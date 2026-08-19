@@ -1,5 +1,5 @@
-# Playnite Bridge
-
+# Playnite Bridge FORK 
+I AM NOT AFFILIATED WITH THE ORIGINAL DEVELOPERS ALL CREDIT GOES TO THEM
 A [Playnite](https://playnite.link/) plugin with REST API, cross-PC game library sync, and Xbox button integration for handhelds.
 
 - **REST API** — 50+ endpoints for AI agents and automation
