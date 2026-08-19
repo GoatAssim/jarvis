@@ -1,0 +1,18 @@
+# --- jarvis-cli (Python) ---
+jarvis-cli/build/
+jarvis-cli/dist/
+jarvis-cli/*.egg-info/
+__pycache__/
+*.pyc
+*.pyo
+
+# --- web (Node) ---
+web/node_modules/
+
+# --- OS cruft ---
+.DS_Store
+Thumbs.db
+builds/
+jarvis-cli v2/
+web v1/
+jarvis.exe

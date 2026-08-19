@@ -1,0 +1,372 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>J.A.R.V.I.S &mdash; Command Interface</title>
+<link rel="icon" href="data:,">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@500;700;900&family=Rajdhani:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<!-- BOOT SEQUENCE -->
+<div id="boot" class="boot" role="status" aria-live="polite">
+  <div class="boot__ring">
+    <svg viewBox="0 0 200 200" class="boot__svg">
+      <circle cx="100" cy="100" r="90" class="ring ring--outer"/>
+      <circle cx="100" cy="100" r="72" class="ring ring--mid"/>
+      <circle cx="100" cy="100" r="54" class="ring ring--inner"/>
+      <circle cx="100" cy="100" r="6" class="ring ring--core"/>
+    </svg>
+  </div>
+  <div class="boot__title">J.A.R.V.I.S</div>
+  <div class="boot__lines" id="boot-lines"></div>
+  <div class="boot__skip">click to skip</div>
+</div>
+
+<div id="app" class="app" hidden>
+
+  <!-- HEADER -->
+  <header class="topbar">
+    <div class="topbar__brand">
+      <svg class="brand-mark" viewBox="0 0 40 40" aria-hidden="true">
+        <circle cx="20" cy="20" r="18" class="brand-mark__ring"/>
+        <circle cx="20" cy="20" r="11" class="brand-mark__ring brand-mark__ring--in"/>
+        <circle cx="20" cy="20" r="3" class="brand-mark__core"/>
+      </svg>
+      <div class="topbar__titles">
+        <div class="topbar__title">J.A.R.V.I.S</div>
+        <div class="topbar__subtitle">Command Interface</div>
+      </div>
+    </div>
+
+    <div class="topbar__status">
+      <div class="status-pill" id="status-pill">
+        <span class="status-pill__dot" id="status-dot"></span>
+        <span id="status-text">LINKING&hellip;</span>
+      </div>
+      <div class="topbar__meta" id="status-meta"></div>
+    </div>
+
+    <button class="btn btn--primary btn--ask-jarvis" id="btn-ask-jarvis" type="button">
+      <span class="btn__spark"></span>Ask Jarvis
+    </button>
+
+    <div class="topbar__clock" id="clock">00:00:00</div>
+  </header>
+
+  <!-- MAIN GRID -->
+  <main class="grid">
+
+    <!-- COMMAND LIST -->
+    <section class="panel panel--list" aria-label="Commands">
+      <div class="panel__corner panel__corner--tl"></div>
+      <div class="panel__corner panel__corner--br"></div>
+      <div class="panel__head">
+        <h2>Commands</h2>
+        <div class="panel__head-actions">
+          <button class="btn btn--ghost" id="btn-settings" type="button" title="Edit commands, AI, Playnite, and other jarvis configs">Config</button>
+          <button class="btn btn--ghost" id="btn-new-command" type="button">+ New</button>
+        </div>
+      </div>
+      <div class="cmd-list" id="cmd-list">
+        <div class="empty-hint">Loading index&hellip;</div>
+      </div>
+    </section>
+
+    <!-- DETAIL / RUN -->
+    <section class="panel panel--detail" aria-label="Command detail">
+      <div class="panel__corner panel__corner--tl"></div>
+      <div class="panel__corner panel__corner--br"></div>
+      <div id="detail-empty" class="empty-state">
+        <svg viewBox="0 0 120 120" class="empty-state__ring">
+          <circle cx="60" cy="60" r="50" class="ring ring--outer"/>
+          <circle cx="60" cy="60" r="34" class="ring ring--mid"/>
+        </svg>
+        <p>Select a command from the index,<br>or build a new one.</p>
+      </div>
+      <div id="detail-content" class="detail" hidden>
+        <div class="detail__head">
+          <div>
+            <h2 id="detail-name">&mdash;</h2>
+            <p id="detail-desc" class="detail__desc"></p>
+          </div>
+          <div class="detail__actions">
+            <button class="btn btn--icon" id="btn-edit" type="button" title="Edit command">EDIT</button>
+            <button class="btn btn--icon btn--danger" id="btn-delete" type="button" title="Delete command">DEL</button>
+          </div>
+        </div>
+
+        <div class="detail__section">
+          <h3>Variables</h3>
+          <form id="var-form" class="var-form"></form>
+        </div>
+
+        <div class="detail__section">
+          <h3>Steps</h3>
+          <ol id="steps-preview" class="steps-preview"></ol>
+        </div>
+
+        <div class="detail__run-row">
+          <button class="btn btn--primary" id="btn-execute" type="button">
+            <span class="btn__spark"></span>EXECUTE
+          </button>
+          <button class="btn btn--outline" id="btn-queue" type="button">+ Add to sequence</button>
+        </div>
+      </div>
+    </section>
+
+    <!-- CONSOLE -->
+    <section class="panel panel--console" aria-label="Live output">
+      <div class="panel__corner panel__corner--tl"></div>
+      <div class="panel__corner panel__corner--br"></div>
+      <div class="panel__head">
+        <h2>Live Feed</h2>
+        <div class="console-actions">
+          <button class="btn btn--ghost" id="btn-abort" type="button" hidden>ABORT</button>
+          <button class="btn btn--ghost" id="btn-clear-console" type="button">Clear</button>
+        </div>
+      </div>
+      <div class="console" id="console">
+        <div class="console__idle">Awaiting instructions.</div>
+      </div>
+    </section>
+
+  </main>
+
+  <!-- SEQUENCE BAR -->
+  <div class="sequence-bar" id="sequence-bar" hidden>
+    <div class="sequence-bar__label">SEQUENCE</div>
+    <div class="sequence-bar__items" id="sequence-items"></div>
+    <div class="sequence-bar__actions">
+      <button class="btn btn--ghost" id="btn-seq-clear" type="button">Clear</button>
+      <button class="btn btn--primary" id="btn-seq-run" type="button">Run Sequence</button>
+    </div>
+  </div>
+
+</div>
+
+<!-- ASK JARVIS -->
+<div class="ask-overlay" id="ask-overlay" hidden>
+  <div class="ask-panel">
+    <div class="panel__corner panel__corner--tl"></div>
+    <div class="panel__corner panel__corner--br"></div>
+
+    <div class="ask-panel__head">
+      <svg class="brand-mark" viewBox="0 0 40 40" aria-hidden="true">
+        <circle cx="20" cy="20" r="18" class="brand-mark__ring"/>
+        <circle cx="20" cy="20" r="11" class="brand-mark__ring brand-mark__ring--in"/>
+        <circle cx="20" cy="20" r="3" class="brand-mark__core"/>
+      </svg>
+      <div class="ask-panel__titles">
+        <div class="ask-panel__title">ASK JARVIS</div>
+        <div class="ask-panel__subtitle" id="ask-status-line">say the word</div>
+      </div>
+      <div class="ask-panel__actions">
+        <button class="btn btn--ghost btn--sm" id="btn-ask-clear" type="button" title="Clear this conversation">Clear</button>
+        <button class="modal__close" id="ask-close" type="button" aria-label="Close">&times;</button>
+      </div>
+    </div>
+
+    <div class="ask-thread" id="ask-thread">
+      <div class="ask-empty">Ask about anything, or tell me what you need done, sir.</div>
+    </div>
+
+    <form class="ask-input-row" id="ask-form">
+      <input type="text" id="ask-input" placeholder="Ask Jarvis anything&hellip;" autocomplete="off" maxlength="4000">
+      <button class="btn btn--ghost" id="btn-ask-stop" type="button" hidden>Stop</button>
+      <button class="btn btn--primary" id="btn-ask-send" type="submit">
+        <span class="btn__spark"></span>Send
+      </button>
+    </form>
+  </div>
+</div>
+
+<!-- COMMAND BUILDER MODAL -->
+<div class="modal-backdrop" id="modal-backdrop" hidden>
+  <div class="modal" role="dialog" aria-modal="true" aria-labelledby="modal-title">
+    <div class="modal__head">
+      <h2 id="modal-title">New Command</h2>
+      <div class="modal__tabs">
+        <button class="tab-btn is-active" data-tab="builder" type="button">Builder</button>
+        <button class="tab-btn" data-tab="raw" type="button">Raw JSON</button>
+      </div>
+      <button class="modal__close" id="modal-close" type="button" aria-label="Close">&times;</button>
+    </div>
+
+    <div class="modal__name-row">
+      <label class="field">
+        <span class="field__label">Command name</span>
+        <input type="text" id="f-name" placeholder="e.g. deployStaging" autocomplete="off">
+      </label>
+    </div>
+
+    <div class="modal__body">
+      <!-- BUILDER TAB -->
+      <div class="tab-pane is-active" data-pane="builder">
+        <label class="field" style="margin-bottom:18px;">
+          <span class="field__label">Description</span>
+          <input type="text" id="f-desc" placeholder="What this command does" autocomplete="off">
+        </label>
+
+        <div class="builder-section">
+          <div class="builder-section__head">
+            <h3>Variables</h3>
+            <button class="btn btn--ghost btn--sm" id="btn-add-var" type="button">+ Add variable</button>
+          </div>
+          <div id="vars-editor" class="vars-editor"></div>
+        </div>
+
+        <div class="builder-section">
+          <div class="builder-section__head">
+            <h3>Steps</h3>
+            <button class="btn btn--ghost btn--sm" id="btn-add-step" type="button">+ Add step</button>
+          </div>
+          <div id="steps-editor" class="steps-editor"></div>
+        </div>
+      </div>
+
+      <!-- RAW JSON TAB -->
+      <div class="tab-pane" data-pane="raw">
+        <p class="hint">This is exactly what gets written to <code>commands.json</code> for this command. Edit directly, or switch back to Builder &mdash; each view syncs to the other.</p>
+        <textarea id="raw-json" class="raw-json" spellcheck="false"></textarea>
+        <div class="raw-json__error" id="raw-json-error"></div>
+      </div>
+    </div>
+
+    <div class="modal__foot">
+      <div class="modal__error" id="modal-error"></div>
+      <div class="modal__foot-actions">
+        <button class="btn btn--ghost" id="btn-cancel-modal" type="button">Cancel</button>
+        <button class="btn btn--primary" id="btn-save-command" type="button">Save Command</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- SETTINGS — all jarvis config files in one tabbed editor -->
+<div class="modal-backdrop" id="settings-backdrop" hidden>
+  <div class="modal modal--settings" role="dialog" aria-modal="true" aria-labelledby="settings-title">
+    <div class="modal__head">
+      <h2 id="settings-title">Settings</h2>
+      <div class="modal__tabs settings-tabs">
+        <button class="tab-btn settings-tab is-active" data-settings-tab="commands" type="button">Commands</button>
+        <button class="tab-btn settings-tab" data-settings-tab="ai" type="button">AI</button>
+        <button class="tab-btn settings-tab" data-settings-tab="playnite" type="button">Playnite</button>
+      </div>
+      <button class="modal__close" id="settings-close" type="button" aria-label="Close">&times;</button>
+    </div>
+
+    <div class="modal__body">
+      <div class="settings-pane is-active" data-settings-pane="commands">
+        <div class="raw-config-path" id="settings-path-commands"></div>
+        <p class="hint">
+          The entire <code>commands.json</code> file — every command at once. Useful for bulk edits
+          or pasting a config from elsewhere. Changes bypass the builder's per-field checks; jarvis
+          validates when you run a command.
+        </p>
+        <textarea id="settings-json-commands" class="raw-json settings-json" spellcheck="false"></textarea>
+        <div class="raw-json__error" id="settings-error-commands"></div>
+      </div>
+
+      <div class="settings-pane" data-settings-pane="ai">
+        <div class="raw-config-path" id="settings-path-ai"></div>
+        <p class="hint">
+          Persona, defaults, and every AI provider. Add multiple keys to a provider's
+          <code>api_keys</code> array for failover. Read fresh on every ask — nothing to restart
+          after saving.
+        </p>
+        <textarea id="settings-json-ai" class="raw-json settings-json" spellcheck="false"></textarea>
+        <div class="raw-json__error" id="settings-error-ai"></div>
+      </div>
+
+      <div class="settings-pane" data-settings-pane="playnite">
+        <div class="raw-config-path" id="settings-path-playnite"></div>
+        <p class="hint">
+          Playnite Bridge token, base URL, and frequent-game cache. Copy the token from Playnite:
+          Main Menu &rarr; Playnite Bridge. Set <code>enabled</code> to false to disable integration.
+        </p>
+        <textarea id="settings-json-playnite" class="raw-json settings-json" spellcheck="false"></textarea>
+        <div class="raw-json__error" id="settings-error-playnite"></div>
+      </div>
+    </div>
+
+    <div class="modal__foot">
+      <div class="modal__error" id="settings-error-global"></div>
+      <div class="modal__foot-actions">
+        <button class="btn btn--ghost" id="btn-settings-reload" type="button" title="Discard changes and re-read the file">Reload</button>
+        <button class="btn btn--ghost" id="btn-settings-cancel" type="button">Cancel</button>
+        <button class="btn btn--primary" id="btn-settings-save" type="button">Save File</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- STEP TEMPLATE (cloned by JS) -->
+<template id="tmpl-step">
+  <div class="step-card" draggable="true">
+    <div class="step-card__head">
+      <span class="step-card__handle" title="Drag to reorder">&#8942;&#8942;</span>
+      <input type="text" class="step-name" placeholder="Step label (optional)">
+      <div class="step-card__move">
+        <button type="button" class="icon-btn step-up" title="Move up">&uarr;</button>
+        <button type="button" class="icon-btn step-down" title="Move down">&darr;</button>
+        <button type="button" class="icon-btn icon-btn--danger step-remove" title="Remove step">&times;</button>
+      </div>
+    </div>
+    <label class="field">
+      <span class="field__label">Run</span>
+      <input type="text" class="step-run" placeholder="echo Hello, {name}!">
+    </label>
+    <div class="step-card__cond">
+      <label class="check">
+        <input type="checkbox" class="step-has-if"> IF condition
+      </label>
+      <label class="check">
+        <input type="checkbox" class="step-has-unless"> UNLESS condition
+      </label>
+      <label class="check">
+        <input type="checkbox" class="step-coe"> Continue on error
+      </label>
+      <label class="check step-parallel-wrap" title="Starts together with whichever step(s) came right before this one, instead of waiting for them">
+        <input type="checkbox" class="step-parallel"> Run parallel with previous step
+      </label>
+      <label class="check" title="Only hides this step's own '$ command' trace line \u2014 its real output always still prints">
+        <input type="checkbox" class="step-show-cmd" checked> Show command in output
+      </label>
+    </div>
+    <div class="step-card__if-rows" hidden></div>
+    <div class="step-card__unless-rows" hidden></div>
+  </div>
+</template>
+
+<!-- VAR ROW TEMPLATE -->
+<template id="tmpl-var">
+  <div class="var-row">
+    <input type="text" class="var-name" placeholder="varName">
+    <input type="text" class="var-default" placeholder="default (blank = required)">
+    <input type="text" class="var-desc" placeholder="description">
+    <button type="button" class="icon-btn icon-btn--danger var-remove" title="Remove">&times;</button>
+  </div>
+</template>
+
+<!-- CONDITION ROW TEMPLATE (var = value, AND'd) -->
+<template id="tmpl-cond-row">
+  <div class="cond-row">
+    <select class="cond-var"></select>
+    <span class="cond-eq">=</span>
+    <input type="text" class="cond-val" placeholder="value">
+    <button type="button" class="icon-btn icon-btn--danger cond-remove" title="Remove">&times;</button>
+  </div>
+</template>
+
+<div class="toast" id="toast" hidden></div>
+
+<script src="https://cdn.jsdelivr.net/npm/marked@15/marked.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/dompurify@3/dist/purify.min.js"></script>
+<script src="app.js"></script>
+</body>
+</html>

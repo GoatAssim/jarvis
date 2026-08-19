@@ -1,0 +1,20 @@
+[project]
+name = "jarvis-cli"
+version = "1.4.0"
+description = "A tuff, JSON-configurable command runner for your own shortcuts"
+requires-python = ">=3.8"
+dependencies = [
+    "colorama; platform_system=='Windows'",
+    "requests>=2.25",
+    "psutil>=5.9",
+]
+
+[project.scripts]
+jarvis = "jarvis.cli:entry"
+
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+packages = ["jarvis"]
