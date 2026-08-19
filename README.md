@@ -118,7 +118,7 @@ Until then it says so honestly rather than pretend it did something it
 didn't — the system prompt keeps that line explicit so "I can check your
 battery" and "I can run your commands" never get confused for each
 other.
-[![GitHub stars](https://img.shields.io/github/stars/USER/jarvis-butler?style=flat)](https://github.com/USER/jarvis-butler)
+[![GitHub stars](https://img.shields.io/github/stars/GoatAssim/jarvis?style=flat)](https://github.com/GoatAssim/jarvis)
 ## License
 
 Not specified. Add one here (e.g. MIT) if you plan to share or publish
