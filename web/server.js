@@ -25,7 +25,7 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PORT = Number(process.env.PORT) || 4173;
 const HOST = "127.0.0.1";
 
-const RESERVED_NAMES = new Set(["config", "ai-config", "ai-clear", "ai-drop-from", "then", "and", "-h", "--help"]);
+const RESERVED_NAMES = new Set(["config", "ai-config", "ai-clear", "ai-drop-from", "playnite-config", "spotify-config", "spotify-login", "memory-config", "then", "and", "-h", "--help"]);
 
 // ---------------------------------------------------------------------------
 // Locate the real jarvis binary. Tries a few invocation strategies, in
@@ -94,6 +94,8 @@ function tryInvoker({ cmd, args }, timeoutMs = 4000) {
 let JARVIS = null; // { cmd, args, configPath }
 let AI_CONFIG_PATH = null; // cached path to ai_config.json, discovered lazily via `jarvis ai-config`
 let PLAYNITE_CONFIG_PATH = null; // cached path to playnite.json via `jarvis playnite-config`
+let SPOTIFY_CONFIG_PATH = null;
+let MEMORY_CONFIG_PATH = null;
 
 async function resolveJarvis() {
   for (const candidate of CANDIDATES) {
@@ -254,6 +256,8 @@ app.post("/api/reconnect", async (req, res) => {
   JARVIS = await resolveJarvis();
   AI_CONFIG_PATH = null; // re-discover on next config request too, in case the binary changed
   PLAYNITE_CONFIG_PATH = null;
+  SPOTIFY_CONFIG_PATH = null;
+  MEMORY_CONFIG_PATH = null;
   startConfigWatcher();
   res.json({
     online: !!JARVIS,
@@ -466,6 +470,91 @@ app.put("/api/playnite/raw", requireJarvis, async (req, res) => {
   }
 });
 
+async function getSpotifyConfigPath() {
+  if (SPOTIFY_CONFIG_PATH) return SPOTIFY_CONFIG_PATH;
+  const result = await runJarvisOnce(["spotify-config"]);
+  if (result.ok && result.stdout) {
+    SPOTIFY_CONFIG_PATH = result.stdout.trim();
+  }
+  return SPOTIFY_CONFIG_PATH;
+}
+
+app.get("/api/spotify/raw", requireJarvis, async (req, res) => {
+  try {
+    const p = await getSpotifyConfigPath();
+    if (!p) return res.status(500).json({ error: "Couldn't locate spotify.json via the jarvis CLI." });
+    const text = await fs.readFile(p, "utf-8");
+    res.json({ text, path: p });
+  } catch (e) {
+    res.status(500).json({ error: `Couldn't read spotify.json: ${e.message}` });
+  }
+});
+
+app.put("/api/spotify/raw", requireJarvis, async (req, res) => {
+  const { text } = req.body || {};
+  let parsed;
+  try {
+    parsed = JSON.parse(text);
+  } catch (e) {
+    return res.status(400).json({ error: `Invalid JSON: ${e.message}` });
+  }
+  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+    return res.status(400).json({ error: "Top-level JSON must be an object." });
+  }
+  try {
+    const p = await getSpotifyConfigPath();
+    if (!p) return res.status(500).json({ error: "Couldn't locate spotify.json via the jarvis CLI." });
+    await fs.writeFile(p, text.endsWith("\n") ? text : text + "\n", "utf-8");
+    res.json({ ok: true });
+  } catch (e) {
+    res.status(500).json({ error: `Couldn't write spotify.json: ${e.message}` });
+  }
+});
+
+async function getMemoryConfigPath() {
+  if (MEMORY_CONFIG_PATH) return MEMORY_CONFIG_PATH;
+  const result = await runJarvisOnce(["memory-config"]);
+  if (result.ok && result.stdout) {
+    MEMORY_CONFIG_PATH = result.stdout.trim();
+  }
+  return MEMORY_CONFIG_PATH;
+}
+
+app.get("/api/memory/raw", requireJarvis, async (req, res) => {
+  try {
+    const p = await getMemoryConfigPath();
+    if (!p) return res.status(500).json({ error: "Couldn't locate memory.json via the jarvis CLI." });
+    const text = await fs.readFile(p, "utf-8");
+    res.json({ text, path: p });
+  } catch (e) {
+    res.status(500).json({ error: `Couldn't read memory.json: ${e.message}` });
+  }
+});
+
+app.put("/api/memory/raw", requireJarvis, async (req, res) => {
+  const { text } = req.body || {};
+  let parsed;
+  try {
+    parsed = JSON.parse(text);
+  } catch (e) {
+    return res.status(400).json({ error: `Invalid JSON: ${e.message}` });
+  }
+  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+    return res.status(400).json({ error: "Top-level JSON must be an object." });
+  }
+  if (parsed.facts !== undefined && !Array.isArray(parsed.facts)) {
+    return res.status(400).json({ error: "'facts' must be an array." });
+  }
+  try {
+    const p = await getMemoryConfigPath();
+    if (!p) return res.status(500).json({ error: "Couldn't locate memory.json via the jarvis CLI." });
+    await fs.writeFile(p, text.endsWith("\n") ? text : text + "\n", "utf-8");
+    res.json({ ok: true });
+  } catch (e) {
+    res.status(500).json({ error: `Couldn't write memory.json: ${e.message}` });
+  }
+});
+
 app.get("/api/raw", requireJarvis, async (req, res) => {
   try {
     const text = await fs.readFile(JARVIS.configPath, "utf-8");
@@ -667,14 +756,29 @@ wss.on("connection", (ws) => {
         return send(ws, { type: "ask-error", message: "Something's already running \u2014 wait for it to finish." });
       }
       const text = typeof msg.text === "string" ? msg.text.trim() : "";
-      if (!text) {
+      const quote = typeof msg.quote === "string" ? msg.quote.replace(/\0/g, "").trim() : "";
+      if (!text && !quote) {
         return send(ws, { type: "ask-error", message: "Nothing to ask." });
       }
       if (text.length > MAX_ASK_LENGTH) {
         return send(ws, { type: "ask-error", message: `Keep it under ${MAX_ASK_LENGTH} characters.` });
       }
-      if (/[\r\n\0]/.test(text)) {
+      if (text && /[\r\n\0]/.test(text)) {
         return send(ws, { type: "ask-error", message: "Ask can't contain newlines." });
+      }
+
+      let prompt = text;
+      if (quote) {
+        const clipped = quote.slice(0, 4000);
+        prompt = (
+          "The user highlighted this excerpt from the conversation and wants you to address it specifically:\n" +
+          '"""\n' + clipped + "\n" +
+          '"""\n\n' +
+          (text || "Please respond about the quoted excerpt.")
+        );
+      }
+      if (prompt.length > MAX_ASK_LENGTH + 4500) {
+        return send(ws, { type: "ask-error", message: "That quote plus message is too long." });
       }
 
       if (msg.redo) {
@@ -685,7 +789,7 @@ wss.on("connection", (ws) => {
       // real shell \u2014 spawn() takes argv directly (no shell involved), so
       // this is one argument no matter how much whitespace or punctuation
       // it contains, with no injection risk.
-      const fullArgs = [...JARVIS.args, text];
+      const fullArgs = [...JARVIS.args, prompt];
       send(ws, { type: "ask-start", cmdline: [JARVIS.cmd, ...JARVIS.args, "<your message>"].join(" ") });
       spawnAndStream(ws, "ask", fullArgs, ASK_TYPES);
       return;

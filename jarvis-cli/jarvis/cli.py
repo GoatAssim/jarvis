@@ -39,7 +39,7 @@ ENCODING = "utf-8"
 
 CHAIN_SEP = "then"      # starts a new batch \u2014 waits for the previous one to finish
 PARALLEL_SEP = "and"    # joins the current batch \u2014 runs alongside whatever's already in it
-RESERVED_NAMES = {"config", "ai-config", "ai-clear", "ai-drop-from", "playnite-config", CHAIN_SEP, PARALLEL_SEP, "-h", "--help"}
+RESERVED_NAMES = {"config", "ai-config", "ai-clear", "ai-drop-from", "playnite-config", "spotify-config", "spotify-login", "memory-config", CHAIN_SEP, PARALLEL_SEP, "-h", "--help"}
 
 OUT = Palette(sys.stdout)  # actual command output: the banner, the command list
 ERR = Palette(sys.stderr)  # jarvis's own status/trace/error messages
@@ -471,10 +471,20 @@ def handle_ai_prompt(text, commands):
         }
         if name in labels:
             friendly = labels[name]
+        elif name.startswith("web_"):
+            friendly = name[4:].replace("_", " ")
+        elif name.startswith("package_"):
+            friendly = name.replace("_", " ")
+        elif name.startswith("memory_"):
+            friendly = name.replace("_", " ")
+        elif name.startswith("spotify_"):
+            friendly = name.replace("_", " ")
         elif name.startswith("playnite_"):
             friendly = name[9:].replace("_", " ")
         elif name.startswith("get_"):
             friendly = name[4:].replace("_", " ")
+        elif name in ("wifi_set", "bluetooth_set", "radio_status", "git_run"):
+            friendly = name.replace("_", " ")
         else:
             friendly = name.replace("_", " ")
         print(f"{ERR.DIM}  \u2699 {friendly}\u2026{ERR.RESET}", file=sys.stderr)
@@ -543,6 +553,25 @@ def main():
         from . import playnite_config
         playnite_config.ensure_config()
         print(playnite_config.CONFIG_FILE)
+        return
+
+    if argv[0] == "spotify-config":
+        from . import spotify_config
+        spotify_config.ensure_config()
+        print(spotify_config.CONFIG_FILE)
+        return
+
+    if argv[0] == "spotify-login":
+        from . import spotify_api, spotify_config
+        spotify_config.ensure_config()
+        ok, msg = spotify_api.login_interactive()
+        print(msg)
+        sys.exit(0 if ok else 1)
+
+    if argv[0] == "memory-config":
+        from . import memory
+        memory.ensure_config()
+        print(memory.CONFIG_FILE)
         return
 
     if argv[0] not in commands and argv[0] not in RESERVED_NAMES:

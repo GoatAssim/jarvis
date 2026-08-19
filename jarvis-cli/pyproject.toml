@@ -7,6 +7,7 @@ dependencies = [
     "colorama; platform_system=='Windows'",
     "requests>=2.25",
     "psutil>=5.9",
+    "ddgs>=9.0",
 ]
 
 [project.scripts]

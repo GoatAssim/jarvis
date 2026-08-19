@@ -22,8 +22,14 @@ from datetime import datetime
 from pathlib import Path
 
 from .command_tools import COMMAND_TOOL_SCHEMAS, COMMAND_TOOLS
+from .git_tools import GIT_TOOL_SCHEMAS, GIT_TOOLS
+from .memory import MEMORY_TOOL_SCHEMAS, MEMORY_TOOLS
+from .pkg_tools import PKG_TOOL_SCHEMAS, PKG_TOOLS
 from .playnite_api_tools import PLAYNITE_API_TOOL_SCHEMAS, PLAYNITE_API_TOOLS
 from .playnite_tools import PLAYNITE_TOOL_SCHEMAS as _PLAYNITE_CORE_SCHEMAS, PLAYNITE_TOOLS as _PLAYNITE_CORE_TOOLS
+from .radio_tools import RADIO_TOOL_SCHEMAS, RADIO_TOOLS
+from .spotify_tools import SPOTIFY_TOOL_SCHEMAS, SPOTIFY_TOOLS
+from .web_tools import WEB_TOOL_SCHEMAS, WEB_TOOLS
 
 PLAYNITE_TOOL_SCHEMAS = [*_PLAYNITE_CORE_SCHEMAS, *PLAYNITE_API_TOOL_SCHEMAS]
 PLAYNITE_TOOLS = {**_PLAYNITE_CORE_TOOLS, **PLAYNITE_API_TOOLS}
@@ -222,7 +228,7 @@ def _get_memory_usage():
 
 _NO_PARAMS = {"type": "object", "properties": {}, "required": []}
 
-TOOL_SCHEMAS = [
+CORE_TOOL_SCHEMAS = [
     {
         "name": "get_datetime",
         "description": "Local date/time/timezone. Use for 'what time is it' or today's date.",
@@ -259,17 +265,28 @@ TOOL_SCHEMAS = [
         "parameters": _NO_PARAMS,
     },
     *COMMAND_TOOL_SCHEMAS,
-    *PLAYNITE_TOOL_SCHEMAS,
+    *MEMORY_TOOL_SCHEMAS,
+    *RADIO_TOOL_SCHEMAS,
+    *GIT_TOOL_SCHEMAS,
+    *WEB_TOOL_SCHEMAS,
+    *PKG_TOOL_SCHEMAS,
 ]
+
+PLAYNITE_AND_SPOTIFY = [*PLAYNITE_TOOL_SCHEMAS, *SPOTIFY_TOOL_SCHEMAS]
+TOOL_SCHEMAS = [*CORE_TOOL_SCHEMAS, *PLAYNITE_AND_SPOTIFY]
 
 
 def tool_schemas_for_session():
-    """Playnite tools only when configured — saves tokens otherwise."""
+    """Playnite tools only when configured. Spotify is always offered so the
+    model can search/play or get a login prompt — advertising spotify_* in
+    the prompt without listing them makes Groq HTTP 400 (tool not in request)."""
     from . import playnite_config
 
+    out = list(CORE_TOOL_SCHEMAS)
+    out.extend(SPOTIFY_TOOL_SCHEMAS)
     if playnite_config.is_configured():
-        return TOOL_SCHEMAS
-    return TOOL_SCHEMAS[: -len(PLAYNITE_TOOL_SCHEMAS)]
+        out.extend(PLAYNITE_TOOL_SCHEMAS)
+    return out
 
 TOOLS = {
     "get_datetime": _get_datetime,
@@ -280,7 +297,13 @@ TOOLS = {
     "get_disk_usage": _get_disk_usage,
     "get_memory_usage": _get_memory_usage,
     **COMMAND_TOOLS,
+    **MEMORY_TOOLS,
+    **RADIO_TOOLS,
+    **GIT_TOOLS,
+    **WEB_TOOLS,
+    **PKG_TOOLS,
     **PLAYNITE_TOOLS,
+    **SPOTIFY_TOOLS,
 }
 
 
@@ -291,7 +314,7 @@ def execute_tool(name, arguments=None):
     if fn is None:
         return {"error": f"no such tool: {name}"}
     try:
-        if name in COMMAND_TOOLS or name in PLAYNITE_TOOLS:
+        if name in COMMAND_TOOLS or name in PLAYNITE_TOOLS or name in WEB_TOOLS or name in PKG_TOOLS or name in SPOTIFY_TOOLS or name in MEMORY_TOOLS or name in RADIO_TOOLS or name in GIT_TOOLS:
             return fn(arguments or {})
         return fn()
     except Exception as e:

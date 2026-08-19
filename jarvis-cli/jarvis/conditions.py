@@ -82,9 +82,15 @@ def _eval(node, values):
             right = _resolve_leaf(comparator, values)
             a, b = _as_comparable(left, right)
             if isinstance(op, ast.Eq):
-                step_ok = a == b
+                if isinstance(a, str):
+                    step_ok = a.casefold() == b.casefold()
+                else:
+                    step_ok = a == b
             elif isinstance(op, ast.NotEq):
-                step_ok = a != b
+                if isinstance(a, str):
+                    step_ok = a.casefold() != b.casefold()
+                else:
+                    step_ok = a != b
             elif isinstance(op, ast.Lt):
                 step_ok = a < b
             elif isinstance(op, ast.Gt):
@@ -123,11 +129,14 @@ def eval_dict(cond, values, known_vars):
                 f"(this command's variables are: {valid})"
             )
         actual = values.get(key)
+        if actual is None:
+            actual = ""
         if isinstance(expected, list):
-            if str(actual) not in [str(v) for v in expected]:
+            actual_cf = str(actual).casefold()
+            if actual_cf not in [str(v).casefold() for v in expected]:
                 return False
         else:
-            if str(actual) != str(expected):
+            if str(actual).casefold() != str(expected).casefold():
                 return False
     return True
 

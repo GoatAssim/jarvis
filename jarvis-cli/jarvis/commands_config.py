@@ -11,7 +11,7 @@ JARVIS_DIR = Path.home() / ".jarvis"
 CONFIG_FILE = JARVIS_DIR / "commands.json"
 ENCODING = "utf-8"
 
-RESERVED_NAMES = {"config", "ai-config", "ai-clear", "ai-drop-from", "then", "and", "-h", "--help"}
+RESERVED_NAMES = {"config", "ai-config", "ai-clear", "ai-drop-from", "playnite-config", "spotify-config", "spotify-login", "memory-config", "then", "and", "-h", "--help"}
 
 
 def ensure_config():

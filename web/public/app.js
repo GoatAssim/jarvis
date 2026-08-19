@@ -78,6 +78,7 @@
     askReplyLines: [],       // accumulated (post prefix-strip) lines of that reply
     askPrefixStripped: false,// whether we've already tried stripping "Name: " off line 1
     askTraceHolder: null,    // DOM node for this turn's "\u21b3 asking X\u2026" trace group
+    askQuotes: [],           // highlighted excerpts attached to the next ask
   };
 
   // ===========================================================================
@@ -113,6 +114,10 @@
     putAiRaw: (text) => api("PUT", "/api/ai/raw", { text }),
     getPlayniteRaw: () => api("GET", "/api/playnite/raw"),
     putPlayniteRaw: (text) => api("PUT", "/api/playnite/raw", { text }),
+    getSpotifyRaw: () => api("GET", "/api/spotify/raw"),
+    putSpotifyRaw: (text) => api("PUT", "/api/spotify/raw", { text }),
+    getMemoryRaw: () => api("GET", "/api/memory/raw"),
+    putMemoryRaw: (text) => api("PUT", "/api/memory/raw", { text }),
   };
 
   // ===========================================================================
@@ -698,13 +703,17 @@
     wsSend({ type: "ask", text, redo: true });
   }
 
-  function addUserBubble(text) {
+  function addUserBubble(text, quotes) {
     clearAskEmptyHint();
-    const msg = el("div", { class: "ask-msg ask-msg--user" }, [
-      el("div", { class: "ask-msg__role" }, "You"),
-      el("div", { class: "ask-msg__bubble" }, text),
-    ]);
-    msg.dataset.raw = text;
+    const kids = [el("div", { class: "ask-msg__role" }, "You")];
+    if (quotes && quotes.length) {
+      kids.push(el("div", { class: "ask-msg__quotes" }, quotes.map((q) =>
+        el("blockquote", { class: "ask-msg__quote" }, q)
+      )));
+    }
+    kids.push(el("div", { class: "ask-msg__bubble" }, text || "About the quoted part"));
+    const msg = el("div", { class: "ask-msg ask-msg--user" }, kids);
+    msg.dataset.raw = text || quotes.join("\n\n") || "";
     addAskMsgActions(msg);
     askThread.appendChild(msg);
     askThreadScrollToEnd();
@@ -797,15 +806,130 @@
 
   qs("#btn-ask-stop").addEventListener("click", () => wsSend({ type: "cancel" }));
 
+  const askQuoteBar = qs("#ask-quote-bar");
+  const askSelPop = qs("#ask-sel-pop");
+  const askPanel = qs(".ask-panel");
+  let pendingSelection = "";
+
+  function hideSelPop() {
+    askSelPop.hidden = true;
+    pendingSelection = "";
+  }
+
+  function renderQuoteBar() {
+    askQuoteBar.innerHTML = "";
+    if (!state.askQuotes.length) {
+      askQuoteBar.hidden = true;
+      return;
+    }
+    askQuoteBar.hidden = false;
+    state.askQuotes.forEach((q, i) => {
+      askQuoteBar.appendChild(el("div", { class: "ask-quote-chip" }, [
+        el("span", { class: "ask-quote-chip__text", title: q }, q),
+        el("button", {
+          type: "button",
+          class: "ask-quote-chip__x",
+          title: "Remove quote",
+          onclick: () => {
+            state.askQuotes.splice(i, 1);
+            renderQuoteBar();
+          },
+        }, "\u00d7"),
+      ]));
+    });
+  }
+
+  function addQuote(text) {
+    const clipped = text.replace(/\s+/g, " ").trim();
+    if (!clipped) return;
+    if (state.askQuotes.includes(clipped)) return;
+    if (state.askQuotes.length >= 5) {
+      toast("You can quote up to 5 excerpts.");
+      return;
+    }
+    state.askQuotes.push(clipped.slice(0, 1200));
+    renderQuoteBar();
+    qs("#ask-input").focus();
+  }
+
+  function selectionInAskThread() {
+    const sel = window.getSelection();
+    if (!sel || sel.isCollapsed || !sel.rangeCount) return "";
+    const range = sel.getRangeAt(0);
+    if (!askThread.contains(range.commonAncestorContainer)) return "";
+    const bubble = range.commonAncestorContainer.nodeType === 1
+      ? range.commonAncestorContainer.closest(".ask-msg__bubble, .ask-msg__quote")
+      : range.commonAncestorContainer.parentElement &&
+        range.commonAncestorContainer.parentElement.closest(".ask-msg__bubble, .ask-msg__quote");
+    if (!bubble) return "";
+    return sel.toString().trim();
+  }
+
+  function placeSelPop() {
+    const sel = window.getSelection();
+    if (!sel.rangeCount) return hideSelPop();
+    const rect = sel.getRangeAt(0).getBoundingClientRect();
+    const panelRect = askPanel.getBoundingClientRect();
+    let left = rect.left + rect.width / 2 - panelRect.left;
+    let top = rect.top - panelRect.top - 36;
+    askSelPop.hidden = false;
+    const popW = askSelPop.offsetWidth || 120;
+    left = Math.max(8, Math.min(left - popW / 2, panelRect.width - popW - 8));
+    if (top < 8) top = rect.bottom - panelRect.top + 6;
+    askSelPop.style.left = `${left}px`;
+    askSelPop.style.top = `${top}px`;
+  }
+
+  function onAskSelection() {
+    if (askOverlay.hidden) return hideSelPop();
+    const text = selectionInAskThread();
+    if (!text) return hideSelPop();
+    pendingSelection = text;
+    placeSelPop();
+  }
+
+  document.addEventListener("selectionchange", () => {
+    if (askOverlay.hidden) return;
+    // wait a tick so mouseup can finish
+    requestAnimationFrame(onAskSelection);
+  });
+  askThread.addEventListener("scroll", hideSelPop, { passive: true });
+
+  qs("#ask-sel-quote").addEventListener("mousedown", (e) => e.preventDefault());
+  qs("#ask-sel-copy").addEventListener("mousedown", (e) => e.preventDefault());
+  qs("#ask-sel-quote").addEventListener("click", () => {
+    if (pendingSelection) addQuote(pendingSelection);
+    window.getSelection()?.removeAllRanges();
+    hideSelPop();
+  });
+  qs("#ask-sel-copy").addEventListener("click", async () => {
+    if (!pendingSelection) return;
+    try {
+      await navigator.clipboard.writeText(pendingSelection);
+      toast("Copied selection.", "info");
+    } catch {
+      toast("Couldn't copy.");
+    }
+    hideSelPop();
+  });
+
   qs("#ask-form").addEventListener("submit", (e) => {
     e.preventDefault();
-    if (state.running) return; // input is disabled while busy; guard anyway
+    if (state.running) return;
     const input = qs("#ask-input");
     const text = input.value.trim();
-    if (!text) return;
+    const quotes = state.askQuotes.slice();
+    if (!text && quotes.length === 0) return;
     input.value = "";
-    addUserBubble(text);
-    wsSend({ type: "ask", text });
+    state.askQuotes = [];
+    renderQuoteBar();
+    hideSelPop();
+    addUserBubble(text, quotes);
+    wsSend({
+      type: "ask",
+      text,
+      quote: quotes.length ? quotes.join("\n---\n") : undefined,
+    });
   });
 
   qs("#btn-ask-clear").addEventListener("click", async () => {
@@ -815,6 +939,9 @@
       toast(e.message);
       return;
     }
+    state.askQuotes = [];
+    renderQuoteBar();
+    hideSelPop();
     askThread.innerHTML = "";
     askThread.appendChild(el("div", { class: "ask-empty" }, "Ask about anything, or tell me what you need done, sir."));
     toast("Conversation cleared.", "info");
@@ -885,6 +1012,22 @@
       jsonId: "settings-json-playnite",
       errorId: "settings-error-playnite",
       saveToast: "playnite.json saved.",
+    },
+    spotify: {
+      get: () => Api.getSpotifyRaw(),
+      put: (text) => Api.putSpotifyRaw(text),
+      pathId: "settings-path-spotify",
+      jsonId: "settings-json-spotify",
+      errorId: "settings-error-spotify",
+      saveToast: "spotify.json saved.",
+    },
+    memory: {
+      get: () => Api.getMemoryRaw(),
+      put: (text) => Api.putMemoryRaw(text),
+      pathId: "settings-path-memory",
+      jsonId: "settings-json-memory",
+      errorId: "settings-error-memory",
+      saveToast: "memory.json saved.",
     },
   };
 

@@ -40,14 +40,20 @@ MAX_TOOL_ROUNDS = 4  # follow-up requests allowed after a tool call, per ask —
 
 
 class AIResult:
-    """The outcome of one call to one provider."""
+    """The outcome of one call to one provider.
 
-    __slots__ = ("ok", "text", "error")
+    ``tool_history`` is set when a provider ran tools before failing — it's a
+    list of generic {role, content} messages (system+user+tool rounds) that the
+    next provider can continue from instead of re-running those tools.
+    """
 
-    def __init__(self, ok, text=None, error=None):
+    __slots__ = ("ok", "text", "error", "tool_history")
+
+    def __init__(self, ok, text=None, error=None, tool_history=None):
         self.ok = ok
         self.text = text
         self.error = error
+        self.tool_history = tool_history  # enriched messages to hand to the next provider
 
 
 def _post_json(url, headers, payload, timeout):
@@ -145,6 +151,169 @@ def _give_up_error():
     return f"gave up after {MAX_TOOL_ROUNDS} rounds of tool calls with no final answer"
 
 
+def _json_object_at(s, start):
+    """Parse a JSON object starting at s[start]. Returns (obj, end_index) or (None, start)."""
+    if start >= len(s) or s[start] != "{":
+        return None, start
+    depth = 0
+    in_str = False
+    esc = False
+    for i in range(start, len(s)):
+        c = s[i]
+        if in_str:
+            if esc:
+                esc = False
+            elif c == "\\":
+                esc = True
+            elif c == '"':
+                in_str = False
+            continue
+        if c == '"':
+            in_str = True
+        elif c == "{":
+            depth += 1
+        elif c == "}":
+            depth -= 1
+            if depth == 0:
+                raw = s[start : i + 1]
+                try:
+                    return json.loads(raw), i + 1
+                except json.JSONDecodeError:
+                    return None, start
+    return None, start
+
+
+def _extract_text_tool_calls(text, allowed_names):
+    """Groq (and some others) dump tool calls as plain text instead of tool_calls.
+    Recover [called name with {...}] and {"name":...,"arguments":...}."""
+    if not text or not allowed_names:
+        return []
+    allowed = set(allowed_names)
+    s = text.strip()
+    calls = []
+
+    idx = 0
+    while True:
+        i = s.find("[called ", idx)
+        if i < 0:
+            break
+        rest = s[i + 8 :]
+        name = rest.split(None, 1)[0] if rest.split() else ""
+        brace = rest.find("{")
+        if not name or brace < 0:
+            idx = i + 8
+            continue
+        obj, end = _json_object_at(rest, brace)
+        if obj is not None and name in allowed:
+            calls.append((name, obj if isinstance(obj, dict) else {}))
+        idx = i + 8 + (end if obj is not None else brace + 1)
+
+    if calls:
+        return calls
+
+    try:
+        blob = json.loads(s)
+    except (json.JSONDecodeError, TypeError):
+        return []
+    if isinstance(blob, dict) and blob.get("name") in allowed:
+        args = blob.get("arguments") or blob.get("argument") or blob.get("args") or {}
+        if isinstance(args, str):
+            args = _decode_arguments(args)
+        if isinstance(args, dict):
+            return [(blob["name"], args)]
+    return []
+
+
+def _openai_messages_to_generic(working_messages):
+    """Convert an OpenAI-style working_messages list (which may include
+    assistant+tool_call round-trips) into a generic list that any adapter
+    can continue from. Tool call objects are serialised to a JSON string
+    so the next provider sees the action + result in plain text."""
+    out = []
+    for m in working_messages:
+        role = m.get("role", "")
+        if role == "system":
+            out.append({"role": "system", "content": m.get("content", "")})
+        elif role == "user":
+            content = m.get("content", "")
+            if isinstance(content, list):
+                # Anthropic tool_result blocks — flatten to text
+                parts = []
+                for b in content:
+                    if isinstance(b, dict):
+                        parts.append(b.get("content") or b.get("text") or "")
+                    else:
+                        parts.append(str(b))
+                out.append({"role": "user", "content": "\n".join(filter(None, parts))})
+            else:
+                out.append({"role": "user", "content": content})
+        elif role == "assistant":
+            content = m.get("content", "")
+            tool_calls = m.get("tool_calls")
+            if tool_calls:
+                # Summarise what was called so the next provider has context
+                parts = []
+                if content:
+                    parts.append(content)
+                for tc in tool_calls:
+                    fn = tc.get("function") or {}
+                    parts.append(f"[called {fn.get('name', '?')} with {fn.get('arguments', '{}')}]")
+                out.append({"role": "assistant", "content": "\n".join(parts)})
+            else:
+                out.append({"role": "assistant", "content": content or ""})
+        elif role == "tool":
+            # Convert tool result to a user message so any provider can read it
+            out.append({"role": "user", "content": f"[tool result] {m.get('content', '')}"})
+    return out
+
+
+def _gemini_contents_to_generic(working_contents):
+    """Convert Gemini-style contents list back to generic messages."""
+    out = []
+    for c in working_contents:
+        role = c.get("role", "")
+        parts = c.get("parts") or []
+        generic_role = "assistant" if role == "model" else "user"
+        texts = []
+        for p in parts:
+            if isinstance(p, dict):
+                if "text" in p:
+                    texts.append(p["text"])
+                elif "functionCall" in p:
+                    fc = p["functionCall"]
+                    texts.append(f"[called {fc.get('name', '?')} with {json.dumps(fc.get('args') or {})}]")
+                elif "functionResponse" in p:
+                    fr = p["functionResponse"]
+                    texts.append(f"[tool result for {fr.get('name', '?')}] {json.dumps(fr.get('response') or {})}")
+        if texts:
+            out.append({"role": generic_role, "content": "\n".join(texts)})
+    return out
+
+
+def _anthropic_turns_to_generic(system_text, working_turns):
+    """Convert Anthropic-style turns list back to generic messages."""
+    out = []
+    if system_text:
+        out.append({"role": "system", "content": system_text})
+    for t in working_turns:
+        role = t.get("role", "")
+        content = t.get("content", "")
+        if isinstance(content, list):
+            parts = []
+            for b in content:
+                if not isinstance(b, dict):
+                    continue
+                if b.get("type") == "text":
+                    parts.append(b.get("text", ""))
+                elif b.get("type") == "tool_use":
+                    parts.append(f"[called {b.get('name', '?')} with {json.dumps(b.get('input') or {})}]")
+                elif b.get("type") == "tool_result":
+                    parts.append(f"[tool result] {b.get('content', '')}")
+            content = "\n".join(filter(None, parts))
+        out.append({"role": role, "content": content})
+    return out
+
+
 # ---------------------------------------------------------------------------
 # OpenAI-compatible: OpenAI itself, xAI/Grok, Groq, Mistral, DeepSeek,
 # OpenRouter, and (in principle) any other host that mirrors the
@@ -165,6 +334,7 @@ def call_openai_compatible(provider, messages, timeout, tools=None, tool_executo
 
     headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
     working_messages = list(messages)
+    ran_tools = False
     tools_payload = None
     if tools:
         tools_payload = [
@@ -186,27 +356,33 @@ def call_openai_compatible(provider, messages, timeout, tools=None, tool_executo
 
         resp, net_err = _post_json(base_url, headers, payload, timeout)
         if net_err:
-            return AIResult(False, error=net_err)
+            return AIResult(False, error=net_err,
+                            tool_history=_openai_messages_to_generic(working_messages) if ran_tools else None)
         reason = _status_reason(resp)
         if reason:
-            return AIResult(False, error=reason)
+            return AIResult(False, error=reason,
+                            tool_history=_openai_messages_to_generic(working_messages) if ran_tools else None)
 
         data, parse_err = _parse_json(resp)
         if parse_err:
-            return AIResult(False, error=parse_err)
+            return AIResult(False, error=parse_err,
+                            tool_history=_openai_messages_to_generic(working_messages) if ran_tools else None)
 
         choices = data.get("choices") or []
         if not choices:
-            return AIResult(False, error="empty response (no choices)")
+            return AIResult(False, error="empty response (no choices)",
+                            tool_history=_openai_messages_to_generic(working_messages) if ran_tools else None)
         choice = choices[0]
 
         if choice.get("finish_reason") == "content_filter":
-            return AIResult(False, error="refused by the provider's content filter")
+            return AIResult(False, error="refused by the provider's content filter",
+                            tool_history=_openai_messages_to_generic(working_messages) if ran_tools else None)
 
         message = choice.get("message") or {}
         tool_calls = message.get("tool_calls")
 
         if tool_calls and tool_executor and round_num < MAX_TOOL_ROUNDS:
+            ran_tools = True
             working_messages.append(message)
             for call in tool_calls:
                 fn = call.get("function") or {}
@@ -224,13 +400,38 @@ def call_openai_compatible(provider, messages, timeout, tools=None, tool_executo
         if not text:
             refusal = message.get("refusal")
             if refusal:
-                return AIResult(False, error=f"refused: {refusal}")
+                return AIResult(False, error=f"refused: {refusal}",
+                                tool_history=_openai_messages_to_generic(working_messages) if ran_tools else None)
             if tool_calls:
-                return AIResult(False, error=_give_up_error())
-            return AIResult(False, error="empty response content")
+                return AIResult(False, error=_give_up_error(),
+                                tool_history=_openai_messages_to_generic(working_messages) if ran_tools else None)
+            return AIResult(False, error="empty response content",
+                            tool_history=_openai_messages_to_generic(working_messages) if ran_tools else None)
+
+        allowed = {t.get("name") for t in (tools or []) if t.get("name")}
+        text_calls = _extract_text_tool_calls(text, allowed)
+        if text_calls and tool_executor and round_num < MAX_TOOL_ROUNDS:
+            ran_tools = True
+            result_bits = []
+            for name, args in text_calls:
+                raw = _call_tool_safely(tool_executor, name, args)
+                result_bits.append(f"{name}: {_stringify_tool_result(raw)}")
+            working_messages.append({
+                "role": "user",
+                "content": (
+                    "Your last message was a tool call written as plain text. It has now been "
+                    "executed. Results:\n"
+                    + "\n".join(result_bits)
+                    + "\nReply to the user in plain language. Only claim a launch/install if "
+                    "these results say it succeeded."
+                ),
+            })
+            continue
+
         return AIResult(True, text=text)
 
-    return AIResult(False, error=_give_up_error())
+    return AIResult(False, error=_give_up_error(),
+                    tool_history=_openai_messages_to_generic(working_messages) if ran_tools else None)
 
 
 # ---------------------------------------------------------------------------
@@ -256,12 +457,16 @@ def call_anthropic(provider, messages, timeout, tools=None, tool_executor=None):
         "Content-Type": "application/json",
     }
     working_turns = list(turns)
+    ran_tools = False
     tools_payload = None
     if tools:
         tools_payload = [
             {"name": t["name"], "description": t["description"], "input_schema": t["parameters"]}
             for t in tools
         ]
+
+    def _history():
+        return _anthropic_turns_to_generic(system_text, working_turns) if ran_tools else None
 
     for round_num in range(MAX_TOOL_ROUNDS + 1):
         payload = {
@@ -276,22 +481,23 @@ def call_anthropic(provider, messages, timeout, tools=None, tool_executor=None):
 
         resp, net_err = _post_json(base_url, headers, payload, timeout)
         if net_err:
-            return AIResult(False, error=net_err)
+            return AIResult(False, error=net_err, tool_history=_history())
         reason = _status_reason(resp)
         if reason:
-            return AIResult(False, error=reason)
+            return AIResult(False, error=reason, tool_history=_history())
 
         data, parse_err = _parse_json(resp)
         if parse_err:
-            return AIResult(False, error=parse_err)
+            return AIResult(False, error=parse_err, tool_history=_history())
 
         if data.get("stop_reason") == "refusal":
-            return AIResult(False, error="refused by the model's safety classifier")
+            return AIResult(False, error="refused by the model's safety classifier", tool_history=_history())
 
         blocks = data.get("content") or []
         tool_use_blocks = [b for b in blocks if isinstance(b, dict) and b.get("type") == "tool_use"]
 
         if tool_use_blocks and tool_executor and round_num < MAX_TOOL_ROUNDS:
+            ran_tools = True
             working_turns.append({"role": "assistant", "content": blocks})
             result_blocks = []
             for b in tool_use_blocks:
@@ -309,11 +515,11 @@ def call_anthropic(provider, messages, timeout, tools=None, tool_executor=None):
         text = "".join(b.get("text", "") for b in blocks if isinstance(b, dict) and b.get("type") == "text").strip()
         if not text:
             if tool_use_blocks:
-                return AIResult(False, error=_give_up_error())
-            return AIResult(False, error="empty response content")
+                return AIResult(False, error=_give_up_error(), tool_history=_history())
+            return AIResult(False, error="empty response content", tool_history=_history())
         return AIResult(True, text=text)
 
-    return AIResult(False, error=_give_up_error())
+    return AIResult(False, error=_give_up_error(), tool_history=_history())
 
 
 # ---------------------------------------------------------------------------
@@ -378,18 +584,38 @@ def call_gemini(provider, messages, timeout, tools=None, tool_executor=None):
     url = base_url.format(model=model) if "{model}" in base_url else base_url
 
     system_text, turns = _split_system(messages)
-    working_contents = [
-        {"role": ("model" if t.get("role") == "assistant" else "user"),
-         "parts": [{"text": t.get("content", "")}]}
-        for t in turns
-    ]
+
+    def _to_gemini_content(m):
+        role = m.get("role", "")
+        content = m.get("content", "")
+        gemini_role = "model" if role == "assistant" else "user"
+        if isinstance(content, list):
+            parts = []
+            for b in content:
+                if isinstance(b, dict):
+                    parts.append({"text": b.get("content") or b.get("text") or ""})
+                else:
+                    parts.append({"text": str(b)})
+            return {"role": gemini_role, "parts": parts}
+        return {"role": gemini_role, "parts": [{"text": content}]}
+
+    working_contents = [_to_gemini_content(t) for t in turns]
     headers = {"x-goog-api-key": api_key, "Content-Type": "application/json"}
+    ran_tools = False
     tools_payload = None
     if tools:
         tools_payload = [{"function_declarations": [
             {"name": t["name"], "description": t["description"], "parameters": _to_gemini_schema(t["parameters"])}
             for t in tools
         ]}]
+
+    def _history():
+        if not ran_tools:
+            return None
+        generic = _gemini_contents_to_generic(working_contents)
+        if system_text:
+            generic.insert(0, {"role": "system", "content": system_text})
+        return generic
 
     for round_num in range(MAX_TOOL_ROUNDS + 1):
         payload = {
@@ -403,32 +629,33 @@ def call_gemini(provider, messages, timeout, tools=None, tool_executor=None):
 
         resp, net_err = _post_json(url, headers, payload, timeout)
         if net_err:
-            return AIResult(False, error=net_err)
+            return AIResult(False, error=net_err, tool_history=_history())
         reason = _status_reason(resp)
         if reason:
-            return AIResult(False, error=reason)
+            return AIResult(False, error=reason, tool_history=_history())
 
         data, parse_err = _parse_json(resp)
         if parse_err:
-            return AIResult(False, error=parse_err)
+            return AIResult(False, error=parse_err, tool_history=_history())
 
         block_reason = (data.get("promptFeedback") or {}).get("blockReason")
         if block_reason:
-            return AIResult(False, error=f"blocked by provider safety filter ({block_reason})")
+            return AIResult(False, error=f"blocked by provider safety filter ({block_reason})", tool_history=_history())
 
         candidates = data.get("candidates") or []
         if not candidates:
-            return AIResult(False, error="empty response (no candidates)")
+            return AIResult(False, error="empty response (no candidates)", tool_history=_history())
         candidate = candidates[0]
 
         finish_reason = candidate.get("finishReason")
         if finish_reason in ("SAFETY", "PROHIBITED_CONTENT", "BLOCKLIST", "SPII"):
-            return AIResult(False, error=f"blocked by provider safety filter ({finish_reason})")
+            return AIResult(False, error=f"blocked by provider safety filter ({finish_reason})", tool_history=_history())
 
         parts = (candidate.get("content") or {}).get("parts") or []
         call_parts = [p for p in parts if isinstance(p, dict) and "functionCall" in p]
 
         if call_parts and tool_executor and round_num < MAX_TOOL_ROUNDS:
+            ran_tools = True
             working_contents.append({"role": "model", "parts": parts})
             response_parts = []
             for p in call_parts:
@@ -445,11 +672,11 @@ def call_gemini(provider, messages, timeout, tools=None, tool_executor=None):
         text = "".join(p.get("text", "") for p in parts if isinstance(p, dict)).strip()
         if not text:
             if call_parts:
-                return AIResult(False, error=_give_up_error())
-            return AIResult(False, error="empty response content")
+                return AIResult(False, error=_give_up_error(), tool_history=_history())
+            return AIResult(False, error="empty response content", tool_history=_history())
         return AIResult(True, text=text)
 
-    return AIResult(False, error=_give_up_error())
+    return AIResult(False, error=_give_up_error(), tool_history=_history())
 
 
 # ---------------------------------------------------------------------------
@@ -472,6 +699,7 @@ def call_cohere(provider, messages, timeout, tools=None, tool_executor=None):
 
     headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
     working_messages = list(messages)
+    ran_tools = False
     tools_payload = None
     if tools:
         tools_payload = [
@@ -490,19 +718,23 @@ def call_cohere(provider, messages, timeout, tools=None, tool_executor=None):
 
         resp, net_err = _post_json(base_url, headers, payload, timeout)
         if net_err:
-            return AIResult(False, error=net_err)
+            return AIResult(False, error=net_err,
+                            tool_history=_openai_messages_to_generic(working_messages) if ran_tools else None)
         reason = _status_reason(resp)
         if reason:
-            return AIResult(False, error=reason)
+            return AIResult(False, error=reason,
+                            tool_history=_openai_messages_to_generic(working_messages) if ran_tools else None)
 
         data, parse_err = _parse_json(resp)
         if parse_err:
-            return AIResult(False, error=parse_err)
+            return AIResult(False, error=parse_err,
+                            tool_history=_openai_messages_to_generic(working_messages) if ran_tools else None)
 
         message = data.get("message") or {}
         tool_calls = message.get("tool_calls")
 
         if tool_calls and tool_executor and round_num < MAX_TOOL_ROUNDS:
+            ran_tools = True
             working_messages.append(message)
             for call in tool_calls:
                 fn = call.get("function") or {}
@@ -520,11 +752,14 @@ def call_cohere(provider, messages, timeout, tools=None, tool_executor=None):
         text = "".join(b.get("text", "") for b in content if isinstance(b, dict)).strip()
         if not text:
             if tool_calls:
-                return AIResult(False, error=_give_up_error())
-            return AIResult(False, error="empty response content")
+                return AIResult(False, error=_give_up_error(),
+                                tool_history=_openai_messages_to_generic(working_messages) if ran_tools else None)
+            return AIResult(False, error="empty response content",
+                            tool_history=_openai_messages_to_generic(working_messages) if ran_tools else None)
         return AIResult(True, text=text)
 
-    return AIResult(False, error=_give_up_error())
+    return AIResult(False, error=_give_up_error(),
+                    tool_history=_openai_messages_to_generic(working_messages) if ran_tools else None)
 
 
 # ---------------------------------------------------------------------------
@@ -544,6 +779,7 @@ def call_ollama(provider, messages, timeout, tools=None, tool_executor=None):
 
     headers = {"Content-Type": "application/json"}
     working_messages = list(messages)
+    ran_tools = False
     tools_payload = None
     if tools:
         tools_payload = [
@@ -558,19 +794,23 @@ def call_ollama(provider, messages, timeout, tools=None, tool_executor=None):
 
         resp, net_err = _post_json(base_url, headers, payload, timeout)
         if net_err:
-            return AIResult(False, error=f"{net_err} (is Ollama installed and running?)")
+            return AIResult(False, error=f"{net_err} (is Ollama installed and running?)",
+                            tool_history=_openai_messages_to_generic(working_messages) if ran_tools else None)
         reason = _status_reason(resp)
         if reason:
-            return AIResult(False, error=reason)
+            return AIResult(False, error=reason,
+                            tool_history=_openai_messages_to_generic(working_messages) if ran_tools else None)
 
         data, parse_err = _parse_json(resp)
         if parse_err:
-            return AIResult(False, error=parse_err)
+            return AIResult(False, error=parse_err,
+                            tool_history=_openai_messages_to_generic(working_messages) if ran_tools else None)
 
         message = data.get("message") or {}
         tool_calls = message.get("tool_calls")
 
         if tool_calls and tool_executor and round_num < MAX_TOOL_ROUNDS:
+            ran_tools = True
             working_messages.append(message)
             for call in tool_calls:
                 fn = call.get("function") or {}
@@ -583,14 +823,17 @@ def call_ollama(provider, messages, timeout, tools=None, tool_executor=None):
         text = (message.get("content") or "").strip()
         if not text:
             if tool_calls:
-                return AIResult(False, error=_give_up_error())
+                return AIResult(False, error=_give_up_error(),
+                                tool_history=_openai_messages_to_generic(working_messages) if ran_tools else None)
             return AIResult(
                 False,
                 error="empty response content (is the model pulled? try: ollama pull " + (model or "<model>") + ")",
+                tool_history=_openai_messages_to_generic(working_messages) if ran_tools else None,
             )
         return AIResult(True, text=text)
 
-    return AIResult(False, error=_give_up_error())
+    return AIResult(False, error=_give_up_error(),
+                    tool_history=_openai_messages_to_generic(working_messages) if ran_tools else None)
 
 
 ADAPTERS = {
