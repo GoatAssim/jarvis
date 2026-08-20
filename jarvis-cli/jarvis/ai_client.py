@@ -341,7 +341,10 @@ def _make_tool_executor(on_tool_call):
         if key in cache:
             return cache[key]
         if on_tool_call:
-            on_tool_call(name)
+            try:
+                on_tool_call(name, arguments)
+            except TypeError:
+                on_tool_call(name)
         result = system_tools.execute_tool(name, arguments)
         cache[key] = result
         runs.append({"name": name, "arguments": arguments, "result": result})

@@ -644,12 +644,19 @@ function send(ws, obj) {
 
 function makeLineBuffer(onLine) {
   let buf = "";
-  return (chunk) => {
+  const feed = (chunk) => {
     buf += chunk.toString();
     const lines = buf.split("\n");
     buf = lines.pop();
     for (const line of lines) onLine(line.replace(/\r$/, ""));
   };
+  feed.flush = () => {
+    if (buf) {
+      onLine(buf.replace(/\r$/, ""));
+      buf = "";
+    }
+  };
+  return feed;
 }
 
 const MAX_ASK_LENGTH = 4000;
@@ -667,6 +674,7 @@ function spawnAndStream(ws, kind, fullArgs, types) {
     child = spawn(JARVIS.cmd, fullArgs, {
       windowsHide: true,
       detached: process.platform !== "win32",
+      env: { ...process.env, PYTHONUNBUFFERED: "1", PYTHONIOENCODING: "utf-8" },
     });
   } catch (e) {
     send(ws, { type: types.error, message: `Couldn't start jarvis: ${e.message}` });
@@ -685,6 +693,8 @@ function spawnAndStream(ws, kind, fullArgs, types) {
   });
 
   child.on("exit", (code, signal) => {
+    onOut.flush();
+    onErr.flush();
     ws.activeChild = null;
     ws.activeKind = null;
     send(ws, { type: types.exit, code: signal ? null : code, signal: signal || null });

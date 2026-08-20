@@ -77,7 +77,6 @@
     askPendingBubble: null,  // the DOM node for Jarvis's in-progress reply bubble
     askReplyLines: [],       // accumulated (post prefix-strip) lines of that reply
     askPrefixStripped: false,// whether we've already tried stripping "Name: " off line 1
-    askTraceHolder: null,    // DOM node for this turn's "\u21b3 asking X\u2026" trace group
     askQuotes: [],           // highlighted excerpts attached to the next ask
   };
 
@@ -567,19 +566,20 @@
         setRunning(true);
         state.askReplyLines = [];
         state.askPrefixStripped = false;
-        state.askTraceHolder = null;
         state.askPendingBubble = addJarvisBubblePending();
         setAskStatus("thinking\u2026", "busy");
+        askPromptBegin();
         break;
       case "ask-stdout":
         appendAskReplyLine(msg.line);
         break;
       case "ask-stderr":
-        addAskTraceLine(msg.line);
+        addAskPromptTrace(msg.line);
         break;
       case "ask-exit":
         setRunning(false);
         finalizeAskBubble();
+        askPromptEnd(msg.code, msg.signal);
         setAskStatus(msg.code === 0 ? "online" : "last attempt failed", msg.code === 0 ? "" : "error");
         break;
       case "ask-error":
@@ -589,6 +589,7 @@
         } else {
           toast(msg.message);
         }
+        askPromptEnd(1, null, msg.message);
         setAskStatus("error", "error");
         break;
     }
@@ -733,17 +734,73 @@
     return msg;
   }
 
-  function addAskTraceLine(line) {
-    let holder = state.askTraceHolder;
-    if (!holder) {
-      holder = el("div", { class: "ask-trace" });
-      if (state.askPendingBubble) askThread.insertBefore(holder, state.askPendingBubble);
-      else askThread.appendChild(holder);
-      state.askTraceHolder = holder;
+  function addAskPromptTrace(raw) {
+    const line = stripAnsi(raw).trim();
+    if (!line) return;
+    let cls = "sys";
+    if (line.includes("\u2717")) cls = "fail";
+    else if (line.includes("$")) cls = "tool";
+    askPromptLine(line, cls);
+  }
+
+  function stripAnsi(s) {
+    return String(s || "").replace(/\u001b\[[0-9;]*[A-Za-z]/g, "").replace(/\u001b\][^\u0007]*\u0007/g, "");
+  }
+
+  function askPromptTerm() {
+    return qs("#ask-prompt-term");
+  }
+
+  function setAskPromptState(text, live) {
+    const node = qs("#ask-prompt-state");
+    node.textContent = text;
+    node.classList.toggle("is-live", !!live);
+  }
+
+  function askPromptClearIdle() {
+    const idle = qs(".ask-prompt__idle", askPromptTerm());
+    if (idle) idle.remove();
+  }
+
+  function askPromptCursor(show) {
+    const term = askPromptTerm();
+    let cur = qs(".ask-prompt__cursor", term);
+    if (!show) {
+      if (cur) cur.remove();
+      return;
     }
-    const isFail = line.includes("\u2717");
-    holder.appendChild(el("div", { class: "ask-trace-line" + (isFail ? " is-fail" : "") }, line));
-    askThreadScrollToEnd();
+    if (!cur) cur = el("span", { class: "ask-prompt__cursor" });
+    term.appendChild(cur);
+  }
+
+  function askPromptLine(text, cls) {
+    const term = askPromptTerm();
+    askPromptClearIdle();
+    const cur = qs(".ask-prompt__cursor", term);
+    const line = el("div", { class: `ask-prompt-line ask-prompt-line--${cls}` }, text);
+    if (cur) term.insertBefore(line, cur);
+    else term.appendChild(line);
+    term.scrollTop = term.scrollHeight;
+  }
+
+  function askPromptBegin() {
+    setAskPromptState("live", true);
+    askPromptLine("$ jarvis", "cmd");
+    askPromptCursor(true);
+  }
+
+  function askPromptEnd(code, signal, errorMessage) {
+    if (errorMessage) askPromptLine(errorMessage, "fail");
+    else if (signal) askPromptLine(`stopped (${signal})`, "fail");
+    else if (code === 0) askPromptLine("done", "done");
+    else askPromptLine(`exit ${code}`, "fail");
+    askPromptCursor(false);
+    setAskPromptState("idle", false);
+  }
+
+  function askPromptReset() {
+    askPromptTerm().innerHTML = '<div class="ask-prompt__idle">Commands Jarvis runs will show up here live.</div>';
+    setAskPromptState("idle", false);
   }
 
   // Jarvis's own CLI output is plain text like "J.A.R.V.I.S: <reply>" (see
@@ -944,6 +1001,7 @@
     hideSelPop();
     askThread.innerHTML = "";
     askThread.appendChild(el("div", { class: "ask-empty" }, "Ask about anything, or tell me what you need done, sir."));
+    askPromptReset();
     toast("Conversation cleared.", "info");
   });
 

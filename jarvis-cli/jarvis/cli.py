@@ -460,9 +460,9 @@ def handle_ai_prompt(text, commands):
         return 1
 
     def on_attempt(label):
-        print(f"{ERR.DIM}\u21b3 asking {label}\u2026{ERR.RESET}", file=sys.stderr)
+        print(f"{ERR.DIM}\u21b3 asking {label}\u2026{ERR.RESET}", file=sys.stderr, flush=True)
 
-    def on_tool_call(name):
+    def on_tool_call(name, arguments=None):
         labels = {
             "run_command": "running command",
             "run_chain": "running chain",
@@ -487,12 +487,30 @@ def handle_ai_prompt(text, commands):
             friendly = name.replace("_", " ")
         else:
             friendly = name.replace("_", " ")
-        print(f"{ERR.DIM}  \u2699 {friendly}\u2026{ERR.RESET}", file=sys.stderr)
+        detail = ""
+        if arguments:
+            bits = []
+            for k, v in arguments.items():
+                if v is None or v is False:
+                    continue
+                if isinstance(v, (dict, list)):
+                    s = json.dumps(v, default=str, ensure_ascii=False)
+                else:
+                    s = str(v)
+                s = s.replace("\n", " ")
+                if len(s) > 90:
+                    s = s[:87] + "..."
+                bits.append(f"{k}={s}")
+            if bits:
+                detail = "  " + " ".join(bits)
+                if len(detail) > 180:
+                    detail = detail[:177] + "..."
+        print(f"{ERR.DIM}  $ {friendly}{detail}{ERR.RESET}", file=sys.stderr, flush=True)
 
     result = ai_client.ask(text, commands, on_attempt=on_attempt, on_tool_call=on_tool_call)
 
     for label, err in result.attempts:
-        print(f"{ERR.DIM}  \u2717 {label} \u2014 {err}{ERR.RESET}", file=sys.stderr)
+        print(f"{ERR.DIM}  \u2717 {label} \u2014 {err}{ERR.RESET}", file=sys.stderr, flush=True)
 
     prefix = f"{OUT.CYAN}{OUT.BOLD}{result.assistant_name}:{OUT.RESET} "
 
