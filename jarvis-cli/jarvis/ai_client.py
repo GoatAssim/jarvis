@@ -168,10 +168,11 @@ def _tools_blurb(compact, has_playnite, has_spotify):
     if compact:
         parts = [
             "Tools: commands; system info (get_*); wifi_set/bluetooth_set/radio_status; git_run; "
-            "web_search/web_fetch; packages "
+            "take_screenshot; web_search/web_fetch; packages "
             "(winget/choco/scoop/pip/pipx/npm); memory_*. "
             "ONLY call tools in your tool list — never invent names. "
             "Wi-Fi/BT off needs confirm=true. git_run allowlisted only (status/log/pull/commit/…). "
+            "Screenshot: take_screenshot — image goes to the user UI, not to you; confirm briefly. "
             "For 'best X'/news: web_search then web_fetch. "
             "Install: package_search then ASK then package_install confirm=true. "
             "MEMORY: matching facts are injected; else memory_search. "
@@ -184,19 +185,22 @@ def _tools_blurb(compact, has_playnite, has_spotify):
             )
         if has_playnite:
             parts.append(
-                "Playnite: query_games WITH filters; find_game is name lookup only. "
-                "Actions: list then launch. Never claim launched unless playnite_launch_* succeeded."
+                "Playnite: query_games WITH filters; find_game is name lookup. "
+                "Play a title: playnite_launch_game (Playnite Play, including Steam/Epic library action). "
+                "Named extras: list then launch_action. Never claim launched unless playnite_launch_* succeeded."
             )
         return " ".join(parts)
 
     parts = [
         "Tools: commands; system info (get_*); radio_status, wifi_set, bluetooth_set; git_run; "
-        "web_search + web_fetch; packages "
+        "take_screenshot; web_search + web_fetch; packages "
         "(package_* for winget, choco, scoop, pip, pipx, npm); memory_*. "
         "ONLY call tools that appear in your tool list. Never invent a tool name. "
         "RADIOS: wifi_set/bluetooth_set action on|off. Off requires confirm=true (may need Admin). "
         "GIT: git_run with an allowlisted command (status, log, diff, add, commit, pull, push, …). "
         "reset/clean/force-push/clone need confirm=true. Not a shell. "
+        "SCREENSHOT: take_screenshot saves the desktop and shows it in the UI. "
+        "You only get a tiny ok/path — never describe pixels or ask for the image. Confirm in one short line. "
         "WEB: For 'best X', news, prices, how-tos, or anything that may have changed, "
         "MUST web_search, then web_fetch 1–3 URLs, then summarize with markdown source links. "
         "SOFTWARE INSTALL: package_search, ASK user, package_install confirm=true. Never guess ids. "
@@ -216,8 +220,9 @@ def _tools_blurb(compact, has_playnite, has_spotify):
     if has_playnite:
         parts.append(
             "PLAYNITE: ALWAYS playnite_query_games WITH filters or groupBy — never dump the library. "
-            "find_game is a specific title lookup. Actions: playnite_list_game_actions then "
-            "playnite_launch_action. Never say a game launched unless playnite_launch_* returned success."
+            "find_game is a specific title lookup. 'Play X' → playnite_launch_game (same as Play in Playnite; "
+            "Steam/Epic use a virtual LibraryPlugin action). Extra launchers: list_game_actions then "
+            "launch_action. Never PUT LibraryPlugin into gameActions. Never say launched unless playnite_launch_* succeeded."
         )
     return " ".join(parts)
 
@@ -346,6 +351,13 @@ def _make_tool_executor(on_tool_call):
             except TypeError:
                 on_tool_call(name)
         result = system_tools.execute_tool(name, arguments)
+        # Never feed screenshot pixels / huge blobs back into the model.
+        if name == "take_screenshot" and isinstance(result, dict):
+            result = {
+                k: result[k]
+                for k in ("ok", "id", "file", "path", "width", "height", "bytes", "note", "error")
+                if k in result
+            }
         cache[key] = result
         runs.append({"name": name, "arguments": arguments, "result": result})
         return result

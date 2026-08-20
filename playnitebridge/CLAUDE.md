@@ -116,7 +116,10 @@ Must be copied to `Extensions/PlayniteBridge/FSE/` in release .pext
 - **Encoding:** `ReadBody` must use `Encoding.UTF8` explicitly
 - **Deploy:** Must kill Playnite before copying DLL (file lock)
 - **Game readonly props:** Source, Genres, etc. are read-only (DB-backed)
-- **GameAction IDs:** Each `GameAction` has a stable `Id` GUID (Playnite fork). Bridge exposes them in all game payloads and supports `POST /api/games/{id}/actions/{actionId}/launch`. Requires fork with GameAction ID migration + `GamesEditor.ActivateAction` (reflection launch path).
+- **GameAction IDs:** Each stored `GameAction` has a stable `Id` GUID (Playnite fork). `GetCopy()` **preserves** `Id` (must not mint a new GUID on clone — that used to rotate ids every time the editor opened).
+- **Library plugin play action:** Plugin games have no stored play `GameAction`. Fork exposes `Game.LibraryPluginPlayActionId` (SHA-1 derived from game id). Bridge prepends it as `type: "LibraryPlugin"` when include-library-play is on. Launch via `POST /api/games/{id}/actions/{actionId}/launch` → `GamesEditor.PlayLibraryPluginAction`, or URI `playnite://playnite/startaction/{gameId}/{actionId}`. Playtime tracking uses the same path as Play (not the old dispose-immediately `ActivateAction` path).
+- **Bridge launch:** `GameActionLaunchService` reflects `PlayGameAction` for stored actions and `PlayLibraryPluginAction` for the virtual id. PUT `gameActions` must ignore `LibraryPlugin` payloads so they are not saved as fake stored actions.
+- Requires this Playnite fork (SDK `GameAction.Id` + `LibraryPluginPlayActionId`).
 - **Sync canonical key:** Only games with source + gameId sync
 - **Tailscale discovery timeout:** HttpClient needs 5s+ timeout for peer scanning
 - **Backend DB path:** Relative to working directory, not exe location

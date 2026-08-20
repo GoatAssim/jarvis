@@ -8,6 +8,21 @@ from . import playnite_config
 from .playnite_http import DEFAULT_TIMEOUT, api as _api
 
 
+def _is_library_plugin_action(raw):
+    if not isinstance(raw, dict):
+        return False
+    if raw.get("isLibraryPluginAction"):
+        return True
+    return (raw.get("type") or "") == "LibraryPlugin"
+
+
+def _stored_game_actions(actions):
+    """LibraryPlugin entries are virtual — never persist them via PUT."""
+    if not isinstance(actions, list):
+        return actions
+    return [a for a in actions if isinstance(a, dict) and not _is_library_plugin_action(a)]
+
+
 def _compact_action(raw):
     if not isinstance(raw, dict):
         return {}
@@ -17,6 +32,10 @@ def _compact_action(raw):
         "type": raw.get("type"),
         "isPlayAction": bool(raw.get("isPlayAction")),
     }
+    if _is_library_plugin_action(raw):
+        out["isLibraryPluginAction"] = True
+        out["type"] = raw.get("type") or "LibraryPlugin"
+        return out
     path = raw.get("path")
     if isinstance(path, str) and path.strip():
         out["path"] = path.strip()[:140]
@@ -54,9 +73,6 @@ def _compact_game(raw, *, include_actions=True):
 def _list_game(raw):
     """Name/playtime/status only — for library search and query results."""
     return _compact_game(raw, include_actions=False)
-
-
-from .playnite_http import DEFAULT_TIMEOUT, api as _api
 
 
 def _remember_game_dict(game):
@@ -103,8 +119,9 @@ def _fetch_actions(game_id, *, refresh=False):
     """Return (actions_list, error_dict). Uses cache unless refresh=True."""
     cfg = playnite_config.load_config()
     cached = (cfg.get("games") or {}).get(game_id) or {}
-    if not refresh and cached.get("actions"):
-        return cached["actions"], None
+    cached_actions = cached.get("actions") or []
+    if not refresh and cached_actions:
+        return cached_actions, None
 
     data = _api("GET", f"/api/games/{game_id}/actions")
     if "error" in data:
@@ -114,9 +131,14 @@ def _fetch_actions(game_id, *, refresh=False):
     game_name = data.get("game") or cached.get("name") or game_id
     play_action_id = None
     for a in actions:
-        if a.get("isPlayAction"):
+        if a.get("isLibraryPluginAction") and a.get("isPlayAction"):
             play_action_id = a.get("id")
             break
+    if not play_action_id:
+        for a in actions:
+            if a.get("isPlayAction"):
+                play_action_id = a.get("id")
+                break
 
     _remember_game_dict({
         "id": game_id,
@@ -146,11 +168,32 @@ def _match_action(actions, *, action_id=None, action_name=None):
         exact = [a for a in actions if playnite_config.normalize_name(a.get("name", "")) == norm]
         if len(exact) == 1:
             return exact[0], None
+        if norm in ("play", "default", "default play"):
+            lib = [a for a in actions if a.get("isLibraryPluginAction")]
+            named_play = [
+                a for a in actions
+                if playnite_config.normalize_name(a.get("name", "")) == "play"
+                and not a.get("isLibraryPluginAction")
+            ]
+            if named_play:
+                return named_play[0], None
+            if lib:
+                return lib[0], None
+        if "library" in norm:
+            lib = [a for a in actions if a.get("isLibraryPluginAction")]
+            if len(lib) == 1:
+                return lib[0], None
         partial = [
             a for a in actions
             if norm in playnite_config.normalize_name(a.get("name", ""))
             or playnite_config.normalize_name(a.get("name", "")) in norm
         ]
+        if norm == "play":
+            partial = [
+                a for a in partial
+                if playnite_config.normalize_name(a.get("name", "")) == "play"
+                or a.get("isLibraryPluginAction")
+            ]
         if len(partial) == 1:
             return partial[0], None
         if len(partial) > 1:
@@ -177,7 +220,9 @@ def _launch_action_id(game_id, action_id, *, game_name="", action_name=""):
         "name": data.get("game") or game_name or game_id,
         "last_action_id": action_id,
         "last_action_name": data.get("action") or action_name,
-        "playActionId": action_id if data.get("launchType") == "specific_action" else None,
+        "playActionId": action_id if data.get("launchType") in (
+            "specific_action", "library_plugin_action",
+        ) else None,
     })
     return {
         "ok": True,
@@ -195,8 +240,10 @@ def tool_playnite_list_game_actions(args):
     if not game_id:
         return {"error": "Could not resolve game."}
 
-    refresh = bool(args.get("refresh"))
-    actions, err = _fetch_actions(game_id, refresh=refresh)
+    refresh = args.get("refresh")
+    if refresh is None:
+        refresh = True
+    actions, err = _fetch_actions(game_id, refresh=bool(refresh))
     if err:
         return err
 
@@ -214,9 +261,16 @@ def tool_playnite_list_game_actions(args):
         "actions": actions,
         "playActionId": default_id,
     }
-    if len(actions) > 1:
+    extras = [a for a in actions if not a.get("isLibraryPluginAction")]
+    if any(a.get("isLibraryPluginAction") for a in actions):
         out["message"] = (
-            "Multiple actions — ask which one, or use playnite_launch_action with action_id/action_name."
+            "Includes a virtual LibraryPlugin play action (Steam/Epic/GOG/etc — same as Play in Playnite). "
+            "playnite_launch_game uses that default. Use playnite_launch_action only for a named extra. "
+            "Do not PUT LibraryPlugin entries back as stored actions."
+        )
+    elif len(extras) > 1:
+        out["message"] = (
+            "Multiple stored actions — ask which one, or use playnite_launch_action with action_id/action_name."
         )
     return out
 
@@ -240,8 +294,13 @@ def tool_playnite_launch_action(args):
         return err
 
     action, err = _match_action(actions, action_id=action_id, action_name=action_name)
-    if err:
-        return err
+    if err or not action:
+        actions, retry_err = _fetch_actions(game_id, refresh=True)
+        if retry_err:
+            return err or retry_err
+        action, err = _match_action(actions, action_id=action_id, action_name=action_name)
+        if err:
+            return err
     if not action:
         return {"error": "Could not resolve action."}
 
@@ -323,8 +382,24 @@ def tool_playnite_find_game(args):
     return out
 
 
+def _launch_default_play(game_id):
+    """Same as clicking Play in Playnite (library plugin or stored play action)."""
+    data = _api("POST", f"/api/games/{game_id}/launch")
+    if "error" in data:
+        return data
+    _remember_game_dict({
+        "id": game_id,
+        "name": data.get("game") or game_id,
+        "playActionId": data.get("actionId"),
+        "play_action_id": data.get("actionId"),
+        "last_action_id": data.get("actionId"),
+        "last_action_name": data.get("action"),
+    })
+    return {"ok": True, "game_id": game_id, **{k: data[k] for k in ("game", "action", "actionId", "launchType") if k in data}}
+
+
 def tool_playnite_launch_game(args):
-    """Default play — if multiple actions exist, require explicit choice unless use_default_play."""
+    """Default Play in Playnite. Named extras go through playnite_launch_action."""
     args = args or {}
     game_id, err = _resolve_game_id(args)
     if err:
@@ -339,40 +414,7 @@ def tool_playnite_launch_game(args):
             "action_name": action_name,
         })
 
-    actions, err = _fetch_actions(game_id)
-    if err:
-        return err
-
-    if len(actions) > 1 and not args.get("use_default_play"):
-        default_id = None
-        cfg = playnite_config.load_config()
-        default_id = (cfg.get("games") or {}).get(game_id, {}).get("play_action_id") or (
-            cfg.get("games") or {}).get(game_id, {}).get("playActionId")
-        return {
-            "needs_clarification": True,
-            "message": (
-                "This game has multiple actions — ask which one, or use playnite_launch_action. "
-                "Pass use_default_play=true only to run the default Play action."
-            ),
-            "game_id": game_id,
-            "playActionId": default_id,
-            "actions": actions,
-        }
-
-    if len(actions) == 1:
-        return _launch_action_id(game_id, actions[0]["id"])
-
-    cfg = playnite_config.load_config()
-    default_id = (cfg.get("games") or {}).get(game_id, {}).get("play_action_id") or (
-        cfg.get("games") or {}).get(game_id, {}).get("playActionId")
-    if default_id:
-        return _launch_action_id(game_id, default_id)
-
-    data = _api("POST", f"/api/games/{game_id}/launch")
-    if "error" in data:
-        return data
-    _remember_game_dict({"id": game_id, "name": data.get("game") or game_id})
-    return {"ok": True, **{k: data[k] for k in ("game", "action", "actionId", "launchType") if k in data}}
+    return _launch_default_play(game_id)
 
 
 def tool_playnite_library_stats(args):
@@ -428,6 +470,11 @@ def tool_playnite_update_game(args):
         if key in args and args[key] is not None:
             body[key] = args[key]
 
+    if "gameActions" in body:
+        stored = _stored_game_actions(body["gameActions"])
+        if stored != body["gameActions"]:
+            body["gameActions"] = stored
+
     if not body:
         return {"needs_clarification": True, "message": "Nothing to update — pass fields to change."}
 
@@ -456,8 +503,10 @@ PLAYNITE_TOOL_SCHEMAS = [
     {
         "name": "playnite_list_game_actions",
         "description": (
-            "List every launch action for a game (Play, mods, URLs, emulators). Each action has a "
-            "stable action id. Call this before launching when the user might want a non-default action."
+            "List launch actions for a game. Includes a virtual type=LibraryPlugin action on "
+            "Steam/Epic/GOG/etc (library integration play) plus stored File/URL/Emulator/Script actions. "
+            "LibraryPlugin is not in the DB — never send it back in gameActions updates. "
+            "For ordinary 'play this game' use playnite_launch_game."
         ),
         "parameters": {
             "type": "object",
@@ -471,8 +520,8 @@ PLAYNITE_TOOL_SCHEMAS = [
     {
         "name": "playnite_launch_action",
         "description": (
-            "Launch a SPECIFIC game action by action_id or action_name. This is the correct tool when "
-            "the user names a mod, alternate launch, URL action, etc. Confirm with the user first. "
+            "Launch a SPECIFIC game action by action_id or action_name (mod, URL, emulator, or "
+            "LibraryPlugin). Confirm first. For ordinary Play, use playnite_launch_game. "
             "Use playnite_list_game_actions if ids are unknown."
         ),
         "parameters": {
@@ -519,9 +568,8 @@ PLAYNITE_TOOL_SCHEMAS = [
     {
         "name": "playnite_launch_game",
         "description": (
-            "Launch the default Play action ONLY when the game has one action or user confirmed default. "
-            "If multiple actions exist, returns the action list — use playnite_launch_action instead. "
-            "Pass action_id/action_name here too (delegates to launch_action). use_default_play=true skips prompt."
+            "Launch a game the same way as Play in Playnite (Steam/Epic/GOG library play, or the "
+            "stored play action). Use this for 'play X'. Extra named launchers: playnite_launch_action."
         ),
         "parameters": {
             "type": "object",
@@ -531,7 +579,7 @@ PLAYNITE_TOOL_SCHEMAS = [
                 "action_id": {"type": "string"},
                 "action_name": {"type": "string"},
                 "installed": {"type": "boolean"},
-                "use_default_play": {"type": "boolean", "description": "Force default Play when multiple actions."},
+                "use_default_play": {"type": "boolean", "description": "Unused; default Play is used when no action_id/name."},
             },
         },
     },
@@ -554,7 +602,10 @@ PLAYNITE_TOOL_SCHEMAS = [
     },
     {
         "name": "playnite_update_game",
-        "description": "Update game metadata. gameActions replaces the full actions list (include ids to keep them).",
+        "description": (
+            "Update game metadata. gameActions replaces stored File/URL/Emulator/Script actions "
+            "(include ids to keep them). Never include type LibraryPlugin — those are virtual."
+        ),
         "parameters": {
             "type": "object",
             "properties": {
@@ -577,7 +628,7 @@ PLAYNITE_TOOL_SCHEMAS = [
                 "gameActions": {
                     "type": "array",
                     "description": (
-                        "Replace all launch actions. Each item: id, name, type, isPlayAction, path, etc."
+                        "Replace stored launch actions only. Do not include LibraryPlugin entries."
                     ),
                     "items": {"type": "object"},
                 },

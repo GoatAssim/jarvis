@@ -39,7 +39,7 @@ ENCODING = "utf-8"
 
 CHAIN_SEP = "then"      # starts a new batch \u2014 waits for the previous one to finish
 PARALLEL_SEP = "and"    # joins the current batch \u2014 runs alongside whatever's already in it
-RESERVED_NAMES = {"config", "ai-config", "ai-clear", "ai-drop-from", "playnite-config", "spotify-config", "spotify-login", "memory-config", CHAIN_SEP, PARALLEL_SEP, "-h", "--help"}
+RESERVED_NAMES = {"config", "ai-config", "ai-clear", "ai-drop-from", "playnite-config", "spotify-config", "spotify-login", "memory-config", "tools-list", CHAIN_SEP, PARALLEL_SEP, "-h", "--help"}
 
 OUT = Palette(sys.stdout)  # actual command output: the banner, the command list
 ERR = Palette(sys.stderr)  # jarvis's own status/trace/error messages
@@ -157,6 +157,7 @@ def print_help(commands, file=sys.stdout):
         print(f"  {p.GREEN}{name.ljust(width)}{p.RESET} {spec.get('description', '')}", file=file)
     print(f"\nRun '{p.CYAN}jarvis <command> --help{p.RESET}' for a command's options.", file=file)
     print(f"Chain several with '{p.CYAN}jarvis cmd1 then cmd2{p.RESET}'.", file=file)
+    print(f"Built-in: {p.CYAN}config{p.RESET}, {p.CYAN}ai-config{p.RESET}, {p.CYAN}ai-clear{p.RESET}, {p.CYAN}tools-list{p.RESET} (prints every AI tool as JSON — not an ask).", file=file)
     print(f"Edit {p.DIM}{CONFIG_FILE}{p.RESET} to add or change commands.", file=file)
 
 
@@ -483,7 +484,7 @@ def handle_ai_prompt(text, commands):
             friendly = name[9:].replace("_", " ")
         elif name.startswith("get_"):
             friendly = name[4:].replace("_", " ")
-        elif name in ("wifi_set", "bluetooth_set", "radio_status", "git_run"):
+        elif name in ("wifi_set", "bluetooth_set", "radio_status", "git_run", "take_screenshot"):
             friendly = name.replace("_", " ")
         else:
             friendly = name.replace("_", " ")
@@ -590,6 +591,11 @@ def main():
         from . import memory
         memory.ensure_config()
         print(memory.CONFIG_FILE)
+        return
+
+    if argv[0] == "tools-list":
+        from . import tools as system_tools
+        print(json.dumps(system_tools.tools_list_payload(), indent=2))
         return
 
     if argv[0] not in commands and argv[0] not in RESERVED_NAMES:
