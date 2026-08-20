@@ -171,19 +171,34 @@
       </div>
     </div>
 
-    <div class="ask-thread" id="ask-thread">
-      <div class="ask-empty">Ask about anything, or tell me what you need done, sir.</div>
+    <div class="ask-body">
+      <div class="ask-main">
+        <div class="ask-thread" id="ask-thread">
+          <div class="ask-empty">Ask about anything, or tell me what you need done, sir.</div>
+        </div>
+
+        <div class="ask-quote-bar" id="ask-quote-bar" hidden></div>
+
+        <form class="ask-input-row" id="ask-form">
+          <input type="text" id="ask-input" placeholder="Ask Jarvis anything&hellip; highlight text above to quote it" autocomplete="off" maxlength="4000">
+          <button class="btn btn--ghost" id="btn-ask-stop" type="button" hidden>Stop</button>
+          <button class="btn btn--primary" id="btn-ask-send" type="submit">
+            <span class="btn__spark"></span>Send
+          </button>
+        </form>
+      </div>
+
+      <aside class="ask-prompt" aria-label="Live command prompt">
+        <div class="ask-prompt__head">
+          <span class="ask-prompt__title">PROMPT</span>
+          <span class="ask-prompt__state" id="ask-prompt-state">idle</span>
+        </div>
+        <div class="ask-prompt__term" id="ask-prompt-term">
+          <div class="ask-prompt__idle">Commands Jarvis runs will show up here live.</div>
+        </div>
+      </aside>
     </div>
 
-    <div class="ask-quote-bar" id="ask-quote-bar" hidden></div>
-
-    <form class="ask-input-row" id="ask-form">
-      <input type="text" id="ask-input" placeholder="Ask Jarvis anything&hellip; highlight text above to quote it" autocomplete="off" maxlength="4000">
-      <button class="btn btn--ghost" id="btn-ask-stop" type="button" hidden>Stop</button>
-      <button class="btn btn--primary" id="btn-ask-send" type="submit">
-        <span class="btn__spark"></span>Send
-      </button>
-    </form>
     <div class="ask-sel-pop" id="ask-sel-pop" hidden>
       <button type="button" id="ask-sel-quote">Quote</button>
       <button type="button" id="ask-sel-copy">Copy</button>
