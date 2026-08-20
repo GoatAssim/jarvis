@@ -59,6 +59,51 @@
     toastTimer = setTimeout(() => { t.hidden = true; }, 4200);
   }
 
+  function jarvisTabVisible() {
+    return document.visibilityState === "visible";
+  }
+
+  function ensureNotifPermission() {
+    if (!("Notification" in window)) return;
+    if (Notification.permission === "default") {
+      Notification.requestPermission().catch(() => {});
+    }
+  }
+
+  function summarizeText(text) {
+    const plain = String(text || "")
+      .replace(/[#*_`>+-]/g, " ")
+      .replace(/\s+/g, " ")
+      .trim();
+    if (!plain) return "Finished.";
+    const sentence = (plain.match(/^[^.!?]+[.!?]?/) || [plain])[0];
+    return sentence.slice(0, 120);
+  }
+
+  function notifyIfAway(title, body) {
+    if (jarvisTabVisible()) return;
+    if (!("Notification" in window) || Notification.permission !== "granted") return;
+    try {
+      const n = new Notification(title.slice(0, 88), {
+        body: (body || "").slice(0, 140),
+        tag: "jarvis-task",
+        silent: true,
+      });
+      n.onclick = () => {
+        window.focus();
+        n.close();
+      };
+    } catch {
+      /* private mode / unsupported */
+    }
+  }
+
+  function notifyTaskDone(summary, failed) {
+    const task = (state.lastTaskLabel || "that").replace(/\s+/g, " ").trim().slice(0, 42) || "that";
+    const title = `Your task of doing ${task} is done sir`;
+    notifyIfAway(title, failed ? (summary || "It didn't finish cleanly.") : (summary || "All set."));
+  }
+
   // ===========================================================================
   // State
   // ===========================================================================
@@ -78,6 +123,7 @@
     askReplyLines: [],       // accumulated (post prefix-strip) lines of that reply
     askPrefixStripped: false,// whether we've already tried stripping "Name: " off line 1
     askQuotes: [],           // highlighted excerpts attached to the next ask
+    lastTaskLabel: "",       // user request / command name for away notifications
   };
 
   // ===========================================================================
@@ -550,16 +596,20 @@
         setRunning(false);
         if (msg.signal) {
           consoleAppend(`\u25a0 stopped (${msg.signal})`, "exit-bad");
+          notifyTaskDone(`Stopped (${msg.signal}).`, true);
         } else if (msg.code === 0) {
           consoleAppend("\u25a0 done \u2014 exit code 0", "exit-ok");
+          notifyTaskDone("Command finished.");
         } else {
           consoleAppend(`\u25a0 exit code ${msg.code}`, "exit-bad");
+          notifyTaskDone(`Exit code ${msg.code}.`, true);
         }
         break;
       case "error":
         setRunning(false);
         consoleAppend(`\u26a0 ${msg.message}`, "exit-bad");
         toast(msg.message);
+        notifyTaskDone(msg.message, true);
         break;
 
       case "ask-start":
@@ -576,12 +626,15 @@
       case "ask-stderr":
         addAskPromptTrace(msg.line);
         break;
-      case "ask-exit":
+      case "ask-exit": {
         setRunning(false);
+        const raw = state.askReplyLines.length ? state.askReplyLines.join("\n") : "";
         finalizeAskBubble();
         askPromptEnd(msg.code, msg.signal);
         setAskStatus(msg.code === 0 ? "online" : "last attempt failed", msg.code === 0 ? "" : "error");
+        notifyTaskDone(summarizeText(raw), msg.code !== 0);
         break;
+      }
       case "ask-error":
         setRunning(false);
         if (state.askPendingBubble) {
@@ -591,12 +644,15 @@
         }
         askPromptEnd(1, null, msg.message);
         setAskStatus("error", "error");
+        notifyTaskDone(msg.message, true);
         break;
     }
   }
 
   function runSegments(segments) {
     if (state.running) { toast("A command is already running."); return; }
+    ensureNotifPermission();
+    state.lastTaskLabel = (segments || []).map((s) => s.name).filter(Boolean).join(" then ") || "that command";
     wsSend({ type: "run", segments });
   }
 
@@ -701,6 +757,8 @@
       node.remove();
       node = next;
     }
+    ensureNotifPermission();
+    state.lastTaskLabel = text;
     wsSend({ type: "ask", text, redo: true });
   }
 
@@ -737,10 +795,41 @@
   function addAskPromptTrace(raw) {
     const line = stripAnsi(raw).trim();
     if (!line) return;
+    if (line.startsWith("JARVIS_MEDIA\t")) {
+      const parts = line.split("\t");
+      if (parts[1] === "screenshot" && parts[2]) {
+        showAskScreenshot(parts[2].trim());
+        askPromptLine(`$ screenshot  ${parts[2].trim()}`, "tool");
+        return;
+      }
+    }
     let cls = "sys";
     if (line.includes("\u2717")) cls = "fail";
     else if (line.includes("$")) cls = "tool";
     askPromptLine(line, cls);
+  }
+
+  function showAskScreenshot(filename) {
+    if (!/^ss_[A-Za-z0-9_.-]+\.png$/.test(filename)) return;
+    clearAskEmptyHint();
+    const url = `/api/screenshots/${encodeURIComponent(filename)}`;
+    const msg = el("div", { class: "ask-msg ask-msg--jarvis ask-msg--media" }, [
+      el("div", { class: "ask-msg__role" }, "Jarvis"),
+      el("div", { class: "ask-msg__bubble ask-msg__bubble--media" }, [
+        el("a", { href: url, target: "_blank", rel: "noopener", class: "ask-shot-link" }, [
+          el("img", {
+            class: "ask-shot",
+            src: url,
+            alt: "Desktop screenshot",
+            loading: "lazy",
+          }),
+        ]),
+        el("div", { class: "ask-shot-cap" }, "Screenshot"),
+      ]),
+    ]);
+    if (state.askPendingBubble) askThread.insertBefore(msg, state.askPendingBubble);
+    else askThread.appendChild(msg);
+    askThreadScrollToEnd();
   }
 
   function stripAnsi(s) {
@@ -848,6 +937,7 @@
 
   function openAsk() {
     askOverlay.hidden = false;
+    ensureNotifPermission();
     qs("#ask-input").focus();
   }
   function closeAsk() {
@@ -982,6 +1072,8 @@
     renderQuoteBar();
     hideSelPop();
     addUserBubble(text, quotes);
+    ensureNotifPermission();
+    state.lastTaskLabel = text || (quotes[0] || "that");
     wsSend({
       type: "ask",
       text,

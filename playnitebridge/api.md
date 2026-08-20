@@ -54,9 +54,16 @@ List/search games with pagination.
       "playCount": 5,
       "lastActivity": "2026-03-20T15:30:00.0000000+00:00",
       "userScore": 85,
-      "actionCount": 1,
+      "actionCount": 2,
       "playActionId": "action-guid",
       "gameActions": [
+        {
+          "id": "library-plugin-action-guid",
+          "name": "Library integration play action",
+          "type": "LibraryPlugin",
+          "isPlayAction": true,
+          "isLibraryPluginAction": true
+        },
         {
           "id": "action-guid",
           "name": "Play",
@@ -113,9 +120,9 @@ Update any game fields. Send only the fields you want to change.
 | `ageRatings` | string[] | Must exist |
 | `regions` | string[] | Must exist |
 | `links` | object[] | `[{name, url}, ...]` |
-| `gameActions` | object[] | Full replace of game actions; include `id` to preserve stable ids |
+| `gameActions` | object[] | Full replace of **stored** game actions; include `id` to preserve stable ids. Do **not** send `type: "LibraryPlugin"` entries — they are virtual and ignored on write. |
 
-Each `gameActions` entry supports: `id`, `name`, `type`, `isPlayAction`, `path`, `arguments`, `additionalArguments`, `workingDir`, `overrideDefaultArgs`, `emulatorId`, `emulatorProfileId`, `trackingMode`, `trackingPath`, `script`, `initialTrackingDelay`, `trackingFrequency`
+Each stored `gameActions` entry supports: `id`, `name`, `type` (`File`, `URL`, `Emulator`, `Script`), `isPlayAction`, `path`, `arguments`, `additionalArguments`, `workingDir`, `overrideDefaultArgs`, `emulatorId`, `emulatorProfileId`, `trackingMode`, `trackingPath`, `script`, `initialTrackingDelay`, `trackingFrequency`
 
 ---
 
@@ -133,7 +140,19 @@ Launch the game's default play action (same as Play in the Playnite UI).
 
 ### GET /api/games/{id}/actions
 
-List all configured actions for a game. Each action includes a stable `id` GUID.
+List all launchable actions for a game. Each action includes a **stable** `id` GUID.
+
+The list is **stored GameActions plus**, for library-imported games (Steam, Epic, GOG, …) with “Include library integration play actions” enabled, a virtual first entry:
+
+| Field | Value |
+|-------|--------|
+| `id` | Deterministic GUID derived from the **game** id (same every time; plugins do not assign it) |
+| `name` | `Library integration play action` |
+| `type` | `LibraryPlugin` |
+| `isPlayAction` | `true` |
+| `isLibraryPluginAction` | `true` |
+
+Custom (manual) games do not get this virtual action. It is **not** stored in the database; do not persist it back via `PUT … gameActions`.
 
 **Response:**
 ```json
@@ -142,6 +161,13 @@ List all configured actions for a game. Each action includes a stable `id` GUID.
   "game": "Game Name",
   "total": 2,
   "actions": [
+    {
+      "id": "library-plugin-action-guid",
+      "name": "Library integration play action",
+      "type": "LibraryPlugin",
+      "isPlayAction": true,
+      "isLibraryPluginAction": true
+    },
     {
       "id": "action-guid",
       "name": "Play",
@@ -161,19 +187,19 @@ List all configured actions for a game. Each action includes a stable `id` GUID.
 
 ### GET /api/games/{id}/actions/{actionId}
 
-Return full metadata for one game action.
+Return full metadata for one game action, including the virtual library plugin action when `{actionId}` is that game’s library plugin play action id.
 
 ---
 
 ### POST /api/games/{id}/actions/{actionId}/launch
 
-Launch a specific game action by its stable id.
+Launch a specific action by its stable id. Playtime is tracked the same way as clicking Play in Playnite (file / emulator / script / library plugin). URL-only actions open the link without session tracking.
 
-- File/Emulator/Script play actions require the game to be installed
+- File / emulator / script / **library plugin** play actions require the game to be installed
 - URL actions can launch without installation
-- Uses Playnite's internal `GamesEditor.ActivateAction` via reflection
+- Library plugin actions start the integration’s play controller (no plugin code changes required)
 
-**Response:**
+**Response (stored action):**
 ```json
 {
   "ok": true,
@@ -183,6 +209,34 @@ Launch a specific game action by its stable id.
   "launchType": "specific_action"
 }
 ```
+
+**Response (library plugin action):**
+```json
+{
+  "ok": true,
+  "game": "Game Name",
+  "action": "Library integration play action",
+  "actionId": "library-plugin-action-guid",
+  "launchType": "library_plugin_action"
+}
+```
+
+---
+
+## Game action IDs (clients / other tools)
+
+Use these rules if another app talks to Bridge:
+
+| If the tool… | Update needed? |
+|--------------|----------------|
+| Only calls `POST /api/games/{id}/launch` (default Play) | No |
+| Lists `gameActions` and assumes every `type` is `File`/`URL`/`Emulator`/`Script` | **Yes** — ignore or special-case `type: "LibraryPlugin"` |
+| Treats `actionCount` as only stored extra actions | **Yes** — plugin games may be +1 for the virtual action |
+| Uses `playActionId` on Steam/Epic/etc. games that had **no** stored play action | **Yes** — `playActionId` is now the library plugin action id when no stored `IsPlayAction` exists |
+| Launches by id / copies ids for later | **Yes** — use the listed `id`; it is stable (opening the game editor no longer regenerates ids) |
+| PUTs `gameActions` as a round-trip of GET | Filter out `LibraryPlugin` entries (Bridge ignores them, but do not invent stored copies) |
+
+Playnite URI equivalent: `playnite://playnite/startaction/{gameId}/{actionId}` (works for stored actions **and** the library plugin action id).
 
 ---
 

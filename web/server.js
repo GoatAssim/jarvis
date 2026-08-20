@@ -18,6 +18,7 @@ import { spawn } from "node:child_process";
 import { watch } from "node:fs";
 import { createServer } from "node:http";
 import fs from "node:fs/promises";
+import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -25,7 +26,7 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PORT = Number(process.env.PORT) || 4173;
 const HOST = "127.0.0.1";
 
-const RESERVED_NAMES = new Set(["config", "ai-config", "ai-clear", "ai-drop-from", "playnite-config", "spotify-config", "spotify-login", "memory-config", "then", "and", "-h", "--help"]);
+const RESERVED_NAMES = new Set(["config", "ai-config", "ai-clear", "ai-drop-from", "playnite-config", "spotify-config", "spotify-login", "memory-config", "tools-list", "then", "and", "-h", "--help"]);
 
 // ---------------------------------------------------------------------------
 // Locate the real jarvis binary. Tries a few invocation strategies, in
@@ -553,6 +554,25 @@ app.put("/api/memory/raw", requireJarvis, async (req, res) => {
   } catch (e) {
     res.status(500).json({ error: `Couldn't write memory.json: ${e.message}` });
   }
+});
+
+const SCREENSHOT_NAME_RE = /^ss_[A-Za-z0-9_.-]+\.png$/;
+
+function screenshotsDir() {
+  return path.join(os.homedir(), ".jarvis", "screenshots");
+}
+
+app.get("/api/screenshots/:name", (req, res) => {
+  const name = path.basename(String(req.params.name || ""));
+  if (!SCREENSHOT_NAME_RE.test(name)) {
+    return res.status(400).json({ error: "Invalid screenshot name." });
+  }
+  const filePath = path.join(screenshotsDir(), name);
+  res.sendFile(filePath, (err) => {
+    if (err && !res.headersSent) {
+      res.status(404).json({ error: "Screenshot not found." });
+    }
+  });
 });
 
 app.get("/api/raw", requireJarvis, async (req, res) => {

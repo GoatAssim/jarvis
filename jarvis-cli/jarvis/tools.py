@@ -13,6 +13,7 @@ that's what steers correct tool selection, per every provider's own
 tool-use guidance.
 """
 
+import os
 import platform
 import shutil
 import socket
@@ -28,6 +29,7 @@ from .pkg_tools import PKG_TOOL_SCHEMAS, PKG_TOOLS
 from .playnite_api_tools import PLAYNITE_API_TOOL_SCHEMAS, PLAYNITE_API_TOOLS
 from .playnite_tools import PLAYNITE_TOOL_SCHEMAS as _PLAYNITE_CORE_SCHEMAS, PLAYNITE_TOOLS as _PLAYNITE_CORE_TOOLS
 from .radio_tools import RADIO_TOOL_SCHEMAS, RADIO_TOOLS
+from .screenshot_tools import SCREENSHOT_TOOL_SCHEMAS, SCREENSHOT_TOOLS
 from .spotify_tools import SPOTIFY_TOOL_SCHEMAS, SPOTIFY_TOOLS
 from .web_tools import WEB_TOOL_SCHEMAS, WEB_TOOLS
 
@@ -268,12 +270,22 @@ CORE_TOOL_SCHEMAS = [
     *MEMORY_TOOL_SCHEMAS,
     *RADIO_TOOL_SCHEMAS,
     *GIT_TOOL_SCHEMAS,
+    *SCREENSHOT_TOOL_SCHEMAS,
     *WEB_TOOL_SCHEMAS,
     *PKG_TOOL_SCHEMAS,
 ]
 
 PLAYNITE_AND_SPOTIFY = [*PLAYNITE_TOOL_SCHEMAS, *SPOTIFY_TOOL_SCHEMAS]
 TOOL_SCHEMAS = [*CORE_TOOL_SCHEMAS, *PLAYNITE_AND_SPOTIFY]
+
+
+def allowed_tools_from_env():
+    """None means unrestricted (normal CLI). A set — even empty — is an allowlist
+    used by the KDE Connect plugin via JARVIS_ALLOWED_TOOLS."""
+    raw = os.environ.get("JARVIS_ALLOWED_TOOLS")
+    if raw is None:
+        return None
+    return {part.strip() for part in raw.split(",") if part.strip()}
 
 
 def tool_schemas_for_session():
@@ -286,7 +298,30 @@ def tool_schemas_for_session():
     out.extend(SPOTIFY_TOOL_SCHEMAS)
     if playnite_config.is_configured():
         out.extend(PLAYNITE_TOOL_SCHEMAS)
+    allowed = allowed_tools_from_env()
+    if allowed is not None:
+        out = [schema for schema in out if schema.get("name") in allowed]
     return out
+
+
+def tools_list_payload():
+    """Full catalog for remote permission UIs — not filtered by session or env."""
+    items = []
+    seen = set()
+    for schema in TOOL_SCHEMAS:
+        name = schema.get("name")
+        if not name or name in seen:
+            continue
+        seen.add(name)
+        items.append({
+            "name": name,
+            "description": schema.get("description") or "",
+        })
+    for name in TOOLS:
+        if name not in seen:
+            seen.add(name)
+            items.append({"name": name, "description": ""})
+    return items
 
 TOOLS = {
     "get_datetime": _get_datetime,
@@ -300,6 +335,7 @@ TOOLS = {
     **MEMORY_TOOLS,
     **RADIO_TOOLS,
     **GIT_TOOLS,
+    **SCREENSHOT_TOOLS,
     **WEB_TOOLS,
     **PKG_TOOLS,
     **PLAYNITE_TOOLS,
@@ -310,11 +346,14 @@ TOOLS = {
 def execute_tool(name, arguments=None):
     """Run one tool by name and return a JSON-serializable result — always,
     even on failure. Never raises."""
+    allowed = allowed_tools_from_env()
+    if allowed is not None and name not in allowed:
+        return {"error": "tool not permitted"}
     fn = TOOLS.get(name)
     if fn is None:
         return {"error": f"no such tool: {name}"}
     try:
-        if name in COMMAND_TOOLS or name in PLAYNITE_TOOLS or name in WEB_TOOLS or name in PKG_TOOLS or name in SPOTIFY_TOOLS or name in MEMORY_TOOLS or name in RADIO_TOOLS or name in GIT_TOOLS:
+        if name in COMMAND_TOOLS or name in PLAYNITE_TOOLS or name in WEB_TOOLS or name in PKG_TOOLS or name in SPOTIFY_TOOLS or name in MEMORY_TOOLS or name in RADIO_TOOLS or name in GIT_TOOLS or name in SCREENSHOT_TOOLS:
             return fn(arguments or {})
         return fn()
     except Exception as e:

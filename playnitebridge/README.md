@@ -1,5 +1,5 @@
-# Playnite Bridge FORK 
-I AM NOT AFFILIATED WITH THE ORIGINAL DEVELOPERS ALL CREDIT GOES TO THEM
+# Playnite Bridge
+
 A [Playnite](https://playnite.link/) plugin with REST API, cross-PC game library sync, and Xbox button integration for handhelds.
 
 - **REST API** — 50+ endpoints for AI agents and automation
@@ -12,7 +12,7 @@ A [Playnite](https://playnite.link/) plugin with REST API, cross-PC game library
 - **50+ endpoints** on `localhost:19821` covering the entire Playnite SDK
 - **AI Skill file** — paste into any AI chat (ChatGPT, Claude, Gemini) for full library control
 - **Bearer token auth** with rotation
-- **Game management** — search, create, update, delete, launch, install/uninstall, **launch specific game actions by stable id**
+- **Game management** — search, create, update, delete, launch, install/uninstall, **launch specific game actions by stable id** (including Steam/Epic/etc. library plugin play, which now has a virtual `LibraryPlugin` action id)
 - **Library metadata** — categories, tags, genres, features, platforms, series, and more
 - **Advanced query** — filters, sorting, groupBy analytics
 - **View control** — select games, apply filters, get UI state
@@ -89,7 +89,9 @@ All endpoints require `Authorization: Bearer <token>`. Full docs in [`docs/api.m
 
 | Category | Endpoints | Examples |
 |----------|-----------|---------|
-| Games | 24 | Search, CRUD, launch, **game actions (list/get/launch by id)**, install, categories, tags, cover art |
+| Games | 24 | Search, CRUD, launch, **game actions (list/get/launch by id, including library plugin play)**, install, categories, tags, cover art |
+
+**Other tools calling Bridge:** default `POST /api/games/{id}/launch` is unchanged. If the tool lists or launches **by action id**, handle `type: "LibraryPlugin"` (virtual, not stored), treat `playActionId` as present on plugin games even with no extra actions, and never PUT that virtual action back as a stored `GameAction`. See [`docs/api.md`](docs/api.md) § Game action IDs.
 | Query | 1 | Advanced filters, sort, groupBy analytics |
 | Collections | 18 | Categories, genres, tags, features, platforms, sources |
 | Plugin Data | 3 | Achievements, activity, plugins |
