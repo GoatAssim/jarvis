@@ -43,7 +43,7 @@ Edit /home/you/.jarvis/commands.json to add or change commands.
 
 ## In this repo
 
-| | |
+| Directory | Function |
 |---|---|
 | [`jarvis-cli/`](jarvis-cli) | The CLI itself — a Python package (`pip install .`) that reads `~/.jarvis/commands.json` and runs whatever's in it. Start here; this is the whole tool. **→ [jarvis-cli/README.md](jarvis-cli/README.md)** for the full config format, multi-step commands, conditions, and chaining. |
 | [`web/`](web) | A local web console for the CLI above — run, chain, and edit commands from the browser instead of the terminal, including a full raw-config editor. Optional; the CLI works completely on its own. **→ [web/README.md](web/README.md)** for setup and the API/WebSocket reference. |
@@ -51,9 +51,14 @@ Edit /home/you/.jarvis/commands.json to add or change commands.
 
 ## Fastest path to trying it
 ```bash
-python -m ensurepip --default-pip && for /f "tokens=*" %i in ('python -c "import os, sys; print(os.path.join(sys.prefix, 'Scripts'))"') do setx PATH "%PATH%;%i"
-cd ./jarvis/script.bat
+python -m ensurepip --default-pip && for /f "tokens=*" %i in ('python -c "import os, sys; print(os.path.join(sys.prefix, 'Scripts'))"') do setx PATH "%PATH%;%i" 
+``` 
+Run this if pip isn't already installed or if it's showing that it doesn't recognize pip.
+```bash
+cd C:/Your/jarvis/Path/Jarvis
+script.bat 
 ```
+
 Both talk to the exact same `~/.jarvis/commands.json` — edit it from
 either one, or by hand, and the other picks it up immediately. Nothing
 needs to be reinstalled or restarted after a config change.
