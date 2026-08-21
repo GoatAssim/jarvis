@@ -254,6 +254,26 @@ def tool_update_command(args):
     return {"ok": True, "name": saved_as, "message": f"Updated command '{saved_as}'."}
 
 
+def tool_search_commands(args):
+    args = args or {}
+    query = (args.get("query") or args.get("q") or "").strip().lower()
+    commands = commands_config.load_commands_dict()
+    hits = []
+    for name, spec in commands.items():
+        if not isinstance(spec, dict):
+            continue
+        desc = str(spec.get("description") or "")
+        blob = f"{name} {desc}".lower()
+        if query and query not in blob:
+            continue
+        hits.append({"name": name, "description": desc[:160]})
+        if len(hits) >= 20:
+            break
+    if not hits:
+        return {"ok": True, "matches": [], "message": "No commands matched."}
+    return {"ok": True, "matches": hits, "count": len(hits)}
+
+
 # Open object — no additionalProperties (Gemini rejects that field).
 _VARS_OBJ = {
     "type": "object",
@@ -261,6 +281,17 @@ _VARS_OBJ = {
 }
 
 COMMAND_TOOL_SCHEMAS = [
+    {
+        "name": "search_commands",
+        "description": "Search saved jarvis commands by name or description. Use before run_command if the name is unclear.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string"},
+            },
+            "required": ["query"],
+        },
+    },
     {
         "name": "run_command",
         "description": (
@@ -353,6 +384,7 @@ COMMAND_TOOL_SCHEMAS = [
 ]
 
 COMMAND_TOOLS = {
+    "search_commands": tool_search_commands,
     "run_command": tool_run_command,
     "run_chain": tool_run_chain,
     "create_command": tool_create_command,

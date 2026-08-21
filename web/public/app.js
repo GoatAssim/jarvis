@@ -112,8 +112,8 @@
     commands: {},          // name -> spec
     selected: null,        // currently selected command name
     sequence: [],          // [{name, flags, label}]
-    running: false,        // true while ANY child process is in flight (a run OR an ask \u2014 the
-                            // server allows only one at a time per connection, see server.js)
+    running: false,        // true while a command/sequence is in flight
+    asking: false,         // true while an Ask Jarvis reply is streaming
     ws: null,
     wsBackoff: 1000,
     editingOriginalName: null, // set when the builder modal is editing an existing command
@@ -124,6 +124,9 @@
     askPrefixStripped: false,// whether we've already tried stripping "Name: " off line 1
     askQuotes: [],           // highlighted excerpts attached to the next ask
     lastTaskLabel: "",       // user request / command name for away notifications
+    muted: localStorage.getItem("jarvis-muted") === "1",
+    askSpokenLen: 0,
+    cmdQuery: "",
   };
 
   // ===========================================================================
@@ -266,10 +269,21 @@
 
   function renderCommandList() {
     const list = qs("#cmd-list");
-    const names = Object.keys(state.commands);
-    if (names.length === 0) {
+    const q = (state.cmdQuery || "").trim().toLowerCase();
+    const names = Object.keys(state.commands).filter((name) => {
+      if (!q) return true;
+      const spec = state.commands[name] || {};
+      const desc = (spec.description || "").toLowerCase();
+      return name.toLowerCase().includes(q) || desc.includes(q);
+    });
+    if (Object.keys(state.commands).length === 0) {
       list.innerHTML = "";
       list.appendChild(el("div", { class: "empty-hint" }, "No commands yet. Build your first one."));
+      return;
+    }
+    if (names.length === 0) {
+      list.innerHTML = "";
+      list.appendChild(el("div", { class: "empty-hint" }, "No commands match that search."));
       return;
     }
     list.innerHTML = "";
@@ -300,6 +314,11 @@
     }
     applyCommandsToUi();
   }
+
+  qs("#cmd-search").addEventListener("input", () => {
+    state.cmdQuery = qs("#cmd-search").value;
+    renderCommandList();
+  });
 
   function applyCommandsToUi() {
     renderCommandList();
@@ -535,17 +554,26 @@
   });
 
   qs("#btn-abort").addEventListener("click", () => {
-    wsSend({ type: "cancel" });
+    wsSend({ type: "cancel", kind: "run" });
   });
+
+  function syncBusyUi() {
+    qs("#btn-execute").disabled = state.running;
+    qs("#btn-seq-run").disabled = state.running;
+    qs("#btn-abort").hidden = !state.running;
+    qs("#btn-ask-send").disabled = state.asking;
+    qs("#btn-ask-stop").hidden = !state.asking;
+    syncMuteButton();
+  }
 
   function setRunning(running) {
     state.running = running;
-    qs("#btn-execute").disabled = running;
-    qs("#btn-seq-run").disabled = running;
-    qs("#btn-abort").hidden = !running;
-    qs("#ask-input").disabled = running;
-    qs("#btn-ask-send").disabled = running;
-    qs("#btn-ask-stop").hidden = !running;
+    syncBusyUi();
+  }
+
+  function setAsking(asking) {
+    state.asking = asking;
+    syncBusyUi();
   }
 
   function connectWs() {
@@ -557,7 +585,9 @@
     ws.addEventListener("close", () => {
       state.ws = null;
       if (state.running) consoleAppend("\u26a0 uplink to server lost mid-run", "exit-bad");
+      if (state.asking) setAskStatus("uplink lost", "error");
       setRunning(false);
+      setAsking(false);
       setTimeout(connectWs, state.wsBackoff);
       state.wsBackoff = Math.min(state.wsBackoff * 1.6, 10000);
     });
@@ -613,9 +643,10 @@
         break;
 
       case "ask-start":
-        setRunning(true);
+        setAsking(true);
         state.askReplyLines = [];
         state.askPrefixStripped = false;
+        state.askSpokenLen = 0;
         state.askPendingBubble = addJarvisBubblePending();
         setAskStatus("thinking\u2026", "busy");
         askPromptBegin();
@@ -627,16 +658,17 @@
         addAskPromptTrace(msg.line);
         break;
       case "ask-exit": {
-        setRunning(false);
+        setAsking(false);
         const raw = state.askReplyLines.length ? state.askReplyLines.join("\n") : "";
         finalizeAskBubble();
+        speakJarvisRemainder(raw);
         askPromptEnd(msg.code, msg.signal);
         setAskStatus(msg.code === 0 ? "online" : "last attempt failed", msg.code === 0 ? "" : "error");
         notifyTaskDone(summarizeText(raw), msg.code !== 0);
         break;
       }
       case "ask-error":
-        setRunning(false);
+        setAsking(false);
         if (state.askPendingBubble) {
           finalizeAskBubble(msg.message);
         } else {
@@ -674,6 +706,127 @@
       return DOMPurify.sanitize(html);
     }
     return html;
+  }
+
+  const MUTE_RE = /\b(mute(?:\s+yourself)?|be quiet|silence(?:\s+yourself)?|stop (?:talking|speaking)|hush|voice off)\b/i;
+  const UNMUTE_RE = /\b(unmute|speak again|you (?:may|can) talk|voice on|unmute yourself)\b/i;
+
+  function speechText(raw) {
+    return String(raw || "")
+      .replace(/```[\s\S]*?```/g, " ")
+      .replace(/`([^`]+)`/g, "$1")
+      .replace(/!\[[^\]]*]\([^)]+\)/g, " ")
+      .replace(/\[([^\]]+)]\([^)]+\)/g, "$1")
+      .replace(/^#{1,6}\s+/gm, "")
+      .replace(/[*_~]+/g, "")
+      .replace(/\s+/g, " ")
+      .trim();
+  }
+
+  function pickJarvisVoice() {
+    const voices = window.speechSynthesis ? window.speechSynthesis.getVoices() : [];
+    const english = voices.filter((v) => {
+      const n = `${v.name} ${v.lang}`.toLowerCase();
+      if (!/^en/i.test(v.lang || "")) return false;
+      if (/fr-|french|fran[cç]ais/.test(n)) return false;
+      return true;
+    });
+    const score = (v) => {
+      const n = `${v.name} ${v.lang}`.toLowerCase();
+      if (/female|woman|hazel|zira|samantha|susan|fable|aria|jenny|salli/.test(n)) return -100;
+      let s = 0;
+      if (/en-gb|en_gb/.test(n)) s += 12;
+      if (/google uk english male|daniel|george/.test(n)) s += 16;
+      if (/male|david|mark|brian|ryan/.test(n)) s += 8;
+      if (/rishi|en-in|india/.test(n)) s -= 12;
+      if (/irish|scottish|australian|en-au/.test(n)) s -= 6;
+      if (v.localService) s += 1;
+      return s;
+    };
+    const ranked = english.slice().sort((a, b) => score(b) - score(a));
+    const best = ranked[0];
+    if (!best || score(best) <= 0) {
+      return english.find((v) => /male/i.test(v.name)) || null;
+    }
+    return best;
+  }
+
+  function speakJarvis(text) {
+    if (state.muted || !text || !window.speechSynthesis) return;
+    const u = new SpeechSynthesisUtterance(text);
+    const voice = pickJarvisVoice();
+    if (voice) u.voice = voice;
+    u.lang = "en-GB";
+    u.rate = 0.94;
+    u.pitch = 0.72;
+    u.volume = 1;
+    window.speechSynthesis.speak(u);
+  }
+
+  function speakJarvisCatchup(full) {
+    if (state.muted) return;
+    const plain = speechText(full);
+    if (plain.length <= state.askSpokenLen) return;
+    const unread = plain.slice(state.askSpokenLen);
+    const parts = unread.split(/(?<=[.!?])\s+/);
+    if (parts.length < 2) return;
+    const ready = parts.slice(0, -1).join(" ").trim();
+    if (!ready) return;
+    speakJarvis(ready);
+    state.askSpokenLen += ready.length;
+    while (plain[state.askSpokenLen] === " ") state.askSpokenLen += 1;
+  }
+
+  function speakJarvisRemainder(full) {
+    if (state.muted) return;
+    const plain = speechText(full);
+    const rest = plain.slice(state.askSpokenLen).trim();
+    if (rest) speakJarvis(rest);
+    state.askSpokenLen = plain.length;
+  }
+
+  function setMuted(muted) {
+    state.muted = !!muted;
+    localStorage.setItem("jarvis-muted", state.muted ? "1" : "0");
+    if (state.muted && window.speechSynthesis) window.speechSynthesis.cancel();
+    syncMuteButton();
+  }
+
+  function syncMuteButton() {
+    const btn = qs("#btn-ask-mute");
+    if (!btn) return;
+    btn.classList.toggle("is-muted", state.muted);
+    btn.textContent = state.muted ? "Unmute" : "Mute";
+    btn.title = state.muted ? "Voice muted" : "Mute Jarvis";
+  }
+
+  function applyVoiceCommand(text) {
+    if (MUTE_RE.test(text)) setMuted(true);
+    else if (UNMUTE_RE.test(text)) {
+      setMuted(false);
+      speakJarvis("Online, sir.");
+    }
+  }
+
+  function bindBubbleHoldCopy(msg) {
+    let timer = null;
+    const start = (e) => {
+      if (e.pointerType === "mouse" && e.button !== 0) return;
+      timer = setTimeout(() => {
+        timer = null;
+        copyAskRaw(msg);
+      }, 480);
+    };
+    const clear = () => {
+      if (timer) {
+        clearTimeout(timer);
+        timer = null;
+      }
+    };
+    msg.addEventListener("pointerdown", start);
+    msg.addEventListener("pointerup", clear);
+    msg.addEventListener("pointerleave", clear);
+    msg.addEventListener("pointercancel", clear);
   }
 
   // ===========================================================================
@@ -741,7 +894,7 @@
   }
 
   function redoAskMessage(msg) {
-    if (state.running) {
+    if (state.asking) {
       toast("Wait for the current reply to finish.");
       return;
     }
@@ -774,6 +927,7 @@
     const msg = el("div", { class: "ask-msg ask-msg--user" }, kids);
     msg.dataset.raw = text || quotes.join("\n\n") || "";
     addAskMsgActions(msg);
+    bindBubbleHoldCopy(msg);
     askThread.appendChild(msg);
     askThreadScrollToEnd();
     return msg;
@@ -911,6 +1065,7 @@
     state.askReplyLines.push(line);
     const bubble = qs(".ask-msg__bubble", state.askPendingBubble);
     bubble.innerHTML = renderMarkdown(state.askReplyLines.join("\n"));
+    speakJarvisCatchup(state.askReplyLines.join("\n"));
     askThreadScrollToEnd();
   }
 
@@ -929,6 +1084,7 @@
         qs(".ask-msg__bubble", bubble).innerHTML = renderMarkdown(raw);
       }
       addAskMsgActions(bubble);
+      bindBubbleHoldCopy(bubble);
     }
     state.askPendingBubble = null;
     state.askReplyLines = [];
@@ -946,12 +1102,18 @@
 
   qs("#btn-ask-jarvis").addEventListener("click", openAsk);
   qs("#ask-close").addEventListener("click", closeAsk);
+  qs("#btn-ask-mute").addEventListener("click", () => setMuted(!state.muted));
+  syncMuteButton();
+  if (window.speechSynthesis) {
+    window.speechSynthesis.onvoiceschanged = () => {};
+    window.speechSynthesis.getVoices();
+  }
   askOverlay.addEventListener("click", (e) => { if (e.target === askOverlay) closeAsk(); });
   document.addEventListener("keydown", (e) => {
     if (e.key === "Escape" && !askOverlay.hidden) closeAsk();
   });
 
-  qs("#btn-ask-stop").addEventListener("click", () => wsSend({ type: "cancel" }));
+  qs("#btn-ask-stop").addEventListener("click", () => wsSend({ type: "cancel", kind: "ask" }));
 
   const askQuoteBar = qs("#ask-quote-bar");
   const askSelPop = qs("#ask-sel-pop");
@@ -1062,11 +1224,12 @@
 
   qs("#ask-form").addEventListener("submit", (e) => {
     e.preventDefault();
-    if (state.running) return;
+    if (state.asking) return;
     const input = qs("#ask-input");
     const text = input.value.trim();
     const quotes = state.askQuotes.slice();
     if (!text && quotes.length === 0) return;
+    applyVoiceCommand(text);
     input.value = "";
     state.askQuotes = [];
     renderQuoteBar();

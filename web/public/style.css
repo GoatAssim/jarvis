@@ -285,6 +285,17 @@ textarea:focus-visible, select:focus-visible, [tabindex]:focus-visible{
   font-weight: 600;
 }
 .panel__head-actions{ display: flex; align-items: center; gap: 8px; }
+.cmd-search{
+  width: 140px;
+  min-width: 90px;
+  padding: 5px 8px;
+  font-size: 12px;
+  background: var(--panel-2, rgba(0,0,0,0.25));
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 2px;
+}
+.cmd-search:focus{ border-color: var(--accent); }
 
 /* =========================================================================
    Buttons
@@ -789,6 +800,7 @@ input.is-invalid{ border-color: var(--red) !important; }
   padding: 3px 8px; border-radius: 2px; cursor: pointer;
 }
 .ask-msg__act:hover{ border-color: var(--accent); color: var(--accent); }
+#btn-ask-mute.is-muted{ color: var(--red); border-color: var(--red); }
 
 /* Markdown inside Jarvis bubbles */
 .ask-msg--jarvis .ask-msg__bubble p{ margin: 0 0 0.7em; }

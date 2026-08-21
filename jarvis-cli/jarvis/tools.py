@@ -31,6 +31,7 @@ from .playnite_tools import PLAYNITE_TOOL_SCHEMAS as _PLAYNITE_CORE_SCHEMAS, PLA
 from .radio_tools import RADIO_TOOL_SCHEMAS, RADIO_TOOLS
 from .screenshot_tools import SCREENSHOT_TOOL_SCHEMAS, SCREENSHOT_TOOLS
 from .spotify_tools import SPOTIFY_TOOL_SCHEMAS, SPOTIFY_TOOLS
+from .notify_tools import NOTIFY_TOOL_SCHEMAS, NOTIFY_TOOLS
 from .web_tools import WEB_TOOL_SCHEMAS, WEB_TOOLS
 
 PLAYNITE_TOOL_SCHEMAS = [*_PLAYNITE_CORE_SCHEMAS, *PLAYNITE_API_TOOL_SCHEMAS]
@@ -271,6 +272,7 @@ CORE_TOOL_SCHEMAS = [
     *RADIO_TOOL_SCHEMAS,
     *GIT_TOOL_SCHEMAS,
     *SCREENSHOT_TOOL_SCHEMAS,
+    *NOTIFY_TOOL_SCHEMAS,
     *WEB_TOOL_SCHEMAS,
     *PKG_TOOL_SCHEMAS,
 ]
@@ -320,23 +322,38 @@ def _compact_json_schema(schema):
     return out
 
 
-def name_only_schemas_for_prompt(schemas):
-    """Advertise tools by name (and a one-line hint) with no argument schema.
+DISPATCHER_NAME = "run_jarvis_tool"
 
-    The model learns parameters on first use: if required args are missing,
-    the executor returns the compact summary instead of running the tool.
-    """
-    stub_params = {"type": "object", "properties": {}}
-    out = []
-    for schema in schemas or []:
-        if not isinstance(schema, dict) or not schema.get("name"):
-            continue
-        out.append({
-            "name": schema.get("name"),
-            "description": _clip_text(schema.get("description") or "", 48),
-            "parameters": stub_params,
-        })
-    return out
+
+def dispatcher_schema_for_prompt(schemas):
+    """One callable tool. The model only sees names until it asks for a schema."""
+    names = [
+        s.get("name")
+        for s in (schemas or [])
+        if isinstance(s, dict) and s.get("name")
+    ]
+    return {
+        "name": DISPATCHER_NAME,
+        "description": (
+            "Run a Jarvis tool by name. First call with only name if you need "
+            "its argument schema; then call again with arguments filled in."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "name": {
+                    "type": "string",
+                    "enum": names,
+                    "description": "Tool to use.",
+                },
+                "arguments": {
+                    "type": "object",
+                    "description": "Arguments for that tool. Omit to receive its schema.",
+                },
+            },
+            "required": ["name"],
+        },
+    }
 
 
 def compact_schemas_for_prompt(schemas):
@@ -403,6 +420,7 @@ TOOLS = {
     **RADIO_TOOLS,
     **GIT_TOOLS,
     **SCREENSHOT_TOOLS,
+    **NOTIFY_TOOLS,
     **WEB_TOOLS,
     **PKG_TOOLS,
     **PLAYNITE_TOOLS,
@@ -420,7 +438,7 @@ def execute_tool(name, arguments=None):
     if fn is None:
         return {"error": f"no such tool: {name}"}
     try:
-        if name in COMMAND_TOOLS or name in PLAYNITE_TOOLS or name in WEB_TOOLS or name in PKG_TOOLS or name in SPOTIFY_TOOLS or name in MEMORY_TOOLS or name in RADIO_TOOLS or name in GIT_TOOLS or name in SCREENSHOT_TOOLS:
+        if name in COMMAND_TOOLS or name in PLAYNITE_TOOLS or name in WEB_TOOLS or name in PKG_TOOLS or name in SPOTIFY_TOOLS or name in MEMORY_TOOLS or name in RADIO_TOOLS or name in GIT_TOOLS or name in SCREENSHOT_TOOLS or name in NOTIFY_TOOLS:
             return fn(arguments or {})
         return fn()
     except Exception as e:
