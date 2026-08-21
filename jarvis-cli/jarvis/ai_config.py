@@ -22,9 +22,11 @@ List provider *names* in the order you want jarvis to try them. Providers
 not named fall back to the order they appear in the "providers" array.
 Leave the list empty (or omit it) to keep using array order only.
 
-Rate-sensitive hosts (Groq by default) can get a leaner system prompt via
-"defaults.compact_prompt_providers" — fewer commands listed, shorter
-descriptions, and less conversation history folded in.
+Rate-sensitive hosts used to get a leaner system prompt via
+"defaults.compact_prompt_providers". Compact prompts are now the default
+for every provider (saves input tokens). Set "compact_prompt": false to
+restore the longer prompt, optionally keeping compact only for names in
+compact_prompt_providers.
 
 Each provider can hold *more than one* key:
 
@@ -79,10 +81,11 @@ DEFAULT_AI_CONFIG = {
             "cohere",
             "ollama",
         ],
+        "compact_prompt": True,
         "compact_prompt_providers": ["groq"],
-        "compact_max_commands": 8,
-        "compact_history_char_budget": 1800,
-        "compact_history_exchanges": 4,
+        "compact_max_commands": 6,
+        "compact_history_char_budget": 1200,
+        "compact_history_exchanges": 3,
     },
     "providers": [
         {

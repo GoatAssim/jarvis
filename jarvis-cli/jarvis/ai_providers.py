@@ -119,16 +119,23 @@ def _call_tool_safely(tool_executor, name, arguments):
         return {"error": f"{name} failed: {e}"}
 
 
+MAX_TOOL_RESULT_CHARS = 4000
+
+
 def _stringify_tool_result(result):
     """Most providers want the tool result as a plain string. Structured
     (dict/list) results get JSON-encoded so the model can still read the
     individual fields precisely rather than a mangled repr()."""
     if isinstance(result, str):
-        return result
-    try:
-        return json.dumps(result)
-    except TypeError:
-        return str(result)
+        text = result
+    else:
+        try:
+            text = json.dumps(result)
+        except TypeError:
+            text = str(result)
+    if len(text) <= MAX_TOOL_RESULT_CHARS:
+        return text
+    return text[: MAX_TOOL_RESULT_CHARS - 14].rstrip() + "…[truncated]"
 
 
 def _decode_arguments(raw_args):

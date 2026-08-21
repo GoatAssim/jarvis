@@ -10,7 +10,7 @@ from html.parser import HTMLParser
 from urllib.parse import urlparse
 
 FETCH_TIMEOUT = 15
-FETCH_MAX_CHARS = 8000
+FETCH_MAX_CHARS = 4000
 SEARCH_MAX = 8
 
 _BLOCKED_HOSTS = {
@@ -225,7 +225,7 @@ WEB_TOOL_SCHEMAS = [
     {
         "name": "web_fetch",
         "description": (
-            "Fetch a public web page and return extracted text (capped at 8k chars). Use after web_search "
+            "Fetch a public web page and return extracted text (capped at 4k chars). Use after web_search "
             "on 1–3 promising URLs so you can summarize with real sources."
         ),
         "parameters": {

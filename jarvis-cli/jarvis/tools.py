@@ -288,6 +288,54 @@ def allowed_tools_from_env():
     return {part.strip() for part in raw.split(",") if part.strip()}
 
 
+_SCHEMA_DESC_MAX = 90
+
+
+def _clip_text(text, limit):
+    text = (text or "").strip()
+    if len(text) <= limit:
+        return text
+    return text[: limit - 1].rstrip() + "…"
+
+
+def _compact_json_schema(schema):
+    """Keep types/enums/required; drop verbose property descriptions."""
+    if not isinstance(schema, dict):
+        return schema
+    out = {}
+    for key in ("type", "enum", "required", "minimum", "maximum", "default"):
+        if key in schema:
+            out[key] = schema[key]
+    items = schema.get("items")
+    if isinstance(items, dict):
+        out["items"] = _compact_json_schema(items)
+    props = schema.get("properties")
+    if isinstance(props, dict):
+        out["properties"] = {name: _compact_json_schema(prop) for name, prop in props.items()}
+    elif "type" not in out and schema:
+        # unknown shape — keep a shallow copy without description
+        return {k: v for k, v in schema.items() if k != "description"}
+    if "type" not in out and "properties" in out:
+        out["type"] = "object"
+    return out
+
+
+def compact_schemas_for_prompt(schemas):
+    """Shorter tool JSON for the model. Full schemas stay in tools-list / KDE."""
+    out = []
+    for schema in schemas or []:
+        if not isinstance(schema, dict):
+            continue
+        item = {
+            "name": schema.get("name"),
+            "description": _clip_text(schema.get("description") or "", _SCHEMA_DESC_MAX),
+        }
+        params = schema.get("parameters")
+        item["parameters"] = _compact_json_schema(params) if isinstance(params, dict) else params
+        out.append(item)
+    return out
+
+
 def tool_schemas_for_session():
     """Playnite tools only when configured. Spotify is always offered so the
     model can search/play or get a login prompt — advertising spotify_* in
