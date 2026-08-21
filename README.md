@@ -24,27 +24,39 @@ Run 'jarvis <command> --help' for a command's options.
 Chain several with 'jarvis cmd1 then cmd2'.
 Edit /home/you/.jarvis/commands.json to add or change commands.
 ```
+## J.A.R.V.I.S – What I Can Do  
+ 
+
+| Category | Capability | How I Invoke It |
+|----------|------------|-----------------|
+| **System Info** | Date/Time, Battery, Wi‑Fi SSID, Location, OS details, Disk & Memory usage | `get_datetime`, `get_battery`, `get_wifi_info`, `get_location`, `get_system_info`, `get_disk_usage`, `get_memory_usage` |
+| **Radio Control** | Query Wi‑Fi/Bluetooth status, turn them **on/off** (off requires confirmation) | `radio_status`, `wifi_set`, `bluetooth_set` |
+| **Git** | `status`, `log`, `pull`, `push`, `add`, `commit`, `branch`, `checkout`, `merge`, … (reset/clean/force‑push/clone need confirmation) | `git_run` (Note: it doesn't invoke direct shell access to run git commands) |
+| **Screenshots** | Capture the desktop and send the image to the UI | `take_screenshot` |
+| **Web** | Search the web, fetch pages, summarize with citations | `web_search`, `web_fetch` |
+| **Package Management** | Detect installed managers, search, view info, list, install, uninstall packages (requires confirmation) | `package_managers`, `package_search`, `package_info`, `package_list`, `package_install`, `package_uninstall` |
+| **Memory (Long‑term)** | Save durable facts, forget, search | `memory_save`, `memory_forget`, `memory_search` |
+| **Spotify** | Open app, view now‑playing, search, play, control (pause/play/skip/volume/etc.), queue, list playlists, get suggestions, like tracks (note: most of these features require Spotify Premium) | `spotify_open`, `spotify_now`, `spotify_search`, `spotify_play`, `spotify_control`, `spotify_queue`, `spotify_playlists`, `spotify_suggest`, `spotify_like` |
+| **Playnite (Game Library)** | Query library, find specific games, list frequent titles, view stats, launch games or specific actions, install/uninstall, manage tags/categories, fetch missing artwork, get achievements/activity, create collections, control UI, send notifications, run C# snippets   | `playnite_query_games`, `playnite_find_game`, `playnite_list_frequent`, `playnite_library_stats`, `playnite_launch_game`, `playnite_launch_action`, `playnite_list_game_actions`, `playnite_install_game`, `playnite_uninstall_game`, `playnite_manage_game_lists`, `playnite_fetch_game_art`, `playnite_list_missing_art`, `playnite_get_achievements`, `playnite_get_activity`, `playnite_create_collection`, `playnite_view`, `playnite_notify`, `playnite_eval` (Note: Any tool that involves play actions will not work on a normal Playnite installation this is the [Normal Playnite](https://github.com/JosefNemec/Playnite) and this is [my fork](https://github.com/GoatAssim/Playnite), and all of these tools REQUIRE Playnite bridge this is the [normal Playnite Bridge](https://github.com/rollacode/playnite-bridge) and this is [my fork](https://github.com/GoatAssim/playnite-bridge).) |
+| **Custom Commands** | Run saved Jarvis commands, chain multiple commands, create or update commands | `run_command`, `run_chain`, `create_command`, `update_command` |
+| **KDE Connect** | There is my KDE Connect fork ([desktop](https://github.com/GoatAssim/kdeconnect-kde) and [android](https://github.com/GoatAssim/kdeconnect-android)) It allows you to access the Jarvis interface using a more polished UI. You can also access it wirelessly(check [Tailscale](https://github.com/tailscale/tailscale)) using a mobile device | No tools |
 
 ## In this repo
 
-| | |
+| Directory | Function |
 |---|---|
 | [`jarvis-cli/`](jarvis-cli) | The CLI itself — a Python package (`pip install .`) that reads `~/.jarvis/commands.json` and runs whatever's in it. Start here; this is the whole tool. **→ [jarvis-cli/README.md](jarvis-cli/README.md)** for the full config format, multi-step commands, conditions, and chaining. |
 | [`web/`](web) | A local web console for the CLI above — run, chain, and edit commands from the browser instead of the terminal, including a full raw-config editor. Optional; the CLI works completely on its own. **→ [web/README.md](web/README.md)** for setup and the API/WebSocket reference. |
-| `jarvis.exe` | A prebuilt Windows executable, if you'd rather not run `pip install .` yourself. **Predates the AI features below** — rebuild it (e.g. `pyinstaller`) if you want those in the `.exe` too; the source in `jarvis-cli/` is what's current. |
+
 
 ## Fastest path to trying it
-
 ```bash
-# 1. Install the CLI
-cd jarvis-cli
-pip install .
-jarvis                       # should print the banner above
-
-# 2. (optional) Start the web console for it
-cd ../web
-npm install
-npm start                    # open http://127.0.0.1:4173
+python -m ensurepip --default-pip && for /f "tokens=*" %i in ('python -c "import os, sys; print(os.path.join(sys.prefix, 'Scripts'))"') do setx PATH "%PATH%;%i" 
+``` 
+Run this if pip isn't already installed or if it's showing that it doesn't recognize pip.
+```bash
+cd C:/Your/jarvis/Path/Jarvis
+script.bat 
 ```
 
 Both talk to the exact same `~/.jarvis/commands.json` — edit it from
@@ -112,14 +124,5 @@ $ jarvis "how's my battery"
 J.A.R.V.I.S: 74% and not plugged in, sir — you've got a while yet.
 ```
 
-It still can't run your own jarvis commands, or build new ones for you
-from a request like this — that's next (see [PROGRESS.md](PROGRESS.md)).
-Until then it says so honestly rather than pretend it did something it
-didn't — the system prompt keeps that line explicit so "I can check your
-battery" and "I can run your commands" never get confused for each
-other.
-[![GitHub stars](https://img.shields.io/github/stars/GoatAssim/jarvis?style=flat)](https://github.com/GoatAssim/jarvis)
-## License
 
-Not specified. Add one here (e.g. MIT) if you plan to share or publish
-this.
+[![GitHub stars](https://img.shields.io/github/stars/GoatAssim/jarvis?style=flat)](https://github.com/GoatAssim/jarvis)
