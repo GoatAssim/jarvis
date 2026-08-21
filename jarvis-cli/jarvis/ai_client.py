@@ -23,8 +23,10 @@ DEFAULT_TOOLS_ENABLED = True
 MAX_COMMANDS_LISTED = 12  # cap how many command names+descriptions go into every prompt
 COMPACT_MAX_COMMANDS = 6
 COMPACT_DESC_MAX_LEN = 50
-COMPACT_HISTORY_CHAR_BUDGET = 1200
-COMPACT_HISTORY_EXCHANGES = 3
+COMPACT_HISTORY_CHAR_BUDGET = 4800
+COMPACT_HISTORY_EXCHANGES = 10
+COMPACT_RECAP_EXCHANGES = 16
+COMPACT_RECAP_CHAR_BUDGET = 1400
 DEFAULT_COMPACT_PROMPT = True
 DEFAULT_COMPACT_PROMPT_PROVIDERS = ("groq",)
 
@@ -132,6 +134,16 @@ def _commands_context(commands, max_listed=MAX_COMMANDS_LISTED, desc_max_len=Non
     return "Saved commands:\n" + listing
 
 
+def _history_int(defaults, keys, floor, fallback):
+    """Prefer explicit history_* knobs. Ignore leftover compact_history_*
+    values from older configs that were too small to keep a conversation."""
+    for key in keys:
+        value = defaults.get(key)
+        if isinstance(value, int) and value >= floor:
+            return value
+    return fallback
+
+
 def _prompt_profile(provider_name, defaults):
     """Return prompt-size knobs for a provider.
 
@@ -148,11 +160,29 @@ def _prompt_profile(provider_name, defaults):
         return {
             "max_commands": defaults.get("compact_max_commands", COMPACT_MAX_COMMANDS),
             "desc_max_len": COMPACT_DESC_MAX_LEN,
-            "history_char_budget": defaults.get(
-                "compact_history_char_budget", COMPACT_HISTORY_CHAR_BUDGET
+            "history_char_budget": _history_int(
+                defaults,
+                ("history_char_budget", "compact_history_char_budget"),
+                2000,
+                COMPACT_HISTORY_CHAR_BUDGET,
             ),
-            "history_exchanges": defaults.get(
-                "compact_history_exchanges", COMPACT_HISTORY_EXCHANGES
+            "history_exchanges": _history_int(
+                defaults,
+                ("history_exchanges", "compact_history_exchanges"),
+                8,
+                COMPACT_HISTORY_EXCHANGES,
+            ),
+            "recap_exchanges": _history_int(
+                defaults,
+                ("recap_exchanges", "compact_recap_exchanges"),
+                8,
+                COMPACT_RECAP_EXCHANGES,
+            ),
+            "recap_budget": _history_int(
+                defaults,
+                ("recap_char_budget", "compact_recap_char_budget"),
+                800,
+                COMPACT_RECAP_CHAR_BUDGET,
             ),
             "include_freq": False,
             "compact_tools_blurb": True,
@@ -161,8 +191,10 @@ def _prompt_profile(provider_name, defaults):
     return {
         "max_commands": MAX_COMMANDS_LISTED,
         "desc_max_len": COMPACT_DESC_MAX_LEN * 2,
-        "history_char_budget": defaults.get("history_char_budget", 2500),
-        "history_exchanges": defaults.get("history_exchanges", 6),
+        "history_char_budget": defaults.get("history_char_budget", 6000),
+        "history_exchanges": defaults.get("history_exchanges", 12),
+        "recap_exchanges": defaults.get("recap_exchanges", 20),
+        "recap_budget": defaults.get("recap_char_budget", 1800),
         "include_freq": True,
         "compact_tools_blurb": False,
         "compact_persona": False,
@@ -174,10 +206,13 @@ def _tools_blurb(compact, has_playnite, has_spotify):
     Groq 400s if the prompt names a tool that isn't in request.tools."""
     if compact:
         parts = [
-            "Use only tools in the tool list. Confirm before install/delete/off/eval. "
+            "Tools are listed by name only. Call one when you need it. "
+            "If it needs arguments you don't know, call it with no arguments — "
+            "you will get its schema, then call it again. "
+            "Confirm before install/delete/off/eval. "
             "Screenshots: take_screenshot (image is for the user, not you). "
             "Web: web_search then web_fetch. Install: package_search, ask, then "
-            "package_install confirm=true. Durable facts: memory_save (no passwords)."
+            "package_install confirm=true."
         ]
         if has_spotify:
             parts.append(
@@ -290,9 +325,11 @@ def _build_messages(persona, commands, user_text, tools_enabled, profile):
         compact=compact,
     )
     freq_ctx = stats.frequent_commands_context(commands) if profile["include_freq"] else ""
-    prior_turns = history.recent_messages(
+    prior_turns = history.conversation_messages(
         max_exchanges=profile["history_exchanges"],
         char_budget=profile["history_char_budget"],
+        recap_exchanges=profile.get("recap_exchanges"),
+        recap_budget=profile.get("recap_budget"),
     )
     compact_persona = profile.get("compact_persona", False)
     prior_user = [
@@ -333,25 +370,63 @@ def _cache_key(name, arguments):
     return f"{name}:{args_s}"
 
 
-def _make_tool_executor(on_tool_call):
+def _schema_required(schema):
+    params = (schema or {}).get("parameters") or {}
+    required = params.get("required") or []
+    return [k for k in required if isinstance(k, str)]
+
+
+def _missing_required(schema, arguments):
+    arguments = arguments or {}
+    missing = []
+    for key in _schema_required(schema):
+        value = arguments.get(key)
+        if value is None or value == "":
+            missing.append(key)
+    return missing
+
+
+def _make_tool_executor(on_tool_call, schemas=None):
     """Shared across every provider/key in one ask() so a failover never
     re-runs the same command, Playnite action, or web fetch. Cache hits
-    still return the original result (no second launch / install / HTTP)."""
+    still return the original result (no second launch / install / HTTP).
+
+    First call with missing required args returns the compact schema
+    instead of running the tool (lazy tool summaries).
+    """
     cache = {}
     runs = []
+    by_name = {
+        s.get("name"): s
+        for s in (schemas or [])
+        if isinstance(s, dict) and s.get("name")
+    }
 
     def _executor(name, arguments):
         arguments = arguments or {}
         key = _cache_key(name, arguments)
         if key in cache:
             return cache[key]
+        schema = by_name.get(name)
+        if schema is not None:
+            missing = _missing_required(schema, arguments)
+            if missing:
+                compact = system_tools.compact_schemas_for_prompt([schema])
+                result = {
+                    "need_args": True,
+                    "missing": missing,
+                    "schema": compact[0] if compact else {"name": name},
+                    "hint": "Call this tool again with the parameters in schema.",
+                }
+                cache[key] = result
+                runs.append({"name": name, "arguments": arguments, "result": result})
+                return result
         if on_tool_call:
             try:
                 on_tool_call(name, arguments)
             except TypeError:
                 on_tool_call(name)
         result = system_tools.execute_tool(name, arguments)
-        # Never feed screenshot pixels / huge blobs back into the model.
         if name == "take_screenshot" and isinstance(result, dict):
             result = {
                 k: result[k]
@@ -491,11 +566,11 @@ def ask(user_text, commands=None, on_attempt=None, on_tool_call=None):
 
     tools_enabled = cfg["defaults"].get("tools_enabled", DEFAULT_TOOLS_ENABLED)
     tool_schemas = None
+    full_schemas = []
     if tools_enabled:
-        tool_schemas = system_tools.compact_schemas_for_prompt(
-            system_tools.tool_schemas_for_session()
-        )
-    tool_executor = _make_tool_executor(on_tool_call) if tools_enabled else None
+        full_schemas = system_tools.tool_schemas_for_session()
+        tool_schemas = system_tools.name_only_schemas_for_prompt(full_schemas)
+    tool_executor = _make_tool_executor(on_tool_call, full_schemas) if tools_enabled else None
 
     attempts = []
 
