@@ -381,6 +381,18 @@ app.post("/api/ai/clear", requireJarvis, async (req, res) => {
   res.json({ ok: true, message: result.stdout });
 });
 
+app.get("/api/tools", requireJarvis, async (req, res) => {
+  const result = await runJarvisOnce(["tools-list"], 15000);
+  if (!result.ok) {
+    return res.status(500).json({ error: result.error || result.stderr || "Couldn't list tools." });
+  }
+  try {
+    res.json(JSON.parse(result.stdout));
+  } catch (e) {
+    res.status(500).json({ error: `Couldn't parse tools-list: ${e.message}` });
+  }
+});
+
 // `jarvis ai-config` prints (and creates, if missing) the path to
 // ai_config.json \u2014 same trick runJarvisOnce already uses for `ai-clear`,
 // reused here instead of guessing the path ourselves, so this server never
@@ -688,13 +700,18 @@ const MAX_ASK_LENGTH = 4000;
 // either way, since an AI ask *is* just `jarvis "<free text>"` under the
 // hood (see jarvis-cli/jarvis/cli.py: handle_ai_prompt). Only one of
 // either kind runs at a time per connection, tracked via ws.activeChild.
-function spawnAndStream(ws, kind, fullArgs, types) {
+function spawnAndStream(ws, kind, fullArgs, types, extraEnv = {}) {
   let child;
   try {
     child = spawn(JARVIS.cmd, fullArgs, {
       windowsHide: true,
       detached: process.platform !== "win32",
-      env: { ...process.env, PYTHONUNBUFFERED: "1", PYTHONIOENCODING: "utf-8" },
+      env: {
+        ...process.env,
+        PYTHONUNBUFFERED: "1",
+        PYTHONIOENCODING: "utf-8",
+        ...extraEnv,
+      },
     });
   } catch (e) {
     send(ws, { type: types.error, message: `Couldn't start jarvis: ${e.message}` });
@@ -821,7 +838,11 @@ wss.on("connection", (ws) => {
       // it contains, with no injection risk.
       const fullArgs = [...JARVIS.args, prompt];
       send(ws, { type: "ask-start", cmdline: [JARVIS.cmd, ...JARVIS.args, "<your message>"].join(" ") });
-      spawnAndStream(ws, "ask", fullArgs, ASK_TYPES);
+      const extraEnv = {};
+      if (typeof msg.allowedTools === "string") {
+        extraEnv.JARVIS_ALLOWED_TOOLS = msg.allowedTools;
+      }
+      spawnAndStream(ws, "ask", fullArgs, ASK_TYPES, extraEnv);
       return;
     }
   });

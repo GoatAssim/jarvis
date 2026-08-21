@@ -36,7 +36,7 @@ import json
 
 import requests
 
-MAX_TOOL_ROUNDS = 4  # follow-up requests allowed after a tool call, per ask — plenty for simple lookups
+MAX_TOOL_ROUNDS = 10  # follow-up requests allowed after a tool call, per ask — plenty for simple lookups
 
 
 class AIResult:
