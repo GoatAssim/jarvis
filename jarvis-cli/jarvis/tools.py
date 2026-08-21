@@ -320,6 +320,25 @@ def _compact_json_schema(schema):
     return out
 
 
+def name_only_schemas_for_prompt(schemas):
+    """Advertise tools by name (and a one-line hint) with no argument schema.
+
+    The model learns parameters on first use: if required args are missing,
+    the executor returns the compact summary instead of running the tool.
+    """
+    stub_params = {"type": "object", "properties": {}}
+    out = []
+    for schema in schemas or []:
+        if not isinstance(schema, dict) or not schema.get("name"):
+            continue
+        out.append({
+            "name": schema.get("name"),
+            "description": _clip_text(schema.get("description") or "", 48),
+            "parameters": stub_params,
+        })
+    return out
+
+
 def compact_schemas_for_prompt(schemas):
     """Shorter tool JSON for the model. Full schemas stay in tools-list / KDE."""
     out = []
