@@ -177,7 +177,7 @@ def cache_get_game(game_id):
     return games.get(game_id)
 
 
-def frequent_games_context(max_games=None):
+def frequent_games_context(max_games=None, compact=False):
     """One-line-per-game hint for the system prompt (ids + actions, no library query)."""
     if not is_configured():
         return ""
@@ -191,6 +191,11 @@ def frequent_games_context(max_games=None):
         games.values(),
         key=lambda g: (-int(g.get("use_count", 0)), g.get("last_used", "")),
     )[:limit]
+    if compact:
+        names = [g.get("name") for g in ranked if g.get("name")]
+        if not names:
+            return ""
+        return "Playnite frequent: " + ", ".join(names)
     lines = [
         "Playnite frequent games (game_id + action ids — use playnite_launch_action):"
     ]

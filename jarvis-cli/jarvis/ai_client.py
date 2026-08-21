@@ -20,11 +20,12 @@ DEFAULT_ASSISTANT_NAME = "J.A.R.V.I.S"
 DEFAULT_ADDRESS = "sir"
 DEFAULT_TOOLS_ENABLED = True
 
-MAX_COMMANDS_LISTED = 30  # cap how many command names+descriptions go into every prompt
-COMPACT_MAX_COMMANDS = 8
-COMPACT_DESC_MAX_LEN = 60
-COMPACT_HISTORY_CHAR_BUDGET = 1800
-COMPACT_HISTORY_EXCHANGES = 4
+MAX_COMMANDS_LISTED = 12  # cap how many command names+descriptions go into every prompt
+COMPACT_MAX_COMMANDS = 6
+COMPACT_DESC_MAX_LEN = 50
+COMPACT_HISTORY_CHAR_BUDGET = 1200
+COMPACT_HISTORY_EXCHANGES = 3
+DEFAULT_COMPACT_PROMPT = True
 DEFAULT_COMPACT_PROMPT_PROVIDERS = ("groq",)
 
 
@@ -132,12 +133,18 @@ def _commands_context(commands, max_listed=MAX_COMMANDS_LISTED, desc_max_len=Non
 
 
 def _prompt_profile(provider_name, defaults):
-    """Return prompt-size knobs for a provider. Compact profiles trim context
-    for rate-sensitive hosts (Groq by default)."""
+    """Return prompt-size knobs for a provider.
+
+    Compact is the default for every provider (saves input tokens). Set
+    defaults.compact_prompt to false to restore the longer prompt, optionally
+    keeping it only for names in compact_prompt_providers.
+    """
+    compact_all = defaults.get("compact_prompt", DEFAULT_COMPACT_PROMPT)
     compact_names = defaults.get("compact_prompt_providers")
     if compact_names is None:
         compact_names = list(DEFAULT_COMPACT_PROMPT_PROVIDERS)
-    if provider_name in compact_names:
+    use_compact = bool(compact_all) or provider_name in compact_names
+    if use_compact:
         return {
             "max_commands": defaults.get("compact_max_commands", COMPACT_MAX_COMMANDS),
             "desc_max_len": COMPACT_DESC_MAX_LEN,
@@ -153,9 +160,9 @@ def _prompt_profile(provider_name, defaults):
         }
     return {
         "max_commands": MAX_COMMANDS_LISTED,
-        "desc_max_len": None,
-        "history_char_budget": None,
-        "history_exchanges": None,
+        "desc_max_len": COMPACT_DESC_MAX_LEN * 2,
+        "history_char_budget": defaults.get("history_char_budget", 2500),
+        "history_exchanges": defaults.get("history_exchanges", 6),
         "include_freq": True,
         "compact_tools_blurb": False,
         "compact_persona": False,
@@ -167,27 +174,19 @@ def _tools_blurb(compact, has_playnite, has_spotify):
     Groq 400s if the prompt names a tool that isn't in request.tools."""
     if compact:
         parts = [
-            "Tools: commands; system info (get_*); wifi_set/bluetooth_set/radio_status; git_run; "
-            "take_screenshot; web_search/web_fetch; packages "
-            "(winget/choco/scoop/pip/pipx/npm); memory_*. "
-            "ONLY call tools in your tool list — never invent names. "
-            "Wi-Fi/BT off needs confirm=true. git_run allowlisted only (status/log/pull/commit/…). "
-            "Screenshot: take_screenshot — image goes to the user UI, not to you; confirm briefly. "
-            "For 'best X'/news: web_search then web_fetch. "
-            "Install: package_search then ASK then package_install confirm=true. "
-            "MEMORY: matching facts are injected; else memory_search. "
-            "memory_save for durable facts; no passwords."
+            "Use only tools in the tool list. Confirm before install/delete/off/eval. "
+            "Screenshots: take_screenshot (image is for the user, not you). "
+            "Web: web_search then web_fetch. Install: package_search, ask, then "
+            "package_install confirm=true. Durable facts: memory_save (no passwords)."
         ]
         if has_spotify:
             parts.append(
-                "Spotify: NEVER run_command. Open: spotify_open. Play: spotify_search then spotify_play "
-                "(desktop app; Free may need a click to play). Pause/skip: spotify_control."
+                "Spotify: spotify_search then spotify_play; never run_command."
             )
         if has_playnite:
             parts.append(
-                "Playnite: query_games WITH filters; find_game is name lookup. "
-                "Play a title: playnite_launch_game (Playnite Play, including Steam/Epic library action). "
-                "Named extras: list then launch_action. Never claim launched unless playnite_launch_* succeeded."
+                "Playnite: find_game or query_games, then playnite_launch_game. "
+                "Don't claim launch unless that tool succeeded."
             )
         return " ".join(parts)
 
@@ -268,7 +267,8 @@ def _system_prompt(persona, commands_ctx, freq_ctx, tools_enabled,
     if memory_ctx:
         parts.append(memory_ctx)
     playnite_ctx = playnite_config.frequent_games_context(
-        8 if compact_persona else None
+        5 if compact_persona else 8,
+        compact=compact_persona,
     )
     if playnite_ctx:
         parts.append(playnite_ctx)
@@ -490,7 +490,11 @@ def ask(user_text, commands=None, on_attempt=None, on_tool_call=None):
         return AskResult(False, assistant_name=assistant_name, address_user_as=address)
 
     tools_enabled = cfg["defaults"].get("tools_enabled", DEFAULT_TOOLS_ENABLED)
-    tool_schemas = system_tools.tool_schemas_for_session() if tools_enabled else None
+    tool_schemas = None
+    if tools_enabled:
+        tool_schemas = system_tools.compact_schemas_for_prompt(
+            system_tools.tool_schemas_for_session()
+        )
     tool_executor = _make_tool_executor(on_tool_call) if tools_enabled else None
 
     attempts = []
@@ -514,7 +518,7 @@ def ask(user_text, commands=None, on_attempt=None, on_tool_call=None):
             )
             runs = getattr(tool_executor, "runs", None) if tool_executor else None
             if runs:
-                budget = 2500 if profile.get("compact_tools_blurb") else 8000
+                budget = 1600 if profile.get("compact_tools_blurb") else 3500
                 note = _tool_runs_note(runs, budget)
                 if note:
                     messages.append({"role": "user", "content": note})

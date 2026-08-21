@@ -20,8 +20,8 @@ HISTORY_FILE = JARVIS_DIR / "conversation_history.json"
 ENCODING = "utf-8"
 
 MAX_STORED_EXCHANGES = 40      # how many exchanges live on disk
-CONTEXT_EXCHANGES = 10         # how many prior turns to send as real chat messages
-CONTEXT_CHAR_BUDGET = 5000     # rough cap on prior-turn text (full providers)
+CONTEXT_EXCHANGES = 6          # how many prior turns to send as real chat messages
+CONTEXT_CHAR_BUDGET = 2500     # rough cap on prior-turn text (full providers)
 
 
 def _load():
