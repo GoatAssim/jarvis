@@ -693,14 +693,17 @@ function makeLineBuffer(onLine) {
 
 const MAX_ASK_LENGTH = 4000;
 
-// Spawns `jarvis <fullArgs>` and streams its output back over the socket,
-// under a caller-chosen set of message type names. Used for both real
-// command runs ("run" -> start/stdout/stderr/exit) and AI asks ("ask" ->
-// ask-start/ask-stdout/ask-stderr/ask-exit) \u2014 same child-process plumbing
-// either way, since an AI ask *is* just `jarvis "<free text>"` under the
-// hood (see jarvis-cli/jarvis/cli.py: handle_ai_prompt). Only one of
-// either kind runs at a time per connection, tracked via ws.activeChild.
 function spawnAndStream(ws, kind, fullArgs, types, extraEnv = {}) {
+  const slot = kind === "ask" ? "askChild" : "runChild";
+  if (ws[slot]) {
+    send(ws, {
+      type: types.error,
+      message: kind === "ask"
+        ? "Already asking Jarvis."
+        : "A command is already running.",
+    });
+    return;
+  }
   let child;
   try {
     child = spawn(JARVIS.cmd, fullArgs, {
@@ -717,8 +720,7 @@ function spawnAndStream(ws, kind, fullArgs, types, extraEnv = {}) {
     send(ws, { type: types.error, message: `Couldn't start jarvis: ${e.message}` });
     return;
   }
-  ws.activeChild = child;
-  ws.activeKind = kind;
+  ws[slot] = child;
 
   const onOut = makeLineBuffer((line) => send(ws, { type: types.stdout, line }));
   const onErr = makeLineBuffer((line) => send(ws, { type: types.stderr, line }));
@@ -732,18 +734,26 @@ function spawnAndStream(ws, kind, fullArgs, types, extraEnv = {}) {
   child.on("exit", (code, signal) => {
     onOut.flush();
     onErr.flush();
-    ws.activeChild = null;
-    ws.activeKind = null;
+    if (ws[slot] === child) ws[slot] = null;
     send(ws, { type: types.exit, code: signal ? null : code, signal: signal || null });
   });
+}
+
+function cancelSlot(ws, kind) {
+  const slot = kind === "ask" ? "askChild" : "runChild";
+  const child = ws[slot];
+  if (!child) return false;
+  send(ws, { type: kind === "ask" ? "ask-stderr" : "stderr", line: "(abort requested)" });
+  killTree(child);
+  return true;
 }
 
 const RUN_TYPES = { stdout: "stdout", stderr: "stderr", exit: "exit", error: "error" };
 const ASK_TYPES = { stdout: "ask-stdout", stderr: "ask-stderr", exit: "ask-exit", error: "ask-error" };
 
 wss.on("connection", (ws) => {
-  ws.activeChild = null;
-  ws.activeKind = null; // "run" | "ask", while something is in flight
+  ws.runChild = null;
+  ws.askChild = null;
 
   if (JARVIS) {
     readConfig()
@@ -760,9 +770,12 @@ wss.on("connection", (ws) => {
     }
 
     if (msg.type === "cancel") {
-      if (ws.activeChild) {
-        send(ws, { type: ws.activeKind === "ask" ? "ask-stderr" : "stderr", line: "(abort requested)" });
-        killTree(ws.activeChild);
+      const kind = msg.kind === "ask" || msg.kind === "run" ? msg.kind : null;
+      if (kind) {
+        cancelSlot(ws, kind);
+      } else {
+        cancelSlot(ws, "run");
+        cancelSlot(ws, "ask");
       }
       return;
     }
@@ -771,7 +784,7 @@ wss.on("connection", (ws) => {
       if (!JARVIS) {
         return send(ws, { type: "error", message: "jarvis CLI is not connected." });
       }
-      if (ws.activeChild) {
+      if (ws.runChild) {
         return send(ws, { type: "error", message: "A command is already running." });
       }
       const segments = Array.isArray(msg.segments) ? msg.segments : [];
@@ -799,8 +812,8 @@ wss.on("connection", (ws) => {
       if (!JARVIS) {
         return send(ws, { type: "ask-error", message: "jarvis CLI is not connected." });
       }
-      if (ws.activeChild) {
-        return send(ws, { type: "ask-error", message: "Something's already running \u2014 wait for it to finish." });
+      if (ws.askChild) {
+        return send(ws, { type: "ask-error", message: "Already asking Jarvis." });
       }
       const text = typeof msg.text === "string" ? msg.text.trim() : "";
       const quote = typeof msg.quote === "string" ? msg.quote.replace(/\0/g, "").trim() : "";
@@ -810,18 +823,19 @@ wss.on("connection", (ws) => {
       if (text.length > MAX_ASK_LENGTH) {
         return send(ws, { type: "ask-error", message: `Keep it under ${MAX_ASK_LENGTH} characters.` });
       }
-      if (text && /[\r\n\0]/.test(text)) {
-        return send(ws, { type: "ask-error", message: "Ask can't contain newlines." });
+      const promptText = text.replace(/[\r\n\0]+/g, " ").replace(/\s+/g, " ").trim();
+      if (!promptText && !quote) {
+        return send(ws, { type: "ask-error", message: "Nothing to ask." });
       }
 
-      let prompt = text;
+      let prompt = promptText;
       if (quote) {
         const clipped = quote.slice(0, 4000);
         prompt = (
           "The user highlighted this excerpt from the conversation and wants you to address it specifically:\n" +
           '"""\n' + clipped + "\n" +
           '"""\n\n' +
-          (text || "Please respond about the quoted excerpt.")
+          (promptText || "Please respond about the quoted excerpt.")
         );
       }
       if (prompt.length > MAX_ASK_LENGTH + 4500) {
@@ -829,7 +843,7 @@ wss.on("connection", (ws) => {
       }
 
       if (msg.redo) {
-        await runJarvisOnce(["ai-drop-from", text]);
+        await runJarvisOnce(["ai-drop-from", promptText]);
       }
 
       // A single argv element, exactly like typing `jarvis "<text>"` at a
@@ -848,7 +862,8 @@ wss.on("connection", (ws) => {
   });
 
   ws.on("close", () => {
-    if (ws.activeChild) killTree(ws.activeChild);
+    if (ws.runChild) killTree(ws.runChild);
+    if (ws.askChild) killTree(ws.askChild);
   });
 });
 

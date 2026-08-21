@@ -202,27 +202,17 @@ def _prompt_profile(provider_name, defaults):
 
 
 def _tools_blurb(compact, has_playnite, has_spotify):
-    """Only advertise tools that are actually in this session's schema.
-    Groq 400s if the prompt names a tool that isn't in request.tools."""
+    """Instructions for the single run_jarvis_tool dispatcher."""
     if compact:
         parts = [
-            "Tools are listed by name only. Call one when you need it. "
-            "If it needs arguments you don't know, call it with no arguments — "
-            "you will get its schema, then call it again. "
-            "Confirm before install/delete/off/eval. "
-            "Screenshots: take_screenshot (image is for the user, not you). "
-            "Web: web_search then web_fetch. Install: package_search, ask, then "
-            "package_install confirm=true."
+            "Use run_jarvis_tool. Pass name from its enum. "
+            "If you don't know the arguments, call with name only — you get the schema, then call again. "
+            "Confirm before install/delete/off/eval. Never claim an action unless the tool result says it happened."
         ]
         if has_spotify:
-            parts.append(
-                "Spotify: spotify_search then spotify_play; never run_command."
-            )
+            parts.append("Music: spotify_search then spotify_play via run_jarvis_tool.")
         if has_playnite:
-            parts.append(
-                "Playnite: find_game or query_games, then playnite_launch_game. "
-                "Don't claim launch unless that tool succeeded."
-            )
+            parts.append("Games: playnite_find_game or playnite_query_games, then playnite_launch_game.")
         return " ".join(parts)
 
     parts = [
@@ -402,25 +392,33 @@ def _make_tool_executor(on_tool_call, schemas=None):
         if isinstance(s, dict) and s.get("name")
     }
 
-    def _executor(name, arguments):
+    def _run_named(name, arguments):
         arguments = arguments or {}
+        if not isinstance(arguments, dict):
+            try:
+                arguments = json.loads(arguments) if isinstance(arguments, str) else {}
+            except (json.JSONDecodeError, TypeError):
+                arguments = {}
         key = _cache_key(name, arguments)
         if key in cache:
             return cache[key]
         schema = by_name.get(name)
-        if schema is not None:
-            missing = _missing_required(schema, arguments)
-            if missing:
-                compact = system_tools.compact_schemas_for_prompt([schema])
-                result = {
-                    "need_args": True,
-                    "missing": missing,
-                    "schema": compact[0] if compact else {"name": name},
-                    "hint": "Call this tool again with the parameters in schema.",
-                }
-                cache[key] = result
-                runs.append({"name": name, "arguments": arguments, "result": result})
-                return result
+        if schema is None:
+            result = {"error": f"unknown tool: {name}"}
+            cache[key] = result
+            return result
+        missing = _missing_required(schema, arguments)
+        if missing:
+            compact = system_tools.compact_schemas_for_prompt([schema])
+            result = {
+                "need_args": True,
+                "missing": missing,
+                "schema": compact[0] if compact else {"name": name},
+                "hint": "Call run_jarvis_tool again with name and these arguments.",
+            }
+            cache[key] = result
+            runs.append({"name": name, "arguments": arguments, "result": result})
+            return result
         if on_tool_call:
             try:
                 on_tool_call(name, arguments)
@@ -436,6 +434,16 @@ def _make_tool_executor(on_tool_call, schemas=None):
         cache[key] = result
         runs.append({"name": name, "arguments": arguments, "result": result})
         return result
+
+    def _executor(name, arguments):
+        arguments = arguments or {}
+        if name == system_tools.DISPATCHER_NAME:
+            inner = (arguments.get("name") or arguments.get("tool") or "").strip()
+            inner_args = arguments.get("arguments")
+            if inner_args is None:
+                inner_args = {}
+            return _run_named(inner, inner_args)
+        return _run_named(name, arguments)
 
     _executor.runs = runs
     return _executor
@@ -569,7 +577,7 @@ def ask(user_text, commands=None, on_attempt=None, on_tool_call=None):
     full_schemas = []
     if tools_enabled:
         full_schemas = system_tools.tool_schemas_for_session()
-        tool_schemas = system_tools.name_only_schemas_for_prompt(full_schemas)
+        tool_schemas = [system_tools.dispatcher_schema_for_prompt(full_schemas)]
     tool_executor = _make_tool_executor(on_tool_call, full_schemas) if tools_enabled else None
 
     attempts = []
