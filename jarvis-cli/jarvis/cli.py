@@ -465,6 +465,7 @@ def handle_ai_prompt(text, commands):
 
     def on_tool_call(name, arguments=None):
         labels = {
+            "search_commands": "searching commands",
             "run_command": "running command",
             "run_chain": "running chain",
             "create_command": "creating command",

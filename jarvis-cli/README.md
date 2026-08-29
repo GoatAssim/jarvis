@@ -456,6 +456,13 @@ is what stands in for a long-running conversation, giving it real
 continuity between separate calls. `jarvis ai-clear` wipes that memory
 and starts fresh.
 
+That commands list in the prompt is capped (12 commands normally, 6 in
+the token-saving "compact" mode some providers use) so it doesn't eat
+your whole context window on every call. Past that cap, Jarvis doesn't
+guess at a name it can't see — it calls `search_commands` (keyword, or
+no query for the full list) to look up the rest of `commands.json`
+before running anything.
+
 **It can't run your commands yet, and says so.** Jarvis is told what
 commands you have but isn't given any way to actually trigger one, and
 is explicitly instructed to be honest about that rather than invent a

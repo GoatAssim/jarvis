@@ -115,7 +115,8 @@ def _format_var_summary(spec):
 def _commands_context(commands, max_listed=MAX_COMMANDS_LISTED, desc_max_len=None, compact=False):
     if not commands:
         return ""
-    names = list(commands.items())[:max_listed]
+    all_names = list(commands.items())
+    names = all_names[:max_listed]
     lines = []
     for name, spec in names:
         if not isinstance(spec, dict):
@@ -129,9 +130,15 @@ def _commands_context(commands, max_listed=MAX_COMMANDS_LISTED, desc_max_len=Non
         else:
             lines.append(f"- {name}: {desc}")
     listing = "\n".join(lines)
-    if compact:
-        return "Commands:\n" + listing
-    return "Saved commands:\n" + listing
+    header = "Commands:\n" if compact else "Saved commands:\n"
+    ctx = header + listing
+    remaining = len(all_names) - len(names)
+    if remaining > 0:
+        ctx += (
+            f"\n…and {remaining} more not shown here. If the command the user means "
+            "isn't in this list, call search_commands instead of guessing a name."
+        )
+    return ctx
 
 
 def _history_int(defaults, keys, floor, fallback):
@@ -210,6 +217,9 @@ def _tools_blurb(compact, has_playnite, has_spotify):
             "If it needs arguments you don't know, call it with no arguments — "
             "you will get its schema, then call it again. "
             "Confirm before install/delete/off/eval. "
+            "COMMANDS: only some are listed above — if you're not sure of the exact "
+            "saved command name, call search_commands (with a keyword, or no query "
+            "for the full list) before run_command/run_chain. Never guess a name. "
             "Screenshots: take_screenshot (image is for the user, not you). "
             "Web: web_search then web_fetch. Install: package_search, ask, then "
             "package_install confirm=true."
@@ -230,6 +240,10 @@ def _tools_blurb(compact, has_playnite, has_spotify):
         "take_screenshot; web_search + web_fetch; packages "
         "(package_* for winget, choco, scoop, pip, pipx, npm); memory_*. "
         "ONLY call tools that appear in your tool list. Never invent a tool name. "
+        "COMMANDS: the 'Saved commands' list above is only a partial preview. Before "
+        "run_command or run_chain, if you aren't certain of the exact saved command "
+        "name, call search_commands first — pass a keyword, or no query to list every "
+        "saved command. Do this instead of guessing a name and hoping it resolves. "
         "RADIOS: wifi_set/bluetooth_set action on|off. Off requires confirm=true (may need Admin). "
         "GIT: git_run with an allowlisted command (status, log, diff, add, commit, pull, push, …). "
         "reset/clean/force-push/clone need confirm=true. Not a shell. "

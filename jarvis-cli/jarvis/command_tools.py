@@ -39,7 +39,10 @@ def _resolve_command(commands, name):
         }
     return None, {
         "needs_clarification": True,
-        "message": f"No command named '{name}'.",
+        "message": (
+            f"No command named '{name}'. Call search_commands with a keyword "
+            "(or no query, to list everything) instead of guessing another name."
+        ),
         "available": sorted(commands.keys())[:12],
     }
 
@@ -184,6 +187,89 @@ def tool_run_chain(args):
     return {"ok": True, "exit_code": 0, "results": all_results}
 
 
+_SEARCH_RESULTS_CAP = 15
+_LIST_ALL_CAP = 40
+
+
+def _command_summary(name, spec):
+    if not isinstance(spec, dict):
+        spec = {}
+    summary = {
+        "name": name,
+        "description": spec.get("description", ""),
+    }
+    var_part = _format_var_summary_for_search(spec)
+    if var_part:
+        summary["vars"] = var_part
+    return summary
+
+
+def _format_var_summary_for_search(spec):
+    parts = []
+    for var_name, var_spec in (spec.get("vars") or {}).items():
+        if not isinstance(var_spec, dict):
+            continue
+        if "default" in var_spec:
+            parts.append(f"{var_name}={var_spec['default']}")
+        else:
+            parts.append(f"{var_name}*")
+    return ", ".join(parts)
+
+
+def tool_search_commands(args):
+    """Search (or list) the user's FULL saved command set — not just the
+    handful the system prompt shows up front. Exists so the AI looks up an
+    unfamiliar command instead of guessing a name at run_command/run_chain."""
+    commands = commands_config.load_commands_dict()
+    if not commands:
+        return {"matches": [], "total_commands": 0, "message": "No commands are saved yet."}
+
+    query = (args or {}).get("query")
+    query = query.strip() if isinstance(query, str) else ""
+
+    if not query:
+        names = sorted(commands.keys())
+        truncated = len(names) > _LIST_ALL_CAP
+        names = names[:_LIST_ALL_CAP]
+        result = {
+            "matches": [_command_summary(n, commands[n]) for n in names],
+            "total_commands": len(commands),
+        }
+        if truncated:
+            result["message"] = (
+                f"Showing {len(names)} of {len(commands)} commands — pass a query to narrow it down."
+            )
+        return result
+
+    lower = query.lower()
+    name_exact, name_hits, desc_hits = [], [], []
+    for name, spec in commands.items():
+        spec = spec if isinstance(spec, dict) else {}
+        name_l = name.lower()
+        desc_l = (spec.get("description") or "").lower()
+        if name_l == lower:
+            name_exact.append(name)
+        elif lower in name_l:
+            name_hits.append(name)
+        elif lower in desc_l:
+            desc_hits.append(name)
+
+    ordered = name_exact + sorted(name_hits) + sorted(desc_hits)
+    if not ordered:
+        return {
+            "matches": [],
+            "total_commands": len(commands),
+            "message": f"No commands matched '{query}'. Try a broader keyword, or call with no query to list all.",
+        }
+
+    truncated = len(ordered) > _SEARCH_RESULTS_CAP
+    ordered = ordered[:_SEARCH_RESULTS_CAP]
+    result = {"matches": [_command_summary(n, commands[n]) for n in ordered]}
+    if truncated:
+        result["message"] = "More matches exist — narrow the query for a shorter list."
+    return result
+
+
 def tool_create_command(args):
     args = args or {}
     name = args.get("name")
@@ -261,6 +347,26 @@ _VARS_OBJ = {
 }
 
 COMMAND_TOOL_SCHEMAS = [
+    {
+        "name": "search_commands",
+        "description": (
+            "Search or list the user's saved commands by name/description keyword. "
+            "The system prompt only shows a handful of commands up front — call this "
+            "FIRST whenever the command the user means isn't clearly one of those, or "
+            "you're not 100% sure of the exact name, instead of guessing at run_command. "
+            "Omit query to list everything."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": "Keyword to match against command names and descriptions. Omit to list all.",
+                },
+            },
+            "required": [],
+        },
+    },
     {
         "name": "run_command",
         "description": (
@@ -353,6 +459,7 @@ COMMAND_TOOL_SCHEMAS = [
 ]
 
 COMMAND_TOOLS = {
+    "search_commands": tool_search_commands,
     "run_command": tool_run_command,
     "run_chain": tool_run_chain,
     "create_command": tool_create_command,
