@@ -120,8 +120,9 @@
 
     // Ask Jarvis \u2014 state for the turn currently streaming in, if any.
     askPendingBubble: null,  // the DOM node for Jarvis's in-progress reply bubble
-    askReplyLines: [],       // accumulated (post prefix-strip) lines of that reply
+    askReplyLines: [],       // accumulated (post prefix-strip) lines of that reply, raw (untriaged)
     askPrefixStripped: false,// whether we've already tried stripping "Name: " off line 1
+    askTraceBubble: null,    // the DOM node for the current turn's console-dump bubble, if any
     askQuotes: [],           // highlighted excerpts attached to the next ask
     lastTaskLabel: "",       // user request / command name for away notifications
   };
@@ -671,6 +672,7 @@
         setRunning(true);
         state.askReplyLines = [];
         state.askPrefixStripped = false;
+        state.askTraceBubble = null;
         state.askPendingBubble = addJarvisBubblePending();
         setAskStatus("thinking\u2026", "busy");
         askPromptBegin();
@@ -953,6 +955,48 @@
   // leading "Name: " off (and adopt Name as the role label, so a renamed
   // persona in ai_config.json is reflected automatically) instead of
   // showing it twice.
+  // Some providers (mainly weaker/local ones, or a mid-stream fallback) don't
+  // always route tool calls through the real function-calling API and instead
+  // have the model echo its own tool-call/tool-result scaffolding as plain
+  // text \u2014 e.g. a line like "[called run_command with {...}]" or
+  // "[tool result ...]" (see ai_client.py's _TOOL_TRACE_LINE). If the whole
+  // reply were that, ai_client.py already treats it as a failed attempt and
+  // retries \u2014 but a *partial* echo (real prose plus a few of these lines)
+  // sails through as-is and used to get dumped straight into the same bubble
+  // as Jarvis's actual answer. Split those lines out so the raw console dump
+  // renders as its own bubble, with Jarvis's real reply following after it.
+  const INLINE_TOOL_TRACE_LINE = /^\[(called\s|tool result\b)/i;
+
+  function extractInlineToolTrace(lines) {
+    const trace = [];
+    const reply = [];
+    for (const line of lines) {
+      if (INLINE_TOOL_TRACE_LINE.test(String(line).trim())) trace.push(String(line).trim());
+      else reply.push(line);
+    }
+    return { trace, reply };
+  }
+
+  function ensureAskTraceBubble() {
+    if (state.askTraceBubble) return state.askTraceBubble;
+    const msg = el("div", { class: "ask-msg ask-msg--jarvis ask-msg--console" }, [
+      el("div", { class: "ask-msg__role" }, "Console"),
+      el("div", { class: "ask-msg__bubble ask-msg__bubble--console" }),
+    ]);
+    if (state.askPendingBubble) askThread.insertBefore(msg, state.askPendingBubble);
+    else askThread.appendChild(msg);
+    state.askTraceBubble = msg;
+    return msg;
+  }
+
+  function renderAskTrace(traceLines) {
+    if (!traceLines.length) return;
+    const msg = ensureAskTraceBubble();
+    qs(".ask-msg__bubble", msg).textContent = traceLines.join("\n");
+    msg.dataset.raw = traceLines.join("\n");
+    askThreadScrollToEnd();
+  }
+
   function appendAskReplyLine(line) {
     if (!state.askPendingBubble) return;
     if (!state.askPrefixStripped) {
@@ -964,8 +1008,10 @@
       }
     }
     state.askReplyLines.push(line);
+    const { trace, reply } = extractInlineToolTrace(state.askReplyLines);
+    renderAskTrace(trace);
     const bubble = qs(".ask-msg__bubble", state.askPendingBubble);
-    bubble.innerHTML = renderMarkdown(state.askReplyLines.join("\n"));
+    bubble.innerHTML = renderMarkdown(reply.join("\n"));
     askThreadScrollToEnd();
   }
 
@@ -973,20 +1019,27 @@
     const bubble = state.askPendingBubble;
     if (bubble) {
       bubble.classList.remove("is-pending");
-      const raw = state.askReplyLines.length
-        ? state.askReplyLines.join("\n")
-        : (overrideMessage || "(no response)");
-      bubble.dataset.raw = raw;
       if (state.askReplyLines.length === 0) {
+        const raw = overrideMessage || "(no response)";
+        bubble.dataset.raw = raw;
         bubble.classList.add("is-error");
         qs(".ask-msg__bubble", bubble).textContent = raw;
       } else {
+        const { trace, reply } = extractInlineToolTrace(state.askReplyLines);
+        renderAskTrace(trace);
+        // If the model's entire "reply" somehow turned out to be trace lines,
+        // fall back to showing everything rather than leaving the bubble blank.
+        const replyLines = reply.length ? reply : state.askReplyLines;
+        const raw = replyLines.join("\n");
+        bubble.dataset.raw = raw;
         qs(".ask-msg__bubble", bubble).innerHTML = renderMarkdown(raw);
       }
       addAskMsgActions(bubble);
     }
+    if (state.askTraceBubble) addAskMsgActions(state.askTraceBubble);
     state.askPendingBubble = null;
     state.askReplyLines = [];
+    state.askTraceBubble = null;
     askThreadScrollToEnd();
   }
 

@@ -815,6 +815,15 @@ input.is-invalid{ border-color: var(--red) !important; }
 .ask-msg--jarvis.is-error .ask-msg__bubble{ border-left-color: var(--red); color: var(--text-dim); }
 
 .ask-msg__bubble--media{ padding: 8px; max-width: min(420px, 92vw); }
+
+/* Raw tool-call/tool-result echo, split out of the reply into its own
+   bubble so it reads as a console dump rather than part of Jarvis's answer. */
+.ask-msg--console .ask-msg__role{ color: var(--text-dimmer); }
+.ask-msg__bubble--console{
+  font-family: var(--font-mono); font-size: 12px; line-height: 1.5;
+  white-space: pre-wrap; color: var(--text-dim);
+  background: var(--bg-raised); border-left-color: var(--border-strong);
+}
 .ask-shot-link{ display: block; line-height: 0; }
 .ask-shot{
   display: block; width: 100%; height: auto; max-height: 320px; object-fit: contain;
