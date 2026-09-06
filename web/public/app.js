@@ -264,6 +264,43 @@
     return spec.run.some((s) => typeof s === "object" && (s.if != null || s.unless != null));
   }
 
+  // Default flag values for a quick run/queue straight from the list card
+  // (no var-form on screen yet) — only vars with a default get filled in.
+  function defaultFlagsFor(spec) {
+    const flags = {};
+    for (const [vname, vspec] of Object.entries(spec.vars || {})) {
+      if (vspec && typeof vspec === "object" && "default" in vspec) flags[vname] = vspec.default;
+    }
+    return flags;
+  }
+  function hasRequiredVars(spec) {
+    return Object.values(spec.vars || {}).some((v) => !(v && typeof v === "object" && "default" in v));
+  }
+
+  const ICON_RUN = '<svg viewBox="0 0 24 24" width="11" height="11" aria-hidden="true"><path d="M6 4l14 8-14 8V4z" fill="currentColor"/></svg>';
+  const ICON_ADD = '<svg viewBox="0 0 24 24" width="11" height="11" aria-hidden="true"><path d="M11 5h2v6h6v2h-6v6h-2v-6H5v-2h6V5z" fill="currentColor"/></svg>';
+
+  function quickRunCommand(name) {
+    const spec = state.commands[name];
+    if (!spec) return;
+    if (hasRequiredVars(spec)) {
+      selectCommand(name);
+      toast(`"${name}" needs input \u2014 fill in the required fields, then Execute.`, "info");
+      return;
+    }
+    runSegments([{ name, flags: defaultFlagsFor(spec) }]);
+  }
+
+  function quickQueueCommand(name) {
+    const spec = state.commands[name];
+    if (!spec) return;
+    const flags = defaultFlagsFor(spec);
+    const bits = Object.entries(flags).map(([k, v]) => `--${k} ${v}`).join(" ");
+    state.sequence.push({ name, flags, label: bits ? `${name} ${bits}` : name, mode: "then" });
+    renderSequenceBar();
+    toast(`Added "${name}" to sequence.`, "info");
+  }
+
   function renderCommandList() {
     const list = qs("#cmd-list");
     const names = Object.keys(state.commands);
@@ -279,6 +316,24 @@
         class: "cmd-card" + (name === state.selected ? " is-active" : ""),
         onclick: () => selectCommand(name),
       }, [
+        el("div", { class: "cmd-card__quick" }, [
+          el("button", {
+            type: "button",
+            class: "cmd-card__quick-btn cmd-card__quick-btn--run",
+            title: `Run "${name}"`,
+            "aria-label": `Run ${name}`,
+            html: ICON_RUN,
+            onclick: (e) => { e.stopPropagation(); quickRunCommand(name); },
+          }),
+          el("button", {
+            type: "button",
+            class: "cmd-card__quick-btn cmd-card__quick-btn--add",
+            title: `Add "${name}" to sequence`,
+            "aria-label": `Add ${name} to sequence`,
+            html: ICON_ADD,
+            onclick: (e) => { e.stopPropagation(); quickQueueCommand(name); },
+          }),
+        ]),
         el("div", { class: "cmd-card__name" }, name),
         el("div", { class: "cmd-card__desc" }, spec.description || ""),
         el("div", { class: "cmd-card__meta" }, [
