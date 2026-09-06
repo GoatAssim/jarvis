@@ -583,7 +583,15 @@ def ask(user_text, commands=None, on_attempt=None, on_tool_call=None):
     full_schemas = []
     if tools_enabled:
         full_schemas = system_tools.tool_schemas_for_session()
-        tool_schemas = system_tools.name_only_schemas_for_prompt(full_schemas)
+        # Real (description-stripped) argument schemas, not name-only stubs.
+        # jarvis is a brand-new process every "jarvis ..." call (see history.py's
+        # module docstring) — there's no running session for a model to "learn" a
+        # tool's shape in, so the old name-only-then-relearn-on-first-use trade
+        # was paying a full extra tool round-trip (i.e. resending the *entire*
+        # prompt again) on essentially every argument-taking tool, every single
+        # invocation. A few hundred extra bytes of schema up front is far
+        # cheaper than that guaranteed second round trip.
+        tool_schemas = system_tools.compact_schemas_for_prompt(full_schemas)
     tool_executor = _make_tool_executor(on_tool_call, full_schemas) if tools_enabled else None
 
     attempts = []

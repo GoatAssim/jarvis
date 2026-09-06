@@ -36,7 +36,11 @@ import json
 
 import requests
 
-MAX_TOOL_ROUNDS = 10  # follow-up requests allowed after a tool call, per ask — plenty for simple lookups
+MAX_TOOL_ROUNDS = 5  # follow-up requests allowed after a tool call, per ask — plenty for simple
+# lookups. Every round resends the *whole* growing transcript (system prompt, history, every
+# tool call/result so far), so this is the single biggest token-cost lever in this file: raising
+# it doesn't add tokens linearly, it adds them roughly quadratically (round N resends rounds
+# 1..N-1 too). 5 still covers a two-step "search then fetch then answer" with room to spare.
 
 
 class AIResult:
@@ -355,7 +359,10 @@ def call_openai_compatible(provider, messages, timeout, tools=None, tool_executo
             "messages": working_messages,
             "max_tokens": provider.get("max_tokens", 700),
         }
-        if tools_payload:
+        if tools_payload and round_num < MAX_TOOL_ROUNDS:
+            # On the forced-final round any tool_calls the model returns get
+            # ignored anyway (see the round_num < MAX_TOOL_ROUNDS gate below),
+            # so advertising tools there just burns input tokens for nothing.
             payload["tools"] = tools_payload
         extra = provider.get("extra_params")
         if isinstance(extra, dict):
@@ -483,7 +490,7 @@ def call_anthropic(provider, messages, timeout, tools=None, tool_executor=None):
         }
         if system_text:
             payload["system"] = system_text
-        if tools_payload:
+        if tools_payload and round_num < MAX_TOOL_ROUNDS:
             payload["tools"] = tools_payload
 
         resp, net_err = _post_json(base_url, headers, payload, timeout)
@@ -631,7 +638,7 @@ def call_gemini(provider, messages, timeout, tools=None, tool_executor=None):
         }
         if system_text:
             payload["systemInstruction"] = {"parts": [{"text": system_text}]}
-        if tools_payload:
+        if tools_payload and round_num < MAX_TOOL_ROUNDS:
             payload["tools"] = tools_payload
 
         resp, net_err = _post_json(url, headers, payload, timeout)
@@ -720,7 +727,7 @@ def call_cohere(provider, messages, timeout, tools=None, tool_executor=None):
             "messages": working_messages,
             "max_tokens": provider.get("max_tokens", 700),
         }
-        if tools_payload:
+        if tools_payload and round_num < MAX_TOOL_ROUNDS:
             payload["tools"] = tools_payload
 
         resp, net_err = _post_json(base_url, headers, payload, timeout)
@@ -796,7 +803,7 @@ def call_ollama(provider, messages, timeout, tools=None, tool_executor=None):
 
     for round_num in range(MAX_TOOL_ROUNDS + 1):
         payload = {"model": model, "messages": working_messages, "stream": False}
-        if tools_payload:
+        if tools_payload and round_num < MAX_TOOL_ROUNDS:
             payload["tools"] = tools_payload
 
         resp, net_err = _post_json(base_url, headers, payload, timeout)
