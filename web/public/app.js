@@ -125,6 +125,7 @@
     askTraceBubble: null,    // the DOM node for the current turn's console-dump bubble, if any
     askQuotes: [],           // highlighted excerpts attached to the next ask
     lastTaskLabel: "",       // user request / command name for away notifications
+    cmdSearch: "",           // current text in the command-list search field
   };
 
   // ===========================================================================
@@ -302,15 +303,27 @@
     toast(`Added "${name}" to sequence.`, "info");
   }
 
+  function commandMatchesSearch(name, spec, query) {
+    if (!query) return true;
+    const haystack = `${name} ${spec.description || ""}`.toLowerCase();
+    return haystack.includes(query);
+  }
+
   function renderCommandList() {
     const list = qs("#cmd-list");
-    const names = Object.keys(state.commands);
-    if (names.length === 0) {
+    const allNames = Object.keys(state.commands);
+    if (allNames.length === 0) {
       list.innerHTML = "";
       list.appendChild(el("div", { class: "empty-hint" }, "No commands yet. Build your first one."));
       return;
     }
+    const query = state.cmdSearch.trim().toLowerCase();
+    const names = allNames.filter((name) => commandMatchesSearch(name, state.commands[name], query));
     list.innerHTML = "";
+    if (names.length === 0) {
+      list.appendChild(el("div", { class: "empty-hint" }, `No commands match \u201c${state.cmdSearch.trim()}\u201d.`));
+      return;
+    }
     for (const name of names) {
       const spec = state.commands[name];
       const card = el("div", {
@@ -1232,6 +1245,11 @@
   }
 
   function closeBuilder() { backdrop.hidden = true; }
+
+  qs("#cmd-search").addEventListener("input", (e) => {
+    state.cmdSearch = e.target.value;
+    renderCommandList();
+  });
 
   qs("#btn-new-command").addEventListener("click", () => openBuilder("new"));
   qs("#modal-close").addEventListener("click", closeBuilder);
