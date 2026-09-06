@@ -16,3 +16,4 @@ builds/
 jarvis-cli v2/
 web v1/
 jarvis.exe
+*.patch
