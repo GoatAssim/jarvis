@@ -2,6 +2,7 @@
 
 import argparse
 import json
+import re
 import subprocess
 import sys
 import threading
@@ -282,6 +283,43 @@ def _group_into_batches(steps):
     return batches
 
 
+# A saved command's "run" text can be an arbitrary shell/PowerShell/script
+# snippet, and those are full of braces that have nothing to do with a
+# jarvis {var} — a PowerShell script block (Where-Object { $_.Foo -like
+# 'x' }), a regex quantifier ({2,4}), a printf/.NET format placeholder
+# ({0}), a JSON literal, etc. str.format(**values) parses *every* '{...}'
+# as a field, so any of those raised a spurious "uses variable ... that
+# isn't defined" error (or, for something like {0}, an uncaught IndexError)
+# even though nothing in the command was ever meant to be a jarvis
+# variable. Only a bare {name} — letters/digits/_/- and nothing else
+# between the braces — is a plausible jarvis variable reference; anything
+# else inside braces is left exactly as written.
+_RUN_TEMPLATE_TOKEN = re.compile(r"\{\{|\}\}|\{[A-Za-z_][A-Za-z0-9_-]*\}")
+
+
+def _format_run_template(template, values):
+    """Substitute {var} placeholders from a command's declared 'vars' —
+    without treating every stray brace in the underlying command as one.
+
+    {{ and }} still collapse to a literal brace (matches str.format's
+    escaping, for anyone already relying on it). A bare {name} that isn't
+    one of `values` still raises KeyError(name), same as before, so a
+    genuine typo'd/undefined jarvis variable is still caught.
+    """
+    def _sub(match):
+        token = match.group(0)
+        if token == "{{":
+            return "{"
+        if token == "}}":
+            return "}"
+        name = token[1:-1]
+        if name in values:
+            return str(values[name])
+        raise KeyError(name)
+
+    return _RUN_TEMPLATE_TOKEN.sub(_sub, template)
+
+
 def _run_batch(name, batch, values, known_vars):
     """Run one batch of steps \u2014 concurrently if there's more than one.
 
@@ -311,7 +349,7 @@ def _run_batch(name, batch, values, known_vars):
             continue
 
         try:
-            cmd = step["run"].format(**values)
+            cmd = _format_run_template(step["run"], values)
         except KeyError as e:
             print(f"{ERR.RED}'{name}' uses variable {e} that isn't defined in its 'vars'.{ERR.RESET}", file=sys.stderr)
             return False, 1, True
