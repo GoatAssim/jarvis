@@ -26,7 +26,7 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PORT = Number(process.env.PORT) || 4173;
 const HOST = "127.0.0.1";
 
-const RESERVED_NAMES = new Set(["config", "ai-config", "ai-clear", "ai-drop-from", "playnite-config", "spotify-config", "spotify-login", "memory-config", "tools-list", "then", "and", "-h", "--help"]);
+const RESERVED_NAMES = new Set(["config", "ai-config", "ai-clear", "ai-drop-from", "playnite-config", "spotify-config", "spotify-login", "memory-config", "tools-list", "tool-run", "then", "and", "-h", "--help"]);
 
 // ---------------------------------------------------------------------------
 // Locate the real jarvis binary. Tries a few invocation strategies, in
@@ -391,6 +391,35 @@ app.get("/api/tools", requireJarvis, async (req, res) => {
   } catch (e) {
     res.status(500).json({ error: `Couldn't parse tools-list: ${e.message}` });
   }
+});
+
+// Debug dashboard: run one AI tool directly (bypassing the model) and
+// return exactly what it returns. `jarvis tool-run` takes argv directly
+// (spawn, no shell) so the JSON-stringified arguments never need escaping.
+app.post("/api/tools/run", requireJarvis, async (req, res) => {
+  const name = typeof req.body?.name === "string" ? req.body.name.trim() : "";
+  if (!name) {
+    return res.status(400).json({ error: "Missing tool name." });
+  }
+  let argsJson;
+  try {
+    argsJson = JSON.stringify(req.body?.arguments && typeof req.body.arguments === "object" ? req.body.arguments : {});
+  } catch (e) {
+    return res.status(400).json({ error: `Couldn't serialize arguments: ${e.message}` });
+  }
+  const result = await runJarvisOnce(["tool-run", name, argsJson], 30000);
+  // `jarvis tool-run` always prints a JSON object to stdout, even on its
+  // own validation errors (bad JSON args, missing name), just with a
+  // non-zero exit code in those cases — so try parsing stdout first no
+  // matter what the exit code was, and only fall back to a generic error.
+  let parsed;
+  try {
+    parsed = JSON.parse(result.stdout);
+  } catch { /* not JSON — fall through */ }
+  if (parsed !== undefined) {
+    return res.json({ ok: result.ok, result: parsed, raw: result.stdout, stderr: result.stderr });
+  }
+  res.status(500).json({ error: result.error || result.stderr || "Tool run failed.", raw: result.stdout, stderr: result.stderr });
 });
 
 // `jarvis ai-config` prints (and creates, if missing) the path to
