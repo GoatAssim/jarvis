@@ -294,6 +294,21 @@ textarea:focus-visible, select:focus-visible, [tabindex]:focus-visible{
 }
 .panel__head-actions{ display: flex; align-items: center; gap: 8px; }
 
+.panel__search{
+  position: relative;
+  flex-shrink: 0;
+  padding: 10px 16px;
+  border-bottom: 1px solid var(--border);
+}
+.panel__search-icon{
+  position: absolute; left: 28px; top: 50%; transform: translateY(-50%);
+  width: 13px; height: 13px; color: var(--text-dimmer); pointer-events: none;
+}
+.panel__search-input{
+  padding-left: 32px !important;
+}
+.panel__search-input::-webkit-search-cancel-button{ filter: grayscale(1); opacity: 0.6; }
+
 /* =========================================================================
    Buttons
    ========================================================================= */
@@ -481,7 +496,7 @@ input[type="text"], input[type="search"], textarea, select{
   font-size: 13.5px;
   width: 100%;
 }
-input[type="text"]:focus, textarea:focus, select:focus{ border-color: var(--accent); }
+input[type="text"]:focus, input[type="search"]:focus, textarea:focus, select:focus{ border-color: var(--accent); }
 input.is-invalid{ border-color: var(--red) !important; }
 
 .steps-preview{ list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 8px; }
