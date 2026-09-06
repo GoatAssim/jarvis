@@ -125,6 +125,15 @@
     askQuotes: [],           // highlighted excerpts attached to the next ask
     lastTaskLabel: "",       // user request / command name for away notifications
     cmdSearch: "",           // current text in the command-list search field
+
+    // Debug dashboard \u2014 tool catalog is read live from /api/tools, never hardcoded.
+    debugTools: [],          // [{name, description, parameters}] as returned by the CLI
+    debugLoaded: false,
+    debugSelected: null,     // name of the currently selected tool
+    debugSearch: "",
+    debugResponseMode: "organized", // "organized" | "raw"
+    debugLastResult: null,   // last {ok, result, raw, stderr, error} from /api/tools/run
+    debugLastResultError: false,
   };
 
   // ===========================================================================
@@ -164,6 +173,8 @@
     putSpotifyRaw: (text) => api("PUT", "/api/spotify/raw", { text }),
     getMemoryRaw: () => api("GET", "/api/memory/raw"),
     putMemoryRaw: (text) => api("PUT", "/api/memory/raw", { text }),
+    listTools: () => api("GET", "/api/tools"),
+    runTool: (name, arguments_) => api("POST", "/api/tools/run", { name, arguments: arguments_ }),
   };
 
   // ===========================================================================
@@ -1232,6 +1243,374 @@
     askThread.appendChild(el("div", { class: "ask-empty" }, "Ask about anything, or tell me what you need done, sir."));
     askPromptReset();
     toast("Conversation cleared.", "info");
+  });
+
+  // ===========================================================================
+  // Debug dashboard \u2014 every tool Jarvis can call, read live via /api/tools
+  // (never hardcoded), with a form to run any of them and see the response.
+  // ===========================================================================
+
+  const debugOverlay = qs("#debug-overlay");
+  const debugStatusLine = qs("#debug-status-line");
+  const debugDocs = qs("#debug-docs");
+  const debugArgs = qs("#debug-args");
+  const debugResponse = qs("#debug-response");
+  const debugToolList = qs("#debug-tool-list");
+  const debugToolCount = qs("#debug-tool-count");
+  const btnDebugRun = qs("#btn-debug-run");
+
+  function debugFindTool(name) {
+    return state.debugTools.find((t) => t.name === name) || null;
+  }
+
+  function debugFilteredTools() {
+    const q = state.debugSearch.trim().toLowerCase();
+    if (!q) return state.debugTools;
+    return state.debugTools.filter((t) =>
+      t.name.toLowerCase().includes(q) || (t.description || "").toLowerCase().includes(q)
+    );
+  }
+
+  // Human-readable type label for a JSON-schema property, e.g. "string",
+  // "array<string>", "enum".
+  function debugParamTypeLabel(prop) {
+    if (!prop || typeof prop !== "object") return "any";
+    if (Array.isArray(prop.enum)) return "enum";
+    if (prop.type === "array") {
+      const items = prop.items && prop.items.type ? prop.items.type : "any";
+      return `array<${items}>`;
+    }
+    return prop.type || "any";
+  }
+
+  function debugParamEntries(schema) {
+    const props = (schema && schema.properties) || {};
+    const required = new Set((schema && schema.required) || []);
+    return Object.entries(props).map(([name, prop]) => ({
+      name,
+      prop: prop || {},
+      required: required.has(name),
+    }));
+  }
+
+  // ---- LEFT pane: description + parameter docs -----------------------------
+
+  function renderDebugDocs(tool) {
+    debugDocs.innerHTML = "";
+    if (!tool) {
+      debugDocs.appendChild(el("div", { class: "debug-empty" }, "Select a tool from the list on the right."));
+      return;
+    }
+    debugDocs.appendChild(el("div", { class: "debug-docs__name" }, tool.name));
+    debugDocs.appendChild(el("div", { class: "debug-docs__desc" },
+      tool.description || "No description provided by this tool."));
+
+    const entries = debugParamEntries(tool.parameters);
+    if (!entries.length) {
+      debugDocs.appendChild(el("div", { class: "debug-docs__section-title" }, "Parameters"));
+      debugDocs.appendChild(el("div", { class: "debug-empty" }, "This tool takes no arguments."));
+      return;
+    }
+    debugDocs.appendChild(el("div", { class: "debug-docs__section-title" }, "Parameters"));
+    for (const { name, prop, required } of entries) {
+      const head = el("div", { class: "debug-param-doc__name" }, [
+        name,
+        el("span", { class: "debug-param-doc__type" }, debugParamTypeLabel(prop)),
+        required ? el("span", { class: "debug-param-doc__req" }, "required") : null,
+      ]);
+      const doc = el("div", { class: "debug-param-doc" }, [head]);
+      if (prop.description) {
+        doc.appendChild(el("div", { class: "debug-param-doc__desc" }, prop.description));
+      }
+      if (Array.isArray(prop.enum)) {
+        doc.appendChild(el("div", { class: "debug-param-doc__enum" }, `one of: ${prop.enum.join(", ")}`));
+      }
+      debugDocs.appendChild(doc);
+    }
+  }
+
+  // ---- MIDDLE pane: argument form -------------------------------------------
+
+  // Builds one labeled input appropriate to the property's JSON-schema type.
+  // Returns the input/textarea/select element so the run handler can read it.
+  function debugBuildArgInput(name, prop, required) {
+    const type = prop && prop.type;
+
+    if (Array.isArray(prop && prop.enum)) {
+      const select = el("select", { "data-arg": name });
+      if (!required) select.appendChild(el("option", { value: "" }, "(omit)"));
+      for (const v of prop.enum) select.appendChild(el("option", { value: v }, String(v)));
+      if (prop.default !== undefined) select.value = String(prop.default);
+      return select;
+    }
+    if (type === "boolean") {
+      const wrap = el("label", { class: "check" });
+      const input = el("input", { type: "checkbox", "data-arg": name, "data-argtype": "boolean" });
+      if (prop.default === true) input.checked = true;
+      wrap.appendChild(input);
+      wrap.appendChild(document.createTextNode(" true"));
+      wrap.__debugInput = input; // caller reads .__debugInput when the field itself is a <label>
+      return wrap;
+    }
+    if (type === "number" || type === "integer") {
+      const input = el("input", {
+        type: "number", "data-arg": name, "data-argtype": type,
+        placeholder: prop.default !== undefined ? String(prop.default) : "",
+      });
+      if (prop.minimum !== undefined) input.min = prop.minimum;
+      if (prop.maximum !== undefined) input.max = prop.maximum;
+      return input;
+    }
+    if (type === "array" || type === "object") {
+      const input = el("textarea", {
+        "data-arg": name, "data-argtype": type,
+        placeholder: type === "array" ? "[\"item1\", \"item2\"]" : "{\"key\": \"value\"}",
+      });
+      return input;
+    }
+    // string, or unknown \u2014 default to a plain text input
+    const input = el("input", {
+      type: "text", "data-arg": name, "data-argtype": "string",
+      placeholder: prop && prop.default !== undefined ? String(prop.default) : "",
+    });
+    return input;
+  }
+
+  function renderDebugArgs(tool) {
+    debugArgs.innerHTML = "";
+    if (!tool) {
+      debugArgs.appendChild(el("div", { class: "debug-empty" }, "Nothing selected yet."));
+      btnDebugRun.disabled = true;
+      return;
+    }
+    btnDebugRun.disabled = false;
+    const entries = debugParamEntries(tool.parameters);
+    if (!entries.length) {
+      debugArgs.appendChild(el("div", { class: "debug-empty" }, "This tool takes no arguments \u2014 just hit Run."));
+      return;
+    }
+    for (const { name, prop, required } of entries) {
+      const label = el("div", { class: "debug-arg-field__label" }, [
+        name,
+        required ? el("span", { class: "debug-arg-field__req" }, "required") : null,
+      ]);
+      const input = debugBuildArgInput(name, prop, required);
+      const field = el("div", { class: "debug-arg-field" }, [label, input]);
+      debugArgs.appendChild(field);
+    }
+  }
+
+  // Reads every [data-arg] control under #debug-args back into a plain
+  // object, coercing each value to the type the schema said it should be.
+  // Throws with a friendly message if a field can't be coerced.
+  function debugCollectArgs() {
+    const out = {};
+    for (const node of qsa("[data-arg]", debugArgs)) {
+      const name = node.getAttribute("data-arg");
+      const argtype = node.getAttribute("data-argtype");
+      if (node.tagName === "SELECT") {
+        if (node.value !== "") out[name] = node.value;
+        continue;
+      }
+      if (argtype === "boolean") {
+        out[name] = node.checked;
+        continue;
+      }
+      const raw = node.value;
+      if (raw === "" || raw == null) continue; // omit empty optional/required-but-blank fields
+      if (argtype === "number" || argtype === "integer") {
+        const n = Number(raw);
+        if (Number.isNaN(n)) throw new Error(`"${name}" must be a number.`);
+        out[name] = argtype === "integer" ? Math.trunc(n) : n;
+        continue;
+      }
+      if (argtype === "array" || argtype === "object") {
+        try {
+          out[name] = JSON.parse(raw);
+        } catch (e) {
+          throw new Error(`"${name}" must be valid JSON (${e.message}).`);
+        }
+        continue;
+      }
+      out[name] = raw;
+    }
+    return out;
+  }
+
+  // ---- BOTTOM: response viewer (organized / raw JSON) -----------------------
+
+  // Renders any JSON value as a plain indented key: value tree \u2014 the
+  // "organized" view, easier to scan than a raw dump for typical tool
+  // results (flat-ish objects, small arrays).
+  function debugRenderOrganized(value, depth = 0) {
+    if (value === null || value === undefined) {
+      return el("span", { class: "debug-kv__val" }, String(value));
+    }
+    if (Array.isArray(value)) {
+      if (!value.length) return el("span", { class: "debug-kv__val" }, "[]");
+      const wrap = el("div", { class: "debug-kv" });
+      value.forEach((item, i) => {
+        const row = el("div", { class: "debug-kv__row" }, [
+          el("span", { class: "debug-kv__key" }, `[${i}]`),
+        ]);
+        if (item !== null && typeof item === "object") {
+          row.appendChild(debugRenderOrganized(item, depth + 1));
+        } else {
+          row.appendChild(el("span", { class: "debug-kv__val" }, String(item)));
+        }
+        wrap.appendChild(row);
+      });
+      return wrap;
+    }
+    if (typeof value === "object") {
+      const keys = Object.keys(value);
+      if (!keys.length) return el("span", { class: "debug-kv__val" }, "{}");
+      const wrap = el("div", { class: "debug-kv" });
+      for (const k of keys) {
+        const v = value[k];
+        const row = el("div", { class: "debug-kv__row" }, [el("span", { class: "debug-kv__key" }, `${k}:`)]);
+        if (v !== null && typeof v === "object") {
+          row.appendChild(debugRenderOrganized(v, depth + 1));
+        } else {
+          row.appendChild(el("span", { class: "debug-kv__val" }, String(v)));
+        }
+        wrap.appendChild(row);
+      }
+      return wrap;
+    }
+    return el("span", { class: "debug-kv__val" }, String(value));
+  }
+
+  function renderDebugResponse() {
+    debugResponse.innerHTML = "";
+    debugResponse.classList.remove("is-error");
+    const last = state.debugLastResult;
+    if (!last) {
+      debugResponse.appendChild(el("div", { class: "debug-empty" }, "Response will appear here after you run a tool."));
+      return;
+    }
+    if (last.error) {
+      debugResponse.classList.add("is-error");
+      debugResponse.appendChild(el("pre", {}, last.error));
+      return;
+    }
+    const payload = last.result;
+    if (state.debugResponseMode === "raw") {
+      debugResponse.appendChild(el("pre", {}, JSON.stringify(payload, null, 2)));
+    } else {
+      debugResponse.appendChild(debugRenderOrganized(payload));
+    }
+  }
+
+  qs("#debug-response-toggle").addEventListener("click", (e) => {
+    const btn = e.target.closest(".debug-toggle-btn");
+    if (!btn) return;
+    state.debugResponseMode = btn.dataset.mode;
+    qsa(".debug-toggle-btn", debugOverlay).forEach((b) => b.classList.toggle("is-active", b === btn));
+    renderDebugResponse();
+  });
+
+  // ---- RIGHT pane: tool list -------------------------------------------------
+
+  function renderDebugToolList() {
+    const tools = debugFilteredTools();
+    debugToolCount.textContent = `${state.debugTools.length}`;
+    debugToolList.innerHTML = "";
+    if (!tools.length) {
+      debugToolList.appendChild(el("div", { class: "debug-empty" },
+        state.debugTools.length ? "No tools match your search." : "No tools reported by jarvis."));
+      return;
+    }
+    for (const tool of tools) {
+      const card = el("div", {
+        class: "debug-tool-card" + (tool.name === state.debugSelected ? " is-active" : ""),
+        onclick: () => debugSelectTool(tool.name),
+      }, [
+        el("div", { class: "debug-tool-card__name" }, tool.name),
+        tool.description ? el("div", { class: "debug-tool-card__desc" }, tool.description) : null,
+      ]);
+      debugToolList.appendChild(card);
+    }
+  }
+
+  function debugSelectTool(name) {
+    state.debugSelected = name;
+    state.debugLastResult = null;
+    const tool = debugFindTool(name);
+    renderDebugDocs(tool);
+    renderDebugArgs(tool);
+    renderDebugResponse();
+    renderDebugToolList();
+  }
+
+  qs("#debug-search").addEventListener("input", (e) => {
+    state.debugSearch = e.target.value;
+    renderDebugToolList();
+  });
+
+  // ---- Run ------------------------------------------------------------------
+
+  btnDebugRun.addEventListener("click", async () => {
+    if (!state.debugSelected) return;
+    let args;
+    try {
+      args = debugCollectArgs();
+    } catch (e) {
+      state.debugLastResult = { error: e.message };
+      renderDebugResponse();
+      return;
+    }
+    btnDebugRun.disabled = true;
+    debugStatusLine.textContent = `running ${state.debugSelected}\u2026`;
+    debugStatusLine.classList.add("is-busy");
+    debugStatusLine.classList.remove("is-error", "is-ok");
+    try {
+      const res = await Api.runTool(state.debugSelected, args);
+      state.debugLastResult = res.ok !== false ? { result: res.result } : { error: res.error || "Tool run failed." };
+      debugStatusLine.textContent = res.ok !== false ? "done" : "tool run failed";
+      debugStatusLine.classList.toggle("is-error", res.ok === false);
+      debugStatusLine.classList.toggle("is-ok", res.ok !== false);
+    } catch (e) {
+      state.debugLastResult = { error: e.message };
+      debugStatusLine.textContent = "request failed";
+      debugStatusLine.classList.add("is-error");
+    } finally {
+      debugStatusLine.classList.remove("is-busy");
+      btnDebugRun.disabled = false;
+      renderDebugResponse();
+    }
+  });
+
+  // ---- Open / close / load ----------------------------------------------------
+
+  async function openDebug() {
+    debugOverlay.hidden = false;
+    if (state.debugLoaded) return;
+    debugStatusLine.textContent = "reading tool catalog\u2026";
+    debugStatusLine.classList.add("is-busy");
+    try {
+      const tools = await Api.listTools();
+      state.debugTools = Array.isArray(tools) ? tools : [];
+      state.debugLoaded = true;
+      debugStatusLine.textContent = `${state.debugTools.length} tools available`;
+    } catch (e) {
+      debugStatusLine.textContent = `couldn't load tools: ${e.message}`;
+      debugStatusLine.classList.add("is-error");
+    } finally {
+      debugStatusLine.classList.remove("is-busy");
+      renderDebugToolList();
+    }
+  }
+
+  function closeDebug() {
+    debugOverlay.hidden = true;
+  }
+
+  qs("#btn-debug").addEventListener("click", openDebug);
+  qs("#debug-close").addEventListener("click", closeDebug);
+  debugOverlay.addEventListener("click", (e) => { if (e.target === debugOverlay) closeDebug(); });
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape" && !debugOverlay.hidden) closeDebug();
   });
 
   // ===========================================================================

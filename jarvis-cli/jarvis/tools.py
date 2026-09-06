@@ -372,7 +372,12 @@ def tool_schemas_for_session():
 
 
 def tools_list_payload():
-    """Full catalog for remote permission UIs — not filtered by session or env."""
+    """Full catalog for remote permission UIs — not filtered by session or env.
+
+    Includes the full (uncompacted) parameter schema for each tool so a
+    remote debug/permission UI can render argument inputs and docs without
+    guessing — this is the same schema the model itself receives.
+    """
     items = []
     seen = set()
     for schema in TOOL_SCHEMAS:
@@ -383,11 +388,12 @@ def tools_list_payload():
         items.append({
             "name": name,
             "description": schema.get("description") or "",
+            "parameters": schema.get("parameters") or _NO_PARAMS,
         })
     for name in TOOLS:
         if name not in seen:
             seen.add(name)
-            items.append({"name": name, "description": ""})
+            items.append({"name": name, "description": "", "parameters": _NO_PARAMS})
     return items
 
 TOOLS = {

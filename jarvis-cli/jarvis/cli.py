@@ -40,7 +40,7 @@ ENCODING = "utf-8"
 
 CHAIN_SEP = "then"      # starts a new batch \u2014 waits for the previous one to finish
 PARALLEL_SEP = "and"    # joins the current batch \u2014 runs alongside whatever's already in it
-RESERVED_NAMES = {"config", "ai-config", "ai-clear", "ai-drop-from", "playnite-config", "spotify-config", "spotify-login", "memory-config", "tools-list", CHAIN_SEP, PARALLEL_SEP, "-h", "--help"}
+RESERVED_NAMES = {"config", "ai-config", "ai-clear", "ai-drop-from", "playnite-config", "spotify-config", "spotify-login", "memory-config", "tools-list", "tool-run", CHAIN_SEP, PARALLEL_SEP, "-h", "--help"}
 
 OUT = Palette(sys.stdout)  # actual command output: the banner, the command list
 ERR = Palette(sys.stderr)  # jarvis's own status/trace/error messages
@@ -158,7 +158,7 @@ def print_help(commands, file=sys.stdout):
         print(f"  {p.GREEN}{name.ljust(width)}{p.RESET} {spec.get('description', '')}", file=file)
     print(f"\nRun '{p.CYAN}jarvis <command> --help{p.RESET}' for a command's options.", file=file)
     print(f"Chain several with '{p.CYAN}jarvis cmd1 then cmd2{p.RESET}'.", file=file)
-    print(f"Built-in: {p.CYAN}config{p.RESET}, {p.CYAN}ai-config{p.RESET}, {p.CYAN}ai-clear{p.RESET}, {p.CYAN}tools-list{p.RESET} (prints every AI tool as JSON — not an ask).", file=file)
+    print(f"Built-in: {p.CYAN}config{p.RESET}, {p.CYAN}ai-config{p.RESET}, {p.CYAN}ai-clear{p.RESET}, {p.CYAN}tools-list{p.RESET} (prints every AI tool as JSON — not an ask), {p.CYAN}tool-run{p.RESET} (runs one AI tool directly).", file=file)
     print(f"Edit {p.DIM}{CONFIG_FILE}{p.RESET} to add or change commands.", file=file)
 
 
@@ -635,6 +635,32 @@ def main():
     if argv[0] == "tools-list":
         from . import tools as system_tools
         print(json.dumps(system_tools.tools_list_payload(), indent=2))
+        return
+
+    if argv[0] == "tool-run":
+        # jarvis tool-run <name> [json-arguments]
+        # Runs one AI tool directly (bypassing the model) and prints its
+        # JSON result. Powers the web UI's debug dashboard so a person can
+        # invoke any tool the AI can call and see exactly what comes back.
+        from . import tools as system_tools
+
+        if len(argv) < 2 or not argv[1].strip():
+            print(json.dumps({"error": "usage: jarvis tool-run <name> [json-arguments]"}))
+            sys.exit(1)
+
+        tool_name = argv[1].strip()
+        raw_args = argv[2] if len(argv) > 2 else "{}"
+        try:
+            arguments = json.loads(raw_args) if raw_args.strip() else {}
+        except json.JSONDecodeError as e:
+            print(json.dumps({"error": f"arguments must be valid JSON: {e}"}))
+            sys.exit(1)
+        if not isinstance(arguments, dict):
+            print(json.dumps({"error": "arguments must be a JSON object"}))
+            sys.exit(1)
+
+        result = system_tools.execute_tool(tool_name, arguments)
+        print(json.dumps(result, indent=2, default=str))
         return
 
     if argv[0] not in commands and argv[0] not in RESERVED_NAMES:
