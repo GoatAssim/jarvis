@@ -121,7 +121,6 @@
     // Ask Jarvis \u2014 state for the turn currently streaming in, if any.
     askPendingBubble: null,  // the DOM node for Jarvis's in-progress reply bubble
     askReplyLines: [],       // accumulated (post prefix-strip) lines of that reply, raw (untriaged)
-    askPrefixStripped: false,// whether we've already tried stripping "Name: " off line 1
     askTraceBubble: null,    // the DOM node for the current turn's console-dump bubble, if any
     askQuotes: [],           // highlighted excerpts attached to the next ask
     lastTaskLabel: "",       // user request / command name for away notifications
@@ -684,7 +683,6 @@
       case "ask-start":
         setRunning(true);
         state.askReplyLines = [];
-        state.askPrefixStripped = false;
         state.askTraceBubble = null;
         state.askPendingBubble = addJarvisBubblePending();
         setAskStatus("thinking\u2026", "busy");
@@ -963,31 +961,55 @@
   }
 
   // Jarvis's own CLI output is plain text like "J.A.R.V.I.S: <reply>" (see
-  // cli.py: handle_ai_prompt) \u2014 the ask panel already shows a "Jarvis" role
-  // label above the bubble, so on the first line of a reply we lift that
-  // leading "Name: " off (and adopt Name as the role label, so a renamed
-  // persona in ai_config.json is reflected automatically) instead of
-  // showing it twice.
+  // cli.py: handle_ai_prompt, which does `print(f"{prefix}{result.text}")`).
+  // Normally that "Name: " prefix is on line 1 and we just lift it off (and
+  // adopt Name as the role label, so a renamed persona in ai_config.json is
+  // reflected automatically) instead of showing it twice.
+  //
+  // But when the model calls a tool like run_command, it sometimes echoes
+  // the tool's raw output *verbatim as the start of its own answer*, and
+  // only *then* writes its actual signed reply \u2014 e.g.:
+  //   Hello, World! Jarvis at your service.
+  //   J.A.R.V.I.S: Executed, sir. The hello command completed successfully.
+  // Here line 1 is straight from the command's stdout, not from Jarvis "the
+  // persona" \u2014 the "Name: " prefix only shows up on line 2. Stripping only
+  // ever looked at line 1, so that raw output used to get glued into the
+  // same bubble as the real reply. Now we scan every line for the first one
+  // that looks like "<Name>: <text>" and treat everything *before* it as a
+  // console dump (its own bubble), keeping only that line onward (prefix
+  // stripped) as Jarvis's actual reply.
+  const NAME_PREFIX_LINE = /^([^\n:]{1,40}):\s(.*)$/;
   // Some providers (mainly weaker/local ones, or a mid-stream fallback) don't
   // always route tool calls through the real function-calling API and instead
   // have the model echo its own tool-call/tool-result scaffolding as plain
   // text \u2014 e.g. a line like "[called run_command with {...}]" or
-  // "[tool result ...]" (see ai_client.py's _TOOL_TRACE_LINE). If the whole
-  // reply were that, ai_client.py already treats it as a failed attempt and
-  // retries \u2014 but a *partial* echo (real prose plus a few of these lines)
-  // sails through as-is and used to get dumped straight into the same bubble
-  // as Jarvis's actual answer. Split those lines out so the raw console dump
-  // renders as its own bubble, with Jarvis's real reply following after it.
+  // "[tool result ...]" (see ai_client.py's _TOOL_TRACE_LINE). Treat those as
+  // console dump too, wherever they show up in the reply.
   const INLINE_TOOL_TRACE_LINE = /^\[(called\s|tool result\b)/i;
 
-  function extractInlineToolTrace(lines) {
-    const trace = [];
+  function splitConsoleDump(lines) {
+    let splitAt = -1;
+    let name = null;
+    let firstReplyLine = null;
+    for (let i = 0; i < lines.length; i++) {
+      const m = NAME_PREFIX_LINE.exec(String(lines[i]));
+      if (m) {
+        splitAt = i;
+        name = m[1];
+        firstReplyLine = m[2];
+        break;
+      }
+    }
+
+    const dump = splitAt === -1 ? [] : lines.slice(0, splitAt);
+    const candidateReply = splitAt === -1 ? lines.slice() : [firstReplyLine, ...lines.slice(splitAt + 1)];
+
     const reply = [];
-    for (const line of lines) {
-      if (INLINE_TOOL_TRACE_LINE.test(String(line).trim())) trace.push(String(line).trim());
+    for (const line of candidateReply) {
+      if (INLINE_TOOL_TRACE_LINE.test(String(line).trim())) dump.push(String(line).trim());
       else reply.push(line);
     }
-    return { trace, reply };
+    return { name, dump, reply };
   }
 
   function ensureAskTraceBubble() {
@@ -1002,27 +1024,20 @@
     return msg;
   }
 
-  function renderAskTrace(traceLines) {
-    if (!traceLines.length) return;
+  function renderAskTrace(dumpLines) {
+    if (!dumpLines.length) return;
     const msg = ensureAskTraceBubble();
-    qs(".ask-msg__bubble", msg).textContent = traceLines.join("\n");
-    msg.dataset.raw = traceLines.join("\n");
+    qs(".ask-msg__bubble", msg).textContent = dumpLines.join("\n");
+    msg.dataset.raw = dumpLines.join("\n");
     askThreadScrollToEnd();
   }
 
   function appendAskReplyLine(line) {
     if (!state.askPendingBubble) return;
-    if (!state.askPrefixStripped) {
-      state.askPrefixStripped = true;
-      const m = /^([^\n:]{1,40}):\s(.*)$/.exec(line);
-      if (m) {
-        qs(".ask-msg__role", state.askPendingBubble).textContent = m[1];
-        line = m[2];
-      }
-    }
     state.askReplyLines.push(line);
-    const { trace, reply } = extractInlineToolTrace(state.askReplyLines);
-    renderAskTrace(trace);
+    const { name, dump, reply } = splitConsoleDump(state.askReplyLines);
+    if (name) qs(".ask-msg__role", state.askPendingBubble).textContent = name;
+    renderAskTrace(dump);
     const bubble = qs(".ask-msg__bubble", state.askPendingBubble);
     bubble.innerHTML = renderMarkdown(reply.join("\n"));
     askThreadScrollToEnd();
@@ -1038,9 +1053,10 @@
         bubble.classList.add("is-error");
         qs(".ask-msg__bubble", bubble).textContent = raw;
       } else {
-        const { trace, reply } = extractInlineToolTrace(state.askReplyLines);
-        renderAskTrace(trace);
-        // If the model's entire "reply" somehow turned out to be trace lines,
+        const { name, dump, reply } = splitConsoleDump(state.askReplyLines);
+        if (name) qs(".ask-msg__role", bubble).textContent = name;
+        renderAskTrace(dump);
+        // If the model's entire "reply" somehow turned out to be dump lines,
         // fall back to showing everything rather than leaving the bubble blank.
         const replyLines = reply.length ? reply : state.askReplyLines;
         const raw = replyLines.join("\n");
