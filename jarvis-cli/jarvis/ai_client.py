@@ -11,7 +11,7 @@ told about itself, and what gets remembered.
 import json
 import re
 
-from . import ai_config, ai_providers, conversations, memory, playnite_config, stats
+from . import ai_config, ai_providers, conversations, memory, playnite_config, stats, tool_safety
 from . import tools as system_tools
 
 DEFAULT_TIMEOUT = 30
@@ -412,13 +412,70 @@ def _missing_required(schema, arguments):
     return missing
 
 
-def _make_tool_executor(on_tool_call, schemas=None):
+def risk_review(tool_name, arguments, cfg, exclude_label=None):
+    """Ask a *different* configured AI provider than the one currently
+    answering to explain, in plain language, what a tool call will do and
+    how dangerous/irreversible it is. Best-effort only: never raises, and
+    returns None (no risk note attached) if no other provider is
+    configured or the call fails \u2014 a missing/misconfigured second provider
+    should never block or crash the primary ask, it just means the
+    confirmation prompt won't have an AI opinion attached.
+    """
+    try:
+        providers = _eligible_providers(cfg["providers"], cfg["defaults"])
+        candidates = [p for p in providers if exclude_label is None or _provider_label(p) != exclude_label]
+        if not candidates:
+            return None
+        provider = candidates[0]
+        adapter = ai_providers.ADAPTERS.get(provider.get("type"))
+        if adapter is None:
+            return None
+        keys = ai_config.provider_keys(provider) or [None]
+        resolved = _resolve(provider, cfg["defaults"])
+        if keys[0] is not None:
+            resolved["api_key"] = keys[0]
+
+        try:
+            args_s = json.dumps(arguments or {}, default=str)
+        except TypeError:
+            args_s = str(arguments)
+        prompt = (
+            "A personal-assistant program is about to run this tool call on the "
+            "user's own machine:\n"
+            f"  tool: {tool_name}\n"
+            f"  arguments: {args_s}\n\n"
+            "In 2-3 short plain-language sentences: (1) explain exactly what this "
+            "specific call will do, and (2) rate how dangerous/irreversible it is "
+            "(none / low / medium / high) with a one-line reason. No preamble, no "
+            "markdown, just the assessment."
+        )
+        messages = [{"role": "user", "content": prompt}]
+        result = adapter(resolved, messages, resolved.get("timeout", DEFAULT_TIMEOUT),
+                          tools=None, tool_executor=None)
+        if result.ok and result.text:
+            return {"provider": _provider_label(provider), "note": result.text.strip()}
+        return None
+    except Exception:
+        return None
+
+
+def _make_tool_executor(on_tool_call, schemas=None, on_confirm_request=None,
+                         cfg=None, provider_ref=None):
     """Shared across every provider/key in one ask() so a failover never
     re-runs the same command, Playnite action, or web fetch. Cache hits
     still return the original result (no second launch / install / HTTP).
 
     First call with missing required args returns the compact schema
     instead of running the tool (lazy tool summaries).
+
+    Before a tool flagged confirm_required (see tool_safety.py) actually
+    runs, on_confirm_request(name, arguments, risk_note) is called and must
+    return True/False \u2014 the tool is only executed on True. If ai_review is
+    also on for that tool, risk_note is a {"provider", "note"} dict from a
+    *different* configured provider (see risk_review) explaining what the
+    call does and how dangerous it is; otherwise risk_note is None. With no
+    on_confirm_request supplied at all, a tool requiring confirmation fails
+    closed (never silently runs unconfirmed).
     """
     cache = {}
     runs = []
@@ -447,6 +504,36 @@ def _make_tool_executor(on_tool_call, schemas=None):
                 cache[key] = result
                 runs.append({"name": name, "arguments": arguments, "result": result})
                 return result
+
+        if tool_safety.requires_confirmation(name):
+            if on_confirm_request is None:
+                result = {
+                    "ok": False, "cancelled": True,
+                    "message": f"'{name}' requires user confirmation, but no confirmation "
+                               f"channel is available here \u2014 not run.",
+                }
+                cache[key] = result
+                runs.append({"name": name, "arguments": arguments, "result": result})
+                return result
+
+            risk_note = None
+            if tool_safety.requires_ai_review(name) and cfg is not None:
+                exclude_label = (provider_ref or [None])[0]
+                risk_note = risk_review(name, arguments, cfg, exclude_label=exclude_label)
+
+            approved = False
+            try:
+                approved = bool(on_confirm_request(name, arguments, risk_note))
+            except TypeError:
+                approved = bool(on_confirm_request(name, arguments))
+            if not approved:
+                result = {"ok": False, "cancelled": True,
+                          "message": f"The user declined to run '{name}' \u2014 do not retry it "
+                                     f"this turn, and don't claim it happened."}
+                cache[key] = result
+                runs.append({"name": name, "arguments": arguments, "result": result})
+                return result
+
         if on_tool_call:
             try:
                 on_tool_call(name, arguments)
@@ -476,6 +563,7 @@ def _is_mutating_tool(name):
         "memory_save", "memory_forget",
         "spotify_open",
         "wifi_set", "bluetooth_set", "git_run",
+        "write_file", "run_custom_command",
     }:
         return True
     return name.startswith((
@@ -651,7 +739,8 @@ def _maybe_update_title(cfg, conversation_id, exchange_count, user_text, jarvis_
             pass
 
 
-def ask(user_text, commands=None, on_attempt=None, on_tool_call=None, conversation_id=None):
+def ask(user_text, commands=None, on_attempt=None, on_tool_call=None, conversation_id=None,
+        on_confirm_request=None):
     """Ask Jarvis something, trying every configured, enabled provider in
     order until one answers \u2014 and within each provider, every one of its
     configured keys in order before moving on to the next provider. Always
@@ -676,6 +765,11 @@ def ask(user_text, commands=None, on_attempt=None, on_tool_call=None, conversati
     on-disk "current" conversation is used (auto-created on first ever
     use) — the web UI instead always passes one explicitly, since each
     browser tab tracks its own active conversation.
+
+    on_confirm_request(name, arguments, risk_note), if given, gates any
+    tool call flagged confirm_required in tool_safety.json (see
+    _make_tool_executor). Tools requiring confirmation fail closed (never
+    run) if this isn't supplied.
     """
     cfg = ai_config.load_ai_config()
     persona = cfg["persona"]
@@ -702,12 +796,17 @@ def ask(user_text, commands=None, on_attempt=None, on_tool_call=None, conversati
         # invocation. A few hundred extra bytes of schema up front is far
         # cheaper than that guaranteed second round trip.
         tool_schemas = system_tools.compact_schemas_for_prompt(full_schemas)
-    tool_executor = _make_tool_executor(on_tool_call, full_schemas) if tools_enabled else None
+    provider_ref = [None]
+    tool_executor = _make_tool_executor(
+        on_tool_call, full_schemas, on_confirm_request=on_confirm_request,
+        cfg=cfg, provider_ref=provider_ref,
+    ) if tools_enabled else None
 
     attempts = []
 
     for provider in providers:
         label = _provider_label(provider)
+        provider_ref[0] = label
         profile = _prompt_profile(label, cfg["defaults"])
         adapter = ai_providers.ADAPTERS.get(provider.get("type"))
         if adapter is None:

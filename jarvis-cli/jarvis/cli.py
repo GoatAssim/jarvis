@@ -41,7 +41,7 @@ ENCODING = "utf-8"
 
 CHAIN_SEP = "then"      # starts a new batch \u2014 waits for the previous one to finish
 PARALLEL_SEP = "and"    # joins the current batch \u2014 runs alongside whatever's already in it
-RESERVED_NAMES = {"config", "ai-config", "ai-clear", "ai-drop-from", "playnite-config", "spotify-config", "spotify-login", "memory-config", "tools-list", "tool-run", "conv-new", "conv-list", "conv-show", "conv-switch", "conv-delete", CHAIN_SEP, PARALLEL_SEP, "-h", "--help"}
+RESERVED_NAMES = {"config", "ai-config", "ai-clear", "ai-drop-from", "playnite-config", "spotify-config", "spotify-login", "memory-config", "tools-list", "tool-run", "tool-preview", "tool-safety-set", "conv-new", "conv-list", "conv-show", "conv-switch", "conv-delete", CHAIN_SEP, PARALLEL_SEP, "-h", "--help"}
 
 OUT = Palette(sys.stdout)  # actual command output: the banner, the command list
 ERR = Palette(sys.stderr)  # jarvis's own status/trace/error messages
@@ -548,6 +548,44 @@ def handle_ai_prompt(text, commands):
                     detail = detail[:177] + "..."
         print(f"{ERR.DIM}  $ {friendly}{detail}{ERR.RESET}", file=sys.stderr, flush=True)
 
+    # Gate for anything tool_safety.json flags confirm_required for (see
+    # ai_client._make_tool_executor). Two protocols, auto-selected:
+    #   - real terminal (stdin is a tty): a plain "Proceed? [y/N]" prompt,
+    #     blocking on input() exactly like any other CLI confirmation.
+    #   - piped stdin (this process spawned by the web server): prints one
+    #     machine-readable "JARVIS_CONFIRM_REQUEST {...}" line to stdout and
+    #     blocks reading one line back from stdin. server.js watches for
+    #     that line, relays it to the browser as Yes/No buttons, and writes
+    #     "y\n"/"n\n" back to this process's stdin once the user answers —
+    #     see web/server.js's onStdoutLine + "ask-confirm-response".
+    def on_confirm_request(name, arguments, risk_note=None):
+        payload = {"tool": name, "arguments": arguments or {}}
+        if risk_note:
+            payload["risk_note"] = risk_note
+
+        if sys.stdin.isatty():
+            print(
+                f"\n{ERR.YELLOW}\u26a0 Jarvis wants to run: {ERR.BOLD}{name}{ERR.RESET}"
+                f"{ERR.YELLOW}({json.dumps(arguments or {}, default=str)}){ERR.RESET}"
+            )
+            if risk_note:
+                note_text = risk_note.get("note") if isinstance(risk_note, dict) else risk_note
+                provider = risk_note.get("provider") if isinstance(risk_note, dict) else None
+                label = f" ({provider})" if provider else ""
+                print(f"{ERR.DIM}  AI review{label}: {note_text}{ERR.RESET}")
+            try:
+                answer = input(f"{ERR.BOLD}Proceed? [y/N]: {ERR.RESET}")
+            except EOFError:
+                answer = ""
+            return answer.strip().lower().startswith("y")
+
+        print("JARVIS_CONFIRM_REQUEST " + json.dumps(payload, default=str), flush=True)
+        try:
+            line = sys.stdin.readline()
+        except Exception:
+            line = ""
+        return line.strip().lower().startswith("y")
+
     # The web UI sends one explicit conversation id per browser tab (see
     # server.js's "ask" WS handler); plain CLI use has no such id and falls
     # back to whatever conversation is "current" on disk (auto-created on
@@ -559,7 +597,7 @@ def handle_ai_prompt(text, commands):
 
     result = ai_client.ask(
         text, commands, on_attempt=on_attempt, on_tool_call=on_tool_call,
-        conversation_id=conv_id,
+        conversation_id=conv_id, on_confirm_request=on_confirm_request,
     )
 
     for label, err in result.attempts:
@@ -733,6 +771,72 @@ def main():
 
         result = system_tools.execute_tool(tool_name, arguments)
         print(json.dumps(result, indent=2, default=str))
+        return
+
+    if argv[0] == "tool-preview":
+        # jarvis tool-preview <name> [json-arguments]
+        # Reports whether a tool call would be gated by a confirmation
+        # prompt and (if AI review is on for it) a risk note from a second
+        # configured provider — without actually running the tool. Powers
+        # the web UI's debug dashboard: the RUN button calls this first so
+        # a person sees exactly what they're about to approve before
+        # anything real happens.
+        from . import tool_safety
+
+        if len(argv) < 2 or not argv[1].strip():
+            print(json.dumps({"error": "usage: jarvis tool-preview <name> [json-arguments]"}))
+            sys.exit(1)
+
+        tool_name = argv[1].strip()
+        raw_args = argv[2] if len(argv) > 2 else "{}"
+        try:
+            arguments = json.loads(raw_args) if raw_args.strip() else {}
+        except json.JSONDecodeError as e:
+            print(json.dumps({"error": f"arguments must be valid JSON: {e}"}))
+            sys.exit(1)
+        if not isinstance(arguments, dict):
+            print(json.dumps({"error": "arguments must be a JSON object"}))
+            sys.exit(1)
+
+        flags = tool_safety.get_flags(tool_name)
+        risk_note = None
+        if flags["ai_review"]:
+            try:
+                from . import ai_client, ai_config
+                risk_note = ai_client.risk_review(tool_name, arguments, ai_config.load_ai_config())
+            except Exception:
+                risk_note = None
+
+        print(json.dumps({
+            "name": tool_name,
+            "arguments": arguments,
+            "confirm_required": flags["confirm_required"],
+            "ai_review": flags["ai_review"],
+            "risk_note": risk_note,
+        }, indent=2, default=str))
+        return
+
+    if argv[0] == "tool-safety-set":
+        # jarvis tool-safety-set <name> <confirm_required|ai_review> <true|false>
+        # Flips one of a tool's two safety toggles (see tool_safety.py).
+        # Powers the "Toggle warning:" / "Toggle AI review:" switches in
+        # the web UI's debug dashboard, right under a tool's description.
+        from . import tool_safety
+
+        if len(argv) < 4:
+            print(json.dumps({
+                "error": "usage: jarvis tool-safety-set <name> <confirm_required|ai_review> <true|false>",
+            }))
+            sys.exit(1)
+
+        tool_name, key, raw_value = argv[1], argv[2], argv[3]
+        value = raw_value.strip().lower() in ("1", "true", "yes", "y", "on")
+        try:
+            flags = tool_safety.set_flag(tool_name, key, value)
+        except ValueError as e:
+            print(json.dumps({"error": str(e)}))
+            sys.exit(1)
+        print(json.dumps({"name": tool_name, **flags}, indent=2))
         return
 
     if argv[0] not in commands and argv[0] not in RESERVED_NAMES:

@@ -23,6 +23,8 @@ from datetime import datetime
 from pathlib import Path
 
 from .command_tools import COMMAND_TOOL_SCHEMAS, COMMAND_TOOLS
+from .custom_tools import CUSTOM_TOOL_SCHEMAS, CUSTOM_TOOLS
+from .file_tools import FILE_TOOL_SCHEMAS, FILE_TOOLS
 from .git_tools import GIT_TOOL_SCHEMAS, GIT_TOOLS
 from .memory import MEMORY_TOOL_SCHEMAS, MEMORY_TOOLS
 from .pkg_tools import PKG_TOOL_SCHEMAS, PKG_TOOLS
@@ -273,6 +275,8 @@ CORE_TOOL_SCHEMAS = [
     *SCREENSHOT_TOOL_SCHEMAS,
     *WEB_TOOL_SCHEMAS,
     *PKG_TOOL_SCHEMAS,
+    *FILE_TOOL_SCHEMAS,
+    *CUSTOM_TOOL_SCHEMAS,
 ]
 
 PLAYNITE_AND_SPOTIFY = [*PLAYNITE_TOOL_SCHEMAS, *SPOTIFY_TOOL_SCHEMAS]
@@ -376,8 +380,13 @@ def tools_list_payload():
 
     Includes the full (uncompacted) parameter schema for each tool so a
     remote debug/permission UI can render argument inputs and docs without
-    guessing — this is the same schema the model itself receives.
+    guessing — this is the same schema the model itself receives. Also
+    includes each tool's current confirm_required/ai_review safety flags
+    (see tool_safety.py) so the debug dashboard's toggles reflect real
+    state, not a hardcoded guess.
     """
+    from . import tool_safety
+
     items = []
     seen = set()
     for schema in TOOL_SCHEMAS:
@@ -385,15 +394,25 @@ def tools_list_payload():
         if not name or name in seen:
             continue
         seen.add(name)
+        flags = tool_safety.get_flags(name)
         items.append({
             "name": name,
             "description": schema.get("description") or "",
             "parameters": schema.get("parameters") or _NO_PARAMS,
+            "confirm_required": flags["confirm_required"],
+            "ai_review": flags["ai_review"],
         })
     for name in TOOLS:
         if name not in seen:
             seen.add(name)
-            items.append({"name": name, "description": "", "parameters": _NO_PARAMS})
+            flags = tool_safety.get_flags(name)
+            items.append({
+                "name": name,
+                "description": "",
+                "parameters": _NO_PARAMS,
+                "confirm_required": flags["confirm_required"],
+                "ai_review": flags["ai_review"],
+            })
     return items
 
 TOOLS = {
@@ -413,6 +432,8 @@ TOOLS = {
     **PKG_TOOLS,
     **PLAYNITE_TOOLS,
     **SPOTIFY_TOOLS,
+    **FILE_TOOLS,
+    **CUSTOM_TOOLS,
 }
 
 
@@ -426,7 +447,7 @@ def execute_tool(name, arguments=None):
     if fn is None:
         return {"error": f"no such tool: {name}"}
     try:
-        if name in COMMAND_TOOLS or name in PLAYNITE_TOOLS or name in WEB_TOOLS or name in PKG_TOOLS or name in SPOTIFY_TOOLS or name in MEMORY_TOOLS or name in RADIO_TOOLS or name in GIT_TOOLS or name in SCREENSHOT_TOOLS:
+        if name in COMMAND_TOOLS or name in PLAYNITE_TOOLS or name in WEB_TOOLS or name in PKG_TOOLS or name in SPOTIFY_TOOLS or name in MEMORY_TOOLS or name in RADIO_TOOLS or name in GIT_TOOLS or name in SCREENSHOT_TOOLS or name in FILE_TOOLS or name in CUSTOM_TOOLS:
             return fn(arguments or {})
         return fn()
     except Exception as e:
