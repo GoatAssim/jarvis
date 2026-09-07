@@ -180,6 +180,23 @@
     </div>
 
     <div class="ask-body">
+      <aside class="ask-convos" aria-label="Conversations">
+        <div class="ask-convos__head">
+          <span class="ask-convos__title">CHATS</span>
+          <button class="btn btn--ghost btn--sm" id="btn-convo-new" type="button" title="Start a new conversation">+ New</button>
+        </div>
+        <div class="panel__search ask-convos__search">
+          <svg class="panel__search-icon" viewBox="0 0 20 20" aria-hidden="true">
+            <circle cx="8.7" cy="8.7" r="6" fill="none" stroke="currentColor" stroke-width="1.6"/>
+            <line x1="13.2" y1="13.2" x2="17.5" y2="17.5" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/>
+          </svg>
+          <input type="search" id="convo-search" class="panel__search-input" placeholder="Search chats&hellip;" autocomplete="off">
+        </div>
+        <div class="ask-convos__list" id="convo-list">
+          <div class="ask-convos__empty">Loading&hellip;</div>
+        </div>
+      </aside>
+
       <div class="ask-main">
         <div class="ask-thread" id="ask-thread">
           <div class="ask-empty">Ask about anything, or tell me what you need done, sir.</div>

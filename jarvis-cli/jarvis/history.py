@@ -1,5 +1,10 @@
 """Rolling conversation memory for 'jarvis <text>'.
 
+NOTE: superseded by conversations.py, which supports multiple, switchable,
+searchable conversations instead of one never-ending log — ai_client.ask()
+uses that module now. This file is kept only for any external script that
+might still import it directly; nothing in jarvis itself calls it anymore.
+
 Every invocation of jarvis is a brand-new process — there's no long-running
 server holding conversation state in memory (see cli.py's own notes on this
 philosophy). This file on disk is what gives the AI continuity between one

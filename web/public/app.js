@@ -134,6 +134,13 @@
     debugResponseMode: "organized", // "organized" | "raw"
     debugLastResult: null,   // last {ok, result, raw, stderr, error} from /api/tools/run
     debugLastResultError: false,
+
+    // Conversations — every saved chat lives in ~/.jarvis/conversations
+    // (see conversations.py); this is just the in-memory mirror for the
+    // sidebar list, refreshed from /api/conversations.
+    conversations: [],           // [{id,title,soft_context,created_at,updated_at,exchange_count}]
+    activeConversationId: null,  // which one the open thread + next ask belong to
+    convoSearch: "",
   };
 
   // ===========================================================================
@@ -164,7 +171,7 @@
     deleteCommand: (name) => api("DELETE", `/api/commands/${encodeURIComponent(name)}`),
     getRaw: () => api("GET", "/api/raw"),
     putRaw: (text) => api("PUT", "/api/raw", { text }),
-    clearAiHistory: () => api("POST", "/api/ai/clear"),
+    clearAiHistory: (conversationId) => api("POST", "/api/ai/clear", conversationId ? { conversationId } : {}),
     getAiRaw: () => api("GET", "/api/ai/raw"),
     putAiRaw: (text) => api("PUT", "/api/ai/raw", { text }),
     getPlayniteRaw: () => api("GET", "/api/playnite/raw"),
@@ -175,6 +182,10 @@
     putMemoryRaw: (text) => api("PUT", "/api/memory/raw", { text }),
     listTools: () => api("GET", "/api/tools"),
     runTool: (name, arguments_) => api("POST", "/api/tools/run", { name, arguments: arguments_ }),
+    listConversations: (q) => api("GET", `/api/conversations${q ? `?q=${encodeURIComponent(q)}` : ""}`),
+    createConversation: (title) => api("POST", "/api/conversations", title ? { title } : {}),
+    getConversation: (id) => api("GET", `/api/conversations/${encodeURIComponent(id)}`),
+    deleteConversation: (id) => api("DELETE", `/api/conversations/${encodeURIComponent(id)}`),
   };
 
   // ===========================================================================
@@ -712,6 +723,9 @@
         askPromptEnd(msg.code, msg.signal);
         setAskStatus(msg.code === 0 ? "online" : "last attempt failed", msg.code === 0 ? "" : "error");
         notifyTaskDone(summarizeText(raw), msg.code !== 0);
+        // The reply may have just (re)titled this conversation — refresh
+        // the sidebar so its card picks up the new title/gist.
+        if (msg.code === 0) refreshConvoList();
         break;
       }
       case "ask-error":
@@ -838,7 +852,7 @@
     }
     ensureNotifPermission();
     state.lastTaskLabel = text;
-    wsSend({ type: "ask", text, redo: true });
+    wsSend({ type: "ask", text, redo: true, conversationId: state.activeConversationId });
   }
 
   function addUserBubble(text, quotes) {
@@ -1208,13 +1222,14 @@
     hideSelPop();
   });
 
-  qs("#ask-form").addEventListener("submit", (e) => {
+  qs("#ask-form").addEventListener("submit", async (e) => {
     e.preventDefault();
     if (state.running) return;
     const input = qs("#ask-input");
     const text = input.value.trim();
     const quotes = state.askQuotes.slice();
     if (!text && quotes.length === 0) return;
+    if (!state.activeConversationId) await startNewConversation();
     input.value = "";
     state.askQuotes = [];
     renderQuoteBar();
@@ -1226,12 +1241,13 @@
       type: "ask",
       text,
       quote: quotes.length ? quotes.join("\n---\n") : undefined,
+      conversationId: state.activeConversationId,
     });
   });
 
   qs("#btn-ask-clear").addEventListener("click", async () => {
     try {
-      await Api.clearAiHistory();
+      await Api.clearAiHistory(state.activeConversationId);
     } catch (e) {
       toast(e.message);
       return;
@@ -1242,6 +1258,7 @@
     askThread.innerHTML = "";
     askThread.appendChild(el("div", { class: "ask-empty" }, "Ask about anything, or tell me what you need done, sir."));
     askPromptReset();
+    refreshConvoList();
     toast("Conversation cleared.", "info");
   });
 
@@ -1611,6 +1628,160 @@
   debugOverlay.addEventListener("click", (e) => { if (e.target === debugOverlay) closeDebug(); });
   document.addEventListener("keydown", (e) => {
     if (e.key === "Escape" && !debugOverlay.hidden) closeDebug();
+  });
+
+
+  // ===========================================================================
+  // Conversations — every chat is saved (see jarvis-cli's conversations.py),
+  // switchable and searchable from the sidebar inside the Ask panel.
+  // Opening the page always starts a fresh one; switching to an older one
+  // restores it with full context.
+  // ===========================================================================
+
+  const convoListEl = qs("#convo-list");
+
+  // A plain, already-finished reply bubble — used to replay a saved
+  // conversation's history, as opposed to addJarvisBubblePending() +
+  // appendAskReplyLine()/finalizeAskBubble(), which animate a live one in.
+  function addJarvisStaticBubble(text) {
+    clearAskEmptyHint();
+    const msg = el("div", { class: "ask-msg ask-msg--jarvis" }, [
+      el("div", { class: "ask-msg__role" }, "Jarvis"),
+      el("div", { class: "ask-msg__bubble" }),
+    ]);
+    msg.dataset.raw = text || "";
+    qs(".ask-msg__bubble", msg).innerHTML = renderMarkdown(text || "");
+    addAskMsgActions(msg);
+    askThread.appendChild(msg);
+    return msg;
+  }
+
+  function loadConversationIntoThread(record) {
+    askThread.innerHTML = "";
+    const exchanges = (record && record.exchanges) || [];
+    if (!exchanges.length) {
+      askThread.appendChild(el("div", { class: "ask-empty" }, "Ask about anything, or tell me what you need done, sir."));
+    } else {
+      for (const ex of exchanges) {
+        addUserBubble(ex.user || "");
+        addJarvisStaticBubble(ex.jarvis || "");
+      }
+    }
+    askThreadScrollToEnd();
+  }
+
+  function convoFiltered() {
+    const q = state.convoSearch.trim().toLowerCase();
+    if (!q) return state.conversations;
+    return state.conversations.filter((c) =>
+      (c.title || "").toLowerCase().includes(q) || (c.soft_context || "").toLowerCase().includes(q)
+    );
+  }
+
+  function renderConvoList() {
+    const items = convoFiltered();
+    convoListEl.innerHTML = "";
+    if (!items.length) {
+      convoListEl.appendChild(el("div", { class: "ask-convos__empty" },
+        state.conversations.length ? "No chats match your search." : "No conversations yet."));
+      return;
+    }
+    for (const convo of items) {
+      const gist = (convo.soft_context || "").trim();
+      const card = el("div", {
+        class: "convo-card" + (convo.id === state.activeConversationId ? " is-active" : ""),
+        onclick: () => selectConversation(convo.id),
+      }, [
+        el("div", { class: "convo-card__title" }, convo.title || "New Conversation"),
+        gist
+          ? el("div", { class: "convo-card__gist" }, gist)
+          : el("div", { class: "convo-card__empty-gist" }, convo.exchange_count ? "\u2026" : "No messages yet"),
+        el("button", {
+          type: "button", class: "convo-card__del", title: "Delete this conversation",
+          onclick: (e) => { e.stopPropagation(); deleteConversationConfirm(convo.id); },
+        }, "\u00d7"),
+      ]);
+      convoListEl.appendChild(card);
+    }
+  }
+
+  async function refreshConvoList() {
+    try {
+      state.conversations = await Api.listConversations(state.convoSearch);
+    } catch (e) {
+      convoListEl.innerHTML = "";
+      convoListEl.appendChild(el("div", { class: "ask-convos__empty" }, `Couldn't load chats: ${e.message}`));
+      return;
+    }
+    renderConvoList();
+  }
+
+  async function selectConversation(id) {
+    if (id === state.activeConversationId) return;
+    if (state.running) {
+      toast("Wait for the current reply to finish before switching chats.");
+      return;
+    }
+    let record;
+    try {
+      record = await Api.getConversation(id);
+    } catch (e) {
+      toast(`Couldn't load that conversation: ${e.message}`);
+      return;
+    }
+    state.activeConversationId = id;
+    loadConversationIntoThread(record);
+    askPromptReset();
+    renderConvoList();
+  }
+
+  // Used both by the "+ New" button and automatically once on page load
+  // (see initApp) — every fresh page load starts a brand-new conversation,
+  // while older ones stay saved and reachable from the sidebar.
+  async function startNewConversation({ select = true } = {}) {
+    let record;
+    try {
+      record = await Api.createConversation();
+    } catch (e) {
+      toast(`Couldn't start a new conversation: ${e.message}`);
+      return null;
+    }
+    state.conversations.unshift(record);
+    if (select) {
+      state.activeConversationId = record.id;
+      loadConversationIntoThread({ exchanges: [] });
+      askPromptReset();
+    }
+    renderConvoList();
+    return record.id;
+  }
+
+  async function deleteConversationConfirm(id) {
+    if (!confirm("Delete this conversation? This can't be undone.")) return;
+    try {
+      await Api.deleteConversation(id);
+    } catch (e) {
+      toast(`Couldn't delete: ${e.message}`);
+      return;
+    }
+    state.conversations = state.conversations.filter((c) => c.id !== id);
+    if (id === state.activeConversationId) {
+      // Land somewhere sane: the next most recent chat, or a brand-new one.
+      if (state.conversations.length) {
+        await selectConversation(state.conversations[0].id);
+      } else {
+        await startNewConversation();
+      }
+    } else {
+      renderConvoList();
+    }
+    toast("Conversation deleted.", "info");
+  }
+
+  qs("#btn-convo-new").addEventListener("click", () => startNewConversation());
+  qs("#convo-search").addEventListener("input", (e) => {
+    state.convoSearch = e.target.value;
+    refreshConvoList();
   });
 
   // ===========================================================================

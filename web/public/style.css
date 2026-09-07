@@ -758,7 +758,7 @@ input.is-invalid{ border-color: var(--red) !important; }
 
 .ask-panel{
   position: relative;
-  width: min(1080px, 100%);
+  width: min(1320px, 100%);
   height: min(760px, 86vh);
   display: flex; flex-direction: column;
   background: var(--bg-1);
@@ -789,7 +789,7 @@ input.is-invalid{ border-color: var(--red) !important; }
 .ask-body{
   flex: 1; min-height: 0;
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 280px;
+  grid-template-columns: 240px minmax(0, 1fr) 280px;
 }
 .ask-main{
   min-width: 0; min-height: 0;
@@ -996,6 +996,64 @@ input.is-invalid{ border-color: var(--red) !important; }
   30%{ transform: translateY(-3px); opacity: 1; }
 }
 
+
+/* Conversations sidebar — every saved chat, read live from
+   ~/.jarvis/conversations via /api/conversations, switchable and
+   searchable. Sits to the left of the thread inside the Ask panel. */
+.ask-convos{
+  min-width: 0; min-height: 0;
+  display: flex; flex-direction: column;
+  border-right: 1px solid var(--border);
+  background: var(--bg-panel-2);
+}
+.ask-convos__head{
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 11px 12px;
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+}
+.ask-convos__title{
+  font-size: 11px; letter-spacing: 0.18em; text-transform: uppercase;
+  color: var(--text-dim); font-weight: 600;
+}
+.ask-convos__search{ padding: 8px 10px; flex-shrink: 0; }
+.ask-convos__list{ flex: 1; overflow-y: auto; padding: 6px; display: flex; flex-direction: column; gap: 5px; }
+.ask-convos__empty{ color: var(--text-dimmer); font-size: 12px; padding: 14px 10px; text-align: center; }
+
+.convo-card{
+  position: relative;
+  border: 1px solid var(--border);
+  border-left: 2px solid var(--border-strong);
+  border-radius: 2px;
+  padding: 7px 26px 7px 9px;
+  cursor: pointer;
+  transition: border-color 0.15s, background 0.15s;
+}
+.convo-card:hover{ border-color: var(--accent-soft); border-left-color: var(--accent); }
+.convo-card.is-active{
+  border-color: var(--accent);
+  border-left-color: var(--accent);
+  background: linear-gradient(90deg, rgba(79,216,255,0.12), transparent);
+}
+.convo-card__title{
+  font-size: 12.5px; color: var(--text);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.convo-card__gist{
+  font-size: 11px; color: var(--text-dim); margin-top: 2px;
+  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
+}
+.convo-card__empty-gist{ font-size: 11px; color: var(--text-dimmer); margin-top: 2px; font-style: italic; }
+.convo-card__del{
+  position: absolute; top: 5px; right: 4px;
+  width: 18px; height: 18px; line-height: 16px; text-align: center;
+  border: none; background: transparent; color: var(--text-dimmer);
+  font-size: 15px; cursor: pointer; border-radius: 2px; opacity: 0;
+  transition: opacity 0.1s, color 0.1s, background 0.1s;
+}
+.convo-card:hover .convo-card__del{ opacity: 1; }
+.convo-card__del:hover{ color: var(--red); background: rgba(255,255,255,0.06); }
+
 .ask-quote-bar{
   display: flex; flex-wrap: wrap; gap: 6px;
   padding: 8px 14px 0; flex-shrink: 0;
@@ -1055,7 +1113,11 @@ input.is-invalid{ border-color: var(--red) !important; }
 @media (max-width: 780px){
   .ask-overlay{ padding: 0; }
   .ask-panel{ width: 100%; height: 100%; border-radius: 0; }
-  .ask-body{ grid-template-columns: 1fr; grid-template-rows: 1fr 160px; }
+  .ask-body{
+    grid-template-columns: 1fr;
+    grid-template-rows: minmax(0,110px) 1fr 160px;
+  }
+  .ask-convos{ border-right: none; border-bottom: 1px solid var(--border); order: -1; }
   .ask-main{ border-right: none; border-bottom: 1px solid var(--border); }
   .btn--ask-jarvis span:not(.btn__spark){ display: inline; }
 }

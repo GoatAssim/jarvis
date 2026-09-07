@@ -2,6 +2,7 @@
 
 import argparse
 import json
+import os
 import re
 import subprocess
 import sys
@@ -40,7 +41,7 @@ ENCODING = "utf-8"
 
 CHAIN_SEP = "then"      # starts a new batch \u2014 waits for the previous one to finish
 PARALLEL_SEP = "and"    # joins the current batch \u2014 runs alongside whatever's already in it
-RESERVED_NAMES = {"config", "ai-config", "ai-clear", "ai-drop-from", "playnite-config", "spotify-config", "spotify-login", "memory-config", "tools-list", "tool-run", CHAIN_SEP, PARALLEL_SEP, "-h", "--help"}
+RESERVED_NAMES = {"config", "ai-config", "ai-clear", "ai-drop-from", "playnite-config", "spotify-config", "spotify-login", "memory-config", "tools-list", "tool-run", "conv-new", "conv-list", "conv-show", "conv-switch", "conv-delete", CHAIN_SEP, PARALLEL_SEP, "-h", "--help"}
 
 OUT = Palette(sys.stdout)  # actual command output: the banner, the command list
 ERR = Palette(sys.stderr)  # jarvis's own status/trace/error messages
@@ -158,7 +159,7 @@ def print_help(commands, file=sys.stdout):
         print(f"  {p.GREEN}{name.ljust(width)}{p.RESET} {spec.get('description', '')}", file=file)
     print(f"\nRun '{p.CYAN}jarvis <command> --help{p.RESET}' for a command's options.", file=file)
     print(f"Chain several with '{p.CYAN}jarvis cmd1 then cmd2{p.RESET}'.", file=file)
-    print(f"Built-in: {p.CYAN}config{p.RESET}, {p.CYAN}ai-config{p.RESET}, {p.CYAN}ai-clear{p.RESET}, {p.CYAN}tools-list{p.RESET} (prints every AI tool as JSON — not an ask), {p.CYAN}tool-run{p.RESET} (runs one AI tool directly).", file=file)
+    print(f"Built-in: {p.CYAN}config{p.RESET}, {p.CYAN}ai-config{p.RESET}, {p.CYAN}ai-clear{p.RESET}, {p.CYAN}tools-list{p.RESET} (prints every AI tool as JSON — not an ask), {p.CYAN}tool-run{p.RESET} (runs one AI tool directly), {p.CYAN}conv-new{p.RESET}/{p.CYAN}conv-list{p.RESET}/{p.CYAN}conv-show{p.RESET}/{p.CYAN}conv-switch{p.RESET}/{p.CYAN}conv-delete{p.RESET} (manage conversations).", file=file)
     print(f"Edit {p.DIM}{CONFIG_FILE}{p.RESET} to add or change commands.", file=file)
 
 
@@ -547,7 +548,19 @@ def handle_ai_prompt(text, commands):
                     detail = detail[:177] + "..."
         print(f"{ERR.DIM}  $ {friendly}{detail}{ERR.RESET}", file=sys.stderr, flush=True)
 
-    result = ai_client.ask(text, commands, on_attempt=on_attempt, on_tool_call=on_tool_call)
+    # The web UI sends one explicit conversation id per browser tab (see
+    # server.js's "ask" WS handler); plain CLI use has no such id and falls
+    # back to whatever conversation is "current" on disk (auto-created on
+    # first ever use — see conversations.get_current_id).
+    from . import conversations
+    conv_id = os.environ.get("JARVIS_CONVERSATION_ID")
+    if not conversations.is_valid_id(conv_id):
+        conv_id = None
+
+    result = ai_client.ask(
+        text, commands, on_attempt=on_attempt, on_tool_call=on_tool_call,
+        conversation_id=conv_id,
+    )
 
     for label, err in result.attempts:
         print(f"{ERR.DIM}  \u2717 {label} \u2014 {err}{ERR.RESET}", file=sys.stderr, flush=True)
@@ -595,16 +608,75 @@ def main():
         return
 
     if argv[0] == "ai-clear":
-        from . import history
-        history.clear()
+        from . import conversations
+        conv_id = os.environ.get("JARVIS_CONVERSATION_ID")
+        if not conversations.is_valid_id(conv_id):
+            conv_id = conversations.get_current_id()
+        conversations.clear(conv_id)
         print("Conversation history cleared \u2014 next ask starts with a clean slate.")
         return
 
     if argv[0] == "ai-drop-from":
-        from . import history
+        from . import conversations
+        conv_id = os.environ.get("JARVIS_CONVERSATION_ID")
+        if not conversations.is_valid_id(conv_id):
+            conv_id = conversations.get_current_id()
         target = " ".join(argv[1:]).strip()
-        history.drop_from_user(target)
+        conversations.drop_from_user(conv_id, target)
         print("ok")
+        return
+
+    if argv[0] == "conv-new":
+        from . import conversations
+        title = " ".join(argv[1:]).strip() or None
+        conv_id = conversations.new_conversation(title=title)
+        record = conversations.get_conversation(conv_id)
+        print(json.dumps({
+            "id": record["id"],
+            "title": record["title"],
+            "soft_context": record["soft_context"],
+            "created_at": record["created_at"],
+            "updated_at": record["updated_at"],
+            "exchange_count": 0,
+        }, indent=2))
+        return
+
+    if argv[0] == "conv-list":
+        from . import conversations
+        query = " ".join(argv[1:]).strip() or None
+        print(json.dumps(conversations.list_conversations(query), indent=2))
+        return
+
+    if argv[0] == "conv-show":
+        from . import conversations
+        conv_id = argv[1].strip() if len(argv) > 1 else ""
+        record = conversations.get_conversation(conv_id) if conversations.is_valid_id(conv_id) else None
+        if not record:
+            print(json.dumps({"error": "no such conversation"}))
+            sys.exit(1)
+        print(json.dumps(record, indent=2))
+        return
+
+    if argv[0] == "conv-switch":
+        from . import conversations
+        conv_id = argv[1].strip() if len(argv) > 1 else ""
+        if not conversations.is_valid_id(conv_id) or not conversations.get_conversation(conv_id):
+            print(json.dumps({"error": "no such conversation"}))
+            sys.exit(1)
+        conversations.set_current(conv_id)
+        print(json.dumps({"ok": True, "id": conv_id}))
+        return
+
+    if argv[0] == "conv-delete":
+        from . import conversations
+        conv_id = argv[1].strip() if len(argv) > 1 else ""
+        if not conversations.is_valid_id(conv_id):
+            print(json.dumps({"error": "invalid conversation id"}))
+            sys.exit(1)
+        ok = conversations.delete_conversation(conv_id)
+        print(json.dumps({"ok": ok}))
+        if not ok:
+            sys.exit(1)
         return
 
     if argv[0] == "playnite-config":
