@@ -140,6 +140,7 @@
     // sidebar list, refreshed from /api/conversations.
     conversations: [],           // [{id,title,soft_context,created_at,updated_at,exchange_count}]
     activeConversationId: null,  // which one the open thread + next ask belong to
+    askConversationId: null,     // which conversation the in-flight ask/redo actually belongs to
     convoSearch: "",
   };
 
@@ -726,6 +727,7 @@
         // The reply may have just (re)titled this conversation — refresh
         // the sidebar so its card picks up the new title/gist.
         if (msg.code === 0) refreshConvoList();
+        state.askConversationId = null;
         break;
       }
       case "ask-error":
@@ -738,6 +740,7 @@
         askPromptEnd(1, null, msg.message);
         setAskStatus("error", "error");
         notifyTaskDone(msg.message, true);
+        state.askConversationId = null;
         break;
     }
   }
@@ -852,6 +855,7 @@
     }
     ensureNotifPermission();
     state.lastTaskLabel = text;
+    state.askConversationId = state.activeConversationId;
     wsSend({ type: "ask", text, redo: true, conversationId: state.activeConversationId });
   }
 
@@ -872,7 +876,18 @@
     return msg;
   }
 
+  // True while the conversation thread currently on screen is the same one
+  // an in-flight ask/redo actually belongs to. If the user has switched to
+  // a different conversation while a reply is still streaming in, we must
+  // not paint that reply into the (now unrelated) visible thread — the
+  // exchange is still being saved server-side regardless, and will show up
+  // correctly next time this conversation is opened.
+  function isViewingAskThread() {
+    return state.askConversationId == null || state.askConversationId === state.activeConversationId;
+  }
+
   function addJarvisBubblePending() {
+    if (!isViewingAskThread()) return null;
     clearAskEmptyHint();
     const msg = el("div", { class: "ask-msg ask-msg--jarvis is-pending" }, [
       el("div", { class: "ask-msg__role" }, "Jarvis"),
@@ -886,6 +901,7 @@
   }
 
   function addAskPromptTrace(raw) {
+    if (!isViewingAskThread()) return;
     const line = stripAnsi(raw).trim();
     if (!line) return;
     if (line.startsWith("JARVIS_MEDIA\t")) {
@@ -903,6 +919,7 @@
   }
 
   function showAskScreenshot(filename) {
+    if (!isViewingAskThread()) return;
     if (!/^ss_[A-Za-z0-9_.-]+\.png$/.test(filename)) return;
     clearAskEmptyHint();
     const url = `/api/screenshots/${encodeURIComponent(filename)}`;
@@ -1058,7 +1075,7 @@
   }
 
   function appendAskReplyLine(line) {
-    if (!state.askPendingBubble) return;
+    if (!isViewingAskThread() || !state.askPendingBubble) return;
     state.askReplyLines.push(line);
     const { name, dump, reply } = splitConsoleDump(state.askReplyLines);
     if (name) qs(".ask-msg__role", state.askPendingBubble).textContent = name;
@@ -1069,6 +1086,12 @@
   }
 
   function finalizeAskBubble(overrideMessage) {
+    if (!isViewingAskThread()) {
+      state.askPendingBubble = null;
+      state.askReplyLines = [];
+      state.askTraceBubble = null;
+      return;
+    }
     const bubble = state.askPendingBubble;
     if (bubble) {
       bubble.classList.remove("is-pending");
@@ -1237,6 +1260,7 @@
     addUserBubble(text, quotes);
     ensureNotifPermission();
     state.lastTaskLabel = text || (quotes[0] || "that");
+    state.askConversationId = state.activeConversationId;
     wsSend({
       type: "ask",
       text,
@@ -1718,9 +1742,12 @@
 
   async function selectConversation(id) {
     if (id === state.activeConversationId) return;
-    if (state.running) {
-      toast("Wait for the current reply to finish before switching chats.");
-      return;
+    // Switching is always allowed, even mid-reply: if an ask is still in
+    // flight for the conversation we're leaving, it keeps running in the
+    // background and saves normally — we just stop painting it into a
+    // thread that isn't showing it anymore (see isViewingAskThread()).
+    if (state.running && state.askConversationId && state.askConversationId === state.activeConversationId) {
+      toast("Still replying in the other chat \u2014 it'll be saved there.", "info");
     }
     let record;
     try {
@@ -2343,6 +2370,17 @@
     // Silent: the boot sequence + status pill already explain an offline
     // CLI on first load, so a third toast on top would just be noise.
     await loadCommands({ silent: !status.online });
+    // Load every saved conversation into the sidebar first (they live on
+    // disk under ~/.jarvis/conversations and are shared across every
+    // browser/session that hits this server — this was previously never
+    // called, so old conversations looked "lost" on a fresh page load even
+    // though they were still on disk). Then start today's fresh thread on
+    // top of that list, per the "opening the page always starts a new
+    // conversation" design.
+    if (status.online) {
+      await refreshConvoList();
+      await startNewConversation();
+    }
     connectWs();
   }
 
