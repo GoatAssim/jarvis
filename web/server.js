@@ -26,7 +26,7 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PORT = Number(process.env.PORT) || 4173;
 const HOST = "127.0.0.1";
 
-const RESERVED_NAMES = new Set(["config", "ai-config", "ai-clear", "ai-drop-from", "playnite-config", "spotify-config", "spotify-login", "memory-config", "tools-list", "tool-run", "conv-new", "conv-list", "conv-show", "conv-switch", "conv-delete", "then", "and", "-h", "--help"]);
+const RESERVED_NAMES = new Set(["config", "ai-config", "ai-clear", "ai-drop-from", "playnite-config", "spotify-config", "spotify-login", "memory-config", "tools-list", "tool-run", "tool-preview", "tool-safety-set", "conv-new", "conv-list", "conv-show", "conv-switch", "conv-delete", "then", "and", "-h", "--help"]);
 
 // ---------------------------------------------------------------------------
 // Locate the real jarvis binary. Tries a few invocation strategies, in
@@ -507,6 +507,56 @@ app.post("/api/tools/run", requireJarvis, async (req, res) => {
   res.status(500).json({ error: result.error || result.stderr || "Tool run failed.", raw: result.stdout, stderr: result.stderr });
 });
 
+// Debug dashboard: check whether a tool call would be gated by a
+// confirmation prompt, and (if AI review is on for it) get a second
+// provider's risk note — without actually running the tool. The RUN
+// button calls this first; only a follow-up call to /api/tools/run
+// (above), after the user clicks "Yes", actually executes anything.
+app.post("/api/tools/preview", requireJarvis, async (req, res) => {
+  const name = typeof req.body?.name === "string" ? req.body.name.trim() : "";
+  if (!name) {
+    return res.status(400).json({ error: "Missing tool name." });
+  }
+  let argsJson;
+  try {
+    argsJson = JSON.stringify(req.body?.arguments && typeof req.body.arguments === "object" ? req.body.arguments : {});
+  } catch (e) {
+    return res.status(400).json({ error: `Couldn't serialize arguments: ${e.message}` });
+  }
+  // Generous timeout: when ai_review is on this makes a real network call
+  // to a second AI provider before responding.
+  const result = await runJarvisOnce(["tool-preview", name, argsJson], 30000);
+  let parsed;
+  try {
+    parsed = JSON.parse(result.stdout);
+  } catch { /* not JSON — fall through */ }
+  if (parsed !== undefined) {
+    return res.json(parsed);
+  }
+  res.status(500).json({ error: result.error || result.stderr || "Tool preview failed." });
+});
+
+// Debug dashboard: flip one of a tool's two safety toggles (confirm_required
+// or ai_review — see jarvis-cli/jarvis/tool_safety.py). Returns the tool's
+// full updated flag set.
+app.post("/api/tools/safety", requireJarvis, async (req, res) => {
+  const name = typeof req.body?.name === "string" ? req.body.name.trim() : "";
+  const key = typeof req.body?.key === "string" ? req.body.key.trim() : "";
+  if (!name || !["confirm_required", "ai_review"].includes(key)) {
+    return res.status(400).json({ error: "Missing or invalid name/key." });
+  }
+  const value = req.body?.value ? "true" : "false";
+  const result = await runJarvisOnce(["tool-safety-set", name, key, value], 15000);
+  let parsed;
+  try {
+    parsed = JSON.parse(result.stdout);
+  } catch { /* not JSON — fall through */ }
+  if (parsed !== undefined && !parsed.error) {
+    return res.json(parsed);
+  }
+  res.status(500).json({ error: (parsed && parsed.error) || result.error || result.stderr || "Couldn't update tool safety flag." });
+});
+
 // `jarvis ai-config` prints (and creates, if missing) the path to
 // ai_config.json \u2014 same trick runJarvisOnce already uses for `ai-clear`,
 // reused here instead of guessing the path ourselves, so this server never
@@ -814,7 +864,13 @@ const MAX_ASK_LENGTH = 4000;
 // either way, since an AI ask *is* just `jarvis "<free text>"` under the
 // hood (see jarvis-cli/jarvis/cli.py: handle_ai_prompt). Only one of
 // either kind runs at a time per connection, tracked via ws.activeChild.
-function spawnAndStream(ws, kind, fullArgs, types, extraEnv = {}) {
+//
+// onStdoutLine(line), if given, gets first look at every stdout line before
+// it's forwarded as a normal stdout message — return true to swallow the
+// line, falsy to let it through as usual. Used by the "ask" flow to catch
+// "JARVIS_CONFIRM_REQUEST {...}" lines (see cli.py's on_confirm_request)
+// and turn them into ask-confirm-request instead of chat-bubble text.
+function spawnAndStream(ws, kind, fullArgs, types, extraEnv = {}, onStdoutLine = null) {
   let child;
   try {
     child = spawn(JARVIS.cmd, fullArgs, {
@@ -834,7 +890,10 @@ function spawnAndStream(ws, kind, fullArgs, types, extraEnv = {}) {
   ws.activeChild = child;
   ws.activeKind = kind;
 
-  const onOut = makeLineBuffer((line) => send(ws, { type: types.stdout, line }));
+  const onOut = makeLineBuffer((line) => {
+    if (onStdoutLine && onStdoutLine(line)) return;
+    send(ws, { type: types.stdout, line });
+  });
   const onErr = makeLineBuffer((line) => send(ws, { type: types.stderr, line }));
   child.stdout.on("data", onOut);
   child.stderr.on("data", onErr);
@@ -956,7 +1015,38 @@ wss.on("connection", (ws) => {
       if (typeof msg.allowedTools === "string") {
         extraEnv.JARVIS_ALLOWED_TOOLS = msg.allowedTools;
       }
-      spawnAndStream(ws, "ask", fullArgs, ASK_TYPES, extraEnv);
+      const CONFIRM_MARKER = "JARVIS_CONFIRM_REQUEST ";
+      const onStdoutLine = (line) => {
+        if (!line.startsWith(CONFIRM_MARKER)) return false;
+        let payload;
+        try {
+          payload = JSON.parse(line.slice(CONFIRM_MARKER.length));
+        } catch {
+          return false; // malformed — let it through as plain text rather than swallow it silently
+        }
+        send(ws, {
+          type: "ask-confirm-request",
+          tool: payload.tool,
+          arguments: payload.arguments || {},
+          risk_note: payload.risk_note || null,
+        });
+        return true;
+      };
+      spawnAndStream(ws, "ask", fullArgs, ASK_TYPES, extraEnv, onStdoutLine);
+      return;
+    }
+
+    if (msg.type === "ask-confirm-response") {
+      // The user clicked Yes/No on a confirmation prompt the running ask
+      // is blocked waiting on (see cli.py's on_confirm_request — it's
+      // doing a blocking sys.stdin.readline() right now). Write the
+      // answer straight to its stdin; it picks up on the very next line.
+      if (!ws.activeChild || ws.activeKind !== "ask") return;
+      try {
+        ws.activeChild.stdin.write((msg.approved ? "y" : "n") + "\n");
+      } catch {
+        /* child may have already exited — nothing to do */
+      }
       return;
     }
   });

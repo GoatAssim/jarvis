@@ -134,6 +134,7 @@
     debugResponseMode: "organized", // "organized" | "raw"
     debugLastResult: null,   // last {ok, result, raw, stderr, error} from /api/tools/run
     debugLastResultError: false,
+    debugPendingConfirm: null, // {name, arguments, risk_note} awaiting Yes/No before /api/tools/run
 
     // Conversations — every saved chat lives in ~/.jarvis/conversations
     // (see conversations.py); this is just the in-memory mirror for the
@@ -183,6 +184,8 @@
     putMemoryRaw: (text) => api("PUT", "/api/memory/raw", { text }),
     listTools: () => api("GET", "/api/tools"),
     runTool: (name, arguments_) => api("POST", "/api/tools/run", { name, arguments: arguments_ }),
+    previewTool: (name, arguments_) => api("POST", "/api/tools/preview", { name, arguments: arguments_ }),
+    setToolSafety: (name, key, value) => api("POST", "/api/tools/safety", { name, key, value }),
     listConversations: (q) => api("GET", `/api/conversations${q ? `?q=${encodeURIComponent(q)}` : ""}`),
     createConversation: (title) => api("POST", "/api/conversations", title ? { title } : {}),
     getConversation: (id) => api("GET", `/api/conversations/${encodeURIComponent(id)}`),
@@ -717,6 +720,10 @@
       case "ask-stderr":
         addAskPromptTrace(msg.line);
         break;
+      case "ask-confirm-request":
+        addAskConfirmBubble(msg.tool, msg.arguments, msg.risk_note);
+        setAskStatus("waiting for your confirmation\u2026", "busy");
+        break;
       case "ask-exit": {
         setRunning(false);
         const raw = state.askReplyLines.length ? state.askReplyLines.join("\n") : "";
@@ -1074,6 +1081,52 @@
     askThreadScrollToEnd();
   }
 
+  // A tool flagged confirm_required (see jarvis-cli/jarvis/tool_safety.py)
+  // pauses the running ask and asks the browser to decide. cli.py's
+  // on_confirm_request is blocked on a synchronous stdin read right now —
+  // server.js relays the answer straight to it, so until Yes/No is
+  // clicked here the ask genuinely cannot proceed.
+  function addAskConfirmBubble(tool, args, riskNote) {
+    clearAskEmptyHint();
+    const argsStr = JSON.stringify(args || {}, null, 2);
+    const bubbleChildren = [
+      el("div", { class: "ask-confirm__tool" }, tool || "(unknown tool)"),
+      el("pre", { class: "ask-confirm__args" }, argsStr),
+    ];
+    if (riskNote && riskNote.note) {
+      const label = riskNote.provider ? `AI review \u2014 ${riskNote.provider}` : "AI review";
+      bubbleChildren.push(el("div", { class: "ask-confirm__risk" }, [
+        el("div", { class: "ask-confirm__risk-label" }, label),
+        el("div", { class: "ask-confirm__risk-note" }, riskNote.note),
+      ]));
+    }
+    const yesBtn = el("button", { class: "btn btn--primary ask-confirm__btn", type: "button" }, "Yes, run it");
+    const noBtn = el("button", { class: "btn btn--ghost ask-confirm__btn", type: "button" }, "No, cancel");
+    const actions = el("div", { class: "ask-confirm__actions" }, [yesBtn, noBtn]);
+    bubbleChildren.push(actions);
+
+    const msg = el("div", { class: "ask-msg ask-msg--jarvis ask-msg--confirm" }, [
+      el("div", { class: "ask-msg__role" }, "Confirm"),
+      el("div", { class: "ask-msg__bubble ask-msg__bubble--confirm" }, bubbleChildren),
+    ]);
+
+    function resolve(approved) {
+      yesBtn.disabled = true;
+      noBtn.disabled = true;
+      actions.appendChild(el("div", { class: `ask-confirm__result ${approved ? "is-yes" : "is-no"}` },
+        approved ? "\u2713 Approved \u2014 running\u2026" : "\u2717 Declined"));
+      wsSend({ type: "ask-confirm-response", approved });
+      setAskStatus("thinking\u2026", "busy");
+    }
+    yesBtn.addEventListener("click", () => resolve(true));
+    noBtn.addEventListener("click", () => resolve(false));
+
+    if (state.askPendingBubble) askThread.insertBefore(msg, state.askPendingBubble);
+    else askThread.appendChild(msg);
+    askThreadScrollToEnd();
+    return msg;
+  }
+
   function appendAskReplyLine(line) {
     if (!isViewingAskThread() || !state.askPendingBubble) return;
     state.askReplyLines.push(line);
@@ -1336,6 +1389,36 @@
 
   // ---- LEFT pane: description + parameter docs -----------------------------
 
+  // A single "Toggle warning:"/"Toggle AI review:" switch under a tool's
+  // description. Flips jarvis-cli/jarvis/tool_safety.json's per-tool flags
+  // immediately (no separate save step) via /api/tools/safety, and mutates
+  // the in-memory tool object in place so the confirm flow below reads the
+  // change right away without a full tool-list reload.
+  function debugToggleRow(tool, key, label) {
+    const input = el("input", { type: "checkbox", class: "safety-toggle__input" });
+    input.checked = !!tool[key];
+    const row = el("label", { class: "safety-toggle" }, [
+      input,
+      el("span", { class: "safety-toggle__track" }),
+      el("span", { class: "safety-toggle__label" }, label),
+    ]);
+    input.addEventListener("change", async () => {
+      const next = input.checked;
+      input.disabled = true;
+      try {
+        const updated = await Api.setToolSafety(tool.name, key, next);
+        tool[key] = !!(updated && key in updated ? updated[key] : next);
+        input.checked = tool[key];
+      } catch (e) {
+        input.checked = !next; // revert on failure
+        toast(`Couldn't update ${label.toLowerCase()} for ${tool.name}: ${e.message}`);
+      } finally {
+        input.disabled = false;
+      }
+    });
+    return row;
+  }
+
   function renderDebugDocs(tool) {
     debugDocs.innerHTML = "";
     if (!tool) {
@@ -1345,6 +1428,11 @@
     debugDocs.appendChild(el("div", { class: "debug-docs__name" }, tool.name));
     debugDocs.appendChild(el("div", { class: "debug-docs__desc" },
       tool.description || "No description provided by this tool."));
+
+    debugDocs.appendChild(el("div", { class: "debug-docs__safety" }, [
+      debugToggleRow(tool, "confirm_required", "Toggle warning:"),
+      debugToggleRow(tool, "ai_review", "Toggle AI review:"),
+    ]));
 
     const entries = debugParamEntries(tool.parameters);
     if (!entries.length) {
@@ -1525,6 +1613,10 @@
   function renderDebugResponse() {
     debugResponse.innerHTML = "";
     debugResponse.classList.remove("is-error");
+    if (state.debugPendingConfirm) {
+      debugResponse.appendChild(debugRenderConfirmPending(state.debugPendingConfirm));
+      return;
+    }
     const last = state.debugLastResult;
     if (!last) {
       debugResponse.appendChild(el("div", { class: "debug-empty" }, "Response will appear here after you run a tool."));
@@ -1541,6 +1633,59 @@
     } else {
       debugResponse.appendChild(debugRenderOrganized(payload));
     }
+  }
+
+  // Shown in the response pane, in place of a result, while a
+  // confirm_required tool's run is waiting on Yes/No — mirrors the same
+  // "raw JSON has the prompt + buttons" shape as the chat confirm bubble
+  // (see addAskConfirmBubble), just scoped to a manual debug-dashboard run.
+  function debugRenderConfirmPending(pending) {
+    const wrap = el("div", { class: "debug-confirm" });
+    if (state.debugResponseMode === "raw") {
+      wrap.appendChild(el("pre", {}, JSON.stringify({
+        tool: pending.name, arguments: pending.arguments, risk_note: pending.risk_note,
+      }, null, 2)));
+    } else {
+      wrap.appendChild(el("div", { class: "debug-confirm__tool" }, pending.name));
+      wrap.appendChild(el("pre", { class: "debug-confirm__args" }, JSON.stringify(pending.arguments || {}, null, 2)));
+      if (pending.risk_note && pending.risk_note.note) {
+        const label = pending.risk_note.provider ? `AI review \u2014 ${pending.risk_note.provider}` : "AI review";
+        wrap.appendChild(el("div", { class: "debug-confirm__risk" }, [
+          el("div", { class: "debug-confirm__risk-label" }, label),
+          el("div", { class: "debug-confirm__risk-note" }, pending.risk_note.note),
+        ]));
+      }
+    }
+    const yesBtn = el("button", { class: "btn btn--primary", type: "button" }, "Y \u2014 run it");
+    const noBtn = el("button", { class: "btn btn--ghost", type: "button" }, "N \u2014 cancel");
+    wrap.appendChild(el("div", { class: "debug-confirm__actions" }, [yesBtn, noBtn]));
+
+    yesBtn.addEventListener("click", async () => {
+      yesBtn.disabled = true;
+      noBtn.disabled = true;
+      debugStatusLine.textContent = `running ${pending.name}\u2026`;
+      debugStatusLine.classList.add("is-busy");
+      debugStatusLine.classList.remove("is-error", "is-ok");
+      try {
+        await debugRunNow(pending.name, pending.arguments);
+      } catch (e) {
+        state.debugLastResult = { error: e.message };
+        debugStatusLine.textContent = "request failed";
+        debugStatusLine.classList.add("is-error");
+      } finally {
+        state.debugPendingConfirm = null;
+        debugStatusLine.classList.remove("is-busy");
+        renderDebugResponse();
+      }
+    });
+    noBtn.addEventListener("click", () => {
+      state.debugPendingConfirm = null;
+      state.debugLastResult = { result: { ok: false, cancelled: true, message: `You declined to run '${pending.name}'.` } };
+      debugStatusLine.textContent = "cancelled";
+      debugStatusLine.classList.remove("is-error", "is-ok", "is-busy");
+      renderDebugResponse();
+    });
+    return wrap;
   }
 
   qs("#debug-response-toggle").addEventListener("click", (e) => {
@@ -1577,6 +1722,7 @@
   function debugSelectTool(name) {
     state.debugSelected = name;
     state.debugLastResult = null;
+    state.debugPendingConfirm = null;
     const tool = debugFindTool(name);
     renderDebugDocs(tool);
     renderDebugArgs(tool);
@@ -1591,6 +1737,17 @@
 
   // ---- Run ------------------------------------------------------------------
 
+  // Actually calls /api/tools/run and stashes the result — split out so
+  // both the direct (non-sensitive) path below and the confirm dialog's
+  // Yes button (debugRenderConfirmPending) can share it.
+  async function debugRunNow(name, args) {
+    const res = await Api.runTool(name, args);
+    state.debugLastResult = res.ok !== false ? { result: res.result } : { error: res.error || "Tool run failed." };
+    debugStatusLine.textContent = res.ok !== false ? "done" : "tool run failed";
+    debugStatusLine.classList.toggle("is-error", res.ok === false);
+    debugStatusLine.classList.toggle("is-ok", res.ok !== false);
+  }
+
   btnDebugRun.addEventListener("click", async () => {
     if (!state.debugSelected) return;
     let args;
@@ -1598,21 +1755,36 @@
       args = debugCollectArgs();
     } catch (e) {
       state.debugLastResult = { error: e.message };
+      state.debugPendingConfirm = null;
       renderDebugResponse();
       return;
     }
+    const tool = debugFindTool(state.debugSelected);
     btnDebugRun.disabled = true;
-    debugStatusLine.textContent = `running ${state.debugSelected}\u2026`;
-    debugStatusLine.classList.add("is-busy");
     debugStatusLine.classList.remove("is-error", "is-ok");
     try {
-      const res = await Api.runTool(state.debugSelected, args);
-      state.debugLastResult = res.ok !== false ? { result: res.result } : { error: res.error || "Tool run failed." };
-      debugStatusLine.textContent = res.ok !== false ? "done" : "tool run failed";
-      debugStatusLine.classList.toggle("is-error", res.ok === false);
-      debugStatusLine.classList.toggle("is-ok", res.ok !== false);
+      if (tool && tool.confirm_required) {
+        // Don't run anything yet — ask jarvis what this call would do (and,
+        // if ai_review is on for this tool, a second provider's risk note),
+        // then wait for Yes/No before ever calling /api/tools/run for real.
+        debugStatusLine.textContent = `checking ${state.debugSelected}\u2026`;
+        debugStatusLine.classList.add("is-busy");
+        state.debugLastResult = null;
+        const preview = await Api.previewTool(state.debugSelected, args);
+        state.debugPendingConfirm = {
+          name: state.debugSelected,
+          arguments: args,
+          risk_note: (preview && preview.risk_note) || null,
+        };
+        debugStatusLine.textContent = "awaiting confirmation";
+      } else {
+        debugStatusLine.textContent = `running ${state.debugSelected}\u2026`;
+        debugStatusLine.classList.add("is-busy");
+        await debugRunNow(state.debugSelected, args);
+      }
     } catch (e) {
       state.debugLastResult = { error: e.message };
+      state.debugPendingConfirm = null;
       debugStatusLine.textContent = "request failed";
       debugStatusLine.classList.add("is-error");
     } finally {
