@@ -578,8 +578,12 @@ def _extract_json_object(text):
 def _quick_title_completion(cfg, user_text, jarvis_text):
     """One cheap, history-free completion asking for {"title", "soft_context"}
     JSON describing this exchange. Tries at most the first two eligible
-    providers and gives up quietly on failure — this is cosmetic, never
-    allowed to block or break an actual ask."""
+    providers — but, same as the main ask() failover, every configured key
+    for each of those providers before moving on — and gives up quietly on
+    failure; this is cosmetic, never allowed to block or break an actual
+    ask. (Previously this only ever tried a provider's first key, so a
+    single blocked/rate-limited key could skip a provider's other working
+    keys entirely instead of failing over to them.)"""
     providers = _eligible_providers(cfg["providers"], cfg["defaults"])
     if not providers:
         return None
@@ -598,18 +602,19 @@ def _quick_title_completion(cfg, user_text, jarvis_text):
         if adapter is None:
             continue
         keys = ai_config.provider_keys(provider) or [None]
-        resolved = _resolve(provider, cfg["defaults"])
-        if keys[0] is not None:
-            resolved["api_key"] = keys[0]
-        try:
-            result = adapter(
-                resolved, messages, min(resolved["timeout"], 15),
-                tools=None, tool_executor=None,
-            )
-        except Exception:
-            continue
-        if result.ok and result.text:
-            return result.text
+        for key in keys:
+            resolved = _resolve(provider, cfg["defaults"])
+            if key is not None:
+                resolved["api_key"] = key
+            try:
+                result = adapter(
+                    resolved, messages, min(resolved["timeout"], 15),
+                    tools=None, tool_executor=None,
+                )
+            except Exception:
+                continue
+            if result.ok and result.text:
+                return result.text
     return None
 
 
