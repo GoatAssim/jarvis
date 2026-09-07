@@ -26,7 +26,7 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PORT = Number(process.env.PORT) || 4173;
 const HOST = "127.0.0.1";
 
-const RESERVED_NAMES = new Set(["config", "ai-config", "ai-clear", "ai-drop-from", "playnite-config", "spotify-config", "spotify-login", "memory-config", "tools-list", "tool-run", "then", "and", "-h", "--help"]);
+const RESERVED_NAMES = new Set(["config", "ai-config", "ai-clear", "ai-drop-from", "playnite-config", "spotify-config", "spotify-login", "memory-config", "tools-list", "tool-run", "conv-new", "conv-list", "conv-show", "conv-switch", "conv-delete", "then", "and", "-h", "--help"]);
 
 // ---------------------------------------------------------------------------
 // Locate the real jarvis binary. Tries a few invocation strategies, in
@@ -346,11 +346,14 @@ app.delete("/api/commands/:name", requireJarvis, async (req, res) => {
 // One-shot (non-streaming) invocation for quick, no-output-to-watch calls
 // like `jarvis ai-clear` \u2014 collects stdout/stderr and resolves when the
 // process exits, instead of going through the WebSocket streaming path.
-function runJarvisOnce(args, timeoutMs = 10000) {
+function runJarvisOnce(args, timeoutMs = 10000, extraEnv = {}) {
   return new Promise((resolve) => {
     let child;
     try {
-      child = spawn(JARVIS.cmd, [...JARVIS.args, ...args], { windowsHide: true });
+      child = spawn(JARVIS.cmd, [...JARVIS.args, ...args], {
+        windowsHide: true,
+        env: { ...process.env, ...extraEnv },
+      });
     } catch (e) {
       return resolve({ ok: false, error: e.message });
     }
@@ -373,12 +376,94 @@ function runJarvisOnce(args, timeoutMs = 10000) {
   });
 }
 
+
+// Conversation ids are jarvis-cli's secrets.token_hex(8) — 16 lowercase hex
+// chars. Validated the same way here as in conversations.py before ever
+// being interpolated into a `jarvis ...` argv or env var.
+const CONVERSATION_ID_RE = /^[a-f0-9]{8,64}$/;
+
+function isValidConversationId(id) {
+  return typeof id === "string" && CONVERSATION_ID_RE.test(id);
+}
+
+function conversationEnv(id) {
+  return isValidConversationId(id) ? { JARVIS_CONVERSATION_ID: id } : {};
+}
+
 app.post("/api/ai/clear", requireJarvis, async (req, res) => {
-  const result = await runJarvisOnce(["ai-clear"]);
+  const conversationId = typeof req.body?.conversationId === "string" ? req.body.conversationId : "";
+  const result = await runJarvisOnce(["ai-clear"], 10000, conversationEnv(conversationId));
   if (!result.ok) {
     return res.status(500).json({ error: result.error || result.stderr || "Couldn't clear history." });
   }
   res.json({ ok: true, message: result.stdout });
+});
+
+// ---------------------------------------------------------------------------
+// Conversations — every one lives in ~/.jarvis/conversations on the
+// machine running jarvis-cli (see conversations.py), never anywhere else.
+// The web UI is just a thin client over `jarvis conv-*`, same pattern as
+// the tool debug dashboard's `jarvis tool-run`.
+// ---------------------------------------------------------------------------
+
+app.get("/api/conversations", requireJarvis, async (req, res) => {
+  const q = typeof req.query.q === "string" ? req.query.q.trim() : "";
+  const args = q ? ["conv-list", q] : ["conv-list"];
+  const result = await runJarvisOnce(args, 10000);
+  if (!result.ok) {
+    return res.status(500).json({ error: result.error || result.stderr || "Couldn't list conversations." });
+  }
+  try {
+    res.json(JSON.parse(result.stdout));
+  } catch (e) {
+    res.status(500).json({ error: `Couldn't parse conv-list: ${e.message}` });
+  }
+});
+
+app.post("/api/conversations", requireJarvis, async (req, res) => {
+  const title = typeof req.body?.title === "string" ? req.body.title.trim() : "";
+  const args = title ? ["conv-new", title] : ["conv-new"];
+  const result = await runJarvisOnce(args, 10000);
+  if (!result.ok) {
+    return res.status(500).json({ error: result.error || result.stderr || "Couldn't start a new conversation." });
+  }
+  try {
+    res.json(JSON.parse(result.stdout));
+  } catch (e) {
+    res.status(500).json({ error: `Couldn't parse conv-new: ${e.message}` });
+  }
+});
+
+app.get("/api/conversations/:id", requireJarvis, async (req, res) => {
+  if (!isValidConversationId(req.params.id)) {
+    return res.status(400).json({ error: "Invalid conversation id." });
+  }
+  const result = await runJarvisOnce(["conv-show", req.params.id], 10000);
+  let parsed;
+  try {
+    parsed = JSON.parse(result.stdout);
+  } catch { /* fall through to generic error below */ }
+  if (parsed && parsed.error) {
+    return res.status(404).json(parsed);
+  }
+  if (!result.ok || !parsed) {
+    return res.status(500).json({ error: result.error || result.stderr || "Couldn't load conversation." });
+  }
+  res.json(parsed);
+});
+
+app.delete("/api/conversations/:id", requireJarvis, async (req, res) => {
+  if (!isValidConversationId(req.params.id)) {
+    return res.status(400).json({ error: "Invalid conversation id." });
+  }
+  const result = await runJarvisOnce(["conv-delete", req.params.id], 10000);
+  try {
+    const parsed = JSON.parse(result.stdout);
+    if (!parsed.ok) return res.status(404).json(parsed);
+    return res.json(parsed);
+  } catch (e) {
+    res.status(500).json({ error: result.error || result.stderr || `Couldn't delete conversation: ${e.message}` });
+  }
 });
 
 app.get("/api/tools", requireJarvis, async (req, res) => {
@@ -858,7 +943,7 @@ wss.on("connection", (ws) => {
       }
 
       if (msg.redo) {
-        await runJarvisOnce(["ai-drop-from", text]);
+        await runJarvisOnce(["ai-drop-from", text], 10000, conversationEnv(msg.conversationId));
       }
 
       // A single argv element, exactly like typing `jarvis "<text>"` at a
@@ -867,7 +952,7 @@ wss.on("connection", (ws) => {
       // it contains, with no injection risk.
       const fullArgs = [...JARVIS.args, prompt];
       send(ws, { type: "ask-start", cmdline: [JARVIS.cmd, ...JARVIS.args, "<your message>"].join(" ") });
-      const extraEnv = {};
+      const extraEnv = { ...conversationEnv(msg.conversationId) };
       if (typeof msg.allowedTools === "string") {
         extraEnv.JARVIS_ALLOWED_TOOLS = msg.allowedTools;
       }

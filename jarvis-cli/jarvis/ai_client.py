@@ -11,7 +11,7 @@ told about itself, and what gets remembered.
 import json
 import re
 
-from . import ai_config, ai_providers, history, memory, playnite_config, stats
+from . import ai_config, ai_providers, conversations, memory, playnite_config, stats
 from . import tools as system_tools
 
 DEFAULT_TIMEOUT = 30
@@ -29,6 +29,13 @@ COMPACT_RECAP_EXCHANGES = 16
 COMPACT_RECAP_CHAR_BUDGET = 1400
 DEFAULT_COMPACT_PROMPT = True
 DEFAULT_COMPACT_PROMPT_PROVIDERS = ("groq",)
+
+# How often a conversation's AI-generated title + one-line gist get
+# (re)computed: right after the very first exchange (so the sidebar has
+# something useful immediately), then every Nth exchange after that so it
+# stays roughly current without an extra AI round-trip on every single ask.
+TITLE_REGEN_EVERY = 5
+_JSON_OBJECT_RE = re.compile(r"\{.*\}", re.S)
 
 
 class AskResult:
@@ -277,7 +284,7 @@ def _tools_blurb(compact, has_playnite, has_spotify):
 
 def _system_prompt(persona, commands_ctx, freq_ctx, tools_enabled,
                    compact_tools=False, compact_persona=False, has_history=False,
-                   memory_ctx="", has_playnite=False, has_spotify=False):
+                   memory_ctx="", has_playnite=False, has_spotify=False, other_convos_ctx=""):
     name = persona.get("assistant_name") or DEFAULT_ASSISTANT_NAME
     address = persona.get("address_user_as") or DEFAULT_ADDRESS
     extra = (persona.get("extra_instructions") or "").strip()
@@ -315,6 +322,8 @@ def _system_prompt(persona, commands_ctx, freq_ctx, tools_enabled,
         parts.append(_tools_blurb(compact_tools, has_playnite, has_spotify))
     if memory_ctx:
         parts.append(memory_ctx)
+    if other_convos_ctx:
+        parts.append(other_convos_ctx)
     playnite_ctx = playnite_config.frequent_games_context(
         5 if compact_persona else 8,
         compact=compact_persona,
@@ -330,7 +339,7 @@ def _system_prompt(persona, commands_ctx, freq_ctx, tools_enabled,
     return "\n\n".join(parts)
 
 
-def _build_messages(persona, commands, user_text, tools_enabled, profile):
+def _build_messages(persona, commands, user_text, tools_enabled, profile, conversation_id):
     compact = profile.get("compact_tools_blurb", False)
     commands_ctx = _commands_context(
         commands,
@@ -339,7 +348,8 @@ def _build_messages(persona, commands, user_text, tools_enabled, profile):
         compact=compact,
     )
     freq_ctx = stats.frequent_commands_context(commands) if profile["include_freq"] else ""
-    prior_turns = history.conversation_messages(
+    prior_turns = conversations.conversation_messages(
+        conversation_id,
         max_exchanges=profile["history_exchanges"],
         char_budget=profile["history_char_budget"],
         recap_exchanges=profile.get("recap_exchanges"),
@@ -356,6 +366,7 @@ def _build_messages(persona, commands, user_text, tools_enabled, profile):
         query=user_text or "",
         extra_texts=prior_user,
     )
+    other_convos_ctx = conversations.other_conversations_context(conversation_id)
     offered = system_tools.tool_schemas_for_session() if tools_enabled else []
     offered_names = {s["name"] for s in offered}
     system_prompt = _system_prompt(
@@ -369,6 +380,7 @@ def _build_messages(persona, commands, user_text, tools_enabled, profile):
         memory_ctx=memory_ctx,
         has_playnite=any(n.startswith("playnite_") for n in offered_names),
         has_spotify=any(n.startswith("spotify_") for n in offered_names),
+        other_convos_ctx=other_convos_ctx,
     )
     messages = [{"role": "system", "content": system_prompt}]
     messages.extend(prior_turns)
@@ -549,7 +561,92 @@ def _is_tool_trace_reply(text):
     return False
 
 
-def ask(user_text, commands=None, on_attempt=None, on_tool_call=None):
+
+def _extract_json_object(text):
+    if not text:
+        return None
+    match = _JSON_OBJECT_RE.search(text)
+    if not match:
+        return None
+    try:
+        obj = json.loads(match.group(0))
+    except json.JSONDecodeError:
+        return None
+    return obj if isinstance(obj, dict) else None
+
+
+def _quick_title_completion(cfg, user_text, jarvis_text):
+    """One cheap, history-free completion asking for {"title", "soft_context"}
+    JSON describing this exchange. Tries at most the first two eligible
+    providers and gives up quietly on failure — this is cosmetic, never
+    allowed to block or break an actual ask."""
+    providers = _eligible_providers(cfg["providers"], cfg["defaults"])
+    if not providers:
+        return None
+    prompt = (
+        "Give this exchange a short conversation title (3-6 words, title case, no quotes, "
+        "no trailing punctuation) and a one-sentence gist (under 20 words, third person) "
+        "suitable for a chat-history sidebar. Respond with ONLY compact JSON like "
+        '{"title": "...", "soft_context": "..."} and nothing else \u2014 no markdown, no '
+        "commentary.\n\n"
+        f"User: {conversations._truncate(user_text or '', 400)}\n"
+        f"Assistant: {conversations._truncate(jarvis_text or '', 400)}"
+    )
+    messages = [{"role": "user", "content": prompt}]
+    for provider in providers[:2]:
+        adapter = ai_providers.ADAPTERS.get(provider.get("type"))
+        if adapter is None:
+            continue
+        keys = ai_config.provider_keys(provider) or [None]
+        resolved = _resolve(provider, cfg["defaults"])
+        if keys[0] is not None:
+            resolved["api_key"] = keys[0]
+        try:
+            result = adapter(
+                resolved, messages, min(resolved["timeout"], 15),
+                tools=None, tool_executor=None,
+            )
+        except Exception:
+            continue
+        if result.ok and result.text:
+            return result.text
+    return None
+
+
+def _maybe_update_title(cfg, conversation_id, exchange_count, user_text, jarvis_text):
+    """(Re)titles a conversation right after its first exchange, then every
+    TITLE_REGEN_EVERY exchanges after that. Falls back to a heuristic title
+    (a truncated first line of the user's message) if the AI call fails, so
+    a conversation is never stuck saying "New Conversation" forever just
+    because one title request happened to fail."""
+    if exchange_count != 1 and exchange_count % TITLE_REGEN_EVERY != 0:
+        return
+    title = None
+    soft_context = None
+    try:
+        raw = _quick_title_completion(cfg, user_text, jarvis_text)
+        obj = _extract_json_object(raw) if raw else None
+        if obj:
+            t = obj.get("title")
+            s = obj.get("soft_context")
+            if isinstance(t, str) and t.strip():
+                title = t.strip().strip("\"'")
+            if isinstance(s, str) and s.strip():
+                soft_context = s.strip()
+    except Exception:
+        pass  # title generation is cosmetic — never let it break an ask
+    if title is None:
+        title = conversations._truncate((user_text or "").strip().splitlines()[0], 42) if user_text else None
+    if soft_context is None:
+        soft_context = conversations._truncate((user_text or "").strip(), 140) if user_text else None
+    if title or soft_context:
+        try:
+            conversations.update_meta(conversation_id, title=title, soft_context=soft_context)
+        except Exception:
+            pass
+
+
+def ask(user_text, commands=None, on_attempt=None, on_tool_call=None, conversation_id=None):
     """Ask Jarvis something, trying every configured, enabled provider in
     order until one answers \u2014 and within each provider, every one of its
     configured keys in order before moving on to the next provider. Always
@@ -568,11 +665,19 @@ def ask(user_text, commands=None, on_attempt=None, on_tool_call=None):
     ai_config.json's defaults.tools_enabled on every call, same as
     everything else here; set it to false to turn tool calling off
     entirely (e.g. to keep every ask to a single request).
+
+    conversation_id picks which conversation (see conversations.py) this
+    exchange belongs to and gets appended to. When omitted, the CLI's
+    on-disk "current" conversation is used (auto-created on first ever
+    use) — the web UI instead always passes one explicitly, since each
+    browser tab tracks its own active conversation.
     """
     cfg = ai_config.load_ai_config()
     persona = cfg["persona"]
     assistant_name = persona.get("assistant_name") or DEFAULT_ASSISTANT_NAME
     address = persona.get("address_user_as") or DEFAULT_ADDRESS
+
+    conv_id = conversation_id if conversations.is_valid_id(conversation_id) else conversations.get_current_id()
 
     providers = _eligible_providers(cfg["providers"], cfg["defaults"])
     if not providers:
@@ -611,7 +716,7 @@ def ask(user_text, commands=None, on_attempt=None, on_tool_call=None):
 
         for i, key in enumerate(keys, start=1):
             messages = _build_messages(
-                persona, commands, user_text, tools_enabled, profile
+                persona, commands, user_text, tools_enabled, profile, conv_id
             )
             runs = getattr(tool_executor, "runs", None) if tool_executor else None
             if runs:
@@ -640,7 +745,8 @@ def ask(user_text, commands=None, on_attempt=None, on_tool_call=None):
                 )
 
             if result.ok:
-                history.append_exchange(user_text, result.text, label)
+                exchange_count = conversations.append_exchange(conv_id, user_text, result.text, label)
+                _maybe_update_title(cfg, conv_id, exchange_count, user_text, result.text)
                 return AskResult(True, text=result.text, provider=label, attempts=attempts,
                                  assistant_name=assistant_name, address_user_as=address)
 
