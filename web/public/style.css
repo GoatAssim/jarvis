@@ -384,6 +384,12 @@ textarea:focus-visible, select:focus-visible, [tabindex]:focus-visible{
 }
 .btn--mode[data-mode="ultra"]:hover{ border-color: var(--green); box-shadow: 0 0 14px rgba(70,240,182,0.3); }
 
+/* Debug panel's own mode switch — visually identical to the global one
+   (same .btn--mode/data-mode coloring) but wired to a local-only override,
+   see app.js debugMode. margin-left:auto pushes it (and the close button
+   after it) to the right of the panel head, same trick as .topbar__status. */
+#btn-debug-mode-switch{ margin-left: auto; font-size: 11px; padding: 5px 10px; }
+
 .btn__spark{
   width: 7px; height: 7px; border-radius: 50%;
   background: var(--accent); box-shadow: 0 0 6px var(--accent);
