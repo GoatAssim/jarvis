@@ -41,7 +41,7 @@ ENCODING = "utf-8"
 
 CHAIN_SEP = "then"      # starts a new batch \u2014 waits for the previous one to finish
 PARALLEL_SEP = "and"    # joins the current batch \u2014 runs alongside whatever's already in it
-RESERVED_NAMES = {"config", "ai-config", "ai-clear", "ai-drop-from", "playnite-config", "spotify-config", "spotify-login", "memory-config", "tools-list", "tool-run", "tool-preview", "tool-safety-set", "conv-new", "conv-list", "conv-show", "conv-switch", "conv-delete", CHAIN_SEP, PARALLEL_SEP, "-h", "--help"}
+RESERVED_NAMES = {"config", "ai-config", "ai-clear", "ai-drop-from", "playnite-config", "spotify-config", "spotify-login", "memory-config", "tools-list", "tool-run", "tool-preview", "tool-safety-set", "conv-new", "conv-list", "conv-show", "conv-switch", "conv-delete", "organize-json", CHAIN_SEP, PARALLEL_SEP, "-h", "--help"}
 
 OUT = Palette(sys.stdout)  # actual command output: the banner, the command list
 ERR = Palette(sys.stderr)  # jarvis's own status/trace/error messages
@@ -837,6 +837,52 @@ def main():
             print(json.dumps({"error": str(e)}))
             sys.exit(1)
         print(json.dumps({"name": tool_name, **flags}, indent=2))
+        return
+
+    if argv[0] == "organize-json":
+        # jarvis organize-json <path> [--raw] [--json]
+        # Local file read + json.loads only — never touches ai_client, so
+        # this costs zero API tokens no matter how big the file is.
+        # Default: a human-readable tree (not JSON syntax). --raw: pretty
+        # json.dumps. --json: machine-readable payload for the web server
+        # (powers the "organize-json <path>" chat shortcut and its
+        # Organized/Raw JSON toggle).
+        from . import json_tools
+
+        rest = argv[1:]
+        want_raw = "--raw" in rest
+        want_json = "--json" in rest
+        positional = [a for a in rest if not a.startswith("--")]
+
+        if not positional:
+            usage = "usage: jarvis organize-json <path> [--raw] [--json]"
+            if want_json:
+                print(json.dumps({"ok": False, "error": usage}))
+            else:
+                print(f"{ERR.RED}{usage}{ERR.RESET}", file=sys.stderr)
+            sys.exit(1)
+
+        target = positional[0]
+        data, text, error = json_tools.read_json_file(target)
+
+        if error:
+            if want_json:
+                print(json.dumps({"ok": False, **error}))
+            else:
+                print(f"{ERR.RED}{error['error']}{ERR.RESET}", file=sys.stderr)
+                if error.get("snippet"):
+                    print(error["snippet"], file=sys.stderr)
+            sys.exit(1)
+
+        resolved = str(json_tools.resolve_path(target))
+        if want_json:
+            print(json.dumps({"ok": True, "path": resolved, "data": data, "text": text}))
+            return
+        if want_raw:
+            print(json.dumps(data, indent=2, ensure_ascii=False))
+            return
+        print(f"{OUT.DIM}{resolved}{OUT.RESET}")
+        print(json_tools.render_tree(data))
         return
 
     if argv[0] not in commands and argv[0] not in RESERVED_NAMES:
