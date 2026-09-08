@@ -48,6 +48,7 @@ DEFAULT_CONFIRM_REQUIRED = {
     "wifi_set",
     "bluetooth_set",
     "git_run",
+    "ytdl_download",
 }
 
 # run_custom_command is the one tool where a second AI opinion is on by

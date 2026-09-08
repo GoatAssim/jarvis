@@ -1178,6 +1178,14 @@
         askPromptLine(`$ screenshot  ${parts[2].trim()}`, "tool");
         return;
       }
+      if (parts[1] === "download" && parts[2] && parts[3]) {
+        const jobId = parts[2].trim();
+        const filename = parts[3].trim();
+        const title = (parts[4] || filename).trim();
+        showAskDownload(jobId, filename, title);
+        askPromptLine(`$ download  ${title}`, "tool");
+        return;
+      }
     }
     let cls = "sys";
     if (line.includes("\u2717")) cls = "fail";
@@ -1202,6 +1210,39 @@
           }),
         ]),
         el("div", { class: "ask-shot-cap" }, "Screenshot"),
+      ]),
+    ]);
+    insertIntoAskThread(msg);
+    askThreadScrollToEnd();
+  }
+
+  // A finished ytdl_download (see jarvis-cli/jarvis/ytdl_tools.py) — offers
+  // inline playback plus a real download link, keyed by the job's own
+  // folder so filenames (drawn from the video's title) never collide.
+  const DOWNLOAD_EXT_RE = /\.([A-Za-z0-9]+)$/;
+  const AUDIO_EXTS = new Set(["mp3", "m4a", "opus", "wav", "flac", "ogg"]);
+
+  function showAskDownload(jobId, filename, title) {
+    if (!isViewingAskThread()) return;
+    if (!/^dl_[A-Za-z0-9_-]+$/.test(jobId) || !filename) return;
+    clearAskEmptyHint();
+    const url = `/api/downloads/${encodeURIComponent(jobId)}/${encodeURIComponent(filename)}`;
+    const extMatch = DOWNLOAD_EXT_RE.exec(filename);
+    const ext = extMatch ? extMatch[1].toLowerCase() : "";
+    const isAudio = AUDIO_EXTS.has(ext);
+
+    const player = isAudio
+      ? el("audio", { class: "ask-dl-player", src: url, controls: "true", preload: "none" })
+      : el("video", { class: "ask-dl-player", src: url, controls: "true", preload: "none" });
+
+    const msg = el("div", { class: "ask-msg ask-msg--jarvis ask-msg--media" }, [
+      el("div", { class: "ask-msg__role" }, "Jarvis"),
+      el("div", { class: "ask-msg__bubble ask-msg__bubble--media" }, [
+        player,
+        el("div", { class: "ask-dl-footer" }, [
+          el("div", { class: "ask-shot-cap" }, title || filename),
+          el("a", { href: url, download: filename, class: "ask-dl-link" }, "Download"),
+        ]),
       ]),
     ]);
     insertIntoAskThread(msg);
@@ -1660,6 +1701,13 @@
       return;
     }
     if (!state.activeConversationId) await startNewConversation();
+    // Captured once, right after the conversation is guaranteed to exist —
+    // not re-read from state.activeConversationId further down. Between
+    // this await and wsSend below, the user could switch to a different
+    // conversation; reading state.activeConversationId twice could then
+    // send this ask under one id but mark askConversationId with another,
+    // misattributing every ask-stdout/ask-exit line that follows.
+    const conversationId = state.activeConversationId;
     input.value = "";
     askInputAutoGrow(input);
     state.askQuotes = [];
@@ -1668,12 +1716,12 @@
     addUserBubble(text, quotes);
     ensureNotifPermission();
     state.lastTaskLabel = text || (quotes[0] || "that");
-    state.askConversationId = state.activeConversationId;
+    state.askConversationId = conversationId;
     wsSend({
       type: "ask",
       text,
       quote: quotes.length ? quotes.join("\n---\n") : undefined,
-      conversationId: state.activeConversationId,
+      conversationId,
     });
   });
 
@@ -2085,6 +2133,59 @@
     return el("span", { class: "debug-kv__val" }, String(value));
   }
 
+  // search_files results get a "Reveal in Explorer" / "Open location" button
+  // per row (web console only — the CLI just prints paths, and clicking a
+  // button there makes no sense). Both call /api/tools/run directly against
+  // reveal_in_explorer / open_file_location, no model involved.
+  function debugFileActionButtons(path) {
+    if (!path) return null;
+    const revealBtn = el("button", { class: "btn btn--ghost btn--sm", type: "button" }, "Reveal in Explorer");
+    const openBtn = el("button", { class: "btn btn--ghost btn--sm", type: "button" }, "Open location");
+    const run = async (name, btn) => {
+      revealBtn.disabled = true;
+      openBtn.disabled = true;
+      const prevLabel = btn.textContent;
+      btn.textContent = "\u2026";
+      try {
+        const res = await Api.runTool(name, { path });
+        toast(res.ok !== false && !(res.result && res.result.error) ? "Done." : ((res.result && res.result.error) || res.error || "Failed."));
+      } catch (e) {
+        toast(e.message || "Failed.");
+      } finally {
+        revealBtn.disabled = false;
+        openBtn.disabled = false;
+        btn.textContent = prevLabel;
+      }
+    };
+    revealBtn.addEventListener("click", () => run("reveal_in_explorer", revealBtn));
+    openBtn.addEventListener("click", () => run("open_file_location", openBtn));
+    return el("div", { class: "debug-file-actions" }, [revealBtn, openBtn]);
+  }
+
+  // Custom organized view for search_files: same key/value tree for the
+  // top-level fields (query, count, ...), but each row in `results` gets
+  // the reveal/open buttons above instead of a plain nested dump.
+  function debugRenderSearchFilesResponse(payload) {
+    const wrap = el("div", { class: "debug-kv" });
+    for (const k of Object.keys(payload)) {
+      if (k === "results") continue;
+      wrap.appendChild(el("div", { class: "debug-kv__row" }, [
+        el("span", { class: "debug-kv__key" }, `${k}:`),
+        el("span", { class: "debug-kv__val" }, String(payload[k])),
+      ]));
+    }
+    (payload.results || []).forEach((item, i) => {
+      wrap.appendChild(el("div", { class: "debug-file-row" }, [
+        el("div", { class: "debug-kv__row" }, [
+          el("span", { class: "debug-kv__key" }, `[${i}]`),
+          debugRenderOrganized(item, 1),
+        ]),
+        debugFileActionButtons(item && item.path),
+      ]));
+    });
+    return wrap;
+  }
+
   function renderDebugResponse() {
     debugResponse.innerHTML = "";
     debugResponse.classList.remove("is-error");
@@ -2105,6 +2206,8 @@
     const payload = last.result;
     if (state.debugResponseMode === "raw") {
       debugResponse.appendChild(el("pre", {}, JSON.stringify(payload, null, 2)));
+    } else if (state.debugSelected === "search_files" && payload && Array.isArray(payload.results)) {
+      debugResponse.appendChild(debugRenderSearchFilesResponse(payload));
     } else {
       debugResponse.appendChild(debugRenderOrganized(payload));
     }

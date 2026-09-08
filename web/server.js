@@ -26,7 +26,7 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PORT = Number(process.env.PORT) || 4173;
 const HOST = "127.0.0.1";
 
-const RESERVED_NAMES = new Set(["config", "ai-config", "ai-clear", "ai-drop-from", "playnite-config", "spotify-config", "spotify-login", "memory-config", "tools-list", "tool-run", "tool-preview", "tool-safety-set", "conv-new", "conv-list", "conv-show", "conv-switch", "conv-delete", "organize-json", "then", "and", "-h", "--help"]);
+const RESERVED_NAMES = new Set(["config", "ai-config", "ai-clear", "ai-drop-from", "playnite-config", "spotify-config", "spotify-login", "memory-config", "everything-config", "tools-list", "tool-run", "tool-preview", "tool-safety-set", "conv-new", "conv-list", "conv-show", "conv-switch", "conv-delete", "organize-json", "then", "and", "-h", "--help"]);
 
 // ---------------------------------------------------------------------------
 // Locate the real jarvis binary. Tries a few invocation strategies, in
@@ -749,6 +749,35 @@ app.get("/api/screenshots/:name", (req, res) => {
   res.sendFile(filePath, (err) => {
     if (err && !res.headersSent) {
       res.status(404).json({ error: "Screenshot not found." });
+    }
+  });
+});
+
+// yt-dlp downloads (see jarvis-cli/jarvis/ytdl_tools.py) each land in their
+// own job folder under ~/.jarvis/downloads/<jobId>/<filename> — same
+// basename-only + no-traversal treatment as the screenshots route above,
+// just keyed by (jobId, filename) instead of a single flat name since a
+// job's actual output filename comes from the video's own title.
+const DOWNLOAD_JOB_RE = /^dl_[A-Za-z0-9_-]+$/;
+
+function downloadsDir() {
+  return path.join(os.homedir(), ".jarvis", "downloads");
+}
+
+app.get("/api/downloads/:jobId/:filename", (req, res) => {
+  const jobId = path.basename(String(req.params.jobId || ""));
+  const filename = path.basename(String(req.params.filename || ""));
+  if (!DOWNLOAD_JOB_RE.test(jobId) || !filename) {
+    return res.status(400).json({ error: "Invalid download reference." });
+  }
+  const jobDir = path.join(downloadsDir(), jobId);
+  const filePath = path.join(jobDir, filename);
+  if (path.dirname(filePath) !== jobDir) {
+    return res.status(400).json({ error: "Invalid download reference." });
+  }
+  res.sendFile(filePath, (err) => {
+    if (err && !res.headersSent) {
+      res.status(404).json({ error: "Download not found." });
     }
   });
 });
