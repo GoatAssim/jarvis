@@ -787,18 +787,28 @@ def main():
         return
 
     if argv[0] == "tool-run":
-        # jarvis tool-run <name> [json-arguments]
+        # jarvis tool-run <name> [json-arguments] [mode]
         # Runs one AI tool directly (bypassing the model) and prints its
         # JSON result. Powers the web UI's debug dashboard so a person can
         # invoke any tool the AI can call and see exactly what comes back.
+        #
+        # The optional trailing `mode` is the debug panel's own local-only
+        # capacity override (see its mode switch) — translated to a
+        # tool_result_verbosity and applied via tool_result_shaping.
+        # shape_result(), the exact same trimming a normal ask() already
+        # applies to every tool result at that mode. Anything not one of
+        # the real PROMPT_MODES (including omitted/blank) means "no
+        # override", so the result comes back untouched, same as before
+        # this argument existed.
         from . import tools as system_tools
 
         if len(argv) < 2 or not argv[1].strip():
-            print(json.dumps({"error": "usage: jarvis tool-run <name> [json-arguments]"}))
+            print(json.dumps({"error": "usage: jarvis tool-run <name> [json-arguments] [mode]"}))
             sys.exit(1)
 
         tool_name = argv[1].strip()
         raw_args = argv[2] if len(argv) > 2 else "{}"
+        raw_mode = argv[3].strip() if len(argv) > 3 and argv[3].strip() else None
         try:
             arguments = json.loads(raw_args) if raw_args.strip() else {}
         except json.JSONDecodeError as e:
@@ -808,7 +818,13 @@ def main():
             print(json.dumps({"error": "arguments must be a JSON object"}))
             sys.exit(1)
 
-        result = system_tools.execute_tool(tool_name, arguments)
+        verbosity = None
+        if raw_mode:
+            from . import ai_client
+            if raw_mode in ai_client.PROMPT_MODES:
+                verbosity = ai_client._MODE_BY_NAME[raw_mode].get("tool_result_verbosity")
+
+        result = system_tools.execute_tool(tool_name, arguments, verbosity=verbosity)
         print(json.dumps(result, indent=2, default=str))
         return
 

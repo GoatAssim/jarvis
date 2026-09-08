@@ -408,8 +408,8 @@
     putConfigFile: (name, text) => api("PUT", `/api/config/file/${encodeURIComponent(name)}/raw`, { text }),
     organizeJson: (targetPath) => api("POST", "/api/json/organize", { path: targetPath }),
     listTools: () => api("GET", "/api/tools"),
-    runTool: (name, arguments_) => api("POST", "/api/tools/run", { name, arguments: arguments_ }),
-    previewTool: (name, arguments_) => api("POST", "/api/tools/preview", { name, arguments: arguments_ }),
+    runTool: (name, arguments_, mode) => api("POST", "/api/tools/run", { name, arguments: arguments_, mode }),
+    previewTool: (name, arguments_, mode) => api("POST", "/api/tools/preview", { name, arguments: arguments_, mode }),
     setToolSafety: (name, key, value) => api("POST", "/api/tools/safety", { name, key, value }),
     listConversations: (q) => api("GET", `/api/conversations${q ? `?q=${encodeURIComponent(q)}` : ""}`),
     createConversation: (title) => api("POST", "/api/conversations", title ? { title } : {}),
@@ -2459,7 +2459,7 @@
   // both the direct (non-sensitive) path below and the confirm dialog's
   // Yes button (debugRenderConfirmPending) can share it.
   async function debugRunNow(name, args) {
-    const res = await Api.runTool(name, args);
+    const res = await Api.runTool(name, args, state.debugMode);
     state.debugLastResult = res.ok !== false ? { result: res.result } : { error: res.error || "Tool run failed." };
     debugStatusLine.textContent = res.ok !== false ? "done" : "tool run failed";
     debugStatusLine.classList.toggle("is-error", res.ok === false);
@@ -2488,7 +2488,7 @@
         debugStatusLine.textContent = `checking ${state.debugSelected}\u2026`;
         debugStatusLine.classList.add("is-busy");
         state.debugLastResult = null;
-        const preview = await Api.previewTool(state.debugSelected, args);
+        const preview = await Api.previewTool(state.debugSelected, args, state.debugMode);
         state.debugPendingConfirm = {
           name: state.debugSelected,
           arguments: args,
