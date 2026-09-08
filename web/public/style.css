@@ -662,7 +662,94 @@ input.is-invalid{ border-color: var(--red) !important; }
 .settings-pane.is-active{ display: block; }
 
 .settings-pane .raw-config-path{ margin-bottom: 10px; }
-.settings-json{ min-height: 48vh; }
+.settings-json{ min-height: 48vh; width: 100%; }
+
+.settings-pane__hint{ font-size: 12px; line-height: 1.6; color: var(--text-dim); margin-bottom: 10px; }
+.settings-pane__path{ margin-bottom: 0; }
+.settings-view-toggle{ display: flex; gap: 4px; margin: 10px 0; }
+.settings-pane__view{ min-height: 48vh; }
+.settings-pane__error{ margin-top: 8px; }
+.settings-empty{ color: var(--text-dimmer); font-size: 12.5px; padding: 12px 2px; }
+.settings-tree{ max-height: 56vh; overflow-y: auto; padding: 4px 2px; }
+
+/* =========================================================================
+   JSON tree — shared by the Settings > Config tabs (editable) and the
+   organize-json chat-bubble result (read-only). Deliberately plain: branch
+   rows with a collapse toggle, key, and value, not styled like source code.
+   ========================================================================= */
+
+.json-tree{ font-family: var(--font-mono); font-size: 12.5px; line-height: 1.9; }
+.json-tree__meta--root{ color: var(--text-dimmer); margin-bottom: 4px; }
+.json-tree__row{ display: flex; align-items: baseline; gap: 6px; white-space: nowrap; }
+.json-tree__toggle{
+  display: inline-block; width: 14px; flex-shrink: 0; text-align: center;
+  color: var(--accent-soft); cursor: pointer; user-select: none;
+}
+.json-tree__toggle--leaf{ color: var(--text-dimmer); cursor: default; }
+.json-tree__key{ color: var(--accent-soft); flex-shrink: 0; }
+.json-tree__key--editable{ cursor: text; border-bottom: 1px dashed transparent; }
+.json-tree__key--editable:hover{ border-bottom-color: var(--border-strong); }
+.json-tree__colon{ color: var(--text-dimmer); flex-shrink: 0; }
+.json-tree__meta{ color: var(--text-dimmer); }
+.json-tree__val{
+  color: var(--text); white-space: pre-wrap; word-break: break-word; overflow-wrap: anywhere;
+}
+.json-tree__val--string{ color: var(--text); }
+.json-tree__val--number{ color: var(--gold); }
+.json-tree__val--boolean{ color: var(--accent); }
+.json-tree__val--null{ color: var(--text-dimmer); font-style: italic; }
+.json-tree__val--editable{ cursor: text; border-bottom: 1px dashed transparent; }
+.json-tree__val--editable:hover{ border-bottom-color: var(--border-strong); }
+.json-tree__edit-input{
+  background: var(--bg-raised); border: 1px solid var(--accent-dim); border-radius: 2px;
+  color: var(--text); font-family: var(--font-mono); font-size: 12.5px;
+  padding: 1px 4px; min-width: 60px;
+}
+.json-tree__edit-input:focus{ outline: none; border-color: var(--accent); }
+.json-tree__edit-input--key{ color: var(--accent-soft); min-width: 40px; }
+.json-tree__del{
+  background: transparent; border: none; color: var(--text-dimmer);
+  cursor: pointer; font-size: 13px; line-height: 1; padding: 0 4px; flex-shrink: 0;
+}
+.json-tree__del:hover{ color: var(--red); }
+.json-tree__add-row{ margin: 2px 0; }
+.json-tree__add{
+  background: transparent; border: 1px dashed var(--border); color: var(--text-dim);
+  font-size: 11px; letter-spacing: 0.04em; padding: 2px 8px; border-radius: 2px; cursor: pointer;
+}
+.json-tree__add:hover{ border-color: var(--accent-soft); color: var(--accent-soft); }
+
+/* organize-json chat bubble */
+.ask-msg__bubble--jsontree{ max-width: min(560px, 84vw); }
+.json-org-path{
+  font-family: var(--font-mono); font-size: 11px; color: var(--text-dimmer);
+  margin-bottom: 8px; overflow-wrap: anywhere;
+}
+.json-org-toggle{ display: flex; gap: 4px; margin-bottom: 10px; }
+.json-org-toggle-btn{
+  background: transparent; border: 1px solid var(--border); color: var(--text-dim);
+  font-size: 10.5px; letter-spacing: 0.08em; text-transform: uppercase;
+  padding: 5px 10px; border-radius: 2px; cursor: pointer;
+}
+.json-org-toggle-btn.is-active{ border-color: var(--accent); color: var(--accent); }
+.json-org-toggle-btn:hover{ border-color: var(--accent-soft); color: var(--text); }
+.json-org-view{ max-height: 50vh; overflow-y: auto; }
+.json-org-raw{
+  font-family: var(--font-mono); font-size: 12px; white-space: pre-wrap; word-break: break-word;
+  margin: 0;
+}
+.json-org-error{ color: var(--red); font-size: 12.5px; line-height: 1.6; }
+.json-org-snippet{
+  font-family: var(--font-mono); font-size: 11.5px; color: var(--text-dim);
+  background: var(--bg-raised); border: 1px solid var(--border); border-radius: 2px;
+  padding: 8px 10px; margin-top: 8px; white-space: pre; overflow-x: auto;
+}
+/* Two classes on the same element (0,2,0) to reliably beat the later,
+   equal-specificity .ask-msg__actions{opacity:0.35;...} rule below — see
+   style.css notes in JARVIS_CONTEXT.md re: this exact specificity gotcha. */
+.ask-msg__actions.ask-msg__actions--static{
+  opacity: 1; margin-top: 10px; justify-content: flex-start;
+}
 
 .raw-config-path{
   font-family: var(--font-mono); font-size: 11px; color: var(--text-dimmer);

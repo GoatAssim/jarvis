@@ -49,6 +49,229 @@
     return String(cond);
   }
 
+  // ===========================================================================
+  // Shared JSON tree component — collapsible, optionally editable.
+  //
+  // Used by (1) the "organize-json <path>" chat-bubble result and (2) the
+  // Settings modal's Config tab. Renders straight from an already-parsed JS
+  // value (never re-serializes to send anywhere), so browsing/editing a
+  // config file here never touches the AI layer or costs a token.
+  // ===========================================================================
+
+  function jsonTreeTypeOf(v) {
+    if (v === null) return "null";
+    if (Array.isArray(v)) return "array";
+    return typeof v; // "object" | "string" | "number" | "boolean"
+  }
+
+  function jsonTreeIsContainer(v) {
+    return v !== null && typeof v === "object";
+  }
+
+  function jsonTreeCountLabel(v) {
+    if (Array.isArray(v)) {
+      const n = v.length;
+      return `[ ]  ${n} item${n === 1 ? "" : "s"}`;
+    }
+    const n = Object.keys(v).length;
+    return `{ }  ${n} key${n === 1 ? "" : "s"}`;
+  }
+
+  function jsonTreeScalarLabel(v) {
+    if (v === null) return "null";
+    if (typeof v === "boolean") return v ? "true" : "false";
+    if (typeof v === "string") return JSON.stringify(v);
+    return String(v);
+  }
+
+  // Turns whatever text a person typed into an editable leaf back into a
+  // proper JS value, the way JSON itself would read it — "true"/"false"/
+  // "null"/numbers become their real types, anything else (including text
+  // that merely looks numeric-ish but isn't, or fails to parse) stays a
+  // plain string so nothing is silently misinterpreted.
+  function jsonTreeCoerce(raw) {
+    const t = String(raw);
+    if (t === "null") return null;
+    if (t === "true") return true;
+    if (t === "false") return false;
+    if (/^-?\d+(\.\d+)?([eE][-+]?\d+)?$/.test(t.trim()) && t.trim() !== "") return Number(t);
+    return t;
+  }
+
+  // Builds a read-only OR editable collapsible tree for `rootValue` inside
+  // `mount`. Editable mode mutates `rootValue` in place (objects/arrays are
+  // references) and calls `onChange()` after every structural or leaf edit
+  // so the caller can re-derive raw JSON text for saving/Raw-view.
+  function buildJsonTree(mount, rootValue, { editable = false, onChange = () => {} } = {}) {
+    const collapsedPaths = new Set(); // paths the user explicitly collapsed
+    const expandedPaths = new Set();  // paths the user explicitly expanded
+
+    function isOpen(pathKey, depth) {
+      if (collapsedPaths.has(pathKey)) return false;
+      if (expandedPaths.has(pathKey)) return true;
+      return depth < 2; // default: first two levels open, rest start collapsed
+    }
+
+    function rerender() {
+      mount.innerHTML = "";
+      if (jsonTreeIsContainer(rootValue)) {
+        mount.appendChild(el("div", { class: "json-tree__meta json-tree__meta--root" }, jsonTreeCountLabel(rootValue)));
+        buildChildren(mount, rootValue, "$", 0);
+      } else {
+        mount.appendChild(el("div", { class: "json-tree__row" }, [
+          el("span", { class: `json-tree__val json-tree__val--${jsonTreeTypeOf(rootValue)}` }, jsonTreeScalarLabel(rootValue)),
+        ]));
+      }
+    }
+
+    function startEditValue(container, key, valEl) {
+      const current = container[key];
+      const input = el("input", {
+        class: "json-tree__edit-input",
+        type: "text",
+        value: jsonTreeTypeOf(current) === "string" ? current : jsonTreeScalarLabel(current),
+      });
+      valEl.replaceWith(input);
+      input.focus();
+      input.select();
+      const commit = () => {
+        container[key] = jsonTreeCoerce(input.value);
+        onChange();
+        rerender();
+      };
+      input.addEventListener("keydown", (e) => {
+        if (e.key === "Enter") { e.preventDefault(); commit(); }
+        else if (e.key === "Escape") { e.preventDefault(); rerender(); }
+      });
+      input.addEventListener("blur", commit);
+    }
+
+    function startRenameKey(container, key, keyEl) {
+      const input = el("input", { class: "json-tree__edit-input json-tree__edit-input--key", type: "text", value: key });
+      keyEl.replaceWith(input);
+      input.focus();
+      input.select();
+      const commit = () => {
+        const newKey = input.value.trim();
+        if (!newKey || newKey === key) { rerender(); return; }
+        if (Object.prototype.hasOwnProperty.call(container, newKey)) {
+          toast(`"${newKey}" already exists at this level.`);
+          rerender();
+          return;
+        }
+        // Rebuild the object to preserve key order with the rename in place.
+        const rebuilt = {};
+        for (const k of Object.keys(container)) {
+          rebuilt[k === key ? newKey : k] = container[k];
+        }
+        for (const k of Object.keys(container)) delete container[k];
+        Object.assign(container, rebuilt);
+        onChange();
+        rerender();
+      };
+      input.addEventListener("keydown", (e) => {
+        if (e.key === "Enter") { e.preventDefault(); commit(); }
+        else if (e.key === "Escape") { e.preventDefault(); rerender(); }
+      });
+      input.addEventListener("blur", commit);
+    }
+
+    function buildAddControls(value, pathKey, depth) {
+      const wrap = el("div", { class: "json-tree__row json-tree__add-row", style: `padding-left:${(depth + 1) * 16}px` });
+      if (Array.isArray(value)) {
+        wrap.appendChild(el("button", {
+          type: "button", class: "json-tree__add",
+          onclick: () => { value.push(""); expandedPaths.add(pathKey); onChange(); rerender(); },
+        }, "+ add item"));
+      } else {
+        wrap.appendChild(el("button", {
+          type: "button", class: "json-tree__add",
+          onclick: () => {
+            let base = "new_key", n = 1, name = base;
+            while (Object.prototype.hasOwnProperty.call(value, name)) name = `${base}_${n++}`;
+            value[name] = "";
+            expandedPaths.add(pathKey);
+            onChange();
+            rerender();
+          },
+        }, "+ add key"));
+      }
+      return wrap;
+    }
+
+    function buildChildren(container, value, pathKey, depth) {
+      const isArr = Array.isArray(value);
+      const keys = isArr ? value.map((_, i) => i) : Object.keys(value);
+      for (const key of keys) {
+        const childPathKey = `${pathKey}.${key}`;
+        const child = value[key];
+        const childIsContainer = jsonTreeIsContainer(child);
+        const open = childIsContainer ? isOpen(childPathKey, depth + 1) : false;
+
+        const row = el("div", { class: "json-tree__row", style: `padding-left:${depth * 16}px` });
+
+        const toggle = el("span", {
+          class: "json-tree__toggle" + (childIsContainer ? "" : " json-tree__toggle--leaf"),
+        }, childIsContainer ? (open ? "\u25be" : "\u25b8") : "\u00b7");
+        if (childIsContainer) {
+          toggle.addEventListener("click", () => {
+            if (isOpen(childPathKey, depth + 1)) {
+              expandedPaths.delete(childPathKey);
+              collapsedPaths.add(childPathKey);
+            } else {
+              collapsedPaths.delete(childPathKey);
+              expandedPaths.add(childPathKey);
+            }
+            rerender();
+          });
+        }
+        row.appendChild(toggle);
+
+        const keyEl = el("span", { class: "json-tree__key" }, isArr ? `[${key}]` : String(key));
+        if (editable && !isArr) {
+          keyEl.classList.add("json-tree__key--editable");
+          keyEl.title = "Click to rename";
+          keyEl.addEventListener("click", () => startRenameKey(value, key, keyEl));
+        }
+        row.appendChild(keyEl);
+        row.appendChild(el("span", { class: "json-tree__colon" }, ":"));
+
+        if (childIsContainer) {
+          row.appendChild(el("span", { class: "json-tree__meta" }, jsonTreeCountLabel(child)));
+        } else {
+          const valEl = el("span", { class: `json-tree__val json-tree__val--${jsonTreeTypeOf(child)}` }, jsonTreeScalarLabel(child));
+          if (editable) {
+            valEl.classList.add("json-tree__val--editable");
+            valEl.title = "Click to edit";
+            valEl.addEventListener("click", () => startEditValue(value, key, valEl));
+          }
+          row.appendChild(valEl);
+        }
+
+        if (editable) {
+          row.appendChild(el("button", {
+            type: "button", class: "json-tree__del", title: isArr ? "Remove item" : "Remove key",
+            onclick: () => {
+              if (isArr) value.splice(Number(key), 1);
+              else delete value[key];
+              onChange();
+              rerender();
+            },
+          }, "\u00d7"));
+        }
+
+        container.appendChild(row);
+
+        if (childIsContainer && open) {
+          buildChildren(container, child, childPathKey, depth + 1);
+          if (editable) container.appendChild(buildAddControls(child, childPathKey, depth + 1));
+        }
+      }
+    }
+
+    rerender();
+  }
+
   let toastTimer = null;
   function toast(message, kind = "error") {
     const t = qs("#toast");
@@ -163,7 +386,9 @@
     try { data = await res.json(); } catch { /* no body */ }
     if (!res.ok) {
       const message = (data && data.error) || `${method} ${url} failed (${res.status})`;
-      throw new Error(message);
+      const err = new Error(message);
+      err.data = data; // preserves extra fields (e.g. organize-json's line/column/snippet)
+      throw err;
     }
     return data;
   }
@@ -175,17 +400,11 @@
     createCommand: (name, spec) => api("POST", "/api/commands", { name, spec }),
     updateCommand: (oldName, name, spec) => api("PUT", `/api/commands/${encodeURIComponent(oldName)}`, { name, spec }),
     deleteCommand: (name) => api("DELETE", `/api/commands/${encodeURIComponent(name)}`),
-    getRaw: () => api("GET", "/api/raw"),
-    putRaw: (text) => api("PUT", "/api/raw", { text }),
     clearAiHistory: (conversationId) => api("POST", "/api/ai/clear", conversationId ? { conversationId } : {}),
-    getAiRaw: () => api("GET", "/api/ai/raw"),
-    putAiRaw: (text) => api("PUT", "/api/ai/raw", { text }),
-    getPlayniteRaw: () => api("GET", "/api/playnite/raw"),
-    putPlayniteRaw: (text) => api("PUT", "/api/playnite/raw", { text }),
-    getSpotifyRaw: () => api("GET", "/api/spotify/raw"),
-    putSpotifyRaw: (text) => api("PUT", "/api/spotify/raw", { text }),
-    getMemoryRaw: () => api("GET", "/api/memory/raw"),
-    putMemoryRaw: (text) => api("PUT", "/api/memory/raw", { text }),
+    configList: () => api("GET", "/api/config/list"),
+    getConfigFile: (name) => api("GET", `/api/config/file/${encodeURIComponent(name)}/raw`),
+    putConfigFile: (name, text) => api("PUT", `/api/config/file/${encodeURIComponent(name)}/raw`, { text }),
+    organizeJson: (targetPath) => api("POST", "/api/json/organize", { path: targetPath }),
     listTools: () => api("GET", "/api/tools"),
     runTool: (name, arguments_) => api("POST", "/api/tools/run", { name, arguments: arguments_ }),
     previewTool: (name, arguments_) => api("POST", "/api/tools/preview", { name, arguments: arguments_ }),
@@ -405,11 +624,12 @@
       state.selected = null;
     }
     renderDetail();
-    const settingsBackdrop = qs("#settings-backdrop");
-    const commandsPane = qs('#settings-backdrop .settings-pane[data-settings-pane="commands"]');
-    if (settingsBackdrop && !settingsBackdrop.hidden && commandsPane?.classList.contains("is-active")) {
-      qs("#settings-json-commands").value = JSON.stringify({ commands: state.commands }, null, 2) + "\n";
-    }
+    // If the Settings modal has commands.json open right now, refresh that
+    // tab's in-memory copy so an external change (another tab, another
+    // client, the CLI itself) doesn't get clobbered by a stale Save.
+    // syncCommandsIntoSettingsTab is defined further down (Settings modal
+    // section) — function declarations are hoisted, so this call is safe.
+    syncCommandsIntoSettingsTab(state.commands);
   }
 
   function applyCommandsFromServer(commands) {
@@ -1390,13 +1610,32 @@
     hideSelPop();
   });
 
+  // "organize-json <path>" typed into the Ask box is a local shortcut, not
+  // an AI prompt — it's intercepted here and routed straight to
+  // /api/json/organize (see Api.organizeJson) so it never goes near
+  // wsSend/ask, never costs a token, and isn't blocked by state.running
+  // (that flag only guards the one-active-child-per-socket ask/run path;
+  // organize-json is an independent one-shot REST call on the server).
+  const ORGANIZE_JSON_RE = /^organize-json\s+(.+)$/i;
+
   qs("#ask-form").addEventListener("submit", async (e) => {
     e.preventDefault();
-    if (state.running) return;
     const input = qs("#ask-input");
     const text = input.value.trim();
     const quotes = state.askQuotes.slice();
     if (!text && quotes.length === 0) return;
+
+    const organizeMatch = quotes.length === 0 ? ORGANIZE_JSON_RE.exec(text) : null;
+    if (organizeMatch) {
+      if (!state.activeConversationId) await startNewConversation();
+      input.value = "";
+      askInputAutoGrow(input);
+      hideSelPop();
+      handleOrganizeJsonCommand(text, organizeMatch[1].trim());
+      return;
+    }
+
+    if (state.running) return;
     if (!state.activeConversationId) await startNewConversation();
     input.value = "";
     askInputAutoGrow(input);
@@ -1414,6 +1653,106 @@
       conversationId: state.activeConversationId,
     });
   });
+
+  // ---- organize-json chat-bubble result --------------------------------
+
+  // Echoes the typed command as a user-style bubble but deliberately
+  // WITHOUT the shared addAskMsgActions() Redo button — Redo resends
+  // through the AI ask pipeline (wsSend/ask), which would defeat the
+  // entire point of this shortcut (zero API tokens, however big the file).
+  function addOrganizeJsonUserBubble(rawText) {
+    clearAskEmptyHint();
+    const msg = el("div", { class: "ask-msg ask-msg--user" }, [
+      el("div", { class: "ask-msg__role" }, "You"),
+      el("div", { class: "ask-msg__bubble" }, rawText),
+    ]);
+    msg.dataset.raw = rawText;
+    askThread.appendChild(msg);
+    askThreadScrollToEnd();
+    return msg;
+  }
+
+  function addOrganizeJsonPendingBubble() {
+    clearAskEmptyHint();
+    const msg = el("div", { class: "ask-msg ask-msg--jarvis is-pending" }, [
+      el("div", { class: "ask-msg__role" }, "Jarvis"),
+      el("div", { class: "ask-msg__bubble" }, [
+        el("span", { class: "ask-typing" }, [el("span", {}), el("span", {}), el("span", {})]),
+      ]),
+    ]);
+    askThread.appendChild(msg);
+    askThreadScrollToEnd();
+    return msg;
+  }
+
+  function renderOrganizeJsonResult(msg, payload) {
+    msg.classList.remove("is-pending");
+    const bubble = qs(".ask-msg__bubble", msg);
+    bubble.innerHTML = "";
+    bubble.classList.add("ask-msg__bubble--jsontree");
+
+    if (!payload || payload.ok === false) {
+      msg.classList.add("is-error");
+      bubble.appendChild(el("div", { class: "json-org-error" },
+        (payload && payload.error) || "organize-json failed."));
+      if (payload && payload.snippet) {
+        bubble.appendChild(el("pre", { class: "json-org-snippet" }, payload.snippet));
+      }
+      msg.dataset.raw = (payload && payload.error) || "organize-json failed.";
+      askThreadScrollToEnd();
+      return;
+    }
+
+    const btnOrganized = el("button", { type: "button", class: "json-org-toggle-btn is-active" }, "Organized");
+    const btnRaw = el("button", { type: "button", class: "json-org-toggle-btn" }, "Raw JSON");
+    const viewWrap = el("div", { class: "json-org-view" });
+
+    function showOrganized() {
+      btnOrganized.classList.add("is-active");
+      btnRaw.classList.remove("is-active");
+      viewWrap.innerHTML = "";
+      const treeMount = el("div", { class: "json-tree" });
+      viewWrap.appendChild(treeMount);
+      buildJsonTree(treeMount, payload.data, { editable: false });
+    }
+    function showRaw() {
+      btnRaw.classList.add("is-active");
+      btnOrganized.classList.remove("is-active");
+      viewWrap.innerHTML = "";
+      viewWrap.appendChild(el("pre", { class: "json-org-raw" }, JSON.stringify(payload.data, null, 2)));
+    }
+    btnOrganized.addEventListener("click", showOrganized);
+    btnRaw.addEventListener("click", showRaw);
+
+    bubble.appendChild(el("div", { class: "json-org-path" }, payload.path));
+    bubble.appendChild(el("div", { class: "json-org-toggle" }, [btnOrganized, btnRaw]));
+    bubble.appendChild(viewWrap);
+    showOrganized();
+
+    msg.dataset.raw = JSON.stringify(payload.data, null, 2);
+    bubble.appendChild(el("div", { class: "ask-msg__actions ask-msg__actions--static" }, [
+      el("button", {
+        type: "button", class: "ask-msg__act", title: "Copy the underlying JSON",
+        onclick: () => copyAskRaw(msg),
+      }, "Copy JSON"),
+    ]));
+    askThreadScrollToEnd();
+  }
+
+  async function handleOrganizeJsonCommand(rawText, targetPath) {
+    addOrganizeJsonUserBubble(rawText);
+    const pending = addOrganizeJsonPendingBubble();
+    if (!targetPath) {
+      renderOrganizeJsonResult(pending, { ok: false, error: "usage: organize-json <path>" });
+      return;
+    }
+    try {
+      const payload = await Api.organizeJson(targetPath);
+      renderOrganizeJsonResult(pending, payload);
+    } catch (err) {
+      renderOrganizeJsonResult(pending, err.data || { ok: false, error: err.message });
+    }
+  }
 
   // #ask-input is a <textarea> so a message can span multiple lines (the
   // CLI already handles embedded "\n" in a prompt string fine — this is
@@ -2153,147 +2492,252 @@
   backdrop.addEventListener("click", (e) => { if (e.target === backdrop) closeBuilder(); });
 
   // ===========================================================================
-  // Settings modal — commands.json, ai_config.json, playnite.json in one place.
+  // Settings modal — every *.json file in the jarvis config dir, auto-
+  // discovered from GET /api/config/list (see server.js's KNOWN_CONFIGS /
+  // generic config-file browser). No hardcoded tab list: drop a new *.json
+  // file in that directory and it shows up here with no HTML/JS change.
+  // Each tab gets an editable collapsible tree (buildJsonTree, editable:true)
+  // plus a Raw JSON toggle for bulk/paste edits — mirroring the organize-json
+  // chat bubble's Organized/Raw split, just editable here.
   // ===========================================================================
 
   const settingsBackdrop = qs("#settings-backdrop");
-  let settingsActiveTab = "commands";
+  const settingsTabsEl = qs("#settings-tabs");
+  const settingsBodyEl = qs("#settings-body");
 
-  const SETTINGS = {
-    commands: {
-      get: () => Api.getRaw(),
-      put: (text) => Api.putRaw(text),
-      pathId: "settings-path-commands",
-      jsonId: "settings-json-commands",
-      errorId: "settings-error-commands",
-      saveToast: "commands.json saved.",
-      afterSave: () => loadCommands(),
-    },
-    ai: {
-      get: () => Api.getAiRaw(),
-      put: (text) => Api.putAiRaw(text),
-      pathId: "settings-path-ai",
-      jsonId: "settings-json-ai",
-      errorId: "settings-error-ai",
-      saveToast: "ai_config.json saved.",
-    },
-    playnite: {
-      get: () => Api.getPlayniteRaw(),
-      put: (text) => Api.putPlayniteRaw(text),
-      pathId: "settings-path-playnite",
-      jsonId: "settings-json-playnite",
-      errorId: "settings-error-playnite",
-      saveToast: "playnite.json saved.",
-    },
-    spotify: {
-      get: () => Api.getSpotifyRaw(),
-      put: (text) => Api.putSpotifyRaw(text),
-      pathId: "settings-path-spotify",
-      jsonId: "settings-json-spotify",
-      errorId: "settings-error-spotify",
-      saveToast: "spotify.json saved.",
-    },
-    memory: {
-      get: () => Api.getMemoryRaw(),
-      put: (text) => Api.putMemoryRaw(text),
-      pathId: "settings-path-memory",
-      jsonId: "settings-json-memory",
-      errorId: "settings-error-memory",
-      saveToast: "memory.json saved.",
-    },
-  };
+  let settingsFiles = [];        // [{name, label, hint, path}] from /api/config/list
+  let settingsActiveTab = null;  // active file name, e.g. "commands.json"
+  const settingsFileState = {};  // name -> {path, text, data, parseError, mode, dirty}
+
+  function settingsFileMeta(name) {
+    return settingsFiles.find((f) => f.name === name);
+  }
+
+  function settingsPaneEl(name) {
+    return qs(`.settings-pane[data-settings-pane="${name}"]`, settingsBodyEl);
+  }
 
   function clearSettingsErrors() {
     qs("#settings-error-global").textContent = "";
-    for (const tab of Object.keys(SETTINGS)) {
-      qs(`#${SETTINGS[tab].errorId}`).textContent = "";
+    qsa(".settings-pane__error", settingsBodyEl).forEach((e) => { e.textContent = ""; });
+  }
+
+  function buildSettingsTabs() {
+    settingsTabsEl.innerHTML = "";
+    settingsFiles.forEach((f) => {
+      settingsTabsEl.appendChild(el("button", {
+        type: "button",
+        class: "tab-btn settings-tab-btn",
+        "data-settings-tab": f.name,
+        title: f.hint || "",
+        onclick: () => selectSettingsTab(f.name),
+      }, f.label || f.name));
+    });
+  }
+
+  function buildSettingsPanes() {
+    settingsBodyEl.innerHTML = "";
+    settingsFiles.forEach((f) => {
+      const btnOrganized = el("button", {
+        type: "button", class: "debug-toggle-btn is-active", "data-view": "organized",
+        onclick: () => setSettingsPaneMode(f.name, "organized"),
+      }, "Organized");
+      const btnRaw = el("button", {
+        type: "button", class: "debug-toggle-btn", "data-view": "raw",
+        onclick: () => setSettingsPaneMode(f.name, "raw"),
+      }, "Raw JSON");
+
+      settingsBodyEl.appendChild(el("div", { class: "settings-pane", "data-settings-pane": f.name }, [
+        el("div", { class: "settings-pane__hint" }, f.hint || ""),
+        el("div", { class: "raw-config-path settings-pane__path" }, ""),
+        el("div", { class: "settings-view-toggle" }, [btnOrganized, btnRaw]),
+        el("div", { class: "settings-pane__view" }, [
+          el("div", { class: "settings-empty" }, "Loading\u2026"),
+        ]),
+        el("div", { class: "modal__error settings-pane__error" }),
+      ]));
+    });
+  }
+
+  function setActiveSettingsTabUi(name) {
+    qsa(".settings-tab-btn", settingsTabsEl).forEach((b) => {
+      b.classList.toggle("is-active", b.dataset.settingsTab === name);
+    });
+    qsa(".settings-pane", settingsBodyEl).forEach((p) => {
+      p.classList.toggle("is-active", p.dataset.settingsPane === name);
+    });
+  }
+
+  // Renders whichever view (tree or raw textarea) matches the file's
+  // current mode. Called after loading a file, after Save/Reload, and
+  // whenever the Organized/Raw toggle is flipped.
+  function renderSettingsPaneContent(name) {
+    const st = settingsFileState[name];
+    const pane = settingsPaneEl(name);
+    if (!st || !pane) return;
+    qsa(".debug-toggle-btn", pane).forEach((b) => b.classList.toggle("is-active", b.dataset.view === st.mode));
+    const viewWrap = qs(".settings-pane__view", pane);
+    viewWrap.innerHTML = "";
+
+    if (st.mode === "raw") {
+      const ta = el("textarea", { class: "settings-json", spellcheck: "false" });
+      ta.value = st.text;
+      ta.addEventListener("input", () => { st.text = ta.value; st.dirty = true; });
+      viewWrap.appendChild(ta);
+      return;
     }
-  }
 
-  function setSettingsTab(tab) {
-    settingsActiveTab = tab;
-    qsa("#settings-backdrop .settings-tab").forEach((b) => {
-      b.classList.toggle("is-active", b.dataset.settingsTab === tab);
+    if (st.parseError) {
+      viewWrap.appendChild(el("div", { class: "json-org-error" },
+        `Can't show a tree \u2014 invalid JSON: ${st.parseError}`));
+      return;
+    }
+    const treeMount = el("div", { class: "json-tree settings-tree" });
+    viewWrap.appendChild(treeMount);
+    buildJsonTree(treeMount, st.data, {
+      editable: true,
+      onChange: () => {
+        st.text = JSON.stringify(st.data, null, 2) + "\n";
+        st.dirty = true;
+      },
     });
-    qsa("#settings-backdrop .settings-pane").forEach((p) => {
-      p.classList.toggle("is-active", p.dataset.settingsPane === tab);
-    });
-    const jsonEl = qs(`#${SETTINGS[tab].jsonId}`);
-    if (jsonEl) jsonEl.focus();
   }
 
-  async function loadSettingsTab(tab, { force = false } = {}) {
-    const cfg = SETTINGS[tab];
-    const jsonEl = qs(`#${cfg.jsonId}`);
-    if (!force && jsonEl.dataset.loaded === "1") return;
-    const data = await cfg.get();
-    qs(`#${cfg.pathId}`).textContent = data.path;
-    jsonEl.value = data.text;
-    jsonEl.dataset.loaded = "1";
+  function setSettingsPaneMode(name, mode) {
+    const st = settingsFileState[name];
+    const pane = settingsPaneEl(name);
+    if (!st || !pane) return;
+    if (mode === "organized" && st.mode !== "organized") {
+      // Coming from Raw — re-parse whatever text is sitting there now,
+      // since the person may have hand-edited it directly.
+      try {
+        st.data = JSON.parse(st.text);
+        st.parseError = null;
+      } catch (e) {
+        qs(".settings-pane__error", pane).textContent = `Can't switch to Organized \u2014 invalid JSON: ${e.message}`;
+        return;
+      }
+    }
+    qs(".settings-pane__error", pane).textContent = "";
+    st.mode = mode;
+    renderSettingsPaneContent(name);
   }
 
-  async function openSettings(initialTab = "commands") {
+  async function selectSettingsTab(name, { force = false } = {}) {
+    settingsActiveTab = name;
+    setActiveSettingsTabUi(name);
+    const pane = settingsPaneEl(name);
+    if (!pane) return;
+    qs(".settings-pane__error", pane).textContent = "";
+
+    if (!settingsFileState[name] || force) {
+      try {
+        const data = await Api.getConfigFile(name);
+        const st = { path: data.path, text: data.text, mode: "organized", dirty: false };
+        try {
+          st.data = JSON.parse(st.text);
+          st.parseError = null;
+        } catch (e) {
+          st.data = null;
+          st.parseError = e.message;
+          st.mode = "raw"; // can't build a tree out of invalid JSON — show the text instead
+        }
+        settingsFileState[name] = st;
+      } catch (e) {
+        qs(".settings-pane__error", pane).textContent = e.message;
+        return;
+      }
+    }
+    qs(".settings-pane__path", pane).textContent = settingsFileState[name].path;
+    renderSettingsPaneContent(name);
+  }
+
+  async function openSettings(initialName) {
     clearSettingsErrors();
-    setSettingsTab(initialTab);
     settingsBackdrop.hidden = false;
+    Object.keys(settingsFileState).forEach((k) => delete settingsFileState[k]);
     try {
-      await loadSettingsTab(initialTab, { force: true });
+      const list = await Api.configList();
+      settingsFiles = list.files || [];
     } catch (e) {
+      settingsFiles = [];
       toast(e.message);
+    }
+    buildSettingsTabs();
+    buildSettingsPanes();
+    const target = (initialName && settingsFiles.some((f) => f.name === initialName))
+      ? initialName
+      : (settingsFiles[0] && settingsFiles[0].name);
+    if (target) {
+      await selectSettingsTab(target, { force: true });
+    } else {
+      settingsBodyEl.appendChild(el("div", { class: "settings-empty" }, "No config files found."));
     }
   }
 
   function closeSettings() {
     settingsBackdrop.hidden = true;
-    for (const tab of Object.keys(SETTINGS)) {
-      qs(`#${SETTINGS[tab].jsonId}`).dataset.loaded = "";
-    }
   }
 
-  qs("#btn-settings").addEventListener("click", () => openSettings("commands"));
+  // Called from applyCommandsToUi whenever commands.json changes on the
+  // server (another tab's edit, the CLI, a live broadcast) — if that tab is
+  // open in Settings right now, refresh it in place instead of letting a
+  // later Save silently clobber the newer version with stale in-memory state.
+  function syncCommandsIntoSettingsTab(commands) {
+    const st = settingsFileState["commands.json"];
+    if (!st || settingsBackdrop.hidden) return;
+    const text = JSON.stringify({ commands }, null, 2) + "\n";
+    st.text = text;
+    try {
+      st.data = JSON.parse(text);
+      st.parseError = null;
+    } catch { /* JSON.stringify output is always valid JSON */ }
+    if (settingsActiveTab === "commands.json") renderSettingsPaneContent("commands.json");
+  }
+
+  qs("#btn-settings").addEventListener("click", () => openSettings("commands.json"));
   qs("#settings-close").addEventListener("click", closeSettings);
   qs("#btn-settings-cancel").addEventListener("click", closeSettings);
   settingsBackdrop.addEventListener("click", (e) => { if (e.target === settingsBackdrop) closeSettings(); });
 
-  qsa("#settings-backdrop .settings-tab").forEach((btn) => {
-    btn.addEventListener("click", () => {
-      const tab = btn.dataset.settingsTab;
-      setSettingsTab(tab);
-      loadSettingsTab(tab).catch((e) => {
-        qs(`#${SETTINGS[tab].errorId}`).textContent = e.message;
-      });
-    });
-  });
-
   qs("#btn-settings-reload").addEventListener("click", async () => {
     clearSettingsErrors();
-    const tab = settingsActiveTab;
+    if (!settingsActiveTab) return;
     try {
-      await loadSettingsTab(tab, { force: true });
+      await selectSettingsTab(settingsActiveTab, { force: true });
       toast("Reloaded from disk.", "info");
     } catch (e) {
-      qs(`#${SETTINGS[tab].errorId}`).textContent = e.message;
+      toast(e.message);
     }
   });
 
   qs("#btn-settings-save").addEventListener("click", async () => {
     clearSettingsErrors();
-    const tab = settingsActiveTab;
-    const cfg = SETTINGS[tab];
-    const text = qs(`#${cfg.jsonId}`).value;
+    const name = settingsActiveTab;
+    if (!name) return;
+    const st = settingsFileState[name];
+    const pane = settingsPaneEl(name);
+    if (!st || !pane) return;
+    const errEl = qs(".settings-pane__error", pane);
+
+    // Organized mode keeps st.text in sync on every tree edit (onChange
+    // above); Raw mode's textarea does the same on input — either way
+    // st.text is the thing to validate and send.
     try {
-      JSON.parse(text);
+      JSON.parse(st.text);
     } catch (e) {
-      qs(`#${cfg.errorId}`).textContent = `Invalid JSON: ${e.message}`;
+      errEl.textContent = `Invalid JSON: ${e.message}`;
       return;
     }
     try {
-      await cfg.put(text);
-      if (cfg.afterSave) await cfg.afterSave();
+      await Api.putConfigFile(name, st.text);
+      st.dirty = false;
+      if (name === "commands.json") await loadCommands({ silent: true });
       closeSettings();
-      toast(cfg.saveToast, "info");
+      const meta = settingsFileMeta(name);
+      toast(`${(meta && meta.label) || name} saved.`, "info");
     } catch (e) {
-      qs(`#${cfg.errorId}`).textContent = e.message;
+      errEl.textContent = e.message;
     }
   });
 
