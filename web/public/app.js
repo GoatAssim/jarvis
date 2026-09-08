@@ -1186,11 +1186,48 @@
         askPromptLine(`$ download  ${title}`, "tool");
         return;
       }
+      if (parts[1] === "organize_json" && parts[2]) {
+        showAskOrganizeJson(parts[2].trim());
+        askPromptLine(`$ organize_json  ${parts[2].trim()}`, "tool");
+        return;
+      }
     }
     let cls = "sys";
     if (line.includes("\u2717")) cls = "fail";
     else if (line.includes("$")) cls = "tool";
     askPromptLine(line, cls);
+  }
+
+  // Fired when the AI itself calls the organize_json tool (as opposed to
+  // the person typing "organize-json <path>" directly into the Ask box —
+  // see handleOrganizeJsonCommand). The tool already validated the file and
+  // told the model only a tiny ok/type/count summary; this re-runs
+  // /api/json/organize itself (still zero tokens — a plain local REST call)
+  // purely to get the full parsed data for the Organized/Raw JSON sheet,
+  // and renders it with the exact same renderOrganizeJsonResult() used by
+  // the typed shortcut, so both paths look identical to the user.
+  function showAskOrganizeJson(targetPath) {
+    if (!isViewingAskThread()) return;
+    clearAskEmptyHint();
+    const msg = el("div", { class: "ask-msg ask-msg--jarvis is-pending" }, [
+      el("div", { class: "ask-msg__role" }, "Jarvis"),
+      el("div", { class: "ask-msg__bubble" }, [
+        el("span", { class: "ask-typing" }, [el("span", {}), el("span", {}), el("span", {})]),
+      ]),
+    ]);
+    insertIntoAskThread(msg);
+    askThreadScrollToEnd();
+    (async () => {
+      let payload;
+      try {
+        payload = await Api.organizeJson(targetPath);
+      } catch (err) {
+        payload = err.data || { ok: false, error: err.message };
+      }
+      // Thread may have been rebuilt (conversation switch) while we waited.
+      if (!askThread.contains(msg)) return;
+      renderOrganizeJsonResult(msg, payload);
+    })();
   }
 
   function showAskScreenshot(filename) {
@@ -2406,10 +2443,13 @@
 
 
   // ===========================================================================
-  // Conversations — every chat is saved (see jarvis-cli's conversations.py),
-  // switchable and searchable from the sidebar inside the Ask panel.
-  // Opening the page always starts a fresh one; switching to an older one
-  // restores it with full context.
+  // Conversations — every chat with at least one message is saved (see
+  // jarvis-cli's conversations.py), switchable and searchable from the
+  // sidebar inside the Ask panel. Opening the page always starts a fresh
+  // one; switching to an older one restores it with full context. A
+  // conversation that never gets a message — opened and abandoned, e.g.
+  // by just loading the page or clicking "+ New" and never sending
+  // anything — is never written into that history in the first place.
   // ===========================================================================
 
   const convoListEl = qs("#convo-list");
@@ -2480,12 +2520,28 @@
   }
 
   async function refreshConvoList() {
+    // A brand-new conversation isn't written into the server-side index
+    // until it has a first real exchange (see conversations.py's
+    // new_conversation/append_exchange) — specifically so an "opened but
+    // never used" conversation doesn't clutter conversation history.
+    // That means if we're currently sitting in one, the server plainly
+    // won't include it in this fetch. Hang onto it locally so it doesn't
+    // vanish out of the sidebar mid-session just because something else
+    // triggered a list refresh — it only actually disappears (as
+    // intended) once the session ends without ever sending a message.
+    const activeIfStillEmpty = state.conversations.find((c) => c.id === state.activeConversationId);
     try {
       state.conversations = await Api.listConversations(state.convoSearch);
     } catch (e) {
       convoListEl.innerHTML = "";
       convoListEl.appendChild(el("div", { class: "ask-convos__empty" }, `Couldn't load chats: ${e.message}`));
       return;
+    }
+    if (
+      activeIfStillEmpty &&
+      !state.conversations.some((c) => c.id === state.activeConversationId)
+    ) {
+      state.conversations.unshift(activeIfStillEmpty);
     }
     renderConvoList();
   }
