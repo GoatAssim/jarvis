@@ -28,6 +28,18 @@ for every provider (saves input tokens). Set "compact_prompt": false to
 restore the longer prompt, optionally keeping compact only for names in
 compact_prompt_providers.
 
+"defaults.prompt_mode" is the newer, simpler replacement for the two knobs
+above \u2014 one of "full", "compact", or "ultra" (see ai_client.PROMPT_MODES /
+MODE_LABELS: "400% Capacity", "100% Capacity", "50% Capacity"). When set,
+it wins outright and applies to every provider; leave it unset (or use
+"jarvis mode" / "jarvis mode-set <name>", which is what the web UI's
+capacity switch calls) to keep using compact_prompt/compact_prompt_providers
+instead. "ultra" additionally drops every tool's argument schema down to
+name-only in the prompt (the model gets the real schema back the first
+time it calls a tool that needs arguments it didn't supply) and shrinks
+how much of each tool's result gets replayed on a provider failover \u2014
+it's the cheapest mode, at the cost of that occasional extra round trip.
+
 Each provider can hold *more than one* key:
 
     "api_keys": ["sk-first...", "sk-second...", "sk-third..."]
@@ -86,6 +98,7 @@ DEFAULT_AI_CONFIG = {
         "compact_max_commands": 6,
         "compact_history_char_budget": 4800,
         "compact_history_exchanges": 10,
+        "prompt_mode": "compact",
     },
     "providers": [
         {

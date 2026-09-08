@@ -413,6 +413,8 @@
     createConversation: (title) => api("POST", "/api/conversations", title ? { title } : {}),
     getConversation: (id) => api("GET", `/api/conversations/${encodeURIComponent(id)}`),
     deleteConversation: (id) => api("DELETE", `/api/conversations/${encodeURIComponent(id)}`),
+    getMode: () => api("GET", "/api/mode"),
+    setMode: (mode) => api("POST", "/api/mode", { mode }),
   };
 
   // ===========================================================================
@@ -500,6 +502,54 @@
     const status = await Api.reconnect().catch(() => ({ online: false }));
     renderStatus(status);
     if (status.online) await loadCommands();
+  });
+
+  // ===========================================================================
+  // Capacity switch — 400% / 100% / 50% (full / compact / ultra), see
+  // ai_client.PROMPT_MODES on the CLI side. A plain three-way cycle: click
+  // steps to the next mode and persists it via /api/mode, same "thin client
+  // over the CLI" pattern as everything else in this file.
+  // ===========================================================================
+
+  const MODE_CYCLE = ["full", "compact", "ultra"];
+  const MODE_LABELS = { full: "400% Capacity", compact: "100% Capacity", ultra: "50% Capacity" };
+  const MODE_TITLES = {
+    full: "400% Capacity — fullest context, most tokens per ask. Click to switch to 100%.",
+    compact: "100% Capacity — the balanced default. Click to switch to 50%.",
+    ultra: "50% Capacity — ultra compact, fewest tokens per ask (a tool needing arguments may cost one extra round trip). Click to switch to 400%.",
+  };
+
+  function renderMode(mode) {
+    const btn = qs("#btn-mode-switch");
+    const known = MODE_LABELS[mode] ? mode : "compact";
+    btn.dataset.mode = known;
+    btn.title = MODE_TITLES[known];
+    qs("#mode-switch-label").textContent = MODE_LABELS[known];
+  }
+
+  async function loadMode() {
+    try {
+      const data = await Api.getMode();
+      renderMode(data.mode);
+    } catch {
+      // Non-fatal — leave the button on its default label rather than
+      // blocking the rest of the app over a cosmetic switch.
+    }
+  }
+
+  qs("#btn-mode-switch").addEventListener("click", async () => {
+    const btn = qs("#btn-mode-switch");
+    const current = btn.dataset.mode || "compact";
+    const next = MODE_CYCLE[(MODE_CYCLE.indexOf(current) + 1) % MODE_CYCLE.length];
+    btn.disabled = true;
+    try {
+      const data = await Api.setMode(next);
+      renderMode(data.mode);
+    } catch (e) {
+      toast(e.message || "Couldn't switch capacity mode.", "error");
+    } finally {
+      btn.disabled = false;
+    }
   });
 
   // ===========================================================================
@@ -3345,6 +3395,7 @@
     // Silent: the boot sequence + status pill already explain an offline
     // CLI on first load, so a third toast on top would just be noise.
     await loadCommands({ silent: !status.online });
+    if (status.online) await loadMode();
     // Load every saved conversation into the sidebar first (they live on
     // disk under ~/.jarvis/conversations and are shared across every
     // browser/session that hits this server — this was previously never
