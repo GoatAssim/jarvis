@@ -526,6 +526,12 @@ whatever you want it to always keep in mind.
   Every tool except `get_battery`/`get_memory_usage`/uptime works fine
   even without `psutil` installed; those specific ones degrade to a
   clear error message instead of crashing the ask.
+- Video/audio download (`ytdl_info`/`ytdl_download`) needs `yt-dlp`,
+  which is *not* installed by default — run `pip install -e .[ytdl]`
+  (or `pip install yt-dlp` directly) from `jarvis-cli/` to enable it.
+  Without it, those two tools return a clear "yt-dlp isn't installed"
+  error instead of crashing the ask. Audio extraction (`mode=audio`)
+  additionally needs `ffmpeg` on `PATH`.
 - Conversation history (`conversation_history.json`) and your API keys
   (`ai_config.json`) both live in `~/.jarvis/`, in plain text, same as
   `commands.json` — outside this project folder, so nothing ever ends up

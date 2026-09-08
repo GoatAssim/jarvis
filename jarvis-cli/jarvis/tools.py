@@ -24,6 +24,7 @@ from pathlib import Path
 
 from .command_tools import COMMAND_TOOL_SCHEMAS, COMMAND_TOOLS
 from .custom_tools import CUSTOM_TOOL_SCHEMAS, CUSTOM_TOOLS
+from .everything_tools import EVERYTHING_TOOL_SCHEMAS, EVERYTHING_TOOLS
 from .file_tools import FILE_TOOL_SCHEMAS, FILE_TOOLS
 from .git_tools import GIT_TOOL_SCHEMAS, GIT_TOOLS
 from .memory import MEMORY_TOOL_SCHEMAS, MEMORY_TOOLS
@@ -34,6 +35,7 @@ from .radio_tools import RADIO_TOOL_SCHEMAS, RADIO_TOOLS
 from .screenshot_tools import SCREENSHOT_TOOL_SCHEMAS, SCREENSHOT_TOOLS
 from .spotify_tools import SPOTIFY_TOOL_SCHEMAS, SPOTIFY_TOOLS
 from .web_tools import WEB_TOOL_SCHEMAS, WEB_TOOLS
+from .ytdl_tools import YTDL_TOOL_SCHEMAS, YTDL_TOOLS
 
 PLAYNITE_TOOL_SCHEMAS = [*_PLAYNITE_CORE_SCHEMAS, *PLAYNITE_API_TOOL_SCHEMAS]
 PLAYNITE_TOOLS = {**_PLAYNITE_CORE_TOOLS, **PLAYNITE_API_TOOLS}
@@ -277,6 +279,8 @@ CORE_TOOL_SCHEMAS = [
     *PKG_TOOL_SCHEMAS,
     *FILE_TOOL_SCHEMAS,
     *CUSTOM_TOOL_SCHEMAS,
+    *YTDL_TOOL_SCHEMAS,
+    *EVERYTHING_TOOL_SCHEMAS,
 ]
 
 PLAYNITE_AND_SPOTIFY = [*PLAYNITE_TOOL_SCHEMAS, *SPOTIFY_TOOL_SCHEMAS]
@@ -434,6 +438,8 @@ TOOLS = {
     **SPOTIFY_TOOLS,
     **FILE_TOOLS,
     **CUSTOM_TOOLS,
+    **YTDL_TOOLS,
+    **EVERYTHING_TOOLS,
 }
 
 
@@ -447,7 +453,7 @@ def execute_tool(name, arguments=None):
     if fn is None:
         return {"error": f"no such tool: {name}"}
     try:
-        if name in COMMAND_TOOLS or name in PLAYNITE_TOOLS or name in WEB_TOOLS or name in PKG_TOOLS or name in SPOTIFY_TOOLS or name in MEMORY_TOOLS or name in RADIO_TOOLS or name in GIT_TOOLS or name in SCREENSHOT_TOOLS or name in FILE_TOOLS or name in CUSTOM_TOOLS:
+        if name in COMMAND_TOOLS or name in PLAYNITE_TOOLS or name in WEB_TOOLS or name in PKG_TOOLS or name in SPOTIFY_TOOLS or name in MEMORY_TOOLS or name in RADIO_TOOLS or name in GIT_TOOLS or name in SCREENSHOT_TOOLS or name in FILE_TOOLS or name in CUSTOM_TOOLS or name in YTDL_TOOLS or name in EVERYTHING_TOOLS:
             return fn(arguments or {})
         return fn()
     except Exception as e:

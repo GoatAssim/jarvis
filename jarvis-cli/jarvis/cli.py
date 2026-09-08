@@ -41,7 +41,7 @@ ENCODING = "utf-8"
 
 CHAIN_SEP = "then"      # starts a new batch \u2014 waits for the previous one to finish
 PARALLEL_SEP = "and"    # joins the current batch \u2014 runs alongside whatever's already in it
-RESERVED_NAMES = {"config", "ai-config", "ai-clear", "ai-drop-from", "playnite-config", "spotify-config", "spotify-login", "memory-config", "tools-list", "tool-run", "tool-preview", "tool-safety-set", "conv-new", "conv-list", "conv-show", "conv-switch", "conv-delete", "organize-json", CHAIN_SEP, PARALLEL_SEP, "-h", "--help"}
+RESERVED_NAMES = {"config", "ai-config", "ai-clear", "ai-drop-from", "playnite-config", "spotify-config", "spotify-login", "memory-config", "everything-config", "tools-list", "tool-run", "tool-preview", "tool-safety-set", "conv-new", "conv-list", "conv-show", "conv-switch", "conv-delete", "organize-json", CHAIN_SEP, PARALLEL_SEP, "-h", "--help"}
 
 OUT = Palette(sys.stdout)  # actual command output: the banner, the command list
 ERR = Palette(sys.stderr)  # jarvis's own status/trace/error messages
@@ -524,6 +524,10 @@ def handle_ai_prompt(text, commands):
             friendly = name[9:].replace("_", " ")
         elif name.startswith("get_"):
             friendly = name[4:].replace("_", " ")
+        elif name == "ytdl_info":
+            friendly = "looking up video info"
+        elif name == "ytdl_download":
+            friendly = "downloading media"
         elif name in ("wifi_set", "bluetooth_set", "radio_status", "git_run", "take_screenshot"):
             friendly = name.replace("_", " ")
         else:
@@ -740,6 +744,12 @@ def main():
         from . import memory
         memory.ensure_config()
         print(memory.CONFIG_FILE)
+        return
+
+    if argv[0] == "everything-config":
+        from . import everything_config
+        everything_config.ensure_config()
+        print(everything_config.CONFIG_FILE)
         return
 
     if argv[0] == "tools-list":
