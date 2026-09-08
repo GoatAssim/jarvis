@@ -354,6 +354,42 @@ textarea:focus-visible, select:focus-visible, [tabindex]:focus-visible{
 .btn--danger{ color: var(--red); border-color: rgba(255,92,108,0.35); }
 .btn--danger:hover{ border-color: var(--red); }
 
+/* Prompt-capacity switch (400% / 100% / 50%) — cycles on click, see app.js
+   cycleMode(). Color communicates the tradeoff at a glance: gold = full
+   power/most tokens, cyan = the balanced default, green = leanest/cheapest. */
+.btn--mode{
+  display: inline-flex; align-items: center; gap: 7px;
+  flex-shrink: 0;
+  transition: border-color 0.15s, color 0.15s, background 0.15s, box-shadow 0.15s;
+}
+.btn--mode:disabled{ opacity: 0.5; cursor: wait; }
+.btn__mode-dot{
+  width: 7px; height: 7px; border-radius: 50%;
+  background: currentColor; box-shadow: 0 0 6px currentColor;
+  flex-shrink: 0;
+}
+.btn--mode[data-mode="full"]{
+  color: var(--gold); border-color: rgba(242, 181, 68, 0.4);
+  background: linear-gradient(180deg, rgba(242,181,68,0.14), rgba(242,181,68,0.04));
+}
+.btn--mode[data-mode="full"]:hover{ border-color: var(--gold); box-shadow: 0 0 14px rgba(242,181,68,0.3); }
+.btn--mode[data-mode="compact"]{
+  color: var(--accent); border-color: rgba(79, 216, 255, 0.4);
+  background: linear-gradient(180deg, rgba(79,216,255,0.12), rgba(79,216,255,0.03));
+}
+.btn--mode[data-mode="compact"]:hover{ border-color: var(--accent); box-shadow: 0 0 14px var(--accent-glow); }
+.btn--mode[data-mode="ultra"]{
+  color: var(--green); border-color: rgba(70, 240, 182, 0.4);
+  background: linear-gradient(180deg, rgba(70,240,182,0.14), rgba(70,240,182,0.04));
+}
+.btn--mode[data-mode="ultra"]:hover{ border-color: var(--green); box-shadow: 0 0 14px rgba(70,240,182,0.3); }
+
+/* Debug panel's own mode switch — visually identical to the global one
+   (same .btn--mode/data-mode coloring) but wired to a local-only override,
+   see app.js debugMode. margin-left:auto pushes it (and the close button
+   after it) to the right of the panel head, same trick as .topbar__status. */
+#btn-debug-mode-switch{ margin-left: auto; font-size: 11px; padding: 5px 10px; }
+
 .btn__spark{
   width: 7px; height: 7px; border-radius: 50%;
   background: var(--accent); box-shadow: 0 0 6px var(--accent);

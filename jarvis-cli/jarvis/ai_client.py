@@ -12,6 +12,7 @@ import json
 import re
 
 from . import ai_config, ai_providers, conversations, memory, playnite_config, stats, tool_safety
+from . import tool_result_shaping
 from . import tools as system_tools
 
 DEFAULT_TIMEOUT = 30
@@ -29,6 +30,164 @@ COMPACT_RECAP_EXCHANGES = 16
 COMPACT_RECAP_CHAR_BUDGET = 1400
 DEFAULT_COMPACT_PROMPT = True
 DEFAULT_COMPACT_PROMPT_PROVIDERS = ("groq",)
+
+# ===========================================================================
+# Prompt "capacity" modes \u2014 a generic, table-driven registry.
+#
+# Each entry in PROMPT_MODE_DEFS is a complete, self-contained profile of
+# prompt-size knobs (see _build_messages/ask() for how every key is used).
+# PROMPT_MODES, MODE_LABELS, the mode cycle (next_mode), the "jarvis mode" /
+# "mode-set" CLI commands, the web UI's capacity switch, and the
+# get_capacity_mode/set_capacity_mode AI tools (mode_tools.py) are all
+# derived from this one list \u2014 nothing else needs to change to add a mode.
+#
+# To add a new mode later: append one dict here with a unique "name" (used
+# in defaults.prompt_mode / "jarvis mode-set <name>" / the tool's "mode"
+# argument) and a "label" (shown in the web switch + get_capacity_mode), plus
+# every knob below. Order matters only for the cycle (web switch click /
+# set_capacity_mode's next=true) \u2014 it steps through this list in order and
+# wraps around.
+#
+# Knobs, in the order they appear below:
+#   max_commands        \u2014 how many saved commands get listed in the prompt
+#   desc_max_len         \u2014 max chars of each command's description
+#   history_char_budget  \u2014 total chars of prior-turn history included
+#   history_exchanges    \u2014 max prior exchanges included
+#   recap_exchanges       \u2014 how many older exchanges get folded into a recap
+#   recap_budget          \u2014 max chars of that recap
+#   include_freq          \u2014 include the "frequently used commands" context
+#   compact_tools_blurb    \u2014 use the short "tools" explainer vs the long one
+#   compact_persona        \u2014 use the short persona blurb vs the long one
+#   playnite_freq_games    \u2014 how many frequent Playnite games get listed
+#   skip_other_convos      \u2014 omit the "other recent conversations" context
+#   tool_schema_style      \u2014 "compact" (types/enums/required, short descs) or
+#                            "name_only" (just names \u2014 the model re-requests a
+#                            schema the first time it calls a tool needing
+#                            args it didn't supply; see _make_tool_executor)
+#   tool_result_budget     \u2014 chars of already-ran tool results replayed to
+#                            the next provider on failover
+#   tool_result_verbosity  \u2014 "full" (every field a tool returns), "medium"
+#                            (drop merely-nice-to-have fields), or "low"
+#                            (only what a tool's author marked necessary) \u2014
+#                            see tool_result_shaping.py, applied to every
+#                            tool call's *result* (as opposed to
+#                            tool_schema_style, which shapes what the model
+#                            is told a tool accepts before it's even
+#                            called). A tool not listed in
+#                            tool_result_shaping.TOOL_RESULT_SPECS is
+#                            unaffected at every level.
+# ===========================================================================
+
+PROMPT_MODE_DEFS = [
+    {
+        "name": "full",
+        "label": "400% Capacity",
+        "summary": "Fullest context and richest answers. Most tokens per ask.",
+        "max_commands": MAX_COMMANDS_LISTED,
+        "desc_max_len": COMPACT_DESC_MAX_LEN * 2,
+        "history_char_budget": 6000,
+        "history_exchanges": 12,
+        "recap_exchanges": 20,
+        "recap_budget": 1800,
+        "include_freq": True,
+        "compact_tools_blurb": False,
+        "compact_persona": False,
+        "playnite_freq_games": 8,
+        "skip_other_convos": False,
+        "tool_schema_style": "compact",
+        "tool_result_budget": 3500,
+        "tool_result_verbosity": "full",
+    },
+    {
+        "name": "compact",
+        "label": "100% Capacity",
+        "summary": "The balanced default \u2014 trimmed history/commands, still full tool schemas.",
+        "max_commands": COMPACT_MAX_COMMANDS,
+        "desc_max_len": COMPACT_DESC_MAX_LEN,
+        "history_char_budget": COMPACT_HISTORY_CHAR_BUDGET,
+        "history_exchanges": COMPACT_HISTORY_EXCHANGES,
+        "recap_exchanges": COMPACT_RECAP_EXCHANGES,
+        "recap_budget": COMPACT_RECAP_CHAR_BUDGET,
+        "include_freq": False,
+        "compact_tools_blurb": True,
+        "compact_persona": True,
+        "playnite_freq_games": 5,
+        "skip_other_convos": False,
+        "tool_schema_style": "compact",
+        "tool_result_budget": 1600,
+        "tool_result_verbosity": "medium",
+    },
+    {
+        "name": "ultra",
+        "label": "50% Capacity",
+        "summary": (
+            "Ultra compact \u2014 name-only tool schemas plus every other budget cut "
+            "to the minimum that still works. Cheapest mode; a tool needing "
+            "arguments may cost one extra round trip the first time it's called."
+        ),
+        "max_commands": 4,
+        "desc_max_len": 30,
+        "history_char_budget": 1800,
+        "history_exchanges": 4,
+        "recap_exchanges": 6,
+        "recap_budget": 500,
+        "include_freq": False,
+        "compact_tools_blurb": True,
+        "compact_persona": True,
+        "playnite_freq_games": 3,
+        "skip_other_convos": True,
+        "tool_schema_style": "name_only",
+        "tool_result_budget": 600,
+        "tool_result_verbosity": "low",
+    },
+]
+
+PROMPT_MODES = tuple(m["name"] for m in PROMPT_MODE_DEFS)
+MODE_LABELS = {m["name"]: m["label"] for m in PROMPT_MODE_DEFS}
+MODE_SUMMARIES = {m["name"]: m.get("summary", "") for m in PROMPT_MODE_DEFS}
+_MODE_BY_NAME = {m["name"]: m for m in PROMPT_MODE_DEFS}
+DEFAULT_PROMPT_MODE = "compact"
+
+
+def mode_options():
+    """[{"mode","label","summary"}, ...] in registry order \u2014 the one place
+    that builds this shape, so cli.py's mode/mode-set commands, the web
+    /api/mode responses, and get_capacity_mode/set_capacity_mode (mode_tools)
+    all show the exact same list. Adding a mode to PROMPT_MODE_DEFS is
+    everything needed for it to show up here."""
+    return [
+        {"mode": m, "label": MODE_LABELS[m], "summary": MODE_SUMMARIES.get(m, "")}
+        for m in PROMPT_MODES
+    ]
+
+# Legacy per-key overrides, kept only for the three built-in modes so an
+# older hand-edited ai_config.json (compact_max_commands, history_char_budget,
+# etc.) keeps working exactly as before. A custom mode appended to
+# PROMPT_MODE_DEFS above has no legacy keys to honor, so it's used as-is.
+_LEGACY_OVERRIDE_KEYS = {
+    "full": {
+        "history_char_budget": ("history_char_budget",),
+        "history_exchanges": ("history_exchanges",),
+        "recap_exchanges": ("recap_exchanges",),
+        "recap_budget": ("recap_char_budget",),
+    },
+    "compact": {
+        "max_commands": ("compact_max_commands",),
+        "history_char_budget": ("history_char_budget", "compact_history_char_budget"),
+        "history_exchanges": ("history_exchanges", "compact_history_exchanges"),
+        "recap_exchanges": ("recap_exchanges", "compact_recap_exchanges"),
+        "recap_budget": ("recap_char_budget", "compact_recap_char_budget"),
+    },
+    "ultra": {
+        "max_commands": ("ultra_max_commands",),
+        "history_char_budget": ("ultra_history_char_budget",),
+        "history_exchanges": ("ultra_history_exchanges",),
+        "recap_exchanges": ("ultra_recap_exchanges",),
+        "recap_budget": ("ultra_recap_char_budget",),
+        "tool_result_budget": ("ultra_tool_result_budget",),
+    },
+}
+_SIMPLE_OVERRIDE_KEYS = {"max_commands", "tool_result_budget"}  # not run through _history_int's floor check
 
 # How often a conversation's AI-generated title + one-line gist get
 # (re)computed: right after the very first exchange (so the sidebar has
@@ -158,61 +317,102 @@ def _history_int(defaults, keys, floor, fallback):
     return fallback
 
 
-def _prompt_profile(provider_name, defaults):
-    """Return prompt-size knobs for a provider.
+def _resolve_prompt_mode(provider_name, defaults):
+    """Which of PROMPT_MODES applies to this provider.
 
-    Compact is the default for every provider (saves input tokens). Set
-    defaults.compact_prompt to false to restore the longer prompt, optionally
-    keeping it only for names in compact_prompt_providers.
+    defaults.prompt_mode (set by "jarvis mode-set", the web UI's capacity
+    switch, or the set_capacity_mode AI tool) wins outright when it names a
+    mode in the registry \u2014 that's a single, explicit, global choice. With
+    no explicit mode, fall back to the older per-provider scheme so existing
+    configs keep behaving exactly as before: defaults.compact_prompt
+    (default True) plus defaults.compact_prompt_providers (default
+    ["groq"]) pick "compact" vs "full"; a mode with no matching legacy
+    behavior (like "ultra", or any custom mode appended later) is never
+    reached by this fallback \u2014 nothing used to ask for it.
     """
+    explicit = defaults.get("prompt_mode")
+    if explicit in PROMPT_MODES:
+        return explicit
     compact_all = defaults.get("compact_prompt", DEFAULT_COMPACT_PROMPT)
     compact_names = defaults.get("compact_prompt_providers")
     if compact_names is None:
         compact_names = list(DEFAULT_COMPACT_PROMPT_PROVIDERS)
     use_compact = bool(compact_all) or provider_name in compact_names
-    if use_compact:
-        return {
-            "max_commands": defaults.get("compact_max_commands", COMPACT_MAX_COMMANDS),
-            "desc_max_len": COMPACT_DESC_MAX_LEN,
-            "history_char_budget": _history_int(
-                defaults,
-                ("history_char_budget", "compact_history_char_budget"),
-                2000,
-                COMPACT_HISTORY_CHAR_BUDGET,
-            ),
-            "history_exchanges": _history_int(
-                defaults,
-                ("history_exchanges", "compact_history_exchanges"),
-                8,
-                COMPACT_HISTORY_EXCHANGES,
-            ),
-            "recap_exchanges": _history_int(
-                defaults,
-                ("recap_exchanges", "compact_recap_exchanges"),
-                8,
-                COMPACT_RECAP_EXCHANGES,
-            ),
-            "recap_budget": _history_int(
-                defaults,
-                ("recap_char_budget", "compact_recap_char_budget"),
-                800,
-                COMPACT_RECAP_CHAR_BUDGET,
-            ),
-            "include_freq": False,
-            "compact_tools_blurb": True,
-            "compact_persona": True,
-        }
-    return {
-        "max_commands": MAX_COMMANDS_LISTED,
-        "desc_max_len": COMPACT_DESC_MAX_LEN * 2,
-        "history_char_budget": defaults.get("history_char_budget", 6000),
-        "history_exchanges": defaults.get("history_exchanges", 12),
-        "recap_exchanges": defaults.get("recap_exchanges", 20),
-        "recap_budget": defaults.get("recap_char_budget", 1800),
-        "include_freq": True,
-        "compact_tools_blurb": False,
-        "compact_persona": False,
-    }
+    return "compact" if use_compact else "full"
+
+
+def _prompt_profile(provider_name, defaults):
+    """Return prompt-size knobs for a provider: the matching entry from
+    PROMPT_MODE_DEFS (resolved via _resolve_prompt_mode), with any legacy
+    per-key config overrides applied on top for the three built-in modes
+    (see _LEGACY_OVERRIDE_KEYS). A copy is returned so nothing here ever
+    mutates the registry itself.
+    """
+    mode = _resolve_prompt_mode(provider_name, defaults)
+    base = _MODE_BY_NAME.get(mode) or _MODE_BY_NAME[DEFAULT_PROMPT_MODE]
+    profile = dict(base)
+    profile["mode"] = base["name"]
+
+    for key, config_keys in _LEGACY_OVERRIDE_KEYS.get(base["name"], {}).items():
+        if key in _SIMPLE_OVERRIDE_KEYS:
+            for config_key in config_keys:
+                value = defaults.get(config_key)
+                if value is not None:
+                    profile[key] = value
+                    break
+        else:
+            profile[key] = _history_int(defaults, config_keys, 1, profile[key])
+    return profile
+
+
+def current_mode(cfg=None):
+    """The prompt_mode that's actually in effect right now \u2014 what the web
+    UI's capacity switch, 'jarvis mode', and get_capacity_mode show.
+    Resolved the same way ask() resolves it per-provider (see
+    _resolve_prompt_mode); since a switch only has one indicator, this
+    checks the first eligible provider (or falls back to the global default
+    if none are configured yet)."""
+    cfg = cfg or ai_config.load_ai_config()
+    defaults = cfg.get("defaults") or {}
+    explicit = defaults.get("prompt_mode")
+    if explicit in PROMPT_MODES:
+        return explicit
+    providers = _eligible_providers(cfg.get("providers") or [], defaults)
+    label = _provider_label(providers[0]) if providers else ""
+    return _resolve_prompt_mode(label, defaults)
+
+
+def next_mode(current):
+    """The next mode after `current` in PROMPT_MODE_DEFS's order, wrapping
+    around \u2014 used by both the web switch's click-to-cycle and
+    set_capacity_mode's next=true. Adding a mode to the registry
+    automatically slots it into this cycle; nothing here needs to change."""
+    names = list(PROMPT_MODES)
+    if current not in names:
+        return names[0]
+    return names[(names.index(current) + 1) % len(names)]
+
+
+def set_mode(mode):
+    """Persist defaults.prompt_mode to ~/.jarvis/ai_config.json, leaving
+    every other key (including hand-edited ones this module doesn't know
+    about) untouched. Raises ValueError for anything not in PROMPT_MODES."""
+    if mode not in PROMPT_MODES:
+        raise ValueError(f"unknown mode '{mode}' \u2014 expected one of: {', '.join(PROMPT_MODES)}")
+    ai_config.ensure_ai_config()
+    try:
+        raw = json.loads(ai_config.AI_CONFIG_FILE.read_text(encoding=ai_config.ENCODING))
+    except (json.JSONDecodeError, UnicodeDecodeError, OSError):
+        raw = None
+    if not isinstance(raw, dict):
+        raw = json.loads(json.dumps(ai_config.DEFAULT_AI_CONFIG))  # deep copy of the starter template
+    if not isinstance(raw.get("defaults"), dict):
+        raw["defaults"] = {}
+    raw["defaults"]["prompt_mode"] = mode
+    ai_config.AI_CONFIG_FILE.write_text(
+        json.dumps(raw, indent=2) + "\n", encoding=ai_config.ENCODING
+    )
+    return mode
 
 
 def _tools_blurb(compact, has_playnite, has_spotify):
@@ -293,7 +493,8 @@ def _tools_blurb(compact, has_playnite, has_spotify):
 
 def _system_prompt(persona, commands_ctx, freq_ctx, tools_enabled,
                    compact_tools=False, compact_persona=False, has_history=False,
-                   memory_ctx="", has_playnite=False, has_spotify=False, other_convos_ctx=""):
+                   memory_ctx="", has_playnite=False, has_spotify=False, other_convos_ctx="",
+                   playnite_freq_games=None):
     name = persona.get("assistant_name") or DEFAULT_ASSISTANT_NAME
     address = persona.get("address_user_as") or DEFAULT_ADDRESS
     extra = (persona.get("extra_instructions") or "").strip()
@@ -333,8 +534,11 @@ def _system_prompt(persona, commands_ctx, freq_ctx, tools_enabled,
         parts.append(memory_ctx)
     if other_convos_ctx:
         parts.append(other_convos_ctx)
+    if playnite_freq_games is None:
+        fallback_mode = "compact" if compact_persona else "full"
+        playnite_freq_games = _MODE_BY_NAME[fallback_mode]["playnite_freq_games"]
     playnite_ctx = playnite_config.frequent_games_context(
-        5 if compact_persona else 8,
+        playnite_freq_games,
         compact=compact_persona,
     )
     if playnite_ctx:
@@ -375,7 +579,10 @@ def _build_messages(persona, commands, user_text, tools_enabled, profile, conver
         query=user_text or "",
         extra_texts=prior_user,
     )
-    other_convos_ctx = conversations.other_conversations_context(conversation_id)
+    other_convos_ctx = (
+        "" if profile.get("skip_other_convos")
+        else conversations.other_conversations_context(conversation_id)
+    )
     offered = system_tools.tool_schemas_for_session() if tools_enabled else []
     offered_names = {s["name"] for s in offered}
     system_prompt = _system_prompt(
@@ -390,6 +597,7 @@ def _build_messages(persona, commands, user_text, tools_enabled, profile, conver
         has_playnite=any(n.startswith("playnite_") for n in offered_names),
         has_spotify=any(n.startswith("spotify_") for n in offered_names),
         other_convos_ctx=other_convos_ctx,
+        playnite_freq_games=profile.get("playnite_freq_games"),
     )
     messages = [{"role": "system", "content": system_prompt}]
     messages.extend(prior_turns)
@@ -421,7 +629,31 @@ def _missing_required(schema, arguments):
     return missing
 
 
-def risk_review(tool_name, arguments, cfg, exclude_label=None):
+# Risk-note length/detail and its token ceiling, keyed by the same
+# tool_result_verbosity a mode's PROMPT_MODE_DEFS entry already declares
+# (full/medium/low) \u2014 reuses the existing capacity-mode vocabulary instead
+# of inventing a parallel one, without touching how any *other* prompt in
+# this file is built.
+_RISK_REVIEW_VERBOSITY_PROFILES = {
+    "full": {
+        "sentence_count": "4-6",
+        "extra_instruction": " Include any edge cases or side effects worth knowing about.",
+        "max_tokens": 400,
+    },
+    "medium": {
+        "sentence_count": "2-3",
+        "extra_instruction": "",
+        "max_tokens": 200,
+    },
+    "low": {
+        "sentence_count": "1",
+        "extra_instruction": " Be as brief as possible \u2014 the rating and nothing else.",
+        "max_tokens": 80,
+    },
+}
+
+
+def risk_review(tool_name, arguments, cfg, exclude_label=None, mode=None):
     """Ask a *different* configured AI provider than the one currently
     answering to explain, in plain language, what a tool call will do and
     how dangerous/irreversible it is. Best-effort only: never raises, and
@@ -429,6 +661,15 @@ def risk_review(tool_name, arguments, cfg, exclude_label=None):
     configured or the call fails \u2014 a missing/misconfigured second provider
     should never block or crash the primary ask, it just means the
     confirmation prompt won't have an AI opinion attached.
+
+    `mode`, if given, is one of PROMPT_MODES (e.g. from a one-off local
+    override, not necessarily the config's real defaults.prompt_mode) and
+    only ever scales *this* prompt's requested length and token ceiling via
+    _RISK_REVIEW_VERBOSITY_PROFILES above \u2014 it never reads or writes
+    defaults.prompt_mode, so it can't affect the real global capacity mode
+    or any other prompt built elsewhere in this file. Anything not in
+    PROMPT_MODES (including None) falls back to the same "medium" profile
+    this function always used before `mode` existed.
     """
     try:
         providers = _eligible_providers(cfg["providers"], cfg["defaults"])
@@ -444,6 +685,12 @@ def risk_review(tool_name, arguments, cfg, exclude_label=None):
         if keys[0] is not None:
             resolved["api_key"] = keys[0]
 
+        mode_profile = _MODE_BY_NAME.get(mode) if mode in PROMPT_MODES else None
+        verbosity = (mode_profile or {}).get("tool_result_verbosity", "medium")
+        review_profile = _RISK_REVIEW_VERBOSITY_PROFILES.get(verbosity, _RISK_REVIEW_VERBOSITY_PROFILES["medium"])
+        if mode_profile is not None:
+            resolved["max_tokens"] = review_profile["max_tokens"]
+
         try:
             args_s = json.dumps(arguments or {}, default=str)
         except TypeError:
@@ -453,9 +700,10 @@ def risk_review(tool_name, arguments, cfg, exclude_label=None):
             "user's own machine:\n"
             f"  tool: {tool_name}\n"
             f"  arguments: {args_s}\n\n"
-            "In 2-3 short plain-language sentences: (1) explain exactly what this "
-            "specific call will do, and (2) rate how dangerous/irreversible it is "
-            "(none / low / medium / high) with a one-line reason. No preamble, no "
+            f"In {review_profile['sentence_count']} short plain-language sentence(s): "
+            "(1) explain exactly what this specific call will do, and (2) rate how "
+            "dangerous/irreversible it is (none / low / medium / high) with a "
+            f"one-line reason.{review_profile['extra_instruction']} No preamble, no "
             "markdown, just the assessment."
         )
         messages = [{"role": "user", "content": prompt}]
@@ -469,7 +717,7 @@ def risk_review(tool_name, arguments, cfg, exclude_label=None):
 
 
 def _make_tool_executor(on_tool_call, schemas=None, on_confirm_request=None,
-                         cfg=None, provider_ref=None):
+                         cfg=None, provider_ref=None, verbosity_ref=None):
     """Shared across every provider/key in one ask() so a failover never
     re-runs the same command, Playnite action, or web fetch. Cache hits
     still return the original result (no second launch / install / HTTP).
@@ -485,6 +733,14 @@ def _make_tool_executor(on_tool_call, schemas=None, on_confirm_request=None,
     call does and how dangerous it is; otherwise risk_note is None. With no
     on_confirm_request supplied at all, a tool requiring confirmation fails
     closed (never silently runs unconfirmed).
+
+    verbosity_ref, if given, is a one-element list read fresh on every call
+    (["full"] by default) whose current value picks how much of a
+    successful result survives before it's cached/returned \u2014 see
+    tool_result_shaping.shape_result(). A mutable holder (not a plain
+    argument) because one executor is shared across every provider in a
+    single ask() for failover, and each provider attempt resolves its own
+    prompt profile (see ask()'s main loop), same pattern as provider_ref.
     """
     cache = {}
     runs = []
@@ -549,12 +805,8 @@ def _make_tool_executor(on_tool_call, schemas=None, on_confirm_request=None,
             except TypeError:
                 on_tool_call(name)
         result = system_tools.execute_tool(name, arguments)
-        if name == "take_screenshot" and isinstance(result, dict):
-            result = {
-                k: result[k]
-                for k in ("ok", "id", "file", "path", "width", "height", "bytes", "note", "error")
-                if k in result
-            }
+        verbosity = verbosity_ref[0] if verbosity_ref else "full"
+        result = tool_result_shaping.shape_result(name, result, verbosity)
         cache[key] = result
         runs.append({"name": name, "arguments": arguments, "result": result})
         return result
@@ -793,23 +1045,29 @@ def ask(user_text, commands=None, on_attempt=None, on_tool_call=None, conversati
         return AskResult(False, assistant_name=assistant_name, address_user_as=address)
 
     tools_enabled = cfg["defaults"].get("tools_enabled", DEFAULT_TOOLS_ENABLED)
-    tool_schemas = None
     full_schemas = []
     if tools_enabled:
         full_schemas = system_tools.tool_schemas_for_session()
-        # Real (description-stripped) argument schemas, not name-only stubs.
-        # jarvis is a brand-new process every "jarvis ..." call (see history.py's
-        # module docstring) — there's no running session for a model to "learn" a
-        # tool's shape in, so the old name-only-then-relearn-on-first-use trade
-        # was paying a full extra tool round-trip (i.e. resending the *entire*
-        # prompt again) on essentially every argument-taking tool, every single
+        # Real (description-stripped) argument schemas, not name-only stubs,
+        # are the default (full/compact modes) because jarvis is a brand-new
+        # process every "jarvis ..." call (see history.py's module
+        # docstring) — there's no running session for a model to "learn" a
+        # tool's shape in, so name-only-then-relearn-on-first-use pays a
+        # full extra tool round trip (i.e. resending the *entire* prompt
+        # again) on essentially every argument-taking tool, every single
         # invocation. A few hundred extra bytes of schema up front is far
-        # cheaper than that guaranteed second round trip.
-        tool_schemas = system_tools.compact_schemas_for_prompt(full_schemas)
+        # cheaper than that guaranteed second round trip — UNLESS the prompt
+        # itself is the thing being minimized, which is exactly what "ultra"
+        # (50% Capacity) mode is for: see tool_schema_style per-provider
+        # below, resolved fresh each attempt since mode can still vary by
+        # provider under the legacy compact_prompt_providers config.
+        compact_schemas = system_tools.compact_schemas_for_prompt(full_schemas)
+        name_only_schemas = system_tools.name_only_schemas_for_prompt(full_schemas)
     provider_ref = [None]
+    verbosity_ref = ["full"]
     tool_executor = _make_tool_executor(
         on_tool_call, full_schemas, on_confirm_request=on_confirm_request,
-        cfg=cfg, provider_ref=provider_ref,
+        cfg=cfg, provider_ref=provider_ref, verbosity_ref=verbosity_ref,
     ) if tools_enabled else None
 
     attempts = []
@@ -818,6 +1076,14 @@ def ask(user_text, commands=None, on_attempt=None, on_tool_call=None, conversati
         label = _provider_label(provider)
         provider_ref[0] = label
         profile = _prompt_profile(label, cfg["defaults"])
+        verbosity_ref[0] = profile.get("tool_result_verbosity", "full")
+        if tools_enabled:
+            tool_schemas = (
+                name_only_schemas if profile.get("tool_schema_style") == "name_only"
+                else compact_schemas
+            )
+        else:
+            tool_schemas = None
         adapter = ai_providers.ADAPTERS.get(provider.get("type"))
         if adapter is None:
             attempts.append((label, f"unknown provider type '{provider.get('type')}'"))
@@ -834,7 +1100,7 @@ def ask(user_text, commands=None, on_attempt=None, on_tool_call=None, conversati
             )
             runs = getattr(tool_executor, "runs", None) if tool_executor else None
             if runs:
-                budget = 1600 if profile.get("compact_tools_blurb") else 3500
+                budget = profile.get("tool_result_budget", _MODE_BY_NAME["full"]["tool_result_budget"])
                 note = _tool_runs_note(runs, budget)
                 if note:
                     messages.append({"role": "user", "content": note})
