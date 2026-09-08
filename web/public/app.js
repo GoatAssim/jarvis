@@ -143,6 +143,10 @@
     activeConversationId: null,  // which one the open thread + next ask belong to
     askConversationId: null,     // which conversation the in-flight ask/redo actually belongs to
     convoSearch: "",
+    askTraceByConv: {},          // convId -> [{text, cls}] recorded "commands Jarvis runs" lines,
+                                  // so switching away and back doesn't lose them (see askPromptLine)
+    pendingConfirmByConv: {},    // convId -> {tool, arguments, risk_note} for a confirm request that
+                                  // arrived while that conversation wasn't the one being viewed
   };
 
   // ===========================================================================
@@ -637,9 +641,22 @@
     qs("#btn-execute").disabled = running;
     qs("#btn-seq-run").disabled = running;
     qs("#btn-abort").hidden = !running;
-    qs("#ask-input").disabled = running;
-    qs("#btn-ask-send").disabled = running;
-    qs("#btn-ask-stop").hidden = !running;
+    refreshAskBusyUI();
+  }
+
+  // The ask panel's own busy indicators (input, send/stop buttons) reflect
+  // whether *the conversation currently on screen* is the one an ask is
+  // running for — not just "is anything running at all" — so switching to
+  // an idle conversation while a background ask keeps going elsewhere
+  // doesn't leave a stray Stop button (or a disabled input) behind in a
+  // conversation where, as far as its own view is concerned, nothing is
+  // happening. Call this both when state.running changes (setRunning) and
+  // whenever the visible conversation changes (selectConversation et al).
+  function refreshAskBusyUI() {
+    const busyHere = state.running && isViewingAskThread();
+    qs("#ask-input").disabled = busyHere;
+    qs("#btn-ask-send").disabled = busyHere;
+    qs("#btn-ask-stop").hidden = !busyHere;
   }
 
   function connectWs() {
@@ -720,10 +737,19 @@
       case "ask-stderr":
         addAskPromptTrace(msg.line);
         break;
-      case "ask-confirm-request":
-        addAskConfirmBubble(msg.tool, msg.arguments, msg.risk_note);
-        setAskStatus("waiting for your confirmation\u2026", "busy");
+      case "ask-confirm-request": {
+        const convId = state.askConversationId;
+        if (convId != null) {
+          state.pendingConfirmByConv[convId] = { tool: msg.tool, arguments: msg.arguments, risk_note: msg.risk_note };
+        }
+        if (isViewingAskThread()) {
+          addAskConfirmBubble(msg.tool, msg.arguments, msg.risk_note, convId);
+          setAskStatus("waiting for your confirmation\u2026", "busy");
+        } else {
+          toast("Jarvis needs your OK on something in another chat.", "info");
+        }
         break;
+      }
       case "ask-exit": {
         setRunning(false);
         const raw = state.askReplyLines.length ? state.askReplyLines.join("\n") : "";
@@ -787,6 +813,7 @@
   const askThread = qs("#ask-thread");
 
   function setAskStatus(text, kind) {
+    if (!isViewingAskThread()) return;
     const el = qs("#ask-status-line");
     el.textContent = text;
     el.className = "ask-panel__subtitle" + (kind ? ` is-${kind}` : "");
@@ -883,6 +910,20 @@
     return msg;
   }
 
+  // A pending-bubble reference can go stale (its DOM node destroyed) if the
+  // thread was rebuilt from scratch by loadConversationIntoThread while we
+  // were viewing a different conversation (see selectConversation, which
+  // re-creates a fresh pending bubble on switching back to a still-running
+  // conversation — but this guard is here in case anything else races it,
+  // since insertBefore throws outright on a detached reference node).
+  function insertIntoAskThread(msg) {
+    if (state.askPendingBubble && askThread.contains(state.askPendingBubble)) {
+      askThread.insertBefore(msg, state.askPendingBubble);
+    } else {
+      askThread.appendChild(msg);
+    }
+  }
+
   // True while the conversation thread currently on screen is the same one
   // an in-flight ask/redo actually belongs to. If the user has switched to
   // a different conversation while a reply is still streaming in, we must
@@ -908,7 +949,6 @@
   }
 
   function addAskPromptTrace(raw) {
-    if (!isViewingAskThread()) return;
     const line = stripAnsi(raw).trim();
     if (!line) return;
     if (line.startsWith("JARVIS_MEDIA\t")) {
@@ -944,8 +984,7 @@
         el("div", { class: "ask-shot-cap" }, "Screenshot"),
       ]),
     ]);
-    if (state.askPendingBubble) askThread.insertBefore(msg, state.askPendingBubble);
-    else askThread.appendChild(msg);
+    insertIntoAskThread(msg);
     askThreadScrollToEnd();
   }
 
@@ -958,6 +997,7 @@
   }
 
   function setAskPromptState(text, live) {
+    if (!isViewingAskThread()) return;
     const node = qs("#ask-prompt-state");
     node.textContent = text;
     node.classList.toggle("is-live", !!live);
@@ -969,6 +1009,7 @@
   }
 
   function askPromptCursor(show) {
+    if (!isViewingAskThread()) return;
     const term = askPromptTerm();
     let cur = qs(".ask-prompt__cursor", term);
     if (!show) {
@@ -979,7 +1020,19 @@
     term.appendChild(cur);
   }
 
+  // The single place a trace line gets added. Always records it against
+  // whichever conversation the running ask belongs to (state.askConversationId)
+  // so switching away and back doesn't lose it (see renderAskTraceForConv) —
+  // and only touches the actual DOM if that conversation happens to be the
+  // one on screen right now, so a background ask can never paint into (or
+  // clobber) an unrelated, currently-visible conversation's panel.
   function askPromptLine(text, cls) {
+    const convId = state.askConversationId;
+    if (convId != null) {
+      if (!state.askTraceByConv[convId]) state.askTraceByConv[convId] = [];
+      state.askTraceByConv[convId].push({ text, cls });
+    }
+    if (!isViewingAskThread()) return;
     const term = askPromptTerm();
     askPromptClearIdle();
     const cur = qs(".ask-prompt__cursor", term);
@@ -990,6 +1043,7 @@
   }
 
   function askPromptBegin() {
+    if (state.askConversationId != null) state.askTraceByConv[state.askConversationId] = [];
     setAskPromptState("live", true);
     askPromptLine("$ jarvis", "cmd");
     askPromptCursor(true);
@@ -1007,6 +1061,35 @@
   function askPromptReset() {
     askPromptTerm().innerHTML = '<div class="ask-prompt__idle">Commands Jarvis runs will show up here live.</div>';
     setAskPromptState("idle", false);
+  }
+
+  // Called instead of a blind askPromptReset() whenever the visible
+  // conversation changes: replays that conversation's own recorded trace
+  // lines (if any) rather than always wiping the panel to idle, so
+  // switching away and back no longer loses "the console output on the
+  // right". If that conversation's ask is still actively running, restores
+  // the live cursor/state too.
+  function renderAskTraceForConv(convId) {
+    const lines = state.askTraceByConv[convId];
+    const term = askPromptTerm();
+    if (!lines || !lines.length) {
+      askPromptReset();
+      return;
+    }
+    term.innerHTML = "";
+    for (const { text, cls } of lines) {
+      term.appendChild(el("div", { class: `ask-prompt-line ask-prompt-line--${cls}` }, text));
+    }
+    const stillRunning = state.running && state.askConversationId === convId;
+    if (stillRunning) {
+      term.appendChild(el("span", { class: "ask-prompt__cursor" }));
+      qs("#ask-prompt-state").textContent = "live";
+      qs("#ask-prompt-state").classList.add("is-live");
+    } else {
+      qs("#ask-prompt-state").textContent = "idle";
+      qs("#ask-prompt-state").classList.remove("is-live");
+    }
+    term.scrollTop = term.scrollHeight;
   }
 
   // Jarvis's own CLI output is plain text like "J.A.R.V.I.S: <reply>" (see
@@ -1062,13 +1145,12 @@
   }
 
   function ensureAskTraceBubble() {
-    if (state.askTraceBubble) return state.askTraceBubble;
+    if (state.askTraceBubble && askThread.contains(state.askTraceBubble)) return state.askTraceBubble;
     const msg = el("div", { class: "ask-msg ask-msg--jarvis ask-msg--console" }, [
       el("div", { class: "ask-msg__role" }, "Console"),
       el("div", { class: "ask-msg__bubble ask-msg__bubble--console" }),
     ]);
-    if (state.askPendingBubble) askThread.insertBefore(msg, state.askPendingBubble);
-    else askThread.appendChild(msg);
+    insertIntoAskThread(msg);
     state.askTraceBubble = msg;
     return msg;
   }
@@ -1086,7 +1168,7 @@
   // on_confirm_request is blocked on a synchronous stdin read right now —
   // server.js relays the answer straight to it, so until Yes/No is
   // clicked here the ask genuinely cannot proceed.
-  function addAskConfirmBubble(tool, args, riskNote) {
+  function addAskConfirmBubble(tool, args, riskNote, convId) {
     clearAskEmptyHint();
     const argsStr = JSON.stringify(args || {}, null, 2);
     const bubbleChildren = [
@@ -1115,26 +1197,36 @@
       noBtn.disabled = true;
       actions.appendChild(el("div", { class: `ask-confirm__result ${approved ? "is-yes" : "is-no"}` },
         approved ? "\u2713 Approved \u2014 running\u2026" : "\u2717 Declined"));
+      if (convId != null) delete state.pendingConfirmByConv[convId];
       wsSend({ type: "ask-confirm-response", approved });
       setAskStatus("thinking\u2026", "busy");
     }
     yesBtn.addEventListener("click", () => resolve(true));
     noBtn.addEventListener("click", () => resolve(false));
 
-    if (state.askPendingBubble) askThread.insertBefore(msg, state.askPendingBubble);
-    else askThread.appendChild(msg);
+    insertIntoAskThread(msg);
     askThreadScrollToEnd();
     return msg;
   }
 
-  function appendAskReplyLine(line) {
-    if (!isViewingAskThread() || !state.askPendingBubble) return;
-    state.askReplyLines.push(line);
+  // Shared between a normal incoming reply line and re-painting whatever's
+  // accumulated so far into a freshly (re)created pending bubble — e.g.
+  // after switching back into a still-running conversation, where the old
+  // bubble's DOM node was destroyed by loadConversationIntoThread rebuilding
+  // the thread from scratch (see selectConversation).
+  function rerenderAskPendingBubble() {
+    if (!state.askPendingBubble || !state.askReplyLines.length) return;
     const { name, dump, reply } = splitConsoleDump(state.askReplyLines);
     if (name) qs(".ask-msg__role", state.askPendingBubble).textContent = name;
     renderAskTrace(dump);
     const bubble = qs(".ask-msg__bubble", state.askPendingBubble);
     bubble.innerHTML = renderMarkdown(reply.join("\n"));
+  }
+
+  function appendAskReplyLine(line) {
+    if (!isViewingAskThread() || !state.askPendingBubble) return;
+    state.askReplyLines.push(line);
+    rerenderAskPendingBubble();
     askThreadScrollToEnd();
   }
 
@@ -1307,6 +1399,7 @@
     if (!text && quotes.length === 0) return;
     if (!state.activeConversationId) await startNewConversation();
     input.value = "";
+    askInputAutoGrow(input);
     state.askQuotes = [];
     renderQuoteBar();
     hideSelPop();
@@ -1321,6 +1414,26 @@
       conversationId: state.activeConversationId,
     });
   });
+
+  // #ask-input is a <textarea> so a message can span multiple lines (the
+  // CLI already handles embedded "\n" in a prompt string fine — this is
+  // just about letting the web UI type one in). Enter sends, same as the
+  // old single-line <input> used to; Shift+Enter inserts a real newline
+  // instead, the same convention as Slack/Discord/etc.
+  qs("#ask-input").addEventListener("keydown", (e) => {
+    if (e.key === "Enter" && !e.shiftKey) {
+      e.preventDefault();
+      qs("#ask-form").requestSubmit();
+    }
+  });
+
+  // Grows the textarea to fit its content (up to the CSS max-height, after
+  // which it scrolls) instead of staying a fixed single line.
+  function askInputAutoGrow(input) {
+    input.style.height = "auto";
+    input.style.height = `${input.scrollHeight}px`;
+  }
+  qs("#ask-input").addEventListener("input", (e) => askInputAutoGrow(e.target));
 
   qs("#btn-ask-clear").addEventListener("click", async () => {
     try {
@@ -1930,7 +2043,22 @@
     }
     state.activeConversationId = id;
     loadConversationIntoThread(record);
-    askPromptReset();
+    // If this conversation's ask is still running in the background, the
+    // thread rebuild above just destroyed the old pending-bubble DOM node
+    // (see insertIntoAskThread) — make a fresh one and repaint whatever's
+    // accumulated so far, so live updates have somewhere valid to land.
+    if (state.running && state.askConversationId === id) {
+      state.askPendingBubble = addJarvisBubblePending();
+      rerenderAskPendingBubble();
+      setAskStatus("thinking\u2026", "busy");
+    }
+    renderAskTraceForConv(id);
+    refreshAskBusyUI();
+    const pending = state.pendingConfirmByConv[id];
+    if (pending) {
+      addAskConfirmBubble(pending.tool, pending.arguments, pending.risk_note, id);
+      setAskStatus("waiting for your confirmation\u2026", "busy");
+    }
     renderConvoList();
   }
 
@@ -1950,6 +2078,7 @@
       state.activeConversationId = record.id;
       loadConversationIntoThread({ exchanges: [] });
       askPromptReset();
+      refreshAskBusyUI();
     }
     renderConvoList();
     return record.id;
@@ -1963,6 +2092,8 @@
       toast(`Couldn't delete: ${e.message}`);
       return;
     }
+    delete state.askTraceByConv[id];
+    delete state.pendingConfirmByConv[id];
     state.conversations = state.conversations.filter((c) => c.id !== id);
     if (id === state.activeConversationId) {
       // Land somewhere sane: the next most recent chat, or a brand-new one.
