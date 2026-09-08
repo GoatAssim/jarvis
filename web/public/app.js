@@ -358,6 +358,8 @@
     debugLastResult: null,   // last {ok, result, raw, stderr, error} from /api/tools/run
     debugLastResultError: false,
     debugPendingConfirm: null, // {name, arguments, risk_note} awaiting Yes/No before /api/tools/run
+    debugMode: null,          // local-only capacity override for this panel, e.g. "compact" \u2014
+                               // never sent to /api/mode, never affects the real global mode
 
     // Conversations — every saved chat lives in ~/.jarvis/conversations
     // (see conversations.py); this is just the in-memory mirror for the
@@ -1975,6 +1977,39 @@
   const debugToolCount = qs("#debug-tool-count");
   const btnDebugRun = qs("#btn-debug-run");
 
+  // ---- Debug's own capacity switch ---------------------------------------
+  // Looks and cycles just like the global #btn-mode-switch (same
+  // modeOptions/optionFor/FALLBACK_MODE from the section above), but it
+  // only ever writes to state.debugMode \u2014 it never calls Api.setMode, so
+  // clicking it can't change what mode Jarvis is actually running in.
+  // Nothing currently reads state.debugMode back into a tool call (tool-run
+  // bypasses the model entirely), so today this is purely a local display
+  // toggle, kept separate in case a debug-scoped mode override is wired up
+  // to something later.
+  const btnDebugModeSwitch = qs("#btn-debug-mode-switch");
+  const debugModeSwitchLabel = qs("#debug-mode-switch-label");
+
+  function renderDebugMode() {
+    const current = optionFor(state.debugMode) || optionFor(FALLBACK_MODE.mode) || FALLBACK_MODE;
+    const idx = modeOptions.indexOf(current);
+    const next = modeOptions.length ? modeOptions[(Math.max(idx, 0) + 1) % modeOptions.length] : null;
+    btnDebugModeSwitch.dataset.mode = current.mode;
+    const base = "Local override for this debug panel only \u2014 does not touch Jarvis's real capacity mode.";
+    btnDebugModeSwitch.title = current.summary
+      ? `${base} ${current.label} \u2014 ${current.summary}${next ? ` Click to switch to ${next.label}.` : ""}`
+      : base;
+    debugModeSwitchLabel.textContent = current.label;
+  }
+
+  btnDebugModeSwitch.addEventListener("click", async () => {
+    if (!modeOptions.length) { await loadMode(); if (!modeOptions.length) return; }
+    const current = state.debugMode || FALLBACK_MODE.mode;
+    const idx = modeOptions.findIndex((o) => o.mode === current);
+    const next = modeOptions[(Math.max(idx, 0) + 1) % modeOptions.length];
+    state.debugMode = next.mode; // local only \u2014 never posted to /api/mode
+    renderDebugMode();
+  });
+
   function debugFindTool(name) {
     return state.debugTools.find((t) => t.name === name) || null;
   }
@@ -2481,6 +2516,13 @@
 
   async function openDebug() {
     debugOverlay.hidden = false;
+    if (!state.debugMode) {
+      if (!modeOptions.length) await loadMode();
+      // Seed from whatever the global switch currently shows, purely as a
+      // starting point \u2014 from here the two are independent.
+      state.debugMode = qs("#btn-mode-switch").dataset.mode || FALLBACK_MODE.mode;
+    }
+    renderDebugMode();
     if (state.debugLoaded) return;
     debugStatusLine.textContent = "reading tool catalog\u2026";
     debugStatusLine.classList.add("is-busy");
