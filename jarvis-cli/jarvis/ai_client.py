@@ -230,7 +230,8 @@ def _tools_blurb(compact, has_playnite, has_spotify):
             "Screenshots: take_screenshot (image is for the user, not you). "
             "Web: web_search then web_fetch. Install: package_search, ask, then "
             "package_install confirm=true. "
-            "Video/audio: ytdl_info for metadata, ytdl_download to fetch (confirm first, one URL, never a playlist)."
+            "Video/audio: ytdl_info for metadata, ytdl_formats for exact format ids, "
+            "ytdl_download to fetch (confirm first; single video by default, playlist=true for more, capped)."
         ]
         if has_spotify:
             parts.append(
@@ -257,9 +258,12 @@ def _tools_blurb(compact, has_playnite, has_spotify):
         "reset/clean/force-push/clone need confirm=true. Not a shell. "
         "SCREENSHOT: take_screenshot saves the desktop and shows it in the UI. "
         "You only get a tiny ok/path — never describe pixels or ask for the image. Confirm in one short line. "
-        "VIDEO/AUDIO: ytdl_info gets metadata (title, duration, qualities) for a URL with no download. "
-        "ytdl_download fetches it (mode='video' or 'audio') and hands the file to the user in the UI — "
-        "confirm first, and it's always exactly one URL, never a playlist or channel. "
+        "VIDEO/AUDIO: ytdl_info gets metadata (title, duration, qualities, ffmpeg_available) for a URL with no "
+        "download. ytdl_formats lists exact format_ids when the simple quality presets aren't specific enough. "
+        "ytdl_download fetches it (mode='video' or 'audio', quality/container/codec/subs/thumbnail/metadata/"
+        "SponsorBlock all optional, output_dir to save somewhere specific) and hands the file to the user in "
+        "the UI — confirm first. Single video by default; playlist=true fetches more (hard-capped), still one "
+        "confirm. "
         "You only get a tiny ok/path back — never claim details about the content you weren't told. "
         "WEB: For 'best X', news, prices, how-tos, or anything that may have changed, "
         "MUST web_search, then web_fetch 1–3 URLs, then summarize with markdown source links. "
