@@ -517,7 +517,14 @@ app.post("/api/tools/run", requireJarvis, async (req, res) => {
   } catch (e) {
     return res.status(400).json({ error: `Couldn't serialize arguments: ${e.message}` });
   }
-  const result = await runJarvisOnce(["tool-run", name, argsJson], 30000);
+  // Optional local-only capacity-mode override for this run (the debug
+  // panel's own mode switch, separate from the app's real global mode —
+  // see /api/mode above). `jarvis tool-run` validates it against the real
+  // PROMPT_MODES itself and silently ignores anything it doesn't
+  // recognize, so no validation is needed here beyond "it's a string" —
+  // an empty string is the "no override" case it already expects.
+  const mode = typeof req.body?.mode === "string" ? req.body.mode.trim() : "";
+  const result = await runJarvisOnce(["tool-run", name, argsJson, mode], 30000);
   // `jarvis tool-run` always prints a JSON object to stdout, even on its
   // own validation errors (bad JSON args, missing name), just with a
   // non-zero exit code in those cases — so try parsing stdout first no

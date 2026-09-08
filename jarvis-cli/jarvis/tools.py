@@ -449,9 +449,18 @@ TOOLS = {
 }
 
 
-def execute_tool(name, arguments=None):
+def execute_tool(name, arguments=None, verbosity=None):
     """Run one tool by name and return a JSON-serializable result — always,
-    even on failure. Never raises."""
+    even on failure. Never raises.
+
+    `verbosity` ("full"/"medium"/"low"), if given, shapes the result the
+    exact same way ai_client._make_tool_executor already does for every
+    tool call the model makes (see tool_result_shaping.shape_result) —
+    this just lets a caller outside that flow (the debug dashboard's direct
+    tool-run, via `mode` → verbosity in cli.py) opt into the same trimming.
+    Omitted/None leaves the result untouched, same as before this
+    parameter existed.
+    """
     allowed = allowed_tools_from_env()
     if allowed is not None and name not in allowed:
         return {"error": "tool not permitted"}
@@ -460,7 +469,12 @@ def execute_tool(name, arguments=None):
         return {"error": f"no such tool: {name}"}
     try:
         if name in COMMAND_TOOLS or name in PLAYNITE_TOOLS or name in WEB_TOOLS or name in PKG_TOOLS or name in SPOTIFY_TOOLS or name in MEMORY_TOOLS or name in CAPACITY_TOOLS or name in RADIO_TOOLS or name in GIT_TOOLS or name in SCREENSHOT_TOOLS or name in FILE_TOOLS or name in CUSTOM_TOOLS or name in YTDL_TOOLS or name in EVERYTHING_TOOLS or name in ORGANIZE_JSON_TOOLS:
-            return fn(arguments or {})
-        return fn()
+            result = fn(arguments or {})
+        else:
+            result = fn()
     except Exception as e:
         return {"error": f"{name} failed: {e}"}
+    if verbosity:
+        from . import tool_result_shaping
+        result = tool_result_shaping.shape_result(name, result, verbosity)
+    return result
