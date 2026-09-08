@@ -548,9 +548,17 @@ app.post("/api/tools/preview", requireJarvis, async (req, res) => {
   } catch (e) {
     return res.status(400).json({ error: `Couldn't serialize arguments: ${e.message}` });
   }
+  // Optional local-only capacity-mode override for this one AI-review call
+  // (the debug panel's own mode switch, kept separate from the app's real
+  // global mode — see /api/mode above). `jarvis tool-preview` validates it
+  // against the real PROMPT_MODES itself and silently ignores anything it
+  // doesn't recognize, so no validation is needed here beyond "it's a
+  // string" — an empty string is the "no override" case it already expects.
+  const mode = typeof req.body?.mode === "string" ? req.body.mode.trim() : "";
+
   // Generous timeout: when ai_review is on this makes a real network call
   // to a second AI provider before responding.
-  const result = await runJarvisOnce(["tool-preview", name, argsJson], 30000);
+  const result = await runJarvisOnce(["tool-preview", name, argsJson, mode], 30000);
   let parsed;
   try {
     parsed = JSON.parse(result.stdout);

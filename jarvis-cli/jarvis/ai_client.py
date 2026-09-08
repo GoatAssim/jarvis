@@ -629,7 +629,31 @@ def _missing_required(schema, arguments):
     return missing
 
 
-def risk_review(tool_name, arguments, cfg, exclude_label=None):
+# Risk-note length/detail and its token ceiling, keyed by the same
+# tool_result_verbosity a mode's PROMPT_MODE_DEFS entry already declares
+# (full/medium/low) \u2014 reuses the existing capacity-mode vocabulary instead
+# of inventing a parallel one, without touching how any *other* prompt in
+# this file is built.
+_RISK_REVIEW_VERBOSITY_PROFILES = {
+    "full": {
+        "sentence_count": "4-6",
+        "extra_instruction": " Include any edge cases or side effects worth knowing about.",
+        "max_tokens": 400,
+    },
+    "medium": {
+        "sentence_count": "2-3",
+        "extra_instruction": "",
+        "max_tokens": 200,
+    },
+    "low": {
+        "sentence_count": "1",
+        "extra_instruction": " Be as brief as possible \u2014 the rating and nothing else.",
+        "max_tokens": 80,
+    },
+}
+
+
+def risk_review(tool_name, arguments, cfg, exclude_label=None, mode=None):
     """Ask a *different* configured AI provider than the one currently
     answering to explain, in plain language, what a tool call will do and
     how dangerous/irreversible it is. Best-effort only: never raises, and
@@ -637,6 +661,15 @@ def risk_review(tool_name, arguments, cfg, exclude_label=None):
     configured or the call fails \u2014 a missing/misconfigured second provider
     should never block or crash the primary ask, it just means the
     confirmation prompt won't have an AI opinion attached.
+
+    `mode`, if given, is one of PROMPT_MODES (e.g. from a one-off local
+    override, not necessarily the config's real defaults.prompt_mode) and
+    only ever scales *this* prompt's requested length and token ceiling via
+    _RISK_REVIEW_VERBOSITY_PROFILES above \u2014 it never reads or writes
+    defaults.prompt_mode, so it can't affect the real global capacity mode
+    or any other prompt built elsewhere in this file. Anything not in
+    PROMPT_MODES (including None) falls back to the same "medium" profile
+    this function always used before `mode` existed.
     """
     try:
         providers = _eligible_providers(cfg["providers"], cfg["defaults"])
@@ -652,6 +685,12 @@ def risk_review(tool_name, arguments, cfg, exclude_label=None):
         if keys[0] is not None:
             resolved["api_key"] = keys[0]
 
+        mode_profile = _MODE_BY_NAME.get(mode) if mode in PROMPT_MODES else None
+        verbosity = (mode_profile or {}).get("tool_result_verbosity", "medium")
+        review_profile = _RISK_REVIEW_VERBOSITY_PROFILES.get(verbosity, _RISK_REVIEW_VERBOSITY_PROFILES["medium"])
+        if mode_profile is not None:
+            resolved["max_tokens"] = review_profile["max_tokens"]
+
         try:
             args_s = json.dumps(arguments or {}, default=str)
         except TypeError:
@@ -661,9 +700,10 @@ def risk_review(tool_name, arguments, cfg, exclude_label=None):
             "user's own machine:\n"
             f"  tool: {tool_name}\n"
             f"  arguments: {args_s}\n\n"
-            "In 2-3 short plain-language sentences: (1) explain exactly what this "
-            "specific call will do, and (2) rate how dangerous/irreversible it is "
-            "(none / low / medium / high) with a one-line reason. No preamble, no "
+            f"In {review_profile['sentence_count']} short plain-language sentence(s): "
+            "(1) explain exactly what this specific call will do, and (2) rate how "
+            "dangerous/irreversible it is (none / low / medium / high) with a "
+            f"one-line reason.{review_profile['extra_instruction']} No preamble, no "
             "markdown, just the assessment."
         )
         messages = [{"role": "user", "content": prompt}]

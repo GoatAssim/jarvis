@@ -813,21 +813,31 @@ def main():
         return
 
     if argv[0] == "tool-preview":
-        # jarvis tool-preview <name> [json-arguments]
+        # jarvis tool-preview <name> [json-arguments] [mode]
         # Reports whether a tool call would be gated by a confirmation
         # prompt and (if AI review is on for it) a risk note from a second
         # configured provider — without actually running the tool. Powers
         # the web UI's debug dashboard: the RUN button calls this first so
         # a person sees exactly what they're about to approve before
         # anything real happens.
+        #
+        # The optional trailing `mode` is a one-off, local-only override
+        # (see the debug panel's own mode switch in the web UI) for how
+        # long/detailed that risk note is — it's read once for this single
+        # risk_review() call and never touches defaults.prompt_mode or
+        # anything persisted, so it can't affect the real global capacity
+        # mode "jarvis mode-set" controls. Anything other than one of the
+        # real PROMPT_MODES (including omitted/blank) is treated as "no
+        # override", same as before this argument existed.
         from . import tool_safety
 
         if len(argv) < 2 or not argv[1].strip():
-            print(json.dumps({"error": "usage: jarvis tool-preview <name> [json-arguments]"}))
+            print(json.dumps({"error": "usage: jarvis tool-preview <name> [json-arguments] [mode]"}))
             sys.exit(1)
 
         tool_name = argv[1].strip()
         raw_args = argv[2] if len(argv) > 2 else "{}"
+        raw_mode = argv[3].strip() if len(argv) > 3 and argv[3].strip() else None
         try:
             arguments = json.loads(raw_args) if raw_args.strip() else {}
         except json.JSONDecodeError as e:
@@ -842,7 +852,8 @@ def main():
         if flags["ai_review"]:
             try:
                 from . import ai_client, ai_config
-                risk_note = ai_client.risk_review(tool_name, arguments, ai_config.load_ai_config())
+                mode = raw_mode if raw_mode in ai_client.PROMPT_MODES else None
+                risk_note = ai_client.risk_review(tool_name, arguments, ai_config.load_ai_config(), mode=mode)
             except Exception:
                 risk_note = None
 
