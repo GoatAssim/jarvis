@@ -30,44 +30,137 @@ COMPACT_RECAP_CHAR_BUDGET = 1400
 DEFAULT_COMPACT_PROMPT = True
 DEFAULT_COMPACT_PROMPT_PROVIDERS = ("groq",)
 
-# Ultra-compact ("50% Capacity") knobs \u2014 the smallest prompt that still
-# works. Every budget here is deliberately tighter than the COMPACT_* ones
-# above: fewer commands, a shorter history window, and (see
-# _resolve_prompt_mode / _prompt_profile) name-only tool schemas instead of
-# even the compact per-tool JSON. That last part is where most of the
-# savings live \u2014 a session with Playnite + Spotify + Everything enabled can
-# have dozens of tools, each with its own parameter schema; sending only
-# names defers that cost to the (much rarer) tools a turn actually ends up
-# calling, via the existing "call with no args \u2192 get schema \u2192 call again"
-# path in _make_tool_executor.
-ULTRA_MAX_COMMANDS = 4
-ULTRA_DESC_MAX_LEN = 30
-ULTRA_HISTORY_CHAR_BUDGET = 1800
-ULTRA_HISTORY_EXCHANGES = 4
-ULTRA_RECAP_EXCHANGES = 6
-ULTRA_RECAP_CHAR_BUDGET = 500
-ULTRA_PLAYNITE_FREQ_GAMES = 3
-COMPACT_PLAYNITE_FREQ_GAMES = 5
-FULL_PLAYNITE_FREQ_GAMES = 8
+# ===========================================================================
+# Prompt "capacity" modes \u2014 a generic, table-driven registry.
+#
+# Each entry in PROMPT_MODE_DEFS is a complete, self-contained profile of
+# prompt-size knobs (see _build_messages/ask() for how every key is used).
+# PROMPT_MODES, MODE_LABELS, the mode cycle (next_mode), the "jarvis mode" /
+# "mode-set" CLI commands, the web UI's capacity switch, and the
+# get_capacity_mode/set_capacity_mode AI tools (mode_tools.py) are all
+# derived from this one list \u2014 nothing else needs to change to add a mode.
+#
+# To add a new mode later: append one dict here with a unique "name" (used
+# in defaults.prompt_mode / "jarvis mode-set <name>" / the tool's "mode"
+# argument) and a "label" (shown in the web switch + get_capacity_mode), plus
+# every knob below. Order matters only for the cycle (web switch click /
+# set_capacity_mode's next=true) \u2014 it steps through this list in order and
+# wraps around.
+#
+# Knobs, in the order they appear below:
+#   max_commands        \u2014 how many saved commands get listed in the prompt
+#   desc_max_len         \u2014 max chars of each command's description
+#   history_char_budget  \u2014 total chars of prior-turn history included
+#   history_exchanges    \u2014 max prior exchanges included
+#   recap_exchanges       \u2014 how many older exchanges get folded into a recap
+#   recap_budget          \u2014 max chars of that recap
+#   include_freq          \u2014 include the "frequently used commands" context
+#   compact_tools_blurb    \u2014 use the short "tools" explainer vs the long one
+#   compact_persona        \u2014 use the short persona blurb vs the long one
+#   playnite_freq_games    \u2014 how many frequent Playnite games get listed
+#   skip_other_convos      \u2014 omit the "other recent conversations" context
+#   tool_schema_style      \u2014 "compact" (types/enums/required, short descs) or
+#                            "name_only" (just names \u2014 the model re-requests a
+#                            schema the first time it calls a tool needing
+#                            args it didn't supply; see _make_tool_executor)
+#   tool_result_budget     \u2014 chars of already-ran tool results replayed to
+#                            the next provider on failover
+# ===========================================================================
 
-# Budgets for _tool_runs_note \u2014 how much of what already ran this turn gets
-# re-shown to the next provider on failover. This is often the single
-# biggest chunk of a retried prompt (raw tool results), so it scales with
-# mode same as everything else.
-ULTRA_TOOL_RESULT_BUDGET = 600
-COMPACT_TOOL_RESULT_BUDGET = 1600
-FULL_TOOL_RESULT_BUDGET = 3500
+PROMPT_MODE_DEFS = [
+    {
+        "name": "full",
+        "label": "400% Capacity",
+        "summary": "Fullest context and richest answers. Most tokens per ask.",
+        "max_commands": MAX_COMMANDS_LISTED,
+        "desc_max_len": COMPACT_DESC_MAX_LEN * 2,
+        "history_char_budget": 6000,
+        "history_exchanges": 12,
+        "recap_exchanges": 20,
+        "recap_budget": 1800,
+        "include_freq": True,
+        "compact_tools_blurb": False,
+        "compact_persona": False,
+        "playnite_freq_games": 8,
+        "skip_other_convos": False,
+        "tool_schema_style": "compact",
+        "tool_result_budget": 3500,
+    },
+    {
+        "name": "compact",
+        "label": "100% Capacity",
+        "summary": "The balanced default \u2014 trimmed history/commands, still full tool schemas.",
+        "max_commands": COMPACT_MAX_COMMANDS,
+        "desc_max_len": COMPACT_DESC_MAX_LEN,
+        "history_char_budget": COMPACT_HISTORY_CHAR_BUDGET,
+        "history_exchanges": COMPACT_HISTORY_EXCHANGES,
+        "recap_exchanges": COMPACT_RECAP_EXCHANGES,
+        "recap_budget": COMPACT_RECAP_CHAR_BUDGET,
+        "include_freq": False,
+        "compact_tools_blurb": True,
+        "compact_persona": True,
+        "playnite_freq_games": 5,
+        "skip_other_convos": False,
+        "tool_schema_style": "compact",
+        "tool_result_budget": 1600,
+    },
+    {
+        "name": "ultra",
+        "label": "50% Capacity",
+        "summary": (
+            "Ultra compact \u2014 name-only tool schemas plus every other budget cut "
+            "to the minimum that still works. Cheapest mode; a tool needing "
+            "arguments may cost one extra round trip the first time it's called."
+        ),
+        "max_commands": 4,
+        "desc_max_len": 30,
+        "history_char_budget": 1800,
+        "history_exchanges": 4,
+        "recap_exchanges": 6,
+        "recap_budget": 500,
+        "include_freq": False,
+        "compact_tools_blurb": True,
+        "compact_persona": True,
+        "playnite_freq_games": 3,
+        "skip_other_convos": True,
+        "tool_schema_style": "name_only",
+        "tool_result_budget": 600,
+    },
+]
 
-# Three token-usage modes, cheap-to-expensive. A UI toggle just needs to
-# set defaults.prompt_mode to one of PROMPT_MODES; everything else (which
-# knobs that implies) lives in _prompt_profile below.
-PROMPT_MODES = ("full", "compact", "ultra")
+PROMPT_MODES = tuple(m["name"] for m in PROMPT_MODE_DEFS)
+MODE_LABELS = {m["name"]: m["label"] for m in PROMPT_MODE_DEFS}
+_MODE_BY_NAME = {m["name"]: m for m in PROMPT_MODE_DEFS}
 DEFAULT_PROMPT_MODE = "compact"
-MODE_LABELS = {
-    "full": "400% Capacity",
-    "compact": "100% Capacity",
-    "ultra": "50% Capacity",
+
+# Legacy per-key overrides, kept only for the three built-in modes so an
+# older hand-edited ai_config.json (compact_max_commands, history_char_budget,
+# etc.) keeps working exactly as before. A custom mode appended to
+# PROMPT_MODE_DEFS above has no legacy keys to honor, so it's used as-is.
+_LEGACY_OVERRIDE_KEYS = {
+    "full": {
+        "history_char_budget": ("history_char_budget",),
+        "history_exchanges": ("history_exchanges",),
+        "recap_exchanges": ("recap_exchanges",),
+        "recap_budget": ("recap_char_budget",),
+    },
+    "compact": {
+        "max_commands": ("compact_max_commands",),
+        "history_char_budget": ("history_char_budget", "compact_history_char_budget"),
+        "history_exchanges": ("history_exchanges", "compact_history_exchanges"),
+        "recap_exchanges": ("recap_exchanges", "compact_recap_exchanges"),
+        "recap_budget": ("recap_char_budget", "compact_recap_char_budget"),
+    },
+    "ultra": {
+        "max_commands": ("ultra_max_commands",),
+        "history_char_budget": ("ultra_history_char_budget",),
+        "history_exchanges": ("ultra_history_exchanges",),
+        "recap_exchanges": ("ultra_recap_exchanges",),
+        "recap_budget": ("ultra_recap_char_budget",),
+        "tool_result_budget": ("ultra_tool_result_budget",),
+    },
 }
+_SIMPLE_OVERRIDE_KEYS = {"max_commands", "tool_result_budget"}  # not run through _history_int's floor check
 
 # How often a conversation's AI-generated title + one-line gist get
 # (re)computed: right after the very first exchange (so the sidebar has
@@ -200,14 +293,15 @@ def _history_int(defaults, keys, floor, fallback):
 def _resolve_prompt_mode(provider_name, defaults):
     """Which of PROMPT_MODES applies to this provider.
 
-    defaults.prompt_mode (set by the "jarvis mode-set" CLI command / the web
-    UI's capacity switch) wins outright when it's one of the three known
-    names \u2014 that's a single, explicit, global choice. With no explicit
-    mode, fall back to the older per-provider scheme so existing configs
-    keep behaving exactly as before: defaults.compact_prompt (default True)
-    plus defaults.compact_prompt_providers (default ["groq"]) pick "compact"
-    vs "full"; "ultra" is never reached by the legacy path, since nothing
-    used to ask for it.
+    defaults.prompt_mode (set by "jarvis mode-set", the web UI's capacity
+    switch, or the set_capacity_mode AI tool) wins outright when it names a
+    mode in the registry \u2014 that's a single, explicit, global choice. With
+    no explicit mode, fall back to the older per-provider scheme so existing
+    configs keep behaving exactly as before: defaults.compact_prompt
+    (default True) plus defaults.compact_prompt_providers (default
+    ["groq"]) pick "compact" vs "full"; a mode with no matching legacy
+    behavior (like "ultra", or any custom mode appended later) is never
+    reached by this fallback \u2014 nothing used to ask for it.
     """
     explicit = defaults.get("prompt_mode")
     if explicit in PROMPT_MODES:
@@ -221,113 +315,36 @@ def _resolve_prompt_mode(provider_name, defaults):
 
 
 def _prompt_profile(provider_name, defaults):
-    """Return prompt-size knobs for a provider, keyed off the resolved
-    PROMPT_MODES value (see _resolve_prompt_mode).
-
-    "full" (400% Capacity) \u2014 the longest system prompt, full history
-    window, per-tool compact-but-present JSON schemas. Best answer quality,
-    most tokens per ask.
-
-    "compact" (100% Capacity) \u2014 the long-standing default: shorter
-    persona/tools blurb, trimmed history/commands, still sends every tool's
-    (compacted) parameter schema up front.
-
-    "ultra" (50% Capacity) \u2014 everything "compact" trims, trimmed further,
-    plus name-only tool schemas (see tool_schema_style, used in ask()) and
-    a much smaller tool-result-replay budget (see tool_result_budget). The
-    cheapest mode; a tool needing arguments costs one extra round trip the
-    first time it's called in a turn.
+    """Return prompt-size knobs for a provider: the matching entry from
+    PROMPT_MODE_DEFS (resolved via _resolve_prompt_mode), with any legacy
+    per-key config overrides applied on top for the three built-in modes
+    (see _LEGACY_OVERRIDE_KEYS). A copy is returned so nothing here ever
+    mutates the registry itself.
     """
     mode = _resolve_prompt_mode(provider_name, defaults)
+    base = _MODE_BY_NAME.get(mode) or _MODE_BY_NAME[DEFAULT_PROMPT_MODE]
+    profile = dict(base)
+    profile["mode"] = base["name"]
 
-    if mode == "ultra":
-        return {
-            "mode": mode,
-            "max_commands": defaults.get("ultra_max_commands", ULTRA_MAX_COMMANDS),
-            "desc_max_len": ULTRA_DESC_MAX_LEN,
-            "history_char_budget": _history_int(
-                defaults, ("ultra_history_char_budget",), 800, ULTRA_HISTORY_CHAR_BUDGET,
-            ),
-            "history_exchanges": _history_int(
-                defaults, ("ultra_history_exchanges",), 2, ULTRA_HISTORY_EXCHANGES,
-            ),
-            "recap_exchanges": _history_int(
-                defaults, ("ultra_recap_exchanges",), 4, ULTRA_RECAP_EXCHANGES,
-            ),
-            "recap_budget": _history_int(
-                defaults, ("ultra_recap_char_budget",), 300, ULTRA_RECAP_CHAR_BUDGET,
-            ),
-            "include_freq": False,
-            "compact_tools_blurb": True,
-            "compact_persona": True,
-            "playnite_freq_games": ULTRA_PLAYNITE_FREQ_GAMES,
-            "skip_other_convos": True,
-            "tool_schema_style": "name_only",
-            "tool_result_budget": defaults.get("ultra_tool_result_budget", ULTRA_TOOL_RESULT_BUDGET),
-        }
-
-    if mode == "compact":
-        return {
-            "mode": mode,
-            "max_commands": defaults.get("compact_max_commands", COMPACT_MAX_COMMANDS),
-            "desc_max_len": COMPACT_DESC_MAX_LEN,
-            "history_char_budget": _history_int(
-                defaults,
-                ("history_char_budget", "compact_history_char_budget"),
-                2000,
-                COMPACT_HISTORY_CHAR_BUDGET,
-            ),
-            "history_exchanges": _history_int(
-                defaults,
-                ("history_exchanges", "compact_history_exchanges"),
-                8,
-                COMPACT_HISTORY_EXCHANGES,
-            ),
-            "recap_exchanges": _history_int(
-                defaults,
-                ("recap_exchanges", "compact_recap_exchanges"),
-                8,
-                COMPACT_RECAP_EXCHANGES,
-            ),
-            "recap_budget": _history_int(
-                defaults,
-                ("recap_char_budget", "compact_recap_char_budget"),
-                800,
-                COMPACT_RECAP_CHAR_BUDGET,
-            ),
-            "include_freq": False,
-            "compact_tools_blurb": True,
-            "compact_persona": True,
-            "playnite_freq_games": COMPACT_PLAYNITE_FREQ_GAMES,
-            "skip_other_convos": False,
-            "tool_schema_style": "compact",
-            "tool_result_budget": COMPACT_TOOL_RESULT_BUDGET,
-        }
-
-    return {
-        "mode": "full",
-        "max_commands": MAX_COMMANDS_LISTED,
-        "desc_max_len": COMPACT_DESC_MAX_LEN * 2,
-        "history_char_budget": defaults.get("history_char_budget", 6000),
-        "history_exchanges": defaults.get("history_exchanges", 12),
-        "recap_exchanges": defaults.get("recap_exchanges", 20),
-        "recap_budget": defaults.get("recap_char_budget", 1800),
-        "include_freq": True,
-        "compact_tools_blurb": False,
-        "compact_persona": False,
-        "playnite_freq_games": FULL_PLAYNITE_FREQ_GAMES,
-        "skip_other_convos": False,
-        "tool_schema_style": "compact",
-        "tool_result_budget": FULL_TOOL_RESULT_BUDGET,
-    }
+    for key, config_keys in _LEGACY_OVERRIDE_KEYS.get(base["name"], {}).items():
+        if key in _SIMPLE_OVERRIDE_KEYS:
+            for config_key in config_keys:
+                value = defaults.get(config_key)
+                if value is not None:
+                    profile[key] = value
+                    break
+        else:
+            profile[key] = _history_int(defaults, config_keys, 1, profile[key])
+    return profile
 
 
 def current_mode(cfg=None):
     """The prompt_mode that's actually in effect right now \u2014 what the web
-    UI's capacity switch and 'jarvis mode' show. Resolved the same way
-    ask() resolves it per-provider (see _resolve_prompt_mode); since a
-    switch only has one indicator, this checks the first eligible provider
-    (or falls back to the global default if none are configured yet)."""
+    UI's capacity switch, 'jarvis mode', and get_capacity_mode show.
+    Resolved the same way ask() resolves it per-provider (see
+    _resolve_prompt_mode); since a switch only has one indicator, this
+    checks the first eligible provider (or falls back to the global default
+    if none are configured yet)."""
     cfg = cfg or ai_config.load_ai_config()
     defaults = cfg.get("defaults") or {}
     explicit = defaults.get("prompt_mode")
@@ -336,6 +353,17 @@ def current_mode(cfg=None):
     providers = _eligible_providers(cfg.get("providers") or [], defaults)
     label = _provider_label(providers[0]) if providers else ""
     return _resolve_prompt_mode(label, defaults)
+
+
+def next_mode(current):
+    """The next mode after `current` in PROMPT_MODE_DEFS's order, wrapping
+    around \u2014 used by both the web switch's click-to-cycle and
+    set_capacity_mode's next=true. Adding a mode to the registry
+    automatically slots it into this cycle; nothing here needs to change."""
+    names = list(PROMPT_MODES)
+    if current not in names:
+        return names[0]
+    return names[(names.index(current) + 1) % len(names)]
 
 
 def set_mode(mode):
@@ -480,7 +508,8 @@ def _system_prompt(persona, commands_ctx, freq_ctx, tools_enabled,
     if other_convos_ctx:
         parts.append(other_convos_ctx)
     if playnite_freq_games is None:
-        playnite_freq_games = COMPACT_PLAYNITE_FREQ_GAMES if compact_persona else FULL_PLAYNITE_FREQ_GAMES
+        fallback_mode = "compact" if compact_persona else "full"
+        playnite_freq_games = _MODE_BY_NAME[fallback_mode]["playnite_freq_games"]
     playnite_ctx = playnite_config.frequent_games_context(
         playnite_freq_games,
         compact=compact_persona,
@@ -998,7 +1027,7 @@ def ask(user_text, commands=None, on_attempt=None, on_tool_call=None, conversati
             )
             runs = getattr(tool_executor, "runs", None) if tool_executor else None
             if runs:
-                budget = profile.get("tool_result_budget", FULL_TOOL_RESULT_BUDGET)
+                budget = profile.get("tool_result_budget", _MODE_BY_NAME["full"]["tool_result_budget"])
                 note = _tool_runs_note(runs, budget)
                 if note:
                     messages.append({"role": "user", "content": note})
