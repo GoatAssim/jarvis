@@ -505,31 +505,40 @@
   });
 
   // ===========================================================================
-  // Capacity switch — 400% / 100% / 50% (full / compact / ultra), see
-  // ai_client.PROMPT_MODES on the CLI side. A plain three-way cycle: click
-  // steps to the next mode and persists it via /api/mode, same "thin client
-  // over the CLI" pattern as everything else in this file.
+  // Capacity switch — see ai_client.PROMPT_MODE_DEFS on the CLI side (today:
+  // 400% / 100% / 50%, i.e. full / compact / ultra). Fully generic: the
+  // cycle order, labels, and tooltip summaries all come from /api/mode's
+  // `options` array (itself ai_client.mode_options(), one source of truth),
+  // never hardcoded here — adding a mode to PROMPT_MODE_DEFS is enough for
+  // it to show up in this switch with zero front-end changes. Click always
+  // steps to the next mode in `options` order and persists it via
+  // /api/mode, same "thin client over the CLI" pattern as everything else
+  // in this file.
   // ===========================================================================
 
-  const MODE_CYCLE = ["full", "compact", "ultra"];
-  const MODE_LABELS = { full: "400% Capacity", compact: "100% Capacity", ultra: "50% Capacity" };
-  const MODE_TITLES = {
-    full: "400% Capacity — fullest context, most tokens per ask. Click to switch to 100%.",
-    compact: "100% Capacity — the balanced default. Click to switch to 50%.",
-    ultra: "50% Capacity — ultra compact, fewest tokens per ask (a tool needing arguments may cost one extra round trip). Click to switch to 400%.",
-  };
+  let modeOptions = [];   // [{mode,label,summary}, ...] from the server, in cycle order
+  const FALLBACK_MODE = { mode: "compact", label: "Capacity", summary: "" };
+
+  function optionFor(mode) {
+    return modeOptions.find((o) => o.mode === mode) || null;
+  }
 
   function renderMode(mode) {
     const btn = qs("#btn-mode-switch");
-    const known = MODE_LABELS[mode] ? mode : "compact";
-    btn.dataset.mode = known;
-    btn.title = MODE_TITLES[known];
-    qs("#mode-switch-label").textContent = MODE_LABELS[known];
+    const current = optionFor(mode) || optionFor(FALLBACK_MODE.mode) || FALLBACK_MODE;
+    const idx = modeOptions.indexOf(current);
+    const next = modeOptions.length ? modeOptions[(Math.max(idx, 0) + 1) % modeOptions.length] : null;
+    btn.dataset.mode = current.mode;
+    btn.title = current.summary
+      ? `${current.label} — ${current.summary}${next ? ` Click to switch to ${next.label}.` : ""}`
+      : current.label;
+    qs("#mode-switch-label").textContent = current.label;
   }
 
   async function loadMode() {
     try {
       const data = await Api.getMode();
+      if (Array.isArray(data.options) && data.options.length) modeOptions = data.options;
       renderMode(data.mode);
     } catch {
       // Non-fatal — leave the button on its default label rather than
@@ -539,11 +548,14 @@
 
   qs("#btn-mode-switch").addEventListener("click", async () => {
     const btn = qs("#btn-mode-switch");
-    const current = btn.dataset.mode || "compact";
-    const next = MODE_CYCLE[(MODE_CYCLE.indexOf(current) + 1) % MODE_CYCLE.length];
+    if (!modeOptions.length) { await loadMode(); if (!modeOptions.length) return; }
+    const current = btn.dataset.mode || FALLBACK_MODE.mode;
+    const idx = modeOptions.findIndex((o) => o.mode === current);
+    const next = modeOptions[(Math.max(idx, 0) + 1) % modeOptions.length];
     btn.disabled = true;
     try {
-      const data = await Api.setMode(next);
+      const data = await Api.setMode(next.mode);
+      if (Array.isArray(data.options) && data.options.length) modeOptions = data.options;
       renderMode(data.mode);
     } catch (e) {
       toast(e.message || "Couldn't switch capacity mode.", "error");
