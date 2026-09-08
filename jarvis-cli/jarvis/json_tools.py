@@ -1,14 +1,21 @@
 """Read, validate, and prettify arbitrary JSON files for humans.
 
-Backs the `jarvis organize-json <path>` subcommand. This is pure local file
-IO + stdlib `json` parsing — it never touches ai_client/ai_providers, so
-pointing it at even a huge JSON file costs zero API tokens. The web server
-shells out to `jarvis organize-json <path> --json` (see server.js's
-`/api/json/organize`) to reuse this exact parsing/error logic instead of
-reimplementing JSON-error reporting in Node.
+Backs the `jarvis organize-json <path>` subcommand (see cli.py) AND the
+`organize_json` AI tool below. Both paths funnel through read_json_file() /
+render_tree() here — one implementation of "what's wrong with this JSON"
+and "what does an organized view of it look like", shared by the terminal,
+the web UI's typed "organize-json <path>" shortcut, and the AI tool.
+
+This is pure local file IO + stdlib `json` parsing — it never touches
+ai_client/ai_providers itself, so pointing it at even a huge JSON file
+costs zero API tokens. The web server shells out to
+`jarvis organize-json <path> --json` (see server.js's `/api/json/organize`)
+to reuse this exact parsing/error logic instead of reimplementing
+JSON-error reporting in Node.
 """
 
 import json
+import sys
 from pathlib import Path
 
 
@@ -135,3 +142,83 @@ def render_tree(data):
         lines = [_format_scalar(data)]
     lines.extend(_render_children(data, prefix=""))
     return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# AI-callable tool. Mirrors screenshot_tools.py's pattern: the heavy/visual
+# part (here, the actual JSON) is shown to the user directly in the web UI
+# via a `JARVIS_MEDIA` stderr line, never round-tripped through the model —
+# the AI only ever sees a tiny ok/type/count summary, so a person can say
+# "organize my config.json" in plain English and the AI can act on it
+# without spending a single extra token on the file's contents, no matter
+# how large it is.
+# ---------------------------------------------------------------------------
+
+def _emit_media(kind, payload):
+    """Machine line for the web UI — not for the model."""
+    print(f"JARVIS_MEDIA\t{kind}\t{payload}", file=sys.stderr, flush=True)
+
+
+def tool_organize_json(arguments=None):
+    arguments = arguments or {}
+    raw_path = arguments.get("path")
+    if not raw_path or not isinstance(raw_path, str):
+        return {"error": "path is required"}
+
+    resolved = str(resolve_path(raw_path))
+    data, text, error = read_json_file(raw_path)
+
+    # Emitted either way \u2014 the web UI re-validates independently via
+    # /api/json/organize (same as the typed "organize-json <path>"
+    # shortcut), so an invalid file still gets a proper error card with the
+    # exact line/column, not just a stray chat message.
+    _emit_media("organize_json", resolved)
+
+    if error:
+        return {"ok": False, "path": resolved, "error": error["error"]}
+
+    if isinstance(data, dict):
+        kind, count = "object", len(data)
+    elif isinstance(data, list):
+        kind, count = "array", len(data)
+    else:
+        kind, count = _type_name(data), 0
+
+    return {
+        "ok": True,
+        "path": resolved,
+        "type": kind,
+        "top_level_count": count,
+        "note": (
+            "Already shown to the user in the UI as an interactive, "
+            "collapsible Organized view with a Raw JSON toggle. Do NOT "
+            "paste or restate the JSON content back \u2014 just confirm "
+            "briefly, e.g. the top-level shape."
+        ),
+    }
+
+
+ORGANIZE_JSON_TOOL_SCHEMAS = [
+    {
+        "name": "organize_json",
+        "description": (
+            "Validate a JSON file and show it to the user in the Jarvis UI as an "
+            "interactive, collapsible Organized view with a Raw JSON toggle. The "
+            "file's contents are NOT sent to you \u2014 only a tiny ok/type/count "
+            "result. Use when the user asks to organize, prettify, view, inspect, "
+            "or check a JSON file, or reports one looks broken/invalid."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "path": {
+                    "type": "string",
+                    "description": "Path to the .json file. Relative paths resolve against the user's home directory.",
+                },
+            },
+            "required": ["path"],
+        },
+    },
+]
+
+ORGANIZE_JSON_TOOLS = {"organize_json": tool_organize_json}

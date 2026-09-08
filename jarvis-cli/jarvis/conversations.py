@@ -171,8 +171,23 @@ def set_current(conv_id):
 
 def new_conversation(title=None, make_current=True):
     """Create a brand-new, empty conversation and return its id. This is
-    what both 'opening the page' (web) and the CLI's own first-ever use (or
-    an explicit `jarvis conv-new`) call to start a clean slate."""
+    what both 'opening the page' (web — every fresh page load starts one)
+    and the CLI's own first-ever use (or an explicit `jarvis conv-new`)
+    call to start a clean slate.
+
+    Deliberately NOT added to the index here (see _upsert_index below) —
+    a conversation only earns a place in the browsable history once it
+    has a real exchange in it (append_exchange does the indexing then).
+    Without this, every page load and every "+ New" click would leave a
+    permanent, empty "No messages yet" entry in the sidebar even if the
+    user never actually said anything — this is exactly the clutter this
+    split is meant to avoid. The record is still written to disk (so
+    get_conversation/conv-show and append_exchange's own lookup work
+    immediately) — it's just invisible to list_conversations() until it's
+    no longer empty. See _sweep_empty_orphans for what eventually cleans
+    those never-used files off disk.
+    """
+    _sweep_empty_orphans()
     conv_id = secrets.token_hex(8)
     now = _now()
     record = {
@@ -184,10 +199,53 @@ def new_conversation(title=None, make_current=True):
         "exchanges": [],
     }
     _save_conv(record)
-    _upsert_index(record)
     if make_current:
         set_current(conv_id)
     return conv_id
+
+
+# A brand-new conversation's on-disk file (see new_conversation) is only
+# ever indexed once append_exchange gives it a first real message. Most of
+# the time that happens within minutes, one way or another — either the
+# user says something, or they move on and the tab/session is forgotten.
+# This sweep clears out the latter case: files that never made it into the
+# index and are old enough that they're clearly abandoned rather than a
+# conversation someone still has open and is about to type into. It's
+# intentionally conservative (a full hour, and it only ever touches files
+# that are (a) not in the index and (b) genuinely have zero exchanges) so
+# it can never race-delete something actually in progress.
+_ORPHAN_SWEEP_AGE_SECONDS = 60 * 60
+
+
+def _sweep_empty_orphans():
+    if not CONV_DIR.exists():
+        return
+    try:
+        indexed_ids = {it.get("id") for it in _load_index()}
+        now = datetime.now(timezone.utc)
+        for path in CONV_DIR.glob("*.json"):
+            if path.name == INDEX_FILE.name or path.stem in indexed_ids:
+                continue
+            try:
+                data = json.loads(path.read_text(encoding=ENCODING))
+            except (json.JSONDecodeError, UnicodeDecodeError, OSError):
+                continue
+            if not isinstance(data, dict) or (data.get("exchanges") or []):
+                continue
+            try:
+                created = datetime.fromisoformat(data.get("created_at") or "")
+            except ValueError:
+                continue
+            if (now - created).total_seconds() < _ORPHAN_SWEEP_AGE_SECONDS:
+                continue
+            try:
+                path.unlink()
+            except OSError:
+                pass
+    except OSError:
+        # Best-effort housekeeping only — a failed sweep should never stop
+        # a new conversation from being created.
+        pass
 
 
 def get_conversation(conv_id):
