@@ -366,79 +366,18 @@
   </div>
 </div>
 
-<!-- SETTINGS — all jarvis config files in one tabbed editor -->
+<!-- SETTINGS — every *.json file in the jarvis config dir, auto-discovered.
+     Tabs and panes below are placeholders; app.js populates them from
+     GET /api/config/list so a new config file shows up with no HTML change. -->
 <div class="modal-backdrop" id="settings-backdrop" hidden>
   <div class="modal modal--settings" role="dialog" aria-modal="true" aria-labelledby="settings-title">
     <div class="modal__head">
       <h2 id="settings-title">Settings</h2>
-      <div class="modal__tabs settings-tabs">
-        <button class="tab-btn settings-tab is-active" data-settings-tab="commands" type="button">Commands</button>
-        <button class="tab-btn settings-tab" data-settings-tab="ai" type="button">AI</button>
-        <button class="tab-btn settings-tab" data-settings-tab="playnite" type="button">Playnite</button>
-        <button class="tab-btn settings-tab" data-settings-tab="spotify" type="button">Spotify</button>
-        <button class="tab-btn settings-tab" data-settings-tab="memory" type="button">Memory</button>
-      </div>
+      <div class="modal__tabs settings-tabs" id="settings-tabs"></div>
       <button class="modal__close" id="settings-close" type="button" aria-label="Close">&times;</button>
     </div>
 
-    <div class="modal__body">
-      <div class="settings-pane is-active" data-settings-pane="commands">
-        <div class="raw-config-path" id="settings-path-commands"></div>
-        <p class="hint">
-          The entire <code>commands.json</code> file — every command at once. Useful for bulk edits
-          or pasting a config from elsewhere. Changes bypass the builder's per-field checks; jarvis
-          validates when you run a command.
-        </p>
-        <textarea id="settings-json-commands" class="raw-json settings-json" spellcheck="false"></textarea>
-        <div class="raw-json__error" id="settings-error-commands"></div>
-      </div>
-
-      <div class="settings-pane" data-settings-pane="ai">
-        <div class="raw-config-path" id="settings-path-ai"></div>
-        <p class="hint">
-          Persona, defaults, and every AI provider. Add multiple keys to a provider's
-          <code>api_keys</code> array for failover. Read fresh on every ask — nothing to restart
-          after saving.
-        </p>
-        <textarea id="settings-json-ai" class="raw-json settings-json" spellcheck="false"></textarea>
-        <div class="raw-json__error" id="settings-error-ai"></div>
-      </div>
-
-      <div class="settings-pane" data-settings-pane="playnite">
-        <div class="raw-config-path" id="settings-path-playnite"></div>
-        <p class="hint">
-          Playnite Bridge token, base URL, and frequent-game cache. Copy the token from Playnite:
-          Main Menu &rarr; Playnite Bridge. Set <code>enabled</code> to false to disable integration.
-        </p>
-        <textarea id="settings-json-playnite" class="raw-json settings-json" spellcheck="false"></textarea>
-        <div class="raw-json__error" id="settings-error-playnite"></div>
-      </div>
-
-      <div class="settings-pane" data-settings-pane="spotify">
-        <div class="raw-config-path" id="settings-path-spotify"></div>
-        <p class="hint">
-          Spotify Developer <code>client_id</code> (and optional secret). Redirect URI must be
-          <code>http://127.0.0.1:19823/callback</code>. After saving, run
-          <code>jarvis spotify-login</code> in a terminal and sign in with the <strong>same account</strong>
-          as the Spotify app on this PC. Tokens are stored here after login.
-        </p>
-        <textarea id="settings-json-spotify" class="raw-json settings-json" spellcheck="false"></textarea>
-        <div class="raw-json__error" id="settings-error-spotify"></div>
-      </div>
-
-      <div class="settings-pane" data-settings-pane="memory">
-        <div class="raw-config-path" id="settings-path-memory"></div>
-        <p class="hint">
-          Long-term facts Jarvis keeps across chats (<code>memory.json</code>).
-          Only facts that match the current question are added to the prompt.
-          Chat history is
-          short-term and <code>ai-clear</code> does not wipe this. Each item is
-          <code>id</code>, optional <code>key</code>, and <code>fact</code>.
-        </p>
-        <textarea id="settings-json-memory" class="raw-json settings-json" spellcheck="false"></textarea>
-        <div class="raw-json__error" id="settings-error-memory"></div>
-      </div>
-    </div>
+    <div class="modal__body" id="settings-body"></div>
 
     <div class="modal__foot">
       <div class="modal__error" id="settings-error-global"></div>
