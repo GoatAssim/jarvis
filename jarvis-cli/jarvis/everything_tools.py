@@ -247,6 +247,22 @@ EVERYTHING_TOOL_SCHEMAS = [
             "required": ["path"],
         },
     },
+    {
+        "name": "open_file",
+        "description": (
+            "Open the file itself with its default associated application (like "
+            "double-clicking it in Explorer). Files only \u2014 use open_file_location or "
+            "reveal_in_explorer for folders. Use when the user wants to actually open/view/"
+            "launch a result, not just see where it lives."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "path": {"type": "string", "description": "Full path to the file to open."},
+            },
+            "required": ["path"],
+        },
+    },
 ]
 
 
@@ -361,8 +377,25 @@ def open_file_location(arguments):
         return {"error": f"couldn't open {folder}: {e}"}
 
 
+def open_file(arguments):
+    arguments = arguments or {}
+    if platform.system() != "Windows":
+        return {"error": "open_file is Windows-only"}
+    path, err = _resolve_target_path(arguments.get("path"))
+    if err:
+        return err
+    if path.is_dir():
+        return {"error": f"{path} is a folder, not a file \u2014 use open_file_location or reveal_in_explorer instead"}
+    try:
+        os.startfile(str(path))  # noqa: S606 — Windows-only, user-provided path they already searched for
+        return {"ok": True, "opened": str(path)}
+    except OSError as e:
+        return {"error": f"couldn't open {path}: {e}"}
+
+
 EVERYTHING_TOOLS = {
     "search_files": search_files,
     "reveal_in_explorer": reveal_in_explorer,
     "open_file_location": open_file_location,
+    "open_file": open_file,
 }
