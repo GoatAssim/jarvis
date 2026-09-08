@@ -636,19 +636,54 @@ input.is-invalid{ border-color: var(--red) !important; }
   padding: 16px 18px; border-bottom: 1px solid var(--border);
   flex-shrink: 0;
 }
-.modal__head h2{ font-size: 16px; letter-spacing: 0.06em; }
-.modal__tabs{ display: flex; gap: 4px; margin-left: auto; }
+/* min-width:0 is load-bearing here: without it a flex child (the tab
+   strip) refuses to shrink below its content width, so once there are
+   more tabs than fit, they push the close button out of the header
+   instead of scrolling. */
+.modal__head h2{ font-size: 16px; letter-spacing: 0.06em; flex-shrink: 0; }
+.modal__tabs{ display: flex; gap: 4px; margin-left: auto; min-width: 0; }
 .tab-btn{
   background: transparent; border: 1px solid var(--border); color: var(--text-dim);
   font-size: 11.5px; letter-spacing: 0.1em; text-transform: uppercase;
   padding: 6px 12px; border-radius: 2px; cursor: pointer;
+  flex-shrink: 0; white-space: nowrap;
 }
 .tab-btn.is-active{ border-color: var(--accent); color: var(--accent); }
 .modal__close{
   background: transparent; border: none; color: var(--text-dim); font-size: 22px;
   cursor: pointer; line-height: 1; padding: 0 2px;
+  flex-shrink: 0;
 }
 .modal__close:hover{ color: var(--red); }
+
+/* Settings tab strip can have an arbitrary number of tabs (one per
+   *.json file in ~/.jarvis) — more than the modal will ever be wide
+   enough to lay out in a row. Rather than letting the panel grow to
+   fit them (which eventually runs off-screen) or wrapping (which pushes
+   the body down every time a config file is added), the strip scrolls
+   horizontally in its own fixed-height lane; the close button and
+   title never move. JS (updateSettingsTabsFade) keeps the edge fades
+   in sync with actual scroll position via the --settings-tabs-fade-*
+   custom properties below, and keeps the active tab scrolled into view.*/
+.settings-tabs{
+  flex: 1 1 auto;
+  overflow-x: auto;
+  overflow-y: hidden;
+  scroll-behavior: smooth;
+  scrollbar-width: thin;
+  scrollbar-color: var(--border-strong) transparent;
+  --settings-tabs-fade-l: 0px;
+  --settings-tabs-fade-r: 0px;
+  -webkit-mask-image: linear-gradient(to right,
+    transparent 0, black var(--settings-tabs-fade-l),
+    black calc(100% - var(--settings-tabs-fade-r)), transparent 100%);
+  mask-image: linear-gradient(to right,
+    transparent 0, black var(--settings-tabs-fade-l),
+    black calc(100% - var(--settings-tabs-fade-r)), transparent 100%);
+}
+.settings-tabs::-webkit-scrollbar{ height: 5px; }
+.settings-tabs::-webkit-scrollbar-track{ background: transparent; }
+.settings-tabs::-webkit-scrollbar-thumb{ background: var(--border-strong); border-radius: 3px; }
 
 .modal__body{ padding: 18px; overflow-y: auto; flex: 1; min-height: 0; }
 

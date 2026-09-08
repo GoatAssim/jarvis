@@ -2533,7 +2533,39 @@
         onclick: () => selectSettingsTab(f.name),
       }, f.label || f.name));
     });
+    updateSettingsTabsFade();
   }
+
+  // Keeps the scrollable tab strip's edge fades honest: only fades the
+  // side(s) that actually have more tabs hidden off-screen, so a short
+  // list (nothing to scroll) shows no fade at all, and a strip scrolled
+  // all the way to one end doesn't fade the end it's already at.
+  const SETTINGS_TABS_FADE_PX = 18;
+  function updateSettingsTabsFade() {
+    const maxScroll = settingsTabsEl.scrollWidth - settingsTabsEl.clientWidth;
+    if (maxScroll <= 1) {
+      settingsTabsEl.style.setProperty("--settings-tabs-fade-l", "0px");
+      settingsTabsEl.style.setProperty("--settings-tabs-fade-r", "0px");
+      return;
+    }
+    const atStart = settingsTabsEl.scrollLeft <= 1;
+    const atEnd = settingsTabsEl.scrollLeft >= maxScroll - 1;
+    settingsTabsEl.style.setProperty("--settings-tabs-fade-l", atStart ? "0px" : `${SETTINGS_TABS_FADE_PX}px`);
+    settingsTabsEl.style.setProperty("--settings-tabs-fade-r", atEnd ? "0px" : `${SETTINGS_TABS_FADE_PX}px`);
+  }
+  settingsTabsEl.addEventListener("scroll", updateSettingsTabsFade, { passive: true });
+  window.addEventListener("resize", () => {
+    if (!settingsBackdrop.hidden) updateSettingsTabsFade();
+  });
+  // The strip only scrolls horizontally, so a plain vertical mouse-wheel
+  // (no shift held) would otherwise do nothing over it — translate it to
+  // horizontal scroll, same convention as most horizontal tab/chip rows.
+  settingsTabsEl.addEventListener("wheel", (e) => {
+    if (Math.abs(e.deltaY) <= Math.abs(e.deltaX)) return;
+    if (settingsTabsEl.scrollWidth <= settingsTabsEl.clientWidth) return;
+    e.preventDefault();
+    settingsTabsEl.scrollLeft += e.deltaY;
+  }, { passive: false });
 
   function buildSettingsPanes() {
     settingsBodyEl.innerHTML = "";
@@ -2561,11 +2593,19 @@
 
   function setActiveSettingsTabUi(name) {
     qsa(".settings-tab-btn", settingsTabsEl).forEach((b) => {
-      b.classList.toggle("is-active", b.dataset.settingsTab === name);
+      const isActive = b.dataset.settingsTab === name;
+      b.classList.toggle("is-active", isActive);
+      // "nearest" (not "center"/"start") so this never fights the user's
+      // own scroll position when the tab is already fully visible — it
+      // only moves the strip the minimum needed to bring a newly
+      // selected, currently-clipped tab (e.g. picked via openSettings()
+      // with an initialName, or a keyboard/programmatic switch) on screen.
+      if (isActive) b.scrollIntoView({ block: "nearest", inline: "nearest" });
     });
     qsa(".settings-pane", settingsBodyEl).forEach((p) => {
       p.classList.toggle("is-active", p.dataset.settingsPane === name);
     });
+    updateSettingsTabsFade();
   }
 
   // Renders whichever view (tree or raw textarea) matches the file's
