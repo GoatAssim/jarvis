@@ -526,6 +526,8 @@ def handle_ai_prompt(text, commands):
             friendly = name[4:].replace("_", " ")
         elif name == "ytdl_info":
             friendly = "looking up video info"
+        elif name == "ytdl_formats":
+            friendly = "listing available formats"
         elif name == "ytdl_download":
             friendly = "downloading media"
         elif name in ("wifi_set", "bluetooth_set", "radio_status", "git_run", "take_screenshot"):
