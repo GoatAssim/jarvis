@@ -2172,15 +2172,21 @@
 
   // search_files results get a "Reveal in Explorer" / "Open location" button
   // per row (web console only — the CLI just prints paths, and clicking a
-  // button there makes no sense). Both call /api/tools/run directly against
-  // reveal_in_explorer / open_file_location, no model involved.
-  function debugFileActionButtons(path) {
+  // button there makes no sense), plus an "Open file" button for files only
+  // (opening a folder itself isn't a meaningful action there — use "Open
+  // location" instead). All three call /api/tools/run directly against
+  // reveal_in_explorer / open_file_location / open_file, no model involved.
+  function debugFileActionButtons(path, isFolder) {
     if (!path) return null;
     const revealBtn = el("button", { class: "btn btn--ghost btn--sm", type: "button" }, "Reveal in Explorer");
     const openBtn = el("button", { class: "btn btn--ghost btn--sm", type: "button" }, "Open location");
+    const buttons = [revealBtn, openBtn];
+    const openFileBtn = isFolder
+      ? null
+      : el("button", { class: "btn btn--ghost btn--sm", type: "button" }, "Open file");
+    if (openFileBtn) buttons.push(openFileBtn);
     const run = async (name, btn) => {
-      revealBtn.disabled = true;
-      openBtn.disabled = true;
+      buttons.forEach((b) => { b.disabled = true; });
       const prevLabel = btn.textContent;
       btn.textContent = "\u2026";
       try {
@@ -2189,14 +2195,14 @@
       } catch (e) {
         toast(e.message || "Failed.");
       } finally {
-        revealBtn.disabled = false;
-        openBtn.disabled = false;
+        buttons.forEach((b) => { b.disabled = false; });
         btn.textContent = prevLabel;
       }
     };
     revealBtn.addEventListener("click", () => run("reveal_in_explorer", revealBtn));
     openBtn.addEventListener("click", () => run("open_file_location", openBtn));
-    return el("div", { class: "debug-file-actions" }, [revealBtn, openBtn]);
+    if (openFileBtn) openFileBtn.addEventListener("click", () => run("open_file", openFileBtn));
+    return el("div", { class: "debug-file-actions" }, buttons);
   }
 
   // Custom organized view for search_files: same key/value tree for the
@@ -2217,7 +2223,7 @@
           el("span", { class: "debug-kv__key" }, `[${i}]`),
           debugRenderOrganized(item, 1),
         ]),
-        debugFileActionButtons(item && item.path),
+        debugFileActionButtons(item && item.path, item && item.is_folder),
       ]));
     });
     return wrap;
