@@ -26,7 +26,7 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PORT = Number(process.env.PORT) || 4173;
 const HOST = "127.0.0.1";
 
-const RESERVED_NAMES = new Set(["config", "ai-config", "ai-clear", "ai-drop-from", "playnite-config", "spotify-config", "spotify-login", "memory-config", "tools-list", "tool-run", "tool-preview", "tool-safety-set", "conv-new", "conv-list", "conv-show", "conv-switch", "conv-delete", "then", "and", "-h", "--help"]);
+const RESERVED_NAMES = new Set(["config", "ai-config", "ai-clear", "ai-drop-from", "playnite-config", "spotify-config", "spotify-login", "memory-config", "tools-list", "tool-run", "tool-preview", "tool-safety-set", "conv-new", "conv-list", "conv-show", "conv-switch", "conv-delete", "organize-json", "then", "and", "-h", "--help"]);
 
 // ---------------------------------------------------------------------------
 // Locate the real jarvis binary. Tries a few invocation strategies, in
@@ -93,10 +93,6 @@ function tryInvoker({ cmd, args }, timeoutMs = 4000) {
 }
 
 let JARVIS = null; // { cmd, args, configPath }
-let AI_CONFIG_PATH = null; // cached path to ai_config.json, discovered lazily via `jarvis ai-config`
-let PLAYNITE_CONFIG_PATH = null; // cached path to playnite.json via `jarvis playnite-config`
-let SPOTIFY_CONFIG_PATH = null;
-let MEMORY_CONFIG_PATH = null;
 
 async function resolveJarvis() {
   for (const candidate of CANDIDATES) {
@@ -255,10 +251,6 @@ app.get("/api/status", async (req, res) => {
 
 app.post("/api/reconnect", async (req, res) => {
   JARVIS = await resolveJarvis();
-  AI_CONFIG_PATH = null; // re-discover on next config request too, in case the binary changed
-  PLAYNITE_CONFIG_PATH = null;
-  SPOTIFY_CONFIG_PATH = null;
-  MEMORY_CONFIG_PATH = null;
   startConfigWatcher();
   res.json({
     online: !!JARVIS,
@@ -557,179 +549,189 @@ app.post("/api/tools/safety", requireJarvis, async (req, res) => {
   res.status(500).json({ error: (parsed && parsed.error) || result.error || result.stderr || "Couldn't update tool safety flag." });
 });
 
-// `jarvis ai-config` prints (and creates, if missing) the path to
-// ai_config.json \u2014 same trick runJarvisOnce already uses for `ai-clear`,
-// reused here instead of guessing the path ourselves, so this server never
-// needs to duplicate the CLI's own idea of where its files live. Cached
-// after the first successful lookup; cleared on /api/reconnect.
-async function getAiConfigPath() {
-  if (AI_CONFIG_PATH) return AI_CONFIG_PATH;
-  const result = await runJarvisOnce(["ai-config"]);
-  if (result.ok && result.stdout) {
-    AI_CONFIG_PATH = result.stdout.trim();
-  }
-  return AI_CONFIG_PATH;
+// ---------------------------------------------------------------------------
+// Generic config file browser (the Settings > Config tabs).
+//
+// Instead of one hardcoded REST pair per config file, this lists whatever
+// *.json files actually sit directly in the jarvis config directory (the
+// same directory `jarvis config` resolves commands.json into) and serves
+// any of them generically. Add a new *.json file to that directory later
+// (a new tool's own config) and it shows up in the Config tab immediately
+// \u2014 nothing here needs to change.
+//
+// Known filenames get a nicer label/hint and an extra shape check beyond
+// "is this valid JSON" (mirroring the checks this project always ran for
+// ai_config.json/commands.json/memory.json). Anything else still works \u2014
+// it just gets a generic label and only the base JSON-validity check.
+// ---------------------------------------------------------------------------
+
+const KNOWN_CONFIGS = {
+  "commands.json": {
+    label: "Commands",
+    hint: "The entire commands.json file \u2014 every command at once. Useful for bulk edits or pasting a config from elsewhere. Changes bypass the builder's per-field checks; jarvis validates when you run a command.",
+    validate(parsed) {
+      if (!parsed.commands || typeof parsed.commands !== "object" || Array.isArray(parsed.commands)) {
+        return "Top-level JSON must have a 'commands' object.";
+      }
+      return null;
+    },
+  },
+  "ai_config.json": {
+    label: "AI",
+    hint: "Persona, defaults, and every AI provider. Add multiple keys to a provider's api_keys array for failover. Read fresh on every ask \u2014 nothing to restart after saving.",
+    validate(parsed) {
+      if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+        return "Top-level JSON must be an object.";
+      }
+      if (parsed.providers !== undefined && !Array.isArray(parsed.providers)) {
+        return "'providers' must be an array.";
+      }
+      return null;
+    },
+  },
+  "playnite.json": {
+    label: "Playnite",
+    hint: "Playnite Bridge token, base URL, and frequent-game cache. Copy the token from Playnite: Main Menu \u2192 Playnite Bridge. Set enabled to false to disable integration.",
+  },
+  "spotify.json": {
+    label: "Spotify",
+    hint: "Spotify Developer client_id (and optional secret). Redirect URI must be http://127.0.0.1:19823/callback. After saving, run jarvis spotify-login in a terminal and sign in with the same account as the Spotify app on this PC. Tokens are stored here after login.",
+  },
+  "memory.json": {
+    label: "Memory",
+    hint: "Long-term facts Jarvis keeps across chats. Only facts that match the current question are added to the prompt. Chat history is short-term and ai-clear does not wipe this. Each item is id, optional key, and fact.",
+    validate(parsed) {
+      if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+        return "Top-level JSON must be an object.";
+      }
+      if (parsed.facts !== undefined && !Array.isArray(parsed.facts)) {
+        return "'facts' must be an array.";
+      }
+      return null;
+    },
+  },
+  "tool_safety.json": {
+    label: "Tool Safety",
+    hint: "Per-tool confirm_required / ai_review flags. Usually easier to flip from the Debug dashboard, but this is the raw file.",
+  },
+};
+
+function jarvisConfigDir() {
+  return JARVIS?.configPath ? path.dirname(JARVIS.configPath) : path.join(os.homedir(), ".jarvis");
 }
 
-app.get("/api/ai/raw", requireJarvis, async (req, res) => {
+function prettyConfigLabel(filename) {
+  return filename
+    .replace(/\.json$/i, "")
+    .replace(/[_-]+/g, " ")
+    .replace(/\b\w/g, (c) => c.toUpperCase());
+}
+
+// Resolves a config filename from the URL to a real path, refusing anything
+// that isn't a plain "<name>.json" sitting directly inside the config dir
+// \u2014 no traversal, no reaching into subdirectories (screenshots/,
+// conversations/ stay hidden from this browser).
+function resolveConfigFile(rawName) {
+  const name = path.basename(String(rawName || ""));
+  if (!/^[A-Za-z0-9._-]+\.json$/i.test(name)) return null;
+  const dir = jarvisConfigDir();
+  const full = path.join(dir, name);
+  if (path.dirname(full) !== dir) return null;
+  return { name, full };
+}
+
+app.get("/api/config/list", requireJarvis, async (req, res) => {
+  const dir = jarvisConfigDir();
   try {
-    const p = await getAiConfigPath();
-    if (!p) return res.status(500).json({ error: "Couldn't locate ai_config.json via the jarvis CLI." });
-    const text = await fs.readFile(p, "utf-8");
-    res.json({ text, path: p });
+    const entries = await fs.readdir(dir, { withFileTypes: true });
+    const order = Object.keys(KNOWN_CONFIGS);
+    const files = entries
+      .filter((e) => e.isFile() && /\.json$/i.test(e.name))
+      .map((e) => e.name)
+      .sort((a, b) => {
+        const ai = order.indexOf(a), bi = order.indexOf(b);
+        if (ai !== -1 || bi !== -1) return (ai === -1 ? order.length : ai) - (bi === -1 ? order.length : bi);
+        return a.localeCompare(b);
+      })
+      .map((name) => ({
+        name,
+        label: KNOWN_CONFIGS[name]?.label || prettyConfigLabel(name),
+        hint: KNOWN_CONFIGS[name]?.hint || "Auto-discovered config file \u2014 jarvis only checks that it's well-formed JSON on save.",
+        path: path.join(dir, name),
+      }));
+    res.json({ dir, files });
   } catch (e) {
-    res.status(500).json({ error: `Couldn't read ai_config.json: ${e.message}` });
+    res.status(500).json({ error: `Couldn't list ${dir}: ${e.message}` });
   }
 });
 
-app.put("/api/ai/raw", requireJarvis, async (req, res) => {
+app.get("/api/config/file/:name/raw", requireJarvis, async (req, res) => {
+  const resolved = resolveConfigFile(req.params.name);
+  if (!resolved) return res.status(400).json({ error: "Invalid config file name." });
+  try {
+    const text = await fs.readFile(resolved.full, "utf-8");
+    res.json({ text, path: resolved.full, name: resolved.name });
+  } catch (e) {
+    res.status(404).json({ error: `Couldn't read ${resolved.name}: ${e.message}` });
+  }
+});
+
+app.put("/api/config/file/:name/raw", requireJarvis, async (req, res) => {
+  const resolved = resolveConfigFile(req.params.name);
+  if (!resolved) return res.status(400).json({ error: "Invalid config file name." });
   const { text } = req.body || {};
+  if (typeof text !== "string") {
+    return res.status(400).json({ error: "Missing 'text'." });
+  }
   let parsed;
   try {
     parsed = JSON.parse(text);
   } catch (e) {
     return res.status(400).json({ error: `Invalid JSON: ${e.message}` });
   }
-  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
-    return res.status(400).json({ error: "Top-level JSON must be an object." });
-  }
-  if (parsed.providers !== undefined && !Array.isArray(parsed.providers)) {
-    return res.status(400).json({ error: "'providers' must be an array." });
+  const known = KNOWN_CONFIGS[resolved.name];
+  if (known?.validate) {
+    const problem = known.validate(parsed);
+    if (problem) return res.status(400).json({ error: problem });
   }
   try {
-    const p = await getAiConfigPath();
-    if (!p) return res.status(500).json({ error: "Couldn't locate ai_config.json via the jarvis CLI." });
-    await fs.writeFile(p, text.endsWith("\n") ? text : text + "\n", "utf-8");
+    if (resolved.name === "commands.json") suppressWatchUntil = Date.now() + 400;
+    await fs.writeFile(resolved.full, text.endsWith("\n") ? text : text + "\n", "utf-8");
+    if (resolved.name === "commands.json" && parsed.commands) broadcastCommands(parsed.commands);
     res.json({ ok: true });
   } catch (e) {
-    res.status(500).json({ error: `Couldn't write ai_config.json: ${e.message}` });
+    res.status(500).json({ error: `Couldn't write ${resolved.name}: ${e.message}` });
   }
 });
 
-async function getPlayniteConfigPath() {
-  if (PLAYNITE_CONFIG_PATH) return PLAYNITE_CONFIG_PATH;
-  const result = await runJarvisOnce(["playnite-config"]);
-  if (result.ok && result.stdout) {
-    PLAYNITE_CONFIG_PATH = result.stdout.trim();
-  }
-  return PLAYNITE_CONFIG_PATH;
-}
+// ---------------------------------------------------------------------------
+// organize-json \u2014 turns "organize-json <path>" typed into the Ask box into
+// a local file read + parse, never a prompt to any AI provider (so it never
+// costs a token, no matter how big the file is). Delegates the actual
+// parsing/error-reporting to the CLI (`jarvis organize-json --json`) so the
+// web UI and terminal share one implementation of "what's wrong with this
+// JSON" and "what does an organized view of it look like".
+// ---------------------------------------------------------------------------
 
-app.get("/api/playnite/raw", requireJarvis, async (req, res) => {
+app.post("/api/json/organize", requireJarvis, async (req, res) => {
+  const { path: rawPath } = req.body || {};
+  if (!rawPath || typeof rawPath !== "string" || !rawPath.trim()) {
+    return res.status(400).json({ error: "Missing 'path'." });
+  }
+  const result = await runJarvisOnce(["organize-json", rawPath.trim(), "--json"]);
+  if (!result.stdout) {
+    return res.status(500).json({ error: result.stderr || result.error || "organize-json produced no output." });
+  }
+  let payload;
   try {
-    const p = await getPlayniteConfigPath();
-    if (!p) return res.status(500).json({ error: "Couldn't locate playnite.json via the jarvis CLI." });
-    const text = await fs.readFile(p, "utf-8");
-    res.json({ text, path: p });
+    payload = JSON.parse(result.stdout);
   } catch (e) {
-    res.status(500).json({ error: `Couldn't read playnite.json: ${e.message}` });
+    return res.status(500).json({ error: `Unexpected output from jarvis: ${e.message}` });
   }
-});
-
-app.put("/api/playnite/raw", requireJarvis, async (req, res) => {
-  const { text } = req.body || {};
-  let parsed;
-  try {
-    parsed = JSON.parse(text);
-  } catch (e) {
-    return res.status(400).json({ error: `Invalid JSON: ${e.message}` });
+  if (!payload.ok) {
+    return res.status(400).json(payload);
   }
-  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
-    return res.status(400).json({ error: "Top-level JSON must be an object." });
-  }
-  try {
-    const p = await getPlayniteConfigPath();
-    if (!p) return res.status(500).json({ error: "Couldn't locate playnite.json via the jarvis CLI." });
-    await fs.writeFile(p, text.endsWith("\n") ? text : text + "\n", "utf-8");
-    res.json({ ok: true });
-  } catch (e) {
-    res.status(500).json({ error: `Couldn't write playnite.json: ${e.message}` });
-  }
-});
-
-async function getSpotifyConfigPath() {
-  if (SPOTIFY_CONFIG_PATH) return SPOTIFY_CONFIG_PATH;
-  const result = await runJarvisOnce(["spotify-config"]);
-  if (result.ok && result.stdout) {
-    SPOTIFY_CONFIG_PATH = result.stdout.trim();
-  }
-  return SPOTIFY_CONFIG_PATH;
-}
-
-app.get("/api/spotify/raw", requireJarvis, async (req, res) => {
-  try {
-    const p = await getSpotifyConfigPath();
-    if (!p) return res.status(500).json({ error: "Couldn't locate spotify.json via the jarvis CLI." });
-    const text = await fs.readFile(p, "utf-8");
-    res.json({ text, path: p });
-  } catch (e) {
-    res.status(500).json({ error: `Couldn't read spotify.json: ${e.message}` });
-  }
-});
-
-app.put("/api/spotify/raw", requireJarvis, async (req, res) => {
-  const { text } = req.body || {};
-  let parsed;
-  try {
-    parsed = JSON.parse(text);
-  } catch (e) {
-    return res.status(400).json({ error: `Invalid JSON: ${e.message}` });
-  }
-  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
-    return res.status(400).json({ error: "Top-level JSON must be an object." });
-  }
-  try {
-    const p = await getSpotifyConfigPath();
-    if (!p) return res.status(500).json({ error: "Couldn't locate spotify.json via the jarvis CLI." });
-    await fs.writeFile(p, text.endsWith("\n") ? text : text + "\n", "utf-8");
-    res.json({ ok: true });
-  } catch (e) {
-    res.status(500).json({ error: `Couldn't write spotify.json: ${e.message}` });
-  }
-});
-
-async function getMemoryConfigPath() {
-  if (MEMORY_CONFIG_PATH) return MEMORY_CONFIG_PATH;
-  const result = await runJarvisOnce(["memory-config"]);
-  if (result.ok && result.stdout) {
-    MEMORY_CONFIG_PATH = result.stdout.trim();
-  }
-  return MEMORY_CONFIG_PATH;
-}
-
-app.get("/api/memory/raw", requireJarvis, async (req, res) => {
-  try {
-    const p = await getMemoryConfigPath();
-    if (!p) return res.status(500).json({ error: "Couldn't locate memory.json via the jarvis CLI." });
-    const text = await fs.readFile(p, "utf-8");
-    res.json({ text, path: p });
-  } catch (e) {
-    res.status(500).json({ error: `Couldn't read memory.json: ${e.message}` });
-  }
-});
-
-app.put("/api/memory/raw", requireJarvis, async (req, res) => {
-  const { text } = req.body || {};
-  let parsed;
-  try {
-    parsed = JSON.parse(text);
-  } catch (e) {
-    return res.status(400).json({ error: `Invalid JSON: ${e.message}` });
-  }
-  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
-    return res.status(400).json({ error: "Top-level JSON must be an object." });
-  }
-  if (parsed.facts !== undefined && !Array.isArray(parsed.facts)) {
-    return res.status(400).json({ error: "'facts' must be an array." });
-  }
-  try {
-    const p = await getMemoryConfigPath();
-    if (!p) return res.status(500).json({ error: "Couldn't locate memory.json via the jarvis CLI." });
-    await fs.writeFile(p, text.endsWith("\n") ? text : text + "\n", "utf-8");
-    res.json({ ok: true });
-  } catch (e) {
-    res.status(500).json({ error: `Couldn't write memory.json: ${e.message}` });
-  }
+  res.json(payload);
 });
 
 const SCREENSHOT_NAME_RE = /^ss_[A-Za-z0-9_.-]+\.png$/;
@@ -749,36 +751,6 @@ app.get("/api/screenshots/:name", (req, res) => {
       res.status(404).json({ error: "Screenshot not found." });
     }
   });
-});
-
-app.get("/api/raw", requireJarvis, async (req, res) => {
-  try {
-    const text = await fs.readFile(JARVIS.configPath, "utf-8");
-    res.json({ text, path: JARVIS.configPath });
-  } catch (e) {
-    res.status(500).json({ error: `Couldn't read commands.json: ${e.message}` });
-  }
-});
-
-app.put("/api/raw", requireJarvis, async (req, res) => {
-  const { text } = req.body || {};
-  let parsed;
-  try {
-    parsed = JSON.parse(text);
-  } catch (e) {
-    return res.status(400).json({ error: `Invalid JSON: ${e.message}` });
-  }
-  if (!parsed.commands || typeof parsed.commands !== "object" || Array.isArray(parsed.commands)) {
-    return res.status(400).json({ error: "Top-level JSON must have a 'commands' object." });
-  }
-  try {
-    suppressWatchUntil = Date.now() + 400;
-    await fs.writeFile(JARVIS.configPath, text.endsWith("\n") ? text : text + "\n", "utf-8");
-    broadcastCommands(parsed.commands);
-    res.json({ ok: true });
-  } catch (e) {
-    res.status(500).json({ error: `Couldn't write commands.json: ${e.message}` });
-  }
 });
 
 const server = createServer(app);
