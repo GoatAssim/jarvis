@@ -12,6 +12,7 @@ import json
 import re
 
 from . import ai_config, ai_providers, conversations, memory, playnite_config, stats, tool_safety
+from . import tool_result_shaping
 from . import tools as system_tools
 
 DEFAULT_TIMEOUT = 30
@@ -65,6 +66,16 @@ DEFAULT_COMPACT_PROMPT_PROVIDERS = ("groq",)
 #                            args it didn't supply; see _make_tool_executor)
 #   tool_result_budget     \u2014 chars of already-ran tool results replayed to
 #                            the next provider on failover
+#   tool_result_verbosity  \u2014 "full" (every field a tool returns), "medium"
+#                            (drop merely-nice-to-have fields), or "low"
+#                            (only what a tool's author marked necessary) \u2014
+#                            see tool_result_shaping.py, applied to every
+#                            tool call's *result* (as opposed to
+#                            tool_schema_style, which shapes what the model
+#                            is told a tool accepts before it's even
+#                            called). A tool not listed in
+#                            tool_result_shaping.TOOL_RESULT_SPECS is
+#                            unaffected at every level.
 # ===========================================================================
 
 PROMPT_MODE_DEFS = [
@@ -85,6 +96,7 @@ PROMPT_MODE_DEFS = [
         "skip_other_convos": False,
         "tool_schema_style": "compact",
         "tool_result_budget": 3500,
+        "tool_result_verbosity": "full",
     },
     {
         "name": "compact",
@@ -103,6 +115,7 @@ PROMPT_MODE_DEFS = [
         "skip_other_convos": False,
         "tool_schema_style": "compact",
         "tool_result_budget": 1600,
+        "tool_result_verbosity": "medium",
     },
     {
         "name": "ultra",
@@ -125,13 +138,27 @@ PROMPT_MODE_DEFS = [
         "skip_other_convos": True,
         "tool_schema_style": "name_only",
         "tool_result_budget": 600,
+        "tool_result_verbosity": "low",
     },
 ]
 
 PROMPT_MODES = tuple(m["name"] for m in PROMPT_MODE_DEFS)
 MODE_LABELS = {m["name"]: m["label"] for m in PROMPT_MODE_DEFS}
+MODE_SUMMARIES = {m["name"]: m.get("summary", "") for m in PROMPT_MODE_DEFS}
 _MODE_BY_NAME = {m["name"]: m for m in PROMPT_MODE_DEFS}
 DEFAULT_PROMPT_MODE = "compact"
+
+
+def mode_options():
+    """[{"mode","label","summary"}, ...] in registry order \u2014 the one place
+    that builds this shape, so cli.py's mode/mode-set commands, the web
+    /api/mode responses, and get_capacity_mode/set_capacity_mode (mode_tools)
+    all show the exact same list. Adding a mode to PROMPT_MODE_DEFS is
+    everything needed for it to show up here."""
+    return [
+        {"mode": m, "label": MODE_LABELS[m], "summary": MODE_SUMMARIES.get(m, "")}
+        for m in PROMPT_MODES
+    ]
 
 # Legacy per-key overrides, kept only for the three built-in modes so an
 # older hand-edited ai_config.json (compact_max_commands, history_char_budget,
@@ -650,7 +677,7 @@ def risk_review(tool_name, arguments, cfg, exclude_label=None):
 
 
 def _make_tool_executor(on_tool_call, schemas=None, on_confirm_request=None,
-                         cfg=None, provider_ref=None):
+                         cfg=None, provider_ref=None, verbosity_ref=None):
     """Shared across every provider/key in one ask() so a failover never
     re-runs the same command, Playnite action, or web fetch. Cache hits
     still return the original result (no second launch / install / HTTP).
@@ -666,6 +693,14 @@ def _make_tool_executor(on_tool_call, schemas=None, on_confirm_request=None,
     call does and how dangerous it is; otherwise risk_note is None. With no
     on_confirm_request supplied at all, a tool requiring confirmation fails
     closed (never silently runs unconfirmed).
+
+    verbosity_ref, if given, is a one-element list read fresh on every call
+    (["full"] by default) whose current value picks how much of a
+    successful result survives before it's cached/returned \u2014 see
+    tool_result_shaping.shape_result(). A mutable holder (not a plain
+    argument) because one executor is shared across every provider in a
+    single ask() for failover, and each provider attempt resolves its own
+    prompt profile (see ask()'s main loop), same pattern as provider_ref.
     """
     cache = {}
     runs = []
@@ -730,12 +765,8 @@ def _make_tool_executor(on_tool_call, schemas=None, on_confirm_request=None,
             except TypeError:
                 on_tool_call(name)
         result = system_tools.execute_tool(name, arguments)
-        if name == "take_screenshot" and isinstance(result, dict):
-            result = {
-                k: result[k]
-                for k in ("ok", "id", "file", "path", "width", "height", "bytes", "note", "error")
-                if k in result
-            }
+        verbosity = verbosity_ref[0] if verbosity_ref else "full"
+        result = tool_result_shaping.shape_result(name, result, verbosity)
         cache[key] = result
         runs.append({"name": name, "arguments": arguments, "result": result})
         return result
@@ -993,9 +1024,10 @@ def ask(user_text, commands=None, on_attempt=None, on_tool_call=None, conversati
         compact_schemas = system_tools.compact_schemas_for_prompt(full_schemas)
         name_only_schemas = system_tools.name_only_schemas_for_prompt(full_schemas)
     provider_ref = [None]
+    verbosity_ref = ["full"]
     tool_executor = _make_tool_executor(
         on_tool_call, full_schemas, on_confirm_request=on_confirm_request,
-        cfg=cfg, provider_ref=provider_ref,
+        cfg=cfg, provider_ref=provider_ref, verbosity_ref=verbosity_ref,
     ) if tools_enabled else None
 
     attempts = []
@@ -1004,6 +1036,7 @@ def ask(user_text, commands=None, on_attempt=None, on_tool_call=None, conversati
         label = _provider_label(provider)
         provider_ref[0] = label
         profile = _prompt_profile(label, cfg["defaults"])
+        verbosity_ref[0] = profile.get("tool_result_verbosity", "full")
         if tools_enabled:
             tool_schemas = (
                 name_only_schemas if profile.get("tool_schema_style") == "name_only"

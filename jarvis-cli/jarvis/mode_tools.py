@@ -17,9 +17,7 @@ def tool_get_capacity_mode(args=None):
     return {
         "mode": mode,
         "label": ai_client.MODE_LABELS.get(mode, mode),
-        "options": [
-            {"mode": m, "label": ai_client.MODE_LABELS[m]} for m in ai_client.PROMPT_MODES
-        ],
+        "options": ai_client.mode_options(),
     }
 
 
@@ -29,7 +27,7 @@ def tool_set_capacity_mode(args):
     args = args or {}
     cfg = ai_config.load_ai_config()
     current = ai_client.current_mode(cfg)
-    options = [{"mode": m, "label": ai_client.MODE_LABELS[m]} for m in ai_client.PROMPT_MODES]
+    options = ai_client.mode_options()
 
     requested = (args.get("mode") or "").strip().lower()
     if not requested:

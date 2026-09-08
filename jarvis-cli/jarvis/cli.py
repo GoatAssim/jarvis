@@ -657,9 +657,7 @@ def main():
         print(json.dumps({
             "mode": current,
             "label": ai_client.MODE_LABELS.get(current, current),
-            "options": [
-                {"mode": m, "label": ai_client.MODE_LABELS[m]} for m in ai_client.PROMPT_MODES
-            ],
+            "options": ai_client.mode_options(),
         }, indent=2))
         return
 
@@ -669,13 +667,15 @@ def main():
         if requested not in ai_client.PROMPT_MODES:
             print(json.dumps({
                 "error": f"usage: jarvis mode-set <{'|'.join(ai_client.PROMPT_MODES)}>",
-                "options": [
-                    {"mode": m, "label": ai_client.MODE_LABELS[m]} for m in ai_client.PROMPT_MODES
-                ],
+                "options": ai_client.mode_options(),
             }))
             sys.exit(1)
         new_mode = ai_client.set_mode(requested)
-        print(json.dumps({"mode": new_mode, "label": ai_client.MODE_LABELS[new_mode]}, indent=2))
+        print(json.dumps({
+            "mode": new_mode,
+            "label": ai_client.MODE_LABELS[new_mode],
+            "options": ai_client.mode_options(),
+        }, indent=2))
         return
 
     if argv[0] == "ai-clear":
