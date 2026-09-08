@@ -1635,7 +1635,30 @@
       return;
     }
 
-    if (state.running) return;
+    // There is only one active child process per websocket connection
+    // (server.js: ws.activeChild), so an ask really can't run concurrently
+    // with another ask (or a plain run) even across conversations — that
+    // part is by design, not a bug (see JARVIS_CONTEXT.md).
+    //
+    // The bug: when the in-flight ask belongs to a DIFFERENT conversation
+    // than the one on screen, refreshAskBusyUI()'s isViewingAskThread()
+    // check (correctly) leaves #ask-input/#btn-ask-send enabled here, since
+    // it's only scoping the Stop-button/spinner UI to the conversation
+    // that's actually busy. That left this handler's bare `if (state.running)
+    // return;` as the only thing standing in the way — and it returned
+    // silently, with no toast, no shake, nothing. From the user's
+    // perspective, switching to an idle conversation while another one was
+    // still replying made the whole app look permanently stuck: typing did
+    // nothing and there was no indication why or when it would recover.
+    // Surface it instead of eating the submit silently.
+    if (state.running) {
+      toast(
+        isViewingAskThread()
+          ? "Still replying \u2014 hang tight."
+          : "Jarvis is still replying in another chat \u2014 wait for it to finish."
+      );
+      return;
+    }
     if (!state.activeConversationId) await startNewConversation();
     input.value = "";
     askInputAutoGrow(input);

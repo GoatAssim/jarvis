@@ -1278,7 +1278,7 @@ input.is-invalid{ border-color: var(--red) !important; }
   position: fixed; inset: 0; z-index: 95;
   background: rgba(2,5,10,0.78);
   backdrop-filter: blur(4px);
-  display: flex; align-items: stretch; justify-content: flex-end;
+  display: flex; align-items: stretch; justify-content: center;
   padding: 22px;
 }
 
