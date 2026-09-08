@@ -41,7 +41,7 @@ ENCODING = "utf-8"
 
 CHAIN_SEP = "then"      # starts a new batch \u2014 waits for the previous one to finish
 PARALLEL_SEP = "and"    # joins the current batch \u2014 runs alongside whatever's already in it
-RESERVED_NAMES = {"config", "ai-config", "ai-clear", "ai-drop-from", "playnite-config", "spotify-config", "spotify-login", "memory-config", "everything-config", "tools-list", "tool-run", "tool-preview", "tool-safety-set", "conv-new", "conv-list", "conv-show", "conv-switch", "conv-delete", "organize-json", CHAIN_SEP, PARALLEL_SEP, "-h", "--help"}
+RESERVED_NAMES = {"config", "ai-config", "ai-clear", "ai-drop-from", "playnite-config", "spotify-config", "spotify-login", "memory-config", "everything-config", "tools-list", "tool-run", "tool-preview", "tool-safety-set", "conv-new", "conv-list", "conv-show", "conv-switch", "conv-delete", "organize-json", "mode", "mode-set", CHAIN_SEP, PARALLEL_SEP, "-h", "--help"}
 
 OUT = Palette(sys.stdout)  # actual command output: the banner, the command list
 ERR = Palette(sys.stderr)  # jarvis's own status/trace/error messages
@@ -159,7 +159,7 @@ def print_help(commands, file=sys.stdout):
         print(f"  {p.GREEN}{name.ljust(width)}{p.RESET} {spec.get('description', '')}", file=file)
     print(f"\nRun '{p.CYAN}jarvis <command> --help{p.RESET}' for a command's options.", file=file)
     print(f"Chain several with '{p.CYAN}jarvis cmd1 then cmd2{p.RESET}'.", file=file)
-    print(f"Built-in: {p.CYAN}config{p.RESET}, {p.CYAN}ai-config{p.RESET}, {p.CYAN}ai-clear{p.RESET}, {p.CYAN}tools-list{p.RESET} (prints every AI tool as JSON — not an ask), {p.CYAN}tool-run{p.RESET} (runs one AI tool directly), {p.CYAN}conv-new{p.RESET}/{p.CYAN}conv-list{p.RESET}/{p.CYAN}conv-show{p.RESET}/{p.CYAN}conv-switch{p.RESET}/{p.CYAN}conv-delete{p.RESET} (manage conversations).", file=file)
+    print(f"Built-in: {p.CYAN}config{p.RESET}, {p.CYAN}ai-config{p.RESET}, {p.CYAN}ai-clear{p.RESET}, {p.CYAN}tools-list{p.RESET} (prints every AI tool as JSON — not an ask), {p.CYAN}tool-run{p.RESET} (runs one AI tool directly), {p.CYAN}conv-new{p.RESET}/{p.CYAN}conv-list{p.RESET}/{p.CYAN}conv-show{p.RESET}/{p.CYAN}conv-switch{p.RESET}/{p.CYAN}conv-delete{p.RESET} (manage conversations), {p.CYAN}mode{p.RESET}/{p.CYAN}mode-set <full|compact|ultra>{p.RESET} (read/set the prompt's token-usage capacity — 400%/100%/50%).", file=file)
     print(f"Edit {p.DIM}{CONFIG_FILE}{p.RESET} to add or change commands.", file=file)
 
 
@@ -649,6 +649,33 @@ def main():
         from . import ai_config
         ai_config.ensure_ai_config()
         print(ai_config.AI_CONFIG_FILE)
+        return
+
+    if argv[0] == "mode":
+        from . import ai_client
+        current = ai_client.current_mode()
+        print(json.dumps({
+            "mode": current,
+            "label": ai_client.MODE_LABELS.get(current, current),
+            "options": [
+                {"mode": m, "label": ai_client.MODE_LABELS[m]} for m in ai_client.PROMPT_MODES
+            ],
+        }, indent=2))
+        return
+
+    if argv[0] == "mode-set":
+        from . import ai_client
+        requested = argv[1].strip().lower() if len(argv) > 1 and argv[1].strip() else ""
+        if requested not in ai_client.PROMPT_MODES:
+            print(json.dumps({
+                "error": f"usage: jarvis mode-set <{'|'.join(ai_client.PROMPT_MODES)}>",
+                "options": [
+                    {"mode": m, "label": ai_client.MODE_LABELS[m]} for m in ai_client.PROMPT_MODES
+                ],
+            }))
+            sys.exit(1)
+        new_mode = ai_client.set_mode(requested)
+        print(json.dumps({"mode": new_mode, "label": ai_client.MODE_LABELS[new_mode]}, indent=2))
         return
 
     if argv[0] == "ai-clear":

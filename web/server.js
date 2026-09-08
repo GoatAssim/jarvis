@@ -391,6 +391,39 @@ app.post("/api/ai/clear", requireJarvis, async (req, res) => {
   res.json({ ok: true, message: result.stdout });
 });
 
+// Prompt "capacity" mode — 400%/100%/50% (full/compact/ultra), see
+// ai_client.PROMPT_MODES. Thin wrapper over `jarvis mode` / `jarvis
+// mode-set`, same pattern as everything else here: the actual state lives
+// in ~/.jarvis/ai_config.json on the machine running jarvis-cli, this just
+// shells out and relays the JSON.
+app.get("/api/mode", requireJarvis, async (req, res) => {
+  const result = await runJarvisOnce(["mode"], 10000);
+  if (!result.ok) {
+    return res.status(500).json({ error: result.error || result.stderr || "Couldn't read mode." });
+  }
+  try {
+    res.json(JSON.parse(result.stdout));
+  } catch {
+    res.status(500).json({ error: "Couldn't parse mode output." });
+  }
+});
+
+app.post("/api/mode", requireJarvis, async (req, res) => {
+  const mode = typeof req.body?.mode === "string" ? req.body.mode.trim() : "";
+  if (!mode) return res.status(400).json({ error: "mode is required" });
+  const result = await runJarvisOnce(["mode-set", mode], 10000);
+  if (!result.ok) {
+    let parsed = null;
+    try { parsed = JSON.parse(result.stdout); } catch { /* not JSON */ }
+    return res.status(400).json({ error: (parsed && parsed.error) || result.error || result.stderr || "Couldn't set mode." });
+  }
+  try {
+    res.json(JSON.parse(result.stdout));
+  } catch {
+    res.status(500).json({ error: "Couldn't parse mode output." });
+  }
+});
+
 // ---------------------------------------------------------------------------
 // Conversations — every one lives in ~/.jarvis/conversations on the
 // machine running jarvis-cli (see conversations.py), never anywhere else.
