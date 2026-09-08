@@ -1130,7 +1130,11 @@ input.is-invalid{ border-color: var(--red) !important; }
   display: flex; gap: 10px; padding: 12px 14px;
   border-top: 1px solid var(--border); flex-shrink: 0;
 }
-.ask-input-row input{ flex: 1; }
+.ask-input-row textarea{
+  flex: 1; resize: none; overflow-y: auto;
+  max-height: 140px; line-height: 1.4;
+  font-family: inherit;
+}
 
 @media (max-width: 780px){
   .ask-overlay{ padding: 0; }

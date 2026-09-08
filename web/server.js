@@ -983,8 +983,8 @@ wss.on("connection", (ws) => {
       if (text.length > MAX_ASK_LENGTH) {
         return send(ws, { type: "ask-error", message: `Keep it under ${MAX_ASK_LENGTH} characters.` });
       }
-      if (text && /[\r\n\0]/.test(text)) {
-        return send(ws, { type: "ask-error", message: "Ask can't contain newlines." });
+      if (text && /\0/.test(text)) {
+        return send(ws, { type: "ask-error", message: "Ask can't contain a null byte." });
       }
 
       let prompt = text;
