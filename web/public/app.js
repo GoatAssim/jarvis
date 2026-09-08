@@ -358,6 +358,8 @@
     debugLastResult: null,   // last {ok, result, raw, stderr, error} from /api/tools/run
     debugLastResultError: false,
     debugPendingConfirm: null, // {name, arguments, risk_note} awaiting Yes/No before /api/tools/run
+    debugMode: null,          // local-only capacity override for this panel, e.g. "compact" \u2014
+                               // never sent to /api/mode, never affects the real global mode
 
     // Conversations — every saved chat lives in ~/.jarvis/conversations
     // (see conversations.py); this is just the in-memory mirror for the
@@ -406,13 +408,15 @@
     putConfigFile: (name, text) => api("PUT", `/api/config/file/${encodeURIComponent(name)}/raw`, { text }),
     organizeJson: (targetPath) => api("POST", "/api/json/organize", { path: targetPath }),
     listTools: () => api("GET", "/api/tools"),
-    runTool: (name, arguments_) => api("POST", "/api/tools/run", { name, arguments: arguments_ }),
-    previewTool: (name, arguments_) => api("POST", "/api/tools/preview", { name, arguments: arguments_ }),
+    runTool: (name, arguments_, mode) => api("POST", "/api/tools/run", { name, arguments: arguments_, mode }),
+    previewTool: (name, arguments_, mode) => api("POST", "/api/tools/preview", { name, arguments: arguments_, mode }),
     setToolSafety: (name, key, value) => api("POST", "/api/tools/safety", { name, key, value }),
     listConversations: (q) => api("GET", `/api/conversations${q ? `?q=${encodeURIComponent(q)}` : ""}`),
     createConversation: (title) => api("POST", "/api/conversations", title ? { title } : {}),
     getConversation: (id) => api("GET", `/api/conversations/${encodeURIComponent(id)}`),
     deleteConversation: (id) => api("DELETE", `/api/conversations/${encodeURIComponent(id)}`),
+    getMode: () => api("GET", "/api/mode"),
+    setMode: (mode) => api("POST", "/api/mode", { mode }),
   };
 
   // ===========================================================================
@@ -500,6 +504,66 @@
     const status = await Api.reconnect().catch(() => ({ online: false }));
     renderStatus(status);
     if (status.online) await loadCommands();
+  });
+
+  // ===========================================================================
+  // Capacity switch — see ai_client.PROMPT_MODE_DEFS on the CLI side (today:
+  // 400% / 100% / 50%, i.e. full / compact / ultra). Fully generic: the
+  // cycle order, labels, and tooltip summaries all come from /api/mode's
+  // `options` array (itself ai_client.mode_options(), one source of truth),
+  // never hardcoded here — adding a mode to PROMPT_MODE_DEFS is enough for
+  // it to show up in this switch with zero front-end changes. Click always
+  // steps to the next mode in `options` order and persists it via
+  // /api/mode, same "thin client over the CLI" pattern as everything else
+  // in this file.
+  // ===========================================================================
+
+  let modeOptions = [];   // [{mode,label,summary}, ...] from the server, in cycle order
+  const FALLBACK_MODE = { mode: "compact", label: "Capacity", summary: "" };
+
+  function optionFor(mode) {
+    return modeOptions.find((o) => o.mode === mode) || null;
+  }
+
+  function renderMode(mode) {
+    const btn = qs("#btn-mode-switch");
+    const current = optionFor(mode) || optionFor(FALLBACK_MODE.mode) || FALLBACK_MODE;
+    const idx = modeOptions.indexOf(current);
+    const next = modeOptions.length ? modeOptions[(Math.max(idx, 0) + 1) % modeOptions.length] : null;
+    btn.dataset.mode = current.mode;
+    btn.title = current.summary
+      ? `${current.label} — ${current.summary}${next ? ` Click to switch to ${next.label}.` : ""}`
+      : current.label;
+    qs("#mode-switch-label").textContent = current.label;
+  }
+
+  async function loadMode() {
+    try {
+      const data = await Api.getMode();
+      if (Array.isArray(data.options) && data.options.length) modeOptions = data.options;
+      renderMode(data.mode);
+    } catch {
+      // Non-fatal — leave the button on its default label rather than
+      // blocking the rest of the app over a cosmetic switch.
+    }
+  }
+
+  qs("#btn-mode-switch").addEventListener("click", async () => {
+    const btn = qs("#btn-mode-switch");
+    if (!modeOptions.length) { await loadMode(); if (!modeOptions.length) return; }
+    const current = btn.dataset.mode || FALLBACK_MODE.mode;
+    const idx = modeOptions.findIndex((o) => o.mode === current);
+    const next = modeOptions[(Math.max(idx, 0) + 1) % modeOptions.length];
+    btn.disabled = true;
+    try {
+      const data = await Api.setMode(next.mode);
+      if (Array.isArray(data.options) && data.options.length) modeOptions = data.options;
+      renderMode(data.mode);
+    } catch (e) {
+      toast(e.message || "Couldn't switch capacity mode.", "error");
+    } finally {
+      btn.disabled = false;
+    }
   });
 
   // ===========================================================================
@@ -1913,6 +1977,39 @@
   const debugToolCount = qs("#debug-tool-count");
   const btnDebugRun = qs("#btn-debug-run");
 
+  // ---- Debug's own capacity switch ---------------------------------------
+  // Looks and cycles just like the global #btn-mode-switch (same
+  // modeOptions/optionFor/FALLBACK_MODE from the section above), but it
+  // only ever writes to state.debugMode \u2014 it never calls Api.setMode, so
+  // clicking it can't change what mode Jarvis is actually running in.
+  // Nothing currently reads state.debugMode back into a tool call (tool-run
+  // bypasses the model entirely), so today this is purely a local display
+  // toggle, kept separate in case a debug-scoped mode override is wired up
+  // to something later.
+  const btnDebugModeSwitch = qs("#btn-debug-mode-switch");
+  const debugModeSwitchLabel = qs("#debug-mode-switch-label");
+
+  function renderDebugMode() {
+    const current = optionFor(state.debugMode) || optionFor(FALLBACK_MODE.mode) || FALLBACK_MODE;
+    const idx = modeOptions.indexOf(current);
+    const next = modeOptions.length ? modeOptions[(Math.max(idx, 0) + 1) % modeOptions.length] : null;
+    btnDebugModeSwitch.dataset.mode = current.mode;
+    const base = "Local override for this debug panel only \u2014 does not touch Jarvis's real capacity mode.";
+    btnDebugModeSwitch.title = current.summary
+      ? `${base} ${current.label} \u2014 ${current.summary}${next ? ` Click to switch to ${next.label}.` : ""}`
+      : base;
+    debugModeSwitchLabel.textContent = current.label;
+  }
+
+  btnDebugModeSwitch.addEventListener("click", async () => {
+    if (!modeOptions.length) { await loadMode(); if (!modeOptions.length) return; }
+    const current = state.debugMode || FALLBACK_MODE.mode;
+    const idx = modeOptions.findIndex((o) => o.mode === current);
+    const next = modeOptions[(Math.max(idx, 0) + 1) % modeOptions.length];
+    state.debugMode = next.mode; // local only \u2014 never posted to /api/mode
+    renderDebugMode();
+  });
+
   function debugFindTool(name) {
     return state.debugTools.find((t) => t.name === name) || null;
   }
@@ -2362,7 +2459,7 @@
   // both the direct (non-sensitive) path below and the confirm dialog's
   // Yes button (debugRenderConfirmPending) can share it.
   async function debugRunNow(name, args) {
-    const res = await Api.runTool(name, args);
+    const res = await Api.runTool(name, args, state.debugMode);
     state.debugLastResult = res.ok !== false ? { result: res.result } : { error: res.error || "Tool run failed." };
     debugStatusLine.textContent = res.ok !== false ? "done" : "tool run failed";
     debugStatusLine.classList.toggle("is-error", res.ok === false);
@@ -2391,7 +2488,7 @@
         debugStatusLine.textContent = `checking ${state.debugSelected}\u2026`;
         debugStatusLine.classList.add("is-busy");
         state.debugLastResult = null;
-        const preview = await Api.previewTool(state.debugSelected, args);
+        const preview = await Api.previewTool(state.debugSelected, args, state.debugMode);
         state.debugPendingConfirm = {
           name: state.debugSelected,
           arguments: args,
@@ -2419,6 +2516,13 @@
 
   async function openDebug() {
     debugOverlay.hidden = false;
+    if (!state.debugMode) {
+      if (!modeOptions.length) await loadMode();
+      // Seed from whatever the global switch currently shows, purely as a
+      // starting point \u2014 from here the two are independent.
+      state.debugMode = qs("#btn-mode-switch").dataset.mode || FALLBACK_MODE.mode;
+    }
+    renderDebugMode();
     if (state.debugLoaded) return;
     debugStatusLine.textContent = "reading tool catalog\u2026";
     debugStatusLine.classList.add("is-busy");
@@ -3345,6 +3449,7 @@
     // Silent: the boot sequence + status pill already explain an offline
     // CLI on first load, so a third toast on top would just be noise.
     await loadCommands({ silent: !status.online });
+    if (status.online) await loadMode();
     // Load every saved conversation into the sidebar first (they live on
     // disk under ~/.jarvis/conversations and are shared across every
     // browser/session that hits this server — this was previously never

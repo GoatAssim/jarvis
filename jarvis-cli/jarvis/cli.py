@@ -41,7 +41,7 @@ ENCODING = "utf-8"
 
 CHAIN_SEP = "then"      # starts a new batch \u2014 waits for the previous one to finish
 PARALLEL_SEP = "and"    # joins the current batch \u2014 runs alongside whatever's already in it
-RESERVED_NAMES = {"config", "ai-config", "ai-clear", "ai-drop-from", "playnite-config", "spotify-config", "spotify-login", "memory-config", "everything-config", "tools-list", "tool-run", "tool-preview", "tool-safety-set", "conv-new", "conv-list", "conv-show", "conv-switch", "conv-delete", "organize-json", CHAIN_SEP, PARALLEL_SEP, "-h", "--help"}
+RESERVED_NAMES = {"config", "ai-config", "ai-clear", "ai-drop-from", "playnite-config", "spotify-config", "spotify-login", "memory-config", "everything-config", "tools-list", "tool-run", "tool-preview", "tool-safety-set", "conv-new", "conv-list", "conv-show", "conv-switch", "conv-delete", "organize-json", "mode", "mode-set", CHAIN_SEP, PARALLEL_SEP, "-h", "--help"}
 
 OUT = Palette(sys.stdout)  # actual command output: the banner, the command list
 ERR = Palette(sys.stderr)  # jarvis's own status/trace/error messages
@@ -159,7 +159,7 @@ def print_help(commands, file=sys.stdout):
         print(f"  {p.GREEN}{name.ljust(width)}{p.RESET} {spec.get('description', '')}", file=file)
     print(f"\nRun '{p.CYAN}jarvis <command> --help{p.RESET}' for a command's options.", file=file)
     print(f"Chain several with '{p.CYAN}jarvis cmd1 then cmd2{p.RESET}'.", file=file)
-    print(f"Built-in: {p.CYAN}config{p.RESET}, {p.CYAN}ai-config{p.RESET}, {p.CYAN}ai-clear{p.RESET}, {p.CYAN}tools-list{p.RESET} (prints every AI tool as JSON — not an ask), {p.CYAN}tool-run{p.RESET} (runs one AI tool directly), {p.CYAN}conv-new{p.RESET}/{p.CYAN}conv-list{p.RESET}/{p.CYAN}conv-show{p.RESET}/{p.CYAN}conv-switch{p.RESET}/{p.CYAN}conv-delete{p.RESET} (manage conversations).", file=file)
+    print(f"Built-in: {p.CYAN}config{p.RESET}, {p.CYAN}ai-config{p.RESET}, {p.CYAN}ai-clear{p.RESET}, {p.CYAN}tools-list{p.RESET} (prints every AI tool as JSON — not an ask), {p.CYAN}tool-run{p.RESET} (runs one AI tool directly), {p.CYAN}conv-new{p.RESET}/{p.CYAN}conv-list{p.RESET}/{p.CYAN}conv-show{p.RESET}/{p.CYAN}conv-switch{p.RESET}/{p.CYAN}conv-delete{p.RESET} (manage conversations), {p.CYAN}mode{p.RESET}/{p.CYAN}mode-set <full|compact|ultra>{p.RESET} (read/set the prompt's token-usage capacity — 400%/100%/50%).", file=file)
     print(f"Edit {p.DIM}{CONFIG_FILE}{p.RESET} to add or change commands.", file=file)
 
 
@@ -651,6 +651,33 @@ def main():
         print(ai_config.AI_CONFIG_FILE)
         return
 
+    if argv[0] == "mode":
+        from . import ai_client
+        current = ai_client.current_mode()
+        print(json.dumps({
+            "mode": current,
+            "label": ai_client.MODE_LABELS.get(current, current),
+            "options": ai_client.mode_options(),
+        }, indent=2))
+        return
+
+    if argv[0] == "mode-set":
+        from . import ai_client
+        requested = argv[1].strip().lower() if len(argv) > 1 and argv[1].strip() else ""
+        if requested not in ai_client.PROMPT_MODES:
+            print(json.dumps({
+                "error": f"usage: jarvis mode-set <{'|'.join(ai_client.PROMPT_MODES)}>",
+                "options": ai_client.mode_options(),
+            }))
+            sys.exit(1)
+        new_mode = ai_client.set_mode(requested)
+        print(json.dumps({
+            "mode": new_mode,
+            "label": ai_client.MODE_LABELS[new_mode],
+            "options": ai_client.mode_options(),
+        }, indent=2))
+        return
+
     if argv[0] == "ai-clear":
         from . import conversations
         conv_id = os.environ.get("JARVIS_CONVERSATION_ID")
@@ -760,18 +787,28 @@ def main():
         return
 
     if argv[0] == "tool-run":
-        # jarvis tool-run <name> [json-arguments]
+        # jarvis tool-run <name> [json-arguments] [mode]
         # Runs one AI tool directly (bypassing the model) and prints its
         # JSON result. Powers the web UI's debug dashboard so a person can
         # invoke any tool the AI can call and see exactly what comes back.
+        #
+        # The optional trailing `mode` is the debug panel's own local-only
+        # capacity override (see its mode switch) — translated to a
+        # tool_result_verbosity and applied via tool_result_shaping.
+        # shape_result(), the exact same trimming a normal ask() already
+        # applies to every tool result at that mode. Anything not one of
+        # the real PROMPT_MODES (including omitted/blank) means "no
+        # override", so the result comes back untouched, same as before
+        # this argument existed.
         from . import tools as system_tools
 
         if len(argv) < 2 or not argv[1].strip():
-            print(json.dumps({"error": "usage: jarvis tool-run <name> [json-arguments]"}))
+            print(json.dumps({"error": "usage: jarvis tool-run <name> [json-arguments] [mode]"}))
             sys.exit(1)
 
         tool_name = argv[1].strip()
         raw_args = argv[2] if len(argv) > 2 else "{}"
+        raw_mode = argv[3].strip() if len(argv) > 3 and argv[3].strip() else None
         try:
             arguments = json.loads(raw_args) if raw_args.strip() else {}
         except json.JSONDecodeError as e:
@@ -781,26 +818,42 @@ def main():
             print(json.dumps({"error": "arguments must be a JSON object"}))
             sys.exit(1)
 
-        result = system_tools.execute_tool(tool_name, arguments)
+        verbosity = None
+        if raw_mode:
+            from . import ai_client
+            if raw_mode in ai_client.PROMPT_MODES:
+                verbosity = ai_client._MODE_BY_NAME[raw_mode].get("tool_result_verbosity")
+
+        result = system_tools.execute_tool(tool_name, arguments, verbosity=verbosity)
         print(json.dumps(result, indent=2, default=str))
         return
 
     if argv[0] == "tool-preview":
-        # jarvis tool-preview <name> [json-arguments]
+        # jarvis tool-preview <name> [json-arguments] [mode]
         # Reports whether a tool call would be gated by a confirmation
         # prompt and (if AI review is on for it) a risk note from a second
         # configured provider — without actually running the tool. Powers
         # the web UI's debug dashboard: the RUN button calls this first so
         # a person sees exactly what they're about to approve before
         # anything real happens.
+        #
+        # The optional trailing `mode` is a one-off, local-only override
+        # (see the debug panel's own mode switch in the web UI) for how
+        # long/detailed that risk note is — it's read once for this single
+        # risk_review() call and never touches defaults.prompt_mode or
+        # anything persisted, so it can't affect the real global capacity
+        # mode "jarvis mode-set" controls. Anything other than one of the
+        # real PROMPT_MODES (including omitted/blank) is treated as "no
+        # override", same as before this argument existed.
         from . import tool_safety
 
         if len(argv) < 2 or not argv[1].strip():
-            print(json.dumps({"error": "usage: jarvis tool-preview <name> [json-arguments]"}))
+            print(json.dumps({"error": "usage: jarvis tool-preview <name> [json-arguments] [mode]"}))
             sys.exit(1)
 
         tool_name = argv[1].strip()
         raw_args = argv[2] if len(argv) > 2 else "{}"
+        raw_mode = argv[3].strip() if len(argv) > 3 and argv[3].strip() else None
         try:
             arguments = json.loads(raw_args) if raw_args.strip() else {}
         except json.JSONDecodeError as e:
@@ -815,7 +868,8 @@ def main():
         if flags["ai_review"]:
             try:
                 from . import ai_client, ai_config
-                risk_note = ai_client.risk_review(tool_name, arguments, ai_config.load_ai_config())
+                mode = raw_mode if raw_mode in ai_client.PROMPT_MODES else None
+                risk_note = ai_client.risk_review(tool_name, arguments, ai_config.load_ai_config(), mode=mode)
             except Exception:
                 risk_note = None
 

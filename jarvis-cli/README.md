@@ -517,6 +517,37 @@ refers to itself and to you; `persona.extra_instructions` is free text
 appended to its system prompt verbatim — house rules, tone tweaks,
 whatever you want it to always keep in mind.
 
+### Prompt capacity modes
+
+Every ask sends a system prompt (commands, history, tool schemas, memory,
+persona blurb, ...); how much of that gets included is controlled by a
+"capacity" mode, since a smaller prompt means fewer tokens per ask at the
+cost of some context/answer richness. Three modes ship today:
+
+| Mode | Label | What it trims |
+| --- | --- | --- |
+| `full` | 400% Capacity | Fullest context and richest answers. Most tokens per ask. |
+| `compact` | 100% Capacity | The balanced default — trimmed history/commands, still full tool schemas. |
+| `ultra` | 50% Capacity | Ultra compact — name-only tool schemas plus every other budget cut to the minimum that still works. Cheapest mode; a tool needing arguments may cost one extra round trip the first time it's called. |
+
+Three equivalent ways to read/change it:
+
+- CLI: `jarvis mode` (prints the current mode + every option as JSON),
+  `jarvis mode-set <full|compact|ultra>`.
+- Web console: the capacity switch button in the top bar — click cycles
+  to the next mode and persists it, same as `mode-set`.
+- Ask Jarvis directly ("go more compact", "save tokens", "give me fuller
+  answers") — it has `get_capacity_mode`/`set_capacity_mode` tools that do
+  exactly what the CLI/web switch do. A mode change always takes effect
+  starting with your *next* message, never retroactively on the reply
+  that changed it.
+
+All three are backed by one table, `ai_client.PROMPT_MODE_DEFS` — nothing
+above hardcodes mode names, so adding a fourth mode later is a single new
+entry in that list (name, label, summary, and the same prompt-size knobs
+the other three define); the CLI commands, the web switch, and the AI's
+own tools all pick it up automatically.
+
 ### AI-mode notes
 
 - Needs the `requests` and `psutil` packages. If you installed jarvis
