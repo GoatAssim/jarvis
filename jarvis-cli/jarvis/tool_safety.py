@@ -55,6 +55,7 @@ DEFAULT_CONFIRM_REQUIRED = {
     "click",
     "drag",
     "click_on_text",
+    "open_file",
 }
 
 # run_custom_command is the one tool where a second AI opinion is on by

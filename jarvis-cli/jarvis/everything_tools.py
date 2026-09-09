@@ -230,7 +230,9 @@ EVERYTHING_TOOL_SCHEMAS = [
             "A request like 'find a patch file in my downloads folder' should become "
             "in_folder='downloads', query='*patch*' (or 'ext:patch' if they mean the "
             "extension) \u2014 not query='downloads *patch', which would search the whole PC "
-            "for something literally named that."
+            "for something literally named that.\n\n"
+            "Once the user picks (or there's one obvious) result they actually want, use "
+            "present_file on that path rather than just reading the path back to them."
         ),
         "parameters": {
             "type": "object",
@@ -274,14 +276,16 @@ EVERYTHING_TOOL_SCHEMAS = [
     {
         "name": "reveal_in_explorer",
         "compact_description": (
-            "Open Explorer with the given file/folder already selected. Use after "
-            "search_files when the user wants to see a result, not just its path."
+            "Open Explorer with the given file/folder already selected. present_file's "
+            "card already has a Reveal button for this \u2014 call it yourself only if the "
+            "user explicitly asks to reveal a path without wanting the fuller card."
         ),
         "short_description": "Open Explorer with a file/folder selected.",
         "description": (
             "Open Windows File Explorer with the given file or folder already selected/"
-            "highlighted, so the user can see exactly where it lives. Use after search_files "
-            "when the user wants to see a result, not just hear its path."
+            "highlighted, so the user can see exactly where it lives. present_file's card "
+            "already has a Reveal button that calls this for you \u2014 call it directly yourself "
+            "only if the user explicitly asks to reveal a path without wanting the fuller card."
         ),
         "parameters": {
             "type": "object",
@@ -295,13 +299,17 @@ EVERYTHING_TOOL_SCHEMAS = [
         "name": "open_file_location",
         "compact_description": (
             "Open the folder containing the given path in Explorer (nothing pre-selected). "
-            "If path is already a folder, opens it directly."
+            "If path is already a folder, opens it directly. present_file's card already "
+            "has an Open button for this \u2014 call it yourself only if the user explicitly "
+            "asks to open a path without wanting the fuller card."
         ),
         "short_description": "Open the folder containing a path in Explorer.",
         "description": (
             "Open the folder that contains the given path in File Explorer (the folder "
             "window itself, nothing pre-selected). If path is already a folder, opens it "
-            "directly. Use when the user wants to browse around a result, not just spot it."
+            "directly. present_file's card already has an Open button that calls this (for "
+            "folders) or open_file (for files) \u2014 call it directly yourself only if the user "
+            "explicitly asks to open a path without wanting the fuller card."
         ),
         "parameters": {
             "type": "object",
@@ -315,14 +323,17 @@ EVERYTHING_TOOL_SCHEMAS = [
         "name": "open_file",
         "compact_description": (
             "Open a file with its default app (like double-clicking it). Files only — use "
-            "open_file_location or reveal_in_explorer for folders."
+            "open_file_location or reveal_in_explorer for folders. present_file's card "
+            "already has an Open button for this \u2014 call it yourself only if the user "
+            "explicitly asks to open a path without wanting the fuller card."
         ),
         "short_description": "Open a file with its default app (files only).",
         "description": (
             "Open the file itself with its default associated application (like "
             "double-clicking it in Explorer). Files only \u2014 use open_file_location or "
-            "reveal_in_explorer for folders. Use when the user wants to actually open/view/"
-            "launch a result, not just see where it lives."
+            "reveal_in_explorer for folders. present_file's card already has an Open button "
+            "that calls this for you \u2014 call it directly yourself only if the user explicitly "
+            "asks to open a path without wanting the fuller card."
         ),
         "parameters": {
             "type": "object",

@@ -1210,10 +1210,10 @@
   // ===========================================================================
   // Path linkification — turn file/folder paths mentioned in a rendered
   // reply into clickable links that open them, using the same
-  // reveal_in_explorer / open_file_location / open_file tools already
-  // wired up for the debug console's search_files rows (see
-  // debugFileActionButtons above). Web console only, no CLI equivalent —
-  // there's no clickable surface in a terminal.
+  // reveal_in_explorer / open_file_location / open_file tools present_file
+  // (see jarvis-cli/jarvis/present_tools.py) uses under the hood. Web
+  // console only, no CLI equivalent — there's no clickable surface in a
+  // terminal.
   // ===========================================================================
 
   // Matches Windows paths (`C:\Users\...`, `\\server\share\...`) and
@@ -1614,11 +1614,54 @@
         askPromptLine(`$ organize_json  ${parts[2].trim()}`, "tool");
         return;
       }
+      if (parts[1] === "present_file" && parts[6] !== undefined) {
+        const jobId = (parts[2] || "-").trim();
+        const filename = (parts[3] || "-").trim();
+        const name = (parts[4] || "").trim();
+        const ftype = (parts[5] || "file").trim();
+        const sizeBytes = parts[6] && parts[6] !== "-" ? Number(parts[6]) : null;
+        const fullPath = (parts[7] || "").trim();
+        showAskPresentFile({
+          jobId: jobId === "-" ? null : jobId,
+          filename: filename === "-" ? null : filename,
+          name, type: ftype, sizeBytes, path: fullPath,
+        });
+        askPromptLine(`$ present  ${name || fullPath}`, "tool");
+        return;
+      }
     }
     let cls = "sys";
     if (line.includes("\u2717")) cls = "fail";
     else if (line.includes("$")) cls = "tool";
     askPromptLine(line, cls);
+  }
+
+  function formatFileSize(bytes) {
+    if (typeof bytes !== "number" || !isFinite(bytes) || bytes < 0) return "\u2014";
+    if (bytes < 1024) return `${bytes} B`;
+    const units = ["KB", "MB", "GB", "TB"];
+    let value = bytes / 1024;
+    let i = 0;
+    while (value >= 1024 && i < units.length - 1) { value /= 1024; i += 1; }
+    return `${value.toFixed(value >= 10 ? 0 : 1)} ${units[i]}`;
+  }
+
+  // Shared by present_file's chat card — runs reveal_in_explorer /
+  // open_file_location / open_file straight through /api/tools/run, no
+  // model involved, disabling the row's other buttons while it's in flight.
+  function runFileAction(name, path, btn, siblings) {
+    siblings.forEach((b) => { b.disabled = true; });
+    const prevLabel = btn.textContent;
+    btn.textContent = "\u2026";
+    Api.runTool(name, { path })
+      .then((res) => {
+        toast(res.ok !== false && !(res.result && res.result.error) ? "Done." : ((res.result && res.result.error) || res.error || "Failed."));
+      })
+      .catch((e) => toast(e.message || "Failed."))
+      .finally(() => {
+        siblings.forEach((b) => { b.disabled = false; });
+        btn.textContent = prevLabel;
+      });
   }
 
   // Fired when the AI itself calls the organize_json tool (as opposed to
@@ -1740,6 +1783,47 @@
     pushThreadExtra(state.askConversationId, "download", { jobId, filename, title });
     if (!isViewingAskThread()) return;
     renderDownloadBubble(jobId, filename, title);
+  }
+
+  // A present_file call (see jarvis-cli/jarvis/present_tools.py) — a card
+  // with the file/folder's name, type, size and path, plus Open/Reveal
+  // buttons (straight REST calls via runFileAction, no model round-trip)
+  // and, when the tool prepared one, a Download link identical in shape to
+  // showAskDownload's (same job-folder/route, just a different tool made it).
+  function showAskPresentFile(info) {
+    if (!isViewingAskThread()) return;
+    clearAskEmptyHint();
+    const isFolder = info.type === "folder";
+    const icon = isFolder ? "\ud83d\udcc1" : "\ud83d\udcc4";
+
+    const revealBtn = el("button", { class: "btn btn--ghost btn--sm", type: "button" }, "Reveal in Explorer");
+    const openBtn = el("button", { class: "btn btn--ghost btn--sm", type: "button" }, isFolder ? "Open" : "Open file");
+    const actionButtons = [revealBtn, openBtn];
+    revealBtn.addEventListener("click", () => runFileAction("reveal_in_explorer", info.path, revealBtn, actionButtons));
+    openBtn.addEventListener("click", () => runFileAction(isFolder ? "open_file_location" : "open_file", info.path, openBtn, actionButtons));
+
+    const actions = [revealBtn, openBtn];
+    if (info.jobId && info.filename) {
+      const url = `/api/downloads/${encodeURIComponent(info.jobId)}/${encodeURIComponent(info.filename)}`;
+      actions.push(el("a", { href: url, download: info.filename, class: "ask-dl-link" }, "Download"));
+    }
+
+    const msg = el("div", { class: "ask-msg ask-msg--jarvis ask-msg--media" }, [
+      el("div", { class: "ask-msg__role" }, "Jarvis"),
+      el("div", { class: "ask-msg__bubble ask-msg__bubble--media" }, [
+        el("div", { class: "ask-file-card" }, [
+          el("div", { class: "ask-file-card__icon" }, icon),
+          el("div", { class: "ask-file-card__body" }, [
+            el("div", { class: "ask-file-card__name" }, info.name || info.path || "(unnamed)"),
+            el("div", { class: "ask-file-card__meta" }, `${isFolder ? "Folder" : "File"} \u00b7 ${formatFileSize(info.sizeBytes)}`),
+            el("div", { class: "ask-file-card__path" }, info.path || ""),
+            el("div", { class: "ask-file-card__actions" }, actions),
+          ]),
+        ]),
+      ]),
+    ]);
+    insertIntoAskThread(msg);
+    askThreadScrollToEnd();
   }
 
   function stripAnsi(s) {
@@ -2717,65 +2801,6 @@
     return el("span", { class: "debug-kv__val" }, String(value));
   }
 
-  // search_files results get a "Reveal in Explorer" / "Open location" button
-  // per row (web console only — the CLI just prints paths, and clicking a
-  // button there makes no sense), plus an "Open file" button for files only
-  // (opening a folder itself isn't a meaningful action there — use "Open
-  // location" instead). All three call /api/tools/run directly against
-  // reveal_in_explorer / open_file_location / open_file, no model involved.
-  function debugFileActionButtons(path, isFolder) {
-    if (!path) return null;
-    const revealBtn = el("button", { class: "btn btn--ghost btn--sm", type: "button" }, "Reveal in Explorer");
-    const openBtn = el("button", { class: "btn btn--ghost btn--sm", type: "button" }, "Open location");
-    const buttons = [revealBtn, openBtn];
-    const openFileBtn = isFolder
-      ? null
-      : el("button", { class: "btn btn--ghost btn--sm", type: "button" }, "Open file");
-    if (openFileBtn) buttons.push(openFileBtn);
-    const run = async (name, btn) => {
-      buttons.forEach((b) => { b.disabled = true; });
-      const prevLabel = btn.textContent;
-      btn.textContent = "\u2026";
-      try {
-        const res = await Api.runTool(name, { path });
-        toast(res.ok !== false && !(res.result && res.result.error) ? "Done." : ((res.result && res.result.error) || res.error || "Failed."));
-      } catch (e) {
-        toast(e.message || "Failed.");
-      } finally {
-        buttons.forEach((b) => { b.disabled = false; });
-        btn.textContent = prevLabel;
-      }
-    };
-    revealBtn.addEventListener("click", () => run("reveal_in_explorer", revealBtn));
-    openBtn.addEventListener("click", () => run("open_file_location", openBtn));
-    if (openFileBtn) openFileBtn.addEventListener("click", () => run("open_file", openFileBtn));
-    return el("div", { class: "debug-file-actions" }, buttons);
-  }
-
-  // Custom organized view for search_files: same key/value tree for the
-  // top-level fields (query, count, ...), but each row in `results` gets
-  // the reveal/open buttons above instead of a plain nested dump.
-  function debugRenderSearchFilesResponse(payload) {
-    const wrap = el("div", { class: "debug-kv" });
-    for (const k of Object.keys(payload)) {
-      if (k === "results") continue;
-      wrap.appendChild(el("div", { class: "debug-kv__row" }, [
-        el("span", { class: "debug-kv__key" }, `${k}:`),
-        el("span", { class: "debug-kv__val" }, String(payload[k])),
-      ]));
-    }
-    (payload.results || []).forEach((item, i) => {
-      wrap.appendChild(el("div", { class: "debug-file-row" }, [
-        el("div", { class: "debug-kv__row" }, [
-          el("span", { class: "debug-kv__key" }, `[${i}]`),
-          debugRenderOrganized(item, 1),
-        ]),
-        debugFileActionButtons(item && item.path, item && item.is_folder),
-      ]));
-    });
-    return wrap;
-  }
-
   function renderDebugResponse() {
     debugResponse.innerHTML = "";
     debugResponse.classList.remove("is-error");
@@ -2796,8 +2821,6 @@
     const payload = last.result;
     if (state.debugResponseMode === "raw") {
       debugResponse.appendChild(el("pre", {}, JSON.stringify(payload, null, 2)));
-    } else if (state.debugSelected === "search_files" && payload && Array.isArray(payload.results)) {
-      debugResponse.appendChild(debugRenderSearchFilesResponse(payload));
     } else {
       debugResponse.appendChild(debugRenderOrganized(payload));
     }
