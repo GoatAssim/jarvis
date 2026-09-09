@@ -901,6 +901,40 @@ input.is-invalid{ border-color: var(--red) !important; }
 .toast.is-info{ border-color: var(--accent); box-shadow: 0 0 24px var(--accent-glow); }
 
 /* =========================================================================
+   Run-confirm popup (direct command run, gated by its own confirm_required/
+   ai_review flags — see server.js's "confirm-request" message and cli.py's
+   confirm_direct_command). Bottom-left, separate from the top-center toast
+   and from the Ask-thread confirm bubble, since a directly-run command has
+   no chat thread to render into.
+   ========================================================================= */
+
+.run-confirm-popup{
+  position: fixed; left: 18px; bottom: 18px;
+  z-index: 210;
+  width: min(420px, calc(100vw - 36px));
+  background: var(--bg-raised);
+  border: 1px solid var(--accent);
+  color: var(--text);
+  padding: 14px 16px;
+  border-radius: 4px;
+  font-size: 13px;
+  box-shadow: 0 0 28px var(--accent-glow);
+}
+.run-confirm-popup__title{ font-weight: 600; margin-bottom: 8px; }
+.run-confirm-popup__tool{ color: var(--accent); }
+.run-confirm-popup__args{
+  background: var(--bg); border: 1px solid var(--border);
+  border-radius: 3px; padding: 8px 10px; margin: 6px 0 10px;
+  font-family: var(--mono, monospace); font-size: 12px;
+  white-space: pre-wrap; word-break: break-word; max-height: 160px; overflow: auto;
+}
+.run-confirm-popup__risk{ margin-bottom: 10px; }
+.run-confirm-popup__risk-label{ font-weight: 600; font-size: 12px; opacity: 0.85; }
+.run-confirm-popup__risk-note{ font-size: 12.5px; opacity: 0.9; margin-top: 2px; }
+.run-confirm-popup__flags{ font-size: 12px; opacity: 0.75; margin-bottom: 10px; }
+.run-confirm-popup__actions{ display: flex; gap: 10px; justify-content: flex-end; }
+
+/* =========================================================================
    Ask Jarvis
    ========================================================================= */
 
