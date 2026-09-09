@@ -1090,6 +1090,125 @@
   }
 
   // ===========================================================================
+  // Clickable file/folder paths — whenever Jarvis's reply mentions a
+  // Windows path (`C:\Users\...`) or a UNC share (`\\server\share\...`),
+  // turn it into a clickable span that opens it on the desktop. No new
+  // tool: this reuses the exact same reveal_in_explorer/open_file_location/
+  // open_file tools the debug dashboard's search_files result rows already
+  // call (see debugFileActionButtons above) via the same /api/tools/run.
+  // Web-only by design (a CLI has no "click" to attach to).
+  // ===========================================================================
+
+  // No attempt at spaces-in-paths here — freeform prose has no reliable
+  // delimiter for where a spaced path ends, so this only catches
+  // space-free paths (the common case, and the only case marked.js would
+  // have left un-mangled anyway inside inline `code`).
+  const WIN_PATH_RE = /[A-Za-z]:[\\/][^\s"'<>|?*\r\n]+/g;
+  const UNC_PATH_RE = /\\\\[^\s"'<>|?*\r\n]+\\[^\s"'<>|?*\r\n]+/g;
+  const TRAILING_PUNCT_RE = /[.,;:!?"')\]}]+$/;
+
+  function trimTrailingPunct(path) {
+    // Strips sentence punctuation that isn't part of the path itself
+    // (e.g. "...in C:\Users\bob\notes.txt." — the final period). Only
+    // strips while the path still looks intact (still contains a
+    // separator) so a lone trailing "." on a real extension-less
+    // filename component is left alone in the rare ambiguous case.
+    let out = path;
+    while (TRAILING_PUNCT_RE.test(out) && /[\\/]/.test(out.slice(0, -1))) {
+      out = out.replace(TRAILING_PUNCT_RE, (m) => m.slice(0, -1) || "");
+      if (out === path) break;
+      path = out;
+    }
+    return out;
+  }
+
+  // Heuristic only — the client has no filesystem access. A trailing
+  // separator or an extension-less last segment reads as a folder; a dot
+  // in the last segment (not at position 0, so ".gitignore"-style names
+  // don't confuse it) reads as a file. openPathLink() below recovers from
+  // a wrong guess automatically.
+  function looksLikeFile(path) {
+    const normalized = path.replace(/\\/g, "/").replace(/\/+$/, "");
+    if (normalized !== path.replace(/\\/g, "/")) return false; // had a trailing slash
+    const last = normalized.slice(normalized.lastIndexOf("/") + 1);
+    const dot = last.lastIndexOf(".");
+    return dot > 0;
+  }
+
+  async function openPathLink(path, linkEl) {
+    if (!path || (linkEl && linkEl.dataset.opening === "1")) return;
+    if (linkEl) { linkEl.dataset.opening = "1"; linkEl.classList.add("is-busy"); }
+    const primary = looksLikeFile(path) ? "open_file" : "open_file_location";
+    try {
+      let res = await Api.runTool(primary, { path });
+      let result = res && res.result;
+      if (result && result.error && primary === "open_file" && /is a folder/i.test(result.error)) {
+        // Heuristic guessed "file" but it's actually a folder — retry the
+        // right way instead of surfacing a confusing error.
+        res = await Api.runTool("open_file_location", { path });
+        result = res && res.result;
+      }
+      if (result && result.error) {
+        toast(result.error);
+      } else if (res && res.error) {
+        toast(res.error);
+      }
+    } catch (e) {
+      toast(e.message || "Couldn't open that.");
+    } finally {
+      if (linkEl) { linkEl.dataset.opening = ""; linkEl.classList.remove("is-busy"); }
+    }
+  }
+
+  // Walks every text node under `root` (skipping anything already inside a
+  // link or a path-link, so re-running this on already-linkified content
+  // is a safe no-op) and replaces matched paths with clickable spans.
+  function linkifyPaths(root) {
+    if (!root) return;
+    const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, {
+      acceptNode(node) {
+        let p = node.parentElement;
+        while (p && p !== root) {
+          if (p.tagName === "A" || p.classList?.contains("path-link")) return NodeFilter.FILTER_REJECT;
+          p = p.parentElement;
+        }
+        return NodeFilter.FILTER_ACCEPT;
+      },
+    });
+    const targets = [];
+    let node;
+    while ((node = walker.nextNode())) {
+      if (WIN_PATH_RE.test(node.nodeValue) || UNC_PATH_RE.test(node.nodeValue)) targets.push(node);
+      WIN_PATH_RE.lastIndex = 0;
+      UNC_PATH_RE.lastIndex = 0;
+    }
+    for (const textNode of targets) {
+      const text = textNode.nodeValue;
+      const combined = new RegExp(`${WIN_PATH_RE.source}|${UNC_PATH_RE.source}`, "g");
+      const frag = document.createDocumentFragment();
+      let last = 0;
+      let m;
+      while ((m = combined.exec(text))) {
+        const raw = trimTrailingPunct(m[0]);
+        if (!raw) continue;
+        frag.appendChild(document.createTextNode(text.slice(last, m.index)));
+        const link = el("span", {
+          class: "path-link",
+          role: "button",
+          tabindex: "0",
+          title: `Open ${raw}`,
+          onclick: () => openPathLink(raw, link),
+          onkeydown: (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); openPathLink(raw, link); } },
+        }, raw);
+        frag.appendChild(link);
+        last = m.index + raw.length;
+      }
+      frag.appendChild(document.createTextNode(text.slice(last)));
+      textNode.parentNode.replaceChild(frag, textNode);
+    }
+  }
+
+  // ===========================================================================
   // Ask Jarvis
   // ===========================================================================
 
@@ -1583,6 +1702,7 @@
     renderAskTrace(dump);
     const bubble = qs(".ask-msg__bubble", state.askPendingBubble);
     bubble.innerHTML = renderMarkdown(reply.join("\n"));
+    linkifyPaths(bubble);
   }
 
   function appendAskReplyLine(line) {
