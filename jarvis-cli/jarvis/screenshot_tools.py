@@ -141,6 +141,25 @@ def _capture_mss(path):
         return {"width": shot.width, "height": shot.height}, None
 
 
+def capture_to(path):
+    """Capture the desktop straight to `path` (any writable location, not
+    necessarily SCREENSHOT_DIR). Returns (meta, err) exactly like the
+    internal _capture_* helpers — meta is {"width":..,"height":..} on
+    success, err is a short string on failure. Shared by tool_take_screenshot
+    (which persists + notifies the UI) and anything that just needs pixels
+    to look at internally, e.g. ocr_tools.click_on_text, which captures to a
+    temp path, reads it, and deletes it — never persisting or emitting it.
+    """
+    meta, err = (None, None)
+    if sys.platform == "win32":
+        meta, err = _capture_windows(path)
+    if err or meta is None:
+        meta, err = _capture_mss(path)
+    if err or not Path(path).exists():
+        return None, err or "Screenshot failed."
+    return meta, None
+
+
 def tool_take_screenshot(args=None):
     args = args or {}
     ensure_dir()
@@ -148,12 +167,8 @@ def tool_take_screenshot(args=None):
     fid = "ss_" + stamp + "_" + secrets.token_hex(3)
     path = SCREENSHOT_DIR / f"{fid}.png"
 
-    meta, err = (None, None)
-    if sys.platform == "win32":
-        meta, err = _capture_windows(path)
+    meta, err = capture_to(path)
     if err or meta is None:
-        meta, err = _capture_mss(path)
-    if err or not path.exists():
         return {"ok": False, "error": err or "Screenshot failed."}
 
     _prune()
