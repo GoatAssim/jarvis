@@ -4,6 +4,8 @@ Only predefined commands from commands.json — never arbitrary shell.
 Returns structured needs_clarification responses instead of guessing.
 """
 
+import json
+
 from . import commands_config
 
 
@@ -378,6 +380,29 @@ def tool_search_commands(args):
     return result
 
 
+def _coerce_run(run):
+    """The 'run' tool argument is always a JSON string (schema type
+    "string", for cross-provider compatibility — Gemini in particular
+    can't reliably be given a type-union/array-of-objects field here).
+    A plain shell command is just passed through as-is. A JSON array
+    (steps, for multi-step/conditional commands) arrives as that array
+    *encoded* as a string, e.g. '[{"run": "...", "if": {...}}, ...]' —
+    decode it back into a real list so commands.json stores actual step
+    objects, not a stringified array. If it doesn't parse as JSON, or
+    parses to something that isn't a list, treat it as a literal single
+    shell command string (covers the common case unambiguously)."""
+    if not isinstance(run, str):
+        return run
+    stripped = run.strip()
+    if not stripped.startswith("["):
+        return run
+    try:
+        parsed = json.loads(stripped)
+    except (json.JSONDecodeError, ValueError):
+        return run
+    return parsed if isinstance(parsed, list) else run
+
+
 def tool_create_command(args):
     args = args or {}
     name = args.get("name")
@@ -388,7 +413,7 @@ def tool_create_command(args):
 
     spec = {
         "description": args.get("description") or "",
-        "run": args.get("run"),
+        "run": _coerce_run(args.get("run")),
         "vars": args.get("vars") or {},
     }
     if args.get("confirm_required") is not None:
@@ -422,7 +447,7 @@ def tool_update_command(args):
     if "description" in args and args["description"] is not None:
         current["description"] = args["description"]
     if "run" in args and args["run"] is not None:
-        current["run"] = args["run"]
+        current["run"] = _coerce_run(args["run"])
     if "vars" in args and args["vars"] is not None:
         current["vars"] = args["vars"]
     if "confirm_required" in args and args["confirm_required"] is not None:
@@ -461,6 +486,46 @@ _VARS_OBJ = {
     "type": "object",
     "description": 'Variable values keyed by name, e.g. {"env": "prod", "name": "World"}.',
 }
+
+# Kept as a plain "string" field (not a nested array/object schema) so this
+# works identically across every provider adapter — some can't cleanly
+# express "string OR array-of-objects" as a JSON-schema union. For a single
+# shell command, just pass the command text. For multiple steps and/or
+# conditionals, pass a JSON-ARRAY-ENCODED STRING (i.e. json.dumps(steps)) —
+# it's decoded back into real step objects before saving.
+_RUN_FIELD_DESCRIPTION = (
+    "The command(s) to run. Two forms:\n"
+    "1) Single shell command: just the command text, e.g. \"echo hi\".\n"
+    "2) Multiple steps and/or conditionals: a JSON array, ENCODED AS A STRING "
+    "(this field is always type string — stringify the array), of step "
+    "strings/objects, run in order. Each step is either a plain shell string, "
+    "or an object:\n"
+    "  {\n"
+    "    \"run\": \"<shell command, required>\",\n"
+    "    \"name\": \"<optional label shown when this step runs>\",\n"
+    "    \"if\": <optional condition>,\n"
+    "    \"unless\": <optional condition>,\n"
+    "    \"parallel\": <optional bool, default false>,\n"
+    "    \"showCommand\": <optional bool, default true>,\n"
+    "    \"continueOnError\": <optional bool, default false>\n"
+    "  }\n"
+    "'if' runs the step only when the condition is true; 'unless' runs it only "
+    "when the condition is false. A condition is either an object of "
+    "exact-match checks against this command's own 'vars' — ANDed together, "
+    "e.g. {\"env\": \"prod\", \"region\": [\"us\", \"eu\"]} means "
+    "env == 'prod' AND region is 'us' or 'eu' — or a string expression using "
+    "==, !=, <, >, <=, >=, and, or, not, e.g. \"env == 'prod' and branch != "
+    "'main'\". Every variable a condition refers to must already be declared "
+    "in this command's own 'vars'. 'parallel': true starts this step "
+    "alongside the step(s) immediately before it instead of waiting for them "
+    "(meaningless on the very first step). 'showCommand': false hides the "
+    "normal trace line before the step runs. 'continueOnError': true lets the "
+    "command keep going even if this step exits non-zero.\n"
+    "Example (stringify this whole array before sending): "
+    "[{\"run\": \"echo starting\"}, {\"run\": \"deploy.sh --env prod\", "
+    "\"name\": \"deploy\", \"if\": {\"env\": \"prod\"}}, "
+    "{\"run\": \"notify.sh\", \"parallel\": true, \"continueOnError\": true}]"
+)
 
 COMMAND_TOOL_SCHEMAS = [
     {
@@ -541,7 +606,7 @@ COMMAND_TOOL_SCHEMAS = [
                 "description": {"type": "string"},
                 "run": {
                     "type": "string",
-                    "description": "Shell command string, or JSON array of step strings/objects.",
+                    "description": _RUN_FIELD_DESCRIPTION,
                 },
                 "vars": {
                     "type": "object",
@@ -573,7 +638,7 @@ COMMAND_TOOL_SCHEMAS = [
                 "description": {"type": "string"},
                 "run": {
                     "type": "string",
-                    "description": "New run script (string or JSON array of steps).",
+                    "description": _RUN_FIELD_DESCRIPTION,
                 },
                 "vars": {"type": "object"},
                 "confirm_required": {
