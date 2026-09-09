@@ -811,9 +811,20 @@ def _make_tool_executor(on_tool_call, schemas=None, on_confirm_request=None,
         # command_tools.command_call_requires_confirmation) so "warn on
         # deploy-prod but not on list-files" works even though both go
         # through the same run_command tool.
+        # A command can be flagged ai_review=True with confirm_required
+        # left False (the user wants a heads-up note, not a hard gate).
+        # Previously this whole block — including the ai_review check
+        # inside it — only ran when confirm was independently required,
+        # so an ai_review-only command silently ran with no note shown
+        # anywhere (chat bubble or debug popup) whenever the tool-level
+        # confirm_required also happened to be off. OR'ing ai_review in
+        # here means "needs review" now reliably routes through the same
+        # notification channel as "needs confirmation".
         confirm_meta = None
         if (tool_safety.requires_confirmation(name)
-                or command_tools.command_call_requires_confirmation(name, arguments)):
+                or command_tools.command_call_requires_confirmation(name, arguments)
+                or tool_safety.requires_ai_review(name)
+                or command_tools.command_call_requires_ai_review(name, arguments)):
             if on_confirm_request is None:
                 result = {
                     "ok": False, "cancelled": True,
