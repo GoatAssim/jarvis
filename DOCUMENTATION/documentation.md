@@ -229,3 +229,64 @@ Known touchpoints:
 **Verified**: all Python files pass `py_compile`; `server.js`/`app.js` pass `node --check`; CLI smoke-tested end-to-end (hello runs, tool-preview/tool-safety-set work, `tool_run_command`/`command_call_requires_confirmation`/`command_call_requires_ai_review` all exercised programmatically against a freshly created flagged command); patch verified with `git apply --check` against your original zip.
 
 **Never verified**: an actual browser rendering the popup, a real end-to-end websocket round trip against a live AI provider, or the debug dashboard's live toggle UX — sandbox has no browser.
+---
+
+## 8. This session's changes — three bugs fixed, cumulative across `jarvis-fix2.patch` (backend) and `jarvis-fix3-json-ui.patch` (frontend)
+
+*(compiled the same way as §7 — reproduced/verified where stated, otherwise reasoned from the code actually read this session)*
+
+### 8.1 Bug: debug dashboard says "Tool run failed" even though the command actually ran
+
+**Symptom reported:** running a saved command with `confirm_required`/`ai_review` set, through the Debug panel, executes it (real side effect happens) but the panel reports failure.
+
+**Root cause, confirmed by reproduction:** `jarvis tool-run` (the subcommand `/api/tools/run` shells out to) prints its JSON result as the **last** line of stdout, but a command's steps run via `subprocess.Popen(cmd, shell=True)` in `cli.py`'s `_run_batch` with **no stdout/stderr redirection** — the child inherits the parent process's real fd 1 directly. Anything the command itself prints (e.g. `echo hi`, any real script output) lands on that same stdout stream *ahead of* the JSON. `server.js`'s `/api/tools/run` handler does `JSON.parse(result.stdout)` on the entire captured stream; the mixed content isn't valid JSON, the parse throws, and it falls through to `res.status(500).json({error: ... "Tool run failed."})` — despite the command having already run to completion.
+
+This is why it only ever showed up on the "interesting" (and therefore flagged) commands: the debug panel's usual no-op test tools (`get_datetime`, `battery`, etc.) print nothing, so their stdout was already pure JSON by accident.
+
+**Fix (`cli.py`, `tool-run` handler):** before calling `system_tools.execute_tool(...)`, swap the real fd 1 to `/dev/null` at the OS level (`os.dup2`), restore it immediately after, then print the JSON. Python's `contextlib.redirect_stdout` was **not** sufficient here — it only redirects Python-level writes to `sys.stdout`, not a subprocess's inherited OS file descriptor. Verified locally: previously `jarvis tool-run run_command '{"name":"hello"}'` printed `hi-there\n{...json...}` (two lines, unparseable); after the fix it prints only the JSON, with the command's own output now landing on stderr instead of being lost.
+
+**Scope check:** only the `tool-run` subcommand's stdout handling changed. The normal CLI (`jarvis <command>`) and the websocket `"run"`/`"ask"` streaming flows (`server.js`'s `spawnAndStream`) still inherit stdout/stderr normally and stream it live to the browser console — that behavior is unchanged and still correct there, since those flows are meant to show raw output, unlike `tool-run`'s single-JSON-object contract.
+
+### 8.2 Bug: a command's `ai_review` note doesn't show up anywhere — not the debug popup, not the direct-run popup, not the chat confirm bubble
+
+**Symptom reported:** a saved command flagged for AI review never produces a visible risk note in any of the three confirmation surfaces.
+
+**Root cause:** in three separate places, the AI-review check was nested *inside* the confirm-required check, instead of being its own independent trigger — so whenever `confirm_required` (tool-level and per-command combined) was `False`, the `ai_review` check never even ran, no matter what the command's own `ai_review` flag said:
+
+1. **`cli.py`'s `tool-preview` subcommand** (powers the debug dashboard's pre-flight check) only ever read `tool_safety.get_flags(tool_name)` — the **tool-level** flags for `run_command`/`run_chain` themselves. It never called `command_tools.command_call_requires_confirmation`/`command_call_requires_ai_review` to check the **specific saved command's own** flags, the way `ai_client._make_tool_executor` already did for the real chat path. So the debug popup could never show a note for a command whose only safety setting was its own `ai_review=True`.
+2. **`cli.py`'s `confirm_direct_command`** (gates a human running a saved command directly — clicking it in the web command list, Path B in §4 above) returned `True` immediately with **no prompt at all** for any command with `ai_review=True` but `confirm_required=False`, since it only ever checked `command_tools.command_requires_confirmation(name)`.
+3. **`ai_client.py`'s `_make_tool_executor`** (the real AI chat path, Path A in §4) wrapped its entire confirm-gate block — including the `ai_review` check inside it — behind `if (tool_safety.requires_confirmation(name) or command_tools.command_call_requires_confirmation(name, arguments))`. If both the `run_command` tool's own tool-level `confirm_required` and the specific command's own `confirm_required` were ever `False` (e.g. someone had toggled the tool-level flag off in the debug dashboard), the `ai_review` check inside the block was unreachable — the call would just silently run with no note and no confirmation, even with the command's `ai_review` flag on.
+
+**Fix:** all three now gate on `confirm_required OR ai_review`, checking both tool-level and per-command flags:
+- `tool-preview` now computes `effective_confirm_required`/`effective_ai_review` by OR-ing `tool_safety.get_flags` with `command_tools.command_call_requires_confirmation`/`command_call_requires_ai_review`, calls `risk_review` when review is needed (expanding `run_command`/`run_chain` via `resolved_run_for_review` first, same as the chat path does), and attaches `command_run` (always, for `run_command`/`run_chain`) and `command_flags` (for `create_command`/`update_command`) — bringing it to full parity with what the chat path already showed.
+- `confirm_direct_command` now checks `command_tools.command_requires_confirmation(name) OR command_tools.command_requires_ai_review(name)` before returning early.
+- `ai_client._make_tool_executor`'s gate condition now also OR's in `tool_safety.requires_ai_review(name)` and `command_tools.command_call_requires_ai_review(name, arguments)`.
+
+**Behavioral note:** an ai_review-only command (no `confirm_required`) now goes through the same Yes/No gate as a confirm-required one, in all three surfaces — it didn't have any other mechanism to show a note without going through *some* confirm step, so this reuses the existing "are you sure" UI rather than inventing a separate silent-notification channel. If `on_confirm_request` is unavailable in a given context, this now fails closed (refuses to run unconfirmed) for ai_review-only commands too, consistent with the existing "never silently run something flagged" policy for confirm-required calls.
+
+**Verified by reproduction:** a command with only `ai_review: true` set now correctly reports `"ai_review": true` from `tool-preview` (previously reported `false` unless the tool-level default happened to cover it), and correctly triggers the `JARVIS_CONFIRM_REQUEST` marker from `confirm_direct_command` when run directly (previously ran with no prompt at all).
+
+**Scope check:** neither 8.1 nor 8.2 touches `conversations.py` or any `conversations.*` call site — confirmed by grepping every such call in both changed files. Persistent-conversation behavior (§6B) is unaffected.
+
+### 8.3 Frontend: JSON in confirmation prompts hard to read
+
+**Symptom reported:** the arguments and resolved "Command:" content shown in the confirmation prompts (chat confirm bubble, direct-run popup, debug dashboard confirm card) looked identical to the plain, undifferentiated read-only JSON viewer used elsewhere (e.g. the Settings tab's raw file view) — just a flat monospace block via `JSON.stringify(value, null, 2)` dropped into a `<pre>`.
+
+**Fix (`web/public/app.js`, `web/public/style.css`):** added a small `jsonSyntaxHtml(value)` helper — regex-based JSON tokenizer that wraps keys, strings, numbers, booleans, and `null` in their own `<span class="json-key|json-str|json-num|json-bool|json-null">`, escaping only the matched token text (not the whole pre-escaped blob, which would have hidden the quote characters the string-matching regex needs to see) — plus a `confirmValuePre(value, className)` wrapper that applies it to JSON values but falls back to plain escaped text for the "Command:" field when it's a raw shell string rather than a JSON object. Wired into all four render functions that build these prompts:
+- `showRunConfirmPopup` (direct-run bottom-left popup, Path B)
+- `addAskConfirmBubble` (live chat confirm bubble, Path A)
+- `renderResolvedConfirmBubble` (chat history replay of an already-resolved confirm)
+- `debugRenderConfirmPending` (debug dashboard's confirm card) — only in its "Organized" view; the dashboard's separate "Raw JSON" toggle is left as plain text on purpose, since that view's whole point is showing the untouched wire format.
+
+New CSS classes (`.json-key`, `.json-str`, `.json-num`, `.json-bool`, `.json-null`) added to `style.css`, using the existing theme's `--accent`/`--green`/`--gold`/`--red`/`--text-dimmer` variables rather than introducing new colors.
+
+**Never verified:** this session's sandbox has no browser, so the actual rendered colors/layout were never visually confirmed — only JS syntax validity and the escaping logic were checked by inspection. Worth a quick look in a real browser before considering it fully settled.
+
+### 8.4 Files touched this session
+
+- `jarvis-cli/jarvis/cli.py` — `tool-run` (fd-swap fix), `tool-preview` (per-command flag awareness), `confirm_direct_command` (ai_review-only gate).
+- `jarvis-cli/jarvis/ai_client.py` — `_make_tool_executor`'s confirm-gate condition.
+- `web/public/app.js` — `jsonSyntaxHtml`/`confirmValuePre` helpers; four confirm-prompt render functions updated to use them.
+- `web/public/style.css` — new `.json-*` token color classes.
+
+Patches: `jarvis-fix2.patch` (the two `.py` files, §8.1–8.2), `jarvis-fix3-json-ui.patch` (`app.js` + `style.css`, §8.3). Both verified to apply cleanly (`patch -p0` / `git apply -p0`) against the original uploaded zip.

@@ -38,6 +38,50 @@
     });
   }
 
+  // Lightweight JSON syntax coloring for the confirmation prompts (the
+  // "are you sure" popups shown before a flagged tool/command runs — see
+  // showRunConfirmPopup, addAskConfirmBubble, renderResolvedConfirmBubble,
+  // debugRenderConfirmPending). Those used to just dump a plain
+  // JSON.stringify(..., null, 2) into a <pre>, the same undifferentiated
+  // block of text as the Settings tab's read-only raw JSON viewer. This
+  // colors keys/strings/numbers/booleans/null so the arguments and
+  // resolved command content are actually easy to scan at a glance before
+  // approving something. Only ever reads its own escaped output back into
+  // innerHTML, so nothing here can inject anything the value itself didn't
+  // already contain (already escaped first).
+  function jsonSyntaxHtml(value) {
+    // Match on the RAW JSON text, not an already-escaped copy — escaping
+    // first turns every `"` into `&quot;`, which the string-matching part
+    // of this regex would never see. Every match gets escaped individually
+    // inside the callback instead; the only characters left untouched are
+    // JSON's own structural punctuation/whitespace ({}[]:, and newlines),
+    // none of which need HTML-escaping.
+    const json = JSON.stringify(value, null, 2);
+    return json.replace(
+      /("(?:\\u[a-fA-F0-9]{4}|\\[^u]|[^\\"])*"(\s*:)?|\btrue\b|\bfalse\b|\bnull\b|-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?)/g,
+      (match) => {
+        let cls = "json-num";
+        if (match.startsWith('"')) {
+          cls = /:\s*$/.test(match) ? "json-key" : "json-str";
+        } else if (match === "true" || match === "false") {
+          cls = "json-bool";
+        } else if (match === "null") {
+          cls = "json-null";
+        }
+        return `<span class="${cls}">${escapeHtml(match)}</span>`;
+      },
+    );
+  }
+
+  // A confirmation prompt's "Command:" line is sometimes a plain shell
+  // string (a saved command's `run`, not JSON) and sometimes a JSON value
+  // (resolved_run_for_review's {command, vars, run} object, or a chain's
+  // list of those) — color it as JSON only when it actually is some.
+  function confirmValuePre(value, className) {
+    const html = typeof value === "string" ? escapeHtml(value) : jsonSyntaxHtml(value);
+    return el("pre", { class: className, html });
+  }
+
   function describeCondition(cond) {
     if (cond == null) return null;
     if (typeof cond === "string") return cond;
@@ -299,15 +343,11 @@
       "\u26a0 Run ", el("span", { class: "run-confirm-popup__tool" }, tool || "(unknown command)"), "?",
     ]));
 
-    const argsStr = JSON.stringify(args || {}, null, 2);
-    popup.appendChild(el("pre", { class: "run-confirm-popup__args" }, argsStr));
+    popup.appendChild(confirmValuePre(args || {}, "run-confirm-popup__args"));
 
     if (riskNote && riskNote.command_run !== undefined && riskNote.command_run !== null) {
-      const runStr = typeof riskNote.command_run === "string"
-        ? riskNote.command_run
-        : JSON.stringify(riskNote.command_run, null, 2);
       popup.appendChild(el("div", { class: "run-confirm-popup__risk-label" }, "Command:"));
-      popup.appendChild(el("pre", { class: "run-confirm-popup__args" }, runStr));
+      popup.appendChild(confirmValuePre(riskNote.command_run, "run-confirm-popup__args"));
     }
 
     if (riskNote && riskNote.note) {
@@ -1892,17 +1932,13 @@
   // clicked here the ask genuinely cannot proceed.
   function addAskConfirmBubble(tool, args, riskNote, convId, extraItem) {
     clearAskEmptyHint();
-    const argsStr = JSON.stringify(args || {}, null, 2);
     const bubbleChildren = [
       el("div", { class: "ask-confirm__tool" }, tool || "(unknown tool)"),
-      el("pre", { class: "ask-confirm__args" }, argsStr),
+      confirmValuePre(args || {}, "ask-confirm__args"),
     ];
     if (riskNote && riskNote.command_run !== undefined && riskNote.command_run !== null) {
-      const runStr = typeof riskNote.command_run === "string"
-        ? riskNote.command_run
-        : JSON.stringify(riskNote.command_run, null, 2);
       bubbleChildren.push(el("div", { class: "ask-confirm__risk-label" }, "Command:"));
-      bubbleChildren.push(el("pre", { class: "ask-confirm__args" }, runStr));
+      bubbleChildren.push(confirmValuePre(riskNote.command_run, "ask-confirm__args"));
     }
     if (riskNote && riskNote.note) {
       const label = riskNote.provider ? `AI review \u2014 ${riskNote.provider}` : "AI review";
@@ -1948,17 +1984,13 @@
   // (see renderThreadExtra) instead of the live interactive one above.
   function renderResolvedConfirmBubble(data) {
     clearAskEmptyHint();
-    const argsStr = JSON.stringify(data.arguments || {}, null, 2);
     const bubbleChildren = [
       el("div", { class: "ask-confirm__tool" }, data.tool || "(unknown tool)"),
-      el("pre", { class: "ask-confirm__args" }, argsStr),
+      confirmValuePre(data.arguments || {}, "ask-confirm__args"),
     ];
     if (data.risk_note && data.risk_note.command_run !== undefined && data.risk_note.command_run !== null) {
-      const runStr = typeof data.risk_note.command_run === "string"
-        ? data.risk_note.command_run
-        : JSON.stringify(data.risk_note.command_run, null, 2);
       bubbleChildren.push(el("div", { class: "ask-confirm__risk-label" }, "Command:"));
-      bubbleChildren.push(el("pre", { class: "ask-confirm__args" }, runStr));
+      bubbleChildren.push(confirmValuePre(data.risk_note.command_run, "ask-confirm__args"));
     }
     if (data.risk_note && data.risk_note.note) {
       const label = data.risk_note.provider ? `AI review \u2014 ${data.risk_note.provider}` : "AI review";
@@ -2783,13 +2815,10 @@
       }, null, 2)));
     } else {
       wrap.appendChild(el("div", { class: "debug-confirm__tool" }, pending.name));
-      wrap.appendChild(el("pre", { class: "debug-confirm__args" }, JSON.stringify(pending.arguments || {}, null, 2)));
+      wrap.appendChild(confirmValuePre(pending.arguments || {}, "debug-confirm__args"));
       if (pending.risk_note && pending.risk_note.command_run !== undefined && pending.risk_note.command_run !== null) {
-        const runStr = typeof pending.risk_note.command_run === "string"
-          ? pending.risk_note.command_run
-          : JSON.stringify(pending.risk_note.command_run, null, 2);
         wrap.appendChild(el("div", { class: "debug-confirm__risk-label" }, "Command:"));
-        wrap.appendChild(el("pre", { class: "debug-confirm__args" }, runStr));
+        wrap.appendChild(confirmValuePre(pending.risk_note.command_run, "debug-confirm__args"));
       }
       if (pending.risk_note && pending.risk_note.note) {
         const label = pending.risk_note.provider ? `AI review \u2014 ${pending.risk_note.provider}` : "AI review";

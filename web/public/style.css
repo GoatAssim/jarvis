@@ -1065,6 +1065,17 @@ input.is-invalid{ border-color: var(--red) !important; }
 .ask-confirm__result.is-yes{ color: var(--green); }
 .ask-confirm__result.is-no{ color: var(--red); }
 
+/* JSON syntax coloring for confirmation prompts (see jsonSyntaxHtml in
+   app.js) — args and resolved command content shown before a flagged
+   tool/command runs, in the chat confirm bubble, the direct-run popup,
+   and the debug dashboard's confirm card. Deliberately not applied to
+   the Settings tab's "Raw JSON" viewers — those stay plain text. */
+.json-key{ color: var(--accent); }
+.json-str{ color: var(--green); }
+.json-num{ color: var(--gold); }
+.json-bool{ color: var(--red); }
+.json-null{ color: var(--text-dimmer); font-style: italic; }
+
 .ask-shot-link{ display: block; line-height: 0; }
 .ask-shot{
   display: block; width: 100%; height: auto; max-height: 320px; object-fit: contain;
