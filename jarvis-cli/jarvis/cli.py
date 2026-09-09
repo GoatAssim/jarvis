@@ -538,7 +538,13 @@ def confirm_direct_command(name, spec, args):
     """
     from . import command_tools
 
-    if not command_tools.command_requires_confirmation(name):
+    # Used to early-return here on confirm_required alone, which meant a
+    # command with ONLY ai_review set (no confirm_required) got no prompt
+    # at all — the AI's risk note had nowhere to be shown. Either flag
+    # should surface the popup; confirm_tool_call below already handles a
+    # risk_note with no confirm_required note gracefully.
+    if not (command_tools.command_requires_confirmation(name)
+            or command_tools.command_requires_ai_review(name)):
         return True
 
     known_vars = list((spec or {}).get("vars", {}).keys())
@@ -927,7 +933,32 @@ def main():
             if raw_mode in ai_client.PROMPT_MODES:
                 verbosity = ai_client._MODE_BY_NAME[raw_mode].get("tool_result_verbosity")
 
-        result = system_tools.execute_tool(tool_name, arguments, verbosity=verbosity)
+        # server.js's /api/tools/run treats this process's ENTIRE stdout as
+        # one JSON document (see its `JSON.parse(result.stdout)`). But a
+        # saved command's own steps run via `subprocess.Popen(cmd,
+        # shell=True)` with no stdout redirection (see _run_batch) — they
+        # inherit this process's real stdout file descriptor directly, so
+        # anything a command actually prints (e.g. `echo hi`) lands on the
+        # same stream, *before* the JSON below, and breaks that JSON.parse.
+        # The debug dashboard then shows "Tool run failed" even though the
+        # command's side effect already happened. Fixing this requires an
+        # OS-level fd swap, not just redirecting Python's sys.stdout —
+        # redirect_stdout doesn't touch a child process's inherited fd 1.
+        # Any real output the command produced is discarded here; that's
+        # fine, since tool-run's whole contract is a single JSON result,
+        # never live output (that's what the "run"/"ask" websocket
+        # streaming flows are for).
+        saved_stdout_fd = os.dup(1)
+        devnull_fd = os.open(os.devnull, os.O_WRONLY)
+        try:
+            sys.stdout.flush()
+            os.dup2(devnull_fd, 1)
+            result = system_tools.execute_tool(tool_name, arguments, verbosity=verbosity)
+        finally:
+            sys.stdout.flush()
+            os.dup2(saved_stdout_fd, 1)
+            os.close(devnull_fd)
+            os.close(saved_stdout_fd)
         print(json.dumps(result, indent=2, default=str))
         return
 
@@ -948,7 +979,7 @@ def main():
         # mode "jarvis mode-set" controls. Anything other than one of the
         # real PROMPT_MODES (including omitted/blank) is treated as "no
         # override", same as before this argument existed.
-        from . import tool_safety
+        from . import tool_safety, command_tools
 
         if len(argv) < 2 or not argv[1].strip():
             print(json.dumps({"error": "usage: jarvis tool-preview <name> [json-arguments] [mode]"}))
@@ -967,20 +998,62 @@ def main():
             sys.exit(1)
 
         flags = tool_safety.get_flags(tool_name)
+        # Tool-level flags only cover run_command/run_chain the *tool* —
+        # they say nothing about the specific saved *command* the debug
+        # dashboard is about to run (its own confirm_required/ai_review,
+        # same as command_tools.command_call_requires_confirmation/
+        # command_call_requires_ai_review do for the real AI chat path in
+        # ai_client._make_tool_executor). Without this OR, a command
+        # flagged ai_review=True but relying on run_command's already-True
+        # tool-level confirm_required never actually got its AI review
+        # note computed here, so the debug popup showed a bare confirm
+        # with no note where the chat path would have shown one.
+        effective_confirm_required = flags["confirm_required"] or command_tools.command_call_requires_confirmation(tool_name, arguments)
+        effective_ai_review = flags["ai_review"] or command_tools.command_call_requires_ai_review(tool_name, arguments)
         risk_note = None
-        if flags["ai_review"]:
+        if effective_ai_review:
             try:
                 from . import ai_client, ai_config
                 mode = raw_mode if raw_mode in ai_client.PROMPT_MODES else None
-                risk_note = ai_client.risk_review(tool_name, arguments, ai_config.load_ai_config(), mode=mode)
+                review_arguments = arguments
+                if tool_name in ("run_command", "run_chain"):
+                    expanded = command_tools.resolved_run_for_review(tool_name, arguments)
+                    if expanded is not None:
+                        review_arguments = expanded
+                risk_note = ai_client.risk_review(tool_name, review_arguments, ai_config.load_ai_config(), mode=mode)
             except Exception:
                 risk_note = None
+
+        # Same as ai_client._make_tool_executor and confirm_direct_command:
+        # always show the real resolved shell content for run_command/
+        # run_chain, and the resulting command's own flags for
+        # create_command/update_command, regardless of whether ai_review
+        # produced a plain-language note above.
+        if tool_name in ("run_command", "run_chain"):
+            command_run = command_tools.resolved_run_for_review(tool_name, arguments)
+            if command_run is not None:
+                risk_note = dict(risk_note) if isinstance(risk_note, dict) else (
+                    {"note": risk_note} if risk_note else {}
+                )
+                risk_note["command_run"] = command_run
+
+        if tool_name in ("create_command", "update_command"):
+            try:
+                from . import ai_client
+                command_flags = ai_client._command_flags_for_call(tool_name, arguments)
+            except Exception:
+                command_flags = None
+            if command_flags is not None:
+                risk_note = dict(risk_note) if isinstance(risk_note, dict) else (
+                    {"note": risk_note} if risk_note else {}
+                )
+                risk_note["command_flags"] = command_flags
 
         print(json.dumps({
             "name": tool_name,
             "arguments": arguments,
-            "confirm_required": flags["confirm_required"],
-            "ai_review": flags["ai_review"],
+            "confirm_required": effective_confirm_required,
+            "ai_review": effective_ai_review,
             "risk_note": risk_note,
         }, indent=2, default=str))
         return
