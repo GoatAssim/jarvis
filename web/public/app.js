@@ -1090,121 +1090,152 @@
   }
 
   // ===========================================================================
-  // Clickable file/folder paths — whenever Jarvis's reply mentions a
-  // Windows path (`C:\Users\...`) or a UNC share (`\\server\share\...`),
-  // turn it into a clickable span that opens it on the desktop. No new
-  // tool: this reuses the exact same reveal_in_explorer/open_file_location/
-  // open_file tools the debug dashboard's search_files result rows already
-  // call (see debugFileActionButtons above) via the same /api/tools/run.
-  // Web-only by design (a CLI has no "click" to attach to).
+  // Path linkification — turn file/folder paths mentioned in a rendered
+  // reply into clickable links that open them, using the same
+  // reveal_in_explorer / open_file_location / open_file tools already
+  // wired up for the debug console's search_files rows (see
+  // debugFileActionButtons above). Web console only, no CLI equivalent —
+  // there's no clickable surface in a terminal.
   // ===========================================================================
 
-  // No attempt at spaces-in-paths here — freeform prose has no reliable
-  // delimiter for where a spaced path ends, so this only catches
-  // space-free paths (the common case, and the only case marked.js would
-  // have left un-mangled anyway inside inline `code`).
-  const WIN_PATH_RE = /[A-Za-z]:[\\/][^\s"'<>|?*\r\n]+/g;
-  const UNC_PATH_RE = /\\\\[^\s"'<>|?*\r\n]+\\[^\s"'<>|?*\r\n]+/g;
-  const TRAILING_PUNCT_RE = /[.,;:!?"')\]}]+$/;
+  // Matches Windows paths (`C:\Users\...`, `\\server\share\...`) and
+  // Unix-ish absolute paths (`/home/user/...`), each optionally followed by
+  // a trailing file extension segment. Deliberately conservative: requires
+  // at least one path separator after the root so we don't snag bare words
+  // or drive letters mentioned in passing (e.g. "the C: drive").
+  const PATH_RE = /(?:[a-zA-Z]:\\(?:[^\s\\/:*?"<>|]+\\)*[^\s\\/:*?"<>|]+|\\\\[^\s\\/:*?"<>|]+(?:\\[^\s\\/:*?"<>|]+)+|\/(?:[^\s/]+\/)*[^\s/]+)/g;
 
-  function trimTrailingPunct(path) {
-    // Strips sentence punctuation that isn't part of the path itself
-    // (e.g. "...in C:\Users\bob\notes.txt." — the final period). Only
-    // strips while the path still looks intact (still contains a
-    // separator) so a lone trailing "." on a real extension-less
-    // filename component is left alone in the rare ambiguous case.
-    let out = path;
-    while (TRAILING_PUNCT_RE.test(out) && /[\\/]/.test(out.slice(0, -1))) {
-      out = out.replace(TRAILING_PUNCT_RE, (m) => m.slice(0, -1) || "");
-      if (out === path) break;
-      path = out;
+  // Trailing punctuation that's almost always sentence structure, not part
+  // of the path itself (closing parens/brackets are kept if they're
+  // balanced against an opener earlier in the match).
+  function trimTrailingPunctuation(str) {
+    let end = str.length;
+    while (end > 0 && /[.,;:!?]/.test(str[end - 1])) end--;
+    while (end > 0 && ")]}".includes(str[end - 1])) {
+      const closer = str[end - 1];
+      const opener = closer === ")" ? "(" : closer === "]" ? "[" : "{";
+      const opens = str.slice(0, end - 1).split(opener).length - 1;
+      const closes = str.slice(0, end - 1).split(closer).length - 1;
+      if (opens > closes) break; // balanced against something earlier — keep it
+      end--;
     }
-    return out;
+    return str.slice(0, end);
   }
 
-  // Heuristic only — the client has no filesystem access. A trailing
-  // separator or an extension-less last segment reads as a folder; a dot
-  // in the last segment (not at position 0, so ".gitignore"-style names
-  // don't confuse it) reads as a file. openPathLink() below recovers from
-  // a wrong guess automatically.
-  function looksLikeFile(path) {
-    const normalized = path.replace(/\\/g, "/").replace(/\/+$/, "");
-    if (normalized !== path.replace(/\\/g, "/")) return false; // had a trailing slash
-    const last = normalized.slice(normalized.lastIndexOf("/") + 1);
-    const dot = last.lastIndexOf(".");
-    return dot > 0;
+  // Cheap upfront guess so we pick the right tool on the first try in the
+  // common case: a trailing separator is unambiguous, otherwise assume a
+  // file if the last path segment has a dot-extension, folder otherwise.
+  // Not load-bearing — see the retry in openPathLink() below, which
+  // corrects a wrong guess using the tool's own error message rather than
+  // trying to perfect this heuristic (we have no filesystem access here).
+  function guessIsFolder(path) {
+    if (/[\\/]$/.test(path)) return true;
+    const lastSegment = path.split(/[\\/]/).pop() || "";
+    return !/\.[^.]+$/.test(lastSegment);
   }
 
-  async function openPathLink(path, linkEl) {
-    if (!path || (linkEl && linkEl.dataset.opening === "1")) return;
-    if (linkEl) { linkEl.dataset.opening = "1"; linkEl.classList.add("is-busy"); }
-    const primary = looksLikeFile(path) ? "open_file" : "open_file_location";
+  async function openPathLink(rawPath, linkEl) {
+    let isFolder = linkEl.dataset.isFolder === "1";
+    linkEl.classList.add("is-busy");
     try {
-      let res = await Api.runTool(primary, { path });
-      let result = res && res.result;
-      if (result && result.error && primary === "open_file" && /is a folder/i.test(result.error)) {
-        // Heuristic guessed "file" but it's actually a folder — retry the
-        // right way instead of surfacing a confusing error.
-        res = await Api.runTool("open_file_location", { path });
-        result = res && res.result;
+      let res = await Api.runTool(isFolder ? "open_file_location" : "open_file", { path: rawPath });
+      let errMsg = res.result && res.result.error;
+      // Our folder/file guess was wrong — the tool just told us so
+      // ("X is a folder, not a file"). Flip and retry once rather than
+      // surfacing an error the user has no way to act on.
+      if (!isFolder && errMsg && /is a folder, not a file/i.test(errMsg)) {
+        isFolder = true;
+        linkEl.dataset.isFolder = "1";
+        res = await Api.runTool("open_file_location", { path: rawPath });
+        errMsg = res.result && res.result.error;
       }
-      if (result && result.error) {
-        toast(result.error);
-      } else if (res && res.error) {
-        toast(res.error);
+      const failed = res.ok === false || errMsg;
+      if (failed) {
+        toast(errMsg || res.error || "Couldn't open that.");
       }
     } catch (e) {
       toast(e.message || "Couldn't open that.");
     } finally {
-      if (linkEl) { linkEl.dataset.opening = ""; linkEl.classList.remove("is-busy"); }
+      linkEl.classList.remove("is-busy");
     }
   }
 
-  // Walks every text node under `root` (skipping anything already inside a
-  // link or a path-link, so re-running this on already-linkified content
-  // is a safe no-op) and replaces matched paths with clickable spans.
-  function linkifyPaths(root) {
-    if (!root) return;
-    const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, {
+  // A looser check used only for inline `code` spans: the model chose to
+  // mark this text as a literal, so we trust it even if it contains spaces
+  // (real Windows paths routinely do, e.g. "C:\Program Files\...") — we
+  // just need it to *look* like a path at all, rather than picking out a
+  // path-shaped substring from a run of prose.
+  const LOOKS_LIKE_PATH_RE = /^(?:[a-zA-Z]:[\\/]|\\\\|\/)[^\n]*[^\s]$/;
+
+  function makePathLink(rawPath) {
+    const trimmed = trimTrailingPunctuation(rawPath);
+    const isFolder = guessIsFolder(trimmed);
+    const link = el("span", {
+      class: "path-link",
+      "data-is-folder": isFolder ? "1" : "0",
+      title: `Open ${isFolder ? "folder" : "file"}: ${trimmed}`,
+      onclick: (e) => { e.preventDefault(); openPathLink(trimmed, link); },
+    }, trimmed);
+    return link;
+  }
+
+  // Walks the rendered bubble's DOM, skipping real code blocks (<pre>,
+  // i.e. fenced ```code```) and existing <a>/.path-link nodes so we don't
+  // mangle code or double-link things, and wraps any path-looking text in
+  // a clickable span. Call this right after setting a bubble's innerHTML
+  // to renderMarkdown(...).
+  //
+  // Inline `code` spans get special handling: markdown renders a
+  // single-backtick path like `C:\Program Files\Jarvis\log.txt` as
+  // <code>...</code>, and models mention paths this way constantly. If the
+  // whole span's content looks like a path (LOOKS_LIKE_PATH_RE), we treat
+  // it as one regardless of internal spaces, since the backticks are the
+  // model's own signal that it's a literal, not prose to search inside.
+  // Plain (non-code) text still goes through PATH_RE, which is
+  // space-free/conservative since it has to pick a path out of a sentence.
+  function linkifyPaths(container) {
+    if (!container) return;
+    const codeSpans = Array.from(container.querySelectorAll("code")).filter((c) => !c.closest("pre"));
+    for (const span of codeSpans) {
+      const text = span.textContent;
+      if (LOOKS_LIKE_PATH_RE.test(text.trim())) {
+        span.replaceWith(makePathLink(text.trim()));
+      }
+    }
+
+    const walker = document.createTreeWalker(container, NodeFilter.SHOW_TEXT, {
       acceptNode(node) {
-        let p = node.parentElement;
-        while (p && p !== root) {
-          if (p.tagName === "A" || p.classList?.contains("path-link")) return NodeFilter.FILTER_REJECT;
-          p = p.parentElement;
-        }
-        return NodeFilter.FILTER_ACCEPT;
+        const parent = node.parentElement;
+        if (!parent) return NodeFilter.FILTER_REJECT;
+        if (parent.closest("code, pre, a, .path-link")) return NodeFilter.FILTER_REJECT;
+        return PATH_RE.test(node.nodeValue) ? NodeFilter.FILTER_ACCEPT : NodeFilter.FILTER_SKIP;
       },
     });
-    const targets = [];
-    let node;
-    while ((node = walker.nextNode())) {
-      if (WIN_PATH_RE.test(node.nodeValue) || UNC_PATH_RE.test(node.nodeValue)) targets.push(node);
-      WIN_PATH_RE.lastIndex = 0;
-      UNC_PATH_RE.lastIndex = 0;
-    }
-    for (const textNode of targets) {
-      const text = textNode.nodeValue;
-      const combined = new RegExp(`${WIN_PATH_RE.source}|${UNC_PATH_RE.source}`, "g");
+    const textNodes = [];
+    let n;
+    while ((n = walker.nextNode())) textNodes.push(n);
+
+    for (const node of textNodes) {
+      const text = node.nodeValue;
+      PATH_RE.lastIndex = 0;
       const frag = document.createDocumentFragment();
-      let last = 0;
-      let m;
-      while ((m = combined.exec(text))) {
-        const raw = trimTrailingPunct(m[0]);
-        if (!raw) continue;
-        frag.appendChild(document.createTextNode(text.slice(last, m.index)));
-        const link = el("span", {
-          class: "path-link",
-          role: "button",
-          tabindex: "0",
-          title: `Open ${raw}`,
-          onclick: () => openPathLink(raw, link),
-          onkeydown: (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); openPathLink(raw, link); } },
-        }, raw);
-        frag.appendChild(link);
-        last = m.index + raw.length;
+      let lastIndex = 0;
+      let match;
+      let any = false;
+      while ((match = PATH_RE.exec(text))) {
+        const raw = match[0];
+        const trimmed = trimTrailingPunctuation(raw);
+        if (trimmed.length < 3) continue; // too short to be a meaningful path (e.g. stray "/x")
+        any = true;
+        const start = match.index;
+        frag.appendChild(document.createTextNode(text.slice(lastIndex, start)));
+        frag.appendChild(makePathLink(trimmed));
+        lastIndex = start + raw.length; // resume after the *untrimmed* match so leftover punctuation is preserved as text
+        PATH_RE.lastIndex = lastIndex;
       }
-      frag.appendChild(document.createTextNode(text.slice(last)));
-      textNode.parentNode.replaceChild(frag, textNode);
+      if (!any) continue;
+      frag.appendChild(document.createTextNode(text.slice(lastIndex)));
+      node.parentNode.replaceChild(frag, node);
     }
   }
 
@@ -1736,7 +1767,9 @@
         const replyLines = reply.length ? reply : state.askReplyLines;
         const raw = replyLines.join("\n");
         bubble.dataset.raw = raw;
-        qs(".ask-msg__bubble", bubble).innerHTML = renderMarkdown(raw);
+        const bubbleEl = qs(".ask-msg__bubble", bubble);
+        bubbleEl.innerHTML = renderMarkdown(raw);
+        linkifyPaths(bubbleEl);
       }
       addAskMsgActions(bubble);
     }
@@ -2694,7 +2727,9 @@
       el("div", { class: "ask-msg__bubble" }),
     ]);
     msg.dataset.raw = text || "";
-    qs(".ask-msg__bubble", msg).innerHTML = renderMarkdown(text || "");
+    const bubbleEl = qs(".ask-msg__bubble", msg);
+    bubbleEl.innerHTML = renderMarkdown(text || "");
+    linkifyPaths(bubbleEl);
     addAskMsgActions(msg);
     askThread.appendChild(msg);
     return msg;
