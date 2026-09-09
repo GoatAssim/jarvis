@@ -1513,7 +1513,34 @@
         renderDownloadBubble(item.data.jobId, item.data.filename, item.data.title);
         break;
       case "organizeJson":
-        if (item.data.payload) renderOrganizeJsonExtra(item.data.targetPath, item.data.payload);
+        if (item.data.payload) {
+          renderOrganizeJsonExtra(item.data.targetPath, item.data.payload);
+        } else if (item.data.targetPath) {
+          // Server-persisted extras only ever carry the path (the full
+          // parsed JSON isn't saved to disk) — insert the placeholder now,
+          // in its correct spot in the replay order, then refetch exactly
+          // like a live organize_json call does and fill it in once ready.
+          // Caching the payload on the item means a second replay in this
+          // tab won't refetch.
+          clearAskEmptyHint();
+          const msg = el("div", { class: "ask-msg ask-msg--jarvis is-pending" }, [
+            el("div", { class: "ask-msg__role" }, "Jarvis"),
+            el("div", { class: "ask-msg__bubble" }, [
+              el("span", { class: "ask-typing" }, [el("span", {}), el("span", {}), el("span", {})]),
+            ]),
+          ]);
+          insertIntoAskThread(msg);
+          (async () => {
+            let payload;
+            try {
+              payload = await Api.organizeJson(item.data.targetPath);
+            } catch (err) {
+              payload = err.data || { ok: false, error: err.message };
+            }
+            item.data.payload = payload;
+            if (askThread.contains(msg)) renderOrganizeJsonResult(msg, payload);
+          })();
+        }
         break;
       case "console":
         renderConsoleDumpBubble(item.data.dumpLines);
@@ -2985,7 +3012,27 @@
     return msg;
   }
 
+  // The server now saves each turn's screenshots/downloads/organize_json
+  // results/confirm decisions alongside it (see conversations.append_exchange
+  // and ai_client._extras_from_runs) — this seeds state.threadExtrasByConv
+  // from that saved data the first time a conversation is loaded in this
+  // tab, so replay works after a genuine page reload and not just when
+  // switching between conversations within the same session. Once seeded,
+  // in-memory items pushed during a live ask (pushThreadExtra) take over
+  // for the rest of the tab's lifetime.
+  function seedThreadExtrasFromRecord(record, convId) {
+    if (convId == null || state.threadExtrasByConv[convId]) return;
+    const extras = [];
+    (record.exchanges || []).forEach((ex, bucket) => {
+      for (const e of ex.extras || []) {
+        if (e && e.type) extras.push({ bucket, type: e.type, data: e.data || {} });
+      }
+    });
+    state.threadExtrasByConv[convId] = extras;
+  }
+
   function loadConversationIntoThread(record, convId) {
+    seedThreadExtrasFromRecord(record, convId);
     askThread.innerHTML = "";
     const exchanges = (record && record.exchanges) || [];
     const extras = (convId != null && state.threadExtrasByConv[convId]) || [];

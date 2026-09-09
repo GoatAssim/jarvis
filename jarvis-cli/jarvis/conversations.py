@@ -308,12 +308,19 @@ def update_meta(conv_id, title=None, soft_context=None):
     return True
 
 
-def append_exchange(conv_id, user_text, jarvis_text, provider):
+def append_exchange(conv_id, user_text, jarvis_text, provider, extras=None):
     """Adds one turn to a conversation and returns the new exchange count
     (used by the caller to decide whether it's time to (re)generate a
     title). Recreates the record defensively if it's somehow missing —
     an env var or CLI arg holding a stale/foreign id shouldn't crash an
-    otherwise-successful ask."""
+    otherwise-successful ask.
+
+    `extras`, if given, is the list of non-text thread items (screenshots,
+    downloads, organize_json results, resolved confirmations) that
+    happened during this turn — see ai_client._extras_from_runs. Saved
+    verbatim alongside the exchange so the web UI can replay them after a
+    real page reload, not just for as long as its in-memory state lasts.
+    """
     if not is_valid_id(conv_id):
         return 0
     record = _load_conv(conv_id) or {
@@ -324,12 +331,15 @@ def append_exchange(conv_id, user_text, jarvis_text, provider):
         "updated_at": _now(),
         "exchanges": [],
     }
-    record.setdefault("exchanges", []).append({
+    exchange = {
         "ts": _now(),
         "user": user_text,
         "jarvis": jarvis_text,
         "provider": provider,
-    })
+    }
+    if extras:
+        exchange["extras"] = extras
+    record.setdefault("exchanges", []).append(exchange)
     record["exchanges"] = record["exchanges"][-MAX_STORED_EXCHANGES:]
     record["updated_at"] = _now()
     _save_conv(record)
