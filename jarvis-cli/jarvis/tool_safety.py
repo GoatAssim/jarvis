@@ -54,11 +54,15 @@ DEFAULT_CONFIRM_REQUIRED = {
     "hotkey",
     "click",
     "drag",
+    "click_on_text",
 }
 
 # run_custom_command is the one tool where a second AI opinion is on by
 # default — it's arbitrary shell, so it's the whole reason ai_review exists.
-DEFAULT_AI_REVIEW = {"run_custom_command"}
+# click_on_text joins it here for a related reason: it clicks whatever text
+# looks closest to what was asked for, which is exactly the kind of fuzzy,
+# could-go-wrong action a second opinion is meant to catch.
+DEFAULT_AI_REVIEW = {"run_custom_command", "click_on_text"}
 
 VALID_KEYS = ("confirm_required", "ai_review")
 
