@@ -444,14 +444,147 @@ def split_chain_batches(argv):
     return cleaned
 
 
-def resolve_and_run(commands, parser, seg):
-    """Look up, parse, and run one 'then'/'and'-separated segment. Returns the exit code."""
+def confirm_tool_call(name, arguments, risk_note=None):
+    """Shared confirm-required gate \u2014 same "are you sure" + AI-review
+    protocol whether it's the AI deciding to call a tool (see
+    ai_client._make_tool_executor's on_confirm_request) or a human typing a
+    flagged saved command straight at the CLI (see confirm_direct_command
+    below). Two protocols, auto-selected:
+      - real terminal (stdin is a tty): a plain "Proceed? [y/N]" prompt,
+        blocking on input() exactly like any other CLI confirmation.
+      - piped stdin (this process spawned by the web server): prints one
+        machine-readable "JARVIS_CONFIRM_REQUEST {...}" line to stdout and
+        blocks reading one line back from stdin. server.js watches for
+        that line on both the "ask" and "run" websocket flows, relays it to
+        the browser as Yes/No buttons, and writes "y\\n"/"n\\n" back to this
+        process's stdin once the user answers.
+
+    risk_note, if given, is either the {"provider", "note"} dict from
+    ai_client.risk_review() or that same dict with an extra
+    "command_flags": {"confirm_required": bool, "ai_review": bool} key \u2014
+    attached by ai_client when the call being confirmed is create_command
+    or update_command, so the user sees exactly what safety flags the
+    command they're about to create/change will carry, not just a generic
+    danger rating.
+    """
+    payload = {"tool": name, "arguments": arguments or {}}
+    if risk_note:
+        payload["risk_note"] = risk_note
+
+    command_flags = risk_note.get("command_flags") if isinstance(risk_note, dict) else None
+    command_run = risk_note.get("command_run") if isinstance(risk_note, dict) else None
+
+    if sys.stdin.isatty():
+        print(
+            f"\n{ERR.YELLOW}\u26a0 Jarvis wants to run: {ERR.BOLD}{name}{ERR.RESET}"
+            f"{ERR.YELLOW}({json.dumps(arguments or {}, default=str)}){ERR.RESET}"
+        )
+        if command_run is not None:
+            print(f"{ERR.DIM}  Command: {json.dumps(command_run, default=str)}{ERR.RESET}")
+        if risk_note:
+            note_text = risk_note.get("note") if isinstance(risk_note, dict) else risk_note
+            provider = risk_note.get("provider") if isinstance(risk_note, dict) else None
+            label = f" ({provider})" if provider else ""
+            if note_text:
+                print(f"{ERR.DIM}  AI review{label}: {note_text}{ERR.RESET}")
+        if command_flags:
+            print(
+                f"{ERR.DIM}  Flags: confirm_required={command_flags.get('confirm_required')}, "
+                f"ai_review={command_flags.get('ai_review')}{ERR.RESET}"
+            )
+        try:
+            answer = input(f"{ERR.BOLD}Proceed? [y/N]: {ERR.RESET}")
+        except EOFError:
+            answer = ""
+        return answer.strip().lower().startswith("y")
+
+    print("JARVIS_CONFIRM_REQUEST " + json.dumps(payload, default=str), flush=True)
+    try:
+        line = sys.stdin.readline()
+    except Exception:
+        line = ""
+    return line.strip().lower().startswith("y")
+
+
+def _risk_note_for(name, arguments):
+    """Best-effort ai_client.risk_review() call for a saved command run
+    directly at the CLI (outside the AI ask() loop entirely) \u2014 same
+    "never raises, None means no second opinion available" contract as
+    risk_review itself. Kept separate from that function only because it
+    also has to load ai_config, which the AI ask() loop already does for
+    itself elsewhere."""
+    try:
+        from . import ai_client, ai_config
+    except ImportError:
+        return None
+    try:
+        cfg = ai_config.load_ai_config()
+    except Exception:
+        return None
+    return ai_client.risk_review(name, arguments, cfg)
+
+
+def confirm_direct_command(name, spec, args):
+    """Gate for a saved command run directly at the CLI \u2014 typed at a real
+    shell ('jarvis <name> ...') or as part of a typed 'then'/'and' chain \u2014
+    that has its own confirm_required flag (commands_config /
+    command_tools.command_requires_confirmation). Completely separate from
+    the AI-tool-call gate in ai_client, which only ever fires when the *AI*
+    decides to call run_command/run_chain; this is what makes the same
+    protection apply when a human runs the command by name themselves,
+    from a real terminal or from the web console's command list. Returns
+    True immediately, with no prompt at all, for the overwhelming majority
+    of commands, which don't set the flag.
+    """
+    from . import command_tools
+
+    if not command_tools.command_requires_confirmation(name):
+        return True
+
+    known_vars = list((spec or {}).get("vars", {}).keys())
+    arguments = {v: getattr(args, v.replace("-", "_"), None) for v in known_vars}
+    arguments = {k: v for k, v in arguments.items() if v is not None}
+
+    risk_note = None
+    if command_tools.command_requires_ai_review(name):
+        risk_note = _risk_note_for(
+            name, {"command": name, "vars": arguments, "run": (spec or {}).get("run")}
+        )
+
+    # Always attach the saved command's actual 'run' content (its real
+    # shell script/steps) — not just the tool name and typed-in var
+    # values — so the popup shows the user exactly what will execute,
+    # regardless of whether ai_review is also on for a plain-language
+    # summary of it.
+    run_content = (spec or {}).get("run")
+    if run_content is not None:
+        risk_note = dict(risk_note) if isinstance(risk_note, dict) else (
+            {"note": risk_note} if risk_note else {}
+        )
+        risk_note["command_run"] = run_content
+
+    return confirm_tool_call(name, arguments, risk_note)
+
+
+def resolve_and_run(commands, parser, seg, confirm=True):
+    """Look up, parse, and run one 'then'/'and'-separated segment. Returns
+    the exit code. `confirm=False` skips confirm_direct_command entirely \u2014
+    used by command_tools._run_argv_segment, since that path is reached
+    from the AI's run_command/run_chain tools, which already went through
+    ai_client's own confirm-required gate (including the per-command flags
+    via command_call_requires_confirmation) before this function was ever
+    called; without confirm=False a flagged command would prompt twice."""
     if seg[0] not in commands:
         print(f"{ERR.RED}Unknown command: {seg[0]}{ERR.RESET}\n", file=sys.stderr)
         print_help(commands, file=sys.stderr)
         return 1
     args = parser.parse_args(seg)
-    return run_command(args.command, commands[args.command], args)
+    name = args.command
+    spec = commands[name]
+    if confirm and not confirm_direct_command(name, spec, args):
+        print(f"{ERR.YELLOW}Cancelled '{name}'.{ERR.RESET}", file=sys.stderr)
+        return 1
+    return run_command(name, spec, args)
 
 
 def _run_segment_batch(commands, parser, batch):
@@ -555,42 +688,12 @@ def handle_ai_prompt(text, commands):
         print(f"{ERR.DIM}  $ {friendly}{detail}{ERR.RESET}", file=sys.stderr, flush=True)
 
     # Gate for anything tool_safety.json flags confirm_required for (see
-    # ai_client._make_tool_executor). Two protocols, auto-selected:
-    #   - real terminal (stdin is a tty): a plain "Proceed? [y/N]" prompt,
-    #     blocking on input() exactly like any other CLI confirmation.
-    #   - piped stdin (this process spawned by the web server): prints one
-    #     machine-readable "JARVIS_CONFIRM_REQUEST {...}" line to stdout and
-    #     blocks reading one line back from stdin. server.js watches for
-    #     that line, relays it to the browser as Yes/No buttons, and writes
-    #     "y\n"/"n\n" back to this process's stdin once the user answers —
-    #     see web/server.js's onStdoutLine + "ask-confirm-response".
+    # ai_client._make_tool_executor) — delegates to the same
+    # confirm_tool_call() that confirm_direct_command() uses for a human
+    # typing a flagged command straight at the CLI, so both paths behave
+    # identically (tty prompt vs. piped JARVIS_CONFIRM_REQUEST protocol).
     def on_confirm_request(name, arguments, risk_note=None):
-        payload = {"tool": name, "arguments": arguments or {}}
-        if risk_note:
-            payload["risk_note"] = risk_note
-
-        if sys.stdin.isatty():
-            print(
-                f"\n{ERR.YELLOW}\u26a0 Jarvis wants to run: {ERR.BOLD}{name}{ERR.RESET}"
-                f"{ERR.YELLOW}({json.dumps(arguments or {}, default=str)}){ERR.RESET}"
-            )
-            if risk_note:
-                note_text = risk_note.get("note") if isinstance(risk_note, dict) else risk_note
-                provider = risk_note.get("provider") if isinstance(risk_note, dict) else None
-                label = f" ({provider})" if provider else ""
-                print(f"{ERR.DIM}  AI review{label}: {note_text}{ERR.RESET}")
-            try:
-                answer = input(f"{ERR.BOLD}Proceed? [y/N]: {ERR.RESET}")
-            except EOFError:
-                answer = ""
-            return answer.strip().lower().startswith("y")
-
-        print("JARVIS_CONFIRM_REQUEST " + json.dumps(payload, default=str), flush=True)
-        try:
-            line = sys.stdin.readline()
-        except Exception:
-            line = ""
-        return line.strip().lower().startswith("y")
+        return confirm_tool_call(name, arguments, risk_note)
 
     # The web UI sends one explicit conversation id per browser tab (see
     # server.js's "ask" WS handler); plain CLI use has no such id and falls

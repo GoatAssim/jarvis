@@ -92,7 +92,13 @@ def _run_argv_segment(commands, parser, argv):
 
     if not argv or argv[0] not in commands:
         return {"ok": False, "exit_code": 1, "error": f"Unknown command: {argv[0] if argv else '?'}"}
-    code = resolve_and_run(commands, parser, argv)
+    # confirm=False: this path is only ever reached via the AI's
+    # run_command/run_chain tools, which already went through
+    # ai_client._make_tool_executor's own confirm-required gate (OR'd with
+    # command_call_requires_confirmation for this exact saved command)
+    # before resolve_and_run was ever called — confirming again here would
+    # just double-prompt for the same call.
+    code = resolve_and_run(commands, parser, argv, confirm=False)
     return {"command": argv[0], "ok": code == 0, "exit_code": code}
 
 
