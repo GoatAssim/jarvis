@@ -811,6 +811,7 @@ def _make_tool_executor(on_tool_call, schemas=None, on_confirm_request=None,
         # command_tools.command_call_requires_confirmation) so "warn on
         # deploy-prod but not on list-files" works even though both go
         # through the same run_command tool.
+        confirm_meta = None
         if (tool_safety.requires_confirmation(name)
                 or command_tools.command_call_requires_confirmation(name, arguments)):
             if on_confirm_request is None:
@@ -876,8 +877,18 @@ def _make_tool_executor(on_tool_call, schemas=None, on_confirm_request=None,
                           "message": f"The user declined to run '{name}' \u2014 do not retry it "
                                      f"this turn, and don't claim it happened."}
                 cache[key] = result
-                runs.append({"name": name, "arguments": arguments, "result": result})
+                # Keep the risk_note + decision so the web UI can persist
+                # and replay this exact confirmation prompt later (see
+                # conversations.append_exchange's `extras` and
+                # web/public/app.js's renderResolvedConfirmBubble) instead
+                # of it only existing for as long as the browser tab does.
+                runs.append({"name": name, "arguments": arguments, "result": result,
+                             "confirm": {"risk_note": risk_note, "approved": False}})
                 return result
+            # Approved — recorded below alongside the actual tool result so
+            # a single `runs` entry carries both the confirmation and what
+            # it let through.
+            confirm_meta = {"risk_note": risk_note, "approved": True}
 
         if on_tool_call:
             try:
@@ -888,11 +899,61 @@ def _make_tool_executor(on_tool_call, schemas=None, on_confirm_request=None,
         verbosity = verbosity_ref[0] if verbosity_ref else "full"
         result = tool_result_shaping.shape_result(name, result, verbosity)
         cache[key] = result
-        runs.append({"name": name, "arguments": arguments, "result": result})
+        run_entry = {"name": name, "arguments": arguments, "result": result}
+        if confirm_meta is not None:
+            run_entry["confirm"] = confirm_meta
+        runs.append(run_entry)
         return result
 
     _executor.runs = runs
     return _executor
+
+
+def _extras_from_runs(runs):
+    """Turns this turn's tool_executor.runs (see _make_tool_executor) into
+    the same lightweight 'screenshot / download / organizeJson / confirm'
+    shape the web UI already builds client-side for a live ask (see
+    web/public/app.js's pushThreadExtra) so conversations.append_exchange
+    can save them alongside the exchange. That's what lets the browser
+    replay a screenshot, download card, organize-json result, or a
+    resolved confirmation after a genuine page reload/reconnect — not just
+    for as long as that browser tab's in-memory state happens to survive.
+    """
+    extras = []
+    for run in (runs or []):
+        name = run.get("name")
+        result = run.get("result") if isinstance(run.get("result"), dict) else {}
+        confirm = run.get("confirm")
+        if isinstance(confirm, dict):
+            extras.append({
+                "type": "confirm",
+                "data": {
+                    "tool": name,
+                    "arguments": run.get("arguments") or {},
+                    "risk_note": confirm.get("risk_note"),
+                    "resolved": bool(confirm.get("approved")),
+                },
+            })
+        if name == "take_screenshot" and result.get("ok") and result.get("file"):
+            extras.append({"type": "screenshot", "data": {"filename": result["file"]}})
+        elif name == "organize_json" and result.get("ok") and result.get("path"):
+            extras.append({"type": "organizeJson", "data": {"targetPath": result["path"], "payload": None}})
+        elif name == "ytdl_download" and result.get("ok") and result.get("job_id"):
+            # Mirror ytdl_tools.py's own MAX_MEDIA_EMITTED cap — only the
+            # first few files ever got an inline player card live (see its
+            # _emit_media loop), so a saved/replayed turn shouldn't show
+            # more cards than the user actually saw at the time.
+            for f in (result.get("files") or [])[:5]:
+                if isinstance(f, dict) and f.get("file"):
+                    extras.append({
+                        "type": "download",
+                        "data": {
+                            "jobId": result["job_id"],
+                            "filename": f["file"],
+                            "title": f.get("title") or f["file"],
+                        },
+                    })
+    return extras
 
 
 def _is_mutating_tool(name):
@@ -1205,7 +1266,11 @@ def ask(user_text, commands=None, on_attempt=None, on_tool_call=None, conversati
                 )
 
             if result.ok:
-                exchange_count = conversations.append_exchange(conv_id, user_text, result.text, label)
+                turn_runs = getattr(tool_executor, "runs", None) if tool_executor else None
+                extras = _extras_from_runs(turn_runs)
+                exchange_count = conversations.append_exchange(
+                    conv_id, user_text, result.text, label, extras=extras
+                )
                 _maybe_update_title(cfg, conv_id, exchange_count, user_text, result.text)
                 return AskResult(True, text=result.text, provider=label, attempts=attempts,
                                  assistant_name=assistant_name, address_user_as=address)
