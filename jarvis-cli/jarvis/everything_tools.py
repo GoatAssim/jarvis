@@ -187,18 +187,64 @@ EVERYTHING_TOOL_SCHEMAS = [
     {
         "name": "search_files",
         "description": (
-            "Search the whole PC for files/folders by name, instantly, using Everything "
-            "(voidtools). Use for 'find the file named X', 'where is Y', 'list PDFs in "
-            "Downloads', etc. Needs Everything.exe running in the background. Supports its "
-            "search syntax: 'ext:py' filters by extension, 'path:C:\\Users' restricts to a "
-            "folder, 'size:>10mb' filters by size, quotes for an exact phrase."
+            "Search for files/folders by name, instantly, using Everything (voidtools). Use "
+            "for 'find the file named X', 'where is Y', 'list PDFs in Downloads', etc. Needs "
+            "Everything.exe running in the background.\n\n"
+            "IMPORTANT \u2014 if the user names a specific directory the file should be in "
+            "(e.g. 'I have foo.txt in my Projects folder', 'find bar.png in Downloads'), pass "
+            "that directory as `in_folder` instead of putting it in `query` or the whole PC "
+            "gets searched. `in_folder` accepts a full path or a friendly name configured in "
+            "~/.jarvis/everything.json's folder_aliases (desktop/documents/downloads/pictures/"
+            "music/videos out of the box \u2014 users can add their own, e.g. 'projects').\n\n"
+            "Everything's own search syntax also works inside `query` (on top of, or instead "
+            "of, `in_folder`) \u2014 the main ways to narrow a search:\n"
+            "- Wildcards: '*' matches any run of characters, '?' matches exactly one. "
+            "'*.thing' finds every file with that extension; 'report*.pdf' finds "
+            "'report1.pdf', 'report_final.pdf', etc.; 'IMG_????.jpg' matches exactly 4 chars "
+            "in that spot. Wildcards only work if `regex` is left false.\n"
+            "- Plain text with no wildcard (e.g. 'invoice') is an automatic substring match "
+            "against the file name \u2014 no need to wrap it in *stars* yourself.\n"
+            "- 'ext:py' / 'ext:jpg;png;gif' \u2014 filter by one or more extensions.\n"
+            "- 'path:C:\\Users\\me\\Downloads' \u2014 restrict to a folder and everything under "
+            "it (this is what `in_folder` builds under the hood \u2014 prefer `in_folder` when "
+            "the user names a folder in plain English).\n"
+            "- 'folder:' \u2014 return only folders, no files.\n"
+            "- 'size:>10mb', 'size:100kb-1gb' \u2014 filter by size (also 'size:empty').\n"
+            "- 'dm:today', 'dm:lastweek', 'dm:2024', 'dm:2024-01-01..2024-06-01' \u2014 filter by "
+            "date modified (dc: for date created).\n"
+            "- '\"exact phrase\"' \u2014 quotes match the phrase literally, spaces and all, "
+            "instead of Everything treating each space-separated word as its own AND'ed term.\n"
+            "- 'foo bar' (space, no quotes) \u2014 AND: matches need both 'foo' and 'bar'.\n"
+            "- 'foo|bar' \u2014 OR: matches need either 'foo' or 'bar'.\n"
+            "- '!foo' \u2014 NOT: excludes results containing 'foo'.\n"
+            "- Terms combine freely, e.g. 'ext:pdf report* size:>1mb dm:thismonth' or "
+            "'*.docx !draft' for docx files whose name doesn't contain 'draft'.\n"
+            "A request like 'find a patch file in my downloads folder' should become "
+            "in_folder='downloads', query='*patch*' (or 'ext:patch' if they mean the "
+            "extension) \u2014 not query='downloads *patch', which would search the whole PC "
+            "for something literally named that."
         ),
         "parameters": {
             "type": "object",
             "properties": {
                 "query": {
                     "type": "string",
-                    "description": "Search text, in Everything's search syntax (space = AND, | = OR, ext:, path:, size:, etc.).",
+                    "description": (
+                        "Search text, in Everything's search syntax: plain text substring-"
+                        "matches the file name; '*'/'?' wildcards ('*.thing', 'img????.jpg'); "
+                        "'ext:', 'size:', 'dm:'/'dc:' filters; '|' for OR, '!' for NOT, quotes "
+                        "for an exact phrase; space-separated terms are AND'ed. Don't put a "
+                        "directory here \u2014 use in_folder."
+                    ),
+                },
+                "in_folder": {
+                    "type": "string",
+                    "description": (
+                        "Restrict the search to this directory and its subfolders, instead "
+                        "of the whole PC. Either a full path (e.g. 'D:\\Projects') or a "
+                        "friendly name from folder_aliases in ~/.jarvis/everything.json "
+                        "(e.g. 'downloads', 'desktop', or any custom one the user defined)."
+                    ),
                 },
                 "max_results": {
                     "type": "integer",
@@ -281,6 +327,20 @@ def search_files(arguments):
         return {"error": err}
 
     cfg = everything_config.load_config()
+
+    in_folder = arguments.get("in_folder")
+    if in_folder is not None and not isinstance(in_folder, str):
+        return {"error": "in_folder must be a string"}
+    in_folder = in_folder.strip() if in_folder else ""
+    if in_folder:
+        folder_path = everything_config.resolve_folder_alias(in_folder, cfg) or str(
+            Path(os.path.expandvars(in_folder)).expanduser()
+        )
+        # Everything's path: filter scopes the search to this folder and
+        # everything beneath it \u2014 that's the "selective search" the whole
+        # in_folder option exists for. Quoted so spaces in the path don't
+        # get parsed as separate search terms.
+        query = f'path:"{folder_path}" {query}'
     cap = int(cfg.get("max_results_cap") or 200)
     max_results = arguments.get("max_results")
     try:

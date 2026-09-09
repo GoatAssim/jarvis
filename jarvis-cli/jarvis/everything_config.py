@@ -14,6 +14,7 @@ prints this file's path) if auto-detection doesn't find your install.
 """
 
 import json
+import os
 from pathlib import Path
 
 JARVIS_DIR = Path.home() / ".jarvis"
@@ -26,7 +27,38 @@ DEFAULT_CONFIG = {
     "default_max_results": 30,
     "max_results_cap": 200,
     "match_path_default": False,
+    # Friendly names -> real folders, so "search my projects folder" doesn't
+    # require the user (or the model) to know/type the full path. Keys are
+    # matched case-insensitively with spaces/underscores/hyphens ignored.
+    # Values may use ~ and %ENV% / $ENV placeholders, expanded on read.
+    "folder_aliases": {
+        "desktop": r"~\Desktop",
+        "documents": r"~\Documents",
+        "downloads": r"~\Downloads",
+        "pictures": r"~\Pictures",
+        "music": r"~\Music",
+        "videos": r"~\Videos",
+    },
 }
+
+
+def _normalize_alias_key(name):
+    return "".join(ch for ch in name.strip().lower() if ch.isalnum())
+
+
+def resolve_folder_alias(name, cfg=None):
+    """Look up a user-friendly folder name in folder_aliases (case/spacing
+    insensitive) and expand ~ and %ENV%/$ENV vars. Returns the expanded path
+    string, or None if `name` doesn't match any configured alias."""
+    if not name or not isinstance(name, str):
+        return None
+    cfg = cfg if cfg is not None else load_config()
+    aliases = cfg.get("folder_aliases") or {}
+    target = _normalize_alias_key(name)
+    for key, value in aliases.items():
+        if _normalize_alias_key(key) == target:
+            return str(Path(os.path.expandvars(value)).expanduser())
+    return None
 
 
 def ensure_config():
