@@ -736,7 +736,8 @@ def _command_flags_for_call(name, arguments):
         # only changes e.g. `run` must still reflect the flags the command
         # already has, not silently report them as False.
         try:
-            existing = command_tools.load_commands_dict().get(arguments.get("name"))
+            from . import commands_config
+            existing = commands_config.load_commands_dict().get(arguments.get("name"))
         except Exception:
             existing = None
         if isinstance(existing, dict):
