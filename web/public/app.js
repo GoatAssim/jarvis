@@ -282,6 +282,61 @@
     toastTimer = setTimeout(() => { t.hidden = true; }, 4200);
   }
 
+  // Bottom-left popup for a directly-run saved command that's paused on
+  // its own confirm_required/ai_review flags (see server.js's
+  // "confirm-request" message, fired from cli.py's confirm_direct_command
+  // — completely separate from the in-thread ask-confirm bubble, since a
+  // direct run has no chat thread to render into). Shows the actual
+  // command content (risk_note.command_run) alongside any AI risk note
+  // and the command's own safety flags, so the user has real information
+  // before approving — not just the bare tool name and typed args.
+  function showRunConfirmPopup(tool, args, riskNote) {
+    const popup = qs("#run-confirm-popup");
+    popup.innerHTML = "";
+    popup.hidden = false;
+
+    popup.appendChild(el("div", { class: "run-confirm-popup__title" }, [
+      "\u26a0 Run ", el("span", { class: "run-confirm-popup__tool" }, tool || "(unknown command)"), "?",
+    ]));
+
+    const argsStr = JSON.stringify(args || {}, null, 2);
+    popup.appendChild(el("pre", { class: "run-confirm-popup__args" }, argsStr));
+
+    if (riskNote && riskNote.command_run !== undefined && riskNote.command_run !== null) {
+      const runStr = typeof riskNote.command_run === "string"
+        ? riskNote.command_run
+        : JSON.stringify(riskNote.command_run, null, 2);
+      popup.appendChild(el("div", { class: "run-confirm-popup__risk-label" }, "Command:"));
+      popup.appendChild(el("pre", { class: "run-confirm-popup__args" }, runStr));
+    }
+
+    if (riskNote && riskNote.note) {
+      const label = riskNote.provider ? `AI review \u2014 ${riskNote.provider}` : "AI review";
+      popup.appendChild(el("div", { class: "run-confirm-popup__risk" }, [
+        el("div", { class: "run-confirm-popup__risk-label" }, label),
+        el("div", { class: "run-confirm-popup__risk-note" }, riskNote.note),
+      ]));
+    }
+
+    if (riskNote && riskNote.command_flags) {
+      const cf = riskNote.command_flags;
+      popup.appendChild(el("div", { class: "run-confirm-popup__flags" },
+        `Flags: confirm_required=${!!cf.confirm_required}, ai_review=${!!cf.ai_review}`));
+    }
+
+    const yesBtn = el("button", { class: "btn btn--primary", type: "button" }, "Yes, run it");
+    const noBtn = el("button", { class: "btn btn--ghost", type: "button" }, "No, cancel");
+    popup.appendChild(el("div", { class: "run-confirm-popup__actions" }, [noBtn, yesBtn]));
+
+    function resolve(approved) {
+      popup.hidden = true;
+      popup.innerHTML = "";
+      wsSend({ type: "confirm-response", approved });
+    }
+    yesBtn.addEventListener("click", () => resolve(true));
+    noBtn.addEventListener("click", () => resolve(false));
+  }
+
   function jarvisTabVisible() {
     return document.visibilityState === "visible";
   }
@@ -996,6 +1051,7 @@
         break;
       case "exit":
         setRunning(false);
+        qs("#run-confirm-popup").hidden = true;
         if (msg.signal) {
           consoleAppend(`\u25a0 stopped (${msg.signal})`, "exit-bad");
           notifyTaskDone(`Stopped (${msg.signal}).`, true);
@@ -1009,9 +1065,14 @@
         break;
       case "error":
         setRunning(false);
+        qs("#run-confirm-popup").hidden = true;
         consoleAppend(`\u26a0 ${msg.message}`, "exit-bad");
         toast(msg.message);
         notifyTaskDone(msg.message, true);
+        break;
+
+      case "confirm-request":
+        showRunConfirmPopup(msg.tool, msg.arguments, msg.risk_note);
         break;
 
       case "ask-start":
@@ -1809,6 +1870,13 @@
       el("div", { class: "ask-confirm__tool" }, tool || "(unknown tool)"),
       el("pre", { class: "ask-confirm__args" }, argsStr),
     ];
+    if (riskNote && riskNote.command_run !== undefined && riskNote.command_run !== null) {
+      const runStr = typeof riskNote.command_run === "string"
+        ? riskNote.command_run
+        : JSON.stringify(riskNote.command_run, null, 2);
+      bubbleChildren.push(el("div", { class: "ask-confirm__risk-label" }, "Command:"));
+      bubbleChildren.push(el("pre", { class: "ask-confirm__args" }, runStr));
+    }
     if (riskNote && riskNote.note) {
       const label = riskNote.provider ? `AI review \u2014 ${riskNote.provider}` : "AI review";
       bubbleChildren.push(el("div", { class: "ask-confirm__risk" }, [
@@ -1858,6 +1926,13 @@
       el("div", { class: "ask-confirm__tool" }, data.tool || "(unknown tool)"),
       el("pre", { class: "ask-confirm__args" }, argsStr),
     ];
+    if (data.risk_note && data.risk_note.command_run !== undefined && data.risk_note.command_run !== null) {
+      const runStr = typeof data.risk_note.command_run === "string"
+        ? data.risk_note.command_run
+        : JSON.stringify(data.risk_note.command_run, null, 2);
+      bubbleChildren.push(el("div", { class: "ask-confirm__risk-label" }, "Command:"));
+      bubbleChildren.push(el("pre", { class: "ask-confirm__args" }, runStr));
+    }
     if (data.risk_note && data.risk_note.note) {
       const label = data.risk_note.provider ? `AI review \u2014 ${data.risk_note.provider}` : "AI review";
       bubbleChildren.push(el("div", { class: "ask-confirm__risk" }, [
@@ -2682,6 +2757,13 @@
     } else {
       wrap.appendChild(el("div", { class: "debug-confirm__tool" }, pending.name));
       wrap.appendChild(el("pre", { class: "debug-confirm__args" }, JSON.stringify(pending.arguments || {}, null, 2)));
+      if (pending.risk_note && pending.risk_note.command_run !== undefined && pending.risk_note.command_run !== null) {
+        const runStr = typeof pending.risk_note.command_run === "string"
+          ? pending.risk_note.command_run
+          : JSON.stringify(pending.risk_note.command_run, null, 2);
+        wrap.appendChild(el("div", { class: "debug-confirm__risk-label" }, "Command:"));
+        wrap.appendChild(el("pre", { class: "debug-confirm__args" }, runStr));
+      }
       if (pending.risk_note && pending.risk_note.note) {
         const label = pending.risk_note.provider ? `AI review \u2014 ${pending.risk_note.provider}` : "AI review";
         wrap.appendChild(el("div", { class: "debug-confirm__risk" }, [
