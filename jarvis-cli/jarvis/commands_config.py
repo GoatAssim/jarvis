@@ -80,14 +80,15 @@ def validate_command_spec(spec):
                 val = step.get(field)
                 if val is not None and not isinstance(val, bool):
                     return f"Step {i}: '{field}' must be true or false."
-            cond = step.get("if")
-            if isinstance(cond, dict):
-                for key in cond:
-                    if key not in var_names:
-                        return (
-                            f'Step {i}: condition uses unknown variable "{key}" '
-                            f"(vars: {', '.join(var_names) or '(none)'})."
-                        )
+            for cond_field in ("if", "unless"):
+                cond = step.get(cond_field)
+                if isinstance(cond, dict):
+                    for key in cond:
+                        if key not in var_names:
+                            return (
+                                f'Step {i}: condition uses unknown variable "{key}" '
+                                f"(vars: {', '.join(var_names) or '(none)'})."
+                            )
             continue
         return f"Step {i} must be a string or an object with a 'run' field."
     vars_block = spec.get("vars")
