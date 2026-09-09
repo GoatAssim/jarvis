@@ -337,29 +337,44 @@ def name_only_schemas_for_prompt(schemas):
 
     The model learns parameters on first use: if required args are missing,
     the executor returns the compact summary instead of running the tool.
+
+    A schema can set `short_description` to hand-write its 50% Capacity
+    hint instead of having the full description blindly clipped to 48
+    chars mid-sentence \u2014 useful for tools (like search_files) whose full
+    description is long and front-loads detail that doesn't survive a hard
+    clip. Falls back to clipping `description` when absent.
     """
     stub_params = {"type": "object", "properties": {}}
     out = []
     for schema in schemas or []:
         if not isinstance(schema, dict) or not schema.get("name"):
             continue
+        short = schema.get("short_description")
+        text = short.strip() if isinstance(short, str) and short.strip() else _clip_text(schema.get("description") or "", 48)
         out.append({
             "name": schema.get("name"),
-            "description": _clip_text(schema.get("description") or "", 48),
+            "description": text,
             "parameters": stub_params,
         })
     return out
 
 
 def compact_schemas_for_prompt(schemas):
-    """Shorter tool JSON for the model. Full schemas stay in tools-list / KDE."""
+    """Shorter tool JSON for the model. Full schemas stay in tools-list / KDE.
+
+    A schema can set `compact_description` to hand-write its 100% Capacity
+    text instead of having `description` clipped to _SCHEMA_DESC_MAX chars
+    \u2014 same reasoning as short_description above, just less aggressive.
+    """
     out = []
     for schema in schemas or []:
         if not isinstance(schema, dict):
             continue
+        compact = schema.get("compact_description")
+        text = compact.strip() if isinstance(compact, str) and compact.strip() else _clip_text(schema.get("description") or "", _SCHEMA_DESC_MAX)
         item = {
             "name": schema.get("name"),
-            "description": _clip_text(schema.get("description") or "", _SCHEMA_DESC_MAX),
+            "description": text,
         }
         params = schema.get("parameters")
         item["parameters"] = _compact_json_schema(params) if isinstance(params, dict) else params
