@@ -529,7 +529,7 @@ app.post("/api/tools/run", requireJarvis, async (req, res) => {
   // recognize, so no validation is needed here beyond "it's a string" —
   // an empty string is the "no override" case it already expects.
   const mode = typeof req.body?.mode === "string" ? req.body.mode.trim() : "";
-  const result = await runJarvisOnce(["tool-run", name, argsJson, mode], 30000);
+  const result = await runJarvisOnce(["tool-run", name, argsJson, mode], 30000, { JARVIS_UI: "web" });
   // `jarvis tool-run` always prints a JSON object to stdout, even on its
   // own validation errors (bad JSON args, missing name), just with a
   // non-zero exit code in those cases — so try parsing stdout first no
@@ -570,7 +570,7 @@ app.post("/api/tools/preview", requireJarvis, async (req, res) => {
 
   // Generous timeout: when ai_review is on this makes a real network call
   // to a second AI provider before responding.
-  const result = await runJarvisOnce(["tool-preview", name, argsJson, mode], 30000);
+  const result = await runJarvisOnce(["tool-preview", name, argsJson, mode], 30000, { JARVIS_UI: "web" });
   let parsed;
   try {
     parsed = JSON.parse(result.stdout);
@@ -1089,7 +1089,7 @@ wss.on("connection", (ws) => {
       // it contains, with no injection risk.
       const fullArgs = [...JARVIS.args, prompt];
       send(ws, { type: "ask-start", cmdline: [JARVIS.cmd, ...JARVIS.args, "<your message>"].join(" ") });
-      const extraEnv = { ...conversationEnv(msg.conversationId) };
+      const extraEnv = { ...conversationEnv(msg.conversationId), JARVIS_UI: "web" };
       if (typeof msg.allowedTools === "string") {
         extraEnv.JARVIS_ALLOWED_TOOLS = msg.allowedTools;
       }

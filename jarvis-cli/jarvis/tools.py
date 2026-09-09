@@ -35,6 +35,7 @@ from .ocr_tools import OCR_TOOL_SCHEMAS, OCR_TOOLS
 from .pkg_tools import PKG_TOOL_SCHEMAS, PKG_TOOLS
 from .playnite_api_tools import PLAYNITE_API_TOOL_SCHEMAS, PLAYNITE_API_TOOLS
 from .playnite_tools import PLAYNITE_TOOL_SCHEMAS as _PLAYNITE_CORE_SCHEMAS, PLAYNITE_TOOLS as _PLAYNITE_CORE_TOOLS
+from .present_tools import PRESENT_TOOL_SCHEMAS, PRESENT_TOOLS
 from .radio_tools import RADIO_TOOL_SCHEMAS, RADIO_TOOLS
 from .screenshot_tools import SCREENSHOT_TOOL_SCHEMAS, SCREENSHOT_TOOLS
 from .spotify_tools import SPOTIFY_TOOL_SCHEMAS, SPOTIFY_TOOLS
@@ -289,6 +290,7 @@ CORE_TOOL_SCHEMAS = [
     *CUSTOM_TOOL_SCHEMAS,
     *YTDL_TOOL_SCHEMAS,
     *EVERYTHING_TOOL_SCHEMAS,
+    *PRESENT_TOOL_SCHEMAS,
 ]
 
 PLAYNITE_AND_SPOTIFY = [*PLAYNITE_TOOL_SCHEMAS, *SPOTIFY_TOOL_SCHEMAS]
@@ -467,6 +469,7 @@ TOOLS = {
     **CUSTOM_TOOLS,
     **YTDL_TOOLS,
     **EVERYTHING_TOOLS,
+    **PRESENT_TOOLS,
 }
 
 
@@ -489,7 +492,7 @@ def execute_tool(name, arguments=None, verbosity=None):
     if fn is None:
         return {"error": f"no such tool: {name}"}
     try:
-        if name in COMMAND_TOOLS or name in PLAYNITE_TOOLS or name in WEB_TOOLS or name in PKG_TOOLS or name in SPOTIFY_TOOLS or name in MEMORY_TOOLS or name in CAPACITY_TOOLS or name in RADIO_TOOLS or name in GIT_TOOLS or name in SCREENSHOT_TOOLS or name in DESKTOP_TOOLS or name in OCR_TOOLS or name in FILE_TOOLS or name in CUSTOM_TOOLS or name in YTDL_TOOLS or name in EVERYTHING_TOOLS or name in ORGANIZE_JSON_TOOLS:
+        if name in COMMAND_TOOLS or name in PLAYNITE_TOOLS or name in WEB_TOOLS or name in PKG_TOOLS or name in SPOTIFY_TOOLS or name in MEMORY_TOOLS or name in CAPACITY_TOOLS or name in RADIO_TOOLS or name in GIT_TOOLS or name in SCREENSHOT_TOOLS or name in DESKTOP_TOOLS or name in OCR_TOOLS or name in FILE_TOOLS or name in CUSTOM_TOOLS or name in YTDL_TOOLS or name in EVERYTHING_TOOLS or name in ORGANIZE_JSON_TOOLS or name in PRESENT_TOOLS:
             result = fn(arguments or {})
         else:
             result = fn()
