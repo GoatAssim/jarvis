@@ -370,8 +370,15 @@
     convoSearch: "",
     askTraceByConv: {},          // convId -> [{text, cls}] recorded "commands Jarvis runs" lines,
                                   // so switching away and back doesn't lose them (see askPromptLine)
-    pendingConfirmByConv: {},    // convId -> {tool, arguments, risk_note} for a confirm request that
-                                  // arrived while that conversation wasn't the one being viewed
+    pendingConfirmByConv: {},    // convId -> {tool, arguments, risk_note, extraItem} for a confirm
+                                  // request that arrived while that conversation wasn't being viewed
+    threadExtrasByConv: {},      // convId -> [{bucket, type, data}] non-text thread items (screenshots,
+                                  // downloads, organize-json results, console dumps, resolved confirms)
+                                  // so they survive switching away and back — see pushThreadExtra() and
+                                  // renderThreadExtra(). "bucket" is the exchange index they belong
+                                  // after (see exchangeCountByConv).
+    exchangeCountByConv: {},     // convId -> number of completed (saved) exchanges, used to bucket
+                                  // threadExtrasByConv entries against loadConversationIntoThread's replay
   };
 
   // ===========================================================================
@@ -1023,11 +1030,14 @@
         break;
       case "ask-confirm-request": {
         const convId = state.askConversationId;
+        const extraItem = pushThreadExtra(convId, "confirm", {
+          tool: msg.tool, arguments: msg.arguments, risk_note: msg.risk_note, resolved: null,
+        });
         if (convId != null) {
-          state.pendingConfirmByConv[convId] = { tool: msg.tool, arguments: msg.arguments, risk_note: msg.risk_note };
+          state.pendingConfirmByConv[convId] = { tool: msg.tool, arguments: msg.arguments, risk_note: msg.risk_note, extraItem };
         }
         if (isViewingAskThread()) {
-          addAskConfirmBubble(msg.tool, msg.arguments, msg.risk_note, convId);
+          addAskConfirmBubble(msg.tool, msg.arguments, msg.risk_note, convId, extraItem);
           setAskStatus("waiting for your confirmation\u2026", "busy");
         } else {
           toast("Jarvis needs your OK on something in another chat.", "info");
@@ -1382,6 +1392,70 @@
     return msg;
   }
 
+  // ---------------------------------------------------------------------
+  // Thread "extras" — the non-text items (screenshots, downloads,
+  // organize-json results, console dumps, resolved confirmations) that get
+  // inserted straight into the ask thread as they happen. Unlike the plain
+  // user/jarvis text exchanges, these never round-tripped through the
+  // server, so loadConversationIntoThread() had nothing to replay them
+  // from — they simply vanished the moment a conversation was rebuilt
+  // (switching away and back, or a page refresh landing back on it).
+  // We mirror them here, bucketed by how many exchanges had completed in
+  // that conversation when they occurred, so they can be replayed in the
+  // right place relative to the text exchanges.
+  // ---------------------------------------------------------------------
+
+  function extraBucketFor(convId) {
+    return state.exchangeCountByConv[convId] || 0;
+  }
+
+  function pushThreadExtra(convId, type, data) {
+    if (convId == null) return null;
+    if (!state.threadExtrasByConv[convId]) state.threadExtrasByConv[convId] = [];
+    const item = { bucket: extraBucketFor(convId), type, data };
+    state.threadExtrasByConv[convId].push(item);
+    return item;
+  }
+
+  // Console dumps stream in incrementally (more lines keep arriving for the
+  // same turn) — find-or-create the one extra for this conversation+bucket
+  // instead of pushing a new one on every update.
+  function upsertConsoleExtra(convId, dumpLines) {
+    if (convId == null) return;
+    const bucket = extraBucketFor(convId);
+    if (!state.threadExtrasByConv[convId]) state.threadExtrasByConv[convId] = [];
+    const arr = state.threadExtrasByConv[convId];
+    let item = arr.find((it) => it.type === "console" && it.bucket === bucket);
+    if (!item) {
+      item = { bucket, type: "console", data: { dumpLines: [] } };
+      arr.push(item);
+    }
+    item.data.dumpLines = dumpLines.slice();
+  }
+
+  // Renders one recorded extra into the (currently on-screen) thread —
+  // used both for a freshly-arrived event and for replaying history when a
+  // conversation is (re)loaded.
+  function renderThreadExtra(item) {
+    switch (item.type) {
+      case "screenshot":
+        renderScreenshotBubble(item.data.filename);
+        break;
+      case "download":
+        renderDownloadBubble(item.data.jobId, item.data.filename, item.data.title);
+        break;
+      case "organizeJson":
+        if (item.data.payload) renderOrganizeJsonExtra(item.data.targetPath, item.data.payload);
+        break;
+      case "console":
+        renderConsoleDumpBubble(item.data.dumpLines);
+        break;
+      case "confirm":
+        if (item.data.resolved !== null) renderResolvedConfirmBubble(item.data);
+        break;
+    }
+  }
+
   function addAskPromptTrace(raw) {
     const line = stripAnsi(raw).trim();
     if (!line) return;
@@ -1420,17 +1494,35 @@
   // purely to get the full parsed data for the Organized/Raw JSON sheet,
   // and renders it with the exact same renderOrganizeJsonResult() used by
   // the typed shortcut, so both paths look identical to the user.
-  function showAskOrganizeJson(targetPath) {
-    if (!isViewingAskThread()) return;
+  // Renders the Organized/Raw JSON sheet bubble; reused for a fresh result
+  // and for replaying an already-fetched one from threadExtrasByConv.
+  function renderOrganizeJsonExtra(targetPath, payload) {
     clearAskEmptyHint();
-    const msg = el("div", { class: "ask-msg ask-msg--jarvis is-pending" }, [
+    const msg = el("div", { class: "ask-msg ask-msg--jarvis" }, [
       el("div", { class: "ask-msg__role" }, "Jarvis"),
-      el("div", { class: "ask-msg__bubble" }, [
-        el("span", { class: "ask-typing" }, [el("span", {}), el("span", {}), el("span", {})]),
-      ]),
+      el("div", { class: "ask-msg__bubble" }),
     ]);
     insertIntoAskThread(msg);
+    renderOrganizeJsonResult(msg, payload);
     askThreadScrollToEnd();
+    return msg;
+  }
+
+  function showAskOrganizeJson(targetPath) {
+    const convId = state.askConversationId;
+    const item = pushThreadExtra(convId, "organizeJson", { targetPath, payload: null });
+    let msg = null;
+    if (isViewingAskThread()) {
+      clearAskEmptyHint();
+      msg = el("div", { class: "ask-msg ask-msg--jarvis is-pending" }, [
+        el("div", { class: "ask-msg__role" }, "Jarvis"),
+        el("div", { class: "ask-msg__bubble" }, [
+          el("span", { class: "ask-typing" }, [el("span", {}), el("span", {}), el("span", {})]),
+        ]),
+      ]);
+      insertIntoAskThread(msg);
+      askThreadScrollToEnd();
+    }
     (async () => {
       let payload;
       try {
@@ -1438,15 +1530,16 @@
       } catch (err) {
         payload = err.data || { ok: false, error: err.message };
       }
+      // Keep the fetched result even if the conversation was switched away
+      // from mid-fetch, so it's there next time this conversation is opened.
+      if (item) item.data.payload = payload;
       // Thread may have been rebuilt (conversation switch) while we waited.
-      if (!askThread.contains(msg)) return;
+      if (!msg || !askThread.contains(msg)) return;
       renderOrganizeJsonResult(msg, payload);
     })();
   }
 
-  function showAskScreenshot(filename) {
-    if (!isViewingAskThread()) return;
-    if (!/^ss_[A-Za-z0-9_.-]+\.png$/.test(filename)) return;
+  function renderScreenshotBubble(filename) {
     clearAskEmptyHint();
     const url = `/api/screenshots/${encodeURIComponent(filename)}`;
     const msg = el("div", { class: "ask-msg ask-msg--jarvis ask-msg--media" }, [
@@ -1465,6 +1558,14 @@
     ]);
     insertIntoAskThread(msg);
     askThreadScrollToEnd();
+    return msg;
+  }
+
+  function showAskScreenshot(filename) {
+    if (!/^ss_[A-Za-z0-9_.-]+\.png$/.test(filename)) return;
+    pushThreadExtra(state.askConversationId, "screenshot", { filename });
+    if (!isViewingAskThread()) return;
+    renderScreenshotBubble(filename);
   }
 
   // A finished ytdl_download (see jarvis-cli/jarvis/ytdl_tools.py) — offers
@@ -1473,10 +1574,7 @@
   const DOWNLOAD_EXT_RE = /\.([A-Za-z0-9]+)$/;
   const AUDIO_EXTS = new Set(["mp3", "m4a", "opus", "wav", "flac", "ogg"]);
 
-  function showAskDownload(jobId, filename, title) {
-    if (!isViewingAskThread()) return;
-    if (!/^dl_[A-Za-z0-9_-]+$/.test(jobId) || !filename) return;
-    clearAskEmptyHint();
+  function renderDownloadBubble(jobId, filename, title) {
     const url = `/api/downloads/${encodeURIComponent(jobId)}/${encodeURIComponent(filename)}`;
     const extMatch = DOWNLOAD_EXT_RE.exec(filename);
     const ext = extMatch ? extMatch[1].toLowerCase() : "";
@@ -1486,6 +1584,7 @@
       ? el("audio", { class: "ask-dl-player", src: url, controls: "true", preload: "none" })
       : el("video", { class: "ask-dl-player", src: url, controls: "true", preload: "none" });
 
+    clearAskEmptyHint();
     const msg = el("div", { class: "ask-msg ask-msg--jarvis ask-msg--media" }, [
       el("div", { class: "ask-msg__role" }, "Jarvis"),
       el("div", { class: "ask-msg__bubble ask-msg__bubble--media" }, [
@@ -1498,6 +1597,14 @@
     ]);
     insertIntoAskThread(msg);
     askThreadScrollToEnd();
+    return msg;
+  }
+
+  function showAskDownload(jobId, filename, title) {
+    if (!/^dl_[A-Za-z0-9_-]+$/.test(jobId) || !filename) return;
+    pushThreadExtra(state.askConversationId, "download", { jobId, filename, title });
+    if (!isViewingAskThread()) return;
+    renderDownloadBubble(jobId, filename, title);
   }
 
   function stripAnsi(s) {
@@ -1669,6 +1776,14 @@
 
   function renderAskTrace(dumpLines) {
     if (!dumpLines.length) return;
+    upsertConsoleExtra(state.askConversationId, dumpLines);
+    if (!isViewingAskThread()) return;
+    renderConsoleDumpBubble(dumpLines);
+  }
+
+  // Renders (or updates) the "Console" bubble with the given dump lines —
+  // used both for a live-streaming reply and for replaying a saved one.
+  function renderConsoleDumpBubble(dumpLines) {
     const msg = ensureAskTraceBubble();
     qs(".ask-msg__bubble", msg).textContent = dumpLines.join("\n");
     msg.dataset.raw = dumpLines.join("\n");
@@ -1680,7 +1795,7 @@
   // on_confirm_request is blocked on a synchronous stdin read right now —
   // server.js relays the answer straight to it, so until Yes/No is
   // clicked here the ask genuinely cannot proceed.
-  function addAskConfirmBubble(tool, args, riskNote, convId) {
+  function addAskConfirmBubble(tool, args, riskNote, convId, extraItem) {
     clearAskEmptyHint();
     const argsStr = JSON.stringify(args || {}, null, 2);
     const bubbleChildren = [
@@ -1710,12 +1825,42 @@
       actions.appendChild(el("div", { class: `ask-confirm__result ${approved ? "is-yes" : "is-no"}` },
         approved ? "\u2713 Approved \u2014 running\u2026" : "\u2717 Declined"));
       if (convId != null) delete state.pendingConfirmByConv[convId];
+      if (extraItem) extraItem.data.resolved = approved;
       wsSend({ type: "ask-confirm-response", approved });
       setAskStatus("thinking\u2026", "busy");
     }
     yesBtn.addEventListener("click", () => resolve(true));
     noBtn.addEventListener("click", () => resolve(false));
 
+    insertIntoAskThread(msg);
+    askThreadScrollToEnd();
+    return msg;
+  }
+
+  // A static, already-resolved confirm bubble — used to replay history
+  // (see renderThreadExtra) instead of the live interactive one above.
+  function renderResolvedConfirmBubble(data) {
+    clearAskEmptyHint();
+    const argsStr = JSON.stringify(data.arguments || {}, null, 2);
+    const bubbleChildren = [
+      el("div", { class: "ask-confirm__tool" }, data.tool || "(unknown tool)"),
+      el("pre", { class: "ask-confirm__args" }, argsStr),
+    ];
+    if (data.risk_note && data.risk_note.note) {
+      const label = data.risk_note.provider ? `AI review \u2014 ${data.risk_note.provider}` : "AI review";
+      bubbleChildren.push(el("div", { class: "ask-confirm__risk" }, [
+        el("div", { class: "ask-confirm__risk-label" }, label),
+        el("div", { class: "ask-confirm__risk-note" }, data.risk_note.note),
+      ]));
+    }
+    bubbleChildren.push(el("div", { class: "ask-confirm__actions" }, [
+      el("div", { class: `ask-confirm__result ${data.resolved ? "is-yes" : "is-no"}` },
+        data.resolved ? "\u2713 Approved \u2014 running\u2026" : "\u2717 Declined"),
+    ]));
+    const msg = el("div", { class: "ask-msg ask-msg--jarvis ask-msg--confirm" }, [
+      el("div", { class: "ask-msg__role" }, "Confirm"),
+      el("div", { class: "ask-msg__bubble ask-msg__bubble--confirm" }, bubbleChildren),
+    ]);
     insertIntoAskThread(msg);
     askThreadScrollToEnd();
     return msg;
@@ -1737,8 +1882,9 @@
   }
 
   function appendAskReplyLine(line) {
-    if (!isViewingAskThread() || !state.askPendingBubble) return;
+    if (!state.askPendingBubble) return;
     state.askReplyLines.push(line);
+    if (!isViewingAskThread()) return;
     rerenderAskPendingBubble();
     askThreadScrollToEnd();
   }
