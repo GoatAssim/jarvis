@@ -472,12 +472,15 @@ def confirm_tool_call(name, arguments, risk_note=None):
         payload["risk_note"] = risk_note
 
     command_flags = risk_note.get("command_flags") if isinstance(risk_note, dict) else None
+    command_run = risk_note.get("command_run") if isinstance(risk_note, dict) else None
 
     if sys.stdin.isatty():
         print(
             f"\n{ERR.YELLOW}\u26a0 Jarvis wants to run: {ERR.BOLD}{name}{ERR.RESET}"
             f"{ERR.YELLOW}({json.dumps(arguments or {}, default=str)}){ERR.RESET}"
         )
+        if command_run is not None:
+            print(f"{ERR.DIM}  Command: {json.dumps(command_run, default=str)}{ERR.RESET}")
         if risk_note:
             note_text = risk_note.get("note") if isinstance(risk_note, dict) else risk_note
             provider = risk_note.get("provider") if isinstance(risk_note, dict) else None
@@ -547,6 +550,18 @@ def confirm_direct_command(name, spec, args):
         risk_note = _risk_note_for(
             name, {"command": name, "vars": arguments, "run": (spec or {}).get("run")}
         )
+
+    # Always attach the saved command's actual 'run' content (its real
+    # shell script/steps) — not just the tool name and typed-in var
+    # values — so the popup shows the user exactly what will execute,
+    # regardless of whether ai_review is also on for a plain-language
+    # summary of it.
+    run_content = (spec or {}).get("run")
+    if run_content is not None:
+        risk_note = dict(risk_note) if isinstance(risk_note, dict) else (
+            {"note": risk_note} if risk_note else {}
+        )
+        risk_note["command_run"] = run_content
 
     return confirm_tool_call(name, arguments, risk_note)
 

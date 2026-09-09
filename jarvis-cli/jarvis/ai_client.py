@@ -736,7 +736,8 @@ def _command_flags_for_call(name, arguments):
         # only changes e.g. `run` must still reflect the flags the command
         # already has, not silently report them as False.
         try:
-            existing = command_tools.load_commands_dict().get(arguments.get("name"))
+            from . import commands_config
+            existing = commands_config.load_commands_dict().get(arguments.get("name"))
         except Exception:
             existing = None
         if isinstance(existing, dict):
@@ -836,6 +837,20 @@ def _make_tool_executor(on_tool_call, schemas=None, on_confirm_request=None,
                     if expanded is not None:
                         review_arguments = expanded
                 risk_note = risk_review(name, review_arguments, cfg, exclude_label=exclude_label)
+
+            # Always show the actual resolved command content for
+            # run_command/run_chain — not just the tool name and the
+            # saved-command name/vars the AI passed — regardless of
+            # whether ai_review produced a plain-language note above, so
+            # the user sees the real shell steps before approving, same
+            # as the direct-run popup (see cli.py's confirm_direct_command).
+            if name in ("run_command", "run_chain"):
+                command_run = command_tools.resolved_run_for_review(name, arguments)
+                if command_run is not None:
+                    risk_note = dict(risk_note) if isinstance(risk_note, dict) else (
+                        {"note": risk_note} if risk_note else {}
+                    )
+                    risk_note["command_run"] = command_run
 
             # For create_command/update_command specifically, always show
             # the user the resulting command's own confirm_required/
