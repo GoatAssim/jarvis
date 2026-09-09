@@ -24,6 +24,7 @@ from pathlib import Path
 
 from .command_tools import COMMAND_TOOL_SCHEMAS, COMMAND_TOOLS
 from .custom_tools import CUSTOM_TOOL_SCHEMAS, CUSTOM_TOOLS
+from .desktop_tools import DESKTOP_TOOL_SCHEMAS, DESKTOP_TOOLS
 from .everything_tools import EVERYTHING_TOOL_SCHEMAS, EVERYTHING_TOOLS
 from .file_tools import FILE_TOOL_SCHEMAS, FILE_TOOLS
 from .git_tools import GIT_TOOL_SCHEMAS, GIT_TOOLS
@@ -278,6 +279,7 @@ CORE_TOOL_SCHEMAS = [
     *RADIO_TOOL_SCHEMAS,
     *GIT_TOOL_SCHEMAS,
     *SCREENSHOT_TOOL_SCHEMAS,
+    *DESKTOP_TOOL_SCHEMAS,
     *ORGANIZE_JSON_TOOL_SCHEMAS,
     *WEB_TOOL_SCHEMAS,
     *PKG_TOOL_SCHEMAS,
@@ -452,6 +454,7 @@ TOOLS = {
     **RADIO_TOOLS,
     **GIT_TOOLS,
     **SCREENSHOT_TOOLS,
+    **DESKTOP_TOOLS,
     **ORGANIZE_JSON_TOOLS,
     **WEB_TOOLS,
     **PKG_TOOLS,
@@ -483,7 +486,7 @@ def execute_tool(name, arguments=None, verbosity=None):
     if fn is None:
         return {"error": f"no such tool: {name}"}
     try:
-        if name in COMMAND_TOOLS or name in PLAYNITE_TOOLS or name in WEB_TOOLS or name in PKG_TOOLS or name in SPOTIFY_TOOLS or name in MEMORY_TOOLS or name in CAPACITY_TOOLS or name in RADIO_TOOLS or name in GIT_TOOLS or name in SCREENSHOT_TOOLS or name in FILE_TOOLS or name in CUSTOM_TOOLS or name in YTDL_TOOLS or name in EVERYTHING_TOOLS or name in ORGANIZE_JSON_TOOLS:
+        if name in COMMAND_TOOLS or name in PLAYNITE_TOOLS or name in WEB_TOOLS or name in PKG_TOOLS or name in SPOTIFY_TOOLS or name in MEMORY_TOOLS or name in CAPACITY_TOOLS or name in RADIO_TOOLS or name in GIT_TOOLS or name in SCREENSHOT_TOOLS or name in DESKTOP_TOOLS or name in FILE_TOOLS or name in CUSTOM_TOOLS or name in YTDL_TOOLS or name in EVERYTHING_TOOLS or name in ORGANIZE_JSON_TOOLS:
             result = fn(arguments or {})
         else:
             result = fn()

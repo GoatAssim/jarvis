@@ -49,6 +49,11 @@ DEFAULT_CONFIRM_REQUIRED = {
     "bluetooth_set",
     "git_run",
     "ytdl_download",
+    "type_text",
+    "press_key",
+    "hotkey",
+    "click",
+    "drag",
 }
 
 # run_custom_command is the one tool where a second AI opinion is on by
