@@ -1054,6 +1054,13 @@
         // The reply may have just (re)titled this conversation — refresh
         // the sidebar so its card picks up the new title/gist.
         if (msg.code === 0) refreshConvoList();
+        // A successful turn is now a saved exchange server-side — bump the
+        // bucket counter so the NEXT turn's extras (screenshots, console
+        // dumps, etc.) get filed after it rather than merged into this one.
+        if (msg.code === 0 && state.askConversationId != null) {
+          const convId = state.askConversationId;
+          state.exchangeCountByConv[convId] = (state.exchangeCountByConv[convId] || 0) + 1;
+        }
         state.askConversationId = null;
         break;
       }
@@ -2881,16 +2888,30 @@
     return msg;
   }
 
-  function loadConversationIntoThread(record) {
+  function loadConversationIntoThread(record, convId) {
     askThread.innerHTML = "";
     const exchanges = (record && record.exchanges) || [];
+    const extras = (convId != null && state.threadExtrasByConv[convId]) || [];
+    const renderExtrasForBucket = (bucket) => {
+      for (const item of extras) {
+        if (item.bucket === bucket) renderThreadExtra(item);
+      }
+    };
     if (!exchanges.length) {
-      askThread.appendChild(el("div", { class: "ask-empty" }, "Ask about anything, or tell me what you need done, sir."));
+      renderExtrasForBucket(0);
+      if (!askThread.children.length) {
+        askThread.appendChild(el("div", { class: "ask-empty" }, "Ask about anything, or tell me what you need done, sir."));
+      }
     } else {
-      for (const ex of exchanges) {
+      exchanges.forEach((ex, i) => {
         addUserBubble(ex.user || "");
         addJarvisStaticBubble(ex.jarvis || "");
-      }
+        renderExtrasForBucket(i);
+      });
+      // Extras for the turn currently in flight (or one that failed after
+      // producing media but before finishing) live past the last saved
+      // exchange, at bucket === exchanges.length.
+      renderExtrasForBucket(exchanges.length);
     }
     askThreadScrollToEnd();
   }
@@ -2974,7 +2995,8 @@
       return;
     }
     state.activeConversationId = id;
-    loadConversationIntoThread(record);
+    state.exchangeCountByConv[id] = (record.exchanges || []).length;
+    loadConversationIntoThread(record, id);
     // If this conversation's ask is still running in the background, the
     // thread rebuild above just destroyed the old pending-bubble DOM node
     // (see insertIntoAskThread) — make a fresh one and repaint whatever's
@@ -2988,7 +3010,7 @@
     refreshAskBusyUI();
     const pending = state.pendingConfirmByConv[id];
     if (pending) {
-      addAskConfirmBubble(pending.tool, pending.arguments, pending.risk_note, id);
+      addAskConfirmBubble(pending.tool, pending.arguments, pending.risk_note, id, pending.extraItem);
       setAskStatus("waiting for your confirmation\u2026", "busy");
     }
     renderConvoList();
@@ -3008,7 +3030,8 @@
     state.conversations.unshift(record);
     if (select) {
       state.activeConversationId = record.id;
-      loadConversationIntoThread({ exchanges: [] });
+      state.exchangeCountByConv[record.id] = 0;
+      loadConversationIntoThread({ exchanges: [] }, record.id);
       askPromptReset();
       refreshAskBusyUI();
     }
@@ -3026,6 +3049,8 @@
     }
     delete state.askTraceByConv[id];
     delete state.pendingConfirmByConv[id];
+    delete state.threadExtrasByConv[id];
+    delete state.exchangeCountByConv[id];
     state.conversations = state.conversations.filter((c) => c.id !== id);
     if (id === state.activeConversationId) {
       // Land somewhere sane: the next most recent chat, or a brand-new one.
