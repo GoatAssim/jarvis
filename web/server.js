@@ -967,6 +967,7 @@ function spawnAndStream(ws, kind, fullArgs, types, extraEnv = {}, onStdoutLine =
 
 const RUN_TYPES = { stdout: "stdout", stderr: "stderr", exit: "exit", error: "error" };
 const ASK_TYPES = { stdout: "ask-stdout", stderr: "ask-stderr", exit: "ask-exit", error: "ask-error" };
+const CONFIRM_MARKER = "JARVIS_CONFIRM_REQUEST ";
 
 wss.on("connection", (ws) => {
   ws.activeChild = null;
@@ -1018,7 +1019,30 @@ wss.on("connection", (ws) => {
         cmdline: [JARVIS.cmd, ...fullArgs].join(" "),
         count: segments.length,
       });
-      spawnAndStream(ws, "run", fullArgs, RUN_TYPES);
+      // Same "JARVIS_CONFIRM_REQUEST {...}" protocol as the ask flow below
+      // (see cli.py's confirm_tool_call / confirm_direct_command) — a
+      // directly-run saved command can carry its own confirm_required/
+      // ai_review flags, independent of anything the AI does, so this
+      // flow needs the exact same marker-detection + pause-for-answer
+      // handling, just under "confirm-request" instead of
+      // "ask-confirm-request" so the UI can tell which surface asked.
+      const runOnStdoutLine = (line) => {
+        if (!line.startsWith(CONFIRM_MARKER)) return false;
+        let payload;
+        try {
+          payload = JSON.parse(line.slice(CONFIRM_MARKER.length));
+        } catch {
+          return false;
+        }
+        send(ws, {
+          type: "confirm-request",
+          tool: payload.tool,
+          arguments: payload.arguments || {},
+          risk_note: payload.risk_note || null,
+        });
+        return true;
+      };
+      spawnAndStream(ws, "run", fullArgs, RUN_TYPES, {}, runOnStdoutLine);
       return;
     }
 
@@ -1069,7 +1093,6 @@ wss.on("connection", (ws) => {
       if (typeof msg.allowedTools === "string") {
         extraEnv.JARVIS_ALLOWED_TOOLS = msg.allowedTools;
       }
-      const CONFIRM_MARKER = "JARVIS_CONFIRM_REQUEST ";
       const onStdoutLine = (line) => {
         if (!line.startsWith(CONFIRM_MARKER)) return false;
         let payload;
@@ -1090,12 +1113,16 @@ wss.on("connection", (ws) => {
       return;
     }
 
-    if (msg.type === "ask-confirm-response") {
-      // The user clicked Yes/No on a confirmation prompt the running ask
-      // is blocked waiting on (see cli.py's on_confirm_request — it's
-      // doing a blocking sys.stdin.readline() right now). Write the
-      // answer straight to its stdin; it picks up on the very next line.
-      if (!ws.activeChild || ws.activeKind !== "ask") return;
+    if (msg.type === "ask-confirm-response" || msg.type === "confirm-response") {
+      // The user clicked Yes/No on a confirmation prompt the running
+      // ask OR direct command-run is blocked waiting on (see cli.py's
+      // on_confirm_request/confirm_tool_call — it's doing a blocking
+      // sys.stdin.readline() right now). Write the answer straight to
+      // its stdin; it picks up on the very next line. Works for either
+      // kind since both go through the exact same stdin-prompt protocol.
+      if (!ws.activeChild) return;
+      if (msg.type === "ask-confirm-response" && ws.activeKind !== "ask") return;
+      if (msg.type === "confirm-response" && ws.activeKind !== "run") return;
       try {
         ws.activeChild.stdin.write((msg.approved ? "y" : "n") + "\n");
       } catch {
