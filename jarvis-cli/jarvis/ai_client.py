@@ -11,7 +11,7 @@ told about itself, and what gets remembered.
 import json
 import re
 
-from . import ai_config, ai_providers, conversations, memory, playnite_config, stats, tool_safety
+from . import ai_config, ai_providers, command_tools, conversations, memory, playnite_config, stats, tool_safety
 from . import tool_result_shaping
 from . import tools as system_tools
 
@@ -770,7 +770,13 @@ def _make_tool_executor(on_tool_call, schemas=None, on_confirm_request=None,
                 runs.append({"name": name, "arguments": arguments, "result": result})
                 return result
 
-        if tool_safety.requires_confirmation(name):
+        # Tool-level gate (tool_safety.json, keyed by tool name) is OR'd with
+        # the per-*saved-command* flags on run_command/run_chain (see
+        # command_tools.command_call_requires_confirmation) so "warn on
+        # deploy-prod but not on list-files" works even though both go
+        # through the same run_command tool.
+        if (tool_safety.requires_confirmation(name)
+                or command_tools.command_call_requires_confirmation(name, arguments)):
             if on_confirm_request is None:
                 result = {
                     "ok": False, "cancelled": True,
@@ -782,9 +788,19 @@ def _make_tool_executor(on_tool_call, schemas=None, on_confirm_request=None,
                 return result
 
             risk_note = None
-            if tool_safety.requires_ai_review(name) and cfg is not None:
+            if (tool_safety.requires_ai_review(name)
+                    or command_tools.command_call_requires_ai_review(name, arguments)) and cfg is not None:
                 exclude_label = (provider_ref or [None])[0]
-                risk_note = risk_review(name, arguments, cfg, exclude_label=exclude_label)
+                # For run_command/run_chain, hand risk_review the resolved
+                # shell steps (vars expanded) instead of just the command
+                # label, so the second AI's opinion is about the real
+                # commands being run, not a guess based on the name.
+                review_arguments = arguments
+                if name in ("run_command", "run_chain"):
+                    expanded = command_tools.resolved_run_for_review(name, arguments)
+                    if expanded is not None:
+                        review_arguments = expanded
+                risk_note = risk_review(name, review_arguments, cfg, exclude_label=exclude_label)
 
             approved = False
             try:

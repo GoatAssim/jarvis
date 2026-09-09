@@ -93,4 +93,8 @@ def validate_command_spec(spec):
     vars_block = spec.get("vars")
     if vars_block is not None and (not isinstance(vars_block, dict) or isinstance(vars_block, list)):
         return "'vars' must be an object."
+    for field in ("confirm_required", "ai_review"):
+        val = spec.get(field)
+        if val is not None and not isinstance(val, bool):
+            return f"'{field}' must be true or false."
     return None

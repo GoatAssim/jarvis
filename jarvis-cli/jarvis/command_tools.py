@@ -187,6 +187,108 @@ def tool_run_chain(args):
     return {"ok": True, "exit_code": 0, "results": all_results}
 
 
+def command_requires_confirmation(name):
+    """True if the saved command `name` has its own confirm_required flag
+    set (independent of run_command/run_chain's tool-level setting in
+    tool_safety.json). False for an unresolvable name — an unknown/
+    ambiguous command is handled by the normal _resolve_command error path
+    when the tool actually runs, not by this safety check."""
+    commands = commands_config.load_commands_dict()
+    resolved_name, spec = _resolve_command(commands, name)
+    if resolved_name is None or not isinstance(spec, dict):
+        return False
+    return bool(spec.get("confirm_required"))
+
+
+def command_requires_ai_review(name):
+    """Same as command_requires_confirmation, but for the per-command
+    ai_review flag."""
+    commands = commands_config.load_commands_dict()
+    resolved_name, spec = _resolve_command(commands, name)
+    if resolved_name is None or not isinstance(spec, dict):
+        return False
+    return bool(spec.get("ai_review"))
+
+
+def command_call_requires_confirmation(tool_name, arguments):
+    """Per-command counterpart to tool_safety.requires_confirmation, for
+    run_command/run_chain specifically \u2014 checks the *saved command's own*
+    confirm_required flag(s), not the tool-level one. For run_chain, any
+    flagged segment requires confirmation for the whole chain. Returns
+    False for any other tool name."""
+    arguments = arguments or {}
+    if tool_name == "run_command":
+        return command_requires_confirmation(arguments.get("name"))
+    if tool_name == "run_chain":
+        segments = arguments.get("segments")
+        if not isinstance(segments, list):
+            return False
+        return any(
+            command_requires_confirmation(seg.get("name"))
+            for seg in segments if isinstance(seg, dict)
+        )
+    return False
+
+
+def command_call_requires_ai_review(tool_name, arguments):
+    """Per-command counterpart to tool_safety.requires_ai_review, mirroring
+    command_call_requires_confirmation above."""
+    arguments = arguments or {}
+    if tool_name == "run_command":
+        return command_requires_ai_review(arguments.get("name"))
+    if tool_name == "run_chain":
+        segments = arguments.get("segments")
+        if not isinstance(segments, list):
+            return False
+        return any(
+            command_requires_ai_review(seg.get("name"))
+            for seg in segments if isinstance(seg, dict)
+        )
+    return False
+
+
+def resolved_run_for_review(tool_name, arguments):
+    """Best-effort expansion of a run_command/run_chain call into the
+    actual resolved command name(s), merged vars, and 'run' shell steps \u2014
+    so risk_review's prompt can describe the real shell commands about to
+    execute instead of just `{name: "deploy-prod"}`. Returns None (never
+    raises) if the call can't be resolved; callers should fall back to the
+    raw arguments in that case."""
+    arguments = arguments or {}
+    try:
+        commands = commands_config.load_commands_dict()
+        if tool_name == "run_command":
+            resolved_name, spec = _resolve_command(commands, arguments.get("name"))
+            if resolved_name is None or not isinstance(spec, dict):
+                return None
+            return {
+                "command": resolved_name,
+                "vars": _merged_vars(spec, arguments.get("vars")),
+                "run": spec.get("run"),
+            }
+        if tool_name == "run_chain":
+            segments = arguments.get("segments")
+            if not isinstance(segments, list):
+                return None
+            expanded = []
+            for seg in segments:
+                if not isinstance(seg, dict):
+                    continue
+                resolved_name, spec = _resolve_command(commands, seg.get("name"))
+                if resolved_name is None or not isinstance(spec, dict):
+                    continue
+                expanded.append({
+                    "command": resolved_name,
+                    "vars": _merged_vars(spec, seg.get("vars")),
+                    "run": spec.get("run"),
+                    "mode": seg.get("mode"),
+                })
+            return {"segments": expanded} if expanded else None
+    except Exception:
+        return None
+    return None
+
+
 _SEARCH_RESULTS_CAP = 15
 _LIST_ALL_CAP = 40
 
@@ -283,6 +385,10 @@ def tool_create_command(args):
         "run": args.get("run"),
         "vars": args.get("vars") or {},
     }
+    if args.get("confirm_required") is not None:
+        spec["confirm_required"] = bool(args["confirm_required"])
+    if args.get("ai_review") is not None:
+        spec["ai_review"] = bool(args["ai_review"])
     err = commands_config.validate_command_spec(spec)
     if err:
         return {"error": err}
@@ -313,6 +419,10 @@ def tool_update_command(args):
         current["run"] = args["run"]
     if "vars" in args and args["vars"] is not None:
         current["vars"] = args["vars"]
+    if "confirm_required" in args and args["confirm_required"] is not None:
+        current["confirm_required"] = bool(args["confirm_required"])
+    if "ai_review" in args and args["ai_review"] is not None:
+        current["ai_review"] = bool(args["ai_review"])
 
     new_name = args.get("new_name")
     if new_name is not None:
@@ -431,6 +541,14 @@ COMMAND_TOOL_SCHEMAS = [
                     "type": "object",
                     "description": "Var specs: {\"varName\": {\"default\": \"x\", \"description\": \"...\"}}.",
                 },
+                "confirm_required": {
+                    "type": "boolean",
+                    "description": "If true, this command asks for confirmation before running, regardless of run_command/run_chain's own tool-level setting. Defaults to false.",
+                },
+                "ai_review": {
+                    "type": "boolean",
+                    "description": "If true, a second AI opinion is attached to this command's confirmation prompt. Defaults to false.",
+                },
             },
             "required": ["name", "run"],
         },
@@ -452,6 +570,14 @@ COMMAND_TOOL_SCHEMAS = [
                     "description": "New run script (string or JSON array of steps).",
                 },
                 "vars": {"type": "object"},
+                "confirm_required": {
+                    "type": "boolean",
+                    "description": "If true, this command asks for confirmation before running, regardless of run_command/run_chain's own tool-level setting.",
+                },
+                "ai_review": {
+                    "type": "boolean",
+                    "description": "If true, a second AI opinion is attached to this command's confirmation prompt.",
+                },
             },
             "required": ["name"],
         },
