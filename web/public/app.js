@@ -1816,6 +1816,11 @@
         el("div", { class: "ask-confirm__risk-note" }, riskNote.note),
       ]));
     }
+    if (riskNote && riskNote.command_flags) {
+      const cf = riskNote.command_flags;
+      bubbleChildren.push(el("div", { class: "ask-confirm__flags" },
+        `Flags: confirm_required=${!!cf.confirm_required}, ai_review=${!!cf.ai_review}`));
+    }
     const yesBtn = el("button", { class: "btn btn--primary ask-confirm__btn", type: "button" }, "Yes, run it");
     const noBtn = el("button", { class: "btn btn--ghost ask-confirm__btn", type: "button" }, "No, cancel");
     const actions = el("div", { class: "ask-confirm__actions" }, [yesBtn, noBtn]);
@@ -1859,6 +1864,11 @@
         el("div", { class: "ask-confirm__risk-label" }, label),
         el("div", { class: "ask-confirm__risk-note" }, data.risk_note.note),
       ]));
+    }
+    if (data.risk_note && data.risk_note.command_flags) {
+      const cf = data.risk_note.command_flags;
+      bubbleChildren.push(el("div", { class: "ask-confirm__flags" },
+        `Flags: confirm_required=${!!cf.confirm_required}, ai_review=${!!cf.ai_review}`));
     }
     bubbleChildren.push(el("div", { class: "ask-confirm__actions" }, [
       el("div", { class: `ask-confirm__result ${data.resolved ? "is-yes" : "is-no"}` },
@@ -2678,6 +2688,11 @@
           el("div", { class: "debug-confirm__risk-label" }, label),
           el("div", { class: "debug-confirm__risk-note" }, pending.risk_note.note),
         ]));
+      }
+      if (pending.risk_note && pending.risk_note.command_flags) {
+        const cf = pending.risk_note.command_flags;
+        wrap.appendChild(el("div", { class: "debug-confirm__flags" },
+          `Flags: confirm_required=${!!cf.confirm_required}, ai_review=${!!cf.ai_review}`));
       }
     }
     const yesBtn = el("button", { class: "btn btn--primary", type: "button" }, "Y \u2014 run it");
