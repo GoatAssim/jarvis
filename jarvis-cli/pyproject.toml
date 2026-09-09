@@ -12,6 +12,7 @@ dependencies = [
 
 [project.optional-dependencies]
 ytdl = ["yt-dlp>=2024.1"]
+desktop = ["pyautogui>=0.9.54"]
 
 [project.scripts]
 jarvis = "jarvis.cli:entry"
