@@ -3087,6 +3087,8 @@
     const spec = mode === "edit" ? state.commands[name] : { description: "", run: [""], vars: {} };
     qs("#f-name").value = mode === "edit" ? name : "";
     qs("#f-desc").value = spec.description || "";
+    qs("#f-confirm-required").checked = !!spec.confirm_required;
+    qs("#f-ai-review").checked = !!spec.ai_review;
 
     buildVarsEditor(spec.vars || {});
     buildStepsEditor(normalizeSteps(spec.run));
@@ -3700,7 +3702,13 @@
     } else {
       run = steps;
     }
-    return { description, run, vars };
+    const spec = { description, run, vars };
+    // Only write these when turned on, so a plain command with neither
+    // toggled stays exactly as compact as before (mirrors the step-level
+    // showCommand pattern above).
+    if (qs("#f-confirm-required").checked) spec.confirm_required = true;
+    if (qs("#f-ai-review").checked) spec.ai_review = true;
+    return spec;
   }
 
   function syncBuilderToRaw() {
@@ -3722,6 +3730,8 @@
       return false;
     }
     qs("#f-desc").value = parsed.description || "";
+    qs("#f-confirm-required").checked = !!parsed.confirm_required;
+    qs("#f-ai-review").checked = !!parsed.ai_review;
     buildVarsEditor(parsed.vars || {});
     buildStepsEditor(normalizeSteps(parsed.run));
     refreshVarSync();

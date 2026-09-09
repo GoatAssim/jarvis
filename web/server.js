@@ -220,6 +220,11 @@ function validateSpec(spec) {
   if (spec.vars !== undefined && (typeof spec.vars !== "object" || Array.isArray(spec.vars))) {
     return "'vars' must be an object.";
   }
+  for (const field of ["confirm_required", "ai_review"]) {
+    if (spec[field] !== undefined && typeof spec[field] !== "boolean") {
+      return `'${field}' must be true or false.`;
+    }
+  }
   return null;
 }
 
