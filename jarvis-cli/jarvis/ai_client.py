@@ -716,6 +716,42 @@ def risk_review(tool_name, arguments, cfg, exclude_label=None, mode=None):
         return None
 
 
+def _command_flags_for_call(name, arguments):
+    """create_command/update_command let the AI set a saved command's own
+    confirm_required/ai_review flags (see command_tools.py's schemas) —
+    this surfaces those two booleans, exactly as the AI is about to save
+    them, so on_confirm_request's caller can show "Flags: confirm_required=
+    True, ai_review=False" on the confirmation prompt instead of the user
+    only finding out by opening the Debug dashboard afterward. Returns
+    None for any other tool name (nothing to attach)."""
+    if name not in ("create_command", "update_command"):
+        return None
+    arguments = arguments or {}
+
+    base_confirm, base_review = False, False
+    if name == "update_command":
+        # Start from the command's *current* flags — update_command only
+        # touches confirm_required/ai_review when the AI explicitly passes
+        # them (see command_tools.tool_update_command), so a call that
+        # only changes e.g. `run` must still reflect the flags the command
+        # already has, not silently report them as False.
+        try:
+            from . import commands_config
+            existing = commands_config.load_commands_dict().get(arguments.get("name"))
+        except Exception:
+            existing = None
+        if isinstance(existing, dict):
+            base_confirm = bool(existing.get("confirm_required"))
+            base_review = bool(existing.get("ai_review"))
+
+    confirm_required = arguments.get("confirm_required")
+    ai_review_flag = arguments.get("ai_review")
+    return {
+        "confirm_required": base_confirm if confirm_required is None else bool(confirm_required),
+        "ai_review": base_review if ai_review_flag is None else bool(ai_review_flag),
+    }
+
+
 def _make_tool_executor(on_tool_call, schemas=None, on_confirm_request=None,
                          cfg=None, provider_ref=None, verbosity_ref=None):
     """Shared across every provider/key in one ask() so a failover never
@@ -801,6 +837,20 @@ def _make_tool_executor(on_tool_call, schemas=None, on_confirm_request=None,
                     if expanded is not None:
                         review_arguments = expanded
                 risk_note = risk_review(name, review_arguments, cfg, exclude_label=exclude_label)
+
+            # For create_command/update_command specifically, always show
+            # the user the resulting command's own confirm_required/
+            # ai_review flags on the confirmation prompt — regardless of
+            # whether ai_review produced a risk note above — so they see
+            # exactly what safety behavior the command they're about to
+            # create/change will have going forward, not just a generic
+            # danger rating for the create/update call itself.
+            command_flags = _command_flags_for_call(name, arguments)
+            if command_flags is not None:
+                risk_note = dict(risk_note) if isinstance(risk_note, dict) else (
+                    {"note": risk_note} if risk_note else {}
+                )
+                risk_note["command_flags"] = command_flags
 
             approved = False
             try:
