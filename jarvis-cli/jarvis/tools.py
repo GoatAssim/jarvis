@@ -393,7 +393,12 @@ CORE_TOOL_SCHEMAS = [
 ]
 
 PLAYNITE_AND_SPOTIFY = [*PLAYNITE_TOOL_SCHEMAS, *SPOTIFY_TOOL_SCHEMAS]
-TOOL_SCHEMAS = [*CORE_TOOL_SCHEMAS, *PLAYNITE_AND_SPOTIFY]
+# search_tools is deliberately NOT part of tool_schemas_for_session()'s
+# normal offering (see that function below) — it's the Phase 5 discovery
+# tool, offered instead of (not alongside) the full catalog. It IS part of
+# TOOL_SCHEMAS/TOOL_INDEX so tool_registry.TOOL_INDEX, schemas_for_tools(),
+# and the tool executor's arg-validation all know about it.
+TOOL_SCHEMAS = [*CORE_TOOL_SCHEMAS, *PLAYNITE_AND_SPOTIFY, *DISCOVERY_TOOL_SCHEMAS]
 
 
 def allowed_tools_from_env():
@@ -614,6 +619,7 @@ TOOLS = {
     **YTDL_TOOLS,
     **EVERYTHING_TOOLS,
     **PRESENT_TOOLS,
+    "search_tools": tool_search_tools,
 }
 
 
@@ -636,7 +642,7 @@ def execute_tool(name, arguments=None, verbosity=None):
     if fn is None:
         return {"error": f"no such tool: {name}"}
     try:
-        if name in COMMAND_TOOLS or name in PLAYNITE_TOOLS or name in WEB_TOOLS or name in PKG_TOOLS or name in SPOTIFY_TOOLS or name in MEMORY_TOOLS or name in CAPACITY_TOOLS or name in RADIO_TOOLS or name in GIT_TOOLS or name in SCREENSHOT_TOOLS or name in DESKTOP_TOOLS or name in OCR_TOOLS or name in FILE_TOOLS or name in CUSTOM_TOOLS or name in YTDL_TOOLS or name in EVERYTHING_TOOLS or name in ORGANIZE_JSON_TOOLS or name in PRESENT_TOOLS:
+        if name in COMMAND_TOOLS or name in PLAYNITE_TOOLS or name in WEB_TOOLS or name in PKG_TOOLS or name in SPOTIFY_TOOLS or name in MEMORY_TOOLS or name in CAPACITY_TOOLS or name in RADIO_TOOLS or name in GIT_TOOLS or name in SCREENSHOT_TOOLS or name in DESKTOP_TOOLS or name in OCR_TOOLS or name in FILE_TOOLS or name in CUSTOM_TOOLS or name in YTDL_TOOLS or name in EVERYTHING_TOOLS or name in ORGANIZE_JSON_TOOLS or name in PRESENT_TOOLS or name == "search_tools":
             result = fn(arguments or {})
         else:
             result = fn()
