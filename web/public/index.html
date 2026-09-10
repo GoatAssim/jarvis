@@ -267,6 +267,14 @@
         <div class="debug-docs" id="debug-docs">
           <div class="debug-empty">Select a tool from the list on the right.</div>
         </div>
+
+        <!-- Phase 0 (new_plan.md) baseline: token/tool/round breakdown for
+             the most recent ask, pushed live by the "ask-usage" ws message
+             (see app.js renderDebugUsage / server.js USAGE_MARKER). -->
+        <div class="debug-pane__head"><h3>Last ask &mdash; tokens</h3></div>
+        <div class="debug-usage" id="debug-usage">
+          <div class="debug-empty">No ask measured yet this session.</div>
+        </div>
       </section>
 
       <!-- MIDDLE: arguments, run, response -->
