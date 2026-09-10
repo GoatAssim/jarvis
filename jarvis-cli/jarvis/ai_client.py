@@ -13,6 +13,7 @@ import re
 
 from . import ai_config, ai_providers, command_tools, conversations, memory, playnite_config, stats, tool_safety
 from . import tool_result_shaping
+from . import tool_router
 from . import tools as system_tools
 
 DEFAULT_TIMEOUT = 30
@@ -1294,6 +1295,25 @@ def ask(user_text, commands=None, on_attempt=None, on_tool_call=None, conversati
     full_schemas = []
     if tools_enabled:
         full_schemas = system_tools.tool_schemas_for_session()
+
+        # Phase 4 of the token-optimization plan (see new_plan.md): ask the
+        # local router (Phase 3, tool_router.py — no model round trip) what
+        # this message plausibly needs before deciding what to *offer*.
+        # Deliberately conservative and safe-by-default: the router only
+        # ever narrows the catalog when it has real keyword signal
+        # (route.confident); anything ambiguous — including "hi", which is
+        # exactly the case this phase targets — still falls back to the
+        # exact full_schemas behavior from before this phase, so there's no
+        # regression risk for messages the router doesn't recognize yet.
+        # tool_executor below is still built from full_schemas regardless
+        # (not active_schemas) so a tool call the router didn't anticipate
+        # still validates/executes normally rather than failing closed.
+        route = tool_router.route(user_text)
+        active_schemas = (
+            system_tools.schemas_for_tools(route.tools)
+            if route.confident else full_schemas
+        )
+
         # Real (description-stripped) argument schemas, not name-only stubs,
         # are the default (full/compact modes) because jarvis is a brand-new
         # process every "jarvis ..." call (see history.py's module
@@ -1307,8 +1327,8 @@ def ask(user_text, commands=None, on_attempt=None, on_tool_call=None, conversati
         # (50% Capacity) mode is for: see tool_schema_style per-provider
         # below, resolved fresh each attempt since mode can still vary by
         # provider under the legacy compact_prompt_providers config.
-        compact_schemas = system_tools.compact_schemas_for_prompt(full_schemas)
-        name_only_schemas = system_tools.name_only_schemas_for_prompt(full_schemas)
+        compact_schemas = system_tools.compact_schemas_for_prompt(active_schemas)
+        name_only_schemas = system_tools.name_only_schemas_for_prompt(active_schemas)
     provider_ref = [None]
     verbosity_ref = ["full"]
     tool_executor = _make_tool_executor(
@@ -1327,7 +1347,7 @@ def ask(user_text, commands=None, on_attempt=None, on_tool_call=None, conversati
             style = profile.get("tool_schema_style")
             tool_schemas = (
                 name_only_schemas if style == "name_only"
-                else full_schemas if style == "raw"
+                else active_schemas if style == "raw"
                 else compact_schemas
             )
         else:
