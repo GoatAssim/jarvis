@@ -13,6 +13,7 @@ import re
 
 from . import ai_config, ai_providers, command_tools, conversations, memory, playnite_config, stats, tool_safety
 from . import tool_result_shaping
+from . import tool_router
 from . import tools as system_tools
 
 DEFAULT_TIMEOUT = 30
@@ -61,12 +62,16 @@ DEFAULT_COMPACT_PROMPT_PROVIDERS = ("groq",)
 #   playnite_freq_games    \u2014 how many frequent Playnite games get listed
 #   skip_other_convos      \u2014 omit the "other recent conversations" context
 #   tool_schema_style      \u2014 "compact" (types/enums/required, short descs),
-#                            "full_desc" (the tool's real, uncompacted
-#                            description + parameters \u2014 richer, costs more),
-#                            or "name_only" (just names \u2014 the model
-#                            re-requests a schema the first time it calls a
-#                            tool needing args it didn't supply; see
-#                            _make_tool_executor)
+#                            "name_only" (just names \u2014 the model re-requests a
+#                            schema the first time it calls a tool needing
+#                            args it didn't supply; see _make_tool_executor), or
+#                            "raw" (the full, uncompacted schema exactly as
+#                            each tool declares it \u2014 no description clipping,
+#                            full property docs; most tokens per tool)
+#   precise_persona        \u2014 optional; when True, _system_prompt appends an
+#                            extra paragraph telling the model to be maximally
+#                            precise/unambiguous (see _system_prompt). Absent
+#                            or False is a no-op \u2014 only "precise" sets this.
 #   tool_result_budget     \u2014 chars of already-ran tool results replayed to
 #                            the next provider on failover
 #   tool_result_verbosity  \u2014 "full" (every field a tool returns), "medium"
@@ -79,12 +84,6 @@ DEFAULT_COMPACT_PROMPT_PROVIDERS = ("groq",)
 #                            called). A tool not listed in
 #                            tool_result_shaping.TOOL_RESULT_SPECS is
 #                            unaffected at every level.
-#   prompt_style           \u2014 which persona/tools-blurb wording _system_prompt
-#                            uses: "full", "precise", "compact", or "ultra".
-#                            Independent of compact_tools_blurb/compact_persona
-#                            above (those control commands/memory/Playnite
-#                            *formatting* compactness) \u2014 this only picks
-#                            which hand-written wording variant to use.
 # ===========================================================================
 
 PROMPT_MODE_DEFS = [
@@ -106,30 +105,6 @@ PROMPT_MODE_DEFS = [
         "tool_schema_style": "compact",
         "tool_result_budget": 3500,
         "tool_result_verbosity": "full",
-        "prompt_style": "full",
-    },
-    {
-        "name": "precise",
-        "label": "150% Capacity",
-        "summary": (
-            "100% Capacity's budgets, plus the tools' full uncompacted "
-            "docs and a more precise, rule-driven system prompt."
-        ),
-        "max_commands": COMPACT_MAX_COMMANDS,
-        "desc_max_len": COMPACT_DESC_MAX_LEN,
-        "history_char_budget": COMPACT_HISTORY_CHAR_BUDGET,
-        "history_exchanges": COMPACT_HISTORY_EXCHANGES,
-        "recap_exchanges": COMPACT_RECAP_EXCHANGES,
-        "recap_budget": COMPACT_RECAP_CHAR_BUDGET,
-        "include_freq": False,
-        "compact_tools_blurb": True,
-        "compact_persona": True,
-        "playnite_freq_games": 5,
-        "skip_other_convos": False,
-        "tool_schema_style": "full_desc",
-        "tool_result_budget": 1600,
-        "tool_result_verbosity": "medium",
-        "prompt_style": "precise",
     },
     {
         "name": "compact",
@@ -144,12 +119,36 @@ PROMPT_MODE_DEFS = [
         "include_freq": False,
         "compact_tools_blurb": True,
         "compact_persona": True,
-        "playnite_freq_games": 5,
-        "skip_other_convos": False,
+        "playnite_freq_games": 0,
+        "skip_other_convos": True,
         "tool_schema_style": "compact",
         "tool_result_budget": 1600,
         "tool_result_verbosity": "medium",
-        "prompt_style": "compact",
+    },
+    {
+        "name": "precise",
+        "label": "150% Capacity",
+        "summary": (
+            "Same history/command budgets as 100%, but full uncompacted tool "
+            "schemas (every field, no description clipping) and a sharper, "
+            "precision-focused system prompt. More tokens per ask than 100%, "
+            "well under 400%."
+        ),
+        "max_commands": COMPACT_MAX_COMMANDS,
+        "desc_max_len": COMPACT_DESC_MAX_LEN,
+        "history_char_budget": COMPACT_HISTORY_CHAR_BUDGET,
+        "history_exchanges": COMPACT_HISTORY_EXCHANGES,
+        "recap_exchanges": COMPACT_RECAP_EXCHANGES,
+        "recap_budget": COMPACT_RECAP_CHAR_BUDGET,
+        "include_freq": False,
+        "compact_tools_blurb": False,
+        "compact_persona": False,
+        "precise_persona": True,
+        "playnite_freq_games": 5,
+        "skip_other_convos": False,
+        "tool_schema_style": "raw",
+        "tool_result_budget": 1600,
+        "tool_result_verbosity": "full",
     },
     {
         "name": "ultra",
@@ -168,12 +167,11 @@ PROMPT_MODE_DEFS = [
         "include_freq": False,
         "compact_tools_blurb": True,
         "compact_persona": True,
-        "playnite_freq_games": 3,
+        "playnite_freq_games": 0,
         "skip_other_convos": True,
         "tool_schema_style": "name_only",
         "tool_result_budget": 600,
         "tool_result_verbosity": "low",
-        "prompt_style": "ultra",
     },
 ]
 
@@ -450,72 +448,35 @@ def set_mode(mode):
     return mode
 
 
-def _tools_blurb(style, has_playnite, has_spotify):
+def _tools_blurb(compact, ultra, has_playnite, has_spotify):
     """Only advertise tools that are actually in this session's schema.
     Groq 400s if the prompt names a tool that isn't in request.tools."""
-    if style == "ultra":
-        # Ultra (50% Capacity): tool_schema_style is already "name_only"
-        # here, so the model gets almost nothing about each tool up
-        # front — this blurb is the only place the essential behavioral
-        # rules (confirm-before-destructive, don't guess a command name,
-        # screenshots are for the user not you) survive. Cut everything
-        # that's just elaboration on top of those rules.
-        parts = [
-            "Tools listed by name only — call with no args first if unsure, "
-            "you'll get its schema back. Confirm before install/delete/off/eval. "
-            "Unsure of a saved command's exact name? search_commands first, never "
-            "guess. Screenshots only give you ok/path — never describe the image. "
-            "Web questions: web_search then web_fetch. Installs: package_search, "
-            "ask, package_install confirm=true. Video: ytdl_info, then ytdl_formats "
-            "if needed, then ytdl_download confirm=true."
-        ]
-        if has_spotify:
-            parts.append("Spotify: spotify_search then spotify_play; never run_command.")
-        if has_playnite:
-            parts.append(
-                "Playnite: find_game/query_games then playnite_launch_game; "
-                "don't claim launch unless it succeeded."
-            )
-        return " ".join(parts)
+    if compact:
+        if ultra:
+            # Ultra (50% Capacity): tool_schema_style is already "name_only"
+            # here, so the model gets almost nothing about each tool up
+            # front \u2014 this blurb is the only place the essential behavioral
+            # rules (confirm-before-destructive, don't guess a command name,
+            # screenshots are for the user not you) survive. Cut everything
+            # that's just elaboration on top of those rules.
+            parts = [
+                "Tools listed by name only \u2014 call with no args first if unsure, "
+                "you'll get its schema back. Confirm before install/delete/off/eval. "
+                "Unsure of a saved command's exact name? search_commands first, never "
+                "guess. Screenshots only give you ok/path \u2014 never describe the image. "
+                "Web questions: web_search then web_fetch. Installs: package_search, "
+                "ask, package_install confirm=true. Video: ytdl_info, then ytdl_formats "
+                "if needed, then ytdl_download confirm=true."
+            ]
+            if has_spotify:
+                parts.append("Spotify: spotify_search then spotify_play; never run_command.")
+            if has_playnite:
+                parts.append(
+                    "Playnite: find_game/query_games then playnite_launch_game; "
+                    "don't claim launch unless it succeeded."
+                )
+            return " ".join(parts)
 
-    if style == "precise":
-        # Precise (150% Capacity): tool_schema_style is "full_desc" here, so
-        # every tool's real, uncompacted description/parameters are already
-        # in the prompt — this blurb deliberately does NOT re-explain what
-        # each tool does (that would just duplicate the richer schema text
-        # right above it). Instead it's a tight set of decision rules: when
-        # to check the schema, what "done" actually requires, and the
-        # handful of sequencing rules that aren't obvious from a single
-        # tool's schema in isolation.
-        parts = [
-            "Each tool's schema below is the authoritative reference for exactly what "
-            "it does and takes — read it rather than guessing an argument. Rules that "
-            "cut across tools: confirm explicitly before anything destructive or "
-            "irreversible (install/delete/uninstall/off/eval/reset/clean/force-push). "
-            "Never state an action succeeded unless a tool result actually reports "
-            "success — no assuming, no inferring from silence. Before run_command or "
-            "run_chain, if you aren't 100% certain of the exact saved command name, "
-            "call search_commands first rather than guessing. Screenshots return a "
-            "bare ok/path for the UI, never pixels to you — don't fabricate a "
-            "description of what's on screen. Anything time-sensitive or fact-checkable "
-            "(news, prices, current events, 'best X') needs web_search then web_fetch "
-            "before you answer — don't rely on memory alone for it."
-        ]
-        if has_spotify:
-            parts.append(
-                "Spotify is free-account friendly — never run_command for it; "
-                "spotify_play may need the user to click play once (remote start is "
-                "Premium-only)."
-            )
-        if has_playnite:
-            parts.append(
-                "For Playnite, query_games/find_game always needs a filter or specific "
-                "title — never dump the whole library; don't claim a game launched "
-                "unless the launch tool itself reported success."
-            )
-        return " ".join(parts)
-
-    if style == "compact":
         parts = [
             "Tools are listed by name only. Call one when you need it. "
             "If it needs arguments you don't know, call it with no arguments — "
@@ -541,7 +502,6 @@ def _tools_blurb(style, has_playnite, has_spotify):
             )
         return " ".join(parts)
 
-    # style == "full"
     parts = [
         "Tools: commands; system info (get_*); radio_status, wifi_set, bluetooth_set; git_run; "
         "take_screenshot; web_search + web_fetch; packages "
@@ -590,41 +550,30 @@ def _tools_blurb(style, has_playnite, has_spotify):
 
 
 def _system_prompt(persona, commands_ctx, freq_ctx, tools_enabled,
-                   compact_tools=False, compact_persona=False, style="compact", has_history=False,
+                   compact_tools=False, compact_persona=False, ultra=False, has_history=False,
                    memory_ctx="", has_playnite=False, has_spotify=False, other_convos_ctx="",
-                   playnite_freq_games=None):
+                   playnite_freq_games=None, precise=False):
     name = persona.get("assistant_name") or DEFAULT_ASSISTANT_NAME
     address = persona.get("address_user_as") or DEFAULT_ADDRESS
     extra = (persona.get("extra_instructions") or "").strip()
 
     parts = []
-    if style == "ultra":
-        # Ultra (50% Capacity): trims the compact persona line further \u2014
-        # "dry wit" is flavor, not a rule the model needs to be told
-        # explicitly to follow; everything else here is load-bearing
-        # (name, how to address the user, don't claim unconfirmed actions).
-        parts.append(
-            f"You are {name}, a local AI butler. Address the user as "
-            f'"{address}" sometimes. Never claim you did something unless a tool confirmed it.'
-        )
-    elif style == "precise":
-        # Precise (150% Capacity): same length budget as compact's persona
-        # line, but written as explicit rules rather than a flavor
-        # description \u2014 "precise" is the point of this mode, so the persona
-        # itself should read like a spec, not a character sketch.
-        parts.append(
-            f"You are {name}, a private AI assistant running locally for one user on their own "
-            f"computer. Be precise: give the exact answer or exact next step, state any assumption "
-            f"you're making, and flag genuine uncertainty rather than guessing. Address the user as "
-            f'"{address}" occasionally, not performatively. Never state that an action succeeded '
-            f"unless a tool result actually confirmed it."
-        )
-    elif style == "compact":
-        parts.append(
-            f"You are {name}, a local AI butler. Dry wit, concise. Address the user as "
-            f'"{address}" sometimes. Never claim you did something unless a tool confirmed it.'
-        )
-    else:  # style == "full"
+    if compact_persona:
+        if ultra:
+            # Ultra (50% Capacity): trims the compact persona line further —
+            # "dry wit" is flavor, not a rule the model needs to be told
+            # explicitly to follow; everything else here is load-bearing
+            # (name, how to address the user, don't claim unconfirmed actions).
+            parts.append(
+                f"You are {name}, a local AI butler. Address the user as "
+                f'"{address}" sometimes. Never claim you did something unless a tool confirmed it.'
+            )
+        else:
+            parts.append(
+                f"You are {name}, a local AI butler. Dry wit, concise. Address the user as "
+                f'"{address}" sometimes. Never claim you did something unless a tool confirmed it.'
+            )
+    else:
         parts.append(
             f"You are {name}, a private AI assistant running locally for one user on their own "
             f"computer \u2014 think a supremely capable, unflappable AI butler: dry wit, complete "
@@ -635,28 +584,33 @@ def _system_prompt(persona, commands_ctx, freq_ctx, tools_enabled,
             f"to have taken an action you didn't actually take."
         )
     if has_history:
-        if style == "ultra":
-            parts.append("Earlier messages are real \u2014 continue that thread.")
-        elif style == "precise":
+        if compact_persona:
+            if ultra:
+                parts.append("Earlier messages are real — continue that thread.")
+            else:
+                parts.append(
+                    "Earlier messages in this chat are real — continue that thread. "
+                    "If the user is answering your questions, proceed with what they asked for."
+                )
+        else:
             parts.append(
-                "The conversation history above is real \u2014 continue it precisely. If the "
-                "latest message answers something you asked, use that answer and proceed; "
-                "don't restart or re-ask what's already been answered."
-            )
-        elif style == "compact":
-            parts.append(
-                "Earlier messages in this chat are real \u2014 continue that thread. "
-                "If the user is answering your questions, proceed with what they asked for."
-            )
-        else:  # "full"
-            parts.append(
-                "The conversation history before the latest user message is real \u2014 continue that "
+                "The conversation history before the latest user message is real — continue that "
                 "thread naturally. If their latest message answers questions you asked, use those "
                 "answers and move forward with their original request. Do not pretend the prior "
                 "turns never happened."
             )
     if tools_enabled:
-        parts.append(_tools_blurb(style, has_playnite, has_spotify))
+        parts.append(_tools_blurb(compact_tools, ultra, has_playnite, has_spotify))
+    if precise:
+        # 150% Capacity only: an extra directive on top of the normal
+        # persona/tools text \u2014 not a replacement for either.
+        parts.append(
+            "Precision mode: state exact values, file paths, and tool results "
+            "verbatim rather than paraphrasing them. If a request is ambiguous "
+            "or you're not certain of a fact, say so explicitly instead of "
+            "guessing \u2014 verify with a tool when one is available rather than "
+            "assuming. Prefer being exactly right over being quick."
+        )
     if memory_ctx:
         parts.append(memory_ctx)
     if other_convos_ctx:
@@ -664,9 +618,17 @@ def _system_prompt(persona, commands_ctx, freq_ctx, tools_enabled,
     if playnite_freq_games is None:
         fallback_mode = "compact" if compact_persona else "full"
         playnite_freq_games = _MODE_BY_NAME[fallback_mode]["playnite_freq_games"]
-    playnite_ctx = playnite_config.frequent_games_context(
-        playnite_freq_games,
-        compact=compact_persona,
+    # playnite_freq_games == 0 means "omit this block entirely" for the
+    # current mode (100%/50% capacity) — frequent_games_context treats a
+    # falsy max_games as "use the configured default", so we must not call
+    # it at all in that case rather than passing 0 through.
+    playnite_ctx = (
+        playnite_config.frequent_games_context(
+            playnite_freq_games,
+            compact=compact_persona,
+        )
+        if playnite_freq_games
+        else ""
     )
     if playnite_ctx:
         parts.append(playnite_ctx)
@@ -677,7 +639,6 @@ def _system_prompt(persona, commands_ctx, freq_ctx, tools_enabled,
     if freq_ctx:
         parts.append(freq_ctx)
     return "\n\n".join(parts)
-
 
 
 def _build_messages(persona, commands, user_text, tools_enabled, profile, conversation_id):
@@ -731,6 +692,7 @@ def _build_messages(persona, commands, user_text, tools_enabled, profile, conver
         has_spotify=any(n.startswith("spotify_") for n in offered_names),
         other_convos_ctx=other_convos_ctx,
         playnite_freq_games=profile.get("playnite_freq_games"),
+        precise=profile.get("precise_persona", False),
     )
     messages = [{"role": "system", "content": system_prompt}]
     messages.extend(prior_turns)
@@ -1333,6 +1295,25 @@ def ask(user_text, commands=None, on_attempt=None, on_tool_call=None, conversati
     full_schemas = []
     if tools_enabled:
         full_schemas = system_tools.tool_schemas_for_session()
+
+        # Phase 4 of the token-optimization plan (see new_plan.md): ask the
+        # local router (Phase 3, tool_router.py — no model round trip) what
+        # this message plausibly needs before deciding what to *offer*.
+        # Deliberately conservative and safe-by-default: the router only
+        # ever narrows the catalog when it has real keyword signal
+        # (route.confident); anything ambiguous — including "hi", which is
+        # exactly the case this phase targets — still falls back to the
+        # exact full_schemas behavior from before this phase, so there's no
+        # regression risk for messages the router doesn't recognize yet.
+        # tool_executor below is still built from full_schemas regardless
+        # (not active_schemas) so a tool call the router didn't anticipate
+        # still validates/executes normally rather than failing closed.
+        route = tool_router.route(user_text)
+        active_schemas = (
+            system_tools.schemas_for_tools(route.tools)
+            if route.confident else full_schemas
+        )
+
         # Real (description-stripped) argument schemas, not name-only stubs,
         # are the default (full/compact modes) because jarvis is a brand-new
         # process every "jarvis ..." call (see history.py's module
@@ -1346,13 +1327,8 @@ def ask(user_text, commands=None, on_attempt=None, on_tool_call=None, conversati
         # (50% Capacity) mode is for: see tool_schema_style per-provider
         # below, resolved fresh each attempt since mode can still vary by
         # provider under the legacy compact_prompt_providers config.
-        compact_schemas = system_tools.compact_schemas_for_prompt(full_schemas)
-        name_only_schemas = system_tools.name_only_schemas_for_prompt(full_schemas)
-        # full_schemas itself (tool_schemas_for_session()'s raw output) is
-        # already the uncompacted schema \u2014 full "description" text, full
-        # (non-compacted) "parameters" \u2014 so "precise" mode's tool_schema_style
-        # ("full_desc") just reuses it directly rather than needing its own
-        # builder function.
+        compact_schemas = system_tools.compact_schemas_for_prompt(active_schemas)
+        name_only_schemas = system_tools.name_only_schemas_for_prompt(active_schemas)
     provider_ref = [None]
     verbosity_ref = ["full"]
     tool_executor = _make_tool_executor(
@@ -1368,9 +1344,10 @@ def ask(user_text, commands=None, on_attempt=None, on_tool_call=None, conversati
         profile = _prompt_profile(label, cfg["defaults"])
         verbosity_ref[0] = profile.get("tool_result_verbosity", "full")
         if tools_enabled:
+            style = profile.get("tool_schema_style")
             tool_schemas = (
-                name_only_schemas if profile.get("tool_schema_style") == "name_only"
-                else full_schemas if profile.get("tool_schema_style") == "full_desc"
+                name_only_schemas if style == "name_only"
+                else active_schemas if style == "raw"
                 else compact_schemas
             )
         else:
@@ -1404,11 +1381,14 @@ def ask(user_text, commands=None, on_attempt=None, on_tool_call=None, conversati
             if key is not None:
                 resolved["api_key"] = key
 
+            ai_providers.set_log_context(conv_id, key_label)
             try:
                 result = adapter(resolved, messages, resolved["timeout"],
                                  tools=tool_schemas, tool_executor=tool_executor)
             except Exception as e:  # one bad provider/key must never take down the whole ask
                 result = ai_providers.AIResult(False, error=f"unexpected error: {e}")
+            finally:
+                ai_providers.clear_log_context()
 
             if result.ok and _is_tool_trace_reply(result.text):
                 result = ai_providers.AIResult(
