@@ -1055,6 +1055,12 @@ function spawnAndStream(ws, kind, fullArgs, types, extraEnv = {}, onStdoutLine =
 const RUN_TYPES = { stdout: "stdout", stderr: "stderr", exit: "exit", error: "error" };
 const ASK_TYPES = { stdout: "ask-stdout", stderr: "ask-stderr", exit: "ask-exit", error: "ask-error" };
 const CONFIRM_MARKER = "JARVIS_CONFIRM_REQUEST ";
+// Phase 0 (new_plan.md): cli.py prints one of these per successful ask —
+// {input_tokens, output_tokens, total_tokens, rounds: [...], tool_calls: [...]}
+// (see ai_providers.get_usage_summary). Same marker-on-stdout protocol as
+// CONFIRM_MARKER above, forwarded to the browser as "ask-usage" so the
+// debug menu / chat UI can render a per-turn token breakdown.
+const USAGE_MARKER = "JARVIS_USAGE ";
 
 wss.on("connection", (ws) => {
   ws.activeChild = null;
@@ -1181,6 +1187,16 @@ wss.on("connection", (ws) => {
         extraEnv.JARVIS_ALLOWED_TOOLS = msg.allowedTools;
       }
       const onStdoutLine = (line) => {
+        if (line.startsWith(USAGE_MARKER)) {
+          let usage;
+          try {
+            usage = JSON.parse(line.slice(USAGE_MARKER.length));
+          } catch {
+            return false; // malformed — let it through as plain text rather than swallow it silently
+          }
+          send(ws, { type: "ask-usage", usage });
+          return true;
+        }
         if (!line.startsWith(CONFIRM_MARKER)) return false;
         let payload;
         try {

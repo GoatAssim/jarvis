@@ -693,6 +693,16 @@ def handle_ai_prompt(text, commands):
                     detail = detail[:177] + "..."
         print(f"{ERR.DIM}  $ {friendly}{detail}{ERR.RESET}", file=sys.stderr, flush=True)
 
+    def on_tool_result(name, input_tokens, output_tokens):
+        # Fires once the tool call is done and BOTH halves of the (~estimated)
+        # token count are known — see ai_providers._call_tool_safely. Printed
+        # right under that call's "$ ..." line above, same stderr trace.
+        print(
+            f"{ERR.DIM}    tokens: in={input_tokens} out={output_tokens} "
+            f"total={input_tokens + output_tokens}{ERR.RESET}",
+            file=sys.stderr, flush=True,
+        )
+
     # Gate for anything tool_safety.json flags confirm_required for (see
     # ai_client._make_tool_executor) — delegates to the same
     # confirm_tool_call() that confirm_direct_command() uses for a human
@@ -712,6 +722,7 @@ def handle_ai_prompt(text, commands):
 
     result = ai_client.ask(
         text, commands, on_attempt=on_attempt, on_tool_call=on_tool_call,
+        on_tool_result=on_tool_result,
         conversation_id=conv_id, on_confirm_request=on_confirm_request,
     )
 
@@ -737,6 +748,26 @@ def handle_ai_prompt(text, commands):
                 f"'{OUT.CYAN}jarvis ai-config{OUT.RESET}' shows you where to fix it."
             )
         return 1
+
+    # Phase 0 (new_plan.md): baseline token/tool/round measurement for this
+    # ask. Two lines: a human-readable one on stderr (visible in a plain CLI
+    # trace and in the web console's stderr stream), and a machine-readable
+    # "JARVIS_USAGE <json>" marker line (same protocol shape as
+    # JARVIS_CONFIRM_REQUEST above) that server.js picks off and forwards to
+    # the browser as a structured ws message for the debug menu.
+    usage = result.usage
+    if usage:
+        rounds = usage.get("rounds") or []
+        tool_calls = usage.get("tool_calls") or []
+        print(
+            f"{ERR.DIM}  tokens: in={usage.get('input_tokens', 0)} "
+            f"out={usage.get('output_tokens', 0)} "
+            f"total={usage.get('total_tokens', 0)}  "
+            f"rounds={len(rounds)} tools={len(tool_calls)}{ERR.RESET}",
+            file=sys.stderr, flush=True,
+        )
+        print("JARVIS_USAGE " + json.dumps(usage, default=str, ensure_ascii=False),
+              flush=True)
 
     print(f"{prefix}{result.text}")
     return 0
