@@ -118,8 +118,8 @@ PROMPT_MODE_DEFS = [
         "include_freq": False,
         "compact_tools_blurb": True,
         "compact_persona": True,
-        "playnite_freq_games": 5,
-        "skip_other_convos": False,
+        "playnite_freq_games": 0,
+        "skip_other_convos": True,
         "tool_schema_style": "compact",
         "tool_result_budget": 1600,
         "tool_result_verbosity": "medium",
@@ -166,7 +166,7 @@ PROMPT_MODE_DEFS = [
         "include_freq": False,
         "compact_tools_blurb": True,
         "compact_persona": True,
-        "playnite_freq_games": 3,
+        "playnite_freq_games": 0,
         "skip_other_convos": True,
         "tool_schema_style": "name_only",
         "tool_result_budget": 600,
@@ -617,9 +617,17 @@ def _system_prompt(persona, commands_ctx, freq_ctx, tools_enabled,
     if playnite_freq_games is None:
         fallback_mode = "compact" if compact_persona else "full"
         playnite_freq_games = _MODE_BY_NAME[fallback_mode]["playnite_freq_games"]
-    playnite_ctx = playnite_config.frequent_games_context(
-        playnite_freq_games,
-        compact=compact_persona,
+    # playnite_freq_games == 0 means "omit this block entirely" for the
+    # current mode (100%/50% capacity) — frequent_games_context treats a
+    # falsy max_games as "use the configured default", so we must not call
+    # it at all in that case rather than passing 0 through.
+    playnite_ctx = (
+        playnite_config.frequent_games_context(
+            playnite_freq_games,
+            compact=compact_persona,
+        )
+        if playnite_freq_games
+        else ""
     )
     if playnite_ctx:
         parts.append(playnite_ctx)
