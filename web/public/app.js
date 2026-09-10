@@ -453,6 +453,7 @@
     debugLastResult: null,   // last {ok, result, raw, stderr, error} from /api/tools/run
     debugLastResultError: false,
     debugPendingConfirm: null, // {name, arguments, risk_note} awaiting Yes/No before /api/tools/run
+    debugLastUsage: null,    // Phase 0 (new_plan.md): last ask-usage payload (see handleWsMessage)
     debugMode: null,          // local-only capacity override for this panel, e.g. "compact" \u2014
                                // never sent to /api/mode, never affects the real global mode
 
@@ -1141,6 +1142,26 @@
         break;
       case "ask-stderr":
         addAskPromptTrace(msg.line);
+        break;
+      case "ask-usage":
+        // Phase 0 (new_plan.md) baseline: {input_tokens, output_tokens,
+        // total_tokens, rounds: [{round, input_tokens, output_tokens, source}],
+        // tool_calls: [{name, round, input_tokens, output_tokens, source}]}
+        // from ai_providers.get_usage_summary(), one per successful ask.
+        // Shown two places: a line in this turn's trace, and the debug
+        // menu's "Last ask" token panel (renderDebugUsage below).
+        state.debugLastUsage = msg.usage || null;
+        if (msg.usage) {
+          const u = msg.usage;
+          const rounds = u.rounds || [];
+          const tools = u.tool_calls || [];
+          askPromptLine(
+            `$ tokens  in=${u.input_tokens || 0} out=${u.output_tokens || 0} ` +
+            `total=${u.total_tokens || 0}  rounds=${rounds.length} tools=${tools.length}`,
+            "tool"
+          );
+        }
+        renderDebugUsage();
         break;
       case "ask-confirm-request": {
         const convId = state.askConversationId;
@@ -2518,6 +2539,7 @@
   const debugOverlay = qs("#debug-overlay");
   const debugStatusLine = qs("#debug-status-line");
   const debugDocs = qs("#debug-docs");
+  const debugUsage = qs("#debug-usage"); // Phase 0 (new_plan.md): see renderDebugUsage below
   const debugArgs = qs("#debug-args");
   const debugResponse = qs("#debug-response");
   const debugToolList = qs("#debug-tool-list");
@@ -2621,6 +2643,41 @@
       }
     });
     return row;
+  }
+
+  // Phase 0 (new_plan.md) baseline: render the most recent ask's token/tool/
+  // round breakdown into the debug panel. Called on "ask-usage" (handleWsMessage)
+  // and once on debug-overlay open so a prior turn's numbers are still visible.
+  function renderDebugUsage() {
+    if (!debugUsage) return;
+    debugUsage.innerHTML = "";
+    const u = state.debugLastUsage;
+    if (!u) {
+      debugUsage.appendChild(el("div", { class: "debug-empty" }, "No ask measured yet this session."));
+      return;
+    }
+    const rounds = u.rounds || [];
+    const toolCalls = u.tool_calls || [];
+    debugUsage.appendChild(el("div", { class: "debug-docs__desc" },
+      `input=${u.input_tokens || 0}  output=${u.output_tokens || 0}  ` +
+      `total=${u.total_tokens || 0}  rounds=${rounds.length}  tool calls=${toolCalls.length}`
+    ));
+    if (rounds.length) {
+      debugUsage.appendChild(el("div", { class: "debug-docs__section-title" }, "Per round (reported)"));
+      for (const r of rounds) {
+        debugUsage.appendChild(el("div", { class: "debug-empty" },
+          `round ${r.round}: in=${r.input_tokens || 0} out=${r.output_tokens || 0}`
+        ));
+      }
+    }
+    if (toolCalls.length) {
+      debugUsage.appendChild(el("div", { class: "debug-docs__section-title" }, "Per tool call (estimated)"));
+      for (const t of toolCalls) {
+        debugUsage.appendChild(el("div", { class: "debug-empty" },
+          `${t.name} (round ${t.round}): in\u2248${t.input_tokens || 0} out\u2248${t.output_tokens || 0}`
+        ));
+      }
+    }
   }
 
   function renderDebugDocs(tool) {
@@ -3018,6 +3075,7 @@
       state.debugMode = qs("#btn-mode-switch").dataset.mode || FALLBACK_MODE.mode;
     }
     renderDebugMode();
+    renderDebugUsage();
     if (state.debugLoaded) return;
     debugStatusLine.textContent = "reading tool catalog\u2026";
     debugStatusLine.classList.add("is-busy");
@@ -3097,6 +3155,29 @@
     return `log-entry__dir--${(direction || "info").replace(/[^a-z_]/g, "")}`;
   }
 
+  // Token count shown right next to the provider (key x/y) badge — see
+  // logs.py (each entry's `data`). "usage" entries carry real,
+  // provider-reported counts (token_usage.extract_usage); "tool_call" /
+  // "tool_result" entries carry local ~estimates (token_usage.estimate_
+  // tokens_for), since no provider reports per-tool-call token counts on
+  // its own. Other directions (request/response/error/info) don't carry a
+  // count of their own, so no badge is shown for them.
+  function logEntryTokenLabel(entry) {
+    const data = entry.data;
+    if (!data || typeof data !== "object") return null;
+    if (entry.direction === "usage") {
+      const total = (data.input_tokens || 0) + (data.output_tokens || 0);
+      return `${total} tok (in=${data.input_tokens || 0} out=${data.output_tokens || 0})`;
+    }
+    if (entry.direction === "tool_call") {
+      return `~${data.input_tokens || 0} tok in`;
+    }
+    if (entry.direction === "tool_result") {
+      return `~${data.output_tokens || 0} tok out`;
+    }
+    return null;
+  }
+
   function renderLogsEntries() {
     logsEntriesEl.innerHTML = "";
     logsEntryCount.textContent = state.logsSelected ? `${state.logsEntries.length}` : "";
@@ -3113,10 +3194,12 @@
       return;
     }
     for (const entry of state.logsEntries) {
+      const tokenLabel = logEntryTokenLabel(entry);
       const head = el("div", { class: "log-entry__head" }, [
         el("span", { class: "log-entry__ts" }, (entry.ts || "").replace("T", " ").replace("Z", "") || "?"),
         el("span", { class: `log-entry__dir ${logEntryDirClass(entry.direction)}` }, entry.direction || "?"),
         entry.provider ? el("span", { class: "log-entry__provider" }, entry.provider) : null,
+        tokenLabel ? el("span", { class: "log-entry__tokens" }, tokenLabel) : null,
         entry.round != null ? el("span", { class: "log-entry__round" }, `round ${entry.round}`) : null,
       ]);
       const body = el("pre", { class: "log-entry__body" }, JSON.stringify(entry.data, null, 2));

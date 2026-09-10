@@ -233,16 +233,21 @@ class AskResult:
     """Everything cli.py (or, via the web console, server.js re-running the
     CLI) needs to present one 'jarvis <text>' call to a person."""
 
-    __slots__ = ("ok", "text", "provider", "attempts", "assistant_name", "address_user_as")
+    __slots__ = ("ok", "text", "provider", "attempts", "assistant_name", "address_user_as", "usage")
 
     def __init__(self, ok, text=None, provider=None, attempts=None,
-                 assistant_name=DEFAULT_ASSISTANT_NAME, address_user_as=DEFAULT_ADDRESS):
+                 assistant_name=DEFAULT_ASSISTANT_NAME, address_user_as=DEFAULT_ADDRESS,
+                 usage=None):
         self.ok = ok
         self.text = text
         self.provider = provider
         self.attempts = attempts or []          # [(provider_label, error_reason), ...]
         self.assistant_name = assistant_name
         self.address_user_as = address_user_as
+        # Phase 0 (new_plan.md): ai_providers.AIResult.usage for the attempt
+        # that actually succeeded — {input_tokens, output_tokens, total_tokens,
+        # rounds: [...], tool_calls: [...]}. None if tools/usage weren't tracked.
+        self.usage = usage
 
 
 def _provider_label(provider):
@@ -1247,7 +1252,7 @@ def _maybe_update_title(cfg, conversation_id, exchange_count, user_text, jarvis_
             pass
 
 
-def ask(user_text, commands=None, on_attempt=None, on_tool_call=None, conversation_id=None,
+def ask(user_text, commands=None, on_attempt=None, on_tool_call=None, on_tool_result=None, conversation_id=None,
         on_confirm_request=None):
     """Ask Jarvis something, trying every configured, enabled provider in
     order until one answers \u2014 and within each provider, every one of its
@@ -1260,6 +1265,10 @@ def ask(user_text, commands=None, on_attempt=None, on_tool_call=None, conversati
     a "(key i/N)" suffix when a provider has more than one key configured,
     so the trace makes it obvious which key failed \u2014 useful when e.g. only
     your second OpenAI key has run out of credit.
+
+    on_tool_result(name, input_tokens, output_tokens), if given, fires right
+    after each tool call finishes — once the ~estimated input AND output
+    token counts (see token_usage.estimate_tokens_for) are both known.
 
     on_tool_call(name), if given, fires right before each tool call Jarvis
     makes while answering (battery, wifi, location, ...) \u2014 same idea, live
@@ -1361,7 +1370,7 @@ def ask(user_text, commands=None, on_attempt=None, on_tool_call=None, conversati
             if key is not None:
                 resolved["api_key"] = key
 
-            ai_providers.set_log_context(conv_id, key_label)
+            ai_providers.set_log_context(conv_id, key_label, on_tool_usage=on_tool_result)
             try:
                 result = adapter(resolved, messages, resolved["timeout"],
                                  tools=tool_schemas, tool_executor=tool_executor)
@@ -1383,7 +1392,8 @@ def ask(user_text, commands=None, on_attempt=None, on_tool_call=None, conversati
                 )
                 _maybe_update_title(cfg, conv_id, exchange_count, user_text, result.text)
                 return AskResult(True, text=result.text, provider=label, attempts=attempts,
-                                 assistant_name=assistant_name, address_user_as=address)
+                                 assistant_name=assistant_name, address_user_as=address,
+                                 usage=result.usage)
 
             attempts.append((key_label, result.error))
 
