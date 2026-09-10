@@ -29,8 +29,9 @@ restore the longer prompt, optionally keeping compact only for names in
 compact_prompt_providers.
 
 "defaults.prompt_mode" is the newer, simpler replacement for the two knobs
-above \u2014 one of "full", "compact", or "ultra" (see ai_client.PROMPT_MODES /
-MODE_LABELS: "400% Capacity", "100% Capacity", "50% Capacity"). When set,
+above \u2014 one of "full", "compact", "precise", or "ultra" (see
+ai_client.PROMPT_MODES / MODE_LABELS: "400% Capacity", "100% Capacity",
+"150% Capacity", "50% Capacity"). When set,
 it wins outright and applies to every provider; leave it unset (or use
 "jarvis mode" / "jarvis mode-set <name>", which is what the web UI's
 capacity switch calls) to keep using compact_prompt/compact_prompt_providers
