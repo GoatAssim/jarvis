@@ -17,6 +17,7 @@
   --accent-glow:   rgba(79, 216, 255, 0.35);
 
   --gold:          #f2b544;
+  --orange:        #ff9838;
   --green:         #46f0b6;
   --red:           #ff5c6c;
 
@@ -354,9 +355,10 @@ textarea:focus-visible, select:focus-visible, [tabindex]:focus-visible{
 .btn--danger{ color: var(--red); border-color: rgba(255,92,108,0.35); }
 .btn--danger:hover{ border-color: var(--red); }
 
-/* Prompt-capacity switch (400% / 100% / 50%) — cycles on click, see app.js
-   cycleMode(). Color communicates the tradeoff at a glance: gold = full
-   power/most tokens, cyan = the balanced default, green = leanest/cheapest. */
+/* Prompt-capacity switch (400% / 100% / 150% / 50%) — cycles on click, see
+   app.js cycleMode(). Color communicates the tradeoff at a glance: gold =
+   full power/most tokens, cyan = the balanced default, orange = 150%'s
+   richer tool info + precision prompt, green = leanest/cheapest. */
 .btn--mode{
   display: inline-flex; align-items: center; gap: 7px;
   flex-shrink: 0;
@@ -378,6 +380,11 @@ textarea:focus-visible, select:focus-visible, [tabindex]:focus-visible{
   background: linear-gradient(180deg, rgba(79,216,255,0.12), rgba(79,216,255,0.03));
 }
 .btn--mode[data-mode="compact"]:hover{ border-color: var(--accent); box-shadow: 0 0 14px var(--accent-glow); }
+.btn--mode[data-mode="precise"]{
+  color: var(--orange); border-color: rgba(255, 152, 56, 0.4);
+  background: linear-gradient(180deg, rgba(255,152,56,0.14), rgba(255,152,56,0.04));
+}
+.btn--mode[data-mode="precise"]:hover{ border-color: var(--orange); box-shadow: 0 0 14px rgba(255,152,56,0.3); }
 .btn--mode[data-mode="ultra"]{
   color: var(--green); border-color: rgba(70, 240, 182, 0.4);
   background: linear-gradient(180deg, rgba(70,240,182,0.14), rgba(70,240,182,0.04));
