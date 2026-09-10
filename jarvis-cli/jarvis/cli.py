@@ -41,7 +41,7 @@ ENCODING = "utf-8"
 
 CHAIN_SEP = "then"      # starts a new batch \u2014 waits for the previous one to finish
 PARALLEL_SEP = "and"    # joins the current batch \u2014 runs alongside whatever's already in it
-RESERVED_NAMES = {"config", "ai-config", "ai-clear", "ai-drop-from", "playnite-config", "spotify-config", "spotify-login", "memory-config", "everything-config", "tools-list", "tool-run", "tool-preview", "tool-safety-set", "conv-new", "conv-list", "conv-show", "conv-switch", "conv-delete", "organize-json", "mode", "mode-set", CHAIN_SEP, PARALLEL_SEP, "-h", "--help"}
+RESERVED_NAMES = {"config", "ai-config", "ai-clear", "ai-drop-from", "playnite-config", "spotify-config", "spotify-login", "memory-config", "everything-config", "tools-list", "tool-run", "tool-preview", "tool-safety-set", "conv-new", "conv-list", "conv-show", "conv-switch", "conv-delete", "logs", "organize-json", "mode", "mode-set", CHAIN_SEP, PARALLEL_SEP, "-h", "--help"}
 
 OUT = Palette(sys.stdout)  # actual command output: the banner, the command list
 ERR = Palette(sys.stderr)  # jarvis's own status/trace/error messages
@@ -159,7 +159,7 @@ def print_help(commands, file=sys.stdout):
         print(f"  {p.GREEN}{name.ljust(width)}{p.RESET} {spec.get('description', '')}", file=file)
     print(f"\nRun '{p.CYAN}jarvis <command> --help{p.RESET}' for a command's options.", file=file)
     print(f"Chain several with '{p.CYAN}jarvis cmd1 then cmd2{p.RESET}'.", file=file)
-    print(f"Built-in: {p.CYAN}config{p.RESET}, {p.CYAN}ai-config{p.RESET}, {p.CYAN}ai-clear{p.RESET}, {p.CYAN}tools-list{p.RESET} (prints every AI tool as JSON — not an ask), {p.CYAN}tool-run{p.RESET} (runs one AI tool directly), {p.CYAN}conv-new{p.RESET}/{p.CYAN}conv-list{p.RESET}/{p.CYAN}conv-show{p.RESET}/{p.CYAN}conv-switch{p.RESET}/{p.CYAN}conv-delete{p.RESET} (manage conversations), {p.CYAN}mode{p.RESET}/{p.CYAN}mode-set <full|compact|precise|ultra>{p.RESET} (read/set the prompt's token-usage capacity — 400%/100%/150%/50%).", file=file)
+    print(f"Built-in: {p.CYAN}config{p.RESET}, {p.CYAN}ai-config{p.RESET}, {p.CYAN}ai-clear{p.RESET}, {p.CYAN}tools-list{p.RESET} (prints every AI tool as JSON — not an ask), {p.CYAN}tool-run{p.RESET} (runs one AI tool directly), {p.CYAN}conv-new{p.RESET}/{p.CYAN}conv-list{p.RESET}/{p.CYAN}conv-show{p.RESET}/{p.CYAN}conv-switch{p.RESET}/{p.CYAN}conv-delete{p.RESET} (manage conversations), {p.CYAN}logs{p.RESET} (browse the raw model\u2194backend traffic for a conversation), {p.CYAN}mode{p.RESET}/{p.CYAN}mode-set <full|compact|precise|ultra>{p.RESET} (read/set the prompt's token-usage capacity — 400%/100%/150%/50%).", file=file)
     print(f"Edit {p.DIM}{CONFIG_FILE}{p.RESET} to add or change commands.", file=file)
 
 
@@ -742,6 +742,96 @@ def handle_ai_prompt(text, commands):
     return 0
 
 
+def _format_log_entry(entry):
+    ts = (entry.get("ts") or "")[11:19] or entry.get("ts") or "?"
+    direction = entry.get("direction") or "?"
+    provider = entry.get("provider")
+    color = {
+        "request": ERR.CYAN, "response": ERR.GREEN, "tool_call": ERR.YELLOW,
+        "tool_result": ERR.YELLOW, "error": ERR.RED,
+    }.get(direction, ERR.DIM)
+    head = f"{ERR.DIM}[{ts}]{ERR.RESET} {color}{direction:<11}{ERR.RESET}"
+    if provider:
+        head += f" {ERR.DIM}({provider}){ERR.RESET}"
+    body = json.dumps(entry.get("data"), ensure_ascii=False, default=str)
+    if len(body) > 500:
+        body = body[:500] + "..."
+    return f"{head}  {body}"
+
+
+def run_logs_command(argv, commands):
+    """'jarvis logs' \u2014 conversation-based viewer for the raw JSON traffic
+    between the model and this CLI backend (see logs.py). Lists every
+    conversation that has at least one logged entry, lets you pick one
+    (or pass an id/number directly), prints its latest 50 log lines, then
+    lets you keep going: pressing Enter just exits, or typing a message
+    continues that exact conversation via the normal ask path.
+    """
+    from . import logs as logs_mod
+    from . import conversations
+
+    items = logs_mod.list_logged_conversations()
+    if not items:
+        print(f"{ERR.DIM}No logs yet \u2014 logs are written as soon as you ask Jarvis something.{ERR.RESET}")
+        return
+
+    picked = None
+    arg = argv[0].strip() if argv else ""
+    if arg:
+        if conversations.is_valid_id(arg):
+            picked = arg
+        else:
+            try:
+                idx = int(arg) - 1
+                if 0 <= idx < len(items):
+                    picked = items[idx]["id"]
+            except ValueError:
+                pass
+        if not picked:
+            print(json.dumps({"error": "no such conversation"}))
+            sys.exit(1)
+    else:
+        print(f"{ERR.BOLD}Conversations with logs:{ERR.RESET}")
+        for i, it in enumerate(items, start=1):
+            marker = "" if it["exists"] else f" {ERR.DIM}(deleted){ERR.RESET}"
+            when = (it.get("updated_at") or "")[:19].replace("T", " ")
+            print(f"  {ERR.CYAN}{i}{ERR.RESET}. {it['title']}{marker}  {ERR.DIM}{when}  [{it['id']}]{ERR.RESET}")
+        try:
+            choice = input(f"\n{ERR.BOLD}Pick a conversation [1-{len(items)}]: {ERR.RESET}").strip()
+        except (EOFError, KeyboardInterrupt):
+            print()
+            return
+        if not choice:
+            return
+        try:
+            idx = int(choice) - 1
+        except ValueError:
+            idx = -1
+        if not (0 <= idx < len(items)):
+            print(f"{ERR.RED}Not a valid choice.{ERR.RESET}")
+            sys.exit(1)
+        picked = items[idx]["id"]
+
+    entries = logs_mod.read_entries(picked, limit=50)
+    print(f"\n{ERR.BOLD}Last {len(entries)} log line(s) for {picked}:{ERR.RESET}")
+    if not entries:
+        print(f"  {ERR.DIM}(empty){ERR.RESET}")
+    for entry in entries:
+        print("  " + _format_log_entry(entry))
+
+    try:
+        follow_up = input(
+            f"\n{ERR.BOLD}Enter to exit, or type a message to continue this conversation: {ERR.RESET}"
+        ).strip()
+    except (EOFError, KeyboardInterrupt):
+        print()
+        return
+    if not follow_up:
+        return
+    os.environ["JARVIS_CONVERSATION_ID"] = picked
+    sys.exit(handle_ai_prompt(follow_up, commands) or 0)
+
+
 def main():
     commands = load_commands()
     argv = sys.argv[1:]
@@ -857,6 +947,10 @@ def main():
         print(json.dumps({"ok": ok}))
         if not ok:
             sys.exit(1)
+        return
+
+    if argv[0] == "logs":
+        run_logs_command(argv[1:], commands)
         return
 
     if argv[0] == "playnite-config":
