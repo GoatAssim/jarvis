@@ -269,14 +269,16 @@ TOOL_RESULT_SPECS = {
     },
 
     # ── pyautogui/pygetwindow (desktop_tools.py) ────────────────────────
-    # list_windows/get_active_window are the only two in this group with
-    # anything worth trimming \u2014 click/drag/move_mouse/etc. already return
-    # a handful of short fields. Both share the same window-summary shape
-    # (title/left/top/width/height/isActive/isMinimized): title+isActive
-    # are what the model actually needs to talk about or pick a window;
-    # pixel position/size is semi-necessary (only matters if it's about to
-    # click at a coordinate) and isMinimized is a nice-to-have on top of
-    # that.
+    # These calls tend to chain (list windows \u2192 focus \u2192 click \u2014 several
+    # round trips per user ask), so trimming here pays off more per token
+    # than a one-off tool. list_windows/get_active_window/get_window_info
+    # share the same window-summary shape (title/left/top/width/height/
+    # isActive/isMinimized): title+isActive are what the model actually
+    # needs to talk about or pick a window; pixel position/size is
+    # semi-necessary (only matters if it's about to click at a coordinate)
+    # and isMinimized is a nice-to-have on top of that. click/move_mouse
+    # just echo back the coordinates/timing the caller itself supplied \u2014
+    # confirmation is worth a little at "medium", not worth it at "low".
     "list_windows": {
         "list_item_drop": {
             "windows": {
@@ -289,6 +291,31 @@ TOOL_RESULT_SPECS = {
         "drop_fields": {
             "medium": ["left", "top", "width", "height"],
             "low": ["left", "top", "width", "height", "isMinimized"],
+        },
+    },
+    # get_window_info: same _window_summary shape as get_active_window, same
+    # reasoning \u2014 title+isActive answer "what's this window doing", pixel
+    # rect only matters right before a coordinate-based click.
+    "get_window_info": {
+        "drop_fields": {
+            "medium": ["left", "top", "width", "height"],
+            "low": ["left", "top", "width", "height", "isMinimized"],
+        },
+    },
+    # click: x/y in the result just echo back where the click landed \u2014
+    # useful to confirm at "medium", but the caller already knows what it
+    # asked for, so drop it once capacity is tight.
+    "click": {
+        "drop_fields": {
+            "low": ["x", "y"],
+        },
+    },
+    # move_mouse: x/y are the point requested (necessary to confirm), but
+    # duration is just the glide time the caller itself picked or accepted
+    # the default for \u2014 not worth echoing back at "low".
+    "move_mouse": {
+        "drop_fields": {
+            "low": ["duration"],
         },
     },
 }
