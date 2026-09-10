@@ -552,7 +552,7 @@ def _tools_blurb(compact, ultra, has_playnite, has_spotify):
 def _system_prompt(persona, commands_ctx, freq_ctx, tools_enabled,
                    compact_tools=False, compact_persona=False, ultra=False, has_history=False,
                    memory_ctx="", has_playnite=False, has_spotify=False, other_convos_ctx="",
-                   playnite_freq_games=None, precise=False):
+                   playnite_freq_games=None, precise=False, pack_instructions_ctx=""):
     name = persona.get("assistant_name") or DEFAULT_ASSISTANT_NAME
     address = persona.get("address_user_as") or DEFAULT_ADDRESS
     extra = (persona.get("extra_instructions") or "").strip()
@@ -601,6 +601,8 @@ def _system_prompt(persona, commands_ctx, freq_ctx, tools_enabled,
             )
     if tools_enabled:
         parts.append(_tools_blurb(compact_tools, ultra, has_playnite, has_spotify))
+        if pack_instructions_ctx:
+            parts.append(pack_instructions_ctx)
     if precise:
         # 150% Capacity only: an extra directive on top of the normal
         # persona/tools text \u2014 not a replacement for either.
@@ -641,9 +643,20 @@ def _system_prompt(persona, commands_ctx, freq_ctx, tools_enabled,
     return "\n\n".join(parts)
 
 
-def _build_messages(persona, commands, user_text, tools_enabled, profile, conversation_id):
+def _build_messages(persona, commands, user_text, tools_enabled, profile, conversation_id, route=None):
     compact = profile.get("compact_tools_blurb", False)
-    commands_ctx = _commands_context(
+    # Phase 8 of the token-optimization plan (see new_plan.md): the full
+    # saved-commands listing only earns its tokens when the "commands"
+    # tool group is actually in play. When the router is confident about a
+    # *different* group, search_commands/run_command/etc. aren't even
+    # being offered this round (see ask()'s active_schemas) — so a dozen
+    # inlined command names+descriptions would be pure overhead with no
+    # tool available to act on them anyway. Stay unconditional (the exact
+    # prior behavior) whenever the router has no opinion or "commands" is
+    # itself one of the matched groups, since that's the safe/no-regression
+    # case this phase must not touch.
+    skip_commands_listing = bool(route) and route.confident and "commands" not in route.groups
+    commands_ctx = "" if skip_commands_listing else _commands_context(
         commands,
         max_listed=profile["max_commands"],
         desc_max_len=profile["desc_max_len"],
@@ -678,6 +691,23 @@ def _build_messages(persona, commands, user_text, tools_enabled, profile, conver
     )
     offered = system_tools.tool_schemas_for_session() if tools_enabled else []
     offered_names = {s["name"] for s in offered}
+    # Phase 6 of the token-optimization plan (see new_plan.md): inject
+    # TOOL_PACK_INSTRUCTIONS only for the groups the router actually
+    # activated this turn, instead of _tools_blurb() baking every
+    # subsystem's workflow guidance into every prompt unconditionally.
+    # Only meaningful once the router is confident (route.groups is empty
+    # otherwise) — when it isn't, active_schemas already fell back to the
+    # small search_tools-only offering (Phase 5), so there's no group-
+    # specific guidance to add here either way.
+    pack_instructions_ctx = ""
+    if route is not None and route.confident:
+        from . import tool_registry
+        pack_lines = [
+            tool_registry.pack_instruction(group)
+            for group in route.groups
+            if tool_registry.pack_instruction(group)
+        ]
+        pack_instructions_ctx = " ".join(pack_lines)
     system_prompt = _system_prompt(
         persona,
         commands_ctx,
@@ -693,6 +723,7 @@ def _build_messages(persona, commands, user_text, tools_enabled, profile, conver
         other_convos_ctx=other_convos_ctx,
         playnite_freq_games=profile.get("playnite_freq_games"),
         precise=profile.get("precise_persona", False),
+        pack_instructions_ctx=pack_instructions_ctx,
     )
     messages = [{"role": "system", "content": system_prompt}]
     messages.extend(prior_turns)
@@ -848,7 +879,8 @@ def _command_flags_for_call(name, arguments):
 
 
 def _make_tool_executor(on_tool_call, schemas=None, on_confirm_request=None,
-                         cfg=None, provider_ref=None, verbosity_ref=None):
+                         cfg=None, provider_ref=None, verbosity_ref=None,
+                         discover_sink=None):
     """Shared across every provider/key in one ask() so a failover never
     re-runs the same command, Playnite action, or web fetch. Cache hits
     still return the original result (no second launch / install / HTTP).
@@ -1009,6 +1041,18 @@ def _make_tool_executor(on_tool_call, schemas=None, on_confirm_request=None,
         if confirm_meta is not None:
             run_entry["confirm"] = confirm_meta
         runs.append(run_entry)
+
+        # Phase 5 handoff (see new_plan.md): a successful search_tools call
+        # hands its matches to discover_sink so ask() can grow this round's
+        # active/compact/name_only_schemas in place \u2014 the match is then
+        # actually offered (and callable) on the *next* round, rather than
+        # just described in this tool's own reply and then unreachable.
+        if name == "search_tools" and discover_sink and isinstance(result, dict):
+            matches = result.get("matches") or []
+            found = [m.get("name") for m in matches if isinstance(m, dict) and m.get("name")]
+            if found:
+                discover_sink(found)
+
         return result
 
     _executor.runs = runs
@@ -1309,9 +1353,17 @@ def ask(user_text, commands=None, on_attempt=None, on_tool_call=None, conversati
         # (not active_schemas) so a tool call the router didn't anticipate
         # still validates/executes normally rather than failing closed.
         route = tool_router.route(user_text)
+        # Phase 5 of the token-optimization plan (see new_plan.md): when the
+        # router has no opinion, don't fall all the way back to the full
+        # catalog — offer only the small always-available search_tools
+        # discovery tool instead. A real tool call the model needs is still
+        # reachable (search_tools -> _make_tool_executor's discover_sink
+        # below grows active/compact/name_only_schemas in place, so a match
+        # becomes callable on the very next round without a second full
+        # prompt resend), it's just not offered up front on spec.
         active_schemas = (
             system_tools.schemas_for_tools(route.tools)
-            if route.confident else full_schemas
+            if route.confident else list(system_tools.DISCOVERY_TOOL_SCHEMAS)
         )
 
         # Real (description-stripped) argument schemas, not name-only stubs,
@@ -1331,9 +1383,32 @@ def ask(user_text, commands=None, on_attempt=None, on_tool_call=None, conversati
         name_only_schemas = system_tools.name_only_schemas_for_prompt(active_schemas)
     provider_ref = [None]
     verbosity_ref = ["full"]
+
+    _discovered_names = {s.get("name") for s in active_schemas} if tools_enabled else set()
+
+    def _discover_sink(names):
+        """Phase 5 handoff: called by the tool executor right after a
+        search_tools call returns matches. Grows active_schemas (raw),
+        compact_schemas, and name_only_schemas *in place* (all three, since
+        which one is actually sent depends on the per-provider
+        tool_schema_style resolved below) so a matched tool is really
+        callable on the model's very next round in this same ask() \u2014 not
+        just described in the search_tools reply and then unreachable."""
+        for name in names or []:
+            if not name or name in _discovered_names:
+                continue
+            full = system_tools.schemas_for_tools([name])
+            if not full:
+                continue
+            _discovered_names.add(name)
+            active_schemas.extend(full)
+            compact_schemas.extend(system_tools.compact_schemas_for_prompt(full))
+            name_only_schemas.extend(system_tools.name_only_schemas_for_prompt(full))
+
     tool_executor = _make_tool_executor(
         on_tool_call, full_schemas, on_confirm_request=on_confirm_request,
         cfg=cfg, provider_ref=provider_ref, verbosity_ref=verbosity_ref,
+        discover_sink=_discover_sink if tools_enabled else None,
     ) if tools_enabled else None
 
     attempts = []
@@ -1364,7 +1439,8 @@ def ask(user_text, commands=None, on_attempt=None, on_tool_call=None, conversati
 
         for i, key in enumerate(keys, start=1):
             messages = _build_messages(
-                persona, commands, user_text, tools_enabled, profile, conv_id
+                persona, commands, user_text, tools_enabled, profile, conv_id,
+                route=route if tools_enabled else None,
             )
             runs = getattr(tool_executor, "runs", None) if tool_executor else None
             if runs:
