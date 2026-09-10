@@ -227,16 +227,31 @@ def _call_tool_safely(tool_executor, name, arguments, round_num=None):
     """
     conv_id = _log_conv_id()
     input_tokens = token_usage.estimate_tokens_for(arguments)
+    try:
+        result = tool_executor(name, arguments)
+    except Exception as e:
+        result = {"error": f"{name} failed: {e}"}
+
+    # ai_client._make_tool_executor shares one tool_executor (and its
+    # result cache) across every provider/key failover in a single ask()
+    # specifically so a retried request never re-runs the same tool call —
+    # it marks each call as a cache hit or a real run via this attribute.
+    # A cache hit didn't cost anything new (no tool actually executed, no
+    # extra bytes sent to any provider), so it must not be logged or
+    # counted again here — otherwise every failover retry re-inflates the
+    # token trace and get_usage_summary()'s tool_calls list with duplicate
+    # entries for work that didn't happen. Executors that don't set this
+    # (e.g. no-cache callers, tests) default to "not a cache hit" so
+    # behavior for them is unchanged.
+    if getattr(tool_executor, "_cache_hit", False):
+        return result
+
     if conv_id:
         logs.log(
             conv_id, "tool_call",
             {"name": name, "arguments": arguments, "input_tokens": input_tokens},
             provider=_log_provider(), round_num=round_num,
         )
-    try:
-        result = tool_executor(name, arguments)
-    except Exception as e:
-        result = {"error": f"{name} failed: {e}"}
     output_tokens = token_usage.estimate_tokens_for(result)
     if conv_id:
         logs.log(
