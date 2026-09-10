@@ -1,1062 +1,1513 @@
-"""One small adapter per AI provider "type". Each adapter takes a resolved
-provider config + a generic messages list, and returns an AIResult.
+"""The AI brain: builds Jarvis's system prompt, tries configured providers
+in order until one actually answers, and remembers the exchange.
 
-Generic message shape in (what ai_client.py builds):
-    [{"role": "system"|"user"|"assistant", "content": "..."}, ...]
-
-Every adapter translates that into whatever shape its provider actually
-wants, and translates the response back into plain text — or a short,
-human-readable reason it didn't get one. ai_client.py's failover loop
-doesn't care *why* a provider failed, only that it did, so the reasons
-here are for the trace output a person reads, not for programmatic
-branching.
-
-Auth errors, rate limits/quota, and 5xx are all detected the same way for
-every provider (HTTP status code) and need no maintenance. What genuinely
-differs by provider — and is the part most likely to need a tweak if a
-provider changes their API — is (a) the request/response shape, and
-(b) the specific field that signals a *safety refusal* as opposed to a
-normal answer (still HTTP 200, but not something to hand back to the
-user, and worth failing over on since a different provider may not
-refuse the same prompt). Each adapter is short and self-contained
-specifically so that if one provider's shape changes, fixing it doesn't
-risk the other nine.
-
-Tool calling (added alongside system info tools — see tools.py) follows
-the same principle: each adapter runs its own small "ask, maybe get a
-tool call, run it, ask again" loop internally, in its own provider's wire
-format, rather than funneling everything through one shared cross-
-provider tool-message format. More duplication, but a Gemini-shaped bug
-still can't touch Anthropic's tool handling. tools/tool_executor are
-optional on every call_* function so nothing about the non-tool path
-changes for a caller that doesn't pass them.
+Kept deliberately separate from cli.py (which only knows how to print an
+AskResult nicely) and from ai_providers.py (which only knows how to speak
+one provider's wire format) \u2014 this module is the one place that knows
+*policy*: which provider to try next, what "failed" means, what Jarvis is
+told about itself, and what gets remembered.
 """
 
 import json
-import threading
+import re
 
-import requests
+from . import ai_config, ai_providers, command_tools, conversations, memory, playnite_config, stats, tool_safety
+from . import tool_result_shaping
+from . import tool_router
+from . import tools as system_tools
 
-from . import logs
-from . import token_usage
+DEFAULT_TIMEOUT = 30
+DEFAULT_MAX_TOKENS = 700
+DEFAULT_ASSISTANT_NAME = "J.A.R.V.I.S"
+DEFAULT_ADDRESS = "sir"
+DEFAULT_TOOLS_ENABLED = True
 
-MAX_TOOL_ROUNDS = 5  # follow-up requests allowed after a tool call, per ask — plenty for simple
-# lookups. Every round resends the *whole* growing transcript (system prompt, history, every
-# tool call/result so far), so this is the single biggest token-cost lever in this file: raising
-# it doesn't add tokens linearly, it adds them roughly quadratically (round N resends rounds
-# 1..N-1 too). 5 still covers a two-step "search then fetch then answer" with room to spare.
+MAX_COMMANDS_LISTED = 12  # cap how many command names+descriptions go into every prompt
+COMPACT_MAX_COMMANDS = 6
+COMPACT_DESC_MAX_LEN = 50
+COMPACT_HISTORY_CHAR_BUDGET = 4800
+COMPACT_HISTORY_EXCHANGES = 10
+COMPACT_RECAP_EXCHANGES = 16
+COMPACT_RECAP_CHAR_BUDGET = 1400
+DEFAULT_COMPACT_PROMPT = True
+DEFAULT_COMPACT_PROMPT_PROVIDERS = ("groq",)
+
+# ===========================================================================
+# Prompt "capacity" modes \u2014 a generic, table-driven registry.
+#
+# Each entry in PROMPT_MODE_DEFS is a complete, self-contained profile of
+# prompt-size knobs (see _build_messages/ask() for how every key is used).
+# PROMPT_MODES, MODE_LABELS, the mode cycle (next_mode), the "jarvis mode" /
+# "mode-set" CLI commands, the web UI's capacity switch, and the
+# get_capacity_mode/set_capacity_mode AI tools (mode_tools.py) are all
+# derived from this one list \u2014 nothing else needs to change to add a mode.
+#
+# To add a new mode later: append one dict here with a unique "name" (used
+# in defaults.prompt_mode / "jarvis mode-set <name>" / the tool's "mode"
+# argument) and a "label" (shown in the web switch + get_capacity_mode), plus
+# every knob below. Order matters only for the cycle (web switch click /
+# set_capacity_mode's next=true) \u2014 it steps through this list in order and
+# wraps around.
+#
+# Knobs, in the order they appear below:
+#   max_commands        \u2014 how many saved commands get listed in the prompt
+#   desc_max_len         \u2014 max chars of each command's description
+#   history_char_budget  \u2014 total chars of prior-turn history included
+#   history_exchanges    \u2014 max prior exchanges included
+#   recap_exchanges       \u2014 how many older exchanges get folded into a recap
+#   recap_budget          \u2014 max chars of that recap
+#   include_freq          \u2014 include the "frequently used commands" context
+#   compact_tools_blurb    \u2014 use the short "tools" explainer vs the long one
+#   compact_persona        \u2014 use the short persona blurb vs the long one
+#   playnite_freq_games    \u2014 how many frequent Playnite games get listed
+#   skip_other_convos      \u2014 omit the "other recent conversations" context
+#   tool_schema_style      \u2014 "compact" (types/enums/required, short descs),
+#                            "name_only" (just names \u2014 the model re-requests a
+#                            schema the first time it calls a tool needing
+#                            args it didn't supply; see _make_tool_executor), or
+#                            "raw" (the full, uncompacted schema exactly as
+#                            each tool declares it \u2014 no description clipping,
+#                            full property docs; most tokens per tool)
+#   precise_persona        \u2014 optional; when True, _system_prompt appends an
+#                            extra paragraph telling the model to be maximally
+#                            precise/unambiguous (see _system_prompt). Absent
+#                            or False is a no-op \u2014 only "precise" sets this.
+#   tool_result_budget     \u2014 chars of already-ran tool results replayed to
+#                            the next provider on failover
+#   tool_result_verbosity  \u2014 "full" (every field a tool returns), "medium"
+#                            (drop merely-nice-to-have fields), or "low"
+#                            (only what a tool's author marked necessary) \u2014
+#                            see tool_result_shaping.py, applied to every
+#                            tool call's *result* (as opposed to
+#                            tool_schema_style, which shapes what the model
+#                            is told a tool accepts before it's even
+#                            called). A tool not listed in
+#                            tool_result_shaping.TOOL_RESULT_SPECS is
+#                            unaffected at every level.
+# ===========================================================================
+
+PROMPT_MODE_DEFS = [
+    {
+        "name": "full",
+        "label": "400% Capacity",
+        "summary": "Fullest context and richest answers. Most tokens per ask.",
+        "max_commands": MAX_COMMANDS_LISTED,
+        "desc_max_len": COMPACT_DESC_MAX_LEN * 2,
+        "history_char_budget": 6000,
+        "history_exchanges": 12,
+        "recap_exchanges": 20,
+        "recap_budget": 1800,
+        "include_freq": True,
+        "compact_tools_blurb": False,
+        "compact_persona": False,
+        "playnite_freq_games": 8,
+        "skip_other_convos": False,
+        "tool_schema_style": "compact",
+        "tool_result_budget": 3500,
+        "tool_result_verbosity": "full",
+    },
+    {
+        "name": "compact",
+        "label": "100% Capacity",
+        "summary": "The balanced default \u2014 trimmed history/commands, still full tool schemas.",
+        "max_commands": COMPACT_MAX_COMMANDS,
+        "desc_max_len": COMPACT_DESC_MAX_LEN,
+        "history_char_budget": COMPACT_HISTORY_CHAR_BUDGET,
+        "history_exchanges": COMPACT_HISTORY_EXCHANGES,
+        "recap_exchanges": COMPACT_RECAP_EXCHANGES,
+        "recap_budget": COMPACT_RECAP_CHAR_BUDGET,
+        "include_freq": False,
+        "compact_tools_blurb": True,
+        "compact_persona": True,
+        "playnite_freq_games": 0,
+        "skip_other_convos": True,
+        "tool_schema_style": "compact",
+        "tool_result_budget": 1600,
+        "tool_result_verbosity": "medium",
+    },
+    {
+        "name": "precise",
+        "label": "150% Capacity",
+        "summary": (
+            "Same history/command budgets as 100%, but full uncompacted tool "
+            "schemas (every field, no description clipping) and a sharper, "
+            "precision-focused system prompt. More tokens per ask than 100%, "
+            "well under 400%."
+        ),
+        "max_commands": COMPACT_MAX_COMMANDS,
+        "desc_max_len": COMPACT_DESC_MAX_LEN,
+        "history_char_budget": COMPACT_HISTORY_CHAR_BUDGET,
+        "history_exchanges": COMPACT_HISTORY_EXCHANGES,
+        "recap_exchanges": COMPACT_RECAP_EXCHANGES,
+        "recap_budget": COMPACT_RECAP_CHAR_BUDGET,
+        "include_freq": False,
+        "compact_tools_blurb": False,
+        "compact_persona": False,
+        "precise_persona": True,
+        "playnite_freq_games": 5,
+        "skip_other_convos": False,
+        "tool_schema_style": "raw",
+        "tool_result_budget": 1600,
+        "tool_result_verbosity": "full",
+    },
+    {
+        "name": "ultra",
+        "label": "50% Capacity",
+        "summary": (
+            "Ultra compact \u2014 name-only tool schemas plus every other budget cut "
+            "to the minimum that still works. Cheapest mode; a tool needing "
+            "arguments may cost one extra round trip the first time it's called."
+        ),
+        "max_commands": 4,
+        "desc_max_len": 30,
+        "history_char_budget": 1800,
+        "history_exchanges": 4,
+        "recap_exchanges": 6,
+        "recap_budget": 500,
+        "include_freq": False,
+        "compact_tools_blurb": True,
+        "compact_persona": True,
+        "playnite_freq_games": 0,
+        "skip_other_convos": True,
+        "tool_schema_style": "name_only",
+        "tool_result_budget": 600,
+        "tool_result_verbosity": "low",
+    },
+]
+
+PROMPT_MODES = tuple(m["name"] for m in PROMPT_MODE_DEFS)
+MODE_LABELS = {m["name"]: m["label"] for m in PROMPT_MODE_DEFS}
+MODE_SUMMARIES = {m["name"]: m.get("summary", "") for m in PROMPT_MODE_DEFS}
+_MODE_BY_NAME = {m["name"]: m for m in PROMPT_MODE_DEFS}
+DEFAULT_PROMPT_MODE = "compact"
 
 
-# ---------------------------------------------------------------------------
-# Logging context — the "Logs" feature. ai_client.py sets this once per
-# provider attempt (see ai_client.ask) so that the shared low-level helpers
-# below (_post_json, _call_tool_safely) can attribute the raw request/
-# response/tool traffic to the right conversation without every one of the
-# five adapter loops having to thread a conv_id argument through by hand.
-# Thread-local since the web server may serve multiple asks concurrently.
-# ---------------------------------------------------------------------------
-_log_local = threading.local()
+def mode_options():
+    """[{"mode","label","summary"}, ...] in registry order \u2014 the one place
+    that builds this shape, so cli.py's mode/mode-set commands, the web
+    /api/mode responses, and get_capacity_mode/set_capacity_mode (mode_tools)
+    all show the exact same list. Adding a mode to PROMPT_MODE_DEFS is
+    everything needed for it to show up here."""
+    return [
+        {"mode": m, "label": MODE_LABELS[m], "summary": MODE_SUMMARIES.get(m, "")}
+        for m in PROMPT_MODES
+    ]
+
+# Legacy per-key overrides, kept only for the three built-in modes so an
+# older hand-edited ai_config.json (compact_max_commands, history_char_budget,
+# etc.) keeps working exactly as before. A custom mode appended to
+# PROMPT_MODE_DEFS above has no legacy keys to honor, so it's used as-is.
+_LEGACY_OVERRIDE_KEYS = {
+    "full": {
+        "history_char_budget": ("history_char_budget",),
+        "history_exchanges": ("history_exchanges",),
+        "recap_exchanges": ("recap_exchanges",),
+        "recap_budget": ("recap_char_budget",),
+    },
+    "compact": {
+        "max_commands": ("compact_max_commands",),
+        "history_char_budget": ("history_char_budget", "compact_history_char_budget"),
+        "history_exchanges": ("history_exchanges", "compact_history_exchanges"),
+        "recap_exchanges": ("recap_exchanges", "compact_recap_exchanges"),
+        "recap_budget": ("recap_char_budget", "compact_recap_char_budget"),
+    },
+    "ultra": {
+        "max_commands": ("ultra_max_commands",),
+        "history_char_budget": ("ultra_history_char_budget",),
+        "history_exchanges": ("ultra_history_exchanges",),
+        "recap_exchanges": ("ultra_recap_exchanges",),
+        "recap_budget": ("ultra_recap_char_budget",),
+        "tool_result_budget": ("ultra_tool_result_budget",),
+    },
+}
+_SIMPLE_OVERRIDE_KEYS = {"max_commands", "tool_result_budget"}  # not run through _history_int's floor check
+
+# How often a conversation's AI-generated title + one-line gist get
+# (re)computed: right after the very first exchange (so the sidebar has
+# something useful immediately), then every Nth exchange after that so it
+# stays roughly current without an extra AI round-trip on every single ask.
+TITLE_REGEN_EVERY = 5
+_JSON_OBJECT_RE = re.compile(r"\{.*\}", re.S)
 
 
-def set_log_context(conv_id, provider=None, on_tool_usage=None):
-    _log_local.conv_id = conv_id
-    _log_local.provider = provider
-    # on_tool_usage(name, input_tokens, output_tokens), if given, fires once
-    # per tool call, right after _call_tool_safely below has both halves of
-    # the token estimate (it can't fire any earlier — output_tokens isn't
-    # known until the tool has actually returned).
-    _log_local.on_tool_usage = on_tool_usage
-    # Phase 0 (see new_plan.md): usage/round bookkeeping is scoped to one
-    # provider attempt, same lifecycle as conv_id/provider above — reset
-    # here (ai_client.ask calls this once per attempt) and read back via
-    # get_usage_summary() once that attempt either succeeds or fails.
-    _log_local.usage_rounds = []
-    _log_local.tool_usage = []
+class AskResult:
+    """Everything cli.py (or, via the web console, server.js re-running the
+    CLI) needs to present one 'jarvis <text>' call to a person."""
 
+    __slots__ = ("ok", "text", "provider", "attempts", "assistant_name", "address_user_as", "usage")
 
-def clear_log_context():
-    _log_local.conv_id = None
-    _log_local.provider = None
-    _log_local.on_tool_usage = None
-
-
-def _log_conv_id():
-    return getattr(_log_local, "conv_id", None)
-
-
-def _log_provider():
-    return getattr(_log_local, "provider", None)
-
-
-def _record_usage(provider_type, data, round_num):
-    """Phase 0: log + accumulate the real (provider-reported) token usage
-    for one request/response round, if the response carried any."""
-    usage = token_usage.extract_usage(provider_type, data)
-    if usage is None:
-        return
-    entry = {"round": round_num, **usage}
-    rounds = getattr(_log_local, "usage_rounds", None)
-    if rounds is None:
-        rounds = []
-        _log_local.usage_rounds = rounds
-    rounds.append(entry)
-    conv_id = _log_conv_id()
-    if conv_id:
-        logs.log(conv_id, "usage", entry, provider=_log_provider(), round_num=round_num)
-
-
-def get_usage_summary():
-    """Totals + a per-round/per-tool-call breakdown for the attempt
-    currently (or most recently) in log-context scope. Real provider
-    counts where the response reported them; ~estimated (see
-    token_usage.py) for tool-call arguments/results, which no provider
-    reports token counts for on its own."""
-    rounds = getattr(_log_local, "usage_rounds", None) or []
-    tool_calls = getattr(_log_local, "tool_usage", None) or []
-    total_input = sum(r.get("input_tokens") or 0 for r in rounds)
-    total_output = sum(r.get("output_tokens") or 0 for r in rounds)
-    return {
-        "input_tokens": total_input,
-        "output_tokens": total_output,
-        "total_tokens": total_input + total_output,
-        "rounds": rounds,
-        "tool_calls": tool_calls,
-    }
-
-
-class AIResult:
-    """The outcome of one call to one provider.
-
-    ``tool_history`` is set when a provider ran tools before failing — it's a
-    list of generic {role, content} messages (system+user+tool rounds) that the
-    next provider can continue from instead of re-running those tools.
-    """
-
-    __slots__ = ("ok", "text", "error", "tool_history", "usage")
-
-    def __init__(self, ok, text=None, error=None, tool_history=None, usage=None):
+    def __init__(self, ok, text=None, provider=None, attempts=None,
+                 assistant_name=DEFAULT_ASSISTANT_NAME, address_user_as=DEFAULT_ADDRESS,
+                 usage=None):
         self.ok = ok
         self.text = text
-        self.error = error
-        self.tool_history = tool_history  # enriched messages to hand to the next provider
-        self.usage = usage  # Phase 0 (new_plan.md): get_usage_summary() for this attempt
+        self.provider = provider
+        self.attempts = attempts or []          # [(provider_label, error_reason), ...]
+        self.assistant_name = assistant_name
+        self.address_user_as = address_user_as
+        # Phase 0 (new_plan.md): ai_providers.AIResult.usage for the attempt
+        # that actually succeeded — {input_tokens, output_tokens, total_tokens,
+        # rounds: [...], tool_calls: [...]}. None if tools/usage weren't tracked.
+        self.usage = usage
 
 
-def _post_json(url, headers, payload, timeout):
-    """POST and return (response, None) or (None, human-readable error) —
-    never raises. Every network-level failure (DNS, refused connection,
-    timeout, TLS, ...) collapses into the second case so adapters don't
-    each need their own except-block zoo."""
-    conv_id = _log_conv_id()
-    if conv_id:
-        logs.log(conv_id, "request", {"url": url, "payload": payload}, provider=_log_provider())
-    try:
-        resp = requests.post(url, headers=headers, json=payload, timeout=timeout)
-    except requests.exceptions.Timeout:
-        err = f"timed out after {timeout}s"
-        if conv_id:
-            logs.log(conv_id, "error", {"error": err}, provider=_log_provider())
-        return None, err
-    except requests.exceptions.ConnectionError:
-        err = "couldn't connect (network issue, or the service is down)"
-        if conv_id:
-            logs.log(conv_id, "error", {"error": err}, provider=_log_provider())
-        return None, err
-    except requests.exceptions.RequestException as e:
-        err = f"request failed: {e}"
-        if conv_id:
-            logs.log(conv_id, "error", {"error": err}, provider=_log_provider())
-        return None, err
-    if conv_id:
-        try:
-            body = resp.json()
-        except ValueError:
-            body = (resp.text or "")[:2000]
-        logs.log(conv_id, "response", {"status": resp.status_code, "body": body}, provider=_log_provider())
-    return resp, None
+def _provider_label(provider):
+    return provider.get("name") or provider.get("type") or "provider"
 
 
-def _status_reason(resp):
-    """None for a 2xx response; otherwise a short human reason."""
-    if 200 <= resp.status_code < 300:
-        return None
-    if resp.status_code in (401, 403):
-        return f"invalid or unauthorized API key (HTTP {resp.status_code})"
-    if resp.status_code == 429:
-        return "rate limited or quota exceeded (HTTP 429)"
-    if resp.status_code == 402:
-        return "payment required — out of credits (HTTP 402)"
-    if 500 <= resp.status_code < 600:
-        return f"provider server error (HTTP {resp.status_code})"
-    snippet = (resp.text or "").strip().replace("\n", " ")[:180]
-    return f"HTTP {resp.status_code}{': ' + snippet if snippet else ''}"
+def _eligible_providers(providers, defaults=None):
+    """Enabled, and either local (ollama — no key needed) or actually has at
+    least one real key (see ai_config.provider_keys — handles both the
+    'api_keys' list and the older singular 'api_key'). This is the single
+    point where an empty-key starter-template entry quietly gets skipped
+    instead of being "tried and failed" every time.
+
+    When defaults.provider_priority is set, eligible providers are sorted by
+    that list (unknown names keep their relative array order at the end)."""
+    out = []
+    for p in providers:
+        if not isinstance(p, dict) or not p.get("enabled", True):
+            continue
+        if p.get("type") == "ollama" or ai_config.provider_keys(p):
+            out.append(p)
+    return _sort_providers_by_priority(out, (defaults or {}).get("provider_priority"))
 
 
-def _parse_json(resp):
-    try:
-        return resp.json(), None
-    except ValueError:
-        return None, "couldn't parse the response as JSON"
+def _sort_providers_by_priority(providers, priority_list):
+    """Order providers by defaults.provider_priority (provider names, not keys).
+    Providers missing from the list keep their relative order and trail named ones."""
+    if not priority_list:
+        return providers
+    rank = {name: i for i, name in enumerate(priority_list) if isinstance(name, str)}
+    if not rank:
+        return providers
+    trailing = len(rank)
+
+    def sort_key(item):
+        index, provider = item
+        name = provider.get("name") or ""
+        return (rank.get(name, trailing + index), index)
+
+    indexed = list(enumerate(providers))
+    indexed.sort(key=sort_key)
+    return [p for _, p in indexed]
 
 
-def _split_system(messages):
-    """Anthropic and Gemini both want the system prompt out-of-band, not as
-    a message with role 'system'. Returns (system_text, other_messages)."""
-    system_parts = []
-    turns = []
-    for m in messages:
-        if m.get("role") == "system":
-            if m.get("content"):
-                system_parts.append(m["content"])
+def _resolve(provider, defaults):
+    """Provider-specific fields win; anything unset falls back to the
+    config's 'defaults' block, then a hardcoded default."""
+    merged = {
+        "timeout": defaults.get("timeout", DEFAULT_TIMEOUT),
+        "max_tokens": defaults.get("max_tokens", DEFAULT_MAX_TOKENS),
+    }
+    merged.update(provider)
+    return merged
+
+
+def _format_var_summary(spec):
+    parts = []
+    for var_name, var_spec in (spec.get("vars") or {}).items():
+        if not isinstance(var_spec, dict):
+            continue
+        if "default" in var_spec:
+            parts.append(f"{var_name}={var_spec['default']}")
         else:
-            turns.append(m)
-    return "\n\n".join(system_parts), turns
+            parts.append(f"{var_name}*")
+    return ", ".join(parts)
 
 
-def _call_tool_safely(tool_executor, name, arguments, round_num=None):
-    """Call the caller's tool_executor and return whatever it returns
-    (usually a dict) — or a small error dict if it raised. Never lets a
-    broken tool take down the request loop.
+def _commands_context(commands, max_listed=MAX_COMMANDS_LISTED, desc_max_len=None, compact=False):
+    if not commands:
+        return ""
+    all_names = list(commands.items())
+    names = all_names[:max_listed]
+    lines = []
+    for name, spec in names:
+        if not isinstance(spec, dict):
+            continue
+        desc = spec.get("description", "")
+        if desc_max_len is not None and len(desc) > desc_max_len:
+            desc = desc[: desc_max_len - 1].rstrip() + "…"
+        var_part = _format_var_summary(spec)
+        if var_part:
+            lines.append(f"- {name} ({var_part}): {desc}")
+        else:
+            lines.append(f"- {name}: {desc}")
+    listing = "\n".join(lines)
+    header = "Commands:\n" if compact else "Saved commands:\n"
+    ctx = header + listing
+    remaining = len(all_names) - len(names)
+    if remaining > 0:
+        ctx += (
+            f"\n…and {remaining} more not shown here. If the command the user means "
+            "isn't in this list, call search_commands instead of guessing a name."
+        )
+    return ctx
 
-    Phase 0 (see new_plan.md): providers never report token counts for an
-    individual tool call/result on their own — only for the whole
-    request/response it's embedded in — so input_tokens/output_tokens
-    here are a local ~estimate (token_usage.estimate_tokens_for), logged
-    right alongside the call so the debug panel and Logs viewer can show
-    "how many tokens did this tool call cost" per call, not just per ask.
+
+def _history_int(defaults, keys, floor, fallback):
+    """Prefer explicit history_* knobs. Ignore leftover compact_history_*
+    values from older configs that were too small to keep a conversation."""
+    for key in keys:
+        value = defaults.get(key)
+        if isinstance(value, int) and value >= floor:
+            return value
+    return fallback
+
+
+def _resolve_prompt_mode(provider_name, defaults):
+    """Which of PROMPT_MODES applies to this provider.
+
+    defaults.prompt_mode (set by "jarvis mode-set", the web UI's capacity
+    switch, or the set_capacity_mode AI tool) wins outright when it names a
+    mode in the registry \u2014 that's a single, explicit, global choice. With
+    no explicit mode, fall back to the older per-provider scheme so existing
+    configs keep behaving exactly as before: defaults.compact_prompt
+    (default True) plus defaults.compact_prompt_providers (default
+    ["groq"]) pick "compact" vs "full"; a mode with no matching legacy
+    behavior (like "ultra", or any custom mode appended later) is never
+    reached by this fallback \u2014 nothing used to ask for it.
     """
-    conv_id = _log_conv_id()
-    input_tokens = token_usage.estimate_tokens_for(arguments)
-    try:
-        result = tool_executor(name, arguments)
-    except Exception as e:
-        result = {"error": f"{name} failed: {e}"}
+    explicit = defaults.get("prompt_mode")
+    if explicit in PROMPT_MODES:
+        return explicit
+    compact_all = defaults.get("compact_prompt", DEFAULT_COMPACT_PROMPT)
+    compact_names = defaults.get("compact_prompt_providers")
+    if compact_names is None:
+        compact_names = list(DEFAULT_COMPACT_PROMPT_PROVIDERS)
+    use_compact = bool(compact_all) or provider_name in compact_names
+    return "compact" if use_compact else "full"
 
-    # ai_client._make_tool_executor shares one tool_executor (and its
-    # result cache) across every provider/key failover in a single ask()
-    # specifically so a retried request never re-runs the same tool call —
-    # it marks each call as a cache hit or a real run via this attribute.
-    # A cache hit didn't cost anything new (no tool actually executed, no
-    # extra bytes sent to any provider), so it must not be logged or
-    # counted again here — otherwise every failover retry re-inflates the
-    # token trace and get_usage_summary()'s tool_calls list with duplicate
-    # entries for work that didn't happen. Executors that don't set this
-    # (e.g. no-cache callers, tests) default to "not a cache hit" so
-    # behavior for them is unchanged.
-    if getattr(tool_executor, "_cache_hit", False):
+
+def _prompt_profile(provider_name, defaults):
+    """Return prompt-size knobs for a provider: the matching entry from
+    PROMPT_MODE_DEFS (resolved via _resolve_prompt_mode), with any legacy
+    per-key config overrides applied on top for the three built-in modes
+    (see _LEGACY_OVERRIDE_KEYS). A copy is returned so nothing here ever
+    mutates the registry itself.
+    """
+    mode = _resolve_prompt_mode(provider_name, defaults)
+    base = _MODE_BY_NAME.get(mode) or _MODE_BY_NAME[DEFAULT_PROMPT_MODE]
+    profile = dict(base)
+    profile["mode"] = base["name"]
+
+    for key, config_keys in _LEGACY_OVERRIDE_KEYS.get(base["name"], {}).items():
+        if key in _SIMPLE_OVERRIDE_KEYS:
+            for config_key in config_keys:
+                value = defaults.get(config_key)
+                if value is not None:
+                    profile[key] = value
+                    break
+        else:
+            profile[key] = _history_int(defaults, config_keys, 1, profile[key])
+    return profile
+
+
+def current_mode(cfg=None):
+    """The prompt_mode that's actually in effect right now \u2014 what the web
+    UI's capacity switch, 'jarvis mode', and get_capacity_mode show.
+    Resolved the same way ask() resolves it per-provider (see
+    _resolve_prompt_mode); since a switch only has one indicator, this
+    checks the first eligible provider (or falls back to the global default
+    if none are configured yet)."""
+    cfg = cfg or ai_config.load_ai_config()
+    defaults = cfg.get("defaults") or {}
+    explicit = defaults.get("prompt_mode")
+    if explicit in PROMPT_MODES:
+        return explicit
+    providers = _eligible_providers(cfg.get("providers") or [], defaults)
+    label = _provider_label(providers[0]) if providers else ""
+    return _resolve_prompt_mode(label, defaults)
+
+
+def next_mode(current):
+    """The next mode after `current` in PROMPT_MODE_DEFS's order, wrapping
+    around \u2014 used by both the web switch's click-to-cycle and
+    set_capacity_mode's next=true. Adding a mode to the registry
+    automatically slots it into this cycle; nothing here needs to change."""
+    names = list(PROMPT_MODES)
+    if current not in names:
+        return names[0]
+    return names[(names.index(current) + 1) % len(names)]
+
+
+def set_mode(mode):
+    """Persist defaults.prompt_mode to ~/.jarvis/ai_config.json, leaving
+    every other key (including hand-edited ones this module doesn't know
+    about) untouched. Raises ValueError for anything not in PROMPT_MODES."""
+    if mode not in PROMPT_MODES:
+        raise ValueError(f"unknown mode '{mode}' \u2014 expected one of: {', '.join(PROMPT_MODES)}")
+    ai_config.ensure_ai_config()
+    try:
+        raw = json.loads(ai_config.AI_CONFIG_FILE.read_text(encoding=ai_config.ENCODING))
+    except (json.JSONDecodeError, UnicodeDecodeError, OSError):
+        raw = None
+    if not isinstance(raw, dict):
+        raw = json.loads(json.dumps(ai_config.DEFAULT_AI_CONFIG))  # deep copy of the starter template
+    if not isinstance(raw.get("defaults"), dict):
+        raw["defaults"] = {}
+    raw["defaults"]["prompt_mode"] = mode
+    ai_config.AI_CONFIG_FILE.write_text(
+        json.dumps(raw, indent=2) + "\n", encoding=ai_config.ENCODING
+    )
+    return mode
+
+
+def _tools_blurb(compact, ultra, has_playnite, has_spotify):
+    """Only advertise tools that are actually in this session's schema.
+    Groq 400s if the prompt names a tool that isn't in request.tools."""
+    if compact:
+        if ultra:
+            # Ultra (50% Capacity): tool_schema_style is already "name_only"
+            # here, so the model gets almost nothing about each tool up
+            # front \u2014 this blurb is the only place the essential behavioral
+            # rules (confirm-before-destructive, don't guess a command name,
+            # screenshots are for the user not you) survive. Cut everything
+            # that's just elaboration on top of those rules.
+            parts = [
+                "Tools listed by name only \u2014 call with no args first if unsure, "
+                "you'll get its schema back. Confirm before install/delete/off/eval. "
+                "Unsure of a saved command's exact name? search_commands first, never "
+                "guess. Screenshots only give you ok/path \u2014 never describe the image. "
+                "Web questions: web_search then web_fetch. Installs: package_search, "
+                "ask, package_install confirm=true. Video: ytdl_info, then ytdl_formats "
+                "if needed, then ytdl_download confirm=true."
+            ]
+            if has_spotify:
+                parts.append("Spotify: spotify_search then spotify_play; never run_command.")
+            if has_playnite:
+                parts.append(
+                    "Playnite: find_game/query_games then playnite_launch_game; "
+                    "don't claim launch unless it succeeded."
+                )
+            return " ".join(parts)
+
+        parts = [
+            "Tools are listed by name only. Call one when you need it. "
+            "If it needs arguments you don't know, call it with no arguments — "
+            "you will get its schema, then call it again. "
+            "Confirm before install/delete/off/eval. "
+            "COMMANDS: only some are listed above — if you're not sure of the exact "
+            "saved command name, call search_commands (with a keyword, or no query "
+            "for the full list) before run_command/run_chain. Never guess a name. "
+            "Screenshots: take_screenshot (image is for the user, not you). "
+            "Web: web_search then web_fetch. Install: package_search, ask, then "
+            "package_install confirm=true. "
+            "Video/audio: ytdl_info for metadata, ytdl_formats for exact format ids, "
+            "ytdl_download to fetch (confirm first; single video by default, playlist=true for more, capped)."
+        ]
+        if has_spotify:
+            parts.append(
+                "Spotify: spotify_search then spotify_play; never run_command."
+            )
+        if has_playnite:
+            parts.append(
+                "Playnite: find_game or query_games, then playnite_launch_game. "
+                "Don't claim launch unless that tool succeeded."
+            )
+        return " ".join(parts)
+
+    parts = [
+        "Tools: commands; system info (get_*); radio_status, wifi_set, bluetooth_set; git_run; "
+        "take_screenshot; web_search + web_fetch; packages "
+        "(package_* for winget, choco, scoop, pip, pipx, npm); memory_*. "
+        "ONLY call tools that appear in your tool list. Never invent a tool name. "
+        "COMMANDS: the 'Saved commands' list above is only a partial preview. Before "
+        "run_command or run_chain, if you aren't certain of the exact saved command "
+        "name, call search_commands first — pass a keyword, or no query to list every "
+        "saved command. Do this instead of guessing a name and hoping it resolves. "
+        "RADIOS: wifi_set/bluetooth_set action on|off. Off requires confirm=true (may need Admin). "
+        "GIT: git_run with an allowlisted command (status, log, diff, add, commit, pull, push, …). "
+        "reset/clean/force-push/clone need confirm=true. Not a shell. "
+        "SCREENSHOT: take_screenshot saves the desktop and shows it in the UI. "
+        "You only get a tiny ok/path — never describe pixels or ask for the image. Confirm in one short line. "
+        "VIDEO/AUDIO: ytdl_info gets metadata (title, duration, qualities, ffmpeg_available) for a URL with no "
+        "download. ytdl_formats lists exact format_ids when the simple quality presets aren't specific enough. "
+        "ytdl_download fetches it (mode='video' or 'audio', quality/container/codec/subs/thumbnail/metadata/"
+        "SponsorBlock all optional, output_dir to save somewhere specific) and hands the file to the user in "
+        "the UI — confirm first. Single video by default; playlist=true fetches more (hard-capped), still one "
+        "confirm. "
+        "You only get a tiny ok/path back — never claim details about the content you weren't told. "
+        "WEB: For 'best X', news, prices, how-tos, or anything that may have changed, "
+        "MUST web_search, then web_fetch 1–3 URLs, then summarize with markdown source links. "
+        "SOFTWARE INSTALL: package_search, ASK user, package_install confirm=true. Never guess ids. "
+        "MEMORY: only facts relevant to this message are injected. If you need others, "
+        "memory_search. memory_save for durable facts (prefs, names, 'remember that'). "
+        "Chat history is short-term. No passwords/API keys. memory_forget to delete. "
+        "Confirm before launch/delete/install/eval."
+    ]
+    if has_spotify:
+        parts.append(
+            "SPOTIFY: Free-account friendly. Do NOT use run_command. "
+            "Open app: spotify_open. Play: spotify_search then spotify_play (opens the desktop app — "
+            "user may need one click to play; Spotify blocks remote start on Free). "
+            "Pause/skip: spotify_control (media keys). Queue/volume remote needs Premium. "
+            "Never claim music started unless the tool returned ok."
+        )
+    if has_playnite:
+        parts.append(
+            "PLAYNITE: ALWAYS playnite_query_games WITH filters or groupBy — never dump the library. "
+            "find_game is a specific title lookup. 'Play X' → playnite_launch_game (same as Play in Playnite; "
+            "Steam/Epic use a virtual LibraryPlugin action). Extra launchers: list_game_actions then "
+            "launch_action. Never PUT LibraryPlugin into gameActions. Never say launched unless playnite_launch_* succeeded."
+        )
+    return " ".join(parts)
+
+
+def _system_prompt(persona, commands_ctx, freq_ctx, tools_enabled,
+                   compact_tools=False, compact_persona=False, ultra=False, has_history=False,
+                   memory_ctx="", has_playnite=False, has_spotify=False, other_convos_ctx="",
+                   playnite_freq_games=None, precise=False, pack_instructions_ctx=""):
+    name = persona.get("assistant_name") or DEFAULT_ASSISTANT_NAME
+    address = persona.get("address_user_as") or DEFAULT_ADDRESS
+    extra = (persona.get("extra_instructions") or "").strip()
+
+    parts = []
+    if compact_persona:
+        if ultra:
+            # Ultra (50% Capacity): trims the compact persona line further —
+            # "dry wit" is flavor, not a rule the model needs to be told
+            # explicitly to follow; everything else here is load-bearing
+            # (name, how to address the user, don't claim unconfirmed actions).
+            parts.append(
+                f"You are {name}, a local AI butler. Address the user as "
+                f'"{address}" sometimes. Never claim you did something unless a tool confirmed it.'
+            )
+        else:
+            parts.append(
+                f"You are {name}, a local AI butler. Dry wit, concise. Address the user as "
+                f'"{address}" sometimes. Never claim you did something unless a tool confirmed it.'
+            )
+    else:
+        parts.append(
+            f"You are {name}, a private AI assistant running locally for one user on their own "
+            f"computer \u2014 think a supremely capable, unflappable AI butler: dry wit, complete "
+            f"composure, quiet confidence, never groveling or over-apologizing. Address the user as "
+            f'"{address}" sometimes, naturally \u2014 not in every single sentence. Keep replies '
+            f"conversational and to the point: a sentence or two for anything simple, more only when "
+            f"the question genuinely calls for it. Be honest about your limits. Never claim "
+            f"to have taken an action you didn't actually take."
+        )
+    if has_history:
+        if compact_persona:
+            if ultra:
+                parts.append("Earlier messages are real — continue that thread.")
+            else:
+                parts.append(
+                    "Earlier messages in this chat are real — continue that thread. "
+                    "If the user is answering your questions, proceed with what they asked for."
+                )
+        else:
+            parts.append(
+                "The conversation history before the latest user message is real — continue that "
+                "thread naturally. If their latest message answers questions you asked, use those "
+                "answers and move forward with their original request. Do not pretend the prior "
+                "turns never happened."
+            )
+    if tools_enabled:
+        parts.append(_tools_blurb(compact_tools, ultra, has_playnite, has_spotify))
+        if pack_instructions_ctx:
+            parts.append(pack_instructions_ctx)
+    if precise:
+        # 150% Capacity only: an extra directive on top of the normal
+        # persona/tools text \u2014 not a replacement for either.
+        parts.append(
+            "Precision mode: state exact values, file paths, and tool results "
+            "verbatim rather than paraphrasing them. If a request is ambiguous "
+            "or you're not certain of a fact, say so explicitly instead of "
+            "guessing \u2014 verify with a tool when one is available rather than "
+            "assuming. Prefer being exactly right over being quick."
+        )
+    if memory_ctx:
+        parts.append(memory_ctx)
+    if other_convos_ctx:
+        parts.append(other_convos_ctx)
+    if playnite_freq_games is None:
+        fallback_mode = "compact" if compact_persona else "full"
+        playnite_freq_games = _MODE_BY_NAME[fallback_mode]["playnite_freq_games"]
+    # playnite_freq_games == 0 means "omit this block entirely" for the
+    # current mode (100%/50% capacity) — frequent_games_context treats a
+    # falsy max_games as "use the configured default", so we must not call
+    # it at all in that case rather than passing 0 through.
+    playnite_ctx = (
+        playnite_config.frequent_games_context(
+            playnite_freq_games,
+            compact=compact_persona,
+        )
+        if playnite_freq_games
+        else ""
+    )
+    if playnite_ctx:
+        parts.append(playnite_ctx)
+    if extra:
+        parts.append(extra)
+    if commands_ctx:
+        parts.append(commands_ctx)
+    if freq_ctx:
+        parts.append(freq_ctx)
+    return "\n\n".join(parts)
+
+
+def _build_messages(persona, commands, user_text, tools_enabled, profile, conversation_id, route=None):
+    compact = profile.get("compact_tools_blurb", False)
+    # Phase 8 of the token-optimization plan (see new_plan.md): the full
+    # saved-commands listing only earns its tokens when the "commands"
+    # tool group is actually in play. When the router is confident about a
+    # *different* group, search_commands/run_command/etc. aren't even
+    # being offered this round (see ask()'s active_schemas) — so a dozen
+    # inlined command names+descriptions would be pure overhead with no
+    # tool available to act on them anyway. Stay unconditional (the exact
+    # prior behavior) whenever the router has no opinion or "commands" is
+    # itself one of the matched groups, since that's the safe/no-regression
+    # case this phase must not touch.
+    skip_commands_listing = bool(route) and route.confident and "commands" not in route.groups
+    commands_ctx = "" if skip_commands_listing else _commands_context(
+        commands,
+        max_listed=profile["max_commands"],
+        desc_max_len=profile["desc_max_len"],
+        compact=compact,
+    )
+    freq_ctx = stats.frequent_commands_context(commands) if profile["include_freq"] else ""
+    prior_turns = conversations.conversation_messages(
+        conversation_id,
+        max_exchanges=profile["history_exchanges"],
+        char_budget=profile["history_char_budget"],
+        recap_exchanges=profile.get("recap_exchanges"),
+        recap_budget=profile.get("recap_budget"),
+    )
+    compact_persona = profile.get("compact_persona", False)
+    # tool_schema_style is only "name_only" for the ultra profile today, so
+    # it doubles as the ultra flag here rather than adding a new knob just
+    # for this — see PROMPT_MODE_DEFS' knob list.
+    ultra = profile.get("tool_schema_style") == "name_only"
+    prior_user = [
+        (m.get("content") or "")
+        for m in prior_turns
+        if (m.get("role") == "user" and (m.get("content") or "").strip())
+    ][-2:]
+    memory_ctx = memory.prompt_context(
+        compact=compact_persona,
+        query=user_text or "",
+        extra_texts=prior_user,
+    )
+    other_convos_ctx = (
+        "" if profile.get("skip_other_convos")
+        else conversations.other_conversations_context(conversation_id)
+    )
+    offered = system_tools.tool_schemas_for_session() if tools_enabled else []
+    offered_names = {s["name"] for s in offered}
+    # Phase 6 of the token-optimization plan (see new_plan.md): inject
+    # TOOL_PACK_INSTRUCTIONS only for the groups the router actually
+    # activated this turn, instead of _tools_blurb() baking every
+    # subsystem's workflow guidance into every prompt unconditionally.
+    # Only meaningful once the router is confident (route.groups is empty
+    # otherwise) — when it isn't, active_schemas already fell back to the
+    # small search_tools-only offering (Phase 5), so there's no group-
+    # specific guidance to add here either way.
+    pack_instructions_ctx = ""
+    if route is not None and route.confident:
+        from . import tool_registry
+        pack_lines = [
+            tool_registry.pack_instruction(group)
+            for group in route.groups
+            if tool_registry.pack_instruction(group)
+        ]
+        pack_instructions_ctx = " ".join(pack_lines)
+    elif route is not None and tools_enabled:
+        # Phase 5 fallback (see new_plan.md): the router had no opinion, so
+        # only the tiny search_tools discovery schema is being offered this
+        # round (see active_schemas below) instead of the full catalog.
+        # Without an explicit nudge here, a model that doesn't already
+        # "know" search_tools exists tends to just say it lacks whatever
+        # capability was asked for, rather than calling search_tools to
+        # check first — which is the whole point of this discovery tool.
+        pack_instructions_ctx = (
+            "Before telling the user you don't have a tool for something, "
+            "call search_tools with a keyword for it — many tools aren't "
+            "listed above and only appear after that search."
+        )
+    system_prompt = _system_prompt(
+        persona,
+        commands_ctx,
+        freq_ctx,
+        tools_enabled,
+        compact_tools=compact,
+        compact_persona=compact_persona,
+        ultra=ultra,
+        has_history=bool(prior_turns),
+        memory_ctx=memory_ctx,
+        has_playnite=any(n.startswith("playnite_") for n in offered_names),
+        has_spotify=any(n.startswith("spotify_") for n in offered_names),
+        other_convos_ctx=other_convos_ctx,
+        playnite_freq_games=profile.get("playnite_freq_games"),
+        precise=profile.get("precise_persona", False),
+        pack_instructions_ctx=pack_instructions_ctx,
+    )
+    messages = [{"role": "system", "content": system_prompt}]
+    messages.extend(prior_turns)
+    messages.append({"role": "user", "content": user_text})
+    return messages
+
+
+def _cache_key(name, arguments):
+    try:
+        args_s = json.dumps(arguments or {}, sort_keys=True, default=str)
+    except TypeError:
+        args_s = str(arguments)
+    return f"{name}:{args_s}"
+
+
+def _schema_required(schema):
+    params = (schema or {}).get("parameters") or {}
+    required = params.get("required") or []
+    return [k for k in required if isinstance(k, str)]
+
+
+def _missing_required(schema, arguments):
+    arguments = arguments or {}
+    missing = []
+    for key in _schema_required(schema):
+        value = arguments.get(key)
+        if value is None or value == "":
+            missing.append(key)
+    return missing
+
+
+# Risk-note length/detail and its token ceiling, keyed by the same
+# tool_result_verbosity a mode's PROMPT_MODE_DEFS entry already declares
+# (full/medium/low) \u2014 reuses the existing capacity-mode vocabulary instead
+# of inventing a parallel one, without touching how any *other* prompt in
+# this file is built.
+_RISK_REVIEW_VERBOSITY_PROFILES = {
+    "full": {
+        "sentence_count": "4-6",
+        "extra_instruction": " Include any edge cases or side effects worth knowing about.",
+        "max_tokens": 400,
+    },
+    "medium": {
+        "sentence_count": "2-3",
+        "extra_instruction": "",
+        "max_tokens": 200,
+    },
+    "low": {
+        "sentence_count": "1",
+        "extra_instruction": " Be as brief as possible \u2014 the rating and nothing else.",
+        "max_tokens": 80,
+    },
+}
+
+
+def risk_review(tool_name, arguments, cfg, exclude_label=None, mode=None):
+    """Ask a *different* configured AI provider than the one currently
+    answering to explain, in plain language, what a tool call will do and
+    how dangerous/irreversible it is. Best-effort only: never raises, and
+    returns None (no risk note attached) if no other provider is
+    configured or the call fails \u2014 a missing/misconfigured second provider
+    should never block or crash the primary ask, it just means the
+    confirmation prompt won't have an AI opinion attached.
+
+    `mode`, if given, is one of PROMPT_MODES (e.g. from a one-off local
+    override, not necessarily the config's real defaults.prompt_mode) and
+    only ever scales *this* prompt's requested length and token ceiling via
+    _RISK_REVIEW_VERBOSITY_PROFILES above \u2014 it never reads or writes
+    defaults.prompt_mode, so it can't affect the real global capacity mode
+    or any other prompt built elsewhere in this file. Anything not in
+    PROMPT_MODES (including None) falls back to the same "medium" profile
+    this function always used before `mode` existed.
+    """
+    try:
+        providers = _eligible_providers(cfg["providers"], cfg["defaults"])
+        candidates = [p for p in providers if exclude_label is None or _provider_label(p) != exclude_label]
+        if not candidates:
+            return None
+        provider = candidates[0]
+        adapter = ai_providers.ADAPTERS.get(provider.get("type"))
+        if adapter is None:
+            return None
+        keys = ai_config.provider_keys(provider) or [None]
+        resolved = _resolve(provider, cfg["defaults"])
+        if keys[0] is not None:
+            resolved["api_key"] = keys[0]
+
+        mode_profile = _MODE_BY_NAME.get(mode) if mode in PROMPT_MODES else None
+        verbosity = (mode_profile or {}).get("tool_result_verbosity", "medium")
+        review_profile = _RISK_REVIEW_VERBOSITY_PROFILES.get(verbosity, _RISK_REVIEW_VERBOSITY_PROFILES["medium"])
+        if mode_profile is not None:
+            resolved["max_tokens"] = review_profile["max_tokens"]
+
+        try:
+            args_s = json.dumps(arguments or {}, default=str)
+        except TypeError:
+            args_s = str(arguments)
+        prompt = (
+            "A personal-assistant program is about to run this tool call on the "
+            "user's own machine:\n"
+            f"  tool: {tool_name}\n"
+            f"  arguments: {args_s}\n\n"
+            f"In {review_profile['sentence_count']} short plain-language sentence(s): "
+            "(1) explain exactly what this specific call will do, and (2) rate how "
+            "dangerous/irreversible it is (none / low / medium / high) with a "
+            f"one-line reason.{review_profile['extra_instruction']} No preamble, no "
+            "markdown, just the assessment."
+        )
+        messages = [{"role": "user", "content": prompt}]
+        result = adapter(resolved, messages, resolved.get("timeout", DEFAULT_TIMEOUT),
+                          tools=None, tool_executor=None)
+        if result.ok and result.text:
+            return {"provider": _provider_label(provider), "note": result.text.strip()}
+        return None
+    except Exception:
+        return None
+
+
+def _command_flags_for_call(name, arguments):
+    """create_command/update_command let the AI set a saved command's own
+    confirm_required/ai_review flags (see command_tools.py's schemas) —
+    this surfaces those two booleans, exactly as the AI is about to save
+    them, so on_confirm_request's caller can show "Flags: confirm_required=
+    True, ai_review=False" on the confirmation prompt instead of the user
+    only finding out by opening the Debug dashboard afterward. Returns
+    None for any other tool name (nothing to attach)."""
+    if name not in ("create_command", "update_command"):
+        return None
+    arguments = arguments or {}
+
+    base_confirm, base_review = False, False
+    if name == "update_command":
+        # Start from the command's *current* flags — update_command only
+        # touches confirm_required/ai_review when the AI explicitly passes
+        # them (see command_tools.tool_update_command), so a call that
+        # only changes e.g. `run` must still reflect the flags the command
+        # already has, not silently report them as False.
+        try:
+            from . import commands_config
+            existing = commands_config.load_commands_dict().get(arguments.get("name"))
+        except Exception:
+            existing = None
+        if isinstance(existing, dict):
+            base_confirm = bool(existing.get("confirm_required"))
+            base_review = bool(existing.get("ai_review"))
+
+    confirm_required = arguments.get("confirm_required")
+    ai_review_flag = arguments.get("ai_review")
+    return {
+        "confirm_required": base_confirm if confirm_required is None else bool(confirm_required),
+        "ai_review": base_review if ai_review_flag is None else bool(ai_review_flag),
+    }
+
+
+def _make_tool_executor(on_tool_call, schemas=None, on_confirm_request=None,
+                         cfg=None, provider_ref=None, verbosity_ref=None,
+                         discover_sink=None):
+    """Shared across every provider/key in one ask() so a failover never
+    re-runs the same command, Playnite action, or web fetch. Cache hits
+    still return the original result (no second launch / install / HTTP).
+
+    First call with missing required args returns the compact schema
+    instead of running the tool (lazy tool summaries).
+
+    Before a tool flagged confirm_required (see tool_safety.py) actually
+    runs, on_confirm_request(name, arguments, risk_note) is called and must
+    return True/False \u2014 the tool is only executed on True. If ai_review is
+    also on for that tool, risk_note is a {"provider", "note"} dict from a
+    *different* configured provider (see risk_review) explaining what the
+    call does and how dangerous it is; otherwise risk_note is None. With no
+    on_confirm_request supplied at all, a tool requiring confirmation fails
+    closed (never silently runs unconfirmed).
+
+    verbosity_ref, if given, is a one-element list read fresh on every call
+    (["full"] by default) whose current value picks how much of a
+    successful result survives before it's cached/returned \u2014 see
+    tool_result_shaping.shape_result(). A mutable holder (not a plain
+    argument) because one executor is shared across every provider in a
+    single ask() for failover, and each provider attempt resolves its own
+    prompt profile (see ask()'s main loop), same pattern as provider_ref.
+    """
+    cache = {}
+    runs = []
+    by_name = {
+        s.get("name"): s
+        for s in (schemas or [])
+        if isinstance(s, dict) and s.get("name")
+    }
+
+    def _executor(name, arguments):
+        arguments = arguments or {}
+        key = _cache_key(name, arguments)
+        if key in cache:
+            # Signal the cache hit to ai_providers._call_tool_safely so it
+            # doesn't re-log/re-estimate token usage or append a duplicate
+            # tool_usage entry for a tool that didn't actually run again —
+            # this executor is shared across every provider/key failover
+            # in one ask() specifically so cached results are reused
+            # instead of re-run; the usage accounting needs to honor that
+            # same reuse, not just the side effects.
+            _executor._cache_hit = True
+            return cache[key]
+        _executor._cache_hit = False
+        schema = by_name.get(name)
+        if schema is not None:
+            missing = _missing_required(schema, arguments)
+            if missing:
+                compact = system_tools.compact_schemas_for_prompt([schema])
+                result = {
+                    "need_args": True,
+                    "missing": missing,
+                    "schema": compact[0] if compact else {"name": name},
+                    "hint": "Call this tool again with the parameters in schema.",
+                }
+                cache[key] = result
+                runs.append({"name": name, "arguments": arguments, "result": result})
+                return result
+
+        # Tool-level gate (tool_safety.json, keyed by tool name) is OR'd with
+        # the per-*saved-command* flags on run_command/run_chain (see
+        # command_tools.command_call_requires_confirmation) so "warn on
+        # deploy-prod but not on list-files" works even though both go
+        # through the same run_command tool.
+        # A command can be flagged ai_review=True with confirm_required
+        # left False (the user wants a heads-up note, not a hard gate).
+        # Previously this whole block — including the ai_review check
+        # inside it — only ran when confirm was independently required,
+        # so an ai_review-only command silently ran with no note shown
+        # anywhere (chat bubble or debug popup) whenever the tool-level
+        # confirm_required also happened to be off. OR'ing ai_review in
+        # here means "needs review" now reliably routes through the same
+        # notification channel as "needs confirmation".
+        confirm_meta = None
+        if (tool_safety.requires_confirmation(name)
+                or command_tools.command_call_requires_confirmation(name, arguments)
+                or tool_safety.requires_ai_review(name)
+                or command_tools.command_call_requires_ai_review(name, arguments)):
+            if on_confirm_request is None:
+                result = {
+                    "ok": False, "cancelled": True,
+                    "message": f"'{name}' requires user confirmation, but no confirmation "
+                               f"channel is available here \u2014 not run.",
+                }
+                cache[key] = result
+                runs.append({"name": name, "arguments": arguments, "result": result})
+                return result
+
+            risk_note = None
+            if (tool_safety.requires_ai_review(name)
+                    or command_tools.command_call_requires_ai_review(name, arguments)) and cfg is not None:
+                exclude_label = (provider_ref or [None])[0]
+                # For run_command/run_chain, hand risk_review the resolved
+                # shell steps (vars expanded) instead of just the command
+                # label, so the second AI's opinion is about the real
+                # commands being run, not a guess based on the name.
+                review_arguments = arguments
+                if name in ("run_command", "run_chain"):
+                    expanded = command_tools.resolved_run_for_review(name, arguments)
+                    if expanded is not None:
+                        review_arguments = expanded
+                risk_note = risk_review(name, review_arguments, cfg, exclude_label=exclude_label)
+
+            # Always show the actual resolved command content for
+            # run_command/run_chain — not just the tool name and the
+            # saved-command name/vars the AI passed — regardless of
+            # whether ai_review produced a plain-language note above, so
+            # the user sees the real shell steps before approving, same
+            # as the direct-run popup (see cli.py's confirm_direct_command).
+            if name in ("run_command", "run_chain"):
+                command_run = command_tools.resolved_run_for_review(name, arguments)
+                if command_run is not None:
+                    risk_note = dict(risk_note) if isinstance(risk_note, dict) else (
+                        {"note": risk_note} if risk_note else {}
+                    )
+                    risk_note["command_run"] = command_run
+
+            # For create_command/update_command specifically, always show
+            # the user the resulting command's own confirm_required/
+            # ai_review flags on the confirmation prompt — regardless of
+            # whether ai_review produced a risk note above — so they see
+            # exactly what safety behavior the command they're about to
+            # create/change will have going forward, not just a generic
+            # danger rating for the create/update call itself.
+            command_flags = _command_flags_for_call(name, arguments)
+            if command_flags is not None:
+                risk_note = dict(risk_note) if isinstance(risk_note, dict) else (
+                    {"note": risk_note} if risk_note else {}
+                )
+                risk_note["command_flags"] = command_flags
+
+            approved = False
+            try:
+                approved = bool(on_confirm_request(name, arguments, risk_note))
+            except TypeError:
+                approved = bool(on_confirm_request(name, arguments))
+            if not approved:
+                result = {"ok": False, "cancelled": True,
+                          "message": f"The user declined to run '{name}' \u2014 do not retry it "
+                                     f"this turn, and don't claim it happened."}
+                cache[key] = result
+                # Keep the risk_note + decision so the web UI can persist
+                # and replay this exact confirmation prompt later (see
+                # conversations.append_exchange's `extras` and
+                # web/public/app.js's renderResolvedConfirmBubble) instead
+                # of it only existing for as long as the browser tab does.
+                runs.append({"name": name, "arguments": arguments, "result": result,
+                             "confirm": {"risk_note": risk_note, "approved": False}})
+                return result
+            # Approved — recorded below alongside the actual tool result so
+            # a single `runs` entry carries both the confirmation and what
+            # it let through.
+            confirm_meta = {"risk_note": risk_note, "approved": True}
+
+        if on_tool_call:
+            try:
+                on_tool_call(name, arguments)
+            except TypeError:
+                on_tool_call(name)
+        result = system_tools.execute_tool(name, arguments)
+        verbosity = verbosity_ref[0] if verbosity_ref else "full"
+        result = tool_result_shaping.shape_result(name, result, verbosity)
+        cache[key] = result
+        run_entry = {"name": name, "arguments": arguments, "result": result}
+        if confirm_meta is not None:
+            run_entry["confirm"] = confirm_meta
+        runs.append(run_entry)
+
+        # Phase 5 handoff (see new_plan.md): a successful search_tools call
+        # hands its matches to discover_sink so ask() can grow this round's
+        # active/compact/name_only_schemas in place \u2014 the match is then
+        # actually offered (and callable) on the *next* round, rather than
+        # just described in this tool's own reply and then unreachable.
+        if name == "search_tools" and discover_sink and isinstance(result, dict):
+            matches = result.get("matches") or []
+            found = [m.get("name") for m in matches if isinstance(m, dict) and m.get("name")]
+            if found:
+                discover_sink(found)
+
         return result
 
-    if conv_id:
-        logs.log(
-            conv_id, "tool_call",
-            {"name": name, "arguments": arguments, "input_tokens": input_tokens},
-            provider=_log_provider(), round_num=round_num,
-        )
-    output_tokens = token_usage.estimate_tokens_for(result)
-    if conv_id:
-        logs.log(
-            conv_id, "tool_result",
-            {"name": name, "result": result, "output_tokens": output_tokens},
-            provider=_log_provider(), round_num=round_num,
-        )
-    tool_usage = getattr(_log_local, "tool_usage", None)
-    if tool_usage is None:
-        tool_usage = []
-        _log_local.tool_usage = tool_usage
-    tool_usage.append({
-        "name": name,
-        "round": round_num,
-        "input_tokens": input_tokens,
-        "output_tokens": output_tokens,
-        "source": "estimated",
-    })
-    on_usage = getattr(_log_local, "on_tool_usage", None)
-    if on_usage:
-        try:
-            on_usage(name, input_tokens, output_tokens)
-        except Exception:
-            pass  # a broken display callback must never break the actual tool call
-    return result
+    _executor.runs = runs
+    return _executor
 
 
-MAX_TOOL_RESULT_CHARS = 4000
-
-
-def _stringify_tool_result(result):
-    """Most providers want the tool result as a plain string. Structured
-    (dict/list) results get JSON-encoded so the model can still read the
-    individual fields precisely rather than a mangled repr()."""
-    if isinstance(result, str):
-        text = result
-    else:
-        try:
-            text = json.dumps(result)
-        except TypeError:
-            text = str(result)
-    if len(text) <= MAX_TOOL_RESULT_CHARS:
-        return text
-    return text[: MAX_TOOL_RESULT_CHARS - 14].rstrip() + "…[truncated]"
-
-
-def _decode_arguments(raw_args):
-    """Tool-call arguments arrive as a JSON *string* from most providers'
-    REST APIs, but already-decoded as a dict from some client libraries /
-    Ollama's native endpoint. Handle both, defaulting to {} on anything
-    unparseable rather than raising."""
-    if isinstance(raw_args, dict):
-        return raw_args
-    if isinstance(raw_args, str) and raw_args.strip():
-        try:
-            decoded = json.loads(raw_args)
-            return decoded if isinstance(decoded, dict) else {}
-        except (json.JSONDecodeError, TypeError):
-            return {}
-    return {}
-
-
-def _give_up_error():
-    return f"gave up after {MAX_TOOL_ROUNDS} rounds of tool calls with no final answer"
-
-
-def _json_object_at(s, start):
-    """Parse a JSON object starting at s[start]. Returns (obj, end_index) or (None, start)."""
-    if start >= len(s) or s[start] != "{":
-        return None, start
-    depth = 0
-    in_str = False
-    esc = False
-    for i in range(start, len(s)):
-        c = s[i]
-        if in_str:
-            if esc:
-                esc = False
-            elif c == "\\":
-                esc = True
-            elif c == '"':
-                in_str = False
-            continue
-        if c == '"':
-            in_str = True
-        elif c == "{":
-            depth += 1
-        elif c == "}":
-            depth -= 1
-            if depth == 0:
-                raw = s[start : i + 1]
-                try:
-                    return json.loads(raw), i + 1
-                except json.JSONDecodeError:
-                    return None, start
-    return None, start
-
-
-def _extract_text_tool_calls(text, allowed_names):
-    """Groq (and some others) dump tool calls as plain text instead of tool_calls.
-    Recover [called name with {...}] and {"name":...,"arguments":...}."""
-    if not text or not allowed_names:
-        return []
-    allowed = set(allowed_names)
-    s = text.strip()
-    calls = []
-
-    idx = 0
-    while True:
-        i = s.find("[called ", idx)
-        if i < 0:
-            break
-        rest = s[i + 8 :]
-        name = rest.split(None, 1)[0] if rest.split() else ""
-        brace = rest.find("{")
-        if not name or brace < 0:
-            idx = i + 8
-            continue
-        obj, end = _json_object_at(rest, brace)
-        if obj is not None and name in allowed:
-            calls.append((name, obj if isinstance(obj, dict) else {}))
-        idx = i + 8 + (end if obj is not None else brace + 1)
-
-    if calls:
-        return calls
-
-    try:
-        blob = json.loads(s)
-    except (json.JSONDecodeError, TypeError):
-        return []
-    if isinstance(blob, dict) and blob.get("name") in allowed:
-        args = blob.get("arguments") or blob.get("argument") or blob.get("args") or {}
-        if isinstance(args, str):
-            args = _decode_arguments(args)
-        if isinstance(args, dict):
-            return [(blob["name"], args)]
-    return []
-
-
-def _openai_messages_to_generic(working_messages):
-    """Convert an OpenAI-style working_messages list (which may include
-    assistant+tool_call round-trips) into a generic list that any adapter
-    can continue from. Tool call objects are serialised to a JSON string
-    so the next provider sees the action + result in plain text."""
-    out = []
-    for m in working_messages:
-        role = m.get("role", "")
-        if role == "system":
-            out.append({"role": "system", "content": m.get("content", "")})
-        elif role == "user":
-            content = m.get("content", "")
-            if isinstance(content, list):
-                # Anthropic tool_result blocks — flatten to text
-                parts = []
-                for b in content:
-                    if isinstance(b, dict):
-                        parts.append(b.get("content") or b.get("text") or "")
-                    else:
-                        parts.append(str(b))
-                out.append({"role": "user", "content": "\n".join(filter(None, parts))})
-            else:
-                out.append({"role": "user", "content": content})
-        elif role == "assistant":
-            content = m.get("content", "")
-            tool_calls = m.get("tool_calls")
-            if tool_calls:
-                # Summarise what was called so the next provider has context
-                parts = []
-                if content:
-                    parts.append(content)
-                for tc in tool_calls:
-                    fn = tc.get("function") or {}
-                    parts.append(f"[called {fn.get('name', '?')} with {fn.get('arguments', '{}')}]")
-                out.append({"role": "assistant", "content": "\n".join(parts)})
-            else:
-                out.append({"role": "assistant", "content": content or ""})
-        elif role == "tool":
-            # Convert tool result to a user message so any provider can read it
-            out.append({"role": "user", "content": f"[tool result] {m.get('content', '')}"})
-    return out
-
-
-def _gemini_contents_to_generic(working_contents):
-    """Convert Gemini-style contents list back to generic messages."""
-    out = []
-    for c in working_contents:
-        role = c.get("role", "")
-        parts = c.get("parts") or []
-        generic_role = "assistant" if role == "model" else "user"
-        texts = []
-        for p in parts:
-            if isinstance(p, dict):
-                if "text" in p:
-                    texts.append(p["text"])
-                elif "functionCall" in p:
-                    fc = p["functionCall"]
-                    texts.append(f"[called {fc.get('name', '?')} with {json.dumps(fc.get('args') or {})}]")
-                elif "functionResponse" in p:
-                    fr = p["functionResponse"]
-                    texts.append(f"[tool result for {fr.get('name', '?')}] {json.dumps(fr.get('response') or {})}")
-        if texts:
-            out.append({"role": generic_role, "content": "\n".join(texts)})
-    return out
-
-
-def _anthropic_turns_to_generic(system_text, working_turns):
-    """Convert Anthropic-style turns list back to generic messages."""
-    out = []
-    if system_text:
-        out.append({"role": "system", "content": system_text})
-    for t in working_turns:
-        role = t.get("role", "")
-        content = t.get("content", "")
-        if isinstance(content, list):
-            parts = []
-            for b in content:
-                if not isinstance(b, dict):
-                    continue
-                if b.get("type") == "text":
-                    parts.append(b.get("text", ""))
-                elif b.get("type") == "tool_use":
-                    parts.append(f"[called {b.get('name', '?')} with {json.dumps(b.get('input') or {})}]")
-                elif b.get("type") == "tool_result":
-                    parts.append(f"[tool result] {b.get('content', '')}")
-            content = "\n".join(filter(None, parts))
-        out.append({"role": role, "content": content})
-    return out
-
-
-# ---------------------------------------------------------------------------
-# OpenAI-compatible: OpenAI itself, xAI/Grok, Groq, Mistral, DeepSeek,
-# OpenRouter, and (in principle) any other host that mirrors the
-# /chat/completions request and response shape. This is deliberately the
-# generic "type" — adding a new OpenAI-compatible provider later needs a
-# config block, not new code. Tool format: tools: [{type:"function",
-# function:{name, description, parameters}}]; a tool call comes back as
-# choices[0].message.tool_calls, answered with role:"tool" messages
-# carrying the matching tool_call_id.
-# ---------------------------------------------------------------------------
-
-def call_openai_compatible(provider, messages, timeout, tools=None, tool_executor=None):
-    base_url = provider.get("base_url") or ""
-    api_key = provider.get("api_key") or ""
-    model = provider.get("model") or ""
-    if not base_url:
-        return AIResult(False, error="no base_url configured")
-
-    headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
-    working_messages = list(messages)
-    ran_tools = False
-
-    def _tools_payload():
-        # Phase 9 of the token-optimization plan (see new_plan.md):
-        # rebuilt every round instead of once before the loop, so a
-        # Phase 5 search_tools match (which grows the *same* `tools` list
-        # object the caller passed in, see ai_client._make_tool_executor's
-        # discover_sink) is actually advertised starting the very next
-        # round instead of only existing in that round's tool reply.
-        if not tools:
-            return None
-        return [
-            {"type": "function", "function": {"name": t["name"], "description": t["description"], "parameters": t["parameters"]}}
-            for t in tools
-        ]
-
-    for round_num in range(MAX_TOOL_ROUNDS + 1):
-        tools_payload = _tools_payload()
-        payload = {
-            "model": model,
-            "messages": working_messages,
-            "max_tokens": provider.get("max_tokens", 700),
-        }
-        if tools_payload and round_num < MAX_TOOL_ROUNDS:
-            # On the forced-final round any tool_calls the model returns get
-            # ignored anyway (see the round_num < MAX_TOOL_ROUNDS gate below),
-            # so advertising tools there just burns input tokens for nothing.
-            payload["tools"] = tools_payload
-        extra = provider.get("extra_params")
-        if isinstance(extra, dict):
-            payload.update(extra)
-
-        resp, net_err = _post_json(base_url, headers, payload, timeout)
-        if net_err:
-            return AIResult(False, error=net_err,
-                            tool_history=_openai_messages_to_generic(working_messages) if ran_tools else None)
-        reason = _status_reason(resp)
-        if reason:
-            return AIResult(False, error=reason,
-                            tool_history=_openai_messages_to_generic(working_messages) if ran_tools else None)
-
-        data, parse_err = _parse_json(resp)
-        if parse_err:
-            return AIResult(False, error=parse_err,
-                            tool_history=_openai_messages_to_generic(working_messages) if ran_tools else None)
-
-        _record_usage("openai_compatible", data, round_num)
-
-        choices = data.get("choices") or []
-        if not choices:
-            return AIResult(False, error="empty response (no choices)",
-                            tool_history=_openai_messages_to_generic(working_messages) if ran_tools else None)
-        choice = choices[0]
-
-        if choice.get("finish_reason") == "content_filter":
-            return AIResult(False, error="refused by the provider's content filter",
-                            tool_history=_openai_messages_to_generic(working_messages) if ran_tools else None)
-
-        message = choice.get("message") or {}
-        tool_calls = message.get("tool_calls")
-
-        if tool_calls and tool_executor and round_num < MAX_TOOL_ROUNDS:
-            ran_tools = True
-            working_messages.append(message)
-            for call in tool_calls:
-                fn = call.get("function") or {}
-                name = fn.get("name", "")
-                args = _decode_arguments(fn.get("arguments"))
-                result_text = _stringify_tool_result(_call_tool_safely(tool_executor, name, args, round_num))
-                working_messages.append({
-                    "role": "tool",
-                    "tool_call_id": call.get("id", ""),
-                    "content": result_text,
-                })
-            continue
-
-        text = (message.get("content") or "").strip()
-        if not text:
-            refusal = message.get("refusal")
-            if refusal:
-                return AIResult(False, error=f"refused: {refusal}",
-                                tool_history=_openai_messages_to_generic(working_messages) if ran_tools else None)
-            if tool_calls:
-                return AIResult(False, error=_give_up_error(),
-                                tool_history=_openai_messages_to_generic(working_messages) if ran_tools else None)
-            return AIResult(False, error="empty response content",
-                            tool_history=_openai_messages_to_generic(working_messages) if ran_tools else None)
-
-        allowed = {t.get("name") for t in (tools or []) if t.get("name")}
-        text_calls = _extract_text_tool_calls(text, allowed)
-        if text_calls and tool_executor and round_num < MAX_TOOL_ROUNDS:
-            ran_tools = True
-            result_bits = []
-            for name, args in text_calls:
-                raw = _call_tool_safely(tool_executor, name, args, round_num)
-                result_bits.append(f"{name}: {_stringify_tool_result(raw)}")
-            working_messages.append({
-                "role": "user",
-                "content": (
-                    "Your last message was a tool call written as plain text. It has now been "
-                    "executed. Results:\n"
-                    + "\n".join(result_bits)
-                    + "\nReply to the user in plain language. Only claim a launch/install if "
-                    "these results say it succeeded."
-                ),
+def _extras_from_runs(runs):
+    """Turns this turn's tool_executor.runs (see _make_tool_executor) into
+    the same lightweight 'screenshot / download / organizeJson / confirm'
+    shape the web UI already builds client-side for a live ask (see
+    web/public/app.js's pushThreadExtra) so conversations.append_exchange
+    can save them alongside the exchange. That's what lets the browser
+    replay a screenshot, download card, organize-json result, or a
+    resolved confirmation after a genuine page reload/reconnect — not just
+    for as long as that browser tab's in-memory state happens to survive.
+    """
+    extras = []
+    for run in (runs or []):
+        name = run.get("name")
+        result = run.get("result") if isinstance(run.get("result"), dict) else {}
+        confirm = run.get("confirm")
+        if isinstance(confirm, dict):
+            extras.append({
+                "type": "confirm",
+                "data": {
+                    "tool": name,
+                    "arguments": run.get("arguments") or {},
+                    "risk_note": confirm.get("risk_note"),
+                    "resolved": bool(confirm.get("approved")),
+                },
             })
-            continue
-
-        return AIResult(True, text=text, usage=get_usage_summary())
-
-    return AIResult(False, error=_give_up_error(),
-                    tool_history=_openai_messages_to_generic(working_messages) if ran_tools else None)
-
-
-# ---------------------------------------------------------------------------
-# Anthropic (Claude) — Messages API. Auth via x-api-key + anthropic-version
-# headers, system prompt is a top-level field, max_tokens is required, and
-# a refusal is a normal HTTP 200 with stop_reason == "refusal". Tool
-# format: tools: [{name, description, input_schema}]; a tool call comes
-# back as a tool_use content block, answered with a user message holding
-# a matching tool_result block (tool_use_id).
-# ---------------------------------------------------------------------------
-
-def call_anthropic(provider, messages, timeout, tools=None, tool_executor=None):
-    base_url = provider.get("base_url") or "https://api.anthropic.com/v1/messages"
-    api_key = provider.get("api_key") or ""
-    model = provider.get("model") or ""
-    if not api_key:
-        return AIResult(False, error="no api_key configured")
-
-    system_text, turns = _split_system(messages)
-    headers = {
-        "x-api-key": api_key,
-        "anthropic-version": "2023-06-01",
-        "Content-Type": "application/json",
-    }
-    working_turns = list(turns)
-    ran_tools = False
-
-    def _tools_payload():
-        # Phase 9 (see new_plan.md): rebuilt every round so a Phase 5
-        # search_tools match, appended to the same `tools` list object by
-        # ai_client._make_tool_executor's discover_sink, is offered
-        # starting next round.
-        if not tools:
-            return None
-        return [
-            {"name": t["name"], "description": t["description"], "input_schema": t["parameters"]}
-            for t in tools
-        ]
-
-    def _history():
-        return _anthropic_turns_to_generic(system_text, working_turns) if ran_tools else None
-
-    for round_num in range(MAX_TOOL_ROUNDS + 1):
-        tools_payload = _tools_payload()
-        payload = {
-            "model": model,
-            "max_tokens": provider.get("max_tokens", 700),
-            "messages": working_turns,
-        }
-        if system_text:
-            payload["system"] = system_text
-        if tools_payload and round_num < MAX_TOOL_ROUNDS:
-            payload["tools"] = tools_payload
-
-        resp, net_err = _post_json(base_url, headers, payload, timeout)
-        if net_err:
-            return AIResult(False, error=net_err, tool_history=_history())
-        reason = _status_reason(resp)
-        if reason:
-            return AIResult(False, error=reason, tool_history=_history())
-
-        data, parse_err = _parse_json(resp)
-        if parse_err:
-            return AIResult(False, error=parse_err, tool_history=_history())
-
-        _record_usage("anthropic", data, round_num)
-
-        if data.get("stop_reason") == "refusal":
-            return AIResult(False, error="refused by the model's safety classifier", tool_history=_history())
-
-        blocks = data.get("content") or []
-        tool_use_blocks = [b for b in blocks if isinstance(b, dict) and b.get("type") == "tool_use"]
-
-        if tool_use_blocks and tool_executor and round_num < MAX_TOOL_ROUNDS:
-            ran_tools = True
-            working_turns.append({"role": "assistant", "content": blocks})
-            result_blocks = []
-            for b in tool_use_blocks:
-                result_text = _stringify_tool_result(
-                    _call_tool_safely(tool_executor, b.get("name", ""), b.get("input") or {})
-                )
-                result_blocks.append({
-                    "type": "tool_result",
-                    "tool_use_id": b.get("id", ""),
-                    "content": result_text,
-                })
-            working_turns.append({"role": "user", "content": result_blocks})
-            continue
-
-        text = "".join(b.get("text", "") for b in blocks if isinstance(b, dict) and b.get("type") == "text").strip()
-        if not text:
-            if tool_use_blocks:
-                return AIResult(False, error=_give_up_error(), tool_history=_history())
-            return AIResult(False, error="empty response content", tool_history=_history())
-        return AIResult(True, text=text, usage=get_usage_summary())
-
-    return AIResult(False, error=_give_up_error(), tool_history=_history())
+        if name == "take_screenshot" and result.get("ok") and result.get("file"):
+            extras.append({"type": "screenshot", "data": {"filename": result["file"]}})
+        elif name == "organize_json" and result.get("ok") and result.get("path"):
+            extras.append({"type": "organizeJson", "data": {"targetPath": result["path"], "payload": None}})
+        elif name == "ytdl_download" and result.get("ok") and result.get("job_id"):
+            # Mirror ytdl_tools.py's own MAX_MEDIA_EMITTED cap — only the
+            # first few files ever got an inline player card live (see its
+            # _emit_media loop), so a saved/replayed turn shouldn't show
+            # more cards than the user actually saw at the time.
+            for f in (result.get("files") or [])[:5]:
+                if isinstance(f, dict) and f.get("file"):
+                    extras.append({
+                        "type": "download",
+                        "data": {
+                            "jobId": result["job_id"],
+                            "filename": f["file"],
+                            "title": f.get("title") or f["file"],
+                        },
+                    })
+    return extras
 
 
-# ---------------------------------------------------------------------------
-# Google Gemini — generateContent API. Assistant turns use role "model",
-# not "assistant"; system prompt is a separate systemInstruction field;
-# a block shows up either as promptFeedback.blockReason (the prompt itself
-# was blocked) or candidates[0].finishReason (the *answer* was blocked).
-# Tool format: tools: [{function_declarations: [{name, description,
-# parameters}]}], where parameters' JSON-schema "type" values are
-# uppercased (Gemini's documented SDK-level enum form, e.g. "OBJECT" not
-# "object") — see _to_gemini_schema. A call comes back as a functionCall
-# part; answered with a role:"user" message holding matching
-# functionResponse parts (Gemini 2.x only accepts user/model roles).
-# ---------------------------------------------------------------------------
-
-_GEMINI_SCHEMA_SKIP = frozenset({
-    "additionalProperties",
-    "$schema",
-    "$id",
-    "definitions",
-    "default",
-    "examples",
-    "title",
-})
-
-
-def _to_gemini_schema(schema):
-    if not isinstance(schema, dict):
-        return schema
-    out = {}
-    for k, v in schema.items():
-        if k in _GEMINI_SCHEMA_SKIP:
-            continue
-        if k == "type" and isinstance(v, str):
-            out[k] = v.upper()
-        elif k == "properties" and isinstance(v, dict):
-            out[k] = {pk: _to_gemini_schema(pv) for pk, pv in v.items()}
-        elif k == "items":
-            out[k] = _to_gemini_schema(v)
-        elif k == "required" and isinstance(v, list):
-            out[k] = v
-        elif k in ("description", "enum"):
-            out[k] = v
-        elif isinstance(v, dict):
-            out[k] = _to_gemini_schema(v)
-        elif isinstance(v, list):
-            out[k] = [_to_gemini_schema(i) if isinstance(i, dict) else i for i in v]
-    if out.get("type") == "ARRAY" and "items" not in out:
-        out["items"] = {"type": "OBJECT"}
-    return out
+def _is_mutating_tool(name):
+    name = name or ""
+    if name in {
+        "run_command", "run_chain", "create_command", "update_command",
+        "package_install", "package_uninstall",
+        "spotify_play", "spotify_control", "spotify_queue", "spotify_like",
+        "memory_save", "memory_forget",
+        "spotify_open",
+        "wifi_set", "bluetooth_set", "git_run",
+        "write_file", "run_custom_command",
+        "ytdl_download",
+    }:
+        return True
+    return name.startswith((
+        "playnite_launch",
+        "playnite_install",
+        "playnite_uninstall",
+        "playnite_delete",
+        "playnite_update",
+        "playnite_eval",
+        "playnite_notify",
+        "playnite_create",
+        "playnite_manage",
+        "playnite_auto",
+        "playnite_view",
+        "playnite_rotate",
+        "playnite_fetch_all",
+    ))
 
 
-def call_gemini(provider, messages, timeout, tools=None, tool_executor=None):
-    api_key = provider.get("api_key") or ""
-    model = provider.get("model") or ""
-    if not api_key:
-        return AIResult(False, error="no api_key configured")
+def _tool_runs_note(runs, char_budget):
+    """Tell the next model what already ran — without implying side effects
+    (launch/install) happened if they didn't."""
+    if not runs:
+        return None
+    ran = [r.get("name") or "" for r in runs]
+    mutated = [n for n in ran if _is_mutating_tool(n)]
+    parts = [
+        "Some tools already ran this turn. Reuse those results — do not repeat "
+        "the same read-only call (search, list, fetch, query).",
+    ]
+    if mutated:
+        parts.append(
+            "These actions DID run (only claim they happened because of the results below): "
+            + ", ".join(mutated) + "."
+        )
+    else:
+        parts.append(
+            "No launch/install/command has run yet. If the user asked to play/launch/"
+            "install something, you MUST call the real tool now (playnite_launch_action, "
+            "package_install, run_command, …). Do not claim it already launched. "
+            "Do not write tool calls as plain text."
+        )
+    used = sum(len(p) for p in parts)
+    for run in runs:
+        try:
+            args_s = json.dumps(run.get("arguments") or {}, default=str)
+            result_s = json.dumps(run.get("result"), default=str)
+        except TypeError:
+            args_s = str(run.get("arguments"))
+            result_s = str(run.get("result"))
+        block = f"\n{run.get('name')}({args_s})\n{result_s}"
+        room = char_budget - used
+        if room <= 80:
+            parts.append("\n…(further tool results omitted)")
+            break
+        if len(block) > room:
+            block = block[:room] + "\n…(truncated)"
+        parts.append(block)
+        used += len(block)
+    return "\n".join(parts)
 
-    base_url = provider.get("base_url") or (
-        "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
+
+_TOOL_TRACE_LINE = re.compile(r"^\[(called |tool result)", re.I)
+_TOOL_TRACE_ANY = re.compile(r"\[called\s+[A-Za-z0-9_]+\s+with\s+\{", re.I)
+
+
+def _is_tool_trace_reply(text):
+    """True when the model echoed internal tool-call scaffolding instead of
+    answering the user — treat as a failed attempt and keep failing over."""
+    if not text or not str(text).strip():
+        return False
+    stripped = str(text).strip()
+    lines = [ln.strip() for ln in stripped.splitlines() if ln.strip()]
+    if not lines:
+        return False
+    if all(_TOOL_TRACE_LINE.match(ln) for ln in lines):
+        return True
+    # Whole reply is basically one fake tool call (maybe with a short prefix).
+    if _TOOL_TRACE_ANY.search(stripped) and len(stripped) < 800:
+        prose = _TOOL_TRACE_ANY.sub("", stripped).strip(" \n:-")
+        if len(prose) < 40:
+            return True
+    return False
+
+
+
+def _extract_json_object(text):
+    if not text:
+        return None
+    match = _JSON_OBJECT_RE.search(text)
+    if not match:
+        return None
+    try:
+        obj = json.loads(match.group(0))
+    except json.JSONDecodeError:
+        return None
+    return obj if isinstance(obj, dict) else None
+
+
+def _quick_title_completion(cfg, user_text, jarvis_text):
+    """One cheap, history-free completion asking for {"title", "soft_context"}
+    JSON describing this exchange. Tries at most the first two eligible
+    providers — but, same as the main ask() failover, every configured key
+    for each of those providers before moving on — and gives up quietly on
+    failure; this is cosmetic, never allowed to block or break an actual
+    ask. (Previously this only ever tried a provider's first key, so a
+    single blocked/rate-limited key could skip a provider's other working
+    keys entirely instead of failing over to them.)"""
+    providers = _eligible_providers(cfg["providers"], cfg["defaults"])
+    if not providers:
+        return None
+    prompt = (
+        "Give this exchange a short conversation title (3-6 words, title case, no quotes, "
+        "no trailing punctuation) and a one-sentence gist (under 20 words, third person) "
+        "suitable for a chat-history sidebar. Respond with ONLY compact JSON like "
+        '{"title": "...", "soft_context": "..."} and nothing else \u2014 no markdown, no '
+        "commentary.\n\n"
+        f"User: {conversations._truncate(user_text or '', 400)}\n"
+        f"Assistant: {conversations._truncate(jarvis_text or '', 400)}"
     )
-    url = base_url.format(model=model) if "{model}" in base_url else base_url
-
-    system_text, turns = _split_system(messages)
-
-    def _to_gemini_content(m):
-        role = m.get("role", "")
-        content = m.get("content", "")
-        gemini_role = "model" if role == "assistant" else "user"
-        if isinstance(content, list):
-            parts = []
-            for b in content:
-                if isinstance(b, dict):
-                    parts.append({"text": b.get("content") or b.get("text") or ""})
-                else:
-                    parts.append({"text": str(b)})
-            return {"role": gemini_role, "parts": parts}
-        return {"role": gemini_role, "parts": [{"text": content}]}
-
-    working_contents = [_to_gemini_content(t) for t in turns]
-    headers = {"x-goog-api-key": api_key, "Content-Type": "application/json"}
-    ran_tools = False
-
-    def _tools_payload():
-        # Phase 9 (see new_plan.md): rebuilt every round so a Phase 5
-        # search_tools match, appended to the same `tools` list object by
-        # ai_client._make_tool_executor's discover_sink, is offered
-        # starting next round.
-        if not tools:
-            return None
-        return [{"function_declarations": [
-            {"name": t["name"], "description": t["description"], "parameters": _to_gemini_schema(t["parameters"])}
-            for t in tools
-        ]}]
-
-    def _history():
-        if not ran_tools:
-            return None
-        generic = _gemini_contents_to_generic(working_contents)
-        if system_text:
-            generic.insert(0, {"role": "system", "content": system_text})
-        return generic
-
-    for round_num in range(MAX_TOOL_ROUNDS + 1):
-        tools_payload = _tools_payload()
-        payload = {
-            "contents": working_contents,
-            "generationConfig": {"maxOutputTokens": provider.get("max_tokens", 700)},
-        }
-        if system_text:
-            payload["systemInstruction"] = {"parts": [{"text": system_text}]}
-        if tools_payload and round_num < MAX_TOOL_ROUNDS:
-            payload["tools"] = tools_payload
-
-        resp, net_err = _post_json(url, headers, payload, timeout)
-        if net_err:
-            return AIResult(False, error=net_err, tool_history=_history())
-        reason = _status_reason(resp)
-        if reason:
-            return AIResult(False, error=reason, tool_history=_history())
-
-        data, parse_err = _parse_json(resp)
-        if parse_err:
-            return AIResult(False, error=parse_err, tool_history=_history())
-
-        _record_usage("gemini", data, round_num)
-
-        block_reason = (data.get("promptFeedback") or {}).get("blockReason")
-        if block_reason:
-            return AIResult(False, error=f"blocked by provider safety filter ({block_reason})", tool_history=_history())
-
-        candidates = data.get("candidates") or []
-        if not candidates:
-            return AIResult(False, error="empty response (no candidates)", tool_history=_history())
-        candidate = candidates[0]
-
-        finish_reason = candidate.get("finishReason")
-        if finish_reason in ("SAFETY", "PROHIBITED_CONTENT", "BLOCKLIST", "SPII"):
-            return AIResult(False, error=f"blocked by provider safety filter ({finish_reason})", tool_history=_history())
-
-        parts = (candidate.get("content") or {}).get("parts") or []
-        call_parts = [p for p in parts if isinstance(p, dict) and "functionCall" in p]
-
-        if call_parts and tool_executor and round_num < MAX_TOOL_ROUNDS:
-            ran_tools = True
-            working_contents.append({"role": "model", "parts": parts})
-            response_parts = []
-            for p in call_parts:
-                fc = p["functionCall"]
-                raw_result = _call_tool_safely(tool_executor, fc.get("name", ""), fc.get("args") or {})
-                response_obj = raw_result if isinstance(raw_result, dict) else {"result": raw_result}
-                fr = {"name": fc.get("name", ""), "response": response_obj}
-                if fc.get("id"):
-                    fr["id"] = fc["id"]
-                response_parts.append({"functionResponse": fr})
-            working_contents.append({"role": "user", "parts": response_parts})
+    messages = [{"role": "user", "content": prompt}]
+    for provider in providers[:2]:
+        adapter = ai_providers.ADAPTERS.get(provider.get("type"))
+        if adapter is None:
             continue
-
-        text = "".join(p.get("text", "") for p in parts if isinstance(p, dict)).strip()
-        if not text:
-            if call_parts:
-                return AIResult(False, error=_give_up_error(), tool_history=_history())
-            return AIResult(False, error="empty response content", tool_history=_history())
-        return AIResult(True, text=text, usage=get_usage_summary())
-
-    return AIResult(False, error=_give_up_error(), tool_history=_history())
-
-
-# ---------------------------------------------------------------------------
-# Cohere — Chat API v2. Closer to the OpenAI shape than Anthropic/Gemini
-# (a flat "messages" list with role/content, system role included inline),
-# but the response nests the reply under message.content[0].text. Tool
-# format mirrors OpenAI's (tools: [{type:"function", function:{...}}],
-# tool_calls on the response) — this is the one adapter built without a
-# confirmed example of the tool_result round-trip specifically, so if
-# Cohere ever errors here specifically, this request-building block is
-# the first place to check against their current docs.
-# ---------------------------------------------------------------------------
-
-def call_cohere(provider, messages, timeout, tools=None, tool_executor=None):
-    base_url = provider.get("base_url") or "https://api.cohere.com/v2/chat"
-    api_key = provider.get("api_key") or ""
-    model = provider.get("model") or ""
-    if not api_key:
-        return AIResult(False, error="no api_key configured")
-
-    headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
-    working_messages = list(messages)
-    ran_tools = False
-
-    def _tools_payload():
-        # Phase 9 (see new_plan.md): rebuilt every round so a Phase 5
-        # search_tools match, appended to the same `tools` list object by
-        # ai_client._make_tool_executor's discover_sink, is offered
-        # starting next round.
-        if not tools:
-            return None
-        return [
-            {"type": "function", "function": {"name": t["name"], "description": t["description"], "parameters": t["parameters"]}}
-            for t in tools
-        ]
-
-    for round_num in range(MAX_TOOL_ROUNDS + 1):
-        tools_payload = _tools_payload()
-        payload = {
-            "model": model,
-            "messages": working_messages,
-            "max_tokens": provider.get("max_tokens", 700),
-        }
-        if tools_payload and round_num < MAX_TOOL_ROUNDS:
-            payload["tools"] = tools_payload
-
-        resp, net_err = _post_json(base_url, headers, payload, timeout)
-        if net_err:
-            return AIResult(False, error=net_err,
-                            tool_history=_openai_messages_to_generic(working_messages) if ran_tools else None)
-        reason = _status_reason(resp)
-        if reason:
-            return AIResult(False, error=reason,
-                            tool_history=_openai_messages_to_generic(working_messages) if ran_tools else None)
-
-        data, parse_err = _parse_json(resp)
-        if parse_err:
-            return AIResult(False, error=parse_err,
-                            tool_history=_openai_messages_to_generic(working_messages) if ran_tools else None)
-
-        _record_usage("cohere", data, round_num)
-
-        message = data.get("message") or {}
-        tool_calls = message.get("tool_calls")
-
-        if tool_calls and tool_executor and round_num < MAX_TOOL_ROUNDS:
-            ran_tools = True
-            working_messages.append(message)
-            for call in tool_calls:
-                fn = call.get("function") or {}
-                name = fn.get("name", "")
-                args = _decode_arguments(fn.get("arguments"))
-                result_text = _stringify_tool_result(_call_tool_safely(tool_executor, name, args))
-                working_messages.append({
-                    "role": "tool",
-                    "tool_call_id": call.get("id", ""),
-                    "content": result_text,
-                })
-            continue
-
-        content = message.get("content") or []
-        text = "".join(b.get("text", "") for b in content if isinstance(b, dict)).strip()
-        if not text:
-            if tool_calls:
-                return AIResult(False, error=_give_up_error(),
-                                tool_history=_openai_messages_to_generic(working_messages) if ran_tools else None)
-            return AIResult(False, error="empty response content",
-                            tool_history=_openai_messages_to_generic(working_messages) if ran_tools else None)
-        return AIResult(True, text=text, usage=get_usage_summary())
-
-    return AIResult(False, error=_give_up_error(),
-                    tool_history=_openai_messages_to_generic(working_messages) if ran_tools else None)
+        keys = ai_config.provider_keys(provider) or [None]
+        for key in keys:
+            resolved = _resolve(provider, cfg["defaults"])
+            if key is not None:
+                resolved["api_key"] = key
+            try:
+                result = adapter(
+                    resolved, messages, min(resolved["timeout"], 15),
+                    tools=None, tool_executor=None,
+                )
+            except Exception:
+                continue
+            if result.ok and result.text:
+                return result.text
+    return None
 
 
-# ---------------------------------------------------------------------------
-# Ollama — local models, no API key, nothing leaves your machine. Great
-# last-resort fallback: put it last in the provider order and it can never
-# "run out" the way a paid API can, as long as it's installed and running.
-# Tool format mirrors OpenAI's, with one real difference: tool_calls'
-# arguments come back already decoded as an object, not a JSON string
-# (_decode_arguments handles either). Only models whose chat template
-# supports tools will actually use them — see the "Tools" badge on a
-# model's ollama.com library page.
-# ---------------------------------------------------------------------------
+def _maybe_update_title(cfg, conversation_id, exchange_count, user_text, jarvis_text):
+    """(Re)titles a conversation right after its first exchange, then every
+    TITLE_REGEN_EVERY exchanges after that. Falls back to a heuristic title
+    (a truncated first line of the user's message) if the AI call fails, so
+    a conversation is never stuck saying "New Conversation" forever just
+    because one title request happened to fail."""
+    if exchange_count != 1 and exchange_count % TITLE_REGEN_EVERY != 0:
+        return
+    title = None
+    soft_context = None
+    try:
+        raw = _quick_title_completion(cfg, user_text, jarvis_text)
+        obj = _extract_json_object(raw) if raw else None
+        if obj:
+            t = obj.get("title")
+            s = obj.get("soft_context")
+            if isinstance(t, str) and t.strip():
+                title = t.strip().strip("\"'")
+            if isinstance(s, str) and s.strip():
+                soft_context = s.strip()
+    except Exception:
+        pass  # title generation is cosmetic — never let it break an ask
+    if title is None:
+        title = conversations._truncate((user_text or "").strip().splitlines()[0], 42) if user_text else None
+    if soft_context is None:
+        soft_context = conversations._truncate((user_text or "").strip(), 140) if user_text else None
+    if title or soft_context:
+        try:
+            conversations.update_meta(conversation_id, title=title, soft_context=soft_context)
+        except Exception:
+            pass
 
-def call_ollama(provider, messages, timeout, tools=None, tool_executor=None):
-    base_url = provider.get("base_url") or "http://localhost:11434/api/chat"
-    model = provider.get("model") or ""
 
-    headers = {"Content-Type": "application/json"}
-    working_messages = list(messages)
-    ran_tools = False
+def ask(user_text, commands=None, on_attempt=None, on_tool_call=None, on_tool_result=None, conversation_id=None,
+        on_confirm_request=None):
+    """Ask Jarvis something, trying every configured, enabled provider in
+    order until one answers \u2014 and within each provider, every one of its
+    configured keys in order before moving on to the next provider. Always
+    returns an AskResult \u2014 never raises, so a single flaky provider (or
+    key) can't take down the whole CLI call.
 
-    def _tools_payload():
-        # Phase 9 (see new_plan.md): rebuilt every round so a Phase 5
-        # search_tools match, appended to the same `tools` list object by
-        # ai_client._make_tool_executor's discover_sink, is offered
-        # starting next round.
-        if not tools:
-            return None
-        return [
-            {"type": "function", "function": {"name": t["name"], "description": t["description"], "parameters": t["parameters"]}}
-            for t in tools
-        ]
+    on_attempt(label), if given, fires right before each attempt (cli.py
+    uses this to print live "asking X..." trace to stderr). label includes
+    a "(key i/N)" suffix when a provider has more than one key configured,
+    so the trace makes it obvious which key failed \u2014 useful when e.g. only
+    your second OpenAI key has run out of credit.
 
-    for round_num in range(MAX_TOOL_ROUNDS + 1):
-        tools_payload = _tools_payload()
-        payload = {"model": model, "messages": working_messages, "stream": False}
-        if tools_payload and round_num < MAX_TOOL_ROUNDS:
-            payload["tools"] = tools_payload
+    on_tool_call(name), if given, fires right before each tool call Jarvis
+    makes while answering (battery, wifi, location, ...) \u2014 same idea, live
+    trace of what's actually happening. Tools are looked up fresh from
+    ai_config.json's defaults.tools_enabled on every call, same as
+    everything else here; set it to false to turn tool calling off
+    entirely (e.g. to keep every ask to a single request).
 
-        resp, net_err = _post_json(base_url, headers, payload, timeout)
-        if net_err:
-            return AIResult(False, error=f"{net_err} (is Ollama installed and running?)",
-                            tool_history=_openai_messages_to_generic(working_messages) if ran_tools else None)
-        reason = _status_reason(resp)
-        if reason:
-            return AIResult(False, error=reason,
-                            tool_history=_openai_messages_to_generic(working_messages) if ran_tools else None)
+    conversation_id picks which conversation (see conversations.py) this
+    exchange belongs to and gets appended to. When omitted, the CLI's
+    on-disk "current" conversation is used (auto-created on first ever
+    use) — the web UI instead always passes one explicitly, since each
+    browser tab tracks its own active conversation.
 
-        data, parse_err = _parse_json(resp)
-        if parse_err:
-            return AIResult(False, error=parse_err,
-                            tool_history=_openai_messages_to_generic(working_messages) if ran_tools else None)
+    on_confirm_request(name, arguments, risk_note), if given, gates any
+    tool call flagged confirm_required in tool_safety.json (see
+    _make_tool_executor). Tools requiring confirmation fail closed (never
+    run) if this isn't supplied.
+    """
+    cfg = ai_config.load_ai_config()
+    persona = cfg["persona"]
+    assistant_name = persona.get("assistant_name") or DEFAULT_ASSISTANT_NAME
+    address = persona.get("address_user_as") or DEFAULT_ADDRESS
 
-        _record_usage("ollama", data, round_num)
+    conv_id = conversation_id if conversations.is_valid_id(conversation_id) else conversations.get_current_id()
 
-        message = data.get("message") or {}
-        tool_calls = message.get("tool_calls")
+    providers = _eligible_providers(cfg["providers"], cfg["defaults"])
+    if not providers:
+        return AskResult(False, assistant_name=assistant_name, address_user_as=address)
 
-        if tool_calls and tool_executor and round_num < MAX_TOOL_ROUNDS:
-            ran_tools = True
-            working_messages.append(message)
-            for call in tool_calls:
-                fn = call.get("function") or {}
-                name = fn.get("name", "")
-                args = _decode_arguments(fn.get("arguments"))
-                result_text = _stringify_tool_result(_call_tool_safely(tool_executor, name, args))
-                working_messages.append({"role": "tool", "content": result_text})
-            continue
+    tools_enabled = cfg["defaults"].get("tools_enabled", DEFAULT_TOOLS_ENABLED)
+    full_schemas = []
+    if tools_enabled:
+        full_schemas = system_tools.tool_schemas_for_session()
 
-        text = (message.get("content") or "").strip()
-        if not text:
-            if tool_calls:
-                return AIResult(False, error=_give_up_error(),
-                                tool_history=_openai_messages_to_generic(working_messages) if ran_tools else None)
-            return AIResult(
-                False,
-                error="empty response content (is the model pulled? try: ollama pull " + (model or "<model>") + ")",
-                tool_history=_openai_messages_to_generic(working_messages) if ran_tools else None,
+        # Phase 4 of the token-optimization plan (see new_plan.md): ask the
+        # local router (Phase 3, tool_router.py — no model round trip) what
+        # this message plausibly needs before deciding what to *offer*.
+        # Deliberately conservative and safe-by-default: the router only
+        # ever narrows the catalog when it has real keyword signal
+        # (route.confident); anything ambiguous — including "hi", which is
+        # exactly the case this phase targets — still falls back to the
+        # exact full_schemas behavior from before this phase, so there's no
+        # regression risk for messages the router doesn't recognize yet.
+        # tool_executor below is still built from full_schemas regardless
+        # (not active_schemas) so a tool call the router didn't anticipate
+        # still validates/executes normally rather than failing closed.
+        route = tool_router.route(user_text)
+        # Phase 5 of the token-optimization plan (see new_plan.md): when the
+        # router has no opinion, don't fall all the way back to the full
+        # catalog — offer only the small always-available search_tools
+        # discovery tool instead. A real tool call the model needs is still
+        # reachable (search_tools -> _make_tool_executor's discover_sink
+        # below grows active/compact/name_only_schemas in place, so a match
+        # becomes callable on the very next round without a second full
+        # prompt resend), it's just not offered up front on spec.
+        active_schemas = (
+            system_tools.schemas_for_tools(route.tools)
+            if route.confident else list(system_tools.DISCOVERY_TOOL_SCHEMAS)
+        )
+
+        # Real (description-stripped) argument schemas, not name-only stubs,
+        # are the default (full/compact modes) because jarvis is a brand-new
+        # process every "jarvis ..." call (see history.py's module
+        # docstring) — there's no running session for a model to "learn" a
+        # tool's shape in, so name-only-then-relearn-on-first-use pays a
+        # full extra tool round trip (i.e. resending the *entire* prompt
+        # again) on essentially every argument-taking tool, every single
+        # invocation. A few hundred extra bytes of schema up front is far
+        # cheaper than that guaranteed second round trip — UNLESS the prompt
+        # itself is the thing being minimized, which is exactly what "ultra"
+        # (50% Capacity) mode is for: see tool_schema_style per-provider
+        # below, resolved fresh each attempt since mode can still vary by
+        # provider under the legacy compact_prompt_providers config.
+        compact_schemas = system_tools.compact_schemas_for_prompt(active_schemas)
+        name_only_schemas = system_tools.name_only_schemas_for_prompt(active_schemas)
+    provider_ref = [None]
+    verbosity_ref = ["full"]
+
+    _discovered_names = {s.get("name") for s in active_schemas} if tools_enabled else set()
+
+    def _discover_sink(names):
+        """Phase 5 handoff: called by the tool executor right after a
+        search_tools call returns matches. Grows active_schemas (raw),
+        compact_schemas, and name_only_schemas *in place* (all three, since
+        which one is actually sent depends on the per-provider
+        tool_schema_style resolved below) so a matched tool is really
+        callable on the model's very next round in this same ask() \u2014 not
+        just described in the search_tools reply and then unreachable."""
+        for name in names or []:
+            if not name or name in _discovered_names:
+                continue
+            full = system_tools.schemas_for_tools([name])
+            if not full:
+                continue
+            _discovered_names.add(name)
+            active_schemas.extend(full)
+            compact_schemas.extend(system_tools.compact_schemas_for_prompt(full))
+            name_only_schemas.extend(system_tools.name_only_schemas_for_prompt(full))
+
+    tool_executor = _make_tool_executor(
+        on_tool_call, full_schemas, on_confirm_request=on_confirm_request,
+        cfg=cfg, provider_ref=provider_ref, verbosity_ref=verbosity_ref,
+        discover_sink=_discover_sink if tools_enabled else None,
+    ) if tools_enabled else None
+
+    attempts = []
+
+    for provider in providers:
+        label = _provider_label(provider)
+        provider_ref[0] = label
+        profile = _prompt_profile(label, cfg["defaults"])
+        verbosity_ref[0] = profile.get("tool_result_verbosity", "full")
+        if tools_enabled:
+            style = profile.get("tool_schema_style")
+            tool_schemas = (
+                name_only_schemas if style == "name_only"
+                else active_schemas if style == "raw"
+                else compact_schemas
             )
-        return AIResult(True, text=text, usage=get_usage_summary())
+        else:
+            tool_schemas = None
+        adapter = ai_providers.ADAPTERS.get(provider.get("type"))
+        if adapter is None:
+            attempts.append((label, f"unknown provider type '{provider.get('type')}'"))
+            continue
 
-    return AIResult(False, error=_give_up_error(),
-                    tool_history=_openai_messages_to_generic(working_messages) if ran_tools else None)
+        # Ollama (or anything else with no configured keys but still
+        # eligible \u2014 i.e. local, no auth needed) gets exactly one pass with
+        # no key substituted, same as before multi-key support existed.
+        keys = ai_config.provider_keys(provider) or [None]
 
+        for i, key in enumerate(keys, start=1):
+            messages = _build_messages(
+                persona, commands, user_text, tools_enabled, profile, conv_id,
+                route=route if tools_enabled else None,
+            )
+            runs = getattr(tool_executor, "runs", None) if tool_executor else None
+            if runs:
+                budget = profile.get("tool_result_budget", _MODE_BY_NAME["full"]["tool_result_budget"])
+                note = _tool_runs_note(runs, budget)
+                if note:
+                    messages.append({"role": "user", "content": note})
 
-ADAPTERS = {
-    "openai_compatible": call_openai_compatible,
-    "anthropic": call_anthropic,
-    "gemini": call_gemini,
-    "cohere": call_cohere,
-    "ollama": call_ollama,
-}
+            key_label = f"{label} (key {i}/{len(keys)})" if len(keys) > 1 else label
+            if on_attempt:
+                on_attempt(key_label)
+
+            resolved = _resolve(provider, cfg["defaults"])
+            if key is not None:
+                resolved["api_key"] = key
+
+            ai_providers.set_log_context(conv_id, key_label)
+            try:
+                result = adapter(resolved, messages, resolved["timeout"],
+                                 tools=tool_schemas, tool_executor=tool_executor)
+            except Exception as e:  # one bad provider/key must never take down the whole ask
+                result = ai_providers.AIResult(False, error=f"unexpected error: {e}")
+            finally:
+                ai_providers.clear_log_context()
+
+            if result.ok and _is_tool_trace_reply(result.text):
+                result = ai_providers.AIResult(
+                    False, error="model echoed tool-call traces instead of an answer"
+                )
+
+            if result.ok:
+                turn_runs = getattr(tool_executor, "runs", None) if tool_executor else None
+                extras = _extras_from_runs(turn_runs)
+                exchange_count = conversations.append_exchange(
+                    conv_id, user_text, result.text, label, extras=extras
+                )
+                _maybe_update_title(cfg, conv_id, exchange_count, user_text, result.text)
+                return AskResult(True, text=result.text, provider=label, attempts=attempts,
+                                 assistant_name=assistant_name, address_user_as=address)
+
+            attempts.append((key_label, result.error))
+
+    return AskResult(False, attempts=attempts, assistant_name=assistant_name, address_user_as=address)
