@@ -402,14 +402,23 @@ def call_openai_compatible(provider, messages, timeout, tools=None, tool_executo
     headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
     working_messages = list(messages)
     ran_tools = False
-    tools_payload = None
-    if tools:
-        tools_payload = [
+
+    def _tools_payload():
+        # Phase 9 of the token-optimization plan (see new_plan.md):
+        # rebuilt every round instead of once before the loop, so a
+        # Phase 5 search_tools match (which grows the *same* `tools` list
+        # object the caller passed in, see ai_client._make_tool_executor's
+        # discover_sink) is actually advertised starting the very next
+        # round instead of only existing in that round's tool reply.
+        if not tools:
+            return None
+        return [
             {"type": "function", "function": {"name": t["name"], "description": t["description"], "parameters": t["parameters"]}}
             for t in tools
         ]
 
     for round_num in range(MAX_TOOL_ROUNDS + 1):
+        tools_payload = _tools_payload()
         payload = {
             "model": model,
             "messages": working_messages,
@@ -528,9 +537,15 @@ def call_anthropic(provider, messages, timeout, tools=None, tool_executor=None):
     }
     working_turns = list(turns)
     ran_tools = False
-    tools_payload = None
-    if tools:
-        tools_payload = [
+
+    def _tools_payload():
+        # Phase 9 (see new_plan.md): rebuilt every round so a Phase 5
+        # search_tools match, appended to the same `tools` list object by
+        # ai_client._make_tool_executor's discover_sink, is offered
+        # starting next round.
+        if not tools:
+            return None
+        return [
             {"name": t["name"], "description": t["description"], "input_schema": t["parameters"]}
             for t in tools
         ]
@@ -539,6 +554,7 @@ def call_anthropic(provider, messages, timeout, tools=None, tool_executor=None):
         return _anthropic_turns_to_generic(system_text, working_turns) if ran_tools else None
 
     for round_num in range(MAX_TOOL_ROUNDS + 1):
+        tools_payload = _tools_payload()
         payload = {
             "model": model,
             "max_tokens": provider.get("max_tokens", 700),
@@ -672,9 +688,15 @@ def call_gemini(provider, messages, timeout, tools=None, tool_executor=None):
     working_contents = [_to_gemini_content(t) for t in turns]
     headers = {"x-goog-api-key": api_key, "Content-Type": "application/json"}
     ran_tools = False
-    tools_payload = None
-    if tools:
-        tools_payload = [{"function_declarations": [
+
+    def _tools_payload():
+        # Phase 9 (see new_plan.md): rebuilt every round so a Phase 5
+        # search_tools match, appended to the same `tools` list object by
+        # ai_client._make_tool_executor's discover_sink, is offered
+        # starting next round.
+        if not tools:
+            return None
+        return [{"function_declarations": [
             {"name": t["name"], "description": t["description"], "parameters": _to_gemini_schema(t["parameters"])}
             for t in tools
         ]}]
@@ -688,6 +710,7 @@ def call_gemini(provider, messages, timeout, tools=None, tool_executor=None):
         return generic
 
     for round_num in range(MAX_TOOL_ROUNDS + 1):
+        tools_payload = _tools_payload()
         payload = {
             "contents": working_contents,
             "generationConfig": {"maxOutputTokens": provider.get("max_tokens", 700)},
@@ -770,14 +793,21 @@ def call_cohere(provider, messages, timeout, tools=None, tool_executor=None):
     headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
     working_messages = list(messages)
     ran_tools = False
-    tools_payload = None
-    if tools:
-        tools_payload = [
+
+    def _tools_payload():
+        # Phase 9 (see new_plan.md): rebuilt every round so a Phase 5
+        # search_tools match, appended to the same `tools` list object by
+        # ai_client._make_tool_executor's discover_sink, is offered
+        # starting next round.
+        if not tools:
+            return None
+        return [
             {"type": "function", "function": {"name": t["name"], "description": t["description"], "parameters": t["parameters"]}}
             for t in tools
         ]
 
     for round_num in range(MAX_TOOL_ROUNDS + 1):
+        tools_payload = _tools_payload()
         payload = {
             "model": model,
             "messages": working_messages,
@@ -850,14 +880,21 @@ def call_ollama(provider, messages, timeout, tools=None, tool_executor=None):
     headers = {"Content-Type": "application/json"}
     working_messages = list(messages)
     ran_tools = False
-    tools_payload = None
-    if tools:
-        tools_payload = [
+
+    def _tools_payload():
+        # Phase 9 (see new_plan.md): rebuilt every round so a Phase 5
+        # search_tools match, appended to the same `tools` list object by
+        # ai_client._make_tool_executor's discover_sink, is offered
+        # starting next round.
+        if not tools:
+            return None
+        return [
             {"type": "function", "function": {"name": t["name"], "description": t["description"], "parameters": t["parameters"]}}
             for t in tools
         ]
 
     for round_num in range(MAX_TOOL_ROUNDS + 1):
+        tools_payload = _tools_payload()
         payload = {"model": model, "messages": working_messages, "stream": False}
         if tools_payload and round_num < MAX_TOOL_ROUNDS:
             payload["tools"] = tools_payload
