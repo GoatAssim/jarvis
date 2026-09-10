@@ -1,11 +1,16 @@
 """File search via voidtools' Everything (Windows only), plus two small
 Explorer helpers for acting on a result.
 
-Everything.exe must already be running \u2014 this module is only the SDK
-client, never the indexer. See DOCUMENTATION/everything_sdk_reference.md
-and DOCUMENTATION/everything_sdk_python_reference.md for the full API this
-wraps, and everything_config.py for the settings file (DLL path override,
-result-count defaults).
+The SDK itself is just an IPC client, never the indexer \u2014 see
+DOCUMENTATION/everything_sdk_reference.md and
+DOCUMENTATION/everything_sdk_python_reference.md for the full API it wraps,
+and everything_config.py for the settings file (DLL/exe path overrides,
+result-count defaults). Since a search is useless without Everything.exe
+actually running to answer it, search_files() launches it on demand (via
+_ensure_running) if it isn't already up, minimized to the tray with
+-startup, and asks it to close again (Everything_Exit) once this ask's
+jarvis process exits \u2014 but only if *we* were the ones who launched it; an
+instance the user already had open is left running untouched.
 
 Like every other tools module here, every public function takes an
 `arguments` dict and always returns a JSON-serializable dict \u2014 real data,
@@ -21,10 +26,12 @@ and every Set* filter is re-applied on every search rather than relying on
 leftover state from a previous call.
 """
 
+import atexit
 import ctypes
 import os
 import platform
 import subprocess
+import time
 from ctypes import wintypes
 from datetime import datetime
 from pathlib import Path
@@ -84,7 +91,19 @@ _CANDIDATE_DLL_DIRS = [
     r"C:\Everything-SDK\DLL",
 ]
 
+# Common install locations for the actual Everything.exe app (separate
+# download/installer from the SDK zip above).
+_CANDIDATE_EXE_PATHS = [
+    r"C:\Program Files\Everything\Everything.exe",
+    r"C:\Program Files (x86)\Everything\Everything.exe",
+]
+
 _dll_cache = {"path": None, "dll": None}
+
+# Whether *this* process is the one that launched Everything.exe (as opposed
+# to it already being open before we got here). Only ever close it down in
+# the former case \u2014 never kill an instance the user already had running.
+_launch_state = {"launched": False, "atexit_registered": False}
 
 
 def _is_64bit_python():
@@ -140,6 +159,7 @@ def _setup_dll(dll):
     dll.Everything_GetResultDateModified.restype = wintypes.BOOL
     dll.Everything_GetResultAttributes.argtypes = [wintypes.DWORD]
     dll.Everything_GetResultAttributes.restype = wintypes.DWORD
+    dll.Everything_Exit.restype = wintypes.BOOL
     return dll
 
 
@@ -171,6 +191,94 @@ def _get_dll():
     _dll_cache["dll"] = dll
     _dll_cache["path"] = path
     return dll, None
+
+
+def _resolve_exe_path():
+    """Same shape as _resolve_dll_path(): explicit config override first
+    (exe_path in ~/.jarvis/everything.json), then an env var, then the
+    usual install spots. Returns a path string, or None if nothing found."""
+    cfg = everything_config.load_config()
+    override = (cfg.get("exe_path") or "").strip()
+    if override and Path(override).is_file():
+        return override
+
+    env_override = (os.environ.get("EVERYTHING_EXE") or "").strip()
+    if env_override and Path(env_override).is_file():
+        return env_override
+
+    for candidate in _CANDIDATE_EXE_PATHS:
+        if Path(candidate).is_file():
+            return candidate
+    return None
+
+
+def _ipc_reachable(dll):
+    """Cheap probe: a zero-result query still round-trips through IPC, so
+    its success/failure tells us whether Everything.exe is there to answer
+    without actually fetching anything."""
+    try:
+        dll.Everything_SetSearchW("")
+        dll.Everything_SetMax(0)
+        if dll.Everything_QueryW(True):
+            return True
+        return dll.Everything_GetLastError() != 2  # 2 == EVERYTHING_ERROR_IPC
+    except Exception:
+        return False
+
+
+def _ensure_running(dll):
+    """If Everything.exe isn't reachable over IPC, try launching it
+    ourselves and wait for it to come up. Returns None on success (already
+    running, or we just started it), or an error string.
+
+    Only ever called right before a search, and only ever closes what *this*
+    call launched (see _close_if_launched) \u2014 an instance the user already
+    had open is left alone."""
+    if _ipc_reachable(dll):
+        return None
+
+    exe_path = _resolve_exe_path()
+    if not exe_path:
+        return (
+            "Everything.exe isn't running and I couldn't find it to launch it \u2014 "
+            "install it from https://www.voidtools.com/ or set exe_path in "
+            "~/.jarvis/everything.json (run 'jarvis everything-config' to see that file)"
+        )
+
+    try:
+        # -startup mirrors how Everything launches itself from the Windows
+        # startup folder: minimized to the tray, no window popping up.
+        subprocess.Popen([exe_path, "-startup"])
+    except OSError as e:
+        return f"couldn't launch {exe_path}: {e}"
+
+    deadline = time.monotonic() + 8.0
+    while time.monotonic() < deadline:
+        if _ipc_reachable(dll):
+            _launch_state["launched"] = True
+            if not _launch_state["atexit_registered"]:
+                atexit.register(_close_if_launched)
+                _launch_state["atexit_registered"] = True
+            return None
+        time.sleep(0.25)
+
+    return f"launched {exe_path} but it never responded over IPC \u2014 try again in a moment"
+
+
+def _close_if_launched():
+    """Registered with atexit only when we're the ones who launched
+    Everything.exe (see _ensure_running) \u2014 asks it to close, via the SDK's
+    own Everything_Exit IPC call, once this ask's process is done replying.
+    Never touches an instance that was already running before us."""
+    if not _launch_state["launched"]:
+        return
+    dll = _dll_cache.get("dll")
+    if dll is None:
+        return
+    try:
+        dll.Everything_Exit()
+    except Exception:
+        pass  # best-effort cleanup, nothing left to do if this fails
 
 
 def _filetime_to_iso(ticks):
@@ -357,6 +465,10 @@ def search_files(arguments):
         return {"error": f"unknown sort: {sort_key!r} (expected one of {list(_SORT_TYPES.keys())})"}
 
     dll, err = _get_dll()
+    if err:
+        return {"error": err}
+
+    err = _ensure_running(dll)
     if err:
         return {"error": err}
 

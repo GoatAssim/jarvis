@@ -267,4 +267,28 @@ TOOL_RESULT_SPECS = {
             "low": ["bySource", "byCompletionStatus", "topGenres"],
         },
     },
+
+    # ── pyautogui/pygetwindow (desktop_tools.py) ────────────────────────
+    # list_windows/get_active_window are the only two in this group with
+    # anything worth trimming \u2014 click/drag/move_mouse/etc. already return
+    # a handful of short fields. Both share the same window-summary shape
+    # (title/left/top/width/height/isActive/isMinimized): title+isActive
+    # are what the model actually needs to talk about or pick a window;
+    # pixel position/size is semi-necessary (only matters if it's about to
+    # click at a coordinate) and isMinimized is a nice-to-have on top of
+    # that.
+    "list_windows": {
+        "list_item_drop": {
+            "windows": {
+                "medium": ["left", "top", "width", "height"],
+                "low": ["left", "top", "width", "height", "isMinimized"],
+            },
+        },
+    },
+    "get_active_window": {
+        "drop_fields": {
+            "medium": ["left", "top", "width", "height"],
+            "low": ["left", "top", "width", "height", "isMinimized"],
+        },
+    },
 }

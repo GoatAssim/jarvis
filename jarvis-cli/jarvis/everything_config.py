@@ -24,6 +24,7 @@ ENCODING = "utf-8"
 DEFAULT_CONFIG = {
     "enabled": True,
     "dll_path": "",              # explicit override; blank = auto-detect
+    "exe_path": "",              # Everything.exe itself; blank = auto-detect (used to auto-launch it if it's not already running)
     "default_max_results": 30,
     "max_results_cap": 200,
     "match_path_default": False,

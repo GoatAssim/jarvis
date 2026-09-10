@@ -415,10 +415,35 @@ def set_mode(mode):
     return mode
 
 
-def _tools_blurb(compact, has_playnite, has_spotify):
+def _tools_blurb(compact, ultra, has_playnite, has_spotify):
     """Only advertise tools that are actually in this session's schema.
     Groq 400s if the prompt names a tool that isn't in request.tools."""
     if compact:
+        if ultra:
+            # Ultra (50% Capacity): tool_schema_style is already "name_only"
+            # here, so the model gets almost nothing about each tool up
+            # front \u2014 this blurb is the only place the essential behavioral
+            # rules (confirm-before-destructive, don't guess a command name,
+            # screenshots are for the user not you) survive. Cut everything
+            # that's just elaboration on top of those rules.
+            parts = [
+                "Tools listed by name only \u2014 call with no args first if unsure, "
+                "you'll get its schema back. Confirm before install/delete/off/eval. "
+                "Unsure of a saved command's exact name? search_commands first, never "
+                "guess. Screenshots only give you ok/path \u2014 never describe the image. "
+                "Web questions: web_search then web_fetch. Installs: package_search, "
+                "ask, package_install confirm=true. Video: ytdl_info, then ytdl_formats "
+                "if needed, then ytdl_download confirm=true."
+            ]
+            if has_spotify:
+                parts.append("Spotify: spotify_search then spotify_play; never run_command.")
+            if has_playnite:
+                parts.append(
+                    "Playnite: find_game/query_games then playnite_launch_game; "
+                    "don't claim launch unless it succeeded."
+                )
+            return " ".join(parts)
+
         parts = [
             "Tools are listed by name only. Call one when you need it. "
             "If it needs arguments you don't know, call it with no arguments — "
@@ -492,7 +517,7 @@ def _tools_blurb(compact, has_playnite, has_spotify):
 
 
 def _system_prompt(persona, commands_ctx, freq_ctx, tools_enabled,
-                   compact_tools=False, compact_persona=False, has_history=False,
+                   compact_tools=False, compact_persona=False, ultra=False, has_history=False,
                    memory_ctx="", has_playnite=False, has_spotify=False, other_convos_ctx="",
                    playnite_freq_games=None):
     name = persona.get("assistant_name") or DEFAULT_ASSISTANT_NAME
@@ -501,10 +526,20 @@ def _system_prompt(persona, commands_ctx, freq_ctx, tools_enabled,
 
     parts = []
     if compact_persona:
-        parts.append(
-            f"You are {name}, a local AI butler. Dry wit, concise. Address the user as "
-            f'"{address}" sometimes. Never claim you did something unless a tool confirmed it.'
-        )
+        if ultra:
+            # Ultra (50% Capacity): trims the compact persona line further —
+            # "dry wit" is flavor, not a rule the model needs to be told
+            # explicitly to follow; everything else here is load-bearing
+            # (name, how to address the user, don't claim unconfirmed actions).
+            parts.append(
+                f"You are {name}, a local AI butler. Address the user as "
+                f'"{address}" sometimes. Never claim you did something unless a tool confirmed it.'
+            )
+        else:
+            parts.append(
+                f"You are {name}, a local AI butler. Dry wit, concise. Address the user as "
+                f'"{address}" sometimes. Never claim you did something unless a tool confirmed it.'
+            )
     else:
         parts.append(
             f"You are {name}, a private AI assistant running locally for one user on their own "
@@ -517,10 +552,13 @@ def _system_prompt(persona, commands_ctx, freq_ctx, tools_enabled,
         )
     if has_history:
         if compact_persona:
-            parts.append(
-                "Earlier messages in this chat are real — continue that thread. "
-                "If the user is answering your questions, proceed with what they asked for."
-            )
+            if ultra:
+                parts.append("Earlier messages are real — continue that thread.")
+            else:
+                parts.append(
+                    "Earlier messages in this chat are real — continue that thread. "
+                    "If the user is answering your questions, proceed with what they asked for."
+                )
         else:
             parts.append(
                 "The conversation history before the latest user message is real — continue that "
@@ -529,7 +567,7 @@ def _system_prompt(persona, commands_ctx, freq_ctx, tools_enabled,
                 "turns never happened."
             )
     if tools_enabled:
-        parts.append(_tools_blurb(compact_tools, has_playnite, has_spotify))
+        parts.append(_tools_blurb(compact_tools, ultra, has_playnite, has_spotify))
     if memory_ctx:
         parts.append(memory_ctx)
     if other_convos_ctx:
@@ -569,6 +607,10 @@ def _build_messages(persona, commands, user_text, tools_enabled, profile, conver
         recap_budget=profile.get("recap_budget"),
     )
     compact_persona = profile.get("compact_persona", False)
+    # tool_schema_style is only "name_only" for the ultra profile today, so
+    # it doubles as the ultra flag here rather than adding a new knob just
+    # for this — see PROMPT_MODE_DEFS' knob list.
+    ultra = profile.get("tool_schema_style") == "name_only"
     prior_user = [
         (m.get("content") or "")
         for m in prior_turns
@@ -592,6 +634,7 @@ def _build_messages(persona, commands, user_text, tools_enabled, profile, conver
         tools_enabled,
         compact_tools=compact,
         compact_persona=compact_persona,
+        ultra=ultra,
         has_history=bool(prior_turns),
         memory_ctx=memory_ctx,
         has_playnite=any(n.startswith("playnite_") for n in offered_names),

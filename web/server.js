@@ -233,7 +233,40 @@ function validateSpec(spec) {
 // ---------------------------------------------------------------------------
 
 const app = express();
-app.use(express.json({ limit: "1mb" }));
+app.use(
+  express.json({
+    limit: "1mb",
+    // Stash the exact raw bytes we received before body-parser tries to
+    // JSON.parse them, so if parsing fails we can log what actually came
+    // in (headers + raw body) instead of just the generic SyntaxError.
+    // Temporary diagnostic for tracking down the "Unexpected non-whitespace
+    // character" errors — safe to remove later, doesn't change parsing
+    // behavior for valid requests.
+    verify: (req, _res, buf) => {
+      req.rawBody = buf;
+    },
+  })
+);
+// express.json() throws a SyntaxError (not caught anywhere) when a request
+// body isn't valid JSON. Without this handler that error propagates as an
+// unhandled exception and gets dumped to the console as a stack trace on
+// every malformed request. Catch it here, log what we can about the
+// offending request, and reply with a clean 400 instead — this only
+// affects requests with bad JSON bodies, everything else is untouched.
+app.use((err, req, res, next) => {
+  if (err && err.type === "entity.parse.failed") {
+    console.warn(
+      `[bad-json-body] ${new Date().toISOString()} ${req.method} ${req.originalUrl}\n` +
+        `  from: ${req.ip}\n` +
+        `  headers: ${JSON.stringify(req.headers)}\n` +
+        `  raw body (${req.rawBody ? req.rawBody.length : 0} bytes): ${JSON.stringify(
+          req.rawBody ? req.rawBody.toString("utf-8") : ""
+        )}`
+    );
+    return res.status(400).json({ error: "Invalid JSON body." });
+  }
+  next(err);
+});
 app.use(express.static(path.join(__dirname, "public")));
 
 function requireJarvis(req, res, next) {
