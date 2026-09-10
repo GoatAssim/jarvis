@@ -1676,6 +1676,7 @@ audio.ask-dl-player{ max-height: none; background: transparent; }
 .log-entry__dir--tool_call, .log-entry__dir--tool_result{ color: var(--gold); border-color: var(--gold); }
 .log-entry__dir--error{ color: var(--red); border-color: var(--red); }
 .log-entry__provider{ color: var(--text-dimmer); }
+.log-entry__tokens{ color: var(--text-dimmer); font-variant-numeric: tabular-nums; }
 .log-entry__round{ color: var(--text-dimmer); margin-left: auto; }
 .log-entry__body{
   margin: 0; white-space: pre-wrap; word-break: break-word;

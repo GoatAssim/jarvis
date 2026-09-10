@@ -38,6 +38,7 @@ import threading
 import requests
 
 from . import logs
+from . import token_usage
 
 MAX_TOOL_ROUNDS = 5  # follow-up requests allowed after a tool call, per ask — plenty for simple
 # lookups. Every round resends the *whole* growing transcript (system prompt, history, every
@@ -57,14 +58,26 @@ MAX_TOOL_ROUNDS = 5  # follow-up requests allowed after a tool call, per ask —
 _log_local = threading.local()
 
 
-def set_log_context(conv_id, provider=None):
+def set_log_context(conv_id, provider=None, on_tool_usage=None):
     _log_local.conv_id = conv_id
     _log_local.provider = provider
+    # on_tool_usage(name, input_tokens, output_tokens), if given, fires once
+    # per tool call, right after _call_tool_safely below has both halves of
+    # the token estimate (it can't fire any earlier — output_tokens isn't
+    # known until the tool has actually returned).
+    _log_local.on_tool_usage = on_tool_usage
+    # Phase 0 (see new_plan.md): usage/round bookkeeping is scoped to one
+    # provider attempt, same lifecycle as conv_id/provider above — reset
+    # here (ai_client.ask calls this once per attempt) and read back via
+    # get_usage_summary() once that attempt either succeeds or fails.
+    _log_local.usage_rounds = []
+    _log_local.tool_usage = []
 
 
 def clear_log_context():
     _log_local.conv_id = None
     _log_local.provider = None
+    _log_local.on_tool_usage = None
 
 
 def _log_conv_id():
@@ -75,6 +88,42 @@ def _log_provider():
     return getattr(_log_local, "provider", None)
 
 
+def _record_usage(provider_type, data, round_num):
+    """Phase 0: log + accumulate the real (provider-reported) token usage
+    for one request/response round, if the response carried any."""
+    usage = token_usage.extract_usage(provider_type, data)
+    if usage is None:
+        return
+    entry = {"round": round_num, **usage}
+    rounds = getattr(_log_local, "usage_rounds", None)
+    if rounds is None:
+        rounds = []
+        _log_local.usage_rounds = rounds
+    rounds.append(entry)
+    conv_id = _log_conv_id()
+    if conv_id:
+        logs.log(conv_id, "usage", entry, provider=_log_provider(), round_num=round_num)
+
+
+def get_usage_summary():
+    """Totals + a per-round/per-tool-call breakdown for the attempt
+    currently (or most recently) in log-context scope. Real provider
+    counts where the response reported them; ~estimated (see
+    token_usage.py) for tool-call arguments/results, which no provider
+    reports token counts for on its own."""
+    rounds = getattr(_log_local, "usage_rounds", None) or []
+    tool_calls = getattr(_log_local, "tool_usage", None) or []
+    total_input = sum(r.get("input_tokens") or 0 for r in rounds)
+    total_output = sum(r.get("output_tokens") or 0 for r in rounds)
+    return {
+        "input_tokens": total_input,
+        "output_tokens": total_output,
+        "total_tokens": total_input + total_output,
+        "rounds": rounds,
+        "tool_calls": tool_calls,
+    }
+
+
 class AIResult:
     """The outcome of one call to one provider.
 
@@ -83,13 +132,14 @@ class AIResult:
     next provider can continue from instead of re-running those tools.
     """
 
-    __slots__ = ("ok", "text", "error", "tool_history")
+    __slots__ = ("ok", "text", "error", "tool_history", "usage")
 
-    def __init__(self, ok, text=None, error=None, tool_history=None):
+    def __init__(self, ok, text=None, error=None, tool_history=None, usage=None):
         self.ok = ok
         self.text = text
         self.error = error
         self.tool_history = tool_history  # enriched messages to hand to the next provider
+        self.usage = usage  # Phase 0 (new_plan.md): get_usage_summary() for this attempt
 
 
 def _post_json(url, headers, payload, timeout):
@@ -163,19 +213,54 @@ def _split_system(messages):
     return "\n\n".join(system_parts), turns
 
 
-def _call_tool_safely(tool_executor, name, arguments):
+def _call_tool_safely(tool_executor, name, arguments, round_num=None):
     """Call the caller's tool_executor and return whatever it returns
     (usually a dict) — or a small error dict if it raised. Never lets a
-    broken tool take down the request loop."""
+    broken tool take down the request loop.
+
+    Phase 0 (see new_plan.md): providers never report token counts for an
+    individual tool call/result on their own — only for the whole
+    request/response it's embedded in — so input_tokens/output_tokens
+    here are a local ~estimate (token_usage.estimate_tokens_for), logged
+    right alongside the call so the debug panel and Logs viewer can show
+    "how many tokens did this tool call cost" per call, not just per ask.
+    """
     conv_id = _log_conv_id()
+    input_tokens = token_usage.estimate_tokens_for(arguments)
     if conv_id:
-        logs.log(conv_id, "tool_call", {"name": name, "arguments": arguments}, provider=_log_provider())
+        logs.log(
+            conv_id, "tool_call",
+            {"name": name, "arguments": arguments, "input_tokens": input_tokens},
+            provider=_log_provider(), round_num=round_num,
+        )
     try:
         result = tool_executor(name, arguments)
     except Exception as e:
         result = {"error": f"{name} failed: {e}"}
+    output_tokens = token_usage.estimate_tokens_for(result)
     if conv_id:
-        logs.log(conv_id, "tool_result", {"name": name, "result": result}, provider=_log_provider())
+        logs.log(
+            conv_id, "tool_result",
+            {"name": name, "result": result, "output_tokens": output_tokens},
+            provider=_log_provider(), round_num=round_num,
+        )
+    tool_usage = getattr(_log_local, "tool_usage", None)
+    if tool_usage is None:
+        tool_usage = []
+        _log_local.tool_usage = tool_usage
+    tool_usage.append({
+        "name": name,
+        "round": round_num,
+        "input_tokens": input_tokens,
+        "output_tokens": output_tokens,
+        "source": "estimated",
+    })
+    on_usage = getattr(_log_local, "on_tool_usage", None)
+    if on_usage:
+        try:
+            on_usage(name, input_tokens, output_tokens)
+        except Exception:
+            pass  # a broken display callback must never break the actual tool call
     return result
 
 
@@ -437,6 +522,7 @@ def call_openai_compatible(provider, messages, timeout, tools=None, tool_executo
         if parse_err:
             return AIResult(False, error=parse_err,
                             tool_history=_openai_messages_to_generic(working_messages) if ran_tools else None)
+        _record_usage("openai_compatible", data, round_num)
 
         choices = data.get("choices") or []
         if not choices:
@@ -458,7 +544,7 @@ def call_openai_compatible(provider, messages, timeout, tools=None, tool_executo
                 fn = call.get("function") or {}
                 name = fn.get("name", "")
                 args = _decode_arguments(fn.get("arguments"))
-                result_text = _stringify_tool_result(_call_tool_safely(tool_executor, name, args))
+                result_text = _stringify_tool_result(_call_tool_safely(tool_executor, name, args, round_num))
                 working_messages.append({
                     "role": "tool",
                     "tool_call_id": call.get("id", ""),
@@ -484,7 +570,7 @@ def call_openai_compatible(provider, messages, timeout, tools=None, tool_executo
             ran_tools = True
             result_bits = []
             for name, args in text_calls:
-                raw = _call_tool_safely(tool_executor, name, args)
+                raw = _call_tool_safely(tool_executor, name, args, round_num)
                 result_bits.append(f"{name}: {_stringify_tool_result(raw)}")
             working_messages.append({
                 "role": "user",
@@ -498,7 +584,7 @@ def call_openai_compatible(provider, messages, timeout, tools=None, tool_executo
             })
             continue
 
-        return AIResult(True, text=text)
+        return AIResult(True, text=text, usage=get_usage_summary())
 
     return AIResult(False, error=_give_up_error(),
                     tool_history=_openai_messages_to_generic(working_messages) if ran_tools else None)
@@ -587,7 +673,7 @@ def call_anthropic(provider, messages, timeout, tools=None, tool_executor=None):
             if tool_use_blocks:
                 return AIResult(False, error=_give_up_error(), tool_history=_history())
             return AIResult(False, error="empty response content", tool_history=_history())
-        return AIResult(True, text=text)
+        return AIResult(True, text=text, usage=get_usage_summary())
 
     return AIResult(False, error=_give_up_error(), tool_history=_history())
 
@@ -744,7 +830,7 @@ def call_gemini(provider, messages, timeout, tools=None, tool_executor=None):
             if call_parts:
                 return AIResult(False, error=_give_up_error(), tool_history=_history())
             return AIResult(False, error="empty response content", tool_history=_history())
-        return AIResult(True, text=text)
+        return AIResult(True, text=text, usage=get_usage_summary())
 
     return AIResult(False, error=_give_up_error(), tool_history=_history())
 
@@ -826,7 +912,7 @@ def call_cohere(provider, messages, timeout, tools=None, tool_executor=None):
                                 tool_history=_openai_messages_to_generic(working_messages) if ran_tools else None)
             return AIResult(False, error="empty response content",
                             tool_history=_openai_messages_to_generic(working_messages) if ran_tools else None)
-        return AIResult(True, text=text)
+        return AIResult(True, text=text, usage=get_usage_summary())
 
     return AIResult(False, error=_give_up_error(),
                     tool_history=_openai_messages_to_generic(working_messages) if ran_tools else None)
@@ -900,7 +986,7 @@ def call_ollama(provider, messages, timeout, tools=None, tool_executor=None):
                 error="empty response content (is the model pulled? try: ollama pull " + (model or "<model>") + ")",
                 tool_history=_openai_messages_to_generic(working_messages) if ran_tools else None,
             )
-        return AIResult(True, text=text)
+        return AIResult(True, text=text, usage=get_usage_summary())
 
     return AIResult(False, error=_give_up_error(),
                     tool_history=_openai_messages_to_generic(working_messages) if ran_tools else None)
