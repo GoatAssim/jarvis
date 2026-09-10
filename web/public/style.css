@@ -1614,3 +1614,93 @@ audio.ask-dl-player{ max-height: none; background: transparent; }
   .debug-pane{ border-right: none; border-bottom: 1px solid var(--border); }
   .debug-pane--list{ order: -1; }
 }
+
+/* =========================================================================
+   Logs — floating action button + overlay. The overlay reuses the generic
+   .debug-* three-pane layout (see above) so it matches the tool inspector's
+   look for free; only the bits specific to rendering log entries live here.
+   ========================================================================= */
+
+.logs-fab{
+  position: fixed; right: 22px; bottom: 22px; z-index: 60;
+  display: flex; align-items: center; gap: 8px;
+  padding: 11px 16px 11px 13px;
+  background: var(--bg-raised);
+  border: 1px solid var(--border-strong);
+  border-radius: 999px;
+  color: var(--text);
+  font-family: var(--font-display); font-size: 12px; letter-spacing: 0.14em; text-transform: uppercase;
+  cursor: pointer;
+  box-shadow: 0 4px 20px rgba(0,0,0,0.45), 0 0 0 rgba(0,0,0,0);
+  transition: border-color 0.15s, box-shadow 0.15s, transform 0.15s;
+}
+.logs-fab svg{ width: 18px; height: 18px; color: var(--accent-soft); flex-shrink: 0; }
+.logs-fab:hover{
+  border-color: var(--accent); color: var(--accent);
+  box-shadow: 0 4px 24px rgba(0,0,0,0.5), 0 0 22px var(--accent-glow);
+  transform: translateY(-1px);
+}
+.logs-fab:hover svg{ color: var(--accent); }
+
+@media (max-width: 900px){
+  .logs-fab span{ display: none; }
+  .logs-fab{ padding: 12px; border-radius: 50%; right: 16px; bottom: 16px; }
+}
+
+.logs-body{ grid-template-columns: 260px minmax(0, 1fr) 260px; }
+
+.logs-pane--entries{ display: flex; flex-direction: column; }
+.logs-entries{ flex: 1; overflow-y: auto; padding: 10px 14px; min-height: 60px; }
+.logs-toolbar{ justify-content: flex-start; }
+.logs-toolbar .debug-response-toggle{ margin-left: auto; }
+
+.log-entry{
+  border: 1px solid var(--border);
+  border-left: 2px solid var(--border-strong);
+  border-radius: 2px;
+  background: var(--bg-panel-2);
+  padding: 8px 10px;
+  margin-bottom: 8px;
+}
+.log-entry__head{
+  display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap;
+  font-family: var(--font-mono); font-size: 11px; margin-bottom: 6px;
+}
+.log-entry__ts{ color: var(--text-dimmer); }
+.log-entry__dir{
+  letter-spacing: 0.06em; text-transform: uppercase; font-size: 10.5px;
+  padding: 1px 6px; border-radius: 2px; border: 1px solid var(--border-strong);
+}
+.log-entry__dir--request{ color: var(--accent-soft); border-color: var(--accent-soft); }
+.log-entry__dir--response{ color: var(--green); border-color: var(--green); }
+.log-entry__dir--tool_call, .log-entry__dir--tool_result{ color: var(--gold); border-color: var(--gold); }
+.log-entry__dir--error{ color: var(--red); border-color: var(--red); }
+.log-entry__provider{ color: var(--text-dimmer); }
+.log-entry__round{ color: var(--text-dimmer); margin-left: auto; }
+.log-entry__body{
+  margin: 0; white-space: pre-wrap; word-break: break-word;
+  font-family: var(--font-mono); font-size: 11.5px; line-height: 1.6; color: var(--text);
+}
+
+.logs-convo-card{
+  border: 1px solid var(--border);
+  border-left: 2px solid var(--border-strong);
+  border-radius: 2px;
+  background: var(--bg-panel-2);
+  padding: 8px 10px;
+  cursor: pointer;
+  transition: border-color 0.15s, background 0.15s, transform 0.15s;
+}
+.logs-convo-card:hover{ border-color: var(--accent-soft); border-left-color: var(--accent); transform: translateX(2px); }
+.logs-convo-card.is-active{
+  border-color: var(--accent);
+  border-left-color: var(--accent);
+  background: linear-gradient(90deg, rgba(79,216,255,0.12), transparent);
+}
+.logs-convo-card__title{ font-size: 12.5px; color: var(--text); word-break: break-word; }
+.logs-convo-card__title.is-deleted{ color: var(--text-dimmer); font-style: italic; }
+.logs-convo-card__meta{ font-family: var(--font-mono); font-size: 10.5px; color: var(--text-dimmer); margin-top: 3px; }
+
+@media (max-width: 1080px){
+  .logs-body{ grid-template-columns: 220px minmax(0,1fr) 220px; }
+}

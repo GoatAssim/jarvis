@@ -26,7 +26,7 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PORT = Number(process.env.PORT) || 4173;
 const HOST = "127.0.0.1";
 
-const RESERVED_NAMES = new Set(["config", "ai-config", "ai-clear", "ai-drop-from", "playnite-config", "spotify-config", "spotify-login", "memory-config", "everything-config", "tools-list", "tool-run", "tool-preview", "tool-safety-set", "conv-new", "conv-list", "conv-show", "conv-switch", "conv-delete", "organize-json", "then", "and", "-h", "--help"]);
+const RESERVED_NAMES = new Set(["config", "ai-config", "ai-clear", "ai-drop-from", "playnite-config", "spotify-config", "spotify-login", "memory-config", "everything-config", "tools-list", "tool-run", "tool-preview", "tool-safety-set", "conv-new", "conv-list", "conv-show", "conv-switch", "conv-delete", "logs", "logs-list", "logs-show", "logs-clear", "organize-json", "then", "and", "-h", "--help"]);
 
 // ---------------------------------------------------------------------------
 // Locate the real jarvis binary. Tries a few invocation strategies, in
@@ -526,6 +526,60 @@ app.delete("/api/conversations/:id", requireJarvis, async (req, res) => {
     return res.json(parsed);
   } catch (e) {
     res.status(500).json({ error: result.error || result.stderr || `Couldn't delete conversation: ${e.message}` });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Logs — raw request/response/tool traffic between the model and this
+// backend, one append-only file per conversation under ~/.jarvis/logs/
+// (see logs.py). Same thin-client pattern as /api/conversations above:
+// the web UI never reads the files itself, it just shells out to the
+// non-interactive `jarvis logs-*` commands and forwards their JSON.
+// ---------------------------------------------------------------------------
+
+app.get("/api/logs", requireJarvis, async (req, res) => {
+  const result = await runJarvisOnce(["logs-list"], 10000);
+  if (!result.ok) {
+    return res.status(500).json({ error: result.error || result.stderr || "Couldn't list logs." });
+  }
+  try {
+    res.json(JSON.parse(result.stdout));
+  } catch (e) {
+    res.status(500).json({ error: `Couldn't parse logs-list: ${e.message}` });
+  }
+});
+
+app.get("/api/logs/:id", requireJarvis, async (req, res) => {
+  if (!isValidConversationId(req.params.id)) {
+    return res.status(400).json({ error: "Invalid conversation id." });
+  }
+  const limitRaw = typeof req.query.limit === "string" ? req.query.limit.trim() : "";
+  const limit = /^\d+$/.test(limitRaw) ? limitRaw : "50";
+  const result = await runJarvisOnce(["logs-show", req.params.id, limit], 10000);
+  let parsed;
+  try {
+    parsed = JSON.parse(result.stdout);
+  } catch { /* fall through to generic error below */ }
+  if (parsed && parsed.error) {
+    return res.status(404).json(parsed);
+  }
+  if (!result.ok || !parsed) {
+    return res.status(500).json({ error: result.error || result.stderr || "Couldn't load logs." });
+  }
+  res.json(parsed);
+});
+
+app.delete("/api/logs/:id", requireJarvis, async (req, res) => {
+  if (!isValidConversationId(req.params.id)) {
+    return res.status(400).json({ error: "Invalid conversation id." });
+  }
+  const result = await runJarvisOnce(["logs-clear", req.params.id], 10000);
+  try {
+    const parsed = JSON.parse(result.stdout);
+    if (!parsed.ok) return res.status(404).json(parsed);
+    return res.json(parsed);
+  } catch (e) {
+    res.status(500).json({ error: result.error || result.stderr || `Couldn't clear log: ${e.message}` });
   }
 });
 

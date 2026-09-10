@@ -41,7 +41,7 @@ ENCODING = "utf-8"
 
 CHAIN_SEP = "then"      # starts a new batch \u2014 waits for the previous one to finish
 PARALLEL_SEP = "and"    # joins the current batch \u2014 runs alongside whatever's already in it
-RESERVED_NAMES = {"config", "ai-config", "ai-clear", "ai-drop-from", "playnite-config", "spotify-config", "spotify-login", "memory-config", "everything-config", "tools-list", "tool-run", "tool-preview", "tool-safety-set", "conv-new", "conv-list", "conv-show", "conv-switch", "conv-delete", "logs", "organize-json", "mode", "mode-set", CHAIN_SEP, PARALLEL_SEP, "-h", "--help"}
+RESERVED_NAMES = {"config", "ai-config", "ai-clear", "ai-drop-from", "playnite-config", "spotify-config", "spotify-login", "memory-config", "everything-config", "tools-list", "tool-run", "tool-preview", "tool-safety-set", "conv-new", "conv-list", "conv-show", "conv-switch", "conv-delete", "logs", "logs-list", "logs-show", "logs-clear", "organize-json", "mode", "mode-set", CHAIN_SEP, PARALLEL_SEP, "-h", "--help"}
 
 OUT = Palette(sys.stdout)  # actual command output: the banner, the command list
 ERR = Palette(sys.stderr)  # jarvis's own status/trace/error messages
@@ -951,6 +951,47 @@ def main():
 
     if argv[0] == "logs":
         run_logs_command(argv[1:], commands)
+        return
+
+    if argv[0] == "logs-list":
+        # Non-interactive, JSON-emitting sibling of 'jarvis logs' — used by
+        # the web UI (see server.js's /api/logs) which has no tty to prompt
+        # against. Plain CLI usage never calls this directly.
+        from . import logs as logs_mod
+        print(json.dumps(logs_mod.list_logged_conversations(), indent=2))
+        return
+
+    if argv[0] == "logs-show":
+        from . import logs as logs_mod
+        from . import conversations
+        conv_id = argv[1].strip() if len(argv) > 1 else ""
+        if not conversations.is_valid_id(conv_id):
+            print(json.dumps({"error": "invalid conversation id"}))
+            sys.exit(1)
+        if not logs_mod.has_log(conv_id):
+            print(json.dumps({"error": "no such conversation"}))
+            sys.exit(1)
+        limit = None
+        if len(argv) > 2 and argv[2].strip():
+            try:
+                limit = int(argv[2].strip())
+            except ValueError:
+                limit = None
+        entries = logs_mod.read_entries(conv_id, limit=limit or 50)
+        print(json.dumps({"id": conv_id, "entries": entries}, indent=2))
+        return
+
+    if argv[0] == "logs-clear":
+        from . import logs as logs_mod
+        from . import conversations
+        conv_id = argv[1].strip() if len(argv) > 1 else ""
+        if not conversations.is_valid_id(conv_id):
+            print(json.dumps({"error": "invalid conversation id"}))
+            sys.exit(1)
+        ok = logs_mod.clear(conv_id)
+        print(json.dumps({"ok": ok}))
+        if not ok:
+            sys.exit(1)
         return
 
     if argv[0] == "playnite-config":
