@@ -297,6 +297,58 @@ def tool_get_active_window(args=None):
     return {"ok": True, **_window_summary(win)}
 
 
+def _find_window(title):
+    """Shared lookup for the two by-title tools below \u2014 same (partial,
+    first-match) semantics as tool_focus_window."""
+    matches = gw.getWindowsWithTitle(str(title))
+    if not matches:
+        return None, {"error": f"no window found matching title: {title!r}"}
+    return matches[0], None
+
+
+def tool_get_window_size(args=None):
+    # Position/size only, by title \u2014 for when a caller already knows which
+    # window it wants (e.g. right before a coordinate-based click) and
+    # doesn't need list_windows' full enumeration of every open window
+    # just to get one window's rect.
+    if gw is None:
+        return _no_pygetwindow()
+    args = args or {}
+    title = args.get("title")
+    if not title:
+        return {"error": "title is required"}
+    try:
+        win, err = _find_window(title)
+    except Exception as e:
+        return {"error": f"get_window_size failed: {e}"}
+    if err:
+        return err
+    try:
+        return {"ok": True, "title": win.title, "left": win.left, "top": win.top, "width": win.width, "height": win.height}
+    except Exception as e:
+        return {"error": f"get_window_size failed: {e}"}
+
+
+def tool_get_window_info(args=None):
+    # Same targeted-by-title idea as get_window_size, but the full summary
+    # (title/left/top/width/height/isActive/isMinimized) \u2014 for when the
+    # caller wants to check on one specific window's full state without
+    # paying for list_windows' whole-desktop enumeration.
+    if gw is None:
+        return _no_pygetwindow()
+    args = args or {}
+    title = args.get("title")
+    if not title:
+        return {"error": "title is required"}
+    try:
+        win, err = _find_window(title)
+    except Exception as e:
+        return {"error": f"get_window_info failed: {e}"}
+    if err:
+        return err
+    return {"ok": True, **_window_summary(win)}
+
+
 DESKTOP_TOOL_SCHEMAS = [
     {
         "name": "type_text",
@@ -461,6 +513,38 @@ DESKTOP_TOOL_SCHEMAS = [
         "description": "Read-only. Get the title/position/size of whatever window currently has focus.",
         "parameters": {"type": "object", "properties": {}, "required": []},
     },
+    {
+        "name": "get_window_size",
+        "description": (
+            "Read-only. Get just the position/size (left/top/width/height) of "
+            "one window by (partial) title match. Cheaper than list_windows "
+            "when you already know which window you want and only need its "
+            "rect \u2014 e.g. right before a coordinate-based click or drag."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "title": {"type": "string", "description": "Window title or substring to match, e.g. 'Spotify'."},
+            },
+            "required": ["title"],
+        },
+    },
+    {
+        "name": "get_window_info",
+        "description": (
+            "Read-only. Get the full title/position/size/active/minimized "
+            "state of one window by (partial) title match. Cheaper than "
+            "list_windows when you already know which window you want and "
+            "just need to check on that one."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "title": {"type": "string", "description": "Window title or substring to match, e.g. 'Spotify'."},
+            },
+            "required": ["title"],
+        },
+    },
 ]
 
 DESKTOP_TOOLS = {
@@ -476,4 +560,6 @@ DESKTOP_TOOLS = {
     "list_windows": tool_list_windows,
     "focus_window": tool_focus_window,
     "get_active_window": tool_get_active_window,
+    "get_window_size": tool_get_window_size,
+    "get_window_info": tool_get_window_info,
 }
