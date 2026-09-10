@@ -404,6 +404,51 @@ def tool_schemas_for_session():
     return out
 
 
+_TOOL_INDEX = None
+
+
+def _tool_index():
+    """name -> full schema, built once from TOOL_SCHEMAS (the full catalog,
+    same source tools_list_payload uses) and cached. Private: use
+    schemas_for_tools() below rather than reaching into this directly."""
+    global _TOOL_INDEX
+    if _TOOL_INDEX is None:
+        _TOOL_INDEX = {}
+        for schema in TOOL_SCHEMAS:
+            name = schema.get("name")
+            if name and name not in _TOOL_INDEX:
+                _TOOL_INDEX[name] = schema
+    return _TOOL_INDEX
+
+
+def schemas_for_tools(names):
+    """Phase 2 of the token-optimization plan (see new_plan.md): return only
+    the full schemas for the given tool names, in the order `names` is
+    given, dropping any name that isn't a real tool.
+
+    Not called from ask() yet — tool_schemas_for_session() below still
+    returns everything, exactly as before. This is purely the building
+    block a later phase (once tool_router.py picks a small set of relevant
+    tool names) will filter down to before handing schemas to a provider.
+
+    Compatibility check: schemas_for_tools([s["name"] for s in
+    tool_schemas_for_session()]) must return the exact same list
+    tool_schemas_for_session() does (same names, same schemas) — see
+    tests/test_schemas_for_tools.py.
+    """
+    index = _tool_index()
+    out = []
+    seen = set()
+    for name in names or []:
+        if name in seen:
+            continue
+        schema = index.get(name)
+        if schema is not None:
+            out.append(schema)
+            seen.add(name)
+    return out
+
+
 def tools_list_payload():
     """Full catalog for remote permission UIs — not filtered by session or env.
 
