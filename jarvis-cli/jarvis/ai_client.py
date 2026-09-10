@@ -708,6 +708,19 @@ def _build_messages(persona, commands, user_text, tools_enabled, profile, conver
             if tool_registry.pack_instruction(group)
         ]
         pack_instructions_ctx = " ".join(pack_lines)
+    elif route is not None and tools_enabled:
+        # Phase 5 fallback (see new_plan.md): the router had no opinion, so
+        # only the tiny search_tools discovery schema is being offered this
+        # round (see active_schemas below) instead of the full catalog.
+        # Without an explicit nudge here, a model that doesn't already
+        # "know" search_tools exists tends to just say it lacks whatever
+        # capability was asked for, rather than calling search_tools to
+        # check first — which is the whole point of this discovery tool.
+        pack_instructions_ctx = (
+            "Before telling the user you don't have a tool for something, "
+            "call search_tools with a keyword for it — many tools aren't "
+            "listed above and only appear after that search."
+        )
     system_prompt = _system_prompt(
         persona,
         commands_ctx,

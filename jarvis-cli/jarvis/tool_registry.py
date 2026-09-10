@@ -152,6 +152,14 @@ TOOL_GROUPS = {
         "playnite_rotate_token",
         "playnite_get_skill",
     ],
+    # search_tools is the Phase 5 discovery tool (see tools.py) — it's
+    # deliberately not offered alongside a normal workflow group, but it
+    # still needs a home here so the consistency check below (and the
+    # every-tool-is-grouped test) doesn't flag it as an orphaned tool that
+    # someone forgot to register.
+    "discovery": [
+        "search_tools",
+    ],
 }
 
 # ---------------------------------------------------------------------------
@@ -186,7 +194,13 @@ TOOL_KEYWORDS = {
     "list_windows": {"windows": 5, "open windows": 8},
     "focus_window": {"focus": 5, "switch to window": 8},
 
-    "search_files": {"find file": 10, "search file": 10, "locate file": 8},
+    "search_files": {
+        "find file": 10, "search file": 10, "locate file": 8,
+        "find files": 10, "search files": 10, "locate files": 8,
+        "find a file": 10, "find the file": 10, "where is": 6,
+        "files in": 7, "list files": 8, "list of files": 8,
+        "folder": 5, "directory": 5, ".exe": 6, "ext:": 8,
+    },
     "open_file": {"open file": 9},
     "write_file": {"write file": 9, "create file": 7, "save file": 6},
 
