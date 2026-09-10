@@ -15,6 +15,7 @@ tool-use guidance.
 
 import os
 import platform
+import re
 import shutil
 import socket
 import subprocess
@@ -242,6 +243,18 @@ _NO_PARAMS = {"type": "object", "properties": {}, "required": []}
 _SEARCH_TOOLS_CAP = 8
 
 
+_SEARCH_STOPWORDS = {
+    "a", "an", "the", "to", "for", "of", "my", "me", "i", "is", "are", "do",
+    "does", "you", "your", "this", "that", "on", "in", "at", "with", "and",
+    "or", "please", "can", "could", "would", "what", "how", "check", "get",
+    "want", "need", "it", "some", "up", "out", "about", "there", "any",
+}
+
+
+def _search_tokens(text):
+    return [t for t in re.findall(r"[a-z0-9']+", text) if t and t not in _SEARCH_STOPWORDS]
+
+
 def tool_search_tools(args):
     """Phase 5 of the token-optimization plan (see new_plan.md): a small,
     always-available, model-visible discovery tool. When the local router
@@ -253,16 +266,16 @@ def tool_search_tools(args):
     Returns compact matches (name/group/one-line summary) only — never
     full argument schemas (new_plan.md section 9: a search_tools reply
     that dumped full schemas would just move the token cost, not remove
-    it). The full schema for anything matched here is queued by the
-    caller (ai_client._make_tool_executor) for the *next* round's tools
-    payload (see ai_providers._pop_discovered_tools), so a match is
-    actually callable later in this same ask() — not just described and
+    it). The full schema for anything matched here is grown into this
+    round's active/compact/name_only schemas by the caller
+    (ai_client._make_tool_executor's discover_sink), so a match is
+    actually callable on the model's next round — not just described and
     then unreachable.
     """
     from . import tool_registry
 
-    query = (args or {}).get("query") or ""
-    query = query.strip().lower()
+    raw_query = (args or {}).get("query") or ""
+    query = raw_query.strip().lower()
     index = tool_registry.TOOL_INDEX
 
     if not query:
@@ -273,16 +286,31 @@ def tool_search_tools(args):
             "message": "Pass a query (a group name, or a keyword) to see matching tools.",
         }
 
+    # Whole-phrase matches (a bare keyword or group name — the common,
+    # cheapest case) still win outright and skip tokenization entirely.
+    # But a real query from the model is often a natural phrase ("download
+    # youtube video", "take a screenshot") that will almost never appear
+    # verbatim in any tool's name or description — requiring the *whole*
+    # query string to be a substring silently returned zero matches for
+    # exactly those realistic queries. Tokenizing and scoring on overlap
+    # fixes that without changing behavior for the simple single-keyword
+    # case (a single-token query degrades to the same substring checks).
+    tokens = _search_tokens(query)
+    if not tokens:
+        tokens = [query]
+
     scored = []
     for name, schema in index.items():
         group = tool_registry.group_of(name) or "misc"
         keywords = " ".join(tool_registry.keywords_for(name).keys())
+        name_lower = name.replace("_", " ").lower()
         haystack = " ".join([
-            name.replace("_", " "),
+            name_lower,
             schema.get("description") or "",
             keywords,
             group,
         ]).lower()
+
         if query == group.lower():
             score = 100
         elif query in name.lower():
@@ -290,13 +318,31 @@ def tool_search_tools(args):
         elif query in haystack:
             score = 10
         else:
-            continue
+            score = 0
+            matched_tokens = 0
+            for tok in tokens:
+                if tok == group.lower():
+                    score += 12
+                    matched_tokens += 1
+                elif tok in name_lower:
+                    score += 9
+                    matched_tokens += 1
+                elif tok in haystack:
+                    score += 3
+                    matched_tokens += 1
+            if matched_tokens > 1:
+                # Small bonus for a tool matching multiple distinct query
+                # tokens (e.g. both "youtube" and "download") over one
+                # matching only a single generic token.
+                score += matched_tokens
+            if score <= 0:
+                continue
         scored.append((score, name, group, schema))
 
     if not scored:
         return {
             "matches": [],
-            "message": f"No tools matched '{query}'. Try a broader keyword or a group name.",
+            "message": f"No tools matched '{raw_query.strip()}'. Try a broader keyword or a group name.",
         }
 
     scored.sort(key=lambda x: (-x[0], x[1]))
