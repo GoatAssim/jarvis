@@ -226,6 +226,11 @@ TOOL_KEYWORDS = {
 # ---------------------------------------------------------------------------
 
 TOOL_PACK_INSTRUCTIONS = {
+    "web": (
+        "Web: for anything that may have changed (prices, news, best-X, "
+        "how-tos), web_search then web_fetch 1-3 URLs, then summarize with "
+        "markdown source links."
+    ),
     "spotify": (
         "Spotify: search before play unless a URI is already known. Never claim "
         "playback started unless spotify_play/spotify_control actually succeeded."
