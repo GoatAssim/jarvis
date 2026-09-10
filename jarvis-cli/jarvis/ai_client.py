@@ -889,7 +889,16 @@ def _make_tool_executor(on_tool_call, schemas=None, on_confirm_request=None,
         arguments = arguments or {}
         key = _cache_key(name, arguments)
         if key in cache:
+            # Signal the cache hit to ai_providers._call_tool_safely so it
+            # doesn't re-log/re-estimate token usage or append a duplicate
+            # tool_usage entry for a tool that didn't actually run again —
+            # this executor is shared across every provider/key failover
+            # in one ask() specifically so cached results are reused
+            # instead of re-run; the usage accounting needs to honor that
+            # same reuse, not just the side effects.
+            _executor._cache_hit = True
             return cache[key]
+        _executor._cache_hit = False
         schema = by_name.get(name)
         if schema is not None:
             missing = _missing_required(schema, arguments)
