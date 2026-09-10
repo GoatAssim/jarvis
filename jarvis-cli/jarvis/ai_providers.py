@@ -33,14 +33,46 @@ changes for a caller that doesn't pass them.
 """
 
 import json
+import threading
 
 import requests
+
+from . import logs
 
 MAX_TOOL_ROUNDS = 5  # follow-up requests allowed after a tool call, per ask — plenty for simple
 # lookups. Every round resends the *whole* growing transcript (system prompt, history, every
 # tool call/result so far), so this is the single biggest token-cost lever in this file: raising
 # it doesn't add tokens linearly, it adds them roughly quadratically (round N resends rounds
 # 1..N-1 too). 5 still covers a two-step "search then fetch then answer" with room to spare.
+
+
+# ---------------------------------------------------------------------------
+# Logging context — the "Logs" feature. ai_client.py sets this once per
+# provider attempt (see ai_client.ask) so that the shared low-level helpers
+# below (_post_json, _call_tool_safely) can attribute the raw request/
+# response/tool traffic to the right conversation without every one of the
+# five adapter loops having to thread a conv_id argument through by hand.
+# Thread-local since the web server may serve multiple asks concurrently.
+# ---------------------------------------------------------------------------
+_log_local = threading.local()
+
+
+def set_log_context(conv_id, provider=None):
+    _log_local.conv_id = conv_id
+    _log_local.provider = provider
+
+
+def clear_log_context():
+    _log_local.conv_id = None
+    _log_local.provider = None
+
+
+def _log_conv_id():
+    return getattr(_log_local, "conv_id", None)
+
+
+def _log_provider():
+    return getattr(_log_local, "provider", None)
 
 
 class AIResult:
@@ -65,14 +97,32 @@ def _post_json(url, headers, payload, timeout):
     never raises. Every network-level failure (DNS, refused connection,
     timeout, TLS, ...) collapses into the second case so adapters don't
     each need their own except-block zoo."""
+    conv_id = _log_conv_id()
+    if conv_id:
+        logs.log(conv_id, "request", {"url": url, "payload": payload}, provider=_log_provider())
     try:
         resp = requests.post(url, headers=headers, json=payload, timeout=timeout)
     except requests.exceptions.Timeout:
-        return None, f"timed out after {timeout}s"
+        err = f"timed out after {timeout}s"
+        if conv_id:
+            logs.log(conv_id, "error", {"error": err}, provider=_log_provider())
+        return None, err
     except requests.exceptions.ConnectionError:
-        return None, "couldn't connect (network issue, or the service is down)"
+        err = "couldn't connect (network issue, or the service is down)"
+        if conv_id:
+            logs.log(conv_id, "error", {"error": err}, provider=_log_provider())
+        return None, err
     except requests.exceptions.RequestException as e:
-        return None, f"request failed: {e}"
+        err = f"request failed: {e}"
+        if conv_id:
+            logs.log(conv_id, "error", {"error": err}, provider=_log_provider())
+        return None, err
+    if conv_id:
+        try:
+            body = resp.json()
+        except ValueError:
+            body = (resp.text or "")[:2000]
+        logs.log(conv_id, "response", {"status": resp.status_code, "body": body}, provider=_log_provider())
     return resp, None
 
 
@@ -117,10 +167,16 @@ def _call_tool_safely(tool_executor, name, arguments):
     """Call the caller's tool_executor and return whatever it returns
     (usually a dict) — or a small error dict if it raised. Never lets a
     broken tool take down the request loop."""
+    conv_id = _log_conv_id()
+    if conv_id:
+        logs.log(conv_id, "tool_call", {"name": name, "arguments": arguments}, provider=_log_provider())
     try:
-        return tool_executor(name, arguments)
+        result = tool_executor(name, arguments)
     except Exception as e:
-        return {"error": f"{name} failed: {e}"}
+        result = {"error": f"{name} failed: {e}"}
+    if conv_id:
+        logs.log(conv_id, "tool_result", {"name": name, "result": result}, provider=_log_provider())
+    return result
 
 
 MAX_TOOL_RESULT_CHARS = 4000

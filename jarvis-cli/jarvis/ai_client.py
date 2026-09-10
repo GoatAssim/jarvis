@@ -1353,11 +1353,14 @@ def ask(user_text, commands=None, on_attempt=None, on_tool_call=None, conversati
             if key is not None:
                 resolved["api_key"] = key
 
+            ai_providers.set_log_context(conv_id, key_label)
             try:
                 result = adapter(resolved, messages, resolved["timeout"],
                                  tools=tool_schemas, tool_executor=tool_executor)
             except Exception as e:  # one bad provider/key must never take down the whole ask
                 result = ai_providers.AIResult(False, error=f"unexpected error: {e}")
+            finally:
+                ai_providers.clear_log_context()
 
             if result.ok and _is_tool_trace_reply(result.text):
                 result = ai_providers.AIResult(
