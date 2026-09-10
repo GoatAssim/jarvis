@@ -60,10 +60,17 @@ DEFAULT_COMPACT_PROMPT_PROVIDERS = ("groq",)
 #   compact_persona        \u2014 use the short persona blurb vs the long one
 #   playnite_freq_games    \u2014 how many frequent Playnite games get listed
 #   skip_other_convos      \u2014 omit the "other recent conversations" context
-#   tool_schema_style      \u2014 "compact" (types/enums/required, short descs) or
+#   tool_schema_style      \u2014 "compact" (types/enums/required, short descs),
 #                            "name_only" (just names \u2014 the model re-requests a
 #                            schema the first time it calls a tool needing
-#                            args it didn't supply; see _make_tool_executor)
+#                            args it didn't supply; see _make_tool_executor), or
+#                            "raw" (the full, uncompacted schema exactly as
+#                            each tool declares it \u2014 no description clipping,
+#                            full property docs; most tokens per tool)
+#   precise_persona        \u2014 optional; when True, _system_prompt appends an
+#                            extra paragraph telling the model to be maximally
+#                            precise/unambiguous (see _system_prompt). Absent
+#                            or False is a no-op \u2014 only "precise" sets this.
 #   tool_result_budget     \u2014 chars of already-ran tool results replayed to
 #                            the next provider on failover
 #   tool_result_verbosity  \u2014 "full" (every field a tool returns), "medium"
@@ -116,6 +123,31 @@ PROMPT_MODE_DEFS = [
         "tool_schema_style": "compact",
         "tool_result_budget": 1600,
         "tool_result_verbosity": "medium",
+    },
+    {
+        "name": "precise",
+        "label": "150% Capacity",
+        "summary": (
+            "Same history/command budgets as 100%, but full uncompacted tool "
+            "schemas (every field, no description clipping) and a sharper, "
+            "precision-focused system prompt. More tokens per ask than 100%, "
+            "well under 400%."
+        ),
+        "max_commands": COMPACT_MAX_COMMANDS,
+        "desc_max_len": COMPACT_DESC_MAX_LEN,
+        "history_char_budget": COMPACT_HISTORY_CHAR_BUDGET,
+        "history_exchanges": COMPACT_HISTORY_EXCHANGES,
+        "recap_exchanges": COMPACT_RECAP_EXCHANGES,
+        "recap_budget": COMPACT_RECAP_CHAR_BUDGET,
+        "include_freq": False,
+        "compact_tools_blurb": False,
+        "compact_persona": False,
+        "precise_persona": True,
+        "playnite_freq_games": 5,
+        "skip_other_convos": False,
+        "tool_schema_style": "raw",
+        "tool_result_budget": 1600,
+        "tool_result_verbosity": "full",
     },
     {
         "name": "ultra",
@@ -519,7 +551,7 @@ def _tools_blurb(compact, ultra, has_playnite, has_spotify):
 def _system_prompt(persona, commands_ctx, freq_ctx, tools_enabled,
                    compact_tools=False, compact_persona=False, ultra=False, has_history=False,
                    memory_ctx="", has_playnite=False, has_spotify=False, other_convos_ctx="",
-                   playnite_freq_games=None):
+                   playnite_freq_games=None, precise=False):
     name = persona.get("assistant_name") or DEFAULT_ASSISTANT_NAME
     address = persona.get("address_user_as") or DEFAULT_ADDRESS
     extra = (persona.get("extra_instructions") or "").strip()
@@ -568,6 +600,16 @@ def _system_prompt(persona, commands_ctx, freq_ctx, tools_enabled,
             )
     if tools_enabled:
         parts.append(_tools_blurb(compact_tools, ultra, has_playnite, has_spotify))
+    if precise:
+        # 150% Capacity only: an extra directive on top of the normal
+        # persona/tools text \u2014 not a replacement for either.
+        parts.append(
+            "Precision mode: state exact values, file paths, and tool results "
+            "verbatim rather than paraphrasing them. If a request is ambiguous "
+            "or you're not certain of a fact, say so explicitly instead of "
+            "guessing \u2014 verify with a tool when one is available rather than "
+            "assuming. Prefer being exactly right over being quick."
+        )
     if memory_ctx:
         parts.append(memory_ctx)
     if other_convos_ctx:
@@ -641,6 +683,7 @@ def _build_messages(persona, commands, user_text, tools_enabled, profile, conver
         has_spotify=any(n.startswith("spotify_") for n in offered_names),
         other_convos_ctx=other_convos_ctx,
         playnite_freq_games=profile.get("playnite_freq_games"),
+        precise=profile.get("precise_persona", False),
     )
     messages = [{"role": "system", "content": system_prompt}]
     messages.extend(prior_turns)
@@ -1273,8 +1316,10 @@ def ask(user_text, commands=None, on_attempt=None, on_tool_call=None, conversati
         profile = _prompt_profile(label, cfg["defaults"])
         verbosity_ref[0] = profile.get("tool_result_verbosity", "full")
         if tools_enabled:
+            style = profile.get("tool_schema_style")
             tool_schemas = (
-                name_only_schemas if profile.get("tool_schema_style") == "name_only"
+                name_only_schemas if style == "name_only"
+                else full_schemas if style == "raw"
                 else compact_schemas
             )
         else:

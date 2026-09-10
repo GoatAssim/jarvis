@@ -159,7 +159,7 @@ def print_help(commands, file=sys.stdout):
         print(f"  {p.GREEN}{name.ljust(width)}{p.RESET} {spec.get('description', '')}", file=file)
     print(f"\nRun '{p.CYAN}jarvis <command> --help{p.RESET}' for a command's options.", file=file)
     print(f"Chain several with '{p.CYAN}jarvis cmd1 then cmd2{p.RESET}'.", file=file)
-    print(f"Built-in: {p.CYAN}config{p.RESET}, {p.CYAN}ai-config{p.RESET}, {p.CYAN}ai-clear{p.RESET}, {p.CYAN}tools-list{p.RESET} (prints every AI tool as JSON — not an ask), {p.CYAN}tool-run{p.RESET} (runs one AI tool directly), {p.CYAN}conv-new{p.RESET}/{p.CYAN}conv-list{p.RESET}/{p.CYAN}conv-show{p.RESET}/{p.CYAN}conv-switch{p.RESET}/{p.CYAN}conv-delete{p.RESET} (manage conversations), {p.CYAN}mode{p.RESET}/{p.CYAN}mode-set <full|compact|ultra>{p.RESET} (read/set the prompt's token-usage capacity — 400%/100%/50%).", file=file)
+    print(f"Built-in: {p.CYAN}config{p.RESET}, {p.CYAN}ai-config{p.RESET}, {p.CYAN}ai-clear{p.RESET}, {p.CYAN}tools-list{p.RESET} (prints every AI tool as JSON — not an ask), {p.CYAN}tool-run{p.RESET} (runs one AI tool directly), {p.CYAN}conv-new{p.RESET}/{p.CYAN}conv-list{p.RESET}/{p.CYAN}conv-show{p.RESET}/{p.CYAN}conv-switch{p.RESET}/{p.CYAN}conv-delete{p.RESET} (manage conversations), {p.CYAN}mode{p.RESET}/{p.CYAN}mode-set <full|compact|precise|ultra>{p.RESET} (read/set the prompt's token-usage capacity — 400%/100%/150%/50%).", file=file)
     print(f"Edit {p.DIM}{CONFIG_FILE}{p.RESET} to add or change commands.", file=file)
 
 
