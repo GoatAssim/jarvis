@@ -239,6 +239,105 @@ def _get_memory_usage():
 
 _NO_PARAMS = {"type": "object", "properties": {}, "required": []}
 
+_SEARCH_TOOLS_CAP = 8
+
+
+def tool_search_tools(args):
+    """Phase 5 of the token-optimization plan (see new_plan.md): a small,
+    always-available, model-visible discovery tool. When the local router
+    (tool_router.route(), Phase 3) isn't confident about a message, ask()
+    now offers ONLY this tool instead of falling back to the full catalog
+    (that fallback was Phase 1-4's explicitly-documented remaining gap —
+    see "Not yet done" in jarvis-token-optimization-phases-1-4.md).
+
+    Returns compact matches (name/group/one-line summary) only — never
+    full argument schemas (new_plan.md section 9: a search_tools reply
+    that dumped full schemas would just move the token cost, not remove
+    it). The full schema for anything matched here is queued by the
+    caller (ai_client._make_tool_executor) for the *next* round's tools
+    payload (see ai_providers._pop_discovered_tools), so a match is
+    actually callable later in this same ask() — not just described and
+    then unreachable.
+    """
+    from . import tool_registry
+
+    query = (args or {}).get("query") or ""
+    query = query.strip().lower()
+    index = tool_registry.TOOL_INDEX
+
+    if not query:
+        # No query: hand back the group list, not every tool — still tiny,
+        # still enough to narrow down on the next call.
+        return {
+            "groups": sorted(tool_registry.TOOL_GROUPS),
+            "message": "Pass a query (a group name, or a keyword) to see matching tools.",
+        }
+
+    scored = []
+    for name, schema in index.items():
+        group = tool_registry.group_of(name) or "misc"
+        keywords = " ".join(tool_registry.keywords_for(name).keys())
+        haystack = " ".join([
+            name.replace("_", " "),
+            schema.get("description") or "",
+            keywords,
+            group,
+        ]).lower()
+        if query == group.lower():
+            score = 100
+        elif query in name.lower():
+            score = 80
+        elif query in haystack:
+            score = 10
+        else:
+            continue
+        scored.append((score, name, group, schema))
+
+    if not scored:
+        return {
+            "matches": [],
+            "message": f"No tools matched '{query}'. Try a broader keyword or a group name.",
+        }
+
+    scored.sort(key=lambda x: (-x[0], x[1]))
+    truncated = len(scored) > _SEARCH_TOOLS_CAP
+    scored = scored[:_SEARCH_TOOLS_CAP]
+    matches = [
+        {
+            "name": name,
+            "group": group,
+            "summary": _clip_text(schema.get("description") or "", _SCHEMA_DESC_MAX),
+        }
+        for _, name, group, schema in scored
+    ]
+    result = {"matches": matches}
+    if truncated:
+        result["message"] = "More tools matched — narrow the query if you don't see what you need."
+    return result
+
+
+DISCOVERY_TOOL_SCHEMAS = [
+    {
+        "name": "search_tools",
+        "description": (
+            "Discover which of Jarvis's tools are relevant right now. Call this FIRST "
+            "when you might need a tool but don't see one offered for it — pass a "
+            "keyword (e.g. 'spotify', 'battery', 'git') or a group name, or omit the "
+            "query to list the groups. Matches become callable on your next reply."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": "Keyword or group name to search for. Omit to list groups.",
+                },
+            },
+            "required": [],
+        },
+    },
+]
+
 CORE_TOOL_SCHEMAS = [
     {
         "name": "get_datetime",
