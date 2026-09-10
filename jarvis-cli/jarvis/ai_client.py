@@ -1484,7 +1484,7 @@ def ask(user_text, commands=None, on_attempt=None, on_tool_call=None, on_tool_re
             if key is not None:
                 resolved["api_key"] = key
 
-            ai_providers.set_log_context(conv_id, key_label)
+            ai_providers.set_log_context(conv_id, key_label, on_tool_usage=on_tool_result)
             try:
                 result = adapter(resolved, messages, resolved["timeout"],
                                  tools=tool_schemas, tool_executor=tool_executor)
@@ -1506,7 +1506,8 @@ def ask(user_text, commands=None, on_attempt=None, on_tool_call=None, on_tool_re
                 )
                 _maybe_update_title(cfg, conv_id, exchange_count, user_text, result.text)
                 return AskResult(True, text=result.text, provider=label, attempts=attempts,
-                                 assistant_name=assistant_name, address_user_as=address)
+                                 assistant_name=assistant_name, address_user_as=address,
+                                 usage=result.usage)
 
             attempts.append((key_label, result.error))
 
