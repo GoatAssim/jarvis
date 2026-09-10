@@ -313,6 +313,85 @@
   </div>
 </div>
 
+<!-- LOGS FAB — opens the logs overlay, bottom-right of the viewport -->
+<button class="logs-fab" id="btn-logs-fab" type="button" title="View logs — raw traffic between the model and the backend">
+  <svg viewBox="0 0 24 24" aria-hidden="true">
+    <path d="M6 4h9l4 4v12a1 1 0 0 1-1 1H6a1 1 0 0 1-1-1V5a1 1 0 0 1 1-1z" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/>
+    <path d="M15 4v4h4" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/>
+    <path d="M8 12h8M8 15h8M8 18h5" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/>
+  </svg>
+  <span>Logs</span>
+</button>
+
+<!-- LOGS OVERLAY — per-conversation raw model↔backend traffic, read live
+     from ~/.jarvis/logs/<conv_id>.jsonl via /api/logs (see logs.py). -->
+<div class="debug-overlay" id="logs-overlay" hidden>
+  <div class="debug-panel">
+    <div class="panel__corner panel__corner--tl"></div>
+    <div class="panel__corner panel__corner--br"></div>
+
+    <div class="debug-panel__head">
+      <svg class="brand-mark" viewBox="0 0 40 40" aria-hidden="true">
+        <circle cx="20" cy="20" r="18" class="brand-mark__ring"/>
+        <circle cx="20" cy="20" r="11" class="brand-mark__ring brand-mark__ring--in"/>
+        <circle cx="20" cy="20" r="3" class="brand-mark__core"/>
+      </svg>
+      <div class="debug-panel__titles">
+        <div class="debug-panel__title">LOGS &mdash; MODEL &harr; BACKEND TRAFFIC</div>
+        <div class="debug-panel__subtitle" id="logs-status-line">reading conversations&hellip;</div>
+      </div>
+      <button class="modal__close" id="logs-close" type="button" aria-label="Close">&times;</button>
+    </div>
+
+    <div class="debug-body logs-body">
+
+      <!-- LEFT: every conversation that has at least one logged entry -->
+      <section class="debug-pane debug-pane--list logs-pane--convos" aria-label="Logged conversations">
+        <div class="debug-pane__head">
+          <h3>Conversations</h3>
+          <span class="debug-tool-count" id="logs-convo-count"></span>
+        </div>
+        <div class="panel__search debug-search">
+          <svg class="panel__search-icon" viewBox="0 0 20 20" aria-hidden="true">
+            <circle cx="8.7" cy="8.7" r="6" fill="none" stroke="currentColor" stroke-width="1.6"/>
+            <line x1="13.2" y1="13.2" x2="17.5" y2="17.5" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/>
+          </svg>
+          <input type="search" id="logs-convo-search" class="panel__search-input" placeholder="Search conversations&hellip;" autocomplete="off">
+        </div>
+        <div class="debug-tool-list" id="logs-convo-list">
+          <div class="debug-empty">Loading&hellip;</div>
+        </div>
+      </section>
+
+      <!-- MIDDLE: raw JSON entries for the selected conversation -->
+      <section class="debug-pane debug-pane--main logs-pane--entries" aria-label="Log entries">
+        <div class="debug-pane__head">
+          <h3 id="logs-entries-title">Log</h3>
+          <span class="debug-tool-count" id="logs-entry-count"></span>
+        </div>
+        <div class="logs-entries" id="logs-entries">
+          <div class="debug-empty">Select a conversation on the left.</div>
+        </div>
+        <div class="debug-run-row logs-toolbar">
+          <button class="btn btn--ghost" id="btn-logs-refresh" type="button" disabled>Refresh</button>
+          <button class="btn btn--ghost btn--danger" id="btn-logs-clear" type="button" disabled>Clear log</button>
+          <div class="debug-response-toggle" id="logs-view-toggle" role="group" aria-label="Entry view">
+            <button type="button" class="debug-toggle-btn is-active" data-mode="organized">Organized</button>
+            <button type="button" class="debug-toggle-btn" data-mode="raw">Raw JSON</button>
+          </div>
+        </div>
+      </section>
+
+      <!-- RIGHT: settings — left empty for now -->
+      <section class="debug-pane logs-pane--settings" aria-label="Log settings">
+        <div class="debug-pane__head"><h3>Settings</h3></div>
+        <div class="debug-empty">Nothing to configure yet.</div>
+      </section>
+
+    </div>
+  </div>
+</div>
+
 <!-- COMMAND BUILDER MODAL -->
 <div class="modal-backdrop" id="modal-backdrop" hidden>
   <div class="modal" role="dialog" aria-modal="true" aria-labelledby="modal-title">

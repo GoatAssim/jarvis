@@ -474,6 +474,16 @@
                                   // after (see exchangeCountByConv).
     exchangeCountByConv: {},     // convId -> number of completed (saved) exchanges, used to bucket
                                   // threadExtrasByConv entries against loadConversationIntoThread's replay
+
+    // Logs overlay — conversation-scoped raw model↔backend traffic, read
+    // live from /api/logs (see logs.py). Independent of the Ask sidebar's
+    // own conversation list/search state above.
+    logsLoaded: false,
+    logsConvos: [],           // [{id, title, updated_at, exists}] from /api/logs
+    logsSearch: "",
+    logsSelected: null,       // conv id currently shown in the middle pane
+    logsEntries: [],          // entries for logsSelected, oldest first
+    logsViewMode: "organized", // "organized" | "raw"
   };
 
   // ===========================================================================
@@ -519,6 +529,9 @@
     deleteConversation: (id) => api("DELETE", `/api/conversations/${encodeURIComponent(id)}`),
     getMode: () => api("GET", "/api/mode"),
     setMode: (mode) => api("POST", "/api/mode", { mode }),
+    listLogs: () => api("GET", "/api/logs"),
+    getLog: (id, limit) => api("GET", `/api/logs/${encodeURIComponent(id)}${limit ? `?limit=${limit}` : ""}`),
+    clearLog: (id) => api("DELETE", `/api/logs/${encodeURIComponent(id)}`),
   };
 
   // ===========================================================================
@@ -3031,6 +3044,185 @@
   debugOverlay.addEventListener("click", (e) => { if (e.target === debugOverlay) closeDebug(); });
   document.addEventListener("keydown", (e) => {
     if (e.key === "Escape" && !debugOverlay.hidden) closeDebug();
+  });
+
+  // ===========================================================================
+  // Logs overlay — conversation-scoped raw traffic between the model and
+  // this backend (see logs.py). Left: every conversation that has at least
+  // one logged entry. Middle: that conversation's entries (organized or raw
+  // JSON), with refresh/clear. Right: settings, left empty for now.
+  // ===========================================================================
+
+  const logsOverlay = qs("#logs-overlay");
+  const logsStatusLine = qs("#logs-status-line");
+  const logsConvoList = qs("#logs-convo-list");
+  const logsConvoCount = qs("#logs-convo-count");
+  const logsEntriesEl = qs("#logs-entries");
+  const logsEntriesTitle = qs("#logs-entries-title");
+  const logsEntryCount = qs("#logs-entry-count");
+  const btnLogsRefresh = qs("#btn-logs-refresh");
+  const btnLogsClear = qs("#btn-logs-clear");
+
+  function logsFilteredConvos() {
+    const q = state.logsSearch.trim().toLowerCase();
+    if (!q) return state.logsConvos;
+    return state.logsConvos.filter((c) =>
+      (c.title || "").toLowerCase().includes(q) || c.id.toLowerCase().includes(q)
+    );
+  }
+
+  function renderLogsConvoList() {
+    const items = logsFilteredConvos();
+    logsConvoCount.textContent = `${state.logsConvos.length}`;
+    logsConvoList.innerHTML = "";
+    if (!items.length) {
+      logsConvoList.appendChild(el("div", { class: "debug-empty" },
+        state.logsConvos.length ? "No conversations match your search." : "No logs yet — logs are written as soon as you ask Jarvis something."));
+      return;
+    }
+    for (const c of items) {
+      const when = (c.updated_at || "").slice(0, 19).replace("T", " ");
+      const card = el("div", {
+        class: "logs-convo-card" + (c.id === state.logsSelected ? " is-active" : ""),
+        onclick: () => logsSelectConvo(c.id),
+      }, [
+        el("div", { class: "logs-convo-card__title" + (c.exists ? "" : " is-deleted") }, c.title || c.id),
+        el("div", { class: "logs-convo-card__meta" }, when ? `${when}  ·  ${c.id}` : c.id),
+      ]);
+      logsConvoList.appendChild(card);
+    }
+  }
+
+  function logEntryDirClass(direction) {
+    return `log-entry__dir--${(direction || "info").replace(/[^a-z_]/g, "")}`;
+  }
+
+  function renderLogsEntries() {
+    logsEntriesEl.innerHTML = "";
+    logsEntryCount.textContent = state.logsSelected ? `${state.logsEntries.length}` : "";
+    if (!state.logsSelected) {
+      logsEntriesEl.appendChild(el("div", { class: "debug-empty" }, "Select a conversation on the left."));
+      return;
+    }
+    if (!state.logsEntries.length) {
+      logsEntriesEl.appendChild(el("div", { class: "debug-empty" }, "(empty)"));
+      return;
+    }
+    if (state.logsViewMode === "raw") {
+      logsEntriesEl.appendChild(el("pre", { class: "log-entry__body" }, JSON.stringify(state.logsEntries, null, 2)));
+      return;
+    }
+    for (const entry of state.logsEntries) {
+      const head = el("div", { class: "log-entry__head" }, [
+        el("span", { class: "log-entry__ts" }, (entry.ts || "").replace("T", " ").replace("Z", "") || "?"),
+        el("span", { class: `log-entry__dir ${logEntryDirClass(entry.direction)}` }, entry.direction || "?"),
+        entry.provider ? el("span", { class: "log-entry__provider" }, entry.provider) : null,
+        entry.round != null ? el("span", { class: "log-entry__round" }, `round ${entry.round}`) : null,
+      ]);
+      const body = el("pre", { class: "log-entry__body" }, JSON.stringify(entry.data, null, 2));
+      logsEntriesEl.appendChild(el("div", { class: "log-entry" }, [head, body]));
+    }
+  }
+
+  qs("#logs-view-toggle").addEventListener("click", (e) => {
+    const btn = e.target.closest(".debug-toggle-btn");
+    if (!btn) return;
+    state.logsViewMode = btn.dataset.mode;
+    qsa(".debug-toggle-btn", qs("#logs-view-toggle")).forEach((b) => b.classList.toggle("is-active", b === btn));
+    renderLogsEntries();
+  });
+
+  async function logsLoadEntries(convId) {
+    logsStatusLine.textContent = "loading entries…";
+    logsStatusLine.classList.add("is-busy");
+    logsStatusLine.classList.remove("is-error", "is-ok");
+    try {
+      const res = await Api.getLog(convId, 50);
+      state.logsEntries = (res && res.entries) || [];
+      logsStatusLine.textContent = `${state.logsEntries.length} log line(s) for ${convId}`;
+      logsStatusLine.classList.add("is-ok");
+    } catch (e) {
+      state.logsEntries = [];
+      logsStatusLine.textContent = `couldn't load log: ${e.message}`;
+      logsStatusLine.classList.add("is-error");
+    } finally {
+      logsStatusLine.classList.remove("is-busy");
+      renderLogsEntries();
+    }
+  }
+
+  function logsSelectConvo(id) {
+    state.logsSelected = id;
+    state.logsEntries = [];
+    logsEntriesTitle.textContent = "Log";
+    const convo = state.logsConvos.find((c) => c.id === id);
+    if (convo) logsEntriesTitle.textContent = convo.title || id;
+    btnLogsRefresh.disabled = false;
+    btnLogsClear.disabled = false;
+    renderLogsConvoList();
+    renderLogsEntries();
+    logsLoadEntries(id);
+  }
+
+  qs("#logs-convo-search").addEventListener("input", (e) => {
+    state.logsSearch = e.target.value;
+    renderLogsConvoList();
+  });
+
+  btnLogsRefresh.addEventListener("click", () => {
+    if (state.logsSelected) logsLoadEntries(state.logsSelected);
+  });
+
+  btnLogsClear.addEventListener("click", async () => {
+    if (!state.logsSelected) return;
+    const id = state.logsSelected;
+    if (!confirm(`Clear the log for "${logsEntriesTitle.textContent}"? This can't be undone.`)) return;
+    btnLogsClear.disabled = true;
+    try {
+      await Api.clearLog(id);
+      state.logsEntries = [];
+      state.logsConvos = state.logsConvos.filter((c) => c.id !== id);
+      state.logsSelected = null;
+      logsEntriesTitle.textContent = "Log";
+      btnLogsRefresh.disabled = true;
+      renderLogsConvoList();
+      renderLogsEntries();
+      toast("Log cleared.", "info");
+    } catch (e) {
+      toast(`Couldn't clear log: ${e.message}`);
+      btnLogsClear.disabled = false;
+    }
+  });
+
+  async function openLogs() {
+    logsOverlay.hidden = false;
+    if (state.logsLoaded) { renderLogsConvoList(); renderLogsEntries(); return; }
+    logsStatusLine.textContent = "reading conversations…";
+    logsStatusLine.classList.add("is-busy");
+    try {
+      const items = await Api.listLogs();
+      state.logsConvos = Array.isArray(items) ? items : [];
+      state.logsLoaded = true;
+      logsStatusLine.textContent = `${state.logsConvos.length} conversation(s) with logs`;
+    } catch (e) {
+      logsStatusLine.textContent = `couldn't load logs: ${e.message}`;
+      logsStatusLine.classList.add("is-error");
+    } finally {
+      logsStatusLine.classList.remove("is-busy");
+      renderLogsConvoList();
+      renderLogsEntries();
+    }
+  }
+
+  function closeLogs() {
+    logsOverlay.hidden = true;
+  }
+
+  qs("#btn-logs-fab").addEventListener("click", openLogs);
+  qs("#logs-close").addEventListener("click", closeLogs);
+  logsOverlay.addEventListener("click", (e) => { if (e.target === logsOverlay) closeLogs(); });
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape" && !logsOverlay.hidden) closeLogs();
   });
 
 
