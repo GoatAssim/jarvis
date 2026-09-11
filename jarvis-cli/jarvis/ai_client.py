@@ -695,7 +695,25 @@ def _build_messages(persona, commands, user_text, tools_enabled, profile, conver
         "" if profile.get("skip_other_convos")
         else conversations.other_conversations_context(conversation_id)
     )
-    offered = system_tools.tool_schemas_for_session() if tools_enabled else []
+    # Bugfix: this used to always call tool_schemas_for_session() (the
+    # full per-session catalog) regardless of `route`, so has_playnite/
+    # has_spotify below were computed from what *could* be offered rather
+    # than what this round's router-filtered active_schemas actually
+    # offers (see ask()'s active_schemas selection, which this mirrors).
+    # Net effect of the bug: whenever the router narrowed to some other
+    # group (e.g. "desktop"), the playnite/spotify blurb text still got
+    # included every time, since tool_schemas_for_session() always
+    # includes those — quietly defeating the token-optimization this
+    # phase is for.
+    if tools_enabled:
+        if route is not None and route.confident:
+            offered = system_tools.schemas_for_tools(route.tools)
+        elif route is not None:
+            offered = list(system_tools.DISCOVERY_TOOL_SCHEMAS)
+        else:
+            offered = system_tools.tool_schemas_for_session()
+    else:
+        offered = []
     offered_names = {s["name"] for s in offered}
     # Phase 6 of the token-optimization plan (see new_plan.md): inject
     # TOOL_PACK_INSTRUCTIONS only for the groups the router actually
