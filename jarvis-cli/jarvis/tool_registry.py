@@ -190,9 +190,10 @@ TOOL_KEYWORDS = {
     "press_key": {"press": 5, "key": 4},
     "hotkey": {"hotkey": 9, "shortcut": 7},
     "take_screenshot": {"screenshot": 10, "screen shot": 10, "capture screen": 8},
+    "click": {"discord": 8, "click": 6},
     "click_on_text": {"click on": 6, "ocr": 8},
     "list_windows": {"windows": 5, "open windows": 8},
-    "focus_window": {"focus": 5, "switch to window": 8},
+    "focus_window": {"focus": 5, "switch to window": 8, "window": 5, "chrome": 6, "firefox": 6},
 
     "search_files": {
         "find file": 10, "search file": 10, "locate file": 8,

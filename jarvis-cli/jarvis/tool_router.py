@@ -22,6 +22,8 @@ routing can only ever narrow what gets offered, never break a request
 the old code would have handled.
 """
 
+import re
+
 from .tool_registry import TOOL_GROUPS, TOOL_KEYWORDS, group_of
 
 # A keyword only counts as a real signal at this weight or above (see
@@ -72,7 +74,12 @@ def route(user_text):
         for phrase, weight in keywords.items():
             if weight < MIN_SCORE:
                 continue
-            if phrase in text:
+            # Word-boundary match, not raw substring containment — a plain
+            # `phrase in text` check let "commanded" match the keyword
+            # "command" and misfire the commands group (see handoff doc,
+            # Bug 1). \b works for both single-word and multi-word phrases
+            # already in TOOL_KEYWORDS.
+            if re.search(rf"\b{re.escape(phrase)}\b", text):
                 group = group or group_of(name)
                 break
         if group and group not in seen_groups:
