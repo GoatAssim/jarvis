@@ -709,7 +709,7 @@ def _build_messages(persona, commands, user_text, tools_enabled, profile, conver
         if route is not None and route.confident:
             offered = system_tools.schemas_for_tools(route.tools)
         elif route is not None:
-            offered = list(system_tools.DISCOVERY_TOOL_SCHEMAS)
+            offered = list(system_tools.DISCOVERY_AND_COMMANDS_SCHEMAS)
         else:
             offered = system_tools.tool_schemas_for_session()
     else:
@@ -743,7 +743,11 @@ def _build_messages(persona, commands, user_text, tools_enabled, profile, conver
         pack_instructions_ctx = (
             "Before telling the user you don't have a tool for something, "
             "call search_tools with a keyword for it — many tools aren't "
-            "listed above and only appear after that search."
+            "listed above and only appear after that search. If the "
+            "request sounds like running something the user already set "
+            "up (a saved routine/command) rather than a built-in "
+            "capability, try search_commands instead — don't just keep "
+            "retrying search_tools with different keywords."
         )
     system_prompt = _system_prompt(
         persona,
@@ -915,6 +919,16 @@ def _command_flags_for_call(name, arguments):
     }
 
 
+# See _make_tool_executor's failed-lookup tracking below: a search_tools
+# miss or a run_command/run_chain that couldn't resolve the name both count
+# as one "failed lookup". After this many in a single ask(), search_commands
+# gets forced into the offered set even if the router was confidently
+# pointed at the wrong group the whole time (Part A's DISCOVERY_AND_
+# COMMANDS_SCHEMAS fallback only helps when the router had no opinion at
+# all — a *wrong but confident* route needs this separate safety net).
+_FAILED_LOOKUP_THRESHOLD = 3
+
+
 def _make_tool_executor(on_tool_call, schemas=None, on_confirm_request=None,
                          cfg=None, provider_ref=None, verbosity_ref=None,
                          discover_sink=None):
@@ -949,6 +963,8 @@ def _make_tool_executor(on_tool_call, schemas=None, on_confirm_request=None,
         for s in (schemas or [])
         if isinstance(s, dict) and s.get("name")
     }
+    _failed_lookups = [0]
+    _commands_surfaced = [False]
 
     def _executor(name, arguments):
         arguments = arguments or {}
@@ -1098,6 +1114,26 @@ def _make_tool_executor(on_tool_call, schemas=None, on_confirm_request=None,
             found = [m.get("name") for m in matches if isinstance(m, dict) and m.get("name")]
             if found:
                 discover_sink(found)
+
+        # Failed-lookup tracking (see _FAILED_LOOKUP_THRESHOLD docstring
+        # above): a search_tools call that found nothing, or a run_command/
+        # run_chain call that couldn't resolve the name it was given, is a
+        # sign the model may be hunting for a saved command while only
+        # tools are offered (or vice versa). Once that's happened
+        # _FAILED_LOOKUP_THRESHOLD times in this ask(), force
+        # search_commands (and its whole group) into the offered set for
+        # the next round — same discover_sink path search_tools hits use,
+        # so it's actually callable immediately, not just mentioned.
+        if discover_sink and not _commands_surfaced[0] and isinstance(result, dict):
+            is_failed_lookup = (
+                (name == "search_tools" and not result.get("matches"))
+                or (name in ("run_command", "run_chain") and result.get("needs_clarification"))
+            )
+            if is_failed_lookup:
+                _failed_lookups[0] += 1
+                if _failed_lookups[0] >= _FAILED_LOOKUP_THRESHOLD:
+                    _commands_surfaced[0] = True
+                    discover_sink(["search_commands"])
 
         return result
 
@@ -1430,7 +1466,7 @@ def ask(user_text, commands=None, on_attempt=None, on_tool_call=None, on_tool_re
         # prompt resend), it's just not offered up front on spec.
         active_schemas = (
             system_tools.schemas_for_tools(route.tools)
-            if route.confident else list(system_tools.DISCOVERY_TOOL_SCHEMAS)
+            if route.confident else list(system_tools.DISCOVERY_AND_COMMANDS_SCHEMAS)
         )
 
         # Real (description-stripped) argument schemas, not name-only stubs,
