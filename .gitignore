@@ -18,3 +18,4 @@ web v1/
 jarvis.exe
 *.patch
 web/public/app - Copy.js
+*.rej
