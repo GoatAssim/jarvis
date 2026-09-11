@@ -1421,9 +1421,25 @@ def ask(user_text, commands=None, on_attempt=None, on_tool_call=None, on_tool_re
         tool_schema_style resolved below) so a matched tool is really
         callable on the model's very next round in this same ask() \u2014 not
         just described in the search_tools reply and then unreachable."""
+        from . import tool_registry
+
+        to_add = []
         for name in names or []:
             if not name or name in _discovered_names:
                 continue
+            # Activate the tool's whole group, not just the single matched
+            # name — mirrors tool_router.route()'s behavior (Phase 3) so a
+            # search_tools hit is just as workflow-complete as a router hit.
+            # Without this, finding e.g. spotify_search via search_tools
+            # left spotify_play/spotify_control unreachable, forcing a
+            # second search_tools call mid-workflow for every sibling tool.
+            group = tool_registry.group_of(name)
+            group_names = tool_registry.tools_in_group(group) if group else [name]
+            for gname in group_names:
+                if gname and gname not in _discovered_names:
+                    to_add.append(gname)
+
+        for name in to_add:
             full = system_tools.schemas_for_tools([name])
             if not full:
                 continue
