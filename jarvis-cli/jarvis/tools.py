@@ -384,6 +384,22 @@ DISCOVERY_TOOL_SCHEMAS = [
     },
 ]
 
+# DISCOVERY_TOOL_SCHEMAS alone left the model with no way to tell "is this
+# a tool?" from "is this a saved command?" when the router isn't confident
+# — a message like "run the tts thing" (a saved command, not a tool) just
+# made it call search_tools repeatedly with different keywords and never
+# find anything, burning rounds/tokens. search_commands's schema already
+# exists (it's part of COMMAND_TOOL_SCHEMAS below); reuse it here instead
+# of duplicating it, so both discovery tools are offered together whenever
+# the router has no opinion.
+_SEARCH_COMMANDS_SCHEMA = next(
+    (s for s in COMMAND_TOOL_SCHEMAS if s.get("name") == "search_commands"), None
+)
+DISCOVERY_AND_COMMANDS_SCHEMAS = (
+    [*DISCOVERY_TOOL_SCHEMAS, _SEARCH_COMMANDS_SCHEMA]
+    if _SEARCH_COMMANDS_SCHEMA else list(DISCOVERY_TOOL_SCHEMAS)
+)
+
 CORE_TOOL_SCHEMAS = [
     {
         "name": "get_datetime",
