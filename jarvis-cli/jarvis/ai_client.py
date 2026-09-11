@@ -10,6 +10,7 @@ told about itself, and what gets remembered.
 
 import json
 import re
+import threading
 
 from . import ai_config, ai_providers, command_tools, conversations, memory, playnite_config, stats, tool_safety
 from . import tool_result_shaping
@@ -1291,7 +1292,13 @@ def _maybe_update_title(cfg, conversation_id, exchange_count, user_text, jarvis_
     TITLE_REGEN_EVERY exchanges after that. Falls back to a heuristic title
     (a truncated first line of the user's message) if the AI call fails, so
     a conversation is never stuck saying "New Conversation" forever just
-    because one title request happened to fail."""
+    because one title request happened to fail.
+
+    Purely cosmetic and, critically, NOT on the path to the user's answer
+    (see _spawn_title_update below) \u2014 this can take up to ~30s (two
+    provider attempts at a 15s timeout each) when a title provider is slow
+    or flaky, and that used to stall the real reply for just as long since
+    ask() called this inline before returning."""
     if exchange_count != 1 and exchange_count % TITLE_REGEN_EVERY != 0:
         return
     title = None
@@ -1317,6 +1324,21 @@ def _maybe_update_title(cfg, conversation_id, exchange_count, user_text, jarvis_
             conversations.update_meta(conversation_id, title=title, soft_context=soft_context)
         except Exception:
             pass
+
+
+def _spawn_title_update(cfg, conversation_id, exchange_count, user_text, jarvis_text):
+    """Fire-and-forget wrapper around _maybe_update_title(). Titling talks
+    to an AI provider and must never make the user wait on their real
+    answer, so it runs on a daemon thread instead of inline \u2014 a slow or
+    flaky title provider then costs the sidebar a stale title for a
+    moment, not the reply a 15-30s stall. daemon=True so it never blocks
+    process exit."""
+    thread = threading.Thread(
+        target=_maybe_update_title,
+        args=(cfg, conversation_id, exchange_count, user_text, jarvis_text),
+        daemon=True,
+    )
+    thread.start()
 
 
 def ask(user_text, commands=None, on_attempt=None, on_tool_call=None, on_tool_result=None, conversation_id=None,
@@ -1520,7 +1542,7 @@ def ask(user_text, commands=None, on_attempt=None, on_tool_call=None, on_tool_re
                 exchange_count = conversations.append_exchange(
                     conv_id, user_text, result.text, label, extras=extras
                 )
-                _maybe_update_title(cfg, conv_id, exchange_count, user_text, result.text)
+                _spawn_title_update(cfg, conv_id, exchange_count, user_text, result.text)
                 return AskResult(True, text=result.text, provider=label, attempts=attempts,
                                  assistant_name=assistant_name, address_user_as=address,
                                  usage=result.usage)
