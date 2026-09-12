@@ -1,0 +1,208 @@
+{
+  "label": "main",
+  "generated_at": "2026-09-12T19:17:19.043638+00:00",
+  "steps": [
+    {
+      "step": 1,
+      "prompt": "Do a quick web search for today's top tech news.",
+      "ok": true,
+      "provider": "gemini",
+      "reply": "Here are today's top tech headlines:\n\n* **AI Safety & Regulatory Debates:** Anthropic CEO Dario Amodei proposed potential measures to govern the pace of AI capabilities amid growing concerns around model self-improvement. The warnings have intensified calls in Washington for AI regulation.\n* **Apple Enters Foldables:** Apple unveiled the **iPhone Duo** ($1,999), featuring a 7.6-inch inner foldable screen and powered by the 2nm A20 Pro chip tailored for on-device AI operations.\n* **Cloud & Infrastructure Demand:** Oracle posted a 30% revenue surge driven by AI cloud infrastructure demand, while tech infrastructure providers continue to see strong market tailwinds.\n* **IP & Model Security:** Anthropic reported that Chinese AI labs improperly leveraged millions of Claude interaction logs to train rival models, further fueling U.S.-China tech frictions.",
+      "reply_tokens_estimated": 216,
+      "elapsed_s": 23.09,
+      "tool_call_count": 4,
+      "tool_call_count_real": 4,
+      "tool_call_count_stubbed": 0,
+      "tool_calls": [
+        "get_datetime",
+        "web_search",
+        "web_fetch",
+        "web_fetch"
+      ],
+      "request_round_count": 0,
+      "reported_input_tokens": 0,
+      "reported_output_tokens": 0,
+      "reported_total_tokens": 0,
+      "tool_call_tokens_estimated": 2277,
+      "no_reported_usage": true,
+      "rounds": [],
+      "tool_call_usage_detail": [
+        {
+          "name": "get_datetime",
+          "round": null,
+          "input_tokens": 1,
+          "output_tokens": 36,
+          "source": "estimated"
+        },
+        {
+          "name": "web_search",
+          "round": null,
+          "input_tokens": 11,
+          "output_tokens": 743,
+          "source": "estimated"
+        },
+        {
+          "name": "web_fetch",
+          "round": null,
+          "input_tokens": 33,
+          "output_tokens": 757,
+          "source": "estimated"
+        },
+        {
+          "name": "web_fetch",
+          "round": null,
+          "input_tokens": 11,
+          "output_tokens": 685,
+          "source": "estimated"
+        }
+      ]
+    },
+    {
+      "step": 2,
+      "prompt": "Go on Discord, tag @no and say hi.",
+      "ok": true,
+      "provider": "gemini",
+      "reply": "I have switched to Discord and sent \"@no hi\" in the active channel, sir.",
+      "reply_tokens_estimated": 18,
+      "elapsed_s": 14.54,
+      "tool_call_count": 4,
+      "tool_call_count_real": 1,
+      "tool_call_count_stubbed": 3,
+      "tool_calls": [
+        "list_windows",
+        "focus_window",
+        "type_text",
+        "press_key"
+      ],
+      "request_round_count": 0,
+      "reported_input_tokens": 0,
+      "reported_output_tokens": 0,
+      "reported_total_tokens": 0,
+      "tool_call_tokens_estimated": 144,
+      "no_reported_usage": true,
+      "rounds": [],
+      "tool_call_usage_detail": [
+        {
+          "name": "focus_window",
+          "round": null,
+          "input_tokens": 5,
+          "output_tokens": 44,
+          "source": "estimated"
+        },
+        {
+          "name": "type_text",
+          "round": null,
+          "input_tokens": 5,
+          "output_tokens": 43,
+          "source": "estimated"
+        },
+        {
+          "name": "press_key",
+          "round": null,
+          "input_tokens": 4,
+          "output_tokens": 43,
+          "source": "estimated"
+        }
+      ]
+    },
+    {
+      "step": 3,
+      "prompt": "Open the TTS bot.",
+      "ok": true,
+      "provider": "gemini",
+      "reply": "Starting the TTS bot for you now, sir.",
+      "reply_tokens_estimated": 10,
+      "elapsed_s": 8.31,
+      "tool_call_count": 2,
+      "tool_call_count_real": 1,
+      "tool_call_count_stubbed": 1,
+      "tool_calls": [
+        "search_commands",
+        "run_command"
+      ],
+      "request_round_count": 0,
+      "reported_input_tokens": 0,
+      "reported_output_tokens": 0,
+      "reported_total_tokens": 0,
+      "tool_call_tokens_estimated": 103,
+      "no_reported_usage": true,
+      "rounds": [],
+      "tool_call_usage_detail": [
+        {
+          "name": "search_commands",
+          "round": null,
+          "input_tokens": 4,
+          "output_tokens": 50,
+          "source": "estimated"
+        },
+        {
+          "name": "run_command",
+          "round": null,
+          "input_tokens": 5,
+          "output_tokens": 44,
+          "source": "estimated"
+        }
+      ]
+    },
+    {
+      "step": 4,
+      "prompt": "Launch Roblox.",
+      "ok": true,
+      "provider": "gemini",
+      "reply": "Launching Roblox via Bloxstrap now, sir.",
+      "reply_tokens_estimated": 10,
+      "elapsed_s": 9.66,
+      "tool_call_count": 3,
+      "tool_call_count_real": 1,
+      "tool_call_count_stubbed": 2,
+      "tool_calls": [
+        "playnite_find_game",
+        "playnite_list_game_actions",
+        "playnite_launch_action"
+      ],
+      "request_round_count": 0,
+      "reported_input_tokens": 0,
+      "reported_output_tokens": 0,
+      "reported_total_tokens": 0,
+      "tool_call_tokens_estimated": 297,
+      "no_reported_usage": true,
+      "rounds": [],
+      "tool_call_usage_detail": [
+        {
+          "name": "playnite_find_game",
+          "round": null,
+          "input_tokens": 5,
+          "output_tokens": 45,
+          "source": "estimated"
+        },
+        {
+          "name": "playnite_list_game_actions",
+          "round": null,
+          "input_tokens": 5,
+          "output_tokens": 170,
+          "source": "estimated"
+        },
+        {
+          "name": "playnite_launch_action",
+          "round": null,
+          "input_tokens": 26,
+          "output_tokens": 46,
+          "source": "estimated"
+        }
+      ]
+    }
+  ],
+  "totals": {
+    "tool_call_count": 13,
+    "tool_call_count_real": 7,
+    "tool_call_count_stubbed": 6,
+    "request_round_count": 0,
+    "reported_input_tokens": 0,
+    "reported_output_tokens": 0,
+    "reported_total_tokens": 0,
+    "tool_call_tokens_estimated": 2821,
+    "reply_tokens_estimated": 254,
+    "any_step_missing_usage": true,
+    "grand_total_tokens": 2821
+  }
+}
