@@ -264,7 +264,15 @@ TOOL_PACK_INSTRUCTIONS = {
     ),
     "desktop": (
         "Desktop automation acts on the real mouse/keyboard/screen — confirm "
-        "before anything destructive or hard to undo."
+        "before anything destructive or hard to undo. get_active_window, "
+        "get_window_info, and get_window_size all overlap — call ONE of "
+        "them (or none, if list_windows/focus_window's own result already "
+        "told you what you need), never several back-to-back on the same "
+        "window. To click a button/label by what it says (e.g. 'Call', "
+        "'Send'), use click_on_text directly — it screenshots, finds the "
+        "text, and clicks it in one call. Don't get a window's size/"
+        "position just to guess x/y for a plain click; that's slower and "
+        "more brittle than click_on_text."
     ),
     "commands": (
         "Prefer search_commands over guessing a saved command's exact name."
