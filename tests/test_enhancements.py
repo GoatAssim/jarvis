@@ -1,10 +1,11 @@
-"""Automated tests for the three enhancements built on top of
+"""Automated tests for the enhancements built on top of
 tests/test_schemas_for_tools.py's baseline (see jarvis-codebase-
 orientation.md's "Outstanding ideas" section for which is which):
 
   #1 weighted multi-group confidence in tool_router.route()
   #2 cross-process discovery cache (discovery_cache.py)
   #3 exclusion keywords in TOOL_KEYWORDS
+  #5 generalized repeat-failure counter (ai_client._make_tool_executor)
 
 Same no-framework, plain-assert convention as test_schemas_for_tools.py
 (none is installed in this environment) — runnable directly:
@@ -206,6 +207,153 @@ def test_make_tool_executor_stores_search_commands_hit_in_cache():
             assert cached == ["run_command"]
         finally:
             system_tools.execute_tool = original_execute_tool
+
+
+def test_repeat_failure_tool_or_command_still_works_like_before():
+    # Enhancement #5 generalizes the old (_failed_lookups, _commands_surfaced)
+    # pair into _REPEAT_FAILURE_DETECTORS — this is the pre-existing
+    # tool/command behavior, preserved as one entry: 3 search_tools misses
+    # in a row should fire discover_sink(["search_commands"]) exactly once,
+    # on the 3rd miss, same as _FAILED_LOOKUP_THRESHOLD always did.
+    #
+    # Each call uses a distinct query so the executor's own (name, args)
+    # result cache — which exists precisely so a real duplicate call never
+    # re-runs a real action — doesn't short-circuit a *different* logical
+    # miss before it reaches the repeat-failure tracking below it.
+    original_execute_tool = system_tools.execute_tool
+
+    def fake_execute_tool(name, arguments=None, verbosity=None):
+        if name == "search_tools":
+            return {"groups": [], "message": "no matches"}
+        return original_execute_tool(name, arguments, verbosity)
+
+    system_tools.execute_tool = fake_execute_tool
+    try:
+        discovered = []
+        executor = ai_client._make_tool_executor(
+            on_tool_call=None,
+            schemas=None,
+            discover_sink=lambda names: discovered.append(list(names)),
+        )
+        for i in range(2):
+            result = executor("search_tools", {"query": f"miss-{i}"})
+            assert not result.get("matches")
+        assert discovered == [], "should not fire before the threshold"
+        result = executor("search_tools", {"query": "miss-2"})
+        assert not result.get("matches")
+        assert discovered == [["search_commands"]], "should fire exactly once, at the threshold"
+        # A 4th miss should not fire it again (kind already surfaced).
+        executor("search_tools", {"query": "miss-3"})
+        assert discovered == [["search_commands"]]
+    finally:
+        system_tools.execute_tool = original_execute_tool
+
+
+def test_repeat_failure_click_on_text_miss_is_tracked_per_text():
+    # New detector: click_on_text returning "clicked": False (ambiguous or
+    # not-found) three times *for the same text* should surface
+    # list_windows; a different text's misses shouldn't share that counter.
+    original_execute_tool = system_tools.execute_tool
+
+    def fake_execute_tool(name, arguments=None, verbosity=None):
+        if name == "click_on_text":
+            return {"ok": True, "clicked": False, "candidates": []}
+        return original_execute_tool(name, arguments, verbosity)
+
+    system_tools.execute_tool = fake_execute_tool
+    try:
+        discovered = []
+        executor = ai_client._make_tool_executor(
+            on_tool_call=None,
+            schemas=None,
+            on_confirm_request=lambda *a, **k: True,
+            discover_sink=lambda names: discovered.append(list(names)),
+        )
+        # Two misses on "Submit" and one on "Cancel" shouldn't trip anything
+        # yet — separate counters, neither at 3.
+        # Distinct "attempt" values keep the executor's own (name, args)
+        # result cache from treating these as duplicate calls — see the
+        # note in test_repeat_failure_tool_or_command_still_works_like_before.
+        executor("click_on_text", {"text": "Submit", "attempt": 1})
+        executor("click_on_text", {"text": "Submit", "attempt": 2})
+        executor("click_on_text", {"text": "Cancel", "attempt": 1})
+        assert discovered == []
+        # Third miss on "Submit" specifically should fire.
+        executor("click_on_text", {"text": "Submit", "attempt": 3})
+        assert discovered == [["list_windows"]]
+        # "Cancel" still only has one miss recorded — no cross-contamination.
+        executor("click_on_text", {"text": "Cancel", "attempt": 2})
+        assert discovered == [["list_windows"]]
+    finally:
+        system_tools.execute_tool = original_execute_tool
+
+
+def test_repeat_failure_kinds_do_not_interfere():
+    # A search_tools-miss streak and a click_on_text-miss streak happening
+    # in the same ask() should count independently — this is the key
+    # change from the old single boolean-shaped gate to a per-kind one.
+    original_execute_tool = system_tools.execute_tool
+
+    def fake_execute_tool(name, arguments=None, verbosity=None):
+        if name == "click_on_text":
+            return {"ok": True, "clicked": False, "candidates": []}
+        if name == "search_tools":
+            return {"groups": [], "message": "no matches"}
+        return original_execute_tool(name, arguments, verbosity)
+
+    system_tools.execute_tool = fake_execute_tool
+    try:
+        discovered = []
+        executor = ai_client._make_tool_executor(
+            on_tool_call=None,
+            schemas=None,
+            on_confirm_request=lambda *a, **k: True,
+            discover_sink=lambda names: discovered.append(list(names)),
+        )
+        executor("search_tools", {"query": "a"})
+        executor("click_on_text", {"text": "Submit", "attempt": 1})
+        executor("search_tools", {"query": "b"})
+        executor("click_on_text", {"text": "Submit", "attempt": 2})
+        assert discovered == [], "neither kind has hit 3 yet"
+        executor("search_tools", {"query": "c"})
+        assert discovered == [["search_commands"]]
+        executor("click_on_text", {"text": "Submit", "attempt": 3})
+        assert discovered == [["search_commands"], ["list_windows"]]
+    finally:
+        system_tools.execute_tool = original_execute_tool
+
+
+def test_repeat_failure_search_commands_hit_suppresses_tool_or_command_kind():
+    # A direct search_commands hit already surfaces run_command and should
+    # mark the "tool_or_command" kind as surfaced too, so unrelated prior
+    # search_tools misses don't later double-fire search_commands again.
+    original_execute_tool = system_tools.execute_tool
+
+    def fake_execute_tool(name, arguments=None, verbosity=None):
+        if name == "search_commands":
+            return {"matches": [{"name": "deploy-prod"}], "total_commands": 1}
+        if name == "search_tools":
+            return {"groups": [], "message": "no matches"}
+        return original_execute_tool(name, arguments, verbosity)
+
+    system_tools.execute_tool = fake_execute_tool
+    try:
+        discovered = []
+        executor = ai_client._make_tool_executor(
+            on_tool_call=None,
+            schemas=None,
+            discover_sink=lambda names: discovered.append(list(names)),
+        )
+        executor("search_tools", {"query": "x"})
+        executor("search_tools", {"query": "y"})
+        executor("search_commands", {"query": "deploy"})
+        assert discovered == [["run_command"]]
+        # A further search_tools miss should not push tool_or_command over
+        # threshold anymore — that kind is already marked surfaced.
+        executor("search_tools", {"query": "z"})
+        assert discovered == [["run_command"]]
+    finally:
+        system_tools.execute_tool = original_execute_tool
 
 
 def test_cache_query_none_stores_nothing():
