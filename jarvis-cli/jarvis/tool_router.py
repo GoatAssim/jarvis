@@ -34,6 +34,16 @@ from .tool_registry import TOOL_GROUPS, TOOL_KEYWORDS, group_of
 # tool for a message that's actually about something else).
 MIN_SCORE = 5
 
+# Phase 1 of the enhancements doc: weighted multi-group confidence. A
+# message that only weakly brushes several groups shouldn't get every one
+# of their schemas — keep the top-scoring group, then keep additional
+# groups only while they're within ROUTER_GROUP_MARGIN of the top score,
+# up to ROUTER_MAX_GROUPS total. A clear single winner narrows to one
+# group; genuine near-ties (e.g. "download this spotify track" touching
+# both `media` and `spotify` closely) still get both.
+ROUTER_MAX_GROUPS = 2
+ROUTER_GROUP_MARGIN = 10
+
 
 class RouteResult:
     """tools: ordered, deduped tool names to offer (schemas_for_tools()
@@ -69,6 +79,7 @@ def route(user_text):
 
     matched_groups = []
     seen_groups = set()
+    group_scores = {}
     for name, keywords in TOOL_KEYWORDS.items():
         group = None
         for phrase, weight in keywords.items():
@@ -81,13 +92,35 @@ def route(user_text):
             # already in TOOL_KEYWORDS.
             if re.search(rf"\b{re.escape(phrase)}\b", text):
                 group = group or group_of(name)
-                break
+                # Accumulate every qualifying match for this tool, not just
+                # the first one that set `group` — a tool with several
+                # strong keyword hits should count more toward its group's
+                # total than one with a single weak hit.
+                if group:
+                    group_scores[group] = group_scores.get(group, 0) + weight
         if group and group not in seen_groups:
             seen_groups.add(group)
             matched_groups.append(group)
 
     if not matched_groups:
         return RouteResult([], [])
+
+    # Rank groups by accumulated score, then trim to the top group plus any
+    # others within ROUTER_GROUP_MARGIN of it, capped at ROUTER_MAX_GROUPS.
+    # With only one matched group (the common case) this is a no-op and
+    # behavior is identical to before.
+    if len(matched_groups) > 1:
+        matched_groups = sorted(
+            matched_groups, key=lambda g: group_scores.get(g, 0), reverse=True
+        )
+        top_score = group_scores.get(matched_groups[0], 0)
+        trimmed = [matched_groups[0]]
+        for group in matched_groups[1:]:
+            if len(trimmed) >= ROUTER_MAX_GROUPS:
+                break
+            if top_score - group_scores.get(group, 0) <= ROUTER_GROUP_MARGIN:
+                trimmed.append(group)
+        matched_groups = trimmed
 
     tools = []
     seen_tools = set()
