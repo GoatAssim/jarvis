@@ -546,6 +546,7 @@ def call_openai_compatible(provider, messages, timeout, tools=None, tool_executo
         if parse_err:
             return AIResult(False, error=parse_err,
                             tool_history=_openai_messages_to_generic(working_messages) if ran_tools else None)
+        _record_usage("openai_compatible", data, round_num)
 
         _record_usage("openai_compatible", data, round_num)
 

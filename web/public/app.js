@@ -453,6 +453,7 @@
     debugLastResult: null,   // last {ok, result, raw, stderr, error} from /api/tools/run
     debugLastResultError: false,
     debugPendingConfirm: null, // {name, arguments, risk_note} awaiting Yes/No before /api/tools/run
+    debugLastUsage: null,    // Phase 0 (new_plan.md): last ask-usage payload (see handleWsMessage)
     debugMode: null,          // local-only capacity override for this panel, e.g. "compact" \u2014
                                // never sent to /api/mode, never affects the real global mode
     debugLastUsage: null,    // Phase 0 (new_plan.md): last ask-usage payload (see handleWsMessage)

@@ -1633,6 +1633,10 @@ def ask(user_text, commands=None, on_attempt=None, on_tool_call=None, on_tool_re
     so the trace makes it obvious which key failed \u2014 useful when e.g. only
     your second OpenAI key has run out of credit.
 
+    on_tool_result(name, input_tokens, output_tokens), if given, fires right
+    after each tool call finishes — once the ~estimated input AND output
+    token counts (see token_usage.estimate_tokens_for) are both known.
+
     on_tool_call(name), if given, fires right before each tool call Jarvis
     makes while answering (battery, wifi, location, ...) \u2014 same idea, live
     trace of what's actually happening. Tools are looked up fresh from

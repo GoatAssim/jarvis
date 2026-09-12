@@ -766,6 +766,26 @@ def handle_ai_prompt(text, commands):
             )
         return 1
 
+    # Phase 0 (new_plan.md): baseline token/tool/round measurement for this
+    # ask. Two lines: a human-readable one on stderr (visible in a plain CLI
+    # trace and in the web console's stderr stream), and a machine-readable
+    # "JARVIS_USAGE <json>" marker line (same protocol shape as
+    # JARVIS_CONFIRM_REQUEST above) that server.js picks off and forwards to
+    # the browser as a structured ws message for the debug menu.
+    usage = result.usage
+    if usage:
+        rounds = usage.get("rounds") or []
+        tool_calls = usage.get("tool_calls") or []
+        print(
+            f"{ERR.DIM}  tokens: in={usage.get('input_tokens', 0)} "
+            f"out={usage.get('output_tokens', 0)} "
+            f"total={usage.get('total_tokens', 0)}  "
+            f"rounds={len(rounds)} tools={len(tool_calls)}{ERR.RESET}",
+            file=sys.stderr, flush=True,
+        )
+        print("JARVIS_USAGE " + json.dumps(usage, default=str, ensure_ascii=False),
+              flush=True)
+
     print(f"{prefix}{result.text}")
 
     # Phase 0 (new_plan.md): baseline token/tool/round measurement for this
