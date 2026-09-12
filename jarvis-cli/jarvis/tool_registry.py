@@ -168,6 +168,15 @@ TOOL_GROUPS = {
 # signal to place a message into the right *group* (see tool_router.py) —
 # grouped tools without their own explicit keywords still get activated
 # whenever a sibling tool in the same group scores highly enough.
+#
+# A value is normally a plain int weight. A phrase that's prone to false-
+# positive overlap with an unrelated phrase (the same class of bug as
+# "commanded" matching "command" — see tool_router.py's word-boundary fix,
+# but for two *whole* phrases that can legitimately co-occur) can instead
+# use {"weight": w, "not_with": [phrase, ...]}: the phrase still needs
+# word-boundary weight >= MIN_SCORE to be considered, but tool_router.route()
+# treats it as a non-match if any of its not_with terms also appear in the
+# message. Use keyword_weight()/keyword_exclusions() to read either shape.
 # ---------------------------------------------------------------------------
 
 TOOL_KEYWORDS = {
@@ -189,7 +198,7 @@ TOOL_KEYWORDS = {
     "type_text": {"type": 6, "keyboard": 5},
     "press_key": {"press": 5, "key": 4},
     "hotkey": {"hotkey": 9, "shortcut": 7},
-    "take_screenshot": {"screenshot": 10, "screen shot": 10, "capture screen": 8},
+    "take_screenshot": {"screenshot": 10, "screen shot": {"weight": 10, "not_with": ["recording", "record"]}, "capture screen": 8},
     "click": {"discord": 8, "click": 6},
     "click_on_text": {"click on": 6, "ocr": 8},
     "list_windows": {"windows": 5, "open windows": 8},
@@ -307,6 +316,25 @@ def tools_in_group(group):
 def keywords_for(name):
     """The {keyword: weight} dict for a tool, or {} if it has none defined."""
     return dict(TOOL_KEYWORDS.get(name, {}))
+
+
+def keyword_weight(value):
+    """Unwrap a TOOL_KEYWORDS entry's value into its weight. Most entries
+    are a plain int; a phrase that also carries an exclusion list uses
+    {"weight": w, "not_with": [...]} instead — see keyword_exclusions()."""
+    if isinstance(value, dict):
+        return value.get("weight", 0)
+    return value
+
+
+def keyword_exclusions(value):
+    """The phrase's not_with list (terms that, if also present, cancel
+    this phrase's match), or [] for a plain-int entry with none."""
+    if isinstance(value, dict):
+        not_with = value.get("not_with")
+        if isinstance(not_with, list):
+            return not_with
+    return []
 
 
 def pack_instruction(group):
