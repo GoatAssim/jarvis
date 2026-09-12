@@ -22,7 +22,7 @@ from . import tool_router
 from . import tools as system_tools
 
 DEFAULT_TIMEOUT = 30
-DEFAULT_MAX_TOKENS = 700
+DEFAULT_MAX_TOKENS = 1700
 DEFAULT_ASSISTANT_NAME = "J.A.R.V.I.S"
 DEFAULT_ADDRESS = "sir"
 DEFAULT_TOOLS_ENABLED = True

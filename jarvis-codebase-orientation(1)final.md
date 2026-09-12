@@ -86,17 +86,20 @@ next round sees the grown active set → eventually a final text answer
 | `discovery_cache.py` | Small on-disk, cross-process cache of recent `search_tools`/`search_commands` hits (enhancement #2) — new file, no prior counterpart | `CACHE_FILE=~/.jarvis/discovery_cache.json`, `TTL_SECONDS=300`, `MAX_ENTRIES=20`, `cache_lookup(query, kind)`, `cache_store(query, kind, found)` |
 | `tools.py` | Full tool schema catalog + schema-shrinking helpers + the `search_tools` discovery tool | `CORE_TOOL_SCHEMAS`, `TOOL_SCHEMAS` (the full catalog), `DISCOVERY_TOOL_SCHEMAS` (just `search_tools`), `DISCOVERY_AND_COMMANDS_SCHEMAS` (`search_tools` + `search_commands`, added later — see bug log), `schemas_for_tools()`, `compact_schemas_for_prompt()`, `name_only_schemas_for_prompt()`, `tool_search_tools()`, `_SEARCH_TOOLS_CAP=8` |
 | `command_tools.py` | Saved-command system: search/run/create/update user-defined command routines | `COMMAND_TOOL_SCHEMAS`, `COMMAND_TOOLS`, `tool_search_commands()`, `_resolve_command()` (returns `needs_clarification: True` on a miss), `resolved_run_for_review()`, `command_call_requires_confirmation/ai_review()`, `_LIST_ALL_CAP=40` |
-| `ai_client.py` | The orchestrator: `ask()`, message/prompt assembly, the shared tool executor, provider/key failover loop | `ask()` (now also cache-pre-seeds `active_schemas` from `discovery_cache` on a not-confident route — enhancement #2; also fires an optional `on_route(route)` callback right after `tool_router.route()` runs — enhancement #10, see `cli.py` row below), `_build_messages()`, `_make_tool_executor()` (+ its `discover_sink` hook and `cache_query` param, which feeds `discovery_cache.cache_store()` on a `search_tools`/`search_commands` hit), `_FAILED_LOOKUP_THRESHOLD=3`, `_REPEAT_FAILURE_DETECTORS` (generalized per-kind repeat-failure registry — enhancement #5; the old single-purpose `_failed_lookups`/`_commands_surfaced` pair is gone, replaced by a `_repeat_failures` count dict + `_surfaced` set inside `_make_tool_executor()`), `OrderedSchemaSet` (insertion-ordered, name-keyed structure — enhancement #6; `ask()`'s `active_schemas`/`compact_schemas`/`name_only_schemas` are instances of it now, not plain lists, so a duplicate tool name is structurally impossible to add twice — `.to_list()` converts at the boundary right before a provider adapter sees the final `tool_schemas`), `_tool_runs_note(runs, char_budget, verbosity="full")` (now re-applies `tool_result_shaping.shape_result()` to each cached run's result at the *current* round's `verbosity_ref[0]` before serializing it into the note, instead of resending whatever verbosity it was originally shaped at — enhancement #8; `_extras_from_runs()`/the persisted history record is untouched, only what's resent to the model each round is retrimmed), `PROMPT_MODE_DEFS` (capacity modes), `_prompt_profile()`, `_eligible_providers()`, `AskResult` |
-| `ai_providers.py` | Per-provider API adapters + the tool-round loop | `MAX_TOOL_ROUNDS=5` (**never lower this to save tokens** — optimize what's sent per round instead), `ADAPTERS`, `call_gemini()`, `call_openai_compatible()`, each with its own `_tools_payload()` rebuilt fresh every round |
+| `ai_client.py` | The orchestrator: `ask()`, message/prompt assembly, the shared tool executor, provider/key failover loop | `ask()` (now also cache-pre-seeds `active_schemas` from `discovery_cache` on a not-confident route — enhancement #2; also fires an optional `on_route(route)` callback right after `tool_router.route()` runs — enhancement #10, see `cli.py` row below), `_build_messages()`, `_make_tool_executor()` (+ its `discover_sink` hook and `cache_query` param, which feeds `discovery_cache.cache_store()` on a `search_tools`/`search_commands` hit), `_FAILED_LOOKUP_THRESHOLD=3`, `_REPEAT_FAILURE_DETECTORS` (generalized per-kind repeat-failure registry — enhancement #5; the old single-purpose `_failed_lookups`/`_commands_surfaced` pair is gone, replaced by a `_repeat_failures` count dict + `_surfaced` set inside `_make_tool_executor()`), `OrderedSchemaSet` (insertion-ordered, name-keyed structure — enhancement #6; `ask()`'s `active_schemas`/`compact_schemas`/`name_only_schemas` are instances of it now, not plain lists, so a duplicate tool name is structurally impossible to add twice — `.to_list()` converts at the boundary right before a provider adapter sees the final `tool_schemas`), `_tool_runs_note(runs, char_budget, verbosity="full")` (now re-applies `tool_result_shaping.shape_result()` to each cached run's result at the *current* round's `verbosity_ref[0]` before serializing it into the note, instead of resending whatever verbosity it was originally shaped at — enhancement #8; `_extras_from_runs()`/the persisted history record is untouched, only what's resent to the model each round is retrimmed), `_spawn_title_update()`/`run_internal_retitle()` (titling now launches a **detached OS subprocess**, not a daemon thread — see bug log #8; the subprocess re-reads the exchange from disk rather than needing it passed on the command line), `PROMPT_MODE_DEFS` (capacity modes), `_prompt_profile()`, `_eligible_providers()`, `AskResult` (`.usage` — see "Token usage instrumentation" below) |
+| `ai_providers.py` | Per-provider API adapters + the tool-round loop | `MAX_TOOL_ROUNDS=5` (**never lower this to save tokens** — optimize what's sent per round instead), `ADAPTERS`, `call_gemini()`, `call_openai_compatible()`, each with its own `_tools_payload()` rebuilt fresh every round; `set_log_context()`/`_record_usage()`/`_call_tool_safely()`/`get_usage_summary()` (real per-round provider-reported tokens + per-tool-call ~estimates — see "Token usage instrumentation" below) |
+| `token_usage.py` | Token measurement helpers, shared by both repos | `estimate_tokens_for(obj)` (~4 chars/token heuristic — tool call args/results, or anything else no provider reports a count for on its own), `extract_usage(provider_type, data)` (pulls real provider-reported prompt/completion tokens out of one raw response body; returns `None` if that response carried no usage block) |
 | `tool_result_shaping.py` | Trims what a tool call **returns**, after execution (the output-side counterpart to `tools.py`'s schema shrinking) | `TOOL_RESULT_SPECS` (opt-in allowlist — unlisted tools pass through unchanged), `shape_result(name, result, verbosity)` |
 | `tool_safety.py` | Confirmation/AI-review gating, independent of token optimization — **do not touch for this work** | `requires_confirmation()`, `requires_ai_review()`, `DEFAULT_AI_REVIEW` |
 | `conversations.py` | On-disk history, since each CLI call is a fresh process | `conversation_messages()` (recent turns + recap of older ones; each older-exchange recap line now also gets a compact `" [recap] ran tool(args), tool(args)"` suffix built from that exchange's stored `extras` — enhancement #9 — via new helpers `_extras_recap_fragment()`/`_compact_args()`; name-and-key-argument only, no result payloads), `append_exchange()`, `other_conversations_context()` |
 | `memory.py` | Cross-session memory | `prompt_context(compact, query, extra_texts)` — already relevance-scores against `query` and returns `""` on no match |
 | `desktop_tools.py` | Mouse/keyboard/window schemas + implementations | `click`, `focus_window`, `list_windows`, `get_active_window`, `get_window_size`, `get_window_info` (**the last three overlap heavily** — see bug log) |
 | `ocr_tools.py` | `click_on_text` — screenshot + local OCR + click, in one call, by visible label text |
-| `cli.py` | Terminal trace output (the `↳ asking gemini (key n/N)…` / `$ <tool>` / `tokens: in=X out=Y` lines you see in logs) | the `on_attempt` print line, a tool-name→trace-verb dict (e.g. `"search_commands": "searching commands"`), `on_route` (new — enhancement #10; prints one `$ routed: <group> (matched "<phrase>" on <tool>)` line per matched group, first match per group, using `route.matches`; no-ops silently on a non-confident route; always-on stderr trace like the others, not gated behind any `--verbose`/env-var flag — no such flag exists anywhere in `cli.py` today) |
+| `everything_tools.py` | File search + Windows shell integration (`search_files`, `reveal_in_explorer`, `open_file_location`, `open_file`) | `reveal_in_explorer()` (Windows-only; builds its `explorer /select,"<path>"` call as **one pre-quoted string**, not a list — see bug log #9 for why the list form silently breaks on any path with a space), `open_file_location()`/`open_file()` (`os.startfile()` — no equivalent quoting footgun) |
+| `cli.py` | Terminal trace output (the `↳ asking gemini (key n/N)…` / `$ <tool>` / `tokens: in=X out=Y` lines you see in logs) | the `on_attempt` print line, a tool-name→trace-verb dict (e.g. `"search_commands": "searching commands"`), `on_route` (new — enhancement #10; prints one `$ routed: <group> (matched "<phrase>" on <tool>)` line per matched group, first match per group, using `route.matches`; no-ops silently on a non-confident route; always-on stderr trace like the others, not gated behind any `--verbose`/env-var flag — no such flag exists anywhere in `cli.py` today), a hidden `_internal_retitle <conv_id> <exchange_count>` dispatch branch (see bug log #8 — not in `--help`, only `ai_client._spawn_title_update()` should ever invoke it) |
 | `tests/test_schemas_for_tools.py`, `tests/test_enhancements.py` | Automated tests — see "Testing pattern used in this project" below | run directly with `python3 tests/test_<name>.py`; no framework dependency |
 | `tests/interactive_inspector.py` | Human-readable diagnostic report (not pass/fail) for what a given message actually triggers — see "Interactive inspector" below | REPL / single-shot / `--examples` batch modes; `report(text)`, `_explain_keyword_matches()`, `_trim_groups()`, `_active_schemas_for()` |
+| `tests/benchmark_pc_actions.py`, `tests/compare_benchmark_results.py` | Cross-repo (main vs. counterreword) token/tool-call benchmark — see "Cross-repo benchmark" below | `run_benchmark(label)`, `is_safe_tool()` (default-deny allowlist gating which tools are allowed to actually run), `install_stub()`; `compare_benchmark_results.py` reads two of the JSON files this produces and prints a delta |
 
 Groups **confirmed** (by direct testing, not just reading) so far:
 - `desktop` = `type_text, press_key, hotkey, scroll, move_mouse, click, drag, get_screen_size, get_mouse_position, list_windows, focus_window, get_active_window, get_window_size, get_window_info, take_screenshot, click_on_text` (16 tools)
@@ -217,6 +220,52 @@ exactly like "why is this so slow" with no token cost to show for it.
    themselves; those are `OrderedSchemaSet` instances now, so a duplicate
    name can't be added to any of them in the first place, and the filter
    itself was removed as redundant.
+
+8. **New conversations never actually got a title/description.**
+   `_spawn_title_update()` ran `_maybe_update_title()` on a **daemon
+   thread** so titling (a real ~1-30s network round trip) would never
+   delay the visible reply. But `jarvis` is a brand-new OS process on
+   every invocation (see `history.py`'s docstring) whose top-level call is
+   `sys.exit(handle_ai_prompt(...))` — and Python kills daemon threads
+   outright on interpreter shutdown rather than waiting for them. Since
+   the process exits within milliseconds of printing the reply, the
+   background thread lost that race on **effectively every call**, not
+   just occasionally — reproduced directly: a daemon thread with
+   `time.sleep(1)` never gets to run before `sys.exit(0)` returns. **Fixed:**
+   `_spawn_title_update(conversation_id, exchange_count)` now launches a
+   fully **detached OS subprocess** (`jarvis _internal_retitle <id> <n>`,
+   own session/process group, detached stdio) instead of a thread — it
+   survives the parent's exit. The new hidden entry point
+   `ai_client.run_internal_retitle()` re-reads the just-appended exchange
+   straight from the conversation's on-disk record (already written by
+   `append_exchange()` before the subprocess is even launched) rather than
+   needing the text passed on the command line. Dispatched via a new
+   `_internal_retitle` branch in `cli.py` — undocumented in `--help`,
+   nothing but jarvis itself should call it. Verified end-to-end (spawn,
+   let the "parent" exit immediately, confirm the title landed on disk
+   afterward in a separate check) rather than just read as plausible.
+
+9. **`reveal_in_explorer` silently opened the wrong (default) folder
+   instead of revealing the target file — for any path containing a
+   space.** The code built the Explorer call as
+   `subprocess.Popen(["explorer", f"/select,{path}"])`. Passed as a
+   **list**, Python's own Windows argv-quoting (`list2cmdline`) wraps the
+   *entire* `/select,<path>` token in quotes whenever the path has a
+   space, producing `explorer "/select,C:\Users\John Doe\My File.txt"` —
+   confirmed directly via `subprocess.list2cmdline()`. But `explorer.exe`
+   needs the quotes to start **right after the comma**:
+   `explorer /select,"C:\Users\John Doe\My File.txt"`. With the quotes in
+   the wrong place, Explorer can't parse the argument at all and silently
+   falls back to opening its default folder (commonly Documents) instead
+   of erroring — no exception, no error dict, so this looked like "the
+   button doesn't work" with no clue why. Hits any path with a space in
+   it — filenames, "My Documents", etc. — which is most real-world paths.
+   **Fixed:** build the whole command as one pre-quoted string —
+   `subprocess.Popen(f'explorer /select,"{path}"')` — which sidesteps
+   Python's own Windows quoting entirely and puts the quotes exactly
+   where Explorer expects them. `open_file_location`/`open_file` were
+   never affected — they use `os.startfile()`, which has no equivalent
+   quoting step.
 
 ---
 
@@ -427,6 +476,94 @@ and prints a loud `MIRROR DRIFT` warning (not a crash) if they ever disagree.
 `active_schemas` construction, update the mirrors in this file in the same
 change** — the drift warning is a safety net for catching a missed update,
 not a substitute for remembering to make one.
+
+---
+
+## Token usage instrumentation ("Phase 0", new_plan.md)
+
+Both `jarvis-main` and `jarvis-counterreword` carry the **same** usage-
+tracking plumbing — it's not counterreword-only, despite one stale,
+already-superseded `.rej` hunk in a counterreword zip briefly suggesting
+otherwise (that patch's change was already present; the reject was noise
+from applying an old patch to a base that had already moved past it — if
+you see a `.rej` file, check whether its hunk is already applied before
+assuming something's missing).
+
+- `token_usage.py`: `estimate_tokens_for(obj)` (~4 chars/token heuristic)
+  and `extract_usage(provider_type, data)` (real provider-reported
+  prompt/completion tokens from one raw response body, or `None` if that
+  response carried no usage block).
+- `ai_providers.py`: `_record_usage()` calls `extract_usage()` on every
+  request round and accumulates it; `_call_tool_safely()` estimates
+  input/output tokens for every tool call/result via
+  `estimate_tokens_for()`; `get_usage_summary()` rolls both up into
+  `{input_tokens, output_tokens, total_tokens, rounds: [...], tool_calls:
+  [...]}` for the current provider attempt.
+- Every adapter's success path returns `AIResult(..., usage=
+  get_usage_summary())`; `ai_client.ask()`'s success path threads that
+  through as `AskResult(..., usage=result.usage)`.
+
+Net effect: `ai_client.ask(...).usage` already gives you exactly "how many
+tokens did this ask cost," broken down by round and by tool call, with
+real provider-reported numbers where the provider sent them. Anything that
+wants to measure token cost (see "Cross-repo benchmark" below) should read
+this directly rather than re-deriving it independently — it's already
+correct, and it's identical in both repos.
+
+**Caveat:** if a configured provider's API never returns a usage block
+(some Ollama setups, some misconfigured OpenAI-compatible endpoints),
+`get_usage_summary()`'s `rounds` list comes back empty for that ask even
+though real requests happened — `extract_usage()` only appends a round
+when the response actually carried one. Don't read an empty `rounds` list
+as "this ask cost 0 tokens"; it means "this provider didn't tell us."
+
+---
+
+## Cross-repo benchmark (`tests/benchmark_pc_actions.py`)
+
+A fixed, repeatable 4-step scenario — quick web search, "go on Discord and
+tag @no and say hi," "open the TTS bot," "launch Roblox" — run through the
+real `ai_client.ask()` in one continuous conversation, meant to be run
+once in `jarvis-main` and once in `jarvis-counterreword` (same
+`ai_config.json` provider/model in both — it reads from `Path.home()`, so
+this is naturally already shared across both checkouts) to get an
+apples-to-apples token/tool-call comparison between the unoptimized
+baseline and the optimized branch.
+
+- **Measurement:** reads `AskResult.usage` directly (see "Token usage
+  instrumentation" above) rather than re-instrumenting anything itself —
+  the numbers it reports are exactly what each repo's own Logs/debug panel
+  would already show for the same conversation.
+- **Safety:** patches `jarvis.tools.execute_tool` with a **default-deny
+  allowlist** (`is_safe_tool()`) — only tools with no real side effect
+  (`get_*`/`list_*`/`search_*`, `web_search`, `spotify_now`, etc.) are
+  allowed to actually run; everything else (`run_command`,
+  `playnite_launch_game`, `click_on_text`, `type_text`, `focus_window`,
+  `hotkey`, `reveal_in_explorer`, ...) gets a canned
+  `{"ok": true, "simulated": true}` instead of touching real app/OS state.
+  Deny-by-default on purpose, so a tool the allowlist's author didn't
+  think of gets stubbed rather than silently executed. Verified against
+  the real tool catalog (97 tools in counterreword, 96 in main — the only
+  difference is counterreword's `search_tools`, itself already read-only)
+  by hand before shipping this.
+- `compare_benchmark_results.py` takes the two JSON files this produces
+  (one per repo) and prints a per-metric and per-step delta, plus one
+  bottom-line "X% fewer/more total tokens" verdict.
+- **No build/install/PATH step needed to run it.** The script imports the
+  `jarvis` package directly from source
+  (`sys.path.insert(..., ".../jarvis-cli")`) rather than invoking the
+  installed `jarvis` console command, so it always benchmarks whichever
+  repo checkout it's run from regardless of what's `pip install`-ed or on
+  `PATH` — no need to reinstall/switch anything between a main-branch run
+  and a counterreword run. Only the usual runtime dependencies
+  (`requests`, etc. — see `jarvis-cli/pyproject.toml`) need to be
+  installed once, in whichever Python environment runs the script; they
+  can be shared across both checkouts since it's the same dependency set.
+- Not yet run against a real provider as of this writing (built and
+  syntax/logic-checked, including the safety classification against the
+  real tool list, but not a live end-to-end run) — treat its first real
+  output with the same "sanity-check before trusting it" caution as any
+  new instrument, especially the "no usage block reported" warning path.
 
 ---
 

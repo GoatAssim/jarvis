@@ -1,0 +1,272 @@
+{
+  "label": "counterreword",
+  "generated_at": "2026-09-12T19:15:17.608714+00:00",
+  "steps": [
+    {
+      "step": 1,
+      "prompt": "Do a quick web search for today's top tech news.",
+      "ok": true,
+      "provider": "gemini",
+      "reply": "Here are today's top tech headlines, sir:\n\n* **Anthropic AI Safety:** CEO Dario Amodei has proposed a framework to intentionally slow down the pace of advancing frontier AI capabilities to address growing existential safety concerns.\n* **Oracle Stock Maneuvers:** Larry Ellison nixed his plan to sell off up to $7.5 billion in Oracle stock, buoyed by strong AI cloud infrastructure demand.\n* **Workplace AI Surveillance:** A growing number of enterprises are starting to analyze employees' internal AI chats to help determine performance reviews and compensation.\n* **Construction Robotics:** Automated bricklayers and construction robots are being increasingly deployed to help tackle housing shortages.",
+      "reply_tokens_estimated": 176,
+      "elapsed_s": 15.26,
+      "tool_call_count": 3,
+      "tool_call_count_real": 3,
+      "tool_call_count_stubbed": 0,
+      "tool_calls": [
+        "search_tools",
+        "web_search",
+        "web_fetch"
+      ],
+      "request_round_count": 3,
+      "reported_input_tokens": 5431,
+      "reported_output_tokens": 181,
+      "reported_total_tokens": 5612,
+      "tool_call_tokens_estimated": 1371,
+      "no_reported_usage": false,
+      "rounds": [
+        {
+          "round": 0,
+          "input_tokens": 890,
+          "output_tokens": 19,
+          "source": "reported"
+        },
+        {
+          "round": 1,
+          "input_tokens": 1870,
+          "output_tokens": 26,
+          "source": "reported"
+        },
+        {
+          "round": 2,
+          "input_tokens": 2671,
+          "output_tokens": 136,
+          "source": "reported"
+        }
+      ],
+      "tool_call_usage_detail": [
+        {
+          "name": "web_search",
+          "round": null,
+          "input_tokens": 8,
+          "output_tokens": 667,
+          "source": "estimated"
+        },
+        {
+          "name": "web_fetch",
+          "round": null,
+          "input_tokens": 11,
+          "output_tokens": 685,
+          "source": "estimated"
+        }
+      ]
+    },
+    {
+      "step": 2,
+      "prompt": "Go on Discord, tag @no and say hi.",
+      "ok": true,
+      "provider": "gemini",
+      "reply": "Done, sir. I have focused Discord and sent \"@no hi\" in the active channel.",
+      "reply_tokens_estimated": 19,
+      "elapsed_s": 19.28,
+      "tool_call_count": 6,
+      "tool_call_count_real": 1,
+      "tool_call_count_stubbed": 5,
+      "tool_calls": [
+        "list_windows",
+        "focus_window",
+        "type_text",
+        "focus_window",
+        "type_text",
+        "press_key"
+      ],
+      "request_round_count": 4,
+      "reported_input_tokens": 10424,
+      "reported_output_tokens": 69,
+      "reported_total_tokens": 10493,
+      "tool_call_tokens_estimated": 144,
+      "no_reported_usage": false,
+      "rounds": [
+        {
+          "round": 0,
+          "input_tokens": 2139,
+          "output_tokens": 16,
+          "source": "reported"
+        },
+        {
+          "round": 1,
+          "input_tokens": 2271,
+          "output_tokens": 18,
+          "source": "reported"
+        },
+        {
+          "round": 2,
+          "input_tokens": 2970,
+          "output_tokens": 16,
+          "source": "reported"
+        },
+        {
+          "round": 3,
+          "input_tokens": 3044,
+          "output_tokens": 19,
+          "source": "reported"
+        }
+      ],
+      "tool_call_usage_detail": [
+        {
+          "name": "focus_window",
+          "round": null,
+          "input_tokens": 5,
+          "output_tokens": 44,
+          "source": "estimated"
+        },
+        {
+          "name": "type_text",
+          "round": null,
+          "input_tokens": 5,
+          "output_tokens": 43,
+          "source": "estimated"
+        },
+        {
+          "name": "press_key",
+          "round": null,
+          "input_tokens": 4,
+          "output_tokens": 43,
+          "source": "estimated"
+        }
+      ]
+    },
+    {
+      "step": 3,
+      "prompt": "Open the TTS bot.",
+      "ok": true,
+      "provider": "gemini",
+      "reply": "Starting the TTS bot now, sir.",
+      "reply_tokens_estimated": 8,
+      "elapsed_s": 13.27,
+      "tool_call_count": 4,
+      "tool_call_count_real": 3,
+      "tool_call_count_stubbed": 1,
+      "tool_calls": [
+        "search_commands",
+        "search_tools",
+        "search_tools",
+        "run_command"
+      ],
+      "request_round_count": 2,
+      "reported_input_tokens": 2983,
+      "reported_output_tokens": 26,
+      "reported_total_tokens": 3009,
+      "tool_call_tokens_estimated": 49,
+      "no_reported_usage": false,
+      "rounds": [
+        {
+          "round": 0,
+          "input_tokens": 1188,
+          "output_tokens": 18,
+          "source": "reported"
+        },
+        {
+          "round": 1,
+          "input_tokens": 1795,
+          "output_tokens": 8,
+          "source": "reported"
+        }
+      ],
+      "tool_call_usage_detail": [
+        {
+          "name": "run_command",
+          "round": null,
+          "input_tokens": 5,
+          "output_tokens": 44,
+          "source": "estimated"
+        }
+      ]
+    },
+    {
+      "step": 4,
+      "prompt": "Launch Roblox.",
+      "ok": true,
+      "provider": "gemini",
+      "reply": "Launching Roblox via Bloxstrap now, sir.",
+      "reply_tokens_estimated": 10,
+      "elapsed_s": 11.77,
+      "tool_call_count": 3,
+      "tool_call_count_real": 1,
+      "tool_call_count_stubbed": 2,
+      "tool_calls": [
+        "playnite_find_game",
+        "playnite_list_game_actions",
+        "playnite_launch_action"
+      ],
+      "request_round_count": 4,
+      "reported_input_tokens": 15573,
+      "reported_output_tokens": 141,
+      "reported_total_tokens": 15714,
+      "tool_call_tokens_estimated": 297,
+      "no_reported_usage": false,
+      "rounds": [
+        {
+          "round": 0,
+          "input_tokens": 3440,
+          "output_tokens": 20,
+          "source": "reported"
+        },
+        {
+          "round": 1,
+          "input_tokens": 3623,
+          "output_tokens": 22,
+          "source": "reported"
+        },
+        {
+          "round": 2,
+          "input_tokens": 4068,
+          "output_tokens": 89,
+          "source": "reported"
+        },
+        {
+          "round": 3,
+          "input_tokens": 4442,
+          "output_tokens": 10,
+          "source": "reported"
+        }
+      ],
+      "tool_call_usage_detail": [
+        {
+          "name": "playnite_find_game",
+          "round": null,
+          "input_tokens": 5,
+          "output_tokens": 45,
+          "source": "estimated"
+        },
+        {
+          "name": "playnite_list_game_actions",
+          "round": null,
+          "input_tokens": 5,
+          "output_tokens": 170,
+          "source": "estimated"
+        },
+        {
+          "name": "playnite_launch_action",
+          "round": null,
+          "input_tokens": 26,
+          "output_tokens": 46,
+          "source": "estimated"
+        }
+      ]
+    }
+  ],
+  "totals": {
+    "tool_call_count": 16,
+    "tool_call_count_real": 8,
+    "tool_call_count_stubbed": 8,
+    "request_round_count": 13,
+    "reported_input_tokens": 34411,
+    "reported_output_tokens": 417,
+    "reported_total_tokens": 34828,
+    "tool_call_tokens_estimated": 1861,
+    "reply_tokens_estimated": 213,
+    "any_step_missing_usage": false,
+    "grand_total_tokens": 36689
+  }
+}
