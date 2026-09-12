@@ -393,6 +393,43 @@ def _truncate(text, max_len):
     return text[: max_len - 1].rstrip() + "\u2026"
 
 
+def _compact_args(args, max_len=40):
+    """Name-and-key-argument only, no result payloads — a short 'k=v, k=v'
+    rendering of a tool's arguments dict for recap lines."""
+    if not isinstance(args, dict) or not args:
+        return ""
+    parts = []
+    for k, v in args.items():
+        parts.append(f"{k}={v}")
+    return _truncate(", ".join(parts), max_len)
+
+
+def _extras_recap_fragment(extras):
+    """Turns an exchange's stored `extras` (see ai_client._extras_from_runs)
+    into a short structured 'ran x(...), y(...)' fragment for the recap —
+    name-and-key-argument only, no result payloads. Returns "" when there's
+    nothing to summarize, so callers can append it unconditionally."""
+    if not extras:
+        return ""
+    calls = []
+    for extra in extras:
+        etype = extra.get("type")
+        data = extra.get("data") or {}
+        if etype == "confirm":
+            tool = data.get("tool") or "tool"
+            calls.append(f"{tool}({_compact_args(data.get('arguments'))})")
+        elif etype == "screenshot":
+            calls.append(f"take_screenshot({data.get('filename') or ''})")
+        elif etype == "organizeJson":
+            calls.append(f"organize_json({data.get('targetPath') or ''})")
+        elif etype == "download":
+            label = data.get("title") or data.get("filename") or ""
+            calls.append(f"ytdl_download({label})")
+    if not calls:
+        return ""
+    return " [recap] ran " + ", ".join(calls)
+
+
 def conversation_messages(
     conv_id,
     max_exchanges=None,
@@ -426,6 +463,7 @@ def conversation_messages(
         if not user_text:
             continue
         line = f"- User: {user_text} \u2192 You: {assistant_text}"
+        line += _extras_recap_fragment(ex.get("extras"))
         if used_r + len(line) > recap_lim:
             break
         recap_lines.append(line)
