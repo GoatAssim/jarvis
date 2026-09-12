@@ -1115,6 +1115,22 @@ def _make_tool_executor(on_tool_call, schemas=None, on_confirm_request=None,
             if found:
                 discover_sink(found)
 
+        # search_commands's own matches are SAVED COMMAND names (e.g.
+        # "deploy-prod"), not tool names — they can't be fed to discover_sink
+        # directly the way search_tools' matches are. But finding at least
+        # one means the model is about to want run_command/run_chain next,
+        # and those weren't necessarily offered yet (search_commands can now
+        # be called directly from turn one — see DISCOVERY_AND_COMMANDS_
+        # SCHEMAS — with no search_tools call in between to trigger the hook
+        # above). Passing any one commands-group tool name activates the
+        # whole group the same way search_tools' hits do, immediately
+        # making run_command/etc. callable next round instead of costing a
+        # whole extra round trip to find that out.
+        if name == "search_commands" and discover_sink and isinstance(result, dict):
+            if result.get("matches"):
+                discover_sink(["run_command"])
+                _commands_surfaced[0] = True
+
         # Failed-lookup tracking (see _FAILED_LOOKUP_THRESHOLD docstring
         # above): a search_tools call that found nothing, or a run_command/
         # run_chain call that couldn't resolve the name it was given, is a
@@ -1544,6 +1560,28 @@ def ask(user_text, commands=None, on_attempt=None, on_tool_call=None, on_tool_re
                 else active_schemas if style == "raw"
                 else compact_schemas
             )
+            # Defensive de-dupe by name, first occurrence wins. A duplicate
+            # name anywhere in this list isn't just wasted tokens — Gemini's
+            # API rejects the WHOLE request with HTTP 400 "Duplicate
+            # function declaration found: X" when one slips through, which
+            # fails identically on every key/provider tried after it (see
+            # jarvis-token-optimization-handoff.md's live-test log: 10
+            # gemini keys + 4 groq keys, all instantly wasted on the same
+            # error). Nothing upstream currently guarantees no duplicates
+            # ever reach this point across every way active_schemas/
+            # compact_schemas/name_only_schemas can grow (discover_sink,
+            # route.tools, DISCOVERY_AND_COMMANDS_SCHEMAS, ...), so this is
+            # the one shared choke point before any provider sees the list.
+            seen_tool_names = set()
+            deduped = []
+            for s in tool_schemas or []:
+                n = s.get("name") if isinstance(s, dict) else None
+                if n and n in seen_tool_names:
+                    continue
+                if n:
+                    seen_tool_names.add(n)
+                deduped.append(s)
+            tool_schemas = deduped
         else:
             tool_schemas = None
         adapter = ai_providers.ADAPTERS.get(provider.get("type"))
