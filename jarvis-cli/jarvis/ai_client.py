@@ -920,7 +920,7 @@ def _command_flags_for_call(name, arguments):
     }
 
 
-# See _make_tool_executor's failed-lookup tracking below: a search_tools
+# See _make_tool_executor's repeat-failure tracking below: a search_tools
 # miss or a run_command/run_chain that couldn't resolve the name both count
 # as one "failed lookup". After this many in a single ask(), search_commands
 # gets forced into the offered set even if the router was confidently
@@ -928,6 +928,56 @@ def _command_flags_for_call(name, arguments):
 # COMMANDS_SCHEMAS fallback only helps when the router had no opinion at
 # all — a *wrong but confident* route needs this separate safety net).
 _FAILED_LOOKUP_THRESHOLD = 3
+
+# Enhancement #5 (see jarvis-token-optimization-enhancements.md): the
+# tool/command lookup case above used to be the only repeat-failure pattern
+# tracked, via a single-purpose (_failed_lookups, _commands_surfaced) pair.
+# This registry generalizes that into an ordered list of detectors so other
+# repeat-failure patterns (e.g. click_on_text missing the same text three
+# times in a row) get the same safety net without a bespoke counter each.
+#
+# Each entry is (predicate, kind_fn, threshold, corrective):
+#   predicate(name, arguments, result) -> bool
+#       True if this tool call, given its result, counts as one instance
+#       of this failure kind.
+#   kind_fn(name, arguments) -> str
+#       The counter key for this instance. Usually a constant label, but
+#       can fold in an argument (e.g. the `text` click_on_text was given)
+#       so unrelated instances of a pattern don't share one counter.
+#   threshold -> int
+#       How many instances of this kind (in this single ask()) before the
+#       corrective fires.
+#   corrective -> list[str]
+#       Tool names handed to discover_sink once threshold is hit — same
+#       plumbing search_tools hits already use, so the corrective group is
+#       actually callable next round, not just implied.
+#
+# The tool/command entry below preserves the exact existing behavior (same
+# threshold, same corrective) as one entry in this list.
+_REPEAT_FAILURE_DETECTORS = [
+    (
+        lambda name, arguments, result: (
+            (name == "search_tools" and not result.get("matches"))
+            or (name in ("run_command", "run_chain") and result.get("needs_clarification"))
+        ),
+        lambda name, arguments: "tool_or_command",
+        _FAILED_LOOKUP_THRESHOLD,
+        ["search_commands"],
+    ),
+    (
+        # click_on_text found nothing (no "clicked" key at all) or found an
+        # ambiguous/inspect-only match (explicit "clicked": False) for the
+        # *same* text three times running — surface list_windows/
+        # focus_window as a corrective path (a no-op if the desktop group,
+        # which already includes them alongside click_on_text, is active).
+        lambda name, arguments, result: (
+            name == "click_on_text" and result.get("clicked") is False
+        ),
+        lambda name, arguments: f"click_on_text_miss:{(arguments or {}).get('text')}",
+        3,
+        ["list_windows"],
+    ),
+]
 
 
 def _make_tool_executor(on_tool_call, schemas=None, on_confirm_request=None,
@@ -970,8 +1020,13 @@ def _make_tool_executor(on_tool_call, schemas=None, on_confirm_request=None,
         for s in (schemas or [])
         if isinstance(s, dict) and s.get("name")
     }
-    _failed_lookups = [0]
-    _commands_surfaced = [False]
+    # Generalized repeat-failure tracking (enhancement #5) — replaces the
+    # old single-purpose (_failed_lookups int, _commands_surfaced bool)
+    # pair with a per-kind counter dict and a per-kind surfaced set, so one
+    # failure pattern hitting its threshold doesn't interfere with another's
+    # count. See _REPEAT_FAILURE_DETECTORS above for the active patterns.
+    _repeat_failures = {}
+    _surfaced = set()
 
     def _executor(name, arguments):
         arguments = arguments or {}
@@ -1142,32 +1197,36 @@ def _make_tool_executor(on_tool_call, schemas=None, on_confirm_request=None,
         if name == "search_commands" and discover_sink and isinstance(result, dict):
             if result.get("matches"):
                 discover_sink(["run_command"])
-                _commands_surfaced[0] = True
+                # Commands are already found — mark the tool/command
+                # repeat-failure kind surfaced too, so the detector below
+                # doesn't keep counting (and eventually re-fire) toward a
+                # corrective that already happened via this direct hit.
+                _surfaced.add("tool_or_command")
                 # Same idea as the search_tools case above, kind="commands"
                 # so a cache_lookup for a plain tool hit never gets handed
                 # the commands group by mistake.
                 if cache_query:
                     discovery_cache.cache_store(cache_query, "commands", ["run_command"])
 
-        # Failed-lookup tracking (see _FAILED_LOOKUP_THRESHOLD docstring
-        # above): a search_tools call that found nothing, or a run_command/
-        # run_chain call that couldn't resolve the name it was given, is a
-        # sign the model may be hunting for a saved command while only
-        # tools are offered (or vice versa). Once that's happened
-        # _FAILED_LOOKUP_THRESHOLD times in this ask(), force
-        # search_commands (and its whole group) into the offered set for
-        # the next round — same discover_sink path search_tools hits use,
-        # so it's actually callable immediately, not just mentioned.
-        if discover_sink and not _commands_surfaced[0] and isinstance(result, dict):
-            is_failed_lookup = (
-                (name == "search_tools" and not result.get("matches"))
-                or (name in ("run_command", "run_chain") and result.get("needs_clarification"))
-            )
-            if is_failed_lookup:
-                _failed_lookups[0] += 1
-                if _failed_lookups[0] >= _FAILED_LOOKUP_THRESHOLD:
-                    _commands_surfaced[0] = True
-                    discover_sink(["search_commands"])
+        # Generalized repeat-failure tracking (enhancement #5 — see
+        # _REPEAT_FAILURE_DETECTORS above). Each detector counts its own
+        # kind independently, so an unrelated failure type never pushes a
+        # different kind over its own threshold. Once a kind's threshold is
+        # hit, its corrective is fired exactly once (the kind is marked
+        # surfaced) — same discover_sink path search_tools hits use, so the
+        # corrective is actually callable immediately, not just mentioned.
+        if discover_sink and isinstance(result, dict):
+            for predicate, kind_fn, threshold, corrective in _REPEAT_FAILURE_DETECTORS:
+                if not predicate(name, arguments, result):
+                    continue
+                kind = kind_fn(name, arguments)
+                if kind in _surfaced:
+                    continue
+                count = _repeat_failures.get(kind, 0) + 1
+                _repeat_failures[kind] = count
+                if count >= threshold:
+                    _surfaced.add(kind)
+                    discover_sink(corrective)
 
         return result
 
