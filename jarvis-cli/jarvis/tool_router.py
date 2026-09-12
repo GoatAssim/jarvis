@@ -24,7 +24,7 @@ the old code would have handled.
 
 import re
 
-from .tool_registry import TOOL_GROUPS, TOOL_KEYWORDS, group_of
+from .tool_registry import TOOL_GROUPS, TOOL_KEYWORDS, group_of, keyword_exclusions, keyword_weight
 
 # A keyword only counts as a real signal at this weight or above (see
 # TOOL_KEYWORDS in tool_registry.py) — low-weight entries like "power": 4
@@ -82,7 +82,8 @@ def route(user_text):
     group_scores = {}
     for name, keywords in TOOL_KEYWORDS.items():
         group = None
-        for phrase, weight in keywords.items():
+        for phrase, value in keywords.items():
+            weight = keyword_weight(value)
             if weight < MIN_SCORE:
                 continue
             # Word-boundary match, not raw substring containment — a plain
@@ -90,14 +91,24 @@ def route(user_text):
             # "command" and misfire the commands group (see handoff doc,
             # Bug 1). \b works for both single-word and multi-word phrases
             # already in TOOL_KEYWORDS.
-            if re.search(rf"\b{re.escape(phrase)}\b", text):
-                group = group or group_of(name)
-                # Accumulate every qualifying match for this tool, not just
-                # the first one that set `group` — a tool with several
-                # strong keyword hits should count more toward its group's
-                # total than one with a single weak hit.
-                if group:
-                    group_scores[group] = group_scores.get(group, 0) + weight
+            if not re.search(rf"\b{re.escape(phrase)}\b", text):
+                continue
+            # Phase 3 of the enhancements doc: a phrase can carry its own
+            # exclusion list (e.g. "screen shot" excluded by "recording"/
+            # "record" on take_screenshot) — if any of its not_with terms
+            # also word-boundary-match the message, this phrase doesn't
+            # count as a match; keep scanning the tool's other keywords
+            # instead of activating its group off this one.
+            excluded = keyword_exclusions(value)
+            if excluded and any(re.search(rf"\b{re.escape(term)}\b", text) for term in excluded):
+                continue
+            group = group or group_of(name)
+            # Accumulate every qualifying match for this tool, not just
+            # the first one that set `group` — a tool with several
+            # strong keyword hits should count more toward its group's
+            # total than one with a single weak hit.
+            if group:
+                group_scores[group] = group_scores.get(group, 0) + weight
         if group and group not in seen_groups:
             seen_groups.add(group)
             matched_groups.append(group)

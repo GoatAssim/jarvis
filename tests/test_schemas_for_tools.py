@@ -15,7 +15,7 @@ plain asserts, runnable directly:
 import sys
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "jarvis-cli"))
 
 from jarvis import tools as system_tools  # noqa: E402
 from jarvis import tool_registry  # noqa: E402
