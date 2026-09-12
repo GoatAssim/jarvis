@@ -52,18 +52,26 @@ class RouteResult:
     shorthand for bool(tools); callers branch on this, not on len(groups),
     since a matched group with no tools in it (shouldn't happen, but
     tool_registry's consistency check is what actually guarantees that)
-    must still be treated as "no opinion".
+    must still be treated as "no opinion". matches: (group, tool_name,
+    matched_phrase) triples recorded as each qualifying keyword hit
+    activates its group — inert debug data, unused by any caller's
+    control flow; it only exists so a trace/log line can show *why* a
+    group activated instead of just the final tools/groups.
     """
 
-    __slots__ = ("tools", "groups", "confident")
+    __slots__ = ("tools", "groups", "confident", "matches")
 
-    def __init__(self, tools, groups):
+    def __init__(self, tools, groups, matches=None):
         self.tools = tools
         self.groups = groups
         self.confident = bool(tools)
+        self.matches = matches or []
 
     def __repr__(self):
-        return f"RouteResult(tools={self.tools!r}, groups={self.groups!r})"
+        return (
+            f"RouteResult(tools={self.tools!r}, groups={self.groups!r}, "
+            f"matches={self.matches!r})"
+        )
 
 
 def route(user_text):
@@ -80,6 +88,7 @@ def route(user_text):
     matched_groups = []
     seen_groups = set()
     group_scores = {}
+    matches = []
     for name, keywords in TOOL_KEYWORDS.items():
         group = None
         for phrase, value in keywords.items():
@@ -109,6 +118,11 @@ def route(user_text):
             # total than one with a single weak hit.
             if group:
                 group_scores[group] = group_scores.get(group, 0) + weight
+                # Phase 10 of the enhancements doc: record which keyword
+                # in which tool's entry caused this activation, so a
+                # trace/log line can show the router's reasoning instead
+                # of just the final tool list.
+                matches.append((group, name, phrase))
         if group and group not in seen_groups:
             seen_groups.add(group)
             matched_groups.append(group)
@@ -140,4 +154,4 @@ def route(user_text):
             if name not in seen_tools:
                 seen_tools.add(name)
                 tools.append(name)
-    return RouteResult(tools, matched_groups)
+    return RouteResult(tools, matched_groups, matches=matches)

@@ -15,12 +15,23 @@ things that were already fixed once.
   **highest-numbered** version before grepping around — it's a living map
   of the file structure, bug history, and what's already built, kept
   current after every change. Don't assume a zip handed to you is
-  unmodified/raw — check that doc's lineage note first.
+  unmodified/raw — check that doc's lineage note first. As of this
+  writing, all 8 enhancement ideas in the design doc below are built —
+  there is nothing left outstanding in it. Confirm this hasn't changed
+  by re-reading the orientation doc's "Outstanding ideas" section rather
+  than trusting this note indefinitely.
 - If a `jarvis-token-optimization-enhancements.md` (or similarly named
   design doc) is present, it holds designs, not a to-do list — some
   numbered items in it are already implemented even though the doc
   itself is never edited after the fact. Cross-check the orientation doc
   for which ones before building one.
+- Enhancements #8–#10 (historical tool-run reshaping, recap-level tool-call
+  summarization, router activation logging) landed without accompanying
+  tests in `tests/test_enhancements.py` — they were verified with one-off
+  inline snippets only. If you're touching any of `ai_client._tool_runs_note()`,
+  `conversations._extras_recap_fragment()`, or `tool_router.RouteResult.matches`
+  /`ai_client.ask()`'s `on_route` callback, add real coverage for it while
+  you're in there rather than assuming it's already tested.
 
 ## Invariants — do not break these
 
@@ -39,6 +50,13 @@ things that were already fixed once.
   `history.py`'s docstring). Nothing survives in memory between calls —
   persistence goes through `conversations.py` or `discovery_cache.py` on
   disk, never a module-level global.
+- **There is no debug/verbose flag anywhere in `cli.py`.** All stderr trace
+  output (`on_attempt`, `on_tool_call`, `on_tool_result`, `on_route`) is
+  always-on, unconditional `print(..., file=sys.stderr)`. Don't assume one
+  exists and gate new trace output behind it — either add real output
+  unconditionally, matching the existing convention, or introduce the flag
+  itself explicitly (and update every existing trace call site to respect
+  it, not just the new one) if you actually want gating.
 
 ## Testing
 
@@ -77,7 +95,14 @@ active-schema construction, update the mirrored copy of that logic inside
 its mirror against the real code and prints `MIRROR DRIFT` on disagreement
 — that's a safety net for catching a missed update, not a substitute for
 making one. Run the `--examples` batch afterward and confirm no drift
-warnings.
+warnings. Note: `tool_router.RouteResult` now carries a real `.matches`
+field (list of `(group, tool_name, matched_phrase)` triples, populated by
+`route()` itself) — the inspector's `_explain_keyword_matches()` still
+re-derives this by mirroring rather than reading `route.matches` directly,
+so there are technically two sources of per-phrase match detail now. Worth
+collapsing to one (have the inspector just read `route.matches`) next time
+you're touching that file, but it hasn't been done yet — don't assume
+they've been unified just because `route.matches` exists.
 
 ## Patch conventions
 
