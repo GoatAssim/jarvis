@@ -560,9 +560,23 @@ def reveal_in_explorer(arguments):
     if err:
         return err
     try:
-        # explorer.exe routinely returns a non-zero exit code even on
-        # success, so this is fire-and-forget rather than checked.
-        subprocess.Popen(["explorer", f"/select,{path}"])
+        # explorer.exe's own command-line parser wants the quotes right
+        # after "/select," — explorer /select,"C:\a b\f.txt" — not wrapped
+        # around the whole "/select,<path>" token. Passing this as a list
+        # (["explorer", f"/select,{path}"]) lets subprocess's own Windows
+        # argv-quoting (list2cmdline) add its own surrounding quotes
+        # whenever the path contains a space, producing
+        # explorer "/select,C:\a b\f.txt" instead — which explorer can't
+        # parse as a /select argument, so it silently falls back to opening
+        # its default folder (commonly Documents) instead of erroring or
+        # revealing anything. That's exactly the bug: any path with a
+        # space in it (a very common case — "My Documents", a filename
+        # with a space, ...) reveals nothing and just opens Documents.
+        # Passing one pre-quoted string instead gives exact control over
+        # where the quotes land and sidesteps subprocess's own quoting
+        # entirely; explorer routinely returns a non-zero exit code even
+        # on success, so this is still fire-and-forget rather than checked.
+        subprocess.Popen(f'explorer /select,"{path}"')
         return {"ok": True, "revealed": str(path)}
     except OSError as e:
         return {"error": f"couldn't open Explorer: {e}"}
