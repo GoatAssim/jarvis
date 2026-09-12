@@ -6,6 +6,7 @@ orientation.md's "Outstanding ideas" section for which is which):
   #2 cross-process discovery cache (discovery_cache.py)
   #3 exclusion keywords in TOOL_KEYWORDS
   #5 generalized repeat-failure counter (ai_client._make_tool_executor)
+  #6 dict-keyed active-schema construction (ai_client.OrderedSchemaSet)
 
 Same no-framework, plain-assert convention as test_schemas_for_tools.py
 (none is installed in this environment) — runnable directly:
@@ -354,6 +355,95 @@ def test_repeat_failure_search_commands_hit_suppresses_tool_or_command_kind():
         assert discovered == [["run_command"]]
     finally:
         system_tools.execute_tool = original_execute_tool
+
+
+def test_ordered_schema_set_dedupes_first_occurrence_wins():
+    # Enhancement #6 (see jarvis-token-optimization-enhancements.md):
+    # OrderedSchemaSet.append() is a no-op when a name is already present,
+    # keeping the *first* schema seen for that name — same "first
+    # occurrence wins" rule the dedupe filter it replaces used to apply
+    # right before the adapter call.
+    s = ai_client.OrderedSchemaSet([{"name": "a", "v": 1}, {"name": "b", "v": 1}])
+    s.append({"name": "a", "v": 999})  # should not overwrite
+    assert s.to_list() == [{"name": "a", "v": 1}, {"name": "b", "v": 1}]
+    assert len(s) == 2
+
+
+def test_ordered_schema_set_extend_preserves_insertion_order():
+    s = ai_client.OrderedSchemaSet()
+    s.extend([{"name": "c"}, {"name": "a"}])
+    s.extend([{"name": "a"}, {"name": "b"}])  # "a" dup ignored, "b" new
+    assert [x["name"] for x in s.to_list()] == ["c", "a", "b"]
+
+
+def test_ordered_schema_set_membership_and_bool():
+    empty = ai_client.OrderedSchemaSet()
+    assert not empty
+    assert "anything" not in empty
+    s = ai_client.OrderedSchemaSet([{"name": "search_tools"}])
+    assert s
+    assert "search_tools" in s
+    assert "search_commands" not in s
+
+
+def test_ordered_schema_set_ignores_non_dict_and_nameless_entries():
+    # Same tolerance the plain-list code it replaces had (schemas_for_prompt
+    # helpers skip non-dict/nameless entries rather than raising).
+    s = ai_client.OrderedSchemaSet([{"no_name": True}, None, {"name": "ok"}])
+    assert s.to_list() == [{"name": "ok"}]
+
+
+def test_discover_sink_growth_dedupes_across_all_three_schema_sets():
+    # Reconstructs the exact active_schemas/compact_schemas/name_only_schemas
+    # + _discover_sink wiring ask() builds (see ai_client.ask(), the
+    # not-confident branch) so the enhancement #6 dedup guarantee can be
+    # exercised without needing a configured provider/adapter to drive the
+    # full ask() call — same "mirror the internal wiring" approach
+    # tests/interactive_inspector.py already uses for active_schemas.
+    active_schemas = ai_client.OrderedSchemaSet(system_tools.DISCOVERY_AND_COMMANDS_SCHEMAS)
+    compact_schemas = ai_client.OrderedSchemaSet(system_tools.compact_schemas_for_prompt(active_schemas))
+    name_only_schemas = ai_client.OrderedSchemaSet(system_tools.name_only_schemas_for_prompt(active_schemas))
+    starting_len = len(active_schemas)
+    assert "get_battery" not in active_schemas
+
+    def discover_sink(names):
+        to_add = []
+        for name in names or []:
+            if not name or name in active_schemas:
+                continue
+            group = tool_registry.group_of(name)
+            group_names = tool_registry.tools_in_group(group) if group else [name]
+            for gname in group_names:
+                if gname and gname not in active_schemas:
+                    to_add.append(gname)
+        for name in to_add:
+            full = system_tools.schemas_for_tools([name])
+            if not full:
+                continue
+            active_schemas.extend(full)
+            compact_schemas.extend(system_tools.compact_schemas_for_prompt(full))
+            name_only_schemas.extend(system_tools.name_only_schemas_for_prompt(full))
+
+    # First hit: "get_battery" (core group) is new.
+    discover_sink(["get_battery"])
+    grown_len = len(active_schemas)
+    assert grown_len > starting_len
+    assert "get_battery" in active_schemas
+
+    # Second call re-mentions the same name alongside itself again — this
+    # is exactly the case a duplicate could have slipped through before:
+    # discover_sink used to only guard via a *separate* _discovered_names
+    # set, so anything that bypassed that check could still double-add.
+    # Now the append is a no-op regardless of how it's reached, since the
+    # structure itself is keyed by name.
+    discover_sink(["get_battery", "get_battery"])
+    assert len(active_schemas) == grown_len, "re-discovering the same name should be a no-op"
+
+    # All three sets stay in lockstep, and none has an internal duplicate.
+    for schema_set in (active_schemas, compact_schemas, name_only_schemas):
+        names = [s["name"] for s in schema_set.to_list()]
+        assert len(names) == len(set(names)), f"duplicate name(s) in {names}"
+    assert len(active_schemas) == len(compact_schemas) == len(name_only_schemas)
 
 
 def test_cache_query_none_stores_nothing():

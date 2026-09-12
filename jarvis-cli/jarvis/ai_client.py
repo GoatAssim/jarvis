@@ -34,6 +34,72 @@ COMPACT_RECAP_CHAR_BUDGET = 1400
 DEFAULT_COMPACT_PROMPT = True
 DEFAULT_COMPACT_PROMPT_PROVIDERS = ("groq",)
 
+
+class OrderedSchemaSet:
+    """Enhancement #6 (see jarvis-token-optimization-enhancements.md):
+    an insertion-ordered, tool-name-keyed structure standing in for the
+    plain `list[dict]` that `active_schemas`/`compact_schemas`/
+    `name_only_schemas` used to be in ask().
+
+    Before this, a duplicate schema was still *representable* in those
+    intermediate lists — `_discover_sink()` guarded against re-adding a
+    name via a separate `_discovered_names` set, and a defensive
+    dedupe-by-name filter was applied once, right before the final
+    `tool_schemas` selection reached the adapter. Both were correct, but
+    anything that forgot to check `_discovered_names` before appending
+    could still reintroduce a duplicate upstream of that filter. Keying
+    the structure itself by name makes a duplicate structurally
+    impossible instead of merely guarded-against: `.append()` is a no-op
+    on a name already present, so "is this name already here" collapses
+    to a plain `in` check against the set itself — no separate tracking
+    set needed alongside it.
+
+    Iterates in insertion order and supports `len()`/`in` for convenience
+    (so most call sites that only ever read/iterate need no changes at
+    all), but callers that hand this to something expecting a genuine
+    `list` (e.g. `ai_providers.py`'s adapters, or anything doing
+    list-specific things like slicing) should call `.to_list()` at that
+    boundary rather than relying on duck-typing.
+    """
+
+    __slots__ = ("_by_name",)
+
+    def __init__(self, schemas=None):
+        self._by_name = {}
+        self.extend(schemas)
+
+    def append(self, schema):
+        """No-op if a schema with this name is already present (first
+        occurrence wins, same as the dedupe filter it replaces)."""
+        if not isinstance(schema, dict):
+            return
+        name = schema.get("name")
+        if not name or name in self._by_name:
+            return
+        self._by_name[name] = schema
+
+    def extend(self, schemas):
+        for schema in schemas or []:
+            self.append(schema)
+
+    def to_list(self):
+        return list(self._by_name.values())
+
+    def __iter__(self):
+        return iter(self._by_name.values())
+
+    def __len__(self):
+        return len(self._by_name)
+
+    def __contains__(self, name):
+        return name in self._by_name
+
+    def __bool__(self):
+        return bool(self._by_name)
+
+    def __repr__(self):
+        return f"OrderedSchemaSet({list(self._by_name.keys())!r})"
+
 # ===========================================================================
 # Prompt "capacity" modes \u2014 a generic, table-driven registry.
 #
@@ -1557,9 +1623,9 @@ def ask(user_text, commands=None, on_attempt=None, on_tool_call=None, on_tool_re
         # below grows active/compact/name_only_schemas in place, so a match
         # becomes callable on the very next round without a second full
         # prompt resend), it's just not offered up front on spec.
-        active_schemas = (
+        active_schemas = OrderedSchemaSet(
             system_tools.schemas_for_tools(route.tools)
-            if route.confident else list(system_tools.DISCOVERY_AND_COMMANDS_SCHEMAS)
+            if route.confident else system_tools.DISCOVERY_AND_COMMANDS_SCHEMAS
         )
 
         # Phase 2 of the enhancements doc: when the router has no opinion,
@@ -1609,12 +1675,10 @@ def ask(user_text, commands=None, on_attempt=None, on_tool_call=None, on_tool_re
         # (50% Capacity) mode is for: see tool_schema_style per-provider
         # below, resolved fresh each attempt since mode can still vary by
         # provider under the legacy compact_prompt_providers config.
-        compact_schemas = system_tools.compact_schemas_for_prompt(active_schemas)
-        name_only_schemas = system_tools.name_only_schemas_for_prompt(active_schemas)
+        compact_schemas = OrderedSchemaSet(system_tools.compact_schemas_for_prompt(active_schemas))
+        name_only_schemas = OrderedSchemaSet(system_tools.name_only_schemas_for_prompt(active_schemas))
     provider_ref = [None]
     verbosity_ref = ["full"]
-
-    _discovered_names = {s.get("name") for s in active_schemas} if tools_enabled else set()
 
     def _discover_sink(names):
         """Phase 5 handoff: called by the tool executor right after a
@@ -1623,12 +1687,20 @@ def ask(user_text, commands=None, on_attempt=None, on_tool_call=None, on_tool_re
         which one is actually sent depends on the per-provider
         tool_schema_style resolved below) so a matched tool is really
         callable on the model's very next round in this same ask() \u2014 not
-        just described in the search_tools reply and then unreachable."""
+        just described in the search_tools reply and then unreachable.
+
+        Enhancement #6: active_schemas/compact_schemas/name_only_schemas
+        are OrderedSchemaSet instances now, so "already discovered" is a
+        plain `in` check against active_schemas itself \u2014 the separate
+        `_discovered_names` set this used to need is gone; a duplicate
+        name is structurally impossible to add twice regardless of which
+        of the three sets .append()/.extend() is called on.
+        """
         from . import tool_registry
 
         to_add = []
         for name in names or []:
-            if not name or name in _discovered_names:
+            if not name or name in active_schemas:
                 continue
             # Activate the tool's whole group, not just the single matched
             # name — mirrors tool_router.route()'s behavior (Phase 3) so a
@@ -1639,14 +1711,13 @@ def ask(user_text, commands=None, on_attempt=None, on_tool_call=None, on_tool_re
             group = tool_registry.group_of(name)
             group_names = tool_registry.tools_in_group(group) if group else [name]
             for gname in group_names:
-                if gname and gname not in _discovered_names:
+                if gname and gname not in active_schemas:
                     to_add.append(gname)
 
         for name in to_add:
             full = system_tools.schemas_for_tools([name])
             if not full:
                 continue
-            _discovered_names.add(name)
             active_schemas.extend(full)
             compact_schemas.extend(system_tools.compact_schemas_for_prompt(full))
             name_only_schemas.extend(system_tools.name_only_schemas_for_prompt(full))
@@ -1672,28 +1743,22 @@ def ask(user_text, commands=None, on_attempt=None, on_tool_call=None, on_tool_re
                 else active_schemas if style == "raw"
                 else compact_schemas
             )
-            # Defensive de-dupe by name, first occurrence wins. A duplicate
-            # name anywhere in this list isn't just wasted tokens — Gemini's
-            # API rejects the WHOLE request with HTTP 400 "Duplicate
-            # function declaration found: X" when one slips through, which
-            # fails identically on every key/provider tried after it (see
-            # jarvis-token-optimization-handoff.md's live-test log: 10
-            # gemini keys + 4 groq keys, all instantly wasted on the same
-            # error). Nothing upstream currently guarantees no duplicates
-            # ever reach this point across every way active_schemas/
-            # compact_schemas/name_only_schemas can grow (discover_sink,
-            # route.tools, DISCOVERY_AND_COMMANDS_SCHEMAS, ...), so this is
-            # the one shared choke point before any provider sees the list.
-            seen_tool_names = set()
-            deduped = []
-            for s in tool_schemas or []:
-                n = s.get("name") if isinstance(s, dict) else None
-                if n and n in seen_tool_names:
-                    continue
-                if n:
-                    seen_tool_names.add(n)
-                deduped.append(s)
-            tool_schemas = deduped
+            # Boundary: everything downstream of ai_client.py (adapters,
+            # provider-payload builders) expects a plain list, not an
+            # OrderedSchemaSet — .to_list() is the one conversion point.
+            #
+            # Enhancement #6: duplicates are now structurally impossible in
+            # active_schemas/compact_schemas/name_only_schemas themselves
+            # (OrderedSchemaSet.append() is a no-op on a name already
+            # present), so the belt-and-suspenders re-dedupe that used to
+            # live here — guarding against every way those three could
+            # theoretically grow a duplicate — is redundant and has been
+            # removed. Gemini's HTTP 400 "Duplicate function declaration
+            # found: X" on a slipped-through duplicate (see
+            # jarvis-token-optimization-handoff.md's live-test log) is the
+            # reason this mattered; that failure mode is now prevented one
+            # layer upstream instead of filtered right before the adapter.
+            tool_schemas = tool_schemas.to_list()
         else:
             tool_schemas = None
         adapter = ai_providers.ADAPTERS.get(provider.get("type"))
