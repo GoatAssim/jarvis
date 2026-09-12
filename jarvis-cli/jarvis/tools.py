@@ -15,6 +15,7 @@ tool-use guidance.
 
 import os
 import platform
+import re
 import shutil
 import socket
 import subprocess
@@ -239,6 +240,166 @@ def _get_memory_usage():
 
 _NO_PARAMS = {"type": "object", "properties": {}, "required": []}
 
+_SEARCH_TOOLS_CAP = 8
+
+
+_SEARCH_STOPWORDS = {
+    "a", "an", "the", "to", "for", "of", "my", "me", "i", "is", "are", "do",
+    "does", "you", "your", "this", "that", "on", "in", "at", "with", "and",
+    "or", "please", "can", "could", "would", "what", "how", "check", "get",
+    "want", "need", "it", "some", "up", "out", "about", "there", "any",
+}
+
+
+def _search_tokens(text):
+    return [t for t in re.findall(r"[a-z0-9']+", text) if t and t not in _SEARCH_STOPWORDS]
+
+
+def tool_search_tools(args):
+    """Phase 5 of the token-optimization plan (see new_plan.md): a small,
+    always-available, model-visible discovery tool. When the local router
+    (tool_router.route(), Phase 3) isn't confident about a message, ask()
+    now offers ONLY this tool instead of falling back to the full catalog
+    (that fallback was Phase 1-4's explicitly-documented remaining gap —
+    see "Not yet done" in jarvis-token-optimization-phases-1-4.md).
+
+    Returns compact matches (name/group/one-line summary) only — never
+    full argument schemas (new_plan.md section 9: a search_tools reply
+    that dumped full schemas would just move the token cost, not remove
+    it). The full schema for anything matched here is grown into this
+    round's active/compact/name_only schemas by the caller
+    (ai_client._make_tool_executor's discover_sink), so a match is
+    actually callable on the model's next round — not just described and
+    then unreachable.
+    """
+    from . import tool_registry
+
+    raw_query = (args or {}).get("query") or ""
+    query = raw_query.strip().lower()
+    index = tool_registry.TOOL_INDEX
+
+    if not query:
+        # No query: hand back the group list, not every tool — still tiny,
+        # still enough to narrow down on the next call.
+        return {
+            "groups": sorted(tool_registry.TOOL_GROUPS),
+            "message": "Pass a query (a group name, or a keyword) to see matching tools.",
+        }
+
+    # Whole-phrase matches (a bare keyword or group name — the common,
+    # cheapest case) still win outright and skip tokenization entirely.
+    # But a real query from the model is often a natural phrase ("download
+    # youtube video", "take a screenshot") that will almost never appear
+    # verbatim in any tool's name or description — requiring the *whole*
+    # query string to be a substring silently returned zero matches for
+    # exactly those realistic queries. Tokenizing and scoring on overlap
+    # fixes that without changing behavior for the simple single-keyword
+    # case (a single-token query degrades to the same substring checks).
+    tokens = _search_tokens(query)
+    if not tokens:
+        tokens = [query]
+
+    scored = []
+    for name, schema in index.items():
+        group = tool_registry.group_of(name) or "misc"
+        keywords = " ".join(tool_registry.keywords_for(name).keys())
+        name_lower = name.replace("_", " ").lower()
+        haystack = " ".join([
+            name_lower,
+            schema.get("description") or "",
+            keywords,
+            group,
+        ]).lower()
+
+        if query == group.lower():
+            score = 100
+        elif query in name.lower():
+            score = 80
+        elif query in haystack:
+            score = 10
+        else:
+            score = 0
+            matched_tokens = 0
+            for tok in tokens:
+                if tok == group.lower():
+                    score += 12
+                    matched_tokens += 1
+                elif tok in name_lower:
+                    score += 9
+                    matched_tokens += 1
+                elif tok in haystack:
+                    score += 3
+                    matched_tokens += 1
+            if matched_tokens > 1:
+                # Small bonus for a tool matching multiple distinct query
+                # tokens (e.g. both "youtube" and "download") over one
+                # matching only a single generic token.
+                score += matched_tokens
+            if score <= 0:
+                continue
+        scored.append((score, name, group, schema))
+
+    if not scored:
+        return {
+            "matches": [],
+            "message": f"No tools matched '{raw_query.strip()}'. Try a broader keyword or a group name.",
+        }
+
+    scored.sort(key=lambda x: (-x[0], x[1]))
+    truncated = len(scored) > _SEARCH_TOOLS_CAP
+    scored = scored[:_SEARCH_TOOLS_CAP]
+    matches = [
+        {
+            "name": name,
+            "group": group,
+            "summary": _clip_text(schema.get("description") or "", _SCHEMA_DESC_MAX),
+        }
+        for _, name, group, schema in scored
+    ]
+    result = {"matches": matches}
+    if truncated:
+        result["message"] = "More tools matched — narrow the query if you don't see what you need."
+    return result
+
+
+DISCOVERY_TOOL_SCHEMAS = [
+    {
+        "name": "search_tools",
+        "description": (
+            "Discover which of Jarvis's tools are relevant right now. Call this FIRST "
+            "when you might need a tool but don't see one offered for it — pass a "
+            "keyword (e.g. 'spotify', 'battery', 'git') or a group name, or omit the "
+            "query to list the groups. Matches become callable on your next reply."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": "Keyword or group name to search for. Omit to list groups.",
+                },
+            },
+            "required": [],
+        },
+    },
+]
+
+# DISCOVERY_TOOL_SCHEMAS alone left the model with no way to tell "is this
+# a tool?" from "is this a saved command?" when the router isn't confident
+# — a message like "run the tts thing" (a saved command, not a tool) just
+# made it call search_tools repeatedly with different keywords and never
+# find anything, burning rounds/tokens. search_commands's schema already
+# exists (it's part of COMMAND_TOOL_SCHEMAS below); reuse it here instead
+# of duplicating it, so both discovery tools are offered together whenever
+# the router has no opinion.
+_SEARCH_COMMANDS_SCHEMA = next(
+    (s for s in COMMAND_TOOL_SCHEMAS if s.get("name") == "search_commands"), None
+)
+DISCOVERY_AND_COMMANDS_SCHEMAS = (
+    [*DISCOVERY_TOOL_SCHEMAS, _SEARCH_COMMANDS_SCHEMA]
+    if _SEARCH_COMMANDS_SCHEMA else list(DISCOVERY_TOOL_SCHEMAS)
+)
+
 CORE_TOOL_SCHEMAS = [
     {
         "name": "get_datetime",
@@ -294,7 +455,12 @@ CORE_TOOL_SCHEMAS = [
 ]
 
 PLAYNITE_AND_SPOTIFY = [*PLAYNITE_TOOL_SCHEMAS, *SPOTIFY_TOOL_SCHEMAS]
-TOOL_SCHEMAS = [*CORE_TOOL_SCHEMAS, *PLAYNITE_AND_SPOTIFY]
+# search_tools is deliberately NOT part of tool_schemas_for_session()'s
+# normal offering (see that function below) — it's the Phase 5 discovery
+# tool, offered instead of (not alongside) the full catalog. It IS part of
+# TOOL_SCHEMAS/TOOL_INDEX so tool_registry.TOOL_INDEX, schemas_for_tools(),
+# and the tool executor's arg-validation all know about it.
+TOOL_SCHEMAS = [*CORE_TOOL_SCHEMAS, *PLAYNITE_AND_SPOTIFY, *DISCOVERY_TOOL_SCHEMAS]
 
 
 def allowed_tools_from_env():
@@ -404,6 +570,51 @@ def tool_schemas_for_session():
     return out
 
 
+_TOOL_INDEX = None
+
+
+def _tool_index():
+    """name -> full schema, built once from TOOL_SCHEMAS (the full catalog,
+    same source tools_list_payload uses) and cached. Private: use
+    schemas_for_tools() below rather than reaching into this directly."""
+    global _TOOL_INDEX
+    if _TOOL_INDEX is None:
+        _TOOL_INDEX = {}
+        for schema in TOOL_SCHEMAS:
+            name = schema.get("name")
+            if name and name not in _TOOL_INDEX:
+                _TOOL_INDEX[name] = schema
+    return _TOOL_INDEX
+
+
+def schemas_for_tools(names):
+    """Phase 2 of the token-optimization plan (see new_plan.md): return only
+    the full schemas for the given tool names, in the order `names` is
+    given, dropping any name that isn't a real tool.
+
+    Not called from ask() yet — tool_schemas_for_session() below still
+    returns everything, exactly as before. This is purely the building
+    block a later phase (once tool_router.py picks a small set of relevant
+    tool names) will filter down to before handing schemas to a provider.
+
+    Compatibility check: schemas_for_tools([s["name"] for s in
+    tool_schemas_for_session()]) must return the exact same list
+    tool_schemas_for_session() does (same names, same schemas) — see
+    tests/test_schemas_for_tools.py.
+    """
+    index = _tool_index()
+    out = []
+    seen = set()
+    for name in names or []:
+        if name in seen:
+            continue
+        schema = index.get(name)
+        if schema is not None:
+            out.append(schema)
+            seen.add(name)
+    return out
+
+
 def tools_list_payload():
     """Full catalog for remote permission UIs — not filtered by session or env.
 
@@ -470,6 +681,7 @@ TOOLS = {
     **YTDL_TOOLS,
     **EVERYTHING_TOOLS,
     **PRESENT_TOOLS,
+    "search_tools": tool_search_tools,
 }
 
 
@@ -492,7 +704,7 @@ def execute_tool(name, arguments=None, verbosity=None):
     if fn is None:
         return {"error": f"no such tool: {name}"}
     try:
-        if name in COMMAND_TOOLS or name in PLAYNITE_TOOLS or name in WEB_TOOLS or name in PKG_TOOLS or name in SPOTIFY_TOOLS or name in MEMORY_TOOLS or name in CAPACITY_TOOLS or name in RADIO_TOOLS or name in GIT_TOOLS or name in SCREENSHOT_TOOLS or name in DESKTOP_TOOLS or name in OCR_TOOLS or name in FILE_TOOLS or name in CUSTOM_TOOLS or name in YTDL_TOOLS or name in EVERYTHING_TOOLS or name in ORGANIZE_JSON_TOOLS or name in PRESENT_TOOLS:
+        if name in COMMAND_TOOLS or name in PLAYNITE_TOOLS or name in WEB_TOOLS or name in PKG_TOOLS or name in SPOTIFY_TOOLS or name in MEMORY_TOOLS or name in CAPACITY_TOOLS or name in RADIO_TOOLS or name in GIT_TOOLS or name in SCREENSHOT_TOOLS or name in DESKTOP_TOOLS or name in OCR_TOOLS or name in FILE_TOOLS or name in CUSTOM_TOOLS or name in YTDL_TOOLS or name in EVERYTHING_TOOLS or name in ORGANIZE_JSON_TOOLS or name in PRESENT_TOOLS or name == "search_tools":
             result = fn(arguments or {})
         else:
             result = fn()

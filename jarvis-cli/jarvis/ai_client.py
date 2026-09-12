@@ -10,13 +10,19 @@ told about itself, and what gets remembered.
 
 import json
 import re
+import threading
+import os
+import subprocess
+import sys
 
 from . import ai_config, ai_providers, command_tools, conversations, memory, playnite_config, stats, tool_safety
+from . import discovery_cache
 from . import tool_result_shaping
+from . import tool_router
 from . import tools as system_tools
 
 DEFAULT_TIMEOUT = 30
-DEFAULT_MAX_TOKENS = 700
+DEFAULT_MAX_TOKENS = 1700
 DEFAULT_ASSISTANT_NAME = "J.A.R.V.I.S"
 DEFAULT_ADDRESS = "sir"
 DEFAULT_TOOLS_ENABLED = True
@@ -30,6 +36,72 @@ COMPACT_RECAP_EXCHANGES = 16
 COMPACT_RECAP_CHAR_BUDGET = 1400
 DEFAULT_COMPACT_PROMPT = True
 DEFAULT_COMPACT_PROMPT_PROVIDERS = ("groq",)
+
+
+class OrderedSchemaSet:
+    """Enhancement #6 (see jarvis-token-optimization-enhancements.md):
+    an insertion-ordered, tool-name-keyed structure standing in for the
+    plain `list[dict]` that `active_schemas`/`compact_schemas`/
+    `name_only_schemas` used to be in ask().
+
+    Before this, a duplicate schema was still *representable* in those
+    intermediate lists — `_discover_sink()` guarded against re-adding a
+    name via a separate `_discovered_names` set, and a defensive
+    dedupe-by-name filter was applied once, right before the final
+    `tool_schemas` selection reached the adapter. Both were correct, but
+    anything that forgot to check `_discovered_names` before appending
+    could still reintroduce a duplicate upstream of that filter. Keying
+    the structure itself by name makes a duplicate structurally
+    impossible instead of merely guarded-against: `.append()` is a no-op
+    on a name already present, so "is this name already here" collapses
+    to a plain `in` check against the set itself — no separate tracking
+    set needed alongside it.
+
+    Iterates in insertion order and supports `len()`/`in` for convenience
+    (so most call sites that only ever read/iterate need no changes at
+    all), but callers that hand this to something expecting a genuine
+    `list` (e.g. `ai_providers.py`'s adapters, or anything doing
+    list-specific things like slicing) should call `.to_list()` at that
+    boundary rather than relying on duck-typing.
+    """
+
+    __slots__ = ("_by_name",)
+
+    def __init__(self, schemas=None):
+        self._by_name = {}
+        self.extend(schemas)
+
+    def append(self, schema):
+        """No-op if a schema with this name is already present (first
+        occurrence wins, same as the dedupe filter it replaces)."""
+        if not isinstance(schema, dict):
+            return
+        name = schema.get("name")
+        if not name or name in self._by_name:
+            return
+        self._by_name[name] = schema
+
+    def extend(self, schemas):
+        for schema in schemas or []:
+            self.append(schema)
+
+    def to_list(self):
+        return list(self._by_name.values())
+
+    def __iter__(self):
+        return iter(self._by_name.values())
+
+    def __len__(self):
+        return len(self._by_name)
+
+    def __contains__(self, name):
+        return name in self._by_name
+
+    def __bool__(self):
+        return bool(self._by_name)
+
+    def __repr__(self):
+        return f"OrderedSchemaSet({list(self._by_name.keys())!r})"
 
 # ===========================================================================
 # Prompt "capacity" modes \u2014 a generic, table-driven registry.
@@ -556,7 +628,7 @@ def _tools_blurb(compact, ultra, has_playnite, has_spotify):
 def _system_prompt(persona, commands_ctx, freq_ctx, tools_enabled,
                    compact_tools=False, compact_persona=False, ultra=False, has_history=False,
                    memory_ctx="", has_playnite=False, has_spotify=False, other_convos_ctx="",
-                   playnite_freq_games=None, precise=False):
+                   playnite_freq_games=None, precise=False, pack_instructions_ctx=""):
     name = persona.get("assistant_name") or DEFAULT_ASSISTANT_NAME
     address = persona.get("address_user_as") or DEFAULT_ADDRESS
     extra = (persona.get("extra_instructions") or "").strip()
@@ -605,6 +677,8 @@ def _system_prompt(persona, commands_ctx, freq_ctx, tools_enabled,
             )
     if tools_enabled:
         parts.append(_tools_blurb(compact_tools, ultra, has_playnite, has_spotify))
+        if pack_instructions_ctx:
+            parts.append(pack_instructions_ctx)
     if precise:
         # 150% Capacity only: an extra directive on top of the normal
         # persona/tools text \u2014 not a replacement for either.
@@ -645,9 +719,20 @@ def _system_prompt(persona, commands_ctx, freq_ctx, tools_enabled,
     return "\n\n".join(parts)
 
 
-def _build_messages(persona, commands, user_text, tools_enabled, profile, conversation_id):
+def _build_messages(persona, commands, user_text, tools_enabled, profile, conversation_id, route=None):
     compact = profile.get("compact_tools_blurb", False)
-    commands_ctx = _commands_context(
+    # Phase 8 of the token-optimization plan (see new_plan.md): the full
+    # saved-commands listing only earns its tokens when the "commands"
+    # tool group is actually in play. When the router is confident about a
+    # *different* group, search_commands/run_command/etc. aren't even
+    # being offered this round (see ask()'s active_schemas) — so a dozen
+    # inlined command names+descriptions would be pure overhead with no
+    # tool available to act on them anyway. Stay unconditional (the exact
+    # prior behavior) whenever the router has no opinion or "commands" is
+    # itself one of the matched groups, since that's the safe/no-regression
+    # case this phase must not touch.
+    skip_commands_listing = bool(route) and route.confident and "commands" not in route.groups
+    commands_ctx = "" if skip_commands_listing else _commands_context(
         commands,
         max_listed=profile["max_commands"],
         desc_max_len=profile["desc_max_len"],
@@ -680,8 +765,60 @@ def _build_messages(persona, commands, user_text, tools_enabled, profile, conver
         "" if profile.get("skip_other_convos")
         else conversations.other_conversations_context(conversation_id)
     )
-    offered = system_tools.tool_schemas_for_session() if tools_enabled else []
+    # Bugfix: this used to always call tool_schemas_for_session() (the
+    # full per-session catalog) regardless of `route`, so has_playnite/
+    # has_spotify below were computed from what *could* be offered rather
+    # than what this round's router-filtered active_schemas actually
+    # offers (see ask()'s active_schemas selection, which this mirrors).
+    # Net effect of the bug: whenever the router narrowed to some other
+    # group (e.g. "desktop"), the playnite/spotify blurb text still got
+    # included every time, since tool_schemas_for_session() always
+    # includes those — quietly defeating the token-optimization this
+    # phase is for.
+    if tools_enabled:
+        if route is not None and route.confident:
+            offered = system_tools.schemas_for_tools(route.tools)
+        elif route is not None:
+            offered = list(system_tools.DISCOVERY_AND_COMMANDS_SCHEMAS)
+        else:
+            offered = system_tools.tool_schemas_for_session()
+    else:
+        offered = []
     offered_names = {s["name"] for s in offered}
+    # Phase 6 of the token-optimization plan (see new_plan.md): inject
+    # TOOL_PACK_INSTRUCTIONS only for the groups the router actually
+    # activated this turn, instead of _tools_blurb() baking every
+    # subsystem's workflow guidance into every prompt unconditionally.
+    # Only meaningful once the router is confident (route.groups is empty
+    # otherwise) — when it isn't, active_schemas already fell back to the
+    # small search_tools-only offering (Phase 5), so there's no group-
+    # specific guidance to add here either way.
+    pack_instructions_ctx = ""
+    if route is not None and route.confident:
+        from . import tool_registry
+        pack_lines = [
+            tool_registry.pack_instruction(group)
+            for group in route.groups
+            if tool_registry.pack_instruction(group)
+        ]
+        pack_instructions_ctx = " ".join(pack_lines)
+    elif route is not None and tools_enabled:
+        # Phase 5 fallback (see new_plan.md): the router had no opinion, so
+        # only the tiny search_tools discovery schema is being offered this
+        # round (see active_schemas below) instead of the full catalog.
+        # Without an explicit nudge here, a model that doesn't already
+        # "know" search_tools exists tends to just say it lacks whatever
+        # capability was asked for, rather than calling search_tools to
+        # check first — which is the whole point of this discovery tool.
+        pack_instructions_ctx = (
+            "Before telling the user you don't have a tool for something, "
+            "call search_tools with a keyword for it — many tools aren't "
+            "listed above and only appear after that search. If the "
+            "request sounds like running something the user already set "
+            "up (a saved routine/command) rather than a built-in "
+            "capability, try search_commands instead — don't just keep "
+            "retrying search_tools with different keywords."
+        )
     system_prompt = _system_prompt(
         persona,
         commands_ctx,
@@ -697,6 +834,7 @@ def _build_messages(persona, commands, user_text, tools_enabled, profile, conver
         other_convos_ctx=other_convos_ctx,
         playnite_freq_games=profile.get("playnite_freq_games"),
         precise=profile.get("precise_persona", False),
+        pack_instructions_ctx=pack_instructions_ctx,
     )
     messages = [{"role": "system", "content": system_prompt}]
     messages.extend(prior_turns)
@@ -851,8 +989,69 @@ def _command_flags_for_call(name, arguments):
     }
 
 
+# See _make_tool_executor's repeat-failure tracking below: a search_tools
+# miss or a run_command/run_chain that couldn't resolve the name both count
+# as one "failed lookup". After this many in a single ask(), search_commands
+# gets forced into the offered set even if the router was confidently
+# pointed at the wrong group the whole time (Part A's DISCOVERY_AND_
+# COMMANDS_SCHEMAS fallback only helps when the router had no opinion at
+# all — a *wrong but confident* route needs this separate safety net).
+_FAILED_LOOKUP_THRESHOLD = 3
+
+# Enhancement #5 (see jarvis-token-optimization-enhancements.md): the
+# tool/command lookup case above used to be the only repeat-failure pattern
+# tracked, via a single-purpose (_failed_lookups, _commands_surfaced) pair.
+# This registry generalizes that into an ordered list of detectors so other
+# repeat-failure patterns (e.g. click_on_text missing the same text three
+# times in a row) get the same safety net without a bespoke counter each.
+#
+# Each entry is (predicate, kind_fn, threshold, corrective):
+#   predicate(name, arguments, result) -> bool
+#       True if this tool call, given its result, counts as one instance
+#       of this failure kind.
+#   kind_fn(name, arguments) -> str
+#       The counter key for this instance. Usually a constant label, but
+#       can fold in an argument (e.g. the `text` click_on_text was given)
+#       so unrelated instances of a pattern don't share one counter.
+#   threshold -> int
+#       How many instances of this kind (in this single ask()) before the
+#       corrective fires.
+#   corrective -> list[str]
+#       Tool names handed to discover_sink once threshold is hit — same
+#       plumbing search_tools hits already use, so the corrective group is
+#       actually callable next round, not just implied.
+#
+# The tool/command entry below preserves the exact existing behavior (same
+# threshold, same corrective) as one entry in this list.
+_REPEAT_FAILURE_DETECTORS = [
+    (
+        lambda name, arguments, result: (
+            (name == "search_tools" and not result.get("matches"))
+            or (name in ("run_command", "run_chain") and result.get("needs_clarification"))
+        ),
+        lambda name, arguments: "tool_or_command",
+        _FAILED_LOOKUP_THRESHOLD,
+        ["search_commands"],
+    ),
+    (
+        # click_on_text found nothing (no "clicked" key at all) or found an
+        # ambiguous/inspect-only match (explicit "clicked": False) for the
+        # *same* text three times running — surface list_windows/
+        # focus_window as a corrective path (a no-op if the desktop group,
+        # which already includes them alongside click_on_text, is active).
+        lambda name, arguments, result: (
+            name == "click_on_text" and result.get("clicked") is False
+        ),
+        lambda name, arguments: f"click_on_text_miss:{(arguments or {}).get('text')}",
+        3,
+        ["list_windows"],
+    ),
+]
+
+
 def _make_tool_executor(on_tool_call, schemas=None, on_confirm_request=None,
-                         cfg=None, provider_ref=None, verbosity_ref=None):
+                         cfg=None, provider_ref=None, verbosity_ref=None,
+                         discover_sink=None, cache_query=None):
     """Shared across every provider/key in one ask() so a failover never
     re-runs the same command, Playnite action, or web fetch. Cache hits
     still return the original result (no second launch / install / HTTP).
@@ -876,6 +1075,12 @@ def _make_tool_executor(on_tool_call, schemas=None, on_confirm_request=None,
     argument) because one executor is shared across every provider in a
     single ask() for failover, and each provider attempt resolves its own
     prompt profile (see ask()'s main loop), same pattern as provider_ref.
+
+    cache_query, if given, is the normalized user_text for this ask() call
+    (see discovery_cache.py) — a successful search_tools/search_commands
+    hit is stored under it so a similar query in a *later* jarvis process
+    can pre-seed active_schemas without repeating the same discovery round
+    trip. Purely additive: with cache_query left None, nothing is stored.
     """
     cache = {}
     runs = []
@@ -884,6 +1089,13 @@ def _make_tool_executor(on_tool_call, schemas=None, on_confirm_request=None,
         for s in (schemas or [])
         if isinstance(s, dict) and s.get("name")
     }
+    # Generalized repeat-failure tracking (enhancement #5) — replaces the
+    # old single-purpose (_failed_lookups int, _commands_surfaced bool)
+    # pair with a per-kind counter dict and a per-kind surfaced set, so one
+    # failure pattern hitting its threshold doesn't interfere with another's
+    # count. See _REPEAT_FAILURE_DETECTORS above for the active patterns.
+    _repeat_failures = {}
+    _surfaced = set()
 
     def _executor(name, arguments):
         arguments = arguments or {}
@@ -1022,6 +1234,69 @@ def _make_tool_executor(on_tool_call, schemas=None, on_confirm_request=None,
         if confirm_meta is not None:
             run_entry["confirm"] = confirm_meta
         runs.append(run_entry)
+
+        # Phase 5 handoff (see new_plan.md): a successful search_tools call
+        # hands its matches to discover_sink so ask() can grow this round's
+        # active/compact/name_only_schemas in place \u2014 the match is then
+        # actually offered (and callable) on the *next* round, rather than
+        # just described in this tool's own reply and then unreachable.
+        if name == "search_tools" and discover_sink and isinstance(result, dict):
+            matches = result.get("matches") or []
+            found = [m.get("name") for m in matches if isinstance(m, dict) and m.get("name")]
+            if found:
+                discover_sink(found)
+                # Phase 2 of the enhancements doc: remember this hit under
+                # the message that triggered it, so a similar message in a
+                # *later* jarvis process (a fresh OS process every time —
+                # see history.py) can skip the round trip entirely.
+                if cache_query:
+                    discovery_cache.cache_store(cache_query, "tools", found)
+
+        # search_commands's own matches are SAVED COMMAND names (e.g.
+        # "deploy-prod"), not tool names — they can't be fed to discover_sink
+        # directly the way search_tools' matches are. But finding at least
+        # one means the model is about to want run_command/run_chain next,
+        # and those weren't necessarily offered yet (search_commands can now
+        # be called directly from turn one — see DISCOVERY_AND_COMMANDS_
+        # SCHEMAS — with no search_tools call in between to trigger the hook
+        # above). Passing any one commands-group tool name activates the
+        # whole group the same way search_tools' hits do, immediately
+        # making run_command/etc. callable next round instead of costing a
+        # whole extra round trip to find that out.
+        if name == "search_commands" and discover_sink and isinstance(result, dict):
+            if result.get("matches"):
+                discover_sink(["run_command"])
+                # Commands are already found — mark the tool/command
+                # repeat-failure kind surfaced too, so the detector below
+                # doesn't keep counting (and eventually re-fire) toward a
+                # corrective that already happened via this direct hit.
+                _surfaced.add("tool_or_command")
+                # Same idea as the search_tools case above, kind="commands"
+                # so a cache_lookup for a plain tool hit never gets handed
+                # the commands group by mistake.
+                if cache_query:
+                    discovery_cache.cache_store(cache_query, "commands", ["run_command"])
+
+        # Generalized repeat-failure tracking (enhancement #5 — see
+        # _REPEAT_FAILURE_DETECTORS above). Each detector counts its own
+        # kind independently, so an unrelated failure type never pushes a
+        # different kind over its own threshold. Once a kind's threshold is
+        # hit, its corrective is fired exactly once (the kind is marked
+        # surfaced) — same discover_sink path search_tools hits use, so the
+        # corrective is actually callable immediately, not just mentioned.
+        if discover_sink and isinstance(result, dict):
+            for predicate, kind_fn, threshold, corrective in _REPEAT_FAILURE_DETECTORS:
+                if not predicate(name, arguments, result):
+                    continue
+                kind = kind_fn(name, arguments)
+                if kind in _surfaced:
+                    continue
+                count = _repeat_failures.get(kind, 0) + 1
+                _repeat_failures[kind] = count
+                if count >= threshold:
+                    _surfaced.add(kind)
+                    discover_sink(corrective)
+
         return result
 
     _executor.runs = runs
@@ -1105,9 +1380,16 @@ def _is_mutating_tool(name):
     ))
 
 
-def _tool_runs_note(runs, char_budget):
+def _tool_runs_note(runs, char_budget, verbosity="full"):
     """Tell the next model what already ran — without implying side effects
-    (launch/install) happened if they didn't."""
+    (launch/install) happened if they didn't.
+
+    Each run's cached result is re-shaped at the *current* verbosity before
+    being serialized here, rather than resent at whatever verbosity was in
+    effect when it was first produced. shape_result() is an opt-in allowlist
+    that returns unclassified tools unchanged, so re-shaping an
+    already-shaped result is idempotent-or-further-trimming, never wrong.
+    """
     if not runs:
         return None
     ran = [r.get("name") or "" for r in runs]
@@ -1130,12 +1412,15 @@ def _tool_runs_note(runs, char_budget):
         )
     used = sum(len(p) for p in parts)
     for run in runs:
+        shaped_result = tool_result_shaping.shape_result(
+            run.get("name"), run.get("result"), verbosity
+        )
         try:
             args_s = json.dumps(run.get("arguments") or {}, default=str)
-            result_s = json.dumps(run.get("result"), default=str)
+            result_s = json.dumps(shaped_result, default=str)
         except TypeError:
             args_s = str(run.get("arguments"))
-            result_s = str(run.get("result"))
+            result_s = str(shaped_result)
         block = f"\n{run.get('name')}({args_s})\n{result_s}"
         room = char_budget - used
         if room <= 80:
@@ -1233,7 +1518,13 @@ def _maybe_update_title(cfg, conversation_id, exchange_count, user_text, jarvis_
     TITLE_REGEN_EVERY exchanges after that. Falls back to a heuristic title
     (a truncated first line of the user's message) if the AI call fails, so
     a conversation is never stuck saying "New Conversation" forever just
-    because one title request happened to fail."""
+    because one title request happened to fail.
+
+    Purely cosmetic and, critically, NOT on the path to the user's answer
+    (see _spawn_title_update below) \u2014 this can take up to ~30s (two
+    provider attempts at a 15s timeout each) when a title provider is slow
+    or flaky, and that used to stall the real reply for just as long since
+    ask() called this inline before returning."""
     if exchange_count != 1 and exchange_count % TITLE_REGEN_EVERY != 0:
         return
     title = None
@@ -1261,8 +1552,75 @@ def _maybe_update_title(cfg, conversation_id, exchange_count, user_text, jarvis_
             pass
 
 
+def run_internal_retitle(conversation_id, exchange_count):
+    """Entry point for the detached `jarvis _internal_retitle <id> <n>`
+    subprocess (see _spawn_title_update below). Re-reads the just-appended
+    exchange straight from the conversation's on-disk record — which
+    conversations.append_exchange() already wrote before this process was
+    ever launched — instead of needing user_text/jarvis_text passed on the
+    command line (avoids OS argv-length limits for a long exchange, and
+    keeps this callable with nothing but an id). Purely cosmetic and safe
+    to fail silently, same as the code it replaces.
+    """
+    try:
+        cfg = ai_config.load_ai_config()
+        record = conversations._load_conv(conversation_id)
+        exchanges = (record or {}).get("exchanges") or []
+        if not exchanges:
+            return
+        last = exchanges[-1]
+        _maybe_update_title(
+            cfg, conversation_id, exchange_count,
+            last.get("user"), last.get("jarvis"),
+        )
+    except Exception:
+        pass  # title generation is cosmetic — never let it break anything
+
+
+def _spawn_title_update(conversation_id, exchange_count):
+    """Fire-and-forget (re)titling, launched as a fully **detached OS
+    process** rather than a background thread.
+
+    Why not a thread: jarvis is a brand-new OS process on every invocation
+    (see history.py's docstring) that exits almost immediately after
+    printing the reply — cli.py's top-level call is `sys.exit(handle_ai_
+    prompt(...))`, and Python kills daemon threads outright on interpreter
+    shutdown rather than waiting for them. A title/soft_context completion
+    is a real network round trip (up to ~30s across two provider attempts
+    at a 15s timeout each — see _quick_title_completion), which is
+    essentially always still in flight when the parent process exits a few
+    milliseconds after spawning it. The old daemon-thread version lost that
+    race on effectively every call, which is why brand-new conversations
+    were never actually getting titled/described (see bug log) even though
+    the logic that computes the title was itself correct.
+
+    The fix: spawn a fully independent `jarvis _internal_retitle <id> <n>`
+    process (own session/process group, stdio detached) that keeps running
+    after this parent exits, and re-reads the exchange it needs from disk
+    (see run_internal_retitle) rather than depending on anything held in
+    this process's memory. This preserves the original design intent
+    exactly — the real reply is never delayed by this — while actually
+    letting the update complete.
+    """
+    args = [sys.executable, "-m", "jarvis", "_internal_retitle",
+            conversation_id, str(exchange_count)]
+    kwargs = dict(stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                  stderr=subprocess.DEVNULL)
+    if os.name == "nt":
+        kwargs["creationflags"] = (
+            getattr(subprocess, "DETACHED_PROCESS", 0x00000008)
+            | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0x00000200)
+        )
+    else:
+        kwargs["start_new_session"] = True
+    try:
+        subprocess.Popen(args, **kwargs)
+    except Exception:
+        pass  # title generation is cosmetic — never let it break an ask
+
+
 def ask(user_text, commands=None, on_attempt=None, on_tool_call=None, on_tool_result=None, conversation_id=None,
-        on_confirm_request=None):
+        on_confirm_request=None, on_route=None):
     """Ask Jarvis something, trying every configured, enabled provider in
     order until one answers \u2014 and within each provider, every one of its
     configured keys in order before moving on to the next provider. Always
@@ -1296,6 +1654,13 @@ def ask(user_text, commands=None, on_attempt=None, on_tool_call=None, on_tool_re
     tool call flagged confirm_required in tool_safety.json (see
     _make_tool_executor). Tools requiring confirmation fail closed (never
     run) if this isn't supplied.
+
+    on_route(route), if given, fires once right after the local router
+    (tool_router.route()) decides what this message plausibly needs \u2014
+    same live-trace idea as on_attempt, but for the routing decision
+    itself (route.tools/route.groups/route.matches) rather than a
+    provider attempt. Only called when tools are enabled, since routing
+    only happens on that branch.
     """
     cfg = ai_config.load_ai_config()
     persona = cfg["persona"]
@@ -1312,6 +1677,69 @@ def ask(user_text, commands=None, on_attempt=None, on_tool_call=None, on_tool_re
     full_schemas = []
     if tools_enabled:
         full_schemas = system_tools.tool_schemas_for_session()
+
+        # Phase 4 of the token-optimization plan (see new_plan.md): ask the
+        # local router (Phase 3, tool_router.py — no model round trip) what
+        # this message plausibly needs before deciding what to *offer*.
+        # Deliberately conservative and safe-by-default: the router only
+        # ever narrows the catalog when it has real keyword signal
+        # (route.confident); anything ambiguous — including "hi", which is
+        # exactly the case this phase targets — still falls back to the
+        # exact full_schemas behavior from before this phase, so there's no
+        # regression risk for messages the router doesn't recognize yet.
+        # tool_executor below is still built from full_schemas regardless
+        # (not active_schemas) so a tool call the router didn't anticipate
+        # still validates/executes normally rather than failing closed.
+        route = tool_router.route(user_text)
+        if on_route:
+            on_route(route)
+        # Phase 5 of the token-optimization plan (see new_plan.md): when the
+        # router has no opinion, don't fall all the way back to the full
+        # catalog — offer only the small always-available search_tools
+        # discovery tool instead. A real tool call the model needs is still
+        # reachable (search_tools -> _make_tool_executor's discover_sink
+        # below grows active/compact/name_only_schemas in place, so a match
+        # becomes callable on the very next round without a second full
+        # prompt resend), it's just not offered up front on spec.
+        active_schemas = OrderedSchemaSet(
+            system_tools.schemas_for_tools(route.tools)
+            if route.confident else system_tools.DISCOVERY_AND_COMMANDS_SCHEMAS
+        )
+
+        # Phase 2 of the enhancements doc: when the router has no opinion,
+        # check whether a similar message already paid for a search_tools/
+        # search_commands round trip recently (in this process or an
+        # earlier one — jarvis is a fresh OS process every call, see
+        # history.py, so this is the only thing that survives between
+        # them). A hit pre-seeds active_schemas with the previously-found
+        # tools/commands-group names via the same schemas_for_tools() path
+        # discover_sink uses below, so the very first round already has
+        # what the last similar query needed. A miss (missing/corrupt/
+        # stale cache file, or just no prior match) falls straight through
+        # to the exact DISCOVERY_AND_COMMANDS_SCHEMAS behavior above — no
+        # regression risk either way.
+        cache_query = (user_text or "").strip().lower()
+        if not route.confident:
+            from . import tool_registry
+
+            cached_names = []
+            for kind in ("tools", "commands"):
+                hit = discovery_cache.cache_lookup(cache_query, kind)
+                if hit:
+                    cached_names.extend(hit)
+            if cached_names:
+                seeded = {s.get("name") for s in active_schemas}
+                for name in cached_names:
+                    if name in seeded:
+                        continue
+                    group = tool_registry.group_of(name)
+                    group_names = tool_registry.tools_in_group(group) if group else [name]
+                    for gname in group_names:
+                        if gname and gname not in seeded:
+                            seeded.add(gname)
+                            full = system_tools.schemas_for_tools([gname])
+                            active_schemas.extend(full)
+
         # Real (description-stripped) argument schemas, not name-only stubs,
         # are the default (full/compact modes) because jarvis is a brand-new
         # process every "jarvis ..." call (see history.py's module
@@ -1325,13 +1753,58 @@ def ask(user_text, commands=None, on_attempt=None, on_tool_call=None, on_tool_re
         # (50% Capacity) mode is for: see tool_schema_style per-provider
         # below, resolved fresh each attempt since mode can still vary by
         # provider under the legacy compact_prompt_providers config.
-        compact_schemas = system_tools.compact_schemas_for_prompt(full_schemas)
-        name_only_schemas = system_tools.name_only_schemas_for_prompt(full_schemas)
+        compact_schemas = OrderedSchemaSet(system_tools.compact_schemas_for_prompt(active_schemas))
+        name_only_schemas = OrderedSchemaSet(system_tools.name_only_schemas_for_prompt(active_schemas))
     provider_ref = [None]
     verbosity_ref = ["full"]
+
+    def _discover_sink(names):
+        """Phase 5 handoff: called by the tool executor right after a
+        search_tools call returns matches. Grows active_schemas (raw),
+        compact_schemas, and name_only_schemas *in place* (all three, since
+        which one is actually sent depends on the per-provider
+        tool_schema_style resolved below) so a matched tool is really
+        callable on the model's very next round in this same ask() \u2014 not
+        just described in the search_tools reply and then unreachable.
+
+        Enhancement #6: active_schemas/compact_schemas/name_only_schemas
+        are OrderedSchemaSet instances now, so "already discovered" is a
+        plain `in` check against active_schemas itself \u2014 the separate
+        `_discovered_names` set this used to need is gone; a duplicate
+        name is structurally impossible to add twice regardless of which
+        of the three sets .append()/.extend() is called on.
+        """
+        from . import tool_registry
+
+        to_add = []
+        for name in names or []:
+            if not name or name in active_schemas:
+                continue
+            # Activate the tool's whole group, not just the single matched
+            # name — mirrors tool_router.route()'s behavior (Phase 3) so a
+            # search_tools hit is just as workflow-complete as a router hit.
+            # Without this, finding e.g. spotify_search via search_tools
+            # left spotify_play/spotify_control unreachable, forcing a
+            # second search_tools call mid-workflow for every sibling tool.
+            group = tool_registry.group_of(name)
+            group_names = tool_registry.tools_in_group(group) if group else [name]
+            for gname in group_names:
+                if gname and gname not in active_schemas:
+                    to_add.append(gname)
+
+        for name in to_add:
+            full = system_tools.schemas_for_tools([name])
+            if not full:
+                continue
+            active_schemas.extend(full)
+            compact_schemas.extend(system_tools.compact_schemas_for_prompt(full))
+            name_only_schemas.extend(system_tools.name_only_schemas_for_prompt(full))
+
     tool_executor = _make_tool_executor(
         on_tool_call, full_schemas, on_confirm_request=on_confirm_request,
         cfg=cfg, provider_ref=provider_ref, verbosity_ref=verbosity_ref,
+        discover_sink=_discover_sink if tools_enabled else None,
+        cache_query=cache_query if tools_enabled else None,
     ) if tools_enabled else None
 
     attempts = []
@@ -1345,9 +1818,25 @@ def ask(user_text, commands=None, on_attempt=None, on_tool_call=None, on_tool_re
             style = profile.get("tool_schema_style")
             tool_schemas = (
                 name_only_schemas if style == "name_only"
-                else full_schemas if style == "raw"
+                else active_schemas if style == "raw"
                 else compact_schemas
             )
+            # Boundary: everything downstream of ai_client.py (adapters,
+            # provider-payload builders) expects a plain list, not an
+            # OrderedSchemaSet — .to_list() is the one conversion point.
+            #
+            # Enhancement #6: duplicates are now structurally impossible in
+            # active_schemas/compact_schemas/name_only_schemas themselves
+            # (OrderedSchemaSet.append() is a no-op on a name already
+            # present), so the belt-and-suspenders re-dedupe that used to
+            # live here — guarding against every way those three could
+            # theoretically grow a duplicate — is redundant and has been
+            # removed. Gemini's HTTP 400 "Duplicate function declaration
+            # found: X" on a slipped-through duplicate (see
+            # jarvis-token-optimization-handoff.md's live-test log) is the
+            # reason this mattered; that failure mode is now prevented one
+            # layer upstream instead of filtered right before the adapter.
+            tool_schemas = tool_schemas.to_list()
         else:
             tool_schemas = None
         adapter = ai_providers.ADAPTERS.get(provider.get("type"))
@@ -1362,12 +1851,13 @@ def ask(user_text, commands=None, on_attempt=None, on_tool_call=None, on_tool_re
 
         for i, key in enumerate(keys, start=1):
             messages = _build_messages(
-                persona, commands, user_text, tools_enabled, profile, conv_id
+                persona, commands, user_text, tools_enabled, profile, conv_id,
+                route=route if tools_enabled else None,
             )
             runs = getattr(tool_executor, "runs", None) if tool_executor else None
             if runs:
                 budget = profile.get("tool_result_budget", _MODE_BY_NAME["full"]["tool_result_budget"])
-                note = _tool_runs_note(runs, budget)
+                note = _tool_runs_note(runs, budget, verbosity_ref[0] if verbosity_ref else "full")
                 if note:
                     messages.append({"role": "user", "content": note})
 
@@ -1399,7 +1889,7 @@ def ask(user_text, commands=None, on_attempt=None, on_tool_call=None, on_tool_re
                 exchange_count = conversations.append_exchange(
                     conv_id, user_text, result.text, label, extras=extras
                 )
-                _maybe_update_title(cfg, conv_id, exchange_count, user_text, result.text)
+                _spawn_title_update(conv_id, exchange_count)
                 return AskResult(True, text=result.text, provider=label, attempts=attempts,
                                  assistant_name=assistant_name, address_user_as=address,
                                  usage=result.usage)

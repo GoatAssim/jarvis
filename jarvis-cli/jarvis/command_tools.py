@@ -338,11 +338,16 @@ def tool_search_commands(args):
     query = query.strip() if isinstance(query, str) else ""
 
     if not query:
+        # Empty query = "what's available", not "give me everything". Mirror
+        # tool_search_tools()'s empty-query short-circuit: names only, no
+        # descriptions/vars — a full-summary dump here was costing ~600
+        # output tokens per call (see handoff doc, Bug 3). Pass a query to
+        # get full summaries for the matches that need them.
         names = sorted(commands.keys())
         truncated = len(names) > _LIST_ALL_CAP
         names = names[:_LIST_ALL_CAP]
         result = {
-            "matches": [_command_summary(n, commands[n]) for n in names],
+            "matches": [{"name": n} for n in names],
             "total_commands": len(commands),
         }
         if truncated:

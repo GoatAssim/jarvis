@@ -145,6 +145,9 @@ STEPS = [
     "Go on Discord, tag @no and say hi.",
     "Open the TTS bot.",
     "Launch Roblox.",
+    "Search for the Jarvis executable in this directory D:\\MyDigitalVault\\prjects\\whole jarvis\\jarvis v2\\jarvis - Copy (7) - Copy .",
+    "Download pyautogui.",
+    "Open Spotify.",
 ]
 
 
