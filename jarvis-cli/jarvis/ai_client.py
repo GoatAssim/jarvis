@@ -13,6 +13,7 @@ import re
 import threading
 
 from . import ai_config, ai_providers, command_tools, conversations, memory, playnite_config, stats, tool_safety
+from . import discovery_cache
 from . import tool_result_shaping
 from . import tool_router
 from . import tools as system_tools
@@ -931,7 +932,7 @@ _FAILED_LOOKUP_THRESHOLD = 3
 
 def _make_tool_executor(on_tool_call, schemas=None, on_confirm_request=None,
                          cfg=None, provider_ref=None, verbosity_ref=None,
-                         discover_sink=None):
+                         discover_sink=None, cache_query=None):
     """Shared across every provider/key in one ask() so a failover never
     re-runs the same command, Playnite action, or web fetch. Cache hits
     still return the original result (no second launch / install / HTTP).
@@ -955,6 +956,12 @@ def _make_tool_executor(on_tool_call, schemas=None, on_confirm_request=None,
     argument) because one executor is shared across every provider in a
     single ask() for failover, and each provider attempt resolves its own
     prompt profile (see ask()'s main loop), same pattern as provider_ref.
+
+    cache_query, if given, is the normalized user_text for this ask() call
+    (see discovery_cache.py) — a successful search_tools/search_commands
+    hit is stored under it so a similar query in a *later* jarvis process
+    can pre-seed active_schemas without repeating the same discovery round
+    trip. Purely additive: with cache_query left None, nothing is stored.
     """
     cache = {}
     runs = []
@@ -1114,6 +1121,12 @@ def _make_tool_executor(on_tool_call, schemas=None, on_confirm_request=None,
             found = [m.get("name") for m in matches if isinstance(m, dict) and m.get("name")]
             if found:
                 discover_sink(found)
+                # Phase 2 of the enhancements doc: remember this hit under
+                # the message that triggered it, so a similar message in a
+                # *later* jarvis process (a fresh OS process every time —
+                # see history.py) can skip the round trip entirely.
+                if cache_query:
+                    discovery_cache.cache_store(cache_query, "tools", found)
 
         # search_commands's own matches are SAVED COMMAND names (e.g.
         # "deploy-prod"), not tool names — they can't be fed to discover_sink
@@ -1130,6 +1143,11 @@ def _make_tool_executor(on_tool_call, schemas=None, on_confirm_request=None,
             if result.get("matches"):
                 discover_sink(["run_command"])
                 _commands_surfaced[0] = True
+                # Same idea as the search_tools case above, kind="commands"
+                # so a cache_lookup for a plain tool hit never gets handed
+                # the commands group by mistake.
+                if cache_query:
+                    discovery_cache.cache_store(cache_query, "commands", ["run_command"])
 
         # Failed-lookup tracking (see _FAILED_LOOKUP_THRESHOLD docstring
         # above): a search_tools call that found nothing, or a run_command/
@@ -1485,6 +1503,40 @@ def ask(user_text, commands=None, on_attempt=None, on_tool_call=None, on_tool_re
             if route.confident else list(system_tools.DISCOVERY_AND_COMMANDS_SCHEMAS)
         )
 
+        # Phase 2 of the enhancements doc: when the router has no opinion,
+        # check whether a similar message already paid for a search_tools/
+        # search_commands round trip recently (in this process or an
+        # earlier one — jarvis is a fresh OS process every call, see
+        # history.py, so this is the only thing that survives between
+        # them). A hit pre-seeds active_schemas with the previously-found
+        # tools/commands-group names via the same schemas_for_tools() path
+        # discover_sink uses below, so the very first round already has
+        # what the last similar query needed. A miss (missing/corrupt/
+        # stale cache file, or just no prior match) falls straight through
+        # to the exact DISCOVERY_AND_COMMANDS_SCHEMAS behavior above — no
+        # regression risk either way.
+        cache_query = (user_text or "").strip().lower()
+        if not route.confident:
+            from . import tool_registry
+
+            cached_names = []
+            for kind in ("tools", "commands"):
+                hit = discovery_cache.cache_lookup(cache_query, kind)
+                if hit:
+                    cached_names.extend(hit)
+            if cached_names:
+                seeded = {s.get("name") for s in active_schemas}
+                for name in cached_names:
+                    if name in seeded:
+                        continue
+                    group = tool_registry.group_of(name)
+                    group_names = tool_registry.tools_in_group(group) if group else [name]
+                    for gname in group_names:
+                        if gname and gname not in seeded:
+                            seeded.add(gname)
+                            full = system_tools.schemas_for_tools([gname])
+                            active_schemas.extend(full)
+
         # Real (description-stripped) argument schemas, not name-only stubs,
         # are the default (full/compact modes) because jarvis is a brand-new
         # process every "jarvis ..." call (see history.py's module
@@ -1544,6 +1596,7 @@ def ask(user_text, commands=None, on_attempt=None, on_tool_call=None, on_tool_re
         on_tool_call, full_schemas, on_confirm_request=on_confirm_request,
         cfg=cfg, provider_ref=provider_ref, verbosity_ref=verbosity_ref,
         discover_sink=_discover_sink if tools_enabled else None,
+        cache_query=cache_query if tools_enabled else None,
     ) if tools_enabled else None
 
     attempts = []
