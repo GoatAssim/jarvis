@@ -11,6 +11,9 @@ told about itself, and what gets remembered.
 import json
 import re
 import threading
+import os
+import subprocess
+import sys
 
 from . import ai_config, ai_providers, command_tools, conversations, memory, playnite_config, stats, tool_safety
 from . import discovery_cache
@@ -1549,23 +1552,75 @@ def _maybe_update_title(cfg, conversation_id, exchange_count, user_text, jarvis_
             pass
 
 
-def _spawn_title_update(cfg, conversation_id, exchange_count, user_text, jarvis_text):
-    """Fire-and-forget wrapper around _maybe_update_title(). Titling talks
-    to an AI provider and must never make the user wait on their real
-    answer, so it runs on a daemon thread instead of inline \u2014 a slow or
-    flaky title provider then costs the sidebar a stale title for a
-    moment, not the reply a 15-30s stall. daemon=True so it never blocks
-    process exit."""
-    thread = threading.Thread(
-        target=_maybe_update_title,
-        args=(cfg, conversation_id, exchange_count, user_text, jarvis_text),
-        daemon=True,
-    )
-    thread.start()
+def run_internal_retitle(conversation_id, exchange_count):
+    """Entry point for the detached `jarvis _internal_retitle <id> <n>`
+    subprocess (see _spawn_title_update below). Re-reads the just-appended
+    exchange straight from the conversation's on-disk record — which
+    conversations.append_exchange() already wrote before this process was
+    ever launched — instead of needing user_text/jarvis_text passed on the
+    command line (avoids OS argv-length limits for a long exchange, and
+    keeps this callable with nothing but an id). Purely cosmetic and safe
+    to fail silently, same as the code it replaces.
+    """
+    try:
+        cfg = ai_config.load_ai_config()
+        record = conversations._load_conv(conversation_id)
+        exchanges = (record or {}).get("exchanges") or []
+        if not exchanges:
+            return
+        last = exchanges[-1]
+        _maybe_update_title(
+            cfg, conversation_id, exchange_count,
+            last.get("user"), last.get("jarvis"),
+        )
+    except Exception:
+        pass  # title generation is cosmetic — never let it break anything
+
+
+def _spawn_title_update(conversation_id, exchange_count):
+    """Fire-and-forget (re)titling, launched as a fully **detached OS
+    process** rather than a background thread.
+
+    Why not a thread: jarvis is a brand-new OS process on every invocation
+    (see history.py's docstring) that exits almost immediately after
+    printing the reply — cli.py's top-level call is `sys.exit(handle_ai_
+    prompt(...))`, and Python kills daemon threads outright on interpreter
+    shutdown rather than waiting for them. A title/soft_context completion
+    is a real network round trip (up to ~30s across two provider attempts
+    at a 15s timeout each — see _quick_title_completion), which is
+    essentially always still in flight when the parent process exits a few
+    milliseconds after spawning it. The old daemon-thread version lost that
+    race on effectively every call, which is why brand-new conversations
+    were never actually getting titled/described (see bug log) even though
+    the logic that computes the title was itself correct.
+
+    The fix: spawn a fully independent `jarvis _internal_retitle <id> <n>`
+    process (own session/process group, stdio detached) that keeps running
+    after this parent exits, and re-reads the exchange it needs from disk
+    (see run_internal_retitle) rather than depending on anything held in
+    this process's memory. This preserves the original design intent
+    exactly — the real reply is never delayed by this — while actually
+    letting the update complete.
+    """
+    args = [sys.executable, "-m", "jarvis", "_internal_retitle",
+            conversation_id, str(exchange_count)]
+    kwargs = dict(stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                  stderr=subprocess.DEVNULL)
+    if os.name == "nt":
+        kwargs["creationflags"] = (
+            getattr(subprocess, "DETACHED_PROCESS", 0x00000008)
+            | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0x00000200)
+        )
+    else:
+        kwargs["start_new_session"] = True
+    try:
+        subprocess.Popen(args, **kwargs)
+    except Exception:
+        pass  # title generation is cosmetic — never let it break an ask
 
 
 def ask(user_text, commands=None, on_attempt=None, on_tool_call=None, on_tool_result=None, conversation_id=None,
-        on_confirm_request=None):
+        on_confirm_request=None, on_route=None):
     """Ask Jarvis something, trying every configured, enabled provider in
     order until one answers \u2014 and within each provider, every one of its
     configured keys in order before moving on to the next provider. Always
@@ -1595,6 +1650,13 @@ def ask(user_text, commands=None, on_attempt=None, on_tool_call=None, on_tool_re
     tool call flagged confirm_required in tool_safety.json (see
     _make_tool_executor). Tools requiring confirmation fail closed (never
     run) if this isn't supplied.
+
+    on_route(route), if given, fires once right after the local router
+    (tool_router.route()) decides what this message plausibly needs \u2014
+    same live-trace idea as on_attempt, but for the routing decision
+    itself (route.tools/route.groups/route.matches) rather than a
+    provider attempt. Only called when tools are enabled, since routing
+    only happens on that branch.
     """
     cfg = ai_config.load_ai_config()
     persona = cfg["persona"]
@@ -1625,6 +1687,8 @@ def ask(user_text, commands=None, on_attempt=None, on_tool_call=None, on_tool_re
         # (not active_schemas) so a tool call the router didn't anticipate
         # still validates/executes normally rather than failing closed.
         route = tool_router.route(user_text)
+        if on_route:
+            on_route(route)
         # Phase 5 of the token-optimization plan (see new_plan.md): when the
         # router has no opinion, don't fall all the way back to the full
         # catalog — offer only the small always-available search_tools
@@ -1821,7 +1885,7 @@ def ask(user_text, commands=None, on_attempt=None, on_tool_call=None, on_tool_re
                 exchange_count = conversations.append_exchange(
                     conv_id, user_text, result.text, label, extras=extras
                 )
-                _spawn_title_update(cfg, conv_id, exchange_count, user_text, result.text)
+                _spawn_title_update(conv_id, exchange_count)
                 return AskResult(True, text=result.text, provider=label, attempts=attempts,
                                  assistant_name=assistant_name, address_user_as=address,
                                  usage=result.usage)

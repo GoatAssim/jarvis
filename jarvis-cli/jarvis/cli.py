@@ -641,6 +641,22 @@ def handle_ai_prompt(text, commands):
     def on_attempt(label):
         print(f"{ERR.DIM}\u21b3 asking {label}\u2026{ERR.RESET}", file=sys.stderr, flush=True)
 
+    def on_route(route):
+        # Phase 10 of the enhancements doc: trace the router's activation
+        # reason, not just the final tool list \u2014 first match per group is
+        # enough here, this is a debug trace, not a user-facing message.
+        if not route.groups:
+            return
+        first_by_group = {}
+        for group, name, phrase in route.matches:
+            first_by_group.setdefault(group, (name, phrase))
+        bits = ", ".join(
+            f'{group} (matched "{first_by_group[group][1]}" on {first_by_group[group][0]})'
+            if group in first_by_group else group
+            for group in route.groups
+        )
+        print(f"{ERR.DIM}$ routed: {bits}{ERR.RESET}", file=sys.stderr, flush=True)
+
     def on_tool_call(name, arguments=None):
         labels = {
             "search_commands": "searching commands",
@@ -724,6 +740,7 @@ def handle_ai_prompt(text, commands):
         text, commands, on_attempt=on_attempt, on_tool_call=on_tool_call,
         on_tool_result=on_tool_result,
         conversation_id=conv_id, on_confirm_request=on_confirm_request,
+        on_route=on_route,
     )
 
     for label, err in result.attempts:
@@ -874,6 +891,23 @@ def main():
 
     if argv[0] == "config":
         print(CONFIG_FILE)
+        return
+
+    if argv[0] == "_internal_retitle":
+        # Hidden entry point: the detached subprocess ai_client._spawn_title_
+        # update() launches to (re)title a conversation after this same
+        # process's own reply has already been printed and it's about to
+        # exit — see that function's docstring for why a background thread
+        # doesn't survive to do this instead. Not documented in --help;
+        # nothing but jarvis itself should ever call this directly.
+        if len(argv) < 3:
+            sys.exit(1)
+        try:
+            exchange_count = int(argv[2])
+        except ValueError:
+            sys.exit(1)
+        from . import ai_client
+        ai_client.run_internal_retitle(argv[1], exchange_count)
         return
 
     if argv[0] == "ai-config":
