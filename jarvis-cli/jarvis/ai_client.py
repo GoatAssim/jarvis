@@ -1377,9 +1377,16 @@ def _is_mutating_tool(name):
     ))
 
 
-def _tool_runs_note(runs, char_budget):
+def _tool_runs_note(runs, char_budget, verbosity="full"):
     """Tell the next model what already ran — without implying side effects
-    (launch/install) happened if they didn't."""
+    (launch/install) happened if they didn't.
+
+    Each run's cached result is re-shaped at the *current* verbosity before
+    being serialized here, rather than resent at whatever verbosity was in
+    effect when it was first produced. shape_result() is an opt-in allowlist
+    that returns unclassified tools unchanged, so re-shaping an
+    already-shaped result is idempotent-or-further-trimming, never wrong.
+    """
     if not runs:
         return None
     ran = [r.get("name") or "" for r in runs]
@@ -1402,12 +1409,15 @@ def _tool_runs_note(runs, char_budget):
         )
     used = sum(len(p) for p in parts)
     for run in runs:
+        shaped_result = tool_result_shaping.shape_result(
+            run.get("name"), run.get("result"), verbosity
+        )
         try:
             args_s = json.dumps(run.get("arguments") or {}, default=str)
-            result_s = json.dumps(run.get("result"), default=str)
+            result_s = json.dumps(shaped_result, default=str)
         except TypeError:
             args_s = str(run.get("arguments"))
-            result_s = str(run.get("result"))
+            result_s = str(shaped_result)
         block = f"\n{run.get('name')}({args_s})\n{result_s}"
         room = char_budget - used
         if room <= 80:
@@ -1779,7 +1789,7 @@ def ask(user_text, commands=None, on_attempt=None, on_tool_call=None, on_tool_re
             runs = getattr(tool_executor, "runs", None) if tool_executor else None
             if runs:
                 budget = profile.get("tool_result_budget", _MODE_BY_NAME["full"]["tool_result_budget"])
-                note = _tool_runs_note(runs, budget)
+                note = _tool_runs_note(runs, budget, verbosity_ref[0] if verbosity_ref else "full")
                 if note:
                     messages.append({"role": "user", "content": note})
 
