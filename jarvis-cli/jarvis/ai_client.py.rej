@@ -1,0 +1,20 @@
+diff a/jarvis-cli/jarvis/ai_client.py b/jarvis-cli/jarvis/ai_client.py	(rejected hunks)
+@@ -1484,7 +1484,7 @@
+             if key is not None:
+                 resolved["api_key"] = key
+ 
+-            ai_providers.set_log_context(conv_id, key_label)
++            ai_providers.set_log_context(conv_id, key_label, on_tool_usage=on_tool_result)
+             try:
+                 result = adapter(resolved, messages, resolved["timeout"],
+                                  tools=tool_schemas, tool_executor=tool_executor)
+@@ -1506,7 +1506,8 @@
+                 )
+                 _maybe_update_title(cfg, conv_id, exchange_count, user_text, result.text)
+                 return AskResult(True, text=result.text, provider=label, attempts=attempts,
+-                                 assistant_name=assistant_name, address_user_as=address)
++                                 assistant_name=assistant_name, address_user_as=address,
++                                 usage=result.usage)
+ 
+             attempts.append((key_label, result.error))
+ 

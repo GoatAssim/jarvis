@@ -456,6 +456,7 @@
     debugLastUsage: null,    // Phase 0 (new_plan.md): last ask-usage payload (see handleWsMessage)
     debugMode: null,          // local-only capacity override for this panel, e.g. "compact" \u2014
                                // never sent to /api/mode, never affects the real global mode
+    debugLastUsage: null,    // Phase 0 (new_plan.md): last ask-usage payload (see handleWsMessage)
 
     // Conversations — every saved chat lives in ~/.jarvis/conversations
     // (see conversations.py); this is just the in-memory mirror for the
