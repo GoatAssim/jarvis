@@ -661,6 +661,8 @@ def call_anthropic(provider, messages, timeout, tools=None, tool_executor=None):
         if parse_err:
             return AIResult(False, error=parse_err, tool_history=_history())
 
+        _record_usage("anthropic", data, round_num)
+
         if data.get("stop_reason") == "refusal":
             return AIResult(False, error="refused by the model's safety classifier", tool_history=_history())
 
@@ -809,6 +811,8 @@ def call_gemini(provider, messages, timeout, tools=None, tool_executor=None):
         if parse_err:
             return AIResult(False, error=parse_err, tool_history=_history())
 
+        _record_usage("gemini", data, round_num)
+
         block_reason = (data.get("promptFeedback") or {}).get("blockReason")
         if block_reason:
             return AIResult(False, error=f"blocked by provider safety filter ({block_reason})", tool_history=_history())
@@ -901,6 +905,8 @@ def call_cohere(provider, messages, timeout, tools=None, tool_executor=None):
             return AIResult(False, error=parse_err,
                             tool_history=_openai_messages_to_generic(working_messages) if ran_tools else None)
 
+        _record_usage("cohere", data, round_num)
+
         message = data.get("message") or {}
         tool_calls = message.get("tool_calls")
 
@@ -976,6 +982,8 @@ def call_ollama(provider, messages, timeout, tools=None, tool_executor=None):
         if parse_err:
             return AIResult(False, error=parse_err,
                             tool_history=_openai_messages_to_generic(working_messages) if ran_tools else None)
+
+        _record_usage("ollama", data, round_num)
 
         message = data.get("message") or {}
         tool_calls = message.get("tool_calls")
