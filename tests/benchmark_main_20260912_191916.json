@@ -1,0 +1,174 @@
+{
+  "label": "main",
+  "generated_at": "2026-09-12T19:19:16.569149+00:00",
+  "steps": [
+    {
+      "step": 1,
+      "prompt": "Do a quick web search for today's top tech news.",
+      "ok": true,
+      "provider": "gemini",
+      "reply": "Here are today's top tech headlines, sir:\n\n* **Massive AI Infrastructure & Energy Push:** Microsoft outlined plans for a 38-gigawatt energy expansion to support AI compute demand, while Oracle reported a $664 billion cloud backlog. Meanwhile, the Pentagon is negotiating a $5 billion loan to stabilize U.S. data-center supply chains under the load.\n* **AI Cybersecurity & Threat Escalation:** Anthropic revealed it blocked AI workloads capable of aiding biological weapons development and uncovered AI-driven cyber operations and corporate espionage. Concurrently, reports emerged of autonomous AI agents contributing to breaches across nearly 400 organizations.\n* **Global Hardware Competition:** In Shanghai, a Tencent-backed domestic rival to Nvidia tripled its stock valuation on market debut as demand for local accelerator hardware surges.\n* **Data Breach & Regulatory Pressure:** A major verification vendor suffered a breach exposing 153 million driver's license records. Simultaneously, legislative bodies in Washington and California are moving to enact stricter oversight on frontier AI models and digital child safety.",
+      "reply_tokens_estimated": 283,
+      "elapsed_s": 25.79,
+      "tool_call_count": 3,
+      "tool_call_count_real": 3,
+      "tool_call_count_stubbed": 0,
+      "tool_calls": [
+        "get_datetime",
+        "web_search",
+        "web_fetch"
+      ],
+      "request_round_count": 0,
+      "reported_input_tokens": 0,
+      "reported_output_tokens": 0,
+      "reported_total_tokens": 0,
+      "tool_call_tokens_estimated": 1531,
+      "no_reported_usage": true,
+      "rounds": [],
+      "tool_call_usage_detail": [
+        {
+          "name": "web_search",
+          "round": null,
+          "input_tokens": 11,
+          "output_tokens": 720,
+          "source": "estimated"
+        },
+        {
+          "name": "web_fetch",
+          "round": null,
+          "input_tokens": 35,
+          "output_tokens": 765,
+          "source": "estimated"
+        }
+      ]
+    },
+    {
+      "step": 2,
+      "prompt": "Go on Discord, tag @no and say hi.",
+      "ok": true,
+      "provider": "gemini",
+      "reply": "I have brought Discord into focus, tagged @no, and sent the message, sir.",
+      "reply_tokens_estimated": 19,
+      "elapsed_s": 20.66,
+      "tool_call_count": 6,
+      "tool_call_count_real": 1,
+      "tool_call_count_stubbed": 5,
+      "tool_calls": [
+        "list_windows",
+        "focus_window",
+        "type_text",
+        "press_key",
+        "type_text",
+        "type_text"
+      ],
+      "request_round_count": 0,
+      "reported_input_tokens": 0,
+      "reported_output_tokens": 0,
+      "reported_total_tokens": 0,
+      "tool_call_tokens_estimated": 48,
+      "no_reported_usage": true,
+      "rounds": [],
+      "tool_call_usage_detail": [
+        {
+          "name": "type_text",
+          "round": null,
+          "input_tokens": 5,
+          "output_tokens": 43,
+          "source": "estimated"
+        }
+      ]
+    },
+    {
+      "step": 3,
+      "prompt": "Open the TTS bot.",
+      "ok": true,
+      "provider": "gemini",
+      "reply": "Starting the TTS bot for you now, sir.",
+      "reply_tokens_estimated": 10,
+      "elapsed_s": 8.61,
+      "tool_call_count": 2,
+      "tool_call_count_real": 1,
+      "tool_call_count_stubbed": 1,
+      "tool_calls": [
+        "search_commands",
+        "run_command"
+      ],
+      "request_round_count": 0,
+      "reported_input_tokens": 0,
+      "reported_output_tokens": 0,
+      "reported_total_tokens": 0,
+      "tool_call_tokens_estimated": 49,
+      "no_reported_usage": true,
+      "rounds": [],
+      "tool_call_usage_detail": [
+        {
+          "name": "run_command",
+          "round": null,
+          "input_tokens": 5,
+          "output_tokens": 44,
+          "source": "estimated"
+        }
+      ]
+    },
+    {
+      "step": 4,
+      "prompt": "Launch Roblox.",
+      "ok": true,
+      "provider": "gemini",
+      "reply": "Launching Roblox via Bloxstrap now, sir.",
+      "reply_tokens_estimated": 10,
+      "elapsed_s": 10.61,
+      "tool_call_count": 3,
+      "tool_call_count_real": 1,
+      "tool_call_count_stubbed": 2,
+      "tool_calls": [
+        "playnite_find_game",
+        "playnite_list_game_actions",
+        "playnite_launch_action"
+      ],
+      "request_round_count": 0,
+      "reported_input_tokens": 0,
+      "reported_output_tokens": 0,
+      "reported_total_tokens": 0,
+      "tool_call_tokens_estimated": 297,
+      "no_reported_usage": true,
+      "rounds": [],
+      "tool_call_usage_detail": [
+        {
+          "name": "playnite_find_game",
+          "round": null,
+          "input_tokens": 5,
+          "output_tokens": 45,
+          "source": "estimated"
+        },
+        {
+          "name": "playnite_list_game_actions",
+          "round": null,
+          "input_tokens": 5,
+          "output_tokens": 170,
+          "source": "estimated"
+        },
+        {
+          "name": "playnite_launch_action",
+          "round": null,
+          "input_tokens": 26,
+          "output_tokens": 46,
+          "source": "estimated"
+        }
+      ]
+    }
+  ],
+  "totals": {
+    "tool_call_count": 14,
+    "tool_call_count_real": 6,
+    "tool_call_count_stubbed": 8,
+    "request_round_count": 0,
+    "reported_input_tokens": 0,
+    "reported_output_tokens": 0,
+    "reported_total_tokens": 0,
+    "tool_call_tokens_estimated": 1925,
+    "reply_tokens_estimated": 322,
+    "any_step_missing_usage": true,
+    "grand_total_tokens": 1925
+  }
+}
