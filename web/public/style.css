@@ -403,10 +403,14 @@ textarea:focus-visible, select:focus-visible, [tabindex]:focus-visible{
 }
 .btn--mode[data-mode="compact"]:hover{ border-color: var(--accent); box-shadow: 0 0 14px var(--accent-glow); }
 .btn--mode[data-mode="precise"]{
-  color: var(--accent-tertiary); border-color: rgba(var(--accent-tertiary-rgb), 0.5);
-  background: linear-gradient(180deg, rgba(var(--accent-tertiary-rgb),0.18), rgba(var(--accent-tertiary-rgb),0.05));
+  /* Deliberately pinned to the original fixed blue (not --accent-tertiary):
+     "precise" is a mode identity, not a decorative accent, so it stays
+     recognizable as "the blue mode" no matter which skin is active — same
+     reasoning as leaving --green/--red alone. */
+  color: var(--blue); border-color: rgba(43, 92, 255, 0.5);
+  background: linear-gradient(180deg, rgba(43,92,255,0.18), rgba(43,92,255,0.05));
 }
-.btn--mode[data-mode="precise"]:hover{ border-color: var(--accent-tertiary); box-shadow: 0 0 14px rgba(var(--accent-tertiary-rgb),0.45); }
+.btn--mode[data-mode="precise"]:hover{ border-color: var(--blue); box-shadow: 0 0 14px rgba(43,92,255,0.45); }
 .btn--mode[data-mode="ultra"]{
   color: var(--green); border-color: rgba(70, 240, 182, 0.4);
   background: linear-gradient(180deg, rgba(70,240,182,0.14), rgba(70,240,182,0.04));
@@ -1886,7 +1890,7 @@ audio.ask-dl-player{ max-height: none; background: transparent; }
 .mode-chip__dot{ width: 6px; height: 6px; border-radius: 50%; background: currentColor; box-shadow: 0 0 5px currentColor; flex-shrink: 0; }
 .mode-chip[data-mode="full"]{ color: var(--accent-secondary); border-color: rgba(var(--accent-secondary-rgb),0.4); background: rgba(var(--accent-secondary-rgb),0.08); }
 .mode-chip[data-mode="compact"]{ color: var(--accent); border-color: color-mix(in srgb, var(--accent) 40%, transparent); background: color-mix(in srgb, var(--accent) 8%, transparent); }
-.mode-chip[data-mode="precise"]{ color: var(--accent-tertiary); border-color: rgba(var(--accent-tertiary-rgb),0.5); background: rgba(var(--accent-tertiary-rgb),0.1); }
+.mode-chip[data-mode="precise"]{ color: var(--blue); border-color: rgba(43,92,255,0.5); background: rgba(43,92,255,0.1); }
 .mode-chip[data-mode="ultra"]{ color: var(--green); border-color: rgba(70,240,182,0.4); background: rgba(70,240,182,0.08); }
 .mode-chip--unknown{ color: var(--text-dimmer); }
 

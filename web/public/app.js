@@ -52,6 +52,15 @@
     { name: "Violet", hex: "#b98bff" },
     { name: "Emerald", hex: "#4fe6a4" },
     { name: "Rose Gold", hex: "#f2b7c2" },
+    // Not a hand-picked swatch like the others above — this is the exact
+    // original --blue (#2b5cff) from the pre-skins build, back when it was
+    // a fixed, non-skinnable color (still is, for the "precise" mode chip;
+    // see the round-3 note in applyAccent's callers / the handoff doc). It
+    // also happens to land in a hue gap (~226°) the other six presets don't
+    // cover between Cyan (~193°) and Violet (~264°), and its lightness/
+    // saturation are in the same range as the rest, so it reads cleanly
+    // against --bg-1 the same way they do.
+    { name: "Sapphire", hex: "#2b5cff" },
   ];
 
   function loadSkinPrefs() {
