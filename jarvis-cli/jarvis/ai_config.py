@@ -76,6 +76,7 @@ DEFAULT_AI_CONFIG = {
     "persona": {
         "assistant_name": "J.A.R.V.I.S",
         "address_user_as": "sir",
+        "attitude": "dry",
         "extra_instructions": "",
     },
     "defaults": {

@@ -41,45 +41,59 @@
   const SKIN_DEFAULT_ACCENT = "#4fd8ff";
   const SKIN_DEFAULT_NAME = "J.A.R.V.I.S";
   const SKIN_DEFAULT_ADDRESS = "sir";
+  // Mirrors ai_client.ATTITUDE_PRESETS on the backend (id -> label) — kept
+  // in sync by hand since the web UI has no direct import path into the
+  // Python package. If a new attitude is added there, add its id/label
+  // here too so it shows up as an option. "dry" first/default matches the
+  // backend's DEFAULT_ATTITUDE and the app's original, unchanged tone.
+  const SKIN_ATTITUDES = [
+    { id: "dry", label: "Dry Wit (default)" },
+    { id: "cheerful", label: "Cheerful" },
+    { id: "snarky", label: "Snarky" },
+    { id: "formal", label: "Formal Butler" },
+    { id: "warm", label: "Warm & Encouraging" },
+    { id: "blunt", label: "No-Nonsense" },
+  ];
+  const SKIN_DEFAULT_ATTITUDE = "dry";
+  // Saturation slider range/default, as a percentage (100 = unchanged).
+  // Scales the saturation of every skin-derived color (accent, soft, dim,
+  // border, secondary/tertiary, background tint) — see applyAccent() below.
+  // Never touches the "Classic (hardcoded)" preset, which bypasses
+  // applyAccent() entirely.
+  const SKIN_SATURATION_MIN = 0;
+  const SKIN_SATURATION_MAX = 150;
+  const SKIN_DEFAULT_SATURATION = 100;
 
   // A handful of curated presets shown as swatches; the color input next to
-  // them covers everything else. Amber/Crimson/Violet/Emerald/Rose Gold were
-  // originally picked at full HSL saturation (100%) and high lightness,
-  // which read as candy-bright/neon next to Cyan and Sapphire — those two
-  // are moody precisely because they're darker and (perceptually, even
-  // though also 100% saturated numerically) cooler-toned. Muted the other
-  // five down via the same scaleHsl() helper used elsewhere in this file
-  // (saturation x0.72, lightness x0.88 — same hue, same recipe, just
-  // toned down) so the whole set reads as one consistent, moodier palette.
-  // Cyan and Sapphire are intentionally NOT touched here.
-  // Each preset has a stable `id` (not just a hex) so the UI/persistence can
-  // tell "Cyan (default)" and "Classic (hardcoded)" apart even though they
-  // render the same color swatch — see the `hardcoded` preset below and
-  // applyPreset()/renderSkinSwatches() for why the id, not the hex, is what
-  // actually gets matched against.
+  // them covers everything else.
+  //
+  // NOTE: an earlier round of this feature (see the handoff doc) hand-baked
+  // a "muted" version of each of these five hexes directly into this array,
+  // scaling saturation down to ~55-65% of the original while keeping
+  // lightness unchanged, to avoid a "candy-bright/neon" look. That turned
+  // out to be the wrong call for a *different* reason than the one it was
+  // trying to fix: baking the dilution into the stored hex meant it could
+  // never be undone — every preset except Cyan ended up permanently
+  // washed-out/pastel ("a shade of white in it"), with no way back to the
+  // true color even at the saturation slider's max. Reverted back to each
+  // preset's true, fully-saturated original hex here; the saturation
+  // slider (see SKIN_SATURATION_MIN/MAX, applyAccent) is the actual,
+  // reversible control for dialing vividness up or down from there, and
+  // its default (100%) is a no-op — full original saturation, not muted.
   const SKIN_PRESETS = [
     { id: "cyan", name: "Cyan (default)", hex: "#4fd8ff" },
-    // Muted from the original #ffb347 (H35°, S100%, L64%) to H35°, S55%, same lightness — softened from the original neon swatch.
-    { id: "amber", name: "Amber", hex: "#d6ac70" },
-    // Muted from the original #ff5c72 (H352°, S100%, L68%) to H352°, S55%, same lightness — softened from the original neon swatch.
-    { id: "crimson", name: "Crimson", hex: "#da818d" },
-    // Muted from the original #b98bff (H264°, S100%, L77%) to H264°, S60%, same lightness — softened from the original neon swatch.
-    { id: "violet", name: "Violet", hex: "#bea2e8" },
-    // Muted from the original #4fe6a4 (H154°, S75%, L61%) to H154°, S45%, same lightness — softened from the original neon swatch.
-    { id: "emerald", name: "Emerald", hex: "#6dc8a0" },
-    // Muted from the original #f2b7c2 (H349°, S69%, L83%) to H348°, S40%, same lightness — softened from the original pastel swatch.
-    { id: "rose-gold", name: "Rose Gold", hex: "#e6c3ca" },
-    // Not a hand-picked swatch like the others above — this is the exact
-    // original --blue (#2b5cff) from the pre-skins build, back when it was
-    // a fixed, non-skinnable color (still is, for the "precise" mode chip;
-    // see the round-3 note in applyAccent's callers / the handoff doc). It
-    // also happens to land in a hue gap (~226°) the other six presets don't
-    // cover between Cyan (~193°) and Violet (~264°), and its lightness/
-    // saturation are in the same range as the rest, so it reads cleanly
-    // against --bg-1 the same way they do. Deliberately left un-muted, same
-    // as Cyan above.
-    // Softened from the original fixed blue (#2b5cff) to keep this skin from reading neon.
-    { id: "sapphire", name: "Sapphire", hex: "#5070da" },
+    { id: "amber", name: "Amber", hex: "#ffb347" },
+    { id: "crimson", name: "Crimson", hex: "#ff5c72" },
+    { id: "violet", name: "Violet", hex: "#b98bff" },
+    { id: "emerald", name: "Emerald", hex: "#4fe6a4" },
+    { id: "rose-gold", name: "Rose Gold", hex: "#f2b7c2" },
+    // The exact original --blue (#2b5cff) from the pre-skins build, back
+    // when it was a fixed, non-skinnable color (still is, for the
+    // "precise" mode chip; see the round-3 note in applyAccent's callers /
+    // the handoff doc). It also happens to land in a hue gap (~226°) the
+    // other six presets don't cover between Cyan (~193°) and Violet
+    // (~264°), so it reads cleanly as its own option.
+    { id: "sapphire", name: "Sapphire", hex: "#2b5cff" },
     // The literal, pre-skins J.A.R.V.I.S palette, byte-for-byte — every
     // value below is copied straight from the original :root block (and
 
@@ -126,6 +140,35 @@
   // renderSkinSwatches() and saveSkin(). null means "custom color, no
   // preset selected". Reset whenever the modal opens.
   let currentPresetId = null;
+
+  // The saturation slider's live value (percentage, 100 = unchanged),
+  // mirrored here so applyAccent() can factor it in any time the accent
+  // changes (swatch click, custom color drag, load, revert) without every
+  // call site having to thread it through by hand. Never read by
+  // applyHardcodedVars() — the "Classic (hardcoded)" preset bypasses
+  // applyAccent() entirely and is unaffected by this slider no matter what
+  // it's set to.
+  let currentSaturationPercent = SKIN_DEFAULT_SATURATION;
+
+  // Clamps a saturation percentage to the slider's own min/max, so a
+  // corrupted localStorage value can't push it somewhere absurd.
+  function clampSaturationPercent(percent) {
+    return Math.max(
+      SKIN_SATURATION_MIN,
+      Math.min(SKIN_SATURATION_MAX, Number(percent) || SKIN_DEFAULT_SATURATION)
+    );
+  }
+
+  // Enables/disables the saturation slider in the Skin modal — disabled
+  // while "Classic (hardcoded)" is the active preset, since saturation
+  // never applies to it (see applyAccent()/applyHardcodedVars()). The
+  // slider's underlying value is left untouched so it's restored the
+  // moment the person picks a different preset/color.
+  function updateSaturationControlState() {
+    const slider = qs("#skin-saturation");
+    if (!slider) return;
+    slider.disabled = currentPresetId === "classic-hardcoded";
+  }
 
   function loadSkinPrefs() {
     try {
@@ -270,20 +313,20 @@
   // shifts the app's overall mood a bit, not just its buttons. At the
   // default cyan accent this reduces to (almost exactly) the original fixed
   // values, so nothing changes unless you actually pick a different color.
-  // Applies an accent color. Custom/raw colors are softened before they touch
-  // the UI so a fully-saturated picker value does not turn the whole interface
-  // neon. Curated preset hexes are already softened and can opt out via
-  // `preserveInputColor`.
-  function applyAccent(hex, preserveInputColor = false) {
+  // Applies an accent color. hue/lightness are taken from `hex` as-is;
+  // saturation is scaled by the saturation slider (currentSaturationPercent,
+  // 100% = the color's own true saturation, unchanged) before anything is
+  // derived from it. There used to be a hardcoded cap here forcing any
+  // custom-picked color's saturation down to 65% "to avoid neon" — that was
+  // the actual bug making every non-hardcoded color look diluted/whitish
+  // (a fully-saturated pick could never render as fully saturated). Removed:
+  // the saturation slider is the real, reversible control for that now, so
+  // a fixed cap baked into the pipeline no longer serves any purpose except
+  // adding unwanted white.
+  function applyAccent(hex) {
     const rawRgb = hexToRgb(hex);
     if (!rawRgb) return;
-    const rgb = preserveInputColor ? rawRgb : (() => {
-      const hsl = rgbToHsl(rawRgb);
-      // Cap very saturated custom colors while preserving their hue/lightness.
-      // Lower-saturation custom colors are left alone instead of getting muddy.
-      hsl.s = Math.min(hsl.s, 0.65);
-      return hslToRgb(hsl);
-    })();
+    const rgb = scaleHsl(rawRgb, currentSaturationPercent / 100, 1);
     const root = document.documentElement.style;
     const appliedHex = rgbToHex(rgb);
     const soft = scaleHsl(rgb, 0.67, 0.78);
@@ -355,20 +398,28 @@
   // directly instead.
   function applyPreset(preset) {
     if (preset.hardcoded) applyHardcodedVars(preset.vars);
-    else applyAccent(preset.hex, true);
+    else applyAccent(preset.hex);
   }
 
-  // Updates every place the assistant's name is echoed back in the UI chrome
-  // itself (topbar title, Ask panel title, page title). Doesn't touch the
-  // boot sequence's own title line — that's intentionally the one place the
-  // brand mark stays fixed, the same way a car's dashboard logo doesn't
-  // change just because you renamed the onboard assistant.
+  // Updates every place the assistant's name is echoed back in the UI
+  // chrome itself: topbar title, Ask panel title, the "Ask <name>" button,
+  // the boot sequence's own title line, and the page title. The boot title
+  // used to be the one deliberately-fixed spot ("brand mark stays fixed
+  // like a car's dashboard logo") — that's been reconsidered: a renamed
+  // assistant should look renamed everywhere, including the loading
+  // screen you see before the app itself renders, not just once you're
+  // inside it. applySavedSkinEarly() (below) already calls this before
+  // boot even paints, so there's no flash of "J.A.R.V.I.S" first.
   function applyAssistantNameToChrome(name) {
     const clean = (name || "").trim() || SKIN_DEFAULT_NAME;
     const topbarTitle = qs("#topbar-title");
     if (topbarTitle) topbarTitle.textContent = clean;
     const askTitle = qs("#ask-panel-title");
     if (askTitle) askTitle.textContent = `ASK ${clean.toUpperCase()}`;
+    const askButtonLabel = qs("#btn-ask-jarvis-label");
+    if (askButtonLabel) askButtonLabel.textContent = clean;
+    const bootTitle = qs("#boot-title");
+    if (bootTitle) bootTitle.textContent = clean;
     document.title = `${clean} — Command Interface`;
   }
 
@@ -379,6 +430,7 @@
   // opened or the config is fetched — this is just a fast, best-effort guess.
   (function applySavedSkinEarly() {
     const prefs = loadSkinPrefs();
+    currentSaturationPercent = clampSaturationPercent(prefs.saturation);
     const preset = SKIN_PRESETS.find((p) => p.id === prefs.presetId);
     if (preset) applyPreset(preset);
     else if (prefs.accent) applyAccent(prefs.accent);
@@ -404,11 +456,23 @@
         title: preset.name,
         onclick: () => {
           qs("#skin-custom-color").value = preset.hex;
-          applyPreset(preset);
           currentPresetId = preset.id;
+          applyPreset(preset);
           renderSkinSwatches(preset.id);
+          updateSaturationControlState();
         },
       }));
+    }
+  }
+
+  // Populates the Attitude <select> once with the fixed list of presets
+  // (see SKIN_ATTITUDES above) — the options themselves never change at
+  // runtime, only which one is selected, so this only needs to run once.
+  function renderAttitudeOptions() {
+    const select = qs("#skin-attitude");
+    if (!select || select.options.length) return;
+    for (const attitude of SKIN_ATTITUDES) {
+      select.appendChild(el("option", { value: attitude.id }, attitude.label));
     }
   }
 
@@ -420,6 +484,10 @@
     currentPresetId = matchedPreset ? matchedPreset.id : null;
     qs("#skin-custom-color").value = accent;
     renderSkinSwatches(currentPresetId);
+    currentSaturationPercent = clampSaturationPercent(prefs.saturation);
+    const saturationSlider = qs("#skin-saturation");
+    if (saturationSlider) saturationSlider.value = currentSaturationPercent;
+    updateSaturationControlState();
 
     // Persona fields are authoritative on the server (ai_config.json), not
     // in localStorage — always fetch the real current value so Skin never
@@ -427,12 +495,14 @@
     // or changed from another browser/session since the last visit here.
     qs("#skin-assistant-name").value = prefs.assistantName || SKIN_DEFAULT_NAME;
     qs("#skin-address-as").value = prefs.addressAs || SKIN_DEFAULT_ADDRESS;
+    qs("#skin-attitude").value = SKIN_DEFAULT_ATTITUDE;
     try {
       const { text } = await Api.getConfigFile("ai_config.json");
       const parsed = JSON.parse(text);
       const persona = (parsed && parsed.persona) || {};
       qs("#skin-assistant-name").value = persona.assistant_name || SKIN_DEFAULT_NAME;
       qs("#skin-address-as").value = persona.address_user_as || SKIN_DEFAULT_ADDRESS;
+      qs("#skin-attitude").value = persona.attitude || SKIN_DEFAULT_ATTITUDE;
     } catch (e) {
       // Fall back to whatever localStorage/defaults already filled in above
       // — Skin should still be usable (accent at least) even if the CLI
@@ -443,9 +513,11 @@
 
   function closeSkinModal() {
     qs("#skin-backdrop").hidden = true;
-    // Revert any live-preview accent back to whatever's actually saved, in
-    // case the person clicked around swatches and then hit Cancel.
+    // Revert any live-preview accent/saturation back to whatever's actually
+    // saved, in case the person clicked around swatches or dragged the
+    // slider and then hit Cancel.
     const prefs = loadSkinPrefs();
+    currentSaturationPercent = clampSaturationPercent(prefs.saturation);
     const preset = SKIN_PRESETS.find((p) => p.id === prefs.presetId);
     if (preset) applyPreset(preset);
     else if (prefs.accent) applyAccent(prefs.accent);
@@ -456,6 +528,7 @@
     const accent = qs("#skin-custom-color").value || SKIN_DEFAULT_ACCENT;
     const assistantName = qs("#skin-assistant-name").value.trim() || SKIN_DEFAULT_NAME;
     const addressAs = qs("#skin-address-as").value.trim() || SKIN_DEFAULT_ADDRESS;
+    const attitude = qs("#skin-attitude").value || SKIN_DEFAULT_ATTITUDE;
     const errEl = qs("#skin-error");
     errEl.textContent = "";
 
@@ -465,13 +538,14 @@
       parsed.persona = parsed.persona || {};
       parsed.persona.assistant_name = assistantName;
       parsed.persona.address_user_as = addressAs;
+      parsed.persona.attitude = attitude;
       await Api.putConfigFile("ai_config.json", JSON.stringify(parsed, null, 2));
     } catch (e) {
       errEl.textContent = `Couldn't save persona: ${e.message}`;
       return;
     }
 
-    saveSkinPrefs({ accent, presetId: currentPresetId, assistantName, addressAs });
+    saveSkinPrefs({ accent, presetId: currentPresetId, assistantName, addressAs, saturation: currentSaturationPercent });
     const preset = SKIN_PRESETS.find((p) => p.id === currentPresetId);
     if (preset) applyPreset(preset);
     else applyAccent(accent);
@@ -483,13 +557,19 @@
   function resetSkinToDefaults() {
     qs("#skin-assistant-name").value = SKIN_DEFAULT_NAME;
     qs("#skin-address-as").value = SKIN_DEFAULT_ADDRESS;
+    qs("#skin-attitude").value = SKIN_DEFAULT_ATTITUDE;
     qs("#skin-custom-color").value = SKIN_DEFAULT_ACCENT;
     currentPresetId = "cyan";
+    currentSaturationPercent = SKIN_DEFAULT_SATURATION;
+    const saturationSlider = qs("#skin-saturation");
+    if (saturationSlider) saturationSlider.value = SKIN_DEFAULT_SATURATION;
     applyPreset(SKIN_PRESETS.find((p) => p.id === "cyan"));
     renderSkinSwatches(currentPresetId);
+    updateSaturationControlState();
   }
 
   function wireSkinModal() {
+    renderAttitudeOptions();
     qs("#btn-skin").addEventListener("click", openSkinModal);
     qs("#skin-close").addEventListener("click", closeSkinModal);
     qs("#btn-skin-cancel").addEventListener("click", closeSkinModal);
@@ -502,10 +582,29 @@
     // A manually typed/picked color is never a preset, even if it happens
     // to match one's hex — see renderSkinSwatches()'s id-matching comment.
     qs("#skin-custom-color").addEventListener("input", (e) => {
-      applyAccent(e.target.value);
       currentPresetId = null;
+      applyAccent(e.target.value);
       renderSkinSwatches(null);
+      updateSaturationControlState();
     });
+    // Saturation slider — live preview. Since saturation is baked into the
+    // same HSL derivation as everything else in applyAccent() (not a
+    // separate filter), moving the slider re-runs the whole derivation
+    // against whatever's currently active: the matched preset if one's
+    // selected, otherwise the raw custom-color value. Guarded against the
+    // hardcoded preset for safety even though the slider is also disabled
+    // (via updateSaturationControlState) whenever "Classic (hardcoded)" is
+    // active, so this shouldn't normally fire in that state at all.
+    const saturationSlider = qs("#skin-saturation");
+    if (saturationSlider) {
+      saturationSlider.addEventListener("input", (e) => {
+        currentSaturationPercent = clampSaturationPercent(e.target.value);
+        if (currentPresetId === "classic-hardcoded") return;
+        const preset = SKIN_PRESETS.find((p) => p.id === currentPresetId);
+        if (preset) applyPreset(preset);
+        else applyAccent(qs("#skin-custom-color").value);
+      });
+    }
   }
 
   function escapeHtml(s) {
