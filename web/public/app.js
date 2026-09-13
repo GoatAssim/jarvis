@@ -316,6 +316,19 @@
     rerender();
   }
 
+  // Small grey "conv id" tag shown next to the Ask panel's action row and
+  // next to the Logs "Settings" pane header — purely a copy/paste aid for
+  // reporting bugs against a specific conversation, no behavior depends on
+  // it. Safe to call with an empty/undefined id (clears the tag).
+  function updateConvoIdTag(id) {
+    const tag = qs("#ask-convo-id-tag");
+    if (tag) tag.textContent = id || "";
+  }
+  function updateLogsConvoIdTag(id) {
+    const tag = qs("#logs-convo-id-tag");
+    if (tag) tag.textContent = id || "";
+  }
+
   let toastTimer = null;
   function toast(message, kind = "error") {
     const t = qs("#toast");
@@ -2212,6 +2225,7 @@
   function openAsk() {
     askOverlay.hidden = false;
     ensureNotifPermission();
+    updateConvoIdTag(state.activeConversationId);
     qs("#ask-input").focus();
   }
   function closeAsk() {
@@ -3525,6 +3539,7 @@
     state.logsSelected = id;
     state.logsEntries = [];
     logsEntriesTitle.textContent = "Log";
+    updateLogsConvoIdTag(id);
     const convo = state.logsConvos.find((c) => c.id === id);
     if (convo) logsEntriesTitle.textContent = convo.title || id;
     btnLogsRefresh.disabled = false;
@@ -3753,6 +3768,7 @@
       return;
     }
     state.activeConversationId = id;
+    updateConvoIdTag(id);
     state.exchangeCountByConv[id] = (record.exchanges || []).length;
     loadConversationIntoThread(record, id);
     // If this conversation's ask is still running in the background, the
@@ -3788,6 +3804,7 @@
     state.conversations.unshift(record);
     if (select) {
       state.activeConversationId = record.id;
+      updateConvoIdTag(record.id);
       state.exchangeCountByConv[record.id] = 0;
       loadConversationIntoThread({ exchanges: [] }, record.id);
       askPromptReset();

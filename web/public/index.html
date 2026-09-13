@@ -186,6 +186,7 @@
           </button>
           <div class="provider-picker__menu" id="provider-picker-menu" hidden></div>
         </div>
+        <span class="convo-id-tag" id="ask-convo-id-tag" title="Active conversation id"></span>
         <button class="btn btn--ghost btn--sm" id="btn-ask-clear" type="button" title="Clear this conversation">Clear</button>
         <button class="modal__close" id="ask-close" type="button" aria-label="Close">&times;</button>
       </div>
@@ -400,7 +401,7 @@
       <!-- RIGHT: settings — per-API-key capacity mode, token usage, and
            console dump, grouped from this conversation's log entries. -->
       <section class="debug-pane logs-pane--settings" aria-label="Log settings">
-        <div class="debug-pane__head"><h3>Settings</h3></div>
+        <div class="debug-pane__head"><h3>Settings</h3><span class="convo-id-tag" id="logs-convo-id-tag" title="Conversation id"></span></div>
         <div class="logs-settings-body" id="logs-settings-body">
           <div class="debug-empty">Select a conversation on the left.</div>
         </div>

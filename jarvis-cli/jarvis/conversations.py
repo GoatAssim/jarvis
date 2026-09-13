@@ -288,6 +288,8 @@ def delete_conversation(conv_id):
             CURRENT_FILE.unlink(missing_ok=True)
     except (FileNotFoundError, json.JSONDecodeError, UnicodeDecodeError, OSError):
         pass
+    from . import route_stickiness
+    route_stickiness.clear_sticky(conv_id)
     return True
 
 
@@ -382,6 +384,8 @@ def clear(conv_id):
     record["updated_at"] = _now()
     _save_conv(record)
     _upsert_index(record)
+    from . import route_stickiness
+    route_stickiness.clear_sticky(conv_id)
     return True
 
 

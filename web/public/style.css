@@ -1800,3 +1800,16 @@ audio.ask-dl-player{ max-height: none; background: transparent; }
   padding: 8px; max-height: 220px; overflow-y: auto;
 }
 .logs-key-console--synthesized{ border-style: dashed; }
+/* Small grey conversation-id tag next to the Ask panel's actions row and
+   the Logs "Settings" pane header — cosmetic only, purely for copy/paste
+   reference when reporting a bug against a specific conversation. */
+.convo-id-tag {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--text-dim);
+  opacity: 0.65;
+  margin-left: 6px;
+  align-self: center;
+  user-select: all; /* easy to double-click/select the whole id */
+}
+.convo-id-tag:empty { display: none; }
