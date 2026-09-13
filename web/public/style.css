@@ -971,6 +971,34 @@ input.is-invalid{ border-color: var(--red) !important; }
   font-size: 11px; color: var(--text-dimmer); margin-top: 6px;
 }
 
+/* Persona presets (Jarvis/Friday/Edith/Karen) — see PERSONA_PRESETS in
+   app.js. Rendered as labeled pills, not bare swatches, since a persona
+   bundles a name with a palette. Each button's inline `color` is set to
+   the persona's hex (see renderPersonaPresets) so `currentColor` below
+   picks it up for the border/glow/dot without a hardcoded rule per
+   persona; the label overrides back to var(--text) so it stays legible
+   regardless of hue. */
+.skin-persona-presets{ display: flex; flex-wrap: wrap; gap: 10px; margin-bottom: 8px; }
+.persona-preset-btn{
+  display: inline-flex; align-items: center; gap: 8px;
+  padding: 7px 14px 7px 9px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: var(--bg-panel-2);
+  font-family: var(--font-ui); font-size: 13px; font-weight: 600;
+  cursor: pointer;
+  transition: border-color 0.15s, transform 0.15s, box-shadow 0.15s;
+}
+.persona-preset-btn:hover{ transform: translateY(-1px); }
+.persona-preset-btn.is-active{ border-color: currentColor; box-shadow: 0 0 10px currentColor; }
+.persona-preset-btn__dot{
+  width: 13px; height: 13px; border-radius: 50%;
+  background: currentColor;
+  border: 1px solid rgba(255,255,255,0.25);
+  flex-shrink: 0;
+}
+.persona-preset-btn__label{ color: var(--text); }
+
 .skin-swatches{ display: flex; flex-wrap: wrap; gap: 14px; margin-bottom: 4px; }
 .skin-swatch{
   width: 38px; height: 38px; border-radius: 50%;
