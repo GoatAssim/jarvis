@@ -1483,6 +1483,55 @@ def _is_tool_trace_reply(text):
     return False
 
 
+# Mirrors web/public/app.js's splitConsoleDump()/NAME_PREFIX_LINE exactly —
+# same two passes, same regexes translated 1:1 (JS's case-sensitive
+# `[^\n:]{1,40}` and INLINE_TOOL_TRACE_LINE == this module's own
+# _TOOL_TRACE_LINE, just reused instead of re-declared). This is the "raw
+# reply glued to a console dump" split the browser already does live while
+# streaming stdout for a fresh ask; ask() below applies it once more,
+# server-side, purely so the *saved* exchange matches what was shown live
+# (see the call site's comment). If splitConsoleDump ever changes, update
+# this to match or the two will drift — there's no shared source of truth,
+# same caveat AGENTS.md calls out for tests/interactive_inspector.py's
+# router mirror.
+_NAME_PREFIX_LINE = re.compile(r"^([^\n:]{1,40}):\s(.*)$")
+
+
+def _split_console_dump(text):
+    """Splits `text` into (clean_reply_text, dump_lines) the same way the
+    web UI splits a live stdout stream into a normal reply bubble plus a
+    separate "Console" bubble: everything before the first "<Name>: <rest>"
+    -looking line is a console dump (raw command output some providers glue
+    in ahead of their real answer), and any line anywhere else that looks
+    like an echoed tool-call/tool-result trace (_TOOL_TRACE_LINE) is pulled
+    out into the dump too. Returns (text, []) unchanged when there's
+    nothing to split out, so callers can apply this unconditionally."""
+    if not text:
+        return text, []
+    lines = str(text).split("\n")
+    split_at = -1
+    first_reply_line = None
+    for i, ln in enumerate(lines):
+        m = _NAME_PREFIX_LINE.match(ln)
+        if m:
+            split_at = i
+            first_reply_line = m.group(2)
+            break
+    if split_at == -1:
+        dump = []
+        candidate_reply = list(lines)
+    else:
+        dump = lines[:split_at]
+        candidate_reply = [first_reply_line] + lines[split_at + 1:]
+    reply = []
+    for ln in candidate_reply:
+        if _TOOL_TRACE_LINE.match(ln.strip()):
+            dump.append(ln.strip())
+        else:
+            reply.append(ln)
+    return "\n".join(reply), dump
+
+
 
 def _extract_json_object(text):
     if not text:
@@ -1955,8 +2004,21 @@ def ask(user_text, commands=None, on_attempt=None, on_tool_call=None, on_tool_re
             if result.ok:
                 turn_runs = getattr(tool_executor, "runs", None) if tool_executor else None
                 extras = _extras_from_runs(turn_runs)
+                # Split the same way the web UI's live view does (see
+                # _split_console_dump) so the *saved* exchange matches what
+                # was actually shown: a clean reply bubble plus, if there
+                # was one, a separate "console" extra the web UI already
+                # knows how to replay (renderThreadExtra's "console" case).
+                # Only the saved copy is split — the raw, unsplit
+                # result.text below is still what's returned/printed live,
+                # since the browser (or a plain terminal) needs the whole
+                # stream exactly as before; this doesn't change live output
+                # at all, only what a page reload sees afterward.
+                clean_text, dump_lines = _split_console_dump(result.text)
+                if dump_lines:
+                    extras.append({"type": "console", "data": {"dumpLines": dump_lines}})
                 exchange_count = conversations.append_exchange(
-                    conv_id, user_text, result.text, label, extras=extras
+                    conv_id, user_text, clean_text, label, extras=extras
                 )
                 _spawn_title_update(conv_id, exchange_count)
                 return AskResult(True, text=result.text, provider=label, attempts=attempts,

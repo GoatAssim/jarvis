@@ -509,6 +509,40 @@ def test_keywords_for_haystack_is_still_just_phrases():
     assert phrases == {"screenshot", "screen shot", "capture screen"}
 
 
+def test_split_console_dump_no_trace_is_unchanged():
+    # No "<Name>: <rest>" line anywhere and no inline tool-trace lines ->
+    # nothing to split out, text comes back untouched.
+    text = "Just a plain reply\nwith two lines"
+    clean, dump = ai_client._split_console_dump(text)
+    assert clean == text
+    assert dump == []
+
+
+def test_split_console_dump_pulls_out_leading_raw_output():
+    # Raw command output glued in ahead of the real "<Name>: <rest>" line
+    # (see splitConsoleDump's NAME_PREFIX_LINE in web/public/app.js) is
+    # everything before that line; the real reply is what follows it, with
+    # the "<Name>: " prefix itself stripped.
+    text = "some raw file listing\nmore raw output\nJarvis: Executed, sir."
+    clean, dump = ai_client._split_console_dump(text)
+    assert clean == "Executed, sir."
+    assert dump == ["some raw file listing", "more raw output"]
+
+
+def test_split_console_dump_pulls_out_inline_tool_trace():
+    # An echoed tool-call/tool-result scaffolding line (_TOOL_TRACE_LINE)
+    # anywhere in the reply gets pulled into the dump, wherever it sits.
+    text = 'Jarvis: Sure thing.\n[called run_command with {"name": "x"}]\nAll done.'
+    clean, dump = ai_client._split_console_dump(text)
+    assert clean == "Sure thing.\nAll done."
+    assert dump == ['[called run_command with {"name": "x"}]']
+
+
+def test_split_console_dump_empty_text():
+    assert ai_client._split_console_dump("") == ("", [])
+    assert ai_client._split_console_dump(None) == (None, [])
+
+
 _TESTS = [obj for name, obj in list(globals().items()) if name.startswith("test_")]
 
 
