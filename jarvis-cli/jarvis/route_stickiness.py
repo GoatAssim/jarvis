@@ -43,9 +43,14 @@ ENCODING = "utf-8"
 
 # How many *non-confident* follow-up asks in the same conversation still get
 # the last confidently-matched group(s) offered, before falling back to the
-# normal discovery-only behavior. 3 covers the common "do X" -> "it's ready"
-# -> "go ahead" -> "thanks" shape without pinning a stale toolset forever.
-STICKY_TURNS = 3
+# normal discovery-only behavior. Each sticky turn re-offers the *full*
+# group schema (same size as a confident match) instead of the tiny
+# discovery pair — cheap for one immediate follow-up ("it's ready" ->
+# "go ahead"), but 3 turns of that on every tool use was measurably
+# doubling session token cost on conversations with a lot of ambiguous
+# chit-chat between tool calls. 1 still covers the single-follow-up case
+# this was built for, without taxing every message for two turns after.
+STICKY_TURNS = 1
 
 
 def _load():

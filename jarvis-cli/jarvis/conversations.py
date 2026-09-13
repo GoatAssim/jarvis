@@ -459,25 +459,44 @@ def conversation_messages(
     older_src = exchanges[:-recent_n][-recap_n:] if recap_n and len(exchanges) > recent_n else []
 
     messages = []
-    recap_lines = []
-    used_r = 0
-    for ex in reversed(older_src):
-        user_text = _truncate((ex.get("user") or "").strip(), 90)
-        assistant_text = _truncate((ex.get("jarvis") or "").strip(), 110)
-        if not user_text:
-            continue
-        line = f"- User: {user_text} \u2192 You: {assistant_text}"
-        line += _extras_recap_fragment(ex.get("extras"))
-        if used_r + len(line) > recap_lim:
-            break
-        recap_lines.append(line)
-        used_r += len(line)
-    recap_lines.reverse()
-    if recap_lines:
-        messages.append({
-            "role": "user",
-            "content": "Earlier in this same conversation (compressed):\n" + "\n".join(recap_lines),
-        })
+    recap_text = None
+    if older_src:
+        # Prefer a real model's summary of the older turns over mechanical
+        # truncation — see history_summarizer.py's module docstring for
+        # why. This is a best-effort round trip (cached per unchanged
+        # older_src, so it only actually runs again when a new exchange
+        # rolls into the older window): any failure (no eligible
+        # provider, network error, bad response) returns None here and we
+        # fall straight through to the exact old truncate-and-join recap
+        # below, so a summarizer outage can never break an ask().
+        from . import history_summarizer
+        try:
+            ai_recap = history_summarizer.summarize_older_exchanges(conv_id, older_src)
+        except Exception:
+            ai_recap = None
+        if ai_recap:
+            recap_text = "Earlier in this same conversation (summarized by another model):\n" + ai_recap
+
+    if recap_text is None:
+        recap_lines = []
+        used_r = 0
+        for ex in reversed(older_src):
+            user_text = _truncate((ex.get("user") or "").strip(), 90)
+            assistant_text = _truncate((ex.get("jarvis") or "").strip(), 110)
+            if not user_text:
+                continue
+            line = f"- User: {user_text} \u2192 You: {assistant_text}"
+            line += _extras_recap_fragment(ex.get("extras"))
+            if used_r + len(line) > recap_lim:
+                break
+            recap_lines.append(line)
+            used_r += len(line)
+        recap_lines.reverse()
+        if recap_lines:
+            recap_text = "Earlier in this same conversation (compressed):\n" + "\n".join(recap_lines)
+
+    if recap_text:
+        messages.append({"role": "user", "content": recap_text})
 
     used = 0
     recent = []

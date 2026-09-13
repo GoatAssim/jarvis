@@ -463,14 +463,16 @@ guess at a name it can't see — it calls `search_commands` (keyword, or
 no query for the full list) to look up the rest of `commands.json`
 before running anything.
 
-**It can't run your commands yet, and says so.** Jarvis is told what
-commands you have but isn't given any way to actually trigger one, and
-is explicitly instructed to be honest about that rather than invent a
-"done!" — ask it to do something it has no function for and (model
-willing) you'll get an in-character "I'm afraid I don't have a function
-for that yet, sir." Wiring up real execution — and letting Jarvis draft
-new commands for you from a plain-English description — is next (see
-[PROGRESS.md](../PROGRESS.md)).
+**It can run your saved commands now.** Jarvis can search your
+`commands.json` (`search_commands`) and actually trigger a match
+(`run_command`, or `run_chain` for a `then`/`and` sequence), the same as
+if you'd typed it yourself — so "run my updateSpotify thing" or "deploy
+to staging" can genuinely happen from a plain-English ask, not just get
+acknowledged. It's still honest when nothing fits: ask for something with
+no matching command or tool and (model willing) you'll get an
+in-character "I'm afraid I don't have a function for that yet, sir."
+rather than a false "done!". Jarvis can also draft brand-new commands for
+you from a plain-English description (`create_command`/`update_command`).
 
 ### Tools: real answers about your computer
 
@@ -498,17 +500,42 @@ J.A.R.V.I.S: 74% and not plugged in, and you're on "HomeNet-5G", sir.
 The model decides on its own whether a question needs one — "what's my
 battery at" triggers `get_battery`; "tell me a joke" doesn't touch any
 of them. All seven only ever *read* something; none of them change a
-setting, write a file, or run a command — a deliberately small, fixed,
-read-only toolkit, not a way for the AI to execute arbitrary code.
-
-This is genuinely separate from the "can't run your commands" honesty
-note above — the system prompt draws the line explicitly so the model
-doesn't confuse "I can check your battery" with "I can run your
-commands," which stays false until step 2.
+setting, write a file, or run a command.
 
 Set `"tools_enabled": false` in `ai_config.json`'s `defaults` block to
 turn this off entirely (e.g. to guarantee every ask is exactly one
 request, no matter what) — on by default.
+
+### Beyond read-only: everything else Jarvis can reach
+
+The seven read-only tools above are just one group. Jarvis's full
+catalog is much larger, and unlike the read-only group, several of these
+*do* change things — write files, install packages, launch apps, run
+shell commands — so the riskier ones are gated behind a confirmation
+prompt (and, for the most dangerous, a second AI's plain-language risk
+review) before anything actually runs. You never need to remember any of
+this — just ask in plain English and Jarvis figures out which tool(s)
+apply:
+
+| Group | What it covers |
+|---|---|
+| Saved commands | `search_commands`, `run_command`, `run_chain`, `create_command`, `update_command` — see "What Jarvis actually knows" above |
+| Desktop control | Mouse/keyboard/window automation (`click`, `type_text`, `hotkey`, `focus_window`, `list_windows`, `click_on_text` via OCR, screenshots, ...) — see "AI-mode notes" below |
+| Files | `write_file` (create/overwrite text files), `search_files`/`reveal_in_explorer`/`open_file`/`open_file_location` (via Everything, Windows only), `present_file` (hand you a proper open/reveal/download card for a file instead of just typing its path) |
+| JSON | `organize_json` — validate and pretty-print a JSON file, with clear parse-error messages (also available directly as `jarvis organize-json <path>`) |
+| Web | `web_search` and page fetch, for anything Jarvis doesn't already know |
+| Git | An allowlisted set of git subcommands (status, log, diff, commit, push, ...); destructive ones (`reset`, `clean`, a forced `push`) need your confirmation |
+| Packages | Search/install/uninstall via winget, Chocolatey, Scoop, pip, pipx, or npm — installs and uninstalls always ask for confirmation first |
+| Spotify | Launch the desktop app, or control playback via the Spotify Web API once you've run `jarvis spotify-login` |
+| Playnite | Browse and launch games (and their specific actions — a mod, a URL, a non-default emulator) through the Playnite Bridge plugin, if installed |
+| Radio | Toggle Wi-Fi and Bluetooth adapters on/off (Windows) |
+| Capacity mode | Read or change the prompt "capacity" mode (see "Prompt capacity modes" below) from inside a normal ask, same as `jarvis mode-set` |
+| Custom commands | `run_custom_command` — an arbitrary, ad-hoc shell command for anything no saved command or existing tool already covers. The most powerful (and most dangerous) tool Jarvis has, so it's confirmed by you **and** reviewed by a second AI provider for risk before it runs, by default |
+
+This is genuinely separate from the read-only group above — the system
+prompt draws the line explicitly so the model doesn't confuse "I can
+check your battery" with "I can install a package or run an arbitrary
+command," which always needs your say-so first.
 
 ### Customizing the persona
 
