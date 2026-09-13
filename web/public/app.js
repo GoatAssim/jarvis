@@ -79,17 +79,65 @@
     return { r: parseInt(m[1], 16), g: parseInt(m[2], 16), b: parseInt(m[3], 16) };
   }
 
-  function mixWithBlack(rgb, amount) {
-    return {
-      r: Math.round(rgb.r * (1 - amount)),
-      g: Math.round(rgb.g * (1 - amount)),
-      b: Math.round(rgb.b * (1 - amount)),
-    };
-  }
-
   function rgbToHex({ r, g, b }) {
     const h = (n) => n.toString(16).padStart(2, "0");
     return `#${h(r)}${h(g)}${h(b)}`;
+  }
+
+  // rgb (0-255 channels) <-> hsl (h/s/l all 0-1) so soft/dim/border variants
+  // can be derived by scaling *lightness and saturation* instead of naively
+  // darkening each RGB channel by the same amount. Uniform RGB darkening
+  // (the old approach) keeps a color's saturation maxed out no matter how
+  // dark it gets, which reads as neon/plasticky against this app's muted
+  // navy backdrop — the hand-picked defaults these variants were modeled on
+  // pull *both* lightness and saturation down together (see the ratios in
+  // applyAccent), which is what actually makes them look like shaded/dimmed
+  // versions of the accent rather than a different, harsher color.
+  function rgbToHsl({ r, g, b }) {
+    r /= 255; g /= 255; b /= 255;
+    const max = Math.max(r, g, b), min = Math.min(r, g, b);
+    let h = 0, s = 0;
+    const l = (max + min) / 2;
+    const d = max - min;
+    if (d !== 0) {
+      s = d / (1 - Math.abs(2 * l - 1));
+      switch (max) {
+        case r: h = ((g - b) / d) % 6; break;
+        case g: h = (b - r) / d + 2; break;
+        default: h = (r - g) / d + 4; break;
+      }
+      h *= 60;
+      if (h < 0) h += 360;
+    }
+    return { h, s, l };
+  }
+
+  function hslToRgb({ h, s, l }) {
+    const c = (1 - Math.abs(2 * l - 1)) * s;
+    const x = c * (1 - Math.abs(((h / 60) % 2) - 1));
+    const m = l - c / 2;
+    let r1 = 0, g1 = 0, b1 = 0;
+    if (h < 60) [r1, g1, b1] = [c, x, 0];
+    else if (h < 120) [r1, g1, b1] = [x, c, 0];
+    else if (h < 180) [r1, g1, b1] = [0, c, x];
+    else if (h < 240) [r1, g1, b1] = [0, x, c];
+    else if (h < 300) [r1, g1, b1] = [x, 0, c];
+    else [r1, g1, b1] = [c, 0, x];
+    return {
+      r: Math.round((r1 + m) * 255),
+      g: Math.round((g1 + m) * 255),
+      b: Math.round((b1 + m) * 255),
+    };
+  }
+
+  // Scales a hex color's saturation/lightness by the given ratios (same hue),
+  // clamped to valid HSL range. This is how accent-soft/-dim/-border are
+  // derived below.
+  function scaleHsl(rgb, sRatio, lRatio) {
+    const hsl = rgbToHsl(rgb);
+    hsl.s = Math.max(0, Math.min(1, hsl.s * sRatio));
+    hsl.l = Math.max(0, Math.min(1, hsl.l * lRatio));
+    return hslToRgb(hsl);
   }
 
   // Blends a base color toward the chosen accent by `amount` (0-1). Used to
@@ -113,27 +161,36 @@
   const BG_RAISED_BASE = { r: 13, g: 24, b: 38 };       // --bg-raised
 
   // Applies one accent hex to every --accent* CSS var the whole stylesheet
-  // is built from, deriving the soft/dim/glow variants the same way the
-  // hand-picked defaults in style.css relate to each other (soft ≈ 15%
-  // darker, dim ≈ 45% darker + used as low-opacity fills, glow ≈ the base
-  // color at 35% alpha for shadows/selection highlight).
+  // is built from, deriving the soft/dim/border/glow variants the same way
+  // the hand-picked defaults in style.css actually relate to each other.
+  // Measured against those defaults (accent #4fd8ff -> soft #2ea9d6, dim
+  // #164a63, border rgba(102,214,255,.16/.34)): soft is accent's saturation
+  // x0.67 and lightness x0.78; dim is saturation x0.64 and lightness x0.36;
+  // border is a touch *lighter* than accent (lightness x1.07, full
+  // saturation) shown at 0.16/0.34 alpha rather than as a solid fill; glow
+  // is the accent itself at 35% alpha. Scaling saturation down alongside
+  // lightness (instead of just darkening RGB channels toward black) is what
+  // keeps soft/dim reading as shaded versions of the accent rather than a
+  // separate neon color — see scaleHsl above.
   //
-  // Also lightly re-tints --border/--border-strong and the --bg* background
-  // layers with the same accent (kept subtle — a light wash, not a full
-  // recolor) so picking a skin shifts the app's overall mood a bit, not
-  // just its buttons. At the default cyan accent this reduces to
-  // (almost exactly) the original fixed values, so nothing changes unless
-  // you actually pick a different color.
+  // Also lightly re-tints the --bg* background layers with the same accent
+  // (kept subtle — a light wash, not a full recolor) so picking a skin
+  // shifts the app's overall mood a bit, not just its buttons. At the
+  // default cyan accent this reduces to (almost exactly) the original fixed
+  // values, so nothing changes unless you actually pick a different color.
   function applyAccent(hex) {
     const rgb = hexToRgb(hex);
     if (!rgb) return;
     const root = document.documentElement.style;
+    const soft = scaleHsl(rgb, 0.67, 0.78);
+    const dim = scaleHsl(rgb, 0.64, 0.36);
+    const borderRgb = scaleHsl(rgb, 1, 1.07);
     root.setProperty("--accent", hex);
-    root.setProperty("--accent-soft", rgbToHex(mixWithBlack(rgb, 0.15)));
-    root.setProperty("--accent-dim", rgbToHex(mixWithBlack(rgb, 0.55)));
+    root.setProperty("--accent-soft", rgbToHex(soft));
+    root.setProperty("--accent-dim", rgbToHex(dim));
     root.setProperty("--accent-glow", `rgba(${rgb.r}, ${rgb.g}, ${rgb.b}, 0.35)`);
-    root.setProperty("--border", `rgba(${rgb.r}, ${rgb.g}, ${rgb.b}, 0.09)`);
-    root.setProperty("--border-strong", `rgba(${rgb.r}, ${rgb.g}, ${rgb.b}, 0.16)`);
+    root.setProperty("--border", `rgba(${borderRgb.r}, ${borderRgb.g}, ${borderRgb.b}, 0.16)`);
+    root.setProperty("--border-strong", `rgba(${borderRgb.r}, ${borderRgb.g}, ${borderRgb.b}, 0.34)`);
 
     const bg = mixTowardAccent(BG_BASE, rgb, 0.018);
     const bg1 = mixTowardAccent(BG1_BASE, rgb, 0.02);
