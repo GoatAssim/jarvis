@@ -20,6 +20,7 @@ from . import discovery_cache
 from . import logs
 from . import tool_result_shaping
 from . import tool_router
+from . import route_stickiness
 from . import tools as system_tools
 
 DEFAULT_TIMEOUT = 30
@@ -1812,6 +1813,35 @@ def ask(user_text, commands=None, on_attempt=None, on_tool_call=None, on_tool_re
         route = tool_router.route(user_text)
         if on_route:
             on_route(route)
+
+        from . import tool_registry
+
+        # Stickiness: a confident match here always wins outright and
+        # replaces whatever group was previously sticky for this
+        # conversation (never merges with it — see route_stickiness.py's
+        # module docstring on why "a new toolset drops the old one").
+        # A non-confident result instead checks whether an earlier turn in
+        # this same conversation left a still-live sticky group behind, and
+        # if so offers *that* instead of falling all the way back to the
+        # bare discovery pair — this is what keeps a same-task follow-up
+        # ("no just say hello", "it's open now") from losing every tool it
+        # actually needs just because the follow-up text itself doesn't
+        # repeat the original keywords.
+        sticky_tools = []
+        if route.confident:
+            route_stickiness.set_sticky(conv_id, route.groups)
+        else:
+            sticky_groups = route_stickiness.get_sticky(conv_id)
+            if sticky_groups:
+                seen = set()
+                for group in sticky_groups:
+                    for name in tool_registry.tools_in_group(group):
+                        if name not in seen:
+                            seen.add(name)
+                            sticky_tools.append(name)
+                if sticky_tools:
+                    route_stickiness.touch_sticky(conv_id)
+
         # Phase 5 of the token-optimization plan (see new_plan.md): when the
         # router has no opinion, don't fall all the way back to the full
         # catalog — offer only the small always-available search_tools
@@ -1819,11 +1849,14 @@ def ask(user_text, commands=None, on_attempt=None, on_tool_call=None, on_tool_re
         # reachable (search_tools -> _make_tool_executor's discover_sink
         # below grows active/compact/name_only_schemas in place, so a match
         # becomes callable on the very next round without a second full
-        # prompt resend), it's just not offered up front on spec.
-        active_schemas = OrderedSchemaSet(
-            system_tools.schemas_for_tools(route.tools)
-            if route.confident else system_tools.DISCOVERY_AND_COMMANDS_SCHEMAS
-        )
+        # prompt resend), it's just not offered up front on spec. A live
+        # sticky group (see above) is offered in place of that bare pair.
+        if route.confident:
+            active_schemas = OrderedSchemaSet(system_tools.schemas_for_tools(route.tools))
+        elif sticky_tools:
+            active_schemas = OrderedSchemaSet(system_tools.schemas_for_tools(sticky_tools))
+        else:
+            active_schemas = OrderedSchemaSet(system_tools.DISCOVERY_AND_COMMANDS_SCHEMAS)
 
         # Phase 2 of the enhancements doc: when the router has no opinion,
         # check whether a similar message already paid for a search_tools/
