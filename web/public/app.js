@@ -24,6 +24,218 @@
     return node;
   }
 
+  // ===========================================================================
+  // Skin — persona rename (name Jarvis answers to / what he calls you) plus a
+  // purely cosmetic accent color, edited from the "Skin" button next to the
+  // topbar title. Persona fields are the same ai_config.json persona.
+  // assistant_name/address_user_as the raw Settings > Config > AI tab edits
+  // (see ai_config.py) — this is just a friendlier form for those two fields.
+  // The accent color has no server-side equivalent at all: it's stored in
+  // this browser's localStorage only and applied by overriding the CSS
+  // custom properties every color in style.css is already built from
+  // (--accent/--accent-soft/--accent-dim/--accent-glow), so nothing but the
+  // :root override needs to change for a new color to skin the whole app.
+  // ===========================================================================
+
+  const SKIN_STORAGE_KEY = "jarvis.skin.v1";
+  const SKIN_DEFAULT_ACCENT = "#4fd8ff";
+  const SKIN_DEFAULT_NAME = "J.A.R.V.I.S";
+  const SKIN_DEFAULT_ADDRESS = "sir";
+
+  // A handful of curated presets shown as swatches; the color input next to
+  // them covers everything else. Picked to each still read clearly against
+  // the app's near-black background (see --bg-1) the way the default cyan does.
+  const SKIN_PRESETS = [
+    { name: "Cyan (default)", hex: "#4fd8ff" },
+    { name: "Amber", hex: "#ffb347" },
+    { name: "Crimson", hex: "#ff5c72" },
+    { name: "Violet", hex: "#b98bff" },
+    { name: "Emerald", hex: "#4fe6a4" },
+    { name: "Rose Gold", hex: "#f2b7c2" },
+  ];
+
+  function loadSkinPrefs() {
+    try {
+      const raw = localStorage.getItem(SKIN_STORAGE_KEY);
+      const parsed = raw ? JSON.parse(raw) : null;
+      return parsed && typeof parsed === "object" ? parsed : {};
+    } catch (e) {
+      return {};
+    }
+  }
+
+  function saveSkinPrefs(prefs) {
+    try {
+      localStorage.setItem(SKIN_STORAGE_KEY, JSON.stringify(prefs));
+    } catch (e) {
+      // Best-effort only — a full/blocked localStorage just means the
+      // accent choice doesn't survive a reload, nothing else breaks.
+    }
+  }
+
+  function hexToRgb(hex) {
+    const m = /^#?([a-f\d]{2})([a-f\d]{2})([a-f\d]{2})$/i.exec(hex || "");
+    if (!m) return null;
+    return { r: parseInt(m[1], 16), g: parseInt(m[2], 16), b: parseInt(m[3], 16) };
+  }
+
+  function mixWithBlack(rgb, amount) {
+    return {
+      r: Math.round(rgb.r * (1 - amount)),
+      g: Math.round(rgb.g * (1 - amount)),
+      b: Math.round(rgb.b * (1 - amount)),
+    };
+  }
+
+  function rgbToHex({ r, g, b }) {
+    const h = (n) => n.toString(16).padStart(2, "0");
+    return `#${h(r)}${h(g)}${h(b)}`;
+  }
+
+  // Applies one accent hex to every --accent* CSS var the whole stylesheet
+  // is built from, deriving the soft/dim/glow variants the same way the
+  // hand-picked defaults in style.css relate to each other (soft ≈ 15%
+  // darker, dim ≈ 45% darker + used as low-opacity fills, glow ≈ the base
+  // color at 35% alpha for shadows/selection highlight).
+  function applyAccent(hex) {
+    const rgb = hexToRgb(hex);
+    if (!rgb) return;
+    const root = document.documentElement.style;
+    root.setProperty("--accent", hex);
+    root.setProperty("--accent-soft", rgbToHex(mixWithBlack(rgb, 0.15)));
+    root.setProperty("--accent-dim", rgbToHex(mixWithBlack(rgb, 0.55)));
+    root.setProperty("--accent-glow", `rgba(${rgb.r}, ${rgb.g}, ${rgb.b}, 0.35)`);
+  }
+
+  // Updates every place the assistant's name is echoed back in the UI chrome
+  // itself (topbar title, Ask panel title, page title). Doesn't touch the
+  // boot sequence's own title line — that's intentionally the one place the
+  // brand mark stays fixed, the same way a car's dashboard logo doesn't
+  // change just because you renamed the onboard assistant.
+  function applyAssistantNameToChrome(name) {
+    const clean = (name || "").trim() || SKIN_DEFAULT_NAME;
+    const topbarTitle = qs("#topbar-title");
+    if (topbarTitle) topbarTitle.textContent = clean;
+    const askTitle = qs("#ask-panel-title");
+    if (askTitle) askTitle.textContent = `ASK ${clean.toUpperCase()}`;
+    document.title = `${clean} — Command Interface`;
+  }
+
+  // Applied once at script start (before boot even renders) from whatever
+  // was last saved locally, so there's no flash of default cyan/"J.A.R.V.I.S"
+  // before the real ai_config.json persona loads a moment later. The persona
+  // half gets refreshed again with the server's actual value once Skin is
+  // opened or the config is fetched — this is just a fast, best-effort guess.
+  (function applySavedSkinEarly() {
+    const prefs = loadSkinPrefs();
+    applyAccent(prefs.accent || SKIN_DEFAULT_ACCENT);
+    if (prefs.assistantName) applyAssistantNameToChrome(prefs.assistantName);
+  })();
+
+  function renderSkinSwatches(activeHex) {
+    const wrap = qs("#skin-swatches");
+    if (!wrap) return;
+    wrap.innerHTML = "";
+    for (const preset of SKIN_PRESETS) {
+      const isActive = preset.hex.toLowerCase() === (activeHex || "").toLowerCase();
+      wrap.appendChild(el("button", {
+        type: "button",
+        class: "skin-swatch" + (isActive ? " is-active" : ""),
+        style: `background:${preset.hex}; color:${preset.hex};`,
+        title: preset.name,
+        onclick: () => {
+          qs("#skin-custom-color").value = preset.hex;
+          applyAccent(preset.hex);
+          renderSkinSwatches(preset.hex);
+        },
+      }));
+    }
+  }
+
+  async function openSkinModal() {
+    qs("#skin-error").textContent = "";
+    const prefs = loadSkinPrefs();
+    const accent = prefs.accent || SKIN_DEFAULT_ACCENT;
+    qs("#skin-custom-color").value = accent;
+    renderSkinSwatches(accent);
+
+    // Persona fields are authoritative on the server (ai_config.json), not
+    // in localStorage — always fetch the real current value so Skin never
+    // shows/saves-over a stale local guess if ai_config.json was hand-edited
+    // or changed from another browser/session since the last visit here.
+    qs("#skin-assistant-name").value = prefs.assistantName || SKIN_DEFAULT_NAME;
+    qs("#skin-address-as").value = prefs.addressAs || SKIN_DEFAULT_ADDRESS;
+    try {
+      const { text } = await Api.getConfigFile("ai_config.json");
+      const parsed = JSON.parse(text);
+      const persona = (parsed && parsed.persona) || {};
+      qs("#skin-assistant-name").value = persona.assistant_name || SKIN_DEFAULT_NAME;
+      qs("#skin-address-as").value = persona.address_user_as || SKIN_DEFAULT_ADDRESS;
+    } catch (e) {
+      // Fall back to whatever localStorage/defaults already filled in above
+      // — Skin should still be usable (accent at least) even if the CLI
+      // backend is offline or ai_config.json is missing/corrupt.
+    }
+    qs("#skin-backdrop").hidden = false;
+  }
+
+  function closeSkinModal() {
+    qs("#skin-backdrop").hidden = true;
+    // Revert any live-preview accent back to whatever's actually saved, in
+    // case the person clicked around swatches and then hit Cancel.
+    applyAccent(loadSkinPrefs().accent || SKIN_DEFAULT_ACCENT);
+  }
+
+  async function saveSkin() {
+    const accent = qs("#skin-custom-color").value || SKIN_DEFAULT_ACCENT;
+    const assistantName = qs("#skin-assistant-name").value.trim() || SKIN_DEFAULT_NAME;
+    const addressAs = qs("#skin-address-as").value.trim() || SKIN_DEFAULT_ADDRESS;
+    const errEl = qs("#skin-error");
+    errEl.textContent = "";
+
+    try {
+      const { text } = await Api.getConfigFile("ai_config.json");
+      const parsed = JSON.parse(text);
+      parsed.persona = parsed.persona || {};
+      parsed.persona.assistant_name = assistantName;
+      parsed.persona.address_user_as = addressAs;
+      await Api.putConfigFile("ai_config.json", JSON.stringify(parsed, null, 2));
+    } catch (e) {
+      errEl.textContent = `Couldn't save persona: ${e.message}`;
+      return;
+    }
+
+    saveSkinPrefs({ accent, assistantName, addressAs });
+    applyAccent(accent);
+    applyAssistantNameToChrome(assistantName);
+    qs("#skin-backdrop").hidden = true;
+    toast("Skin saved.", "info");
+  }
+
+  function resetSkinToDefaults() {
+    qs("#skin-assistant-name").value = SKIN_DEFAULT_NAME;
+    qs("#skin-address-as").value = SKIN_DEFAULT_ADDRESS;
+    qs("#skin-custom-color").value = SKIN_DEFAULT_ACCENT;
+    applyAccent(SKIN_DEFAULT_ACCENT);
+    renderSkinSwatches(SKIN_DEFAULT_ACCENT);
+  }
+
+  function wireSkinModal() {
+    qs("#btn-skin").addEventListener("click", openSkinModal);
+    qs("#skin-close").addEventListener("click", closeSkinModal);
+    qs("#btn-skin-cancel").addEventListener("click", closeSkinModal);
+    qs("#skin-backdrop").addEventListener("click", (e) => {
+      if (e.target === qs("#skin-backdrop")) closeSkinModal();
+    });
+    qs("#btn-skin-save").addEventListener("click", saveSkin);
+    qs("#btn-skin-reset").addEventListener("click", resetSkinToDefaults);
+    // Live preview while picking a custom color, same as clicking a swatch.
+    qs("#skin-custom-color").addEventListener("input", (e) => {
+      applyAccent(e.target.value);
+      renderSkinSwatches(e.target.value);
+    });
+  }
+
   function escapeHtml(s) {
     return String(s).replace(/[&<>"']/g, (c) => ({
       "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
@@ -4575,6 +4787,8 @@
     }
     connectWs();
   }
+
+  wireSkinModal();
 
   tickClock();
   setInterval(tickClock, 1000);
