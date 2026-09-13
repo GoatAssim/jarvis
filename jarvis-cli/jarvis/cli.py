@@ -11,6 +11,7 @@ from pathlib import Path
 
 from . import conditions, stats
 from .palette import Palette
+from .persona_name import current_cli_name, current_display_name, banner_letters
 
 # Make stdout/stderr tolerant of any Unicode character, on every platform.
 # AI responses can contain characters a legacy console codepage has no
@@ -48,9 +49,13 @@ ERR = Palette(sys.stderr)  # jarvis's own status/trace/error messages
 
 
 def banner(p):
+    # Letter-spaced from whichever persona is currently equipped (see
+    # persona_name.banner_letters) instead of a permanently hardcoded
+    # "J A R V I S" — so the startup banner actually matches the name
+    # you renamed the assistant/exe to.
     return f"""{p.CYAN}{p.BOLD}
   -------------------------------
-   J A R V I S
+   {banner_letters()}
    your commands, your rules
   -------------------------------
 {p.RESET}"""
@@ -191,7 +196,11 @@ def describe_steps(spec):
 
 
 def build_parser(commands):
-    parser = argparse.ArgumentParser(prog="jarvis", add_help=False)
+    # `prog` matches whatever this build's entry point was actually named
+    # (see persona_name.py / build_tools/sync_entry_point.py) so --help and
+    # usage errors say e.g. "friday: error: ..." instead of always "jarvis:
+    # error: ..." once the exe itself has been renamed.
+    parser = argparse.ArgumentParser(prog=current_cli_name(), add_help=False)
     subparsers = parser.add_subparsers(dest="command")
     for name, spec in commands.items():
         epilog = describe_steps(spec)
@@ -476,7 +485,7 @@ def confirm_tool_call(name, arguments, risk_note=None):
 
     if sys.stdin.isatty():
         print(
-            f"\n{ERR.YELLOW}\u26a0 Jarvis wants to run: {ERR.BOLD}{name}{ERR.RESET}"
+            f"\n{ERR.YELLOW}\u26a0 {current_display_name()} wants to run: {ERR.BOLD}{name}{ERR.RESET}"
             f"{ERR.YELLOW}({json.dumps(arguments or {}, default=str)}){ERR.RESET}"
         )
         if command_run is not None:
@@ -893,7 +902,7 @@ def run_logs_command(argv, commands):
 
     items = logs_mod.list_logged_conversations()
     if not items:
-        print(f"{ERR.DIM}No logs yet \u2014 logs are written as soon as you ask Jarvis something.{ERR.RESET}")
+        print(f"{ERR.DIM}No logs yet \u2014 logs are written as soon as you ask {current_display_name()} something.{ERR.RESET}")
         return
 
     picked = None

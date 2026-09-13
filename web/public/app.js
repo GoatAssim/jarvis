@@ -55,6 +55,34 @@
     { id: "blunt", label: "No-Nonsense" },
   ];
   const SKIN_DEFAULT_ATTITUDE = "dry";
+
+  // Mirrors jarvis-cli/jarvis/persona_name.py's sanitize_cli_name() EXACTLY
+  // (same illegal-char stripping, same digit-lead/reserved-name fallback)
+  // so the Skin modal's live preview always matches what the next
+  // `script.bat` rebuild will actually name the exe/command as. If the
+  // rules ever change on the Python side, mirror the change here too.
+  const CLI_NAME_RESERVED = new Set([
+    "cli", "cmd", "com", "con", "exe", "nul", "prn", "aux",
+    "python", "python3", "py", "pip", "git", "npm", "node",
+  ]);
+  const CLI_NAME_DEFAULT = "jarvis";
+  function sanitizeCliName(raw) {
+    const cleaned = String(raw || "").replace(/[^A-Za-z0-9]+/g, "").toLowerCase();
+    if (!cleaned) return CLI_NAME_DEFAULT;
+    const withPrefix = /^[0-9]/.test(cleaned) ? "cli" + cleaned : cleaned;
+    if (CLI_NAME_RESERVED.has(withPrefix)) return CLI_NAME_DEFAULT;
+    return withPrefix;
+  }
+  // Updates the "Terminal command after rebuild: <x>" hint under the name
+  // field. Purely cosmetic preview — the real rename only takes effect
+  // once the person reruns script.bat, which is spelled out in the hint
+  // text itself so nobody expects it to apply live.
+  function updateCliNamePreview() {
+    const hint = qs("#skin-cli-name-preview");
+    if (!hint) return;
+    const raw = qs("#skin-assistant-name") ? qs("#skin-assistant-name").value : "";
+    hint.innerHTML = `Terminal command after rebuild: <code>${sanitizeCliName(raw)}</code>`;
+  }
   // Saturation slider range/default, as a percentage (100 = unchanged).
   // Scales the saturation of every skin-derived color (accent, soft, dim,
   // border, secondary/tertiary, background tint) — see applyAccent() below.
@@ -160,6 +188,11 @@
       id: "jarvis",
       name: "J.A.R.V.I.S",
       assistantName: "J.A.R.V.I.S",
+      // Dry, unflappable, quietly sarcastic butler-bot — matches
+      // SKIN_ATTITUDES' own "dry" default, which was modeled on Jarvis in
+      // the first place, so this is really just making that implicit
+      // match explicit for the preset picker.
+      attitude: "dry",
       hex: "#4fd8ff",
       vars: {
         "--accent": "#4fd8ff",
@@ -192,6 +225,11 @@
       id: "friday",
       name: "F.R.I.D.A.Y.",
       assistantName: "F.R.I.D.A.Y.",
+      // MCU's Friday swapped in for Jarvis with a noticeably more
+      // casual, cheeky, quick-with-a-quip energy (still competent and
+      // loyal, just far less formal about it) — "snarky" is the closest
+      // preset to that.
+      attitude: "snarky",
       hex: "#ff4fd6",
       vars: {
         "--accent": "#ff4fd6",
@@ -216,6 +254,10 @@
       id: "edith",
       name: "E.D.I.T.H.",
       assistantName: "E.D.I.T.H.",
+      // Tony's last AI, handed to Peter in Far From Home — clipped,
+      // matter-of-fact, briefs you on drone strikes and threat data with
+      // zero small talk. "formal" is the closest fit to that tone.
+      attitude: "formal",
       hex: "#ff7a29",
       vars: {
         "--accent": "#ff7a29",
@@ -240,6 +282,10 @@
       id: "karen",
       name: "K.A.R.E.N.",
       assistantName: "K.A.R.E.N.",
+      // Peter's suit AI in Homecoming — chatty, upbeat, genuinely
+      // enthusiastic about helping (including unsolicited dating advice).
+      // "warm" (Warm & Encouraging) is the closest match.
+      attitude: "warm",
       hex: "#33e075",
       vars: {
         "--accent": "#33e075",
@@ -552,10 +598,12 @@
     currentPresetId = null;
     qs("#skin-custom-color").value = persona.hex;
     qs("#skin-assistant-name").value = persona.assistantName;
+    qs("#skin-attitude").value = persona.attitude || SKIN_DEFAULT_ATTITUDE;
     applyHardcodedVars(persona.vars);
     renderSkinSwatches(null);
     renderPersonaPresets(persona.id);
     updateSaturationControlState();
+    updateCliNamePreview();
   }
 
   // Updates every place the assistant's name is echoed back in the UI
@@ -644,11 +692,12 @@
     wrap.innerHTML = "";
     for (const persona of PERSONA_PRESETS) {
       const isActive = persona.id === activeId;
+      const attitudeLabel = (SKIN_ATTITUDES.find((a) => a.id === persona.attitude) || {}).label || persona.attitude;
       wrap.appendChild(el("button", {
         type: "button",
         class: "persona-preset-btn" + (isActive ? " is-active" : ""),
         style: `color:${persona.hex};`,
-        title: `${persona.name} — sets the name and a hardcoded palette together`,
+        title: `${persona.name} — sets the name, a hardcoded palette, and a "${attitudeLabel}" attitude together`,
         onclick: () => applyPersonaPreset(persona),
       }, [
         el("span", { class: "persona-preset-btn__dot" }),
@@ -706,6 +755,7 @@
       // — Skin should still be usable (accent at least) even if the CLI
       // backend is offline or ai_config.json is missing/corrupt.
     }
+    updateCliNamePreview();
     qs("#skin-backdrop").hidden = false;
   }
 
@@ -773,6 +823,7 @@
     renderSkinSwatches(currentPresetId);
     renderPersonaPresets(null);
     updateSaturationControlState();
+    updateCliNamePreview();
   }
 
   function wireSkinModal() {
@@ -785,6 +836,10 @@
     });
     qs("#btn-skin-save").addEventListener("click", saveSkin);
     qs("#btn-skin-reset").addEventListener("click", resetSkinToDefaults);
+    // Live preview of the CLI command name as the person types a new name —
+    // see updateCliNamePreview()/sanitizeCliName() above. Purely visual;
+    // the actual exe/command isn't renamed until the next script.bat run.
+    qs("#skin-assistant-name").addEventListener("input", updateCliNamePreview);
     // Live preview while picking a custom color, same as clicking a swatch.
     // A manually typed/picked color is never a preset, even if it happens
     // to match one's hex — see renderSkinSwatches()'s id-matching comment.
