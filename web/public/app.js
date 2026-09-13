@@ -92,11 +92,38 @@
     return `#${h(r)}${h(g)}${h(b)}`;
   }
 
+  // Blends a base color toward the chosen accent by `amount` (0-1). Used to
+  // tint the near-black background layers and structural borders (see
+  // applyAccent) just enough that the app's atmosphere shifts hue with the
+  // skin, without washing everything out in a fully saturated color.
+  function mixTowardAccent(base, accent, amount) {
+    return {
+      r: Math.round(base.r * (1 - amount) + accent.r * amount),
+      g: Math.round(base.g * (1 - amount) + accent.g * amount),
+      b: Math.round(base.b * (1 - amount) + accent.b * amount),
+    };
+  }
+
+  // The hand-picked near-black bases each --bg* token in style.css starts
+  // from, before any accent tint is mixed in (see mixTowardAccent above).
+  const BG_BASE = { r: 0x04, g: 0x07, b: 0x0d };       // --bg
+  const BG1_BASE = { r: 0x07, g: 0x0d, b: 0x16 };       // --bg-1
+  const BG_PANEL_BASE = { r: 9, g: 18, b: 30 };         // --bg-panel (alpha 0.68)
+  const BG_PANEL2_BASE = { r: 13, g: 24, b: 38 };       // --bg-panel-2 (alpha 0.55)
+  const BG_RAISED_BASE = { r: 13, g: 24, b: 38 };       // --bg-raised
+
   // Applies one accent hex to every --accent* CSS var the whole stylesheet
   // is built from, deriving the soft/dim/glow variants the same way the
   // hand-picked defaults in style.css relate to each other (soft ≈ 15%
   // darker, dim ≈ 45% darker + used as low-opacity fills, glow ≈ the base
   // color at 35% alpha for shadows/selection highlight).
+  //
+  // Also lightly re-tints --border/--border-strong and the --bg* background
+  // layers with the same accent (kept subtle — a light wash, not a full
+  // recolor) so picking a skin shifts the app's overall mood a bit, not
+  // just its buttons. At the default cyan accent this reduces to
+  // (almost exactly) the original fixed values, so nothing changes unless
+  // you actually pick a different color.
   function applyAccent(hex) {
     const rgb = hexToRgb(hex);
     if (!rgb) return;
@@ -105,6 +132,19 @@
     root.setProperty("--accent-soft", rgbToHex(mixWithBlack(rgb, 0.15)));
     root.setProperty("--accent-dim", rgbToHex(mixWithBlack(rgb, 0.55)));
     root.setProperty("--accent-glow", `rgba(${rgb.r}, ${rgb.g}, ${rgb.b}, 0.35)`);
+    root.setProperty("--border", `rgba(${rgb.r}, ${rgb.g}, ${rgb.b}, 0.09)`);
+    root.setProperty("--border-strong", `rgba(${rgb.r}, ${rgb.g}, ${rgb.b}, 0.16)`);
+
+    const bg = mixTowardAccent(BG_BASE, rgb, 0.018);
+    const bg1 = mixTowardAccent(BG1_BASE, rgb, 0.02);
+    const bgPanel = mixTowardAccent(BG_PANEL_BASE, rgb, 0.045);
+    const bgPanel2 = mixTowardAccent(BG_PANEL2_BASE, rgb, 0.045);
+    const bgRaised = mixTowardAccent(BG_RAISED_BASE, rgb, 0.035);
+    root.setProperty("--bg", rgbToHex(bg));
+    root.setProperty("--bg-1", rgbToHex(bg1));
+    root.setProperty("--bg-panel", `rgba(${bgPanel.r}, ${bgPanel.g}, ${bgPanel.b}, 0.68)`);
+    root.setProperty("--bg-panel-2", `rgba(${bgPanel2.r}, ${bgPanel2.g}, ${bgPanel2.b}, 0.55)`);
+    root.setProperty("--bg-raised", rgbToHex(bgRaised));
   }
 
   // Updates every place the assistant's name is echoed back in the UI chrome
