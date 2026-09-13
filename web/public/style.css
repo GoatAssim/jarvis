@@ -1001,6 +1001,14 @@ input.is-invalid{ border-color: var(--red) !important; }
 }
 .provider-picker__item:hover{ background: var(--bg-panel-2); }
 .provider-picker__item.is-active{ color: var(--accent); }
+.provider-picker__item-main{ display: flex; align-items: baseline; gap: 7px; }
+.provider-picker__item-order{
+  display: inline-flex; align-items: center; justify-content: center;
+  min-width: 15px; height: 15px; padding: 0 3px; border-radius: 999px;
+  background: var(--accent); color: var(--bg-panel, #000);
+  font-family: var(--font-mono); font-size: 10px; font-weight: 700; line-height: 1;
+  flex-shrink: 0;
+}
 .provider-picker__item-model{ color: var(--text-dimmer); font-size: 11px; font-family: var(--font-mono); flex-shrink: 0; }
 .provider-picker__empty{ padding: 10px 9px; color: var(--text-dimmer); font-size: 12px; }
 

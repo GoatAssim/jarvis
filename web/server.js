@@ -1231,11 +1231,15 @@ wss.on("connection", (ws) => {
         extraEnv.JARVIS_ALLOWED_TOOLS = msg.allowedTools;
       }
       // Ask panel's provider-override picker (see /api/ai/providers above
-      // and cli.py's JARVIS_PROVIDER_OVERRIDE handling) — a provider name
-      // only, never trusted as a path/shell fragment; same conservative
-      // shape-check as JARVIS_ALLOWED_TOOLS above. Absent/invalid just
-      // means "no override", identical to before this existed.
-      if (typeof msg.provider === "string" && /^[A-Za-z0-9_-]{1,64}$/.test(msg.provider)) {
+      // and cli.py's JARVIS_PROVIDER_OVERRIDE handling) — either a single
+      // provider name, or an ordered comma-separated list of names (the
+      // order the user picked them in becomes the try-order for that ask;
+      // see cli.py's _parse_provider_override_value, which this same
+      // shape feeds into). Never trusted as a path/shell fragment; same
+      // conservative shape-check as JARVIS_ALLOWED_TOOLS above, just
+      // repeated across up to 10 comma-separated names. Absent/invalid
+      // just means "no override", identical to before this existed.
+      if (typeof msg.provider === "string" && /^[A-Za-z0-9_-]{1,64}(,[A-Za-z0-9_-]{1,64}){0,9}$/.test(msg.provider)) {
         extraEnv.JARVIS_PROVIDER_OVERRIDE = msg.provider;
       }
       const onStdoutLine = (line) => {

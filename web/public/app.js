@@ -470,10 +470,15 @@
 
     // Provider-override picker — list of {name, model, type} from
     // /api/ai/providers (already-eligible-and-priority-ordered, see that
-    // route in server.js), plus which one (if any) is currently picked.
-    // null means "Auto" \u2014 no override, exact previous behavior.
+    // route in server.js), plus which ones (if any) are currently picked
+    // and in what order. An empty array means "Auto" — no override, exact
+    // previous behavior. A non-empty array is an ordered try-list: the
+    // order names were *clicked* in the picker is the order they're tried
+    // in for that ask (first pick first), same shape as cli.py's
+    // '--provider a,b,c'. See providerOverrideValue() for how this
+    // becomes the wire value sent on "ask"/redo.
     aiProviders: [],
-    providerOverride: null,
+    providerOverride: [],
     pendingConfirmByConv: {},    // convId -> {tool, arguments, risk_note, extraItem} for a confirm
                                   // request that arrived while that conversation wasn't being viewed
     threadExtrasByConv: {},      // convId -> [{bucket, type, data}] non-text thread items (screenshots,
@@ -1485,7 +1490,7 @@
     ensureNotifPermission();
     state.lastTaskLabel = text;
     state.askConversationId = state.activeConversationId;
-    wsSend({ type: "ask", text, redo: true, conversationId: state.activeConversationId, provider: state.providerOverride || undefined });
+    wsSend({ type: "ask", text, redo: true, conversationId: state.activeConversationId, provider: providerOverrideValue() });
   }
 
   function addUserBubble(text, quotes) {
@@ -2400,7 +2405,7 @@
       text,
       quote: quotes.length ? quotes.join("\n---\n") : undefined,
       conversationId,
-      provider: state.providerOverride || undefined,
+      provider: providerOverrideValue(),
     });
   });
 
@@ -2543,26 +2548,44 @@
 
   // ---- Ask panel: provider-override picker -----------------------------
   //
-  // "Auto" (state.providerOverride === null) means exactly the previous
+  // "Auto" (state.providerOverride is empty) means exactly the previous
   // behavior: ai_client.ask() tries every eligible provider in
-  // defaults.provider_priority order, failing over as usual. Picking a
-  // named provider here sends it as `provider` on every "ask"/redo WS
-  // message (see wsSend calls above) \u2014 server.js turns that into
+  // defaults.provider_priority order, failing over as usual.
+  //
+  // Clicking providers in the menu builds an ordered try-list: the first
+  // one you click becomes try #1, the second try #2, and so on — a badge
+  // on each selected item shows its position. Clicking a selected item
+  // again removes it and the remaining badges renumber. The resulting
+  // order is sent as `provider` (a comma-joined string) on every
+  // "ask"/redo WS message (see providerOverrideValue() and the wsSend
+  // calls above) — server.js passes that straight through as
   // JARVIS_PROVIDER_OVERRIDE for that one subprocess call (see
-  // jarvis-provider-override.patch), restricting just that ask to the
-  // chosen provider. It's a client-side-only choice: nothing is persisted
-  // server-side, and it resets to Auto on a full page reload.
+  // jarvis-provider-override.patch and cli.py's
+  // _parse_provider_override_value, which already treats a comma-
+  // separated value as an ordered list). It's a client-side-only choice:
+  // nothing is persisted server-side, and it resets to Auto on a full
+  // page reload. Unlike "Auto", the menu stays open while you build a
+  // multi-provider order — it only closes on "Auto", Escape, or an
+  // outside click, so you can pick several in a row.
   const providerPickerEl = qs("#provider-picker");
   const providerBtn = qs("#btn-provider-override");
   const providerLabel = qs("#provider-override-label");
   const providerMenu = qs("#provider-picker-menu");
 
+  // The wire value for "ask"/redo: undefined for Auto (send nothing, same
+  // as before this existed), otherwise the picked names joined in click
+  // order — e.g. ["openai","anthropic"] -> "openai,anthropic".
+  function providerOverrideValue() {
+    return state.providerOverride.length ? state.providerOverride.join(",") : undefined;
+  }
+
   function renderProviderMenu() {
     providerMenu.innerHTML = "";
+    const isAuto = state.providerOverride.length === 0;
     const autoItem = el("button", {
       type: "button",
-      class: "provider-picker__item" + (state.providerOverride ? "" : " is-active"),
-      onclick: () => selectProviderOverride(null),
+      class: "provider-picker__item" + (isAuto ? " is-active" : ""),
+      onclick: () => clearProviderOverride(),
     }, "Auto (priority order)");
     providerMenu.appendChild(autoItem);
 
@@ -2572,21 +2595,52 @@
       return;
     }
     for (const p of state.aiProviders) {
+      const order = state.providerOverride.indexOf(p.name);
+      const picked = order !== -1;
       const item = el("button", {
         type: "button",
-        class: "provider-picker__item" + (state.providerOverride === p.name ? " is-active" : ""),
-        onclick: () => selectProviderOverride(p.name),
+        class: "provider-picker__item" + (picked ? " is-active" : ""),
+        onclick: () => toggleProviderOverride(p.name),
       }, [
-        el("span", {}, p.name),
+        el("span", { class: "provider-picker__item-main" }, [
+          picked ? el("span", { class: "provider-picker__item-order" }, String(order + 1)) : null,
+          el("span", {}, p.name),
+        ]),
         p.model ? el("span", { class: "provider-picker__item-model" }, p.model) : null,
       ]);
       providerMenu.appendChild(item);
     }
   }
 
-  function selectProviderOverride(name) {
-    state.providerOverride = name;
-    providerLabel.textContent = name ? `Provider: ${name}` : "Provider: Auto";
+  function updateProviderLabel() {
+    const picked = state.providerOverride;
+    if (!picked.length) {
+      providerLabel.textContent = "Provider: Auto";
+    } else if (picked.length === 1) {
+      providerLabel.textContent = `Provider: ${picked[0]}`;
+    } else {
+      providerLabel.textContent = `Provider: ${picked.join(" \u2192 ")}`;
+    }
+  }
+
+  // Toggling is order-preserving: picking a new name appends it (making it
+  // the last try), and un-picking an already-selected name just removes
+  // it from wherever it sits — everything after it shifts down a slot,
+  // which is exactly what re-rendering `order` from indexOf() reflects.
+  function toggleProviderOverride(name) {
+    const i = state.providerOverride.indexOf(name);
+    if (i === -1) {
+      state.providerOverride = [...state.providerOverride, name];
+    } else {
+      state.providerOverride = state.providerOverride.filter((n) => n !== name);
+    }
+    updateProviderLabel();
+    renderProviderMenu();
+  }
+
+  function clearProviderOverride() {
+    state.providerOverride = [];
+    updateProviderLabel();
     closeProviderMenu();
   }
 
