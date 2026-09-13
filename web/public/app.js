@@ -134,12 +134,149 @@
     },
   ];
 
+  // Named "persona" presets — separate from SKIN_PRESETS above, and from
+  // the freeform accent color picker entirely. Each one bundles an
+  // assistant *name* with a fully hardcoded color palette in a single
+  // click: no HSL derivation, no accent math, every value below is a
+  // literal, hand-picked hex/rgba, applied the exact same way (and via the
+  // same applyHardcodedVars() function) as "Classic (hardcoded)" in
+  // SKIN_PRESETS. That's deliberate — a named persona is meant to look
+  // exactly one specific way forever, not shift with a saturation slider
+  // or drift if the accent-derivation formulas above get retuned later.
+  //
+  // "Jarvis" here is the same values as SKIN_PRESETS' classic-hardcoded
+  // entry, written out again rather than shared by reference, so editing
+  // one can never accidentally change the other. Friday/Edith/Karen were
+  // built by running the same scaleHsl/rotateHue/mixTowardAccent math
+  // applyAccent() uses at runtime, but *offline*, once, against a chosen
+  // accent per persona — then baking the results in here as plain values,
+  // per the "use the hardcoded model, not the generic picker" ask. Picking
+  // one of these sets qs("#skin-assistant-name")'s value (persisted to
+  // ai_config.json on Save exactly like typing a name by hand) AND the
+  // full palette below (persisted client-side like every other color
+  // choice) — see applyPersonaPreset().
+  const PERSONA_PRESETS = [
+    {
+      id: "jarvis",
+      name: "J.A.R.V.I.S",
+      assistantName: "J.A.R.V.I.S",
+      hex: "#4fd8ff",
+      vars: {
+        "--accent": "#4fd8ff",
+        "--accent-soft": "#2ea9d6",
+        "--accent-dim": "#164a63",
+        "--accent-glow": "rgba(79, 216, 255, 0.35)",
+        "--accent-secondary": "#f2b544",
+        "--accent-tertiary": "#2b5cff",
+        "--accent-secondary-rgb": "242, 181, 68",
+        "--accent-tertiary-rgb": "43, 92, 255",
+        "--status-online": "var(--green)",
+        "--border": "rgba(102, 214, 255, 0.16)",
+        "--border-strong": "rgba(102, 214, 255, 0.34)",
+        "--bg": "#04070d",
+        "--bg-1": "#070d16",
+        "--bg-panel": "rgba(9, 18, 30, 0.68)",
+        "--bg-panel-2": "rgba(13, 24, 38, 0.55)",
+        "--bg-raised": "#0d1826",
+      },
+    },
+    {
+      // Accent (#ff4fd6) is the exact magenta sampled from the person's own
+      // screenshot of a hand-tweaked pink skin earlier in this project —
+      // the style.css they uploaded to source this from turned out to be
+      // an untouched, pre-vivid-upgrade snapshot with no Friday colors in
+      // it at all (the pink was only ever a runtime localStorage override,
+      // never committed to a file), so this palette was reconstructed from
+      // that screenshot instead of copied from the upload. Flagging this
+      // in case the exact shade matters — happy to adjust hexes on request.
+      id: "friday",
+      name: "F.R.I.D.A.Y.",
+      assistantName: "F.R.I.D.A.Y.",
+      hex: "#ff4fd6",
+      vars: {
+        "--accent": "#ff4fd6",
+        "--accent-soft": "#d62faf",
+        "--accent-dim": "#631651",
+        "--accent-glow": "rgba(255, 79, 214, 0.35)",
+        "--accent-secondary": "#45f2b8",
+        "--accent-tertiary": "#ff2a58",
+        "--accent-secondary-rgb": "69, 242, 184",
+        "--accent-tertiary-rgb": "255, 42, 88",
+        "--status-online": "var(--accent)",
+        "--border": "rgba(255, 102, 219, 0.16)",
+        "--border-strong": "rgba(255, 102, 219, 0.34)",
+        "--bg": "#180d1d",
+        "--bg-1": "#1d1327",
+        "--bg-panel": "rgba(53, 29, 63, 0.68)",
+        "--bg-panel-2": "rgba(52, 33, 66, 0.55)",
+        "--bg-raised": "#2f203f",
+      },
+    },
+    {
+      id: "edith",
+      name: "E.D.I.T.H.",
+      assistantName: "E.D.I.T.H.",
+      hex: "#ff7a29",
+      vars: {
+        "--accent": "#ff7a29",
+        "--accent-soft": "#c16126",
+        "--accent-dim": "#572d13",
+        "--accent-glow": "rgba(255, 122, 41, 0.35)",
+        "--accent-secondary": "#244af0",
+        "--accent-tertiary": "#ffed08",
+        "--accent-secondary-rgb": "36, 74, 240",
+        "--accent-tertiary-rgb": "255, 237, 8",
+        "--status-online": "var(--accent)",
+        "--border": "rgba(255, 135, 62, 0.16)",
+        "--border-strong": "rgba(255, 135, 62, 0.34)",
+        "--bg": "#18100f",
+        "--bg-1": "#1d1718",
+        "--bg-panel": "rgba(53, 37, 32, 0.68)",
+        "--bg-panel-2": "rgba(52, 40, 38, 0.55)",
+        "--bg-raised": "#2f2626",
+      },
+    },
+    {
+      id: "karen",
+      name: "K.A.R.E.N.",
+      assistantName: "K.A.R.E.N.",
+      hex: "#33e075",
+      vars: {
+        "--accent": "#33e075",
+        "--accent-soft": "#36a05f",
+        "--accent-dim": "#1a492c",
+        "--accent-glow": "rgba(51, 224, 117, 0.35)",
+        "--accent-secondary": "#d12e4d",
+        "--accent-tertiary": "#20d4c8",
+        "--accent-secondary-rgb": "209, 46, 77",
+        "--accent-tertiary-rgb": "32, 212, 200",
+        "--status-online": "var(--accent)",
+        "--border": "rgba(68, 227, 128, 0.16)",
+        "--border-strong": "rgba(68, 227, 128, 0.34)",
+        "--bg": "#081815",
+        "--bg-1": "#0b201f",
+        "--bg-panel": "rgba(17, 55, 46, 0.68)",
+        "--bg-panel-2": "rgba(19, 56, 51, 0.55)",
+        "--bg-raised": "#123431",
+      },
+    },
+  ];
+
   // Tracks which preset (by id) is currently selected in the Skin modal, so
   // Save/Cancel/swatch-highlighting can tell a preset choice apart from a
   // raw custom color that just happens to match a preset's hex — see
   // renderSkinSwatches() and saveSkin(). null means "custom color, no
   // preset selected". Reset whenever the modal opens.
   let currentPresetId = null;
+
+  // Same idea as currentPresetId, for PERSONA_PRESETS instead of
+  // SKIN_PRESETS. The two are mutually exclusive in the UI (picking a
+  // persona clears the accent-swatch selection and vice versa — see
+  // applyPersonaPreset(), renderSkinSwatches()'s onclick, and the custom
+  // color input handler in wireSkinModal()) since a persona's whole point
+  // is a specific, non-derived palette; picking a plain accent afterward
+  // means "no, override with a computed one instead."
+  let currentPersonaId = null;
 
   // The saturation slider's live value (percentage, 100 = unchanged),
   // mirrored here so applyAccent() can factor it in any time the accent
@@ -167,7 +304,7 @@
   function updateSaturationControlState() {
     const slider = qs("#skin-saturation");
     if (!slider) return;
-    slider.disabled = currentPresetId === "classic-hardcoded";
+    slider.disabled = currentPresetId === "classic-hardcoded" || !!currentPersonaId;
   }
 
   function loadSkinPrefs() {
@@ -401,6 +538,26 @@
     else applyAccent(preset.hex);
   }
 
+  // Live-preview a persona preset: applies its hardcoded palette (never
+  // applyAccent() — see PERSONA_PRESETS' comment) and fills in the name
+  // field, but does NOT push the name to the topbar/chrome yet. That
+  // mirrors how typing a name by hand already works here — chrome only
+  // picks up a new name on Save (applyAssistantNameToChrome is called
+  // there) — so Cancel reverting to the last-saved persona/preset/accent
+  // (see closeSkinModal, which re-reads from localStorage rather than any
+  // of these in-memory picks) also correctly leaves an unsaved persona's
+  // name un-adopted, not just its colors.
+  function applyPersonaPreset(persona) {
+    currentPersonaId = persona.id;
+    currentPresetId = null;
+    qs("#skin-custom-color").value = persona.hex;
+    qs("#skin-assistant-name").value = persona.assistantName;
+    applyHardcodedVars(persona.vars);
+    renderSkinSwatches(null);
+    renderPersonaPresets(persona.id);
+    updateSaturationControlState();
+  }
+
   // Updates every place the assistant's name is echoed back in the UI
   // chrome itself: topbar title, Ask panel title, the "Ask <name>" button,
   // the boot sequence's own title line, and the page title. The boot title
@@ -431,11 +588,17 @@
   (function applySavedSkinEarly() {
     const prefs = loadSkinPrefs();
     currentSaturationPercent = clampSaturationPercent(prefs.saturation);
-    const preset = SKIN_PRESETS.find((p) => p.id === prefs.presetId);
-    if (preset) applyPreset(preset);
-    else if (prefs.accent) applyAccent(prefs.accent);
-    else applyPreset(SKIN_PRESETS.find((p) => p.id === "cyan"));
-    if (prefs.assistantName) applyAssistantNameToChrome(prefs.assistantName);
+    const persona = PERSONA_PRESETS.find((p) => p.id === prefs.personaId);
+    if (persona) {
+      applyHardcodedVars(persona.vars);
+      applyAssistantNameToChrome(prefs.assistantName || persona.assistantName);
+    } else {
+      const preset = SKIN_PRESETS.find((p) => p.id === prefs.presetId);
+      if (preset) applyPreset(preset);
+      else if (prefs.accent) applyAccent(prefs.accent);
+      else applyPreset(SKIN_PRESETS.find((p) => p.id === "cyan"));
+      if (prefs.assistantName) applyAssistantNameToChrome(prefs.assistantName);
+    }
   })();
 
   // `activePresetId` is whatever's currently selected (or null for "custom
@@ -457,11 +620,40 @@
         onclick: () => {
           qs("#skin-custom-color").value = preset.hex;
           currentPresetId = preset.id;
+          currentPersonaId = null;
           applyPreset(preset);
           renderSkinSwatches(preset.id);
+          renderPersonaPresets(null);
           updateSaturationControlState();
         },
       }));
+    }
+  }
+
+  // Same pattern as renderSkinSwatches, for PERSONA_PRESETS. Rendered as
+  // labeled pills rather than bare color circles since a persona is a name
+  // + palette bundle, not just a color — the label is what actually
+  // identifies "which persona is this" at a glance. Each button's inline
+  // `color` is set to the persona's hex so `currentColor` in .persona-
+  // preset-btn/__dot's CSS (border, glow, dot fill) picks it up without a
+  // dozen hardcoded color rules in style.css; the label itself overrides
+  // back to var(--text) there so it stays legible regardless of hue.
+  function renderPersonaPresets(activeId) {
+    const wrap = qs("#skin-persona-presets");
+    if (!wrap) return;
+    wrap.innerHTML = "";
+    for (const persona of PERSONA_PRESETS) {
+      const isActive = persona.id === activeId;
+      wrap.appendChild(el("button", {
+        type: "button",
+        class: "persona-preset-btn" + (isActive ? " is-active" : ""),
+        style: `color:${persona.hex};`,
+        title: `${persona.name} — sets the name and a hardcoded palette together`,
+        onclick: () => applyPersonaPreset(persona),
+      }, [
+        el("span", { class: "persona-preset-btn__dot" }),
+        el("span", { class: "persona-preset-btn__label" }, persona.name),
+      ]));
     }
   }
 
@@ -480,10 +672,16 @@
     qs("#skin-error").textContent = "";
     const prefs = loadSkinPrefs();
     const accent = prefs.accent || SKIN_DEFAULT_ACCENT;
-    const matchedPreset = SKIN_PRESETS.find((p) => p.id === prefs.presetId);
+    const matchedPersona = PERSONA_PRESETS.find((p) => p.id === prefs.personaId);
+    currentPersonaId = matchedPersona ? matchedPersona.id : null;
+    // A saved persona always wins the accent-swatch slot too — the two are
+    // mutually exclusive (see currentPersonaId's comment) — so only look
+    // for a matching SKIN_PRESETS entry when no persona is active.
+    const matchedPreset = currentPersonaId ? null : SKIN_PRESETS.find((p) => p.id === prefs.presetId);
     currentPresetId = matchedPreset ? matchedPreset.id : null;
-    qs("#skin-custom-color").value = accent;
+    qs("#skin-custom-color").value = matchedPersona ? matchedPersona.hex : accent;
     renderSkinSwatches(currentPresetId);
+    renderPersonaPresets(currentPersonaId);
     currentSaturationPercent = clampSaturationPercent(prefs.saturation);
     const saturationSlider = qs("#skin-saturation");
     if (saturationSlider) saturationSlider.value = currentSaturationPercent;
@@ -518,6 +716,11 @@
     // slider and then hit Cancel.
     const prefs = loadSkinPrefs();
     currentSaturationPercent = clampSaturationPercent(prefs.saturation);
+    const persona = PERSONA_PRESETS.find((p) => p.id === prefs.personaId);
+    if (persona) {
+      applyHardcodedVars(persona.vars);
+      return;
+    }
     const preset = SKIN_PRESETS.find((p) => p.id === prefs.presetId);
     if (preset) applyPreset(preset);
     else if (prefs.accent) applyAccent(prefs.accent);
@@ -545,9 +748,11 @@
       return;
     }
 
-    saveSkinPrefs({ accent, presetId: currentPresetId, assistantName, addressAs, saturation: currentSaturationPercent });
+    saveSkinPrefs({ accent, presetId: currentPresetId, personaId: currentPersonaId, assistantName, addressAs, saturation: currentSaturationPercent });
+    const persona = PERSONA_PRESETS.find((p) => p.id === currentPersonaId);
     const preset = SKIN_PRESETS.find((p) => p.id === currentPresetId);
-    if (preset) applyPreset(preset);
+    if (persona) applyHardcodedVars(persona.vars);
+    else if (preset) applyPreset(preset);
     else applyAccent(accent);
     applyAssistantNameToChrome(assistantName);
     qs("#skin-backdrop").hidden = true;
@@ -560,11 +765,13 @@
     qs("#skin-attitude").value = SKIN_DEFAULT_ATTITUDE;
     qs("#skin-custom-color").value = SKIN_DEFAULT_ACCENT;
     currentPresetId = "cyan";
+    currentPersonaId = null;
     currentSaturationPercent = SKIN_DEFAULT_SATURATION;
     const saturationSlider = qs("#skin-saturation");
     if (saturationSlider) saturationSlider.value = SKIN_DEFAULT_SATURATION;
     applyPreset(SKIN_PRESETS.find((p) => p.id === "cyan"));
     renderSkinSwatches(currentPresetId);
+    renderPersonaPresets(null);
     updateSaturationControlState();
   }
 
@@ -583,8 +790,10 @@
     // to match one's hex — see renderSkinSwatches()'s id-matching comment.
     qs("#skin-custom-color").addEventListener("input", (e) => {
       currentPresetId = null;
+      currentPersonaId = null;
       applyAccent(e.target.value);
       renderSkinSwatches(null);
+      renderPersonaPresets(null);
       updateSaturationControlState();
     });
     // Saturation slider — live preview. Since saturation is baked into the
@@ -599,7 +808,7 @@
     if (saturationSlider) {
       saturationSlider.addEventListener("input", (e) => {
         currentSaturationPercent = clampSaturationPercent(e.target.value);
-        if (currentPresetId === "classic-hardcoded") return;
+        if (currentPresetId === "classic-hardcoded" || currentPersonaId) return;
         const preset = SKIN_PRESETS.find((p) => p.id === currentPresetId);
         if (preset) applyPreset(preset);
         else applyAccent(qs("#skin-custom-color").value);
