@@ -1620,7 +1620,7 @@ def _spawn_title_update(conversation_id, exchange_count):
 
 
 def ask(user_text, commands=None, on_attempt=None, on_tool_call=None, on_tool_result=None, conversation_id=None,
-        on_confirm_request=None, on_route=None):
+        on_confirm_request=None, on_route=None, provider_override=None):
     """Ask Jarvis something, trying every configured, enabled provider in
     order until one answers \u2014 and within each provider, every one of its
     configured keys in order before moving on to the next provider. Always
@@ -1661,6 +1661,21 @@ def ask(user_text, commands=None, on_attempt=None, on_tool_call=None, on_tool_re
     itself (route.tools/route.groups/route.matches) rather than a
     provider attempt. Only called when tools are enabled, since routing
     only happens on that branch.
+
+    provider_override, if given, is a provider *name* (matched
+    case-insensitively against each provider's "name" field, same as
+    defaults.provider_priority) that restricts this single ask() call to
+    that one provider only \u2014 skipping the configured priority order and
+    every other configured provider entirely. It's a one-off, per-call
+    knob (like the "mode" argument to jarvis tool-run/tool-preview): it
+    never touches ai_config.json or any persisted default, and normal
+    multi-key failover *within* that one provider still applies. Omitted
+    (the default) means "no override" \u2014 exact previous behavior, trying
+    every eligible provider in priority order. If the named provider
+    isn't configured, isn't enabled, or has no usable key, ask() fails
+    the same way it would if no providers were configured at all, except
+    result.attempts names the requested provider so the caller can say
+    why.
     """
     cfg = ai_config.load_ai_config()
     persona = cfg["persona"]
@@ -1670,6 +1685,15 @@ def ask(user_text, commands=None, on_attempt=None, on_tool_call=None, on_tool_re
     conv_id = conversation_id if conversations.is_valid_id(conversation_id) else conversations.get_current_id()
 
     providers = _eligible_providers(cfg["providers"], cfg["defaults"])
+    if provider_override:
+        wanted = provider_override.strip().lower()
+        matched = [p for p in providers if (p.get("name") or "").strip().lower() == wanted]
+        if not matched:
+            return AskResult(
+                False, assistant_name=assistant_name, address_user_as=address,
+                attempts=[(provider_override, "not configured, not enabled, or has no API key")],
+            )
+        providers = matched
     if not providers:
         return AskResult(False, assistant_name=assistant_name, address_user_as=address)
 

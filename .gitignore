@@ -19,3 +19,5 @@ jarvis.exe
 *.patch
 web/public/app - Copy.js
 *.rej
+*.rej*
+benchmark*
