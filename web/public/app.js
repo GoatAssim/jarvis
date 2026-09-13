@@ -3327,6 +3327,7 @@
   }
 
   function renderLogsEntries() {
+    renderLogsSettings();
     logsEntriesEl.innerHTML = "";
     logsEntryCount.textContent = state.logsSelected ? `${state.logsEntries.length}` : "";
     if (!state.logsSelected) {
@@ -3353,6 +3354,116 @@
       const body = el("pre", { class: "log-entry__body" }, JSON.stringify(entry.data, null, 2));
       logsEntriesEl.appendChild(el("div", { class: "log-entry" }, [head, body]));
     }
+  }
+
+  // ---- Logs overlay's Settings pane: per-API-key breakdown -----------------
+  // Groups the same entries renderLogsEntries() just rendered by their
+  // `provider` field (ai_client.py's key_label, e.g. "Anthropic (key 1/2)"
+  // or just "Anthropic" when a provider only has one key configured) and
+  // pulls out, per key: the capacity mode it ran under (from the "info"
+  // entry ai_client.py logs once per attempt), total tokens (summed from
+  // "usage" entries — see logs.py), and any console dump lines (from the
+  // "info" entry logged alongside a successful reply's split-out console
+  // block). Purely a read of what's already logged — nothing here changes
+  // what gets written.
+  const KEY_LABEL_RE = /^(.*) \(key (\d+)\/(\d+)\)$/;
+
+  function summarizeLogsByKey(entries) {
+    const order = [];
+    const byLabel = new Map();
+    for (const entry of entries) {
+      const label = entry.provider || "(unknown)";
+      if (!byLabel.has(label)) {
+        byLabel.set(label, {
+          label, capacityMode: null, capacityLabel: null,
+          inputTokens: 0, outputTokens: 0, consoleDump: [],
+        });
+        order.push(label);
+      }
+      const g = byLabel.get(label);
+      const data = entry.data;
+      if (!data || typeof data !== "object") continue;
+      if (entry.direction === "info") {
+        if (data.capacity_mode) {
+          g.capacityMode = data.capacity_mode;
+          g.capacityLabel = data.capacity_label || data.capacity_mode;
+        }
+        if (Array.isArray(data.console_dump) && data.console_dump.length) {
+          g.consoleDump = g.consoleDump.concat(data.console_dump);
+        }
+      } else if (entry.direction === "usage") {
+        g.inputTokens += data.input_tokens || 0;
+        g.outputTokens += data.output_tokens || 0;
+      }
+    }
+    return order.map((label) => byLabel.get(label));
+  }
+
+  function renderLogsSettings() {
+    const container = qs("#logs-settings-body");
+    if (!container) return;
+    container.innerHTML = "";
+    if (!state.logsSelected) {
+      container.appendChild(el("div", { class: "debug-empty" }, "Select a conversation on the left."));
+      return;
+    }
+    if (!state.logsEntries.length) {
+      container.appendChild(el("div", { class: "debug-empty" }, "(empty)"));
+      return;
+    }
+    const groups = summarizeLogsByKey(state.logsEntries);
+    if (!groups.length) {
+      container.appendChild(el("div", { class: "debug-empty" }, "Nothing to show for this conversation yet."));
+      return;
+    }
+    groups.forEach((g, idx) => {
+      const m = KEY_LABEL_RE.exec(g.label);
+      const provider = m ? m[1] : g.label;
+      const keyNum = m ? m[2] : "1";
+      const keyTotal = m ? m[3] : null;
+      const totalTokens = g.inputTokens + g.outputTokens;
+
+      const modeChip = g.capacityMode
+        ? el("span", { class: "mode-chip", "data-mode": g.capacityMode }, [
+            el("span", { class: "mode-chip__dot" }),
+            g.capacityLabel || g.capacityMode,
+          ])
+        : el("span", { class: "mode-chip mode-chip--unknown" }, "unknown");
+
+      const summary = el("summary", { class: "logs-key-card__summary" }, [
+        el("span", { class: "logs-key-card__caret" }),
+        el("span", { class: "logs-key-card__title" },
+          `API key ${keyNum}${keyTotal ? `/${keyTotal}` : ""} — ${provider}`),
+        modeChip,
+        el("span", { class: "logs-key-card__tokens" }, `${totalTokens} tok`),
+      ]);
+
+      const bodyRows = [
+        el("div", { class: "logs-key-row" }, [
+          el("span", { class: "logs-key-row__label" }, "Capacity"),
+          modeChip.cloneNode(true),
+        ]),
+        el("div", { class: "logs-key-row" }, [
+          el("span", { class: "logs-key-row__label" }, "API key"),
+          el("span", { class: "logs-key-row__value" }, `${provider} — key ${keyNum}${keyTotal ? ` of ${keyTotal}` : ""}`),
+        ]),
+        el("div", { class: "logs-key-row" }, [
+          el("span", { class: "logs-key-row__label" }, "Tokens"),
+          el("span", { class: "logs-key-row__value" }, `${totalTokens} tok (in=${g.inputTokens} out=${g.outputTokens})`),
+        ]),
+      ];
+      const consoleBlock = g.consoleDump.length
+        ? el("pre", { class: "logs-key-console" }, g.consoleDump.join("\n"))
+        : el("div", { class: "debug-empty" }, "No console output logged for this key.");
+      bodyRows.push(el("div", { class: "logs-key-row" }, [
+        el("span", { class: "logs-key-row__label" }, "Console"),
+      ]));
+      bodyRows.push(consoleBlock);
+
+      const details = el("details", { class: "logs-key-card" }, [summary, el("div", { class: "logs-key-card__body" }, bodyRows)]);
+      if (idx === 0) details.open = true;
+      container.appendChild(details);
+    });
   }
 
   qs("#logs-view-toggle").addEventListener("click", (e) => {
