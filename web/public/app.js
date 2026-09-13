@@ -1705,6 +1705,46 @@
 
   const ICON_RUN = '<svg viewBox="0 0 24 24" width="11" height="11" aria-hidden="true"><path d="M6 4l14 8-14 8V4z" fill="currentColor"/></svg>';
   const ICON_ADD = '<svg viewBox="0 0 24 24" width="11" height="11" aria-hidden="true"><path d="M11 5h2v6h6v2h-6v6h-2v-6H5v-2h6V5z" fill="currentColor"/></svg>';
+  const ICON_STAR_OUTLINE = '<svg viewBox="0 0 24 24" width="11" height="11" aria-hidden="true"><path d="M12 3.5l2.47 5.51 5.98.58-4.5 4.03 1.32 5.88L12 16.62l-5.27 2.88 1.32-5.88-4.5-4.03 5.98-.58L12 3.5z" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/></svg>';
+  const ICON_STAR_FILLED = '<svg viewBox="0 0 24 24" width="11" height="11" aria-hidden="true"><path d="M12 3.5l2.47 5.51 5.98.58-4.5 4.03 1.32 5.88L12 16.62l-5.27 2.88 1.32-5.88-4.5-4.03 5.98-.58L12 3.5z" fill="currentColor"/></svg>';
+
+  // Purely front-end command favoriting — a Set of command names kept in
+  // localStorage, same try/catch-and-shrug persistence pattern as
+  // loadSkinPrefs/saveSkinPrefs above. Nothing here ever touches
+  // commands.json or the CLI; a favorite is just a client-side pin on
+  // where a command sorts in the list, so it's scoped per-browser like
+  // every other localStorage skin/accent preference in this file.
+  function loadFavoriteCommands() {
+    try {
+      const raw = localStorage.getItem(FAVORITE_COMMANDS_STORAGE_KEY);
+      const parsed = raw ? JSON.parse(raw) : null;
+      return new Set(Array.isArray(parsed) ? parsed : []);
+    } catch (e) {
+      return new Set();
+    }
+  }
+
+  function saveFavoriteCommands(favoriteSet) {
+    try {
+      localStorage.setItem(FAVORITE_COMMANDS_STORAGE_KEY, JSON.stringify([...favoriteSet]));
+    } catch (e) {
+      // Best-effort only — a full/blocked localStorage just means
+      // favorites don't survive a reload, nothing else breaks.
+    }
+  }
+
+  let favoriteCommands = loadFavoriteCommands();
+
+  function isFavoriteCommand(name) {
+    return favoriteCommands.has(name);
+  }
+
+  function toggleFavoriteCommand(name) {
+    if (favoriteCommands.has(name)) favoriteCommands.delete(name);
+    else favoriteCommands.add(name);
+    saveFavoriteCommands(favoriteCommands);
+    renderCommandList();
+  }
 
   function quickRunCommand(name) {
     const spec = state.commands[name];
@@ -1742,7 +1782,13 @@
       return;
     }
     const query = state.cmdSearch.trim().toLowerCase();
-    const names = allNames.filter((name) => commandMatchesSearch(name, state.commands[name], query));
+    const names = allNames
+      .filter((name) => commandMatchesSearch(name, state.commands[name], query))
+      // Favorited commands float to the top; within each group (favorited
+      // / not), relative order is left exactly as it came in — a plain
+      // .sort() would be unstable-in-spirit here, so this compares only
+      // favorite-status and lets JS's stable sort preserve everything else.
+      .sort((a, b) => Number(isFavoriteCommand(b)) - Number(isFavoriteCommand(a)));
     list.innerHTML = "";
     if (names.length === 0) {
       list.appendChild(el("div", { class: "empty-hint" }, `No commands match \u201c${state.cmdSearch.trim()}\u201d.`));
@@ -1750,11 +1796,20 @@
     }
     for (const name of names) {
       const spec = state.commands[name];
+      const favorited = isFavoriteCommand(name);
       const card = el("div", {
-        class: "cmd-card" + (name === state.selected ? " is-active" : ""),
+        class: "cmd-card" + (name === state.selected ? " is-active" : "") + (favorited ? " is-favorited" : ""),
         onclick: () => selectCommand(name),
       }, [
         el("div", { class: "cmd-card__quick" }, [
+          el("button", {
+            type: "button",
+            class: "cmd-card__quick-btn cmd-card__quick-btn--favorite" + (favorited ? " is-active" : ""),
+            title: favorited ? `Unfavorite "${name}"` : `Favorite "${name}"`,
+            "aria-label": favorited ? `Unfavorite ${name}` : `Favorite ${name}`,
+            html: favorited ? ICON_STAR_FILLED : ICON_STAR_OUTLINE,
+            onclick: (e) => { e.stopPropagation(); toggleFavoriteCommand(name); },
+          }),
           el("button", {
             type: "button",
             class: "cmd-card__quick-btn cmd-card__quick-btn--run",
@@ -1943,6 +1998,7 @@
       await Api.deleteCommand(name);
       state.selected = null;
       pruneSequence(name);
+      if (favoriteCommands.delete(name)) saveFavoriteCommands(favoriteCommands);
       await loadCommands();
       toast(`Deleted "${name}".`, "info");
     } catch (e) {
@@ -5505,7 +5561,13 @@
       const originalName = state.editingOriginalName;
       if (originalName) {
         await Api.updateCommand(originalName, name, spec);
-        if (originalName !== name) renameInSequence(originalName, name);
+        if (originalName !== name) {
+          renameInSequence(originalName, name);
+          if (favoriteCommands.delete(originalName)) {
+            favoriteCommands.add(name);
+            saveFavoriteCommands(favoriteCommands);
+          }
+        }
       } else {
         await Api.createCommand(name, spec);
       }
