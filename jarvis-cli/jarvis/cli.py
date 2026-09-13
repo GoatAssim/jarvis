@@ -615,7 +615,32 @@ def _run_segment_batch(commands, parser, batch):
     return list(zip(batch, results))
 
 
-def handle_ai_prompt(text, commands):
+def _extract_provider_override(argv):
+    """Pull a leading '--provider NAME' or '--provider=NAME' out of a raw
+    argv list before it's joined into free-text for handle_ai_prompt.
+    Returns (remaining_argv, provider_name_or_None). Only the first match
+    is honored; matching '--provider' with nothing after it (or as the
+    very last token) is left alone and treated as ordinary text, since
+    that's ambiguous rather than clearly a flag."""
+    out = []
+    override = None
+    i = 0
+    while i < len(argv):
+        tok = argv[i]
+        if override is None and tok.startswith("--provider="):
+            override = tok.split("=", 1)[1].strip() or None
+            i += 1
+            continue
+        if override is None and tok == "--provider" and i + 1 < len(argv):
+            override = argv[i + 1].strip() or None
+            i += 2
+            continue
+        out.append(tok)
+        i += 1
+    return out, override
+
+
+def handle_ai_prompt(text, commands, provider_override=None):
     """Anything typed at jarvis that isn't a known command name lands here
     instead of the "Unknown command" error \u2014 it's treated as a message for
     the AI, not a CLI invocation. This is what 'jarvis "text"' (or even
@@ -740,7 +765,7 @@ def handle_ai_prompt(text, commands):
         text, commands, on_attempt=on_attempt, on_tool_call=on_tool_call,
         on_tool_result=on_tool_result,
         conversation_id=conv_id, on_confirm_request=on_confirm_request,
-        on_route=on_route,
+        on_route=on_route, provider_override=provider_override,
     )
 
     for label, err in result.attempts:
@@ -1349,7 +1374,12 @@ def main():
         return
 
     if argv[0] not in commands and argv[0] not in RESERVED_NAMES:
-        sys.exit(handle_ai_prompt(" ".join(argv), commands))
+        # '--provider NAME' / '--provider=NAME' can appear anywhere in the
+        # free-text args (e.g. 'jarvis --provider anthropic what time is
+        # it') and is stripped out before the rest is joined into the
+        # actual message \u2014 see _extract_provider_override.
+        rest, provider_override = _extract_provider_override(argv)
+        sys.exit(handle_ai_prompt(" ".join(rest), commands, provider_override=provider_override))
 
     batches = split_chain_batches(argv)
     if not batches:
