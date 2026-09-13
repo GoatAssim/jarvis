@@ -364,6 +364,33 @@ def _sort_providers_by_priority(providers, priority_list):
     return [p for _, p in indexed]
 
 
+def _order_providers_by_override(eligible_providers, wanted_names):
+    """Reorder (and filter down to) `eligible_providers` per a caller-picked
+    ordered list of names \u2014 the general form of provider_override. Matching
+    is case-insensitive against each provider's "name" field; a name with no
+    match among the eligible providers is silently skipped rather than
+    erroring the whole call (see ask()'s provider_override docs for why).
+    Duplicate names in wanted_names are collapsed to the name's first
+    position \u2014 picking the same provider twice doesn't try it twice."""
+    by_lower_name = {}
+    for p in eligible_providers:
+        key = (p.get("name") or "").strip().lower()
+        if key and key not in by_lower_name:
+            by_lower_name[key] = p
+
+    ordered = []
+    seen = set()
+    for name in wanted_names:
+        key = name.strip().lower()
+        if key in seen:
+            continue
+        match = by_lower_name.get(key)
+        if match is not None:
+            ordered.append(match)
+            seen.add(key)
+    return ordered
+
+
 def _resolve(provider, defaults):
     """Provider-specific fields win; anything unset falls back to the
     config's 'defaults' block, then a hardcoded default."""
@@ -1662,19 +1689,33 @@ def ask(user_text, commands=None, on_attempt=None, on_tool_call=None, on_tool_re
     provider attempt. Only called when tools are enabled, since routing
     only happens on that branch.
 
-    provider_override, if given, is a provider *name* (matched
-    case-insensitively against each provider's "name" field, same as
-    defaults.provider_priority) that restricts this single ask() call to
-    that one provider only \u2014 skipping the configured priority order and
-    every other configured provider entirely. It's a one-off, per-call
-    knob (like the "mode" argument to jarvis tool-run/tool-preview): it
-    never touches ai_config.json or any persisted default, and normal
-    multi-key failover *within* that one provider still applies. Omitted
-    (the default) means "no override" \u2014 exact previous behavior, trying
-    every eligible provider in priority order. If the named provider
-    isn't configured, isn't enabled, or has no usable key, ask() fails
+    provider_override, if given, restricts this single ask() call to a
+    custom, caller-picked subset/order of providers instead of the
+    configured defaults.provider_priority \u2014 skipping every other
+    configured provider entirely. Accepts either:
+
+      - a single provider name (string) \u2014 the original one-provider form,
+        kept working as-is for the plain-CLI '--provider NAME' flag; or
+      - an ordered list/tuple of names, e.g. ["anthropic", "gemini"] \u2014
+        try anthropic first, then gemini, in exactly that order, ignoring
+        every other configured provider and defaults.provider_priority.
+        This is what powers the Ask panel's multi-pick provider-order
+        picker (see _order_providers_by_override() below and
+        jarvis-provider-override-ranked.patch): the *order the person
+        clicked providers in* becomes the try-order for that one ask.
+
+    Matching is case-insensitive against each provider's "name" field
+    (same lookup provider_priority uses). It's a one-off, per-call knob
+    (like the "mode" argument to jarvis tool-run/tool-preview): it never
+    touches ai_config.json or any persisted default, and normal multi-key
+    failover *within* each named provider still applies. Omitted (the
+    default) means "no override" \u2014 exact previous behavior, trying every
+    eligible provider in priority order. Names that don't match any
+    eligible provider (wrong name, disabled, or no usable key) are simply
+    dropped from the try-order rather than failing the whole call \u2014
+    unless *every* name given fails to match, in which case ask() fails
     the same way it would if no providers were configured at all, except
-    result.attempts names the requested provider so the caller can say
+    result.attempts names every requested provider so the caller can say
     why.
     """
     cfg = ai_config.load_ai_config()
@@ -1686,12 +1727,16 @@ def ask(user_text, commands=None, on_attempt=None, on_tool_call=None, on_tool_re
 
     providers = _eligible_providers(cfg["providers"], cfg["defaults"])
     if provider_override:
-        wanted = provider_override.strip().lower()
-        matched = [p for p in providers if (p.get("name") or "").strip().lower() == wanted]
+        wanted_names = (
+            [provider_override] if isinstance(provider_override, str)
+            else [n for n in provider_override if isinstance(n, str) and n.strip()]
+        )
+        matched = _order_providers_by_override(providers, wanted_names)
         if not matched:
             return AskResult(
                 False, assistant_name=assistant_name, address_user_as=address,
-                attempts=[(provider_override, "not configured, not enabled, or has no API key")],
+                attempts=[(", ".join(wanted_names) or str(provider_override),
+                           "not configured, not enabled, or has no API key")],
             )
         providers = matched
     if not providers:
