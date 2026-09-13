@@ -28,6 +28,53 @@ DEFAULT_MAX_TOKENS = 1700
 DEFAULT_ASSISTANT_NAME = "J.A.R.V.I.S"
 DEFAULT_ADDRESS = "sir"
 DEFAULT_TOOLS_ENABLED = True
+DEFAULT_ATTITUDE = "dry"
+
+# Personality presets for the persona's tone, selectable from the web UI's
+# Skin modal (persona.attitude in ai_config.json) or by hand-editing that
+# file. Each entry drives two spots in _system_prompt(): "full" is the
+# clause slotted into the full (uncompact) persona line ("...think a
+# supremely capable, unflappable AI butler: {full}. Address the user
+# as..."), and "compact" is the whole short sentence used in the 100%-
+# capacity persona line in place of "Dry wit, concise." Deliberately NOT
+# used in ultra (50% capacity) mode at all, regardless of which attitude is
+# picked \u2014 see the "dry wit is flavor, not a rule" comment on the ultra
+# branch below; that token-saving call applies no matter which attitude is
+# selected, not just the default. "dry" is the original, unchanged
+# personality this app always had \u2014 kept as the default so nobody's
+# persona changes underneath them just because this feature shipped.
+ATTITUDE_PRESETS = {
+    "dry": {
+        "label": "Dry Wit",
+        "full": "dry wit, complete composure, quiet confidence, never groveling or over-apologizing",
+        "compact": "Dry wit, concise.",
+    },
+    "cheerful": {
+        "label": "Cheerful",
+        "full": "upbeat and warmly enthusiastic, genuinely pleased to help, quick with encouragement",
+        "compact": "Upbeat and encouraging, concise.",
+    },
+    "snarky": {
+        "label": "Snarky",
+        "full": "sharp and playfully sarcastic, quick with a dry jab, but never actually unhelpful or mean about it",
+        "compact": "Playfully sarcastic, concise.",
+    },
+    "formal": {
+        "label": "Formal Butler",
+        "full": "old-world formal and impeccably polite, in the manner of a classic household butler, never casual or familiar",
+        "compact": "Formal and polite, concise.",
+    },
+    "warm": {
+        "label": "Warm & Encouraging",
+        "full": "warm, patient, and encouraging, like a trusted mentor genuinely invested in things going well",
+        "compact": "Warm and patient, concise.",
+    },
+    "blunt": {
+        "label": "No-Nonsense",
+        "full": "blunt and no-nonsense, skips the pleasantries and gets straight to the point, respects the user's time above all",
+        "compact": "Blunt and direct, concise.",
+    },
+}
 
 MAX_COMMANDS_LISTED = 12  # cap how many command names+descriptions go into every prompt
 COMPACT_MAX_COMMANDS = 6
@@ -661,32 +708,34 @@ def _system_prompt(persona, commands_ctx, freq_ctx, tools_enabled,
     name = persona.get("assistant_name") or DEFAULT_ASSISTANT_NAME
     address = persona.get("address_user_as") or DEFAULT_ADDRESS
     extra = (persona.get("extra_instructions") or "").strip()
+    attitude = ATTITUDE_PRESETS.get(persona.get("attitude"), ATTITUDE_PRESETS[DEFAULT_ATTITUDE])
 
     parts = []
     if compact_persona:
         if ultra:
             # Ultra (50% Capacity): trims the compact persona line further —
-            # "dry wit" is flavor, not a rule the model needs to be told
+            # attitude flavor is not a rule the model needs to be told
             # explicitly to follow; everything else here is load-bearing
-            # (name, how to address the user, don't claim unconfirmed actions).
+            # (name, how to address the user, don't claim unconfirmed
+            # actions). This holds regardless of which attitude preset is
+            # selected — not just for the "dry" default.
             parts.append(
                 f"You are {name}, a local AI butler. Address the user as "
                 f'"{address}" sometimes. Never claim you did something unless a tool confirmed it.'
             )
         else:
             parts.append(
-                f"You are {name}, a local AI butler. Dry wit, concise. Address the user as "
+                f"You are {name}, a local AI butler. {attitude['compact']} Address the user as "
                 f'"{address}" sometimes. Never claim you did something unless a tool confirmed it.'
             )
     else:
         parts.append(
             f"You are {name}, a private AI assistant running locally for one user on their own "
-            f"computer \u2014 think a supremely capable, unflappable AI butler: dry wit, complete "
-            f"composure, quiet confidence, never groveling or over-apologizing. Address the user as "
-            f'"{address}" sometimes, naturally \u2014 not in every single sentence. Keep replies '
-            f"conversational and to the point: a sentence or two for anything simple, more only when "
-            f"the question genuinely calls for it. Be honest about your limits. Never claim "
-            f"to have taken an action you didn't actually take."
+            f"computer \u2014 think a supremely capable, unflappable AI butler: {attitude['full']}. "
+            f'Address the user as "{address}" sometimes, naturally \u2014 not in every single '
+            f"sentence. Keep replies conversational and to the point: a sentence or two for "
+            f"anything simple, more only when the question genuinely calls for it. Be honest "
+            f"about your limits. Never claim to have taken an action you didn't actually take."
         )
     if has_history:
         if compact_persona:

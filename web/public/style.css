@@ -965,6 +965,12 @@ input.is-invalid{ border-color: var(--red) !important; }
 }
 .skin-field--inline span{ flex-shrink: 0; }
 
+.skin-field--inline input[type="range"]{ flex: 1; accent-color: var(--accent); }
+.skin-field--inline input[type="range"]:disabled{ opacity: 0.4; cursor: not-allowed; }
+.skin-hint{
+  font-size: 11px; color: var(--text-dimmer); margin-top: 6px;
+}
+
 .skin-swatches{ display: flex; flex-wrap: wrap; gap: 14px; margin-bottom: 4px; }
 .skin-swatch{
   width: 38px; height: 38px; border-radius: 50%;

@@ -22,7 +22,7 @@
       <circle cx="100" cy="100" r="6" class="ring ring--core"/>
     </svg>
   </div>
-  <div class="boot__title">J.A.R.V.I.S</div>
+  <div class="boot__title" id="boot-title">J.A.R.V.I.S</div>
   <div class="boot__lines" id="boot-lines"></div>
   <div class="boot__skip">click to skip</div>
 </div>
@@ -58,7 +58,7 @@
     </button>
 
     <button class="btn btn--primary btn--ask-jarvis" id="btn-ask-jarvis" type="button">
-      <span class="btn__spark"></span>Ask Jarvis
+      <span class="btn__spark"></span>Ask <span id="btn-ask-jarvis-label">Jarvis</span>
     </button>
 
     <div class="topbar__clock" id="clock">00:00:00</div>
@@ -536,6 +536,10 @@
           <span>Addresses you as</span>
           <input type="text" id="skin-address-as" maxlength="60" placeholder="sir">
         </label>
+        <label class="skin-field">
+          <span>Attitude</span>
+          <select id="skin-attitude"></select>
+        </label>
       </section>
 
       <section class="skin-section">
@@ -547,12 +551,21 @@
         </label>
       </section>
 
+      <section class="skin-section">
+        <h3>Saturation</h3>
+        <label class="skin-field skin-field--inline">
+          <span>Saturation</span>
+          <input type="range" id="skin-saturation" min="0" max="150" step="5" value="100">
+        </label>
+        <p class="skin-hint">No effect on the "Classic (hardcoded)" preset.</p>
+      </section>
+
       <div class="modal__error" id="skin-error"></div>
     </div>
 
     <div class="modal__foot">
       <div class="modal__foot-actions">
-        <button class="btn btn--ghost" id="btn-skin-reset" type="button" title="Reset name, address, and accent back to defaults">Reset Defaults</button>
+        <button class="btn btn--ghost" id="btn-skin-reset" type="button" title="Reset name, address, attitude, and accent back to defaults">Reset Defaults</button>
         <button class="btn btn--ghost" id="btn-skin-cancel" type="button">Cancel</button>
         <button class="btn btn--primary" id="btn-skin-save" type="button">Save</button>
       </div>
