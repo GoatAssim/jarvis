@@ -59,21 +59,16 @@
   // actually gets matched against.
   const SKIN_PRESETS = [
     { id: "cyan", name: "Cyan (default)", hex: "#4fd8ff" },
-    // Muted from the original #ffb347 (H35°, S100%, L64%) to H35°, S72%,
-    // L56% — scaleHsl({...#ffb347}, 0.72, 0.88).
-    { id: "amber", name: "Amber", hex: "#e09d3f" },
-    // Muted from the original #ff5c72 (H352°, S100%, L68%) to H352°, S72%,
-    // L60% — scaleHsl({...#ff5c72}, 0.72, 0.88).
-    { id: "crimson", name: "Crimson", hex: "#e24f63" },
-    // Muted from the original #b98bff (H264°, S100%, L77%) to H264°, S72%,
-    // L68% — scaleHsl({...#b98bff}, 0.72, 0.88).
-    { id: "violet", name: "Violet", hex: "#a173e8" },
-    // Muted from the original #4fe6a4 (H154°, S75%, L61%) to H154°, S54%,
-    // L53% — scaleHsl({...#4fe6a4}, 0.72, 0.88).
-    { id: "emerald", name: "Emerald", hex: "#48c890" },
-    // Muted from the original #f2b7c2 (H349°, S69%, L83%) to H349°, S50%,
-    // L73% — scaleHsl({...#f2b7c2}, 0.72, 0.88).
-    { id: "rose-gold", name: "Rose Gold", hex: "#dd99a6" },
+    // Muted from the original #ffb347 (H35°, S100%, L64%) to H35°, S55%, same lightness — softened from the original neon swatch.
+    { id: "amber", name: "Amber", hex: "#d6ac70" },
+    // Muted from the original #ff5c72 (H352°, S100%, L68%) to H352°, S55%, same lightness — softened from the original neon swatch.
+    { id: "crimson", name: "Crimson", hex: "#da818d" },
+    // Muted from the original #b98bff (H264°, S100%, L77%) to H264°, S60%, same lightness — softened from the original neon swatch.
+    { id: "violet", name: "Violet", hex: "#bea2e8" },
+    // Muted from the original #4fe6a4 (H154°, S75%, L61%) to H154°, S45%, same lightness — softened from the original neon swatch.
+    { id: "emerald", name: "Emerald", hex: "#6dc8a0" },
+    // Muted from the original #f2b7c2 (H349°, S69%, L83%) to H348°, S40%, same lightness — softened from the original pastel swatch.
+    { id: "rose-gold", name: "Rose Gold", hex: "#e6c3ca" },
     // Not a hand-picked swatch like the others above — this is the exact
     // original --blue (#2b5cff) from the pre-skins build, back when it was
     // a fixed, non-skinnable color (still is, for the "precise" mode chip;
@@ -83,7 +78,8 @@
     // saturation are in the same range as the rest, so it reads cleanly
     // against --bg-1 the same way they do. Deliberately left un-muted, same
     // as Cyan above.
-    { id: "sapphire", name: "Sapphire", hex: "#2b5cff" },
+    // Softened from the original fixed blue (#2b5cff) to keep this skin from reading neon.
+    { id: "sapphire", name: "Sapphire", hex: "#5070da" },
     // The literal, pre-skins J.A.R.V.I.S palette, byte-for-byte — every
     // value below is copied straight from the original :root block (and
 
@@ -274,14 +270,26 @@
   // shifts the app's overall mood a bit, not just its buttons. At the
   // default cyan accent this reduces to (almost exactly) the original fixed
   // values, so nothing changes unless you actually pick a different color.
-  function applyAccent(hex) {
-    const rgb = hexToRgb(hex);
-    if (!rgb) return;
+  // Applies an accent color. Custom/raw colors are softened before they touch
+  // the UI so a fully-saturated picker value does not turn the whole interface
+  // neon. Curated preset hexes are already softened and can opt out via
+  // `preserveInputColor`.
+  function applyAccent(hex, preserveInputColor = false) {
+    const rawRgb = hexToRgb(hex);
+    if (!rawRgb) return;
+    const rgb = preserveInputColor ? rawRgb : (() => {
+      const hsl = rgbToHsl(rawRgb);
+      // Cap very saturated custom colors while preserving their hue/lightness.
+      // Lower-saturation custom colors are left alone instead of getting muddy.
+      hsl.s = Math.min(hsl.s, 0.65);
+      return hslToRgb(hsl);
+    })();
     const root = document.documentElement.style;
+    const appliedHex = rgbToHex(rgb);
     const soft = scaleHsl(rgb, 0.67, 0.78);
     const dim = scaleHsl(rgb, 0.64, 0.36);
     const borderRgb = scaleHsl(rgb, 1, 1.07);
-    root.setProperty("--accent", hex);
+    root.setProperty("--accent", appliedHex);
     root.setProperty("--accent-soft", rgbToHex(soft));
     root.setProperty("--accent-dim", rgbToHex(dim));
     root.setProperty("--accent-glow", `rgba(${rgb.r}, ${rgb.g}, ${rgb.b}, 0.35)`);
@@ -347,7 +355,7 @@
   // directly instead.
   function applyPreset(preset) {
     if (preset.hardcoded) applyHardcodedVars(preset.vars);
-    else applyAccent(preset.hex);
+    else applyAccent(preset.hex, true);
   }
 
   // Updates every place the assistant's name is echoed back in the UI chrome
@@ -373,7 +381,8 @@
     const prefs = loadSkinPrefs();
     const preset = SKIN_PRESETS.find((p) => p.id === prefs.presetId);
     if (preset) applyPreset(preset);
-    else applyAccent(prefs.accent || SKIN_DEFAULT_ACCENT);
+    else if (prefs.accent) applyAccent(prefs.accent);
+    else applyPreset(SKIN_PRESETS.find((p) => p.id === "cyan"));
     if (prefs.assistantName) applyAssistantNameToChrome(prefs.assistantName);
   })();
 
@@ -439,7 +448,8 @@
     const prefs = loadSkinPrefs();
     const preset = SKIN_PRESETS.find((p) => p.id === prefs.presetId);
     if (preset) applyPreset(preset);
-    else applyAccent(prefs.accent || SKIN_DEFAULT_ACCENT);
+    else if (prefs.accent) applyAccent(prefs.accent);
+    else applyPreset(SKIN_PRESETS.find((p) => p.id === "cyan"));
   }
 
   async function saveSkin() {
@@ -475,7 +485,7 @@
     qs("#skin-address-as").value = SKIN_DEFAULT_ADDRESS;
     qs("#skin-custom-color").value = SKIN_DEFAULT_ACCENT;
     currentPresetId = "cyan";
-    applyAccent(SKIN_DEFAULT_ACCENT);
+    applyPreset(SKIN_PRESETS.find((p) => p.id === "cyan"));
     renderSkinSwatches(currentPresetId);
   }
 
