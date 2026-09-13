@@ -288,12 +288,27 @@ app.get("/api/status", async (req, res) => {
 });
 
 app.post("/api/reconnect", async (req, res) => {
-  JARVIS = await resolveJarvis();
+  // Re-resolving can fail transiently even though the executable we're
+  // already talking to is fine — e.g. right after switching a persona
+  // preset, "jarvis config" briefly chokes on a config shape the
+  // currently-installed jarvis.exe predates (added by code that hasn't
+  // been rebuilt into that exe yet via `pip install .`). Don't let a
+  // failed re-resolve tear down a working connection: keep using
+  // whatever JARVIS invocation was last known to work until either a
+  // resolve actually succeeds, or the server itself is restarted (which
+  // starts this from a clean slate — see the startup call below). A
+  // rebuild (pip install .) followed by that restart is what actually
+  // picks up the new executable.
+  const resolved = await resolveJarvis();
+  if (resolved) {
+    JARVIS = resolved;
+  }
   startConfigWatcher();
   res.json({
     online: !!JARVIS,
     invocation: JARVIS ? [JARVIS.cmd, ...JARVIS.args].join(" ") : null,
     configPath: JARVIS ? JARVIS.configPath : null,
+    stale: !resolved && !!JARVIS,
   });
 });
 
