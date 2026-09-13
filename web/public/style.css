@@ -490,7 +490,8 @@ textarea:focus-visible, select:focus-visible, [tabindex]:focus-visible{
   border-radius: 3px;
 }
 .cmd-card:hover .cmd-card__quick,
-.cmd-card:focus-within .cmd-card__quick{
+.cmd-card:focus-within .cmd-card__quick,
+.cmd-card.is-favorited .cmd-card__quick{
   opacity: 1;
   transform: translateY(0);
   pointer-events: auto;
@@ -505,6 +506,15 @@ textarea:focus-visible, select:focus-visible, [tabindex]:focus-visible{
   transition: border-color 0.15s, color 0.15s, box-shadow 0.15s, background 0.15s;
 }
 .cmd-card__quick-btn svg{ display: block; }
+.cmd-card__quick-btn--favorite{ color: var(--text-dim); border-color: var(--border-strong); }
+.cmd-card__quick-btn--favorite:hover{
+  color: #ffd21f; border-color: #ffd21f; background: rgba(255,210,31,0.14);
+  box-shadow: 0 0 10px rgba(255,210,31,0.45);
+}
+.cmd-card__quick-btn--favorite.is-active{
+  color: #ffd21f; border-color: rgba(255,210,31,0.4);
+  box-shadow: 0 0 8px rgba(255,210,31,0.35);
+}
 .cmd-card__quick-btn--run{ color: var(--green); border-color: rgba(70,240,182,0.4); }
 .cmd-card__quick-btn--run:hover{
   color: #fff; border-color: var(--green); background: rgba(70,240,182,0.14);
@@ -516,7 +526,7 @@ textarea:focus-visible, select:focus-visible, [tabindex]:focus-visible{
   box-shadow: 0 0 10px var(--accent-glow);
 }
 
-.cmd-card__name{ font-weight: 600; font-size: 15px; letter-spacing: 0.02em; padding-right: 56px; }
+.cmd-card__name{ font-weight: 600; font-size: 15px; letter-spacing: 0.02em; padding-right: 82px; }
 .cmd-card__desc{
   font-size: 12.5px; color: var(--text-dim); margin-top: 3px;
   display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
