@@ -140,6 +140,25 @@
     return hslToRgb(hsl);
   }
 
+  // Same as scaleHsl but also rotates hue by a fixed offset. Used to derive
+  // --accent-secondary/--accent-tertiary (the "gold"/"blue" family used for
+  // mode chips, badges, and JSON/log syntax coloring) from whatever accent
+  // is picked, instead of leaving those two stuck at their old fixed hex
+  // values — which is what made a non-cyan skin look unfinished (buttons
+  // and borders reskin, but every badge/mode-chip/status-dot next to them
+  // stays exactly the old cyan-era gold/blue/green and clashes). The offsets
+  // (206°, +33°) are measured from the original design's own accent->gold
+  // and accent->blue hue gaps, so at the default cyan accent this reduces
+  // to (almost exactly) the original #f2b544/#2b5cff — same reasoning as
+  // scaleHsl reproducing the original soft/dim.
+  function rotateHue(rgb, hueDeltaDeg, sRatio, lRatio) {
+    const hsl = rgbToHsl(rgb);
+    hsl.h = (hsl.h + hueDeltaDeg + 360) % 360;
+    hsl.s = Math.max(0, Math.min(1, hsl.s * sRatio));
+    hsl.l = Math.max(0, Math.min(1, hsl.l * lRatio));
+    return hslToRgb(hsl);
+  }
+
   // Blends a base color toward the chosen accent by `amount` (0-1). Used to
   // tint the near-black background layers and structural borders (see
   // applyAccent) just enough that the app's atmosphere shifts hue with the
@@ -192,11 +211,31 @@
     root.setProperty("--border", `rgba(${borderRgb.r}, ${borderRgb.g}, ${borderRgb.b}, 0.16)`);
     root.setProperty("--border-strong", `rgba(${borderRgb.r}, ${borderRgb.g}, ${borderRgb.b}, 0.34)`);
 
-    const bg = mixTowardAccent(BG_BASE, rgb, 0.018);
-    const bg1 = mixTowardAccent(BG1_BASE, rgb, 0.02);
-    const bgPanel = mixTowardAccent(BG_PANEL_BASE, rgb, 0.045);
-    const bgPanel2 = mixTowardAccent(BG_PANEL2_BASE, rgb, 0.045);
-    const bgRaised = mixTowardAccent(BG_RAISED_BASE, rgb, 0.035);
+    // The "gold"/"blue" family used for mode chips, badges, and JSON/log
+    // syntax coloring — see rotateHue's comment above for why these move
+    // with the skin now instead of staying fixed.
+    const secondary = rotateHue(rgb, 206, 0.87, 0.93);
+    const tertiary = rotateHue(rgb, 33, 1.0, 0.89);
+    root.setProperty("--accent-secondary", rgbToHex(secondary));
+    root.setProperty("--accent-tertiary", rgbToHex(tertiary));
+    // Triplet form for the rgba(var(--accent-secondary-rgb), alpha) calls in
+    // style.css — see that var's comment for why this exists alongside the
+    // hex one above.
+    root.setProperty("--accent-secondary-rgb", `${secondary.r}, ${secondary.g}, ${secondary.b}`);
+    root.setProperty("--accent-tertiary-rgb", `${tertiary.r}, ${tertiary.g}, ${tertiary.b}`);
+
+    // Tint amount was previously so small (0.018-0.045) that the background
+    // barely shifted hue no matter which accent was picked, leaving the
+    // "deep space" backdrop looking like a leftover from the cyan default
+    // under any other skin. Bumped ~4-5x so the app's overall mood actually
+    // reads as tinted — still nowhere near a full recolor (these are still
+    // near-black), and at the default cyan accent this still lands close to
+    // the original fixed values since cyan is already close to that base.
+    const bg = mixTowardAccent(BG_BASE, rgb, 0.08);
+    const bg1 = mixTowardAccent(BG1_BASE, rgb, 0.09);
+    const bgPanel = mixTowardAccent(BG_PANEL_BASE, rgb, 0.18);
+    const bgPanel2 = mixTowardAccent(BG_PANEL2_BASE, rgb, 0.16);
+    const bgRaised = mixTowardAccent(BG_RAISED_BASE, rgb, 0.14);
     root.setProperty("--bg", rgbToHex(bg));
     root.setProperty("--bg-1", rgbToHex(bg1));
     root.setProperty("--bg-panel", `rgba(${bgPanel.r}, ${bgPanel.g}, ${bgPanel.b}, 0.68)`);

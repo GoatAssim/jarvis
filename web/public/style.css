@@ -22,6 +22,21 @@
   --green:         #46f0b6;
   --red:           #ff5c6c;
 
+  /* Skin-driven "gold"/"blue" family (mode chips, badges, JSON/log syntax
+     coloring) — overridden by applyAccent() in app.js to rotate with
+     whichever accent is picked. These two fallbacks (matching --gold/--blue
+     above) only apply before JS runs. --green/--red are deliberately left
+     alone: they carry pass/fail meaning (success, error, offline) that
+     needs to stay recognizable no matter which skin is active. */
+  --accent-secondary: #f2b544;
+  --accent-tertiary:  #2b5cff;
+  /* "R, G, B" triplets of the two vars above, for use inside rgba(). Kept in
+     sync with --accent-secondary/--accent-tertiary by applyAccent() —
+     CSS custom properties can't be decomposed into channels in plain CSS,
+     so the JS side sets both the hex and the triplet together. */
+  --accent-secondary-rgb: 242, 181, 68;
+  --accent-tertiary-rgb:  43, 92, 255;
+
   --text:          #e6f5fc;
   --text-dim:      #85a2b6;
   --text-dimmer:   #4d6377;
@@ -238,11 +253,15 @@ textarea:focus-visible, select:focus-visible, [tabindex]:focus-visible{
   transition: background 0.3s, box-shadow 0.3s;
 }
 .status-pill.is-online .status-pill__dot{
-  background: var(--green);
-  box-shadow: 0 0 8px var(--green);
+  /* "Online" reads as the reactor being lit, not a pass/fail result, so it
+     tracks the skin's accent (like the boot ring) rather than the fixed
+     --green used for actual success states elsewhere. --red below stays
+     untouched: offline/error needs to stay recognizable regardless of skin. */
+  background: var(--accent);
+  box-shadow: 0 0 8px var(--accent);
   animation: pulse 2.4s ease-in-out infinite;
 }
-.status-pill.is-online #status-text{ color: var(--green); }
+.status-pill.is-online #status-text{ color: var(--accent); }
 .status-pill.is-offline .status-pill__dot{ background: var(--red); box-shadow: 0 0 8px var(--red); }
 .status-pill.is-offline #status-text{ color: var(--red); }
 
@@ -374,20 +393,20 @@ textarea:focus-visible, select:focus-visible, [tabindex]:focus-visible{
   flex-shrink: 0;
 }
 .btn--mode[data-mode="full"]{
-  color: var(--gold); border-color: rgba(242, 181, 68, 0.4);
-  background: linear-gradient(180deg, rgba(242,181,68,0.14), rgba(242,181,68,0.04));
+  color: var(--accent-secondary); border-color: rgba(var(--accent-secondary-rgb), 0.4);
+  background: linear-gradient(180deg, rgba(var(--accent-secondary-rgb),0.14), rgba(var(--accent-secondary-rgb),0.04));
 }
-.btn--mode[data-mode="full"]:hover{ border-color: var(--gold); box-shadow: 0 0 14px rgba(242,181,68,0.3); }
+.btn--mode[data-mode="full"]:hover{ border-color: var(--accent-secondary); box-shadow: 0 0 14px rgba(var(--accent-secondary-rgb),0.3); }
 .btn--mode[data-mode="compact"]{
   color: var(--accent); border-color: color-mix(in srgb, var(--accent) 40%, transparent);
   background: linear-gradient(180deg, color-mix(in srgb, var(--accent) 12%, transparent), color-mix(in srgb, var(--accent) 3%, transparent));
 }
 .btn--mode[data-mode="compact"]:hover{ border-color: var(--accent); box-shadow: 0 0 14px var(--accent-glow); }
 .btn--mode[data-mode="precise"]{
-  color: var(--blue); border-color: rgba(43, 92, 255, 0.5);
-  background: linear-gradient(180deg, rgba(43,92,255,0.18), rgba(43,92,255,0.05));
+  color: var(--accent-tertiary); border-color: rgba(var(--accent-tertiary-rgb), 0.5);
+  background: linear-gradient(180deg, rgba(var(--accent-tertiary-rgb),0.18), rgba(var(--accent-tertiary-rgb),0.05));
 }
-.btn--mode[data-mode="precise"]:hover{ border-color: var(--blue); box-shadow: 0 0 14px rgba(43,92,255,0.45); }
+.btn--mode[data-mode="precise"]:hover{ border-color: var(--accent-tertiary); box-shadow: 0 0 14px rgba(var(--accent-tertiary-rgb),0.45); }
 .btn--mode[data-mode="ultra"]{
   color: var(--green); border-color: rgba(70, 240, 182, 0.4);
   background: linear-gradient(180deg, rgba(70,240,182,0.14), rgba(70,240,182,0.04));
@@ -493,7 +512,7 @@ textarea:focus-visible, select:focus-visible, [tabindex]:focus-visible{
   border: 1px solid var(--border);
   border-radius: 2px; padding: 1px 6px;
 }
-.badge--cond{ color: var(--gold); border-color: rgba(242,181,68,0.35); }
+.badge--cond{ color: var(--accent-secondary); border-color: rgba(var(--accent-secondary-rgb),0.35); }
 
 .empty-hint{ color: var(--text-dimmer); font-size: 13px; padding: 14px; text-align: center; }
 
@@ -530,7 +549,7 @@ textarea:focus-visible, select:focus-visible, [tabindex]:focus-visible{
 .var-field__label{
   font-size: 12.5px; color: var(--text-dim); display: flex; gap: 6px; align-items: baseline;
 }
-.var-field__req{ color: var(--gold); font-size: 10px; letter-spacing: 0.1em; }
+.var-field__req{ color: var(--accent-secondary); font-size: 10px; letter-spacing: 0.1em; }
 .var-field__hint{ font-size: 11px; color: var(--text-dimmer); }
 
 input[type="text"], input[type="search"], textarea, select{
@@ -569,7 +588,7 @@ input.is-invalid{ border-color: var(--red) !important; }
   font-family: var(--font-mono); font-size: 10px;
   border-radius: 2px; padding: 1px 6px; border: 1px solid;
 }
-.tag--if{ color: var(--gold); border-color: rgba(242,181,68,0.35); }
+.tag--if{ color: var(--accent-secondary); border-color: rgba(var(--accent-secondary-rgb),0.35); }
 .tag--coe{ color: var(--text-dim); border-color: var(--border); }
 .tag--parallel{ color: var(--accent-soft); border-color: color-mix(in srgb, var(--accent) 35%, transparent); }
 .tag--hidden{ color: var(--text-dimmer); border-color: var(--border); font-style: italic; }
@@ -596,7 +615,7 @@ input.is-invalid{ border-color: var(--red) !important; }
 .console__idle{ color: var(--text-dimmer); }
 
 .console-line{ white-space: pre-wrap; word-break: break-word; }
-.console-line--cmd{ color: var(--gold); margin: 8px 0 4px; }
+.console-line--cmd{ color: var(--accent-secondary); margin: 8px 0 4px; }
 .console-line--cmd::before{ content: "$ "; opacity: 0.7; }
 .console-line--out{ color: var(--text); }
 .console-line--err{ color: var(--text-dim); }
@@ -776,7 +795,7 @@ input.is-invalid{ border-color: var(--red) !important; }
   color: var(--text); white-space: pre-wrap; word-break: break-word; overflow-wrap: anywhere;
 }
 .json-tree__val--string{ color: var(--text); }
-.json-tree__val--number{ color: var(--gold); }
+.json-tree__val--number{ color: var(--accent-secondary); }
 .json-tree__val--boolean{ color: var(--accent); }
 .json-tree__val--null{ color: var(--text-dimmer); font-style: italic; }
 .json-tree__val--editable{ cursor: text; border-bottom: 1px dashed transparent; }
@@ -1161,18 +1180,18 @@ input.is-invalid{ border-color: var(--red) !important; }
 /* Sensitive tool call awaiting Yes/No from the user (see tool_safety.py /
    cli.py's on_confirm_request) — the running ask is genuinely blocked on
    this until a button is clicked. */
-.ask-msg--confirm .ask-msg__role{ color: var(--gold); }
+.ask-msg--confirm .ask-msg__role{ color: var(--accent-secondary); }
 .ask-msg__bubble.ask-msg__bubble--confirm{
-  border-left-color: var(--gold); display: flex; flex-direction: column; gap: 8px;
+  border-left-color: var(--accent-secondary); display: flex; flex-direction: column; gap: 8px;
 }
 .ask-confirm__tool{ font-family: var(--font-mono); font-size: 13px; color: var(--accent-soft); }
 .ask-confirm__args{
   margin: 0; white-space: pre-wrap; word-break: break-word;
   font-family: var(--font-mono); font-size: 12px; color: var(--text-dim);
 }
-.ask-confirm__risk{ border-left: 2px solid var(--gold); padding: 4px 0 4px 10px; }
+.ask-confirm__risk{ border-left: 2px solid var(--accent-secondary); padding: 4px 0 4px 10px; }
 .ask-confirm__risk-label{
-  font-size: 10.5px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--gold);
+  font-size: 10.5px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--accent-secondary);
 }
 .ask-confirm__risk-note{ font-size: 12.5px; color: var(--text-dim); margin-top: 2px; line-height: 1.5; }
 .ask-confirm__actions{ display: flex; gap: 8px; margin-top: 2px; }
@@ -1187,7 +1206,7 @@ input.is-invalid{ border-color: var(--red) !important; }
    the Settings tab's "Raw JSON" viewers — those stay plain text. */
 .json-key{ color: var(--accent); }
 .json-str{ color: var(--green); }
-.json-num{ color: var(--gold); }
+.json-num{ color: var(--accent-secondary); }
 .json-bool{ color: var(--red); }
 .json-null{ color: var(--text-dimmer); font-style: italic; }
 
@@ -1353,7 +1372,7 @@ audio.ask-dl-player{ max-height: none; background: transparent; }
 }
 .ask-prompt__idle{ color: var(--text-dimmer); }
 .ask-prompt-line{ white-space: pre-wrap; word-break: break-word; color: var(--text-dim); }
-.ask-prompt-line--cmd{ color: var(--gold); margin-top: 8px; }
+.ask-prompt-line--cmd{ color: var(--accent-secondary); margin-top: 8px; }
 .ask-prompt-line--cmd::before{ content: ""; }
 .ask-prompt-line--sys{ color: var(--accent-soft); }
 .ask-prompt-line--tool{ color: var(--text); }
@@ -1626,7 +1645,7 @@ audio.ask-dl-player{ max-height: none; background: transparent; }
   display: flex; align-items: baseline; gap: 6px; flex-wrap: wrap;
 }
 .debug-param-doc__type{ color: var(--text-dimmer); font-size: 10.5px; }
-.debug-param-doc__req{ color: var(--gold); font-size: 10px; letter-spacing: 0.08em; text-transform: uppercase; }
+.debug-param-doc__req{ color: var(--accent-secondary); font-size: 10px; letter-spacing: 0.08em; text-transform: uppercase; }
 .debug-param-doc__desc{ font-size: 11.5px; color: var(--text-dim); margin-top: 3px; line-height: 1.5; }
 .debug-param-doc__enum{ font-size: 11px; color: var(--text-dimmer); margin-top: 3px; font-family: var(--font-mono); }
 
@@ -1637,7 +1656,7 @@ audio.ask-dl-player{ max-height: none; background: transparent; }
 .debug-arg-field__label{
   font-size: 12.5px; color: var(--text-dim); display: flex; gap: 6px; align-items: baseline;
 }
-.debug-arg-field__req{ color: var(--gold); font-size: 10px; letter-spacing: 0.1em; }
+.debug-arg-field__req{ color: var(--accent-secondary); font-size: 10px; letter-spacing: 0.1em; }
 .debug-arg-field textarea{ min-height: 72px; resize: vertical; font-family: var(--font-mono); font-size: 12.5px; }
 .debug-arg-field .check{ margin-top: 2px; }
 
@@ -1675,10 +1694,10 @@ audio.ask-dl-player{ max-height: none; background: transparent; }
 .debug-confirm__tool{ font-family: var(--font-mono); font-size: 13px; color: var(--accent-soft); }
 .debug-confirm__args{ margin: 0; white-space: pre-wrap; word-break: break-word; color: var(--text-dim); }
 .debug-confirm__risk{
-  border-left: 2px solid var(--gold); padding: 4px 0 4px 10px; margin-top: 2px;
+  border-left: 2px solid var(--accent-secondary); padding: 4px 0 4px 10px; margin-top: 2px;
 }
 .debug-confirm__risk-label{
-  font-size: 10.5px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--gold);
+  font-size: 10.5px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--accent-secondary);
 }
 .debug-confirm__risk-note{ font-size: 12px; color: var(--text-dim); margin-top: 2px; line-height: 1.5; }
 .debug-confirm__actions{ display: flex; gap: 8px; margin-top: 4px; }
@@ -1781,7 +1800,7 @@ audio.ask-dl-player{ max-height: none; background: transparent; }
 }
 .log-entry__dir--request{ color: var(--accent-soft); border-color: var(--accent-soft); }
 .log-entry__dir--response{ color: var(--green); border-color: var(--green); }
-.log-entry__dir--tool_call, .log-entry__dir--tool_result{ color: var(--gold); border-color: var(--gold); }
+.log-entry__dir--tool_call, .log-entry__dir--tool_result{ color: var(--accent-secondary); border-color: var(--accent-secondary); }
 .log-entry__dir--error{ color: var(--red); border-color: var(--red); }
 .log-entry__provider{ color: var(--text-dimmer); }
 .log-entry__tokens{ color: var(--text-dimmer); font-variant-numeric: tabular-nums; }
@@ -1865,9 +1884,9 @@ audio.ask-dl-player{ max-height: none; background: transparent; }
   font-family: var(--font-mono); font-size: 10.5px; letter-spacing: 0.03em;
 }
 .mode-chip__dot{ width: 6px; height: 6px; border-radius: 50%; background: currentColor; box-shadow: 0 0 5px currentColor; flex-shrink: 0; }
-.mode-chip[data-mode="full"]{ color: var(--gold); border-color: rgba(242,181,68,0.4); background: rgba(242,181,68,0.08); }
+.mode-chip[data-mode="full"]{ color: var(--accent-secondary); border-color: rgba(var(--accent-secondary-rgb),0.4); background: rgba(var(--accent-secondary-rgb),0.08); }
 .mode-chip[data-mode="compact"]{ color: var(--accent); border-color: color-mix(in srgb, var(--accent) 40%, transparent); background: color-mix(in srgb, var(--accent) 8%, transparent); }
-.mode-chip[data-mode="precise"]{ color: var(--blue); border-color: rgba(43,92,255,0.5); background: rgba(43,92,255,0.1); }
+.mode-chip[data-mode="precise"]{ color: var(--accent-tertiary); border-color: rgba(var(--accent-tertiary-rgb),0.5); background: rgba(var(--accent-tertiary-rgb),0.1); }
 .mode-chip[data-mode="ultra"]{ color: var(--green); border-color: rgba(70,240,182,0.4); background: rgba(70,240,182,0.08); }
 .mode-chip--unknown{ color: var(--text-dimmer); }
 
