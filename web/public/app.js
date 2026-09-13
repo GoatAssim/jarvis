@@ -186,7 +186,79 @@
   // ai_config.json on Save exactly like typing a name by hand) AND the
   // full palette below (persisted client-side like every other color
   // choice) — see applyPersonaPreset().
+  // Logo markup swapped in per persona — see applyPersonaLogo(). Every
+  // other persona keeps the default three-ring arc-reactor mark; Verity
+  // gets a smiley face (two eye dots + a static smile) instead, so it
+  // reads as a ball with a face rather than a reactor. Eyes reuse the
+  // pulsing ring--core/brand-mark__core dot classes; the mouth is stroked
+  // directly in --accent rather than reusing ring--inner/brand-mark__ring--in,
+  // since those classes spin and dash, which looks broken on a mouth
+  // curve instead of a ring.
+  const LOGO_MARKUP = {
+    default: {
+      boot: `<circle cx="100" cy="100" r="90" class="ring ring--outer"/>
+        <circle cx="100" cy="100" r="72" class="ring ring--mid"/>
+        <circle cx="100" cy="100" r="54" class="ring ring--inner"/>
+        <circle cx="100" cy="100" r="6" class="ring ring--core"/>`,
+      brand: `<circle cx="20" cy="20" r="18" class="brand-mark__ring"/>
+        <circle cx="20" cy="20" r="11" class="brand-mark__ring brand-mark__ring--in"/>
+        <circle cx="20" cy="20" r="3" class="brand-mark__core"/>`,
+    },
+    verity: {
+      boot: `<circle cx="100" cy="100" r="90" class="ring ring--outer"/>
+        <circle cx="72" cy="80" r="10" class="ring ring--core"/>
+        <circle cx="128" cy="80" r="10" class="ring ring--core"/>
+        <path d="M 62 120 Q 100 155 138 120" fill="none" stroke="var(--accent)" stroke-width="6" stroke-linecap="round"/>`,
+      brand: `<circle cx="20" cy="20" r="18" class="brand-mark__ring"/>
+        <circle cx="14" cy="17" r="2.2" class="brand-mark__core"/>
+        <circle cx="26" cy="17" r="2.2" class="brand-mark__core"/>
+        <path d="M 12 24 Q 20 30 28 24" fill="none" stroke="var(--accent)" stroke-width="1.8" stroke-linecap="round"/>`,
+    },
+  };
+
+  // Swaps every boot-ring and brand-mark <svg> on the page between the
+  // default arc-reactor rings and Verity's smiley face, via innerHTML
+  // rather than duplicating four near-identical logo variants across
+  // index.html. Called anywhere a persona is applied, previewed, saved,
+  // reverted, or reset — see each call site's comment.
+  function applyPersonaLogo(personaId) {
+    const set = personaId === "verity" ? LOGO_MARKUP.verity : LOGO_MARKUP.default;
+    const boot = qs(".boot__svg");
+    if (boot) boot.innerHTML = set.boot;
+    for (const brand of qsa(".brand-mark")) brand.innerHTML = set.brand;
+  }
+
   const PERSONA_PRESETS = [
+    {
+      // Verity — a yellow smiley-face ball. Palette derived the same way
+      // Friday/Edith/Karen were (offline scaleHsl/rotateHue/mixTowardAccent
+      // pass against a chosen accent, baked in as plain hex values).
+      // What's actually different visually beyond color lives outside
+      // `vars` entirely: applyPersonaLogo() (above) swaps the arc-reactor
+      // rings for Verity's smiley face whenever this preset is active.
+      id: "verity",
+      name: "Verity",
+      assistantName: "Verity",
+      hex: "#ffd21f",
+      vars: {
+        "--accent": "#ffd21f",
+        "--accent-soft": "#c9a316",
+        "--accent-dim": "#5c4a0c",
+        "--accent-glow": "rgba(255, 210, 31, 0.35)",
+        "--accent-secondary": "#2ea9d6",
+        "--accent-tertiary": "#ff6b3d",
+        "--accent-secondary-rgb": "46, 169, 214",
+        "--accent-tertiary-rgb": "255, 107, 61",
+        "--status-online": "var(--accent)",
+        "--border": "rgba(255, 214, 51, 0.16)",
+        "--border-strong": "rgba(255, 214, 51, 0.34)",
+        "--bg": "#181405",
+        "--bg-1": "#1d1808",
+        "--bg-panel": "rgba(53, 45, 15, 0.68)",
+        "--bg-panel-2": "rgba(52, 44, 19, 0.55)",
+        "--bg-raised": "#2f2712",
+      },
+    },
     {
       id: "jarvis",
       name: "J.A.R.V.I.S",
@@ -623,6 +695,7 @@
     qs("#skin-assistant-name").value = persona.assistantName;
     qs("#skin-attitude").value = persona.attitude || SKIN_DEFAULT_ATTITUDE;
     applyHardcodedVars(persona.vars);
+    applyPersonaLogo(persona.id);
     renderSkinSwatches(null);
     renderPersonaPresets(persona.id);
     updateSaturationControlState();
@@ -674,12 +747,14 @@
     const persona = PERSONA_PRESETS.find((p) => p.id === prefs.personaId);
     if (persona) {
       applyHardcodedVars(persona.vars);
+      applyPersonaLogo(persona.id);
       applyAssistantNameToChrome(prefs.assistantName || persona.assistantName);
     } else {
       const preset = SKIN_PRESETS.find((p) => p.id === prefs.presetId);
       if (preset) applyPreset(preset);
       else if (prefs.accent) applyAccent(prefs.accent);
       else applyPreset(SKIN_PRESETS.find((p) => p.id === "cyan"));
+      applyPersonaLogo(null);
       if (prefs.assistantName) applyAssistantNameToChrome(prefs.assistantName);
     }
   })();
@@ -705,6 +780,7 @@
           currentPresetId = preset.id;
           currentPersonaId = null;
           applyPreset(preset);
+          applyPersonaLogo(null);
           renderSkinSwatches(preset.id);
           renderPersonaPresets(null);
           updateSaturationControlState();
@@ -804,12 +880,14 @@
     const persona = PERSONA_PRESETS.find((p) => p.id === prefs.personaId);
     if (persona) {
       applyHardcodedVars(persona.vars);
+      applyPersonaLogo(persona.id);
       return;
     }
     const preset = SKIN_PRESETS.find((p) => p.id === prefs.presetId);
     if (preset) applyPreset(preset);
     else if (prefs.accent) applyAccent(prefs.accent);
     else applyPreset(SKIN_PRESETS.find((p) => p.id === "cyan"));
+    applyPersonaLogo(null);
   }
 
   async function saveSkin() {
@@ -839,6 +917,7 @@
     if (persona) applyHardcodedVars(persona.vars);
     else if (preset) applyPreset(preset);
     else applyAccent(accent);
+    applyPersonaLogo(currentPersonaId);
     applyAssistantNameToChrome(assistantName);
     qs("#skin-backdrop").hidden = true;
     toast("Skin saved.", "info");
@@ -855,6 +934,7 @@
     const saturationSlider = qs("#skin-saturation");
     if (saturationSlider) saturationSlider.value = SKIN_DEFAULT_SATURATION;
     applyPreset(SKIN_PRESETS.find((p) => p.id === "cyan"));
+    applyPersonaLogo(null);
     renderSkinSwatches(currentPresetId);
     renderPersonaPresets(null);
     updateSaturationControlState();
@@ -882,6 +962,7 @@
       currentPresetId = null;
       currentPersonaId = null;
       applyAccent(e.target.value);
+      applyPersonaLogo(null);
       renderSkinSwatches(null);
       renderPersonaPresets(null);
       updateSaturationControlState();
