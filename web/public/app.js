@@ -467,6 +467,13 @@
     convoSearch: "",
     askTraceByConv: {},          // convId -> [{text, cls}] recorded "commands Jarvis runs" lines,
                                   // so switching away and back doesn't lose them (see askPromptLine)
+
+    // Provider-override picker — list of {name, model, type} from
+    // /api/ai/providers (already-eligible-and-priority-ordered, see that
+    // route in server.js), plus which one (if any) is currently picked.
+    // null means "Auto" \u2014 no override, exact previous behavior.
+    aiProviders: [],
+    providerOverride: null,
     pendingConfirmByConv: {},    // convId -> {tool, arguments, risk_note, extraItem} for a confirm
                                   // request that arrived while that conversation wasn't being viewed
     threadExtrasByConv: {},      // convId -> [{bucket, type, data}] non-text thread items (screenshots,
@@ -534,6 +541,7 @@
     listLogs: () => api("GET", "/api/logs"),
     getLog: (id, limit) => api("GET", `/api/logs/${encodeURIComponent(id)}${limit ? `?limit=${limit}` : ""}`),
     clearLog: (id) => api("DELETE", `/api/logs/${encodeURIComponent(id)}`),
+    listAiProviders: () => api("GET", "/api/ai/providers"),
   };
 
   // ===========================================================================
@@ -1477,7 +1485,7 @@
     ensureNotifPermission();
     state.lastTaskLabel = text;
     state.askConversationId = state.activeConversationId;
-    wsSend({ type: "ask", text, redo: true, conversationId: state.activeConversationId });
+    wsSend({ type: "ask", text, redo: true, conversationId: state.activeConversationId, provider: state.providerOverride || undefined });
   }
 
   function addUserBubble(text, quotes) {
@@ -2392,6 +2400,7 @@
       text,
       quote: quotes.length ? quotes.join("\n---\n") : undefined,
       conversationId,
+      provider: state.providerOverride || undefined,
     });
   });
 
@@ -2530,6 +2539,90 @@
     askPromptReset();
     refreshConvoList();
     toast("Conversation cleared.", "info");
+  });
+
+  // ---- Ask panel: provider-override picker -----------------------------
+  //
+  // "Auto" (state.providerOverride === null) means exactly the previous
+  // behavior: ai_client.ask() tries every eligible provider in
+  // defaults.provider_priority order, failing over as usual. Picking a
+  // named provider here sends it as `provider` on every "ask"/redo WS
+  // message (see wsSend calls above) \u2014 server.js turns that into
+  // JARVIS_PROVIDER_OVERRIDE for that one subprocess call (see
+  // jarvis-provider-override.patch), restricting just that ask to the
+  // chosen provider. It's a client-side-only choice: nothing is persisted
+  // server-side, and it resets to Auto on a full page reload.
+  const providerPickerEl = qs("#provider-picker");
+  const providerBtn = qs("#btn-provider-override");
+  const providerLabel = qs("#provider-override-label");
+  const providerMenu = qs("#provider-picker-menu");
+
+  function renderProviderMenu() {
+    providerMenu.innerHTML = "";
+    const autoItem = el("button", {
+      type: "button",
+      class: "provider-picker__item" + (state.providerOverride ? "" : " is-active"),
+      onclick: () => selectProviderOverride(null),
+    }, "Auto (priority order)");
+    providerMenu.appendChild(autoItem);
+
+    if (!state.aiProviders.length) {
+      providerMenu.appendChild(el("div", { class: "provider-picker__empty" },
+        "No configured providers found — check ai_config.json."));
+      return;
+    }
+    for (const p of state.aiProviders) {
+      const item = el("button", {
+        type: "button",
+        class: "provider-picker__item" + (state.providerOverride === p.name ? " is-active" : ""),
+        onclick: () => selectProviderOverride(p.name),
+      }, [
+        el("span", {}, p.name),
+        p.model ? el("span", { class: "provider-picker__item-model" }, p.model) : null,
+      ]);
+      providerMenu.appendChild(item);
+    }
+  }
+
+  function selectProviderOverride(name) {
+    state.providerOverride = name;
+    providerLabel.textContent = name ? `Provider: ${name}` : "Provider: Auto";
+    closeProviderMenu();
+  }
+
+  function openProviderMenu() {
+    renderProviderMenu();
+    providerMenu.hidden = false;
+    providerBtn.setAttribute("aria-expanded", "true");
+  }
+
+  function closeProviderMenu() {
+    providerMenu.hidden = true;
+    providerBtn.setAttribute("aria-expanded", "false");
+  }
+
+  async function loadAiProviders() {
+    try {
+      const data = await Api.listAiProviders();
+      state.aiProviders = Array.isArray(data.providers) ? data.providers : [];
+    } catch {
+      // Non-fatal — the picker still opens with just "Auto" and a "no
+      // providers found" note rather than blocking the rest of the app.
+      state.aiProviders = [];
+    }
+  }
+
+  providerBtn.addEventListener("click", async () => {
+    if (!providerMenu.hidden) return closeProviderMenu();
+    if (!state.aiProviders.length) await loadAiProviders();
+    openProviderMenu();
+  });
+
+  document.addEventListener("click", (e) => {
+    if (!providerMenu.hidden && !providerPickerEl.contains(e.target)) closeProviderMenu();
+  });
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape" && !providerMenu.hidden) closeProviderMenu();
   });
 
   // ===========================================================================
@@ -4258,6 +4351,7 @@
     // CLI on first load, so a third toast on top would just be noise.
     await loadCommands({ silent: !status.online });
     if (status.online) await loadMode();
+    if (status.online) await loadAiProviders();
     // Load every saved conversation into the sidebar first (they live on
     // disk under ~/.jarvis/conversations and are shared across every
     // browser/session that hits this server — this was previously never

@@ -179,6 +179,13 @@
         <div class="ask-panel__subtitle" id="ask-status-line">say the word</div>
       </div>
       <div class="ask-panel__actions">
+        <div class="provider-picker" id="provider-picker">
+          <button class="btn btn--ghost btn--sm" id="btn-provider-override" type="button"
+                  title="Override which AI provider handles the next ask" aria-haspopup="true" aria-expanded="false">
+            <span id="provider-override-label">Provider: Auto</span>
+          </button>
+          <div class="provider-picker__menu" id="provider-picker-menu" hidden></div>
+        </div>
         <button class="btn btn--ghost btn--sm" id="btn-ask-clear" type="button" title="Clear this conversation">Clear</button>
         <button class="modal__close" id="ask-close" type="button" aria-label="Close">&times;</button>
       </div>
