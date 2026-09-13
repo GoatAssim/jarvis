@@ -651,6 +651,18 @@
     document.title = `${clean} — Command Interface`;
   }
 
+  // Single source of truth for "whatever the assistant is currently named"
+  // — used anywhere we need to label the assistant's own output (e.g. the
+  // Ask thread's role labels) instead of hardcoding "Jarvis". Reads back
+  // from the topbar chrome (kept in sync by applyAssistantNameToChrome)
+  // rather than tracking a separate variable, so it's never able to drift
+  // out of sync with what's actually shown as the assistant's name.
+  function currentAssistantName() {
+    const topbarTitle = qs("#topbar-title");
+    const name = topbarTitle && topbarTitle.textContent.trim();
+    return name || SKIN_DEFAULT_NAME;
+  }
+
   // Applied once at script start (before boot even renders) from whatever
   // was last saved locally, so there's no flash of default cyan/"J.A.R.V.I.S"
   // before the real ai_config.json persona loads a moment later. The persona
@@ -1497,9 +1509,15 @@
     pill.classList.remove("is-online", "is-offline");
     if (status.online) {
       pill.classList.add("is-online");
-      text.textContent = "ONLINE";
+      // `stale` means the last reconnect attempt couldn't re-resolve the
+      // jarvis binary, so we're still riding on a previously-working
+      // invocation rather than a freshly-confirmed one — most commonly
+      // because code was edited without running `pip install .` again.
+      // Still fully usable; just flag it so it's obvious a rebuild (then
+      // restart) is what will actually pick up those changes.
+      text.textContent = status.stale ? "ONLINE (stale build — rebuild to refresh)" : "ONLINE";
       meta.textContent = `${status.invocation} \u00b7 ${status.configPath}`;
-      pill.title = "";
+      pill.title = status.stale ? "Still using the last working jarvis executable. Run pip install . and restart to pick up recent changes." : "";
       pill.style.cursor = "default";
     } else {
       pill.classList.add("is-offline");
@@ -2421,7 +2439,7 @@
     if (!isViewingAskThread()) return null;
     clearAskEmptyHint();
     const msg = el("div", { class: "ask-msg ask-msg--jarvis is-pending" }, [
-      el("div", { class: "ask-msg__role" }, "Jarvis"),
+      el("div", { class: "ask-msg__role" }, currentAssistantName()),
       el("div", { class: "ask-msg__bubble" }, [
         el("span", { class: "ask-typing" }, [el("span", {}), el("span", {}), el("span", {})]),
       ]),
@@ -2495,7 +2513,7 @@
           // tab won't refetch.
           clearAskEmptyHint();
           const msg = el("div", { class: "ask-msg ask-msg--jarvis is-pending" }, [
-            el("div", { class: "ask-msg__role" }, "Jarvis"),
+            el("div", { class: "ask-msg__role" }, currentAssistantName()),
             el("div", { class: "ask-msg__bubble" }, [
               el("span", { class: "ask-typing" }, [el("span", {}), el("span", {}), el("span", {})]),
             ]),
@@ -2608,7 +2626,7 @@
   function renderOrganizeJsonExtra(targetPath, payload) {
     clearAskEmptyHint();
     const msg = el("div", { class: "ask-msg ask-msg--jarvis" }, [
-      el("div", { class: "ask-msg__role" }, "Jarvis"),
+      el("div", { class: "ask-msg__role" }, currentAssistantName()),
       el("div", { class: "ask-msg__bubble" }),
     ]);
     insertIntoAskThread(msg);
@@ -2624,7 +2642,7 @@
     if (isViewingAskThread()) {
       clearAskEmptyHint();
       msg = el("div", { class: "ask-msg ask-msg--jarvis is-pending" }, [
-        el("div", { class: "ask-msg__role" }, "Jarvis"),
+        el("div", { class: "ask-msg__role" }, currentAssistantName()),
         el("div", { class: "ask-msg__bubble" }, [
           el("span", { class: "ask-typing" }, [el("span", {}), el("span", {}), el("span", {})]),
         ]),
@@ -2652,7 +2670,7 @@
     clearAskEmptyHint();
     const url = `/api/screenshots/${encodeURIComponent(filename)}`;
     const msg = el("div", { class: "ask-msg ask-msg--jarvis ask-msg--media" }, [
-      el("div", { class: "ask-msg__role" }, "Jarvis"),
+      el("div", { class: "ask-msg__role" }, currentAssistantName()),
       el("div", { class: "ask-msg__bubble ask-msg__bubble--media" }, [
         el("a", { href: url, target: "_blank", rel: "noopener", class: "ask-shot-link" }, [
           el("img", {
@@ -2695,7 +2713,7 @@
 
     clearAskEmptyHint();
     const msg = el("div", { class: "ask-msg ask-msg--jarvis ask-msg--media" }, [
-      el("div", { class: "ask-msg__role" }, "Jarvis"),
+      el("div", { class: "ask-msg__role" }, currentAssistantName()),
       el("div", { class: "ask-msg__bubble ask-msg__bubble--media" }, [
         player,
         el("div", { class: "ask-dl-footer" }, [
@@ -2740,7 +2758,7 @@
     }
 
     const msg = el("div", { class: "ask-msg ask-msg--jarvis ask-msg--media" }, [
-      el("div", { class: "ask-msg__role" }, "Jarvis"),
+      el("div", { class: "ask-msg__role" }, currentAssistantName()),
       el("div", { class: "ask-msg__bubble ask-msg__bubble--media" }, [
         el("div", { class: "ask-file-card" }, [
           el("div", { class: "ask-file-card__icon" }, icon),
@@ -3314,7 +3332,7 @@
   function addOrganizeJsonPendingBubble() {
     clearAskEmptyHint();
     const msg = el("div", { class: "ask-msg ask-msg--jarvis is-pending" }, [
-      el("div", { class: "ask-msg__role" }, "Jarvis"),
+      el("div", { class: "ask-msg__role" }, currentAssistantName()),
       el("div", { class: "ask-msg__bubble" }, [
         el("span", { class: "ask-typing" }, [el("span", {}), el("span", {}), el("span", {})]),
       ]),
@@ -4499,7 +4517,7 @@
   function addJarvisStaticBubble(text) {
     clearAskEmptyHint();
     const msg = el("div", { class: "ask-msg ask-msg--jarvis" }, [
-      el("div", { class: "ask-msg__role" }, "Jarvis"),
+      el("div", { class: "ask-msg__role" }, currentAssistantName()),
       el("div", { class: "ask-msg__bubble" }),
     ]);
     msg.dataset.raw = text || "";
