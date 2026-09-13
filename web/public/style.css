@@ -885,6 +885,76 @@ input.is-invalid{ border-color: var(--red) !important; }
 }
 .raw-json__error{ color: var(--red); font-size: 12px; margin-top: 8px; min-height: 1em; }
 
+/* =========================================================================
+   Skin — topbar button (next to the J.A.R.V.I.S title) + persona/accent
+   modal. See app.js wireSkinModal/applyAccent for behavior.
+   ========================================================================= */
+
+.btn--skin{
+  color: var(--accent-soft);
+  border-color: var(--accent-dim);
+  margin-left: 2px;
+}
+.btn--skin:hover{
+  color: var(--accent);
+  border-color: var(--accent);
+  box-shadow: 0 0 12px var(--accent-glow);
+}
+
+.modal--skin{ width: min(480px, 100%); }
+
+.skin-section{ margin-bottom: 22px; }
+.skin-section:last-of-type{ margin-bottom: 8px; }
+.skin-section h3{
+  font-size: 11.5px; letter-spacing: 0.16em; text-transform: uppercase;
+  color: var(--text-dim); margin-bottom: 12px;
+}
+
+.skin-field{
+  display: flex; flex-direction: column; gap: 6px;
+  margin-bottom: 14px;
+}
+.skin-field:last-child{ margin-bottom: 0; }
+.skin-field span{
+  font-size: 11px; letter-spacing: 0.08em; text-transform: uppercase;
+  color: var(--text-dimmer);
+}
+.skin-field input[type="text"]{ width: 100%; }
+
+.skin-field--inline{
+  flex-direction: row; align-items: center; gap: 10px;
+  margin-top: 4px;
+}
+.skin-field--inline span{ flex-shrink: 0; }
+
+.skin-swatches{ display: flex; flex-wrap: wrap; gap: 10px; }
+.skin-swatch{
+  width: 30px; height: 30px; border-radius: 50%;
+  border: 2px solid var(--border);
+  cursor: pointer;
+  padding: 0;
+  position: relative;
+  transition: border-color 0.15s, box-shadow 0.15s, transform 0.15s;
+}
+.skin-swatch:hover{ transform: scale(1.08); }
+.skin-swatch.is-active{
+  border-color: var(--text);
+  box-shadow: 0 0 0 2px var(--bg-1), 0 0 0 3px currentColor, 0 0 10px currentColor;
+}
+
+.skin-custom-color-wrap{ display: flex; align-items: center; gap: 10px; }
+
+#skin-custom-color{
+  -webkit-appearance: none; appearance: none;
+  width: 34px; height: 26px;
+  background: transparent; border: 1px solid var(--border); border-radius: 2px;
+  cursor: pointer; padding: 2px;
+}
+#skin-custom-color::-webkit-color-swatch-wrapper{ padding: 0; }
+#skin-custom-color::-webkit-color-swatch{ border: none; border-radius: 1px; }
+#skin-custom-color::-moz-color-swatch{ border: none; border-radius: 1px; }
+#skin-custom-color:hover{ border-color: var(--accent-soft); }
+
 .modal__foot{
   padding: 14px 18px; border-top: 1px solid var(--border);
   display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-shrink: 0;
