@@ -4,19 +4,22 @@ Read this before grepping around. It's a map of what's already true in this
 codebase, written by an AI that already did the exploration — the goal is you
 spend your tool calls on the *new* task, not re-discovering any of this.
 
-**Lineage:** the zip you've been handed (`jarvis-counterreword_N.zip`) is the
-`counterreword` branch state — original Jarvis + the user's own
-`counterreword.patch` + Phases 1–9 of a token-optimization plan, all already
-merged in. It is NOT raw/unoptimized Jarvis. On top of that baseline, four
-bugfix patches and eight enhancement patches (see "Outstanding ideas" and
-"Patches delivered so far" below) have since been delivered. If you're given
-a fresh zip, diff it against what's described here before assuming anything
-is still broken or still just a design — most of what used to be wrong has
-already been fixed, and all 8 originally-outstanding enhancement ideas are
-now built. There is nothing left outstanding in
-`jarvis-token-optimization-enhancements.md`.
+**Lineage:** the `counterreword` branch (original Jarvis + the user's own
+`counterreword.patch` + Phases 1–9 of a token-optimization plan) has been
+merged into mainline — it's not a separate branch state to track anymore,
+just history. On top of that, four bugfix patches and eight enhancement
+patches (see "Outstanding ideas" and "Patches delivered so far" below) have
+since been delivered, and all 8 originally-outstanding enhancement ideas are
+now built — there is nothing left outstanding in
+`jarvis-token-optimization-enhancements.md`. If you're given a fresh zip,
+diff it against what's described here before assuming anything is still
+broken or still just a design — most of what used to be wrong has already
+been fixed. One further patch has since landed on top of all of that (not
+part of the original enhancements doc): `jarvis-provider-override.patch`, a
+`--provider NAME` CLI override — see "Provider/key failover" and "Patches
+delivered so far" below.
 
-Package root: `jarvis-counterreword/jarvis-cli/jarvis/*.py`. All paths below
+Package root: `jarvis-cli/jarvis/*.py`. All paths below
 are relative to that `jarvis/` directory.
 
 ---
@@ -145,6 +148,39 @@ This matters: if a payload-level bug (see Bug 4 below) makes a request fail
 identically regardless of which key is used, every single key gets tried
 and fails in sequence — that's pure wasted latency, not tokens, and it looks
 exactly like "why is this so slow" with no token cost to show for it.
+
+**Provider override (one-off, per-call):** `ask()` takes an optional
+`provider_override` — a provider name, matched case-insensitively against
+each provider's `"name"` field, same lookup `provider_priority` uses. When
+given, `_eligible_providers()`'s normal output is filtered down to just that
+one provider before the loop above ever runs, so `provider_priority` and
+every other configured provider are skipped entirely for that single call —
+multi-key failover *within* the matched provider still applies normally. It
+mirrors the existing one-off "mode" argument to `jarvis tool-run`/
+`tool-preview`: nothing persisted to `ai_config.json`, no effect on any
+other call. If the name doesn't match an eligible provider (wrong name,
+disabled, or no usable key), `ask()` returns the same failure shape as "no
+providers configured" except `result.attempts` names the requested
+provider, so the reason shows up in the normal trace/error message instead
+of silently falling back to the priority order. Wired into the CLI as
+`jarvis --provider NAME <message>` / `jarvis <message> --provider=NAME` —
+`cli._extract_provider_override()` strips the flag out of `argv` before the
+rest is joined into the free-text message, so `--provider` can appear
+anywhere in the typed command. Covered by `tests/test_provider_override.py`
+(10 tests: argv extraction incl. `--provider=`, mid-sentence placement,
+absent/trailing/duplicate-flag edge cases; and override name-matching incl.
+case-insensitivity, a disabled provider, an unknown name, and priority being
+bypassed).
+
+The web UI exposes this as a picker: a "Provider: Auto" button next to
+Clear in the Ask panel header (see `jarvis-provider-override-web-ui.patch`
+below) lists every currently-eligible provider (via a new `GET
+/api/ai/providers` in `server.js`, which hand-mirrors
+`_eligible_providers`/`_sort_providers_by_priority` in JS rather than
+calling them, so keep both in sync by hand if either changes) and sends the
+picked name as `JARVIS_PROVIDER_OVERRIDE` on that one ask — consumed by
+`cli.py`'s `handle_ai_prompt` (see `jarvis-provider-override-cli-env.patch`)
+only when no argv `--provider` flag was already given.
 
 ---
 
@@ -646,6 +682,40 @@ an earlier patch contains the cumulative diff for that file:
   `tool_router.py` half is diffed against the tree with enhancements #1 and
   #3 already applied (both touched that file already); the `ai_client.py`
   half against the tree with #2/#5/#6/#8 already applied.
+- `jarvis-provider-override.patch` — new `provider_override` param on
+  `ai_client.ask()` (see "Provider/key failover" above) plus `cli.py`'s
+  `_extract_provider_override()` and the `--provider NAME`/`--provider=NAME`
+  CLI flag wired into `handle_ai_prompt`'s call site; diffed against the raw
+  zip baseline (touches only `ai_client.py`/`cli.py`, neither modified by
+  the `tool_router.py`-chain patches above, so it applies independently of
+  those — but diff against the *current* tree if any other `ai_client.py`/
+  `cli.py` patch has already landed first). Companion `tests/
+  test_provider_override.py` (10 tests) ships as a plain new file alongside
+  the patch, not folded into it.
+- `jarvis-provider-override-cli-env.patch` — extends the override with a
+  `JARVIS_PROVIDER_OVERRIDE` env-var fallback in `cli.py`'s
+  `handle_ai_prompt` (consulted only when no argv `--provider` flag was
+  given, so an explicit CLI flag still always wins) — this is what lets a
+  caller with no argv to put a flag in (the web UI) still set the override.
+  Diffed against the tree with `jarvis-provider-override.patch` already
+  applied (touches the same `cli.py` region); apply that one first.
+- `jarvis-provider-override-web-ui.patch` — the Ask panel's provider
+  picker: new `GET /api/ai/providers` route in `server.js` (reads
+  `ai_config.json` directly and hand-mirrors `_eligible_providers()`/
+  `_sort_providers_by_priority()` in JS — enabled + has a real key, ordered
+  by `provider_priority` — returning only `{name, model, type}`, never the
+  actual keys); the `"ask"` WS handler forwards an optional `msg.provider`
+  (validated `/^[A-Za-z0-9_-]{1,64}$/`) as `JARVIS_PROVIDER_OVERRIDE` in the
+  spawned subprocess's env, same pattern as the existing
+  `JARVIS_ALLOWED_TOOLS`; `index.html`/`style.css`/`app.js` add a "Provider:
+  Auto" button next to Clear in the Ask panel header that opens a themed
+  dropdown of currently-eligible providers (client-side-only choice —
+  nothing persisted, resets to Auto on reload), threaded into both the
+  normal ask and the "redo" WS payloads via `state.providerOverride`.
+  Diffed against the raw zip baseline (touches only `web/*`, untouched by
+  every patch above); depends on `jarvis-provider-override-cli-env.patch`
+  (for the env var it relies on) but applies independently of it file-wise
+  since there's no overlap.
 
 If you're asked to build one of the outstanding ideas, or fix something new,
 generate a fresh scoped patch the same way — don't fold it into an existing

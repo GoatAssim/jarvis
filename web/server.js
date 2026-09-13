@@ -429,6 +429,50 @@ app.post("/api/ai/clear", requireJarvis, async (req, res) => {
   res.json({ ok: true, message: result.stdout });
 });
 
+// Providers eligible for the Ask panel's "--provider" override picker (see
+// jarvis-provider-override.patch / ai_client._eligible_providers). Reads
+// ai_config.json directly and mirrors _eligible_providers()'s "enabled, and
+// either ollama or has a real key" filter plus _sort_providers_by_priority's
+// ordering \u2014 kept in sync with those two functions by hand since this is
+// JS re-deriving Python logic, not calling it. Deliberately never returns
+// api_keys/api_key themselves, only enough to label a picker entry: this
+// is a config *summary* for the UI, not the raw file (that's what the
+// Settings > Config > AI tab's /api/config/file/ai_config.json/raw is for).
+app.get("/api/ai/providers", requireJarvis, async (req, res) => {
+  const full = path.join(jarvisConfigDir(), "ai_config.json");
+  let parsed;
+  try {
+    parsed = JSON.parse(await fs.readFile(full, "utf-8"));
+  } catch (e) {
+    return res.status(404).json({ error: `Couldn't read ai_config.json: ${e.message}` });
+  }
+  const providers = Array.isArray(parsed?.providers) ? parsed.providers : [];
+  const defaults = parsed?.defaults && typeof parsed.defaults === "object" ? parsed.defaults : {};
+
+  const hasRealKey = (p) => {
+    const keys = Array.isArray(p.api_keys) ? p.api_keys.filter((k) => typeof k === "string" && k.trim()) : [];
+    if (keys.length) return true;
+    return typeof p.api_key === "string" && p.api_key.trim().length > 0;
+  };
+  const eligible = providers.filter((p) => (
+    p && typeof p === "object" && p.enabled !== false && (p.type === "ollama" || hasRealKey(p))
+  ));
+
+  const priorityList = Array.isArray(defaults.provider_priority) ? defaults.provider_priority : [];
+  const rank = new Map(priorityList.filter((n) => typeof n === "string").map((n, i) => [n, i]));
+  const trailing = rank.size;
+  const ordered = eligible
+    .map((p, i) => ({ p, i }))
+    .sort((a, b) => {
+      const ra = rank.has(a.p.name) ? rank.get(a.p.name) : trailing + a.i;
+      const rb = rank.has(b.p.name) ? rank.get(b.p.name) : trailing + b.i;
+      return ra - rb || a.i - b.i;
+    })
+    .map(({ p }) => ({ name: p.name || p.type || "provider", model: p.model || null, type: p.type || null }));
+
+  res.json({ providers: ordered });
+});
+
 // Prompt "capacity" mode — 400%/100%/50% (full/compact/ultra), see
 // ai_client.PROMPT_MODES. Thin wrapper over `jarvis mode` / `jarvis
 // mode-set`, same pattern as everything else here: the actual state lives
@@ -1185,6 +1229,14 @@ wss.on("connection", (ws) => {
       const extraEnv = { ...conversationEnv(msg.conversationId), JARVIS_UI: "web" };
       if (typeof msg.allowedTools === "string") {
         extraEnv.JARVIS_ALLOWED_TOOLS = msg.allowedTools;
+      }
+      // Ask panel's provider-override picker (see /api/ai/providers above
+      // and cli.py's JARVIS_PROVIDER_OVERRIDE handling) — a provider name
+      // only, never trusted as a path/shell fragment; same conservative
+      // shape-check as JARVIS_ALLOWED_TOOLS above. Absent/invalid just
+      // means "no override", identical to before this existed.
+      if (typeof msg.provider === "string" && /^[A-Za-z0-9_-]{1,64}$/.test(msg.provider)) {
+        extraEnv.JARVIS_PROVIDER_OVERRIDE = msg.provider;
       }
       const onStdoutLine = (line) => {
         if (line.startsWith(USAGE_MARKER)) {

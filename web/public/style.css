@@ -985,6 +985,25 @@ input.is-invalid{ border-color: var(--red) !important; }
 .ask-panel__subtitle.is-error{ color: var(--red); }
 .ask-panel__actions{ display: flex; align-items: center; gap: 8px; margin-left: auto; flex-shrink: 0; }
 
+.provider-picker{ position: relative; }
+.provider-picker__menu{
+  position: absolute; top: calc(100% + 6px); right: 0; z-index: 6;
+  min-width: 200px; max-height: 280px; overflow-y: auto;
+  background: var(--bg-raised); border: 1px solid var(--border-strong); border-radius: var(--radius);
+  box-shadow: 0 8px 28px rgba(0,0,0,0.5), 0 0 18px var(--accent-glow);
+  padding: 4px;
+}
+.provider-picker__item{
+  display: flex; align-items: baseline; justify-content: space-between; gap: 10px;
+  width: 100%; text-align: left; padding: 7px 9px; border-radius: var(--radius);
+  background: transparent; border: none; color: var(--text); font-family: var(--font-ui); font-size: 13px;
+  cursor: pointer;
+}
+.provider-picker__item:hover{ background: var(--bg-panel-2); }
+.provider-picker__item.is-active{ color: var(--accent); }
+.provider-picker__item-model{ color: var(--text-dimmer); font-size: 11px; font-family: var(--font-mono); flex-shrink: 0; }
+.provider-picker__empty{ padding: 10px 9px; color: var(--text-dimmer); font-size: 12px; }
+
 .ask-body{
   flex: 1; min-height: 0;
   display: grid;
