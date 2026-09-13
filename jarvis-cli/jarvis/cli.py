@@ -761,6 +761,18 @@ def handle_ai_prompt(text, commands, provider_override=None):
     if not conversations.is_valid_id(conv_id):
         conv_id = None
 
+    # Same idea, one level up: a plain-CLI '--provider NAME' is already
+    # extracted from argv and passed in directly (see
+    # _extract_provider_override / the call site in main()). The web UI
+    # instead has no argv to put a flag in — its Ask-panel provider picker
+    # sets JARVIS_PROVIDER_OVERRIDE per ask (see server.js's "ask" WS
+    # handler) — so an explicit argv-derived override always wins, and the
+    # env var is only consulted when the CLI path didn't supply one.
+    if not provider_override:
+        env_override = os.environ.get("JARVIS_PROVIDER_OVERRIDE")
+        if env_override and env_override.strip():
+            provider_override = env_override.strip()
+
     result = ai_client.ask(
         text, commands, on_attempt=on_attempt, on_tool_call=on_tool_call,
         on_tool_result=on_tool_result,
