@@ -1779,6 +1779,7 @@ audio.ask-dl-player{ max-height: none; background: transparent; }
   flex-shrink: 0; width: 82px;
 }
 .logs-key-row__value{ color: var(--text); font-family: var(--font-mono); }
+.logs-key-row__hint{ color: var(--text-dimmer); font-style: italic; font-size: 10.5px; }
 
 .mode-chip{
   display: inline-flex; align-items: center; gap: 6px;
@@ -1798,3 +1799,4 @@ audio.ask-dl-player{ max-height: none; background: transparent; }
   background: var(--bg-panel); border: 1px solid var(--border); border-radius: 2px;
   padding: 8px; max-height: 220px; overflow-y: auto;
 }
+.logs-key-console--synthesized{ border-style: dashed; }

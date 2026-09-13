@@ -3376,7 +3376,7 @@
       if (!byLabel.has(label)) {
         byLabel.set(label, {
           label, capacityMode: null, capacityLabel: null,
-          inputTokens: 0, outputTokens: 0, consoleDump: [],
+          inputTokens: 0, outputTokens: 0, consoleDump: [], toolTrace: [],
         });
         order.push(label);
       }
@@ -3394,6 +3394,17 @@
       } else if (entry.direction === "usage") {
         g.inputTokens += data.input_tokens || 0;
         g.outputTokens += data.output_tokens || 0;
+      } else if (entry.direction === "tool_call") {
+        // Synthesized fallback for when nothing ever hit the real
+        // console_dump split (see summarizeLogsByKey's caller) — a raw
+        // "here's what this key actually did" trace built straight from
+        // the tool_call/tool_result entries ai_providers.py already logs
+        // for every tool run, same shape logEntryTokenLabel already reads
+        // elsewhere in this file.
+        const args = (() => { try { return JSON.stringify(data.arguments); } catch { return String(data.arguments); } })();
+        g.toolTrace.push(`→ called ${data.name || "?"}(${args ?? ""}) — ~${data.input_tokens || 0} tok in`);
+      } else if (entry.direction === "tool_result") {
+        g.toolTrace.push(`← ${data.name || "?"} result — ~${data.output_tokens || 0} tok out`);
       }
     }
     return order.map((label) => byLabel.get(label));
@@ -3454,9 +3465,14 @@
       ];
       const consoleBlock = g.consoleDump.length
         ? el("pre", { class: "logs-key-console" }, g.consoleDump.join("\n"))
-        : el("div", { class: "debug-empty" }, "No console output logged for this key.");
+        : g.toolTrace.length
+        ? el("pre", { class: "logs-key-console logs-key-console--synthesized" }, g.toolTrace.join("\n"))
+        : el("div", { class: "debug-empty" }, "No console output or tool activity logged for this key.");
       bodyRows.push(el("div", { class: "logs-key-row" }, [
         el("span", { class: "logs-key-row__label" }, "Console"),
+        !g.consoleDump.length && g.toolTrace.length
+          ? el("span", { class: "logs-key-row__hint" }, "(synthesized from tool calls — no raw dump for this key)")
+          : null,
       ]));
       bodyRows.push(consoleBlock);
 
@@ -3474,12 +3490,24 @@
     renderLogsEntries();
   });
 
+  // Logs overlay fetch cap. Was hardcoded to 50 — fine for the old raw
+  // "skim recent traffic" view, but the per-API-key Settings pane (see
+  // renderLogsSettings) needs the *whole* conversation's entries to
+  // aggregate capacity mode / tokens / console dump per key, and a single
+  // tool-heavy turn alone can easily emit 50+ entries (a request/response
+  // pair plus a tool_call/tool_result pair per tool round-trip), pushing
+  // that turn's own "info" entries out of a 50-entry window before the
+  // Settings pane ever sees them. Bumped way up so a conversation's full
+  // history is actually available; each line is separately capped (see
+  // logs.py's MAX_LINE_CHARS) so this stays bounded.
+  const LOGS_FETCH_LIMIT = 5000;
+
   async function logsLoadEntries(convId) {
     logsStatusLine.textContent = "loading entries…";
     logsStatusLine.classList.add("is-busy");
     logsStatusLine.classList.remove("is-error", "is-ok");
     try {
-      const res = await Api.getLog(convId, 50);
+      const res = await Api.getLog(convId, LOGS_FETCH_LIMIT);
       state.logsEntries = (res && res.entries) || [];
       logsStatusLine.textContent = `${state.logsEntries.length} log line(s) for ${convId}`;
       logsStatusLine.classList.add("is-ok");
