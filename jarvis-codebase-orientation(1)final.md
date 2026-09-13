@@ -14,10 +14,19 @@ now built — there is nothing left outstanding in
 `jarvis-token-optimization-enhancements.md`. If you're given a fresh zip,
 diff it against what's described here before assuming anything is still
 broken or still just a design — most of what used to be wrong has already
-been fixed. One further patch has since landed on top of all of that (not
-part of the original enhancements doc): `jarvis-provider-override.patch`, a
-`--provider NAME` CLI override — see "Provider/key failover" and "Patches
-delivered so far" below.
+been fixed. Several further patches have since landed on top of all of that
+(none part of the original enhancements doc):
+
+- `jarvis-provider-override.patch` (+ two follow-ups), a `--provider NAME`
+  CLI override that grew into an ordered-list, ranked-picker override — see
+  "Provider/key failover" below.
+- `jarvis-provider-order-picker.patch`, the web UI's multi-pick ordered
+  provider picker — same section.
+- `jarvis-persist-console-dump.patch`, saving a turn's console-dump extra
+  server-side so it survives a page reload — see "Console-dump persistence"
+  below.
+
+See "Patches delivered so far" for the full list and apply order.
 
 Package root: `jarvis-cli/jarvis/*.py`. All paths below
 are relative to that `jarvis/` directory.
@@ -150,37 +159,129 @@ and fails in sequence — that's pure wasted latency, not tokens, and it looks
 exactly like "why is this so slow" with no token cost to show for it.
 
 **Provider override (one-off, per-call):** `ask()` takes an optional
-`provider_override` — a provider name, matched case-insensitively against
-each provider's `"name"` field, same lookup `provider_priority` uses. When
-given, `_eligible_providers()`'s normal output is filtered down to just that
-one provider before the loop above ever runs, so `provider_priority` and
-every other configured provider are skipped entirely for that single call —
-multi-key failover *within* the matched provider still applies normally. It
-mirrors the existing one-off "mode" argument to `jarvis tool-run`/
-`tool-preview`: nothing persisted to `ai_config.json`, no effect on any
-other call. If the name doesn't match an eligible provider (wrong name,
-disabled, or no usable key), `ask()` returns the same failure shape as "no
-providers configured" except `result.attempts` names the requested
-provider, so the reason shows up in the normal trace/error message instead
-of silently falling back to the priority order. Wired into the CLI as
-`jarvis --provider NAME <message>` / `jarvis <message> --provider=NAME` —
-`cli._extract_provider_override()` strips the flag out of `argv` before the
-rest is joined into the free-text message, so `--provider` can appear
-anywhere in the typed command. Covered by `tests/test_provider_override.py`
-(10 tests: argv extraction incl. `--provider=`, mid-sentence placement,
-absent/trailing/duplicate-flag edge cases; and override name-matching incl.
-case-insensitivity, a disabled provider, an unknown name, and priority being
-bypassed).
+`provider_override`, matched case-insensitively against each provider's
+`"name"` field (same lookup `provider_priority` uses). It accepts either
+shape:
+
+- a single provider name (string) — the original form, still what the
+  plain-CLI `--provider NAME` flag sends; or
+- an ordered list/tuple of names, e.g. `["anthropic", "gemini"]` — try
+  anthropic first, then gemini, in exactly that order, via
+  `_order_providers_by_override()`. This is the shape the web UI's
+  multi-pick provider-order picker sends (see below) and what
+  `--provider NAME1,NAME2,...` sends from the plain CLI
+  (`cli._parse_provider_override_value()` splits on commas).
+
+Either way, `_eligible_providers()`'s normal output is filtered/reordered
+down to just the requested name(s) before the attempt loop above ever runs,
+so `provider_priority` and every other configured provider are skipped
+entirely for that single call — multi-key failover *within* each named
+provider still applies normally. It mirrors the existing one-off "mode"
+argument to `jarvis tool-run`/`tool-preview`: nothing persisted to
+`ai_config.json`, no effect on any other call. If a name doesn't match an
+eligible provider (wrong name, disabled, or no usable key), `ask()` returns
+the same failure shape as "no providers configured" except
+`result.attempts` names the requested provider(s), so the reason shows up
+in the normal trace/error message instead of silently falling back to the
+priority order. Wired into the CLI as `jarvis --provider NAME <message>` /
+`jarvis <message> --provider=NAME` / `jarvis --provider NAME1,NAME2
+<message>` — `cli._extract_provider_override()` strips the flag out of
+`argv` before the rest is joined into the free-text message, so `--provider`
+can appear anywhere in the typed command. Covered by
+`tests/test_provider_override.py` (10 tests: argv extraction incl.
+`--provider=`, mid-sentence placement, absent/trailing/duplicate-flag edge
+cases; and override name-matching incl. case-insensitivity, a disabled
+provider, an unknown name, and priority being bypassed) — those tests
+predate the list form and only exercise the single-name path; the list
+form's ordering (`_order_providers_by_override`) has no dedicated test file
+as of this writing.
+
+**Naming note:** `ask()`'s own docstring calls this "the Ask panel's
+multi-pick provider-order picker (see ... `jarvis-provider-override-ranked
+.patch`)" — that exact filename was never actually delivered. The backend
+support (`_order_providers_by_override`, the list-form `provider_override`)
+landed on its own, ahead of any frontend for it, under the assumption a
+matching web UI patch would follow with that name. The web UI patch that
+actually implements the picker is named `jarvis-provider-order-picker.patch`
+(see "Patches delivered so far") — same feature, different filename. Don't
+go looking for `jarvis-provider-override-ranked.patch`; it doesn't exist.
 
 The web UI exposes this as a picker: a "Provider: Auto" button next to
-Clear in the Ask panel header (see `jarvis-provider-override-web-ui.patch`
-below) lists every currently-eligible provider (via a new `GET
-/api/ai/providers` in `server.js`, which hand-mirrors
+Clear in the Ask panel header lists every currently-eligible provider (via
+`GET /api/ai/providers` in `server.js`, which hand-mirrors
 `_eligible_providers`/`_sort_providers_by_priority` in JS rather than
-calling them, so keep both in sync by hand if either changes) and sends the
-picked name as `JARVIS_PROVIDER_OVERRIDE` on that one ask — consumed by
-`cli.py`'s `handle_ai_prompt` (see `jarvis-provider-override-cli-env.patch`)
-only when no argv `--provider` flag was already given.
+calling them, so keep both in sync by hand if either changes). It was
+originally single-pick (`jarvis-provider-override-web-ui.patch`: click one
+provider, or "Auto"); `jarvis-provider-order-picker.patch` replaced that
+with the current multi-pick behavior — clicking providers in the menu
+appends each to an ordered pick-list (`state.providerOverride`, an array
+now, not a single name-or-null), with a numbered badge on each selected
+item showing its position, and clicking a picked one again removes it
+(everything after renumbers). The menu stays open across picks so multiple
+providers can be chosen in one visit, closing only on "Auto", Escape, or an
+outside click. The picks are joined with `,` (`providerOverrideValue()`)
+and sent as `msg.provider` on every "ask"/redo WS message — `server.js`'s
+`"ask"` handler validates that string against
+`/^[A-Za-z0-9_-]{1,64}(,[A-Za-z0-9_-]{1,64}){0,9}$/` (widened from a
+single-name-only regex to allow up to 10 comma-separated names) before
+setting it as `JARVIS_PROVIDER_OVERRIDE` in the spawned subprocess's env —
+consumed by `cli.py`'s `handle_ai_prompt` (see
+`jarvis-provider-override-cli-env.patch`) only when no argv `--provider`
+flag was already given, then split back into a list by
+`cli._parse_provider_override_value()` exactly like a typed
+`--provider a,b,c` would be. Client-side-only choice: nothing persisted
+server-side, resets to Auto on a full page reload.
+
+---
+
+## Console-dump persistence
+
+Some provider replies come back with extra raw text glued around the real
+answer — either literal command stdout a weaker/local model echoes ahead of
+its answer, or inline tool-call/tool-result scaffolding it echoes instead of
+using real function-calling (`ai_client._TOOL_TRACE_LINE`). The web UI has
+always split this out live into its own "Console" bubble while streaming
+stdout for a fresh ask (`app.js`'s `splitConsoleDump()`), but until
+`jarvis-persist-console-dump.patch`, only the *unsplit* raw text was ever
+saved to the conversation record (`conversations.append_exchange`'s
+`jarvis_text` arg) — so a page reload replayed the raw glued-together text
+in the main reply bubble instead of a clean reply + separate Console bubble
+the way it looked live. The other extra types (screenshot/download/
+organizeJson/confirm) didn't have this gap because `ai_client
+._extras_from_runs()` already turned runtime results into saved extras
+before this; "console" just wasn't one of them yet.
+
+The fix is `ai_client._split_console_dump()`, a line-for-line Python port of
+`app.js`'s `splitConsoleDump()`/`NAME_PREFIX_LINE` (reusing the existing
+`_TOOL_TRACE_LINE` regex instead of re-declaring the JS's
+`INLINE_TOOL_TRACE_LINE`). `ask()`'s `append_exchange` call site now runs
+`result.text` through it and saves the *clean* text as the exchange's
+`jarvis` field, plus — when there was anything to split out — a
+`{"type": "console", "data": {"dumpLines": [...]}}` extra, the same shape
+`_extras_from_runs()` already produces for the other extra types. The web
+UI already had a `"console"` case in `renderThreadExtra()` (it just never
+had anything to replay) and generic bucket/replay plumbing
+(`seedThreadExtrasFromRecord`/`loadConversationIntoThread`) that needed no
+changes at all — this was purely a "the server wasn't saving it" gap, not a
+missing client feature.
+
+**Only the saved copy is split — live behavior is unchanged.** `ask()`
+still returns/prints the raw, unsplit `result.text` (`AskResult.text`), since
+a plain terminal and the browser's live stdout stream both still need the
+whole thing exactly as before; the browser keeps doing its own live split
+via `splitConsoleDump()` as the stream arrives, same as always. The
+server-side split only affects what a *reload* sees afterward, bringing it
+in line with what was already shown live.
+
+No recap fragment was added for the new `"console"` extra type in
+`conversations._extras_recap_fragment()` — unlike a real tool call, a
+console dump isn't something the model needs reminded of on a later turn,
+so it's deliberately left out of the `[recap] ran ...` summary.
+
+Covered by 4 new tests appended to `tests/test_enhancements.py` (now 30
+tests total): no-op on plain text, splitting out leading raw output ahead
+of a `"<Name>: <rest>"` line, splitting out an inline tool-trace line
+elsewhere in the reply, and the empty/`None` edge cases.
 
 ---
 
@@ -716,6 +817,31 @@ an earlier patch contains the cumulative diff for that file:
   every patch above); depends on `jarvis-provider-override-cli-env.patch`
   (for the env var it relies on) but applies independently of it file-wise
   since there's no overlap.
+- `jarvis-provider-order-picker.patch` — the web UI's picker goes from
+  single-pick to multi-pick, ordered (`web/server.js`,
+  `web/public/app.js`/`index.html`/`style.css`): `state.providerOverride`
+  becomes an array built by click order instead of a single name-or-null;
+  the picker menu grows numbered order badges and stays open across picks;
+  `server.js`'s `"ask"` WS handler's provider-field regex widens from one
+  name to up to 10 comma-separated names. This is the frontend for the
+  list-form `provider_override`/`_order_providers_by_override()` that was
+  already sitting in `ai_client.py` unused from the backend side — see
+  "Provider/key failover"'s naming note above for why this isn't named
+  `jarvis-provider-override-ranked.patch` despite that being what
+  `ai_client.ask()`'s own docstring calls it. Diffed against the tree with
+  `jarvis-provider-override-web-ui.patch` already applied (touches the same
+  four files that patch introduced/modified).
+- `jarvis-persist-console-dump.patch` — see "Console-dump persistence"
+  above (`ai_client.py`: new `_split_console_dump()`, wired into the
+  `append_exchange` call site) plus 4 new tests appended to
+  `tests/test_enhancements.py` (now 30 tests total). Diffed against the raw
+  zip baseline for `ai_client.py` (the `append_exchange` call site and the
+  area right after `_is_tool_trace_reply`/`_TOOL_TRACE_LINE` weren't
+  touched by any earlier `ai_client.py` patch) — but diff against the
+  *current* tree instead if any of the enhancement/provider-override
+  patches that also touch `ai_client.py` (#2/#5/#6/#8,
+  `jarvis-provider-override.patch`) haven't landed yet in the tree you're
+  patching.
 
 If you're asked to build one of the outstanding ideas, or fix something new,
 generate a fresh scoped patch the same way — don't fold it into an existing
