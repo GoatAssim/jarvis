@@ -176,8 +176,11 @@
   // entry, written out again rather than shared by reference, so editing
   // one can never accidentally change the other. Friday/Edith/Karen were
   // built by running the same scaleHsl/rotateHue/mixTowardAccent math
-  // applyAccent() uses at runtime, but *offline*, once, against a chosen
-  // accent per persona — then baking the results in here as plain values,
+  // applyAccent() uses at runtime (the corrected, dim-based background
+  // mix — see applyAccent()'s "IMPORTANT" comment; the values below were
+  // re-baked after that fix, since they were briefly too light/washed-out
+  // before it), but *offline*, once, against a chosen accent per persona —
+  // then baking the results in here as plain values,
   // per the "use the hardcoded model, not the generic picker" ask. Picking
   // one of these sets qs("#skin-assistant-name")'s value (persisted to
   // ai_config.json on Save exactly like typing a name by hand) AND the
@@ -243,11 +246,16 @@
         "--status-online": "var(--accent)",
         "--border": "rgba(255, 102, 219, 0.16)",
         "--border-strong": "rgba(255, 102, 219, 0.34)",
-        "--bg": "#180d1d",
-        "--bg-1": "#1d1327",
-        "--bg-panel": "rgba(53, 29, 63, 0.68)",
-        "--bg-panel-2": "rgba(52, 33, 66, 0.55)",
-        "--bg-raised": "#2f203f",
+        // Recomputed (see applyAccent()'s "IMPORTANT" comment) mixing
+        // toward Friday's *dim* accent variant instead of her raw, bright
+        // magenta — the raw-accent version baked in here previously came
+        // out lighter/pinker than intended, the same background-washing
+        // bug that applyAccent() had at runtime.
+        "--bg": "#0c0812",
+        "--bg-1": "#0f0e1b",
+        "--bg-panel": "rgba(25, 19, 39, 0.68)",
+        "--bg-panel-2": "rgba(27, 24, 45, 0.55)",
+        "--bg-raised": "#19182c",
       },
     },
     {
@@ -271,11 +279,12 @@
         "--status-online": "var(--accent)",
         "--border": "rgba(255, 135, 62, 0.16)",
         "--border-strong": "rgba(255, 135, 62, 0.34)",
-        "--bg": "#18100f",
-        "--bg-1": "#1d1718",
-        "--bg-panel": "rgba(53, 37, 32, 0.68)",
-        "--bg-panel-2": "rgba(52, 40, 38, 0.55)",
-        "--bg-raised": "#2f2626",
+        // Recomputed — see Friday's comment above; same fix, same reason.
+        "--bg": "#0b0a0d",
+        "--bg-1": "#0e1016",
+        "--bg-panel": "rgba(23, 23, 28, 0.68)",
+        "--bg-panel-2": "rgba(25, 27, 35, 0.55)",
+        "--bg-raised": "#171b23",
       },
     },
     {
@@ -299,11 +308,12 @@
         "--status-online": "var(--accent)",
         "--border": "rgba(68, 227, 128, 0.16)",
         "--border-strong": "rgba(68, 227, 128, 0.34)",
-        "--bg": "#081815",
-        "--bg-1": "#0b201f",
-        "--bg-panel": "rgba(17, 55, 46, 0.68)",
-        "--bg-panel-2": "rgba(19, 56, 51, 0.55)",
-        "--bg-raised": "#123431",
+        // Recomputed — see Friday's comment above; same fix, same reason.
+        "--bg": "#060c0f",
+        "--bg-1": "#091218",
+        "--bg-panel": "rgba(12, 28, 33, 0.68)",
+        "--bg-panel-2": "rgba(15, 32, 39, 0.55)",
+        "--bg-raised": "#0f1f27",
       },
     },
   ];
@@ -548,13 +558,26 @@
     // "deep space" backdrop looking like a leftover from the cyan default
     // under any other skin. Bumped ~4-5x so the app's overall mood actually
     // reads as tinted — still nowhere near a full recolor (these are still
-    // near-black), and at the default cyan accent this still lands close to
-    // the original fixed values since cyan is already close to that base.
-    const bg = mixTowardAccent(BG_BASE, rgb, 0.08);
-    const bg1 = mixTowardAccent(BG1_BASE, rgb, 0.09);
-    const bgPanel = mixTowardAccent(BG_PANEL_BASE, rgb, 0.18);
-    const bgPanel2 = mixTowardAccent(BG_PANEL2_BASE, rgb, 0.16);
-    const bgRaised = mixTowardAccent(BG_RAISED_BASE, rgb, 0.14);
+    // near-black).
+    //
+    // IMPORTANT: mixed toward `dim` (the same darkened/desaturated accent
+    // variant --accent-dim is built from — scaleHsl(rgb, 0.64, 0.36), see
+    // above), NOT toward the raw, full-lightness `rgb`. Mixing toward the
+    // raw accent was the actual bug behind backgrounds reading as washed-
+    // out/whiter than "Classic (hardcoded)" even at the identical cyan
+    // hex: the default accent is ~65% lightness, so blending even a small
+    // amount of it straight in pulls every --bg* token substantially
+    // *lighter* — toward that near-white lightness — instead of toward a
+    // moody, dark shade of it. `dim` is already darkened the same way the
+    // rest of this function treats "a shaded version of the accent," so
+    // mixing toward it keeps backgrounds near-black (matching Classic's
+    // hand-picked values almost exactly at the default cyan accent) while
+    // still hue-shifting with whatever color is picked.
+    const bg = mixTowardAccent(BG_BASE, dim, 0.08);
+    const bg1 = mixTowardAccent(BG1_BASE, dim, 0.09);
+    const bgPanel = mixTowardAccent(BG_PANEL_BASE, dim, 0.18);
+    const bgPanel2 = mixTowardAccent(BG_PANEL2_BASE, dim, 0.16);
+    const bgRaised = mixTowardAccent(BG_RAISED_BASE, dim, 0.14);
     root.setProperty("--bg", rgbToHex(bg));
     root.setProperty("--bg-1", rgbToHex(bg1));
     root.setProperty("--bg-panel", `rgba(${bgPanel.r}, ${bgPanel.g}, ${bgPanel.b}, 0.68)`);
