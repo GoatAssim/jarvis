@@ -17,6 +17,7 @@ import sys
 
 from . import ai_config, ai_providers, command_tools, conversations, memory, playnite_config, stats, tool_safety
 from . import discovery_cache
+from . import logs
 from . import tool_result_shaping
 from . import tool_router
 from . import tools as system_tools
@@ -1983,6 +1984,22 @@ def ask(user_text, commands=None, on_attempt=None, on_tool_call=None, on_tool_re
             if on_attempt:
                 on_attempt(key_label)
 
+            # "Info" log entry (see logs.py's long-documented-but-never-used
+            # "info" direction) — one per attempt, tagged with the same
+            # key_label as this attempt's request/response/usage entries
+            # below, so the Logs viewer can group "which capacity mode was
+            # this API key run under" right alongside its token usage.
+            # Purely informational: nothing in this file ever reads it back.
+            if conv_id:
+                logs.log(
+                    conv_id, "info",
+                    {
+                        "capacity_mode": profile.get("mode"),
+                        "capacity_label": MODE_LABELS.get(profile.get("mode"), profile.get("mode")),
+                    },
+                    provider=key_label,
+                )
+
             resolved = _resolve(provider, cfg["defaults"])
             if key is not None:
                 resolved["api_key"] = key
@@ -2017,6 +2034,13 @@ def ask(user_text, commands=None, on_attempt=None, on_tool_call=None, on_tool_re
                 clean_text, dump_lines = _split_console_dump(result.text)
                 if dump_lines:
                     extras.append({"type": "console", "data": {"dumpLines": dump_lines}})
+                    # Same "info" direction as the capacity-mode entry above,
+                    # tagged with this (the successful) attempt's key_label —
+                    # lets the Logs viewer show a per-API-key console dump
+                    # without having to re-derive the split from raw
+                    # response bodies itself.
+                    if conv_id:
+                        logs.log(conv_id, "info", {"console_dump": dump_lines}, provider=key_label)
                 exchange_count = conversations.append_exchange(
                     conv_id, user_text, clean_text, label, extras=extras
                 )

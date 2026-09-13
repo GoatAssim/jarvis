@@ -30,7 +30,11 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "jarvis-cli"))
 
 from jarvis import ai_client  # noqa: E402
+from jarvis import ai_config  # noqa: E402
+from jarvis import ai_providers  # noqa: E402
+from jarvis import conversations  # noqa: E402
 from jarvis import discovery_cache  # noqa: E402
+from jarvis import logs  # noqa: E402
 from jarvis import tool_registry  # noqa: E402
 from jarvis import tool_router  # noqa: E402
 from jarvis import tools as system_tools  # noqa: E402
@@ -541,6 +545,156 @@ def test_split_console_dump_pulls_out_inline_tool_trace():
 def test_split_console_dump_empty_text():
     assert ai_client._split_console_dump("") == ("", [])
     assert ai_client._split_console_dump(None) == (None, [])
+
+
+@contextmanager
+def _isolated_ask_env():
+    """Points conversations.py and logs.py at a throwaway ~/.jarvis for the
+    duration of the `with` block (same idea as _isolated_cache above, just
+    covering the two modules ai_client.ask() writes through), and hands back
+    a fresh, valid conversation id to run ask() against. Never touches a
+    real ~/.jarvis/conversations or ~/.jarvis/logs."""
+    orig = {
+        "conv_dir": conversations.JARVIS_DIR,
+        "conv_conv_dir": conversations.CONV_DIR,
+        "conv_index": conversations.INDEX_FILE,
+        "conv_current": conversations.CURRENT_FILE,
+        "logs_dir": logs.JARVIS_DIR,
+        "logs_log_dir": logs.LOG_DIR,
+    }
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp = Path(tmp)
+        conversations.JARVIS_DIR = tmp
+        conversations.CONV_DIR = tmp / "conversations"
+        conversations.INDEX_FILE = conversations.CONV_DIR / "index.json"
+        conversations.CURRENT_FILE = tmp / "current_conversation.json"
+        conversations.CONV_DIR.mkdir(parents=True, exist_ok=True)
+        logs.JARVIS_DIR = tmp
+        logs.LOG_DIR = tmp / "logs"
+        try:
+            yield conversations.get_current_id()
+        finally:
+            conversations.JARVIS_DIR = orig["conv_dir"]
+            conversations.CONV_DIR = orig["conv_conv_dir"]
+            conversations.INDEX_FILE = orig["conv_index"]
+            conversations.CURRENT_FILE = orig["conv_current"]
+            logs.JARVIS_DIR = orig["logs_dir"]
+            logs.LOG_DIR = orig["logs_log_dir"]
+
+
+@contextmanager
+def _fake_single_provider_ask(reply_text=None, ok=True, mode="ultra"):
+    """Stubs ai_config.load_ai_config() with one fake, single-key provider
+    and registers a fake adapter under ai_providers.ADAPTERS["fake"] that
+    always returns `reply_text` (or fails, if ok=False) — enough to drive
+    ai_client.ask() end-to-end without any real network/config. Restores
+    both afterward."""
+    orig_load = ai_config.load_ai_config
+    orig_adapters = dict(ai_providers.ADAPTERS)
+    cfg = {
+        "persona": {},
+        "providers": [{
+            "name": "fakeprov", "type": "fake", "enabled": True,
+            "api_keys": ["k1"], "model": "m",
+        }],
+        "defaults": {"tools_enabled": False, "prompt_mode": mode},
+    }
+
+    def fake_adapter(resolved, messages, timeout, tools=None, tool_executor=None):
+        if not ok:
+            return ai_providers.AIResult(False, error="fake failure")
+        return ai_providers.AIResult(True, text=reply_text)
+
+    ai_config.load_ai_config = lambda: cfg
+    ai_providers.ADAPTERS["fake"] = fake_adapter
+    try:
+        yield
+    finally:
+        ai_config.load_ai_config = orig_load
+        ai_providers.ADAPTERS.clear()
+        ai_providers.ADAPTERS.update(orig_adapters)
+
+
+# ---------------------------------------------------------------------------
+# Per-API-key capacity-mode / console-dump "info" log entries (feeds the
+# Logs viewer's Settings pane — see jarvis-log-per-key-info.patch)
+# ---------------------------------------------------------------------------
+
+def test_ask_logs_capacity_mode_info_entry_per_attempt():
+    with _isolated_ask_env() as conv_id, _fake_single_provider_ask(
+        reply_text="Jarvis: a short plain reply with no dump in it.", mode="ultra",
+    ):
+        result = ai_client.ask("hello", commands=[], conversation_id=conv_id)
+        assert result.ok
+
+        entries = logs.read_entries(conv_id)
+        info_entries = [e for e in entries if e["direction"] == "info"]
+        assert len(info_entries) == 1  # capacity-mode only — no dump this time
+        assert info_entries[0]["data"]["capacity_mode"] == "ultra"
+        assert info_entries[0]["data"]["capacity_label"] == "50% Capacity"
+        # Tagged with the same key_label every other entry from this attempt
+        # uses, so the Logs viewer can group by it.
+        assert info_entries[0]["provider"] == "fakeprov"
+
+
+def test_ask_logs_capacity_mode_even_on_failure():
+    # A failed attempt never reaches append_exchange/the console-dump split,
+    # but it should still have logged which capacity mode it was tried
+    # under — this is what lets a Logs viewer show "API key 1 - fakeprov"
+    # for a key that never actually produced a saved reply.
+    with _isolated_ask_env() as conv_id, _fake_single_provider_ask(ok=False, mode="compact"):
+        result = ai_client.ask("hello", commands=[], conversation_id=conv_id)
+        assert not result.ok
+
+        entries = logs.read_entries(conv_id)
+        info_entries = [e for e in entries if e["direction"] == "info"]
+        assert len(info_entries) == 1
+        assert info_entries[0]["data"]["capacity_mode"] == "compact"
+        assert info_entries[0]["provider"] == "fakeprov"
+
+
+def test_ask_saves_clean_text_and_logs_console_dump_per_key():
+    reply_text = (
+        "raw file listing line one\n"
+        "raw file listing line two\n"
+        "Jarvis: Here is a nice long real answer about the weather today, "
+        "sir, and everything else you asked about at some length, well "
+        "clear of the trace-echo heuristic's short-reply threshold.\n"
+        '[called run_command with {"name": "x"}]\n'
+        "That concludes the answer."
+    )
+    with _isolated_ask_env() as conv_id, _fake_single_provider_ask(reply_text=reply_text):
+        result = ai_client.ask("hello", commands=[], conversation_id=conv_id)
+        assert result.ok
+        # Live/returned text is untouched — dump lines and all.
+        assert result.text == reply_text
+
+        entries = logs.read_entries(conv_id)
+        info_entries = [e for e in entries if e["direction"] == "info"]
+        assert len(info_entries) == 2  # capacity mode, then console dump
+        assert "capacity_mode" in info_entries[0]["data"]
+        dump = info_entries[1]["data"]["console_dump"]
+        assert dump == [
+            "raw file listing line one",
+            "raw file listing line two",
+            '[called run_command with {"name": "x"}]',
+        ]
+        assert info_entries[1]["provider"] == "fakeprov"
+
+        record = conversations._load_conv(conv_id)
+        saved = record["exchanges"][-1]
+        # Saved exchange text is the *clean* reply — no glued-in raw output
+        # or inline tool-trace line — matching what the web UI's live view
+        # already shows for the same reply.
+        assert saved["jarvis"] == (
+            "Here is a nice long real answer about the weather today, sir, "
+            "and everything else you asked about at some length, well clear "
+            "of the trace-echo heuristic's short-reply threshold.\n"
+            "That concludes the answer."
+        )
+        console_extras = [e for e in saved.get("extras", []) if e["type"] == "console"]
+        assert len(console_extras) == 1
+        assert console_extras[0]["data"]["dumpLines"] == dump
 
 
 _TESTS = [obj for name, obj in list(globals().items()) if name.startswith("test_")]
