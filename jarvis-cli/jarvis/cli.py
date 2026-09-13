@@ -615,24 +615,38 @@ def _run_segment_batch(commands, parser, batch):
     return list(zip(batch, results))
 
 
+def _parse_provider_override_value(raw):
+    """'--provider' takes either one name or a comma-separated ordered list
+    (e.g. 'anthropic,gemini,openai') \u2014 the order given becomes the
+    try-order for that ask, see ai_client.ask()'s provider_override. Splits
+    on commas, trims whitespace, drops empty entries; returns None if
+    nothing usable is left (e.g. raw was just "," or blank)."""
+    names = [part.strip() for part in raw.split(",")]
+    names = [n for n in names if n]
+    return names or None
+
+
 def _extract_provider_override(argv):
-    """Pull a leading '--provider NAME' or '--provider=NAME' out of a raw
-    argv list before it's joined into free-text for handle_ai_prompt.
-    Returns (remaining_argv, provider_name_or_None). Only the first match
-    is honored; matching '--provider' with nothing after it (or as the
-    very last token) is left alone and treated as ordinary text, since
-    that's ambiguous rather than clearly a flag."""
+    """Pull a leading '--provider NAME' / '--provider=NAME' / '--provider
+    NAME1,NAME2,...' out of a raw argv list before it's joined into
+    free-text for handle_ai_prompt. A comma-separated value is an ordered
+    list \u2014 try NAME1 first, then NAME2, and so on \u2014 see
+    ai_client.ask()'s provider_override. Returns (remaining_argv,
+    override_list_or_None). Only the first match is honored; matching
+    '--provider' with nothing after it (or as the very last token) is left
+    alone and treated as ordinary text, since that's ambiguous rather than
+    clearly a flag."""
     out = []
     override = None
     i = 0
     while i < len(argv):
         tok = argv[i]
         if override is None and tok.startswith("--provider="):
-            override = tok.split("=", 1)[1].strip() or None
+            override = _parse_provider_override_value(tok.split("=", 1)[1])
             i += 1
             continue
         if override is None and tok == "--provider" and i + 1 < len(argv):
-            override = argv[i + 1].strip() or None
+            override = _parse_provider_override_value(argv[i + 1])
             i += 2
             continue
         out.append(tok)
@@ -761,17 +775,18 @@ def handle_ai_prompt(text, commands, provider_override=None):
     if not conversations.is_valid_id(conv_id):
         conv_id = None
 
-    # Same idea, one level up: a plain-CLI '--provider NAME' is already
-    # extracted from argv and passed in directly (see
-    # _extract_provider_override / the call site in main()). The web UI
-    # instead has no argv to put a flag in — its Ask-panel provider picker
-    # sets JARVIS_PROVIDER_OVERRIDE per ask (see server.js's "ask" WS
+    # Same idea, one level up: a plain-CLI '--provider NAME' or '--provider
+    # NAME1,NAME2,...' is already extracted from argv and passed in
+    # directly (see _extract_provider_override / the call site in main()).
+    # The web UI instead has no argv to put a flag in — its Ask-panel
+    # provider-order picker sets JARVIS_PROVIDER_OVERRIDE to the same
+    # comma-separated ordered-list shape per ask (see server.js's "ask" WS
     # handler) — so an explicit argv-derived override always wins, and the
     # env var is only consulted when the CLI path didn't supply one.
     if not provider_override:
         env_override = os.environ.get("JARVIS_PROVIDER_OVERRIDE")
         if env_override and env_override.strip():
-            provider_override = env_override.strip()
+            provider_override = _parse_provider_override_value(env_override)
 
     result = ai_client.ask(
         text, commands, on_attempt=on_attempt, on_tool_call=on_tool_call,
