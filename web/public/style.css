@@ -37,6 +37,16 @@
   --accent-secondary-rgb: 242, 181, 68;
   --accent-tertiary-rgb:  43, 92, 255;
 
+  /* "Online" status color. This fallback (shown before JS runs, and
+     matching the true default cyan accent) is var(--green), same as the
+     original pre-skins look. applyAccent() overrides this to track
+     var(--accent) for every preset/custom color (see the
+     .status-pill.is-online comment below) — the one exception is the
+     "Classic (hardcoded)" preset in app.js, which sets this back to
+     var(--green) directly via applyHardcodedVars() instead of going
+     through applyAccent() at all. */
+  --status-online: var(--green);
+
   --text:          #e6f5fc;
   --text-dim:      #85a2b6;
   --text-dimmer:   #4d6377;
@@ -254,14 +264,19 @@ textarea:focus-visible, select:focus-visible, [tabindex]:focus-visible{
 }
 .status-pill.is-online .status-pill__dot{
   /* "Online" reads as the reactor being lit, not a pass/fail result, so it
-     tracks the skin's accent (like the boot ring) rather than the fixed
-     --green used for actual success states elsewhere. --red below stays
-     untouched: offline/error needs to stay recognizable regardless of skin. */
-  background: var(--accent);
-  box-shadow: 0 0 8px var(--accent);
+     tracks the accent (like the boot ring) rather than the fixed --green
+     used for actual success states elsewhere — applyAccent() in app.js
+     points var(--status-online) at var(--accent) for that. The "Classic
+     (hardcoded)" preset is the one exception: it sets --status-online
+     straight to var(--green) itself, bypassing applyAccent() entirely —
+     see SKIN_PRESETS/applyHardcodedVars() in app.js. --red below stays
+     untouched either way: offline/error needs to stay recognizable
+     regardless of skin. */
+  background: var(--status-online);
+  box-shadow: 0 0 8px var(--status-online);
   animation: pulse 2.4s ease-in-out infinite;
 }
-.status-pill.is-online #status-text{ color: var(--accent); }
+.status-pill.is-online #status-text{ color: var(--status-online); }
 .status-pill.is-offline .status-pill__dot{ background: var(--red); box-shadow: 0 0 8px var(--red); }
 .status-pill.is-offline #status-text{ color: var(--red); }
 

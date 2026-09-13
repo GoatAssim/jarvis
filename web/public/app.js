@@ -43,15 +43,37 @@
   const SKIN_DEFAULT_ADDRESS = "sir";
 
   // A handful of curated presets shown as swatches; the color input next to
-  // them covers everything else. Picked to each still read clearly against
-  // the app's near-black background (see --bg-1) the way the default cyan does.
+  // them covers everything else. Amber/Crimson/Violet/Emerald/Rose Gold were
+  // originally picked at full HSL saturation (100%) and high lightness,
+  // which read as candy-bright/neon next to Cyan and Sapphire — those two
+  // are moody precisely because they're darker and (perceptually, even
+  // though also 100% saturated numerically) cooler-toned. Muted the other
+  // five down via the same scaleHsl() helper used elsewhere in this file
+  // (saturation x0.72, lightness x0.88 — same hue, same recipe, just
+  // toned down) so the whole set reads as one consistent, moodier palette.
+  // Cyan and Sapphire are intentionally NOT touched here.
+  // Each preset has a stable `id` (not just a hex) so the UI/persistence can
+  // tell "Cyan (default)" and "Classic (hardcoded)" apart even though they
+  // render the same color swatch — see the `hardcoded` preset below and
+  // applyPreset()/renderSkinSwatches() for why the id, not the hex, is what
+  // actually gets matched against.
   const SKIN_PRESETS = [
-    { name: "Cyan (default)", hex: "#4fd8ff" },
-    { name: "Amber", hex: "#ffb347" },
-    { name: "Crimson", hex: "#ff5c72" },
-    { name: "Violet", hex: "#b98bff" },
-    { name: "Emerald", hex: "#4fe6a4" },
-    { name: "Rose Gold", hex: "#f2b7c2" },
+    { id: "cyan", name: "Cyan (default)", hex: "#4fd8ff" },
+    // Muted from the original #ffb347 (H35°, S100%, L64%) to H35°, S72%,
+    // L56% — scaleHsl({...#ffb347}, 0.72, 0.88).
+    { id: "amber", name: "Amber", hex: "#e09d3f" },
+    // Muted from the original #ff5c72 (H352°, S100%, L68%) to H352°, S72%,
+    // L60% — scaleHsl({...#ff5c72}, 0.72, 0.88).
+    { id: "crimson", name: "Crimson", hex: "#e24f63" },
+    // Muted from the original #b98bff (H264°, S100%, L77%) to H264°, S72%,
+    // L68% — scaleHsl({...#b98bff}, 0.72, 0.88).
+    { id: "violet", name: "Violet", hex: "#a173e8" },
+    // Muted from the original #4fe6a4 (H154°, S75%, L61%) to H154°, S54%,
+    // L53% — scaleHsl({...#4fe6a4}, 0.72, 0.88).
+    { id: "emerald", name: "Emerald", hex: "#48c890" },
+    // Muted from the original #f2b7c2 (H349°, S69%, L83%) to H349°, S50%,
+    // L73% — scaleHsl({...#f2b7c2}, 0.72, 0.88).
+    { id: "rose-gold", name: "Rose Gold", hex: "#dd99a6" },
     // Not a hand-picked swatch like the others above — this is the exact
     // original --blue (#2b5cff) from the pre-skins build, back when it was
     // a fixed, non-skinnable color (still is, for the "precise" mode chip;
@@ -59,9 +81,55 @@
     // also happens to land in a hue gap (~226°) the other six presets don't
     // cover between Cyan (~193°) and Violet (~264°), and its lightness/
     // saturation are in the same range as the rest, so it reads cleanly
-    // against --bg-1 the same way they do.
-    { name: "Sapphire", hex: "#2b5cff" },
+    // against --bg-1 the same way they do. Deliberately left un-muted, same
+    // as Cyan above.
+    { id: "sapphire", name: "Sapphire", hex: "#2b5cff" },
+    // The literal, pre-skins J.A.R.V.I.S palette, byte-for-byte — every
+    // value below is copied straight from the original :root block (and
+
+    // cross-checked against a pre-skins-feature build), not run through
+    // scaleHsl/rotateHue/mixTowardAccent like every preset above. That
+    // math reproduces the original palette *almost* exactly at the cyan
+    // default, but "almost" was the problem: this preset exists so there's
+    // always one option with zero derivation and zero drift risk, ever.
+    // `hardcoded: true` + `vars` is what routes this through
+    // applyHardcodedVars() instead of applyAccent() — see both below.
+    {
+      id: "classic-hardcoded",
+      name: "Classic (hardcoded)",
+      hex: "#4fd8ff",
+      hardcoded: true,
+      vars: {
+        "--accent": "#4fd8ff",
+        "--accent-soft": "#2ea9d6",
+        "--accent-dim": "#164a63",
+        "--accent-glow": "rgba(79, 216, 255, 0.35)",
+        "--accent-secondary": "#f2b544",
+        "--accent-tertiary": "#2b5cff",
+        "--accent-secondary-rgb": "242, 181, 68",
+        "--accent-tertiary-rgb": "43, 92, 255",
+        // The original build never had a --status-online var at all — the
+        // online dot was just unconditionally var(--green). Setting it
+        // explicitly here reproduces that exactly without needing the
+        // status-pill CSS itself to special-case this preset.
+        "--status-online": "var(--green)",
+        "--border": "rgba(102, 214, 255, 0.16)",
+        "--border-strong": "rgba(102, 214, 255, 0.34)",
+        "--bg": "#04070d",
+        "--bg-1": "#070d16",
+        "--bg-panel": "rgba(9, 18, 30, 0.68)",
+        "--bg-panel-2": "rgba(13, 24, 38, 0.55)",
+        "--bg-raised": "#0d1826",
+      },
+    },
   ];
+
+  // Tracks which preset (by id) is currently selected in the Skin modal, so
+  // Save/Cancel/swatch-highlighting can tell a preset choice apart from a
+  // raw custom color that just happens to match a preset's hex — see
+  // renderSkinSwatches() and saveSkin(). null means "custom color, no
+  // preset selected". Reset whenever the modal opens.
+  let currentPresetId = null;
 
   function loadSkinPrefs() {
     try {
@@ -233,6 +301,14 @@
     root.setProperty("--accent-secondary-rgb", `${secondary.r}, ${secondary.g}, ${secondary.b}`);
     root.setProperty("--accent-tertiary-rgb", `${tertiary.r}, ${tertiary.g}, ${tertiary.b}`);
 
+    // ONLINE status color: tracks the accent (like the boot ring) for every
+    // color chosen through this function. The one true "always green, never
+    // tracks the accent" look lives in the dedicated hardcoded preset below
+    // (applyHardcodedVars) instead of being special-cased here — see that
+    // preset's comment for why a hex comparison isn't a reliable way to
+    // detect "the user wants the classic look".
+    root.setProperty("--status-online", "var(--accent)");
+
     // Tint amount was previously so small (0.018-0.045) that the background
     // barely shifted hue no matter which accent was picked, leaving the
     // "deep space" backdrop looking like a leftover from the cyan default
@@ -250,6 +326,28 @@
     root.setProperty("--bg-panel", `rgba(${bgPanel.r}, ${bgPanel.g}, ${bgPanel.b}, 0.68)`);
     root.setProperty("--bg-panel-2", `rgba(${bgPanel2.r}, ${bgPanel2.g}, ${bgPanel2.b}, 0.55)`);
     root.setProperty("--bg-raised", rgbToHex(bgRaised));
+  }
+
+  // Applies a preset's literal, pre-computed CSS var values directly — no
+  // HSL math, no accent-derivation, nothing that could drift from the
+  // original numbers as the formulas above get tuned over time. Used only
+  // by the "Classic (hardcoded)" preset (see SKIN_PRESETS); every other
+  // preset/custom color goes through applyAccent() instead.
+  function applyHardcodedVars(vars) {
+    const root = document.documentElement.style;
+    for (const [prop, value] of Object.entries(vars)) {
+      root.setProperty(prop, value);
+    }
+  }
+
+  // Single entry point for "apply whichever preset this is" — dispatches to
+  // applyHardcodedVars() for the literal classic preset, applyAccent() for
+  // every hand-picked/curated color. Callers that just have a hex (custom
+  // color input, or no matching preset id) should call applyAccent()
+  // directly instead.
+  function applyPreset(preset) {
+    if (preset.hardcoded) applyHardcodedVars(preset.vars);
+    else applyAccent(preset.hex);
   }
 
   // Updates every place the assistant's name is echoed back in the UI chrome
@@ -273,16 +371,23 @@
   // opened or the config is fetched — this is just a fast, best-effort guess.
   (function applySavedSkinEarly() {
     const prefs = loadSkinPrefs();
-    applyAccent(prefs.accent || SKIN_DEFAULT_ACCENT);
+    const preset = SKIN_PRESETS.find((p) => p.id === prefs.presetId);
+    if (preset) applyPreset(preset);
+    else applyAccent(prefs.accent || SKIN_DEFAULT_ACCENT);
     if (prefs.assistantName) applyAssistantNameToChrome(prefs.assistantName);
   })();
 
-  function renderSkinSwatches(activeHex) {
+  // `activePresetId` is whatever's currently selected (or null for "custom
+  // color, no preset"). Matching by id — not by re-checking each preset's
+  // hex against the color input's current value — is what lets "Cyan
+  // (default)" and "Classic (hardcoded)" both render as the same-colored
+  // swatch without one falsely lighting up as active for the other.
+  function renderSkinSwatches(activePresetId) {
     const wrap = qs("#skin-swatches");
     if (!wrap) return;
     wrap.innerHTML = "";
     for (const preset of SKIN_PRESETS) {
-      const isActive = preset.hex.toLowerCase() === (activeHex || "").toLowerCase();
+      const isActive = preset.id === activePresetId;
       wrap.appendChild(el("button", {
         type: "button",
         class: "skin-swatch" + (isActive ? " is-active" : ""),
@@ -290,8 +395,9 @@
         title: preset.name,
         onclick: () => {
           qs("#skin-custom-color").value = preset.hex;
-          applyAccent(preset.hex);
-          renderSkinSwatches(preset.hex);
+          applyPreset(preset);
+          currentPresetId = preset.id;
+          renderSkinSwatches(preset.id);
         },
       }));
     }
@@ -301,8 +407,10 @@
     qs("#skin-error").textContent = "";
     const prefs = loadSkinPrefs();
     const accent = prefs.accent || SKIN_DEFAULT_ACCENT;
+    const matchedPreset = SKIN_PRESETS.find((p) => p.id === prefs.presetId);
+    currentPresetId = matchedPreset ? matchedPreset.id : null;
     qs("#skin-custom-color").value = accent;
-    renderSkinSwatches(accent);
+    renderSkinSwatches(currentPresetId);
 
     // Persona fields are authoritative on the server (ai_config.json), not
     // in localStorage — always fetch the real current value so Skin never
@@ -328,7 +436,10 @@
     qs("#skin-backdrop").hidden = true;
     // Revert any live-preview accent back to whatever's actually saved, in
     // case the person clicked around swatches and then hit Cancel.
-    applyAccent(loadSkinPrefs().accent || SKIN_DEFAULT_ACCENT);
+    const prefs = loadSkinPrefs();
+    const preset = SKIN_PRESETS.find((p) => p.id === prefs.presetId);
+    if (preset) applyPreset(preset);
+    else applyAccent(prefs.accent || SKIN_DEFAULT_ACCENT);
   }
 
   async function saveSkin() {
@@ -350,8 +461,10 @@
       return;
     }
 
-    saveSkinPrefs({ accent, assistantName, addressAs });
-    applyAccent(accent);
+    saveSkinPrefs({ accent, presetId: currentPresetId, assistantName, addressAs });
+    const preset = SKIN_PRESETS.find((p) => p.id === currentPresetId);
+    if (preset) applyPreset(preset);
+    else applyAccent(accent);
     applyAssistantNameToChrome(assistantName);
     qs("#skin-backdrop").hidden = true;
     toast("Skin saved.", "info");
@@ -361,8 +474,9 @@
     qs("#skin-assistant-name").value = SKIN_DEFAULT_NAME;
     qs("#skin-address-as").value = SKIN_DEFAULT_ADDRESS;
     qs("#skin-custom-color").value = SKIN_DEFAULT_ACCENT;
+    currentPresetId = "cyan";
     applyAccent(SKIN_DEFAULT_ACCENT);
-    renderSkinSwatches(SKIN_DEFAULT_ACCENT);
+    renderSkinSwatches(currentPresetId);
   }
 
   function wireSkinModal() {
@@ -375,9 +489,12 @@
     qs("#btn-skin-save").addEventListener("click", saveSkin);
     qs("#btn-skin-reset").addEventListener("click", resetSkinToDefaults);
     // Live preview while picking a custom color, same as clicking a swatch.
+    // A manually typed/picked color is never a preset, even if it happens
+    // to match one's hex — see renderSkinSwatches()'s id-matching comment.
     qs("#skin-custom-color").addEventListener("input", (e) => {
       applyAccent(e.target.value);
-      renderSkinSwatches(e.target.value);
+      currentPresetId = null;
+      renderSkinSwatches(null);
     });
   }
 
