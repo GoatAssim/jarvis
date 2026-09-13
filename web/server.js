@@ -287,6 +287,59 @@ app.get("/api/status", async (req, res) => {
   });
 });
 
+// ---------------------------------------------------------------------------
+// Favorited commands — purely a web-UI preference (which command cards sort
+// to the top), no CLI/commands.json involvement at all. Used to live in
+// each browser's localStorage, which meant favoriting something in one
+// browser/tab didn't show up in any other tab or device hitting this same
+// server. Storing it here instead — one JSON file next to reboot.json,
+// served over its own tiny endpoint — makes it a property of the running
+// jarvis instance instead of the browser, so every tab/device pointed at
+// this server sees the same favorites. Deliberately NOT gated behind
+// requireJarvis/JARVIS.configPath: this has nothing to do with whether the
+// jarvis CLI itself is reachable.
+// ---------------------------------------------------------------------------
+
+const FAVORITES_PATH = path.join(__dirname, "data", "favorites.json");
+
+async function readFavorites() {
+  try {
+    const text = await fs.readFile(FAVORITES_PATH, "utf-8");
+    const parsed = JSON.parse(text);
+    return Array.isArray(parsed) ? parsed.filter((n) => typeof n === "string") : [];
+  } catch (e) {
+    // Missing file (first run) or corrupt JSON both just mean "no
+    // favorites yet" — same best-effort shrug as everything else that
+    // reads its own small state file in this app.
+    return [];
+  }
+}
+
+async function writeFavorites(names) {
+  await fs.mkdir(path.dirname(FAVORITES_PATH), { recursive: true });
+  await fs.writeFile(FAVORITES_PATH, JSON.stringify(names, null, 2) + "\n", "utf-8");
+}
+
+app.get("/api/favorites", async (req, res) => {
+  res.json(await readFavorites());
+});
+
+app.post("/api/favorites", async (req, res) => {
+  const names = req.body?.names;
+  if (!Array.isArray(names) || !names.every((n) => typeof n === "string")) {
+    return res.status(400).json({ error: "Body must be { names: string[] }." });
+  }
+  // De-duplicate defensively — the client always sends a Set's contents,
+  // but nothing stops some other caller of this endpoint from not doing
+  // that, and a favorites list is inherently a set, not a sequence.
+  try {
+    await writeFavorites([...new Set(names)]);
+    res.json({ ok: true });
+  } catch (e) {
+    res.status(500).json({ error: `Couldn't save favorites: ${e.message}` });
+  }
+});
+
 app.post("/api/reconnect", async (req, res) => {
   // Re-resolving can fail transiently even though the executable we're
   // already talking to is fine — e.g. right after switching a persona

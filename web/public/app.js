@@ -1500,6 +1500,11 @@
   const Api = {
     status: () => api("GET", "/api/status"),
     reconnect: () => api("POST", "/api/reconnect"),
+    // Favorited commands: server-persisted (see server.js), independent of
+    // whether the jarvis CLI itself is reachable — never gated behind
+    // requireJarvis on the server side, so this always works.
+    getFavorites: () => api("GET", "/api/favorites"),
+    setFavorites: (names) => api("POST", "/api/favorites", { names }),
     listCommands: () => api("GET", "/api/commands"),
     createCommand: (name, spec) => api("POST", "/api/commands", { name, spec }),
     updateCommand: (oldName, name, spec) => api("PUT", `/api/commands/${encodeURIComponent(oldName)}`, { name, spec }),
@@ -1708,32 +1713,41 @@
   const ICON_STAR_OUTLINE = '<svg viewBox="0 0 24 24" width="11" height="11" aria-hidden="true"><path d="M12 3.5l2.47 5.51 5.98.58-4.5 4.03 1.32 5.88L12 16.62l-5.27 2.88 1.32-5.88-4.5-4.03 5.98-.58L12 3.5z" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/></svg>';
   const ICON_STAR_FILLED = '<svg viewBox="0 0 24 24" width="11" height="11" aria-hidden="true"><path d="M12 3.5l2.47 5.51 5.98.58-4.5 4.03 1.32 5.88L12 16.62l-5.27 2.88 1.32-5.88-4.5-4.03 5.98-.58L12 3.5z" fill="currentColor"/></svg>';
 
-  // Purely front-end command favoriting — a Set of command names kept in
-  // localStorage, same try/catch-and-shrug persistence pattern as
-  // loadSkinPrefs/saveSkinPrefs above. Nothing here ever touches
-  // commands.json or the CLI; a favorite is just a client-side pin on
-  // where a command sorts in the list, so it's scoped per-browser like
-  // every other localStorage skin/accent preference in this file.
-  function loadFavoriteCommands() {
+  // Purely front-end command favoriting (still no commands.json/CLI
+  // involvement — a favorite is just which command cards sort to the
+  // top) — but persisted server-side via /api/favorites (see server.js)
+  // instead of this browser's localStorage. localStorage meant favoriting
+  // something in one tab/browser never showed up anywhere else pointed at
+  // the same running jarvis instance; a tiny JSON file the server reads/
+  // writes makes it a property of the instance instead, like conversations
+  // and commands.json already are. Same try/catch-and-shrug best-effort
+  // style as everything else in this file that touches its own small bit
+  // of state: a failed fetch just means this tab's edit doesn't stick,
+  // nothing else breaks.
+  //
+  // favoriteCommands starts empty and is populated asynchronously by
+  // loadFavoriteCommands() during initApp() (see Init section at the
+  // bottom of this file) — anything that reads it before that resolves
+  // just sees "nothing favorited yet" for a moment, then renderCommandList()
+  // re-sorts once the real list is in.
+  async function loadFavoriteCommands() {
     try {
-      const raw = localStorage.getItem(FAVORITE_COMMANDS_STORAGE_KEY);
-      const parsed = raw ? JSON.parse(raw) : null;
-      return new Set(Array.isArray(parsed) ? parsed : []);
+      const names = await Api.getFavorites();
+      return new Set(Array.isArray(names) ? names : []);
     } catch (e) {
       return new Set();
     }
   }
 
   function saveFavoriteCommands(favoriteSet) {
-    try {
-      localStorage.setItem(FAVORITE_COMMANDS_STORAGE_KEY, JSON.stringify([...favoriteSet]));
-    } catch (e) {
-      // Best-effort only — a full/blocked localStorage just means
-      // favorites don't survive a reload, nothing else breaks.
-    }
+    Api.setFavorites([...favoriteSet]).catch(() => {
+      // Best-effort only — a failed save just means this change didn't
+      // persist to disk; the in-memory Set (and this tab's rendering)
+      // still reflects it until the next reload.
+    });
   }
 
-  let favoriteCommands = loadFavoriteCommands();
+  let favoriteCommands = new Set();
 
   function isFavoriteCommand(name) {
     return favoriteCommands.has(name);
@@ -5588,6 +5602,11 @@
 
   async function initApp(status) {
     renderStatus(status);
+    // Favorites live on the server, not the jarvis CLI, so this loads
+    // regardless of status.online — then re-renders the (already loaded,
+    // or about-to-load) command list once the real favorite set is in.
+    favoriteCommands = await loadFavoriteCommands();
+    renderCommandList();
     // Silent: the boot sequence + status pill already explain an offline
     // CLI on first load, so a third toast on top would just be noise.
     await loadCommands({ silent: !status.online });

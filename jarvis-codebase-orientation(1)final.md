@@ -113,6 +113,36 @@ next round sees the grown active set → eventually a final text answer
 | `tests/interactive_inspector.py` | Human-readable diagnostic report (not pass/fail) for what a given message actually triggers — see "Interactive inspector" below | REPL / single-shot / `--examples` batch modes; `report(text)`, `_explain_keyword_matches()`, `_trim_groups()`, `_active_schemas_for()` |
 | `tests/benchmark_pc_actions.py`, `tests/compare_benchmark_results.py` | Cross-repo (main vs. counterreword) token/tool-call benchmark — see "Cross-repo benchmark" below | `run_benchmark(label)`, `is_safe_tool()` (default-deny allowlist gating which tools are allowed to actually run), `install_stub()`; `compare_benchmark_results.py` reads two of the JSON files this produces and prints a delta |
 
+### Additional tool modules (not yet individually enumerated above)
+
+These exist and are wired into `tools.py`'s catalog/groups, but weren't
+covered in the original file-map pass above:
+
+| File | Role | Key symbols |
+|---|---|---|
+| `route_stickiness.py` | "Sticks" a conversation's last confidently-routed tool group(s) for a few follow-up turns, so a same-task follow-up ("no just say hello", "yes do it") that carries none of the original keywords still has the right tools on hand instead of falling back to bare discovery. Best-effort, degrades to no stickiness on a missing/corrupt file, same spirit as `discovery_cache.py`. One JSON file, one entry per `conversation_id` | `get_sticky(conv_id)`, `STICKY_TURNS`, wired into `ai_client.ask()` around the `tool_router.route()` call |
+| `present_tools.py` | `present_file` — the tool the model reaches for to actually hand the user a file/folder (name/type/size/path, Open/Reveal/Download), instead of just typing the path in prose. Under the hood still resolves to the same `reveal_in_explorer`/`open_file_location`/`open_file` calls in `everything_tools.py`. Behavior differs by `JARVIS_UI` env var (web vs. plain terminal — see `web/server.js`) | `tool_present_file()` |
+| `mode_tools.py` | Lets the AI read/change its own capacity mode from inside an ask (`get_capacity_mode`/`set_capacity_mode`), same effect as `jarvis mode-set` or the web UI's capacity switch. Imports `ai_client` lazily inside each function to dodge a circular import (`ai_client` → `tools.py` → this module, at load time) | `tool_get_capacity_mode()`, `tool_set_capacity_mode()` |
+| `json_tools.py` | Validate/pretty-print an arbitrary JSON file for humans — backs both `jarvis organize-json <path>` and the `organize_json` AI tool. Pure stdlib `json` + file IO, zero API tokens; `web/server.js`'s `/api/json/organize` shells out to the CLI form to reuse the same parsing/error logic rather than reimplementing it in Node | `resolve_path()`, `read_json_file()`, `render_tree()` |
+| `custom_tools.py` | `run_custom_command` — arbitrary ad-hoc shell command, the most powerful and most dangerous tool in the catalog. `tool_safety.py` defaults **both** `confirm_required` and `ai_review` to `True` for this tool specifically — user confirmation and a second AI's risk assessment both have to pass before anything runs | `CUSTOM_TOOL_SCHEMAS` |
+| `file_tools.py` | `write_file` — create/overwrite a text file. Deliberately narrow (text only, no binary, no delete); `confirm_required` on by default | `FILE_TOOL_SCHEMAS` |
+| `git_tools.py` | Allowlisted git subcommands, not a general shell — everyday ones (`status`, `log`, `diff`, `commit`, `push`, ...) run freely; `reset`/`clean`/a forced `push` need `confirm=true` | `_SAFE`, `_NEEDS_CONFIRM`, `_ARG_OK` (arg sanitizer regex) |
+| `pkg_tools.py` | Windows package management across winget/Chocolatey/Scoop/pip/pipx/npm. Search/info run freely; install/uninstall always require `confirm=true`. Package ids sanitized (`_PKG_ID_RE`) so this isn't a general shell either | `_MANAGERS` |
+| `web_tools.py` | `web_search` (via the `ddgs` DuckDuckGo package) and page fetch — fetched pages are stripped of markup and capped at `FETCH_MAX_CHARS` so a library-sized HTML dump never reaches the model | `SEARCH_MAX`, `FETCH_MAX_CHARS`, `_BLOCKED_HOSTS` (blocks localhost/loopback/`playnite` as fetch targets) |
+| `screenshot_tools.py` | Desktop screenshot, saved to disk under `~/.jarvis/screenshots` (pruned to `MAX_KEEP`) — **never** sent to the AI as raw pixels | `ensure_dir()`, `MAX_KEEP=40` |
+| `radio_tools.py` | Windows Wi-Fi/Bluetooth adapter on/off, via a PowerShell helper script | `_PS_HELPERS` |
+| `stats.py` | Tracks how often each saved command actually runs (typed directly or triggered by the AI); feeds the "frequently used commands" context in every ask. Thread-locked since chained `and` commands can bump concurrently | `bump()`, `frequent_commands_context()`, `STATS_FILE` |
+| `spotify_tools.py`, `spotify_api.py`, `spotify_config.py` | Spotify integration: launch the desktop app with no API needed (`tool_spotify_open`), or full playback control via the Web API + PKCE OAuth login (`jarvis spotify-login`) once `spotify.json` has a client id | `tool_spotify_open()`, `tool_spotify_now()`, config at `~/.jarvis/spotify.json` |
+| `playnite_tools.py`, `playnite_api_tools.py`, `playnite_config.py`, `playnite_http.py` | Playnite Bridge integration (HTTP API on `localhost:19821`, a companion plugin — see `playnitebridge/` at the repo root) — browse/search the game library, launch a game by a specific action id (not just default Play — mods, URLs, emulators are first-class), cached game/action ids in `~/.jarvis/playnite.json` | `_stored_game_actions()` (LibraryPlugin actions are virtual, never persisted), config at `~/.jarvis/playnite.json` |
+| `everything_config.py` | Settings for the `everything_tools.py` file-search integration (DLL/exe path overrides, default result count) | — |
+
+New confirmed groups since the original pass: `git`/`packages` fold under
+the existing `system_control` group per the note below the original table;
+`spotify`, `playnite`, `web`, `files`, and a `json`/`capacity`/`present`
+handful of single-tool groups also exist. As before, check
+`tool_registry.TOOL_GROUPS` directly rather than assuming from this list —
+it wasn't re-enumerated tool-by-tool here, just documented per-module.
+
 Groups **confirmed** (by direct testing, not just reading) so far:
 - `desktop` = `type_text, press_key, hotkey, scroll, move_mouse, click, drag, get_screen_size, get_mouse_position, list_windows, focus_window, get_active_window, get_window_size, get_window_info, take_screenshot, click_on_text` (16 tools)
 - `commands` = `search_commands, run_command, run_chain, create_command, update_command, run_custom_command` (6 tools)
