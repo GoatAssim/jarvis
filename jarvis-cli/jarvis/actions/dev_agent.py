@@ -153,39 +153,71 @@ def _extract_json(text):
 
 
 def _ai_single_call(system_prompt, user_prompt, cfg=None):
-    """One raw completion via the first eligible configured provider,
-    structurally identical to ai_client.risk_review's adapter-call shape.
-    Returns (text, None) or (None, error_string). Best-effort: any
-    configuration/provider failure comes back as an error string, never
-    an exception -- the caller turns that into a plan_failed/fix "fail"
-    event, same as every other failure branch in the loop.
+    """One raw completion, trying every eligible configured provider (and
+    every key within each provider) in order until one succeeds --
+    structurally the same fallback ai_client.ask() does, just without
+    tool-calling. Returns (text, None) or (None, error_string) if every
+    provider/key was exhausted. Best-effort: any configuration/provider
+    failure comes back as an error string, never an exception -- the
+    caller turns that into a plan_failed/fix "fail" event, same as every
+    other failure branch in the loop.
     """
     try:
         from .. import ai_client, ai_config  # see module-level NOTE above
 
-        cfg = cfg or ai_config.load_config()
+        cfg = cfg or ai_config.load_ai_config()
         providers = ai_client._eligible_providers(cfg["providers"], cfg["defaults"])
         if not providers:
             return None, "no configured AI provider available for dev_agent's planner/writer call"
-        provider = providers[0]
-        adapter = ai_client.ai_providers.ADAPTERS.get(provider.get("type"))
-        if adapter is None:
-            return None, f"no adapter for provider type {provider.get('type')!r}"
-        keys = ai_config.provider_keys(provider) or [None]
-        resolved = ai_client._resolve(provider, cfg["defaults"])
-        if keys[0] is not None:
-            resolved["api_key"] = keys[0]
+
         messages = [
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_prompt},
         ]
-        result = adapter(resolved, messages, resolved.get("timeout", ai_client.DEFAULT_TIMEOUT),
-                          tools=None, tool_executor=None)
-        if result.ok and result.text:
-            return result.text, None
-        return None, (getattr(result, "error", None) or "planner/writer call returned no text")
+
+        errors = []
+        for provider in providers:
+            adapter = ai_client.ai_providers.ADAPTERS.get(provider.get("type"))
+            if adapter is None:
+                errors.append(f"{_provider_label_safe(ai_client, provider)}: no adapter for provider type {provider.get('type')!r}")
+                continue
+
+            # Ollama (or anything else with no configured keys but still
+            # eligible, i.e. local/no auth needed) gets exactly one pass
+            # with no key substituted -- same convention ai_client.ask()
+            # uses for multi-key providers.
+            keys = ai_config.provider_keys(provider) or [None]
+
+            for key in keys:
+                resolved = ai_client._resolve(provider, cfg["defaults"])
+                if key is not None:
+                    resolved["api_key"] = key
+                try:
+                    result = adapter(resolved, messages, resolved.get("timeout", ai_client.DEFAULT_TIMEOUT),
+                                      tools=None, tool_executor=None)
+                except Exception as e:  # one bad provider/key must never take down the whole call
+                    errors.append(f"{_provider_label_safe(ai_client, provider)}: unexpected error: {e}")
+                    continue
+
+                if result.ok and result.text:
+                    return result.text, None
+                errors.append(f"{_provider_label_safe(ai_client, provider)}: "
+                               f"{getattr(result, 'error', None) or 'planner/writer call returned no text'}")
+
+        return None, "all configured providers failed for dev_agent's planner/writer call: " + "; ".join(errors)
     except Exception as e:
         return None, str(e)
+
+
+def _provider_label_safe(ai_client, provider):
+    """ai_client._provider_label() is a private helper but the natural
+    thing to reuse for per-attempt error labels here; wrapped so a future
+    rename in ai_client can't turn this into a hard crash, just a plainer
+    label."""
+    try:
+        return ai_client._provider_label(provider)
+    except Exception:
+        return provider.get("type", "unknown-provider")
 
 
 def _plan_project(description, language_hint=None):

@@ -706,9 +706,20 @@ TOOLS = {
 # the built-in always wins and the action file is logged and skipped
 # rather than silently shadowing something real.
 # ---------------------------------------------------------------------------
+import sys  # noqa: E402  (deliberately after TOOLS is built, see below)
 from . import tool_loader  # noqa: E402  (deliberately after TOOLS is built)
 
-_AUTO_RECORDS = tool_loader.discover_actions(reserved_names=set(TOOLS))
+# logger=print (the default) would write auto-discovery log lines to
+# stdout. That's fine for most invocations, but `jarvis tools-list`
+# imports this module and then prints exactly one JSON payload to stdout
+# for the web UI to JSON.parse — any stray print() before that call
+# corrupts it. Every other diagnostic/log line in this codebase goes to
+# stderr for the same reason (see cli.py); auto-discovery logging should
+# not be the one exception.
+_AUTO_RECORDS = tool_loader.discover_actions(
+    reserved_names=set(TOOLS),
+    logger=lambda msg: print(msg, file=sys.stderr),
+)
 _AUTO_VALID = [r for r in _AUTO_RECORDS if r.valid]
 
 AUTO_TOOL_SCHEMAS = [s for r in _AUTO_VALID for s in r.schemas]
