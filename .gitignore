@@ -25,3 +25,7 @@ benchmark*
 *.venv
 venv
 jarvis/venv
+voices/
+voices
+voice/
+voice
