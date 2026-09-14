@@ -1739,10 +1739,17 @@ def _spawn_title_update(conversation_id, exchange_count):
     kwargs = dict(stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
                   stderr=subprocess.DEVNULL)
     if os.name == "nt":
-        kwargs["creationflags"] = (
-            getattr(subprocess, "DETACHED_PROCESS", 0x00000008)
-            | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0x00000200)
-        )
+        # CREATE_NO_WINDOW (not DETACHED_PROCESS) is the flag that actually
+        # suppresses window creation for a console-subsystem child like
+        # `python -m jarvis`: DETACHED_PROCESS still lets Windows briefly
+        # allocate/flash a console for a console-subsystem executable
+        # before it exits, which is exactly the "a cmd window pops up and
+        # dies" symptom on every single ask — CREATE_NO_WINDOW never
+        # allocates one at all. (The two are mutually exclusive per the
+        # Win32 CreateProcess docs, so this replaces DETACHED_PROCESS
+        # rather than adding to it; CREATE_NEW_PROCESS_GROUP isn't needed
+        # either — that's for signal isolation, not window visibility.)
+        kwargs["creationflags"] = getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)
     else:
         kwargs["start_new_session"] = True
     try:

@@ -45,6 +45,16 @@ KNOWN_TTS_PROVIDERS = {"kokoro", "edge", "elevenlabs", "xtts"}
 KNOWN_STT_PROVIDERS = {"faster_whisper", "vosk"}
 
 DEFAULT_VOICE_CONFIG = {
+    # Master switch for the whole voice feature (TTS + STT), independent of
+    # which providers are picked below. Flip to false to turn voice off
+    # everywhere at once — the CLI's `speak`/`listen`/`transcribe`
+    # subcommands and synthesize()/transcribe() both refuse to run (see
+    # voice_enabled() below and the checks at the top of tts.synthesize()/
+    # stt.transcribe()), and web/server.js's /api/status reports it via
+    # "voiceEnabled" so public/app.js can hide the mic button and every
+    # "Speak" button on the reply bubbles. No provider/model settings are
+    # touched or lost — this only gates whether they're used.
+    "enabled": True,
     "tts": {
         "provider": "edge",
         "kokoro": {
@@ -139,9 +149,10 @@ def _merge_defaults(section_name, loaded, defaults):
 
 
 def load_voice_config():
-    """Always returns a dict with 'tts', 'stt', and 'audio' keys, each
-    fully populated (missing sub-keys filled from DEFAULT_VOICE_CONFIG) —
-    callers never need to guard against a half-shaped or stale config."""
+    """Always returns a dict with 'enabled', 'tts', 'stt', and 'audio'
+    keys, each fully populated (missing sub-keys filled from
+    DEFAULT_VOICE_CONFIG) — callers never need to guard against a
+    half-shaped or stale config."""
     ensure_voice_config()
     try:
         data = json.loads(VOICE_CONFIG_FILE.read_text(encoding=ENCODING))
@@ -157,11 +168,24 @@ def load_voice_config():
     if not isinstance(data, dict):
         data = {}
 
+    enabled = data.get("enabled", DEFAULT_VOICE_CONFIG["enabled"])
+    if not isinstance(enabled, bool):
+        enabled = DEFAULT_VOICE_CONFIG["enabled"]
+
     return {
+        "enabled": enabled,
         "tts": _merge_defaults("tts", data, DEFAULT_VOICE_CONFIG),
         "stt": _merge_defaults("stt", data, DEFAULT_VOICE_CONFIG),
         "audio": _merge_defaults("audio", data, DEFAULT_VOICE_CONFIG),
     }
+
+
+def voice_enabled(cfg=None):
+    """True unless voice_config.json has \"enabled\": false at the top
+    level — the one switch that turns TTS + STT off everywhere (CLI and
+    web) without touching any provider settings."""
+    cfg = cfg or load_voice_config()
+    return bool(cfg.get("enabled", True))
 
 
 def tts_provider_and_settings(cfg=None):

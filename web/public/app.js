@@ -1632,6 +1632,7 @@
   // ===========================================================================
 
   function renderStatus(status) {
+    applyVoiceEnabled(status.voiceEnabled !== false);
     const pill = qs("#status-pill");
     const text = qs("#status-text");
     const meta = qs("#status-meta");
@@ -3524,14 +3525,45 @@
     }
   }
 
+  // Server-reported master switch from voice_config.json's "enabled" key
+  // (see /api/status's "voiceEnabled" and voice/config.py). Starts true so
+  // nothing flashes disabled before status has loaded; updated for real in
+  // applyVoiceEnabled() once boot's Api.status() resolves. micSupported()
+  // is also what gates whether a "Speak" button gets created on jarvis
+  // reply bubbles (see the ask-msg--jarvis branch above), so folding the
+  // server-side switch into it disables both the mic button and every
+  // future Speak button from this one flag.
+  let voiceFeatureEnabled = true;
+
   function micSupported() {
-    return !!(navigator.mediaDevices && navigator.mediaDevices.getUserMedia && window.MediaRecorder);
+    return voiceFeatureEnabled &&
+      !!(navigator.mediaDevices && navigator.mediaDevices.getUserMedia && window.MediaRecorder);
   }
 
   const micBtn = qs("#btn-ask-mic");
   if (!micSupported()) {
     micBtn.disabled = true;
     micBtn.title = "Voice input isn't supported in this browser.";
+  }
+
+  function applyVoiceEnabled(enabled) {
+    voiceFeatureEnabled = enabled;
+    if (!enabled) {
+      // Hide outright (not just disable) — the user asked for voice to be
+      // fully turned off, front and back, not just greyed out.
+      micBtn.style.display = "none";
+      micBtn.disabled = true;
+      micBtn.title = "Voice is disabled (voice_config.json).";
+      qsa(".ask-msg__act[title=\"Read this reply aloud\"]").forEach((btn) => {
+        btn.style.display = "none";
+      });
+    } else {
+      micBtn.style.display = "";
+      if (navigator.mediaDevices && navigator.mediaDevices.getUserMedia && window.MediaRecorder) {
+        micBtn.disabled = false;
+        micBtn.title = "Record a voice message";
+      }
+    }
   }
 
   function setMicRecording(isRecording) {

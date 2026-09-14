@@ -134,6 +134,9 @@ def transcribe(path, config=None):
     from . import config as voice_config
 
     cfg = config or voice_config.load_voice_config()
+    if not voice_config.voice_enabled(cfg):
+        return {"error": "Voice is disabled (voice_config.json: \"enabled\": false).", "disabled": True}
+
     provider, settings = voice_config.stt_provider_and_settings(cfg)
 
     backend = _BACKENDS.get(provider)
