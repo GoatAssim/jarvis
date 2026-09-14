@@ -1169,6 +1169,17 @@ def main():
     if argv[0] == "voice-config":
         from .voice import config as voice_config
         voice_config.ensure_voice_config()
+        if "--json" in argv[1:]:
+            # Machine-readable status for web/server.js's /api/status —
+            # just the bit a UI needs to decide whether to show voice
+            # controls at all, not the full (potentially secret-bearing,
+            # e.g. elevenlabs.api_key) config.
+            cfg = voice_config.load_voice_config()
+            print(json.dumps({
+                "path": str(voice_config.VOICE_CONFIG_FILE),
+                "enabled": voice_config.voice_enabled(cfg),
+            }))
+            return
         print(voice_config.VOICE_CONFIG_FILE)
         return
 
@@ -1177,7 +1188,11 @@ def main():
         # default output device. server.js's web path calls this same
         # subcommand but with --no-play (see below) so it can stream the
         # raw bytes to the browser instead of touching the host speaker.
-        from .voice import tts as voice_tts
+        from .voice import config as voice_config, tts as voice_tts
+
+        if not voice_config.voice_enabled():
+            print(json.dumps({"error": "Voice is disabled (voice_config.json: \"enabled\": false)."}))
+            sys.exit(1)
 
         no_play = "--no-play" in argv[1:]
         out_path = None
@@ -1209,7 +1224,11 @@ def main():
         # WAV file. Used directly by a person with a recording on disk,
         # and by server.js's /api/voice/transcribe on a browser upload
         # saved to a temp file (see voice/stt.py's module docstring).
-        from .voice import stt as voice_stt
+        from .voice import config as voice_config, stt as voice_stt
+
+        if not voice_config.voice_enabled():
+            print(json.dumps({"error": "Voice is disabled (voice_config.json: \"enabled\": false)."}))
+            sys.exit(1)
 
         if len(argv) < 2 or not argv[1].strip():
             print(json.dumps({"error": "usage: jarvis transcribe <audio file>"}))
@@ -1229,8 +1248,12 @@ def main():
         # local mic/speaker) — the web UI does the mic/speaker parts itself
         # in the browser and calls /api/voice/transcribe + /api/voice/speak
         # around a normal "ask" instead (see jarvis-enhancement-plan.md §3a).
-        from .voice import audio_io as voice_audio_io, stt as voice_stt, tts as voice_tts
+        from .voice import audio_io as voice_audio_io, config as voice_config, stt as voice_stt, tts as voice_tts
         from . import ai_client, conversations
+
+        if not voice_config.voice_enabled():
+            print(f"{ERR.RED}Voice is disabled (voice_config.json: \"enabled\": false).{ERR.RESET}", file=sys.stderr)
+            sys.exit(1)
 
         def status(msg):
             print(f"{ERR.DIM}{msg}{ERR.RESET}", file=sys.stderr, flush=True)

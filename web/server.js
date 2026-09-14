@@ -278,11 +278,30 @@ function requireJarvis(req, res, next) {
   next();
 }
 
+// Voice's master on/off switch lives in voice_config.json (see
+// voice/config.py's "enabled" key), not in this server's own state, so
+// checking it means asking the CLI — same "never reimplement jarvis's own
+// logic here" rule as everything else in this file. Cheap (one short-lived
+// local process) and only called from /api/status, which itself is only
+// hit on page load / manual reconnect, not polled.
+async function getVoiceEnabled() {
+  if (!JARVIS) return true; // unknown/offline: don't hide voice UI on top of an offline banner
+  const result = await runJarvisOnce(["voice-config", "--json"], 5000);
+  if (!result.ok) return true;
+  try {
+    const parsed = JSON.parse(result.stdout);
+    return parsed.enabled !== false;
+  } catch {
+    return true;
+  }
+}
+
 app.get("/api/status", async (req, res) => {
   res.json({
     online: !!JARVIS,
     invocation: JARVIS ? [JARVIS.cmd, ...JARVIS.args].join(" ") : null,
     configPath: JARVIS ? JARVIS.configPath : null,
+    voiceEnabled: await getVoiceEnabled(),
   });
 });
 
