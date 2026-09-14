@@ -100,9 +100,16 @@ if errorlevel 1 (
     del /f /q "%BUMP_OUTPUT%" 2>nul
     echo WARNING: Could not bump build number ^(non-fatal^) -- version display may be stale.
 ) else (
-    set /p "BUILD_NUM="<"%BUMP_OUTPUT%"
+    rem stdout contract is "<number> <hash>" -- see bump_build_version.py.
+    rem The number only actually changes when jarvis-cli/jarvis/ source
+    rem itself changed since the last build; re-running with no source
+    rem edits reports the SAME number/hash on purpose.
+    for /f "usebackq tokens=1,2" %%A in ("%BUMP_OUTPUT%") do (
+        set "BUILD_NUM=%%A"
+        set "BUILD_HASH=%%B"
+    )
     del /f /q "%BUMP_OUTPUT%" 2>nul
-    echo This build: #!BUILD_NUM!
+    echo This build: #!BUILD_NUM! ^(src !BUILD_HASH:~0,12!^)
 )
 echo.
 
@@ -129,6 +136,19 @@ echo.
 echo [4/5] Updating Program Files copy...
 set "INSTALLED_EXE=%INSTALL_DIR%\%CLI_NAME%.exe"
 call :install_program_files
+echo.
+
+echo [4.5/5] Verifying PATH's %CLI_NAME% matches this build...
+rem This is the ACTUAL check, not the version display -- it asks the OS
+rem to resolve "%CLI_NAME%" through PATH exactly like a plain invocation
+rem would (which can differ from !JARVIS_EXE! above -- that's whichever
+rem venv/scripts-dir copy find_jarvis picked, not necessarily what PATH
+rem itself resolves to), runs its `version` output, and compares the
+rem source hash it reports against jarvis-cli/jarvis/ on disk right now.
+rem Non-fatal by design: a mismatch here means "you're not about to run
+rem what you just built", which is worth a loud warning, but shouldn't
+rem block the web server from starting.
+"%PYEXE%" "%JARVIS_CLI%\build_tools\verify_exe.py" "%CLI_NAME%"
 echo.
 
 echo [5/5] Starting web server...
@@ -276,7 +296,12 @@ if not errorlevel 1 echo Program Files copy updated.
 exit /b 0
 
 :launch_server
-powershell -NoProfile -ExecutionPolicy Bypass -File "%ROOT%launch-web.ps1" -WebDir "%WEB_DIR%" -JarvisExe "!JARVIS_EXE!"
+rem CliName/JarvisCliDir/PyExe are passed through so start-server.bat can
+rem re-run the SAME PATH-vs-source-hash check on every server start, not
+rem just once here at build time -- e.g. someone re-opening the web UI
+rem later, without rebuilding, on a machine where PATH order can change
+rem underneath them (PATH edits, another persona's exe reinstalled, etc.).
+powershell -NoProfile -ExecutionPolicy Bypass -File "%ROOT%launch-web.ps1" -WebDir "%WEB_DIR%" -JarvisExe "!JARVIS_EXE!" -CliName "%CLI_NAME%" -JarvisCliDir "%JARVIS_CLI%" -PyExe "%PYEXE%"
 echo.
 echo Server window opened. JARVIS_BIN=!JARVIS_EXE! ^(command: %CLI_NAME%^)
 echo.
