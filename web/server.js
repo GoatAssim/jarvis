@@ -26,7 +26,7 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PORT = Number(process.env.PORT) || 4173;
 const HOST = "127.0.0.1";
 
-const RESERVED_NAMES = new Set(["config", "ai-config", "ai-clear", "ai-drop-from", "playnite-config", "spotify-config", "spotify-login", "memory-config", "everything-config", "tools-list", "tool-run", "tool-preview", "tool-safety-set", "conv-new", "conv-list", "conv-show", "conv-switch", "conv-delete", "logs", "logs-list", "logs-show", "logs-clear", "organize-json", "then", "and", "-h", "--help"]);
+const RESERVED_NAMES = new Set(["config", "ai-config", "ai-clear", "ai-drop-from", "playnite-config", "spotify-config", "spotify-login", "memory-config", "everything-config", "tools-list", "tool-run", "tool-preview", "tool-safety-set", "conv-new", "conv-list", "conv-show", "conv-switch", "conv-delete", "logs", "logs-list", "logs-show", "logs-clear", "organize-json", "mode", "mode-set", "voice-config", "speak", "listen", "transcribe", "then", "and", "-h", "--help"]);
 
 // ---------------------------------------------------------------------------
 // Locate the real jarvis binary. Tries a few invocation strategies, in
@@ -573,6 +573,82 @@ app.post("/api/mode", requireJarvis, async (req, res) => {
     res.status(500).json({ error: "Couldn't parse mode output." });
   }
 });
+
+// ---------------------------------------------------------------------------
+// Voice (jarvis-enhancement-plan.md §3.5 / §3a) — the browser owns the
+// mic/speaker (getUserMedia / <audio>), this server just shells out to the
+// same `jarvis speak` / `jarvis transcribe` subcommands the CLI's `jarvis
+// listen` uses, per audio_io.py's docstring: "a web browser records
+// through its own mic ... it never calls anything in this file". No new
+// synthesis/transcription logic lives here, only plumbing.
+// ---------------------------------------------------------------------------
+
+app.post("/api/voice/speak", requireJarvis, async (req, res) => {
+  const text = typeof req.body?.text === "string" ? req.body.text.trim() : "";
+  if (!text) return res.status(400).json({ error: "text is required" });
+
+  // `jarvis speak` never puts raw audio on stdout (see cli.py) — write it
+  // to a temp file with --out, stream that back, then clean up. --no-play
+  // stops it from also trying to use *this machine's* speaker, which
+  // would be the wrong device for whoever's actually listening (their
+  // browser, possibly on another machine on the LAN).
+  const tmpPath = path.join(os.tmpdir(), `jarvis_web_speak_${Date.now()}_${Math.random().toString(36).slice(2)}.audio`);
+  const result = await runJarvisOnce(["speak", text, "--no-play", "--out", tmpPath], 30000);
+
+  let parsed = null;
+  try { parsed = JSON.parse(result.stdout); } catch { /* not JSON */ }
+
+  if (!result.ok || !parsed || parsed.error) {
+    await fs.unlink(tmpPath).catch(() => {});
+    return res.status(500).json({ error: (parsed && parsed.error) || result.error || result.stderr || "Speech synthesis failed." });
+  }
+
+  try {
+    const audio = await fs.readFile(tmpPath);
+    res.set("Content-Type", parsed.mime || "application/octet-stream");
+    res.set("X-Voice-Provider", parsed.provider || "");
+    res.send(audio);
+  } catch (e) {
+    res.status(500).json({ error: `couldn't read synthesized audio: ${e.message}` });
+  } finally {
+    await fs.unlink(tmpPath).catch(() => {});
+  }
+});
+
+app.post(
+  "/api/voice/transcribe",
+  requireJarvis,
+  express.raw({ type: "audio/*", limit: "25mb" }),
+  async (req, res) => {
+    if (!Buffer.isBuffer(req.body) || req.body.length === 0) {
+      return res.status(400).json({ error: "expected a raw audio body (Content-Type: audio/*)" });
+    }
+
+    // stt.py's backends (faster-whisper/vosk) both read a WAV file path.
+    // Browsers record webm/ogg via MediaRecorder, not WAV — but rather
+    // than teach this Node server to transcode, the browser side records
+    // as WAV directly (see public/app.js's recorder setup), so whatever
+    // lands here is already the right container; this is just a save-to-
+    // disk-and-hand-to-the-CLI step, no format logic of its own.
+    const tmpPath = path.join(os.tmpdir(), `jarvis_web_listen_${Date.now()}_${Math.random().toString(36).slice(2)}.wav`);
+    try {
+      await fs.writeFile(tmpPath, req.body);
+    } catch (e) {
+      return res.status(500).json({ error: `couldn't save upload: ${e.message}` });
+    }
+
+    const result = await runJarvisOnce(["transcribe", tmpPath], 60000);
+    await fs.unlink(tmpPath).catch(() => {});
+
+    let parsed = null;
+    try { parsed = JSON.parse(result.stdout); } catch { /* not JSON */ }
+
+    if (!result.ok || !parsed || parsed.error) {
+      return res.status(500).json({ error: (parsed && parsed.error) || result.error || result.stderr || "Transcription failed." });
+    }
+    res.json(parsed);
+  }
+);
 
 // ---------------------------------------------------------------------------
 // Conversations — every one lives in ~/.jarvis/conversations on the
