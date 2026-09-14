@@ -769,8 +769,14 @@ class ToolContext:
     round_budget_remaining: Callable[[], int]  # zero-arg callable, not a
     # snapshot int — RoundBudget.used keeps changing after this context
     # object is built, so a frozen int would go stale immediately.
-    emit_event: Callable[[str, dict], None]  # emit_event(job_kind, payload)
-    # writes one JARVIS_MEDIA line to stderr — see dev_agent_events.emit.
+    emit_event: Callable[..., dict]  # bound to dev_agent_events.emit, i.e.
+    # emit_event(job_id, seq, phase, status, **fields) -> the event dict it
+    # just wrote to stderr (and, if a CLI hook is registered, handed to it
+    # too — see dev_agent_events.set_hook). A handler's own steps=[] list
+    # should append exactly this return value, not reconstruct its own
+    # copy, so the live stream and the persisted/replayed result can never
+    # drift apart. Any callable with this signature works as a test stub
+    # (e.g. one that appends the event to a list instead of printing).
     ui: str  # "web" or "cli" — mirrors the JARVIS_UI env var, so a handler
     # can decide whether it's worth emitting UI-only events at all.
 
