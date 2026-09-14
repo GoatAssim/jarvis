@@ -134,25 +134,59 @@ _PLAN_SYSTEM_PROMPT = (
 )
 
 
-def _extract_json(text):
-    """Defensive parse matching ai_client's own convention elsewhere: strip
-    a ```json ... ``` fence if present, then json.loads. Returns (obj, None)
-    or (None, error_string) -- a parse failure is always a plan/fix failure,
-    never a partially-trusted guess at what the model meant."""
-    import json as _json
-
+def _strip_fences(text):
+    """Strip a leading/trailing ```lang ... ``` fence if present. Shared by
+    _extract_json (JSON payloads) and _fix_one_file (raw file payloads) so
+    there's exactly one place that knows what "the model ignored the 'no
+    fences' instruction" looks like."""
     s = (text or "").strip()
     if s.startswith("```"):
         s = re.sub(r"^```[a-zA-Z]*\n?", "", s)
         s = re.sub(r"```\s*$", "", s)
         s = s.strip()
-    try:
-        return _json.loads(s), None
-    except ValueError as e:
-        return None, f"could not parse model output as JSON: {e}"
+    return s
 
 
-def _ai_single_call(system_prompt, user_prompt, cfg=None):
+def _extract_json(text):
+    """Defensive parse matching ai_client's own convention elsewhere: strip
+    a ```json ... ``` fence if present, then json.loads. Returns (obj, None)
+    or (None, error_string).
+
+    Two things make this more forgiving than a bare json.loads, because
+    both are extremely common ways a model's "JSON only" instruction gets
+    bent, not broken:
+      1. Leading/trailing prose around the object ("Here's the plan:\n{...}")
+         -- salvaged by slicing from the first '{' to the matching last '}'.
+      2. Literal, unescaped control characters (raw newlines/tabs) *inside*
+         a string value -- e.g. multi-line source code pasted into
+         files_content without escaping -- which strict json.loads rejects
+         outright. strict=False accepts these.
+    What this does NOT fix is a genuinely malformed document (e.g. a stray
+    unescaped '"' inside an HTML/JS string that ends the JSON string early)
+    -- that's still a real parse failure, and the caller (_ai_single_call,
+    via is_acceptable) is what actually recovers from that by discarding
+    this provider's response and trying the next provider/key rather than
+    failing the whole plan/fix step outright.
+    """
+    import json as _json
+
+    s = _strip_fences(text)
+    if s and not s.startswith("{"):
+        start = s.find("{")
+        end = s.rfind("}")
+        if start != -1 and end != -1 and end > start:
+            s = s[start:end + 1]
+
+    last_err = None
+    for strict in (True, False):
+        try:
+            return _json.loads(s, strict=strict), None
+        except ValueError as e:
+            last_err = e
+    return None, f"could not parse model output as JSON: {last_err}"
+
+
+def _ai_single_call(system_prompt, user_prompt, cfg=None, is_acceptable=None):
     """One raw completion, trying every eligible configured provider (and
     every key within each provider) in order until one succeeds --
     structurally the same fallback ai_client.ask() does, just without
@@ -161,6 +195,24 @@ def _ai_single_call(system_prompt, user_prompt, cfg=None):
     failure comes back as an error string, never an exception -- the
     caller turns that into a plan_failed/fix "fail" event, same as every
     other failure branch in the loop.
+
+    is_acceptable, if given, is called as is_acceptable(text) -> (ok, reason)
+    on every response the adapter itself reported as successful. A provider
+    can fail the *adapter* call (network error, bad key, etc) -- that was
+    already handled below -- but it can just as easily succeed at the HTTP
+    level while returning garbage for what dev_agent actually needs (e.g.
+    unparseable JSON from the planner, or an empty string from the writer).
+    Before this hook existed, that second kind of failure was treated as a
+    final answer: the first provider tried "won" as soon as it returned any
+    non-empty text, even if that text was useless, and the whole plan/fix
+    step failed outright -- the only way to get a different provider to
+    have a go was for the user to re-run dev_agent from scratch (new job,
+    new sandbox, back to square one). Routing both kinds of failure through
+    the same errors/continue path means a single provider emitting broken
+    JSON is treated exactly like that provider being down: dev_agent just
+    moves on to the next key/provider *within this one call*, and only
+    gives up (returning the combined error string) once everything
+    configured has actually been tried.
     """
     try:
         from .. import ai_client, ai_config  # see module-level NOTE above
@@ -200,6 +252,11 @@ def _ai_single_call(system_prompt, user_prompt, cfg=None):
                     continue
 
                 if result.ok and result.text:
+                    if is_acceptable is not None:
+                        ok, reason = is_acceptable(result.text)
+                        if not ok:
+                            errors.append(f"{_provider_label_safe(ai_client, provider)}: {reason}")
+                            continue
                     return result.text, None
                 errors.append(f"{_provider_label_safe(ai_client, provider)}: "
                                f"{getattr(result, 'error', None) or 'planner/writer call returned no text'}")
@@ -220,17 +277,12 @@ def _provider_label_safe(ai_client, provider):
         return provider.get("type", "unknown-provider")
 
 
-def _plan_project(description, language_hint=None):
-    """One model call -> {"files": [...], "dependencies": [...],
-    "run_command": "...", "files_content": {...}}. See _PLAN_SYSTEM_PROMPT.
-    Returns (plan_dict, None) or (None, error_string).
-    """
-    user_prompt = f"Project description: {description}"
-    if language_hint:
-        user_prompt += f"\nLanguage hint: {language_hint}"
-    text, err = _ai_single_call(_PLAN_SYSTEM_PROMPT, user_prompt)
-    if err:
-        return None, err
+def _parse_and_validate_plan(text):
+    """Shared by _plan_project's is_acceptable hook (checked once per
+    provider/key, before committing to a response) and by _plan_project
+    itself (called once more on whichever response finally won) -- one
+    place that knows what a usable plan looks like. Returns (plan_dict,
+    None) or (None, error_string)."""
     plan, err = _extract_json(text)
     if err:
         return None, err
@@ -259,6 +311,31 @@ def _plan_project(description, language_hint=None):
     }, None
 
 
+def _plan_project(description, language_hint=None):
+    """One model call -> {"files": [...], "dependencies": [...],
+    "run_command": "...", "files_content": {...}}. See _PLAN_SYSTEM_PROMPT.
+    Returns (plan_dict, None) or (None, error_string).
+
+    Validation runs as an is_acceptable hook inside _ai_single_call, not
+    just after it returns: this is what lets a provider that emits
+    malformed/incomplete JSON get silently skipped in favor of the next
+    configured provider or key, in the same call, instead of that one bad
+    response becoming the job's final (failed) outcome.
+    """
+    user_prompt = f"Project description: {description}"
+    if language_hint:
+        user_prompt += f"\nLanguage hint: {language_hint}"
+
+    def is_acceptable(text):
+        plan, err = _parse_and_validate_plan(text)
+        return plan is not None, err
+
+    text, err = _ai_single_call(_PLAN_SYSTEM_PROMPT, user_prompt, is_acceptable=is_acceptable)
+    if err:
+        return None, err
+    return _parse_and_validate_plan(text)
+
+
 def _fix_one_file(target_file, current_content, stderr_tail, description):
     """One model call asking for a corrected version of a single file.
     Returns (new_content, None) or (None, error_string)."""
@@ -276,14 +353,15 @@ def _fix_one_file(target_file, current_content, stderr_tail, description):
         f"Error output when run:\n{stderr_tail}\n\n"
         "Return the complete corrected file content, nothing else."
     )
-    text, err = _ai_single_call(system_prompt, user_prompt)
+    def is_acceptable(text):
+        if not _strip_fences(text):
+            return False, "writer model returned an empty fix"
+        return True, None
+
+    text, err = _ai_single_call(system_prompt, user_prompt, is_acceptable=is_acceptable)
     if err:
         return None, err
-    fixed = (text or "").strip()
-    if fixed.startswith("```"):
-        fixed = re.sub(r"^```[a-zA-Z]*\n?", "", fixed)
-        fixed = re.sub(r"```\s*$", "", fixed)
-        fixed = fixed.strip()
+    fixed = _strip_fences(text)
     if not fixed:
         return None, "writer model returned an empty fix"
     return fixed, None
