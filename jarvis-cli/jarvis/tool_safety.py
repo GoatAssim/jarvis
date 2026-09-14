@@ -48,6 +48,9 @@ DEFAULT_CONFIRM_REQUIRED = {
     "wifi_set",
     "bluetooth_set",
     "git_run",
+    "dev_agent",  # §3.6 plan §8 — belt-and-suspenders on top of actions/dev_agent.py's own
+                  # TOOL_CONFIRM_REQUIRED, so the confirm-required gate holds even for a
+                  # reader who only checks this top-level default set.
     "ytdl_download",
     "type_text",
     "press_key",

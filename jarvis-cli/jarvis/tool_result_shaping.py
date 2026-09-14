@@ -105,6 +105,24 @@ def shape_result(name, result, verbosity):
 
 
 TOOL_RESULT_SPECS = {
+    # dev_agent (§3.6 plan §7): the model mainly needs ok/project_dir/run_command/reason,
+    # not every intermediate step's full preview/stdout/stderr text repeated back into its
+    # own context window each round. NOTE — this only trims what goes back to the *model*;
+    # the full untrimmed `steps` list is still what should be persisted into `extras` for
+    # the UI's replay (§6), which depends on whichever result runs.append(...) records being
+    # the pre-shaping copy — confirm that call order in ai_client.py's _executor before
+    # relying on this for replay correctness.
+    "dev_agent": {
+        "drop_fields": {
+            "low": ["steps"],
+        },
+        "list_item_drop": {
+            "steps": {
+                "medium": ["preview", "stdout_tail"],
+                "low": ["preview", "stdout_tail", "stderr_tail"],
+            },
+        },
+    },
     # Screenshot: the image itself never reaches the model (see the
     # JARVIS_MEDIA pattern) \u2014 only these bookkeeping fields do. Pixel
     # dimensions/file size are nice for a human debugging, not needed for
