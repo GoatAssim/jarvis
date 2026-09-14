@@ -1474,6 +1474,19 @@
     logsSelected: null,       // conv id currently shown in the middle pane
     logsEntries: [],          // entries for logsSelected, oldest first
     logsViewMode: "organized", // "organized" | "raw"
+
+    // Voice (jarvis-enhancement-plan.md §3.5/§3a) — the browser owns the
+    // mic/speaker; these just track the one recording (if any) and the
+    // one reply audio (if any) currently in flight, so a second click on
+    // the mic or a Speak button always has a single, unambiguous thing to
+    // stop rather than stacking overlapping streams.
+    voiceRecorder: null,      // active MediaRecorder, or null when not recording
+    voiceStream: null,        // its MediaStream, kept around so tracks can be stopped
+    voiceChunks: [],          // recorded Blob chunks for the in-progress recording
+    voiceTurnPending: false,  // true after a mic-originated ask is sent, until its
+                              // reply bubble finalizes — see finalizeAskBubble's hook
+    voiceAudioEl: null,       // the single <audio> used for Speak playback
+    voiceSpeakingBtn: null,   // the "Speak" button currently showing "Stop" (if any)
   };
 
   // ===========================================================================
@@ -1528,6 +1541,36 @@
     getLog: (id, limit) => api("GET", `/api/logs/${encodeURIComponent(id)}${limit ? `?limit=${limit}` : ""}`),
     clearLog: (id) => api("DELETE", `/api/logs/${encodeURIComponent(id)}`),
     listAiProviders: () => api("GET", "/api/ai/providers"),
+    // Voice endpoints don't go through api(): /api/voice/speak's success
+    // response body is raw audio, not JSON, and /api/voice/transcribe's
+    // request body is raw audio, not JSON — both need their own fetch()
+    // rather than api()'s always-JSON assumption in both directions.
+    voiceSpeak: async (text) => {
+      const res = await fetch("/api/voice/speak", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ text }),
+      });
+      if (!res.ok) {
+        let message = `voice/speak failed (${res.status})`;
+        try { message = (await res.json()).error || message; } catch { /* not JSON */ }
+        throw new Error(message);
+      }
+      return { blob: await res.blob(), mime: res.headers.get("Content-Type") || "audio/mpeg" };
+    },
+    voiceTranscribe: async (wavBlob) => {
+      const res = await fetch("/api/voice/transcribe", {
+        method: "POST",
+        headers: { "Content-Type": "audio/wav" },
+        body: wavBlob,
+      });
+      let data = null;
+      try { data = await res.json(); } catch { /* no body */ }
+      if (!res.ok || !data || data.error) {
+        throw new Error((data && data.error) || `voice/transcribe failed (${res.status})`);
+      }
+      return data; // {ok, text, provider, language}
+    },
   };
 
   // ===========================================================================
@@ -2482,7 +2525,7 @@
 
   function addAskMsgActions(msg) {
     if (qs(".ask-msg__actions", msg)) return;
-    const actions = el("div", { class: "ask-msg__actions" }, [
+    const buttons = [
       el("button", {
         type: "button",
         class: "ask-msg__act",
@@ -2495,8 +2538,19 @@
         title: "Redo this prompt",
         onclick: () => redoAskMessage(msg),
       }, "Redo"),
-    ]);
-    msg.appendChild(actions);
+    ];
+    // Speak only makes sense on Jarvis's own replies, not the echoed user
+    // bubble or the console-dump trace bubble (see finalizeAskBubble).
+    if (msg.classList.contains("ask-msg--jarvis") && micSupported()) {
+      const speakBtn = el("button", {
+        type: "button",
+        class: "ask-msg__act",
+        title: "Read this reply aloud",
+        onclick: () => speakText(msg.dataset.raw || "", speakBtn),
+      }, "Speak");
+      buttons.push(speakBtn);
+    }
+    msg.appendChild(el("div", { class: "ask-msg__actions" }, buttons));
   }
 
   async function copyAskRaw(msg) {
@@ -3394,6 +3448,207 @@
   // (that flag only guards the one-active-child-per-socket ask/run path;
   // organize-json is an independent one-shot REST call on the server).
   const ORGANIZE_JSON_RE = /^organize-json\s+(.+)$/i;
+
+  // ---- Voice input (mic button) -----------------------------------------
+  //
+  // MediaRecorder only gives us webm/ogg (browsers don't record WAV
+  // directly), but stt.py's backends need a WAV file — vosk opens it with
+  // the stdlib `wave` module, which can't touch anything else. So a
+  // recording is decoded via Web Audio and re-encoded to 16-bit PCM WAV
+  // client-side before it's ever sent to /api/voice/transcribe; the
+  // server (per its own comment) just saves the bytes it's given and
+  // shells out to `jarvis transcribe`, no format handling of its own.
+
+  function audioBufferToWavBlob(buffer) {
+    const numChannels = 1; // stt backends expect mono; downmix on the way out
+    const sampleRate = buffer.sampleRate;
+    const chData = buffer.getChannelData(0);
+    const bytesPerSample = 2; // 16-bit PCM
+    const blockAlign = numChannels * bytesPerSample;
+    const dataSize = chData.length * bytesPerSample;
+
+    const arrayBuffer = new ArrayBuffer(44 + dataSize);
+    const view = new DataView(arrayBuffer);
+    const writeStr = (offset, str) => { for (let i = 0; i < str.length; i++) view.setUint8(offset + i, str.charCodeAt(i)); };
+
+    writeStr(0, "RIFF");
+    view.setUint32(4, 36 + dataSize, true);
+    writeStr(8, "WAVE");
+    writeStr(12, "fmt ");
+    view.setUint32(16, 16, true);          // fmt chunk size
+    view.setUint16(20, 1, true);           // PCM
+    view.setUint16(22, numChannels, true);
+    view.setUint32(24, sampleRate, true);
+    view.setUint32(28, sampleRate * blockAlign, true); // byte rate
+    view.setUint16(32, blockAlign, true);
+    view.setUint16(34, bytesPerSample * 8, true); // bits per sample
+    writeStr(36, "data");
+    view.setUint32(40, dataSize, true);
+
+    let offset = 44;
+    for (let i = 0; i < chData.length; i++) {
+      const s = Math.max(-1, Math.min(1, chData[i]));
+      view.setInt16(offset, s < 0 ? s * 0x8000 : s * 0x7fff, true);
+      offset += 2;
+    }
+    return new Blob([arrayBuffer], { type: "audio/wav" });
+  }
+
+  async function recordingBlobToWav(blob) {
+    const arrayBuffer = await blob.arrayBuffer();
+    const AudioCtx = window.AudioContext || window.webkitAudioContext;
+    const ctx = new AudioCtx();
+    try {
+      const decoded = await ctx.decodeAudioData(arrayBuffer);
+      return audioBufferToWavBlob(decoded);
+    } finally {
+      ctx.close();
+    }
+  }
+
+  function micSupported() {
+    return !!(navigator.mediaDevices && navigator.mediaDevices.getUserMedia && window.MediaRecorder);
+  }
+
+  const micBtn = qs("#btn-ask-mic");
+  if (!micSupported()) {
+    micBtn.disabled = true;
+    micBtn.title = "Voice input isn't supported in this browser.";
+  }
+
+  function setMicRecording(isRecording) {
+    micBtn.classList.toggle("is-recording", isRecording);
+    micBtn.title = isRecording ? "Stop recording" : "Record a voice message";
+  }
+
+  async function startVoiceRecording() {
+    let stream;
+    try {
+      stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    } catch (e) {
+      toast("Couldn't access the microphone.");
+      return;
+    }
+    state.voiceStream = stream;
+    state.voiceChunks = [];
+    let recorder;
+    try {
+      recorder = new MediaRecorder(stream);
+    } catch (e) {
+      stream.getTracks().forEach((t) => t.stop());
+      toast("This browser can't record audio.");
+      return;
+    }
+    recorder.addEventListener("dataavailable", (e) => {
+      if (e.data && e.data.size > 0) state.voiceChunks.push(e.data);
+    });
+    recorder.addEventListener("stop", onVoiceRecordingStopped);
+    state.voiceRecorder = recorder;
+    recorder.start();
+    setMicRecording(true);
+  }
+
+  function stopVoiceRecording() {
+    if (state.voiceRecorder && state.voiceRecorder.state !== "inactive") {
+      state.voiceRecorder.stop();
+    }
+    if (state.voiceStream) {
+      state.voiceStream.getTracks().forEach((t) => t.stop());
+      state.voiceStream = null;
+    }
+    setMicRecording(false);
+  }
+
+  async function onVoiceRecordingStopped() {
+    const chunks = state.voiceChunks;
+    state.voiceChunks = [];
+    state.voiceRecorder = null;
+    if (!chunks.length) return;
+
+    const rawBlob = new Blob(chunks, { type: chunks[0].type || "audio/webm" });
+    micBtn.disabled = true;
+    try {
+      const wavBlob = await recordingBlobToWav(rawBlob);
+      const { text } = await Api.voiceTranscribe(wavBlob);
+      if (!text || !text.trim()) {
+        toast("Didn't catch any speech.");
+        return;
+      }
+      const input = qs("#ask-input");
+      input.value = text;
+      askInputAutoGrow(input);
+      // Mirrors cli.py's `jarvis listen` (record -> transcribe -> ask ->
+      // speak) — a mic-originated turn auto-sends and, per §3a, speaks
+      // the reply back too (see finalizeAskBubble's hook), rather than
+      // leaving text input as the only path.
+      state.voiceTurnPending = true;
+      qs("#ask-form").requestSubmit();
+    } catch (e) {
+      toast(e.message || "Transcription failed.");
+    } finally {
+      micBtn.disabled = false;
+    }
+  }
+
+  micBtn.addEventListener("click", () => {
+    if (state.voiceRecorder) {
+      stopVoiceRecording();
+    } else {
+      startVoiceRecording();
+    }
+  });
+
+  // ---- Voice output (Speak button on a jarvis reply bubble) -------------
+  //
+  // One shared <audio> element rather than a fresh one per click, so
+  // starting a second Speak (or a mic-originated auto-speak) always
+  // interrupts whatever was already playing instead of overlapping it.
+
+  function voiceAudioEl() {
+    if (!state.voiceAudioEl) {
+      state.voiceAudioEl = new Audio();
+      state.voiceAudioEl.addEventListener("ended", () => setSpeakingButton(null));
+    }
+    return state.voiceAudioEl;
+  }
+
+  function setSpeakingButton(btn) {
+    if (state.voiceSpeakingBtn && state.voiceSpeakingBtn !== btn) {
+      state.voiceSpeakingBtn.classList.remove("is-active");
+      state.voiceSpeakingBtn.textContent = "Speak";
+    }
+    state.voiceSpeakingBtn = btn;
+    if (btn) {
+      btn.classList.add("is-active");
+      btn.textContent = "Stop";
+    }
+  }
+
+  async function speakText(text, btn) {
+    const audio = voiceAudioEl();
+    if (state.voiceSpeakingBtn === btn) {
+      // Clicking "Stop" on the bubble that's currently speaking.
+      audio.pause();
+      setSpeakingButton(null);
+      return;
+    }
+    if (!text || !text.trim()) {
+      toast("Nothing to speak.");
+      return;
+    }
+    if (btn) { btn.disabled = true; btn.textContent = "\u2026"; }
+    try {
+      const { blob } = await Api.voiceSpeak(text);
+      audio.pause();
+      audio.src = URL.createObjectURL(blob);
+      await audio.play();
+      setSpeakingButton(btn);
+    } catch (e) {
+      toast(e.message || "Speech synthesis failed.");
+    } finally {
+      if (btn) btn.disabled = false;
+    }
+  }
 
   qs("#ask-form").addEventListener("submit", async (e) => {
     e.preventDefault();
