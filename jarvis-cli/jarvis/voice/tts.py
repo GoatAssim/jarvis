@@ -7,6 +7,13 @@ option and two online options:
     edge         — online, free. Microsoft Edge's TTS, no API key.
                     Default provider (works with zero config).
     elevenlabs   — online, paid. Cloud API, best quality, needs an API key.
+    xtts         — local, offline (after first download). Voice cloning
+                    via Coqui's XTTS-v2 from a short reference clip you
+                    supply and have the rights to — see tts.xtts in
+                    voice_config.json. Heaviest option: needs torch and a
+                    ~2GB checkpoint. Not a source of any specific
+                    copyrighted character's voice; it clones whatever
+                    clip you point it at.
 
 synthesize() returns raw audio bytes + a mime type and never touches an
 output device — that split is what lets the same function serve both
@@ -32,6 +39,13 @@ _ELEVENLABS_INSTALL_NOTE = (
     'elevenlabs needs the requests package (already a base jarvis-cli '
     "dependency) plus an API key — set tts.elevenlabs.api_key and "
     "voice_id via `jarvis voice-config`."
+)
+_XTTS_INSTALL_NOTE = (
+    'coqui-tts not installed. pip install "jarvis-cli[voice-tts-xtts]" '
+    "(pulls in coqui-tts + torch; first call downloads the ~2GB XTTS-v2 "
+    "checkpoint, then runs fully offline). Also needs a reference voice "
+    "clip you have the rights to — set tts.xtts.speaker_wav_path via "
+    "`jarvis voice-config`."
 )
 
 _kokoro_pipeline_cache = {}  # lang_code -> KPipeline
@@ -136,10 +150,61 @@ def _elevenlabs_synthesize(text, settings):
     return {"audio": resp.content, "mime": "audio/mpeg"}, None
 
 
+_xtts_model_cache = {}  # model_name -> loaded TTS instance
+
+
+def _xtts_synthesize(text, settings):
+    try:
+        from TTS.api import TTS
+    except ImportError:
+        return None, {"error": _XTTS_INSTALL_NOTE}
+    try:
+        import soundfile as sf
+        import numpy as np
+        import io
+    except ImportError:
+        return None, {"error": _XTTS_INSTALL_NOTE}
+
+    speaker_wav = (settings.get("speaker_wav_path") or "").strip()
+    if not speaker_wav:
+        return None, {
+            "error": "tts.xtts.speaker_wav_path isn't set. Point it at a short "
+                     "(roughly 6-30s), clean, single-speaker reference recording "
+                     "of the voice to clone — a source you have the rights to — "
+                     "via `jarvis voice-config`."
+        }
+
+    from pathlib import Path
+    if not Path(speaker_wav).is_file():
+        return None, {"error": f"tts.xtts.speaker_wav_path '{speaker_wav}' doesn't exist"}
+
+    model_name = settings.get("model_name") or "tts_models/multilingual/multi-dataset/xtts_v2"
+    language = settings.get("language", "en")
+    device = settings.get("device", "cpu")
+
+    model = _xtts_model_cache.get(model_name)
+    if model is None:
+        try:
+            model = TTS(model_name).to(device)
+        except Exception as e:
+            return None, {"error": f"couldn't load xtts model '{model_name}': {e}"}
+        _xtts_model_cache[model_name] = model
+
+    try:
+        wav = model.tts(text=text, speaker_wav=speaker_wav, language=language)
+        audio = np.asarray(wav, dtype=np.float32)
+        buf = io.BytesIO()
+        sf.write(buf, audio, 24000, format="WAV")
+        return {"audio": buf.getvalue(), "mime": "audio/wav"}, None
+    except Exception as e:
+        return None, {"error": f"xtts synthesis failed: {e}"}
+
+
 _BACKENDS = {
     "kokoro": _kokoro_synthesize,
     "edge": _edge_synthesize,
     "elevenlabs": _elevenlabs_synthesize,
+    "xtts": _xtts_synthesize,
 }
 
 

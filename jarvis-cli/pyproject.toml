@@ -22,6 +22,12 @@ ocr = ["pytesseract>=0.3.10", "Pillow>=9.0"]
 voice-audio = ["sounddevice>=0.4.6", "soundfile>=0.12.1", "numpy>=1.22"]
 voice-tts-kokoro = ["kokoro>=0.7.9", "soundfile>=0.12.1", "numpy>=1.22"]
 voice-tts-edge = ["edge-tts>=6.1.0"]
+# XTTS-v2 voice cloning (coqui-tts, the maintained idiap fork). Heaviest
+# option by far: pulls in torch and downloads a ~2GB checkpoint on first
+# use. Needs a reference clip you have the rights to (see
+# tts.xtts.speaker_wav_path in voice_config.json) — not bundled in the
+# default `voice` extra below since most people won't want the download.
+voice-tts-xtts = ["coqui-tts>=0.24.1", "torch>=2.1", "soundfile>=0.12.1", "numpy>=1.22"]
 voice-stt-whisper = ["faster-whisper>=1.0.0"]
 voice-stt-vosk = ["vosk>=0.3.45"]
 voice = [
