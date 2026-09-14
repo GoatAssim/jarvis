@@ -93,6 +93,19 @@ echo Persona's CLI command will be: %CLI_NAME%
 echo (config still lives in %%USERPROFILE%%\.jarvis regardless of the above)
 echo.
 
+echo [1.5/5] Bumping build number...
+set "BUMP_OUTPUT=%TEMP%\jarvis_build_num_%RANDOM%.txt"
+"%PYEXE%" "%JARVIS_CLI%\build_tools\bump_build_version.py" > "%BUMP_OUTPUT%"
+if errorlevel 1 (
+    del /f /q "%BUMP_OUTPUT%" 2>nul
+    echo WARNING: Could not bump build number ^(non-fatal^) -- version display may be stale.
+) else (
+    set /p "BUILD_NUM="<"%BUMP_OUTPUT%"
+    del /f /q "%BUMP_OUTPUT%" 2>nul
+    echo This build: #!BUILD_NUM!
+)
+echo.
+
 echo [2/5] Installing CLI as "%CLI_NAME%"...
 rem --force-reinstall is required here: plain `pip install .` only checks
 rem name==version against what's already installed and silently no-ops if

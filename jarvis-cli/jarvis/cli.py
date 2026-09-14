@@ -974,6 +974,14 @@ def main():
         print(CONFIG_FILE)
         return
 
+    if argv[0] in ("version", "--version", "-v"):
+        # Deliberately at the very top of dispatch, same tier as -h/--help
+        # and config -- this needs to work even if commands.json is broken
+        # or empty, since its whole point is "which exe am I even running".
+        from . import build_info
+        print(build_info.version_string())
+        return
+
     if argv[0] == "_internal_retitle":
         # Hidden entry point: the detached subprocess ai_client._spawn_title_
         # update() launches to (re)title a conversation after this same

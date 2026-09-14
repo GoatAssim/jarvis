@@ -1,9 +1,11 @@
 @echo off
-setlocal
+setlocal EnableDelayedExpansion
 cd /d "%~dp0"
 
 if defined JARVIS_BIN (
-  echo Using jarvis: %JARVIS_BIN%
+  set "JARVIS_VERSION=version unavailable"
+  for /f "usebackq delims=" %%V in (`"%JARVIS_BIN%" version 2^>nul`) do set "JARVIS_VERSION=%%V"
+  echo Using jarvis: %JARVIS_BIN% - !JARVIS_VERSION!
 ) else (
   echo JARVIS_BIN not set - server will auto-detect jarvis on PATH.
 )
