@@ -564,6 +564,11 @@ def tool_schemas_for_session():
     out.extend(SPOTIFY_TOOL_SCHEMAS)
     if playnite_config.is_configured():
         out.extend(PLAYNITE_TOOL_SCHEMAS)
+    # Auto-discovered tools (jarvis/actions/*.py) ride along in the full
+    # fallback catalog too, not just the router-confident path — otherwise
+    # they'd vanish whenever route is None (router disabled) while every
+    # built-in tool stayed put.
+    out.extend(AUTO_TOOL_SCHEMAS)
     allowed = allowed_tools_from_env()
     if allowed is not None:
         out = [schema for schema in out if schema.get("name") in allowed]
@@ -684,6 +689,64 @@ TOOLS = {
     "search_tools": tool_search_tools,
 }
 
+# ---------------------------------------------------------------------------
+# Auto-discovered tools — jarvis/actions/*.py (see tool_loader.py). Adding a
+# new tool no longer requires touching this file: drop a module in actions/
+# exposing TOOL_SCHEMAS/TOOLS/TOOL_GROUP (+ TOOL_KEYWORDS to be reachable
+# through tool_router.route() the same way every built-in tool is — see
+# actions/_template.py). Every manually-wired tool above is untouched by
+# this; it's a second, additive path into the same catalog, not a
+# replacement for the manual imports at the top of this file.
+#
+# reserved_names is computed from TOOLS *before* this block runs, so a
+# collision between an action file and a built-in tool name is rejected —
+# the built-in always wins and the action file is logged and skipped
+# rather than silently shadowing something real.
+# ---------------------------------------------------------------------------
+from . import tool_loader  # noqa: E402  (deliberately after TOOLS is built)
+
+_AUTO_RECORDS = tool_loader.discover_actions(reserved_names=set(TOOLS))
+_AUTO_VALID = [r for r in _AUTO_RECORDS if r.valid]
+
+AUTO_TOOL_SCHEMAS = [s for r in _AUTO_VALID for s in r.schemas]
+AUTO_TOOLS = {name: fn for r in _AUTO_VALID for name, fn in r.tools.items()}
+
+# group -> [tool names]; tool_registry.py merges this into its own
+# TOOL_GROUPS so auto-discovered tools join the router exactly like a
+# built-in tool would.
+AUTO_TOOL_GROUPS = {}
+for _r in _AUTO_VALID:
+    AUTO_TOOL_GROUPS.setdefault(_r.group, []).extend(sorted(_r.tools))
+
+# name -> {phrase: weight}; tool_registry.py merges this into TOOL_KEYWORDS.
+AUTO_TOOL_KEYWORDS = {}
+for _r in _AUTO_VALID:
+    AUTO_TOOL_KEYWORDS.update(_r.keywords)
+
+# group -> instruction; tool_registry.py only fills in groups that don't
+# already have a curated instruction, so an action file joining an
+# existing group can never silently override its established guidance.
+AUTO_TOOL_PACK_INSTRUCTIONS = {r.group: r.pack_instruction for r in _AUTO_VALID if r.pack_instruction}
+
+TOOLS = {**TOOLS, **AUTO_TOOLS}
+TOOL_SCHEMAS = [*TOOL_SCHEMAS, *AUTO_TOOL_SCHEMAS]
+
+# Best-effort merges into tool_safety.py / tool_result_shaping.py's
+# opt-in dicts, so TOOL_CONFIRM_REQUIRED / TOOL_AI_REVIEW / TOOL_RESULT_SPECS
+# in an action file (see actions/_template.py) work the same one-file way —
+# neither module imports tools.py, so this has to run from here. Wrapped so
+# a problem merging safety/shaping defaults can never take tool discovery
+# itself down.
+try:
+    from . import tool_safety as _tool_safety
+    from . import tool_result_shaping as _tool_result_shaping
+    for _r in _AUTO_VALID:
+        _tool_safety.DEFAULT_CONFIRM_REQUIRED.update(_r.confirm_required)
+        _tool_safety.DEFAULT_AI_REVIEW.update(_r.ai_review)
+        _tool_result_shaping.TOOL_RESULT_SPECS.update(_r.result_specs)
+except Exception:
+    pass
+
 
 def execute_tool(name, arguments=None, verbosity=None):
     """Run one tool by name and return a JSON-serializable result — always,
@@ -704,7 +767,7 @@ def execute_tool(name, arguments=None, verbosity=None):
     if fn is None:
         return {"error": f"no such tool: {name}"}
     try:
-        if name in COMMAND_TOOLS or name in PLAYNITE_TOOLS or name in WEB_TOOLS or name in PKG_TOOLS or name in SPOTIFY_TOOLS or name in MEMORY_TOOLS or name in CAPACITY_TOOLS or name in RADIO_TOOLS or name in GIT_TOOLS or name in SCREENSHOT_TOOLS or name in DESKTOP_TOOLS or name in OCR_TOOLS or name in FILE_TOOLS or name in CUSTOM_TOOLS or name in YTDL_TOOLS or name in EVERYTHING_TOOLS or name in ORGANIZE_JSON_TOOLS or name in PRESENT_TOOLS or name == "search_tools":
+        if name in COMMAND_TOOLS or name in PLAYNITE_TOOLS or name in WEB_TOOLS or name in PKG_TOOLS or name in SPOTIFY_TOOLS or name in MEMORY_TOOLS or name in CAPACITY_TOOLS or name in RADIO_TOOLS or name in GIT_TOOLS or name in SCREENSHOT_TOOLS or name in DESKTOP_TOOLS or name in OCR_TOOLS or name in FILE_TOOLS or name in CUSTOM_TOOLS or name in YTDL_TOOLS or name in EVERYTHING_TOOLS or name in ORGANIZE_JSON_TOOLS or name in PRESENT_TOOLS or name in AUTO_TOOLS or name == "search_tools":
             result = fn(arguments or {})
         else:
             result = fn()

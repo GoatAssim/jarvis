@@ -24,7 +24,12 @@ windows, screenshots, OCR) is one "desktop" group even though it's spread
 across desktop_tools.py, screenshot_tools.py, and ocr_tools.py.
 """
 
-from .tools import TOOL_SCHEMAS
+from .tools import (
+    TOOL_SCHEMAS,
+    AUTO_TOOL_GROUPS,
+    AUTO_TOOL_KEYWORDS,
+    AUTO_TOOL_PACK_INSTRUCTIONS,
+)
 
 # ---------------------------------------------------------------------------
 # TOOL_GROUPS — workflow groups. Every tool name in TOOL_SCHEMAS should
@@ -164,6 +169,22 @@ TOOL_GROUPS = {
 }
 
 # ---------------------------------------------------------------------------
+# Merge in auto-discovered tools (jarvis/actions/*.py — see tool_loader.py
+# and actions/_template.py). This is what makes an auto-discovered tool
+# routable through tool_router.route() exactly like a built-in one: joining
+# an existing group's list here (or introducing a new group) is the whole
+# mechanism tool_router.py reads. Done as a merge, right after the static
+# groups above, so every built-in group/keyword/instruction keeps behaving
+# exactly as before — this only ever adds keys or appends to a group's list,
+# never removes or reorders anything static.
+# ---------------------------------------------------------------------------
+for _group, _names in AUTO_TOOL_GROUPS.items():
+    _bucket = TOOL_GROUPS.setdefault(_group, [])
+    for _name in _names:
+        if _name not in _bucket:
+            _bucket.append(_name)
+
+# ---------------------------------------------------------------------------
 # TOOL_KEYWORDS — per-tool weighted keywords for the (future) local router.
 # Not every tool needs entries here to start: the router only needs enough
 # signal to place a message into the right *group* (see tool_router.py) —
@@ -243,6 +264,11 @@ TOOL_KEYWORDS = {
     "playnite_list_frequent": {"frequent games": 9, "games i play most": 8},
 }
 
+# Merge in auto-discovered keywords (see the TOOL_GROUPS merge above for
+# why this matters — without an entry here, an auto-discovered tool in a
+# brand-new group is unroutable by tool_router.route()).
+TOOL_KEYWORDS = {**TOOL_KEYWORDS, **AUTO_TOOL_KEYWORDS}
+
 # ---------------------------------------------------------------------------
 # TOOL_PACK_INSTRUCTIONS — short, group-specific workflow guidance. This is
 # exactly the content _tools_blurb() currently bakes into *every* prompt
@@ -295,6 +321,13 @@ TOOL_PACK_INSTRUCTIONS = {
         "acting on it rather than guessing an id."
     ),
 }
+
+# Merge in auto-discovered pack instructions — only for groups that don't
+# already have a curated one above, so an action file joining an existing
+# built-in group (e.g. "files") can never silently override its
+# established workflow guidance with its own TOOL_PACK_INSTRUCTION.
+for _group, _instr in AUTO_TOOL_PACK_INSTRUCTIONS.items():
+    TOOL_PACK_INSTRUCTIONS.setdefault(_group, _instr)
 
 # ---------------------------------------------------------------------------
 # TOOL_INDEX — name -> schema, O(1) lookup. Built once from the real schema
