@@ -22,3 +22,6 @@ web/public/app - Copy.js
 *.rej*
 benchmark*
 *.diff
+*.venv
+venv
+jarvis/venv
