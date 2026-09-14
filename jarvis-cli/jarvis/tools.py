@@ -13,6 +13,7 @@ that's what steers correct tool selection, per every provider's own
 tool-use guidance.
 """
 
+import inspect
 import os
 import platform
 import re
@@ -20,8 +21,10 @@ import shutil
 import socket
 import subprocess
 import time
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
+from typing import Callable, Optional
 
 from .command_tools import COMMAND_TOOL_SCHEMAS, COMMAND_TOOLS
 from .custom_tools import CUSTOM_TOOL_SCHEMAS, CUSTOM_TOOLS
@@ -748,7 +751,48 @@ except Exception:
     pass
 
 
-def execute_tool(name, arguments=None, verbosity=None):
+@dataclass
+class ToolContext:
+    """Optional second argument a tool handler can accept (see
+    _accepts_context / execute_tool below) to get mid-call visibility that
+    a plain `fn(arguments_dict)` signature has no way to expose: how much
+    of the shared cross-provider tool-round budget is left, a place to
+    emit progress events before the call returns, which conversation this
+    is running under, and whether it's a web or CLI session.
+
+    Every existing one-argument handler (built-in or auto-discovered via
+    tool_loader.py) is completely unaffected — this is purely additive,
+    detected per-handler via inspect.signature, not a new required arg.
+    """
+
+    conv_id: Optional[str]
+    round_budget_remaining: Callable[[], int]  # zero-arg callable, not a
+    # snapshot int — RoundBudget.used keeps changing after this context
+    # object is built, so a frozen int would go stale immediately.
+    emit_event: Callable[[str, dict], None]  # emit_event(job_kind, payload)
+    # writes one JARVIS_MEDIA line to stderr — see dev_agent_events.emit.
+    ui: str  # "web" or "cli" — mirrors the JARVIS_UI env var, so a handler
+    # can decide whether it's worth emitting UI-only events at all.
+
+
+_ACCEPTS_CONTEXT_CACHE = {}  # fn -> bool, computed once per handler via
+# inspect, not re-inspected on every single call.
+
+
+def _accepts_context(fn):
+    cached = _ACCEPTS_CONTEXT_CACHE.get(fn)
+    if cached is not None:
+        return cached
+    try:
+        sig = inspect.signature(fn)
+        accepts = len(sig.parameters) >= 2
+    except (TypeError, ValueError):
+        accepts = False
+    _ACCEPTS_CONTEXT_CACHE[fn] = accepts
+    return accepts
+
+
+def execute_tool(name, arguments=None, verbosity=None, context=None):
     """Run one tool by name and return a JSON-serializable result — always,
     even on failure. Never raises.
 
@@ -759,6 +803,11 @@ def execute_tool(name, arguments=None, verbosity=None):
     tool-run, via `mode` → verbosity in cli.py) opt into the same trimming.
     Omitted/None leaves the result untouched, same as before this
     parameter existed.
+
+    `context`, if given, is a ToolContext — passed as a second positional
+    argument to any handler whose signature accepts one (see
+    _accepts_context). Every handler that only takes one argument keeps
+    being called exactly as before; this is strictly additive.
     """
     allowed = allowed_tools_from_env()
     if allowed is not None and name not in allowed:
@@ -768,7 +817,10 @@ def execute_tool(name, arguments=None, verbosity=None):
         return {"error": f"no such tool: {name}"}
     try:
         if name in COMMAND_TOOLS or name in PLAYNITE_TOOLS or name in WEB_TOOLS or name in PKG_TOOLS or name in SPOTIFY_TOOLS or name in MEMORY_TOOLS or name in CAPACITY_TOOLS or name in RADIO_TOOLS or name in GIT_TOOLS or name in SCREENSHOT_TOOLS or name in DESKTOP_TOOLS or name in OCR_TOOLS or name in FILE_TOOLS or name in CUSTOM_TOOLS or name in YTDL_TOOLS or name in EVERYTHING_TOOLS or name in ORGANIZE_JSON_TOOLS or name in PRESENT_TOOLS or name in AUTO_TOOLS or name == "search_tools":
-            result = fn(arguments or {})
+            if _accepts_context(fn) and context is not None:
+                result = fn(arguments or {}, context)
+            else:
+                result = fn(arguments or {})
         else:
             result = fn()
     except Exception as e:

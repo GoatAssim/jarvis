@@ -16,6 +16,7 @@ import subprocess
 import sys
 
 from . import ai_config, ai_providers, command_tools, conversations, memory, playnite_config, stats, tool_safety
+from . import dev_agent_events as _dev_agent_events
 from . import discovery_cache
 from . import logs
 from . import tool_result_shaping
@@ -1134,7 +1135,8 @@ _REPEAT_FAILURE_DETECTORS = [
 
 def _make_tool_executor(on_tool_call, schemas=None, on_confirm_request=None,
                          cfg=None, provider_ref=None, verbosity_ref=None,
-                         discover_sink=None, cache_query=None):
+                         discover_sink=None, cache_query=None,
+                         round_budget=None, conv_id=None):
     """Shared across every provider/key in one ask() so a failover never
     re-runs the same command, Playnite action, or web fetch. Cache hits
     still return the original result (no second launch / install / HTTP).
@@ -1164,6 +1166,18 @@ def _make_tool_executor(on_tool_call, schemas=None, on_confirm_request=None,
     hit is stored under it so a similar query in a *later* jarvis process
     can pre-seed active_schemas without repeating the same discovery round
     trip. Purely additive: with cache_query left None, nothing is stored.
+
+    round_budget, if given, is the ask()-level ai_providers.RoundBudget
+    shared across every provider/key attempt this turn (see ask()) — it's
+    wrapped in a ToolContext and handed to any tool handler whose
+    signature accepts one (tools.py's _accepts_context), so a bounded,
+    self-correcting tool like dev_agent can size its own internal retry
+    loop against what's actually left in the shared pool instead of a
+    hardcoded constant that can outlive the budget. conv_id is likewise
+    threaded through so a handler can scope its own output/bookkeeping to
+    the active conversation. Both default to a safe fallback (a
+    remaining()-like lambda returning 1, and None) when omitted, so every
+    existing caller of _make_tool_executor keeps working unchanged.
     """
     cache = {}
     runs = []
@@ -1309,7 +1323,13 @@ def _make_tool_executor(on_tool_call, schemas=None, on_confirm_request=None,
                 on_tool_call(name, arguments)
             except TypeError:
                 on_tool_call(name)
-        result = system_tools.execute_tool(name, arguments)
+        context = system_tools.ToolContext(
+            conv_id=conv_id,
+            round_budget_remaining=(round_budget.remaining if round_budget else (lambda: 1)),
+            emit_event=_dev_agent_events.emit,
+            ui=os.environ.get("JARVIS_UI", "cli"),
+        )
+        result = system_tools.execute_tool(name, arguments, context=context)
         verbosity = verbosity_ref[0] if verbosity_ref else "full"
         result = tool_result_shaping.shape_result(name, result, verbosity)
         cache[key] = result
@@ -2013,19 +2033,23 @@ def ask(user_text, commands=None, on_attempt=None, on_tool_call=None, on_tool_re
             compact_schemas.extend(system_tools.compact_schemas_for_prompt(full))
             name_only_schemas.extend(system_tools.name_only_schemas_for_prompt(full))
 
+    # Shared across every provider/key attempt below — see RoundBudget's docstring.
+    # Each adapter still gets its own local MAX_TOOL_ROUNDS, but a failover to the
+    # next key draws from this same pool instead of getting a fresh 5 rounds on top
+    # of whatever the failed key already burned. Built *before* _make_tool_executor
+    # now, so it can be handed into the executor and wrapped into every tool call's
+    # ToolContext (see tools.ToolContext / _make_tool_executor's docstring).
+    round_budget = ai_providers.RoundBudget()
+
     tool_executor = _make_tool_executor(
         on_tool_call, full_schemas, on_confirm_request=on_confirm_request,
         cfg=cfg, provider_ref=provider_ref, verbosity_ref=verbosity_ref,
         discover_sink=_discover_sink if tools_enabled else None,
         cache_query=cache_query if tools_enabled else None,
+        round_budget=round_budget, conv_id=conversation_id,
     ) if tools_enabled else None
 
     attempts = []
-    # Shared across every provider/key attempt below — see RoundBudget's docstring.
-    # Each adapter still gets its own local MAX_TOOL_ROUNDS, but a failover to the
-    # next key draws from this same pool instead of getting a fresh 5 rounds on top
-    # of whatever the failed key already burned.
-    round_budget = ai_providers.RoundBudget()
 
     for provider in providers:
         label = _provider_label(provider)
