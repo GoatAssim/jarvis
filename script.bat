@@ -12,6 +12,22 @@ rem name is active. CLI_NAME_STATE just remembers the last-installed exe
 rem name so a persona switch can clean up the old one; it has nothing to
 rem do with where settings/history/etc. actually live.
 set "CLI_NAME_STATE=%USERPROFILE%\.jarvis\cli_name.txt"
+rem Prefer a project venv's Python if one exists (e.g. a 3.12 venv kept
+rem around for packages like torch), so this script works correctly
+rem whether or not the venv happens to be activated in the current shell.
+rem Checks jarvis-cli\.venv first (where pyproject.toml lives, so it's
+rem the natural place to create one) then falls back to a root-level
+rem .venv, then to plain "python" if neither exists.
+if exist "%JARVIS_CLI%\.venv\Scripts\python.exe" (
+    set "PYEXE=%JARVIS_CLI%\.venv\Scripts\python.exe"
+    set "VENV_SCRIPTS=%JARVIS_CLI%\.venv\Scripts"
+) else if exist "%ROOT%.venv\Scripts\python.exe" (
+    set "PYEXE=%ROOT%.venv\Scripts\python.exe"
+    set "VENV_SCRIPTS=%ROOT%.venv\Scripts"
+) else (
+    set "PYEXE=python"
+    set "VENV_SCRIPTS="
+)
 
 if /i "%~1"=="admin-copy" goto admin_copy
 
@@ -69,7 +85,7 @@ echo (config still lives in %%USERPROFILE%%\.jarvis regardless of the above)
 echo.
 
 echo [2/5] Installing CLI as "%CLI_NAME%"...
-pip install .
+"%PYEXE%" -m pip install .
 if errorlevel 1 goto err_pip
 echo.
 
@@ -102,7 +118,9 @@ rem     stripped by the Python side (jarvis\persona_name.py); this just
 rem     wires that resolver into the build.
 :sync_entry_point
 set "CLI_NAME="
-for /f "usebackq delims=" %%N in (`python "%JARVIS_CLI%\build_tools\sync_entry_point.py" 2^>nul`) do set "CLI_NAME=%%N"
+echo [debug] PYEXE=%PYEXE%
+echo [debug] SCRIPT=%JARVIS_CLI%\build_tools\sync_entry_point.py
+for /f "usebackq delims=" %%N in (`"%PYEXE%" "%JARVIS_CLI%\build_tools\sync_entry_point.py"`) do set "CLI_NAME=%%N"
 if not defined CLI_NAME goto sync_entry_point_fail
 exit /b 0
 :sync_entry_point_fail
@@ -117,12 +135,18 @@ rem     flow already synced pyproject.toml and just needs the same answer
 rem     again to know which exe filename to look for/copy.
 :resolve_cli_name
 set "CLI_NAME="
-for /f "usebackq delims=" %%N in (`python -c "import sys; sys.path.insert(0, r'%JARVIS_CLI%'); from jarvis.persona_name import current_cli_name; print(current_cli_name())" 2^>nul`) do set "CLI_NAME=%%N"
+for /f "usebackq delims=" %%N in (`"%PYEXE%" -c "import sys; sys.path.insert(0, r'%JARVIS_CLI%'); from jarvis.persona_name import current_cli_name; print(current_cli_name())" 2^>nul`) do set "CLI_NAME=%%N"
 if not defined CLI_NAME set "CLI_NAME=jarvis"
 exit /b 0
 
 :find_jarvis
 set "JARVIS_EXE="
+rem Check the project's own .venv first, if present -- this is where pip
+rem installs the CLI when script.bat is run with a project venv active
+rem (e.g. a Python 3.12 venv kept around for packages like torch that
+rem don't yet support newer Pythons). Falls through to the hardcoded
+rem global-Python paths below if no venv exists or it lacks the exe.
+if defined VENV_SCRIPTS if exist "%VENV_SCRIPTS%\%CLI_NAME%.exe" set "JARVIS_EXE=%VENV_SCRIPTS%\%CLI_NAME%.exe" & goto find_jarvis_ok
 for %%P in (
     "%LOCALAPPDATA%\Python\pythoncore-3.14-64\Scripts\%CLI_NAME%.exe"
     "%LOCALAPPDATA%\Python\Python314\Scripts\%CLI_NAME%.exe"
