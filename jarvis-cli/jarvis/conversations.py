@@ -498,9 +498,17 @@ def conversation_messages(
     if recap_text:
         messages.append({"role": "user", "content": recap_text})
 
+    # Walk the recent window NEWEST-first so the budget is spent on the most
+    # recent turns before the oldest ones, then reverse back to chronological
+    # order. Building this forward (oldest-of-the-window first) meant a few
+    # verbose exchanges near the start of the window could exhaust
+    # recent_budget before the loop ever reached the most recent turn —
+    # i.e. "what did you just say" could get silently dropped while older,
+    # already-recapped-adjacent turns took the budget instead. See the
+    # 2026-09-14 conversation about this.
     used = 0
-    recent = []
-    for ex in recent_src:
+    kept_pairs = []
+    for ex in reversed(recent_src):
         user_text = _truncate((ex.get("user") or "").strip(), MAX_USER_CHARS)
         assistant_text = _truncate((ex.get("jarvis") or "").strip(), MAX_ASSISTANT_CHARS)
         if not user_text or not assistant_text:
@@ -508,16 +516,20 @@ def conversation_messages(
         pair_len = len(user_text) + len(assistant_text)
         if used + pair_len > recent_budget:
             remaining = recent_budget - used
-            if remaining < 80 or recent:
+            if remaining < 80 or kept_pairs:
                 break
             if len(user_text) > remaining // 2:
                 user_text = _truncate(user_text, remaining // 2)
             remaining -= len(user_text)
             assistant_text = _truncate(assistant_text, max(remaining, 40))
             pair_len = len(user_text) + len(assistant_text)
+        kept_pairs.append((user_text, assistant_text))
+        used += pair_len
+
+    recent = []
+    for user_text, assistant_text in reversed(kept_pairs):
         recent.append({"role": "user", "content": user_text})
         recent.append({"role": "assistant", "content": assistant_text})
-        used += pair_len
 
     messages.extend(recent)
     return messages
