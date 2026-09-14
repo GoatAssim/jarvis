@@ -21,3 +21,4 @@ web/public/app - Copy.js
 *.rej
 *.rej*
 benchmark*
+*.diff
