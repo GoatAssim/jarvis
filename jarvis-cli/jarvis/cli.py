@@ -1166,6 +1166,110 @@ def main():
         print(memory.CONFIG_FILE)
         return
 
+    if argv[0] == "voice-config":
+        from .voice import config as voice_config
+        voice_config.ensure_voice_config()
+        print(voice_config.VOICE_CONFIG_FILE)
+        return
+
+    if argv[0] == "speak":
+        # jarvis speak <text> — synthesize()+play() on this machine's
+        # default output device. server.js's web path calls this same
+        # subcommand but with --no-play (see below) so it can stream the
+        # raw bytes to the browser instead of touching the host speaker.
+        from .voice import tts as voice_tts
+
+        no_play = "--no-play" in argv[1:]
+        out_path = None
+        rest = [a for a in argv[1:] if a != "--no-play"]
+        if len(rest) >= 2 and rest[-2] == "--out":
+            out_path = rest[-1]
+            rest = rest[:-2]
+        text = " ".join(rest).strip()
+        if not text:
+            print(json.dumps({"error": "usage: jarvis speak <text> [--no-play] [--out <path>]"}))
+            sys.exit(1)
+
+        result = voice_tts.speak(text, play=not no_play, out_path=out_path)
+        if "error" in result:
+            print(json.dumps({"error": result["error"]}))
+            sys.exit(1)
+        # Never dump raw audio bytes to stdout/JSON — report metadata only.
+        # --out (or the browser path via server.js) is how the caller
+        # actually gets the audio; stdout stays clean JSON, same
+        # convention as every other machine-readable jarvis subcommand.
+        print(json.dumps({
+            "ok": True, "provider": result.get("provider"), "mime": result.get("mime"),
+            "played": result.get("played"), "path": result.get("path"),
+        }))
+        return
+
+    if argv[0] == "transcribe":
+        # jarvis transcribe <audio file> — speech-to-text on an existing
+        # WAV file. Used directly by a person with a recording on disk,
+        # and by server.js's /api/voice/transcribe on a browser upload
+        # saved to a temp file (see voice/stt.py's module docstring).
+        from .voice import stt as voice_stt
+
+        if len(argv) < 2 or not argv[1].strip():
+            print(json.dumps({"error": "usage: jarvis transcribe <audio file>"}))
+            sys.exit(1)
+        result = voice_stt.transcribe(argv[1].strip())
+        if "error" in result:
+            print(json.dumps({"error": result["error"]}))
+            sys.exit(1)
+        print(json.dumps(result))
+        return
+
+    if argv[0] == "listen":
+        # jarvis listen — one full voice turn: record from the default mic
+        # until silence, transcribe it, hand the text to the normal ask()
+        # pipeline (same commands/tools/memory as typed input), then speak
+        # the reply back. CLI-only (audio_io.record()/play() need a real
+        # local mic/speaker) — the web UI does the mic/speaker parts itself
+        # in the browser and calls /api/voice/transcribe + /api/voice/speak
+        # around a normal "ask" instead (see jarvis-enhancement-plan.md §3a).
+        from .voice import audio_io as voice_audio_io, stt as voice_stt, tts as voice_tts
+        from . import ai_client, conversations
+
+        def status(msg):
+            print(f"{ERR.DIM}{msg}{ERR.RESET}", file=sys.stderr, flush=True)
+
+        rec = voice_audio_io.record(on_status=status)
+        if "error" in rec:
+            print(f"{ERR.RED}{rec['error']}{ERR.RESET}", file=sys.stderr)
+            sys.exit(1)
+
+        try:
+            transcript = voice_stt.transcribe(rec["path"])
+        finally:
+            Path(rec["path"]).unlink(missing_ok=True)
+
+        if "error" in transcript:
+            print(f"{ERR.RED}{transcript['error']}{ERR.RESET}", file=sys.stderr)
+            sys.exit(1)
+
+        heard = transcript["text"]
+        print(f"{OUT.DIM}you said: {heard}{OUT.RESET}")
+
+        conv_id = os.environ.get("JARVIS_CONVERSATION_ID")
+        if not conversations.is_valid_id(conv_id):
+            conv_id = None
+
+        result = ai_client.ask(heard, commands, conversation_id=conv_id, on_attempt=status)
+        prefix = f"{OUT.CYAN}{OUT.BOLD}{result.assistant_name}:{OUT.RESET} "
+        if not result.ok:
+            print(f"{prefix}I couldn't get a response from any configured AI provider, "
+                  f"{result.address_user_as}.")
+            sys.exit(1)
+
+        print(f"{prefix}{result.text}")
+        speak_result = voice_tts.speak(result.text)
+        if "error" in speak_result:
+            print(f"{ERR.DIM}(couldn't speak the reply: {speak_result['error']}){ERR.RESET}",
+                  file=sys.stderr)
+        return
+
     if argv[0] == "everything-config":
         from . import everything_config
         everything_config.ensure_config()

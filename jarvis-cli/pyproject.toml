@@ -14,6 +14,19 @@ dependencies = [
 ytdl = ["yt-dlp>=2024.1"]
 desktop = ["pyautogui>=0.9.54"]
 ocr = ["pytesseract>=0.3.10", "Pillow>=9.0"]
+# jarvis-enhancement-plan.md §3.5 — pluggable voice backends. All opt-in;
+# none of these are in the base `dependencies` above. "voice-audio" is
+# needed by every voice command (record/play); the tts-*/stt-* extras are
+# per-provider so picking e.g. edge+faster_whisper doesn't pull in kokoro
+# or vosk too.
+voice-audio = ["sounddevice>=0.4.6", "soundfile>=0.12.1", "numpy>=1.22"]
+voice-tts-kokoro = ["kokoro>=0.7.9", "soundfile>=0.12.1", "numpy>=1.22"]
+voice-tts-edge = ["edge-tts>=6.1.0"]
+voice-stt-whisper = ["faster-whisper>=1.0.0"]
+voice-stt-vosk = ["vosk>=0.3.45"]
+voice = [
+    "jarvis-cli[voice-audio,voice-tts-edge,voice-stt-whisper]",
+]
 
 [project.scripts]
 jarvis = "jarvis.cli:entry"
@@ -23,4 +36,4 @@ requires = ["setuptools>=61.0"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools]
-packages = ["jarvis"]
+packages = ["jarvis", "jarvis.voice"]
