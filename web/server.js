@@ -41,10 +41,9 @@ const CANDIDATES = process.env.JARVIS_BIN
       { cmd: "python", args: ["-m", "jarvis"] },
       { cmd: "py", args: ["-m", "jarvis"] },
     ];
-
 function parseOverride(raw) {
-  const parts = raw.split(" ").filter(Boolean);
-  return { cmd: parts[0], args: parts.slice(1) };
+  const value = raw.trim().replace(/^"(.*)"$/, "$1");
+  return { cmd: value, args: [] };
 }
 
 function tryInvoker({ cmd, args }, timeoutMs = 4000) {

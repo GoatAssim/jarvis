@@ -118,17 +118,28 @@ rem     stripped by the Python side (jarvis\persona_name.py); this just
 rem     wires that resolver into the build.
 :sync_entry_point
 set "CLI_NAME="
+set "SYNC_OUTPUT=%TEMP%\jarvis_cli_name_%RANDOM%.txt"
+
 echo [debug] PYEXE=%PYEXE%
 echo [debug] SCRIPT=%JARVIS_CLI%\build_tools\sync_entry_point.py
-for /f "usebackq delims=" %%N in (`"%PYEXE%" "%JARVIS_CLI%\build_tools\sync_entry_point.py"`) do set "CLI_NAME=%%N"
+
+"%PYEXE%" "%JARVIS_CLI%\build_tools\sync_entry_point.py" > "%SYNC_OUTPUT%"
+if errorlevel 1 (
+    del /f /q "%SYNC_OUTPUT%" 2>nul
+    goto sync_entry_point_fail
+)
+
+set /p "CLI_NAME="<"%SYNC_OUTPUT%"
+del /f /q "%SYNC_OUTPUT%" 2>nul
+
 if not defined CLI_NAME goto sync_entry_point_fail
 exit /b 0
+
 :sync_entry_point_fail
 echo ERROR: Could not resolve/sync the persona's CLI name.
 echo Falling back to "jarvis" -- check that Python can import jarvis.ai_config.
 set "CLI_NAME=jarvis"
 exit /b 1
-
 rem --- Same resolution as above, but read-only (no pyproject.toml rewrite) --
 rem     used by the elevated admin-copy branch, which runs after the main
 rem     flow already synced pyproject.toml and just needs the same answer
@@ -226,4 +237,4 @@ echo ERROR: Could not enter web folder.
 pause & exit /b 1
 :err_npm
 echo ERROR: npm install failed.
-pause & exit /b 1
+pause & exit /b 1   
