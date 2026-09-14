@@ -85,7 +85,16 @@ echo (config still lives in %%USERPROFILE%%\.jarvis regardless of the above)
 echo.
 
 echo [2/5] Installing CLI as "%CLI_NAME%"...
-"%PYEXE%" -m pip install .
+rem --force-reinstall is required here: plain `pip install .` only checks
+rem name==version against what's already installed and silently no-ops if
+rem that already matches -- it does NOT diff source file contents/timestamps.
+rem Since this project's version string doesn't bump on every code change,
+rem without this flag every run after the first would install NOTHING, and
+rem you'd keep running a stale exe while every step above still reports
+"success". --no-deps keeps this fast by skipping the (unchanged) dependency
+rem tree -- if pyproject.toml's dependencies themselves changed, run a plain
+rem "%PYEXE%" -m pip install . (no flags) once to pick those up too.
+"%PYEXE%" -m pip install . --force-reinstall --no-deps
 if errorlevel 1 goto err_pip
 echo.
 
@@ -120,9 +129,6 @@ rem     wires that resolver into the build.
 set "CLI_NAME="
 set "SYNC_OUTPUT=%TEMP%\jarvis_cli_name_%RANDOM%.txt"
 
-echo [debug] PYEXE=%PYEXE%
-echo [debug] SCRIPT=%JARVIS_CLI%\build_tools\sync_entry_point.py
-
 "%PYEXE%" "%JARVIS_CLI%\build_tools\sync_entry_point.py" > "%SYNC_OUTPUT%"
 if errorlevel 1 (
     del /f /q "%SYNC_OUTPUT%" 2>nul
@@ -155,9 +161,24 @@ set "JARVIS_EXE="
 rem Check the project's own .venv first, if present -- this is where pip
 rem installs the CLI when script.bat is run with a project venv active
 rem (e.g. a Python 3.12 venv kept around for packages like torch that
-rem don't yet support newer Pythons). Falls through to the hardcoded
-rem global-Python paths below if no venv exists or it lacks the exe.
+rem don't yet support newer Pythons).
 if defined VENV_SCRIPTS if exist "%VENV_SCRIPTS%\%CLI_NAME%.exe" set "JARVIS_EXE=%VENV_SCRIPTS%\%CLI_NAME%.exe" & goto find_jarvis_ok
+
+rem No venv (or venv copy missing) -- ask the SAME python we just ran
+rem `pip install .` with (whatever %PYEXE% resolved to, e.g. plain
+rem "python" on PATH) where IT puts console-script exes. This MUST use
+rem the identical interpreter the install just used, or you silently
+rem build into one Python's Scripts folder and then look in another --
+rem which is exactly how a stale exe from an unrelated Python install
+rem (e.g. a different branch/venv on this same machine) keeps getting
+rem picked up even though the real install succeeded moments earlier.
+set "PY_SCRIPTS="
+for /f "usebackq delims=" %%S in (`"%PYEXE%" -c "import sysconfig; print(sysconfig.get_path('scripts'))" 2^>nul`) do set "PY_SCRIPTS=%%S"
+if defined PY_SCRIPTS if exist "%PY_SCRIPTS%\%CLI_NAME%.exe" set "JARVIS_EXE=%PY_SCRIPTS%\%CLI_NAME%.exe" & goto find_jarvis_ok
+
+rem Last-resort fallback only -- hardcoded guesses kept as a safety net
+rem for setups where sysconfig somehow didn't resolve. Don't rely on this
+rem branch; if you land here, PYEXE and this list have drifted apart.
 for %%P in (
     "%LOCALAPPDATA%\Python\pythoncore-3.14-64\Scripts\%CLI_NAME%.exe"
     "%LOCALAPPDATA%\Python\Python314\Scripts\%CLI_NAME%.exe"
@@ -172,7 +193,9 @@ for /f "usebackq delims=" %%P in (`where %CLI_NAME%.exe 2^>nul`) do (
     goto find_jarvis_ok
 )
 :find_jarvis_fail
-echo ERROR: %CLI_NAME%.exe not found. Run pip install from jarvis-cli first.
+echo ERROR: %CLI_NAME%.exe not found.
+echo Tried venv (%VENV_SCRIPTS%), sysconfig scripts dir (%PY_SCRIPTS%), and the hardcoded/PATH fallbacks.
+echo Run pip install from jarvis-cli first, or check that %PYEXE% is the python you expect.
 exit /b 1
 :find_jarvis_ok
 exit /b 0
@@ -237,4 +260,4 @@ echo ERROR: Could not enter web folder.
 pause & exit /b 1
 :err_npm
 echo ERROR: npm install failed.
-pause & exit /b 1   
+pause & exit /b 1
