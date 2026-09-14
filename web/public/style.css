@@ -1313,6 +1313,64 @@ audio.ask-dl-player{ max-height: none; background: transparent; }
 }
 .ask-file-card__actions{ display: flex; flex-wrap: wrap; gap: 6px; margin-top: 4px; }
 
+/* dev_agent's live/replayed step timeline (see jarvis-cli/jarvis/dev_agent_events.py
+   and app.js's upsertDevAgentCard/renderDevAgentCard/fillDevAgentCardBody, plus
+   renderThreadExtra's "devAgent" case for replay after reload). One row per
+   plan/write/install/run/fix/done step; a completed write row expands to show its
+   truncated preview; fix rows nest (indent) under the run they followed. */
+.ask-msg--dev-agent .ask-msg__role{ color: var(--accent-soft); }
+.ask-msg__bubble.ask-msg__bubble--dev-agent{
+  display: flex; flex-direction: column; gap: 2px;
+  border-left-color: var(--accent-soft);
+}
+.dev-agent-card__header{
+  font-family: var(--font-mono); font-size: 10.5px; letter-spacing: 0.08em;
+  text-transform: uppercase; color: var(--text-dimmer); margin-bottom: 4px;
+}
+.dev-agent-card__body{ display: flex; flex-direction: column; gap: 1px; }
+.dev-agent-card__step{
+  display: flex; align-items: baseline; gap: 8px;
+  padding: 3px 4px; font-size: 12.5px; line-height: 1.4; border-radius: 2px;
+}
+.dev-agent-card__step.is-expandable{ cursor: pointer; }
+.dev-agent-card__step.is-expandable:hover{ background: var(--bg-raised); }
+.dev-agent-card__step--nested{
+  margin-left: 18px; border-left: 2px solid var(--border); padding-left: 8px;
+}
+.dev-agent-card__step-glyph{
+  flex: none; width: 14px; text-align: center; font-family: var(--font-mono);
+}
+.dev-agent-card__step--ok .dev-agent-card__step-glyph{ color: var(--green); }
+.dev-agent-card__step--fail .dev-agent-card__step-glyph{ color: var(--red); }
+.dev-agent-card__step--pending .dev-agent-card__step-glyph{
+  color: var(--accent); animation: dev-agent-pulse 1.1s ease-in-out infinite;
+}
+.dev-agent-card__step-phase{
+  flex: none; font-family: var(--font-mono); font-size: 10.5px; letter-spacing: 0.06em;
+  text-transform: uppercase; color: var(--text-dim); min-width: 46px;
+}
+.dev-agent-card__step-summary{
+  color: var(--text); word-break: break-word; overflow-wrap: anywhere;
+}
+.dev-agent-card__step--fail .dev-agent-card__step-summary{ color: var(--red); }
+.dev-agent-card__step-detail{
+  display: none; margin: 4px 0 2px 22px; padding: 6px 8px;
+  font-family: var(--font-mono); font-size: 11px; white-space: pre-wrap; word-break: break-word;
+  color: var(--text-dim); background: var(--bg-raised); border-left: 2px solid var(--border-strong);
+  border-radius: 2px; max-height: 160px; overflow-y: auto;
+}
+.dev-agent-card__step.is-expanded .dev-agent-card__step-detail{ display: block; }
+.dev-agent-card__footer{
+  margin-top: 6px; padding-top: 6px; border-top: 1px solid var(--border);
+  font-size: 12px; color: var(--text-dim); word-break: break-word;
+}
+.dev-agent-card__footer--fail{ color: var(--red); }
+
+@keyframes dev-agent-pulse{
+  0%, 100%{ opacity: 0.4; }
+  50%{ opacity: 1; }
+}
+
 .ask-msg__actions{
   display: flex; gap: 6px; margin-top: 5px; padding: 0 2px;
   opacity: 0.35; transition: opacity 0.12s;

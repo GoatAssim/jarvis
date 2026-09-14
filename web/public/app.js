@@ -2743,6 +2743,17 @@
       case "confirm":
         if (item.data.resolved !== null) renderResolvedConfirmBubble(item.data);
         break;
+      case "devAgent":
+        // A replayed devAgent extra already has its complete `steps` array
+        // (persisted per ai_client._extras_from_runs — see §6 of the §3.6
+        // plan), so this builds the whole finished stepper in one pass —
+        // no incremental upsert needed, unlike the live path in
+        // addAskPromptTrace/upsertDevAgentCard below. Same
+        // renderDevAgentCard() either way so live and replayed never
+        // visually drift apart.
+        item.dom = renderDevAgentCard(item);
+        insertIntoAskThread(item.dom);
+        break;
     }
   }
 
@@ -2782,6 +2793,29 @@
           name, type: ftype, sizeBytes, path: fullPath,
         });
         askPromptLine(`$ present  ${name || fullPath}`, "tool");
+        return;
+      }
+      if (parts[1] === "dev_agent" && parts[2]) {
+        // dev_agent's progress events (see jarvis-cli/jarvis/dev_agent_events.py)
+        // don't fit present_file's fixed positional fields — the whole event
+        // is one JSON blob in parts[2] instead. Still exactly 3 tab-separated
+        // parts overall, so this still fits the plain line.split("\t") dispatch
+        // every other JARVIS_MEDIA branch above uses.
+        let event;
+        try { event = JSON.parse(parts[2]); } catch { return; }
+        const item = upsertDevAgentCard(event);
+        if (item && isViewingAskThread()) {
+          clearAskEmptyHint();
+          if (!item.dom) {
+            item.dom = renderDevAgentCard(item);
+            insertIntoAskThread(item.dom);
+          } else {
+            updateDevAgentCard(item);
+          }
+          askThreadScrollToEnd();
+        }
+        const detail = event.path || event.command || "";
+        askPromptLine(`$ dev_agent  ${event.phase}:${event.status}` + (detail ? `  ${detail}` : ""), "tool");
         return;
       }
     }
@@ -2979,6 +3013,199 @@
     ]);
     insertIntoAskThread(msg);
     askThreadScrollToEnd();
+  }
+
+  // ---------------------------------------------------------------------
+  // dev_agent — live-progress card (see jarvis-cli/jarvis/dev_agent_events.py
+  // and jarvis-cli/jarvis/actions/dev_agent.py). Progress events arrive as
+  // JARVIS_MEDIA\tdev_agent\t<json> lines on stderr (parsed in
+  // addAskPromptTrace above); the persisted replay shape is
+  // {jobId, ok, projectDir, steps} (ai_client._extras_from_runs' "devAgent"
+  // branch, §6 of the §3.6 plan). renderDevAgentCard/fillDevAgentCardBody
+  // are shared by both the live path (upsertDevAgentCard) and the replay
+  // path (renderThreadExtra's "devAgent" case) so the two never visually
+  // drift apart — same principle as §3.3's steps/live-stream identity.
+  // ---------------------------------------------------------------------
+
+  // Finds (or creates) this job's extra entry for the current conversation
+  // and appends the event to its steps — mirrors upsertConsoleExtra's
+  // find-or-create-by-bucket pattern, keyed additionally by job_id since a
+  // single turn could in principle run more than one dev_agent job.
+  function upsertDevAgentCard(event) {
+    const convId = state.askConversationId;
+    if (convId == null) return null;
+    const bucket = extraBucketFor(convId);
+    if (!state.threadExtrasByConv[convId]) state.threadExtrasByConv[convId] = [];
+    const arr = state.threadExtrasByConv[convId];
+    let item = arr.find((it) => it.type === "devAgent" && it.bucket === bucket && it.data.jobId === event.job_id);
+    if (!item) {
+      item = { bucket, type: "devAgent", data: { jobId: event.job_id, ok: null, projectDir: null, steps: [] } };
+      arr.push(item);
+    }
+    item.data.steps.push(event);
+    if (event.phase === "done") {
+      item.data.ok = event.status === "ok";
+      item.data.projectDir = event.project_dir || null;
+    }
+    return item;
+  }
+
+  function devAgentStatusGlyph(status) {
+    if (status === "ok") return "\u2713";
+    if (status === "fail") return "\u2717";
+    if (status === "start" || status === "progress" || status === "pending") return "\u22ef";
+    return "\u25cb";
+  }
+
+  const DEV_AGENT_PHASE_LABELS = { plan: "Plan", write: "Write", install: "Install", run: "Run", fix: "Fix", done: "Done" };
+  function devAgentPhaseLabel(phase) {
+    return DEV_AGENT_PHASE_LABELS[phase] || phase;
+  }
+
+  // One-line row summary built from a step event's own fields — different
+  // phases carry different fields (see dev_agent_events.py's event-shape
+  // table and the real per-phase field names in actions/dev_agent.py:
+  // write uses "path"/"bytes", not "file"/"bytes_written").
+  function devAgentStepSummary(e) {
+    const firstLine = (s) => (s || "").split("\n")[0];
+    switch (e.phase) {
+      case "plan": {
+        if (e.status === "ok") {
+          const nFiles = (e.files || []).length;
+          const nDeps = (e.dependencies || []).length;
+          return `${nFiles} file${nFiles === 1 ? "" : "s"}, ${nDeps} dep${nDeps === 1 ? "" : "s"}, run: ${e.run_command || ""}`;
+        }
+        if (e.status === "fail") return e.error || "planning failed";
+        return e.description || "";
+      }
+      case "write": {
+        if (e.status === "ok") return `${e.path || ""}  ${formatFileSize(e.bytes)}`;
+        if (e.status === "fail") return `${e.path || ""} \u2014 ${e.error || "write failed"}`;
+        return e.path || "";
+      }
+      case "install": {
+        const deps = (e.dependencies || []).join(", ");
+        if (e.status === "fail") return firstLine(e.stderr_tail) || "install failed";
+        if (e.status === "start") return deps || "no dependencies";
+        return deps || "nothing to install";
+      }
+      case "run": {
+        if (e.status === "start") return e.command || "";
+        if (e.status === "ok") return `exit ${e.exit_code}`;
+        return `exit ${e.exit_code}  \u2014 ${firstLine(e.stderr_tail)}`;
+      }
+      case "fix": {
+        const base = `attempt ${e.attempt}/${e.max_attempts}  ${e.classified_error || ""}`;
+        return e.note ? `${base} \u2014 ${e.note}` : base;
+      }
+      case "done": {
+        if (e.status === "ok") {
+          const n = e.total_attempts || 0;
+          return n ? `running \u2014 ${n} fix attempt${n === 1 ? "" : "s"}` : "running";
+        }
+        return firstLine(e.last_error) || e.reason || "gave up";
+      }
+      default:
+        return "";
+    }
+  }
+
+  // Groups the raw start/ok/fail event stream into one row per step —
+  // matching a "start" to its later "ok"/"fail" by phase (and, for write,
+  // by path — writes happen one file at a time, never interleaved, per
+  // _write_files' sequential loop, so the most recent open row for a key
+  // is always the right one to close). A fix row is flagged `nested` so
+  // it renders indented under the run row it followed.
+  function buildDevAgentRows(steps) {
+    const rows = [];
+    const open = {};
+    const keyFor = (e) => (e.phase === "write" ? `write:${e.path || ""}` : e.phase === "fix" ? `fix:${e.attempt}` : e.phase);
+    for (const e of steps || []) {
+      const key = keyFor(e);
+      if (e.status === "start") {
+        const row = { phase: e.phase, status: "pending", summary: devAgentStepSummary(e), event: e, nested: e.phase === "fix" };
+        rows.push(row);
+        open[key] = row;
+        continue;
+      }
+      const row = open[key];
+      if (row) {
+        row.status = e.status;
+        row.summary = devAgentStepSummary(e);
+        row.event = e;
+        delete open[key];
+      } else {
+        // "done" never has its own "start" event — and any other
+        // orphaned ok/fail still gets shown rather than silently dropped.
+        rows.push({ phase: e.phase, status: e.status, summary: devAgentStepSummary(e), event: e, nested: e.phase === "fix" });
+      }
+    }
+    return rows;
+  }
+
+  function renderDevAgentStepRow(row) {
+    const glyph = devAgentStatusGlyph(row.status);
+    const statusCls = row.status === "ok" ? "dev-agent-card__step--ok"
+      : row.status === "fail" ? "dev-agent-card__step--fail"
+      : "dev-agent-card__step--pending";
+    const cls = ["dev-agent-card__step", statusCls, row.nested ? "dev-agent-card__step--nested" : null]
+      .filter(Boolean).join(" ");
+    const rowEl = el("div", { class: cls }, [
+      el("span", { class: "dev-agent-card__step-glyph" }, glyph),
+      el("span", { class: "dev-agent-card__step-phase" }, devAgentPhaseLabel(row.phase)),
+      el("span", { class: "dev-agent-card__step-summary" }, row.summary || ""),
+    ]);
+    // A completed write row with a preview expands in place to show the
+    // truncated file content — reusing the console-dump bubble's <pre>
+    // styling family rather than inventing a new one.
+    if (row.phase === "write" && row.status === "ok" && row.event && row.event.preview) {
+      rowEl.classList.add("is-expandable");
+      rowEl.appendChild(el("pre", { class: "dev-agent-card__step-detail" }, row.event.preview));
+      rowEl.addEventListener("click", () => rowEl.classList.toggle("is-expanded"));
+    }
+    return rowEl;
+  }
+
+  function fillDevAgentCardBody(body, item) {
+    body.innerHTML = "";
+    for (const row of buildDevAgentRows(item.data.steps)) body.appendChild(renderDevAgentStepRow(row));
+    if (item.data.ok === true) {
+      body.appendChild(el("div", { class: "dev-agent-card__footer" },
+        item.data.projectDir ? `Project ready \u2014 ${item.data.projectDir}` : "Done."));
+    } else if (item.data.ok === false) {
+      const lastStep = item.data.steps[item.data.steps.length - 1] || {};
+      const lastError = lastStep.last_error ? String(lastStep.last_error).split("\n")[0] : "";
+      const note = item.data.projectDir
+        ? ` \u2014 the project folder is still here: ${item.data.projectDir}`
+        : "";
+      body.appendChild(el("div", { class: "dev-agent-card__footer dev-agent-card__footer--fail" },
+        (lastError || "gave up") + note));
+    }
+  }
+
+  // Builds a fresh card and fills it from item.data.steps as it stands
+  // right now — used both to insert the very first live row and to
+  // replay an already-finished job in one pass.
+  function renderDevAgentCard(item) {
+    clearAskEmptyHint();
+    const body = el("div", { class: "dev-agent-card__body" });
+    const msg = el("div", { class: "ask-msg ask-msg--jarvis ask-msg--dev-agent" }, [
+      el("div", { class: "ask-msg__role" }, currentAssistantName()),
+      el("div", { class: "ask-msg__bubble ask-msg__bubble--dev-agent" }, [
+        el("div", { class: "dev-agent-card__header" }, "dev_agent"),
+        body,
+      ]),
+    ]);
+    fillDevAgentCardBody(body, item);
+    return msg;
+  }
+
+  // Re-renders just this card's step list in place, not the whole thread.
+  function updateDevAgentCard(item) {
+    if (!item.dom) return;
+    const body = qs(".dev-agent-card__body", item.dom);
+    if (!body) return;
+    fillDevAgentCardBody(body, item);
   }
 
   function stripAnsi(s) {

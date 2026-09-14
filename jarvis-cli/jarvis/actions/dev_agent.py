@@ -564,6 +564,9 @@ TOOL_KEYWORDS = {
         "create a small app": 8,
         "write a script that": 6,
         "code me": 7,
+        "program":5,
+        "project":5,
+        "make":6,
         # NOTE: "make a", "change", "program", and "project" were removed
         # here — they're generic enough to match unrelated requests
         # ("make a note", "change my wallpaper", "what's my program
