@@ -1,167 +1,273 @@
-"""Loading and defaults for ~/.jarvis/voice_config.json.
+"""Pluggable text-to-speech backends for Jarvis — jarvis-enhancement-plan.md
+§3.5. Mirrors Mark LIII's core/tts.py swappable-provider shape, one local
+option and two online options:
 
-Same philosophy as ai_config.py (see that module's docstring for the full
-rationale): a plain, hand-editable JSON file, created with a sensible
-starter template on first use, re-read fresh on every invocation — no
-"apply"/reload step, no code change needed to switch providers or tweak a
-voice/model/rate.
+    kokoro       — local, offline. Neural TTS, ~330MB model, no network
+                    needed after the first download.
+    edge         — online, free. Microsoft Edge's TTS, no API key.
+                    Default provider (works with zero config).
+    elevenlabs   — online, paid. Cloud API, best quality, needs an API key.
+    xtts         — local, offline (after first download). Voice cloning
+                    via Coqui's XTTS-v2 from a short reference clip you
+                    supply and have the rights to — see tts.xtts in
+                    voice_config.json. Heaviest option: needs torch and a
+                    ~2GB checkpoint. Not a source of any specific
+                    copyrighted character's voice; it clones whatever
+                    clip you point it at.
 
-Two independent provider choices, matching jarvis-enhancement-plan.md's
-§3.5 table:
-
-    "tts": {"provider": "edge", ...}          # kokoro | edge | elevenlabs
-    "stt": {"provider": "faster_whisper", ...} # faster_whisper | vosk
-
-"edge" (Edge TTS) is the default TTS provider because it needs no API key
-and no local model download — the file works out of the box the same way
-ai_config.json's Ollama entry needs no key. Swap "provider" to "kokoro" for
-fully offline TTS (first call downloads the ~330MB model, then no network
-needed) or "elevenlabs" for paid cloud quality (needs api_key + voice_id
-filled in under "elevenlabs"). Same idea for STT: "faster_whisper" is the
-default (offline after its one-time, much smaller model download); "vosk"
-is a lighter offline alternative for constrained machines, but needs
-"model_path" pointed at a downloaded Vosk model directory since Vosk (unlike
-faster-whisper) doesn't fetch one for you.
-
-Each per-provider block is complete on its own so switching "provider" is
-the only edit needed for a normal switch — the other blocks' settings are
-simply ignored while inactive, not deleted, so flipping back and forth
-during evaluation doesn't lose any tuning.
+synthesize() returns raw audio bytes + a mime type and never touches an
+output device — that split is what lets the same function serve both
+callers described in this package's __init__.py docstring: cli.py's
+`jarvis speak` calls speak() (synthesize + audio_io.play on this machine),
+while web/server.js's /api/voice/speak endpoint calls synthesize() alone
+and streams the bytes to the browser to play through *its* speaker
+instead — per jarvis-enhancement-plan.md §3a, CLI and web need different
+playback paths even though the synthesis backend itself is shared.
 """
 
-import json
+import asyncio
 import sys
-from pathlib import Path
 
-JARVIS_DIR = Path.home() / ".jarvis"
-VOICE_CONFIG_FILE = JARVIS_DIR / "voice_config.json"
-ENCODING = "utf-8"
 
-KNOWN_TTS_PROVIDERS = {"kokoro", "edge", "elevenlabs"}
-KNOWN_STT_PROVIDERS = {"faster_whisper", "vosk"}
+_KOKORO_INSTALL_NOTE = (
+    'kokoro not installed. pip install "jarvis-cli[voice-tts-kokoro]" '
+    "(pulls in kokoro + soundfile; first call downloads the ~330MB model, "
+    "then runs fully offline)."
+)
+_EDGE_INSTALL_NOTE = 'edge-tts not installed. pip install "jarvis-cli[voice-tts-edge]"'
+_ELEVENLABS_INSTALL_NOTE = (
+    'elevenlabs needs the requests package (already a base jarvis-cli '
+    "dependency) plus an API key — set tts.elevenlabs.api_key and "
+    "voice_id via `jarvis voice-config`."
+)
+_XTTS_INSTALL_NOTE = (
+    'coqui-tts not installed. pip install "jarvis-cli[voice-tts-xtts]" '
+    "(pulls in coqui-tts + torch; first call downloads the ~2GB XTTS-v2 "
+    "checkpoint, then runs fully offline). Also needs a reference voice "
+    "clip you have the rights to — set tts.xtts.speaker_wav_path via "
+    "`jarvis voice-config`."
+)
 
-DEFAULT_VOICE_CONFIG = {
-    "tts": {
-        "provider": "edge",
-        "kokoro": {
-            # Kokoro voice names are short codes, not free text — see
-            # https://github.com/hexgrad/kokoro for the current list.
-            "voice": "af_heart",
-            "speed": 1.0,
-        },
-        "edge": {
-            # Any voice from `edge-tts --list-voices`.
-            "voice": "en-US-GuyNeural",
-            "rate": "+0%",
-            "volume": "+0%",
-        },
-        "elevenlabs": {
-            "api_key": "",
-            "voice_id": "",
-            "model": "eleven_turbo_v2_5",
-        },
-    },
-    "stt": {
-        "provider": "faster_whisper",
-        "faster_whisper": {
-            # tiny|base|small|medium|large-v3 (or a distil-* variant) — see
-            # https://github.com/SYSTRAN/faster-whisper. "small" is a
-            # reasonable default: noticeably more accurate than "base",
-            # still comfortable on CPU.
-            "model": "small",
-            "device": "cpu",
-            "compute_type": "int8",
-            "language": "",  # "" = auto-detect
-        },
-        "vosk": {
-            # No default — Vosk needs a model downloaded and pointed at
-            # explicitly (https://alphacephei.com/vosk/models); unlike
-            # faster-whisper it won't fetch one on first use.
-            "model_path": "",
-        },
-    },
-    "audio": {
-        "sample_rate": 16000,
-        "channels": 1,
-        # Auto-stop-recording tuning for voice.audio_io.record(): how long
-        # a run of near-silence has to last before we consider the person
-        # done talking, and the hard ceiling regardless of silence, so a
-        # noisy room can't pin the mic open forever.
-        "silence_seconds": 1.2,
-        "silence_rms_threshold": 500,
-        "max_record_seconds": 30,
-    },
+_kokoro_pipeline_cache = {}  # lang_code -> KPipeline
+
+
+def _kokoro_synthesize(text, settings):
+    try:
+        from kokoro import KPipeline
+    except ImportError:
+        return None, {"error": _KOKORO_INSTALL_NOTE}
+    try:
+        import soundfile as sf
+        import numpy as np
+        import io
+    except ImportError:
+        return None, {"error": _KOKORO_INSTALL_NOTE}
+
+    voice = settings.get("voice", "af_heart")
+    speed = float(settings.get("speed", 1.0))
+    # Kokoro's language code is the voice prefix's first letter ('a' =
+    # American English, 'b' = British English, ...) — see kokoro's README.
+    lang_code = voice[0] if voice else "a"
+
+    pipeline = _kokoro_pipeline_cache.get(lang_code)
+    if pipeline is None:
+        try:
+            pipeline = KPipeline(lang_code=lang_code)
+        except Exception as e:
+            return None, {"error": f"couldn't load kokoro pipeline: {e}"}
+        _kokoro_pipeline_cache[lang_code] = pipeline
+
+    try:
+        chunks = [audio for _graphemes, _phonemes, audio in pipeline(text, voice=voice, speed=speed)]
+        if not chunks:
+            return None, {"error": "kokoro produced no audio for this text"}
+        audio = np.concatenate(chunks)
+        buf = io.BytesIO()
+        sf.write(buf, audio, 24000, format="WAV")
+        return {"audio": buf.getvalue(), "mime": "audio/wav"}, None
+    except Exception as e:
+        return None, {"error": f"kokoro synthesis failed: {e}"}
+
+
+def _edge_synthesize(text, settings):
+    try:
+        import edge_tts
+    except ImportError:
+        return None, {"error": _EDGE_INSTALL_NOTE}
+
+    voice = settings.get("voice", "en-US-GuyNeural")
+    rate = settings.get("rate", "+0%")
+    volume = settings.get("volume", "+0%")
+
+    async def _run():
+        communicate = edge_tts.Communicate(text, voice=voice, rate=rate, volume=volume)
+        chunks = bytearray()
+        async for chunk in communicate.stream():
+            if chunk["type"] == "audio":
+                chunks.extend(chunk["data"])
+        return bytes(chunks)
+
+    try:
+        audio = asyncio.run(_run())
+    except Exception as e:
+        return None, {"error": f"edge-tts synthesis failed: {e}"}
+
+    if not audio:
+        return None, {"error": "edge-tts returned no audio (bad voice name, or no internet)"}
+    return {"audio": audio, "mime": "audio/mpeg"}, None
+
+
+def _elevenlabs_synthesize(text, settings):
+    try:
+        import requests
+    except ImportError:
+        return None, {"error": _ELEVENLABS_INSTALL_NOTE}
+
+    api_key = (settings.get("api_key") or "").strip()
+    voice_id = (settings.get("voice_id") or "").strip()
+    model = settings.get("model", "eleven_turbo_v2_5")
+
+    if not api_key or not voice_id:
+        return None, {
+            "error": "tts.elevenlabs.api_key and tts.elevenlabs.voice_id must both be set "
+                     "via `jarvis voice-config` before using the elevenlabs provider."
+        }
+
+    try:
+        resp = requests.post(
+            f"https://api.elevenlabs.io/v1/text-to-speech/{voice_id}",
+            headers={"xi-api-key": api_key, "Content-Type": "application/json"},
+            json={"text": text, "model_id": model},
+            timeout=30,
+        )
+    except requests.RequestException as e:
+        return None, {"error": f"elevenlabs request failed: {e}"}
+
+    if resp.status_code != 200:
+        return None, {"error": f"elevenlabs API error {resp.status_code}: {resp.text[:300]}"}
+    if not resp.content:
+        return None, {"error": "elevenlabs returned no audio"}
+    return {"audio": resp.content, "mime": "audio/mpeg"}, None
+
+
+_xtts_model_cache = {}  # model_name -> loaded TTS instance
+
+
+def _xtts_synthesize(text, settings):
+    try:
+        from TTS.api import TTS
+    except ImportError:
+        return None, {"error": _XTTS_INSTALL_NOTE}
+    try:
+        import soundfile as sf
+        import numpy as np
+        import io
+    except ImportError:
+        return None, {"error": _XTTS_INSTALL_NOTE}
+
+    speaker_wav = (settings.get("speaker_wav_path") or "").strip()
+    if not speaker_wav:
+        return None, {
+            "error": "tts.xtts.speaker_wav_path isn't set. Point it at a short "
+                     "(roughly 6-30s), clean, single-speaker reference recording "
+                     "of the voice to clone — a source you have the rights to — "
+                     "via `jarvis voice-config`."
+        }
+
+    from pathlib import Path
+    if not Path(speaker_wav).is_file():
+        return None, {"error": f"tts.xtts.speaker_wav_path '{speaker_wav}' doesn't exist"}
+
+    model_name = settings.get("model_name") or "tts_models/multilingual/multi-dataset/xtts_v2"
+    language = settings.get("language", "en")
+    device = settings.get("device", "cpu")
+
+    model = _xtts_model_cache.get(model_name)
+    if model is None:
+        try:
+            model = TTS(model_name).to(device)
+        except Exception as e:
+            return None, {"error": f"couldn't load xtts model '{model_name}': {e}"}
+        _xtts_model_cache[model_name] = model
+
+    try:
+        wav = model.tts(text=text, speaker_wav=speaker_wav, language=language)
+        audio = np.asarray(wav, dtype=np.float32)
+        buf = io.BytesIO()
+        sf.write(buf, audio, 24000, format="WAV")
+        return {"audio": buf.getvalue(), "mime": "audio/wav"}, None
+    except Exception as e:
+        return None, {"error": f"xtts synthesis failed: {e}"}
+
+
+_BACKENDS = {
+    "kokoro": _kokoro_synthesize,
+    "edge": _edge_synthesize,
+    "elevenlabs": _elevenlabs_synthesize,
+    "xtts": _xtts_synthesize,
 }
 
 
-def ensure_voice_config():
-    JARVIS_DIR.mkdir(parents=True, exist_ok=True)
-    if not VOICE_CONFIG_FILE.exists():
-        VOICE_CONFIG_FILE.write_text(
-            json.dumps(DEFAULT_VOICE_CONFIG, indent=2) + "\n", encoding=ENCODING
-        )
+def synthesize(text, config=None):
+    """Synthesizes `text` with the configured provider. Returns
+    {"ok": True, "provider": "...", "audio": <bytes>, "mime": "..."} on
+    success, or {"error": "..."} — never raises. Does NOT play anything;
+    see speak() below for that, or hand "audio"/"mime" to a browser."""
+    from . import config as voice_config
 
+    text = (text or "").strip()
+    if not text:
+        return {"error": "nothing to say (empty text)"}
 
-def _merge_defaults(section_name, loaded, defaults):
-    """Shallow-merge one top-level section (tts/stt/audio) so a config file
-    written before a new sub-key was added still picks up that sub-key's
-    default instead of a KeyError deep in tts.py/stt.py/audio_io.py."""
-    section = loaded.get(section_name)
-    if not isinstance(section, dict):
-        return dict(defaults[section_name])
-    merged = dict(defaults[section_name])
-    for key, value in section.items():
-        if isinstance(value, dict) and isinstance(merged.get(key), dict):
-            sub = dict(merged[key])
-            sub.update(value)
-            merged[key] = sub
-        else:
-            merged[key] = value
-    return merged
+    cfg = config or voice_config.load_voice_config()
+    provider, settings = voice_config.tts_provider_and_settings(cfg)
 
+    backend = _BACKENDS.get(provider)
+    if backend is None:
+        return {"error": f"unknown TTS provider '{provider}'"}
 
-def load_voice_config():
-    """Always returns a dict with 'tts', 'stt', and 'audio' keys, each
-    fully populated (missing sub-keys filled from DEFAULT_VOICE_CONFIG) —
-    callers never need to guard against a half-shaped or stale config."""
-    ensure_voice_config()
     try:
-        data = json.loads(VOICE_CONFIG_FILE.read_text(encoding=ENCODING))
-    except (json.JSONDecodeError, UnicodeDecodeError) as e:
-        print(
-            f"Warning: couldn't read {VOICE_CONFIG_FILE} ({e}) — using built-in voice "
-            f"defaults for this run. Fix the JSON, or delete the file to get a fresh "
-            f"starter template.",
-            file=sys.stderr,
-        )
-        data = {}
+        result, error = backend(text, settings)
+    except Exception as e:
+        return {"error": f"{provider} synthesis raised: {e}"}
 
-    if not isinstance(data, dict):
-        data = {}
-
-    return {
-        "tts": _merge_defaults("tts", data, DEFAULT_VOICE_CONFIG),
-        "stt": _merge_defaults("stt", data, DEFAULT_VOICE_CONFIG),
-        "audio": _merge_defaults("audio", data, DEFAULT_VOICE_CONFIG),
-    }
+    if error:
+        return error
+    return {"ok": True, "provider": provider, **result}
 
 
-def tts_provider_and_settings(cfg=None):
-    """(provider_name, that provider's settings dict), falling back to
-    'edge' if the configured provider name is unrecognized (e.g. a typo
-    hand-edited into the file) rather than raising deep inside tts.py."""
-    cfg = cfg or load_voice_config()
-    provider = cfg["tts"].get("provider", "edge")
-    if provider not in KNOWN_TTS_PROVIDERS:
-        provider = "edge"
-    return provider, cfg["tts"].get(provider, {})
+def speak(text, config=None, play=True, out_path=None):
+    """Synthesizes `text` and, by default, plays it on this machine's
+    default output device — the CLI path (`jarvis speak`). Pass play=False
+    to just get the bytes back (that's all server.js's web path uses;
+    web/server.js has no business touching the host's speaker for a
+    request that came from someone's browser on another machine).
 
+    out_path, if given, also writes the audio to disk (e.g. so the web
+    endpoint doesn't have to hold the whole file in memory before
+    streaming it) — this is independent of `play`.
 
-def stt_provider_and_settings(cfg=None):
-    """Same shape as tts_provider_and_settings(), falling back to
-    'faster_whisper'."""
-    cfg = cfg or load_voice_config()
-    provider = cfg["stt"].get("provider", "faster_whisper")
-    if provider not in KNOWN_STT_PROVIDERS:
-        provider = "faster_whisper"
-    return provider, cfg["stt"].get(provider, {})
+    Returns synthesize()'s dict, plus "played": bool if play=True was
+    requested (True/False depending on whether playback itself succeeded
+    — synthesis can succeed while playback fails, e.g. no output device
+    on a headless box)."""
+    result = synthesize(text, config=config)
+    if "error" in result:
+        return result
+
+    if out_path:
+        try:
+            from pathlib import Path
+            Path(out_path).write_bytes(result["audio"])
+            result["path"] = str(out_path)
+        except OSError as e:
+            result["write_error"] = f"couldn't write '{out_path}': {e}"
+
+    if play:
+        from . import audio_io
+        play_result = audio_io.play(result["audio"], mime=result.get("mime"))
+        result["played"] = "ok" in play_result
+        if "error" in play_result:
+            result["play_error"] = play_result["error"]
+
+    return result

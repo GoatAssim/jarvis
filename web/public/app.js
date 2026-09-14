@@ -3283,6 +3283,10 @@
       state.askPendingBubble = null;
       state.askReplyLines = [];
       state.askTraceBubble = null;
+      // A mic-originated turn that finishes on a conversation we've since
+      // navigated away from has nothing to speak back to — drop the flag
+      // rather than leaving it set for whatever bubble finalizes next.
+      state.voiceTurnPending = false;
       return;
     }
     const bubble = state.askPendingBubble;
@@ -3312,6 +3316,20 @@
     state.askPendingBubble = null;
     state.askReplyLines = [];
     state.askTraceBubble = null;
+    // Mirrors cli.py's `jarvis listen` (record -> transcribe -> ask ->
+    // speak) — a mic-originated turn speaks the reply back automatically
+    // once its bubble finalizes, using the same "Speak" button/state
+    // machine a manual click would (so it correctly shows "Stop" and can
+    // be interrupted like any other playback), rather than a separate
+    // one-off audio path.
+    if (state.voiceTurnPending) {
+      state.voiceTurnPending = false;
+      if (bubble) {
+        const raw = bubble.dataset.raw || "";
+        const speakBtn = qs('.ask-msg__act[title="Read this reply aloud"]', bubble);
+        if (speakBtn && raw.trim()) speakText(raw, speakBtn);
+      }
+    }
     askThreadScrollToEnd();
   }
 
