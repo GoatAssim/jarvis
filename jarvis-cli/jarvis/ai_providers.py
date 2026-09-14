@@ -46,6 +46,39 @@ MAX_TOOL_ROUNDS = 5  # follow-up requests allowed after a tool call, per ask —
 # it doesn't add tokens linearly, it adds them roughly quadratically (round N resends rounds
 # 1..N-1 too). 5 still covers a two-step "search then fetch then answer" with room to spare.
 
+GLOBAL_MAX_TOOL_ROUNDS = MAX_TOOL_ROUNDS + 1  # 6: hard cap across an ENTIRE ask(), spanning
+# every provider/key failover attempt — not just one attempt's MAX_TOOL_ROUNDS. Without this,
+# a key that 429s after burning its 5 rounds hands the (now much bigger) transcript to the next
+# key, which gets its own fresh 5 rounds — the loop counter resets but the tool-call history it's
+# resending every round does not. See jarvis-token-optimization-handoff.md.
+
+
+class RoundBudget:
+    """Cross-attempt tool-round counter shared by every provider/key tried for one ask().
+
+    Each adapter still enforces its own per-attempt MAX_TOOL_ROUNDS (so a single
+    well-behaved attempt is untouched), but every actual tool-call round — regardless
+    of which key or provider is currently active — also draws down this shared pool.
+    Once it's empty, take() starts returning False and every adapter treats that
+    exactly like hitting its own local round cap: stop calling tools, answer with
+    whatever it has (or give up cleanly) instead of quietly starting a fresh 5-round
+    budget on the next failover.
+    """
+
+    def __init__(self, limit=GLOBAL_MAX_TOOL_ROUNDS):
+        self.limit = limit
+        self.used = 0
+
+    def remaining(self):
+        return max(0, self.limit - self.used)
+
+    def take(self):
+        if self.used >= self.limit:
+            return False
+        self.used += 1
+        return True
+
+
 
 # ---------------------------------------------------------------------------
 # Logging context — the "Logs" feature. ai_client.py sets this once per
@@ -492,7 +525,7 @@ def _anthropic_turns_to_generic(system_text, working_turns):
 # carrying the matching tool_call_id.
 # ---------------------------------------------------------------------------
 
-def call_openai_compatible(provider, messages, timeout, tools=None, tool_executor=None):
+def call_openai_compatible(provider, messages, timeout, tools=None, tool_executor=None, round_budget=None):
     base_url = provider.get("base_url") or ""
     api_key = provider.get("api_key") or ""
     model = provider.get("model") or ""
@@ -502,6 +535,8 @@ def call_openai_compatible(provider, messages, timeout, tools=None, tool_executo
     headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
     working_messages = list(messages)
     ran_tools = False
+    if round_budget is None:
+        round_budget = RoundBudget()
 
     def _tools_payload():
         # Phase 9 of the token-optimization plan (see new_plan.md):
@@ -524,7 +559,7 @@ def call_openai_compatible(provider, messages, timeout, tools=None, tool_executo
             "messages": working_messages,
             "max_tokens": provider.get("max_tokens", 700),
         }
-        if tools_payload and round_num < MAX_TOOL_ROUNDS:
+        if tools_payload and round_num < MAX_TOOL_ROUNDS and round_budget.remaining() > 0:
             # On the forced-final round any tool_calls the model returns get
             # ignored anyway (see the round_num < MAX_TOOL_ROUNDS gate below),
             # so advertising tools there just burns input tokens for nothing.
@@ -563,7 +598,7 @@ def call_openai_compatible(provider, messages, timeout, tools=None, tool_executo
         message = choice.get("message") or {}
         tool_calls = message.get("tool_calls")
 
-        if tool_calls and tool_executor and round_num < MAX_TOOL_ROUNDS:
+        if tool_calls and tool_executor and round_num < MAX_TOOL_ROUNDS and round_budget.take():
             ran_tools = True
             working_messages.append(message)
             for call in tool_calls:
@@ -592,7 +627,7 @@ def call_openai_compatible(provider, messages, timeout, tools=None, tool_executo
 
         allowed = {t.get("name") for t in (tools or []) if t.get("name")}
         text_calls = _extract_text_tool_calls(text, allowed)
-        if text_calls and tool_executor and round_num < MAX_TOOL_ROUNDS:
+        if text_calls and tool_executor and round_num < MAX_TOOL_ROUNDS and round_budget.take():
             ran_tools = True
             result_bits = []
             for name, args in text_calls:
@@ -625,7 +660,7 @@ def call_openai_compatible(provider, messages, timeout, tools=None, tool_executo
 # a matching tool_result block (tool_use_id).
 # ---------------------------------------------------------------------------
 
-def call_anthropic(provider, messages, timeout, tools=None, tool_executor=None):
+def call_anthropic(provider, messages, timeout, tools=None, tool_executor=None, round_budget=None):
     base_url = provider.get("base_url") or "https://api.anthropic.com/v1/messages"
     api_key = provider.get("api_key") or ""
     model = provider.get("model") or ""
@@ -640,6 +675,8 @@ def call_anthropic(provider, messages, timeout, tools=None, tool_executor=None):
     }
     working_turns = list(turns)
     ran_tools = False
+    if round_budget is None:
+        round_budget = RoundBudget()
 
     def _tools_payload():
         # Phase 9 (see new_plan.md): rebuilt every round so a Phase 5
@@ -665,7 +702,7 @@ def call_anthropic(provider, messages, timeout, tools=None, tool_executor=None):
         }
         if system_text:
             payload["system"] = system_text
-        if tools_payload and round_num < MAX_TOOL_ROUNDS:
+        if tools_payload and round_num < MAX_TOOL_ROUNDS and round_budget.remaining() > 0:
             payload["tools"] = tools_payload
 
         resp, net_err = _post_json(base_url, headers, payload, timeout)
@@ -687,7 +724,7 @@ def call_anthropic(provider, messages, timeout, tools=None, tool_executor=None):
         blocks = data.get("content") or []
         tool_use_blocks = [b for b in blocks if isinstance(b, dict) and b.get("type") == "tool_use"]
 
-        if tool_use_blocks and tool_executor and round_num < MAX_TOOL_ROUNDS:
+        if tool_use_blocks and tool_executor and round_num < MAX_TOOL_ROUNDS and round_budget.take():
             ran_tools = True
             working_turns.append({"role": "assistant", "content": blocks})
             result_blocks = []
@@ -838,7 +875,7 @@ def _delete_gemini_cache(cache_name, headers, timeout):
         pass
 
 
-def call_gemini(provider, messages, timeout, tools=None, tool_executor=None):
+def call_gemini(provider, messages, timeout, tools=None, tool_executor=None, round_budget=None):
     api_key = provider.get("api_key") or ""
     model = provider.get("model") or ""
     if not api_key:
@@ -868,6 +905,8 @@ def call_gemini(provider, messages, timeout, tools=None, tool_executor=None):
     working_contents = [_to_gemini_content(t) for t in turns]
     headers = {"x-goog-api-key": api_key, "Content-Type": "application/json"}
     ran_tools = False
+    if round_budget is None:
+        round_budget = RoundBudget()
 
     def _tools_payload():
         # Phase 9 (see new_plan.md): rebuilt every round so a Phase 5
@@ -924,7 +963,7 @@ def call_gemini(provider, messages, timeout, tools=None, tool_executor=None):
             else:
                 if system_text:
                     payload["systemInstruction"] = {"parts": [{"text": system_text}]}
-                if tools_payload and round_num < MAX_TOOL_ROUNDS:
+                if tools_payload and round_num < MAX_TOOL_ROUNDS and round_budget.remaining() > 0:
                     payload["tools"] = tools_payload
 
             resp, net_err = _post_json(url, headers, payload, timeout)
@@ -956,7 +995,7 @@ def call_gemini(provider, messages, timeout, tools=None, tool_executor=None):
             parts = (candidate.get("content") or {}).get("parts") or []
             call_parts = [p for p in parts if isinstance(p, dict) and "functionCall" in p]
 
-            if call_parts and tool_executor and round_num < MAX_TOOL_ROUNDS:
+            if call_parts and tool_executor and round_num < MAX_TOOL_ROUNDS and round_budget.take():
                 ran_tools = True
                 working_contents.append({"role": "model", "parts": parts})
                 response_parts = []
@@ -996,7 +1035,7 @@ def call_gemini(provider, messages, timeout, tools=None, tool_executor=None):
 # the first place to check against their current docs.
 # ---------------------------------------------------------------------------
 
-def call_cohere(provider, messages, timeout, tools=None, tool_executor=None):
+def call_cohere(provider, messages, timeout, tools=None, tool_executor=None, round_budget=None):
     base_url = provider.get("base_url") or "https://api.cohere.com/v2/chat"
     api_key = provider.get("api_key") or ""
     model = provider.get("model") or ""
@@ -1006,6 +1045,8 @@ def call_cohere(provider, messages, timeout, tools=None, tool_executor=None):
     headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
     working_messages = list(messages)
     ran_tools = False
+    if round_budget is None:
+        round_budget = RoundBudget()
 
     def _tools_payload():
         # Phase 9 (see new_plan.md): rebuilt every round so a Phase 5
@@ -1026,7 +1067,7 @@ def call_cohere(provider, messages, timeout, tools=None, tool_executor=None):
             "messages": working_messages,
             "max_tokens": provider.get("max_tokens", 700),
         }
-        if tools_payload and round_num < MAX_TOOL_ROUNDS:
+        if tools_payload and round_num < MAX_TOOL_ROUNDS and round_budget.remaining() > 0:
             payload["tools"] = tools_payload
 
         resp, net_err = _post_json(base_url, headers, payload, timeout)
@@ -1048,7 +1089,7 @@ def call_cohere(provider, messages, timeout, tools=None, tool_executor=None):
         message = data.get("message") or {}
         tool_calls = message.get("tool_calls")
 
-        if tool_calls and tool_executor and round_num < MAX_TOOL_ROUNDS:
+        if tool_calls and tool_executor and round_num < MAX_TOOL_ROUNDS and round_budget.take():
             ran_tools = True
             working_messages.append(message)
             for call in tool_calls:
@@ -1088,13 +1129,15 @@ def call_cohere(provider, messages, timeout, tools=None, tool_executor=None):
 # model's ollama.com library page.
 # ---------------------------------------------------------------------------
 
-def call_ollama(provider, messages, timeout, tools=None, tool_executor=None):
+def call_ollama(provider, messages, timeout, tools=None, tool_executor=None, round_budget=None):
     base_url = provider.get("base_url") or "http://localhost:11434/api/chat"
     model = provider.get("model") or ""
 
     headers = {"Content-Type": "application/json"}
     working_messages = list(messages)
     ran_tools = False
+    if round_budget is None:
+        round_budget = RoundBudget()
 
     def _tools_payload():
         # Phase 9 (see new_plan.md): rebuilt every round so a Phase 5
@@ -1111,7 +1154,7 @@ def call_ollama(provider, messages, timeout, tools=None, tool_executor=None):
     for round_num in range(MAX_TOOL_ROUNDS + 1):
         tools_payload = _tools_payload()
         payload = {"model": model, "messages": working_messages, "stream": False}
-        if tools_payload and round_num < MAX_TOOL_ROUNDS:
+        if tools_payload and round_num < MAX_TOOL_ROUNDS and round_budget.remaining() > 0:
             payload["tools"] = tools_payload
 
         resp, net_err = _post_json(base_url, headers, payload, timeout)
@@ -1133,7 +1176,7 @@ def call_ollama(provider, messages, timeout, tools=None, tool_executor=None):
         message = data.get("message") or {}
         tool_calls = message.get("tool_calls")
 
-        if tool_calls and tool_executor and round_num < MAX_TOOL_ROUNDS:
+        if tool_calls and tool_executor and round_num < MAX_TOOL_ROUNDS and round_budget.take():
             ran_tools = True
             working_messages.append(message)
             for call in tool_calls:

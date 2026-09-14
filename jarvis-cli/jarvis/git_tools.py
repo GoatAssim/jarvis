@@ -145,7 +145,81 @@ def tool_git_run(args):
     }
 
 
+def tool_git_commit_all(args):
+    """Stage everything and commit in one round-trip.
+
+    Exists because the model was doing status -> diff -> add -> commit as
+    four separate tool rounds (each resending the whole growing context),
+    just to end up running `git add -A && git commit -m ...` anyway. This
+    does the add+commit server-side in one Python call so it only costs
+    one round no matter how many files changed.
+    """
+    args = args or {}
+    if not _git_bin():
+        return {"error": "git isn't installed or not on PATH."}
+
+    message = (args.get("message") or "").strip()
+    if not message:
+        return {"error": "message is required."}
+
+    cwd, err = _cwd(args.get("cwd"))
+    if err:
+        return err
+
+    probe = subprocess.run(
+        [_git_bin(), "rev-parse", "--show-toplevel"],
+        cwd=cwd, capture_output=True, timeout=10, creationflags=CREATE_NO_WINDOW,
+    )
+    if probe.returncode != 0:
+        return {"error": f"Not a git repo: {cwd}"}
+
+    add = subprocess.run(
+        [_git_bin(), "add", "-A"],
+        cwd=cwd, capture_output=True, timeout=60, creationflags=CREATE_NO_WINDOW,
+    )
+    if add.returncode != 0:
+        return {
+            "ok": False,
+            "step": "add",
+            "stderr": (add.stderr or b"").decode("utf-8", errors="replace").strip()[:1500],
+        }
+
+    commit = subprocess.run(
+        [_git_bin(), "commit", "-m", message],
+        cwd=cwd, capture_output=True, timeout=60, creationflags=CREATE_NO_WINDOW,
+    )
+    stdout = (commit.stdout or b"").decode("utf-8", errors="replace").strip()
+    stderr = (commit.stderr or b"").decode("utf-8", errors="replace").strip()
+    return {
+        "ok": commit.returncode == 0,
+        "exit_code": commit.returncode,
+        "cwd": cwd,
+        # capped short — this is a confirmation, not a diff review
+        "stdout": stdout[:800],
+        "stderr": stderr[:800],
+    }
+
+
 GIT_TOOL_SCHEMAS = [
+    {
+        "name": "git_commit_all",
+        "description": (
+            "Stage ALL changes and commit them in a single call (git add -A && git commit -m). "
+            "Use this instead of separate git_run status/diff/add/commit calls whenever the user "
+            "just wants everything committed and hasn't asked you to review the diff first — it's "
+            "one tool round instead of four, which matters a lot for token/rate-limit budget. "
+            "Only fall back to git_run's step-by-step commands if the user wants to review or "
+            "stage selectively."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "message": {"type": "string", "description": "Commit message."},
+                "cwd": {"type": "string", "description": "Repo directory. Default: current working directory."},
+            },
+            "required": ["message"],
+        },
+    },
     {
         "name": "git_run",
         "description": (
@@ -173,4 +247,5 @@ GIT_TOOL_SCHEMAS = [
 
 GIT_TOOLS = {
     "git_run": tool_git_run,
+    "git_commit_all": tool_git_commit_all,
 }

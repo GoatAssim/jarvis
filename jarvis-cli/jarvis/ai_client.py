@@ -664,7 +664,12 @@ def _tools_blurb(compact, ultra, has_playnite, has_spotify):
         "name, call search_commands first — pass a keyword, or no query to list every "
         "saved command. Do this instead of guessing a name and hoping it resolves. "
         "RADIOS: wifi_set/bluetooth_set action on|off. Off requires confirm=true (may need Admin). "
-        "GIT: git_run with an allowlisted command (status, log, diff, add, commit, pull, push, …). "
+        "GIT: 'commit everything' / 'stage and commit' -> git_commit_all in ONE call (it stages "
+        "+ commits together). Do not check status or diff first unless the user asked you to "
+        "review changes or write a message based on their content — each extra git_run round "
+        "resends the whole growing conversation, so status->diff->add->commit as four separate "
+        "calls is expensive and usually unnecessary. For anything else, git_run with an "
+        "allowlisted command (status, log, diff, add, commit, pull, push, …). "
         "reset/clean/force-push/clone need confirm=true. Not a shell. "
         "SCREENSHOT: take_screenshot saves the desktop and shows it in the UI. "
         "You only get a tiny ok/path — never describe pixels or ask for the image. Confirm in one short line. "
@@ -2009,6 +2014,11 @@ def ask(user_text, commands=None, on_attempt=None, on_tool_call=None, on_tool_re
     ) if tools_enabled else None
 
     attempts = []
+    # Shared across every provider/key attempt below — see RoundBudget's docstring.
+    # Each adapter still gets its own local MAX_TOOL_ROUNDS, but a failover to the
+    # next key draws from this same pool instead of getting a fresh 5 rounds on top
+    # of whatever the failed key already burned.
+    round_budget = ai_providers.RoundBudget()
 
     for provider in providers:
         label = _provider_label(provider)
@@ -2089,7 +2099,8 @@ def ask(user_text, commands=None, on_attempt=None, on_tool_call=None, on_tool_re
             ai_providers.set_log_context(conv_id, key_label, on_tool_usage=on_tool_result)
             try:
                 result = adapter(resolved, messages, resolved["timeout"],
-                                 tools=tool_schemas, tool_executor=tool_executor)
+                                 tools=tool_schemas, tool_executor=tool_executor,
+                                 round_budget=round_budget)
             except Exception as e:  # one bad provider/key must never take down the whole ask
                 result = ai_providers.AIResult(False, error=f"unexpected error: {e}")
             finally:

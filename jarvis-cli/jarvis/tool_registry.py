@@ -118,6 +118,7 @@ TOOL_GROUPS = {
         "package_install",
         "package_uninstall",
         "git_run",
+        "git_commit_all",
     ],
     "playnite": [
         "playnite_list_game_actions",
@@ -234,6 +235,7 @@ TOOL_KEYWORDS = {
     "package_search": {"package": 6, "install": 4, "is there a package": 8},
     "package_install": {"install": 6, "install package": 10},
     "git_run": {"git": 10, "repository": 7, "repo": 6, "commit": 7, "branch": 6, "push": 5, "pull": 4, "diff": 5},
+    "git_commit_all": {"commit": 9, "stage and commit": 10, "commit everything": 10, "git": 6},
 
     "playnite_find_game": {"playnite": 8, "game": 5},
     "playnite_launch_game": {"launch": 6, "play game": 8, "start game": 8},
@@ -264,7 +266,9 @@ TOOL_PACK_INSTRUCTIONS = {
         "needed; downloads should be confirmed with the user first."
     ),
     "system_control": (
-        "Git: git_run only, destructive operations need confirmation. "
+        "Git: 'stage and commit'/'commit everything' -> git_commit_all in one call, not "
+        "status/diff/add/commit as separate git_run rounds. Otherwise git_run; destructive "
+        "operations need confirmation. "
         "Packages: search/info before install; confirm the exact manager and "
         "package name before installing or uninstalling anything."
     ),

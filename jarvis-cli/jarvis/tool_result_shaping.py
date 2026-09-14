@@ -134,10 +134,15 @@ TOOL_RESULT_SPECS = {
     },
     # Everything search: path/name/is_folder are what a reveal/open action
     # needs; size/modified-date are semi-necessary context that's rarely
-    # the deciding factor once there's a matching path.
+    # the deciding factor once there's a matching path. Dropped at medium
+    # too (not just low) — a 30-result default search_files call puts
+    # size_bytes+date_modified on every single result, which is most of
+    # what made a routine file search jump from ~1.2k to ~4.3k input
+    # tokens on the very next round (see 100% Capacity log from 2026-09-14).
     "search_files": {
         "list_item_drop": {
             "results": {
+                "medium": ["size_bytes", "date_modified"],
                 "low": ["size_bytes", "date_modified"],
             },
         },
