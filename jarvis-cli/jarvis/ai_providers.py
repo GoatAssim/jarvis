@@ -763,6 +763,81 @@ def _to_gemini_schema(schema):
     return out
 
 
+_GEMINI_CACHE_BASE = "https://generativelanguage.googleapis.com/v1beta"
+
+# Gemini's explicit context-caching API (cachedContents) has a real minimum
+# size the cached content must meet before the provider will accept it at
+# all — well documented as being in the low thousands of tokens. Jarvis's
+# own system prompt + tool schemas typically run ~900-1,600 tokens (see the
+# benchmark), comfortably under that floor. Attempting to cache content
+# this small doesn't just fail harmlessly — it costs a full extra network
+# round trip (create attempt, every single ask) for a guaranteed rejection,
+# which is pure added latency with zero token savings. Guard against that
+# with a cheap pre-check using the same ~4-chars/token heuristic
+# token_usage.py already uses elsewhere, rather than paying for a doomed
+# API call to find out. This threshold is deliberately conservative (below
+# the documented minimum for every model Jarvis currently targets) — if a
+# future provider/model lowers its minimum, this just means caching stays
+# off for content that might have technically qualified, never a
+# correctness problem.
+_GEMINI_CACHE_MIN_TOKENS = 4096
+
+
+def _create_gemini_cache(model, headers, system_text, tools_payload, timeout):
+    """Explicit context caching (Gemini's cachedContents API): stores the
+    system-instruction + tool-schema portion of the payload ONCE per ask,
+    so every round after the first references it by name instead of
+    re-sending (and re-billing) that identical content every round — see
+    the token audit's "no prompt caching" finding.
+
+    Best-effort, same philosophy as discovery_cache.py/route_stickiness.py:
+    a provider that rejects the cache (e.g. the model's minimum-cacheable-
+    token threshold not met — small system prompts are common and simply
+    won't qualify), a network error, or a malformed response all collapse
+    to returning None here, and the caller falls back to sending the
+    content inline every round exactly as before. Never raises, never the
+    reason an ask() fails.
+    """
+    if not system_text and not tools_payload:
+        return None
+    estimated = token_usage.estimate_tokens_for(system_text or "") + token_usage.estimate_tokens_for(tools_payload or {})
+    if estimated < _GEMINI_CACHE_MIN_TOKENS:
+        return None
+    body = {
+        "model": f"models/{model}",
+        # Only needs to outlive this single multi-round ask, not persist
+        # across separate `jarvis` invocations — short TTL keeps stray
+        # caches (e.g. from a crashed ask) from lingering expensively.
+        "ttl": "300s",
+    }
+    if system_text:
+        body["systemInstruction"] = {"parts": [{"text": system_text}]}
+    if tools_payload:
+        body["tools"] = tools_payload
+    resp, net_err = _post_json(f"{_GEMINI_CACHE_BASE}/cachedContents", headers, body, timeout)
+    if net_err:
+        return None
+    if not (200 <= resp.status_code < 300):
+        return None
+    data, parse_err = _parse_json(resp)
+    if parse_err or not isinstance(data, dict):
+        return None
+    return data.get("name")
+
+
+def _delete_gemini_cache(cache_name, headers, timeout):
+    """Best-effort cleanup once the ask is done. Not load-bearing — the
+    short ttl in _create_gemini_cache means an undeleted cache just
+    expires on its own — but freeing it immediately avoids paying for the
+    full ttl on every single ask."""
+    if not cache_name:
+        return
+    try:
+        requests.delete(f"{_GEMINI_CACHE_BASE}/{cache_name}", headers=headers, timeout=timeout)
+    except requests.exceptions.RequestException:
+        pass
+
+
 def call_gemini(provider, messages, timeout, tools=None, tool_executor=None):
     api_key = provider.get("api_key") or ""
     model = provider.get("model") or ""
@@ -814,69 +889,100 @@ def call_gemini(provider, messages, timeout, tools=None, tool_executor=None):
             generic.insert(0, {"role": "system", "content": system_text})
         return generic
 
-    for round_num in range(MAX_TOOL_ROUNDS + 1):
-        tools_payload = _tools_payload()
-        payload = {
-            "contents": working_contents,
-            "generationConfig": {"maxOutputTokens": provider.get("max_tokens", 700)},
-        }
-        if system_text:
-            payload["systemInstruction"] = {"parts": [{"text": system_text}]}
-        if tools_payload and round_num < MAX_TOOL_ROUNDS:
-            payload["tools"] = tools_payload
+    # Token audit fix: try to cache the system prompt + tool schemas ONCE,
+    # up front, so every round below can reference them by name instead of
+    # re-sending (and re-billing) identical content every single round.
+    # `cache_name` stays None (falls back to inline-every-round, exactly
+    # the old behavior) if the provider rejects the cache — e.g. the
+    # content is under the model's minimum cacheable-token threshold,
+    # which small system prompts commonly are.
+    initial_tools_payload = _tools_payload()
+    cache_name = _create_gemini_cache(model, headers, system_text, initial_tools_payload, timeout)
+    cached_tool_count = len(tools) if (cache_name and tools) else 0
 
-        resp, net_err = _post_json(url, headers, payload, timeout)
-        if net_err:
-            return AIResult(False, error=net_err, tool_history=_history())
-        reason = _status_reason(resp)
-        if reason:
-            return AIResult(False, error=reason, tool_history=_history())
+    try:
+        for round_num in range(MAX_TOOL_ROUNDS + 1):
+            tools_payload = _tools_payload()
 
-        data, parse_err = _parse_json(resp)
-        if parse_err:
-            return AIResult(False, error=parse_err, tool_history=_history())
+            # `tools` can grow mid-ask (ai_client's discover_sink appends to
+            # the same list object once a search_tools/search_commands hit
+            # lands), which would make an already-created cache stale — the
+            # model would never be offered the newly-discovered tool. If
+            # that's happened, drop the stale cache and fall back to
+            # sending the (now-larger) schema inline for the rest of the ask
+            # rather than risk the model missing the discovered tool.
+            if cache_name and tools is not None and len(tools) != cached_tool_count:
+                _delete_gemini_cache(cache_name, headers, timeout)
+                cache_name = None
 
-        _record_usage("gemini", data, round_num)
+            payload = {
+                "contents": working_contents,
+                "generationConfig": {"maxOutputTokens": provider.get("max_tokens", 700)},
+            }
+            if cache_name:
+                payload["cachedContent"] = cache_name
+            else:
+                if system_text:
+                    payload["systemInstruction"] = {"parts": [{"text": system_text}]}
+                if tools_payload and round_num < MAX_TOOL_ROUNDS:
+                    payload["tools"] = tools_payload
 
-        block_reason = (data.get("promptFeedback") or {}).get("blockReason")
-        if block_reason:
-            return AIResult(False, error=f"blocked by provider safety filter ({block_reason})", tool_history=_history())
+            resp, net_err = _post_json(url, headers, payload, timeout)
+            if net_err:
+                return AIResult(False, error=net_err, tool_history=_history())
+            reason = _status_reason(resp)
+            if reason:
+                return AIResult(False, error=reason, tool_history=_history())
 
-        candidates = data.get("candidates") or []
-        if not candidates:
-            return AIResult(False, error="empty response (no candidates)", tool_history=_history())
-        candidate = candidates[0]
+            data, parse_err = _parse_json(resp)
+            if parse_err:
+                return AIResult(False, error=parse_err, tool_history=_history())
 
-        finish_reason = candidate.get("finishReason")
-        if finish_reason in ("SAFETY", "PROHIBITED_CONTENT", "BLOCKLIST", "SPII"):
-            return AIResult(False, error=f"blocked by provider safety filter ({finish_reason})", tool_history=_history())
+            _record_usage("gemini", data, round_num)
 
-        parts = (candidate.get("content") or {}).get("parts") or []
-        call_parts = [p for p in parts if isinstance(p, dict) and "functionCall" in p]
+            block_reason = (data.get("promptFeedback") or {}).get("blockReason")
+            if block_reason:
+                return AIResult(False, error=f"blocked by provider safety filter ({block_reason})", tool_history=_history())
 
-        if call_parts and tool_executor and round_num < MAX_TOOL_ROUNDS:
-            ran_tools = True
-            working_contents.append({"role": "model", "parts": parts})
-            response_parts = []
-            for p in call_parts:
-                fc = p["functionCall"]
-                raw_result = _call_tool_safely(tool_executor, fc.get("name", ""), fc.get("args") or {})
-                response_obj = raw_result if isinstance(raw_result, dict) else {"result": raw_result}
-                fr = {"name": fc.get("name", ""), "response": response_obj}
-                if fc.get("id"):
-                    fr["id"] = fc["id"]
-                response_parts.append({"functionResponse": fr})
-            working_contents.append({"role": "user", "parts": response_parts})
-            continue
+            candidates = data.get("candidates") or []
+            if not candidates:
+                return AIResult(False, error="empty response (no candidates)", tool_history=_history())
+            candidate = candidates[0]
 
-        text = "".join(p.get("text", "") for p in parts if isinstance(p, dict)).strip()
-        if not text:
-            if call_parts:
-                return AIResult(False, error=_give_up_error(), tool_history=_history())
-            return AIResult(False, error="empty response content", tool_history=_history())
-        return AIResult(True, text=text, usage=get_usage_summary())
+            finish_reason = candidate.get("finishReason")
+            if finish_reason in ("SAFETY", "PROHIBITED_CONTENT", "BLOCKLIST", "SPII"):
+                return AIResult(False, error=f"blocked by provider safety filter ({finish_reason})", tool_history=_history())
 
-    return AIResult(False, error=_give_up_error(), tool_history=_history())
+            parts = (candidate.get("content") or {}).get("parts") or []
+            call_parts = [p for p in parts if isinstance(p, dict) and "functionCall" in p]
+
+            if call_parts and tool_executor and round_num < MAX_TOOL_ROUNDS:
+                ran_tools = True
+                working_contents.append({"role": "model", "parts": parts})
+                response_parts = []
+                for p in call_parts:
+                    fc = p["functionCall"]
+                    raw_result = _call_tool_safely(tool_executor, fc.get("name", ""), fc.get("args") or {})
+                    response_obj = raw_result if isinstance(raw_result, dict) else {"result": raw_result}
+                    fr = {"name": fc.get("name", ""), "response": response_obj}
+                    if fc.get("id"):
+                        fr["id"] = fc["id"]
+                    response_parts.append({"functionResponse": fr})
+                working_contents.append({"role": "user", "parts": response_parts})
+                continue
+
+            text = "".join(p.get("text", "") for p in parts if isinstance(p, dict)).strip()
+            if not text:
+                if call_parts:
+                    return AIResult(False, error=_give_up_error(), tool_history=_history())
+                return AIResult(False, error="empty response content", tool_history=_history())
+            return AIResult(True, text=text, usage=get_usage_summary())
+
+        return AIResult(False, error=_give_up_error(), tool_history=_history())
+    finally:
+        # Always try to free the cache when this ask is done, win or lose —
+        # see _delete_gemini_cache's docstring for why this isn't load-bearing.
+        _delete_gemini_cache(cache_name, headers, timeout)
 
 
 # ---------------------------------------------------------------------------
