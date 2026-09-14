@@ -53,6 +53,15 @@ validation errors, and name collisions with an existing tool (built-in or
 another action file) are logged and that file is skipped — they NEVER
 raise out of discover_actions() and never abort the scan of the remaining
 files, so one broken action file can't take the rest of Jarvis down.
+
+A handler registered here can optionally accept a second positional
+argument, `fn(args, context)` instead of `fn(args)`, to get mid-call
+progress emission, round-budget awareness, and conv_id/ui — see
+tools.ToolContext and tools._accepts_context. discover_actions() itself
+needs no change for this: it only ever stores `tools[name] = fn`, and
+tools.execute_tool() introspects the handler's own signature at call
+time, whichever registry it came from. See actions/_template.py for the
+per-field contract.
 """
 
 import importlib.util

@@ -27,17 +27,35 @@ after adding a file; a typo here fails quiet, not loud.
 # ---------------------------------------------------------------------------
 # 1. THE HANDLER(S)
 #
-# Every handler takes exactly one argument — the model's tool-call
-# arguments as a plain dict (never None; discovery guarantees TOOLS/
-# TOOL_SCHEMAS names line up, but a handler should still treat every key
-# as optional/untrusted, same as every existing tool file does) — and
-# returns a JSON-serializable dict. NEVER raise: catch your own
-# exceptions and return {"error": "..."} instead, exactly like every
-# built-in tool (see tools.py's own module docstring). An uncaught
-# exception is still caught one layer up by tools.execute_tool's try/except
-# and turned into {"error": "<name> failed: <e>"}, but returning your own
-# clearer error message is almost always more useful to the model than
-# a bare exception repr.
+# Every handler takes the model's tool-call arguments as a plain dict
+# (never None; discovery guarantees TOOLS/TOOL_SCHEMAS names line up, but
+# a handler should still treat every key as optional/untrusted, same as
+# every existing tool file does) — and returns a JSON-serializable dict.
+# NEVER raise: catch your own exceptions and return {"error": "..."}
+# instead, exactly like every built-in tool (see tools.py's own module
+# docstring). An uncaught exception is still caught one layer up by
+# tools.execute_tool's try/except and turned into {"error": "<name>
+# failed: <e>"}, but returning your own clearer error message is almost
+# always more useful to the model than a bare exception repr.
+#
+# Optional second argument: `fn(args, context)` instead of `fn(args)`.
+# tools.execute_tool() introspects your handler's own signature (via
+# tools._accepts_context) and only passes a second arg if you declared
+# one — a plain `fn(args)` handler is completely unaffected, so add the
+# second parameter only if you actually need it. `context` is a
+# tools.ToolContext with:
+#   - context.round_budget_remaining() — zero-arg callable, current
+#     remaining shared tool-call rounds for this ask(); call it fresh
+#     each time, don't cache the result, since it changes as the turn
+#     progresses.
+#   - context.emit_event(job_id, seq, phase, status, **fields) — writes
+#     one JARVIS_MEDIA progress line (see dev_agent_events.py) for a
+#     handler that runs long enough to want live sub-step visibility
+#     instead of a single return value at the end. Most tools don't need
+#     this.
+#   - context.conv_id — the active conversation id, or None.
+#   - context.ui — "web" or "cli" (mirrors JARVIS_UI), if a handler wants
+#     to skip emitting UI-only events cheaply.
 # ---------------------------------------------------------------------------
 
 
