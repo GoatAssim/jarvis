@@ -55,6 +55,15 @@ call :find_jarvis
 if errorlevel 1 exit /b 1
 echo [admin] Copying %CLI_NAME%.exe to Program Files...
 if not exist "%INSTALL_DIR%" mkdir "%INSTALL_DIR%"
+if /i "!JARVIS_EXE!"=="%INSTALLED_EXE%" (
+    echo ERROR: Detected source and destination are the same file:
+    echo   !JARVIS_EXE!
+    echo Refusing to delete-then-copy from itself. This means find_jarvis
+    echo couldn't locate a real freshly-built exe outside %INSTALL_DIR% --
+    echo re-run the build without deleting the old install first.
+    pause
+    exit /b 1
+)
 call :cleanup_stale_exe
 del /f /q "%INSTALLED_EXE%" 2>nul
 copy /y "!JARVIS_EXE!" "%INSTALLED_EXE%"
@@ -91,10 +100,10 @@ rem that already matches -- it does NOT diff source file contents/timestamps.
 rem Since this project's version string doesn't bump on every code change,
 rem without this flag every run after the first would install NOTHING, and
 rem you'd keep running a stale exe while every step above still reports
-"success". --no-deps keeps this fast by skipping the (unchanged) dependency
+rem "success". --no-deps keeps this fast by skipping the (unchanged) dependency
 rem tree -- if pyproject.toml's dependencies themselves changed, run a plain
 rem "%PYEXE%" -m pip install . (no flags) once to pick those up too.
-"%PYEXE%" -m pip install . --force-reinstall --no-deps
+call "%PYEXE%" -m pip install . --force-reinstall --no-deps
 if errorlevel 1 goto err_pip
 echo.
 
@@ -166,35 +175,44 @@ if defined VENV_SCRIPTS if exist "%VENV_SCRIPTS%\%CLI_NAME%.exe" set "JARVIS_EXE
 
 rem No venv (or venv copy missing) -- ask the SAME python we just ran
 rem `pip install .` with (whatever %PYEXE% resolved to, e.g. plain
-rem "python" on PATH) where IT puts console-script exes. This MUST use
-rem the identical interpreter the install just used, or you silently
-rem build into one Python's Scripts folder and then look in another --
-rem which is exactly how a stale exe from an unrelated Python install
-rem (e.g. a different branch/venv on this same machine) keeps getting
-rem picked up even though the real install succeeded moments earlier.
+rem "python" on PATH) where IT puts console-script exes. This logic lives
+rem in build_tools\find_cli_exe.py (base scripts dir + the correct
+rem per-user "nt_user" scheme dir, newest mtime wins if both exist) --
+rem see that file's docstring for why it's not an inline one-liner here:
+rem short version, an inline `python -c "..."` with its own parentheses
+rem inside a `for /f` backtick command substitution is a real cmd.exe
+rem parser landmine, and a plain hardcoded-location fallback is exactly
+rem how an OLD exe keeps getting picked over the real freshly-built one.
 set "PY_SCRIPTS="
-for /f "usebackq delims=" %%S in (`"%PYEXE%" -c "import sysconfig; print(sysconfig.get_path('scripts'))" 2^>nul`) do set "PY_SCRIPTS=%%S"
-if defined PY_SCRIPTS if exist "%PY_SCRIPTS%\%CLI_NAME%.exe" set "JARVIS_EXE=%PY_SCRIPTS%\%CLI_NAME%.exe" & goto find_jarvis_ok
+set "FIND_EXE_OUTPUT=%TEMP%\jarvis_find_exe_%RANDOM%.txt"
+"%PYEXE%" "%JARVIS_CLI%\build_tools\find_cli_exe.py" "%CLI_NAME%" > "%FIND_EXE_OUTPUT%" 2>nul
+if not errorlevel 1 set /p "PY_SCRIPTS="<"%FIND_EXE_OUTPUT%"
+del /f /q "%FIND_EXE_OUTPUT%" 2>nul
+if defined PY_SCRIPTS if exist "%PY_SCRIPTS%" set "JARVIS_EXE=%PY_SCRIPTS%" & goto find_jarvis_ok
 
-rem Last-resort fallback only -- hardcoded guesses kept as a safety net
-rem for setups where sysconfig somehow didn't resolve. Don't rely on this
-rem branch; if you land here, PYEXE and this list have drifted apart.
-for %%P in (
-    "%LOCALAPPDATA%\Python\pythoncore-3.14-64\Scripts\%CLI_NAME%.exe"
-    "%LOCALAPPDATA%\Python\Python314\Scripts\%CLI_NAME%.exe"
-    "%APPDATA%\Python\Python314\Scripts\%CLI_NAME%.exe"
-    "%USERPROFILE%\AppData\Local\Programs\Python\Python314\Scripts\%CLI_NAME%.exe"
-    "%USERPROFILE%\AppData\Local\Programs\Python\Python313\Scripts\%CLI_NAME%.exe"
-) do if exist "%%~P" set "JARVIS_EXE=%%~P" & goto find_jarvis_ok
+rem Last-resort fallback: whatever's on PATH. No more hardcoded
+rem version-number guesses here -- those are exactly what kept matching
+rem a stale exe instead of the real (possibly user-scoped) install.
+rem
+rem SAFETY: %INSTALL_DIR% (Program Files\...\bin) is itself on PATH once
+rem installed once, since that's the point of installing there. That means
+rem `where` can match the OLD exe already sitting at the copy DESTINATION,
+rem which is about to be deleted and re-copied FROM -- i.e. we'd delete the
+rem only copy of the file and then try to copy from nothing. Any PATH match
+rem inside %INSTALL_DIR% is therefore never a valid "freshly built" source
+rem and must be skipped.
 where %CLI_NAME%.exe >nul 2>&1
 if errorlevel 1 goto find_jarvis_fail
 for /f "usebackq delims=" %%P in (`where %CLI_NAME%.exe 2^>nul`) do (
-    set "JARVIS_EXE=%%P"
-    goto find_jarvis_ok
+    if /i not "%%~dpP"=="%INSTALL_DIR%\" (
+        set "JARVIS_EXE=%%P"
+        goto find_jarvis_ok
+    )
 )
 :find_jarvis_fail
 echo ERROR: %CLI_NAME%.exe not found.
-echo Tried venv (%VENV_SCRIPTS%), sysconfig scripts dir (%PY_SCRIPTS%), and the hardcoded/PATH fallbacks.
+echo Tried venv (%VENV_SCRIPTS%), the base + user Python scripts dirs, and PATH.
+echo (Skipped any PATH match inside %INSTALL_DIR% -- that's the old install target, not a new build.)
 echo Run pip install from jarvis-cli first, or check that %PYEXE% is the python you expect.
 exit /b 1
 :find_jarvis_ok
@@ -221,6 +239,12 @@ exit /b 0
 net session >nul 2>&1
 if errorlevel 1 goto install_needs_admin
 if not exist "%INSTALL_DIR%" mkdir "%INSTALL_DIR%"
+if /i "!JARVIS_EXE!"=="%INSTALLED_EXE%" (
+    echo WARNING: find_jarvis resolved to the existing Program Files copy
+    echo itself ^(!JARVIS_EXE!^) instead of a freshly built exe -- skipping
+    echo the copy rather than deleting the only remaining copy of it.
+    exit /b 0
+)
 call :cleanup_stale_exe
 del /f /q "%INSTALLED_EXE%" 2>nul
 copy /y "!JARVIS_EXE!" "%INSTALLED_EXE%"
