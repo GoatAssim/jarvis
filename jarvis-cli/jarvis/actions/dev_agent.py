@@ -23,8 +23,24 @@ import sys
 import uuid
 from pathlib import Path
 
-from .. import ai_client, ai_config
 from .. import dev_agent_errors, dev_agent_events, dev_agent_sandbox
+
+# NOTE: `ai_client`/`ai_config` are deliberately NOT imported here at
+# module level. dev_agent.py is loaded by tool_loader.discover_actions()
+# DURING tools.py's own module initialization (tools.py calls
+# discover_actions() partway through executing, before AUTO_TOOL_GROUPS/
+# AUTO_TOOL_KEYWORDS/etc. are defined at the bottom of that file). Since
+# ai_client -> tool_router -> tool_registry all import names FROM tools.py,
+# importing ai_client here at import time creates a circular import back
+# into a still-partially-initialized jarvis.tools -- which raises
+# ImportError, and discover_actions() logs that as "Rejected dev_agent.py"
+# and silently drops tool_dev_agent from the catalog entirely (no crash,
+# just a quiet rejection you only notice because the tool never shows up
+# anywhere -- CLI, debug menu, or otherwise).
+# ai_client/ai_config are only ever used inside function bodies below
+# (never at module scope), so importing them lazily, right where they're
+# needed, avoids the cycle completely: by the time a tool actually runs,
+# tools.py has long since finished initializing.
 
 CREATE_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 
@@ -145,6 +161,8 @@ def _ai_single_call(system_prompt, user_prompt, cfg=None):
     event, same as every other failure branch in the loop.
     """
     try:
+        from .. import ai_client, ai_config  # see module-level NOTE above
+
         cfg = cfg or ai_config.load_config()
         providers = ai_client._eligible_providers(cfg["providers"], cfg["defaults"])
         if not providers:

@@ -22,42 +22,6 @@ an error. A file with SOME of them but not all, or with a value of the
 wrong shape, is REJECTED — logged and skipped, never crashes the rest of
 discovery, but also never becomes callable. Check your terminal/log output
 after adding a file; a typo here fails quiet, not loud.
-
-SAFE IMPORTS AT MODULE LEVEL — READ THIS BEFORE YOU IMPORT ANYTHING
----------------------------------------------------------------------------
-Your file is imported by tool_loader.discover_actions(), which itself runs
-PARTWAY THROUGH jarvis/tools.py's own module initialization (after the
-manually-wired TOOLS dict is built, but before AUTO_TOOL_GROUPS,
-AUTO_TOOL_KEYWORDS, and friends are defined at the bottom of that file).
-That means jarvis.tools is only *partially* initialized while your file's
-top level is executing.
-
-Anything that imports back from jarvis.tools — directly, or transitively
-through another module — will raise ImportError at that moment, EVEN
-THOUGH the exact same import works fine everywhere else in the codebase.
-ai_client, tool_router, and tool_registry all import names FROM
-jarvis.tools, so importing any of them (or anything that imports them) at
-your file's module level creates exactly this cycle. This isn't
-hypothetical: it's the actual bug that silently dropped tool_dev_agent
-from dev_agent.py for a while — no crash, just a quiet
-"[tools] Rejected your_file.py: Failed to load: cannot import name
-'AUTO_TOOL_GROUPS' from partially initialized module 'jarvis.tools'
-(most likely due to a circular import)" in the discovery log, and the
-tool missing everywhere (CLI, debug menu, everywhere) with no other clue.
-
-The fix: if you need ai_client, ai_config, tool_router, tool_registry, or
-anything else that imports from jarvis.tools, import it LAZILY — inside
-the function that actually uses it, not at the top of the file:
-
-    def tool_my_thing(args):
-        from .. import ai_client, ai_config  # imported here, not at module level
-        ...
-
-By the time a handler actually runs, jarvis.tools has long since finished
-initializing, so the cycle never triggers. Imports of modules that don't
-touch jarvis.tools (subprocess, pathlib, re, your own dev_agent_*.py-style
-helper modules, ...) are completely unaffected — this only applies to the
-handful of modules that import back from tools.py.
 """
 
 # ---------------------------------------------------------------------------
@@ -227,31 +191,6 @@ TOOL_AI_REVIEW = set()          # e.g. for a tool fuzzy/risky enough to want
 #    truncate_fields, list_item_drop, list_item_truncate). Leave this
 #    empty and your tool's result is returned completely untouched at
 #    every verbosity, which is the correct default for anything small.
-#
-#    How this ties into capacity mode: every mode in ai_client.
-#    PROMPT_MODE_DEFS carries a tool_result_verbosity of "full", "medium",
-#    or "low", and shape_result() only ever applies your "medium"/"low"
-#    keys — "full" always passes your result through untouched, spec or
-#    no spec. As of this writing the four built-in modes map like this:
-#
-#        mode      | capacity label | tool_result_verbosity
-#        ----------+-----------------+-----------------------
-#        full      | 400% Capacity   | full    (your spec is a no-op)
-#        compact   | 100% Capacity   | medium  (the default mode — write
-#                   |                 |          your "medium" key for this)
-#        precise   | 150% Capacity   | full    (your spec is a no-op)
-#        ultra     | 50% Capacity    | low     (write your "low" key for
-#                   |                 |          the tightest trim)
-#
-#    Practically: "compact" is the default a person is in most of the
-#    time, so your "medium" entries are the ones actually doing work
-#    day-to-day; "low" only kicks in once someone's explicitly in "ultra".
-#    "full" and "precise" both intentionally skip shaping entirely — they
-#    exist for when someone wants the richest possible context, so
-#    trimming there would defeat the point. (This table describes the
-#    current registry, not a hardcoded rule — a custom mode appended to
-#    PROMPT_MODE_DEFS with a different tool_result_verbosity would follow
-#    the same "full"/"medium"/"low" mechanics, just under a new mode name.)
 # ---------------------------------------------------------------------------
 
 TOOL_RESULT_SPECS = {}
