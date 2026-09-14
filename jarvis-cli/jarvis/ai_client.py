@@ -1331,12 +1331,22 @@ def _make_tool_executor(on_tool_call, schemas=None, on_confirm_request=None,
         )
         result = system_tools.execute_tool(name, arguments, context=context)
         verbosity = verbosity_ref[0] if verbosity_ref else "full"
-        result = tool_result_shaping.shape_result(name, result, verbosity)
-        cache[key] = result
+        # §3.6 plan §7's flagged checkpoint, resolved: run_entry (which
+        # feeds _extras_from_runs -> conversations.append_exchange's
+        # persisted `extras`, i.e. what a reloaded page replays) must keep
+        # the FULL, pre-shaping result -- shape_result trims fields like
+        # dev_agent's per-step preview/stdout_tail/stderr_tail that the UI
+        # still needs for replay even though the model doesn't need them
+        # repeated back into its own context every round. Only
+        # cache[key] (reused on a same-turn repeat call) and the
+        # model-facing return value get the shaped copy.
+        shaped_result = tool_result_shaping.shape_result(name, result, verbosity)
+        cache[key] = shaped_result
         run_entry = {"name": name, "arguments": arguments, "result": result}
         if confirm_meta is not None:
             run_entry["confirm"] = confirm_meta
         runs.append(run_entry)
+        result = shaped_result
 
         # Phase 5 handoff (see new_plan.md): a successful search_tools call
         # hands its matches to discover_sink so ask() can grow this round's
