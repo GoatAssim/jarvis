@@ -36,17 +36,20 @@ def _two_arg_handler(args, context):
 
 def _with_scratch_tools(fn):
     """Temporarily register fake tools in the live TOOLS dict, routed
-    through the same membership set execute_tool already checks (CUSTOM_TOOLS),
-    so we exercise the real dispatch path rather than a copy of it."""
+    through the same membership check execute_tool already uses
+    (`name in CUSTOM_TOOLS`), so we exercise the real dispatch path rather
+    than a copy of it. CUSTOM_TOOLS is itself a name -> handler dict (see
+    custom_tools.CUSTOM_TOOLS), not a set — it needs the same two entries
+    added to it as TOOLS, not just the bare names."""
     name_one = "_scratch_one_arg_tool"
     name_two = "_scratch_two_arg_tool"
     orig_tools = dict(system_tools.TOOLS)
-    orig_custom = set(system_tools.CUSTOM_TOOLS)
+    orig_custom = dict(system_tools.CUSTOM_TOOLS)
     try:
         system_tools.TOOLS[name_one] = _one_arg_handler
         system_tools.TOOLS[name_two] = _two_arg_handler
-        system_tools.CUSTOM_TOOLS.add(name_one)
-        system_tools.CUSTOM_TOOLS.add(name_two)
+        system_tools.CUSTOM_TOOLS[name_one] = _one_arg_handler
+        system_tools.CUSTOM_TOOLS[name_two] = _two_arg_handler
         fn(name_one, name_two)
     finally:
         system_tools.TOOLS.clear()
