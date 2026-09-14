@@ -181,15 +181,34 @@ def discover_actions(actions_dir=None, reserved_names=None, logger=print):
     .valid. Never raises."""
     actions_dir = actions_dir or ACTIONS_DIR
     reserved = reserved_names or set()
-    actions_dir.mkdir(parents=True, exist_ok=True)
-    init_file = actions_dir / "__init__.py"
-    if not init_file.exists():
-        init_file.write_text("", encoding="utf-8")
+
+    # This setup step used to run unguarded, which meant a read-only
+    # actions_dir (a packaged/site-packages install, a locked-down
+    # filesystem, ...) would raise straight out of discover_actions() and
+    # take down tools.py's import entirely — every built-in tool along with
+    # auto-discovery, not just the feature this guards. That's the opposite
+    # of "one broken action file can't take the rest of Jarvis down": this
+    # isn't a broken action file, it's the loader's own setup, so it gets
+    # the same fault tolerance every action file already gets below —
+    # logged and skipped, never fatal. Listing the directory is guarded the
+    # same way and for the same reason (a permission error enumerating
+    # actions_dir is just as fatal to the import otherwise).
+    try:
+        actions_dir.mkdir(parents=True, exist_ok=True)
+        init_file = actions_dir / "__init__.py"
+        if not init_file.exists():
+            init_file.write_text("", encoding="utf-8")
+        files = sorted(actions_dir.glob("*.py"), key=lambda p: p.name)
+    except OSError as e:
+        logger(
+            f"[tools] Warning: couldn't prepare/list {actions_dir} ({e}) — "
+            "auto-discovery skipped this run; built-in tools are unaffected."
+        )
+        return []
 
     records = []
     seen_names = {}  # name -> filename that claimed it, this scan only
 
-    files = sorted(actions_dir.glob("*.py"), key=lambda p: p.name)
     for path in files:
         if path.name.startswith("_"):
             continue
