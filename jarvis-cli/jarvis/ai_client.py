@@ -1295,6 +1295,19 @@ def _make_tool_executor(on_tool_call, schemas=None, on_confirm_request=None,
                 )
                 risk_note["command_flags"] = command_flags
 
+            if name == "dev_agent":
+                # §3.6 plan §8. Can't resolve the actual plan (files/deps/
+                # run command) at confirm-time — planning hasn't run yet,
+                # it only runs after this approval. So unlike run_command/
+                # run_chain above, there's no "resolved content" to attach
+                # here; the confirmation prompt necessarily just describes
+                # the raw ask itself. A second, lighter-weight confirmation
+                # between plan and write could be added later (see the
+                # plan's §11 open questions), but the first cut asks once,
+                # up front. No risk_note augmentation beyond whatever the
+                # default ai_review path above already produced.
+                pass
+
             approved = False
             try:
                 approved = bool(on_confirm_request(name, arguments, risk_note))
@@ -1460,6 +1473,26 @@ def _extras_from_runs(runs):
                             "title": f.get("title") or f["file"],
                         },
                     })
+        elif name == "dev_agent" and isinstance(result.get("steps"), list):
+            # §3.6 plan §6. `result` here is run["result"] — the FULL,
+            # pre-shaping copy (see the ordering fix in _executor above) —
+            # so `steps` still has every preview/stdout_tail/stderr_tail
+            # field a live view showed, not whatever verbosity trimmed for
+            # the model. These are the exact same event dicts the live
+            # stream already displayed (see dev_agent_events.emit's
+            # docstring: dev_agent.py's own `steps` list is built from
+            # emit()'s return value, never reconstructed separately), so a
+            # reload replays provably the same trace, not an approximation
+            # of it.
+            extras.append({
+                "type": "devAgent",
+                "data": {
+                    "jobId": result.get("job_id"),
+                    "ok": result.get("ok"),
+                    "projectDir": result.get("project_dir"),
+                    "steps": result["steps"],
+                },
+            })
     return extras
 
 
