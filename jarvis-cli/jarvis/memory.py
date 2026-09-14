@@ -4,9 +4,12 @@ Conversation history is a short rolling chat log. This file is the permanent
 notebook: names, preferences, hardware, 'remember that…' facts.
 
 Facts are NOT dumped into every prompt. Each ask retrieves only facts that
-look relevant to the user message (and recent user turns). Explicit 'what do
-you remember' style questions load as many as the budget allows. The model
-can still memory_search if retrieval misses.
+look relevant to the user message (and recent user turns), except identity
+facts (name, timezone, etc.), which ride along in full every time. Explicit
+'what do you remember' style questions load as many as the budget allows.
+Anything relevant that didn't fit the budget is listed by label in a
+trailing index so the model can still memory_search it by name instead of
+guessing it doesn't exist.
 """
 
 import json
@@ -25,9 +28,26 @@ MAX_KEY_LEN = 48
 PROMPT_FULL_BUDGET = 1200
 PROMPT_COMPACT_BUDGET = 450
 MAX_PROMPT_FACTS = 8
+# Ported from Mark LIII's memory_manager.PROMPT_MAX_PER_CATEGORY: caps how many
+# facts sharing a primary tag may occupy the core block, so one chatty tag
+# (e.g. a dozen "games" facts) can't crowd out everything else that matched.
+PROMPT_MAX_PER_TAG = 3
+# Budget for the trailing "also remembered" index of facts that matched but
+# didn't fit. Same idea as Mark LIII's PROMPT_INDEX_CHARS: the model can't
+# decide to memory_search something it doesn't know exists, so instead of a
+# bare "(N other facts not shown)" count we hand back the actual labels.
+PROMPT_INDEX_CHARS = 300
 
 _KEY_RE = re.compile(r"^[a-z0-9][a-z0-9_\-]{0,47}$")
 _WORD_RE = re.compile(r"[a-z0-9]{2,}")
+# Facts tagged "identity" (or keyed as one of these) ride in every prompt,
+# in full, regardless of query relevance — same rationale as Mark LIII's
+# _IDENTITY_FIELDS: it's wrong for the assistant to have to guess or search
+# for the user's own name.
+_IDENTITY_KEYS = frozenset({
+    "name", "preferred_name", "user_name", "pronouns", "timezone",
+    "location", "city", "birthday", "job", "role",
+})
 _RECALL_ALL = re.compile(
     r"\b(what do you (remember|know)|who am i|about me|"
     r"(list|show|dump) (my |your )?(memory|memories|facts)|"
@@ -159,7 +179,51 @@ def _format_fact_line(fact):
     return line
 
 
-def _render_facts(facts, budget, omitted=0):
+def _fact_label(f):
+    """Short, greppable label for a fact — what goes in the overflow index so
+    the model has something concrete to pass to memory_search."""
+    key = (f.get("key") or "").strip()
+    if key:
+        return key.replace("_", " ")
+    tags = f.get("tags") or []
+    if tags:
+        return str(tags[0])
+    text = (f.get("fact") or "").strip()
+    return (text[:24] + "…") if len(text) > 24 else (text or "fact")
+
+
+def _is_identity_fact(f):
+    return "identity" in (f.get("tags") or []) or (f.get("key") or "") in _IDENTITY_KEYS
+
+
+def _render_index(overflow_labels):
+    """Render the trailing 'also remembered' line from a list of labels,
+    deduped and capped to PROMPT_INDEX_CHARS so the index can't itself blow
+    the budget it exists to protect."""
+    seen = set()
+    names = []
+    idx_budget = PROMPT_INDEX_CHARS
+    extra = 0
+    for label in overflow_labels:
+        if label in seen:
+            continue
+        seen.add(label)
+        if idx_budget - len(label) - 2 < 0:
+            extra += 1
+            continue
+        names.append(label)
+        idx_budget -= len(label) + 2
+    if not names:
+        return ""
+    line = (
+        "(Also remembered, not shown here — call memory_search with one of "
+        "these to read it: " + ", ".join(names)
+        + (f", +{extra} more" if extra else "") + ")"
+    )
+    return line
+
+
+def _render_facts(facts, budget, overflow_labels=None):
     header = (
         "Relevant long-term memory (trust these over chat recap; "
         "memory_search if something is missing; memory_save / memory_forget to change):"
@@ -167,21 +231,34 @@ def _render_facts(facts, budget, omitted=0):
     lines = [header]
     used = len(header)
     included = 0
-    for f in facts:
+    overflow_labels = list(overflow_labels or [])
+    for j, f in enumerate(facts):
         line = _format_fact_line(f)
         if used + len(line) + 1 > budget:
-            omitted += len(facts) - included
+            overflow_labels.extend(_fact_label(x) for x in facts[j:])
             break
         lines.append(line)
         used += len(line) + 1
         included += 1
-    if omitted > 0:
-        lines.append(f"({omitted} other facts not shown — memory_search if needed.)")
-    return "\n".join(lines) if included else ""
+    if not included and not overflow_labels:
+        return ""
+    index_line = _render_index(overflow_labels)
+    if index_line:
+        lines.append(index_line)
+    return "\n".join(lines) if included or index_line else ""
 
 
 def prompt_context(char_budget=None, compact=False, query="", extra_texts=None):
-    """Return memory lines relevant to query, or '' if nothing matches."""
+    """Return memory lines relevant to query, or '' if nothing matches.
+
+    Identity facts (tag "identity", or a well-known key like name/timezone)
+    always ride along in full. Everything else still has to match the query
+    to be considered, then competes for the remaining budget — capped per
+    primary tag (PROMPT_MAX_PER_TAG) so one chatty tag can't crowd out the
+    rest — and whatever matched but didn't fit is listed by label in a
+    trailing index instead of a bare count, so the model can still
+    memory_search it by name.
+    """
     facts = load_facts()
     if not facts:
         return ""
@@ -192,24 +269,44 @@ def prompt_context(char_budget=None, compact=False, query="", extra_texts=None):
     blob = " ".join([query or ""] + [t for t in extras if t])
     if _RECALL_ALL.search(blob or ""):
         newest_first = list(reversed(facts))
-        return _render_facts(newest_first, budget, omitted=0)
+        return _render_facts(newest_first, budget)
 
+    identity_facts = [f for f in facts if _is_identity_fact(f)]
     qtoks = _expand(_tokens(blob))
+
     if not qtoks:
-        return ""
+        if not identity_facts:
+            return ""
+        return _render_facts(identity_facts, budget)
 
     ranked = []
     for i, f in enumerate(facts):
+        if _is_identity_fact(f):
+            continue
         s = _score_fact(f, qtoks)
         if s <= 0:
             continue
         ranked.append((s, i, f))
-    if not ranked:
-        return ""
     ranked.sort(key=lambda x: (-x[0], -x[1]))
-    chosen = [f for _, _, f in ranked[:MAX_PROMPT_FACTS]]
-    omitted = max(0, len(ranked) - len(chosen))
-    return _render_facts(chosen, budget, omitted=omitted)
+
+    if not identity_facts and not ranked:
+        return ""
+
+    chosen = list(identity_facts)
+    tag_used = {}
+    overflow_labels = []
+    for _s, _i, f in ranked:
+        if len(chosen) - len(identity_facts) >= MAX_PROMPT_FACTS:
+            overflow_labels.append(_fact_label(f))
+            continue
+        primary_tag = (f.get("tags") or [None])[0]
+        if tag_used.get(primary_tag, 0) >= PROMPT_MAX_PER_TAG:
+            overflow_labels.append(_fact_label(f))
+            continue
+        chosen.append(f)
+        tag_used[primary_tag] = tag_used.get(primary_tag, 0) + 1
+
+    return _render_facts(chosen, budget, overflow_labels=overflow_labels)
 
 
 def tool_memory_save(args):
