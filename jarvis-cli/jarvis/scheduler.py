@@ -35,8 +35,20 @@ drivers, any of which is enough:
   * web/server.js               — calls sched-tick on an interval while the
                                   web console is open (the usual driver),
                                   and once with --startup on boot.
+  * `jarvis sched-daemon`       — an actual standing process (see
+                                  sched_daemon.py) that loops sched-tick on
+                                  an interval on its own, for anyone who
+                                  wants firing to just work without leaving
+                                  the web UI open or hand-configuring an OS
+                                  scheduler. Still not a Jarvis-managed
+                                  background service — you background it
+                                  yourself (nohup/systemd/etc.) — but it's
+                                  the first-class "make my reminders fire"
+                                  answer instead of routing everyone to
+                                  Task Scheduler/cron.
   * Windows Task Scheduler/cron — `jarvis sched-tick` every minute, for
-                                  firing while the web UI is closed.
+                                  firing without running any Jarvis process
+                                  continuously at all.
   * `jarvis ask`                — drains *notifications* only (cheap, no
                                   execution) so a terminal user still sees
                                   due reminders without any of the above.
