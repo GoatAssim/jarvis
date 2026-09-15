@@ -130,18 +130,74 @@ def load_config():
     return {"servers": servers if isinstance(servers, dict) else {}}
 
 
+def _assign_slugs(configured):
+    """Map every configured server's raw name to a unique sanitized slug.
+
+    Two raw names can sanitize to the same slug ("My Server" and
+    "my-server!" both become "my_server"). Previously `enabled_servers()`
+    built its dict straight off `sanitize_name()`, so a collision meant
+    the second entry silently clobbered the first at `out[name] = ...` —
+    one whole server's tools vanished with no error, no log line, nothing
+    in `jarvis mcp-status`. Whichever raw name happened to be iterated
+    last "won", which also contradicted the comment in
+    `actions/mcp_tools.py._build` claiming "first one registered wins".
+
+    Fixed by disambiguating instead of colliding: servers are walked in
+    config-file order (dict order, stable since Python 3.7 and since
+    JSON objects preserve key order), the first raw name to produce a
+    given slug keeps it, and every subsequent collision gets `_2`, `_3`,
+    ... appended (re-clamped to the 32-char slug limit) until it's
+    unique. Both servers stay usable — nothing is dropped, silently or
+    otherwise — and this is the single place that decides slugs, so
+    `enabled_servers()` and `status()` can't disagree about what a given
+    server's tools are actually prefixed with.
+
+    Returns {raw_name: (slug, renamed_due_to_collision)}.
+    """
+    seen = set()
+    out = {}
+    for raw_name in configured:
+        base = sanitize_name(raw_name)
+        if not base:
+            out[raw_name] = ("", False)
+            continue
+        slug = base
+        renamed = False
+        suffix = 2
+        while slug in seen:
+            renamed = True
+            candidate = "%s_%d" % (base[: 32 - len(str(suffix)) - 1], suffix)
+            slug = candidate if _NAME_RE.match(candidate) else ""
+            suffix += 1
+            if not slug or suffix > 999:
+                # Pathological: can't build a unique legal slug at all.
+                # Treat like sanitize_name() failing outright — skipped
+                # rather than silently colliding.
+                slug = ""
+                break
+        if slug:
+            seen.add(slug)
+        out[raw_name] = (slug, renamed)
+    return out
+
+
 def enabled_servers():
     """Only servers explicitly switched on, keyed by a sanitized name.
 
     The name becomes part of every tool name this server contributes, so it
     has to survive _NAME_RE. A server whose name can't be sanitized is
     skipped rather than silently renamed to something the user never wrote.
+
+    Two servers whose names sanitize to the same slug both stay enabled —
+    see `_assign_slugs()` — rather than one silently disappearing.
     """
+    configured = load_config().get("servers") or {}
+    slugs = _assign_slugs(configured)
     out = {}
-    for raw_name, spec in (load_config().get("servers") or {}).items():
+    for raw_name, spec in configured.items():
         if not isinstance(spec, dict) or not spec.get("enabled"):
             continue
-        name = sanitize_name(raw_name)
+        name, _renamed = slugs.get(raw_name, ("", False))
         if not name:
             continue
         out[name] = dict(spec, _raw_name=raw_name)
@@ -601,15 +657,17 @@ def call_tool(server, tool, arguments=None, timeout=CALL_TIMEOUT):
 def status():
     """Everything `jarvis mcp-status` and the web panel need in one read —
     no subprocess, so it's safe to call from a UI poll."""
+    configured = load_config().get("servers") or {}
+    slugs = _assign_slugs(configured)
     servers = enabled_servers()
     cache = load_cache()
-    configured = load_config().get("servers") or {}
     out = []
+    collisions = []
     for raw_name, spec in configured.items():
-        name = sanitize_name(raw_name)
+        name, renamed = slugs.get(raw_name, ("", False))
         entry = cache.get(name) or {}
         fetched = entry.get("fetched_at")
-        out.append({
+        row = {
             "name": raw_name,
             "slug": name,
             "enabled": bool(spec.get("enabled")) if isinstance(spec, dict) else False,
@@ -619,11 +677,20 @@ def status():
             "last_refreshed": fetched,
             "stale": bool(fetched) and (time.time() - float(fetched)) > CACHE_TTL_SECONDS,
             "error": entry.get("error"),
-        })
-    return {
+        }
+        if renamed:
+            # Made visible on purpose — this used to be the exact case that
+            # silently dropped a whole server's tools (see _assign_slugs).
+            row["renamed_due_to_collision"] = True
+            collisions.append({"name": raw_name, "slug": name})
+        out.append(row)
+    result = {
         "servers": out,
         "enabled_count": len(servers),
         "total_tools": sum(len((cache.get(n) or {}).get("tools") or []) for n in servers),
         "needs_refresh": cache_is_stale(),
         "config_file": str(CONFIG_FILE),
     }
+    if collisions:
+        result["name_collisions"] = collisions
+    return result

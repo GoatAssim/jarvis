@@ -119,6 +119,14 @@ def tool_mcp_list_servers(args):
         )
     elif not info["enabled_count"]:
         info["note"] = "MCP servers are configured but all of them are disabled."
+    elif info.get("name_collisions"):
+        renamed = ", ".join("%s -> mcp_%s_*" % (c["name"], c["slug"]) for c in info["name_collisions"])
+        info["note"] = (
+            "Two or more configured servers sanitize to the same tool-name "
+            "prefix; the later ones were automatically renamed so none of "
+            "them lost their tools: %s. Tell the user if they'd rather "
+            "rename a server in the config for a cleaner prefix." % renamed
+        )
     return info
 
 
@@ -170,7 +178,14 @@ def _build():
             except Exception:  # noqa: BLE001
                 continue
             if name in tools:
-                continue  # two servers, same sanitized name — first wins
+                # Cross-server slug collisions can't reach here any more —
+                # mcp_client._assign_slugs() disambiguates them (mcp-status
+                # surfaces it as name_collisions/renamed_due_to_collision
+                # instead of it happening silently). This guard is now only
+                # for the same server listing the same tool name twice,
+                # which is a malformed server response, not a collision
+                # between servers — first occurrence wins, harmlessly.
+                continue
             schemas.append(schema)
             tools[name] = _make_handler(server, tool["name"])
             # Route on the server name and on the remote tool's own words.
