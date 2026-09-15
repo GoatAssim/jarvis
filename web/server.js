@@ -789,6 +789,71 @@ app.delete("/api/logs/:id", requireJarvis, async (req, res) => {
   }
 });
 
+// ---------------------------------------------------------------------------
+// Skills (see jarvis-cli/jarvis/skills.py). These proxy the dedicated
+// `jarvis skills-*` CLI commands rather than going through /api/tools/run,
+// because the manager is a person editing their own files: it must not
+// inherit the AI-facing confirm gate on remove_skill, and the raw-file
+// read/write it needs are deliberately not exposed as model tools.
+// Every skills-* command prints one JSON object, so they all parse alike.
+// ---------------------------------------------------------------------------
+
+function parseSkillsResult(result, res, fallbackMessage) {
+  // The CLI prints JSON on its own validation errors too, just with a
+  // non-zero exit code — so try stdout first regardless of exit status and
+  // only fall back to a generic message when there's nothing parseable.
+  try {
+    const parsed = JSON.parse(result.stdout);
+    if (parsed && parsed.error) return res.status(400).json(parsed);
+    return res.json(parsed);
+  } catch (e) {
+    return res.status(500).json({ error: result.error || result.stderr || fallbackMessage });
+  }
+}
+
+app.get("/api/skills", requireJarvis, async (req, res) => {
+  const result = await runJarvisOnce(["skills-list"], 15000);
+  return parseSkillsResult(result, res, "Couldn't list skills.");
+});
+
+app.get("/api/skills/:name", requireJarvis, async (req, res) => {
+  const result = await runJarvisOnce(["skills-get", req.params.name], 15000);
+  return parseSkillsResult(result, res, "Couldn't read that skill.");
+});
+
+app.put("/api/skills/:name", requireJarvis, async (req, res) => {
+  const content = typeof req.body?.content === "string" ? req.body.content : "";
+  if (!content.trim()) return res.status(400).json({ error: "Empty skill content." });
+  const result = await runJarvisOnce(["skills-save", req.params.name, content], 15000);
+  return parseSkillsResult(result, res, "Couldn't save that skill.");
+});
+
+app.post("/api/skills", requireJarvis, async (req, res) => {
+  const mode = req.body?.mode === "create" ? "create" : "add";
+  let args;
+  if (mode === "create") {
+    const name = typeof req.body?.name === "string" ? req.body.name.trim() : "";
+    const description = typeof req.body?.description === "string" ? req.body.description.trim() : "";
+    const instructions = typeof req.body?.instructions === "string" ? req.body.instructions : "";
+    if (!name || !description || !instructions.trim()) {
+      return res.status(400).json({ error: "Name, description and instructions are all required." });
+    }
+    args = ["skills-create", name, description, instructions];
+  } else {
+    const source = typeof req.body?.source === "string" ? req.body.source : "";
+    if (!source.trim()) return res.status(400).json({ error: "Paste a SKILL.md, or give a path." });
+    args = ["skills-add", source];
+    if (typeof req.body?.name === "string" && req.body.name.trim()) args.push(req.body.name.trim());
+  }
+  const result = await runJarvisOnce(args, 20000);
+  return parseSkillsResult(result, res, "Couldn't install that skill.");
+});
+
+app.delete("/api/skills/:name", requireJarvis, async (req, res) => {
+  const result = await runJarvisOnce(["skills-remove", req.params.name], 15000);
+  return parseSkillsResult(result, res, "Couldn't remove that skill.");
+});
+
 app.get("/api/tools", requireJarvis, async (req, res) => {
   const result = await runJarvisOnce(["tools-list"], 15000);
   if (!result.ok) {

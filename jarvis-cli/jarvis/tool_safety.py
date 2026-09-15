@@ -35,6 +35,8 @@ ENCODING = "utf-8"
 # spotify_search, search_commands, ...) default to False for both flags —
 # an explicit entry in tool_safety.json always overrides these.
 DEFAULT_CONFIRM_REQUIRED = {
+    # Deletes a skill folder and everything in it, with no undo.
+    "remove_skill",
     "write_file",
     "run_command",
     "run_chain",
