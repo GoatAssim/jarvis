@@ -83,6 +83,7 @@ def tool_create_skill(args):
     a = args or {}
     return skills.create_skill(
         a.get("name"), a.get("description"), a.get("instructions"), a.get("keywords"),
+        a.get("references"), a.get("scripts"),
     )
 
 
@@ -158,7 +159,13 @@ TOOL_SCHEMAS = [
             "wants a recurring task done. Good after the user has explained a process "
             "you'd otherwise have to be told again next time. The description is the "
             "ONLY thing visible on future asks, so make it say when to use the skill, "
-            "and confirm it with the user before writing."
+            "and confirm it with the user before writing. If the skill is complicated "
+            "(several distinct procedures, or any real amount of detail), don't put it "
+            "all in `instructions` — split it: keep `instructions` a short overview that "
+            "names each module and when to open it, put the step-by-step detail for each "
+            "one in `references` (one file per topic), and put any code in `scripts`. "
+            "That keeps the skill's own prompt cost low and lets a future ask load only "
+            "the one module it actually needs."
         ),
         "parameters": {
             "type": "object",
@@ -170,7 +177,30 @@ TOOL_SCHEMAS = [
                 },
                 "instructions": {
                     "type": "string",
-                    "description": "The skill body in markdown — steps, examples, conventions.",
+                    "description": (
+                        "The skill body in markdown. For a simple skill, the whole thing. "
+                        "For a complex one, an overview plus pointers to the reference files "
+                        "below — not the full step-by-step detail."
+                    ),
+                },
+                "references": {
+                    "type": "object",
+                    "additionalProperties": {"type": "string"},
+                    "description": (
+                        "Optional: {filename: markdown content}, one file per distinct "
+                        "procedure or topic for a complex skill. Plain filenames only, no "
+                        "paths — e.g. 'SETUP.md'. Loaded one at a time via "
+                        "load_skill_reference, only when a task needs that specific one."
+                    ),
+                },
+                "scripts": {
+                    "type": "object",
+                    "additionalProperties": {"type": "string"},
+                    "description": (
+                        "Optional: {filename: source code} for scripts this skill runs. "
+                        "Plain filenames with a real extension — e.g. 'submit.py'. Run "
+                        "through the command tools, never read back into context."
+                    ),
                 },
                 "keywords": {
                     "type": "array",

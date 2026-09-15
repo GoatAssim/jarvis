@@ -15,7 +15,7 @@ import os
 import subprocess
 import sys
 
-from . import ai_config, ai_providers, command_tools, conversations, memory, playnite_config, skills, stats, tool_safety
+from . import ai_config, ai_providers, command_tools, conversations, memory, playnite_config, skill_stickiness, skills, stats, tool_safety
 from . import dev_agent_events as _dev_agent_events
 from . import discovery_cache
 from . import logs
@@ -734,7 +734,7 @@ def _system_prompt_parts(persona, commands_ctx, freq_ctx, tools_enabled,
                          compact_tools=False, compact_persona=False, ultra=False, has_history=False,
                          memory_ctx="", has_playnite=False, has_spotify=False, other_convos_ctx="",
                          playnite_freq_games=None, precise=False, pack_instructions_ctx="",
-                         skills_ctx=""):
+                         skills_ctx="", loaded_skills_ctx=""):
     """Return (static_prefix, per_request_tail) instead of one joined string.
 
     This split is the load-bearing half of prompt caching (see
@@ -822,8 +822,14 @@ def _system_prompt_parts(persona, commands_ctx, freq_ctx, tools_enabled,
         # per-request tail instead would cost its full price on every ask.
         if skills_ctx:
             parts.append(skills_ctx)
-        if pack_instructions_ctx:
-            parts.append(pack_instructions_ctx)
+        # pack_instructions_ctx is NOT appended here — see the boundary
+        # below. It's built from route.groups, which is per-turn, so it
+        # belongs in the dynamic tail. It used to sit here, which meant a
+        # conversation whose messages route to different tool groups from
+        # turn to turn invalidated the ENTIRE static block's cache on every
+        # such turn — a marked content block caches as a whole; one byte
+        # difference anywhere inside it is a miss for the whole block, not
+        # a partial hit (see prompt_cache.py's module docstring).
     if precise:
         # 150% Capacity only: an extra directive on top of the normal
         # persona/tools text \u2014 not a replacement for either.
@@ -835,11 +841,22 @@ def _system_prompt_parts(persona, commands_ctx, freq_ctx, tools_enabled,
             "assuming. Prefer being exactly right over being quick."
         )
     # ---- end of the static prefix -------------------------------------
-    # Everything appended above is stable for a given capacity mode + router
-    # group. Everything below varies per request. The breakpoint goes here.
+    # Everything appended above is stable for a given capacity mode — it no
+    # longer includes anything keyed to which router group matched THIS
+    # turn (see the note above pack_instructions_ctx's old spot). Everything
+    # below varies per request or per conversation. The breakpoint goes here.
     static_parts = list(parts)
     parts = []
 
+    if pack_instructions_ctx:
+        parts.append(pack_instructions_ctx)
+    # Manually-loaded skills (see skill_stickiness.py — the "/skillload
+    # <name>" chat command or `jarvis skillload`). Conversation-scoped, not
+    # turn-scoped: stable across every ask in one chat until unloaded, but
+    # not identical across different chats, so it belongs alongside
+    # memory_ctx here rather than in the globally-static run above.
+    if loaded_skills_ctx:
+        parts.append(loaded_skills_ctx)
     if memory_ctx:
         parts.append(memory_ctx)
     if other_convos_ctx:
@@ -979,6 +996,14 @@ def _build_messages(persona, commands, user_text, tools_enabled, profile, conver
     except Exception:
         skills_ctx = ""
 
+    # Manually-loaded skills for this conversation (see skill_stickiness.py)
+    # — the "/skillload <name>" chat command / `jarvis skillload` CLI
+    # command. Same wrapping reasoning as skills_ctx above.
+    try:
+        loaded_skills_ctx = skill_stickiness.loaded_context(conversation_id)
+    except Exception:
+        loaded_skills_ctx = ""
+
     static_system, dynamic_system = _system_prompt_parts(
         persona,
         commands_ctx,
@@ -996,6 +1021,7 @@ def _build_messages(persona, commands, user_text, tools_enabled, profile, conver
         precise=profile.get("precise_persona", False),
         pack_instructions_ctx=pack_instructions_ctx,
         skills_ctx=skills_ctx,
+        loaded_skills_ctx=loaded_skills_ctx,
     )
     # Two system messages, not one: index 0 is the cacheable static prefix,
     # index 1 the per-request tail (see _system_prompt_parts). Providers that
@@ -2141,8 +2167,24 @@ def ask(user_text, commands=None, on_attempt=None, on_tool_call=None, on_tool_re
         #
         # Below CATALOG_TIER_MIN_TOOLS this is a no-op, so small groups and
         # every non-confident path behave precisely as before.
+        #
+        # Bug fix: this used to read `profile.get("catalog_tier", ...)`, but
+        # `profile` isn't assigned until INSIDE the `for provider in
+        # providers:` loop below (it's resolved per-attempt, since mode can
+        # vary by provider — see that loop's own comment). Reading it here,
+        # before the loop, raised UnboundLocalError on every single ask
+        # once a route was confident and a group had 10+ tools — i.e. on
+        # exactly the routes this tier exists to help. active_schemas/
+        # compact_schemas/name_only_schemas are built ONCE and shared
+        # across every attempt (not per-provider), so the catalog-tier
+        # decision has to be made here too — resolved from the first
+        # eligible provider's profile, same representative-provider
+        # approach current_mode() already uses for the same reason.
+        _catalog_tier_profile = (
+            _prompt_profile(_provider_label(providers[0]), cfg["defaults"]) if providers else {}
+        )
         if (
-            profile.get("catalog_tier", True)
+            _catalog_tier_profile.get("catalog_tier", True)
             and route is not None
             and route.confident
             and len(active_schemas) >= CATALOG_TIER_MIN_TOOLS

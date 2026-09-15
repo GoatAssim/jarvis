@@ -3934,6 +3934,15 @@
     const quotes = state.askQuotes.slice();
     if (!text && quotes.length === 0) return;
 
+    const skillSlashMatch = quotes.length === 0 ? SKILL_SLASH_RE.exec(text) : null;
+    if (skillSlashMatch) {
+      input.value = "";
+      askInputAutoGrow(input);
+      hideSkillSuggest();
+      await handleSkillSlashCommand(skillSlashMatch[1].toLowerCase(), skillSlashMatch[2].trim());
+      return;
+    }
+
     const organizeMatch = quotes.length === 0 ? ORGANIZE_JSON_RE.exec(text) : null;
     if (organizeMatch) {
       if (!state.activeConversationId) await startNewConversation();
@@ -4918,6 +4927,10 @@
       skillsCache = data.skills || [];
       const stats = data.stats || {};
       skillsCost.textContent = `${stats.catalog_tokens || 0} tok in every prompt`;
+      // Keep the slash-command autocomplete's name list in sync whenever
+      // the manager refreshes (create/save/remove all call this) instead of
+      // only ever fetching it lazily on first keystroke.
+      skillNamesCache = skillsCache.map((s) => s.name);
       skillsStatus.textContent = skillsCache.length
         ? `${stats.valid || 0} of ${skillsCache.length} loadable \u00b7 instructions load on demand`
         : "no skills installed";
@@ -5070,6 +5083,95 @@
 
   function closeSkills() {
     skillsOverlay.hidden = true;
+  }
+
+  // ===========================================================================
+  // Manual skill loading — "/skillload <name>" / "/skillunload <name>" typed
+  // directly into the chat box, plus "/skillmake" / "/skilladd" as shortcuts
+  // that open the manager to the right pane. Recognized and handled locally,
+  // same "never sent to the model" pattern as ORGANIZE_JSON_RE just above.
+  // load/unload are the CLI's `jarvis skillload`/`skillunload` one layer up
+  // (see skill_stickiness.py) — this forces the skill's full instructions
+  // into every ask for this conversation until unloaded, rather than hoping
+  // the model calls its own load_skill tool.
+  // ===========================================================================
+  const SKILL_SLASH_RE = /^\/skill(load|unload|make|add)\b\s*(.*)$/i;
+  const SKILL_SUGGEST_RE = /^\/skill(load|unload)\s+(\S*)$/i;
+  let skillNamesCache = null;
+
+  async function ensureSkillNamesCache() {
+    if (skillNamesCache) return skillNamesCache;
+    try {
+      const data = await api("GET", "/api/skills");
+      skillNamesCache = (data.skills || []).map((s) => s.name);
+    } catch {
+      skillNamesCache = [];
+    }
+    return skillNamesCache;
+  }
+
+  function hideSkillSuggest() {
+    const box = qs("#skill-slash-suggest");
+    if (box) box.hidden = true;
+  }
+
+  async function updateSkillSuggest(text) {
+    const match = SKILL_SUGGEST_RE.exec(text);
+    const box = qs("#skill-slash-suggest");
+    if (!match || !box) { hideSkillSuggest(); return; }
+    const verb = match[1].toLowerCase();
+    const partial = match[2].toLowerCase();
+    const names = await ensureSkillNamesCache();
+    const hits = names.filter((n) => n.toLowerCase().includes(partial)).slice(0, 8);
+    if (!hits.length) { hideSkillSuggest(); return; }
+    box.innerHTML = "";
+    for (const name of hits) {
+      const item = document.createElement("button");
+      item.type = "button";
+      item.className = "skill-slash-suggest__item";
+      item.textContent = name;
+      // mousedown, not click: fires before the textarea's blur handler, so
+      // the suggestion lands in the input before hideSkillSuggest() (wired
+      // to blur, below) would otherwise race it and close the dropdown
+      // with nothing selected.
+      item.addEventListener("mousedown", (e) => {
+        e.preventDefault();
+        const input = qs("#ask-input");
+        input.value = `/skill${verb} ${name} `;
+        askInputAutoGrow(input);
+        input.focus();
+        hideSkillSuggest();
+      });
+      box.appendChild(item);
+    }
+    box.hidden = false;
+  }
+
+  qs("#ask-input").addEventListener("input", (e) => updateSkillSuggest(e.target.value));
+  qs("#ask-input").addEventListener("blur", () => setTimeout(hideSkillSuggest, 150));
+
+  async function handleSkillSlashCommand(verb, arg) {
+    // "make"/"add" don't take a meaningful single-line argument (a whole
+    // skill, or a folder/zip path, doesn't fit one chat line) — they just
+    // open the manager to the pane that handles them, same as clicking the
+    // toolbar buttons directly.
+    if (verb === "make") { openSkills(); qs("#btn-skill-new").click(); return; }
+    if (verb === "add") { openSkills(); qs("#btn-skill-import").click(); return; }
+    if (!arg) { toast(`Type a skill name: /skill${verb} <name>`); return; }
+    try {
+      if (verb === "load") {
+        const data = await api("POST", `/api/skills/${encodeURIComponent(arg)}/load`,
+          { conversationId: state.activeConversationId });
+        toast(`"${data.name || arg}" loaded for this chat \u2014 Jarvis will use it from the next reply on.`, "info");
+      } else {
+        const data = await api("DELETE", `/api/skills/${encodeURIComponent(arg)}/load`,
+          { conversationId: state.activeConversationId });
+        toast(`"${data.name || arg}" unloaded.`, "info");
+      }
+      skillNamesCache = null; // stale after add/remove elsewhere; cheap to just refetch next time
+    } catch (e) {
+      toast(e.message || `Couldn't ${verb} that skill.`);
+    }
   }
 
   qs("#btn-skills").addEventListener("click", openSkills);

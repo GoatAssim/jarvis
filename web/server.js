@@ -884,6 +884,24 @@ app.delete("/api/skills/:name", requireJarvis, async (req, res) => {
   return parseSkillsResult(result, res, "Couldn't remove that skill.");
 });
 
+// Manual load/unload — the "/skillload <name>" / "/skillunload <name>" chat
+// commands and their web-manager equivalent. Separate from load_skill (the
+// model's own on-demand tool): this forces a skill's instructions into
+// EVERY ask for a scope (one conversation, or every conversation if no
+// conversationId is given) until explicitly unloaded. See skill_stickiness.py.
+app.post("/api/skills/:name/load", requireJarvis, async (req, res) => {
+  const convId = typeof req.body?.conversationId === "string" ? req.body.conversationId : "";
+  const result = await runJarvisOnce(["skillload", req.params.name, convId], 15000);
+  return parseSkillsResult(result, res, "Couldn't load that skill.");
+});
+
+app.delete("/api/skills/:name/load", requireJarvis, async (req, res) => {
+  const convId = typeof req.body?.conversationId === "string" ? req.body.conversationId
+    : (typeof req.query?.conversationId === "string" ? req.query.conversationId : "");
+  const result = await runJarvisOnce(["skillunload", req.params.name, convId], 15000);
+  return parseSkillsResult(result, res, "Couldn't unload that skill.");
+});
+
 app.get("/api/tools", requireJarvis, async (req, res) => {
   const result = await runJarvisOnce(["tools-list"], 15000);
   if (!result.ok) {
