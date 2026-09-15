@@ -141,8 +141,36 @@
         <div class="console-actions">
           <button class="btn btn--ghost" id="btn-abort" type="button" hidden>ABORT</button>
           <button class="btn btn--ghost" id="btn-clear-console" type="button">Clear</button>
-          <button class="btn btn--ghost" id="btn-debug" type="button" title="Inspect and run every tool Jarvis can call">Debug</button>
-          <button class="btn btn--ghost" id="btn-skills" type="button" title="Add, edit and remove skills — reusable instructions Jarvis loads only when a task needs them">Skills</button>
+          <!-- Debug, Skills, Scheduled and MCP Servers used to be four
+               separate buttons crowded into this one row. They're grouped
+               behind one dropdown instead — same trigger, a short list of
+               destinations — modeled on the Ask panel's own provider-picker
+               dropdown just below (.panel-menu mirrors .provider-picker). -->
+          <div class="panel-menu" id="panel-menu">
+            <button class="btn btn--ghost" id="btn-panel-menu" type="button"
+                    aria-haspopup="true" aria-expanded="false"
+                    title="Debug tools, skills, scheduled tasks and reminders, and connected MCP servers">
+              Menu <span class="panel-menu__caret" aria-hidden="true">&#9662;</span>
+            </button>
+            <div class="panel-menu__list" id="panel-menu-list" role="menu" hidden>
+              <button class="panel-menu__item" id="menu-item-debug" type="button" role="menuitem">
+                <span class="panel-menu__item-label">Debug</span>
+                <span class="panel-menu__item-hint">Inspect and run every tool Jarvis can call</span>
+              </button>
+              <button class="panel-menu__item" id="menu-item-skills" type="button" role="menuitem">
+                <span class="panel-menu__item-label">Skills</span>
+                <span class="panel-menu__item-hint">Add, edit and remove skills</span>
+              </button>
+              <button class="panel-menu__item" id="menu-item-scheduled" type="button" role="menuitem">
+                <span class="panel-menu__item-label">Scheduled</span>
+                <span class="panel-menu__item-hint">Tasks, reminders and notifications</span>
+              </button>
+              <button class="panel-menu__item" id="menu-item-mcp" type="button" role="menuitem">
+                <span class="panel-menu__item-label">MCP Servers</span>
+                <span class="panel-menu__item-hint">External tools connected over MCP</span>
+              </button>
+            </div>
+          </div>
         </div>
       </div>
       <div class="console" id="console">
@@ -261,22 +289,103 @@
      Only a skill's name + description live in the prompt; the body loads
      on demand. The token readout below is the point of the whole design,
      so it's shown rather than hidden. -->
-<div class="skills-overlay" id="skills-overlay" hidden>
-  <div class="skills-panel">
+<!-- SCHEDULED — jobs, reminders, notifications. Own panel (separate from MCP,
+     which used to share this space) so each menu item opens exactly one
+     concern. Uses the shared .menu-overlay/.menu-panel chrome — the same
+     chrome the Debug and Ask panels use — rather than a bespoke look. -->
+<div class="menu-overlay" id="sched-overlay" hidden>
+  <div class="menu-panel">
     <div class="panel__corner panel__corner--tl"></div>
     <div class="panel__corner panel__corner--br"></div>
 
-    <div class="skills-panel__head">
-      <div class="skills-panel__titles">
-        <div class="skills-panel__title">SKILLS</div>
-        <div class="skills-panel__subtitle" id="skills-status-line">reading skills&hellip;</div>
+    <div class="menu-panel__head">
+      <svg class="brand-mark" viewBox="0 0 40 40" aria-hidden="true">
+        <circle cx="20" cy="20" r="18" class="brand-mark__ring"/>
+        <circle cx="20" cy="20" r="11" class="brand-mark__ring brand-mark__ring--in"/>
+        <circle cx="20" cy="20" r="3" class="brand-mark__core"/>
+      </svg>
+      <div class="menu-panel__titles">
+        <div class="menu-panel__title">SCHEDULED</div>
+        <div class="menu-panel__subtitle" id="sched-status-line">reading schedule&hellip;</div>
+      </div>
+      <button class="btn btn--ghost btn--sm" id="btn-sched-tick" type="button" title="Fire everything that is due right now, without waiting for the next tick">Run due now</button>
+      <button class="modal__close" id="sched-close" type="button" aria-label="Close">&times;</button>
+    </div>
+
+    <div class="menu-body">
+      <section class="skills-pane skills-pane--list" aria-label="Scheduled jobs">
+        <div class="skills-pane__head"><h3>Jobs</h3></div>
+        <div class="skills-list" id="sched-list">
+          <div class="skills-empty">Loading&hellip;</div>
+        </div>
+      </section>
+
+      <section class="skills-pane skills-pane--editor" aria-label="Add a reminder">
+        <div class="skills-pane__head"><h3>Add a reminder</h3></div>
+        <div class="sched-add">
+          <input type="text" id="sched-when" placeholder="when — e.g. tomorrow at 9am, every weekday at 08:30" />
+          <input type="text" id="sched-message" placeholder="what to say" />
+          <button class="btn btn--primary btn--sm" id="btn-sched-add" type="button">Schedule</button>
+        </div>
+      </section>
+    </div>
+  </div>
+</div>
+
+<!-- MCP SERVERS — external tools connected over the Model Context Protocol.
+     Split out of the old combined Scheduled/MCP panel: scheduling and MCP
+     are unrelated concerns and each deserves its own menu entry. -->
+<div class="menu-overlay" id="mcp-overlay" hidden>
+  <div class="menu-panel">
+    <div class="panel__corner panel__corner--tl"></div>
+    <div class="panel__corner panel__corner--br"></div>
+
+    <div class="menu-panel__head">
+      <svg class="brand-mark" viewBox="0 0 40 40" aria-hidden="true">
+        <circle cx="20" cy="20" r="18" class="brand-mark__ring"/>
+        <circle cx="20" cy="20" r="11" class="brand-mark__ring brand-mark__ring--in"/>
+        <circle cx="20" cy="20" r="3" class="brand-mark__core"/>
+      </svg>
+      <div class="menu-panel__titles">
+        <div class="menu-panel__title">MCP SERVERS</div>
+        <div class="menu-panel__subtitle" id="mcp-status-line">reading servers&hellip;</div>
+      </div>
+      <button class="btn btn--ghost btn--sm" id="btn-mcp-refresh" type="button" title="Reconnect to every configured MCP server and re-read its tool list">Refresh</button>
+      <button class="modal__close" id="mcp-close" type="button" aria-label="Close">&times;</button>
+    </div>
+
+    <div class="menu-body menu-body--single">
+      <section class="skills-pane" aria-label="MCP servers">
+        <div class="skills-pane__head"><h3>Connected servers</h3></div>
+        <div class="skills-list" id="mcp-list">
+          <div class="skills-empty">Loading&hellip;</div>
+        </div>
+      </section>
+    </div>
+  </div>
+</div>
+
+<div class="menu-overlay" id="skills-overlay" hidden>
+  <div class="menu-panel">
+    <div class="panel__corner panel__corner--tl"></div>
+    <div class="panel__corner panel__corner--br"></div>
+
+    <div class="menu-panel__head">
+      <svg class="brand-mark" viewBox="0 0 40 40" aria-hidden="true">
+        <circle cx="20" cy="20" r="18" class="brand-mark__ring"/>
+        <circle cx="20" cy="20" r="11" class="brand-mark__ring brand-mark__ring--in"/>
+        <circle cx="20" cy="20" r="3" class="brand-mark__core"/>
+      </svg>
+      <div class="menu-panel__titles">
+        <div class="menu-panel__title">SKILLS</div>
+        <div class="menu-panel__subtitle" id="skills-status-line">reading skills&hellip;</div>
       </div>
       <button class="btn btn--ghost btn--sm" id="btn-skill-new" type="button">+ New</button>
       <button class="btn btn--ghost btn--sm" id="btn-skill-import" type="button" title="Paste a SKILL.md, or give a folder/file path">Import</button>
       <button class="modal__close" id="skills-close" type="button" aria-label="Close">&times;</button>
     </div>
 
-    <div class="skills-body">
+    <div class="menu-body">
       <section class="skills-pane skills-pane--list" aria-label="Installed skills">
         <div class="skills-pane__head">
           <h3>Installed</h3>

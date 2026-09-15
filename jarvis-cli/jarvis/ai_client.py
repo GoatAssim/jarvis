@@ -1585,6 +1585,24 @@ def _extras_from_runs(runs):
                             "title": f.get("title") or f["file"],
                         },
                     })
+        elif name == "present_file" and result.get("ok"):
+            # The gap that made present_file cards disappear on reload: every
+            # other media tool had an entry here, this one never did, so its
+            # card lived only in the live JARVIS_MEDIA stream. The field
+            # names match app.js's showAskPresentFile(info) argument exactly
+            # so the replay path can hand this straight to the same renderer
+            # the live path uses, rather than a second near-copy of it.
+            extras.append({
+                "type": "presentFile",
+                "data": {
+                    "jobId": result.get("job_id"),
+                    "filename": result.get("download_filename"),
+                    "name": result.get("name"),
+                    "type": result.get("type") or "file",
+                    "sizeBytes": result.get("size_bytes"),
+                    "path": result.get("path"),
+                },
+            })
         elif name == "dev_agent" and isinstance(result.get("steps"), list):
             # §3.6 plan §6. `result` here is run["result"] — the FULL,
             # pre-shaping copy (see the ordering fix in _executor above) —
@@ -1931,6 +1949,39 @@ def _spawn_title_update(conversation_id, exchange_count):
         subprocess.Popen(args, **kwargs)
     except Exception:
         pass  # title generation is cosmetic — never let it break an ask
+
+
+# The turn currently in flight, as (conv_id, user_text), or None. A
+# one-element list rather than a module global reassigned from inside ask()
+# purely so the interrupt handler below and ask() itself are provably
+# looking at the same object.
+#
+# This exists because the only reliable moment to record "the user asked
+# this and never got an answer" is from a signal handler, which has no
+# access to ask()'s locals. Killing a jarvis process mid-ask is a completely
+# ordinary thing to do (the web console's Stop button does it on every
+# abort), so that path needs to leave the conversation in an honest state,
+# not an empty one.
+_pending_turn = [None]
+
+
+def abandon_pending_turn(reason="interrupted"):
+    """Flush the in-flight turn as unanswered. Safe to call at any time,
+    including from a signal handler and including when nothing is pending.
+
+    Never raises: it runs on the way out of a dying process, where an
+    exception would just replace one lost message with a confusing
+    traceback.
+    """
+    pending = _pending_turn[0]
+    _pending_turn[0] = None
+    if not pending:
+        return False
+    conv_id, user_text = pending
+    try:
+        return conversations.abandon_exchange(conv_id, user_text, reason=reason)
+    except Exception:  # noqa: BLE001
+        return False
 
 
 def ask(user_text, commands=None, on_attempt=None, on_tool_call=None, on_tool_result=None, conversation_id=None,
@@ -2290,6 +2341,23 @@ def ask(user_text, commands=None, on_attempt=None, on_tool_call=None, on_tool_re
 
     attempts = []
 
+    # Persist the user's half of this turn NOW, before a single provider is
+    # contacted. Everything downstream of here can be killed mid-flight —
+    # the web UI's Stop button does exactly that (server.js killTree()s the
+    # child process, which on Windows is an unconditional taskkill /F and on
+    # POSIX a SIGTERM that skips every finally block) — and until this call
+    # existed, that killed the user's message with it. See
+    # conversations.begin_exchange's docstring.
+    #
+    # Registering the interrupt handler is a separate step in cli.py, not
+    # here: ask() is also called from contexts with no signal handling to
+    # own (the scheduler's spawned process, tests), and installing a
+    # process-wide handler from a library function would be reaching well
+    # outside this function's remit.
+    _pending_turn[0] = (conv_id, user_text) if conv_id else None
+    if conv_id:
+        conversations.begin_exchange(conv_id, user_text)
+
     for provider in providers:
         label = _provider_label(provider)
         provider_ref[0] = label
@@ -2411,9 +2479,10 @@ def ask(user_text, commands=None, on_attempt=None, on_tool_call=None, on_tool_re
                     # response bodies itself.
                     if conv_id:
                         logs.log(conv_id, "info", {"console_dump": dump_lines}, provider=key_label)
-                exchange_count = conversations.append_exchange(
+                exchange_count = conversations.complete_exchange(
                     conv_id, user_text, clean_text, label, extras=extras
                 )
+                _pending_turn[0] = None
                 _spawn_title_update(conv_id, exchange_count)
                 return AskResult(True, text=result.text, provider=label, attempts=attempts,
                                  assistant_name=assistant_name, address_user_as=address,
@@ -2421,4 +2490,15 @@ def ask(user_text, commands=None, on_attempt=None, on_tool_call=None, on_tool_re
 
             attempts.append((key_label, result.error))
 
+    # Every provider failed. The turn is still real — the user asked
+    # something and got nothing — so it's recorded as such rather than left
+    # pending forever (a pending turn would otherwise be re-abandoned by the
+    # next process's interrupt handler and look like it was cancelled).
+    if conv_id:
+        turn_runs = getattr(tool_executor, "runs", None) if tool_executor else None
+        conversations.abandon_exchange(
+            conv_id, user_text, reason="no provider answered",
+            extras=_extras_from_runs(turn_runs),
+        )
+    _pending_turn[0] = None
     return AskResult(False, attempts=attempts, assistant_name=assistant_name, address_user_as=address)
