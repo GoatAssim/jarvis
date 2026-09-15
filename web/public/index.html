@@ -321,8 +321,16 @@
         </div>
 
         <div class="skills-import" id="skills-import" hidden>
+          <label class="skills-field">
+            <span>Upload a .zip <em>(a skill folder &mdash; scripts, reference docs, SKILL.md)</em></span>
+            <div class="skills-zip-row">
+              <input type="file" id="skill-import-zip" accept=".zip,application/zip">
+              <span class="skills-zip-name" id="skill-import-zip-name">No file selected.</span>
+            </div>
+          </label>
+          <div class="skills-hint">SKILL.md can sit at the top of the zip, or inside the one folder the zip contains &mdash; both work. Scripts and reference files travel with it and load only when needed.</div>
           <label class="skills-field skills-field--grow">
-            <span>Paste a SKILL.md, or enter a folder / file path</span>
+            <span>&hellip;or paste a SKILL.md, or enter a folder / file path</span>
             <textarea id="skill-import-src" spellcheck="false" placeholder="---&#10;name: Imported&#10;description: &hellip;&#10;---&#10;&#10;&hellip;&#10;&#10;or:  C:\\Users\\me\\skills\\blender-render"></textarea>
           </label>
           <div class="skills-hint">Skills use Anthropic&rsquo;s SKILL.md format, so anything written for Claude, Copilot or Cursor imports as-is.</div>

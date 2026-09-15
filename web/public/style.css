@@ -2287,3 +2287,24 @@ audio.ask-dl-player{ max-height: none; background: transparent; }
   .skills-body { grid-template-columns: 1fr; }
   .skills-pane--list { border-right: none; border-bottom: 1px solid var(--line, #17323f); max-height: 34vh; }
 }
+
+/* Zip upload row in the Skills importer (see index.html's #skills-import). */
+.skills-zip-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.skills-zip-row input[type="file"] {
+  font-size: 0.72rem;
+  color: var(--muted, #6d8794);
+  max-width: 60%;
+}
+
+.skills-zip-name {
+  font-size: 0.7rem;
+  color: var(--muted, #6d8794);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}

@@ -62,6 +62,7 @@ written here is portable to those clients and vice versa.
 import json
 import re
 import shutil
+import zipfile
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -89,6 +90,21 @@ REFERENCE_MAX = 40000
 # Extensions treated as executable. Reading these into context is the exact
 # mistake tier 3 exists to prevent, so read_reference() refuses them by name.
 SCRIPT_SUFFIXES = {".py", ".ps1", ".sh", ".bat", ".cmd", ".js", ".rb", ".pl", ".exe"}
+
+# Caps for zip import. A skill can legitimately be "big" — that's the whole
+# point of supporting zips at all, per the request that started this: a
+# skill with a real script library and several reference docs. These are
+# generous ceilings against a zip bomb or an accidental wrong-file upload,
+# not a budget anyone normal skill is expected to approach.
+ZIP_MAX_COMPRESSED_BYTES = 25 * 1024 * 1024   # the upload itself
+ZIP_MAX_UNCOMPRESSED_BYTES = 200 * 1024 * 1024  # what it expands to
+ZIP_MAX_ENTRIES = 5000
+
+# Noise that shows up in a zip made by dragging a folder into Finder/Explorer
+# or `zip -r`, never intentional skill content. Filtered on install so a
+# skill folder doesn't ship someone's OS metadata forever.
+_ZIP_JUNK_NAMES = {".DS_Store", "Thumbs.db", "desktop.ini"}
+_ZIP_JUNK_DIRS = {"__MACOSX"}
 
 _SLUG_RE = re.compile(r"[^a-z0-9]+")
 _NAME_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,63}$")
@@ -180,6 +196,29 @@ def _read_skill_file(folder):
         return None
 
 
+def _list_references(folder):
+    """Every reference file under a skill folder, as relative posix paths.
+
+    Recursive, not just top-level: a folder-shaped skill (the case zip
+    import exists for — a real script library plus several reference docs)
+    naturally organizes into subfolders like scripts/ and docs/, and a
+    reference listing that only sees the top level would make everything
+    below it invisible to both the model and the web manager, even though
+    read_reference() already accepts a nested path like "docs/FORMAT.md".
+    Junk directories are excluded the same way zip import filters them.
+    """
+    if not folder.is_dir():
+        return []
+    out = []
+    for p in folder.rglob("*"):
+        if not p.is_file() or p.name == SKILL_FILE:
+            continue
+        if any(part in _ZIP_JUNK_DIRS or part in _ZIP_JUNK_NAMES for part in p.relative_to(folder).parts):
+            continue
+        out.append(p.relative_to(folder).as_posix())
+    return sorted(out)
+
+
 def list_skills(include_body=False):
     """Every installed skill's tier-1 metadata, in name order.
 
@@ -209,10 +248,7 @@ def list_skills(include_body=False):
             "valid": bool(desc),
             "keywords": meta.get("keywords") or [],
             "version": meta.get("version") or "",
-            "references": sorted(
-                p.name for p in folder.iterdir()
-                if p.is_file() and p.name != SKILL_FILE
-            ) if folder.is_dir() else [],
+            "references": _list_references(folder),
             "body_chars": len(body),
         }
         if not desc:
@@ -316,7 +352,7 @@ def load_skill(name):
         body = body[:BODY_SOFT_LIMIT] + "\n\n[...truncated — this skill's body exceeds the size limit]"
         truncated = True
 
-    references = sorted(p.name for p in folder.iterdir() if p.is_file() and p.name != SKILL_FILE)
+    references = _list_references(folder)
     result = {
         "name": (meta.get("name") or folder.name).strip(),
         "loaded": True,
@@ -450,23 +486,170 @@ def create_skill(name, description, instructions, keywords=None):
     }
 
 
-def add_skill(source, name=None):
-    """Install a skill from existing content: a folder, a SKILL.md file, or
-    raw markdown pasted in.
+def _zip_find_root(extracted_dir):
+    """Locate the folder within an extraction that actually holds SKILL.md.
 
-    The three shapes exist because they're the three ways a skill actually
-    arrives — copied from another agent's skills directory, downloaded as a
-    single file, or pasted from a chat window.
+    Handles the two shapes a real zip comes in:
+      - SKILL.md at the top level (zipped the CONTENTS of the skill folder)
+      - exactly one subfolder at the top level, SKILL.md inside IT (zipped
+        the folder ITSELF — the common case when someone right-clicks a
+        folder and picks "compress" or "send to zip")
+
+    Returns (root_path, error). Doesn't guess past those two shapes: a zip
+    with SKILL.md nested two levels deep, or with several top-level folders
+    and no root SKILL.md, is a genuine "what did you mean" case, not one
+    worth silently picking a winner for.
+    """
+    if (extracted_dir / SKILL_FILE).is_file():
+        return extracted_dir, None
+
+    entries = [
+        p for p in extracted_dir.iterdir()
+        if p.name not in _ZIP_JUNK_DIRS and not p.name.startswith(".")
+    ]
+    subdirs = [p for p in entries if p.is_dir()]
+    if len(subdirs) == 1 and not [p for p in entries if p.is_file()]:
+        nested = subdirs[0] / SKILL_FILE
+        if nested.is_file():
+            return subdirs[0], None
+        return None, (
+            f"Found one folder ('{subdirs[0].name}') but no {SKILL_FILE} inside it."
+        )
+
+    found = sorted(str(p.relative_to(extracted_dir)) for p in extracted_dir.rglob(SKILL_FILE))
+    if found:
+        return None, (
+            f"No {SKILL_FILE} at the top of the zip. Found one at: {found[0]} — "
+            "re-zip so SKILL.md is at the top level (or the only top-level folder)."
+        )
+    return None, f"No {SKILL_FILE} anywhere in the zip."
+
+
+def _install_from_zip(zip_path, name):
+    """Safely extract a zip, find its skill root, and install it. Returns
+    the same {"added": True, ...} / {"error": ...} shape as the other
+    add_skill branches.
+
+    Safety, in the order a hostile zip would need to defeat all of:
+      - a compressed-size cap, checked before touching the archive at all
+      - per-entry path containment (zip slip: "../../.ssh/authorized_keys"
+        as an entry name), resolved and checked before any write
+      - running uncompressed-size and entry-count totals against the zip
+        bomb caps, checked incrementally during extraction rather than only
+        at the end — so a bomb is caught partway through, not after fully
+        inflating onto disk
+    Extraction happens into a throwaway temp directory first; nothing lands
+    in SKILLS_DIR until the whole archive has passed every check and a real
+    SKILL.md with a description has been found inside it.
+    """
+    import tempfile
+
+    try:
+        size = zip_path.stat().st_size
+    except OSError as e:
+        return {"error": f"Couldn't read '{zip_path}': {e}"}
+    if size > ZIP_MAX_COMPRESSED_BYTES:
+        mb = ZIP_MAX_COMPRESSED_BYTES // (1024 * 1024)
+        return {"error": f"Zip is too large ({size // (1024 * 1024)}MB) — the limit is {mb}MB."}
+
+    try:
+        zf = zipfile.ZipFile(zip_path)
+    except zipfile.BadZipFile:
+        return {"error": f"'{zip_path.name}' isn't a valid zip file."}
+
+    with zf:
+        infos = zf.infolist()
+        if len(infos) > ZIP_MAX_ENTRIES:
+            return {"error": f"Zip has too many entries ({len(infos)}, limit {ZIP_MAX_ENTRIES})."}
+
+        with tempfile.TemporaryDirectory(prefix="jarvis_skill_zip_") as raw_tmp:
+            extract_root = Path(raw_tmp).resolve()
+            total_uncompressed = 0
+            for info in infos:
+                if info.is_dir():
+                    continue
+                # Zip slip: a crafted entry name like "../../etc/cron.d/x" is
+                # resolved against extract_root and must still land inside
+                # it. Checked BEFORE extraction, per entry, not fixed up
+                # after the fact.
+                target = (extract_root / info.filename).resolve()
+                try:
+                    target.relative_to(extract_root)
+                except ValueError:
+                    return {"error": f"Zip entry '{info.filename}' escapes the archive — refusing to extract."}
+                total_uncompressed += info.file_size
+                if total_uncompressed > ZIP_MAX_UNCOMPRESSED_BYTES:
+                    mb = ZIP_MAX_UNCOMPRESSED_BYTES // (1024 * 1024)
+                    return {"error": f"Zip expands past the {mb}MB limit — refusing to extract."}
+
+            try:
+                zf.extractall(extract_root)
+            except OSError as e:
+                return {"error": f"Couldn't extract zip: {e}"}
+
+            root, error = _zip_find_root(extract_root)
+            if error:
+                return {"error": error}
+
+            raw = _read_skill_file(root)
+            if raw is None:
+                return {"error": f"Couldn't read {SKILL_FILE} from the zip."}
+            meta, _ = parse_frontmatter(raw)
+            slug, error = _validate_new(name or meta.get("name") or zip_path.stem, meta.get("description"))
+            if error:
+                return {"error": error}
+
+            dest = SKILLS_DIR / slug
+            try:
+                shutil.copytree(
+                    root, dest,
+                    ignore=shutil.ignore_patterns(*_ZIP_JUNK_NAMES, *_ZIP_JUNK_DIRS),
+                )
+            except OSError as e:
+                return {"error": f"Couldn't install skill: {e}"}
+
+    references = _list_references(dest)
+    return {
+        "added": True,
+        "name": meta.get("name") or slug,
+        "slug": slug,
+        "source": "zip",
+        "path": str(dest),
+        "references": references,
+    }
+
+
+def add_skill(source, name=None):
+    """Install a skill from existing content: a folder, a SKILL.md file, a
+    zip archive, or raw markdown pasted in.
+
+    The four shapes exist because they're the ways a skill actually arrives
+    — copied from another agent's skills directory, downloaded as a single
+    file, downloaded/exported as a zip (a real skill with a script library
+    and several reference docs is naturally a folder, and a folder travels
+    as a zip), or pasted from a chat window.
     """
     raw = (source or "").strip()
     if not raw:
-        return {"error": "Pass a folder path, a SKILL.md path, or the skill's markdown."}
+        return {"error": "Pass a folder path, a SKILL.md path, a .zip path, or the skill's markdown."}
 
     path = Path(raw).expanduser()
     try:
         is_dir, is_file = path.is_dir(), path.is_file()
     except OSError:
         is_dir = is_file = False
+
+    # Checked before the generic is_file branch below: a zip's bytes are
+    # binary and reading them with read_text() (what that branch does next)
+    # would corrupt them. Sniffed by content (zipfile.is_zipfile), not by
+    # ".zip" suffix alone, so a misnamed upload still gets handled right.
+    if is_file:
+        try:
+            looks_like_zip = zipfile.is_zipfile(path)
+        except OSError:
+            looks_like_zip = False
+        if looks_like_zip:
+            return _install_from_zip(path, name)
 
     if is_dir:
         src_file = path / SKILL_FILE
