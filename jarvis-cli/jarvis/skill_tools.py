@@ -185,16 +185,18 @@ TOOL_SCHEMAS = [
         "name": "add_skill",
         "short_description": "Install an existing skill.",
         "description": (
-            "Install a skill that already exists: a folder path, a path to a SKILL.md, "
-            "or the skill's markdown pasted in directly. The content must have "
-            "frontmatter with a description — use create_skill instead if it doesn't."
+            "Install a skill that already exists: a folder path, a path to a SKILL.md "
+            "file, a path to a .zip (a skill folder with scripts and reference docs, "
+            "zipped), or the skill's markdown pasted in directly. The content must "
+            "have frontmatter with a description — use create_skill instead if it "
+            "doesn't."
         ),
         "parameters": {
             "type": "object",
             "properties": {
                 "source": {
                     "type": "string",
-                    "description": "Folder path, SKILL.md path, or the raw markdown.",
+                    "description": "Folder path, SKILL.md path, .zip path, or the raw markdown.",
                 },
                 "name": {"type": "string", "description": "Optional override for the skill's name."},
             },

@@ -4988,12 +4988,24 @@
     renderSkillsList();
   });
 
+  const skillImportZip = qs("#skill-import-zip");
+  const skillImportZipName = qs("#skill-import-zip-name");
+
   qs("#btn-skill-import").addEventListener("click", () => {
     selectedSkill = null;
     qs("#skill-import-src").value = "";
+    skillImportZip.value = "";
+    skillImportZipName.textContent = "No file selected.";
     skillEditorTitle.textContent = "Import skill";
     skillsPane("import");
     renderSkillsList();
+  });
+
+  skillImportZip.addEventListener("change", () => {
+    const file = skillImportZip.files && skillImportZip.files[0];
+    skillImportZipName.textContent = file
+      ? `${file.name} (${(file.size / 1024).toFixed(0)} KB)`
+      : "No file selected.";
   });
 
   qs("#btn-skill-create").addEventListener("click", async () => {
@@ -5013,9 +5025,33 @@
     }
   });
 
+  // A zip skill (real scripts + several reference docs) doesn't fit the
+  // JSON path the paste/path form uses, so a selected file goes through the
+  // raw-body /api/skills/upload endpoint instead — same "which shape did
+  // the user give me" branch skills.add_skill() makes on the Python side,
+  // just decided one layer up here because a File object and a pasted
+  // string need genuinely different fetch() calls, not just different args.
   qs("#btn-skill-install").addEventListener("click", async () => {
+    const file = skillImportZip.files && skillImportZip.files[0];
+    if (file) {
+      try {
+        const res = await fetch("/api/skills/upload", {
+          method: "POST",
+          headers: { "Content-Type": "application/zip" },
+          body: file,
+        });
+        let data = null;
+        try { data = await res.json(); } catch { /* no body */ }
+        if (!res.ok) throw new Error((data && data.error) || `Upload failed (${res.status})`);
+        toast(`Installed "${data.name || data.slug}".`, "info");
+        await loadSkills(data.name || data.slug);
+      } catch (e) {
+        toast(e.message || "Couldn't install that zip.");
+      }
+      return;
+    }
     const source = qs("#skill-import-src").value;
-    if (!source.trim()) { toast("Paste a SKILL.md, or give a path."); return; }
+    if (!source.trim()) { toast("Upload a .zip, paste a SKILL.md, or give a path."); return; }
     try {
       const added = await api("POST", "/api/skills", { mode: "add", source });
       toast(`Installed "${added.name || added.slug}".`, "info");

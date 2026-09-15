@@ -1345,7 +1345,7 @@ def main():
     if argv[0] == "skills-add":
         from . import skills as skills_mod
         if len(argv) < 2 or not argv[1].strip():
-            print(json.dumps({"error": "usage: jarvis skills-add <folder|file|markdown> [name]"}))
+            print(json.dumps({"error": "usage: jarvis skills-add <folder|file|.zip|markdown> [name]"}))
             sys.exit(1)
         name = argv[2].strip() if len(argv) > 2 and argv[2].strip() else None
         result = skills_mod.add_skill(argv[1], name)

@@ -849,6 +849,36 @@ app.post("/api/skills", requireJarvis, async (req, res) => {
   return parseSkillsResult(result, res, "Couldn't install that skill.");
 });
 
+// A big skill (real scripts + several reference docs — the case zip import
+// exists for) doesn't fit in a JSON body, so it gets its own raw-upload
+// endpoint instead of overloading POST /api/skills — same shape as
+// /api/voice/transcribe: save the raw bytes to a temp file, hand the CLI a
+// path, always clean the temp file up (skills.py itself copies whatever it
+// finds inside the zip into ~/.jarvis/skills; the uploaded zip is never kept
+// around after that).
+app.post(
+  "/api/skills/upload",
+  requireJarvis,
+  express.raw({ type: "application/zip", limit: "25mb" }),
+  async (req, res) => {
+    if (!Buffer.isBuffer(req.body) || req.body.length === 0) {
+      return res.status(400).json({ error: "expected a raw .zip body (Content-Type: application/zip)" });
+    }
+    const tmpPath = path.join(os.tmpdir(), `jarvis_web_skill_${Date.now()}_${Math.random().toString(36).slice(2)}.zip`);
+    try {
+      await fs.writeFile(tmpPath, req.body);
+    } catch (e) {
+      return res.status(500).json({ error: `couldn't save upload: ${e.message}` });
+    }
+    const args = ["skills-add", tmpPath];
+    const name = typeof req.query?.name === "string" ? req.query.name.trim() : "";
+    if (name) args.push(name);
+    const result = await runJarvisOnce(args, 30000);
+    await fs.unlink(tmpPath).catch(() => {});
+    return parseSkillsResult(result, res, "Couldn't install that skill.");
+  },
+);
+
 app.delete("/api/skills/:name", requireJarvis, async (req, res) => {
   const result = await runJarvisOnce(["skills-remove", req.params.name], 15000);
   return parseSkillsResult(result, res, "Couldn't remove that skill.");

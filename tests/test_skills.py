@@ -208,6 +208,130 @@ def test_add_from_markdown_and_remove():
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+ZIP_SKILL_MD = (
+    "---\nname: Blender Render\ndescription: Submit and monitor a render job. "
+    "Use for any Blender render request.\n---\n\nSee submit.py.\n"
+)
+
+
+def test_zip_import_flat():
+    """SKILL.md at the top of the archive — the shape you get zipping the
+    CONTENTS of a skill folder rather than the folder itself."""
+    import zipfile
+    tmp = fresh_dir()
+    try:
+        z = tmp / "flat.zip"
+        with zipfile.ZipFile(z, "w") as zf:
+            zf.writestr("SKILL.md", ZIP_SKILL_MD)
+            zf.writestr("REFERENCE.md", "# settings\nsamples=256")
+            zf.writestr("submit.py", "print('go')")
+        result = skills.add_skill(str(z))
+        check("flat zip installs", result.get("added") is True, str(result))
+        check("source is reported as zip", result.get("source") == "zip")
+        check("catalog picks it up", "Blender Render" in skills.catalog_text())
+        loaded = skills.load_skill("Blender Render")
+        check("both files listed as references",
+              set(loaded.get("references", [])) == {"REFERENCE.md", "submit.py"})
+        check("script still refused at read time (tier 3 rule holds for zip-imported skills too)",
+              "script" in skills.read_reference("Blender Render", "submit.py").get("error", "").lower())
+        check("reference doc still readable",
+              "samples" in skills.read_reference("Blender Render", "REFERENCE.md").get("content", ""))
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_zip_import_folder_wrapped_and_junk_filtered():
+    """SKILL.md one level down inside the zip's one top folder — the shape
+    you get right-clicking a folder and choosing "compress"/"send to zip".
+    Also verifies OS junk (.DS_Store, __MACOSX) never reaches the installed
+    skill, and that a nested reference (docs/DEEP.md) is still discoverable
+    and readable via its relative path."""
+    import zipfile
+    tmp = fresh_dir()
+    try:
+        z = tmp / "wrapped.zip"
+        with zipfile.ZipFile(z, "w") as zf:
+            zf.writestr("render-pack/SKILL.md", ZIP_SKILL_MD)
+            zf.writestr("render-pack/docs/DEEP.md", "deep reference content")
+            zf.writestr("render-pack/.DS_Store", "junk")
+            zf.writestr("__MACOSX/._SKILL.md", "junk")
+        result = skills.add_skill(str(z))
+        check("wrapped zip installs", result.get("added") is True, str(result))
+        folder = skills.SKILLS_DIR / result["slug"]
+        check("junk file filtered out", not (folder / ".DS_Store").exists())
+        check("__MACOSX never copied in", not any(p.name == "__MACOSX" for p in skills.SKILLS_DIR.iterdir()))
+        check("nested reference listed with its relative path",
+              "docs/DEEP.md" in skills.list_skills()[0]["references"])
+        check("nested reference readable by that path",
+              "deep reference" in skills.read_reference("Blender Render", "docs/DEEP.md").get("content", ""))
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_zip_slip_is_blocked():
+    """A zip entry can name an arbitrary path ("../../etc/cron.d/x"). This
+    must be caught before anything is written to disk, not cleaned up after."""
+    import zipfile
+    tmp = fresh_dir()
+    try:
+        z = tmp / "evil.zip"
+        with zipfile.ZipFile(z, "w") as zf:
+            zf.writestr("SKILL.md", "---\nname: Evil\ndescription: an evil skill\n---\n\nbody")
+            zf.writestr("../../../tmp/jarvis_zip_slip_probe.txt", "pwned")
+        result = skills.add_skill(str(z), name="Evil")
+        check("zip slip attempt is rejected", "escapes" in result.get("error", ""), str(result))
+        check("no file was actually written outside the archive",
+              not Path("/tmp/jarvis_zip_slip_probe.txt").exists())
+    finally:
+        Path("/tmp/jarvis_zip_slip_probe.txt").unlink(missing_ok=True)
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_zip_without_skill_md_is_rejected():
+    import zipfile
+    tmp = fresh_dir()
+    try:
+        z = tmp / "empty.zip"
+        with zipfile.ZipFile(z, "w") as zf:
+            zf.writestr("readme.txt", "just a readme")
+        result = skills.add_skill(str(z))
+        check("zip with no SKILL.md anywhere is rejected", "error" in result)
+        check("nothing was installed", skills.list_skills() == [])
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_misnamed_non_zip_falls_back_to_markdown_path():
+    """A .zip-named file that isn't actually a zip (sniffed by content, not
+    extension) must not crash — it should fall through to being treated as
+    plain text, and fail there for the ordinary "no description" reason."""
+    tmp = fresh_dir()
+    try:
+        fake = tmp / "not-really.zip"
+        fake.write_text("hello world, not a zip", encoding="utf-8")
+        result = skills.add_skill(str(fake))
+        check("misnamed non-zip doesn't crash", "error" in result)
+        check("fails for the ordinary reason, not a zip-parsing error",
+              "description" in result["error"].lower())
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_zip_duplicate_name_rejected():
+    import zipfile
+    tmp = fresh_dir()
+    try:
+        z = tmp / "flat.zip"
+        with zipfile.ZipFile(z, "w") as zf:
+            zf.writestr("SKILL.md", ZIP_SKILL_MD)
+        skills.add_skill(str(z))
+        result = skills.add_skill(str(z), name="Blender Render")
+        check("duplicate zip import rejected like any other duplicate",
+              "already exists" in result.get("error", ""))
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 def test_save_rejects_an_edit_that_would_break_discovery():
     tmp = seed()
     try:
