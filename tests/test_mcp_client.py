@@ -275,6 +275,105 @@ def test_unknown_transport_is_rejected():
         cleanup(tmp)
 
 
+def fresh_multi(servers):
+    """Like fresh(), but for tests that need more than one configured
+    server — takes {raw_name: spec} and writes them all in that order
+    (dict order == config-file order, which is what _assign_slugs walks)."""
+    tmp = Path(tempfile.mkdtemp(prefix="jarvis_mcp_test_"))
+    mcp_client.JARVIS_DIR = tmp
+    mcp_client.CONFIG_FILE = tmp / "mcp_config.json"
+    mcp_client.CACHE_FILE = tmp / "mcp_cache.json"
+    mcp_client._POOL.clear()
+    mcp_client.CONFIG_FILE.write_text(json.dumps({"servers": servers}), encoding="utf-8")
+    return tmp
+
+
+def test_colliding_server_names_both_survive():
+    # "Fake Server" and "fake-server!!" both sanitize to "fake_server" —
+    # this used to mean the second one silently clobbered the first in
+    # enabled_servers()'s dict (see mcp_client._assign_slugs's docstring).
+    tmp = fresh_multi({
+        "Fake Server": {"enabled": True, "transport": "stdio",
+                         "command": sys.executable, "args": ["nope1.py"]},
+        "fake-server!!": {"enabled": True, "transport": "stdio",
+                           "command": sys.executable, "args": ["nope2.py"]},
+    })
+    try:
+        servers = mcp_client.enabled_servers()
+        check("both servers are enabled, none dropped", len(servers) == 2, list(servers))
+        check("the first raw name keeps the plain slug", "fake_server" in servers, list(servers))
+        collided_slug = [s for s in servers if s != "fake_server"]
+        check("the second raw name gets a disambiguated slug",
+              len(collided_slug) == 1 and collided_slug[0].startswith("fake_server_"),
+              collided_slug)
+        check("each slot remembers its own raw name",
+              servers["fake_server"]["_raw_name"] == "Fake Server")
+        check("the disambiguated slot remembers its own raw name too",
+              servers[collided_slug[0]]["_raw_name"] == "fake-server!!")
+
+        st = mcp_client.status()
+        check("status() reports both servers", len(st["servers"]) == 2, st["servers"])
+        check("status() surfaces the collision instead of hiding it",
+              bool(st.get("name_collisions")), st)
+        renamed_rows = [s for s in st["servers"] if s.get("renamed_due_to_collision")]
+        check("exactly the second entry is flagged as renamed", len(renamed_rows) == 1, renamed_rows)
+        check("the flagged row's slug matches enabled_servers()'s slug",
+              renamed_rows and renamed_rows[0]["slug"] == collided_slug[0])
+    finally:
+        cleanup(tmp)
+
+
+def test_non_colliding_names_report_no_collision():
+    tmp = fresh_multi({
+        "alpha": {"enabled": True, "transport": "stdio",
+                  "command": sys.executable, "args": ["a.py"]},
+        "beta": {"enabled": True, "transport": "stdio",
+                 "command": sys.executable, "args": ["b.py"]},
+    })
+    try:
+        servers = mcp_client.enabled_servers()
+        check("distinct names get distinct slugs unchanged",
+              set(servers) == {"alpha", "beta"}, list(servers))
+        st = mcp_client.status()
+        check("no collision is reported when there isn't one", "name_collisions" not in st, st)
+        check("nothing is flagged as renamed",
+              not any(s.get("renamed_due_to_collision") for s in st["servers"]))
+    finally:
+        cleanup(tmp)
+
+
+def test_mcp_tools_build_registers_both_colliding_servers():
+    # End-to-end through actions/mcp_tools.py._build(), which is what the
+    # KNOWN-ISSUES-AND-GAPS.md entry actually named as the risk site.
+    tmp = fresh_multi({
+        "Fake Server": {"enabled": True, "transport": "stdio",
+                         "command": sys.executable, "args": ["nope1.py"]},
+        "fake-server!!": {"enabled": True, "transport": "stdio",
+                           "command": sys.executable, "args": ["nope2.py"]},
+    })
+    try:
+        # Hand-write a cache so _build() has tools to work with without
+        # spawning either (nonexistent) fake server for real.
+        mcp_client.save_cache({
+            "fake_server": {"tools": [{"name": "echo", "input_schema": {"type": "object"}}],
+                            "fetched_at": time.time()},
+            list(mcp_client.enabled_servers())[1]: {
+                "tools": [{"name": "echo", "input_schema": {"type": "object"}}],
+                "fetched_at": time.time()},
+        })
+        import importlib
+        from jarvis.actions import mcp_tools
+        importlib.reload(mcp_tools)
+        names = sorted(mcp_tools.TOOLS)
+        check("both servers' echo tools are registered under distinct names",
+              sum(1 for n in names if n.endswith("_echo")) == 2, names)
+    finally:
+        import importlib
+        from jarvis.actions import mcp_tools
+        cleanup(tmp)
+        importlib.reload(mcp_tools)  # restore a normal (empty) catalog
+
+
 for fn in [
     test_name_sanitizing, test_handshake_and_listing, test_refresh_populates_the_cache,
     test_cache_read_never_spawns, test_calling_tools,
@@ -283,6 +382,9 @@ for fn in [
     test_session_is_pooled_within_a_process, test_broken_server_is_recorded_not_fatal,
     test_disabled_servers_are_ignored, test_stale_cache_entries_are_pruned,
     test_unknown_transport_is_rejected,
+    test_colliding_server_names_both_survive,
+    test_non_colliding_names_report_no_collision,
+    test_mcp_tools_build_registers_both_colliding_servers,
 ]:
     fn()
 
