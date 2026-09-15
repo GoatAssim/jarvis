@@ -417,6 +417,61 @@ def test_get_tool_schema_round_trip():
     check("an empty name is handled", "error" in system_tools.tool_get_tool_schema({}))
 
 
+# --- create_skill: references/ and scripts/ subfolders (module splitting) --
+
+def test_create_skill_with_references_and_scripts():
+    tmp = fresh_dir()
+    try:
+        r = skills.create_skill(
+            "Render Pipeline",
+            "Submit and monitor Blender render jobs. Use for any render request.",
+            "## Overview\nSee references/SETUP.md. Run scripts/submit.py.",
+            references={"SETUP.md": "farm=render01", "DEEP.md": "deep"},
+            scripts={"submit.py": "print(1)"},
+        )
+        check("creation reports both subfolders written",
+              r.get("created") is True and set(r.get("references", [])) == {"SETUP.md", "DEEP.md"}
+              and r.get("scripts") == ["submit.py"])
+        folder = skills.SKILLS_DIR / "render-pipeline"
+        check("references/ folder actually exists", (folder / "references").is_dir())
+        check("scripts/ folder actually exists", (folder / "scripts").is_dir())
+        loaded = skills.load_skill("Render Pipeline")
+        check("both subfolders' files are discoverable via load_skill",
+              set(loaded["references"]) == {"references/SETUP.md", "references/DEEP.md", "scripts/submit.py"})
+        check("reference readable by its subpath",
+              "render01" in skills.read_reference("Render Pipeline", "references/SETUP.md").get("content", ""))
+        check("script still refused at read time regardless of which folder it's in",
+              "script" in skills.read_reference("Render Pipeline", "scripts/submit.py").get("error", "").lower())
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_create_skill_rejects_unsafe_module_filenames():
+    tmp = fresh_dir()
+    try:
+        for bad in ("../../etc/passwd", "sub/dir.md", "/etc/passwd", ""):
+            out = skills.create_skill("Evil", "an evil skill for testing", "body",
+                                      references={bad: "x"})
+            check(f"unsafe reference filename rejected: {bad!r}", "error" in out)
+        check("nothing was created from the rejected attempts", skills.list_skills() == [])
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_create_skill_without_modules_creates_no_subfolders():
+    """A simple skill (the common case) should not sprout empty folders."""
+    tmp = fresh_dir()
+    try:
+        skills.create_skill("Simple", "A simple skill with no modules, for testing.", "just do it")
+        folder = skills.SKILLS_DIR / "simple"
+        check("no references/ folder for a skill with none",
+              not (folder / "references").exists())
+        check("no scripts/ folder for a skill with none",
+              not (folder / "scripts").exists())
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 for t in [v for k, v in sorted(globals().items()) if k.startswith("test_")]:
     t()
 

@@ -184,6 +184,34 @@ def test_skills_catalog_rides_in_the_cached_prefix():
     check("and not in the per-request tail", "SKILLCATALOG" not in dynamic)
 
 
+def test_pack_instructions_does_not_invalidate_the_static_cache():
+    """Regression test for a real bug: pack_instructions_ctx is built from
+    route.groups, which differs turn to turn as the router matches
+    different things. It used to sit in the STATIC half, so a conversation
+    whose messages route to different groups invalidated the entire cached
+    block on every such turn — a marked block caches as a whole; any byte
+    difference inside it is a miss for the whole block, not a partial hit."""
+    static_a, dynamic_a = ai_client._system_prompt_parts(
+        PERSONA, "CMDS", "FREQ", True, **{**KW, "pack_instructions_ctx": "GROUP-A-INSTRUCTIONS"})
+    static_b, dynamic_b = ai_client._system_prompt_parts(
+        PERSONA, "CMDS", "FREQ", True, **{**KW, "pack_instructions_ctx": "GROUP-B-INSTRUCTIONS"})
+    check("static half is IDENTICAL regardless of which group routed this turn",
+          static_a == static_b)
+    check("pack instructions correctly live in the dynamic tail instead",
+          "GROUP-A-INSTRUCTIONS" in dynamic_a and "GROUP-A-INSTRUCTIONS" not in static_a)
+
+
+def test_loaded_skills_ctx_is_dynamic_not_static():
+    """A manually-loaded skill (see skill_stickiness.py) is stable within
+    one conversation but not identical across different ones, so it belongs
+    in the per-request tail alongside memory_ctx, not the globally-static
+    prefix that's meant to be identical for everyone on this capacity mode."""
+    static, dynamic = ai_client._system_prompt_parts(
+        PERSONA, "CMDS", "FREQ", True, loaded_skills_ctx="FORCED-SKILL-BODY", **KW)
+    check("loaded-skill content is in the dynamic tail", "FORCED-SKILL-BODY" in dynamic)
+    check("and not in the static prefix", "FORCED-SKILL-BODY" not in static)
+
+
 def test_build_messages_emits_two_system_messages():
     msgs = ai_client._build_messages(
         PERSONA, {}, "hello there", True,

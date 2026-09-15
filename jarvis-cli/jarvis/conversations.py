@@ -288,8 +288,9 @@ def delete_conversation(conv_id):
             CURRENT_FILE.unlink(missing_ok=True)
     except (FileNotFoundError, json.JSONDecodeError, UnicodeDecodeError, OSError):
         pass
-    from . import route_stickiness
+    from . import route_stickiness, skill_stickiness
     route_stickiness.clear_sticky(conv_id)
+    skill_stickiness.unload_all(conv_id)  # a fresh conversation shouldn't inherit an old one's force-loaded skill either
     return True
 
 

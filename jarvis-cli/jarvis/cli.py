@@ -42,7 +42,7 @@ ENCODING = "utf-8"
 
 CHAIN_SEP = "then"      # starts a new batch \u2014 waits for the previous one to finish
 PARALLEL_SEP = "and"    # joins the current batch \u2014 runs alongside whatever's already in it
-RESERVED_NAMES = {"config", "ai-config", "ai-clear", "ai-drop-from", "playnite-config", "spotify-config", "spotify-login", "memory-config", "everything-config", "tools-list", "tool-run", "skills-list", "skills-get", "skills-save", "skills-add", "skills-create", "skills-remove", "tool-preview", "tool-safety-set", "conv-new", "conv-list", "conv-show", "conv-switch", "conv-delete", "logs", "logs-list", "logs-show", "logs-clear", "organize-json", "mode", "mode-set", "voice-config", "speak", "listen", "transcribe", CHAIN_SEP, PARALLEL_SEP, "-h", "--help"}
+RESERVED_NAMES = {"config", "ai-config", "ai-clear", "ai-drop-from", "playnite-config", "spotify-config", "spotify-login", "memory-config", "everything-config", "tools-list", "tool-run", "skills-list", "skills-get", "skills-save", "skills-add", "skills-create", "skills-remove", "skillmake", "skilladd", "skillload", "skillunload", "tool-preview", "tool-safety-set", "conv-new", "conv-list", "conv-show", "conv-switch", "conv-delete", "logs", "logs-list", "logs-show", "logs-clear", "organize-json", "mode", "mode-set", "voice-config", "speak", "listen", "transcribe", CHAIN_SEP, PARALLEL_SEP, "-h", "--help"}
 
 OUT = Palette(sys.stdout)  # actual command output: the banner, the command list
 ERR = Palette(sys.stderr)  # jarvis's own status/trace/error messages
@@ -1342,21 +1342,21 @@ def main():
         print(json.dumps(result, indent=2))
         sys.exit(1 if result.get("error") else 0)
 
-    if argv[0] == "skills-add":
+    if argv[0] in ("skills-add", "skilladd"):
         from . import skills as skills_mod
         if len(argv) < 2 or not argv[1].strip():
-            print(json.dumps({"error": "usage: jarvis skills-add <folder|file|.zip|markdown> [name]"}))
+            print(json.dumps({"error": f"usage: jarvis {argv[0]} <folder|file|.zip|markdown> [name]"}))
             sys.exit(1)
         name = argv[2].strip() if len(argv) > 2 and argv[2].strip() else None
         result = skills_mod.add_skill(argv[1], name)
         print(json.dumps(result, indent=2))
         sys.exit(1 if result.get("error") else 0)
 
-    if argv[0] == "skills-create":
+    if argv[0] in ("skills-create", "skillmake"):
         # jarvis skills-create <name> <description> <instructions>
         from . import skills as skills_mod
         if len(argv) < 4:
-            print(json.dumps({"error": "usage: jarvis skills-create <name> <description> <instructions>"}))
+            print(json.dumps({"error": f"usage: jarvis {argv[0]} <name> <description> <instructions>"}))
             sys.exit(1)
         result = skills_mod.create_skill(argv[1].strip(), argv[2].strip(), argv[3])
         print(json.dumps(result, indent=2))
@@ -1370,6 +1370,58 @@ def main():
         result = skills_mod.remove_skill(argv[1].strip())
         print(json.dumps(result, indent=2))
         sys.exit(1 if result.get("error") else 0)
+
+    if argv[0] == "skillload":
+        # jarvis skillload <name> [conversation-id]
+        # Force a skill's full instructions into every ask, either for one
+        # conversation (pass its id) or globally (omit it) — see
+        # skill_stickiness.py. The CLI half of the "/skillload <name>" chat
+        # command; the web UI's slash command hits the same code path
+        # through POST /api/skills/:name/load.
+        from . import skill_stickiness, skills as skills_mod
+        if len(argv) < 2 or not argv[1].strip():
+            print(json.dumps({"error": "usage: jarvis skillload <name> [conversation-id]"}))
+            sys.exit(1)
+        conv_id = argv[2].strip() if len(argv) > 2 else ""
+        info = skills_mod.export_skill(argv[1].strip())
+        if info.get("error"):
+            print(json.dumps({"error": info["error"]}))
+            sys.exit(1)
+        meta, _ = skills_mod.parse_frontmatter(info["content"])
+        real_name = (meta.get("name") or info["slug"]).strip()
+        skill_stickiness.load(conv_id or None, real_name)
+        print(json.dumps({
+            "loaded": True, "name": real_name,
+            "scope": conv_id or "global (every conversation)",
+        }, indent=2))
+        return
+
+    if argv[0] == "skillunload":
+        # jarvis skillunload <name> [conversation-id]   -- drop one
+        # jarvis skillunload --all [conversation-id]    -- drop everything
+        from . import skill_stickiness, skills as skills_mod
+        if len(argv) < 2 or not argv[1].strip():
+            print(json.dumps({"error": "usage: jarvis skillunload <name>|--all [conversation-id]"}))
+            sys.exit(1)
+        raw_name = argv[1].strip()
+        conv_id = argv[2].strip() if len(argv) > 2 else ""
+        if raw_name == "--all":
+            skill_stickiness.unload_all(conv_id or None)
+            print(json.dumps({"unloaded_all": True, "scope": conv_id or "global (every conversation)"}, indent=2))
+            return
+        real_name = raw_name
+        info = skills_mod.export_skill(raw_name)
+        if not info.get("error"):
+            meta, _ = skills_mod.parse_frontmatter(info["content"])
+            real_name = (meta.get("name") or info["slug"]).strip()
+        # Unload by whatever name was given even if the skill itself no
+        # longer exists — that's exactly the case where cleanup matters.
+        skill_stickiness.unload(conv_id or None, real_name)
+        print(json.dumps({
+            "unloaded": True, "name": real_name,
+            "scope": conv_id or "global (every conversation)",
+        }, indent=2))
+        return
 
     if argv[0] == "tools-list":
         from . import tools as system_tools

@@ -219,7 +219,10 @@
 
         <div class="ask-quote-bar" id="ask-quote-bar" hidden></div>
 
-        <form class="ask-input-row" id="ask-form">
+        <!-- Autocomplete for "/skillload <name>" / "/skillunload <name>" — see
+     app.js's updateSkillSuggest(). Positioned above the input row by CSS. -->
+<div class="skill-slash-suggest" id="skill-slash-suggest" hidden></div>
+<form class="ask-input-row" id="ask-form">
           <textarea id="ask-input" rows="1" placeholder="Ask Jarvis anything&hellip; highlight text above to quote it" maxlength="4000"></textarea>
           <button class="btn btn--ghost btn--icon" id="btn-ask-mic" type="button" title="Record a voice message">
             <svg class="mic-icon" id="mic-icon" viewBox="0 0 24 24" aria-hidden="true">

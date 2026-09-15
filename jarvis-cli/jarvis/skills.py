@@ -91,6 +91,18 @@ REFERENCE_MAX = 40000
 # mistake tier 3 exists to prevent, so read_reference() refuses them by name.
 SCRIPT_SUFFIXES = {".py", ".ps1", ".sh", ".bat", ".cmd", ".js", ".rb", ".pl", ".exe"}
 
+# The two subfolders create_skill() writes into for a multi-module skill —
+# same names zip import already recognizes, since read_reference() and
+# _list_references() don't care how a file got there.
+REFERENCES_SUBDIR = "references"
+SCRIPTS_SUBDIR = "scripts"
+
+# Filenames under references/ or scripts/ at creation time come from the
+# model (create_skill's arguments), so they get the same treatment a zip
+# entry does: no path separators, no "..", nothing that could resolve
+# outside the one folder they're allowed to land in.
+_SAFE_MODULE_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
+
 # Caps for zip import. A skill can legitimately be "big" — that's the whole
 # point of supporting zips at all, per the request that started this: a
 # skill with a real script library and several reference docs. These are
@@ -446,14 +458,41 @@ def _validate_new(name, description):
     return slug, None
 
 
-def create_skill(name, description, instructions, keywords=None):
-    """Write a brand-new skill folder from supplied content."""
+def create_skill(name, description, instructions, keywords=None, references=None, scripts=None):
+    """Write a brand-new skill folder from supplied content.
+
+    `references` and `scripts` are optional {filename: content} maps,
+    written into references/ and scripts/ under the new skill folder
+    (created on demand — a skill with neither gets neither folder). This is
+    the creation-time half of the tier-2/tier-3 split, not just the
+    zip-import one: a genuinely complex skill can put step-by-step detail
+    for each distinct procedure into its own reference file and keep
+    SKILL.md itself short — an overview plus pointers — and put any code
+    into scripts/, which (same as everywhere else in this module) is run
+    through the command tools rather than read into context. See
+    skill_tools.py's create_skill schema for the guidance actually shown to
+    the model about when a skill is complex enough to split this way.
+    """
     slug, error = _validate_new(name, description)
     if error:
         return {"error": error}
     body = (instructions or "").strip()
     if not body:
         return {"error": "Instructions are required — an empty skill does nothing."}
+
+    for label, mapping in (("references", references), ("scripts", scripts)):
+        if mapping is None:
+            continue
+        if not isinstance(mapping, dict):
+            return {"error": f"'{label}' must be a {{filename: content}} mapping."}
+        for filename in mapping:
+            if not _SAFE_MODULE_NAME_RE.match(filename or ""):
+                return {
+                    "error": (
+                        f"Bad {label} filename '{filename}' — use a plain name "
+                        "(letters, numbers, '.', '-', '_'), no paths."
+                    )
+                }
 
     meta = {
         "name": name.strip(),
@@ -467,14 +506,31 @@ def create_skill(name, description, instructions, keywords=None):
         ]
 
     folder = SKILLS_DIR / slug
+    written = {"references": [], "scripts": []}
     try:
         folder.mkdir(parents=True, exist_ok=False)
         (folder / SKILL_FILE).write_text(
             f"{render_frontmatter(meta)}\n\n{body}\n", encoding=ENCODING
         )
+        for label, mapping, subdir in (
+            ("references", references, REFERENCES_SUBDIR),
+            ("scripts", scripts, SCRIPTS_SUBDIR),
+        ):
+            if not mapping:
+                continue
+            sub = folder / subdir
+            sub.mkdir(parents=True, exist_ok=True)
+            for filename, content in mapping.items():
+                (sub / filename).write_text(content or "", encoding=ENCODING)
+                written[label].append(filename)
     except OSError as e:
+        # A partial write on a mid-creation OSError is left as-is rather
+        # than rolled back — remove_skill on the slug cleans it up the same
+        # way it would a fully-created skill, and list_skills already
+        # surfaces a folder missing a usable SKILL.md as invalid rather
+        # than hiding it.
         return {"error": f"Couldn't create skill: {e}"}
-    return {
+    result = {
         "created": True,
         "name": meta["name"],
         "slug": slug,
@@ -484,6 +540,11 @@ def create_skill(name, description, instructions, keywords=None):
             "instructions load only when this skill is used."
         ),
     }
+    if written["references"]:
+        result["references"] = sorted(written["references"])
+    if written["scripts"]:
+        result["scripts"] = sorted(written["scripts"])
+    return result
 
 
 def _zip_find_root(extracted_dir):

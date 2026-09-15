@@ -2308,3 +2308,35 @@ audio.ask-dl-player{ max-height: none; background: transparent; }
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+
+/* "/skillload <name>" / "/skillunload <name>" autocomplete — see app.js's
+   updateSkillSuggest(). Sits directly above the ask input row. */
+.skill-slash-suggest {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 6px;
+  margin-bottom: 6px;
+  background: var(--panel, #0a141c);
+  border: 1px solid var(--line, #17323f);
+  max-height: 180px;
+  overflow-y: auto;
+}
+
+.skill-slash-suggest__item {
+  display: block;
+  width: 100%;
+  text-align: left;
+  padding: 6px 9px;
+  background: transparent;
+  border: none;
+  color: var(--text, #cfe6f1);
+  font-family: ui-monospace, "SFMono-Regular", Consolas, monospace;
+  font-size: 0.76rem;
+  cursor: pointer;
+}
+
+.skill-slash-suggest__item:hover {
+  background: rgba(79, 210, 255, 0.09);
+  color: var(--accent, #4fd2ff);
+}
