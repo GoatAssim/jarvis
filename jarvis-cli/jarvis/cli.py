@@ -5,6 +5,7 @@ import json
 import os
 import re
 import subprocess
+import signal
 import sys
 import threading
 from pathlib import Path
@@ -42,7 +43,7 @@ ENCODING = "utf-8"
 
 CHAIN_SEP = "then"      # starts a new batch \u2014 waits for the previous one to finish
 PARALLEL_SEP = "and"    # joins the current batch \u2014 runs alongside whatever's already in it
-RESERVED_NAMES = {"config", "ai-config", "ai-clear", "ai-drop-from", "playnite-config", "spotify-config", "spotify-login", "memory-config", "everything-config", "tools-list", "tool-run", "skills-list", "skills-get", "skills-save", "skills-add", "skills-create", "skills-remove", "skillmake", "skilladd", "skillload", "skillunload", "tool-preview", "tool-safety-set", "conv-new", "conv-list", "conv-show", "conv-switch", "conv-delete", "logs", "logs-list", "logs-show", "logs-clear", "organize-json", "mode", "mode-set", "voice-config", "speak", "listen", "transcribe", CHAIN_SEP, PARALLEL_SEP, "-h", "--help"}
+RESERVED_NAMES = {"config", "ai-config", "ai-clear", "ai-drop-from", "playnite-config", "spotify-config", "spotify-login", "memory-config", "everything-config", "tools-list", "tool-run", "skills-list", "skills-get", "skills-save", "skills-add", "skills-create", "skills-remove", "skillmake", "skilladd", "skillload", "skillunload", "tool-preview", "tool-safety-set", "conv-new", "conv-list", "conv-show", "conv-switch", "conv-delete", "logs", "logs-list", "logs-show", "logs-clear", "organize-json", "mode", "mode-set", "voice-config", "speak", "listen", "transcribe", "sched-list", "sched-tick", "sched-add", "sched-show", "sched-cancel", "sched-pause", "sched-resume", "sched-snooze", "sched-approve", "sched-signal", "sched-clear", "notify-send", "notify-list", "notify-ack", "notify-clear", "notify-config", "conv-search", "mcp-status", "mcp-refresh", "mcp-config", "mcp-call", "mcp-tools", CHAIN_SEP, PARALLEL_SEP, "-h", "--help"}
 
 OUT = Palette(sys.stdout)  # actual command output: the banner, the command list
 ERR = Palette(sys.stderr)  # jarvis's own status/trace/error messages
@@ -164,7 +165,7 @@ def print_help(commands, file=sys.stdout):
         print(f"  {p.GREEN}{name.ljust(width)}{p.RESET} {spec.get('description', '')}", file=file)
     print(f"\nRun '{p.CYAN}jarvis <command> --help{p.RESET}' for a command's options.", file=file)
     print(f"Chain several with '{p.CYAN}jarvis cmd1 then cmd2{p.RESET}'.", file=file)
-    print(f"Built-in: {p.CYAN}config{p.RESET}, {p.CYAN}ai-config{p.RESET}, {p.CYAN}ai-clear{p.RESET}, {p.CYAN}tools-list{p.RESET} (prints every AI tool as JSON — not an ask), {p.CYAN}tool-run{p.RESET} (runs one AI tool directly), {p.CYAN}conv-new{p.RESET}/{p.CYAN}conv-list{p.RESET}/{p.CYAN}conv-show{p.RESET}/{p.CYAN}conv-switch{p.RESET}/{p.CYAN}conv-delete{p.RESET} (manage conversations), {p.CYAN}logs{p.RESET} (browse the raw model\u2194backend traffic for a conversation), {p.CYAN}mode{p.RESET}/{p.CYAN}mode-set <full|compact|precise|ultra>{p.RESET} (read/set the prompt's token-usage capacity — 400%/100%/150%/50%), {p.CYAN}voice-config{p.RESET} (prints the voice config file path), {p.CYAN}speak <text>{p.RESET} (text-to-speech), {p.CYAN}listen{p.RESET} (record → transcribe → ask → speak, one voice turn), {p.CYAN}transcribe <audio file>{p.RESET} (speech-to-text on an existing file).", file=file)
+    print(f"Built-in: {p.CYAN}config{p.RESET}, {p.CYAN}ai-config{p.RESET}, {p.CYAN}ai-clear{p.RESET}, {p.CYAN}tools-list{p.RESET} (prints every AI tool as JSON — not an ask), {p.CYAN}tool-run{p.RESET} (runs one AI tool directly), {p.CYAN}conv-new{p.RESET}/{p.CYAN}conv-list{p.RESET}/{p.CYAN}conv-show{p.RESET}/{p.CYAN}conv-switch{p.RESET}/{p.CYAN}conv-delete{p.RESET} (manage conversations), {p.CYAN}logs{p.RESET} (browse the raw model\u2194backend traffic for a conversation), {p.CYAN}mode{p.RESET}/{p.CYAN}mode-set <full|compact|precise|ultra>{p.RESET} (read/set the prompt's token-usage capacity — 400%/100%/150%/50%), {p.CYAN}voice-config{p.RESET} (prints the voice config file path), {p.CYAN}speak <text>{p.RESET} (text-to-speech), {p.CYAN}listen{p.RESET} (record → transcribe → ask → speak, one voice turn), {p.CYAN}transcribe <audio file>{p.RESET} (speech-to-text on an existing file), {p.CYAN}sched-list{p.RESET}/{p.CYAN}sched-add <when> <text>{p.RESET}/{p.CYAN}sched-cancel{p.RESET}/{p.CYAN}sched-snooze{p.RESET}/{p.CYAN}sched-approve{p.RESET} (scheduled tasks, reminders and notifications), {p.CYAN}sched-tick{p.RESET} (fire everything due now \\u2014 point Task Scheduler or cron at this), {p.CYAN}sched-signal <event>{p.RESET} (announce something finished, firing jobs waiting on it), {p.CYAN}notify-send <message>{p.RESET}, {p.CYAN}notify-config{p.RESET}.", file=file)
     print(f"Edit {p.DIM}{CONFIG_FILE}{p.RESET} to add or change commands.", file=file)
 
 
@@ -686,6 +687,37 @@ def handle_ai_prompt(text, commands, provider_override=None):
         )
         return 1
 
+    # The web console's Stop button kills this process outright (server.js
+    # killTree -> taskkill /F on Windows, SIGTERM elsewhere). SIGTERM's
+    # default action terminates immediately, skipping every finally block and
+    # atexit hook, so without this handler an aborted ask left the user's
+    # message unsaved — the "I aborted my first message and the whole
+    # conversation was empty" bug. Handling it turns the kill into a normal
+    # exit that gets one last chance to write.
+    #
+    # taskkill /F can't be caught at all, so this is not a complete fix on
+    # Windows by itself; what makes it work there is that ai_client.ask()
+    # already wrote the user's half BEFORE calling any provider (see
+    # conversations.begin_exchange). This handler is the part that
+    # additionally marks it interrupted rather than leaving it pending.
+    def _on_interrupt(signum, _frame):
+        try:
+            ai_client.abandon_pending_turn(
+                "interrupted" if signum != signal.SIGINT else "cancelled")
+        finally:
+            sys.exit(130)
+
+    for _sig in (getattr(signal, "SIGTERM", None), getattr(signal, "SIGINT", None)):
+        if _sig is None:
+            continue
+        try:
+            signal.signal(_sig, _on_interrupt)
+        except (ValueError, OSError):
+            # Not on the main thread, or the platform won't allow it. The
+            # begin_exchange() write above still stands; only the
+            # "interrupted" label is lost.
+            pass
+
     def on_attempt(label):
         print(f"{ERR.DIM}\u21b3 asking {label}\u2026{ERR.RESET}", file=sys.stderr, flush=True)
 
@@ -847,6 +879,26 @@ def handle_ai_prompt(text, commands, provider_override=None):
         print("JARVIS_USAGE " + json.dumps(usage, default=str, ensure_ascii=False),
               flush=True)
 
+    # Notifications raised while nothing was listening (a reminder that fired
+    # from Task Scheduler, a scheduled task that finished overnight) are
+    # surfaced here, immediately above the reply. This is the CLI's half of
+    # notifier.py's durable inbox — the web console drains the same queue
+    # over /api/notifications under a different consumer name, so neither
+    # acknowledges on the other's behalf and a reminder shows up in both.
+    #
+    # Deliberately a drain, not a tick: reading a JSON file is microseconds,
+    # whereas running due jobs here would put an unbounded amount of work
+    # (an `ask` subprocess, a 300s command) on the latency path of every
+    # single reply. Firing is sched-tick's job.
+    if os.environ.get("JARVIS_UI") != "web":
+        try:
+            from . import notifier
+            waiting = notifier.render_for_terminal(notifier.drain_for_cli())
+            if waiting:
+                print(f"{OUT.YELLOW}{waiting}{OUT.RESET}\n")
+        except Exception:  # noqa: BLE001 — never block a reply over this
+            pass
+
     print(f"{prefix}{result.text}")
 
     # Phase 0 (new_plan.md): baseline token/tool/round measurement for this
@@ -960,6 +1012,245 @@ def run_logs_command(argv, commands):
         return
     os.environ["JARVIS_CONVERSATION_ID"] = picked
     sys.exit(handle_ai_prompt(follow_up, commands) or 0)
+
+
+# Scheduling / notification subcommands. Grouped into one dispatcher rather
+# than another dozen `if argv[0] == ...` blocks in main() — they share a
+# module import, an output convention (JSON on stdout, like every other
+# machine-readable subcommand server.js consumes), and an id-validation step.
+#
+# Every one of these is the HUMAN side of the engine, which is why they pass
+# trusted=True to scheduler.create() and why sched-approve exists here and
+# has no tool equivalent: the approval gate is only worth anything if the
+# model can't reach it (see scheduler._needs_approval).
+SCHEDULER_COMMANDS = {
+    "sched-list", "sched-tick", "sched-add", "sched-show", "sched-cancel",
+    "sched-pause", "sched-resume", "sched-snooze", "sched-approve",
+    "sched-signal", "sched-clear", "notify-send", "notify-list",
+    "notify-ack", "notify-clear", "notify-config",
+    "conv-search", "mcp-status", "mcp-refresh", "mcp-config", "mcp-call",
+    "mcp-tools",
+}
+
+
+def run_search_or_mcp_command(argv):
+    """conv-search and the mcp-* family. Same JSON-on-stdout convention as
+    the scheduler commands; kept in its own function only because the two
+    feature areas share nothing but that convention."""
+    cmd, rest = argv[0], argv[1:]
+
+    def emit(payload, code=0):
+        print(json.dumps(payload, indent=2, default=str))
+        return code
+
+    if cmd == "conv-search":
+        from . import conv_search
+        if not rest or not rest[0].strip():
+            return emit({"error": "usage: jarvis conv-search <query> [--phrase|--regex] "
+                                  "[--tools] [--text] [--in <conv-id>] [--since YYYY-MM-DD]"}, 1)
+        query = rest[0]
+        flags = rest[1:]
+        mode = "regex" if "--regex" in flags else "phrase" if "--phrase" in flags else "words"
+
+        def flag_value(flag):
+            return flags[flags.index(flag) + 1] if flag in flags and len(flags) > flags.index(flag) + 1 else None
+
+        try:
+            results = conv_search.search(
+                query, mode=mode,
+                include_tools="--tools" in flags,
+                conv_id=flag_value("--in"),
+                since=flag_value("--since"),
+                until=flag_value("--until"),
+            )
+        except conv_search.SearchError as e:
+            return emit({"error": str(e)}, 1)
+        if "--text" in flags:
+            print(conv_search.render_for_terminal(results, query))
+            return 0
+        return emit({"query": query, "mode": mode,
+                     **conv_search.summarize(results), "results": results})
+
+    from . import mcp_client
+
+    if cmd == "mcp-config":
+        print(mcp_client.ensure_config())
+        return 0
+
+    if cmd == "mcp-status":
+        return emit(mcp_client.status())
+
+    if cmd == "mcp-tools":
+        cached = mcp_client.cached_tools()
+        return emit({"servers": {name: [t.get("name") for t in entry.get("tools") or []]
+                                 for name, entry in cached.items()}})
+
+    if cmd == "mcp-refresh":
+        # The one command that actually spawns every configured server. Run
+        # it after editing mcp_config.json — the catalog reads a cache, so a
+        # newly-added server stays invisible until this populates it.
+        try:
+            summary = mcp_client.refresh(rest[0].strip() if rest and rest[0].strip() else None)
+        except mcp_client.MCPError as e:
+            return emit({"error": str(e)}, 1)
+        failed = [s for s in summary if s.get("error")]
+        return emit({"refreshed": summary, "ok": not failed}, 1 if failed else 0)
+
+    if cmd == "mcp-call":
+        # jarvis mcp-call <server> <tool> [json-args] — the debugging path,
+        # so a user can prove a server works without going through the model.
+        if len(rest) < 2:
+            return emit({"error": "usage: jarvis mcp-call <server> <tool> [json-arguments]"}, 1)
+        try:
+            arguments = json.loads(rest[2]) if len(rest) > 2 and rest[2].strip() else {}
+        except json.JSONDecodeError as e:
+            return emit({"error": "arguments must be valid JSON: %s" % e}, 1)
+        try:
+            result = mcp_client.call_tool(rest[0].strip(), rest[1].strip(), arguments)
+        except mcp_client.MCPError as e:
+            return emit({"error": str(e)}, 1)
+        finally:
+            mcp_client.close_all()
+        return emit(result)
+
+    return emit({"error": "unknown command %r" % cmd}, 1)
+
+
+def run_scheduler_command(argv):
+    """Handle every sched-*/notify-* subcommand. Returns an exit code.
+
+    Prints JSON on stdout throughout, because both consumers are machines:
+    web/server.js's /api/scheduled* routes, and anything a user wires into
+    Task Scheduler/cron. The one exception is `sched-list --text`, for
+    reading at a terminal.
+    """
+    from . import notifier, scheduler
+
+    cmd = argv[0]
+    rest = argv[1:]
+
+    def emit(payload, code=0):
+        print(json.dumps(payload, indent=2, default=str))
+        return code
+
+    def need_id():
+        if not rest or not scheduler.is_valid_id(rest[0]):
+            emit({"error": "usage: jarvis %s <job-id>" % cmd}, 1)
+            return None
+        return rest[0].strip().lower()
+
+    try:
+        if cmd == "sched-list":
+            if "--text" in rest:
+                jobs = scheduler.list_jobs(include_finished="--all" in rest)
+                if not jobs:
+                    print("Nothing scheduled.")
+                    return 0
+                for job in jobs:
+                    s = scheduler.summarize(job)
+                    flag = "  [NEEDS APPROVAL]" if s["needs_approval"] else ""
+                    eta = ("  (in %s)" % s["in"]) if s["in"] else ""
+                    print("%s  %-8s %-9s %s%s%s" % (
+                        s["id"], s["kind"], s["status"], s["when"], eta, flag))
+                    print("    %s" % s["title"])
+                return 0
+            return emit(scheduler.overview())
+
+        if cmd == "sched-tick":
+            # The workhorse. Run from Task Scheduler/cron every minute, or by
+            # web/server.js on an interval — see scheduler.py's docstring on
+            # why an explicit tick exists at all.
+            result = scheduler.tick(startup="--startup" in rest)
+            return emit(result)
+
+        if cmd == "sched-show":
+            job_id = need_id()
+            if not job_id:
+                return 1
+            job = scheduler.get(job_id)
+            if not job:
+                return emit({"error": "no such job"}, 1)
+            return emit(job)
+
+        if cmd == "sched-add":
+            # jarvis sched-add <when> <message> [kind]
+            # The deliberately minimal human path: a reminder/notification.
+            # Anything that RUNS something is created through the web panel
+            # or the AI tools, both of which can express an action properly —
+            # cramming a tool's argument dict into positional argv would be
+            # worse than not offering it here.
+            if len(rest) < 2:
+                return emit({"error": "usage: jarvis sched-add <when> <message> [task|notify|reminder]"}, 1)
+            kind = rest[2].strip().lower() if len(rest) > 2 else "reminder"
+            job = scheduler.create(kind=kind, title=rest[1], when=rest[0],
+                                   message=rest[1], trusted=True)
+            return emit(scheduler.summarize(job))
+
+        if cmd in ("sched-cancel", "sched-pause", "sched-resume", "sched-approve"):
+            job_id = need_id()
+            if not job_id:
+                return 1
+            fn = {"sched-cancel": scheduler.cancel, "sched-pause": scheduler.pause,
+                  "sched-resume": scheduler.resume, "sched-approve": scheduler.approve}[cmd]
+            return emit(scheduler.summarize(fn(job_id)))
+
+        if cmd == "sched-snooze":
+            job_id = need_id()
+            if not job_id:
+                return 1
+            delay = " ".join(rest[1:]).strip() or "10 minutes"
+            return emit(scheduler.summarize(scheduler.snooze(job_id, delay)))
+
+        if cmd == "sched-signal":
+            if not rest or not rest[0].strip():
+                return emit({"error": "usage: jarvis sched-signal <event> [detail]"}, 1)
+            detail = " ".join(rest[1:]).strip() or None
+            return emit(scheduler.signal(rest[0], payload=detail))
+
+        if cmd == "sched-clear":
+            return emit({"removed": scheduler.clear_finished()})
+
+        if cmd == "notify-send":
+            if len(rest) < 1:
+                return emit({"error": "usage: jarvis notify-send <message> [title] [channels,csv]"}, 1)
+            channels = [c.strip() for c in rest[2].split(",")] if len(rest) > 2 else None
+            record = notifier.notify(
+                title=rest[1] if len(rest) > 1 else "Jarvis",
+                message=rest[0], channels=channels, kind="notify")
+            return emit(record)
+
+        if cmd == "notify-list":
+            # Consumer defaults to "web" because server.js is the caller that
+            # matters; a terminal drain goes through drain_for_cli instead so
+            # the two never acknowledge on each other's behalf.
+            consumer = rest[0].strip() if rest and rest[0].strip() else "web"
+            return emit({"notifications": notifier.pending(consumer=consumer)})
+
+        if cmd == "notify-ack":
+            if not rest:
+                return emit({"error": "usage: jarvis notify-ack <id[,id,...]> [consumer]"}, 1)
+            ids = [i.strip() for i in rest[0].split(",") if i.strip()]
+            consumer = rest[1].strip() if len(rest) > 1 else "web"
+            return emit({"acknowledged": notifier.acknowledge(ids, consumer=consumer)})
+
+        if cmd == "notify-clear":
+            consumer = rest[0].strip() if rest and rest[0].strip() else None
+            return emit({"cleared": notifier.clear(consumer=consumer)})
+
+        if cmd == "notify-config":
+            print(notifier.ensure_config())
+            return 0
+
+    except scheduler.SchedulerError as e:
+        return emit({"error": str(e)}, 1)
+    except Exception as e:  # noqa: BLE001
+        # A scheduler subcommand is often running unattended out of Task
+        # Scheduler, where a traceback on stderr goes nowhere anyone will
+        # read. A JSON error on stdout at least lands in the same place the
+        # success output would.
+        return emit({"error": "%s: %s" % (type(e).__name__, e)}, 1)
+
+    return emit({"error": "unknown scheduler command %r" % cmd}, 1)
 
 
 def main():
@@ -1422,6 +1713,13 @@ def main():
             "scope": conv_id or "global (every conversation)",
         }, indent=2))
         return
+
+    if argv[0] in ("conv-search",) or argv[0].startswith("mcp-"):
+        if argv[0] in SCHEDULER_COMMANDS:
+            sys.exit(run_search_or_mcp_command(argv) or 0)
+
+    if argv[0] in SCHEDULER_COMMANDS:
+        sys.exit(run_scheduler_command(argv) or 0)
 
     if argv[0] == "tools-list":
         from . import tools as system_tools

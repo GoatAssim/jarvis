@@ -26,7 +26,7 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PORT = Number(process.env.PORT) || 4173;
 const HOST = "127.0.0.1";
 
-const RESERVED_NAMES = new Set(["config", "version", "--version", "-v", "ai-config", "ai-clear", "ai-drop-from", "playnite-config", "spotify-config", "spotify-login", "memory-config", "everything-config", "tools-list", "tool-run", "tool-preview", "tool-safety-set", "conv-new", "conv-list", "conv-show", "conv-switch", "conv-delete", "logs", "logs-list", "logs-show", "logs-clear", "organize-json", "mode", "mode-set", "voice-config", "speak", "listen", "transcribe", "then", "and", "-h", "--help"]);
+const RESERVED_NAMES = new Set(["config", "version", "--version", "-v", "ai-config", "ai-clear", "ai-drop-from", "playnite-config", "spotify-config", "spotify-login", "memory-config", "everything-config", "tools-list", "tool-run", "tool-preview", "tool-safety-set", "conv-new", "conv-list", "conv-show", "conv-switch", "conv-delete", "logs", "logs-list", "logs-show", "logs-clear", "organize-json", "mode", "mode-set", "voice-config", "speak", "listen", "transcribe", "sched-list", "sched-tick", "sched-add", "sched-show", "sched-cancel", "sched-pause", "sched-resume", "sched-snooze", "sched-approve", "sched-signal", "sched-clear", "notify-send", "notify-list", "notify-ack", "notify-clear", "notify-config", "conv-search", "mcp-status", "mcp-refresh", "mcp-config", "mcp-call", "mcp-tools", "then", "and", "-h", "--help"]);
 
 // ---------------------------------------------------------------------------
 // Locate the real jarvis binary. Tries a few invocation strategies, in
@@ -902,6 +902,110 @@ app.delete("/api/skills/:name/load", requireJarvis, async (req, res) => {
   return parseSkillsResult(result, res, "Couldn't unload that skill.");
 });
 
+// ---------------------------------------------------------------------------
+// Scheduling / notifications / search / MCP.
+//
+// All of these proxy the CLI rather than reading ~/.jarvis themselves. That's
+// the same choice the skills routes made, for the same reason: the CLI owns
+// the locking (scheduler._claim_lock), the approval gate, and the trigger
+// maths, and a second implementation in JS would drift from it the first time
+// either side changed.
+// ---------------------------------------------------------------------------
+
+function parseJarvisJSON(result, res, fallback) {
+  if (!result.ok && !result.stdout) {
+    return res.status(500).json({ error: result.error || result.stderr || fallback });
+  }
+  try {
+    const parsed = JSON.parse(result.stdout);
+    return res.status(parsed?.error ? 400 : 200).json(parsed);
+  } catch (e) {
+    return res.status(500).json({ error: `${fallback} (${e.message})` });
+  }
+}
+
+app.get("/api/scheduled", requireJarvis, async (req, res) => {
+  const result = await runJarvisOnce(["sched-list"], 15000);
+  return parseJarvisJSON(result, res, "Couldn't list scheduled jobs.");
+});
+
+app.post("/api/scheduled", requireJarvis, async (req, res) => {
+  const when = typeof req.body?.when === "string" ? req.body.when.trim() : "";
+  const message = typeof req.body?.message === "string" ? req.body.message.trim() : "";
+  const kind = typeof req.body?.kind === "string" ? req.body.kind.trim() : "reminder";
+  if (!when || !message) {
+    return res.status(400).json({ error: "Both 'when' and 'message' are required." });
+  }
+  const result = await runJarvisOnce(["sched-add", when, message, kind], 15000);
+  return parseJarvisJSON(result, res, "Couldn't create that job.");
+});
+
+// One route for every per-job verb. The action is validated against a fixed
+// list here so a request body can never name an arbitrary `sched-*` argv.
+const SCHED_ACTIONS = new Set(["cancel", "pause", "resume", "approve", "snooze"]);
+
+app.post("/api/scheduled/:id/:action", requireJarvis, async (req, res) => {
+  const { id, action } = req.params;
+  if (!/^[a-f0-9]{8,32}$/.test(id)) {
+    return res.status(400).json({ error: "Invalid job id." });
+  }
+  if (!SCHED_ACTIONS.has(action)) {
+    return res.status(400).json({ error: "Unknown action." });
+  }
+  const args = [`sched-${action}`, id];
+  if (action === "snooze" && typeof req.body?.delay === "string" && req.body.delay.trim()) {
+    args.push(req.body.delay.trim());
+  }
+  const result = await runJarvisOnce(args, 15000);
+  return parseJarvisJSON(result, res, "Couldn't update that job.");
+});
+
+app.post("/api/scheduled/tick", requireJarvis, async (req, res) => {
+  const result = await runSchedulerTick(Boolean(req.body?.startup));
+  return res.json(result || { ok: false, error: "tick failed" });
+});
+
+app.get("/api/notifications", requireJarvis, async (req, res) => {
+  const result = await runJarvisOnce(["notify-list", "web"], 10000);
+  return parseJarvisJSON(result, res, "Couldn't read notifications.");
+});
+
+app.post("/api/notifications/ack", requireJarvis, async (req, res) => {
+  const ids = Array.isArray(req.body?.ids) ? req.body.ids.filter((i) => typeof i === "string") : [];
+  if (!ids.length) return res.json({ acknowledged: 0 });
+  const result = await runJarvisOnce(["notify-ack", ids.join(","), "web"], 10000);
+  return parseJarvisJSON(result, res, "Couldn't acknowledge notifications.");
+});
+
+app.get("/api/conversations/search", requireJarvis, async (req, res) => {
+  const query = typeof req.query?.q === "string" ? req.query.q.trim() : "";
+  if (!query) return res.status(400).json({ error: "Missing search query." });
+  const args = ["conv-search", query];
+  const mode = typeof req.query?.mode === "string" ? req.query.mode : "words";
+  if (mode === "phrase") args.push("--phrase");
+  if (mode === "regex") args.push("--regex");
+  if (req.query?.tools === "1") args.push("--tools");
+  if (typeof req.query?.in === "string" && isValidConversationId(req.query.in)) {
+    args.push("--in", req.query.in);
+  }
+  const result = await runJarvisOnce(args, 25000);
+  return parseJarvisJSON(result, res, "Search failed.");
+});
+
+app.get("/api/mcp", requireJarvis, async (req, res) => {
+  const result = await runJarvisOnce(["mcp-status"], 10000);
+  return parseJarvisJSON(result, res, "Couldn't read MCP status.");
+});
+
+app.post("/api/mcp/refresh", requireJarvis, async (req, res) => {
+  // Generous timeout: this spawns every configured server and waits for a
+  // handshake from each. An npx-based server downloading its package on
+  // first run can genuinely take most of a minute.
+  const server = typeof req.body?.server === "string" ? req.body.server.trim() : "";
+  const result = await runJarvisOnce(server ? ["mcp-refresh", server] : ["mcp-refresh"], 120000);
+  return parseJarvisJSON(result, res, "Couldn't refresh MCP servers.");
+});
+
 app.get("/api/tools", requireJarvis, async (req, res) => {
   const result = await runJarvisOnce(["tools-list"], 15000);
   if (!result.ok) {
@@ -1240,6 +1344,92 @@ app.get("/api/downloads/:jobId/:filename", (req, res) => {
     }
   });
 });
+
+// ---------------------------------------------------------------------------
+// Scheduler tick loop — the thing that makes time-based triggers actually
+// fire.
+//
+// jarvis-cli is a fresh process per invocation, so nothing in it can wake up
+// at 9am on its own (see jarvis/scheduler.py's docstring). This server is the
+// one component that IS long-running, so while the web console is up it acts
+// as the scheduler's clock: one `jarvis sched-tick` every TICK_INTERVAL_MS,
+// plus one with --startup on boot.
+//
+// It is NOT the only possible driver, and nothing here assumes it is — the
+// CLI command is equally happy under Task Scheduler or cron for firing while
+// the browser is closed, and scheduler.py's lock file means both running at
+// once is a no-op rather than a double-fire.
+// ---------------------------------------------------------------------------
+
+const TICK_INTERVAL_MS = Number(process.env.JARVIS_TICK_MS) || 30000;
+const TICK_TIMEOUT_MS = 300000; // a scheduled `ask` or command can be slow
+
+let tickTimer = null;
+let tickInFlight = false;
+
+async function runSchedulerTick(startup = false) {
+  // Guard on this side too, not just via the lock file: a tick that outruns
+  // the interval would otherwise pile up spawned processes, each blocking on
+  // the lock, for as long as the slow job takes.
+  if (tickInFlight) return { ok: true, skipped: "tick already running", ran: [] };
+  tickInFlight = true;
+  try {
+    const args = startup ? ["sched-tick", "--startup"] : ["sched-tick"];
+    const result = await runJarvisOnce(args, TICK_TIMEOUT_MS);
+    if (!result.stdout) return { ok: false, error: result.error || result.stderr || "no output" };
+    let parsed;
+    try {
+      parsed = JSON.parse(result.stdout);
+    } catch {
+      return { ok: false, error: "couldn't parse sched-tick output" };
+    }
+    if (parsed?.ran?.length) broadcastScheduled(parsed);
+    await pushNotifications();
+    return parsed;
+  } finally {
+    tickInFlight = false;
+  }
+}
+
+// Notifications are pulled from the durable inbox rather than read off the
+// tick's return value, so a notification raised by ANY driver — a cron tick,
+// a terminal `jarvis notify-send`, a job fired while the browser was closed —
+// reaches an open tab too. Acknowledging here (as consumer "web") is what
+// stops the same one being pushed on every poll.
+async function pushNotifications() {
+  if (!JARVIS || !wss || wss.clients.size === 0) return;
+  const result = await runJarvisOnce(["notify-list", "web"], 10000);
+  if (!result.stdout) return;
+  let items;
+  try {
+    items = JSON.parse(result.stdout)?.notifications || [];
+  } catch {
+    return;
+  }
+  if (!items.length) return;
+  for (const client of wss.clients) {
+    send(client, { type: "notifications", notifications: items });
+  }
+  await runJarvisOnce(["notify-ack", items.map((i) => i.id).join(","), "web"], 10000);
+}
+
+function broadcastScheduled(tickResult) {
+  for (const client of wss.clients) {
+    send(client, { type: "scheduled-tick", ran: tickResult.ran || [] });
+  }
+}
+
+function startTickLoop() {
+  if (tickTimer || !JARVIS) return;
+  // The startup tick is deliberately separated from the interval: it's the
+  // only one that fires "on next startup" jobs, and firing those on every
+  // 30-second tick would make the trigger meaningless.
+  runSchedulerTick(true).catch(() => {});
+  tickTimer = setInterval(() => {
+    runSchedulerTick(false).catch(() => {});
+  }, TICK_INTERVAL_MS);
+  if (tickTimer.unref) tickTimer.unref();
+}
 
 const server = createServer(app);
 
@@ -1582,7 +1772,13 @@ resolveJarvis().then((result) => {
     console.log(`\n  J A R V I S  web UI running at http://${HOST}:${PORT}\n`);
     if (JARVIS) {
       console.log(`  linked to jarvis via: ${[JARVIS.cmd, ...JARVIS.args].join(" ")}`);
-      console.log(`  config: ${JARVIS.configPath}\n`);
+      console.log(`  config: ${JARVIS.configPath}`);
+      // Start the scheduler's clock only once the CLI is confirmed
+      // resolvable -- without JARVIS there's nothing to spawn, and a tick
+      // loop failing every 30s would bury the "couldn't find jarvis"
+      // warning below under its own noise.
+      startTickLoop();
+      console.log(`  scheduler: ticking every ${TICK_INTERVAL_MS / 1000}s\n`);
     } else {
       console.log(
         "  WARNING: couldn't find the jarvis CLI (tried jarvis, python3 -m jarvis, python -m jarvis, py -m jarvis)."

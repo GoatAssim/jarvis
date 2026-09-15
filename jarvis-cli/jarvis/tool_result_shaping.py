@@ -105,6 +105,17 @@ def shape_result(name, result, verbosity):
 
 
 TOOL_RESULT_SPECS = {
+    # present_file returns job_id/download_filename purely so
+    # ai_client._extras_from_runs can persist its card for replay (see the
+    # comment on present_tools.tool_present_file's result). The model has no
+    # use for either — it can't fetch a download URL — so they're dropped
+    # everywhere except "full".
+    "present_file": {
+        "drop_fields": {
+            "medium": ["job_id", "download_filename"],
+            "low": ["job_id", "download_filename", "size_bytes", "download_note"],
+        },
+    },
     # dev_agent (§3.6 plan §7): the model mainly needs ok/project_dir/run_command/reason,
     # not every intermediate step's full preview/stdout/stderr text repeated back into its
     # own context window each round. NOTE — this only trims what goes back to the *model*;

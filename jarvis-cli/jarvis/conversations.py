@@ -311,6 +311,122 @@ def update_meta(conv_id, title=None, soft_context=None):
     return True
 
 
+def begin_exchange(conv_id, user_text):
+    """Write the user's half of a turn to disk BEFORE the model is called.
+
+    This is the fix for "I sent a message, aborted it, and the conversation
+    was empty". Persistence used to happen exactly once, in append_exchange,
+    from inside `if result.ok:` in ai_client.ask() — so anything that stopped
+    the process before that line (the web UI's Stop button, which killTree()s
+    the child; every provider failing; a crash) threw the user's message away
+    entirely. On a first message that also meant no title was ever generated,
+    so the whole conversation looked like it had never happened.
+
+    Now the turn lands immediately, marked `pending`, and is upgraded in
+    place by complete_exchange() or downgraded by abandon_exchange(). A
+    pending exchange is deliberately still a real, visible exchange — a
+    reload shows what you asked, even though nothing answered it.
+
+    Returns the index of the pending exchange, or -1 if it couldn't be
+    written (a bad id, an unwritable disk) — callers treat that as "carry on
+    without persistence", never as a reason to fail the ask.
+    """
+    if not is_valid_id(conv_id):
+        return -1
+    record = _load_conv(conv_id) or {
+        "id": conv_id,
+        "title": DEFAULT_TITLE,
+        "soft_context": "",
+        "created_at": _now(),
+        "updated_at": _now(),
+        "exchanges": [],
+    }
+    record.setdefault("exchanges", []).append({
+        "ts": _now(),
+        "user": user_text,
+        "jarvis": "",
+        "provider": None,
+        "pending": True,
+    })
+    record["exchanges"] = record["exchanges"][-MAX_STORED_EXCHANGES:]
+    record["updated_at"] = _now()
+    _save_conv(record)
+    _upsert_index(record)
+    return len(record["exchanges"]) - 1
+
+
+def _finish_pending(record, user_text, patch):
+    """Apply `patch` to the newest pending exchange, preferring one whose
+    user text matches. Falls back to appending a fresh exchange if there's
+    no pending one to claim — begin_exchange() may have failed to write, and
+    losing the reply because of that would be a strictly worse bug than the
+    one this whole mechanism exists to fix."""
+    exchanges = record.setdefault("exchanges", [])
+    target = (user_text or "").strip()
+    for i in range(len(exchanges) - 1, -1, -1):
+        if not exchanges[i].get("pending"):
+            continue
+        if target and (exchanges[i].get("user") or "").strip() != target:
+            continue
+        exchanges[i].update(patch)
+        exchanges[i].pop("pending", None)
+        return i
+    exchange = {"ts": _now(), "user": user_text}
+    exchange.update(patch)
+    exchanges.append(exchange)
+    record["exchanges"] = exchanges[-MAX_STORED_EXCHANGES:]
+    return len(record["exchanges"]) - 1
+
+
+def complete_exchange(conv_id, user_text, jarvis_text, provider, extras=None):
+    """Fill in the reply half of a turn started by begin_exchange().
+
+    Same return value as append_exchange (the new exchange count), so
+    ai_client's title-generation logic is unchanged.
+    """
+    if not is_valid_id(conv_id):
+        return 0
+    record = _load_conv(conv_id) or {
+        "id": conv_id, "title": DEFAULT_TITLE, "soft_context": "",
+        "created_at": _now(), "updated_at": _now(), "exchanges": [],
+    }
+    patch = {"ts": _now(), "jarvis": jarvis_text, "provider": provider}
+    if extras:
+        patch["extras"] = extras
+    _finish_pending(record, user_text, patch)
+    record["updated_at"] = _now()
+    _save_conv(record)
+    _upsert_index(record)
+    return len(record["exchanges"])
+
+
+def abandon_exchange(conv_id, user_text=None, reason="interrupted", extras=None):
+    """Mark a pending turn as never-answered instead of leaving it pending
+    forever. Called from cli.py's signal handler (the Stop button) and from
+    ai_client when every provider fails.
+
+    The user's message stays exactly as they typed it; only the reply half
+    records what went wrong. `extras` is still saved when present, because
+    a turn aborted halfway may well have already taken a screenshot or
+    written a file, and those happened whether or not a reply arrived.
+    """
+    if not is_valid_id(conv_id):
+        return False
+    record = _load_conv(conv_id)
+    if not record:
+        return False
+    if not any(e.get("pending") for e in record.get("exchanges") or []):
+        return False
+    patch = {"ts": _now(), "jarvis": "", "provider": None, "interrupted": reason}
+    if extras:
+        patch["extras"] = extras
+    _finish_pending(record, user_text, patch)
+    record["updated_at"] = _now()
+    _save_conv(record)
+    _upsert_index(record)
+    return True
+
+
 def append_exchange(conv_id, user_text, jarvis_text, provider, extras=None):
     """Adds one turn to a conversation and returns the new exchange count
     (used by the caller to decide whether it's time to (re)generate a
@@ -453,6 +569,13 @@ def conversation_messages(
 
     record = _load_conv(conv_id)
     exchanges = (record or {}).get("exchanges") or []
+    # An exchange with no reply (pending right now, or abandoned when the
+    # user hit Stop) is real history the UI should show, but it must never
+    # reach a provider: an assistant message with empty content is a hard
+    # 400 on Anthropic and silently degrades the others. Filtered here, at
+    # the single point where exchanges become prompt messages, rather than
+    # at each of the several places that write them.
+    exchanges = [e for e in exchanges if (e.get("jarvis") or "").strip()]
     if not exchanges:
         return []
 

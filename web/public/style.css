@@ -2055,65 +2055,69 @@ audio.ask-dl-player{ max-height: none; background: transparent; }
 }
 .convo-id-tag:empty { display: none; }
 /* ===========================================================================
-   SKILLS MANAGER — see jarvis/skills.py.
-   Mirrors the debug overlay's geometry so the two read as the same family of
-   panel; the one visual addition is .skills-cost, which shows what the skill
-   catalog costs in every prompt. That number is the whole argument for the
-   progressive-disclosure design, so it's surfaced rather than buried.
+   SHARED "MENU" PANEL CHROME — Skills, Scheduled, and MCP Servers.
+   See jarvis/skills.py, jarvis/scheduler.py, jarvis/mcp_client.py.
+
+   This replaces what used to be a bespoke .skills-overlay/.skills-panel look
+   (its own fallback-var()'d colors, its own geometry) with the SAME chrome
+   family the Debug and Ask panels already use: real design tokens
+   (--bg-1/--border-strong/--radius/--font-display/--font-mono), the same
+   corner brackets, the same brand-mark head, the same .modal__close button.
+   Three menus that used to each look slightly different now read as one
+   consistent "big panel" language across the whole app — Debug, Ask, Logs,
+   Skin, Skills, Scheduled and MCP Servers are all the same kind of window.
+
+   .menu-body defaults to a two-column list+detail layout (Skills, Scheduled);
+   .menu-body--single drops to one column for a panel with nothing to pair
+   the list against (MCP Servers has no per-server editor pane).
    =========================================================================== */
 
-.skills-overlay {
-  position: fixed;
-  inset: 0;
-  z-index: 70;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  padding: 3vh 3vw;
-  background: rgba(2, 8, 14, 0.82);
-  backdrop-filter: blur(3px);
+.menu-overlay{
+  position: fixed; inset: 0; z-index: 85;
+  background: rgba(2,5,10,0.78);
+  backdrop-filter: blur(4px);
+  display: flex; align-items: center; justify-content: center;
+  padding: 22px;
 }
 
-.skills-panel {
+.menu-panel{
   position: relative;
-  display: flex;
-  flex-direction: column;
   width: min(1100px, 100%);
-  height: min(760px, 94vh);
-  background: var(--panel, #0a141c);
-  border: 1px solid var(--line, #17323f);
-  box-shadow: 0 0 40px rgba(0, 0, 0, 0.6);
+  height: min(780px, 92vh);
+  display: flex; flex-direction: column;
+  background: var(--bg-1);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius);
+  box-shadow: 0 0 60px rgba(0,0,0,0.6), 0 0 40px var(--accent-glow);
+  overflow: hidden;
 }
 
-.skills-panel__head {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  padding: 14px 18px;
-  border-bottom: 1px solid var(--line, #17323f);
+.menu-panel__head{
+  display: flex; align-items: center; gap: 12px;
+  padding: 14px 16px;
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
 }
-
-.skills-panel__titles { flex: 1 1 auto; min-width: 0; }
-
-.skills-panel__title {
-  font-size: 0.95rem;
-  letter-spacing: 0.18em;
-  color: var(--accent, #4fd2ff);
+.menu-panel__titles{ min-width: 0; }
+.menu-panel__title{
+  font-family: var(--font-display); font-size: 14px; letter-spacing: 0.2em; font-weight: 700;
 }
-
-.skills-panel__subtitle {
-  font-size: 0.72rem;
-  letter-spacing: 0.06em;
-  color: var(--muted, #6d8794);
-  margin-top: 3px;
+.menu-panel__subtitle{
+  font-family: var(--font-mono); font-size: 11px; color: var(--text-dimmer);
+  margin-top: 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
+.menu-panel__subtitle.is-busy{ color: var(--accent-soft); }
+.menu-panel__subtitle.is-error{ color: var(--red); }
+.menu-panel__subtitle.is-ok{ color: var(--green); }
+.menu-panel__head .modal__close{ margin-left: auto; flex-shrink: 0; }
 
-.skills-body {
+.menu-body{
   flex: 1 1 auto;
   display: grid;
   grid-template-columns: minmax(260px, 340px) 1fr;
   min-height: 0;
 }
+.menu-body--single{ grid-template-columns: 1fr; }
 
 .skills-pane {
   display: flex;
@@ -2122,7 +2126,7 @@ audio.ask-dl-player{ max-height: none; background: transparent; }
   min-width: 0;
 }
 
-.skills-pane--list { border-right: 1px solid var(--line, #17323f); }
+.skills-pane--list { border-right: 1px solid var(--border); }
 
 .skills-pane__head {
   display: flex;
@@ -2284,8 +2288,8 @@ audio.ask-dl-player{ max-height: none; background: transparent; }
 }
 
 @media (max-width: 860px) {
-  .skills-body { grid-template-columns: 1fr; }
-  .skills-pane--list { border-right: none; border-bottom: 1px solid var(--line, #17323f); max-height: 34vh; }
+  .menu-body { grid-template-columns: 1fr; }
+  .skills-pane--list { border-right: none; border-bottom: 1px solid var(--border); max-height: 34vh; }
 }
 
 /* Zip upload row in the Skills importer (see index.html's #skills-import). */
@@ -2339,4 +2343,86 @@ audio.ask-dl-player{ max-height: none; background: transparent; }
 .skill-slash-suggest__item:hover {
   background: rgba(79, 210, 255, 0.09);
   color: var(--accent, #4fd2ff);
+}
+
+/* ---------------------------------------------------------------------------
+   Scheduled panel. Reuses the skills overlay/panel/list classes wholesale —
+   it has the same shape (overlay, two panes, a scrolling list of items with
+   actions), and duplicating that styling under new names would just be two
+   things to keep in sync. Only the genuinely new bits live here.
+   --------------------------------------------------------------------------- */
+
+/* A job parked on approval, or a server that failed to connect. Marked with a
+   left border rather than a background wash so it still reads as the same
+   kind of row, just one that wants attention. */
+.skills-item.is-warn {
+  border-left: 2px solid var(--amber, #e0a33e);
+  padding-left: 10px;
+}
+
+.skills-item__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.sched-add {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px 14px 16px;
+}
+
+.sched-add input {
+  width: 100%;
+  padding: 8px 10px;
+  background: var(--panel-2, rgba(255, 255, 255, 0.04));
+  border: 1px solid var(--line, rgba(255, 255, 255, 0.12));
+  border-radius: 4px;
+  color: inherit;
+  font: inherit;
+}
+
+.sched-add input:focus {
+  outline: none;
+  border-color: var(--cyan, #37c3d6);
+}
+
+.sched-add .btn {
+  align-self: flex-start;
+}
+
+/* ---------------------------------------------------------------------------
+   Panel-menu dropdown — the "Menu \u25be" trigger that replaced four separate
+   Debug/Skills/Scheduled/MCP buttons crowded into the console header. Same
+   pattern as the Ask panel's own .provider-picker dropdown: an absolutely
+   positioned menu under a toggle button, closed on outside-click or Escape.
+   --------------------------------------------------------------------------- */
+
+.panel-menu{ position: relative; }
+
+.panel-menu__caret{ display: inline-block; margin-left: 2px; font-size: 10px; }
+
+.panel-menu__list{
+  position: absolute; top: calc(100% + 6px); right: 0; z-index: 30;
+  min-width: 230px;
+  background: var(--bg-raised); border: 1px solid var(--border-strong); border-radius: var(--radius);
+  box-shadow: 0 8px 28px rgba(0,0,0,0.5), 0 0 18px var(--accent-glow);
+  padding: 4px;
+  display: flex; flex-direction: column;
+}
+
+.panel-menu__item{
+  display: flex; flex-direction: column; align-items: flex-start; gap: 2px;
+  width: 100%; text-align: left;
+  padding: 8px 10px;
+  background: none; border: none; border-radius: calc(var(--radius) - 2px);
+  color: var(--text); font: inherit; cursor: pointer;
+}
+.panel-menu__item:hover{ background: var(--bg-panel-2); }
+
+.panel-menu__item-label{ font-size: 12px; font-weight: 600; }
+.panel-menu__item-hint{
+  font-family: var(--font-mono); font-size: 10.5px; color: var(--text-dimmer);
 }

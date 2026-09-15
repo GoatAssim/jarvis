@@ -1392,6 +1392,33 @@
     }
   }
 
+  // One place every notification is displayed, whichever path it arrived by
+  // (live stderr stream during an ask, or a WS push from the tick loop).
+  // Always shows an in-page toast; additionally raises a real OS
+  // notification when the tab isn't visible, since the whole point of a
+  // reminder is that it reaches you when you're not looking at Jarvis.
+  function showNotification(note) {
+    if (!note || (!note.title && !note.message)) return;
+    const title = String(note.title || "Jarvis").slice(0, 120);
+    const body = String(note.message || "").slice(0, 400);
+    const isFailure = Boolean(note.failed);
+    toast(`${title}${body ? " \u2014 " + body.slice(0, 160) : ""}`, isFailure ? "error" : "info");
+    if (!jarvisTabVisible() && "Notification" in window && Notification.permission === "granted") {
+      try {
+        // Tagged per notification id, not a shared tag: two reminders
+        // firing in the same tick must not collapse into one toast the way
+        // notifyIfAway's fixed "jarvis-task" tag deliberately does.
+        const n = new Notification(title, {
+          body,
+          tag: `jarvis-note-${note.id || Date.now()}`,
+        });
+        n.onclick = () => { window.focus(); n.close(); };
+      } catch {
+        /* private mode / unsupported */
+      }
+    }
+  }
+
   function notifyTaskDone(summary, failed) {
     const task = (state.lastTaskLabel || "that").replace(/\s+/g, " ").trim().slice(0, 42) || "that";
     const title = `Your task of doing ${task} is done sir`;
@@ -1511,6 +1538,12 @@
   }
 
   const Api = {
+    // Generic verbs, for endpoints whose call sites read better as a plain
+    // path than as another named wrapper (the scheduling/MCP panel builds
+    // per-job URLs like /api/scheduled/<id>/snooze). The named helpers below
+    // are still the right shape for anything called from several places.
+    get: (path) => api("GET", path),
+    post: (path, body) => api("POST", path, body),
     status: () => api("GET", "/api/status"),
     reconnect: () => api("POST", "/api/reconnect"),
     // Favorited commands: server-persisted (see server.js), independent of
@@ -2200,6 +2233,21 @@
 
   function handleWsMessage(msg) {
     switch (msg.type) {
+      case "notifications":
+        // Pushed from the server's tick loop, drained from the durable
+        // inbox (jarvis/notifier.py). These are notifications raised while
+        // this tab may not have been running anything at all -- a reminder
+        // that fired from cron, a scheduled task that finished overnight --
+        // so they arrive here rather than through any ask's stderr stream.
+        (msg.notifications || []).forEach(showNotification);
+        break;
+      case "scheduled-tick":
+        // Only refresh the panel if it's actually open; a background tick
+        // shouldn't cost a re-render nobody is looking at.
+        if ((msg.ran || []).length && typeof refreshScheduledPanel === "function") {
+          refreshScheduledPanel();
+        }
+        break;
       case "commands":
         applyCommandsFromServer(msg.commands);
         break;
@@ -2743,6 +2791,22 @@
       case "confirm":
         if (item.data.resolved !== null) renderResolvedConfirmBubble(item.data);
         break;
+      case "presentFile":
+        // The replay half of the present_file fix. The live path reaches
+        // showAskPresentFile() from the JARVIS_MEDIA branch in
+        // addAskPromptTrace; this reaches the SAME function with the same
+        // field names (ai_client._extras_from_runs builds its data dict to
+        // match this signature deliberately), so a reloaded card is the
+        // card, not a lookalike rebuilt from different fields.
+        showAskPresentFile({
+          jobId: item.data.jobId || null,
+          filename: item.data.filename || null,
+          name: item.data.name || "",
+          type: item.data.type || "file",
+          sizeBytes: typeof item.data.sizeBytes === "number" ? item.data.sizeBytes : null,
+          path: item.data.path || "",
+        });
+        break;
       case "devAgent":
         // A replayed devAgent extra already has its complete `steps` array
         // (persisted per ai_client._extras_from_runs — see §6 of the §3.6
@@ -2793,6 +2857,17 @@
           name, type: ftype, sizeBytes, path: fullPath,
         });
         askPromptLine(`$ present  ${name || fullPath}`, "tool");
+        return;
+      }
+      if (parts[1] === "notification" && parts[2]) {
+        // A scheduled job / reminder firing inside THIS ask's process (see
+        // jarvis/notifier.py's "stream" channel). Same three-field envelope
+        // and JSON-payload shape dev_agent uses, so it needs no change to
+        // the split("\t") dispatch around it.
+        let note;
+        try { note = JSON.parse(parts[2]); } catch { return; }
+        showNotification(note);
+        askPromptLine(`$ notify  ${note.title || ""}`, "tool");
         return;
       }
       if (parts[1] === "dev_agent" && parts[2]) {
@@ -5174,14 +5249,17 @@
     }
   }
 
-  qs("#btn-skills").addEventListener("click", openSkills);
+  // #btn-skills no longer exists (opening Skills now goes through the
+  // panel-menu dropdown's #menu-item-skills, wired further down) — only the
+  // close button and outside-click/Escape handling stay here.
   qs("#skills-close").addEventListener("click", closeSkills);
   skillsOverlay.addEventListener("click", (e) => { if (e.target === skillsOverlay) closeSkills(); });
   document.addEventListener("keydown", (e) => {
     if (e.key === "Escape" && !skillsOverlay.hidden) closeSkills();
   });
 
-  qs("#btn-debug").addEventListener("click", openDebug);
+  // Same story as #btn-skills above: #btn-debug is gone, opening Debug goes
+  // through the panel-menu's #menu-item-debug instead.
   qs("#debug-close").addEventListener("click", closeDebug);
   debugOverlay.addEventListener("click", (e) => { if (e.target === debugOverlay) closeDebug(); });
   document.addEventListener("keydown", (e) => {
@@ -6514,4 +6592,242 @@
   tickClock();
   setInterval(tickClock, 1000);
   runBoot();
+
+  // -------------------------------------------------------------------------
+  // Scheduled panel — jobs and quick-add. MCP server status now lives in its
+  // own panel (see refreshMcpPanel/openMcp below) — the two used to share one
+  // overlay, but scheduling and MCP are unrelated concerns and each earns its
+  // own menu entry.
+  //
+  // Read-mostly on purpose. Creating anything that RUNS (a command, a tool, a
+  // full ask) is deliberately not offered here: those go through the approval
+  // gate (scheduler._needs_approval) and are far easier to express by asking
+  // Jarvis than by filling in a form. What this panel is for is seeing what's
+  // set, approving what's parked, and killing what you no longer want.
+  // -------------------------------------------------------------------------
+  const schedOverlay = qs("#sched-overlay");
+
+  async function refreshScheduledPanel() {
+    if (!schedOverlay || schedOverlay.hidden) return;
+    const list = qs("#sched-list");
+    const statusLine = qs("#sched-status-line");
+    try {
+      const data = await Api.get("/api/scheduled");
+      const jobs = data.jobs || [];
+      const counts = data.counts || {};
+      statusLine.textContent = jobs.length
+        ? `${jobs.length} active \u2014 ${counts.reminders || 0} reminder(s), ${counts.tasks || 0} task(s)` +
+          (counts.needs_approval ? `, ${counts.needs_approval} awaiting approval` : "")
+        : "nothing scheduled";
+      list.innerHTML = "";
+      if (!jobs.length) {
+        list.appendChild(el("div", { class: "skills-empty" }, "Nothing scheduled yet."));
+        return;
+      }
+      for (const job of jobs) list.appendChild(renderSchedJob(job));
+    } catch (err) {
+      statusLine.textContent = "couldn't read the schedule";
+      list.innerHTML = "";
+      list.appendChild(el("div", { class: "skills-empty" }, err.message || "Failed."));
+    }
+  }
+
+  function renderSchedJob(job) {
+    const meta = [job.kind, job.when, job.in ? `in ${job.in}` : null]
+      .filter(Boolean).join(" \u00b7 ");
+    const actions = [];
+    const act = (label, action, body) => {
+      const b = el("button", { class: "btn btn--ghost btn--sm", type: "button" }, label);
+      b.addEventListener("click", async () => {
+        b.disabled = true;
+        try {
+          await Api.post(`/api/scheduled/${job.id}/${action}`, body || {});
+          await refreshScheduledPanel();
+        } catch (err) {
+          toast(err.message || "That didn't work.");
+          b.disabled = false;
+        }
+      });
+      actions.push(b);
+    };
+    // Approve is only offered for a job actually waiting on it — showing it
+    // on everything would suggest every job needs approving, which would
+    // make the ones that genuinely do stop standing out.
+    if (job.needs_approval) act("Approve", "approve");
+    if (job.status === "paused") act("Resume", "resume");
+    else if (!job.needs_approval) act("Pause", "pause");
+    act("Snooze 10m", "snooze", { delay: "10 minutes" });
+    act("Cancel", "cancel");
+
+    return el("div", { class: "skills-item" + (job.needs_approval ? " is-warn" : "") }, [
+      el("div", { class: "skills-item__name" }, job.title || "(untitled)"),
+      el("div", { class: "skills-item__desc" }, meta),
+      job.last_error ? el("div", { class: "skills-item__desc" }, `last error: ${job.last_error}`) : null,
+      el("div", { class: "skills-item__actions" }, actions),
+    ].filter(Boolean));
+  }
+
+  function openScheduled() {
+    if (!schedOverlay) return;
+    schedOverlay.hidden = false;
+    ensureNotifPermission();
+    refreshScheduledPanel();
+  }
+
+  function closeScheduled() {
+    if (schedOverlay) schedOverlay.hidden = true;
+  }
+
+  qs("#sched-close")?.addEventListener("click", closeScheduled);
+  schedOverlay?.addEventListener("click", (e) => { if (e.target === schedOverlay) closeScheduled(); });
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape" && schedOverlay && !schedOverlay.hidden) closeScheduled();
+  });
+
+  qs("#btn-sched-add")?.addEventListener("click", async () => {
+    const when = qs("#sched-when").value.trim();
+    const message = qs("#sched-message").value.trim();
+    if (!when || !message) return toast("Both a time and a message are needed.");
+    try {
+      await Api.post("/api/scheduled", { when, message, kind: "reminder" });
+      qs("#sched-when").value = "";
+      qs("#sched-message").value = "";
+      toast("Scheduled.", "info");
+      refreshScheduledPanel();
+    } catch (err) {
+      // The server passes scheduler/timespec's own error text straight
+      // through, which is written to be read by a person ("couldn't read
+      // 'nexr tuesday' as a time — try ..."), so it's shown verbatim.
+      toast(err.data?.error || err.message || "Couldn't schedule that.");
+    }
+  });
+
+  qs("#btn-sched-tick")?.addEventListener("click", async () => {
+    try {
+      const result = await Api.post("/api/scheduled/tick", {});
+      const n = (result.ran || []).length;
+      toast(n ? `Ran ${n} job(s).` : "Nothing was due.", "info");
+      refreshScheduledPanel();
+    } catch (err) {
+      toast(err.message || "Tick failed.");
+    }
+  });
+
+  // -------------------------------------------------------------------------
+  // MCP Servers panel — its own menu entry, its own overlay. Read-mostly:
+  // servers are added by editing mcp_config.json by hand (see mcp_client.py's
+  // docstring on why that's a deliberate restriction), so the only action
+  // this panel offers is Refresh.
+  // -------------------------------------------------------------------------
+  const mcpOverlay = qs("#mcp-overlay");
+
+  async function refreshMcpPanel() {
+    if (!mcpOverlay || mcpOverlay.hidden) return;
+    const list = qs("#mcp-list");
+    const statusLine = qs("#mcp-status-line");
+    try {
+      const data = await Api.get("/api/mcp");
+      const servers = data.servers || [];
+      statusLine.textContent = servers.length
+        ? `${data.enabled_count || 0} enabled \u00b7 ${data.total_tools || 0} tool(s)` +
+          (data.needs_refresh ? " \u00b7 refresh recommended" : "")
+        : "no servers configured";
+      list.innerHTML = "";
+      if (!servers.length) {
+        list.appendChild(el("div", { class: "skills-empty" },
+          "No MCP servers configured. Add them in mcp_config.json, then Refresh."));
+        return;
+      }
+      for (const s of servers) {
+        const bits = [
+          s.enabled ? "enabled" : "disabled",
+          s.transport,
+          `${s.tool_count} tool(s)`,
+          s.trusted ? "trusted" : "confirm-gated",
+          s.stale ? "stale" : null,
+        ].filter(Boolean).join(" \u00b7 ");
+        list.appendChild(el("div", { class: "skills-item" + (s.error ? " is-warn" : "") }, [
+          el("div", { class: "skills-item__name" }, s.name),
+          el("div", { class: "skills-item__desc" }, bits),
+          s.error ? el("div", { class: "skills-item__desc" }, s.error) : null,
+        ].filter(Boolean)));
+      }
+    } catch (err) {
+      statusLine.textContent = "couldn't read MCP status";
+      list.innerHTML = "";
+      list.appendChild(el("div", { class: "skills-empty" }, err.message || "Failed."));
+    }
+  }
+
+  function openMcp() {
+    if (!mcpOverlay) return;
+    mcpOverlay.hidden = false;
+    refreshMcpPanel();
+  }
+
+  function closeMcp() {
+    if (mcpOverlay) mcpOverlay.hidden = true;
+  }
+
+  qs("#mcp-close")?.addEventListener("click", closeMcp);
+  mcpOverlay?.addEventListener("click", (e) => { if (e.target === mcpOverlay) closeMcp(); });
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape" && mcpOverlay && !mcpOverlay.hidden) closeMcp();
+  });
+
+  qs("#btn-mcp-refresh")?.addEventListener("click", async () => {
+    const btn = qs("#btn-mcp-refresh");
+    btn.disabled = true;
+    btn.textContent = "Refreshing\u2026";
+    try {
+      await Api.post("/api/mcp/refresh", {});
+      toast("MCP servers refreshed. Restart Jarvis for new tools to appear.", "info");
+      refreshMcpPanel();
+    } catch (err) {
+      toast(err.data?.error || err.message || "Refresh failed.");
+    } finally {
+      btn.disabled = false;
+      btn.textContent = "Refresh";
+    }
+  });
+
+  // -------------------------------------------------------------------------
+  // Panel-menu dropdown — one trigger for Debug / Skills / Scheduled / MCP
+  // Servers, replacing four buttons that used to sit side by side in the
+  // console header. Same open/close/outside-click/Escape pattern as the Ask
+  // panel's .provider-picker (see loadAiProviders et al. above).
+  // -------------------------------------------------------------------------
+  const panelMenuEl = qs("#panel-menu");
+  const panelMenuBtn = qs("#btn-panel-menu");
+  const panelMenuList = qs("#panel-menu-list");
+
+  function openPanelMenu() {
+    panelMenuList.hidden = false;
+    panelMenuBtn.setAttribute("aria-expanded", "true");
+  }
+
+  function closePanelMenu() {
+    panelMenuList.hidden = true;
+    panelMenuBtn.setAttribute("aria-expanded", "false");
+  }
+
+  panelMenuBtn?.addEventListener("click", () => {
+    if (!panelMenuList.hidden) return closePanelMenu();
+    openPanelMenu();
+  });
+
+  document.addEventListener("click", (e) => {
+    if (!panelMenuList.hidden && !panelMenuEl.contains(e.target)) closePanelMenu();
+  });
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape" && !panelMenuList.hidden) closePanelMenu();
+  });
+
+  // Each item opens its destination, then closes the dropdown — the menu
+  // itself is never the thing left on screen after a choice is made.
+  qs("#menu-item-debug")?.addEventListener("click", () => { closePanelMenu(); openDebug(); });
+  qs("#menu-item-skills")?.addEventListener("click", () => { closePanelMenu(); openSkills(); });
+  qs("#menu-item-scheduled")?.addEventListener("click", () => { closePanelMenu(); openScheduled(); });
+  qs("#menu-item-mcp")?.addEventListener("click", () => { closePanelMenu(); openMcp(); });
+
 })();
