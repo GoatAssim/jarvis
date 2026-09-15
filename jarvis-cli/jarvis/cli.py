@@ -42,7 +42,7 @@ ENCODING = "utf-8"
 
 CHAIN_SEP = "then"      # starts a new batch \u2014 waits for the previous one to finish
 PARALLEL_SEP = "and"    # joins the current batch \u2014 runs alongside whatever's already in it
-RESERVED_NAMES = {"config", "ai-config", "ai-clear", "ai-drop-from", "playnite-config", "spotify-config", "spotify-login", "memory-config", "everything-config", "tools-list", "tool-run", "tool-preview", "tool-safety-set", "conv-new", "conv-list", "conv-show", "conv-switch", "conv-delete", "logs", "logs-list", "logs-show", "logs-clear", "organize-json", "mode", "mode-set", "voice-config", "speak", "listen", "transcribe", CHAIN_SEP, PARALLEL_SEP, "-h", "--help"}
+RESERVED_NAMES = {"config", "ai-config", "ai-clear", "ai-drop-from", "playnite-config", "spotify-config", "spotify-login", "memory-config", "everything-config", "tools-list", "tool-run", "skills-list", "skills-get", "skills-save", "skills-add", "skills-create", "skills-remove", "tool-preview", "tool-safety-set", "conv-new", "conv-list", "conv-show", "conv-switch", "conv-delete", "logs", "logs-list", "logs-show", "logs-clear", "organize-json", "mode", "mode-set", "voice-config", "speak", "listen", "transcribe", CHAIN_SEP, PARALLEL_SEP, "-h", "--help"}
 
 OUT = Palette(sys.stdout)  # actual command output: the banner, the command list
 ERR = Palette(sys.stderr)  # jarvis's own status/trace/error messages
@@ -1306,6 +1306,70 @@ def main():
         everything_config.ensure_config()
         print(everything_config.CONFIG_FILE)
         return
+
+    # ---- Skills (see skills.py) -----------------------------------------
+    # Dedicated commands rather than routing the web manager through
+    # `tool-run`: the manager is a person editing their own files, so it must
+    # not inherit the AI-facing confirm-gating on remove_skill, and it needs
+    # two operations (read/write the raw SKILL.md) that are deliberately NOT
+    # exposed as model tools — handing the model arbitrary file-overwrite on
+    # its own instruction set is a bad idea regardless of how convenient it'd
+    # be. Every one prints a single JSON object to stdout, same contract as
+    # tools-list/tool-run, so server.js parses them all identically.
+    if argv[0] == "skills-list":
+        from . import skills as skills_mod
+        print(json.dumps({"skills": skills_mod.list_skills(), "stats": skills_mod.stats()}, indent=2))
+        return
+
+    if argv[0] == "skills-get":
+        from . import skills as skills_mod
+        if len(argv) < 2 or not argv[1].strip():
+            print(json.dumps({"error": "usage: jarvis skills-get <name>"}))
+            sys.exit(1)
+        result = skills_mod.export_skill(argv[1].strip())
+        print(json.dumps(result, indent=2))
+        sys.exit(1 if result.get("error") else 0)
+
+    if argv[0] == "skills-save":
+        # jarvis skills-save <name> <full SKILL.md text>
+        # Content arrives as one argv entry (spawn, no shell) so newlines and
+        # quoting in the markdown never need escaping.
+        from . import skills as skills_mod
+        if len(argv) < 3:
+            print(json.dumps({"error": "usage: jarvis skills-save <name> <content>"}))
+            sys.exit(1)
+        result = skills_mod.write_skill_file(argv[1].strip(), argv[2])
+        print(json.dumps(result, indent=2))
+        sys.exit(1 if result.get("error") else 0)
+
+    if argv[0] == "skills-add":
+        from . import skills as skills_mod
+        if len(argv) < 2 or not argv[1].strip():
+            print(json.dumps({"error": "usage: jarvis skills-add <folder|file|markdown> [name]"}))
+            sys.exit(1)
+        name = argv[2].strip() if len(argv) > 2 and argv[2].strip() else None
+        result = skills_mod.add_skill(argv[1], name)
+        print(json.dumps(result, indent=2))
+        sys.exit(1 if result.get("error") else 0)
+
+    if argv[0] == "skills-create":
+        # jarvis skills-create <name> <description> <instructions>
+        from . import skills as skills_mod
+        if len(argv) < 4:
+            print(json.dumps({"error": "usage: jarvis skills-create <name> <description> <instructions>"}))
+            sys.exit(1)
+        result = skills_mod.create_skill(argv[1].strip(), argv[2].strip(), argv[3])
+        print(json.dumps(result, indent=2))
+        sys.exit(1 if result.get("error") else 0)
+
+    if argv[0] == "skills-remove":
+        from . import skills as skills_mod
+        if len(argv) < 2 or not argv[1].strip():
+            print(json.dumps({"error": "usage: jarvis skills-remove <name>"}))
+            sys.exit(1)
+        result = skills_mod.remove_skill(argv[1].strip())
+        print(json.dumps(result, indent=2))
+        sys.exit(1 if result.get("error") else 0)
 
     if argv[0] == "tools-list":
         from . import tools as system_tools

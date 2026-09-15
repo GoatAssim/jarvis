@@ -37,7 +37,7 @@ import threading
 
 import requests
 
-from . import logs
+from . import logs, prompt_cache
 from . import token_usage
 
 MAX_TOOL_ROUNDS = 5  # follow-up requests allowed after a tool call, per ask — plenty for simple
@@ -121,6 +121,31 @@ def _log_provider():
     return getattr(_log_local, "provider", None)
 
 
+def _log_cache_plan(plan, provider_type):
+    """Record what prompt_cache.plan() decided, once per attempt.
+
+    Caching fails silently by design — a prefix that never matches produces
+    a correct answer at full price, with no error anywhere. This line is the
+    only thing standing between that and an unnoticed regression, so it logs
+    the human-readable `reason` string rather than just the flags.
+    """
+    conv_id = _log_conv_id()
+    if not conv_id or not isinstance(plan, dict):
+        return
+    logs.log(
+        conv_id, "prompt_cache",
+        {
+            "provider_type": provider_type,
+            "eligible": plan.get("eligible"),
+            "reason": plan.get("reason"),
+            "system_breakpoint": plan.get("system_index") is not None,
+            "tools_breakpoint": bool(plan.get("tools")),
+            "ttl": plan.get("ttl"),
+        },
+        provider=_log_provider(), round_num=0,
+    )
+
+
 def _record_usage(provider_type, data, round_num):
     """Phase 0: log + accumulate the real (provider-reported) token usage
     for one request/response round, if the response carried any."""
@@ -148,13 +173,25 @@ def get_usage_summary():
     tool_calls = getattr(_log_local, "tool_usage", None) or []
     total_input = sum(r.get("input_tokens") or 0 for r in rounds)
     total_output = sum(r.get("output_tokens") or 0 for r in rounds)
-    return {
+    summary = {
         "input_tokens": total_input,
         "output_tokens": total_output,
         "total_tokens": total_input + total_output,
         "rounds": rounds,
         "tool_calls": tool_calls,
     }
+    # Prompt-cache totals (see prompt_cache.py). Included only when at
+    # least one round actually reported cache activity, so a provider that
+    # never caches — or a model below its cacheable floor — reads exactly
+    # as it did before rather than showing a permanent, meaningless zero.
+    # cache_read_tokens are already counted inside input_tokens above;
+    # these are a breakdown of that number, not an addition to it.
+    cache_read = sum(r.get("cache_read_tokens") or 0 for r in rounds)
+    cache_write = sum(r.get("cache_write_tokens") or 0 for r in rounds)
+    if cache_read or cache_write:
+        summary["cache_read_tokens"] = cache_read
+        summary["cache_write_tokens"] = cache_write
+    return summary
 
 
 class AIResult:
@@ -232,9 +269,21 @@ def _parse_json(resp):
         return None, "couldn't parse the response as JSON"
 
 
-def _split_system(messages):
-    """Anthropic and Gemini both want the system prompt out-of-band, not as
-    a message with role 'system'. Returns (system_text, other_messages)."""
+def _system_parts(messages):
+    """Split messages into (ordered list of system strings, other messages).
+
+    ai_client._build_messages() emits the system prompt as MORE THAN ONE
+    role:"system" message now — index 0 is the static prefix (persona, tool
+    blurb, workflow guidance) and index 1, when present, is the
+    per-request tail (memory context keyed on the user's message, saved
+    commands, frequency stats). Keeping them as separate strings is what
+    lets call_anthropic() put a cache breakpoint between them; see
+    prompt_cache.py's module docstring for why the boundary is there.
+
+    Everything downstream that wants the old single string just joins these
+    with "\\n\\n" — _split_system() and _merge_system() below both do, which
+    is why this split is invisible to every provider that doesn't opt in.
+    """
     system_parts = []
     turns = []
     for m in messages:
@@ -243,7 +292,49 @@ def _split_system(messages):
                 system_parts.append(m["content"])
         else:
             turns.append(m)
+    return system_parts, turns
+
+
+def _split_system(messages):
+    """Anthropic and Gemini both want the system prompt out-of-band, not as
+    a message with role 'system'. Returns (system_text, other_messages).
+
+    Unchanged behavior: several system messages join with "\\n\\n", which is
+    the exact separator _system_prompt() already uses between its own
+    sections, so a two-block system prompt renders byte-identically to the
+    single-block one it replaced."""
+    system_parts, turns = _system_parts(messages)
     return "\n\n".join(system_parts), turns
+
+
+def _merge_system(messages):
+    """Fold consecutive role:"system" messages into one.
+
+    For the three adapters (openai_compatible, cohere, ollama) that pass
+    the caller's message dicts straight into the request payload. Those
+    APIs accept several system messages in principle, but not every
+    OpenAI-*compatible* host does, and there is no upside to finding out
+    the hard way on a user's key — this is the one line that guarantees the
+    two-block system prompt is a pure no-op for every provider that isn't
+    Anthropic.
+
+    Only leading system messages are merged, matching how _build_messages()
+    lays them out; a system message appearing later (nothing does this
+    today) is left exactly where it is rather than being hoisted.
+    """
+    out = []
+    leading = []
+    rest_started = False
+    for m in messages:
+        if not rest_started and m.get("role") == "system":
+            if m.get("content"):
+                leading.append(m["content"])
+            continue
+        rest_started = True
+        out.append(m)
+    if leading:
+        out.insert(0, {"role": "system", "content": "\n\n".join(leading)})
+    return out
 
 
 def _call_tool_safely(tool_executor, name, arguments, round_num=None):
@@ -525,7 +616,8 @@ def _anthropic_turns_to_generic(system_text, working_turns):
 # carrying the matching tool_call_id.
 # ---------------------------------------------------------------------------
 
-def call_openai_compatible(provider, messages, timeout, tools=None, tool_executor=None, round_budget=None):
+def call_openai_compatible(provider, messages, timeout, tools=None, tool_executor=None, round_budget=None,
+                           cfg_defaults=None):
     base_url = provider.get("base_url") or ""
     api_key = provider.get("api_key") or ""
     model = provider.get("model") or ""
@@ -533,7 +625,12 @@ def call_openai_compatible(provider, messages, timeout, tools=None, tool_executo
         return AIResult(False, error="no base_url configured")
 
     headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
-    working_messages = list(messages)
+    # _merge_system: ai_client emits the system prompt as two messages
+    # (static prefix + per-request tail) so call_anthropic can put a cache
+    # breakpoint between them. Every other provider gets them folded back
+    # into the single system message it has always received — byte-identical
+    # to the pre-caching payload, since both sides join with "\n\n".
+    working_messages = _merge_system(messages)
     ran_tools = False
     if round_budget is None:
         round_budget = RoundBudget()
@@ -552,6 +649,12 @@ def call_openai_compatible(provider, messages, timeout, tools=None, tool_executo
             for t in tools
         ]
 
+    system_parts_in, _ = _system_parts(messages)
+    cache_plan = prompt_cache.plan(
+        system_parts_in, _tools_payload(), provider, cfg_defaults or {}, model=model,
+    )
+    _log_cache_plan(cache_plan, "openai_compatible")
+
     for round_num in range(MAX_TOOL_ROUNDS + 1):
         tools_payload = _tools_payload()
         payload = {
@@ -559,6 +662,27 @@ def call_openai_compatible(provider, messages, timeout, tools=None, tool_executo
             "messages": working_messages,
             "max_tokens": provider.get("max_tokens", 700),
         }
+        # Prompt caching for the whole OpenAI-compatible family (Groq,
+        # OpenAI, xAI, Mistral, DeepSeek, OpenRouter). These hosts cache
+        # prefixes AUTOMATICALLY above ~1024 tokens, with no opt-in and no
+        # extra fee, so there is no marker to place — the actual work was
+        # already done upstream by ai_client putting the static system block
+        # first and the per-request tail last.
+        #
+        # The one request-side lever is prompt_cache_key: a stable string
+        # routing this request to the same backend node the last one hit,
+        # which is what turns a possible hit into a likely one. It is a hint,
+        # never a guarantee. Keyed on the conversation, so every turn of one
+        # chat lands together, and deliberately not on anything per-request.
+        #
+        # Unknown JSON fields are ignored by every host jarvis ships a config
+        # block for, but that isn't every host that exists — a self-hosted or
+        # proxied endpoint can be stricter. "prompt_cache_key": false in a
+        # provider block turns this off without touching anything else.
+        if cache_plan.get("cache_key"):
+            cache_key = _log_conv_id()
+            if cache_key:
+                payload["prompt_cache_key"] = str(cache_key)
         if tools_payload and round_num < MAX_TOOL_ROUNDS and round_budget.remaining() > 0:
             # On the forced-final round any tool_calls the model returns get
             # ignored anyway (see the round_num < MAX_TOOL_ROUNDS gate below),
@@ -581,8 +705,11 @@ def call_openai_compatible(provider, messages, timeout, tools=None, tool_executo
         if parse_err:
             return AIResult(False, error=parse_err,
                             tool_history=_openai_messages_to_generic(working_messages) if ran_tools else None)
-        _record_usage("openai_compatible", data, round_num)
-
+        # Called exactly once per round. This line was duplicated, which
+        # double-counted every openai-compatible round in the usage
+        # summary, the debug panel and the Logs viewer. Found while adding
+        # the cache-token accounting above, which would have inherited the
+        # same doubling.
         _record_usage("openai_compatible", data, round_num)
 
         choices = data.get("choices") or []
@@ -660,14 +787,16 @@ def call_openai_compatible(provider, messages, timeout, tools=None, tool_executo
 # a matching tool_result block (tool_use_id).
 # ---------------------------------------------------------------------------
 
-def call_anthropic(provider, messages, timeout, tools=None, tool_executor=None, round_budget=None):
+def call_anthropic(provider, messages, timeout, tools=None, tool_executor=None, round_budget=None,
+                   cfg_defaults=None):
     base_url = provider.get("base_url") or "https://api.anthropic.com/v1/messages"
     api_key = provider.get("api_key") or ""
     model = provider.get("model") or ""
     if not api_key:
         return AIResult(False, error="no api_key configured")
 
-    system_text, turns = _split_system(messages)
+    system_blocks_in, turns = _system_parts(messages)
+    system_text = "\n\n".join(system_blocks_in)
     headers = {
         "x-api-key": api_key,
         "anthropic-version": "2023-06-01",
@@ -677,6 +806,7 @@ def call_anthropic(provider, messages, timeout, tools=None, tool_executor=None, 
     ran_tools = False
     if round_budget is None:
         round_budget = RoundBudget()
+    cache_defaults = cfg_defaults or {}
 
     def _tools_payload():
         # Phase 9 (see new_plan.md): rebuilt every round so a Phase 5
@@ -700,10 +830,35 @@ def call_anthropic(provider, messages, timeout, tools=None, tool_executor=None, 
             "max_tokens": provider.get("max_tokens", 700),
             "messages": working_turns,
         }
+        offering_tools = bool(tools_payload) and round_num < MAX_TOOL_ROUNDS and round_budget.remaining() > 0
+        # Prompt caching (lever 3 of the token-optimization research; see
+        # prompt_cache.py). Re-planned every round rather than once before
+        # the loop, because the thing it sizes against — the tools array —
+        # is itself rebuilt every round and can grow mid-ask when
+        # search_tools/get_tool_schema promote a tool.
+        plan = prompt_cache.plan(
+            system_blocks_in,
+            tools_payload if offering_tools else None,
+            provider,
+            cache_defaults,
+            model=model,
+        )
         if system_text:
-            payload["system"] = system_text
-        if tools_payload and round_num < MAX_TOOL_ROUNDS and round_budget.remaining() > 0:
-            payload["tools"] = tools_payload
+            if plan["system_index"] is None:
+                # No breakpoint earned: send the plain string, which is the
+                # exact payload this adapter built before caching existed.
+                payload["system"] = system_text
+            else:
+                payload["system"] = prompt_cache.apply_to_system(
+                    system_blocks_in, plan["system_index"], plan["ttl"],
+                )
+        if offering_tools:
+            payload["tools"] = (
+                prompt_cache.apply_to_tools(tools_payload, plan["ttl"])
+                if plan["tools"] else tools_payload
+            )
+        if round_num == 0:
+            _log_cache_plan(plan, "anthropic")
 
         resp, net_err = _post_json(base_url, headers, payload, timeout)
         if net_err:
@@ -820,32 +975,47 @@ _GEMINI_CACHE_BASE = "https://generativelanguage.googleapis.com/v1beta"
 _GEMINI_CACHE_MIN_TOKENS = 4096
 
 
-def _create_gemini_cache(model, headers, system_text, tools_payload, timeout):
-    """Explicit context caching (Gemini's cachedContents API): stores the
-    system-instruction + tool-schema portion of the payload ONCE per ask,
-    so every round after the first references it by name instead of
-    re-sending (and re-billing) that identical content every round — see
-    the token audit's "no prompt caching" finding.
+def _gemini_cache_name(model, headers, system_text, tools_payload, timeout, ttl_seconds):
+    """Get a reusable cachedContents name for this prefix, creating one only
+    if no live cache already covers it.
 
-    Best-effort, same philosophy as discovery_cache.py/route_stickiness.py:
-    a provider that rejects the cache (e.g. the model's minimum-cacheable-
-    token threshold not met — small system prompts are common and simply
-    won't qualify), a network error, or a malformed response all collapse
-    to returning None here, and the caller falls back to sending the
-    content inline every round exactly as before. Never raises, never the
-    reason an ask() fails.
+    This is the fix for the "janky" half of the old implementation. That
+    version created a cache at the start of every ask and DELETED it at the
+    end of the same ask, which meant each fresh jarvis process paid:
+
+      - an extra HTTP round trip before the first generateContent, on the
+        latency path
+      - cache-creation billing at the standard input-token rate
+      - storage billing for however long it lived
+
+    ...to collect a discount only on rounds 2+ of that one ask. Most asks are
+    a single round, so that was usually a net loss, and it could never be
+    anything else, because the cache was destroyed before the next process
+    could reach it.
+
+    Now the name is fingerprinted by exactly what went into it and persisted
+    (gemini_cache_store.py), so process N+1 reuses process N's cache and the
+    write is amortized across every ask that shares the prefix. The cache is
+    left to expire on its TTL instead of being deleted, which is the only
+    arrangement where explicit caching beats Gemini's free implicit caching.
+
+    Best-effort throughout, same philosophy as discovery_cache.py: a rejected
+    cache, a network error, or a malformed response all collapse to None and
+    the caller sends content inline exactly as before. Never raises.
     """
+    from . import gemini_cache_store
+
     if not system_text and not tools_payload:
         return None
-    estimated = token_usage.estimate_tokens_for(system_text or "") + token_usage.estimate_tokens_for(tools_payload or {})
-    if estimated < _GEMINI_CACHE_MIN_TOKENS:
-        return None
+
+    key = gemini_cache_store.fingerprint(model, system_text, tools_payload)
+    existing = gemini_cache_store.lookup(key)
+    if existing:
+        return existing
+
     body = {
         "model": f"models/{model}",
-        # Only needs to outlive this single multi-round ask, not persist
-        # across separate `jarvis` invocations — short TTL keeps stray
-        # caches (e.g. from a crashed ask) from lingering expensively.
-        "ttl": "300s",
+        "ttl": f"{int(ttl_seconds)}s",
     }
     if system_text:
         body["systemInstruction"] = {"parts": [{"text": system_text}]}
@@ -859,23 +1029,34 @@ def _create_gemini_cache(model, headers, system_text, tools_payload, timeout):
     data, parse_err = _parse_json(resp)
     if parse_err or not isinstance(data, dict):
         return None
-    return data.get("name")
+    name = data.get("name")
+    if name:
+        gemini_cache_store.store(key, name, ttl_seconds)
+    return name
 
 
 def _delete_gemini_cache(cache_name, headers, timeout):
-    """Best-effort cleanup once the ask is done. Not load-bearing — the
-    short ttl in _create_gemini_cache means an undeleted cache just
-    expires on its own — but freeing it immediately avoids paying for the
-    full ttl on every single ask."""
+    """Drop a cache we know is unusable.
+
+    No longer called at the end of every ask — that was the bug. It's called
+    only when a cache has been invalidated for real: the tool list grew
+    mid-ask, so the cached schemas no longer match what the model needs to be
+    offered. Deleting it then is correct; deleting it on the happy path threw
+    away the whole point.
+    """
     if not cache_name:
         return
+    from . import gemini_cache_store
+
+    gemini_cache_store.forget(cache_name)
     try:
         requests.delete(f"{_GEMINI_CACHE_BASE}/{cache_name}", headers=headers, timeout=timeout)
     except requests.exceptions.RequestException:
         pass
 
 
-def call_gemini(provider, messages, timeout, tools=None, tool_executor=None, round_budget=None):
+def call_gemini(provider, messages, timeout, tools=None, tool_executor=None, round_budget=None,
+                cfg_defaults=None):
     api_key = provider.get("api_key") or ""
     model = provider.get("model") or ""
     if not api_key:
@@ -886,7 +1067,8 @@ def call_gemini(provider, messages, timeout, tools=None, tool_executor=None, rou
     )
     url = base_url.format(model=model) if "{model}" in base_url else base_url
 
-    system_text, turns = _split_system(messages)
+    system_parts_in, turns = _system_parts(messages)
+    system_text = "\n\n".join(system_parts_in)
 
     def _to_gemini_content(m):
         role = m.get("role", "")
@@ -928,15 +1110,36 @@ def call_gemini(provider, messages, timeout, tools=None, tool_executor=None, rou
             generic.insert(0, {"role": "system", "content": system_text})
         return generic
 
-    # Token audit fix: try to cache the system prompt + tool schemas ONCE,
-    # up front, so every round below can reference them by name instead of
-    # re-sending (and re-billing) identical content every single round.
-    # `cache_name` stays None (falls back to inline-every-round, exactly
-    # the old behavior) if the provider rejects the cache — e.g. the
-    # content is under the model's minimum cacheable-token threshold,
-    # which small system prompts commonly are.
+    # Gemini offers two caching mechanisms, and for jarvis the free one is
+    # usually the better one:
+    #
+    #   IMPLICIT (the default here) — on by default for 2.5+ models, costs
+    #     nothing, needs no extra request, and simply requires a stable
+    #     prefix. ai_client already guarantees that by putting the static
+    #     system block first and the query-dependent tail last, so there is
+    #     literally nothing to do at this layer but not break it. That's why
+    #     systemInstruction is built from system_text (static block first)
+    #     rather than being reassembled in some other order per round.
+    #
+    #   EXPLICIT (opt-in: "gemini_explicit_cache": true) — the cachedContents
+    #     API. Guarantees the discount, but costs a POST before the first
+    #     generateContent plus storage billing for the TTL. Worth it only
+    #     when the same prefix is reused enough to amortize the write, which
+    #     is exactly what _gemini_cache_name's cross-process store now makes
+    #     possible and the old delete-at-end-of-ask code made impossible.
+    #
+    # Either way, cache_name None means inline-every-round — the safe path.
     initial_tools_payload = _tools_payload()
-    cache_name = _create_gemini_cache(model, headers, system_text, initial_tools_payload, timeout)
+    cache_plan = prompt_cache.plan(
+        system_parts_in, initial_tools_payload, provider, cfg_defaults or {}, model=model,
+    )
+    _log_cache_plan(cache_plan, "gemini")
+    cache_name = None
+    if cache_plan.get("eligible") and cache_plan.get("explicit"):
+        cache_name = _gemini_cache_name(
+            model, headers, system_text, initial_tools_payload, timeout,
+            prompt_cache.ttl_seconds(cache_plan.get("ttl")),
+        )
     cached_tool_count = len(tools) if (cache_name and tools) else 0
 
     try:
@@ -1019,9 +1222,14 @@ def call_gemini(provider, messages, timeout, tools=None, tool_executor=None, rou
 
         return AIResult(False, error=_give_up_error(), tool_history=_history())
     finally:
-        # Always try to free the cache when this ask is done, win or lose —
-        # see _delete_gemini_cache's docstring for why this isn't load-bearing.
-        _delete_gemini_cache(cache_name, headers, timeout)
+        # Deliberately NOT deleting cache_name here. The previous version did,
+        # and that single line is what made explicit caching a net loss: the
+        # cache was destroyed at the end of the ask that created it, so the
+        # write could never be amortized across the next jarvis process. It
+        # now expires on its own TTL and is reused in the meantime (see
+        # gemini_cache_store.py). The only deletion left is the one in the
+        # loop above, for a cache that has genuinely gone stale.
+        pass
 
 
 # ---------------------------------------------------------------------------
@@ -1035,7 +1243,8 @@ def call_gemini(provider, messages, timeout, tools=None, tool_executor=None, rou
 # the first place to check against their current docs.
 # ---------------------------------------------------------------------------
 
-def call_cohere(provider, messages, timeout, tools=None, tool_executor=None, round_budget=None):
+def call_cohere(provider, messages, timeout, tools=None, tool_executor=None, round_budget=None,
+                cfg_defaults=None):
     base_url = provider.get("base_url") or "https://api.cohere.com/v2/chat"
     api_key = provider.get("api_key") or ""
     model = provider.get("model") or ""
@@ -1043,7 +1252,12 @@ def call_cohere(provider, messages, timeout, tools=None, tool_executor=None, rou
         return AIResult(False, error="no api_key configured")
 
     headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
-    working_messages = list(messages)
+    # _merge_system: ai_client emits the system prompt as two messages
+    # (static prefix + per-request tail) so call_anthropic can put a cache
+    # breakpoint between them. Every other provider gets them folded back
+    # into the single system message it has always received — byte-identical
+    # to the pre-caching payload, since both sides join with "\n\n".
+    working_messages = _merge_system(messages)
     ran_tools = False
     if round_budget is None:
         round_budget = RoundBudget()
@@ -1129,13 +1343,24 @@ def call_cohere(provider, messages, timeout, tools=None, tool_executor=None, rou
 # model's ollama.com library page.
 # ---------------------------------------------------------------------------
 
-def call_ollama(provider, messages, timeout, tools=None, tool_executor=None, round_budget=None):
+def call_ollama(provider, messages, timeout, tools=None, tool_executor=None, round_budget=None,
+                cfg_defaults=None):
     base_url = provider.get("base_url") or "http://localhost:11434/api/chat"
     model = provider.get("model") or ""
 
     headers = {"Content-Type": "application/json"}
-    working_messages = list(messages)
+    # _merge_system: ai_client emits the system prompt as two messages
+    # (static prefix + per-request tail) so call_anthropic can put a cache
+    # breakpoint between them. Every other provider gets them folded back
+    # into the single system message it has always received — byte-identical
+    # to the pre-caching payload, since both sides join with "\n\n".
+    working_messages = _merge_system(messages)
     ran_tools = False
+    system_parts_in, _ = _system_parts(messages)
+    cache_plan = prompt_cache.plan(
+        system_parts_in, None, provider, cfg_defaults or {}, model=model,
+    )
+    _log_cache_plan(cache_plan, "ollama")
     if round_budget is None:
         round_budget = RoundBudget()
 
@@ -1154,6 +1379,25 @@ def call_ollama(provider, messages, timeout, tools=None, tool_executor=None, rou
     for round_num in range(MAX_TOOL_ROUNDS + 1):
         tools_payload = _tools_payload()
         payload = {"model": model, "messages": working_messages, "stream": False}
+        # Ollama reuses a KV prefix automatically when the prompt prefix
+        # matches, but drops that cache when it unloads the model — which it
+        # does after 5 minutes idle by default. jarvis is a fresh process per
+        # call, often with minutes between calls, so that default means the
+        # model unloads between asks and every ask pays a cold prefill.
+        # Raising keep_alive is the entire optimization; there is no cache
+        # field to set and nothing to bill.
+        #
+        # Costs VRAM residency on the user's own machine and nothing else.
+        # Set "ollama_keep_alive": "0" in the provider block to restore
+        # unload-immediately behavior on a machine that needs the memory.
+        #
+        # Do NOT try to measure hits with prompt_eval_count: it reports the
+        # size of the prompt sent, not the tokens actually recomputed, so it
+        # stays flat across a hit and a miss alike. prompt_eval_duration is
+        # the field that moves (see token_usage.extract_usage).
+        keep_alive = cache_plan.get("keep_alive")
+        if keep_alive:
+            payload["keep_alive"] = keep_alive
         if tools_payload and round_num < MAX_TOOL_ROUNDS and round_budget.remaining() > 0:
             payload["tools"] = tools_payload
 

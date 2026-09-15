@@ -15,7 +15,7 @@ import os
 import subprocess
 import sys
 
-from . import ai_config, ai_providers, command_tools, conversations, memory, playnite_config, stats, tool_safety
+from . import ai_config, ai_providers, command_tools, conversations, memory, playnite_config, skills, stats, tool_safety
 from . import dev_agent_events as _dev_agent_events
 from . import discovery_cache
 from . import logs
@@ -265,6 +265,10 @@ PROMPT_MODE_DEFS = [
         "compact_tools_blurb": False,
         "compact_persona": False,
         "precise_persona": True,
+        # 150% Capacity is the "spend tokens for fidelity" mode, so it opts
+        # out of the hybrid catalog tier — every offered tool keeps its full
+        # argument schema rather than any of them dropping to a catalog line.
+        "catalog_tier": False,
         "playnite_freq_games": 5,
         "skip_other_convos": False,
         "tool_schema_style": "raw",
@@ -301,6 +305,14 @@ MODE_LABELS = {m["name"]: m["label"] for m in PROMPT_MODE_DEFS}
 MODE_SUMMARIES = {m["name"]: m.get("summary", "") for m in PROMPT_MODE_DEFS}
 _MODE_BY_NAME = {m["name"]: m for m in PROMPT_MODE_DEFS}
 DEFAULT_PROMPT_MODE = "compact"
+
+# Below this many tools in one round's offering, the hybrid catalog tier in
+# ask() is a no-op and every schema is sent in full. Set from the measured
+# per-group costs: at 10 tools a group is ~700-1,000 compacted tokens, which
+# is cheaper to just send than to risk an extra round trip over. The three
+# groups above it (playnite 31, desktop 16, system_control 11) are where the
+# eager-loading cost actually lives.
+CATALOG_TIER_MIN_TOOLS = 10
 
 
 def mode_options():
@@ -707,10 +719,52 @@ def _tools_blurb(compact, ultra, has_playnite, has_spotify):
     return " ".join(parts)
 
 
-def _system_prompt(persona, commands_ctx, freq_ctx, tools_enabled,
-                   compact_tools=False, compact_persona=False, ultra=False, has_history=False,
-                   memory_ctx="", has_playnite=False, has_spotify=False, other_convos_ctx="",
-                   playnite_freq_games=None, precise=False, pack_instructions_ctx=""):
+def _system_prompt(*args, **kwargs):
+    """The whole system prompt as one string — unchanged public behavior.
+
+    Kept as a thin join over _system_prompt_parts() so every existing caller
+    and test reads the same text it always did, while _build_messages() can
+    reach for the two halves separately.
+    """
+    static, dynamic = _system_prompt_parts(*args, **kwargs)
+    return "\n\n".join(p for p in (static, dynamic) if p)
+
+
+def _system_prompt_parts(persona, commands_ctx, freq_ctx, tools_enabled,
+                         compact_tools=False, compact_persona=False, ultra=False, has_history=False,
+                         memory_ctx="", has_playnite=False, has_spotify=False, other_convos_ctx="",
+                         playnite_freq_games=None, precise=False, pack_instructions_ctx="",
+                         skills_ctx=""):
+    """Return (static_prefix, per_request_tail) instead of one joined string.
+
+    This split is the load-bearing half of prompt caching (see
+    prompt_cache.py). Every provider jarvis talks to caches a byte-PREFIX of
+    the request, so anything that changes early in the prompt invalidates
+    everything after it. jarvis's system prompt mixes both kinds of content:
+
+      STATIC — persona, the history nudge, the tools blurb, the router's
+        pack instructions, the precision directive. Identical across every
+        turn that lands on the same capacity mode and router group.
+
+      PER-REQUEST — memory context (keyed on the user's message, so it is
+        different on literally every turn), the other-conversations context,
+        the Playnite frequent-games block, saved-commands listing, and
+        frequency stats.
+
+    Before this split they were interleaved and joined, which put
+    query-dependent text in front of static text and made the prefix differ
+    on every single turn. No amount of cache_control markers can rescue that
+    — the bytes genuinely differ. Separating them lets the breakpoint sit at
+    the end of the static run, so the tail changes freely without touching
+    what is cached in front of it.
+
+    Ordering note: the parts are emitted in the SAME order as before, so the
+    joined text is byte-identical to what _system_prompt() used to return.
+    `extra` (the persona's extra_instructions) is static and would cache
+    slightly better if hoisted into the prefix, but moving it would change
+    the prompt the model sees, and a token optimization is not worth an
+    unmeasured behavior change. It stays in the tail.
+    """
     name = persona.get("assistant_name") or DEFAULT_ASSISTANT_NAME
     address = persona.get("address_user_as") or DEFAULT_ADDRESS
     extra = (persona.get("extra_instructions") or "").strip()
@@ -761,6 +815,13 @@ def _system_prompt(persona, commands_ctx, freq_ctx, tools_enabled,
             )
     if tools_enabled:
         parts.append(_tools_blurb(compact_tools, ultra, has_playnite, has_spotify))
+        # Tier 1 of the skills system (see skills.py). Deliberately inside
+        # the STATIC run: the catalog is identical on every turn and only
+        # changes when a skill is added or removed, which makes it exactly
+        # the kind of content the cached prefix is for. Putting it in the
+        # per-request tail instead would cost its full price on every ask.
+        if skills_ctx:
+            parts.append(skills_ctx)
         if pack_instructions_ctx:
             parts.append(pack_instructions_ctx)
     if precise:
@@ -773,6 +834,12 @@ def _system_prompt(persona, commands_ctx, freq_ctx, tools_enabled,
             "guessing \u2014 verify with a tool when one is available rather than "
             "assuming. Prefer being exactly right over being quick."
         )
+    # ---- end of the static prefix -------------------------------------
+    # Everything appended above is stable for a given capacity mode + router
+    # group. Everything below varies per request. The breakpoint goes here.
+    static_parts = list(parts)
+    parts = []
+
     if memory_ctx:
         parts.append(memory_ctx)
     if other_convos_ctx:
@@ -800,7 +867,7 @@ def _system_prompt(persona, commands_ctx, freq_ctx, tools_enabled,
         parts.append(commands_ctx)
     if freq_ctx:
         parts.append(freq_ctx)
-    return "\n\n".join(parts)
+    return "\n\n".join(static_parts), "\n\n".join(parts)
 
 
 def _build_messages(persona, commands, user_text, tools_enabled, profile, conversation_id, route=None):
@@ -903,7 +970,16 @@ def _build_messages(persona, commands, user_text, tools_enabled, profile, conver
             "capability, try search_commands instead — don't just keep "
             "retrying search_tools with different keywords."
         )
-    system_prompt = _system_prompt(
+    # The skills catalog is one line per installed skill and nothing else —
+    # the instructions themselves stay on disk until load_skill is called.
+    # Wrapped because a skills directory that can't be read must degrade to
+    # "no skills" rather than take down every ask.
+    try:
+        skills_ctx = skills.catalog_text()
+    except Exception:
+        skills_ctx = ""
+
+    static_system, dynamic_system = _system_prompt_parts(
         persona,
         commands_ctx,
         freq_ctx,
@@ -919,8 +995,18 @@ def _build_messages(persona, commands, user_text, tools_enabled, profile, conver
         playnite_freq_games=profile.get("playnite_freq_games"),
         precise=profile.get("precise_persona", False),
         pack_instructions_ctx=pack_instructions_ctx,
+        skills_ctx=skills_ctx,
     )
-    messages = [{"role": "system", "content": system_prompt}]
+    # Two system messages, not one: index 0 is the cacheable static prefix,
+    # index 1 the per-request tail (see _system_prompt_parts). Providers that
+    # can act on the boundary read it via ai_providers._system_parts();
+    # every other provider gets them folded back into a single system message
+    # by ai_providers._merge_system(), which joins with the same "\n\n" this
+    # function's parts already use — so the text those providers receive is
+    # byte-identical to the single-block prompt this replaced.
+    messages = [{"role": "system", "content": static_system}]
+    if dynamic_system:
+        messages.append({"role": "system", "content": dynamic_system})
     messages.extend(prior_turns)
     messages.append({"role": "user", "content": user_text})
     return messages
@@ -2029,8 +2115,76 @@ def ask(user_text, commands=None, on_attempt=None, on_tool_call=None, on_tool_re
         # (50% Capacity) mode is for: see tool_schema_style per-provider
         # below, resolved fresh each attempt since mode can still vary by
         # provider under the legacy compact_prompt_providers config.
-        compact_schemas = OrderedSchemaSet(system_tools.compact_schemas_for_prompt(active_schemas))
-        name_only_schemas = OrderedSchemaSet(system_tools.name_only_schemas_for_prompt(active_schemas))
+        # ---- Hybrid catalog tier ---------------------------------------
+        # (Lever 1 of skills-and-token-optimization-research.md, applied to
+        # tool schemas.)
+        #
+        # The router activates whole GROUPS, which is right for workflow
+        # completeness but expensive at the top end: the playnite group is 31
+        # tools / ~2,700 compacted tokens, desktop is 16, system_control 11.
+        # Sending all of that to call one tool is the eager-loading
+        # antipattern the research is about.
+        #
+        # The obvious fix — stub everything and make the model re-request —
+        # is wrong here, and the comment above says why: jarvis is a fresh
+        # process per call, so a re-request costs a full extra round trip
+        # (the entire prompt, resent) rather than a cheap in-session lookup.
+        # Pure stubs would trade ~2,700 tokens for a guaranteed second round.
+        #
+        # So: hybrid. route.matches records which tool each qualifying
+        # keyword actually hit, so the tools the user plausibly meant get
+        # their FULL schema and stay callable with no extra round trip, while
+        # the rest of the group drops to a ~10-token catalog line plus
+        # get_tool_schema. The common case costs nothing extra; only the
+        # genuinely unanticipated sibling pays a round trip, which is exactly
+        # the trade search_tools already makes.
+        #
+        # Below CATALOG_TIER_MIN_TOOLS this is a no-op, so small groups and
+        # every non-confident path behave precisely as before.
+        if (
+            profile.get("catalog_tier", True)
+            and route is not None
+            and route.confident
+            and len(active_schemas) >= CATALOG_TIER_MIN_TOOLS
+        ):
+            hot = {name for _group, name, _phrase in (route.matches or [])}
+            # Keep the discovery pair callable: demoting get_tool_schema
+            # itself to a catalog entry would strand every demoted tool.
+            hot.update({"search_tools", "get_tool_schema", "search_commands"})
+            full_set, cold = [], []
+            for schema in active_schemas.to_list():
+                (full_set if schema.get("name") in hot else cold).append(schema)
+            if cold:
+                active_schemas = OrderedSchemaSet(full_set)
+                active_schemas.extend(system_tools.schemas_for_tools(["get_tool_schema"]))
+                catalog_entries = system_tools.catalog_schemas_for_prompt(cold)
+                compact_schemas = OrderedSchemaSet(
+                    system_tools.compact_schemas_for_prompt(active_schemas)
+                )
+                compact_schemas.extend(catalog_entries)
+                name_only_schemas = OrderedSchemaSet(
+                    system_tools.name_only_schemas_for_prompt(active_schemas)
+                )
+                name_only_schemas.extend(
+                    system_tools.name_only_schemas_for_prompt(cold)
+                )
+                # active_schemas is the "raw" (precise mode) offering AND the
+                # set discover_sink checks membership against. Catalog
+                # entries go in so a promoted tool isn't added twice, but
+                # they carry no argument schema — precise mode deliberately
+                # opts out of this tier instead (catalog_tier False), since
+                # its whole point is maximum schema fidelity.
+                active_schemas.extend(catalog_entries)
+            else:
+                compact_schemas = OrderedSchemaSet(
+                    system_tools.compact_schemas_for_prompt(active_schemas)
+                )
+                name_only_schemas = OrderedSchemaSet(
+                    system_tools.name_only_schemas_for_prompt(active_schemas)
+                )
+        else:
+            compact_schemas = OrderedSchemaSet(system_tools.compact_schemas_for_prompt(active_schemas))
+            name_only_schemas = OrderedSchemaSet(system_tools.name_only_schemas_for_prompt(active_schemas))
     provider_ref = [None]
     verbosity_ref = ["full"]
 
@@ -2174,7 +2328,14 @@ def ask(user_text, commands=None, on_attempt=None, on_tool_call=None, on_tool_re
             try:
                 result = adapter(resolved, messages, resolved["timeout"],
                                  tools=tool_schemas, tool_executor=tool_executor,
-                                 round_budget=round_budget)
+                                 round_budget=round_budget,
+                                 # Prompt-cache knobs live in defaults (and
+                                 # can be overridden per provider) — see
+                                 # prompt_cache.resolve_settings. Passed
+                                 # here rather than read from disk inside
+                                 # the adapter so a test can drive caching
+                                 # behavior without touching ~/.jarvis.
+                                 cfg_defaults=cfg["defaults"])
             except Exception as e:  # one bad provider/key must never take down the whole ask
                 result = ai_providers.AIResult(False, error=f"unexpected error: {e}")
             finally:

@@ -48,6 +48,19 @@ warning, because silently-unroutable-by-design and
 forgot-to-add-keywords look identical from outside and only the author
 can tell them apart.
 
+--- actions/*.py vs skills/ ---
+
+An action file adds a CAPABILITY: something that has to run code. If what
+you want to add is KNOWLEDGE — how this user wants a recurring task done, a
+house style, a checklist, a build convention — that's a skill, not an action.
+See skills.py: skills are plain SKILL.md folders under ~/.jarvis/skills/,
+need no Python, are editable without a restart, and cost nothing in the
+prompt until the model actually loads one. An action file's schemas, by
+contrast, are offered (at some tier) on every ask its group is routed to.
+
+Rule of thumb: if you'd write it as instructions, make it a skill; if you'd
+write it as a function, make it an action.
+
 Discovery runs once, at jarvis/tools.py import time. Import errors,
 validation errors, and name collisions with an existing tool (built-in or
 another action file) are logged and that file is skipped — they NEVER

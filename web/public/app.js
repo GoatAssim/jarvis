@@ -4830,6 +4830,219 @@
     debugOverlay.hidden = true;
   }
 
+  // ===========================================================================
+  // Skills manager — see jarvis-cli/jarvis/skills.py.
+  //
+  // A skill is a folder of markdown Jarvis loads ONLY when a task matches it.
+  // What's in the prompt at all times is one line per skill (name +
+  // description); the instructions cost nothing until load_skill is called.
+  // That's why the header shows a live token cost for the catalog: it's the
+  // only number that grows with skills-you-have rather than skills-you-use,
+  // so it's the one worth watching.
+  //
+  // Everything here goes through /api/skills/*, which proxies the dedicated
+  // `jarvis skills-*` commands — not /api/tools/run. The manager is a person
+  // editing their own files and shouldn't inherit the model-facing confirm
+  // gate on remove_skill.
+  // ===========================================================================
+  const skillsOverlay = qs("#skills-overlay");
+  const skillsList = qs("#skills-list");
+  const skillsStatus = qs("#skills-status-line");
+  const skillsCost = qs("#skills-cost");
+  const skillEditor = qs("#skills-editor");
+  const skillCreate = qs("#skills-create");
+  const skillImport = qs("#skills-import");
+  const skillEditorEmpty = qs("#skills-editor-empty");
+  const skillEditorTitle = qs("#skill-editor-title");
+  const skillContent = qs("#skill-content");
+  const skillRefs = qs("#skill-refs");
+  const btnSkillSave = qs("#btn-skill-save");
+  const btnSkillDelete = qs("#btn-skill-delete");
+
+  let skillsCache = [];
+  let selectedSkill = null;
+
+  function skillsPane(which) {
+    // Exactly one of editor / create / import is ever visible; the empty
+    // state shows only when none of them is.
+    skillEditor.hidden = which !== "editor";
+    skillCreate.hidden = which !== "create";
+    skillImport.hidden = which !== "import";
+    skillEditorEmpty.hidden = which !== "none";
+    const editing = which === "editor";
+    btnSkillSave.disabled = !editing;
+    btnSkillDelete.disabled = !editing;
+  }
+
+  function renderSkillsList() {
+    skillsList.innerHTML = "";
+    if (!skillsCache.length) {
+      const empty = document.createElement("div");
+      empty.className = "skills-empty";
+      empty.textContent = "No skills yet. \u201c+ New\u201d writes one, \u201cImport\u201d installs an existing SKILL.md.";
+      skillsList.appendChild(empty);
+      return;
+    }
+    for (const skill of skillsCache) {
+      const row = document.createElement("button");
+      row.type = "button";
+      row.className = "skill-row" + (selectedSkill === skill.name ? " is-active" : "")
+        + (skill.valid ? "" : " is-invalid");
+      const name = document.createElement("div");
+      name.className = "skill-row__name";
+      name.textContent = skill.name;
+      const desc = document.createElement("div");
+      desc.className = "skill-row__desc";
+      // An invalid skill is shown WITH its reason rather than hidden: a
+      // skill the user thinks they installed but that silently never loads
+      // is the worst possible failure mode for this feature.
+      desc.textContent = skill.valid
+        ? (skill.description || "")
+        : (skill.error || "Invalid skill.");
+      row.appendChild(name);
+      row.appendChild(desc);
+      if (skill.references && skill.references.length) {
+        const refs = document.createElement("div");
+        refs.className = "skill-row__refs";
+        refs.textContent = `${skill.references.length} reference file${skill.references.length === 1 ? "" : "s"}`;
+        row.appendChild(refs);
+      }
+      row.addEventListener("click", () => selectSkill(skill.name));
+      skillsList.appendChild(row);
+    }
+  }
+
+  async function loadSkills(selectAfter) {
+    try {
+      const data = await api("GET", "/api/skills");
+      skillsCache = data.skills || [];
+      const stats = data.stats || {};
+      skillsCost.textContent = `${stats.catalog_tokens || 0} tok in every prompt`;
+      skillsStatus.textContent = skillsCache.length
+        ? `${stats.valid || 0} of ${skillsCache.length} loadable \u00b7 instructions load on demand`
+        : "no skills installed";
+      renderSkillsList();
+      if (selectAfter) await selectSkill(selectAfter);
+    } catch (e) {
+      skillsStatus.textContent = "couldn't read skills";
+      toast(e.message || "Couldn't list skills.");
+    }
+  }
+
+  async function selectSkill(name) {
+    try {
+      const data = await api("GET", `/api/skills/${encodeURIComponent(name)}`);
+      selectedSkill = name;
+      skillContent.value = data.content || "";
+      skillEditorTitle.textContent = name;
+      const skill = skillsCache.find((s) => s.name === name);
+      const refs = (skill && skill.references) || [];
+      if (refs.length) {
+        skillRefs.hidden = false;
+        skillRefs.textContent = `Reference files (loaded one at a time, only when needed): ${refs.join(", ")}`;
+      } else {
+        skillRefs.hidden = true;
+      }
+      skillsPane("editor");
+      renderSkillsList();
+    } catch (e) {
+      toast(e.message || "Couldn't open that skill.");
+    }
+  }
+
+  qs("#btn-skill-save").addEventListener("click", async () => {
+    if (!selectedSkill) return;
+    try {
+      await api("PUT", `/api/skills/${encodeURIComponent(selectedSkill)}`, { content: skillContent.value });
+      toast("Skill saved.", "info");
+      await loadSkills(selectedSkill);
+    } catch (e) {
+      // The backend refuses a save whose frontmatter has no description,
+      // because that would leave a skill installed but permanently
+      // undiscoverable. Surface the reason instead of failing quietly.
+      toast(e.message || "Couldn't save.");
+    }
+  });
+
+  qs("#btn-skill-delete").addEventListener("click", async () => {
+    if (!selectedSkill) return;
+    if (!window.confirm(`Delete "${selectedSkill}" and everything in its folder? This can't be undone.`)) return;
+    try {
+      await api("DELETE", `/api/skills/${encodeURIComponent(selectedSkill)}`);
+      toast("Skill removed.", "info");
+      selectedSkill = null;
+      skillsPane("none");
+      await loadSkills();
+    } catch (e) {
+      toast(e.message || "Couldn't remove that skill.");
+    }
+  });
+
+  qs("#btn-skill-new").addEventListener("click", () => {
+    selectedSkill = null;
+    qs("#skill-new-name").value = "";
+    qs("#skill-new-desc").value = "";
+    qs("#skill-new-body").value = "";
+    skillEditorTitle.textContent = "New skill";
+    skillsPane("create");
+    renderSkillsList();
+  });
+
+  qs("#btn-skill-import").addEventListener("click", () => {
+    selectedSkill = null;
+    qs("#skill-import-src").value = "";
+    skillEditorTitle.textContent = "Import skill";
+    skillsPane("import");
+    renderSkillsList();
+  });
+
+  qs("#btn-skill-create").addEventListener("click", async () => {
+    const name = qs("#skill-new-name").value.trim();
+    const description = qs("#skill-new-desc").value.trim();
+    const instructions = qs("#skill-new-body").value;
+    if (!name || !description || !instructions.trim()) {
+      toast("Name, description and instructions are all required.");
+      return;
+    }
+    try {
+      const created = await api("POST", "/api/skills", { mode: "create", name, description, instructions });
+      toast(`Created "${created.name || name}".`, "info");
+      await loadSkills(created.name || name);
+    } catch (e) {
+      toast(e.message || "Couldn't create that skill.");
+    }
+  });
+
+  qs("#btn-skill-install").addEventListener("click", async () => {
+    const source = qs("#skill-import-src").value;
+    if (!source.trim()) { toast("Paste a SKILL.md, or give a path."); return; }
+    try {
+      const added = await api("POST", "/api/skills", { mode: "add", source });
+      toast(`Installed "${added.name || added.slug}".`, "info");
+      await loadSkills(added.name || added.slug);
+    } catch (e) {
+      toast(e.message || "Couldn't install that skill.");
+    }
+  });
+
+  function openSkills() {
+    skillsOverlay.hidden = false;
+    skillsPane("none");
+    selectedSkill = null;
+    loadSkills();
+  }
+
+  function closeSkills() {
+    skillsOverlay.hidden = true;
+  }
+
+  qs("#btn-skills").addEventListener("click", openSkills);
+  qs("#skills-close").addEventListener("click", closeSkills);
+  skillsOverlay.addEventListener("click", (e) => { if (e.target === skillsOverlay) closeSkills(); });
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape" && !skillsOverlay.hidden) closeSkills();
+  });
+
   qs("#btn-debug").addEventListener("click", openDebug);
   qs("#debug-close").addEventListener("click", closeDebug);
   debugOverlay.addEventListener("click", (e) => { if (e.target === debugOverlay) closeDebug(); });

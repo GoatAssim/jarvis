@@ -40,6 +40,7 @@ from .pkg_tools import PKG_TOOL_SCHEMAS, PKG_TOOLS
 from .playnite_api_tools import PLAYNITE_API_TOOL_SCHEMAS, PLAYNITE_API_TOOLS
 from .playnite_tools import PLAYNITE_TOOL_SCHEMAS as _PLAYNITE_CORE_SCHEMAS, PLAYNITE_TOOLS as _PLAYNITE_CORE_TOOLS
 from .present_tools import PRESENT_TOOL_SCHEMAS, PRESENT_TOOLS
+from .skill_tools import TOOL_SCHEMAS as SKILL_TOOL_SCHEMAS, TOOLS as SKILL_TOOLS
 from .radio_tools import RADIO_TOOL_SCHEMAS, RADIO_TOOLS
 from .screenshot_tools import SCREENSHOT_TOOL_SCHEMAS, SCREENSHOT_TOOLS
 from .spotify_tools import SPOTIFY_TOOL_SCHEMAS, SPOTIFY_TOOLS
@@ -365,6 +366,81 @@ def tool_search_tools(args):
     return result
 
 
+def catalog_schemas_for_prompt(schemas):
+    """Tier-1 catalog entries: name + one-line summary, no argument schema.
+
+    This is the "discovery" tier from the Agent Skills progressive-disclosure
+    model (see skills-and-token-optimization-research.md section 1), applied
+    to tool schemas rather than skill files. A catalog entry costs roughly a
+    tenth of a compacted schema, which is what makes offering a 31-tool group
+    affordable.
+
+    A tool gets its full schema back via get_tool_schema (below), which grows
+    it into the live offering through ai_client's discover_sink — the same
+    machinery search_tools already uses. `short_description` is honored when
+    a schema declares one, matching stub_schemas()' existing convention.
+    """
+    stub_params = {"type": "object", "properties": {}}
+    out = []
+    for schema in schemas or []:
+        if not isinstance(schema, dict) or not schema.get("name"):
+            continue
+        short = schema.get("short_description")
+        text = short.strip() if isinstance(short, str) and short.strip() else _clip_text(
+            schema.get("description") or "", 64
+        )
+        out.append({
+            "name": schema["name"],
+            "description": f"{text} (call get_tool_schema for arguments)",
+            "parameters": stub_params,
+        })
+    return out
+
+
+def tool_get_tool_schema(args):
+    """Tier-2 activation: hand back one tool's full argument schema.
+
+    The direct analogue of Anthropic's defer_loading / Tool Search
+    fetch-schema step. search_tools answers "does a tool for X exist"; this
+    answers "what arguments does the tool I already know the name of take",
+    which is the cheaper and far more common question once a catalog entry
+    has been seen.
+
+    Like search_tools, the reply is only half the job: ai_client's
+    discover_sink promotes the named tool into this round's live schema sets,
+    so it is genuinely callable on the model's very next reply rather than
+    merely described.
+    """
+    from . import tool_registry
+
+    raw = (args or {}).get("name") or ""
+    name = raw.strip()
+    if not name:
+        return {"error": "Pass the exact name of the tool you want the schema for."}
+
+    schema = tool_registry.TOOL_INDEX.get(name)
+    if schema is None:
+        # A wrong guess shouldn't cost a whole extra round: point at the
+        # nearest real names instead of just saying no.
+        near = sorted(
+            n for n in tool_registry.TOOL_INDEX
+            if name in n or n in name or n.split("_")[0] == name.split("_")[0]
+        )[:5]
+        out = {"error": f"No tool named '{name}'."}
+        if near:
+            out["did_you_mean"] = near
+        else:
+            out["hint"] = "Call search_tools with a keyword to find the right name."
+        return out
+
+    return {
+        "name": name,
+        "group": tool_registry.group_of(name) or "misc",
+        "schema": compact_schemas_for_prompt([schema])[0],
+        "ready": True,
+    }
+
+
 DISCOVERY_TOOL_SCHEMAS = [
     {
         "name": "search_tools",
@@ -383,6 +459,25 @@ DISCOVERY_TOOL_SCHEMAS = [
                 },
             },
             "required": [],
+        },
+    },
+    {
+        "name": "get_tool_schema",
+        "description": (
+            "Get the full argument schema for ONE tool you already know the name of. "
+            "Use this when a tool is listed for you without its arguments (its "
+            "description says to call this), instead of guessing arguments or "
+            "searching again. The tool becomes callable on your next reply."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "name": {
+                    "type": "string",
+                    "description": "Exact tool name, e.g. 'playnite_launch_game'.",
+                },
+            },
+            "required": ["name"],
         },
     },
 ]
@@ -455,6 +550,7 @@ CORE_TOOL_SCHEMAS = [
     *YTDL_TOOL_SCHEMAS,
     *EVERYTHING_TOOL_SCHEMAS,
     *PRESENT_TOOL_SCHEMAS,
+    *SKILL_TOOL_SCHEMAS,
 ]
 
 PLAYNITE_AND_SPOTIFY = [*PLAYNITE_TOOL_SCHEMAS, *SPOTIFY_TOOL_SCHEMAS]
@@ -690,6 +786,8 @@ TOOLS = {
     **EVERYTHING_TOOLS,
     **PRESENT_TOOLS,
     "search_tools": tool_search_tools,
+    "get_tool_schema": tool_get_tool_schema,
+    **SKILL_TOOLS,
 }
 
 # ---------------------------------------------------------------------------
@@ -833,7 +931,7 @@ def execute_tool(name, arguments=None, verbosity=None, context=None):
     if fn is None:
         return {"error": f"no such tool: {name}"}
     try:
-        if name in COMMAND_TOOLS or name in PLAYNITE_TOOLS or name in WEB_TOOLS or name in PKG_TOOLS or name in SPOTIFY_TOOLS or name in MEMORY_TOOLS or name in CAPACITY_TOOLS or name in RADIO_TOOLS or name in GIT_TOOLS or name in SCREENSHOT_TOOLS or name in DESKTOP_TOOLS or name in OCR_TOOLS or name in FILE_TOOLS or name in CUSTOM_TOOLS or name in YTDL_TOOLS or name in EVERYTHING_TOOLS or name in ORGANIZE_JSON_TOOLS or name in PRESENT_TOOLS or name in AUTO_TOOLS or name == "search_tools":
+        if name in COMMAND_TOOLS or name in PLAYNITE_TOOLS or name in WEB_TOOLS or name in PKG_TOOLS or name in SPOTIFY_TOOLS or name in MEMORY_TOOLS or name in CAPACITY_TOOLS or name in RADIO_TOOLS or name in GIT_TOOLS or name in SCREENSHOT_TOOLS or name in DESKTOP_TOOLS or name in OCR_TOOLS or name in FILE_TOOLS or name in CUSTOM_TOOLS or name in YTDL_TOOLS or name in EVERYTHING_TOOLS or name in ORGANIZE_JSON_TOOLS or name in PRESENT_TOOLS or name in SKILL_TOOLS or name in AUTO_TOOLS or name in ("search_tools", "get_tool_schema"):
             if _accepts_context(fn) and context is not None:
                 result = fn(arguments or {}, context)
             else:

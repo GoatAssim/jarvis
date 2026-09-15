@@ -14,6 +14,13 @@ tool_safety.py, or tool_result_shaping.py first.
 
 WHAT MAKES A FILE DISCOVERABLE
 -------------------------------
+Before writing one: if what you're adding is instructions rather than code —
+"here's how I want the weekly report built" — you want a SKILL, not an
+action. Skills live in ~/.jarvis/skills/<name>/SKILL.md, need no Python, and
+cost nothing in the prompt until they're loaded (see jarvis/skills.py, or
+the Skills button in the web UI). Actions are for capabilities that have to
+execute something.
+
 jarvis/tools.py calls tool_loader.discover_actions() once, at import time,
 which scans every actions/*.py file (except ones starting with "_") for
 three REQUIRED module-level names: TOOL_SCHEMAS, TOOLS, TOOL_GROUP. A file

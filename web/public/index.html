@@ -142,6 +142,7 @@
           <button class="btn btn--ghost" id="btn-abort" type="button" hidden>ABORT</button>
           <button class="btn btn--ghost" id="btn-clear-console" type="button">Clear</button>
           <button class="btn btn--ghost" id="btn-debug" type="button" title="Inspect and run every tool Jarvis can call">Debug</button>
+          <button class="btn btn--ghost" id="btn-skills" type="button" title="Add, edit and remove skills — reusable instructions Jarvis loads only when a task needs them">Skills</button>
         </div>
       </div>
       <div class="console" id="console">
@@ -249,6 +250,87 @@
     <div class="ask-sel-pop" id="ask-sel-pop" hidden>
       <button type="button" id="ask-sel-quote">Quote</button>
       <button type="button" id="ask-sel-copy">Copy</button>
+    </div>
+  </div>
+</div>
+
+<!-- SKILLS MANAGER — tier-1/2/3 progressive disclosure, see jarvis/skills.py.
+     Only a skill's name + description live in the prompt; the body loads
+     on demand. The token readout below is the point of the whole design,
+     so it's shown rather than hidden. -->
+<div class="skills-overlay" id="skills-overlay" hidden>
+  <div class="skills-panel">
+    <div class="panel__corner panel__corner--tl"></div>
+    <div class="panel__corner panel__corner--br"></div>
+
+    <div class="skills-panel__head">
+      <div class="skills-panel__titles">
+        <div class="skills-panel__title">SKILLS</div>
+        <div class="skills-panel__subtitle" id="skills-status-line">reading skills&hellip;</div>
+      </div>
+      <button class="btn btn--ghost btn--sm" id="btn-skill-new" type="button">+ New</button>
+      <button class="btn btn--ghost btn--sm" id="btn-skill-import" type="button" title="Paste a SKILL.md, or give a folder/file path">Import</button>
+      <button class="modal__close" id="skills-close" type="button" aria-label="Close">&times;</button>
+    </div>
+
+    <div class="skills-body">
+      <section class="skills-pane skills-pane--list" aria-label="Installed skills">
+        <div class="skills-pane__head">
+          <h3>Installed</h3>
+          <span class="skills-cost" id="skills-cost" title="Tokens the skill catalog adds to every prompt. Only names and descriptions — instructions are not counted because they are not loaded.">&mdash;</span>
+        </div>
+        <div class="skills-list" id="skills-list">
+          <div class="skills-empty">Loading&hellip;</div>
+        </div>
+      </section>
+
+      <section class="skills-pane skills-pane--editor" aria-label="Skill editor">
+        <div class="skills-pane__head">
+          <h3 id="skill-editor-title">Editor</h3>
+          <div class="skills-pane__actions">
+            <button class="btn btn--primary btn--sm" id="btn-skill-save" type="button" disabled>Save</button>
+            <button class="btn btn--ghost btn--sm btn--danger" id="btn-skill-delete" type="button" disabled>Delete</button>
+          </div>
+        </div>
+
+        <div class="skills-editor" id="skills-editor" hidden>
+          <label class="skills-field">
+            <span>SKILL.md</span>
+            <textarea id="skill-content" spellcheck="false" placeholder="---&#10;name: My Skill&#10;description: One line — what it does and when to use it.&#10;---&#10;&#10;Instructions here."></textarea>
+          </label>
+          <div class="skills-hint" id="skill-hint">
+            The <code>description:</code> line is the only part Jarvis sees until the skill is loaded &mdash; write it as <em>when to use this</em>, not just what it is.
+          </div>
+          <div class="skills-refs" id="skill-refs" hidden></div>
+        </div>
+
+        <div class="skills-create" id="skills-create" hidden>
+          <label class="skills-field">
+            <span>Name</span>
+            <input type="text" id="skill-new-name" placeholder="Weekly Report" autocomplete="off">
+          </label>
+          <label class="skills-field">
+            <span>Description <em>(always in the prompt &mdash; keep it to one line)</em></span>
+            <input type="text" id="skill-new-desc" placeholder="Build the Monday status report. Use when asked for the weekly report." autocomplete="off">
+          </label>
+          <label class="skills-field skills-field--grow">
+            <span>Instructions <em>(loaded only when the skill is used)</em></span>
+            <textarea id="skill-new-body" spellcheck="false" placeholder="## Steps&#10;1. &hellip;"></textarea>
+          </label>
+          <button class="btn btn--primary" id="btn-skill-create" type="button">Create skill</button>
+        </div>
+
+        <div class="skills-import" id="skills-import" hidden>
+          <label class="skills-field skills-field--grow">
+            <span>Paste a SKILL.md, or enter a folder / file path</span>
+            <textarea id="skill-import-src" spellcheck="false" placeholder="---&#10;name: Imported&#10;description: &hellip;&#10;---&#10;&#10;&hellip;&#10;&#10;or:  C:\\Users\\me\\skills\\blender-render"></textarea>
+          </label>
+          <div class="skills-hint">Skills use Anthropic&rsquo;s SKILL.md format, so anything written for Claude, Copilot or Cursor imports as-is.</div>
+          <button class="btn btn--primary" id="btn-skill-install" type="button">Install skill</button>
+        </div>
+
+        <div class="skills-empty" id="skills-editor-empty">Select a skill on the left, or add one.</div>
+      </section>
     </div>
   </div>
 </div>

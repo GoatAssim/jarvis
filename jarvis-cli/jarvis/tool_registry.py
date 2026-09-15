@@ -165,6 +165,23 @@ TOOL_GROUPS = {
     # someone forgot to register.
     "discovery": [
         "search_tools",
+        # get_tool_schema is the tier-2 half of the same discovery pair:
+        # search_tools answers "does a tool for X exist", this answers "what
+        # arguments does the tool I can already see take". Grouped together
+        # so a router hit on one offers the other.
+        "get_tool_schema",
+    ],
+    # Skills (see skills.py): knowledge the user adds, loaded on demand.
+    # Its own group rather than folded into "discovery" so the router can
+    # activate skill management ("add a skill", "what skills do you have")
+    # without dragging in tool discovery, and vice versa.
+    "skills": [
+        "list_skills",
+        "load_skill",
+        "load_skill_reference",
+        "create_skill",
+        "add_skill",
+        "remove_skill",
     ],
 }
 
@@ -267,7 +284,12 @@ TOOL_KEYWORDS = {
 # Merge in auto-discovered keywords (see the TOOL_GROUPS merge above for
 # why this matters — without an entry here, an auto-discovered tool in a
 # brand-new group is unroutable by tool_router.route()).
-TOOL_KEYWORDS = {**TOOL_KEYWORDS, **AUTO_TOOL_KEYWORDS}
+# Skills keywords live in skill_tools.py next to their schemas (the same
+# one-file-per-subsystem convention actions/*.py uses), merged here so
+# tool_router.route() can reach them.
+from .skill_tools import TOOL_KEYWORDS as SKILL_TOOL_KEYWORDS  # noqa: E402
+
+TOOL_KEYWORDS = {**TOOL_KEYWORDS, **SKILL_TOOL_KEYWORDS, **AUTO_TOOL_KEYWORDS}
 
 # ---------------------------------------------------------------------------
 # TOOL_PACK_INSTRUCTIONS — short, group-specific workflow guidance. This is
@@ -278,6 +300,10 @@ TOOL_KEYWORDS = {**TOOL_KEYWORDS, **AUTO_TOOL_KEYWORDS}
 # ---------------------------------------------------------------------------
 
 TOOL_PACK_INSTRUCTIONS = {
+    "skills": (
+        "Skills are loaded on demand: you have each one's name and description "
+        "only. Call load_skill before acting on a task a skill covers."
+    ),
     "web": (
         "Web: for anything that may have changed (prices, news, best-X, "
         "how-tos), web_search then web_fetch 1-3 URLs, then summarize with "
