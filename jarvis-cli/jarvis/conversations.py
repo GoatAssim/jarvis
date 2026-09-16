@@ -119,6 +119,8 @@ def _index_entry(record):
         "created_at": record.get("created_at"),
         "updated_at": record.get("updated_at"),
         "exchange_count": len(record.get("exchanges") or []),
+        "origin": record.get("origin") or "",
+        "origin_detail": record.get("origin_detail") or "",
     }
 
 
@@ -169,7 +171,7 @@ def set_current(conv_id):
 
 # ---- CRUD --------------------------------------------------------------------
 
-def new_conversation(title=None, make_current=True):
+def new_conversation(title=None, make_current=True, origin="", origin_detail=""):
     """Create a brand-new, empty conversation and return its id. This is
     what both 'opening the page' (web — every fresh page load starts one)
     and the CLI's own first-ever use (or an explicit `jarvis conv-new`)
@@ -196,6 +198,15 @@ def new_conversation(title=None, make_current=True):
         "soft_context": "",
         "created_at": now,
         "updated_at": now,
+        # Where this conversation came from: "" (plain web/CLI), "discord",
+        # "instagram", "scheduler". Carried into the index (see
+        # _index_entry) so the Logs viewer can label a conversation without
+        # opening its file — a chat-bot thread and a scheduled job look
+        # exactly like a normal ask once they're just exchanges on disk,
+        # and "why is there a conversation I don't remember having" is a
+        # genuinely confusing thing to hit in the sidebar.
+        "origin": (origin or "").strip()[:32],
+        "origin_detail": (origin_detail or "").strip()[:120],
         "exchanges": [],
     }
     _save_conv(record)
