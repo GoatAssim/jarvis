@@ -48,7 +48,8 @@ INBOX_FILE = JARVIS_DIR / "notifications.json"
 CONFIG_FILE = JARVIS_DIR / "notify_config.json"
 ENCODING = "utf-8"
 
-CHANNELS = ("inbox", "stream", "toast", "voice", "playnite")
+CHANNELS = ("inbox", "stream", "toast", "voice", "playnite",
+            "discord", "instagram")
 
 # Cap on retained notifications. The inbox is a queue — unacknowledged items
 # are kept, but a consumer that never acknowledges (a browser nobody opens
@@ -398,12 +399,43 @@ def _deliver_playnite(record, config):
     return not (isinstance(result, dict) and result.get("error"))
 
 
+def _deliver_chat(record, config, platform):
+    """Deliver one notification as a DM to the owner on a chat platform.
+
+    Best-effort in the strongest sense: Instagram can only be reached
+    inside a 24-hour window the owner opens themselves, and Discord needs
+    a shared server. Both refuse as a matter of normal operation, not as
+    an error — which is exactly why the inbox channel is always written
+    too (see this module's docstring). Returning False here marks the
+    channel as failed in `failed_channels` and changes nothing else.
+    """
+    try:
+        from .channels import outbound
+    except ImportError:
+        return False
+    title = (record.get("title") or "Jarvis").strip()
+    body = (record.get("message") or "").strip()
+    text = f"**{title}**\n{body}" if platform == "discord" else f"{title}\n{body}"
+    ok, _detail = outbound.dm_owner(platform, text.strip())
+    return bool(ok)
+
+
+def _deliver_discord(record, config):
+    return _deliver_chat(record, config, "discord")
+
+
+def _deliver_instagram(record, config):
+    return _deliver_chat(record, config, "instagram")
+
+
 _DELIVERERS = {
     "inbox": _deliver_inbox,
     "stream": _deliver_stream,
     "toast": _deliver_toast,
     "voice": _deliver_voice,
     "playnite": _deliver_playnite,
+    "discord": _deliver_discord,
+    "instagram": _deliver_instagram,
 }
 
 

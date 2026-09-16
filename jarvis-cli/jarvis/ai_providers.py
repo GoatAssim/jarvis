@@ -307,6 +307,133 @@ def _split_system(messages):
     return "\n\n".join(system_parts), turns
 
 
+# ---------------------------------------------------------------------------
+# Prior-tool-result compaction (the O(N^2) round-loop leak)
+# ---------------------------------------------------------------------------
+# Every adapter below drives a multi-round tool loop by APPENDING to
+# working_messages: the assistant's tool_calls message, then one message per
+# tool result, then round-tripping the whole list again. Nothing ever trims
+# it, so round 5 resends rounds 1-4's tool results verbatim. Measured on a
+# realistic 5-round ask with ~1.8KB shaped tool results: 6,601 prompt tokens
+# billed, of which 4,966 were re-sent copies of results the model had
+# already seen. The cost is quadratic in tool-result bytes, and it lands
+# hardest on exactly the multi-step tasks that need the rounds.
+#
+# The model genuinely does need to see what earlier tools returned — it is
+# reasoning about them — so the fix is not deletion. It is the same trick
+# ai_client._tool_runs_note() already applies (enhancement #8) when it
+# rebuilds a prompt on failover: re-shape an old result down to the current
+# verbosity instead of resending it at the size it was first captured.
+# That machinery existed but was only reachable on a failover rebuild,
+# never inside a successful attempt's own round loop.
+#
+# Two invariants this must not break:
+#   * NEVER remove a message. An OpenAI-style assistant/tool_calls message
+#     must be followed by a tool message per call id; dropping one is a hard
+#     400. Only `content` is rewritten, in place, never the structure.
+#   * The MOST RECENT results stay untouched. The model is actively working
+#     with them this round; trimming those would trade tokens for wrong
+#     answers, which is a bad trade at any price.
+
+# Characters of an older tool result to keep. Generous enough that a JSON
+# result keeps its shape and its first records, small enough that five of
+# them cost about as much as one untrimmed one.
+PRIOR_RESULT_CHARS = 400
+
+# How many of the newest tool results to leave completely alone. One full
+# round's worth: the results the current round is reasoning about.
+KEEP_FULL_RESULTS = 2
+
+# Suffix marking an already-trimmed result, which is also what makes the
+# trim idempotent and what tells the model the text it is reading is not
+# the whole result.
+_TRIM_MARKER = "\u2026[trimmed]"
+
+
+def _tool_result_slots(working):
+    """Every place a tool result's text lives, across all three payload
+    shapes, as (setter, current_text) pairs in chronological order.
+
+    Three adapters, three shapes, one trimmer — the alternative is three
+    near-identical trimmers that drift apart the first time one provider's
+    format changes:
+
+      openai / cohere / ollama  {"role": "tool", "content": "..."}
+      anthropic                 {"role": "user", "content": [
+                                    {"type": "tool_result", "content": "..."}]}
+      gemini                    {"role": "user", "parts": [
+                                    {"functionResponse": {"response": {...}}}]}
+    """
+    slots = []
+    for message in working:
+        if not isinstance(message, dict):
+            continue
+
+        if message.get("role") == "tool" and isinstance(message.get("content"), str):
+            def setter(value, _m=message):
+                _m["content"] = value
+            slots.append((setter, message["content"]))
+            continue
+
+        content = message.get("content")
+        if isinstance(content, list):
+            for block in content:
+                if (isinstance(block, dict) and block.get("type") == "tool_result"
+                        and isinstance(block.get("content"), str)):
+                    def setter(value, _b=block):
+                        _b["content"] = value
+                    slots.append((setter, block["content"]))
+
+        parts = message.get("parts")
+        if isinstance(parts, list):
+            for part in parts:
+                if not isinstance(part, dict) or "functionResponse" not in part:
+                    continue
+                fr = part.get("functionResponse")
+                if not isinstance(fr, dict):
+                    continue
+                response = fr.get("response")
+                # Gemini wraps the payload in a dict; the tool text is
+                # usually under "result"/"content". Trim whichever string
+                # field is actually carrying it rather than assuming one.
+                if isinstance(response, dict):
+                    for key in ("result", "content", "output", "text"):
+                        if isinstance(response.get(key), str):
+                            def setter(value, _r=response, _k=key):
+                                _r[_k] = value
+                            slots.append((setter, response[key]))
+                            break
+                elif isinstance(response, str):
+                    def setter(value, _fr=fr):
+                        _fr["response"] = value
+                    slots.append((setter, response))
+    return slots
+
+
+def _compact_prior_tool_results(working, keep_full=KEEP_FULL_RESULTS,
+                                budget=PRIOR_RESULT_CHARS):
+    """Shrink older tool-result payloads in place. Returns chars reclaimed.
+
+    Idempotent: an already-trimmed slot carries the marker suffix and is
+    skipped, so calling this once per round — which is what the loops do —
+    never re-trims the same text five times.
+    """
+    slots = _tool_result_slots(working)
+    if len(slots) <= keep_full:
+        return 0
+
+    reclaimed = 0
+    trimmable = slots[:-keep_full] if keep_full else slots
+    for setter, text in trimmable:
+        if not isinstance(text, str) or len(text) <= budget:
+            continue
+        if text.endswith(_TRIM_MARKER):
+            continue
+        reclaimed += len(text) - budget
+        setter(text[:budget] + _TRIM_MARKER)
+    return reclaimed
+
+
 def _merge_system(messages):
     """Fold consecutive role:"system" messages into one.
 
@@ -679,6 +806,10 @@ def call_openai_compatible(provider, messages, timeout, tools=None, tool_executo
     _log_cache_plan(cache_plan, "openai_compatible")
 
     for round_num in range(MAX_TOOL_ROUNDS + 1):
+        # Trim tool results from earlier rounds before rebuilding this
+        # round's payload — see _compact_prior_tool_results. Without this,
+        # round N resends rounds 1..N-1's results at full size every time.
+        _compact_prior_tool_results(working_messages)
         tools_payload = _tools_payload()
         payload = {
             "model": model,
@@ -867,6 +998,10 @@ def call_anthropic(provider, messages, timeout, tools=None, tool_executor=None, 
         return _anthropic_turns_to_generic(system_text, working_turns) if ran_tools else None
 
     for round_num in range(MAX_TOOL_ROUNDS + 1):
+        # Trim tool results from earlier rounds before rebuilding this
+        # round's payload — see _compact_prior_tool_results. Without this,
+        # round N resends rounds 1..N-1's results at full size every time.
+        _compact_prior_tool_results(working_turns)
         tools_payload = _tools_payload()
         payload = {
             "model": model,
@@ -1201,6 +1336,10 @@ def call_gemini(provider, messages, timeout, tools=None, tool_executor=None, rou
 
     try:
         for round_num in range(MAX_TOOL_ROUNDS + 1):
+            # Trim tool results from earlier rounds before rebuilding this
+            # round's payload — see _compact_prior_tool_results. Without this,
+            # round N resends rounds 1..N-1's results at full size every time.
+            _compact_prior_tool_results(working_contents)
             tools_payload = _tools_payload()
 
             # `tools` can grow mid-ask (ai_client's discover_sink appends to
@@ -1368,6 +1507,10 @@ def call_cohere(provider, messages, timeout, tools=None, tool_executor=None, rou
         ]
 
     for round_num in range(MAX_TOOL_ROUNDS + 1):
+        # Trim tool results from earlier rounds before rebuilding this
+        # round's payload — see _compact_prior_tool_results. Without this,
+        # round N resends rounds 1..N-1's results at full size every time.
+        _compact_prior_tool_results(working_messages)
         tools_payload = _tools_payload()
         payload = {
             "model": model,
@@ -1470,6 +1613,10 @@ def call_ollama(provider, messages, timeout, tools=None, tool_executor=None, rou
         ]
 
     for round_num in range(MAX_TOOL_ROUNDS + 1):
+        # Trim tool results from earlier rounds before rebuilding this
+        # round's payload — see _compact_prior_tool_results. Without this,
+        # round N resends rounds 1..N-1's results at full size every time.
+        _compact_prior_tool_results(working_messages)
         tools_payload = _tools_payload()
         payload = {"model": model, "messages": working_messages, "stream": False}
         # Ollama reuses a KV prefix automatically when the prompt prefix

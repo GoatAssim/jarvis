@@ -2448,3 +2448,162 @@ audio.ask-dl-player{ max-height: none; background: transparent; }
    the column. */
 .katex{ color: inherit; }
 .katex-display{ overflow-x: auto; overflow-y: hidden; padding: 2px 0; }
+
+/* ===========================================================================
+   Origin badges, deep log search, and the Guides panel.
+   Reuses the existing panel/card classes wherever possible — these rules
+   only add what genuinely has no counterpart already.
+   =========================================================================== */
+
+/* --- origin badges --------------------------------------------------------
+   A conversation started by a chat bot or a scheduled job is otherwise
+   indistinguishable from one the user typed. The badge carries that, so it
+   sits inline with the title rather than in the dimmer meta line. */
+.logs-convo-card__title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.logs-convo-card__name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.logs-convo-card__name.is-deleted {
+  opacity: 0.55;
+  text-decoration: line-through;
+}
+
+.origin-badge {
+  flex: 0 0 auto;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  padding: 2px 7px;
+  border-radius: 999px;
+  border: 1px solid currentColor;
+  /* Colour-mix keeps the fill tied to the badge's own colour, so a new
+     origin only needs its colour set once below. */
+  background: color-mix(in srgb, currentColor 14%, transparent);
+}
+
+.origin-badge.is-discord   { color: #8b9dff; }
+.origin-badge.is-instagram { color: #ff8ac4; }
+.origin-badge.is-scheduler { color: var(--gold); }
+
+/* --- deep log search results --------------------------------------------- */
+.logs-search-summary {
+  padding: 6px 10px;
+  font-size: 11px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--text-dim, #7d94a8);
+  border-bottom: 1px solid var(--accent-dim);
+}
+
+.logs-result__dir {
+  flex: 0 0 auto;
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--accent);
+}
+
+.logs-result__title {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  opacity: 0.85;
+}
+
+.logs-result__snippet {
+  margin: 4px 0 2px;
+  font-family: var(--mono, ui-monospace, "SF Mono", Menlo, monospace);
+  font-size: 11px;
+  line-height: 1.45;
+  color: var(--text-dim, #9fb4c6);
+  /* Clamp rather than truncate: a snippet is context, and one line of a
+     JSON blob is rarely enough to recognise the entry you're after. */
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  word-break: break-word;
+}
+
+/* --- guides --------------------------------------------------------------- */
+.guide-body {
+  padding: 4px 14px 22px;
+  overflow-y: auto;
+  line-height: 1.6;
+}
+
+.guide-heading {
+  margin: 20px 0 8px;
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--accent);
+}
+
+.guide-heading:first-child { margin-top: 6px; }
+
+.guide-steps {
+  margin: 0;
+  padding-left: 20px;
+}
+
+.guide-steps li,
+.guide-notes li {
+  margin-bottom: 9px;
+  word-break: break-word;
+}
+
+.guide-cmd {
+  display: inline-block;
+  padding: 3px 8px;
+  border-radius: 5px;
+  background: var(--bg-raised);
+  border: 1px solid var(--accent-dim);
+  font-family: var(--mono, ui-monospace, "SF Mono", Menlo, monospace);
+  font-size: 12px;
+  color: var(--accent);
+  /* Commands are meant to be selected and copied, so allow selection even
+     where the surrounding panel suppresses it. */
+  user-select: text;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+
+.guide-notes {
+  margin: 0;
+  padding-left: 20px;
+  list-style: none;
+}
+
+.guide-notes li {
+  position: relative;
+  padding-left: 4px;
+  color: var(--text-dim, #a9bccb);
+}
+
+/* Gotchas earn a marker: every one of them is a thing that fails silently
+   rather than erroring, which is exactly what people skim past. */
+.guide-notes li::before {
+  content: "!";
+  position: absolute;
+  left: -16px;
+  font-weight: 700;
+  color: var(--gold);
+}
+
+.guide-status {
+  font-size: 11px;
+  color: var(--text-dim, #7d94a8);
+}

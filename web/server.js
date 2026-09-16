@@ -790,6 +790,124 @@ app.delete("/api/logs/:id", requireJarvis, async (req, res) => {
 });
 
 // ---------------------------------------------------------------------------
+// Search — logs and conversations.
+//
+// Both proxy CLI commands rather than reimplementing the matching in JS.
+// logs.search() and conv_search.search() already handle words/phrase/regex
+// modes, snippet extraction and pattern-length guards; a second
+// implementation here would be one more thing to keep in step with them,
+// and a regex compiled by Node is not the regex Python compiles.
+// ---------------------------------------------------------------------------
+
+// A search query is user input going onto a command line. runJarvisOnce
+// spawns without a shell so there is no injection surface, but a stray
+// leading "--" would still be parsed as a flag by the CLI's own option
+// loop — so queries starting with a dash are rejected rather than guessed at.
+function cleanQuery(value) {
+  const text = typeof value === "string" ? value.trim() : "";
+  if (!text || text.length > 500) return null;
+  if (text.startsWith("-")) return null;
+  return text;
+}
+
+const SEARCH_MODES = new Set(["words", "phrase", "regex"]);
+
+app.get("/api/logs-search", requireJarvis, async (req, res) => {
+  const query = cleanQuery(req.query.q);
+  if (!query) {
+    return res.status(400).json({ error: "Missing or invalid query." });
+  }
+  const args = ["logs-search", query];
+  const mode = typeof req.query.mode === "string" ? req.query.mode : "words";
+  if (SEARCH_MODES.has(mode)) args.push("--mode", mode);
+
+  // Repeatable filters. Each value is checked against a conservative
+  // pattern because these land in argv positions the CLI reads as values.
+  for (const [param, flag] of [["origin", "--origin"], ["source", "--source"],
+                               ["direction", "--direction"]]) {
+    const raw = req.query[param];
+    const values = Array.isArray(raw) ? raw : (raw ? [raw] : []);
+    for (const value of values) {
+      if (typeof value === "string" && /^[A-Za-z_]{1,24}$/.test(value)) {
+        args.push(flag, value);
+      }
+    }
+  }
+  if (typeof req.query.conv === "string" && isValidConversationId(req.query.conv)) {
+    args.push("--conv", req.query.conv);
+  }
+  const limitRaw = typeof req.query.limit === "string" ? req.query.limit.trim() : "";
+  args.push("--limit", /^\d{1,3}$/.test(limitRaw) ? limitRaw : "50");
+
+  const result = await runJarvisOnce(args, 25000);
+  try {
+    const parsed = JSON.parse(result.stdout);
+    // A bad regex is a 400 from the user's point of view, not a server error.
+    if (!parsed.ok) return res.status(400).json(parsed);
+    return res.json(parsed);
+  } catch (e) {
+    res.status(500).json({ error: result.error || result.stderr || `Search failed: ${e.message}` });
+  }
+});
+
+app.get("/api/conversations-search", requireJarvis, async (req, res) => {
+  const query = cleanQuery(req.query.q);
+  if (!query) {
+    return res.status(400).json({ error: "Missing or invalid query." });
+  }
+  const args = ["conv-search", query];
+  const mode = typeof req.query.mode === "string" ? req.query.mode : "words";
+  if (SEARCH_MODES.has(mode)) args.push("--mode", mode);
+  if (req.query.tools === "1" || req.query.tools === "true") args.push("--tools");
+  const result = await runJarvisOnce(args, 25000);
+  try {
+    return res.json(JSON.parse(result.stdout));
+  } catch (e) {
+    res.status(500).json({ error: result.error || result.stderr || `Search failed: ${e.message}` });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Channels (Discord / Instagram). Read-mostly: the UI shows posture and
+// lets the allowlists be edited, but never receives a token — the CLI's
+// channels-status already returns a redacted config (see
+// channels/config.py's redacted()).
+// ---------------------------------------------------------------------------
+
+const CHANNEL_PLATFORMS = new Set(["discord", "instagram"]);
+const CHANNEL_SETS = new Set(["dm", "reply", "tool"]);
+
+app.get("/api/channels", requireJarvis, async (req, res) => {
+  const result = await runJarvisOnce(["channels-status"], 15000);
+  try {
+    res.json(JSON.parse(result.stdout));
+  } catch (e) {
+    res.status(500).json({ error: result.error || result.stderr || `Couldn't read channels: ${e.message}` });
+  }
+});
+
+app.post("/api/channels/:platform/:set", requireJarvis, async (req, res) => {
+  const { platform, set } = req.params;
+  if (!CHANNEL_PLATFORMS.has(platform)) return res.status(400).json({ error: "Unknown platform." });
+  if (!CHANNEL_SETS.has(set)) return res.status(400).json({ error: "Unknown permission set." });
+  const entry = typeof req.body?.entry === "string" ? req.body.entry.trim() : "";
+  // "*" is a legitimate entry (it means everyone), so it is allowed
+  // explicitly rather than falling through the id/handle pattern.
+  if (!entry || entry.length > 64 || !(entry === "*" || /^@?[A-Za-z0-9._-]+$/.test(entry))) {
+    return res.status(400).json({ error: "Invalid entry." });
+  }
+  const remove = req.body?.remove === true;
+  const result = await runJarvisOnce(
+    [remove ? "channels-deny" : "channels-allow", platform, set, entry], 10000);
+  try {
+    const parsed = JSON.parse(result.stdout);
+    return parsed.ok ? res.json(parsed) : res.status(400).json(parsed);
+  } catch (e) {
+    res.status(500).json({ error: result.error || result.stderr || e.message });
+  }
+});
+
+// ---------------------------------------------------------------------------
 // Skills (see jarvis-cli/jarvis/skills.py). These proxy the dedicated
 // `jarvis skills-*` CLI commands rather than going through /api/tools/run,
 // because the manager is a person editing their own files: it must not

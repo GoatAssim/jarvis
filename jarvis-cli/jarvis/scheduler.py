@@ -940,6 +940,10 @@ def _do_ask(job, action):
     env["JARVIS_SCHEDULED"] = "1"  # lets any tool notice it has no human
     if job.get("conv_id"):
         env["JARVIS_CONVERSATION_ID"] = job["conv_id"]
+    # Label every log entry this run produces as scheduler-driven, so the
+    # Logs viewer can tell a job's ask apart from one the user typed — they
+    # land in the same conversation and are otherwise identical on disk.
+    env["JARVIS_LOG_SOURCE"] = "scheduler"
     try:
         proc = subprocess.run(
             argv, capture_output=True, text=True, timeout=ASK_TIMEOUT,

@@ -5401,6 +5401,21 @@
     );
   }
 
+  // Origin/source labels. Kept as one table so a new origin only has to be
+  // named once — the conversation list, the entry list and the search
+  // results all render through here.
+  const ORIGIN_LABELS = {
+    discord: { text: "Discord", cls: "is-discord" },
+    instagram: { text: "Instagram", cls: "is-instagram" },
+    scheduler: { text: "Scheduled", cls: "is-scheduler" },
+  };
+
+  function originBadge(origin) {
+    const meta = ORIGIN_LABELS[origin];
+    if (!meta) return null;   // "" = a normal, user-typed conversation
+    return el("span", { class: "origin-badge " + meta.cls }, meta.text);
+  }
+
   function renderLogsConvoList() {
     const items = logsFilteredConvos();
     logsConvoCount.textContent = `${state.logsConvos.length}`;
@@ -5412,11 +5427,22 @@
     }
     for (const c of items) {
       const when = (c.updated_at || "").slice(0, 19).replace("T", " ");
+      const titleRow = [
+        el("span", { class: "logs-convo-card__name" + (c.exists ? "" : " is-deleted") },
+           c.title || c.id),
+      ];
+      // A conversation the Discord bot or a scheduled job created looks
+      // identical to one the user typed once it's just exchanges on disk.
+      // The badge is the only thing that says otherwise, which is why it
+      // sits on the title row rather than buried in the meta line.
+      const badge = originBadge(c.origin);
+      if (badge) titleRow.push(badge);
       const card = el("div", {
         class: "logs-convo-card" + (c.id === state.logsSelected ? " is-active" : ""),
         onclick: () => logsSelectConvo(c.id),
+        title: c.origin_detail || "",
       }, [
-        el("div", { class: "logs-convo-card__title" + (c.exists ? "" : " is-deleted") }, c.title || c.id),
+        el("div", { class: "logs-convo-card__title" }, titleRow),
         el("div", { class: "logs-convo-card__meta" }, when ? `${when}  ·  ${c.id}` : c.id),
       ]);
       logsConvoList.appendChild(card);
@@ -5659,7 +5685,62 @@
     logsLoadEntries(id);
   }
 
-  qs("#logs-convo-search").addEventListener("input", (e) => {
+  // Deep search. The existing input filtered conversation TITLES only,
+  // which is useless for "which ask produced that error" — the thing you
+  // actually open this panel for. Enter runs a full-text search across the
+  // log JSON via /api/logs-search; typing still does the instant local
+  // title filter, so the cheap case stays instant.
+  const logsSearchInput = qs("#logs-convo-search");
+
+  async function runDeepLogSearch(query) {
+    const list = qs("#logs-convo-list");
+    list.innerHTML = "";
+    list.appendChild(el("div", { class: "debug-empty" }, "Searching…"));
+    let data;
+    try {
+      const params = new URLSearchParams({ q: query, mode: state.logsSearchMode || "words" });
+      const res = await fetch(`/api/logs-search?${params}`);
+      data = await res.json();
+      if (!res.ok || data.error) throw new Error(data.error || "search failed");
+    } catch (err) {
+      list.innerHTML = "";
+      list.appendChild(el("div", { class: "debug-empty" }, `Search failed: ${err.message}`));
+      return;
+    }
+    list.innerHTML = "";
+    const results = data.results || [];
+    if (!results.length) {
+      list.appendChild(el("div", { class: "debug-empty" },
+        `No log entries match "${query}".`));
+      return;
+    }
+    list.appendChild(el("div", { class: "logs-search-summary" },
+      `${results.length}${data.truncated ? "+" : ""} matches in ${data.scanned} entries`));
+    for (const r of results) {
+      const head = [el("span", { class: "logs-result__dir" }, r.direction || "?")];
+      const badge = originBadge(r.source || r.origin);
+      if (badge) head.push(badge);
+      head.push(el("span", { class: "logs-result__title" }, r.title || r.conv_id));
+      list.appendChild(el("div", {
+        class: "logs-convo-card logs-result",
+        onclick: () => { logsSelectConvo(r.conv_id); },
+      }, [
+        el("div", { class: "logs-convo-card__title" }, head),
+        el("div", { class: "logs-result__snippet" }, r.snippet || ""),
+        el("div", { class: "logs-convo-card__meta" },
+           `${(r.ts || "").slice(0, 19).replace("T", " ")}  ·  ${r.provider || ""}`),
+      ]));
+    }
+  }
+
+  logsSearchInput.addEventListener("keydown", (e) => {
+    if (e.key !== "Enter") return;
+    const query = e.target.value.trim();
+    if (query) runDeepLogSearch(query);
+    else renderLogsConvoList();
+  });
+
+  logsSearchInput.addEventListener("input", (e) => {
     state.logsSearch = e.target.value;
     renderLogsConvoList();
   });
@@ -6902,6 +6983,315 @@
     }
   });
 
+
+  // -------------------------------------------------------------------------
+  // Guides panel — setup walkthroughs for every integration.
+  //
+  // Content lives here as data rather than in index.html so a guide is one
+  // object to add, and so the search below can match against step text
+  // without walking the DOM. Each entry: id, name, blurb, tags (searched),
+  // and sections of {heading, steps[], notes[]}.
+  //
+  // The gotchas matter more than the happy paths — every "notes" entry here
+  // is a thing that silently fails rather than erroring, which is exactly
+  // the class of problem a setup guide should pre-empt.
+  // -------------------------------------------------------------------------
+  const GUIDES = [
+    {
+      id: "discord", name: "Discord", blurb: "Bot that answers @mentions and DMs",
+      tags: "discord bot token gateway intents mention dm server guild",
+      sections: [
+        { heading: "Create the bot", steps: [
+          "Go to discord.com/developers/applications and click New Application.",
+          "Open the Bot tab, then Reset Token and copy the token.",
+          "Leave every Privileged Gateway Intent OFF. You do not need them — see the note below.",
+          "In OAuth2 > URL Generator tick scope 'bot', then permissions: Send Messages, Read Message History. Open the generated URL to invite it to your server.",
+        ]},
+        { heading: "Connect it to Jarvis", steps: [
+          "jarvis channels-config           (prints the config file path)",
+          "jarvis channels-set discord bot_token YOUR_TOKEN",
+          "jarvis channels-set discord enabled true",
+          "In Discord: Settings > Advanced > Developer Mode ON, then right-click your name > Copy User ID.",
+          "jarvis channels-set discord owner YOUR_USER_ID",
+          "jarvis channels-allow discord reply YOUR_USER_ID",
+          "jarvis channels-allow discord dm YOUR_USER_ID",
+          "jarvis channels-allow discord tool YOUR_USER_ID",
+          "jarvis channels-set discord allow_tools true",
+          "jarvis discord-daemon            (runs in the foreground)",
+        ]},
+        { heading: "Permissions", steps: [
+          "dm_allowlist — who may DM the bot at all.",
+          "reply_allowlist — who gets an answer back.",
+          "tool_allowlist — whose requests may run tools on this PC.",
+          "The three are independent. A friend on reply_allowlist but not tool_allowlist gets a conversation with tools switched off.",
+          "Empty means NOBODY. Put \"*\" in a list to mean everyone — that has to be typed on purpose.",
+        ]},
+        { heading: "Servers and per-server rules", steps: [
+          "The bot works in any server it's invited to, using the same allowlists.",
+          "In a server it only answers when @mentioned. In a DM it answers without one.",
+          "To loosen or tighten one server, add a scope in channels.json:",
+          "\"scopes\": { \"guild:123456\": { \"reply_allowlist\": [\"*\"], \"allow_tools\": false } }",
+          "Only the keys you write are overridden; everything else inherits. Specificity: thread > channel > guild.",
+        ]},
+      ],
+      notes: [
+        "You do NOT need the Message Content Intent. Discord exempts DMs to your bot and messages that @mention it — which is exactly what Jarvis reads. Leaving it off means nothing to justify at review and no breakage at 100 servers.",
+        "A bot can only DM someone who shares a server with it and has 'allow DMs from server members' on. That is the usual cause of a failed owner notification.",
+        "Install the library with: pip install -U discord.py  — the PyPI package named 'discord' is a different, unmaintained project.",
+      ],
+    },
+    {
+      id: "instagram", name: "Instagram", blurb: "Graph API DMs — read the limits first",
+      tags: "instagram meta graph api webhook igsid professional business creator dm",
+      sections: [
+        { heading: "Before you start — hard platform limits", steps: [
+          "A PERSONAL account cannot be automated at all. The Basic Display API is dead and has no successor. You need a Professional (Business or Creator) account.",
+          "The bot CANNOT start a conversation. It may only reply within 24 hours of the other person's last message. That clock resets each time they write.",
+          "So 'DM me when the task finishes' only works if you messaged the bot in the last 24h. Jarvis falls back to Discord automatically when the window is shut.",
+          "The HUMAN_AGENT tag extends the window to 7 days but Meta restricts it to messages typed by a real human. Jarvis never sends it — automated use gets API access revoked.",
+        ]},
+        { heading: "Set up the Meta app", steps: [
+          "Switch the Instagram account to Professional (Settings > Account type).",
+          "At developers.facebook.com create an app and add the Instagram product.",
+          "Request the instagram_manage_messages permission.",
+          "In the Instagram app: Settings > Messages > allow access to messages. This fails silently if it's off.",
+          "Generate an access token and note your Instagram user id.",
+        ]},
+        { heading: "Connect it to Jarvis", steps: [
+          "jarvis channels-set instagram access_token YOUR_TOKEN",
+          "jarvis channels-set instagram ig_user_id YOUR_IG_USER_ID",
+          "jarvis channels-set instagram app_secret YOUR_APP_SECRET",
+          "jarvis channels-set instagram verify_token ANY_STRING_YOU_INVENT",
+          "jarvis channels-set instagram bot_handle your_account_handle",
+          "jarvis channels-set instagram enabled true",
+          "jarvis instagram-serve           (listens on 127.0.0.1:19824)",
+          "Expose it over HTTPS with a tunnel (Cloudflare Tunnel, ngrok) — Meta requires a public HTTPS callback with a valid certificate.",
+          "In the Meta dashboard set the callback URL to https://your-tunnel/webhook and the verify token to the one you invented above, then subscribe to the 'messages' field.",
+        ]},
+        { heading: "Group threads", steps: [
+          "Group threads work the same way as Discord servers: the bot only answers when @mentioned.",
+          "Set bot_handle so it can recognise its own @name — Instagram sends mentions as plain text, not as structured data, so this is a text match.",
+          "The same three allowlists apply, keyed on the sender's IGSID.",
+        ]},
+      ],
+      notes: [
+        "Rate limits: 100 text sends/sec, but only 2 conversation reads/sec — the tightest limit. Jarvis derives state from webhooks rather than re-reading threads.",
+        "Your IGSID is assigned per-app and only exists after you've messaged the bot. Run `jarvis instagram-serve` and DM the bot; the trace prints the sender id.",
+        "The webhook is signature-verified (X-Hub-Signature-256). Without app_secret set, Jarvis rejects every webhook — an unverified endpoint is an open door.",
+      ],
+    },
+    {
+      id: "spotify", name: "Spotify", blurb: "Playback control via Web API + PKCE",
+      tags: "spotify music playback oauth pkce client id premium",
+      sections: [
+        { heading: "Basic (no API needed)", steps: [
+          "spotify_open just launches the desktop app. Nothing to configure.",
+        ]},
+        { heading: "Full playback control", steps: [
+          "Create an app at developer.spotify.com/dashboard.",
+          "jarvis spotify-config     (prints the path to spotify.json)",
+          "Copy the redirect URI from that file into the Spotify dashboard exactly as written.",
+          "Paste your client_id into spotify.json.",
+          "jarvis spotify-login",
+          "Log in with the SAME account the desktop app is signed into.",
+        ]},
+      ],
+      notes: [
+        "Playback control (play/pause/skip/volume) requires Spotify Premium — the API returns 403 on free accounts.",
+        "Spotify needs an active device. If nothing is playing anywhere, start playback once in the app first.",
+      ],
+    },
+    {
+      id: "playnite", name: "Playnite", blurb: "Game library browse and launch",
+      tags: "playnite games library launch bridge plugin emulator",
+      sections: [
+        { heading: "Install the bridge", steps: [
+          "Install the Playnite Bridge plugin from the playnitebridge/ folder in this repo.",
+          "Start Playnite — the bridge serves an HTTP API on localhost:19821.",
+          "jarvis playnite-config    (prints the path to playnite.json)",
+          "Paste the token the plugin shows into playnite.json.",
+        ]},
+      ],
+      notes: [
+        "Playnite must be RUNNING. The bridge is a plugin inside it, not a standalone service.",
+        "Launching by action id supports mods, emulators and custom URLs — not just the default Play action.",
+        "LibraryPlugin actions are virtual and never persisted, so they're resolved fresh rather than cached.",
+      ],
+    },
+    {
+      id: "ytdl", name: "yt-dlp", blurb: "Video info, formats and downloads",
+      tags: "ytdl yt-dlp youtube download video audio ffmpeg format",
+      sections: [
+        { heading: "Install", steps: [
+          "pip install -U yt-dlp",
+          "Install ffmpeg and put it on PATH — without it, merging separate video and audio streams fails.",
+          "Check it works: yt-dlp --version",
+        ]},
+      ],
+      notes: [
+        "yt-dlp breaks whenever a site changes. If downloads suddenly fail, update it first: pip install -U yt-dlp.",
+        "The highest-quality streams are usually video-only and audio-only, merged afterwards. That merge is ffmpeg's job — no ffmpeg means no 1080p+.",
+        "See DOCUMENTATION/yt-dlp-exhaustive-reference.md for the full option surface.",
+      ],
+    },
+    {
+      id: "pyautogui", name: "PyAutoGUI", blurb: "Mouse, keyboard and window control",
+      tags: "pyautogui desktop mouse keyboard click type hotkey window automation screen",
+      sections: [
+        { heading: "Install", steps: [
+          "pip install pyautogui",
+          "Windows: works out of the box.",
+          "macOS: grant Accessibility AND Screen Recording permission to your terminal in System Settings > Privacy & Security.",
+          "Linux (X11): pip install python-xlib. On Wayland it mostly does not work — most compositors block synthetic input by design.",
+        ]},
+        { heading: "Use it well", steps: [
+          "Prefer click_on_text: it screenshots, OCRs, and clicks a visible label in one call.",
+          "Avoid get_window_size then guessing coordinates — that's the fragile path, and it costs extra rounds.",
+        ]},
+      ],
+      notes: [
+        "PyAutoGUI has a failsafe: slam the mouse into a screen corner to abort a runaway script.",
+        "Coordinates are wrong on scaled displays unless DPI awareness is set. If clicks land offset, that's usually why.",
+      ],
+    },
+    {
+      id: "pytesseract", name: "pytesseract / OCR", blurb: "Reading text off the screen",
+      tags: "pytesseract tesseract ocr read screen text click_on_text image",
+      sections: [
+        { heading: "Install", steps: [
+          "pip install pytesseract pillow",
+          "Install the Tesseract BINARY separately — the pip package is only a wrapper around it.",
+          "Windows: install from the UB Mannheim build, then add the install folder to PATH.",
+          "macOS: brew install tesseract.   Linux: apt install tesseract-ocr",
+          "Check it works: tesseract --version",
+        ]},
+      ],
+      notes: [
+        "'pytesseract is installed but nothing works' almost always means the binary is missing or not on PATH. The wrapper cannot do OCR by itself.",
+        "OCR accuracy drops badly on small or low-contrast text. If click_on_text keeps missing, increase the app's font size or zoom before blaming the matcher.",
+        "Screenshots are saved under ~/.jarvis/screenshots and pruned automatically. They are never sent to the model as pixels.",
+      ],
+    },
+    {
+      id: "everything", name: "Everything (file search)", blurb: "Instant filename search on Windows",
+      tags: "everything voidtools file search index windows dll",
+      sections: [
+        { heading: "Install", steps: [
+          "Install Everything from voidtools.com and let it finish building its index.",
+          "Everything must be running for search_files to work.",
+          "jarvis everything-config  to override the DLL/exe path if it isn't found automatically.",
+        ]},
+      ],
+      notes: [
+        "Windows only. On other platforms the file tools fall back to slower methods.",
+        "reveal_in_explorer had a long-standing bug with paths containing spaces — fixed, but if a path opens the wrong folder, that's the shape of the old failure.",
+      ],
+    },
+    {
+      id: "mcp", name: "MCP servers", blurb: "External tools over Model Context Protocol",
+      tags: "mcp model context protocol server external tools",
+      sections: [
+        { heading: "Connect", steps: [
+          "jarvis mcp-config     (prints the config path)",
+          "Add a server entry with its command and args.",
+          "jarvis mcp-refresh    to pull its tool list.",
+          "jarvis mcp-status     to check what's connected.",
+          "The MCP Servers panel in this menu shows the same thing visually.",
+        ]},
+      ],
+      notes: [
+        "MCP tools join the normal router, so they're only sent to the model when relevant — they don't inflate every prompt.",
+      ],
+    },
+    {
+      id: "voice", name: "Voice (STT / TTS)", blurb: "Speaking and listening",
+      tags: "voice tts stt speech whisper microphone speak listen audio",
+      sections: [
+        { heading: "Set up", steps: [
+          "jarvis voice-config   (prints the config path)",
+          "jarvis speak \"hello\"  to test output.",
+          "jarvis listen         to test input.",
+        ]},
+      ],
+      notes: [
+        "Microphone access needs OS permission on macOS and Windows; it fails silently as an empty transcript otherwise.",
+      ],
+    },
+  ];
+
+  const guidesOverlay = qs("#guides-overlay");
+  const guidesList = qs("#guides-list");
+  const guideBody = qs("#guide-body");
+  const guideTitle = qs("#guide-title");
+  let guidesFilter = "";
+  let guideSelected = null;
+
+  function renderGuidesList() {
+    const needle = guidesFilter.toLowerCase();
+    // Match against name, blurb and tags — tags exist so "ocr" finds
+    // pytesseract and "intents" finds Discord, neither of which appear in
+    // the visible name.
+    const items = GUIDES.filter((g) => !needle ||
+      (g.name + " " + g.blurb + " " + g.tags).toLowerCase().includes(needle));
+    guidesList.innerHTML = "";
+    if (!items.length) {
+      guidesList.appendChild(el("div", { class: "skills-empty" }, "No guides match."));
+      return;
+    }
+    for (const g of items) {
+      guidesList.appendChild(el("div", {
+        class: "logs-convo-card" + (g.id === guideSelected ? " is-active" : ""),
+        onclick: () => selectGuide(g.id),
+      }, [
+        el("div", { class: "logs-convo-card__title" }, g.name),
+        el("div", { class: "logs-convo-card__meta" }, g.blurb),
+      ]));
+    }
+  }
+
+  function selectGuide(id) {
+    guideSelected = id;
+    const guide = GUIDES.find((g) => g.id === id);
+    renderGuidesList();
+    if (!guide) return;
+    guideTitle.textContent = guide.name;
+    guideBody.innerHTML = "";
+    for (const section of guide.sections || []) {
+      guideBody.appendChild(el("h4", { class: "guide-heading" }, section.heading));
+      const list = el("ol", { class: "guide-steps" });
+      for (const step of section.steps || []) {
+        // A step that looks like a command is rendered as one so it can be
+        // copied without picking prose out of it.
+        const isCommand = /^(jarvis |pip |npm |brew |apt |yt-dlp |tesseract |")/.test(step)
+          || step.startsWith("\"scopes\"");
+        list.appendChild(el("li", {}, isCommand
+          ? [el("code", { class: "guide-cmd" }, step)]
+          : step));
+      }
+      guideBody.appendChild(list);
+    }
+    if (guide.notes && guide.notes.length) {
+      guideBody.appendChild(el("h4", { class: "guide-heading" }, "Gotchas"));
+      const notes = el("ul", { class: "guide-notes" });
+      for (const note of guide.notes) notes.appendChild(el("li", {}, note));
+      guideBody.appendChild(notes);
+    }
+  }
+
+  function openGuides() {
+    guidesOverlay.hidden = false;
+    if (!guideSelected) renderGuidesList();
+  }
+
+  qs("#guides-close")?.addEventListener("click", () => { guidesOverlay.hidden = true; });
+  qs("#guides-search")?.addEventListener("input", (e) => {
+    guidesFilter = e.target.value || "";
+    renderGuidesList();
+  });
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape" && !guidesOverlay.hidden) guidesOverlay.hidden = true;
+  });
+
   // -------------------------------------------------------------------------
   // Panel-menu dropdown — one trigger for Debug / Skills / Scheduled / MCP
   // Servers, replacing four buttons that used to sit side by side in the
@@ -6936,6 +7326,7 @@
 
   // Each item opens its destination, then closes the dropdown — the menu
   // itself is never the thing left on screen after a choice is made.
+  qs("#menu-item-guides")?.addEventListener("click", () => { closePanelMenu(); openGuides(); });
   qs("#menu-item-debug")?.addEventListener("click", () => { closePanelMenu(); openDebug(); });
   qs("#menu-item-skills")?.addEventListener("click", () => { closePanelMenu(); openSkills(); });
   qs("#menu-item-scheduled")?.addEventListener("click", () => { closePanelMenu(); openScheduled(); });
