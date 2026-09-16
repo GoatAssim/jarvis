@@ -25,6 +25,7 @@ Two very different amounts of context come out of here, on purpose:
 """
 
 import json
+import os
 import re
 import secrets
 import sys
@@ -72,18 +73,53 @@ def _conv_path(conv_id):
 
 def _load_index():
     if not INDEX_FILE.exists():
+        return _rebuild_index()
+    data, recovered = _read_json_with_backup(INDEX_FILE, list)
+    if data is None:
+        # Both copies unreadable. The index is pure derived data — every
+        # field in it also lives in the conversation files — so rebuild it
+        # rather than returning [] and making every conversation on disk
+        # invisible forever, which is what used to happen.
+        print("Note: conversation index was corrupt — rebuilding from disk.",
+              file=sys.stderr)
+        return _rebuild_index()
+    if recovered:
+        print("Note: recovered the conversation index from backup.", file=sys.stderr)
+    return data
+
+
+def _rebuild_index():
+    """Reconstruct the index by scanning the conversation files.
+
+    Only conversations with at least one exchange are indexed, matching
+    new_conversation()'s rule that an empty conversation stays invisible
+    until it has a real message.
+    """
+    if not CONV_DIR.exists():
         return []
-    try:
-        data = json.loads(INDEX_FILE.read_text(encoding=ENCODING))
-    except (json.JSONDecodeError, UnicodeDecodeError, OSError):
-        return []
-    return data if isinstance(data, list) else []
+    items = []
+    for path in sorted(CONV_DIR.glob("*.json")):
+        if path.name == INDEX_FILE.name:
+            continue
+        data, _ = _read_json_with_backup(path, dict)
+        if not isinstance(data, dict) or not data.get("id"):
+            continue
+        if not (data.get("exchanges") or []):
+            continue
+        items.append(_index_entry(data))
+    items.sort(key=lambda it: it.get("updated_at") or "", reverse=True)
+    if items:
+        try:
+            _atomic_write(INDEX_FILE, json.dumps(items, indent=2) + "\n")
+        except OSError:
+            pass
+    return items
 
 
 def _save_index(items):
     CONV_DIR.mkdir(parents=True, exist_ok=True)
     try:
-        INDEX_FILE.write_text(json.dumps(items, indent=2) + "\n", encoding=ENCODING)
+        _atomic_write(INDEX_FILE, json.dumps(items, indent=2) + "\n")
     except OSError as e:
         print(f"Warning: couldn't save conversation index: {e}", file=sys.stderr)
 
@@ -92,21 +128,82 @@ def _load_conv(conv_id):
     if not is_valid_id(conv_id):
         return None
     path = _conv_path(conv_id)
-    if not path.exists():
+    data, recovered = _read_json_with_backup(path, dict)
+    if data is None:
         return None
-    try:
-        data = json.loads(path.read_text(encoding=ENCODING))
-    except (json.JSONDecodeError, UnicodeDecodeError, OSError):
-        return None
-    return data if isinstance(data, dict) else None
+    if recovered:
+        # Say so. A silently-restored older copy is how "it lost my last
+        # message" becomes an unexplainable mystery instead of a known,
+        # bounded loss of exactly one turn.
+        print(f"Note: recovered conversation {conv_id} from backup "
+              f"(the main file was corrupt).", file=sys.stderr)
+    return data
+
+
+def _atomic_write(path, text):
+    """Write via temp file + os.replace, keeping the previous contents as a
+    .bak sibling.
+
+    THIS IS THE FIX FOR "I aborted a message and the whole conversation
+    vanished." Both of these used a plain write_text(), which truncates the
+    target before writing — so a process killed mid-write left a HALF a
+    JSON file behind. _load_conv catches JSONDecodeError and returns None,
+    so a truncated file didn't look corrupt, it looked like the
+    conversation had never existed. Same for the index, except there one
+    torn write hid EVERY conversation at once.
+
+    That kill is not hypothetical or rare: the web UI's Stop button calls
+    killTree(), which on Windows is `taskkill /T /F` — an unconditional
+    force kill with no signal handler able to intervene. Every Stop press
+    on Windows races this write.
+
+    os.replace is atomic on POSIX and on Windows (MoveFileEx with
+    REPLACE_EXISTING), so a reader sees either the old file or the new one,
+    never a torn one. The fsync before it is what makes that hold across a
+    power loss rather than just a process kill.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    with tmp.open("w", encoding=ENCODING) as handle:
+        handle.write(text)
+        handle.flush()
+        os.fsync(handle.fileno())
+    # Keep the last known-good copy. Cheap insurance: the failure this
+    # guards against already happened once and silently destroyed data.
+    if path.exists():
+        try:
+            backup = path.with_suffix(path.suffix + ".bak")
+            os.replace(str(path), str(backup))
+        except OSError:
+            pass
+    os.replace(str(tmp), str(path))
+
+
+def _read_json_with_backup(path, expect):
+    """Load JSON from `path`, falling back to its .bak on corruption.
+
+    Returns (data, recovered). `expect` is the type required — anything
+    else is treated as corruption, since a conversation that deserializes
+    to a list is no more usable than one that doesn't parse at all.
+    """
+    for candidate, is_backup in ((path, False),
+                                 (path.with_suffix(path.suffix + ".bak"), True)):
+        if not candidate.exists():
+            continue
+        try:
+            data = json.loads(candidate.read_text(encoding=ENCODING))
+        except (json.JSONDecodeError, UnicodeDecodeError, OSError):
+            continue
+        if isinstance(data, expect):
+            return data, is_backup
+    return None, False
 
 
 def _save_conv(record):
     CONV_DIR.mkdir(parents=True, exist_ok=True)
     try:
-        _conv_path(record["id"]).write_text(
-            json.dumps(record, indent=2) + "\n", encoding=ENCODING
-        )
+        _atomic_write(_conv_path(record["id"]),
+                      json.dumps(record, indent=2) + "\n")
     except OSError as e:
         print(f"Warning: couldn't save conversation: {e}", file=sys.stderr)
 
@@ -146,12 +243,12 @@ def _remove_from_index(conv_id):
 def get_current_id(auto_create=True):
     """The CLI's on-disk 'active' conversation. Web asks instead pass an
     explicit id via JARVIS_CONVERSATION_ID and never touch this pointer."""
-    conv_id = None
-    try:
-        data = json.loads(CURRENT_FILE.read_text(encoding=ENCODING))
-        conv_id = data.get("id") if isinstance(data, dict) else None
-    except (FileNotFoundError, json.JSONDecodeError, UnicodeDecodeError, OSError):
-        conv_id = None
+    # Backup-aware, to match set_current's atomic write: reading the main
+    # file directly meant a torn pointer read as "none", and the next CLI
+    # message silently opened a NEW conversation instead of continuing the
+    # one the user was in.
+    data, _ = _read_json_with_backup(CURRENT_FILE, dict)
+    conv_id = data.get("id") if isinstance(data, dict) else None
     if conv_id and _load_conv(conv_id):
         return conv_id
     if not auto_create:
@@ -164,7 +261,10 @@ def set_current(conv_id):
         return
     JARVIS_DIR.mkdir(parents=True, exist_ok=True)
     try:
-        CURRENT_FILE.write_text(json.dumps({"id": conv_id}) + "\n", encoding=ENCODING)
+        # Atomic too: a torn pointer file reads as "no current
+        # conversation", so get_current_id() silently starts a NEW one and
+        # the user's next CLI message lands somewhere they never see.
+        _atomic_write(CURRENT_FILE, json.dumps({"id": conv_id}) + "\n")
     except OSError as e:
         print(f"Warning: couldn't save current conversation pointer: {e}", file=sys.stderr)
 
@@ -352,6 +452,14 @@ def begin_exchange(conv_id, user_text):
         "updated_at": _now(),
         "exchanges": [],
     }
+    # Reclaim anything left pending by a PREVIOUS process before adding
+    # ours. A pending turn is only ever resolved in-process, by
+    # complete_exchange or by the signal handler's abandon_exchange — so a
+    # hard kill (Windows' Stop button is `taskkill /F`, which no handler
+    # can intercept) strands one forever. Without this they accumulate:
+    # every killed ask leaves a ghost turn that renders as permanently
+    # unanswered and is silently dropped from prompt history.
+    _reclaim_stale_pending(record)
     record.setdefault("exchanges", []).append({
         "ts": _now(),
         "user": user_text,
@@ -364,6 +472,26 @@ def begin_exchange(conv_id, user_text):
     _save_conv(record)
     _upsert_index(record)
     return len(record["exchanges"]) - 1
+
+
+def _reclaim_stale_pending(record):
+    """Downgrade any still-pending exchange to `interrupted`.
+
+    Called at the start of begin_exchange, which is safe because a pending
+    turn belonging to a LIVE ask in another process would mean two asks
+    writing the same conversation concurrently — already unsupported, and
+    the reclaim leaves the user's text untouched either way. Returns how
+    many were reclaimed.
+    """
+    reclaimed = 0
+    for exchange in record.get("exchanges") or []:
+        if not exchange.get("pending"):
+            continue
+        exchange.pop("pending", None)
+        exchange["jarvis"] = exchange.get("jarvis") or ""
+        exchange.setdefault("interrupted", "interrupted (process ended)")
+        reclaimed += 1
+    return reclaimed
 
 
 def _finish_pending(record, user_text, patch):
@@ -425,9 +553,41 @@ def abandon_exchange(conv_id, user_text=None, reason="interrupted", extras=None)
         return False
     record = _load_conv(conv_id)
     if not record:
-        return False
-    if not any(e.get("pending") for e in record.get("exchanges") or []):
-        return False
+        # No record at all means begin_exchange never managed to write one.
+        # Losing the user's message on top of losing their answer is the
+        # worse of the two failures, so synthesize the record rather than
+        # bailing — this is the same reasoning _finish_pending's append
+        # fallback already documents.
+        if not (user_text or "").strip():
+            return False
+        record = {
+            "id": conv_id, "title": DEFAULT_TITLE, "soft_context": "",
+            "created_at": _now(), "updated_at": _now(), "exchanges": [],
+        }
+    exchanges = record.get("exchanges") or []
+    # Two cases used to be conflated under a single `return False` when
+    # nothing was pending:
+    #
+    #   (a) the turn was never recorded at all — begin_exchange failed, or
+    #       no record existed. Returning False here threw the user's typed
+    #       message away entirely, which is the exact bug the whole pending
+    #       mechanism exists to prevent.
+    #   (b) the turn is ALREADY recorded and resolved, and this is a second
+    #       abandon for it. That genuinely is a no-op — and it happens in
+    #       practice: the signal handler can fire twice (SIGINT then
+    #       SIGTERM), and ask()'s all-providers-failed path abandons too.
+    #
+    # So distinguish them instead of picking one. Only (b) short-circuits.
+    target = (user_text or "").strip()
+    if not any(e.get("pending") for e in exchanges):
+        last = exchanges[-1] if exchanges else None
+        already_recorded = (
+            last is not None
+            and (not target or (last.get("user") or "").strip() == target)
+            and not last.get("pending")
+        )
+        if already_recorded:
+            return False
     patch = {"ts": _now(), "jarvis": "", "provider": None, "interrupted": reason}
     if extras:
         patch["extras"] = extras

@@ -95,9 +95,13 @@ def ensure_config():
 
 def load_facts():
     ensure_config()
-    try:
-        data = json.loads(CONFIG_FILE.read_text(encoding=ENCODING))
-    except (json.JSONDecodeError, UnicodeDecodeError, OSError):
+    from . import atomic_io
+    # Backup-aware: without this the .bak that save_facts now writes would
+    # never actually be consulted, and a corrupt main file would still read
+    # as "no memories" — the exact silent-total-loss this pair exists to
+    # stop. Losing the newest fact beats losing every fact.
+    data = atomic_io.read_json(CONFIG_FILE, default=None, expect=dict)
+    if data is None:
         return []
     facts = data.get("facts") if isinstance(data, dict) else None
     if not isinstance(facts, list):
@@ -106,11 +110,17 @@ def load_facts():
 
 
 def save_facts(facts):
+    """Atomic, with a .bak fallback — see atomic_io's module docstring.
+
+    This file is the only copy of everything the user ever asked Jarvis to
+    remember, and it is fully rewritten on every single memory_save. The
+    old plain write_text() meant one force-kill landing in that window
+    wiped the lot, silently: load_facts() catches the parse error and
+    returns [], so a destroyed memory file reads as "no memories yet".
+    """
     ensure_config()
-    CONFIG_FILE.write_text(
-        json.dumps({"facts": facts[-MAX_FACTS:]}, indent=2) + "\n",
-        encoding=ENCODING,
-    )
+    from . import atomic_io
+    atomic_io.write_json(CONFIG_FILE, {"facts": facts[-MAX_FACTS:]})
 
 
 def _norm_key(key):

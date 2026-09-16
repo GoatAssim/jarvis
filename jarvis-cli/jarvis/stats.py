@@ -36,13 +36,13 @@ def _load():
 
 
 def _save(counts):
-    JARVIS_DIR.mkdir(parents=True, exist_ok=True)
-    try:
-        STATS_FILE.write_text(
-            json.dumps({"counts": counts}, indent=2) + "\n", encoding=ENCODING
-        )
-    except OSError as e:
-        print(f"Warning: couldn't save usage stats: {e}", file=sys.stderr)
+    # Atomic — see atomic_io's module docstring. bump() is called on every
+    # command run, including concurrently from chained commands, so this is
+    # one of the most frequently rewritten files in the system and
+    # correspondingly the most likely to be caught mid-write by a kill.
+    from . import atomic_io
+    if not atomic_io.write_json(STATS_FILE, {"counts": counts}):
+        print("Warning: couldn't save usage stats", file=sys.stderr)
 
 
 def bump(name):
