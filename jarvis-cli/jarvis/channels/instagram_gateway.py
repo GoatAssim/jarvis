@@ -72,23 +72,19 @@ _WINDOW_FILE = transcript.CHANNELS_DIR / "instagram_windows.json"
 
 
 def _load_windows():
-    try:
-        data = json.loads(_WINDOW_FILE.read_text(encoding="utf-8"))
-        return data if isinstance(data, dict) else {}
-    except (json.JSONDecodeError, UnicodeDecodeError, OSError):
-        return {}
+    from .. import atomic_io
+    return atomic_io.read_json(_WINDOW_FILE, default={}, expect=dict)
 
 
 def note_inbound(user_id, when=None):
     """Record that a user messaged us, opening/refreshing their window."""
     windows = _load_windows()
     windows[str(user_id)] = time.time() if when is None else when
-    try:
-        _WINDOW_FILE.parent.mkdir(parents=True, exist_ok=True)
-        _WINDOW_FILE.write_text(json.dumps(windows, indent=2) + "\n",
-                                encoding="utf-8")
-    except OSError:
-        pass
+    # Atomic: this file is read by a different process than the one that
+    # writes it (the sender vs the webhook receiver), so a torn write here
+    # reads as "no window open" and silently blocks every outbound DM.
+    from .. import atomic_io
+    atomic_io.write_json(_WINDOW_FILE, windows)
     return windows[str(user_id)]
 
 
