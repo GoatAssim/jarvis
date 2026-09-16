@@ -1,6 +1,11 @@
 """OCR-based screen interaction for Jarvis — the "sighted" tier that
 desktop_tools.py deliberately left out.
 
+Two tools live here: click_on_text() (find text, click it) and
+read_screen() (find all text, return it as plain lines — no image, no
+screenshot artifact, just what the screen currently says). Both share the
+same capture-then-OCR pipeline below.
+
 This is a separate module on purpose: desktop_tools.py's own docstring
 says vision/OCR tools "cost a real screenshot + extra processing per call"
 and "belong in a separate module if/when they're wanted", to keep the
@@ -158,6 +163,71 @@ def _phrase_candidates(words, query, max_span=4):
     return ranked
 
 
+def _words_to_lines(words):
+    """Reconstruct reading-order lines from _ocr_words()'s flat word list —
+    same (block, par, line) grouping tool_click_on_text uses to find
+    phrases, just joined into whole lines instead of matched against a
+    query. Lines are ordered by their top-most word's vertical position,
+    top of screen first, matching how a person reads it.
+    """
+    by_line = {}
+    for w in words:
+        by_line.setdefault(_line_key(w), []).append(w)
+    lines = []
+    for line_words in by_line.values():
+        line_words.sort(key=lambda w: w["word"])
+        text = " ".join(w["text"] for w in line_words)
+        top = min(w["top"] for w in line_words)
+        lines.append((top, text))
+    lines.sort(key=lambda t: t[0])
+    return [text for _top, text in lines]
+
+
+def tool_read_screen(args=None):
+    if pytesseract is None or Image is None:
+        return _no_pytesseract()
+    args = args or {}
+    try:
+        min_confidence = float(args.get("min_confidence", 0))
+    except (TypeError, ValueError):
+        min_confidence = 0.0
+
+    tmp_path = None
+    try:
+        fd, tmp_name = tempfile.mkstemp(prefix="jarvis_ocr_", suffix=".png")
+        import os
+        os.close(fd)
+        tmp_path = Path(tmp_name)
+
+        meta, err = screenshot_tools.capture_to(tmp_path)
+        if err or meta is None:
+            return {"error": f"screen capture failed: {err or 'unknown error'}"}
+
+        try:
+            words = _ocr_words(tmp_path)
+        except pytesseract.TesseractNotFoundError as e:
+            return _no_tesseract_binary(str(e))
+        except Exception as e:
+            return {"error": f"OCR failed: {e}"}
+    finally:
+        if tmp_path is not None:
+            try:
+                tmp_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+
+    if min_confidence > 0:
+        words = [w for w in words if w["conf"] >= min_confidence]
+    lines = _words_to_lines(words)
+    text = "\n".join(lines)
+    return {
+        "ok": True,
+        "text": text,
+        "line_count": len(lines),
+        "word_count": len(words),
+    }
+
+
 def tool_click_on_text(args=None):
     if pytesseract is None or Image is None:
         return _no_pytesseract()
@@ -251,6 +321,34 @@ def tool_click_on_text(args=None):
 
 OCR_TOOL_SCHEMAS = [
     {
+        "name": "read_screen",
+        "description": (
+            "Read the text currently visible on screen via local OCR — "
+            "returns plain text lines, NOT an image or a screenshot; no "
+            "pixels are ever sent to you or saved anywhere. Use this "
+            "instead of take_screenshot when you just need to know what a "
+            "window says (e.g. checking whether another program printed "
+            "'done' or an error) rather than needing to actually see the "
+            "screen's layout/visuals. Cheaper than a screenshot round-trip "
+            "through you: the OCR happens locally and only the recognized "
+            "text comes back."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "min_confidence": {
+                    "type": "number",
+                    "description": (
+                        "Drop recognized words below this OCR confidence "
+                        "(0-100) before reconstructing lines. Default 0 "
+                        "(keep everything Tesseract returned)."
+                    ),
+                },
+            },
+            "required": [],
+        },
+    },
+    {
         "name": "click_on_text",
         "description": (
             "Find text visible on screen (via a screenshot + local OCR — the "
@@ -294,5 +392,6 @@ OCR_TOOL_SCHEMAS = [
 ]
 
 OCR_TOOLS = {
+    "read_screen": tool_read_screen,
     "click_on_text": tool_click_on_text,
 }

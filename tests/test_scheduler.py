@@ -32,6 +32,7 @@ def fresh():
     scheduler.JARVIS_DIR = tmp
     scheduler.STORE_FILE = tmp / "scheduled.json"
     scheduler.LOCK_FILE = tmp / "scheduled.lock"
+    scheduler.ASK_LOG_FILE = tmp / "scheduler_ask_log.jsonl"
     notifier.JARVIS_DIR = tmp
     notifier.INBOX_FILE = tmp / "notifications.json"
     notifier.CONFIG_FILE = tmp / "notify_config.json"
@@ -336,6 +337,120 @@ def test_summaries_are_display_ready():
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+def test_scheduled_ask_logs_the_prompt_regardless_of_conv_id():
+    # The gap: an ask job with no conv_id used to leave no record anywhere
+    # of what was actually sent. _do_ask should log it unconditionally.
+    tmp = fresh()
+    orig_run = scheduler.subprocess.run
+
+    class FakeCompleted:
+        def __init__(self, stdout="", stderr="", returncode=0):
+            self.stdout, self.stderr, self.returncode = stdout, stderr, returncode
+
+    def fake_run(argv, **kwargs):
+        return FakeCompleted(stdout="Jarvis: all done here.\n")
+
+    scheduler.subprocess.run = fake_run
+    try:
+        job = {"id": "job1", "title": "My task", "kind": "task", "conv_id": None}
+        action = {"type": "ask", "prompt": "check the thing and report back"}
+        result = scheduler._do_ask(job, action)
+        check("_do_ask still returns ok=True on a clean run", result["ok"] is True, result)
+
+        entries = scheduler.read_ask_log()
+        check("exactly one entry was logged", len(entries) == 1, entries)
+        e = entries[0]
+        check("the logged prompt matches what was sent", e["prompt"] == "check the thing and report back", e)
+        check("the job id is recorded even with no conv_id", e["job_id"] == "job1", e)
+        check("the reply is logged too", "all done here" in (e["reply"] or ""), e)
+        check("ok=True is recorded", e["ok"] is True, e)
+    finally:
+        scheduler.subprocess.run = orig_run
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_scheduled_ask_logs_failures_too():
+    tmp = fresh()
+    orig_run = scheduler.subprocess.run
+
+    class FakeCompleted:
+        def __init__(self, stdout="", stderr="", returncode=0):
+            self.stdout, self.stderr, self.returncode = stdout, stderr, returncode
+
+    def fake_run(argv, **kwargs):
+        return FakeCompleted(stdout="", stderr="no providers configured", returncode=1)
+
+    scheduler.subprocess.run = fake_run
+    try:
+        job = {"id": "job2", "title": "Another task", "kind": "task"}
+        action = {"type": "ask", "prompt": "do the other thing"}
+        result = scheduler._do_ask(job, action)
+        check("_do_ask reports failure", result["ok"] is False, result)
+
+        entries = scheduler.read_ask_log()
+        check("the failure is logged", len(entries) == 1 and entries[0]["ok"] is False, entries)
+        check("the error is captured", "no providers configured" in (entries[0]["error"] or ""), entries)
+        check("the prompt is still captured on failure", entries[0]["prompt"] == "do the other thing", entries)
+    finally:
+        scheduler.subprocess.run = orig_run
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_ask_log_filters_by_job_and_respects_limit():
+    tmp = fresh()
+    orig_run = scheduler.subprocess.run
+
+    class FakeCompleted:
+        def __init__(self, stdout="", stderr="", returncode=0):
+            self.stdout, self.stderr, self.returncode = stdout, stderr, returncode
+
+    scheduler.subprocess.run = lambda argv, **kw: FakeCompleted(stdout="ok\n")
+    try:
+        for i in range(3):
+            scheduler._do_ask({"id": "jobA"}, {"type": "ask", "prompt": "p%d" % i})
+        scheduler._do_ask({"id": "jobB"}, {"type": "ask", "prompt": "other"})
+
+        all_entries = scheduler.read_ask_log()
+        check("all four entries present", len(all_entries) == 4, all_entries)
+        check("newest first", all_entries[0]["prompt"] == "other", all_entries)
+
+        job_a_entries = scheduler.read_ask_log(job_id="jobA")
+        check("job filter narrows to just jobA's three entries", len(job_a_entries) == 3, job_a_entries)
+
+        limited = scheduler.read_ask_log(limit=2)
+        check("limit caps the returned entries", len(limited) == 2, limited)
+    finally:
+        scheduler.subprocess.run = orig_run
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_ask_log_is_capped_and_clearable():
+    tmp = fresh()
+    orig_max = scheduler.MAX_ASK_LOG_ENTRIES
+    orig_run = scheduler.subprocess.run
+
+    class FakeCompleted:
+        def __init__(self, stdout=""):
+            self.stdout, self.stderr, self.returncode = stdout, "", 0
+
+    scheduler.subprocess.run = lambda argv, **kw: FakeCompleted(stdout="ok\n")
+    scheduler.MAX_ASK_LOG_ENTRIES = 3
+    try:
+        for i in range(5):
+            scheduler._do_ask({"id": "j%d" % i}, {"type": "ask", "prompt": "p%d" % i})
+        entries = scheduler.read_ask_log()
+        check("log is capped at MAX_ASK_LOG_ENTRIES", len(entries) == 3, entries)
+        check("the newest entries survive the cap", entries[0]["prompt"] == "p4", entries)
+
+        cleared = scheduler.clear_ask_log()
+        check("clear_ask_log reports success", cleared is True)
+        check("the log is empty after clearing", scheduler.read_ask_log() == [])
+    finally:
+        scheduler.subprocess.run = orig_run
+        scheduler.MAX_ASK_LOG_ENTRIES = orig_max
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 for fn in [
     test_one_engine_three_kinds, test_time_trigger_fires_once,
     test_recurring_reschedules, test_missed_runs_fire_once_not_many,
@@ -344,6 +459,10 @@ for fn in [
     test_tick_lock_prevents_double_fire, test_bad_job_does_not_stop_the_others,
     test_bad_triggers_are_rejected, test_notifier_inbox_is_per_consumer,
     test_notifier_always_writes_the_inbox, test_summaries_are_display_ready,
+    test_scheduled_ask_logs_the_prompt_regardless_of_conv_id,
+    test_scheduled_ask_logs_failures_too,
+    test_ask_log_filters_by_job_and_respects_limit,
+    test_ask_log_is_capped_and_clearable,
 ]:
     fn()
 

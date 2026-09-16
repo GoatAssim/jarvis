@@ -137,6 +137,27 @@ def test_provider_strategies():
           o["eligible"] is True and o["keep_alive"] == "30m", o["reason"])
 
 
+def test_groq_never_gets_prompt_cache_key_by_default():
+    # Groq's endpoint 400s outright on prompt_cache_key ("property
+    # 'prompt_cache_key' is unsupported") — unlike the rest of the
+    # openai_compatible family, which silently ignores it. Matched by
+    # provider *name*, since "type" is shared with every other host in
+    # this family (see prompt_cache.NO_CACHE_KEY_PROVIDER_NAMES).
+    real_groq = {"type": "openai_compatible", "name": "groq", "model": "llama-3.3-70b"}
+    r = prompt_cache.plan(SMALL_PARTS, BIG_TOOLS, real_groq)
+    check("groq gets no routing hint by default", r["cache_key"] is False, r)
+    check("groq is still otherwise eligible for (automatic) caching", r["eligible"] is True, r)
+
+    r2 = prompt_cache.plan(SMALL_PARTS, BIG_TOOLS, real_groq, {"prompt_cache_key": True})
+    check("an explicit prompt_cache_key: true still overrides the groq default",
+          r2["cache_key"] is True, r2)
+
+    other = {"type": "openai_compatible", "name": "xai", "model": "grok-4"}
+    r3 = prompt_cache.plan(SMALL_PARTS, BIG_TOOLS, other)
+    check("a different openai_compatible host (by name) is unaffected",
+          r3["cache_key"] is True, r3)
+
+
 def test_disabled_and_unknown_are_safe():
     off = prompt_cache.plan(SMALL_PARTS, BIG_TOOLS, ANTHROPIC, {"prompt_cache": False})
     check("master switch off = no caching", off["system_index"] is None and not off["eligible"])

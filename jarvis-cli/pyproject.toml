@@ -35,7 +35,7 @@ voice = [
 ]
 
 [project.scripts]
-jarvis = "jarvis.cli:entry"
+friday = "jarvis.cli:entry"
 
 [build-system]
 requires = ["setuptools>=61.0"]

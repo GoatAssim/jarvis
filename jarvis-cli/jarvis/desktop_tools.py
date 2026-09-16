@@ -71,6 +71,39 @@ def tool_type_text(args=None):
     return {"ok": True, "typed": text}
 
 
+def tool_write_on_screen(args=None):
+    """type_text's "send it" sibling: types into whatever has keyboard
+    focus, then (by default) presses Enter to submit — the common case of
+    sending a message to a chat box, terminal, or another program's input
+    field, rather than just filling in a form field you'll tab away from.
+
+    Split out from type_text rather than adding a submit flag there: this
+    tool exists specifically for talking TO another running program (e.g.
+    directing another AI assistant's terminal/chat window from a scheduled
+    task), so its name and description say that plainly instead of type_text
+    quietly growing a second, easy-to-miss behavior.
+    """
+    if pyautogui is None:
+        return _no_pyautogui()
+    args = args or {}
+    text = args.get("text")
+    if not text:
+        return {"error": "text is required"}
+    interval = args.get("interval", 0.02)
+    try:
+        interval = max(0.0, min(1.0, float(interval)))
+    except (TypeError, ValueError):
+        interval = 0.02
+    submit = args.get("press_enter", True)
+    try:
+        pyautogui.write(str(text), interval=interval)
+        if submit:
+            pyautogui.press("enter")
+    except Exception as e:
+        return {"error": f"write_on_screen failed: {e}"}
+    return {"ok": True, "typed": text, "submitted": bool(submit)}
+
+
 def tool_press_key(args=None):
     if pyautogui is None:
         return _no_pyautogui()
@@ -371,6 +404,34 @@ DESKTOP_TOOL_SCHEMAS = [
         },
     },
     {
+        "name": "write_on_screen",
+        "description": (
+            "Type text at whatever currently has keyboard focus, then press "
+            "Enter to submit it — for SENDING a message into a chat box, "
+            "terminal, or another program's/AI's input field (e.g. directing "
+            "another Claude/AI session running in a terminal or chat window: "
+            "telling it to continue, answering a question it asked, pasting "
+            "in an instruction). Use focus_window first if the target isn't "
+            "already focused. Set press_enter=false to type without "
+            "submitting (equivalent to type_text)."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "text": {"type": "string", "description": "The text to type and send."},
+                "press_enter": {
+                    "type": "boolean",
+                    "description": "Press Enter after typing to submit it (default true).",
+                },
+                "interval": {
+                    "type": "number",
+                    "description": "Seconds between keystrokes, 0-1 (default 0.02).",
+                },
+            },
+            "required": ["text"],
+        },
+    },
+    {
         "name": "press_key",
         "description": (
             "Press a single key (e.g. 'enter', 'esc', 'tab', 'f5', 'up'). "
@@ -549,6 +610,7 @@ DESKTOP_TOOL_SCHEMAS = [
 
 DESKTOP_TOOLS = {
     "type_text": tool_type_text,
+    "write_on_screen": tool_write_on_screen,
     "press_key": tool_press_key,
     "hotkey": tool_hotkey,
     "scroll": tool_scroll,

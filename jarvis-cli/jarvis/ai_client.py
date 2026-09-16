@@ -367,11 +367,11 @@ class AskResult:
     """Everything cli.py (or, via the web console, server.js re-running the
     CLI) needs to present one 'jarvis <text>' call to a person."""
 
-    __slots__ = ("ok", "text", "provider", "attempts", "assistant_name", "address_user_as", "usage")
+    __slots__ = ("ok", "text", "provider", "attempts", "assistant_name", "address_user_as", "usage", "degraded")
 
     def __init__(self, ok, text=None, provider=None, attempts=None,
                  assistant_name=DEFAULT_ASSISTANT_NAME, address_user_as=DEFAULT_ADDRESS,
-                 usage=None):
+                 usage=None, degraded=False):
         self.ok = ok
         self.text = text
         self.provider = provider
@@ -382,6 +382,13 @@ class AskResult:
         # that actually succeeded — {input_tokens, output_tokens, total_tokens,
         # rounds: [...], tool_calls: [...]}. None if tools/usage weren't tracked.
         self.usage = usage
+        # True when `text` isn't a model-composed reply at all — every
+        # provider failed on the closing text call, but real, mutating tool
+        # calls had already completed first. See _completed_mutations()'s
+        # docstring for why this exists: the alternative was reporting a
+        # completed task as a hard failure just because nothing was left to
+        # write the last sentence.
+        self.degraded = degraded
 
 
 def _provider_label(provider):
@@ -1626,6 +1633,53 @@ def _extras_from_runs(runs):
     return extras
 
 
+def _completed_mutations(runs):
+    """Which of this turn's tool calls actually changed something in the
+    real world, and didn't themselves report an error.
+
+    This is what lets ask() tell "every provider failed before doing
+    anything" apart from "every provider failed AFTER the real work was
+    already done" — see the "every provider failed" tail of ask() for why
+    that distinction matters. A run counts as a completed mutation only if
+    _is_mutating_tool() already agrees it's the kind of tool that isn't a
+    read-only lookup, and its own result doesn't carry an "error" key (a
+    mutating tool that itself failed obviously didn't complete anything).
+    """
+    done = []
+    for run in (runs or []):
+        name = run.get("name") or ""
+        if not _is_mutating_tool(name):
+            continue
+        result = run.get("result")
+        if isinstance(result, dict) and result.get("error"):
+            continue
+        done.append(run)
+    return done
+
+
+def _summarize_completed_mutations(runs):
+    """Plain-language fallback reply for when real work finished but no
+    provider survived to write the closing sentence about it.
+
+    Deliberately terse and mechanical (tool name + a one-line gloss of its
+    result) rather than trying to sound like a normal assistant reply —
+    this text was never reviewed by a model, and pretending otherwise
+    would be worse than admitting a provider dropped out partway through.
+    """
+    lines = ["The requested action(s) completed, but every configured "
+             "provider failed before a closing reply could be written:"]
+    for run in runs:
+        name = run.get("name") or "tool"
+        result = run.get("result") if isinstance(run.get("result"), dict) else {}
+        gloss = result.get("summary") or result.get("message") or result.get("path") \
+            or result.get("file") or result.get("job_id")
+        if gloss:
+            lines.append("- %s: %s" % (name, gloss))
+        else:
+            lines.append("- %s: done" % name)
+    return "\n".join(lines)
+
+
 def _is_mutating_tool(name):
     name = name or ""
     if name in {
@@ -2490,12 +2544,43 @@ def ask(user_text, commands=None, on_attempt=None, on_tool_call=None, on_tool_re
 
             attempts.append((key_label, result.error))
 
-    # Every provider failed. The turn is still real — the user asked
-    # something and got nothing — so it's recorded as such rather than left
-    # pending forever (a pending turn would otherwise be re-abandoned by the
-    # next process's interrupt handler and look like it was cancelled).
+    # Every provider failed on the closing text call. That used to always
+    # mean "no provider answered" and get reported as a hard failure — but
+    # if a mutating tool call already completed cleanly earlier this turn
+    # (see _completed_mutations), the actual requested action DID happen;
+    # only the follow-up "compose a nice reply about it" call failed on
+    # every remaining provider (all keys genuinely exhausted after a long
+    # tool-calling turn is the common case). That's exactly the bug
+    # reported against the scheduler: a scheduled task would run its tools,
+    # complete the real work, then still get reported as an error because
+    # ask() kept cycling every remaining provider for a closing sentence
+    # that never came — "cycled thru every token provider and gave an
+    # error EVEN THOUGH the task is done." Recording that as an abandoned
+    # exchange and returning ok=False was true to what happened to the
+    # LAST attempt, but false to what happened to the ask() call as a
+    # whole. Synthesize a plain summary of what ran instead.
+    turn_runs = getattr(tool_executor, "runs", None) if tool_executor else None
+    completed = _completed_mutations(turn_runs)
+    if completed:
+        summary = _summarize_completed_mutations(completed)
+        if conv_id:
+            exchange_count = conversations.complete_exchange(
+                conv_id, user_text, summary,
+                "(no provider — reporting completed actions)",
+                extras=_extras_from_runs(turn_runs),
+            )
+            _spawn_title_update(conv_id, exchange_count)
+        _pending_turn[0] = None
+        return AskResult(True, text=summary, provider=None, attempts=attempts,
+                         assistant_name=assistant_name, address_user_as=address,
+                         degraded=True)
+
+    # The turn is still real — the user asked something and got nothing at
+    # all, not even a completed side effect — so it's recorded as such
+    # rather than left pending forever (a pending turn would otherwise be
+    # re-abandoned by the next process's interrupt handler and look like it
+    # was cancelled).
     if conv_id:
-        turn_runs = getattr(tool_executor, "runs", None) if tool_executor else None
         conversations.abandon_exchange(
             conv_id, user_text, reason="no provider answered",
             extras=_extras_from_runs(turn_runs),

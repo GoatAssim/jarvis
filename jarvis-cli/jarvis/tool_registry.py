@@ -67,6 +67,7 @@ TOOL_GROUPS = {
     ],
     "desktop": [
         "type_text",
+        "write_on_screen",
         "press_key",
         "hotkey",
         "scroll",
@@ -82,6 +83,7 @@ TOOL_GROUPS = {
         "get_window_info",
         "take_screenshot",
         "click_on_text",
+        "read_screen",
     ],
     "files": [
         "search_files",
@@ -235,11 +237,13 @@ TOOL_KEYWORDS = {
     "run_chain": {"chain": 6, "run these commands": 8},
 
     "type_text": {"type": 6, "keyboard": 5},
+    "write_on_screen": {"send message": 8, "type and send": 9, "send it": 6},
     "press_key": {"press": 5, "key": 4},
     "hotkey": {"hotkey": 9, "shortcut": 7},
     "take_screenshot": {"screenshot": 10, "screen shot": {"weight": 10, "not_with": ["recording", "record"]}, "capture screen": 8},
     "click": {"discord": 8, "click": 6},
     "click_on_text": {"click on": 6, "ocr": 8},
+    "read_screen": {"read the screen": 10, "what does the screen say": 9, "read screen": 10},
     "list_windows": {"windows": 5, "open windows": 8},
     "focus_window": {"focus": 5, "switch to window": 8, "window": 5, "chrome": 6, "firefox": 6},
 
