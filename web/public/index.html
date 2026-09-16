@@ -141,7 +141,36 @@
         <div class="console-actions">
           <button class="btn btn--ghost" id="btn-abort" type="button" hidden>ABORT</button>
           <button class="btn btn--ghost" id="btn-clear-console" type="button">Clear</button>
-          <button class="btn btn--ghost" id="btn-debug" type="button" title="Inspect and run every tool Jarvis can call">Debug</button>
+          <!-- Debug, Skills, Scheduled and MCP Servers used to be four
+               separate buttons crowded into this one row. They're grouped
+               behind one dropdown instead — same trigger, a short list of
+               destinations — modeled on the Ask panel's own provider-picker
+               dropdown just below (.panel-menu mirrors .provider-picker). -->
+          <div class="panel-menu" id="panel-menu">
+            <button class="btn btn--ghost" id="btn-panel-menu" type="button"
+                    aria-haspopup="true" aria-expanded="false"
+                    title="Debug tools, skills, scheduled tasks and reminders, and connected MCP servers">
+              Menu <span class="panel-menu__caret" aria-hidden="true">&#9662;</span>
+            </button>
+            <div class="panel-menu__list" id="panel-menu-list" role="menu" hidden>
+              <button class="panel-menu__item" id="menu-item-debug" type="button" role="menuitem">
+                <span class="panel-menu__item-label">Debug</span>
+                <span class="panel-menu__item-hint">Inspect and run every tool Jarvis can call</span>
+              </button>
+              <button class="panel-menu__item" id="menu-item-skills" type="button" role="menuitem">
+                <span class="panel-menu__item-label">Skills</span>
+                <span class="panel-menu__item-hint">Add, edit and remove skills</span>
+              </button>
+              <button class="panel-menu__item" id="menu-item-scheduled" type="button" role="menuitem">
+                <span class="panel-menu__item-label">Scheduled</span>
+                <span class="panel-menu__item-hint">Tasks, reminders and notifications</span>
+              </button>
+              <button class="panel-menu__item" id="menu-item-mcp" type="button" role="menuitem">
+                <span class="panel-menu__item-label">MCP Servers</span>
+                <span class="panel-menu__item-hint">External tools connected over MCP</span>
+              </button>
+            </div>
+          </div>
         </div>
       </div>
       <div class="console" id="console">
@@ -218,7 +247,10 @@
 
         <div class="ask-quote-bar" id="ask-quote-bar" hidden></div>
 
-        <form class="ask-input-row" id="ask-form">
+        <!-- Autocomplete for "/skillload <name>" / "/skillunload <name>" — see
+     app.js's updateSkillSuggest(). Positioned above the input row by CSS. -->
+<div class="skill-slash-suggest" id="skill-slash-suggest" hidden></div>
+<form class="ask-input-row" id="ask-form">
           <textarea id="ask-input" rows="1" placeholder="Ask Jarvis anything&hellip; highlight text above to quote it" maxlength="4000"></textarea>
           <button class="btn btn--ghost btn--icon" id="btn-ask-mic" type="button" title="Record a voice message">
             <svg class="mic-icon" id="mic-icon" viewBox="0 0 24 24" aria-hidden="true">
@@ -249,6 +281,176 @@
     <div class="ask-sel-pop" id="ask-sel-pop" hidden>
       <button type="button" id="ask-sel-quote">Quote</button>
       <button type="button" id="ask-sel-copy">Copy</button>
+    </div>
+  </div>
+</div>
+
+<!-- SKILLS MANAGER — tier-1/2/3 progressive disclosure, see jarvis/skills.py.
+     Only a skill's name + description live in the prompt; the body loads
+     on demand. The token readout below is the point of the whole design,
+     so it's shown rather than hidden. -->
+<!-- SCHEDULED — jobs, reminders, notifications. Own panel (separate from MCP,
+     which used to share this space) so each menu item opens exactly one
+     concern. Uses the shared .menu-overlay/.menu-panel chrome — the same
+     chrome the Debug and Ask panels use — rather than a bespoke look. -->
+<div class="menu-overlay" id="sched-overlay" hidden>
+  <div class="menu-panel">
+    <div class="panel__corner panel__corner--tl"></div>
+    <div class="panel__corner panel__corner--br"></div>
+
+    <div class="menu-panel__head">
+      <svg class="brand-mark" viewBox="0 0 40 40" aria-hidden="true">
+        <circle cx="20" cy="20" r="18" class="brand-mark__ring"/>
+        <circle cx="20" cy="20" r="11" class="brand-mark__ring brand-mark__ring--in"/>
+        <circle cx="20" cy="20" r="3" class="brand-mark__core"/>
+      </svg>
+      <div class="menu-panel__titles">
+        <div class="menu-panel__title">SCHEDULED</div>
+        <div class="menu-panel__subtitle" id="sched-status-line">reading schedule&hellip;</div>
+      </div>
+      <button class="btn btn--ghost btn--sm" id="btn-sched-tick" type="button" title="Fire everything that is due right now, without waiting for the next tick">Run due now</button>
+      <button class="modal__close" id="sched-close" type="button" aria-label="Close">&times;</button>
+    </div>
+
+    <div class="menu-body">
+      <section class="skills-pane skills-pane--list" aria-label="Scheduled jobs">
+        <div class="skills-pane__head"><h3>Jobs</h3></div>
+        <div class="skills-list" id="sched-list">
+          <div class="skills-empty">Loading&hellip;</div>
+        </div>
+      </section>
+
+      <section class="skills-pane skills-pane--editor" aria-label="Add a reminder">
+        <div class="skills-pane__head"><h3>Add a reminder</h3></div>
+        <div class="sched-add">
+          <input type="text" id="sched-when" placeholder="when — e.g. tomorrow at 9am, every weekday at 08:30" />
+          <input type="text" id="sched-message" placeholder="what to say" />
+          <button class="btn btn--primary btn--sm" id="btn-sched-add" type="button">Schedule</button>
+        </div>
+      </section>
+    </div>
+  </div>
+</div>
+
+<!-- MCP SERVERS — external tools connected over the Model Context Protocol.
+     Split out of the old combined Scheduled/MCP panel: scheduling and MCP
+     are unrelated concerns and each deserves its own menu entry. -->
+<div class="menu-overlay" id="mcp-overlay" hidden>
+  <div class="menu-panel">
+    <div class="panel__corner panel__corner--tl"></div>
+    <div class="panel__corner panel__corner--br"></div>
+
+    <div class="menu-panel__head">
+      <svg class="brand-mark" viewBox="0 0 40 40" aria-hidden="true">
+        <circle cx="20" cy="20" r="18" class="brand-mark__ring"/>
+        <circle cx="20" cy="20" r="11" class="brand-mark__ring brand-mark__ring--in"/>
+        <circle cx="20" cy="20" r="3" class="brand-mark__core"/>
+      </svg>
+      <div class="menu-panel__titles">
+        <div class="menu-panel__title">MCP SERVERS</div>
+        <div class="menu-panel__subtitle" id="mcp-status-line">reading servers&hellip;</div>
+      </div>
+      <button class="btn btn--ghost btn--sm" id="btn-mcp-refresh" type="button" title="Reconnect to every configured MCP server and re-read its tool list">Refresh</button>
+      <button class="modal__close" id="mcp-close" type="button" aria-label="Close">&times;</button>
+    </div>
+
+    <div class="menu-body menu-body--single">
+      <section class="skills-pane" aria-label="MCP servers">
+        <div class="skills-pane__head"><h3>Connected servers</h3></div>
+        <div class="skills-list" id="mcp-list">
+          <div class="skills-empty">Loading&hellip;</div>
+        </div>
+      </section>
+    </div>
+  </div>
+</div>
+
+<div class="menu-overlay" id="skills-overlay" hidden>
+  <div class="menu-panel">
+    <div class="panel__corner panel__corner--tl"></div>
+    <div class="panel__corner panel__corner--br"></div>
+
+    <div class="menu-panel__head">
+      <svg class="brand-mark" viewBox="0 0 40 40" aria-hidden="true">
+        <circle cx="20" cy="20" r="18" class="brand-mark__ring"/>
+        <circle cx="20" cy="20" r="11" class="brand-mark__ring brand-mark__ring--in"/>
+        <circle cx="20" cy="20" r="3" class="brand-mark__core"/>
+      </svg>
+      <div class="menu-panel__titles">
+        <div class="menu-panel__title">SKILLS</div>
+        <div class="menu-panel__subtitle" id="skills-status-line">reading skills&hellip;</div>
+      </div>
+      <button class="btn btn--ghost btn--sm" id="btn-skill-new" type="button">+ New</button>
+      <button class="btn btn--ghost btn--sm" id="btn-skill-import" type="button" title="Paste a SKILL.md, or give a folder/file path">Import</button>
+      <button class="modal__close" id="skills-close" type="button" aria-label="Close">&times;</button>
+    </div>
+
+    <div class="menu-body">
+      <section class="skills-pane skills-pane--list" aria-label="Installed skills">
+        <div class="skills-pane__head">
+          <h3>Installed</h3>
+          <span class="skills-cost" id="skills-cost" title="Tokens the skill catalog adds to every prompt. Only names and descriptions — instructions are not counted because they are not loaded.">&mdash;</span>
+        </div>
+        <div class="skills-list" id="skills-list">
+          <div class="skills-empty">Loading&hellip;</div>
+        </div>
+      </section>
+
+      <section class="skills-pane skills-pane--editor" aria-label="Skill editor">
+        <div class="skills-pane__head">
+          <h3 id="skill-editor-title">Editor</h3>
+          <div class="skills-pane__actions">
+            <button class="btn btn--primary btn--sm" id="btn-skill-save" type="button" disabled>Save</button>
+            <button class="btn btn--ghost btn--sm btn--danger" id="btn-skill-delete" type="button" disabled>Delete</button>
+          </div>
+        </div>
+
+        <div class="skills-editor" id="skills-editor" hidden>
+          <label class="skills-field">
+            <span>SKILL.md</span>
+            <textarea id="skill-content" spellcheck="false" placeholder="---&#10;name: My Skill&#10;description: One line — what it does and when to use it.&#10;---&#10;&#10;Instructions here."></textarea>
+          </label>
+          <div class="skills-hint" id="skill-hint">
+            The <code>description:</code> line is the only part Jarvis sees until the skill is loaded &mdash; write it as <em>when to use this</em>, not just what it is.
+          </div>
+          <div class="skills-refs" id="skill-refs" hidden></div>
+        </div>
+
+        <div class="skills-create" id="skills-create" hidden>
+          <label class="skills-field">
+            <span>Name</span>
+            <input type="text" id="skill-new-name" placeholder="Weekly Report" autocomplete="off">
+          </label>
+          <label class="skills-field">
+            <span>Description <em>(always in the prompt &mdash; keep it to one line)</em></span>
+            <input type="text" id="skill-new-desc" placeholder="Build the Monday status report. Use when asked for the weekly report." autocomplete="off">
+          </label>
+          <label class="skills-field skills-field--grow">
+            <span>Instructions <em>(loaded only when the skill is used)</em></span>
+            <textarea id="skill-new-body" spellcheck="false" placeholder="## Steps&#10;1. &hellip;"></textarea>
+          </label>
+          <button class="btn btn--primary" id="btn-skill-create" type="button">Create skill</button>
+        </div>
+
+        <div class="skills-import" id="skills-import" hidden>
+          <label class="skills-field">
+            <span>Upload a .zip <em>(a skill folder &mdash; scripts, reference docs, SKILL.md)</em></span>
+            <div class="skills-zip-row">
+              <input type="file" id="skill-import-zip" accept=".zip,application/zip">
+              <span class="skills-zip-name" id="skill-import-zip-name">No file selected.</span>
+            </div>
+          </label>
+          <div class="skills-hint">SKILL.md can sit at the top of the zip, or inside the one folder the zip contains &mdash; both work. Scripts and reference files travel with it and load only when needed.</div>
+          <label class="skills-field skills-field--grow">
+            <span>&hellip;or paste a SKILL.md, or enter a folder / file path</span>
+            <textarea id="skill-import-src" spellcheck="false" placeholder="---&#10;name: Imported&#10;description: &hellip;&#10;---&#10;&#10;&hellip;&#10;&#10;or:  C:\\Users\\me\\skills\\blender-render"></textarea>
+          </label>
+          <div class="skills-hint">Skills use Anthropic&rsquo;s SKILL.md format, so anything written for Claude, Copilot or Cursor imports as-is.</div>
+          <button class="btn btn--primary" id="btn-skill-install" type="button">Install skill</button>
+        </div>
+
+        <div class="skills-empty" id="skills-editor-empty">Select a skill on the left, or add one.</div>
+      </section>
     </div>
   </div>
 </div>
@@ -647,6 +849,9 @@
 
 <script src="https://cdn.jsdelivr.net/npm/marked@15/marked.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/dompurify@3/dist/purify.min.js"></script>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css">
+<script src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/contrib/auto-render.min.js"></script>
 <script src="app.js"></script>
 </body>
 </html>

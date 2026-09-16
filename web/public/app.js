@@ -1392,6 +1392,33 @@
     }
   }
 
+  // One place every notification is displayed, whichever path it arrived by
+  // (live stderr stream during an ask, or a WS push from the tick loop).
+  // Always shows an in-page toast; additionally raises a real OS
+  // notification when the tab isn't visible, since the whole point of a
+  // reminder is that it reaches you when you're not looking at Jarvis.
+  function showNotification(note) {
+    if (!note || (!note.title && !note.message)) return;
+    const title = String(note.title || "Jarvis").slice(0, 120);
+    const body = String(note.message || "").slice(0, 400);
+    const isFailure = Boolean(note.failed);
+    toast(`${title}${body ? " \u2014 " + body.slice(0, 160) : ""}`, isFailure ? "error" : "info");
+    if (!jarvisTabVisible() && "Notification" in window && Notification.permission === "granted") {
+      try {
+        // Tagged per notification id, not a shared tag: two reminders
+        // firing in the same tick must not collapse into one toast the way
+        // notifyIfAway's fixed "jarvis-task" tag deliberately does.
+        const n = new Notification(title, {
+          body,
+          tag: `jarvis-note-${note.id || Date.now()}`,
+        });
+        n.onclick = () => { window.focus(); n.close(); };
+      } catch {
+        /* private mode / unsupported */
+      }
+    }
+  }
+
   function notifyTaskDone(summary, failed) {
     const task = (state.lastTaskLabel || "that").replace(/\s+/g, " ").trim().slice(0, 42) || "that";
     const title = `Your task of doing ${task} is done sir`;
@@ -1511,6 +1538,12 @@
   }
 
   const Api = {
+    // Generic verbs, for endpoints whose call sites read better as a plain
+    // path than as another named wrapper (the scheduling/MCP panel builds
+    // per-job URLs like /api/scheduled/<id>/snooze). The named helpers below
+    // are still the right shape for anything called from several places.
+    get: (path) => api("GET", path),
+    post: (path, body) => api("POST", path, body),
     status: () => api("GET", "/api/status"),
     reconnect: () => api("POST", "/api/reconnect"),
     // Favorited commands: server-persisted (see server.js), independent of
@@ -2200,6 +2233,21 @@
 
   function handleWsMessage(msg) {
     switch (msg.type) {
+      case "notifications":
+        // Pushed from the server's tick loop, drained from the durable
+        // inbox (jarvis/notifier.py). These are notifications raised while
+        // this tab may not have been running anything at all -- a reminder
+        // that fired from cron, a scheduled task that finished overnight --
+        // so they arrive here rather than through any ask's stderr stream.
+        (msg.notifications || []).forEach(showNotification);
+        break;
+      case "scheduled-tick":
+        // Only refresh the panel if it's actually open; a background tick
+        // shouldn't cost a re-render nobody is looking at.
+        if ((msg.ran || []).length && typeof refreshScheduledPanel === "function") {
+          refreshScheduledPanel();
+        }
+        break;
       case "commands":
         applyCommandsFromServer(msg.commands);
         break;
@@ -2332,6 +2380,80 @@
   }
 
   // ===========================================================================
+  // ===========================================================================
+  // Math extraction — pulls $...$/$$...$$/\(...\)/\[...\] segments out of
+  // the raw text BEFORE marked.parse() ever sees them, and puts the exact
+  // original source back in after marked+DOMPurify have run. This is not
+  // optional politeness — two real bugs make it necessary, not just nice:
+  //
+  //  1. CommonMark's backslash-escape rule silently EATS the backslash in
+  //     \( and \[ (backslash followed by ASCII punctuation is "this is an
+  //     escaped literal", and the backslash is dropped from the output).
+  //     marked.parse("\\(x_B = 1\\)") produces "(x_B = 1)" — the escaped
+  //     delimiter marker is gone before KaTeX's auto-render ever runs
+  //     over the DOM, so \(...\)/\[...\] would silently never match.
+  //  2. A bare "*" or "_" inside $...$ is ordinary GFM emphasis syntax to
+  //     marked, which doesn't know it's looking at math. Confirmed:
+  //     marked.parse("$2*x + 3*y$") produces "$2<em>x + 3</em>y$" — real,
+  //     unremarkable LaTeX (any multiplication or subscript written
+  //     without spaces) silently corrupted, not a contrived edge case.
+  //
+  // Extracting first means marked and DOMPurify never see the LaTeX
+  // source at all — they see an opaque placeholder token instead — so
+  // neither can mangle it. KaTeX's auto-render then runs on the finished
+  // DOM as normal, seeing the exact original delimiters and content.
+  // ===========================================================================
+
+  // Private Use Area characters: valid anywhere in HTML text content,
+  // never produced by marked/DOMPurify's own output, so a placeholder
+  // built from them can't collide with anything either library emits.
+  const MATH_PLACEHOLDER_OPEN = "\uE000";
+  const MATH_PLACEHOLDER_CLOSE = "\uE001";
+
+  function extractMath(text) {
+    const stash = [];
+    const stow = (m) => {
+      stash.push(m);
+      return MATH_PLACEHOLDER_OPEN + (stash.length - 1) + MATH_PLACEHOLDER_CLOSE;
+    };
+    // Order matters: block forms first, so a later inline pattern can't
+    // tear a block delimiter in half (e.g. matching just the first "$" of
+    // a "$$" pair). Each is non-greedy and (for the dollar forms) barred
+    // from crossing a blank line, so a stray unmatched "$" earlier in a
+    // long reply can't swallow everything after it as one giant match.
+    let out = text.replace(/\$\$[\s\S]+?\$\$/g, stow);
+    out = out.replace(/\\\[[\s\S]+?\\\]/g, stow);
+    out = out.replace(/\$[^\n$]+?\$/g, stow);
+    out = out.replace(/\\\([^\n]+?\\\)/g, stow);
+    return { text: out, stash };
+  }
+  // Known, accepted trade-off — not unique to this implementation, every
+  // tool supporting bare $...$ inline math has the same ambiguity: two
+  // unrelated dollar amounts on one line with nothing else between them
+  // ("It costs $5 and $10") greedily reads as one inline math span.
+  // KaTeX (throwOnError: false, see renderMathIn) shows a small inline
+  // error for the resulting nonsense rather than crashing — the same
+  // failure mode every other $...$-based renderer accepts, not a reason
+  // to drop inline math support. \(...\)/\[...\] are unambiguous and
+  // never hit this.
+
+  function escapeHtml(s) {
+    return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  }
+
+  function restoreMath(html, stash) {
+    const re = new RegExp(MATH_PLACEHOLDER_OPEN + "(\\d+)" + MATH_PLACEHOLDER_CLOSE, "g");
+    return html.replace(re, (m, i) => {
+      const src = stash[Number(i)];
+      // src is about to be dropped back into an HTML string as literal
+      // text content, so it needs the same escaping marked's own text
+      // nodes already got — otherwise LaTeX containing < or > (e.g.
+      // "$a < b$") would be parsed as a stray HTML tag once this string
+      // is assigned to .innerHTML.
+      return src === undefined ? m : escapeHtml(src);
+    });
+  }
+
   // Markdown renderer (marked.js — loaded via CDN before this script)
   // ===========================================================================
 
@@ -2341,14 +2463,48 @@
       d.textContent = text;
       return d.innerHTML.replace(/\n/g, "<br>");
     }
-    const html = marked.parse(text, {
+    const { text: withPlaceholders, stash } = extractMath(text);
+    const html = marked.parse(withPlaceholders, {
       breaks: true,
       gfm: true,
     });
-    if (typeof DOMPurify !== "undefined") {
-      return DOMPurify.sanitize(html);
+    const clean = typeof DOMPurify !== "undefined" ? DOMPurify.sanitize(html) : html;
+    return stash.length ? restoreMath(clean, stash) : clean;
+  }
+
+  // KaTeX auto-render, applied to an element's rendered HTML AFTER
+  // marked+DOMPurify+restoreMath have run — a post-process pass over the
+  // DOM, which is what katex's own auto-render extension is built for: it
+  // walks an element's text nodes looking for $...$/$$...$$/\(...\)/\[...\],
+  // which by this point are back to their exact original source text
+  // (see extractMath's docstring for why that step has to happen first).
+  // Without this, a reply with math in it renders literal "\vec{OI}" and
+  // dollar signs instead of typeset math — this is what actually turns
+  // the LaTeX Jarvis is asked to write into math a person can read,
+  // rather than requiring the model to avoid math notation entirely.
+  //
+  // Silently a no-op if the CDN script failed to load (offline, blocked,
+  // whatever) — same graceful-degradation spirit as the `typeof marked
+  // === "undefined"` fallback above, math just stays as plain text
+  // instead of the whole bubble failing to render.
+  function renderMathIn(el) {
+    if (typeof renderMathInElement === "undefined" || !el) return;
+    try {
+      renderMathInElement(el, {
+        delimiters: [
+          { left: "$$", right: "$$", display: true },
+          { left: "\\[", right: "\\]", display: true },
+          { left: "$", right: "$", display: false },
+          { left: "\\(", right: "\\)", display: false },
+        ],
+        throwOnError: false,
+        // Code blocks/inline code are the one place a bare "$" is common
+        // and never meant as math (shell prompts, prices in examples).
+        ignoredTags: ["script", "noscript", "style", "textarea", "pre", "code"],
+      });
+    } catch (e) {
+      // Never let a malformed formula take the whole bubble down.
     }
-    return html;
   }
 
   // ===========================================================================
@@ -2743,6 +2899,33 @@
       case "confirm":
         if (item.data.resolved !== null) renderResolvedConfirmBubble(item.data);
         break;
+      case "presentFile":
+        // The replay half of the present_file fix. The live path reaches
+        // showAskPresentFile() from the JARVIS_MEDIA branch in
+        // addAskPromptTrace; this reaches the SAME function with the same
+        // field names (ai_client._extras_from_runs builds its data dict to
+        // match this signature deliberately), so a reloaded card is the
+        // card, not a lookalike rebuilt from different fields.
+        showAskPresentFile({
+          jobId: item.data.jobId || null,
+          filename: item.data.filename || null,
+          name: item.data.name || "",
+          type: item.data.type || "file",
+          sizeBytes: typeof item.data.sizeBytes === "number" ? item.data.sizeBytes : null,
+          path: item.data.path || "",
+        });
+        break;
+      case "devAgent":
+        // A replayed devAgent extra already has its complete `steps` array
+        // (persisted per ai_client._extras_from_runs — see §6 of the §3.6
+        // plan), so this builds the whole finished stepper in one pass —
+        // no incremental upsert needed, unlike the live path in
+        // addAskPromptTrace/upsertDevAgentCard below. Same
+        // renderDevAgentCard() either way so live and replayed never
+        // visually drift apart.
+        item.dom = renderDevAgentCard(item);
+        insertIntoAskThread(item.dom);
+        break;
     }
   }
 
@@ -2782,6 +2965,40 @@
           name, type: ftype, sizeBytes, path: fullPath,
         });
         askPromptLine(`$ present  ${name || fullPath}`, "tool");
+        return;
+      }
+      if (parts[1] === "notification" && parts[2]) {
+        // A scheduled job / reminder firing inside THIS ask's process (see
+        // jarvis/notifier.py's "stream" channel). Same three-field envelope
+        // and JSON-payload shape dev_agent uses, so it needs no change to
+        // the split("\t") dispatch around it.
+        let note;
+        try { note = JSON.parse(parts[2]); } catch { return; }
+        showNotification(note);
+        askPromptLine(`$ notify  ${note.title || ""}`, "tool");
+        return;
+      }
+      if (parts[1] === "dev_agent" && parts[2]) {
+        // dev_agent's progress events (see jarvis-cli/jarvis/dev_agent_events.py)
+        // don't fit present_file's fixed positional fields — the whole event
+        // is one JSON blob in parts[2] instead. Still exactly 3 tab-separated
+        // parts overall, so this still fits the plain line.split("\t") dispatch
+        // every other JARVIS_MEDIA branch above uses.
+        let event;
+        try { event = JSON.parse(parts[2]); } catch { return; }
+        const item = upsertDevAgentCard(event);
+        if (item && isViewingAskThread()) {
+          clearAskEmptyHint();
+          if (!item.dom) {
+            item.dom = renderDevAgentCard(item);
+            insertIntoAskThread(item.dom);
+          } else {
+            updateDevAgentCard(item);
+          }
+          askThreadScrollToEnd();
+        }
+        const detail = event.path || event.command || "";
+        askPromptLine(`$ dev_agent  ${event.phase}:${event.status}` + (detail ? `  ${detail}` : ""), "tool");
         return;
       }
     }
@@ -2979,6 +3196,199 @@
     ]);
     insertIntoAskThread(msg);
     askThreadScrollToEnd();
+  }
+
+  // ---------------------------------------------------------------------
+  // dev_agent — live-progress card (see jarvis-cli/jarvis/dev_agent_events.py
+  // and jarvis-cli/jarvis/actions/dev_agent.py). Progress events arrive as
+  // JARVIS_MEDIA\tdev_agent\t<json> lines on stderr (parsed in
+  // addAskPromptTrace above); the persisted replay shape is
+  // {jobId, ok, projectDir, steps} (ai_client._extras_from_runs' "devAgent"
+  // branch, §6 of the §3.6 plan). renderDevAgentCard/fillDevAgentCardBody
+  // are shared by both the live path (upsertDevAgentCard) and the replay
+  // path (renderThreadExtra's "devAgent" case) so the two never visually
+  // drift apart — same principle as §3.3's steps/live-stream identity.
+  // ---------------------------------------------------------------------
+
+  // Finds (or creates) this job's extra entry for the current conversation
+  // and appends the event to its steps — mirrors upsertConsoleExtra's
+  // find-or-create-by-bucket pattern, keyed additionally by job_id since a
+  // single turn could in principle run more than one dev_agent job.
+  function upsertDevAgentCard(event) {
+    const convId = state.askConversationId;
+    if (convId == null) return null;
+    const bucket = extraBucketFor(convId);
+    if (!state.threadExtrasByConv[convId]) state.threadExtrasByConv[convId] = [];
+    const arr = state.threadExtrasByConv[convId];
+    let item = arr.find((it) => it.type === "devAgent" && it.bucket === bucket && it.data.jobId === event.job_id);
+    if (!item) {
+      item = { bucket, type: "devAgent", data: { jobId: event.job_id, ok: null, projectDir: null, steps: [] } };
+      arr.push(item);
+    }
+    item.data.steps.push(event);
+    if (event.phase === "done") {
+      item.data.ok = event.status === "ok";
+      item.data.projectDir = event.project_dir || null;
+    }
+    return item;
+  }
+
+  function devAgentStatusGlyph(status) {
+    if (status === "ok") return "\u2713";
+    if (status === "fail") return "\u2717";
+    if (status === "start" || status === "progress" || status === "pending") return "\u22ef";
+    return "\u25cb";
+  }
+
+  const DEV_AGENT_PHASE_LABELS = { plan: "Plan", write: "Write", install: "Install", run: "Run", fix: "Fix", done: "Done" };
+  function devAgentPhaseLabel(phase) {
+    return DEV_AGENT_PHASE_LABELS[phase] || phase;
+  }
+
+  // One-line row summary built from a step event's own fields — different
+  // phases carry different fields (see dev_agent_events.py's event-shape
+  // table and the real per-phase field names in actions/dev_agent.py:
+  // write uses "path"/"bytes", not "file"/"bytes_written").
+  function devAgentStepSummary(e) {
+    const firstLine = (s) => (s || "").split("\n")[0];
+    switch (e.phase) {
+      case "plan": {
+        if (e.status === "ok") {
+          const nFiles = (e.files || []).length;
+          const nDeps = (e.dependencies || []).length;
+          return `${nFiles} file${nFiles === 1 ? "" : "s"}, ${nDeps} dep${nDeps === 1 ? "" : "s"}, run: ${e.run_command || ""}`;
+        }
+        if (e.status === "fail") return e.error || "planning failed";
+        return e.description || "";
+      }
+      case "write": {
+        if (e.status === "ok") return `${e.path || ""}  ${formatFileSize(e.bytes)}`;
+        if (e.status === "fail") return `${e.path || ""} \u2014 ${e.error || "write failed"}`;
+        return e.path || "";
+      }
+      case "install": {
+        const deps = (e.dependencies || []).join(", ");
+        if (e.status === "fail") return firstLine(e.stderr_tail) || "install failed";
+        if (e.status === "start") return deps || "no dependencies";
+        return deps || "nothing to install";
+      }
+      case "run": {
+        if (e.status === "start") return e.command || "";
+        if (e.status === "ok") return `exit ${e.exit_code}`;
+        return `exit ${e.exit_code}  \u2014 ${firstLine(e.stderr_tail)}`;
+      }
+      case "fix": {
+        const base = `attempt ${e.attempt}/${e.max_attempts}  ${e.classified_error || ""}`;
+        return e.note ? `${base} \u2014 ${e.note}` : base;
+      }
+      case "done": {
+        if (e.status === "ok") {
+          const n = e.total_attempts || 0;
+          return n ? `running \u2014 ${n} fix attempt${n === 1 ? "" : "s"}` : "running";
+        }
+        return firstLine(e.last_error) || e.reason || "gave up";
+      }
+      default:
+        return "";
+    }
+  }
+
+  // Groups the raw start/ok/fail event stream into one row per step —
+  // matching a "start" to its later "ok"/"fail" by phase (and, for write,
+  // by path — writes happen one file at a time, never interleaved, per
+  // _write_files' sequential loop, so the most recent open row for a key
+  // is always the right one to close). A fix row is flagged `nested` so
+  // it renders indented under the run row it followed.
+  function buildDevAgentRows(steps) {
+    const rows = [];
+    const open = {};
+    const keyFor = (e) => (e.phase === "write" ? `write:${e.path || ""}` : e.phase === "fix" ? `fix:${e.attempt}` : e.phase);
+    for (const e of steps || []) {
+      const key = keyFor(e);
+      if (e.status === "start") {
+        const row = { phase: e.phase, status: "pending", summary: devAgentStepSummary(e), event: e, nested: e.phase === "fix" };
+        rows.push(row);
+        open[key] = row;
+        continue;
+      }
+      const row = open[key];
+      if (row) {
+        row.status = e.status;
+        row.summary = devAgentStepSummary(e);
+        row.event = e;
+        delete open[key];
+      } else {
+        // "done" never has its own "start" event — and any other
+        // orphaned ok/fail still gets shown rather than silently dropped.
+        rows.push({ phase: e.phase, status: e.status, summary: devAgentStepSummary(e), event: e, nested: e.phase === "fix" });
+      }
+    }
+    return rows;
+  }
+
+  function renderDevAgentStepRow(row) {
+    const glyph = devAgentStatusGlyph(row.status);
+    const statusCls = row.status === "ok" ? "dev-agent-card__step--ok"
+      : row.status === "fail" ? "dev-agent-card__step--fail"
+      : "dev-agent-card__step--pending";
+    const cls = ["dev-agent-card__step", statusCls, row.nested ? "dev-agent-card__step--nested" : null]
+      .filter(Boolean).join(" ");
+    const rowEl = el("div", { class: cls }, [
+      el("span", { class: "dev-agent-card__step-glyph" }, glyph),
+      el("span", { class: "dev-agent-card__step-phase" }, devAgentPhaseLabel(row.phase)),
+      el("span", { class: "dev-agent-card__step-summary" }, row.summary || ""),
+    ]);
+    // A completed write row with a preview expands in place to show the
+    // truncated file content — reusing the console-dump bubble's <pre>
+    // styling family rather than inventing a new one.
+    if (row.phase === "write" && row.status === "ok" && row.event && row.event.preview) {
+      rowEl.classList.add("is-expandable");
+      rowEl.appendChild(el("pre", { class: "dev-agent-card__step-detail" }, row.event.preview));
+      rowEl.addEventListener("click", () => rowEl.classList.toggle("is-expanded"));
+    }
+    return rowEl;
+  }
+
+  function fillDevAgentCardBody(body, item) {
+    body.innerHTML = "";
+    for (const row of buildDevAgentRows(item.data.steps)) body.appendChild(renderDevAgentStepRow(row));
+    if (item.data.ok === true) {
+      body.appendChild(el("div", { class: "dev-agent-card__footer" },
+        item.data.projectDir ? `Project ready \u2014 ${item.data.projectDir}` : "Done."));
+    } else if (item.data.ok === false) {
+      const lastStep = item.data.steps[item.data.steps.length - 1] || {};
+      const lastError = lastStep.last_error ? String(lastStep.last_error).split("\n")[0] : "";
+      const note = item.data.projectDir
+        ? ` \u2014 the project folder is still here: ${item.data.projectDir}`
+        : "";
+      body.appendChild(el("div", { class: "dev-agent-card__footer dev-agent-card__footer--fail" },
+        (lastError || "gave up") + note));
+    }
+  }
+
+  // Builds a fresh card and fills it from item.data.steps as it stands
+  // right now — used both to insert the very first live row and to
+  // replay an already-finished job in one pass.
+  function renderDevAgentCard(item) {
+    clearAskEmptyHint();
+    const body = el("div", { class: "dev-agent-card__body" });
+    const msg = el("div", { class: "ask-msg ask-msg--jarvis ask-msg--dev-agent" }, [
+      el("div", { class: "ask-msg__role" }, currentAssistantName()),
+      el("div", { class: "ask-msg__bubble ask-msg__bubble--dev-agent" }, [
+        el("div", { class: "dev-agent-card__header" }, "dev_agent"),
+        body,
+      ]),
+    ]);
+    fillDevAgentCardBody(body, item);
+    return msg;
+  }
+
+  // Re-renders just this card's step list in place, not the whole thread.
+  function updateDevAgentCard(item) {
+    if (!item.dom) return;
+    const body = qs(".dev-agent-card__body", item.dom);
+    if (!body) return;
+    fillDevAgentCardBody(body, item);
   }
 
   function stripAnsi(s) {
@@ -3269,6 +3679,7 @@
     const bubble = qs(".ask-msg__bubble", state.askPendingBubble);
     bubble.innerHTML = renderMarkdown(reply.join("\n"));
     linkifyPaths(bubble);
+    renderMathIn(bubble);
   }
 
   function appendAskReplyLine(line) {
@@ -3310,6 +3721,7 @@
         const bubbleEl = qs(".ask-msg__bubble", bubble);
         bubbleEl.innerHTML = renderMarkdown(raw);
         linkifyPaths(bubbleEl);
+        renderMathIn(bubbleEl);
       }
       addAskMsgActions(bubble);
     }
@@ -3706,6 +4118,15 @@
     const text = input.value.trim();
     const quotes = state.askQuotes.slice();
     if (!text && quotes.length === 0) return;
+
+    const skillSlashMatch = quotes.length === 0 ? SKILL_SLASH_RE.exec(text) : null;
+    if (skillSlashMatch) {
+      input.value = "";
+      askInputAutoGrow(input);
+      hideSkillSuggest();
+      await handleSkillSlashCommand(skillSlashMatch[1].toLowerCase(), skillSlashMatch[2].trim());
+      return;
+    }
 
     const organizeMatch = quotes.length === 0 ? ORGANIZE_JSON_RE.exec(text) : null;
     if (organizeMatch) {
@@ -4603,7 +5024,352 @@
     debugOverlay.hidden = true;
   }
 
-  qs("#btn-debug").addEventListener("click", openDebug);
+  // ===========================================================================
+  // Skills manager — see jarvis-cli/jarvis/skills.py.
+  //
+  // A skill is a folder of markdown Jarvis loads ONLY when a task matches it.
+  // What's in the prompt at all times is one line per skill (name +
+  // description); the instructions cost nothing until load_skill is called.
+  // That's why the header shows a live token cost for the catalog: it's the
+  // only number that grows with skills-you-have rather than skills-you-use,
+  // so it's the one worth watching.
+  //
+  // Everything here goes through /api/skills/*, which proxies the dedicated
+  // `jarvis skills-*` commands — not /api/tools/run. The manager is a person
+  // editing their own files and shouldn't inherit the model-facing confirm
+  // gate on remove_skill.
+  // ===========================================================================
+  const skillsOverlay = qs("#skills-overlay");
+  const skillsList = qs("#skills-list");
+  const skillsStatus = qs("#skills-status-line");
+  const skillsCost = qs("#skills-cost");
+  const skillEditor = qs("#skills-editor");
+  const skillCreate = qs("#skills-create");
+  const skillImport = qs("#skills-import");
+  const skillEditorEmpty = qs("#skills-editor-empty");
+  const skillEditorTitle = qs("#skill-editor-title");
+  const skillContent = qs("#skill-content");
+  const skillRefs = qs("#skill-refs");
+  const btnSkillSave = qs("#btn-skill-save");
+  const btnSkillDelete = qs("#btn-skill-delete");
+
+  let skillsCache = [];
+  let selectedSkill = null;
+
+  function skillsPane(which) {
+    // Exactly one of editor / create / import is ever visible; the empty
+    // state shows only when none of them is.
+    skillEditor.hidden = which !== "editor";
+    skillCreate.hidden = which !== "create";
+    skillImport.hidden = which !== "import";
+    skillEditorEmpty.hidden = which !== "none";
+    const editing = which === "editor";
+    btnSkillSave.disabled = !editing;
+    btnSkillDelete.disabled = !editing;
+  }
+
+  function renderSkillsList() {
+    skillsList.innerHTML = "";
+    if (!skillsCache.length) {
+      const empty = document.createElement("div");
+      empty.className = "skills-empty";
+      empty.textContent = "No skills yet. \u201c+ New\u201d writes one, \u201cImport\u201d installs an existing SKILL.md.";
+      skillsList.appendChild(empty);
+      return;
+    }
+    for (const skill of skillsCache) {
+      const row = document.createElement("button");
+      row.type = "button";
+      row.className = "skill-row" + (selectedSkill === skill.name ? " is-active" : "")
+        + (skill.valid ? "" : " is-invalid");
+      const name = document.createElement("div");
+      name.className = "skill-row__name";
+      name.textContent = skill.name;
+      const desc = document.createElement("div");
+      desc.className = "skill-row__desc";
+      // An invalid skill is shown WITH its reason rather than hidden: a
+      // skill the user thinks they installed but that silently never loads
+      // is the worst possible failure mode for this feature.
+      desc.textContent = skill.valid
+        ? (skill.description || "")
+        : (skill.error || "Invalid skill.");
+      row.appendChild(name);
+      row.appendChild(desc);
+      if (skill.references && skill.references.length) {
+        const refs = document.createElement("div");
+        refs.className = "skill-row__refs";
+        refs.textContent = `${skill.references.length} reference file${skill.references.length === 1 ? "" : "s"}`;
+        row.appendChild(refs);
+      }
+      row.addEventListener("click", () => selectSkill(skill.name));
+      skillsList.appendChild(row);
+    }
+  }
+
+  async function loadSkills(selectAfter) {
+    try {
+      const data = await api("GET", "/api/skills");
+      skillsCache = data.skills || [];
+      const stats = data.stats || {};
+      skillsCost.textContent = `${stats.catalog_tokens || 0} tok in every prompt`;
+      // Keep the slash-command autocomplete's name list in sync whenever
+      // the manager refreshes (create/save/remove all call this) instead of
+      // only ever fetching it lazily on first keystroke.
+      skillNamesCache = skillsCache.map((s) => s.name);
+      skillsStatus.textContent = skillsCache.length
+        ? `${stats.valid || 0} of ${skillsCache.length} loadable \u00b7 instructions load on demand`
+        : "no skills installed";
+      renderSkillsList();
+      if (selectAfter) await selectSkill(selectAfter);
+    } catch (e) {
+      skillsStatus.textContent = "couldn't read skills";
+      toast(e.message || "Couldn't list skills.");
+    }
+  }
+
+  async function selectSkill(name) {
+    try {
+      const data = await api("GET", `/api/skills/${encodeURIComponent(name)}`);
+      selectedSkill = name;
+      skillContent.value = data.content || "";
+      skillEditorTitle.textContent = name;
+      const skill = skillsCache.find((s) => s.name === name);
+      const refs = (skill && skill.references) || [];
+      if (refs.length) {
+        skillRefs.hidden = false;
+        skillRefs.textContent = `Reference files (loaded one at a time, only when needed): ${refs.join(", ")}`;
+      } else {
+        skillRefs.hidden = true;
+      }
+      skillsPane("editor");
+      renderSkillsList();
+    } catch (e) {
+      toast(e.message || "Couldn't open that skill.");
+    }
+  }
+
+  qs("#btn-skill-save").addEventListener("click", async () => {
+    if (!selectedSkill) return;
+    try {
+      await api("PUT", `/api/skills/${encodeURIComponent(selectedSkill)}`, { content: skillContent.value });
+      toast("Skill saved.", "info");
+      await loadSkills(selectedSkill);
+    } catch (e) {
+      // The backend refuses a save whose frontmatter has no description,
+      // because that would leave a skill installed but permanently
+      // undiscoverable. Surface the reason instead of failing quietly.
+      toast(e.message || "Couldn't save.");
+    }
+  });
+
+  qs("#btn-skill-delete").addEventListener("click", async () => {
+    if (!selectedSkill) return;
+    if (!window.confirm(`Delete "${selectedSkill}" and everything in its folder? This can't be undone.`)) return;
+    try {
+      await api("DELETE", `/api/skills/${encodeURIComponent(selectedSkill)}`);
+      toast("Skill removed.", "info");
+      selectedSkill = null;
+      skillsPane("none");
+      await loadSkills();
+    } catch (e) {
+      toast(e.message || "Couldn't remove that skill.");
+    }
+  });
+
+  qs("#btn-skill-new").addEventListener("click", () => {
+    selectedSkill = null;
+    qs("#skill-new-name").value = "";
+    qs("#skill-new-desc").value = "";
+    qs("#skill-new-body").value = "";
+    skillEditorTitle.textContent = "New skill";
+    skillsPane("create");
+    renderSkillsList();
+  });
+
+  const skillImportZip = qs("#skill-import-zip");
+  const skillImportZipName = qs("#skill-import-zip-name");
+
+  qs("#btn-skill-import").addEventListener("click", () => {
+    selectedSkill = null;
+    qs("#skill-import-src").value = "";
+    skillImportZip.value = "";
+    skillImportZipName.textContent = "No file selected.";
+    skillEditorTitle.textContent = "Import skill";
+    skillsPane("import");
+    renderSkillsList();
+  });
+
+  skillImportZip.addEventListener("change", () => {
+    const file = skillImportZip.files && skillImportZip.files[0];
+    skillImportZipName.textContent = file
+      ? `${file.name} (${(file.size / 1024).toFixed(0)} KB)`
+      : "No file selected.";
+  });
+
+  qs("#btn-skill-create").addEventListener("click", async () => {
+    const name = qs("#skill-new-name").value.trim();
+    const description = qs("#skill-new-desc").value.trim();
+    const instructions = qs("#skill-new-body").value;
+    if (!name || !description || !instructions.trim()) {
+      toast("Name, description and instructions are all required.");
+      return;
+    }
+    try {
+      const created = await api("POST", "/api/skills", { mode: "create", name, description, instructions });
+      toast(`Created "${created.name || name}".`, "info");
+      await loadSkills(created.name || name);
+    } catch (e) {
+      toast(e.message || "Couldn't create that skill.");
+    }
+  });
+
+  // A zip skill (real scripts + several reference docs) doesn't fit the
+  // JSON path the paste/path form uses, so a selected file goes through the
+  // raw-body /api/skills/upload endpoint instead — same "which shape did
+  // the user give me" branch skills.add_skill() makes on the Python side,
+  // just decided one layer up here because a File object and a pasted
+  // string need genuinely different fetch() calls, not just different args.
+  qs("#btn-skill-install").addEventListener("click", async () => {
+    const file = skillImportZip.files && skillImportZip.files[0];
+    if (file) {
+      try {
+        const res = await fetch("/api/skills/upload", {
+          method: "POST",
+          headers: { "Content-Type": "application/zip" },
+          body: file,
+        });
+        let data = null;
+        try { data = await res.json(); } catch { /* no body */ }
+        if (!res.ok) throw new Error((data && data.error) || `Upload failed (${res.status})`);
+        toast(`Installed "${data.name || data.slug}".`, "info");
+        await loadSkills(data.name || data.slug);
+      } catch (e) {
+        toast(e.message || "Couldn't install that zip.");
+      }
+      return;
+    }
+    const source = qs("#skill-import-src").value;
+    if (!source.trim()) { toast("Upload a .zip, paste a SKILL.md, or give a path."); return; }
+    try {
+      const added = await api("POST", "/api/skills", { mode: "add", source });
+      toast(`Installed "${added.name || added.slug}".`, "info");
+      await loadSkills(added.name || added.slug);
+    } catch (e) {
+      toast(e.message || "Couldn't install that skill.");
+    }
+  });
+
+  function openSkills() {
+    skillsOverlay.hidden = false;
+    skillsPane("none");
+    selectedSkill = null;
+    loadSkills();
+  }
+
+  function closeSkills() {
+    skillsOverlay.hidden = true;
+  }
+
+  // ===========================================================================
+  // Manual skill loading — "/skillload <name>" / "/skillunload <name>" typed
+  // directly into the chat box, plus "/skillmake" / "/skilladd" as shortcuts
+  // that open the manager to the right pane. Recognized and handled locally,
+  // same "never sent to the model" pattern as ORGANIZE_JSON_RE just above.
+  // load/unload are the CLI's `jarvis skillload`/`skillunload` one layer up
+  // (see skill_stickiness.py) — this forces the skill's full instructions
+  // into every ask for this conversation until unloaded, rather than hoping
+  // the model calls its own load_skill tool.
+  // ===========================================================================
+  const SKILL_SLASH_RE = /^\/skill(load|unload|make|add)\b\s*(.*)$/i;
+  const SKILL_SUGGEST_RE = /^\/skill(load|unload)\s+(\S*)$/i;
+  let skillNamesCache = null;
+
+  async function ensureSkillNamesCache() {
+    if (skillNamesCache) return skillNamesCache;
+    try {
+      const data = await api("GET", "/api/skills");
+      skillNamesCache = (data.skills || []).map((s) => s.name);
+    } catch {
+      skillNamesCache = [];
+    }
+    return skillNamesCache;
+  }
+
+  function hideSkillSuggest() {
+    const box = qs("#skill-slash-suggest");
+    if (box) box.hidden = true;
+  }
+
+  async function updateSkillSuggest(text) {
+    const match = SKILL_SUGGEST_RE.exec(text);
+    const box = qs("#skill-slash-suggest");
+    if (!match || !box) { hideSkillSuggest(); return; }
+    const verb = match[1].toLowerCase();
+    const partial = match[2].toLowerCase();
+    const names = await ensureSkillNamesCache();
+    const hits = names.filter((n) => n.toLowerCase().includes(partial)).slice(0, 8);
+    if (!hits.length) { hideSkillSuggest(); return; }
+    box.innerHTML = "";
+    for (const name of hits) {
+      const item = document.createElement("button");
+      item.type = "button";
+      item.className = "skill-slash-suggest__item";
+      item.textContent = name;
+      // mousedown, not click: fires before the textarea's blur handler, so
+      // the suggestion lands in the input before hideSkillSuggest() (wired
+      // to blur, below) would otherwise race it and close the dropdown
+      // with nothing selected.
+      item.addEventListener("mousedown", (e) => {
+        e.preventDefault();
+        const input = qs("#ask-input");
+        input.value = `/skill${verb} ${name} `;
+        askInputAutoGrow(input);
+        input.focus();
+        hideSkillSuggest();
+      });
+      box.appendChild(item);
+    }
+    box.hidden = false;
+  }
+
+  qs("#ask-input").addEventListener("input", (e) => updateSkillSuggest(e.target.value));
+  qs("#ask-input").addEventListener("blur", () => setTimeout(hideSkillSuggest, 150));
+
+  async function handleSkillSlashCommand(verb, arg) {
+    // "make"/"add" don't take a meaningful single-line argument (a whole
+    // skill, or a folder/zip path, doesn't fit one chat line) — they just
+    // open the manager to the pane that handles them, same as clicking the
+    // toolbar buttons directly.
+    if (verb === "make") { openSkills(); qs("#btn-skill-new").click(); return; }
+    if (verb === "add") { openSkills(); qs("#btn-skill-import").click(); return; }
+    if (!arg) { toast(`Type a skill name: /skill${verb} <name>`); return; }
+    try {
+      if (verb === "load") {
+        const data = await api("POST", `/api/skills/${encodeURIComponent(arg)}/load`,
+          { conversationId: state.activeConversationId });
+        toast(`"${data.name || arg}" loaded for this chat \u2014 Jarvis will use it from the next reply on.`, "info");
+      } else {
+        const data = await api("DELETE", `/api/skills/${encodeURIComponent(arg)}/load`,
+          { conversationId: state.activeConversationId });
+        toast(`"${data.name || arg}" unloaded.`, "info");
+      }
+      skillNamesCache = null; // stale after add/remove elsewhere; cheap to just refetch next time
+    } catch (e) {
+      toast(e.message || `Couldn't ${verb} that skill.`);
+    }
+  }
+
+  // #btn-skills no longer exists (opening Skills now goes through the
+  // panel-menu dropdown's #menu-item-skills, wired further down) — only the
+  // close button and outside-click/Escape handling stay here.
+  qs("#skills-close").addEventListener("click", closeSkills);
+  skillsOverlay.addEventListener("click", (e) => { if (e.target === skillsOverlay) closeSkills(); });
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape" && !skillsOverlay.hidden) closeSkills();
+  });
+
+  // Same story as #btn-skills above: #btn-debug is gone, opening Debug goes
+  // through the panel-menu's #menu-item-debug instead.
   qs("#debug-close").addEventListener("click", closeDebug);
   debugOverlay.addEventListener("click", (e) => { if (e.target === debugOverlay) closeDebug(); });
   document.addEventListener("keydown", (e) => {
@@ -4980,6 +5746,7 @@
     const bubbleEl = qs(".ask-msg__bubble", msg);
     bubbleEl.innerHTML = renderMarkdown(text || "");
     linkifyPaths(bubbleEl);
+    renderMathIn(bubbleEl);
     addAskMsgActions(msg);
     askThread.appendChild(msg);
     return msg;
@@ -5936,4 +6703,242 @@
   tickClock();
   setInterval(tickClock, 1000);
   runBoot();
+
+  // -------------------------------------------------------------------------
+  // Scheduled panel — jobs and quick-add. MCP server status now lives in its
+  // own panel (see refreshMcpPanel/openMcp below) — the two used to share one
+  // overlay, but scheduling and MCP are unrelated concerns and each earns its
+  // own menu entry.
+  //
+  // Read-mostly on purpose. Creating anything that RUNS (a command, a tool, a
+  // full ask) is deliberately not offered here: those go through the approval
+  // gate (scheduler._needs_approval) and are far easier to express by asking
+  // Jarvis than by filling in a form. What this panel is for is seeing what's
+  // set, approving what's parked, and killing what you no longer want.
+  // -------------------------------------------------------------------------
+  const schedOverlay = qs("#sched-overlay");
+
+  async function refreshScheduledPanel() {
+    if (!schedOverlay || schedOverlay.hidden) return;
+    const list = qs("#sched-list");
+    const statusLine = qs("#sched-status-line");
+    try {
+      const data = await Api.get("/api/scheduled");
+      const jobs = data.jobs || [];
+      const counts = data.counts || {};
+      statusLine.textContent = jobs.length
+        ? `${jobs.length} active \u2014 ${counts.reminders || 0} reminder(s), ${counts.tasks || 0} task(s)` +
+          (counts.needs_approval ? `, ${counts.needs_approval} awaiting approval` : "")
+        : "nothing scheduled";
+      list.innerHTML = "";
+      if (!jobs.length) {
+        list.appendChild(el("div", { class: "skills-empty" }, "Nothing scheduled yet."));
+        return;
+      }
+      for (const job of jobs) list.appendChild(renderSchedJob(job));
+    } catch (err) {
+      statusLine.textContent = "couldn't read the schedule";
+      list.innerHTML = "";
+      list.appendChild(el("div", { class: "skills-empty" }, err.message || "Failed."));
+    }
+  }
+
+  function renderSchedJob(job) {
+    const meta = [job.kind, job.when, job.in ? `in ${job.in}` : null]
+      .filter(Boolean).join(" \u00b7 ");
+    const actions = [];
+    const act = (label, action, body) => {
+      const b = el("button", { class: "btn btn--ghost btn--sm", type: "button" }, label);
+      b.addEventListener("click", async () => {
+        b.disabled = true;
+        try {
+          await Api.post(`/api/scheduled/${job.id}/${action}`, body || {});
+          await refreshScheduledPanel();
+        } catch (err) {
+          toast(err.message || "That didn't work.");
+          b.disabled = false;
+        }
+      });
+      actions.push(b);
+    };
+    // Approve is only offered for a job actually waiting on it — showing it
+    // on everything would suggest every job needs approving, which would
+    // make the ones that genuinely do stop standing out.
+    if (job.needs_approval) act("Approve", "approve");
+    if (job.status === "paused") act("Resume", "resume");
+    else if (!job.needs_approval) act("Pause", "pause");
+    act("Snooze 10m", "snooze", { delay: "10 minutes" });
+    act("Cancel", "cancel");
+
+    return el("div", { class: "skills-item" + (job.needs_approval ? " is-warn" : "") }, [
+      el("div", { class: "skills-item__name" }, job.title || "(untitled)"),
+      el("div", { class: "skills-item__desc" }, meta),
+      job.last_error ? el("div", { class: "skills-item__desc" }, `last error: ${job.last_error}`) : null,
+      el("div", { class: "skills-item__actions" }, actions),
+    ].filter(Boolean));
+  }
+
+  function openScheduled() {
+    if (!schedOverlay) return;
+    schedOverlay.hidden = false;
+    ensureNotifPermission();
+    refreshScheduledPanel();
+  }
+
+  function closeScheduled() {
+    if (schedOverlay) schedOverlay.hidden = true;
+  }
+
+  qs("#sched-close")?.addEventListener("click", closeScheduled);
+  schedOverlay?.addEventListener("click", (e) => { if (e.target === schedOverlay) closeScheduled(); });
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape" && schedOverlay && !schedOverlay.hidden) closeScheduled();
+  });
+
+  qs("#btn-sched-add")?.addEventListener("click", async () => {
+    const when = qs("#sched-when").value.trim();
+    const message = qs("#sched-message").value.trim();
+    if (!when || !message) return toast("Both a time and a message are needed.");
+    try {
+      await Api.post("/api/scheduled", { when, message, kind: "reminder" });
+      qs("#sched-when").value = "";
+      qs("#sched-message").value = "";
+      toast("Scheduled.", "info");
+      refreshScheduledPanel();
+    } catch (err) {
+      // The server passes scheduler/timespec's own error text straight
+      // through, which is written to be read by a person ("couldn't read
+      // 'nexr tuesday' as a time — try ..."), so it's shown verbatim.
+      toast(err.data?.error || err.message || "Couldn't schedule that.");
+    }
+  });
+
+  qs("#btn-sched-tick")?.addEventListener("click", async () => {
+    try {
+      const result = await Api.post("/api/scheduled/tick", {});
+      const n = (result.ran || []).length;
+      toast(n ? `Ran ${n} job(s).` : "Nothing was due.", "info");
+      refreshScheduledPanel();
+    } catch (err) {
+      toast(err.message || "Tick failed.");
+    }
+  });
+
+  // -------------------------------------------------------------------------
+  // MCP Servers panel — its own menu entry, its own overlay. Read-mostly:
+  // servers are added by editing mcp_config.json by hand (see mcp_client.py's
+  // docstring on why that's a deliberate restriction), so the only action
+  // this panel offers is Refresh.
+  // -------------------------------------------------------------------------
+  const mcpOverlay = qs("#mcp-overlay");
+
+  async function refreshMcpPanel() {
+    if (!mcpOverlay || mcpOverlay.hidden) return;
+    const list = qs("#mcp-list");
+    const statusLine = qs("#mcp-status-line");
+    try {
+      const data = await Api.get("/api/mcp");
+      const servers = data.servers || [];
+      statusLine.textContent = servers.length
+        ? `${data.enabled_count || 0} enabled \u00b7 ${data.total_tools || 0} tool(s)` +
+          (data.needs_refresh ? " \u00b7 refresh recommended" : "")
+        : "no servers configured";
+      list.innerHTML = "";
+      if (!servers.length) {
+        list.appendChild(el("div", { class: "skills-empty" },
+          "No MCP servers configured. Add them in mcp_config.json, then Refresh."));
+        return;
+      }
+      for (const s of servers) {
+        const bits = [
+          s.enabled ? "enabled" : "disabled",
+          s.transport,
+          `${s.tool_count} tool(s)`,
+          s.trusted ? "trusted" : "confirm-gated",
+          s.stale ? "stale" : null,
+        ].filter(Boolean).join(" \u00b7 ");
+        list.appendChild(el("div", { class: "skills-item" + (s.error ? " is-warn" : "") }, [
+          el("div", { class: "skills-item__name" }, s.name),
+          el("div", { class: "skills-item__desc" }, bits),
+          s.error ? el("div", { class: "skills-item__desc" }, s.error) : null,
+        ].filter(Boolean)));
+      }
+    } catch (err) {
+      statusLine.textContent = "couldn't read MCP status";
+      list.innerHTML = "";
+      list.appendChild(el("div", { class: "skills-empty" }, err.message || "Failed."));
+    }
+  }
+
+  function openMcp() {
+    if (!mcpOverlay) return;
+    mcpOverlay.hidden = false;
+    refreshMcpPanel();
+  }
+
+  function closeMcp() {
+    if (mcpOverlay) mcpOverlay.hidden = true;
+  }
+
+  qs("#mcp-close")?.addEventListener("click", closeMcp);
+  mcpOverlay?.addEventListener("click", (e) => { if (e.target === mcpOverlay) closeMcp(); });
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape" && mcpOverlay && !mcpOverlay.hidden) closeMcp();
+  });
+
+  qs("#btn-mcp-refresh")?.addEventListener("click", async () => {
+    const btn = qs("#btn-mcp-refresh");
+    btn.disabled = true;
+    btn.textContent = "Refreshing\u2026";
+    try {
+      await Api.post("/api/mcp/refresh", {});
+      toast("MCP servers refreshed. Restart Jarvis for new tools to appear.", "info");
+      refreshMcpPanel();
+    } catch (err) {
+      toast(err.data?.error || err.message || "Refresh failed.");
+    } finally {
+      btn.disabled = false;
+      btn.textContent = "Refresh";
+    }
+  });
+
+  // -------------------------------------------------------------------------
+  // Panel-menu dropdown — one trigger for Debug / Skills / Scheduled / MCP
+  // Servers, replacing four buttons that used to sit side by side in the
+  // console header. Same open/close/outside-click/Escape pattern as the Ask
+  // panel's .provider-picker (see loadAiProviders et al. above).
+  // -------------------------------------------------------------------------
+  const panelMenuEl = qs("#panel-menu");
+  const panelMenuBtn = qs("#btn-panel-menu");
+  const panelMenuList = qs("#panel-menu-list");
+
+  function openPanelMenu() {
+    panelMenuList.hidden = false;
+    panelMenuBtn.setAttribute("aria-expanded", "true");
+  }
+
+  function closePanelMenu() {
+    panelMenuList.hidden = true;
+    panelMenuBtn.setAttribute("aria-expanded", "false");
+  }
+
+  panelMenuBtn?.addEventListener("click", () => {
+    if (!panelMenuList.hidden) return closePanelMenu();
+    openPanelMenu();
+  });
+
+  document.addEventListener("click", (e) => {
+    if (!panelMenuList.hidden && !panelMenuEl.contains(e.target)) closePanelMenu();
+  });
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape" && !panelMenuList.hidden) closePanelMenu();
+  });
+
+  // Each item opens its destination, then closes the dropdown — the menu
+  // itself is never the thing left on screen after a choice is made.
+  qs("#menu-item-debug")?.addEventListener("click", () => { closePanelMenu(); openDebug(); });
+  qs("#menu-item-skills")?.addEventListener("click", () => { closePanelMenu(); openSkills(); });
+  qs("#menu-item-scheduled")?.addEventListener("click", () => { closePanelMenu(); openScheduled(); });
+  qs("#menu-item-mcp")?.addEventListener("click", () => { closePanelMenu(); openMcp(); });
+
 })();

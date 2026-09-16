@@ -1,0 +1,736 @@
+"""dev_agent — plan/write/install/run/self-fix a small project from a
+plain-language description, in one tool call.
+
+See docs/section-3.6-dev-agent-implementation-plan.md for the full design.
+This file implements §4.1 (module-level auto-discovery contract), §4.2
+(schema), §4.3 (sandboxing, via dev_agent_sandbox.py), §4.4 (the
+plan→write→install→run→fix loop), §4.5 (result shape), and §4.6
+(planner/writer AI calls). tool_dev_agent is a real, working handler, not a
+placeholder.
+
+Still outstanding elsewhere in the codebase (not this file): §2's context
+injection (execute_tool/tool_loader/ai_client passing a real context object
+with emit_event/round_budget_remaining — this file already degrades
+gracefully when context is None or missing those attrs), §7's
+TOOL_RESULT_SPECS entry, and §8's tool_safety.DEFAULT_CONFIRM_REQUIRED
+addition. TOOL_CONFIRM_REQUIRED below covers this file's half of §8 but the
+belt-and-suspenders tool_safety.py-side addition still needs doing.
+"""
+
+import re
+import subprocess
+import sys
+import uuid
+from pathlib import Path
+
+from .. import dev_agent_errors, dev_agent_events, dev_agent_sandbox
+
+# NOTE: `ai_client`/`ai_config` are deliberately NOT imported here at
+# module level. dev_agent.py is loaded by tool_loader.discover_actions()
+# DURING tools.py's own module initialization (tools.py calls
+# discover_actions() partway through executing, before AUTO_TOOL_GROUPS/
+# AUTO_TOOL_KEYWORDS/etc. are defined at the bottom of that file). Since
+# ai_client -> tool_router -> tool_registry all import names FROM tools.py,
+# importing ai_client here at import time creates a circular import back
+# into a still-partially-initialized jarvis.tools -- which raises
+# ImportError, and discover_actions() logs that as "Rejected dev_agent.py"
+# and silently drops tool_dev_agent from the catalog entirely (no crash,
+# just a quiet rejection you only notice because the tool never shows up
+# anywhere -- CLI, debug menu, or otherwise).
+# ai_client/ai_config are only ever used inside function bodies below
+# (never at module scope), so importing them lazily, right where they're
+# needed, avoids the cycle completely: by the time a tool actually runs,
+# tools.py has long since finished initializing.
+
+CREATE_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+
+# Hard ceilings, not floors — see the max_attempts computation in
+# tool_dev_agent (§4.4) for how the *actual* per-call limits are derived
+# from whatever's left of the shared round budget.
+INSTALL_TIMEOUT = 180  # seconds; dependency installs (pip/npm) can be slow
+RUN_TIMEOUT = 30  # seconds; a generated project hanging shouldn't hang jarvis
+MAX_FIX_ATTEMPTS_CEILING = 5
+
+# ---------------------------------------------------------------------------
+# 4.1 Module-level contract (per tool_loader.py's convention)
+# ---------------------------------------------------------------------------
+
+
+def _new_job_id():
+    return uuid.uuid4().hex[:12]
+
+
+def _run_subprocess(argv, cwd, timeout):
+    """Run argv, capped/decoded the same way git_tools.tool_git_run and
+    pkg_tools._run already do (capture_output, decode with errors="replace",
+    CREATE_NO_WINDOW on Windows). Returns (ok, {"exit_code", "stdout_tail",
+    "stderr_tail"}) -- never raises; timeout and OSError both come back as
+    a non-ok result with an explanatory stderr_tail instead of propagating,
+    so a single bad step never takes the whole dev_agent call down.
+    """
+    try:
+        result = subprocess.run(
+            argv,
+            cwd=str(cwd),
+            capture_output=True,
+            timeout=timeout,
+            creationflags=CREATE_NO_WINDOW,
+        )
+    except subprocess.TimeoutExpired:
+        return False, {
+            "exit_code": None,
+            "stdout_tail": "",
+            "stderr_tail": f"timed out after {timeout}s",
+        }
+    except OSError as e:
+        return False, {"exit_code": None, "stdout_tail": "", "stderr_tail": str(e)}
+
+    stdout = (result.stdout or b"").decode("utf-8", errors="replace")
+    stderr = (result.stderr or b"").decode("utf-8", errors="replace")
+
+    def cap(s, n=4000):
+        s = (s or "").strip()
+        return s if len(s) <= n else s[-n:] + "\n...(truncated, showing tail)"
+
+    return result.returncode == 0, {
+        "exit_code": result.returncode,
+        "stdout_tail": cap(stdout),
+        "stderr_tail": cap(stderr, 2500),
+    }
+
+
+def _write_text_file(path, content):
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(content if content is not None else "", encoding="utf-8")
+    return path.stat().st_size
+
+
+# ---------------------------------------------------------------------------
+# 4.6 Planner/writer AI calls -- single non-tool-calling completions, same
+# adapter-call convention as ai_client.risk_review (see that function for
+# the pattern this mirrors: _resolve() a provider, call the adapter
+# directly with tools=None/tool_executor=None, never a nested ask()).
+# ---------------------------------------------------------------------------
+
+_PLAN_SYSTEM_PROMPT = (
+    "You are the planning/writing step of an autonomous coding agent. Given a "
+    "plain-language project description, respond with ONLY a single JSON object "
+    "(no markdown fences, no commentary before or after) of this exact shape:\n"
+    "{\n"
+    '  "files": ["relative/path/one.py", "relative/path/two.py"],\n'
+    '  "dependencies": ["package-name", ...],\n'
+    '  "run_command": "python main.py",\n'
+    '  "files_content": {"relative/path/one.py": "full file text", ...}\n'
+    "}\n"
+    "Rules: keep the project small and self-contained (prefer a single file "
+    "unless the description clearly needs more). dependencies are package "
+    "names only, installable via pip (Python) or npm (Node) -- never stdlib/"
+    "builtin modules. run_command must work with cwd already set to the "
+    "project directory (no cd, no absolute paths). files_content must have "
+    "exactly one entry per path listed in files, with the complete file "
+    "contents (no placeholders, no '...'). Prefer Python unless the "
+    "description or language_hint clearly calls for Node/JavaScript."
+)
+
+
+def _strip_fences(text):
+    """Strip a leading/trailing ```lang ... ``` fence if present. Shared by
+    _extract_json (JSON payloads) and _fix_one_file (raw file payloads) so
+    there's exactly one place that knows what "the model ignored the 'no
+    fences' instruction" looks like."""
+    s = (text or "").strip()
+    if s.startswith("```"):
+        s = re.sub(r"^```[a-zA-Z]*\n?", "", s)
+        s = re.sub(r"```\s*$", "", s)
+        s = s.strip()
+    return s
+
+
+def _extract_json(text):
+    """Defensive parse matching ai_client's own convention elsewhere: strip
+    a ```json ... ``` fence if present, then json.loads. Returns (obj, None)
+    or (None, error_string).
+
+    Two things make this more forgiving than a bare json.loads, because
+    both are extremely common ways a model's "JSON only" instruction gets
+    bent, not broken:
+      1. Leading/trailing prose around the object ("Here's the plan:\n{...}")
+         -- salvaged by slicing from the first '{' to the matching last '}'.
+      2. Literal, unescaped control characters (raw newlines/tabs) *inside*
+         a string value -- e.g. multi-line source code pasted into
+         files_content without escaping -- which strict json.loads rejects
+         outright. strict=False accepts these.
+    What this does NOT fix is a genuinely malformed document (e.g. a stray
+    unescaped '"' inside an HTML/JS string that ends the JSON string early)
+    -- that's still a real parse failure, and the caller (_ai_single_call,
+    via is_acceptable) is what actually recovers from that by discarding
+    this provider's response and trying the next provider/key rather than
+    failing the whole plan/fix step outright.
+    """
+    import json as _json
+
+    s = _strip_fences(text)
+    if s and not s.startswith("{"):
+        start = s.find("{")
+        end = s.rfind("}")
+        if start != -1 and end != -1 and end > start:
+            s = s[start:end + 1]
+
+    last_err = None
+    for strict in (True, False):
+        try:
+            return _json.loads(s, strict=strict), None
+        except ValueError as e:
+            last_err = e
+    return None, f"could not parse model output as JSON: {last_err}"
+
+
+def _ai_single_call(system_prompt, user_prompt, cfg=None, is_acceptable=None):
+    """One raw completion, trying every eligible configured provider (and
+    every key within each provider) in order until one succeeds --
+    structurally the same fallback ai_client.ask() does, just without
+    tool-calling. Returns (text, None) or (None, error_string) if every
+    provider/key was exhausted. Best-effort: any configuration/provider
+    failure comes back as an error string, never an exception -- the
+    caller turns that into a plan_failed/fix "fail" event, same as every
+    other failure branch in the loop.
+
+    is_acceptable, if given, is called as is_acceptable(text) -> (ok, reason)
+    on every response the adapter itself reported as successful. A provider
+    can fail the *adapter* call (network error, bad key, etc) -- that was
+    already handled below -- but it can just as easily succeed at the HTTP
+    level while returning garbage for what dev_agent actually needs (e.g.
+    unparseable JSON from the planner, or an empty string from the writer).
+    Before this hook existed, that second kind of failure was treated as a
+    final answer: the first provider tried "won" as soon as it returned any
+    non-empty text, even if that text was useless, and the whole plan/fix
+    step failed outright -- the only way to get a different provider to
+    have a go was for the user to re-run dev_agent from scratch (new job,
+    new sandbox, back to square one). Routing both kinds of failure through
+    the same errors/continue path means a single provider emitting broken
+    JSON is treated exactly like that provider being down: dev_agent just
+    moves on to the next key/provider *within this one call*, and only
+    gives up (returning the combined error string) once everything
+    configured has actually been tried.
+    """
+    try:
+        from .. import ai_client, ai_config  # see module-level NOTE above
+
+        cfg = cfg or ai_config.load_ai_config()
+        providers = ai_client._eligible_providers(cfg["providers"], cfg["defaults"])
+        if not providers:
+            return None, "no configured AI provider available for dev_agent's planner/writer call"
+
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt},
+        ]
+
+        errors = []
+        for provider in providers:
+            adapter = ai_client.ai_providers.ADAPTERS.get(provider.get("type"))
+            if adapter is None:
+                errors.append(f"{_provider_label_safe(ai_client, provider)}: no adapter for provider type {provider.get('type')!r}")
+                continue
+
+            # Ollama (or anything else with no configured keys but still
+            # eligible, i.e. local/no auth needed) gets exactly one pass
+            # with no key substituted -- same convention ai_client.ask()
+            # uses for multi-key providers.
+            keys = ai_config.provider_keys(provider) or [None]
+
+            for key in keys:
+                resolved = ai_client._resolve(provider, cfg["defaults"])
+                if key is not None:
+                    resolved["api_key"] = key
+                try:
+                    result = adapter(resolved, messages, resolved.get("timeout", ai_client.DEFAULT_TIMEOUT),
+                                      tools=None, tool_executor=None)
+                except Exception as e:  # one bad provider/key must never take down the whole call
+                    errors.append(f"{_provider_label_safe(ai_client, provider)}: unexpected error: {e}")
+                    continue
+
+                if result.ok and result.text:
+                    if is_acceptable is not None:
+                        ok, reason = is_acceptable(result.text)
+                        if not ok:
+                            errors.append(f"{_provider_label_safe(ai_client, provider)}: {reason}")
+                            continue
+                    return result.text, None
+                errors.append(f"{_provider_label_safe(ai_client, provider)}: "
+                               f"{getattr(result, 'error', None) or 'planner/writer call returned no text'}")
+
+        return None, "all configured providers failed for dev_agent's planner/writer call: " + "; ".join(errors)
+    except Exception as e:
+        return None, str(e)
+
+
+def _provider_label_safe(ai_client, provider):
+    """ai_client._provider_label() is a private helper but the natural
+    thing to reuse for per-attempt error labels here; wrapped so a future
+    rename in ai_client can't turn this into a hard crash, just a plainer
+    label."""
+    try:
+        return ai_client._provider_label(provider)
+    except Exception:
+        return provider.get("type", "unknown-provider")
+
+
+def _parse_and_validate_plan(text):
+    """Shared by _plan_project's is_acceptable hook (checked once per
+    provider/key, before committing to a response) and by _plan_project
+    itself (called once more on whichever response finally won) -- one
+    place that knows what a usable plan looks like. Returns (plan_dict,
+    None) or (None, error_string)."""
+    plan, err = _extract_json(text)
+    if err:
+        return None, err
+    if not isinstance(plan, dict):
+        return None, "planner response was valid JSON but not an object"
+    files = plan.get("files")
+    files_content = plan.get("files_content")
+    run_command = (plan.get("run_command") or "").strip()
+    if not isinstance(files, list) or not files:
+        return None, "planner response is missing a non-empty 'files' list"
+    if not isinstance(files_content, dict):
+        return None, "planner response is missing 'files_content'"
+    if not run_command:
+        return None, "planner response is missing 'run_command'"
+    missing = [f for f in files if f not in files_content]
+    if missing:
+        return None, f"planner listed files with no content: {missing}"
+    dependencies = plan.get("dependencies")
+    if not isinstance(dependencies, list):
+        dependencies = []
+    return {
+        "files": files,
+        "dependencies": [d for d in dependencies if isinstance(d, str) and d.strip()],
+        "run_command": run_command,
+        "files_content": {k: (v if isinstance(v, str) else "") for k, v in files_content.items()},
+    }, None
+
+
+def _plan_project(description, language_hint=None):
+    """One model call -> {"files": [...], "dependencies": [...],
+    "run_command": "...", "files_content": {...}}. See _PLAN_SYSTEM_PROMPT.
+    Returns (plan_dict, None) or (None, error_string).
+
+    Validation runs as an is_acceptable hook inside _ai_single_call, not
+    just after it returns: this is what lets a provider that emits
+    malformed/incomplete JSON get silently skipped in favor of the next
+    configured provider or key, in the same call, instead of that one bad
+    response becoming the job's final (failed) outcome.
+    """
+    user_prompt = f"Project description: {description}"
+    if language_hint:
+        user_prompt += f"\nLanguage hint: {language_hint}"
+
+    def is_acceptable(text):
+        plan, err = _parse_and_validate_plan(text)
+        return plan is not None, err
+
+    text, err = _ai_single_call(_PLAN_SYSTEM_PROMPT, user_prompt, is_acceptable=is_acceptable)
+    if err:
+        return None, err
+    return _parse_and_validate_plan(text)
+
+
+def _fix_one_file(target_file, current_content, stderr_tail, description):
+    """One model call asking for a corrected version of a single file.
+    Returns (new_content, None) or (None, error_string)."""
+    system_prompt = (
+        "You are the self-fix step of an autonomous coding agent. You will be "
+        "given one source file that failed to run, plus the error output. "
+        "Respond with ONLY the complete corrected file contents -- no markdown "
+        "fences, no explanation, no commentary. Keep the fix minimal and "
+        "consistent with the rest of the file's existing style."
+    )
+    user_prompt = (
+        f"Project description: {description}\n\n"
+        f"File: {target_file}\n\n"
+        f"Current content:\n{current_content}\n\n"
+        f"Error output when run:\n{stderr_tail}\n\n"
+        "Return the complete corrected file content, nothing else."
+    )
+    def is_acceptable(text):
+        if not _strip_fences(text):
+            return False, "writer model returned an empty fix"
+        return True, None
+
+    text, err = _ai_single_call(system_prompt, user_prompt, is_acceptable=is_acceptable)
+    if err:
+        return None, err
+    fixed = _strip_fences(text)
+    if not fixed:
+        return None, "writer model returned an empty fix"
+    return fixed, None
+
+
+# ---------------------------------------------------------------------------
+# 4.4 The loop -- _plan_project -> _write_files -> _install_dependencies ->
+# _run_project -> _fix_files
+# ---------------------------------------------------------------------------
+
+
+def _write_files(project_dir, files_content, emit):
+    """Write every planned file through dev_agent_sandbox.resolve_within,
+    emitting a write start/ok/fail event per file. A rejected/failed path
+    is skipped (not fatal to the whole job) -- same fault-tolerance
+    philosophy tool_loader.discover_actions already uses for a broken
+    action file (plan §4.3)."""
+    written = []
+    for rel_path, text in files_content.items():
+        emit("write", "start", path=rel_path)
+        try:
+            resolved = dev_agent_sandbox.resolve_within(project_dir, rel_path)
+        except ValueError as e:
+            emit("write", "fail", path=rel_path, error=str(e))
+            continue
+        try:
+            size = _write_text_file(resolved, text)
+        except OSError as e:
+            emit("write", "fail", path=rel_path, error=str(e))
+            continue
+        emit("write", "ok", path=rel_path, bytes=size, preview=(text or "")[:200])
+        written.append(rel_path)
+    return written
+
+
+def _detect_language(project_dir, plan):
+    """Cheap heuristic: presence of package.json means Node, anything else
+    (or a requirements.txt / .py file) defaults to Python -- matches
+    _plan_project's own "prefer Python unless clearly Node" instruction,
+    so the two stay consistent."""
+    if (project_dir / "package.json").exists():
+        return "node"
+    for rel_path in plan.get("files", []):
+        if rel_path.endswith(".js") or rel_path.endswith(".ts"):
+            return "node"
+    return "python"
+
+
+def _install_dependencies(project_dir, dependencies, plan):
+    """Installs are scoped to project_dir so a generated project can never
+    pollute or depend on jarvis's own interpreter environment (plan §5):
+    Python gets its own venv inside project_dir, Node gets its own
+    node_modules (npm's default, no extra work needed). Returns
+    (ok, out_dict) where out_dict has exit_code/stdout_tail/stderr_tail,
+    same shape _run_subprocess returns, so callers can **out_dict it
+    straight into an emit() call."""
+    language = _detect_language(project_dir, plan)
+
+    if language == "node":
+        if not dependencies:
+            return True, {"exit_code": 0, "stdout_tail": "", "stderr_tail": ""}
+        argv = ["npm", "install", *dependencies]
+        return _run_subprocess(argv, project_dir, INSTALL_TIMEOUT)
+
+    # python: create a venv inside the sandboxed project dir, then pip
+    # install into *that* interpreter -- never sys.executable/jarvis's own.
+    venv_dir = project_dir / ".venv"
+    venv_python = venv_dir / ("Scripts/python.exe" if sys.platform == "win32" else "bin/python")
+    if not venv_python.exists():
+        ok, out = _run_subprocess([sys.executable, "-m", "venv", str(venv_dir)], project_dir, INSTALL_TIMEOUT)
+        if not ok:
+            return False, out
+    if not dependencies:
+        return True, {"exit_code": 0, "stdout_tail": "", "stderr_tail": ""}
+    argv = [str(venv_python), "-m", "pip", "install", *dependencies]
+    return _run_subprocess(argv, project_dir, INSTALL_TIMEOUT)
+
+
+def _run_project(project_dir, run_command, plan=None):
+    """Launches run_command with cwd=project_dir and a hard RUN_TIMEOUT
+    (plan §5). If this is a Python project with its own venv, rewrite a
+    bare 'python'/'python3' leading token to the venv's interpreter so the
+    run actually sees the packages _install_dependencies just installed."""
+    argv = _shlex_split(run_command)
+    if not argv:
+        return False, {"exit_code": None, "stdout_tail": "", "stderr_tail": "empty run_command"}
+    if plan is not None and _detect_language(project_dir, plan) == "python" and argv[0] in ("python", "python3"):
+        venv_python = project_dir / ".venv" / ("Scripts/python.exe" if sys.platform == "win32" else "bin/python")
+        if venv_python.exists():
+            argv[0] = str(venv_python)
+    return _run_subprocess(argv, project_dir, RUN_TIMEOUT)
+
+
+def _shlex_split(command):
+    import shlex
+    try:
+        return shlex.split(command, posix=(sys.platform != "win32"))
+    except ValueError:
+        return command.split()
+
+
+def _fix_files(project_dir, target_file, stderr_tail, plan, description):
+    """One fix attempt. Branches on dev_agent_errors.classify's label:
+    missing_dependency -> add to plan["dependencies"] (no file edit, no
+    writer call -- the caller reinstalls and re-runs); everything else ->
+    ask the writer model for a corrected version of target_file (falling
+    back to the whole plan's file list if no target_file was identified)
+    and rewrite it through the sandbox. Returns (fixed_bool, note_str).
+    """
+    classified, guessed_target = dev_agent_errors.classify(stderr_tail)
+
+    if classified == "missing_dependency":
+        name = dev_agent_errors.missing_dependency_name(stderr_tail)
+        if not name:
+            return False, "missing_dependency classified but no package name could be extracted"
+        if name not in plan["dependencies"]:
+            plan["dependencies"].append(name)
+        return True, f"added missing dependency {name!r}; will reinstall and re-run"
+
+    target = target_file or guessed_target
+    if not target or target not in plan["files_content"]:
+        # No specific file identified (or it's not one we wrote) -- fall
+        # back to the first planned file, still better than giving up
+        # outright on an unrecognized error shape (plan §5, last bullet).
+        target = plan["files"][0] if plan.get("files") else None
+    if not target:
+        return False, "no target file to fix and no planned files to fall back to"
+
+    current = plan["files_content"].get(target, "")
+    fixed_content, err = _fix_one_file(target, current, stderr_tail, description)
+    if err:
+        return False, f"writer model failed: {err}"
+
+    try:
+        resolved = dev_agent_sandbox.resolve_within(project_dir, target)
+        _write_text_file(resolved, fixed_content)
+    except (ValueError, OSError) as e:
+        return False, f"could not write fix for {target}: {e}"
+
+    plan["files_content"][target] = fixed_content
+    return True, f"rewrote {target} ({classified})"
+
+
+def _final_result(job_id, steps, ok, project_dir, **extra):
+    return {
+        "ok": ok,
+        "job_id": job_id,
+        "project_dir": project_dir,
+        "steps": steps,
+        **extra,
+    }
+
+
+def tool_dev_agent(arguments, context=None):
+    """Plan, write, install, run, and self-fix a small project from a
+    plain-language description -- one tool call, live progress events,
+    a full step timeline in the result. See §4.4 of the implementation
+    plan for the design this mirrors almost line-for-line.
+
+    NEVER raises -- every failure branch below returns a well-formed
+    _final_result with ok=False and a reason, same contract as every
+    other tool handler (actions/_template.py §1).
+    """
+    arguments = arguments or {}
+    description = (arguments.get("description") or "").strip()
+    if not description:
+        return {"error": "description is required"}
+    language_hint = (arguments.get("language_hint") or "").strip() or None
+
+    job_id = _new_job_id()
+    steps = []
+    seq = [0]  # mutable cell so the emit closure below can increment it
+
+    def emit(phase, status, **fields):
+        if context is not None and getattr(context, "emit_event", None):
+            e = context.emit_event(job_id, seq[0], phase, status, **fields)
+        else:
+            # No context (e.g. called directly / from a test) -- still
+            # produce a well-formed event via the same emit() the context
+            # would have wrapped, just without the CLI-hook/stderr side
+            # effect a real context provides.
+            e = dev_agent_events.emit(job_id, seq[0], phase, status, **fields)
+        seq[0] += 1
+        steps.append(e)
+        return e
+
+    try:
+        project_dir = dev_agent_sandbox.new_project_dir(job_id, arguments.get("project_name"))
+    except OSError as e:
+        emit("plan", "fail", error=f"could not create project directory: {e}")
+        return _final_result(job_id, steps, ok=False, project_dir=None, reason="sandbox_failed", last_error=str(e))
+
+    emit("plan", "start", description=description[:300])
+    plan, err = _plan_project(description, language_hint)
+    if err:
+        emit("plan", "fail", error=err)
+        return _final_result(job_id, steps, ok=False, project_dir=str(project_dir), reason="plan_failed", last_error=err)
+    emit("plan", "ok", files=plan["files"], dependencies=plan["dependencies"], run_command=plan["run_command"])
+
+    _write_files(project_dir, plan["files_content"], emit)
+
+    if plan["dependencies"]:
+        emit("install", "start", dependencies=plan["dependencies"])
+        install_ok, install_out = _install_dependencies(project_dir, plan["dependencies"], plan)
+        emit("install", "ok" if install_ok else "fail", dependencies=plan["dependencies"], **install_out)
+        if not install_ok:
+            return _final_result(job_id, steps, ok=False, project_dir=str(project_dir),
+                                  reason="install_failed", last_error=install_out.get("stderr_tail"))
+
+    if context is not None and getattr(context, "round_budget_remaining", None):
+        try:
+            remaining = context.round_budget_remaining()
+        except Exception:
+            remaining = MAX_FIX_ATTEMPTS_CEILING
+    else:
+        remaining = MAX_FIX_ATTEMPTS_CEILING
+    max_attempts = min(MAX_FIX_ATTEMPTS_CEILING, max(1, remaining))
+    # dev_agent itself only ever consumes exactly ONE unit of the outer
+    # RoundBudget (it's one tool call from the model's point of view) --
+    # this local loop is internal to that single call, capped so a giveup
+    # here still leaves enough shared budget for the model to read the
+    # final result and answer in prose afterward (plan §4.4).
+
+    attempt = 0
+    emit("run", "start", command=plan["run_command"])
+    run_ok, run_out = _run_project(project_dir, plan["run_command"], plan)
+    emit("run", "ok" if run_ok else "fail", command=plan["run_command"], **run_out)
+
+    while not run_ok and attempt < max_attempts:
+        attempt += 1
+        classified, target_file = dev_agent_errors.classify(run_out.get("stderr_tail", ""))
+        emit("fix", "start", attempt=attempt, max_attempts=max_attempts,
+             classified_error=classified, target_file=target_file)
+        fixed, fix_note = _fix_files(project_dir, target_file, run_out.get("stderr_tail", ""), plan, description)
+        emit("fix", "ok" if fixed else "fail", attempt=attempt, max_attempts=max_attempts,
+             classified_error=classified, target_file=target_file, note=fix_note)
+        if not fixed:
+            break
+        if classified == "missing_dependency":
+            emit("install", "start", dependencies=plan["dependencies"])
+            install_ok, install_out = _install_dependencies(project_dir, plan["dependencies"], plan)
+            emit("install", "ok" if install_ok else "fail", dependencies=plan["dependencies"], **install_out)
+            if not install_ok:
+                return _final_result(job_id, steps, ok=False, project_dir=str(project_dir),
+                                      reason="install_failed", last_error=install_out.get("stderr_tail"))
+        emit("run", "start", command=plan["run_command"])
+        run_ok, run_out = _run_project(project_dir, plan["run_command"], plan)
+        emit("run", "ok" if run_ok else "fail", command=plan["run_command"], **run_out)
+
+    if run_ok:
+        emit("done", "ok", project_dir=str(project_dir), run_command=plan["run_command"], total_attempts=attempt)
+        return _final_result(job_id, steps, ok=True, project_dir=str(project_dir),
+                              run_command=plan["run_command"], total_attempts=attempt)
+
+    reason = "budget_exhausted" if attempt >= max_attempts and max_attempts < MAX_FIX_ATTEMPTS_CEILING else "max_attempts"
+    emit("done", "fail", project_dir=str(project_dir), reason=reason, last_error=run_out.get("stderr_tail"))
+    return _final_result(job_id, steps, ok=False, project_dir=str(project_dir),
+                          reason=reason, last_error=run_out.get("stderr_tail"))
+
+
+# TOOL_SCHEMAS — required. See §4.2 of the implementation plan.
+TOOL_SCHEMAS = [
+    {
+        "name": "dev_agent",
+        "description": (
+            "Plan, write, install dependencies for, run, and self-fix a small project from a "
+            "plain-language description — a bounded, self-correcting build loop, not a single "
+            "file edit. Use this instead of write_file/run_command/package_install by hand when "
+            "the user wants something runnable built from nothing (a script, a small web app, a "
+            "CLI tool). Requires user confirmation before anything is written or run. Streams "
+            "progress live; the final result includes the full step-by-step timeline."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "description": {
+                    "type": "string",
+                    "description": "Plain-language description of what to build.",
+                },
+                "project_name": {
+                    "type": "string",
+                    "description": (
+                        "Optional short slug for the project folder (letters/digits/hyphens "
+                        "only). If omitted, one is derived from the description."
+                    ),
+                },
+                "language_hint": {
+                    "type": "string",
+                    "description": (
+                        "Optional hint, e.g. 'python', 'node' — the planner AI call decides "
+                        "otherwise."
+                    ),
+                },
+            },
+            "required": ["description"],
+        },
+    },
+]
+
+# TOOLS — required. name -> handler, one entry per TOOL_SCHEMAS name.
+TOOLS = {
+    "dev_agent": tool_dev_agent,
+}
+
+# TOOL_GROUP — required. Brand-new group (nothing existing fits "plans and
+# runs a whole project"), so TOOL_KEYWORDS below is not optional — see
+# tool_loader.py's "Why TOOL_KEYWORDS is not really optional" docstring
+# section: a new group with no keyword coverage is only ever reachable via
+# search_tools's low-confidence fallback.
+TOOL_GROUP = "dev_agent"
+
+# TOOL_KEYWORDS — weights follow the real convention already used across
+# tool_registry.TOOL_KEYWORDS (see e.g. take_screenshot: 10, web_search's
+# "search the web": 10, run_command's "run": 4) where a phrase only counts
+# as real signal at tool_router.MIN_SCORE (5) or above. NOTE: the
+# implementation-plan doc's own §4.1 draft used weights of 1–3, which
+# would never clear MIN_SCORE and would make this group permanently
+# unroutable except through search_tools — that looks like exactly the
+# "forgot to add real keywords" case tool_loader.py's discovery warning
+# exists to catch, so the weights below are corrected to be >= 5 while
+# keeping the same phrases the plan called for.
+TOOL_KEYWORDS = {
+    "dev_agent": {
+        "build me a": 9,
+        "build an app": 9,
+        "make me an app": 9,
+        "scaffold a project": 9,
+        "create a small app": 8,
+        "write a script that": 6,
+        "code me": 7,
+        "program":5,
+        "project":5,
+        "make":6,
+        # NOTE: "make a", "change", "program", and "project" were removed
+        # here — they're generic enough to match unrelated requests
+        # ("make a note", "change my wallpaper", "what's my program
+        # schedule") and would misroute them into dev_agent at a
+        # score above tool_router.MIN_SCORE. Keep additions to phrases
+        # that are specific to "build me a whole runnable project."
+    },
+}
+
+# TOOL_PACK_INSTRUCTION — one short line of workflow guidance for a
+# brand-new group (see actions/_template.py §3).
+TOOL_PACK_INSTRUCTION = (
+    "dev_agent plans, writes, installs, runs, and self-fixes a whole small project from a "
+    "plain-language description, in one call. Prefer it over write_file+run_command by hand "
+    "whenever the user wants a runnable project built from scratch, not a single file edited."
+)
+
+# TOOL_CONFIRM_REQUIRED — belt-and-suspenders: dev_agent writes files and
+# runs a process, so it defaults to confirm_required=True the same way
+# write_file/run_command/package_install do. This is also added to
+# tool_safety.DEFAULT_CONFIRM_REQUIRED directly (§8 of the plan, not yet
+# done in this pass) so the gate holds even for someone who only reads
+# tool_safety.py and never opens this file. Deliberately NOT a model-fillable
+# "confirm" parameter on the schema above — confirmation is enforced by
+# ai_client._make_tool_executor calling tool_safety.requires_confirmation(name)
+# before the tool runs at all, the same real out-of-band gate every other
+# confirm-gated tool uses (see §4.2's note and §2.3 of the plan).
+TOOL_CONFIRM_REQUIRED = {"dev_agent"}
+
+# TOOL_AI_REVIEW — left empty for the first cut, same as the plan; nothing
+# here rules out turning this on later once real usage shows it's worth a
+# second AI's risk opinion before the confirmation prompt.
+TOOL_AI_REVIEW = set()
+
+# TOOL_RESULT_SPECS — deferred to §7 of the plan, once the real result
+# shape (§4.5's steps=[...] timeline) exists to shape. Left empty here
+# rather than guessed at, since a wrong shape spec is worse than none (it
+# would silently truncate fields nothing has decided are safe to drop yet).
+TOOL_RESULT_SPECS = {}

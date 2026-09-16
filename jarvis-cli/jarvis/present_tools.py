@@ -186,6 +186,19 @@ def present_file(arguments):
         "path": str(path),
         "size_bytes": size_bytes,
         "note": base_note,
+        # job_id/download_filename are returned (not just emitted on the
+        # JARVIS_MEDIA line above) so ai_client._extras_from_runs can persist
+        # this card alongside the exchange. Before this, present_file was the
+        # only media-producing tool whose card existed ONLY in the live
+        # stream: it drew fine while the ask was running and then vanished on
+        # the next page reload, because nothing had ever written it down.
+        #
+        # They cost the model two short strings it has no use for, so
+        # tool_result_shaping.TOOL_RESULT_SPECS drops both at medium/low
+        # verbosity — extras is built from the full pre-shaping result (see
+        # _make_tool_executor's ordering), so replay keeps them either way.
+        "job_id": job_id,
+        "download_filename": download_filename,
     }
     if download_note:
         result["download_note"] = download_note

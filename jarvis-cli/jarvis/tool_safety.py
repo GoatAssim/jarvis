@@ -35,6 +35,8 @@ ENCODING = "utf-8"
 # spotify_search, search_commands, ...) default to False for both flags —
 # an explicit entry in tool_safety.json always overrides these.
 DEFAULT_CONFIRM_REQUIRED = {
+    # Deletes a skill folder and everything in it, with no undo.
+    "remove_skill",
     "write_file",
     "run_command",
     "run_chain",
@@ -48,8 +50,15 @@ DEFAULT_CONFIRM_REQUIRED = {
     "wifi_set",
     "bluetooth_set",
     "git_run",
+    "dev_agent",  # §3.6 plan §8 — belt-and-suspenders on top of actions/dev_agent.py's own
+                  # TOOL_CONFIRM_REQUIRED, so the confirm-required gate holds even for a
+                  # reader who only checks this top-level default set.
     "ytdl_download",
     "type_text",
+    "write_on_screen",  # types AND submits — same input-injection risk as
+                        # type_text plus it actually sends the result, so it
+                        # gets the same confirm-required default rather than
+                        # inheriting a laxer one by omission.
     "press_key",
     "hotkey",
     "click",
