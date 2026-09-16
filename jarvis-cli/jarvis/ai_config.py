@@ -57,6 +57,23 @@ appended if it isn't already in the list) \u2014 provider_keys() below is the
 one place that normalizes this, so nothing else in the codebase needs to
 care which form a given config file happens to use.
 
+Prompt caching is configured under "defaults" and can be overridden per
+provider (the same key inside a "providers" block wins for that provider):
+
+    "prompt_cache": true            master switch
+    "prompt_cache_ttl": "5m"        or "1h" — Anthropic breakpoint lifetime
+    "prompt_cache_tools": false     Anthropic: extra breakpoint on tools
+    "prompt_cache_key": true        OpenAI/Groq family: routing hint
+    "gemini_explicit_cache": false  Gemini: cachedContents API vs free implicit
+    "ollama_keep_alive": "30m"      Ollama: model residency
+
+There is nothing to turn on to make this work — ai_client already puts the
+static half of the system prompt first and the per-request half last, which
+is the part that actually matters, since every provider caches a byte-prefix
+and anything that changes early invalidates everything after it. The knobs
+above only tune what happens on top of that. See prompt_cache.py's module
+docstring for what each provider does and why the defaults are what they are.
+
 "defaults.tools_enabled" (default true) turns Jarvis's built-in system-
 info tools (battery, wifi, location, date/time, disk, memory \u2014 see
 tools.py) on or off globally. They're read-only and cost nothing extra
@@ -101,6 +118,36 @@ DEFAULT_AI_CONFIG = {
         "compact_history_char_budget": 4800,
         "compact_history_exchanges": 10,
         "prompt_mode": "compact",
+        # --- Prompt caching (see prompt_cache.py) -------------------------
+        # Every provider jarvis talks to caches a byte-PREFIX of the request.
+        # These knobs are all overridable per provider: put the same key in a
+        # "providers" block below and it wins for that provider only.
+        "prompt_cache": True,
+        "prompt_cache_ttl": "5m",
+        # Anthropic only: a SECOND breakpoint on the tools array. Off by
+        # default because a cache write that's never read costs 1.25x, and
+        # the tool list is the part of the prefix most likely to differ
+        # between two asks (a different router group = a different list).
+        # The system breakpoint already covers tools whenever they are
+        # stable, which is the case that actually pays.
+        "prompt_cache_tools": False,
+        # OpenAI-family (openai/groq/xai/mistral/deepseek/openrouter): send a
+        # stable per-conversation routing hint so repeat asks land on the
+        # same backend node. Harmless on hosts that ignore unknown fields;
+        # set false for a strict self-hosted or proxied endpoint.
+        "prompt_cache_key": True,
+        # Gemini: false (default) uses the FREE implicit cache, which needs
+        # no extra request. True uses the cachedContents API — guaranteed
+        # discount, but costs a POST before the first generateContent plus
+        # storage billing, so it only pays when the same prefix is reused a
+        # lot (see gemini_cache_store.py).
+        "gemini_explicit_cache": False,
+        # Ollama: how long to keep the model resident. Ollama dumps its KV
+        # prefix cache when it unloads, which it does after 5 minutes idle by
+        # default — and jarvis is a fresh process per call, often with gaps,
+        # so that default means a cold prefill on most asks. Costs VRAM on
+        # your own machine and nothing else. "0" restores unload-immediately.
+        "ollama_keep_alive": "30m",
     },
     "providers": [
         {

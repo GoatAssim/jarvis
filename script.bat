@@ -55,6 +55,15 @@ call :find_jarvis
 if errorlevel 1 exit /b 1
 echo [admin] Copying %CLI_NAME%.exe to Program Files...
 if not exist "%INSTALL_DIR%" mkdir "%INSTALL_DIR%"
+if /i "!JARVIS_EXE!"=="%INSTALLED_EXE%" (
+    echo ERROR: Detected source and destination are the same file:
+    echo   !JARVIS_EXE!
+    echo Refusing to delete-then-copy from itself. This means find_jarvis
+    echo couldn't locate a real freshly-built exe outside %INSTALL_DIR% --
+    echo re-run the build without deleting the old install first.
+    pause
+    exit /b 1
+)
 call :cleanup_stale_exe
 del /f /q "%INSTALLED_EXE%" 2>nul
 copy /y "!JARVIS_EXE!" "%INSTALLED_EXE%"
@@ -84,8 +93,37 @@ echo Persona's CLI command will be: %CLI_NAME%
 echo (config still lives in %%USERPROFILE%%\.jarvis regardless of the above)
 echo.
 
+echo [1.5/5] Bumping build number...
+set "BUMP_OUTPUT=%TEMP%\jarvis_build_num_%RANDOM%.txt"
+"%PYEXE%" "%JARVIS_CLI%\build_tools\bump_build_version.py" > "%BUMP_OUTPUT%"
+if errorlevel 1 (
+    del /f /q "%BUMP_OUTPUT%" 2>nul
+    echo WARNING: Could not bump build number ^(non-fatal^) -- version display may be stale.
+) else (
+    rem stdout contract is "<number> <hash>" -- see bump_build_version.py.
+    rem The number only actually changes when jarvis-cli/jarvis/ source
+    rem itself changed since the last build; re-running with no source
+    rem edits reports the SAME number/hash on purpose.
+    for /f "usebackq tokens=1,2" %%A in ("%BUMP_OUTPUT%") do (
+        set "BUILD_NUM=%%A"
+        set "BUILD_HASH=%%B"
+    )
+    del /f /q "%BUMP_OUTPUT%" 2>nul
+    echo This build: #!BUILD_NUM! ^(src !BUILD_HASH:~0,12!^)
+)
+echo.
+
 echo [2/5] Installing CLI as "%CLI_NAME%"...
-"%PYEXE%" -m pip install .
+rem --force-reinstall is required here: plain `pip install .` only checks
+rem name==version against what's already installed and silently no-ops if
+rem that already matches -- it does NOT diff source file contents/timestamps.
+rem Since this project's version string doesn't bump on every code change,
+rem without this flag every run after the first would install NOTHING, and
+rem you'd keep running a stale exe while every step above still reports
+rem "success". --no-deps keeps this fast by skipping the (unchanged) dependency
+rem tree -- if pyproject.toml's dependencies themselves changed, run a plain
+rem "%PYEXE%" -m pip install . (no flags) once to pick those up too.
+call "%PYEXE%" -m pip install . --force-reinstall --no-deps
 if errorlevel 1 goto err_pip
 echo.
 
@@ -98,6 +136,19 @@ echo.
 echo [4/5] Updating Program Files copy...
 set "INSTALLED_EXE=%INSTALL_DIR%\%CLI_NAME%.exe"
 call :install_program_files
+echo.
+
+echo [4.5/5] Verifying PATH's %CLI_NAME% matches this build...
+rem This is the ACTUAL check, not the version display -- it asks the OS
+rem to resolve "%CLI_NAME%" through PATH exactly like a plain invocation
+rem would (which can differ from !JARVIS_EXE! above -- that's whichever
+rem venv/scripts-dir copy find_jarvis picked, not necessarily what PATH
+rem itself resolves to), runs its `version` output, and compares the
+rem source hash it reports against jarvis-cli/jarvis/ on disk right now.
+rem Non-fatal by design: a mismatch here means "you're not about to run
+rem what you just built", which is worth a loud warning, but shouldn't
+rem block the web server from starting.
+"%PYEXE%" "%JARVIS_CLI%\build_tools\verify_exe.py" "%CLI_NAME%"
 echo.
 
 echo [5/5] Starting web server...
@@ -119,9 +170,6 @@ rem     wires that resolver into the build.
 :sync_entry_point
 set "CLI_NAME="
 set "SYNC_OUTPUT=%TEMP%\jarvis_cli_name_%RANDOM%.txt"
-
-echo [debug] PYEXE=%PYEXE%
-echo [debug] SCRIPT=%JARVIS_CLI%\build_tools\sync_entry_point.py
 
 "%PYEXE%" "%JARVIS_CLI%\build_tools\sync_entry_point.py" > "%SYNC_OUTPUT%"
 if errorlevel 1 (
@@ -155,24 +203,50 @@ set "JARVIS_EXE="
 rem Check the project's own .venv first, if present -- this is where pip
 rem installs the CLI when script.bat is run with a project venv active
 rem (e.g. a Python 3.12 venv kept around for packages like torch that
-rem don't yet support newer Pythons). Falls through to the hardcoded
-rem global-Python paths below if no venv exists or it lacks the exe.
+rem don't yet support newer Pythons).
 if defined VENV_SCRIPTS if exist "%VENV_SCRIPTS%\%CLI_NAME%.exe" set "JARVIS_EXE=%VENV_SCRIPTS%\%CLI_NAME%.exe" & goto find_jarvis_ok
-for %%P in (
-    "%LOCALAPPDATA%\Python\pythoncore-3.14-64\Scripts\%CLI_NAME%.exe"
-    "%LOCALAPPDATA%\Python\Python314\Scripts\%CLI_NAME%.exe"
-    "%APPDATA%\Python\Python314\Scripts\%CLI_NAME%.exe"
-    "%USERPROFILE%\AppData\Local\Programs\Python\Python314\Scripts\%CLI_NAME%.exe"
-    "%USERPROFILE%\AppData\Local\Programs\Python\Python313\Scripts\%CLI_NAME%.exe"
-) do if exist "%%~P" set "JARVIS_EXE=%%~P" & goto find_jarvis_ok
+
+rem No venv (or venv copy missing) -- ask the SAME python we just ran
+rem `pip install .` with (whatever %PYEXE% resolved to, e.g. plain
+rem "python" on PATH) where IT puts console-script exes. This logic lives
+rem in build_tools\find_cli_exe.py (base scripts dir + the correct
+rem per-user "nt_user" scheme dir, newest mtime wins if both exist) --
+rem see that file's docstring for why it's not an inline one-liner here:
+rem short version, an inline `python -c "..."` with its own parentheses
+rem inside a `for /f` backtick command substitution is a real cmd.exe
+rem parser landmine, and a plain hardcoded-location fallback is exactly
+rem how an OLD exe keeps getting picked over the real freshly-built one.
+set "PY_SCRIPTS="
+set "FIND_EXE_OUTPUT=%TEMP%\jarvis_find_exe_%RANDOM%.txt"
+"%PYEXE%" "%JARVIS_CLI%\build_tools\find_cli_exe.py" "%CLI_NAME%" > "%FIND_EXE_OUTPUT%" 2>nul
+if not errorlevel 1 set /p "PY_SCRIPTS="<"%FIND_EXE_OUTPUT%"
+del /f /q "%FIND_EXE_OUTPUT%" 2>nul
+if defined PY_SCRIPTS if exist "%PY_SCRIPTS%" set "JARVIS_EXE=%PY_SCRIPTS%" & goto find_jarvis_ok
+
+rem Last-resort fallback: whatever's on PATH. No more hardcoded
+rem version-number guesses here -- those are exactly what kept matching
+rem a stale exe instead of the real (possibly user-scoped) install.
+rem
+rem SAFETY: %INSTALL_DIR% (Program Files\...\bin) is itself on PATH once
+rem installed once, since that's the point of installing there. That means
+rem `where` can match the OLD exe already sitting at the copy DESTINATION,
+rem which is about to be deleted and re-copied FROM -- i.e. we'd delete the
+rem only copy of the file and then try to copy from nothing. Any PATH match
+rem inside %INSTALL_DIR% is therefore never a valid "freshly built" source
+rem and must be skipped.
 where %CLI_NAME%.exe >nul 2>&1
 if errorlevel 1 goto find_jarvis_fail
 for /f "usebackq delims=" %%P in (`where %CLI_NAME%.exe 2^>nul`) do (
-    set "JARVIS_EXE=%%P"
-    goto find_jarvis_ok
+    if /i not "%%~dpP"=="%INSTALL_DIR%\" (
+        set "JARVIS_EXE=%%P"
+        goto find_jarvis_ok
+    )
 )
 :find_jarvis_fail
-echo ERROR: %CLI_NAME%.exe not found. Run pip install from jarvis-cli first.
+echo ERROR: %CLI_NAME%.exe not found.
+echo Tried venv (%VENV_SCRIPTS%), the base + user Python scripts dirs, and PATH.
+echo (Skipped any PATH match inside %INSTALL_DIR% -- that's the old install target, not a new build.)
+echo Run pip install from jarvis-cli first, or check that %PYEXE% is the python you expect.
 exit /b 1
 :find_jarvis_ok
 exit /b 0
@@ -198,6 +272,12 @@ exit /b 0
 net session >nul 2>&1
 if errorlevel 1 goto install_needs_admin
 if not exist "%INSTALL_DIR%" mkdir "%INSTALL_DIR%"
+if /i "!JARVIS_EXE!"=="%INSTALLED_EXE%" (
+    echo WARNING: find_jarvis resolved to the existing Program Files copy
+    echo itself ^(!JARVIS_EXE!^) instead of a freshly built exe -- skipping
+    echo the copy rather than deleting the only remaining copy of it.
+    exit /b 0
+)
 call :cleanup_stale_exe
 del /f /q "%INSTALLED_EXE%" 2>nul
 copy /y "!JARVIS_EXE!" "%INSTALLED_EXE%"
@@ -216,7 +296,12 @@ if not errorlevel 1 echo Program Files copy updated.
 exit /b 0
 
 :launch_server
-powershell -NoProfile -ExecutionPolicy Bypass -File "%ROOT%launch-web.ps1" -WebDir "%WEB_DIR%" -JarvisExe "!JARVIS_EXE!"
+rem CliName/JarvisCliDir/PyExe are passed through so start-server.bat can
+rem re-run the SAME PATH-vs-source-hash check on every server start, not
+rem just once here at build time -- e.g. someone re-opening the web UI
+rem later, without rebuilding, on a machine where PATH order can change
+rem underneath them (PATH edits, another persona's exe reinstalled, etc.).
+powershell -NoProfile -ExecutionPolicy Bypass -File "%ROOT%launch-web.ps1" -WebDir "%WEB_DIR%" -JarvisExe "!JARVIS_EXE!" -CliName "%CLI_NAME%" -JarvisCliDir "%JARVIS_CLI%" -PyExe "%PYEXE%"
 echo.
 echo Server window opened. JARVIS_BIN=!JARVIS_EXE! ^(command: %CLI_NAME%^)
 echo.
@@ -237,4 +322,4 @@ echo ERROR: Could not enter web folder.
 pause & exit /b 1
 :err_npm
 echo ERROR: npm install failed.
-pause & exit /b 1   
+pause & exit /b 1

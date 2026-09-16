@@ -14,6 +14,13 @@ tool_safety.py, or tool_result_shaping.py first.
 
 WHAT MAKES A FILE DISCOVERABLE
 -------------------------------
+Before writing one: if what you're adding is instructions rather than code —
+"here's how I want the weekly report built" — you want a SKILL, not an
+action. Skills live in ~/.jarvis/skills/<name>/SKILL.md, need no Python, and
+cost nothing in the prompt until they're loaded (see jarvis/skills.py, or
+the Skills button in the web UI). Actions are for capabilities that have to
+execute something.
+
 jarvis/tools.py calls tool_loader.discover_actions() once, at import time,
 which scans every actions/*.py file (except ones starting with "_") for
 three REQUIRED module-level names: TOOL_SCHEMAS, TOOLS, TOOL_GROUP. A file
@@ -22,22 +29,76 @@ an error. A file with SOME of them but not all, or with a value of the
 wrong shape, is REJECTED — logged and skipped, never crashes the rest of
 discovery, but also never becomes callable. Check your terminal/log output
 after adding a file; a typo here fails quiet, not loud.
+
+SAFE IMPORTS AT MODULE LEVEL — READ THIS BEFORE YOU IMPORT ANYTHING
+---------------------------------------------------------------------------
+Your file is imported by tool_loader.discover_actions(), which itself runs
+PARTWAY THROUGH jarvis/tools.py's own module initialization (after the
+manually-wired TOOLS dict is built, but before AUTO_TOOL_GROUPS,
+AUTO_TOOL_KEYWORDS, and friends are defined at the bottom of that file).
+That means jarvis.tools is only *partially* initialized while your file's
+top level is executing.
+
+Anything that imports back from jarvis.tools — directly, or transitively
+through another module — will raise ImportError at that moment, EVEN
+THOUGH the exact same import works fine everywhere else in the codebase.
+ai_client, tool_router, and tool_registry all import names FROM
+jarvis.tools, so importing any of them (or anything that imports them) at
+your file's module level creates exactly this cycle. This isn't
+hypothetical: it's the actual bug that silently dropped tool_dev_agent
+from dev_agent.py for a while — no crash, just a quiet
+"[tools] Rejected your_file.py: Failed to load: cannot import name
+'AUTO_TOOL_GROUPS' from partially initialized module 'jarvis.tools'
+(most likely due to a circular import)" in the discovery log, and the
+tool missing everywhere (CLI, debug menu, everywhere) with no other clue.
+
+The fix: if you need ai_client, ai_config, tool_router, tool_registry, or
+anything else that imports from jarvis.tools, import it LAZILY — inside
+the function that actually uses it, not at the top of the file:
+
+    def tool_my_thing(args):
+        from .. import ai_client, ai_config  # imported here, not at module level
+        ...
+
+By the time a handler actually runs, jarvis.tools has long since finished
+initializing, so the cycle never triggers. Imports of modules that don't
+touch jarvis.tools (subprocess, pathlib, re, your own dev_agent_*.py-style
+helper modules, ...) are completely unaffected — this only applies to the
+handful of modules that import back from tools.py.
 """
 
 # ---------------------------------------------------------------------------
 # 1. THE HANDLER(S)
 #
-# Every handler takes exactly one argument — the model's tool-call
-# arguments as a plain dict (never None; discovery guarantees TOOLS/
-# TOOL_SCHEMAS names line up, but a handler should still treat every key
-# as optional/untrusted, same as every existing tool file does) — and
-# returns a JSON-serializable dict. NEVER raise: catch your own
-# exceptions and return {"error": "..."} instead, exactly like every
-# built-in tool (see tools.py's own module docstring). An uncaught
-# exception is still caught one layer up by tools.execute_tool's try/except
-# and turned into {"error": "<name> failed: <e>"}, but returning your own
-# clearer error message is almost always more useful to the model than
-# a bare exception repr.
+# Every handler takes the model's tool-call arguments as a plain dict
+# (never None; discovery guarantees TOOLS/TOOL_SCHEMAS names line up, but
+# a handler should still treat every key as optional/untrusted, same as
+# every existing tool file does) — and returns a JSON-serializable dict.
+# NEVER raise: catch your own exceptions and return {"error": "..."}
+# instead, exactly like every built-in tool (see tools.py's own module
+# docstring). An uncaught exception is still caught one layer up by
+# tools.execute_tool's try/except and turned into {"error": "<name>
+# failed: <e>"}, but returning your own clearer error message is almost
+# always more useful to the model than a bare exception repr.
+#
+# Optional second argument: `fn(args, context)` instead of `fn(args)`.
+# tools.execute_tool() introspects your handler's own signature (via
+# tools._accepts_context) and only passes a second arg if you declared
+# one — a plain `fn(args)` handler is completely unaffected, so add the
+# second parameter only if you actually need it. `context` is a
+# tools.ToolContext with:
+#   - context.round_budget_remaining() — zero-arg callable, current
+#     remaining shared tool-call rounds for this ask(); call it fresh
+#     each time, don't cache the result, since it changes as the turn
+#     progresses.
+#   - context.emit_event(job_id, seq, phase, status, **fields) — writes
+#     one JARVIS_MEDIA progress line (see dev_agent_events.py) for a
+#     handler that runs long enough to want live sub-step visibility
+#     instead of a single return value at the end. Most tools don't need
+#     this.
+#   - context.conv_id — the active conversation id, or None.
+#   - context.ui — "web" or "cli" (mirrors JARVIS_UI), if a handler wants
+#     to skip emitting UI-only events cheaply.
 # ---------------------------------------------------------------------------
 
 
@@ -173,6 +234,31 @@ TOOL_AI_REVIEW = set()          # e.g. for a tool fuzzy/risky enough to want
 #    truncate_fields, list_item_drop, list_item_truncate). Leave this
 #    empty and your tool's result is returned completely untouched at
 #    every verbosity, which is the correct default for anything small.
+#
+#    How this ties into capacity mode: every mode in ai_client.
+#    PROMPT_MODE_DEFS carries a tool_result_verbosity of "full", "medium",
+#    or "low", and shape_result() only ever applies your "medium"/"low"
+#    keys — "full" always passes your result through untouched, spec or
+#    no spec. As of this writing the four built-in modes map like this:
+#
+#        mode      | capacity label | tool_result_verbosity
+#        ----------+-----------------+-----------------------
+#        full      | 400% Capacity   | full    (your spec is a no-op)
+#        compact   | 100% Capacity   | medium  (the default mode — write
+#                   |                 |          your "medium" key for this)
+#        precise   | 150% Capacity   | full    (your spec is a no-op)
+#        ultra     | 50% Capacity    | low     (write your "low" key for
+#                   |                 |          the tightest trim)
+#
+#    Practically: "compact" is the default a person is in most of the
+#    time, so your "medium" entries are the ones actually doing work
+#    day-to-day; "low" only kicks in once someone's explicitly in "ultra".
+#    "full" and "precise" both intentionally skip shaping entirely — they
+#    exist for when someone wants the richest possible context, so
+#    trimming there would defeat the point. (This table describes the
+#    current registry, not a hardcoded rule — a custom mode appended to
+#    PROMPT_MODE_DEFS with a different tool_result_verbosity would follow
+#    the same "full"/"medium"/"low" mechanics, just under a new mode name.)
 # ---------------------------------------------------------------------------
 
 TOOL_RESULT_SPECS = {}

@@ -15,7 +15,8 @@ import os
 import subprocess
 import sys
 
-from . import ai_config, ai_providers, command_tools, conversations, memory, playnite_config, stats, tool_safety
+from . import ai_config, ai_providers, command_tools, conversations, memory, playnite_config, skill_stickiness, skills, stats, tool_safety
+from . import dev_agent_events as _dev_agent_events
 from . import discovery_cache
 from . import logs
 from . import tool_result_shaping
@@ -264,6 +265,10 @@ PROMPT_MODE_DEFS = [
         "compact_tools_blurb": False,
         "compact_persona": False,
         "precise_persona": True,
+        # 150% Capacity is the "spend tokens for fidelity" mode, so it opts
+        # out of the hybrid catalog tier — every offered tool keeps its full
+        # argument schema rather than any of them dropping to a catalog line.
+        "catalog_tier": False,
         "playnite_freq_games": 5,
         "skip_other_convos": False,
         "tool_schema_style": "raw",
@@ -300,6 +305,14 @@ MODE_LABELS = {m["name"]: m["label"] for m in PROMPT_MODE_DEFS}
 MODE_SUMMARIES = {m["name"]: m.get("summary", "") for m in PROMPT_MODE_DEFS}
 _MODE_BY_NAME = {m["name"]: m for m in PROMPT_MODE_DEFS}
 DEFAULT_PROMPT_MODE = "compact"
+
+# Below this many tools in one round's offering, the hybrid catalog tier in
+# ask() is a no-op and every schema is sent in full. Set from the measured
+# per-group costs: at 10 tools a group is ~700-1,000 compacted tokens, which
+# is cheaper to just send than to risk an extra round trip over. The three
+# groups above it (playnite 31, desktop 16, system_control 11) are where the
+# eager-loading cost actually lives.
+CATALOG_TIER_MIN_TOOLS = 10
 
 
 def mode_options():
@@ -354,11 +367,11 @@ class AskResult:
     """Everything cli.py (or, via the web console, server.js re-running the
     CLI) needs to present one 'jarvis <text>' call to a person."""
 
-    __slots__ = ("ok", "text", "provider", "attempts", "assistant_name", "address_user_as", "usage")
+    __slots__ = ("ok", "text", "provider", "attempts", "assistant_name", "address_user_as", "usage", "degraded")
 
     def __init__(self, ok, text=None, provider=None, attempts=None,
                  assistant_name=DEFAULT_ASSISTANT_NAME, address_user_as=DEFAULT_ADDRESS,
-                 usage=None):
+                 usage=None, degraded=False):
         self.ok = ok
         self.text = text
         self.provider = provider
@@ -369,6 +382,13 @@ class AskResult:
         # that actually succeeded — {input_tokens, output_tokens, total_tokens,
         # rounds: [...], tool_calls: [...]}. None if tools/usage weren't tracked.
         self.usage = usage
+        # True when `text` isn't a model-composed reply at all — every
+        # provider failed on the closing text call, but real, mutating tool
+        # calls had already completed first. See _completed_mutations()'s
+        # docstring for why this exists: the alternative was reporting a
+        # completed task as a hard failure just because nothing was left to
+        # write the last sentence.
+        self.degraded = degraded
 
 
 def _provider_label(provider):
@@ -706,10 +726,52 @@ def _tools_blurb(compact, ultra, has_playnite, has_spotify):
     return " ".join(parts)
 
 
-def _system_prompt(persona, commands_ctx, freq_ctx, tools_enabled,
-                   compact_tools=False, compact_persona=False, ultra=False, has_history=False,
-                   memory_ctx="", has_playnite=False, has_spotify=False, other_convos_ctx="",
-                   playnite_freq_games=None, precise=False, pack_instructions_ctx=""):
+def _system_prompt(*args, **kwargs):
+    """The whole system prompt as one string — unchanged public behavior.
+
+    Kept as a thin join over _system_prompt_parts() so every existing caller
+    and test reads the same text it always did, while _build_messages() can
+    reach for the two halves separately.
+    """
+    static, dynamic = _system_prompt_parts(*args, **kwargs)
+    return "\n\n".join(p for p in (static, dynamic) if p)
+
+
+def _system_prompt_parts(persona, commands_ctx, freq_ctx, tools_enabled,
+                         compact_tools=False, compact_persona=False, ultra=False, has_history=False,
+                         memory_ctx="", has_playnite=False, has_spotify=False, other_convos_ctx="",
+                         playnite_freq_games=None, precise=False, pack_instructions_ctx="",
+                         skills_ctx="", loaded_skills_ctx=""):
+    """Return (static_prefix, per_request_tail) instead of one joined string.
+
+    This split is the load-bearing half of prompt caching (see
+    prompt_cache.py). Every provider jarvis talks to caches a byte-PREFIX of
+    the request, so anything that changes early in the prompt invalidates
+    everything after it. jarvis's system prompt mixes both kinds of content:
+
+      STATIC — persona, the history nudge, the tools blurb, the router's
+        pack instructions, the precision directive. Identical across every
+        turn that lands on the same capacity mode and router group.
+
+      PER-REQUEST — memory context (keyed on the user's message, so it is
+        different on literally every turn), the other-conversations context,
+        the Playnite frequent-games block, saved-commands listing, and
+        frequency stats.
+
+    Before this split they were interleaved and joined, which put
+    query-dependent text in front of static text and made the prefix differ
+    on every single turn. No amount of cache_control markers can rescue that
+    — the bytes genuinely differ. Separating them lets the breakpoint sit at
+    the end of the static run, so the tail changes freely without touching
+    what is cached in front of it.
+
+    Ordering note: the parts are emitted in the SAME order as before, so the
+    joined text is byte-identical to what _system_prompt() used to return.
+    `extra` (the persona's extra_instructions) is static and would cache
+    slightly better if hoisted into the prefix, but moving it would change
+    the prompt the model sees, and a token optimization is not worth an
+    unmeasured behavior change. It stays in the tail.
+    """
     name = persona.get("assistant_name") or DEFAULT_ASSISTANT_NAME
     address = persona.get("address_user_as") or DEFAULT_ADDRESS
     extra = (persona.get("extra_instructions") or "").strip()
@@ -760,8 +822,21 @@ def _system_prompt(persona, commands_ctx, freq_ctx, tools_enabled,
             )
     if tools_enabled:
         parts.append(_tools_blurb(compact_tools, ultra, has_playnite, has_spotify))
-        if pack_instructions_ctx:
-            parts.append(pack_instructions_ctx)
+        # Tier 1 of the skills system (see skills.py). Deliberately inside
+        # the STATIC run: the catalog is identical on every turn and only
+        # changes when a skill is added or removed, which makes it exactly
+        # the kind of content the cached prefix is for. Putting it in the
+        # per-request tail instead would cost its full price on every ask.
+        if skills_ctx:
+            parts.append(skills_ctx)
+        # pack_instructions_ctx is NOT appended here — see the boundary
+        # below. It's built from route.groups, which is per-turn, so it
+        # belongs in the dynamic tail. It used to sit here, which meant a
+        # conversation whose messages route to different tool groups from
+        # turn to turn invalidated the ENTIRE static block's cache on every
+        # such turn — a marked content block caches as a whole; one byte
+        # difference anywhere inside it is a miss for the whole block, not
+        # a partial hit (see prompt_cache.py's module docstring).
     if precise:
         # 150% Capacity only: an extra directive on top of the normal
         # persona/tools text \u2014 not a replacement for either.
@@ -772,6 +847,23 @@ def _system_prompt(persona, commands_ctx, freq_ctx, tools_enabled,
             "guessing \u2014 verify with a tool when one is available rather than "
             "assuming. Prefer being exactly right over being quick."
         )
+    # ---- end of the static prefix -------------------------------------
+    # Everything appended above is stable for a given capacity mode — it no
+    # longer includes anything keyed to which router group matched THIS
+    # turn (see the note above pack_instructions_ctx's old spot). Everything
+    # below varies per request or per conversation. The breakpoint goes here.
+    static_parts = list(parts)
+    parts = []
+
+    if pack_instructions_ctx:
+        parts.append(pack_instructions_ctx)
+    # Manually-loaded skills (see skill_stickiness.py — the "/skillload
+    # <name>" chat command or `jarvis skillload`). Conversation-scoped, not
+    # turn-scoped: stable across every ask in one chat until unloaded, but
+    # not identical across different chats, so it belongs alongside
+    # memory_ctx here rather than in the globally-static run above.
+    if loaded_skills_ctx:
+        parts.append(loaded_skills_ctx)
     if memory_ctx:
         parts.append(memory_ctx)
     if other_convos_ctx:
@@ -799,7 +891,7 @@ def _system_prompt(persona, commands_ctx, freq_ctx, tools_enabled,
         parts.append(commands_ctx)
     if freq_ctx:
         parts.append(freq_ctx)
-    return "\n\n".join(parts)
+    return "\n\n".join(static_parts), "\n\n".join(parts)
 
 
 def _build_messages(persona, commands, user_text, tools_enabled, profile, conversation_id, route=None):
@@ -902,7 +994,24 @@ def _build_messages(persona, commands, user_text, tools_enabled, profile, conver
             "capability, try search_commands instead — don't just keep "
             "retrying search_tools with different keywords."
         )
-    system_prompt = _system_prompt(
+    # The skills catalog is one line per installed skill and nothing else —
+    # the instructions themselves stay on disk until load_skill is called.
+    # Wrapped because a skills directory that can't be read must degrade to
+    # "no skills" rather than take down every ask.
+    try:
+        skills_ctx = skills.catalog_text()
+    except Exception:
+        skills_ctx = ""
+
+    # Manually-loaded skills for this conversation (see skill_stickiness.py)
+    # — the "/skillload <name>" chat command / `jarvis skillload` CLI
+    # command. Same wrapping reasoning as skills_ctx above.
+    try:
+        loaded_skills_ctx = skill_stickiness.loaded_context(conversation_id)
+    except Exception:
+        loaded_skills_ctx = ""
+
+    static_system, dynamic_system = _system_prompt_parts(
         persona,
         commands_ctx,
         freq_ctx,
@@ -918,8 +1027,19 @@ def _build_messages(persona, commands, user_text, tools_enabled, profile, conver
         playnite_freq_games=profile.get("playnite_freq_games"),
         precise=profile.get("precise_persona", False),
         pack_instructions_ctx=pack_instructions_ctx,
+        skills_ctx=skills_ctx,
+        loaded_skills_ctx=loaded_skills_ctx,
     )
-    messages = [{"role": "system", "content": system_prompt}]
+    # Two system messages, not one: index 0 is the cacheable static prefix,
+    # index 1 the per-request tail (see _system_prompt_parts). Providers that
+    # can act on the boundary read it via ai_providers._system_parts();
+    # every other provider gets them folded back into a single system message
+    # by ai_providers._merge_system(), which joins with the same "\n\n" this
+    # function's parts already use — so the text those providers receive is
+    # byte-identical to the single-block prompt this replaced.
+    messages = [{"role": "system", "content": static_system}]
+    if dynamic_system:
+        messages.append({"role": "system", "content": dynamic_system})
     messages.extend(prior_turns)
     messages.append({"role": "user", "content": user_text})
     return messages
@@ -1134,7 +1254,8 @@ _REPEAT_FAILURE_DETECTORS = [
 
 def _make_tool_executor(on_tool_call, schemas=None, on_confirm_request=None,
                          cfg=None, provider_ref=None, verbosity_ref=None,
-                         discover_sink=None, cache_query=None):
+                         discover_sink=None, cache_query=None,
+                         round_budget=None, conv_id=None):
     """Shared across every provider/key in one ask() so a failover never
     re-runs the same command, Playnite action, or web fetch. Cache hits
     still return the original result (no second launch / install / HTTP).
@@ -1164,6 +1285,18 @@ def _make_tool_executor(on_tool_call, schemas=None, on_confirm_request=None,
     hit is stored under it so a similar query in a *later* jarvis process
     can pre-seed active_schemas without repeating the same discovery round
     trip. Purely additive: with cache_query left None, nothing is stored.
+
+    round_budget, if given, is the ask()-level ai_providers.RoundBudget
+    shared across every provider/key attempt this turn (see ask()) — it's
+    wrapped in a ToolContext and handed to any tool handler whose
+    signature accepts one (tools.py's _accepts_context), so a bounded,
+    self-correcting tool like dev_agent can size its own internal retry
+    loop against what's actually left in the shared pool instead of a
+    hardcoded constant that can outlive the budget. conv_id is likewise
+    threaded through so a handler can scope its own output/bookkeeping to
+    the active conversation. Both default to a safe fallback (a
+    remaining()-like lambda returning 1, and None) when omitted, so every
+    existing caller of _make_tool_executor keeps working unchanged.
     """
     cache = {}
     runs = []
@@ -1281,6 +1414,19 @@ def _make_tool_executor(on_tool_call, schemas=None, on_confirm_request=None,
                 )
                 risk_note["command_flags"] = command_flags
 
+            if name == "dev_agent":
+                # §3.6 plan §8. Can't resolve the actual plan (files/deps/
+                # run command) at confirm-time — planning hasn't run yet,
+                # it only runs after this approval. So unlike run_command/
+                # run_chain above, there's no "resolved content" to attach
+                # here; the confirmation prompt necessarily just describes
+                # the raw ask itself. A second, lighter-weight confirmation
+                # between plan and write could be added later (see the
+                # plan's §11 open questions), but the first cut asks once,
+                # up front. No risk_note augmentation beyond whatever the
+                # default ai_review path above already produced.
+                pass
+
             approved = False
             try:
                 approved = bool(on_confirm_request(name, arguments, risk_note))
@@ -1309,14 +1455,30 @@ def _make_tool_executor(on_tool_call, schemas=None, on_confirm_request=None,
                 on_tool_call(name, arguments)
             except TypeError:
                 on_tool_call(name)
-        result = system_tools.execute_tool(name, arguments)
+        context = system_tools.ToolContext(
+            conv_id=conv_id,
+            round_budget_remaining=(round_budget.remaining if round_budget else (lambda: 1)),
+            emit_event=_dev_agent_events.emit,
+            ui=os.environ.get("JARVIS_UI", "cli"),
+        )
+        result = system_tools.execute_tool(name, arguments, context=context)
         verbosity = verbosity_ref[0] if verbosity_ref else "full"
-        result = tool_result_shaping.shape_result(name, result, verbosity)
-        cache[key] = result
+        # §3.6 plan §7's flagged checkpoint, resolved: run_entry (which
+        # feeds _extras_from_runs -> conversations.append_exchange's
+        # persisted `extras`, i.e. what a reloaded page replays) must keep
+        # the FULL, pre-shaping result -- shape_result trims fields like
+        # dev_agent's per-step preview/stdout_tail/stderr_tail that the UI
+        # still needs for replay even though the model doesn't need them
+        # repeated back into its own context every round. Only
+        # cache[key] (reused on a same-turn repeat call) and the
+        # model-facing return value get the shaped copy.
+        shaped_result = tool_result_shaping.shape_result(name, result, verbosity)
+        cache[key] = shaped_result
         run_entry = {"name": name, "arguments": arguments, "result": result}
         if confirm_meta is not None:
             run_entry["confirm"] = confirm_meta
         runs.append(run_entry)
+        result = shaped_result
 
         # Phase 5 handoff (see new_plan.md): a successful search_tools call
         # hands its matches to discover_sink so ask() can grow this round's
@@ -1430,7 +1592,92 @@ def _extras_from_runs(runs):
                             "title": f.get("title") or f["file"],
                         },
                     })
+        elif name == "present_file" and result.get("ok"):
+            # The gap that made present_file cards disappear on reload: every
+            # other media tool had an entry here, this one never did, so its
+            # card lived only in the live JARVIS_MEDIA stream. The field
+            # names match app.js's showAskPresentFile(info) argument exactly
+            # so the replay path can hand this straight to the same renderer
+            # the live path uses, rather than a second near-copy of it.
+            extras.append({
+                "type": "presentFile",
+                "data": {
+                    "jobId": result.get("job_id"),
+                    "filename": result.get("download_filename"),
+                    "name": result.get("name"),
+                    "type": result.get("type") or "file",
+                    "sizeBytes": result.get("size_bytes"),
+                    "path": result.get("path"),
+                },
+            })
+        elif name == "dev_agent" and isinstance(result.get("steps"), list):
+            # §3.6 plan §6. `result` here is run["result"] — the FULL,
+            # pre-shaping copy (see the ordering fix in _executor above) —
+            # so `steps` still has every preview/stdout_tail/stderr_tail
+            # field a live view showed, not whatever verbosity trimmed for
+            # the model. These are the exact same event dicts the live
+            # stream already displayed (see dev_agent_events.emit's
+            # docstring: dev_agent.py's own `steps` list is built from
+            # emit()'s return value, never reconstructed separately), so a
+            # reload replays provably the same trace, not an approximation
+            # of it.
+            extras.append({
+                "type": "devAgent",
+                "data": {
+                    "jobId": result.get("job_id"),
+                    "ok": result.get("ok"),
+                    "projectDir": result.get("project_dir"),
+                    "steps": result["steps"],
+                },
+            })
     return extras
+
+
+def _completed_mutations(runs):
+    """Which of this turn's tool calls actually changed something in the
+    real world, and didn't themselves report an error.
+
+    This is what lets ask() tell "every provider failed before doing
+    anything" apart from "every provider failed AFTER the real work was
+    already done" — see the "every provider failed" tail of ask() for why
+    that distinction matters. A run counts as a completed mutation only if
+    _is_mutating_tool() already agrees it's the kind of tool that isn't a
+    read-only lookup, and its own result doesn't carry an "error" key (a
+    mutating tool that itself failed obviously didn't complete anything).
+    """
+    done = []
+    for run in (runs or []):
+        name = run.get("name") or ""
+        if not _is_mutating_tool(name):
+            continue
+        result = run.get("result")
+        if isinstance(result, dict) and result.get("error"):
+            continue
+        done.append(run)
+    return done
+
+
+def _summarize_completed_mutations(runs):
+    """Plain-language fallback reply for when real work finished but no
+    provider survived to write the closing sentence about it.
+
+    Deliberately terse and mechanical (tool name + a one-line gloss of its
+    result) rather than trying to sound like a normal assistant reply —
+    this text was never reviewed by a model, and pretending otherwise
+    would be worse than admitting a provider dropped out partway through.
+    """
+    lines = ["The requested action(s) completed, but every configured "
+             "provider failed before a closing reply could be written:"]
+    for run in runs:
+        name = run.get("name") or "tool"
+        result = run.get("result") if isinstance(run.get("result"), dict) else {}
+        gloss = result.get("summary") or result.get("message") or result.get("path") \
+            or result.get("file") or result.get("job_id")
+        if gloss:
+            lines.append("- %s: %s" % (name, gloss))
+        else:
+            lines.append("- %s: done" % name)
+    return "\n".join(lines)
 
 
 def _is_mutating_tool(name):
@@ -1758,6 +2005,39 @@ def _spawn_title_update(conversation_id, exchange_count):
         pass  # title generation is cosmetic — never let it break an ask
 
 
+# The turn currently in flight, as (conv_id, user_text), or None. A
+# one-element list rather than a module global reassigned from inside ask()
+# purely so the interrupt handler below and ask() itself are provably
+# looking at the same object.
+#
+# This exists because the only reliable moment to record "the user asked
+# this and never got an answer" is from a signal handler, which has no
+# access to ask()'s locals. Killing a jarvis process mid-ask is a completely
+# ordinary thing to do (the web console's Stop button does it on every
+# abort), so that path needs to leave the conversation in an honest state,
+# not an empty one.
+_pending_turn = [None]
+
+
+def abandon_pending_turn(reason="interrupted"):
+    """Flush the in-flight turn as unanswered. Safe to call at any time,
+    including from a signal handler and including when nothing is pending.
+
+    Never raises: it runs on the way out of a dying process, where an
+    exception would just replace one lost message with a confusing
+    traceback.
+    """
+    pending = _pending_turn[0]
+    _pending_turn[0] = None
+    if not pending:
+        return False
+    conv_id, user_text = pending
+    try:
+        return conversations.abandon_exchange(conv_id, user_text, reason=reason)
+    except Exception:  # noqa: BLE001
+        return False
+
+
 def ask(user_text, commands=None, on_attempt=None, on_tool_call=None, on_tool_result=None, conversation_id=None,
         on_confirm_request=None, on_route=None, provider_override=None):
     """Ask Jarvis something, trying every configured, enabled provider in
@@ -1966,8 +2246,92 @@ def ask(user_text, commands=None, on_attempt=None, on_tool_call=None, on_tool_re
         # (50% Capacity) mode is for: see tool_schema_style per-provider
         # below, resolved fresh each attempt since mode can still vary by
         # provider under the legacy compact_prompt_providers config.
-        compact_schemas = OrderedSchemaSet(system_tools.compact_schemas_for_prompt(active_schemas))
-        name_only_schemas = OrderedSchemaSet(system_tools.name_only_schemas_for_prompt(active_schemas))
+        # ---- Hybrid catalog tier ---------------------------------------
+        # (Lever 1 of skills-and-token-optimization-research.md, applied to
+        # tool schemas.)
+        #
+        # The router activates whole GROUPS, which is right for workflow
+        # completeness but expensive at the top end: the playnite group is 31
+        # tools / ~2,700 compacted tokens, desktop is 16, system_control 11.
+        # Sending all of that to call one tool is the eager-loading
+        # antipattern the research is about.
+        #
+        # The obvious fix — stub everything and make the model re-request —
+        # is wrong here, and the comment above says why: jarvis is a fresh
+        # process per call, so a re-request costs a full extra round trip
+        # (the entire prompt, resent) rather than a cheap in-session lookup.
+        # Pure stubs would trade ~2,700 tokens for a guaranteed second round.
+        #
+        # So: hybrid. route.matches records which tool each qualifying
+        # keyword actually hit, so the tools the user plausibly meant get
+        # their FULL schema and stay callable with no extra round trip, while
+        # the rest of the group drops to a ~10-token catalog line plus
+        # get_tool_schema. The common case costs nothing extra; only the
+        # genuinely unanticipated sibling pays a round trip, which is exactly
+        # the trade search_tools already makes.
+        #
+        # Below CATALOG_TIER_MIN_TOOLS this is a no-op, so small groups and
+        # every non-confident path behave precisely as before.
+        #
+        # Bug fix: this used to read `profile.get("catalog_tier", ...)`, but
+        # `profile` isn't assigned until INSIDE the `for provider in
+        # providers:` loop below (it's resolved per-attempt, since mode can
+        # vary by provider — see that loop's own comment). Reading it here,
+        # before the loop, raised UnboundLocalError on every single ask
+        # once a route was confident and a group had 10+ tools — i.e. on
+        # exactly the routes this tier exists to help. active_schemas/
+        # compact_schemas/name_only_schemas are built ONCE and shared
+        # across every attempt (not per-provider), so the catalog-tier
+        # decision has to be made here too — resolved from the first
+        # eligible provider's profile, same representative-provider
+        # approach current_mode() already uses for the same reason.
+        _catalog_tier_profile = (
+            _prompt_profile(_provider_label(providers[0]), cfg["defaults"]) if providers else {}
+        )
+        if (
+            _catalog_tier_profile.get("catalog_tier", True)
+            and route is not None
+            and route.confident
+            and len(active_schemas) >= CATALOG_TIER_MIN_TOOLS
+        ):
+            hot = {name for _group, name, _phrase in (route.matches or [])}
+            # Keep the discovery pair callable: demoting get_tool_schema
+            # itself to a catalog entry would strand every demoted tool.
+            hot.update({"search_tools", "get_tool_schema", "search_commands"})
+            full_set, cold = [], []
+            for schema in active_schemas.to_list():
+                (full_set if schema.get("name") in hot else cold).append(schema)
+            if cold:
+                active_schemas = OrderedSchemaSet(full_set)
+                active_schemas.extend(system_tools.schemas_for_tools(["get_tool_schema"]))
+                catalog_entries = system_tools.catalog_schemas_for_prompt(cold)
+                compact_schemas = OrderedSchemaSet(
+                    system_tools.compact_schemas_for_prompt(active_schemas)
+                )
+                compact_schemas.extend(catalog_entries)
+                name_only_schemas = OrderedSchemaSet(
+                    system_tools.name_only_schemas_for_prompt(active_schemas)
+                )
+                name_only_schemas.extend(
+                    system_tools.name_only_schemas_for_prompt(cold)
+                )
+                # active_schemas is the "raw" (precise mode) offering AND the
+                # set discover_sink checks membership against. Catalog
+                # entries go in so a promoted tool isn't added twice, but
+                # they carry no argument schema — precise mode deliberately
+                # opts out of this tier instead (catalog_tier False), since
+                # its whole point is maximum schema fidelity.
+                active_schemas.extend(catalog_entries)
+            else:
+                compact_schemas = OrderedSchemaSet(
+                    system_tools.compact_schemas_for_prompt(active_schemas)
+                )
+                name_only_schemas = OrderedSchemaSet(
+                    system_tools.name_only_schemas_for_prompt(active_schemas)
+                )
+        else:
+            compact_schemas = OrderedSchemaSet(system_tools.compact_schemas_for_prompt(active_schemas))
+            name_only_schemas = OrderedSchemaSet(system_tools.name_only_schemas_for_prompt(active_schemas))
     provider_ref = [None]
     verbosity_ref = ["full"]
 
@@ -2013,19 +2377,40 @@ def ask(user_text, commands=None, on_attempt=None, on_tool_call=None, on_tool_re
             compact_schemas.extend(system_tools.compact_schemas_for_prompt(full))
             name_only_schemas.extend(system_tools.name_only_schemas_for_prompt(full))
 
+    # Shared across every provider/key attempt below — see RoundBudget's docstring.
+    # Each adapter still gets its own local MAX_TOOL_ROUNDS, but a failover to the
+    # next key draws from this same pool instead of getting a fresh 5 rounds on top
+    # of whatever the failed key already burned. Built *before* _make_tool_executor
+    # now, so it can be handed into the executor and wrapped into every tool call's
+    # ToolContext (see tools.ToolContext / _make_tool_executor's docstring).
+    round_budget = ai_providers.RoundBudget()
+
     tool_executor = _make_tool_executor(
         on_tool_call, full_schemas, on_confirm_request=on_confirm_request,
         cfg=cfg, provider_ref=provider_ref, verbosity_ref=verbosity_ref,
         discover_sink=_discover_sink if tools_enabled else None,
         cache_query=cache_query if tools_enabled else None,
+        round_budget=round_budget, conv_id=conversation_id,
     ) if tools_enabled else None
 
     attempts = []
-    # Shared across every provider/key attempt below — see RoundBudget's docstring.
-    # Each adapter still gets its own local MAX_TOOL_ROUNDS, but a failover to the
-    # next key draws from this same pool instead of getting a fresh 5 rounds on top
-    # of whatever the failed key already burned.
-    round_budget = ai_providers.RoundBudget()
+
+    # Persist the user's half of this turn NOW, before a single provider is
+    # contacted. Everything downstream of here can be killed mid-flight —
+    # the web UI's Stop button does exactly that (server.js killTree()s the
+    # child process, which on Windows is an unconditional taskkill /F and on
+    # POSIX a SIGTERM that skips every finally block) — and until this call
+    # existed, that killed the user's message with it. See
+    # conversations.begin_exchange's docstring.
+    #
+    # Registering the interrupt handler is a separate step in cli.py, not
+    # here: ask() is also called from contexts with no signal handling to
+    # own (the scheduler's spawned process, tests), and installing a
+    # process-wide handler from a library function would be reaching well
+    # outside this function's remit.
+    _pending_turn[0] = (conv_id, user_text) if conv_id else None
+    if conv_id:
+        conversations.begin_exchange(conv_id, user_text)
 
     for provider in providers:
         label = _provider_label(provider)
@@ -2107,7 +2492,14 @@ def ask(user_text, commands=None, on_attempt=None, on_tool_call=None, on_tool_re
             try:
                 result = adapter(resolved, messages, resolved["timeout"],
                                  tools=tool_schemas, tool_executor=tool_executor,
-                                 round_budget=round_budget)
+                                 round_budget=round_budget,
+                                 # Prompt-cache knobs live in defaults (and
+                                 # can be overridden per provider) — see
+                                 # prompt_cache.resolve_settings. Passed
+                                 # here rather than read from disk inside
+                                 # the adapter so a test can drive caching
+                                 # behavior without touching ~/.jarvis.
+                                 cfg_defaults=cfg["defaults"])
             except Exception as e:  # one bad provider/key must never take down the whole ask
                 result = ai_providers.AIResult(False, error=f"unexpected error: {e}")
             finally:
@@ -2141,9 +2533,10 @@ def ask(user_text, commands=None, on_attempt=None, on_tool_call=None, on_tool_re
                     # response bodies itself.
                     if conv_id:
                         logs.log(conv_id, "info", {"console_dump": dump_lines}, provider=key_label)
-                exchange_count = conversations.append_exchange(
+                exchange_count = conversations.complete_exchange(
                     conv_id, user_text, clean_text, label, extras=extras
                 )
+                _pending_turn[0] = None
                 _spawn_title_update(conv_id, exchange_count)
                 return AskResult(True, text=result.text, provider=label, attempts=attempts,
                                  assistant_name=assistant_name, address_user_as=address,
@@ -2151,4 +2544,46 @@ def ask(user_text, commands=None, on_attempt=None, on_tool_call=None, on_tool_re
 
             attempts.append((key_label, result.error))
 
+    # Every provider failed on the closing text call. That used to always
+    # mean "no provider answered" and get reported as a hard failure — but
+    # if a mutating tool call already completed cleanly earlier this turn
+    # (see _completed_mutations), the actual requested action DID happen;
+    # only the follow-up "compose a nice reply about it" call failed on
+    # every remaining provider (all keys genuinely exhausted after a long
+    # tool-calling turn is the common case). That's exactly the bug
+    # reported against the scheduler: a scheduled task would run its tools,
+    # complete the real work, then still get reported as an error because
+    # ask() kept cycling every remaining provider for a closing sentence
+    # that never came — "cycled thru every token provider and gave an
+    # error EVEN THOUGH the task is done." Recording that as an abandoned
+    # exchange and returning ok=False was true to what happened to the
+    # LAST attempt, but false to what happened to the ask() call as a
+    # whole. Synthesize a plain summary of what ran instead.
+    turn_runs = getattr(tool_executor, "runs", None) if tool_executor else None
+    completed = _completed_mutations(turn_runs)
+    if completed:
+        summary = _summarize_completed_mutations(completed)
+        if conv_id:
+            exchange_count = conversations.complete_exchange(
+                conv_id, user_text, summary,
+                "(no provider — reporting completed actions)",
+                extras=_extras_from_runs(turn_runs),
+            )
+            _spawn_title_update(conv_id, exchange_count)
+        _pending_turn[0] = None
+        return AskResult(True, text=summary, provider=None, attempts=attempts,
+                         assistant_name=assistant_name, address_user_as=address,
+                         degraded=True)
+
+    # The turn is still real — the user asked something and got nothing at
+    # all, not even a completed side effect — so it's recorded as such
+    # rather than left pending forever (a pending turn would otherwise be
+    # re-abandoned by the next process's interrupt handler and look like it
+    # was cancelled).
+    if conv_id:
+        conversations.abandon_exchange(
+            conv_id, user_text, reason="no provider answered",
+            extras=_extras_from_runs(turn_runs),
+        )
+    _pending_turn[0] = None
     return AskResult(False, attempts=attempts, assistant_name=assistant_name, address_user_as=address)

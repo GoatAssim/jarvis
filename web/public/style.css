@@ -1313,6 +1313,64 @@ audio.ask-dl-player{ max-height: none; background: transparent; }
 }
 .ask-file-card__actions{ display: flex; flex-wrap: wrap; gap: 6px; margin-top: 4px; }
 
+/* dev_agent's live/replayed step timeline (see jarvis-cli/jarvis/dev_agent_events.py
+   and app.js's upsertDevAgentCard/renderDevAgentCard/fillDevAgentCardBody, plus
+   renderThreadExtra's "devAgent" case for replay after reload). One row per
+   plan/write/install/run/fix/done step; a completed write row expands to show its
+   truncated preview; fix rows nest (indent) under the run they followed. */
+.ask-msg--dev-agent .ask-msg__role{ color: var(--accent-soft); }
+.ask-msg__bubble.ask-msg__bubble--dev-agent{
+  display: flex; flex-direction: column; gap: 2px;
+  border-left-color: var(--accent-soft);
+}
+.dev-agent-card__header{
+  font-family: var(--font-mono); font-size: 10.5px; letter-spacing: 0.08em;
+  text-transform: uppercase; color: var(--text-dimmer); margin-bottom: 4px;
+}
+.dev-agent-card__body{ display: flex; flex-direction: column; gap: 1px; }
+.dev-agent-card__step{
+  display: flex; align-items: baseline; gap: 8px;
+  padding: 3px 4px; font-size: 12.5px; line-height: 1.4; border-radius: 2px;
+}
+.dev-agent-card__step.is-expandable{ cursor: pointer; }
+.dev-agent-card__step.is-expandable:hover{ background: var(--bg-raised); }
+.dev-agent-card__step--nested{
+  margin-left: 18px; border-left: 2px solid var(--border); padding-left: 8px;
+}
+.dev-agent-card__step-glyph{
+  flex: none; width: 14px; text-align: center; font-family: var(--font-mono);
+}
+.dev-agent-card__step--ok .dev-agent-card__step-glyph{ color: var(--green); }
+.dev-agent-card__step--fail .dev-agent-card__step-glyph{ color: var(--red); }
+.dev-agent-card__step--pending .dev-agent-card__step-glyph{
+  color: var(--accent); animation: dev-agent-pulse 1.1s ease-in-out infinite;
+}
+.dev-agent-card__step-phase{
+  flex: none; font-family: var(--font-mono); font-size: 10.5px; letter-spacing: 0.06em;
+  text-transform: uppercase; color: var(--text-dim); min-width: 46px;
+}
+.dev-agent-card__step-summary{
+  color: var(--text); word-break: break-word; overflow-wrap: anywhere;
+}
+.dev-agent-card__step--fail .dev-agent-card__step-summary{ color: var(--red); }
+.dev-agent-card__step-detail{
+  display: none; margin: 4px 0 2px 22px; padding: 6px 8px;
+  font-family: var(--font-mono); font-size: 11px; white-space: pre-wrap; word-break: break-word;
+  color: var(--text-dim); background: var(--bg-raised); border-left: 2px solid var(--border-strong);
+  border-radius: 2px; max-height: 160px; overflow-y: auto;
+}
+.dev-agent-card__step.is-expanded .dev-agent-card__step-detail{ display: block; }
+.dev-agent-card__footer{
+  margin-top: 6px; padding-top: 6px; border-top: 1px solid var(--border);
+  font-size: 12px; color: var(--text-dim); word-break: break-word;
+}
+.dev-agent-card__footer--fail{ color: var(--red); }
+
+@keyframes dev-agent-pulse{
+  0%, 100%{ opacity: 0.4; }
+  50%{ opacity: 1; }
+}
+
 .ask-msg__actions{
   display: flex; gap: 6px; margin-top: 5px; padding: 0 2px;
   opacity: 0.35; transition: opacity 0.12s;
@@ -1996,3 +2054,397 @@ audio.ask-dl-player{ max-height: none; background: transparent; }
   user-select: all; /* easy to double-click/select the whole id */
 }
 .convo-id-tag:empty { display: none; }
+/* ===========================================================================
+   SHARED "MENU" PANEL CHROME — Skills, Scheduled, and MCP Servers.
+   See jarvis/skills.py, jarvis/scheduler.py, jarvis/mcp_client.py.
+
+   This replaces what used to be a bespoke .skills-overlay/.skills-panel look
+   (its own fallback-var()'d colors, its own geometry) with the SAME chrome
+   family the Debug and Ask panels already use: real design tokens
+   (--bg-1/--border-strong/--radius/--font-display/--font-mono), the same
+   corner brackets, the same brand-mark head, the same .modal__close button.
+   Three menus that used to each look slightly different now read as one
+   consistent "big panel" language across the whole app — Debug, Ask, Logs,
+   Skin, Skills, Scheduled and MCP Servers are all the same kind of window.
+
+   .menu-body defaults to a two-column list+detail layout (Skills, Scheduled);
+   .menu-body--single drops to one column for a panel with nothing to pair
+   the list against (MCP Servers has no per-server editor pane).
+   =========================================================================== */
+
+.menu-overlay{
+  position: fixed; inset: 0; z-index: 85;
+  background: rgba(2,5,10,0.78);
+  backdrop-filter: blur(4px);
+  display: flex; align-items: center; justify-content: center;
+  padding: 22px;
+}
+
+.menu-panel{
+  position: relative;
+  width: min(1100px, 100%);
+  height: min(780px, 92vh);
+  display: flex; flex-direction: column;
+  background: var(--bg-1);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius);
+  box-shadow: 0 0 60px rgba(0,0,0,0.6), 0 0 40px var(--accent-glow);
+  overflow: hidden;
+}
+
+.menu-panel__head{
+  display: flex; align-items: center; gap: 12px;
+  padding: 14px 16px;
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+}
+.menu-panel__titles{ min-width: 0; }
+.menu-panel__title{
+  font-family: var(--font-display); font-size: 14px; letter-spacing: 0.2em; font-weight: 700;
+}
+.menu-panel__subtitle{
+  font-family: var(--font-mono); font-size: 11px; color: var(--text-dimmer);
+  margin-top: 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.menu-panel__subtitle.is-busy{ color: var(--accent-soft); }
+.menu-panel__subtitle.is-error{ color: var(--red); }
+.menu-panel__subtitle.is-ok{ color: var(--green); }
+.menu-panel__head .modal__close{ margin-left: auto; flex-shrink: 0; }
+
+.menu-body{
+  flex: 1 1 auto;
+  display: grid;
+  grid-template-columns: minmax(260px, 340px) 1fr;
+  min-height: 0;
+}
+.menu-body--single{ grid-template-columns: 1fr; }
+
+.skills-pane {
+  /* Inner content (list rows, form fields, hints, the editor textarea)
+     used to keep its pre-unification fallback-var() colors — var(--line,
+     #17323f), var(--muted, #6d8794), etc. — left over from the old bespoke
+     .skills-overlay/.skills-panel look, even after the outer chrome above
+     (.menu-overlay/.menu-panel/.menu-panel__head) was moved onto the real
+     design tokens. Cosmetically inconsistent (a slightly different border
+     and text color inside the same panel), never broken, since the
+     fallback values were close to the real tokens. Every rule from here
+     through .sched-add now references only --border/--text/--text-dim/
+     --accent/--red/--gold/--bg-raised/--bg-panel-2 — no more fallback
+     hex/rgba anywhere in this section. */
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  min-width: 0;
+}
+
+.skills-pane--list { border-right: 1px solid var(--border); }
+
+.skills-pane__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--border);
+}
+
+.skills-pane__head h3 {
+  margin: 0;
+  font-size: 0.72rem;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+}
+
+.skills-pane__actions { display: flex; gap: 6px; }
+
+.skills-cost {
+  font-size: 0.66rem;
+  letter-spacing: 0.04em;
+  color: var(--accent);
+  white-space: nowrap;
+  cursor: help;
+}
+
+.skills-list { flex: 1 1 auto; overflow-y: auto; padding: 8px; }
+
+.skill-row {
+  display: block;
+  width: 100%;
+  text-align: left;
+  padding: 9px 11px;
+  margin-bottom: 6px;
+  background: transparent;
+  border: 1px solid transparent;
+  border-left: 2px solid var(--border);
+  color: inherit;
+  cursor: pointer;
+  font: inherit;
+}
+
+.skill-row:hover { background: rgba(79, 210, 255, 0.05); }
+
+.skill-row.is-active {
+  background: rgba(79, 210, 255, 0.09);
+  border-left-color: var(--accent);
+}
+
+/* An unloadable skill stays visible and says why — a skill that silently
+   never loads is the failure mode this feature must not have. */
+.skill-row.is-invalid { border-left-color: var(--red); }
+.skill-row.is-invalid .skill-row__desc { color: var(--red); }
+
+.skill-row__name {
+  font-size: 0.83rem;
+  letter-spacing: 0.04em;
+  color: var(--text);
+  margin-bottom: 2px;
+}
+
+.skill-row__desc {
+  font-size: 0.7rem;
+  line-height: 1.4;
+  color: var(--text-dim);
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.skill-row__refs {
+  margin-top: 4px;
+  font-size: 0.62rem;
+  letter-spacing: 0.06em;
+  color: var(--accent);
+  opacity: 0.72;
+}
+
+.skills-editor,
+.skills-create,
+.skills-import {
+  flex: 1 1 auto;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 14px 16px;
+  min-height: 0;
+  overflow-y: auto;
+}
+
+.skills-field { display: flex; flex-direction: column; gap: 5px; }
+.skills-field--grow { flex: 1 1 auto; min-height: 0; }
+
+.skills-field > span {
+  font-size: 0.68rem;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+}
+
+.skills-field > span em {
+  text-transform: none;
+  letter-spacing: 0.02em;
+  font-style: normal;
+  opacity: 0.75;
+}
+
+.skills-field input,
+.skills-field textarea {
+  width: 100%;
+  background: rgba(0, 0, 0, 0.28);
+  border: 1px solid var(--border);
+  color: var(--text);
+  padding: 9px 11px;
+  font-family: ui-monospace, "SFMono-Regular", Consolas, monospace;
+  font-size: 0.78rem;
+  line-height: 1.5;
+  resize: vertical;
+}
+
+.skills-field textarea { flex: 1 1 auto; min-height: 220px; }
+
+.skills-field input:focus,
+.skills-field textarea:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+.skills-hint {
+  font-size: 0.7rem;
+  line-height: 1.5;
+  color: var(--text-dim);
+  border-left: 2px solid var(--border);
+  padding-left: 10px;
+}
+
+.skills-hint code {
+  color: var(--accent);
+  font-size: 0.72rem;
+}
+
+.skills-refs {
+  font-size: 0.68rem;
+  line-height: 1.5;
+  color: var(--text-dim);
+  border-top: 1px dashed var(--border);
+  padding-top: 9px;
+}
+
+.skills-empty {
+  padding: 26px 18px;
+  text-align: center;
+  font-size: 0.74rem;
+  line-height: 1.6;
+  color: var(--text-dim);
+}
+
+@media (max-width: 860px) {
+  .menu-body { grid-template-columns: 1fr; }
+  .skills-pane--list { border-right: none; border-bottom: 1px solid var(--border); max-height: 34vh; }
+}
+
+/* Zip upload row in the Skills importer (see index.html's #skills-import). */
+.skills-zip-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.skills-zip-row input[type="file"] {
+  font-size: 0.72rem;
+  color: var(--text-dim);
+  max-width: 60%;
+}
+
+.skills-zip-name {
+  font-size: 0.7rem;
+  color: var(--text-dim);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* "/skillload <name>" / "/skillunload <name>" autocomplete — see app.js's
+   updateSkillSuggest(). Sits directly above the ask input row. */
+.skill-slash-suggest {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 6px;
+  margin-bottom: 6px;
+  background: var(--bg-raised);
+  border: 1px solid var(--border);
+  max-height: 180px;
+  overflow-y: auto;
+}
+
+.skill-slash-suggest__item {
+  display: block;
+  width: 100%;
+  text-align: left;
+  padding: 6px 9px;
+  background: transparent;
+  border: none;
+  color: var(--text);
+  font-family: ui-monospace, "SFMono-Regular", Consolas, monospace;
+  font-size: 0.76rem;
+  cursor: pointer;
+}
+
+.skill-slash-suggest__item:hover {
+  background: rgba(79, 210, 255, 0.09);
+  color: var(--accent);
+}
+
+/* ---------------------------------------------------------------------------
+   Scheduled panel. Reuses the skills overlay/panel/list classes wholesale —
+   it has the same shape (overlay, two panes, a scrolling list of items with
+   actions), and duplicating that styling under new names would just be two
+   things to keep in sync. Only the genuinely new bits live here.
+   --------------------------------------------------------------------------- */
+
+/* A job parked on approval, or a server that failed to connect. Marked with a
+   left border rather than a background wash so it still reads as the same
+   kind of row, just one that wants attention. */
+.skills-item.is-warn {
+  border-left: 2px solid var(--gold);
+  padding-left: 10px;
+}
+
+.skills-item__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.sched-add {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px 14px 16px;
+}
+
+.sched-add input {
+  width: 100%;
+  padding: 8px 10px;
+  background: var(--bg-panel-2);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  color: inherit;
+  font: inherit;
+}
+
+.sched-add input:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+.sched-add .btn {
+  align-self: flex-start;
+}
+
+/* ---------------------------------------------------------------------------
+   Panel-menu dropdown — the "Menu \u25be" trigger that replaced four separate
+   Debug/Skills/Scheduled/MCP buttons crowded into the console header. Same
+   pattern as the Ask panel's own .provider-picker dropdown: an absolutely
+   positioned menu under a toggle button, closed on outside-click or Escape.
+   --------------------------------------------------------------------------- */
+
+.panel-menu{ position: relative; }
+
+.panel-menu__caret{ display: inline-block; margin-left: 2px; font-size: 10px; }
+
+.panel-menu__list{
+  position: absolute; top: calc(100% + 6px); right: 0; z-index: 30;
+  min-width: 230px;
+  background: var(--bg-raised); border: 1px solid var(--border-strong); border-radius: var(--radius);
+  box-shadow: 0 8px 28px rgba(0,0,0,0.5), 0 0 18px var(--accent-glow);
+  padding: 4px;
+  display: flex; flex-direction: column;
+}
+
+.panel-menu__item{
+  display: flex; flex-direction: column; align-items: flex-start; gap: 2px;
+  width: 100%; text-align: left;
+  padding: 8px 10px;
+  background: none; border: none; border-radius: calc(var(--radius) - 2px);
+  color: var(--text); font: inherit; cursor: pointer;
+}
+.panel-menu__item:hover{ background: var(--bg-panel-2); }
+
+.panel-menu__item-label{ font-size: 12px; font-weight: 600; }
+.panel-menu__item-hint{
+  font-family: var(--font-mono); font-size: 10.5px; color: var(--text-dimmer);
+}
+
+/* KaTeX math (see app.js's renderMathIn/extractMath). KaTeX's own
+   stylesheet doesn't reliably set a text color that stays legible against
+   this app's dark theme, so force it to inherit the bubble's own text
+   color rather than trusting KaTeX's default. Display-mode blocks
+   ($$...$$) get the same overflow-x pattern as this file's other
+   wide-content containers (see .json-org-snippet above) — a long
+   equation shouldn't be able to push the whole chat bubble wider than
+   the column. */
+.katex{ color: inherit; }
+.katex-display{ overflow-x: auto; overflow-y: hidden; padding: 2px 0; }

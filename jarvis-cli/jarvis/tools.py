@@ -13,6 +13,7 @@ that's what steers correct tool selection, per every provider's own
 tool-use guidance.
 """
 
+import inspect
 import os
 import platform
 import re
@@ -20,8 +21,10 @@ import shutil
 import socket
 import subprocess
 import time
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
+from typing import Callable, Optional
 
 from .command_tools import COMMAND_TOOL_SCHEMAS, COMMAND_TOOLS
 from .custom_tools import CUSTOM_TOOL_SCHEMAS, CUSTOM_TOOLS
@@ -37,6 +40,7 @@ from .pkg_tools import PKG_TOOL_SCHEMAS, PKG_TOOLS
 from .playnite_api_tools import PLAYNITE_API_TOOL_SCHEMAS, PLAYNITE_API_TOOLS
 from .playnite_tools import PLAYNITE_TOOL_SCHEMAS as _PLAYNITE_CORE_SCHEMAS, PLAYNITE_TOOLS as _PLAYNITE_CORE_TOOLS
 from .present_tools import PRESENT_TOOL_SCHEMAS, PRESENT_TOOLS
+from .skill_tools import TOOL_SCHEMAS as SKILL_TOOL_SCHEMAS, TOOLS as SKILL_TOOLS
 from .radio_tools import RADIO_TOOL_SCHEMAS, RADIO_TOOLS
 from .screenshot_tools import SCREENSHOT_TOOL_SCHEMAS, SCREENSHOT_TOOLS
 from .spotify_tools import SPOTIFY_TOOL_SCHEMAS, SPOTIFY_TOOLS
@@ -362,6 +366,81 @@ def tool_search_tools(args):
     return result
 
 
+def catalog_schemas_for_prompt(schemas):
+    """Tier-1 catalog entries: name + one-line summary, no argument schema.
+
+    This is the "discovery" tier from the Agent Skills progressive-disclosure
+    model (see skills-and-token-optimization-research.md section 1), applied
+    to tool schemas rather than skill files. A catalog entry costs roughly a
+    tenth of a compacted schema, which is what makes offering a 31-tool group
+    affordable.
+
+    A tool gets its full schema back via get_tool_schema (below), which grows
+    it into the live offering through ai_client's discover_sink — the same
+    machinery search_tools already uses. `short_description` is honored when
+    a schema declares one, matching stub_schemas()' existing convention.
+    """
+    stub_params = {"type": "object", "properties": {}}
+    out = []
+    for schema in schemas or []:
+        if not isinstance(schema, dict) or not schema.get("name"):
+            continue
+        short = schema.get("short_description")
+        text = short.strip() if isinstance(short, str) and short.strip() else _clip_text(
+            schema.get("description") or "", 64
+        )
+        out.append({
+            "name": schema["name"],
+            "description": f"{text} (call get_tool_schema for arguments)",
+            "parameters": stub_params,
+        })
+    return out
+
+
+def tool_get_tool_schema(args):
+    """Tier-2 activation: hand back one tool's full argument schema.
+
+    The direct analogue of Anthropic's defer_loading / Tool Search
+    fetch-schema step. search_tools answers "does a tool for X exist"; this
+    answers "what arguments does the tool I already know the name of take",
+    which is the cheaper and far more common question once a catalog entry
+    has been seen.
+
+    Like search_tools, the reply is only half the job: ai_client's
+    discover_sink promotes the named tool into this round's live schema sets,
+    so it is genuinely callable on the model's very next reply rather than
+    merely described.
+    """
+    from . import tool_registry
+
+    raw = (args or {}).get("name") or ""
+    name = raw.strip()
+    if not name:
+        return {"error": "Pass the exact name of the tool you want the schema for."}
+
+    schema = tool_registry.TOOL_INDEX.get(name)
+    if schema is None:
+        # A wrong guess shouldn't cost a whole extra round: point at the
+        # nearest real names instead of just saying no.
+        near = sorted(
+            n for n in tool_registry.TOOL_INDEX
+            if name in n or n in name or n.split("_")[0] == name.split("_")[0]
+        )[:5]
+        out = {"error": f"No tool named '{name}'."}
+        if near:
+            out["did_you_mean"] = near
+        else:
+            out["hint"] = "Call search_tools with a keyword to find the right name."
+        return out
+
+    return {
+        "name": name,
+        "group": tool_registry.group_of(name) or "misc",
+        "schema": compact_schemas_for_prompt([schema])[0],
+        "ready": True,
+    }
+
+
 DISCOVERY_TOOL_SCHEMAS = [
     {
         "name": "search_tools",
@@ -380,6 +459,25 @@ DISCOVERY_TOOL_SCHEMAS = [
                 },
             },
             "required": [],
+        },
+    },
+    {
+        "name": "get_tool_schema",
+        "description": (
+            "Get the full argument schema for ONE tool you already know the name of. "
+            "Use this when a tool is listed for you without its arguments (its "
+            "description says to call this), instead of guessing arguments or "
+            "searching again. The tool becomes callable on your next reply."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "name": {
+                    "type": "string",
+                    "description": "Exact tool name, e.g. 'playnite_launch_game'.",
+                },
+            },
+            "required": ["name"],
         },
     },
 ]
@@ -452,6 +550,7 @@ CORE_TOOL_SCHEMAS = [
     *YTDL_TOOL_SCHEMAS,
     *EVERYTHING_TOOL_SCHEMAS,
     *PRESENT_TOOL_SCHEMAS,
+    *SKILL_TOOL_SCHEMAS,
 ]
 
 PLAYNITE_AND_SPOTIFY = [*PLAYNITE_TOOL_SCHEMAS, *SPOTIFY_TOOL_SCHEMAS]
@@ -687,6 +786,8 @@ TOOLS = {
     **EVERYTHING_TOOLS,
     **PRESENT_TOOLS,
     "search_tools": tool_search_tools,
+    "get_tool_schema": tool_get_tool_schema,
+    **SKILL_TOOLS,
 }
 
 # ---------------------------------------------------------------------------
@@ -703,9 +804,20 @@ TOOLS = {
 # the built-in always wins and the action file is logged and skipped
 # rather than silently shadowing something real.
 # ---------------------------------------------------------------------------
+import sys  # noqa: E402  (deliberately after TOOLS is built, see below)
 from . import tool_loader  # noqa: E402  (deliberately after TOOLS is built)
 
-_AUTO_RECORDS = tool_loader.discover_actions(reserved_names=set(TOOLS))
+# logger=print (the default) would write auto-discovery log lines to
+# stdout. That's fine for most invocations, but `jarvis tools-list`
+# imports this module and then prints exactly one JSON payload to stdout
+# for the web UI to JSON.parse — any stray print() before that call
+# corrupts it. Every other diagnostic/log line in this codebase goes to
+# stderr for the same reason (see cli.py); auto-discovery logging should
+# not be the one exception.
+_AUTO_RECORDS = tool_loader.discover_actions(
+    reserved_names=set(TOOLS),
+    logger=lambda msg: print(msg, file=sys.stderr),
+)
 _AUTO_VALID = [r for r in _AUTO_RECORDS if r.valid]
 
 AUTO_TOOL_SCHEMAS = [s for r in _AUTO_VALID for s in r.schemas]
@@ -748,7 +860,54 @@ except Exception:
     pass
 
 
-def execute_tool(name, arguments=None, verbosity=None):
+@dataclass
+class ToolContext:
+    """Optional second argument a tool handler can accept (see
+    _accepts_context / execute_tool below) to get mid-call visibility that
+    a plain `fn(arguments_dict)` signature has no way to expose: how much
+    of the shared cross-provider tool-round budget is left, a place to
+    emit progress events before the call returns, which conversation this
+    is running under, and whether it's a web or CLI session.
+
+    Every existing one-argument handler (built-in or auto-discovered via
+    tool_loader.py) is completely unaffected — this is purely additive,
+    detected per-handler via inspect.signature, not a new required arg.
+    """
+
+    conv_id: Optional[str]
+    round_budget_remaining: Callable[[], int]  # zero-arg callable, not a
+    # snapshot int — RoundBudget.used keeps changing after this context
+    # object is built, so a frozen int would go stale immediately.
+    emit_event: Callable[..., dict]  # bound to dev_agent_events.emit, i.e.
+    # emit_event(job_id, seq, phase, status, **fields) -> the event dict it
+    # just wrote to stderr (and, if a CLI hook is registered, handed to it
+    # too — see dev_agent_events.set_hook). A handler's own steps=[] list
+    # should append exactly this return value, not reconstruct its own
+    # copy, so the live stream and the persisted/replayed result can never
+    # drift apart. Any callable with this signature works as a test stub
+    # (e.g. one that appends the event to a list instead of printing).
+    ui: str  # "web" or "cli" — mirrors the JARVIS_UI env var, so a handler
+    # can decide whether it's worth emitting UI-only events at all.
+
+
+_ACCEPTS_CONTEXT_CACHE = {}  # fn -> bool, computed once per handler via
+# inspect, not re-inspected on every single call.
+
+
+def _accepts_context(fn):
+    cached = _ACCEPTS_CONTEXT_CACHE.get(fn)
+    if cached is not None:
+        return cached
+    try:
+        sig = inspect.signature(fn)
+        accepts = len(sig.parameters) >= 2
+    except (TypeError, ValueError):
+        accepts = False
+    _ACCEPTS_CONTEXT_CACHE[fn] = accepts
+    return accepts
+
+
+def execute_tool(name, arguments=None, verbosity=None, context=None):
     """Run one tool by name and return a JSON-serializable result — always,
     even on failure. Never raises.
 
@@ -759,6 +918,11 @@ def execute_tool(name, arguments=None, verbosity=None):
     tool-run, via `mode` → verbosity in cli.py) opt into the same trimming.
     Omitted/None leaves the result untouched, same as before this
     parameter existed.
+
+    `context`, if given, is a ToolContext — passed as a second positional
+    argument to any handler whose signature accepts one (see
+    _accepts_context). Every handler that only takes one argument keeps
+    being called exactly as before; this is strictly additive.
     """
     allowed = allowed_tools_from_env()
     if allowed is not None and name not in allowed:
@@ -767,8 +931,11 @@ def execute_tool(name, arguments=None, verbosity=None):
     if fn is None:
         return {"error": f"no such tool: {name}"}
     try:
-        if name in COMMAND_TOOLS or name in PLAYNITE_TOOLS or name in WEB_TOOLS or name in PKG_TOOLS or name in SPOTIFY_TOOLS or name in MEMORY_TOOLS or name in CAPACITY_TOOLS or name in RADIO_TOOLS or name in GIT_TOOLS or name in SCREENSHOT_TOOLS or name in DESKTOP_TOOLS or name in OCR_TOOLS or name in FILE_TOOLS or name in CUSTOM_TOOLS or name in YTDL_TOOLS or name in EVERYTHING_TOOLS or name in ORGANIZE_JSON_TOOLS or name in PRESENT_TOOLS or name in AUTO_TOOLS or name == "search_tools":
-            result = fn(arguments or {})
+        if name in COMMAND_TOOLS or name in PLAYNITE_TOOLS or name in WEB_TOOLS or name in PKG_TOOLS or name in SPOTIFY_TOOLS or name in MEMORY_TOOLS or name in CAPACITY_TOOLS or name in RADIO_TOOLS or name in GIT_TOOLS or name in SCREENSHOT_TOOLS or name in DESKTOP_TOOLS or name in OCR_TOOLS or name in FILE_TOOLS or name in CUSTOM_TOOLS or name in YTDL_TOOLS or name in EVERYTHING_TOOLS or name in ORGANIZE_JSON_TOOLS or name in PRESENT_TOOLS or name in SKILL_TOOLS or name in AUTO_TOOLS or name in ("search_tools", "get_tool_schema"):
+            if _accepts_context(fn) and context is not None:
+                result = fn(arguments or {}, context)
+            else:
+                result = fn(arguments or {})
         else:
             result = fn()
     except Exception as e:
