@@ -93,6 +93,7 @@ from .timespec import TimeSpecError
 JARVIS_DIR = Path.home() / ".jarvis"
 STORE_FILE = JARVIS_DIR / "scheduled.json"
 LOCK_FILE = JARVIS_DIR / "scheduled.lock"
+ASK_LOG_FILE = JARVIS_DIR / "scheduler_ask_log.jsonl"
 ENCODING = "utf-8"
 
 KINDS = ("task", "notify", "reminder")
@@ -123,6 +124,12 @@ TOOL_TIMEOUT = 120
 MAX_CATCHUP_RUNS = 5
 MAX_JOBS = 500            # a runaway loop creating jobs shouldn't fill the disk
 MAX_RESULT_CHARS = 4000   # last_result is for humans/the model, not an archive
+MAX_ASK_LOG_ENTRIES = 500  # same "don't fill the disk" ceiling as MAX_JOBS,
+                           # applied to the ask-prompt log instead of the job
+                           # store — see _log_scheduled_ask's docstring.
+MAX_ASK_LOG_FIELD_CHARS = 4000  # mirrors MAX_RESULT_CHARS: a runaway prompt
+                                 # or reply shouldn't be able to blow up the
+                                 # log file or whatever renders sched-ask-log.
 
 CREATE_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 
@@ -826,6 +833,96 @@ def _default_title(job):
         job.get("kind"), "Jarvis")
 
 
+def _truncate_field(text, limit=MAX_ASK_LOG_FIELD_CHARS):
+    text = text or ""
+    if len(text) > limit:
+        return text[:limit] + "...(truncated)"
+    return text
+
+
+def _log_scheduled_ask(job, prompt, ok, reply=None, error=None):
+    """Append one line to ~/.jarvis/scheduler_ask_log.jsonl for every
+    prompt the scheduler sends to `jarvis ask`.
+
+    Before this, a scheduled ask's prompt was only ever visible if the job
+    happened to carry a conv_id AND that conv_id was still a valid,
+    existing conversation — logs.log() silently no-ops otherwise (see its
+    is_valid_id() guard), so an ask job created directly via schedule_task
+    (no linked conversation) left no trace anywhere of what was actually
+    sent once it fired, success or failure. That made a scheduled prompt
+    that misbehaved essentially undebuggable after the fact — nothing to
+    look at except "it/didn't run".
+
+    This log is deliberately independent of conversations.py/logs.py: it
+    always fires, regardless of whether the job has a conv_id, and it
+    survives even if that conversation is later deleted. One JSONL file,
+    same append-only shape as logs.py's own conversation logs, capped at
+    MAX_ASK_LOG_ENTRIES lines the same way MAX_JOBS caps the job store —
+    a misbehaving recurring job firing every minute forever shouldn't be
+    able to grow this file without bound.
+    """
+    entry = {
+        "ts": datetime.now().isoformat(),
+        "job_id": job.get("id"),
+        "title": job.get("title") or _default_title(job),
+        "kind": job.get("kind"),
+        "conv_id": job.get("conv_id"),
+        "prompt": _truncate_field(prompt),
+        "ok": bool(ok),
+        "reply": _truncate_field(reply) if reply else None,
+        "error": _truncate_field(error) if error else None,
+    }
+    try:
+        JARVIS_DIR.mkdir(parents=True, exist_ok=True)
+        lines = []
+        if ASK_LOG_FILE.exists():
+            try:
+                lines = ASK_LOG_FILE.read_text(encoding=ENCODING).splitlines()
+            except OSError:
+                lines = []
+        lines.append(json.dumps(entry, ensure_ascii=False))
+        if len(lines) > MAX_ASK_LOG_ENTRIES:
+            lines = lines[-MAX_ASK_LOG_ENTRIES:]
+        ASK_LOG_FILE.write_text("\n".join(lines) + "\n", encoding=ENCODING)
+    except OSError:
+        # Never let a logging failure take down the actual scheduled
+        # action — same "never raise" spirit as _run_action's own docstring.
+        pass
+
+
+def read_ask_log(limit=None, job_id=None):
+    """Every logged scheduled-ask prompt, newest first. `job_id` filters to
+    one job's history; `limit` caps how many entries come back."""
+    if not ASK_LOG_FILE.exists():
+        return []
+    entries = []
+    try:
+        for line in ASK_LOG_FILE.read_text(encoding=ENCODING).splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                entries.append(json.loads(line))
+            except json.JSONDecodeError:
+                continue
+    except OSError:
+        return []
+    entries.reverse()
+    if job_id:
+        entries = [e for e in entries if e.get("job_id") == job_id]
+    if limit:
+        entries = entries[:limit]
+    return entries
+
+
+def clear_ask_log():
+    try:
+        ASK_LOG_FILE.unlink(missing_ok=True)
+        return True
+    except OSError:
+        return False
+
+
 def _do_ask(job, action):
     """Run a scheduled prompt through a *fresh* `jarvis ask` subprocess.
 
@@ -849,13 +946,21 @@ def _do_ask(job, action):
             env=env, creationflags=CREATE_NO_WINDOW,
         )
     except subprocess.TimeoutExpired:
-        return {"ok": False, "error": "ask timed out after %ds" % ASK_TIMEOUT, "summary": ""}
+        error = "ask timed out after %ds" % ASK_TIMEOUT
+        _log_scheduled_ask(job, prompt, ok=False, error=error)
+        return {"ok": False, "error": error, "summary": ""}
     except (OSError, ValueError) as e:
-        return {"ok": False, "error": "couldn't run jarvis ask: %s" % e, "summary": ""}
+        error = "couldn't run jarvis ask: %s" % e
+        _log_scheduled_ask(job, prompt, ok=False, error=error)
+        return {"ok": False, "error": error, "summary": ""}
 
     reply = (proc.stdout or "").strip()
     if proc.returncode != 0 and not reply:
-        return {"ok": False, "error": (proc.stderr or "ask failed").strip()[:500], "summary": ""}
+        error = (proc.stderr or "ask failed").strip()[:500]
+        _log_scheduled_ask(job, prompt, ok=False, error=error)
+        return {"ok": False, "error": error, "summary": ""}
+
+    _log_scheduled_ask(job, prompt, ok=True, reply=reply)
 
     note = None
     if _should_report(job):

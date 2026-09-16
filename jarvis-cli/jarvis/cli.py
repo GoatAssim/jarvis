@@ -43,7 +43,7 @@ ENCODING = "utf-8"
 
 CHAIN_SEP = "then"      # starts a new batch \u2014 waits for the previous one to finish
 PARALLEL_SEP = "and"    # joins the current batch \u2014 runs alongside whatever's already in it
-RESERVED_NAMES = {"config", "ai-config", "ai-clear", "ai-drop-from", "playnite-config", "spotify-config", "spotify-login", "memory-config", "everything-config", "tools-list", "tool-run", "skills-list", "skills-get", "skills-save", "skills-add", "skills-create", "skills-remove", "skillmake", "skilladd", "skillload", "skillunload", "tool-preview", "tool-safety-set", "conv-new", "conv-list", "conv-show", "conv-switch", "conv-delete", "logs", "logs-list", "logs-show", "logs-clear", "organize-json", "mode", "mode-set", "voice-config", "speak", "listen", "transcribe", "sched-list", "sched-tick", "sched-daemon", "sched-add", "sched-show", "sched-cancel", "sched-pause", "sched-resume", "sched-snooze", "sched-approve", "sched-signal", "sched-clear", "notify-send", "notify-list", "notify-ack", "notify-clear", "notify-config", "conv-search", "mcp-status", "mcp-refresh", "mcp-config", "mcp-call", "mcp-tools", CHAIN_SEP, PARALLEL_SEP, "-h", "--help"}
+RESERVED_NAMES = {"config", "ai-config", "ai-clear", "ai-drop-from", "playnite-config", "spotify-config", "spotify-login", "memory-config", "everything-config", "tools-list", "tool-run", "skills-list", "skills-get", "skills-save", "skills-add", "skills-create", "skills-remove", "skillmake", "skilladd", "skillload", "skillunload", "tool-preview", "tool-safety-set", "conv-new", "conv-list", "conv-show", "conv-switch", "conv-delete", "logs", "logs-list", "logs-show", "logs-clear", "organize-json", "mode", "mode-set", "voice-config", "speak", "listen", "transcribe", "sched-list", "sched-tick", "sched-daemon", "sched-ask-log", "sched-add", "sched-show", "sched-cancel", "sched-pause", "sched-resume", "sched-snooze", "sched-approve", "sched-signal", "sched-clear", "notify-send", "notify-list", "notify-ack", "notify-clear", "notify-config", "conv-search", "mcp-status", "mcp-refresh", "mcp-config", "mcp-call", "mcp-tools", CHAIN_SEP, PARALLEL_SEP, "-h", "--help"}
 
 OUT = Palette(sys.stdout)  # actual command output: the banner, the command list
 ERR = Palette(sys.stderr)  # jarvis's own status/trace/error messages
@@ -165,7 +165,7 @@ def print_help(commands, file=sys.stdout):
         print(f"  {p.GREEN}{name.ljust(width)}{p.RESET} {spec.get('description', '')}", file=file)
     print(f"\nRun '{p.CYAN}jarvis <command> --help{p.RESET}' for a command's options.", file=file)
     print(f"Chain several with '{p.CYAN}jarvis cmd1 then cmd2{p.RESET}'.", file=file)
-    print(f"Built-in: {p.CYAN}config{p.RESET}, {p.CYAN}ai-config{p.RESET}, {p.CYAN}ai-clear{p.RESET}, {p.CYAN}tools-list{p.RESET} (prints every AI tool as JSON — not an ask), {p.CYAN}tool-run{p.RESET} (runs one AI tool directly), {p.CYAN}conv-new{p.RESET}/{p.CYAN}conv-list{p.RESET}/{p.CYAN}conv-show{p.RESET}/{p.CYAN}conv-switch{p.RESET}/{p.CYAN}conv-delete{p.RESET} (manage conversations), {p.CYAN}logs{p.RESET} (browse the raw model\u2194backend traffic for a conversation), {p.CYAN}mode{p.RESET}/{p.CYAN}mode-set <full|compact|precise|ultra>{p.RESET} (read/set the prompt's token-usage capacity — 400%/100%/150%/50%), {p.CYAN}voice-config{p.RESET} (prints the voice config file path), {p.CYAN}speak <text>{p.RESET} (text-to-speech), {p.CYAN}listen{p.RESET} (record → transcribe → ask → speak, one voice turn), {p.CYAN}transcribe <audio file>{p.RESET} (speech-to-text on an existing file), {p.CYAN}sched-list{p.RESET}/{p.CYAN}sched-add <when> <text>{p.RESET}/{p.CYAN}sched-cancel{p.RESET}/{p.CYAN}sched-snooze{p.RESET}/{p.CYAN}sched-approve{p.RESET} (scheduled tasks, reminders and notifications), {p.CYAN}sched-tick{p.RESET} (fire everything due now \\u2014 point Task Scheduler or cron at this), {p.CYAN}sched-daemon{p.RESET} (run a standing tick loop yourself instead of wiring up Task Scheduler/cron or leaving the web UI open; --interval <secs>, --once, --status, --stop), {p.CYAN}sched-signal <event>{p.RESET} (announce something finished, firing jobs waiting on it), {p.CYAN}notify-send <message>{p.RESET}, {p.CYAN}notify-config{p.RESET}.", file=file)
+    print(f"Built-in: {p.CYAN}config{p.RESET}, {p.CYAN}ai-config{p.RESET}, {p.CYAN}ai-clear{p.RESET}, {p.CYAN}tools-list{p.RESET} (prints every AI tool as JSON — not an ask), {p.CYAN}tool-run{p.RESET} (runs one AI tool directly), {p.CYAN}conv-new{p.RESET}/{p.CYAN}conv-list{p.RESET}/{p.CYAN}conv-show{p.RESET}/{p.CYAN}conv-switch{p.RESET}/{p.CYAN}conv-delete{p.RESET} (manage conversations), {p.CYAN}logs{p.RESET} (browse the raw model\u2194backend traffic for a conversation), {p.CYAN}mode{p.RESET}/{p.CYAN}mode-set <full|compact|precise|ultra>{p.RESET} (read/set the prompt's token-usage capacity — 400%/100%/150%/50%), {p.CYAN}voice-config{p.RESET} (prints the voice config file path), {p.CYAN}speak <text>{p.RESET} (text-to-speech), {p.CYAN}listen{p.RESET} (record → transcribe → ask → speak, one voice turn), {p.CYAN}transcribe <audio file>{p.RESET} (speech-to-text on an existing file), {p.CYAN}sched-list{p.RESET}/{p.CYAN}sched-add <when> <text>{p.RESET}/{p.CYAN}sched-cancel{p.RESET}/{p.CYAN}sched-snooze{p.RESET}/{p.CYAN}sched-approve{p.RESET} (scheduled tasks, reminders and notifications), {p.CYAN}sched-tick{p.RESET} (fire everything due now \\u2014 point Task Scheduler or cron at this), {p.CYAN}sched-daemon{p.RESET} (run a standing tick loop yourself instead of wiring up Task Scheduler/cron or leaving the web UI open; --interval <secs>, --once, --status, --stop), {p.CYAN}sched-ask-log{p.RESET} (view the prompts the scheduler has sent to `jarvis ask`, even for jobs with no linked conversation; --job <id>, --limit N, --clear), {p.CYAN}sched-signal <event>{p.RESET} (announce something finished, firing jobs waiting on it), {p.CYAN}notify-send <message>{p.RESET}, {p.CYAN}notify-config{p.RESET}.", file=file)
     print(f"Edit {p.DIM}{CONFIG_FILE}{p.RESET} to add or change commands.", file=file)
 
 
@@ -900,6 +900,13 @@ def handle_ai_prompt(text, commands, provider_override=None):
             pass
 
     print(f"{prefix}{result.text}")
+    if getattr(result, "degraded", False):
+        print(
+            f"{ERR.DIM}  (note: every provider failed while composing this reply; "
+            f"the text above is a mechanical summary of completed tool calls, "
+            f"not a model-written answer){ERR.RESET}",
+            file=sys.stderr, flush=True,
+        )
 
     # Phase 0 (new_plan.md): baseline token/tool/round measurement for this
     # ask. Two lines: a human-readable one on stderr (visible in a plain CLI
@@ -1024,8 +1031,8 @@ def run_logs_command(argv, commands):
 # has no tool equivalent: the approval gate is only worth anything if the
 # model can't reach it (see scheduler._needs_approval).
 SCHEDULER_COMMANDS = {
-    "sched-list", "sched-tick", "sched-daemon", "sched-add", "sched-show",
-    "sched-cancel", "sched-pause", "sched-resume", "sched-snooze",
+    "sched-list", "sched-tick", "sched-daemon", "sched-ask-log", "sched-add",
+    "sched-show", "sched-cancel", "sched-pause", "sched-resume", "sched-snooze",
     "sched-approve", "sched-signal", "sched-clear", "notify-send",
     "notify-list", "notify-ack", "notify-clear", "notify-config",
     "conv-search", "mcp-status", "mcp-refresh", "mcp-config", "mcp-call",
@@ -1184,6 +1191,28 @@ def run_scheduler_command(argv):
                 except (ValueError, IndexError):
                     return emit({"error": "usage: jarvis sched-daemon [--interval <seconds>] [--once] [--status] [--stop]"}, 1)
             return sched_daemon.run(interval=interval, once="--once" in rest)
+
+        if cmd == "sched-ask-log":
+            # View (or clear) the prompts the scheduler has sent to
+            # `jarvis ask` — see scheduler._log_scheduled_ask's docstring
+            # for why this exists: an ask job with no conv_id used to leave
+            # no record anywhere of what was actually sent when it fired.
+            if "--clear" in rest:
+                cleared = scheduler.clear_ask_log()
+                return emit({"ok": True, "cleared": cleared})
+            job_id = None
+            if "--job" in rest:
+                try:
+                    job_id = rest[rest.index("--job") + 1]
+                except IndexError:
+                    return emit({"error": "usage: jarvis sched-ask-log [--job <id>] [--limit N] [--clear]"}, 1)
+            limit = 20
+            if "--limit" in rest:
+                try:
+                    limit = int(rest[rest.index("--limit") + 1])
+                except (ValueError, IndexError):
+                    return emit({"error": "usage: jarvis sched-ask-log [--job <id>] [--limit N] [--clear]"}, 1)
+            return emit({"entries": scheduler.read_ask_log(limit=limit, job_id=job_id)})
 
         if cmd == "sched-show":
             job_id = need_id()

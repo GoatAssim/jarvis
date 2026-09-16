@@ -616,6 +616,29 @@ def _anthropic_turns_to_generic(system_text, working_turns):
 # carrying the matching tool_call_id.
 # ---------------------------------------------------------------------------
 
+def _looks_like_omitted_tools_confused_the_model(reason):
+    """Groq's tool-calling validation is stricter than the rest of the
+    openai_compatible family: if `tools` is left out of the request
+    entirely (jarvis's forced-final-round behavior — see the round_num <
+    MAX_TOOL_ROUNDS gate above) but the model still emits a tool call
+    anyway, Groq 400s instead of just treating it as ignorable text. Two
+    message shapes seen in practice for the same underlying mismatch:
+    "Tool choice is none, but model called a tool" and "attempted to call
+    tool 'X' which was not in request.tools". Matched loosely (substring,
+    not an exact string) since the exact wording isn't documented/stable
+    API contract, just an observed pattern — a false negative here just
+    means the normal error path handles it as before.
+    """
+    if not reason:
+        return False
+    lowered = reason.lower()
+    return (
+        ("tool choice is none" in lowered and "called a tool" in lowered)
+        or "which was not in request.tools" in lowered
+        or ("tool_choice" in lowered and "none" in lowered and "tool" in lowered)
+    )
+
+
 def call_openai_compatible(provider, messages, timeout, tools=None, tool_executor=None, round_budget=None,
                            cfg_defaults=None):
     base_url = provider.get("base_url") or ""
@@ -675,18 +698,22 @@ def call_openai_compatible(provider, messages, timeout, tools=None, tool_executo
         # never a guarantee. Keyed on the conversation, so every turn of one
         # chat lands together, and deliberately not on anything per-request.
         #
-        # Unknown JSON fields are ignored by every host jarvis ships a config
-        # block for, but that isn't every host that exists — a self-hosted or
-        # proxied endpoint can be stricter. "prompt_cache_key": false in a
-        # provider block turns this off without touching anything else.
+        # NOT every host in this family tolerates an unrecognized field:
+        # Groq's endpoint 400s outright on prompt_cache_key ("property
+        # 'prompt_cache_key' is unsupported"), on every request, every key —
+        # not a fluke. prompt_cache.resolve_settings() already defaults
+        # send_cache_key to False for names in NO_CACHE_KEY_PROVIDER_NAMES,
+        # so cache_plan["cache_key"] is already False for Groq by the time
+        # it reaches here; this comment is the "why" for that default, not
+        # something this call site needs to re-check. "prompt_cache_key":
+        # true in a Groq provider block would still turn it back on and
+        # promptly fail again — that's an explicit choice, not a bug.
         if cache_plan.get("cache_key"):
             cache_key = _log_conv_id()
             if cache_key:
                 payload["prompt_cache_key"] = str(cache_key)
-        if tools_payload and round_num < MAX_TOOL_ROUNDS and round_budget.remaining() > 0:
-            # On the forced-final round any tool_calls the model returns get
-            # ignored anyway (see the round_num < MAX_TOOL_ROUNDS gate below),
-            # so advertising tools there just burns input tokens for nothing.
+        tools_omitted_this_round = not (tools_payload and round_num < MAX_TOOL_ROUNDS and round_budget.remaining() > 0)
+        if not tools_omitted_this_round:
             payload["tools"] = tools_payload
         extra = provider.get("extra_params")
         if isinstance(extra, dict):
@@ -697,6 +724,22 @@ def call_openai_compatible(provider, messages, timeout, tools=None, tool_executo
             return AIResult(False, error=net_err,
                             tool_history=_openai_messages_to_generic(working_messages) if ran_tools else None)
         reason = _status_reason(resp)
+        if reason and tools_omitted_this_round and tools_payload \
+                and _looks_like_omitted_tools_confused_the_model(reason):
+            # See _looks_like_omitted_tools_confused_the_model's docstring.
+            # Retry this SAME round once, with tools included after all —
+            # bypassing the forced-final-round omission just for this one
+            # request — rather than burning the whole key over a request
+            # shape jarvis chose, not something the caller did wrong. Only
+            # ever one retry per round (this isn't inside a loop that could
+            # re-trigger it), so a provider that fails this way for some
+            # other, unrelated reason still terminates normally.
+            payload["tools"] = tools_payload
+            resp, net_err = _post_json(base_url, headers, payload, timeout)
+            if net_err:
+                return AIResult(False, error=net_err,
+                                tool_history=_openai_messages_to_generic(working_messages) if ran_tools else None)
+            reason = _status_reason(resp)
         if reason:
             return AIResult(False, error=reason,
                             tool_history=_openai_messages_to_generic(working_messages) if ran_tools else None)
@@ -1055,6 +1098,20 @@ def _delete_gemini_cache(cache_name, headers, timeout):
         pass
 
 
+# gemini-2.5+ models "think" by default — the model spends output tokens on
+# an invisible reasoning trace BEFORE any visible answer text, and
+# maxOutputTokens caps the two together, not separately. The blind fallback
+# of 700 used everywhere else in this file was sized for plain completions
+# and is nowhere near enough for a thinking model: a real, reproducible
+# failure mode is every single round finishing with finishReason=MAX_TOKENS
+# and zero visible text, because the whole budget went to the hidden trace.
+# Unlike a rate limit or a bad key, this reproduces identically on every
+# key against the same model/config — which is exactly the "empty response
+# content" x10 signature this constant exists to stop being the default.
+# An explicit "max_tokens" in the provider block always overrides this.
+GEMINI_DEFAULT_MAX_TOKENS = 3072
+
+
 def call_gemini(provider, messages, timeout, tools=None, tool_executor=None, round_budget=None,
                 cfg_defaults=None):
     api_key = provider.get("api_key") or ""
@@ -1159,8 +1216,18 @@ def call_gemini(provider, messages, timeout, tools=None, tool_executor=None, rou
 
             payload = {
                 "contents": working_contents,
-                "generationConfig": {"maxOutputTokens": provider.get("max_tokens", 700)},
+                "generationConfig": {"maxOutputTokens": provider.get("max_tokens", GEMINI_DEFAULT_MAX_TOKENS)},
             }
+            extra = provider.get("extra_params")
+            if isinstance(extra, dict):
+                # Merged into generationConfig specifically (not the top
+                # level payload, unlike the openai_compatible family) — this
+                # is where thinkingConfig, topP, topK etc. actually live in
+                # Gemini's request shape. Lets a provider block turn off
+                # reasoning traces entirely with
+                # "extra_params": {"thinkingConfig": {"thinkingBudget": 0}}
+                # instead of just raising max_tokens to outrun them.
+                payload["generationConfig"].update(extra)
             if cache_name:
                 payload["cachedContent"] = cache_name
             else:
@@ -1217,6 +1284,32 @@ def call_gemini(provider, messages, timeout, tools=None, tool_executor=None, rou
             if not text:
                 if call_parts:
                     return AIResult(False, error=_give_up_error(), tool_history=_history())
+                if finish_reason == "MAX_TOKENS":
+                    # See GEMINI_DEFAULT_MAX_TOKENS's docstring: this is the
+                    # thinking-budget-ate-everything failure mode, not a
+                    # generic empty response, and it's worth saying so —
+                    # "empty response content" gives no hint that the fix is
+                    # a config change (raise max_tokens, or set
+                    # thinkingConfig.thinkingBudget=0), and this failure
+                    # otherwise reproduces identically on every key, which
+                    # looks like a mass outage rather than one bad setting.
+                    thoughts = ((data.get("usageMetadata") or {}).get("thoughtsTokenCount"))
+                    hint = (
+                        " (%d tokens spent on internal \"thinking\" before any "
+                        "visible output)" % thoughts if thoughts else ""
+                    )
+                    return AIResult(
+                        False,
+                        error=(
+                            "hit max_tokens with no visible output%s — raise "
+                            "this provider's max_tokens (current cap: %d), or "
+                            "set \"extra_params\": {\"thinkingConfig\": "
+                            "{\"thinkingBudget\": 0}} in this provider's config "
+                            "if you don't need reasoning traces"
+                            % (hint, provider.get("max_tokens", GEMINI_DEFAULT_MAX_TOKENS))
+                        ),
+                        tool_history=_history(),
+                    )
                 return AIResult(False, error="empty response content", tool_history=_history())
             return AIResult(True, text=text, usage=get_usage_summary())
 

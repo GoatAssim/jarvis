@@ -2380,6 +2380,80 @@
   }
 
   // ===========================================================================
+  // ===========================================================================
+  // Math extraction — pulls $...$/$$...$$/\(...\)/\[...\] segments out of
+  // the raw text BEFORE marked.parse() ever sees them, and puts the exact
+  // original source back in after marked+DOMPurify have run. This is not
+  // optional politeness — two real bugs make it necessary, not just nice:
+  //
+  //  1. CommonMark's backslash-escape rule silently EATS the backslash in
+  //     \( and \[ (backslash followed by ASCII punctuation is "this is an
+  //     escaped literal", and the backslash is dropped from the output).
+  //     marked.parse("\\(x_B = 1\\)") produces "(x_B = 1)" — the escaped
+  //     delimiter marker is gone before KaTeX's auto-render ever runs
+  //     over the DOM, so \(...\)/\[...\] would silently never match.
+  //  2. A bare "*" or "_" inside $...$ is ordinary GFM emphasis syntax to
+  //     marked, which doesn't know it's looking at math. Confirmed:
+  //     marked.parse("$2*x + 3*y$") produces "$2<em>x + 3</em>y$" — real,
+  //     unremarkable LaTeX (any multiplication or subscript written
+  //     without spaces) silently corrupted, not a contrived edge case.
+  //
+  // Extracting first means marked and DOMPurify never see the LaTeX
+  // source at all — they see an opaque placeholder token instead — so
+  // neither can mangle it. KaTeX's auto-render then runs on the finished
+  // DOM as normal, seeing the exact original delimiters and content.
+  // ===========================================================================
+
+  // Private Use Area characters: valid anywhere in HTML text content,
+  // never produced by marked/DOMPurify's own output, so a placeholder
+  // built from them can't collide with anything either library emits.
+  const MATH_PLACEHOLDER_OPEN = "\uE000";
+  const MATH_PLACEHOLDER_CLOSE = "\uE001";
+
+  function extractMath(text) {
+    const stash = [];
+    const stow = (m) => {
+      stash.push(m);
+      return MATH_PLACEHOLDER_OPEN + (stash.length - 1) + MATH_PLACEHOLDER_CLOSE;
+    };
+    // Order matters: block forms first, so a later inline pattern can't
+    // tear a block delimiter in half (e.g. matching just the first "$" of
+    // a "$$" pair). Each is non-greedy and (for the dollar forms) barred
+    // from crossing a blank line, so a stray unmatched "$" earlier in a
+    // long reply can't swallow everything after it as one giant match.
+    let out = text.replace(/\$\$[\s\S]+?\$\$/g, stow);
+    out = out.replace(/\\\[[\s\S]+?\\\]/g, stow);
+    out = out.replace(/\$[^\n$]+?\$/g, stow);
+    out = out.replace(/\\\([^\n]+?\\\)/g, stow);
+    return { text: out, stash };
+  }
+  // Known, accepted trade-off — not unique to this implementation, every
+  // tool supporting bare $...$ inline math has the same ambiguity: two
+  // unrelated dollar amounts on one line with nothing else between them
+  // ("It costs $5 and $10") greedily reads as one inline math span.
+  // KaTeX (throwOnError: false, see renderMathIn) shows a small inline
+  // error for the resulting nonsense rather than crashing — the same
+  // failure mode every other $...$-based renderer accepts, not a reason
+  // to drop inline math support. \(...\)/\[...\] are unambiguous and
+  // never hit this.
+
+  function escapeHtml(s) {
+    return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  }
+
+  function restoreMath(html, stash) {
+    const re = new RegExp(MATH_PLACEHOLDER_OPEN + "(\\d+)" + MATH_PLACEHOLDER_CLOSE, "g");
+    return html.replace(re, (m, i) => {
+      const src = stash[Number(i)];
+      // src is about to be dropped back into an HTML string as literal
+      // text content, so it needs the same escaping marked's own text
+      // nodes already got — otherwise LaTeX containing < or > (e.g.
+      // "$a < b$") would be parsed as a stray HTML tag once this string
+      // is assigned to .innerHTML.
+      return src === undefined ? m : escapeHtml(src);
+    });
+  }
+
   // Markdown renderer (marked.js — loaded via CDN before this script)
   // ===========================================================================
 
@@ -2389,14 +2463,48 @@
       d.textContent = text;
       return d.innerHTML.replace(/\n/g, "<br>");
     }
-    const html = marked.parse(text, {
+    const { text: withPlaceholders, stash } = extractMath(text);
+    const html = marked.parse(withPlaceholders, {
       breaks: true,
       gfm: true,
     });
-    if (typeof DOMPurify !== "undefined") {
-      return DOMPurify.sanitize(html);
+    const clean = typeof DOMPurify !== "undefined" ? DOMPurify.sanitize(html) : html;
+    return stash.length ? restoreMath(clean, stash) : clean;
+  }
+
+  // KaTeX auto-render, applied to an element's rendered HTML AFTER
+  // marked+DOMPurify+restoreMath have run — a post-process pass over the
+  // DOM, which is what katex's own auto-render extension is built for: it
+  // walks an element's text nodes looking for $...$/$$...$$/\(...\)/\[...\],
+  // which by this point are back to their exact original source text
+  // (see extractMath's docstring for why that step has to happen first).
+  // Without this, a reply with math in it renders literal "\vec{OI}" and
+  // dollar signs instead of typeset math — this is what actually turns
+  // the LaTeX Jarvis is asked to write into math a person can read,
+  // rather than requiring the model to avoid math notation entirely.
+  //
+  // Silently a no-op if the CDN script failed to load (offline, blocked,
+  // whatever) — same graceful-degradation spirit as the `typeof marked
+  // === "undefined"` fallback above, math just stays as plain text
+  // instead of the whole bubble failing to render.
+  function renderMathIn(el) {
+    if (typeof renderMathInElement === "undefined" || !el) return;
+    try {
+      renderMathInElement(el, {
+        delimiters: [
+          { left: "$$", right: "$$", display: true },
+          { left: "\\[", right: "\\]", display: true },
+          { left: "$", right: "$", display: false },
+          { left: "\\(", right: "\\)", display: false },
+        ],
+        throwOnError: false,
+        // Code blocks/inline code are the one place a bare "$" is common
+        // and never meant as math (shell prompts, prices in examples).
+        ignoredTags: ["script", "noscript", "style", "textarea", "pre", "code"],
+      });
+    } catch (e) {
+      // Never let a malformed formula take the whole bubble down.
     }
-    return html;
   }
 
   // ===========================================================================
@@ -3571,6 +3679,7 @@
     const bubble = qs(".ask-msg__bubble", state.askPendingBubble);
     bubble.innerHTML = renderMarkdown(reply.join("\n"));
     linkifyPaths(bubble);
+    renderMathIn(bubble);
   }
 
   function appendAskReplyLine(line) {
@@ -3612,6 +3721,7 @@
         const bubbleEl = qs(".ask-msg__bubble", bubble);
         bubbleEl.innerHTML = renderMarkdown(raw);
         linkifyPaths(bubbleEl);
+        renderMathIn(bubbleEl);
       }
       addAskMsgActions(bubble);
     }
@@ -5636,6 +5746,7 @@
     const bubbleEl = qs(".ask-msg__bubble", msg);
     bubbleEl.innerHTML = renderMarkdown(text || "");
     linkifyPaths(bubbleEl);
+    renderMathIn(bubbleEl);
     addAskMsgActions(msg);
     askThread.appendChild(msg);
     return msg;

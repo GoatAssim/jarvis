@@ -55,6 +55,10 @@ DEFAULT_CONFIRM_REQUIRED = {
                   # reader who only checks this top-level default set.
     "ytdl_download",
     "type_text",
+    "write_on_screen",  # types AND submits — same input-injection risk as
+                        # type_text plus it actually sends the result, so it
+                        # gets the same confirm-required default rather than
+                        # inheriting a laxer one by omission.
     "press_key",
     "hotkey",
     "click",

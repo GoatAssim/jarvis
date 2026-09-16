@@ -2437,3 +2437,14 @@ audio.ask-dl-player{ max-height: none; background: transparent; }
 .panel-menu__item-hint{
   font-family: var(--font-mono); font-size: 10.5px; color: var(--text-dimmer);
 }
+
+/* KaTeX math (see app.js's renderMathIn/extractMath). KaTeX's own
+   stylesheet doesn't reliably set a text color that stays legible against
+   this app's dark theme, so force it to inherit the bubble's own text
+   color rather than trusting KaTeX's default. Display-mode blocks
+   ($$...$$) get the same overflow-x pattern as this file's other
+   wide-content containers (see .json-org-snippet above) — a long
+   equation shouldn't be able to push the whole chat bubble wider than
+   the column. */
+.katex{ color: inherit; }
+.katex-display{ overflow-x: auto; overflow-y: hidden; padding: 2px 0; }

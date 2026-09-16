@@ -107,6 +107,19 @@ OLLAMA — local, and the lever is keep_alive, not a cache field.
 # automatically (openai_compatible) or is tuned some other way (ollama).
 EXPLICIT_MARKER_TYPES = frozenset({"anthropic"})
 
+# openai_compatible covers several genuinely different hosts behind one
+# shared code path (see ai_providers.call_openai_compatible). Most of them
+# silently ignore JSON fields they don't recognize, which is what let this
+# module assume "unknown fields are safe to send speculatively" for the
+# whole family. Groq's endpoint does NOT: sending prompt_cache_key there is
+# a hard HTTP 400 ("property 'prompt_cache_key' is unsupported"), on every
+# single request, for every key — not a rate limit, not a transient
+# failure, an unconditional reject. Matched on provider *name* rather than
+# a new "type", since these are still genuinely openai_compatible in every
+# other respect (payload shape, tool-calling format, auth header) — this
+# is one field on one host, not a different protocol.
+NO_CACHE_KEY_PROVIDER_NAMES = frozenset({"groq"})
+
 DEFAULT_TTL = "5m"
 VALID_TTLS = ("5m", "1h")
 
@@ -226,7 +239,9 @@ def resolve_settings(provider, defaults=None):
                                 on why a write never read is a 25% loss)
         prompt_cache_min_tokens override the model-derived floor
         prompt_cache_key        openai-family: send a routing hint (default
-                                True)
+                                True, except False for hosts in
+                                NO_CACHE_KEY_PROVIDER_NAMES like Groq, which
+                                reject the field outright)
         gemini_explicit_cache   Gemini: use the cachedContents API instead of
                                 relying on free implicit caching (default
                                 False)
@@ -254,12 +269,20 @@ def resolve_settings(provider, defaults=None):
     if not isinstance(keep_alive, (str, int)) or keep_alive == "":
         keep_alive = DEFAULT_OLLAMA_KEEP_ALIVE
 
+    # send_cache_key defaults to True for the family, EXCEPT the specific
+    # names in NO_CACHE_KEY_PROVIDER_NAMES, which default to False — see
+    # that set's docstring. An explicit "prompt_cache_key" in the provider
+    # block (or defaults) always wins either way; this only changes what
+    # happens when the key is left unset, which is every existing config
+    # someone already has on disk.
+    cache_key_default = provider.get("name") not in NO_CACHE_KEY_PROVIDER_NAMES
+
     return {
         "enabled": bool(pick("prompt_cache", True)),
         "ttl": ttl,
         "cache_tools": bool(pick("prompt_cache_tools", False)),
         "min_tokens": min_tokens,
-        "send_cache_key": bool(pick("prompt_cache_key", True)),
+        "send_cache_key": bool(pick("prompt_cache_key", cache_key_default)),
         "gemini_explicit": bool(pick("gemini_explicit_cache", False)),
         "ollama_keep_alive": keep_alive,
     }

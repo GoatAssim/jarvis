@@ -1,13 +1,14 @@
 """scheduling — the model's side of scheduled tasks, notifications and
 reminders.
 
-Six tools over ONE engine (jarvis/scheduler.py). The split between them is
+Seven tools over ONE engine (jarvis/scheduler.py). The split between them is
 about what the model is trying to express, not about three separate
 mechanisms underneath:
 
     remind_me        "remind me to call mum at 6"        kind=reminder
     notify_me        "tell me when the download's done"  kind=notify
     schedule_task    "run the backup every night at 2"   kind=task
+    schedule_watch   "check the screen and react to what it says" kind=task
     list_scheduled   "what have I got set up?"
     cancel_scheduled cancel / pause / resume / snooze
     signal_event     "the backup finished"  -> fires anything waiting on it
@@ -15,7 +16,11 @@ mechanisms underneath:
 Every one of them lands in the same store, with the same trigger types and
 the same tick loop. remind_me and notify_me are, mechanically, schedule_task
 with action={"type": "notify"} — which is exactly what "reminders use the
-notifying engine" means in practice.
+notifying engine" means in practice. schedule_watch is, mechanically, also
+schedule_task with action={"type": "ask"} — it just builds that prompt's
+text from structured {if_screen_shows, then} checks instead of asking the
+caller to hand-write a nested if/elif prose block (see
+_build_watch_prompt's docstring).
 
 WHY THREE TOOLS INSTEAD OF ONE WITH A `kind` PARAMETER
 ------------------------------------------------------
@@ -237,6 +242,87 @@ def tool_schedule_task(args, context=None):
     return _ok(job)
 
 
+def _build_watch_prompt(context, checks, otherwise):
+    """Turn a structured watch spec into the numbered, ordered-if/elif
+    prompt text an 'ask' job actually runs. See tool_schedule_watch's
+    docstring for why this exists instead of asking the caller to hand-
+    write this shape of prompt every time.
+    """
+    lines = []
+    if context:
+        lines.append(context.strip())
+        lines.append("")
+    lines.append("1. Use the read_screen tool (NOT take_screenshot) to see "
+                 "what's currently on screen.")
+    lines.append("2. Check each condition below IN ORDER and act on the "
+                 "FIRST one that matches. Do at most ONE action this run — "
+                 "don't act on more than one condition, and don't repeat an "
+                 "action you can see you already took.")
+    lines.append("")
+    letters = "abcdefghijklmnopqrstuvwxyz"
+    for i, c in enumerate(checks):
+        letter = letters[i] if i < len(letters) else str(i + 1)
+        lines.append('   %s. If the screen shows: "%s"' % (letter, c["if_screen_shows"].strip()))
+        lines.append("      -> %s" % c["then"].strip())
+        lines.append("")
+    lines.append("3. If NONE of the above match: %s" % (otherwise or "Do nothing.").strip())
+    return "\n".join(lines).rstrip() + "\n"
+
+
+def tool_schedule_watch(args, context=None):
+    """Schedule an ordered 'read the screen, check conditions in turn, act
+    on the first match' task, without the caller having to hand-compose
+    that shape of prompt from scratch.
+
+    schedule_task's `prompt` field is fully general — it can already
+    express this by writing the whole nested if/then/else as prose — but
+    that prose is easy to get subtly wrong (forgetting to say read_screen
+    instead of take_screenshot, forgetting to say "only act once", losing
+    track of which condition is checked first when there are 3-4 of them).
+    This tool takes the same logic as structured data instead and
+    generates that prompt text consistently every time, then creates the
+    job through the exact same scheduler.create() path tool_schedule_task
+    uses — it's a friendlier front end onto the same 'ask' job, not a
+    different mechanism.
+    """
+    args = args or {}
+    when = (args.get("when") or "").strip()
+    if not when:
+        return {"needs_clarification": True, "message": "When should this run?"}
+
+    checks = args.get("checks") or []
+    if not isinstance(checks, list) or not checks:
+        return {"needs_clarification": True,
+                "message": "Give at least one check: {if_screen_shows, then}."}
+    cleaned = []
+    for i, c in enumerate(checks):
+        if not isinstance(c, dict) or not (c.get("if_screen_shows") or "").strip() \
+                or not (c.get("then") or "").strip():
+            return _err("checks[%d] needs both if_screen_shows and then" % i)
+        cleaned.append({"if_screen_shows": c["if_screen_shows"], "then": c["then"]})
+
+    prompt = _build_watch_prompt(args.get("context"), cleaned, args.get("otherwise"))
+    action = {"type": "ask", "prompt": prompt, "report": bool(args.get("report", True))}
+
+    try:
+        job = scheduler.create(
+            kind="task",
+            title=(args.get("title") or "Watch: %s" % cleaned[0]["if_screen_shows"]).strip(),
+            when=when,
+            action=action,
+            channels=_channels(args),
+            conv_id=getattr(context, "conv_id", None),
+            emit_on_done=args.get("emit_on_done"),
+            max_runs=args.get("times"),
+            catch_up=bool(args.get("catch_up", False)),
+        )
+    except SchedulerError as e:
+        return {"needs_clarification": True, "message": str(e)}
+    result = _ok(job)
+    result["generated_prompt"] = prompt
+    return result
+
+
 def tool_list_scheduled(args, context=None):
     args = args or {}
     kind = (args.get("kind") or "").strip().lower() or None
@@ -430,6 +516,88 @@ TOOL_SCHEMAS = [
         },
     },
     {
+        "name": "schedule_watch",
+        "description": (
+            "Schedule a task that reads the screen and reacts based on what it "
+            "sees — an ordered list of conditions checked in turn, acting on "
+            "the first one that matches (like an if/elif chain). Use this "
+            "instead of schedule_task's freeform `prompt` whenever the request "
+            "is shaped like 'check if the screen shows X, and if so do Y, "
+            "otherwise check Z...' — e.g. monitoring another program or AI "
+            "session's terminal/chat window and reacting to its state "
+            "('if it says tokens are exhausted, do nothing', 'if it's done, "
+            "tell it to do the next thing', 'if it's still running, leave it "
+            "alone'). Always reads the screen via read_screen (text, not an "
+            "image) and takes at most one action per run. For a single "
+            "unconditional prompt with no branching, use schedule_task instead."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "when": {"type": "string", "description": _WHEN_HELP},
+                "context": {
+                    "type": "string",
+                    "description": "Optional one- or two-sentence framing of what's "
+                                   "being watched, prepended to the generated prompt "
+                                   "(e.g. 'You're monitoring another Claude session "
+                                   "running in a terminal window.').",
+                },
+                "checks": {
+                    "type": "array",
+                    "description": "Ordered conditions — checked top to bottom, first "
+                                   "match wins. Each needs if_screen_shows (what to look "
+                                   "for) and then (what to do if it's there).",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "if_screen_shows": {
+                                "type": "string",
+                                "description": "Text or a description of what should be "
+                                               "on screen for this condition to match, "
+                                               "e.g. 'tokens are exhausted' or 'the task "
+                                               "is done'.",
+                            },
+                            "then": {
+                                "type": "string",
+                                "description": "What to do if this condition matches, "
+                                               "written as an instruction, e.g. 'Do "
+                                               "nothing.' or 'Tell it to continue.' or "
+                                               "'Tell it to do one of: A, B.'",
+                            },
+                        },
+                        "required": ["if_screen_shows", "then"],
+                    },
+                },
+                "otherwise": {
+                    "type": "string",
+                    "description": "What to do if none of the checks match. Default "
+                                   "'Do nothing.' — the common case is 'it's still "
+                                   "running, leave it be'.",
+                },
+                "title": {"type": "string", "description": "Short label shown in lists and notifications."},
+                "report": {
+                    "type": "boolean",
+                    "description": "Notify the user with the result when it finishes. "
+                                   "Default true; set false for a genuinely silent watcher.",
+                },
+                "emit_on_done": {
+                    "type": "string",
+                    "description": "Announce this event name when the task finishes "
+                                   "successfully, so another job created with "
+                                   "when='when <name>' runs next.",
+                },
+                "catch_up": {
+                    "type": "boolean",
+                    "description": "If the machine was off through scheduled runs, make "
+                                   "them up on the next tick (capped at 5). Default false.",
+                },
+                "times": {"type": "integer", "description": "Stop after this many runs."},
+                "channels": {"type": "array", "items": {"type": "string"}, "description": _CHANNEL_HELP},
+            },
+            "required": ["when", "checks"],
+        },
+    },
+    {
         "name": "list_scheduled",
         "description": (
             "List the user's scheduled tasks, reminders and pending notifications, "
@@ -513,6 +681,7 @@ TOOLS = {
     "remind_me": tool_remind_me,
     "notify_me": tool_notify_me,
     "schedule_task": tool_schedule_task,
+    "schedule_watch": tool_schedule_watch,
     "list_scheduled": tool_list_scheduled,
     "cancel_scheduled": tool_cancel_scheduled,
     "signal_event": tool_signal_event,
@@ -546,6 +715,10 @@ TOOL_KEYWORDS = {
         "every day at": 9, "each morning": 8, "on startup": 9, "at startup": 9,
         "next startup": 9, "recurring": 8, "automatically run": 9, "cron": 8,
         "in the background later": 7, "every hour": 8, "daily": 7, "hourly": 7,
+    },
+    "schedule_watch": {
+        "check if the screen": 10, "check the screen": 9, "read the screen and": 9,
+        "watch the screen": 9, "if it says": 6, "if it shows": 6,
     },
     "list_scheduled": {
         "what's scheduled": 10, "whats scheduled": 10, "my reminders": 10,

@@ -374,6 +374,75 @@ def test_mcp_tools_build_registers_both_colliding_servers():
         importlib.reload(mcp_tools)  # restore a normal (empty) catalog
 
 
+def test_non_object_schema_is_wrapped_not_discarded():
+    # actions/mcp_tools.py._schema_for — the "MCP schema translation is
+    # best-effort" gap. A server declaring a non-object top-level schema
+    # used to be flattened to an open `{}`, throwing away every
+    # constraint (type, enum, nested shape). It should now be wrapped in
+    # a single required "value" property that carries the original
+    # schema verbatim.
+    from jarvis.actions import mcp_tools
+
+    schema, name = mcp_tools._schema_for(
+        "srv", {"name": "pick", "description": "d",
+                "input_schema": {"type": "string", "enum": ["a", "b"]}},
+        trusted=False)
+    params = schema["parameters"]
+    check("wrapped schema is still an object at the top level",
+          params.get("type") == "object", params)
+    check("the original schema survives verbatim under 'value'",
+          params.get("properties", {}).get("value") == {"type": "string", "enum": ["a", "b"]},
+          params)
+    check("'value' is required", params.get("required") == ["value"], params)
+    check("the description flags the wrapping so the model knows to nest its call",
+          "value" in schema["description"].lower() and "note" in schema["description"].lower(),
+          schema["description"])
+
+
+def test_object_schema_passes_through_unwrapped():
+    from jarvis.actions import mcp_tools
+
+    schema, _ = mcp_tools._schema_for(
+        "srv", {"name": "echo", "description": "d",
+                "input_schema": {"type": "object",
+                                  "properties": {"x": {"type": "string"}}}},
+        trusted=False)
+    check("a genuine object schema is untouched",
+          schema["parameters"] == {"type": "object", "properties": {"x": {"type": "string"}}},
+          schema["parameters"])
+    check("no wrapping note is added when nothing was wrapped",
+          "Note:" not in schema["description"], schema["description"])
+
+
+def test_schema_missing_type_but_has_properties_is_treated_as_object():
+    # Some servers write a valid object schema but omit "type": "object"
+    # since JSON Schema doesn't strictly require it. That should be
+    # recognized as an object schema, not wrapped as if it were "any".
+    from jarvis.actions import mcp_tools
+
+    schema, _ = mcp_tools._schema_for(
+        "srv", {"name": "echo", "description": "d",
+                "input_schema": {"properties": {"x": {"type": "string"}}}},
+        trusted=False)
+    check("a typeless-but-object-shaped schema is filled in, not wrapped",
+          schema["parameters"].get("type") == "object" and "value" not in schema["parameters"].get("properties", {}),
+          schema["parameters"])
+
+
+def test_missing_or_garbage_schema_still_degrades_to_open_object():
+    from jarvis.actions import mcp_tools
+
+    schema, _ = mcp_tools._schema_for("srv", {"name": "t", "description": "d"}, trusted=False)
+    check("no input_schema at all still yields an open object",
+          schema["parameters"] == {"type": "object", "properties": {}}, schema["parameters"])
+
+    schema2, _ = mcp_tools._schema_for(
+        "srv", {"name": "t2", "description": "d", "input_schema": "not even a dict"},
+        trusted=False)
+    check("a non-dict input_schema still degrades to an open object",
+          schema2["parameters"] == {"type": "object", "properties": {}}, schema2["parameters"])
+
+
 for fn in [
     test_name_sanitizing, test_handshake_and_listing, test_refresh_populates_the_cache,
     test_cache_read_never_spawns, test_calling_tools,
@@ -385,6 +454,10 @@ for fn in [
     test_colliding_server_names_both_survive,
     test_non_colliding_names_report_no_collision,
     test_mcp_tools_build_registers_both_colliding_servers,
+    test_non_object_schema_is_wrapped_not_discarded,
+    test_object_schema_passes_through_unwrapped,
+    test_schema_missing_type_but_has_properties_is_treated_as_object,
+    test_missing_or_garbage_schema_still_degrades_to_open_object,
 ]:
     fn()
 

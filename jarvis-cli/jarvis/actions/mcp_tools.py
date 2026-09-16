@@ -143,15 +143,59 @@ def _schema_for(server, tool, trusted):
     described = tool.get("description") or ("%s tool from the %s MCP server"
                                             % (tool["name"], server))
     schema = tool.get("input_schema") or {"type": "object", "properties": {}}
-    if not isinstance(schema, dict) or schema.get("type") != "object":
-        # A few servers declare a non-object top level, which no provider
-        # will accept as a function signature. Wrapping is wrong (it would
-        # change the argument shape the server expects), so this degrades to
-        # an open object and lets the server validate.
+    wrapped = False
+
+    if not isinstance(schema, dict):
         schema = {"type": "object", "properties": {}}
+    else:
+        declared_type = schema.get("type")
+        if declared_type is None:
+            # JSON Schema treats a missing "type" as "any type", but in
+            # practice an inputSchema that already has "properties" is
+            # just an object schema that omitted the keyword — add it
+            # rather than treat it as non-object.
+            if isinstance(schema.get("properties"), dict):
+                schema = dict(schema, type="object")
+            else:
+                schema = {"type": "object", "properties": {}}
+        elif declared_type != "object":
+            # A genuinely non-object top level (string/array/number/...).
+            # No function-calling provider accepts that as `parameters`
+            # (Anthropic and OpenAI both require an object schema), so it
+            # can't be handed through unchanged. The old behavior degraded
+            # this straight to an open `{}` — every constraint the server
+            # declared (type, enum, format, a nested object's own
+            # properties) was thrown away, leaving the model to guess
+            # blind at what a valid call even looks like.
+            #
+            # Faithful-enough alternative: wrap it. A single required
+            # `value` property carries the ORIGINAL schema verbatim, so
+            # the model still sees exactly what's expected (a string from
+            # this enum, an array of these items, whatever it declared).
+            # This also happens to be the only call shape that can work
+            # at all: MCP's tools/call always sends `arguments` as a JSON
+            # object on the wire, so a server that documented a
+            # non-object top-level schema was already relying on some
+            # undocumented convention no client can recover — `{"value":
+            # ...}` is the closest a spec-compliant caller can get, not a
+            # guarantee the server accepts it.
+            schema = {
+                "type": "object",
+                "properties": {"value": schema},
+                "required": ["value"],
+            }
+            wrapped = True
+
+    description = "[MCP: %s] %s" % (server, described.strip())
+    if wrapped:
+        description += (
+            " (Note: this server declared a non-object argument schema; "
+            "call it with a single `value` argument matching the schema "
+            "shown for `value` below.)"
+        )
     return {
         "name": name,
-        "description": "[MCP: %s] %s" % (server, described.strip()),
+        "description": description,
         "parameters": schema,
     }, name
 
