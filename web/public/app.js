@@ -689,6 +689,7 @@
   // of these in-memory picks) also correctly leaves an unsaved persona's
   // name un-adopted, not just its colors.
   function applyPersonaPreset(persona) {
+    if (window.JarvisUI) window.JarvisUI.themes.deactivate();
     currentPersonaId = persona.id;
     currentPresetId = null;
     qs("#skin-custom-color").value = persona.hex;
@@ -745,17 +746,27 @@
     const prefs = loadSkinPrefs();
     currentSaturationPercent = clampSaturationPercent(prefs.saturation);
     const persona = PERSONA_PRESETS.find((p) => p.id === prefs.personaId);
+    // If the NEW theme gallery (ui-kit.js) is what the user last touched,
+    // it already painted the page before this script ran (see index.html's
+    // load order) — don't immediately overwrite it with the legacy accent
+    // restore. window.JarvisUI is guaranteed to exist here since ui-kit.js
+    // is loaded first and runs synchronously.
+    const themeActive = window.JarvisUI && window.JarvisUI.themes.isActive();
     if (persona) {
       applyHardcodedVars(persona.vars);
       applyPersonaLogo(persona.id);
       applyAssistantNameToChrome(prefs.assistantName || persona.assistantName);
-    } else {
+    } else if (!themeActive) {
       const preset = SKIN_PRESETS.find((p) => p.id === prefs.presetId);
       if (preset) applyPreset(preset);
       else if (prefs.accent) applyAccent(prefs.accent);
       else applyPreset(SKIN_PRESETS.find((p) => p.id === "cyan"));
       applyPersonaLogo(null);
       if (prefs.assistantName) applyAssistantNameToChrome(prefs.assistantName);
+    } else if (prefs.assistantName) {
+      // Colours are the new system's call, but the persona name in the
+      // header chrome is independent of both and still applies either way.
+      applyAssistantNameToChrome(prefs.assistantName);
     }
   })();
 
@@ -776,6 +787,11 @@
         style: `background:${preset.hex}; color:${preset.hex};`,
         title: preset.name,
         onclick: () => {
+          // Hand colour control back to this (older) picker — see
+          // ACTIVE_KEY's comment in ui-kit.js for why this matters: without
+          // it, the two systems fight over the same CSS variables and
+          // whichever runs its "restore on close" logic last silently wins.
+          if (window.JarvisUI) window.JarvisUI.themes.deactivate();
           qs("#skin-custom-color").value = preset.hex;
           currentPresetId = preset.id;
           currentPersonaId = null;
@@ -874,7 +890,14 @@
     qs("#skin-backdrop").hidden = true;
     // Revert any live-preview accent/saturation back to whatever's actually
     // saved, in case the person clicked around swatches or dragged the
-    // slider and then hit Cancel.
+    // slider and then hit Cancel. Same fork as applySavedSkinEarly(): if the
+    // new theme gallery is the active system, restoring ITS saved theme is
+    // the correct "back to what's actually saved" — reapplying the legacy
+    // accent here was the bug (see ACTIVE_KEY's comment in ui-kit.js).
+    if (window.JarvisUI && window.JarvisUI.themes.isActive()) {
+      window.JarvisUI.themes.apply();
+      return;
+    }
     const prefs = loadSkinPrefs();
     currentSaturationPercent = clampSaturationPercent(prefs.saturation);
     const persona = PERSONA_PRESETS.find((p) => p.id === prefs.personaId);
@@ -914,9 +937,16 @@
     saveSkinPrefs({ accent, presetId: currentPresetId, personaId: currentPersonaId, assistantName, addressAs, saturation: currentSaturationPercent });
     const persona = PERSONA_PRESETS.find((p) => p.id === currentPersonaId);
     const preset = SKIN_PRESETS.find((p) => p.id === currentPresetId);
+    const themeActive = window.JarvisUI && window.JarvisUI.themes.isActive();
     if (persona) applyHardcodedVars(persona.vars);
     else if (preset) applyPreset(preset);
-    else applyAccent(accent);
+    // Neither a persona nor a preset was explicitly picked this session —
+    // that's the common case where the colour swatch/input still just holds
+    // whatever it was last rendered with. If the new theme gallery is what's
+    // actually active, leave it alone instead of stomping it with that
+    // leftover value; that's the exact bug this fix addresses (see
+    // ACTIVE_KEY's comment in ui-kit.js).
+    else if (!themeActive) applyAccent(accent);
     applyPersonaLogo(currentPersonaId);
     applyAssistantNameToChrome(assistantName);
     qs("#skin-backdrop").hidden = true;
@@ -959,6 +989,7 @@
     // A manually typed/picked color is never a preset, even if it happens
     // to match one's hex — see renderSkinSwatches()'s id-matching comment.
     qs("#skin-custom-color").addEventListener("input", (e) => {
+      if (window.JarvisUI) window.JarvisUI.themes.deactivate();
       currentPresetId = null;
       currentPersonaId = null;
       applyAccent(e.target.value);
@@ -978,6 +1009,7 @@
     const saturationSlider = qs("#skin-saturation");
     if (saturationSlider) {
       saturationSlider.addEventListener("input", (e) => {
+        if (window.JarvisUI) window.JarvisUI.themes.deactivate();
         currentSaturationPercent = clampSaturationPercent(e.target.value);
         if (currentPresetId === "classic-hardcoded" || currentPersonaId) return;
         const preset = SKIN_PRESETS.find((p) => p.id === currentPresetId);
