@@ -203,6 +203,35 @@ def build_client(discord, cfg):
         loop = asyncio.get_running_loop()
         sent_any = {"ok": False}
 
+        # --- read receipt -------------------------------------------------
+        # Added the moment the message is accepted, before any provider is
+        # contacted, because its whole job is to answer "did it even see
+        # me?" during the seconds before anything else appears. Every step
+        # is wrapped: a missing Add Reactions permission is extremely common
+        # (the invite URL in the Guides only asks for Send Messages and Read
+        # Message History) and must degrade to "no receipt", never to a
+        # failed reply.
+        receipts = bool(cfg.get("read_receipts", True))
+
+        async def _react(emoji):
+            if not receipts or not emoji:
+                return
+            try:
+                await message.add_reaction(emoji)
+            except Exception:  # noqa: BLE001 — usually a missing permission
+                pass
+
+        async def _unreact(emoji):
+            if not receipts or not emoji:
+                return
+            try:
+                await message.remove_reaction(emoji, client.user)
+            except Exception:  # noqa: BLE001
+                pass
+
+        seen_emoji = cfg.get("reaction_seen") or "\U0001F440"
+        await _react(seen_emoji)
+
         def send(text):
             """Called from the worker thread — hop back to the event loop,
             because discord.py's send() is a coroutine and is not safe to
@@ -213,13 +242,35 @@ def build_client(discord, cfg):
             sent_any["ok"] = True
             return True
 
-        async with message.channel.typing():
-            # handle_message does blocking IO (a provider round trip, tool
-            # execution). Running it on the event loop would freeze the
-            # gateway's heartbeat and get the bot disconnected, so it goes
-            # to a thread.
-            await loop.run_in_executor(
-                None, lambda: base.handle_message(DISCORD, msg, send, cfg=cfg))
+        failed = False
+        try:
+            async with message.channel.typing():
+                # handle_message does blocking IO (a provider round trip, tool
+                # execution). Running it on the event loop would freeze the
+                # gateway's heartbeat and get the bot disconnected, so it goes
+                # to a thread.
+                #
+                # discord.py's typing() context manager re-sends the typing
+                # signal every ~9s for as long as the block is open, so a
+                # multi-round tool call keeps showing "Jarvis is typing…"
+                # rather than going quiet after Discord's 10-second timeout.
+                await loop.run_in_executor(
+                    None, lambda: base.handle_message(DISCORD, msg, send, cfg=cfg))
+        except Exception as exc:  # noqa: BLE001
+            failed = True
+            base._log("discord handler failed: %s" % exc)
+        finally:
+            # Swap the receipt for an outcome. A message that produced no
+            # reply at all (denied by permissions, or the model returned
+            # nothing) is marked failed rather than silently left at 👀 —
+            # "seen, and nothing happened" is a state worth being able to
+            # see from the chat.
+            await _unreact(seen_emoji)
+            if failed or not sent_any["ok"]:
+                if sent_any["ok"] or cfg.get("react_when_denied"):
+                    await _react(cfg.get("reaction_failed") or "\u26a0\ufe0f")
+            else:
+                await _react(cfg.get("reaction_done") or "\u2705")
 
     return client
 
@@ -279,7 +330,7 @@ def run():
         print("discord channel is disabled. Enable it with:\n"
               "  jarvis channels-set discord enabled true", file=sys.stderr)
         return 1
-    token = (cfg.get("bot_token") or "").strip()
+    token = str(cfg.get("bot_token") or "").strip()
     if not token:
         print(f"no bot_token set. Add one to {channel_config.CONFIG_FILE}\n"
               "See the Guides panel in the web UI for how to create a bot.",

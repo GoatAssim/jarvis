@@ -2283,6 +2283,34 @@
         notifyTaskDone(msg.message, true);
         break;
 
+      // A tool asked the user something through jarvis/ui_bridge.py. The
+      // child process is BLOCKED on stdin until we answer, so every path
+      // out of here must send exactly one ui-response — including the
+      // error path, or the tool hangs until its own timeout.
+      case "ui-request": {
+        const req = data.request || {};
+        const answer = (value) => wsSend({ type: "ui-response", value });
+        let pending;
+        try {
+          switch (req.kind) {
+            case "confirm": pending = JarvisUI.confirm(req); break;
+            case "choose":  pending = JarvisUI.choose(req); break;
+            case "prompt":  pending = JarvisUI.prompt(req); break;
+            case "form":    pending = JarvisUI.form(req); break;
+            default:        pending = Promise.resolve(req.default ?? "");
+          }
+        } catch (e) {
+          pending = Promise.resolve(req.default ?? "");
+        }
+        Promise.resolve(pending)
+          .then((value) => {
+            if (req.kind === "confirm") return answer(value ? "y" : "n");
+            return answer(value);
+          })
+          .catch(() => answer(req.default ?? ""));
+        break;
+      }
+
       case "confirm-request":
         showRunConfirmPopup(msg.tool, msg.arguments, msg.risk_note);
         break;
@@ -2779,6 +2807,28 @@
   // re-creates a fresh pending bubble on switching back to a still-running
   // conversation — but this guard is here in case anything else races it,
   // since insertBefore throws outright on a detached reference node).
+  // A tool's bubble belongs IN the conversation, in turn order, so it's
+  // rendered here rather than by ui-kit.js — which owns floating surfaces
+  // but has no idea where the current turn ends.
+  document.addEventListener("jarvis:ui-bubble", (e) => {
+    const event = e.detail || {};
+    const lvl = ["info", "success", "warn", "error"].includes(event.level) ? event.level : "info";
+    const mark = { info: "\u2139", success: "\u2713", warn: "\u26a0", error: "\u2717" }[lvl];
+    clearAskEmptyHint();
+    const card = el("div", { class: `jui-card jui-card--${lvl}` }, [
+      el("div", { class: "jui-card__head" }, [
+        el("span", { class: "jui-card__mark" }, mark),
+        el("span", {}, String(event.title || "")),
+      ]),
+      event.body ? el("div", { class: "jui-card__body" }, String(event.body)) : null,
+    ]);
+    insertIntoAskThread(card);
+    // Recorded as a thread extra so a page reload replays it, exactly like
+    // a screenshot or a download card.
+    pushThreadExtra({ type: "uiBubble", data: { title: event.title, body: event.body, level: lvl } });
+    askThreadScrollToEnd();
+  });
+
   function insertIntoAskThread(msg) {
     if (state.askPendingBubble && askThread.contains(state.askPendingBubble)) {
       askThread.insertBefore(msg, state.askPendingBubble);
@@ -2896,6 +2946,19 @@
       case "console":
         renderConsoleDumpBubble(item.data.dumpLines);
         break;
+      case "uiBubble": {
+        const lvl = ["info", "success", "warn", "error"].includes(item.data.level)
+          ? item.data.level : "info";
+        const mark = { info: "\u2139", success: "\u2713", warn: "\u26a0", error: "\u2717" }[lvl];
+        insertIntoAskThread(el("div", { class: `jui-card jui-card--${lvl}` }, [
+          el("div", { class: "jui-card__head" }, [
+            el("span", { class: "jui-card__mark" }, mark),
+            el("span", {}, String(item.data.title || "")),
+          ]),
+          item.data.body ? el("div", { class: "jui-card__body" }, String(item.data.body)) : null,
+        ]));
+        break;
+      }
       case "confirm":
         if (item.data.resolved !== null) renderResolvedConfirmBubble(item.data);
         break;
@@ -2976,6 +3039,18 @@
         try { note = JSON.parse(parts[2]); } catch { return; }
         showNotification(note);
         askPromptLine(`$ notify  ${note.title || ""}`, "tool");
+        return;
+      }
+      if (parts[1] === "ui" && parts[2]) {
+        // Generic UI event from any tool (jarvis/ui_bridge.py). Same
+        // three-field envelope dev_agent uses, dispatched to the shared
+        // popup layer instead of a per-feature renderer — this is the
+        // branch that means a NEW kind of popup needs no change here.
+        let event;
+        try { event = JSON.parse(parts[2]); } catch { return; }
+        JarvisUI.handleEvent(event);
+        const label = event.title || event.message || event.label || event.kind;
+        askPromptLine(`$ ui  ${event.kind}  ${String(label).slice(0, 60)}`, "tool");
         return;
       }
       if (parts[1] === "dev_agent" && parts[2]) {
@@ -6998,6 +7073,223 @@
   // -------------------------------------------------------------------------
   const GUIDES = [
     {
+      id: "build-a-tool", name: "Build a Tool (walkthrough)", blurb: "Start to finish, one real example",
+      tags: "build make write custom tool python tutorial walkthrough example handler schema keywords group confirm gate",
+      sections: [
+        { heading: "Before you write anything: tool or skill?", steps: [
+          "If what you're adding is INSTRUCTIONS \u2014 'here's how I want the weekly report written' \u2014 you want a SKILL, not a tool. Skills are plain SKILL.md files, need no Python, and cost nothing in the prompt until loaded.",
+          "If it has to RUN something \u2014 call an API, read a file, poke a device \u2014 it's a tool.",
+          "Rule of thumb: if you'd write it as instructions, make it a skill; if you'd write it as a function, make it a tool.",
+        ]},
+        { heading: "Step 1 \u2014 open the editor and pick a template", steps: [
+          "Menu > Custom Tools. Choose a template from the dropdown, then New.",
+          "'Minimal' is one tool with one argument. 'Shows a popup' demonstrates toasts and in-chat cards. 'Asks the user something' shows a blocking confirm with a safe default. 'Calls an API' shows HTTP plus result shaping.",
+          "Give it a filename in the Name box: lower_snake_case, starts with a letter. This is the FILE name \u2014 one file can define several tools.",
+        ]},
+        { heading: "Step 2 \u2014 the handler", steps: [
+          "def tool_disk_report(args): \u2014 takes one dict, returns one dict. That's the whole contract.",
+          "args is never None, but treat every key as optional and untrusted. The model fills these in; it gets them wrong sometimes.",
+          "NEVER raise. Catch your own exceptions and return {\"error\": \"...\"}. An uncaught exception is caught one layer up, but your message is far more useful to the model than a bare repr.",
+          "Return {\"needs_clarification\": True, \"message\": \"Which folder?\"} when you need more from the user \u2014 the model knows to ask rather than guess.",
+          "Keep the returned dict SMALL. Every character is sent to the model and billed. Return what's needed to answer, not everything you happen to have.",
+        ]},
+        { heading: "Step 3 \u2014 the schema (this is what actually matters)", steps: [
+          "TOOL_SCHEMAS = [{\"name\", \"description\", \"parameters\"}]. The description is the single highest-leverage thing in the file.",
+          "Write it like briefing a coworker on WHEN to reach for this \u2014 not what it does. 'Show a disk usage report as a card in the chat. Use when the user asks how much space is left.' beats 'Reports disk usage.'",
+          "Every parameter gets its own description too. 'Drive or mount point, e.g. C: or /' is worth ten words of prose elsewhere.",
+          "Mark only genuinely-required things in \"required\". Anything with a sensible default should be optional.",
+          "Name it something no built-in uses. The editor checks and tells you before it saves.",
+        ]},
+        { heading: "Step 4 \u2014 TOOLS and TOOL_GROUP", steps: [
+          "TOOLS = {\"disk_report\": tool_disk_report} \u2014 one entry per schema name, no extras. Mismatches are rejected.",
+          "TOOL_GROUP = \"custom\" \u2014 the router group. Join an EXISTING group (files, web, desktop, system_control...) and your tool is offered whenever that group is, alongside its siblings.",
+          "Or start a new group. That's cleaner, but see the next section \u2014 a new group without keywords is nearly invisible.",
+        ]},
+        { heading: "Step 5 \u2014 TOOL_KEYWORDS (skip this and your tool is nearly unreachable)", steps: [
+          "Jarvis does NOT send every tool to the model. A local keyword router picks a group first \u2014 that's the whole token-optimisation design.",
+          "TOOL_KEYWORDS = {\"disk_report\": {\"disk space\": 10, \"how full\": 8, \"free space\": 9}}",
+          "A phrase needs weight >= 5 to count as real signal. Weights are additive across phrases.",
+          "Phrases are matched on WORD BOUNDARIES, not substrings \u2014 'ping' will not match 'pinging'. Write the phrases people actually type.",
+          "Without keywords, a brand-new group is only reachable through search_tools \u2014 which works, but costs an extra round trip every time.",
+          "Need a phrase to NOT match when another is present? Use {\"weight\": 8, \"not_with\": [\"screen recording\"]}.",
+        ]},
+        { heading: "Step 6 \u2014 gate it if it's dangerous", steps: [
+          "TOOL_CONFIRM_REQUIRED = {\"cleanup_temp\"} \u2014 the user is shown the call and must approve before it runs.",
+          "TOOL_AI_REVIEW = {\"cleanup_temp\"} \u2014 a SECOND AI provider assesses the risk first and its note is shown alongside.",
+          "This is enforced out of band, from a config file the model cannot reach. It is NOT a \"confirm\": true parameter on your own schema \u2014 that shape lets the model approve itself, which protects nothing.",
+          "The policy engine (jarvis/policy.py) also scores every call by tool, arguments and context, and can escalate on its own. Name your arguments plainly \u2014 a tool with a `path` argument is scored far more accurately than one hiding a path inside an opaque string.",
+        ]},
+        { heading: "Step 7 \u2014 talk to the user", steps: [
+          "A return value goes to the MODEL, not the person. To reach the person: from jarvis import ui_bridge as ui",
+          "ui.toast(\"Backup finished\", level=\"success\") \u2014 transient corner message.",
+          "ui.bubble(\"Disk report\", body=table) \u2014 a card in the chat that persists across reloads.",
+          "ui.dialog(\"Disk almost full\", body, level=\"error\") \u2014 a modal that interrupts.",
+          "if ui.confirm(\"Delete 12 files?\", body=listing, default=False): \u2014 blocking, and the default is what an UNATTENDED run gets.",
+          "Always point the default at the safe outcome. Your tool will eventually be run by a scheduled job at 3am, because the user can schedule any tool.",
+        ]},
+        { heading: "Step 8 \u2014 check, save, run", steps: [
+          "Check validates without saving. Errors are reported by stage: syntax (a typo), import (usually a circular import \u2014 see the pitfalls below), or contract (a missing description, a handler with no schema).",
+          "Save validates first and refuses to write a file that would be silently rejected at startup. It keeps a .bak of the previous version.",
+          "Run executes the real handler with arguments you supply. Real side effects really happen. There is no sandbox.",
+          "Ctrl+S saves. Tab indents four spaces.",
+        ]},
+        { heading: "Step 9 \u2014 make it live", steps: [
+          "Tools are discovered once, at process start, so a new tool is live on your very next command.",
+          "A long-running daemon (sched-daemon, discord-daemon) has to be restarted to see it.",
+          "jarvis doctor tools \u2014 lists any file that was rejected, and why.",
+          "Then just ask for it in plain language. If Jarvis doesn't reach for it, your keywords are the thing to fix, not the handler.",
+        ]},
+        { heading: "The four pitfalls that cost real time", steps: [
+          "CIRCULAR IMPORT: never import ai_client, tool_router or tool_registry at module level. At discovery time jarvis.tools is only half-initialised. Import them INSIDE your handler. This fails with a confusing partially-initialised-module error and once silently dropped a built-in tool for weeks.",
+          "SILENT REJECTION: a file that fails validation is logged once at startup and then invisible \u2014 no tool, no error in the UI. That's exactly why the editor validates before saving. If a tool 'disappeared', run jarvis doctor tools.",
+          "NO KEYWORDS: the handler is perfect, the schema is perfect, and Jarvis never calls it. Almost always this.",
+          "WRONG DIRECTORY: tools in ~/.jarvis/tools survive a rebuild. Tools written into the install directory (jarvis/actions/) are DESTROYED by the next script.bat run.",
+        ]},
+        { heading: "Multiple tools in one file", steps: [
+          "Perfectly normal, and usually better \u2014 related tools that share helpers belong together.",
+          "Add an entry to both TOOL_SCHEMAS and TOOLS for each, all in the same TOOL_GROUP.",
+          "A file starting with _ is skipped by the loader, so _shared_helpers.py can sit next to your tools without being mistaken for one.",
+        ]},
+      ],
+      notes: [
+        "A custom tool is arbitrary Python running as you. Same trust level as commands.json, which runs arbitrary shell.",
+        "The MODEL cannot author these. That's deliberate: a model that could write its own tools could route around every confirm gate by writing an unflagged tool that does the same thing.",
+        "Everything here matches jarvis/actions/_template.py, which is the same contract with more detail \u2014 read it if you're writing something unusual.",
+      ],
+    },
+    {
+      id: "custom-tools", name: "Custom Tools", blurb: "Write your own Python tools",
+      tags: "custom tools python actions write code extend plugin handler schema popup ui",
+      sections: [
+        { heading: "Where they live", steps: [
+          "Menu > Custom Tools, or the folder directly: ~/.jarvis/tools/",
+          "NOT jarvis/actions/ — script.bat overwrites the install directory on every rebuild, so a tool written there is destroyed by the next build. ~/.jarvis never moves.",
+          "One .py file per tool set. A file starting with _ is ignored, so _helpers.py is safe to keep alongside.",
+          "x.py.disabled is switched off but kept — that's what the Enabled checkbox toggles.",
+        ]},
+        { heading: "The contract — three names, all required", steps: [
+          "TOOL_SCHEMAS = [{\"name\", \"description\", \"parameters\"}]  — the description is what tells the model WHEN to use it, so write it like briefing a coworker.",
+          "TOOLS = {\"name\": handler}  — handler(args: dict) -> dict. One entry per schema, no extras.",
+          "TOOL_GROUP = \"custom\"  — the router group it joins.",
+          "Optional: TOOL_KEYWORDS, TOOL_PACK_INSTRUCTION, TOOL_CONFIRM_REQUIRED, TOOL_AI_REVIEW.",
+        ]},
+        { heading: "Four rules that bite", steps: [
+          "A handler must NEVER raise. Catch your own exceptions and return {\"error\": \"...\"}.",
+          "Import ai_client / tool_router / tool_registry INSIDE the handler, never at module level — at discovery time jarvis.tools is only half-initialised and a module-level import fails with a circular-import error.",
+          "Without TOOL_KEYWORDS, a brand-new group is only reachable through search_tools, never through normal routing. Add at least one phrase.",
+          "Name it something no built-in already uses. The editor checks and tells you.",
+        ]},
+        { heading: "Buttons in the editor", steps: [
+          "Check — validates without saving. Reports syntax, import and contract errors separately, because they need different fixes.",
+          "Save — validates FIRST and refuses to write a file that would be silently rejected at startup. Keeps a .bak of the previous version.",
+          "Run — actually executes the handler with arguments you supply. Real side effects really happen; there is no sandbox.",
+          "Ctrl+S saves. Tab indents four spaces instead of leaving the box.",
+        ]},
+        { heading: "Picking it up", steps: [
+          "Tools are discovered once, at process start. A new tool is live on the next command you run.",
+          "A long-running daemon (sched-daemon, discord-daemon) has to be restarted to see it.",
+          "jarvis doctor tools — lists any file that was rejected and why.",
+        ]},
+      ],
+      notes: [
+        "A custom tool is arbitrary Python running as you. That's the same trust level as commands.json (arbitrary shell) — the person writing it is the person running it.",
+        "The MODEL cannot write these. Authoring is human-only on purpose: a model that could write its own tools could route around every confirm gate by writing an unflagged tool that does the same thing.",
+      ],
+    },
+    {
+      id: "tool-popups", name: "Tool Popups & Dialogs", blurb: "Show things and ask things from a tool",
+      tags: "popup dialog toast confirm prompt modal notify error ui bridge bubble progress form choose",
+      sections: [
+        { heading: "The idea", steps: [
+          "Any tool can put something on screen and get an answer back: from jarvis import ui_bridge as ui",
+          "The same call works in the web UI (a real popup), a plain terminal (styled text + input()), and headless (returns your default immediately).",
+          "That last one matters most — see 'The headless rule' below.",
+        ]},
+        { heading: "Show something (returns immediately)", steps: [
+          "ui.toast(\"Backup finished\", level=\"success\")  — transient corner message. Errors stay until dismissed; everything else fades.",
+          "ui.bubble(\"Disk report\", body=table, level=\"warn\")  — a card IN the chat thread. Persists, survives a reload, scroll back to it.",
+          "ui.dialog(\"Careful\", \"This overwrites 12 files.\", level=\"error\")  — a real modal. Interrupts. Reserve it for things that should.",
+          "ui.progress(\"Indexing\", 3, 10, job_id=pid)  — an updatable row, bottom-left.",
+          "level is one of: info, success, warn, error.",
+        ]},
+        { heading: "Ask something (blocks for an answer)", steps: [
+          "ui.confirm(\"Delete 12 files?\", body=listing, default=False) -> bool",
+          "ui.choose(\"Which environment?\", [\"staging\", \"production\"]) -> str",
+          "ui.prompt(\"Name the backup?\", default=\"backup-1\") -> str",
+          "ui.form(\"Setup\", [{\"name\": \"host\", \"default\": \"127.0.0.1\"}]) -> dict",
+          "Escape / clicking away always picks the SAFE answer — a dismissed confirm is never a yes.",
+        ]},
+        { heading: "The headless rule", steps: [
+          "EVERY blocking call needs a default, and it is returned instantly when nobody is watching — a scheduled job at 3am, a daemon, a test.",
+          "Without that, a tool blocking on input() inside a scheduler tick hangs the whole tick, silently, forever.",
+          "So set the default to the safe outcome: default=False on a delete means an unattended run deletes nothing.",
+          "There is also a timeout (120s default) for a web dialog nobody answers.",
+        ]},
+        { heading: "What it is NOT", steps: [
+          "ui.confirm() is a courtesy question, NOT a security gate.",
+          "The real gate is TOOL_CONFIRM_REQUIRED, checked out of band against ~/.jarvis/tool_safety.json — a file the model cannot reach.",
+          "A destructive tool should have both: the flag for protection, the ui.confirm for a readable question.",
+          "Every field you pass is rendered as plain text, never as HTML. A filename containing <script> is shown, not run.",
+        ]},
+      ],
+      notes: [
+        "Start from Menu > Custom Tools > template 'Shows a popup' or 'Asks the user something' — both are working examples of everything above.",
+      ],
+    },
+    {
+      id: "themes", name: "Themes & Appearance", blurb: "Skins, colours and interface tuning",
+      tags: "theme skin colour color appearance dark light accent font glow scanlines customise",
+      sections: [
+        { heading: "Picking a theme", steps: [
+          "Skin > Theme. Six built in: Jarvis, Mark I, Terminal, Mono, Daylight (a real light theme) and Nebula.",
+          "Applies instantly, no reload. Remembered per browser.",
+        ]},
+        { heading: "Tuning on top", steps: [
+          "Skin > Interface adjusts any theme without editing it: corner rounding (0 = fully square), glow/shadow intensity, text size, animations, grid overlay.",
+          "Useful combinations: Mono + rounding 0 + glow 0 for a flat, plain look; any theme + animations off for a low-distraction setup.",
+          "Animations also switch off automatically if your OS asks for reduced motion.",
+        ]},
+        { heading: "Making your own", steps: [
+          "Pick the closest theme, adjust the accent colour, then Save as new — it snapshots what's currently on screen.",
+          "Export current gives you JSON you can save as a file and share.",
+          "Import... takes that JSON back. Only recognised CSS variables are accepted, so an imported skin can't restyle arbitrary parts of the app.",
+        ]},
+      ],
+      notes: [
+        "A theme is just a set of CSS variables, so a new one is data rather than code.",
+        "Themes are per-browser (localStorage). Persona name and attitude are different — those are server-side in ai_config.json and apply everywhere.",
+      ],
+    },
+    {
+      id: "doctor", name: "Doctor / Self-check", blurb: "One command that checks everything",
+      tags: "doctor diagnose diagnostic broken health check fix troubleshoot",
+      sections: [
+        { heading: "Running it", steps: [
+          "jarvis doctor            — everything, offline, only shows problems.",
+          "jarvis doctor --verbose  — shows passing checks too.",
+          "jarvis doctor --deep     — also tests every API key with a real request, pings Playnite, handshakes MCP servers.",
+          "jarvis doctor channels   — just one area (runtime, binaries, packages, ai, tools, memory, scheduler, notify, digest, daemons, channels, playnite, mcp).",
+          "jarvis doctor --json     — machine readable.",
+        ]},
+        { heading: "What it catches", steps: [
+          "ffmpeg / tesseract missing from PATH — the reason youtube_download and click_on_text 'just fail'.",
+          "An API key that's present but expired, rate-limited or out of credit (--deep only).",
+          "A Discord bot enabled with a valid token and an EMPTY allowlist — it connects, looks online, and ignores everyone including you, with no error anywhere.",
+          "A stale daemon pid file, which makes a new daemon refuse to start while nothing is actually running.",
+          "Scheduled jobs overdue by more than an hour, i.e. nothing is ticking.",
+          "A custom tool or action file that was rejected at startup and is silently missing.",
+        ]},
+        { heading: "Reading it", steps: [
+          "FAIL = broken now. warn = works, will bite later. -- = not applicable, which is a normal result for anything you don't use.",
+          "Every FAIL and warn carries a literal fix — a command to run or a file to edit.",
+          "Exit code: 0 healthy, 1 warnings, 2 something broken. Usable in a script.",
+        ]},
+      ],
+      notes: [
+        "doctor never changes anything. You run it when something is already broken; it must not be able to make it worse.",
+      ],
+    },
+    {
       id: "discord", name: "Discord", blurb: "Bot that answers @mentions and DMs",
       tags: "discord bot token gateway intents mention dm server guild",
       sections: [
@@ -7331,5 +7623,9 @@
   qs("#menu-item-skills")?.addEventListener("click", () => { closePanelMenu(); openSkills(); });
   qs("#menu-item-scheduled")?.addEventListener("click", () => { closePanelMenu(); openScheduled(); });
   qs("#menu-item-mcp")?.addEventListener("click", () => { closePanelMenu(); openMcp(); });
+  qs("#menu-item-ctools")?.addEventListener("click", () => {
+    closePanelMenu();
+    if (window.JarvisCustomTools) window.JarvisCustomTools.open();
+  });
 
 })();

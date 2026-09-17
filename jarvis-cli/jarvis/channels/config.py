@@ -146,6 +146,24 @@ _PLATFORM_EXTRA = {
         # See the Guides panel for the full explanation.
         "message_content_intent": False,
         "max_reply_chars": 1900,
+        # --- acknowledgement ------------------------------------------
+        # A reaction on the user's own message, as a read receipt. The
+        # typing indicator already covers "working on it", but it only
+        # starts once handle_message is underway and it says nothing about
+        # whether the message was ACCEPTED — a message rejected by the
+        # allowlist and a message being thought about look identical
+        # (silence) for the several seconds a tool-calling turn takes.
+        #
+        # So: 👀 the instant it's picked up, replaced by ✅ when the reply
+        # lands or ⚠️ if it failed. Three states, no text, no extra message
+        # in the channel.
+        "read_receipts": True,
+        "reaction_seen": "\U0001F440",     # 👀 received
+        "reaction_done": "\u2705",          # ✅ answered
+        "reaction_failed": "\u26a0\ufe0f",  # ⚠️ something went wrong
+        # Reacting to a denied message tells a stranger the bot is watching
+        # and that they're on a list. Off by default for that reason.
+        "react_when_denied": False,
     },
     INSTAGRAM: {
         # Instagram API with Instagram Login (no Facebook Page needed since
@@ -231,8 +249,61 @@ def load_config():
         for key in PERM_SETS:
             block[key] = _normalize_entries(block.get(key))
         block["owner"] = _normalize_entry(block.get("owner"))
+        _coerce_text_fields(block)
         cfg[platform] = block
     return cfg
+
+
+# Fields every consumer treats as text — `(cfg.get(k) or "").strip()` is the
+# idiom used in roughly twenty places across channels/, spotify_*, playnite_*
+# and doctor.py. Listed explicitly rather than coercing everything, because
+# the booleans (enabled, allow_tools) and the real integers (webhook_port,
+# cooldown_seconds, max_reply_chars) are genuinely non-text and must keep
+# their types.
+_TEXT_FIELDS = (
+    "bot_token", "bot_user_id", "bot_handle",
+    "access_token", "ig_user_id", "app_secret", "verify_token",
+    "graph_version", "webhook_host", "webhook_path",
+)
+
+
+def _coerce_text_fields(block):
+    """Force the id/token fields to strings.
+
+    THE BUG THIS FIXES
+    ------------------
+        AttributeError: 'int' object has no attribute 'strip'
+          ... if not (cfg.get(key) or "").strip()]     # instagram_gateway.run()
+
+    An Instagram user id is a 17-digit number and a Discord snowflake is an
+    18-digit number. This file is documented as hand-editable, so writing
+
+        "ig_user_id": 17841400000000000
+
+    is the obvious thing to type — JSON has a number type, the value is a
+    number, no quotes needed. It parses fine, it saves fine, and then it
+    crashes the gateway on startup with a traceback that names neither the
+    file nor the field.
+
+    Fixing it here rather than at the ~20 call sites is deliberate: those
+    sites are spread across five modules, a fix at each one is a fix that
+    the next `(cfg.get(x) or "").strip()` someone writes will reintroduce,
+    and two sites (permissions.py, outbound.py) had already independently
+    grown a defensive `str()` — which is the clearest possible signal that
+    the coercion belongs at the boundary, once, instead of at every reader.
+
+    A value of 0 or False coerces to "" rather than "0"/"False": for these
+    fields those are "unset" spellings, and "0" would read as a configured
+    id that happens to be zero.
+    """
+    for key in _TEXT_FIELDS:
+        if key not in block:
+            continue
+        value = block[key]
+        if value is None or value is False or value == 0:
+            block[key] = ""
+        elif not isinstance(value, str):
+            block[key] = str(value).strip()
 
 
 def save_config(cfg):

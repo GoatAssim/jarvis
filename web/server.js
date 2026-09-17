@@ -462,7 +462,12 @@ app.delete("/api/commands/:name", requireJarvis, async (req, res) => {
 // One-shot (non-streaming) invocation for quick, no-output-to-watch calls
 // like `jarvis ai-clear` \u2014 collects stdout/stderr and resolves when the
 // process exits, instead of going through the WebSocket streaming path.
-function runJarvisOnce(args, timeoutMs = 10000, extraEnv = {}) {
+// stdinText: piped to the child's stdin and then closed. Added for the
+// custom-tools editor — a tool file is multi-line Python full of quotes and
+// backslashes, and there is no argv escaping that survives both cmd.exe and
+// sh intact. stdin has no such problem and no length limit worth caring
+// about. Omitted (the default) keeps the exact previous behavior.
+function runJarvisOnce(args, timeoutMs = 10000, extraEnv = {}, stdinText = null) {
   return new Promise((resolve) => {
     let child;
     try {
@@ -472,6 +477,12 @@ function runJarvisOnce(args, timeoutMs = 10000, extraEnv = {}) {
       });
     } catch (e) {
       return resolve({ ok: false, error: e.message });
+    }
+    if (stdinText !== null && child.stdin) {
+      try {
+        child.stdin.write(stdinText);
+        child.stdin.end();
+      } catch { /* the child may have died already; the exit handler reports it */ }
     }
     let out = "";
     let err = "";
@@ -1681,6 +1692,103 @@ function spawnAndStream(ws, kind, fullArgs, types, extraEnv = {}, onStdoutLine =
 
 const RUN_TYPES = { stdout: "stdout", stderr: "stderr", exit: "exit", error: "error" };
 const ASK_TYPES = { stdout: "ask-stdout", stderr: "ask-stderr", exit: "ask-exit", error: "ask-error" };
+
+// ---------------------------------------------------------------------------
+// Custom tools — thin proxy over `jarvis ctools-*`, same pattern as
+// /api/skills and /api/conversations: the web server never touches
+// ~/.jarvis/tools itself, it shells out to the CLI so validation, naming
+// rules and the on-disk layout have exactly one implementation.
+// ---------------------------------------------------------------------------
+
+const CTOOL_NAME_RE = /^[a-z][a-z0-9_]{0,48}$/;
+
+app.get("/api/ctools", requireJarvis, async (req, res) => {
+  const result = await runJarvisOnce(["ctools-list"], 15000);
+  if (!result.ok) {
+    return res.status(500).json({ error: result.error || result.stderr || "Couldn't list custom tools." });
+  }
+  try { res.json(JSON.parse(result.stdout)); }
+  catch (e) { res.status(500).json({ error: `Couldn't parse ctools-list: ${e.message}` }); }
+});
+
+app.get("/api/ctools/templates", requireJarvis, async (req, res) => {
+  const result = await runJarvisOnce(["ctools-templates"], 10000);
+  if (!result.ok) return res.status(500).json({ error: result.stderr || "Couldn't load templates." });
+  try { res.json(JSON.parse(result.stdout)); }
+  catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// Registered before /api/ctools/:name deliberately — Express matches in
+// declaration order, so a :name route declared first would capture "draft".
+app.get("/api/ctools/draft", requireJarvis, async (req, res) => {
+  const template = typeof req.query.template === "string" ? req.query.template : "minimal";
+  if (!/^[a-z_]{1,32}$/.test(template)) return res.status(400).json({ error: "Bad template id." });
+  const result = await runJarvisOnce(["ctools-show", "draft", "--template", template], 10000);
+  try { res.json(JSON.parse(result.stdout)); }
+  catch (e) { res.status(500).json({ error: result.stderr || e.message }); }
+});
+
+app.get("/api/ctools/:name", requireJarvis, async (req, res) => {
+  if (!CTOOL_NAME_RE.test(req.params.name)) return res.status(400).json({ error: "Invalid tool name." });
+  const result = await runJarvisOnce(["ctools-show", req.params.name], 15000);
+  try {
+    const parsed = JSON.parse(result.stdout);
+    return parsed.ok === false ? res.status(404).json(parsed) : res.json(parsed);
+  } catch (e) {
+    res.status(500).json({ error: result.stderr || e.message });
+  }
+});
+
+// Source goes over stdin, never argv: a tool file is multi-line Python with
+// quotes and backslashes in it, and no amount of shell escaping makes that
+// safe or reliable across cmd.exe and sh.
+app.put("/api/ctools/:name", requireJarvis, async (req, res) => {
+  if (!CTOOL_NAME_RE.test(req.params.name)) return res.status(400).json({ error: "Invalid tool name." });
+  const source = typeof req.body?.source === "string" ? req.body.source : "";
+  const result = await runJarvisOnce(["ctools-write", req.params.name, "--stdin"], 20000, {}, source);
+  try {
+    const parsed = JSON.parse(result.stdout);
+    return parsed.ok === false ? res.status(400).json(parsed) : res.json(parsed);
+  } catch (e) {
+    res.status(500).json({ error: result.stderr || e.message });
+  }
+});
+
+app.post("/api/ctools/:name/check", requireJarvis, async (req, res) => {
+  if (!CTOOL_NAME_RE.test(req.params.name)) return res.status(400).json({ error: "Invalid tool name." });
+  const source = typeof req.body?.source === "string" ? req.body.source : "";
+  const result = await runJarvisOnce(["ctools-check", req.params.name, "--stdin"], 20000, {}, source);
+  try { res.json(JSON.parse(result.stdout)); }
+  catch (e) { res.status(500).json({ error: result.stderr || e.message }); }
+});
+
+app.post("/api/ctools/:name/run", requireJarvis, async (req, res) => {
+  if (!CTOOL_NAME_RE.test(req.params.name)) return res.status(400).json({ error: "Invalid tool name." });
+  const args = JSON.stringify(req.body?.arguments || {});
+  const tool = typeof req.body?.tool === "string" ? req.body.tool : "";
+  const argv = ["ctools-run", req.params.name];
+  if (tool) argv.push("--tool", tool);
+  argv.push("--args", args);
+  const result = await runJarvisOnce(argv, 60000);
+  try { res.json(JSON.parse(result.stdout)); }
+  catch (e) { res.status(500).json({ error: result.stderr || e.message }); }
+});
+
+app.post("/api/ctools/:name/enabled", requireJarvis, async (req, res) => {
+  if (!CTOOL_NAME_RE.test(req.params.name)) return res.status(400).json({ error: "Invalid tool name." });
+  const on = req.body?.enabled ? "on" : "off";
+  const result = await runJarvisOnce(["ctools-toggle", req.params.name, on], 10000);
+  try { res.json(JSON.parse(result.stdout)); }
+  catch (e) { res.status(500).json({ error: result.stderr || e.message }); }
+});
+
+app.delete("/api/ctools/:name", requireJarvis, async (req, res) => {
+  if (!CTOOL_NAME_RE.test(req.params.name)) return res.status(400).json({ error: "Invalid tool name." });
+  const result = await runJarvisOnce(["ctools-delete", req.params.name], 10000);
+  try { res.json(JSON.parse(result.stdout)); }
+  catch (e) { res.status(500).json({ error: result.stderr || e.message }); }
+});
+
 const CONFIRM_MARKER = "JARVIS_CONFIRM_REQUEST ";
 // Phase 0 (new_plan.md): cli.py prints one of these per successful ask —
 // {input_tokens, output_tokens, total_tokens, rounds: [...], tool_calls: [...]}
@@ -1688,6 +1796,12 @@ const CONFIRM_MARKER = "JARVIS_CONFIRM_REQUEST ";
 // CONFIRM_MARKER above, forwarded to the browser as "ask-usage" so the
 // debug menu / chat UI can render a per-turn token breakdown.
 const USAGE_MARKER = "JARVIS_USAGE ";
+// Generic UI round-trip (jarvis/ui_bridge.py). Same marker-on-stdout,
+// answer-on-stdin protocol as CONFIRM_MARKER — generalized so ANY tool can
+// ask the user something, instead of confirmation being the only question
+// the system knows how to ask. The child blocks on stdin until we write a
+// line back, so every path that handles this MUST answer exactly once.
+const UI_MARKER = "JARVIS_UI_REQUEST ";
 
 wss.on("connection", (ws) => {
   ws.activeChild = null;
@@ -1747,6 +1861,13 @@ wss.on("connection", (ws) => {
       // handling, just under "confirm-request" instead of
       // "ask-confirm-request" so the UI can tell which surface asked.
       const runOnStdoutLine = (line) => {
+        if (line.startsWith(UI_MARKER)) {
+          let uiPayload;
+          try { uiPayload = JSON.parse(line.slice(UI_MARKER.length)); }
+          catch { return false; }
+          send(ws, { type: "ui-request", request: uiPayload });
+          return true;
+        }
         if (!line.startsWith(CONFIRM_MARKER)) return false;
         let payload;
         try {
@@ -1852,6 +1973,21 @@ wss.on("connection", (ws) => {
         return true;
       };
       spawnAndStream(ws, "ask", fullArgs, ASK_TYPES, extraEnv, onStdoutLine);
+      return;
+    }
+
+    if (msg.type === "ui-response") {
+      // The child is blocked on stdin inside ui_bridge._ask(). Answer once.
+      // A JSON object goes back for structured answers (a form's fields); a
+      // bare string for the simple cases — ui_bridge accepts both.
+      if (!ws.activeChild || !ws.activeChild.stdin) return;
+      let line;
+      try {
+        line = typeof msg.value === "object" && msg.value !== null
+          ? JSON.stringify({ value: msg.value })
+          : String(msg.value ?? "");
+      } catch { line = ""; }
+      try { ws.activeChild.stdin.write(line.replace(/[\r\n]+/g, " ") + "\n"); } catch { /* gone */ }
       return;
     }
 

@@ -107,6 +107,99 @@ def set_log_context(conv_id, provider=None, on_tool_usage=None):
     _log_local.tool_usage = []
 
 
+# ---------------------------------------------------------------------------
+# Thinking context. Set by ai_client.ask() per attempt, read by every adapter.
+#
+# A module-level holder rather than a parameter on five adapter signatures,
+# for the same reason set_log_context() is one: the adapters are called
+# through a uniform ADAPTERS[type](provider, messages, timeout, ...) contract
+# that other callers (tests, benchmark_pc_actions.py) also use, and widening
+# that signature would break every one of them for a field most don't care
+# about. Cleared in the same finally: block as the log context.
+# ---------------------------------------------------------------------------
+_thinking = {"level": "off", "trace": "", "rounds": 0, "requested": 0}
+
+
+def set_thinking(level="off"):
+    _thinking["level"] = level or "off"
+    _thinking["trace"] = ""
+    _thinking["rounds"] = 0
+    _thinking["requested"] = 0
+
+
+def get_thinking_trace():
+    """The concatenated thinking text from the attempt that just ran, plus
+    how many rounds actually carried a thinking request — which is what lets
+    the caller show "thought on 2 of 5 rounds" instead of implying every
+    round paid for it."""
+    return {"text": _thinking.get("trace", ""),
+            "rounds": _thinking.get("rounds", 0),
+            "requested": _thinking.get("requested", 0),
+            "level": _thinking.get("level", "off")}
+
+
+def _apply_thinking(payload, provider, provider_type, round_num, ran_tools, thought_rounds):
+    """Merge this round's thinking keys into `payload`. Returns True if any
+    were added, so the adapter can count the round.
+
+    The whole token-discipline decision lives in reasoning.round_patch —
+    see its comment block. Here it's just: ask, merge, count.
+    """
+    from . import reasoning
+
+    level = _thinking.get("level", "off")
+    if reasoning.normalize_level(level) == "off":
+        return False
+    # Round 0 always. After that, exactly one more — the first round after a
+    # tool batch came back, where the model is synthesizing results rather
+    # than picking the next call.
+    if round_num != 0 and not (ran_tools and thought_rounds < 2):
+        return False
+
+    patch = reasoning.round_patch(
+        provider_type, level, round_num=round_num,
+        is_final=bool(ran_tools and round_num > 0), ran_tools=ran_tools,
+        provider_name=provider.get("name") or "", model=provider.get("model") or "",
+    )
+    if not patch:
+        return False
+
+    # Gemini nests its config; everything else is top-level.
+    gen = patch.pop("_generationConfig", None)
+    if gen:
+        target = payload.setdefault("generationConfig", {})
+        for key, value in gen.items():
+            target.setdefault(key, value)
+    payload.update(patch)
+
+    if provider_type == "anthropic":
+        # budget_tokens must be strictly less than max_tokens or the request
+        # is rejected — raise the ceiling rather than shrink the budget, or
+        # asking for `high` against a 700-token cap silently buys nothing.
+        payload["max_tokens"] = reasoning.fit_max_tokens(
+            payload.get("max_tokens"), level)
+        # Anthropic rejects a non-default temperature alongside thinking.
+        payload.pop("temperature", None)
+        payload.pop("top_p", None)
+
+    _thinking["requested"] += 1
+    return True
+
+
+def _collect_thinking(provider_type, data):
+    from . import reasoning
+
+    text = reasoning.extract_trace(provider_type, data)
+    if not text:
+        return
+    _thinking["rounds"] += 1
+    existing = _thinking.get("trace") or ""
+    # Cheap join, capped: a runaway thinking block must not be able to grow
+    # this without bound before ai_client ever gets to clip it.
+    if len(existing) < 20000:
+        _thinking["trace"] = (existing + "\n\n" + text).strip() if existing else text
+
+
 def clear_log_context():
     _log_local.conv_id = None
     _log_local.provider = None
@@ -782,6 +875,7 @@ def call_openai_compatible(provider, messages, timeout, tools=None, tool_executo
     # to the pre-caching payload, since both sides join with "\n\n".
     working_messages = _merge_system(messages)
     ran_tools = False
+    thought_rounds = 0
     if round_budget is None:
         round_budget = RoundBudget()
 
@@ -846,11 +940,27 @@ def call_openai_compatible(provider, messages, timeout, tools=None, tool_executo
         tools_omitted_this_round = not (tools_payload and round_num < MAX_TOOL_ROUNDS and round_budget.remaining() > 0)
         if not tools_omitted_this_round:
             payload["tools"] = tools_payload
+        if _apply_thinking(payload, provider, "openai_compatible", round_num,
+                           ran_tools, thought_rounds):
+            thought_rounds += 1
         extra = provider.get("extra_params")
         if isinstance(extra, dict):
+            # extra_params last, so an explicit per-provider override always
+            # beats what the thinking level asked for.
             payload.update(extra)
 
         resp, net_err = _post_json(base_url, headers, payload, timeout)
+        # One retry without the thinking keys if THAT is what was rejected.
+        # Some OpenAI-compatible hosts 400 on an unknown field (Groq does
+        # exactly this for prompt_cache_key), and burning a whole API key
+        # over a request shape jarvis chose — not something the user did —
+        # is the failure this avoids.
+        if not net_err:
+            _reason = _status_reason(resp)
+            if _reason:
+                from . import reasoning as _r
+                if _r.looks_like_thinking_rejected(_reason) and _r.strip_from_payload(payload):
+                    resp, net_err = _post_json(base_url, headers, payload, timeout)
         if net_err:
             return AIResult(False, error=net_err,
                             tool_history=_openai_messages_to_generic(working_messages) if ran_tools else None)
@@ -885,6 +995,7 @@ def call_openai_compatible(provider, messages, timeout, tools=None, tool_executo
         # the cache-token accounting above, which would have inherited the
         # same doubling.
         _record_usage("openai_compatible", data, round_num)
+        _collect_thinking("openai_compatible", data)
 
         choices = data.get("choices") or []
         if not choices:
@@ -978,6 +1089,7 @@ def call_anthropic(provider, messages, timeout, tools=None, tool_executor=None, 
     }
     working_turns = list(turns)
     ran_tools = False
+    thought_rounds = 0
     if round_budget is None:
         round_budget = RoundBudget()
     cache_defaults = cfg_defaults or {}
@@ -1009,6 +1121,9 @@ def call_anthropic(provider, messages, timeout, tools=None, tool_executor=None, 
             "messages": working_turns,
         }
         offering_tools = bool(tools_payload) and round_num < MAX_TOOL_ROUNDS and round_budget.remaining() > 0
+        if _apply_thinking(payload, provider, "anthropic", round_num,
+                           ran_tools, thought_rounds):
+            thought_rounds += 1
         # Prompt caching (lever 3 of the token-optimization research; see
         # prompt_cache.py). Re-planned every round rather than once before
         # the loop, because the thing it sizes against — the tools array —
@@ -1043,13 +1158,21 @@ def call_anthropic(provider, messages, timeout, tools=None, tool_executor=None, 
             return AIResult(False, error=net_err, tool_history=_history())
         reason = _status_reason(resp)
         if reason:
-            return AIResult(False, error=reason, tool_history=_history())
+            from . import reasoning as _r
+            if _r.looks_like_thinking_rejected(reason) and _r.strip_from_payload(payload):
+                resp, net_err = _post_json(base_url, headers, payload, timeout)
+                if net_err:
+                    return AIResult(False, error=net_err, tool_history=_history())
+                reason = _status_reason(resp)
+            if reason:
+                return AIResult(False, error=reason, tool_history=_history())
 
         data, parse_err = _parse_json(resp)
         if parse_err:
             return AIResult(False, error=parse_err, tool_history=_history())
 
         _record_usage("anthropic", data, round_num)
+        _collect_thinking("anthropic", data)
 
         if data.get("stop_reason") == "refusal":
             return AIResult(False, error="refused by the model's safety classifier", tool_history=_history())
@@ -1059,6 +1182,12 @@ def call_anthropic(provider, messages, timeout, tools=None, tool_executor=None, 
 
         if tool_use_blocks and tool_executor and round_num < MAX_TOOL_ROUNDS and round_budget.take():
             ran_tools = True
+            # `blocks` is appended whole, thinking blocks included. That is
+            # required, not incidental: Anthropic rejects a replayed
+            # tool_use turn whose thinking blocks (and their signatures) are
+            # missing, so stripping them here to save input tokens would
+            # break every multi-round turn with thinking on. This is the one
+            # place a trace is legitimately resent — see reasoning.carry_blocks.
             working_turns.append({"role": "assistant", "content": blocks})
             result_blocks = []
             for b in tool_use_blocks:
@@ -1279,6 +1408,7 @@ def call_gemini(provider, messages, timeout, tools=None, tool_executor=None, rou
     working_contents = [_to_gemini_content(t) for t in turns]
     headers = {"x-goog-api-key": api_key, "Content-Type": "application/json"}
     ran_tools = False
+    thought_rounds = 0
     if round_budget is None:
         round_budget = RoundBudget()
 
@@ -1357,6 +1487,9 @@ def call_gemini(provider, messages, timeout, tools=None, tool_executor=None, rou
                 "contents": working_contents,
                 "generationConfig": {"maxOutputTokens": provider.get("max_tokens", GEMINI_DEFAULT_MAX_TOKENS)},
             }
+            if _apply_thinking(payload, provider, "gemini", round_num,
+                               ran_tools, thought_rounds):
+                thought_rounds += 1
             extra = provider.get("extra_params")
             if isinstance(extra, dict):
                 # Merged into generationConfig specifically (not the top
@@ -1387,6 +1520,7 @@ def call_gemini(provider, messages, timeout, tools=None, tool_executor=None, rou
                 return AIResult(False, error=parse_err, tool_history=_history())
 
             _record_usage("gemini", data, round_num)
+            _collect_thinking("gemini", data)
 
             block_reason = (data.get("promptFeedback") or {}).get("blockReason")
             if block_reason:
@@ -1406,7 +1540,17 @@ def call_gemini(provider, messages, timeout, tools=None, tool_executor=None, rou
 
             if call_parts and tool_executor and round_num < MAX_TOOL_ROUNDS and round_budget.take():
                 ran_tools = True
-                working_contents.append({"role": "model", "parts": parts})
+                # Thought parts are stripped before the model turn is echoed
+                # back. Gemini rejects a replayed turn that still contains
+                # them, so with includeThoughts on this would fail EVERY
+                # multi-round turn — and it's the opposite of Anthropic,
+                # which requires them kept. Same field, inverted rule; the
+                # difference is why reasoning.carry_blocks() is per-provider.
+                working_contents.append({
+                    "role": "model",
+                    "parts": [p for p in parts
+                              if not (isinstance(p, dict) and p.get("thought"))],
+                })
                 response_parts = []
                 for p in call_parts:
                     fc = p["functionCall"]
@@ -1419,7 +1563,12 @@ def call_gemini(provider, messages, timeout, tools=None, tool_executor=None, rou
                 working_contents.append({"role": "user", "parts": response_parts})
                 continue
 
-            text = "".join(p.get("text", "") for p in parts if isinstance(p, dict)).strip()
+            # Thought parts excluded: with includeThoughts on, Gemini returns
+            # the reasoning as ordinary text parts flagged `thought: true`.
+            # Joining them all would print the model's private deliberation
+            # to the user as if it were the answer.
+            text = "".join(p.get("text", "") for p in parts
+                           if isinstance(p, dict) and not p.get("thought")).strip()
             if not text:
                 if call_parts:
                     return AIResult(False, error=_give_up_error(), tool_history=_history())
@@ -1592,6 +1741,7 @@ def call_ollama(provider, messages, timeout, tools=None, tool_executor=None, rou
     # to the pre-caching payload, since both sides join with "\n\n".
     working_messages = _merge_system(messages)
     ran_tools = False
+    thought_rounds = 0
     system_parts_in, _ = _system_parts(messages)
     cache_plan = prompt_cache.plan(
         system_parts_in, None, provider, cfg_defaults or {}, model=model,
@@ -1619,6 +1769,9 @@ def call_ollama(provider, messages, timeout, tools=None, tool_executor=None, rou
         _compact_prior_tool_results(working_messages)
         tools_payload = _tools_payload()
         payload = {"model": model, "messages": working_messages, "stream": False}
+        if _apply_thinking(payload, provider, "ollama", round_num,
+                           ran_tools, thought_rounds):
+            thought_rounds += 1
         # Ollama reuses a KV prefix automatically when the prompt prefix
         # matches, but drops that cache when it unloads the model — which it
         # does after 5 minutes idle by default. jarvis is a fresh process per
@@ -1656,6 +1809,7 @@ def call_ollama(provider, messages, timeout, tools=None, tool_executor=None, rou
                             tool_history=_openai_messages_to_generic(working_messages) if ran_tools else None)
 
         _record_usage("ollama", data, round_num)
+        _collect_thinking("ollama", data)
 
         message = data.get("message") or {}
         tool_calls = message.get("tool_calls")

@@ -41,5 +41,22 @@ jarvis = "jarvis.cli:entry"
 requires = ["setuptools>=61.0"]
 build-backend = "setuptools.build_meta"
 
-[tool.setuptools]
-packages = ["jarvis", "jarvis.voice", "jarvis.actions"]
+[tool.setuptools.packages.find]
+# AUTO-DISCOVERY, NOT A HAND-WRITTEN LIST — this was `packages = ["jarvis",
+# "jarvis.voice", "jarvis.actions"]`, and jarvis.channels was missing from
+# it. The symptom was vicious: running from a source checkout worked fine
+# (the folder is right there on sys.path), and `pip install -e .` worked
+# fine (editable installs point at the source tree), so the bug was
+# invisible during development. Only a REAL install — what script.bat does
+# — actually copies the declared packages into site-packages, and it
+# silently copied everything except channels/:
+#
+#     ModuleNotFoundError: No module named 'jarvis.channels'
+#       ... from .channels_cli import COMMANDS as _CHANNEL_COMMANDS
+#
+# which surfaced as "couldn't load logs" (cli.main() imports channels_cli
+# before almost every command, so the failure had nothing to do with logs).
+#
+# A hand-maintained list means every future subpackage is one forgotten
+# edit away from the same multi-hour debugging session. find: cannot forget.
+include = ["jarvis*"]

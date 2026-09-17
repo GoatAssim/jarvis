@@ -39,6 +39,82 @@ PROMPT_MAX_PER_TAG = 3
 PROMPT_INDEX_CHARS = 300
 
 _KEY_RE = re.compile(r"^[a-z0-9][a-z0-9_\-]{0,47}$")
+
+# ---------------------------------------------------------------------------
+# NAMESPACES
+#
+# One memory file, several contexts. Without this, a work laptop's deployment
+# conventions and a household shopping preference compete for the same
+# per-prompt character budget on every single ask, and the loser is whichever
+# happened to score lower — so asking about a deploy can silently push out
+# the fact that tells Jarvis your name.
+#
+# A namespace is a soft filter, not a wall:
+#   * facts in the ACTIVE namespace are scored normally
+#   * facts in "shared" are ALWAYS eligible, in every namespace
+#   * facts in another namespace are still searchable by memory_search, but
+#     score much lower in prompt_context
+#
+# Soft rather than hard on purpose. A hard wall means "why doesn't it
+# remember that?" with no way to find out, and the honest truth is that
+# namespace boundaries are guesses — a fact filed under "work" can still be
+# the right answer to a personal question. Down-weighting keeps recall
+# possible while stopping one context from crowding out another.
+# ---------------------------------------------------------------------------
+DEFAULT_NAMESPACE = "default"
+SHARED_NAMESPACE = "shared"
+ACTIVE_NS_FILE = JARVIS_DIR / "memory_namespace.json"
+_NS_RE = re.compile(r"^[a-z0-9][a-z0-9_\-]{0,23}$")
+# How much a fact from a DIFFERENT namespace keeps of its score. Low enough
+# that same-namespace facts win every realistic tie, high enough that a
+# strongly-matching cross-namespace fact can still surface.
+FOREIGN_NAMESPACE_WEIGHT = 0.25
+
+
+def normalize_namespace(value):
+    text = (str(value or "")).strip().lower().replace(" ", "_")
+    if not text:
+        return ""
+    text = re.sub(r"[^a-z0-9_\-]+", "_", text).strip("_")[:24]
+    return text if _NS_RE.match(text) else ""
+
+
+def active_namespace():
+    """Which namespace new facts land in and prompt_context prefers."""
+    try:
+        data = json.loads(ACTIVE_NS_FILE.read_text(encoding=ENCODING))
+        return normalize_namespace(data.get("namespace")) or DEFAULT_NAMESPACE
+    except (FileNotFoundError, json.JSONDecodeError, UnicodeDecodeError, OSError):
+        return DEFAULT_NAMESPACE
+
+
+def set_active_namespace(name):
+    ns = normalize_namespace(name) or DEFAULT_NAMESPACE
+    from . import atomic_io
+    ensure_config()
+    atomic_io.write_json(ACTIVE_NS_FILE, {"namespace": ns})
+    return ns
+
+
+def namespaces():
+    """Every namespace in use, with counts — what `jarvis memory-ns` lists."""
+    counts = {}
+    for fact in load_facts():
+        ns = normalize_namespace(fact.get("namespace")) or DEFAULT_NAMESPACE
+        counts[ns] = counts.get(ns, 0) + 1
+    counts.setdefault(DEFAULT_NAMESPACE, counts.get(DEFAULT_NAMESPACE, 0))
+    return counts
+
+
+def _fact_namespace(fact):
+    return normalize_namespace(fact.get("namespace")) or DEFAULT_NAMESPACE
+
+
+def _namespace_factor(fact, active):
+    ns = _fact_namespace(fact)
+    if ns == active or ns == SHARED_NAMESPACE:
+        return 1.0
+    return FOREIGN_NAMESPACE_WEIGHT
 _WORD_RE = re.compile(r"[a-z0-9]{2,}")
 # Facts tagged "identity" (or keyed as one of these) ride in every prompt,
 # in full, regardless of query relevance — same rationale as Mark LIII's
@@ -79,9 +155,27 @@ _EXPAND = {
     "game": ("playnite", "games"),
     "games": ("playnite", "game"),
     "git": ("github", "commit", "repo", "repository"),
-    "gpu": ("rtx", "nvidia", "graphics", "videocard"),
-    "graphics": ("gpu", "rtx", "nvidia"),
+    "gpu": ("rtx", "nvidia", "graphics", "videocard", "card"),
+    "graphics": ("gpu", "rtx", "nvidia", "card"),
     "nvidia": ("gpu", "rtx"),
+    "card": ("gpu", "rtx", "graphics"),
+    # Added alongside the semantic layer (memory_semantic.py), which reuses
+    # this same table. Character n-grams cannot bridge true synonyms —
+    # "ship" and "deploy" share no letters — so the curated entries are what
+    # cover the pairs this project actually sees. The embedding tier is the
+    # general answer; this is the free one.
+    "ship": ("deploy", "release", "launch"),
+    "deploy": ("ship", "release", "rollout"),
+    "release": ("ship", "deploy", "version"),
+    "theme": ("mode", "appearance", "colour", "color", "skin"),
+    "themes": ("mode", "appearance", "skin"),
+    "dark": ("theme", "mode", "appearance"),
+    "light": ("theme", "mode", "appearance"),
+    "cpu": ("processor", "ryzen", "intel", "chip"),
+    "processor": ("cpu", "ryzen", "intel"),
+    "ram": ("memory", "ddr"),
+    "screen": ("monitor", "display", "resolution"),
+    "monitor": ("screen", "display"),
 }
 
 
@@ -258,7 +352,8 @@ def _render_facts(facts, budget, overflow_labels=None):
     return "\n".join(lines) if included or index_line else ""
 
 
-def prompt_context(char_budget=None, compact=False, query="", extra_texts=None):
+def prompt_context(char_budget=None, compact=False, query="", extra_texts=None,
+                   namespace=None, semantic=True, use_embeddings=False):
     """Return memory lines relevant to query, or '' if nothing matches.
 
     Identity facts (tag "identity", or a well-known key like name/timezone)
@@ -268,6 +363,13 @@ def prompt_context(char_budget=None, compact=False, query="", extra_texts=None):
     rest — and whatever matched but didn't fit is listed by label in a
     trailing index instead of a bare count, so the model can still
     memory_search it by name.
+
+    `namespace` overrides the active one for this call (the scheduler passes
+    the namespace a job was created in, so a 3am task doesn't retrieve
+    against whatever context a human last switched to). `semantic=False`
+    restores the exact pre-semantic-search behavior — useful for a
+    reproducible test, and as an escape hatch if the fuzzy layer ever
+    misbehaves.
     """
     facts = load_facts()
     if not facts:
@@ -281,7 +383,12 @@ def prompt_context(char_budget=None, compact=False, query="", extra_texts=None):
         newest_first = list(reversed(facts))
         return _render_facts(newest_first, budget)
 
-    identity_facts = [f for f in facts if _is_identity_fact(f)]
+    active_ns_for_identity = namespace or active_namespace()
+    identity_facts = [
+        f for f in facts
+        if _is_identity_fact(f)
+        and _fact_namespace(f) in (active_ns_for_identity, SHARED_NAMESPACE)
+    ]
     qtoks = _expand(_tokens(blob))
 
     if not qtoks:
@@ -289,11 +396,32 @@ def prompt_context(char_budget=None, compact=False, query="", extra_texts=None):
             return ""
         return _render_facts(identity_facts, budget)
 
+    # Semantic recall (memory_semantic.py). Purely ADDITIVE: it can lift a
+    # fact the token overlap missed into contention, but the lexical score is
+    # untouched, so anything the old code surfaced is still surfaced and still
+    # ranked above a merely-similar fact. Wrapped because an index rebuild
+    # failing (unwritable disk, corrupt file) must degrade to the exact
+    # previous behavior rather than break recall entirely.
+    boosts = {}
+    if semantic:
+        try:
+            from . import memory_semantic
+            boosts = memory_semantic.boost_map(
+                blob, facts, use_embeddings=use_embeddings)
+        except Exception:  # noqa: BLE001
+            boosts = {}
+
+    active_ns = namespace or active_namespace()
+
     ranked = []
     for i, f in enumerate(facts):
         if _is_identity_fact(f):
             continue
-        s = _score_fact(f, qtoks)
+        s = _score_fact(f, qtoks) + boosts.get(f.get("id"), 0)
+        # Namespace weighting applied AFTER the semantic boost, so a strongly
+        # matching cross-namespace fact keeps a quarter of a big number rather
+        # than a quarter of a small one.
+        s *= _namespace_factor(f, active_ns)
         if s <= 0:
             continue
         ranked.append((s, i, f))
@@ -334,24 +462,37 @@ def tool_memory_save(args):
         tags = []
     tags = [str(t).strip().lower()[:24] for t in tags if str(t).strip()][:6]
 
+    # An explicit namespace wins; otherwise a fact lands in whatever context
+    # is active, which is what makes `jarvis memory-ns work` followed by a
+    # few memory_saves do the obvious thing.
+    ns = normalize_namespace(args.get("namespace")) or active_namespace()
+
     facts = load_facts()
     now = datetime.now(timezone.utc).isoformat(timespec="seconds")
     if key:
         for f in facts:
-            if (f.get("key") or "") == key:
+            # Key uniqueness is PER NAMESPACE: "deploy_target" meaning one
+            # thing at work and another at home is a legitimate thing to
+            # want, and a global key would silently overwrite one with the
+            # other.
+            if (f.get("key") or "") == key and _fact_namespace(f) == ns:
                 f["fact"] = fact
                 f["tags"] = tags or f.get("tags") or []
                 f["updated"] = now
+                f["namespace"] = ns
                 save_facts(facts)
-                return {"ok": True, "updated": True, "id": f.get("id"), "key": key, "fact": fact}
+                return {"ok": True, "updated": True, "id": f.get("id"), "key": key,
+                        "fact": fact, "namespace": ns}
 
     fid = "m_" + secrets.token_hex(4)
-    entry = {"id": fid, "key": key, "fact": fact, "tags": tags, "updated": now}
+    entry = {"id": fid, "key": key, "fact": fact, "tags": tags, "updated": now,
+             "namespace": ns}
     facts.append(entry)
     if len(facts) > MAX_FACTS:
         facts = facts[-MAX_FACTS:]
     save_facts(facts)
-    return {"ok": True, "updated": False, "id": fid, "key": key or None, "fact": fact}
+    return {"ok": True, "updated": False, "id": fid, "key": key or None,
+            "fact": fact, "namespace": ns}
 
 
 def tool_memory_forget(args):
@@ -388,24 +529,58 @@ def tool_memory_forget(args):
 
 def tool_memory_search(args=None):
     args = args or {}
-    query = (args.get("query") or args.get("q") or "").strip().lower()
+    query = (args.get("query") or args.get("q") or "").strip()
     facts = load_facts()
+
+    ns_filter = normalize_namespace(args.get("namespace"))
+    if ns_filter:
+        facts = [f for f in facts
+                 if _fact_namespace(f) in (ns_filter, SHARED_NAMESPACE)]
+
+    matched_semantically = set()
     if query:
-        facts = [
+        lowered = query.lower()
+        exact = [
             f for f in facts
-            if query in (f.get("fact") or "").lower()
-            or query in (f.get("key") or "").lower()
-            or query in " ".join(f.get("tags") or []).lower()
+            if lowered in (f.get("fact") or "").lower()
+            or lowered in (f.get("key") or "").lower()
+            or lowered in " ".join(f.get("tags") or []).lower()
         ]
+        # Substring first, then semantic for everything it missed. This is
+        # the whole point of the feature: "do I like light themes?" shares no
+        # substring with "Prefers dark mode in every app", so the old search
+        # returned nothing and the model concluded it didn't know.
+        extra = []
+        if args.get("semantic", True):
+            try:
+                from . import memory_semantic
+                seen = {f.get("id") for f in exact}
+                for _sim, fact in memory_semantic.rank(query, facts, limit=12):
+                    if fact.get("id") not in seen:
+                        extra.append(fact)
+                        matched_semantically.add(fact.get("id"))
+            except Exception:  # noqa: BLE001 — degrade to substring-only
+                extra = []
+        facts = exact + extra
     compact = []
     for f in facts[-40:]:
-        compact.append({
+        entry = {
             "id": f.get("id"),
             "key": f.get("key") or None,
             "fact": f.get("fact"),
             "tags": f.get("tags") or [],
-        })
-    return {"showing": len(compact), "total_stored": len(load_facts()), "facts": compact}
+        }
+        ns = _fact_namespace(f)
+        if ns != DEFAULT_NAMESPACE:
+            entry["namespace"] = ns
+        # Flagged so the model can tell "this literally contains your words"
+        # from "this is about the same thing" — a distinction worth making
+        # before it asserts a fuzzy match as fact.
+        if f.get("id") in matched_semantically:
+            entry["matched"] = "similar meaning"
+        compact.append(entry)
+    return {"showing": len(compact), "total_stored": len(load_facts()),
+            "namespace": ns_filter or active_namespace(), "facts": compact}
 
 
 MEMORY_TOOL_SCHEMAS = [
@@ -427,6 +602,14 @@ MEMORY_TOOL_SCHEMAS = [
                     "items": {"type": "string"},
                     "description": "Optional short tags: identity, prefs, hardware, games.",
                 },
+                "namespace": {
+                    "type": "string",
+                    "description": (
+                        "Optional context this fact belongs to (work, personal, "
+                        "household). Omit to use the active one. Use 'shared' for "
+                        "facts that are true in every context."
+                    ),
+                },
             },
             "required": ["fact"],
         },
@@ -446,11 +629,17 @@ MEMORY_TOOL_SCHEMAS = [
     },
     {
         "name": "memory_search",
-        "description": "Search long-term memories. The prompt only includes facts that matched this message — call this if you need more or the user asks what you remember and nothing was injected.",
+        "description": (
+            "Search long-term memories. Matches both literal text AND similar "
+            "meaning, so a paraphrase finds the fact. The prompt only includes "
+            "facts that matched this message — call this if you need more, or if "
+            "the user asks what you remember and nothing was injected."
+        ),
         "parameters": {
             "type": "object",
             "properties": {
-                "query": {"type": "string", "description": "Optional substring. Empty lists recent facts."},
+                "query": {"type": "string", "description": "What to look for. Empty lists recent facts."},
+                "namespace": {"type": "string", "description": "Optional: restrict to one context."},
             },
             "required": [],
         },

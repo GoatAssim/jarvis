@@ -1446,6 +1446,321 @@ def main():
             sys.exit(1)
         return
 
+    # --- Conversation export ------------------------------------------------
+    if argv[0] == "conv-export":
+        from . import conv_export, conversations as _conv
+        conv_id = ""
+        fmt = conv_export.DEFAULT_FORMAT
+        out_dir = None
+        rest = argv[1:]
+        i = 0
+        flags = set()
+        while i < len(rest):
+            token = rest[i]
+            if token in ("--format", "-f") and i + 1 < len(rest):
+                fmt = rest[i + 1]; i += 2; continue
+            if token in ("--out", "-o") and i + 1 < len(rest):
+                out_dir = rest[i + 1]; i += 2; continue
+            if token.startswith("--"):
+                flags.add(token); i += 1; continue
+            if not conv_id:
+                conv_id = token
+            i += 1
+        if not conv_id:
+            conv_id = os.environ.get("JARVIS_CONVERSATION_ID") or _conv.get_current_id()
+        result = conv_export.export(
+            conv_id, fmt, out_dir=out_dir,
+            include_tools="--tools" in flags,
+            include_thinking="--thinking" in flags,
+            include_trace="--trace" in flags,
+            assistant_name=current_display_name(),
+        )
+        print(json.dumps(result, indent=2))
+        if not result.get("ok"):
+            sys.exit(1)
+        return
+
+    # --- Memory namespaces / consolidation -----------------------------------
+    if argv[0] in ("memory-ns", "memory-list", "memory-consolidate",
+                   "memory-stats", "memory-recall", "memory-reindex"):
+        from . import memory as _mem
+        cmd = argv[0]
+
+        if cmd == "memory-ns":
+            if len(argv) > 1:
+                print(json.dumps({"ok": True,
+                                  "namespace": _mem.set_active_namespace(argv[1])}, indent=2))
+            else:
+                print(json.dumps({"active": _mem.active_namespace(),
+                                  "all": _mem.namespaces()}, indent=2))
+            return
+
+        if cmd == "memory-list":
+            facts = _mem.load_facts()
+            if "--auto" in argv:
+                facts = [f for f in facts if "auto" in (f.get("tags") or [])]
+            print(json.dumps({"count": len(facts), "facts": facts}, indent=2))
+            return
+
+        if cmd == "memory-stats":
+            from . import memory_consolidation as _mc
+            print(json.dumps(_mc.stats(), indent=2))
+            return
+
+        if cmd == "memory-recall":
+            from . import memory_consolidation as _mc
+            query = " ".join(a for a in argv[1:] if not a.startswith("--")).strip()
+            if not query:
+                print(json.dumps({"error": "usage: jarvis memory-recall <what you remember>"}))
+                sys.exit(1)
+            print(json.dumps({"results": _mc.recall(query)}, indent=2))
+            return
+
+        if cmd == "memory-reindex":
+            from . import memory_semantic as _ms
+            facts = _mem.load_facts()
+            _ms.build_index(facts)
+            out = {"ok": True, "indexed": len(facts)}
+            if "--embeddings" in argv:
+                out["embeddings"] = _ms.reindex_embeddings(facts)
+            print(json.dumps(out, indent=2))
+            return
+
+        if cmd == "memory-consolidate":
+            from . import memory_consolidation as _mc
+            days = 7
+            for i, token in enumerate(argv):
+                if token == "--days" and i + 1 < len(argv):
+                    try:
+                        days = int(argv[i + 1])
+                    except ValueError:
+                        pass
+            result = _mc.consolidate(
+                days=days,
+                review_only="--review" in argv or "--dry-run" in argv,
+                use_model="--no-model" not in argv,
+            )
+            print(json.dumps(result, indent=2))
+            return
+
+    # --- Calendar ------------------------------------------------------------
+    if argv[0] in ("calendar-add", "calendar-list", "calendar-remove", "calendar-events"):
+        from .actions import calendar_tools as _cal
+        cmd = argv[0]
+        cfg = _cal.load_config()
+        if cmd == "calendar-add":
+            if len(argv) < 3:
+                print(json.dumps({"error": "usage: jarvis calendar-add <name> <ics-url>"}))
+                sys.exit(1)
+            cfg.setdefault("feeds", []).append(
+                {"name": argv[1], "url": argv[2], "enabled": True})
+            _cal.save_config(cfg)
+            body, err = _cal.fetch_feed({"url": argv[2]}, force=True)
+            print(json.dumps({"ok": True, "name": argv[1],
+                              "reachable": bool(body) and not err,
+                              "problem": err or None,
+                              "events_seen": len(_cal.parse_ics(body)) if body else 0}, indent=2))
+            return
+        if cmd == "calendar-list":
+            print(json.dumps({"feeds": cfg.get("feeds") or [],
+                              "local_events": len(cfg.get("local_events") or [])}, indent=2))
+            return
+        if cmd == "calendar-remove":
+            name = argv[1] if len(argv) > 1 else ""
+            cfg["feeds"] = [f for f in (cfg.get("feeds") or []) if f.get("name") != name]
+            _cal.save_config(cfg)
+            print(json.dumps({"ok": True, "removed": name}))
+            return
+        if cmd == "calendar-events":
+            print(json.dumps(_cal.tool_calendar_events({"days": 7}), indent=2))
+            return
+
+    # --- Policy --------------------------------------------------------------
+    if argv[0] in ("policy", "policy-check", "policy-dry-run"):
+        from . import policy as _policy
+        if argv[0] == "policy":
+            path = _policy.ensure_policy()
+            loaded, problems = _policy.load_policy()
+            print(json.dumps({"file": str(path), "enabled": loaded.get("enabled"),
+                              "rules": len(loaded.get("rules") or []),
+                              "safe_roots": loaded.get("safe_roots"),
+                              "problems": problems}, indent=2))
+            return
+        tool = argv[1] if len(argv) > 1 else ""
+        args = {}
+        if "--args" in argv:
+            idx = argv.index("--args")
+            if len(argv) > idx + 1:
+                try:
+                    args = json.loads(argv[idx + 1])
+                except ValueError as exc:
+                    print(json.dumps({"error": "--args must be JSON: %s" % exc}))
+                    sys.exit(1)
+        context = _policy.context_from_env()
+        if "--context" in argv:
+            idx = argv.index("--context")
+            if len(argv) > idx + 1:
+                context = argv[idx + 1]
+        if argv[0] == "policy-dry-run":
+            print(json.dumps(_policy.dry_run(tool, args, context), indent=2))
+        else:
+            verdict = _policy.decide(tool, args, context=context)
+            verdict["explanation"] = _policy.explain(verdict)
+            print(json.dumps(verdict, indent=2))
+        return
+
+    # --- Custom tools (~/.jarvis/tools) ------------------------------------
+    # Source arrives on STDIN for write/check, never argv: a tool file is
+    # multi-line Python with quotes and backslashes in it, and argv escaping
+    # that survives both cmd.exe and sh does not exist.
+    if argv[0] in ("ctools-list", "ctools-show", "ctools-write", "ctools-check",
+                   "ctools-run", "ctools-toggle", "ctools-delete", "ctools-templates"):
+        from . import custom_tools_store as ctools
+        cmd = argv[0]
+
+        if cmd == "ctools-templates":
+            print(json.dumps({"templates": ctools.templates()}, indent=2))
+            return
+        if cmd == "ctools-list":
+            print(json.dumps({"tools": ctools.list_tools()}, indent=2))
+            return
+
+        name = argv[1].strip().lower() if len(argv) > 1 else ""
+        if not name:
+            print(json.dumps({"ok": False, "error": "usage: jarvis %s <name>" % cmd}))
+            sys.exit(1)
+
+        if cmd == "ctools-show":
+            template = None
+            if "--template" in argv:
+                template = argv[argv.index("--template") + 1] if len(argv) > argv.index("--template") + 1 else None
+            if template:
+                print(json.dumps({"ok": True, "name": name,
+                                  "source": ctools.template_source(template)}, indent=2))
+                return
+            print(json.dumps(ctools.read_tool(name), indent=2))
+            return
+
+        if cmd in ("ctools-write", "ctools-check"):
+            source = sys.stdin.read() if "--stdin" in argv else ""
+            if not source and "--file" in argv:
+                idx = argv.index("--file")
+                if len(argv) > idx + 1:
+                    try:
+                        source = Path(argv[idx + 1]).read_text(encoding="utf-8")
+                    except OSError as exc:
+                        print(json.dumps({"ok": False, "error": str(exc)}))
+                        sys.exit(1)
+            if cmd == "ctools-check":
+                print(json.dumps(ctools.validate_source(source, name), indent=2))
+                return
+            result = ctools.write_tool(name, source)
+            print(json.dumps(result, indent=2))
+            if not result.get("ok"):
+                sys.exit(1)
+            return
+
+        if cmd == "ctools-run":
+            tool = None
+            arguments = {}
+            if "--tool" in argv:
+                idx = argv.index("--tool")
+                tool = argv[idx + 1] if len(argv) > idx + 1 else None
+            if "--args" in argv:
+                idx = argv.index("--args")
+                try:
+                    arguments = json.loads(argv[idx + 1]) if len(argv) > idx + 1 else {}
+                except ValueError as exc:
+                    print(json.dumps({"ok": False, "error": "--args must be JSON: %s" % exc}))
+                    sys.exit(1)
+            print(json.dumps(ctools.test_tool(name, tool, arguments), indent=2, default=str))
+            return
+
+        if cmd == "ctools-toggle":
+            want = (argv[2].strip().lower() if len(argv) > 2 else "on") in ("on", "true", "1", "yes")
+            print(json.dumps(ctools.set_enabled(name, want), indent=2))
+            return
+
+        if cmd == "ctools-delete":
+            result = ctools.delete_tool(name)
+            print(json.dumps(result, indent=2))
+            if not result.get("ok"):
+                sys.exit(1)
+            return
+
+    # --- Self-diagnostics ---------------------------------------------------
+    if argv[0] == "doctor":
+        from . import doctor
+        flags = {a for a in argv[1:] if a.startswith("--")}
+        groups = [a for a in argv[1:] if not a.startswith("--")]
+        report = doctor.run(deep="--deep" in flags, only=groups)
+        if "--json" in flags:
+            print(json.dumps(report, indent=2))
+        else:
+            print(doctor.render_for_terminal(report, verbose="--verbose" in flags))
+        # Exit code mirrors the worst finding, so `jarvis doctor` is usable in
+        # a script or a CI step: 0 healthy, 1 warnings, 2 something broken.
+        sys.exit({"ok": 0, "warn": 1, "fail": 2}.get(report["overall"], 0))
+
+    # --- Notification digest ------------------------------------------------
+    if argv[0] in ("digest-status", "digest-on", "digest-off", "digest-now",
+                   "digest-preview"):
+        from . import digest as digest_mod
+        cmd = argv[0]
+        if cmd == "digest-status":
+            print(json.dumps(digest_mod.status(), indent=2))
+            return
+        if cmd == "digest-on":
+            schedule = argv[1].strip().lower() if len(argv) > 1 else "daily"
+            at = argv[2].strip() if len(argv) > 2 else None
+            print(json.dumps(digest_mod.schedule_digest(schedule, at), indent=2))
+            return
+        if cmd == "digest-off":
+            print(json.dumps(digest_mod.unschedule(), indent=2))
+            return
+        if cmd == "digest-preview":
+            print(json.dumps(digest_mod.flush(force=True, dry_run=True), indent=2))
+            return
+        if cmd == "digest-now":
+            result = digest_mod.flush(force=True)
+            print(json.dumps(result, indent=2))
+            if not result.get("ok"):
+                sys.exit(1)
+            return
+
+    # --- Thinking level -----------------------------------------------------
+    if argv[0] == "think":
+        from . import ai_config, reasoning
+        cfg = ai_config.load_ai_config()
+        current = reasoning.resolve_config(cfg.get("defaults") or {})
+        if len(argv) < 2:
+            print(json.dumps({"level": current["level"], "auto": current["auto"],
+                              "show": current["show"],
+                              "options": list(reasoning.LEVELS)}, indent=2))
+            return
+        level = reasoning.normalize_level(argv[1])
+        ai_config.ensure_ai_config()
+        try:
+            raw = json.loads(ai_config.AI_CONFIG_FILE.read_text(encoding="utf-8"))
+        except (OSError, ValueError) as exc:
+            print(json.dumps({"ok": False, "error": str(exc)}))
+            sys.exit(1)
+        defaults = raw.setdefault("defaults", {})
+        block = defaults.get("reasoning")
+        if not isinstance(block, dict):
+            block = {}
+        block["level"] = level
+        if "--show" in argv:
+            block["show"] = True
+        if "--hide" in argv:
+            block["show"] = False
+        defaults["reasoning"] = block
+        from . import atomic_io
+        atomic_io.write_json(ai_config.AI_CONFIG_FILE, raw)
+        print(json.dumps({"ok": True, "level": level,
+                          "describes": reasoning.describe(level)}, indent=2))
+        return
+
     if argv[0] == "logs":
         run_logs_command(argv[1:], commands)
         return

@@ -22,6 +22,8 @@ from . import logs
 from . import tool_result_shaping
 from . import tool_router
 from . import route_stickiness
+from . import reasoning
+from . import turn_trace
 from . import tools as system_tools
 
 DEFAULT_TIMEOUT = 30
@@ -2039,7 +2041,8 @@ def abandon_pending_turn(reason="interrupted"):
 
 
 def ask(user_text, commands=None, on_attempt=None, on_tool_call=None, on_tool_result=None, conversation_id=None,
-        on_confirm_request=None, on_route=None, provider_override=None):
+        on_confirm_request=None, on_route=None, provider_override=None,
+        think_override=None, on_trace=None):
     """Ask Jarvis something, trying every configured, enabled provider in
     order until one answers \u2014 and within each provider, every one of its
     configured keys in order before moving on to the next provider. Always
@@ -2134,6 +2137,20 @@ def ask(user_text, commands=None, on_attempt=None, on_tool_call=None, on_tool_re
     if not providers:
         return AskResult(False, assistant_name=assistant_name, address_user_as=address)
 
+    # Per-turn explanation (turn_trace.py). Built here, filled by the same
+    # callbacks that already drive the stderr trace, so it can never describe
+    # something different from what actually ran.
+    trace = turn_trace.TurnTrace()
+
+    # Thinking level for this one ask: explicit override > configured level >
+    # the zero-cost keyword heuristic. Resolved once and held in
+    # ai_providers' thinking context for the whole attempt loop, because the
+    # adapters read it per round (see reasoning.round_patch's token-discipline
+    # comment for why per-round rather than per-request).
+    think_level, think_cfg = reasoning.effective_level(
+        user_text, cfg["defaults"], think_override)
+    trace.thinking_level = think_level
+
     tools_enabled = cfg["defaults"].get("tools_enabled", DEFAULT_TOOLS_ENABLED)
     full_schemas = []
     if tools_enabled:
@@ -2154,6 +2171,7 @@ def ask(user_text, commands=None, on_attempt=None, on_tool_call=None, on_tool_re
         route = tool_router.route(user_text)
         if on_route:
             on_route(route)
+        trace.note_route(route)
 
         from . import tool_registry
 
@@ -2182,6 +2200,7 @@ def ask(user_text, commands=None, on_attempt=None, on_tool_call=None, on_tool_re
                             sticky_tools.append(name)
                 if sticky_tools:
                     route_stickiness.touch_sticky(conv_id)
+                    trace.sticky_groups = list(sticky_groups)
 
         # Phase 5 of the token-optimization plan (see new_plan.md): when the
         # router has no opinion, don't fall all the way back to the full
@@ -2232,6 +2251,7 @@ def ask(user_text, commands=None, on_attempt=None, on_tool_call=None, on_tool_re
                             seeded.add(gname)
                             full = system_tools.schemas_for_tools([gname])
                             active_schemas.extend(full)
+                            trace.cache_seeded.append(gname)
 
         # Real (description-stripped) argument schemas, not name-only stubs,
         # are the default (full/compact modes) because jarvis is a brand-new
@@ -2417,6 +2437,7 @@ def ask(user_text, commands=None, on_attempt=None, on_tool_call=None, on_tool_re
         provider_ref[0] = label
         profile = _prompt_profile(label, cfg["defaults"])
         verbosity_ref[0] = profile.get("tool_result_verbosity", "full")
+        trace.mode = MODE_LABELS.get(profile.get("mode"), profile.get("mode"))
         if tools_enabled:
             style = profile.get("tool_schema_style")
             tool_schemas = (
@@ -2440,6 +2461,7 @@ def ask(user_text, commands=None, on_attempt=None, on_tool_call=None, on_tool_re
             # reason this mattered; that failure mode is now prevented one
             # layer upstream instead of filtered right before the adapter.
             tool_schemas = tool_schemas.to_list()
+            trace.tool_count = len(tool_schemas)
         else:
             tool_schemas = None
         adapter = ai_providers.ADAPTERS.get(provider.get("type"))
@@ -2489,6 +2511,11 @@ def ask(user_text, commands=None, on_attempt=None, on_tool_call=None, on_tool_re
                 resolved["api_key"] = key
 
             ai_providers.set_log_context(conv_id, key_label, on_tool_usage=on_tool_result)
+            # Reset per attempt, not per ask: a failover to the next key
+            # starts a fresh set of rounds, so its round-0 thinking is a new
+            # spend and its trace shouldn't be glued onto the failed
+            # attempt's.
+            ai_providers.set_thinking(think_level)
             try:
                 result = adapter(resolved, messages, resolved["timeout"],
                                  tools=tool_schemas, tool_executor=tool_executor,
@@ -2513,6 +2540,32 @@ def ask(user_text, commands=None, on_attempt=None, on_tool_call=None, on_tool_re
             if result.ok:
                 turn_runs = getattr(tool_executor, "runs", None) if tool_executor else None
                 extras = _extras_from_runs(turn_runs)
+
+                # --- thinking + trace -------------------------------------
+                thinking = ai_providers.get_thinking_trace()
+                trace.provider = label
+                trace.thinking_chars = len(thinking.get("text") or "")
+                for run in (turn_runs or []):
+                    trace.note_step(run.get("name"), run.get("arguments"), run.get("result"))
+                try:
+                    trace.skills = list(skill_stickiness.get_loaded(conv_id) or [])
+                except Exception:  # noqa: BLE001 — a trace never fails a turn
+                    trace.skills = []
+
+                if thinking.get("text") and think_cfg.get("save", True):
+                    extras.append({"type": "thinking", "data": {
+                        "text": reasoning.clip_trace(
+                            thinking["text"], think_cfg.get("max_trace_chars")),
+                        "level": think_level,
+                        "rounds": thinking.get("rounds", 0),
+                        "requested": thinking.get("requested", 0),
+                    }})
+                extras.append({"type": "trace", "data": trace.to_dict()})
+                if on_trace:
+                    try:
+                        on_trace(trace, thinking)
+                    except Exception:  # noqa: BLE001
+                        pass
                 # Split the same way the web UI's live view does (see
                 # _split_console_dump) so the *saved* exchange matches what
                 # was actually shown: a clean reply bubble plus, if there
@@ -2543,6 +2596,7 @@ def ask(user_text, commands=None, on_attempt=None, on_tool_call=None, on_tool_re
                                  usage=result.usage)
 
             attempts.append((key_label, result.error))
+            trace.note_attempt_failed(key_label, result.error)
 
     # Every provider failed on the closing text call. That used to always
     # mean "no provider answered" and get reported as a hard failure — but
@@ -2563,6 +2617,7 @@ def ask(user_text, commands=None, on_attempt=None, on_tool_call=None, on_tool_re
     completed = _completed_mutations(turn_runs)
     if completed:
         summary = _summarize_completed_mutations(completed)
+        trace.degraded = True
         if conv_id:
             exchange_count = conversations.complete_exchange(
                 conv_id, user_text, summary,
