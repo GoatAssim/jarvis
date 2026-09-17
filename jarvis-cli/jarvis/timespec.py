@@ -85,6 +85,11 @@ _ARTICLE_UNIT_RE = re.compile(
     re.IGNORECASE,
 )
 
+# Long form first per weekday, so a reverse lookup (number -> name) for
+# display picks "Thursday" rather than "Thurs".
+_WEEKDAY_NAMES = {0: "Monday", 1: "Tuesday", 2: "Wednesday", 3: "Thursday",
+                  4: "Friday", 5: "Saturday", 6: "Sunday"}
+
 _WEEKDAYS = {
     "monday": 0, "mon": 0, "tuesday": 1, "tue": 1, "tues": 1, "wednesday": 2,
     "wed": 2, "thursday": 3, "thu": 3, "thur": 3, "thurs": 3, "friday": 4,
@@ -305,6 +310,15 @@ def parse_every(text, now=None):
     if not norm:
         return None
 
+    # Ordinal ("first monday of the month") is checked before everything else
+    # because it doesn't start with "every" and would otherwise fall straight
+    # through to parse_when and be read as a one-off next-Monday.
+    ordinal = parse_ordinal(norm, now)
+    if ordinal:
+        interval, first, rule = ordinal
+        rule.update(parse_exceptions(norm))
+        return interval, first, None, rule
+
     if re.match(r"^(daily|hourly|weekly|monthly|nightly)\b", norm):
         norm = {
             "daily": "every day", "hourly": "every hour", "weekly": "every week",
@@ -315,7 +329,44 @@ def parse_every(text, now=None):
         return None
 
     body = re.sub(r"^(every|each)\s+", "", norm)
+    exceptions = parse_exceptions(norm)
+    # The exception clause is REMOVED from the body before any cadence
+    # matching runs. Without this, "every day at 8 except weekends" sees the
+    # word "weekends" in the body and matches the weekend branch — producing
+    # a job that fires ONLY at weekends, i.e. the exact opposite of what was
+    # asked for. A silently inverted schedule is the worst failure this
+    # module can produce, since it looks like it worked.
+    body = _EXCEPT_RE.sub("", body).strip()
     clock = _parse_clock(body, allow_bare_hour=False)
+
+    # "every other tuesday" / "biweekly" — a weekly cadence with a phase.
+    if _EVERY_OTHER_RE.search(norm):
+        for name, weekday in _WEEKDAYS.items():
+            if re.search(r"\b" + name + r"\b", body):
+                hh, mm = clock if clock else (9, 0)
+                first = _next_weekday(now, weekday, hh, mm)
+                rule = {"every_n_weeks": 2}
+                rule.update(exceptions)
+                return 604800 * 2, first, None, rule
+        # "every other day"
+        if re.search(r"\bdays?\b", body):
+            hh, mm = clock if clock else (9, 0)
+            first = now.replace(hour=hh, minute=mm, second=0, microsecond=0)
+            if first <= now:
+                first += timedelta(days=1)
+            return 86400 * 2, first, None, exceptions or None
+
+    # "every monday and thursday at 18:00" — more than one named weekday.
+    named = sorted({wd for name, wd in _WEEKDAYS.items()
+                    if re.search(r"\b" + name + r"\b", body)})
+    if len(named) > 1:
+        hh, mm = clock if clock else (9, 0)
+        first = now.replace(hour=hh, minute=mm, second=0, microsecond=0)
+        while first <= now or first.weekday() not in named:
+            first += timedelta(days=1)
+        rule = {"only_days": named}
+        rule.update(exceptions)
+        return 86400, first, None, rule
 
     # "every weekday" / "every weekend" — a per-weekday recurrence the
     # fixed-interval model can't express (Mon-Fri isn't a constant gap), so
@@ -326,18 +377,18 @@ def parse_every(text, now=None):
         first = now.replace(hour=hh, minute=mm, second=0, microsecond=0)
         while first <= now or first.weekday() > 4:
             first += timedelta(days=1)
-        return 86400, first, "weekday"
+        return 86400, first, "weekday", exceptions or None
     if re.search(r"\bweekend(s)?\b", body):
         hh, mm = clock if clock else (10, 0)
         first = now.replace(hour=hh, minute=mm, second=0, microsecond=0)
         while first <= now or first.weekday() < 5:
             first += timedelta(days=1)
-        return 86400, first, "weekend"
+        return 86400, first, "weekend", exceptions or None
 
     for name, weekday in _WEEKDAYS.items():
         if re.search(r"\b" + name + r"\b", body):
             hh, mm = clock if clock else (9, 0)
-            return 604800, _next_weekday(now, weekday, hh, mm), None
+            return 604800, _next_weekday(now, weekday, hh, mm), None, exceptions or None
 
     interval = parse_delay(body)
     if interval is None:
@@ -365,7 +416,7 @@ def parse_every(text, now=None):
             first += timedelta(seconds=interval)
     else:
         first = (now + timedelta(seconds=interval)).replace(microsecond=0)
-    return interval, first, None
+    return interval, first, None, exceptions or None
 
 
 def parse_trigger(text, now=None):
@@ -380,10 +431,19 @@ def parse_trigger(text, now=None):
     now = now or datetime.now()
     recurring = parse_every(text, now)
     if recurring:
-        interval, first, day_filter = recurring
+        # parse_every returns 4 values now (a `rule` was appended); the
+        # 3-tuple form is still accepted so anything that calls it directly
+        # and predates this keeps working.
+        if len(recurring) == 4:
+            interval, first, day_filter, rule = recurring
+        else:
+            interval, first, day_filter = recurring
+            rule = None
         trigger = {"type": "every", "every_seconds": int(interval), "at": to_iso(first)}
         if day_filter:
             trigger["only_on"] = day_filter
+        if rule:
+            trigger["rule"] = rule
         return trigger
     return {"type": "at", "at": to_iso(parse_when(text, now))}
 
@@ -405,6 +465,10 @@ def describe(trigger):
         base = "every " + every
         if only:
             base = "every %s" % ("weekday" if only == "weekday" else "weekend day")
+        rule_text = describe_rule(trigger.get("rule"))
+        if rule_text:
+            base = rule_text if trigger.get("rule", {}).get("ordinal") is not None \
+                else base + " (" + rule_text + ")"
         if at:
             try:
                 base += ", next " + _friendly(at)
@@ -457,3 +521,245 @@ def human_duration(seconds):
         if len(parts) == 2:
             break
     return " ".join(parts) or "0m"
+
+
+# ===========================================================================
+# RICHER RECURRENCE — exceptions, ordinals, intervals
+#
+# parse_every() above covers the fixed-interval cases plus the two per-weekday
+# ones (weekday/weekend) that a constant gap can't express. What it can't say:
+#
+#     every weekday at 9am except holidays
+#     first monday of the month at 10:00
+#     every other tuesday
+#     every day at 8 except weekends
+#     last friday of the month
+#     every monday and thursday at 18:00
+#
+# All of these are the same shape: a base cadence plus a FILTER applied at
+# fire time. The scheduler already does exactly that for weekday/weekend via
+# trigger["only_on"], so this extends that mechanism rather than inventing a
+# parallel one — a trigger gains an optional "rule" block, and
+# scheduler._weekday_filter's call site consults it.
+#
+# WHY NOT RRULE
+# -------------
+# iCalendar's RRULE covers all of this and much more. It also needs
+# dateutil, which this module deliberately doesn't have (see the module
+# docstring), and it is unreadable — "FREQ=MONTHLY;BYDAY=1MO" is not
+# something a user will recognise in `sched-list`. The set below is what
+# people actually ask for, spelled the way they ask for it.
+#
+# HOLIDAYS ARE DATA
+# -----------------
+# "except holidays" needs a list of holidays, and there is no correct
+# built-in answer — they differ by country, by company, and by person.
+# So it reads ~/.jarvis/holidays.json, a plain list of YYYY-MM-DD strings,
+# and a rule referencing holidays when that file is empty simply never skips
+# anything. Failing open is right here: a reminder that fires on a holiday is
+# a minor annoyance, one that silently never fires is a missed appointment.
+# ===========================================================================
+
+import json as _json
+from pathlib import Path as _Path
+
+HOLIDAYS_FILE = _Path.home() / ".jarvis" / "holidays.json"
+
+_ORDINALS = {
+    "first": 1, "1st": 1, "second": 2, "2nd": 2, "third": 3, "3rd": 3,
+    "fourth": 4, "4th": 4, "fifth": 5, "5th": 5, "last": -1,
+}
+
+_EXCEPT_RE = re.compile(
+    r"\b(?:except|excluding|but not|skip(?:ping)?|other than)\s+(?:on\s+)?(.+)$",
+    re.IGNORECASE,
+)
+
+_ORDINAL_RE = re.compile(
+    r"\b(first|1st|second|2nd|third|3rd|fourth|4th|fifth|5th|last)\s+"
+    r"(monday|mon|tuesday|tue|tues|wednesday|wed|thursday|thu|thur|thurs|"
+    r"friday|fri|saturday|sat|sunday|sun)\b(?:\s+(?:of|in)\s+(?:the\s+)?month)?",
+    re.IGNORECASE,
+)
+
+_EVERY_OTHER_RE = re.compile(
+    r"\b(?:every\s+other|alternate|biweekly|fortnightly)\b", re.IGNORECASE)
+
+
+def load_holidays():
+    """YYYY-MM-DD strings from ~/.jarvis/holidays.json. Never raises."""
+    try:
+        data = _json.loads(HOLIDAYS_FILE.read_text(encoding="utf-8"))
+    except (FileNotFoundError, ValueError, OSError):
+        return set()
+    if isinstance(data, dict):
+        data = data.get("holidays") or data.get("dates") or []
+    if not isinstance(data, list):
+        return set()
+    out = set()
+    for entry in data:
+        if isinstance(entry, str) and len(entry) >= 10:
+            out.add(entry[:10])
+        elif isinstance(entry, dict) and entry.get("date"):
+            out.add(str(entry["date"])[:10])
+    return out
+
+
+def parse_exceptions(text):
+    """The 'except ...' half of a recurrence -> a filter dict.
+
+    Returns {} when there's no exception clause, so a caller can merge
+    unconditionally.
+    """
+    match = _EXCEPT_RE.search(text or "")
+    if not match:
+        return {}
+    body = match.group(1).lower()
+    rule = {}
+
+    if re.search(r"\bholidays?\b|\bbank holidays?\b|\bpublic holidays?\b", body):
+        rule["skip_holidays"] = True
+    if re.search(r"\bweekends?\b", body):
+        rule["skip_weekends"] = True
+    if re.search(r"\bweekdays?\b", body):
+        rule["skip_weekdays"] = True
+
+    days = []
+    for name, weekday in _WEEKDAYS.items():
+        if re.search(r"\b" + name + r"\b", body) and weekday not in days:
+            days.append(weekday)
+    if days:
+        rule["skip_days"] = sorted(days)
+
+    # "except the 1st", "except 25 december" — explicit dates.
+    dates = re.findall(r"\b(\d{4}-\d{2}-\d{2})\b", body)
+    if dates:
+        rule["skip_dates"] = sorted(set(dates))
+
+    return rule
+
+
+def parse_ordinal(text, now=None):
+    """'first monday of the month at 10:00' -> (interval, first_run, rule).
+
+    Returns None if the text isn't an ordinal expression. The interval is
+    nominal (roughly a month); the rule is what actually decides whether a
+    given fire is the right one, because "the first Monday" is 28-35 days
+    apart depending on the month and no fixed interval expresses it.
+    """
+    now = now or datetime.now()
+    match = _ORDINAL_RE.search(_norm(text))
+    if not match:
+        return None
+    ordinal = _ORDINALS[match.group(1).lower()]
+    weekday = _WEEKDAYS[match.group(2).lower()]
+    clock = _parse_clock(_norm(text), allow_bare_hour=False) or (9, 0)
+
+    first = _next_ordinal_weekday(now, ordinal, weekday, clock[0], clock[1])
+    rule = {"ordinal": ordinal, "weekday": weekday}
+    # Daily nominal interval: the scheduler advances a day at a time and the
+    # rule rejects every day that isn't the nth weekday, which is both simpler
+    # and more robust than trying to compute the next occurrence arithmetically
+    # across month boundaries and DST.
+    return 86400, first, rule
+
+
+def _next_ordinal_weekday(now, ordinal, weekday, hour, minute):
+    """Next datetime that is the nth <weekday> of its month, after `now`."""
+    candidate = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+    if candidate <= now:
+        candidate += timedelta(days=1)
+    # At most ~70 days covers this month and the next, which is always enough
+    # for any ordinal from 1st to 5th or "last".
+    for _ in range(70):
+        if _is_ordinal_weekday(candidate, ordinal, weekday):
+            return candidate
+        candidate += timedelta(days=1)
+    return candidate
+
+
+def _is_ordinal_weekday(dt, ordinal, weekday):
+    if dt.weekday() != weekday:
+        return False
+    if ordinal == -1:
+        # "last": no same weekday left in this month.
+        return (dt + timedelta(days=7)).month != dt.month
+    return (dt.day - 1) // 7 + 1 == ordinal
+
+
+def matches_rule(dt, rule, anchor=None):
+    """Should a job whose trigger carries `rule` actually fire at `dt`?
+
+    Called by the scheduler at fire time, alongside the existing only_on
+    check. Returns True when there is no rule, so every existing job is
+    unaffected.
+    """
+    if not isinstance(rule, dict) or not rule:
+        return True
+
+    if rule.get("skip_weekends") and dt.weekday() >= 5:
+        return False
+    if rule.get("skip_weekdays") and dt.weekday() < 5:
+        return False
+    if dt.weekday() in (rule.get("skip_days") or []):
+        return False
+    if dt.strftime("%Y-%m-%d") in set(rule.get("skip_dates") or []):
+        return False
+    if rule.get("skip_holidays") and dt.strftime("%Y-%m-%d") in load_holidays():
+        return False
+
+    only_days = rule.get("only_days")
+    if only_days and dt.weekday() not in only_days:
+        return False
+
+    ordinal = rule.get("ordinal")
+    if ordinal is not None:
+        if not _is_ordinal_weekday(dt, ordinal, rule.get("weekday", dt.weekday())):
+            return False
+
+    interval_weeks = rule.get("every_n_weeks")
+    if interval_weeks and interval_weeks > 1:
+        # Counted from the anchor (the job's first run), so "every other
+        # Tuesday" stays on the same fortnightly phase forever instead of
+        # drifting whenever a run is skipped for another reason.
+        if anchor:
+            try:
+                base = from_iso(anchor) if isinstance(anchor, str) else anchor
+                weeks = (dt.date() - base.date()).days // 7
+                if weeks % interval_weeks != 0:
+                    return False
+            except (TimeSpecError, AttributeError, TypeError):
+                pass
+    return True
+
+
+def describe_rule(rule):
+    """Plain-language rendering, for sched-list and the web panel."""
+    if not isinstance(rule, dict) or not rule:
+        return ""
+    bits = []
+    ordinal = rule.get("ordinal")
+    if ordinal is not None:
+        label = {1: "first", 2: "second", 3: "third", 4: "fourth",
+                 5: "fifth", -1: "last"}.get(ordinal, str(ordinal))
+        bits.append("%s %s of the month"
+                    % (label, _WEEKDAY_NAMES.get(rule.get("weekday"), "day").lower()))
+    if rule.get("every_n_weeks", 1) > 1:
+        bits.append("every %d weeks" % rule["every_n_weeks"])
+    only = rule.get("only_days")
+    if only:
+        bits.append("on " + ", ".join(_WEEKDAY_NAMES.get(d, "?") for d in only))
+    skips = []
+    if rule.get("skip_holidays"):
+        skips.append("holidays")
+    if rule.get("skip_weekends"):
+        skips.append("weekends")
+    if rule.get("skip_weekdays"):
+        skips.append("weekdays")
+    if rule.get("skip_days"):
+        skips.extend(_WEEKDAY_NAMES.get(d, "?") for d in rule["skip_days"])
+    if rule.get("skip_dates"):
+        skips.append("%d specific date(s)" % len(rule["skip_dates"]))
+    if skips:
+        bits.append("except " + ", ".join(skips))
+    return ", ".join(bits)

@@ -81,6 +81,11 @@ handful of modules that import back from tools.py.
 # failed: <e>"}, but returning your own clearer error message is almost
 # always more useful to the model than a bare exception repr.
 #
+# To SHOW the user something (a toast, a card in the chat, a modal) or to
+# ASK them something (confirm / choose / prompt / form), see section 6 at
+# the bottom of this file — `from jarvis import ui_bridge as ui`. A return
+# value goes to the model, not to the person; ui_bridge is the direct line.
+#
 # Optional second argument: `fn(args, context)` instead of `fn(args)`.
 # tools.execute_tool() introspects your handler's own signature (via
 # tools._accepts_context) and only passes a second arg if you declared
@@ -259,6 +264,129 @@ TOOL_AI_REVIEW = set()          # e.g. for a tool fuzzy/risky enough to want
 #    current registry, not a hardcoded rule — a custom mode appended to
 #    PROMPT_MODE_DEFS with a different tool_result_verbosity would follow
 #    the same "full"/"medium"/"low" mechanics, just under a new mode name.)
+# ---------------------------------------------------------------------------
+
+
+# ---------------------------------------------------------------------------
+# 6. TALKING TO THE USER — popups, dialogs and questions (jarvis/ui_bridge.py)
+#
+# A handler's return value goes to the MODEL. It is not shown to the person.
+# So if your tool needs to warn someone, show them a table, or ask them
+# something, returning a dict is the wrong instrument — the model may
+# paraphrase it, bury it, or not mention it at all.
+#
+# ui_bridge is the direct line:
+#
+#     def tool_my_thing(args):
+#         from jarvis import ui_bridge as ui     # lazy import, see section 2
+#         ui.toast("Backup finished", level="success")
+#         return {"ok": True}
+#
+# SHOW SOMETHING (returns immediately, never blocks)
+# --------------------------------------------------
+#     ui.toast(message, level="info", title="", timeout=None)
+#         Transient corner message. The lightest possible FYI.
+#         level="error" stays until dismissed; everything else fades after
+#         ~4s. This is the same widget the web UI already uses for its own
+#         errors — now reachable from any tool.
+#
+#     ui.bubble(title, body="", level="info")
+#         A card IN the chat thread. Persists, survives a page reload, the
+#         user can scroll back to it. Use for output worth keeping: a table,
+#         a diff, a summary, a report.
+#
+#     ui.dialog(title, body="", level="info", actions=None)
+#         A real modal, outside the chat. It INTERRUPTS. Reserve it for
+#         things that genuinely should — a misconfiguration, a destructive
+#         result, something that needs attention before anything else.
+#
+#     ui.progress(label, value=None, total=None, job_id=None, done=False)
+#         An updatable row, bottom-left. Returns the job_id, so:
+#             pid = ui.progress("Indexing")
+#             ui.progress("Indexing", 3, 10, job_id=pid)
+#             ui.progress("Indexing", 10, 10, job_id=pid, done=True)
+#
+#     ui.dismiss(event_id)   removes a dialog or progress row early.
+#
+# `level` is one of: "info", "success", "warn", "error". It controls colour
+# and icon, and it is the ONLY styling a tool can influence — see the safety
+# note at the bottom of this section.
+#
+# ASK SOMETHING (blocks until answered)
+# --------------------------------------
+#     ui.confirm(question, body="", default=False, confirm_label="Yes",
+#                cancel_label="No", level="warn")          -> bool
+#     ui.choose(question, options, default=None)            -> str
+#     ui.prompt(question, default="", placeholder="",
+#               secret=False)                               -> str
+#     ui.form(title, fields)                                -> dict
+#
+#         fields is a list of
+#           {"name", "label", "type", "default", "placeholder",
+#            "options", "required"}
+#         type is text | number | password | select | checkbox | textarea.
+#         An unrecognised type renders as text rather than breaking the
+#         dialog.
+#
+# Escape, clicking the backdrop, and closing the window all resolve to the
+# SAFE answer — a dismissed confirm is never a yes.
+#
+# *** THE HEADLESS RULE — READ THIS ONE ***
+# -----------------------------------------
+# EVERY blocking call takes a `default`, and that default is returned
+# IMMEDIATELY when nobody is watching: a scheduled job at 3am, a channel
+# daemon, a test run. ui_bridge checks for this BEFORE printing anything, so
+# such a run never even emits a question.
+#
+# This is not a nicety. A tool that blocks on input() inside a scheduler tick
+# hangs the entire tick — silently, and until the process is killed. Your
+# tool WILL eventually be run by a scheduled job, whether you intended that
+# or not, because the user can schedule any tool.
+#
+# So point the default at the safe outcome:
+#
+#     # RIGHT — an unattended run deletes nothing
+#     if not ui.confirm("Delete %d files?" % n, default=False):
+#         return {"ok": True, "deleted": 0, "note": "cancelled"}
+#
+#     # WRONG — an unattended run silently deletes everything
+#     if ui.confirm("Delete %d files?" % n, default=True):
+#
+# There is also a timeout (120s by default) for a web dialog nobody answers,
+# after which the default is returned the same way.
+#
+# ui.confirm() IS NOT A SECURITY GATE
+# -----------------------------------
+# It is a courtesy question, and the model can see that you asked it. The
+# REAL gate is TOOL_CONFIRM_REQUIRED in section 4 above, enforced out of band
+# against ~/.jarvis/tool_safety.json — a file the model cannot reach.
+#
+# A destructive tool wants BOTH:
+#
+#     TOOL_CONFIRM_REQUIRED = {"cleanup_temp"}   # the protection
+#     ...and inside the handler:
+#     ui.confirm("Delete these 12 files?", body=listing, default=False)
+#                                                # the readable question
+#
+# There is also a policy layer (jarvis/policy.py) that scores every call by
+# tool, arguments and execution context, and can escalate a call to
+# confirm/review/deny on its own. You do not call it; it wraps you. Its one
+# implication for a tool author is that a tool taking a `path` or `command`
+# argument gets scored more accurately than one that hides the same thing
+# inside an opaque blob — so name your arguments plainly.
+#
+# EVERYTHING IS TEXT, NEVER MARKUP
+# --------------------------------
+# Every field you pass is inserted with textContent on the browser side. A
+# filename containing <script> is displayed, not executed. Do not try to
+# smuggle HTML in; it will show up as literal angle brackets, which is the
+# intended behaviour and not a bug to work around.
+#
+# ON A PLAIN TERMINAL
+# -------------------
+# All of the above still works: toasts and bubbles become styled stderr
+# output, and the blocking prompts become input() / getpass(). You do not
+# write two code paths — ui_bridge picks the surface per call.
 # ---------------------------------------------------------------------------
 
 TOOL_RESULT_SPECS = {}

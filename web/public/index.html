@@ -9,6 +9,7 @@
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@500;700;900&family=Rajdhani:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="style.css">
+<link rel="stylesheet" href="ui-kit.css">
 </head>
 <body>
 
@@ -172,6 +173,10 @@
               <button class="panel-menu__item" id="menu-item-mcp" type="button" role="menuitem">
                 <span class="panel-menu__item-label">MCP Servers</span>
                 <span class="panel-menu__item-hint">External tools connected over MCP</span>
+              </button>
+              <button class="panel-menu__item" id="menu-item-ctools" type="button" role="menuitem">
+                <span class="panel-menu__item-label">Custom Tools</span>
+                <span class="panel-menu__item-hint">Write your own Python tools &mdash; kept in ~/.jarvis, survives a rebuild</span>
               </button>
             </div>
           </div>
@@ -805,6 +810,30 @@
       </section>
 
       <section class="skin-section">
+        <h3>Theme</h3>
+        <div id="jui-theme-gallery" class="jui-theme-grid"></div>
+        <p class="skin-hint">A theme is a set of CSS variables. Picking one applies instantly and is remembered per browser.</p>
+        <div class="ctools__bar">
+          <button class="btn btn--ghost" id="btn-theme-import" type="button">Import&hellip;</button>
+          <button class="btn btn--ghost" id="btn-theme-export" type="button">Export current</button>
+          <button class="btn btn--ghost" id="btn-theme-save" type="button" title="Save the current accent/colour tweaks as a new named theme">Save as new</button>
+        </div>
+      </section>
+
+      <section class="skin-section">
+        <h3>Interface</h3>
+        <label class="skin-field skin-field--inline"><span>Corner rounding</span>
+          <input type="range" id="tune-radius" min="0" max="200" step="10" value="100"></label>
+        <label class="skin-field skin-field--inline"><span>Glow / shadow</span>
+          <input type="range" id="tune-glow" min="0" max="200" step="10" value="100"></label>
+        <label class="skin-field skin-field--inline"><span>Text size</span>
+          <input type="range" id="tune-font" min="80" max="130" step="5" value="100"></label>
+        <label class="check"><input type="checkbox" id="tune-motion" checked> Animations</label>
+        <label class="check"><input type="checkbox" id="tune-scanlines" checked> Grid / scanline overlay</label>
+        <p class="skin-hint">Applies on top of any theme, so you can keep a skin you like and still square the corners or kill the glow.</p>
+      </section>
+
+      <section class="skin-section">
         <h3>Accent color</h3>
         <div class="skin-swatches" id="skin-swatches"></div>
         <label class="skin-field skin-field--inline">
@@ -893,6 +922,46 @@
   </div>
 </template>
 
+<!-- CUSTOM TOOLS — user-authored Python tools living in ~/.jarvis/tools/.
+     Deliberately NOT jarvis/actions/: script.bat overwrites the install
+     directory on every rebuild, so a tool written there is destroyed by the
+     next build. See jarvis/custom_tools_store.py's module docstring. -->
+<div class="menu-overlay" id="ctools-overlay" hidden>
+  <div class="menu-panel menu-panel--wide" role="dialog" aria-modal="true" aria-labelledby="ctools-title">
+    <div class="panel__head">
+      <h2 id="ctools-title">Custom Tools</h2>
+      <div class="panel__head-actions">
+        <select id="ctools-template" class="jui-input" style="max-width:190px" title="Start from a template"></select>
+        <button class="btn btn--ghost" id="btn-ctools-new" type="button">New</button>
+        <button class="btn btn--ghost" id="btn-ctools-refresh" type="button">Refresh</button>
+      </div>
+      <button class="modal__close" id="ctools-close" type="button" aria-label="Close">&times;</button>
+    </div>
+    <div class="menu-panel__body">
+      <div class="ctools">
+        <div class="ctools__list" id="ctools-list"></div>
+        <div class="ctools__editor">
+          <div class="ctools__bar">
+            <input type="text" id="ctools-name" class="jui-input" style="max-width:220px"
+                   placeholder="tool_file_name" autocomplete="off">
+            <label class="check" title="Disabled files are kept as .py.disabled"><input type="checkbox" id="ctools-enabled" checked> Enabled</label>
+            <span class="ctools__status" id="ctools-status"></span>
+          </div>
+          <textarea id="ctools-code" class="ctools__code" spellcheck="false"
+                    placeholder="Pick a template above, or write a tool here."></textarea>
+          <div class="ctools__bar">
+            <button class="btn btn--primary" id="btn-ctools-save" type="button">Save</button>
+            <button class="btn btn--ghost" id="btn-ctools-check" type="button" title="Validate without saving">Check</button>
+            <button class="btn btn--ghost" id="btn-ctools-run" type="button" title="Actually runs the handler, side effects included">Run</button>
+            <button class="btn btn--ghost icon-btn--danger" id="btn-ctools-delete" type="button">Delete</button>
+          </div>
+          <pre class="ctools__result" id="ctools-result" hidden></pre>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
 <div class="toast" id="toast" hidden></div>
 <div class="run-confirm-popup" id="run-confirm-popup" hidden></div>
 
@@ -901,6 +970,10 @@
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css">
 <script src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/contrib/auto-render.min.js"></script>
+<!-- ui-kit.js BEFORE app.js: app.js calls JarvisUI.handleEvent() from its
+     JARVIS_MEDIA dispatch, so the global has to exist by then. -->
+<script src="ui-kit.js"></script>
 <script src="app.js"></script>
+<script src="custom-tools.js"></script>
 </body>
 </html>

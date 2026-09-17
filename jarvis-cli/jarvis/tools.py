@@ -818,6 +818,56 @@ _AUTO_RECORDS = tool_loader.discover_actions(
     reserved_names=set(TOOLS),
     logger=lambda msg: print(msg, file=sys.stderr),
 )
+
+# ---------------------------------------------------------------------------
+# User-authored tools (~/.jarvis/tools/*.py) — the SAME contract and the same
+# loader, just a different directory.
+#
+# Why a second directory at all: this one survives a reinstall. script.bat
+# rebuilds and overwrites the install tree, so anything a user wrote into
+# jarvis/actions/ is silently destroyed by the next build. ~/.jarvis is the
+# directory this project already promises never to move (see script.bat's own
+# comment about it), so that's where a user's own work belongs — next to
+# their commands, memory and skills.
+#
+# Scanned SECOND and with the built-ins plus every actions/ name already
+# reserved, so a shipped tool always wins a name collision. That ordering is
+# deliberate: a jarvis update that adds a tool named the same as one of
+# yours should disable yours with a logged rejection, not silently shadow the
+# built-in and change what an existing prompt does.
+#
+# Failures here are logged and skipped exactly like actions/ — one broken
+# user file can't take down discovery, let alone the CLI.
+# ---------------------------------------------------------------------------
+try:
+    from . import custom_tools_store as _custom_store
+
+    _USER_DIR = _custom_store.ensure_dir()
+    _reserved_after_actions = set(TOOLS) | {
+        name for _r in _AUTO_RECORDS if _r.valid for name in _r.tools
+    }
+    _user_scan_start = len(_AUTO_RECORDS)
+    _AUTO_RECORDS = _AUTO_RECORDS + tool_loader.discover_actions(
+        actions_dir=_USER_DIR,
+        reserved_names=_reserved_after_actions,
+        logger=lambda msg: print(msg, file=sys.stderr),
+    )
+    # Names contributed by the user directory specifically. custom_tools_store
+    # needs this to answer "does this name collide with something that already
+    # exists?" correctly: without it, validating an ALREADY-SAVED user tool
+    # finds its own name in the live catalog and reports the file as clashing
+    # with itself — so a tool would save fine once and then show as broken
+    # forever afterward.
+    USER_TOOL_NAMES = {
+        name
+        for _r in _AUTO_RECORDS[_user_scan_start:]
+        if _r.valid
+        for name in _r.tools
+    }
+except Exception as _e:  # noqa: BLE001 — a missing/unreadable ~/.jarvis/tools is normal
+    print("[tools] user tool directory skipped: %s" % _e, file=sys.stderr)
+    USER_TOOL_NAMES = set()
+
 _AUTO_VALID = [r for r in _AUTO_RECORDS if r.valid]
 
 AUTO_TOOL_SCHEMAS = [s for r in _AUTO_VALID for s in r.schemas]

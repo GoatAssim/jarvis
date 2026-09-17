@@ -283,6 +283,18 @@ def normalize_trigger(when=None, trigger=None, now=None):
                 timespec.to_iso(now + timedelta(seconds=secs))
             if trigger.get("only_on") in ("weekday", "weekend"):
                 out["only_on"] = trigger["only_on"]
+            # Richer recurrence (timespec.matches_rule): "except holidays",
+            # "first monday of the month", "every other tuesday". Preserved
+            # verbatim — it's opaque data to this module, evaluated at fire
+            # time by the one function that knows what the keys mean.
+            if isinstance(trigger.get("rule"), dict) and trigger["rule"]:
+                out["rule"] = trigger["rule"]
+            # The anchor a fortnightly phase is counted from. Fixed at
+            # creation so a skipped run can't shift the phase.
+            if trigger.get("anchor"):
+                out["anchor"] = trigger["anchor"]
+            elif out.get("rule", {}).get("every_n_weeks"):
+                out["anchor"] = out["at"]
         elif ttype == "event":
             event = normalize_event(trigger.get("event"))
             out["event"] = event
@@ -581,10 +593,16 @@ def _weekday_ok(trigger, when):
     interval (Mon-Fri isn't a constant gap, so it's stored as daily and
     filtered here instead)."""
     only = trigger.get("only_on")
-    if only == "weekday":
-        return when.weekday() <= 4
-    if only == "weekend":
-        return when.weekday() >= 5
+    if only == "weekday" and when.weekday() > 4:
+        return False
+    if only == "weekend" and when.weekday() < 5:
+        return False
+    # Richer rules layered on top of the original two. Both are ANDed: a job
+    # that is "every weekday except holidays" has to pass the weekday filter
+    # AND the holiday one, which is exactly what the phrasing says.
+    rule = trigger.get("rule")
+    if rule:
+        return timespec.matches_rule(when, rule, anchor=trigger.get("anchor"))
     return True
 
 

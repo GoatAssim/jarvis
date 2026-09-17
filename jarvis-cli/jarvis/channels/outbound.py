@@ -50,7 +50,7 @@ def dm_owner_discord(text, cfg=None):
         return False, (f"discord owner '{owner}' is not a numeric user id. "
                        "Right-click your name > Copy User ID (Developer Mode on), "
                        "or run `jarvis channels-whoami`.")
-    token = (cfg.get("bot_token") or "").strip()
+    token = str(cfg.get("bot_token") or "").strip()
     if not token:
         return False, "no discord bot_token configured"
 

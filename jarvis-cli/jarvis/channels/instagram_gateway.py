@@ -117,8 +117,8 @@ def send_message(user_id, text, cfg=None, thread_key=""):
     Never attaches a message tag — see rule 3 in the module docstring.
     """
     cfg = cfg or channel_config.platform_config(INSTAGRAM)
-    token = (cfg.get("access_token") or "").strip()
-    ig_user_id = (cfg.get("ig_user_id") or "").strip()
+    token = str(cfg.get("access_token") or "").strip()
+    ig_user_id = str(cfg.get("ig_user_id") or "").strip()
     if not token or not ig_user_id:
         return False, "instagram access_token / ig_user_id not configured"
 
@@ -327,7 +327,7 @@ class _Handler(BaseHTTPRequestHandler):
         mode = (params.get("hub.mode") or [""])[0]
         token = (params.get("hub.verify_token") or [""])[0]
         challenge = (params.get("hub.challenge") or [""])[0]
-        expected = (cfg.get("verify_token") or "").strip()
+        expected = str(cfg.get("verify_token") or "").strip()
 
         if mode == "subscribe" and expected and hmac.compare_digest(token, expected):
             base._log("webhook verification succeeded")
@@ -402,8 +402,12 @@ def run():
               "  jarvis channels-set instagram enabled true", file=sys.stderr)
         return 1
 
+    # str() before strip(): these are id/token fields a user naturally types
+    # unquoted in channels.json (an ig_user_id is a 17-digit number), and an
+    # int has no .strip(). config.load_config() now coerces them at the
+    # boundary; this stays defensive for a cfg dict built some other way.
     missing = [key for key in ("access_token", "ig_user_id", "app_secret", "verify_token")
-               if not (cfg.get(key) or "").strip()]
+               if not str(cfg.get(key) or "").strip()]
     if missing:
         print("instagram is not fully configured — missing: "
               + ", ".join(missing)
