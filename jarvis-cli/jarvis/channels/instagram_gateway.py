@@ -57,7 +57,7 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 
 from . import INSTAGRAM
 from . import config as channel_config
-from . import base, permissions, transcript
+from . import base, permissions, transcript, directory
 
 GRAPH_HOST = "https://graph.instagram.com"
 # Meta's own docs say a webhook must be acknowledged quickly; 5s is the
@@ -367,6 +367,42 @@ class _Handler(BaseHTTPRequestHandler):
                          daemon=True).start()
 
 
+def _fetch_username(user_id, cfg):
+    """Look up a sender's current username via the Graph API.
+
+    Necessary because Instagram's DM webhook usually sends ONLY
+    `sender: {id}` — no username at all — unlike Discord, where
+    discord.py hands you the author's name for free on every event. So
+    "@handle resolves to an id" only works on Instagram if something
+    actively fetches the handle; parse_events() alone reads a field Meta
+    typically never populates, which is why a handle-based allowlist
+    entry never matched anything even though messages were arriving.
+
+    Best-effort: a failure here must never block answering the message
+    itself, so it returns "" rather than raising, and channels-directory
+    simply won't know this person's handle until a later message succeeds.
+    """
+    token = str(cfg.get("access_token") or "").strip()
+    if not token or not user_id:
+        return ""
+    try:
+        import requests
+    except ImportError:
+        return ""
+    version = cfg.get("graph_version") or "v21.0"
+    try:
+        resp = requests.get(
+            f"{GRAPH_HOST}/{version}/{user_id}",
+            params={"fields": "username", "access_token": token},
+            timeout=10,
+        )
+        if resp.status_code >= 400:
+            return ""
+        return str(resp.json().get("username") or "")
+    except Exception:  # noqa: BLE001
+        return ""
+
+
 def _process_payload(payload, cfg):
     """Handle one webhook body off the response path.
 
@@ -400,6 +436,13 @@ def _process_payload(payload, cfg):
         return
 
     for msg in messages:
+        if not msg.user_handle:
+            # This is the fix: the webhook itself almost never carries a
+            # username, so without an active fetch here `@handle` would
+            # never resolve to anything no matter how many messages came in.
+            msg.user_handle = _fetch_username(msg.user_id, cfg)
+        if msg.user_handle:
+            directory.record(INSTAGRAM, msg.user_handle, msg.user_id)
         base._log(f"instagram message from user_id={msg.user_id!r} "
                   f"handle={msg.user_handle!r} context={msg.context} "
                   f"thread={msg.thread_id!r} text={msg.text[:80]!r}")

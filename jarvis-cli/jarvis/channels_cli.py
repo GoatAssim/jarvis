@@ -15,11 +15,12 @@ import sys
 
 from .channels import PLATFORMS, PERM_SETS
 from .channels import config as channel_config
-from .channels import outbound, permissions, transcript
+from .channels import directory, outbound, permissions, transcript
 
 COMMANDS = (
     "channels-config", "channels-status", "channels-set", "channels-allow",
     "channels-deny", "channels-test", "channels-whoami", "channels-log",
+    "channels-directory",
     "discord-daemon", "instagram-serve", "logs-search",
 )
 
@@ -32,6 +33,7 @@ USAGE = """channel commands:
   channels-test  [platform] [message]   send a test DM to the owner
   channels-whoami                       how to find your stable user id
   channels-log   <platform> <thread>    print a thread's transcript
+  channels-directory [platform]         list known @handle -> id mappings
   discord-daemon                        run the Discord bot (foreground)
   instagram-serve                       run the Instagram webhook (foreground)
   logs-search <query> [--mode m] [--origin o] [--source s] [--direction d]
@@ -109,16 +111,36 @@ def handle(argv):
 
     if cmd in ("channels-allow", "channels-deny"):
         if len(rest) < 3:
-            _fail(f"usage: {cmd} <platform> <dm|reply|tool> <id-or-handle>")
+            _fail(f"usage: {cmd} <platform> <dm|reply|tool> <id-or-@handle>")
         platform, which, entry = rest[0], rest[1], rest[2]
         which = _SET_ALIASES.get(which.lower(), which)
         if which not in PERM_SETS:
             _fail(f"unknown set '{rest[1]}' — use dm, reply or tool")
+
+        # @handle resolution. Only on channels-allow: a channels-deny for a
+        # handle nobody has heard of yet is ambiguous (remove what, from
+        # what?) whereas allow has one unambiguous failure mode ("not known
+        # yet — have them message the bot first"). For deny, resolve too
+        # when possible so `channels-deny discord reply @name` still works
+        # once the directory knows them, but fall through to removing the
+        # literal string otherwise — a deny is safe to attempt even if it
+        # turns out to be a no-op, unlike an allow which would silently
+        # grant the WRONG id if resolution guessed instead of looking up.
+        resolved, err = directory.resolve(platform, entry)
+        if cmd == "channels-allow" and resolved is None:
+            print(json.dumps({"ok": False, "error": err, "platform": platform,
+                              "set": which, "entry": entry}, indent=2))
+            sys.exit(1)
+        actual_entry = resolved if resolved is not None else entry
+
         action = (channel_config.add_to_set if cmd == "channels-allow"
                   else channel_config.remove_from_set)
-        ok, err = action(platform, which, entry)
-        print(json.dumps({"ok": ok, "error": err, "platform": platform,
-                          "set": which, "entry": entry}, indent=2))
+        ok, err = action(platform, which, actual_entry)
+        result = {"ok": ok, "error": err, "platform": platform,
+                  "set": which, "entry": actual_entry}
+        if actual_entry != entry:
+            result["resolved_from"] = entry
+        print(json.dumps(result, indent=2))
         sys.exit(0 if ok else 1)
 
     if cmd == "channels-test":
@@ -145,6 +167,13 @@ def handle(argv):
                 "webhook trace, which prints the sender id of every message "
                 "it receives."),
         }, indent=2))
+        return
+
+    if cmd == "channels-directory":
+        platform = rest[0] if rest and rest[0] in PLATFORMS else None
+        entries = directory.all_entries(platform)
+        print(json.dumps({"ok": True, "count": len(entries),
+                          "entries": entries}, indent=2))
         return
 
     if cmd == "channels-log":
