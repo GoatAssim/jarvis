@@ -117,8 +117,8 @@ def send_message(user_id, text, cfg=None, thread_key=""):
     Never attaches a message tag — see rule 3 in the module docstring.
     """
     cfg = cfg or channel_config.platform_config(INSTAGRAM)
-    token = str(cfg.get("access_token") or "").strip()
-    ig_user_id = str(cfg.get("ig_user_id") or "").strip()
+    token = (cfg.get("access_token") or "").strip()
+    ig_user_id = (cfg.get("ig_user_id") or "").strip()
     if not token or not ig_user_id:
         return False, "instagram access_token / ig_user_id not configured"
 
@@ -327,7 +327,7 @@ class _Handler(BaseHTTPRequestHandler):
         mode = (params.get("hub.mode") or [""])[0]
         token = (params.get("hub.verify_token") or [""])[0]
         challenge = (params.get("hub.challenge") or [""])[0]
-        expected = str(cfg.get("verify_token") or "").strip()
+        expected = (cfg.get("verify_token") or "").strip()
 
         if mode == "subscribe" and expected and hmac.compare_digest(token, expected):
             base._log("webhook verification succeeded")
@@ -368,7 +368,17 @@ class _Handler(BaseHTTPRequestHandler):
 
 
 def _process_payload(payload, cfg):
-    """Handle one webhook body off the response path."""
+    """Handle one webhook body off the response path.
+
+    Traces every parsed message with its sender id — this is the ONLY
+    place that id is ever printed, and it is how `jarvis channels-whoami`
+    tells someone to find their IGSID (there is no username lookup on
+    Instagram; the id only exists once they've messaged the bot). Without
+    this line, "jarvis instagram-serve" showing `POST /webhook 200` with
+    nothing else looks identical whether the message was received and
+    silently dropped, or never reached parse_events at all — that
+    ambiguity is exactly what made this undiagnosable before.
+    """
     try:
         messages = parse_events(payload, bot_id=cfg.get("ig_user_id"),
                                 bot_handle=cfg.get("bot_handle"))
@@ -376,7 +386,23 @@ def _process_payload(payload, cfg):
         base._log(f"could not parse webhook payload: {exc}")
         return
 
+    if not messages:
+        # The single most common cause: Meta delivered something other than
+        # a message (a read receipt, a reaction, an echo of our own send) —
+        # all of which parse_events correctly ignores. Rarer cause: the
+        # payload shape didn't match what parse_events expects at all. This
+        # line is what tells the two apart instead of both looking like
+        # nothing happened.
+        base._log("webhook delivered no actionable message "
+                  "(a read receipt/reaction/echo, most likely — "
+                  "raw payload logged at debug level below)")
+        base._log(f"raw payload: {json.dumps(payload)[:500]}")
+        return
+
     for msg in messages:
+        base._log(f"instagram message from user_id={msg.user_id!r} "
+                  f"handle={msg.user_handle!r} context={msg.context} "
+                  f"thread={msg.thread_id!r} text={msg.text[:80]!r}")
         # Record the window BEFORE gating: their message opens the reply
         # window regardless of whether we are allowed to answer it, and a
         # denied sender who is later allowlisted should not have lost it.
@@ -402,12 +428,8 @@ def run():
               "  jarvis channels-set instagram enabled true", file=sys.stderr)
         return 1
 
-    # str() before strip(): these are id/token fields a user naturally types
-    # unquoted in channels.json (an ig_user_id is a 17-digit number), and an
-    # int has no .strip(). config.load_config() now coerces them at the
-    # boundary; this stays defensive for a cfg dict built some other way.
     missing = [key for key in ("access_token", "ig_user_id", "app_secret", "verify_token")
-               if not str(cfg.get(key) or "").strip()]
+               if not (cfg.get(key) or "").strip()]
     if missing:
         print("instagram is not fully configured — missing: "
               + ", ".join(missing)

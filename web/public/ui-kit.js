@@ -505,6 +505,40 @@
   const THEME_KEY = "jarvis.theme";
   const CUSTOM_KEY = "jarvis.themes.custom";
   const TUNING_KEY = "jarvis.theme.tuning";
+  // Whether the NEW theme gallery is the thing actually in charge of colours
+  // right now, as opposed to the older accent-swatch/custom-color/saturation
+  // picker that already existed in the Skin modal before this file did.
+  //
+  // THE BUG THIS FLAG FIXES: that older picker restores its own saved accent
+  // whenever the Skin modal closes, whenever the page loads, and on the
+  // modal's main Save button — always, unconditionally, with no idea this
+  // theme system exists. Its restore path (applyAccent) sets --bg, --accent
+  // and everything derived from it, but never touches --text/--text-dim/
+  // --text-dimmer. So picking or saving a theme here would look right for a
+  // moment and then get silently overwritten back to the old accent the
+  // instant the modal closed or the page reloaded — except the text colour,
+  // which the old code has no opinion on. That mismatch (colours revert,
+  // text doesn't) was the visible symptom.
+  //
+  // The fix is this flag: set the moment someone deliberately picks, saves,
+  // or imports a theme HERE; cleared the moment they touch the OLD swatches,
+  // custom-color input, or saturation slider. app.js's three restore sites
+  // check it and, when set, re-apply THIS system's saved theme instead of
+  // the legacy accent — so whichever picker was touched most recently is the
+  // one that survives a close/reload, and the other stays out of its way.
+  const ACTIVE_KEY = "jarvis.theme.active";
+
+  function markActive() {
+    try { localStorage.setItem(ACTIVE_KEY, "1"); } catch (_) { /* private mode */ }
+  }
+
+  function isActive() {
+    try { return localStorage.getItem(ACTIVE_KEY) === "1"; } catch (_) { return false; }
+  }
+
+  function deactivate() {
+    try { localStorage.removeItem(ACTIVE_KEY); } catch (_) { /* private mode */ }
+  }
 
   function customThemes() {
     try {
@@ -552,6 +586,7 @@
   }
 
   function applyTheme(id) {
+    if (id) markActive();
     const themes = allThemes();
     const chosen = id || localStorage.getItem(THEME_KEY) || "jarvis";
     const theme = themes[chosen] || themes.jarvis;
@@ -657,6 +692,7 @@
       apply: applyTheme, current: currentTheme, save: saveCustomTheme,
       remove: deleteCustomTheme, tuning, setTuning: saveTuning,
       export: exportTheme, import: importTheme,
+      isActive, deactivate,
     },
     _el: el,
   };
