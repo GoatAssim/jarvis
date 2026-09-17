@@ -48,7 +48,7 @@ from pathlib import Path
 
 from . import DISCORD
 from . import config as channel_config
-from . import base, permissions, transcript
+from . import base, permissions, transcript, directory
 
 PID_FILE = Path.home() / ".jarvis" / "discord_daemon.pid"
 
@@ -199,6 +199,16 @@ def build_client(discord, cfg):
         # model to respond to an empty string.
         if not msg.text and (mentioned or is_dm):
             msg.text = "Hi"
+
+        # Discord hands us the username for free on every event, unlike
+        # Instagram (see instagram_gateway._fetch_username's docstring for
+        # why that one needs an active API call). So this is a plain
+        # record — teaches the directory a handle->id mapping for
+        # `channels-allow discord reply @name` with no extra cost, and it
+        # happens before the read-receipt/typing work below so a message
+        # that later errors out still gets its handle learned.
+        if msg.user_handle:
+            directory.record(DISCORD, msg.user_handle, msg.user_id)
 
         loop = asyncio.get_running_loop()
         sent_any = {"ok": False}
