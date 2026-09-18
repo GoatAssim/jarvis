@@ -2666,3 +2666,240 @@ audio.ask-dl-player{ max-height: none; background: transparent; }
   font-size: 11px;
   color: var(--text-dim, #7d94a8);
 }
+
+/* ===========================================================================
+   DAEMONS / BACKLOG / LOG SEARCH / SETUP, and the layout switch.
+
+   All four panels reuse the .menu-overlay / .menu-panel / .menu-body chrome
+   defined above rather than introducing their own — a panel that looks
+   different for no reason is a panel people have to learn separately. What
+   follows is only the content INSIDE those panels, plus the one genuinely
+   new thing: the classic/focus layout.
+   =========================================================================== */
+
+/* --- layout switch -------------------------------------------------------
+   Focus hides the three-column grid and leads with the Ask panel. It is a
+   presentation choice only: every feature is reachable in both layouts, from
+   the same Menu, which is what makes switching safe mid-task. */
+.btn--layout{ gap: 6px; }
+.btn__layout-glyph{ opacity: 0.75; font-size: 13px; line-height: 1; }
+
+body.layout--focus .grid{ display: none; }
+
+/* With the grid gone the Ask panel IS the page, so it stops being a floating
+   modal and fills the space the grid left behind. */
+body.layout--focus .ask-overlay{
+  position: static;
+  background: none;
+  backdrop-filter: none;
+  padding: 0 18px 18px;
+  flex: 1;
+  min-height: 0;
+}
+body.layout--focus .ask-panel{
+  width: 100%;
+  max-width: none;
+  height: 100%;
+  max-height: none;
+}
+/* The Ask panel is the surface in this layout, not something you opened, so
+   the control that would close it has nowhere to go back to. */
+body.layout--focus #ask-close{ display: none; }
+body.layout--focus .btn--ask-jarvis{ display: none; }
+
+/* --- daemons ------------------------------------------------------------- */
+.daemon-row{ align-items: flex-start; gap: 10px; }
+.daemon-row.is-selected{
+  border-color: var(--accent);
+  box-shadow: 0 0 0 1px var(--accent-glow);
+}
+.daemon-row__main{ display: flex; gap: 10px; flex: 1; min-width: 0; }
+.daemon-row__text{ min-width: 0; flex: 1; }
+.daemon-row__cmd{
+  font-family: "JetBrains Mono", monospace;
+  font-size: 11px;
+  color: var(--muted);
+  margin-top: 3px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.daemon-actions{ display: flex; flex-wrap: wrap; gap: 6px; }
+
+/* Three states, one glyph. Colour alone never carries the meaning — the row's
+   text says "running"/"crashed" too, because a status you can only read by
+   hue is one some people cannot read at all. */
+.daemon-dot{
+  width: 9px; height: 9px; border-radius: 50%;
+  background: var(--muted);
+  flex: 0 0 auto;
+  margin-top: 5px;
+}
+.daemon-dot--up{
+  background: var(--status-online, #4ade80);
+  box-shadow: 0 0 8px var(--status-online, #4ade80);
+}
+.daemon-dot--bad{ background: #f87171; box-shadow: 0 0 8px rgba(248,113,113,0.6); }
+.daemon-dot--wait{ background: var(--accent-secondary); }
+
+.daemon-console{
+  flex: 1 1 auto;
+  margin: 0;
+  padding: 12px 14px;
+  overflow: auto;
+  background: var(--bg-1);
+  border-top: 1px solid var(--border);
+  border-bottom: 1px solid var(--border);
+  font-family: "JetBrains Mono", monospace;
+  font-size: 11.5px;
+  line-height: 1.55;
+  color: var(--text);
+  white-space: pre-wrap;
+  word-break: break-word;
+  min-height: 0;
+}
+.daemon-log-picker,
+.backlog-add select,
+.logsearch-controls select{
+  margin-left: auto;
+  padding: 4px 8px;
+  background: var(--bg-panel-2);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  color: var(--text);
+  font-family: inherit;
+  font-size: 11px;
+}
+.daemon-stdin-toggle{
+  display: flex; align-items: center; gap: 6px;
+  font-size: 11.5px; color: var(--muted);
+}
+.daemon-input-row input{ font-family: "JetBrains Mono", monospace; }
+
+/* --- backlog -------------------------------------------------------------
+   A five-column board that scrolls sideways rather than squashing: a kanban
+   column narrower than its card titles stops being readable long before it
+   stops fitting. */
+.menu-body--wide{ grid-template-columns: 1fr; }
+.menu-body--column{ grid-template-columns: 1fr; overflow: auto; }
+
+.kanban{
+  display: grid;
+  grid-auto-flow: column;
+  grid-auto-columns: minmax(190px, 1fr);
+  gap: 10px;
+  padding: 14px;
+  overflow-x: auto;
+  align-items: start;
+  min-height: 0;
+}
+.kanban__col{
+  display: flex; flex-direction: column; gap: 8px;
+  background: var(--bg-panel-2);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 10px;
+  min-height: 120px;
+}
+.kanban__colhead{
+  font-family: "Orbitron", sans-serif;
+  font-size: 10.5px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--accent);
+}
+.kanban__card{
+  background: var(--bg-raised);
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--border-strong);
+  border-radius: 4px;
+  padding: 8px 10px;
+}
+.kanban__card--high{ border-left-color: var(--accent-secondary); }
+.kanban__card--low{ opacity: 0.72; }
+.kanban__title{ font-size: 12.5px; line-height: 1.4; }
+.kanban__project{
+  font-size: 10.5px; color: var(--accent); margin-top: 3px;
+  text-transform: uppercase; letter-spacing: 0.05em;
+}
+.kanban__blocked{ font-size: 11px; color: var(--accent-secondary); margin-top: 4px; }
+.kanban__actions{ display: flex; gap: 4px; margin-top: 8px; flex-wrap: wrap; }
+.kanban__actions .btn{ padding: 2px 7px; font-size: 10.5px; }
+.kanban__empty{ color: var(--muted); font-size: 11px; text-align: center; padding: 6px; }
+.backlog-add{ flex-direction: row; flex-wrap: wrap; align-items: center; }
+.backlog-add input{ flex: 1 1 180px; width: auto; }
+
+/* --- log search ---------------------------------------------------------- */
+.logsearch-controls{ flex-direction: row; flex-wrap: wrap; align-items: center; }
+.logsearch-controls input{ flex: 1 1 200px; width: auto; }
+.logsearch-results{
+  flex: 1 1 auto;
+  overflow: auto;
+  padding: 0 14px 14px;
+  min-height: 0;
+}
+.logsearch-hit{
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  margin-bottom: 8px;
+  overflow: hidden;
+}
+.logsearch-hit__where{
+  padding: 5px 10px;
+  background: var(--bg-panel-2);
+  font-family: "JetBrains Mono", monospace;
+  font-size: 10.5px;
+  color: var(--accent);
+}
+.logsearch-hit__text{
+  margin: 0;
+  padding: 8px 10px;
+  font-family: "JetBrains Mono", monospace;
+  font-size: 11.5px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+/* --- setup --------------------------------------------------------------- */
+.setup-steps{ padding: 14px; display: flex; flex-direction: column; gap: 10px; }
+.setup-step{
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--border-strong);
+  border-radius: 5px;
+  padding: 10px 12px;
+  background: var(--bg-panel-2);
+}
+.setup-step--ok{ border-left-color: var(--status-online, #4ade80); opacity: 0.82; }
+.setup-step--todo{ border-left-color: #f87171; }
+.setup-step--optional{ border-left-color: var(--accent-secondary); }
+.setup-step__head{ display: flex; align-items: center; gap: 8px; }
+.setup-step__icon{
+  width: 18px; height: 18px; border-radius: 50%;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 11px; flex: 0 0 auto;
+  background: var(--bg-raised); color: var(--muted);
+}
+.setup-step__icon--ok{ color: var(--status-online, #4ade80); }
+.setup-step__icon--todo{ color: #f87171; }
+.setup-step__title{ font-size: 13px; font-weight: 600; }
+.setup-step__detail{ font-size: 11.5px; color: var(--muted); margin-top: 4px; padding-left: 26px; }
+.setup-step__why{ font-size: 11.5px; margin-top: 6px; padding-left: 26px; line-height: 1.5; }
+.setup-step__action{
+  display: inline-block;
+  margin: 8px 0 0 26px;
+  padding: 4px 8px;
+  background: var(--bg-1);
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  font-family: "JetBrains Mono", monospace;
+  font-size: 11px;
+  color: var(--accent);
+}
+.setup-step__choices{ display: flex; gap: 8px; margin: 10px 0 0 26px; }
+.menu-panel--narrow{ max-width: 620px; }
+
+@media (max-width: 900px){
+  .kanban{ grid-auto-flow: row; grid-auto-columns: auto; }
+  .daemon-actions{ width: 100%; }
+}

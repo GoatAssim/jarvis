@@ -19,6 +19,7 @@ from . import ai_config, ai_providers, command_tools, conversations, memory, pla
 from . import dev_agent_events as _dev_agent_events
 from . import discovery_cache
 from . import logs
+from . import tool_diagnosis
 from . import tool_result_shaping
 from . import tool_router
 from . import route_stickiness
@@ -651,9 +652,31 @@ def set_mode(mode):
     return mode
 
 
-def _tools_blurb(compact, ultra, has_playnite, has_spotify):
-    """Only advertise tools that are actually in this session's schema.
-    Groq 400s if the prompt names a tool that isn't in request.tools."""
+def _tools_blurb(compact, ultra):
+    """The tools explainer that is true on EVERY turn, whatever routed.
+
+    Split in two as of the per-clause work below. What stays here is the
+    part that doesn't depend on which tools are being offered this round:
+    how to call a tool you don't have the schema for, and the
+    confirm-before-destructive rule. That makes this function's output a
+    pure function of the capacity mode — which is what lets it stay in the
+    cached static prefix (see _system_prompt_parts' breakpoint note).
+
+    Everything that names a *specific* tool moved to
+    _tool_workflow_notes(), because it varies with the router's decision
+    and therefore belongs in the per-request tail. Keeping it here meant
+    two separate problems:
+
+      1. Tokens. A message about Spotify still paid for the yt-dlp
+         workflow, the package-install workflow, the git workflow and the
+         screenshot rule — every turn, forever. That's the bulk of what
+         made the compact prompt as big as it was.
+      2. Cache. has_playnite/has_spotify were already derived from the
+         router's offered set, so this "static" block silently differed
+         between turns that routed to different groups — invalidating the
+         whole cached prefix exactly the way pack_instructions_ctx used
+         to (see tests/test_prompt_cache.py).
+    """
     if compact:
         if ultra:
             # Ultra (50% Capacity): tool_schema_style is already "name_only"
@@ -662,98 +685,187 @@ def _tools_blurb(compact, ultra, has_playnite, has_spotify):
             # rules (confirm-before-destructive, don't guess a command name,
             # screenshots are for the user not you) survive. Cut everything
             # that's just elaboration on top of those rules.
-            parts = [
+            return (
                 "Tools listed by name only \u2014 call with no args first if unsure, "
-                "you'll get its schema back. Confirm before install/delete/off/eval. "
-                "Unsure of a saved command's exact name? search_commands first, never "
-                "guess. Screenshots only give you ok/path \u2014 never describe the image. "
-                "Web questions: web_search then web_fetch. Installs: package_search, "
-                "ask, package_install confirm=true. Video: ytdl_info, then ytdl_formats "
-                "if needed, then ytdl_download confirm=true."
-            ]
-            if has_spotify:
-                parts.append("Spotify: spotify_search then spotify_play; never run_command.")
-            if has_playnite:
-                parts.append(
-                    "Playnite: find_game/query_games then playnite_launch_game; "
-                    "don't claim launch unless it succeeded."
-                )
-            return " ".join(parts)
-
-        parts = [
+                "you'll get its schema back. Confirm before install/delete/off/eval."
+            )
+        return (
             "Tools are listed by name only. Call one when you need it. "
             "If it needs arguments you don't know, call it with no arguments — "
             "you will get its schema, then call it again. "
-            "Confirm before install/delete/off/eval. "
-            "COMMANDS: only some are listed above — if you're not sure of the exact "
-            "saved command name, call search_commands (with a keyword, or no query "
-            "for the full list) before run_command/run_chain. Never guess a name. "
-            "Screenshots: take_screenshot (image is for the user, not you). "
-            "Web: web_search then web_fetch. Install: package_search, ask, then "
-            "package_install confirm=true. "
-            "Video/audio: ytdl_info for metadata, ytdl_formats for exact format ids, "
-            "ytdl_download to fetch (confirm first; single video by default, playlist=true for more, capped)."
-        ]
-        if has_spotify:
-            parts.append(
-                "Spotify: spotify_search then spotify_play; never run_command."
-            )
-        if has_playnite:
-            parts.append(
-                "Playnite: find_game or query_games, then playnite_launch_game. "
-                "Don't claim launch unless that tool succeeded."
-            )
-        return " ".join(parts)
-
-    parts = [
-        "Tools: commands; system info (get_*); radio_status, wifi_set, bluetooth_set; git_run; "
-        "take_screenshot; web_search + web_fetch; packages "
-        "(package_* for winget, choco, scoop, pip, pipx, npm); memory_*. "
+            "Confirm before install/delete/off/eval."
+        )
+    return (
         "ONLY call tools that appear in your tool list. Never invent a tool name. "
+        "Confirm before launch/delete/install/eval."
+    )
+
+
+# Per-tool workflow guidance, keyed by the tools each clause actually talks
+# about. A clause is emitted ONLY when at least one of its tools is in the
+# set the router decided to offer this round.
+#
+# That gate is not only a token saving. This function's original docstring
+# said it outright — "Groq 400s if the prompt names a tool that isn't in
+# request.tools" — and the old unconditional text named a dozen tools the
+# router had usually just filtered out. has_playnite/has_spotify were the
+# only two clauses that ever honoured it.
+#
+# Each entry is (tool names, full text, compact text, ultra text). An empty
+# string means "this clause doesn't exist at that verbosity", which is how
+# ultra stays as lean as it was before.
+_TOOL_WORKFLOW_CLAUSES = (
+    (
+        ("search_commands", "run_command", "run_chain"),
         "COMMANDS: the 'Saved commands' list above is only a partial preview. Before "
         "run_command or run_chain, if you aren't certain of the exact saved command "
         "name, call search_commands first — pass a keyword, or no query to list every "
-        "saved command. Do this instead of guessing a name and hoping it resolves. "
-        "RADIOS: wifi_set/bluetooth_set action on|off. Off requires confirm=true (may need Admin). "
+        "saved command. Do this instead of guessing a name and hoping it resolves.",
+        "COMMANDS: only some are listed above — if you're not sure of the exact "
+        "saved command name, call search_commands (with a keyword, or no query "
+        "for the full list) before run_command/run_chain. Never guess a name.",
+        "Unsure of a saved command's exact name? search_commands first, never guess.",
+    ),
+    (
+        ("radio_status", "wifi_set", "bluetooth_set"),
+        "RADIOS: wifi_set/bluetooth_set action on|off. Off requires confirm=true (may need Admin).",
+        "",
+        "",
+    ),
+    (
+        ("git_run", "git_commit_all"),
         "GIT: 'commit everything' / 'stage and commit' -> git_commit_all in ONE call (it stages "
         "+ commits together). Do not check status or diff first unless the user asked you to "
         "review changes or write a message based on their content — each extra git_run round "
         "resends the whole growing conversation, so status->diff->add->commit as four separate "
         "calls is expensive and usually unnecessary. For anything else, git_run with an "
         "allowlisted command (status, log, diff, add, commit, pull, push, …). "
-        "reset/clean/force-push/clone need confirm=true. Not a shell. "
+        "reset/clean/force-push/clone need confirm=true. Not a shell.",
+        "",
+        "",
+    ),
+    (
+        ("take_screenshot",),
         "SCREENSHOT: take_screenshot saves the desktop and shows it in the UI. "
-        "You only get a tiny ok/path — never describe pixels or ask for the image. Confirm in one short line. "
+        "You only get a tiny ok/path — never describe pixels or ask for the image. "
+        "Confirm in one short line.",
+        "Screenshots: take_screenshot (image is for the user, not you).",
+        "Screenshots only give you ok/path — never describe the image.",
+    ),
+    (
+        ("ytdl_info", "ytdl_formats", "ytdl_download"),
         "VIDEO/AUDIO: ytdl_info gets metadata (title, duration, qualities, ffmpeg_available) for a URL with no "
         "download. ytdl_formats lists exact format_ids when the simple quality presets aren't specific enough. "
         "ytdl_download fetches it (mode='video' or 'audio', quality/container/codec/subs/thumbnail/metadata/"
         "SponsorBlock all optional, output_dir to save somewhere specific) and hands the file to the user in "
         "the UI — confirm first. Single video by default; playlist=true fetches more (hard-capped), still one "
         "confirm. "
-        "You only get a tiny ok/path back — never claim details about the content you weren't told. "
+        "You only get a tiny ok/path back — never claim details about the content you weren't told.",
+        "Video/audio: ytdl_info for metadata, ytdl_formats for exact format ids, "
+        "ytdl_download to fetch (confirm first; single video by default, playlist=true for more, capped).",
+        "Video: ytdl_info, then ytdl_formats if needed, then ytdl_download confirm=true.",
+    ),
+    (
+        ("web_search", "web_fetch"),
         "WEB: For 'best X', news, prices, how-tos, or anything that may have changed, "
-        "MUST web_search, then web_fetch 1–3 URLs, then summarize with markdown source links. "
-        "SOFTWARE INSTALL: package_search, ASK user, package_install confirm=true. Never guess ids. "
+        "MUST web_search, then web_fetch 1–3 URLs, then summarize with markdown source links.",
+        "Web: web_search then web_fetch.",
+        "Web questions: web_search then web_fetch.",
+    ),
+    (
+        ("package_search", "package_install"),
+        "SOFTWARE INSTALL: package_search, ASK user, package_install confirm=true. Never guess ids.",
+        "Install: package_search, ask, then package_install confirm=true.",
+        "Installs: package_search, ask, package_install confirm=true.",
+    ),
+    (
+        ("memory_search", "memory_save", "memory_forget"),
         "MEMORY: only facts relevant to this message are injected. If you need others, "
         "memory_search. memory_save for durable facts (prefs, names, 'remember that'). "
-        "Chat history is short-term. No passwords/API keys. memory_forget to delete. "
-        "Confirm before launch/delete/install/eval."
-    ]
-    if has_spotify:
-        parts.append(
-            "SPOTIFY: Free-account friendly. Do NOT use run_command. "
-            "Open app: spotify_open. Play: spotify_search then spotify_play (opens the desktop app — "
-            "user may need one click to play; Spotify blocks remote start on Free). "
-            "Pause/skip: spotify_control (media keys). Queue/volume remote needs Premium. "
-            "Never claim music started unless the tool returned ok."
-        )
-    if has_playnite:
-        parts.append(
-            "PLAYNITE: ALWAYS playnite_query_games WITH filters or groupBy — never dump the library. "
-            "find_game is a specific title lookup. 'Play X' → playnite_launch_game (same as Play in Playnite; "
-            "Steam/Epic use a virtual LibraryPlugin action). Extra launchers: list_game_actions then "
-            "launch_action. Never PUT LibraryPlugin into gameActions. Never say launched unless playnite_launch_* succeeded."
-        )
+        "Chat history is short-term. No passwords/API keys. memory_forget to delete.",
+        "",
+        "",
+    ),
+    (
+        ("spotify_search", "spotify_play", "spotify_open", "spotify_control"),
+        "SPOTIFY: Free-account friendly. Do NOT use run_command. "
+        "Open app: spotify_open. Play: spotify_search then spotify_play (opens the desktop app — "
+        "user may need one click to play; Spotify blocks remote start on Free). "
+        "Pause/skip: spotify_control (media keys). Queue/volume remote needs Premium. "
+        "Never claim music started unless the tool returned ok.",
+        "Spotify: spotify_search then spotify_play; never run_command.",
+        "Spotify: spotify_search then spotify_play; never run_command.",
+    ),
+    (
+        ("playnite_launch_game", "playnite_query_games", "find_game",
+         "query_games", "list_game_actions", "launch_action"),
+        "PLAYNITE: ALWAYS playnite_query_games WITH filters or groupBy — never dump the library. "
+        "find_game is a specific title lookup. 'Play X' → playnite_launch_game (same as Play in Playnite; "
+        "Steam/Epic use a virtual LibraryPlugin action). Extra launchers: list_game_actions then "
+        "launch_action. Never PUT LibraryPlugin into gameActions. Never say launched unless playnite_launch_* succeeded.",
+        "Playnite: find_game or query_games, then playnite_launch_game. "
+        "Don't claim launch unless that tool succeeded.",
+        "Playnite: find_game/query_games then playnite_launch_game; "
+        "don't claim launch unless it succeeded.",
+    ),
+)
+
+# Prefix matches, for tool families whose members are generated rather than
+# listed (playnite_*, spotify_*). Mirrors what has_playnite/has_spotify did
+# with startswith() before this table existed.
+_WORKFLOW_PREFIXES = ("playnite_", "spotify_")
+
+
+def _clause_applies(tool_names, offered_names):
+    """Is any tool this clause talks about actually on offer this round?"""
+    for name in tool_names:
+        if name in offered_names:
+            return True
+    # A prefix family counts as present if ANY of its members is offered,
+    # so a clause listing three playnite tools still fires when the router
+    # offered a fourth one this table doesn't name.
+    for prefix in _WORKFLOW_PREFIXES:
+        if any(n.startswith(prefix) for n in tool_names):
+            if any(n.startswith(prefix) for n in offered_names):
+                return True
+    return False
+
+
+def _tool_workflow_notes(offered_names, compact, ultra,
+                         has_playnite=False, has_spotify=False):
+    """Per-tool workflow guidance for THIS round's offered tools only.
+
+    Goes in the per-request tail next to pack_instructions_ctx, not the
+    cached static prefix, because it varies with the router's decision —
+    same rule, same reason. See _tools_blurb's docstring.
+
+    `offered_names` is the set of tool names ai_client is actually sending
+    this round. Passing None restores the old unconditional behaviour
+    exactly (every clause, with Playnite/Spotify still gated on the two
+    legacy flags), so a caller that doesn't know its offered set — a test,
+    an external caller of _system_prompt() — reads the same text it always
+    did rather than silently losing guidance.
+    """
+    index = 1 if not compact else (3 if ultra else 2)
+    legacy = offered_names is None
+    parts = []
+    for tool_names, *texts in _TOOL_WORKFLOW_CLAUSES:
+        text = texts[index - 1]
+        if not text:
+            continue
+        if legacy:
+            is_spotify = any(n.startswith("spotify_") for n in tool_names)
+            is_playnite = any(n.startswith("playnite_") or n in
+                              ("find_game", "query_games", "list_game_actions",
+                               "launch_action")
+                              for n in tool_names)
+            if is_spotify and not has_spotify:
+                continue
+            if is_playnite and not has_playnite:
+                continue
+        elif not _clause_applies(tool_names, offered_names):
+            continue
+        parts.append(text)
     return " ".join(parts)
 
 
@@ -772,7 +884,8 @@ def _system_prompt_parts(persona, commands_ctx, freq_ctx, tools_enabled,
                          compact_tools=False, compact_persona=False, ultra=False, has_history=False,
                          memory_ctx="", has_playnite=False, has_spotify=False, other_convos_ctx="",
                          playnite_freq_games=None, precise=False, pack_instructions_ctx="",
-                         skills_ctx="", loaded_skills_ctx=""):
+                         skills_ctx="", loaded_skills_ctx="", sender_ctx="",
+                         offered_names=None):
     """Return (static_prefix, per_request_tail) instead of one joined string.
 
     This split is the load-bearing half of prompt caching (see
@@ -852,7 +965,10 @@ def _system_prompt_parts(persona, commands_ctx, freq_ctx, tools_enabled,
                 "turns never happened."
             )
     if tools_enabled:
-        parts.append(_tools_blurb(compact_tools, ultra, has_playnite, has_spotify))
+        # Static half only — the per-tool workflow clauses moved to the
+        # tail below, since they depend on what the router offered this
+        # turn. See _tools_blurb / _tool_workflow_notes.
+        parts.append(_tools_blurb(compact_tools, ultra))
         # Tier 1 of the skills system (see skills.py). Deliberately inside
         # the STATIC run: the catalog is identical on every turn and only
         # changes when a skill is added or removed, which makes it exactly
@@ -886,6 +1002,30 @@ def _system_prompt_parts(persona, commands_ctx, freq_ctx, tools_enabled,
     static_parts = list(parts)
     parts = []
 
+    # WHO IS TYPING. First in the tail, ahead of memory_ctx, deliberately:
+    # everything below is written as though the owner is on the other end,
+    # and this is the line that says they might not be (see
+    # channels/people.py). A model that reads "remember: their sister's
+    # birthday is Tuesday" before being told it's talking to a stranger has
+    # already been primed with the wrong frame.
+    #
+    # Tail rather than static prefix even though it's stable within one
+    # chat thread: it differs per conversation, and the static run is
+    # shared across every conversation in a capacity mode (see the
+    # breakpoint note above). Empty for the CLI and the web UI, which keeps
+    # every non-chat ask byte-identical to before this existed.
+    if sender_ctx:
+        parts.append(sender_ctx)
+    # Per-tool workflow guidance for the tools actually on offer this round.
+    # Sits with pack_instructions_ctx because it has exactly the same
+    # property: derived from the router's per-turn decision, so it must not
+    # touch the cached prefix.
+    if tools_enabled:
+        workflow_ctx = _tool_workflow_notes(
+            offered_names, compact_tools, ultra,
+            has_playnite=has_playnite, has_spotify=has_spotify)
+        if workflow_ctx:
+            parts.append(workflow_ctx)
     if pack_instructions_ctx:
         parts.append(pack_instructions_ctx)
     # Manually-loaded skills (see skill_stickiness.py — the "/skillload
@@ -925,7 +1065,8 @@ def _system_prompt_parts(persona, commands_ctx, freq_ctx, tools_enabled,
     return "\n\n".join(static_parts), "\n\n".join(parts)
 
 
-def _build_messages(persona, commands, user_text, tools_enabled, profile, conversation_id, route=None):
+def _build_messages(persona, commands, user_text, tools_enabled, profile, conversation_id, route=None,
+                    sender_ctx=""):
     compact = profile.get("compact_tools_blurb", False)
     # Phase 8 of the token-optimization plan (see new_plan.md): the full
     # saved-commands listing only earns its tokens when the "commands"
@@ -1060,6 +1201,8 @@ def _build_messages(persona, commands, user_text, tools_enabled, profile, conver
         pack_instructions_ctx=pack_instructions_ctx,
         skills_ctx=skills_ctx,
         loaded_skills_ctx=loaded_skills_ctx,
+        sender_ctx=sender_ctx,
+        offered_names=offered_names if tools_enabled else None,
     )
     # Two system messages, not one: index 0 is the cacheable static prefix,
     # index 1 the per-request tail (see _system_prompt_parts). Providers that
@@ -1504,6 +1647,15 @@ def _make_tool_executor(on_tool_call, schemas=None, on_confirm_request=None,
         # cache[key] (reused on a same-turn repeat call) and the
         # model-facing return value get the shaped copy.
         shaped_result = tool_result_shaping.shape_result(name, result, verbosity)
+        # "Explain what broke": a failed tool gets a plain-language cause
+        # and the actual fix attached, matched against the same dependency
+        # tables `jarvis doctor` uses (see tool_diagnosis.py). Applied to
+        # the SHAPED copy only — the model is the audience for the
+        # explanation, while run_entry below deliberately keeps the
+        # untouched result for UI replay. Returns its input unchanged when
+        # the call succeeded or nothing is known about the error, so the
+        # happy path is byte-identical to before.
+        shaped_result = tool_diagnosis.annotate(name, shaped_result)
         cache[key] = shaped_result
         run_entry = {"name": name, "arguments": arguments, "result": result}
         if confirm_meta is not None:
@@ -2071,7 +2223,7 @@ def abandon_pending_turn(reason="interrupted"):
 
 def ask(user_text, commands=None, on_attempt=None, on_tool_call=None, on_tool_result=None, conversation_id=None,
         on_confirm_request=None, on_route=None, provider_override=None,
-        think_override=None, on_trace=None):
+        think_override=None, on_trace=None, sender_context=""):
     """Ask Jarvis something, trying every configured, enabled provider in
     order until one answers \u2014 and within each provider, every one of its
     configured keys in order before moving on to the next provider. Always
@@ -2105,6 +2257,15 @@ def ask(user_text, commands=None, on_attempt=None, on_tool_call=None, on_tool_re
     tool call flagged confirm_required in tool_safety.json (see
     _make_tool_executor). Tools requiring confirmation fail closed (never
     run) if this isn't supplied.
+
+    sender_context, if given, is a short identity block naming who sent
+    this message and whether they are the owner (see
+    channels/people.prompt_block). It is injected at the head of the
+    per-request system tail. Only the chat gateways pass it — over Discord
+    or Instagram the person typing is frequently NOT the owner, and the
+    rest of the prompt is written on the assumption that they are. The CLI
+    and web UI leave it empty, which keeps their prompts byte-identical to
+    what they were before this parameter existed.
 
     on_route(route), if given, fires once right after the local router
     (tool_router.route()) decides what this message plausibly needs \u2014
@@ -2507,6 +2668,7 @@ def ask(user_text, commands=None, on_attempt=None, on_tool_call=None, on_tool_re
             messages = _build_messages(
                 persona, commands, user_text, tools_enabled, profile, conv_id,
                 route=route if tools_enabled else None,
+                sender_ctx=sender_context,
             )
             runs = getattr(tool_executor, "runs", None) if tool_executor else None
             if runs:

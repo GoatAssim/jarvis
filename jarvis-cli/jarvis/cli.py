@@ -43,7 +43,7 @@ ENCODING = "utf-8"
 
 CHAIN_SEP = "then"      # starts a new batch \u2014 waits for the previous one to finish
 PARALLEL_SEP = "and"    # joins the current batch \u2014 runs alongside whatever's already in it
-RESERVED_NAMES = {"config", "ai-config", "ai-clear", "ai-drop-from", "playnite-config", "spotify-config", "spotify-login", "memory-config", "everything-config", "tools-list", "tool-run", "personas-list", "skills-list", "skills-get", "skills-save", "skills-add", "skills-create", "skills-remove", "skillmake", "skilladd", "skillload", "skillunload", "tool-preview", "tool-safety-set", "conv-new", "conv-list", "conv-show", "conv-switch", "conv-delete", "logs", "logs-list", "logs-show", "logs-clear", "organize-json", "mode", "mode-set", "voice-config", "speak", "listen", "transcribe", "sched-list", "sched-tick", "sched-daemon", "sched-ask-log", "sched-add", "sched-show", "sched-cancel", "sched-pause", "sched-resume", "sched-snooze", "sched-approve", "sched-signal", "sched-clear", "notify-send", "notify-list", "notify-ack", "notify-clear", "notify-config", "conv-search", "mcp-status", "mcp-refresh", "mcp-config", "mcp-call", "channels-config", "channels-status", "channels-set", "channels-allow", "channels-deny", "channels-test", "channels-whoami", "channels-log", "discord-daemon", "instagram-serve", "logs-search", "mcp-tools", CHAIN_SEP, PARALLEL_SEP, "-h", "--help"}
+RESERVED_NAMES = {"config", "ai-config", "ai-clear", "ai-drop-from", "playnite-config", "spotify-config", "spotify-login", "memory-config", "everything-config", "tools-list", "tool-run", "personas-list", "skills-list", "skills-get", "skills-save", "skills-add", "skills-create", "skills-remove", "skillmake", "skilladd", "skillload", "skillunload", "tool-preview", "tool-safety-set", "conv-new", "conv-list", "conv-show", "conv-switch", "conv-delete", "logs", "logs-list", "logs-show", "logs-clear", "organize-json", "mode", "mode-set", "voice-config", "speak", "listen", "transcribe", "sched-list", "sched-tick", "sched-daemon", "sched-ask-log", "sched-add", "sched-show", "sched-cancel", "sched-pause", "sched-resume", "sched-snooze", "sched-approve", "sched-signal", "sched-clear", "notify-send", "notify-list", "notify-ack", "notify-clear", "notify-config", "conv-search", "mcp-status", "mcp-refresh", "mcp-config", "mcp-call", "channels-config", "channels-status", "channels-set", "channels-allow", "channels-deny", "channels-test", "channels-whoami", "channels-log", "channels-directory", "channels-people", "channels-follow", "channels-block", "discord-daemon", "instagram-serve", "logs-search", "mcp-tools", "daemons", "daemon-start", "daemon-stop", "daemon-restart", "daemon-status", "daemon-console", "daemon-input", "daemon-schedule", "daemon-add", "daemon-edit", "daemon-remove", "daemon-run", "daemons-tick", "logs-files", "logs-tail", "logs-sets", "backlog", "backlog-add", "backlog-done", "backlog-update", "backlog-remove", "backlog-board", "ambient", "ambient-tick", "onboard", "ui-mode", CHAIN_SEP, PARALLEL_SEP, "-h", "--help"}
 
 OUT = Palette(sys.stdout)  # actual command output: the banner, the command list
 ERR = Palette(sys.stderr)  # jarvis's own status/trace/error messages
@@ -1822,6 +1822,14 @@ def main():
 
     if argv[0] == "logs":
         run_logs_command(argv[1:], commands)
+        return
+
+    from .workspace_cli import COMMANDS as _WORKSPACE_COMMANDS
+    if argv[0] in _WORKSPACE_COMMANDS:
+        # Daemons, raw log-file search, the backlog, ambient monitoring and
+        # onboarding — same split-out reasoning as channels_cli.py below.
+        from . import workspace_cli as _workspace_cli
+        _workspace_cli.handle(argv)
         return
 
     from .channels_cli import COMMANDS as _CHANNEL_COMMANDS

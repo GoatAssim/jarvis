@@ -7992,4 +7992,595 @@
     if (window.JarvisCustomTools) window.JarvisCustomTools.open();
   });
 
+  // ===========================================================================
+  // DAEMONS / BACKLOG / LOG SEARCH / SETUP / LAYOUT
+  //
+  // Four panels and one switch, all built on the same .menu-overlay chrome the
+  // Scheduled and MCP panels already use. Every one of them talks to a REST
+  // route that shells out to the matching `jarvis` subcommand, so the browser
+  // never re-implements a rule that lives in Python — see server.js's comment
+  // above the routes for why that split is load-bearing rather than tidy.
+  // ===========================================================================
+
+  // --- layout -----------------------------------------------------------
+  // "classic" keeps the Commands / Detail / Console grid on screen at all
+  // times, which is what this UI has always done. "focus" hides the grid and
+  // opens the Ask panel as the whole surface, with everything else reachable
+  // from the same Menu it was already in.
+  //
+  // The important property, and the reason this is safe: NO FEATURE EXISTS IN
+  // ONE LAYOUT AND NOT THE OTHER. Focus only changes what is on screen by
+  // default. Anything that would only work in classic would turn a
+  // presentation preference into a trap.
+  let currentLayout = "classic";
+
+  function applyLayout(mode) {
+    currentLayout = mode === "focus" ? "focus" : "classic";
+    document.body.classList.toggle("layout--focus", currentLayout === "focus");
+    const btn = qs("#btn-layout-switch");
+    const label = qs("#layout-switch-label");
+    if (btn) btn.dataset.layout = currentLayout;
+    if (label) label.textContent = currentLayout === "focus" ? "Focus" : "Classic";
+    // Focus leads with the conversation, so the Ask panel is the surface
+    // rather than an overlay you open. Opening it here (idempotently) is what
+    // makes the switch feel like a layout change instead of a blank screen.
+    if (currentLayout === "focus" && typeof openAsk === "function") {
+      try { openAsk(); } catch { /* the panel may not be built yet on first paint */ }
+    }
+  }
+
+  async function loadLayout() {
+    try {
+      const data = await Api.get("/api/ui-mode");
+      applyLayout(data && data.ui_mode);
+    } catch {
+      // Server-side preference unreadable (jarvis CLI down, first run) — the
+      // classic layout is the safe default because it is what every existing
+      // user already has.
+      applyLayout("classic");
+    }
+  }
+
+  async function toggleLayout() {
+    const next = currentLayout === "focus" ? "classic" : "focus";
+    applyLayout(next);          // optimistic: the switch must feel instant
+    try {
+      await Api.post("/api/ui-mode", { mode: next });
+    } catch (err) {
+      applyLayout(next === "focus" ? "classic" : "focus");   // roll back
+      toast(err.message || "Couldn't save that layout.");
+    }
+  }
+
+  qs("#btn-layout-switch")?.addEventListener("click", toggleLayout);
+
+  // --- daemons ----------------------------------------------------------
+  const daemonsOverlay = qs("#daemons-overlay");
+  let selectedDaemon = null;
+  let daemonPollTimer = null;
+
+  function daemonStatusClass(status) {
+    if (status === "running") return "daemon-dot daemon-dot--up";
+    if (status === "crashed") return "daemon-dot daemon-dot--bad";
+    if (status === "scheduled") return "daemon-dot daemon-dot--wait";
+    return "daemon-dot";
+  }
+
+  function renderDaemonRow(entry) {
+    const running = Boolean(entry.running);
+    const actions = el("div", { class: "daemon-actions" }, [
+      el("button", {
+        class: "btn btn--ghost btn--sm",
+        onclick: () => daemonAction(entry.id, running ? "stop" : "start"),
+      }, running ? "Stop" : "Start"),
+      el("button", {
+        class: "btn btn--ghost btn--sm",
+        onclick: () => daemonAction(entry.id, "restart"),
+      }, "Restart"),
+      el("button", {
+        class: "btn btn--ghost btn--sm",
+        onclick: () => selectDaemon(entry.id),
+      }, "Console"),
+    ]);
+    // A built-in can be disabled but never deleted — daemons.remove refuses,
+    // so offering the button would only produce an error.
+    if (!entry.builtin) {
+      actions.appendChild(el("button", {
+        class: "btn btn--ghost btn--sm",
+        onclick: () => removeDaemon(entry.id),
+      }, "Remove"));
+    }
+
+    const meta = [];
+    if (entry.pid) meta.push(`pid ${entry.pid}`);
+    if (entry.adopted) meta.push("started outside Jarvis");
+    if (entry.next_start) meta.push(`starts ${entry.next_start}`);
+    if (!entry.enabled) meta.push("disabled");
+    if (entry.last_error) meta.push(entry.last_error);
+
+    return el("div", {
+      class: "skill-row daemon-row" + (selectedDaemon === entry.id ? " is-selected" : ""),
+    }, [
+      el("div", { class: "daemon-row__main" }, [
+        el("span", { class: daemonStatusClass(entry.status) }),
+        el("div", { class: "daemon-row__text" }, [
+          el("div", { class: "skill-row__name" }, entry.name || entry.id),
+          el("div", { class: "skill-row__desc" },
+            `${entry.status}${meta.length ? " \u2014 " + meta.join(", ") : ""}`),
+          el("div", { class: "daemon-row__cmd" }, entry.command || ""),
+        ]),
+      ]),
+      actions,
+    ]);
+  }
+
+  async function refreshDaemons() {
+    if (!daemonsOverlay || daemonsOverlay.hidden) return;
+    const list = qs("#daemons-list");
+    const statusLine = qs("#daemons-status-line");
+    try {
+      const data = await Api.get("/api/daemons");
+      const entries = data.daemons || [];
+      const up = entries.filter((d) => d.running).length;
+      const broken = entries.filter((d) => d.status === "crashed").length;
+      statusLine.textContent =
+        `${up} of ${entries.length} running` + (broken ? `, ${broken} crashed` : "");
+      list.innerHTML = "";
+      for (const entry of entries) list.appendChild(renderDaemonRow(entry));
+      if (!entries.length) {
+        list.appendChild(el("div", { class: "skills-empty" }, "No services registered."));
+      }
+    } catch (err) {
+      statusLine.textContent = "couldn't read services";
+      list.innerHTML = "";
+      list.appendChild(el("div", { class: "skills-empty" }, err.message || "Failed."));
+    }
+  }
+
+  async function daemonAction(id, action) {
+    try {
+      const data = await Api.post(`/api/daemons/${encodeURIComponent(id)}/${action}`, {});
+      toast(data.message || `${action}ed ${id}`, "info");
+    } catch (err) {
+      toast(err.message || `Couldn't ${action} ${id}.`);
+    }
+    // Starting is asynchronous by design (daemons.start returns as soon as the
+    // supervisor is spawned, without waiting for a WebSocket handshake), so
+    // one refresh now and one shortly after is what makes the row settle on
+    // the real state rather than on "starting".
+    refreshDaemons();
+    setTimeout(refreshDaemons, 1500);
+    if (selectedDaemon === id) setTimeout(refreshDaemonConsole, 1500);
+  }
+
+  async function removeDaemon(id) {
+    if (!window.confirm(`Remove the '${id}' service? Its console logs stay on disk.`)) return;
+    try {
+      await api("DELETE", `/api/daemons/${encodeURIComponent(id)}`);
+      if (selectedDaemon === id) selectedDaemon = null;
+      refreshDaemons();
+    } catch (err) {
+      toast(err.message || "Couldn't remove that service.");
+    }
+  }
+
+  async function selectDaemon(id) {
+    selectedDaemon = id;
+    const title = qs("#daemon-console-title");
+    if (title) title.textContent = `Console \u2014 ${id}`;
+    await refreshDaemonConsole();
+    refreshDaemons();
+  }
+
+  async function refreshDaemonConsole() {
+    const pane = qs("#daemon-console");
+    if (!pane || !selectedDaemon) return;
+    const picker = qs("#daemon-console-file");
+    const file = picker && picker.value ? `&file=${encodeURIComponent(picker.value)}` : "";
+    try {
+      const data = await Api.get(
+        `/api/daemons/${encodeURIComponent(selectedDaemon)}/console?lines=300${file}`);
+      const lines = data.lines || [];
+      pane.textContent = lines.length ? lines.join("\n") : "(no output yet)";
+      pane.scrollTop = pane.scrollHeight;
+
+      if (picker && !file) {
+        const backups = data.backups || [];
+        const want = ["", ...backups].join("|");
+        if (picker.dataset.loaded !== want) {
+          picker.dataset.loaded = want;
+          picker.innerHTML = "";
+          picker.appendChild(el("option", { value: "" }, "current"));
+          for (const path of backups) {
+            picker.appendChild(el("option", { value: path },
+              path.split(/[\\/]/).pop()));
+          }
+        }
+      }
+
+      // stdin is only offered where it can actually work: a running daemon
+      // whose definition says its process reads stdin. daemons.send_input
+      // refuses otherwise, and a control that always errors is worse than no
+      // control.
+      const daemons = (await Api.get("/api/daemons")).daemons || [];
+      const entry = daemons.find((d) => d.id === selectedDaemon);
+      const row = qs("#daemon-input-row");
+      if (row) row.hidden = !(entry && entry.running && entry.supports_stdin);
+    } catch (err) {
+      pane.textContent = err.message || "Couldn't read that console.";
+    }
+  }
+
+  qs("#btn-daemon-refresh")?.addEventListener("click", () => {
+    refreshDaemons();
+    refreshDaemonConsole();
+  });
+
+  qs("#daemon-console-file")?.addEventListener("change", refreshDaemonConsole);
+
+  qs("#btn-daemon-add")?.addEventListener("click", async () => {
+    const id = (qs("#daemon-new-id")?.value || "").trim();
+    const command = (qs("#daemon-new-command")?.value || "").trim();
+    if (!id || !command) return toast("An id and a command are both required.");
+    try {
+      await Api.post("/api/daemons", {
+        id,
+        command,
+        cwd: (qs("#daemon-new-cwd")?.value || "").trim(),
+        stdin: Boolean(qs("#daemon-new-stdin")?.checked),
+      });
+      qs("#daemon-new-id").value = "";
+      qs("#daemon-new-command").value = "";
+      qs("#daemon-new-cwd").value = "";
+      refreshDaemons();
+    } catch (err) {
+      toast(err.message || "Couldn't register that service.");
+    }
+  });
+
+  qs("#btn-daemon-send")?.addEventListener("click", async () => {
+    const input = qs("#daemon-input-text");
+    const text = (input?.value || "").trim();
+    if (!selectedDaemon || !text) return;
+    try {
+      await Api.post(`/api/daemons/${encodeURIComponent(selectedDaemon)}/input`, { text });
+      input.value = "";
+      setTimeout(refreshDaemonConsole, 400);
+    } catch (err) {
+      toast(err.message || "Couldn't send that.");
+    }
+  });
+
+  qs("#daemon-input-text")?.addEventListener("keydown", (ev) => {
+    if (ev.key === "Enter") qs("#btn-daemon-send")?.click();
+  });
+
+  qs("#btn-daemon-schedule")?.addEventListener("click", async () => {
+    const when = (qs("#daemon-schedule-when")?.value || "").trim();
+    if (!selectedDaemon) return toast("Pick a service first.");
+    try {
+      const data = await Api.post(
+        `/api/daemons/${encodeURIComponent(selectedDaemon)}/schedule`, { when });
+      toast(when ? `Will start at ${data.next_start || when}` : "Schedule cleared", "info");
+      refreshDaemons();
+    } catch (err) {
+      toast(err.message || "Couldn't schedule that.");
+    }
+  });
+
+  function openDaemons() {
+    if (!daemonsOverlay) return;
+    daemonsOverlay.hidden = false;
+    refreshDaemons();
+    if (selectedDaemon) refreshDaemonConsole();
+    // A console is only useful live. Polling stops the moment the panel
+    // closes — an interval left running against a closed overlay is a slow
+    // leak and a pile of pointless subprocess spawns on the server.
+    if (daemonPollTimer) clearInterval(daemonPollTimer);
+    daemonPollTimer = setInterval(() => {
+      refreshDaemons();
+      refreshDaemonConsole();
+    }, 4000);
+  }
+
+  function closeDaemons() {
+    if (daemonsOverlay) daemonsOverlay.hidden = true;
+    if (daemonPollTimer) { clearInterval(daemonPollTimer); daemonPollTimer = null; }
+  }
+
+  qs("#daemons-close")?.addEventListener("click", closeDaemons);
+  daemonsOverlay?.addEventListener("click", (ev) => {
+    if (ev.target === daemonsOverlay) closeDaemons();
+  });
+
+  // --- backlog ----------------------------------------------------------
+  const backlogOverlay = qs("#backlog-overlay");
+  const BACKLOG_COLUMNS = [
+    ["idea", "Ideas"], ["todo", "To do"], ["doing", "Doing"],
+    ["blocked", "Blocked"], ["done", "Done"],
+  ];
+
+  function renderBacklogCard(item) {
+    const next = { idea: "todo", todo: "doing", doing: "done", blocked: "doing", done: "todo" };
+    return el("div", { class: `kanban__card kanban__card--${item.priority || "normal"}` }, [
+      el("div", { class: "kanban__title" }, item.title),
+      item.project ? el("div", { class: "kanban__project" }, item.project) : null,
+      item.blocked_on ? el("div", { class: "kanban__blocked" }, `waiting on ${item.blocked_on}`) : null,
+      el("div", { class: "kanban__actions" }, [
+        el("button", {
+          class: "btn btn--ghost btn--sm",
+          onclick: () => updateBacklog(item.id, { state: next[item.state] || "todo" }),
+        }, item.state === "done" ? "Reopen" : `\u2192 ${next[item.state] || "todo"}`),
+        el("button", {
+          class: "btn btn--ghost btn--sm",
+          onclick: () => {
+            const reason = window.prompt("Blocked on what?", item.blocked_on || "");
+            if (reason !== null) updateBacklog(item.id, { blocked_on: reason });
+          },
+        }, "Block"),
+        el("button", {
+          class: "btn btn--ghost btn--sm",
+          onclick: () => removeBacklog(item.id),
+        }, "\u00d7"),
+      ]),
+    ]);
+  }
+
+  async function refreshBacklog() {
+    if (!backlogOverlay || backlogOverlay.hidden) return;
+    const board = qs("#backlog-board");
+    const statusLine = qs("#backlog-status-line");
+    try {
+      const data = await Api.get("/api/backlog");
+      const grouped = data.board || {};
+      const summary = data.summary || {};
+      const blocked = (summary.blocked || []).length;
+      statusLine.textContent =
+        `${summary.open || 0} open` + (blocked ? `, ${blocked} blocked` : "") +
+        ((summary.stale_doing || []).length ? `, ${summary.stale_doing.length} stale` : "");
+      board.innerHTML = "";
+      for (const [state, label] of BACKLOG_COLUMNS) {
+        const items = grouped[state] || [];
+        const column = el("div", { class: "kanban__col" }, [
+          el("div", { class: "kanban__colhead" }, `${label} (${items.length})`),
+        ]);
+        for (const item of items) column.appendChild(renderBacklogCard(item));
+        if (!items.length) column.appendChild(el("div", { class: "kanban__empty" }, "\u2014"));
+        board.appendChild(column);
+      }
+    } catch (err) {
+      statusLine.textContent = "couldn't read the backlog";
+      board.innerHTML = "";
+      board.appendChild(el("div", { class: "skills-empty" }, err.message || "Failed."));
+    }
+  }
+
+  async function updateBacklog(id, fields) {
+    try {
+      await api("PATCH", `/api/backlog/${encodeURIComponent(id)}`, fields);
+      refreshBacklog();
+    } catch (err) {
+      toast(err.message || "Couldn't update that item.");
+    }
+  }
+
+  async function removeBacklog(id) {
+    try {
+      await api("DELETE", `/api/backlog/${encodeURIComponent(id)}`);
+      refreshBacklog();
+    } catch (err) {
+      toast(err.message || "Couldn't remove that item.");
+    }
+  }
+
+  qs("#btn-backlog-add")?.addEventListener("click", async () => {
+    const title = (qs("#backlog-new-title")?.value || "").trim();
+    if (!title) return;
+    try {
+      await Api.post("/api/backlog", {
+        title,
+        project: (qs("#backlog-new-project")?.value || "").trim(),
+        state: qs("#backlog-new-state")?.value || "todo",
+      });
+      qs("#backlog-new-title").value = "";
+      refreshBacklog();
+    } catch (err) {
+      toast(err.message || "Couldn't add that.");
+    }
+  });
+
+  qs("#backlog-new-title")?.addEventListener("keydown", (ev) => {
+    if (ev.key === "Enter") qs("#btn-backlog-add")?.click();
+  });
+
+  function openBacklog() {
+    if (!backlogOverlay) return;
+    backlogOverlay.hidden = false;
+    refreshBacklog();
+  }
+
+  function closeBacklog() {
+    if (backlogOverlay) backlogOverlay.hidden = true;
+  }
+
+  qs("#backlog-close")?.addEventListener("click", closeBacklog);
+  backlogOverlay?.addEventListener("click", (ev) => {
+    if (ev.target === backlogOverlay) closeBacklog();
+  });
+
+  // --- log search -------------------------------------------------------
+  const logsearchOverlay = qs("#logsearch-overlay");
+
+  async function runLogSearch() {
+    const query = (qs("#logsearch-query")?.value || "").trim();
+    const results = qs("#logsearch-results");
+    const statusLine = qs("#logsearch-status-line");
+    if (!query) return;
+    results.innerHTML = "";
+    results.appendChild(el("div", { class: "skills-empty" }, "Searching\u2026"));
+    const params = new URLSearchParams({ q: query, context: "1", limit: "120" });
+    const mode = qs("#logsearch-mode")?.value;
+    if (mode) params.set("mode", mode);
+    const set = qs("#logsearch-set")?.value;
+    if (set) params.set("set", set);
+    const path = (qs("#logsearch-path")?.value || "").trim();
+    if (path) params.set("path", path);
+    try {
+      const data = await Api.get(`/api/log-files/search?${params.toString()}`);
+      const hits = data.results || [];
+      statusLine.textContent =
+        `${hits.length} match(es) across ${data.files_scanned || 0} file(s)` +
+        (data.truncated ? " (truncated)" : "");
+      results.innerHTML = "";
+      if (!hits.length) {
+        results.appendChild(el("div", { class: "skills-empty" }, "Nothing matched."));
+        return;
+      }
+      for (const hit of hits) {
+        results.appendChild(el("div", { class: "logsearch-hit" }, [
+          el("div", { class: "logsearch-hit__where" }, `${hit.file}:${hit.line}`),
+          el("pre", { class: "logsearch-hit__text" }, hit.text),
+        ]));
+      }
+    } catch (err) {
+      statusLine.textContent = "search failed";
+      results.innerHTML = "";
+      results.appendChild(el("div", { class: "skills-empty" }, err.message || "Failed."));
+    }
+  }
+
+  qs("#btn-logsearch")?.addEventListener("click", runLogSearch);
+  qs("#logsearch-query")?.addEventListener("keydown", (ev) => {
+    if (ev.key === "Enter") runLogSearch();
+  });
+
+  function openLogSearch() {
+    if (!logsearchOverlay) return;
+    logsearchOverlay.hidden = false;
+    qs("#logsearch-query")?.focus();
+  }
+
+  function closeLogSearch() {
+    if (logsearchOverlay) logsearchOverlay.hidden = true;
+  }
+
+  qs("#logsearch-close")?.addEventListener("click", closeLogSearch);
+  logsearchOverlay?.addEventListener("click", (ev) => {
+    if (ev.target === logsearchOverlay) closeLogSearch();
+  });
+
+  // --- setup / onboarding -----------------------------------------------
+  const setupOverlay = qs("#setup-overlay");
+
+  function renderSetupStep(step) {
+    const icons = { ok: "\u2713", todo: "!", optional: "\u00b7" };
+    const body = [
+      el("div", { class: "setup-step__head" }, [
+        el("span", { class: `setup-step__icon setup-step__icon--${step.status}` },
+          icons[step.status] || "?"),
+        el("div", { class: "setup-step__title" }, step.title),
+      ]),
+      el("div", { class: "setup-step__detail" }, step.detail || ""),
+    ];
+    if (step.status !== "ok") {
+      body.push(el("div", { class: "setup-step__why" }, step.why || ""));
+      if (step.action) {
+        body.push(el("code", { class: "setup-step__action" }, step.action));
+      }
+    }
+    // The layout step is the one thing the wizard can actually DO from here,
+    // so it gets real buttons rather than a command to copy.
+    if (step.id === "ui_mode" && Array.isArray(step.choices)) {
+      const row = el("div", { class: "setup-step__choices" });
+      for (const choice of step.choices) {
+        row.appendChild(el("button", {
+          class: "btn " + (currentLayout === choice.value ? "btn--primary" : "btn--ghost") + " btn--sm",
+          title: choice.hint || "",
+          onclick: async () => {
+            try {
+              await Api.post("/api/ui-mode", { mode: choice.value });
+              applyLayout(choice.value);
+              refreshSetup();
+            } catch (err) {
+              toast(err.message || "Couldn't set that layout.");
+            }
+          },
+        }, choice.label));
+      }
+      body.push(row);
+    }
+    return el("div", { class: `setup-step setup-step--${step.status}` }, body);
+  }
+
+  async function refreshSetup() {
+    if (!setupOverlay || setupOverlay.hidden) return;
+    const container = qs("#setup-steps");
+    const statusLine = qs("#setup-status-line");
+    try {
+      const data = await Api.get("/api/onboarding");
+      statusLine.textContent = data.ready
+        ? "everything required is in place"
+        : `still needed: ${(data.blocking || []).join(", ")}`;
+      container.innerHTML = "";
+      for (const step of data.steps || []) container.appendChild(renderSetupStep(step));
+      if (data.ready && !data.completed) {
+        // Marking it complete is what stops it opening by itself next time.
+        Api.post("/api/onboarding/complete", {}).catch(() => {});
+      }
+    } catch (err) {
+      statusLine.textContent = "couldn't read setup state";
+      container.innerHTML = "";
+      container.appendChild(el("div", { class: "skills-empty" }, err.message || "Failed."));
+    }
+  }
+
+  function openSetup() {
+    if (!setupOverlay) return;
+    setupOverlay.hidden = false;
+    refreshSetup();
+  }
+
+  function closeSetup() {
+    if (setupOverlay) setupOverlay.hidden = true;
+  }
+
+  qs("#setup-close")?.addEventListener("click", closeSetup);
+  qs("#btn-setup-skip")?.addEventListener("click", async () => {
+    try { await Api.post("/api/onboarding/skip", {}); } catch { /* best effort */ }
+    closeSetup();
+  });
+  setupOverlay?.addEventListener("click", (ev) => {
+    if (ev.target === setupOverlay) closeSetup();
+  });
+
+  // Opens by itself exactly once: on a machine that has never been set up and
+  // has never skipped. `should_prompt` is server-side state (see
+  // onboarding.should_prompt), not a cookie, so it is the same answer in
+  // every browser.
+  async function maybeOpenOnboarding() {
+    try {
+      const data = await Api.get("/api/onboarding");
+      if (data && data.should_prompt) openSetup();
+    } catch { /* first run with the CLI unreachable — doctor covers that */ }
+  }
+
+  // --- menu wiring ------------------------------------------------------
+  qs("#menu-item-daemons")?.addEventListener("click", () => { closePanelMenu(); openDaemons(); });
+  qs("#menu-item-backlog")?.addEventListener("click", () => { closePanelMenu(); openBacklog(); });
+  qs("#menu-item-logsearch")?.addEventListener("click", () => { closePanelMenu(); openLogSearch(); });
+  qs("#menu-item-setup")?.addEventListener("click", () => { closePanelMenu(); openSetup(); });
+
+  // Escape closes whichever of these is on top, matching the existing panels.
+  document.addEventListener("keydown", (ev) => {
+    if (ev.key !== "Escape") return;
+    if (setupOverlay && !setupOverlay.hidden) return closeSetup();
+    if (logsearchOverlay && !logsearchOverlay.hidden) return closeLogSearch();
+    if (backlogOverlay && !backlogOverlay.hidden) return closeBacklog();
+    if (daemonsOverlay && !daemonsOverlay.hidden) return closeDaemons();
+  });
+
+  loadLayout();
+  maybeOpenOnboarding();
+
+
 })();

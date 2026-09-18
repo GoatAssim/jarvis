@@ -424,7 +424,7 @@ def _probe_keys(usable):
 
 def _key_fix(error):
     text = str(error or "").lower()
-    if "401" in text or "unauthor" in text or "invalid" in text and "key" in text:
+    if "401" in text or "unauthor" in text or ("invalid" in text and "key" in text):
         return "The key is rejected — regenerate it in the provider's dashboard."
     if "402" in text or "quota" in text or "credit" in text or "billing" in text:
         return "Out of credit — top up, or move this provider down provider_priority."

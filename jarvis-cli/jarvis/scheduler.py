@@ -791,7 +791,29 @@ def tick(now=None, startup=False, limit=25):
         ran.extend(nested.get("ran", []))
         notifications.extend(nested.get("notifications", []))
 
+    # --- riders on the tick ------------------------------------------------
+    # Two things that need a regular heartbeat and don't deserve a daemon of
+    # their own: daemons whose scheduled start time has arrived, and the
+    # ambient monitor's observations. Both run AFTER the lock is released
+    # and both are individually wrapped — neither is allowed to be the
+    # reason a reminder fails to fire, which is this function's actual job.
+    started_daemons = []
+    try:
+        from . import daemons as _daemons
+        started_daemons = _daemons.tick(now=None)
+    except Exception:  # noqa: BLE001
+        started_daemons = []
+
+    noticed = {}
+    try:
+        from . import ambient as _ambient
+        noticed = _ambient.tick()
+    except Exception:  # noqa: BLE001
+        noticed = {}
+
     return {"ok": True, "ran": ran, "notifications": notifications,
+            "daemons_started": started_daemons,
+            "noticed": noticed.get("new") or [],
             "at": timespec.to_iso(datetime.now())}
 
 

@@ -11,20 +11,19 @@ things that were already fixed once.
   above `jarvis-cli/`.
 - Tests live in `tests/` at the **repo root**, next to `jarvis-cli/`, not
   inside it.
-- If a `jarvis-codebase-orientation*.md` file is present, read the
-  **highest-numbered** version before grepping around — it's a living map
-  of the file structure, bug history, and what's already built, kept
-  current after every change. Don't assume a zip handed to you is
-  unmodified/raw — check that doc's lineage note first. As of this
-  writing, all 8 enhancement ideas in the design doc below are built —
-  there is nothing left outstanding in it. Confirm this hasn't changed
-  by re-reading the orientation doc's "Outstanding ideas" section rather
-  than trusting this note indefinitely.
-- If a `jarvis-token-optimization-enhancements.md` (or similarly named
-  design doc) is present, it holds designs, not a to-do list — some
-  numbered items in it are already implemented even though the doc
-  itself is never edited after the fact. Cross-check the orientation doc
-  for which ones before building one.
+- **`REPO_MAP.md` at the repo root is the current map.** Read it before
+  grepping around: file layout, where every piece of state lives, the
+  subsystems worth understanding first, and the full command surface.
+- **`DOCUMENTATION/outdated/` is history, not documentation.** Everything
+  in there is a point-in-time snapshot and is not maintained. Several of
+  those files describe designs that were never built or bugs fixed long
+  ago — including the old `jarvis-codebase-orientation*.md`, which used to
+  serve the role `REPO_MAP.md` now serves. If one of them disagrees with
+  `REPO_MAP.md`, `REPO_MAP.md` is right. Don't "restore" something from
+  there without checking the code first.
+- `DOCUMENTATION/` itself now holds only things that are still true:
+  `PERSONAS_GUIDE.md` and the external `everything_sdk_*` / `yt-dlp-*`
+  references.
 - Enhancements #8–#10 (historical tool-run reshaping, recap-level tool-call
   summarization, router activation logging) landed without accompanying
   tests in `tests/test_enhancements.py` — they were verified with one-off
@@ -34,6 +33,29 @@ things that were already fixed once.
   you're in there rather than assuming it's already tested.
 
 ## Invariants — do not break these
+
+- **Per-turn content never goes in the cached static prompt prefix.**
+  `_system_prompt_parts()` returns (static, tail). Anything derived from
+  the router's decision, the user's message, the conversation or the
+  sender belongs in the tail. This has been broken twice — once by
+  `pack_instructions_ctx`, once by the tools blurb's playnite/spotify
+  flags — and both times the symptom was silent: the prompt still worked,
+  the cache just never hit. `tests/test_prompt_cache.py` guards it.
+- **The model may start, stop and inspect daemons; it may not create one.**
+  Registering a daemon stores an argv Jarvis later runs unattended, and
+  the model is the component most exposed to text written by other people
+  (a chat guest, a fetched page, a file it was asked to read). There is
+  deliberately no `daemon_add` tool. Same reasoning as `notify_owner`
+  taking no recipient.
+- **A chat guest's details never go in `memory.py`.** That store rides
+  along in the owner's own prompts. Guest facts belong in
+  `channels/people.py`, which is capped, keyed by platform id, and only
+  ever surfaced back into that same person's conversation.
+- **Anything that can be redelivered must be deduplicated.** Both chat
+  platforms redeliver (Meta retries a webhook whose 200 was lost, Discord
+  replays on a resumed session). `channels/dedupe.py` is the guard and it
+  is on disk, not in memory, because a gateway restart is exactly when a
+  redelivery happens.
 
 - **Never touch `tool_safety.py`, confirmation prompts, `risk_review()`,
   or the AI-review gating inside `_make_tool_executor()`** while doing
@@ -65,6 +87,20 @@ pytest functions if pytest happens to be available). Run directly:
 
     python3 tests/test_schemas_for_tools.py
     python3 tests/test_enhancements.py
+    python3 tests/test_workspace.py
+    python3 tests/test_channel_people.py
+
+Two things that will waste your time if nobody tells you:
+
+- **Redirect `HOME` to a temp dir BEFORE importing any jarvis module** in a
+  test that touches `~/.jarvis`. Most modules resolve `Path.home()` at
+  import time, so setting it afterwards has no effect and your test will
+  read and write the developer's real store.
+  `tests/test_workspace.py` shows the pattern.
+- **Define test functions above the runner block at the bottom of the
+  file.** The runner reads `globals()` when it executes, so a test appended
+  after it is silently never run — and "N passed" still prints, which is
+  how you don't notice.
 
 Any new test file's `sys.path` setup must point at `jarvis-cli/`
 (`Path(__file__).resolve().parent.parent / "jarvis-cli"`), or imports

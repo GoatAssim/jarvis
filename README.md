@@ -25,6 +25,11 @@ Chain several with 'jarvis cmd1 then cmd2'.
 Edit /home/you/.jarvis/commands.json to add or change commands.
 ```
 
+> **Working on the code?** `REPO_MAP.md` is the map: file layout, where
+> every piece of state lives, and the invariants that matter. `AGENTS.md`
+> has the rules for changing things. Everything in `DOCUMENTATION/outdated/`
+> is kept for history and is not maintained.
+
 ## Install
 
 From this folder:
@@ -623,6 +628,142 @@ own tools all pick it up automatically.
   **stdout** (`output=$(jarvis "...")` captures exactly the reply,
   nothing else); the provider-by-provider trace goes to **stderr**.
 
+## First run
+
+```
+jarvis onboard
+```
+
+Walks the setup that otherwise gets discovered by something breaking: an
+API key that is really still a placeholder, a chat platform enabled with an
+empty allowlist so the bot looks broken, a missing dependency a tool needs.
+Re-runnable any time as a checklist — it changes nothing on its own, it
+tells you what is missing and the exact command that fixes it.
+
+It also asks which UI layout you want. `jarvis ui-mode classic|focus`
+changes it later, and the web UI has a switch in the topbar.
+
+## Background services
+
+Everything long-running — the scheduler, the Discord bot, the Instagram
+webhook, and anything of your own — is managed in one place.
+
+```
+jarvis daemons                     # what exists, and what's actually up
+jarvis daemon-start discord
+jarvis daemon-console discord      # what it printed, including why it died
+jarvis daemon-stop discord
+jarvis daemon-schedule discord "tomorrow 8am"
+```
+
+Register your own with as much or as little control as you need:
+
+```
+jarvis daemon-add web "node server.js --port 3000" \
+    --cwd ~/projects/site \
+    --env NODE_ENV=production \
+    --restart on-failure --restart-delay 5 --max-restarts 3 \
+    --stop-signal TERM --stop-timeout 20 \
+    --stdin --autostart
+```
+
+| Option | What it controls |
+|---|---|
+| `--cwd D` | working directory the process starts in |
+| `--env K=V` | extra environment variables (repeatable) |
+| `--shell` | run the command through a shell, for pipes and redirection |
+| `--restart never\|on-failure\|always` | whether it comes back on its own |
+| `--restart-delay S` | seconds to wait before respawning |
+| `--max-restarts N` | give up after N restarts in 10 minutes |
+| `--stop-signal TERM\|INT\|KILL` | what a stop sends first (POSIX) |
+| `--stop-timeout S` | how long to wait before forcing it |
+| `--stdin` | this process reads stdin, so you can type into its console |
+| `--autostart` | bring it up automatically |
+| `--name`, `--description` | how it reads in the list and the UI |
+
+`jarvis daemon-edit <id>` changes any of these afterwards. The console is
+captured to a rotating log you can read later or search, and for a service
+that reads stdin you can type into it:
+
+```
+jarvis daemon-input web "reload"
+```
+
+Starting a daemon spawns a small supervisor that owns the process. That is
+what makes the console and the stdin box work at all — `jarvis` is a fresh
+process every time you run it, and a fresh process cannot reach into
+another one's pipes.
+
+## Searching the logs
+
+Two different searches, because there are two different questions.
+
+```
+jarvis conv-search "what did I ask about the invoice"   # what was SAID
+jarvis logs-files "traceback" --set daemons --context 3 # what was WRITTEN
+```
+
+`logs-files` greps the raw log files on disk line by line and gives you the
+file and line number. That covers things the structured search structurally
+cannot see: a log line that failed to parse because the process was killed
+mid-write, a daemon's console output, and any file you point it at.
+
+```
+jarvis logs-files "connection refused" --mode phrase
+jarvis logs-files "ERROR|FATAL" --mode regex --limit 20
+jarvis logs-files "timeout" --path ~/myapp/logs/*.log
+jarvis logs-tail ~/.jarvis/daemons/web/console.log
+```
+
+## Backlog
+
+For work with no due date — the things a scheduler is the wrong shape for.
+
+```
+jarvis backlog-add "rewrite the auth module" --project api --priority high
+jarvis backlog                      # what's open
+jarvis backlog-update "auth" --blocked-on "Ana's review"
+jarvis backlog-done "auth"
+jarvis backlog-board                # grouped by state
+```
+
+You can also just say it: *"add rewrite auth to my backlog"*, *"what's
+blocked right now?"*, *"mark the auth thing as done"*.
+
+## When something breaks
+
+A failed tool now explains itself. Instead of surfacing
+`[WinError 2] The system cannot find the file specified`, Jarvis matches the
+error against the same dependency knowledge `jarvis doctor` has and tells
+you it is ffmpeg that is missing, and the command that installs it.
+
+```
+jarvis doctor          # everything, with the fix for each
+jarvis doctor --deep   # also probes every configured API key
+```
+
+`jarvis ambient` shows what Jarvis has noticed on its own — a disk filling
+up, a daemon that crashed, backlog items that stopped moving. It only tells
+you when something has actually changed, because a monitor that repeats
+itself is one you learn to ignore.
+
+## Chatting from Discord or Instagram
+
+Jarvis knows when the person typing isn't you. A stranger gets answered as
+a stranger — not addressed as the owner, and told nothing from your
+long-term memory. It asks their name, remembers it for next time, and pings
+you the first time someone new writes in:
+
+```
+jarvis channels-people             # everyone who has messaged
+jarvis channels-people --pending   # people waiting on your decision
+jarvis channels-follow discord 1234567890
+jarvis channels-block  discord 1234567890
+```
+
+Approving adds them to `reply_allowlist`. Tools stay off until you
+separately run `jarvis channels-allow discord tool <id>`.
+
 ## Commands
 
 | Command | What it does |
@@ -636,6 +777,20 @@ own tools all pick it up automatically.
 | `jarvis config` | Print the path to `commands.json` |
 | `jarvis ai-config` | Print the path to `ai_config.json` (created if missing) |
 | `jarvis ai-clear` | Wipe AI conversation memory |
+| `jarvis onboard` | Guided setup / setup checklist |
+| `jarvis ui-mode [classic\|focus]` | Read or set the web UI layout |
+| `jarvis doctor [--deep]` | Health check, with the fix for each problem |
+| `jarvis daemons` | List background services and whether they're running |
+| `jarvis daemon-add/edit/remove <id>` | Manage your own background services |
+| `jarvis daemon-start/stop/restart <id>` | Control one |
+| `jarvis daemon-console <id>` | Read what a service printed |
+| `jarvis daemon-input <id> <text>` | Type into a running service's console |
+| `jarvis logs-files <query>` | Grep the raw log files on disk |
+| `jarvis logs-tail <path>` | Tail any log file |
+| `jarvis backlog` | Untimed work: what's open, what's blocked |
+| `jarvis ambient` | What Jarvis has noticed on its own |
+| `jarvis channels-people` | Who has messaged Jarvis on Discord/Instagram |
+| `jarvis channels-follow/block <platform> <id>` | Decide about someone |
 
 ## Notes
 

