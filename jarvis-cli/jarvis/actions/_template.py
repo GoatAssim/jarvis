@@ -391,6 +391,235 @@ TOOL_AI_REVIEW = set()          # e.g. for a tool fuzzy/risky enough to want
 
 TOOL_RESULT_SPECS = {}
 
+# ---------------------------------------------------------------------------
+# 7. PERSONAS — optional, and INDEPENDENT of everything above. A file can
+#    carry PERSONAS with no TOOL_SCHEMAS/TOOLS/TOOL_GROUP at all (a
+#    persona-only file), TOOL_SCHEMAS/TOOLS/TOOL_GROUP with no PERSONAS
+#    (an ordinary tool file, everything above this section), or both at
+#    once. Either way it's discovered the same way, by the same
+#    discover_actions() scan, at the same startup — nothing extra to wire
+#    up, no edits anywhere else.
+#
+#    A persona is what shows up as a labeled pill in the web UI's Skin
+#    modal (the "Skin" button next to the topbar title), alongside the
+#    built-in J.A.R.V.I.S/Verity/Friday/Edith/Karen presets. Picking one
+#    sets, in a single click: the assistant's display name, how it
+#    addresses the user, its attitude/personality, its accent color
+#    palette, its logo (boot screen + every brand mark in the UI), and
+#    optionally the Skin modal's own Interface (corner rounding / glow /
+#    text size) and Saturation sliders. Every field below is genuinely
+#    optional except id/name and a color — write only what you care about.
+#
+#        PERSONAS = [
+#            {
+#                "id": "orion",                 # slug; derived from `name`
+#                                                # if omitted. Must not
+#                                                # collide with a built-in
+#                                                # persona id (jarvis,
+#                                                # verity, friday, edith,
+#                                                # karen) — that's rejected,
+#                                                # logged, and dropped, the
+#                                                # same as a tool name
+#                                                # collision above.
+#                "name": "Orion",               # REQUIRED — the label shown
+#                                                # on the preset pill.
+#                "assistant_name": "O.R.I.O.N.",# what the assistant is
+#                                                # actually called once this
+#                                                # persona is picked (and
+#                                                # saved to ai_config.json's
+#                                                # persona.assistant_name —
+#                                                # see ai_config.py). Falls
+#                                                # back to `name` if omitted.
+#                "address_user_as": "commander",# optional — how it
+#                                                # addresses the user
+#                                                # (persona.address_user_as).
+#                                                # Left alone if omitted, so
+#                                                # a persona can change only
+#                                                # the parts it cares about.
+#                "attitude": "formal",          # optional — the id of an
+#                                                # EXISTING attitude, built-in
+#                                                # (see ai_client.
+#                                                # ATTITUDE_PRESETS: dry,
+#                                                # cheerful, snarky, formal,
+#                                                # warm, blunt) or one
+#                                                # another persona registered
+#                                                # (below).
+#                #   ...or register a brand new attitude inline instead of
+#                #   referencing an id — this is the "(could add custom
+#                #   ones too)" case:
+#                # "attitude": {
+#                #     "label": "Stoic",         # shown in the Skin
+#                #                               # modal's Attitude dropdown
+#                #     "full": "calm and unflinching under pressure, "
+#                #             "measures every word before it's spoken",
+#                #     "compact": "Calm, measured, unflinching.",
+#                # },
+#                # An inline attitude is globally registered under a slug
+#                # derived from its label (or "id" if you give one) the
+#                # moment this file is discovered — it becomes selectable
+#                # for ANY persona from then on, not just this one, and
+#                # actually changes ai_client._system_prompt()'s output
+#                # (see ai_client.py's ATTITUDE_PRESETS.update() merge),
+#                # not just what the dropdown displays.
+#
+#                "hex": "#7dd3fc",              # a single accent color —
+#                                                # goes through the SAME
+#                                                # saturation-aware
+#                                                # derivation math every
+#                                                # plain accent-color pick
+#                                                # already uses (soft/dim/
+#                                                # border/secondary/tertiary
+#                                                # all computed from this).
+#                                                # REQUIRED unless you give
+#                                                # "vars" instead (or both).
+#                # "vars": {                     # ...or a FULLY hardcoded
+#                #     "--accent": "#7dd3fc",     # palette instead — the
+#                #     "--accent-soft": "#4a9bc9",# exact literal values,
+#                #     "--accent-dim": "#1c4a63", # never derived, never
+#                #     "--accent-glow": "rgba(125, 211, 252, 0.35)",
+#                #     "--accent-secondary": "#f2b544",
+#                #     "--accent-tertiary": "#2b5cff",
+#                #     "--accent-secondary-rgb": "242, 181, 68",
+#                #     "--accent-tertiary-rgb": "43, 92, 255",
+#                #     "--status-online": "var(--accent)",
+#                #     "--border": "rgba(125, 211, 252, 0.16)",
+#                #     "--border-strong": "rgba(125, 211, 252, 0.34)",
+#                #     "--bg": "#04070d", "--bg-1": "#070d16",
+#                #     "--bg-panel": "rgba(9, 18, 30, 0.68)",
+#                #     "--bg-panel-2": "rgba(13, 24, 38, 0.55)",
+#                #     "--bg-raised": "#0d1826",
+#                # },                           # affected by saturation — see below. Only
+#                                                # these exact keys are
+#                                                # accepted (anything else is
+#                                                # dropped with a warning);
+#                                                # this is the same palette
+#                                                # shape the built-in
+#                                                # J.A.R.V.I.S/Verity/Friday/
+#                                                # Edith/Karen presets use.
+#                                                # IMPORTANT: giving "vars"
+#                                                # makes this persona a
+#                                                # FIXED palette — like every
+#                                                # built-in preset, the Skin
+#                                                # modal's Saturation slider
+#                                                # has no effect on it. Give
+#                                                # only "hex" (no "vars") if
+#                                                # you want saturation to
+#                                                # keep working.
+#
+#                "logo": {                      # optional — swaps the boot
+#                                                # screen ring AND every
+#                                                # brand mark in the UI.
+#                                                # Omit entirely to keep the
+#                                                # default arc-reactor rings.
+#                    "svg_brand": (             # raw SVG markup, dropped
+#                        '<circle cx="20" cy="20" r="18" '
+#                        'class="brand-mark__ring"/>'
+#                        '<circle cx="20" cy="20" r="3" '
+#                        'class="brand-mark__core"/>'
+#                    ),                         # required if using svg —
+#                                                # inserted into the 40x40
+#                                                # viewBox .brand-mark <svg>
+#                                                # elements (topbar, buttons,
+#                                                # etc.) exactly like the
+#                                                # built-in Verity smiley-
+#                                                # face mark already is.
+#                    "svg_boot": '...',         # optional — same idea, for
+#                                                # the once-per-session 200x200
+#                                                # viewBox boot screen ring.
+#                                                # Falls back to the default
+#                                                # arc-reactor rings if
+#                                                # omitted (the brand mark is
+#                                                # seen far more often, so
+#                                                # it's the one that matters
+#                                                # most to get right).
+#                },
+#                # ...or a plain PNG instead of hand-drawn SVG — pick ONE of
+#                # svg_brand (above) or one of these two, not several:
+#                # "logo": {"png_path": "orion_logo.png"},   # resolved
+#                #     # relative to THIS FILE's own directory (or give an
+#                #     # absolute path). Read once at discovery time and
+#                #     # embedded as a base64 data URI — nothing needs to be
+#                #     # copied or served from anywhere. Capped at 512KB.
+#                # "logo": {"png_base64": "iVBORw0KG..."},   # same thing,
+#                #     # pre-encoded, for a PNG you already have in memory
+#                #     # rather than sitting on disk.
+#                #
+#                # A PNG logo's background is used exactly as-is — Jarvis
+#                # does not inspect, strip, key out, or otherwise touch it.
+#                # A transparent PNG shows the app's own background through
+#                # it (like the SVG rings do); a PNG with a solid/opaque
+#                # background just shows that background as part of the
+#                # mark. Neither is treated as a mistake to fix — if you
+#                # want it transparent, export it transparent; if you don't,
+#                # it stays exactly as given.
+#
+#                "interface": {                 # optional — the Skin
+#                                                # modal's own "Interface"
+#                                                # section, applied the
+#                                                # moment this persona is
+#                                                # picked (on top of
+#                                                # whichever Theme is
+#                                                # active — see that
+#                                                # section's own "applies on
+#                                                # top of any theme" hint).
+#                    "corner_rounding": 40,      # 0-200, default 100 (100 =
+#                                                # unchanged/normal).
+#                    "glow": 20,                 # 0-200, default 100.
+#                    "text_size": 110,           # 80-130, default 100.
+#                },                             # Give only the keys you
+#                                                # want to change — any
+#                                                # omitted key leaves that
+#                                                # slider wherever it
+#                                                # already was.
+#
+#                "saturation": 80,              # optional, 0-150, default
+#                                                # 100 — pre-sets the Skin
+#                                                # modal's own Saturation
+#                                                # slider when this persona
+#                                                # is picked. Only has any
+#                                                # visible effect if you
+#                                                # gave "hex" above without
+#                                                # "vars" (see that field's
+#                                                # note) — a fully hardcoded
+#                                                # "vars" palette ignores
+#                                                # saturation entirely, same
+#                                                # as every built-in preset.
+#            },
+#        ]
+#
+#    VALIDATION AND FAILURE MODE
+#    ----------------------------
+#    Every persona is validated independently at discovery time (see
+#    jarvis/persona_registry.py) — a bad entry (missing name, malformed
+#    hex, an unreadable png_path, a reserved id, ...) is logged and
+#    dropped, exactly like a bad TOOL_SCHEMAS entry above; it never takes
+#    down the rest of this file's personas, this file's tools, or
+#    discovery as a whole. Check your terminal/log output after adding
+#    one, same advice as this file's very first section.
+#
+#    A duplicate id across TWO DIFFERENT files (built-in actions/ or
+#    ~/.jarvis/tools/) is also logged and dropped — first registration
+#    wins, and built-in actions/ is always scanned before a user's own
+#    ~/.jarvis/tools/, so a shipped persona can never be silently
+#    shadowed by a user file the way a shipped tool name can't either.
+#
+#    WHERE THIS SURFACES
+#    --------------------
+#    `jarvis personas-list` prints the full validated/normalized catalog as
+#    JSON (same one-shot-JSON-to-stdout contract as `jarvis tools-list`).
+#    The web UI's Skin modal fetches this once from GET /api/personas (see
+#    web/server.js) and merges it into the same preset-pill list the
+#    built-in personas already render as — see web/public/app.js's
+#    REGISTERED_PERSONAS / loadRegisteredPersonas(). No separate UI, no
+#    separate save path: picking a registered persona and hitting Save in
+#    the Skin modal writes assistant_name/address_user_as/attitude to
+#    ai_config.json exactly the way picking Verity or Friday already does.
+#
+#    See DOCUMENTATION/PERSONAS_GUIDE.md for the end-to-end walkthrough
+#    (a full worked example file, screenshots of where each field lands,
+#    and the full list of allowed "vars" keys).
+# ---------------------------------------------------------------------------
+
 # That's the whole contract. Delete example_ping and this comment block,
 # write your real handler(s) and schema(s) above, and the file is live the
 # next time Jarvis starts — no edits anywhere else.
