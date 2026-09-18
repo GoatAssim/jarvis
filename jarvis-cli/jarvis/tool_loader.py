@@ -26,6 +26,17 @@ A file in jarvis/actions/ is discovered as a tool module if it exposes:
     TOOL_AI_REVIEW         = {"name", ...}
     TOOL_RESULT_SPECS      = {"name": {...}}  # tool_result_shaping.py shape
 
+A file (with or without the TOOL_SCHEMAS/TOOLS/TOOL_GROUP trio above) can
+ALSO optionally expose:
+
+    PERSONAS = [ {"id": ..., "name": ..., "hex": ..., ...}, ... ]
+
+...registering one or more Skin-modal personas — see persona_registry.py
+for the full field-by-field validation and actions/_template.py §7 for
+the human-facing writeup. This is a fully independent contract from the
+tool one above: a persona-only file (no TOOL_SCHEMAS/TOOLS/TOOL_GROUP at
+all) is valid and its personas are still discovered.
+
 See actions/_template.py for the full contract, one field at a time,
 including why TOOL_KEYWORDS matters for routing (the section called out
 below) and how confirm-gating is supposed to work.
@@ -112,6 +123,7 @@ class ActionModuleRecord:
     confirm_required: set = field(default_factory=set)
     ai_review: set = field(default_factory=set)
     result_specs: dict = field(default_factory=dict)
+    personas: list = field(default_factory=list)
 
 
 def _validate(module, filename, logger):
@@ -119,12 +131,34 @@ def _validate(module, filename, logger):
     tools = getattr(module, "TOOLS", None)
     group = getattr(module, "TOOL_GROUP", None)
 
+    # PERSONAS (see persona_registry.py and actions/_template.py §7) is a
+    # second, independent opt-in contract a file can carry — with or
+    # without also being a tool file. Validated here (not deferred to
+    # tools.py) so a bad persona entry is logged and dropped at the exact
+    # same discovery pass a bad tool schema would be, instead of surfacing
+    # somewhere unrelated later.
+    raw_personas = getattr(module, "PERSONAS", None)
+    personas = []
+    if raw_personas is not None:
+        from . import persona_registry
+        base_dir = Path(module.__file__).resolve().parent if getattr(module, "__file__", None) else None
+        personas, persona_errors = persona_registry.validate_personas(raw_personas, filename, base_dir)
+        for e in persona_errors:
+            logger(f"[personas] {e}")
+        for p in personas:
+            logger(f"[personas] Registered persona {p['id']!r} ({p['name']!r}) from {filename}")
+
     if schemas is None and tools is None and group is None:
         # No TOOL_SCHEMAS/TOOLS/TOOL_GROUP at all — this isn't an attempted
         # action file, it's a shared helper module (or a stray script) that
         # happens to live in actions/. Silently skip, same as Mark LIII's
-        # action_loader treating a missing TOOL dict as "not an action".
-        return ActionModuleRecord(file=filename, error="__not_an_action__")
+        # action_loader treating a missing TOOL dict as "not an action" —
+        # UNLESS it registered personas, in which case it's a legitimate
+        # persona-only file and the personas still need to reach tools.py's
+        # aggregation step (see discover_actions()'s "__not_an_action__"
+        # handling below, which now keeps such a record instead of
+        # dropping it).
+        return ActionModuleRecord(file=filename, error="__not_an_action__", personas=personas)
 
     if not isinstance(schemas, list) or not schemas:
         return ActionModuleRecord(file=filename, error="TOOL_SCHEMAS must be a non-empty list.")
@@ -192,6 +226,7 @@ def _validate(module, filename, logger):
         file=filename, valid=True, group=group, schemas=schemas, tools=tools,
         keywords=keywords, pack_instruction=pack_instruction,
         confirm_required=confirm_required, ai_review=ai_review, result_specs=result_specs,
+        personas=personas,
     )
 
 
@@ -251,6 +286,13 @@ def discover_actions(actions_dir=None, reserved_names=None, logger=print):
 
             rec = _validate(module, path.name, logger)
             if rec.error == "__not_an_action__":
+                # Not a tool file — but if it registered PERSONAS, keep the
+                # (invalid-as-a-tool, personas-populated) record so
+                # tools.py's aggregation step still sees them. rec.valid
+                # stays False, so nothing downstream mistakes this for a
+                # real tool file (see tools.py's `if r.valid` filters).
+                if rec.personas:
+                    records.append(rec)
                 continue
 
             if rec.valid:
@@ -260,6 +302,10 @@ def discover_actions(actions_dir=None, reserved_names=None, logger=print):
                     rec = ActionModuleRecord(
                         file=path.name,
                         error=f"Name(s) already in use, rejected: {owners}.",
+                        # Tool names collided, but any personas this same
+                        # file registered are independent of that and
+                        # shouldn't be thrown away too.
+                        personas=rec.personas,
                     )
 
         except Exception as e:

@@ -79,6 +79,20 @@ ATTITUDE_PRESETS = {
     },
 }
 
+# Merge in any custom attitudes registered by a tool file's PERSONAS entry
+# (see persona_registry.py's _resolve_attitude and tools.AUTO_ATTITUDES).
+# Done here, right after the built-in dict literal, so a custom attitude id
+# picked in the Skin modal and saved to persona.attitude actually changes
+# what the model is told about its own personality — not just what the
+# dropdown displays. dict.update() means a custom id that happens to match
+# a built-in one (e.g. someone naming a custom attitude "dry") just wins
+# for that id, same as any other last-write-wins merge — no crash, no
+# special-casing needed.
+try:
+    ATTITUDE_PRESETS.update(system_tools.AUTO_ATTITUDES)
+except Exception:
+    pass
+
 MAX_COMMANDS_LISTED = 12  # cap how many command names+descriptions go into every prompt
 COMPACT_MAX_COMMANDS = 6
 COMPACT_DESC_MAX_LEN = 50

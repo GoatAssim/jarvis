@@ -909,6 +909,53 @@ try:
 except Exception:
     pass
 
+# ---------------------------------------------------------------------------
+# Auto-discovered PERSONAS — same two directories (jarvis/actions/, then
+# ~/.jarvis/tools/) and the same _AUTO_RECORDS list as the tools above, just
+# a different optional attribute on each module (see persona_registry.py
+# and actions/_template.py §7). Scanned across EVERY record regardless of
+# `.valid` — a persona-only file is deliberately not a valid tool file (see
+# tool_loader._validate's "__not_an_action__" branch) but its personas are
+# still real. First registration of a given id wins (built-in actions/ is
+# scanned before ~/.jarvis/tools/, matching the same "shipped beats
+# user-authored on a name collision" rule tool names already follow); any
+# later duplicate is logged and dropped rather than silently overriding the
+# first.
+# ---------------------------------------------------------------------------
+AUTO_PERSONAS = []
+_seen_persona_ids = {}
+for _r in _AUTO_RECORDS:
+    for _p in _r.personas:
+        _pid = _p["id"]
+        if _pid in _seen_persona_ids:
+            print(
+                f"[personas] Duplicate persona id {_pid!r} in {_r.file} — "
+                f"already registered by {_seen_persona_ids[_pid]}, skipped.",
+                file=sys.stderr,
+            )
+            continue
+        _seen_persona_ids[_pid] = _r.file
+        AUTO_PERSONAS.append(_p)
+
+# id -> {label, full, compact} — every custom attitude any registered
+# persona defined inline (see persona_registry._resolve_attitude). Merged
+# into ai_client.ATTITUDE_PRESETS at import time there, so a persona's
+# custom attitude actually renders in the system prompt the same way a
+# built-in one does, not just in the Skin modal's dropdown.
+AUTO_ATTITUDES = {}
+for _p in AUTO_PERSONAS:
+    _ca = _p.get("custom_attitude")
+    if _ca:
+        AUTO_ATTITUDES[_ca["id"]] = {"label": _ca["label"], "full": _ca["full"], "compact": _ca["compact"]}
+
+
+def personas_list_payload():
+    """Full catalog for the web UI's Skin modal (see `jarvis personas-list`
+    / GET /api/personas). Every persona here is already fully validated and
+    logo-resolved (PNGs are already base64 data URIs) — the web UI can
+    render this straight through with no further backend round trip."""
+    return {"personas": AUTO_PERSONAS, "attitudes": AUTO_ATTITUDES}
+
 
 @dataclass
 class ToolContext:

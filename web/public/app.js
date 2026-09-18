@@ -222,10 +222,37 @@
   // index.html. Called anywhere a persona is applied, previewed, saved,
   // reverted, or reset — see each call site's comment.
   function applyPersonaLogo(personaId) {
-    const set = personaId === "verity" ? LOGO_MARKUP.verity : LOGO_MARKUP.default;
     const boot = qs(".boot__svg");
-    if (boot) boot.innerHTML = set.boot;
-    for (const brand of qsa(".brand-mark")) brand.innerHTML = set.brand;
+    const brands = qsa(".brand-mark");
+    if (personaId === "verity") {
+      if (boot) boot.innerHTML = LOGO_MARKUP.verity.boot;
+      for (const brand of brands) brand.innerHTML = LOGO_MARKUP.verity.brand;
+      return;
+    }
+    // A registered persona's own logo, if it supplied one — see
+    // persona_registry.py's _resolve_logo for the two accepted shapes.
+    // SVG markup drops straight into the existing boot/brand elements
+    // exactly like Verity's does above; a PNG is wrapped in a plain
+    // in-viewBox <image>, no background handling of any kind — the PNG's
+    // own alpha (or lack of it) is shown exactly as it already is.
+    const registered = REGISTERED_PERSONAS.find((p) => p.id === personaId);
+    const logo = registered && registered.logo;
+    if (logo && logo.type === "svg" && logo.brand) {
+      if (boot) boot.innerHTML = logo.boot || LOGO_MARKUP.default.boot;
+      for (const brand of brands) brand.innerHTML = logo.brand;
+      return;
+    }
+    if (logo && logo.type === "png" && logo.data_uri) {
+      if (boot) {
+        boot.innerHTML = `<image href="${logo.data_uri}" x="10" y="10" width="180" height="180" preserveAspectRatio="xMidYMid meet"/>`;
+      }
+      for (const brand of brands) {
+        brand.innerHTML = `<image href="${logo.data_uri}" x="2" y="2" width="36" height="36" preserveAspectRatio="xMidYMid meet"/>`;
+      }
+      return;
+    }
+    if (boot) boot.innerHTML = LOGO_MARKUP.default.boot;
+    for (const brand of brands) brand.innerHTML = LOGO_MARKUP.default.brand;
   }
 
   const PERSONA_PRESETS = [
@@ -406,6 +433,127 @@
   // means "no, override with a computed one instead."
   let currentPersonaId = null;
 
+  // ===========================================================================
+  // Registered personas — the dynamic counterpart to the hand-written
+  // PERSONA_PRESETS above. A tool file (built-in actions/ or a user's own
+  // ~/.jarvis/tools/) can expose a module-level PERSONAS list (see
+  // jarvis/persona_registry.py and actions/_template.py §7); the backend
+  // validates/normalizes those and GET /api/personas hands back the result
+  // already logo-resolved (PNGs as base64 data URIs, SVG as raw markup) —
+  // no further processing needed here beyond merging into the same UI
+  // PERSONA_PRESETS already drives.
+  //
+  // Each entry, once loaded, has the SAME shape saveSkin()/applyPersonaPreset()
+  // already expect from a PERSONA_PRESETS entry (id/name/assistantName/hex/
+  // vars/attitude), plus fields no built-in preset has ever needed: addressAs
+  // (a persona can pin "addresses you as" the same one click sets a palette),
+  // logo (svg or png, see applyPersonaLogo()), interface ({radius, glow,
+  // fontScale} — the Skin modal's "Interface" sliders), saturation (the
+  // "Saturation" slider), and hardcoded (false for a persona that only gave a
+  // "hex", meaning it goes through the normal accent-derivation math and the
+  // saturation slider actually affects it — see isHardcodedPersona()).
+  // ===========================================================================
+  let REGISTERED_PERSONAS = [];
+  // id -> label, merged into the Attitude <select> alongside SKIN_ATTITUDES.
+  let REGISTERED_ATTITUDES = [];
+
+  function allPersonas() {
+    return PERSONA_PRESETS.concat(REGISTERED_PERSONAS);
+  }
+
+  function allAttitudes() {
+    return SKIN_ATTITUDES.concat(REGISTERED_ATTITUDES);
+  }
+
+  // Every built-in PERSONA_PRESETS entry is a fixed, non-derived palette
+  // (see that array's own comment) — always hardcoded. A registered persona
+  // says so explicitly via its `hardcoded` flag (true when it gave `vars`,
+  // false when it only gave `hex` — see persona_registry.py). Used by
+  // updateSaturationControlState() to decide whether the slider actually
+  // does anything for the currently active persona.
+  function isHardcodedPersona(id) {
+    if (!id) return false;
+    const registered = REGISTERED_PERSONAS.find((p) => p.id === id);
+    if (registered) return registered.hardcoded !== false;
+    return true;
+  }
+
+  // Normalizes one raw /api/personas entry into the same shape
+  // PERSONA_PRESETS entries already have, defensively — a malformed or
+  // partially-invalid entry (should already be rare, since the backend
+  // validated it, but this is still data crossing a process boundary) is
+  // dropped rather than crashing the Skin modal.
+  function normalizeRegisteredPersona(raw) {
+    if (!raw || typeof raw !== "object") return null;
+    const id = typeof raw.id === "string" ? raw.id.trim() : "";
+    const name = typeof raw.name === "string" ? raw.name.trim() : "";
+    if (!id || !name) return null;
+    const hex = typeof raw.hex === "string" ? raw.hex : SKIN_DEFAULT_ACCENT;
+    return {
+      id,
+      name,
+      assistantName: (typeof raw.assistant_name === "string" && raw.assistant_name.trim()) || name,
+      addressAs: typeof raw.address_user_as === "string" ? raw.address_user_as : null,
+      attitude: typeof raw.attitude === "string" ? raw.attitude : null,
+      hex,
+      vars: raw.vars && typeof raw.vars === "object" ? raw.vars : null,
+      hardcoded: raw.hardcoded !== false,
+      logo: raw.logo && typeof raw.logo === "object" ? raw.logo : null,
+      interface: raw.interface && typeof raw.interface === "object" ? raw.interface : null,
+      saturation: typeof raw.saturation === "number" ? raw.saturation : null,
+    };
+  }
+
+  // Fetches /api/personas once and merges the result into REGISTERED_
+  // PERSONAS / REGISTERED_ATTITUDES, then re-renders anything already on
+  // screen that depends on them. Called once at startup (see the bottom of
+  // this file) — deliberately NOT awaited by anything else, since the app
+  // (and the Skin modal) must stay fully usable with only the hardcoded
+  // presets if the backend is slow, offline, or this request fails.
+  async function loadRegisteredPersonas() {
+    try {
+      const data = await Api.getPersonas();
+      const list = Array.isArray(data && data.personas) ? data.personas : [];
+      REGISTERED_PERSONAS = list.map(normalizeRegisteredPersona).filter(Boolean);
+      const attitudes = (data && data.attitudes && typeof data.attitudes === "object") ? data.attitudes : {};
+      REGISTERED_ATTITUDES = Object.entries(attitudes).map(([id, a]) => ({
+        id,
+        label: (a && typeof a.label === "string" && a.label) || id,
+      }));
+    } catch (e) {
+      // Offline/errored — leave REGISTERED_PERSONAS/ATTITUDES as whatever
+      // they already were (empty on first load) and move on silently; this
+      // is a nice-to-have layered on top of a fully working built-in set.
+      return;
+    }
+    renderAttitudeOptions();
+    // If the Skin modal happens to already be open, refresh what it's
+    // showing so a newly-discovered persona/attitude appears without the
+    // person having to close and reopen it.
+    if (qs("#skin-backdrop") && !qs("#skin-backdrop").hidden) {
+      renderPersonaPresets(currentPersonaId);
+    }
+    // Early boot (applySavedSkinEarly(), below) only ever had the
+    // hardcoded PERSONA_PRESETS to search — if the browser's last-saved
+    // personaId turns out to belong to a REGISTERED persona that just
+    // arrived, apply its palette/logo/interface/saturation now instead of
+    // leaving the page on whatever applySavedSkinEarly() fell back to.
+    const prefs = loadSkinPrefs();
+    if (prefs.personaId && !PERSONA_PRESETS.find((p) => p.id === prefs.personaId)) {
+      const persona = REGISTERED_PERSONAS.find((p) => p.id === prefs.personaId);
+      if (persona) {
+        const themeActive = window.JarvisUI && window.JarvisUI.themes.isActive();
+        if (!themeActive) {
+          if (persona.vars) applyHardcodedVars(persona.vars);
+          else applyAccent(persona.hex);
+          applyPersonaLogo(persona.id);
+          if (persona.interface && window.JarvisUI) window.JarvisUI.themes.setTuning(persona.interface);
+        }
+        applyAssistantNameToChrome(prefs.assistantName || persona.assistantName);
+      }
+    }
+  }
+
   // The saturation slider's live value (percentage, 100 = unchanged),
   // mirrored here so applyAccent() can factor it in any time the accent
   // changes (swatch click, custom color drag, load, revert) without every
@@ -432,7 +580,7 @@
   function updateSaturationControlState() {
     const slider = qs("#skin-saturation");
     if (!slider) return;
-    slider.disabled = currentPresetId === "classic-hardcoded" || !!currentPersonaId;
+    slider.disabled = currentPresetId === "classic-hardcoded" || isHardcodedPersona(currentPersonaId);
   }
 
   function loadSkinPrefs() {
@@ -695,8 +843,34 @@
     qs("#skin-custom-color").value = persona.hex;
     qs("#skin-assistant-name").value = persona.assistantName;
     qs("#skin-attitude").value = persona.attitude || SKIN_DEFAULT_ATTITUDE;
-    applyHardcodedVars(persona.vars);
+    // Only a registered persona ever sets this — none of the hand-written
+    // PERSONA_PRESETS pin an address, so leave whatever's already typed
+    // there alone unless this persona actually specifies one.
+    if (persona.addressAs) qs("#skin-address-as").value = persona.addressAs;
+    // Every PERSONA_PRESETS entry always has `vars` (a fixed palette); a
+    // registered persona that only gave `hex` instead runs through the
+    // normal accent-derivation math, same as picking a plain accent color.
+    if (persona.vars) applyHardcodedVars(persona.vars);
+    else applyAccent(persona.hex);
     applyPersonaLogo(persona.id);
+    // A registered persona can also pin a saturation and/or Interface
+    // (corner rounding / glow / text size) setting — apply and reflect
+    // them in the sliders themselves, the same way opening the modal
+    // already syncs #skin-saturation from a saved value.
+    if (persona.saturation != null) {
+      currentSaturationPercent = clampSaturationPercent(persona.saturation);
+      const saturationSlider = qs("#skin-saturation");
+      if (saturationSlider) saturationSlider.value = currentSaturationPercent;
+    }
+    if (persona.interface) {
+      if (window.JarvisUI) window.JarvisUI.themes.setTuning(persona.interface);
+      const radius = qs("#tune-radius");
+      if (radius && persona.interface.radius != null) radius.value = persona.interface.radius;
+      const glow = qs("#tune-glow");
+      if (glow && persona.interface.glow != null) glow.value = persona.interface.glow;
+      const font = qs("#tune-font");
+      if (font && persona.interface.fontScale != null) font.value = persona.interface.fontScale;
+    }
     renderSkinSwatches(null);
     renderPersonaPresets(persona.id);
     updateSaturationControlState();
@@ -817,14 +991,17 @@
     const wrap = qs("#skin-persona-presets");
     if (!wrap) return;
     wrap.innerHTML = "";
-    for (const persona of PERSONA_PRESETS) {
+    for (const persona of allPersonas()) {
       const isActive = persona.id === activeId;
-      const attitudeLabel = (SKIN_ATTITUDES.find((a) => a.id === persona.attitude) || {}).label || persona.attitude;
+      const attitudeLabel = (allAttitudes().find((a) => a.id === persona.attitude) || {}).label || persona.attitude;
+      const title = attitudeLabel
+        ? `${persona.name} — sets the name, a palette, and a "${attitudeLabel}" attitude together`
+        : `${persona.name} — sets the name and a palette`;
       wrap.appendChild(el("button", {
         type: "button",
         class: "persona-preset-btn" + (isActive ? " is-active" : ""),
         style: `color:${persona.hex};`,
-        title: `${persona.name} — sets the name, a hardcoded palette, and a "${attitudeLabel}" attitude together`,
+        title,
         onclick: () => applyPersonaPreset(persona),
       }, [
         el("span", { class: "persona-preset-btn__dot" }),
@@ -838,9 +1015,19 @@
   // runtime, only which one is selected, so this only needs to run once.
   function renderAttitudeOptions() {
     const select = qs("#skin-attitude");
-    if (!select || select.options.length) return;
-    for (const attitude of SKIN_ATTITUDES) {
+    if (!select) return;
+    // Re-render-safe (not just once): loadRegisteredPersonas() calls this
+    // again once any custom attitude a persona registered has arrived, so
+    // it can show up in the dropdown without a page reload. Preserve
+    // whatever's currently selected across the rebuild, in case the Skin
+    // modal is already open with a choice made.
+    const prevValue = select.value;
+    select.innerHTML = "";
+    for (const attitude of allAttitudes()) {
       select.appendChild(el("option", { value: attitude.id }, attitude.label));
+    }
+    if (prevValue && [...select.options].some((o) => o.value === prevValue)) {
+      select.value = prevValue;
     }
   }
 
@@ -848,7 +1035,7 @@
     qs("#skin-error").textContent = "";
     const prefs = loadSkinPrefs();
     const accent = prefs.accent || SKIN_DEFAULT_ACCENT;
-    const matchedPersona = PERSONA_PRESETS.find((p) => p.id === prefs.personaId);
+    const matchedPersona = allPersonas().find((p) => p.id === prefs.personaId);
     currentPersonaId = matchedPersona ? matchedPersona.id : null;
     // A saved persona always wins the accent-swatch slot too — the two are
     // mutually exclusive (see currentPersonaId's comment) — so only look
@@ -900,10 +1087,12 @@
     }
     const prefs = loadSkinPrefs();
     currentSaturationPercent = clampSaturationPercent(prefs.saturation);
-    const persona = PERSONA_PRESETS.find((p) => p.id === prefs.personaId);
+    const persona = allPersonas().find((p) => p.id === prefs.personaId);
     if (persona) {
-      applyHardcodedVars(persona.vars);
+      if (persona.vars) applyHardcodedVars(persona.vars);
+      else applyAccent(persona.hex);
       applyPersonaLogo(persona.id);
+      if (persona.interface && window.JarvisUI) window.JarvisUI.themes.setTuning(persona.interface);
       return;
     }
     const preset = SKIN_PRESETS.find((p) => p.id === prefs.presetId);
@@ -935,10 +1124,13 @@
     }
 
     saveSkinPrefs({ accent, presetId: currentPresetId, personaId: currentPersonaId, assistantName, addressAs, saturation: currentSaturationPercent });
-    const persona = PERSONA_PRESETS.find((p) => p.id === currentPersonaId);
+    const persona = allPersonas().find((p) => p.id === currentPersonaId);
     const preset = SKIN_PRESETS.find((p) => p.id === currentPresetId);
     const themeActive = window.JarvisUI && window.JarvisUI.themes.isActive();
-    if (persona) applyHardcodedVars(persona.vars);
+    if (persona) {
+      if (persona.vars) applyHardcodedVars(persona.vars);
+      else applyAccent(persona.hex);
+    }
     else if (preset) applyPreset(preset);
     // Neither a persona nor a preset was explicitly picked this session —
     // that's the common case where the colour swatch/input still just holds
@@ -1593,6 +1785,7 @@
     putConfigFile: (name, text) => api("PUT", `/api/config/file/${encodeURIComponent(name)}/raw`, { text }),
     organizeJson: (targetPath) => api("POST", "/api/json/organize", { path: targetPath }),
     listTools: () => api("GET", "/api/tools"),
+    getPersonas: () => api("GET", "/api/personas"),
     runTool: (name, arguments_, mode) => api("POST", "/api/tools/run", { name, arguments: arguments_, mode }),
     previewTool: (name, arguments_, mode) => api("POST", "/api/tools/preview", { name, arguments: arguments_, mode }),
     setToolSafety: (name, key, value) => api("POST", "/api/tools/safety", { name, key, value }),
@@ -6887,6 +7080,9 @@
   }
 
   wireSkinModal();
+  // Fire-and-forget — see loadRegisteredPersonas()'s own comment for why
+  // this is never awaited here.
+  loadRegisteredPersonas();
 
   tickClock();
   setInterval(tickClock, 1000);

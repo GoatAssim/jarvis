@@ -43,7 +43,7 @@ ENCODING = "utf-8"
 
 CHAIN_SEP = "then"      # starts a new batch \u2014 waits for the previous one to finish
 PARALLEL_SEP = "and"    # joins the current batch \u2014 runs alongside whatever's already in it
-RESERVED_NAMES = {"config", "ai-config", "ai-clear", "ai-drop-from", "playnite-config", "spotify-config", "spotify-login", "memory-config", "everything-config", "tools-list", "tool-run", "skills-list", "skills-get", "skills-save", "skills-add", "skills-create", "skills-remove", "skillmake", "skilladd", "skillload", "skillunload", "tool-preview", "tool-safety-set", "conv-new", "conv-list", "conv-show", "conv-switch", "conv-delete", "logs", "logs-list", "logs-show", "logs-clear", "organize-json", "mode", "mode-set", "voice-config", "speak", "listen", "transcribe", "sched-list", "sched-tick", "sched-daemon", "sched-ask-log", "sched-add", "sched-show", "sched-cancel", "sched-pause", "sched-resume", "sched-snooze", "sched-approve", "sched-signal", "sched-clear", "notify-send", "notify-list", "notify-ack", "notify-clear", "notify-config", "conv-search", "mcp-status", "mcp-refresh", "mcp-config", "mcp-call", "channels-config", "channels-status", "channels-set", "channels-allow", "channels-deny", "channels-test", "channels-whoami", "channels-log", "discord-daemon", "instagram-serve", "logs-search", "mcp-tools", CHAIN_SEP, PARALLEL_SEP, "-h", "--help"}
+RESERVED_NAMES = {"config", "ai-config", "ai-clear", "ai-drop-from", "playnite-config", "spotify-config", "spotify-login", "memory-config", "everything-config", "tools-list", "tool-run", "personas-list", "skills-list", "skills-get", "skills-save", "skills-add", "skills-create", "skills-remove", "skillmake", "skilladd", "skillload", "skillunload", "tool-preview", "tool-safety-set", "conv-new", "conv-list", "conv-show", "conv-switch", "conv-delete", "logs", "logs-list", "logs-show", "logs-clear", "organize-json", "mode", "mode-set", "voice-config", "speak", "listen", "transcribe", "sched-list", "sched-tick", "sched-daemon", "sched-ask-log", "sched-add", "sched-show", "sched-cancel", "sched-pause", "sched-resume", "sched-snooze", "sched-approve", "sched-signal", "sched-clear", "notify-send", "notify-list", "notify-ack", "notify-clear", "notify-config", "conv-search", "mcp-status", "mcp-refresh", "mcp-config", "mcp-call", "channels-config", "channels-status", "channels-set", "channels-allow", "channels-deny", "channels-test", "channels-whoami", "channels-log", "discord-daemon", "instagram-serve", "logs-search", "mcp-tools", CHAIN_SEP, PARALLEL_SEP, "-h", "--help"}
 
 OUT = Palette(sys.stdout)  # actual command output: the banner, the command list
 ERR = Palette(sys.stderr)  # jarvis's own status/trace/error messages
@@ -2100,6 +2100,15 @@ def main():
     if argv[0] == "tools-list":
         from . import tools as system_tools
         print(json.dumps(system_tools.tools_list_payload(), indent=2))
+        return
+
+    if argv[0] == "personas-list":
+        # Prints every persona a tool file has registered (see
+        # persona_registry.py, tools.AUTO_PERSONAS) as one JSON payload —
+        # same single-shot-JSON-to-stdout contract as tools-list, so
+        # server.js's GET /api/personas parses it the same way.
+        from . import tools as system_tools
+        print(json.dumps(system_tools.personas_list_payload(), indent=2))
         return
 
     if argv[0] == "tool-run":

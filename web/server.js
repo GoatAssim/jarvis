@@ -26,7 +26,7 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PORT = Number(process.env.PORT) || 4173;
 const HOST = "127.0.0.1";
 
-const RESERVED_NAMES = new Set(["config", "version", "--version", "-v", "ai-config", "ai-clear", "ai-drop-from", "playnite-config", "spotify-config", "spotify-login", "memory-config", "everything-config", "tools-list", "tool-run", "tool-preview", "tool-safety-set", "conv-new", "conv-list", "conv-show", "conv-switch", "conv-delete", "logs", "logs-list", "logs-show", "logs-clear", "organize-json", "mode", "mode-set", "voice-config", "speak", "listen", "transcribe", "sched-list", "sched-tick", "sched-add", "sched-show", "sched-cancel", "sched-pause", "sched-resume", "sched-snooze", "sched-approve", "sched-signal", "sched-clear", "notify-send", "notify-list", "notify-ack", "notify-clear", "notify-config", "conv-search", "mcp-status", "mcp-refresh", "mcp-config", "mcp-call", "mcp-tools", "then", "and", "-h", "--help"]);
+const RESERVED_NAMES = new Set(["config", "version", "--version", "-v", "ai-config", "ai-clear", "ai-drop-from", "playnite-config", "spotify-config", "spotify-login", "memory-config", "everything-config", "tools-list", "tool-run", "personas-list", "tool-preview", "tool-safety-set", "conv-new", "conv-list", "conv-show", "conv-switch", "conv-delete", "logs", "logs-list", "logs-show", "logs-clear", "organize-json", "mode", "mode-set", "voice-config", "speak", "listen", "transcribe", "sched-list", "sched-tick", "sched-add", "sched-show", "sched-cancel", "sched-pause", "sched-resume", "sched-snooze", "sched-approve", "sched-signal", "sched-clear", "notify-send", "notify-list", "notify-ack", "notify-clear", "notify-config", "conv-search", "mcp-status", "mcp-refresh", "mcp-config", "mcp-call", "mcp-tools", "then", "and", "-h", "--help"]);
 
 // ---------------------------------------------------------------------------
 // Locate the real jarvis binary. Tries a few invocation strategies, in
@@ -1144,6 +1144,24 @@ app.get("/api/tools", requireJarvis, async (req, res) => {
     res.json(JSON.parse(result.stdout));
   } catch (e) {
     res.status(500).json({ error: `Couldn't parse tools-list: ${e.message}` });
+  }
+});
+
+// Personas a tool file registered (see persona_registry.py, tools.
+// AUTO_PERSONAS) — the Skin modal fetches this once and merges the result
+// into its own hardcoded PERSONA_PRESETS list (see app.js's
+// loadRegisteredPersonas()). Logos already arrive as data URIs (PNG) or
+// raw SVG markup (both resolved server-side at discovery time), so this
+// route needs no further processing beyond the usual JSON passthrough.
+app.get("/api/personas", requireJarvis, async (req, res) => {
+  const result = await runJarvisOnce(["personas-list"], 15000);
+  if (!result.ok) {
+    return res.status(500).json({ error: result.error || result.stderr || "Couldn't list personas." });
+  }
+  try {
+    res.json(JSON.parse(result.stdout));
+  } catch (e) {
+    res.status(500).json({ error: `Couldn't parse personas-list: ${e.message}` });
   }
 });
 
