@@ -31,19 +31,21 @@ def test_extract_provider_override_space_form():
         ["--provider", "anthropic", "what", "time", "is", "it"]
     )
     assert rest == ["what", "time", "is", "it"]
-    assert override == "anthropic"
+    # A list, not a bare string: --provider takes an ordered try-list
+    # ("anthropic,gemini"), so the single-name form is a one-element list.
+    assert override == ["anthropic"]
 
 
 def test_extract_provider_override_equals_form():
     rest, override = cli._extract_provider_override(["--provider=groq", "hello"])
     assert rest == ["hello"]
-    assert override == "groq"
+    assert override == ["groq"]
 
 
 def test_extract_provider_override_mid_sentence():
     rest, override = cli._extract_provider_override(["hello", "--provider", "openai", "there"])
     assert rest == ["hello", "there"]
-    assert override == "openai"
+    assert override == ["openai"]
 
 
 def test_extract_provider_override_absent_is_noop():
@@ -64,7 +66,7 @@ def test_extract_provider_override_only_first_wins():
     rest, override = cli._extract_provider_override(
         ["--provider", "groq", "--provider", "openai", "hi"]
     )
-    assert override == "groq"
+    assert override == ["groq"]
     assert rest == ["--provider", "openai", "hi"]
 
 

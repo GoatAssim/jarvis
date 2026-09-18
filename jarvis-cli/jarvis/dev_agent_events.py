@@ -58,10 +58,29 @@ def emit(job_id, seq, phase, status, **fields):
     event = {"job_id": job_id, "seq": seq, "phase": phase, "status": status, **fields}
     try:
         line = "JARVIS_MEDIA\tdev_agent\t" + json.dumps(event, default=str, ensure_ascii=False)
-    except (TypeError, ValueError) as e:
+    except Exception as e:  # noqa: BLE001 — see docstring; this must not raise
+        # Deliberately Exception and not (TypeError, ValueError). `default=str`
+        # means json.dumps falls back to str() on anything it can't encode, so
+        # the failure that actually reaches here is str()/__repr__() ITSELF
+        # raising — and it can raise anything at all. A RuntimeError out of a
+        # field's __repr__ used to escape emit() entirely and abort the
+        # dev_agent loop over a logging call, which is exactly what the
+        # docstring above promises cannot happen.
+        try:
+            detail = str(e)
+        except Exception:  # noqa: BLE001 — the exception's own __str__ can raise too
+            detail = type(e).__name__
         event = {"job_id": job_id, "seq": seq, "phase": phase, "status": status,
-                  "error": f"event serialization failed: {e}"}
-        line = "JARVIS_MEDIA\tdev_agent\t" + json.dumps(event)
+                 "error": f"event serialization failed: {detail}"}
+        try:
+            line = "JARVIS_MEDIA\tdev_agent\t" + json.dumps(event)
+        except Exception:  # noqa: BLE001
+            # Even the fallback can fail if job_id/phase/status are themselves
+            # exotic objects, since this dumps() has no default=. Last resort:
+            # a valid three-field envelope with everything coerced.
+            event = {"job_id": repr(job_id)[:120], "seq": -1, "phase": "unknown",
+                     "status": "error", "error": "event serialization failed"}
+            line = "JARVIS_MEDIA\tdev_agent\t" + json.dumps(event)
     try:
         print(line, file=sys.stderr, flush=True)
     except Exception:

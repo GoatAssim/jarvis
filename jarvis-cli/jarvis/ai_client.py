@@ -420,6 +420,21 @@ def _eligible_providers(providers, defaults=None):
 
     When defaults.provider_priority is set, eligible providers are sorted by
     that list (unknown names keep their relative array order at the end)."""
+    # Subagent key isolation, applied FIRST and unconditionally. When this
+    # process was spawned as a subagent, the provider list is replaced
+    # wholesale by that role's own pool — not appended to, not reordered.
+    # Doing it here rather than at a call site is the whole guarantee: this
+    # function is the single point where "which keys may this process spend"
+    # is decided, so there is no path by which a subagent reaches the main
+    # Jarvis key, including on failover. See subagents.providers_from_env.
+    try:
+        from . import subagents
+        pinned = subagents.providers_from_env(providers)
+    except Exception:  # noqa: BLE001 — never let this break an ordinary ask
+        pinned = None
+    if pinned is not None:
+        providers = pinned
+
     out = []
     for p in providers:
         if not isinstance(p, dict) or not p.get("enabled", True):

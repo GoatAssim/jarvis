@@ -625,6 +625,9 @@ def _run_segment_batch(commands, parser, batch):
     return list(zip(batch, results))
 
 
+from . import reasoning
+
+
 def _parse_provider_override_value(raw):
     """'--provider' takes either one name or a comma-separated ordered list
     (e.g. 'anthropic,gemini,openai') \u2014 the order given becomes the
@@ -664,7 +667,51 @@ def _extract_provider_override(argv):
     return out, override
 
 
-def handle_ai_prompt(text, commands, provider_override=None):
+def _extract_think_override(argv):
+    """Pull '--think [LEVEL]' / '--think=LEVEL' / '--no-think' out of a raw
+    argv list before it's joined into free-text, the same way
+    _extract_provider_override handles '--provider'.
+
+    Returns (remaining_argv, level_or_None). None means "nobody said" —
+    ai_client.ask() then falls through to the configured default and the
+    auto-escalation heuristic, which is the historical behavior.
+
+    A bare '--think' with no level after it (or followed by something that
+    isn't a level, e.g. 'jarvis --think why is this failing') means
+    "medium" and consumes only itself. That asymmetry with --provider is
+    deliberate: a provider name is unguessable so a dangling '--provider'
+    is ambiguous, but "think about it" has an obvious default and the
+    alternative is a confusing no-op.
+    """
+    out = []
+    override = None
+    i = 0
+    while i < len(argv):
+        tok = argv[i]
+        low = tok.lower()
+        if override is None and low.startswith("--think="):
+            override = reasoning.normalize_level(tok.split("=", 1)[1])
+            i += 1
+            continue
+        if override is None and low == "--think":
+            nxt = argv[i + 1].lower() if i + 1 < len(argv) else None
+            if nxt in reasoning.LEVELS:
+                override = nxt
+                i += 2
+            else:
+                override = "medium"
+                i += 1
+            continue
+        if override is None and low in ("--no-think", "--nothink", "--think-off"):
+            override = "off"
+            i += 1
+            continue
+        out.append(tok)
+        i += 1
+    return out, override
+
+
+def handle_ai_prompt(text, commands, provider_override=None, think_override=None):
     """Anything typed at jarvis that isn't a known command name lands here
     instead of the "Unknown command" error \u2014 it's treated as a message for
     the AI, not a CLI invocation. This is what 'jarvis "text"' (or even
@@ -829,11 +876,23 @@ def handle_ai_prompt(text, commands, provider_override=None):
         if env_override and env_override.strip():
             provider_override = _parse_provider_override_value(env_override)
 
+    # Same precedence rule as the provider override above: an argv flag wins,
+    # the env var is only read when argv didn't say. JARVIS_THINK_OVERRIDE is
+    # how the web server and the scheduler pass a per-request level down into
+    # a spawned CLI — including the explicit "off" an API request without a
+    # thinking field gets, which is why "off" has to be distinguishable from
+    # "unset" here rather than being folded into a falsy check.
+    if think_override is None:
+        env_think = os.environ.get("JARVIS_THINK_OVERRIDE")
+        if env_think and env_think.strip():
+            think_override = reasoning.normalize_level(env_think.strip())
+
     result = ai_client.ask(
         text, commands, on_attempt=on_attempt, on_tool_call=on_tool_call,
         on_tool_result=on_tool_result,
         conversation_id=conv_id, on_confirm_request=on_confirm_request,
         on_route=on_route, provider_override=provider_override,
+        think_override=think_override,
     )
 
     for label, err in result.attempts:
@@ -2349,7 +2408,10 @@ def main():
         # it') and is stripped out before the rest is joined into the
         # actual message \u2014 see _extract_provider_override.
         rest, provider_override = _extract_provider_override(argv)
-        sys.exit(handle_ai_prompt(" ".join(rest), commands, provider_override=provider_override))
+        rest, think_override = _extract_think_override(rest)
+        sys.exit(handle_ai_prompt(" ".join(rest), commands,
+                                  provider_override=provider_override,
+                                  think_override=think_override))
 
     batches = split_chain_batches(argv)
     if not batches:
