@@ -925,22 +925,34 @@
     // load order) — don't immediately overwrite it with the legacy accent
     // restore. window.JarvisUI is guaranteed to exist here since ui-kit.js
     // is loaded first and runs synchronously.
+    //
+    // BUGFIX: the persona branch used to run BEFORE this check instead of
+    // behind it — `if (persona) { ...unconditional... } else if (!themeActive)`
+    // — so any saved personaId (the common case; a default persona is
+    // normally set) reapplied its hardcoded palette regardless of whether a
+    // new-system theme was active. Persona palettes don't define
+    // --text/--text-dim/--text-dimmer, so the visible result was exactly
+    // this bug: every colour reverted except text. Both colour-applying
+    // branches now live inside the SAME `!themeActive` guard so neither can
+    // bypass it.
     const themeActive = window.JarvisUI && window.JarvisUI.themes.isActive();
-    if (persona) {
-      applyHardcodedVars(persona.vars);
-      applyPersonaLogo(persona.id);
-      applyAssistantNameToChrome(prefs.assistantName || persona.assistantName);
-    } else if (!themeActive) {
-      const preset = SKIN_PRESETS.find((p) => p.id === prefs.presetId);
-      if (preset) applyPreset(preset);
-      else if (prefs.accent) applyAccent(prefs.accent);
-      else applyPreset(SKIN_PRESETS.find((p) => p.id === "cyan"));
-      applyPersonaLogo(null);
-      if (prefs.assistantName) applyAssistantNameToChrome(prefs.assistantName);
+    if (!themeActive) {
+      if (persona) {
+        applyHardcodedVars(persona.vars);
+        applyPersonaLogo(persona.id);
+        applyAssistantNameToChrome(prefs.assistantName || persona.assistantName);
+      } else {
+        const preset = SKIN_PRESETS.find((p) => p.id === prefs.presetId);
+        if (preset) applyPreset(preset);
+        else if (prefs.accent) applyAccent(prefs.accent);
+        else applyPreset(SKIN_PRESETS.find((p) => p.id === "cyan"));
+        applyPersonaLogo(null);
+        if (prefs.assistantName) applyAssistantNameToChrome(prefs.assistantName);
+      }
     } else if (prefs.assistantName) {
       // Colours are the new system's call, but the persona name in the
       // header chrome is independent of both and still applies either way.
-      applyAssistantNameToChrome(prefs.assistantName);
+      applyAssistantNameToChrome(persona ? (prefs.assistantName || persona.assistantName) : prefs.assistantName);
     }
   })();
 
@@ -1127,19 +1139,26 @@
     const persona = allPersonas().find((p) => p.id === currentPersonaId);
     const preset = SKIN_PRESETS.find((p) => p.id === currentPresetId);
     const themeActive = window.JarvisUI && window.JarvisUI.themes.isActive();
-    if (persona) {
-      if (persona.vars) applyHardcodedVars(persona.vars);
-      else applyAccent(persona.hex);
+    // BUGFIX: `persona` and `preset` used to be checked BEFORE `themeActive`,
+    // so a stale currentPersonaId/currentPresetId (openSkinModal() seeds
+    // both from localStorage every time the modal opens, whether or not the
+    // new theme gallery is what's actually in effect) reapplied that old
+    // palette on every Save — reverting the active theme's colours except
+    // text, since neither applyHardcodedVars() nor applyAccent() touch
+    // --text/--text-dim/--text-dimmer. All three colour-applying branches
+    // now sit behind the ONE `!themeActive` check, matching closeSkinModal()
+    // and the boot restore above.
+    if (!themeActive) {
+      if (persona) {
+        if (persona.vars) applyHardcodedVars(persona.vars);
+        else applyAccent(persona.hex);
+      } else if (preset) {
+        applyPreset(preset);
+      } else {
+        applyAccent(accent);
+      }
+      applyPersonaLogo(currentPersonaId);
     }
-    else if (preset) applyPreset(preset);
-    // Neither a persona nor a preset was explicitly picked this session —
-    // that's the common case where the colour swatch/input still just holds
-    // whatever it was last rendered with. If the new theme gallery is what's
-    // actually active, leave it alone instead of stomping it with that
-    // leftover value; that's the exact bug this fix addresses (see
-    // ACTIVE_KEY's comment in ui-kit.js).
-    else if (!themeActive) applyAccent(accent);
-    applyPersonaLogo(currentPersonaId);
     applyAssistantNameToChrome(assistantName);
     qs("#skin-backdrop").hidden = true;
     toast("Skin saved.", "info");
@@ -2468,6 +2487,7 @@
         // that fired from cron, a scheduled task that finished overnight --
         // so they arrive here rather than through any ask's stderr stream.
         (msg.notifications || []).forEach(showNotification);
+        recordLiveNotifications(msg.notifications || []);
         break;
       case "scheduled-tick":
         // Only refresh the panel if it's actually open; a background tick
@@ -4762,6 +4782,110 @@
   });
 
   // ===========================================================================
+  // Thinking level \u2014 how hard the model reasons before answering (see
+  // jarvis-cli/jarvis/reasoning.py). This used to be CLI-only (`jarvis think`)
+  // with nothing in the web UI at all, so the only way to change it was a
+  // terminal. GET/POST /api/think wrap that same command. Modeled on the
+  // provider-picker right next to it: a button + small dropdown, one item
+  // per level plus a Show/Hide toggle for the reasoning trace underneath.
+  // ===========================================================================
+  const THINK_LEVELS = ["off", "low", "medium", "high"];
+  const THINK_LEVEL_LABEL = { off: "Off", low: "Low", medium: "Medium", high: "High" };
+  const thinkPickerEl = qs("#think-picker");
+  const thinkBtn = qs("#btn-think-override");
+  const thinkLabel = qs("#think-level-label");
+  const thinkMenu = qs("#think-picker-menu");
+  const thinkState = { level: "off", show: false, loaded: false };
+
+  function renderThinkMenu() {
+    thinkMenu.innerHTML = "";
+    for (const lvl of THINK_LEVELS) {
+      thinkMenu.appendChild(el("button", {
+        type: "button",
+        class: "provider-picker__item" + (thinkState.level === lvl ? " is-active" : ""),
+        onclick: () => setThinkLevel(lvl),
+      }, THINK_LEVEL_LABEL[lvl]));
+    }
+    thinkMenu.appendChild(el("button", {
+      type: "button",
+      class: "provider-picker__item" + (thinkState.show ? " is-active" : ""),
+      title: "Show the model's reasoning trace as its own bubble in the thread",
+      onclick: () => setThinkShow(!thinkState.show),
+    }, thinkState.show ? "\u2713 Show reasoning trace" : "Show reasoning trace"));
+  }
+
+  function updateThinkLabel() {
+    thinkLabel.textContent = `Thinking: ${THINK_LEVEL_LABEL[thinkState.level] || "Off"}`;
+  }
+
+  async function setThinkLevel(level) {
+    const prev = thinkState.level;
+    thinkState.level = level;         // optimistic, same pattern as toggleLayout()
+    updateThinkLabel();
+    renderThinkMenu();
+    try {
+      await Api.post("/api/think", { level, show: thinkState.show });
+    } catch (err) {
+      thinkState.level = prev;
+      updateThinkLabel();
+      renderThinkMenu();
+      toast(err.message || "Couldn't set the thinking level.");
+    }
+  }
+
+  async function setThinkShow(show) {
+    const prev = thinkState.show;
+    thinkState.show = show;
+    renderThinkMenu();
+    try {
+      await Api.post("/api/think", { level: thinkState.level, show });
+    } catch (err) {
+      thinkState.show = prev;
+      renderThinkMenu();
+      toast(err.message || "Couldn't change that.");
+    }
+  }
+
+  async function loadThinkLevel() {
+    try {
+      const data = await Api.get("/api/think");
+      thinkState.level = THINK_LEVELS.includes(data.level) ? data.level : "off";
+      thinkState.show = Boolean(data.show);
+    } catch {
+      thinkState.level = "off";
+      thinkState.show = false;
+    }
+    thinkState.loaded = true;
+    updateThinkLabel();
+  }
+
+  function openThinkMenu() {
+    renderThinkMenu();
+    thinkMenu.hidden = false;
+    thinkBtn.setAttribute("aria-expanded", "true");
+  }
+
+  function closeThinkMenu() {
+    thinkMenu.hidden = true;
+    thinkBtn.setAttribute("aria-expanded", "false");
+  }
+
+  thinkBtn?.addEventListener("click", async () => {
+    if (!thinkMenu.hidden) return closeThinkMenu();
+    if (!thinkState.loaded) await loadThinkLevel();
+    openThinkMenu();
+  });
+
+  document.addEventListener("click", (e) => {
+    if (!thinkMenu.hidden && !thinkPickerEl.contains(e.target)) closeThinkMenu();
+  });
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape" && !thinkMenu.hidden) closeThinkMenu();
+  });
+
+  loadThinkLevel();
+
+  // ===========================================================================
   // Debug dashboard \u2014 every tool Jarvis can call, read live via /api/tools
   // (never hardcoded), with a form to run any of them and see the response.
   // ===========================================================================
@@ -6002,6 +6126,12 @@
     let data;
     try {
       const params = new URLSearchParams({ q: query, mode: state.logsSearchMode || "words" });
+      const direction = qs("#logs-filter-direction")?.value;
+      if (direction) params.append("direction", direction);
+      const origin = (qs("#logs-filter-origin")?.value || "").trim();
+      if (origin) params.append("origin", origin);
+      const source = (qs("#logs-filter-source")?.value || "").trim();
+      if (source) params.append("source", source);
       const res = await fetch(`/api/logs-search?${params}`);
       data = await res.json();
       if (!res.ok || data.error) throw new Error(data.error || "search failed");
@@ -6047,6 +6177,16 @@
     state.logsSearch = e.target.value;
     renderLogsConvoList();
   });
+
+  // Changing a filter re-runs the deep search immediately if one is active
+  // (the search box holds a query, not just the instant local title
+  // filter) — matching a change of "mode" doing the same elsewhere.
+  for (const id of ["logs-filter-direction", "logs-filter-origin", "logs-filter-source"]) {
+    qs(`#${id}`)?.addEventListener("change", () => {
+      const query = logsSearchInput.value.trim();
+      if (query) runDeepLogSearch(query);
+    });
+  }
 
   btnLogsRefresh.addEventListener("click", () => {
     if (state.logsSelected) logsLoadEntries(state.logsSelected);
@@ -8467,6 +8607,107 @@
   qs("#logsearch-close")?.addEventListener("click", closeLogSearch);
   logsearchOverlay?.addEventListener("click", (ev) => {
     if (ev.target === logsearchOverlay) closeLogSearch();
+  });
+
+  // --- notifications -------------------------------------------------------
+  // Every notification Jarvis has ever sent (reminders, task-done, plain
+  // notify-send), newest first, backed by the durable inbox on disk (see
+  // /api/notifications/history and notifier.history() server-side) rather
+  // than anything kept in the browser — so it survives a tab close, a
+  // browser restart, or the machine rebooting, which "persist restarts"
+  // means here. The panel never acknowledges anything it reads (that stays
+  // /api/notifications's job, driven by the tick loop's toasts/OS
+  // notifications), so opening it can't make an unread item vanish before
+  // the person has actually seen it delivered live.
+  const notificationsOverlay = qs("#notifications-overlay");
+  const notificationsFab = qs("#btn-notifications-fab");
+  const notificationsBadge = qs("#notifications-fab-badge");
+  let notifUnseenCount = 0;
+
+  function notifKindClass(note) {
+    if (note.failed) return "notif-card notif-card--failed";
+    if (note.kind === "reminder") return "notif-card notif-card--reminder";
+    if (note.kind === "task") return "notif-card notif-card--task";
+    return "notif-card";
+  }
+
+  function notifTimestamp(note) {
+    const raw = note.created_at || note.ts || "";
+    return raw ? raw.replace("T", " ").slice(0, 19) : "";
+  }
+
+  function renderNotifCard(note) {
+    return el("div", { class: notifKindClass(note) }, [
+      el("div", { class: "notif-card__head" }, [
+        el("div", { class: "notif-card__title" }, note.title || "Jarvis"),
+        el("div", { class: "notif-card__meta" }, notifTimestamp(note)),
+      ]),
+      note.message ? el("div", { class: "notif-card__body" }, note.message) : null,
+      el("div", { class: "notif-card__kind" },
+        `${note.kind || "notify"}${note.failed ? " \u2014 failed" : ""}`),
+    ]);
+  }
+
+  async function refreshNotifications() {
+    if (!notificationsOverlay || notificationsOverlay.hidden) return;
+    const list = qs("#notifications-list");
+    const statusLine = qs("#notifications-status-line");
+    try {
+      const data = await Api.get("/api/notifications/history?limit=200");
+      const items = data.notifications || [];
+      statusLine.textContent = items.length
+        ? `${items.length} notification${items.length === 1 ? "" : "s"}, newest first`
+        : "everything ever sent, persisted on disk";
+      list.innerHTML = "";
+      if (!items.length) {
+        list.appendChild(el("div", { class: "skills-empty" }, "Nothing sent yet."));
+        return;
+      }
+      for (const note of items) list.appendChild(renderNotifCard(note));
+    } catch (err) {
+      statusLine.textContent = "couldn't read notifications";
+      list.innerHTML = "";
+      list.appendChild(el("div", { class: "skills-empty" }, err.message || "Failed."));
+    }
+  }
+
+  function updateNotifBadge() {
+    if (!notificationsBadge) return;
+    notificationsBadge.hidden = notifUnseenCount <= 0;
+    notificationsBadge.textContent = notifUnseenCount > 99 ? "99+" : String(notifUnseenCount);
+  }
+
+  // Called for every notification pushed live over the websocket (see
+  // handleWsMessage's "notifications" case) so the badge and, if the panel
+  // happens to be open, the list itself stay current without waiting for
+  // the next manual refresh.
+  function recordLiveNotifications(items) {
+    if (!items.length) return;
+    if (notificationsOverlay && !notificationsOverlay.hidden) {
+      refreshNotifications();
+    } else {
+      notifUnseenCount += items.length;
+      updateNotifBadge();
+    }
+  }
+
+  function openNotifications() {
+    if (!notificationsOverlay) return;
+    notificationsOverlay.hidden = false;
+    notifUnseenCount = 0;
+    updateNotifBadge();
+    refreshNotifications();
+  }
+
+  function closeNotifications() {
+    if (notificationsOverlay) notificationsOverlay.hidden = true;
+  }
+
+  notificationsFab?.addEventListener("click", openNotifications);
+  qs("#btn-notifications-refresh")?.addEventListener("click", refreshNotifications);
+  qs("#notifications-close")?.addEventListener("click", closeNotifications);
+  notificationsOverlay?.addEventListener("click", (ev) => {
+    if (ev.target === notificationsOverlay) closeNotifications();
   });
 
   // --- setup / onboarding -----------------------------------------------

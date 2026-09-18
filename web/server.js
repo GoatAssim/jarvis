@@ -1330,11 +1330,45 @@ app.get("/api/notifications", requireJarvis, async (req, res) => {
   return parseJarvisJSON(result, res, "Couldn't read notifications.");
 });
 
+// Full durable history (read or not), for the Notifications panel — distinct
+// from /api/notifications above, which is the unread queue the tick loop
+// drains into toasts/OS notifications. This one never acknowledges anything,
+// so opening the panel can't make a live notification disappear before the
+// person has actually seen it pushed.
+app.get("/api/notifications/history", requireJarvis, async (req, res) => {
+  const limitRaw = typeof req.query.limit === "string" ? req.query.limit.trim() : "";
+  const limit = /^\d{1,4}$/.test(limitRaw) ? limitRaw : "200";
+  const result = await runJarvisOnce(["notify-history", limit], 10000);
+  return parseJarvisJSON(result, res, "Couldn't read notification history.");
+});
+
 app.post("/api/notifications/ack", requireJarvis, async (req, res) => {
   const ids = Array.isArray(req.body?.ids) ? req.body.ids.filter((i) => typeof i === "string") : [];
   if (!ids.length) return res.json({ acknowledged: 0 });
   const result = await runJarvisOnce(["notify-ack", ids.join(","), "web"], 10000);
   return parseJarvisJSON(result, res, "Couldn't acknowledge notifications.");
+});
+
+// Thinking level — how much of its budget the model spends reasoning before
+// answering (see reasoning.py). Read-modify-write against ai_config.json via
+// the `jarvis think` CLI, same pattern as /api/ui-mode above.
+const THINK_LEVELS = new Set(["off", "low", "medium", "high"]);
+
+app.get("/api/think", requireJarvis, async (req, res) => {
+  const result = await runJarvisOnce(["think"], 10000);
+  return parseJarvisJSON(result, res, "Couldn't read the thinking level.");
+});
+
+app.post("/api/think", requireJarvis, async (req, res) => {
+  const level = typeof req.body?.level === "string" ? req.body.level.trim() : "";
+  if (!THINK_LEVELS.has(level)) {
+    return res.status(400).json({ error: "level must be one of off/low/medium/high." });
+  }
+  const args = ["think", level];
+  if (req.body?.show === true) args.push("--show");
+  else if (req.body?.show === false) args.push("--hide");
+  const result = await runJarvisOnce(args, 10000);
+  return parseJarvisJSON(result, res, "Couldn't set the thinking level.");
 });
 
 app.get("/api/conversations/search", requireJarvis, async (req, res) => {

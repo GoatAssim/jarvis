@@ -70,6 +70,69 @@
       <span class="btn__layout-glyph" aria-hidden="true">&#9707;</span><span id="layout-switch-label">Classic</span>
     </button>
 
+    <!-- Debug, Skills, Scheduled, MCP Servers, Daemons, Backlog, Log search,
+         Setup, Channels and Guides used to live behind this dropdown INSIDE
+         the console panel of the Classic three-column grid. That's the
+         panel the Focus layout hides (see body.layout--focus .grid in
+         style.css), which made every one of those panels unreachable the
+         moment Focus was on — the "the menu is gone" bug. Living in the
+         header instead, alongside the layout switch itself, is what makes
+         "reachable in both layouts, from the same Menu" (the promise the
+         comments near applyLayout() make) actually true. -->
+    <div class="panel-menu" id="panel-menu">
+      <button class="btn btn--ghost" id="btn-panel-menu" type="button"
+              aria-haspopup="true" aria-expanded="false"
+              title="Debug tools, skills, scheduled tasks and reminders, daemons, backlog, log search and connected MCP servers">
+        Menu <span class="panel-menu__caret" aria-hidden="true">&#9662;</span>
+      </button>
+      <div class="panel-menu__list" id="panel-menu-list" role="menu" hidden>
+        <button class="panel-menu__item" id="menu-item-guides" type="button" role="menuitem">
+          <span class="panel-menu__item-label">Guides</span>
+          <span class="panel-menu__item-hint">How to connect Discord, Instagram, Spotify and the rest</span>
+        </button>
+        <button class="panel-menu__item" id="menu-item-debug" type="button" role="menuitem">
+          <span class="panel-menu__item-label">Debug</span>
+          <span class="panel-menu__item-hint">Inspect and run every tool Jarvis can call</span>
+        </button>
+        <button class="panel-menu__item" id="menu-item-skills" type="button" role="menuitem">
+          <span class="panel-menu__item-label">Skills</span>
+          <span class="panel-menu__item-hint">Add, edit and remove skills</span>
+        </button>
+        <button class="panel-menu__item" id="menu-item-scheduled" type="button" role="menuitem">
+          <span class="panel-menu__item-label">Scheduled</span>
+          <span class="panel-menu__item-hint">Tasks, reminders and notifications</span>
+        </button>
+        <button class="panel-menu__item" id="menu-item-mcp" type="button" role="menuitem">
+          <span class="panel-menu__item-label">MCP Servers</span>
+          <span class="panel-menu__item-hint">External tools connected over MCP</span>
+        </button>
+        <button class="panel-menu__item" id="menu-item-ctools" type="button" role="menuitem">
+          <span class="panel-menu__item-label">Custom Tools</span>
+          <span class="panel-menu__item-hint">Write your own Python tools &mdash; kept in ~/.jarvis, survives a rebuild</span>
+        </button>
+        <button class="panel-menu__item" id="menu-item-daemons" type="button" role="menuitem">
+          <span class="panel-menu__item-label">Daemons</span>
+          <span class="panel-menu__item-hint">Background services &mdash; start, stop, watch their console, schedule them</span>
+        </button>
+        <button class="panel-menu__item" id="menu-item-backlog" type="button" role="menuitem">
+          <span class="panel-menu__item-label">Backlog</span>
+          <span class="panel-menu__item-hint">Open-ended work with no due date &mdash; what&rsquo;s in progress, what&rsquo;s blocked</span>
+        </button>
+        <button class="panel-menu__item" id="menu-item-logsearch" type="button" role="menuitem">
+          <span class="panel-menu__item-label">Log search</span>
+          <span class="panel-menu__item-hint">Grep the raw log files on disk, including daemon consoles</span>
+        </button>
+        <button class="panel-menu__item" id="menu-item-setup" type="button" role="menuitem">
+          <span class="panel-menu__item-label">Setup</span>
+          <span class="panel-menu__item-hint">Guided first run, dependency checks and the layout switch</span>
+        </button>
+        <button class="panel-menu__item" id="menu-item-channels" type="button" role="menuitem">
+          <span class="panel-menu__item-label">Channels</span>
+          <span class="panel-menu__item-hint">Who can DM, get replies from, and run tools on Discord &amp; Instagram</span>
+        </button>
+      </div>
+    </div>
+
     <button class="btn btn--primary btn--ask-jarvis" id="btn-ask-jarvis" type="button">
       <span class="btn__spark"></span>Ask <span id="btn-ask-jarvis-label">Jarvis</span>
     </button>
@@ -154,64 +217,6 @@
         <div class="console-actions">
           <button class="btn btn--ghost" id="btn-abort" type="button" hidden>ABORT</button>
           <button class="btn btn--ghost" id="btn-clear-console" type="button">Clear</button>
-          <!-- Debug, Skills, Scheduled and MCP Servers used to be four
-               separate buttons crowded into this one row. They're grouped
-               behind one dropdown instead — same trigger, a short list of
-               destinations — modeled on the Ask panel's own provider-picker
-               dropdown just below (.panel-menu mirrors .provider-picker). -->
-          <div class="panel-menu" id="panel-menu">
-            <button class="btn btn--ghost" id="btn-panel-menu" type="button"
-                    aria-haspopup="true" aria-expanded="false"
-                    title="Debug tools, skills, scheduled tasks and reminders, and connected MCP servers">
-              Menu <span class="panel-menu__caret" aria-hidden="true">&#9662;</span>
-            </button>
-            <div class="panel-menu__list" id="panel-menu-list" role="menu" hidden>
-              <button class="panel-menu__item" id="menu-item-guides" type="button" role="menuitem">
-                <span class="panel-menu__item-label">Guides</span>
-                <span class="panel-menu__item-hint">How to connect Discord, Instagram, Spotify and the rest</span>
-              </button>
-              <button class="panel-menu__item" id="menu-item-debug" type="button" role="menuitem">
-                <span class="panel-menu__item-label">Debug</span>
-                <span class="panel-menu__item-hint">Inspect and run every tool Jarvis can call</span>
-              </button>
-              <button class="panel-menu__item" id="menu-item-skills" type="button" role="menuitem">
-                <span class="panel-menu__item-label">Skills</span>
-                <span class="panel-menu__item-hint">Add, edit and remove skills</span>
-              </button>
-              <button class="panel-menu__item" id="menu-item-scheduled" type="button" role="menuitem">
-                <span class="panel-menu__item-label">Scheduled</span>
-                <span class="panel-menu__item-hint">Tasks, reminders and notifications</span>
-              </button>
-              <button class="panel-menu__item" id="menu-item-mcp" type="button" role="menuitem">
-                <span class="panel-menu__item-label">MCP Servers</span>
-                <span class="panel-menu__item-hint">External tools connected over MCP</span>
-              </button>
-              <button class="panel-menu__item" id="menu-item-ctools" type="button" role="menuitem">
-                <span class="panel-menu__item-label">Custom Tools</span>
-                <span class="panel-menu__item-hint">Write your own Python tools &mdash; kept in ~/.jarvis, survives a rebuild</span>
-              </button>
-              <button class="panel-menu__item" id="menu-item-daemons" type="button" role="menuitem">
-                <span class="panel-menu__item-label">Daemons</span>
-                <span class="panel-menu__item-hint">Background services &mdash; start, stop, watch their console, schedule them</span>
-              </button>
-              <button class="panel-menu__item" id="menu-item-backlog" type="button" role="menuitem">
-                <span class="panel-menu__item-label">Backlog</span>
-                <span class="panel-menu__item-hint">Open-ended work with no due date &mdash; what&rsquo;s in progress, what&rsquo;s blocked</span>
-              </button>
-              <button class="panel-menu__item" id="menu-item-logsearch" type="button" role="menuitem">
-                <span class="panel-menu__item-label">Log search</span>
-                <span class="panel-menu__item-hint">Grep the raw log files on disk, including daemon consoles</span>
-              </button>
-              <button class="panel-menu__item" id="menu-item-setup" type="button" role="menuitem">
-                <span class="panel-menu__item-label">Setup</span>
-                <span class="panel-menu__item-hint">Guided first run, dependency checks and the layout switch</span>
-              </button>
-              <button class="panel-menu__item" id="menu-item-channels" type="button" role="menuitem">
-                <span class="panel-menu__item-label">Channels</span>
-                <span class="panel-menu__item-hint">Who can DM, get replies from, and run tools on Discord &amp; Instagram</span>
-              </button>
-            </div>
-          </div>
         </div>
       </div>
       <div class="console" id="console">
@@ -231,10 +236,26 @@
     </div>
   </div>
 
-</div>
-
-<!-- ASK JARVIS -->
-<div class="ask-overlay" id="ask-overlay" hidden>
+  <!-- ASK JARVIS
+       BUGFIX: this used to sit OUTSIDE #app, as a sibling in <body>. In
+       Classic layout that's invisible because .ask-overlay is
+       `position: fixed; inset: 0` regardless of its parent — but Focus
+       layout turns that off (body.layout--focus .ask-overlay in style.css
+       sets `position: static; flex: 1; min-height: 0`) so the panel can sit
+       inline and take its height from the layout instead of floating over
+       it. `flex: 1` only means anything on a flex CHILD of a flex
+       container, and <body> isn't one — #app is (`display: flex;
+       flex-direction: column; height: 100vh; overflow: hidden`), so being
+       outside it meant Focus mode's ask-panel had no constrained height at
+       all: it grew to fit however many conversations were in the sidebar
+       (fills the whole page, scrollbar and all) instead of scrolling its
+       own list, and — because #app's own bottom padding is what keeps the
+       fixed Logs/Notifications buttons and the sequence bar clear of real
+       content — an unconstrained panel could also render underneath them.
+       Being an actual flex child of #app fixes both: Focus mode now gets a
+       real, viewport-sized box, the conversation list scrolls inside it,
+       and it never encroaches on the fixed bottom-right buttons. -->
+  <div class="ask-overlay" id="ask-overlay" hidden>
   <div class="ask-panel">
     <div class="panel__corner panel__corner--tl"></div>
     <div class="panel__corner panel__corner--br"></div>
@@ -256,6 +277,20 @@
             <span id="provider-override-label">Provider: Auto</span>
           </button>
           <div class="provider-picker__menu" id="provider-picker-menu" hidden></div>
+        </div>
+        <!-- Thinking level — how much budget the model spends reasoning
+             before answering (see jarvis-cli/jarvis/reasoning.py). Read/set
+             through /api/think, which was previously CLI-only (`jarvis
+             think`) with no web control at all. Mirrors the provider-picker
+             right next to it: a button that toggles a small menu of the
+             four levels, plus a Show/Hide toggle for the reasoning trace. -->
+        <div class="provider-picker" id="think-picker">
+          <button class="btn btn--ghost btn--sm" id="btn-think-override" type="button"
+                  title="How much Jarvis reasons before answering, and whether to show the reasoning trace"
+                  aria-haspopup="true" aria-expanded="false">
+            <span id="think-level-label">Thinking: &hellip;</span>
+          </button>
+          <div class="provider-picker__menu" id="think-picker-menu" hidden></div>
         </div>
         <span class="convo-id-tag" id="ask-convo-id-tag" title="Active conversation id"></span>
         <button class="btn btn--ghost btn--sm" id="btn-ask-clear" type="button" title="Clear this conversation">Clear</button>
@@ -324,6 +359,8 @@
       <button type="button" id="ask-sel-copy">Copy</button>
     </div>
   </div>
+  </div>
+
 </div>
 
 <!-- SKILLS MANAGER — tier-1/2/3 progressive disclosure, see jarvis/skills.py.
@@ -674,6 +711,19 @@
   <span>Logs</span>
 </button>
 
+<!-- NOTIFICATIONS FAB — stacked directly above the Logs fab, same corner.
+     The badge shows how many notifications have arrived since the panel
+     was last opened (client-side counter only; the underlying history
+     itself is server-side and never cleared by viewing it). -->
+<button class="logs-fab notifications-fab" id="btn-notifications-fab" type="button" title="Notifications — everything Jarvis has ever sent, persisted on disk">
+  <svg viewBox="0 0 24 24" aria-hidden="true">
+    <path d="M12 3a6 6 0 0 0-6 6v3.2c0 .7-.24 1.37-.68 1.9L4 16h16l-1.32-1.9a3 3 0 0 1-.68-1.9V9a6 6 0 0 0-6-6z" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/>
+    <path d="M9.5 19a2.5 2.5 0 0 0 5 0" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/>
+  </svg>
+  <span>Notifications</span>
+  <span class="notifications-fab__badge" id="notifications-fab-badge" hidden>0</span>
+</button>
+
 <!-- LOGS OVERLAY — per-conversation raw model↔backend traffic, read live
      from ~/.jarvis/logs/<conv_id>.jsonl via /api/logs (see logs.py). -->
 <div class="debug-overlay" id="logs-overlay" hidden>
@@ -708,6 +758,22 @@
             <line x1="13.2" y1="13.2" x2="17.5" y2="17.5" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/>
           </svg>
           <input type="search" id="logs-convo-search" class="panel__search-input" placeholder="Search conversations&hellip;" autocomplete="off">
+        </div>
+        <!-- Deep search (Enter in the box above, via /api/logs-search)
+             already supported repeatable origin/source/direction filters
+             server-side — logs.search()'s directions/origins/sources
+             params, wired all the way through server.js — with no way to
+             set any of them from the browser. This is that control. -->
+        <div class="logs-filter-row" id="logs-filter-row">
+          <select id="logs-filter-direction" title="Only entries of this kind">
+            <option value="">any direction</option>
+            <option value="request">request</option>
+            <option value="response">response</option>
+            <option value="tool_call">tool call</option>
+            <option value="tool_result">tool result</option>
+          </select>
+          <input type="text" id="logs-filter-origin" placeholder="origin (e.g. discord)" title="Only conversations from this origin">
+          <input type="text" id="logs-filter-source" placeholder="source (e.g. anthropic)" title="Only entries from this source/provider">
         </div>
         <div class="debug-tool-list" id="logs-convo-list">
           <div class="debug-empty">Loading&hellip;</div>
@@ -1188,6 +1254,36 @@
       </div>
       <div class="logsearch-results" id="logsearch-results">
         <div class="skills-empty">Enter something to search for.</div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- NOTIFICATIONS — every notification Jarvis has ever sent (toasts, OS
+     notifications, reminders), newest first. Backed by the durable inbox at
+     ~/.jarvis/notifications.json via /api/notifications/history, so it
+     survives closing the tab, the browser, or the machine restarting —
+     nothing here is stored client-side. -->
+<div class="menu-overlay" id="notifications-overlay" hidden>
+  <div class="menu-panel">
+    <div class="panel__corner panel__corner--tl"></div>
+    <div class="panel__corner panel__corner--br"></div>
+    <div class="menu-panel__head">
+      <svg class="brand-mark" viewBox="0 0 40 40" aria-hidden="true">
+        <circle cx="20" cy="20" r="18" class="brand-mark__ring"/>
+        <circle cx="20" cy="20" r="11" class="brand-mark__ring brand-mark__ring--in"/>
+        <circle cx="20" cy="20" r="3" class="brand-mark__core"/>
+      </svg>
+      <div class="menu-panel__titles">
+        <div class="menu-panel__title">NOTIFICATIONS</div>
+        <div class="menu-panel__subtitle" id="notifications-status-line">everything ever sent, persisted on disk</div>
+      </div>
+      <button class="btn btn--ghost btn--sm" id="btn-notifications-refresh" type="button">Refresh</button>
+      <button class="modal__close" id="notifications-close" type="button" aria-label="Close">&times;</button>
+    </div>
+    <div class="menu-body menu-body--wide">
+      <div class="notif-list" id="notifications-list">
+        <div class="skills-empty">Loading&hellip;</div>
       </div>
     </div>
   </div>
