@@ -1786,6 +1786,9 @@
     organizeJson: (targetPath) => api("POST", "/api/json/organize", { path: targetPath }),
     listTools: () => api("GET", "/api/tools"),
     getPersonas: () => api("GET", "/api/personas"),
+    getChannels: () => api("GET", "/api/channels"),
+    setChannelEntry: (platform, set, entry, remove) =>
+      api("POST", `/api/channels/${encodeURIComponent(platform)}/${encodeURIComponent(set)}`, { entry, remove: !!remove }),
     runTool: (name, arguments_, mode) => api("POST", "/api/tools/run", { name, arguments: arguments_, mode }),
     previewTool: (name, arguments_, mode) => api("POST", "/api/tools/preview", { name, arguments: arguments_, mode }),
     setToolSafety: (name, key, value) => api("POST", "/api/tools/safety", { name, key, value }),
@@ -7270,6 +7273,138 @@
     if (e.key === "Escape" && mcpOverlay && !mcpOverlay.hidden) closeMcp();
   });
 
+  // ===========================================================================
+  // Channels panel — Discord/Instagram allowlists. The backend API this
+  // drives (GET /api/channels, POST /api/channels/:platform/:set — see
+  // server.js) already existed; this is the missing frontend for it, so
+  // "who gets a reply" no longer requires a terminal.
+  //
+  // Token/enabled/owner setup is deliberately left out (and still pointed
+  // at the Guides panel) — see server.js's own comment on /api/channels:
+  // the UI shows posture and edits allowlists, but a bot token must never
+  // pass through this browser.
+  // ===========================================================================
+  const channelsOverlay = qs("#channels-overlay");
+  const CHANNELS_META = {
+    discord: { label: "Discord" },
+    instagram: { label: "Instagram" },
+  };
+  const CHANNELS_SETS = [
+    { key: "dm_allowlist", short: "dm", label: "DM allowlist", hint: "May open a DM conversation with the bot at all." },
+    { key: "reply_allowlist", short: "reply", label: "Reply allowlist", hint: "Actually gets an answer back." },
+    { key: "tool_allowlist", short: "tool", label: "Tool allowlist", hint: "May cause a tool to run on this PC." },
+  ];
+
+  function channelsChip(entry, onRemove) {
+    const isWildcard = entry === "*";
+    return el("span", { class: "channels-chip" + (isWildcard ? " channels-chip--wildcard" : "") }, [
+      isWildcard ? "everyone (*)" : entry,
+      el("button", {
+        type: "button", class: "channels-chip__remove", title: `Remove ${entry}`,
+        onclick: onRemove,
+      }, "\u00d7"),
+    ]);
+  }
+
+  async function channelsMutate(platform, short, entry, remove, statusEl) {
+    if (statusEl) statusEl.textContent = "";
+    try {
+      const result = await Api.setChannelEntry(platform, short, entry, remove);
+      if (!result || result.ok === false) {
+        throw new Error((result && result.error) || "Request failed.");
+      }
+      await refreshChannelsPanel();
+    } catch (err) {
+      if (statusEl) statusEl.textContent = err.message || "Couldn't save that.";
+    }
+  }
+
+  function renderChannelsPlatform(platform, block) {
+    const meta = CHANNELS_META[platform];
+    const enabled = !!block.enabled;
+    const tokenSet = block.bot_token === "set" || block.access_token === "set";
+    const header = el("div", { class: "skills-item__name" }, [
+      `${meta.label} — `,
+      el("span", { style: enabled ? "color: var(--accent);" : "color: var(--text-dimmer);" },
+        enabled ? "enabled" : "disabled"),
+      " \u00b7 token ",
+      tokenSet ? "set" : "not set",
+      block.owner ? ` \u00b7 owner: ${block.owner}` : " \u00b7 owner: (unset)",
+    ]);
+
+    const setBlocks = CHANNELS_SETS.map((set) => {
+      const entries = Array.isArray(block[set.key]) ? block[set.key] : [];
+      const chips = el("div", { class: "channels-chips" });
+      if (!entries.length) {
+        chips.appendChild(el("div", { class: "channels-empty-hint" },
+          set.short === "reply" ? "nobody — the bot won't reply to anyone yet" : "nobody"));
+      } else {
+        for (const entry of entries) {
+          chips.appendChild(channelsChip(entry, () =>
+            channelsMutate(platform, set.short, entry, true, statusLine)));
+        }
+      }
+      const input = el("input", {
+        type: "text", placeholder: "id, handle, or * for everyone", autocomplete: "off",
+      });
+      const addBtn = el("button", { type: "button", class: "btn btn--ghost btn--sm" }, "Add");
+      const statusLine = el("div", { class: "channels-empty-hint" });
+      const doAdd = () => {
+        const value = input.value.trim();
+        if (!value) return;
+        input.value = "";
+        channelsMutate(platform, set.short, value, false, statusLine);
+      };
+      addBtn.addEventListener("click", doAdd);
+      input.addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); doAdd(); } });
+      return el("div", { class: "channels-set" }, [
+        el("div", { class: "channels-set__label" }, `${set.label} \u2014 ${set.hint}`),
+        chips,
+        el("div", { class: "channels-add" }, [input, addBtn]),
+        statusLine,
+      ]);
+    });
+
+    return el("div", { class: "skills-item" }, [header, ...setBlocks]);
+  }
+
+  async function refreshChannelsPanel() {
+    if (!channelsOverlay || channelsOverlay.hidden) return;
+    const list = qs("#channels-list");
+    const statusLine = qs("#channels-status-line");
+    try {
+      const data = await Api.getChannels();
+      const cfg = (data && data.config) || {};
+      statusLine.textContent = Object.entries(data.summary || {})
+        .map(([p, s]) => `${CHANNELS_META[p]?.label || p}: ${(s || "").split("\n")[0]}`)
+        .join("  \u00b7  ") || "";
+      list.innerHTML = "";
+      for (const platform of Object.keys(CHANNELS_META)) {
+        list.appendChild(renderChannelsPlatform(platform, cfg[platform] || {}));
+      }
+    } catch (err) {
+      statusLine.textContent = "couldn't read channel status";
+      list.innerHTML = "";
+      list.appendChild(el("div", { class: "skills-empty" }, err.message || "Failed."));
+    }
+  }
+
+  function openChannels() {
+    if (!channelsOverlay) return;
+    channelsOverlay.hidden = false;
+    refreshChannelsPanel();
+  }
+
+  function closeChannels() {
+    if (channelsOverlay) channelsOverlay.hidden = true;
+  }
+
+  qs("#channels-close")?.addEventListener("click", closeChannels);
+  channelsOverlay?.addEventListener("click", (e) => { if (e.target === channelsOverlay) closeChannels(); });
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape" && channelsOverlay && !channelsOverlay.hidden) closeChannels();
+  });
+
   qs("#btn-mcp-refresh")?.addEventListener("click", async () => {
     const btn = qs("#btn-mcp-refresh");
     btn.disabled = true;
@@ -7851,6 +7986,7 @@
   qs("#menu-item-skills")?.addEventListener("click", () => { closePanelMenu(); openSkills(); });
   qs("#menu-item-scheduled")?.addEventListener("click", () => { closePanelMenu(); openScheduled(); });
   qs("#menu-item-mcp")?.addEventListener("click", () => { closePanelMenu(); openMcp(); });
+  qs("#menu-item-channels")?.addEventListener("click", () => { closePanelMenu(); openChannels(); });
   qs("#menu-item-ctools")?.addEventListener("click", () => {
     closePanelMenu();
     if (window.JarvisCustomTools) window.JarvisCustomTools.open();
