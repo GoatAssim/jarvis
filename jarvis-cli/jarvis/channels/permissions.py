@@ -42,7 +42,8 @@ never saw it.
 
 import time
 
-from . import PERM_DM, PERM_REPLY, PERM_TOOLS
+from . import PERM_DM, PERM_REPLY, PERM_TOOLS, PERM_SETS
+from . import config
 from .config import WILDCARD
 
 # Context kinds. A gateway translates its own notion of "where" into one of
@@ -80,6 +81,27 @@ def resolve_scope(cfg, msg):
 
     Returns the config unchanged when there are no scopes, so the common
     case costs one dict lookup.
+
+    THE BUG THIS FIXES
+    ------------------
+    load_config() normalizes every top-level dm/reply/tool_allowlist and
+    owner into a clean list/string on every read (see config.py's
+    _normalize_entries — "a bare string instead of a list is the single
+    most common hand-edit mistake"). A scope override sits one level
+    deeper in the same file and used to skip that normalization entirely
+    — `merged[field] = value` copied whatever JSON was there verbatim. The
+    same obvious-thing-to-type mistake at the top level
+
+        "scopes": {"guild:123456789012345678": {"reply_allowlist": 987654321012345678}}
+
+    (a bare id instead of `["987654321012345678"]`) used to reach
+    permissions.matches() as a raw int, which crashed with `'int' object
+    is not iterable` and denied the message with stage="error" — a
+    confusing failure mode indistinguishable from "the gate itself is
+    broken" (see base.py's handle_message). Normalizing here, the exact
+    same way load_config() already does for the platform-level value,
+    means a scope override is exactly as hand-edit-tolerant as everything
+    else in this file.
     """
     scopes = (cfg or {}).get("scopes")
     if not isinstance(scopes, dict) or not scopes:
@@ -94,6 +116,10 @@ def resolve_scope(cfg, msg):
         if merged is None:
             merged = dict(cfg)
         for field, value in override.items():
+            if field in PERM_SETS:
+                value = config.normalize_entries(value)
+            elif field == "owner":
+                value = config.normalize_entry(value)
             merged[field] = value
     return merged if merged is not None else cfg
 
@@ -174,8 +200,22 @@ def matches(entries, identities):
     Empty entries -> False (deny). The WILDCARD entry -> True. See
     config.py's EMPTY MEANS DENY note for why that asymmetry is the whole
     point rather than an oversight.
+
+    `entries` SHOULD always be a list by the time it gets here — load_
+    config() normalizes every top-level allowlist on every read, and
+    resolve_scope() normalizes a scope override's before merging it in
+    (see that function's own note). This function still tolerates a bare
+    string/int/None (treated as a single entry, or none) rather than
+    crashing on it, the same "never raises, fails closed" contract as the
+    rest of this module — a config file is hand-editable, and the obvious
+    thing to type for one person is `"reply_allowlist": 123456789012345`
+    (no brackets), not a JSON list.
     """
     if not entries:
+        return False
+    if isinstance(entries, (str, int)):
+        entries = [entries]
+    if not isinstance(entries, (list, tuple, set)):
         return False
     entries = [str(e).strip().lstrip("@").lower() for e in entries if str(e).strip()]
     if WILDCARD in entries:

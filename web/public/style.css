@@ -2378,6 +2378,65 @@ audio.ask-dl-player{ max-height: none; background: transparent; }
   margin-top: 8px;
 }
 
+/* ---------------------------------------------------------------------------
+   Channels panel — reuses .skills-item/.skills-list wholesale for the two
+   per-platform blocks (same reasoning as the Scheduled panel comment just
+   above: same shape, don't duplicate the styling under new names). Only
+   the allowlist chips themselves are new.
+   --------------------------------------------------------------------------- */
+.channels-set { margin-top: 10px; }
+.channels-set__label {
+  font-size: 0.66rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+  margin-bottom: 5px;
+}
+.channels-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 6px;
+}
+.channels-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  border-radius: 3px;
+  padding: 3px 4px 3px 8px;
+  border: 1px solid var(--border);
+  color: var(--text);
+  background: var(--bg-panel-2);
+}
+.channels-chip--wildcard { border-color: var(--accent); color: var(--accent); }
+.channels-chip__remove {
+  appearance: none; border: none; background: none; cursor: pointer;
+  color: var(--text-dimmer); font-size: 13px; line-height: 1; padding: 2px 4px;
+}
+.channels-chip__remove:hover { color: var(--text); }
+.channels-add {
+  display: flex;
+  gap: 6px;
+}
+.channels-add input {
+  flex: 1 1 auto;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  background: var(--bg-panel-2);
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  color: var(--text);
+  padding: 5px 8px;
+}
+.channels-empty-hint {
+  font-size: 11px;
+  color: var(--text-dimmer);
+  font-style: italic;
+  margin-bottom: 6px;
+}
+
 .sched-add {
   display: flex;
   flex-direction: column;

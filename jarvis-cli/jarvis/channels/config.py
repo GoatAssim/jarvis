@@ -344,6 +344,15 @@ def _normalize_entries(value):
     return out
 
 
+# Public names for the same two functions — used by permissions.py's
+# resolve_scope() to normalize a per-scope override exactly the same way
+# load_config() already normalizes the platform-level value (see that
+# function's own note on why). Kept as thin aliases rather than renaming
+# the originals so every existing in-module call site is untouched.
+normalize_entry = _normalize_entry
+normalize_entries = _normalize_entries
+
+
 # ---------------------------------------------------------------------------
 # Mutation helpers — used by the CLI and the web UI so neither has to
 # hand-roll read/modify/write against the file (and get the normalization
