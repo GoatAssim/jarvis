@@ -1932,7 +1932,7 @@ const MAX_ASK_LENGTH = 4000;
 // line, falsy to let it through as usual. Used by the "ask" flow to catch
 // "JARVIS_CONFIRM_REQUEST {...}" lines (see cli.py's on_confirm_request)
 // and turn them into ask-confirm-request instead of chat-bubble text.
-function spawnAndStream(ws, kind, fullArgs, types, extraEnv = {}, onStdoutLine = null) {
+function spawnAndStream(ws, kind, fullArgs, types, extraEnv = {}, onStdoutLine = null, onLine = null, onExit = null) {
   let child;
   try {
     child = spawn(JARVIS.cmd, fullArgs, {
@@ -1952,11 +1952,20 @@ function spawnAndStream(ws, kind, fullArgs, types, extraEnv = {}, onStdoutLine =
   ws.activeChild = child;
   ws.activeKind = kind;
 
+  // onLine, when given, sees every stdout/stderr line regardless of whether
+  // onStdoutLine swallowed it as a protocol marker (confirm-request etc.) —
+  // used by the "run" handler below to build the buffer it persists once
+  // the run finishes (see logs-append-run in cli.py). Purely an observer:
+  // it never affects what gets sent to the browser.
   const onOut = makeLineBuffer((line) => {
+    if (onLine) onLine("out", line);
     if (onStdoutLine && onStdoutLine(line)) return;
     send(ws, { type: types.stdout, line });
   });
-  const onErr = makeLineBuffer((line) => send(ws, { type: types.stderr, line }));
+  const onErr = makeLineBuffer((line) => {
+    if (onLine) onLine("err", line);
+    send(ws, { type: types.stderr, line });
+  });
   child.stdout.on("data", onOut);
   child.stderr.on("data", onErr);
 
@@ -1970,6 +1979,7 @@ function spawnAndStream(ws, kind, fullArgs, types, extraEnv = {}, onStdoutLine =
     ws.activeChild = null;
     ws.activeKind = null;
     send(ws, { type: types.exit, code: signal ? null : code, signal: signal || null });
+    if (onExit) onExit(code, signal);
   });
 }
 
@@ -2131,11 +2141,34 @@ wss.on("connection", (ws) => {
 
       const argv = buildArgv(segments);
       const fullArgs = [...JARVIS.args, ...argv];
+      const cmdline = [JARVIS.cmd, ...fullArgs].join(" ");
       send(ws, {
         type: "start",
-        cmdline: [JARVIS.cmd, ...fullArgs].join(" "),
+        cmdline,
         count: segments.length,
       });
+
+      // Buffers every line of this run's output so it can be handed to
+      // `jarvis logs-append-run` once the run finishes (see cli.py) —
+      // without this, a directly-run command's console output only ever
+      // lived in this websocket stream and vanished on reload/conversation
+      // switch, unlike an ask's tool output which ai_client.py already logs
+      // as it happens. Capped defensively; a runaway command shouldn't be
+      // able to balloon memory or the eventual log entry.
+      const runConversationId = typeof msg.conversationId === "string" ? msg.conversationId : "";
+      const runLines = [];
+      const runOnLine = (stream, line) => {
+        if (runLines.length < 5000) runLines.push({ stream, text: line });
+      };
+      const runOnExit = (code, signal) => {
+        if (!isValidConversationId(runConversationId)) return;
+        runJarvisOnce(
+          ["logs-append-run"],
+          10000,
+          conversationEnv(runConversationId),
+          JSON.stringify({ cmdline, lines: runLines, exit_code: signal ? null : code, signal: signal || null })
+        ).catch(() => {}); // best-effort — a failed save must never surface as a run failure
+      };
       // Same "JARVIS_CONFIRM_REQUEST {...}" protocol as the ask flow below
       // (see cli.py's confirm_tool_call / confirm_direct_command) — a
       // directly-run saved command can carry its own confirm_required/
@@ -2166,7 +2199,7 @@ wss.on("connection", (ws) => {
         });
         return true;
       };
-      spawnAndStream(ws, "run", fullArgs, RUN_TYPES, {}, runOnStdoutLine);
+      spawnAndStream(ws, "run", fullArgs, RUN_TYPES, {}, runOnStdoutLine, runOnLine, runOnExit);
       return;
     }
 

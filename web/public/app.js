@@ -2652,7 +2652,11 @@
     if (state.running) { toast("A command is already running."); return; }
     ensureNotifPermission();
     state.lastTaskLabel = (segments || []).map((s) => s.name).filter(Boolean).join(" then ") || "that command";
-    wsSend({ type: "run", segments });
+    // Tagging the run with the conversation that's open when it's launched
+    // is what lets server.js persist its console output there (see
+    // logs-append-run in cli.py) so it survives a reload/switch instead of
+    // only living in this tab's live websocket stream.
+    wsSend({ type: "run", segments, conversationId: state.activeConversationId });
   }
 
   // ===========================================================================
@@ -6322,6 +6326,58 @@
       renderExtrasForBucket(exchanges.length);
     }
     askThreadScrollToEnd();
+    loadConsoleHistoryForConv(convId);
+  }
+
+  // Repopulates the "Live output" console panel (#console) from this
+  // conversation's persisted "command_run" log entries (see cli.py's
+  // logs-append-run and server.js's "run" websocket handler) — without
+  // this, a directly-run command's console output only ever lived in this
+  // tab's live websocket stream and vanished the instant the page reloaded
+  // or another conversation was selected. Best-effort and silent: a brand
+  // new conversation with no runs yet legitimately 404s (no log file at
+  // all), which is not a failure worth surfacing.
+  //
+  // Skipped while something is actively running (state.running covers both
+  // an in-flight ask and an in-flight run) so a switch mid-run can't wipe
+  // out the live output the user is currently watching — that run's own
+  // exit will persist it, and the next conversation load will pick it up.
+  async function loadConsoleHistoryForConv(convId) {
+    const consoleEl = qs("#console");
+    if (!consoleEl || state.running) return;
+    let log = null;
+    if (convId != null) {
+      try {
+        log = await Api.getLog(convId, 500);
+      } catch {
+        log = null; // no log file yet for this conversation — that's fine
+      }
+    }
+    // The conversation may have been switched again while this was in
+    // flight; only paint if we're still looking at the conversation this
+    // history belongs to.
+    if (convId !== state.activeConversationId) return;
+    const runs = ((log && log.entries) || []).filter((e) => e && e.direction === "command_run");
+    consoleEl.innerHTML = "";
+    if (!runs.length) {
+      consoleEl.appendChild(el("div", { class: "console__idle" }, "Awaiting instructions."));
+      return;
+    }
+    runs.forEach((entry, i) => {
+      const d = entry.data || {};
+      if (i > 0) consoleAppend("\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500", "sys");
+      consoleAppend(d.cmdline || "(command)", "cmd");
+      (Array.isArray(d.lines) ? d.lines : []).forEach((l) => {
+        consoleAppend((l && l.text) || "", (l && l.stream === "err") ? "err" : "out");
+      });
+      if (d.signal) {
+        consoleAppend(`\u25a0 stopped (${d.signal})`, "exit-bad");
+      } else if (d.exit_code === 0) {
+        consoleAppend("\u25a0 done \u2014 exit code 0", "exit-ok");
+      } else if (d.exit_code != null) {
+        consoleAppend(`\u25a0 exit code ${d.exit_code}`, "exit-bad");
+      }
+    });
   }
 
   function convoFiltered() {

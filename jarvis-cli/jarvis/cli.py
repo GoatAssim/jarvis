@@ -43,7 +43,7 @@ ENCODING = "utf-8"
 
 CHAIN_SEP = "then"      # starts a new batch \u2014 waits for the previous one to finish
 PARALLEL_SEP = "and"    # joins the current batch \u2014 runs alongside whatever's already in it
-RESERVED_NAMES = {"config", "ai-config", "ai-clear", "ai-drop-from", "playnite-config", "spotify-config", "spotify-login", "memory-config", "everything-config", "tools-list", "tool-run", "personas-list", "skills-list", "skills-get", "skills-save", "skills-add", "skills-create", "skills-remove", "skillmake", "skilladd", "skillload", "skillunload", "tool-preview", "tool-safety-set", "conv-new", "conv-list", "conv-show", "conv-switch", "conv-delete", "logs", "logs-list", "logs-show", "logs-clear", "organize-json", "mode", "mode-set", "voice-config", "speak", "listen", "transcribe", "sched-list", "sched-tick", "sched-daemon", "sched-ask-log", "sched-add", "sched-show", "sched-cancel", "sched-pause", "sched-resume", "sched-snooze", "sched-approve", "sched-signal", "sched-clear", "notify-send", "notify-list", "notify-history", "notify-ack", "notify-clear", "notify-config", "conv-search", "mcp-status", "mcp-refresh", "mcp-config", "mcp-call", "channels-config", "channels-status", "channels-set", "channels-allow", "channels-deny", "channels-test", "channels-whoami", "channels-log", "channels-directory", "channels-people", "channels-follow", "channels-block", "discord-daemon", "instagram-serve", "logs-search", "mcp-tools", "daemons", "daemon-start", "daemon-stop", "daemon-restart", "daemon-status", "daemon-console", "daemon-input", "daemon-schedule", "daemon-add", "daemon-edit", "daemon-remove", "daemon-run", "daemons-tick", "logs-files", "logs-tail", "logs-sets", "backlog", "backlog-add", "backlog-done", "backlog-update", "backlog-remove", "backlog-board", "ambient", "ambient-tick", "onboard", "ui-mode", "subagent-keys", "subagents", "subagent-spawn", "subagent-run", "subagent-status", "subagent-cancel", "think", CHAIN_SEP, PARALLEL_SEP, "-h", "--help"}
+RESERVED_NAMES = {"config", "ai-config", "ai-clear", "ai-drop-from", "playnite-config", "spotify-config", "spotify-login", "memory-config", "everything-config", "tools-list", "tool-run", "personas-list", "skills-list", "skills-get", "skills-save", "skills-add", "skills-create", "skills-remove", "skillmake", "skilladd", "skillload", "skillunload", "tool-preview", "tool-safety-set", "conv-new", "conv-list", "conv-show", "conv-switch", "conv-delete", "logs", "logs-list", "logs-show", "logs-append-run", "logs-clear", "organize-json", "mode", "mode-set", "voice-config", "speak", "listen", "transcribe", "sched-list", "sched-tick", "sched-daemon", "sched-ask-log", "sched-add", "sched-show", "sched-cancel", "sched-pause", "sched-resume", "sched-snooze", "sched-approve", "sched-signal", "sched-clear", "notify-send", "notify-list", "notify-history", "notify-ack", "notify-clear", "notify-config", "conv-search", "mcp-status", "mcp-refresh", "mcp-config", "mcp-call", "channels-config", "channels-status", "channels-set", "channels-allow", "channels-deny", "channels-test", "channels-whoami", "channels-log", "channels-directory", "channels-people", "channels-follow", "channels-block", "discord-daemon", "instagram-serve", "logs-search", "mcp-tools", "daemons", "daemon-start", "daemon-stop", "daemon-restart", "daemon-status", "daemon-console", "daemon-input", "daemon-schedule", "daemon-add", "daemon-edit", "daemon-remove", "daemon-run", "daemons-tick", "logs-files", "logs-tail", "logs-sets", "backlog", "backlog-add", "backlog-done", "backlog-update", "backlog-remove", "backlog-board", "ambient", "ambient-tick", "onboard", "ui-mode", "subagent-keys", "subagents", "subagent-spawn", "subagent-run", "subagent-status", "subagent-cancel", "think", CHAIN_SEP, PARALLEL_SEP, "-h", "--help"}
 
 OUT = Palette(sys.stdout)  # actual command output: the banner, the command list
 ERR = Palette(sys.stderr)  # jarvis's own status/trace/error messages
@@ -1882,6 +1882,58 @@ def main():
                 limit = None
         entries = logs_mod.read_entries(conv_id, limit=limit or 50)
         print(json.dumps({"id": conv_id, "entries": entries}, indent=2))
+        return
+
+    if argv[0] == "logs-append-run":
+        # Persists one directly-run "jarvis <cmd>" invocation's console
+        # output to the current conversation's log (~/.jarvis/logs/
+        # <conv_id>.jsonl) — the same file ask() already writes request/
+        # response/tool_call/info entries to (see logs.py). Bridges a real
+        # gap: an ask's tool-call output is logged from inside *this same
+        # process* as it happens (see ai_client.py), but a directly-run
+        # command from the web UI's Command Builder / Live Output console
+        # panel (server.js's "run" websocket message) is a totally separate
+        # spawn with no ask() in the loop to log anything — until now that
+        # output only ever lived in the browser tab's live websocket
+        # stream and vanished the moment the page reloaded or the
+        # conversation was switched away from and back. server.js calls
+        # this once, after the run finishes, with the exact buffer of
+        # lines it already relayed live — this process doesn't re-capture
+        # anything, just appends it to disk.
+        from . import logs as logs_mod
+        from . import conversations
+        conv_id = os.environ.get("JARVIS_CONVERSATION_ID", "").strip()
+        if not conversations.is_valid_id(conv_id):
+            # No conversation selected in the UI when the run happened —
+            # nothing to attach this to. Not an error: plenty of runs
+            # (e.g. from a terminal, or before any chat is picked) legitimately
+            # have nowhere to go.
+            print(json.dumps({"ok": True, "skipped": "no conversation"}))
+            return
+        try:
+            payload = json.loads(sys.stdin.read() or "{}")
+        except (json.JSONDecodeError, ValueError):
+            print(json.dumps({"error": "malformed payload"}))
+            sys.exit(1)
+        raw_lines = payload.get("lines")
+        if not isinstance(raw_lines, list):
+            raw_lines = []
+        lines = []
+        for item in raw_lines[:5000]:
+            if isinstance(item, dict):
+                stream = item.get("stream") if item.get("stream") in ("out", "err") else "out"
+                text = item.get("text")
+            else:
+                stream, text = "out", item
+            lines.append({"stream": stream, "text": str(text) if text is not None else ""})
+        entry = {
+            "cmdline": str(payload.get("cmdline") or "")[:2000],
+            "lines": lines,
+            "exit_code": payload.get("exit_code"),
+            "signal": payload.get("signal"),
+        }
+        logs_mod.log(conv_id, "command_run", entry)
+        print(json.dumps({"ok": True}))
         return
 
     if argv[0] == "logs-clear":
