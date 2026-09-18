@@ -43,7 +43,7 @@ ENCODING = "utf-8"
 
 CHAIN_SEP = "then"      # starts a new batch \u2014 waits for the previous one to finish
 PARALLEL_SEP = "and"    # joins the current batch \u2014 runs alongside whatever's already in it
-RESERVED_NAMES = {"config", "ai-config", "ai-clear", "ai-drop-from", "playnite-config", "spotify-config", "spotify-login", "memory-config", "everything-config", "tools-list", "tool-run", "personas-list", "skills-list", "skills-get", "skills-save", "skills-add", "skills-create", "skills-remove", "skillmake", "skilladd", "skillload", "skillunload", "tool-preview", "tool-safety-set", "conv-new", "conv-list", "conv-show", "conv-switch", "conv-delete", "logs", "logs-list", "logs-show", "logs-clear", "organize-json", "mode", "mode-set", "voice-config", "speak", "listen", "transcribe", "sched-list", "sched-tick", "sched-daemon", "sched-ask-log", "sched-add", "sched-show", "sched-cancel", "sched-pause", "sched-resume", "sched-snooze", "sched-approve", "sched-signal", "sched-clear", "notify-send", "notify-list", "notify-ack", "notify-clear", "notify-config", "conv-search", "mcp-status", "mcp-refresh", "mcp-config", "mcp-call", "channels-config", "channels-status", "channels-set", "channels-allow", "channels-deny", "channels-test", "channels-whoami", "channels-log", "channels-directory", "channels-people", "channels-follow", "channels-block", "discord-daemon", "instagram-serve", "logs-search", "mcp-tools", "daemons", "daemon-start", "daemon-stop", "daemon-restart", "daemon-status", "daemon-console", "daemon-input", "daemon-schedule", "daemon-add", "daemon-edit", "daemon-remove", "daemon-run", "daemons-tick", "logs-files", "logs-tail", "logs-sets", "backlog", "backlog-add", "backlog-done", "backlog-update", "backlog-remove", "backlog-board", "ambient", "ambient-tick", "onboard", "ui-mode", CHAIN_SEP, PARALLEL_SEP, "-h", "--help"}
+RESERVED_NAMES = {"config", "ai-config", "ai-clear", "ai-drop-from", "playnite-config", "spotify-config", "spotify-login", "memory-config", "everything-config", "tools-list", "tool-run", "personas-list", "skills-list", "skills-get", "skills-save", "skills-add", "skills-create", "skills-remove", "skillmake", "skilladd", "skillload", "skillunload", "tool-preview", "tool-safety-set", "conv-new", "conv-list", "conv-show", "conv-switch", "conv-delete", "logs", "logs-list", "logs-show", "logs-clear", "organize-json", "mode", "mode-set", "voice-config", "speak", "listen", "transcribe", "sched-list", "sched-tick", "sched-daemon", "sched-ask-log", "sched-add", "sched-show", "sched-cancel", "sched-pause", "sched-resume", "sched-snooze", "sched-approve", "sched-signal", "sched-clear", "notify-send", "notify-list", "notify-ack", "notify-clear", "notify-config", "conv-search", "mcp-status", "mcp-refresh", "mcp-config", "mcp-call", "channels-config", "channels-status", "channels-set", "channels-allow", "channels-deny", "channels-test", "channels-whoami", "channels-log", "channels-directory", "channels-people", "channels-follow", "channels-block", "discord-daemon", "instagram-serve", "logs-search", "mcp-tools", "daemons", "daemon-start", "daemon-stop", "daemon-restart", "daemon-status", "daemon-console", "daemon-input", "daemon-schedule", "daemon-add", "daemon-edit", "daemon-remove", "daemon-run", "daemons-tick", "logs-files", "logs-tail", "logs-sets", "backlog", "backlog-add", "backlog-done", "backlog-update", "backlog-remove", "backlog-board", "ambient", "ambient-tick", "onboard", "ui-mode", "subagent-keys", "subagents", "subagent-spawn", "subagent-run", "subagent-status", "subagent-cancel", CHAIN_SEP, PARALLEL_SEP, "-h", "--help"}
 
 OUT = Palette(sys.stdout)  # actual command output: the banner, the command list
 ERR = Palette(sys.stderr)  # jarvis's own status/trace/error messages
@@ -2155,6 +2155,124 @@ def main():
             "unloaded": True, "name": real_name,
             "scope": conv_id or "global (every conversation)",
         }, indent=2))
+        return
+
+    if argv[0] == "subagent-keys":
+        # jarvis subagent-keys                              -- list pools (redacted)
+        # jarvis subagent-keys <role> <provider> <key> [k2 ...]  -- set a pool
+        # jarvis subagent-keys <role> --clear                -- remove a pool
+        #
+        # A subagent role with no pool here refuses to spawn rather than
+        # falling back to the main jarvis key — see subagents.py's docstring
+        # for why that's enforced structurally, not just by convention.
+        from . import subagents as subagents_mod
+        if len(argv) < 2:
+            print(json.dumps({"pools": subagents_mod.describe_pools()}, indent=2))
+            return
+        role = argv[1].strip().lower()
+        if not role:
+            print(json.dumps({"error": "usage: jarvis subagent-keys <role> <provider> <key> [key2 ...]"}))
+            sys.exit(1)
+        cfg = subagents_mod.load_config()
+        if len(argv) >= 3 and argv[2] == "--clear":
+            cfg.setdefault("key_pools", {}).pop(role, None)
+            subagents_mod.save_config(cfg)
+            print(json.dumps({"cleared": role}, indent=2))
+            return
+        if len(argv) < 4:
+            print(json.dumps({"error": "usage: jarvis subagent-keys <role> <provider> <key> [key2 ...]"}))
+            sys.exit(1)
+        provider, keys = argv[2].strip(), [k.strip() for k in argv[3:] if k.strip()]
+        if not provider or not keys:
+            print(json.dumps({"error": "need a provider name and at least one key"}))
+            sys.exit(1)
+        cfg.setdefault("key_pools", {})[role] = {"provider": provider, "api_keys": keys}
+        subagents_mod.save_config(cfg)
+        print(json.dumps({
+            "role": role, "provider": provider, "key_count": len(keys),
+        }, indent=2))
+        return
+
+    if argv[0] == "subagents":
+        # jarvis subagents                    -- list known roles + recent subagent tasks
+        # jarvis subagents --parent <task_id>  -- only that parent's children
+        from . import subagents as subagents_mod, tasks
+        parent_id = None
+        if len(argv) >= 3 and argv[1] == "--parent":
+            parent_id = argv[2].strip()
+        cfg = subagents_mod.load_config()
+        roles = [
+            {"name": name, "description": spec.get("description"),
+             "builtin": spec.get("builtin", False),
+             "pool_configured": subagents_mod.key_pool(name, cfg) is not None}
+            for name, spec in sorted(subagents_mod.agents(cfg).items())
+        ]
+        pool = subagents_mod.children(parent_id) if parent_id else [
+            t for t in tasks.all_tasks(include_terminal=True) if t.get("agent")
+        ]
+        print(json.dumps({
+            "max_concurrent": cfg.get("max_concurrent"),
+            "roles": roles,
+            "running_now": subagents_mod.running_count(parent_id),
+            "tasks": [tasks.describe(t) for t in pool[:50]],
+        }, indent=2))
+        return
+
+    if argv[0] == "subagent-spawn":
+        # jarvis subagent-spawn <role> <goal...>
+        from . import subagents as subagents_mod
+        if len(argv) < 3:
+            print(json.dumps({"error": "usage: jarvis subagent-spawn <role> <goal...>"}))
+            sys.exit(1)
+        role = argv[1].strip()
+        goal = " ".join(argv[2:]).strip()
+        try:
+            task = subagents_mod.spawn(role, goal)
+        except subagents_mod.SubagentError as exc:
+            print(json.dumps({"error": str(exc)}))
+            sys.exit(1)
+        print(json.dumps({
+            "task_id": task["id"], "role": role, "goal": goal,
+            "status": task["status"],
+            "note": "run 'jarvis sched-daemon' to advance it in the background, "
+                    "or 'jarvis subagent-run " + task["id"] + "' to drive it now.",
+        }, indent=2))
+        return
+
+    if argv[0] == "subagent-run":
+        # jarvis subagent-run <task_id> [task_id2 ...]
+        # Synchronously drives the named subagent task(s) to completion —
+        # the same loop run_subagents (the ask-time tool) uses, exposed
+        # directly so a subagent can be advanced from a terminal without
+        # needing the scheduler daemon running.
+        from . import subagent_tools
+        if len(argv) < 2:
+            print(json.dumps({"error": "usage: jarvis subagent-run <task_id> [task_id2 ...]"}))
+            sys.exit(1)
+        result = subagent_tools.tool_run_subagents({"task_ids": argv[1:]})
+        print(json.dumps(result, indent=2))
+        sys.exit(0 if result.get("all_finished") else 1)
+
+    if argv[0] == "subagent-status":
+        from . import subagent_tools
+        if len(argv) < 2:
+            print(json.dumps({"error": "usage: jarvis subagent-status <task_id>"}))
+            sys.exit(1)
+        result = subagent_tools.tool_subagent_status({"task_id": argv[1].strip()})
+        print(json.dumps(result, indent=2))
+        sys.exit(1 if result.get("error") else 0)
+
+    if argv[0] == "subagent-cancel":
+        from . import tasks
+        if len(argv) < 2:
+            print(json.dumps({"error": "usage: jarvis subagent-cancel <task_id>"}))
+            sys.exit(1)
+        try:
+            task = tasks.cancel(argv[1].strip())
+        except tasks.TaskError as exc:
+            print(json.dumps({"error": str(exc)}))
+            sys.exit(1)
+        print(json.dumps({"id": task["id"], "status": task["status"]}, indent=2))
         return
 
     if argv[0] in ("conv-search",) or argv[0].startswith("mcp-"):

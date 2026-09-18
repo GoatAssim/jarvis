@@ -44,6 +44,7 @@ from .skill_tools import TOOL_SCHEMAS as SKILL_TOOL_SCHEMAS, TOOLS as SKILL_TOOL
 from .radio_tools import RADIO_TOOL_SCHEMAS, RADIO_TOOLS
 from .audio_tools import AUDIO_TOOL_SCHEMAS, AUDIO_TOOLS
 from .vision_tools import VISION_TOOL_SCHEMAS, VISION_TOOLS
+from .subagent_tools import SUBAGENT_TOOL_SCHEMAS, SUBAGENT_TOOLS
 from .screenshot_tools import SCREENSHOT_TOOL_SCHEMAS, SCREENSHOT_TOOLS
 from .spotify_tools import SPOTIFY_TOOL_SCHEMAS, SPOTIFY_TOOLS
 from .web_tools import WEB_TOOL_SCHEMAS, WEB_TOOLS
@@ -542,6 +543,7 @@ CORE_TOOL_SCHEMAS = [
     *RADIO_TOOL_SCHEMAS,
     *AUDIO_TOOL_SCHEMAS,
     *VISION_TOOL_SCHEMAS,
+    *SUBAGENT_TOOL_SCHEMAS,
     *GIT_TOOL_SCHEMAS,
     *SCREENSHOT_TOOL_SCHEMAS,
     *DESKTOP_TOOL_SCHEMAS,
@@ -777,6 +779,7 @@ TOOLS = {
     **RADIO_TOOLS,
     **AUDIO_TOOLS,
     **VISION_TOOLS,
+    **SUBAGENT_TOOLS,
     **GIT_TOOLS,
     **SCREENSHOT_TOOLS,
     **DESKTOP_TOOLS,
@@ -1034,7 +1037,7 @@ def execute_tool(name, arguments=None, verbosity=None, context=None):
     if fn is None:
         return {"error": f"no such tool: {name}"}
     try:
-        if name in COMMAND_TOOLS or name in PLAYNITE_TOOLS or name in WEB_TOOLS or name in PKG_TOOLS or name in SPOTIFY_TOOLS or name in MEMORY_TOOLS or name in CAPACITY_TOOLS or name in RADIO_TOOLS or name in AUDIO_TOOLS or name in VISION_TOOLS or name in GIT_TOOLS or name in SCREENSHOT_TOOLS or name in DESKTOP_TOOLS or name in OCR_TOOLS or name in FILE_TOOLS or name in CUSTOM_TOOLS or name in YTDL_TOOLS or name in EVERYTHING_TOOLS or name in ORGANIZE_JSON_TOOLS or name in PRESENT_TOOLS or name in SKILL_TOOLS or name in AUTO_TOOLS or name in ("search_tools", "get_tool_schema"):
+        if name in COMMAND_TOOLS or name in PLAYNITE_TOOLS or name in WEB_TOOLS or name in PKG_TOOLS or name in SPOTIFY_TOOLS or name in MEMORY_TOOLS or name in CAPACITY_TOOLS or name in RADIO_TOOLS or name in AUDIO_TOOLS or name in VISION_TOOLS or name in SUBAGENT_TOOLS or name in GIT_TOOLS or name in SCREENSHOT_TOOLS or name in DESKTOP_TOOLS or name in OCR_TOOLS or name in FILE_TOOLS or name in CUSTOM_TOOLS or name in YTDL_TOOLS or name in EVERYTHING_TOOLS or name in ORGANIZE_JSON_TOOLS or name in PRESENT_TOOLS or name in SKILL_TOOLS or name in AUTO_TOOLS or name in ("search_tools", "get_tool_schema"):
             if _accepts_context(fn) and context is not None:
                 result = fn(arguments or {}, context)
             else:

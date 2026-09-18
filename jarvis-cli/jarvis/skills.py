@@ -192,6 +192,11 @@ def render_frontmatter(meta):
 def _skill_dirs():
     try:
         SKILLS_DIR.mkdir(parents=True, exist_ok=True)
+        # The single choke point every lookup path routes through
+        # (list_skills, find_skill, and catalog_text via list_skills) — see
+        # ensure_builtin_skills()'s docstring for why seeding lives here and
+        # not in any one caller.
+        ensure_builtin_skills()
         return sorted((p for p in SKILLS_DIR.iterdir() if p.is_dir()), key=lambda p: p.name)
     except OSError:
         # A read-only or missing home directory must never take jarvis down;
@@ -273,6 +278,139 @@ def list_skills(include_body=False):
             entry["body"] = body
         out.append(entry)
     return out
+
+
+# ---------------------------------------------------------------------------
+# Built-in skill seeding
+# ---------------------------------------------------------------------------
+#
+# jarvis ships zero skills by default — SKILLS_DIR starts empty and every
+# skill is something someone installed. `consult` is the one exception: the
+# handoff specifically asked for a "/consult fires up subagents to argue"
+# skill, and the point of building it as a SKILL.md rather than a Python
+# function is that the debate strategy (which roles, how many, how the
+# synthesis reads) is then editable text, not a patch. So it has to actually
+# exist somewhere the first time someone asks for it, without a separate
+# install step.
+#
+# Seeding is idempotent via a marker file, not by re-checking whether the
+# folder exists: if it only checked existence, deleting the skill on purpose
+# would just resurrect it on the next ask. The marker records "we already
+# tried to seed this slug once" — after that, its presence or absence is the
+# user's call.
+
+BUILTIN_SKILLS_MARKER = SKILLS_DIR / ".seeded_builtins.json"
+
+_CONSULT_INSTRUCTIONS = """\
+Run a two-sided review of a question using subagents, then synthesize.
+
+## When to use this
+
+The user asks you to "consult", "get a second opinion", "argue both sides",
+"debate this", or asks a genuinely contestable question ("should we do X",
+"is Y a good idea") where a single pass from you risks just agreeing with
+however the question was framed.
+
+## What to do
+
+1. Call `list_subagent_roles`. Confirm `advocate` and `skeptic` both show
+   `pool_configured: true`. If either doesn't, tell the user which role has
+   no API key pool and how to add one (`jarvis subagent-keys <role>
+   <provider> <key>`) instead of trying to spawn it anyway.
+
+2. Call `spawn_subagent` twice with the SAME goal — the user's question,
+   restated precisely — once with `role="advocate"` and once with
+   `role="skeptic"`. Use `notes` to add any context the user gave you that
+   the subagents will need but that isn't in the question itself.
+
+   This is deliberately two subagents, not five: each one spends real API
+   credits on its own key pool, and two opposing takes already surface the
+   disagreement that matters. Five would cost more for the same answer.
+
+3. Call `run_subagents` with `parent_id` set to the task these subagents
+   were spawned under (spawn_subagent returns it), OR with both `task_ids`
+   if there's no parent task. Wait for `all_finished: true` — don't
+   summarize partial results.
+
+4. Read both verdicts. Present the user:
+   - The advocate's case, in your own words, briefly.
+   - The skeptic's case, in your own words, briefly.
+   - Where they actually disagree vs. where they agree despite arguing
+     opposite sides — agreement THROUGH disagreement is the most useful
+     signal here, more useful than either side's confidence alone.
+   - Your own read of which case is stronger, if you have one, clearly
+     marked as your view and not theirs.
+
+Do not just concatenate their two replies. The user asked you to consult
+two views, not relay a transcript — synthesize.
+
+## If a subagent comes back blocked or failed
+
+Say so plainly rather than papering over it with the other side's answer
+alone. "The skeptic's subagent hit an error and couldn't complete — here's
+just the advocate's case" is honest; presenting one side as if it were the
+whole consultation is not.
+"""
+
+BUILTIN_SKILLS = {
+    "consult": {
+        "name": "Consult",
+        "description": (
+            "Get two opposing subagent takes (advocate vs skeptic) on a "
+            "contestable question and synthesize them. Use for \"consult\", "
+            "\"second opinion\", \"argue both sides\", \"debate this\"."
+        ),
+        "instructions": _CONSULT_INSTRUCTIONS,
+        "keywords": ["consult", "debate", "second opinion", "argue", "pros and cons"],
+    },
+}
+
+
+def _read_seeded_marker():
+    try:
+        data = json.loads(BUILTIN_SKILLS_MARKER.read_text(encoding=ENCODING))
+        return set(data) if isinstance(data, list) else set()
+    except Exception:
+        return set()
+
+
+def _write_seeded_marker(slugs):
+    try:
+        SKILLS_DIR.mkdir(parents=True, exist_ok=True)
+        BUILTIN_SKILLS_MARKER.write_text(
+            json.dumps(sorted(slugs)), encoding=ENCODING)
+    except OSError:
+        pass  # best-effort; worst case we re-attempt next call, which is harmless
+
+
+_seeded_this_process = False
+
+
+def ensure_builtin_skills():
+    """Seed any not-yet-attempted built-in skill. Cheap after the first call
+    in a process, and cheap even on the first call once the marker exists —
+    the common case is "nothing to do", so this is safe to call on every
+    catalog_text().
+    """
+    global _seeded_this_process
+    if _seeded_this_process:
+        return
+    _seeded_this_process = True
+
+    already = _read_seeded_marker()
+    missing = set(BUILTIN_SKILLS) - already
+    if not missing:
+        return
+
+    for slug in missing:
+        spec = BUILTIN_SKILLS[slug]
+        # create_skill refuses if the folder exists, which covers the case
+        # where a user made their own skill with this slug before it was
+        # ever a builtin — their content wins, we don't overwrite it.
+        create_skill(spec["name"], spec["description"], spec["instructions"],
+                    keywords=spec.get("keywords"))
+        already.add(slug)
+    _write_seeded_marker(already)
 
 
 def catalog_text(max_skills=40):
