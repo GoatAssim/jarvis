@@ -15,12 +15,13 @@ import sys
 
 from .channels import PLATFORMS, PERM_SETS
 from .channels import config as channel_config
-from .channels import directory, outbound, permissions, transcript
+from .channels import directory, outbound, people, permissions, transcript
 
 COMMANDS = (
     "channels-config", "channels-status", "channels-set", "channels-allow",
     "channels-deny", "channels-test", "channels-whoami", "channels-log",
-    "channels-directory",
+    "channels-directory", "channels-people", "channels-follow",
+    "channels-block",
     "discord-daemon", "instagram-serve", "logs-search",
 )
 
@@ -34,6 +35,9 @@ USAGE = """channel commands:
   channels-whoami                       how to find your stable user id
   channels-log   <platform> <thread>    print a thread's transcript
   channels-directory [platform]         list known @handle -> id mappings
+  channels-people [platform] [--pending] who has messaged Jarvis, and what it knows about them
+  channels-follow <platform> <id|@handle> approve someone: adds them to reply_allowlist
+  channels-block  <platform> <id|@handle> refuse someone, and stop being asked about them
   discord-daemon                        run the Discord bot (foreground)
   instagram-serve                       run the Instagram webhook (foreground)
   logs-search <query> [--mode m] [--origin o] [--source s] [--direction d]
@@ -175,6 +179,63 @@ def handle(argv):
         print(json.dumps({"ok": True, "count": len(entries),
                           "entries": entries}, indent=2))
         return
+
+    if cmd == "channels-people":
+        platform = rest[0] if rest and rest[0] in PLATFORMS else None
+        follow = people.FOLLOW_PENDING if "--pending" in rest else None
+        entries = people.all_people(platform, follow=follow)
+        print(json.dumps({
+            "ok": True, "count": len(entries),
+            "people": entries,
+            "summary": [people.describe(e) for e in entries],
+        }, indent=2))
+        return
+
+    if cmd in ("channels-follow", "channels-block"):
+        if len(rest) < 2:
+            _fail(f"usage: {cmd} <platform> <id-or-@handle>")
+        platform, entry = rest[0], rest[1]
+        if platform not in PLATFORMS:
+            _fail(f"unknown platform '{platform}' — use "
+                  + " or ".join(PLATFORMS))
+        user_id = people.resolve_user_id(platform, entry)
+        if not user_id:
+            _fail(f"don't know anyone called '{entry}' on {platform} yet. "
+                  f"Run `jarvis channels-people {platform}` to see who has "
+                  f"actually messaged in.")
+
+        if cmd == "channels-block":
+            # No allowlist write. Blocking is the ABSENCE of permission,
+            # and the allowlists already fail closed — so "blocked" only
+            # has to mean "stop asking me about this person". Actively
+            # removing them would silently undo a deliberate
+            # channels-allow, which is a surprising thing for a command
+            # whose job is to answer a notification prompt.
+            record = people.set_follow(platform, user_id,
+                                       people.FOLLOW_BLOCKED)
+            print(json.dumps({"ok": True, "platform": platform,
+                              "user_id": user_id, "follow": record["follow"],
+                              "note": ("recorded — they stay off every "
+                                       "allowlist, and you won't be asked "
+                                       "about them again")}, indent=2))
+            return
+
+        # Approving is a real permission change, so it goes through the
+        # same add_to_set() that channels-allow uses rather than a second
+        # path into the config — permissions.py must keep exactly one
+        # source of truth for who may be answered (see people.py).
+        ok, err = channel_config.add_to_set(platform, "reply_allowlist",
+                                            str(user_id))
+        record = people.set_follow(platform, user_id, people.FOLLOW_APPROVED)
+        print(json.dumps({
+            "ok": ok, "error": err, "platform": platform,
+            "user_id": user_id, "follow": record["follow"],
+            "added_to": "reply_allowlist",
+            "note": ("they can be answered now. Tools stay off until you "
+                     "also run: jarvis channels-allow "
+                     f"{platform} tool {user_id}"),
+        }, indent=2))
+        sys.exit(0 if ok else 1)
 
     if cmd == "channels-log":
         if len(rest) < 2:

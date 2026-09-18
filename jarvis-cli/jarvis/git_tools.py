@@ -88,9 +88,11 @@ def tool_git_run(args):
     if err:
         return err
 
+    # NOTE: `force` is computed but only read by the confirmation check
+    # below, which re-derives the push case itself. The old two lines here
+    # ("if cmd == 'push' and not force: force = False") set an already-False
+    # variable to False and did nothing at all.
     force = any(_FORCE.match(a) for a in extra) or cmd in ("reset", "clean")
-    if cmd == "push" and not force:
-        force = False
     if cmd in ("reset", "clean") or (cmd == "push" and any(a in ("--force", "-f", "--force-with-lease") for a in extra)):
         blocked = _need_confirm(args, f"git {cmd} {' '.join(extra)}".strip())
         if blocked:

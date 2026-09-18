@@ -1094,6 +1094,237 @@ app.post("/api/scheduled/tick", requireJarvis, async (req, res) => {
   return res.json(result || { ok: false, error: "tick failed" });
 });
 
+// ---------------------------------------------------------------------------
+// Daemons, raw log search, backlog, ambient monitoring, onboarding.
+//
+// Every one of these shells out to the same `jarvis` subcommand the CLI
+// exposes, exactly like the scheduled/channels routes above. Nothing here
+// reimplements a rule in JS — a permission check or a status reconciliation
+// that existed in two places would drift, and the Python side is the one
+// with the tests.
+// ---------------------------------------------------------------------------
+
+// Daemon ids are used as argv and as a path segment under ~/.jarvis/daemons,
+// so they are validated here against the same character set daemons.py's
+// normalize_id() allows. Rejecting rather than silently normalizing means a
+// typo is an error the user sees, not a different daemon being acted on.
+const DAEMON_ID = /^[a-z0-9][a-z0-9_-]{0,39}$/;
+
+function badDaemonId(id, res) {
+  if (typeof id !== "string" || !DAEMON_ID.test(id)) {
+    res.status(400).json({ error: "Invalid daemon id." });
+    return true;
+  }
+  return false;
+}
+
+app.get("/api/daemons", requireJarvis, async (req, res) => {
+  const result = await runJarvisOnce(["daemons"], 15000);
+  return parseJarvisJSON(result, res, "Couldn't list daemons.");
+});
+
+// Fixed verb list, same reasoning as SCHED_ACTIONS: a request body must
+// never be able to name an arbitrary `daemon-*` argv.
+const DAEMON_ACTIONS = new Set(["start", "stop", "restart", "status"]);
+
+app.post("/api/daemons/:id/:action", requireJarvis, async (req, res) => {
+  const { id, action } = req.params;
+  if (badDaemonId(id, res)) return;
+  if (!DAEMON_ACTIONS.has(action)) {
+    return res.status(400).json({ error: "Unknown action." });
+  }
+  // stop() waits on the process, so it needs more headroom than a query.
+  const result = await runJarvisOnce([`daemon-${action}`, id], 30000);
+  return parseJarvisJSON(result, res, "Couldn't update that daemon.");
+});
+
+app.get("/api/daemons/:id/console", requireJarvis, async (req, res) => {
+  const { id } = req.params;
+  if (badDaemonId(id, res)) return;
+  const lines = String(req.query?.lines || "200").replace(/[^0-9]/g, "") || "200";
+  const args = ["daemon-console", id, "--lines", lines, "--json"];
+  if (typeof req.query?.file === "string" && req.query.file.trim()) {
+    args.push("--file", req.query.file.trim());
+  }
+  const result = await runJarvisOnce(args, 15000);
+  return parseJarvisJSON(result, res, "Couldn't read that console.");
+});
+
+app.post("/api/daemons/:id/input", requireJarvis, async (req, res) => {
+  const { id } = req.params;
+  if (badDaemonId(id, res)) return;
+  const text = typeof req.body?.text === "string" ? req.body.text : "";
+  if (!text.trim()) return res.status(400).json({ error: "Nothing to send." });
+  const result = await runJarvisOnce(["daemon-input", id, text], 10000);
+  return parseJarvisJSON(result, res, "Couldn't send that input.");
+});
+
+app.post("/api/daemons/:id/schedule", requireJarvis, async (req, res) => {
+  const { id } = req.params;
+  if (badDaemonId(id, res)) return;
+  const when = typeof req.body?.when === "string" ? req.body.when.trim() : "";
+  const result = await runJarvisOnce(["daemon-schedule", id, when], 10000);
+  return parseJarvisJSON(result, res, "Couldn't schedule that daemon.");
+});
+
+app.post("/api/daemons", requireJarvis, async (req, res) => {
+  const id = typeof req.body?.id === "string" ? req.body.id.trim() : "";
+  const command = typeof req.body?.command === "string" ? req.body.command.trim() : "";
+  if (badDaemonId(id, res)) return;
+  if (!command) return res.status(400).json({ error: "A command is required." });
+  const args = ["daemon-add", id, command];
+  if (req.body?.name) args.push("--name", String(req.body.name));
+  if (req.body?.cwd) args.push("--cwd", String(req.body.cwd));
+  if (req.body?.stdin) args.push("--stdin");
+  if (req.body?.autostart) args.push("--autostart");
+  for (const pair of Array.isArray(req.body?.env) ? req.body.env : []) {
+    if (typeof pair === "string" && pair.includes("=")) args.push("--env", pair);
+  }
+  const result = await runJarvisOnce(args, 15000);
+  return parseJarvisJSON(result, res, "Couldn't add that daemon.");
+});
+
+app.patch("/api/daemons/:id", requireJarvis, async (req, res) => {
+  const { id } = req.params;
+  if (badDaemonId(id, res)) return;
+  const args = ["daemon-edit", id];
+  const flags = { name: "--name", cwd: "--cwd", command: "--command", notes: "--notes" };
+  for (const [key, flag] of Object.entries(flags)) {
+    if (typeof req.body?.[key] === "string") args.push(flag, req.body[key]);
+  }
+  for (const key of ["enabled", "autostart", "stdin"]) {
+    if (typeof req.body?.[key] === "boolean") {
+      args.push(`--${key}`, req.body[key] ? "true" : "false");
+    }
+  }
+  if (args.length === 2) return res.status(400).json({ error: "Nothing to change." });
+  const result = await runJarvisOnce(args, 15000);
+  return parseJarvisJSON(result, res, "Couldn't update that daemon.");
+});
+
+app.delete("/api/daemons/:id", requireJarvis, async (req, res) => {
+  const { id } = req.params;
+  if (badDaemonId(id, res)) return;
+  const result = await runJarvisOnce(["daemon-remove", id], 10000);
+  return parseJarvisJSON(result, res, "Couldn't remove that daemon.");
+});
+
+// Raw log-FILE search. Distinct from /api/logs-search above, which searches
+// parsed conversation entries — see log_files.py's module docstring.
+app.get("/api/log-files/search", requireJarvis, async (req, res) => {
+  const query = typeof req.query?.q === "string" ? req.query.q.trim() : "";
+  if (!query) return res.status(400).json({ error: "A query is required." });
+  const args = ["logs-files", query];
+  const mode = String(req.query?.mode || "");
+  if (["words", "phrase", "regex"].includes(mode)) args.push("--mode", mode);
+  const sets = [].concat(req.query?.set || []);
+  for (const one of sets) {
+    if (typeof one === "string" && /^[a-z]+$/.test(one)) args.push("--set", one);
+  }
+  if (typeof req.query?.path === "string" && req.query.path.trim()) {
+    args.push("--path", req.query.path.trim());
+  }
+  const context = String(req.query?.context || "").replace(/[^0-9]/g, "");
+  if (context) args.push("--context", context);
+  const limit = String(req.query?.limit || "").replace(/[^0-9]/g, "");
+  if (limit) args.push("--limit", limit);
+  const result = await runJarvisOnce(args, 30000);
+  return parseJarvisJSON(result, res, "Log search failed.");
+});
+
+app.get("/api/log-files/sets", requireJarvis, async (req, res) => {
+  const result = await runJarvisOnce(["logs-sets"], 10000);
+  return parseJarvisJSON(result, res, "Couldn't list log sets.");
+});
+
+// Backlog.
+app.get("/api/backlog", requireJarvis, async (req, res) => {
+  const result = await runJarvisOnce(["backlog-board"], 10000);
+  return parseJarvisJSON(result, res, "Couldn't read the backlog.");
+});
+
+app.post("/api/backlog", requireJarvis, async (req, res) => {
+  const title = typeof req.body?.title === "string" ? req.body.title.trim() : "";
+  if (!title) return res.status(400).json({ error: "A title is required." });
+  const args = ["backlog-add", title];
+  for (const key of ["project", "state", "priority", "note"]) {
+    if (typeof req.body?.[key] === "string" && req.body[key].trim()) {
+      args.push(`--${key}`, req.body[key].trim());
+    }
+  }
+  const result = await runJarvisOnce(args, 10000);
+  return parseJarvisJSON(result, res, "Couldn't add that item.");
+});
+
+app.patch("/api/backlog/:id", requireJarvis, async (req, res) => {
+  const { id } = req.params;
+  if (!/^b_[a-f0-9]{4,12}$/.test(id)) {
+    return res.status(400).json({ error: "Invalid item id." });
+  }
+  const args = ["backlog-update", id];
+  const flags = {
+    state: "--state", priority: "--priority", blocked_on: "--blocked-on",
+    note: "--note", project: "--project", title: "--title",
+  };
+  for (const [key, flag] of Object.entries(flags)) {
+    if (typeof req.body?.[key] === "string") args.push(flag, req.body[key]);
+  }
+  if (args.length === 2) return res.status(400).json({ error: "Nothing to change." });
+  const result = await runJarvisOnce(args, 10000);
+  return parseJarvisJSON(result, res, "Couldn't update that item.");
+});
+
+app.delete("/api/backlog/:id", requireJarvis, async (req, res) => {
+  const { id } = req.params;
+  if (!/^b_[a-f0-9]{4,12}$/.test(id)) {
+    return res.status(400).json({ error: "Invalid item id." });
+  }
+  const result = await runJarvisOnce(["backlog-remove", id], 10000);
+  return parseJarvisJSON(result, res, "Couldn't remove that item.");
+});
+
+// Ambient monitoring.
+app.get("/api/ambient", requireJarvis, async (req, res) => {
+  const result = await runJarvisOnce(["ambient"], 10000);
+  return parseJarvisJSON(result, res, "Couldn't read ambient status.");
+});
+
+app.post("/api/ambient/tick", requireJarvis, async (req, res) => {
+  const result = await runJarvisOnce(["ambient-tick"], 30000);
+  return parseJarvisJSON(result, res, "Ambient check failed.");
+});
+
+// Onboarding + UI layout. GET is deliberately cheap and unauthenticated-ish
+// (still behind requireJarvis) because index.html asks for it on first paint
+// to decide which layout to render.
+app.get("/api/onboarding", requireJarvis, async (req, res) => {
+  const result = await runJarvisOnce(["onboard", "--json"], 15000);
+  return parseJarvisJSON(result, res, "Couldn't read setup state.");
+});
+
+app.post("/api/onboarding/:action", requireJarvis, async (req, res) => {
+  const { action } = req.params;
+  if (!["skip", "complete"].includes(action)) {
+    return res.status(400).json({ error: "Unknown action." });
+  }
+  const result = await runJarvisOnce(["onboard", `--${action}`], 10000);
+  return parseJarvisJSON(result, res, "Couldn't update setup state.");
+});
+
+app.get("/api/ui-mode", requireJarvis, async (req, res) => {
+  const result = await runJarvisOnce(["ui-mode"], 10000);
+  return parseJarvisJSON(result, res, "Couldn't read the UI mode.");
+});
+
+app.post("/api/ui-mode", requireJarvis, async (req, res) => {
+  const mode = typeof req.body?.mode === "string" ? req.body.mode.trim() : "";
+  if (!["classic", "focus"].includes(mode)) {
+    return res.status(400).json({ error: "Mode must be 'classic' or 'focus'." });
+  }
+  const result = await runJarvisOnce(["ui-mode", mode], 10000);
+  return parseJarvisJSON(result, res, "Couldn't set the UI mode.");
+});
+
 app.get("/api/notifications", requireJarvis, async (req, res) => {
   const result = await runJarvisOnce(["notify-list", "web"], 10000);
   return parseJarvisJSON(result, res, "Couldn't read notifications.");

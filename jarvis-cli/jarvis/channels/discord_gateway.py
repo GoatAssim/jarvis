@@ -213,6 +213,23 @@ def build_client(discord, cfg):
         loop = asyncio.get_running_loop()
         sent_any = {"ok": False}
 
+        # --- gate FIRST, before anything the channel can see ---------------
+        # This used to run inside handle_message, *after* the 👀 reaction
+        # and the typing indicator had already gone up. In a server where
+        # the bot is present but not being talked to, that meant every
+        # single unrelated message got reacted to, then typed at, then
+        # silently dropped when the gate denied it at [reachable] for not
+        # mentioning us — "it reacts, types, then fails" on every line in
+        # the channel. The denial is correct and stays; announcing it to
+        # the whole room three times was the bug.
+        #
+        # base.gate() is the same pure decide() handle_message would have
+        # run, so this costs one cheap call and no behaviour change — and
+        # the verdict is handed straight back to handle_message below so
+        # the gate is still only ever evaluated once per message.
+        decision = base.gate(DISCORD, msg, cfg)
+        answering = decision.allowed
+
         # --- read receipt -------------------------------------------------
         # Added the moment the message is accepted, before any provider is
         # contacted, because its whole job is to answer "did it even see
@@ -240,7 +257,6 @@ def build_client(discord, cfg):
                 pass
 
         seen_emoji = cfg.get("reaction_seen") or "\U0001F440"
-        await _react(seen_emoji)
 
         def send(text):
             """Called from the worker thread — hop back to the event loop,
@@ -251,6 +267,32 @@ def build_client(discord, cfg):
             future.result(timeout=30)
             sent_any["ok"] = True
             return True
+
+        # handle_message still runs on the denied path — it owns the denial
+        # log line and the optional notify_on_denied reply, and `send` hops
+        # back to this loop via run_coroutine_threadsafe().result(), which
+        # would deadlock if called from the loop thread itself. So it always
+        # goes to the executor; only the *visible* parts are conditional.
+        def _run():
+            return base.handle_message(DISCORD, msg, send, cfg=cfg,
+                                       decision=decision)
+
+        if not answering:
+            # Silent by default. react_when_denied is the opt-in for people
+            # who do want a visible "seen, and refused" mark — but only for
+            # a message actually aimed at us. Reacting to something that
+            # merely happened in a channel we can read is the noise this
+            # whole branch exists to stop, so a [reachable] denial never
+            # reacts regardless of that setting.
+            await loop.run_in_executor(None, _run)
+            if cfg.get("react_when_denied") and base.addressed_to_us(decision):
+                await _react(cfg.get("reaction_failed") or "\u26a0\ufe0f")
+            return
+
+        # Accepted. The receipt goes up now — still before any provider is
+        # contacted, so it keeps its whole point of answering "did it even
+        # see me?" during the slow seconds ahead.
+        await _react(seen_emoji)
 
         failed = False
         try:
@@ -264,21 +306,21 @@ def build_client(discord, cfg):
                 # signal every ~9s for as long as the block is open, so a
                 # multi-round tool call keeps showing "Jarvis is typing…"
                 # rather than going quiet after Discord's 10-second timeout.
-                await loop.run_in_executor(
-                    None, lambda: base.handle_message(DISCORD, msg, send, cfg=cfg))
+                await loop.run_in_executor(None, _run)
         except Exception as exc:  # noqa: BLE001
             failed = True
             base._log("discord handler failed: %s" % exc)
         finally:
-            # Swap the receipt for an outcome. A message that produced no
-            # reply at all (denied by permissions, or the model returned
-            # nothing) is marked failed rather than silently left at 👀 —
-            # "seen, and nothing happened" is a state worth being able to
-            # see from the chat.
+            # Swap the receipt for an outcome. Everything reaching here was
+            # allowed by the gate, so "no reply came out" is a genuine
+            # failure (every provider down, send permission missing) and is
+            # marked as one rather than silently left at 👀. The old
+            # `sent_any or react_when_denied` guard here was unreachable in
+            # its first half and about denials in its second — denials no
+            # longer come down this path at all.
             await _unreact(seen_emoji)
             if failed or not sent_any["ok"]:
-                if sent_any["ok"] or cfg.get("react_when_denied"):
-                    await _react(cfg.get("reaction_failed") or "\u26a0\ufe0f")
+                await _react(cfg.get("reaction_failed") or "\u26a0\ufe0f")
             else:
                 await _react(cfg.get("reaction_done") or "\u2705")
 

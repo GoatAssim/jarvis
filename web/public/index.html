@@ -58,6 +58,18 @@
       <span class="btn__mode-dot"></span><span id="mode-switch-label">100% Capacity</span>
     </button>
 
+    <!-- LAYOUT SWITCH. The classic layout shows the Commands / Detail /
+         Console grid at all times; Focus hides the grid and leads with the
+         chat, with everything else reachable from the same Menu. Purely a
+         presentation choice — no feature exists in one layout and not the
+         other, which is the property that makes switching safe at any
+         moment. Persisted server-side (jarvis ui-mode) so it follows the
+         person across browsers rather than living in one tab. -->
+    <button class="btn btn--ghost btn--layout" id="btn-layout-switch" type="button" data-layout="classic"
+            title="Switch between the Classic layout (everything visible) and Focus (chat first, the rest one click away)">
+      <span class="btn__layout-glyph" aria-hidden="true">&#9707;</span><span id="layout-switch-label">Classic</span>
+    </button>
+
     <button class="btn btn--primary btn--ask-jarvis" id="btn-ask-jarvis" type="button">
       <span class="btn__spark"></span>Ask <span id="btn-ask-jarvis-label">Jarvis</span>
     </button>
@@ -177,6 +189,22 @@
               <button class="panel-menu__item" id="menu-item-ctools" type="button" role="menuitem">
                 <span class="panel-menu__item-label">Custom Tools</span>
                 <span class="panel-menu__item-hint">Write your own Python tools &mdash; kept in ~/.jarvis, survives a rebuild</span>
+              </button>
+              <button class="panel-menu__item" id="menu-item-daemons" type="button" role="menuitem">
+                <span class="panel-menu__item-label">Daemons</span>
+                <span class="panel-menu__item-hint">Background services &mdash; start, stop, watch their console, schedule them</span>
+              </button>
+              <button class="panel-menu__item" id="menu-item-backlog" type="button" role="menuitem">
+                <span class="panel-menu__item-label">Backlog</span>
+                <span class="panel-menu__item-hint">Open-ended work with no due date &mdash; what&rsquo;s in progress, what&rsquo;s blocked</span>
+              </button>
+              <button class="panel-menu__item" id="menu-item-logsearch" type="button" role="menuitem">
+                <span class="panel-menu__item-label">Log search</span>
+                <span class="panel-menu__item-hint">Grep the raw log files on disk, including daemon consoles</span>
+              </button>
+              <button class="panel-menu__item" id="menu-item-setup" type="button" role="menuitem">
+                <span class="panel-menu__item-label">Setup</span>
+                <span class="panel-menu__item-hint">Guided first run, dependency checks and the layout switch</span>
               </button>
               <button class="panel-menu__item" id="menu-item-channels" type="button" role="menuitem">
                 <span class="panel-menu__item-label">Channels</span>
@@ -1017,5 +1045,182 @@
 <script src="ui-kit.js"></script>
 <script src="app.js"></script>
 <script src="custom-tools.js"></script>
+
+<!-- DAEMONS — every long-running background service in one place: the three
+     built-ins (scheduler, Discord, Instagram) and anything the user has
+     registered. Same .menu-overlay/.menu-panel chrome as Scheduled and MCP;
+     nothing bespoke, because a panel that looks different for no reason is a
+     panel people learn separately. -->
+<div class="menu-overlay" id="daemons-overlay" hidden>
+  <div class="menu-panel">
+    <div class="panel__corner panel__corner--tl"></div>
+    <div class="panel__corner panel__corner--br"></div>
+
+    <div class="menu-panel__head">
+      <svg class="brand-mark" viewBox="0 0 40 40" aria-hidden="true">
+        <circle cx="20" cy="20" r="18" class="brand-mark__ring"/>
+        <circle cx="20" cy="20" r="11" class="brand-mark__ring brand-mark__ring--in"/>
+        <circle cx="20" cy="20" r="3" class="brand-mark__core"/>
+      </svg>
+      <div class="menu-panel__titles">
+        <div class="menu-panel__title">DAEMONS</div>
+        <div class="menu-panel__subtitle" id="daemons-status-line">reading services&hellip;</div>
+      </div>
+      <button class="btn btn--ghost btn--sm" id="btn-daemon-refresh" type="button" title="Re-read every daemon's live status">Refresh</button>
+      <button class="modal__close" id="daemons-close" type="button" aria-label="Close">&times;</button>
+    </div>
+
+    <div class="menu-body">
+      <section class="skills-pane skills-pane--list" aria-label="Background services">
+        <div class="skills-pane__head"><h3>Services</h3></div>
+        <div class="skills-list" id="daemons-list">
+          <div class="skills-empty">Loading&hellip;</div>
+        </div>
+        <div class="skills-pane__head"><h3>Add your own</h3></div>
+        <div class="sched-add">
+          <input type="text" id="daemon-new-id" placeholder="id &mdash; e.g. web" />
+          <input type="text" id="daemon-new-command" placeholder="command &mdash; e.g. node server.js --port 3000" />
+          <input type="text" id="daemon-new-cwd" placeholder="working directory (optional)" />
+          <label class="daemon-stdin-toggle">
+            <input type="checkbox" id="daemon-new-stdin" /> reads stdin
+          </label>
+          <button class="btn btn--primary btn--sm" id="btn-daemon-add" type="button">Register</button>
+        </div>
+      </section>
+
+      <section class="skills-pane skills-pane--editor" aria-label="Daemon console">
+        <div class="skills-pane__head">
+          <h3 id="daemon-console-title">Console</h3>
+          <select id="daemon-console-file" class="daemon-log-picker" title="Current console, or an older rotated log"></select>
+        </div>
+        <pre class="daemon-console" id="daemon-console">Pick a service to see its output.</pre>
+        <!-- Only enabled for a running daemon whose definition says it reads
+             stdin — see daemons.send_input, which refuses otherwise rather
+             than silently swallowing the line. -->
+        <div class="sched-add daemon-input-row" id="daemon-input-row" hidden>
+          <input type="text" id="daemon-input-text" placeholder="type a line into this service's console&hellip;" />
+          <button class="btn btn--primary btn--sm" id="btn-daemon-send" type="button">Send</button>
+        </div>
+        <div class="sched-add">
+          <input type="text" id="daemon-schedule-when" placeholder="start it later &mdash; e.g. in 2 hours, tomorrow 9am" />
+          <button class="btn btn--ghost btn--sm" id="btn-daemon-schedule" type="button">Schedule start</button>
+        </div>
+      </section>
+    </div>
+  </div>
+</div>
+
+<!-- BACKLOG — untimed work. Deliberately NOT in the Scheduled panel: that
+     one is about things that fire at a moment, this is about things with no
+     moment at all. See backlog.py's module docstring. -->
+<div class="menu-overlay" id="backlog-overlay" hidden>
+  <div class="menu-panel">
+    <div class="panel__corner panel__corner--tl"></div>
+    <div class="panel__corner panel__corner--br"></div>
+
+    <div class="menu-panel__head">
+      <svg class="brand-mark" viewBox="0 0 40 40" aria-hidden="true">
+        <circle cx="20" cy="20" r="18" class="brand-mark__ring"/>
+        <circle cx="20" cy="20" r="11" class="brand-mark__ring brand-mark__ring--in"/>
+        <circle cx="20" cy="20" r="3" class="brand-mark__core"/>
+      </svg>
+      <div class="menu-panel__titles">
+        <div class="menu-panel__title">BACKLOG</div>
+        <div class="menu-panel__subtitle" id="backlog-status-line">reading backlog&hellip;</div>
+      </div>
+      <button class="modal__close" id="backlog-close" type="button" aria-label="Close">&times;</button>
+    </div>
+
+    <div class="menu-body menu-body--wide">
+      <div class="kanban" id="backlog-board"></div>
+      <div class="sched-add backlog-add">
+        <input type="text" id="backlog-new-title" placeholder="what needs doing&hellip;" />
+        <input type="text" id="backlog-new-project" placeholder="project (optional)" />
+        <select id="backlog-new-state">
+          <option value="idea">idea</option>
+          <option value="todo" selected>todo</option>
+          <option value="doing">doing</option>
+        </select>
+        <button class="btn btn--primary btn--sm" id="btn-backlog-add" type="button">Add</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- LOG SEARCH — the raw files on disk, line by line. The existing Logs
+     viewer shows parsed conversation entries; this one finds the line that
+     failed to parse, the traceback in a daemon console, and anything in a
+     file the user points it at. -->
+<div class="menu-overlay" id="logsearch-overlay" hidden>
+  <div class="menu-panel">
+    <div class="panel__corner panel__corner--tl"></div>
+    <div class="panel__corner panel__corner--br"></div>
+
+    <div class="menu-panel__head">
+      <svg class="brand-mark" viewBox="0 0 40 40" aria-hidden="true">
+        <circle cx="20" cy="20" r="18" class="brand-mark__ring"/>
+        <circle cx="20" cy="20" r="11" class="brand-mark__ring brand-mark__ring--in"/>
+        <circle cx="20" cy="20" r="3" class="brand-mark__core"/>
+      </svg>
+      <div class="menu-panel__titles">
+        <div class="menu-panel__title">LOG SEARCH</div>
+        <div class="menu-panel__subtitle" id="logsearch-status-line">searches the raw files on disk</div>
+      </div>
+      <button class="modal__close" id="logsearch-close" type="button" aria-label="Close">&times;</button>
+    </div>
+
+    <div class="menu-body menu-body--wide">
+      <div class="sched-add logsearch-controls">
+        <input type="text" id="logsearch-query" placeholder="what to find &mdash; e.g. traceback, connection refused" />
+        <select id="logsearch-mode">
+          <option value="words" selected>all words</option>
+          <option value="phrase">exact phrase</option>
+          <option value="regex">regex</option>
+        </select>
+        <select id="logsearch-set">
+          <option value="">all Jarvis logs</option>
+          <option value="conversations">conversations</option>
+          <option value="daemons">daemon consoles</option>
+          <option value="scheduler">scheduler</option>
+        </select>
+        <input type="text" id="logsearch-path" placeholder="or a file/glob of your own (optional)" />
+        <button class="btn btn--primary btn--sm" id="btn-logsearch" type="button">Search</button>
+      </div>
+      <div class="logsearch-results" id="logsearch-results">
+        <div class="skills-empty">Enter something to search for.</div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- SETUP — the same steps onboarding.py defines, rendered for the browser.
+     Opens by itself on a machine that has never been through it (see
+     maybeOpenOnboarding in app.js) and is re-openable from the Menu forever
+     after as a checklist. -->
+<div class="menu-overlay" id="setup-overlay" hidden>
+  <div class="menu-panel menu-panel--narrow">
+    <div class="panel__corner panel__corner--tl"></div>
+    <div class="panel__corner panel__corner--br"></div>
+
+    <div class="menu-panel__head">
+      <svg class="brand-mark" viewBox="0 0 40 40" aria-hidden="true">
+        <circle cx="20" cy="20" r="18" class="brand-mark__ring"/>
+        <circle cx="20" cy="20" r="11" class="brand-mark__ring brand-mark__ring--in"/>
+        <circle cx="20" cy="20" r="3" class="brand-mark__core"/>
+      </svg>
+      <div class="menu-panel__titles">
+        <div class="menu-panel__title">SETUP</div>
+        <div class="menu-panel__subtitle" id="setup-status-line">checking&hellip;</div>
+      </div>
+      <button class="btn btn--ghost btn--sm" id="btn-setup-skip" type="button" title="Don't show this automatically again — it stays in the Menu">Skip</button>
+      <button class="modal__close" id="setup-close" type="button" aria-label="Close">&times;</button>
+    </div>
+
+    <div class="menu-body menu-body--column">
+      <div class="setup-steps" id="setup-steps"></div>
+    </div>
+  </div>
+</div>
+
 </body>
 </html>
