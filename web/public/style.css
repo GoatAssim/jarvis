@@ -220,7 +220,8 @@ textarea:focus-visible, select:focus-visible, [tabindex]:focus-visible{
 .topbar{
   display: flex;
   align-items: center;
-  gap: 20px;
+  flex-wrap: wrap;
+  gap: 12px 20px;
   padding: 10px 18px;
   border: 1px solid var(--border);
   border-radius: var(--radius);
@@ -1506,16 +1507,34 @@ audio.ask-dl-player{ max-height: none; background: transparent; }
 }
 @keyframes prompt-blink{ 50%{ opacity: 0; } }
 
-.ask-typing{ display: inline-flex; gap: 4px; align-items: center; padding: 2px 0; }
+/* Bumped from 5px/soft-accent to 7px/full-accent with a glow — at the old
+   size this was easy to miss entirely against the bubble background, which
+   is exactly what people meant by "can't tell if Jarvis is thinking". */
+.ask-typing{ display: inline-flex; gap: 5px; align-items: center; padding: 3px 0; }
 .ask-typing span{
-  width: 5px; height: 5px; border-radius: 50%; background: var(--accent-soft);
+  width: 7px; height: 7px; border-radius: 50%; background: var(--accent);
+  box-shadow: 0 0 6px var(--accent-glow);
   animation: typing-bounce 1.1s ease-in-out infinite;
 }
 .ask-typing span:nth-child(2){ animation-delay: 0.15s; }
 .ask-typing span:nth-child(3){ animation-delay: 0.3s; }
 @keyframes typing-bounce{
-  0%, 60%, 100%{ transform: translateY(0); opacity: 0.5; }
-  30%{ transform: translateY(-3px); opacity: 1; }
+  0%, 60%, 100%{ transform: translateY(0); opacity: 0.45; }
+  30%{ transform: translateY(-4px); opacity: 1; }
+}
+
+/* A busy status line used to be a colour change on 11px text — the kind of
+   thing you only notice if you're already looking right at it. A small
+   pulsing dot in front reads as "something is happening" from a glance,
+   the same job the OS gives a spinner. */
+.ask-panel__subtitle.is-busy{
+  display: inline-flex; align-items: center; gap: 6px;
+}
+.ask-panel__subtitle.is-busy::before{
+  content: ""; width: 7px; height: 7px; border-radius: 50%;
+  background: var(--accent); box-shadow: 0 0 6px var(--accent-glow);
+  animation: typing-bounce 1s ease-in-out infinite;
+  flex: 0 0 auto;
 }
 
 
@@ -1848,6 +1867,22 @@ audio.ask-dl-player{ max-height: none; background: transparent; }
 
 /* Right: tool list */
 .debug-search{ padding: 10px 12px; }
+
+.logs-filter-row{
+  display: flex; flex-wrap: wrap; gap: 6px;
+  padding: 0 12px 10px;
+}
+.logs-filter-row select,
+.logs-filter-row input{
+  flex: 1 1 100px; min-width: 0;
+  padding: 4px 7px;
+  background: var(--bg-panel-2);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  color: var(--text);
+  font-family: inherit;
+  font-size: 11px;
+}
 .debug-tool-list{ flex: 1; overflow-y: auto; padding: 8px; display: flex; flex-direction: column; gap: 6px; }
 .debug-tool-card{
   border: 1px solid var(--border);
@@ -1916,6 +1951,51 @@ audio.ask-dl-player{ max-height: none; background: transparent; }
 @media (max-width: 900px){
   .logs-fab span{ display: none; }
   .logs-fab{ padding: 12px; border-radius: 50%; right: 16px; bottom: 16px; }
+}
+
+/* Stacked directly above the Logs fab (same right offset, bottom pushed up
+   by the Logs fab's own height + gap) rather than crowding it side by side,
+   so both stay reachable with a thumb on narrow viewports. */
+.notifications-fab{ bottom: 78px; position: relative; }
+.notifications-fab__badge{
+  position: absolute; top: -6px; right: -6px;
+  min-width: 18px; height: 18px; padding: 0 4px;
+  display: flex; align-items: center; justify-content: center;
+  border-radius: 999px;
+  background: var(--accent-secondary, #ff7a45); color: #10151b;
+  font-family: var(--font-mono); font-size: 10.5px; font-weight: 700;
+  box-shadow: 0 0 0 2px var(--bg-raised);
+}
+@media (max-width: 900px){
+  .notifications-fab{ bottom: 70px; }
+}
+
+/* --- notifications panel -------------------------------------------------
+   One card per notification, newest first. Distinguishes "kind" (reminder /
+   task / notify) and a failed state, the way daemon rows distinguish
+   running/crashed — colour never carries the only signal, the text does. */
+.notif-list{ flex: 1 1 auto; overflow-y: auto; padding: 10px 14px; display: flex; flex-direction: column; gap: 8px; }
+.notif-card{
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--border-strong);
+  border-radius: 5px;
+  padding: 9px 12px;
+  background: var(--bg-panel-2);
+}
+.notif-card--failed{ border-left-color: #f87171; }
+.notif-card--reminder{ border-left-color: var(--accent); }
+.notif-card--task{ border-left-color: var(--accent-secondary); }
+.notif-card__head{ display: flex; align-items: baseline; justify-content: space-between; gap: 10px; }
+.notif-card__title{ font-size: 13px; font-weight: 600; color: var(--text); }
+.notif-card__meta{
+  font-family: "JetBrains Mono", monospace; font-size: 10.5px; color: var(--text-dimmer);
+  white-space: nowrap; flex-shrink: 0;
+}
+.notif-card__body{ font-size: 12.5px; color: var(--text-dim); margin-top: 4px; line-height: 1.5; white-space: pre-wrap; word-break: break-word; }
+.notif-card__kind{
+  display: inline-block; margin-top: 6px;
+  font-family: "JetBrains Mono", monospace; font-size: 10px; letter-spacing: 0.06em; text-transform: uppercase;
+  color: var(--accent-soft);
 }
 
 .logs-body{ grid-template-columns: 260px minmax(0, 1fr) 260px; }
