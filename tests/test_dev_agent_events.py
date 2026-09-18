@@ -88,9 +88,15 @@ def test_fields_with_embedded_tabs_and_newlines_dont_break_the_split():
 
 
 def test_unserializable_field_falls_back_without_raising():
+    # Must be something json.dumps genuinely cannot handle. A plain object
+    # is NOT that: emit() passes default=str, so json falls back to str()
+    # and serializes it fine. This test used a plain object and asserted an
+    # "error" key, so it was asserting a fallback that could never fire —
+    # while the real failure mode (a __repr__ that RAISES) went untested and
+    # escaped emit() entirely. See tests/test_robustness_fixes.py.
     class Unserializable:
         def __repr__(self):
-            return "<Unserializable>"
+            raise RuntimeError("cannot represent this")
 
     with _CaptureStderr() as buf:
         returned = dev_agent_events.emit(

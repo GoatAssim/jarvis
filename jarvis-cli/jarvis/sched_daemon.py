@@ -118,6 +118,46 @@ def stop_running():
         return False
 
 
+def _tick_scheduler(**kwargs):
+    """scheduler.tick(), but it can never take the daemon down.
+
+    tick() documents "never raises" and now genuinely tries to honour that
+    per job, but this loop is the process that has to still be alive
+    tomorrow morning for a 7am reminder to fire. A bug anywhere under tick()
+    — including in code added later — must cost one missed pass, not every
+    future pass. Returning an error-shaped summary keeps the caller's
+    `result.get("ran")` contract intact.
+    """
+    try:
+        return scheduler.tick(**kwargs)
+    except Exception as exc:  # noqa: BLE001
+        return {"ok": False, "ran": [], "notifications": [],
+                "error": "%s: %s" % (type(exc).__name__, exc)}
+
+
+def _tick_tasks():
+    """Advance long-running tasks. Never raises.
+
+    Imported lazily and wrapped because the task loop is strictly additive
+    to this daemon: if tasks.py is missing, broken, or throws, the
+    *scheduler* must keep ticking. Reminders are the thing people would
+    notice not firing.
+    """
+    try:
+        from . import task_runner
+        return task_runner.tick()
+    except Exception as exc:  # noqa: BLE001
+        return {"count": 0, "error": "%s: %s" % (type(exc).__name__, exc)}
+
+
+def _recover_tasks():
+    try:
+        from . import task_runner
+        return task_runner.recover_stale()
+    except Exception:  # noqa: BLE001
+        return []
+
+
 def run(interval=DEFAULT_INTERVAL, once=False, quiet=False):
     """Block, ticking every `interval` seconds, until SIGTERM/SIGINT.
 
@@ -155,9 +195,25 @@ def run(interval=DEFAULT_INTERVAL, once=False, quiet=False):
         sys.stdout.flush()
 
     try:
-        result = scheduler.tick(startup=True)
+        # A long-running task whose worker was killed mid-step left its
+        # status at "running" with a lease nobody holds. Re-arming those
+        # here, before the first tick, is what makes a task survive a
+        # reboot — the daemon is the supervisor the task loop needs, and
+        # startup is the only moment we know for certain that no previous
+        # worker of ours is still alive.
+        recovered = _recover_tasks()
+        if recovered and not quiet:
+            print(json.dumps({"tasks_recovered": recovered}, indent=2))
+            sys.stdout.flush()
+
+        result = _tick_scheduler(startup=True)
         if not quiet and result.get("ran"):
             print(json.dumps({"tick": result}, indent=2, default=str))
+            sys.stdout.flush()
+
+        task_result = _tick_tasks()
+        if task_result.get("count") and not quiet:
+            print(json.dumps({"tasks": task_result}, indent=2, default=str))
             sys.stdout.flush()
 
         if once:
@@ -173,9 +229,19 @@ def run(interval=DEFAULT_INTERVAL, once=False, quiet=False):
                 slept += 1
             if _stop:
                 break
-            result = scheduler.tick()
+            result = _tick_scheduler()
             if not quiet and result.get("ran"):
                 print(json.dumps({"tick": result}, indent=2, default=str))
+                sys.stdout.flush()
+
+            # One task step per interval, deliberately (see
+            # task_runner.tick's docstring): a step is a full ask with real
+            # token cost, so advancing every runnable task every interval
+            # would multiply spend by however many tasks happen to be
+            # parked. Steady interleaved progress beats a thundering herd.
+            task_result = _tick_tasks()
+            if task_result.get("count") and not quiet:
+                print(json.dumps({"tasks": task_result}, indent=2, default=str))
                 sys.stdout.flush()
         return 0
     finally:

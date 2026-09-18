@@ -114,6 +114,17 @@ TOOL_GROUPS = {
         "spotify_suggest",
         "spotify_like",
     ],
+    "vision": [
+        "look_at_screen",
+    ],
+    "audio": [
+        "audio_status",
+        "set_volume",
+        "volume_up",
+        "volume_down",
+        "set_mute",
+        "set_default_output",
+    ],
     "system_control": [
         "radio_status",
         "wifi_set",
@@ -271,6 +282,24 @@ TOOL_KEYWORDS = {
     "spotify_queue": {"queue": 8, "queue up": 8},
     "spotify_playlists": {"my playlists": 9, "playlists": 6},
 
+    "look_at_screen": {"what colour": 10, "what color": 10, "greyed out": 10,
+                       "grayed out": 10, "what does the icon": 10,
+                       "look at my screen": 10, "what does my screen": 9,
+                       "on my screen": 7, "what is on screen": 9,
+                       "describe the screen": 10, "can you see": 7},
+    "audio_status": {"volume": 6, "sound": 5, "audio": 5, "output device": 8,
+                     "playback device": 8, "speakers": 6, "headphones": 6},
+    "set_volume": {"set volume": 10, "volume to": 10, "turn the volume": 9,
+                   "change the volume": 9, "percent volume": 9},
+    "volume_up": {"volume up": 10, "turn it up": 9, "turn up the volume": 10,
+                  "louder": 9, "raise the volume": 10, "increase the volume": 10},
+    "volume_down": {"volume down": 10, "turn it down": 9, "turn down the volume": 10,
+                    "quieter": 9, "lower the volume": 10, "decrease the volume": 10},
+    "set_mute": {"mute": 9, "unmute": 10, "silence the": 8, "sound off": 8,
+                 "sound back on": 9},
+    "set_default_output": {"default output": 10, "output device": 9,
+                           "switch to headphones": 10, "switch to speakers": 10,
+                           "play through": 8, "sound output": 9},
     "radio_status": {"radio": 6, "bluetooth": 6, "wifi status": 6},
     "wifi_set": {"turn on wifi": 10, "turn off wifi": 10, "enable wifi": 9, "disable wifi": 9},
     "bluetooth_set": {"turn on bluetooth": 10, "turn off bluetooth": 10, "enable bluetooth": 9},
@@ -320,6 +349,17 @@ TOOL_PACK_INSTRUCTIONS = {
     "youtube": (
         "Video: use ytdl_info first; use ytdl_formats when an exact format is "
         "needed; downloads should be confirmed with the user first."
+    ),
+    "vision": (
+        "look_at_screen reads the screen text first and only looks at the "
+        "actual pixels when the text can't answer. Use read_screen when you "
+        "just need text, take_screenshot when the USER wants an image. Only "
+        "pass force_vision=true after a text-tier answer was insufficient."
+    ),
+    "audio": (
+        "Audio: volume_up/volume_down move by 10 points unless an amount is "
+        "given; set_volume takes an absolute 0-100. Call audio_status first "
+        "only when you need to know what devices exist or the current level."
     ),
     "system_control": (
         "Git: 'stage and commit'/'commit everything' -> git_commit_all in one call, not "

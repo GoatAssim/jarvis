@@ -618,7 +618,7 @@ def _advance(job, now):
     interval = timedelta(seconds=int(trig.get("every_seconds") or 3600))
     try:
         nxt = timespec.from_iso(job.get("next_run") or trig.get("at"))
-    except TimeSpecError:
+    except (TimeSpecError, AttributeError):
         nxt = now
     guard = 0
     while nxt <= now or not _weekday_ok(trig, nxt):
@@ -635,9 +635,20 @@ def due_jobs(now=None, startup=False):
     now = now or datetime.now()
     out = []
     for job in load_store()["jobs"]:
+        if not isinstance(job, dict):
+            continue
         if job.get("status") != STATUS_PENDING:
             continue
-        trig = job.get("trigger") or {}
+        trig = job.get("trigger")
+        # `job.get("trigger") or {}` only defends against a MISSING trigger,
+        # not a wrong-typed one. A job whose trigger is a bare string (an
+        # older schema, a hand-edit, a half-written store) hit .get() on a
+        # str and raised AttributeError out of due_jobs — which runs before
+        # tick()'s per-job loop, so the guard there never saw it. One bad
+        # job stopped the entire scan, permanently, and every unrelated
+        # reminder with it.
+        if not isinstance(trig, dict):
+            trig = {}
         ttype = trig.get("type")
         if ttype == "startup":
             if startup:
@@ -678,45 +689,83 @@ def tick(now=None, startup=False, limit=25):
             if job is None or job.get("status") != STATUS_PENDING:
                 continue  # cancelled by someone else between the scan and now
 
-            runs_this_pass = 1
-            if job.get("catch_up") and job["trigger"].get("type") == "every":
-                runs_this_pass = min(_missed_runs(job, now), MAX_CATCHUP_RUNS)
+            # Everything from here to ran.append() is guarded. _run_action()
+            # already catches its own handler errors, but the code around it
+            # does not: `job["trigger"]`, `job["kind"]` and `job["title"]`
+            # are unchecked subscripts, and a job missing any of them (a
+            # hand-edited store, a half-written one, an older schema) raises
+            # KeyError right here. That exception propagates out of tick(),
+            # and sched_daemon calls tick() unguarded, so the daemon dies and
+            # every future reminder silently stops.
+            #
+            # Worse, the crash can land AFTER the action already fired but
+            # BEFORE save_store(), leaving the job status=pending — so the
+            # next tick re-fires the notification and crashes again. One
+            # malformed job became a duplicate-notification crash loop.
+            #
+            # This is the behavior the docstring above always claimed: record
+            # the failure on the offending job, keep going, let unrelated
+            # reminders arrive.
+            try:
+                runs_this_pass = 1
+                trigger = job.get("trigger")
+                if job.get("catch_up") and isinstance(trigger, dict) and trigger.get("type") == "every":
+                    runs_this_pass = min(_missed_runs(job, now), MAX_CATCHUP_RUNS)
 
-            outcome = None
-            for _ in range(max(1, runs_this_pass)):
-                outcome = _run_action(job)
-                job["run_count"] = int(job.get("run_count") or 0) + 1
-                if outcome.get("notification"):
-                    notifications.append(outcome["notification"])
-                if not outcome.get("ok"):
-                    break
+                outcome = None
+                for _ in range(max(1, runs_this_pass)):
+                    outcome = _run_action(job)
+                    job["run_count"] = int(job.get("run_count") or 0) + 1
+                    if outcome.get("notification"):
+                        notifications.append(outcome["notification"])
+                    if not outcome.get("ok"):
+                        break
 
-            job["last_run"] = timespec.to_iso(datetime.now())
-            job["last_result"] = _trim(outcome.get("summary") if outcome else "")
-            job["last_error"] = outcome.get("error") if outcome else None
+                job["last_run"] = timespec.to_iso(datetime.now())
+                job["last_result"] = _trim(outcome.get("summary") if outcome else "")
+                job["last_error"] = outcome.get("error") if outcome else None
 
-            _apply_next_state(job, outcome, now)
+                _apply_next_state(job, outcome, now)
 
-            if outcome and outcome.get("ok") and job.get("emit_on_done"):
-                follow_up_events.append(job["emit_on_done"])
-            # Every completed job also announces itself under a stable name,
-            # so "when <that job> is done" can be written before the listener
-            # job even exists — the chaining case that made events worth
-            # having at all.
-            if outcome and outcome.get("ok"):
-                follow_up_events.append("job_%s_done" % job["id"])
+                if outcome and outcome.get("ok") and job.get("emit_on_done"):
+                    follow_up_events.append(job["emit_on_done"])
+                # Every completed job also announces itself under a stable name,
+                # so "when <that job> is done" can be written before the listener
+                # job even exists — the chaining case that made events worth
+                # having at all.
+                if outcome and outcome.get("ok"):
+                    follow_up_events.append("job_%s_done" % job["id"])
 
-            store["last_tick"] = timespec.to_iso(datetime.now())
-            if startup:
-                store["last_startup_tick"] = store["last_tick"]
-            save_store(store)
+                store["last_tick"] = timespec.to_iso(datetime.now())
+                if startup:
+                    store["last_startup_tick"] = store["last_tick"]
+                save_store(store)
 
-            ran.append({
-                "id": job["id"], "kind": job["kind"], "title": job["title"],
-                "ok": bool(outcome and outcome.get("ok")),
-                "summary": job["last_result"], "error": job["last_error"],
-                "status": job["status"], "next_run": job.get("next_run"),
-            })
+                ran.append({
+                    "id": job["id"], "kind": job.get("kind"), "title": job.get("title"),
+                    "ok": bool(outcome and outcome.get("ok")),
+                    "summary": job["last_result"], "error": job["last_error"],
+                    "status": job["status"], "next_run": job.get("next_run"),
+                })
+            except Exception as exc:  # noqa: BLE001 — see the block comment
+                # STATUS_ERROR (not STATUS_PENDING) is what stops the crash
+                # loop: due_jobs() only returns pending jobs, so parking the
+                # broken one here means the next tick skips it entirely
+                # instead of re-firing it.
+                detail = "%s: %s" % (type(exc).__name__, exc)
+                try:
+                    job["status"] = STATUS_ERROR
+                    job["last_error"] = _trim(detail)
+                    job["last_run"] = timespec.to_iso(datetime.now())
+                    save_store(store)
+                except Exception:  # noqa: BLE001
+                    pass  # a store we can't write is not worth dying over either
+                ran.append({
+                    "id": job.get("id"), "kind": job.get("kind"),
+                    "title": job.get("title"), "ok": False, "summary": "",
+                    "error": detail, "status": STATUS_ERROR,
+                    "next_run": job.get("next_run"),
+                })
 
         if not pending:
             store = load_store()
