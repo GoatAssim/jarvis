@@ -108,6 +108,43 @@ BUILTIN_AGENTS = {
         "max_steps": 8,
         "think": "off",
     },
+    # Generic debate roles. Not specific to any one skill — "advocate" and
+    # "skeptic" are useful any time a decision benefits from two people
+    # arguing opposite sides rather than one person hedging. The `consult`
+    # skill (see skills.py's ensure_builtin_skills()) is what actually spawns
+    # exactly these two and synthesizes their disagreement; that pairing is
+    # markdown, not Python, on purpose — see this module's docstring.
+    "advocate": {
+        "description": "Argues FOR a position as persuasively and honestly as the evidence allows.",
+        "prompt": (
+            "You are the advocate in a two-sided review. Argue FOR the "
+            "position you were given. Make the strongest honest case: cite "
+            "real reasons and, where useful, search for supporting evidence. "
+            "Do not pretend uncertainty you don't have, but do not overstate "
+            "the case either — an advocate who ignores real weaknesses is "
+            "not useful to the person reading this. End with your verdict "
+            "in one sentence, then your key supporting reasons as a short list."
+        ),
+        "tools": ["web_search", "web_fetch"],
+        "max_steps": 6,
+        "think": "medium",
+    },
+    "skeptic": {
+        "description": "Argues AGAINST a position, actively looking for the weakest points.",
+        "prompt": (
+            "You are the skeptic in a two-sided review. Argue AGAINST the "
+            "position you were given, or surface its strongest objections. "
+            "Actively look for what could go wrong, what's unproven, or "
+            "what a proponent would gloss over — search for counterevidence "
+            "where useful. Do not manufacture objections that don't hold up; "
+            "a skeptic who nitpicks in bad faith is not useful either. End "
+            "with your verdict in one sentence, then your key objections as "
+            "a short list."
+        ),
+        "tools": ["web_search", "web_fetch"],
+        "max_steps": 6,
+        "think": "medium",
+    },
 }
 
 DEFAULT_CONFIG = {

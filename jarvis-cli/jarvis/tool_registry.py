@@ -114,6 +114,12 @@ TOOL_GROUPS = {
         "spotify_suggest",
         "spotify_like",
     ],
+    "subagents": [
+        "spawn_subagent",
+        "run_subagents",
+        "subagent_status",
+        "list_subagent_roles",
+    ],
     "vision": [
         "look_at_screen",
     ],
@@ -282,6 +288,13 @@ TOOL_KEYWORDS = {
     "spotify_queue": {"queue": 8, "queue up": 8},
     "spotify_playlists": {"my playlists": 9, "playlists": 6},
 
+    "spawn_subagent": {"spawn a subagent": 10, "delegate this": 9,
+                       "have a subagent": 9, "subagent to": 8},
+    "run_subagents": {"run the subagent": 10, "run subagents": 10,
+                      "wait for the subagent": 9},
+    "subagent_status": {"subagent status": 10, "check the subagent": 9},
+    "list_subagent_roles": {"subagent roles": 10, "what subagents": 8,
+                            "available subagents": 9},
     "look_at_screen": {"what colour": 10, "what color": 10, "greyed out": 10,
                        "grayed out": 10, "what does the icon": 10,
                        "look at my screen": 10, "what does my screen": 9,
@@ -349,6 +362,14 @@ TOOL_PACK_INSTRUCTIONS = {
     "youtube": (
         "Video: use ytdl_info first; use ytdl_formats when an exact format is "
         "needed; downloads should be confirmed with the user first."
+    ),
+    "subagents": (
+        "spawn_subagent creates a subagent (its own key, own tool "
+        "allowance, own budget); run_subagents drives spawned ones to "
+        "completion and returns their results synchronously — call it "
+        "right after spawning, don't just spawn and stop. list_subagent_roles "
+        "shows what roles exist and whether each has a key pool configured; "
+        "check that before spawning if you're not sure."
     ),
     "vision": (
         "look_at_screen reads the screen text first and only looks at the "
