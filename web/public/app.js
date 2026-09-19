@@ -8182,9 +8182,9 @@
   // next to Clear) and #btn-panel-menu-focus (Ask panel header, Focus-mode
   // only — see .panel-menu--focus-only in style.css). Rather than duplicate
   // #panel-menu-list's eleven items and every click handler wired to them
-  // below, opening the menu reparents that one list into whichever
-  // trigger's wrapper was clicked; .panel-menu__list's `position: absolute`
-  // then anchors it under that trigger automatically.
+  // below, opening the menu reparents that one list to <body> (a portal —
+  // see the long comment on openPanelMenuFrom for why) and points it at
+  // whichever trigger was clicked.
   // -------------------------------------------------------------------------
   const panelMenuEl = qs("#panel-menu");
   const panelMenuBtn = qs("#btn-panel-menu");
@@ -8192,10 +8192,35 @@
   const panelMenuFocusBtn = qs("#btn-panel-menu-focus");
   const panelMenuList = qs("#panel-menu-list");
 
+  // BUGFIX: this used to just be `wrapperEl.appendChild(panelMenuList)`,
+  // relying on .panel-menu__list's `position: absolute` to anchor it under
+  // whichever trigger's wrapper it was dropped into (.panel-menu{ position:
+  // relative }). That works fine for the Focus-mode trigger, which sits in
+  // the Ask panel header, but the console trigger (#panel-menu) lives inside
+  // .panel--console — and every .panel, this one included, sets `overflow:
+  // hidden` so its rounded corners clip cleanly. An absolutely-positioned
+  // child is still clipped by an `overflow: hidden` ancestor in the DOM
+  // regardless of its own containing block, so once the list (eleven items)
+  // grew taller than the console panel itself, everything from "Log search"
+  // down (Setup, Channels) rendered outside the panel's box and was simply
+  // invisible/unclickable — "the dropdown gets cut off under Backlog".
+  // Portaling the list to <body> and positioning it with `fixed` coordinates
+  // computed from the trigger's own bounding rect escapes that clipping
+  // entirely, no matter how tall the list grows or which trigger opened it.
   function openPanelMenuFrom(wrapperEl, btnEl) {
     if (!wrapperEl || !btnEl || !panelMenuList) return;
-    wrapperEl.appendChild(panelMenuList);
+    document.body.appendChild(panelMenuList);
     panelMenuList.hidden = false;
+    panelMenuList.style.position = "fixed";
+    const rect = btnEl.getBoundingClientRect();
+    const listWidth = panelMenuList.offsetWidth || 230;
+    const left = Math.max(8, Math.min(rect.right - listWidth, window.innerWidth - listWidth - 8));
+    const top = Math.min(rect.bottom + 6, window.innerHeight - 60);
+    panelMenuList.style.left = `${left}px`;
+    panelMenuList.style.top = `${top}px`;
+    panelMenuList.style.right = "auto";
+    panelMenuList.style.maxHeight = `${Math.max(160, window.innerHeight - top - 16)}px`;
+    panelMenuList.style.overflowY = "auto";
     btnEl.setAttribute("aria-expanded", "true");
   }
 
@@ -8207,22 +8232,32 @@
   }
 
   panelMenuBtn?.addEventListener("click", () => {
-    if (!panelMenuList.hidden && panelMenuList.parentElement === panelMenuEl) return closePanelMenu();
+    if (!panelMenuList.hidden && panelMenuList.dataset.openFrom === "console") return closePanelMenu();
+    panelMenuList.dataset.openFrom = "console";
     openPanelMenuFrom(panelMenuEl, panelMenuBtn);
   });
   panelMenuFocusBtn?.addEventListener("click", () => {
-    if (!panelMenuList.hidden && panelMenuList.parentElement === panelMenuFocusEl) return closePanelMenu();
+    if (!panelMenuList.hidden && panelMenuList.dataset.openFrom === "focus") return closePanelMenu();
+    panelMenuList.dataset.openFrom = "focus";
     openPanelMenuFrom(panelMenuFocusEl, panelMenuFocusBtn);
   });
 
   document.addEventListener("click", (e) => {
     if (panelMenuList.hidden) return;
+    const inList = panelMenuList.contains(e.target);
     const inConsole = panelMenuEl?.contains(e.target);
     const inFocus = panelMenuFocusEl?.contains(e.target);
-    if (!inConsole && !inFocus) closePanelMenu();
+    if (!inList && !inConsole && !inFocus) closePanelMenu();
   });
   document.addEventListener("keydown", (e) => {
     if (e.key === "Escape" && !panelMenuList.hidden) closePanelMenu();
+  });
+  // The list is fixed-positioned from a rect computed at open time; if the
+  // viewport resizes while it's open (rotating a tablet, resizing the
+  // window) that rect goes stale, so just close it rather than leave it
+  // floating over the wrong spot.
+  window.addEventListener("resize", () => {
+    if (!panelMenuList.hidden) closePanelMenu();
   });
 
   // Each item opens its destination, then closes the dropdown — the menu
@@ -8241,11 +8276,14 @@
   // ===========================================================================
   // DAEMONS / BACKLOG / LOG SEARCH / SETUP / LAYOUT
   //
-  // Four panels and one switch, all built on the same .menu-overlay chrome the
-  // Scheduled and MCP panels already use. Every one of them talks to a REST
-  // route that shells out to the matching `jarvis` subcommand, so the browser
-  // never re-implements a rule that lives in Python — see server.js's comment
-  // above the routes for why that split is load-bearing rather than tidy.
+  // Daemons, Backlog and Log search are built on the bigger .debug-overlay
+  // chrome (same as Debug/Logs); Setup stays on the plainer .menu-overlay
+  // chrome the Scheduled and MCP panels use — see the CSS comment above the
+  // daemons/backlog/logsearch rules for why. Every one of them talks to a
+  // REST route that shells out to the matching `jarvis` subcommand, so the
+  // browser never re-implements a rule that lives in Python — see server.js's
+  // comment above the routes for why that split is load-bearing rather than
+  // tidy.
   // ===========================================================================
 
   // --- layout -----------------------------------------------------------

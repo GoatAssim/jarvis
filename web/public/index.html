@@ -50,12 +50,6 @@
               title="Cycle Jarvis's prompt capacity: 400% (fullest context) → 100% (balanced, default) → 50% (ultra compact, fewest tokens)">
         <span class="btn__mode-dot"></span><span id="mode-switch-label">100% Capacity</span>
       </button>
-
-      <!-- Ask Jarvis sits right next to Capacity now — both are "how Jarvis
-           is set up for this turn" controls, so they read as one group. -->
-      <button class="btn btn--primary btn--ask-jarvis" id="btn-ask-jarvis" type="button">
-        <span class="btn__spark"></span>Ask <span id="btn-ask-jarvis-label">Jarvis</span>
-      </button>
     </div>
 
     <!-- Centered in the topbar via the 3-column grid below (topbar__left /
@@ -64,12 +58,19 @@
     <div class="topbar__clock" id="clock">00:00:00</div>
 
     <div class="topbar__right">
-      <!-- Layout switch only, now — Menu itself moved down to the Live
-           Feed panel's header, next to Clear (see the comment there for
-           why a second, Focus-only copy of its trigger exists too). -->
+      <!-- Layout switch — Menu itself lives down in the Live Feed panel's
+           header, next to Clear (see the comment there for why a second,
+           Focus-only copy of its trigger exists too). -->
       <button class="btn btn--ghost btn--layout" id="btn-layout-switch" type="button" data-layout="classic"
               title="Switch between the Classic layout (everything visible) and Focus (chat first, the rest one click away)">
         <span class="btn__layout-glyph" aria-hidden="true">&#9707;</span><span id="layout-switch-label">Classic</span>
+      </button>
+
+      <!-- Ask Jarvis sits right next to the layout switch now — both are
+           "how you're viewing/using Jarvis right now" controls, so they
+           read as one group at the end of the topbar. -->
+      <button class="btn btn--primary btn--ask-jarvis" id="btn-ask-jarvis" type="button">
+        <span class="btn__spark"></span>Ask <span id="btn-ask-jarvis-label">Jarvis</span>
       </button>
     </div>
   </header>
@@ -1133,23 +1134,24 @@
 
 <!-- DAEMONS — every long-running background service in one place: the three
      built-ins (scheduler, Discord, Instagram) and anything the user has
-     registered. Same .menu-overlay/.menu-panel chrome as Scheduled and MCP;
-     nothing bespoke, because a panel that looks different for no reason is a
-     panel people learn separately. -->
-<div class="menu-overlay" id="daemons-overlay" hidden>
-  <div class="menu-panel">
+     registered. Uses the .debug-overlay/.debug-panel chrome (same as Debug
+     and Logs) rather than the plainer .menu-panel — this panel has a real
+     list+console split just like Logs does, so it earns the bigger, more
+     capable frame instead of the compact one. -->
+<div class="debug-overlay" id="daemons-overlay" hidden>
+  <div class="debug-panel">
     <div class="panel__corner panel__corner--tl"></div>
     <div class="panel__corner panel__corner--br"></div>
 
-    <div class="menu-panel__head">
+    <div class="debug-panel__head">
       <svg class="brand-mark" viewBox="0 0 40 40" aria-hidden="true">
         <circle cx="20" cy="20" r="18" class="brand-mark__ring"/>
         <circle cx="20" cy="20" r="11" class="brand-mark__ring brand-mark__ring--in"/>
         <circle cx="20" cy="20" r="3" class="brand-mark__core"/>
       </svg>
-      <div class="menu-panel__titles">
-        <div class="menu-panel__title">DAEMONS</div>
-        <div class="menu-panel__subtitle" id="daemons-status-line">reading services&hellip;</div>
+      <div class="debug-panel__titles">
+        <div class="debug-panel__title">DAEMONS</div>
+        <div class="debug-panel__subtitle" id="daemons-status-line">reading services&hellip;</div>
       </div>
       <button class="btn btn--ghost btn--sm" id="btn-daemon-refresh" type="button" title="Re-read every daemon's live status">Refresh</button>
       <button class="modal__close" id="daemons-close" type="button" aria-label="Close">&times;</button>
@@ -1197,21 +1199,23 @@
 
 <!-- BACKLOG — untimed work. Deliberately NOT in the Scheduled panel: that
      one is about things that fire at a moment, this is about things with no
-     moment at all. See backlog.py's module docstring. -->
-<div class="menu-overlay" id="backlog-overlay" hidden>
-  <div class="menu-panel">
+     moment at all. See backlog.py's module docstring. Same bigger
+     .debug-overlay/.debug-panel chrome as Daemons/Log search/Debug/Logs — a
+     five-column board wants the room. -->
+<div class="debug-overlay" id="backlog-overlay" hidden>
+  <div class="debug-panel">
     <div class="panel__corner panel__corner--tl"></div>
     <div class="panel__corner panel__corner--br"></div>
 
-    <div class="menu-panel__head">
+    <div class="debug-panel__head">
       <svg class="brand-mark" viewBox="0 0 40 40" aria-hidden="true">
         <circle cx="20" cy="20" r="18" class="brand-mark__ring"/>
         <circle cx="20" cy="20" r="11" class="brand-mark__ring brand-mark__ring--in"/>
         <circle cx="20" cy="20" r="3" class="brand-mark__core"/>
       </svg>
-      <div class="menu-panel__titles">
-        <div class="menu-panel__title">BACKLOG</div>
-        <div class="menu-panel__subtitle" id="backlog-status-line">reading backlog&hellip;</div>
+      <div class="debug-panel__titles">
+        <div class="debug-panel__title">BACKLOG</div>
+        <div class="debug-panel__subtitle" id="backlog-status-line">reading backlog&hellip;</div>
       </div>
       <button class="modal__close" id="backlog-close" type="button" aria-label="Close">&times;</button>
     </div>
@@ -1235,21 +1239,23 @@
 <!-- LOG SEARCH — the raw files on disk, line by line. The existing Logs
      viewer shows parsed conversation entries; this one finds the line that
      failed to parse, the traceback in a daemon console, and anything in a
-     file the user points it at. -->
-<div class="menu-overlay" id="logsearch-overlay" hidden>
-  <div class="menu-panel">
+     file the user points it at. Same bigger .debug-overlay/.debug-panel
+     chrome as Daemons/Backlog/Debug/Logs — a results list this dense wants
+     the room too. -->
+<div class="debug-overlay" id="logsearch-overlay" hidden>
+  <div class="debug-panel">
     <div class="panel__corner panel__corner--tl"></div>
     <div class="panel__corner panel__corner--br"></div>
 
-    <div class="menu-panel__head">
+    <div class="debug-panel__head">
       <svg class="brand-mark" viewBox="0 0 40 40" aria-hidden="true">
         <circle cx="20" cy="20" r="18" class="brand-mark__ring"/>
         <circle cx="20" cy="20" r="11" class="brand-mark__ring brand-mark__ring--in"/>
         <circle cx="20" cy="20" r="3" class="brand-mark__core"/>
       </svg>
-      <div class="menu-panel__titles">
-        <div class="menu-panel__title">LOG SEARCH</div>
-        <div class="menu-panel__subtitle" id="logsearch-status-line">searches the raw files on disk</div>
+      <div class="debug-panel__titles">
+        <div class="debug-panel__title">LOG SEARCH</div>
+        <div class="debug-panel__subtitle" id="logsearch-status-line">searches the raw files on disk</div>
       </div>
       <button class="modal__close" id="logsearch-close" type="button" aria-label="Close">&times;</button>
     </div>
@@ -1277,6 +1283,7 @@
     </div>
   </div>
 </div>
+
 
 <!-- NOTIFICATIONS — every notification Jarvis has ever sent (toasts, OS
      notifications, reminders), newest first. Backed by the durable inbox at
