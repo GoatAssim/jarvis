@@ -83,6 +83,23 @@ html, body{
   -webkit-font-smoothing: antialiased;
 }
 
+/* Lock the page's own scroll while any full-screen panel is open. Every one
+   of these (.ask-overlay, .debug-overlay — shared by Debug and Logs —, and
+   .menu-overlay — Skills/Scheduled/MCP/Channels/Guides/Daemons/Backlog/Log
+   search/Notifications/Setup) is `position: fixed; inset: 0` and already
+   fills the viewport on its own, but nothing was stopping the page
+   underneath from still scrolling — most noticeable on Notifications, whose
+   list is usually the tallest thing on screen, but the bug was never
+   specific to it. This locks background scroll for as long as ANY of them
+   is open, and releases it the moment none of them are (`:not([hidden])`
+   tracks the same `hidden` attribute every open/close function already
+   toggles, so no JS needs to touch this). */
+body:has(
+  .ask-overlay:not([hidden]),
+  .debug-overlay:not([hidden]),
+  .menu-overlay:not([hidden])
+){ overflow: hidden; }
+
 body{
   background-image:
     radial-gradient(ellipse 900px 500px at 15% -10%, color-mix(in srgb, var(--accent) 8%, transparent), transparent 60%),
@@ -314,7 +331,7 @@ textarea:focus-visible, select:focus-visible, [tabindex]:focus-visible{
 .bottom-status-bar{
   position: fixed;
   left: 50%;
-  bottom: 92px;
+  bottom: 74px;
   transform: translateX(-50%);
   z-index: 45;
   display: flex;
@@ -327,7 +344,7 @@ textarea:focus-visible, select:focus-visible, [tabindex]:focus-visible{
 }
 .bottom-status-bar .status-pill{ pointer-events: auto; }
 @media (max-width: 780px){
-  .bottom-status-bar{ bottom: 132px; max-width: calc(100vw - 24px); }
+  .bottom-status-bar{ bottom: 112px; max-width: calc(100vw - 24px); }
   .bottom-status-bar .topbar__meta{ white-space: normal; word-break: break-word; }
 }
 
@@ -1771,6 +1788,14 @@ audio.ask-dl-player{ max-height: none; background: transparent; }
 .debug-panel__subtitle.is-error{ color: var(--red); }
 .debug-panel__subtitle.is-ok{ color: var(--green); }
 #debug-close{ margin-left: auto; flex-shrink: 0; }
+/* BUGFIX: the Logs panel (#logs-overlay, same .debug-panel__head chrome)
+   had no middle toolbar button to carry a margin-left:auto the way Debug's
+   mode-switch does, and nothing gave its own close button (#logs-close) one
+   either — so it rendered snug against the subtitle instead of pinned to
+   the top-right corner like every other panel's close button. Generic rule,
+   mirroring .menu-panel__head's, so it's correct regardless of what else is
+   in the header and covers every .debug-panel__head panel, not just Debug's. */
+.debug-panel__head .modal__close{ margin-left: auto; flex-shrink: 0; }
 
 .debug-body{
   flex: 1; min-height: 0;
@@ -1992,10 +2017,12 @@ audio.ask-dl-player{ max-height: none; background: transparent; }
   .logs-fab{ padding: 12px; border-radius: 50%; right: 16px; bottom: 16px; }
 }
 
-/* Stacked directly above the Logs fab (same right offset, bottom pushed up
-   by the Logs fab's own height + gap) rather than crowding it side by side,
-   so both stay reachable with a thumb on narrow viewports. */
-.notifications-fab{ bottom: 78px; right: 12px; position: relative; }
+/* Stacked directly above the Logs fab (bottom pushed up by the Logs fab's
+   own height + gap) rather than crowding it side by side, so both stay
+   reachable with a thumb on narrow viewports. Shifted a bit further right
+   than a straight stack-above-Logs would put it (smaller `right` = closer
+   to the edge = further right on screen). */
+.notifications-fab{ bottom: 78px; right: 6px; position: relative; }
 .notifications-fab__badge{
   position: absolute; top: -6px; right: -6px;
   min-width: 18px; height: 18px; padding: 0 4px;
@@ -2006,7 +2033,7 @@ audio.ask-dl-player{ max-height: none; background: transparent; }
   box-shadow: 0 0 0 2px var(--bg-raised);
 }
 @media (max-width: 900px){
-  .notifications-fab{ bottom: 70px; right: 8px; }
+  .notifications-fab{ bottom: 70px; right: 3px; }
 }
 
 /* --- notifications panel -------------------------------------------------
@@ -2593,8 +2620,15 @@ audio.ask-dl-player{ max-height: none; background: transparent; }
 
 .panel-menu__caret{ display: inline-block; margin-left: 2px; font-size: 10px; }
 
+/* Portaled to <body> on open (see openPanelMenuFrom in app.js) and
+   positioned with `fixed` + inline top/left set from the trigger's own
+   bounding rect — this default top/right is only a fallback for the split
+   second before JS repositions it. z-index sits above the FABs (60) and
+   sequence bar (40) it might otherwise render under now that it's a
+   body-level element, but below full-screen overlays (85+), which never
+   need to coexist with it anyway. */
 .panel-menu__list{
-  position: absolute; top: calc(100% + 6px); right: 0; z-index: 30;
+  position: fixed; top: 60px; right: 12px; z-index: 70;
   min-width: 230px;
   background: var(--bg-raised); border: 1px solid var(--border-strong); border-radius: var(--radius);
   box-shadow: 0 8px 28px rgba(0,0,0,0.5), 0 0 18px var(--accent-glow);
@@ -2789,11 +2823,18 @@ audio.ask-dl-player{ max-height: none; background: transparent; }
 /* ===========================================================================
    DAEMONS / BACKLOG / LOG SEARCH / SETUP, and the layout switch.
 
-   All four panels reuse the .menu-overlay / .menu-panel / .menu-body chrome
-   defined above rather than introducing their own — a panel that looks
-   different for no reason is a panel people have to learn separately. What
-   follows is only the content INSIDE those panels, plus the one genuinely
-   new thing: the classic/focus layout.
+   Setup still uses the .menu-overlay/.menu-panel/.menu-body chrome defined
+   above. Daemons, Backlog and Log search were moved onto the bigger
+   .debug-overlay/.debug-panel chrome instead (see their markup in
+   index.html) — same idea (a panel that looks different for no reason is a
+   panel people have to learn separately), just matched to the panels this
+   trio was actually supposed to be peers of. Their inner content below
+   (.skills-pane/.skills-list for Daemons, .kanban for Backlog,
+   .logsearch-* for Log search) still reuses the same building blocks as
+   before; what changed is the per-row/card treatment, upgraded from a flat
+   tinted-background row to the same bordered-card-with-hover-lift language
+   as the Debug panel's .debug-tool-card, plus a couple of real bugs fixed
+   along the way (see the --muted note below).
    =========================================================================== */
 
 /* --- layout switch -------------------------------------------------------
@@ -2833,17 +2874,47 @@ body.layout--focus .btn--ask-jarvis{ display: none; }
 .panel-menu--focus-only{ display: none; }
 body.layout--focus .panel-menu--focus-only{ display: inline-flex; }
 
-/* --- daemons ------------------------------------------------------------- */.daemon-row{ align-items: flex-start; gap: 10px; }
+/* --- daemons ---------------------------------------------------------------
+   .daemon-row rides alongside .skill-row (same list, same base spacing/
+   click target) but overrides its look entirely to match .debug-tool-card:
+   a real bordered card with a filled background and a hover lift, instead
+   of a flat row that just tints on hover. Declared after .skill-row in the
+   stylesheet so these win on the properties both set (background, border,
+   border-left) without needing !important. */
+.daemon-row{
+  display: flex; align-items: flex-start; gap: 10px;
+  border: 1px solid var(--border);
+  border-left: 2px solid var(--border-strong);
+  border-radius: 2px;
+  background: var(--bg-panel-2);
+  transition: border-color 0.15s, background 0.15s, transform 0.15s;
+}
+.daemon-row:hover{
+  background: var(--bg-panel-2);
+  border-color: var(--accent-soft);
+  border-left-color: var(--accent);
+  transform: translateX(2px);
+}
 .daemon-row.is-selected{
   border-color: var(--accent);
-  box-shadow: 0 0 0 1px var(--accent-glow);
+  border-left-color: var(--accent);
+  background: linear-gradient(90deg, color-mix(in srgb, var(--accent) 12%, transparent), var(--bg-panel-2) 70%);
 }
 .daemon-row__main{ display: flex; gap: 10px; flex: 1; min-width: 0; }
 .daemon-row__text{ min-width: 0; flex: 1; }
 .daemon-row__cmd{
-  font-family: "JetBrains Mono", monospace;
+  font-family: var(--font-mono);
   font-size: 11px;
-  color: var(--muted);
+  /* BUGFIX: was var(--muted), a token that's never defined anywhere in
+     :root — with no fallback that's invalid at computed-value time, and
+     for an inherited property like `color` that means it silently falls
+     back to whatever color the row already had (full-brightness text),
+     not the dimmed secondary tone it was clearly meant to be. Same fix
+     applies throughout this section (.daemon-dot, .daemon-stdin-toggle,
+     .kanban__empty, .setup-step__icon, .setup-step__detail below) — for
+     `background` (non-inherited) the effect was worse: an invisible,
+     fully transparent daemon status dot by default. */
+  color: var(--text-dimmer);
   margin-top: 3px;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -2856,13 +2927,14 @@ body.layout--focus .panel-menu--focus-only{ display: inline-flex; }
    hue is one some people cannot read at all. */
 .daemon-dot{
   width: 9px; height: 9px; border-radius: 50%;
-  background: var(--muted);
+  background: var(--text-dimmer);
   flex: 0 0 auto;
   margin-top: 5px;
 }
 .daemon-dot--up{
   background: var(--status-online, #4ade80);
   box-shadow: 0 0 8px var(--status-online, #4ade80);
+  animation: pulse 2.4s ease-in-out infinite;
 }
 .daemon-dot--bad{ background: #f87171; box-shadow: 0 0 8px rgba(248,113,113,0.6); }
 .daemon-dot--wait{ background: var(--accent-secondary); }
@@ -2875,7 +2947,7 @@ body.layout--focus .panel-menu--focus-only{ display: inline-flex; }
   background: var(--bg-1);
   border-top: 1px solid var(--border);
   border-bottom: 1px solid var(--border);
-  font-family: "JetBrains Mono", monospace;
+  font-family: var(--font-mono);
   font-size: 11.5px;
   line-height: 1.55;
   color: var(--text);
@@ -2897,9 +2969,9 @@ body.layout--focus .panel-menu--focus-only{ display: inline-flex; }
 }
 .daemon-stdin-toggle{
   display: flex; align-items: center; gap: 6px;
-  font-size: 11.5px; color: var(--muted);
+  font-size: 11.5px; color: var(--text-dimmer);
 }
-.daemon-input-row input{ font-family: "JetBrains Mono", monospace; }
+.daemon-input-row input{ font-family: var(--font-mono); }
 
 /* --- backlog -------------------------------------------------------------
    A five-column board that scrolls sideways rather than squashing: a kanban
@@ -2933,12 +3005,25 @@ body.layout--focus .panel-menu--focus-only{ display: inline-flex; }
   text-transform: uppercase;
   color: var(--accent);
 }
+/* Was a static block with no hover/transition at all — every other
+   clickable card in the app (.debug-tool-card, .daemon-row, .skill-row)
+   responds to a hover; this one just sat there, which is what made it read
+   as unfinished next to the rest. Cards here are drag-reorderable (see the
+   drag handlers in app.js), so a lift-on-hover also doubles as a "yes, you
+   can pick this up" cue. */
 .kanban__card{
   background: var(--bg-raised);
   border: 1px solid var(--border);
   border-left: 3px solid var(--border-strong);
   border-radius: 4px;
   padding: 8px 10px;
+  cursor: grab;
+  transition: border-color 0.15s, background 0.15s, transform 0.15s, box-shadow 0.15s;
+}
+.kanban__card:hover{
+  border-color: var(--accent-soft);
+  box-shadow: 0 4px 14px rgba(0,0,0,0.35);
+  transform: translateY(-1px);
 }
 .kanban__card--high{ border-left-color: var(--accent-secondary); }
 .kanban__card--low{ opacity: 0.72; }
@@ -2950,11 +3035,15 @@ body.layout--focus .panel-menu--focus-only{ display: inline-flex; }
 .kanban__blocked{ font-size: 11px; color: var(--accent-secondary); margin-top: 4px; }
 .kanban__actions{ display: flex; gap: 4px; margin-top: 8px; flex-wrap: wrap; }
 .kanban__actions .btn{ padding: 2px 7px; font-size: 10.5px; }
-.kanban__empty{ color: var(--muted); font-size: 11px; text-align: center; padding: 6px; }
+.kanban__empty{ color: var(--text-dimmer); font-size: 11px; text-align: center; padding: 6px; }
 .backlog-add{ flex-direction: row; flex-wrap: wrap; align-items: center; }
 .backlog-add input{ flex: 1 1 180px; width: auto; }
 
-/* --- log search ---------------------------------------------------------- */
+/* --- log search ------------------------------------------------------------
+   Each hit gets the same card-with-accent treatment as .debug-tool-card and
+   .daemon-row instead of a flat bordered box with no feedback on hover —
+   the "where" byline doubles as that accent, in the same mono/accent-color
+   styling .debug-tool-card__name uses for its own file-ish text. */
 .logsearch-controls{ flex-direction: row; flex-wrap: wrap; align-items: center; }
 .logsearch-controls input{ flex: 1 1 200px; width: auto; }
 .logsearch-results{
@@ -2962,24 +3051,33 @@ body.layout--focus .panel-menu--focus-only{ display: inline-flex; }
   overflow: auto;
   padding: 0 14px 14px;
   min-height: 0;
+  display: flex; flex-direction: column; gap: 8px;
 }
 .logsearch-hit{
   border: 1px solid var(--border);
-  border-radius: 4px;
-  margin-bottom: 8px;
+  border-left: 2px solid var(--border-strong);
+  border-radius: 2px;
   overflow: hidden;
+  background: var(--bg-panel-2);
+  transition: border-color 0.15s, transform 0.15s;
+}
+.logsearch-hit:hover{
+  border-color: var(--accent-soft);
+  border-left-color: var(--accent);
+  transform: translateX(2px);
 }
 .logsearch-hit__where{
   padding: 5px 10px;
-  background: var(--bg-panel-2);
-  font-family: "JetBrains Mono", monospace;
+  background: var(--bg-raised);
+  border-bottom: 1px solid var(--border);
+  font-family: var(--font-mono);
   font-size: 10.5px;
   color: var(--accent);
 }
 .logsearch-hit__text{
   margin: 0;
   padding: 8px 10px;
-  font-family: "JetBrains Mono", monospace;
+  font-family: var(--font-mono);
   font-size: 11.5px;
   line-height: 1.5;
   white-space: pre-wrap;
@@ -3003,12 +3101,12 @@ body.layout--focus .panel-menu--focus-only{ display: inline-flex; }
   width: 18px; height: 18px; border-radius: 50%;
   display: flex; align-items: center; justify-content: center;
   font-size: 11px; flex: 0 0 auto;
-  background: var(--bg-raised); color: var(--muted);
+  background: var(--bg-raised); color: var(--text-dimmer);
 }
 .setup-step__icon--ok{ color: var(--status-online, #4ade80); }
 .setup-step__icon--todo{ color: #f87171; }
 .setup-step__title{ font-size: 13px; font-weight: 600; }
-.setup-step__detail{ font-size: 11.5px; color: var(--muted); margin-top: 4px; padding-left: 26px; }
+.setup-step__detail{ font-size: 11.5px; color: var(--text-dim); margin-top: 4px; padding-left: 26px; }
 .setup-step__why{ font-size: 11.5px; margin-top: 6px; padding-left: 26px; line-height: 1.5; }
 .setup-step__action{
   display: inline-block;
@@ -3017,7 +3115,7 @@ body.layout--focus .panel-menu--focus-only{ display: inline-flex; }
   background: var(--bg-1);
   border: 1px solid var(--border);
   border-radius: 3px;
-  font-family: "JetBrains Mono", monospace;
+  font-family: var(--font-mono);
   font-size: 11px;
   color: var(--accent);
 }
