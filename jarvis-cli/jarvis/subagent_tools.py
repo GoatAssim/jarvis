@@ -102,7 +102,14 @@ def tool_run_subagents(args):
         return {"error": "no matching subagent tasks found"}
 
     rounds = 0
-    max_rounds = min(int(args.get("max_rounds") or MAX_ROUNDS), MAX_ROUNDS)
+    # BUGFIX: `int(args.get("max_rounds") or MAX_ROUNDS)` treated an
+    # explicit `max_rounds: 0` the same as "not provided" (0 is falsy in
+    # Python), silently running up to MAX_ROUNDS instead of the zero rounds
+    # actually requested. `is None` is the only case that should mean
+    # "use the default".
+    raw_max_rounds = args.get("max_rounds")
+    max_rounds = MAX_ROUNDS if raw_max_rounds is None else int(raw_max_rounds)
+    max_rounds = max(0, min(max_rounds, MAX_ROUNDS))
     while rounds < max_rounds:
         pending = []
         for tid in ids:
@@ -119,6 +126,16 @@ def tool_run_subagents(args):
 
     results = [tasks.load(tid) for tid in ids]
     results = [t for t in results if t]
+
+    # BUGFIX: every id in `ids` failing to resolve (a typo, or a task
+    # already garbage-collected) used to fall straight through to the
+    # summary code below with an empty `results`, which reports
+    # `all_finished: true` — indistinguishable from "ran fine, nothing left
+    # to do" when what actually happened is "none of these ids exist".
+    # subagent_status already gets this right for a single id; do the same
+    # here rather than claiming false success.
+    if not results:
+        return {"error": "no matching subagent tasks found for the given id(s)"}
 
     if parent_id:
         summary = subagents.summary_for_parent(parent_id)

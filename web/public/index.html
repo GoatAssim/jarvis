@@ -32,19 +32,54 @@
 
   <!-- HEADER -->
   <header class="topbar">
-    <div class="topbar__brand">
-      <svg class="brand-mark" viewBox="0 0 40 40" aria-hidden="true">
-        <circle cx="20" cy="20" r="18" class="brand-mark__ring"/>
-        <circle cx="20" cy="20" r="11" class="brand-mark__ring brand-mark__ring--in"/>
-        <circle cx="20" cy="20" r="3" class="brand-mark__core"/>
-      </svg>
-      <div class="topbar__titles">
-        <div class="topbar__title" id="topbar-title">J.A.R.V.I.S</div>
-        <div class="topbar__subtitle">Command Interface</div>
+    <div class="topbar__left">
+      <div class="topbar__brand">
+        <svg class="brand-mark" viewBox="0 0 40 40" aria-hidden="true">
+          <circle cx="20" cy="20" r="18" class="brand-mark__ring"/>
+          <circle cx="20" cy="20" r="11" class="brand-mark__ring brand-mark__ring--in"/>
+          <circle cx="20" cy="20" r="3" class="brand-mark__core"/>
+        </svg>
+        <div class="topbar__titles">
+          <div class="topbar__title" id="topbar-title">J.A.R.V.I.S</div>
+          <div class="topbar__subtitle">Command Interface</div>
+        </div>
+        <button class="btn btn--ghost btn--sm btn--skin" id="btn-skin" type="button" title="Rename Jarvis, change how he addresses you, and pick an accent skin">Skin</button>
       </div>
-      <button class="btn btn--ghost btn--sm btn--skin" id="btn-skin" type="button" title="Rename Jarvis, change how he addresses you, and pick an accent skin">Skin</button>
+
+      <button class="btn btn--ghost btn--mode" id="btn-mode-switch" type="button" data-mode="compact"
+              title="Cycle Jarvis's prompt capacity: 400% (fullest context) → 100% (balanced, default) → 50% (ultra compact, fewest tokens)">
+        <span class="btn__mode-dot"></span><span id="mode-switch-label">100% Capacity</span>
+      </button>
+
+      <!-- Ask Jarvis sits right next to Capacity now — both are "how Jarvis
+           is set up for this turn" controls, so they read as one group. -->
+      <button class="btn btn--primary btn--ask-jarvis" id="btn-ask-jarvis" type="button">
+        <span class="btn__spark"></span>Ask <span id="btn-ask-jarvis-label">Jarvis</span>
+      </button>
     </div>
 
+    <!-- Centered in the topbar via the 3-column grid below (topbar__left /
+         clock / topbar__right), regardless of how wide either side group
+         is. -->
+    <div class="topbar__clock" id="clock">00:00:00</div>
+
+    <div class="topbar__right">
+      <!-- Layout switch only, now — Menu itself moved down to the Live
+           Feed panel's header, next to Clear (see the comment there for
+           why a second, Focus-only copy of its trigger exists too). -->
+      <button class="btn btn--ghost btn--layout" id="btn-layout-switch" type="button" data-layout="classic"
+              title="Switch between the Classic layout (everything visible) and Focus (chat first, the rest one click away)">
+        <span class="btn__layout-glyph" aria-hidden="true">&#9707;</span><span id="layout-switch-label">Classic</span>
+      </button>
+    </div>
+  </header>
+
+  <!-- Online status + Jarvis's invocation/config path — pulled out of the
+       topbar and centered along the bottom of the screen instead, next to
+       each other exactly as they were (see renderStatus() in app.js: the
+       pill is the online/offline state, .topbar__meta is the literal
+       `invocation · configPath` string, i.e. "the path of Jarvis"). -->
+  <div class="bottom-status-bar" id="bottom-status-bar">
     <div class="topbar__status">
       <div class="status-pill" id="status-pill">
         <span class="status-pill__dot" id="status-dot"></span>
@@ -52,93 +87,7 @@
       </div>
       <div class="topbar__meta" id="status-meta"></div>
     </div>
-
-    <button class="btn btn--ghost btn--mode" id="btn-mode-switch" type="button" data-mode="compact"
-            title="Cycle Jarvis's prompt capacity: 400% (fullest context) → 100% (balanced, default) → 50% (ultra compact, fewest tokens)">
-      <span class="btn__mode-dot"></span><span id="mode-switch-label">100% Capacity</span>
-    </button>
-
-    <!-- LAYOUT SWITCH. The classic layout shows the Commands / Detail /
-         Console grid at all times; Focus hides the grid and leads with the
-         chat, with everything else reachable from the same Menu. Purely a
-         presentation choice — no feature exists in one layout and not the
-         other, which is the property that makes switching safe at any
-         moment. Persisted server-side (jarvis ui-mode) so it follows the
-         person across browsers rather than living in one tab. -->
-    <button class="btn btn--ghost btn--layout" id="btn-layout-switch" type="button" data-layout="classic"
-            title="Switch between the Classic layout (everything visible) and Focus (chat first, the rest one click away)">
-      <span class="btn__layout-glyph" aria-hidden="true">&#9707;</span><span id="layout-switch-label">Classic</span>
-    </button>
-
-    <!-- Debug, Skills, Scheduled, MCP Servers, Daemons, Backlog, Log search,
-         Setup, Channels and Guides used to live behind this dropdown INSIDE
-         the console panel of the Classic three-column grid. That's the
-         panel the Focus layout hides (see body.layout--focus .grid in
-         style.css), which made every one of those panels unreachable the
-         moment Focus was on — the "the menu is gone" bug. Living in the
-         header instead, alongside the layout switch itself, is what makes
-         "reachable in both layouts, from the same Menu" (the promise the
-         comments near applyLayout() make) actually true. -->
-    <div class="panel-menu" id="panel-menu">
-      <button class="btn btn--ghost" id="btn-panel-menu" type="button"
-              aria-haspopup="true" aria-expanded="false"
-              title="Debug tools, skills, scheduled tasks and reminders, daemons, backlog, log search and connected MCP servers">
-        Menu <span class="panel-menu__caret" aria-hidden="true">&#9662;</span>
-      </button>
-      <div class="panel-menu__list" id="panel-menu-list" role="menu" hidden>
-        <button class="panel-menu__item" id="menu-item-guides" type="button" role="menuitem">
-          <span class="panel-menu__item-label">Guides</span>
-          <span class="panel-menu__item-hint">How to connect Discord, Instagram, Spotify and the rest</span>
-        </button>
-        <button class="panel-menu__item" id="menu-item-debug" type="button" role="menuitem">
-          <span class="panel-menu__item-label">Debug</span>
-          <span class="panel-menu__item-hint">Inspect and run every tool Jarvis can call</span>
-        </button>
-        <button class="panel-menu__item" id="menu-item-skills" type="button" role="menuitem">
-          <span class="panel-menu__item-label">Skills</span>
-          <span class="panel-menu__item-hint">Add, edit and remove skills</span>
-        </button>
-        <button class="panel-menu__item" id="menu-item-scheduled" type="button" role="menuitem">
-          <span class="panel-menu__item-label">Scheduled</span>
-          <span class="panel-menu__item-hint">Tasks, reminders and notifications</span>
-        </button>
-        <button class="panel-menu__item" id="menu-item-mcp" type="button" role="menuitem">
-          <span class="panel-menu__item-label">MCP Servers</span>
-          <span class="panel-menu__item-hint">External tools connected over MCP</span>
-        </button>
-        <button class="panel-menu__item" id="menu-item-ctools" type="button" role="menuitem">
-          <span class="panel-menu__item-label">Custom Tools</span>
-          <span class="panel-menu__item-hint">Write your own Python tools &mdash; kept in ~/.jarvis, survives a rebuild</span>
-        </button>
-        <button class="panel-menu__item" id="menu-item-daemons" type="button" role="menuitem">
-          <span class="panel-menu__item-label">Daemons</span>
-          <span class="panel-menu__item-hint">Background services &mdash; start, stop, watch their console, schedule them</span>
-        </button>
-        <button class="panel-menu__item" id="menu-item-backlog" type="button" role="menuitem">
-          <span class="panel-menu__item-label">Backlog</span>
-          <span class="panel-menu__item-hint">Open-ended work with no due date &mdash; what&rsquo;s in progress, what&rsquo;s blocked</span>
-        </button>
-        <button class="panel-menu__item" id="menu-item-logsearch" type="button" role="menuitem">
-          <span class="panel-menu__item-label">Log search</span>
-          <span class="panel-menu__item-hint">Grep the raw log files on disk, including daemon consoles</span>
-        </button>
-        <button class="panel-menu__item" id="menu-item-setup" type="button" role="menuitem">
-          <span class="panel-menu__item-label">Setup</span>
-          <span class="panel-menu__item-hint">Guided first run, dependency checks and the layout switch</span>
-        </button>
-        <button class="panel-menu__item" id="menu-item-channels" type="button" role="menuitem">
-          <span class="panel-menu__item-label">Channels</span>
-          <span class="panel-menu__item-hint">Who can DM, get replies from, and run tools on Discord &amp; Instagram</span>
-        </button>
-      </div>
-    </div>
-
-    <button class="btn btn--primary btn--ask-jarvis" id="btn-ask-jarvis" type="button">
-      <span class="btn__spark"></span>Ask <span id="btn-ask-jarvis-label">Jarvis</span>
-    </button>
-
-    <div class="topbar__clock" id="clock">00:00:00</div>
-  </header>
+  </div>
 
   <!-- MAIN GRID -->
   <main class="grid">
@@ -216,6 +165,70 @@
         <h2>Live Feed</h2>
         <div class="console-actions">
           <button class="btn btn--ghost" id="btn-abort" type="button" hidden>ABORT</button>
+          <!-- Debug, Skills, Scheduled, MCP Servers, Daemons, Backlog, Log
+               search, Setup, Channels and Guides live behind this dropdown.
+               It used to sit in the topbar specifically so it wouldn't
+               disappear when Focus mode hides this whole panel (see
+               body.layout--focus .grid in style.css) — that was the "the
+               menu is gone" bug. Moved back down here, next to Clear, on
+               request; #panel-menu-focus below is the fix for the same
+               problem this reintroduces: a second trigger, shown only in
+               Focus mode, that opens this exact list (see the JS —
+               panel-menu-list gets reparented to whichever trigger opened
+               it, not duplicated). -->
+          <div class="panel-menu" id="panel-menu">
+            <button class="btn btn--ghost" id="btn-panel-menu" type="button"
+                    aria-haspopup="true" aria-expanded="false"
+                    title="Debug tools, skills, scheduled tasks and reminders, daemons, backlog, log search and connected MCP servers">
+              Menu <span class="panel-menu__caret" aria-hidden="true">&#9662;</span>
+            </button>
+            <div class="panel-menu__list" id="panel-menu-list" role="menu" hidden>
+              <button class="panel-menu__item" id="menu-item-guides" type="button" role="menuitem">
+                <span class="panel-menu__item-label">Guides</span>
+                <span class="panel-menu__item-hint">How to connect Discord, Instagram, Spotify and the rest</span>
+              </button>
+              <button class="panel-menu__item" id="menu-item-debug" type="button" role="menuitem">
+                <span class="panel-menu__item-label">Debug</span>
+                <span class="panel-menu__item-hint">Inspect and run every tool Jarvis can call</span>
+              </button>
+              <button class="panel-menu__item" id="menu-item-skills" type="button" role="menuitem">
+                <span class="panel-menu__item-label">Skills</span>
+                <span class="panel-menu__item-hint">Add, edit and remove skills</span>
+              </button>
+              <button class="panel-menu__item" id="menu-item-scheduled" type="button" role="menuitem">
+                <span class="panel-menu__item-label">Scheduled</span>
+                <span class="panel-menu__item-hint">Tasks, reminders and notifications</span>
+              </button>
+              <button class="panel-menu__item" id="menu-item-mcp" type="button" role="menuitem">
+                <span class="panel-menu__item-label">MCP Servers</span>
+                <span class="panel-menu__item-hint">External tools connected over MCP</span>
+              </button>
+              <button class="panel-menu__item" id="menu-item-ctools" type="button" role="menuitem">
+                <span class="panel-menu__item-label">Custom Tools</span>
+                <span class="panel-menu__item-hint">Write your own Python tools &mdash; kept in ~/.jarvis, survives a rebuild</span>
+              </button>
+              <button class="panel-menu__item" id="menu-item-daemons" type="button" role="menuitem">
+                <span class="panel-menu__item-label">Daemons</span>
+                <span class="panel-menu__item-hint">Background services &mdash; start, stop, watch their console, schedule them</span>
+              </button>
+              <button class="panel-menu__item" id="menu-item-backlog" type="button" role="menuitem">
+                <span class="panel-menu__item-label">Backlog</span>
+                <span class="panel-menu__item-hint">Open-ended work with no due date &mdash; what&rsquo;s in progress, what&rsquo;s blocked</span>
+              </button>
+              <button class="panel-menu__item" id="menu-item-logsearch" type="button" role="menuitem">
+                <span class="panel-menu__item-label">Log search</span>
+                <span class="panel-menu__item-hint">Grep the raw log files on disk, including daemon consoles</span>
+              </button>
+              <button class="panel-menu__item" id="menu-item-setup" type="button" role="menuitem">
+                <span class="panel-menu__item-label">Setup</span>
+                <span class="panel-menu__item-hint">Guided first run, dependency checks and the layout switch</span>
+              </button>
+              <button class="panel-menu__item" id="menu-item-channels" type="button" role="menuitem">
+                <span class="panel-menu__item-label">Channels</span>
+                <span class="panel-menu__item-hint">Who can DM, get replies from, and run tools on Discord &amp; Instagram</span>
+              </button>
+            </div>
+          </div>
           <button class="btn btn--ghost" id="btn-clear-console" type="button">Clear</button>
         </div>
       </div>
@@ -294,6 +307,21 @@
         </div>
         <span class="convo-id-tag" id="ask-convo-id-tag" title="Active conversation id"></span>
         <button class="btn btn--ghost btn--sm" id="btn-ask-clear" type="button" title="Clear this conversation">Clear</button>
+        <!-- Menu lives next to the Live Feed's Clear button now, but that
+             panel is exactly what Focus mode hides (body.layout--focus
+             .grid in style.css) — the Ask panel is the only chrome left on
+             screen there. This is a second trigger for the SAME dropdown
+             (#panel-menu-list gets reparented here on open, not cloned),
+             shown only in Focus via .panel-menu--focus-only in style.css,
+             so Menu stays reachable in both layouts without duplicating
+             its eleven items and all their click wiring. -->
+        <div class="panel-menu panel-menu--focus-only" id="panel-menu-focus">
+          <button class="btn btn--ghost btn--sm" id="btn-panel-menu-focus" type="button"
+                  aria-haspopup="true" aria-expanded="false"
+                  title="Debug tools, skills, scheduled tasks and reminders, daemons, backlog, log search and connected MCP servers">
+            Menu <span class="panel-menu__caret" aria-hidden="true">&#9662;</span>
+          </button>
+        </div>
         <button class="modal__close" id="ask-close" type="button" aria-label="Close">&times;</button>
       </div>
     </div>
@@ -1101,16 +1129,7 @@
 <div class="toast" id="toast" hidden></div>
 <div class="run-confirm-popup" id="run-confirm-popup" hidden></div>
 
-<script src="https://cdn.jsdelivr.net/npm/marked@15/marked.min.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/dompurify@3/dist/purify.min.js"></script>
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css">
-<script src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/contrib/auto-render.min.js"></script>
-<!-- ui-kit.js BEFORE app.js: app.js calls JarvisUI.handleEvent() from its
-     JARVIS_MEDIA dispatch, so the global has to exist by then. -->
-<script src="ui-kit.js"></script>
-<script src="app.js"></script>
-<script src="custom-tools.js"></script>
 
 <!-- DAEMONS — every long-running background service in one place: the three
      built-ins (scheduler, Discord, Instagram) and anything the user has
@@ -1317,6 +1336,29 @@
     </div>
   </div>
 </div>
+
+<!-- Scripts load LAST, after every panel's markup (Daemons/Backlog/Log
+     search/Notifications/Setup included). app.js and custom-tools.js do
+     `qs("#some-overlay")` as plain top-level `const` lookups the moment
+     they run — not lazily, not inside a DOMContentLoaded handler — so any
+     overlay whose HTML appeared later in the document than this script tag
+     used to resolve to null forever, silently no-opping every open/close
+     call for it. That was the actual reason the Daemons, Backlog, Log
+     search, Notifications and Setup panels (all appended near the end of
+     <body>, after where these tags used to sit) didn't respond to clicks:
+     the qs() lookups all ran before their markup existed. Guides, Debug,
+     Skills, Scheduled, MCP and Channels worked fine only because their
+     markup happens to sit earlier in the file. Keep these tags below every
+     panel div, not just below the ones that exist today. -->
+<script src="https://cdn.jsdelivr.net/npm/marked@15/marked.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/dompurify@3/dist/purify.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/contrib/auto-render.min.js"></script>
+<!-- ui-kit.js BEFORE app.js: app.js calls JarvisUI.handleEvent() from its
+     JARVIS_MEDIA dispatch, so the global has to exist by then. -->
+<script src="ui-kit.js"></script>
+<script src="app.js"></script>
+<script src="custom-tools.js"></script>
 
 </body>
 </html>

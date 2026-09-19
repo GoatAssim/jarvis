@@ -348,6 +348,16 @@
   function wire() {
     wireSkin();
     qs("#ctools-close")?.addEventListener("click", close);
+    // Same click-outside-to-close / Escape pattern every other menu-overlay
+    // panel gets in app.js — this one was built here instead and had never
+    // gotten either.
+    qs("#ctools-overlay")?.addEventListener("click", (e) => {
+      if (e.target === qs("#ctools-overlay")) close();
+    });
+    document.addEventListener("keydown", (e) => {
+      const overlay = qs("#ctools-overlay");
+      if (e.key === "Escape" && overlay && !overlay.hidden) close();
+    });
     qs("#btn-ctools-refresh")?.addEventListener("click", refresh);
     qs("#btn-ctools-save")?.addEventListener("click", save);
     qs("#btn-ctools-check")?.addEventListener("click", check);
@@ -396,17 +406,25 @@
 
     Object.entries(themes).forEach(([id, theme]) => {
       const vars = theme.vars || {};
+      // "None" has no colours to swatch — falling back to the same
+      // defaults every other theme's missing vars use would make its card
+      // look like a plain copy of the default Jarvis theme, which is
+      // actively misleading for the one option that promises to apply
+      // nothing. It gets a distinct checkerboard instead.
+      const swatch = theme.isNone
+        ? el("div", { class: "jui-theme__swatch jui-theme__swatch--none" })
+        : el("div", { class: "jui-theme__swatch" }, [
+            el("span", { style: "background:" + (vars["--bg"] || "#000") }),
+            el("span", { style: "background:" + (vars["--accent"] || "#4fd8ff") }),
+            el("span", { style: "background:" + (vars["--accent-secondary"] || "#f2b544") }),
+            el("span", { style: "background:" + (vars["--bg-raised"] || "#111") }),
+          ]);
       const card = el("button", {
         class: "jui-theme" + (id === current ? " is-active" : ""),
         type: "button", title: theme.hint || theme.label,
         onclick: () => { UI().themes.apply(id); renderThemeGallery(host); },
       }, [
-        el("div", { class: "jui-theme__swatch" }, [
-          el("span", { style: "background:" + (vars["--bg"] || "#000") }),
-          el("span", { style: "background:" + (vars["--accent"] || "#4fd8ff") }),
-          el("span", { style: "background:" + (vars["--accent-secondary"] || "#f2b544") }),
-          el("span", { style: "background:" + (vars["--bg-raised"] || "#111") }),
-        ]),
+        swatch,
         el("div", { class: "jui-theme__meta" }, [
           el("div", { class: "jui-theme__name" }, theme.label || id),
           el("div", { class: "jui-theme__hint" }, theme.author || ""),

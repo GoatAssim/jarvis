@@ -428,12 +428,26 @@ def _eligible_providers(providers, defaults=None):
     # function is the single point where "which keys may this process spend"
     # is decided, so there is no path by which a subagent reaches the main
     # Jarvis key, including on failover. See subagents.providers_from_env.
+    # BUGFIX: this used to be one try/except around the whole lookup, so any
+    # exception inside providers_from_env() — including one this function's
+    # author never anticipated — set `pinned = None`, which reads as "this
+    # process isn't a subagent, carry on" and silently handed back the
+    # AMBIENT provider list (main key included). For a boundary whose entire
+    # job is "a subagent can never reach the main key", fail-open on an
+    # unexpected exception is exactly backwards. Only the "am I even a
+    # subagent" check (reading one env var) is allowed to fail open, since a
+    # normal ask must never be affected by this; once we know the env var IS
+    # set, any failure past that point fails CLOSED (empty list) instead.
     try:
         from . import subagents
-        pinned = subagents.providers_from_env(providers)
+        is_subagent = bool(os.environ.get(subagents.KEY_ENV))
     except Exception:  # noqa: BLE001 — never let this break an ordinary ask
-        pinned = None
-    if pinned is not None:
+        is_subagent = False
+    if is_subagent:
+        try:
+            pinned = subagents.providers_from_env(providers)
+        except Exception:  # noqa: BLE001 — fail closed: this process IS a subagent
+            pinned = []
         providers = pinned
 
     out = []
