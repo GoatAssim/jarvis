@@ -218,15 +218,28 @@ textarea:focus-visible, select:focus-visible, [tabindex]:focus-visible{
    ========================================================================= */
 
 .topbar{
-  display: flex;
+  display: grid;
+  grid-template-columns: 1fr auto 1fr;
   align-items: center;
-  flex-wrap: wrap;
   gap: 12px 20px;
   padding: 10px 18px;
   border: 1px solid var(--border);
   border-radius: var(--radius);
   background: var(--bg-panel);
   backdrop-filter: blur(10px);
+}
+
+/* Left/right groups each take their own column and wrap internally on
+   narrow screens; the middle column (.topbar__clock) is exactly centered
+   between them no matter how wide either group gets, which plain flexbox
+   can't guarantee once both sides vary in width. */
+.topbar__left{
+  display: flex; align-items: center; flex-wrap: wrap; gap: 12px 20px;
+  justify-self: start; min-width: 0;
+}
+.topbar__right{
+  display: flex; align-items: center; flex-wrap: wrap; gap: 12px 20px;
+  justify-self: end; min-width: 0;
 }
 
 .topbar__brand{ display: flex; align-items: center; gap: 12px; }
@@ -250,7 +263,7 @@ textarea:focus-visible, select:focus-visible, [tabindex]:focus-visible{
   margin-top: 1px;
 }
 
-.topbar__status{ display: flex; flex-direction: column; gap: 3px; margin-left: auto; }
+.topbar__status{ display: flex; flex-direction: column; align-items: center; gap: 3px; }
 
 .status-pill{
   display: inline-flex; align-items: center; gap: 8px;
@@ -281,7 +294,7 @@ textarea:focus-visible, select:focus-visible, [tabindex]:focus-visible{
 .status-pill.is-offline .status-pill__dot{ background: var(--red); box-shadow: 0 0 8px var(--red); }
 .status-pill.is-offline #status-text{ color: var(--red); }
 
-.topbar__meta{ font-family: var(--font-mono); font-size: 10.5px; color: var(--text-dimmer); text-align: right; }
+.topbar__meta{ font-family: var(--font-mono); font-size: 10.5px; color: var(--text-dimmer); text-align: center; }
 
 .topbar__clock{
   font-family: var(--font-mono);
@@ -289,7 +302,33 @@ textarea:focus-visible, select:focus-visible, [tabindex]:focus-visible{
   color: var(--accent);
   letter-spacing: 0.08em;
   min-width: 82px;
-  text-align: right;
+  text-align: center;
+  justify-self: center;
+}
+
+/* Fixed, centered along the bottom of the screen — see the HTML comment
+   above #bottom-status-bar for why the online pill and Jarvis's path live
+   here instead of the topbar. Sits above the sequence bar's usual height
+   (see .sequence-bar below) so the two don't overlap when a sequence is
+   queued; z-index below the FABs/overlays but above ordinary page content. */
+.bottom-status-bar{
+  position: fixed;
+  left: 50%;
+  bottom: 92px;
+  transform: translateX(-50%);
+  z-index: 45;
+  display: flex;
+  padding: 8px 18px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-panel);
+  backdrop-filter: blur(10px);
+  pointer-events: none;
+}
+.bottom-status-bar .status-pill{ pointer-events: auto; }
+@media (max-width: 780px){
+  .bottom-status-bar{ bottom: 132px; max-width: calc(100vw - 24px); }
+  .bottom-status-bar .topbar__meta{ white-space: normal; word-break: break-word; }
 }
 
 /* =========================================================================
@@ -1956,7 +1995,7 @@ audio.ask-dl-player{ max-height: none; background: transparent; }
 /* Stacked directly above the Logs fab (same right offset, bottom pushed up
    by the Logs fab's own height + gap) rather than crowding it side by side,
    so both stay reachable with a thumb on narrow viewports. */
-.notifications-fab{ bottom: 78px; position: relative; }
+.notifications-fab{ bottom: 78px; right: 12px; position: relative; }
 .notifications-fab__badge{
   position: absolute; top: -6px; right: -6px;
   min-width: 18px; height: 18px; padding: 0 4px;
@@ -1967,7 +2006,7 @@ audio.ask-dl-player{ max-height: none; background: transparent; }
   box-shadow: 0 0 0 2px var(--bg-raised);
 }
 @media (max-width: 900px){
-  .notifications-fab{ bottom: 70px; }
+  .notifications-fab{ bottom: 70px; right: 8px; }
 }
 
 /* --- notifications panel -------------------------------------------------
@@ -2787,8 +2826,14 @@ body.layout--focus .ask-panel{
 body.layout--focus #ask-close{ display: none; }
 body.layout--focus .btn--ask-jarvis{ display: none; }
 
-/* --- daemons ------------------------------------------------------------- */
-.daemon-row{ align-items: flex-start; gap: 10px; }
+/* Menu's Focus-mode-only second entry point — see the HTML comment on
+   #panel-menu-focus for why it exists. Hidden in Classic (Menu already
+   lives in the Live Feed header there); shown in Focus, where the grid
+   -- and Live Feed with it -- is gone. */
+.panel-menu--focus-only{ display: none; }
+body.layout--focus .panel-menu--focus-only{ display: inline-flex; }
+
+/* --- daemons ------------------------------------------------------------- */.daemon-row{ align-items: flex-start; gap: 10px; }
 .daemon-row.is-selected{
   border-color: var(--accent);
   box-shadow: 0 0 0 1px var(--accent-glow);

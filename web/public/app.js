@@ -4426,16 +4426,39 @@
       return;
     }
     if (btn) { btn.disabled = true; btn.textContent = "\u2026"; }
+    // BUGFIX (stale response): two Speak clicks fired close together on
+    // different bubbles could resolve out of order — nothing tracked which
+    // request was still wanted, so a slow first request finishing after a
+    // fast second one would clobber it and start playing the wrong reply.
+    // A per-call token, checked after the await, makes a response that's no
+    // longer the latest one a no-op instead.
+    const requestToken = (state.voiceRequestSeq = (state.voiceRequestSeq || 0) + 1);
+    let becameActive = false;
     try {
       const { blob } = await Api.voiceSpeak(text);
+      if (state.voiceRequestSeq !== requestToken) return; // superseded by a newer Speak click
       audio.pause();
-      audio.src = URL.createObjectURL(blob);
+      // BUGFIX (leak): audio.src used to be reassigned to a fresh
+      // createObjectURL() on every click with the previous one never
+      // revoked — confirmed nowhere else in this file calls
+      // revokeObjectURL either, so every Speak click leaked that blob for
+      // the life of the tab.
+      if (state.voiceAudioUrl) URL.revokeObjectURL(state.voiceAudioUrl);
+      state.voiceAudioUrl = URL.createObjectURL(blob);
+      audio.src = state.voiceAudioUrl;
       await audio.play();
       setSpeakingButton(btn);
+      becameActive = true;
     } catch (e) {
       toast(e.message || "Speech synthesis failed.");
     } finally {
-      if (btn) btn.disabled = false;
+      if (btn) {
+        btn.disabled = false;
+        // Only the button that actually won the race stays "Stop" (already
+        // set by setSpeakingButton above); a stale or failed one goes back
+        // to its resting label instead of getting stuck on "…".
+        if (!becameActive) btn.textContent = "Speak";
+      }
     }
   }
 
@@ -8135,6 +8158,11 @@
   }
 
   qs("#guides-close")?.addEventListener("click", () => { guidesOverlay.hidden = true; });
+  // Same click-outside-to-close pattern every other overlay uses (Debug,
+  // Skills, Logs, etc.) — this one was just missing it.
+  guidesOverlay?.addEventListener("click", (e) => {
+    if (e.target === guidesOverlay) guidesOverlay.hidden = true;
+  });
   qs("#guides-search")?.addEventListener("input", (e) => {
     guidesFilter = e.target.value || "";
     renderGuidesList();
@@ -8145,31 +8173,53 @@
 
   // -------------------------------------------------------------------------
   // Panel-menu dropdown — one trigger for Debug / Skills / Scheduled / MCP
+  // -------------------------------------------------------------------------
   // Servers, replacing four buttons that used to sit side by side in the
   // console header. Same open/close/outside-click/Escape pattern as the Ask
   // panel's .provider-picker (see loadAiProviders et al. above).
+  //
+  // Two triggers share this one dropdown: #btn-panel-menu (Live Feed header,
+  // next to Clear) and #btn-panel-menu-focus (Ask panel header, Focus-mode
+  // only — see .panel-menu--focus-only in style.css). Rather than duplicate
+  // #panel-menu-list's eleven items and every click handler wired to them
+  // below, opening the menu reparents that one list into whichever
+  // trigger's wrapper was clicked; .panel-menu__list's `position: absolute`
+  // then anchors it under that trigger automatically.
   // -------------------------------------------------------------------------
   const panelMenuEl = qs("#panel-menu");
   const panelMenuBtn = qs("#btn-panel-menu");
+  const panelMenuFocusEl = qs("#panel-menu-focus");
+  const panelMenuFocusBtn = qs("#btn-panel-menu-focus");
   const panelMenuList = qs("#panel-menu-list");
 
-  function openPanelMenu() {
+  function openPanelMenuFrom(wrapperEl, btnEl) {
+    if (!wrapperEl || !btnEl || !panelMenuList) return;
+    wrapperEl.appendChild(panelMenuList);
     panelMenuList.hidden = false;
-    panelMenuBtn.setAttribute("aria-expanded", "true");
+    btnEl.setAttribute("aria-expanded", "true");
   }
 
   function closePanelMenu() {
+    if (!panelMenuList) return;
     panelMenuList.hidden = true;
-    panelMenuBtn.setAttribute("aria-expanded", "false");
+    panelMenuBtn?.setAttribute("aria-expanded", "false");
+    panelMenuFocusBtn?.setAttribute("aria-expanded", "false");
   }
 
   panelMenuBtn?.addEventListener("click", () => {
-    if (!panelMenuList.hidden) return closePanelMenu();
-    openPanelMenu();
+    if (!panelMenuList.hidden && panelMenuList.parentElement === panelMenuEl) return closePanelMenu();
+    openPanelMenuFrom(panelMenuEl, panelMenuBtn);
+  });
+  panelMenuFocusBtn?.addEventListener("click", () => {
+    if (!panelMenuList.hidden && panelMenuList.parentElement === panelMenuFocusEl) return closePanelMenu();
+    openPanelMenuFrom(panelMenuFocusEl, panelMenuFocusBtn);
   });
 
   document.addEventListener("click", (e) => {
-    if (!panelMenuList.hidden && !panelMenuEl.contains(e.target)) closePanelMenu();
+    if (panelMenuList.hidden) return;
+    const inConsole = panelMenuEl?.contains(e.target);
+    const inFocus = panelMenuFocusEl?.contains(e.target);
+    if (!inConsole && !inFocus) closePanelMenu();
   });
   document.addEventListener("keydown", (e) => {
     if (e.key === "Escape" && !panelMenuList.hidden) closePanelMenu();
@@ -8220,8 +8270,20 @@
     // Focus leads with the conversation, so the Ask panel is the surface
     // rather than an overlay you open. Opening it here (idempotently) is what
     // makes the switch feel like a layout change instead of a blank screen.
+    //
+    // BUGFIX: switching back to Classic used to leave the Ask panel's
+    // `hidden` attribute exactly as openAsk() left it above — false — since
+    // nothing here ever closed it again. In Classic, .ask-overlay is
+    // `position: fixed; inset: 0`, so a still-open-but-invisible-because-
+    // inline panel from Focus mode would suddenly render as a full-screen
+    // overlay on top of the grid the instant Classic came back. Closing it
+    // on the way OUT of Focus is what keeps Classic's Ask panel an
+    // explicit, click-to-open modal rather than something that reopens
+    // itself as a side effect of the layout switch.
     if (currentLayout === "focus" && typeof openAsk === "function") {
       try { openAsk(); } catch { /* the panel may not be built yet on first paint */ }
+    } else if (typeof closeAsk === "function") {
+      try { closeAsk(); } catch { /* the panel may not be built yet on first paint */ }
     }
   }
 
@@ -8511,7 +8573,19 @@
           class: "btn btn--ghost btn--sm",
           onclick: () => {
             const reason = window.prompt("Blocked on what?", item.blocked_on || "");
-            if (reason !== null) updateBacklog(item.id, { blocked_on: reason });
+            if (reason === null) return;
+            // BUGFIX: this used to send only { blocked_on: reason }. The
+            // server sets state to "blocked" for you when blocked_on is
+            // non-empty (backlog.py's update()), but clearing it back to ""
+            // has no matching rule — nothing ever moved the card OUT of the
+            // Blocked column, so clearing the reason here left it stranded
+            // there with no visible note and no obvious way back except the
+            // unrelated advance button. Mirror that server rule on the way
+            // out: clearing the reason on an already-blocked item unblocks
+            // it too.
+            const fields = { blocked_on: reason };
+            if (!reason && item.state === "blocked") fields.state = "doing";
+            updateBacklog(item.id, fields);
           },
         }, "Block"),
         el("button", {

@@ -500,6 +500,21 @@
         "--text": "#f0e6ff", "--text-dim": "#a58fc4", "--text-dimmer": "#6b5a85",
       },
     },
+    // Deliberately empty. This is the escape hatch for personas and the
+    // legacy accent/skin picker: picking a real theme here calls
+    // markActive(), which makes app.js's persona-restore code back off and
+    // leave colours alone (see the ACTIVE_KEY comment above) — a normal
+    // theme MEANS to take over. "None" means the opposite: it should never
+    // fight a persona for control of --accent/--bg/etc. So applyTheme()
+    // below special-cases isNone to skip the vars loop entirely (nothing to
+    // skip anyway, vars is {}) AND calls deactivate() instead of
+    // markActive() — the one entry in this table that turns the theme
+    // system OFF rather than on.
+    none: {
+      label: "None", author: "built-in", dark: true, isNone: true,
+      hint: "Applies nothing. Lets a persona or the Skin panel's own accent picker control colour instead.",
+      vars: {},
+    },
   };
 
   const THEME_KEY = "jarvis.theme";
@@ -586,19 +601,30 @@
   }
 
   function applyTheme(id) {
-    if (id) markActive();
     const themes = allThemes();
     const chosen = id || localStorage.getItem(THEME_KEY) || "jarvis";
     const theme = themes[chosen] || themes.jarvis;
     const root = document.documentElement;
 
-    Object.entries(theme.vars || {}).forEach(([k, v]) => root.style.setProperty(k, v));
+    // "None" deactivates instead of activating — see its entry in
+    // BUILTIN_THEMES above for why — and skips writing any of its (empty)
+    // vars, so whatever a persona or the legacy accent picker already put
+    // on :root is left exactly as it was.
+    if (theme.isNone) {
+      deactivate();
+    } else if (id) {
+      markActive();
+    }
 
-    // rgb companions for the colours style.css also uses inside rgba().
-    ["--accent", "--accent-secondary", "--accent-tertiary"].forEach((name) => {
-      const rgb = hexToRgb(theme.vars && theme.vars[name]);
-      if (rgb) root.style.setProperty(name + "-rgb", rgb.join(", "));
-    });
+    if (!theme.isNone) {
+      Object.entries(theme.vars || {}).forEach(([k, v]) => root.style.setProperty(k, v));
+
+      // rgb companions for the colours style.css also uses inside rgba().
+      ["--accent", "--accent-secondary", "--accent-tertiary"].forEach((name) => {
+        const rgb = hexToRgb(theme.vars && theme.vars[name]);
+        if (rgb) root.style.setProperty(name + "-rgb", rgb.join(", "));
+      });
+    }
 
     const t = tuning();
     root.style.setProperty("--jui-saturation", (t.saturation / 100).toFixed(2));

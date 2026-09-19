@@ -266,11 +266,20 @@ namespace JarvisAudio {
     // Role is set for all three roles (console/multimedia/communications),
     // because setting only the multimedia role leaves Discord and friends
     // on the old device and looks like the switch silently didn't work.
-    public static void SetDefault(string deviceId) {
+    //
+    // BUGFIX: this used to be `void` and threw away each call's HRESULT, so
+    // one role failing (a stale endpoint id, a device that doesn't accept
+    // one particular role) was silently swallowed and the tool reported
+    // full success even though — the exact scenario the comment above warns
+    // about — one app class could be left on the old device. Returning the
+    // three HRESULTs lets the Python side actually check.
+    public static int[] SetDefault(string deviceId) {
       var cfg = (IPolicyConfig)(new PolicyConfigComObject());
+      var results = new int[3];
       for (int role = 0; role < 3; role++) {
-        cfg.SetDefaultEndpoint(deviceId, role);
+        results[role] = cfg.SetDefaultEndpoint(deviceId, role);
       }
+      return results;
     }
   }
 }
@@ -395,15 +404,29 @@ def tool_set_volume(args):
 
 def _adjust(direction, args):
     args = args or {}
-    step = args.get("amount")
-    step = _clamp_percent(step) if step is not None else DEFAULT_STEP
-    if not step:
+    # BUGFIX: `step = _clamp_percent(step) if step is not None else
+    # DEFAULT_STEP; if not step: step = DEFAULT_STEP` treated an explicit
+    # `amount: 0` the same as "not provided" (0 is falsy), silently turning
+    # "raise by 0" into "raise by 10". Only a genuinely missing/unparseable
+    # amount should fall back to the default.
+    raw_step = args.get("amount")
+    if raw_step is None:
         step = DEFAULT_STEP
+    else:
+        step = _clamp_percent(raw_step)
+        if step is None:
+            step = DEFAULT_STEP
     delta = step if direction == "up" else -step
+    # The mute check for the "up" branch below used to be a second, separate
+    # _ps() call (_get_mute_raw()) — a whole extra PowerShell launch, each
+    # one repaying the ~1-2s Add-Type compile cost the module docstring says
+    # is avoided by batching work into one script. Folding it into this same
+    # script cuts that back to one round-trip in the common case.
     script = _PS_AUDIO + (
         "\n$cur = [JarvisAudio.Endpoints]::GetVolume()\n"
         "$next = [JarvisAudio.Endpoints]::SetVolume($cur + (%d))\n"
-        "ConvertTo-Json -InputObject @{ previous = $cur; volume = $next } -Compress\n" % delta
+        "$muted = [JarvisAudio.Endpoints]::GetMute()\n"
+        "ConvertTo-Json -InputObject @{ previous = $cur; volume = $next; muted = $muted } -Compress\n" % delta
     )
     out, err = _ps(script)
     if err:
@@ -411,14 +434,12 @@ def _adjust(direction, args):
     data = _parse(out) or {}
     result = {"ok": True, "previous": data.get("previous"),
               "volume": data.get("volume"), "step": step}
-    if direction == "up":
+    if direction == "up" and data.get("muted") is True:
         # Same reasoning as set_volume: turning it up while muted is a no-op
         # the user will read as a failure.
-        state = _get_mute_raw()
-        if state is True:
-            _set_mute_raw(False)
-            result["muted"] = False
-            result["note"] = "unmuted, since the volume was turned up"
+        _set_mute_raw(False)
+        result["muted"] = False
+        result["note"] = "unmuted, since the volume was turned up"
     return result
 
 
@@ -508,14 +529,26 @@ def tool_set_default_output(args):
 
     # The id is a quoted literal rather than an interpolated bare token
     # because endpoint ids contain {} and . characters.
+    #
+    # BUGFIX: the three per-role HRESULTs from SetDefault are now actually
+    # inspected (see its C# docstring above) instead of being discarded —
+    # a non-zero value means that one role's switch failed.
     script = _PS_AUDIO + (
-        "\n[JarvisAudio.Endpoints]::SetDefault(%s)\n"
-        "ConvertTo-Json -InputObject @{ ok = $true } -Compress\n"
+        "\n$r = [JarvisAudio.Endpoints]::SetDefault(%s)\n"
+        "$failed = @($r | Where-Object { $_ -ne 0 }).Count\n"
+        "ConvertTo-Json -InputObject @{ ok = ($failed -eq 0); failed_roles = $failed } -Compress\n"
         % _ps_quote(target.get("id") or "")
     )
     out, err = _ps(script)
     if err:
         return {"ok": False, "device": target.get("name"), "error": err}
+    data = _parse(out) or {}
+    if not data.get("ok", True):
+        return {"ok": False, "device": target.get("name"),
+                "error": ("Switched %d of 3 audio role(s) (console/multimedia/"
+                          "communications) — %d failed. Some apps may still use "
+                          "the old device." % (3 - data.get("failed_roles", 0),
+                                                data.get("failed_roles", 0)))}
     return {"ok": True, "device": target.get("name"),
             "previous": next((d.get("name") for d in devices if d.get("default")), None)}
 

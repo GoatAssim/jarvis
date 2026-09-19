@@ -47,11 +47,13 @@ design constraint and silently picking a winner would defeat it.
 
 import json
 import os
+import time
 from pathlib import Path
 
 from . import atomic_io, tasks
 
 CONFIG_FILE = Path.home() / ".jarvis" / "subagents.json"
+_SPAWN_LOCK_FILE = Path.home() / ".jarvis" / "subagents.spawn.lock"
 
 # The env var a spawned subagent process reads to find out which keys it is
 # allowed to use. Consumed in ai_client._eligible_providers().
@@ -234,7 +236,11 @@ def key_pool(role, cfg=None):
     """
     cfg = cfg or load_config()
     pools = cfg.get("key_pools") or {}
-    entry = pools.get(role) or pools.get("default")
+    # BUGFIX: `pools.get(role) or pools.get("default")` treated an
+    # explicitly-empty {} entry the same as the role being absent, silently
+    # falling back to the shared pool. `role in pools` distinguishes "not
+    # configured" from "configured, but empty" — only the former falls back.
+    entry = pools[role] if role in pools else pools.get("default")
     if not isinstance(entry, dict):
         return None
     provider = str(entry.get("provider") or "").strip()
@@ -285,6 +291,69 @@ def describe_pools(cfg=None):
 # ---------------------------------------------------------------------------
 
 
+
+# How old the lockfile itself must be before a waiter assumes its holder
+# died mid-critical-section rather than being a legitimate (if slow) hold.
+# Independent from any one caller's wait `timeout` on purpose — see the
+# BUGFIX note in _acquire_spawn_lock for why conflating the two is wrong.
+_SPAWN_LOCK_STALE_AFTER = 10.0
+
+
+def _acquire_spawn_lock(timeout=5.0):
+    """Best-effort mutual exclusion around the running_count()-then-create
+    window in spawn(), below.
+
+    BUGFIX (the race): that window used to be unprotected — two
+    near-simultaneous spawns (an interactive ask and a daemon tick, say, or
+    two tool calls in the same ask) could each call running_count(), each
+    see one slot free, and both create a task, silently exceeding
+    max_concurrent. That is exactly the "spend spike... every key
+    rate-limited at the same moment" failure this module's docstring names
+    as the reason the cap exists, so unlike tasks.claim()'s
+    deliberately-accepted lease race (whose worst case is a harmlessly
+    duplicated step), this one gets an actual lock.
+
+    BUGFIX (this function, caught by its own test): the first version used
+    the caller's own `timeout` argument to also decide when the lockfile
+    counts as stale. A short-timeout caller (a quick poll) would then treat
+    a lock that a NORMAL, still-in-progress spawn had held for only a few
+    hundred milliseconds as abandoned, delete it, and barge in — reopening
+    the exact race this function exists to close. Staleness is about how
+    long the critical section could plausibly still be running (seconds, at
+    most, for a file read and a small write), not about how long this one
+    caller feels like waiting, so it's judged against a fixed constant
+    instead of `timeout`.
+
+    A plain O_CREAT|O_EXCL lockfile rather than fcntl/msvcrt: this project
+    also ships audio_tools.py for Windows, so anything here has to work
+    identically on POSIX and Windows with no extra dependency either way.
+    """
+    _SPAWN_LOCK_FILE.parent.mkdir(parents=True, exist_ok=True)
+    deadline = time.time() + timeout
+    while True:
+        try:
+            fd = os.open(str(_SPAWN_LOCK_FILE), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            os.close(fd)
+            return True
+        except FileExistsError:
+            try:
+                if time.time() - os.path.getmtime(_SPAWN_LOCK_FILE) > _SPAWN_LOCK_STALE_AFTER:
+                    os.remove(_SPAWN_LOCK_FILE)
+                    continue
+            except OSError:
+                pass
+            if time.time() >= deadline:
+                return False
+            time.sleep(0.05)
+
+
+def _release_spawn_lock():
+    try:
+        os.remove(_SPAWN_LOCK_FILE)
+    except OSError:
+        pass
+
+
 def running_count(parent_id=None):
     """How many subagent tasks are currently active."""
     n = 0
@@ -317,31 +386,40 @@ def spawn(role, goal, parent_id=None, notes=None, conv_id=None,
             % (role, role))
 
     limit = int(cfg.get("max_concurrent") or MAX_CONCURRENT_DEFAULT)
-    if running_count() >= limit:
-        raise SubagentError(
-            "subagent pool is full (%d running, max_concurrent=%d)" % (running_count(), limit))
 
-    combined_notes = spec.get("prompt") or ""
-    if notes:
-        combined_notes = (combined_notes + "\n\n" + str(notes)).strip()
+    # The count check and the task creation below are one critical section —
+    # see _acquire_spawn_lock's docstring for why this needs an actual lock
+    # rather than the tasks.claim()-style accepted race.
+    if not _acquire_spawn_lock():
+        raise SubagentError("subagent spawn is busy right now — try again in a moment")
+    try:
+        if running_count() >= limit:
+            raise SubagentError(
+                "subagent pool is full (%d running, max_concurrent=%d)" % (running_count(), limit))
 
-    task = tasks.create(
-        goal=goal,
-        title="[%s] %s" % (role, goal),
-        notes=combined_notes,
-        conv_id=conv_id,
-        parent_id=parent_id,
-        agent=role,
-        think=spec.get("think"),
-        max_steps=max_steps or spec.get("max_steps"),
-    )
-    # Tool allowance rides JARVIS_ALLOWED_TOOLS, which the web UI already
-    # uses — one mechanism for "restrict this ask's tools", not two.
-    allowed = spec.get("tools")
-    if allowed:
-        task["allowed_tools"] = list(allowed)
-        tasks.save(task)
-    return task
+        combined_notes = spec.get("prompt") or ""
+        if notes:
+            combined_notes = (combined_notes + "\n\n" + str(notes)).strip()
+
+        task = tasks.create(
+            goal=goal,
+            title="[%s] %s" % (role, goal),
+            notes=combined_notes,
+            conv_id=conv_id,
+            parent_id=parent_id,
+            agent=role,
+            think=spec.get("think"),
+            max_steps=max_steps or spec.get("max_steps"),
+        )
+        # Tool allowance rides JARVIS_ALLOWED_TOOLS, which the web UI already
+        # uses — one mechanism for "restrict this ask's tools", not two.
+        allowed = spec.get("tools")
+        if allowed:
+            task["allowed_tools"] = list(allowed)
+            tasks.save(task)
+        return task
+    finally:
+        _release_spawn_lock()
 
 
 def children(parent_id):
