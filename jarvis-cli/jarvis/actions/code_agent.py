@@ -397,9 +397,18 @@ def _run_shell_impl(command, cwd, timeout=RUN_TIMEOUT):
             creationflags=CREATE_NO_WINDOW,
         )
     except subprocess.TimeoutExpired:
-        return {"exit_code": None, "stdout_tail": "", "stderr_tail": f"timed out after {timeout}s"}, None
+        return {"exit_code": None, "stdout_tail": "", "stderr_tail": f"timed out after {timeout}s",
+                "command": command}, None
     except OSError as e:
-        return {"exit_code": None, "stdout_tail": "", "stderr_tail": str(e)}, None
+        # `command` (the ORIGINAL string, not the possibly cmd/c-wrapped
+        # argv) rides along on every outcome, not just this one — see
+        # master plan F.4's "diagnosis text" follow-up. tool_diagnosis.py
+        # needs the actual command line to tell "this WinError 2 is a
+        # cmd.exe builtin someone tried to exec directly" apart from a
+        # genuine missing external program, and it only ever sees the
+        # tool's result dict, not the call site's arguments.
+        return {"exit_code": None, "stdout_tail": "", "stderr_tail": str(e),
+                "command": command}, None
 
     def cap(raw, n=3000):
         s = (raw or b"").decode("utf-8", errors="replace").strip()
@@ -409,6 +418,7 @@ def _run_shell_impl(command, cwd, timeout=RUN_TIMEOUT):
         "exit_code": result.returncode,
         "stdout_tail": cap(result.stdout),
         "stderr_tail": cap(result.stderr, 2000),
+        "command": command,
     }, None
 
 

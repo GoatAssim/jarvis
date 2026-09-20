@@ -180,6 +180,20 @@ def looks_like_failure(result):
     return bool(_error_text(result))
 
 
+def _cmd_builtins():
+    """The cmd.exe builtin names `run_shell` already knows to route through
+    `cmd /c` (see actions/code_agent.py, master plan F.4). Imported lazily,
+    same reasoning as _tables(): this module sits on the tool-executor hot
+    path and shouldn't drag in an actions module for the common case where
+    nothing failed."""
+    try:
+        from .actions import code_agent
+        return code_agent._CMD_BUILTINS
+    except Exception:  # noqa: BLE001 — diagnosis must never be the thing
+        # that breaks; an unavailable table just means no special-case hint.
+        return set()
+
+
 def diagnose(tool_name, result):
     """Explain a failed tool call. Returns a dict, or None when there's
     nothing useful to add — in which case the caller changes nothing.
@@ -192,6 +206,31 @@ def diagnose(tool_name, result):
         return None
     lowered = error.lower()
     binaries, packages = _tables()
+
+    # Special case, checked before the generic WinError-2 pattern below:
+    # for run_shell specifically, "[WinError 2] ... cannot find the file
+    # specified" is at least as likely to mean "the model ran a cmd.exe
+    # builtin (dir, type, echo, ...) directly" as "a real external program
+    # is missing" — and the generic ffmpeg/git/tesseract advice is simply
+    # wrong for the first case. This needs the actual command line, which
+    # is why _run_shell_impl now carries a `command` field on every
+    # outcome (see master plan F.4's "diagnosis text" follow-up). Only
+    # fires for run_shell: no other tool's result has a `command` field to
+    # check, and misreading some other tool's incidental "command" key as
+    # this shape would be worse than saying nothing.
+    if tool_name == "run_shell" and isinstance(result, dict) and \
+            re.search(r"winerror 2\b|cannot find the file specified", lowered):
+        command = (result.get("command") or "").strip()
+        first_word = command.split(None, 1)[0].lower() if command else ""
+        if first_word in _cmd_builtins():
+            return {
+                "cause": (
+                    f"'{first_word}' is a cmd.exe builtin, not a standalone "
+                    "program — subprocess has no .exe to find for it."
+                ),
+                "fix": f"Run it as: cmd /c {command}",
+                "check": "jarvis doctor",
+            }
 
     missing = []
     fixes = []
