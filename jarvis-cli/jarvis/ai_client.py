@@ -701,12 +701,16 @@ def _tools_blurb(compact, ultra):
             # that's just elaboration on top of those rules.
             return (
                 "Tools listed by name only \u2014 call with no args first if unsure, "
-                "you'll get its schema back. Confirm before install/delete/off/eval."
+                "you'll get its schema back. Never invent a tool name \u2014 "
+                "search_tools first if you don't see one you need. "
+                "Confirm before install/delete/off/eval."
             )
         return (
             "Tools are listed by name only. Call one when you need it. "
             "If it needs arguments you don't know, call it with no arguments — "
             "you will get its schema, then call it again. "
+            "Never invent a tool name — if you don't see one for what you need, "
+            "call search_tools first. "
             "Confirm before install/delete/off/eval."
         )
     return (

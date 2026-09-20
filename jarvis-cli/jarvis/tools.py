@@ -400,6 +400,27 @@ def catalog_schemas_for_prompt(schemas):
     return out
 
 
+def _unknown_tool_hint(name):
+    """Shared with tool_get_tool_schema: point an unknown tool name at the
+    nearest real ones (did_you_mean) or, failing that, at search_tools —
+    instead of a bare error a model has no way to act on (master plan F.2:
+    execute_tool's unknown-name path used to skip this, so a model that
+    invented a tool name burned a whole extra round finding out, with no
+    hint which real tool it meant)."""
+    from . import tool_registry
+
+    near = sorted(
+        n for n in tool_registry.TOOL_INDEX
+        if name in n or n in name or n.split("_")[0] == name.split("_")[0]
+    )[:5]
+    out = {"error": f"no such tool: {name}"}
+    if near:
+        out["did_you_mean"] = near
+    else:
+        out["hint"] = "Call search_tools with a keyword to find the right name."
+    return out
+
+
 def tool_get_tool_schema(args):
     """Tier-2 activation: hand back one tool's full argument schema.
 
@@ -425,16 +446,7 @@ def tool_get_tool_schema(args):
     if schema is None:
         # A wrong guess shouldn't cost a whole extra round: point at the
         # nearest real names instead of just saying no.
-        near = sorted(
-            n for n in tool_registry.TOOL_INDEX
-            if name in n or n in name or n.split("_")[0] == name.split("_")[0]
-        )[:5]
-        out = {"error": f"No tool named '{name}'."}
-        if near:
-            out["did_you_mean"] = near
-        else:
-            out["hint"] = "Call search_tools with a keyword to find the right name."
-        return out
+        return _unknown_tool_hint(name)
 
     return {
         "name": name,
@@ -1061,7 +1073,7 @@ def execute_tool(name, arguments=None, verbosity=None, context=None):
         return {"error": "tool not permitted"}
     fn = TOOLS.get(name)
     if fn is None:
-        return {"error": f"no such tool: {name}"}
+        return _unknown_tool_hint(name)
     arguments = _drop_null_optionals(name, arguments)
     try:
         if name in COMMAND_TOOLS or name in PLAYNITE_TOOLS or name in WEB_TOOLS or name in PKG_TOOLS or name in SPOTIFY_TOOLS or name in MEMORY_TOOLS or name in CAPACITY_TOOLS or name in RADIO_TOOLS or name in AUDIO_TOOLS or name in VISION_TOOLS or name in SUBAGENT_TOOLS or name in GIT_TOOLS or name in SCREENSHOT_TOOLS or name in DESKTOP_TOOLS or name in OCR_TOOLS or name in FILE_TOOLS or name in CUSTOM_TOOLS or name in YTDL_TOOLS or name in EVERYTHING_TOOLS or name in ORGANIZE_JSON_TOOLS or name in PRESENT_TOOLS or name in SKILL_TOOLS or name in AUTO_TOOLS or name in ("search_tools", "get_tool_schema"):
