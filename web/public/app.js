@@ -8284,6 +8284,12 @@
   // itself is never the thing left on screen after a choice is made.
   qs("#menu-item-guides")?.addEventListener("click", () => { closePanelMenu(); openGuides(); });
   qs("#menu-item-debug")?.addEventListener("click", () => { closePanelMenu(); openDebug(); });
+  // Test Checklist is its own module (test-checklist.js) — see custom-tools.js
+  // for the same pattern. Its results live only in this browser; no API call.
+  qs("#menu-item-testchecklist")?.addEventListener("click", () => {
+    closePanelMenu();
+    if (window.JarvisTestChecklist) window.JarvisTestChecklist.open();
+  });
   qs("#menu-item-skills")?.addEventListener("click", () => { closePanelMenu(); openSkills(); });
   qs("#menu-item-scheduled")?.addEventListener("click", () => { closePanelMenu(); openScheduled(); });
   qs("#menu-item-mcp")?.addEventListener("click", () => { closePanelMenu(); openMcp(); });

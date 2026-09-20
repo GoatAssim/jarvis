@@ -131,6 +131,12 @@ TOOL_GROUPS = {
         "set_mute",
         "set_default_output",
     ],
+    "clipboard": [
+        "clipboard_get",
+        "clipboard_set",
+        "clipboard_clear",
+        "clipboard_wait_for_change",
+    ],
     "system_control": [
         "radio_status",
         "wifi_set",
@@ -201,6 +207,20 @@ TOOL_GROUPS = {
         "create_skill",
         "add_skill",
         "remove_skill",
+    ],
+    # Browser control (browser_tools.py, master plan Part C) — a real,
+    # persistent, JS-executing session, as opposed to "web" above's
+    # stateless single-GET web_fetch. Its own group (not folded into
+    # "web") so a task that only needs to read a page doesn't drag in
+    # click/fill, and vice versa.
+    "browser": [
+        "browser_goto",
+        "browser_click",
+        "browser_fill",
+        "browser_get_text",
+        "browser_screenshot",
+        "browser_wait_for",
+        "browser_close",
     ],
 }
 
@@ -316,6 +336,13 @@ TOOL_KEYWORDS = {
     "radio_status": {"radio": 6, "bluetooth": 6, "wifi status": 6},
     "wifi_set": {"turn on wifi": 10, "turn off wifi": 10, "enable wifi": 9, "disable wifi": 9},
     "bluetooth_set": {"turn on bluetooth": 10, "turn off bluetooth": 10, "enable bluetooth": 9},
+    "clipboard_get": {"clipboard": 8, "paste": 6, "what did i copy": 10, "copied": 5},
+    "clipboard_set": {"copy this": 9, "copy that": 9, "put on the clipboard": 10,
+                      "copy to clipboard": 10, "copy to the clipboard": 10},
+    "clipboard_clear": {"clear the clipboard": 10, "empty the clipboard": 10},
+    "clipboard_wait_for_change": {"tell me when i copy": 10, "watch the clipboard": 9,
+                                  "wait for me to copy": 9, "let me know when i copy": 10},
+
     "package_search": {"package": 6, "install": 4, "is there a package": 8},
     "package_install": {"install": 6, "install package": 10},
     "git_run": {"git": 10, "repository": 7, "repo": 6, "commit": 7, "branch": 6, "push": 5, "pull": 4, "diff": 5},
@@ -325,6 +352,15 @@ TOOL_KEYWORDS = {
     "playnite_launch_game": {"launch": 6, "play game": 8, "start game": 8},
     "playnite_library_stats": {"game library": 8, "how many games": 8},
     "playnite_list_frequent": {"frequent games": 9, "games i play most": 8},
+
+    "browser_goto": {"go to the website": 9, "open the website": 9, "navigate to": 8,
+                      "log into": 7, "log in to": 7, "browse to": 9},
+    "browser_click": {"click the button": 8, "click on the": 6},
+    "browser_fill": {"fill in the": 8, "fill out the form": 10, "type into the field": 8},
+    "browser_get_text": {"read the page": 7, "what does the page say": 8},
+    "browser_screenshot": {"screenshot the page": 9, "screenshot the browser": 10},
+    "browser_wait_for": {"wait for the page": 8},
+    "browser_close": {"close the browser": 10},
 }
 
 # Merge in auto-discovered keywords (see the TOOL_GROUPS merge above for
@@ -382,6 +418,13 @@ TOOL_PACK_INSTRUCTIONS = {
         "given; set_volume takes an absolute 0-100. Call audio_status first "
         "only when you need to know what devices exist or the current level."
     ),
+    "clipboard": (
+        "Clipboard contents may be sensitive (a password manager just put "
+        "something there) — don't restate clipboard_get's text back to the "
+        "user verbatim unless they asked to see it. clipboard_wait_for_change "
+        "blocks the call itself; only use it for a short 'copy that, then "
+        "tell me' style wait, not as a background watcher."
+    ),
     "system_control": (
         "Git: 'stage and commit'/'commit everything' -> git_commit_all in one call, not "
         "status/diff/add/commit as separate git_run rounds. Otherwise git_run; destructive "
@@ -410,6 +453,14 @@ TOOL_PACK_INSTRUCTIONS = {
     "playnite": (
         "Look a game up (playnite_find_game / playnite_query_games) before "
         "acting on it rather than guessing an id."
+    ),
+    "browser": (
+        "Browser control: use browser_goto/click/fill/get_text — NOT "
+        "web_search/web_fetch — whenever the task needs to interact with a "
+        "page (log in, fill a form, click through a flow) rather than just "
+        "read it once. Describe elements in plain English ('the Submit "
+        "button'), never as a CSS selector or XPath. browser_click and "
+        "browser_fill require the user's confirmation before running."
     ),
 }
 

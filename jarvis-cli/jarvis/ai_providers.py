@@ -33,6 +33,7 @@ changes for a caller that doesn't pass them.
 """
 
 import json
+import re
 import threading
 
 import requests
@@ -65,9 +66,16 @@ class RoundBudget:
     budget on the next failover.
     """
 
-    def __init__(self, limit=GLOBAL_MAX_TOOL_ROUNDS):
+    def __init__(self, limit=GLOBAL_MAX_TOOL_ROUNDS, grace=False):
         self.limit = limit
         self.used = 0
+        # F.1 "grace call": ONE extra, last-chance tool round for the whole
+        # ask() once the budget above is spent — see _forced_ending(). Off by
+        # default so every caller that builds its own RoundBudget (code_agent's
+        # inner loop, tests) keeps exactly the budget it asked for; only
+        # ai_client.ask() turns it on, and only via defaults.grace_call.
+        self.grace = bool(grace)
+        self.grace_used = False
 
     def remaining(self):
         return max(0, self.limit - self.used)
@@ -76,6 +84,17 @@ class RoundBudget:
         if self.used >= self.limit:
             return False
         self.used += 1
+        return True
+
+    def grace_available(self):
+        return self.grace and not self.grace_used
+
+    def take_grace(self):
+        """True at most once per budget (i.e. once per ask(), across every
+        provider/key failover), and only if grace was enabled."""
+        if not self.grace_available():
+            return False
+        self.grace_used = True
         return True
 
 
@@ -147,6 +166,11 @@ def _apply_thinking(payload, provider, provider_type, round_num, ran_tools, thou
     """
     from . import reasoning
 
+    # A forced ending (see _forced_ending) is a plain "finish up" request that
+    # re-enters the adapter at round 0; without this it would look like a fresh
+    # ask and pay for a whole new thinking pass on the last, cheapest call.
+    if getattr(_log_local, "forced", None) is not None:
+        return False
     level = _thinking.get("level", "off")
     if reasoning.normalize_level(level) == "off":
         return False
@@ -205,6 +229,7 @@ def clear_log_context():
     _log_local.conv_id = None
     _log_local.provider = None
     _log_local.on_tool_usage = None
+    _log_local.forced = None
 
 
 def _log_conv_id():
@@ -246,6 +271,9 @@ def _record_usage(provider_type, data, round_num):
     usage = token_usage.extract_usage(provider_type, data)
     if usage is None:
         return
+    # Inside a forced ending the adapter is re-entered at round 0; label the
+    # entry with the real round so the usage breakdown reads 5, 6 (not 0, 0).
+    round_num = round_num + ((getattr(_log_local, "forced", None) or {}).get("round_base", 0))
     entry = {"round": round_num, **usage}
     rounds = getattr(_log_local, "usage_rounds", None)
     if rounds is None:
@@ -296,14 +324,73 @@ class AIResult:
     next provider can continue from instead of re-running those tools.
     """
 
-    __slots__ = ("ok", "text", "error", "tool_history", "usage")
+    __slots__ = ("ok", "text", "error", "tool_history", "usage", "kind", "pending")
 
-    def __init__(self, ok, text=None, error=None, tool_history=None, usage=None):
+    def __init__(self, ok, text=None, error=None, tool_history=None, usage=None, kind=None, pending=None):
         self.ok = ok
         self.text = text
         self.error = error
         self.tool_history = tool_history  # enriched messages to hand to the next provider
         self.usage = usage  # Phase 0 (new_plan.md): get_usage_summary() for this attempt
+        # F.8: WHY an attempt failed, one of the KIND_* values below. Derived
+        # from the error text unless a call site knows better, so the ~60
+        # existing `AIResult(False, error=...)` sites needed no edit.
+        self.kind = kind if kind else (None if ok else classify_failure(error))
+        # F.1: the tool call(s) (name, args) the model still wanted to make
+        # when it could not be given tools. None unless kind == KIND_BUDGET.
+        self.pending = list(pending) if pending else None
+
+
+# ---------------------------------------------------------------------------
+# Failure kinds (master plan F.8).
+#
+# Before this, every failure was a string and ask() rotated to the next key
+# after almost all of them. That is right for a dead/rate-limited key and
+# wrong for KIND_BUDGET: "the tool-round budget is spent and the model still
+# wants a tool" is not the key's fault, every other key will do the same, and
+# in the logs it turned one missing step into ten wasted keys. The kinds are
+# derived from the error text (classify_failure) so no call site had to change.
+#
+# Only two kinds change what ask() does today: KIND_BUDGET (never rotate, end
+# through a harness-written reply) and KIND_SHAPE (already handled by
+# is_request_shape_error). The rest are named so the next changes (F.9's key
+# health, F.7's failover) have one classifier to build on instead of a fourth
+# copy of the string matching.
+# ---------------------------------------------------------------------------
+KIND_BUDGET = "budget"        # tools were withheld and the model still wanted one
+KIND_KEY = "key"              # bad / rate-limited / out-of-credit key: another key can help
+KIND_OVERLOAD = "overload"    # provider-side 5xx: model-wide, another key rarely helps
+KIND_NETWORK = "network"      # timeout / refused connection / DNS
+KIND_SHAPE = "shape"          # the request itself was rejected; no key can fix it
+KIND_EMPTY = "empty"          # a reply with nothing in it
+KIND_MALFORMED = "malformed"  # the model tried to call a tool and garbled it
+KIND_REFUSED = "refused"      # safety filter / refusal
+KIND_OTHER = "other"
+
+
+def classify_failure(error):
+    """One of the KIND_* values for an AIResult.error string (or KIND_OTHER)."""
+    if not error:
+        return KIND_OTHER
+    e = str(error).lower()
+    if "gave up after" in e and "tool calls" in e:
+        return KIND_BUDGET
+    if "malformed tool call" in e or "malformed_function_call" in e:
+        return KIND_MALFORMED
+    if is_request_shape_error(e):
+        return KIND_SHAPE
+    if ("rate limited" in e or "quota exceeded" in e or "invalid or unauthorized api key" in e
+            or "payment required" in e or "out of credits" in e or "no api_key configured" in e):
+        return KIND_KEY
+    if "provider server error" in e:
+        return KIND_OVERLOAD
+    if "timed out" in e or "couldn't connect" in e or "request failed" in e:
+        return KIND_NETWORK
+    if "empty response" in e or "hit max_tokens with no visible output" in e:
+        return KIND_EMPTY
+    if "refused" in e or "blocked by provider safety filter" in e or "content filter" in e:
+        return KIND_REFUSED
+    return KIND_OTHER
 
 
 def _post_json(url, headers, payload, timeout):
@@ -674,6 +761,7 @@ def _call_tool_safely(tool_executor, name, arguments, round_num=None):
     "how many tokens did this tool call cost" per call, not just per ask.
     """
     conv_id = _log_conv_id()
+    name = _normalize_tool_name(name)
     input_tokens = token_usage.estimate_tokens_for(arguments)
     try:
         result = tool_executor(name, arguments)
@@ -930,6 +1018,288 @@ def _anthropic_turns_to_generic(system_text, working_turns):
 
 
 # ---------------------------------------------------------------------------
+# Forced ending (master plan F.1 + F.8).
+#
+# THE PROBLEM. Every adapter withholds `tools` once the round budget is spent
+# (or MAX_TOOL_ROUNDS is reached) but keeps sending a transcript that is FULL
+# of native tool-call structures. A model cannot un-learn a call it can see
+# itself making, so it kept making one: Gemini answered with a functionCall
+# (or a MALFORMED_FUNCTION_CALL), Groq with the call written into its
+# `reasoning` channel or a 400, Ollama with prose. Every adapter treated that
+# as a dead key and rotated. In the 2026-09-20 logs the discarded call was, in
+# one case, exactly the Move-Item command the user wanted run — and ten keys
+# were spent finding that out.
+#
+# THE SHAPE OF THE FIX. When tools have to go, the adapter hands the rest of
+# the ask to _forced_ending() instead of sending one more structured request:
+#
+#   1. GRACE ROUND (once per ask, only if RoundBudget(grace=True)). The whole
+#      transcript so far is flattened to plain text, the tools come BACK, and
+#      the model is told it may make one more call if it is essential. Any call
+#      it makes goes through the ordinary tool_executor — i.e. through the
+#      normal confirm gate — never around it.
+#   2. FINAL ANSWER. The transcript, now including the grace call's result, is
+#      flattened again and sent with NO tools and no structure to imitate, plus
+#      one shared notice that tools are gone. Tool calls and results are prose
+#      ("I ran X with {...}. Result of X: ..."), so there is nothing to copy.
+#
+# If the final request still comes back empty or containing a call, that is not
+# a key fault: the adapter returns KIND_BUDGET with the call it was about to
+# make, and ask() ends the turn through a harness-written reply instead of
+# rotating (F.11).
+#
+# WHY RECURSION INTO THE SAME ADAPTER. Flat text is the generic message format
+# every adapter already accepts at its front door, so re-entering
+# `call_x(provider, flat_messages, tools=None|tools, tool_executor=None)` reuses
+# 100% of each adapter's request building, error handling, usage and logging —
+# instead of five hand-written "finish up" requests that would drift apart.
+# The cost is that a re-entered adapter sees round 0; _log_local.forced marks
+# that state so thinking stays off and usage rounds keep their real numbers.
+# ---------------------------------------------------------------------------
+
+GRACE_MAX_CALLS = 4  # calls honoured from the single grace response (a normal round runs all of a response's calls too)
+
+# gpt-oss models are trained on tool namespaces the provider doesn't strip:
+# a call to `list_dir` can arrive as `repo_browser.list_dir` (seen in the Groq
+# failed_generation of Case 1) or `functions.list_dir`.
+_TOOL_NAME_PREFIXES = ("repo_browser.", "functions.")
+
+
+def _normalize_tool_name(name):
+    if isinstance(name, str):
+        for prefix in _TOOL_NAME_PREFIXES:
+            if name.startswith(prefix):
+                return name[len(prefix):]
+    return name
+
+
+def _capture_pending(calls):
+    """Adapters call this wherever they have just parsed the model's tool
+    calls. A no-op unless a forced ending is collecting them — that is how the
+    wrapper learns what the model WANTED to call without the adapter executing
+    it (tool_executor is None in those re-entered calls)."""
+    forced = getattr(_log_local, "forced", None)
+    if forced is None or not calls:
+        return
+    for name, args in calls:
+        forced["captured"].append((_normalize_tool_name(name), args if isinstance(args, dict) else {}))
+
+
+def _forced_active():
+    return getattr(_log_local, "forced", None) is not None
+
+
+def _openai_style_calls(tool_calls):
+    """[(name, args)] from an OpenAI/Cohere/Ollama-shaped `tool_calls` list."""
+    out = []
+    for call in tool_calls or []:
+        if not isinstance(call, dict):
+            continue
+        fn = call.get("function") or {}
+        out.append((fn.get("name", ""), _decode_arguments(fn.get("arguments"))))
+    return out
+
+
+_HARMONY_CALL_RE = re.compile(r"to=(?:functions|repo_browser)\.([A-Za-z0-9_]+)[^{]*?(\{.*\})", re.S)
+
+
+def _calls_from_reasoning(message):
+    """A call the model wrote into its reasoning channel instead of tool_calls
+    (Groq/gpt-oss, Case 1: `content: ""`, finish_reason "stop", the call as JSON
+    in `reasoning`). Only consulted when the visible reply is empty. Returns at
+    most the LAST call found — earlier ones in a reasoning trace are drafts.
+
+    The two shapes handled are educated guesses from the plan's description
+    ("written as JSON inside reasoning") plus gpt-oss's own harmony syntax; the
+    raw log wasn't available, so both are covered by tests on synthetic samples
+    only. A wrong guess is harmless: the wrapper only honours names that are in
+    the offered tool list."""
+    if not isinstance(message, dict):
+        return []
+    text = ""
+    for key in ("reasoning", "reasoning_content"):
+        value = message.get(key)
+        if isinstance(value, str) and value.strip():
+            text = value
+            break
+    if not text:
+        return []
+    calls = []
+    m = _HARMONY_CALL_RE.search(text)
+    if m:
+        obj, _ = _json_object_at(m.group(2), 0)
+        if isinstance(obj, dict):
+            calls.append((m.group(1), obj))
+    i = 0
+    while True:
+        i = text.find("{", i)
+        if i < 0:
+            break
+        obj, end = _json_object_at(text, i)
+        if obj is None:
+            i += 1
+            continue
+        i = max(end, i + 1)
+        if not isinstance(obj, dict) or not isinstance(obj.get("name"), str):
+            continue
+        for key in ("arguments", "args", "parameters", "input"):
+            if key in obj:
+                args = obj[key]
+                if isinstance(args, str):
+                    args = _decode_arguments(args)
+                if isinstance(args, dict):
+                    calls.append((obj["name"], args))
+                break
+    return calls[-1:]
+
+
+def _pending_from_text(text, allowed):
+    """Calls a model wrote as plain text (`[called x with {...}]` or a bare
+    {"name":..., "arguments":...} object) — but only when that IS the reply,
+    not a real answer that happens to mention one."""
+    calls = _extract_text_tool_calls(text or "", allowed)
+    if not calls:
+        return []
+    stripped = (text or "").strip()
+    if stripped.startswith("{"):
+        return calls
+    prose = re.sub(r"\[called\s+[A-Za-z0-9_.\-]+\s+with\s+.*?\]", "", stripped, flags=re.S)
+    return calls if len(prose.strip(" \n:-")) < 40 else []
+
+
+# The bracketed "[called x with {...}]" / "[tool result] ..." lines are how
+# every _*_to_generic() serialises a round trip so the NEXT provider can read
+# it. They are also exactly the syntax _extract_text_tool_calls parses and
+# _is_tool_trace_reply rejects, i.e. a model that copies them produces a fake
+# call, not an answer. For the final request they are rewritten as prose.
+_GENERIC_CALL_LINE = re.compile(r"\[called\s+(\S+)\s+with\s+(.*)\]\s*$", re.M)
+_GENERIC_RESULT_FOR = re.compile(r"^\[tool result for ([^\]]+)\]\s*", re.M)
+_GENERIC_RESULT = re.compile(r"^\[tool result\]\s*", re.M)
+
+
+def _flatten_tool_scaffold(generic):
+    """A copy of `generic` (a list of {role, content}) in which every recorded
+    tool call/result reads as ordinary prose. Roles, order and everything that
+    isn't scaffolding are left exactly as they were."""
+    out = []
+    for m in generic or []:
+        content = m.get("content") if isinstance(m, dict) else None
+        if not isinstance(content, str):
+            out.append(m)
+            continue
+        role = m.get("role")
+        if role == "assistant" and "[called " in content:
+            content = _GENERIC_CALL_LINE.sub(r"I ran \1 with \2.", content)
+        elif role == "user" and content.lstrip().startswith("[tool result"):
+            content = _GENERIC_RESULT_FOR.sub(lambda mo: f"Result of {mo.group(1)}: ", content)
+            content = _GENERIC_RESULT.sub("Result: ", content)
+        out.append({**m, "content": content})
+    return out
+
+
+def _with_notice(generic, notice):
+    """`generic` plus `notice` as the final user turn. Merged into the last
+    message when that is already a user turn, so providers that dislike two
+    consecutive user messages never see them."""
+    out = list(generic)
+    if out and out[-1].get("role") == "user" and isinstance(out[-1].get("content"), str):
+        out[-1] = {**out[-1], "content": out[-1]["content"] + "\n\n" + notice}
+    else:
+        out.append({"role": "user", "content": notice})
+    return out
+
+
+def _tools_withheld(round_num, round_budget):
+    return round_num >= MAX_TOOL_ROUNDS or round_budget.remaining() <= 0
+
+
+def _forced_ending_due(round_num, round_budget, ran_tools, tool_executor):
+    """True when this round must not offer the tools it normally would AND
+    there is something a forced ending can do about it: a transcript full of
+    native tool structure to flatten, or a grace call left to run. A first
+    round with plain history, a spent budget and no grace to give keeps the
+    plain (notice-only) path — nothing to flatten, nothing to run."""
+    if not _tools_withheld(round_num, round_budget):
+        return False
+    return bool(ran_tools) or (tool_executor is not None and round_budget.grace_available())
+
+
+def _record_pair(history, name, args, result):
+    try:
+        args_s = json.dumps(args, default=str)
+    except (TypeError, ValueError):
+        args_s = str(args)
+    history.append({"role": "assistant", "content": f"I ran {name} with {args_s}."})
+    history.append({"role": "user", "content": f"Result of {name}: {_stringify_tool_result(result)}"})
+
+
+def _forced_ending(adapter, provider, generic, timeout, tools, tool_executor, round_budget,
+                   cfg_defaults, round_num):
+    """Finish an ask() whose tools must be withheld. See the block comment
+    above for the design. Returns an AIResult; never raises."""
+    allowed = {t.get("name") for t in (tools or []) if isinstance(t, dict) and t.get("name")}
+    previous = getattr(_log_local, "forced", None)
+    state = {"allowed": allowed, "captured": [], "round_base": round_num}
+    _log_local.forced = state
+    try:
+        history = _flatten_tool_scaffold(generic)
+
+        def _wanted(result):
+            """Calls the model wanted: captured natively, written into its
+            reasoning, or written as its whole reply. Only offered tool names
+            count; the rest is noise."""
+            calls = list(state["captured"])
+            if result is not None and result.ok:
+                calls += _pending_from_text(result.text, allowed)
+            if result is not None and result.pending:
+                calls += list(result.pending)
+            seen, kept = set(), []
+            for name, args in calls:
+                name = _normalize_tool_name(name)
+                key = (name, json.dumps(args, sort_keys=True, default=str))
+                if name in allowed and key not in seen:
+                    seen.add(key)
+                    kept.append((name, args))
+            return kept
+
+        # 1. Grace round — tools come back, once, one more time.
+        if tool_executor is not None and round_budget.take_grace():
+            state["captured"] = []
+            r = adapter(provider, _with_notice(history, _GRACE_NOTICE), timeout, tools=tools,
+                        tool_executor=None, round_budget=RoundBudget(), cfg_defaults=cfg_defaults)
+            calls = _wanted(r)[:GRACE_MAX_CALLS]
+            if not calls:
+                if r.ok:
+                    return r  # it simply answered
+                if r.kind not in (KIND_EMPTY, KIND_MALFORMED, KIND_BUDGET):
+                    # A real failure (key, network, shape): let ask() handle it
+                    # the normal way rather than spending a second request here.
+                    return AIResult(False, error=r.error, tool_history=history, kind=r.kind)
+            for name, args in calls:
+                _record_pair(history, name, args, _call_tool_safely(tool_executor, name, args, round_num))
+            state["round_base"] = round_num + 1
+
+        # 2. Final answer — no tools, nothing structural to imitate.
+        state["captured"] = []
+        r = adapter(provider, _with_notice(history, _TOOLS_WITHHELD_NOTICE), timeout, tools=None,
+                    tool_executor=None, round_budget=RoundBudget(), cfg_defaults=cfg_defaults)
+        wanted = _wanted(r)
+        if r.ok and not wanted:
+            return r
+        if wanted or r.kind in (KIND_EMPTY, KIND_MALFORMED, KIND_BUDGET):
+            # Still wants a tool, or produced nothing usable, even with the
+            # structure gone: end it here — another key would do the same.
+            return AIResult(False, error=_give_up_error(), tool_history=history,
+                            kind=KIND_BUDGET, pending=wanted)
+        return AIResult(False, error=r.error, tool_history=history, kind=r.kind)
+    except Exception as e:  # noqa: BLE001 — a forced ending must never take the ask down with it
+        return AIResult(False, error=f"unexpected error while finishing the reply: {e}")
+    finally:
+        _log_local.forced = previous
+
+
+
+# ---------------------------------------------------------------------------
 # OpenAI-compatible: OpenAI itself, xAI/Grok, Groq, Mistral, DeepSeek,
 # OpenRouter, and (in principle) any other host that mirrors the
 # /chat/completions request and response shape. This is deliberately the
@@ -941,10 +1311,16 @@ def _anthropic_turns_to_generic(system_text, working_turns):
 # ---------------------------------------------------------------------------
 
 _TOOLS_WITHHELD_NOTICE = (
-    "Tool calls are no longer available for the rest of this reply (the tool-round "
-    "budget is spent). Do not call any tool. Answer the user now, in plain text, from "
-    "the results already shown above; if they are not enough, say plainly what is "
-    "still missing."
+    "You can't use tools for the rest of this reply. Do not call any tool. Answer the "
+    "user now, in plain text, from the results already shown above. If they don't fully "
+    "finish the job, say plainly what was done and what still remains, in the user's own "
+    "terms. Never mention tools, limits, budgets or rounds."
+)
+# The one grace round (see _forced_ending): tools are back, once.
+_GRACE_NOTICE = (
+    "You may make ONE more tool call, and only if it is essential to finish what the user "
+    "asked. If you can already answer, answer in plain text now. Never mention tools, "
+    "limits, budgets or rounds to the user."
 )
 
 
@@ -1024,6 +1400,13 @@ def call_openai_compatible(provider, messages, timeout, tools=None, tool_executo
         # round's payload — see _compact_prior_tool_results. Without this,
         # round N resends rounds 1..N-1's results at full size every time.
         _compact_prior_tool_results(working_messages)
+        # F.1/F.8: tools must be withheld now. Rather than send one more
+        # request whose transcript is full of calls the model will keep
+        # trying to make, hand the ending to _forced_ending (grace round, then
+        # a flattened, tool-less final answer).
+        if tools and _forced_ending_due(round_num, round_budget, ran_tools, tool_executor):
+            return _forced_ending(call_openai_compatible, provider, _openai_messages_to_generic(working_messages),
+                                  timeout, tools, tool_executor, round_budget, cfg_defaults, round_num)
         tools_payload = _tools_payload()
         tools_omitted_this_round = not (tools_payload and round_num < MAX_TOOL_ROUNDS and round_budget.remaining() > 0)
         # When tools exist but are being WITHHELD (round cap or the shared
@@ -1142,6 +1525,7 @@ def call_openai_compatible(provider, messages, timeout, tools=None, tool_executo
 
         message = choice.get("message") or {}
         tool_calls = message.get("tool_calls")
+        _capture_pending(_openai_style_calls(tool_calls))
 
         if tool_calls and tool_executor and round_num < MAX_TOOL_ROUNDS and round_budget.take():
             ran_tools = True
@@ -1165,8 +1549,13 @@ def call_openai_compatible(provider, messages, timeout, tools=None, tool_executo
                 return AIResult(False, error=f"refused: {refusal}",
                                 tool_history=_openai_messages_to_generic(working_messages) if ran_tools else None)
             if tool_calls:
-                return AIResult(False, error=_give_up_error(),
+                return AIResult(False, error=_give_up_error(), pending=_openai_style_calls(tool_calls),
                                 tool_history=_openai_messages_to_generic(working_messages) if ran_tools else None)
+            if _forced_active():
+                # gpt-oss on Groq writes its call into `reasoning` and leaves
+                # `content` empty (Case 1). Record it so the forced ending
+                # knows the model wanted a tool; the reply is still "empty".
+                _capture_pending(_calls_from_reasoning(message))
             return AIResult(False, error="empty response content",
                             tool_history=_openai_messages_to_generic(working_messages) if ran_tools else None)
 
@@ -1247,6 +1636,14 @@ def call_anthropic(provider, messages, timeout, tools=None, tool_executor=None, 
         # round's payload — see _compact_prior_tool_results. Without this,
         # round N resends rounds 1..N-1's results at full size every time.
         _compact_prior_tool_results(working_turns)
+        if tools and _forced_ending_due(round_num, round_budget, ran_tools, tool_executor):
+            # Keep the system blocks separate (not the single joined string
+            # _history() builds) so the final request keeps the same cache
+            # breakpoint layout as every round before it.
+            generic = ([{"role": "system", "content": part} for part in system_blocks_in]
+                       + _anthropic_turns_to_generic("", working_turns))
+            return _forced_ending(call_anthropic, provider, generic, timeout, tools, tool_executor,
+                                  round_budget, cfg_defaults, round_num)
         tools_payload = _tools_payload()
         payload = {
             "model": model,
@@ -1254,6 +1651,10 @@ def call_anthropic(provider, messages, timeout, tools=None, tool_executor=None, 
             "messages": working_turns,
         }
         offering_tools = bool(tools_payload) and round_num < MAX_TOOL_ROUNDS and round_budget.remaining() > 0
+        if tools_payload and not offering_tools:
+            # F.1: tools are withheld and the model is told so, not left to
+            # find out by trying. Request-only; never added to working_turns.
+            payload["messages"] = working_turns + [{"role": "user", "content": _TOOLS_WITHHELD_NOTICE}]
         if _apply_thinking(payload, provider, "anthropic", round_num,
                            ran_tools, thought_rounds):
             thought_rounds += 1
@@ -1312,6 +1713,7 @@ def call_anthropic(provider, messages, timeout, tools=None, tool_executor=None, 
 
         blocks = data.get("content") or []
         tool_use_blocks = [b for b in blocks if isinstance(b, dict) and b.get("type") == "tool_use"]
+        _capture_pending([(b.get("name", ""), b.get("input") or {}) for b in tool_use_blocks])
 
         if tool_use_blocks and tool_executor and round_num < MAX_TOOL_ROUNDS and round_budget.take():
             ran_tools = True
@@ -1338,7 +1740,8 @@ def call_anthropic(provider, messages, timeout, tools=None, tool_executor=None, 
         text = "".join(b.get("text", "") for b in blocks if isinstance(b, dict) and b.get("type") == "text").strip()
         if not text:
             if tool_use_blocks:
-                return AIResult(False, error=_give_up_error(), tool_history=_history())
+                return AIResult(False, error=_give_up_error(), tool_history=_history(),
+                                pending=[(b.get("name", ""), b.get("input") or {}) for b in tool_use_blocks])
             return AIResult(False, error="empty response content", tool_history=_history())
         return AIResult(True, text=text, usage=get_usage_summary())
 
@@ -1603,6 +2006,11 @@ def call_gemini(provider, messages, timeout, tools=None, tool_executor=None, rou
             # round's payload — see _compact_prior_tool_results. Without this,
             # round N resends rounds 1..N-1's results at full size every time.
             _compact_prior_tool_results(working_contents)
+            if tools and _forced_ending_due(round_num, round_budget, ran_tools, tool_executor):
+                generic = ([{"role": "system", "content": part} for part in system_parts_in]
+                           + _gemini_contents_to_generic(working_contents))
+                return _forced_ending(call_gemini, provider, generic, timeout, tools, tool_executor,
+                                      round_budget, cfg_defaults, round_num)
             tools_payload = _tools_payload()
 
             # `tools` can grow mid-ask (ai_client's discover_sink appends to
@@ -1640,6 +2048,10 @@ def call_gemini(provider, messages, timeout, tools=None, tool_executor=None, rou
                     payload["systemInstruction"] = {"parts": [{"text": system_text}]}
                 if tools_payload and round_num < MAX_TOOL_ROUNDS and round_budget.remaining() > 0:
                     payload["tools"] = tools_payload
+                elif tools_payload:
+                    # F.1: withheld and the model is told so. Request-only.
+                    payload["contents"] = working_contents + [
+                        {"role": "user", "parts": [{"text": _TOOLS_WITHHELD_NOTICE}]}]
 
             resp, net_err = _post_json(url, headers, payload, timeout)
             if net_err:
@@ -1670,6 +2082,8 @@ def call_gemini(provider, messages, timeout, tools=None, tool_executor=None, rou
 
             parts = (candidate.get("content") or {}).get("parts") or []
             call_parts = [p for p in parts if isinstance(p, dict) and "functionCall" in p]
+            _capture_pending([(p["functionCall"].get("name", ""), p["functionCall"].get("args") or {})
+                              for p in call_parts])
 
             if call_parts and tool_executor and round_num < MAX_TOOL_ROUNDS and round_budget.take():
                 ran_tools = True
@@ -1704,7 +2118,20 @@ def call_gemini(provider, messages, timeout, tools=None, tool_executor=None, rou
                            if isinstance(p, dict) and not p.get("thought")).strip()
             if not text:
                 if call_parts:
-                    return AIResult(False, error=_give_up_error(), tool_history=_history())
+                    return AIResult(False, error=_give_up_error(), tool_history=_history(),
+                                    pending=[(p["functionCall"].get("name", ""), p["functionCall"].get("args") or {})
+                                             for p in call_parts])
+                if finish_reason in ("MALFORMED_FUNCTION_CALL", "UNEXPECTED_TOOL_CALL"):
+                    # The model tried to call a tool and garbled it. This used
+                    # to be reported as "empty response content" (F.8), which
+                    # hid that the model had wanted a tool at all.
+                    detail = str(candidate.get("finishMessage") or "").strip().replace("\n", " ")[:160]
+                    return AIResult(
+                        False,
+                        error="malformed tool call from the model (Gemini finishReason %s)%s"
+                              % (finish_reason, f": {detail}" if detail else ""),
+                        tool_history=_history(),
+                    )
                 if finish_reason == "MAX_TOKENS":
                     # See GEMINI_DEFAULT_MAX_TOKENS's docstring: this is the
                     # thinking-budget-ate-everything failure mode, not a
@@ -1793,6 +2220,9 @@ def call_cohere(provider, messages, timeout, tools=None, tool_executor=None, rou
         # round's payload — see _compact_prior_tool_results. Without this,
         # round N resends rounds 1..N-1's results at full size every time.
         _compact_prior_tool_results(working_messages)
+        if tools and _forced_ending_due(round_num, round_budget, ran_tools, tool_executor):
+            return _forced_ending(call_cohere, provider, _openai_messages_to_generic(working_messages),
+                                  timeout, tools, tool_executor, round_budget, cfg_defaults, round_num)
         tools_payload = _tools_payload()
         payload = {
             "model": model,
@@ -1801,6 +2231,9 @@ def call_cohere(provider, messages, timeout, tools=None, tool_executor=None, rou
         }
         if tools_payload and round_num < MAX_TOOL_ROUNDS and round_budget.remaining() > 0:
             payload["tools"] = tools_payload
+        elif tools_payload:
+            # F.1: withheld and the model is told so. Request-only.
+            payload["messages"] = working_messages + [{"role": "user", "content": _TOOLS_WITHHELD_NOTICE}]
 
         resp, net_err = _post_json(base_url, headers, payload, timeout)
         if net_err:
@@ -1820,6 +2253,7 @@ def call_cohere(provider, messages, timeout, tools=None, tool_executor=None, rou
 
         message = data.get("message") or {}
         tool_calls = message.get("tool_calls")
+        _capture_pending(_openai_style_calls(tool_calls))
 
         if tool_calls and tool_executor and round_num < MAX_TOOL_ROUNDS and round_budget.take():
             ran_tools = True
@@ -1840,7 +2274,7 @@ def call_cohere(provider, messages, timeout, tools=None, tool_executor=None, rou
         text = "".join(b.get("text", "") for b in content if isinstance(b, dict)).strip()
         if not text:
             if tool_calls:
-                return AIResult(False, error=_give_up_error(),
+                return AIResult(False, error=_give_up_error(), pending=_openai_style_calls(tool_calls),
                                 tool_history=_openai_messages_to_generic(working_messages) if ran_tools else None)
             return AIResult(False, error="empty response content",
                             tool_history=_openai_messages_to_generic(working_messages) if ran_tools else None)
@@ -1900,6 +2334,9 @@ def call_ollama(provider, messages, timeout, tools=None, tool_executor=None, rou
         # round's payload — see _compact_prior_tool_results. Without this,
         # round N resends rounds 1..N-1's results at full size every time.
         _compact_prior_tool_results(working_messages)
+        if tools and _forced_ending_due(round_num, round_budget, ran_tools, tool_executor):
+            return _forced_ending(call_ollama, provider, _openai_messages_to_generic(working_messages),
+                                  timeout, tools, tool_executor, round_budget, cfg_defaults, round_num)
         tools_payload = _tools_payload()
         payload = {"model": model, "messages": working_messages, "stream": False}
         if _apply_thinking(payload, provider, "ollama", round_num,
@@ -1926,6 +2363,9 @@ def call_ollama(provider, messages, timeout, tools=None, tool_executor=None, rou
             payload["keep_alive"] = keep_alive
         if tools_payload and round_num < MAX_TOOL_ROUNDS and round_budget.remaining() > 0:
             payload["tools"] = tools_payload
+        elif tools_payload:
+            # F.1: withheld and the model is told so. Request-only.
+            payload["messages"] = working_messages + [{"role": "user", "content": _TOOLS_WITHHELD_NOTICE}]
 
         resp, net_err = _post_json(base_url, headers, payload, timeout)
         if net_err:
@@ -1946,6 +2386,7 @@ def call_ollama(provider, messages, timeout, tools=None, tool_executor=None, rou
 
         message = data.get("message") or {}
         tool_calls = message.get("tool_calls")
+        _capture_pending(_openai_style_calls(tool_calls))
 
         if tool_calls and tool_executor and round_num < MAX_TOOL_ROUNDS and round_budget.take():
             ran_tools = True
@@ -1961,7 +2402,7 @@ def call_ollama(provider, messages, timeout, tools=None, tool_executor=None, rou
         text = (message.get("content") or "").strip()
         if not text:
             if tool_calls:
-                return AIResult(False, error=_give_up_error(),
+                return AIResult(False, error=_give_up_error(), pending=_openai_style_calls(tool_calls),
                                 tool_history=_openai_messages_to_generic(working_messages) if ran_tools else None)
             return AIResult(
                 False,

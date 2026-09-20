@@ -10,6 +10,7 @@
 <link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@500;700;900&family=Rajdhani:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="style.css">
 <link rel="stylesheet" href="ui-kit.css">
+<link rel="stylesheet" href="test-checklist.css">
 </head>
 <body>
 
@@ -200,6 +201,10 @@
               <button class="panel-menu__item" id="menu-item-debug" type="button" role="menuitem">
                 <span class="panel-menu__item-label">Debug</span>
                 <span class="panel-menu__item-hint">Inspect and run every tool Jarvis can call</span>
+              </button>
+              <button class="panel-menu__item" id="menu-item-testchecklist" type="button" role="menuitem">
+                <span class="panel-menu__item-label">Test Checklist</span>
+                <span class="panel-menu__item-hint">Every tool, how to test it, and what works &mdash; results stay in this browser</span>
               </button>
               <button class="panel-menu__item" id="menu-item-skills" type="button" role="menuitem">
                 <span class="panel-menu__item-label">Skills</span>
@@ -733,6 +738,74 @@
         <div class="debug-tool-list" id="debug-tool-list">
           <div class="debug-empty">Loading&hellip;</div>
         </div>
+      </section>
+
+    </div>
+  </div>
+</div>
+
+<!-- TEST CHECKLIST — every tool, how to test it (Ask prompts + Debug runs) and a
+     place to record what works. Same .debug-overlay/.debug-panel chrome as
+     Debug and Logs. The catalogue is test-checklist-data.js; RESULTS live only
+     in this browser's localStorage — nothing here touches the CLI. All the
+     dynamic parts are rendered by test-checklist.js. -->
+<div class="debug-overlay" id="tc-overlay" hidden>
+  <div class="debug-panel tc-panel" role="dialog" aria-modal="true" aria-labelledby="tc-title">
+    <div class="panel__corner panel__corner--tl"></div>
+    <div class="panel__corner panel__corner--br"></div>
+
+    <div class="debug-panel__head">
+      <svg class="brand-mark" viewBox="0 0 40 40" aria-hidden="true">
+        <circle cx="20" cy="20" r="18" class="brand-mark__ring"/>
+        <circle cx="20" cy="20" r="11" class="brand-mark__ring brand-mark__ring--in"/>
+        <circle cx="20" cy="20" r="3" class="brand-mark__core"/>
+      </svg>
+      <div class="debug-panel__titles">
+        <div class="debug-panel__title" id="tc-title">TEST CHECKLIST &mdash; WHAT WORKS, WHAT DOESN&rsquo;T</div>
+        <div class="debug-panel__subtitle" id="tc-status-line" aria-live="polite">loading checklist&hellip;</div>
+      </div>
+      <div class="tc-head-actions">
+        <button class="btn btn--ghost btn--sm" id="btn-tc-refresh" type="button" title="Re-read the live tool catalogue from the CLI (read-only) to spot tools with no checklist entry">Refresh</button>
+      </div>
+      <button class="modal__close" id="tc-close" type="button" aria-label="Close">&times;</button>
+    </div>
+
+    <div class="debug-body tc-body">
+
+      <!-- LEFT: every tool, grouped, filterable -->
+      <section class="debug-pane" aria-label="Tools">
+        <div class="debug-pane__head">
+          <h3>Tools</h3>
+          <span class="debug-tool-count" id="tc-count"></span>
+        </div>
+        <div class="panel__search debug-search">
+          <svg class="panel__search-icon" viewBox="0 0 20 20" aria-hidden="true">
+            <circle cx="8.7" cy="8.7" r="6" fill="none" stroke="currentColor" stroke-width="1.6"/>
+            <line x1="13.2" y1="13.2" x2="17.5" y2="17.5" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/>
+          </svg>
+          <input type="search" id="tc-search" class="panel__search-input" placeholder="Search tools, prompts, notes&hellip;" autocomplete="off">
+        </div>
+        <div class="tc-filters">
+          <div class="tc-chips" id="tc-chips" role="group" aria-label="Filter by verdict"></div>
+          <select class="tc-select" id="tc-group-filter" aria-label="Filter by category"></select>
+        </div>
+        <div class="tc-list" id="tc-list"></div>
+      </section>
+
+      <!-- MIDDLE: the selected tool -->
+      <section class="debug-pane" aria-label="Selected tool">
+        <div class="debug-pane__head"><h3>Test</h3></div>
+        <div class="tc-detail" id="tc-detail"></div>
+        <div class="tc-foot">
+          <span><kbd class="tc-kbd">&uarr;</kbd><kbd class="tc-kbd">&darr;</kbd> move &nbsp;<kbd class="tc-kbd">0</kbd>&ndash;<kbd class="tc-kbd">5</kbd> verdict &nbsp;<kbd class="tc-kbd">/</kbd> search &nbsp;<kbd class="tc-kbd">Esc</kbd> close</span>
+        </div>
+      </section>
+
+      <!-- RIGHT: progress, filters by verdict, what needs attention, results -->
+      <section class="debug-pane" aria-label="Overview">
+        <div class="debug-pane__head"><h3>Overview</h3></div>
+        <div class="tc-side" id="tc-side"></div>
+        <input type="file" class="tc-file" id="tc-file" accept="application/json,.json" tabindex="-1" aria-hidden="true">
       </section>
 
     </div>
@@ -1431,6 +1504,8 @@
 <script src="ui-kit.js"></script>
 <script src="app.js"></script>
 <script src="custom-tools.js"></script>
+<script src="test-checklist-data.js"></script>
+<script src="test-checklist.js"></script>
 
 </body>
 </html>

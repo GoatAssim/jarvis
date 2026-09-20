@@ -43,7 +43,7 @@ ENCODING = "utf-8"
 
 CHAIN_SEP = "then"      # starts a new batch \u2014 waits for the previous one to finish
 PARALLEL_SEP = "and"    # joins the current batch \u2014 runs alongside whatever's already in it
-RESERVED_NAMES = {"config", "ai-config", "ai-clear", "ai-drop-from", "playnite-config", "spotify-config", "spotify-login", "memory-config", "everything-config", "tools-list", "tool-run", "personas-list", "skills-list", "skills-get", "skills-save", "skills-add", "skills-create", "skills-remove", "skillmake", "skilladd", "skillload", "skillunload", "tool-preview", "tool-safety-set", "conv-new", "conv-list", "conv-show", "conv-switch", "conv-delete", "logs", "logs-list", "logs-show", "logs-append-run", "logs-clear", "organize-json", "mode", "mode-set", "voice-config", "speak", "listen", "transcribe", "sched-list", "sched-tick", "sched-daemon", "sched-ask-log", "sched-add", "sched-show", "sched-cancel", "sched-pause", "sched-resume", "sched-snooze", "sched-approve", "sched-signal", "sched-clear", "notify-send", "notify-list", "notify-history", "notify-ack", "notify-clear", "notify-config", "conv-search", "mcp-status", "mcp-refresh", "mcp-config", "mcp-call", "channels-config", "channels-status", "channels-set", "channels-allow", "channels-deny", "channels-test", "channels-whoami", "channels-log", "channels-directory", "channels-people", "channels-follow", "channels-block", "discord-daemon", "instagram-serve", "logs-search", "mcp-tools", "daemons", "daemon-start", "daemon-stop", "daemon-restart", "daemon-status", "daemon-console", "daemon-input", "daemon-schedule", "daemon-add", "daemon-edit", "daemon-remove", "daemon-run", "daemons-tick", "logs-files", "logs-tail", "logs-sets", "backlog", "backlog-add", "backlog-done", "backlog-update", "backlog-remove", "backlog-board", "ambient", "ambient-tick", "onboard", "ui-mode", "subagent-keys", "subagents", "subagent-spawn", "subagent-run", "subagent-status", "subagent-cancel", "think", CHAIN_SEP, PARALLEL_SEP, "-h", "--help"}
+RESERVED_NAMES = {"config", "ai-config", "ai-clear", "ai-drop-from", "playnite-config", "spotify-config", "spotify-login", "memory-config", "everything-config", "tools-list", "tool-run", "personas-list", "skills-list", "skills-get", "skills-save", "skills-add", "skills-create", "skills-remove", "skillmake", "skilladd", "skillload", "skillunload", "tool-preview", "tool-safety-set", "conv-new", "conv-list", "conv-show", "conv-switch", "conv-delete", "logs", "logs-list", "logs-show", "logs-append-run", "logs-clear", "organize-json", "mode", "mode-set", "voice-config", "speak", "listen", "transcribe", "sched-list", "sched-tick", "sched-daemon", "sched-ask-log", "sched-add", "sched-show", "sched-cancel", "sched-pause", "sched-resume", "sched-snooze", "sched-approve", "sched-signal", "sched-clear", "notify-send", "notify-list", "notify-history", "notify-ack", "notify-clear", "notify-config", "conv-search", "mcp-status", "mcp-refresh", "mcp-config", "mcp-call", "channels-config", "channels-status", "channels-set", "channels-allow", "channels-deny", "channels-test", "channels-whoami", "channels-log", "channels-directory", "channels-people", "channels-follow", "channels-block", "discord-daemon", "instagram-serve", "logs-search", "mcp-tools", "daemons", "daemon-start", "daemon-stop", "daemon-restart", "daemon-status", "daemon-console", "daemon-input", "daemon-schedule", "daemon-add", "daemon-edit", "daemon-remove", "daemon-run", "daemons-tick", "logs-files", "logs-tail", "logs-sets", "backlog", "backlog-add", "backlog-done", "backlog-update", "backlog-remove", "backlog-board", "ambient", "ambient-tick", "onboard", "ui-mode", "subagent-keys", "subagents", "subagent-spawn", "subagent-run", "subagent-status", "subagent-cancel", "think", "clipboard-watch", "clipboard-watch-config", CHAIN_SEP, PARALLEL_SEP, "-h", "--help"}
 
 OUT = Palette(sys.stdout)  # actual command output: the banner, the command list
 ERR = Palette(sys.stderr)  # jarvis's own status/trace/error messages
@@ -1775,6 +1775,21 @@ def main():
         # a script or a CI step: 0 healthy, 1 warnings, 2 something broken.
         sys.exit({"ok": 0, "warn": 1, "fail": 2}.get(report["overall"], 0))
 
+    # --- Browser control setup (browser_tools.py, master plan Part C) -------
+    if argv[0] == "browser-setup":
+        from . import browser_tools
+        report = browser_tools.run_setup()
+        if "--json" in argv[1:]:
+            print(json.dumps(report, indent=2))
+        else:
+            for step in report["steps"]:
+                mark = "OK" if step["ok"] else "FAIL"
+                print(f"[{mark}] {step['step']}")
+                if not step["ok"]:
+                    print(f"      {step['detail']}")
+            print("Browser control is ready." if report["ok"] else "Browser control setup failed — see above.")
+        sys.exit(0 if report["ok"] else 1)
+
     # --- Notification digest ------------------------------------------------
     if argv[0] in ("digest-status", "digest-on", "digest-off", "digest-now",
                    "digest-preview"):
@@ -1854,6 +1869,15 @@ def main():
         # still runs every other command normally.
         from . import channels_cli as _channels_cli
         _channels_cli.handle(argv)
+        return
+
+    from .clipboard_cli import COMMANDS as _CLIPBOARD_COMMANDS
+    if argv[0] in _CLIPBOARD_COMMANDS:
+        # The clipboard-watch worker + its config command — see
+        # clipboard_cli.py's docstring for why this is split out the same
+        # way channels_cli.py is.
+        from . import clipboard_cli as _clipboard_cli
+        _clipboard_cli.handle(argv)
         return
 
     if argv[0] == "logs-list":

@@ -14,6 +14,9 @@ dependencies = [
 ytdl = ["yt-dlp>=2024.1"]
 desktop = ["pyautogui>=0.9.54"]
 ocr = ["pytesseract>=0.3.10", "Pillow>=9.0"]
+# actions/path_tools.py — delete_path sends to the Recycle Bin/Trash and refuses
+# (deleting nothing) when this isn't installed; there is no permanent delete.
+trash = ["send2trash>=1.8"]
 # jarvis-enhancement-plan.md §3.5 — pluggable voice backends. All opt-in;
 # none of these are in the base `dependencies` above. "voice-audio" is
 # needed by every voice command (record/play); the tts-*/stt-* extras are
