@@ -325,13 +325,18 @@ textarea:focus-visible, select:focus-visible, [tabindex]:focus-visible{
 
 /* Fixed, centered along the bottom of the screen — see the HTML comment
    above #bottom-status-bar for why the online pill and Jarvis's path live
-   here instead of the topbar. Sits above the sequence bar's usual height
-   (see .sequence-bar below) so the two don't overlap when a sequence is
-   queued; z-index below the FABs/overlays but above ordinary page content. */
+   here instead of the topbar.
+   Matches the Logs fab's own bottom offset (22px / 16px on narrow
+   viewports) so the online pill sits at the same level as the
+   notifications/logs button stack in the opposite corner, rather than
+   floating separately above it. That does put it at roughly the same
+   height as the sequence bar when one is queued — .bottom-status-bar's
+   z-index (45) stays above .sequence-bar's (40) so the pill still wins
+   that overlap rather than getting hidden by it. */
 .bottom-status-bar{
   position: fixed;
   left: 50%;
-  bottom: 74px;
+  bottom: 22px;
   transform: translateX(-50%);
   z-index: 45;
   display: flex;
@@ -344,7 +349,7 @@ textarea:focus-visible, select:focus-visible, [tabindex]:focus-visible{
 }
 .bottom-status-bar .status-pill{ pointer-events: auto; }
 @media (max-width: 780px){
-  .bottom-status-bar{ bottom: 112px; max-width: calc(100vw - 24px); }
+  .bottom-status-bar{ bottom: 16px; max-width: calc(100vw - 24px); }
   .bottom-status-bar .topbar__meta{ white-space: normal; word-break: break-word; }
 }
 
@@ -2019,10 +2024,11 @@ audio.ask-dl-player{ max-height: none; background: transparent; }
 
 /* Stacked directly above the Logs fab (bottom pushed up by the Logs fab's
    own height + gap) rather than crowding it side by side, so both stay
-   reachable with a thumb on narrow viewports. Shifted a bit further right
-   than a straight stack-above-Logs would put it (smaller `right` = closer
-   to the edge = further right on screen). */
-.notifications-fab{ bottom: 78px; right: 6px; position: relative; }
+   reachable with a thumb on narrow viewports. Shifted further right than a
+   straight stack-above-Logs would put it (smaller `right` = closer to the
+   edge = further right on screen) — nudged again per feedback that the
+   first pass wasn't far enough. */
+.notifications-fab{ bottom: 78px; right: 2px; position: relative; }
 .notifications-fab__badge{
   position: absolute; top: -6px; right: -6px;
   min-width: 18px; height: 18px; padding: 0 4px;
@@ -2033,7 +2039,7 @@ audio.ask-dl-player{ max-height: none; background: transparent; }
   box-shadow: 0 0 0 2px var(--bg-raised);
 }
 @media (max-width: 900px){
-  .notifications-fab{ bottom: 70px; right: 3px; }
+  .notifications-fab{ bottom: 70px; right: 1px; }
 }
 
 /* --- notifications panel -------------------------------------------------
@@ -2218,8 +2224,18 @@ audio.ask-dl-player{ max-height: none; background: transparent; }
    the list against (MCP Servers has no per-server editor pane).
    =========================================================================== */
 
+/* BUGFIX: was z-index 85, below .ask-overlay's 90. Setup (and the other
+   panels here — Skills, Scheduled, MCP, Channels, Guides) is reachable from
+   the Menu button that sits inside the Ask panel's own header in Focus
+   layout (see .panel-menu--focus-only), and the Setup wizard's own "Focus/
+   Classic" step opens the Ask panel via applyLayout() without closing the
+   wizard first — so a lower z-index here meant a panel opened deliberately
+   on top of the Ask surface could end up rendering underneath it instead.
+   92 keeps this above Ask (90) while staying below Debug/Logs (95), which
+   should still be able to layer over an open menu panel (e.g. opening
+   Debug from the Live Feed header while Scheduled is open). */
 .menu-overlay{
-  position: fixed; inset: 0; z-index: 85;
+  position: fixed; inset: 0; z-index: 92;
   background: rgba(2,5,10,0.78);
   backdrop-filter: blur(4px);
   display: flex; align-items: center; justify-content: center;
