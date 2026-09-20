@@ -31,7 +31,13 @@ Call shape (see ai_client.ask() for the actual wiring):
 "A different toolset is called, drop the old one": handled by set_sticky()
 simply overwriting whatever was stored for that conversation_id — there is
 only ever one sticky entry per conversation, so a fresh confident match
-always replaces (never merges with) the previous one.
+always replaces (never merges with) the previous one, AS FAR AS THIS MODULE
+IS CONCERNED. ai_client.ask() (master plan F.10 item 2) is one caller that
+deliberately computes a merged list itself before calling set_sticky() —
+when a confident match is also a short confirmation ("yes plz run this")
+with a live sticky entry, that's continuing the same task, not switching to
+a new one. set_sticky() doesn't know or care either way; it just stores
+whatever list its caller hands it.
 """
 
 import json
@@ -87,9 +93,10 @@ def get_sticky(conv_id):
 
 
 def set_sticky(conv_id, groups):
-    """A fresh confident route() result — overwrite (never merge with)
-    whatever was previously sticky for this conversation, and reset the
-    counter to STICKY_TURNS."""
+    """Overwrite whatever was previously sticky for this conversation with
+    `groups`, and reset the counter to STICKY_TURNS. Simple last-write-wins
+    storage — it's the caller's job to decide what `groups` should be; see
+    the module docstring for ai_client.ask()'s merge-on-confirmation case."""
     if not conv_id or not groups:
         return
     data = _load()

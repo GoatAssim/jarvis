@@ -2239,6 +2239,98 @@ def abandon_pending_turn(reason="interrupted"):
         return False
 
 
+def _strip_pasted_previous_reply(user_text, conv_id):
+    """F.10: when user_text contains Jarvis's own previous reply pasted
+    back verbatim (the raw paste case — no `The user highlighted this
+    excerpt…` wrapper, which is the web UI's separate highlight-quote
+    path and isn't touched here), remove that reply text before handing
+    the message to tool_router.route(). Otherwise the router scores the
+    ASSISTANT's own words too — a closing line like "Let me know if
+    you'd like me to handle it..." can out-score the user's actual
+    instruction sitting right next to it (Case 2b: it beat "run this
+    custom command" outright and replaced the sticky `files` group with
+    `channels`+`scheduling`).
+
+    Deliberately conservative: only strips an EXACT match of the whole
+    previous reply (stripped of surrounding whitespace), and only when
+    it's long enough (20+ chars) to be a real paste rather than a short
+    phrase that could legitimately also be something the user typed
+    themselves. A smaller or inexact overlap is left alone — worst case
+    that just falls back to the pre-fix behavior for that message, never
+    something worse.
+
+    Only affects what gets ROUTED; the original user_text (paste
+    included) is still what's sent to the model and saved to history —
+    this never changes what Jarvis actually sees or remembers.
+    """
+    if not user_text or not conv_id:
+        return user_text
+    prev = conversations.last_assistant_reply(conv_id)
+    if not prev:
+        return user_text
+    prev = prev.strip()
+    if len(prev) < 20 or prev not in user_text:
+        return user_text
+    stripped = user_text.replace(prev, " ", 1).strip()
+    return stripped or user_text
+
+
+# F.10 item 2: a short confirmation ("yes", "do it", "run this", "go
+# ahead", ...) that ALSO happens to confidently match a group (e.g. "yes
+# plz run this" matching `commands` via "run"/"command") shouldn't
+# outright replace a broader sticky context the way a genuine topic
+# change should (route_stickiness.py's normal "a new toolset drops the
+# old one" behavior) — it should ADD to it.
+#
+# Anchored across the WHOLE message, not just a leading prefix: a
+# prefix-only match let "please install ffmpeg for me" false-positive as
+# a confirmation, since "please" is both a common confirmation word AND
+# a common way to start a completely new, unrelated instruction. Anchoring
+# end-to-end means every word has to be either a bare filler
+# (yes/plz/please/...) or part of a fixed confirmation phrase — "install
+# ffmpeg for me" isn't either, so the whole match fails, exactly as it
+# should. "run this <whatever the model/user names>" is still allowed to
+# carry up to 3 trailing words (the actual real-world Case 2b case, "run
+# this custom command") since that's the one place a confirmation
+# legitimately names its own object.
+_CONFIRMATION_FILLER = r"(?:yes|yep|yeah|yup|sure|ok(?:ay)?|please|plz|confirmed?|proceed)"
+_CONFIRMATION_CORE = r"(?:go ahead|go for it|do it|do that|sounds good|run (?:it|this|that)(?:\s+\w+){0,3})"
+_CONFIRMATION_TOKEN = rf"(?:{_CONFIRMATION_FILLER}|{_CONFIRMATION_CORE})"
+_CONFIRMATION_RE = re.compile(
+    rf"^\s*{_CONFIRMATION_TOKEN}(?:[\s!.,]+{_CONFIRMATION_TOKEN})*[\s!.,]*$",
+    re.IGNORECASE,
+)
+
+
+def _looks_like_short_confirmation(text):
+    text = (text or "").strip()
+    if not text or len(text.split()) > 8:
+        return False
+    return bool(_CONFIRMATION_RE.match(text))
+
+
+def _merged_sticky_groups_for_confirmation(route, existing_sticky_groups, user_text):
+    """The decision half of F.10 item 2, pulled out as a pure function so
+    it's testable without going through the whole ask() attempt loop.
+
+    Returns the merged group list (existing sticky groups, in order, plus
+    any newly-matched group not already in it) when this message is BOTH
+    a confident route AND a short confirmation with a live sticky context
+    to merge into; returns None otherwise, meaning "normal replace
+    behavior" (ask() then does route_stickiness.set_sticky(conv_id,
+    route.groups) exactly as before this fix).
+    """
+    if not route.confident or not existing_sticky_groups:
+        return None
+    if not _looks_like_short_confirmation(user_text):
+        return None
+    merged = list(existing_sticky_groups)
+    for group in route.groups:
+        if group not in merged:
+            merged.append(group)
+    return merged
+
+
 def ask(user_text, commands=None, on_attempt=None, on_tool_call=None, on_tool_result=None, conversation_id=None,
         on_confirm_request=None, on_route=None, provider_override=None,
         think_override=None, on_trace=None, sender_context=""):
@@ -2376,17 +2468,22 @@ def ask(user_text, commands=None, on_attempt=None, on_tool_call=None, on_tool_re
         # tool_executor below is still built from full_schemas regardless
         # (not active_schemas) so a tool call the router didn't anticipate
         # still validates/executes normally rather than failing closed.
-        route = tool_router.route(user_text)
+        route = tool_router.route(_strip_pasted_previous_reply(user_text, conv_id))
         if on_route:
             on_route(route)
         trace.note_route(route)
 
         from . import tool_registry
 
-        # Stickiness: a confident match here always wins outright and
+        # Stickiness: a confident match here normally wins outright and
         # replaces whatever group was previously sticky for this
         # conversation (never merges with it — see route_stickiness.py's
-        # module docstring on why "a new toolset drops the old one").
+        # module docstring on why "a new toolset drops the old one"). The
+        # one exception (master plan F.10 item 2): when the message is
+        # both confident AND a short confirmation ("yes plz run this"),
+        # it's continuing the previous task, not switching to a new one —
+        # merge its matched group(s) into the still-live sticky set
+        # instead of dropping the rest.
         # A non-confident result instead checks whether an earlier turn in
         # this same conversation left a still-live sticky group behind, and
         # if so offers *that* instead of falling all the way back to the
@@ -2395,10 +2492,34 @@ def ask(user_text, commands=None, on_attempt=None, on_tool_call=None, on_tool_re
         # actually needs just because the follow-up text itself doesn't
         # repeat the original keywords.
         sticky_tools = []
+        existing_sticky_groups = route_stickiness.get_sticky(conv_id)
         if route.confident:
-            route_stickiness.set_sticky(conv_id, route.groups)
+            merged_groups = _merged_sticky_groups_for_confirmation(route, existing_sticky_groups, user_text)
+            if merged_groups is not None:
+                route_stickiness.set_sticky(conv_id, merged_groups)
+                trace.sticky_groups = list(existing_sticky_groups)
+                # Mutate route in place (RouteResult's fields are plain
+                # attributes, not read-only) so every other consumer of
+                # this same route object downstream — _build_messages'
+                # pack_instructions_ctx/offered_names, the other
+                # route.tools/route.groups reads later in this function —
+                # sees the merged view too, not just this one
+                # active_schemas assignment. turn_trace already took its
+                # own copy via note_route() above, so the raw pre-merge
+                # decision is still what shows up in the trace/log.
+                seen = set()
+                merged_tools = []
+                for group in merged_groups:
+                    for name in tool_registry.tools_in_group(group):
+                        if name not in seen:
+                            seen.add(name)
+                            merged_tools.append(name)
+                route.groups = merged_groups
+                route.tools = merged_tools
+            else:
+                route_stickiness.set_sticky(conv_id, route.groups)
         else:
-            sticky_groups = route_stickiness.get_sticky(conv_id)
+            sticky_groups = existing_sticky_groups
             if sticky_groups:
                 seen = set()
                 for group in sticky_groups:
