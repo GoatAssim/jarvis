@@ -2751,7 +2751,7 @@ window.JARVIS_TEST_CHECKLIST = /*JSON-BEGIN*/ {
   },
   "run_shell": {
    "group": "dev_agent",
-   "does": "Runs one shell command in a directory. A cmd.exe builtin (dir, type, echo, ...) is auto-routed through cmd /c; if that still fails with a WinError 2, the diagnosis names the builtin instead of suggesting ffmpeg/git.",
+   "does": "Runs one shell command in a directory. A cmd.exe builtin (dir, type, echo, ...) is auto-routed through cmd /c; if that still fails with a WinError 2, the diagnosis names the builtin instead of suggesting ffmpeg/git. Applies whether run_shell is called directly or from code_agent's own inner loop.",
    "steps": [
     {
      "ask": "In <project path>, run the tests.",
