@@ -321,6 +321,15 @@ def check_ai_config(deep=False):
         keys = ai_config.provider_keys(provider) or []
         if provider.get("type") == "ollama":
             usable.append((name, provider, []))
+            down = _endpoint_refusing(provider)
+            if down:
+                # F.9/F.8: both Ollama entries in the 2026-09-20 logs failed the
+                # same way on every ask (connection refused, server not running).
+                out.append(Check("ai.ollama.%s" % name, "%s (Ollama)" % name, WARN,
+                                 "nothing is listening on %s" % down,
+                                 "Start it with `ollama serve`, or set \"enabled\": false on this "
+                                 "provider in %s. Until then every ask spends a request on it." % path,
+                                 "ai"))
             continue
         if not keys:
             continue
@@ -343,6 +352,19 @@ def check_ai_config(deep=False):
                                    if k else "%s (local)" % n
                                    for n, _p, k in usable), "", "ai",
                          {"providers": [n for n, _p, _k in usable]}))
+
+    # F.9: keys the last asks parked after a 429 / a bad-key answer.
+    try:
+        from . import key_health
+        cooling = key_health.cooling_keys()
+    except Exception:  # noqa: BLE001 — a doctor check never crashes the doctor
+        cooling = []
+    if cooling:
+        out.append(Check("ai.cooldowns", "Keys cooling down", WARN,
+                         "; ".join("%s (%s, %ds left)" % (k, st or "cooling", max(1, int(left)))
+                                   for k, left, st in cooling),
+                         "They are tried last until the timer ends; nothing to do unless it "
+                         "keeps happening (then the key is over its quota).", "ai"))
 
     priority = defaults.get("provider_priority") or []
     if isinstance(priority, list) and priority:
@@ -368,6 +390,24 @@ def check_ai_config(deep=False):
     if deep:
         out.extend(_probe_keys(usable))
     return out
+
+
+def _endpoint_refusing(provider, timeout=0.6):
+    """"host:port" if a plain TCP connect to the provider's base_url is refused
+    or times out, else None. A local server that isn't running is the one
+    failure worth a pre-flight: it costs a request on every single ask."""
+    import socket
+    from urllib.parse import urlparse
+    try:
+        u = urlparse(str(provider.get("base_url") or "http://localhost:11434"))
+        host, port = u.hostname or "localhost", u.port or (443 if u.scheme == "https" else 80)
+    except ValueError:
+        return None
+    try:
+        with socket.create_connection((host, port), timeout=timeout):
+            return None
+    except OSError:
+        return "%s:%s" % (host, port)
 
 
 def _looks_like_placeholder(key):

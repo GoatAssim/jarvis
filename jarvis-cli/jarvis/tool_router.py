@@ -74,6 +74,28 @@ class RouteResult:
         )
 
 
+# F.10 item 3. A long, multi-paragraph message usually ends with what the user
+# actually wants ("...run this custom command") after context they pasted or
+# wrote earlier; a phrase that appears only in the middle (or in a quoted
+# reply's closing "let me know") shouldn't out-vote it. Any keyword phrase that
+# also matches the LAST line adds this to its group's score. Deliberately
+# small — it breaks ties and near-ties, it can't activate a group by itself
+# (the MIN_SCORE gate is unchanged) — and it only applies to messages of 3+
+# non-empty lines and 200+ chars, so a one-line message routes exactly as before.
+LAST_LINE_BONUS = 2
+_LAST_LINE_MIN_LINES = 3
+_LAST_LINE_MIN_CHARS = 200
+
+
+def last_line_for_bonus(text):
+    """The lowercased last non-empty line of a multi-paragraph message, else
+    None. Shared with tests/interactive_inspector.py so the two can't drift."""
+    lines = [ln.strip() for ln in (text or "").splitlines() if ln.strip()]
+    if len(lines) < _LAST_LINE_MIN_LINES or len(text or "") < _LAST_LINE_MIN_CHARS:
+        return None
+    return lines[-1].lower()
+
+
 def route(user_text):
     """Score user_text (case-insensitive substring match) against every
     tool's keywords. Any tool whose matched keyword weight >= MIN_SCORE
@@ -84,6 +106,7 @@ def route(user_text):
     text = (user_text or "").lower()
     if not text.strip():
         return RouteResult([], [])
+    last_line = last_line_for_bonus(user_text)
 
     matched_groups = []
     seen_groups = set()
@@ -118,6 +141,8 @@ def route(user_text):
             # total than one with a single weak hit.
             if group:
                 group_scores[group] = group_scores.get(group, 0) + weight
+                if last_line and re.search(rf"\b{re.escape(phrase)}\b", last_line):
+                    group_scores[group] += LAST_LINE_BONUS
                 # Phase 10 of the enhancements doc: record which keyword
                 # in which tool's entry caused this activation, so a
                 # trace/log line can show the router's reasoning instead

@@ -574,7 +574,7 @@ def _run_agent_loop(task, schemas, executor, round_limit):
     already on disk cannot.
     """
     try:
-        from .. import ai_client, ai_config, ai_providers
+        from .. import ai_client, ai_config, ai_providers, key_health
 
         cfg = ai_config.load_ai_config()
         providers = ai_client._eligible_providers(cfg["providers"], cfg["defaults"])
@@ -594,6 +594,12 @@ def _run_agent_loop(task, schemas, executor, round_limit):
                 continue
 
             keys = ai_config.provider_keys(provider) or [None]
+            # F.9: don't put the inner loop on the key the outer ask is using
+            # (it shares that key's per-minute quota), and skip keys that are
+            # cooling down from a 429 — while remembering the ones this loop
+            # burns, so the outer ask doesn't start on them either.
+            health_name = ai_client._provider_label(provider)
+            keys = key_health.spread_keys(health_name, keys)
             for key in keys:
                 resolved = ai_client._resolve(provider, cfg["defaults"])
                 if key is not None:
@@ -610,7 +616,10 @@ def _run_agent_loop(task, schemas, executor, round_limit):
                     continue
 
                 if result.ok and result.text:
+                    key_health.record_success(health_name, resolved.get("model"), key)
                     return result.text, None
+                key_health.record_failure(health_name, resolved.get("model"), key,
+                                          getattr(result, "kind", None), getattr(result, "error", None))
                 if round_budget.used > 0:
                     return None, (f"{_provider_label_safe(ai_client, provider)}: "
                                   f"{getattr(result, 'error', None) or 'no final answer after tool calls'}")
