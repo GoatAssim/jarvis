@@ -160,6 +160,7 @@ def _apply_thinking(payload, provider, provider_type, round_num, ran_tools, thou
         provider_type, level, round_num=round_num,
         is_final=bool(ran_tools and round_num > 0), ran_tools=ran_tools,
         provider_name=provider.get("name") or "", model=provider.get("model") or "",
+        base_url=provider.get("base_url") or "",
     )
     if not patch:
         return False

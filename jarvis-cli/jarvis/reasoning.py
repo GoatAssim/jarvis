@@ -115,6 +115,37 @@ _REASONING_MODEL_RE = re.compile(
     r"(^|[-_/])(o[1-4](\s|-|$)|gpt-5|reason|think|r1\b|qwq|deepseek-r)", re.I
 )
 
+# §4 fix: a provider typed openai_compatible but actually pointed at an
+# Ollama server (its native /api/chat endpoint speaks a different shape,
+# but plenty of setups instead point at Ollama's OpenAI-compat endpoint,
+# or a proxy in front of it) needs "think": true, not "reasoning_effort" —
+# Ollama silently ignores the latter, which is exactly how a second local
+# provider config'd this way ends up with no explicit thinking instruction
+# at all. Three independent signals, any one is enough:
+#   - the provider's own `name` says so ("ollama1", "my-ollama", ...)
+#   - the base_url is Ollama's default port, or ends in its native path
+#   - the model string uses Ollama's registry "name:tag" convention, which
+#     nothing else in _OPENAI_FAMILY_STYLE's roster uses this way (an
+#     OpenRouter "org/model:variant" always has a "/" too, so requiring no
+#     "/" keeps this from firing on those)
+# This is a heuristic, not a certainty — a false positive costs one wasted
+# request key that Ollama ignores, same as today; a false negative just
+# leaves things exactly as broken as they already are.
+_OLLAMA_TAG_MODEL_RE = re.compile(r"^[A-Za-z0-9][\w.\-]*:[A-Za-z0-9][\w.\-]*$")
+
+
+def _looks_like_ollama_host(provider_name, base_url, model):
+    name = (provider_name or "").strip().lower()
+    if "ollama" in name:
+        return True
+    url = (base_url or "").strip().lower()
+    if ":11434" in url or url.rstrip("/").endswith("/api/chat"):
+        return True
+    model = model or ""
+    if "/" not in model and _OLLAMA_TAG_MODEL_RE.match(model):
+        return True
+    return False
+
 # Auto-escalation signal. Weighted like tool_router.TOOL_KEYWORDS and read
 # the same way: word-boundary matched, additive, compared against a
 # threshold. These are phrases where a wrong first answer is expensive
@@ -267,7 +298,9 @@ def effective_level(user_text, defaults=None, override=None):
     return level, cfg
 
 
-def _openai_style(provider_name, model):
+def _openai_style(provider_name, model, base_url=""):
+    if _looks_like_ollama_host(provider_name, base_url, model):
+        return "ollama_native"
     name = (provider_name or "").strip().lower()
     for needle, style in _OPENAI_FAMILY_STYLE:
         if needle in name:
@@ -279,7 +312,7 @@ def _openai_style(provider_name, model):
 
 
 def request_patch(provider_type, level, *, provider_name="", model="",
-                  include_trace=True):
+                  base_url="", include_trace=True):
     """The keys to merge into this provider's request payload.
 
     Returns a flat dict (possibly empty). Empty always means "send exactly
@@ -311,7 +344,9 @@ def request_patch(provider_type, level, *, provider_name="", model="",
         return {"think": True}
 
     if provider_type == "openai_compatible":
-        style = _openai_style(provider_name, model)
+        style = _openai_style(provider_name, model, base_url)
+        if style == "ollama_native":
+            return {"think": True}
         if style == "effort":
             return {"reasoning_effort": spec["effort"]}
         if style == "object":
@@ -427,8 +462,11 @@ def extract_trace(provider_type, data):
                 return ""
             message = (choices[0] or {}).get("message") or {}
             # DeepSeek: reasoning_content. OpenRouter/Groq: reasoning.
+            # Ollama's OpenAI-compat endpoint (§4 fix, "ollama_native" style
+            # above): "thinking", same field name its native /api/chat uses,
+            # since it's the same server underneath.
             # OpenRouter can also send structured reasoning_details.
-            for key in ("reasoning_content", "reasoning"):
+            for key in ("reasoning_content", "reasoning", "thinking"):
                 value = message.get(key)
                 if isinstance(value, str) and value.strip():
                     return value.strip()
@@ -565,7 +603,7 @@ def effort_for_round(level, round_num=0):
 
 def round_patch(provider_type, level, round_num=0, is_final=False,
                 ran_tools=False, *, provider_name="", model="",
-                include_trace=True):
+                base_url="", include_trace=True):
     """request_patch() for one specific round — the function adapters call.
 
     Returns {} for any round that shouldn't think, which is the whole point:
@@ -599,10 +637,12 @@ def round_patch(provider_type, level, round_num=0, is_final=False,
         return {"think": True}
 
     if provider_type == "openai_compatible":
+        style = _openai_style(provider_name, model, base_url)
+        if style == "ollama_native":
+            return {"think": True}
         effort = effort_for_round(level, round_num)
         if not effort:
             return {}
-        style = _openai_style(provider_name, model)
         if style == "effort":
             return {"reasoning_effort": effort}
         if style == "object":
