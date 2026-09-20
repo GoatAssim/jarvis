@@ -3198,6 +3198,26 @@
       case "console":
         renderConsoleDumpBubble(item.data.dumpLines);
         break;
+      case "thinking":
+        // BUGFIX: ai_client.py has captured and saved a full thinking trace
+        // per round since Phase 0 (see extras.append({"type": "thinking"...
+        // in ai_client.py) — this case was simply never written, so that
+        // data reached the browser on every conversation reload and was
+        // silently dropped. Grep confirms zero other references to
+        // item.data.text/.rounds/.level anywhere in this file before this.
+        // Collapsed by default and rendered after the round finishes (not
+        // token-by-token) — true live streaming needs the backend to move
+        // off blocking `stream: false` calls per provider, which is a
+        // bigger, separately-planned change.
+        if (item.data && item.data.text) {
+          const details = el("details", { class: "thinking-block" }, [
+            el("summary", { class: "thinking-block__summary" },
+              `Thinking (${item.data.rounds || 1} round${item.data.rounds === 1 ? "" : "s"}, ${THINK_LEVEL_LABEL[item.data.level] || item.data.level || "default"})`),
+            el("pre", { class: "thinking-block__text" }, item.data.text),
+          ]);
+          insertIntoAskThread(details);
+        }
+        break;
       case "uiBubble": {
         const lvl = ["info", "success", "warn", "error"].includes(item.data.level)
           ? item.data.level : "info";
@@ -8361,6 +8381,255 @@
   }
 
   qs("#btn-layout-switch")?.addEventListener("click", toggleLayout);
+
+  // --- subagents ----------------------------------------------------------
+  // Active vs finished split mirrors tasks.py's own ACTIVE_STATUSES /
+  // TERMINAL_STATUSES exactly (see tasks.py) — "blocked" is neither: it's
+  // not running, but it's a subagent waiting on a human decision, which
+  // belongs with the things worth looking at, not the finished pile.
+  const SUBAGENT_ACTIVE_STATUSES = new Set(["pending", "running", "blocked"]);
+
+  const subagentsOverlay = qs("#subagents-overlay");
+  let selectedSubagent = null;
+  let subagentActiveList = [];
+  let subagentPollTimer = null;
+
+  function subagentStatusClass(status) {
+    if (status === "running") return "is-busy";
+    if (status === "done") return "is-ok";
+    if (status === "failed") return "is-error";
+    if (status === "blocked") return "is-warn";
+    if (status === "cancelled") return "is-muted";
+    return "";
+  }
+
+  function renderSubagentRow(t) {
+    const goalLine = (t.goal || "").length > 64 ? t.goal.slice(0, 64) + "\u2026" : (t.goal || "");
+    return el("button", {
+      class: "skills-item subagent-row" + (t.id === selectedSubagent ? " is-active" : "")
+        + (t.status === "blocked" ? " is-warn" : ""),
+      type: "button",
+      onclick: () => selectSubagent(t.id),
+    }, [
+      el("div", { class: "skills-item__name" }, [
+        el("span", { class: `subagent-dot ${subagentStatusClass(t.status)}` }),
+        `[${t.role || "?"}] ${goalLine || "(no goal)"}`,
+      ]),
+      el("div", { class: "skills-item__desc" },
+        `${t.status}\u2002\u00b7\u2002${t.progress || ""}\u2002\u00b7\u2002${t.steps_used || 0} step${t.steps_used === 1 ? "" : "s"}`),
+    ]);
+  }
+
+  async function refreshSubagents() {
+    let data;
+    try {
+      data = await Api.get("/api/subagents");
+    } catch (e) {
+      qs("#subagents-status-line").textContent = e.message || "Couldn't read subagents.";
+      return;
+    }
+    const tasks = data.tasks || [];
+    subagentActiveList = tasks.filter((t) => SUBAGENT_ACTIVE_STATUSES.has(t.status));
+    const done = tasks.filter((t) => !SUBAGENT_ACTIVE_STATUSES.has(t.status)).slice(0, 10);
+
+    qs("#subagents-status-line").textContent =
+      `${data.running_now || 0} running \u00b7 max_concurrent ${data.max_concurrent ?? "\u2014"}`;
+
+    const badge = qs("#subagents-badge");
+    if (badge) {
+      const n = subagentActiveList.length;
+      badge.hidden = n === 0;
+      badge.textContent = String(n);
+    }
+
+    const listEl = qs("#subagents-list");
+    listEl.innerHTML = "";
+    if (!subagentActiveList.length) {
+      listEl.appendChild(el("div", { class: "skills-empty" }, "No active subagents right now."));
+    } else {
+      subagentActiveList.forEach((t) => listEl.appendChild(renderSubagentRow(t)));
+    }
+
+    const doneEl = qs("#subagents-list-done");
+    doneEl.innerHTML = "";
+    if (!done.length) {
+      doneEl.appendChild(el("div", { class: "skills-empty" }, "Nothing finished yet."));
+    } else {
+      done.forEach((t) => doneEl.appendChild(renderSubagentRow(t)));
+    }
+
+    // Keep a selection alive across a poll tick if it's still around; drop
+    // it (rather than silently pointing at stale data) if the task is gone.
+    if (selectedSubagent && !tasks.some((t) => t.id === selectedSubagent)) {
+      selectedSubagent = null;
+      renderSubagentDetail(null);
+    } else if (selectedSubagent) {
+      selectSubagent(selectedSubagent, /* fromPoll */ true);
+    }
+  }
+
+  function planLine(step) {
+    const mark = { done: "\u2713", failed: "\u2717", skipped: "\u2013" }[step.status] || "\u25cb";
+    return el("div", { class: `subagent-plan-step subagent-plan-step--${step.status || "pending"}` },
+      `${mark}  ${step.text || ""}`);
+  }
+
+  function historyLine(entry) {
+    const cls = entry.ok === false ? "fail" : "sys";
+    const when = entry.at ? new Date(entry.at).toLocaleTimeString() : "";
+    return el("div", { class: `daemon-console-line ${cls}` },
+      `${when}  step ${entry.step ?? "?"}: ${entry.summary || ""}${entry.error ? "  \u2014 " + entry.error : ""}`);
+  }
+
+  function renderSubagentDetail(detail) {
+    const body = qs("#subagent-detail");
+    const title = qs("#subagent-detail-title");
+    const statusTag = qs("#subagent-detail-status");
+    const actions = qs("#subagent-detail-actions");
+    if (!detail) {
+      title.textContent = "Pick a subagent";
+      statusTag.hidden = true;
+      actions.hidden = true;
+      body.innerHTML = "";
+      body.appendChild(el("div", { class: "skills-empty" },
+        "Nothing selected \u2014 pick one on the left, or spawn one by asking Jarvis to consult a role."));
+      return;
+    }
+    title.textContent = `[${detail.role || "?"}] ${detail.goal || ""}`;
+    statusTag.hidden = false;
+    statusTag.textContent = detail.status;
+    statusTag.className = `subagent-detail-status ${subagentStatusClass(detail.status)}`;
+    actions.hidden = false;
+    qs("#btn-subagent-cancel").disabled = !SUBAGENT_ACTIVE_STATUSES.has(detail.status);
+    qs("#btn-subagent-transcript").disabled = !detail.conv_id;
+
+    body.innerHTML = "";
+    body.appendChild(el("div", { class: "subagent-detail__row" }, [
+      el("span", {}, `Progress: ${detail.progress || "\u2014"}`),
+      el("span", {}, `Steps: ${detail.steps_used ?? 0}${detail.max_steps ? ` / ${detail.max_steps}` : ""}`),
+      detail.parent_id ? el("span", {}, `Parent: ${detail.parent_id}`) : null,
+    ]));
+
+    if (detail.error) {
+      body.appendChild(el("div", { class: "jui-card jui-card--error" }, [
+        el("div", { class: "jui-card__head" }, "Last error"),
+        el("div", { class: "jui-card__body" }, detail.error),
+      ]));
+    }
+
+    const plan = detail.plan || [];
+    if (plan.length) {
+      body.appendChild(el("div", { class: "skills-pane__head skills-pane__head--sub" }, [el("h3", {}, "Plan")]));
+      plan.forEach((step) => body.appendChild(planLine(step)));
+    }
+
+    body.appendChild(el("div", { class: "skills-pane__head skills-pane__head--sub" }, [el("h3", {}, "Step history")]));
+    const history = detail.history || [];
+    if (!history.length) {
+      body.appendChild(el("div", { class: "skills-empty" }, "No steps have run yet."));
+    } else {
+      const log = el("pre", { class: "daemon-console subagent-history" });
+      history.forEach((entry) => log.appendChild(historyLine(entry)));
+      body.appendChild(log);
+    }
+
+    if (detail.result) {
+      body.appendChild(el("div", { class: "skills-pane__head skills-pane__head--sub" }, [el("h3", {}, "Result")]));
+      body.appendChild(el("pre", { class: "daemon-console" }, detail.result));
+    }
+  }
+
+  async function selectSubagent(id, fromPoll) {
+    selectedSubagent = id;
+    if (!fromPoll) {
+      // Reflect the selection in the list immediately; don't wait on the
+      // network round-trip below just to show which row is active.
+      qsa(".skills-item", qs("#subagents-list")).forEach((n) => n.classList.remove("is-active"));
+      qsa(".skills-item", qs("#subagents-list-done")).forEach((n) => n.classList.remove("is-active"));
+    }
+    let detail;
+    try {
+      detail = await Api.get(`/api/subagents/${encodeURIComponent(id)}`);
+    } catch (e) {
+      toast(e.message || "Couldn't load that subagent.");
+      return;
+    }
+    if (selectedSubagent !== id) return; // superseded by a newer selection
+    renderSubagentDetail(detail);
+    qsa(".skills-item", qs("#subagents-list")).forEach((n, i) => {
+      n.classList.toggle("is-active", subagentActiveList[i] && subagentActiveList[i].id === id);
+    });
+  }
+
+  function cycleSubagent(delta) {
+    if (!subagentActiveList.length) return;
+    const i = subagentActiveList.findIndex((t) => t.id === selectedSubagent);
+    const next = i === -1
+      ? (delta > 0 ? 0 : subagentActiveList.length - 1)
+      : (i + delta + subagentActiveList.length) % subagentActiveList.length;
+    selectSubagent(subagentActiveList[next].id);
+  }
+
+  function openSubagents() {
+    subagentsOverlay.hidden = false;
+    refreshSubagents();
+    if (subagentPollTimer) clearInterval(subagentPollTimer);
+    subagentPollTimer = setInterval(refreshSubagents, 4000);
+  }
+
+  function closeSubagents() {
+    subagentsOverlay.hidden = true;
+    if (subagentPollTimer) { clearInterval(subagentPollTimer); subagentPollTimer = null; }
+  }
+
+  qs("#btn-subagents")?.addEventListener("click", openSubagents);
+  qs("#subagents-close")?.addEventListener("click", closeSubagents);
+  qs("#btn-subagents-refresh")?.addEventListener("click", refreshSubagents);
+  qs("#btn-subagents-prev")?.addEventListener("click", () => cycleSubagent(-1));
+  qs("#btn-subagents-next")?.addEventListener("click", () => cycleSubagent(1));
+  subagentsOverlay?.addEventListener("click", (e) => {
+    if (e.target === subagentsOverlay) closeSubagents();
+  });
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape" && subagentsOverlay && !subagentsOverlay.hidden) closeSubagents();
+  });
+
+  qs("#btn-subagent-cancel")?.addEventListener("click", async () => {
+    if (!selectedSubagent) return;
+    try {
+      await Api.post(`/api/subagents/${encodeURIComponent(selectedSubagent)}/cancel`, {});
+      toast("Subagent cancelled.");
+      refreshSubagents();
+    } catch (e) {
+      toast(e.message || "Couldn't cancel that subagent.");
+    }
+  });
+
+  qs("#btn-subagent-transcript")?.addEventListener("click", async () => {
+    if (!selectedSubagent) return;
+    let detail;
+    try {
+      detail = await Api.get(`/api/subagents/${encodeURIComponent(selectedSubagent)}`);
+    } catch (e) {
+      toast(e.message || "Couldn't load that subagent.");
+      return;
+    }
+    if (!detail.conv_id) {
+      toast("This subagent has no transcript yet.");
+      return;
+    }
+    closeSubagents();
+    // Reuses the exact same conversation-switch the sidebar's own
+    // conversation list uses (see selectConversation) — a subagent's steps
+    // are ordinary exchanges in an ordinary conversation (see
+    // subagents.spawn()'s docstring), so nothing new had to be built to
+    // show its real tool calls, console output and thinking, only to make
+    // that conversation exist in the first place. Switching here makes it
+    // the active conversation; the sidebar's own conversation list is how
+    // the person gets back to whatever they were working on.
+    await selectConversation(detail.conv_id);
+    openAsk();
+  });
 
   // --- daemons ----------------------------------------------------------
   const daemonsOverlay = qs("#daemons-overlay");

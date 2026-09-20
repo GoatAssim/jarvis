@@ -2276,11 +2276,27 @@ def main():
         pool = subagents_mod.children(parent_id) if parent_id else [
             t for t in tasks.all_tasks(include_terminal=True) if t.get("agent")
         ]
+        # Structured per-task fields instead of tasks.describe()'s single
+        # formatted string — added for the web UI's Subagents panel, which
+        # needs to bind role/status/progress to separate list cells and
+        # link straight to a task's conv_id, not re-parse one sentence.
+        task_summaries = []
+        for t in pool[:50]:
+            budget = t.get("budget") or {}
+            task_summaries.append({
+                "id": t.get("id"), "role": t.get("agent"), "goal": t.get("goal"),
+                "title": t.get("title"), "status": t.get("status"),
+                "parent_id": t.get("parent_id"), "conv_id": t.get("conv_id"),
+                "progress": tasks.progress_line(t),
+                "steps_used": budget.get("steps_used") or 0,
+                "max_steps": budget.get("max_steps"),
+                "created_at": t.get("created_at"), "updated_at": t.get("updated_at"),
+            })
         print(json.dumps({
             "max_concurrent": cfg.get("max_concurrent"),
             "roles": roles,
             "running_now": subagents_mod.running_count(parent_id),
-            "tasks": [tasks.describe(t) for t in pool[:50]],
+            "tasks": task_summaries,
         }, indent=2))
         return
 

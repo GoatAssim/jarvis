@@ -181,10 +181,23 @@ def tool_subagent_status(args):
     task = tasks.load(task_id)
     if not task:
         return {"error": "no such task: %s" % task_id}
+    budget = task.get("budget") or {}
     return {
         "id": task["id"], "role": task.get("agent"), "goal": task.get("goal"),
         "status": task["status"], "progress": tasks.progress_line(task),
         "result": task.get("result"), "error": task.get("last_error"),
+        # Added for the web UI's Subagents panel (goal/plan/history is the
+        # "what is it doing and why" view; conv_id is what lets it also
+        # offer the full transcript via GET /api/conversations/:id — see
+        # subagents.spawn()'s docstring for why that now always exists).
+        "parent_id": task.get("parent_id"),
+        "conv_id": task.get("conv_id"),
+        "plan": task.get("plan") or [],
+        "history": (task.get("history") or [])[-20:],
+        "steps_used": budget.get("steps_used") or 0,
+        "max_steps": budget.get("max_steps"),
+        "created_at": task.get("created_at"),
+        "updated_at": task.get("updated_at"),
     }
 
 
