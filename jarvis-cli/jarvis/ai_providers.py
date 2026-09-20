@@ -355,6 +355,109 @@ def _status_reason(resp):
     return f"HTTP {resp.status_code}{': ' + snippet if snippet else ''}"
 
 
+# ---------------------------------------------------------------------------
+# Request-shape failures vs key failures.
+#
+# ai_client.ask() rotates to the provider's next API key after ANY failure,
+# which is right for a dead/rate-limited/out-of-credit key and pointless for
+# a request the provider rejects on its merits: the same payload gets the same
+# 400 from every other key. One real log burned three Groq keys on a single
+# "Tool choice is none, but model called a tool" and a fourth on a
+# tool-argument schema mismatch before falling through to the next provider.
+#
+# This is a deliberate WHITELIST of observed message shapes, not "any HTTP
+# 400": Gemini reports an invalid API key as a 400 too, and that one IS
+# fixed by the next key. An unrecognized failure keeps the old behavior.
+# ---------------------------------------------------------------------------
+_REQUEST_SHAPE_MARKERS = (
+    "tool choice is none",                 # Groq: final round sent without tools, model called one anyway
+    "tool call validation failed",         # Groq: model's arguments rejected by the tool's schema
+    "did not match schema",                # same family, other wording
+    "which was not in request.tools",      # Groq: called a tool that wasn't offered this round
+    "duplicate function declaration",      # Gemini: same tool declared twice
+)
+
+
+def is_request_shape_error(reason):
+    """True when `reason` (an AIResult.error string) describes a rejection of
+    the request itself, which no other key on the same provider can cure."""
+    if not reason:
+        return False
+    lowered = str(reason).lower()
+    return any(marker in lowered for marker in _REQUEST_SHAPE_MARKERS)
+
+
+# ---------------------------------------------------------------------------
+# Null-tolerant optional parameters.
+#
+# A model that "omits" an optional argument will often send an explicit null
+# instead. Most hosts don't care, but Groq validates tool-call arguments
+# server-side against the schema jarvis sent, so {"parent_id": null} against
+# {"type": "string"} is a 400 before jarvis ever sees the call — and, per
+# is_request_shape_error above, a 400 no other key can fix.
+#
+# Widening at the wire boundary (rather than editing ~290 optional parameters
+# across the catalog by hand) keeps the source schemas untouched for every
+# other adapter. The matching half is tools._drop_null_optionals, which makes
+# such a null reach the handler as "argument omitted".
+# ---------------------------------------------------------------------------
+NULLABLE_OPTIONAL_PROVIDER_NAMES = ("groq",)
+_NULLABLE_JSON_TYPES = frozenset({"string", "integer", "number", "boolean", "array", "object"})
+
+
+def provider_wants_nullable_optionals(provider):
+    """Groq by default (by name or host); an explicit boolean
+    "nullable_optional_params" in the provider block wins either way."""
+    provider = provider or {}
+    explicit = provider.get("nullable_optional_params")
+    if isinstance(explicit, bool):
+        return explicit
+    name = str(provider.get("name") or "").lower()
+    base_url = str(provider.get("base_url") or "").lower()
+    return name.startswith(NULLABLE_OPTIONAL_PROVIDER_NAMES) or "api.groq.com" in base_url
+
+
+def nullable_optional_parameters(parameters):
+    """Copy of a JSON-schema `parameters` object in which every top-level
+    OPTIONAL property also accepts null. Required properties, properties
+    without a plain string `type`, and anything already nullable are left
+    alone. An enum gains None so null doesn't fail the enum instead. Returns
+    the input object itself, unchanged, when there is nothing to widen."""
+    if not isinstance(parameters, dict):
+        return parameters
+    props = parameters.get("properties")
+    if not isinstance(props, dict) or not props:
+        return parameters
+    required = set(parameters.get("required") or [])
+    widened = {}
+    changed = False
+    for name, prop in props.items():
+        ptype = prop.get("type") if isinstance(prop, dict) else None
+        if name in required or not isinstance(ptype, str) or ptype not in _NULLABLE_JSON_TYPES:
+            widened[name] = prop
+            continue
+        new_prop = dict(prop)
+        new_prop["type"] = [ptype, "null"]
+        enum = new_prop.get("enum")
+        if isinstance(enum, list) and None not in enum:
+            new_prop["enum"] = list(enum) + [None]
+        widened[name] = new_prop
+        changed = True
+    if not changed:
+        return parameters
+    out = dict(parameters)
+    out["properties"] = widened
+    return out
+
+
+def active_provider_label():
+    """Label of the provider/key attempt currently running on THIS thread
+    (e.g. "ollama" or "gemini (key 2/10)"), or None outside an ask(). Lets a
+    tool handler ask "which model is driving me right now" without
+    ToolContext growing a field for it."""
+    return _log_provider()
+
+
 def _parse_json(resp):
     try:
         return resp.json(), None
@@ -836,6 +939,14 @@ def _anthropic_turns_to_generic(system_text, working_turns):
 # carrying the matching tool_call_id.
 # ---------------------------------------------------------------------------
 
+_TOOLS_WITHHELD_NOTICE = (
+    "Tool calls are no longer available for the rest of this reply (the tool-round "
+    "budget is spent). Do not call any tool. Answer the user now, in plain text, from "
+    "the results already shown above; if they are not enough, say plainly what is "
+    "still missing."
+)
+
+
 def _looks_like_omitted_tools_confused_the_model(reason):
     """Groq's tool-calling validation is stricter than the rest of the
     openai_compatible family: if `tools` is left out of the request
@@ -878,6 +989,10 @@ def call_openai_compatible(provider, messages, timeout, tools=None, tool_executo
     thought_rounds = 0
     if round_budget is None:
         round_budget = RoundBudget()
+    # See provider_wants_nullable_optionals: Groq validates tool arguments
+    # server-side, so an optional parameter the model sends as null has to be
+    # declared nullable or the whole call 400s before jarvis sees it.
+    widen_optionals = provider_wants_nullable_optionals(provider)
 
     def _tools_payload():
         # Phase 9 of the token-optimization plan (see new_plan.md):
@@ -889,7 +1004,11 @@ def call_openai_compatible(provider, messages, timeout, tools=None, tool_executo
         if not tools:
             return None
         return [
-            {"type": "function", "function": {"name": t["name"], "description": t["description"], "parameters": t["parameters"]}}
+            {"type": "function", "function": {
+                "name": t["name"], "description": t["description"],
+                "parameters": (nullable_optional_parameters(t["parameters"])
+                               if widen_optionals else t["parameters"]),
+            }}
             for t in tools
         ]
 
@@ -905,9 +1024,20 @@ def call_openai_compatible(provider, messages, timeout, tools=None, tool_executo
         # round N resends rounds 1..N-1's results at full size every time.
         _compact_prior_tool_results(working_messages)
         tools_payload = _tools_payload()
+        tools_omitted_this_round = not (tools_payload and round_num < MAX_TOOL_ROUNDS and round_budget.remaining() > 0)
+        # When tools exist but are being WITHHELD (round cap or the shared
+        # cross-key budget is spent), the transcript still shows the model
+        # calling tools, and it keeps trying. On Groq that is the 400 "Tool
+        # choice is none, but model called a tool"; elsewhere it is prose like
+        # "I will now search for ...". Say so explicitly instead. Sent for this
+        # request only — never appended to working_messages, so it can't leak
+        # into the transcript handed to the next provider on failover.
+        request_messages = working_messages
+        if tools_omitted_this_round and tools_payload:
+            request_messages = working_messages + [{"role": "user", "content": _TOOLS_WITHHELD_NOTICE}]
         payload = {
             "model": model,
-            "messages": working_messages,
+            "messages": request_messages,
             "max_tokens": provider.get("max_tokens", 700),
         }
         # Prompt caching for the whole OpenAI-compatible family (Groq,
@@ -937,7 +1067,6 @@ def call_openai_compatible(provider, messages, timeout, tools=None, tool_executo
             cache_key = _log_conv_id()
             if cache_key:
                 payload["prompt_cache_key"] = str(cache_key)
-        tools_omitted_this_round = not (tools_payload and round_num < MAX_TOOL_ROUNDS and round_budget.remaining() > 0)
         if not tools_omitted_this_round:
             payload["tools"] = tools_payload
         if _apply_thinking(payload, provider, "openai_compatible", round_num,
@@ -976,6 +1105,9 @@ def call_openai_compatible(provider, messages, timeout, tools=None, tool_executo
             # re-trigger it), so a provider that fails this way for some
             # other, unrelated reason still terminates normally.
             payload["tools"] = tools_payload
+            # Tools are attached again, so "do not call tools" would now
+            # contradict the request.
+            payload["messages"] = working_messages
             resp, net_err = _post_json(base_url, headers, payload, timeout)
             if net_err:
                 return AIResult(False, error=net_err,

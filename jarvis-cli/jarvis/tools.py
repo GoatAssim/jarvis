@@ -1013,6 +1013,32 @@ def _accepts_context(fn):
     return accepts
 
 
+def _drop_null_optionals(name, arguments):
+    """Treat an explicit null for an OPTIONAL top-level argument as "omitted".
+
+    Models routinely send {"parent_id": null} where they mean "not given".
+    Hosts that validate tool arguments (Groq) reject that unless the schema
+    declares the property nullable — ai_providers.nullable_optional_parameters
+    does, at the wire — and once it gets through, the handler should see what
+    it would have seen had the key been left out. That matters for the many
+    handlers written `args.get("x", default)`, where a present-but-None key
+    would bypass the default and blow up later (int(None), None.strip()).
+
+    Deliberately narrow: only keys the tool's own schema lists as NOT
+    required, only top-level, only a literal None. A required key, a tool
+    with no known schema (a user-defined custom tool), and everything nested
+    inside a value are left exactly as sent.
+    """
+    if not isinstance(arguments, dict) or not any(v is None for v in arguments.values()):
+        return arguments
+    params = (_tool_index().get(name) or {}).get("parameters")
+    if not isinstance(params, dict) or not isinstance(params.get("properties"), dict):
+        return arguments
+    required = set(params.get("required") or [])
+    return {k: v for k, v in arguments.items()
+            if not (v is None and k in params["properties"] and k not in required)}
+
+
 def execute_tool(name, arguments=None, verbosity=None, context=None):
     """Run one tool by name and return a JSON-serializable result — always,
     even on failure. Never raises.
@@ -1036,6 +1062,7 @@ def execute_tool(name, arguments=None, verbosity=None, context=None):
     fn = TOOLS.get(name)
     if fn is None:
         return {"error": f"no such tool: {name}"}
+    arguments = _drop_null_optionals(name, arguments)
     try:
         if name in COMMAND_TOOLS or name in PLAYNITE_TOOLS or name in WEB_TOOLS or name in PKG_TOOLS or name in SPOTIFY_TOOLS or name in MEMORY_TOOLS or name in CAPACITY_TOOLS or name in RADIO_TOOLS or name in AUDIO_TOOLS or name in VISION_TOOLS or name in SUBAGENT_TOOLS or name in GIT_TOOLS or name in SCREENSHOT_TOOLS or name in DESKTOP_TOOLS or name in OCR_TOOLS or name in FILE_TOOLS or name in CUSTOM_TOOLS or name in YTDL_TOOLS or name in EVERYTHING_TOOLS or name in ORGANIZE_JSON_TOOLS or name in PRESENT_TOOLS or name in SKILL_TOOLS or name in AUTO_TOOLS or name in ("search_tools", "get_tool_schema"):
             if _accepts_context(fn) and context is not None:
