@@ -120,10 +120,40 @@ def _numbered(lines, start=1):
     return "\n".join(f"{i:>6}\t{line}" for i, line in enumerate(lines, start=start))
 
 
-def _read_file_text(path, start_line=None, end_line=None, max_chars=12000):
+_DOTENV_NAME_RE = re.compile(r"^\.env(\..+)?$")
+# Matches .env, .env.local, .env.production, etc. — not .environment or
+# anything else that merely starts with ".env".
+
+_DOTENV_LINE_RE = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)$")
+
+
+def _mask_dotenv_text(text):
+    """KEY=value -> KEY=•••• (N chars), so the inner agent can see which
+    names exist (enough to write os.getenv("KEY")) without a raw secret
+    value ever landing in a cloud provider's transcript (master plan F.5,
+    decision D2). Lines that aren't KEY=value (comments, blank lines) pass
+    through unchanged."""
+    out = []
+    for line in text.splitlines():
+        m = _DOTENV_LINE_RE.match(line)
+        if m and not line.lstrip().startswith("#"):
+            key, value = m.group(1), m.group(2)
+            out.append(f"{key}=•••• ({len(value)} chars)" if value else f"{key}=")
+        else:
+            out.append(line)
+    return "\n".join(out)
+
+
+def _read_file_text(path, start_line=None, end_line=None, max_chars=12000, reveal_secrets=False):
     """Numbered-line read of a file, optionally restricted to a line range
     — never the whole file pasted blind. Returns (result_dict, None) or
-    (None, error_string)."""
+    (None, error_string).
+
+    A dotfile matching .env/.env.* is masked by default (key names only,
+    values replaced with a length-only placeholder) — see
+    _mask_dotenv_text. Pass reveal_secrets=True for the rare case a raw
+    read is genuinely needed; that path is never used by the autonomous
+    inner loop, only the explicit standalone tool call."""
     if not path.exists():
         return None, f"{path} does not exist"
     if path.is_dir():
@@ -132,6 +162,11 @@ def _read_file_text(path, start_line=None, end_line=None, max_chars=12000):
         text = path.read_text(encoding="utf-8", errors="replace")
     except OSError as e:
         return None, f"couldn't read {path}: {e}"
+
+    masked = False
+    if _DOTENV_NAME_RE.match(path.name) and not reveal_secrets:
+        text = _mask_dotenv_text(text)
+        masked = True
 
     all_lines = text.splitlines()
     total = len(all_lines)
@@ -149,14 +184,17 @@ def _read_file_text(path, start_line=None, end_line=None, max_chars=12000):
                               "and re-read for the rest)...\n" + body[-half:])
         truncated = True
 
-    return {
+    result = {
         "path": str(path),
         "total_lines": total,
         "start_line": lo,
         "end_line": hi,
         "content": body,
         "truncated": truncated,
-    }, None
+    }
+    if masked:
+        result["values_masked"] = True
+    return result, None
 
 
 def _list_dir_impl(path, max_depth=2, max_entries=400):
@@ -166,6 +204,11 @@ def _list_dir_impl(path, max_depth=2, max_entries=400):
         return None, f"{path} is not a directory — use read_file"
 
     lines = []
+    hidden = []  # top-level dotfiles by name (see master plan F.5) — not
+    # walked into and not counted against max_entries; just named so the
+    # agent knows they exist instead of the directory silently looking
+    # like it doesn't contain them (list_dir on a folder with a ".env"
+    # used to report only ["main.py"]).
     count = [0]
 
     def walk(d, depth, prefix):
@@ -177,7 +220,13 @@ def _list_dir_impl(path, max_depth=2, max_entries=400):
             lines.append(f"{prefix}[error reading {d.name}: {e}]")
             return
         for entry in entries:
-            if entry.name.startswith(".") or entry.name in _IGNORE_NAMES:
+            if entry.name.startswith("."):
+                # Still skip noisy/large dotdirs entirely (.git, .venv,
+                # etc.) — only name plain top-level dotfiles.
+                if depth == 1 and entry.is_file() and entry.name not in _IGNORE_NAMES:
+                    hidden.append(entry.name)
+                continue
+            if entry.name in _IGNORE_NAMES:
                 continue
             if count[0] >= max_entries:
                 lines.append(f"{prefix}...(truncated at {max_entries} entries)")
@@ -189,7 +238,10 @@ def _list_dir_impl(path, max_depth=2, max_entries=400):
                 walk(entry, depth + 1, prefix + "  ")
 
     walk(path, 1, "")
-    return {"path": str(path), "entries": lines, "entry_count": count[0]}, None
+    result = {"path": str(path), "entries": lines, "entry_count": count[0]}
+    if hidden:
+        result["hidden"] = sorted(hidden)
+    return result, None
 
 
 def _iter_source_files(root, glob_pattern, max_files=4000):
@@ -198,8 +250,14 @@ def _iter_source_files(root, glob_pattern, max_files=4000):
         dirnames[:] = [d for d in dirnames if not d.startswith(".") and d not in _IGNORE_NAMES]
         for name in filenames:
             if name.startswith("."):
-                continue
-            if glob_pattern and not fnmatch.fnmatch(name, glob_pattern):
+                # Dotfiles are skipped by default (same reasoning as
+                # list_dir), but an explicit glob that itself targets
+                # dotfiles (e.g. ".env*") can still reach them — the
+                # default is "don't wade through .git", not "make .env
+                # unfindable" (master plan F.5).
+                if not glob_pattern or not fnmatch.fnmatch(name, glob_pattern):
+                    continue
+            elif glob_pattern and not fnmatch.fnmatch(name, glob_pattern):
                 continue
             scanned += 1
             if scanned > max_files:
@@ -266,10 +324,54 @@ def _edit_file_impl(path, old_str, new_str):
     return {"path": str(path), "bytes_written": len(new_text.encode("utf-8")), "preview": (new_str or "")[:200]}, None
 
 
+_CMD_BUILTINS = {
+    # cmd.exe builtins have no standalone .exe, so subprocess.run can never
+    # find them as a program (WinError 2) — they only work run through
+    # cmd.exe itself (see master plan F.4). Not exhaustive, but covers
+    # everything a model is likely to reach for.
+    "dir", "type", "copy", "move", "del", "erase", "echo", "cd", "chdir",
+    "md", "mkdir", "rd", "rmdir", "cls", "set", "ver", "vol", "path",
+    "title", "pushd", "popd", "ren", "rename", "start", "assoc", "ftype",
+    "if", "for", "call", "exit", "attrib", "more",
+}
+
+
+def _windows_argv_split(command):
+    """Split a command line the way Windows programs themselves see their
+    argv — via CommandLineToArgvW — instead of shlex(posix=False), which
+    leaves quote characters IN the token. `shlex.split('python -c "import
+    os; print(1)"', posix=False)` hands Python the two-character string
+    `-c` plus a token that still has its surrounding quotes, so `python`
+    parses it as a no-op string literal and exits 0 with no output (see
+    master plan F.4 — a silent success is the worst failure a tool can
+    return). CommandLineToArgvW strips the quotes and keeps the spaces
+    inside them as one argument, matching what every real Windows program
+    (including python.exe) actually receives.
+    """
+    import ctypes
+
+    argc = ctypes.c_int(0)
+    argv_p = ctypes.windll.shell32.CommandLineToArgvW(
+        ctypes.c_wchar_p(command), ctypes.byref(argc)
+    )
+    try:
+        return [argv_p[i] for i in range(argc.value)]
+    finally:
+        ctypes.windll.kernel32.LocalFree(argv_p)
+
+
 def _shlex_split(command):
     import shlex
+    if sys.platform == "win32":
+        try:
+            return _windows_argv_split(command)
+        except Exception:
+            # WinAPI call itself failed for some reason — fall back to a
+            # naive split rather than the old posix=False behavior, which
+            # silently mis-splits quoted arguments (see docstring above).
+            return command.split()
     try:
-        return shlex.split(command, posix=(sys.platform != "win32"))
+        return shlex.split(command, posix=True)
     except ValueError:
         return command.split()
 
@@ -278,6 +380,17 @@ def _run_shell_impl(command, cwd, timeout=RUN_TIMEOUT):
     argv = _shlex_split(command or "")
     if not argv:
         return None, "command is required"
+
+    if sys.platform == "win32" and argv[0].lower() in _CMD_BUILTINS:
+        # Run the ORIGINAL command line through cmd /c rather than
+        # re-joining argv, so quoting the model wrote (e.g. a quoted path
+        # with spaces) survives exactly as given instead of being
+        # re-escaped by us. This is intentionally narrower than blanket
+        # shell=True (decision F.16/D3): only a small fixed list of known
+        # builtins gets the cmd.exe treatment, nothing else gets `&`/`|`/
+        # `>` shell-metacharacter behavior.
+        argv = ["cmd", "/c", command]
+
     try:
         result = subprocess.run(
             argv, cwd=str(cwd), capture_output=True, timeout=timeout,
@@ -311,7 +424,10 @@ def tool_read_file(arguments):
     raw_path = arguments.get("path")
     if not raw_path:
         return {"error": "path is required"}
-    result, err = _read_file_text(_resolve_path(raw_path), arguments.get("start_line"), arguments.get("end_line"))
+    result, err = _read_file_text(
+        _resolve_path(raw_path), arguments.get("start_line"), arguments.get("end_line"),
+        reveal_secrets=bool(arguments.get("reveal_secrets")),
+    )
     return result if err is None else {"error": err}
 
 
@@ -379,7 +495,12 @@ _CODE_AGENT_SYSTEM_PROMPT = (
     "old_str/new_str match (never rewrite a whole file just to change a few "
     "lines) — write_file is only for a genuinely new file. When the change "
     "can be run, tested, or syntax-checked, use run_shell to actually verify "
-    "it before declaring success; don't assume an edit worked. When you're "
+    "it before declaring success; don't assume an edit worked. "
+    "list_dir also names top-level dotfiles like .env under \"hidden\" — "
+    "check there before assuming a config file doesn't exist. read_file on "
+    "a .env/.env.* file returns key NAMES only, values masked as "
+    "'•••• (N chars)' — that's enough to write os.getenv(\"KEY\"); it is "
+    "never a way to see the real value. When you're "
     "done (or genuinely stuck), reply with a short plain-text summary of "
     "what you found, what you changed and why, and how you verified it — "
     "no more tool calls after that."
@@ -523,6 +644,12 @@ def tool_code_agent(arguments, context=None):
         try:
             if name == "read_file":
                 path = dev_agent_sandbox.resolve_within(root, tool_args.get("path") or "")
+                # reveal_secrets is deliberately NOT threaded through here:
+                # this is the autonomous inner loop, whose read_file calls
+                # go straight into a cloud provider's transcript — exactly
+                # what masking .env values is meant to prevent (F.5,
+                # decision D2). Only the standalone, human-invoked
+                # tool_read_file honors reveal_secrets.
                 result, err = _read_file_text(path, tool_args.get("start_line"), tool_args.get("end_line"))
             elif name == "list_dir":
                 path = dev_agent_sandbox.resolve_within(root, tool_args.get("path") or ".")
@@ -606,7 +733,9 @@ TOOL_SCHEMAS = [
             "paste jarvis's file-attach path does — token-heavy for real source files). "
             "Pass start_line/end_line to read just a range; the result reports "
             "total_lines so you can request another range instead of guessing. Use "
-            "search_code first if you don't already know which file/lines matter."
+            "search_code first if you don't already know which file/lines matter. "
+            "A .env/.env.* file is returned with values masked (key names only) "
+            "unless reveal_secrets is set."
         ),
         "parameters": {
             "type": "object",
@@ -614,13 +743,14 @@ TOOL_SCHEMAS = [
                 "path": {"type": "string", "description": "File path. Relative paths resolve against the user's home directory."},
                 "start_line": {"type": "integer", "description": "First line to include (1-indexed). Omit to start at line 1."},
                 "end_line": {"type": "integer", "description": "Last line to include (1-indexed). Omit to read to the end."},
+                "reveal_secrets": {"type": "boolean", "description": "Return real values for a .env/.env.* file instead of masking them. Default false. Only honored for a direct, explicit call — never used by code_agent's own autonomous loop."},
             },
             "required": ["path"],
         },
     },
     {
         "name": "list_dir",
-        "description": "List a directory's contents (up to 2 levels deep), skipping hidden entries, .git, node_modules, and similar. Use to orient yourself in an unfamiliar project before reading specific files.",
+        "description": "List a directory's contents (up to 2 levels deep), skipping .git/node_modules/venv and similar. Top-level dotfiles (e.g. .env) aren't listed among entries but are named separately under \"hidden\" so you know they exist. Use to orient yourself in an unfamiliar project before reading specific files.",
         "parameters": {
             "type": "object",
             "properties": {
