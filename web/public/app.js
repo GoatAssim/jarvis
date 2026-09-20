@@ -8309,6 +8309,17 @@
     // rather than an overlay you open. Opening it here (idempotently) is what
     // makes the switch feel like a layout change instead of a blank screen.
     //
+    // BUGFIX: the Setup wizard's own "ui_mode" step lets you pick Focus or
+    // Classic right there in the wizard (see renderSetupStep's `ui_mode`
+    // branch below), which calls applyLayout() while the wizard is still
+    // open — this used to open the Ask panel unconditionally regardless,
+    // so it appeared layered with the still-open wizard. There's nothing to
+    // gain by opening it while another panel already has the whole screen —
+    // whatever's underneath isn't visible either way — so this only opens
+    // the Ask panel when nothing else is currently covering it. closeSetup()
+    // below picks up the deferred case, opening the Ask panel once the
+    // wizard actually closes if Focus was chosen from inside it.
+    //
     // BUGFIX: switching back to Classic used to leave the Ask panel's
     // `hidden` attribute exactly as openAsk() left it above — false — since
     // nothing here ever closed it again. In Classic, .ask-overlay is
@@ -8318,9 +8329,10 @@
     // on the way OUT of Focus is what keeps Classic's Ask panel an
     // explicit, click-to-open modal rather than something that reopens
     // itself as a side effect of the layout switch.
-    if (currentLayout === "focus" && typeof openAsk === "function") {
+    const anotherOverlayOpen = setupOverlay && !setupOverlay.hidden;
+    if (currentLayout === "focus" && !anotherOverlayOpen && typeof openAsk === "function") {
       try { openAsk(); } catch { /* the panel may not be built yet on first paint */ }
-    } else if (typeof closeAsk === "function") {
+    } else if (currentLayout === "classic" && typeof closeAsk === "function") {
       try { closeAsk(); } catch { /* the panel may not be built yet on first paint */ }
     }
   }
@@ -8951,6 +8963,14 @@
 
   function closeSetup() {
     if (setupOverlay) setupOverlay.hidden = true;
+    // Picks up the deferral from applyLayout() above: if Focus was chosen
+    // from inside the wizard, the Ask panel was held back rather than
+    // opened underneath the still-open wizard. Now that the wizard is
+    // actually gone, open it — same "don't leave Focus on a blank screen"
+    // reasoning applyLayout() itself follows.
+    if (currentLayout === "focus" && askOverlay?.hidden && typeof openAsk === "function") {
+      try { openAsk(); } catch { /* the panel may not be built yet on first paint */ }
+    }
   }
 
   qs("#setup-close")?.addEventListener("click", closeSetup);
