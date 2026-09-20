@@ -151,7 +151,14 @@ def test_two_asks_second_skips_the_key_that_returned_429():
     def adapter(resolved, messages, timeout, tools=None, tool_executor=None, **kw):
         used.append(resolved["api_key"])
         if resolved["api_key"] == "k1":
-            return ai_providers.AIResult(False, error="rate limited or quota exceeded (HTTP 429) [retry in 26s]")
+            # Delay stated here is deliberately > defaults.max_429_wait_seconds
+            # (30s, see D5 / _short_429_wait_seconds in ai_client.py) so this
+            # rotates immediately instead of retrying k1 in place — this test
+            # is about cross-ask cooldown bookkeeping, not the D5 retry path
+            # (that's covered by tests/test_short_429_wait.py, which mocks
+            # time.sleep; this file's _env doesn't, so a qualifying delay
+            # here would make the suite actually sleep it out).
+            return ai_providers.AIResult(False, error="rate limited or quota exceeded (HTTP 429) [retry in 45s]")
         return ai_providers.AIResult(True, text="hi")
 
     with _env(adapter, [_prov("gem", ["k1", "k2"])]) as conv:
