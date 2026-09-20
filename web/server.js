@@ -2261,6 +2261,9 @@ wss.on("connection", (ws) => {
         return send(ws, { type: "ask-error", message: "Ask can't contain a null byte." });
       }
 
+      // The wrapper below is mirrored by ai_client._HIGHLIGHT_WRAPPER (Python) so the
+      // quoted excerpt doesn't vote in tool routing. If you reword it, update that too:
+      // tests/test_highlight_wrapper_drift.py fails when the two disagree.
       let prompt = text;
       if (quote) {
         const clipped = quote.slice(0, 4000);
