@@ -482,29 +482,47 @@ def tool_run_shell(arguments):
 # already uses for install/run/fix.
 # ---------------------------------------------------------------------------
 
-_CODE_AGENT_SYSTEM_PROMPT = (
-    "You are an autonomous coding agent working inside one existing, local "
-    "project directory (your root — every path argument you use is relative "
-    "to it, and you cannot leave it). Tools available: read_file, list_dir, "
-    "search_code, edit_file, write_file, run_shell.\n\n"
-    "Work the way a careful engineer would: look around and read enough of "
-    "the relevant code to actually understand it BEFORE changing anything — "
-    "don't guess a fix from the task description alone. Prefer search_code "
-    "to locate where something lives over guessing file paths. Make the "
-    "smallest edit that correctly does the job, using edit_file's exact "
-    "old_str/new_str match (never rewrite a whole file just to change a few "
-    "lines) — write_file is only for a genuinely new file. When the change "
-    "can be run, tested, or syntax-checked, use run_shell to actually verify "
-    "it before declaring success; don't assume an edit worked. "
-    "list_dir also names top-level dotfiles like .env under \"hidden\" — "
-    "check there before assuming a config file doesn't exist. read_file on "
-    "a .env/.env.* file returns key NAMES only, values masked as "
-    "'•••• (N chars)' — that's enough to write os.getenv(\"KEY\"); it is "
-    "never a way to see the real value. When you're "
-    "done (or genuinely stuck), reply with a short plain-text summary of "
-    "what you found, what you changed and why, and how you verified it — "
-    "no more tool calls after that."
-)
+def _code_agent_system_prompt(round_limit):
+    """Builds the inner loop's system prompt with the REAL per-attempt round
+    limit baked in as an actual number, not a vague "be efficient" (master
+    plan F.6). F.6's own evidence was a run that spent list_dir + read_file
+    (fix already obvious after that) plus three more probing calls and hit
+    the ceiling with edit_file never even attempted — a model that's never
+    told its budget has no reason to economize it."""
+    plural = "" if round_limit == 1 else "s"
+    return (
+        "You are an autonomous coding agent working inside one existing, local "
+        "project directory (your root — every path argument you use is relative "
+        "to it, and you cannot leave it). Tools available: read_file, list_dir, "
+        "search_code, edit_file, write_file, run_shell.\n\n"
+        f"Budget: you have at most {round_limit} tool call{plural} for this "
+        "ENTIRE task, and your very last request must be a tool-less text "
+        "summary — there is no extra call set aside for that. Spend the budget "
+        "like an engineer on a deadline, not like someone with time to kill: "
+        "read only what you need to understand the fix (often 1-2 calls is "
+        "enough), and if you've already read the relevant code and the fix is "
+        "evident, edit now rather than reading further or re-confirming what "
+        "you already know. Keep a call in reserve to verify (run/compile/test) "
+        "if the budget allows it — but an edit made unverified beats running "
+        "out of budget before you've edited anything at all.\n\n"
+        "Work the way a careful engineer would: look around and read enough of "
+        "the relevant code to actually understand it BEFORE changing anything — "
+        "don't guess a fix from the task description alone. Prefer search_code "
+        "to locate where something lives over guessing file paths. Make the "
+        "smallest edit that correctly does the job, using edit_file's exact "
+        "old_str/new_str match (never rewrite a whole file just to change a few "
+        "lines) — write_file is only for a genuinely new file. When the change "
+        "can be run, tested, or syntax-checked, use run_shell to actually verify "
+        "it before declaring success; don't assume an edit worked. "
+        "list_dir also names top-level dotfiles like .env under \"hidden\" — "
+        "check there before assuming a config file doesn't exist. read_file on "
+        "a .env/.env.* file returns key NAMES only, values masked as "
+        "'•••• (N chars)' — that's enough to write os.getenv(\"KEY\"); it is "
+        "never a way to see the real value. When you're "
+        "done (or genuinely stuck), reply with a short plain-text summary of "
+        "what you found, what you changed and why, and how you verified it — "
+        "no more tool calls after that."
+    )
 
 # The AI-facing schema for "write_file" here is intentionally private —
 # never added to this file's TOOL_SCHEMAS/TOOLS below, so it can share the
@@ -564,7 +582,7 @@ def _run_agent_loop(task, schemas, executor, round_limit):
             return None, "no configured AI provider available for code_agent"
 
         messages = [
-            {"role": "system", "content": _CODE_AGENT_SYSTEM_PROMPT},
+            {"role": "system", "content": _code_agent_system_prompt(round_limit)},
             {"role": "user", "content": task},
         ]
 
@@ -604,6 +622,75 @@ def _run_agent_loop(task, schemas, executor, round_limit):
         return None, str(e)
 
 
+def _truncate_line(text, limit):
+    """Collapse to one line and cap its length. Only used for the short
+    per-step outcome strings below — never the underlying result, which is
+    untouched and still available in `steps` for anyone who needs the full
+    text."""
+    line = " ".join((text or "").split())
+    if len(line) <= limit:
+        return line
+    return line[: limit - 1].rstrip() + "…"
+
+
+def _run_shell_outcome(result):
+    """run_shell's own result never sets an executor-level `err` for a
+    command that ran but exited non-zero, or one that couldn't even start
+    (WinError 2, a timeout) — see _run_shell_impl. Both look exactly like
+    the generic success case below unless something actually reads
+    exit_code/stderr_tail, which is what a step outcome needs to do instead
+    of reporting a bare "run_shell → done" (master plan F.6)."""
+    code = result.get("exit_code")
+    stderr = (result.get("stderr_tail") or "").strip()
+    stdout = (result.get("stdout_tail") or "").strip()
+    if code is None:
+        # Timed out, or the OS couldn't launch it at all (e.g. a cmd.exe
+        # builtin run without the F.4 wrapper) — stderr_tail carries
+        # whichever of those it was.
+        detail = stderr.splitlines()[0] if stderr else "produced no output"
+        return _truncate_line(f"did not run — {detail}", 150)
+    if code == 0:
+        return "exit 0"
+    detail = stderr.splitlines()[0] if stderr else (stdout.splitlines()[0] if stdout else "")
+    return _truncate_line(f"exit {code}" + (f": {detail}" if detail else ""), 150)
+
+
+def _step_outcome(name, result, err):
+    """One short line describing what a completed tool call actually did or
+    found — e.g. "31 lines" or "exit 1: ModuleNotFoundError...". Before this
+    (F.6), a step's "ok" event recorded only the tool's name: the outer
+    model (and anyone reading a failed job's transcript) had no way to tell
+    what an agent_failed run had actually learned along the way, so it just
+    repeated the work itself. Never raises — a formatting bug here must
+    never look like the tool itself failed."""
+    try:
+        if err:
+            return _truncate_line(err, 150)
+        result = result if isinstance(result, dict) else {}
+        if name == "list_dir":
+            n = result.get("entry_count", 0)
+            hidden = result.get("hidden") or []
+            extra = f" (+{len(hidden)} hidden)" if hidden else ""
+            return f"{n} entr{'y' if n == 1 else 'ies'}{extra}"
+        if name == "read_file":
+            note = " (masked)" if result.get("values_masked") else ""
+            return f"{result.get('total_lines', '?')} lines{note}"
+        if name == "search_code":
+            matches = result.get("matches") or []
+            note = " (truncated)" if result.get("truncated") else ""
+            return (f"{len(matches)} match{'es' if len(matches) != 1 else ''} "
+                    f"in {result.get('files_scanned', '?')} files{note}")
+        if name == "edit_file":
+            return f"edited, {result.get('bytes_written', '?')} bytes written"
+        if name == "write_file":
+            return f"created, {result.get('bytes_written', '?')} bytes written"
+        if name == "run_shell":
+            return _run_shell_outcome(result)
+        return "done"
+    except Exception:
+        return "done"
+
+
 def tool_code_agent(arguments, context=None):
     """Autonomously read, search, edit, and run inside one EXISTING project
     directory to accomplish `task` — a bounded, self-directed loop, not a
@@ -624,6 +711,9 @@ def tool_code_agent(arguments, context=None):
 
     job_id = uuid.uuid4().hex[:12]
     steps = []
+    log = []  # one short "tool → outcome" line per completed call (see
+    # _step_outcome) — what a trimmed recap should read instead of the
+    # raw `steps` telemetry below (master plan F.6).
     seq = [0]
 
     def emit(phase, status, **fields):
@@ -683,7 +773,10 @@ def tool_code_agent(arguments, context=None):
         except Exception as e:  # one bad step must never kill the whole job
             result, err = None, f"unexpected error: {e}"
 
-        emit("step", "ok" if err is None else "fail", tool=name, **({"error": err} if err else {}))
+        outcome = _step_outcome(name, result, err)
+        log.append(f"{name} → {outcome}")
+        emit("step", "ok" if err is None else "fail", tool=name, outcome=outcome,
+             **({"error": err} if err else {}))
         return result if err is None else {"error": err}
 
     ai_schemas = [
@@ -712,12 +805,13 @@ def tool_code_agent(arguments, context=None):
         return {
             "ok": False, "job_id": job_id, "root": str(root), "steps": steps,
             "tool_calls": call_count[0], "reason": "agent_failed", "last_error": err,
+            "log": log,
         }
 
     emit("done", "ok", tool_calls=call_count[0])
     return {
         "ok": True, "job_id": job_id, "root": str(root), "steps": steps,
-        "tool_calls": call_count[0], "summary": text,
+        "tool_calls": call_count[0], "summary": text, "log": log,
     }
 
 
@@ -893,10 +987,16 @@ TOOL_CONFIRM_REQUIRED = {"edit_file", "run_shell", "code_agent"}
 # own old_str/new_str diff, so it's left off.
 TOOL_AI_REVIEW = {"run_shell", "code_agent"}
 
-# TOOL_RESULT_SPECS — trims the two fields most likely to balloon: a big
+# TOOL_RESULT_SPECS — trims the fields most likely to balloon: a big
 # search_code hit list's per-match text, and code_agent's own step
 # timeline (which echoes every tool call's raw arguments — including a
-# large edit_file diff — at "full" verbosity).
+# large edit_file diff). "steps" is dropped outright at "low": even with
+# "arguments" gone it's still two telemetry dicts (start + ok/fail) per
+# tool call, which is more bulk than "low" should spend on it. `log` — a
+# short "tool → outcome" line per completed call, always present
+# regardless of verbosity — is what a tight recap should read instead
+# (master plan F.6). `last_error` is capped too, since a joined
+# multi-provider failure message can run long on its own.
 TOOL_RESULT_SPECS = {
     "read_file": {
         "truncate_fields": {"content": {"medium": 6000, "low": 3000}},
@@ -905,6 +1005,14 @@ TOOL_RESULT_SPECS = {
         "list_item_truncate": {"matches": {"text": {"medium": 160, "low": 80}}},
     },
     "code_agent": {
-        "list_item_drop": {"steps": {"low": ["arguments"]}},
+        "drop_fields": {
+            "low": ["steps"],
+        },
+        "truncate_fields": {
+            "last_error": {"medium": 300, "low": 150},
+        },
+        "list_item_drop": {
+            "steps": {"medium": ["arguments"], "low": ["arguments"]},
+        },
     },
 }
