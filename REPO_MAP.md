@@ -140,12 +140,19 @@ jarvis-cli/jarvis/
         conv_search_tools.py  notify_owner.py
         channel_people.py     NEW — remember_sender / who_am_i_talking_to
         workspace_tools.py    NEW — daemons, log search, backlog as AI tools
+        path_tools.py         NEW — move/copy/rename/make_dir/delete-to-trash
+                              (`files` group; confirm-gated via TOOL_CONFIRM_REQUIRED)
 
 web/
     server.js             Express + WS; shells out to `jarvis` for everything
     public/index.html     the whole UI
     public/app.js         the whole front-end
     public/style.css      theme + layout, including the classic/focus switch
+    public/custom-tools.js       Custom Tools panel
+    public/test-checklist.js     Menu -> Test Checklist (UI, browser-only results)
+    public/test-checklist-data.js  the checklist catalogue: one entry per tool.
+                                 Edit it whenever you add/rename/remove a tool
+    public/test-checklist.css    its styling (reuses the debug-* panel chrome)
 ```
 
 ---
@@ -299,8 +306,13 @@ and not the other.** Focus only changes what is on screen by default;
 everything is still in the same Menu. A feature reachable only in classic
 would turn a presentation preference into a trap.
 
-Panels: Guides, Debug, Skills, Scheduled, MCP Servers, Custom Tools,
-Channels, **Daemons**, **Backlog**, **Log search**, **Setup**.
+Panels: Guides, Debug, **Test Checklist**, Skills, Scheduled, MCP Servers,
+Custom Tools, Channels, **Daemons**, **Backlog**, **Log search**, **Setup**.
+
+Test Checklist is the one panel with no server route and no CLI command: its
+catalogue is a static file and its results live in the browser's localStorage.
+The only request it makes is the read-only `GET /api/tools` Debug already uses.
+See AGENTS.md -> "Test Checklist".
 
 ---
 

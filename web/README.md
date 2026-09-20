@@ -77,6 +77,15 @@ accounts — everything lives in `~/.jarvis/commands.json`, same as the CLI.
   second (or third) key to any provider's array right from the browser;
   it's read fresh on the very next ask, nothing to restart.
 
+- **Test Checklist.** **Menu → Test Checklist** lists every tool Jarvis can
+  call with how to test it — prompts to send through Ask, arguments to run
+  from Debug, and what a pass looks like — plus a verdict per tool (fully
+  working / partial / not as intended / bug / blocked), ticked steps and
+  notes. It is purely front end: results are stored in this browser's
+  localStorage only (Export/Import JSON to back up or move them), and nothing
+  is written by the CLI. The catalogue is `public/test-checklist-data.js`;
+  see AGENTS.md for the rule that keeps it in step with the tools.
+
 Nothing here is faked or mocked — every action above goes through the
 real CLI or the real config file on disk.
 

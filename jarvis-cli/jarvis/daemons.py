@@ -157,6 +157,19 @@ BUILTINS = {
         "supports_stdin": False,
         "enabled": True,
     },
+    "clipboard-watch": {
+        "id": "clipboard-watch",
+        "name": "Clipboard watch",
+        "builtin": True,
+        "argv": [JARVIS_TOKEN, "clipboard-watch"],
+        "description": (
+            "Notifies when the clipboard changes (optionally filtered by a "
+            "regex pattern set via 'jarvis clipboard-watch-config'). Off by "
+            "default — start it with daemon_start/daemon-start when wanted."
+        ),
+        "supports_stdin": False,
+        "enabled": True,
+    },
 }
 
 # Legacy PID files the three built-ins write for themselves. Read (never

@@ -1892,6 +1892,9 @@ def _is_mutating_tool(name):
         "wifi_set", "bluetooth_set", "git_run",
         "write_file", "run_custom_command",
         "ytdl_download",
+        # actions/path_tools.py (F.3): these change the disk, so a completed one
+        # must show up in the recap and the degraded reply.
+        "move_path", "copy_path", "rename_path", "make_dir", "delete_path",
     }:
         return True
     return name.startswith((
@@ -1909,6 +1912,54 @@ def _is_mutating_tool(name):
         "playnite_rotate",
         "playnite_fetch_all",
     ))
+
+
+_DISCOVERY_ONLY_TOOLS = {"search_tools", "get_tool_schema", "load_skill"}
+
+
+def _describe_run(run):
+    name = run.get("name") or "a step"
+    result = run.get("result")
+    if isinstance(result, dict):
+        if result.get("error"):
+            return f"{name} did not work: {str(result['error'])[:140]}"
+        if result.get("from") and result.get("to"):
+            return f"{name}: {result['from']} -> {result['to']}"
+        for key in ("summary", "message", "path"):
+            if isinstance(result.get(key), str) and result[key]:
+                return f"{name}: {result[key][:140]}"
+    return f"{name}: done"
+
+
+def _describe_pending(name, args):
+    args = args if isinstance(args, dict) else {}
+    for key in ("command", "cmd"):
+        if isinstance(args.get(key), str) and args[key].strip():
+            return f"{name}: {args[key].strip()[:400]}"
+    if name in ("move_path", "copy_path") and args.get("src") and args.get("dest"):
+        return f"{name}: {args['src']} -> {args['dest']}"
+    shown = ", ".join(f"{k}={str(v)[:80]}" for k, v in list(args.items())[:4])
+    return f"{name}({shown})"
+
+
+def _forced_ending_reply(runs, pending):
+    """Harness-written reply for a turn the model couldn't finish (F.1/F.11).
+    Built from what actually ran, never asks the model to explain limits, and
+    never uses the words 'tool', 'budget', 'exhausted' or 'round'."""
+    done = [r for r in (runs or []) if (r.get("name") or "") not in _DISCOVERY_ONLY_TOOLS][-6:]
+    lines = []
+    if done:
+        lines.append("Here is where things stand.\n\nDone so far:")
+        lines += [f"- {_describe_run(r)}" for r in done]
+    else:
+        lines.append("I couldn't finish this one.")
+    if pending:
+        name, args = pending[0]
+        lines.append("\nStill to do — I was about to run:\n" + f"- {_describe_pending(name, args)}")
+        lines.append("\nSay \"go ahead\" and I'll try that next (you'll get the usual confirmation first).")
+    else:
+        lines.append("\nAsk me to continue and I'll pick up from there.")
+    return "\n".join(lines)
 
 
 def _tool_runs_note(runs, char_budget, verbosity="full"):
@@ -2732,7 +2783,10 @@ def ask(user_text, commands=None, on_attempt=None, on_tool_call=None, on_tool_re
     # of whatever the failed key already burned. Built *before* _make_tool_executor
     # now, so it can be handed into the executor and wrapped into every tool call's
     # ToolContext (see tools.ToolContext / _make_tool_executor's docstring).
-    round_budget = ai_providers.RoundBudget()
+    # grace=True lets the model make ONE last-chance call after the budget is
+    # spent (decision D1; switch off with defaults.grace_call = false).
+    round_budget = ai_providers.RoundBudget(grace=bool((cfg.get("defaults") or {}).get("grace_call", True)))
+    forced_end = None
 
     tool_executor = _make_tool_executor(
         on_tool_call, full_schemas, on_confirm_request=on_confirm_request,
@@ -2934,6 +2988,14 @@ def ask(user_text, commands=None, on_attempt=None, on_tool_call=None, on_tool_re
             # ai_providers.is_request_shape_error — so a bad/rate-limited key
             # still rotates exactly as before.
             failure = result.error
+            if result.kind == ai_providers.KIND_BUDGET:
+                # Not a key problem: the budget is spent and the model still
+                # wanted a tool. Every other key would do the same — stop
+                # rotating and report what ran instead.
+                forced_end = result
+                attempts.append((key_label, failure))
+                trace.note_attempt_failed(key_label, failure)
+                break
             skip_remaining_keys = ai_providers.is_request_shape_error(failure) and i < len(keys)
             if skip_remaining_keys:
                 failure = (f"{failure} [request rejected on its shape, not because of the key - "
@@ -2942,6 +3004,24 @@ def ask(user_text, commands=None, on_attempt=None, on_tool_call=None, on_tool_re
             trace.note_attempt_failed(key_label, failure)
             if skip_remaining_keys:
                 break
+        if forced_end is not None:
+            break
+
+    if forced_end is not None:
+        turn_runs = getattr(tool_executor, "runs", None) if tool_executor else None
+        reply = _forced_ending_reply(turn_runs, forced_end.pending)
+        trace.degraded = True
+        if conv_id:
+            exchange_count = conversations.complete_exchange(
+                conv_id, user_text, reply,
+                "(reporting what ran — the model couldn't finish)",
+                extras=_extras_from_runs(turn_runs),
+            )
+            _spawn_title_update(conv_id, exchange_count)
+        _pending_turn[0] = None
+        return AskResult(True, text=reply, provider=None, attempts=attempts,
+                         assistant_name=assistant_name, address_user_as=address,
+                         degraded=True)
 
     # Every provider failed on the closing text call. That used to always
     # mean "no provider answered" and get reported as a hard failure — but

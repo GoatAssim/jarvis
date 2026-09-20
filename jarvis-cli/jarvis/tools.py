@@ -43,12 +43,18 @@ from .present_tools import PRESENT_TOOL_SCHEMAS, PRESENT_TOOLS
 from .skill_tools import TOOL_SCHEMAS as SKILL_TOOL_SCHEMAS, TOOLS as SKILL_TOOLS
 from .radio_tools import RADIO_TOOL_SCHEMAS, RADIO_TOOLS
 from .audio_tools import AUDIO_TOOL_SCHEMAS, AUDIO_TOOLS
+from .clipboard_tools import CLIPBOARD_TOOL_SCHEMAS, CLIPBOARD_TOOLS
 from .vision_tools import VISION_TOOL_SCHEMAS, VISION_TOOLS
 from .subagent_tools import SUBAGENT_TOOL_SCHEMAS, SUBAGENT_TOOLS
 from .screenshot_tools import SCREENSHOT_TOOL_SCHEMAS, SCREENSHOT_TOOLS
 from .spotify_tools import SPOTIFY_TOOL_SCHEMAS, SPOTIFY_TOOLS
 from .web_tools import WEB_TOOL_SCHEMAS, WEB_TOOLS
 from .ytdl_tools import YTDL_TOOL_SCHEMAS, YTDL_TOOLS
+# Appended after the block above rather than alphabetized into it, so this
+# stays a self-contained one-line diff hunk (see browser_tools.py, master
+# plan Part C) instead of landing in the same hunk as another module's
+# import line.
+from .browser_tools import BROWSER_TOOL_SCHEMAS, BROWSER_TOOLS
 
 PLAYNITE_TOOL_SCHEMAS = [*_PLAYNITE_CORE_SCHEMAS, *PLAYNITE_API_TOOL_SCHEMAS]
 PLAYNITE_TOOLS = {**_PLAYNITE_CORE_TOOLS, **PLAYNITE_API_TOOLS}
@@ -554,6 +560,7 @@ CORE_TOOL_SCHEMAS = [
     *CAPACITY_TOOL_SCHEMAS,
     *RADIO_TOOL_SCHEMAS,
     *AUDIO_TOOL_SCHEMAS,
+    *CLIPBOARD_TOOL_SCHEMAS,
     *VISION_TOOL_SCHEMAS,
     *SUBAGENT_TOOL_SCHEMAS,
     *GIT_TOOL_SCHEMAS,
@@ -569,6 +576,10 @@ CORE_TOOL_SCHEMAS = [
     *EVERYTHING_TOOL_SCHEMAS,
     *PRESENT_TOOL_SCHEMAS,
     *SKILL_TOOL_SCHEMAS,
+    # Appended at the end of this list (not alongside AUDIO_TOOL_SCHEMAS
+    # etc. above) so this addition is a self-contained diff hunk — see
+    # browser_tools.py, master plan Part C.
+    *BROWSER_TOOL_SCHEMAS,
 ]
 
 PLAYNITE_AND_SPOTIFY = [*PLAYNITE_TOOL_SCHEMAS, *SPOTIFY_TOOL_SCHEMAS]
@@ -790,6 +801,7 @@ TOOLS = {
     **CAPACITY_TOOLS,
     **RADIO_TOOLS,
     **AUDIO_TOOLS,
+    **CLIPBOARD_TOOLS,
     **VISION_TOOLS,
     **SUBAGENT_TOOLS,
     **GIT_TOOLS,
@@ -809,6 +821,9 @@ TOOLS = {
     "search_tools": tool_search_tools,
     "get_tool_schema": tool_get_tool_schema,
     **SKILL_TOOLS,
+    # Appended at the end of this dict for the same reason as the
+    # CORE_TOOL_SCHEMAS addition above — see browser_tools.py.
+    **BROWSER_TOOLS,
 }
 
 # ---------------------------------------------------------------------------
@@ -1076,7 +1091,7 @@ def execute_tool(name, arguments=None, verbosity=None, context=None):
         return _unknown_tool_hint(name)
     arguments = _drop_null_optionals(name, arguments)
     try:
-        if name in COMMAND_TOOLS or name in PLAYNITE_TOOLS or name in WEB_TOOLS or name in PKG_TOOLS or name in SPOTIFY_TOOLS or name in MEMORY_TOOLS or name in CAPACITY_TOOLS or name in RADIO_TOOLS or name in AUDIO_TOOLS or name in VISION_TOOLS or name in SUBAGENT_TOOLS or name in GIT_TOOLS or name in SCREENSHOT_TOOLS or name in DESKTOP_TOOLS or name in OCR_TOOLS or name in FILE_TOOLS or name in CUSTOM_TOOLS or name in YTDL_TOOLS or name in EVERYTHING_TOOLS or name in ORGANIZE_JSON_TOOLS or name in PRESENT_TOOLS or name in SKILL_TOOLS or name in AUTO_TOOLS or name in ("search_tools", "get_tool_schema"):
+        if name in COMMAND_TOOLS or name in PLAYNITE_TOOLS or name in WEB_TOOLS or name in PKG_TOOLS or name in SPOTIFY_TOOLS or name in MEMORY_TOOLS or name in CAPACITY_TOOLS or name in RADIO_TOOLS or name in AUDIO_TOOLS or name in CLIPBOARD_TOOLS or name in VISION_TOOLS or name in SUBAGENT_TOOLS or name in GIT_TOOLS or name in SCREENSHOT_TOOLS or name in DESKTOP_TOOLS or name in OCR_TOOLS or name in FILE_TOOLS or name in CUSTOM_TOOLS or name in YTDL_TOOLS or name in EVERYTHING_TOOLS or name in ORGANIZE_JSON_TOOLS or name in PRESENT_TOOLS or name in SKILL_TOOLS or name in AUTO_TOOLS or name in BROWSER_TOOLS or name in ("search_tools", "get_tool_schema"):
             if _accepts_context(fn) and context is not None:
                 result = fn(arguments or {}, context)
             else:

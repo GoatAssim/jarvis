@@ -89,6 +89,7 @@ pytest functions if pytest happens to be available). Run directly:
     python3 tests/test_enhancements.py
     python3 tests/test_workspace.py
     python3 tests/test_channel_people.py
+    python3 tests/test_checklist_coverage.py
 
 Two things that will waste your time if nobody tells you:
 
@@ -139,6 +140,52 @@ so there are technically two sources of per-phrase match detail now. Worth
 collapsing to one (have the inspector just read `route.matches`) next time
 you're touching that file, but it hasn't been done yet — don't assume
 they've been unified just because `route.matches` exists.
+
+## Test Checklist — adding a tool means updating it
+
+The web console has **Menu → Test Checklist**: every tool Jarvis can call, how
+to test it (prompts for Ask, arguments for a Debug direct-run), what a pass
+looks like, and a place to record what works and what doesn't. Its catalogue
+is one file, `web/public/test-checklist-data.js`.
+
+**Whenever you add, rename, remove or change the behaviour of a tool, you MUST
+update that tool's entry in `web/public/test-checklist-data.js` in the same
+change.** This is not optional and not a follow-up. A tool change without its
+checklist entry is an incomplete change, the same as a tool with no schema.
+
+For each tool the entry needs:
+
+- `group` — one of the ids in the file's `"groups"` list (match the group in
+  `tool_registry.TOOL_GROUPS`; add a group there too if you added one).
+- `does` — one line on what it's for.
+- `steps` — at least one, ideally two or three: an `{"ask": "...", "expect":
+  "..."}` prompt to type into Ask, and/or a `{"run": {...args...}, "expect":
+  "..."}` direct run from Debug (skips the model). Write `expect` as what a
+  pass looks like, concretely. Use `<angle brackets>` for things the tester
+  must fill in — the UI highlights them.
+- `needs` / `os` / `care` / `watch` when they apply: prerequisites (accounts,
+  installed programs, plugins), Windows-only, side effects worth warning about
+  (writes files, sends messages, starts processes, changes system state), and
+  known gotchas or invariants worth checking while testing.
+
+Renamed a tool? Rename its key. Removed one? Delete its entry. If you changed
+what a tool does, fix the affected `does` / `steps` / `expect` text — editing a
+step's text automatically un-ticks it in testers' browsers, which is what you
+want.
+
+Do NOT put test results (status, notes, ticks) in that file. Results live only
+in the tester's browser (localStorage); nothing about the checklist is ever
+written by the CLI or stored under `~/.jarvis`. The panel is purely front end.
+
+What happens if an entry is missing: the tool still appears in the menu (the
+panel reads the live catalogue from `/api/tools`), but only as a bare name
+marked **NO CHECKLIST**, with no details, and the Overview's Coverage section
+names it. `tests/test_checklist_coverage.py` fails on this too, so you'll hear
+about it before the tester does.
+
+The data file is strict JSON between its `JSON-BEGIN` / `JSON-END` markers
+(double quotes, no trailing commas, no comments) because both the browser and
+that test parse it.
 
 ## Patch conventions
 

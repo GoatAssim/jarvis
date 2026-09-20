@@ -141,3 +141,20 @@ def all_flags(tool_names):
     tool_names — lets the debug dashboard paint every toggle's current
     state from a single pass."""
     return {name: get_flags(name) for name in tool_names}
+
+
+# ---------------------------------------------------------------------------
+# Browser control (browser_tools.py, master plan Part C). Appended here as
+# .add() calls on the module-level set above, rather than folded into the
+# DEFAULT_CONFIRM_REQUIRED literal, so this stays a self-contained diff hunk
+# that doesn't need to touch the same lines as any other in-flight change to
+# that set (e.g. new file-mutating tools from a move/copy/rename addition).
+#
+# A tool that can click buttons and submit forms on a real, logged-in
+# session has a materially bigger blast radius than anything else in this
+# set — it can buy things, send messages, delete data, change account
+# settings — so both default to confirm_required=True out of the box, same
+# as every other mutating tool above.
+# ---------------------------------------------------------------------------
+DEFAULT_CONFIRM_REQUIRED.add("browser_click")
+DEFAULT_CONFIRM_REQUIRED.add("browser_fill")
