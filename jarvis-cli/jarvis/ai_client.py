@@ -2374,7 +2374,8 @@ def abandon_pending_turn(reason="interrupted"):
 # asking for, so it must not vote in the router (F.10 cause 3). If server.js's
 # wording ever changes this simply stops matching and routing falls back to the
 # old whole-message behaviour — same no-shared-source-of-truth caveat as the
-# other mirrors AGENTS.md lists.
+# other mirrors AGENTS.md lists. tests/test_highlight_wrapper_drift.py reads the
+# wrapper's literals out of server.js and fails if they stop matching this.
 _HIGHLIGHT_WRAPPER = re.compile(
     r'\AThe user highlighted this excerpt from the conversation and wants you to address it specifically:\n"""\n.*?\n"""\n\n(?P<own>.*)\Z',
     re.S,
