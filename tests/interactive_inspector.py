@@ -94,6 +94,7 @@ def _explain_keyword_matches(text):
     matched_groups_in_first_seen_order) — the last two feed _trim_groups()
     below, kept separate from route() itself per the module docstring."""
     lowered = (text or "").lower()
+    last_line = tool_router.last_line_for_bonus(text)   # F.10 item 3 (shared helper, so it can't drift)
     matches = []
     group_scores = {}
     matched_groups = []
@@ -121,6 +122,8 @@ def _explain_keyword_matches(text):
             group = group or tool_group
             if group:
                 group_scores[group] = group_scores.get(group, 0) + weight
+                if last_line and re.search(rf"\b{re.escape(phrase)}\b", last_line):
+                    group_scores[group] += tool_router.LAST_LINE_BONUS
         if group and group not in seen_groups:
             seen_groups.add(group)
             matched_groups.append(group)

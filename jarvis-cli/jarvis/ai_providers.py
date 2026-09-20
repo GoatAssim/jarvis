@@ -110,9 +110,14 @@ class RoundBudget:
 _log_local = threading.local()
 
 
-def set_log_context(conv_id, provider=None, on_tool_usage=None):
+def set_log_context(conv_id, provider=None, on_tool_usage=None, base_url=None):
     _log_local.conv_id = conv_id
     _log_local.provider = provider
+    # F.12: the host this attempt's own requests go to. A request to any OTHER
+    # host during the attempt (the AI risk review runs on a different provider
+    # while a tool call is being confirmed) is logged under that host, not
+    # under this attempt's key label — see _log_provider_for().
+    _log_local.host = _host_of_url(base_url)
     # on_tool_usage(name, input_tokens, output_tokens), if given, fires once
     # per tool call, right after _call_tool_safely below has both halves of
     # the token estimate (it can't fire any earlier — output_tokens isn't
@@ -238,6 +243,28 @@ def _log_conv_id():
 
 def _log_provider():
     return getattr(_log_local, "provider", None)
+
+
+def _host_of_url(url):
+    from urllib.parse import urlparse
+    try:
+        return urlparse(str(url or "")).netloc or None
+    except ValueError:
+        return None
+
+
+def _log_provider_for(url):
+    """The label a request to `url` should be logged under. Normally the
+    attempt's own key label. But a Groq risk-review request made while
+    `gemini (key 2/10)` was the active attempt used to be logged AS
+    `gemini (key 2/10)` (F.12), so the Logs viewer credited Gemini's key with
+    Groq's tokens."""
+    label = _log_provider()
+    attempt_host = getattr(_log_local, "host", None)
+    host = _host_of_url(url)
+    if label and attempt_host and host and host != attempt_host:
+        return f"{host} (side request during {label})"
+    return label
 
 
 def _log_cache_plan(plan, provider_type):
@@ -400,30 +427,30 @@ def _post_json(url, headers, payload, timeout):
     each need their own except-block zoo."""
     conv_id = _log_conv_id()
     if conv_id:
-        logs.log(conv_id, "request", {"url": url, "payload": payload}, provider=_log_provider())
+        logs.log(conv_id, "request", {"url": url, "payload": payload}, provider=_log_provider_for(url))
     try:
         resp = requests.post(url, headers=headers, json=payload, timeout=timeout)
     except requests.exceptions.Timeout:
         err = f"timed out after {timeout}s"
         if conv_id:
-            logs.log(conv_id, "error", {"error": err}, provider=_log_provider())
+            logs.log(conv_id, "error", {"error": err}, provider=_log_provider_for(url))
         return None, err
     except requests.exceptions.ConnectionError:
         err = "couldn't connect (network issue, or the service is down)"
         if conv_id:
-            logs.log(conv_id, "error", {"error": err}, provider=_log_provider())
+            logs.log(conv_id, "error", {"error": err}, provider=_log_provider_for(url))
         return None, err
     except requests.exceptions.RequestException as e:
         err = f"request failed: {e}"
         if conv_id:
-            logs.log(conv_id, "error", {"error": err}, provider=_log_provider())
+            logs.log(conv_id, "error", {"error": err}, provider=_log_provider_for(url))
         return None, err
     if conv_id:
         try:
             body = resp.json()
         except ValueError:
             body = (resp.text or "")[:2000]
-        logs.log(conv_id, "response", {"status": resp.status_code, "body": body}, provider=_log_provider())
+        logs.log(conv_id, "response", {"status": resp.status_code, "body": body}, provider=_log_provider_for(url))
     return resp, None
 
 
@@ -434,7 +461,12 @@ def _status_reason(resp):
     if resp.status_code in (401, 403):
         return f"invalid or unauthorized API key (HTTP {resp.status_code})"
     if resp.status_code == 429:
-        return "rate limited or quota exceeded (HTTP 429)"
+        # F.9: carry the delay the provider stated in the message, so ask() can
+        # park the key for exactly that long (key_health.parse_retry_delay).
+        from . import key_health
+        delay = key_health.parse_retry_delay(getattr(resp, "text", "") or "", getattr(resp, "headers", None))
+        hint = f" [retry in {delay:g}s]" if delay is not None else ""
+        return f"rate limited or quota exceeded (HTTP 429){hint}"
     if resp.status_code == 402:
         return "payment required — out of credits (HTTP 402)"
     if 500 <= resp.status_code < 600:

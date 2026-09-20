@@ -18,6 +18,7 @@ import sys
 from . import ai_config, ai_providers, command_tools, conversations, memory, playnite_config, skill_stickiness, skills, stats, tool_safety
 from . import dev_agent_events as _dev_agent_events
 from . import discovery_cache
+from . import key_health
 from . import logs
 from . import tool_diagnosis
 from . import tool_result_shaping
@@ -410,6 +411,17 @@ class AskResult:
 
 def _provider_label(provider):
     return provider.get("name") or provider.get("type") or "provider"
+
+
+def _host_of(provider):
+    """host:port of a provider's endpoint, or None. Used to notice that two
+    providers (both Ollama entries, say) share a server that just refused a
+    connection."""
+    from urllib.parse import urlparse
+    try:
+        return urlparse(str(provider.get("base_url") or "")).netloc or None
+    except ValueError:
+        return None
 
 
 def _eligible_providers(providers, defaults=None):
@@ -1962,7 +1974,21 @@ def _forced_ending_reply(runs, pending):
     return "\n".join(lines)
 
 
-def _tool_runs_note(runs, char_budget, verbosity="full"):
+# F.7: the recap's own notion of "something real happened". Deliberately NOT
+# _is_mutating_tool(): that one also feeds _completed_mutations(), i.e. the
+# "the requested action completed" degraded reply, and a `run_shell` that only
+# ran `dir` must never be reported as a completed action. Here the only effect
+# of the wider set is the recap wording — after a failed coding job the next
+# model was told "No launch/install/command has run yet... you MUST call the
+# real tool now" and went looking for a tool instead of reporting.
+_RECAP_SIDE_EFFECT_TOOLS = {"code_agent", "run_shell", "edit_file"}
+
+
+def _ran_something_real(name):
+    return _is_mutating_tool(name) or (name or "") in _RECAP_SIDE_EFFECT_TOOLS
+
+
+def _tool_runs_note(runs, char_budget, verbosity="full", can_call_tools=True):
     """Tell the next model what already ran — without implying side effects
     (launch/install) happened if they didn't.
 
@@ -1975,7 +2001,7 @@ def _tool_runs_note(runs, char_budget, verbosity="full"):
     if not runs:
         return None
     ran = [r.get("name") or "" for r in runs]
-    mutated = [n for n in ran if _is_mutating_tool(n)]
+    mutated = [n for n in ran if _ran_something_real(n)]
     parts = [
         "Some tools already ran this turn. Reuse those results — do not repeat "
         "the same read-only call (search, list, fetch, query).",
@@ -1986,11 +2012,17 @@ def _tool_runs_note(runs, char_budget, verbosity="full"):
             + ", ".join(mutated) + "."
         )
     else:
+        # Neutral on purpose (F.7 item 3). The old text told every model, on
+        # every non-launch task, that it MUST call a tool; the launch/install
+        # case it was written for is still covered by "if the request needs one".
         parts.append(
-            "No launch/install/command has run yet. If the user asked to play/launch/"
-            "install something, you MUST call the real tool now (playnite_launch_action, "
-            "package_install, run_command, …). Do not claim it already launched. "
-            "Do not write tool calls as plain text."
+            "Nothing that launches, installs, edits or runs a command has run yet — "
+            "do not claim otherwise. "
+            + ("If the user's request needs one, call the real tool for it now "
+               "(don't write a tool call as plain text); if it doesn't, answer from "
+               "the results above."
+               if can_call_tools else
+               "Answer from the results above and say plainly what is still undone.")
         )
     used = sum(len(p) for p in parts)
     for run in runs:
@@ -2013,6 +2045,52 @@ def _tool_runs_note(runs, char_budget, verbosity="full"):
         parts.append(block)
         used += len(block)
     return "\n".join(parts)
+
+
+def _carried_scaffold(history):
+    """The tool round-trips out of a failed attempt's `AIResult.tool_history`,
+    ready to append to the NEXT attempt's fresh messages.
+
+    `tool_history` is the failed attempt's whole generic transcript (system +
+    the user turn + every "[called x with {...}]" / "[tool result] ..." pair).
+    The head of it is rebuilt fresh for each provider (its system prompt and
+    profile differ), so only the tail from the first tool call on is kept. That
+    is found by the FIRST assistant message containing a call — never by a user
+    message that merely looks like a result, which a pasted trace could fake."""
+    for i, m in enumerate(history or []):
+        if (isinstance(m, dict) and m.get("role") == "assistant"
+                and isinstance(m.get("content"), str) and "[called " in m["content"]):
+            return [dict(x) for x in history[i:] if isinstance(x, dict)]
+    return []
+
+
+def _truncate_middle(text, limit):
+    """Shorten `text` to about `limit` chars by cutting the MIDDLE, keeping the
+    head (what it is) and the tail (how it ended). The old recap cut the tail
+    off everything after the first big result — F.7's 'never drop the whole
+    tail'."""
+    if not isinstance(text, str) or len(text) <= limit or limit < 120:
+        return text
+    head = int(limit * 0.6)
+    tail = limit - head
+    return text[:head] + f"\n…[{len(text) - head - tail} characters omitted]…\n" + text[-tail:]
+
+
+def _carried_messages(history, char_budget):
+    """`_carried_scaffold`, with each tool result middle-truncated so the whole
+    carry stays near `char_budget` (the active capacity mode's own limit, but
+    never less than ~600 chars per result — that floor is what keeps a single
+    large result like code_agent's from squeezing out the ones after it)."""
+    scaffold = _carried_scaffold(history)
+    results = [m for m in scaffold if m.get("role") == "user"
+               and str(m.get("content", "")).lstrip().startswith("[tool result")]
+    per_result = max(600, int(char_budget) // max(1, len(results)))
+    out = []
+    for m in scaffold:
+        if m in results:
+            m = {**m, "content": _truncate_middle(m["content"], per_result)}
+        out.append(m)
+    return out
 
 
 _TOOL_TRACE_LINE = re.compile(r"^\[(called |tool result)", re.I)
@@ -2290,6 +2368,31 @@ def abandon_pending_turn(reason="interrupted"):
         return False
 
 
+# Mirrors the wrapper web/server.js builds around a highlighted excerpt
+# (`prompt = "The user highlighted this excerpt ... :\n\"\"\"\n" + quote +
+# "\n\"\"\"\n\n" + text`). The excerpt is text the user is pointing AT, not
+# asking for, so it must not vote in the router (F.10 cause 3). If server.js's
+# wording ever changes this simply stops matching and routing falls back to the
+# old whole-message behaviour — same no-shared-source-of-truth caveat as the
+# other mirrors AGENTS.md lists.
+_HIGHLIGHT_WRAPPER = re.compile(
+    r'\AThe user highlighted this excerpt from the conversation and wants you to address it specifically:\n"""\n.*?\n"""\n\n(?P<own>.*)\Z',
+    re.S,
+)
+_HIGHLIGHT_DEFAULT_ASK = "Please respond about the quoted excerpt."
+
+
+def _strip_highlight_excerpt(user_text):
+    """The user's own words from a highlight-quote prompt, or `user_text`
+    unchanged when it isn't one. The stock "Please respond about the quoted
+    excerpt." (what the UI sends when the user typed nothing) routes as empty."""
+    m = _HIGHLIGHT_WRAPPER.match(user_text or "")
+    if not m:
+        return user_text
+    own = m.group("own").strip()
+    return "" if own == _HIGHLIGHT_DEFAULT_ASK else own
+
+
 def _strip_pasted_previous_reply(user_text, conv_id):
     """F.10: when user_text contains Jarvis's own previous reply pasted
     back verbatim (the raw paste case — no `The user highlighted this
@@ -2519,7 +2622,7 @@ def ask(user_text, commands=None, on_attempt=None, on_tool_call=None, on_tool_re
         # tool_executor below is still built from full_schemas regardless
         # (not active_schemas) so a tool call the router didn't anticipate
         # still validates/executes normally rather than failing closed.
-        route = tool_router.route(_strip_pasted_previous_reply(user_text, conv_id))
+        route = tool_router.route(_strip_pasted_previous_reply(_strip_highlight_excerpt(user_text), conv_id))
         if on_route:
             on_route(route)
         trace.note_route(route)
@@ -2815,6 +2918,24 @@ def ask(user_text, commands=None, on_attempt=None, on_tool_call=None, on_tool_re
     if conv_id:
         conversations.begin_exchange(conv_id, user_text)
 
+    # F.7: the tool round-trips of the most recent attempt that got far enough
+    # to have any. The next key/provider continues from them instead of being
+    # handed a 1600-character recap and repeating read_file / run_shell.
+    carried = []
+
+    # F.9: a provider whose model just returned a 503 goes to the back of the
+    # line for a short while (never out of it — it is still tried if nothing
+    # else answers). sorted() is stable, so healthy providers keep the user's
+    # own priority order.
+    def _model_cooling(p):
+        try:
+            return key_health.model_cooling(_provider_label(p), _resolve(p, cfg["defaults"]).get("model"))
+        except Exception:  # noqa: BLE001 — health is advice, never a reason to fail
+            return False
+
+    providers = sorted(providers, key=_model_cooling)
+    dead_hosts = set()   # endpoints that refused a connection during THIS ask
+
     for provider in providers:
         label = _provider_label(provider)
         provider_ref[0] = label
@@ -2851,11 +2972,20 @@ def ask(user_text, commands=None, on_attempt=None, on_tool_call=None, on_tool_re
         if adapter is None:
             attempts.append((label, f"unknown provider type '{provider.get('type')}'"))
             continue
+        host = _host_of(provider)
+        if host and host in dead_hosts:
+            # Two Ollama entries share localhost:11434 — the second failure was
+            # guaranteed (F.8's table). Don't spend a request finding that out.
+            attempts.append((label, f"skipped: {host} already refused a connection this turn"))
+            continue
 
         # Ollama (or anything else with no configured keys but still
         # eligible \u2014 i.e. local, no auth needed) gets exactly one pass with
         # no key substituted, same as before multi-key support existed.
         keys = ai_config.provider_keys(provider) or [None]
+        # F.9: start at the key that last worked; keys cooling down from a 429
+        # go last (still tried if nothing else is left).
+        keys = key_health.order_keys(_provider_label(provider), keys)
 
         for i, key in enumerate(keys, start=1):
             messages = _build_messages(
@@ -2864,9 +2994,17 @@ def ask(user_text, commands=None, on_attempt=None, on_tool_call=None, on_tool_re
                 sender_ctx=sender_context,
             )
             runs = getattr(tool_executor, "runs", None) if tool_executor else None
-            if runs:
-                budget = profile.get("tool_result_budget", _MODE_BY_NAME["full"]["tool_result_budget"])
-                note = _tool_runs_note(runs, budget, verbosity_ref[0] if verbosity_ref else "full")
+            budget = profile.get("tool_result_budget", _MODE_BY_NAME["full"]["tool_result_budget"])
+            if carried:
+                # The real transcript. No recap on top of it — the results are
+                # already there, and the recap's wording only ever confused things.
+                messages.extend(_carried_messages(carried, budget))
+            elif runs:
+                # No transcript to carry (the failed attempt never got a
+                # response back), but tools did run: fall back to the recap.
+                can_call = round_budget.remaining() > 0 or round_budget.grace_available()
+                note = _tool_runs_note(runs, budget, verbosity_ref[0] if verbosity_ref else "full",
+                                       can_call_tools=can_call)
                 if note:
                     messages.append({"role": "user", "content": note})
 
@@ -2894,7 +3032,8 @@ def ask(user_text, commands=None, on_attempt=None, on_tool_call=None, on_tool_re
             if key is not None:
                 resolved["api_key"] = key
 
-            ai_providers.set_log_context(conv_id, key_label, on_tool_usage=on_tool_result)
+            ai_providers.set_log_context(conv_id, key_label, on_tool_usage=on_tool_result,
+                                        base_url=resolved.get("base_url"))
             # Reset per attempt, not per ask: a failover to the next key
             # starts a fresh set of rounds, so its round-0 thinking is a new
             # spend and its trace shouldn't be glued onto the failed
@@ -2922,6 +3061,7 @@ def ask(user_text, commands=None, on_attempt=None, on_tool_call=None, on_tool_re
                 )
 
             if result.ok:
+                key_health.record_success(_provider_label(provider), resolved.get("model"), key)
                 turn_runs = getattr(tool_executor, "runs", None) if tool_executor else None
                 extras = _extras_from_runs(turn_runs)
 
@@ -2996,12 +3136,34 @@ def ask(user_text, commands=None, on_attempt=None, on_tool_call=None, on_tool_re
                 attempts.append((key_label, failure))
                 trace.note_attempt_failed(key_label, failure)
                 break
+            key_health.record_failure(_provider_label(provider), resolved.get("model"), key,
+                                      result.kind, failure)
             skip_remaining_keys = ai_providers.is_request_shape_error(failure) and i < len(keys)
             if skip_remaining_keys:
                 failure = (f"{failure} [request rejected on its shape, not because of the key - "
                            f"skipping this provider's other {len(keys) - i} key(s)]")
+            elif result.kind == ai_providers.KIND_NETWORK and "couldn't connect" in str(failure):
+                # Same endpoint for every key AND for any sibling provider.
+                if host:
+                    dead_hosts.add(host)
+                if i < len(keys):
+                    skip_remaining_keys = True
+                    failure = (f"{failure} [the service refused the connection - "
+                               f"skipping this provider's other {len(keys) - i} key(s)]")
+            elif result.kind == ai_providers.KIND_OVERLOAD and i < len(keys):
+                # A model-wide condition (503 "high demand"): another key on the
+                # same model has little better odds and each hop costs the turn
+                # its state (F.9).
+                skip_remaining_keys = True
+                failure = (f"{failure} [the model is overloaded, not the key - "
+                           f"skipping this provider's other {len(keys) - i} key(s)]")
             attempts.append((key_label, failure))
             trace.note_attempt_failed(key_label, failure)
+            # Remember how far this attempt got. An attempt that failed before
+            # any response came back has no history: keep what we had.
+            new_carry = _carried_scaffold(getattr(result, "tool_history", None))
+            if new_carry:
+                carried = new_carry
             if skip_remaining_keys:
                 break
         if forced_end is not None:

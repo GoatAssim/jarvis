@@ -133,6 +133,9 @@ jarvis-cli/jarvis/
     workspace_cli.py      NEW — daemons, log-file search, backlog, ambient,
                           onboarding, ui-mode
 
+    key_health.py         NEW — ~/.jarvis/key_health.json: per-key 429 cooldowns, per-model
+                          503 cooldowns, last-good key (ai_client.ask reorders, never removes)
+
     actions/              auto-discovered tool files (see _template.py)
         _template.py      the contract, commented field by field
         dev_agent.py      plan -> write -> install -> run -> fix, sandboxed
@@ -362,3 +365,16 @@ silently never runs.
   unconditional.
 - The model can start, stop and inspect daemons; it cannot create one.
   Registering a daemon stores a command Jarvis later runs unattended.
+
+## Failure handling in ask() (master plan Part F)
+
+- Tools withheld (budget spent) -> `ai_providers._forced_ending`: one optional grace round
+  (`defaults.grace_call`, default on), then a flattened tool-less final request. Still wants a
+  tool -> `KIND_BUDGET`: ask() stops rotating and returns `_forced_ending_reply` (harness-written).
+- Failover carries the failed attempt's `tool_history` (`_carried_messages`); the old recap is
+  only a fallback when there is no transcript.
+- `AIResult.kind` (`KIND_*`, `classify_failure`) drives rotation; 503 and refused connections skip
+  remaining keys / sibling hosts; key cooldowns live in `key_health.py`.
+- Log entries for a request to a different host are labelled by host (`_log_provider_for`).
+- Router: last line of a 3+ line, 200+ char message gets +2 (`tool_router.LAST_LINE_BONUS`);
+  highlight-quote wrappers are stripped before routing (`_strip_highlight_excerpt`).
