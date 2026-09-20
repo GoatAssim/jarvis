@@ -2751,11 +2751,15 @@ window.JARVIS_TEST_CHECKLIST = /*JSON-BEGIN*/ {
   },
   "run_shell": {
    "group": "dev_agent",
-   "does": "Runs one shell command in a directory.",
+   "does": "Runs one shell command in a directory. A cmd.exe builtin (dir, type, echo, ...) is auto-routed through cmd /c; if that still fails with a WinError 2, the diagnosis names the builtin instead of suggesting ffmpeg/git.",
    "steps": [
     {
      "ask": "In <project path>, run the tests.",
      "expect": "Confirmation + AI review note, then exit code / stdout / stderr."
+    },
+    {
+     "run": {"command": "dir", "path": "<project path>"},
+     "expect": "On Windows: exit 0 with a directory listing (routed through cmd /c automatically). If it somehow still fails with WinError 2, the result's diagnosis says \"'dir' is a cmd.exe builtin\", not the generic ffmpeg/git/tesseract advice."
     }
    ],
    "care": "Do this in a scratch folder or throwaway repo, not a real project."
