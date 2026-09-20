@@ -52,12 +52,20 @@ with zero keywords anywhere in it can never be routed by tool_router.route()
 at all: it would only ever be reachable through search_tools (the
 low-confidence fallback), which is a real path but a strictly worse one
 than a message routing straight to it. Any new-group action file, in
-practice, needs at least one real keyword entry. discover_actions() does
-not hard-reject a keyword-less new group (a tool used only for testing, or
-only ever invoked by another tool, is legitimate) but it does log a loud
-warning, because silently-unroutable-by-design and
-forgot-to-add-keywords look identical from outside and only the author
-can tell them apart.
+practice, needs at least one real keyword entry.
+
+_validate() no longer leaves a keyword-less tool with zero router coverage:
+any tool name with no explicit TOOL_KEYWORDS entry gets a minimal fallback
+derived from its own name (see _derive_fallback_keywords() below), at
+exactly tool_router.MIN_SCORE so it's real signal without outranking a
+hand-picked keyword. This is deliberately a floor, not a fix — a name like
+`spotify_search` derives "spotify"/"search", which is far weaker than
+purpose-written phrases a person would actually type. discover_actions()
+does not hard-reject a keyword-less new group (a tool used only for
+testing, or only ever invoked by another tool, is legitimate) but it does
+log a note (or, if even the fallback derives nothing, the original loud
+warning), because silently-unroutable-by-design and forgot-to-add-keywords
+look identical from outside and only the author can tell them apart.
 
 --- actions/*.py vs skills/ ---
 
@@ -104,6 +112,46 @@ from pathlib import Path
 _NAME_RE = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
 
 ACTIONS_DIR = Path(__file__).resolve().parent / "actions"
+
+# §7 fix (master plan): TOOL_KEYWORDS is optional per the contract above, but
+# a tool with none of its own is only ever reachable through search_tools's
+# low-confidence fallback (or by riding along on a sibling's keyword hit in
+# the same group, which credits the trace to that sibling, not this tool —
+# see the module docstring section this references). Rather than leave such
+# a tool with literally zero router signal, derive a minimal keyword set
+# from its own name as a fallback — real, human-picked TOOL_KEYWORDS always
+# win; this only fills in for a tool that has none at all.
+#
+# Generic verbs/fillers carry no distinguishing signal and would false-hit
+# on unrelated messages if turned into keywords, so they're filtered before
+# any name is used as a keyword. len(word) < 4 already excludes most of the
+# shortest generic verbs (get/set/run/add/...); this covers the remaining
+# words worth naming explicitly.
+_FALLBACK_KEYWORD_STOPWORDS = {
+    "list", "make", "does", "with", "from", "into", "this", "that",
+    "tool", "tools", "action", "actions", "execute", "call", "show",
+    "find", "check", "start", "stop", "current", "info", "data",
+    "value", "values", "item", "items", "name", "names", "file", "files",
+    "all", "new", "the", "and", "for",
+}
+
+# Matches tool_router.MIN_SCORE — the lowest weight that still counts as
+# real router signal (see tool_router.py). A fallback keyword is real
+# coverage, not a thumb on the scale, so it earns exactly that floor and no
+# more: a hand-picked keyword worth more than the minimum still outranks it.
+_FALLBACK_KEYWORD_WEIGHT = 5
+
+
+def _derive_fallback_keywords(tool_name):
+    """A minimal {phrase: weight} dict derived from a tool's own name, used
+    only when the author gave it no TOOL_KEYWORDS entry of its own. Can
+    return {} (e.g. a name made up entirely of stopwords/short words) —
+    callers must handle that, it just means no fallback was possible."""
+    words = [
+        w for w in tool_name.split("_")
+        if len(w) >= 4 and w not in _FALLBACK_KEYWORD_STOPWORDS
+    ]
+    return {w: _FALLBACK_KEYWORD_WEIGHT for w in words}
 
 
 @dataclass
@@ -214,12 +262,43 @@ def _validate(module, filename, logger):
             error=f"TOOL_KEYWORDS has entries for name(s) not in this file's TOOLS: {sorted(stray_kw)}.",
         )
 
+    # §7 fix: fill in a fallback for any tool with no human-authored
+    # keywords, instead of leaving it with none at all. Never overrides an
+    # explicit (non-empty) entry.
+    had_any_explicit = bool(keywords)
+    keywords = dict(keywords)
+    auto_derived = {}
+    for _name in names:
+        if keywords.get(_name):
+            continue
+        derived = _derive_fallback_keywords(_name)
+        if derived:
+            keywords[_name] = derived
+            auto_derived[_name] = derived
+
     if not keywords:
+        # Fallback derivation couldn't help either (every name here is
+        # short/generic-only) — this file really is only reachable through
+        # search_tools, same as before.
         logger(
-            f"[tools] Warning: {filename} (group={group!r}) has no TOOL_KEYWORDS — "
-            "it will never be reachable through tool_router.route(), only through "
+            f"[tools] Warning: {filename} (group={group!r}) has no TOOL_KEYWORDS, and "
+            "no fallback keywords could be derived from its tool name(s) either — it "
+            "will never be reachable through tool_router.route(), only through "
             "search_tools's low-confidence fallback, unless it's sharing an existing "
             "group that already has keyword coverage from another file."
+        )
+    elif not had_any_explicit:
+        logger(
+            f"[tools] Note: {filename} (group={group!r}) has no TOOL_KEYWORDS of its "
+            f"own — auto-derived fallback keyword(s) from the tool name(s) "
+            f"{sorted(auto_derived)} so it isn't completely unroutable, but a few real "
+            "TOOL_KEYWORDS entries will match user phrasing far better than the name alone."
+        )
+    elif auto_derived:
+        logger(
+            f"[tools] Note: {filename} (group={group!r}): {sorted(auto_derived)} have no "
+            "TOOL_KEYWORDS of their own — auto-derived a minimal keyword set from each "
+            "name as a fallback."
         )
 
     return ActionModuleRecord(
