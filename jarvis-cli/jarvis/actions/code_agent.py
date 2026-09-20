@@ -665,8 +665,23 @@ def _run_shell_outcome(result):
     if code is None:
         # Timed out, or the OS couldn't launch it at all (e.g. a cmd.exe
         # builtin run without the F.4 wrapper) — stderr_tail carries
-        # whichever of those it was.
+        # whichever of those it was. tool_diagnosis.diagnose() (the same
+        # builtin-aware check the standalone run_shell tool now gets via
+        # ai_client's executor, master plan F.4) can name a cmd.exe
+        # builtin specifically when that's the real cause — the inner
+        # loop never went through that executor path, so without this it
+        # never saw the hint at all and the outer model (reading this via
+        # F.7's failover transcript, or a failed job's recap) just saw the
+        # same bare WinError text every other tool's failure gets.
         detail = stderr.splitlines()[0] if stderr else "produced no output"
+        try:
+            from .. import tool_diagnosis
+            diagnosis = tool_diagnosis.diagnose("run_shell", result)
+            if diagnosis and "cmd.exe builtin" in diagnosis.get("cause", ""):
+                detail = diagnosis["cause"]
+        except Exception:  # noqa: BLE001 — a step's outcome line must
+            # never itself become the reason a step fails to log.
+            pass
         return _truncate_line(f"did not run — {detail}", 150)
     if code == 0:
         return "exit 0"

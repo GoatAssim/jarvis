@@ -18,6 +18,14 @@ Two pieces, both covered here:
    instead of falling through to the generic missing-external-program
    advice. Every other tool, and every other WinError 2 shape, is
    unaffected — this only ever narrows one specific false-positive.
+3. `code_agent`'s own inner loop (`_execute_step`'s `run_shell` branch)
+   never goes through `ai_client`'s tool executor — that's where
+   `tool_diagnosis.annotate()` normally gets attached — so it never saw
+   any of the above. `_run_shell_outcome()` (the short line that becomes
+   this step's `log` entry, read by the outer model on both a normal
+   recap and F.7's failover transcript) now calls `diagnose()` directly
+   for the same builtin case, so the hint reaches the inner loop's own
+   failures too, not just the standalone `run_shell` tool's.
 
 Run: python3 tests/test_run_shell_diagnosis.py
 """
@@ -163,6 +171,50 @@ def test_diagnose_unaffected_for_non_winerror2_run_shell_failures():
     d = td.diagnose("run_shell", fake_result)
     assert d is not None
     assert "Nothing is listening" in d["cause"]
+
+
+# --- inner dev-agent loop: _run_shell_outcome (the log line, not the tool
+# result) also gets the builtin-aware hint -------------------------------
+
+def test_inner_loop_outcome_names_the_builtin():
+    result = {
+        "exit_code": None, "stdout_tail": "",
+        "stderr_tail": "[WinError 2] The system cannot find the file specified",
+        "command": "dir /a",
+    }
+    outcome = code_agent._run_shell_outcome(result)
+    assert "cmd.exe builtin" in outcome
+    assert "'dir'" in outcome
+
+
+def test_inner_loop_outcome_falls_through_for_real_missing_program():
+    result = {
+        "exit_code": None, "stdout_tail": "",
+        "stderr_tail": "[WinError 2] The system cannot find the file specified",
+        "command": "ffmpeg -version",
+    }
+    outcome = code_agent._run_shell_outcome(result)
+    assert "cmd.exe builtin" not in outcome
+    assert "WinError 2" in outcome
+
+
+def test_inner_loop_outcome_unaffected_for_normal_exit_codes():
+    # Guard against the diagnosis hook changing anything on the paths that
+    # were already correct before this change.
+    assert code_agent._run_shell_outcome(
+        {"exit_code": 0, "stdout_tail": "ok", "stderr_tail": ""}) == "exit 0"
+    assert code_agent._run_shell_outcome(
+        {"exit_code": 1, "stdout_tail": "", "stderr_tail": "boom"}) == "exit 1: boom"
+
+
+def test_inner_loop_outcome_missing_command_field_does_not_crash():
+    # Defensive: an older-shaped result with no `command` key must still
+    # produce a sane outcome line, not raise.
+    result = {"exit_code": None, "stdout_tail": "",
+              "stderr_tail": "[WinError 2] The system cannot find the file specified"}
+    outcome = code_agent._run_shell_outcome(result)
+    assert "cmd.exe builtin" not in outcome
+    assert "WinError 2" in outcome
 
 
 def _run():
