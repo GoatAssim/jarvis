@@ -73,7 +73,11 @@ jarvis-cli/jarvis/
     tool_loader.py        auto-discovery of actions/ and ~/.jarvis/tools/
     tool_safety.py        which tools need confirmation  (DO NOT drive-by edit)
     tool_result_shaping.py  trims a tool result before it goes back to the model
-    tool_diagnosis.py     NEW — explains a FAILED tool call and names the fix
+    tool_diagnosis.py     NEW — explains a FAILED tool call and names the fix.
+                          read_screen/click_on_text have their own classifier
+                          (_diagnose_ocr): it keys on the START of ocr_tools'
+                          message (no PATH / no pip pkg / found-but-failed),
+                          never on words inside it. tests/test_ocr_diagnosis.py
     tool_context.py …     (see ToolContext in tools.py)
 
     # --- memory and history ---------------------------------------------

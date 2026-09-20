@@ -1035,6 +1035,9 @@ window.JARVIS_TEST_CHECKLIST = /*JSON-BEGIN*/ {
    "needs": [
     "Tesseract OCR installed (local OCR — nothing leaves the PC)"
    ],
+   "watch": [
+    "A failed OCR call carries a diagnosis naming the real cause: Tesseract not on PATH (restart the web server from a fresh terminal), language data missing (TESSDATA_PREFIX), or the pip packages missing. It should never tell you to install something that is already installed."
+   ],
    "care": "Moves the real mouse/keyboard. Open Notepad (or another harmless target) first and keep it focused."
   },
   "read_screen": {
@@ -1052,6 +1055,9 @@ window.JARVIS_TEST_CHECKLIST = /*JSON-BEGIN*/ {
    ],
    "needs": [
     "Tesseract OCR installed (local OCR — nothing leaves the PC)"
+   ],
+   "watch": [
+    "A failed OCR call carries a diagnosis naming the real cause: Tesseract not on PATH (restart the web server from a fresh terminal), language data missing (TESSDATA_PREFIX), or the pip packages missing. It should never tell you to install something that is already installed."
    ]
   },
   "look_at_screen": {

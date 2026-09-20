@@ -194,6 +194,131 @@ def _cmd_builtins():
         return set()
 
 
+# Tools whose failures are classified by _diagnose_ocr() rather than by the
+# generic name-matching in diagnose().
+_OCR_TOOLS = {"read_screen", "click_on_text"}
+
+# ocr_tools.py's messages start with one of these (see _no_pytesseract(),
+# _no_tesseract_binary() and the "OCR failed:" branches there). Matching on
+# the START of the message, which the tool controls, is what makes this
+# reliable: the whole message also carries a long install note that names
+# tesseract, pytesseract and Pillow whatever actually went wrong.
+# tests/test_ocr_diagnosis.py builds the real messages from ocr_tools so a
+# reworded prefix fails a test instead of silently disabling this.
+_OCR_NO_PIP = "pytesseract/pillow not installed"
+_OCR_NO_BINARY = "tesseract binary not found on path"
+_OCR_RAN_AND_FAILED = "ocr failed"
+_TESSDATA_RE = re.compile(
+    r"tessdata|traineddata|failed loading language|couldn't load any languages")
+
+
+def _diagnose_ocr(error):
+    """Classify a failed read_screen / click_on_text by what actually broke.
+
+    THE BUG THIS REPLACES
+    ---------------------
+    The generic matcher treats any error containing "tesseract" or "not
+    found" as "the Tesseract program is missing". For OCR that was wrong in
+    three ways, each reproduced against the real ocr_tools code paths:
+
+    - Tesseract found, language data missing or broken ("OCR failed: Error
+      opening data file ... TESSDATA_PREFIX"): diagnosed as "Missing
+      dependency: tesseract — install it". It is installed; the user is
+      told to install what they already have while the real reason sits in
+      the raw error the model was told not to repeat.
+    - Tesseract genuinely not on PATH: also diagnosed as missing pytesseract
+      and Pillow ("pip install ..."), because ocr_tools' install note names
+      them. They are installed. The fix also said "reopen your terminal",
+      which does nothing when the process that needs the new PATH is the
+      long-running web server.
+    - A pip-package-missing error also listed the Tesseract program as
+      missing, since "pytesseract" contains "tesseract".
+
+    Returns None for anything unrecognised (e.g. "screen capture failed:")
+    rather than guessing: naming Tesseract for a capture failure is worse
+    than saying nothing, and this module only ever adds.
+    """
+    lowered = error.lower().strip()
+    binaries, _packages = _tables()
+    tess = binaries.get("tesseract") or {}
+    install = _install_hint(tess)
+    windows = platform.system() == "Windows"
+
+    if lowered.startswith(_OCR_NO_PIP):
+        return {
+            "cause": ("The Python packages OCR needs (pytesseract, Pillow) "
+                      "aren't installed in the Python that runs Jarvis."),
+            "fix": ("Run: pip install pytesseract Pillow  — into the same "
+                    "Python that runs Jarvis (the web server uses whichever "
+                    "`python` it finds first)."),
+            "check": "jarvis doctor",
+            "missing": [
+                {"kind": "python package", "name": "pytesseract",
+                 "why": "click_on_text / read_screen",
+                 "install": "pip install pytesseract"},
+                {"kind": "python package", "name": "Pillow",
+                 "why": "screenshots and OCR preprocessing",
+                 "install": "pip install Pillow"},
+            ],
+        }
+
+    if lowered.startswith(_OCR_NO_BINARY):
+        # Only the program is implicated: this message is raised by
+        # pytesseract after both Python packages imported fine.
+        if windows:
+            fix = ("Open a NEW terminal and run `where tesseract`. If it "
+                   "prints a path, Tesseract is installed: fully close and "
+                   "restart the web server from that new terminal — a "
+                   "process started earlier, or by double-clicking, keeps "
+                   "the PATH it started with. If it prints nothing, install "
+                   f"it ({install}) or add its folder (usually "
+                   "C:\\Program Files\\Tesseract-OCR) to PATH.")
+        else:
+            fix = ("Open a new terminal and run `which tesseract`. If it "
+                   "prints a path, restart whatever launched Jarvis (the web "
+                   "server, if you use it) from that terminal — a process "
+                   f"started earlier keeps its old PATH. If not: {install}.")
+        return {
+            "cause": ("Jarvis can't find the Tesseract program from the "
+                      "process that ran this tool. Either it isn't "
+                      "installed, or it is but this process started before "
+                      "it was added to PATH."),
+            "fix": fix,
+            "check": "jarvis doctor",
+            "missing": [{"kind": "program", "name": "tesseract",
+                         "why": tess.get("why", ""), "install": install}],
+        }
+
+    if lowered.startswith(_OCR_RAN_AND_FAILED):
+        # Tesseract was found and started — this is NOT a missing-program
+        # error, so deliberately no "missing" list and no install command.
+        if _TESSDATA_RE.search(lowered):
+            return {
+                "cause": ("Tesseract is installed and was found, but it "
+                          "can't load its language data (normally "
+                          "eng.traineddata)."),
+                "fix": ("Set the TESSDATA_PREFIX environment variable to the "
+                        "folder that contains eng.traineddata (the `tessdata` "
+                        "folder inside Tesseract's install folder), or "
+                        "reinstall Tesseract with the English language data. "
+                        "Then restart whatever launched Jarvis so it sees "
+                        "the variable."),
+                "check": "jarvis doctor",
+            }
+        return {
+            "cause": ("Tesseract was found but failed while running; the "
+                      "exact reason is in the error text."),
+            "fix": ("In a terminal run `tesseract --version` and `tesseract "
+                    "--list-langs`. If either fails, that is the real "
+                    "problem (a broken install, or a different tesseract "
+                    "first on PATH — `where tesseract` on Windows, `which "
+                    "tesseract` elsewhere, shows which one runs)."),
+            "check": "jarvis doctor",
+        }
+
+    return None
+
+
 def diagnose(tool_name, result):
     """Explain a failed tool call. Returns a dict, or None when there's
     nothing useful to add — in which case the caller changes nothing.
@@ -231,6 +356,13 @@ def diagnose(tool_name, result):
                 "fix": f"Run it as: cmd /c {command}",
                 "check": "jarvis doctor",
             }
+
+    # OCR tools get their own classifier instead of the generic matching
+    # below. See _diagnose_ocr() for why: the generic path reads the tool's
+    # own install note as if it were the failure, and blames Tesseract for
+    # every OCR error including ones where Tesseract was found and ran.
+    if tool_name in _OCR_TOOLS:
+        return _diagnose_ocr(error)
 
     missing = []
     fixes = []
