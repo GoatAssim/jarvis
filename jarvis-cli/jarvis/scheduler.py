@@ -123,6 +123,25 @@ TOOL_TIMEOUT = 120
 
 MAX_CATCHUP_RUNS = 5
 MAX_JOBS = 500            # a runaway loop creating jobs shouldn't fill the disk
+
+# Both markers cli.py prints to the stdout of a `jarvis ask` invocation for a
+# LIVE session to pick off — JARVIS_USAGE (token/round telemetry) always,
+# JARVIS_CONFIRM_REQUEST when a tool needs approval. server.js's onStdoutLine
+# strips both before anything reaches the browser as reply text (see
+# USAGE_MARKER/CONFIRM_MARKER there). A scheduled job has no live listener to
+# strip them the same way, so without this, a job's raw stdout — JSON and
+# all — was going straight into the notification a person actually reads.
+_PROTOCOL_LINE_PREFIXES = ("JARVIS_USAGE ", "JARVIS_CONFIRM_REQUEST ")
+
+
+def _strip_protocol_lines(text):
+    """Drop cli.py's machine-readable marker lines from a captured ask's
+    stdout, so a scheduled job's notification shows the reply a person
+    would see in a live session — not that reply plus raw telemetry JSON."""
+    if not text:
+        return text
+    kept = [ln for ln in text.split("\n") if not ln.startswith(_PROTOCOL_LINE_PREFIXES)]
+    return "\n".join(kept).strip()
 MAX_RESULT_CHARS = 4000   # last_result is for humans/the model, not an archive
 MAX_ASK_LOG_ENTRIES = 500  # same "don't fill the disk" ceiling as MAX_JOBS,
                            # applied to the ask-prompt log instead of the job
@@ -1047,13 +1066,18 @@ def _do_ask(job, action):
         _log_scheduled_ask(job, prompt, ok=False, error=error)
         return {"ok": False, "error": error, "summary": ""}
 
-    reply = (proc.stdout or "").strip()
+    raw_reply = (proc.stdout or "").strip()
+    reply = _strip_protocol_lines(raw_reply)
     if proc.returncode != 0 and not reply:
         error = (proc.stderr or "ask failed").strip()[:500]
         _log_scheduled_ask(job, prompt, ok=False, error=error)
         return {"ok": False, "error": error, "summary": ""}
 
-    _log_scheduled_ask(job, prompt, ok=True, reply=reply)
+    # The raw capture (telemetry line included) goes to the log — this is
+    # the same raw-fidelity log "Log search" greps, where seeing the actual
+    # bytes cli.py produced is the point. Only the cleaned version reaches a
+    # person, via the notification below and the summary this returns.
+    _log_scheduled_ask(job, prompt, ok=True, reply=raw_reply)
 
     note = None
     if _should_report(job):
@@ -1086,7 +1110,8 @@ def _do_command(job, action):
     except (OSError, ValueError) as e:
         return {"ok": False, "error": "couldn't run command: %s" % e, "summary": ""}
 
-    output = ((proc.stdout or "") + ("\n" + proc.stderr if proc.stderr else "")).strip()
+    output = _strip_protocol_lines(
+        ((proc.stdout or "") + ("\n" + proc.stderr if proc.stderr else "")).strip())
     ok = proc.returncode == 0
     note = None
     if _should_report(job):

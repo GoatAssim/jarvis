@@ -1237,6 +1237,45 @@ app.get("/api/log-files/sets", requireJarvis, async (req, res) => {
   return parseJarvisJSON(result, res, "Couldn't list log sets.");
 });
 
+// Subagents. Task ids are validated against tasks.py's own `t_` + 8 hex
+// chars format (see tasks._ID_RE) — same reasoning as DAEMON_ID above: a
+// typo should be a 400, not something silently normalized or passed
+// through to argv.
+const SUBAGENT_TASK_ID = /^t_[a-z0-9]{8}$/;
+
+function badSubagentId(id, res) {
+  if (typeof id !== "string" || !SUBAGENT_TASK_ID.test(id)) {
+    res.status(400).json({ error: "Invalid subagent task id." });
+    return true;
+  }
+  return false;
+}
+
+app.get("/api/subagents", requireJarvis, async (req, res) => {
+  const args = ["subagents"];
+  const parent = req.query?.parent;
+  if (typeof parent === "string" && parent.trim()) {
+    if (badSubagentId(parent.trim(), res)) return;
+    args.push("--parent", parent.trim());
+  }
+  const result = await runJarvisOnce(args, 15000);
+  return parseJarvisJSON(result, res, "Couldn't list subagents.");
+});
+
+app.get("/api/subagents/:id", requireJarvis, async (req, res) => {
+  const { id } = req.params;
+  if (badSubagentId(id, res)) return;
+  const result = await runJarvisOnce(["subagent-status", id], 10000);
+  return parseJarvisJSON(result, res, "Couldn't read that subagent's status.");
+});
+
+app.post("/api/subagents/:id/cancel", requireJarvis, async (req, res) => {
+  const { id } = req.params;
+  if (badSubagentId(id, res)) return;
+  const result = await runJarvisOnce(["subagent-cancel", id], 10000);
+  return parseJarvisJSON(result, res, "Couldn't cancel that subagent.");
+});
+
 // Backlog.
 app.get("/api/backlog", requireJarvis, async (req, res) => {
   const result = await runJarvisOnce(["backlog-board"], 10000);

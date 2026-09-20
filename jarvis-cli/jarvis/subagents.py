@@ -374,6 +374,22 @@ def spawn(role, goal, parent_id=None, notes=None, conv_id=None,
     The subagent is *not* run here — it's persisted as a runnable task and
     the supervisor picks it up. That's what makes a fan-out survive the
     parent process dying halfway through issuing it.
+
+    FEATURE: `conv_id` now defaults to a freshly-minted, real conversation
+    rather than staying unset. Every step of a task is its own `jarvis ask`
+    subprocess (see task_runner.py's docstring), and task_runner only wires
+    JARVIS_CONVERSATION_ID into that subprocess's env when task["conv_id"]
+    is set — nothing before this ever set it, so every step of every
+    subagent silently opened (and immediately orphaned) a brand-new
+    anonymous conversation instead of accumulating one real transcript.
+    tasks.py's own docstring for "history" anticipates exactly this fix
+    ("summarizes outcomes... a transcript is what conversations.py already
+    does better") — this is that connection actually made. Minting it here,
+    at the single choke point every spawn path goes through, means the
+    text, tool calls and thinking of every one of a subagent's steps land
+    in the one place the rest of this app already knows how to display
+    (GET /api/conversations/:id, the same call the Ask panel makes),
+    instead of only the one-line step summaries tasks.record_step() keeps.
     """
     cfg = cfg or load_config()
     role = str(role or "").strip().lower()
@@ -384,6 +400,13 @@ def spawn(role, goal, parent_id=None, notes=None, conv_id=None,
             "subagent %r has no API key pool. Subagents never use the main "
             "Jarvis key — add one with: jarvis subagent-keys %s <provider> <key> [key2 ...]"
             % (role, role))
+
+    if not conv_id:
+        from . import conversations
+        conv_id = conversations.new_conversation(
+            title="[%s] %s" % (role, goal[:160]),
+            make_current=False, origin="subagent", origin_detail=role,
+        )
 
     limit = int(cfg.get("max_concurrent") or MAX_CONCURRENT_DEFAULT)
 

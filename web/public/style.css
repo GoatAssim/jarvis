@@ -2989,6 +2989,81 @@ body.layout--focus .panel-menu--focus-only{ display: inline-flex; }
 }
 .daemon-input-row input{ font-family: var(--font-mono); }
 
+/* Collapsible "thinking" trace — see renderThreadExtra's "thinking" case
+   for why this only appears after a round finishes rather than live. Native
+   <details>/<summary> rather than a custom toggle: free keyboard support
+   and no JS needed to open/close it. */
+.thinking-block{
+  margin: 4px 0 10px; max-width: 720px;
+  border: 1px solid var(--border); border-radius: var(--radius);
+  background: var(--bg-panel-2);
+}
+.thinking-block__summary{
+  cursor: pointer; padding: 8px 12px; font-size: 12px;
+  color: var(--text-dim); font-family: var(--font-mono);
+  user-select: none;
+}
+.thinking-block__summary:hover{ color: var(--text); }
+.thinking-block__text{
+  margin: 0; padding: 0 12px 12px; max-height: 320px; overflow-y: auto;
+  white-space: pre-wrap; word-break: break-word;
+  font-family: var(--font-mono); font-size: 12px; line-height: 1.5;
+  color: var(--text-dim);
+}
+
+/* --- subagents -------------------------------------------------------- */
+.subagents-badge{
+  display: inline-flex; align-items: center; justify-content: center;
+  min-width: 16px; height: 16px; margin-left: 6px; padding: 0 4px;
+  border-radius: 999px; background: var(--accent); color: var(--bg);
+  font-size: 10px; font-weight: 700; line-height: 16px;
+}
+.subagents-cycle{ display: flex; gap: 4px; }
+
+.subagent-row.is-active{
+  background: rgba(79, 210, 255, 0.09);
+  border-left-color: var(--accent);
+}
+.subagent-dot{
+  display: inline-block; width: 7px; height: 7px; border-radius: 50%;
+  margin-right: 6px; background: var(--text-dimmer); flex-shrink: 0;
+}
+.subagent-dot.is-busy{ background: var(--accent); box-shadow: 0 0 6px var(--accent-glow); }
+.subagent-dot.is-ok{ background: var(--green); }
+.subagent-dot.is-error{ background: #f87171; box-shadow: 0 0 6px rgba(248,113,113,0.6); }
+.subagent-dot.is-warn{ background: var(--gold); }
+.subagent-dot.is-muted{ background: var(--text-dimmer); }
+
+.subagent-detail-status{
+  font-size: 11px; font-family: var(--font-mono); text-transform: uppercase;
+  letter-spacing: 0.04em; padding: 2px 8px; border-radius: 999px;
+  border: 1px solid var(--border); color: var(--text-dim);
+}
+.subagent-detail-status.is-busy{ color: var(--accent); border-color: var(--accent-soft); }
+.subagent-detail-status.is-ok{ color: var(--green); border-color: var(--green); }
+.subagent-detail-status.is-error{ color: var(--red); border-color: var(--red); }
+.subagent-detail-status.is-warn{ color: var(--gold); border-color: var(--gold); }
+.subagent-detail-status.is-muted{ color: var(--text-dimmer); }
+
+.subagent-detail{ flex: 1; overflow-y: auto; padding: 4px 2px; }
+.subagent-detail__row{
+  display: flex; flex-wrap: wrap; gap: 4px 14px; margin-bottom: 10px;
+  font-family: var(--font-mono); font-size: 11.5px; color: var(--text-dim);
+}
+.skills-pane__head--sub{ padding: 6px 0 4px; }
+.skills-pane__head--sub h3{ font-size: 11px; }
+
+.subagent-plan-step{
+  font-family: var(--font-mono); font-size: 12px; padding: 3px 0;
+  color: var(--text-dim);
+}
+.subagent-plan-step--done{ color: var(--green); }
+.subagent-plan-step--failed{ color: #f87171; }
+.subagent-plan-step--skipped{ color: var(--text-dimmer); text-decoration: line-through; }
+
+.subagent-history{ max-height: 220px; }
+.subagent-detail-actions{ border-top: 1px solid var(--border); margin-top: 8px; padding-top: 8px; }
+
 /* --- backlog -------------------------------------------------------------
    A five-column board that scrolls sideways rather than squashing: a kanban
    column narrower than its card titles stops being readable long before it
