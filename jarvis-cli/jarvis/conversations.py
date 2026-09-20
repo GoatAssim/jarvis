@@ -363,6 +363,26 @@ def get_conversation(conv_id):
     return _load_conv(conv_id)
 
 
+def last_assistant_reply(conv_id):
+    """The most recent exchange's `jarvis` text for this conversation, or
+    None if there isn't one (no conversation, no exchanges yet, or the
+    last exchange has no reply recorded — e.g. an abandoned turn). Used by
+    ai_client.ask() (master plan F.10) to recognize when the CURRENT
+    user_text is Jarvis's own previous reply pasted back verbatim, so
+    routing can strip it out instead of scoring the assistant's own
+    closing line (e.g. "Let me know if you'd like me to handle it...")
+    against the user's actual instruction."""
+    if not is_valid_id(conv_id):
+        return None
+    record = _load_conv(conv_id)
+    if not record:
+        return None
+    exchanges = record.get("exchanges") or []
+    if not exchanges:
+        return None
+    return exchanges[-1].get("jarvis") or None
+
+
 def list_conversations(query=None):
     """Every conversation's lightweight index entry, most recently updated
     first. `query` filters on title/soft_context/id (case-insensitive
