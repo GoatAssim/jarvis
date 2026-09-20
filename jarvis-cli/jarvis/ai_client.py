@@ -14,6 +14,7 @@ import threading
 import os
 import subprocess
 import sys
+import time
 
 from . import ai_config, ai_providers, command_tools, conversations, memory, playnite_config, skill_stickiness, skills, stats, tool_safety
 from . import dev_agent_events as _dev_agent_events
@@ -2097,6 +2098,29 @@ _TOOL_TRACE_LINE = re.compile(r"^\[(called |tool result)", re.I)
 _TOOL_TRACE_ANY = re.compile(r"\[called\s+[A-Za-z0-9_]+\s+with\s+\{", re.I)
 
 
+def _short_429_wait_seconds(kind, failure, cap):
+    """Decision D5 (master plan F.9/F.16): seconds to wait before retrying
+    the SAME key once, or None if this failure doesn't qualify.
+
+    Only a rate-limit/quota failure (KIND_KEY, matching the same
+    "rate limited"/"quota" text key_health.record_failure keys off of) that
+    stated an actual delay of at most `cap` seconds qualifies — a
+    bad/rejected key (401/403, still KIND_KEY but nothing to wait out), an
+    unstated delay, or a delay longer than `cap` all return None and rotate
+    to the next key immediately, exactly as before D5. `cap` <= 0 disables
+    this entirely (defaults.max_429_wait_seconds = 0).
+    """
+    if cap <= 0 or kind != ai_providers.KIND_KEY:
+        return None
+    err = str(failure or "").lower()
+    if "rate limited" not in err and "quota" not in err:
+        return None
+    delay = key_health.parse_retry_delay(failure)
+    if delay is None or delay > cap:
+        return None
+    return max(delay, 0.0)
+
+
 def _is_tool_trace_reply(text):
     """True when the model echoed internal tool-call scaffolding instead of
     answering the user — treat as a failed attempt and keep failing over."""
@@ -2889,7 +2913,20 @@ def ask(user_text, commands=None, on_attempt=None, on_tool_call=None, on_tool_re
     # ToolContext (see tools.ToolContext / _make_tool_executor's docstring).
     # grace=True lets the model make ONE last-chance call after the budget is
     # spent (decision D1; switch off with defaults.grace_call = false).
-    round_budget = ai_providers.RoundBudget(grace=bool((cfg.get("defaults") or {}).get("grace_call", True)))
+    # discovery_limit gives search_tools/get_tool_schema/load_skill calls (and
+    # made-up tool names) their own small separate pool instead of eating the
+    # real work budget (decision D1's other half, F.2; switch off with
+    # defaults.discovery_call_budget = 0). Default of 3 covers the F.2
+    # evidence's worst case (six straight discovery calls) with room to
+    # spare without materially raising how much total work a turn can do.
+    _defaults = cfg.get("defaults") or {}
+    round_budget = ai_providers.RoundBudget(
+        grace=bool(_defaults.get("grace_call", True)),
+        discovery_limit=int(_defaults.get("discovery_call_budget", 3) or 0),
+    )
+    # D5: cap (seconds) on waiting out a 429's OWN stated retry delay before
+    # rotating keys. 30 by default; 0 disables (see _short_429_wait_seconds).
+    max_429_wait = float(_defaults.get("max_429_wait_seconds", 30) or 0)
     forced_end = None
 
     tool_executor = _make_tool_executor(
@@ -3055,6 +3092,37 @@ def ask(user_text, commands=None, on_attempt=None, on_tool_call=None, on_tool_re
                 result = ai_providers.AIResult(False, error=f"unexpected error: {e}")
             finally:
                 ai_providers.clear_log_context()
+
+            # D5 (master plan F.9/F.16): a 429 that stated a short retry
+            # delay is worth waiting out ONCE, on this SAME key, rather than
+            # abandoning the attempt and rotating — a failed attempt here
+            # cost the transcript nothing (no request/response was appended
+            # to `messages`), so re-trying loses nothing but the wait
+            # itself. Only fires for a genuine rate-limit/quota failure with
+            # a stated delay <= max_429_wait; anything else (a bad key, an
+            # unstated or long delay) rotates immediately as before.
+            if not result.ok:
+                wait_s = _short_429_wait_seconds(result.kind, result.error, max_429_wait)
+                if wait_s is not None:
+                    if on_attempt:
+                        on_attempt(f"{key_label} [rate limited \u2014 waiting {wait_s:.0f}s before retrying]")
+                    time.sleep(wait_s)
+                    ai_providers.set_log_context(conv_id, key_label, on_tool_usage=on_tool_result,
+                                                base_url=resolved.get("base_url"))
+                    ai_providers.set_thinking(think_level)
+                    try:
+                        result = adapter(resolved, messages, resolved["timeout"],
+                                         tools=tool_schemas, tool_executor=tool_executor,
+                                         round_budget=round_budget,
+                                         cfg_defaults=cfg["defaults"])
+                    except Exception as e:
+                        result = ai_providers.AIResult(False, error=f"unexpected error: {e}")
+                    finally:
+                        ai_providers.clear_log_context()
+                    if not result.ok:
+                        result.error = f"{result.error} [waited {wait_s:.0f}s for the stated rate limit, still failed]"
+                    if on_attempt:
+                        on_attempt(key_label)
 
             if result.ok and _is_tool_trace_reply(result.text):
                 result = ai_providers.AIResult(

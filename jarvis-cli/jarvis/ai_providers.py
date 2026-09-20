@@ -54,6 +54,21 @@ GLOBAL_MAX_TOOL_ROUNDS = MAX_TOOL_ROUNDS + 1  # 6: hard cap across an ENTIRE ask
 # resending every round does not. See jarvis-token-optimization-handoff.md.
 
 
+# F.2/D1: tool names that cost the caller nothing to call — they only ever
+# look something up (a keyword search, a schema fetch, a skill body), never
+# touch the filesystem or the world. A model probing one of these, or typing
+# a name that turns out not to exist at all, used to spend a full round of
+# the same 6-round GLOBAL_MAX_TOOL_ROUNDS budget as a real tool call — see
+# master plan F.1/F.2 evidence (six straight discovery calls before the one
+# real call, which F.1 then discarded for arriving after the budget was
+# spent). RoundBudget.take() below gives these their own small, separate
+# pool instead, so looking a tool up doesn't cost the ability to actually do
+# the work. Deliberately NOT exhaustive of every read-only tool in the
+# catalog (e.g. get_battery) — only the ones whose entire JOB is discovery
+# itself, mirroring what F.2's suggested fix named.
+DISCOVERY_TOOL_NAMES = frozenset({"search_tools", "get_tool_schema", "load_skill"})
+
+
 class RoundBudget:
     """Cross-attempt tool-round counter shared by every provider/key tried for one ask().
 
@@ -66,7 +81,7 @@ class RoundBudget:
     budget on the next failover.
     """
 
-    def __init__(self, limit=GLOBAL_MAX_TOOL_ROUNDS, grace=False):
+    def __init__(self, limit=GLOBAL_MAX_TOOL_ROUNDS, grace=False, discovery_limit=0):
         self.limit = limit
         self.used = 0
         # F.1 "grace call": ONE extra, last-chance tool round for the whole
@@ -76,11 +91,55 @@ class RoundBudget:
         # ai_client.ask() turns it on, and only via defaults.grace_call.
         self.grace = bool(grace)
         self.grace_used = False
+        # F.2/D1: a separate, small cap for discovery-only rounds (see
+        # DISCOVERY_TOOL_NAMES / take() below). 0 by default — same reasoning
+        # as `grace` above: a caller that doesn't ask for it (code_agent's
+        # inner loop, existing tests, anything calling take() with no
+        # `names`) keeps exactly the budget it always had. Only
+        # ai_client.ask() turns it on, via defaults.discovery_call_budget.
+        self.discovery_limit = max(0, int(discovery_limit or 0))
+        self.discovery_used = 0
 
     def remaining(self):
         return max(0, self.limit - self.used)
 
-    def take(self):
+    def _is_discovery_round(self, names):
+        """True when every name in `names` is either a known discovery tool
+        or a name that doesn't exist in the catalog at all (a made-up tool
+        name) — both cost nothing to actually call, which is exactly what
+        made F.1/F.2's evidence painful: probing them still burned real
+        work rounds. A round that mixes in even one REAL tool call is
+        charged normally, so this never lets genuine work hide behind a
+        cheap discovery call riding along in the same round."""
+        if not names:
+            return False
+        from . import tool_registry
+        for n in names:
+            if n in DISCOVERY_TOOL_NAMES:
+                continue
+            if n not in tool_registry.TOOL_INDEX:
+                continue  # unknown/made-up name — also free, see F.2
+            return False
+        return True
+
+    def take(self, names=None):
+        """Charge one round. `names` — the tool name(s) about to be called
+        this round — is optional and defaults to None, which reproduces the
+        exact pre-D1 behavior (always draw from the main `limit`/`used`
+        pool) for every caller that doesn't pass it. When every name in
+        `names` is discovery-only (see _is_discovery_round) and this budget
+        has a discovery_limit configured, the round is drawn from the
+        separate discovery pool instead — until THAT is exhausted, at which
+        point discovery calls fall back to costing a normal round, same as
+        before D1 existed."""
+        if names is not None and self.discovery_limit and self._is_discovery_round(names):
+            if self.discovery_used < self.discovery_limit:
+                self.discovery_used += 1
+                return True
+            # Discovery pool spent — fall through and charge the real
+            # budget instead of returning False outright, so a model that's
+            # burned its free lookups can still make (and be charged for)
+            # one more attempt rather than being cut off mid-round.
         if self.used >= self.limit:
             return False
         self.used += 1
@@ -1559,7 +1618,8 @@ def call_openai_compatible(provider, messages, timeout, tools=None, tool_executo
         tool_calls = message.get("tool_calls")
         _capture_pending(_openai_style_calls(tool_calls))
 
-        if tool_calls and tool_executor and round_num < MAX_TOOL_ROUNDS and round_budget.take():
+        if tool_calls and tool_executor and round_num < MAX_TOOL_ROUNDS \
+                and round_budget.take([n for n, _ in _openai_style_calls(tool_calls)]):
             ran_tools = True
             working_messages.append(message)
             for call in tool_calls:
@@ -1593,7 +1653,8 @@ def call_openai_compatible(provider, messages, timeout, tools=None, tool_executo
 
         allowed = {t.get("name") for t in (tools or []) if t.get("name")}
         text_calls = _extract_text_tool_calls(text, allowed)
-        if text_calls and tool_executor and round_num < MAX_TOOL_ROUNDS and round_budget.take():
+        if text_calls and tool_executor and round_num < MAX_TOOL_ROUNDS \
+                and round_budget.take([n for n, _ in text_calls]):
             ran_tools = True
             result_bits = []
             for name, args in text_calls:
@@ -1747,7 +1808,8 @@ def call_anthropic(provider, messages, timeout, tools=None, tool_executor=None, 
         tool_use_blocks = [b for b in blocks if isinstance(b, dict) and b.get("type") == "tool_use"]
         _capture_pending([(b.get("name", ""), b.get("input") or {}) for b in tool_use_blocks])
 
-        if tool_use_blocks and tool_executor and round_num < MAX_TOOL_ROUNDS and round_budget.take():
+        if tool_use_blocks and tool_executor and round_num < MAX_TOOL_ROUNDS \
+                and round_budget.take([b.get("name", "") for b in tool_use_blocks]):
             ran_tools = True
             # `blocks` is appended whole, thinking blocks included. That is
             # required, not incidental: Anthropic rejects a replayed
@@ -2117,7 +2179,8 @@ def call_gemini(provider, messages, timeout, tools=None, tool_executor=None, rou
             _capture_pending([(p["functionCall"].get("name", ""), p["functionCall"].get("args") or {})
                               for p in call_parts])
 
-            if call_parts and tool_executor and round_num < MAX_TOOL_ROUNDS and round_budget.take():
+            if call_parts and tool_executor and round_num < MAX_TOOL_ROUNDS \
+                    and round_budget.take([p["functionCall"].get("name", "") for p in call_parts]):
                 ran_tools = True
                 # Thought parts are stripped before the model turn is echoed
                 # back. Gemini rejects a replayed turn that still contains
@@ -2287,7 +2350,8 @@ def call_cohere(provider, messages, timeout, tools=None, tool_executor=None, rou
         tool_calls = message.get("tool_calls")
         _capture_pending(_openai_style_calls(tool_calls))
 
-        if tool_calls and tool_executor and round_num < MAX_TOOL_ROUNDS and round_budget.take():
+        if tool_calls and tool_executor and round_num < MAX_TOOL_ROUNDS \
+                and round_budget.take([n for n, _ in _openai_style_calls(tool_calls)]):
             ran_tools = True
             working_messages.append(message)
             for call in tool_calls:
@@ -2420,7 +2484,8 @@ def call_ollama(provider, messages, timeout, tools=None, tool_executor=None, rou
         tool_calls = message.get("tool_calls")
         _capture_pending(_openai_style_calls(tool_calls))
 
-        if tool_calls and tool_executor and round_num < MAX_TOOL_ROUNDS and round_budget.take():
+        if tool_calls and tool_executor and round_num < MAX_TOOL_ROUNDS \
+                and round_budget.take([n for n, _ in _openai_style_calls(tool_calls)]):
             ran_tools = True
             working_messages.append(message)
             for call in tool_calls:
