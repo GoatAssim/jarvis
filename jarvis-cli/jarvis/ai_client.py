@@ -2800,8 +2800,23 @@ def ask(user_text, commands=None, on_attempt=None, on_tool_call=None, on_tool_re
                                  assistant_name=assistant_name, address_user_as=address,
                                  usage=result.usage)
 
-            attempts.append((key_label, result.error))
-            trace.note_attempt_failed(key_label, result.error)
+            # A rejection of the REQUEST itself (Groq's "Tool choice is none,
+            # but model called a tool", a tool-argument schema mismatch, ...)
+            # is not a key problem: the identical payload gets the identical
+            # answer from every other key on this provider. Move on to the
+            # next provider instead of burning the rest of this one's keys.
+            # Only a whitelist of observed shapes qualifies — see
+            # ai_providers.is_request_shape_error — so a bad/rate-limited key
+            # still rotates exactly as before.
+            failure = result.error
+            skip_remaining_keys = ai_providers.is_request_shape_error(failure) and i < len(keys)
+            if skip_remaining_keys:
+                failure = (f"{failure} [request rejected on its shape, not because of the key - "
+                           f"skipping this provider's other {len(keys) - i} key(s)]")
+            attempts.append((key_label, failure))
+            trace.note_attempt_failed(key_label, failure)
+            if skip_remaining_keys:
+                break
 
     # Every provider failed on the closing text call. That used to always
     # mean "no provider answered" and get reported as a hard failure — but

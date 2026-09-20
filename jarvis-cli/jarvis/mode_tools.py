@@ -9,6 +9,42 @@ import at the exact moment ai_client is still mid-initialization.
 """
 
 
+def _mode_cost_pct(mode):
+    """Relative token cost of a mode, read from its "N% Capacity" label
+    (the registry has no numeric cost field, and its ORDER is not cost order:
+    full comes first). None for a label with no percentage -- a custom mode
+    that doesn't follow the convention is never treated as "more expensive"."""
+    import re
+    from . import ai_client
+
+    m = re.match(r"\s*(\d+)\s*%", ai_client.MODE_LABELS.get(mode, "") or "")
+    return int(m.group(1)) if m else None
+
+
+def _active_provider_is_local(cfg):
+    """True when the provider/key attempt driving THIS tool call is a local
+    model: type "ollama", or any provider pointed at this machine (covers a
+    second Ollama entry reached through its OpenAI-compatible /v1 endpoint).
+    False outside an ask() (a direct `jarvis tool ...` run, a test), so a
+    person driving this by hand is never restricted."""
+    from urllib.parse import urlparse
+
+    from . import ai_client, ai_providers
+
+    label = ai_providers.active_provider_label()
+    if not label:
+        return False
+    name = label.split(" (key ", 1)[0]  # "gemini (key 2/10)" -> "gemini"
+    for provider in cfg.get("providers") or []:
+        if ai_client._provider_label(provider) != name:
+            continue
+        if provider.get("type") == "ollama":
+            return True
+        host = (urlparse(str(provider.get("base_url") or "")).hostname or "").lower()
+        return host in ("localhost", "127.0.0.1", "::1", "0.0.0.0")
+    return False
+
+
 def tool_get_capacity_mode(args=None):
     from . import ai_client, ai_config
 
@@ -46,6 +82,31 @@ def tool_set_capacity_mode(args):
             "options": options,
         }
 
+    # A model must not raise the token budget on its own while a LOCAL model
+    # is the one answering. mode is one global setting, so a raise made here
+    # also becomes what every later ask runs at -- and on local hardware a
+    # bigger prompt/answer budget is minutes of extra generation, not extra
+    # quota. One logged turn showed the setting climbing (100% -> 150% ->
+    # 400%) with two multi-minute gaps right after. Nothing in jarvis raises
+    # it automatically on failure or retry; the only writers are a person
+    # (web UI / `jarvis mode-set`, neither of which goes through this tool)
+    # and this tool. Lowering is always allowed.
+    requested_cost, current_cost = _mode_cost_pct(requested), _mode_cost_pct(current)
+    if (requested_cost is not None and current_cost is not None
+            and requested_cost > current_cost and _active_provider_is_local(cfg)):
+        return {
+            "error": (
+                f"not changed: a local model is answering right now, and raising capacity "
+                f"({ai_client.MODE_LABELS.get(current, current)} -> "
+                f"{ai_client.MODE_LABELS.get(requested, requested)}) would make every reply much "
+                f"slower on local hardware. Tell the user; they can raise it themselves from "
+                f"the web UI's capacity switch or with `jarvis mode-set {requested}`."
+            ),
+            "refused": True,
+            "current_mode": current,
+            "options": options,
+        }
+
     new_mode = ai_client.set_mode(requested)
     return {
         "ok": True,
@@ -75,7 +136,8 @@ CAPACITY_TOOL_SCHEMAS = [
             "are valid \u2014 the set of modes can grow over time. Use if the user asks to "
             "save tokens / go more compact, or wants deeper context / fuller answers. "
             "Takes effect starting with the user's NEXT message \u2014 don't claim your reply "
-            "right now is already using the new mode."
+            "right now is already using the new mode. Only change it when the user asks; "
+            "while a local model is answering, raising capacity is refused."
         ),
         "parameters": {
             "type": "object",
