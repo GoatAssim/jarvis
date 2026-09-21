@@ -2940,6 +2940,45 @@ window.JARVIS_TEST_CHECKLIST = /*JSON-BEGIN*/ {
     "Copying the same text again may not count as a change."
    ]
   },
+  "clipboard_watch_get_pattern": {
+   "group": "clipboard",
+   "does": "Reads the regex pattern the background clipboard-watch daemon currently filters on.",
+   "steps": [
+    {
+     "ask": "What's the clipboard watcher currently set to match?",
+     "expect": "Reports the current pattern, or that it's unset (notifies on every change)."
+    },
+    {
+     "run": {},
+     "expect": "Returns pattern: null when unset, otherwise the regex string."
+    }
+   ]
+  },
+  "clipboard_watch_set_pattern": {
+   "group": "clipboard",
+   "does": "Sets (or clears) the regex the background clipboard-watch daemon filters on.",
+   "steps": [
+    {
+     "ask": "Only notify me when I copy something that looks like an invoice number.",
+     "expect": "Confirms the pattern was set; a matching future copy triggers a notification, a non-matching one doesn't."
+    },
+    {
+     "run": {
+      "pattern": "\\d{3}-\\d{4}"
+     },
+     "expect": "clipboard_watch_get_pattern afterwards returns the same pattern."
+    },
+    {
+     "run": {},
+     "expect": "Omitting pattern (or passing '') clears it back to notify-on-every-change."
+    }
+   ],
+   "watch": [
+    "This only changes what an already-running watcher matches on \u2014 use daemon_start/daemon_stop ('clipboard-watch') to turn the daemon itself on or off.",
+    "An invalid regex is rejected with ok:false and leaves the previous pattern untouched, rather than raising or silently breaking the watcher.",
+    "No confirmation prompt (owner decision D7) \u2014 the pattern is only ever matched against, never executed."
+   ]
+  },
   "browser_goto": {
    "group": "browser",
    "does": "Opens a URL in a persistent, logged-in browser session.",

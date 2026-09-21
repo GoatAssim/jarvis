@@ -136,6 +136,8 @@ TOOL_GROUPS = {
         "clipboard_set",
         "clipboard_clear",
         "clipboard_wait_for_change",
+        "clipboard_watch_get_pattern",
+        "clipboard_watch_set_pattern",
     ],
     "system_control": [
         "radio_status",
@@ -342,6 +344,9 @@ TOOL_KEYWORDS = {
     "clipboard_clear": {"clear the clipboard": 10, "empty the clipboard": 10},
     "clipboard_wait_for_change": {"tell me when i copy": 10, "watch the clipboard": 9,
                                   "wait for me to copy": 9, "let me know when i copy": 10},
+    "clipboard_watch_get_pattern": {"clipboard watch pattern": 9, "what is the clipboard watch matching": 9},
+    "clipboard_watch_set_pattern": {"only notify me when i copy": 9, "clipboard watch pattern": 8,
+                                    "filter the clipboard watch": 9, "watch the clipboard for": 8},
 
     "package_search": {"package": 6, "install": 4, "is there a package": 8},
     "package_install": {"install": 6, "install package": 10},

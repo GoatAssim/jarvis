@@ -221,6 +221,75 @@ def test_cli_config_rejects_bad_regex():
     assert "invalid --pattern" in buf.getvalue() or "\"ok\": false" in buf.getvalue().lower()
 
 
+# --- D7: model-callable pattern get/set (clipboard_tools.py) ----------------
+# The model can already start/stop/inspect this daemon for free via
+# daemon_start/daemon_stop/daemon_status — no new tool needed for that half.
+# These two are the one part of D7 that needed new code: letting the model
+# read/change what the watcher filters ON.
+
+def test_tool_get_pattern_reflects_config():
+    cw.set_pattern(None)
+    assert ct.tool_clipboard_watch_get_pattern()["pattern"] is None
+    cw.set_pattern("invoice")
+    assert ct.tool_clipboard_watch_get_pattern()["pattern"] == "invoice"
+
+
+def test_tool_set_pattern_round_trips():
+    result = ct.tool_clipboard_watch_set_pattern({"pattern": r"\d{3}-\d{4}"})
+    assert result["ok"] is True
+    assert result["pattern"] == r"\d{3}-\d{4}"
+    assert cw.load_config()["pattern"] == r"\d{3}-\d{4}"
+
+
+def test_tool_set_pattern_empty_clears():
+    cw.set_pattern("something")
+    result = ct.tool_clipboard_watch_set_pattern({"pattern": ""})
+    assert result["ok"] is True
+    assert result["pattern"] is None
+    assert cw.load_config()["pattern"] is None
+
+
+def test_tool_set_pattern_omitted_also_clears():
+    cw.set_pattern("something")
+    result = ct.tool_clipboard_watch_set_pattern({})
+    assert result["ok"] is True
+    assert cw.load_config()["pattern"] is None
+
+
+def test_tool_set_pattern_rejects_bad_regex_without_raising():
+    # A tool call must never let a re.error escape into the caller — the
+    # model just gets ok:False back, same as any other tool failure.
+    cw.set_pattern("keep-me")
+    result = ct.tool_clipboard_watch_set_pattern({"pattern": "(unclosed"})
+    assert result["ok"] is False
+    assert "error" in result
+    # And the bad attempt must not have clobbered the last-good pattern.
+    assert cw.load_config()["pattern"] == "keep-me"
+
+
+def test_tool_set_pattern_rejects_non_string():
+    result = ct.tool_clipboard_watch_set_pattern({"pattern": 12345})
+    assert result["ok"] is False
+
+
+def test_tool_set_pattern_no_confirm_required():
+    # D7 option A: model-callable with no confirmation gate, same footing
+    # as daemon_start/daemon_stop already have for this daemon — a regex
+    # string can only ever be matched against, never executed.
+    from jarvis import tool_safety
+    assert tool_safety.requires_confirmation("clipboard_watch_set_pattern") is False
+
+
+def test_tool_registered_in_clipboard_group_and_schemas():
+    from jarvis import tool_registry
+    from jarvis import tools as system_tools
+    assert "clipboard_watch_set_pattern" in tool_registry.TOOL_GROUPS["clipboard"]
+    assert "clipboard_watch_get_pattern" in tool_registry.TOOL_GROUPS["clipboard"]
+    assert "clipboard_watch_set_pattern" in system_tools.TOOLS
+    schema_names = {s["name"] for s in ct.CLIPBOARD_TOOL_SCHEMAS}
+    assert {"clipboard_watch_get_pattern", "clipboard_watch_set_pattern"} <= schema_names
+
+
 def _run():
     tests = [v for k, v in sorted(globals().items())
              if k.startswith("test_") and callable(v)]

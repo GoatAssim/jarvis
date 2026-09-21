@@ -1562,7 +1562,19 @@ def _make_tool_executor(on_tool_call, schemas=None, on_confirm_request=None,
         # here means "needs review" now reliably routes through the same
         # notification channel as "needs confirmation".
         confirm_meta = None
-        if (tool_safety.requires_confirmation(name)
+        # D6: a small, fixed allow-list of genuinely read-only run_shell
+        # commands (dir, type, where, echo — see tool_safety's
+        # is_allowlisted_read_only_shell docstring) skips confirm/ai_review
+        # entirely, so the same 'dir' doesn't cost a prompt AND a Groq
+        # risk-review call every single time it's asked for (F.12 evidence:
+        # one such confirm cost 32s of the user's time). Deliberately its
+        # own top-of-block check, isolated from the general gate below —
+        # confirm gating is AGENTS.md-protected, so this stays a narrow,
+        # exact allow-list rather than folding into any broader condition.
+        if name == "run_shell" and tool_safety.is_allowlisted_read_only_shell(
+                arguments.get("command") if isinstance(arguments, dict) else None):
+            pass
+        elif (tool_safety.requires_confirmation(name)
                 or command_tools.command_call_requires_confirmation(name, arguments)
                 or tool_safety.requires_ai_review(name)
                 or command_tools.command_call_requires_ai_review(name, arguments)):
