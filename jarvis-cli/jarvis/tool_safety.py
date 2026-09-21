@@ -24,6 +24,7 @@ under a tool's description ("Toggle warning:" / "Toggle AI review:"), via
 """
 
 import json
+import re
 from pathlib import Path
 
 JARVIS_DIR = Path.home() / ".jarvis"
@@ -121,6 +122,45 @@ def requires_confirmation(name):
 
 def requires_ai_review(name):
     return get_flags(name)["ai_review"]
+
+
+# ---------------------------------------------------------------------------
+# D6 (F.12 "confirm churn"): a small, fixed allow-list of genuinely
+# read-only run_shell commands that can skip the confirm/ai_review gate
+# entirely. This is deliberately its own narrow function, not a config
+# toggle or something the model can extend — confirm gating is
+# AGENTS.md-protected, so the list only ever grows via another explicit,
+# reviewed change here, never at runtime.
+#
+# F.12's evidence: Case 1 asked for confirmation on the same read-only
+# `dir` three separate times (each also triggering a Groq risk-review
+# call — one confirm alone cost the user 32 seconds). None of dir/type/
+# where/echo can mutate, delete, install, or execute anything else — but
+# only when called EXACTLY like that, with nothing else riding along, so
+# the match is intentionally strict in both directions:
+#   - the first whitespace-separated token (case-insensitively) must BE
+#     one of the four verbs, not just start with one ("dirty" doesn't
+#     count, nor does a path that happens to start with "dir");
+#   - the command must contain no shell metacharacters at all, so nothing
+#     can be chained after a safe-looking prefix (e.g. "dir & del *",
+#     "echo hi > startup.cmd"). F.4 already runs run_shell in argv mode
+#     with no shell=True, so a metacharacter wouldn't be shell-interpreted
+#     at execution time either — but the confirm decision is made before
+#     that, and staying conservative here costs nothing.
+# Anything that doesn't match exactly still goes through the normal gate.
+# ---------------------------------------------------------------------------
+_READ_ONLY_SHELL_COMMANDS = frozenset({"dir", "type", "where", "echo"})
+_SHELL_METACHAR_RE = re.compile(r"[&|;`$<>\n\r]")
+
+
+def is_allowlisted_read_only_shell(command):
+    if not isinstance(command, str):
+        return False
+    command = command.strip()
+    if not command or _SHELL_METACHAR_RE.search(command):
+        return False
+    first = command.split(None, 1)[0].lower()
+    return first in _READ_ONLY_SHELL_COMMANDS
 
 
 def set_flag(name, key, value):

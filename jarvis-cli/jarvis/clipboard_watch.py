@@ -30,10 +30,12 @@ The optional match pattern is plain data (a regex string used only for
 `re.search` against clipboard text, never executed or shelled out), so it
 lives in its own small config file — same "plain JSON, created-on-first-
 use, re-read-every-call" convention as notifier.py's channel config —
-edited via `jarvis clipboard-watch-config` (a human CLI action, mirroring
-`channels-set`). It is deliberately NOT exposed as an AI tool yet; see
-CLIPBOARD_WATCH_PATTERN_TOOL in the master plan's decision log for why that
-was left as an open call for the owner rather than shipped by default.
+editable by hand via `jarvis clipboard-watch-config`, or by the model via
+`clipboard_tools.tool_clipboard_watch_set_pattern` (owner decision D7:
+yes, the model may set it — see the master plan's decision log). No
+confirmation gate on that tool, same footing as the daemon's own
+start/stop already have, since the pattern can only ever be matched
+against, never executed.
 """
 
 import re

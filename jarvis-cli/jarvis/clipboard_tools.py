@@ -12,6 +12,7 @@ exports `tools.py` splices into `CORE_TOOL_SCHEMAS`/`TOOLS`.
 
 import os
 import platform
+import re
 import subprocess
 import time
 
@@ -242,6 +243,37 @@ def tool_clipboard_wait_for_change(args=None):
     return {"ok": False, "timed_out": True}
 
 
+# D7: the background clipboard-watch daemon's match pattern, made
+# model-callable. Deliberately narrow — this is the ONE part of Part B
+# owner decision D7 left open (see clipboard_watch.py's own module
+# docstring): the model can already start/stop/inspect the watcher itself
+# via daemon_start/daemon_stop/daemon_status (no new tool needed for
+# that), it just couldn't change what the watcher filters ON. The pattern
+# is plain data — a regex string matched with re.search against clipboard
+# text, never executed or shelled out — which is why this is safe to
+# expose with no confirmation gate, same footing as start/stop already
+# have. clipboard_watch.set_pattern() does the real validation
+# (re.compile) and persists it; imported lazily to avoid a circular
+# import (clipboard_watch imports this module for its own reasons).
+def tool_clipboard_watch_get_pattern(args=None):
+    from . import clipboard_watch
+    cfg = clipboard_watch.load_config()
+    return {"ok": True, "pattern": cfg.get("pattern")}
+
+
+def tool_clipboard_watch_set_pattern(args=None):
+    from . import clipboard_watch
+    args = args or {}
+    pattern = args.get("pattern")
+    if pattern is not None and not isinstance(pattern, str):
+        return {"ok": False, "error": "pattern must be a string (or omitted/empty to clear)."}
+    try:
+        cfg = clipboard_watch.set_pattern(pattern)
+    except re.error as exc:
+        return {"ok": False, "error": f"not a valid regex: {exc}"}
+    return {"ok": True, "pattern": cfg.get("pattern")}
+
+
 CLIPBOARD_TOOL_SCHEMAS = [
     {
         "name": "clipboard_get",
@@ -288,6 +320,37 @@ CLIPBOARD_TOOL_SCHEMAS = [
             "required": [],
         },
     },
+    {
+        "name": "clipboard_watch_get_pattern",
+        "description": (
+            "Get the regex pattern the background clipboard-watch daemon currently "
+            "filters on (None/empty means it notifies on every change). Use before "
+            "clipboard_watch_set_pattern to see the current value rather than "
+            "overwriting it blind."
+        ),
+        "parameters": {"type": "object", "properties": {}, "required": []},
+    },
+    {
+        "name": "clipboard_watch_set_pattern",
+        "description": (
+            "Set the regex pattern the background clipboard-watch daemon filters "
+            "on — only clipboard changes matching this pattern (via re.search) "
+            "trigger a notification. Omit pattern, or pass an empty string, to "
+            "clear it (notify on every change). This only changes what the "
+            "already-running watcher matches on; use daemon_start/daemon_stop "
+            "('clipboard-watch') to turn it on or off."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "pattern": {
+                    "type": "string",
+                    "description": "A Python regex. Omit or leave empty to clear (match everything).",
+                },
+            },
+            "required": [],
+        },
+    },
 ]
 
 CLIPBOARD_TOOLS = {
@@ -295,4 +358,6 @@ CLIPBOARD_TOOLS = {
     "clipboard_set": tool_clipboard_set,
     "clipboard_clear": tool_clipboard_clear,
     "clipboard_wait_for_change": tool_clipboard_wait_for_change,
+    "clipboard_watch_get_pattern": tool_clipboard_watch_get_pattern,
+    "clipboard_watch_set_pattern": tool_clipboard_watch_set_pattern,
 }
