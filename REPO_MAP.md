@@ -65,7 +65,12 @@ jarvis-cli/jarvis/
     # --- the brain -----------------------------------------------------
     ai_client.py          ask(), prompt assembly, the tool executor,
                           provider/key failover
-    ai_providers.py       per-provider adapters + the tool-round loop
+    ai_providers.py       per-provider adapters + the tool-round loop.
+                          finish_signal() normalizes each provider's own stop
+                          field to finish "tool"|"done" + cut None/"length"/
+                          "refused"/"filter" (Sec5); _surface_interim_text()
+                          keeps + live-fires text sent alongside a tool call,
+                          on all five adapters now. tests/test_finish_signal.py
     ai_config.py          ~/.jarvis/ai_config.json
     tool_router.py        keyword router — which tool GROUP does this need
     tool_registry.py      static: groups, keywords, per-group guidance

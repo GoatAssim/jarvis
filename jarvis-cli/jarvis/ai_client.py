@@ -386,11 +386,12 @@ class AskResult:
     """Everything cli.py (or, via the web console, server.js re-running the
     CLI) needs to present one 'jarvis <text>' call to a person."""
 
-    __slots__ = ("ok", "text", "provider", "attempts", "assistant_name", "address_user_as", "usage", "degraded")
+    __slots__ = ("ok", "text", "provider", "attempts", "assistant_name", "address_user_as", "usage", "degraded",
+                 "ending")
 
     def __init__(self, ok, text=None, provider=None, attempts=None,
                  assistant_name=DEFAULT_ASSISTANT_NAME, address_user_as=DEFAULT_ADDRESS,
-                 usage=None, degraded=False):
+                 usage=None, degraded=False, ending=None):
         self.ok = ok
         self.text = text
         self.provider = provider
@@ -408,6 +409,20 @@ class AskResult:
         # completed task as a hard failure just because nothing was left to
         # write the last sentence.
         self.degraded = degraded
+        # Why the turn ended when it was NOT the model finishing on its own
+        # (master plan §5 / F.1: forced endings are reported AS forced):
+        #   None            a natural ending
+        #   "forced"        the step budget ran out; the reply is the harness's
+        #                   summary of what ran and what was pending
+        #   "cutoff"        the model's reply hit the output limit while it was
+        #                   asking for a tool; same harness summary
+        #   "truncated"     the model's answer hit the output limit (the text
+        #                   is the model's, and ends with a note saying so)
+        #   "no_provider"   every provider failed on the closing call; the text
+        #                   is a mechanical summary of completed actions
+        #   "pending_action" the user said "go ahead" and the step Jarvis had
+        #                   proposed last turn was run directly (F.11)
+        self.ending = ending
 
 
 def _provider_label(provider):
@@ -1967,10 +1982,14 @@ def _describe_pending(name, args):
     return f"{name}({shown})"
 
 
-def _forced_ending_reply(runs, pending):
+def _forced_ending_reply(runs, pending, cutoff=False):
     """Harness-written reply for a turn the model couldn't finish (F.1/F.11).
     Built from what actually ran, never asks the model to explain limits, and
-    never uses the words 'tool', 'budget', 'exhausted' or 'round'."""
+    never uses the words 'tool', 'budget', 'exhausted' or 'round'.
+
+    `cutoff` is the §5 variant: the model's reply hit the output limit while
+    it was writing its next step, so that step is unusable and there is no
+    pending call to offer — the reply says where it stopped instead."""
     done = [r for r in (runs or []) if (r.get("name") or "") not in _DISCOVERY_ONLY_TOOLS][-6:]
     lines = []
     if done:
@@ -1978,13 +1997,130 @@ def _forced_ending_reply(runs, pending):
         lines += [f"- {_describe_run(r)}" for r in done]
     else:
         lines.append("I couldn't finish this one.")
+    if cutoff:
+        lines.append("\nI ran out of room partway through working out the next step, so I stopped there.")
     if pending:
         name, args = pending[0]
         lines.append("\nStill to do — I was about to run:\n" + f"- {_describe_pending(name, args)}")
-        lines.append("\nSay \"go ahead\" and I'll try that next (you'll get the usual confirmation first).")
+        lines.append("\nSay \"go ahead\" and I'll run that (you'll get the usual confirmation first).")
     else:
         lines.append("\nAsk me to continue and I'll pick up from there.")
     return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# F.11 — a pending proposed action, so a bare "go ahead" runs it.
+#
+# When a turn ends by force, the harness reply offers the one call the model
+# was about to make ("Say \"go ahead\" and I'll run that"). Until now that was
+# only words: the next message went to a model that had to rediscover the
+# call from the recap, and in the logs it often didn't (Case 2b's Move-Item
+# was proposed twice and never run). Now the offered call is saved on that
+# exchange as a `pendingAction` extra, and the very next message, if it is a
+# bare confirmation, runs it directly.
+#
+# Safety, deliberately conservative:
+#   - it goes through the SAME tool_executor as any model call, so the normal
+#     confirm gate (tool_safety.py) still asks first — nothing here bypasses it;
+#   - only the LAST exchange's action counts, so it can never be "a yes to
+#     something from yesterday": one message later it is gone;
+#   - it expires after PENDING_ACTION_TTL_SECONDS even if nothing else was said;
+#   - the tool name must be one this session actually has, and the arguments
+#     must be a plain dict;
+#   - only the owner's own surfaces (CLI / web) use it, never a chat guest.
+# ---------------------------------------------------------------------------
+PENDING_ACTION_TTL_SECONDS = 30 * 60
+
+
+def _pending_action_extra(pending, known_names):
+    """The `pendingAction` extra for the first offerable call in `pending`
+    (the same call _forced_ending_reply names), or None."""
+    for name, args in pending or []:
+        if name not in known_names or not isinstance(args, dict):
+            continue
+        try:
+            json.dumps(args)
+        except (TypeError, ValueError):
+            continue
+        return {"type": "pendingAction", "data": {
+            "name": name, "arguments": args,
+            "summary": _describe_pending(name, args), "ts": time.time(),
+        }}
+    return None
+
+
+def _load_pending_action(conv_id, now=None):
+    """(name, arguments) proposed by the conversation's LAST exchange and
+    still fresh, else None."""
+    if not conversations.is_valid_id(conv_id):
+        return None
+    record = conversations.get_conversation(conv_id) or {}
+    exchanges = record.get("exchanges") or []
+    if not exchanges:
+        return None
+    last = exchanges[-1]
+    if last.get("pending") or not (last.get("jarvis") or "").strip():
+        return None
+    for extra in last.get("extras") or []:
+        if not isinstance(extra, dict) or extra.get("type") != "pendingAction":
+            continue
+        data = extra.get("data") or {}
+        name, args, ts = data.get("name"), data.get("arguments"), data.get("ts")
+        if not isinstance(name, str) or not isinstance(args, dict):
+            continue
+        try:
+            age = (time.time() if now is None else now) - float(ts)
+        except (TypeError, ValueError):
+            continue
+        if 0 <= age <= PENDING_ACTION_TTL_SECONDS:
+            return name, args
+    return None
+
+
+def _pending_action_reply(name, args, result):
+    """Harness-written reply after a direct run: says what happened, in the
+    user's terms, from the result alone."""
+    if isinstance(result, dict) and (result.get("cancelled") or result.get("blocked")):
+        return "Okay, I didn't run it. Nothing has changed."
+    if isinstance(result, dict) and (result.get("error") or result.get("ok") is False):
+        why = str(result.get("error") or "it reported a failure")[:200]
+        return f"That didn't go through: {why}"
+    return "Done. " + _describe_run({"name": name, "result": result})
+
+
+# §5: appended to an answer the provider cut off at its output cap.
+_CUT_NOTE = ("\n\n(That reply was cut off at the length limit. "
+             "Say \"continue\" and I'll pick up from there.)")
+
+
+def _run_pending_action(pending_action, tool_executor, conv_id, user_text,
+                        assistant_name, address, trace):
+    """Run the call the last turn offered, straight away. Goes through
+    `tool_executor`, i.e. the normal confirm gate. Never raises."""
+    name, args = pending_action
+    conversations.begin_exchange(conv_id, user_text)
+    _pending_turn[0] = (conv_id, user_text)
+    ai_providers.set_log_context(conv_id, "pending action")
+    try:
+        result = ai_providers._call_tool_safely(tool_executor, name, args)
+    except Exception as e:  # noqa: BLE001 — never take the ask down
+        result = {"error": f"{name} failed: {e}"}
+    finally:
+        ai_providers.clear_log_context()
+    runs = getattr(tool_executor, "runs", None)
+    reply = _pending_action_reply(name, args, result)
+    trace.ending = "pending_action"
+    for run in (runs or []):
+        trace.note_step(run.get("name"), run.get("arguments"), run.get("result"))
+    exchange_count = conversations.complete_exchange(
+        conv_id, user_text, reply, "(ran the step I'd proposed)",
+        extras=_extras_from_runs(runs),
+    )
+    _spawn_title_update(conv_id, exchange_count)
+    _pending_turn[0] = None
+    return AskResult(True, text=reply, provider=None, attempts=[],
+                     assistant_name=assistant_name, address_user_as=address,
+                     ending="pending_action")
 
 
 # F.7: the recap's own notion of "something real happened". Deliberately NOT
@@ -2552,9 +2688,8 @@ def ask(user_text, commands=None, on_attempt=None, on_tool_call=None, on_tool_re
     text ALONGSIDE a tool call in the same response \u2014 "I'll check that
     now" right before it actually calls something \u2014 rather than that text
     being silently dropped the way it was before master plan Part A \u00a75.
-    Fires before the tool(s) that came with it are run. Only the Anthropic
-    adapter reports this so far (\u00a75's prototype adapter, per the plan's own
-    staged rollout); the other four don't call it yet.
+    Fires before the tool(s) that came with it are run. All five adapters
+    report it (Anthropic, Gemini, OpenAI-compatible, Cohere, Ollama).
 
     conversation_id picks which conversation (see conversations.py) this
     exchange belongs to and gets appended to. When omitted, the CLI's
@@ -2959,6 +3094,18 @@ def ask(user_text, commands=None, on_attempt=None, on_tool_call=None, on_tool_re
 
     attempts = []
 
+    # F.11: the previous turn ended by force and offered one call ("say go
+    # ahead and I'll run that"). If this message is that go-ahead, run it
+    # directly instead of asking a model to rediscover it. Owner surfaces only.
+    if tools_enabled and tool_executor and conv_id and not sender_context \
+            and _looks_like_short_confirmation(user_text):
+        pending_action = _load_pending_action(conv_id)
+        known = {sch.get("name") for sch in full_schemas if isinstance(sch, dict)}
+        if pending_action and pending_action[0] in known:
+            return _run_pending_action(
+                pending_action, tool_executor, conv_id, user_text,
+                assistant_name, address, trace)
+
     # Persist the user's half of this turn NOW, before a single provider is
     # contacted. Everything downstream of here can be killed mid-flight —
     # the web UI's Stop button does exactly that (server.js killTree()s the
@@ -3178,7 +3325,7 @@ def ask(user_text, commands=None, on_attempt=None, on_tool_call=None, on_tool_re
                 # now saved as its own extra so a page reload/reconnect (or
                 # a plain conversation replay) still shows it, the same
                 # reasoning the "thinking" extra just above exists for.
-                # Anthropic-only for now (see on_interim_text's docstring).
+                # All five adapters feed this (see on_interim_text's docstring).
                 interim_items = ai_providers.get_interim_text()
                 if interim_items:
                     extras.append({"type": "interimText", "data": {"items": interim_items}})
@@ -3198,7 +3345,16 @@ def ask(user_text, commands=None, on_attempt=None, on_tool_call=None, on_tool_re
                 # since the browser (or a plain terminal) needs the whole
                 # stream exactly as before; this doesn't change live output
                 # at all, only what a page reload sees afterward.
-                clean_text, dump_lines = _split_console_dump(result.text)
+                reply_text = result.text
+                ending = None
+                if getattr(result, "cut", None) == ai_providers.CUT_LENGTH:
+                    # §5: the provider stopped this answer at its output cap;
+                    # the model did not finish on its own. Say so rather than
+                    # let a cut-off answer pass for a complete one.
+                    reply_text = result.text + _CUT_NOTE
+                    ending = "truncated"
+                    trace.ending = ending
+                clean_text, dump_lines = _split_console_dump(reply_text)
                 if dump_lines:
                     extras.append({"type": "console", "data": {"dumpLines": dump_lines}})
                     # Same "info" direction as the capacity-mode entry above,
@@ -3213,9 +3369,9 @@ def ask(user_text, commands=None, on_attempt=None, on_tool_call=None, on_tool_re
                 )
                 _pending_turn[0] = None
                 _spawn_title_update(conv_id, exchange_count)
-                return AskResult(True, text=result.text, provider=label, attempts=attempts,
+                return AskResult(True, text=reply_text, provider=label, attempts=attempts,
                                  assistant_name=assistant_name, address_user_as=address,
-                                 usage=result.usage)
+                                 usage=result.usage, ending=ending)
 
             # A rejection of the REQUEST itself (Groq's "Tool choice is none,
             # but model called a tool", a tool-argument schema mismatch, ...)
@@ -3226,10 +3382,11 @@ def ask(user_text, commands=None, on_attempt=None, on_tool_call=None, on_tool_re
             # ai_providers.is_request_shape_error — so a bad/rate-limited key
             # still rotates exactly as before.
             failure = result.error
-            if result.kind == ai_providers.KIND_BUDGET:
+            if result.kind in (ai_providers.KIND_BUDGET, ai_providers.KIND_CUTOFF):
                 # Not a key problem: the budget is spent and the model still
-                # wanted a tool. Every other key would do the same — stop
-                # rotating and report what ran instead.
+                # wanted a tool (KIND_BUDGET), or its reply hit the output cap
+                # while writing a call (KIND_CUTOFF, §5). Every other key would
+                # do the same — stop rotating and report what ran instead.
                 forced_end = result
                 attempts.append((key_label, failure))
                 trace.note_attempt_failed(key_label, failure)
@@ -3269,19 +3426,29 @@ def ask(user_text, commands=None, on_attempt=None, on_tool_call=None, on_tool_re
 
     if forced_end is not None:
         turn_runs = getattr(tool_executor, "runs", None) if tool_executor else None
-        reply = _forced_ending_reply(turn_runs, forced_end.pending)
+        is_cutoff = forced_end.kind == ai_providers.KIND_CUTOFF
+        reply = _forced_ending_reply(turn_runs, forced_end.pending, cutoff=is_cutoff)
+        ending = "cutoff" if is_cutoff else "forced"
         trace.degraded = True
+        trace.ending = ending
         if conv_id:
+            forced_extras = _extras_from_runs(turn_runs)
+            # F.11: keep the call the reply just offered, so a bare "go ahead"
+            # next turn runs it. Nothing to keep after a cutoff (no usable call).
+            offered = None if is_cutoff else _pending_action_extra(
+                forced_end.pending, {sch.get("name") for sch in full_schemas if isinstance(sch, dict)})
+            if offered:
+                forced_extras.append(offered)
             exchange_count = conversations.complete_exchange(
                 conv_id, user_text, reply,
                 "(reporting what ran — the model couldn't finish)",
-                extras=_extras_from_runs(turn_runs),
+                extras=forced_extras,
             )
             _spawn_title_update(conv_id, exchange_count)
         _pending_turn[0] = None
         return AskResult(True, text=reply, provider=None, attempts=attempts,
                          assistant_name=assistant_name, address_user_as=address,
-                         degraded=True)
+                         degraded=True, ending=ending)
 
     # Every provider failed on the closing text call. That used to always
     # mean "no provider answered" and get reported as a hard failure — but
@@ -3303,6 +3470,7 @@ def ask(user_text, commands=None, on_attempt=None, on_tool_call=None, on_tool_re
     if completed:
         summary = _summarize_completed_mutations(completed)
         trace.degraded = True
+        trace.ending = "no_provider"
         if conv_id:
             exchange_count = conversations.complete_exchange(
                 conv_id, user_text, summary,
@@ -3313,7 +3481,7 @@ def ask(user_text, commands=None, on_attempt=None, on_tool_call=None, on_tool_re
         _pending_turn[0] = None
         return AskResult(True, text=summary, provider=None, attempts=attempts,
                          assistant_name=assistant_name, address_user_as=address,
-                         degraded=True)
+                         degraded=True, ending="no_provider")
 
     # The turn is still real — the user asked something and got nothing at
     # all, not even a completed side effect — so it's recorded as such

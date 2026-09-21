@@ -170,6 +170,25 @@ BUILTINS = {
         "supports_stdin": False,
         "enabled": True,
     },
+    "browser": {
+        "id": "browser",
+        "name": "Browser (warm)",
+        "builtin": True,
+        "argv": [JARVIS_TOKEN, "browser-daemon"],
+        "description": (
+            "Holds a Playwright browser session open across asks instead of "
+            "one per ask (master plan Part C, v2). Closes the browser after "
+            "'browser_daemon_idle_seconds' (config, default 600s) of no "
+            "activity; the daemon keeps listening and reopens it on the next "
+            "call. Purely a speed optimization: browser_* tools only use it "
+            "when 'browser_warm_daemon' (ai_config.json defaults) is on, and "
+            "fall back to their own local session for this ask if it isn't "
+            "running or doesn't answer. Off by default — start it with "
+            "daemon_start/daemon-start when wanted."
+        ),
+        "supports_stdin": False,
+        "enabled": True,
+    },
 }
 
 # Legacy PID files the three built-ins write for themselves. Read (never

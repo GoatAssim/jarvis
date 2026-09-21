@@ -36,9 +36,39 @@ comment above ai_client.ask()'s conversation-persistence call notes is an
 unconditional `taskkill /F` — skips atexit the same way it skips every
 other Python cleanup hook, so the Chromium child can outlive its parent
 until the OS reaps it in that one case. Nothing here makes that worse than
-any other subprocess-owning tool already in this codebase; a v2 warm
-daemon with its own idle-timeout (see the master plan) would close this
-gap properly, and is deliberately not built here.
+any other subprocess-owning tool already in this codebase. This is still
+true of the v1 path below even now that v2 exists (see next section):
+v1's session is a bare module-level singleton with no supervisor watching
+it, unlike the daemon.
+
+SESSION MODEL (v2 — the warm daemon, browser_daemon.py, OFF BY DEFAULT)
+-------------------------------------------------------------------------
+`jarvis browser-daemon` (a `daemons.py` BUILTIN, same footing as
+`clipboard-watch`) holds its own persistent-context session open across
+every ask, not just the calls within one, and exposes it over a loopback
+TCP socket (port written to ~/.jarvis/browser-daemon.port). A background
+thread inside the daemon closes the browser (not the daemon process
+itself) after `browser_daemon_idle_seconds` (config, default 600s) of no
+requests — the "always-warm... with an idle-timeout auto-close" the
+master plan asked for: warm while actually being used across a run of
+asks, freed automatically once it stops being useful, and never a mystery
+process someone finds days later. The daemon process itself keeps
+listening either way; a request after an idle-close just re-pays the
+~1-2s Chromium startup once, exactly like a fresh v1 ask does today.
+
+Every `tool_browser_*` function below (see "public entry points" near the
+bottom) tries the daemon first ONLY when the `browser_warm_daemon` config
+flag is on (`ai_config.json`'s `defaults` dict, same pattern as
+`browser_headless` above) and only uses the result if the daemon actually
+answers — `_call_daemon()` never raises and a short connect timeout means
+a stopped or stale daemon is indistinguishable from "not installed" to
+every caller. So flipping `browser_warm_daemon` on can never make a
+browser_* call behave worse than the v1 fallback already does; it is
+purely additive. The flag defaults OFF: the daemon has to be started
+explicitly (`daemon_start`/`daemon-start browser`, or the AI's own
+`daemon_start` tool) and the config flag has to be turned on by hand —
+this is deliberately not something the model can silently switch on
+itself, same spirit as `browser_headless`.
 
 DEPENDENCY STORY
 ------------------
@@ -63,7 +93,9 @@ correct selector for markup it has never seen.
 """
 
 import atexit
+import json
 import secrets
+import socket
 import subprocess
 import sys
 import time
@@ -74,6 +106,16 @@ from urllib.parse import urlsplit
 JARVIS_DIR = Path.home() / ".jarvis"
 PROFILE_DIR = JARVIS_DIR / "browser-profile"
 ENCODING = "utf-8"
+
+# v2 warm daemon (see browser_daemon.py and master plan Part C "v2 warm
+# daemon"). `jarvis browser-daemon` writes its loopback port here on
+# startup and removes it on clean shutdown; a stale file (process killed
+# without cleanup) just means _call_daemon()'s connect attempt fails and
+# every tool below falls back to its own local, process-lifetime session
+# exactly as it did before this feature existed.
+DAEMON_PORT_FILE = JARVIS_DIR / "browser-daemon.port"
+_DAEMON_CONNECT_TIMEOUT = 0.3
+_DAEMON_CALL_TIMEOUT = 30.0
 
 # Mirrors web_tools.FETCH_MAX_CHARS — kept as its own constant (not
 # imported from there) so this module has no import-time dependency on
@@ -122,6 +164,83 @@ def _headless_setting():
         return bool(cfg.get("defaults", {}).get("browser_headless", True))
     except Exception:
         return True
+
+
+def _warm_daemon_setting():
+    """Whether browser_* tool calls should try the warm daemon first —
+    off by default, same "read from ai_config.json's defaults dict, no
+    schema to update" pattern as _headless_setting() right above. Turning
+    this on is what actually makes `jarvis browser-daemon` matter to the
+    model; leaving it off (the default) keeps every tool exactly as it
+    behaved before v2 existed, even if the daemon happens to be running."""
+    try:
+        from . import ai_config
+        cfg = ai_config.load_ai_config()
+        return bool(cfg.get("defaults", {}).get("browser_warm_daemon", False))
+    except Exception:
+        return False
+
+
+def _read_daemon_port():
+    """The port `jarvis browser-daemon` is currently listening on, or
+    None if it isn't running (no file) or the file is stale/corrupt —
+    both treated the same as "not running", never raised."""
+    try:
+        data = json.loads(DAEMON_PORT_FILE.read_text(encoding=ENCODING))
+        port = int(data.get("port"))
+        return port if port > 0 else None
+    except Exception:
+        return None
+
+
+def _call_daemon(op, args):
+    """Best-effort round trip to the warm browser daemon over its
+    loopback socket. Returns the daemon's parsed JSON response dict on
+    success, or None on ANY failure (not running, connect refused, bad
+    JSON, timeout) — callers always treat None as "fall back to the local
+    session", so a dead or slow daemon degrades to v1 behavior rather than
+    failing the tool call outright. The short connect timeout matters
+    most: a stale port file pointing at nothing must not stall every
+    browser_* call waiting on a connection that will never complete."""
+    port = _read_daemon_port()
+    if port is None:
+        return None
+    try:
+        with socket.create_connection(("127.0.0.1", port), timeout=_DAEMON_CONNECT_TIMEOUT) as sock:
+            sock.settimeout(_DAEMON_CALL_TIMEOUT)
+            sock.sendall((json.dumps({"op": op, "args": args or {}}) + "\n").encode(ENCODING))
+            sock.shutdown(socket.SHUT_WR)
+            chunks = []
+            while True:
+                chunk = sock.recv(65536)
+                if not chunk:
+                    break
+                chunks.append(chunk)
+            raw = b"".join(chunks).decode(ENCODING, errors="replace")
+    except OSError:
+        return None
+    lines = raw.splitlines()
+    if not lines:
+        return None
+    try:
+        result = json.loads(lines[0])
+    except ValueError:
+        return None
+    return result if isinstance(result, dict) else None
+
+
+def _via_daemon_or_local(op, args, local_fn):
+    """Route one browser_* call through the warm daemon when
+    browser_warm_daemon is on and the daemon actually answers; otherwise
+    run the same local, process-lifetime logic this module has always
+    used. Turning the flag on can therefore never make a call fail any
+    worse than a fresh checkout already does — the daemon is purely
+    additive on top of v1."""
+    if _warm_daemon_setting():
+        result = _call_daemon(op, args)
+        if result is not None:
+            return result
+    return local_fn(args)
 
 
 def _ensure_page():
@@ -252,7 +371,7 @@ def _find_locator(page, description, timeout_ms):
 # ── tools -------------------------------------------------------------
 
 
-def tool_browser_goto(args=None):
+def _local_tool_browser_goto(args=None):
     args = args or {}
     url = (args.get("url") or "").strip()
     if not url:
@@ -277,7 +396,7 @@ def tool_browser_goto(args=None):
     return {"ok": True, "url": page.url, "title": title}
 
 
-def tool_browser_click(args=None):
+def _local_tool_browser_click(args=None):
     args = args or {}
     description = (args.get("description") or "").strip()
     if not description:
@@ -301,7 +420,7 @@ def tool_browser_click(args=None):
     return {"ok": True, "url": page.url}
 
 
-def tool_browser_fill(args=None):
+def _local_tool_browser_fill(args=None):
     args = args or {}
     description = (args.get("description") or "").strip()
     text = args.get("text")
@@ -328,7 +447,7 @@ def tool_browser_fill(args=None):
     return {"ok": True}
 
 
-def tool_browser_get_text(args=None):
+def _local_tool_browser_get_text(args=None):
     args = args or {}
     description = (args.get("description") or "").strip()
     page, err = _ensure_page()
@@ -369,7 +488,7 @@ def _prune_browser_screenshots():
             break
 
 
-def tool_browser_screenshot(args=None):
+def _local_tool_browser_screenshot(args=None):
     page, err = _ensure_page()
     if err:
         return {"ok": False, "error": err}
@@ -403,7 +522,7 @@ def tool_browser_screenshot(args=None):
     }
 
 
-def tool_browser_wait_for(args=None):
+def _local_tool_browser_wait_for(args=None):
     args = args or {}
     description = (args.get("description") or "").strip()
     if not description:
@@ -432,7 +551,7 @@ def tool_browser_wait_for(args=None):
     return {"ok": True, "url": page.url}
 
 
-def tool_browser_close(args=None):
+def _local_tool_browser_close(args=None):
     was_open = _session.get("page") is not None
     close_browser()
     return {"ok": True, "closed": was_open}
@@ -477,6 +596,42 @@ def run_setup():
         ok, detail = False, str(e)
     steps.append({"step": "playwright install chromium", "ok": ok, "detail": detail})
     return {"ok": all(s["ok"] for s in steps), "steps": steps}
+
+
+# ── public entry points (v2: warm daemon when enabled, local session otherwise) ---
+
+def tool_browser_goto(args=None):
+    return _via_daemon_or_local("goto", args, _local_tool_browser_goto)
+
+
+def tool_browser_click(args=None):
+    return _via_daemon_or_local("click", args, _local_tool_browser_click)
+
+
+def tool_browser_fill(args=None):
+    return _via_daemon_or_local("fill", args, _local_tool_browser_fill)
+
+
+def tool_browser_get_text(args=None):
+    return _via_daemon_or_local("get_text", args, _local_tool_browser_get_text)
+
+
+def tool_browser_screenshot(args=None):
+    return _via_daemon_or_local("screenshot", args, _local_tool_browser_screenshot)
+
+
+def tool_browser_wait_for(args=None):
+    return _via_daemon_or_local("wait_for", args, _local_tool_browser_wait_for)
+
+
+def tool_browser_close(args=None):
+    # Explicit early close is honored against whichever session is
+    # actually open — the daemon's warm session when the flag is on and
+    # it answers, this process's own local session otherwise. Either way
+    # the daemon process itself keeps running (its idle-timeout owns
+    # closing the browser on its own schedule); this only closes the
+    # browser, not the daemon.
+    return _via_daemon_or_local("close", args, _local_tool_browser_close)
 
 
 # ── schemas -------------------------------------------------------------
