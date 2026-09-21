@@ -57,6 +57,26 @@
     node.textContent = typeof value === "string" ? value : JSON.stringify(value, null, 2);
   }
 
+  // What Menu > Test Checklist will show for this file (master plan G.1). The
+  // check/save results carry checklist / checklist_missing / checklist_problems
+  // from the CLI. A checklist entry is notes about a tool, so this is never an
+  // error: it goes in the result box, and only when there is something to say.
+  function checklistNote(result) {
+    if (!result) return null;
+    const lines = [];
+    const problems = result.checklist_problems || [];
+    const missing = result.checklist_missing || [];
+    if (problems.length) {
+      lines.push("Test Checklist \u2014 these were ignored (the tool itself still loads):");
+      problems.forEach((p) => lines.push("  \u2022 " + p));
+    }
+    if (missing.length) {
+      lines.push("Test Checklist \u2014 no entry yet for: " + missing.join(", ")
+        + ". Add a TEST_CHECKLIST dict (every template has an example) so the panel can show how to test it.");
+    }
+    return lines.length ? lines.join("\n") : null;
+  }
+
   /* --- list --------------------------------------------------------------- */
 
   function renderList() {
@@ -135,6 +155,8 @@
       if (result.ok) {
         setStatus("Valid \u2014 provides " + (result.tools || []).join(", ")
                   + " in group '" + result.group + "'", true);
+        const note = checklistNote(result);
+        if (note) showResult(note);
       } else {
         setStatus("[" + (result.stage || "error") + "] " + result.error, false);
         if (result.hint) showResult(result.hint);
@@ -164,6 +186,8 @@
       state.active = name;
       state.dirty = false;
       setStatus("Saved \u2014 " + (result.tools || []).join(", "), true);
+      const note = checklistNote(result);
+      if (note) showResult(note);
       UI().toast({
         message: "Saved " + name + ". " + (result.note || ""),
         level: "success",

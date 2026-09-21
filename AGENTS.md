@@ -90,6 +90,7 @@ pytest functions if pytest happens to be available). Run directly:
     python3 tests/test_workspace.py
     python3 tests/test_channel_people.py
     python3 tests/test_checklist_coverage.py
+    python3 tests/test_checklist_supplied.py
 
 Two things that will waste your time if nobody tells you:
 
@@ -145,18 +146,39 @@ they've been unified just because `route.matches` exists.
 
 The web console has **Menu → Test Checklist**: every tool Jarvis can call, how
 to test it (prompts for Ask, arguments for a Debug direct-run), what a pass
-looks like, and a place to record what works and what doesn't. Its catalogue
-is one file, `web/public/test-checklist-data.js`.
+looks like, and a place to record what works and what doesn't. An entry has
+**two possible homes**:
+
+- **Shipped:** `web/public/test-checklist-data.js`, for every tool that ships
+  with jarvis.
+- **The tool's own module:** a module-level `TEST_CHECKLIST` dict (tool name ->
+  entry, the same shape, `group` optional and defaulting to `TOOL_GROUP`), plus
+  `TEST_CHECKLIST_GROUP = {"label": ..., "blurb": ...}` if the module invents a
+  brand-new `TOOL_GROUP`. This is the **only** option for a user's own tool in
+  `~/.jarvis/tools/`, which can never be in a file that ships with the app.
+  `actions/_template.py` section 8 documents it; every Custom Tools template
+  carries an example. Discovery reads it, `jarvis tools-list` (GET `/api/tools`)
+  carries it, and the panel merges it in. Use ONE home per tool — the coverage
+  test fails if a tool has an entry in both.
+
+What counts as a well-formed entry is defined once, in
+`jarvis-cli/jarvis/checklist_schema.py`, and checked by the same code for both
+homes. A malformed module-supplied entry is dropped and logged
+(`[checklist] file.py: ...`) — the tool itself still loads — and the Custom
+Tools editor's Check button reports it; the coverage test then fails for a
+shipped module because the tool is left with no entry.
 
 **Whenever you add, rename, remove or change the behaviour of a tool, you MUST
-update that tool's entry in `web/public/test-checklist-data.js` in the same
+update that tool's entry — in `web/public/test-checklist-data.js`, or in its own
+module's `TEST_CHECKLIST` if that is where its entry lives — in the same
 change.** This is not optional and not a follow-up. A tool change without its
 checklist entry is an incomplete change, the same as a tool with no schema.
 
 For each tool the entry needs:
 
 - `group` — one of the ids in the file's `"groups"` list (match the group in
-  `tool_registry.TOOL_GROUPS`; add a group there too if you added one).
+  `tool_registry.TOOL_GROUPS`; add a group there too if you added one). In a
+  module's own `TEST_CHECKLIST`, leave it out: it is the module's `TOOL_GROUP`.
 - `does` — one line on what it's for.
 - `steps` — at least one, ideally two or three: an `{"ask": "...", "expect":
   "..."}` prompt to type into Ask, and/or a `{"run": {...args...}, "expect":
@@ -177,15 +199,16 @@ Do NOT put test results (status, notes, ticks) in that file. Results live only
 in the tester's browser (localStorage); nothing about the checklist is ever
 written by the CLI or stored under `~/.jarvis`. The panel is purely front end.
 
-What happens if an entry is missing: the tool still appears in the menu (the
-panel reads the live catalogue from `/api/tools`), but only as a bare name
-marked **NO CHECKLIST**, with no details, and the Overview's Coverage section
-names it. `tests/test_checklist_coverage.py` fails on this too, so you'll hear
-about it before the tester does.
+What happens if an entry is missing from both homes: the tool still appears in
+the menu (the panel reads the live catalogue from `/api/tools`), but only as a
+bare name marked **NO CHECKLIST**, with no details, and the Overview's Coverage
+section names it. `tests/test_checklist_coverage.py` fails on this too for any
+tool that ships with jarvis, so you'll hear about it before the tester does.
 
 The data file is strict JSON between its `JSON-BEGIN` / `JSON-END` markers
 (double quotes, no trailing commas, no comments) because both the browser and
-that test parse it.
+that test parse it. A module's `TEST_CHECKLIST` is ordinary Python, but its
+values must be plain JSON types (it is sent to the browser as JSON).
 
 ## Patch conventions
 

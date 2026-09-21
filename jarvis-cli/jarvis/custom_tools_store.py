@@ -233,6 +233,9 @@ def write_tool(name, source, description=""):
     return {"ok": True, "name": name, "enabled": was_enabled if existing else True,
             "path": str(target), "tools": check.get("tools", []),
             "group": check.get("group", ""),
+            "checklist": check.get("checklist", []),
+            "checklist_missing": check.get("checklist_missing", []),
+            "checklist_problems": check.get("checklist_problems", []),
             "note": "Restart any running daemon (or just run the next command) "
                     "to pick it up — tools are discovered at process start."}
 
@@ -368,8 +371,22 @@ def validate_source(source, name="custom_tool"):
                 "error": "%s already exists as a built-in tool — pick another name"
                          % ", ".join(clash)}
 
+    # G.1: the file's own Test Checklist entries. Never a reason to fail the
+    # check (a malformed entry is dropped at discovery, the tool still loads —
+    # see tool_loader.py), but the ONLY place a custom-tool author gets told:
+    # discovery's log line goes to stderr, where nobody is looking.
+    from . import checklist_schema
+    entries, _group_meta, checklist_problems = checklist_schema.extract_supplied(
+        getattr(module, "TEST_CHECKLIST", None),
+        getattr(module, "TEST_CHECKLIST_GROUP", None),
+        set(names), group.strip(),
+    )
+
     return {"ok": True, "tools": names, "group": group.strip(),
-            "keywords": getattr(module, "TOOL_KEYWORDS", {}) or {}}
+            "keywords": getattr(module, "TOOL_KEYWORDS", {}) or {},
+            "checklist": sorted(entries),
+            "checklist_missing": [n for n in names if n not in entries],
+            "checklist_problems": checklist_problems}
 
 
 def _builtin_clash(names):
@@ -466,6 +483,29 @@ TOOL_SCHEMAS = [
 TOOLS = {"hello": tool_hello}
 TOOL_GROUP = "custom"
 TOOL_KEYWORDS = {"hello": {"say hello": 10, "greet": 8}}
+
+# OPTIONAL, but worth the two minutes: this is what Menu > Test Checklist shows
+# for the tool — how to try it and what a pass looks like. Without it the tool
+# is listed there as "NO CHECKLIST". Keyed by tool name; "group" follows
+# TOOL_GROUP, so leave it out. A step is EITHER {"ask": "<prompt to type into
+# Ask>"} OR {"run": {<arguments>}} (run it straight from Debug, no model), plus
+# "expect". Write <angle brackets> for things the tester fills in. Also allowed:
+# "needs" (list), "os" ("windows"), "care" (a warning), "watch" (list).
+TEST_CHECKLIST = {
+    "hello": {
+        "does": "Greets someone by name.",
+        "steps": [
+            {"ask": "Say hello to <a name>.",
+             "expect": "Replies with 'Hello, <the name>!'."},
+            {"run": {"name": "Ada"},
+             "expect": "Returns ok: true and the greeting 'Hello, Ada!'."},
+        ],
+    },
+}
+
+# A brand-new TOOL_GROUP (anything other than "custom", or a shipped group such
+# as "files") also wants a name for its section in that panel:
+# TEST_CHECKLIST_GROUP = {"label": "My tools", "blurb": "What this group is for."}
 ''',
     },
     "ui": {
@@ -523,6 +563,21 @@ TOOL_SCHEMAS = [
 TOOLS = {"disk_report": tool_disk_report}
 TOOL_GROUP = "custom"
 TOOL_KEYWORDS = {"disk_report": {"disk space": 10, "how full": 8, "free space": 9}}
+
+# What Menu > Test Checklist shows for this tool (see the minimal template for
+# the field-by-field notes). Two steps: the path you'd normally use, and the
+# error path — a toast is only worth having if you've seen it fire.
+TEST_CHECKLIST = {
+    "disk_report": {
+        "does": "Shows disk usage as a card in the chat.",
+        "steps": [
+            {"ask": "How much disk space is left?",
+             "expect": "A card appears in the chat with total, used and free space."},
+            {"run": {"path": "<a folder that does not exist>"},
+             "expect": "An error toast appears and the result is ok: false."},
+        ],
+    },
+}
 ''',
     },
     "ask": {
@@ -589,6 +644,22 @@ TOOLS = {"cleanup_temp": tool_cleanup}
 TOOL_GROUP = "custom"
 TOOL_KEYWORDS = {"cleanup_temp": {"clean up": 9, "temp files": 10, "cleanup": 9}}
 
+# What Menu > Test Checklist shows for this tool (see the minimal template for
+# the field-by-field notes). "care" is the place to warn a tester about side
+# effects before they run it — this one deletes files.
+TEST_CHECKLIST = {
+    "cleanup_temp": {
+        "does": "Deletes .tmp files in a folder, after asking the user to confirm.",
+        "steps": [
+            {"ask": "Clean up the temp files in <a scratch folder holding a few .tmp files>.",
+             "expect": "Asks to confirm and lists the files; No deletes nothing, Delete removes them."},
+            {"run": {"folder": "<a scratch folder holding a few .tmp files>"},
+             "expect": "The same confirmation; the result reports how many files were deleted."},
+        ],
+        "care": "Deletes real files - point it at a scratch folder, never a real one.",
+    },
+}
+
 # This one deletes things, so it gets the real out-of-band gate as well —
 # ui.confirm() above is a courtesy, this is the actual protection.
 TOOL_CONFIRM_REQUIRED = {"cleanup_temp"}
@@ -645,6 +716,23 @@ TOOL_SCHEMAS = [
 TOOLS = {"api_status": tool_api_status}
 TOOL_GROUP = "custom"
 TOOL_KEYWORDS = {"api_status": {"is it up": 10, "is down": 9, "check the api": 10}}
+
+# What Menu > Test Checklist shows for this tool (see the minimal template for
+# the field-by-field notes). "needs" lists what must exist before a test can pass.
+TEST_CHECKLIST = {
+    "api_status": {
+        "does": "Checks whether a URL responds, and how fast.",
+        "steps": [
+            {"ask": "Is https://example.com up?",
+             "expect": "Says it responds, with the status code and roughly how long it took."},
+            {"run": {"url": "https://example.com"},
+             "expect": "ok: true, a 200 status, elapsed_ms and a short preview of the body."},
+            {"run": {"url": "not a url"},
+             "expect": "ok: false with 'url must start with http:// or https://'."},
+        ],
+        "needs": ["Network access", "The requests package installed"],
+    },
+}
 ''',
     },
 }
@@ -677,6 +765,8 @@ Optional:
     TOOL_PACK_INSTRUCTION = "one line of workflow guidance"
     TOOL_CONFIRM_REQUIRED = {"name"}          # gate it behind a confirmation
     TOOL_AI_REVIEW        = {"name"}          # and a second AI's risk check
+    TEST_CHECKLIST        = {"name": {...}}   # how to test it, for Menu > Test Checklist
+    TEST_CHECKLIST_GROUP  = {"label": "..."}  # names a brand-new TOOL_GROUP there
 
 Rules that bite if you skip them:
 
@@ -685,6 +775,9 @@ Rules that bite if you skip them:
   never at module level (circular import at discovery time).
 * Without `TOOL_KEYWORDS`, a brand-new group is only reachable via
   `search_tools`, not by ordinary routing.
+* Without `TEST_CHECKLIST`, Menu > Test Checklist lists your tool by name only,
+  marked NO CHECKLIST. A malformed entry is dropped (the tool still loads) and
+  the editor's Check button says why. Every template above carries an example.
 * A file starting with `_` is ignored, so `_helpers.py` is safe to keep here.
 * `x.py.disabled` is switched off but kept.
 

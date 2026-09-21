@@ -83,8 +83,11 @@ accounts — everything lives in `~/.jarvis/commands.json`, same as the CLI.
   working / partial / not as intended / bug / blocked), ticked steps and
   notes. It is purely front end: results are stored in this browser's
   localStorage only (Export/Import JSON to back up or move them), and nothing
-  is written by the CLI. The catalogue is `public/test-checklist-data.js`;
-  see AGENTS.md for the rule that keeps it in step with the tools.
+  is written by the CLI. The catalogue is `public/test-checklist-data.js` for
+  tools that ship with jarvis; a tool can also carry its own entry in its
+  module (`TEST_CHECKLIST`), which is how a tool you wrote yourself under
+  Menu → Custom Tools gets one — the panel picks it up from `GET /api/tools`.
+  See AGENTS.md for the rule that keeps it in step with the tools.
 
 Nothing here is faked or mocked — every action above goes through the
 real CLI or the real config file on disk.
