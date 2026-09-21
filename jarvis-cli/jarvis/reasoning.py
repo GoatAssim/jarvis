@@ -70,10 +70,21 @@ DEFAULT_LEVEL = "off"
 # 1024 tokens, so "low" starts there rather than at something smaller that
 # the API would reject outright.
 _LEVELS = {
-    "off":    {"budget": 0,    "effort": None,     "gemini": 0},
-    "low":    {"budget": 1024, "effort": "low",    "gemini": 1024},
-    "medium": {"budget": 4096, "effort": "medium", "gemini": 4096},
-    "high":   {"budget": 12288, "effort": "high",  "gemini": 16384},
+    "off":    {"budget": 0,    "effort": None,     "gemini": 0,     "max_thinking_rounds": 0},
+    "low":    {"budget": 1024, "effort": "low",    "gemini": 1024,  "max_thinking_rounds": 2},
+    "medium": {"budget": 4096, "effort": "medium", "gemini": 4096,  "max_thinking_rounds": 4},
+    # None = no cap: every round that ran tools gets a thinking request.
+    # Master plan Part A §6 ("thinking between tool calls"): the old code
+    # capped every level at 2 total rounds (round 0 + one more), so a long
+    # tool-calling sequence got no thinking at all past the second round
+    # regardless of level. This is a default policy choice, not a hard
+    # requirement from the finding itself — see §6's own text ("worth
+    # deciding deliberately what the new policy should be... scaled by
+    # thinking level"). 'low' keeps the pre-§6 behavior so the cheapest
+    # level's token/latency cost doesn't change; 'medium' allows more
+    # rounds before capping; 'high' — a level someone chose specifically
+    # for maximum deliberation — is no longer silently cut off.
+    "high":   {"budget": 12288, "effort": "high",  "gemini": 16384, "max_thinking_rounds": None},
 }
 
 # Which provider *types* (ai_providers.ADAPTERS keys) can be asked to think
@@ -253,6 +264,15 @@ def normalize_level(value):
         "thorough": "high", "3": "high",
     }
     return aliases.get(text, DEFAULT_LEVEL)
+
+
+def max_thinking_rounds(level):
+    """Master plan Part A §6: how many rounds of a single turn may carry a
+    thinking request, round 0 included. None means unlimited (every round
+    that ran tools gets one) — see the comment on _LEVELS above for why
+    each level's number is what it is. Unknown/invalid levels fall back to
+    'off's cap (0), same fail-safe direction as normalize_level."""
+    return _LEVELS.get(normalize_level(level), _LEVELS["off"]).get("max_thinking_rounds", 0)
 
 
 def auto_level(user_text):

@@ -2524,7 +2524,7 @@ def _merged_sticky_groups_for_confirmation(route, existing_sticky_groups, user_t
 
 def ask(user_text, commands=None, on_attempt=None, on_tool_call=None, on_tool_result=None, conversation_id=None,
         on_confirm_request=None, on_route=None, provider_override=None,
-        think_override=None, on_trace=None, sender_context=""):
+        think_override=None, on_trace=None, sender_context="", on_interim_text=None):
     """Ask Jarvis something, trying every configured, enabled provider in
     order until one answers \u2014 and within each provider, every one of its
     configured keys in order before moving on to the next provider. Always
@@ -2547,6 +2547,14 @@ def ask(user_text, commands=None, on_attempt=None, on_tool_call=None, on_tool_re
     ai_config.json's defaults.tools_enabled on every call, same as
     everything else here; set it to false to turn tool calling off
     entirely (e.g. to keep every ask to a single request).
+
+    on_interim_text(text, round_num), if given, fires when a provider sends
+    text ALONGSIDE a tool call in the same response \u2014 "I'll check that
+    now" right before it actually calls something \u2014 rather than that text
+    being silently dropped the way it was before master plan Part A \u00a75.
+    Fires before the tool(s) that came with it are run. Only the Anthropic
+    adapter reports this so far (\u00a75's prototype adapter, per the plan's own
+    staged rollout); the other four don't call it yet.
 
     conversation_id picks which conversation (see conversations.py) this
     exchange belongs to and gets appended to. When omitted, the CLI's
@@ -3083,7 +3091,7 @@ def ask(user_text, commands=None, on_attempt=None, on_tool_call=None, on_tool_re
                 resolved["api_key"] = key
 
             ai_providers.set_log_context(conv_id, key_label, on_tool_usage=on_tool_result,
-                                        base_url=resolved.get("base_url"))
+                                        base_url=resolved.get("base_url"), on_interim_text=on_interim_text)
             # Reset per attempt, not per ask: a failover to the next key
             # starts a fresh set of rounds, so its round-0 thinking is a new
             # spend and its trace shouldn't be glued onto the failed
@@ -3120,7 +3128,7 @@ def ask(user_text, commands=None, on_attempt=None, on_tool_call=None, on_tool_re
                         on_attempt(f"{key_label} [rate limited \u2014 waiting {wait_s:.0f}s before retrying]")
                     time.sleep(wait_s)
                     ai_providers.set_log_context(conv_id, key_label, on_tool_usage=on_tool_result,
-                                                base_url=resolved.get("base_url"))
+                                                base_url=resolved.get("base_url"), on_interim_text=on_interim_text)
                     ai_providers.set_thinking(think_level)
                     try:
                         result = adapter(resolved, messages, resolved["timeout"],
@@ -3165,6 +3173,15 @@ def ask(user_text, commands=None, on_attempt=None, on_tool_call=None, on_tool_re
                         "rounds": thinking.get("rounds", 0),
                         "requested": thinking.get("requested", 0),
                     }})
+                # Part A §5: narration the model sent alongside a tool call
+                # ("I'll check that now") \u2014 previously discarded entirely,
+                # now saved as its own extra so a page reload/reconnect (or
+                # a plain conversation replay) still shows it, the same
+                # reasoning the "thinking" extra just above exists for.
+                # Anthropic-only for now (see on_interim_text's docstring).
+                interim_items = ai_providers.get_interim_text()
+                if interim_items:
+                    extras.append({"type": "interimText", "data": {"items": interim_items}})
                 extras.append({"type": "trace", "data": trace.to_dict()})
                 if on_trace:
                     try:

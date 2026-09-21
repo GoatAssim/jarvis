@@ -169,7 +169,7 @@ class RoundBudget:
 _log_local = threading.local()
 
 
-def set_log_context(conv_id, provider=None, on_tool_usage=None, base_url=None):
+def set_log_context(conv_id, provider=None, on_tool_usage=None, base_url=None, on_interim_text=None):
     _log_local.conv_id = conv_id
     _log_local.provider = provider
     # F.12: the host this attempt's own requests go to. A request to any OTHER
@@ -182,6 +182,17 @@ def set_log_context(conv_id, provider=None, on_tool_usage=None, base_url=None):
     # the token estimate (it can't fire any earlier — output_tokens isn't
     # known until the tool has actually returned).
     _log_local.on_tool_usage = on_tool_usage
+    # Part A §5: on_interim_text(text, round_num), if given, fires the
+    # moment an adapter sees text sent ALONGSIDE a tool call in the same
+    # response — before the tools that came with it are run. Thread-local
+    # for the same reason on_tool_usage is: the adapter loops call through
+    # a uniform ADAPTERS[type](provider, messages, ...) contract that other
+    # callers (tests, benchmark scripts) also use, and widening every
+    # adapter's signature for one caller's optional trace hook isn't worth
+    # it. Only call_anthropic uses this so far (§5's prototype adapter) —
+    # see 0.4/§5 item 4: "prototype on one adapter first... not done until
+    # all five follow it."
+    _log_local.on_interim_text = on_interim_text
     # Phase 0 (see new_plan.md): usage/round bookkeeping is scoped to one
     # provider attempt, same lifecycle as conv_id/provider above — reset
     # here (ai_client.ask calls this once per attempt) and read back via
@@ -208,6 +219,7 @@ def set_thinking(level="off"):
     _thinking["trace"] = ""
     _thinking["rounds"] = 0
     _thinking["requested"] = 0
+    _interim_text["items"] = []
 
 
 def get_thinking_trace():
@@ -238,11 +250,15 @@ def _apply_thinking(payload, provider, provider_type, round_num, ran_tools, thou
     level = _thinking.get("level", "off")
     if reasoning.normalize_level(level) == "off":
         return False
-    # Round 0 always. After that, exactly one more — the first round after a
-    # tool batch came back, where the model is synthesizing results rather
-    # than picking the next call.
-    if round_num != 0 and not (ran_tools and thought_rounds < 2):
-        return False
+    # Round 0 always. After that, apply per-round up to the level's own cap
+    # (master plan Part A §6 — see reasoning._LEVELS' max_thinking_rounds):
+    # None means no cap (every round that ran tools gets one).
+    if round_num != 0:
+        if not ran_tools:
+            return False
+        cap = reasoning.max_thinking_rounds(level)
+        if cap is not None and thought_rounds >= cap:
+            return False
 
     patch = reasoning.round_patch(
         provider_type, level, round_num=round_num,
@@ -289,10 +305,42 @@ def _collect_thinking(provider_type, data):
         _thinking["trace"] = (existing + "\n\n" + text).strip() if existing else text
 
 
+# ---------------------------------------------------------------------------
+# Interim text (master plan Part A §5): text a model sends ALONGSIDE a tool
+# call in the same response — "I'll check that now" before it actually
+# calls the tool. Every adapter used to throw this away entirely (the
+# `text = "".join(...)` extraction line lived only in the branch reached
+# when there were NO tool calls), so the user only ever saw text from the
+# final, tool-free round. Reset with `_thinking` (set_thinking() below is
+# called once per attempt, same lifecycle), read back via get_interim_text()
+# once the attempt finishes so ai_client.ask() can fold it into a saved
+# "interimText" extra — same idea as the "thinking" extra just above it.
+# ---------------------------------------------------------------------------
+_interim_text = {"items": []}
+
+
+def get_interim_text():
+    """The narration text (if any) the model sent alongside tool calls
+    during the attempt that just ran, in round order. Each item is
+    {"round": N, "text": "..."}. Empty list is the common case — most
+    responses don't narrate before calling a tool."""
+    return list(_interim_text["items"])
+
+
+def _collect_interim_text(round_num, text):
+    text = (text or "").strip()
+    if not text:
+        return
+    # Same cheap-but-bounded growth guard _collect_thinking uses above.
+    if sum(len(it["text"]) for it in _interim_text["items"]) < 20000:
+        _interim_text["items"].append({"round": round_num, "text": text})
+
+
 def clear_log_context():
     _log_local.conv_id = None
     _log_local.provider = None
     _log_local.on_tool_usage = None
+    _log_local.on_interim_text = None
     _log_local.forced = None
 
 
@@ -1807,10 +1855,33 @@ def call_anthropic(provider, messages, timeout, tools=None, tool_executor=None, 
         blocks = data.get("content") or []
         tool_use_blocks = [b for b in blocks if isinstance(b, dict) and b.get("type") == "tool_use"]
         _capture_pending([(b.get("name", ""), b.get("input") or {}) for b in tool_use_blocks])
+        # Part A §5: text can legitimately arrive ALONGSIDE tool_use blocks
+        # in the same response ("I'll check that now" + an actual call) —
+        # extracted unconditionally now, not just in the no-tool-calls
+        # branch below, so it's never silently thrown away.
+        text = "".join(b.get("text", "") for b in blocks if isinstance(b, dict) and b.get("type") == "text").strip()
 
         if tool_use_blocks and tool_executor and round_num < MAX_TOOL_ROUNDS \
                 and round_budget.take([b.get("name", "") for b in tool_use_blocks]):
             ran_tools = True
+            if text:
+                # Surface the narration BEFORE running the tools it
+                # accompanied: live, via on_interim_text if the caller
+                # wired one (ai_client.ask() connects cli.py's stderr trace,
+                # which server.js already forwards to the web UI live —
+                # see set_log_context's docstring), and persisted for the
+                # saved conversation via get_interim_text(), which
+                # ai_client.ask() folds into an "interimText" extra once
+                # the attempt succeeds. True mid-turn streaming (word by
+                # word) is §8, not this — this is "don't discard it and
+                # tell whoever's listening right now", not a token stream.
+                _collect_interim_text(round_num, text)
+                on_interim = getattr(_log_local, "on_interim_text", None)
+                if on_interim:
+                    try:
+                        on_interim(text, round_num)
+                    except Exception:  # noqa: BLE001 — a trace hook must never break the turn
+                        pass
             # `blocks` is appended whole, thinking blocks included. That is
             # required, not incidental: Anthropic rejects a replayed
             # tool_use turn whose thinking blocks (and their signatures) are
@@ -1831,7 +1902,6 @@ def call_anthropic(provider, messages, timeout, tools=None, tool_executor=None, 
             working_turns.append({"role": "user", "content": result_blocks})
             continue
 
-        text = "".join(b.get("text", "") for b in blocks if isinstance(b, dict) and b.get("type") == "text").strip()
         if not text:
             if tool_use_blocks:
                 return AIResult(False, error=_give_up_error(), tool_history=_history(),

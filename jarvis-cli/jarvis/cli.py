@@ -846,6 +846,19 @@ def handle_ai_prompt(text, commands, provider_override=None, think_override=None
             file=sys.stderr, flush=True,
         )
 
+    def on_interim_text(text, round_num):
+        # Master plan Part A §5: text the model sent alongside a tool call
+        # ("I'll check that now") — previously silently dropped. Printed as
+        # its own stderr line, same always-on trace convention as
+        # on_tool_call/on_tool_result above (AGENTS.md: no debug flag,
+        # nothing here is conditional). server.js already forwards a running
+        # jarvis process's stderr to the web UI live, so this also reaches
+        # the browser's console output without any change on that side.
+        text = text.replace("\n", " ").strip()
+        if len(text) > 240:
+            text = text[:237] + "..."
+        print(f"{ERR.DIM}  \u00bb {text}{ERR.RESET}", file=sys.stderr, flush=True)
+
     # Gate for anything tool_safety.json flags confirm_required for (see
     # ai_client._make_tool_executor) — delegates to the same
     # confirm_tool_call() that confirm_direct_command() uses for a human
@@ -892,7 +905,7 @@ def handle_ai_prompt(text, commands, provider_override=None, think_override=None
         on_tool_result=on_tool_result,
         conversation_id=conv_id, on_confirm_request=on_confirm_request,
         on_route=on_route, provider_override=provider_override,
-        think_override=think_override,
+        think_override=think_override, on_interim_text=on_interim_text,
     )
 
     for label, err in result.attempts:
