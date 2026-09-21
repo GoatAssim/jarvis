@@ -5,12 +5,27 @@
  * how to test it (Ask prompts and Debug direct-runs), what a pass looks like,
  * what it needs, and what to be careful of.
  *
+ * THIS FILE IS ONE OF TWO PLACES AN ENTRY CAN LIVE
+ * ------------------------------------------------
+ * 1. HERE — for every tool that ships with jarvis. This file is the source of
+ *    truth for those, and it is not the only source of truth there is.
+ * 2. In the TOOL'S OWN MODULE — a module-level TEST_CHECKLIST dict (and
+ *    TEST_CHECKLIST_GROUP for a brand-new TOOL_GROUP), in exactly the shape
+ *    described under FORMAT below (minus "group", which follows TOOL_GROUP).
+ *    This is the ONLY place a tool the user wrote themselves (Menu -> Custom
+ *    Tools, ~/.jarvis/tools/) can have an entry, because it can't be in a file
+ *    that ships with the app. The panel reads it from /api/tools and merges it
+ *    in; see actions/_template.py section 8. A tool that is in BOTH places
+ *    shows the entry from this file, and tests/test_checklist_coverage.py
+ *    fails on it: pick one home per tool.
+ *
  * WHO EDITS IT
  * ------------
- * Whoever adds, renames, removes or changes a tool. See AGENTS.md ("Test
- * Checklist"): adding a tool without adding its entry here is an incomplete
- * change. A tool with no entry still appears in the menu (the live catalogue
- * is read from /api/tools) but only as a bare name marked NO CHECKLIST.
+ * Whoever adds, renames, removes or changes a tool that ships with jarvis. See
+ * AGENTS.md ("Test Checklist"): adding a tool without adding its entry (here,
+ * or in its own module) is an incomplete change. A tool with neither still
+ * appears in the menu (the live catalogue is read from /api/tools) but only as
+ * a bare name marked NO CHECKLIST.
  *
  * WHAT IS *NOT* HERE
  * ------------------
@@ -21,7 +36,9 @@
  * ------
  * Everything between the JSON-BEGIN / JSON-END markers is strict JSON (double
  * quotes, no trailing commas, no comments): tests/test_checklist_coverage.py
- * parses it, and so does the browser.
+ * parses it, and so does the browser. What counts as a well-formed entry is
+ * defined once, in jarvis-cli/jarvis/checklist_schema.py, which validates
+ * entries from this file and from tool modules alike.
  *
  *   group   one of the ids in "groups"
  *   does    one line: what the tool is for
@@ -37,7 +54,7 @@
 
 window.JARVIS_TEST_CHECKLIST = /*JSON-BEGIN*/ {
  "schema": 1,
- "updated": "2026-09-20",
+ "updated": "2026-09-21",
  "groups": [
   {
    "id": "core",
@@ -158,6 +175,11 @@ window.JARVIS_TEST_CHECKLIST = /*JSON-BEGIN*/ {
    "id": "mcp",
    "label": "MCP",
    "blurb": "External tool servers."
+  },
+  {
+   "id": "custom",
+   "label": "Custom tools",
+   "blurb": "Tools you wrote yourself in Menu \u2192 Custom Tools. Their entries come from the tools' own files, not from this file."
   }
  ],
  "tools": {

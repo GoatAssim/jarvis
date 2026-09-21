@@ -25,6 +25,12 @@ A file in jarvis/actions/ is discovered as a tool module if it exposes:
     TOOL_CONFIRM_REQUIRED  = {"name", ...}
     TOOL_AI_REVIEW         = {"name", ...}
     TOOL_RESULT_SPECS      = {"name": {...}}  # tool_result_shaping.py shape
+    TEST_CHECKLIST         = {"name": {...}}  # this tool's Menu -> Test Checklist
+                                              # entry (does/steps/needs/os/care/
+                                              # watch), for tools that can't be in
+                                              # web/public/test-checklist-data.js
+    TEST_CHECKLIST_GROUP   = {"label": ..., "blurb": ...}  # names a brand-new
+                                              # TOOL_GROUP's section in that panel
 
 A file (with or without the TOOL_SCHEMAS/TOOLS/TOOL_GROUP trio above) can
 ALSO optionally expose:
@@ -40,6 +46,22 @@ all) is valid and its personas are still discovered.
 See actions/_template.py for the full contract, one field at a time,
 including why TOOL_KEYWORDS matters for routing (the section called out
 below) and how confirm-gating is supposed to work.
+
+--- TEST_CHECKLIST / TEST_CHECKLIST_GROUP (master plan G.1) ---
+
+The Test Checklist panel's shipped catalogue (web/public/test-checklist-data.js)
+can only ever document tools that ship WITH jarvis. A tool a user wrote into
+~/.jarvis/tools/ is unknown to it, so before G.1 it showed "NO CHECKLIST"
+forever. A module can now carry its own entry: TEST_CHECKLIST maps tool name
+-> entry, in exactly the shape the shipped file uses (checklist_schema.py is
+the single definition and the single validator), and TEST_CHECKLIST_GROUP
+labels a brand-new TOOL_GROUP so it gets a real section instead of a bare id.
+
+Failure mode differs from TOOL_KEYWORDS on purpose: a malformed entry is
+dropped and logged, and the TOOL FILE STILL LOADS. A checklist entry is notes
+about a tool, and rejecting a working tool over a typo in them would be the
+wrong trade — the loud place for the report is the log line here and the
+Custom Tools editor's Check button (custom_tools_store.validate_source).
 
 --- Why TOOL_KEYWORDS is not really optional ---
 
@@ -172,6 +194,10 @@ class ActionModuleRecord:
     ai_review: set = field(default_factory=set)
     result_specs: dict = field(default_factory=dict)
     personas: list = field(default_factory=list)
+    # G.1: already validated and normalised by checklist_schema.extract_supplied
+    # ({tool name: entry, "group" filled in}); {} / {} when the module supplied none.
+    checklist: dict = field(default_factory=dict)
+    checklist_group: dict = field(default_factory=dict)
 
 
 def _validate(module, filename, logger):
@@ -301,11 +327,26 @@ def _validate(module, filename, logger):
             "name as a fallback."
         )
 
+    # G.1: the module's own Test Checklist entry/entries, if any. Deliberately
+    # AFTER every check that can reject the file, and never a reason to reject
+    # it: problems are logged, the offending entry is dropped, the tool loads.
+    raw_checklist = getattr(module, "TEST_CHECKLIST", None)
+    raw_checklist_group = getattr(module, "TEST_CHECKLIST_GROUP", None)
+    checklist, checklist_group = {}, {}
+    if raw_checklist is not None or raw_checklist_group is not None:
+        from . import checklist_schema
+        checklist, group_meta, checklist_problems = checklist_schema.extract_supplied(
+            raw_checklist, raw_checklist_group, names, group,
+        )
+        checklist_group = group_meta or {}
+        for problem in checklist_problems:
+            logger(f"[checklist] {filename}: {problem} — ignored; the tool itself still loads.")
+
     return ActionModuleRecord(
         file=filename, valid=True, group=group, schemas=schemas, tools=tools,
         keywords=keywords, pack_instruction=pack_instruction,
         confirm_required=confirm_required, ai_review=ai_review, result_specs=result_specs,
-        personas=personas,
+        personas=personas, checklist=checklist, checklist_group=checklist_group,
     )
 
 

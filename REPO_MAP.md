@@ -71,6 +71,7 @@ jarvis-cli/jarvis/
     tool_registry.py      static: groups, keywords, per-group guidance
     tools.py              the full schema catalog + search_tools
     tool_loader.py        auto-discovery of actions/ and ~/.jarvis/tools/
+    checklist_schema.py   shape + validator for a Test Checklist entry (shipped file and module-supplied alike)
     tool_safety.py        which tools need confirmation  (DO NOT drive-by edit)
     tool_result_shaping.py  trims a tool result before it goes back to the model
     tool_diagnosis.py     NEW — explains a FAILED tool call and names the fix.
@@ -157,8 +158,10 @@ web/
     public/style.css      theme + layout, including the classic/focus switch
     public/custom-tools.js       Custom Tools panel
     public/test-checklist.js     Menu -> Test Checklist (UI, browser-only results)
-    public/test-checklist-data.js  the checklist catalogue: one entry per tool.
-                                 Edit it whenever you add/rename/remove a tool
+    public/test-checklist-data.js  the SHIPPED checklist catalogue: an entry per
+                                 tool that ships with jarvis. Edit it whenever you
+                                 add/rename/remove one. A tool module can carry its
+                                 own entry instead (TEST_CHECKLIST) - see checklist_schema.py
     public/test-checklist.css    its styling (reuses the debug-* panel chrome)
 ```
 
@@ -317,8 +320,10 @@ Panels: Guides, Debug, **Test Checklist**, Skills, Scheduled, MCP Servers,
 Custom Tools, Channels, **Daemons**, **Backlog**, **Log search**, **Setup**.
 
 Test Checklist is the one panel with no server route and no CLI command: its
-catalogue is a static file and its results live in the browser's localStorage.
-The only request it makes is the read-only `GET /api/tools` Debug already uses.
+catalogue is a static file plus any entries tool modules supply themselves, and
+its results live in the browser's localStorage. The only request it makes is the
+read-only `GET /api/tools` Debug already uses, which carries a tool's own
+`checklist` / `checklist_group` when its module defined them.
 See AGENTS.md -> "Test Checklist".
 
 ---

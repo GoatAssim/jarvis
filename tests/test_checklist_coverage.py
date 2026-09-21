@@ -5,6 +5,11 @@ says an agent that adds a tool updates its entry in the same change; this is
 the check that makes that visible before a tester finds a bare "NO CHECKLIST"
 card. Nothing here touches ~/.jarvis for real (HOME is redirected first), and
 the test only reads the data file — the checklist itself stays front end only.
+
+An entry has two possible homes (master plan G.1): the shipped data file, or the
+tool's own module (TEST_CHECKLIST). Coverage counts both; entries from both go
+through the same jarvis/checklist_schema.py validator, so there is one
+definition of "well formed"; and a tool may not have an entry in both places.
 """
 
 import json
@@ -34,6 +39,16 @@ def _load():
     return json.loads(m.group(1))
 
 
+def _supplied():
+    """Entries shipped tool modules (jarvis/actions/*.py) supply themselves.
+    HOME is redirected, so no developer's own custom tools are in here."""
+    import io
+    import contextlib
+    with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+        from jarvis import tools
+    return dict(tools.AUTO_TEST_CHECKLIST)
+
+
 def _live_tool_names():
     import io
     import contextlib
@@ -43,12 +58,14 @@ def _live_tool_names():
 
 
 def test_every_tool_has_a_checklist_entry():
-    have = set(_load()["tools"])
+    have = set(_load()["tools"]) | set(_supplied())
     missing = sorted(_live_tool_names() - have)
     assert not missing, (
         "Tools with no entry in web/public/test-checklist-data.js: "
         + ", ".join(missing)
-        + " -- add one (see AGENTS.md > Test Checklist)."
+        + " -- add one (see AGENTS.md > Test Checklist). A tool module can carry its own"
+        " (TEST_CHECKLIST); if it does, check the discovery log for a '[checklist]' line"
+        " saying the entry was dropped."
     )
 
 
@@ -61,28 +78,40 @@ def test_no_entry_for_a_tool_that_does_not_exist():
 
 
 def test_entries_are_well_formed():
+    # The shape check itself lives in jarvis/checklist_schema.py so a module's own
+    # TEST_CHECKLIST is judged by exactly the same code; only the group-id
+    # question is specific to this file (a module's group is its TOOL_GROUP).
+    from jarvis import checklist_schema
     data = _load()
     group_ids = {g["id"] for g in data["groups"]}
     problems = []
     for name, e in data["tools"].items():
         if e.get("group") not in group_ids:
             problems.append(f"{name}: unknown group {e.get('group')!r}")
-        if not str(e.get("does", "")).strip():
-            problems.append(f"{name}: empty 'does'")
-        steps = e.get("steps")
-        if not isinstance(steps, list) or not steps:
-            problems.append(f"{name}: needs at least one step")
-            continue
-        for i, s in enumerate(steps, 1):
-            has_ask = isinstance(s.get("ask"), str) and s["ask"].strip()
-            has_run = isinstance(s.get("run"), dict)
-            if has_ask == bool(has_run) or (has_ask and has_run):
-                problems.append(f"{name} step {i}: needs exactly one of 'ask' (text) or 'run' (object)")
-            if not str(s.get("expect", "")).strip():
-                problems.append(f"{name} step {i}: missing 'expect'")
-        for key in ("needs", "watch"):
-            if key in e and not (isinstance(e[key], list) and all(isinstance(x, str) for x in e[key])):
-                problems.append(f"{name}: '{key}' must be a list of strings")
+        if "group" not in e:
+            problems.append(f"{name}: shipped entries must name their 'group'")
+        problems.extend(checklist_schema.validate_entry(name, e))
+    for g in data["groups"]:
+        if not (str(g.get("id", "")).strip() and str(g.get("label", "")).strip()):
+            problems.append(f"group {g!r}: needs an id and a label")
+    assert not problems, "\n".join(problems)
+
+
+def test_supplied_entries_are_well_formed_and_not_duplicated():
+    # Discovery already dropped malformed entries (which test 1 then reports as
+    # missing); this checks what got through is in the shipped shape, and that
+    # no tool has an entry in both homes (one source of truth per tool).
+    from jarvis import checklist_schema
+    supplied = _supplied()
+    problems = []
+    for name, e in supplied.items():
+        problems.extend(checklist_schema.validate_entry(name, e))
+    both = sorted(set(supplied) & set(_load()["tools"]))
+    if both:
+        problems.append(
+            "Entries in BOTH web/public/test-checklist-data.js and the tool's own module "
+            "(keep one): " + ", ".join(both)
+        )
     assert not problems, "\n".join(problems)
 
 

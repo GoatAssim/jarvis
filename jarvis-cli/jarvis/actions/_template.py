@@ -620,6 +620,90 @@ TOOL_RESULT_SPECS = {}
 #    and the full list of allowed "vars" keys).
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# 8. TEST_CHECKLIST / TEST_CHECKLIST_GROUP — optional, and the way a tool that
+#    is NOT in the shipped web/public/test-checklist-data.js gets a real entry
+#    in the web console's Menu -> Test Checklist.
+#
+#    Why this exists: that panel's catalogue is one static file that ships
+#    with the app. A tool a user wrote into ~/.jarvis/tools/ (Menu -> Custom
+#    Tools) can never be in it, so without this it is listed as "NO CHECKLIST"
+#    forever, however good the tool is. A module supplies its own entry the
+#    same way it supplies TOOL_KEYWORDS: a module-level name, discovered at
+#    startup, no edits anywhere else.
+#
+#    WHICH HOME DOES MY TOOL USE?
+#      - A tool that ships with jarvis (a file in jarvis/actions/): either
+#        works, but AGENTS.md's rule ("adding a tool means updating its
+#        checklist entry") is satisfied by whichever you pick. Use the module
+#        if you want the test notes to sit next to the code. Never both — the
+#        coverage test fails if a tool has an entry in both places.
+#      - A tool in ~/.jarvis/tools/: this section is your only option.
+#
+#    TEST_CHECKLIST is a dict, tool name -> entry, in EXACTLY the shape the
+#    shipped file uses under "tools" (documented at the top of
+#    test-checklist-data.js), except "group": leave it out and it follows
+#    TOOL_GROUP above; if you give it, it must equal TOOL_GROUP.
+#
+#        does    one line: what the tool is for                    (required)
+#        steps   one or more tests                                 (required)
+#                {"ask": "<prompt to type into Ask>", "expect": "..."}
+#                {"run": {<arguments for a direct run from Debug>},
+#                 "expect": "..."}          (exactly one of ask / run, each
+#                                            step; "expect" is what a PASS
+#                                            looks like, concretely)
+#        needs   optional list: accounts, installed programs, hardware
+#        os      optional: "windows" if it only works there
+#        care    optional: side effects to warn a tester about
+#        watch   optional list: known gotchas worth checking
+#
+#    Use <angle brackets> for things the tester must fill in — the panel
+#    highlights them. Do NOT put results (ticks, verdicts, notes) here: those
+#    live only in the tester's browser. Editing a step's text un-ticks it for
+#    testers, which is what you want when the behaviour changed.
+#
+#    TEST_CHECKLIST_GROUP is only for a BRAND-NEW TOOL_GROUP (one that is
+#    neither a router group jarvis already ships nor "custom", which the panel
+#    already labels): it names your category's section. Without it the panel
+#    still shows your tool, under a label made from the group id.
+#
+#    VALIDATION AND FAILURE MODE
+#    ----------------------------
+#    Validated at discovery by jarvis/checklist_schema.py — the same code that
+#    checks the shipped file. Unlike TOOL_SCHEMAS, a malformed entry does NOT
+#    reject your file: it is dropped, logged ("[checklist] your_file.py: ...")
+#    and your tool loads normally, because a typo in test notes shouldn't take
+#    a working tool offline. The quiet failure that leaves is why the Custom
+#    Tools editor's Check button reports it too — use it.
+#
+#    WHERE THIS SURFACES
+#    --------------------
+#    tools.tools_list_payload() (`jarvis tools-list`, GET /api/tools) adds
+#    `checklist` (and `checklist_group`) to a tool that supplied them; the
+#    panel merges those into its shipped catalogue. No new route, no storage.
+# ---------------------------------------------------------------------------
+
+TEST_CHECKLIST = {
+    "example_ping": {
+        "does": "Replies 'pong' for whatever target it is given.",
+        "steps": [
+            {"ask": "Ping <a hostname>.",
+             "expect": "Replies with pong for that target."},
+            {"run": {"target": "<a hostname>"},
+             "expect": "ok: true, result 'pong', and the target echoed back."},
+            {"run": {},
+             "expect": "Asks what to ping instead of guessing (needs_clarification)."},
+        ],
+        "watch": ["A blank target must ask a question, not return a fake pong."],
+    },
+}
+
+# Only needed because TOOL_GROUP above is the brand-new group "example".
+TEST_CHECKLIST_GROUP = {
+    "label": "Examples",
+    "blurb": "Template tools; delete this once you have written your own.",
+}
+
 # That's the whole contract. Delete example_ping and this comment block,
 # write your real handler(s) and schema(s) above, and the file is live the
 # next time Jarvis starts — no edits anywhere else.

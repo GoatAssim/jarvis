@@ -757,6 +757,13 @@ def tools_list_payload():
     includes each tool's current confirm_required/ai_review safety flags
     (see tool_safety.py) so the debug dashboard's toggles reflect real
     state, not a hardcoded guess.
+
+    Additive, only when present (G.1): a tool whose own module supplied a
+    Test Checklist entry carries it as `checklist` (same shape as the shipped
+    web/public/test-checklist-data.js entries, `group` filled in), plus
+    `checklist_group` ({label, blurb}) when its module named a new group. The
+    Test Checklist panel merges these into its shipped catalogue. Every other
+    consumer ignores unknown keys, and the payload stays a plain list.
     """
     from . import tool_safety
 
@@ -768,13 +775,20 @@ def tools_list_payload():
             continue
         seen.add(name)
         flags = tool_safety.get_flags(name)
-        items.append({
+        item = {
             "name": name,
             "description": schema.get("description") or "",
             "parameters": schema.get("parameters") or _NO_PARAMS,
             "confirm_required": flags["confirm_required"],
             "ai_review": flags["ai_review"],
-        })
+        }
+        supplied = AUTO_TEST_CHECKLIST.get(name)
+        if supplied:
+            item["checklist"] = supplied
+            group_meta = AUTO_TEST_CHECKLIST_GROUPS.get(supplied.get("group"))
+            if group_meta:
+                item["checklist_group"] = group_meta
+        items.append(item)
     for name in TOOLS:
         if name not in seen:
             seen.add(name)
@@ -925,6 +939,22 @@ for _r in _AUTO_VALID:
 # already have a curated instruction, so an action file joining an
 # existing group can never silently override its established guidance.
 AUTO_TOOL_PACK_INSTRUCTIONS = {r.group: r.pack_instruction for r in _AUTO_VALID if r.pack_instruction}
+
+# Test Checklist entries tool modules supplied themselves (TEST_CHECKLIST /
+# TEST_CHECKLIST_GROUP — master plan G.1, see tool_loader.py and
+# checklist_schema.py). Already validated and normalised by the loader.
+#   name     -> entry, "group" filled in (the module's TOOL_GROUP)
+#   group id -> {"label", "blurb"}; first module to name a group wins, and
+#               actions/ is scanned before ~/.jarvis/tools/, so a shipped label
+#               can't be replaced by a user's file.
+# Read by tools_list_payload() below, which is how the web panel sees them —
+# there is no other route.
+AUTO_TEST_CHECKLIST = {}
+AUTO_TEST_CHECKLIST_GROUPS = {}
+for _r in _AUTO_VALID:
+    AUTO_TEST_CHECKLIST.update(_r.checklist)
+    if _r.checklist_group:
+        AUTO_TEST_CHECKLIST_GROUPS.setdefault(_r.group, _r.checklist_group)
 
 TOOLS = {**TOOLS, **AUTO_TOOLS}
 TOOL_SCHEMAS = [*TOOL_SCHEMAS, *AUTO_TOOL_SCHEMAS]

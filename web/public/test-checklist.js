@@ -18,12 +18,27 @@
  *    written to ~/.jarvis, no CLI command is involved. Export / Import moves
  *    them between browsers as a plain JSON file.
  *  - The only network call is a read-only GET /api/tools — the same one the
- *    Debug panel makes — used to notice tools that exist in the CLI but have
- *    no checklist entry yet. If the CLI is offline the panel still works from
+ *    Debug panel makes — used to (a) notice tools that exist in the CLI but
+ *    have no checklist entry yet, and (b) pick up entries a tool's OWN module
+ *    supplied (see below). If the CLI is offline the panel still works from
  *    the static catalogue.
  *
- * A tool with no checklist entry is listed by name only, marked NO CHECKLIST,
- * with no further details (there is nothing to show and nothing to record).
+ * TWO SOURCES FOR AN ENTRY (master plan G.1)
+ * ------------------------------------------
+ *  1. SHIPPED: test-checklist-data.js — tools that ship with jarvis.
+ *  2. SUPPLIED: a tool module's own TEST_CHECKLIST (and, for a brand-new
+ *     TOOL_GROUP, TEST_CHECKLIST_GROUP). A user's own custom tool can never be
+ *     in the shipped file, so this is the only way it gets a real entry. The
+ *     CLI puts it on that tool's item in /api/tools as `checklist` (+
+ *     `checklist_group`); mergeCatalogue() below folds it into the view the
+ *     panel renders. Same shape, same rendering either way. If both sources
+ *     have an entry for one tool, the shipped one wins.
+ *  window.JARVIS_TEST_CHECKLIST stays exactly the shipped file (never
+ *  mutated, so a refresh after deleting a custom tool really drops its
+ *  entry); JarvisTestChecklist.catalogue() returns the merged view.
+ *
+ * A tool with neither is listed by name only, marked NO CHECKLIST, with no
+ * further details (there is nothing to show and nothing to record).
  *
  * EVERYTHING IS TEXT, NEVER MARKUP
  * --------------------------------
@@ -38,7 +53,10 @@
   "use strict";
 
   const STORE_KEY = "jarvis.testChecklist.v1";
-  const DATA = global.JARVIS_TEST_CHECKLIST || null;
+  // The shipped file, never mutated. DATA is what the panel renders: SHIPPED
+  // plus any entries tools supplied themselves (rebuilt on every live read).
+  const SHIPPED = global.JARVIS_TEST_CHECKLIST || null;
+  let DATA = SHIPPED;
 
   const STATUSES = [
     { id: "untested", label: "Untested",         short: "Untested",   glyph: "\u25CB", key: "0", hint: "Not tried yet." },
@@ -180,6 +198,7 @@
   const state = {
     built: false,
     live: null,          // Map name -> live tool, once /api/tools answered
+    supplied: new Set(), // tool names whose entry came from their own module
     liveBusy: false,
     liveError: "",
     rows: [],
@@ -197,13 +216,67 @@
     return g ? g.label : id === "__nolist" ? "No checklist yet" : id;
   };
 
+  /* ---- entries a tool's own module supplied (G.1) --------------------- */
+
+  const isObj = (v) => !!v && typeof v === "object" && !Array.isArray(v);
+  const strOr = (v, dflt) => (typeof v === "string" && v.trim() ? v : dflt);
+  const strList = (v) => (Array.isArray(v) ? v.filter((x) => typeof x === "string" && x.trim()) : []);
+
+  // The CLI validates these already (checklist_schema.py), but this panel also
+  // talks to whatever CLI build happens to be installed — so a malformed entry
+  // is dropped here rather than allowed to throw inside a renderer.
+  function cleanSuppliedEntry(e) {
+    if (!isObj(e) || !strOr(e.does, "")) return null;
+    const steps = (Array.isArray(e.steps) ? e.steps : []).filter((s) =>
+      isObj(s) && strOr(s.expect, "") && (typeof s.ask === "string" && s.ask.trim() ? !isObj(s.run) : isObj(s.run)));
+    if (!steps.length) return null;
+    const out = { group: strOr(e.group, "custom"), does: e.does, steps };
+    const needs = strList(e.needs), watch = strList(e.watch);
+    if (needs.length) out.needs = needs;
+    if (watch.length) out.watch = watch;
+    if (strOr(e.os, "")) out.os = e.os;
+    if (strOr(e.care, "")) out.care = e.care;
+    return out;
+  }
+
+  // "my_group" -> "My group". Only the fallback for a group whose module gave
+  // no TEST_CHECKLIST_GROUP label; a real label always wins.
+  function prettyGroup(id) {
+    const t = String(id).replace(/[_-]+/g, " ").trim();
+    return t ? t.charAt(0).toUpperCase() + t.slice(1) : "Other tools";
+  }
+
+  // Pure: (shipped file data, /api/tools list) -> { data, from }.
+  //   data  shipped + supplied entries; shipped groups keep their order and
+  //         labels, new groups are appended in the order the CLI listed them
+  //   from  Set of tool names whose entry was supplied
+  function mergeCatalogue(shipped, liveList) {
+    const data = { ...shipped, groups: (shipped.groups || []).slice(), tools: { ...(shipped.tools || {}) } };
+    const from = new Set();
+    const known = new Set(data.groups.map((g) => g.id));
+    (Array.isArray(liveList) ? liveList : []).forEach((t) => {
+      if (!isObj(t) || typeof t.name !== "string" || !t.name || t.checklist === undefined) return;
+      if (data.tools[t.name]) return; // shipped wins
+      const entry = cleanSuppliedEntry(t.checklist);
+      if (!entry) return;
+      data.tools[t.name] = entry;
+      from.add(t.name);
+      if (!known.has(entry.group)) {
+        const meta = isObj(t.checklist_group) ? t.checklist_group : {};
+        data.groups.push({ id: entry.group, label: strOr(meta.label, prettyGroup(entry.group)), blurb: strOr(meta.blurb, "Supplied by the tool's own module.") });
+        known.add(entry.group);
+      }
+    });
+    return { data, from };
+  }
+
   function buildRows() {
     const order = groupIndex();
     const rows = [];
     let idx = 0;
     Object.entries((DATA && DATA.tools) || {}).forEach(([name, def]) => {
       rows.push({
-        name, def, idx: idx++, group: def.group, listed: true,
+        name, def, idx: idx++, group: def.group, listed: true, supplied: state.supplied.has(name),
         live: state.live ? state.live.get(name) || null : null,
         stale: !!state.live && state.live.size > 0 && !state.live.has(name),
       });
@@ -534,7 +607,7 @@
           el("span", { class: "tc-tag tc-tag--warn" }, "No checklist"),
         ]),
         el("p", null, "This tool exists in the CLI but has no checklist entry yet, so there is nothing to show beyond its name."),
-        el("p", null, ["Whoever added it should add an entry to ", el("code", null, "web/public/test-checklist-data.js"), " \u2014 see AGENTS.md \u2192 Test Checklist."]),
+        el("p", null, ["A tool that ships with jarvis gets its entry in ", el("code", null, "web/public/test-checklist-data.js"), " \u2014 see AGENTS.md \u2192 Test Checklist. A tool you wrote yourself (Menu \u2192 Custom Tools) carries its own: add a ", el("code", null, "TEST_CHECKLIST"), " dict to its file, and use the editor's Check button to see whether it was accepted."]),
         el("div", { class: "tc-step__actions", style: "margin-top:14px" }, [
           el("button", { class: "btn btn--outline btn--sm", type: "button", onclick: () => openInDebug(row.name) }, "Open in Debug"),
           el("button", { class: "btn btn--ghost btn--sm", type: "button", onclick: async () => toast((await copyText(row.name)) ? "Name copied" : "Couldn't copy") }, "Copy name"),
@@ -549,6 +622,7 @@
     const badges = [
       el("span", { class: "tc-tag" }, groupLabel(row.group)),
       def.os ? el("span", { class: "tc-tag" }, "Windows only") : null,
+      row.supplied ? el("span", { class: "tc-tag", title: "This entry is defined in the tool's own file (TEST_CHECKLIST), not in test-checklist-data.js" }, "From the tool's own file") : null,
       live && live.confirm_required ? el("span", { class: "tc-tag tc-tag--info", title: "Pauses for Yes/No before running (toggle in Debug)" }, "Confirms first") : null,
       live && live.ai_review ? el("span", { class: "tc-tag tc-tag--info", title: "A second AI reviews the call for risk" }, "AI review") : null,
       row.stale ? el("span", { class: "tc-tag tc-tag--bad", title: "The live CLI catalogue no longer has a tool with this name" }, "Not in CLI \u2014 renamed or removed?") : null,
@@ -979,8 +1053,15 @@
       if (!res.ok) throw new Error((body && body.error) || res.statusText || "CLI offline");
       if (!Array.isArray(body)) throw new Error("unexpected response");
       state.live = new Map(body.filter((t) => t && t.name).map((t) => [t.name, t]));
+      if (SHIPPED && SHIPPED.tools) {
+        try { const m = mergeCatalogue(SHIPPED, body); DATA = m.data; state.supplied = m.from; }
+        catch (_) { DATA = SHIPPED; state.supplied = new Set(); }
+      }
     } catch (e) {
       state.live = null;
+      // No live read, no supplied entries: fall back to the shipped file alone.
+      DATA = SHIPPED;
+      state.supplied = new Set();
       state.liveError = String(e && e.message ? e.message : e).slice(0, 80);
     } finally {
       state.liveBusy = false;
@@ -1050,7 +1131,7 @@
     state.prevFocus = document.activeElement;
     dom.overlay.hidden = false;
 
-    if (!DATA || !DATA.tools) {
+    if (!SHIPPED || !SHIPPED.tools) {
       dom.statusLine.textContent = "test-checklist-data.js didn't load";
       dom.statusLine.classList.add("is-error");
       dom.detail.textContent = "";
@@ -1081,5 +1162,7 @@
     if (prev && prev.focus && document.contains(prev)) { try { prev.focus(); } catch (_) { /* gone */ } }
   }
 
-  global.JarvisTestChecklist = { open, close };
+  // catalogue(): the merged view the panel renders (shipped + supplied).
+  // _mergeCatalogue is exposed for tests/test_checklist_supplied.py only.
+  global.JarvisTestChecklist = { open, close, catalogue: () => DATA, _mergeCatalogue: mergeCatalogue };
 })(window);
