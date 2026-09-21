@@ -43,7 +43,7 @@ ENCODING = "utf-8"
 
 CHAIN_SEP = "then"      # starts a new batch \u2014 waits for the previous one to finish
 PARALLEL_SEP = "and"    # joins the current batch \u2014 runs alongside whatever's already in it
-RESERVED_NAMES = {"config", "ai-config", "ai-clear", "ai-drop-from", "playnite-config", "spotify-config", "spotify-login", "memory-config", "everything-config", "tools-list", "tool-run", "personas-list", "skills-list", "skills-get", "skills-save", "skills-add", "skills-create", "skills-remove", "skillmake", "skilladd", "skillload", "skillunload", "tool-preview", "tool-safety-set", "conv-new", "conv-list", "conv-show", "conv-switch", "conv-delete", "logs", "logs-list", "logs-show", "logs-append-run", "logs-clear", "organize-json", "mode", "mode-set", "voice-config", "speak", "listen", "transcribe", "sched-list", "sched-tick", "sched-daemon", "sched-ask-log", "sched-add", "sched-show", "sched-cancel", "sched-pause", "sched-resume", "sched-snooze", "sched-approve", "sched-signal", "sched-clear", "notify-send", "notify-list", "notify-history", "notify-ack", "notify-clear", "notify-config", "conv-search", "mcp-status", "mcp-refresh", "mcp-config", "mcp-call", "channels-config", "channels-status", "channels-set", "channels-allow", "channels-deny", "channels-test", "channels-whoami", "channels-log", "channels-directory", "channels-people", "channels-follow", "channels-block", "discord-daemon", "instagram-serve", "logs-search", "mcp-tools", "daemons", "daemon-start", "daemon-stop", "daemon-restart", "daemon-status", "daemon-console", "daemon-input", "daemon-schedule", "daemon-add", "daemon-edit", "daemon-remove", "daemon-run", "daemons-tick", "logs-files", "logs-tail", "logs-sets", "backlog", "backlog-add", "backlog-done", "backlog-update", "backlog-remove", "backlog-board", "ambient", "ambient-tick", "onboard", "ui-mode", "subagent-keys", "subagents", "subagent-spawn", "subagent-run", "subagent-status", "subagent-cancel", "think", "clipboard-watch", "clipboard-watch-config", CHAIN_SEP, PARALLEL_SEP, "-h", "--help"}
+RESERVED_NAMES = {"config", "ai-config", "ai-clear", "ai-drop-from", "playnite-config", "spotify-config", "spotify-login", "memory-config", "everything-config", "tools-list", "tool-run", "personas-list", "skills-list", "skills-get", "skills-save", "skills-add", "skills-create", "skills-remove", "skillmake", "skilladd", "skillload", "skillunload", "tool-preview", "tool-safety-set", "conv-new", "conv-list", "conv-show", "conv-switch", "conv-delete", "logs", "logs-list", "logs-show", "logs-append-run", "logs-clear", "organize-json", "mode", "mode-set", "voice-config", "speak", "listen", "transcribe", "sched-list", "sched-tick", "sched-daemon", "sched-ask-log", "sched-add", "sched-show", "sched-cancel", "sched-pause", "sched-resume", "sched-snooze", "sched-approve", "sched-signal", "sched-clear", "notify-send", "notify-list", "notify-history", "notify-ack", "notify-clear", "notify-config", "conv-search", "mcp-status", "mcp-refresh", "mcp-config", "mcp-call", "channels-config", "channels-status", "channels-set", "channels-allow", "channels-deny", "channels-test", "channels-whoami", "channels-log", "channels-directory", "channels-people", "channels-follow", "channels-block", "discord-daemon", "instagram-serve", "logs-search", "mcp-tools", "daemons", "daemon-start", "daemon-stop", "daemon-restart", "daemon-status", "daemon-console", "daemon-input", "daemon-schedule", "daemon-add", "daemon-edit", "daemon-remove", "daemon-run", "daemons-tick", "logs-files", "logs-tail", "logs-sets", "backlog", "backlog-add", "backlog-done", "backlog-update", "backlog-remove", "backlog-board", "ambient", "ambient-tick", "onboard", "ui-mode", "subagent-keys", "subagents", "subagent-spawn", "subagent-run", "subagent-status", "subagent-cancel", "think", "clipboard-watch", "clipboard-watch-config", "browser-daemon", CHAIN_SEP, PARALLEL_SEP, "-h", "--help"}
 
 OUT = Palette(sys.stdout)  # actual command output: the banner, the command list
 ERR = Palette(sys.stderr)  # jarvis's own status/trace/error messages
@@ -855,8 +855,10 @@ def handle_ai_prompt(text, commands, provider_override=None, think_override=None
         # jarvis process's stderr to the web UI live, so this also reaches
         # the browser's console output without any change on that side.
         text = text.replace("\n", " ").strip()
-        if len(text) > 240:
-            text = text[:237] + "..."
+        # Was 240; a whole interim message is a sentence or two, and cutting
+        # it mid-word hid most of what the model said (plan §0.5 item 4b).
+        if len(text) > 600:
+            text = text[:597] + "..."
         print(f"{ERR.DIM}  \u00bb {text}{ERR.RESET}", file=sys.stderr, flush=True)
 
     # Gate for anything tool_safety.json flags confirm_required for (see
@@ -972,13 +974,20 @@ def handle_ai_prompt(text, commands, provider_override=None, think_override=None
             pass
 
     print(f"{prefix}{result.text}")
-    if getattr(result, "degraded", False):
-        print(
-            f"{ERR.DIM}  (note: every provider failed while composing this reply; "
-            f"the text above is a mechanical summary of completed tool calls, "
-            f"not a model-written answer){ERR.RESET}",
-            file=sys.stderr, flush=True,
-        )
+    ending = getattr(result, "ending", None)
+    note = {
+        "forced": "the step limit was reached, so the text above is a summary of what ran, not a "
+                  "model-written answer",
+        "cutoff": "the model's reply hit its output limit while writing its next step, so the text "
+                  "above is a summary of what ran, not a model-written answer",
+        "truncated": "the model's reply hit its output limit and was cut off",
+        "pending_action": "you said go ahead, so the step proposed last turn was run directly",
+    }.get(ending)
+    if note is None and getattr(result, "degraded", False):
+        note = ("every provider failed while composing this reply; the text above is a mechanical "
+                "summary of completed tool calls, not a model-written answer")
+    if note:
+        print(f"{ERR.DIM}  (note: {note}){ERR.RESET}", file=sys.stderr, flush=True)
 
     # Phase 0 (new_plan.md): baseline token/tool/round measurement for this
     # ask. Two lines: a human-readable one on stderr (visible in a plain CLI
@@ -1802,6 +1811,11 @@ def main():
                     print(f"      {step['detail']}")
             print("Browser control is ready." if report["ok"] else "Browser control setup failed — see above.")
         sys.exit(0 if report["ok"] else 1)
+
+    # --- Browser control v2 warm daemon (browser_daemon.py) -----------------
+    if argv[0] == "browser-daemon":
+        from . import browser_daemon
+        sys.exit(browser_daemon.run())
 
     # --- Notification digest ------------------------------------------------
     if argv[0] in ("digest-status", "digest-on", "digest-off", "digest-now",

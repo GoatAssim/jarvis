@@ -189,9 +189,8 @@ def set_log_context(conv_id, provider=None, on_tool_usage=None, base_url=None, o
     # a uniform ADAPTERS[type](provider, messages, ...) contract that other
     # callers (tests, benchmark scripts) also use, and widening every
     # adapter's signature for one caller's optional trace hook isn't worth
-    # it. Only call_anthropic uses this so far (§5's prototype adapter) —
-    # see 0.4/§5 item 4: "prototype on one adapter first... not done until
-    # all five follow it."
+    # it. All five adapters use it now (§5: Anthropic first, then Gemini,
+    # OpenAI-compatible, Cohere and Ollama) through _surface_interim_text().
     _log_local.on_interim_text = on_interim_text
     # Phase 0 (see new_plan.md): usage/round bookkeeping is scoped to one
     # provider attempt, same lifecycle as conv_id/provider above — reset
@@ -220,6 +219,7 @@ def set_thinking(level="off"):
     _thinking["rounds"] = 0
     _thinking["requested"] = 0
     _interim_text["items"] = []
+    _finish_log["items"] = []
 
 
 def get_thinking_trace():
@@ -334,6 +334,124 @@ def _collect_interim_text(round_num, text):
     # Same cheap-but-bounded growth guard _collect_thinking uses above.
     if sum(len(it["text"]) for it in _interim_text["items"]) < 20000:
         _interim_text["items"].append({"round": round_num, "text": text})
+
+
+def _surface_interim_text(round_num, text):
+    """Narration the model sent ALONGSIDE a tool call ("I'll check that now"
+    + a call, in one response). Master plan §5: talking does not end a turn
+    and must not be thrown away. Called by every adapter right before it runs
+    the tools that came with the text, so:
+      - it is kept (get_interim_text(), saved by ai_client as an
+        "interimText" extra), and
+      - it is shown live, before the tools run, through on_interim_text if
+        the caller wired one (cli.py's stderr trace, which server.js
+        forwards to the web console).
+    Not token streaming — the whole message, once complete (that is §8).
+    A raising hook never breaks the turn.
+    """
+    text = (text or "").strip()
+    if not text:
+        return
+    _collect_interim_text(round_num, text)
+    on_interim = getattr(_log_local, "on_interim_text", None)
+    if on_interim:
+        try:
+            on_interim(text, round_num)
+        except Exception:  # noqa: BLE001 — a trace hook must never break the turn
+            pass
+
+
+# ---------------------------------------------------------------------------
+# The provider finish signal (master plan §5, "Required behavior").
+#
+# Talking does not end a turn; only the model's own finish signal does. Every
+# provider says it differently, so each adapter reads ITS OWN field and hands
+# it to finish_signal(), which returns the one normalized answer the shared
+# loop acts on:
+#
+#   finish  FINISH_TOOL — the model wants a tool, the turn continues
+#           FINISH_DONE — the model is finished with the prompt
+#   cut     None for a natural ending, else why the response ended when it
+#           was NOT the model finishing on its own: CUT_LENGTH (ran into the
+#           output cap), CUT_REFUSED (safety classifier), CUT_FILTER (a
+#           provider content filter).
+#
+#   anthropic          stop_reason  tool_use | end_turn | max_tokens | refusal
+#   openai_compatible  finish_reason tool_calls | stop | length | content_filter
+#   gemini             finishReason STOP (even when it wants a tool!) | MAX_TOKENS | SAFETY…
+#   cohere             finish_reason TOOL_CALL | COMPLETE | MAX_TOKENS
+#   ollama             done_reason  stop | length   (no tool-specific value)
+#
+# In the ordinary case the field and the presence of tool calls agree, so
+# nothing visibly changes. The rule earns its keep at the edges:
+#   - a reply cut off by the output cap that ALSO contains a tool call is a
+#     truncated call — its arguments may be cut mid-string, so it is never
+#     run (Gemini's function calls are atomic parts, so they still are);
+#   - a reply cut off by the cap with text in it is reported as cut off
+#     instead of looking like the model finished on its own (AIResult.cut);
+#   - the calls-present-but-can't-run case is a give-up with the pending call,
+#     never "the text was the answer".
+# Non-natural endings stay the hard stops they were — but they are labelled.
+# ---------------------------------------------------------------------------
+FINISH_TOOL = "tool"
+FINISH_DONE = "done"
+CUT_LENGTH = "length"
+CUT_REFUSED = "refused"
+CUT_FILTER = "filter"
+
+_LENGTH_REASONS = frozenset({"max_tokens", "length", "MAX_TOKENS", "model_context_window_exceeded"})
+_REFUSED_REASONS = frozenset({"refusal"})
+_FILTER_REASONS = frozenset({"content_filter", "SAFETY", "PROHIBITED_CONTENT", "BLOCKLIST", "SPII"})
+
+
+def finish_signal(reason, has_calls, atomic_calls=False):
+    """Normalize one response's provider-specific stop reason.
+
+    `reason` is the raw field (or None when the provider/proxy didn't send
+    one — an unknown or missing value falls back to whether tool calls are
+    present, which is what every adapter did before this existed).
+    `has_calls` is whether the response carries any tool call.
+    `atomic_calls` is True for a provider whose calls arrive as whole
+    structured parts that cannot be cut mid-argument (Gemini): a length cut
+    then does not make its calls unusable.
+
+    Returns (finish, cut) — see the block comment above.
+    """
+    r = "" if reason is None else str(reason)
+    if r in _REFUSED_REASONS:
+        return FINISH_DONE, CUT_REFUSED
+    if r in _FILTER_REASONS:
+        return FINISH_DONE, CUT_FILTER
+    if r in _LENGTH_REASONS:
+        if has_calls and atomic_calls:
+            return FINISH_TOOL, None
+        return (FINISH_TOOL if has_calls else FINISH_DONE), CUT_LENGTH
+    return (FINISH_TOOL if has_calls else FINISH_DONE), None
+
+
+_finish_log = {"items": []}
+
+
+def _note_finish(round_num, finish, cut):
+    """Remember what each round's finish signal said, per attempt (same
+    lifecycle as the interim text above). For tests and for explaining a turn
+    that ended oddly; nothing on the hot path reads it."""
+    _finish_log["items"].append({"round": round_num, "finish": finish, "cut": cut})
+
+
+def get_finish_log():
+    """[{"round": N, "finish": "tool"|"done", "cut": None|"length"|...}] for
+    the attempt that just ran, in round order."""
+    return [dict(it) for it in _finish_log["items"]]
+
+
+def _capture_forced_text(text):
+    """Companion to _capture_pending(): while a forced ending is collecting
+    what the model WANTED to call, also keep the narration it sent with the
+    call, so the wrapper can show it before it runs that call itself."""
+    forced = getattr(_log_local, "forced", None)
+    if forced is not None and text:
+        forced["text"] = text
 
 
 def clear_log_context():
@@ -458,9 +576,10 @@ class AIResult:
     next provider can continue from instead of re-running those tools.
     """
 
-    __slots__ = ("ok", "text", "error", "tool_history", "usage", "kind", "pending")
+    __slots__ = ("ok", "text", "error", "tool_history", "usage", "kind", "pending", "cut")
 
-    def __init__(self, ok, text=None, error=None, tool_history=None, usage=None, kind=None, pending=None):
+    def __init__(self, ok, text=None, error=None, tool_history=None, usage=None, kind=None, pending=None,
+                 cut=None):
         self.ok = ok
         self.text = text
         self.error = error
@@ -473,6 +592,10 @@ class AIResult:
         # F.1: the tool call(s) (name, args) the model still wanted to make
         # when it could not be given tools. None unless kind == KIND_BUDGET.
         self.pending = list(pending) if pending else None
+        # §5: set (CUT_LENGTH) on a SUCCESSFUL result whose text ended because
+        # the provider hit its output cap, not because the model finished.
+        # None for a natural ending. ai_client tells the user about it.
+        self.cut = cut
 
 
 # ---------------------------------------------------------------------------
@@ -499,6 +622,7 @@ KIND_SHAPE = "shape"          # the request itself was rejected; no key can fix 
 KIND_EMPTY = "empty"          # a reply with nothing in it
 KIND_MALFORMED = "malformed"  # the model tried to call a tool and garbled it
 KIND_REFUSED = "refused"      # safety filter / refusal
+KIND_CUTOFF = "cutoff"        # the reply hit the output cap while asking for a tool; the call is unusable
 KIND_OTHER = "other"
 
 
@@ -509,6 +633,8 @@ def classify_failure(error):
     e = str(error).lower()
     if "gave up after" in e and "tool calls" in e:
         return KIND_BUDGET
+    if "cut off at the output limit" in e:
+        return KIND_CUTOFF
     if "malformed tool call" in e or "malformed_function_call" in e:
         return KIND_MALFORMED
     if is_request_shape_error(e):
@@ -993,6 +1119,13 @@ def _give_up_error():
     return f"gave up after {MAX_TOOL_ROUNDS} rounds of tool calls with no final answer"
 
 
+def _cutoff_error():
+    """A tool call the provider cut off at its output cap (§5). Its arguments
+    may be truncated mid-string, so it is not run; another key has the same
+    cap, so ask() does not rotate either (KIND_CUTOFF)."""
+    return "the reply was cut off at the output limit while it was asking for a tool"
+
+
 def _json_object_at(s, start):
     """Parse a JSON object starting at s[start]. Returns (obj, end_index) or (None, start)."""
     if start >= len(s) or s[start] != "{":
@@ -1378,7 +1511,7 @@ def _forced_ending(adapter, provider, generic, timeout, tools, tool_executor, ro
     above for the design. Returns an AIResult; never raises."""
     allowed = {t.get("name") for t in (tools or []) if isinstance(t, dict) and t.get("name")}
     previous = getattr(_log_local, "forced", None)
-    state = {"allowed": allowed, "captured": [], "round_base": round_num}
+    state = {"allowed": allowed, "captured": [], "round_base": round_num, "text": ""}
     _log_local.forced = state
     try:
         history = _flatten_tool_scaffold(generic)
@@ -1404,6 +1537,7 @@ def _forced_ending(adapter, provider, generic, timeout, tools, tool_executor, ro
         # 1. Grace round — tools come back, once, one more time.
         if tool_executor is not None and round_budget.take_grace():
             state["captured"] = []
+            state["text"] = ""
             r = adapter(provider, _with_notice(history, _GRACE_NOTICE), timeout, tools=tools,
                         tool_executor=None, round_budget=RoundBudget(), cfg_defaults=cfg_defaults)
             calls = _wanted(r)[:GRACE_MAX_CALLS]
@@ -1414,6 +1548,10 @@ def _forced_ending(adapter, provider, generic, timeout, tools, tool_executor, ro
                     # A real failure (key, network, shape): let ask() handle it
                     # the normal way rather than spending a second request here.
                     return AIResult(False, error=r.error, tool_history=history, kind=r.kind)
+            if calls and state.get("text"):
+                # §5: the grace response narrated before its call; show that
+                # first, exactly like a normal round does.
+                _surface_interim_text(round_num, state["text"])
             for name, args in calls:
                 _record_pair(history, name, args, _call_tool_safely(tool_executor, name, args, round_num))
             state["round_base"] = round_num + 1
@@ -1664,11 +1802,34 @@ def call_openai_compatible(provider, messages, timeout, tools=None, tool_executo
 
         message = choice.get("message") or {}
         tool_calls = message.get("tool_calls")
-        _capture_pending(_openai_style_calls(tool_calls))
+        calls = _openai_style_calls(tool_calls)
+        _capture_pending(calls)
+        # §5: `content` may carry narration alongside the calls; it is read
+        # up front now so it can be shown before the calls run.
+        text = (message.get("content") or "").strip()
+        if calls:
+            _capture_forced_text(text)
+        # §5: continue on the finish signal (finish_reason "tool_calls";
+        # some hosts say "stop" with calls present, which still counts).
+        finish, cut = finish_signal(choice.get("finish_reason"), bool(tool_calls))
+        _note_finish(round_num, finish, cut)
 
-        if tool_calls and tool_executor and round_num < MAX_TOOL_ROUNDS \
-                and round_budget.take([n for n, _ in _openai_style_calls(tool_calls)]):
+        if finish == FINISH_TOOL:
+            if cut == CUT_LENGTH:
+                # finish_reason "length" with calls: the arguments string may
+                # be cut off mid-JSON — _decode_arguments would turn that into
+                # {} and run the tool anyway. Don't.
+                return AIResult(False, error=_cutoff_error(), kind=KIND_CUTOFF,
+                                tool_history=_openai_messages_to_generic(working_messages) if ran_tools else None)
+            if not (tool_executor and round_num < MAX_TOOL_ROUNDS
+                    and round_budget.take([n for n, _ in calls])):
+                # Not finished, but the tools can't run now: a forced ending
+                # carrying the pending call — never "the narration was the answer".
+                return AIResult(False, error=_give_up_error(), pending=calls,
+                                tool_history=_openai_messages_to_generic(working_messages) if ran_tools else None)
             ran_tools = True
+            _surface_interim_text(round_num, text)
+            # `message` is appended whole: content AND tool_calls travel together.
             working_messages.append(message)
             for call in tool_calls:
                 fn = call.get("function") or {}
@@ -1682,14 +1843,10 @@ def call_openai_compatible(provider, messages, timeout, tools=None, tool_executo
                 })
             continue
 
-        text = (message.get("content") or "").strip()
         if not text:
             refusal = message.get("refusal")
             if refusal:
                 return AIResult(False, error=f"refused: {refusal}",
-                                tool_history=_openai_messages_to_generic(working_messages) if ran_tools else None)
-            if tool_calls:
-                return AIResult(False, error=_give_up_error(), pending=_openai_style_calls(tool_calls),
                                 tool_history=_openai_messages_to_generic(working_messages) if ran_tools else None)
             if _forced_active():
                 # gpt-oss on Groq writes its call into `reasoning` and leaves
@@ -1720,7 +1877,7 @@ def call_openai_compatible(provider, messages, timeout, tools=None, tool_executo
             })
             continue
 
-        return AIResult(True, text=text, usage=get_usage_summary())
+        return AIResult(True, text=text, usage=get_usage_summary(), cut=cut)
 
     return AIResult(False, error=_give_up_error(),
                     tool_history=_openai_messages_to_generic(working_messages) if ran_tools else None)
@@ -1854,34 +2011,36 @@ def call_anthropic(provider, messages, timeout, tools=None, tool_executor=None, 
 
         blocks = data.get("content") or []
         tool_use_blocks = [b for b in blocks if isinstance(b, dict) and b.get("type") == "tool_use"]
-        _capture_pending([(b.get("name", ""), b.get("input") or {}) for b in tool_use_blocks])
+        calls = [(b.get("name", ""), b.get("input") or {}) for b in tool_use_blocks]
+        _capture_pending(calls)
         # Part A §5: text can legitimately arrive ALONGSIDE tool_use blocks
         # in the same response ("I'll check that now" + an actual call) —
-        # extracted unconditionally now, not just in the no-tool-calls
-        # branch below, so it's never silently thrown away.
+        # extracted unconditionally, not just in the no-tool-calls branch,
+        # so it's never silently thrown away.
         text = "".join(b.get("text", "") for b in blocks if isinstance(b, dict) and b.get("type") == "text").strip()
+        if calls:
+            _capture_forced_text(text)
+        # §5: the turn continues on Anthropic's own finish signal
+        # (stop_reason "tool_use"), not on "did this response contain text".
+        finish, cut = finish_signal(data.get("stop_reason"), bool(tool_use_blocks))
+        _note_finish(round_num, finish, cut)
 
-        if tool_use_blocks and tool_executor and round_num < MAX_TOOL_ROUNDS \
-                and round_budget.take([b.get("name", "") for b in tool_use_blocks]):
+        if finish == FINISH_TOOL:
+            if cut == CUT_LENGTH:
+                # max_tokens hit while a tool_use block was being written:
+                # its input may be cut mid-string. Never run it.
+                return AIResult(False, error=_cutoff_error(), tool_history=_history(), kind=KIND_CUTOFF)
+            if not (tool_executor and round_num < MAX_TOOL_ROUNDS
+                    and round_budget.take([n for n, _ in calls])):
+                # The model is NOT finished — it wants a tool it can't have
+                # right now. That is a forced ending carrying the pending
+                # call, never "the narration was the answer".
+                return AIResult(False, error=_give_up_error(), tool_history=_history(), pending=calls)
             ran_tools = True
-            if text:
-                # Surface the narration BEFORE running the tools it
-                # accompanied: live, via on_interim_text if the caller
-                # wired one (ai_client.ask() connects cli.py's stderr trace,
-                # which server.js already forwards to the web UI live —
-                # see set_log_context's docstring), and persisted for the
-                # saved conversation via get_interim_text(), which
-                # ai_client.ask() folds into an "interimText" extra once
-                # the attempt succeeds. True mid-turn streaming (word by
-                # word) is §8, not this — this is "don't discard it and
-                # tell whoever's listening right now", not a token stream.
-                _collect_interim_text(round_num, text)
-                on_interim = getattr(_log_local, "on_interim_text", None)
-                if on_interim:
-                    try:
-                        on_interim(text, round_num)
-                    except Exception:  # noqa: BLE001 — a trace hook must never break the turn
-                        pass
+            # Surface the narration BEFORE running the tools it accompanied
+            # (live via on_interim_text, and kept for the saved
+            # conversation) — see _surface_interim_text.
+            _surface_interim_text(round_num, text)
             # `blocks` is appended whole, thinking blocks included. That is
             # required, not incidental: Anthropic rejects a replayed
             # tool_use turn whose thinking blocks (and their signatures) are
@@ -1903,11 +2062,8 @@ def call_anthropic(provider, messages, timeout, tools=None, tool_executor=None, 
             continue
 
         if not text:
-            if tool_use_blocks:
-                return AIResult(False, error=_give_up_error(), tool_history=_history(),
-                                pending=[(b.get("name", ""), b.get("input") or {}) for b in tool_use_blocks])
             return AIResult(False, error="empty response content", tool_history=_history())
-        return AIResult(True, text=text, usage=get_usage_summary())
+        return AIResult(True, text=text, usage=get_usage_summary(), cut=cut)
 
     return AIResult(False, error=_give_up_error(), tool_history=_history())
 
@@ -2246,12 +2402,30 @@ def call_gemini(provider, messages, timeout, tools=None, tool_executor=None, rou
 
             parts = (candidate.get("content") or {}).get("parts") or []
             call_parts = [p for p in parts if isinstance(p, dict) and "functionCall" in p]
-            _capture_pending([(p["functionCall"].get("name", ""), p["functionCall"].get("args") or {})
-                              for p in call_parts])
+            calls = [(p["functionCall"].get("name", ""), p["functionCall"].get("args") or {})
+                     for p in call_parts]
+            _capture_pending(calls)
+            # Thought parts excluded: with includeThoughts on, Gemini returns
+            # the reasoning as ordinary text parts flagged `thought: true`.
+            # Joining them all would print the model's private deliberation
+            # to the user as if it were the answer (or as narration).
+            text = "".join(p.get("text", "") for p in parts
+                           if isinstance(p, dict) and not p.get("thought")).strip()
+            if calls:
+                _capture_forced_text(text)
+            # §5: Gemini reports STOP even when it wants a tool, so the parts
+            # are the signal (any functionCall part = the turn continues).
+            # Its calls are whole structured parts, so a MAX_TOKENS cut does
+            # not make them unusable (atomic_calls).
+            finish, cut = finish_signal(finish_reason, bool(call_parts), atomic_calls=True)
+            _note_finish(round_num, finish, cut)
 
-            if call_parts and tool_executor and round_num < MAX_TOOL_ROUNDS \
-                    and round_budget.take([p["functionCall"].get("name", "") for p in call_parts]):
+            if finish == FINISH_TOOL:
+                if not (tool_executor and round_num < MAX_TOOL_ROUNDS
+                        and round_budget.take([n for n, _ in calls])):
+                    return AIResult(False, error=_give_up_error(), tool_history=_history(), pending=calls)
                 ran_tools = True
+                _surface_interim_text(round_num, text)
                 # Thought parts are stripped before the model turn is echoed
                 # back. Gemini rejects a replayed turn that still contains
                 # them, so with includeThoughts on this would fail EVERY
@@ -2275,17 +2449,7 @@ def call_gemini(provider, messages, timeout, tools=None, tool_executor=None, rou
                 working_contents.append({"role": "user", "parts": response_parts})
                 continue
 
-            # Thought parts excluded: with includeThoughts on, Gemini returns
-            # the reasoning as ordinary text parts flagged `thought: true`.
-            # Joining them all would print the model's private deliberation
-            # to the user as if it were the answer.
-            text = "".join(p.get("text", "") for p in parts
-                           if isinstance(p, dict) and not p.get("thought")).strip()
             if not text:
-                if call_parts:
-                    return AIResult(False, error=_give_up_error(), tool_history=_history(),
-                                    pending=[(p["functionCall"].get("name", ""), p["functionCall"].get("args") or {})
-                                             for p in call_parts])
                 if finish_reason in ("MALFORMED_FUNCTION_CALL", "UNEXPECTED_TOOL_CALL"):
                     # The model tried to call a tool and garbled it. This used
                     # to be reported as "empty response content" (F.8), which
@@ -2324,7 +2488,7 @@ def call_gemini(provider, messages, timeout, tools=None, tool_executor=None, rou
                         tool_history=_history(),
                     )
                 return AIResult(False, error="empty response content", tool_history=_history())
-            return AIResult(True, text=text, usage=get_usage_summary())
+            return AIResult(True, text=text, usage=get_usage_summary(), cut=cut)
 
         return AIResult(False, error=_give_up_error(), tool_history=_history())
     finally:
@@ -2418,11 +2582,31 @@ def call_cohere(provider, messages, timeout, tools=None, tool_executor=None, rou
 
         message = data.get("message") or {}
         tool_calls = message.get("tool_calls")
-        _capture_pending(_openai_style_calls(tool_calls))
+        calls = _openai_style_calls(tool_calls)
+        _capture_pending(calls)
+        content = message.get("content") or []
+        text = "".join(b.get("text", "") for b in content if isinstance(b, dict)).strip()
+        # §5: Cohere's narration before a call lives in `tool_plan` ("I will
+        # search for ..."), not in `content`; both count as interim text.
+        plan = message.get("tool_plan")
+        plan = plan.strip() if isinstance(plan, str) else ""
+        narration = "\n\n".join(t for t in (plan, text) if t)
+        if calls:
+            _capture_forced_text(narration)
+        # §5: Cohere's own finish signal is finish_reason TOOL_CALL / COMPLETE.
+        finish, cut = finish_signal(data.get("finish_reason"), bool(tool_calls))
+        _note_finish(round_num, finish, cut)
 
-        if tool_calls and tool_executor and round_num < MAX_TOOL_ROUNDS \
-                and round_budget.take([n for n, _ in _openai_style_calls(tool_calls)]):
+        if finish == FINISH_TOOL:
+            if cut == CUT_LENGTH:
+                return AIResult(False, error=_cutoff_error(), kind=KIND_CUTOFF,
+                                tool_history=_openai_messages_to_generic(working_messages) if ran_tools else None)
+            if not (tool_executor and round_num < MAX_TOOL_ROUNDS
+                    and round_budget.take([n for n, _ in calls])):
+                return AIResult(False, error=_give_up_error(), pending=calls,
+                                tool_history=_openai_messages_to_generic(working_messages) if ran_tools else None)
             ran_tools = True
+            _surface_interim_text(round_num, narration)
             working_messages.append(message)
             for call in tool_calls:
                 fn = call.get("function") or {}
@@ -2436,15 +2620,10 @@ def call_cohere(provider, messages, timeout, tools=None, tool_executor=None, rou
                 })
             continue
 
-        content = message.get("content") or []
-        text = "".join(b.get("text", "") for b in content if isinstance(b, dict)).strip()
         if not text:
-            if tool_calls:
-                return AIResult(False, error=_give_up_error(), pending=_openai_style_calls(tool_calls),
-                                tool_history=_openai_messages_to_generic(working_messages) if ran_tools else None)
             return AIResult(False, error="empty response content",
                             tool_history=_openai_messages_to_generic(working_messages) if ran_tools else None)
-        return AIResult(True, text=text, usage=get_usage_summary())
+        return AIResult(True, text=text, usage=get_usage_summary(), cut=cut)
 
     return AIResult(False, error=_give_up_error(),
                     tool_history=_openai_messages_to_generic(working_messages) if ran_tools else None)
@@ -2552,11 +2731,27 @@ def call_ollama(provider, messages, timeout, tools=None, tool_executor=None, rou
 
         message = data.get("message") or {}
         tool_calls = message.get("tool_calls")
-        _capture_pending(_openai_style_calls(tool_calls))
+        calls = _openai_style_calls(tool_calls)
+        _capture_pending(calls)
+        text = (message.get("content") or "").strip()
+        if calls:
+            _capture_forced_text(text)
+        # §5: Ollama has no tool-specific done_reason — tool_calls present is
+        # the "wants a tool" signal, done_reason stop/length the natural or
+        # cut ending.
+        finish, cut = finish_signal(data.get("done_reason"), bool(tool_calls))
+        _note_finish(round_num, finish, cut)
 
-        if tool_calls and tool_executor and round_num < MAX_TOOL_ROUNDS \
-                and round_budget.take([n for n, _ in _openai_style_calls(tool_calls)]):
+        if finish == FINISH_TOOL:
+            if cut == CUT_LENGTH:
+                return AIResult(False, error=_cutoff_error(), kind=KIND_CUTOFF,
+                                tool_history=_openai_messages_to_generic(working_messages) if ran_tools else None)
+            if not (tool_executor and round_num < MAX_TOOL_ROUNDS
+                    and round_budget.take([n for n, _ in calls])):
+                return AIResult(False, error=_give_up_error(), pending=calls,
+                                tool_history=_openai_messages_to_generic(working_messages) if ran_tools else None)
             ran_tools = True
+            _surface_interim_text(round_num, text)
             working_messages.append(message)
             for call in tool_calls:
                 fn = call.get("function") or {}
@@ -2566,17 +2761,13 @@ def call_ollama(provider, messages, timeout, tools=None, tool_executor=None, rou
                 working_messages.append({"role": "tool", "content": result_text})
             continue
 
-        text = (message.get("content") or "").strip()
         if not text:
-            if tool_calls:
-                return AIResult(False, error=_give_up_error(), pending=_openai_style_calls(tool_calls),
-                                tool_history=_openai_messages_to_generic(working_messages) if ran_tools else None)
             return AIResult(
                 False,
                 error="empty response content (is the model pulled? try: ollama pull " + (model or "<model>") + ")",
                 tool_history=_openai_messages_to_generic(working_messages) if ran_tools else None,
             )
-        return AIResult(True, text=text, usage=get_usage_summary())
+        return AIResult(True, text=text, usage=get_usage_summary(), cut=cut)
 
     return AIResult(False, error=_give_up_error(),
                     tool_history=_openai_messages_to_generic(working_messages) if ran_tools else None)

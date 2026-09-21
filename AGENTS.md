@@ -91,6 +91,9 @@ pytest functions if pytest happens to be available). Run directly:
     python3 tests/test_channel_people.py
     python3 tests/test_checklist_coverage.py
     python3 tests/test_checklist_supplied.py
+    python3 tests/test_finish_signal.py
+    python3 tests/test_ask_output.py
+    python3 tests/test_browser_daemon.py
 
 Two things that will waste your time if nobody tells you:
 

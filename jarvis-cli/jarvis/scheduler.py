@@ -89,6 +89,7 @@ from pathlib import Path
 
 from . import timespec
 from .timespec import TimeSpecError
+from . import ask_output as _ask_output
 
 JARVIS_DIR = Path.home() / ".jarvis"
 STORE_FILE = JARVIS_DIR / "scheduled.json"
@@ -131,17 +132,12 @@ MAX_JOBS = 500            # a runaway loop creating jobs shouldn't fill the disk
 # USAGE_MARKER/CONFIRM_MARKER there). A scheduled job has no live listener to
 # strip them the same way, so without this, a job's raw stdout — JSON and
 # all — was going straight into the notification a person actually reads.
-_PROTOCOL_LINE_PREFIXES = ("JARVIS_USAGE ", "JARVIS_CONFIRM_REQUEST ")
-
-
-def _strip_protocol_lines(text):
-    """Drop cli.py's machine-readable marker lines from a captured ask's
-    stdout, so a scheduled job's notification shows the reply a person
-    would see in a live session — not that reply plus raw telemetry JSON."""
-    if not text:
-        return text
-    kept = [ln for ln in text.split("\n") if not ln.startswith(_PROTOCOL_LINE_PREFIXES)]
-    return "\n".join(kept).strip()
+# The actual stripping now lives in ask_output.py (master plan D.2) so
+# task_runner.py can share it instead of reimplementing it; kept as a
+# private alias here so this module's own call sites (and anything in
+# tests that imports the private name directly) don't need to change.
+_PROTOCOL_LINE_PREFIXES = _ask_output.PROTOCOL_LINE_PREFIXES
+_strip_protocol_lines = _ask_output.strip_protocol_lines
 MAX_RESULT_CHARS = 4000   # last_result is for humans/the model, not an archive
 MAX_ASK_LOG_ENTRIES = 500  # same "don't fill the disk" ceiling as MAX_JOBS,
                            # applied to the ask-prompt log instead of the job

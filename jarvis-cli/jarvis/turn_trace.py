@@ -119,6 +119,19 @@ MAX_STEPS = 24
 MAX_DETAIL_CHARS = 60
 
 
+_ENDING_LINES = {
+    "forced": ("I ran out of steps before the job was finished, so this summary of what ran "
+               "is mine, not the model's."),
+    "cutoff": ("The model's reply hit its output limit while it was working out the next "
+               "step, so I stopped there and summarised what had run."),
+    "truncated": "The model's reply hit its output limit, so it stops mid-thought.",
+    "no_provider": ("The actions finished, but no provider was left to write a reply about "
+                    "them — so this summary is mine, not the model's."),
+    "pending_action": ("You said go ahead, so I ran the step I had proposed directly, after "
+                       "the usual confirmation."),
+}
+
+
 class TurnTrace:
     """Everything worth explaining about one ask(), collected as it happens.
 
@@ -129,7 +142,7 @@ class TurnTrace:
 
     __slots__ = ("route", "sticky_groups", "cache_seeded", "steps",
                  "attempts", "provider", "thinking_level", "thinking_chars",
-                 "skills", "mode", "tool_count", "degraded")
+                 "skills", "mode", "tool_count", "degraded", "ending")
 
     def __init__(self):
         self.route = None            # (groups, matches, confident)
@@ -144,6 +157,10 @@ class TurnTrace:
         self.mode = None             # capacity mode label
         self.tool_count = 0          # tools actually offered to the model
         self.degraded = False        # answered from completed side effects only
+        # Why the turn ended when it was NOT the model finishing on its own
+        # (same vocabulary as ai_client.AskResult.ending): None, "forced",
+        # "cutoff", "truncated", "no_provider", "pending_action".
+        self.ending = None
 
     # -- collection ------------------------------------------------------
 
@@ -207,6 +224,7 @@ class TurnTrace:
             "mode": self.mode,
             "toolsOffered": self.tool_count,
             "degraded": self.degraded,
+            "ending": self.ending,
         }
 
     def summary(self):
@@ -279,7 +297,13 @@ class TurnTrace:
         for label, error in self.attempts:
             out.append("%s didn't answer (%s), so I moved to the next one." % (label, error))
 
-        if self.degraded:
+        # Forced endings are reported AS forced (master plan §5 / F.1): the
+        # old single sentence claimed "no provider was left" even when the
+        # real reason was that the step limit or the output limit was hit.
+        ending_line = _ENDING_LINES.get(self.ending)
+        if ending_line:
+            out.append(ending_line)
+        elif self.degraded:
             out.append("The actions finished, but no provider was left to write a reply about "
                        "them — so this summary is mine, not the model's.")
 
@@ -404,4 +428,5 @@ def from_extra(data):
     trace.mode = data.get("mode")
     trace.tool_count = int(data.get("toolsOffered") or 0)
     trace.degraded = bool(data.get("degraded"))
+    trace.ending = data.get("ending") or None
     return trace

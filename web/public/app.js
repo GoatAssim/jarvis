@@ -3218,6 +3218,22 @@
           insertIntoAskThread(details);
         }
         break;
+      case "interimText": {
+        // Narration the model sent alongside a tool call ("I'll check that
+        // now") — saved as an extra by ai_client since master plan §5, but
+        // this case was never written, so it vanished on reload (plan
+        // §0.5 item 4a). Same collapsed block as "thinking" above.
+        const items = (item.data && Array.isArray(item.data.items)) ? item.data.items : [];
+        const said = items.map((it) => String((it && it.text) || "").trim()).filter(Boolean);
+        if (said.length) {
+          insertIntoAskThread(el("details", { class: "thinking-block" }, [
+            el("summary", { class: "thinking-block__summary" },
+              `Said along the way (${said.length})`),
+            el("pre", { class: "thinking-block__text" }, said.join("\n\n")),
+          ]));
+        }
+        break;
+      }
       case "uiBubble": {
         const lvl = ["info", "success", "warn", "error"].includes(item.data.level)
           ? item.data.level : "info";
@@ -9092,12 +9108,38 @@
   }
 
   function renderNotifCard(note) {
+    // D.2 (master plan): the raw `message` can be a whole ask/command
+    // reply — the bug report this fixed was exactly a notification list
+    // showing raw JARVIS_USAGE {...} JSON under every entry. The backend
+    // (notifier.py) now always ships a short, pre-cleaned `summary`
+    // alongside the full `message`; this renders the summary by default
+    // and only offers to expand to the full text when there's more to
+    // see (`summary_truncated`), instead of showing everything inline.
+    const hasMore = !!note.summary_truncated && note.message && note.message !== note.summary;
+    const bodyText = note.summary || note.message || "";
+    const bodyChildren = [bodyText];
+    let expanded = false;
+    let toggleBtn = null;
+    let bodyEl = null;
+    if (hasMore) {
+      toggleBtn = el("button", {
+        type: "button",
+        class: "notif-card__expand",
+        onclick: () => {
+          expanded = !expanded;
+          bodyEl.textContent = expanded ? note.message : note.summary;
+          toggleBtn.textContent = expanded ? "Show less" : "Show more";
+        },
+      }, "Show more");
+    }
+    bodyEl = el("div", { class: "notif-card__body" }, bodyChildren);
     return el("div", { class: notifKindClass(note) }, [
       el("div", { class: "notif-card__head" }, [
         el("div", { class: "notif-card__title" }, note.title || "Jarvis"),
         el("div", { class: "notif-card__meta" }, notifTimestamp(note)),
       ]),
-      note.message ? el("div", { class: "notif-card__body" }, note.message) : null,
+      bodyText ? bodyEl : null,
+      toggleBtn,
       el("div", { class: "notif-card__kind" },
         `${note.kind || "notify"}${note.failed ? " \u2014 failed" : ""}`),
     ]);

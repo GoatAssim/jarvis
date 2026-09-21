@@ -43,6 +43,8 @@ import secrets
 from datetime import datetime
 from pathlib import Path
 
+from . import ask_output
+
 JARVIS_DIR = Path.home() / ".jarvis"
 INBOX_FILE = JARVIS_DIR / "notifications.json"
 CONFIG_FILE = JARVIS_DIR / "notify_config.json"
@@ -131,6 +133,29 @@ def _save_inbox(items):
         return False
 
 
+def _hydrate(item):
+    """Heal a notification record read from disk that predates the
+    summary/cleaning fields above (master plan D.2 "existing data" note):
+    re-clean `message` and backfill `summary`/`summary_truncated` if
+    missing, without rewriting the file — this runs on every read, is
+    cheap, and means old data self-heals the next time it's viewed rather
+    than needing a migration script. A record that already has a
+    `summary` is trusted as-is and left untouched (no repeated work).
+    """
+    if not isinstance(item, dict):
+        return item
+    if "summary" in item and not (item.get("message") or "").startswith(ask_output.PROTOCOL_LINE_PREFIXES):
+        return item
+    item = dict(item)
+    cleaned = ask_output.strip_protocol_lines(item.get("message") or "") or ""
+    item["message"] = cleaned[:MAX_MESSAGE_CHARS]
+    if "summary" not in item:
+        summarized = ask_output.summarize(cleaned)
+        item["summary"] = summarized["summary"][:MAX_MESSAGE_CHARS]
+        item["summary_truncated"] = summarized["truncated"] or len(cleaned) > MAX_MESSAGE_CHARS
+    return item
+
+
 def pending(consumer="web", limit=50):
     """Undelivered notifications for one consumer, oldest first.
 
@@ -145,7 +170,7 @@ def pending(consumer="web", limit=50):
     for item in _load_inbox():
         if consumer in (item.get("seen_by") or []):
             continue
-        out.append(item)
+        out.append(_hydrate(item))
         if len(out) >= limit:
             break
     return out
@@ -181,7 +206,7 @@ def clear(consumer=None):
 
 
 def history(limit=50):
-    return list(reversed(_load_inbox()))[:limit]
+    return [_hydrate(i) for i in list(reversed(_load_inbox()))[:limit]]
 
 
 # ---------------------------------------------------------------------------
@@ -197,12 +222,33 @@ def notify(title, message, channels=None, kind="notify", job_id=None,
     of the channels that actually worked and `failed_channels` for the ones
     that didn't — visible in `jarvis sched-tick` output, because a toast
     that silently isn't appearing is otherwise very hard to diagnose.
+
+    `message` is run through ask_output.strip_protocol_lines() before
+    anything else — a defense-in-depth backstop (master plan D.2), not the
+    only place this happens: scheduler.py already cleans a scheduled ask/
+    command's captured stdout before it ever reaches here. This catches
+    any OTHER call site that passes raw captured stdout straight through,
+    now or in the future, without every one of them having to remember to
+    strip it themselves. It's a no-op for ordinary text (a reminder body,
+    a plain notify-send message) since that never starts with a marker
+    prefix in the first place.
+
+    The record also carries a `summary` (first line / first ~200 chars)
+    and `summary_truncated` flag alongside the full `message`, so a list
+    view (the web Notifications panel, `jarvis notify-list`) can show the
+    short form with the full text available on expand, instead of dumping
+    an entire reply — including, for a task/command notification, output
+    that can run to paragraphs — into every entry in the list.
     """
     config = _load_config()
+    clean_message = ask_output.strip_protocol_lines((message or "").strip()) or ""
+    summarized = ask_output.summarize(clean_message)
     record = {
         "id": secrets.token_hex(6),
         "title": (title or "Jarvis").strip()[:200],
-        "message": (message or "").strip()[:MAX_MESSAGE_CHARS],
+        "message": clean_message[:MAX_MESSAGE_CHARS],
+        "summary": summarized["summary"][:MAX_MESSAGE_CHARS],
+        "summary_truncated": summarized["truncated"] or len(clean_message) > MAX_MESSAGE_CHARS,
         "kind": kind or "notify",
         "job_id": job_id,
         "conv_id": conv_id,
@@ -279,7 +325,7 @@ def _deliver_toast(record, config):
     """Native OS notification. Best-effort by design — there is no portable
     way to do this, so each platform gets its own attempt and a failure just
     means the inbox carries the notification instead."""
-    text = record["message"].replace("\r", " ").replace("\n", " ")[:250]
+    text = (record.get("summary") or record["message"]).replace("\r", " ").replace("\n", " ")[:250]
     title = record["title"][:64]
     if sys.platform.startswith("win"):
         return _toast_windows(title, text, config)

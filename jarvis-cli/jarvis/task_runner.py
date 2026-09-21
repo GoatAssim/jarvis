@@ -38,6 +38,7 @@ import os
 import subprocess
 import sys
 
+from . import ask_output
 from . import tasks
 
 CREATE_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
@@ -111,7 +112,7 @@ def _spawn_ask(task, prompt):
     except (OSError, ValueError) as exc:
         return False, "", "couldn't run jarvis: %s" % exc
 
-    text = (proc.stdout or "").strip()
+    text = ask_output.strip_protocol_lines((proc.stdout or "").strip())
     if proc.returncode != 0 and not text:
         return False, "", (proc.stderr or "ask failed").strip()[:500]
     return True, text, None
