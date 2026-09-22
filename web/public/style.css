@@ -713,6 +713,9 @@ input.is-invalid{ border-color: var(--red) !important; }
 .console-line--exit-ok{ color: var(--green); margin-top: 6px; }
 .console-line--exit-bad{ color: var(--red); margin-top: 6px; }
 .console-line--sys{ color: var(--accent-soft); }
+.console-line--tool{ color: var(--accent-soft); }
+.console-line--narration{ color: var(--text-dim); font-style: italic; }
+.console-line.is-filtered{ display: none; }
 
 .cursor-blink{
   display: inline-block; width: 7px; height: 13px; background: var(--accent);
@@ -1904,6 +1907,24 @@ audio.ask-dl-player{ max-height: none; background: transparent; }
 }
 .debug-toggle-btn.is-active{ border-color: var(--accent); color: var(--accent); }
 .debug-toggle-btn:hover{ border-color: var(--accent-soft); color: var(--text); }
+
+/* §3: source filter row, between the tool-list search box and the list
+   itself. Same button styling as .debug-toggle-btn above, just wrapped so
+   four buttons stay readable in the narrow right-hand pane. */
+.debug-source-filter{ display: flex; gap: 4px; flex-wrap: wrap; padding: 0 14px 8px; }
+.debug-tool-card__name-row{ display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.debug-tool-card__source{
+  flex-shrink: 0; font-size: 9.5px; letter-spacing: 0.07em; text-transform: uppercase;
+  padding: 1px 6px; border-radius: 2px; border: 1px solid var(--border); color: var(--text-dim);
+}
+.debug-tool-card__source--auto{ border-color: var(--accent-soft); color: var(--accent-soft); }
+.debug-tool-card__source--user{ border-color: var(--accent); color: var(--accent); }
+
+/* Part E.5 — Live Feed's console replay filter row, between the panel head
+   and the console output itself. */
+.console-filter{ display: flex; align-items: center; gap: 8px; padding: 6px 14px; flex-wrap: wrap; }
+.console-filter__kinds{ display: flex; gap: 4px; flex-wrap: wrap; }
+.console-filter__search{ flex: 1 1 120px; min-width: 100px; }
 
 .debug-response{
   flex: 0 0 auto; max-height: 40%; min-height: 90px;

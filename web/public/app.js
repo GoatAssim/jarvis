@@ -1695,6 +1695,16 @@
     debugLoaded: false,
     debugSelected: null,     // name of the currently selected tool
     debugSearch: "",
+    // §3: "" = All. One of "builtin" | "auto" | "user" otherwise, matching
+    // the `source` field tools_list_payload() now returns per tool. There
+    // is deliberately no "mcp" option yet — MCP-bridged tools aren't part
+    // of this catalog at all (see tools.py's _tool_source docstring), so
+    // offering that bucket here would just always show empty.
+    debugSourceFilter: "",
+    // Part E.5 — Live Feed console replay filter. consoleKindGroup is ""
+    // (All) or one of "output"|"tools"|"errors" (see CONSOLE_KIND_GROUPS).
+    consoleKindGroup: "",
+    consoleSearch: "",
     debugResponseMode: "organized", // "organized" | "raw"
     debugLastResult: null,   // last {ok, result, raw, stderr, error} from /api/tools/run
     debugLastResultError: false,
@@ -1820,6 +1830,22 @@
     listLogs: () => api("GET", "/api/logs"),
     getLog: (id, limit) => api("GET", `/api/logs/${encodeURIComponent(id)}${limit ? `?limit=${limit}` : ""}`),
     clearLog: (id) => api("DELETE", `/api/logs/${encodeURIComponent(id)}`),
+    // Part E — the console store (~/.jarvis/console/<id>.jsonl). `opts` may
+    // set since/kinds/turn/limit/afterLastClear — see console-read's
+    // docstring in cli.py for what each does; `kinds` is an array here,
+    // joined for the querystring.
+    getConsole: (id, opts = {}) => {
+      const params = new URLSearchParams();
+      if (opts.since) params.set("since", String(opts.since));
+      if (opts.kinds && opts.kinds.length) params.set("kinds", opts.kinds.join(","));
+      if (opts.turn) params.set("turn", opts.turn);
+      if (opts.surface) params.set("surface", opts.surface);
+      if (opts.limit) params.set("limit", String(opts.limit));
+      if (opts.afterLastClear) params.set("afterLastClear", "1");
+      const qs_ = params.toString();
+      return api("GET", `/api/console/${encodeURIComponent(id)}${qs_ ? `?${qs_}` : ""}`);
+    },
+    clearConsole: (id) => api("POST", `/api/console/${encodeURIComponent(id)}/clear`),
     listAiProviders: () => api("GET", "/api/ai/providers"),
     // Voice endpoints don't go through api(): /api/voice/speak's success
     // response body is raw audio, not JSON, and /api/voice/transcribe's
@@ -2410,16 +2436,109 @@
   // Console + WebSocket execution
   // ===========================================================================
 
-  function consoleAppend(text, cls) {
+  // Part E.5 — every console-store kind (see console_store.KINDS) maps to
+  // one of three filter buckets the Live Feed's "Output/Tools/Errors"
+  // buttons show; a kind not listed here (a future addition to the store)
+  // falls back to "output" rather than disappearing from every filter.
+  const CONSOLE_KIND_GROUPS = {
+    stdout: "output", stderr: "output", command: "output",
+    "tool-call": "tools", "tool-result": "tools", provider: "tools",
+    tokens: "tools", narration: "tools", thinking: "tools",
+    error: "errors", status: "errors",
+  };
+  // The structural "──────" separator between two persisted runs (see
+  // loadConsoleHistoryForConv) is chrome, not content — always visible,
+  // in every filter, same reasoning a section divider in the Debug panel
+  // would never be hidden by a text search either.
+  const CONSOLE_ALWAYS_VISIBLE_KIND = "sys";
+
+  function consoleKindGroup(kind) {
+    if (kind === CONSOLE_ALWAYS_VISIBLE_KIND) return null;
+    return CONSOLE_KIND_GROUPS[kind] || "output";
+  }
+
+  function consoleAppend(text, cls, kind) {
     const c = qs("#console");
     const idle = qs(".console__idle", c);
     if (idle) idle.remove();
-    c.appendChild(el("div", { class: `console-line console-line--${cls}` }, text));
+    // Live call sites (the ws handler below) only ever pass `cls`
+    // ("cmd"/"out"/"err"/"exit-ok"/"exit-bad"/"sys") — map those to the
+    // same canonical console_store kind names replayed lines carry, so
+    // CONSOLE_KIND_GROUPS (keyed on the store's vocabulary) buckets a
+    // live line the same way it will once that line is reloaded from
+    // the store.
+    const CLS_TO_KIND = {
+      cmd: "command", out: "stdout", err: "stderr",
+      "exit-ok": "status", "exit-bad": "error", sys: "sys",
+    };
+    const line = el("div", { class: `console-line console-line--${cls}` }, text);
+    line.dataset.kind = kind || CLS_TO_KIND[cls] || cls;
+    c.appendChild(line);
+    applyConsoleLineFilter(line);
     c.scrollTop = c.scrollHeight;
   }
 
+  // Maps a console_store {kind, text} line to the same {cls, kind} shape
+  // consoleAppend's live call sites already use, so replayed and live
+  // lines render identically. "status" is split into ok/bad/plain by
+  // sniffing the text ai_client.py/cli.py actually write ("answered",
+  // "exit 0", "exit <n>", "interrupted ...") — a label, not a re-parse of
+  // anything structural, so a wording change downstream just falls back
+  // to the plain "sys" look rather than breaking.
+  function consoleClsForStoredLine(kind, text) {
+    if (kind === "command") return "cmd";
+    if (kind === "stdout") return "out";
+    if (kind === "stderr") return "err";
+    if (kind === "tool-call" || kind === "tool-result") return "tool";
+    if (kind === "narration" || kind === "thinking") return "narration";
+    if (kind === "error") return "exit-bad";
+    if (kind === "status") {
+      const t = (text || "").toLowerCase();
+      if (t === "answered" || t === "exit 0") return "exit-ok";
+      if (t.startsWith("exit") || t.includes("interrupted") || t.includes("no provider")) return "exit-bad";
+      return "sys";
+    }
+    return "sys"; // provider, tokens, and anything not yet mapped
+  }
+
+  function consoleFiltersActive() {
+    return { group: state.consoleKindGroup || "", search: (state.consoleSearch || "").trim().toLowerCase() };
+  }
+
+  function applyConsoleLineFilter(line, filters) {
+    filters = filters || consoleFiltersActive();
+    const group = consoleKindGroup(line.dataset.kind);
+    const groupHidden = group !== null && filters.group && filters.group !== group;
+    const searchHidden = filters.search && !line.textContent.toLowerCase().includes(filters.search);
+    line.classList.toggle("is-filtered", groupHidden || searchHidden);
+  }
+
+  function applyConsoleFilter() {
+    const filters = consoleFiltersActive();
+    qsa(".console-line", qs("#console")).forEach((line) => applyConsoleLineFilter(line, filters));
+  }
+
+  qs("#console-filter").addEventListener("click", (e) => {
+    const btn = e.target.closest(".debug-toggle-btn");
+    if (!btn) return;
+    state.consoleKindGroup = btn.dataset.kindGroup || "";
+    qsa(".debug-toggle-btn", qs("#console-filter")).forEach((b) => b.classList.toggle("is-active", b === btn));
+    applyConsoleFilter();
+  });
+  qs("#console-search").addEventListener("input", (e) => {
+    state.consoleSearch = e.target.value;
+    applyConsoleFilter();
+  });
+
   qs("#btn-clear-console").addEventListener("click", () => {
     qs("#console").innerHTML = '<div class="console__idle">Awaiting instructions.</div>';
+    // Part E.4 point 7 — persist a "cleared through here" marker so a
+    // reload matches what this click just did, rather than bringing
+    // everything back. Best-effort and silent, same as every other
+    // console-store write: a failed marker just means the NEXT reload
+    // shows history again, not that Clear visibly failed right now.
+    const convId = state.activeConversationId;
+    if (convId != null) Api.clearConsole(convId).catch(() => {});
   });
 
   qs("#btn-abort").addEventListener("click", () => {
@@ -5002,10 +5121,19 @@
 
   function debugFilteredTools() {
     const q = state.debugSearch.trim().toLowerCase();
-    if (!q) return state.debugTools;
-    return state.debugTools.filter((t) =>
-      t.name.toLowerCase().includes(q) || (t.description || "").toLowerCase().includes(q)
-    );
+    const src = state.debugSourceFilter;
+    return state.debugTools.filter((t) => {
+      if (src && (t.source || "builtin") !== src) return false;
+      if (!q) return true;
+      return t.name.toLowerCase().includes(q) || (t.description || "").toLowerCase().includes(q);
+    });
+  }
+
+  // Small "Built-in"/"Auto"/"User" label shown on each tool card, same
+  // three buckets as the filter row above. Falls back to "builtin" for any
+  // payload that predates §3 (e.g. a cached /api/tools response).
+  function debugSourceLabel(source) {
+    return { builtin: "Built-in", auto: "Auto", user: "User" }[source] || "Built-in";
   }
 
   // Human-readable type label for a JSON-schema property, e.g. "string",
@@ -5387,11 +5515,17 @@
 
   function renderDebugToolList() {
     const tools = debugFilteredTools();
-    debugToolCount.textContent = `${state.debugTools.length}`;
+    // Count reflects the active source filter (not just search), so "12"
+    // next to "Built-in" selected means 12 built-in tools, not the full 170.
+    debugToolCount.textContent = state.debugSourceFilter
+      ? `${tools.length} / ${state.debugTools.length}`
+      : `${state.debugTools.length}`;
     debugToolList.innerHTML = "";
     if (!tools.length) {
-      debugToolList.appendChild(el("div", { class: "debug-empty" },
-        state.debugTools.length ? "No tools match your search." : "No tools reported by jarvis."));
+      const reason = state.debugSearch.trim()
+        ? "No tools match your search."
+        : (state.debugSourceFilter ? "No tools in this source." : "No tools reported by jarvis.");
+      debugToolList.appendChild(el("div", { class: "debug-empty" }, reason));
       return;
     }
     for (const tool of tools) {
@@ -5399,7 +5533,11 @@
         class: "debug-tool-card" + (tool.name === state.debugSelected ? " is-active" : ""),
         onclick: () => debugSelectTool(tool.name),
       }, [
-        el("div", { class: "debug-tool-card__name" }, tool.name),
+        el("div", { class: "debug-tool-card__name-row" }, [
+          el("div", { class: "debug-tool-card__name" }, tool.name),
+          el("span", { class: `debug-tool-card__source debug-tool-card__source--${tool.source || "builtin"}` },
+            debugSourceLabel(tool.source)),
+        ]),
         tool.description ? el("div", { class: "debug-tool-card__desc" }, tool.description) : null,
       ]);
       debugToolList.appendChild(card);
@@ -5419,6 +5557,14 @@
 
   qs("#debug-search").addEventListener("input", (e) => {
     state.debugSearch = e.target.value;
+    renderDebugToolList();
+  });
+
+  qs("#debug-source-filter").addEventListener("click", (e) => {
+    const btn = e.target.closest(".debug-toggle-btn");
+    if (!btn) return;
+    state.debugSourceFilter = btn.dataset.source || "";
+    qsa(".debug-toggle-btn", qs("#debug-source-filter")).forEach((b) => b.classList.toggle("is-active", b === btn));
     renderDebugToolList();
   });
 
@@ -6389,13 +6535,20 @@
   }
 
   // Repopulates the "Live output" console panel (#console) from this
-  // conversation's persisted "command_run" log entries (see cli.py's
-  // logs-append-run and server.js's "run" websocket handler) — without
-  // this, a directly-run command's console output only ever lived in this
-  // tab's live websocket stream and vanished the instant the page reloaded
-  // or another conversation was selected. Best-effort and silent: a brand
-  // new conversation with no runs yet legitimately 404s (no log file at
-  // all), which is not a failure worth surfacing.
+  // conversation's persisted console-store history (Part E — see
+  // console_store.py and cli.py's console-read), filtered to surface
+  // "live" (direct/live command runs) so an ask's own tool activity —
+  // logged into the same per-conversation store — never bleeds into this
+  // panel; that's the Ask console's own half of the same data, not
+  // wired into a persisted replay here yet (see the master plan's E.6
+  // step list for what's left).
+  //
+  // afterLastClear: true — a reload matches what a previous Clear click
+  // actually did (E.4 point 7): only what happened after that Clear,
+  // not the full history from before it. Best-effort and silent: a
+  // brand new conversation with no runs yet legitimately returns nothing
+  // (console-read's own "legacy" fallback also lands here empty if there's
+  // truly nothing on disk), which is not a failure worth surfacing.
   //
   // Skipped while something is actively running (state.running covers both
   // an in-flight ask and an in-flight run) so a switch mid-run can't wipe
@@ -6404,39 +6557,36 @@
   async function loadConsoleHistoryForConv(convId) {
     const consoleEl = qs("#console");
     if (!consoleEl || state.running) return;
-    let log = null;
+    let result = null;
     if (convId != null) {
       try {
-        log = await Api.getLog(convId, 500);
+        result = await Api.getConsole(convId, { surface: "live", afterLastClear: true, limit: 2000 });
       } catch {
-        log = null; // no log file yet for this conversation — that's fine
+        result = null; // no console history yet for this conversation — that's fine
       }
     }
     // The conversation may have been switched again while this was in
     // flight; only paint if we're still looking at the conversation this
     // history belongs to.
     if (convId !== state.activeConversationId) return;
-    const runs = ((log && log.entries) || []).filter((e) => e && e.direction === "command_run");
+    const lines = (result && result.lines) || [];
     consoleEl.innerHTML = "";
-    if (!runs.length) {
+    if (!lines.length) {
       consoleEl.appendChild(el("div", { class: "console__idle" }, "Awaiting instructions."));
       return;
     }
-    runs.forEach((entry, i) => {
-      const d = entry.data || {};
-      if (i > 0) consoleAppend("\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500", "sys");
-      consoleAppend(d.cmdline || "(command)", "cmd");
-      (Array.isArray(d.lines) ? d.lines : []).forEach((l) => {
-        consoleAppend((l && l.text) || "", (l && l.stream === "err") ? "err" : "out");
-      });
-      if (d.signal) {
-        consoleAppend(`\u25a0 stopped (${d.signal})`, "exit-bad");
-      } else if (d.exit_code === 0) {
-        consoleAppend("\u25a0 done \u2014 exit code 0", "exit-ok");
-      } else if (d.exit_code != null) {
-        consoleAppend(`\u25a0 exit code ${d.exit_code}`, "exit-bad");
+    let lastTurn;
+    let sawFirstTurn = false;
+    lines.forEach((line) => {
+      if (sawFirstTurn && line.turn !== lastTurn) {
+        consoleAppend("\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500", "sys");
       }
+      lastTurn = line.turn;
+      sawFirstTurn = true;
+      const cls = consoleClsForStoredLine(line.kind, line.text);
+      consoleAppend(line.text || "", cls, line.kind);
     });
+    applyConsoleFilter();
   }
 
   function convoFiltered() {

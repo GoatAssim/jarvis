@@ -247,6 +247,21 @@
           <button class="btn btn--ghost" id="btn-clear-console" type="button">Clear</button>
         </div>
       </div>
+      <!-- Part E.5 — filter the persisted console replay (not just this
+           tab's live stream) by kind and by text. Same segmented-button
+           language as the Debug panel's §3 source filter. "All" is the
+           default so switching conversations never silently hides
+           anything until you touch this. -->
+      <div class="console-filter" id="console-filter">
+        <div class="console-filter__kinds" role="group" aria-label="Filter console output by kind">
+          <button type="button" class="debug-toggle-btn is-active" data-kind-group="">All</button>
+          <button type="button" class="debug-toggle-btn" data-kind-group="output">Output</button>
+          <button type="button" class="debug-toggle-btn" data-kind-group="tools">Tools</button>
+          <button type="button" class="debug-toggle-btn" data-kind-group="errors">Errors</button>
+        </div>
+        <input type="search" id="console-search" class="panel__search-input console-filter__search"
+               placeholder="Filter&hellip;" autocomplete="off">
+      </div>
       <div class="console" id="console">
         <div class="console__idle">Awaiting instructions.</div>
       </div>
@@ -734,6 +749,16 @@
             <line x1="13.2" y1="13.2" x2="17.5" y2="17.5" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/>
           </svg>
           <input type="search" id="debug-search" class="panel__search-input" placeholder="Search tools&hellip;" autocomplete="off">
+        </div>
+        <!-- §3: filter the tool list by where a tool comes from. Same
+             visual language as the Organized/Raw toggle above
+             (.debug-toggle-btn), just four buttons instead of two. "All" is
+             the default so this never hides anything until you touch it. -->
+        <div class="debug-source-filter" id="debug-source-filter" role="group" aria-label="Filter tools by source">
+          <button type="button" class="debug-toggle-btn is-active" data-source="">All</button>
+          <button type="button" class="debug-toggle-btn" data-source="builtin">Built-in</button>
+          <button type="button" class="debug-toggle-btn" data-source="auto">Auto</button>
+          <button type="button" class="debug-toggle-btn" data-source="user">User</button>
         </div>
         <div class="debug-tool-list" id="debug-tool-list">
           <div class="debug-empty">Loading&hellip;</div>
