@@ -17,7 +17,6 @@ import sys
 import time
 
 from . import ai_config, ai_providers, command_tools, conversations, memory, playnite_config, skill_stickiness, skills, stats, tool_safety
-from . import console_store
 from . import dev_agent_events as _dev_agent_events
 from . import discovery_cache
 from . import key_health
@@ -1670,7 +1669,6 @@ def _make_tool_executor(on_tool_call, schemas=None, on_confirm_request=None,
                           "message": f"The user declined to run '{name}' \u2014 do not retry it "
                                      f"this turn, and don't claim it happened."}
                 cache[key] = result
-                console_store.log("tool-result", "declined by user", tool=name)
                 # Keep the risk_note + decision so the web UI can persist
                 # and replay this exact confirmation prompt later (see
                 # conversations.append_exchange's `extras` and
@@ -1689,10 +1687,6 @@ def _make_tool_executor(on_tool_call, schemas=None, on_confirm_request=None,
                 on_tool_call(name, arguments)
             except TypeError:
                 on_tool_call(name)
-        try:
-            console_store.log("tool-call", json.dumps(arguments, ensure_ascii=False, default=str), tool=name)
-        except Exception:  # noqa: BLE001 — console logging must never break a tool call
-            pass
         context = system_tools.ToolContext(
             conv_id=conv_id,
             round_budget_remaining=(round_budget.remaining if round_budget else (lambda: 1)),
@@ -1726,12 +1720,6 @@ def _make_tool_executor(on_tool_call, schemas=None, on_confirm_request=None,
             run_entry["confirm"] = confirm_meta
         runs.append(run_entry)
         result = shaped_result
-        try:
-            ok = not (isinstance(result, dict) and result.get("ok") is False)
-            summary = json.dumps(result, ensure_ascii=False, default=str)
-            console_store.log("tool-result" if ok else "error", summary, tool=name)
-        except Exception:  # noqa: BLE001 — console logging must never break a tool call
-            pass
 
         # Phase 5 handoff (see new_plan.md): a successful search_tools call
         # hands its matches to discover_sink so ask() can grow this round's
@@ -2540,17 +2528,6 @@ def abandon_pending_turn(reason="interrupted"):
     Never raises: it runs on the way out of a dying process, where an
     exception would just replace one lost message with a confusing
     traceback.
-
-    Part E.4 point 3 ("interrupt-safe... must record 'interrupted \u2014 N
-    console lines saved' and pass real extras"): the console store's own
-    active turn (console_store.active_turn()) is separate module-level
-    state from _pending_turn above, but they're set/cleared together at
-    the top and every exit of ask() below, so whenever _pending_turn is
-    non-None the console store still has whatever this turn logged before
-    the kill. end_turn() here writes the closing status line and hands
-    back a {"turn", "lines"} pointer that becomes this exchange's
-    `consoleRef` extra \u2014 the first time an interrupted exchange gets
-    anything beyond an empty jarvis reply (E.2's 4-of-15 empty exchanges).
     """
     pending = _pending_turn[0]
     _pending_turn[0] = None
@@ -2558,9 +2535,7 @@ def abandon_pending_turn(reason="interrupted"):
         return False
     conv_id, user_text = pending
     try:
-        pointer = console_store.end_turn("status", f"{reason} (process ended)")
-        extras = [{"type": "consoleRef", "data": pointer}] if pointer else None
-        return conversations.abandon_exchange(conv_id, user_text, reason=reason, extras=extras)
+        return conversations.abandon_exchange(conv_id, user_text, reason=reason)
     except Exception:  # noqa: BLE001
         return False
 
@@ -3147,13 +3122,6 @@ def ask(user_text, commands=None, on_attempt=None, on_tool_call=None, on_tool_re
     _pending_turn[0] = (conv_id, user_text) if conv_id else None
     if conv_id:
         conversations.begin_exchange(conv_id, user_text)
-        # Part E \u2014 the console store's own turn, independent of
-        # conversations.py's pending-exchange bookkeeping above (see
-        # console_store.py's module docstring for why: this needs to
-        # survive the exchange record not existing yet, and the exchange
-        # record needs to survive the console store failing to write).
-        console_store.begin_turn(conv_id)
-        console_store.log("command", user_text)
 
     # F.7: the tool round-trips of the most recent attempt that got far enough
     # to have any. The next key/provider continues from them instead of being
@@ -3172,27 +3140,6 @@ def ask(user_text, commands=None, on_attempt=None, on_tool_call=None, on_tool_re
 
     providers = sorted(providers, key=_model_cooling)
     dead_hosts = set()   # endpoints that refused a connection during THIS ask
-
-    # Part E.4 point 2 ("Asks... append each as an event in the same
-    # process, as it happens") — wrap the caller's own callbacks rather
-    # than adding a third parameter every ask() caller would need to grow.
-    # Both callbacks already fire from inside ai_providers.py's per-round
-    # loop (set as on_tool_usage/on_interim_text below), which is the only
-    # place with the real, live token counts and interim text — so
-    # wrapping here, once, covers every adapter without touching
-    # ai_providers.py at all.
-    def _log_tool_usage(name, input_tokens, output_tokens):
-        console_store.log(
-            "tokens", f"{name}: in={input_tokens} out={output_tokens} total={input_tokens + output_tokens}",
-            tool=name,
-        )
-        if on_tool_result:
-            on_tool_result(name, input_tokens, output_tokens)
-
-    def _log_interim_text(text, round_num):
-        console_store.log("narration", text)
-        if on_interim_text:
-            on_interim_text(text, round_num)
 
     for provider in providers:
         label = _provider_label(provider)
@@ -3269,7 +3216,6 @@ def ask(user_text, commands=None, on_attempt=None, on_tool_call=None, on_tool_re
             key_label = f"{label} (key {i}/{len(keys)})" if len(keys) > 1 else label
             if on_attempt:
                 on_attempt(key_label)
-            console_store.log("provider", key_label)
 
             # "Info" log entry (see logs.py's long-documented-but-never-used
             # "info" direction) — one per attempt, tagged with the same
@@ -3291,8 +3237,8 @@ def ask(user_text, commands=None, on_attempt=None, on_tool_call=None, on_tool_re
             if key is not None:
                 resolved["api_key"] = key
 
-            ai_providers.set_log_context(conv_id, key_label, on_tool_usage=_log_tool_usage,
-                                        base_url=resolved.get("base_url"), on_interim_text=_log_interim_text)
+            ai_providers.set_log_context(conv_id, key_label, on_tool_usage=on_tool_result,
+                                        base_url=resolved.get("base_url"), on_interim_text=on_interim_text)
             # Reset per attempt, not per ask: a failover to the next key
             # starts a fresh set of rounds, so its round-0 thinking is a new
             # spend and its trace shouldn't be glued onto the failed
@@ -3327,10 +3273,9 @@ def ask(user_text, commands=None, on_attempt=None, on_tool_call=None, on_tool_re
                 if wait_s is not None:
                     if on_attempt:
                         on_attempt(f"{key_label} [rate limited \u2014 waiting {wait_s:.0f}s before retrying]")
-                    console_store.log("provider", f"{key_label} [rate limited \u2014 waiting {wait_s:.0f}s before retrying]")
                     time.sleep(wait_s)
-                    ai_providers.set_log_context(conv_id, key_label, on_tool_usage=_log_tool_usage,
-                                                base_url=resolved.get("base_url"), on_interim_text=_log_interim_text)
+                    ai_providers.set_log_context(conv_id, key_label, on_tool_usage=on_tool_result,
+                                                base_url=resolved.get("base_url"), on_interim_text=on_interim_text)
                     ai_providers.set_thinking(think_level)
                     try:
                         result = adapter(resolved, messages, resolved["timeout"],
@@ -3345,7 +3290,6 @@ def ask(user_text, commands=None, on_attempt=None, on_tool_call=None, on_tool_re
                         result.error = f"{result.error} [waited {wait_s:.0f}s for the stated rate limit, still failed]"
                     if on_attempt:
                         on_attempt(key_label)
-                    console_store.log("provider", key_label)
 
             if result.ok and _is_tool_trace_reply(result.text):
                 result = ai_providers.AIResult(
@@ -3420,9 +3364,6 @@ def ask(user_text, commands=None, on_attempt=None, on_tool_call=None, on_tool_re
                     # response bodies itself.
                     if conv_id:
                         logs.log(conv_id, "info", {"console_dump": dump_lines}, provider=key_label)
-                console_pointer = console_store.end_turn("status", "answered")
-                if console_pointer:
-                    extras.append({"type": "consoleRef", "data": console_pointer})
                 exchange_count = conversations.complete_exchange(
                     conv_id, user_text, clean_text, label, extras=extras
                 )
@@ -3449,7 +3390,6 @@ def ask(user_text, commands=None, on_attempt=None, on_tool_call=None, on_tool_re
                 forced_end = result
                 attempts.append((key_label, failure))
                 trace.note_attempt_failed(key_label, failure)
-                console_store.log("error", failure, provider=key_label)
                 break
             key_health.record_failure(_provider_label(provider), resolved.get("model"), key,
                                       result.kind, failure)
@@ -3474,7 +3414,6 @@ def ask(user_text, commands=None, on_attempt=None, on_tool_call=None, on_tool_re
                            f"skipping this provider's other {len(keys) - i} key(s)]")
             attempts.append((key_label, failure))
             trace.note_attempt_failed(key_label, failure)
-            console_store.log("error", failure, provider=key_label)
             # Remember how far this attempt got. An attempt that failed before
             # any response came back has no history: keep what we had.
             new_carry = _carried_scaffold(getattr(result, "tool_history", None))
@@ -3500,9 +3439,6 @@ def ask(user_text, commands=None, on_attempt=None, on_tool_call=None, on_tool_re
                 forced_end.pending, {sch.get("name") for sch in full_schemas if isinstance(sch, dict)})
             if offered:
                 forced_extras.append(offered)
-            console_pointer = console_store.end_turn("status", "budget exhausted \u2014 reporting what ran")
-            if console_pointer:
-                forced_extras.append({"type": "consoleRef", "data": console_pointer})
             exchange_count = conversations.complete_exchange(
                 conv_id, user_text, reply,
                 "(reporting what ran — the model couldn't finish)",
@@ -3536,14 +3472,10 @@ def ask(user_text, commands=None, on_attempt=None, on_tool_call=None, on_tool_re
         trace.degraded = True
         trace.ending = "no_provider"
         if conv_id:
-            extras = _extras_from_runs(turn_runs)
-            console_pointer = console_store.end_turn("status", "no provider answered \u2014 reporting completed actions")
-            if console_pointer:
-                extras.append({"type": "consoleRef", "data": console_pointer})
             exchange_count = conversations.complete_exchange(
                 conv_id, user_text, summary,
                 "(no provider — reporting completed actions)",
-                extras=extras,
+                extras=_extras_from_runs(turn_runs),
             )
             _spawn_title_update(conv_id, exchange_count)
         _pending_turn[0] = None
@@ -3557,13 +3489,9 @@ def ask(user_text, commands=None, on_attempt=None, on_tool_call=None, on_tool_re
     # re-abandoned by the next process's interrupt handler and look like it
     # was cancelled).
     if conv_id:
-        extras = _extras_from_runs(turn_runs)
-        console_pointer = console_store.end_turn("status", "no provider answered")
-        if console_pointer:
-            extras.append({"type": "consoleRef", "data": console_pointer})
         conversations.abandon_exchange(
             conv_id, user_text, reason="no provider answered",
-            extras=extras,
+            extras=_extras_from_runs(turn_runs),
         )
     _pending_turn[0] = None
     return AskResult(False, attempts=attempts, assistant_name=assistant_name, address_user_as=address)

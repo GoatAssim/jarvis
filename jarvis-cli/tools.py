@@ -781,7 +781,6 @@ def tools_list_payload():
             "parameters": schema.get("parameters") or _NO_PARAMS,
             "confirm_required": flags["confirm_required"],
             "ai_review": flags["ai_review"],
-            "source": _tool_source(name),
         }
         supplied = AUTO_TEST_CHECKLIST.get(name)
         if supplied:
@@ -800,35 +799,8 @@ def tools_list_payload():
                 "parameters": _NO_PARAMS,
                 "confirm_required": flags["confirm_required"],
                 "ai_review": flags["ai_review"],
-                "source": _tool_source(name),
             })
     return items
-
-
-def _tool_source(name):
-    """§3 — classify a tool name into the Debug-menu source buckets.
-
-    Resolved lazily (called from tools_list_payload(), never at import
-    time) because USER_TOOL_NAMES / _SHIPPED_AUTO_TOOL_NAMES are only
-    populated later in this module, once the two discover_actions() scans
-    below have run. Order matters and mirrors the discovery/collision
-    rules above: a name in USER_TOOL_NAMES came from ~/.jarvis/tools (it
-    cannot also be shipped-auto or built-in — collisions there are
-    rejected at discovery time), anything else in AUTO_TOOL_SCHEMAS came
-    from the shipped jarvis/actions/ scan, and everything left over is a
-    built-in hand-wired in TOOL_SCHEMAS/TOOLS above.
-
-    There is currently no "mcp" bucket: MCP-bridged tools (mcp_client.py,
-    the `mcp-tools` CLI command) are not merged into TOOL_SCHEMAS/TOOLS at
-    all, so they never reach this catalog or the Debug panel today — see
-    §3 item 2. Add a fourth branch here (and to the front-end filter) once
-    that wiring exists; don't offer "mcp" as a filter choice before it does.
-    """
-    if name in USER_TOOL_NAMES:
-        return "user"
-    if name in _SHIPPED_AUTO_TOOL_NAMES:
-        return "auto"
-    return "builtin"
 
 TOOLS = {
     "get_datetime": _get_datetime,
@@ -950,16 +922,6 @@ _AUTO_VALID = [r for r in _AUTO_RECORDS if r.valid]
 
 AUTO_TOOL_SCHEMAS = [s for r in _AUTO_VALID for s in r.schemas]
 AUTO_TOOLS = {name: fn for r in _AUTO_VALID for name, fn in r.tools.items()}
-
-# §3 — names contributed by the SHIPPED jarvis/actions/ scan only. This is
-# deliberately a set difference (AUTO_TOOLS' names minus USER_TOOL_NAMES)
-# rather than slicing _AUTO_VALID by _user_scan_start: _AUTO_VALID has
-# already dropped invalid records, so a positional split at that index
-# would land on the wrong boundary once any record — shipped or user — is
-# invalid. Since a user-authored name can never collide with a shipped one
-# (discover_actions rejects that at scan time — see the block below), plain
-# subtraction gives the same partition without depending on record order.
-_SHIPPED_AUTO_TOOL_NAMES = set(AUTO_TOOLS) - USER_TOOL_NAMES
 
 # group -> [tool names]; tool_registry.py merges this into its own
 # TOOL_GROUPS so auto-discovered tools join the router exactly like a

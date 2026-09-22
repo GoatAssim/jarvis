@@ -801,6 +801,67 @@ app.delete("/api/logs/:id", requireJarvis, async (req, res) => {
 });
 
 // ---------------------------------------------------------------------------
+// Part E \u2014 the console store (~/.jarvis/console/<id>.jsonl, see
+// console_store.py): a dedicated, append-only record of provider attempts,
+// tool calls/results, narration, tokens, errors and status lines, separate
+// from both /api/logs above (raw request/response traffic for the Logs
+// viewer, cleared independently \u2014 E.4 point 7) and /api/conversations
+// (the final exchange text). Same thin-client shape as everything else in
+// this file: shells out to `jarvis console-read`/`console-clear`, never
+// reads ~/.jarvis/console itself.
+// ---------------------------------------------------------------------------
+
+app.get("/api/console/:id", requireJarvis, async (req, res) => {
+  if (!isValidConversationId(req.params.id)) {
+    return res.status(400).json({ error: "Invalid conversation id." });
+  }
+  const args = ["console-read", req.params.id];
+  const sinceRaw = typeof req.query.since === "string" ? req.query.since.trim() : "";
+  if (/^\d+$/.test(sinceRaw)) args.push("--since", sinceRaw);
+  const kindsRaw = typeof req.query.kinds === "string" ? req.query.kinds : "";
+  // Whitelisted against the vocabulary console_store.py actually writes —
+  // this lands in an argv position the CLI reads as a plain value, but a
+  // stray comma-joined string is still worth constraining defensively.
+  if (kindsRaw && /^[a-z][a-z0-9_,-]{0,200}$/.test(kindsRaw)) args.push("--kinds", kindsRaw);
+  if (typeof req.query.turn === "string" && /^[A-Za-z0-9_-]{1,64}$/.test(req.query.turn)) {
+    args.push("--turn", req.query.turn);
+  }
+  if (req.query.surface === "ask" || req.query.surface === "live") {
+    args.push("--surface", req.query.surface);
+  }
+  const limitRaw = typeof req.query.limit === "string" ? req.query.limit.trim() : "";
+  if (/^\d{1,5}$/.test(limitRaw)) args.push("--limit", limitRaw);
+  // The Live Feed's own reload passes this so a Clear it already did stays
+  // cleared on reconnect; the Ask console's reload (and anything asking
+  // for full history) leaves it off — see console-read's docstring.
+  if (req.query.afterLastClear === "1" || req.query.afterLastClear === "true") {
+    args.push("--after-last-clear");
+  }
+  const result = await runJarvisOnce(args, 10000);
+  try {
+    const parsed = JSON.parse(result.stdout);
+    if (parsed.error) return res.status(400).json(parsed);
+    return res.json(parsed);
+  } catch (e) {
+    res.status(500).json({ error: result.error || result.stderr || `Couldn't read console: ${e.message}` });
+  }
+});
+
+app.post("/api/console/:id/clear", requireJarvis, async (req, res) => {
+  if (!isValidConversationId(req.params.id)) {
+    return res.status(400).json({ error: "Invalid conversation id." });
+  }
+  const result = await runJarvisOnce(["console-clear", req.params.id], 10000);
+  try {
+    const parsed = JSON.parse(result.stdout);
+    if (!parsed.ok) return res.status(404).json(parsed);
+    return res.json(parsed);
+  } catch (e) {
+    res.status(500).json({ error: result.error || result.stderr || `Couldn't clear console: ${e.message}` });
+  }
+});
+
+// ---------------------------------------------------------------------------
 // Search — logs and conversations.
 //
 // Both proxy CLI commands rather than reimplementing the matching in JS.
@@ -2187,26 +2248,72 @@ wss.on("connection", (ws) => {
         count: segments.length,
       });
 
-      // Buffers every line of this run's output so it can be handed to
-      // `jarvis logs-append-run` once the run finishes (see cli.py) —
-      // without this, a directly-run command's console output only ever
-      // lived in this websocket stream and vanished on reload/conversation
-      // switch, unlike an ask's tool output which ai_client.py already logs
-      // as it happens. Capped defensively; a runaway command shouldn't be
-      // able to balloon memory or the eventual log entry.
+      // Part E.4 point 2 \u2014 persist this run's console output to the
+      // console store (~/.jarvis/console/<id>.jsonl, see console_store.py)
+      // INCREMENTALLY, in small batches while the run is still going, via
+      // `jarvis console-append-run` \u2014 not once as a single blob after
+      // the process exits the way this used to work with
+      // `logs-append-run` (E.3 table row 1: "written only when the run
+      // exits" \u2014 a long-running or killed command showed nothing on a
+      // reload until it finished, and showed NOTHING at all if the
+      // process was killed before exiting cleanly enough for this
+      // `runOnExit` handler to fire).
+      //
+      // `runTurn` is minted here, once per run, and threaded through
+      // every batch's payload as `turn` \u2014 console_store.append() takes
+      // it as an explicit, opaque id (see console-append-run's docstring
+      // in cli.py for why: each CLI invocation is its own short-lived
+      // process with nothing remembered between them, unlike ai_client.py's
+      // one-process-per-ask active-context layer).
       const runConversationId = typeof msg.conversationId === "string" ? msg.conversationId : "";
-      const runLines = [];
+      const runTurn = `live-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+      const runLines = [];       // full buffer, still kept for the UI's own live rendering
+      let runFlushedThrough = 0; // index into runLines already sent to console-append-run
+      let runCmdlineSent = false;
+      let runFlushTimer = null;
+      let runFlushInFlight = false;
+
+      const flushRunConsole = (extra = {}) => {
+        if (!isValidConversationId(runConversationId)) return Promise.resolve();
+        const pending = runLines.slice(runFlushedThrough);
+        if (pending.length === 0 && !extra.exit_code && extra.exit_code !== 0 && !extra.signal) {
+          // Nothing new and this isn't the closing flush \u2014 skip the
+          // round trip. (exit_code === 0 is falsy but still a real,
+          // meaningful closing flush, hence the explicit check above.)
+          return Promise.resolve();
+        }
+        runFlushedThrough = runLines.length;
+        const payload = { turn: runTurn, lines: pending, ...extra };
+        if (!runCmdlineSent) {
+          payload.cmdline = cmdline;
+          runCmdlineSent = true;
+        }
+        return runJarvisOnce(
+          ["console-append-run"], 10000, conversationEnv(runConversationId), JSON.stringify(payload)
+        ).catch(() => {}); // best-effort — a failed save must never surface as a run failure
+      };
+      // Flush periodically while the run is live, not just at the end, so
+      // a long-running command's output is on disk (and replayable) well
+      // before it finishes — the same "as it happens" principle ai_client's
+      // own writers follow for an ask (see console_store.py). Chained
+      // through runFlushInFlight rather than left to overlap, since two
+      // concurrent console-append-run calls for the same turn could
+      // interleave their `pending` slices out of order on disk.
+      runFlushTimer = setInterval(() => {
+        if (runFlushInFlight) return;
+        runFlushInFlight = true;
+        flushRunConsole().finally(() => { runFlushInFlight = false; });
+      }, 700);
       const runOnLine = (stream, line) => {
         if (runLines.length < 5000) runLines.push({ stream, text: line });
       };
       const runOnExit = (code, signal) => {
-        if (!isValidConversationId(runConversationId)) return;
-        runJarvisOnce(
-          ["logs-append-run"],
-          10000,
-          conversationEnv(runConversationId),
-          JSON.stringify({ cmdline, lines: runLines, exit_code: signal ? null : code, signal: signal || null })
-        ).catch(() => {}); // best-effort — a failed save must never surface as a run failure
+        clearInterval(runFlushTimer);
+        const closing = () => flushRunConsole({ exit_code: signal ? null : code, signal: signal || null });
+        // Wait for any in-flight flush to land first so the closing call's
+        // `pending` slice (and its exit_code/signal) is never sent out of
+        // order ahead of lines an earlier flush is still writing.
+        (runFlushInFlight ? new Promise((r) => setTimeout(r, 750)) : Promise.resolve()).then(closing);
       };
       // Same "JARVIS_CONFIRM_REQUEST {...}" protocol as the ask flow below
       // (see cli.py's confirm_tool_call / confirm_direct_command) — a
