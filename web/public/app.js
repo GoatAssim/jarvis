@@ -5299,11 +5299,14 @@
     });
   }
 
-  // Small "Built-in"/"Auto"/"User" label shown on each tool card, same
-  // three buckets as the filter row above. Falls back to "builtin" for any
-  // payload that predates §3 (e.g. a cached /api/tools response).
+  // Small "Built-in"/"Auto"/"User"/"MCP" label shown on each tool card, same
+  // four buckets as the filter row above. Falls back to "builtin" for any
+  // payload that predates §3 item 2's mcp bucket (e.g. a cached /api/tools
+  // response from before this — an unrecognized "mcp" source string would
+  // otherwise fall through to "Built-in", which is misleading, so map it
+  // explicitly even though the backend now always sends it).
   function debugSourceLabel(source) {
-    return { builtin: "Built-in", auto: "Auto", user: "User" }[source] || "Built-in";
+    return { builtin: "Built-in", auto: "Auto", user: "User", mcp: "MCP" }[source] || "Built-in";
   }
 
   // Human-readable type label for a JSON-schema property, e.g. "string",

@@ -809,23 +809,32 @@ def _tool_source(name):
     """§3 — classify a tool name into the Debug-menu source buckets.
 
     Resolved lazily (called from tools_list_payload(), never at import
-    time) because USER_TOOL_NAMES / _SHIPPED_AUTO_TOOL_NAMES are only
-    populated later in this module, once the two discover_actions() scans
-    below have run. Order matters and mirrors the discovery/collision
+    time) because USER_TOOL_NAMES / _MCP_TOOL_NAMES / _SHIPPED_AUTO_TOOL_NAMES
+    are only populated later in this module, once the two discover_actions()
+    scans below have run. Order matters and mirrors the discovery/collision
     rules above: a name in USER_TOOL_NAMES came from ~/.jarvis/tools (it
-    cannot also be shipped-auto or built-in — collisions there are
-    rejected at discovery time), anything else in AUTO_TOOL_SCHEMAS came
-    from the shipped jarvis/actions/ scan, and everything left over is a
-    built-in hand-wired in TOOL_SCHEMAS/TOOLS above.
+    cannot also be MCP, shipped-auto or built-in — collisions there are
+    rejected at discovery time); a name in _MCP_TOOL_NAMES came from
+    actions/mcp_tools.py's TOOL_GROUP == "mcp" (mcp_<server>_<tool> plus the
+    always-present mcp_list_servers); anything else left in AUTO_TOOL_SCHEMAS
+    came from the rest of the shipped jarvis/actions/ scan; everything left
+    over is a built-in hand-wired in TOOL_SCHEMAS/TOOLS above.
 
-    There is currently no "mcp" bucket: MCP-bridged tools (mcp_client.py,
-    the `mcp-tools` CLI command) are not merged into TOOL_SCHEMAS/TOOLS at
-    all, so they never reach this catalog or the Debug panel today — see
-    §3 item 2. Add a fourth branch here (and to the front-end filter) once
-    that wiring exists; don't offer "mcp" as a filter choice before it does.
+    §3 item 2 — MCP bucket. actions/mcp_tools.py rides the same
+    jarvis/actions/ auto-discovery path as any other shipped tool module
+    (see its own docstring for why: no changes needed to tools.py or
+    tool_loader.py to plug a foreign protocol in), so without this branch
+    every mcp_* tool would silently land in "auto" — indistinguishable from
+    a first-party shipped tool in the Debug panel, which defeats the point
+    of a source filter once a server is actually configured. _MCP_TOOL_NAMES
+    below is keyed off the discovered record's own `.group`, not a name
+    prefix match, so it stays correct even if a future MCP-adjacent tool
+    doesn't follow the `mcp_` naming convention.
     """
     if name in USER_TOOL_NAMES:
         return "user"
+    if name in _MCP_TOOL_NAMES:
+        return "mcp"
     if name in _SHIPPED_AUTO_TOOL_NAMES:
         return "auto"
     return "builtin"
@@ -960,6 +969,24 @@ AUTO_TOOLS = {name: fn for r in _AUTO_VALID for name, fn in r.tools.items()}
 # (discover_actions rejects that at scan time — see the block below), plain
 # subtraction gives the same partition without depending on record order.
 _SHIPPED_AUTO_TOOL_NAMES = set(AUTO_TOOLS) - USER_TOOL_NAMES
+
+# §3 item 2 — names contributed specifically by actions/mcp_tools.py (its
+# TOOL_GROUP is "mcp"), a subset of _SHIPPED_AUTO_TOOL_NAMES above. Pulled
+# out into its own bucket so the Debug source filter can offer "mcp"
+# distinctly from "auto" — see _tool_source() below. A user-authored tool
+# can never land here: discover_actions() scans jarvis/actions/ (shipped)
+# before ~/.jarvis/tools/ (user), so a name from the second scan is already
+# excluded by the USER_TOOL_NAMES subtraction above, and _AUTO_VALID's
+# records from the user scan carry whatever TOOL_GROUP that file declared,
+# not "mcp", unless a user literally names their own group "mcp" — in which
+# case treating it as the MCP bucket is arguably still correct, since
+# USER_TOOL_NAMES is checked first in _tool_source() and always wins.
+_MCP_TOOL_NAMES = {
+    name
+    for _r in _AUTO_VALID
+    if _r.group == "mcp"
+    for name in _r.tools
+}
 
 # group -> [tool names]; tool_registry.py merges this into its own
 # TOOL_GROUPS so auto-discovered tools join the router exactly like a

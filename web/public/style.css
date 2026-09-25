@@ -1910,7 +1910,8 @@ audio.ask-dl-player{ max-height: none; background: transparent; }
 
 /* §3: source filter row, between the tool-list search box and the list
    itself. Same button styling as .debug-toggle-btn above, just wrapped so
-   four buttons stay readable in the narrow right-hand pane. */
+   all five buttons (All/Built-in/Auto/User/MCP) stay readable in the
+   narrow right-hand pane. */
 .debug-source-filter{ display: flex; gap: 4px; flex-wrap: wrap; padding: 0 14px 8px; }
 .debug-tool-card__name-row{ display: flex; align-items: center; justify-content: space-between; gap: 8px; }
 .debug-tool-card__source{
@@ -1919,6 +1920,7 @@ audio.ask-dl-player{ max-height: none; background: transparent; }
 }
 .debug-tool-card__source--auto{ border-color: var(--accent-soft); color: var(--accent-soft); }
 .debug-tool-card__source--user{ border-color: var(--accent); color: var(--accent); }
+.debug-tool-card__source--mcp{ border-color: var(--gold); color: var(--gold); }
 
 /* Part E.5 — Live Feed's console replay filter row, between the panel head
    and the console output itself. */
