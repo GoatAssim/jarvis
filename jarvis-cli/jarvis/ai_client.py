@@ -2732,9 +2732,13 @@ def ask(user_text, commands=None, on_attempt=None, on_tool_call=None, on_tool_re
     ai_providers.EVENT_TEXT/EVENT_THINKING/EVENT_TOOL/EVENT_ROUND_END/
     EVENT_RESET. Only takes effect when this ask()'s config has
     `defaults.stream: true` \u2014 see stream_this_ask above for why that isn't
-    the default yet, and ai_providers.py's own per-adapter conversion status
-    (\u00a78.7's order: only `ollama` streams so far; the other four still make
-    one blocking request and this callback simply never fires for them).
+    the default yet. All five adapters (Ollama, OpenAI-compatible,
+    Anthropic, Gemini, Cohere) natively stream as of \u00a78.7's K.3.1.2; what's
+    still missing is anything downstream that could consume the callback
+    (K.3.1.4's CLI marker line, K.3.1.5's web WS/SSE framing and browser
+    render entry point), which is the actual reason `stream: true` isn't
+    turned on anywhere yet \u2014 flipping it now would just mean nobody's
+    listening.
 
     conversation_id picks which conversation (see conversations.py) this
     exchange belongs to and gets appended to. When omitted, the CLI's

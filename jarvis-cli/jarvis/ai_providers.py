@@ -1809,6 +1809,121 @@ def _looks_like_omitted_tools_confused_the_model(reason):
     )
 
 
+def _stream_openai_compatible_chat(resp, url):
+    """\u00a78.3's openai_compatible row: SSE, `data: {...}` lines, terminated by
+    a literal `data: [DONE]` \u2014 covers OpenAI, Groq, xAI/Grok, OpenRouter,
+    DeepSeek, Mistral, Together, Perplexity, Cerebras and Ollama's own
+    OpenAI-compat endpoint, all the same wire shape. `resp` is an
+    already-open streaming response (from _post_stream \u2014 the caller still
+    does its own _status_reason() check first, exactly like the
+    non-streamed path). Returns (data, error) with `data` shaped exactly
+    like this family's own non-streamed response body (one `choices[0]`
+    entry), so every line of call_openai_compatible() below it
+    (_record_usage, _collect_thinking, finish_signal, ...) runs completely
+    unchanged whether streaming is on or off.
+
+    Text and reasoning arrive as plain per-token deltas (`delta.content`,
+    `delta.reasoning_content`/`delta.reasoning` \u2014 read both, see
+    reasoning.extract_trace's openai_compatible branch). Tool calls arrive
+    FRAGMENTED, unlike Ollama's whole-line calls: each `delta.tool_calls[i]`
+    carries a partial `function.arguments` string keyed by `index`, so
+    fragments are concatenated per index as they arrive and only reported
+    live (EVENT_TOOL) once the round's finish_reason chunk confirms the
+    call is complete \u2014 matches \u00a78.3's \"never show/run a tool call until the
+    fragments parse as complete\" rule.
+
+    `stream_options: {\"include_usage\": true}` (set by the caller) puts one
+    extra chunk at the very end with `choices: []` and a top-level `usage`
+    object \u2014 accumulated the same way a non-streamed response's `usage`
+    field is read by token_usage.extract_usage.
+    """
+    content_parts = []
+    reasoning_parts = []
+    tool_calls_by_index = {}
+    finish_reason = None
+    usage = None
+    response_id = None
+    model_name = None
+    try:
+        for raw_line in resp.iter_lines(decode_unicode=True):
+            if not raw_line:
+                continue  # SSE keep-alive/blank lines between events
+            line = raw_line.strip()
+            if not line.startswith("data:"):
+                continue  # ignore any "event:"/"id:" framing lines
+            payload_str = line[len("data:"):].strip()
+            if not payload_str or payload_str == "[DONE]":
+                continue
+            try:
+                chunk = json.loads(payload_str)
+            except ValueError:
+                continue  # a malformed line is dropped, not a fatal error \u2014 matches _parse_json's leniency
+            if response_id is None and chunk.get("id"):
+                response_id = chunk["id"]
+            if chunk.get("model"):
+                model_name = chunk["model"]
+            if isinstance(chunk.get("usage"), dict):
+                usage = chunk["usage"]
+            choices = chunk.get("choices") or []
+            if not choices:
+                continue  # the trailing include_usage-only chunk has no choices
+            choice = choices[0]
+            delta = choice.get("delta") or {}
+            text_delta = delta.get("content") or ""
+            if text_delta:
+                content_parts.append(text_delta)
+                _emit_stream(EVENT_TEXT, delta=text_delta)
+            reasoning_delta = delta.get("reasoning_content") or delta.get("reasoning") or ""
+            if reasoning_delta:
+                reasoning_parts.append(reasoning_delta)
+                _emit_stream(EVENT_THINKING, delta=reasoning_delta)
+            for tc in delta.get("tool_calls") or []:
+                idx = tc.get("index", 0)
+                slot = tool_calls_by_index.setdefault(
+                    idx, {"id": "", "type": "function", "function": {"name": "", "arguments": ""}})
+                if tc.get("id"):
+                    slot["id"] = tc["id"]
+                fn = tc.get("function") or {}
+                if fn.get("name"):
+                    slot["function"]["name"] += fn["name"]
+                if fn.get("arguments"):
+                    slot["function"]["arguments"] += fn["arguments"]
+            if choice.get("finish_reason"):
+                finish_reason = choice["finish_reason"]
+    except requests.exceptions.RequestException as e:
+        # A connection dropped mid-stream after some content already
+        # arrived \u2014 \u00a78.6: ai_client's own failover/reset handling is what
+        # makes use of the partial live delta the sink already received;
+        # there's nothing to salvage into an AIResult here.
+        return None, f"stream interrupted: {e}"
+    finally:
+        resp.close()
+
+    tool_calls = [tool_calls_by_index[i] for i in sorted(tool_calls_by_index)] if tool_calls_by_index else None
+    if tool_calls:
+        # Reported once per call, now that its fragments are known complete
+        # \u2014 never mid-assembly (\u00a78.3's rule).
+        for call in tool_calls:
+            fn = call.get("function") or {}
+            _emit_stream(EVENT_TOOL, name=fn.get("name", ""), arguments=fn.get("arguments"))
+
+    message = {"role": "assistant", "content": "".join(content_parts)}
+    if reasoning_parts:
+        message["reasoning_content"] = "".join(reasoning_parts)
+    if tool_calls:
+        message["tool_calls"] = tool_calls
+    data = {"choices": [{"message": message, "finish_reason": finish_reason}]}
+    if response_id:
+        data["id"] = response_id
+    if model_name:
+        data["model"] = model_name
+    if usage:
+        data["usage"] = usage
+    _log_stream_response(url, resp, data)
+    _emit_stream(EVENT_ROUND_END, finish=FINISH_ROUND_TOOL if tool_calls else FINISH_ROUND_DONE)
+    return data, None
+
+
 def call_openai_compatible(provider, messages, timeout, tools=None, tool_executor=None, round_budget=None,
                            cfg_defaults=None):
     base_url = provider.get("base_url") or ""
@@ -1832,6 +1947,24 @@ def call_openai_compatible(provider, messages, timeout, tools=None, tool_executo
     # server-side, so an optional parameter the model sends as null has to be
     # declared nullable or the whole call 400s before jarvis sees it.
     widen_optionals = provider_wants_nullable_optionals(provider)
+
+    # \u00a78.3: same helpers as call_ollama's own stream_enabled() branch, but
+    # wrapped as closures (not an inline if/else at each call site) because
+    # this adapter's retry logic below calls _post_json up to three times in
+    # one round (thinking-rejected retry, then the omitted-tools-confused-
+    # the-model retry) \u2014 duplicating the stream/non-stream branch at each of
+    # those sites would triple the surface area for the same bug. Every
+    # retry site below is unchanged apart from calling _post()/_parse()
+    # instead of _post_json()/_parse_json() directly.
+    def _post(round_payload):
+        if stream_enabled():
+            return _post_stream(base_url, headers, round_payload, timeout)
+        return _post_json(base_url, headers, round_payload, timeout)
+
+    def _parse(round_resp):
+        if stream_enabled():
+            return _stream_openai_compatible_chat(round_resp, base_url)
+        return _parse_json(round_resp)
 
     def _tools_payload():
         # Phase 9 of the token-optimization plan (see new_plan.md):
@@ -1886,6 +2019,15 @@ def call_openai_compatible(provider, messages, timeout, tools=None, tool_executo
             "messages": request_messages,
             "max_tokens": provider.get("max_tokens", 700),
         }
+        if stream_enabled():
+            # stream_options.include_usage: \u00a78.3's table \u2014 "where supported".
+            # Not every host in this family tolerates the field (see the
+            # prompt_cache_key comment just below for the same problem with
+            # a different field), but every host that DOESN'T just ignores
+            # an extra key it doesn't recognize rather than rejecting the
+            # whole request over it, unlike prompt_cache_key on Groq.
+            payload["stream"] = True
+            payload["stream_options"] = {"include_usage": True}
         # Prompt caching for the whole OpenAI-compatible family (Groq,
         # OpenAI, xAI, Mistral, DeepSeek, OpenRouter). These hosts cache
         # prefixes AUTOMATICALLY above ~1024 tokens, with no opt-in and no
@@ -1924,7 +2066,7 @@ def call_openai_compatible(provider, messages, timeout, tools=None, tool_executo
             # beats what the thinking level asked for.
             payload.update(extra)
 
-        resp, net_err = _post_json(base_url, headers, payload, timeout)
+        resp, net_err = _post(payload)
         # One retry without the thinking keys if THAT is what was rejected.
         # Some OpenAI-compatible hosts 400 on an unknown field (Groq does
         # exactly this for prompt_cache_key), and burning a whole API key
@@ -1935,7 +2077,11 @@ def call_openai_compatible(provider, messages, timeout, tools=None, tool_executo
             if _reason:
                 from . import reasoning as _r
                 if _r.looks_like_thinking_rejected(_reason) and _r.strip_from_payload(payload):
-                    resp, net_err = _post_json(base_url, headers, payload, timeout)
+                    try:
+                        resp.close()
+                    except Exception:  # noqa: BLE001 — discarding a rejected stream response
+                        pass
+                    resp, net_err = _post(payload)
         if net_err:
             return AIResult(False, error=net_err,
                             tool_history=_openai_messages_to_generic(working_messages) if ran_tools else None)
@@ -1954,7 +2100,11 @@ def call_openai_compatible(provider, messages, timeout, tools=None, tool_executo
             # Tools are attached again, so "do not call tools" would now
             # contradict the request.
             payload["messages"] = working_messages
-            resp, net_err = _post_json(base_url, headers, payload, timeout)
+            try:
+                resp.close()
+            except Exception:  # noqa: BLE001 — discarding a rejected stream response
+                pass
+            resp, net_err = _post(payload)
             if net_err:
                 return AIResult(False, error=net_err,
                                 tool_history=_openai_messages_to_generic(working_messages) if ran_tools else None)
@@ -1963,7 +2113,7 @@ def call_openai_compatible(provider, messages, timeout, tools=None, tool_executo
             return AIResult(False, error=reason,
                             tool_history=_openai_messages_to_generic(working_messages) if ran_tools else None)
 
-        data, parse_err = _parse_json(resp)
+        data, parse_err = _parse(resp)
         if parse_err:
             return AIResult(False, error=parse_err,
                             tool_history=_openai_messages_to_generic(working_messages) if ran_tools else None)
@@ -2077,6 +2227,127 @@ def call_openai_compatible(provider, messages, timeout, tools=None, tool_executo
 # a matching tool_result block (tool_use_id).
 # ---------------------------------------------------------------------------
 
+def _stream_anthropic_message(resp, url):
+    """\u00a78.3's anthropic row: SSE, named events (`content_block_delta`, etc.),
+    not just bare `data:` chunks. `resp` is an already-open streaming
+    response (from _post_stream \u2014 the caller still does its own
+    _status_reason() check first). Returns (data, error) with `data` shaped
+    exactly like Anthropic's own non-streamed Messages response body (a
+    `content` block list + `stop_reason` + `usage`), so every line of
+    call_anthropic() below it (_record_usage, _collect_thinking,
+    finish_signal, the replayed-thinking-block requirement, ...) runs
+    completely unchanged whether streaming is on or off.
+
+    Blocks are assembled by index: `content_block_start` seeds a block
+    (text/thinking/tool_use/redacted_thinking) at its index, and
+    `content_block_delta` events fill it in \u2014 `text_delta`/`thinking_delta`
+    append straight into the block, `signature_delta` accumulates
+    separately (never emitted as a live event: it's an opaque signature,
+    not something to show), and `input_json_delta` accumulates a
+    per-index partial-JSON buffer that is only parsed into the block's
+    real `input` at `content_block_stop` \u2014 the same \"don't touch it until
+    it's known complete\" rule \u00a78.3 states for every provider's fragmented
+    tool arguments. `signature_delta` is why the reassembled thinking
+    blocks must be built from real accumulation, not just concatenated
+    text: replaying a tool_use turn on the next round requires the
+    matching signature to be intact (see the adapter's own comment on
+    `working_turns.append` for the non-streamed path).
+    """
+    blocks = {}
+    json_bufs = {}
+    stop_reason = None
+    usage = {}
+    try:
+        for raw_line in resp.iter_lines(decode_unicode=True):
+            if not raw_line:
+                continue  # blank line between SSE events
+            line = raw_line.strip()
+            if not line.startswith("data:"):
+                continue  # ignore the paired "event: <type>" line — the data line repeats the type
+            payload_str = line[len("data:"):].strip()
+            if not payload_str:
+                continue
+            try:
+                chunk = json.loads(payload_str)
+            except ValueError:
+                continue  # a malformed line is dropped, not a fatal error
+            etype = chunk.get("type")
+            if etype == "message_start":
+                msg = chunk.get("message") or {}
+                if isinstance(msg.get("usage"), dict):
+                    usage.update(msg["usage"])
+            elif etype == "content_block_start":
+                idx = chunk.get("index", 0)
+                blocks[idx] = dict(chunk.get("content_block") or {})
+                json_bufs[idx] = []
+            elif etype == "content_block_delta":
+                idx = chunk.get("index", 0)
+                block = blocks.setdefault(idx, {})
+                delta = chunk.get("delta") or {}
+                dtype = delta.get("type")
+                if dtype == "text_delta":
+                    t = delta.get("text") or ""
+                    if t:
+                        block.setdefault("type", "text")
+                        block["text"] = block.get("text", "") + t
+                        _emit_stream(EVENT_TEXT, delta=t)
+                elif dtype == "thinking_delta":
+                    t = delta.get("thinking") or ""
+                    if t:
+                        block.setdefault("type", "thinking")
+                        block["thinking"] = block.get("thinking", "") + t
+                        _emit_stream(EVENT_THINKING, delta=t)
+                elif dtype == "signature_delta":
+                    sig = delta.get("signature") or ""
+                    if sig:
+                        block["signature"] = block.get("signature", "") + sig
+                elif dtype == "input_json_delta":
+                    pj = delta.get("partial_json") or ""
+                    json_bufs.setdefault(idx, []).append(pj)
+            elif etype == "content_block_stop":
+                idx = chunk.get("index", 0)
+                block = blocks.get(idx)
+                if block is not None and block.get("type") == "tool_use":
+                    raw = "".join(json_bufs.get(idx) or [])
+                    try:
+                        block["input"] = json.loads(raw) if raw else {}
+                    except ValueError:
+                        block["input"] = {}
+                    _emit_stream(EVENT_TOOL, name=block.get("name", ""), arguments=block.get("input"))
+            elif etype == "message_delta":
+                d = chunk.get("delta") or {}
+                if d.get("stop_reason"):
+                    stop_reason = d["stop_reason"]
+                if isinstance(chunk.get("usage"), dict):
+                    # message_delta's usage is cumulative output_tokens; it
+                    # replaces (not adds to) message_start's own estimate.
+                    usage.update(chunk["usage"])
+            elif etype == "error":
+                err = (chunk.get("error") or {}).get("message") or "stream error"
+                return None, f"stream error: {err}"
+            # message_stop / ping carry nothing this adapter needs.
+    except requests.exceptions.RequestException as e:
+        # A connection dropped mid-stream after some content already
+        # arrived — §8.6: ai_client's own failover/reset handling is what
+        # makes use of the partial live delta the sink already received;
+        # there's nothing to salvage into an AIResult here.
+        return None, f"stream interrupted: {e}"
+    finally:
+        resp.close()
+
+    ordered_blocks = [blocks[i] for i in sorted(blocks)]
+    for b in ordered_blocks:
+        if b.get("type") == "tool_use" and "input" not in b:
+            b["input"] = {}
+    tool_use_blocks = [b for b in ordered_blocks if b.get("type") == "tool_use"]
+    data = {"content": ordered_blocks, "stop_reason": stop_reason}
+    if usage:
+        data["usage"] = usage
+    _log_stream_response(url, resp, data)
+    _emit_stream(EVENT_ROUND_END, finish=FINISH_ROUND_TOOL if tool_use_blocks else FINISH_ROUND_DONE)
+    return data, None
+
+
 def call_anthropic(provider, messages, timeout, tools=None, tool_executor=None, round_budget=None,
                    cfg_defaults=None):
     base_url = provider.get("base_url") or "https://api.anthropic.com/v1/messages"
@@ -2114,6 +2385,20 @@ def call_anthropic(provider, messages, timeout, tools=None, tool_executor=None, 
     def _history():
         return _anthropic_turns_to_generic(system_text, working_turns) if ran_tools else None
 
+    # §8.3: closures rather than an inline if/else at the one call site
+    # below, so the existing thinking-rejected retry (which reuses this
+    # same request/parse pair a second time) doesn't need its own
+    # duplicated stream/non-stream branch.
+    def _post(round_payload):
+        if stream_enabled():
+            return _post_stream(base_url, headers, round_payload, timeout)
+        return _post_json(base_url, headers, round_payload, timeout)
+
+    def _parse(round_resp):
+        if stream_enabled():
+            return _stream_anthropic_message(round_resp, base_url)
+        return _parse_json(round_resp)
+
     for round_num in range(MAX_TOOL_ROUNDS + 1):
         # Trim tool results from earlier rounds before rebuilding this
         # round's payload — see _compact_prior_tool_results. Without this,
@@ -2132,6 +2417,7 @@ def call_anthropic(provider, messages, timeout, tools=None, tool_executor=None, 
             "model": model,
             "max_tokens": provider.get("max_tokens", 700),
             "messages": working_turns,
+            "stream": stream_enabled(),
         }
         offering_tools = bool(tools_payload) and round_num < MAX_TOOL_ROUNDS and round_budget.remaining() > 0
         if tools_payload and not offering_tools:
@@ -2170,21 +2456,25 @@ def call_anthropic(provider, messages, timeout, tools=None, tool_executor=None, 
         if round_num == 0:
             _log_cache_plan(plan, "anthropic")
 
-        resp, net_err = _post_json(base_url, headers, payload, timeout)
+        resp, net_err = _post(payload)
         if net_err:
             return AIResult(False, error=net_err, tool_history=_history())
         reason = _status_reason(resp)
         if reason:
             from . import reasoning as _r
             if _r.looks_like_thinking_rejected(reason) and _r.strip_from_payload(payload):
-                resp, net_err = _post_json(base_url, headers, payload, timeout)
+                try:
+                    resp.close()
+                except Exception:  # noqa: BLE001 — discarding a rejected stream response
+                    pass
+                resp, net_err = _post(payload)
                 if net_err:
                     return AIResult(False, error=net_err, tool_history=_history())
                 reason = _status_reason(resp)
             if reason:
                 return AIResult(False, error=reason, tool_history=_history())
 
-        data, parse_err = _parse_json(resp)
+        data, parse_err = _parse(resp)
         if parse_err:
             return AIResult(False, error=parse_err, tool_history=_history())
 
@@ -2417,6 +2707,121 @@ def _delete_gemini_cache(cache_name, headers, timeout):
 GEMINI_DEFAULT_MAX_TOKENS = 3072
 
 
+def _gemini_stream_url(url):
+    """§8.3's gemini row: unlike every other adapter, Gemini doesn't turn
+    streaming on with a body flag — it's a different endpoint
+    (`streamGenerateContent` instead of `generateContent`) plus an
+    `alt=sse` query param to get SSE framing rather than a bare JSON
+    array. `url` is call_gemini's already-built request URL (custom
+    `base_url` overrides included), so the substring swap here is the
+    only change streaming makes to it.
+    """
+    if ":generateContent" in url:
+        base = url.split(":generateContent", 1)[0]
+        return base + ":streamGenerateContent?alt=sse"
+    # A custom base_url that doesn't match the expected suffix (a proxy,
+    # say) — best effort: just ask it for SSE and hope it understands.
+    sep = "&" if "?" in url else "?"
+    return url + sep + "alt=sse"
+
+
+def _stream_gemini_chat(resp, url):
+    """Parses the SSE stream from _gemini_stream_url's endpoint. `resp` is
+    an already-open streaming response (from _post_stream — the caller
+    still does its own _status_reason() check first). Returns
+    (data, error) with `data` shaped exactly like Gemini's own
+    non-streamed generateContent response body (one `candidates[0]` entry
+    with `content.parts` + `finishReason`, plus `usageMetadata`), so every
+    line of call_gemini() below it (_record_usage, _collect_thinking,
+    finish_signal, the thought-part filtering before replay, ...) runs
+    completely unchanged whether streaming is on or off.
+
+    Each SSE chunk carries a *partial* GenerateContentResponse whose
+    `candidates[0].content.parts` are new content for this chunk only
+    (already delta-shaped, unlike Anthropic's index-addressed blocks) —
+    text and thought parts are accumulated into two running buffers
+    (Gemini doesn't guarantee stable part indices across chunks the way
+    Anthropic does) and re-emitted as single parts at the end; a
+    `functionCall` part, per §8.3, always arrives whole in one chunk, so
+    it's reported (EVENT_TOOL) and kept as-is the moment it's seen.
+    `usageMetadata` is cumulative on every chunk, so the latest chunk's
+    value is simply kept, never summed.
+    """
+    answer_parts = []
+    thought_parts = []
+    call_parts_out = []
+    finish_reason = None
+    usage_meta = None
+    block_reason = None
+    try:
+        for raw_line in resp.iter_lines(decode_unicode=True):
+            if not raw_line:
+                continue
+            line = raw_line.strip()
+            if not line.startswith("data:"):
+                continue
+            payload_str = line[len("data:"):].strip()
+            if not payload_str:
+                continue
+            try:
+                chunk = json.loads(payload_str)
+            except ValueError:
+                continue  # a malformed line is dropped, not a fatal error
+            pf = chunk.get("promptFeedback") or {}
+            if pf.get("blockReason"):
+                block_reason = pf["blockReason"]
+            if isinstance(chunk.get("usageMetadata"), dict):
+                usage_meta = chunk["usageMetadata"]
+            candidates = chunk.get("candidates") or []
+            if not candidates:
+                continue
+            cand = candidates[0]
+            if cand.get("finishReason"):
+                finish_reason = cand["finishReason"]
+            parts = (cand.get("content") or {}).get("parts") or []
+            for p in parts:
+                if not isinstance(p, dict):
+                    continue
+                if "functionCall" in p:
+                    fc = p["functionCall"] or {}
+                    call_parts_out.append(p)
+                    _emit_stream(EVENT_TOOL, name=fc.get("name", ""), arguments=fc.get("args"))
+                elif p.get("thought"):
+                    t = p.get("text") or ""
+                    if t:
+                        thought_parts.append(t)
+                        _emit_stream(EVENT_THINKING, delta=t)
+                elif "text" in p:
+                    t = p.get("text") or ""
+                    if t:
+                        answer_parts.append(t)
+                        _emit_stream(EVENT_TEXT, delta=t)
+    except requests.exceptions.RequestException as e:
+        # A connection dropped mid-stream after some content already
+        # arrived — §8.6: ai_client's own failover/reset handling is what
+        # makes use of the partial live delta the sink already received;
+        # there's nothing to salvage into an AIResult here.
+        return None, f"stream interrupted: {e}"
+    finally:
+        resp.close()
+
+    final_parts = []
+    if thought_parts:
+        final_parts.append({"thought": True, "text": "".join(thought_parts)})
+    if answer_parts:
+        final_parts.append({"text": "".join(answer_parts)})
+    final_parts.extend(call_parts_out)
+
+    data = {"candidates": [{"content": {"role": "model", "parts": final_parts}, "finishReason": finish_reason}]}
+    if usage_meta:
+        data["usageMetadata"] = usage_meta
+    if block_reason:
+        data["promptFeedback"] = {"blockReason": block_reason}
+    _log_stream_response(url, resp, data)
+    _emit_stream(EVENT_ROUND_END, finish=FINISH_ROUND_TOOL if call_parts_out else FINISH_ROUND_DONE)
+    return data, None
+
+
 def call_gemini(provider, messages, timeout, tools=None, tool_executor=None, round_budget=None,
                 cfg_defaults=None):
     api_key = provider.get("api_key") or ""
@@ -2558,16 +2963,29 @@ def call_gemini(provider, messages, timeout, tools=None, tool_executor=None, rou
                     payload["contents"] = working_contents + [
                         {"role": "user", "parts": [{"text": _TOOLS_WITHHELD_NOTICE}]}]
 
-            resp, net_err = _post_json(url, headers, payload, timeout)
-            if net_err:
-                return AIResult(False, error=net_err, tool_history=_history())
-            reason = _status_reason(resp)
-            if reason:
-                return AIResult(False, error=reason, tool_history=_history())
+            if stream_enabled():
+                stream_url = _gemini_stream_url(url)
+                resp, net_err = _post_stream(stream_url, headers, payload, timeout)
+                if net_err:
+                    return AIResult(False, error=net_err, tool_history=_history())
+                reason = _status_reason(resp)
+                if reason:
+                    resp.close()
+                    return AIResult(False, error=reason, tool_history=_history())
+                data, stream_err = _stream_gemini_chat(resp, stream_url)
+                if stream_err:
+                    return AIResult(False, error=stream_err, tool_history=_history())
+            else:
+                resp, net_err = _post_json(url, headers, payload, timeout)
+                if net_err:
+                    return AIResult(False, error=net_err, tool_history=_history())
+                reason = _status_reason(resp)
+                if reason:
+                    return AIResult(False, error=reason, tool_history=_history())
 
-            data, parse_err = _parse_json(resp)
-            if parse_err:
-                return AIResult(False, error=parse_err, tool_history=_history())
+                data, parse_err = _parse_json(resp)
+                if parse_err:
+                    return AIResult(False, error=parse_err, tool_history=_history())
 
             _record_usage("gemini", data, round_num)
             _collect_thinking("gemini", data)
@@ -2698,6 +3116,108 @@ def call_gemini(provider, messages, timeout, tools=None, tool_executor=None, rou
 # the first place to check against their current docs.
 # ---------------------------------------------------------------------------
 
+def _stream_cohere_chat(resp, url):
+    """\u00a78.3's cohere row: SSE, named events like Anthropic's rather than
+    bare `data:` chunks — `content-delta` for text, a `tool-call-start` /
+    `tool-call-delta` / `tool-call-end` triplet per tool call, and a
+    closing `message-end` carrying `finish_reason` + usage. `resp` is an
+    already-open streaming response (from _post_stream — the caller still
+    does its own _status_reason() check first). Returns (data, error) with
+    `data` shaped exactly like Cohere v2 chat's own non-streamed response
+    body (a `message` object + `finish_reason` + `meta`), so every line of
+    call_cohere() below it (_record_usage, finish_signal, ...) runs
+    completely unchanged whether streaming is on or off. No thinking
+    events here — this family doesn't have a reasoning-model member yet
+    (see the CAPABILITIES table), so call_cohere's non-streamed path never
+    calls _collect_thinking either, and this adapter doesn't invent an
+    event type for something the API doesn't send.
+
+    Tool calls arrive fragmented like openai_compatible's, keyed by
+    `index` rather than Anthropic's content-block index, and are only
+    reported (EVENT_TOOL) at their own `tool-call-end` — never mid-way
+    through their `-delta` events, matching \u00a78.3's rule for every
+    provider's fragmented tool arguments.
+    """
+    content_parts = []
+    tool_plan_parts = []
+    tool_calls_by_index = {}
+    finish_reason = None
+    usage = None
+    try:
+        for raw_line in resp.iter_lines(decode_unicode=True):
+            if not raw_line:
+                continue
+            line = raw_line.strip()
+            if not line.startswith("data:"):
+                continue  # ignore the paired "event: <type>" line — the data line repeats the type
+            payload_str = line[len("data:"):].strip()
+            if not payload_str:
+                continue
+            try:
+                chunk = json.loads(payload_str)
+            except ValueError:
+                continue  # a malformed line is dropped, not a fatal error
+            etype = chunk.get("type")
+            delta = chunk.get("delta") or {}
+            message = delta.get("message") or {}
+            if etype == "content-delta":
+                text_delta = (message.get("content") or {}).get("text") or ""
+                if text_delta:
+                    content_parts.append(text_delta)
+                    _emit_stream(EVENT_TEXT, delta=text_delta)
+            elif etype == "tool-plan-delta":
+                plan_delta = message.get("tool_plan") or ""
+                if plan_delta:
+                    tool_plan_parts.append(plan_delta)
+            elif etype == "tool-call-start":
+                idx = chunk.get("index", 0)
+                tc = message.get("tool_calls") or {}
+                fn = tc.get("function") or {}
+                tool_calls_by_index[idx] = {
+                    "id": tc.get("id", ""), "type": "function",
+                    "function": {"name": fn.get("name", ""), "arguments": fn.get("arguments") or ""},
+                }
+            elif etype == "tool-call-delta":
+                idx = chunk.get("index", 0)
+                slot = tool_calls_by_index.setdefault(
+                    idx, {"id": "", "type": "function", "function": {"name": "", "arguments": ""}})
+                fn = (message.get("tool_calls") or {}).get("function") or {}
+                if fn.get("arguments"):
+                    slot["function"]["arguments"] += fn["arguments"]
+            elif etype == "tool-call-end":
+                idx = chunk.get("index", 0)
+                slot = tool_calls_by_index.get(idx)
+                if slot:
+                    fn = slot.get("function") or {}
+                    _emit_stream(EVENT_TOOL, name=fn.get("name", ""), arguments=fn.get("arguments"))
+            elif etype == "message-end":
+                if delta.get("finish_reason"):
+                    finish_reason = delta["finish_reason"]
+                if isinstance(delta.get("usage"), dict):
+                    usage = delta["usage"]
+    except requests.exceptions.RequestException as e:
+        # A connection dropped mid-stream after some content already
+        # arrived — §8.6: ai_client's own failover/reset handling is what
+        # makes use of the partial live delta the sink already received;
+        # there's nothing to salvage into an AIResult here.
+        return None, f"stream interrupted: {e}"
+    finally:
+        resp.close()
+
+    tool_calls = [tool_calls_by_index[i] for i in sorted(tool_calls_by_index)] if tool_calls_by_index else None
+    message_out = {"role": "assistant", "content": [{"type": "text", "text": "".join(content_parts)}]}
+    if tool_plan_parts:
+        message_out["tool_plan"] = "".join(tool_plan_parts)
+    if tool_calls:
+        message_out["tool_calls"] = tool_calls
+    data = {"message": message_out, "finish_reason": finish_reason}
+    if usage:
+        data["meta"] = usage
+    _log_stream_response(url, resp, data)
+    _emit_stream(EVENT_ROUND_END, finish=FINISH_ROUND_TOOL if tool_calls else FINISH_ROUND_DONE)
+    return data, None
+
+
 def call_cohere(provider, messages, timeout, tools=None, tool_executor=None, round_budget=None,
                 cfg_defaults=None):
     base_url = provider.get("base_url") or "https://api.cohere.com/v2/chat"
@@ -2749,19 +3269,35 @@ def call_cohere(provider, messages, timeout, tools=None, tool_executor=None, rou
             # F.1: withheld and the model is told so. Request-only.
             payload["messages"] = working_messages + [{"role": "user", "content": _TOOLS_WITHHELD_NOTICE}]
 
-        resp, net_err = _post_json(base_url, headers, payload, timeout)
-        if net_err:
-            return AIResult(False, error=net_err,
-                            tool_history=_openai_messages_to_generic(working_messages) if ran_tools else None)
-        reason = _status_reason(resp)
-        if reason:
-            return AIResult(False, error=reason,
-                            tool_history=_openai_messages_to_generic(working_messages) if ran_tools else None)
+        if stream_enabled():
+            payload["stream"] = True
+            resp, net_err = _post_stream(base_url, headers, payload, timeout)
+            if net_err:
+                return AIResult(False, error=net_err,
+                                tool_history=_openai_messages_to_generic(working_messages) if ran_tools else None)
+            reason = _status_reason(resp)
+            if reason:
+                resp.close()
+                return AIResult(False, error=reason,
+                                tool_history=_openai_messages_to_generic(working_messages) if ran_tools else None)
+            data, stream_err = _stream_cohere_chat(resp, base_url)
+            if stream_err:
+                return AIResult(False, error=stream_err,
+                                tool_history=_openai_messages_to_generic(working_messages) if ran_tools else None)
+        else:
+            resp, net_err = _post_json(base_url, headers, payload, timeout)
+            if net_err:
+                return AIResult(False, error=net_err,
+                                tool_history=_openai_messages_to_generic(working_messages) if ran_tools else None)
+            reason = _status_reason(resp)
+            if reason:
+                return AIResult(False, error=reason,
+                                tool_history=_openai_messages_to_generic(working_messages) if ran_tools else None)
 
-        data, parse_err = _parse_json(resp)
-        if parse_err:
-            return AIResult(False, error=parse_err,
-                            tool_history=_openai_messages_to_generic(working_messages) if ran_tools else None)
+            data, parse_err = _parse_json(resp)
+            if parse_err:
+                return AIResult(False, error=parse_err,
+                                tool_history=_openai_messages_to_generic(working_messages) if ran_tools else None)
 
         _record_usage("cohere", data, round_num)
 

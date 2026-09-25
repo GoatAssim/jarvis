@@ -3090,7 +3090,47 @@ body.layout--focus .panel-menu--focus-only{ display: inline-flex; }
 .subagent-plan-step--skipped{ color: var(--text-dimmer); text-decoration: line-through; }
 
 .subagent-history{ max-height: 220px; }
+.subagent-live{ max-height: 260px; }
 .subagent-detail-actions{ border-top: 1px solid var(--border); margin-top: 8px; padding-top: 8px; }
+
+/* --- D.1: docked side pane (Focus layout, wide viewport only — see
+   updateSubagentsDockMode in app.js) -----------------------------------
+   Below SUBAGENTS_DOCK_MIN_WIDTH, or in Classic, #subagents-overlay never
+   gets .is-docked and keeps the plain centered .menu-overlay look defined
+   above untouched — this is purely additive. Docked, the full-screen dimmed
+   backdrop goes away and the panel itself becomes a fixed sidebar pinned to
+   the right edge, the same corner the Ask panel already occupies the rest
+   of in Focus, so the two read as one workspace rather than a modal on top
+   of it. */
+#subagents-overlay.is-docked{
+  position: fixed; inset: 18px 18px 18px auto; left: auto;
+  width: min(380px, 34vw);
+  background: none; backdrop-filter: none;
+  padding: 0;
+  display: flex; align-items: stretch; justify-content: flex-end;
+  z-index: 40; /* clear of the (hidden) grid; below any true modal that opens on top */
+}
+#subagents-overlay.is-docked .menu-panel{
+  width: 100%; height: 100%; max-width: none; max-height: none;
+  box-shadow: 0 0 30px rgba(0,0,0,0.5);
+}
+/* A 380px-wide sidebar can't fit the list | detail two-column .menu-body
+   this panel normally uses — same fix the narrow-viewport media query
+   above already applies for the same reason, stacked here instead of
+   behind a max-width so it isn't tied to (and can't fight) that query. */
+#subagents-overlay.is-docked .menu-body{
+  grid-template-columns: 1fr;
+  grid-template-rows: minmax(120px, 38%) 1fr;
+}
+#subagents-overlay.is-docked .skills-pane--list{
+  border-right: none; border-bottom: 1px solid var(--border); max-height: none;
+}
+/* Collapsed keeps the head (title/status/Refresh/collapse toggle) visible
+   as a thin strip — the live poll underneath keeps running either way
+   (see closeSubagents vs. the collapse handler in app.js), so reopening
+   shows a caught-up transcript rather than a gap. */
+#subagents-overlay.is-docked.is-collapsed .menu-panel{ height: auto; }
+#subagents-overlay.is-docked.is-collapsed .menu-body{ display: none; }
 
 /* --- backlog -------------------------------------------------------------
    A five-column board that scrolls sideways rather than squashing: a kanban
