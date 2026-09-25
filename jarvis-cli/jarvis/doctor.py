@@ -786,6 +786,44 @@ def check_memory():
     return out
 
 
+def check_saved_commands():
+    """D-I9 (master plan Part I, decision made 2026-09-22g): warn about any
+    saved command (commands.json) whose name is now reserved — cli.py's
+    dispatcher will shadow it silently, so the saved command's own
+    definition is dead: `jarvis <name>` (or the equivalent web slash-run)
+    always reaches the built-in first, never the thing the person actually
+    saved. Read-only and non-destructive, per this module's own design
+    rules — nothing here renames or deletes the saved command; that stays
+    the owner's call (see reserved_names.py's docstring for the underlying
+    single-source-of-truth fix, I-B2, that made this check even possible:
+    before it, cli.py/web/commands_config each disagreed about what was
+    reserved, so a check like this couldn't have given a trustworthy
+    answer)."""
+    from . import commands_config
+    from .reserved_names import RESERVED_NAMES
+
+    try:
+        commands = commands_config.load_commands_dict()
+    except Exception as exc:  # noqa: BLE001
+        return [Check("commands.config", "Saved commands", WARN,
+                      "couldn't read commands.json: %s" % exc,
+                      "Check ~/.jarvis/commands.json is valid JSON.", "commands")]
+
+    shadowed = sorted(name for name in commands if name in RESERVED_NAMES)
+    if not shadowed:
+        return [Check("commands.shadowed", "Saved commands", OK,
+                      "%d saved, none shadowed by a built-in" % len(commands),
+                      group="commands")]
+    return [Check("commands.shadowed", "Saved commands shadowed by a built-in", WARN,
+                  "%d saved command name%s already used by jarvis itself, so "
+                  "it can never run: %s"
+                  % (len(shadowed), "" if len(shadowed) == 1 else "s", ", ".join(shadowed)),
+                  "Rename it in the Commands panel (or `jarvis commands-check-name "
+                  "<new-name>` to confirm a new name is free first) — jarvis doctor "
+                  "never renames anything for you.",
+                  "commands")]
+
+
 def check_conversations():
     from . import conversations
 
@@ -992,6 +1030,7 @@ _CHECKS = [
     ("skills", "Skills", lambda deep: check_skills()),
     ("memory", "Memory", lambda deep: check_memory()),
     ("conversations", "Conversations", lambda deep: check_conversations()),
+    ("commands", "Saved commands", lambda deep: check_saved_commands()),
     ("scheduler", "Scheduler", lambda deep: check_scheduler()),
     ("notify", "Notifications", lambda deep: check_notifications()),
     ("digest", "Digest", lambda deep: check_digest()),

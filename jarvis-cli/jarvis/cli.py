@@ -13,6 +13,7 @@ from pathlib import Path
 from . import conditions, stats
 from .palette import Palette
 from .persona_name import current_cli_name, current_display_name, banner_letters
+from .reserved_names import RESERVED_NAMES, CHAIN_SEP, PARALLEL_SEP
 
 # Make stdout/stderr tolerant of any Unicode character, on every platform.
 # AI responses can contain characters a legacy console codepage has no
@@ -41,9 +42,10 @@ CONFIG_DIR = Path.home() / ".jarvis"
 CONFIG_FILE = CONFIG_DIR / "commands.json"
 ENCODING = "utf-8"
 
-CHAIN_SEP = "then"      # starts a new batch \u2014 waits for the previous one to finish
-PARALLEL_SEP = "and"    # joins the current batch \u2014 runs alongside whatever's already in it
-RESERVED_NAMES = {"config", "ai-config", "ai-clear", "ai-drop-from", "playnite-config", "spotify-config", "spotify-login", "memory-config", "everything-config", "tools-list", "tool-run", "personas-list", "skills-list", "skills-get", "skills-save", "skills-add", "skills-create", "skills-remove", "skillmake", "skilladd", "skillload", "skillunload", "tool-preview", "tool-safety-set", "conv-new", "conv-list", "conv-show", "conv-switch", "conv-delete", "logs", "logs-list", "logs-show", "logs-append-run", "console-append-run", "console-read", "console-clear", "logs-clear", "organize-json", "mode", "mode-set", "voice-config", "speak", "listen", "transcribe", "sched-list", "sched-tick", "sched-daemon", "sched-ask-log", "sched-add", "sched-show", "sched-cancel", "sched-pause", "sched-resume", "sched-snooze", "sched-approve", "sched-signal", "sched-clear", "notify-send", "notify-list", "notify-history", "notify-ack", "notify-clear", "notify-config", "conv-search", "mcp-status", "mcp-refresh", "mcp-config", "mcp-call", "channels-config", "channels-status", "channels-set", "channels-allow", "channels-deny", "channels-test", "channels-whoami", "channels-log", "channels-directory", "channels-people", "channels-follow", "channels-block", "discord-daemon", "instagram-serve", "logs-search", "mcp-tools", "daemons", "daemon-start", "daemon-stop", "daemon-restart", "daemon-status", "daemon-console", "daemon-input", "daemon-schedule", "daemon-add", "daemon-edit", "daemon-remove", "daemon-run", "daemons-tick", "logs-files", "logs-tail", "logs-sets", "backlog", "backlog-add", "backlog-done", "backlog-update", "backlog-remove", "backlog-board", "ambient", "ambient-tick", "onboard", "ui-mode", "subagent-keys", "subagents", "subagent-spawn", "subagent-run", "subagent-status", "subagent-cancel", "think", "clipboard-watch", "clipboard-watch-config", "browser-daemon", CHAIN_SEP, PARALLEL_SEP, "-h", "--help"}
+# CHAIN_SEP, PARALLEL_SEP and RESERVED_NAMES now live in reserved_names.py
+# (imported above) — that's the single canonical copy cli.py,
+# commands_config.py and (indirectly, via `commands-check-name`) web/server.js
+# all share. See that module's docstring for why (I-B2 fix).
 
 OUT = Palette(sys.stdout)  # actual command output: the banner, the command list
 ERR = Palette(sys.stderr)  # jarvis's own status/trace/error messages
@@ -2749,6 +2751,26 @@ def main():
             print(json.dumps({"error": str(e)}))
             sys.exit(1)
         print(json.dumps({"name": tool_name, **flags}, indent=2))
+        return
+
+    if argv[0] == "commands-check-name":
+        # jarvis commands-check-name <name>
+        # Prints {"ok": true} or {"ok": false, "error": "..."}. This is the
+        # only thing web/server.js's saved-command name validation still
+        # needs a subprocess for — it keeps reading/writing commands.json
+        # directly (that part isn't a "rule", just file I/O), but the
+        # reserved-word check itself now lives in one place
+        # (reserved_names.py, via commands_config.validate_command_name)
+        # instead of being re-implemented as server.js's own RESERVED_NAMES
+        # Set (I-B2 fix — REPO_MAP.md §6: a web route never reimplements a
+        # rule, it shells out).
+        from . import commands_config
+
+        if len(argv) < 2:
+            print(json.dumps({"ok": False, "error": "usage: jarvis commands-check-name <name>"}))
+            sys.exit(1)
+        error = commands_config.validate_command_name(argv[1])
+        print(json.dumps({"ok": error is None, "error": error}))
         return
 
     if argv[0] == "organize-json":

@@ -68,6 +68,22 @@ GLOBAL_MAX_TOOL_ROUNDS = MAX_TOOL_ROUNDS + 1  # 6: hard cap across an ENTIRE ask
 # itself, mirroring what F.2's suggested fix named.
 DISCOVERY_TOOL_NAMES = frozenset({"search_tools", "get_tool_schema", "load_skill"})
 
+# F.2/D1 follow-on, decision K.2.4.1: project-content discovery — looking
+# for the right FILE or PATH, as opposed to DISCOVERY_TOOL_NAMES's looking
+# for the right TOOL — had the exact same failure shape in Case 2b: several
+# search_files calls before the model ever reached move_path, burning the
+# same shared round budget a real mutation needs. Kept as a SEPARATE pool
+# from DISCOVERY_TOOL_NAMES rather than folded into it, on purpose: these
+# tools touch the real filesystem (even if only reading it) and can return
+# arbitrarily large results depending on the repo, which a static catalog
+# lookup never can, so they get their own, smaller cap (see
+# ai_client.ask()'s project_discovery_call_budget, default 2) rather than
+# sharing DISCOVERY_TOOL_NAMES's room. Deliberately narrow — "search_files"
+# and "list_dir" only, not every read-only repo-inspection tool — matching
+# how DISCOVERY_TOOL_NAMES itself is deliberately not exhaustive either;
+# widen this only with the same evidence-driven care F.2 itself used.
+PROJECT_DISCOVERY_TOOL_NAMES = frozenset({"search_files", "list_dir"})
+
 
 class RoundBudget:
     """Cross-attempt tool-round counter shared by every provider/key tried for one ask().
@@ -81,7 +97,8 @@ class RoundBudget:
     budget on the next failover.
     """
 
-    def __init__(self, limit=GLOBAL_MAX_TOOL_ROUNDS, grace=False, discovery_limit=0):
+    def __init__(self, limit=GLOBAL_MAX_TOOL_ROUNDS, grace=False, discovery_limit=0,
+                 project_discovery_limit=0):
         self.limit = limit
         self.used = 0
         # F.1 "grace call": ONE extra, last-chance tool round for the whole
@@ -99,6 +116,12 @@ class RoundBudget:
         # ai_client.ask() turns it on, via defaults.discovery_call_budget.
         self.discovery_limit = max(0, int(discovery_limit or 0))
         self.discovery_used = 0
+        # K.2.4/F.2 follow-on: same idea, separate pool, for project-content
+        # discovery (see PROJECT_DISCOVERY_TOOL_NAMES). 0 by default for the
+        # same reason as discovery_limit above; ai_client.ask() turns it on
+        # via defaults.project_discovery_call_budget.
+        self.project_discovery_limit = max(0, int(project_discovery_limit or 0))
+        self.project_discovery_used = 0
 
     def remaining(self):
         return max(0, self.limit - self.used)
@@ -122,6 +145,22 @@ class RoundBudget:
             return False
         return True
 
+    def _is_project_discovery_round(self, names):
+        """True when every name in `names` is a project-content discovery
+        tool (see PROJECT_DISCOVERY_TOOL_NAMES). Unlike _is_discovery_round,
+        an unknown/made-up name does NOT qualify here — a made-up name isn't
+        "looking for the right file", it's the tool-catalog-discovery
+        scenario F.2 already covers, so it stays on that pool instead. A
+        round mixing a project-discovery tool with anything else (a real
+        tool, or even a catalog-discovery tool) is charged normally, same
+        philosophy as _is_discovery_round: free calls never hide real work."""
+        if not names:
+            return False
+        for n in names:
+            if n not in PROJECT_DISCOVERY_TOOL_NAMES:
+                return False
+        return True
+
     def take(self, names=None):
         """Charge one round. `names` — the tool name(s) about to be called
         this round — is optional and defaults to None, which reproduces the
@@ -131,7 +170,19 @@ class RoundBudget:
         has a discovery_limit configured, the round is drawn from the
         separate discovery pool instead — until THAT is exhausted, at which
         point discovery calls fall back to costing a normal round, same as
-        before D1 existed."""
+        before D1 existed. Project-content discovery (search_files,
+        list_dir — see _is_project_discovery_round) works exactly the same
+        way against its own separate project_discovery_limit pool, checked
+        first: the two pools are independent, so a model that's spent its
+        project-discovery budget still has its (unrelated) tool-discovery
+        budget intact, and vice versa."""
+        if names is not None and self.project_discovery_limit and self._is_project_discovery_round(names):
+            if self.project_discovery_used < self.project_discovery_limit:
+                self.project_discovery_used += 1
+                return True
+            # Project-discovery pool spent — fall through to the other
+            # checks (tool-discovery pool, then the real budget) exactly
+            # like discovery_limit's own exhaustion does below.
         if names is not None and self.discovery_limit and self._is_discovery_round(names):
             if self.discovery_used < self.discovery_limit:
                 self.discovery_used += 1
@@ -169,7 +220,8 @@ class RoundBudget:
 _log_local = threading.local()
 
 
-def set_log_context(conv_id, provider=None, on_tool_usage=None, base_url=None, on_interim_text=None):
+def set_log_context(conv_id, provider=None, on_tool_usage=None, base_url=None, on_interim_text=None,
+                     stream=False):
     _log_local.conv_id = conv_id
     _log_local.provider = provider
     # F.12: the host this attempt's own requests go to. A request to any OTHER
@@ -192,6 +244,11 @@ def set_log_context(conv_id, provider=None, on_tool_usage=None, base_url=None, o
     # it. All five adapters use it now (§5: Anthropic first, then Gemini,
     # OpenAI-compatible, Cohere and Ollama) through _surface_interim_text().
     _log_local.on_interim_text = on_interim_text
+    # Master plan §8: whether adapters should use their streaming transport
+    # at all this attempt (defaults.stream, default True) — see
+    # stream_enabled()'s own comment for why this is separate from whether
+    # anyone's actually listening for the deltas (set_stream_sink below).
+    _log_local.stream_enabled = stream
     # Phase 0 (see new_plan.md): usage/round bookkeeping is scoped to one
     # provider attempt, same lifecycle as conv_id/provider above — reset
     # here (ai_client.ask calls this once per attempt) and read back via
@@ -362,6 +419,132 @@ def _surface_interim_text(round_num, text):
 
 
 # ---------------------------------------------------------------------------
+# Master plan §8: real-time streaming. Foundation only — this is the shared
+# sink/vocabulary every adapter reports through, plus the on/off switch;
+# converting each adapter's own transport to actually use it is per-adapter
+# work (§8.3), done one at a time (§8.7's suggested order: Ollama native
+# first, since it's local and free to test end to end).
+#
+# Same thread-local pattern as on_tool_usage/on_interim_text above, for the
+# same reason: ADAPTERS[type](provider, messages, timeout, ...) is a uniform
+# contract other callers (tests, benchmark_pc_actions.py) also use, and
+# widening five signatures for one caller's optional live-delta hook isn't
+# worth it. Two SEPARATE knobs, not one:
+#   - stream_enabled() / set_log_context(..., stream=...) says whether the
+#     adapter should use its streaming transport AT ALL.
+#   - set_stream_sink(callback) / _emit_stream(kind, **data) is who gets
+#     told about it, if anyone.
+#
+# Defaults to OFF everywhere (the function signature, the bare getattr
+# fallback, clear_log_context()'s reset) — NOT what §8.2 ultimately wants
+# (`defaults.stream`, default on), but the right default for *this* stage of
+# building it: the CLI/server.js/app.js side of §8 that would actually
+# consume a stream_sink callback doesn't exist yet, and a large slice of the
+# existing test suite monkeypatches `ai_providers._post_json` directly, with
+# no idea `_post_stream` exists — flipping this on by default here, before
+# there's a `JARVIS_STREAM` marker line for anything to reach, would silently
+# break every one of those tests for zero user-visible benefit (nobody's
+# listening to the deltas yet). `ai_client.ask()` is the one place a caller
+# can opt in early (`defaults.stream: true`) to exercise the real streaming
+# transport end-to-end; flipping the ask()-level default to on is a
+# one-line change, saved for once the CLI/server/UI legs actually exist and
+# the existing suite's mocks have been reviewed for it.
+# ---------------------------------------------------------------------------
+
+EVENT_TEXT = "text"
+EVENT_THINKING = "thinking"
+EVENT_TOOL = "tool"
+EVENT_ROUND_END = "round_end"
+EVENT_RESET = "reset"
+
+FINISH_ROUND_TOOL = "tool"
+FINISH_ROUND_DONE = "done"
+
+
+def stream_enabled():
+    """False unless the caller explicitly turned streaming on for this
+    attempt. See the module comment above for why the default is off for
+    now, not the on-by-default §8.2 ultimately calls for."""
+    return getattr(_log_local, "stream_enabled", False)
+
+
+def set_stream_sink(callback):
+    """callback(kind, **data), or None. `kind` is one of the EVENT_* names
+    above; `data` varies by kind (see _emit_stream's call sites in each
+    adapter once converted). Set by ai_client.ask() per attempt, in the same
+    place set_thinking() is; cleared by clear_log_context()."""
+    _log_local.stream_sink = callback
+
+
+def _stream_sink():
+    return getattr(_log_local, "stream_sink", None)
+
+
+def _emit_stream(kind, **data):
+    """Never raises — same philosophy as _surface_interim_text's hook call:
+    a sink callback that blows up (a UI bug downstream) must not take down
+    the provider attempt that's the actual point of this call."""
+    sink = _stream_sink()
+    if sink:
+        try:
+            sink(kind, **data)
+        except Exception:  # noqa: BLE001 — a trace hook must never break the turn
+            pass
+
+
+def _post_stream(url, headers, payload, timeout):
+    """Like _post_json, but for a streamed response: same never-raises
+    contract (returns (response, None) or (None, human-readable error)), but
+    `stream=True` and the caller iterates the raw response itself — SSE vs.
+    NDJSON framing, and how to assemble deltas into the same shape a
+    non-streamed response would have had, differs per provider (§8.3) and
+    doesn't belong in this shared helper.
+
+    `timeout` here is `requests`' own read timeout, which already means
+    "no bytes for this long" rather than "the whole request took this long"
+    once `stream=True` — exactly the between-chunks visibility §8.2 wants: a
+    local model steadily producing tokens no longer looks like a hang just
+    because the FULL response takes minutes.
+
+    The request is logged the same way _post_json logs one (one entry, not
+    per chunk); logging the assembled response body is the caller's job,
+    once the stream actually ends — see _log_stream_response."""
+    conv_id = _log_conv_id()
+    if conv_id:
+        logs.log(conv_id, "request", {"url": url, "payload": payload}, provider=_log_provider_for(url))
+    try:
+        resp = requests.post(url, headers=headers, json=payload, timeout=timeout, stream=True)
+    except requests.exceptions.Timeout:
+        err = f"timed out after {timeout}s"
+        if conv_id:
+            logs.log(conv_id, "error", {"error": err}, provider=_log_provider_for(url))
+        return None, err
+    except requests.exceptions.ConnectionError:
+        err = "couldn't connect (network issue, or the service is down)"
+        if conv_id:
+            logs.log(conv_id, "error", {"error": err}, provider=_log_provider_for(url))
+        return None, err
+    except requests.exceptions.RequestException as e:
+        err = f"request failed: {e}"
+        if conv_id:
+            logs.log(conv_id, "error", {"error": err}, provider=_log_provider_for(url))
+        return None, err
+    return resp, None
+
+
+def _log_stream_response(url, resp, assembled_body):
+    """Companion to _post_stream: log the fully-assembled response body once
+    the stream ends, mirroring what _post_json logs straight from
+    resp.json(). Called by the adapter after iterating every chunk, so the
+    Logs viewer sees one clean response entry per round either way — never
+    one entry per raw chunk."""
+    conv_id = _log_conv_id()
+    if conv_id:
+        logs.log(conv_id, "response", {"status": resp.status_code, "body": assembled_body},
+                 provider=_log_provider_for(url))
+
+
+# ---------------------------------------------------------------------------
 # The provider finish signal (master plan §5, "Required behavior").
 #
 # Talking does not end a turn; only the model's own finish signal does. Every
@@ -460,6 +643,8 @@ def clear_log_context():
     _log_local.on_tool_usage = None
     _log_local.on_interim_text = None
     _log_local.forced = None
+    _log_local.stream_enabled = False
+    _log_local.stream_sink = None
 
 
 def _log_conv_id():
@@ -2640,6 +2825,74 @@ def call_cohere(provider, messages, timeout, tools=None, tool_executor=None, rou
 # model's ollama.com library page.
 # ---------------------------------------------------------------------------
 
+def _stream_ollama_chat(resp, url):
+    """§8.3's Ollama row: NDJSON, not SSE — one JSON object per line, no
+    "data: " prefix, no [DONE] sentinel; the final line has "done": true and
+    carries the usage fields. `resp` is an already-open streaming response
+    (from _post_stream — the caller still does its own _status_reason()
+    check first, exactly like the non-streamed path, so error messages stay
+    identical whether streaming is on or off). Returns (data, error) with
+    `data` shaped exactly like Ollama's own non-streamed response body, so
+    every line of call_ollama() below it (_record_usage, _collect_thinking,
+    _openai_style_calls, finish_signal, ...) runs completely unchanged
+    whether streaming is on or off — this function's only job is to also
+    report each delta live via _emit_stream() as it arrives, and to
+    reconstruct the same shape at the end.
+
+    Tool calls arrive whole in one line (never fragmented — see §8.3's
+    table), so there's nothing to accumulate for them beyond "keep the last
+    non-empty one seen"."""
+    content_parts = []
+    thinking_parts = []
+    tool_calls = None
+    final = {}
+    try:
+        for raw_line in resp.iter_lines(decode_unicode=True):
+            if not raw_line:
+                continue  # Ollama NDJSON has no keep-alive blank lines, but skip harmlessly if one shows up
+            try:
+                chunk = json.loads(raw_line)
+            except ValueError:
+                continue  # a malformed line is dropped, not a fatal error — matches _parse_json's leniency
+            message = chunk.get("message") or {}
+            delta = message.get("content") or ""
+            if delta:
+                content_parts.append(delta)
+                _emit_stream(EVENT_TEXT, delta=delta)
+            thinking_delta = message.get("thinking") or ""
+            if thinking_delta:
+                thinking_parts.append(thinking_delta)
+                _emit_stream(EVENT_THINKING, delta=thinking_delta)
+            if message.get("tool_calls"):
+                tool_calls = message["tool_calls"]
+                for call in tool_calls:
+                    fn = (call or {}).get("function") or {}
+                    _emit_stream(EVENT_TOOL, name=fn.get("name", ""), arguments=fn.get("arguments"))
+            if chunk.get("done"):
+                final = chunk
+    except requests.exceptions.RequestException as e:
+        # A connection dropped mid-stream after some content already
+        # arrived — §8.6: ai_client's own failover/reset handling is what
+        # makes use of the partial live delta the sink already received;
+        # there's nothing to salvage into an AIResult here.
+        return None, f"stream interrupted: {e}"
+    finally:
+        resp.close()
+
+    data = dict(final)  # carries done_reason, prompt_eval_count, eval_count, durations, etc. as-is
+    data["message"] = {
+        "role": "assistant",
+        "content": "".join(content_parts),
+    }
+    if thinking_parts:
+        data["message"]["thinking"] = "".join(thinking_parts)
+    if tool_calls:
+        data["message"]["tool_calls"] = tool_calls
+    _log_stream_response(url, resp, data)
+    _emit_stream(EVENT_ROUND_END, finish=FINISH_ROUND_TOOL if tool_calls else FINISH_ROUND_DONE)
+    return data, None
+
+
 def call_ollama(provider, messages, timeout, tools=None, tool_executor=None, round_budget=None,
                 cfg_defaults=None):
     base_url = provider.get("base_url") or "http://localhost:11434/api/chat"
@@ -2683,7 +2936,7 @@ def call_ollama(provider, messages, timeout, tools=None, tool_executor=None, rou
             return _forced_ending(call_ollama, provider, _openai_messages_to_generic(working_messages),
                                   timeout, tools, tool_executor, round_budget, cfg_defaults, round_num)
         tools_payload = _tools_payload()
-        payload = {"model": model, "messages": working_messages, "stream": False}
+        payload = {"model": model, "messages": working_messages, "stream": stream_enabled()}
         if _apply_thinking(payload, provider, "ollama", round_num,
                            ran_tools, thought_rounds):
             thought_rounds += 1
@@ -2712,19 +2965,34 @@ def call_ollama(provider, messages, timeout, tools=None, tool_executor=None, rou
             # F.1: withheld and the model is told so. Request-only.
             payload["messages"] = working_messages + [{"role": "user", "content": _TOOLS_WITHHELD_NOTICE}]
 
-        resp, net_err = _post_json(base_url, headers, payload, timeout)
-        if net_err:
-            return AIResult(False, error=f"{net_err} (is Ollama installed and running?)",
-                            tool_history=_openai_messages_to_generic(working_messages) if ran_tools else None)
-        reason = _status_reason(resp)
-        if reason:
-            return AIResult(False, error=reason,
-                            tool_history=_openai_messages_to_generic(working_messages) if ran_tools else None)
+        if stream_enabled():
+            resp, net_err = _post_stream(base_url, headers, payload, timeout)
+            if net_err:
+                return AIResult(False, error=f"{net_err} (is Ollama installed and running?)",
+                                tool_history=_openai_messages_to_generic(working_messages) if ran_tools else None)
+            reason = _status_reason(resp)
+            if reason:
+                resp.close()
+                return AIResult(False, error=reason,
+                                tool_history=_openai_messages_to_generic(working_messages) if ran_tools else None)
+            data, stream_err = _stream_ollama_chat(resp, base_url)
+            if stream_err:
+                return AIResult(False, error=stream_err,
+                                tool_history=_openai_messages_to_generic(working_messages) if ran_tools else None)
+        else:
+            resp, net_err = _post_json(base_url, headers, payload, timeout)
+            if net_err:
+                return AIResult(False, error=f"{net_err} (is Ollama installed and running?)",
+                                tool_history=_openai_messages_to_generic(working_messages) if ran_tools else None)
+            reason = _status_reason(resp)
+            if reason:
+                return AIResult(False, error=reason,
+                                tool_history=_openai_messages_to_generic(working_messages) if ran_tools else None)
 
-        data, parse_err = _parse_json(resp)
-        if parse_err:
-            return AIResult(False, error=parse_err,
-                            tool_history=_openai_messages_to_generic(working_messages) if ran_tools else None)
+            data, parse_err = _parse_json(resp)
+            if parse_err:
+                return AIResult(False, error=parse_err,
+                                tool_history=_openai_messages_to_generic(working_messages) if ran_tools else None)
 
         _record_usage("ollama", data, round_num)
         _collect_thinking("ollama", data)

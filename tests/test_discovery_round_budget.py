@@ -131,6 +131,110 @@ def test_discovery_limit_zero_disables_the_pool_even_with_names():
     check("discovery pool never used", rb.discovery_used == 0)
 
 
+# ---------------------------------------------------------------------------
+# K.2.4.1/F.2 follow-on: project-content discovery (search_files, list_dir)
+# gets its OWN separate pool, distinct from DISCOVERY_TOOL_NAMES's pool —
+# Case 2b's evidence was several search_files calls burning the shared
+# budget before the model ever reached move_path. See
+# PROJECT_DISCOVERY_TOOL_NAMES's own comment in ai_providers.py for why this
+# is a second pool rather than folded into the existing one.
+# ---------------------------------------------------------------------------
+
+def test_project_discovery_round_draws_from_its_own_separate_pool():
+    rb = ai_providers.RoundBudget(limit=2, project_discovery_limit=2)
+    check("search_files round is free", rb.take(["search_files"]) is True)
+    check("main pool untouched by it", rb.used == 0, rb.used)
+    check("project-discovery pool charged", rb.project_discovery_used == 1, rb.project_discovery_used)
+    check("list_dir round is also free", rb.take(["list_dir"]) is True)
+    check("project-discovery pool now spent", rb.project_discovery_used == 2, rb.project_discovery_used)
+    check("main pool STILL untouched after 2 project-discovery rounds", rb.used == 0, rb.used)
+
+
+def test_project_discovery_pool_is_independent_of_the_tool_discovery_pool():
+    # Spending one pool must not touch, or be affected by, the other —
+    # they're tracking two different kinds of "looking something up".
+    rb = ai_providers.RoundBudget(limit=2, discovery_limit=3, project_discovery_limit=2)
+    check("search_files round is free", rb.take(["search_files"]) is True)
+    check("tool-discovery pool untouched by a project-discovery call",
+          rb.discovery_used == 0, rb.discovery_used)
+    check("search_tools round is free", rb.take(["search_tools"]) is True)
+    check("project-discovery pool untouched by a tool-discovery call",
+          rb.project_discovery_used == 1, rb.project_discovery_used)
+    check("both pools charged independently",
+          (rb.project_discovery_used, rb.discovery_used) == (1, 1))
+    check("main pool untouched by either", rb.used == 0, rb.used)
+
+
+def test_unknown_tool_name_is_not_project_discovery():
+    # A made-up name is F.2's existing tool-discovery scenario, not this
+    # one — it must NOT draw from the project-discovery pool even if that's
+    # the only pool configured.
+    rb = ai_providers.RoundBudget(limit=2, project_discovery_limit=2)
+    check("an unknown name is charged to the main pool, not project-discovery",
+          rb.take([_MADE_UP_NAME]) is True)
+    check("main pool charged", rb.used == 1, rb.used)
+    check("project-discovery pool untouched", rb.project_discovery_used == 0)
+
+
+def test_mixed_project_discovery_and_real_call_is_charged_normally():
+    rb = ai_providers.RoundBudget(limit=2, project_discovery_limit=2)
+    check("mixed round is charged", rb.take(["search_files", _REAL_TOOL]) is True)
+    check("main pool charged, not project-discovery",
+          rb.used == 1 and rb.project_discovery_used == 0,
+          (rb.used, rb.project_discovery_used))
+
+
+def test_mixed_project_discovery_and_tool_discovery_is_charged_normally():
+    # Both are "free" categories individually, but mixing across the two
+    # pools in one round isn't a pure round for either — charged normally,
+    # same conservative choice as any other mixed round.
+    rb = ai_providers.RoundBudget(limit=2, discovery_limit=3, project_discovery_limit=2)
+    check("mixed round is charged", rb.take(["search_files", "search_tools"]) is True)
+    check("neither free pool was touched",
+          rb.project_discovery_used == 0 and rb.discovery_used == 0,
+          (rb.project_discovery_used, rb.discovery_used))
+    check("main pool charged instead", rb.used == 1, rb.used)
+
+
+def test_project_discovery_pool_exhaustion_falls_back_to_main_budget():
+    # Case 2b's shape: repeated search_files calls. With a cap of 2, the
+    # 3rd+ round should still be allowed — just charged to the main budget,
+    # not an automatic cutoff.
+    rb = ai_providers.RoundBudget(limit=6, project_discovery_limit=2)
+    for i in range(2):
+        check(f"project-discovery round {i + 1}/2 is free", rb.take(["search_files"]) is True)
+    check("project-discovery pool now spent", rb.project_discovery_used == 2)
+    check("main pool still untouched", rb.used == 0, rb.used)
+    check("3rd project-discovery round falls back to the main pool",
+          rb.take(["search_files"]) is True)
+    check("main pool now charged for it", rb.used == 1, rb.used)
+
+
+def test_project_discovery_limit_zero_disables_the_pool_even_with_names():
+    # Same "opt-in only" guarantee as discovery_limit: a caller that
+    # doesn't ask for this pool keeps the exact old behavior.
+    rb = ai_providers.RoundBudget(limit=2)  # project_discovery_limit defaults to 0
+    check("project_discovery_limit defaults to 0", rb.project_discovery_limit == 0)
+    check("search_files round is charged to the main pool with no project-discovery budget configured",
+          rb.take(["search_files"]) is True)
+    check("main pool was actually charged", rb.used == 1, rb.used)
+    check("project-discovery pool never used", rb.project_discovery_used == 0)
+
+
+def test_ai_client_reads_project_discovery_call_budget_from_config_defaults():
+    import inspect
+    from jarvis import ai_client
+
+    src = inspect.getsource(ai_client.ask)
+    check("ask() constructs RoundBudget with project_discovery_limit=",
+          "project_discovery_limit=" in src)
+    check("ask() reads project_discovery_call_budget from defaults",
+          "project_discovery_call_budget" in src)
+    check("default fallback is 2, the more conservative of the two caps",
+          'project_discovery_call_budget", 2)' in src or "project_discovery_call_budget', 2)" in src,
+          src)
+
+
 def test_empty_names_list_is_not_a_discovery_round():
     # Defensive: an empty list is falsy, same as None — take([]) must not
     # be silently free.
@@ -170,6 +274,14 @@ for fn in [
     test_discovery_limit_zero_disables_the_pool_even_with_names,
     test_empty_names_list_is_not_a_discovery_round,
     test_ai_client_reads_discovery_call_budget_from_config_defaults,
+    test_project_discovery_round_draws_from_its_own_separate_pool,
+    test_project_discovery_pool_is_independent_of_the_tool_discovery_pool,
+    test_unknown_tool_name_is_not_project_discovery,
+    test_mixed_project_discovery_and_real_call_is_charged_normally,
+    test_mixed_project_discovery_and_tool_discovery_is_charged_normally,
+    test_project_discovery_pool_exhaustion_falls_back_to_main_budget,
+    test_project_discovery_limit_zero_disables_the_pool_even_with_names,
+    test_ai_client_reads_project_discovery_call_budget_from_config_defaults,
 ]:
     fn()
 

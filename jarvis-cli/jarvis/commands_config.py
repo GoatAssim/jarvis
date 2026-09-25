@@ -7,11 +7,17 @@ same rules for names and specs.
 import json
 from pathlib import Path
 
+from .reserved_names import RESERVED_NAMES
+
 JARVIS_DIR = Path.home() / ".jarvis"
 CONFIG_FILE = JARVIS_DIR / "commands.json"
 ENCODING = "utf-8"
 
-RESERVED_NAMES = {"config", "ai-config", "ai-clear", "ai-drop-from", "playnite-config", "spotify-config", "spotify-login", "memory-config", "everything-config", "tools-list", "tool-run", "conv-new", "conv-list", "conv-show", "conv-switch", "conv-delete", "then", "and", "-h", "--help"}
+# RESERVED_NAMES used to be its own, much smaller (20-name) hand-copied
+# list here — that's exactly what let `validate_command_name` accept names
+# like "backlog", "think" and "doctor" that the CLI's dispatcher would
+# actually shadow. It now comes from reserved_names.py, the single
+# canonical copy (I-B2 fix).
 
 
 def ensure_config():

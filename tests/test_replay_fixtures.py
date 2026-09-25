@@ -291,11 +291,21 @@ def test_case2b_executes_the_move_call_it_previously_discarded():
     moved = any(c["name"] in ("move_path", "run_custom_command") for c in tool_calls)
     check_known_gap(
         "Case 2b: a move tool (or run_custom_command) was executed", moved, names,
-        "replay shows the turn still spends its rounds on search_files discovery "
-        "and ends by telling the user to run the move themselves, rather than "
-        "calling move_path. Matches the plan's own '[ ]' (unchecked) status for "
-        "this exact checklist item — tied to F.2's still-open discovery-budget "
-        "cap (owner decision D1), not something this harness silently papers over.")
+        "K.2.4.1 gave search_files/list_dir their own separate, uncharged "
+        "discovery pool (default 2) — implemented and unit-tested "
+        "(tests/test_discovery_round_budget.py) — but replaying this "
+        "specific fixture with it still doesn't reach move_path. Traced "
+        "directly: both search_files calls here draw from that free pool "
+        "(project_discovery_used reaches 2, the main round budget stays at "
+        "0 the whole turn), so this was never actually a budget-crowding "
+        "case the way Case 2a's six-discovery-calls evidence was — the "
+        "model in this recording just stops and tells the user to do the "
+        "move itself after its second search, with room to spare in both "
+        "pools. That's a different, still-open gap (something about how "
+        "the search results or the accumulated context after two misses "
+        "shapes the model's next move, not the round-budget mechanism "
+        "K.2.4.1 was scoped to fix) and needs its own separate "
+        "investigation rather than being closed by this fix.")
     check("Case 2b: reply is non-empty either way",
           bool(result.ok and (result.text or "").strip()), result.text)
 

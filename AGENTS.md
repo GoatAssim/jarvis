@@ -94,6 +94,21 @@ pytest functions if pytest happens to be available). Run directly:
     python3 tests/test_finish_signal.py
     python3 tests/test_ask_output.py
     python3 tests/test_browser_daemon.py
+    python3 tests/test_subagents.py
+    python3 tests/test_build_info.py
+    python3 tests/test_reserved_names.py
+    python3 tests/test_replay_fixtures.py
+    python3 tests/test_doctor_saved_commands.py
+    python3 tests/test_streaming_ollama.py
+
+Front-end logic that's pure enough to run outside a browser gets a plain
+Node script instead, same no-framework convention (each slices the real
+function straight out of `web/public/app.js` by source range, so it can't
+silently drift out of sync with a copy — `npm install marked` inside
+`tests/` first for the one that needs it to actually render Markdown):
+
+    node tests/verify_math_rendering.js
+    node tests/verify_ask_trace_replay.js
 
 Two things that will waste your time if nobody tells you:
 
