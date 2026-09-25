@@ -752,13 +752,19 @@
         </div>
         <!-- §3: filter the tool list by where a tool comes from. Same
              visual language as the Organized/Raw toggle above
-             (.debug-toggle-btn), just four buttons instead of two. "All" is
-             the default so this never hides anything until you touch it. -->
+             (.debug-toggle-btn), just five buttons instead of two. "All" is
+             the default so this never hides anything until you touch it.
+             "MCP" (§3 item 2) is its own bucket, not folded into "Auto":
+             actions/mcp_tools.py rides the same shipped jarvis/actions/
+             auto-discovery scan as any other built-in action module, but
+             its tools come from a server the user configured, not from
+             jarvis itself, so they get their own source. -->
         <div class="debug-source-filter" id="debug-source-filter" role="group" aria-label="Filter tools by source">
           <button type="button" class="debug-toggle-btn is-active" data-source="">All</button>
           <button type="button" class="debug-toggle-btn" data-source="builtin">Built-in</button>
           <button type="button" class="debug-toggle-btn" data-source="auto">Auto</button>
           <button type="button" class="debug-toggle-btn" data-source="user">User</button>
+          <button type="button" class="debug-toggle-btn" data-source="mcp">MCP</button>
         </div>
         <div class="debug-tool-list" id="debug-tool-list">
           <div class="debug-empty">Loading&hellip;</div>
