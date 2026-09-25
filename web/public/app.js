@@ -8701,6 +8701,12 @@
     } else if (currentLayout === "classic" && typeof closeAsk === "function") {
       try { closeAsk(); } catch { /* the panel may not be built yet on first paint */ }
     }
+    // D.1 layout tier — the subagents panel docks beside the Ask surface in
+    // Focus, so a layout switch has to re-evaluate it exactly like it does
+    // openAsk/closeAsk above. updateSubagentsDockMode is defined further
+    // down (with the rest of the subagents code) but hoisted, so it's safe
+    // to call from here.
+    try { updateSubagentsDockMode(); } catch { /* subagents panel may not be built yet on first paint */ }
   }
 
   async function loadLayout() {
@@ -8739,6 +8745,97 @@
   let selectedSubagent = null;
   let subagentActiveList = [];
   let subagentPollTimer = null;
+
+  // --- D.1 layout tier: docked side pane in Focus, overlay fallback ------
+  // "Right next to Jarvis" means beside the Ask panel while it's the thing
+  // on screen — that's Focus layout (see applyLayout above). A narrow
+  // viewport can't fit both side by side, so this only ever docks at
+  // widths comfortably wider than the Ask panel's own single-column
+  // minimum; below that (or in Classic) the original centered
+  // .menu-overlay/.menu-panel behavior is untouched.
+  const SUBAGENTS_DOCK_MIN_WIDTH = 1000;
+
+  function updateSubagentsDockMode() {
+    if (!subagentsOverlay) return;
+    const docked = currentLayout === "focus" && window.innerWidth >= SUBAGENTS_DOCK_MIN_WIDTH;
+    subagentsOverlay.classList.toggle("is-docked", docked);
+    const collapseBtn = qs("#btn-subagents-collapse");
+    if (collapseBtn) collapseBtn.hidden = !docked;
+    if (!docked) subagentsOverlay.classList.remove("is-collapsed");
+  }
+
+  window.addEventListener("resize", updateSubagentsDockMode);
+
+  // --- D.1 near-live tier: tail each subagent's own console_store lines --
+  // Each subagent step is its own `jarvis ask` subprocess (task_runner.py's
+  // _spawn_ask), writing to console_store.py under the "ask" surface (the
+  // same store and surface the main Ask panel's own right-side trace reads
+  // — see loadAskTraceForConv/askLineFromStoredEntry above) as it runs. No
+  // new backend needed: polling GET /api/console/:id?since=... every ~1s
+  // while a subagent is selected and active surfaces its tool calls,
+  // provider attempts and errors well before the step's `jarvis ask`
+  // subprocess exits and conv-show would show anything new at all.
+  // Reuses askLineFromStoredEntry's exact {text, cls} mapping so a
+  // subagent's live line and the main Ask panel's own trace line render
+  // identically — one rendering rule, not two that could drift apart.
+  const subagentLiveDom = {};   // task id -> the persistent live-pane element
+  const subagentLiveSeq = {};   // task id -> highest seq already rendered
+  let subagentLiveTimer = null;
+  let subagentLiveTimerId = null;
+
+  function subagentLiveEmptyMessage(convId) {
+    return convId ? "Nothing yet." : "This subagent has no transcript to tail.";
+  }
+
+  function getOrCreateSubagentLivePane(id, convId) {
+    let pane = subagentLiveDom[id];
+    if (pane) return pane;
+    // .ask-prompt__term/.ask-prompt-line--* — the exact classes
+    // renderAskTraceForConv uses for the main Ask panel's own right-side
+    // trace, since askLineFromStoredEntry's {text, cls} values are that
+    // renderer's vocabulary, not the Live Feed's (.console-line--*).
+    pane = el("div", { class: "ask-prompt__term subagent-live" });
+    pane.appendChild(el("div", { class: "skills-empty" }, subagentLiveEmptyMessage(convId)));
+    subagentLiveDom[id] = pane;
+    return pane;
+  }
+
+  async function pollSubagentLiveOnce(id, convId) {
+    let result;
+    try {
+      result = await Api.getConsole(convId, { since: subagentLiveSeq[id] || 0, surface: "ask", limit: 500 });
+    } catch {
+      return; // transient — the next tick (or the next selection) tries again
+    }
+    if (result && typeof result.last_seq === "number") subagentLiveSeq[id] = result.last_seq;
+    const lines = (result && result.lines) || [];
+    if (!lines.length) return;
+    const pane = subagentLiveDom[id];
+    if (!pane) return; // detail was torn down (task disappeared / panel closed) mid-fetch
+    const placeholder = qs(".skills-empty", pane);
+    if (placeholder) placeholder.remove();
+    lines.forEach((line) => {
+      const mapped = askLineFromStoredEntry(line);
+      if (!mapped) return; // "narration" and anything askLineFromStoredEntry doesn't map — see its own comment
+      pane.appendChild(el("div", { class: `ask-prompt-line ask-prompt-line--${mapped.cls}` }, mapped.text));
+    });
+    while (pane.children.length > 600) pane.removeChild(pane.firstChild); // bound DOM growth over a long-running task
+    if (selectedSubagent === id) pane.scrollTop = pane.scrollHeight;
+  }
+
+  function startSubagentLivePoll(id, convId) {
+    if (subagentLiveTimer && subagentLiveTimerId === id) return; // already tailing this one
+    stopSubagentLivePoll();
+    subagentLiveTimerId = id;
+    pollSubagentLiveOnce(id, convId);
+    subagentLiveTimer = setInterval(() => pollSubagentLiveOnce(id, convId), 1000);
+  }
+
+  function stopSubagentLivePoll() {
+    if (subagentLiveTimer) clearInterval(subagentLiveTimer);
+    subagentLiveTimer = null;
+    subagentLiveTimerId = null;
+  }
 
   function subagentStatusClass(status) {
     if (status === "running") return "is-busy";
@@ -8809,8 +8906,25 @@
     if (selectedSubagent && !tasks.some((t) => t.id === selectedSubagent)) {
       selectedSubagent = null;
       renderSubagentDetail(null);
+      stopSubagentLivePoll();
     } else if (selectedSubagent) {
       selectSubagent(selectedSubagent, /* fromPoll */ true);
+    }
+
+    // A task that's gone from every list (active or the last 10 finished)
+    // can't be revisited without a fresh /api/subagents/:id fetch anyway,
+    // so its live pane and seq cursor are just dead weight — drop them
+    // rather than let a long-running Jarvis session accumulate one per
+    // subagent ever spawned.
+    const liveIds = Object.keys(subagentLiveDom);
+    if (liveIds.length) {
+      const known = new Set(tasks.map((t) => t.id));
+      liveIds.forEach((id) => {
+        if (!known.has(id) && id !== selectedSubagent) {
+          delete subagentLiveDom[id];
+          delete subagentLiveSeq[id];
+        }
+      });
     }
   }
 
@@ -8883,6 +8997,14 @@
       body.appendChild(el("div", { class: "skills-pane__head skills-pane__head--sub" }, [el("h3", {}, "Result")]));
       body.appendChild(el("pre", { class: "daemon-console" }, detail.result));
     }
+
+    // D.1 near-live tier: the persistent pane from getOrCreateSubagentLivePane
+    // is re-appended (not rebuilt) on every refresh so a running tail's
+    // scroll position and lines survive this function's periodic
+    // body.innerHTML reset above; pollSubagentLiveOnce appends to it
+    // directly and independently of this render cycle.
+    body.appendChild(el("div", { class: "skills-pane__head skills-pane__head--sub" }, [el("h3", {}, "Live")]));
+    body.appendChild(getOrCreateSubagentLivePane(detail.id, detail.conv_id));
   }
 
   async function selectSubagent(id, fromPoll) {
@@ -8905,6 +9027,16 @@
     qsa(".skills-item", qs("#subagents-list")).forEach((n, i) => {
       n.classList.toggle("is-active", subagentActiveList[i] && subagentActiveList[i].id === id);
     });
+    if (detail.conv_id && SUBAGENT_ACTIVE_STATUSES.has(detail.status)) {
+      startSubagentLivePoll(id, detail.conv_id);
+    } else {
+      stopSubagentLivePoll();
+      // Not active (or never had a transcript at all): no ongoing tail to
+      // poll, but do one catch-up fetch so a step that finished between two
+      // 4s list polls still shows its trailing lines instead of just
+      // whatever was already on screen from the last time it was active.
+      if (detail.conv_id && !subagentLiveSeq[id]) pollSubagentLiveOnce(id, detail.conv_id);
+    }
   }
 
   function cycleSubagent(delta) {
@@ -8918,6 +9050,7 @@
 
   function openSubagents() {
     subagentsOverlay.hidden = false;
+    updateSubagentsDockMode();
     refreshSubagents();
     if (subagentPollTimer) clearInterval(subagentPollTimer);
     subagentPollTimer = setInterval(refreshSubagents, 4000);
@@ -8926,7 +9059,14 @@
   function closeSubagents() {
     subagentsOverlay.hidden = true;
     if (subagentPollTimer) { clearInterval(subagentPollTimer); subagentPollTimer = null; }
+    stopSubagentLivePoll();
   }
+
+  qs("#btn-subagents-collapse")?.addEventListener("click", (e) => {
+    const collapsed = subagentsOverlay.classList.toggle("is-collapsed");
+    e.currentTarget.innerHTML = collapsed ? "&#8593;" : "&#8595;";
+    e.currentTarget.title = collapsed ? "Expand" : "Collapse";
+  });
 
   qs("#btn-subagents")?.addEventListener("click", openSubagents);
   qs("#subagents-close")?.addEventListener("click", closeSubagents);

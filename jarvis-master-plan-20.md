@@ -795,7 +795,7 @@ mostly closed, G.1 is implemented, D.2/D.4 are implemented, and the current
 repo also contains the Part E console store/persistence baseline. The largest
 remaining product work is **Part I (code blocks + full `/` command palette),
 Part H (UI rework), Part E's Ask-console replay/filter gaps, Part A §8
-real-time token streaming, D.1 subagent live detail, and G.2 multi-group
+real-time token streaming, D.1's remaining word-by-word tier, and G.2 multi-group
 checklist support**.
 
 There are also **three current release/QA issues that are not safely represented
@@ -837,7 +837,7 @@ by the old status text**:
 | **A — §8 real-time streaming** | **NOT STARTED** | P2 | No provider-wide token streaming path | Needs transport, provider adapters, AI client callback, web WS/SSE framing, UI render entry point and tests |
 | **B — Clipboard** | **DONE** | — | Get/set/clear/wait, watch daemon, human config command, model set/get-pattern tools | Real OS backend verification is still outstanding |
 | **C — Browser** | **DONE (v1+v2)** | — | Playwright tools + warm browser daemon + persistent profile + fallback | Real Chromium/login persistence and hard-kill cleanup are not verified |
-| **D.1 — Subagent live view** | **PARTIAL** | P2 | Overlay, badge, cycling, plan/history/result, transcript link | Near-live incremental transcript/console/thinking and docked side-pane experience remain |
+| **D.1 — Subagent live view** | **PARTIAL (word-by-word tier only)** | P2 | Overlay/docked panel, badge, cycling, plan/history/result, transcript link, near-live console tail (~1s poll of the existing console store) | Word-by-word streaming still depends on §8; the near-live tail updates per completed console line, not per token |
 | **D.2 — Notification summaries** | **DONE** | — | Shared stdout stripping/summarization; web “Show more” | Digest is a separate feature, not a replacement for this |
 | **D.3 — scheduled-reminder issue** | **NO ACTIONABLE OPEN BUG IDENTIFIED** | P3 | Scheduler already logs scheduled prompts and current prompt assembly has no matching stale block | Re-open only with a concrete current repro/provider requirement |
 | **D.4 — nullable optional schema** | **DONE** | — | Current nullable/optional handling is tested | Historical wording should be treated as resolved |
@@ -1046,7 +1046,7 @@ started here.
 
 | Item | What exists | What's missing |
 |---|---|---|
-| Watch subagents "right next to Jarvis" with their console output and reasoning | A button + panel with cycling, plan, step history and a transcript link | It's an **overlay panel** that polls every 4 s, not a docked side view; reasoning/console output only appears via the finished transcript, **not live**. Live view depends on §8 streaming — design in Part D.1 |
+| Watch subagents "right next to Jarvis" with their console output and reasoning | A docked side pane in Focus (overlay fallback elsewhere) with cycling, plan, step history, a transcript link, and a ~1s console tail while a subagent is selected and active | Console-tail lines arrive per completed line, not per token — true word-by-word still depends on §8 streaming, per Part D.1's tier 2 |
 | "Thinking" like Claude/Cursor (word by word) | Post-hoc collapsible block; a show/hide toggle already exists (`Show reasoning trace`) | Nothing streams — the whole of **§8** is still to do (§5, its prerequisite, is now finished on all five adapters — see §0.1f) |
 
 ### 0.3 Not started
@@ -2727,10 +2727,10 @@ of the whole session-model decision above.
 
 # Part D — Remaining work the patch left open
 
-> **CURRENT AUDIT — 2026-09-22:** D.1 is partial, D.2 is done, D.3 has no concrete current repro in the archive, and D.4's nullable-optional issue is already fixed. The only D-family feature still meaningfully under construction is the subagent live view.
+> **CURRENT AUDIT — 2026-09-25:** D.1's near-live and layout tiers are delivered (see Status line below); its word-by-word tier still depends on §8. D.2 is done, D.3 has no concrete current repro in the archive, and D.4's nullable-optional issue is already fixed.
 
 
-## D.1 Subagent live view (console output + reasoning, right next to Jarvis)
+## D.1 Subagent live view (console output + reasoning, right next to Jarvis) — Status: Tiers 1/3/4 delivered (rev. 2026-09-25a); tier 2 (word-by-word) still depends on §8
 
 **Goal (from the original request):** see what each subagent is doing —
 reasoning, console output, what it's trying to do — in a separate view next to
@@ -2739,30 +2739,52 @@ Jarvis, and cycle through the active subagents.
 **Already there (Part 0.1):** button + badge, cycling, plan/history/result,
 transcript via `conv_id`.
 
-**To do, in two tiers:**
+**Delivered in rev. 2026-09-25a (tiers 1, 3, 4 below):**
 
-1. **Near-live without new backend (small).** While a subagent is selected,
-   poll its conversation incrementally (the same `GET /api/conversations/:id`
-   the Ask panel uses, with an offset/`since` so only new entries come back)
-   every ~1 s and render its saved tool calls, console output and `thinking`
-   extras in the panel's detail pane. Updates arrive per completed round, not
-   per token. Once Part E exists, read the subagent's console store with
-   `since_seq` instead, and reuse the same filter control.
-2. **Truly live, word by word (needs §8).** Each subagent step is its own
-   `jarvis ask` subprocess (see `task_runner.py`). Once `JARVIS_STREAM` markers
-   exist (§8.2), the runner must forward them somewhere the server can tail —
-   e.g. append the marker lines to a per-task stream file/log that `server.js`
-   tails and pushes over the WebSocket as `subagent-stream` events keyed by task
-   id. Check how `task_runner.py` currently captures the step subprocess's
-   stdout before choosing the mechanism; reuse whatever it already does rather
-   than adding a second channel.
-3. **Layout.** Today the panel is a full overlay. To sit "right next to Jarvis",
-   make it a docked side pane in the Ask/Focus layout (collapsible, same
-   prev/next cycling and status badge), keeping the overlay as the fallback on
-   narrow screens. Reuse the segmented thinking → text → tool renderer from
-   §8.5 so a subagent's live view looks identical to the main chat.
-4. **Older tasks.** Tasks created before the patch have no `conv_id`
-   (button disabled). Nothing to migrate — just show the plan/history for them.
+1. **Near-live without new backend — DONE, via the console store rather than
+   conv-show.** Part E's console store (`console_store.py` /
+   `GET /api/console/:id`) already supports `since`/`surface` filtering, and
+   each subagent step already writes to it live, under the `"ask"` surface,
+   as its own `jarvis ask` subprocess runs — no backend change needed. While
+   a subagent is selected and active, the web UI now polls
+   `GET /api/console/:id?since=<seq>&surface=ask` every ~1s and appends new
+   tool-call/tool-result/provider/error lines to the panel's detail pane,
+   reusing `askLineFromStoredEntry`'s exact rendering so a subagent's live
+   line looks identical to the main Ask panel's own trace. This lands
+   updates per completed console line (tool call, provider attempt, error),
+   not per token — that granularity is still tier 2 below. `thinking`/full
+   reply text still only appears once a step's exchange completes (via the
+   existing plan/history/result refresh), since nothing currently persists
+   those mid-step.
+2. **Truly live, word by word (needs §8) — NOT STARTED, unchanged.** Each
+   subagent step is its own `jarvis ask` subprocess (see `task_runner.py`).
+   Once `JARVIS_STREAM` markers exist (§8.2), the runner must forward them
+   somewhere the server can tail — e.g. append the marker lines to a
+   per-task stream file/log that `server.js` tails and pushes over the
+   WebSocket as `subagent-stream` events keyed by task id. Check how
+   `task_runner.py` currently captures the step subprocess's stdout before
+   choosing the mechanism; reuse whatever it already does rather than
+   adding a second channel.
+3. **Layout — DONE.** The panel now docks as a side pane beside the Ask
+   panel in Focus layout, on viewports wide enough to fit both (≥1000px);
+   below that width, or in Classic, it keeps the original centered
+   `.menu-overlay` behavior unchanged. Docked mode is collapsible (a head
+   toggle shrinks it to just the title/status strip; the live poll keeps
+   running underneath) and keeps the same prev/next cycling and status
+   badge as before. Reusing §8.5's segmented thinking → text → tool
+   renderer for this wasn't possible — that renderer doesn't exist yet
+   (§8 is still NOT STARTED, above) — so tier 1's console-line rendering
+   is what the docked pane shows today; revisit once §8.5 lands.
+4. **Older tasks — unchanged, already handled.** Tasks created before the
+   `conv_id` patch have no `conv_id` (transcript button already disabled);
+   the new live pane now also shows an explicit "no transcript to tail"
+   placeholder for them instead of attempting to poll.
+
+**Not yet verified:** this was implemented and reviewed against the source
+(console_store's `since`/`surface` contract, `askLineFromStoredEntry`'s
+mapping, the Focus-layout CSS it docks against) but not exercised against a
+running server with a live subagent — do that before considering tier 1/3
+closed rather than just delivered.
 
 ## D.2 Notifications: show a summary, not raw output — Status: Delivered (rev. 2026-09-22a)
 
@@ -5262,7 +5284,7 @@ deliberately not built) and needs its own row:
 
 | Item | Ask prompt / manual step | Expect |
 |---|---|---|
-| D.1 — subagent live view (near-live tier) | Start a subagent task, watch the panel while it runs | Tool calls/console/`thinking` extras appear roughly every ~1s, not only after the task finishes via the transcript link |
+| D.1 — subagent live view (near-live tier) | Start a subagent task, watch the docked/overlay panel while it runs | Tool-call/provider/error console lines appear roughly every ~1s via the console-store tail, not only after the task finishes via the transcript link. (`thinking`/full reply text still only lands when a step's exchange completes — nothing persists those mid-step yet.) |
 | D.1 — subagent live view (word-by-word tier) | Same, once §8 streaming exists | Text streams the same way the main chat does |
 | D.2 — notification summaries | Trigger a scheduled ask/command notification | A short digest (first line / ~200 chars, expandable), not raw `JARVIS_USAGE`/`JARVIS_CONFIRM_REQUEST` JSON — checked across every notification source, not just the two scheduler paths |
 | D.2.1 — notification importance levels | Trigger one `high`, one `normal`, and one `low` notification, including a clipboard-watch notification | Resolved priority is stored and visible; `high` is immediate and not batched, `low` enters the existing digest when enabled, and `normal` is immediate subject only to burst coalescing |
@@ -5969,7 +5991,13 @@ and the final successful/declined action semantics remain correct.
 
 ### K.3.1 Part A §8 — real-time token streaming of text and thinking
 
-**Status:** NOT STARTED.
+**Status:** PARTIAL (rev. 2026-09-25). The provider-side half is done: every
+adapter streams natively and `ai_client.ask()` threads it through to
+`on_stream`. Nothing downstream can consume it yet — K.3.1.4/K.3.1.5 (the CLI
+marker line, the web WS/SSE framing, the browser render entry point) are all
+still OPEN, which is also why `defaults.stream` still defaults to false
+everywhere: flipping it now would mean the deltas fire into a sink nobody's
+listening on.
 
 **What it does:** Lets the user see model text and reasoning arrive while a turn
 is running instead of waiting for the provider round to finish. This is the
@@ -5977,7 +6005,11 @@ missing complement to §5's interim-message narration.
 
 #### K.3.1.1 Define a provider-neutral streaming callback/event shape
 
-**Status:** OPEN.
+**Status:** DONE (rev. 2026-09-25). `EVENT_TEXT`/`EVENT_THINKING`/`EVENT_TOOL`/
+`EVENT_ROUND_END` (plus `EVENT_RESET`), a `set_stream_sink()` callback, a
+shared `_post_stream()` transport, and a `stream_enabled()` on/off switch —
+mirroring the existing `on_interim_text` thread-local pattern already in the
+codebase. Defaults to off everywhere (see K.3.1's own status note).
 
 **Change:** Add a shared event contract for text chunks, thinking chunks, turn
 boundaries and errors without duplicating provider-specific UI logic.
@@ -5986,7 +6018,21 @@ boundaries and errors without duplicating provider-specific UI logic.
 
 #### K.3.1.2 Implement native streaming in each adapter
 
-**Status:** OPEN.
+**Status:** DONE (rev. 2026-09-25). All five converted, in the order this
+section already suggested — Ollama (NDJSON) first since it's local and free to
+test end to end without a real network, then OpenAI-compatible (SSE,
+`data: {...}` / `[DONE]`), Anthropic (SSE, named events, fragmented tool
+`input_json_delta` requiring the block's `signature_delta` to survive intact
+for replay), Gemini (a different endpoint —
+`streamGenerateContent?alt=sse` — rather than a body flag, delta-shaped parts
+with cumulative `usageMetadata`), and Cohere (SSE, named events like
+Anthropic's; no thinking events, since this family has no reasoning-model
+member yet). Every adapter reassembles its stream into the exact response
+shape its own non-streamed parser already produces, so `_record_usage`,
+`_collect_thinking`, `finish_signal` etc. run unchanged either way. Covered by
+`tests/test_streaming_ollama.py` (24 tests) and
+`tests/test_streaming_other_adapters.py` (60 tests, one file for the
+remaining four since they share the same shape-parity approach).
 
 **Change:** OpenAI-compatible, Anthropic, Gemini, Cohere and Ollama each need
 provider-native stream parsing mapped into the shared event shape.
@@ -5995,7 +6041,12 @@ provider-native stream parsing mapped into the shared event shape.
 
 #### K.3.1.3 Thread stream events through `ai_client.ask()`
 
-**Status:** OPEN.
+**Status:** DONE (rev. 2026-09-25). `ask()`'s `on_stream=` parameter is wired
+to `ai_providers.set_stream_sink()` (and `set_log_context(..., stream=...)`)
+on every attempt, gated by `defaults.stream`/`stream_this_ask` the same way
+`on_interim_text` is gated. Live end to end for any caller that turns
+`defaults.stream` on and passes `on_stream=`; no caller does yet (see K.3.1's
+own status note) — K.3.1.4/K.3.1.5 are what would.
 
 **Priority:** P2.
 
@@ -6019,7 +6070,7 @@ and final rendering do not fork into two incompatible paths.
 
 ### K.3.2 D.1 — subagent live side view
 
-**Status:** PARTIAL.
+**Status:** PARTIAL (word-by-word tier only — K.3.2.4).
 
 **What it does:** Lets the user see what each active subagent is doing near-live,
 including saved tool calls, console lines and thinking, and cycle among active
@@ -6027,22 +6078,34 @@ subagents.
 
 #### K.3.2.1 Near-live polling from conversation data
 
-**Status:** OPEN.
+**Status:** DONE (rev. 2026-09-25a), via the console store instead of
+conv-show.
 
-**Change:** While a subagent is selected, poll `GET /api/conversations/:id`
-incrementally so only new entries are rendered.
+**Change:** Polling `GET /api/conversations/:id` incrementally turned out
+unnecessary — Part E's console store already supports `since`/`surface`
+filtering and each subagent step already writes to it live under the `"ask"`
+surface as its own `jarvis ask` subprocess runs. While a subagent is selected
+and active, the web UI polls `GET /api/console/:id?since=<seq>&surface=ask`
+every ~1s instead, no backend change needed. `thinking`/full reply text still
+only lands once a step's exchange completes, since nothing persists those
+mid-step.
 
 **Priority:** P2.
 
 #### K.3.2.2 Add live daemon/console tail when applicable
 
-**Status:** OPEN.
+**Status:** DONE (rev. 2026-09-25a) — delivered together with K.3.2.1 above;
+same change, same poll.
 
 **Priority:** P2.
 
 #### K.3.2.3 Dock the subagent view beside the main Ask panel
 
-**Status:** OPEN.
+**Status:** DONE (rev. 2026-09-25a). Docks as a side pane beside the Ask
+panel in Focus layout on viewports ≥1000px wide; collapsible; falls back to
+the original centered overlay in Classic or on narrower viewports. Not yet
+exercised against a running server — see the D.1 section above and the
+open-items checklist.
 
 **Dependency:** K.3.2.1.
 
@@ -6314,8 +6377,9 @@ UI/rendering plumbing twice.
     I-B1/I-B2 foundations are fixed and the rendering entry point is stable.
 11. **P2. Build Part A §8 streaming** and feed both final Ask rendering and the
     D.1 subagent live view through the shared stream/event path.
-12. **P2. Finish D.1, G.2 and Part H rework.** These are now UI/product work
-    against relatively stable backend contracts.
+12. **P2. Finish D.1's word-by-word tier (blocked on #11), plus G.2 and Part H
+    rework.** These are now UI/product work against relatively stable backend
+    contracts.
 13. **P2/P3. Close OS/provider verification and documentation debt**, then
     tighten permanent regression coverage where tests still depend on one-off
     snippets.
@@ -6337,7 +6401,10 @@ following are true:
 - [ ] Part E Ask-console output survives reload by replaying from the persistent
       console store, with live behavior still intact.
 - [ ] §8 streaming is implemented or explicitly removed from the product goal.
-- [ ] D.1 subagent live view is actually near-live and tested on a real web UI.
+- [ ] D.1 subagent live view's near-live console tail and docked layout
+      (rev. 2026-09-25a) are verified against a running server with a live
+      subagent, not just reviewed against source; word-by-word tier still
+      waits on §8.
 - [ ] G.2 supports multi-group module-supplied checklist data.
 - [ ] Part H reaches the requested Test-Checklist-quality UI bar.
 - [ ] Notification records carry the shared `low` / `normal` / `high` importance

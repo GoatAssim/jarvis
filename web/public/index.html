@@ -1263,6 +1263,10 @@
         <div class="menu-panel__subtitle" id="subagents-status-line">reading tasks&hellip;</div>
       </div>
       <button class="btn btn--ghost btn--sm" id="btn-subagents-refresh" type="button" title="Re-read every subagent's live status">Refresh</button>
+      <!-- D.1: only shown once docked (Focus layout, wide viewport — see
+           updateSubagentsDockMode in app.js); collapses the panel to just
+           this head strip without stopping the live poll underneath. -->
+      <button class="btn btn--ghost btn--sm" id="btn-subagents-collapse" type="button" title="Collapse" hidden>&#8595;</button>
       <button class="modal__close" id="subagents-close" type="button" aria-label="Close">&times;</button>
     </div>
 
