@@ -442,7 +442,7 @@ def update_meta(conv_id, title=None, soft_context=None):
     return True
 
 
-def begin_exchange(conv_id, user_text):
+def begin_exchange(conv_id, user_text, console_turn=None):
     """Write the user's half of a turn to disk BEFORE the model is called.
 
     This is the fix for "I sent a message, aborted it, and the conversation
@@ -457,6 +457,14 @@ def begin_exchange(conv_id, user_text):
     place by complete_exchange() or downgraded by abandon_exchange(). A
     pending exchange is deliberately still a real, visible exchange — a
     reload shows what you asked, even though nothing answered it.
+
+    `console_turn`, if given, is the id `console_store.begin_turn()` just
+    minted for this same turn (K.2.5.2). It's saved on the pending exchange
+    so `_reclaim_stale_pending()` can still point at that turn's console
+    lines even after a hard kill that skipped every other cleanup path —
+    the turn id is the one thing a brand-new process couldn't otherwise
+    recover, since `console_store`'s own bookkeeping is in-process state
+    that died with the old process.
 
     Returns the index of the pending exchange, or -1 if it couldn't be
     written (a bad id, an unwritable disk) — callers treat that as "carry on
@@ -480,13 +488,16 @@ def begin_exchange(conv_id, user_text):
     # every killed ask leaves a ghost turn that renders as permanently
     # unanswered and is silently dropped from prompt history.
     _reclaim_stale_pending(record)
-    record.setdefault("exchanges", []).append({
+    exchange = {
         "ts": _now(),
         "user": user_text,
         "jarvis": "",
         "provider": None,
         "pending": True,
-    })
+    }
+    if console_turn:
+        exchange["consoleTurn"] = console_turn
+    record.setdefault("exchanges", []).append(exchange)
     record["exchanges"] = record["exchanges"][-MAX_STORED_EXCHANGES:]
     record["updated_at"] = _now()
     _save_conv(record)
@@ -502,6 +513,19 @@ def _reclaim_stale_pending(record):
     writing the same conversation concurrently — already unsupported, and
     the reclaim leaves the user's text untouched either way. Returns how
     many were reclaimed.
+
+    K.2.5.2: a pending exchange carrying a `consoleTurn` (see
+    begin_exchange) gets a real `consoleRef` extra pointing at whatever that
+    turn's console store actually holds, the same shape
+    `console_store.end_turn()` already builds for the in-process abandon
+    paths (`ai_client.abandon_pending_turn`) — so a process that died too
+    hard for even the signal handler to run (SIGKILL, OOM, power loss) still
+    leaves a reclaimed exchange that can show what ran, not just "you asked
+    this and nothing answered." The console data itself was never at risk
+    either way — it's written line-by-line as it happens — this only fixes
+    the reclaimed exchange record's own extras missing the pointer to it.
+    Imported lazily to avoid a module-level import cycle: console_store.py
+    already imports this module (conversations.py) for `is_valid_id`.
     """
     reclaimed = 0
     for exchange in record.get("exchanges") or []:
@@ -510,6 +534,15 @@ def _reclaim_stale_pending(record):
         exchange.pop("pending", None)
         exchange["jarvis"] = exchange.get("jarvis") or ""
         exchange.setdefault("interrupted", "interrupted (process ended)")
+        console_turn = exchange.pop("consoleTurn", None)
+        if console_turn and not exchange.get("extras"):
+            try:
+                from . import console_store
+                lines = console_store.line_count_for_turn(record.get("id"), console_turn)
+            except Exception:  # noqa: BLE001 — a missing pointer beats a crashed reclaim
+                lines = 0
+            if lines:
+                exchange["extras"] = [{"type": "consoleRef", "data": {"turn": console_turn, "lines": lines}}]
         reclaimed += 1
     return reclaimed
 
@@ -529,6 +562,15 @@ def _finish_pending(record, user_text, patch):
             continue
         exchanges[i].update(patch)
         exchanges[i].pop("pending", None)
+        # K.2.5.2's consoleTurn is bookkeeping for a hard-kill reclaim that
+        # never happened here — this turn is resolving normally, through
+        # complete_exchange() or abandon_exchange(), both of which already
+        # build their own consoleRef (from console_store.end_turn(), while
+        # the turn's still active in-process) into `patch["extras"]` when
+        # there's console data to point at. Leaving the raw turn id behind
+        # on top of that would just be dead clutter on every single
+        # exchange, forever, not a second safety net.
+        exchanges[i].pop("consoleTurn", None)
         return i
     exchange = {"ts": _now(), "user": user_text}
     exchange.update(patch)

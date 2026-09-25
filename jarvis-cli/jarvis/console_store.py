@@ -376,6 +376,33 @@ def read_legacy_command_run(conv_id, limit=200):
 _ACTIVE = {"conv_id": None, "turn": None, "surface": "ask", "count": 0}
 
 
+def line_count_for_turn(conv_id, turn):
+    """How many lines this store holds for one turn, regardless of surface.
+
+    Exists for conversations.py's `_reclaim_stale_pending()` (K.2.5.2): the
+    reclaim runs in a brand-new process (the one that discovers the stale
+    pending exchange left by a SIGKILL'd/OOM'd predecessor), so
+    `active_turn()`'s module-level state is long gone — it belonged to a
+    process that no longer exists. The turn id itself survives, though,
+    because begin_exchange() now saves it on the pending exchange record
+    (`consoleTurn`) before a single provider is contacted, same as the text
+    the record already saves early for exactly this reason. This is what
+    lets that turn id be turned back into a real `{"turn", "lines"}`
+    consoleRef pointer, matching the shape `end_turn()` already returns for
+    the in-process paths, without conversations.py importing this module at
+    module level (it already imports conversations.py the other way, for
+    `is_valid_id`) — callers import this function lazily instead.
+
+    Returns 0 (never raises) for a missing file, an unknown turn, or an
+    invalid conv_id — "no lines to point at" is a normal, harmless outcome
+    here (e.g. the process died before writing even the first "command"
+    line), not an error.
+    """
+    if not conversations.is_valid_id(conv_id) or not turn:
+        return 0
+    return sum(1 for line in _read_raw_lines(conv_id) if line.get("turn") == turn)
+
+
 def begin_turn(conv_id, surface="ask"):
     """Start a new turn for conv_id and remember it for log()/end_turn()
     for the rest of this process. Returns the turn id (opaque \u2014 callers

@@ -477,7 +477,18 @@ def _eligible_providers(providers, defaults=None):
             pinned = subagents.providers_from_env(providers)
         except Exception:  # noqa: BLE001 — fail closed: this process IS a subagent
             pinned = []
-        providers = pinned
+        # providers_from_env() returns None only for unparseable JSON, which
+        # it treats as indistinguishable from "not a subagent" (see its
+        # docstring) — that case must fall through to the ambient list
+        # unchanged. Every OTHER malformed shape returns [], and [] must be
+        # assigned as-is so the subagent gets nothing rather than silently
+        # falling back to the main key. Assigning `pinned` unconditionally
+        # here was the bug: None became `providers`, and the loop below then
+        # crashed with `TypeError: 'NoneType' object is not iterable`
+        # instead of failing closed on the malformed-pool case (it never got
+        # far enough to fail closed at all).
+        if pinned is not None:
+            providers = pinned
 
     out = []
     for p in providers:
@@ -2685,7 +2696,7 @@ def _merged_sticky_groups_for_confirmation(route, existing_sticky_groups, user_t
 
 def ask(user_text, commands=None, on_attempt=None, on_tool_call=None, on_tool_result=None, conversation_id=None,
         on_confirm_request=None, on_route=None, provider_override=None,
-        think_override=None, on_trace=None, sender_context="", on_interim_text=None):
+        think_override=None, on_trace=None, sender_context="", on_interim_text=None, on_stream=None):
     """Ask Jarvis something, trying every configured, enabled provider in
     order until one answers \u2014 and within each provider, every one of its
     configured keys in order before moving on to the next provider. Always
@@ -2715,6 +2726,15 @@ def ask(user_text, commands=None, on_attempt=None, on_tool_call=None, on_tool_re
     being silently dropped the way it was before master plan Part A \u00a75.
     Fires before the tool(s) that came with it are run. All five adapters
     report it (Anthropic, Gemini, OpenAI-compatible, Cohere, Ollama).
+
+    on_stream(kind, **data), if given, fires with live deltas as an adapter's
+    response streams in \u2014 master plan \u00a78. `kind` is one of
+    ai_providers.EVENT_TEXT/EVENT_THINKING/EVENT_TOOL/EVENT_ROUND_END/
+    EVENT_RESET. Only takes effect when this ask()'s config has
+    `defaults.stream: true` \u2014 see stream_this_ask above for why that isn't
+    the default yet, and ai_providers.py's own per-adapter conversion status
+    (\u00a78.7's order: only `ollama` streams so far; the other four still make
+    one blocking request and this callback simply never fires for them).
 
     conversation_id picks which conversation (see conversations.py) this
     exchange belongs to and gets appended to. When omitted, the CLI's
@@ -3099,14 +3119,37 @@ def ask(user_text, commands=None, on_attempt=None, on_tool_call=None, on_tool_re
     # defaults.discovery_call_budget = 0). Default of 3 covers the F.2
     # evidence's worst case (six straight discovery calls) with room to
     # spare without materially raising how much total work a turn can do.
+    # project_discovery_limit is the same idea for project-content discovery
+    # (search_files/list_dir) — decision K.2.4.1, the F.2 follow-on Case 2b
+    # exposed: those calls were still billed as ordinary work, so a turn
+    # could spend its whole budget finding the right file and have nothing
+    # left to act on it with. Kept as its own separate pool, not folded into
+    # discovery_limit — see PROJECT_DISCOVERY_TOOL_NAMES's own comment for
+    # why — and given a smaller default (2, not 3): unlike a catalog lookup,
+    # each call here can return an arbitrarily large result depending on the
+    # repo, so it's deliberately the more conservative of the two caps.
+    # Switch off with defaults.project_discovery_call_budget = 0.
     _defaults = cfg.get("defaults") or {}
     round_budget = ai_providers.RoundBudget(
         grace=bool(_defaults.get("grace_call", True)),
         discovery_limit=int(_defaults.get("discovery_call_budget", 3) or 0),
+        project_discovery_limit=int(_defaults.get("project_discovery_call_budget", 2) or 0),
     )
     # D5: cap (seconds) on waiting out a 429's OWN stated retry delay before
     # rotating keys. 30 by default; 0 disables (see _short_429_wait_seconds).
     max_429_wait = float(_defaults.get("max_429_wait_seconds", 30) or 0)
+    # Master plan §8: whether adapters should use their streaming transport
+    # this ask() at all. Default False FOR NOW, not the on-by-default §8.2
+    # ultimately wants — see ai_providers.py's own module comment (right
+    # above stream_enabled()) for why: nothing downstream of on_stream
+    # exists yet to consume it (no JARVIS_STREAM marker line, no web
+    # forwarding, no UI), so there is no user-visible reason to turn this on
+    # by default before that lands, and doing so early would silently
+    # change behavior for every existing caller/test that mocks
+    # ai_providers._post_json without knowing _post_stream exists.
+    # `defaults.stream: true` (or passing on_stream=...) opts in early for
+    # testing one adapter at a time as each is converted (§8.7's order).
+    stream_this_ask = bool(_defaults.get("stream", False))
     forced_end = None
 
     tool_executor = _make_tool_executor(
@@ -3146,13 +3189,14 @@ def ask(user_text, commands=None, on_attempt=None, on_tool_call=None, on_tool_re
     # outside this function's remit.
     _pending_turn[0] = (conv_id, user_text) if conv_id else None
     if conv_id:
-        conversations.begin_exchange(conv_id, user_text)
-        # Part E \u2014 the console store's own turn, independent of
-        # conversations.py's pending-exchange bookkeeping above (see
-        # console_store.py's module docstring for why: this needs to
-        # survive the exchange record not existing yet, and the exchange
-        # record needs to survive the console store failing to write).
-        console_store.begin_turn(conv_id)
+        # console_store.begin_turn() runs FIRST so its turn id exists in
+        # time to hand to conversations.begin_exchange() below (K.2.5.2) —
+        # a brand-new process reclaiming this exchange after a hard kill
+        # has no other way to learn which console turn belonged to it,
+        # since console_store's own bookkeeping is in-process state that
+        # dies with the old process.
+        console_turn = console_store.begin_turn(conv_id)
+        conversations.begin_exchange(conv_id, user_text, console_turn=console_turn)
         console_store.log("command", user_text)
 
     # F.7: the tool round-trips of the most recent attempt that got far enough
@@ -3292,7 +3336,10 @@ def ask(user_text, commands=None, on_attempt=None, on_tool_call=None, on_tool_re
                 resolved["api_key"] = key
 
             ai_providers.set_log_context(conv_id, key_label, on_tool_usage=_log_tool_usage,
-                                        base_url=resolved.get("base_url"), on_interim_text=_log_interim_text)
+                                        base_url=resolved.get("base_url"), on_interim_text=_log_interim_text,
+                                        stream=stream_this_ask)
+            if stream_this_ask:
+                ai_providers.set_stream_sink(on_stream)
             # Reset per attempt, not per ask: a failover to the next key
             # starts a fresh set of rounds, so its round-0 thinking is a new
             # spend and its trace shouldn't be glued onto the failed
@@ -3330,7 +3377,10 @@ def ask(user_text, commands=None, on_attempt=None, on_tool_call=None, on_tool_re
                     console_store.log("provider", f"{key_label} [rate limited \u2014 waiting {wait_s:.0f}s before retrying]")
                     time.sleep(wait_s)
                     ai_providers.set_log_context(conv_id, key_label, on_tool_usage=_log_tool_usage,
-                                                base_url=resolved.get("base_url"), on_interim_text=_log_interim_text)
+                                                base_url=resolved.get("base_url"), on_interim_text=_log_interim_text,
+                                                stream=stream_this_ask)
+                    if stream_this_ask:
+                        ai_providers.set_stream_sink(on_stream)
                     ai_providers.set_thinking(think_level)
                     try:
                         result = adapter(resolved, messages, resolved["timeout"],

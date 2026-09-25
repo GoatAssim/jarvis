@@ -1,0 +1,16 @@
+{
+  "id": "cb140e091ddc66e8",
+  "title": "New Conversation",
+  "soft_context": "",
+  "created_at": "2026-09-20T08:33:09.146+00:00",
+  "updated_at": "2026-09-20T08:33:09.146+00:00",
+  "exchanges": [
+    {
+      "ts": "2026-09-20T08:33:09.146+00:00",
+      "user": "hey jarvis help me out here \nD:\\MyDigitalVault\\prjects\\ratioty\\main.py\ni cant get the token variable from .env to run in the python program\nuse code agent\ndeveloper \nmake me a",
+      "jarvis": "",
+      "provider": null,
+      "pending": true
+    }
+  ]
+}

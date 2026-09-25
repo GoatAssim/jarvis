@@ -26,7 +26,12 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PORT = Number(process.env.PORT) || 4173;
 const HOST = "127.0.0.1";
 
-const RESERVED_NAMES = new Set(["config", "version", "--version", "-v", "ai-config", "ai-clear", "ai-drop-from", "playnite-config", "spotify-config", "spotify-login", "memory-config", "everything-config", "tools-list", "tool-run", "personas-list", "tool-preview", "tool-safety-set", "conv-new", "conv-list", "conv-show", "conv-switch", "conv-delete", "logs", "logs-list", "logs-show", "logs-clear", "organize-json", "mode", "mode-set", "voice-config", "speak", "listen", "transcribe", "sched-list", "sched-tick", "sched-add", "sched-show", "sched-cancel", "sched-pause", "sched-resume", "sched-snooze", "sched-approve", "sched-signal", "sched-clear", "notify-send", "notify-list", "notify-ack", "notify-clear", "notify-config", "conv-search", "mcp-status", "mcp-refresh", "mcp-config", "mcp-call", "mcp-tools", "then", "and", "-h", "--help"]);
+// There used to be a hand-copied RESERVED_NAMES Set here, its own
+// re-implementation of a rule cli.py and commands_config.py each kept a
+// different copy of too — REPO_MAP.md §6 says a web route never
+// reimplements a rule, it shells out, and this was the one place that
+// didn't (I-B2). validateName() below now asks the CLI's
+// `commands-check-name` subcommand instead.
 
 // ---------------------------------------------------------------------------
 // Locate the real jarvis binary. Tries a few invocation strategies, in
@@ -159,7 +164,7 @@ function startConfigWatcher() {
   }
 }
 
-function validateName(name, { forbidExisting, existing } = {}) {
+async function validateName(name, { forbidExisting, existing } = {}) {
   if (typeof name !== "string" || !name.trim()) {
     return "Command name can't be empty.";
   }
@@ -169,8 +174,24 @@ function validateName(name, { forbidExisting, existing } = {}) {
   if (/[\r\n\0]/.test(name)) {
     return "Command name contains invalid characters.";
   }
-  if (RESERVED_NAMES.has(name)) {
-    return `"${name}" is reserved by jarvis (${[...RESERVED_NAMES].sort().join(", ")}) and can't be used as a command name.`;
+  // The reserved-word check itself is the one rule that has to match the
+  // CLI's actual dispatcher exactly, so it's not re-implemented here —
+  // ask the CLI (see reserved_names.py / cli.py's `commands-check-name`).
+  const result = await runJarvisOnce(["commands-check-name", name]);
+  if (!result.ok) {
+    // The subcommand failed to run at all (jarvis not found, timed out,
+    // etc.) rather than reporting the name invalid — don't silently treat
+    // that as "name is fine", but don't pretend it's a name problem either.
+    return `Couldn't validate the command name: ${result.error || result.stderr || "unknown error"}.`;
+  }
+  let parsed;
+  try {
+    parsed = JSON.parse(result.stdout);
+  } catch {
+    return `Couldn't validate the command name: unexpected output from jarvis.`;
+  }
+  if (!parsed.ok) {
+    return parsed.error || `"${name}" is reserved by jarvis and can't be used as a command name.`;
   }
   if (forbidExisting && existing && Object.prototype.hasOwnProperty.call(existing, name)) {
     return `A command named "${name}" already exists.`;
@@ -407,7 +428,7 @@ app.post("/api/commands", requireJarvis, async (req, res) => {
   const { name, spec } = req.body || {};
   try {
     const data = await readConfig();
-    const nameErr = validateName(name, { forbidExisting: true, existing: data.commands });
+    const nameErr = await validateName(name, { forbidExisting: true, existing: data.commands });
     if (nameErr) return res.status(400).json({ error: nameErr });
     const specErr = validateSpec(spec);
     if (specErr) return res.status(400).json({ error: specErr });
@@ -430,7 +451,7 @@ app.put("/api/commands/:name", requireJarvis, async (req, res) => {
     }
     const targetName = newName || oldName;
     if (targetName !== oldName) {
-      const nameErr = validateName(targetName, { forbidExisting: true, existing: data.commands });
+      const nameErr = await validateName(targetName, { forbidExisting: true, existing: data.commands });
       if (nameErr) return res.status(400).json({ error: nameErr });
     }
     const specErr = validateSpec(spec);

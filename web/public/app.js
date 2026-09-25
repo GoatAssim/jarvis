@@ -2478,6 +2478,75 @@
     c.scrollTop = c.scrollHeight;
   }
 
+  // Maps one console_store {kind, text, tool} line (the "ask" surface —
+  // see console_store.py's begin_turn/log/end_turn calls in ai_client.py)
+  // to the same {text, cls} shape askTraceByConv already holds from a live
+  // run (see askPromptLine), so a replayed trace and a freshly-recorded one
+  // render identically. Returns null for kinds this side panel has never
+  // shown live (e.g. "narration" — that's the reply/interim text itself,
+  // rendered elsewhere, not this trace) so replay doesn't invent new lines
+  // a live run wouldn't have shown.
+  function askLineFromStoredEntry(line) {
+    const kind = line.kind;
+    const text = line.text || "";
+    const short = (s, n) => (s.length > n ? s.slice(0, n) + "\u2026" : s);
+    if (kind === "command") return { text: "$ jarvis", cls: "cmd" };
+    if (kind === "provider") return { text: `$ trying  ${short(text, 80)}`, cls: "sys" };
+    if (kind === "tool-call") return { text: `$ tool  ${line.tool || short(text, 60)}`, cls: "tool" };
+    if (kind === "tool-result") return { text: `\u2713 ${line.tool || "tool"}  ${short(text, 160)}`, cls: "tool" };
+    if (kind === "error") {
+      return line.tool
+        ? { text: `\u2717 ${line.tool}  ${short(text, 160)}`, cls: "fail" }
+        : { text: short(text, 160), cls: "fail" };
+    }
+    if (kind === "status") {
+      // Mirrors askPromptEnd()'s own live cls choice: "answered" is the
+      // only success text end_turn() ever writes (see ai_client.py); every
+      // other status text — budget-exhausted, no-provider, an abandon
+      // reason — is a non-success ending.
+      return { text, cls: text.toLowerCase() === "answered" ? "done" : "fail" };
+    }
+    return null; // "narration" and anything not yet mapped
+  }
+
+  // Hydrates state.askTraceByConv[convId] from the persisted console store
+  // (Part E / K.2.5.1) the first time this tab sees this conversation, so a
+  // genuine reload, a second tab, or a different browser can still show the
+  // Ask panel's right-side trace — not just "switching away and back within
+  // the same running tab", which already worked off in-memory state alone.
+  // Guarded the same way seedThreadExtrasFromRecord() is: if this session
+  // already recorded (or began recording) a live trace for this
+  // conversation, that's kept as-is and this never overwrites it.
+  async function loadAskTraceForConv(convId) {
+    if (convId == null || state.askTraceByConv[convId]) return;
+    let result = null;
+    try {
+      result = await Api.getConsole(convId, { surface: "ask", afterLastClear: true, limit: 2000 });
+    } catch {
+      result = null; // no ask history yet for this conversation — that's fine
+    }
+    // The conversation may have been switched again while this was in
+    // flight, or a live run for it may have started and already begun
+    // writing its own trace — either way, don't clobber.
+    if (convId !== state.activeConversationId || state.askTraceByConv[convId]) return;
+    const stored = (result && result.lines) || [];
+    if (!stored.length) return;
+    const lines = [];
+    let lastTurn;
+    let sawFirstTurn = false;
+    stored.forEach((line) => {
+      const mapped = askLineFromStoredEntry(line);
+      if (!mapped) return;
+      if (sawFirstTurn && line.turn !== lastTurn) {
+        lines.push({ text: "\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500", cls: "sys" });
+      }
+      lastTurn = line.turn;
+      sawFirstTurn = true;
+      lines.push(mapped);
+    });
+    state.askTraceByConv[convId] = lines;
+  }
+
   // Maps a console_store {kind, text} line to the same {cls, kind} shape
   // consoleAppend's live call sites already use, so replayed and live
   // lines render identically. "status" is split into ok/bad/plain by
@@ -2815,16 +2884,117 @@
       stash.push(m);
       return MATH_PLACEHOLDER_OPEN + (stash.length - 1) + MATH_PLACEHOLDER_CLOSE;
     };
-    // Order matters: block forms first, so a later inline pattern can't
-    // tear a block delimiter in half (e.g. matching just the first "$" of
-    // a "$$" pair). Each is non-greedy and (for the dollar forms) barred
-    // from crossing a blank line, so a stray unmatched "$" earlier in a
-    // long reply can't swallow everything after it as one giant match.
+    const out = _splitFencedCode(text)
+      .map((seg) => (seg.code ? seg.content : _extractMathFromNonFenced(seg.content, stow)))
+      .join("\n");
+    return { text: out, stash };
+  }
+
+  // --- Segment-aware helpers for extractMath (I-B1 fix) ----------------------
+  // A math delimiter must never be allowed to match across a fenced code
+  // block or an inline code span — that's what let a "$$", a "\[...\]", or a
+  // pair of "$" inside code eat a closing fence or backtick run that marked
+  // still needed to see, merging or breaking code blocks (I-B1). Splitting
+  // code out first, applying the four math patterns only to what's left, and
+  // passing code segments through completely untouched fixes that: no match
+  // can start in text and end inside code, or vice versa, because they're
+  // never in the same string being matched against.
+
+  // Splits text into { code, content } segments at fenced-code-block
+  // boundaries. A fence opens with 3+ backticks or tildes (<=3 spaces
+  // indent) and closes with a line of the same character, at least as long;
+  // an unclosed fence runs to the end of the text (also what streaming needs
+  // once §8 lands — see I.1.3's acceptance notes). Segments rejoin with "\n"
+  // to reproduce the input exactly, since no split point falls inside a line.
+  function _splitFencedCode(text) {
+    const lines = text.split("\n");
+    const segments = [];
+    let textBuf = [];
+    const flushText = () => {
+      if (textBuf.length) {
+        segments.push({ code: false, content: textBuf.join("\n") });
+        textBuf = [];
+      }
+    };
+    const openRe = /^ {0,3}(`{3,}|~{3,})/;
+    let i = 0;
+    while (i < lines.length) {
+      const m = lines[i].match(openRe);
+      if (m) {
+        const fenceChar = m[1][0];
+        const fenceLen = m[1].length;
+        const closeRe = new RegExp("^ {0,3}" + (fenceChar === "`" ? "`" : "~") + "{" + fenceLen + ",}\\s*$");
+        let j = i + 1;
+        while (j < lines.length && !closeRe.test(lines[j])) j++;
+        flushText();
+        const end = j < lines.length ? j + 1 : j; // include the closing fence line, if there is one
+        segments.push({ code: true, content: lines.slice(i, end).join("\n") });
+        i = end;
+        continue;
+      }
+      textBuf.push(lines[i]);
+      i++;
+    }
+    flushText();
+    return segments;
+  }
+
+  // Splits already-non-fenced text into { code, content } segments at
+  // inline code spans: a run of N backticks closes at the next run of
+  // exactly N backticks — a longer or shorter run doesn't count, same as
+  // CommonMark — and an opening run with no matching close just stays
+  // literal text. Segments concatenate directly (no separator needed) to
+  // reproduce the input.
+  function _splitInlineCode(text) {
+    const runs = [];
+    const re = /`+/g;
+    let m;
+    while ((m = re.exec(text))) {
+      runs.push({ start: m.index, end: m.index + m[0].length, len: m[0].length });
+    }
+    const segments = [];
+    let lastIndex = 0;
+    let i = 0;
+    while (i < runs.length) {
+      const open = runs[i];
+      let j = i + 1;
+      while (j < runs.length && runs[j].len !== open.len) j++;
+      if (j < runs.length) {
+        const close = runs[j];
+        if (open.start > lastIndex) segments.push({ code: false, content: text.slice(lastIndex, open.start) });
+        segments.push({ code: true, content: text.slice(open.start, close.end) });
+        lastIndex = close.end;
+        i = j + 1;
+      } else {
+        i++; // no matching close for this run — it stays literal, keep scanning
+      }
+    }
+    if (lastIndex < text.length) segments.push({ code: false, content: text.slice(lastIndex) });
+    return segments;
+  }
+
+  // Runs the four math patterns over a fenced-code-free segment, but only
+  // across its own inline-code-free stretches. Known, accepted trade-off:
+  // math that itself contains an inline code span ($a `b` c$) is no longer
+  // treated as math — unusual, and today's behavior for it (a corrupted
+  // code span) was already wrong.
+  function _extractMathFromNonFenced(text, stow) {
+    return _splitInlineCode(text)
+      .map((seg) => (seg.code ? seg.content : _applyMathPatterns(seg.content, stow)))
+      .join("");
+  }
+
+  // Order matters: block forms first, so a later inline pattern can't
+  // tear a block delimiter in half (e.g. matching just the first "$" of
+  // a "$$" pair). Each is non-greedy and (for the dollar forms) barred
+  // from crossing a blank line, so a stray unmatched "$" earlier in a
+  // long reply can't swallow everything after it as one giant match.
+  function _applyMathPatterns(text, stow) {
     let out = text.replace(/\$\$[\s\S]+?\$\$/g, stow);
     out = out.replace(/\\\[[\s\S]+?\\\]/g, stow);
     out = out.replace(/\$[^\n$]+?\$/g, stow);
     out = out.replace(/\\\([^\n]+?\\\)/g, stow);
-    return { text: out, stash };
+    return out;
   }
   // Known, accepted trade-off — not unique to this implementation, every
   // tool supporting bare $...$ inline math has the same ambiguity: two
@@ -6680,6 +6850,7 @@
       rerenderAskPendingBubble();
       setAskStatus("thinking\u2026", "busy");
     }
+    await loadAskTraceForConv(id);
     renderAskTraceForConv(id);
     refreshAskBusyUI();
     const pending = state.pendingConfirmByConv[id];

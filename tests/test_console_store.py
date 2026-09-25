@@ -327,6 +327,8 @@ def test_a_successful_ask_writes_events_as_it_happens_and_saves_a_consoleref():
     if refs:
         check("consoleRef line count matches what was actually logged",
               refs[0]["data"]["lines"] == len(result["lines"]), (refs[0], len(result["lines"])))
+    check("the transient consoleTurn bookkeeping field doesn't leak into a normally-completed exchange",
+          "consoleTurn" not in (exchanges[0] if exchanges else {}), exchanges)
 
 
 def test_an_interrupted_turn_saves_what_ran_instead_of_nothing():
@@ -335,8 +337,8 @@ def test_an_interrupted_turn_saves_what_ran_instead_of_nothing():
     flush the console store and attach a real pointer."""
     ai_providers.set_thinking("off")
     with _ask_env([_prov("anthropic", ["k1"])]) as conv:
-        conversations.begin_exchange(conv, "do something risky")
-        console_store.begin_turn(conv)
+        turn = console_store.begin_turn(conv)  # order matches ai_client.ask()'s real sequencing (K.2.5.2)
+        conversations.begin_exchange(conv, "do something risky", console_turn=turn)
         console_store.log("provider", "anthropic")
         console_store.log("tool-call", "{}", tool="run_shell")
         ai_client._pending_turn[0] = (conv, "do something risky")
@@ -351,8 +353,75 @@ def test_an_interrupted_turn_saves_what_ran_instead_of_nothing():
     refs = [e for e in (extras or []) if e.get("type") == "consoleRef"]
     check("interrupted exchange still carries a consoleRef pointer (used to be nothing at all)",
           len(refs) == 1 and refs[0]["data"]["lines"] == 3, extras)
+    check("the transient consoleTurn bookkeeping field doesn't leak here either",
+          "consoleTurn" not in (exchanges[0] if exchanges else {}), exchanges)
     check("the console store itself kept the 2 pre-kill lines plus the closing status",
           len(result["lines"]) == 3, result["lines"])
+
+
+def test_hard_kill_reclaim_still_gets_a_consoleref():
+    """K.2.5.2 \u2014 the gap E.8 explicitly disclosed rather than fixed at the
+    time: a kill hard enough that even the signal handler never runs
+    (SIGKILL, OOM, power loss) skips abandon_pending_turn() entirely, so
+    nothing ever calls console_store.end_turn() and nothing ever attaches a
+    consoleRef. The exchange is only ever resolved later, by
+    _reclaim_stale_pending() \u2014 running in a brand-new process, the NEXT
+    time this conversation is used \u2014 and until this fix, that path
+    downgraded the exchange to `interrupted` but never had a turn id to
+    point at, since console_store's own bookkeeping is in-process state
+    that died with the old process. This differs from
+    test_an_interrupted_turn_saves_what_ran_instead_of_nothing() above in
+    exactly that respect: no abandon_pending_turn() call here at all, and
+    (since nothing ever logged a closing status line) the console store
+    only has the 2 lines actually written before the simulated kill, not 3.
+    """
+    with _ask_env([_prov("anthropic", ["k1"])]) as conv:
+        # Simulate the OLD process, right up to the moment it's killed:
+        # begin_turn() first (as ai_client.ask() now does), hand the turn
+        # id to begin_exchange(), log two lines, then just... stop. No
+        # end_turn(), no abandon_pending_turn(), nothing \u2014 that silence
+        # is the SIGKILL.
+        turn = console_store.begin_turn(conv)
+        conversations.begin_exchange(conv, "do something risky", console_turn=turn)
+        console_store.log("provider", "anthropic")
+        console_store.log("tool-call", "{}", tool="run_shell")
+
+        # The NEW process: some later ask starts, which is exactly when
+        # _reclaim_stale_pending() runs today (at the top of
+        # begin_exchange(), before adding the new turn).
+        console_store.clear_active()  # a fresh process never had the old _ACTIVE state to begin with
+        conversations.begin_exchange(conv, "a completely separate later message")
+        saved = conversations.get_conversation(conv)
+
+    exchanges = (saved or {}).get("exchanges") or []
+    check("two exchanges: the reclaimed one, then the new pending one", len(exchanges) == 2, exchanges)
+    reclaimed = exchanges[0] if exchanges else {}
+    check("the old exchange is marked interrupted", reclaimed.get("interrupted"), reclaimed)
+    check("consoleTurn bookkeeping field doesn't leak into the saved record",
+          "consoleTurn" not in reclaimed, reclaimed)
+    extras = reclaimed.get("extras") or []
+    refs = [e for e in extras if e.get("type") == "consoleRef"]
+    check("the reclaimed exchange now carries a consoleRef pointer (used to be nothing at all)",
+          len(refs) == 1, extras)
+    if refs:
+        check("it points at the 2 lines actually logged before the simulated kill (no closing status was ever written)",
+              refs[0]["data"] == {"turn": turn, "lines": 2}, refs[0])
+
+
+def test_reclaim_with_no_console_turn_is_unaffected():
+    """A pending exchange from BEFORE this fix (or from _run_pending_action,
+    which never calls console_store.begin_turn() at all) has no
+    `consoleTurn` to work with. Reclaim must still downgrade it to
+    interrupted, exactly as before \u2014 just without a consoleRef, since
+    there is nothing to point at."""
+    with _ask_env([_prov("anthropic", ["k1"])]) as conv:
+        conversations.begin_exchange(conv, "no console turn here")  # no console_turn kwarg
+        conversations.begin_exchange(conv, "the next message")
+        saved = conversations.get_conversation(conv)
+    exchanges = (saved or {}).get("exchanges") or []
+    reclaimed = exchanges[0] if exchanges else {}
+    check("still reclaimed as interrupted even with nothing to point at",
+          reclaimed.get("interrupted") and not (reclaimed.get("extras") or []), reclaimed)
 
 
 # ---------------------------------------------------------------------------

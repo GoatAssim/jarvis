@@ -109,5 +109,74 @@ out = renderMarkdown("$a < b$ and $c > d$");
 check("angle brackets inside restored math are HTML-escaped, not parsed as tags",
       out.includes("&lt; b") && out.includes("&gt; d") && !/<b>|<d>/.test(out), out);
 
+// --- I-B1 regression cases: math extraction must not eat code ----------
+// (extractMath must be segment-aware — see the I-B1 fix in extractMath)
+
+// Case A (control) — a fence containing a dollar-pair-looking shell line.
+// Already worked before the fix via exact-byte restore; must still work
+// now that the whole fence is a code segment untouched by extraction.
+out = renderMarkdown('```bash\necho "$HOME and $PATH"\n```');
+check("A: dollar signs inside a fenced block survive untouched",
+      out.includes('echo &quot;$HOME and $PATH&quot;') || out.includes('echo "$HOME and $PATH"'), out);
+check("A: the fence still closes (single <pre>, not swallowed)",
+      (out.match(/<pre>/g) || []).length === 1, out);
+
+// Case B — "$$" inside a fence, prose after it, then an inline `$$`. Used
+// to swallow the closing fence, the prose, and the inline code together.
+out = renderMarkdown('```bash\necho $$\n```\n\nProse in between.\n\nInline: `$$`.');
+check("B: the fence closes on its own (doesn't swallow the prose after it)",
+      (out.match(/<pre>/g) || []).length === 1, out);
+check("B: the prose between the fence and the inline code still renders as its own paragraph",
+      out.includes("Prose in between."), out);
+check("B: the later inline `$$` stays a code span, not consumed as math",
+      /<code>\$\$<\/code>/.test(out), out);
+
+// Case C — two separate inline code spans, each containing a dollar sign.
+// Used to merge into one code span reading across both, with literal
+// backticks left in the middle.
+out = renderMarkdown("Use `echo $HOME` then `echo $PATH` to compare.");
+check("C: two separate <code> spans, not one merged span",
+      (out.match(/<code>/g) || []).length === 2, out);
+check("C: first code span content is exactly 'echo $HOME'",
+      out.includes("<code>echo $HOME</code>"), out);
+check("C: second code span content is exactly 'echo $PATH'",
+      out.includes("<code>echo $PATH</code>"), out);
+
+// Case D — two js fences, the first containing "/\\[(.*)/", the second
+// containing "/(.*)\\]/". The mismatched-but-code-only "\[...\]"-shaped
+// text used to be read as a math block spanning both fences, merging them.
+out = renderMarkdown('```js\nconst re = /\\[(.*)/;\n```\n\nText between.\n\n```js\nconst re2 = /(.*)\\]/;\n```');
+check("D: two separate <pre> blocks, not merged into one",
+      (out.match(/<pre>/g) || []).length === 2, out);
+check("D: the text between the two fences renders as its own paragraph",
+      out.includes("Text between."), out);
+
+// ~~~ fences work the same as ``` fences.
+out = renderMarkdown('~~~\n$$ this looks like math but is code $$\n~~~');
+check("tilde fences are treated as fences too",
+      (out.match(/<pre>/g) || []).length === 1 && out.includes("this looks like math but is code"), out);
+
+// A longer closing fence (more backticks than the opener) still closes it.
+out = renderMarkdown('```\n$$code$$\n````');
+check("a longer closing fence than the opener still closes the block",
+      (out.match(/<pre>/g) || []).length === 1, out);
+
+// An indented fence (<=3 spaces) is still recognized as a fence.
+out = renderMarkdown('  ```\n  $$code$$\n  ```');
+check("an indented (<=3 space) fence is still recognized",
+      (out.match(/<pre>/g) || []).length === 1, out);
+
+// An unclosed fence runs to the end of the text rather than leaking math
+// extraction into it (and is what streaming needs once §8 lands).
+out = renderMarkdown('Some text.\n\n```\n$$unclosed $$ fence content');
+check("an unclosed fence is still treated as one code segment to the end",
+      out.includes("$$unclosed $$ fence content"), out);
+
+// Math immediately adjacent to inline code keeps both: the code span isn't
+// treated as math, and the math on either side of it still renders.
+out = renderMarkdown("$x$ and `code` and $y$");
+check("math adjacent to inline code keeps both math spans and the code",
+      out.includes("$x$") && out.includes("$y$") && out.includes("<code>code</code>"), out);
+
 console.log(`\n${pass} passed, ${fail} failed`);
 if (fail) process.exit(1);
