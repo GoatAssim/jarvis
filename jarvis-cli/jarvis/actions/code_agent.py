@@ -582,6 +582,17 @@ def _run_agent_loop(task, schemas, executor, round_limit):
     double-attempt state. A single stateless completion (dev_agent's
     planner call) can be safely retried elsewhere; a job with side effects
     already on disk cannot.
+
+    Returns (text, err, last_words): `err` is the harness-written diagnostic
+    (same as before); `last_words` (master plan F.6/K.3.5) is the model's
+    own narration from the round that gave up, when the failing attempt
+    burned real rounds (round_budget.used > 0) and left any — see
+    ai_providers.AIResult.last_words. Distinct from `err` on purpose: `err`
+    says why the harness stopped asking, `last_words` says what the model
+    itself last said, so a caller (the agent_failed result below, or
+    whatever reads it later) isn't stuck inferring the second from the
+    first. None whenever there's nothing to distinguish (no rounds run yet,
+    or the model's last round produced no real narration).
     """
     try:
         from .. import ai_client, ai_config, ai_providers, key_health
@@ -589,7 +600,7 @@ def _run_agent_loop(task, schemas, executor, round_limit):
         cfg = ai_config.load_ai_config()
         providers = ai_client._eligible_providers(cfg["providers"], cfg["defaults"])
         if not providers:
-            return None, "no configured AI provider available for code_agent"
+            return None, "no configured AI provider available for code_agent", None
 
         messages = [
             {"role": "system", "content": _code_agent_system_prompt(round_limit)},
@@ -621,24 +632,25 @@ def _run_agent_loop(task, schemas, executor, round_limit):
                 except Exception as e:
                     if round_budget.used > 0:
                         return None, (f"{_provider_label_safe(ai_client, provider)}: crashed mid-run after "
-                                      f"{round_budget.used} tool call(s) already made: {e}")
+                                      f"{round_budget.used} tool call(s) already made: {e}"), None
                     errors.append(f"{_provider_label_safe(ai_client, provider)}: unexpected error: {e}")
                     continue
 
                 if result.ok and result.text:
                     key_health.record_success(health_name, resolved.get("model"), key)
-                    return result.text, None
+                    return result.text, None, None
                 key_health.record_failure(health_name, resolved.get("model"), key,
                                           getattr(result, "kind", None), getattr(result, "error", None))
                 if round_budget.used > 0:
                     return None, (f"{_provider_label_safe(ai_client, provider)}: "
-                                  f"{getattr(result, 'error', None) or 'no final answer after tool calls'}")
+                                  f"{getattr(result, 'error', None) or 'no final answer after tool calls'}"), \
+                                 getattr(result, "last_words", None)
                 errors.append(f"{_provider_label_safe(ai_client, provider)}: "
                                f"{getattr(result, 'error', None) or 'returned no text'}")
 
-        return None, "all configured providers failed for code_agent: " + "; ".join(errors)
+        return None, "all configured providers failed for code_agent: " + "; ".join(errors), None
     except Exception as e:
-        return None, str(e)
+        return None, str(e), None
 
 
 def _truncate_line(text, limit):
@@ -833,14 +845,20 @@ def tool_code_agent(arguments, context=None):
     # outer conversation room to read the result and answer afterward.
 
     emit("plan", "start", task=task[:300], root=str(root))
-    text, err = _run_agent_loop(task, ai_schemas, executor, round_limit)
+    text, err, last_words = _run_agent_loop(task, ai_schemas, executor, round_limit)
     if err:
         emit("done", "fail", error=err, tool_calls=call_count[0])
-        return {
+        result = {
             "ok": False, "job_id": job_id, "root": str(root), "steps": steps,
             "tool_calls": call_count[0], "reason": "agent_failed", "last_error": err,
             "log": log,
         }
+        if last_words:
+            # F.6/K.3.5: what the model itself said last, kept separate from
+            # `last_error` (the harness's own diagnostic string above) —
+            # see _run_agent_loop's docstring for why the two can differ.
+            result["last_words"] = last_words
+        return result
 
     emit("done", "ok", tool_calls=call_count[0])
     return {
@@ -1030,7 +1048,9 @@ TOOL_AI_REVIEW = {"run_shell", "code_agent"}
 # short "tool → outcome" line per completed call, always present
 # regardless of verbosity — is what a tight recap should read instead
 # (master plan F.6). `last_error` is capped too, since a joined
-# multi-provider failure message can run long on its own.
+# multi-provider failure message can run long on its own. `last_words`
+# (F.6/K.3.5) gets the same treatment — it's the model's own free-form
+# narration, so it has no natural length limit either.
 TOOL_RESULT_SPECS = {
     "read_file": {
         "truncate_fields": {"content": {"medium": 6000, "low": 3000}},
@@ -1044,6 +1064,7 @@ TOOL_RESULT_SPECS = {
         },
         "truncate_fields": {
             "last_error": {"medium": 300, "low": 150},
+            "last_words": {"medium": 300, "low": 150},
         },
         "list_item_drop": {
             "steps": {"medium": ["arguments"], "low": ["arguments"]},

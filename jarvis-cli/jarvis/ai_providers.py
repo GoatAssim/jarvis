@@ -761,10 +761,10 @@ class AIResult:
     next provider can continue from instead of re-running those tools.
     """
 
-    __slots__ = ("ok", "text", "error", "tool_history", "usage", "kind", "pending", "cut")
+    __slots__ = ("ok", "text", "error", "tool_history", "usage", "kind", "pending", "cut", "last_words")
 
     def __init__(self, ok, text=None, error=None, tool_history=None, usage=None, kind=None, pending=None,
-                 cut=None):
+                 cut=None, last_words=None):
         self.ok = ok
         self.text = text
         self.error = error
@@ -781,6 +781,18 @@ class AIResult:
         # the provider hit its output cap, not because the model finished.
         # None for a natural ending. ai_client tells the user about it.
         self.cut = cut
+        # F.6/K.3.5: the model's own narration from the round that gave up —
+        # the same text every adapter already captures via
+        # _capture_forced_text() to show as interim narration before running
+        # a call, but which used to be thrown away entirely once that call
+        # turned out to be unrunnable (budget spent). Kept distinct from
+        # `error` (a harness-written diagnostic string, e.g. _give_up_error())
+        # so a caller can tell "what the model actually said last" from "why
+        # the harness stopped" instead of only ever seeing the latter. None
+        # unless the model produced real narration alongside the pending call
+        # it couldn't make — most failures (network, key, shape, refusal)
+        # never set this.
+        self.last_words = last_words or None
 
 
 # ---------------------------------------------------------------------------
@@ -1732,7 +1744,8 @@ def _forced_ending(adapter, provider, generic, timeout, tools, tool_executor, ro
                 if r.kind not in (KIND_EMPTY, KIND_MALFORMED, KIND_BUDGET):
                     # A real failure (key, network, shape): let ask() handle it
                     # the normal way rather than spending a second request here.
-                    return AIResult(False, error=r.error, tool_history=history, kind=r.kind)
+                    return AIResult(False, error=r.error, tool_history=history, kind=r.kind,
+                                    last_words=r.last_words)
             if calls and state.get("text"):
                 # §5: the grace response narrated before its call; show that
                 # first, exactly like a normal round does.
@@ -1751,9 +1764,15 @@ def _forced_ending(adapter, provider, generic, timeout, tools, tool_executor, ro
         if wanted or r.kind in (KIND_EMPTY, KIND_MALFORMED, KIND_BUDGET):
             # Still wants a tool, or produced nothing usable, even with the
             # structure gone: end it here — another key would do the same.
+            # F.6: the model's actual last words, if any survived this far —
+            # narration captured alongside a native call this final round
+            # made (state["text"]), or, failing that, its own answer text
+            # when that answer was itself the thing wanted (an embedded
+            # textual call pattern, so r.text IS the narration).
+            last_words = state.get("text") or (r.text if r.ok else None)
             return AIResult(False, error=_give_up_error(), tool_history=history,
-                            kind=KIND_BUDGET, pending=wanted)
-        return AIResult(False, error=r.error, tool_history=history, kind=r.kind)
+                            kind=KIND_BUDGET, pending=wanted, last_words=last_words)
+        return AIResult(False, error=r.error, tool_history=history, kind=r.kind, last_words=r.last_words)
     except Exception as e:  # noqa: BLE001 — a forced ending must never take the ask down with it
         return AIResult(False, error=f"unexpected error while finishing the reply: {e}")
     finally:
@@ -2160,7 +2179,9 @@ def call_openai_compatible(provider, messages, timeout, tools=None, tool_executo
                     and round_budget.take([n for n, _ in calls])):
                 # Not finished, but the tools can't run now: a forced ending
                 # carrying the pending call — never "the narration was the answer".
-                return AIResult(False, error=_give_up_error(), pending=calls,
+                # F.6: keep the narration itself as last_words (see the
+                # Anthropic adapter's identical comment above).
+                return AIResult(False, error=_give_up_error(), pending=calls, last_words=text,
                                 tool_history=_openai_messages_to_generic(working_messages) if ran_tools else None)
             ran_tools = True
             _surface_interim_text(round_num, text)
@@ -2214,7 +2235,7 @@ def call_openai_compatible(provider, messages, timeout, tools=None, tool_executo
 
         return AIResult(True, text=text, usage=get_usage_summary(), cut=cut)
 
-    return AIResult(False, error=_give_up_error(),
+    return AIResult(False, error=_give_up_error(), last_words=text,
                     tool_history=_openai_messages_to_generic(working_messages) if ran_tools else None)
 
 
@@ -2509,8 +2530,13 @@ def call_anthropic(provider, messages, timeout, tools=None, tool_executor=None, 
                     and round_budget.take([n for n, _ in calls])):
                 # The model is NOT finished — it wants a tool it can't have
                 # right now. That is a forced ending carrying the pending
-                # call, never "the narration was the answer".
-                return AIResult(False, error=_give_up_error(), tool_history=_history(), pending=calls)
+                # call, never "the narration was the answer". F.6: the
+                # narration itself (already captured for interim display via
+                # _capture_forced_text above) is preserved here too, as
+                # last_words, rather than discarded now that the call it
+                # accompanied can't run.
+                return AIResult(False, error=_give_up_error(), tool_history=_history(), pending=calls,
+                                last_words=text)
             ran_tools = True
             # Surface the narration BEFORE running the tools it accompanied
             # (live via on_interim_text, and kept for the saved
@@ -2540,7 +2566,7 @@ def call_anthropic(provider, messages, timeout, tools=None, tool_executor=None, 
             return AIResult(False, error="empty response content", tool_history=_history())
         return AIResult(True, text=text, usage=get_usage_summary(), cut=cut)
 
-    return AIResult(False, error=_give_up_error(), tool_history=_history())
+    return AIResult(False, error=_give_up_error(), tool_history=_history(), last_words=text)
 
 
 # ---------------------------------------------------------------------------
@@ -3026,7 +3052,10 @@ def call_gemini(provider, messages, timeout, tools=None, tool_executor=None, rou
             if finish == FINISH_TOOL:
                 if not (tool_executor and round_num < MAX_TOOL_ROUNDS
                         and round_budget.take([n for n, _ in calls])):
-                    return AIResult(False, error=_give_up_error(), tool_history=_history(), pending=calls)
+                    # F.6: keep the narration itself as last_words (see the
+                    # Anthropic adapter's identical comment above).
+                    return AIResult(False, error=_give_up_error(), tool_history=_history(), pending=calls,
+                                    last_words=text)
                 ran_tools = True
                 _surface_interim_text(round_num, text)
                 # Thought parts are stripped before the model turn is echoed
@@ -3093,7 +3122,7 @@ def call_gemini(provider, messages, timeout, tools=None, tool_executor=None, rou
                 return AIResult(False, error="empty response content", tool_history=_history())
             return AIResult(True, text=text, usage=get_usage_summary(), cut=cut)
 
-        return AIResult(False, error=_give_up_error(), tool_history=_history())
+        return AIResult(False, error=_give_up_error(), tool_history=_history(), last_words=text)
     finally:
         # Deliberately NOT deleting cache_name here. The previous version did,
         # and that single line is what made explicit caching a net loss: the
@@ -3324,7 +3353,9 @@ def call_cohere(provider, messages, timeout, tools=None, tool_executor=None, rou
                                 tool_history=_openai_messages_to_generic(working_messages) if ran_tools else None)
             if not (tool_executor and round_num < MAX_TOOL_ROUNDS
                     and round_budget.take([n for n, _ in calls])):
-                return AIResult(False, error=_give_up_error(), pending=calls,
+                # F.6: keep the narration itself as last_words (see the
+                # Anthropic adapter's identical comment above).
+                return AIResult(False, error=_give_up_error(), pending=calls, last_words=narration,
                                 tool_history=_openai_messages_to_generic(working_messages) if ran_tools else None)
             ran_tools = True
             _surface_interim_text(round_num, narration)
@@ -3346,7 +3377,7 @@ def call_cohere(provider, messages, timeout, tools=None, tool_executor=None, rou
                             tool_history=_openai_messages_to_generic(working_messages) if ran_tools else None)
         return AIResult(True, text=text, usage=get_usage_summary(), cut=cut)
 
-    return AIResult(False, error=_give_up_error(),
+    return AIResult(False, error=_give_up_error(), last_words=narration,
                     tool_history=_openai_messages_to_generic(working_messages) if ran_tools else None)
 
 
@@ -3552,7 +3583,9 @@ def call_ollama(provider, messages, timeout, tools=None, tool_executor=None, rou
                                 tool_history=_openai_messages_to_generic(working_messages) if ran_tools else None)
             if not (tool_executor and round_num < MAX_TOOL_ROUNDS
                     and round_budget.take([n for n, _ in calls])):
-                return AIResult(False, error=_give_up_error(), pending=calls,
+                # F.6: keep the narration itself as last_words (see the
+                # Anthropic adapter's identical comment above).
+                return AIResult(False, error=_give_up_error(), pending=calls, last_words=text,
                                 tool_history=_openai_messages_to_generic(working_messages) if ran_tools else None)
             ran_tools = True
             _surface_interim_text(round_num, text)
@@ -3573,7 +3606,7 @@ def call_ollama(provider, messages, timeout, tools=None, tool_executor=None, rou
             )
         return AIResult(True, text=text, usage=get_usage_summary(), cut=cut)
 
-    return AIResult(False, error=_give_up_error(),
+    return AIResult(False, error=_give_up_error(), last_words=text,
                     tool_history=_openai_messages_to_generic(working_messages) if ran_tools else None)
 
 

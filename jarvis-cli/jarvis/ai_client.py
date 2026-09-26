@@ -388,11 +388,11 @@ class AskResult:
     CLI) needs to present one 'jarvis <text>' call to a person."""
 
     __slots__ = ("ok", "text", "provider", "attempts", "assistant_name", "address_user_as", "usage", "degraded",
-                 "ending")
+                 "ending", "last_words")
 
     def __init__(self, ok, text=None, provider=None, attempts=None,
                  assistant_name=DEFAULT_ASSISTANT_NAME, address_user_as=DEFAULT_ADDRESS,
-                 usage=None, degraded=False, ending=None):
+                 usage=None, degraded=False, ending=None, last_words=None):
         self.ok = ok
         self.text = text
         self.provider = provider
@@ -424,6 +424,14 @@ class AskResult:
         #   "pending_action" the user said "go ahead" and the step Jarvis had
         #                   proposed last turn was run directly (F.11)
         self.ending = ending
+        # F.6/K.3.5: the model's own narration from the round that forced
+        # this ending (ai_providers.AIResult.last_words), kept separate from
+        # `text` (the harness-written recap above, built from what actually
+        # ran — see _forced_ending_reply's docstring) so a caller that wants
+        # "what the model actually said last" doesn't have to go dig for it.
+        # None on a natural ending, and often None on a forced one too (most
+        # failures never produce narration worth keeping).
+        self.last_words = last_words
 
 
 def _provider_label(provider):
@@ -3566,7 +3574,7 @@ def ask(user_text, commands=None, on_attempt=None, on_tool_call=None, on_tool_re
         _pending_turn[0] = None
         return AskResult(True, text=reply, provider=None, attempts=attempts,
                          assistant_name=assistant_name, address_user_as=address,
-                         degraded=True, ending=ending)
+                         degraded=True, ending=ending, last_words=forced_end.last_words)
 
     # Every provider failed on the closing text call. That used to always
     # mean "no provider answered" and get reported as a hard failure — but
