@@ -448,20 +448,38 @@ def parse_trigger(text, now=None):
     return {"type": "at", "at": to_iso(parse_when(text, now))}
 
 
-def describe(trigger):
+def describe(trigger, next_run=None):
     """Render a stored trigger back to a short human string, for `jarvis
     sched-list`, the web panel, and the model's own list_scheduled result —
     all three showed raw ISO before this existed, which reads terribly in a
-    chat reply ("your reminder is set for 2026-09-16T09:00:00")."""
+    chat reply ("your reminder is set for 2026-09-16T09:00:00").
+
+    `next_run`, if given, is the job's persisted next-fire time (the same
+    value due_jobs()/tick() actually act on) and takes priority over the
+    trigger's own `at` for anything that shows a concrete date/time.
+
+    THIS PARAMETER IS THE L.4 FIX. `trigger["at"]` is written once at job
+    creation (normalize_trigger) and, for a one-shot job, again by snooze() —
+    but resume()'s roll-forward and every ordinary _advance() at fire time
+    only ever update `next_run`, never `trigger["at"]`. Left to read
+    `trigger["at"]` alone, a recurring job's displayed "next ..." time goes
+    stale the moment it's paused/resumed or misses a run and catches up,
+    while the job keeps firing correctly against the real `next_run` — the
+    exact owner-reported symptom (displayed 3:00 AM, actually fires hours
+    later) once a job has been through any of those paths. Passing next_run
+    here, rather than chasing every future write site that changes it, is
+    what keeps the display honest without touching any firing/mutation
+    logic at all.
+    """
     if not isinstance(trigger, dict):
         return str(trigger)
     ttype = trigger.get("type")
     if ttype == "at":
-        return "at " + _friendly(trigger.get("at"))
+        return "at " + _friendly(next_run or trigger.get("at"))
     if ttype == "every":
         every = human_duration(trigger.get("every_seconds") or 0)
         only = trigger.get("only_on")
-        at = trigger.get("at")
+        at = next_run or trigger.get("at")
         base = "every " + every
         if only:
             base = "every %s" % ("weekday" if only == "weekday" else "weekend day")

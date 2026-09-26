@@ -998,12 +998,16 @@ def _system_prompt_parts(persona, commands_ctx, freq_ctx, tools_enabled,
             # selected — not just for the "dry" default.
             parts.append(
                 f"You are {name}, a local AI butler. Address the user as "
-                f'"{address}" sometimes. Never claim you did something unless a tool confirmed it.'
+                f'"{address}" sometimes. Never claim you did something unless a tool confirmed '
+                f"it \u2014 a tool result with an error or denial means report the failure, never "
+                f"say it succeeded."
             )
         else:
             parts.append(
                 f"You are {name}, a local AI butler. {attitude['compact']} Address the user as "
-                f'"{address}" sometimes. Never claim you did something unless a tool confirmed it.'
+                f'"{address}" sometimes. Never claim you did something unless a tool confirmed '
+                f"it \u2014 a tool result with an error or denial means report the failure, never "
+                f"say it succeeded."
             )
     else:
         parts.append(
@@ -1012,7 +1016,9 @@ def _system_prompt_parts(persona, commands_ctx, freq_ctx, tools_enabled,
             f'Address the user as "{address}" sometimes, naturally \u2014 not in every single '
             f"sentence. Keep replies conversational and to the point: a sentence or two for "
             f"anything simple, more only when the question genuinely calls for it. Be honest "
-            f"about your limits. Never claim to have taken an action you didn't actually take."
+            f"about your limits. Never claim to have taken an action you didn't actually take. "
+            f"If a tool call comes back with an error, a denial, or \"not permitted\", that is a "
+            f"failure \u2014 tell the user it didn't happen; never smooth it over as done."
         )
     if has_history:
         if compact_persona:
@@ -1173,6 +1179,10 @@ def _build_messages(persona, commands, user_text, tools_enabled, profile, conver
         compact=compact_persona,
         query=user_text or "",
         extra_texts=prior_user,
+        # D.5-#1: exclude the wake word from relevance scoring — see
+        # prompt_context's docstring. persona is per-conversation, so this
+        # also covers a custom assistant_name, not just the default.
+        assistant_name=persona.get("assistant_name") or DEFAULT_ASSISTANT_NAME,
     )
     other_convos_ctx = (
         "" if profile.get("skip_other_convos")
