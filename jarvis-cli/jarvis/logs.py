@@ -84,6 +84,16 @@ def log(conv_id, direction, data, provider=None, round_num=None):
         # conversation legitimately holds both hand-typed and job-driven
         # entries and labelling the conversation would mislabel half of them.
         "source": (os.environ.get("JARVIS_LOG_SOURCE") or "").strip()[:32],
+        # L.3: which task/job (if any) drove this entry. Same reasoning as
+        # "source" above — read from the environment rather than threaded
+        # through every call site, and entry-level rather than conversation-
+        # level since one conversation can hold both manually-started and
+        # task-driven entries. task_id is the stable key a filter/search can
+        # match on; task_label is the human-readable title for display.
+        # Bounded defensively like source; left empty (never fabricated) for
+        # entries a task/job didn't produce.
+        "task_id": (os.environ.get("JARVIS_TASK_ID") or "").strip()[:64],
+        "task_label": (os.environ.get("JARVIS_TASK_LABEL") or "").strip()[:100],
         "data": _safe_json(data),
     }
     line = json.dumps(entry, ensure_ascii=False)
@@ -283,6 +293,11 @@ def search(query, mode="words", limit=SEARCH_DEFAULT_LIMIT, conv_id=None,
                 "ts": entry.get("ts"),
                 "direction": direction,
                 "source": entry.get("source") or "",
+                # L.3.3: carried through so a search hit that belongs to a
+                # task/job can say which one, without a person having to
+                # open the raw entry to find out.
+                "task_id": entry.get("task_id") or "",
+                "task_label": entry.get("task_label") or "",
                 "provider": entry.get("provider"),
                 "round": entry.get("round"),
                 "snippet": _search_snippet(blob, first),
