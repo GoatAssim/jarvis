@@ -739,6 +739,13 @@ def tick(now=None, startup=False, limit=25):
                 job["last_run"] = timespec.to_iso(datetime.now())
                 job["last_result"] = _trim(outcome.get("summary") if outcome else "")
                 job["last_error"] = outcome.get("error") if outcome else None
+                # The conversation THIS run's ask/command/tool action opened
+                # (D.6) — distinct from job["conv_id"], which is the
+                # conversation that originally created the job. Recorded so
+                # a later Conversation-log view (L.2) has something to link
+                # to; not surfaced anywhere yet on its own.
+                if outcome and outcome.get("conv_id"):
+                    job["last_conv_id"] = outcome["conv_id"]
 
                 _apply_next_state(job, outcome, now)
 
@@ -916,6 +923,52 @@ def _run_action(job):
         return {"ok": False, "error": "%s: %s" % (type(e).__name__, e), "summary": ""}
 
 
+def _new_scheduled_conversation(job, action):
+    """Open a brand-new, origin-tagged conversation for one fired run of an
+    ask/command/tool/watch action (master plan D.6).
+
+    Before this, `_do_ask` threaded `job.get("conv_id")` — the conversation
+    that CREATED the job — straight through as JARVIS_CONVERSATION_ID, and
+    when a job had no conv_id at all, ai_client.ask()'s own fallback
+    (conversations.get_current_id()) picked whatever conversation happened
+    to be "current" on disk. Either way, a job's 3am output landed inside
+    a conversation a person might be live in at the time it fires, or
+    silently reopened a thread from whenever the job was created — never a
+    conversation of its own. `conversations.new_conversation(origin=...)`
+    and the web UI's ORIGIN_LABELS.scheduler badge already exist for
+    exactly this; they were just never called from here.
+
+    One new conversation per RUN, not per job: a recurring job gets a
+    fresh one every time it fires, the same way a Discord/Instagram
+    message gets its own per platform-conversation thread rather than one
+    thread shared across every run forever.
+
+    `make_current=False` is deliberate — a scheduled run must never steal
+    the CLI's/a browser tab's "current" conversation out from under a
+    person who's live in one when it fires.
+    """
+    from . import conversations
+    return conversations.new_conversation(
+        title=job.get("title") or _default_title(job),
+        make_current=False,
+        origin="scheduler",
+        origin_detail=(job.get("kind") or action.get("type") or "")[:120],
+    )
+
+
+def _log_run_exchange(conv_id, user_text, jarvis_text):
+    """Record one command/tool run as a single exchange in its (already
+    freshly-created) scheduler conversation. Never raises — a logging
+    failure must not be why a scheduled command/tool run is reported as
+    failed (same spirit as _log_scheduled_ask / tick()'s own docstring).
+    """
+    try:
+        from . import conversations
+        conversations.append_exchange(conv_id, user_text, jarvis_text, provider="scheduler")
+    except Exception:  # noqa: BLE001
+        pass
+
+
 def _do_notify(job, action):
     from . import notifier  # lazy: notifier reaches into tools for playnite/voice
     message = (action.get("message") or job.get("title") or "").strip()
@@ -944,7 +997,7 @@ def _truncate_field(text, limit=MAX_ASK_LOG_FIELD_CHARS):
     return text
 
 
-def _log_scheduled_ask(job, prompt, ok, reply=None, error=None):
+def _log_scheduled_ask(job, prompt, ok, reply=None, error=None, conv_id=None):
     """Append one line to ~/.jarvis/scheduler_ask_log.jsonl for every
     prompt the scheduler sends to `jarvis ask`.
 
@@ -964,13 +1017,19 @@ def _log_scheduled_ask(job, prompt, ok, reply=None, error=None):
     MAX_ASK_LOG_ENTRIES lines the same way MAX_JOBS caps the job store —
     a misbehaving recurring job firing every minute forever shouldn't be
     able to grow this file without bound.
+
+    `conv_id` defaults to job.get("conv_id") (the conversation that CREATED
+    the job) for any caller that doesn't pass one explicitly, but `_do_ask`
+    now always passes the fresh per-run conversation it just opened (D.6) —
+    that's the transcript this particular prompt/reply actually landed in,
+    which is what a person tracing a misbehaving run from this log wants.
     """
     entry = {
         "ts": datetime.now().isoformat(),
         "job_id": job.get("id"),
         "title": job.get("title") or _default_title(job),
         "kind": job.get("kind"),
-        "conv_id": job.get("conv_id"),
+        "conv_id": conv_id if conv_id is not None else job.get("conv_id"),
         "prompt": _truncate_field(prompt),
         "ok": bool(ok),
         "reply": _truncate_field(reply) if reply else None,
@@ -1042,11 +1101,17 @@ def _do_ask(job, action):
     env = dict(os.environ)
     env["JARVIS_UI"] = env.get("JARVIS_UI", "cli")
     env["JARVIS_SCHEDULED"] = "1"  # lets any tool notice it has no human
-    if job.get("conv_id"):
-        env["JARVIS_CONVERSATION_ID"] = job["conv_id"]
+    # D.6: every scheduler-triggered run gets its own brand-new, origin-
+    # tagged conversation — never the conversation that created the job,
+    # and never whatever ai_client.ask() would otherwise fall back to
+    # (conversations.get_current_id(), i.e. "current" on disk). See
+    # _new_scheduled_conversation's docstring.
+    run_conv_id = _new_scheduled_conversation(job, action)
+    env["JARVIS_CONVERSATION_ID"] = run_conv_id
     # Label every log entry this run produces as scheduler-driven, so the
-    # Logs viewer can tell a job's ask apart from one the user typed — they
-    # land in the same conversation and are otherwise identical on disk.
+    # Logs viewer can tell a job's ask apart from one the user typed — both
+    # land in this same fresh conversation and are otherwise identical on
+    # disk.
     env["JARVIS_LOG_SOURCE"] = "scheduler"
     try:
         proc = subprocess.run(
@@ -1055,25 +1120,25 @@ def _do_ask(job, action):
         )
     except subprocess.TimeoutExpired:
         error = "ask timed out after %ds" % ASK_TIMEOUT
-        _log_scheduled_ask(job, prompt, ok=False, error=error)
-        return {"ok": False, "error": error, "summary": ""}
+        _log_scheduled_ask(job, prompt, ok=False, error=error, conv_id=run_conv_id)
+        return {"ok": False, "error": error, "summary": "", "conv_id": run_conv_id}
     except (OSError, ValueError) as e:
         error = "couldn't run jarvis ask: %s" % e
-        _log_scheduled_ask(job, prompt, ok=False, error=error)
-        return {"ok": False, "error": error, "summary": ""}
+        _log_scheduled_ask(job, prompt, ok=False, error=error, conv_id=run_conv_id)
+        return {"ok": False, "error": error, "summary": "", "conv_id": run_conv_id}
 
     raw_reply = (proc.stdout or "").strip()
     reply = _strip_protocol_lines(raw_reply)
     if proc.returncode != 0 and not reply:
         error = (proc.stderr or "ask failed").strip()[:500]
-        _log_scheduled_ask(job, prompt, ok=False, error=error)
-        return {"ok": False, "error": error, "summary": ""}
+        _log_scheduled_ask(job, prompt, ok=False, error=error, conv_id=run_conv_id)
+        return {"ok": False, "error": error, "summary": "", "conv_id": run_conv_id}
 
     # The raw capture (telemetry line included) goes to the log — this is
     # the same raw-fidelity log "Log search" greps, where seeing the actual
     # bytes cli.py produced is the point. Only the cleaned version reaches a
     # person, via the notification below and the summary this returns.
-    _log_scheduled_ask(job, prompt, ok=True, reply=raw_reply)
+    _log_scheduled_ask(job, prompt, ok=True, reply=raw_reply, conv_id=run_conv_id)
 
     note = None
     if _should_report(job):
@@ -1082,9 +1147,10 @@ def _do_ask(job, action):
             title=job.get("title") or "Scheduled task",
             message=reply or "(no output)",
             channels=job.get("channels"),
-            kind="task", job_id=job.get("id"), conv_id=job.get("conv_id"),
+            kind="task", job_id=job.get("id"), conv_id=run_conv_id,
         )
-    return {"ok": True, "summary": reply, "notification": note, "error": None}
+    return {"ok": True, "summary": reply, "notification": note, "error": None,
+            "conv_id": run_conv_id}
 
 
 def _do_command(job, action):
@@ -1092,8 +1158,10 @@ def _do_command(job, action):
     user would type, built the same way web/server.js builds it."""
     name = (action.get("command") or "").strip()
     argv = _jarvis_argv() + [name]
+    args_text = ""
     for key, value in (action.get("args") or {}).items():
         argv += ["--%s" % str(key), str(value)]
+        args_text += " --%s %s" % (key, value)
     env = dict(os.environ)
     env["JARVIS_SCHEDULED"] = "1"
     try:
@@ -1109,6 +1177,13 @@ def _do_command(job, action):
     output = _strip_protocol_lines(
         ((proc.stdout or "") + ("\n" + proc.stderr if proc.stderr else "")).strip())
     ok = proc.returncode == 0
+    # D.6: log this run into its own new, origin="scheduler" conversation
+    # rather than not touching the conversation store at all (its previous
+    # behavior) — that's what makes a scheduled command's output findable
+    # in the Logs viewer / search_conversations like any other run.
+    run_conv_id = _new_scheduled_conversation(job, action)
+    _log_run_exchange(run_conv_id, "jarvis %s%s" % (name, args_text),
+                       output or ("(finished, no output)" if ok else "(failed, no output)"))
     note = None
     if _should_report(job):
         from . import notifier
@@ -1116,11 +1191,11 @@ def _do_command(job, action):
             title=job.get("title") or ("Command: %s" % name),
             message=(output or ("finished" if ok else "failed"))[:1000],
             channels=job.get("channels"), kind="task",
-            job_id=job.get("id"), conv_id=job.get("conv_id"), failed=not ok,
+            job_id=job.get("id"), conv_id=run_conv_id, failed=not ok,
         )
     return {"ok": ok, "summary": output,
             "error": None if ok else "exit code %s" % proc.returncode,
-            "notification": note}
+            "notification": note, "conv_id": run_conv_id}
 
 
 def _do_tool(job, action):
@@ -1138,16 +1213,24 @@ def _do_tool(job, action):
     result = tools_mod.execute_tool(name, args)
     failed = isinstance(result, dict) and bool(result.get("error"))
     summary = json.dumps(result, default=str)[:MAX_RESULT_CHARS]
+    # D.6: same reasoning as _do_command above — a tool action never
+    # touched the conversation store before this, so there was nothing to
+    # "keep appending to", but the requirement is still that every run gets
+    # its own findable, origin-tagged record rather than none at all.
+    run_conv_id = _new_scheduled_conversation(job, action)
+    _log_run_exchange(run_conv_id, "[scheduled tool] %s %s" % (name, json.dumps(args, default=str)),
+                       summary)
     note = None
     if _should_report(job):
         from . import notifier
         note = notifier.notify(
             title=job.get("title") or ("Tool: %s" % name),
             message=summary, channels=job.get("channels"), kind="task",
-            job_id=job.get("id"), conv_id=job.get("conv_id"), failed=failed,
+            job_id=job.get("id"), conv_id=run_conv_id, failed=failed,
         )
     return {"ok": not failed, "summary": summary,
-            "error": result.get("error") if failed else None, "notification": note}
+            "error": result.get("error") if failed else None, "notification": note,
+            "conv_id": run_conv_id}
 
 
 def _should_report(job):
@@ -1189,7 +1272,11 @@ def summarize(job):
     model's list_scheduled can never drift into describing the same job
     differently."""
     now = datetime.now()
-    when_text = timespec.describe(job.get("trigger") or {})
+    # next_run is passed through explicitly (L.4): it's the value tick()
+    # actually fires against, and the only one guaranteed to track
+    # pause/resume/snooze/catch-up — trigger["at"] alone goes stale after
+    # any of those. See timespec.describe()'s docstring.
+    when_text = timespec.describe(job.get("trigger") or {}, next_run=job.get("next_run"))
     eta = None
     if job.get("next_run"):
         try:

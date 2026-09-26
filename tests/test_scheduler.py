@@ -17,7 +17,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "jarvis-cli"))
 
-from jarvis import notifier, scheduler, timespec  # noqa: E402
+from jarvis import notifier, scheduler, timespec, conversations  # noqa: E402
 
 PASS, FAIL = [], []
 
@@ -36,6 +36,14 @@ def fresh():
     notifier.JARVIS_DIR = tmp
     notifier.INBOX_FILE = tmp / "notifications.json"
     notifier.CONFIG_FILE = tmp / "notify_config.json"
+    # D.6: _do_ask/_do_command/_do_tool now unconditionally open a fresh
+    # conversations.py conversation per run (see _new_scheduled_conversation
+    # in scheduler.py) — without repointing these too, every test below
+    # would write straight into the real ~/.jarvis/conversations/.
+    conversations.JARVIS_DIR = tmp
+    conversations.CONV_DIR = tmp / "conversations"
+    conversations.INDEX_FILE = conversations.CONV_DIR / "index.json"
+    conversations.CURRENT_FILE = tmp / "current_conversation.json"
     return tmp
 
 
@@ -451,6 +459,148 @@ def test_ask_log_is_capped_and_clearable():
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+def test_L4_display_matches_next_run_after_resume():
+    # Root cause (see timespec.describe()'s docstring): trigger["at"] is
+    # written once at creation and never touched again, while next_run —
+    # the value due_jobs()/tick() actually fire against — DOES advance on
+    # resume(). Before the fix, describe() (and therefore summarize()'s
+    # "when", which is what the web panel shows) read trigger["at"] only,
+    # so it stayed frozen at the original time forever while the job kept
+    # firing correctly against the real, advanced next_run.
+    tmp = fresh()
+    try:
+        now = datetime(2026, 9, 26, 0, 0, 0)
+        job = scheduler.create(
+            kind="task", title="continue",
+            trigger={"type": "every", "every_seconds": 86400,
+                     "at": timespec.to_iso(now.replace(hour=3))},
+            action={"type": "notify", "message": "continue"},
+            trusted=True, now=now,
+        )
+        before = scheduler.summarize(job)
+        check("displayed time matches next_run before any advance",
+              timespec._friendly(job["next_run"]) in before["when"], before)
+
+        scheduler.pause(job["id"])
+        # ...time passes; the original 3:00 slot is now overdue while paused...
+        job = scheduler.resume(job["id"])
+        check("resume rolled the persisted next_run forward, past the original slot",
+              job["next_run"] != job["trigger"]["at"], job)
+
+        after = scheduler.summarize(job)
+        check("persisted next_run is a real future time", after["next_run"] == job["next_run"], after)
+        check("displayed 'when' text agrees with the ADVANCED next_run, not the frozen creation-time trigger.at",
+              timespec._friendly(job["next_run"]) in after["when"], after)
+        check("displayed 'when' text is NOT the stale original time",
+              timespec._friendly(job["trigger"]["at"]) not in after["when"] or
+              job["trigger"]["at"] == job["next_run"], after)
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_L4_owner_reported_repro_3am_continue_task():
+    # L.4.0's concrete repro, as a fixture: a task scheduled to fire at
+    # 3:00 AM whose actual next fire time later became 6:00 AM (the
+    # ~3-hour discrepancy the owner reported) must be DISPLAYED as 6:00 AM,
+    # not still shown as 3:00 AM.
+    tmp = fresh()
+    try:
+        now = datetime(2026, 9, 26, 0, 0, 0)
+        job = scheduler.create(
+            kind="task", title="continue",
+            trigger={"type": "every", "every_seconds": 3 * 3600,
+                     "at": timespec.to_iso(now.replace(hour=3))},
+            action={"type": "notify", "message": "continue"},
+            trusted=True, now=now,
+        )
+        check("job displays the correct 3:00 AM run time at creation",
+              "03:00" in scheduler.summarize(job)["when"], job)
+
+        # Simulate the job actually firing late, at 6:00 AM, the way a
+        # real tick() advances next_run once the action has run (see
+        # _apply_next_state) — next_run moves on, trigger["at"] does not.
+        job["next_run"] = timespec.to_iso(now.replace(hour=6))
+
+        summary = scheduler.summarize(job)
+        check("next_run itself correctly reflects the actual (late) fire time",
+              summary["next_run"] == job["next_run"], summary)
+        check("the UI-facing 'when' text now shows 6:00 AM, matching next_run, "
+              "instead of staying frozen on the originally-displayed 3:00 AM",
+              "06:00" in summary["when"] and "03:00" not in summary["when"], summary)
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_D6_scheduled_ask_opens_a_brand_new_scheduler_conversation():
+    # Before this, an ask job's env["JARVIS_CONVERSATION_ID"] was whatever
+    # conversation created the job (or, with none, ai_client.ask() fell
+    # back to "current" on disk) — a scheduled run could append into a
+    # conversation a person is live in. Every run must get its own fresh,
+    # origin="scheduler" conversation instead.
+    tmp = fresh()
+    orig_run = scheduler.subprocess.run
+    seen_env = {}
+
+    class FakeCompleted:
+        def __init__(self, stdout="", stderr="", returncode=0):
+            self.stdout, self.stderr, self.returncode = stdout, stderr, returncode
+
+    def fake_run(argv, **kwargs):
+        seen_env.update(kwargs.get("env") or {})
+        return FakeCompleted(stdout="Jarvis: done.\n")
+
+    scheduler.subprocess.run = fake_run
+    try:
+        creating_conv = conversations.new_conversation(title="live chat", make_current=True)
+        job = {"id": "job1", "title": "nightly continue", "kind": "task",
+               "conv_id": creating_conv}
+        action = {"type": "ask", "prompt": "continue"}
+        result = scheduler._do_ask(job, action)
+
+        run_conv_id = result.get("conv_id")
+        check("_do_ask returns the id of the conversation it opened",
+              conversations.is_valid_id(run_conv_id), result)
+        check("the run's conversation is NOT the one that created the job",
+              run_conv_id != creating_conv, (run_conv_id, creating_conv))
+        check("the spawned subprocess was pointed at the new run conversation",
+              seen_env.get("JARVIS_CONVERSATION_ID") == run_conv_id, seen_env)
+
+        record = conversations._load_conv(run_conv_id)
+        check("the new conversation is tagged origin=scheduler",
+              record is not None and record.get("origin") == "scheduler", record)
+
+        entries = scheduler.read_ask_log(job_id="job1")
+        check("the ask log's conv_id points at the new run conversation, not the creating one",
+              entries and entries[0]["conv_id"] == run_conv_id, entries)
+    finally:
+        scheduler.subprocess.run = orig_run
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_D6_scheduled_command_and_tool_also_get_fresh_conversations():
+    tmp = fresh()
+    orig_run = scheduler.subprocess.run
+
+    class FakeCompleted:
+        def __init__(self, stdout="", stderr="", returncode=0):
+            self.stdout, self.stderr, self.returncode = stdout, stderr, returncode
+
+    scheduler.subprocess.run = lambda argv, **kw: FakeCompleted(stdout="backup ok\n")
+    try:
+        job = {"id": "jobC", "title": "nightly backup", "kind": "task", "conv_id": None}
+        result = scheduler._do_command(job, {"type": "command", "command": "backup", "args": {}})
+        conv_id = result.get("conv_id")
+        check("a command action also opens a fresh conversation",
+              conversations.is_valid_id(conv_id), result)
+        record = conversations._load_conv(conv_id)
+        check("the command's conversation is tagged origin=scheduler and has an exchange logged",
+              record is not None and record.get("origin") == "scheduler"
+              and len(record.get("exchanges") or []) == 1, record)
+    finally:
+        scheduler.subprocess.run = orig_run
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 for fn in [
     test_one_engine_three_kinds, test_time_trigger_fires_once,
     test_recurring_reschedules, test_missed_runs_fire_once_not_many,
@@ -463,6 +613,10 @@ for fn in [
     test_scheduled_ask_logs_failures_too,
     test_ask_log_filters_by_job_and_respects_limit,
     test_ask_log_is_capped_and_clearable,
+    test_L4_display_matches_next_run_after_resume,
+    test_L4_owner_reported_repro_3am_continue_task,
+    test_D6_scheduled_ask_opens_a_brand_new_scheduler_conversation,
+    test_D6_scheduled_command_and_tool_also_get_fresh_conversations,
 ]:
     fn()
 

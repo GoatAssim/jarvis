@@ -353,7 +353,8 @@ def _render_facts(facts, budget, overflow_labels=None):
 
 
 def prompt_context(char_budget=None, compact=False, query="", extra_texts=None,
-                   namespace=None, semantic=True, use_embeddings=False):
+                   namespace=None, semantic=True, use_embeddings=False,
+                   assistant_name=None):
     """Return memory lines relevant to query, or '' if nothing matches.
 
     Identity facts (tag "identity", or a well-known key like name/timezone)
@@ -370,6 +371,18 @@ def prompt_context(char_budget=None, compact=False, query="", extra_texts=None,
     restores the exact pre-semantic-search behavior — useful for a
     reproducible test, and as an escape hatch if the fuzzy layer ever
     misbehaves.
+
+    `assistant_name` (D.5-#1 fix, 2026-09-26): the caller's configured wake
+    name (e.g. "J.A.R.V.I.S", or a persona rename). Almost every user
+    message opens with this word ("jarvis, could you...") even though it
+    carries zero topical signal — it's how the user addresses the
+    assistant, not what they're asking about. Left in the query tokens, it
+    behaved like a free +8..11 relevance score for any fact whose key or
+    tags happened to also contain it (e.g. one keyed `jarvis_project_dir`),
+    which is why that fact appeared in "Relevant long-term memory" on
+    100% of sampled requests regardless of topic — including threads that
+    never otherwise mention it. The wake word is stripped from the query
+    tokens below the same way a stopword is, before scoring.
     """
     facts = load_facts()
     if not facts:
@@ -390,6 +403,13 @@ def prompt_context(char_budget=None, compact=False, query="", extra_texts=None,
         and _fact_namespace(f) in (active_ns_for_identity, SHARED_NAMESPACE)
     ]
     qtoks = _expand(_tokens(blob))
+    # Strip the wake word (see docstring above). Dots in a name like
+    # "J.A.R.V.I.S" are removed before tokenizing, since _WORD_RE requires
+    # runs of 2+ alnum chars and would otherwise match nothing at all for a
+    # dotted default name.
+    wake_toks = _tokens((assistant_name or "").replace(".", ""))
+    if wake_toks:
+        qtoks -= wake_toks
 
     if not qtoks:
         if not identity_facts:
@@ -402,12 +422,33 @@ def prompt_context(char_budget=None, compact=False, query="", extra_texts=None,
     # ranked above a merely-similar fact. Wrapped because an index rebuild
     # failing (unwritable disk, corrupt file) must degrade to the exact
     # previous behavior rather than break recall entirely.
+    #
+    # D.5-#1, part 2: the wake word is stripped from the text handed to the
+    # semantic layer too, not just from qtoks above. Without this, a fact
+    # whose own text happens to repeat the wake word (e.g. the
+    # `jarvis_project_dir` fact's path literally contains "...\jarvis\jarvis
+    # v2\jarvis") gets an outsized n-gram/cosine similarity to *any* message
+    # containing that word — which, per the docstring, is virtually every
+    # message — independent of and in addition to the lexical key-hit bonus
+    # the qtoks fix above already closed. Confirmed by testing: stripping
+    # only qtoks left the fact appearing on pure small talk ("jarvis how are
+    # you doing today") in an 8-fact corpus; stripping it from the semantic
+    # blob as well stops that while still surfacing the fact for an
+    # on-topic ask ("what's my jarvis project directory again").
+    semantic_blob = blob
+    if wake_toks:
+        wake_pattern = re.compile(
+            r"\b(?:" + "|".join(re.escape(t) for t in wake_toks) + r")\b",
+            re.I,
+        )
+        semantic_blob = wake_pattern.sub(" ", blob)
+
     boosts = {}
     if semantic:
         try:
             from . import memory_semantic
             boosts = memory_semantic.boost_map(
-                blob, facts, use_embeddings=use_embeddings)
+                semantic_blob, facts, use_embeddings=use_embeddings)
         except Exception:  # noqa: BLE001
             boosts = {}
 
