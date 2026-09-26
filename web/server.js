@@ -883,6 +883,57 @@ app.post("/api/console/:id/clear", requireJarvis, async (req, res) => {
 });
 
 // ---------------------------------------------------------------------------
+// K.2.5.3 (Part E.5) — the Live Feed filter's own preference: which kinds
+// are hidden, search text/mode, tool-name filter, turn scope. "Where the
+// preference lives: server-side settings ... not localStorage" (E.5's own
+// design note) — same reasoning and the same tiny-JSON-file-next-to-
+// favorites.json pattern favorites already use above, not a new mechanism.
+// Deliberately NOT gated behind requireJarvis, for the same reason
+// favorites isn't: a UI filter preference has nothing to do with whether
+// the jarvis CLI itself is reachable.
+// ---------------------------------------------------------------------------
+
+const CONSOLE_FILTER_PREFS_PATH = path.join(__dirname, "data", "console-filter-prefs.json");
+
+async function readConsoleFilterPrefs() {
+  try {
+    const text = await fs.readFile(CONSOLE_FILTER_PREFS_PATH, "utf-8");
+    const parsed = JSON.parse(text);
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
+  } catch (e) {
+    return {}; // missing file (first run) or corrupt JSON: no saved preference yet
+  }
+}
+
+async function writeConsoleFilterPrefs(prefs) {
+  await fs.mkdir(path.dirname(CONSOLE_FILTER_PREFS_PATH), { recursive: true });
+  await fs.writeFile(CONSOLE_FILTER_PREFS_PATH, JSON.stringify(prefs, null, 2) + "\n", "utf-8");
+}
+
+app.get("/api/console-filter-prefs", async (req, res) => {
+  res.json(await readConsoleFilterPrefs());
+});
+
+app.post("/api/console-filter-prefs", async (req, res) => {
+  const body = req.body || {};
+  const prefs = {
+    hiddenKinds: Array.isArray(body.hiddenKinds)
+      ? body.hiddenKinds.filter((k) => typeof k === "string").slice(0, 64) : [],
+    search: typeof body.search === "string" ? body.search.slice(0, 500) : "",
+    searchMode: body.searchMode === "regex" ? "regex" : "text",
+    errorsOnly: body.errorsOnly === true,
+    tool: typeof body.tool === "string" ? body.tool.slice(0, 200) : "",
+    turnScope: body.turnScope === "turn" ? "turn" : "conversation",
+  };
+  try {
+    await writeConsoleFilterPrefs(prefs);
+    res.json({ ok: true });
+  } catch (e) {
+    res.status(500).json({ error: `Couldn't save console filter preferences: ${e.message}` });
+  }
+});
+
+// ---------------------------------------------------------------------------
 // Search — logs and conversations.
 //
 // Both proxy CLI commands rather than reimplementing the matching in JS.
