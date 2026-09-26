@@ -229,7 +229,7 @@ def test_inner_agent_uses_a_different_key_and_reports_failures():
                                         "defaults": {"tools_enabled": True}}
     ai_providers.ADAPTERS["fake"] = adapter
     try:
-        text, err = code_agent._run_agent_loop("do it", [], lambda n, a: {}, 4)
+        text, err, last_words = code_agent._run_agent_loop("do it", [], lambda n, a: {}, 4)
     finally:
         ai_config.load_ai_config = orig[0]
         ai_providers.ADAPTERS.clear()

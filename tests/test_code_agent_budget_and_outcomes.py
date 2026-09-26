@@ -200,7 +200,7 @@ def test_end_to_end_success_reaches_edit_within_budget_and_logs_it():
         executor("list_dir", {"path": "."})
         executor("read_file", {"path": "main.py"})
         executor("edit_file", {"path": "main.py", "old_str": "TOKEN = None", "new_str": new_str})
-        return "Read main.py, replaced the placeholder with os.getenv(\"TOKEN\").", None
+        return "Read main.py, replaced the placeholder with os.getenv(\"TOKEN\").", None, None
 
     code_agent._run_agent_loop = fake_loop
     try:
@@ -233,7 +233,7 @@ def test_end_to_end_failure_still_reports_last_error_and_a_useful_log():
         executor("read_file", {"path": "main.py"})
         executor("run_shell", {"command": "python3 -c \"print(1)\""})
         executor("run_shell", {"command": "python3 -c \"import sys; sys.exit(3)\""})
-        return None, "gemini: gave up after 5 rounds of tool calls with no final answer"
+        return None, "gemini: gave up after 5 rounds of tool calls with no final answer", None
 
     code_agent._run_agent_loop = fake_loop
     try:
@@ -251,6 +251,41 @@ def test_end_to_end_failure_still_reports_last_error_and_a_useful_log():
     check("log has 4 entries, one per call", len(log) == 4, log)
     check("log shows the successful shell call", log[2] == "run_shell → exit 0", log)
     check("log shows the failing shell call's real exit code", log[3] == "run_shell → exit 3", log)
+    check("no last_words key when the loop didn't supply one",
+          "last_words" not in result, result)
+
+
+def test_end_to_end_failure_surfaces_last_words_separately_from_last_error():
+    # F.6/K.3.5: when ai_providers did capture the model's own narration
+    # from the give-up round (ai_providers.AIResult.last_words), it must
+    # reach the caller as its own field — distinct from `last_error`, the
+    # harness's diagnostic string — not get folded into or replace it.
+    d = _project({"main.py": "import sys\nprint('hi')\n"})
+    orig = code_agent._run_agent_loop
+
+    def fake_loop(task, schemas, executor, round_limit):
+        executor("list_dir", {"path": "."})
+        return (
+            None,
+            "gemini: gave up after 5 rounds of tool calls with no final answer",
+            "I found the bug in main.py's import order but ran out of calls before fixing it.",
+        )
+
+    code_agent._run_agent_loop = fake_loop
+    try:
+        result = code_agent.tool_code_agent({"task": "fix something", "root": str(d)})
+    finally:
+        code_agent._run_agent_loop = orig
+        shutil.rmtree(d, ignore_errors=True)
+
+    check("ok is False", result.get("ok") is False, result)
+    check("last_error is still the harness's diagnostic",
+          result.get("last_error") == "gemini: gave up after 5 rounds of tool calls with no final answer",
+          result.get("last_error"))
+    check("last_words carries the model's own narration, unchanged",
+          result.get("last_words") == "I found the bug in main.py's import order but ran out of calls before fixing it.",
+          result.get("last_words"))
+    check("last_words is not last_error", result.get("last_words") != result.get("last_error"))
 
 
 # ---------------------------------------------------------------------------
@@ -307,6 +342,17 @@ def test_shaping_caps_a_long_last_error():
     check("low cap is tighter than medium cap", len(low["last_error"]) < len(medium["last_error"]))
 
 
+def test_shaping_caps_a_long_last_words_independently_of_last_error():
+    huge = dict(_sample_failed_result())
+    huge["last_words"] = "well, I think the fix is " + ("probably in there somewhere " * 100)
+    low = tool_result_shaping.shape_result("code_agent", huge, "low")
+    medium = tool_result_shaping.shape_result("code_agent", huge, "medium")
+    suffix_len = len(tool_result_shaping._TRIM_SUFFIX)
+    check("last_words capped at low (150 chars + suffix)", len(low["last_words"]) <= 150 + suffix_len, len(low["last_words"]))
+    check("last_words capped at medium (300 chars + suffix)", len(medium["last_words"]) <= 300 + suffix_len, len(medium["last_words"]))
+    check("last_error is untouched by last_words' own cap", low["last_error"] == huge["last_error"], low["last_error"])
+
+
 def test_shaping_is_a_no_op_at_full_verbosity():
     sample = _sample_failed_result()
     shaped = tool_result_shaping.shape_result("code_agent", sample, "full")
@@ -326,9 +372,11 @@ for fn in [
     test_step_outcome_never_raises_on_garbage_input,
     test_end_to_end_success_reaches_edit_within_budget_and_logs_it,
     test_end_to_end_failure_still_reports_last_error_and_a_useful_log,
+    test_end_to_end_failure_surfaces_last_words_separately_from_last_error,
     test_shaping_drops_steps_at_low_but_keeps_log,
     test_shaping_keeps_steps_at_medium_but_drops_arguments,
     test_shaping_caps_a_long_last_error,
+    test_shaping_caps_a_long_last_words_independently_of_last_error,
     test_shaping_is_a_no_op_at_full_verbosity,
 ]:
     fn()
