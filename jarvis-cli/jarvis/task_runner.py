@@ -72,6 +72,10 @@ def _spawn_ask(task, prompt):
     # the same signal scheduler._do_ask sets.
     env["JARVIS_SCHEDULED"] = "1"
     env["JARVIS_TASK_ID"] = task.get("id") or ""
+    # L.3: the human-readable title already exists on the task (tasks.py
+    # clips it to 200 chars at creation) — hand it down the same way
+    # JARVIS_TASK_ID is, so logs.log() can label entries without a lookup.
+    env["JARVIS_TASK_LABEL"] = task.get("title") or ""
     env["JARVIS_LOG_SOURCE"] = "task"
     if task.get("conv_id"):
         env["JARVIS_CONVERSATION_ID"] = task["conv_id"]

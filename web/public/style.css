@@ -2129,6 +2129,7 @@ audio.ask-dl-player{ max-height: none; background: transparent; }
 .log-entry__provider{ color: var(--text-dimmer); }
 .log-entry__tokens{ color: var(--text-dimmer); font-variant-numeric: tabular-nums; }
 .log-entry__round{ color: var(--text-dimmer); margin-left: auto; }
+.log-entry__task{ color: var(--accent); }
 .log-entry__body{
   margin: 0; white-space: pre-wrap; word-break: break-word;
   font-family: var(--font-mono); font-size: 11.5px; line-height: 1.6; color: var(--text);
@@ -2774,6 +2775,13 @@ audio.ask-dl-player{ max-height: none; background: transparent; }
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  opacity: 0.85;
+}
+
+.logs-result__task {
+  flex: 0 0 auto;
+  font-size: 10px;
+  color: var(--accent);
   opacity: 0.85;
 }
 

@@ -6309,6 +6309,10 @@
         entry.provider ? el("span", { class: "log-entry__provider" }, entry.provider) : null,
         tokenLabel ? el("span", { class: "log-entry__tokens" }, tokenLabel) : null,
         entry.round != null ? el("span", { class: "log-entry__round" }, `round ${entry.round}`) : null,
+        // L.3: which task/job produced this entry, if any — e.g. "Task:
+        // Morning briefing" instead of only the generic "source: task"
+        // the entry's direction/source already show above.
+        entry.task_label ? el("span", { class: "log-entry__task" }, `Task: ${entry.task_label}`) : null,
       ]);
       const body = el("pre", { class: "log-entry__body" }, JSON.stringify(entry.data, null, 2));
       logsEntriesEl.appendChild(el("div", { class: "log-entry" }, [head, body]));
@@ -6535,6 +6539,9 @@
       const head = [el("span", { class: "logs-result__dir" }, r.direction || "?")];
       const badge = originBadge(r.source || r.origin);
       if (badge) head.push(badge);
+      // L.3.3: a match that belongs to a task/job says which one, the same
+      // label shown in the entry view (renderLogsEntries above).
+      if (r.task_label) head.push(el("span", { class: "logs-result__task" }, `Task: ${r.task_label}`));
       head.push(el("span", { class: "logs-result__title" }, r.title || r.conv_id));
       list.appendChild(el("div", {
         class: "logs-convo-card logs-result",

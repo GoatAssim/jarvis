@@ -1113,6 +1113,12 @@ def _do_ask(job, action):
     # land in this same fresh conversation and are otherwise identical on
     # disk.
     env["JARVIS_LOG_SOURCE"] = "scheduler"
+    # L.3: same signal task_runner.py sets for a tasks.py-driven step,
+    # reused here so a scheduled job's entries carry the id/label pair too
+    # — job.get("id")/job.get("title") are this launcher's equivalent of
+    # task.get("id")/task.get("title").
+    env["JARVIS_TASK_ID"] = job.get("id") or ""
+    env["JARVIS_TASK_LABEL"] = job.get("title") or _default_title(job)
     try:
         proc = subprocess.run(
             argv, capture_output=True, text=True, timeout=ASK_TIMEOUT,
