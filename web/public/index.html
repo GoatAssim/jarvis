@@ -247,20 +247,45 @@
           <button class="btn btn--ghost" id="btn-clear-console" type="button">Clear</button>
         </div>
       </div>
-      <!-- Part E.5 — filter the persisted console replay (not just this
-           tab's live stream) by kind and by text. Same segmented-button
-           language as the Debug panel's §3 source filter. "All" is the
-           default so switching conversations never silently hides
-           anything until you touch this. -->
+      <!-- Part E.5/K.2.5.3 — filter the persisted console replay (not just
+           this tab's live stream) by kind, tool, turn scope and text.
+           Preference is server-persisted (see /api/console-filter-prefs
+           in server.js), same off-localStorage pattern favorites already
+           use, so it survives a reload instead of resetting to "show
+           everything" (the documented default) every time. The kind
+           checkboxes and tool <select> are built at runtime (see
+           renderConsoleKindFilter/refreshConsoleToolFilterOptions in
+           app.js) — only kinds/tools actually present get a control, so
+           this never shows a permanently-empty checkbox. -->
       <div class="console-filter" id="console-filter">
-        <div class="console-filter__kinds" role="group" aria-label="Filter console output by kind">
-          <button type="button" class="debug-toggle-btn is-active" data-kind-group="">All</button>
-          <button type="button" class="debug-toggle-btn" data-kind-group="output">Output</button>
-          <button type="button" class="debug-toggle-btn" data-kind-group="tools">Tools</button>
-          <button type="button" class="debug-toggle-btn" data-kind-group="errors">Errors</button>
+        <div class="console-filter__row console-filter__row--kinds"
+             id="console-filter-kinds" role="group" aria-label="Filter console output by kind"></div>
+        <div class="console-filter__row console-filter__row--controls">
+          <label class="console-filter__errors-only">
+            <input type="checkbox" id="console-filter-errors-only"> Errors only
+          </label>
+          <select id="console-filter-tool" class="console-filter__select" title="Filter by tool name" hidden>
+            <option value="">All tools</option>
+          </select>
+          <select id="console-filter-scope" class="console-filter__select" title="Turn scope">
+            <option value="conversation" selected>This conversation</option>
+            <option value="turn">This turn</option>
+          </select>
+          <select id="console-filter-preset" class="console-filter__select" title="Presets">
+            <option value="" selected>Presets&hellip;</option>
+            <option value="everything">Everything</option>
+            <option value="quiet">Quiet (errors + tool calls)</option>
+          </select>
         </div>
-        <input type="search" id="console-search" class="panel__search-input console-filter__search"
-               placeholder="Filter&hellip;" autocomplete="off">
+        <div class="console-filter__row console-filter__row--search">
+          <input type="search" id="console-search" class="panel__search-input console-filter__search"
+                 placeholder="Filter&hellip;" autocomplete="off">
+          <select id="console-search-mode" class="console-filter__select" title="Search mode">
+            <option value="text" selected>Text</option>
+            <option value="regex">Regex</option>
+          </select>
+          <span class="console-filter__hidden-chip" id="console-filter-hidden-chip" hidden></span>
+        </div>
       </div>
       <div class="console" id="console">
         <div class="console__idle">Awaiting instructions.</div>

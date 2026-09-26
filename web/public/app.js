@@ -1701,10 +1701,22 @@
     // of this catalog at all (see tools.py's _tool_source docstring), so
     // offering that bucket here would just always show empty.
     debugSourceFilter: "",
-    // Part E.5 — Live Feed console replay filter. consoleKindGroup is ""
-    // (All) or one of "output"|"tools"|"errors" (see CONSOLE_KIND_GROUPS).
-    consoleKindGroup: "",
+    // Part E.5/K.2.5.3 — Live Feed console replay filter. hiddenKinds is
+    // which of console_store.KINDS are unchecked (empty = show every kind,
+    // the documented default); the rest are the other independent filter
+    // axes the redesign added — see the "Console + WebSocket execution"
+    // section below for how they combine.
+    consoleHiddenKinds: new Set(),
     consoleSearch: "",
+    consoleSearchMode: "text",   // "text" (substring) | "regex" — mirrors Log search's modes
+    consoleSearchInvalid: false, // true when a regex search doesn't compile
+    consoleErrorsOnly: false,
+    consoleToolFilter: "",       // "" = all tools
+    consoleTurnScope: "conversation", // "conversation" | "turn"
+    consoleKindCounts: {},       // kind -> count of lines currently in #console
+    consoleToolNames: new Set(), // distinct `tool` values seen on current lines
+    consoleCurrentTurn: null,    // turn id of the most recently appended/replayed line
+    consoleLiveTurn: null,       // client-local id for the run currently streaming live, if any
     debugResponseMode: "organized", // "organized" | "raw"
     debugLastResult: null,   // last {ok, result, raw, stderr, error} from /api/tools/run
     debugLastResultError: false,
@@ -1846,6 +1858,12 @@
       return api("GET", `/api/console/${encodeURIComponent(id)}${qs_ ? `?${qs_}` : ""}`);
     },
     clearConsole: (id) => api("POST", `/api/console/${encodeURIComponent(id)}/clear`),
+    // K.2.5.3 — the Live Feed filter's own preference (kinds/search/tool/
+    // turn scope), server-persisted the same way favorites are, so it
+    // survives a reload instead of resetting to "show everything" (E.5's
+    // stated default) every time.
+    getConsoleFilterPrefs: () => api("GET", "/api/console-filter-prefs"),
+    setConsoleFilterPrefs: (prefs) => api("POST", "/api/console-filter-prefs", prefs),
     listAiProviders: () => api("GET", "/api/ai/providers"),
     // Voice endpoints don't go through api(): /api/voice/speak's success
     // response body is raw audio, not JSON, and /api/voice/transcribe's
@@ -2095,6 +2113,45 @@
       // persist to disk; the in-memory Set (and this tab's rendering)
       // still reflects it until the next reload.
     });
+  }
+
+  // K.2.5.3 — loads the Live Feed filter's persisted preference during
+  // initApp(), same "independent of whether the CLI is reachable" spirit
+  // as favorites (this has nothing to do with the jarvis CLI either). The
+  // per-kind checkboxes and the tool-name <select>'s option list are
+  // rebuilt dynamically per-conversation (see renderConsoleKindFilter /
+  // refreshConsoleToolFilterOptions) since which kinds and tools even
+  // exist depends on what's actually in that console — this only needs to
+  // restore the static controls and the in-memory filter state itself.
+  async function loadConsoleFilterPrefs() {
+    try {
+      const prefs = await Api.getConsoleFilterPrefs();
+      if (prefs && typeof prefs === "object") {
+        state.consoleHiddenKinds = new Set(Array.isArray(prefs.hiddenKinds) ? prefs.hiddenKinds : []);
+        state.consoleSearch = typeof prefs.search === "string" ? prefs.search : "";
+        state.consoleSearchMode = prefs.searchMode === "regex" ? "regex" : "text";
+        state.consoleErrorsOnly = prefs.errorsOnly === true;
+        state.consoleToolFilter = typeof prefs.tool === "string" ? prefs.tool : "";
+        state.consoleTurnScope = prefs.turnScope === "turn" ? "turn" : "conversation";
+      }
+    } catch (e) {
+      // No saved preferences yet, or the file's unreadable — same
+      // best-effort shrug as favorites: fall back to E.5's own documented
+      // default ("show everything"), never surface this as an error.
+    }
+    const errorsBox = qs("#console-filter-errors-only");
+    if (errorsBox) errorsBox.checked = state.consoleErrorsOnly;
+    const searchBox = qs("#console-search");
+    if (searchBox) searchBox.value = state.consoleSearch;
+    const modeSel = qs("#console-search-mode");
+    if (modeSel) modeSel.value = state.consoleSearchMode;
+    const scopeSel = qs("#console-filter-scope");
+    if (scopeSel) scopeSel.value = state.consoleTurnScope;
+    // #console-filter-tool's own <option> list isn't built yet (no
+    // conversation loaded) — state.consoleToolFilter is remembered above,
+    // and refreshConsoleToolFilterOptions() (called once real console
+    // history loads) reselects it if a tool by this name turns out to
+    // exist, falling back to "All tools" if not.
   }
 
   let favoriteCommands = new Set();
@@ -2436,46 +2493,94 @@
   // Console + WebSocket execution
   // ===========================================================================
 
-  // Part E.5 — every console-store kind (see console_store.KINDS) maps to
-  // one of three filter buckets the Live Feed's "Output/Tools/Errors"
-  // buttons show; a kind not listed here (a future addition to the store)
-  // falls back to "output" rather than disappearing from every filter.
-  const CONSOLE_KIND_GROUPS = {
-    stdout: "output", stderr: "output", command: "output",
-    "tool-call": "tools", "tool-result": "tools", provider: "tools",
-    tokens: "tools", narration: "tools", thinking: "tools",
-    error: "errors", status: "errors",
-  };
   // The structural "──────" separator between two persisted runs (see
   // loadConsoleHistoryForConv) is chrome, not content — always visible,
   // in every filter, same reasoning a section divider in the Debug panel
   // would never be hidden by a text search either.
   const CONSOLE_ALWAYS_VISIBLE_KIND = "sys";
 
-  function consoleKindGroup(kind) {
-    if (kind === CONSOLE_ALWAYS_VISIBLE_KIND) return null;
-    return CONSOLE_KIND_GROUPS[kind] || "output";
-  }
+  // K.2.5.3 — display labels for console_store.KINDS, used by the per-kind
+  // checkbox row. A kind not listed here (a future addition to the store)
+  // just falls back to its raw name rather than disappearing from the UI.
+  const CONSOLE_KIND_LABELS = {
+    stdout: "Output", stderr: "Stderr", command: "Command",
+    "tool-call": "Tool call", "tool-result": "Tool result", provider: "Provider",
+    tokens: "Tokens", thinking: "Thinking", narration: "Narration",
+    notification: "Notification", status: "Status", error: "Error",
+  };
 
-  function consoleAppend(text, cls, kind) {
+  // A regex search that fails to compile is distinct from "no search typed
+  // at all" (null): it means the box should show as invalid AND every line
+  // should be hidden under it — not silently fall back to "everything
+  // matches", which would look like the search box works when it doesn't.
+  const CONSOLE_SEARCH_INVALID = Symbol("console-search-invalid");
+
+  // meta (K.2.5.3): optional { turn, tool } — replayed lines pass both
+  // straight from the store; a live line leaves turn off and picks up
+  // state.consoleLiveTurn automatically (minted once per run, see the
+  // "start" case below) since a direct/live run never carries a `tool`.
+  function consoleAppend(text, cls, kind, meta) {
+    meta = meta || {};
     const c = qs("#console");
     const idle = qs(".console__idle", c);
     if (idle) idle.remove();
     // Live call sites (the ws handler below) only ever pass `cls`
     // ("cmd"/"out"/"err"/"exit-ok"/"exit-bad"/"sys") — map those to the
     // same canonical console_store kind names replayed lines carry, so
-    // CONSOLE_KIND_GROUPS (keyed on the store's vocabulary) buckets a
-    // live line the same way it will once that line is reloaded from
+    // a live line filters the same way it will once it's reloaded from
     // the store.
     const CLS_TO_KIND = {
       cmd: "command", out: "stdout", err: "stderr",
       "exit-ok": "status", "exit-bad": "error", sys: "sys",
     };
+    const resolvedKind = kind || CLS_TO_KIND[cls] || cls;
     const line = el("div", { class: `console-line console-line--${cls}` }, text);
-    line.dataset.kind = kind || CLS_TO_KIND[cls] || cls;
+    line.dataset.kind = resolvedKind;
+    const isChrome = resolvedKind === CONSOLE_ALWAYS_VISIBLE_KIND;
+    const turn = meta.turn != null ? meta.turn : (isChrome ? null : state.consoleLiveTurn);
+    if (turn != null) line.dataset.turn = turn;
+    if (meta.tool) {
+      line.dataset.tool = meta.tool;
+      state.consoleToolNames.add(meta.tool);
+    }
+    if (!isChrome) {
+      state.consoleKindCounts[resolvedKind] = (state.consoleKindCounts[resolvedKind] || 0) + 1;
+    }
     c.appendChild(line);
+    scheduleConsoleFilterUiUpdate();
+
+    // Turn scope ("this turn") compares every line against the MOST RECENT
+    // turn seen. When that changes — a new run/turn just began — lines from
+    // the previous turn that were visible a moment ago need to become
+    // hidden too, not just this new one, so a full re-apply is needed here.
+    // Rare (once per run, once per replayed turn boundary), so doing it
+    // here costs nothing on a fast stdout dump, where `turn` stays the same
+    // across thousands of consecutive lines and this branch never fires.
+    if (turn != null && turn !== state.consoleCurrentTurn) {
+      state.consoleCurrentTurn = turn;
+      if (state.consoleTurnScope === "turn") {
+        applyConsoleFilter();
+        c.scrollTop = c.scrollHeight;
+        return;
+      }
+    }
     applyConsoleLineFilter(line);
     c.scrollTop = c.scrollHeight;
+  }
+
+  let consoleFilterUiPending = false;
+  // Batches per-kind count / tool-name UI rebuilds into at most one per
+  // animation frame — consoleAppend calls this on every single line, but a
+  // command dumping thousands of lines a second must not trigger thousands
+  // of DOM rebuilds (E.5's own performance note).
+  function scheduleConsoleFilterUiUpdate() {
+    if (consoleFilterUiPending) return;
+    consoleFilterUiPending = true;
+    requestAnimationFrame(() => {
+      consoleFilterUiPending = false;
+      renderConsoleKindFilter();
+      refreshConsoleToolFilterOptions();
+    });
   }
 
   // Maps one console_store {kind, text, tool} line (the "ask" surface —
@@ -2570,37 +2675,287 @@
     return "sys"; // provider, tokens, and anything not yet mapped
   }
 
+  // K.2.5.3 — the search box's own predicate. Returns null (no search
+  // typed), a lowercased plain string (substring mode), a compiled non-
+  // global RegExp (regex mode, for .test() — see consoleTextMatches), or
+  // CONSOLE_SEARCH_INVALID when regex mode's pattern doesn't compile.
+  function consoleSearchPredicate() {
+    const raw = (state.consoleSearch || "").trim();
+    if (!raw) {
+      state.consoleSearchInvalid = false;
+      return null;
+    }
+    if (state.consoleSearchMode === "regex") {
+      try {
+        const re = new RegExp(raw, "i");
+        state.consoleSearchInvalid = false;
+        return re;
+      } catch {
+        state.consoleSearchInvalid = true;
+        return CONSOLE_SEARCH_INVALID;
+      }
+    }
+    state.consoleSearchInvalid = false;
+    return raw.toLowerCase();
+  }
+
+  function consoleTextMatches(text, search) {
+    if (search === CONSOLE_SEARCH_INVALID) return false;
+    if (search instanceof RegExp) return search.test(text);
+    return text.toLowerCase().includes(search);
+  }
+
   function consoleFiltersActive() {
-    return { group: state.consoleKindGroup || "", search: (state.consoleSearch || "").trim().toLowerCase() };
+    return {
+      hiddenKinds: state.consoleHiddenKinds,
+      errorsOnly: state.consoleErrorsOnly,
+      tool: state.consoleToolFilter,
+      turnScope: state.consoleTurnScope,
+      currentTurn: state.consoleCurrentTurn,
+      search: consoleSearchPredicate(),
+    };
   }
 
   function applyConsoleLineFilter(line, filters) {
     filters = filters || consoleFiltersActive();
-    const group = consoleKindGroup(line.dataset.kind);
-    const groupHidden = group !== null && filters.group && filters.group !== group;
-    const searchHidden = filters.search && !line.textContent.toLowerCase().includes(filters.search);
-    line.classList.toggle("is-filtered", groupHidden || searchHidden);
+    const kind = line.dataset.kind;
+    let visible = true;
+    if (kind !== CONSOLE_ALWAYS_VISIBLE_KIND) {
+      if (filters.errorsOnly) {
+        visible = kind === "error";
+      } else if (filters.hiddenKinds.has(kind)) {
+        visible = false;
+      }
+      if (visible && filters.tool && line.dataset.tool !== filters.tool) visible = false;
+      if (visible && filters.turnScope === "turn" && filters.currentTurn != null
+          && (line.dataset.turn || null) !== filters.currentTurn) {
+        visible = false;
+      }
+      if (visible && filters.search != null && !consoleTextMatches(line.textContent, filters.search)) {
+        visible = false;
+      }
+    }
+    line.classList.toggle("is-filtered", !visible);
+    if (visible && filters.search != null && filters.search !== CONSOLE_SEARCH_INVALID) {
+      paintConsoleSearchHighlight(line, filters.search);
+    } else {
+      clearConsoleSearchHighlight(line);
+    }
   }
 
+  // Never look like output is missing (E.5): every full filter pass counts
+  // what it hid and shows a chip, and rebuilds the two facet controls (kind
+  // counts, tool-name list) so they reflect the console's current contents.
   function applyConsoleFilter() {
     const filters = consoleFiltersActive();
-    qsa(".console-line", qs("#console")).forEach((line) => applyConsoleLineFilter(line, filters));
+    let hidden = 0;
+    qsa(".console-line", qs("#console")).forEach((line) => {
+      applyConsoleLineFilter(line, filters);
+      if (line.classList.contains("is-filtered")) hidden++;
+    });
+    updateConsoleFilterChip(hidden);
+    qs("#console-search")?.classList.toggle("is-invalid", state.consoleSearchInvalid);
+    renderConsoleKindFilter();
+    refreshConsoleToolFilterOptions();
   }
 
-  qs("#console-filter").addEventListener("click", (e) => {
-    const btn = e.target.closest(".debug-toggle-btn");
-    if (!btn) return;
-    state.consoleKindGroup = btn.dataset.kindGroup || "";
-    qsa(".debug-toggle-btn", qs("#console-filter")).forEach((b) => b.classList.toggle("is-active", b === btn));
+  function updateConsoleFilterChip(hidden) {
+    const chip = qs("#console-filter-hidden-chip");
+    if (!chip) return;
+    if (hidden > 0) {
+      chip.hidden = false;
+      chip.textContent = `${hidden} line${hidden === 1 ? "" : "s"} hidden by filter`;
+    } else {
+      chip.hidden = true;
+      chip.textContent = "";
+    }
+  }
+
+  function clearConsoleSearchHighlight(line) {
+    if (!line.dataset.highlighted) return;
+    line.textContent = line.textContent; // flattens back to a single plain text node
+    delete line.dataset.highlighted;
+  }
+
+  // Wraps every match in <mark>. Reads line.textContent as the source text
+  // (always the true flattened text, even if a previous pass already
+  // highlighted it) so repeated calls never compound markup.
+  function paintConsoleSearchHighlight(line, search) {
+    const text = line.textContent;
+    let html = "";
+    if (search instanceof RegExp) {
+      const flags = search.flags.includes("g") ? search.flags : search.flags + "g";
+      const re = new RegExp(search.source, flags);
+      let last = 0, m;
+      while ((m = re.exec(text))) {
+        if (m[0].length === 0) { re.lastIndex++; continue; } // guard a zero-width pattern
+        html += escapeHtml(text.slice(last, m.index)) + `<mark class="console-search-hit">${escapeHtml(m[0])}</mark>`;
+        last = m.index + m[0].length;
+      }
+      html += escapeHtml(text.slice(last));
+    } else {
+      const lower = text.toLowerCase();
+      let idx = 0, pos;
+      while ((pos = lower.indexOf(search, idx)) !== -1) {
+        html += escapeHtml(text.slice(idx, pos))
+          + `<mark class="console-search-hit">${escapeHtml(text.slice(pos, pos + search.length))}</mark>`;
+        idx = pos + search.length;
+      }
+      html += escapeHtml(text.slice(idx));
+    }
+    line.innerHTML = html;
+    line.dataset.highlighted = "1";
+  }
+
+  // Per-kind checkbox row — rebuilt from state.consoleKindCounts (an O(1)-
+  // maintained running total, not a DOM scan; see consoleAppend) so this
+  // stays cheap even mid-stream. Only kinds that actually have a line right
+  // now get a checkbox — a Live Feed run only ever produces
+  // command/stdout/stderr/status/error, so this never shows five
+  // permanently-empty "Tools" checkboxes the way a fixed list would (same
+  // reasoning as the Debug panel's §3 source filter never offering an
+  // always-empty "mcp" bucket).
+  function renderConsoleKindFilter() {
+    const row = qs("#console-filter-kinds");
+    if (!row) return;
+    const kinds = Object.keys(state.consoleKindCounts)
+      .filter((k) => state.consoleKindCounts[k] > 0)
+      .sort((a, b) => (CONSOLE_KIND_LABELS[a] || a).localeCompare(CONSOLE_KIND_LABELS[b] || b));
+    row.innerHTML = "";
+    kinds.forEach((kind) => {
+      const active = !state.consoleHiddenKinds.has(kind);
+      row.appendChild(el("button", {
+        type: "button",
+        class: "debug-toggle-btn console-filter__kind-btn" + (active ? " is-active" : ""),
+        "data-kind": kind,
+      }, [
+        `${CONSOLE_KIND_LABELS[kind] || kind} `,
+        el("span", { class: "console-filter__count" }, String(state.consoleKindCounts[kind])),
+      ]));
+    });
+  }
+
+  // Tool-name <select> — same "don't show a dead control" reasoning as
+  // renderConsoleKindFilter: hidden entirely until at least one tool-call/
+  // tool-result line (the only kinds that carry `tool`) has actually
+  // appeared, which on the Live Feed panel (direct/live command runs only)
+  // may be never.
+  function refreshConsoleToolFilterOptions() {
+    const sel = qs("#console-filter-tool");
+    if (!sel) return;
+    const names = [...state.consoleToolNames].sort((a, b) => a.localeCompare(b));
+    const current = state.consoleToolFilter;
+    sel.innerHTML = "";
+    sel.appendChild(el("option", { value: "" }, "All tools"));
+    names.forEach((name) => sel.appendChild(el("option", { value: name }, name)));
+    sel.value = names.includes(current) ? current : "";
+    if (sel.value !== current) state.consoleToolFilter = sel.value;
+    sel.hidden = names.length === 0;
+  }
+
+  // Presets (E.5's own list: "Everything" and "Quiet (errors + tool
+  // calls)"). One-shot actions, not a sticky mode — applying one resets
+  // the <select> back to its placeholder immediately (see the change
+  // handler below), the same way a command palette entry doesn't stay
+  // "selected" after running.
+  const CONSOLE_FILTER_PRESETS = {
+    everything: () => ({ hiddenKinds: new Set(), errorsOnly: false, tool: "", search: "" }),
+    quiet: () => {
+      const keep = new Set(["error", "tool-call", "tool-result"]);
+      const hidden = new Set(Object.keys(state.consoleKindCounts).filter((k) => !keep.has(k)));
+      return { hiddenKinds: hidden, errorsOnly: false, tool: "", search: "" };
+    },
+  };
+
+  function applyConsoleFilterPreset(preset) {
+    state.consoleHiddenKinds = preset.hiddenKinds;
+    state.consoleErrorsOnly = preset.errorsOnly;
+    state.consoleToolFilter = preset.tool;
+    state.consoleSearch = preset.search;
+    const errorsBox = qs("#console-filter-errors-only");
+    if (errorsBox) errorsBox.checked = state.consoleErrorsOnly;
+    const searchBox = qs("#console-search");
+    if (searchBox) searchBox.value = state.consoleSearch;
     applyConsoleFilter();
+    saveConsoleFilterPrefs();
+  }
+
+  let saveConsoleFilterPrefsTimer = null;
+  // Server-side, not localStorage — same reasoning, and the same pattern
+  // (a tiny JSON file next to favorites.json), as favorites already use:
+  // a browser-local preference means switching tabs/devices against the
+  // same running jarvis instance loses it. Debounced so typing in the
+  // search box doesn't fire a save per keystroke.
+  function saveConsoleFilterPrefs() {
+    clearTimeout(saveConsoleFilterPrefsTimer);
+    saveConsoleFilterPrefsTimer = setTimeout(() => {
+      Api.setConsoleFilterPrefs({
+        hiddenKinds: [...state.consoleHiddenKinds],
+        search: state.consoleSearch,
+        searchMode: state.consoleSearchMode,
+        errorsOnly: state.consoleErrorsOnly,
+        tool: state.consoleToolFilter,
+        turnScope: state.consoleTurnScope,
+      }).catch(() => {
+        // Best-effort, same shrug as every other small state file this app
+        // saves — a failed write just means this change doesn't survive
+        // the next reload, nothing else breaks.
+      });
+    }, 400);
+  }
+
+  qs("#console-filter-kinds").addEventListener("click", (e) => {
+    const btn = e.target.closest(".console-filter__kind-btn");
+    if (!btn) return;
+    const kind = btn.dataset.kind;
+    if (state.consoleHiddenKinds.has(kind)) state.consoleHiddenKinds.delete(kind);
+    else state.consoleHiddenKinds.add(kind);
+    btn.classList.toggle("is-active");
+    applyConsoleFilter();
+    saveConsoleFilterPrefs();
+  });
+  qs("#console-filter-errors-only").addEventListener("change", (e) => {
+    state.consoleErrorsOnly = e.target.checked;
+    applyConsoleFilter();
+    saveConsoleFilterPrefs();
+  });
+  qs("#console-filter-tool").addEventListener("change", (e) => {
+    state.consoleToolFilter = e.target.value;
+    applyConsoleFilter();
+    saveConsoleFilterPrefs();
+  });
+  qs("#console-filter-scope").addEventListener("change", (e) => {
+    state.consoleTurnScope = e.target.value;
+    applyConsoleFilter();
+    saveConsoleFilterPrefs();
+  });
+  qs("#console-filter-preset").addEventListener("change", (e) => {
+    const key = e.target.value;
+    e.target.value = "";
+    const build = CONSOLE_FILTER_PRESETS[key];
+    if (build) applyConsoleFilterPreset(build());
+  });
+  qs("#console-search-mode").addEventListener("change", (e) => {
+    state.consoleSearchMode = e.target.value;
+    applyConsoleFilter();
+    saveConsoleFilterPrefs();
   });
   qs("#console-search").addEventListener("input", (e) => {
     state.consoleSearch = e.target.value;
     applyConsoleFilter();
+    saveConsoleFilterPrefs();
   });
 
   qs("#btn-clear-console").addEventListener("click", () => {
     qs("#console").innerHTML = '<div class="console__idle">Awaiting instructions.</div>';
+    // This console's contents just went away — the facets describing them
+    // (per-kind counts, tool names, the current-turn pointer) need to
+    // reset too, or a stale "Output (312)" chip would sit there pointing
+    // at lines that no longer exist.
+    state.consoleKindCounts = {};
+    state.consoleToolNames = new Set();
+    state.consoleCurrentTurn = null;
+    applyConsoleFilter();
     // Part E.4 point 7 — persist a "cleared through here" marker so a
     // reload matches what this click just did, rather than bringing
     // everything back. Best-effort and silent, same as every other
@@ -2689,6 +3044,12 @@
         break;
       case "start":
         setRunning(true);
+        // K.2.5.3's turn-scope filter needs a way to tell "this run" apart
+        // from whatever came before it in the panel. This id is purely
+        // client-local — it doesn't need to match server.js's own
+        // `runTurn` used for console_store persistence (E.4/E.6); any
+        // distinct value per run works for that comparison.
+        state.consoleLiveTurn = `live-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
         consoleAppend(msg.cmdline, "cmd");
         break;
       case "stdout":
@@ -6751,8 +7112,16 @@
     if (convId !== state.activeConversationId) return;
     const lines = (result && result.lines) || [];
     consoleEl.innerHTML = "";
+    // Fresh conversation's console — the per-kind counts, tool-name list
+    // and current-turn pointer all describe THIS console's contents, not
+    // a running total left over from whatever was loaded before it.
+    state.consoleKindCounts = {};
+    state.consoleToolNames = new Set();
+    state.consoleCurrentTurn = null;
+    state.consoleLiveTurn = null;
     if (!lines.length) {
       consoleEl.appendChild(el("div", { class: "console__idle" }, "Awaiting instructions."));
+      applyConsoleFilter(); // clears any stale hidden-count chip / kind row from the previous conversation
       return;
     }
     let lastTurn;
@@ -6764,7 +7133,7 @@
       lastTurn = line.turn;
       sawFirstTurn = true;
       const cls = consoleClsForStoredLine(line.kind, line.text);
-      consoleAppend(line.text || "", cls, line.kind);
+      consoleAppend(line.text || "", cls, line.kind, { turn: line.turn, tool: line.tool || undefined });
     });
     applyConsoleFilter();
   }
@@ -7649,6 +8018,7 @@
     // or about-to-load) command list once the real favorite set is in.
     favoriteCommands = await loadFavoriteCommands();
     renderCommandList();
+    await loadConsoleFilterPrefs();
     // Silent: the boot sequence + status pill already explain an offline
     // CLI on first load, so a third toast on top would just be noise.
     await loadCommands({ silent: !status.online });
