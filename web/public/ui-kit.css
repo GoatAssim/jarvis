@@ -37,8 +37,11 @@ html.jui-no-motion *::after{
   animation-duration: 0.001ms !important;
   transition-duration: 0.001ms !important;
 }
-/* The scanline/grid overlay lives on body::before in style.css. */
-html.jui-no-scanlines body::before{ display: none !important; }
+/* The scanline/grid overlay actually lives on .console::before in
+   style.css (L.6.4 fix — this used to say body::before, a selector that
+   doesn't exist anywhere in the stylesheet, so the toggle never hid
+   anything). */
+html.jui-no-scanlines .console::before{ display: none !important; }
 
 /* Respect the OS setting without needing the toggle. */
 @media (prefers-reduced-motion: reduce){
