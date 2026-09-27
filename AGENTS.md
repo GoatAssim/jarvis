@@ -83,28 +83,55 @@ things that were already fixed once.
 ## Testing
 
 No framework dependency — plain `assert` throughout (also valid as
-pytest functions if pytest happens to be available). Run directly:
+pytest functions if pytest happens to be available). Each `test_*.py` is a
+standalone script: it resolves its own imports off `Path(__file__)`, so it
+runs correctly from any `cwd`, and it exits 0 on success / non-zero on
+failure — no test runner was strictly required to run one file at a time.
 
-    python3 tests/test_schemas_for_tools.py
-    python3 tests/test_enhancements.py
-    python3 tests/test_workspace.py
-    python3 tests/test_channel_people.py
-    python3 tests/test_checklist_coverage.py
-    python3 tests/test_checklist_supplied.py
-    python3 tests/test_finish_signal.py
-    python3 tests/test_ask_output.py
-    python3 tests/test_browser_daemon.py
-    python3 tests/test_subagents.py
-    python3 tests/test_build_info.py
-    python3 tests/test_reserved_names.py
-    python3 tests/test_replay_fixtures.py
-    python3 tests/test_doctor_saved_commands.py
-    python3 tests/test_streaming_ollama.py
-    python3 tests/test_streaming_other_adapters.py
-    python3 tests/test_d5_fixes.py
-    python3 tests/test_k28_token_burn.py
-    python3 tests/test_notification_levels.py
-    python3 tests/test_h11_daemon_status.py
+**Running more than one file at a time used to mean copy-pasting a
+hand-maintained list here — that list silently drifted (it named under a
+quarter of the ~80 files actually in `tests/`) and nobody had to notice,
+because nothing ever cross-checked it against the directory. Use
+`tests/run_tests.py` instead — it discovers every `test_*.py` in `tests/`
+by globbing the directory itself, so there is no list to fall out of
+sync:**
+
+    python3 tests/run_tests.py                     # run everything, one line per file
+    python3 tests/run_tests.py --list               # see what it discovered, run nothing
+    python3 tests/run_tests.py clipboard             # run only tests matching a name filter
+    python3 tests/run_tests.py clipboard build_info   # multiple filters = OR
+    python3 tests/run_tests.py -d clipboard_watch     # --detailed: full output, not just the summary line
+    python3 tests/run_tests.py --fail-fast            # stop at the first failing file
+    python3 tests/run_tests.py --jobs 8               # run in parallel (output stays in discovery order)
+    python3 tests/run_tests.py --timeout 300          # override the per-test timeout (default 180s)
+
+A filter matches by substring against the file's name with `test_`/`.py`
+stripped, case-insensitive — `clipboard`, `clipboard_watch`, and
+`test_clipboard_watch.py` all work. Exit code is 0 only if every selected
+test passed, 1 if any failed, 2 if a filter matched nothing. Each test
+runs as its own subprocess (`stdin` closed, so nothing can silently hang
+waiting on input) with its own timeout, so one crashing or hanging file
+can't take the rest of the run down with it.
+
+**Read the default timeout's own `--help` text before assuming a file is
+hung** — several tests now involve real, unmocked sleeps.
+`key_health.pace_key()` (K.3.6, `jarvis-cli/jarvis/key_health.py`) puts a
+real `time.sleep()` floor (`DEFAULT_MIN_ROUND_INTERVAL = 3.0`s) between
+two requests on the same key, called unconditionally from every one of
+`ai_providers.py`'s five adapters via `_pace_round()`. `test_key_health.py`
+mocks `time.sleep` for its own direct tests of `pace_key`/`_pace_round`,
+but most other test files that exercise multi-round adapter scenarios
+(`test_finish_signal.py`, `test_streaming_other_adapters.py`, etc.) don't
+mock `key_health` at all — they now pay the real 3-second floor on every
+same-key round, which is why `test_finish_signal.py` takes ~140s and
+`test_streaming_other_adapters.py` takes ~65s where they used to be near-
+instant. Those same unmocked tests also read/write the real
+`~/.jarvis/key_health.json` on whatever machine runs them, rather than an
+isolated temp copy — worth fixing (give the whole suite a shared fixture
+that redirects `key_health.HEALTH_FILE`, the way `test_key_health.py`'s
+own `_reset()` does just for itself) before this gets worse as more
+adapter-loop tests are added. Set `min_round_interval_seconds` to `0` on a
+provider block, or pass `--timeout` generously, in the meantime.
 
 Front-end logic that's pure enough to run outside a browser gets a plain
 Node script instead, same no-framework convention (each slices the real
