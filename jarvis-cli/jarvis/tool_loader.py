@@ -31,6 +31,12 @@ A file in jarvis/actions/ is discovered as a tool module if it exposes:
                                               # web/public/test-checklist-data.js
     TEST_CHECKLIST_GROUP   = {"label": ..., "blurb": ...}  # names a brand-new
                                               # TOOL_GROUP's section in that panel
+                                              # — or, for a module whose tools
+                                              # split across more than one
+                                              # section, {group_id: {"label":
+                                              # ..., "blurb": ...}, ...} names
+                                              # several (master plan G.2; see
+                                              # checklist_schema.py)
 
 A file (with or without the TOOL_SCHEMAS/TOOLS/TOOL_GROUP trio above) can
 ALSO optionally expose:
@@ -47,7 +53,7 @@ See actions/_template.py for the full contract, one field at a time,
 including why TOOL_KEYWORDS matters for routing (the section called out
 below) and how confirm-gating is supposed to work.
 
---- TEST_CHECKLIST / TEST_CHECKLIST_GROUP (master plan G.1) ---
+--- TEST_CHECKLIST / TEST_CHECKLIST_GROUP (master plan G.1, extended by G.2) ---
 
 The Test Checklist panel's shipped catalogue (web/public/test-checklist-data.js)
 can only ever document tools that ship WITH jarvis. A tool a user wrote into
@@ -56,6 +62,15 @@ forever. A module can now carry its own entry: TEST_CHECKLIST maps tool name
 -> entry, in exactly the shape the shipped file uses (checklist_schema.py is
 the single definition and the single validator), and TEST_CHECKLIST_GROUP
 labels a brand-new TOOL_GROUP so it gets a real section instead of a bare id.
+
+A module can already give each of its tools its own TEST_CHECKLIST entry —
+nothing here caps it at one. G.2 removes the one remaining cap: a module
+whose tools genuinely split across more than one logical category can give
+TEST_CHECKLIST_GROUP the multi-group shape ({group_id: {"label", "blurb"},
+...}) instead of the single {"label", "blurb"} shape, and tag each entry's
+own "group" with the id of the section it belongs in. The single-group shape
+— still the default, still tied 1:1 to TOOL_GROUP — is unaffected; see
+checklist_schema.extract_supplied() for exactly how the two are told apart.
 
 Failure mode differs from TOOL_KEYWORDS on purpose: a malformed entry is
 dropped and logged, and the TOOL FILE STILL LOADS. A checklist entry is notes
@@ -194,8 +209,12 @@ class ActionModuleRecord:
     ai_review: set = field(default_factory=set)
     result_specs: dict = field(default_factory=dict)
     personas: list = field(default_factory=list)
-    # G.1: already validated and normalised by checklist_schema.extract_supplied
-    # ({tool name: entry, "group" filled in}); {} / {} when the module supplied none.
+    # G.1/G.2: already validated and normalised by checklist_schema.extract_supplied.
+    #   checklist        {tool name: entry, "group" filled in}
+    #   checklist_group  {group id: {"label", "blurb"}, ...} — one entry under
+    #                    the single-group shape (keyed by this module's own
+    #                    TOOL_GROUP), one per id under the multi-group shape
+    # {} / {} when the module supplied none of either.
     checklist: dict = field(default_factory=dict)
     checklist_group: dict = field(default_factory=dict)
 
@@ -327,18 +346,19 @@ def _validate(module, filename, logger):
             "name as a fallback."
         )
 
-    # G.1: the module's own Test Checklist entry/entries, if any. Deliberately
-    # AFTER every check that can reject the file, and never a reason to reject
-    # it: problems are logged, the offending entry is dropped, the tool loads.
+    # G.1/G.2: the module's own Test Checklist entry/entries and group(s), if
+    # any. Deliberately AFTER every check that can reject the file, and never
+    # a reason to reject it: problems are logged, the offending entry is
+    # dropped, the tool loads. extract_supplied() always returns a dict for
+    # group_meta (possibly {}), single- or multi-group shape alike.
     raw_checklist = getattr(module, "TEST_CHECKLIST", None)
     raw_checklist_group = getattr(module, "TEST_CHECKLIST_GROUP", None)
     checklist, checklist_group = {}, {}
     if raw_checklist is not None or raw_checklist_group is not None:
         from . import checklist_schema
-        checklist, group_meta, checklist_problems = checklist_schema.extract_supplied(
+        checklist, checklist_group, checklist_problems = checklist_schema.extract_supplied(
             raw_checklist, raw_checklist_group, names, group,
         )
-        checklist_group = group_meta or {}
         for problem in checklist_problems:
             logger(f"[checklist] {filename}: {problem} — ignored; the tool itself still loads.")
 

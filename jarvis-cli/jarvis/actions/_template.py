@@ -116,6 +116,15 @@ def tool_example_ping(args):
     return {"ok": True, "target": target, "result": "pong"}
 
 
+def tool_example_echo(args):
+    args = args or {}
+    text = (args.get("text") or "").strip()
+    if not text:
+        return {"needs_clarification": True, "message": "Echo what?"}
+    # ... do the real work here ...
+    return {"ok": True, "echo": text}
+
+
 # ---------------------------------------------------------------------------
 # 2. TOOL_SCHEMAS — required. Same shape as every existing *_TOOL_SCHEMAS
 #    list (see git_tools.GIT_TOOL_SCHEMAS for a real, short example) — a
@@ -149,12 +158,29 @@ TOOL_SCHEMAS = [
             "required": ["target"],
         },
     },
+    {
+        "name": "example_echo",
+        "description": (
+            "A second example tool in the same file — here only so this "
+            "template can demonstrate a module supplying more than one "
+            "TEST_CHECKLIST entry (section 8 below). Replace or delete it "
+            "along with example_ping."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "text": {"type": "string", "description": "What to echo back."},
+            },
+            "required": ["text"],
+        },
+    },
 ]
 
 # TOOLS — required. name -> handler, one entry per TOOL_SCHEMAS name (and
 # no extra entries with no matching schema — discovery rejects that too).
 TOOLS = {
     "example_ping": tool_example_ping,
+    "example_echo": tool_example_echo,
 }
 
 # ---------------------------------------------------------------------------
@@ -193,6 +219,7 @@ TOOL_GROUP = "example"
 # real example of why that exists.
 TOOL_KEYWORDS = {
     "example_ping": {"ping": 10, "ping the": 10},
+    "example_echo": {"echo": 10},
 }
 
 # TOOL_PACK_INSTRUCTION — optional. One short line of workflow guidance,
@@ -643,7 +670,8 @@ TOOL_RESULT_SPECS = {}
 #    TEST_CHECKLIST is a dict, tool name -> entry, in EXACTLY the shape the
 #    shipped file uses under "tools" (documented at the top of
 #    test-checklist-data.js), except "group": leave it out and it follows
-#    TOOL_GROUP above; if you give it, it must equal TOOL_GROUP.
+#    TOOL_GROUP above; if you give it, it must be TOOL_GROUP or one of your
+#    own TEST_CHECKLIST_GROUP ids (see the multi-group paragraph below).
 #
 #        does    one line: what the tool is for                    (required)
 #        steps   one or more tests                                 (required)
@@ -662,10 +690,38 @@ TOOL_RESULT_SPECS = {}
 #    live only in the tester's browser. Editing a step's text un-ticks it for
 #    testers, which is what you want when the behaviour changed.
 #
-#    TEST_CHECKLIST_GROUP is only for a BRAND-NEW TOOL_GROUP (one that is
-#    neither a router group jarvis already ships nor "custom", which the panel
-#    already labels): it names your category's section. Without it the panel
-#    still shows your tool, under a label made from the group id.
+#    A MODULE WITH MORE THAN ONE TOOL SUPPLIES MORE THAN ONE ENTRY
+#    ----------------------------------------------------------------
+#    Nothing caps a module at one TEST_CHECKLIST entry — it's a dict keyed by
+#    tool name, so a module with several tools in its TOOLS dict gives each
+#    one its own does/steps/needs/os/care/watch entry, the same way this file
+#    now does for its two example tools below (example_ping AND
+#    example_echo). Don't leave a second, third, ... tool with no entry just
+#    because the first one has one.
+#
+#    TEST_CHECKLIST_GROUP: ONE SECTION, OR SEVERAL (master plan G.2)
+#    -----------------------------------------------------------------
+#    In its simplest, most common shape, TEST_CHECKLIST_GROUP names ONE new
+#    section — the panel's home for your module's whole TOOL_GROUP, when that
+#    group isn't one jarvis already ships (or "custom", which the panel
+#    already labels):
+#
+#        TEST_CHECKLIST_GROUP = {"label": "...", "blurb": "..."}
+#
+#    Without it the panel still shows your tools, under a label made from the
+#    group id. Most modules stop here — one module, one category.
+#
+#    If your module's tools genuinely split across more than one logical
+#    category, give TEST_CHECKLIST_GROUP a SECOND shape instead: a dict of
+#    {group_id: {"label": ..., "blurb": ...}, ...}, one entry per section —
+#    and tag each TEST_CHECKLIST entry's own "group" with the id of the
+#    section it belongs in (an id from this dict, or TOOL_GROUP itself, which
+#    is always a valid target whether or not you also gave it its own meta
+#    here). The two shapes are told apart by their keys alone: a plain
+#    {"label", "blurb"} dict is the single-section shape; anything else is
+#    read as {group_id: meta, ...}. See the worked example just below, where
+#    example_echo splits off into its own "example_extra" section while
+#    example_ping stays in TOOL_GROUP's own "example" section.
 #
 #    VALIDATION AND FAILURE MODE
 #    ----------------------------
@@ -679,12 +735,18 @@ TOOL_RESULT_SPECS = {}
 #    WHERE THIS SURFACES
 #    --------------------
 #    tools.tools_list_payload() (`jarvis tools-list`, GET /api/tools) adds
-#    `checklist` (and `checklist_group`) to a tool that supplied them; the
-#    panel merges those into its shipped catalogue. No new route, no storage.
+#    `checklist` (and, per tool, `checklist_group` for THAT tool's own
+#    section) to a tool that supplied them; the panel merges those into its
+#    shipped catalogue, one tool at a time, so a module split across sections
+#    just works — no new route, no storage.
 # ---------------------------------------------------------------------------
 
 TEST_CHECKLIST = {
     "example_ping": {
+        # No "group" here — follows TOOL_GROUP ("example"), same as every
+        # entry did before G.2. example_echo below is the one that opts into
+        # a different, module-declared section (see "group": "example_extra"
+        # set on it further down).
         "does": "Replies 'pong' for whatever target it is given.",
         "steps": [
             {"ask": "Ping <a hostname>.",
@@ -696,14 +758,44 @@ TEST_CHECKLIST = {
         ],
         "watch": ["A blank target must ask a question, not return a fake pong."],
     },
+    "example_echo": {
+        "does": "Echoes back whatever text it is given.",
+        "steps": [
+            {"ask": "Echo <a short phrase>.",
+             "expect": "Replies with that exact phrase."},
+            {"run": {"text": "hello"},
+             "expect": "ok: true, echo 'hello'."},
+            {"run": {},
+             "expect": "Asks what to echo instead of guessing (needs_clarification)."},
+        ],
+        "watch": ["A blank text must ask a question, not return an empty echo."],
+        # Tags this entry into a SECOND checklist section, declared below in
+        # the multi-group TEST_CHECKLIST_GROUP — must be TOOL_GROUP itself or
+        # one of that dict's own ids, never anything else.
+        "group": "example_extra",
+    },
 }
 
-# Only needed because TOOL_GROUP above is the brand-new group "example".
+# The multi-group shape (master plan G.2): two sections instead of one,
+# because this template pretends example_ping and example_echo belong to
+# different categories. "example" is TOOL_GROUP's own id — declaring its
+# meta here is optional (it's always a valid target either way) but shown
+# for completeness; "example_extra" is a second id that exists ONLY in this
+# dict, and only because example_echo's own entry above tags "group":
+# "example_extra". Delete this whole multi-group example, and go back to
+# the single {"label": ..., "blurb": ...} shape, if your module's tools all
+# belong in one section — that's the common case, and it's simpler.
 TEST_CHECKLIST_GROUP = {
-    "label": "Examples",
-    "blurb": "Template tools; delete this once you have written your own.",
+    "example": {
+        "label": "Examples",
+        "blurb": "Template tools; delete this once you have written your own.",
+    },
+    "example_extra": {
+        "label": "Examples (extra)",
+        "blurb": "A second section, to show a module splitting its tools across more than one.",
+    },
 }
 
-# That's the whole contract. Delete example_ping and this comment block,
-# write your real handler(s) and schema(s) above, and the file is live the
-# next time Jarvis starts — no edits anywhere else.
+# That's the whole contract. Delete example_ping, example_echo and this
+# comment block, write your real handler(s) and schema(s) above, and the
+# file is live the next time Jarvis starts — no edits anywhere else.

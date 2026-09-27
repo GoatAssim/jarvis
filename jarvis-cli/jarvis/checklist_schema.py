@@ -16,12 +16,25 @@ and both go through the functions below, so "well formed" has one definition:
                tool_loader._validate() and custom_tools_store.validate_source()
                both call extract_supplied() below.
 
+               TEST_CHECKLIST_GROUP itself has two shapes (master plan G.2):
+               the plain {"label", "blurb"} shape names ONE section, tied to
+               the module's own TOOL_GROUP (the original, still-default
+               shape); a {group_id: {"label", "blurb"}, ...} shape — a dict
+               whose keys are NOT a subset of {"label", "blurb"} — names as
+               many sections as the module needs, each an id an entry's
+               "group" can point at (in addition to TOOL_GROUP itself, which
+               is always a valid target with or without its own meta). See
+               extract_supplied()'s docstring below for exactly how each
+               shape is told apart and what it resolves to.
+
 Entry shape (identical in both places — see AGENTS.md > Test Checklist):
 
     {
       "group":  "files",                 # shipped: required. supplied: optional,
                                          #   defaults to the module's TOOL_GROUP
-                                         #   and, if given, must equal it
+                                         #   and, if given, must be TOOL_GROUP or
+                                         #   one of the module's own declared
+                                         #   TEST_CHECKLIST_GROUP ids (G.2)
       "does":   "one line: what it is for",
       "steps":  [ {"ask": "prompt to type into Ask", "expect": "what a pass looks like"},
                   {"run": {"arg": "value"},          "expect": "..."} ],   # >= 1
@@ -138,36 +151,101 @@ def validate_entry(name, entry):
     return problems
 
 
-def validate_group_meta(meta):
-    """Problems with a TEST_CHECKLIST_GROUP value: {"label": ..., "blurb": ...}."""
+def validate_group_meta(meta, label="TEST_CHECKLIST_GROUP"):
+    """Problems with ONE group's meta: {"label": ..., "blurb": ...}. Used for
+    both the single-group TEST_CHECKLIST_GROUP shape and each value of the
+    multi-group shape (see is_multi_group_shape() below) — `label` names the
+    thing being checked in each problem string, so a multi-group caller can
+    pass e.g. "TEST_CHECKLIST_GROUP['browser_read']" and get a message that
+    points at the right entry instead of a bare "TEST_CHECKLIST_GROUP"."""
     if not isinstance(meta, dict):
-        return [f"TEST_CHECKLIST_GROUP must be a dict, not {type(meta).__name__}"]
+        return [f"{label} must be a dict, not {type(meta).__name__}"]
     problems = []
     unknown = sorted(set(meta) - GROUP_META_KEYS)
     if unknown:
-        problems.append(f"TEST_CHECKLIST_GROUP: unknown key(s) {unknown} (allowed: label, blurb)")
+        problems.append(f"{label}: unknown key(s) {unknown} (allowed: label, blurb)")
     if not _text(meta.get("label"), MAX_LABEL):
-        problems.append(f"TEST_CHECKLIST_GROUP: 'label' must be a non-empty string of at most {MAX_LABEL} characters")
+        problems.append(f"{label}: 'label' must be a non-empty string of at most {MAX_LABEL} characters")
     if "blurb" in meta and not (isinstance(meta["blurb"], str) and len(meta["blurb"]) <= MAX_BLURB):
-        problems.append(f"TEST_CHECKLIST_GROUP: 'blurb' must be a string of at most {MAX_BLURB} characters")
+        problems.append(f"{label}: 'blurb' must be a string of at most {MAX_BLURB} characters")
     return problems
+
+
+def is_multi_group_shape(raw_group_meta):
+    """True if a TEST_CHECKLIST_GROUP value is the multi-group shape (G.2):
+    a dict of {group_id: {"label", "blurb"}, ...} rather than one group's own
+    {"label", "blurb"}. Told apart by key set alone, no separate marker: the
+    single-group shape's keys are always a subset of {"label", "blurb"}, and
+    a real group id is never exactly one of those two words — a module with
+    a legitimate group literally called "label" or "blurb" is not a shape
+    this schema can support, and is asked (via the problem this produces
+    downstream) to rename it. An empty dict counts as single-group (nothing
+    to tell it apart by), so `TEST_CHECKLIST_GROUP = {}` behaves the way it
+    always has: dropped by validate_group_meta for a missing 'label'."""
+    return isinstance(raw_group_meta, dict) and bool(raw_group_meta) and not set(raw_group_meta).issubset(GROUP_META_KEYS)
 
 
 def extract_supplied(raw_entries, raw_group_meta, tool_names, group):
     """Turn a module's TEST_CHECKLIST / TEST_CHECKLIST_GROUP into clean data.
 
-    raw_entries / raw_group_meta: the module attributes, or None when absent.
+    raw_entries: the module's TEST_CHECKLIST, or None when absent.
+    raw_group_meta: the module's TEST_CHECKLIST_GROUP, or None when absent.
+                    Either the single-group shape {"label", "blurb"} (naming
+                    TOOL_GROUP's own section) or the multi-group shape
+                    {group_id: {"label", "blurb"}, ...} (naming one or more
+                    of the module's OWN sections, distinct from TOOL_GROUP) —
+                    see is_multi_group_shape() above for how they're told
+                    apart. A module needs the multi-group shape only when its
+                    tools split across more than one logical category; the
+                    common case (one module, one category) keeps using the
+                    single-group shape exactly as before.
     tool_names: the names in the module's TOOLS. group: its TOOL_GROUP.
 
     Returns (entries, group_meta, problems):
       entries     {tool name: entry}, each a fresh plain-JSON copy with "group"
-                  filled in — so it is safe to json.dumps into `jarvis
-                  tools-list` no matter what the module put in it
-      group_meta  {"label", "blurb"} or None
+                  filled in (defaulting to TOOL_GROUP, or the entry's own
+                  explicit "group" once validated) — so it is safe to
+                  json.dumps into `jarvis tools-list` no matter what the
+                  module put in it
+      group_meta  {group id: {"label", "blurb"}, ...} for every group the
+                  module named meta for (one entry under the single-group
+                  shape, keyed by TOOL_GROUP; one per id under the
+                  multi-group shape), or {} when the module supplied none —
+                  never None, so callers can always .items() it
       problems    strings, one per thing that was dropped and why
 
     Never raises."""
-    entries, problems, group_meta = {}, [], None
+    entries, problems, group_meta = {}, [], {}
+
+    # Valid targets for an entry's own explicit "group": TOOL_GROUP itself is
+    # always allowed (with or without its own meta — this is unchanged from
+    # before G.2), plus whatever multi-group ids the module declared meta
+    # for. A module doesn't have to declare meta for a group id to use it on
+    # an entry — TEST_CHECKLIST_GROUP is a place to NAME a section, not a
+    # required registry — but declaring meta for an id the module's entries
+    # never use is harmless and not itself a problem.
+    declared_ids = set()
+
+    if raw_group_meta is not None:
+        if is_multi_group_shape(raw_group_meta):
+            for gid, meta in raw_group_meta.items():
+                if not isinstance(gid, str) or not gid.strip():
+                    problems.append(f"TEST_CHECKLIST_GROUP has a non-string or empty group id {gid!r}")
+                    continue
+                found = validate_group_meta(meta, label=f"TEST_CHECKLIST_GROUP[{gid!r}]")
+                if found:
+                    problems.extend(found)
+                    continue
+                group_meta[gid] = {"label": meta["label"].strip(), "blurb": (meta.get("blurb") or "").strip()}
+                declared_ids.add(gid)
+        else:
+            found = validate_group_meta(raw_group_meta)
+            if found:
+                problems.extend(found)
+            else:
+                group_meta[group] = {"label": raw_group_meta["label"].strip(), "blurb": (raw_group_meta.get("blurb") or "").strip()}
+
+    valid_group_ids = {group} | declared_ids
 
     if raw_entries is not None:
         if not isinstance(raw_entries, dict):
@@ -177,12 +255,20 @@ def extract_supplied(raw_entries, raw_group_meta, tool_names, group):
                 if not isinstance(name, str) or name not in tool_names:
                     problems.append(f"TEST_CHECKLIST has an entry for {name!r}, which is not one of this file's tools ({sorted(tool_names)})")
                     continue
-                if isinstance(entry, dict) and "group" in entry and entry["group"] != group:
-                    problems.append(
-                        f"{name}: 'group' is {entry['group']!r} but this file's TOOL_GROUP is {group!r} — "
-                        "leave 'group' out and it follows TOOL_GROUP"
-                    )
-                    continue
+                entry_group = group
+                if isinstance(entry, dict) and "group" in entry:
+                    entry_group = entry["group"]
+                    # isinstance-gated before the set membership check: entry_group
+                    # is untrusted module data and could be unhashable (a list, a
+                    # dict), which `in` on a set would raise on rather than just
+                    # report as a mismatch — never allowed to happen here.
+                    if not (isinstance(entry_group, str) and entry_group in valid_group_ids):
+                        problems.append(
+                            f"{name}: 'group' is {entry_group!r} but this file's TOOL_GROUP is {group!r} and its own "
+                            f"TEST_CHECKLIST_GROUP declares {sorted(declared_ids)!r} — 'group' must be one of those, "
+                            "or left out to follow TOOL_GROUP"
+                        )
+                        continue
                 found = validate_entry(name, entry)
                 if found:
                     problems.extend(found)
@@ -192,14 +278,7 @@ def extract_supplied(raw_entries, raw_group_meta, tool_names, group):
                 except (TypeError, ValueError, RecursionError):
                     problems.append(f"{name}: entry must be plain JSON")
                     continue
-                clean["group"] = group
+                clean["group"] = entry_group
                 entries[name] = clean
-
-    if raw_group_meta is not None:
-        found = validate_group_meta(raw_group_meta)
-        if found:
-            problems.extend(found)
-        else:
-            group_meta = {"label": raw_group_meta["label"].strip(), "blurb": (raw_group_meta.get("blurb") or "").strip()}
 
     return entries, group_meta, problems
