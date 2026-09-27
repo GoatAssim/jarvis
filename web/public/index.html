@@ -1362,15 +1362,65 @@
         <div class="skills-list" id="daemons-list">
           <div class="skills-empty">Loading&hellip;</div>
         </div>
-        <div class="skills-pane__head"><h3>Add your own</h3></div>
-        <div class="sched-add">
-          <input type="text" id="daemon-new-id" placeholder="id &mdash; e.g. web" />
-          <input type="text" id="daemon-new-command" placeholder="command &mdash; e.g. node server.js --port 3000" />
-          <input type="text" id="daemon-new-cwd" placeholder="working directory (optional)" />
-          <label class="daemon-stdin-toggle">
-            <input type="checkbox" id="daemon-new-stdin" /> reads stdin
-          </label>
-          <button class="btn btn--primary btn--sm" id="btn-daemon-add" type="button">Register</button>
+        <div class="skills-pane__head">
+          <h3>Add your own</h3>
+          <button class="btn btn--ghost btn--sm" id="btn-daemon-add-open" type="button">+ Add daemon</button>
+        </div>
+        <!-- H.1.4 (owner feedback, 2026-09-27): its own editor, the same
+             pattern the Custom Tools panel uses for "Add Command" — not a
+             bare inline row squeezed into the list. Hidden until "+ Add
+             daemon" is clicked. Every field here maps straight to a
+             daemon-add flag the CLI/backend already accepted before this
+             patch (see workspace_cli.py's daemon-add usage string); the
+             old inline row only ever surfaced 4 of them (id, command, cwd,
+             stdin). daemons.js's addDaemonEditor* functions own this
+             block's wiring. -->
+        <div class="dmn-add-editor" id="dmn-add-editor" hidden>
+          <div class="dmn-add-editor__row">
+            <input type="text" id="daemon-new-id" placeholder="id &mdash; e.g. web" />
+            <input type="text" id="daemon-new-name" placeholder="display name (optional)" />
+          </div>
+          <input type="text" id="daemon-new-command" class="dmn-add-editor__wide" placeholder="command &mdash; e.g. node server.js --port 3000" />
+          <textarea id="daemon-new-description" class="dmn-add-editor__desc" rows="2" placeholder="description / notes (optional, shown in the row's tooltip)"></textarea>
+          <div class="dmn-add-editor__row">
+            <input type="text" id="daemon-new-cwd" placeholder="working directory (optional)" />
+            <label class="daemon-stdin-toggle"><input type="checkbox" id="daemon-new-shell" /> run via shell</label>
+          </div>
+
+          <div class="dmn-add-editor__head">Environment variables</div>
+          <div class="dmn-add-editor__env" id="dmn-add-env"></div>
+          <button class="btn btn--ghost btn--sm" id="btn-daemon-env-add" type="button">+ variable</button>
+
+          <div class="dmn-add-editor__head">Restart policy</div>
+          <div class="dmn-add-editor__row">
+            <select id="daemon-new-restart" class="jui-input" title="What to do when the process exits">
+              <option value="never">Never restart</option>
+              <option value="on-failure">Restart on failure</option>
+              <option value="always">Always restart</option>
+            </select>
+            <input type="number" id="daemon-new-restart-delay" min="0" placeholder="restart delay (s)" value="5" title="Seconds to wait before a restart" />
+            <input type="number" id="daemon-new-max-restarts" min="0" placeholder="max restarts / 10 min" value="5" title="0 = unlimited" />
+          </div>
+
+          <div class="dmn-add-editor__head">Stop behavior</div>
+          <div class="dmn-add-editor__row">
+            <select id="daemon-new-stop-signal" class="jui-input" title="Signal sent on Stop (Windows always force-kills)">
+              <option value="TERM">TERM (polite)</option>
+              <option value="INT">INT</option>
+              <option value="KILL">KILL (force)</option>
+            </select>
+            <input type="number" id="daemon-new-stop-timeout" min="1" placeholder="stop timeout (s)" value="10" title="How long to wait before force-killing" />
+          </div>
+
+          <div class="dmn-add-editor__row">
+            <label class="daemon-stdin-toggle"><input type="checkbox" id="daemon-new-stdin" /> reads stdin</label>
+            <label class="daemon-stdin-toggle"><input type="checkbox" id="daemon-new-autostart" /> autostart</label>
+          </div>
+
+          <div class="dmn-add-editor__row">
+            <button class="btn btn--primary btn--sm" id="btn-daemon-add" type="button">Register</button>
+            <button class="btn btn--ghost btn--sm" id="btn-daemon-add-cancel" type="button">Cancel</button>
+          </div>
         </div>
       </section>
 

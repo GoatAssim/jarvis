@@ -581,7 +581,32 @@ def status(daemon_id):
         # Claimed to be up and isn't. Distinguish a clean stop (we asked)
         # from a crash (we didn't), because that is the single most useful
         # thing to know when a gateway is mysteriously offline.
-        reported = STATUS_STOPPED if state.get("stop_requested") else STATUS_CRASHED
+        #
+        # H.1.2 (owner-reported, 2026-09-27): "we didn't ask for a stop" is
+        # not, by itself, evidence of a crash. run_supervisor() always
+        # writes the real final status itself — STOPPED or CRASHED, with a
+        # reason — before it ever exits normally (see its own closing
+        # _write_status call at the bottom of this module); that path never
+        # reaches this auto-detection branch at all. The only way status()
+        # finds RUNNING-but-gone with the *supervisor itself* also gone,
+        # and no final status ever written, is something external to the
+        # daemon: a host reboot, the supervisor being force-killed, or a
+        # jarvis upgrade replacing the running process. Reporting every
+        # daemon that was ever running as "crashed" the next time the panel
+        # is opened after one of those is a false alarm on every row, not a
+        # real crash signal — so with the supervisor also gone and no
+        # stop_requested on file, this is now reported as stopped instead.
+        # A supervisor that IS still alive with its child gone keeps the
+        # original, deliberately immediate crashed reading unchanged (see
+        # H.1.1's test_running_to_gone_is_still_an_immediate_crash_no_
+        # regression) — that combination means the supervisor is actively
+        # mid-run and something really did go wrong under it.
+        if state.get("stop_requested"):
+            reported = STATUS_STOPPED
+        elif pid_alive(supervisor):
+            reported = STATUS_CRASHED
+        else:
+            reported = STATUS_STOPPED
         _write_status(did, status=reported, child_pid=None)
     elif entry.get("next_start"):
         reported = STATUS_SCHEDULED
@@ -672,6 +697,17 @@ def start(daemon_id):
     current = status(did)
     if current["running"]:
         return False, f"'{did}' is already running (pid {current['pid']})"
+    # H.1.3 (owner-reported, 2026-09-27): a daemon in STARTING or RESTARTING
+    # (mid crash-loop backoff) is not `running` yet by the check above, but
+    # its supervisor is already alive and already owns this daemon's child
+    # slot — spawning a second supervisor here would race the first one for
+    # the same console.log/status.json and stdin.queue. status()'s own
+    # `supervisor_pid` field is already exactly "the recorded supervisor
+    # pid, or None if it's not actually alive", so checking it catches this
+    # without needing to special-case each intermediate status by name.
+    if current["supervisor_pid"]:
+        return False, (f"'{did}' already has a supervisor running "
+                        f"(pid {current['supervisor_pid']}) — stop it first")
 
     argv = resolve_argv(entry)
     if not argv:
