@@ -9527,244 +9527,11 @@
     openAsk();
   });
 
-  // --- daemons ----------------------------------------------------------
-  const daemonsOverlay = qs("#daemons-overlay");
-  let selectedDaemon = null;
-  let daemonPollTimer = null;
-
-  function daemonStatusClass(status) {
-    if (status === "running") return "daemon-dot daemon-dot--up";
-    if (status === "crashed") return "daemon-dot daemon-dot--bad";
-    if (status === "scheduled") return "daemon-dot daemon-dot--wait";
-    return "daemon-dot";
-  }
-
-  function renderDaemonRow(entry) {
-    const running = Boolean(entry.running);
-    const actions = el("div", { class: "daemon-actions" }, [
-      el("button", {
-        class: "btn btn--ghost btn--sm",
-        onclick: () => daemonAction(entry.id, running ? "stop" : "start"),
-      }, running ? "Stop" : "Start"),
-      el("button", {
-        class: "btn btn--ghost btn--sm",
-        onclick: () => daemonAction(entry.id, "restart"),
-      }, "Restart"),
-      el("button", {
-        class: "btn btn--ghost btn--sm",
-        onclick: () => selectDaemon(entry.id),
-      }, "Console"),
-    ]);
-    // A built-in can be disabled but never deleted — daemons.remove refuses,
-    // so offering the button would only produce an error.
-    if (!entry.builtin) {
-      actions.appendChild(el("button", {
-        class: "btn btn--ghost btn--sm",
-        onclick: () => removeDaemon(entry.id),
-      }, "Remove"));
-    }
-
-    const meta = [];
-    if (entry.pid) meta.push(`pid ${entry.pid}`);
-    if (entry.adopted) meta.push("started outside Jarvis");
-    if (entry.next_start) meta.push(`starts ${entry.next_start}`);
-    if (!entry.enabled) meta.push("disabled");
-    if (entry.last_error) meta.push(entry.last_error);
-
-    return el("div", {
-      class: "skill-row daemon-row" + (selectedDaemon === entry.id ? " is-selected" : ""),
-    }, [
-      el("div", { class: "daemon-row__main" }, [
-        el("span", { class: daemonStatusClass(entry.status) }),
-        el("div", { class: "daemon-row__text" }, [
-          el("div", { class: "skill-row__name" }, entry.name || entry.id),
-          el("div", { class: "skill-row__desc" },
-            `${entry.status}${meta.length ? " \u2014 " + meta.join(", ") : ""}`),
-          el("div", { class: "daemon-row__cmd" }, entry.command || ""),
-        ]),
-      ]),
-      actions,
-    ]);
-  }
-
-  async function refreshDaemons() {
-    if (!daemonsOverlay || daemonsOverlay.hidden) return;
-    const list = qs("#daemons-list");
-    const statusLine = qs("#daemons-status-line");
-    try {
-      const data = await Api.get("/api/daemons");
-      const entries = data.daemons || [];
-      const up = entries.filter((d) => d.running).length;
-      const broken = entries.filter((d) => d.status === "crashed").length;
-      statusLine.textContent =
-        `${up} of ${entries.length} running` + (broken ? `, ${broken} crashed` : "");
-      list.innerHTML = "";
-      for (const entry of entries) list.appendChild(renderDaemonRow(entry));
-      if (!entries.length) {
-        list.appendChild(el("div", { class: "skills-empty" }, "No services registered."));
-      }
-    } catch (err) {
-      statusLine.textContent = "couldn't read services";
-      list.innerHTML = "";
-      list.appendChild(el("div", { class: "skills-empty" }, err.message || "Failed."));
-    }
-  }
-
-  async function daemonAction(id, action) {
-    try {
-      const data = await Api.post(`/api/daemons/${encodeURIComponent(id)}/${action}`, {});
-      toast(data.message || `${action}ed ${id}`, "info");
-    } catch (err) {
-      toast(err.message || `Couldn't ${action} ${id}.`);
-    }
-    // Starting is asynchronous by design (daemons.start returns as soon as the
-    // supervisor is spawned, without waiting for a WebSocket handshake), so
-    // one refresh now and one shortly after is what makes the row settle on
-    // the real state rather than on "starting".
-    refreshDaemons();
-    setTimeout(refreshDaemons, 1500);
-    if (selectedDaemon === id) setTimeout(refreshDaemonConsole, 1500);
-  }
-
-  async function removeDaemon(id) {
-    if (!window.confirm(`Remove the '${id}' service? Its console logs stay on disk.`)) return;
-    try {
-      await api("DELETE", `/api/daemons/${encodeURIComponent(id)}`);
-      if (selectedDaemon === id) selectedDaemon = null;
-      refreshDaemons();
-    } catch (err) {
-      toast(err.message || "Couldn't remove that service.");
-    }
-  }
-
-  async function selectDaemon(id) {
-    selectedDaemon = id;
-    const title = qs("#daemon-console-title");
-    if (title) title.textContent = `Console \u2014 ${id}`;
-    await refreshDaemonConsole();
-    refreshDaemons();
-  }
-
-  async function refreshDaemonConsole() {
-    const pane = qs("#daemon-console");
-    if (!pane || !selectedDaemon) return;
-    const picker = qs("#daemon-console-file");
-    const file = picker && picker.value ? `&file=${encodeURIComponent(picker.value)}` : "";
-    try {
-      const data = await Api.get(
-        `/api/daemons/${encodeURIComponent(selectedDaemon)}/console?lines=300${file}`);
-      const lines = data.lines || [];
-      pane.textContent = lines.length ? lines.join("\n") : "(no output yet)";
-      pane.scrollTop = pane.scrollHeight;
-
-      if (picker && !file) {
-        const backups = data.backups || [];
-        const want = ["", ...backups].join("|");
-        if (picker.dataset.loaded !== want) {
-          picker.dataset.loaded = want;
-          picker.innerHTML = "";
-          picker.appendChild(el("option", { value: "" }, "current"));
-          for (const path of backups) {
-            picker.appendChild(el("option", { value: path },
-              path.split(/[\\/]/).pop()));
-          }
-        }
-      }
-
-      // stdin is only offered where it can actually work: a running daemon
-      // whose definition says its process reads stdin. daemons.send_input
-      // refuses otherwise, and a control that always errors is worse than no
-      // control.
-      const daemons = (await Api.get("/api/daemons")).daemons || [];
-      const entry = daemons.find((d) => d.id === selectedDaemon);
-      const row = qs("#daemon-input-row");
-      if (row) row.hidden = !(entry && entry.running && entry.supports_stdin);
-    } catch (err) {
-      pane.textContent = err.message || "Couldn't read that console.";
-    }
-  }
-
-  qs("#btn-daemon-refresh")?.addEventListener("click", () => {
-    refreshDaemons();
-    refreshDaemonConsole();
-  });
-
-  qs("#daemon-console-file")?.addEventListener("change", refreshDaemonConsole);
-
-  qs("#btn-daemon-add")?.addEventListener("click", async () => {
-    const id = (qs("#daemon-new-id")?.value || "").trim();
-    const command = (qs("#daemon-new-command")?.value || "").trim();
-    if (!id || !command) return toast("An id and a command are both required.");
-    try {
-      await Api.post("/api/daemons", {
-        id,
-        command,
-        cwd: (qs("#daemon-new-cwd")?.value || "").trim(),
-        stdin: Boolean(qs("#daemon-new-stdin")?.checked),
-      });
-      qs("#daemon-new-id").value = "";
-      qs("#daemon-new-command").value = "";
-      qs("#daemon-new-cwd").value = "";
-      refreshDaemons();
-    } catch (err) {
-      toast(err.message || "Couldn't register that service.");
-    }
-  });
-
-  qs("#btn-daemon-send")?.addEventListener("click", async () => {
-    const input = qs("#daemon-input-text");
-    const text = (input?.value || "").trim();
-    if (!selectedDaemon || !text) return;
-    try {
-      await Api.post(`/api/daemons/${encodeURIComponent(selectedDaemon)}/input`, { text });
-      input.value = "";
-      setTimeout(refreshDaemonConsole, 400);
-    } catch (err) {
-      toast(err.message || "Couldn't send that.");
-    }
-  });
-
-  qs("#daemon-input-text")?.addEventListener("keydown", (ev) => {
-    if (ev.key === "Enter") qs("#btn-daemon-send")?.click();
-  });
-
-  qs("#btn-daemon-schedule")?.addEventListener("click", async () => {
-    const when = (qs("#daemon-schedule-when")?.value || "").trim();
-    if (!selectedDaemon) return toast("Pick a service first.");
-    try {
-      const data = await Api.post(
-        `/api/daemons/${encodeURIComponent(selectedDaemon)}/schedule`, { when });
-      toast(when ? `Will start at ${data.next_start || when}` : "Schedule cleared", "info");
-      refreshDaemons();
-    } catch (err) {
-      toast(err.message || "Couldn't schedule that.");
-    }
-  });
-
-  function openDaemons() {
-    if (!daemonsOverlay) return;
-    daemonsOverlay.hidden = false;
-    refreshDaemons();
-    if (selectedDaemon) refreshDaemonConsole();
-    // A console is only useful live. Polling stops the moment the panel
-    // closes — an interval left running against a closed overlay is a slow
-    // leak and a pile of pointless subprocess spawns on the server.
-    if (daemonPollTimer) clearInterval(daemonPollTimer);
-    daemonPollTimer = setInterval(() => {
-      refreshDaemons();
-      refreshDaemonConsole();
-    }, 4000);
-  }
-
-  function closeDaemons() {
-    if (daemonsOverlay) daemonsOverlay.hidden = true;
-    if (daemonPollTimer) { clearInterval(daemonPollTimer); daemonPollTimer = null; }
-  }
-
-  qs("#daemons-close")?.addEventListener("click", closeDaemons);
-  daemonsOverlay?.addEventListener("click", (ev) => {
-    if (ev.target === daemonsOverlay) closeDaemons();
-  });
+  // --- daemons ------------------------------------------------------------
+  // H.1 rework: Daemons is now its own module (daemons.js), the same way
+  // Test Checklist is its own module — see index.html's "Scripts load LAST"
+  // comment for why that file, not this one, owns the qs("#daemons-overlay")
+  // lookup and all click/keydown wiring for that panel. app.js only opens it.
 
   // --- backlog ----------------------------------------------------------
   const backlogOverlay = qs("#backlog-overlay");
@@ -10185,7 +9952,7 @@
   }
 
   // --- menu wiring ------------------------------------------------------
-  qs("#menu-item-daemons")?.addEventListener("click", () => { closePanelMenu(); openDaemons(); });
+  qs("#menu-item-daemons")?.addEventListener("click", () => { closePanelMenu(); window.JarvisDaemons?.open(); });
   qs("#menu-item-backlog")?.addEventListener("click", () => { closePanelMenu(); openBacklog(); });
   qs("#menu-item-logsearch")?.addEventListener("click", () => { closePanelMenu(); openLogSearch(); });
   qs("#menu-item-setup")?.addEventListener("click", () => { closePanelMenu(); openSetup(); });
@@ -10196,7 +9963,7 @@
     if (setupOverlay && !setupOverlay.hidden) return closeSetup();
     if (logsearchOverlay && !logsearchOverlay.hidden) return closeLogSearch();
     if (backlogOverlay && !backlogOverlay.hidden) return closeBacklog();
-    if (daemonsOverlay && !daemonsOverlay.hidden) return closeDaemons();
+    // Daemons handles its own Escape now (daemons.js, same as Test Checklist).
   });
 
   loadLayout();
