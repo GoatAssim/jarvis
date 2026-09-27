@@ -388,17 +388,30 @@ def _needs_approval(action):
 
 def create(kind="reminder", title="", when=None, trigger=None, action=None,
            message="", channels=None, conv_id=None, emit_on_done=None,
-           max_runs=None, catch_up=False, trusted=False, now=None):
+           max_runs=None, catch_up=False, trusted=False, now=None, level=None):
     """Create one job and persist it. Returns the stored job dict.
 
     `trusted=True` skips the approval gate — passed by the CLI and the web
     panel (a human is literally typing the command), never by a model-facing
     tool handler.
+
+    `level` (1-5, K.2.7.1b) is stored raw/unresolved and resolved by
+    notifier.normalize_level() at FIRE time, not here — so a job created
+    with no explicit level picks up whatever the kind's configured default
+    is at the moment it actually fires, not whatever it happened to be when
+    the job was scheduled.
     """
     now = now or datetime.now()
     kind = (kind or "reminder").strip().lower()
     if kind not in KINDS:
         raise SchedulerError("kind must be one of %s" % ", ".join(KINDS))
+    if level is not None:
+        try:
+            level = int(level)
+        except (TypeError, ValueError):
+            raise SchedulerError("level must be an integer 1-5")
+        if not (1 <= level <= 5):
+            raise SchedulerError("level must be between 1 and 5")
 
     action = dict(action or {})
     if not action.get("type"):
@@ -438,6 +451,7 @@ def create(kind="reminder", title="", when=None, trigger=None, action=None,
         "action": action,
         "status": status,
         "channels": list(channels) if channels else None,
+        "level": level,
         "conv_id": conv_id or None,
         "emit_on_done": normalize_event(emit_on_done) if emit_on_done else None,
         "max_runs": int(max_runs) if max_runs else None,
@@ -977,7 +991,7 @@ def _do_notify(job, action):
     note = notifier.notify(
         title=action.get("title") or _default_title(job),
         message=message,
-        channels=job.get("channels"),
+        channels=job.get("channels"), level=job.get("level"),
         kind=job.get("kind"),
         job_id=job.get("id"),
         conv_id=job.get("conv_id"),
@@ -1152,7 +1166,7 @@ def _do_ask(job, action):
         note = notifier.notify(
             title=job.get("title") or "Scheduled task",
             message=reply or "(no output)",
-            channels=job.get("channels"),
+            channels=job.get("channels"), level=job.get("level"),
             kind="task", job_id=job.get("id"), conv_id=run_conv_id,
         )
     return {"ok": True, "summary": reply, "notification": note, "error": None,
@@ -1196,7 +1210,7 @@ def _do_command(job, action):
         note = notifier.notify(
             title=job.get("title") or ("Command: %s" % name),
             message=(output or ("finished" if ok else "failed"))[:1000],
-            channels=job.get("channels"), kind="task",
+            channels=job.get("channels"), kind="task", level=job.get("level"),
             job_id=job.get("id"), conv_id=run_conv_id, failed=not ok,
         )
     return {"ok": ok, "summary": output,
@@ -1231,7 +1245,7 @@ def _do_tool(job, action):
         from . import notifier
         note = notifier.notify(
             title=job.get("title") or ("Tool: %s" % name),
-            message=summary, channels=job.get("channels"), kind="task",
+            message=summary, channels=job.get("channels"), kind="task", level=job.get("level"),
             job_id=job.get("id"), conv_id=run_conv_id, failed=failed,
         )
     return {"ok": not failed, "summary": summary,

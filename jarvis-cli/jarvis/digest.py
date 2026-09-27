@@ -153,9 +153,29 @@ def should_batch(priority, cfg=None):
     With the digest off, a `low` notification is delivered normally rather
     than queued — otherwise turning the feature off would quietly start
     swallowing messages into a file nobody flushes.
+
+    Superseded by should_batch_level() (D.2.1/K.2.7) as the path
+    notifier.notify() actually calls — kept working, unchanged, for any
+    other caller still on the old three-tier vocabulary.
     """
     cfg = cfg if cfg is not None else load_config()
     return bool(cfg.get("enabled")) and priority == "low"
+
+
+def should_batch_level(level, cfg=None):
+    """Level-aware counterpart to should_batch(): the single source of
+    truth digest.py and notifier.py now share (D.2.1), instead of digest.py
+    inferring its own low/normal/high priority in parallel. Levels 1-2
+    batch while the digest is on — matching low/normal's old digest-eligible
+    meaning; levels 3-5 never batch, matching high's old never-suppressed
+    guarantee. With the digest off, nothing batches, same as should_batch().
+    """
+    cfg = cfg if cfg is not None else load_config()
+    try:
+        lvl = int(level)
+    except (TypeError, ValueError):
+        return False
+    return bool(cfg.get("enabled")) and lvl <= 2
 
 
 # ---------------------------------------------------------------------------
@@ -190,6 +210,7 @@ def enqueue(record):
         "kind": record.get("kind") or "notify",
         "job_id": record.get("job_id"),
         "failed": bool(record.get("failed")),
+        "level": record.get("level"),
         "at": record.get("created_at") or _now_iso(),
     })
     return _save_queue(items)

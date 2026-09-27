@@ -2072,6 +2072,13 @@ def _forced_ending_reply(runs, pending, cutoff=False):
 # ---------------------------------------------------------------------------
 PENDING_ACTION_TTL_SECONDS = 30 * 60
 
+# K.2.8.3: a shorter window than pending-action's 30 minutes on purpose — this
+# is catching an immediate stuck retry loop ("continue... continue...",
+# re-sent seconds or minutes apart), not a general "remember what you turned
+# down" memory. 10 minutes covers that case without holding a stale block
+# past when the user would reasonably expect a clean slate.
+DECLINED_REPEAT_TTL_SECONDS = 10 * 60
+
 
 def _pending_action_extra(pending, known_names):
     """The `pendingAction` extra for the first offerable call in `pending`
@@ -2127,6 +2134,112 @@ def _pending_action_reply(name, args, result):
         why = str(result.get("error") or "it reported a failure")[:200]
         return f"That didn't go through: {why}"
     return "Done. " + _describe_run({"name": name, "result": result})
+
+
+# ---------------------------------------------------------------------------
+# K.2.8.3 — a decline is terminal within the same stuck loop.
+#
+# The tool_executor's own cache (_make_tool_executor) already stops a repeat
+# of the identical call from re-prompting WITHIN one ask() — a same-turn
+# retry hits `cache[key]` and gets the recorded decline back instantly, no
+# second confirm round. What that cache can't see is the SAME unchanging
+# nudge arriving as a brand-new, separate ask() call (a fresh user turn),
+# since each turn gets its own fresh executor and cache. That's the actual
+# shape of the A.1g log: the user (or an automated nudge) re-sent the exact
+# same message turn after turn after a decline, each one a full new request
+# that went back to the model, got declined again, and grew the persisted
+# history a little more every time.
+#
+# Mirrors _pending_action_extra / _load_pending_action's own pattern and
+# conservatism exactly (same TTL style, same "only the LAST exchange counts"
+# rule, same owner-surfaces-only gating in ask()) — just for the opposite
+# case: not "the model offered one call, run it on a bare yes", but "the
+# user got told no, said the exact same thing again, don't ask a third time".
+# ---------------------------------------------------------------------------
+
+def _declined_action_extra(turn_runs):
+    """A `declinedAction` extra for THIS turn if its LAST tool call was
+    declined by the user — None otherwise. Only the last call counts: a
+    decline three calls back in a turn that went on to do other things
+    isn't "the thing that just got declined" by the time the turn ends."""
+    if not turn_runs:
+        return None
+    last = turn_runs[-1]
+    result = last.get("result")
+    name, args = last.get("name"), last.get("arguments")
+    if (not isinstance(result, dict) or not result.get("cancelled")
+            or not isinstance(name, str) or not isinstance(args, dict)):
+        return None
+    try:
+        json.dumps(args)
+    except (TypeError, ValueError):
+        return None
+    return {"type": "declinedAction", "data": {
+        "name": name, "arguments": args, "ts": time.time(),
+    }}
+
+
+def _load_declined_repeat(conv_id, user_text, now=None):
+    """(name, arguments) the LAST exchange's last tool call was declined for,
+    if THIS message is the exact same turn (normalized) that led to that
+    decline and it's still fresh — else None. A message with different
+    wording — including an explicit "yes"/"go ahead", which the
+    pending-action check above already handles — is never caught by this:
+    only an unchanged repeat is."""
+    if not conversations.is_valid_id(conv_id):
+        return None
+    text = conversations.normalize_repeat_text(user_text)
+    if not text:
+        return None
+    record = conversations.get_conversation(conv_id) or {}
+    exchanges = record.get("exchanges") or []
+    if not exchanges:
+        return None
+    last = exchanges[-1]
+    if last.get("pending") or conversations.normalize_repeat_text(last.get("user")) != text:
+        return None
+    for extra in last.get("extras") or []:
+        if not isinstance(extra, dict) or extra.get("type") != "declinedAction":
+            continue
+        data = extra.get("data") or {}
+        name, args, ts = data.get("name"), data.get("arguments"), data.get("ts")
+        if not isinstance(name, str) or not isinstance(args, dict):
+            continue
+        try:
+            age = (time.time() if now is None else now) - float(ts)
+        except (TypeError, ValueError):
+            continue
+        if 0 <= age <= DECLINED_REPEAT_TTL_SECONDS:
+            return name, args
+    return None
+
+
+def _declined_repeat_reply(declined, conv_id, user_text, assistant_name, address, trace):
+    """Answer a repeat-of-a-just-declined-action turn without ever
+    contacting a provider. Never raises."""
+    name, _args = declined
+    reply = (
+        "Still no \u2014 you declined that last time and this message hasn't "
+        "changed, so I'm not asking again. Say \"yes\"/\"go ahead\" if you've "
+        "changed your mind, or tell me what to do differently."
+    )
+    conversations.begin_exchange(conv_id, user_text)
+    _pending_turn[0] = (conv_id, user_text)
+    trace.ending = "declined_repeat"
+    console_pointer = console_store.end_turn(
+        "status", f"repeat of a just-declined '{name}' \u2014 not re-asked")
+    extras = []
+    if console_pointer:
+        extras.append({"type": "consoleRef", "data": console_pointer})
+    exchange_count = conversations.complete_exchange(
+        conv_id, user_text, reply, "(repeat of a just-declined action — not re-asked)",
+        extras=extras,
+    )
+    _spawn_title_update(conv_id, exchange_count)
+    _pending_turn[0] = None
+    return AskResult(True, text=reply, provider=None, attempts=[],
+                     assistant_name=assistant_name, address_user_as=address,
+                     ending="declined_repeat")
 
 
 # §5: appended to an answer the provider cut off at its output cap.
@@ -3196,6 +3309,16 @@ def ask(user_text, commands=None, on_attempt=None, on_tool_call=None, on_tool_re
                 pending_action, tool_executor, conv_id, user_text,
                 assistant_name, address, trace)
 
+    # K.2.8.3: the exact same nudge that just got this exact action declined,
+    # with no new information — answered without a single provider round
+    # trip. A genuinely different message, including a short "yes"/"go
+    # ahead" (handled above), is untouched by this.
+    if tools_enabled and tool_executor and conv_id and not sender_context:
+        declined_repeat = _load_declined_repeat(conv_id, user_text)
+        if declined_repeat:
+            return _declined_repeat_reply(
+                declined_repeat, conv_id, user_text, assistant_name, address, trace)
+
     # Persist the user's half of this turn NOW, before a single provider is
     # contacted. Everything downstream of here can be killed mid-flight —
     # the web UI's Stop button does exactly that (server.js killTree()s the
@@ -3428,6 +3551,9 @@ def ask(user_text, commands=None, on_attempt=None, on_tool_call=None, on_tool_re
                 key_health.record_success(_provider_label(provider), resolved.get("model"), key)
                 turn_runs = getattr(tool_executor, "runs", None) if tool_executor else None
                 extras = _extras_from_runs(turn_runs)
+                declined_extra = _declined_action_extra(turn_runs)
+                if declined_extra:
+                    extras.append(declined_extra)
 
                 # --- thinking + trace -------------------------------------
                 thinking = ai_providers.get_thinking_trace()
@@ -3566,6 +3692,9 @@ def ask(user_text, commands=None, on_attempt=None, on_tool_call=None, on_tool_re
         trace.ending = ending
         if conv_id:
             forced_extras = _extras_from_runs(turn_runs)
+            declined_extra = _declined_action_extra(turn_runs)
+            if declined_extra:
+                forced_extras.append(declined_extra)
             # F.11: keep the call the reply just offered, so a bare "go ahead"
             # next turn runs it. Nothing to keep after a cutoff (no usable call).
             offered = None if is_cutoff else _pending_action_extra(
@@ -3609,6 +3738,9 @@ def ask(user_text, commands=None, on_attempt=None, on_tool_call=None, on_tool_re
         trace.ending = "no_provider"
         if conv_id:
             extras = _extras_from_runs(turn_runs)
+            declined_extra = _declined_action_extra(turn_runs)
+            if declined_extra:
+                extras.append(declined_extra)
             console_pointer = console_store.end_turn("status", "no provider answered \u2014 reporting completed actions")
             if console_pointer:
                 extras.append({"type": "consoleRef", "data": console_pointer})

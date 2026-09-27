@@ -784,6 +784,60 @@ def _extras_recap_fragment(extras):
     return " [recap] ran " + ", ".join(calls)
 
 
+def normalize_repeat_text(text):
+    """Loose equality for 'is this literally the same turn again' \u2014 trim,
+    lowercase, collapse whitespace. Used only to detect a stuck, unchanging
+    retry loop (K.2.8), never to judge whether two DIFFERENT requests are
+    "similar enough" to merge \u2014 that bar stays exact-normalized-equality on
+    purpose. Public: ai_client's K.2.8.3 declined-repeat check reuses this
+    same normalization rather than its own copy."""
+    return " ".join((text or "").strip().lower().split())
+
+
+# K.2.8.1/.2: the A.1g log (77 requests, one conversation) resent the same
+# unchanging user turn verbatim on every single request as the conversation
+# history grew — 572 literal repeats of "write_on_screen continue and enter"
+# summed across the session's payloads, because nothing here ever asked
+# "have I already sent this exact turn, unchanged, right before this one?"
+# A run of 3+ CONSECUTIVE turns with the same (normalized) user message is
+# collapsed into the single latest occurrence, annotated with the repeat
+# count, instead of resent in full every time. Deliberately scoped to
+# consecutive runs only (a "continue... continue... continue..." stuck loop)
+# — two turns of ordinary back-and-forth that happen to repeat a phrase
+# ("no" / "no really") is unremarkable and left alone; only the ->3rd
+# identical repeat in a row is the stuck-loop signature this targets.
+_MIN_RUN_TO_COLLAPSE = 3
+
+
+def _collapse_repeated_user_turns(pairs):
+    """`pairs` is a chronological list of (user_text, assistant_text). Runs
+    of >= _MIN_RUN_TO_COLLAPSE consecutive turns with the same normalized
+    user_text collapse to one pair: the LATEST occurrence's assistant reply
+    (what Jarvis most recently said in that stuck loop — earlier replies in
+    an unchanging retry carry nothing the latest one doesn't already), with
+    the user_text annotated with how many times it repeated. Order and any
+    non-repeated turns are otherwise untouched."""
+    if not pairs:
+        return pairs
+    out = []
+    i, n = 0, len(pairs)
+    while i < n:
+        j = i
+        key = normalize_repeat_text(pairs[i][0])
+        while key and j + 1 < n and normalize_repeat_text(pairs[j + 1][0]) == key:
+            j += 1
+        run_len = j - i + 1
+        if run_len >= _MIN_RUN_TO_COLLAPSE:
+            user_text, assistant_text = pairs[j]
+            note = (f"{user_text}  [repeated verbatim {run_len}\u00d7 in a row "
+                     f"with no new information \u2014 shown once]")
+            out.append((note, assistant_text))
+        else:
+            out.extend(pairs[i:j + 1])
+        i = j + 1
+    return out
+
+
 def conversation_messages(
     conv_id,
     max_exchanges=None,
@@ -884,7 +938,7 @@ def conversation_messages(
         used += pair_len
 
     recent = []
-    for user_text, assistant_text in reversed(kept_pairs):
+    for user_text, assistant_text in _collapse_repeated_user_turns(list(reversed(kept_pairs))):
         recent.append({"role": "user", "content": user_text})
         recent.append({"role": "assistant", "content": assistant_text})
 

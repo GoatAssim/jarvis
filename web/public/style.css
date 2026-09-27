@@ -1134,6 +1134,25 @@ input.is-invalid{ border-color: var(--red) !important; }
   max-width: min(560px, 90vw);
 }
 .toast.is-info{ border-color: var(--accent); box-shadow: 0 0 24px var(--accent-glow); }
+/* D.2.1 level 3+ (Persistent): stays until dismissed rather than fading on
+   its own — the pulsing outline and pointer cursor are the only visible
+   cue that this one needs a click, since it otherwise reuses the same
+   toast element and styling as an ordinary one. */
+.toast.is-sticky{
+  cursor: pointer;
+  animation: jarvis-toast-pulse 2.2s ease-in-out infinite;
+}
+@keyframes jarvis-toast-pulse{
+  0%, 100% { box-shadow: 0 0 24px rgba(255,92,108,0.25); }
+  50% { box-shadow: 0 0 36px rgba(255,92,108,0.55); }
+}
+.toast.is-sticky.is-info{
+  animation-name: jarvis-toast-pulse-info;
+}
+@keyframes jarvis-toast-pulse-info{
+  0%, 100% { box-shadow: 0 0 24px var(--accent-glow); }
+  50% { box-shadow: 0 0 36px var(--accent-glow); }
+}
 
 /* =========================================================================
    Run-confirm popup (direct command run, gated by its own confirm_required/
