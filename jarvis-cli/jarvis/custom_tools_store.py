@@ -371,10 +371,17 @@ def validate_source(source, name="custom_tool"):
                 "error": "%s already exists as a built-in tool — pick another name"
                          % ", ".join(clash)}
 
-    # G.1: the file's own Test Checklist entries. Never a reason to fail the
-    # check (a malformed entry is dropped at discovery, the tool still loads —
-    # see tool_loader.py), but the ONLY place a custom-tool author gets told:
-    # discovery's log line goes to stderr, where nobody is looking.
+    # G.1/G.2: the file's own Test Checklist entries (and, if it uses the
+    # multi-group TEST_CHECKLIST_GROUP shape, its own group ids). Never a
+    # reason to fail the check (a malformed entry is dropped at discovery,
+    # the tool still loads — see tool_loader.py), but the ONLY place a
+    # custom-tool author gets told: discovery's log line goes to stderr,
+    # where nobody is looking. _group_meta itself isn't needed here — the
+    # panel only ever reads group labels from `jarvis tools-list` (see
+    # tools.py's tools_list_payload()) — but a bad multi-group id on an
+    # entry (one that matches neither TOOL_GROUP nor a declared group) still
+    # surfaces the same way any other malformed entry does, via
+    # checklist_problems below.
     from . import checklist_schema
     entries, _group_meta, checklist_problems = checklist_schema.extract_supplied(
         getattr(module, "TEST_CHECKLIST", None),

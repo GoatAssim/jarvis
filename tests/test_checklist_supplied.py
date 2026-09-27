@@ -1,21 +1,37 @@
-"""Master plan G.1: a tool module can supply its own Test Checklist entry.
+"""Master plan G.1, extended by G.2: a tool module can supply its own Test
+Checklist entry (or entries), and — since G.2 — its own checklist group (or
+groups).
 
 The shipped catalogue (web/public/test-checklist-data.js) can only document tools
 that ship with jarvis. A tool the user wrote into ~/.jarvis/tools/ used to show
 "NO CHECKLIST" forever. A module can now define TEST_CHECKLIST (tool name ->
 entry, the shipped shape) and, for a brand-new TOOL_GROUP, TEST_CHECKLIST_GROUP.
 
+G.2 removes the two remaining caps: a module can give each of its own tools its
+own TEST_CHECKLIST entry (already true under G.1, regression-proofed here), and
+TEST_CHECKLIST_GROUP can name more than one section — {group_id: {"label",
+"blurb"}, ...} instead of one {"label", "blurb"} tied to TOOL_GROUP — for a
+module whose tools genuinely split across more than one logical category.
+
 What this pins down:
   * tool_loader extracts and normalises them; a malformed entry is DROPPED AND
     LOGGED but never rejects the tool file (a typo in test notes must not take
     a working tool offline);
-  * the entry rides on that tool's `jarvis tools-list` item (the panel's only
-    source), end to end through a real ~/.jarvis/tools file;
+  * a module can supply as many TEST_CHECKLIST entries as it has tools, and
+    (G.2) as many TEST_CHECKLIST_GROUP sections as those entries need;
+  * an entry's own "group" can be TOOL_GROUP or one of the module's own
+    declared multi-group ids; anything else is dropped and logged;
+  * the entry (and its OWN group's meta) rides on that tool's `jarvis
+    tools-list` item (the panel's only source), end to end through a real
+    ~/.jarvis/tools file;
   * whatever a module puts in an entry, the payload stays plain JSON;
   * the Custom Tools editor's check reports what was dropped, and every
     starter template carries a valid example;
-  * actions/_template.py's example is valid;
-  * the panel's JS merge (run under node; skipped if node is missing).
+  * actions/_template.py's example is valid, and (G.2) demonstrates both
+    extensions at once;
+  * the panel's JS merge (run under node; skipped if node is missing) —
+    already tool-item-centric, so a multi-group module needed no JS change,
+    only the regression test here that pins that down.
 
 Run: python3 tests/test_checklist_supplied.py
 """
@@ -150,14 +166,119 @@ def test_stray_entry_name_and_non_dict_checklist_are_reported_not_fatal():
     assert any("must be a dict" in l for l in logs), logs
 
 
+def test_two_tools_in_one_module_each_get_their_own_entry():
+    # Regression-proofs the part of G.2 that was already true under G.1
+    # (TEST_CHECKLIST is a dict keyed by tool name, so nothing capped a
+    # module at one entry) — a module with 2+ tools, each with its own
+    # entry, under the plain single-group shape.
+    mod = _module(extra=(
+        'TOOLS["bye_tool"] = tool_hi\n'
+        'TOOL_SCHEMAS.append({"name": "bye_tool", "description": "Say bye.", '
+        '"parameters": {"type": "object", "properties": {}}})\n'
+        'TOOL_KEYWORDS["bye_tool"] = {"say bye": 10}\n'
+        'TEST_CHECKLIST["bye_tool"] = {"does": "Says bye.", '
+        '"steps": [{"ask": "Say bye.", "expect": "Says goodbye."}]}'
+    ))
+    rec, logs = _one(mod)
+    assert rec.valid, rec.error
+    assert not [l for l in logs if "[checklist]" in l], logs
+    assert set(rec.checklist) == {"hi_tool", "bye_tool"}
+    assert rec.checklist["hi_tool"]["group"] == rec.checklist["bye_tool"]["group"] == "mygroup"
+
+
 def test_group_label_is_extracted_and_a_malformed_one_is_ignored():
+    # Single-group shape: group_meta comes back keyed by TOOL_GROUP itself.
     rec, _ = _one(_module(extra='TEST_CHECKLIST_GROUP = {"label": "My things", "blurb": "Stuff I made."}'))
-    assert rec.checklist_group == {"label": "My things", "blurb": "Stuff I made."}
+    assert rec.checklist_group == {"mygroup": {"label": "My things", "blurb": "Stuff I made."}}
     rec, logs = _one(_module(extra='TEST_CHECKLIST_GROUP = {"label": ""}'))
     assert rec.valid and rec.checklist_group == {} and "hi_tool" in rec.checklist
     assert any("TEST_CHECKLIST_GROUP" in l for l in logs), logs
     rec, logs = _one(_module(extra='TEST_CHECKLIST_GROUP = "My things"'))
     assert rec.checklist_group == {} and any("must be a dict" in l for l in logs)
+
+
+# --- multi-group shape (master plan G.2) ---------------------------------------
+
+def test_multi_group_shape_resolves_each_entry_to_its_own_group():
+    # Two tools, each tagged into a DIFFERENT declared group; TOOL_GROUP
+    # itself ("mygroup") is never used by either entry here.
+    mod = _module(
+        entry='{"does": "Says hi.", "group": "greetings", '
+              '"steps": [{"ask": "Say hi.", "expect": "Greets."}]}',
+        extra=(
+            'TOOLS["bye_tool"] = tool_hi\n'
+            'TOOL_SCHEMAS.append({"name": "bye_tool", "description": "Say bye.", '
+            '"parameters": {"type": "object", "properties": {}}})\n'
+            'TOOL_KEYWORDS["bye_tool"] = {"say bye": 10}\n'
+            'TEST_CHECKLIST["bye_tool"] = {"does": "Says bye.", "group": "farewells", '
+            '"steps": [{"ask": "Say bye.", "expect": "Says goodbye."}]}\n'
+            'TEST_CHECKLIST_GROUP = {'
+            '"greetings": {"label": "Greetings", "blurb": "Hello messages."}, '
+            '"farewells": {"label": "Farewells", "blurb": "Goodbye messages."}}'
+        ),
+    )
+    rec, logs = _one(mod)
+    assert rec.valid, rec.error
+    assert not [l for l in logs if "[checklist]" in l], logs
+    assert rec.checklist["hi_tool"]["group"] == "greetings"
+    assert rec.checklist["bye_tool"]["group"] == "farewells"
+    assert rec.checklist_group == {
+        "greetings": {"label": "Greetings", "blurb": "Hello messages."},
+        "farewells": {"label": "Farewells", "blurb": "Goodbye messages."},
+    }
+
+
+def test_multi_group_entry_may_still_default_to_tool_group():
+    # Under the multi-group shape, an entry with no explicit "group" still
+    # falls back to TOOL_GROUP — the multi-group ids are additive, not a
+    # replacement for the default.
+    mod = _module(extra='TEST_CHECKLIST_GROUP = {"extra": {"label": "Extra"}}')
+    rec, logs = _one(mod)
+    assert rec.valid, rec.error
+    assert rec.checklist["hi_tool"]["group"] == "mygroup"
+    assert rec.checklist_group == {"extra": {"label": "Extra", "blurb": ""}}
+    assert not [l for l in logs if "[checklist]" in l], logs
+
+
+def test_multi_group_entry_naming_tool_group_itself_is_valid():
+    mod = _module(entry='{"does": "Says hi.", "group": "mygroup", '
+                         '"steps": [{"ask": "Say hi.", "expect": "Greets."}]}',
+                  extra='TEST_CHECKLIST_GROUP = {"extra": {"label": "Extra"}}')
+    rec, logs = _one(mod)
+    assert rec.valid and rec.checklist["hi_tool"]["group"] == "mygroup"
+    assert not [l for l in logs if "[checklist]" in l], logs
+
+
+def test_multi_group_entry_with_an_undeclared_group_is_dropped_and_logged():
+    mod = _module(entry='{"does": "Says hi.", "group": "nowhere", '
+                         '"steps": [{"ask": "Say hi.", "expect": "Greets."}]}',
+                  extra='TEST_CHECKLIST_GROUP = {"extra": {"label": "Extra"}}')
+    rec, logs = _one(mod)
+    assert rec.valid and rec.checklist == {}
+    assert any("nowhere" in l and "[checklist]" in l for l in logs), logs
+
+
+def test_multi_group_bad_id_or_meta_is_dropped_and_logged_but_others_survive():
+    mod = _module(extra=(
+        'TEST_CHECKLIST_GROUP = {'
+        '"good": {"label": "Good"}, '
+        '"bad": {"label": ""}, '
+        '"": {"label": "No id"}}'
+    ))
+    rec, logs = _one(mod)
+    assert rec.valid
+    assert rec.checklist_group == {"good": {"label": "Good", "blurb": ""}}
+    assert any("TEST_CHECKLIST_GROUP['bad']" in l for l in logs), logs
+    assert any("non-string or empty group id" in l for l in logs), logs
+
+
+def test_an_empty_dict_is_still_the_single_group_shape_not_multi():
+    # {} has no keys outside {"label", "blurb"} (vacuously), so it's read as
+    # a (malformed, missing 'label') single-group meta, not a zero-group
+    # multi-group dict — same as before G.2 existed.
+    rec, logs = _one(_module(extra="TEST_CHECKLIST_GROUP = {}"))
+    assert rec.valid and rec.checklist_group == {}
+    assert any("'label' must be a non-empty string" in l for l in logs), logs
 
 
 def test_a_file_without_the_new_fields_is_unchanged():
@@ -210,6 +331,30 @@ def test_payload_carries_a_custom_tools_entry_and_only_that_tools():
     assert not others, [t["name"] for t in others]
 
 
+def test_payload_carries_a_distinct_checklist_group_per_tool_in_a_multi_group_module():
+    # G.2 end to end: one module, two tools, two declared groups — each
+    # tool's `jarvis tools-list` item must carry ITS OWN checklist_group,
+    # not the module's (there isn't one single one to fall back to).
+    mod = _module(extra=(
+        'TOOLS["bye_tool"] = tool_hi\n'
+        'TOOL_SCHEMAS.append({"name": "bye_tool", "description": "Say bye.", '
+        '"parameters": {"type": "object", "properties": {}}})\n'
+        'TOOL_KEYWORDS["bye_tool"] = {"say bye": 10}\n'
+        'TEST_CHECKLIST["bye_tool"] = {"does": "Says bye.", "group": "farewells", '
+        '"steps": [{"ask": "Say bye.", "expect": "Says goodbye."}]}\n'
+        'TEST_CHECKLIST_GROUP = {'
+        '"mygroup": {"label": "Greetings", "blurb": "Hello messages."}, '
+        '"farewells": {"label": "Farewells", "blurb": "Goodbye messages."}}'
+    ))
+    payload, stderr = _payload_for({"hi_tool_mod.py": mod})
+    assert "[checklist]" not in stderr, stderr
+    by_name = {t["name"]: t for t in payload}
+    assert by_name["hi_tool"]["checklist"]["group"] == "mygroup"
+    assert by_name["hi_tool"]["checklist_group"] == {"label": "Greetings", "blurb": "Hello messages."}
+    assert by_name["bye_tool"]["checklist"]["group"] == "farewells"
+    assert by_name["bye_tool"]["checklist_group"] == {"label": "Farewells", "blurb": "Goodbye messages."}
+
+
 def test_payload_is_still_json_when_a_module_puts_junk_in_its_entry():
     junk = '{"does": "x", "steps": [{"run": {"k": object()}, "expect": "b"}]}'
     payload, stderr = _payload_for({"hi_tool_mod.py": _module(entry=junk)})
@@ -237,6 +382,30 @@ def test_validate_source_reports_entries_missing_and_problems():
     assert broken["checklist_missing"] == ["hi_tool"] and broken["checklist_problems"]
 
 
+def test_validate_source_reports_a_multi_group_module_correctly():
+    # A custom-tool author's own module uses the multi-group shape; the
+    # editor's Check button must report both entries as present, and an
+    # undeclared "group" reference as a problem — same channel as any other
+    # malformed entry, never a reason to fail the check itself.
+    good = custom_tools_store.validate_source(
+        _module(entry='{"does": "Says hi.", "group": "greetings", '
+                      '"steps": [{"ask": "Say hi.", "expect": "Greets."}]}',
+                extra='TEST_CHECKLIST_GROUP = {"greetings": {"label": "Greetings"}}'),
+        "hi_tool_mod",
+    )
+    assert good["ok"] and good["checklist"] == ["hi_tool"] and good["checklist_problems"] == []
+
+    bad_ref = custom_tools_store.validate_source(
+        _module(entry='{"does": "Says hi.", "group": "nowhere", '
+                      '"steps": [{"ask": "Say hi.", "expect": "Greets."}]}',
+                extra='TEST_CHECKLIST_GROUP = {"greetings": {"label": "Greetings"}}'),
+        "hi_tool_mod",
+    )
+    assert bad_ref["ok"], "an entry naming an undeclared group must never fail the check itself"
+    assert bad_ref["checklist_missing"] == ["hi_tool"]
+    assert any("nowhere" in p for p in bad_ref["checklist_problems"])
+
+
 def test_write_tool_passes_the_checklist_report_through():
     r = custom_tools_store.write_tool("hi_tool_mod", _module(entry='{"does": "x"}'))
     assert r["ok"] and r["checklist_problems"] and r["checklist_missing"] == ["hi_tool"]
@@ -259,7 +428,13 @@ def test_the_actions_template_example_is_valid():
     entries, group_meta, problems = checklist_schema.extract_supplied(
         m.TEST_CHECKLIST, m.TEST_CHECKLIST_GROUP, set(m.TOOLS), m.TOOL_GROUP)
     assert not problems, problems
-    assert set(entries) == set(m.TOOLS) and group_meta and group_meta["label"]
+    # G.2: the template now demonstrates BOTH extensions at once — two tools,
+    # each with its own entry, split across two declared checklist groups.
+    assert set(entries) == set(m.TOOLS) == {"example_ping", "example_echo"}
+    assert entries["example_ping"]["group"] == m.TOOL_GROUP
+    assert entries["example_echo"]["group"] != m.TOOL_GROUP
+    assert set(group_meta) == {m.TOOL_GROUP, entries["example_echo"]["group"]}
+    assert all(g["label"] for g in group_meta.values())
 
 
 def test_validator_accepts_every_shipped_entry_shape_and_rejects_typos():
@@ -330,6 +505,8 @@ def test_js_merge():
          {"name": "noentry"}, None, 7],                                                             # 4 junk tolerated
         "not a list",                                                                               # 5 bad payload
         [{"name": "a", "checklist": _entry(group="g2")}, {"name": "b", "checklist": _entry(group="g2"), "checklist_group": {"label": "Later"}}],  # 6 first label wins... a has none
+        [{"name": "greeter", "checklist": _entry(group="greetings"), "checklist_group": {"label": "Greetings", "blurb": "Hi."}},
+         {"name": "farewell", "checklist": _entry(group="farewells"), "checklist_group": {"label": "Farewells", "blurb": "Bye."}}],  # 7 G.2: one module (by convention), two tools, two distinct groups
     ]
     out = _node_merge(shipped, cases)
     assert all(o["shippedUntouched"] for o in out), "the shipped data must never be mutated"
@@ -358,6 +535,18 @@ def test_js_merge():
     assert d6["from"] == ["a", "b"]
     g2 = [g for g in d6["data"]["groups"] if g["id"] == "g2"]
     assert len(g2) == 1, "a group is added once"
+
+    # G.2: two tools (as if from one multi-group module) land in two
+    # DIFFERENT new sections, each with its own supplied label/blurb — the
+    # merge is per-tool, so this needed no code change, only this test.
+    d7 = out[7]["data"]
+    assert out[7]["from"] == ["greeter", "farewell"]
+    new_groups = {g["id"]: g for g in d7["groups"] if g["id"] in ("greetings", "farewells")}
+    assert set(new_groups) == {"greetings", "farewells"}
+    assert new_groups["greetings"]["label"] == "Greetings" and new_groups["greetings"]["blurb"] == "Hi."
+    assert new_groups["farewells"]["label"] == "Farewells" and new_groups["farewells"]["blurb"] == "Bye."
+    assert d7["tools"]["greeter"]["group"] == "greetings"
+    assert d7["tools"]["farewell"]["group"] == "farewells"
 
 
 def test_js_merge_over_the_real_shipped_catalogue():

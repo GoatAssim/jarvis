@@ -202,14 +202,15 @@ looks like, and a place to record what works and what doesn't. An entry has
 - **Shipped:** `web/public/test-checklist-data.js`, for every tool that ships
   with jarvis.
 - **The tool's own module:** a module-level `TEST_CHECKLIST` dict (tool name ->
-  entry, the same shape, `group` optional and defaulting to `TOOL_GROUP`), plus
-  `TEST_CHECKLIST_GROUP = {"label": ..., "blurb": ...}` if the module invents a
-  brand-new `TOOL_GROUP`. This is the **only** option for a user's own tool in
-  `~/.jarvis/tools/`, which can never be in a file that ships with the app.
-  `actions/_template.py` section 8 documents it; every Custom Tools template
-  carries an example. Discovery reads it, `jarvis tools-list` (GET `/api/tools`)
-  carries it, and the panel merges it in. Use ONE home per tool — the coverage
-  test fails if a tool has an entry in both.
+  entry, the same shape, `group` optional and defaulting to `TOOL_GROUP`) —
+  one entry per tool, so a module with several tools gives each its own —
+  plus `TEST_CHECKLIST_GROUP` if the module invents a brand-new `TOOL_GROUP`
+  (or more than one — see below). This is the **only** option for a user's own
+  tool in `~/.jarvis/tools/`, which can never be in a file that ships with the
+  app. `actions/_template.py` section 8 documents it; every Custom Tools
+  template carries an example. Discovery reads it, `jarvis tools-list` (GET
+  `/api/tools`) carries it, and the panel merges it in. Use ONE home per tool —
+  the coverage test fails if a tool has an entry in both.
 
 What counts as a well-formed entry is defined once, in
 `jarvis-cli/jarvis/checklist_schema.py`, and checked by the same code for both
@@ -228,7 +229,10 @@ For each tool the entry needs:
 
 - `group` — one of the ids in the file's `"groups"` list (match the group in
   `tool_registry.TOOL_GROUPS`; add a group there too if you added one). In a
-  module's own `TEST_CHECKLIST`, leave it out: it is the module's `TOOL_GROUP`.
+  module's own `TEST_CHECKLIST`, leave it out and it follows the module's
+  `TOOL_GROUP` — or, if the module's tools split across more than one
+  logical category, set it explicitly to one of its own declared group ids
+  (see `TEST_CHECKLIST_GROUP`'s two shapes just below).
 - `does` — one line on what it's for.
 - `steps` — at least one, ideally two or three: an `{"ask": "...", "expect":
   "..."}` prompt to type into Ask, and/or a `{"run": {...args...}, "expect":
@@ -239,6 +243,20 @@ For each tool the entry needs:
   installed programs, plugins), Windows-only, side effects worth warning about
   (writes files, sends messages, starts processes, changes system state), and
   known gotchas or invariants worth checking while testing.
+
+`TEST_CHECKLIST_GROUP` has two shapes. The common one, `{"label": ...,
+"blurb": ...}`, names one section — the panel's home for the module's whole
+`TOOL_GROUP` — and is what most modules need (one module, one category). A
+module whose tools genuinely split across more than one logical category can
+instead give it `{group_id: {"label": ..., "blurb": ...}, ...}`, one entry
+per section, and tag each `TEST_CHECKLIST` entry's own `group` with the id of
+the section it belongs in (an id from that dict, or the module's `TOOL_GROUP`
+itself, which is always a valid target whether or not it also has its own
+meta there). The two shapes are told apart by their keys alone — a plain
+`{"label", "blurb"}` dict is the single-section shape; anything else is read
+as `{group_id: meta, ...}` — so a module never needs to say which one it's
+using. `actions/_template.py` section 8 works through both shapes with a
+worked two-tool, two-group example.
 
 Renamed a tool? Rename its key. Removed one? Delete its entry. If you changed
 what a tool does, fix the affected `does` / `steps` / `expect` text — editing a
