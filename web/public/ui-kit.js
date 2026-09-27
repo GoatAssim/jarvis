@@ -438,6 +438,7 @@
         "--accent-glow": "rgba(79, 216, 255, 0.35)",
         "--accent-secondary": "#f2b544", "--accent-tertiary": "#2b5cff",
         "--text": "#e6f5fc", "--text-dim": "#85a2b6", "--text-dimmer": "#4d6377",
+        "--border": "rgba(102, 214, 255, 0.16)", "--border-strong": "rgba(102, 214, 255, 0.34)",
       },
     },
     mark_i: {
@@ -450,6 +451,7 @@
         "--accent-glow": "rgba(255, 182, 39, 0.35)",
         "--accent-secondary": "#e63946", "--accent-tertiary": "#ff7b00",
         "--text": "#fdf0dc", "--text-dim": "#c0967a", "--text-dimmer": "#7a5a48",
+        "--border": "rgba(255, 189, 60, 0.16)", "--border-strong": "rgba(255, 189, 60, 0.34)",
       },
     },
     terminal: {
@@ -462,6 +464,7 @@
         "--accent-glow": "rgba(51, 255, 102, 0.25)",
         "--accent-secondary": "#aaff00", "--accent-tertiary": "#00cc88",
         "--text": "#c8ffd4", "--text-dim": "#5fa06f", "--text-dimmer": "#356342",
+        "--border": "rgba(72, 255, 118, 0.16)", "--border-strong": "rgba(72, 255, 118, 0.34)",
       },
     },
     mono: {
@@ -474,6 +477,7 @@
         "--accent-glow": "rgba(232, 232, 232, 0.18)",
         "--accent-secondary": "#9a9a9a", "--accent-tertiary": "#6e6e6e",
         "--text": "#f2f2f2", "--text-dim": "#9a9a9a", "--text-dimmer": "#5e5e5e",
+        "--border": "rgba(248, 248, 248, 0.16)", "--border-strong": "rgba(248, 248, 248, 0.34)",
       },
     },
     daylight: {
@@ -486,6 +490,7 @@
         "--accent-glow": "rgba(10, 110, 209, 0.2)",
         "--accent-secondary": "#b25e00", "--accent-tertiary": "#5b2bd9",
         "--text": "#101720", "--text-dim": "#4a5a6b", "--text-dimmer": "#7d8b99",
+        "--border": "rgba(11, 118, 224, 0.16)", "--border-strong": "rgba(11, 118, 224, 0.34)",
       },
     },
     nebula: {
@@ -498,6 +503,7 @@
         "--accent-glow": "rgba(198, 107, 255, 0.35)",
         "--accent-secondary": "#ff5fa2", "--accent-tertiary": "#5b8cff",
         "--text": "#f0e6ff", "--text-dim": "#a58fc4", "--text-dimmer": "#6b5a85",
+        "--border": "rgba(208, 132, 255, 0.16)", "--border-strong": "rgba(208, 132, 255, 0.34)",
       },
     },
     // Deliberately empty. This is the escape hatch for personas and the
@@ -516,6 +522,22 @@
       vars: {},
     },
   };
+
+  // Every CSS var any built-in theme can write, plus the rgb() companions
+  // applyTheme() derives alongside them. Used by clearThemeVars() below so
+  // picking "None" can hand control back cleanly instead of leaving a
+  // previous theme's values frozen in the inline style attribute forever
+  // (L.6.2: applyTheme() writes colours via root.style.setProperty, which
+  // always wins over style.css's :root defaults, and nothing was ever
+  // removing them again).
+  const ALL_THEME_VAR_KEYS = Array.from(new Set(
+    Object.values(BUILTIN_THEMES).flatMap((t) => Object.keys(t.vars || {}))
+  )).concat(["--accent-rgb", "--accent-secondary-rgb", "--accent-tertiary-rgb"]);
+
+  function clearThemeVars() {
+    const root = document.documentElement.style;
+    ALL_THEME_VAR_KEYS.forEach((k) => root.removeProperty(k));
+  }
 
   const THEME_KEY = "jarvis.theme";
   const CUSTOM_KEY = "jarvis.themes.custom";
@@ -612,6 +634,14 @@
     // on :root is left exactly as it was.
     if (theme.isNone) {
       deactivate();
+      // L.6.2 fix: previously this left every var the last real theme wrote
+      // (--text/--bg/--accent/etc.) frozen in the inline style attribute,
+      // since inline styles always beat style.css's :root defaults and
+      // nothing else automatically re-applied the legacy picker's colours.
+      // Clearing them here lets the browser fall back to style.css's
+      // hardcoded defaults immediately, instead of "None" silently doing
+      // nothing until something else happens to write colour again.
+      clearThemeVars();
     } else if (id) {
       markActive();
     }

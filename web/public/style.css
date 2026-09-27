@@ -114,6 +114,13 @@ button{ font-family: inherit; }
 input, textarea, select{ font-family: inherit; }
 
 ::selection{ background: var(--accent-glow); color: #fff; }
+/* L.6.3 fix: the hardcoded white foreground above assumes --accent-glow is
+   always a saturated colour over a dark background, true for every
+   dark:true theme. Daylight is the one dark:false theme and its
+   --accent-glow is a pale, low-opacity blue over a near-white --bg, so
+   white-on-that is nearly unreadable. Override the foreground only,
+   in the theme that's actually light. */
+html.jui-light ::selection{ color: var(--text); }
 
 ::-webkit-scrollbar{ width: 9px; height: 9px; }
 ::-webkit-scrollbar-track{ background: transparent; }
@@ -3334,4 +3341,26 @@ body.layout--focus .panel-menu--focus-only{ display: inline-flex; }
 @media (max-width: 900px){
   .kanban{ grid-auto-flow: row; grid-auto-columns: auto; }
   .daemon-actions{ width: 100%; }
+}
+
+/* =========================================================================
+   Light-theme (.jui-light) overrides — L.6.3
+   applyTheme() already toggles this class for any dark:false theme
+   (currently only Daylight), but nothing selected it, so Daylight was
+   inheriting glow/shadow effects hand-tuned for a near-black background:
+   a soft light-coloured glow barely shows against a light page, while the
+   fixed rgba(0,0,0,0.5-0.6) drop shadows read as comparatively heavy/muddy
+   against a white panel. Toning both down here, scoped to .jui-light only,
+   leaves every dark theme exactly as before.
+   ========================================================================= */
+
+html.jui-light .boot__title{
+  text-shadow: 0 0 10px var(--accent-glow);
+}
+
+html.jui-light .modal,
+html.jui-light .ask-panel,
+html.jui-light .debug-panel,
+html.jui-light .menu-panel{
+  box-shadow: 0 8px 28px rgba(16, 23, 32, 0.16), 0 0 24px var(--accent-glow);
 }
