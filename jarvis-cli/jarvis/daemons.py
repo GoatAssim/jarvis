@@ -123,6 +123,13 @@ STATUS_CRASHED = "crashed"
 STATUS_SCHEDULED = "scheduled"
 STATUS_RESTARTING = "restarting"
 
+# H.1.1: how long a daemon is allowed to sit in STATUS_STARTING, with its
+# supervisor process still alive, before status() gives up waiting and calls
+# it crashed. Generous on purpose — this only bounds a supervisor that's
+# alive but has gone silent; a supervisor that has already exited is caught
+# immediately below regardless of this window.
+STARTING_GRACE_SECONDS = 10
+
 # The built-in three. `argv` is resolved through _jarvis_argv() at spawn
 # time when the first element is the JARVIS token, so a frozen build, a
 # venv and a `python -m jarvis` checkout all work without the registry
@@ -549,7 +556,28 @@ def status(daemon_id):
     reported = state.get("status") or STATUS_STOPPED
     if running:
         reported = STATUS_RUNNING
-    elif reported in (STATUS_RUNNING, STATUS_STARTING):
+    elif reported == STATUS_STARTING:
+        # H.1.1: start() writes STATUS_STARTING and returns immediately —
+        # it does not wait for the supervisor to actually spawn the child
+        # and write child_pid (see start()'s own docstring: "does not wait
+        # for the child to be healthy"). Every single daemon start therefore
+        # has a real gap where child_pid is still unset, pid_alive()
+        # correctly says not-running, and status() used to read that as an
+        # immediate crash — a false positive on 100% of starts, not just a
+        # flaky one, since a web UI polling right after clicking Start is
+        # exactly the case that hits this window every time.
+        #
+        # A supervisor that has already exited (crashed before ever
+        # spawning its child, e.g. a broken interpreter path) is still
+        # caught immediately via its own pid, no grace period needed for
+        # that case. Only a supervisor that's alive but hasn't reported in
+        # yet gets the benefit of the doubt, and only for a bounded window.
+        supervisor_alive = pid_alive(supervisor)
+        stuck = (time.time() - (state.get("updated") or 0)) > STARTING_GRACE_SECONDS
+        if not supervisor_alive or stuck:
+            reported = STATUS_STOPPED if state.get("stop_requested") else STATUS_CRASHED
+            _write_status(did, status=reported, child_pid=None)
+    elif reported == STATUS_RUNNING:
         # Claimed to be up and isn't. Distinguish a clean stop (we asked)
         # from a crash (we didn't), because that is the single most useful
         # thing to know when a gateway is mysteriously offline.
@@ -613,6 +641,19 @@ def resolve_argv(entry):
     return [str(a) for a in argv]
 
 
+# H.1.1: CREATE_NO_WINDOW alone is sufficient for a fully detached, invisible
+# process — it creates the child with no console at all, which already
+# achieves what DETACHED_PROCESS is for. Combining the two is a well-known
+# Windows gotcha: they express contradictory intent (DETACHED_PROCESS says
+# "no console, inherit nothing"; CREATE_NO_WINDOW says "create one, just
+# keep it hidden"), and the observed symptom matched exactly what that
+# contradiction predicts — a visible, empty console window on every daemon
+# start. Factored out so it's testable without actually being on Windows.
+def _detached_creationflags(is_windows=None):
+    is_windows = (os.name == "nt") if is_windows is None else is_windows
+    return CREATE_NO_WINDOW if is_windows else 0
+
+
 def start(daemon_id):
     """Ask for a daemon to come up. Returns (ok, message).
 
@@ -649,7 +690,7 @@ def start(daemon_id):
     creationflags = 0
     kwargs = {}
     if os.name == "nt":
-        creationflags = CREATE_NO_WINDOW | DETACHED_PROCESS
+        creationflags = _detached_creationflags(True)
     else:
         # New session, so the supervisor survives the terminal that started
         # it — the unix equivalent of DETACHED_PROCESS.

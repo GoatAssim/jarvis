@@ -104,6 +104,7 @@ pytest functions if pytest happens to be available). Run directly:
     python3 tests/test_d5_fixes.py
     python3 tests/test_k28_token_burn.py
     python3 tests/test_notification_levels.py
+    python3 tests/test_h11_daemon_status.py
 
 Front-end logic that's pure enough to run outside a browser gets a plain
 Node script instead, same no-framework convention (each slices the real
