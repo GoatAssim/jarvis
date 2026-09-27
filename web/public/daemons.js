@@ -25,6 +25,20 @@
  *    surfaced before.
  *  - Keyboard: Up/Down moves between services, PageUp/PageDown/Home/End page
  *    the console, "r" refreshes, Escape closes.
+ *
+ * FOLLOW-UP FIXES, rev. 2026-09-27c+ (owner-reported same day this shipped)
+ * --------------------------------------------------------------------------
+ *  - H.1.2: every daemon reading "crashed" — root-caused to daemons.py's
+ *    status() treating ANY previously-RUNNING daemon whose process is gone
+ *    as a crash, even when the supervisor is also gone with no evidence a
+ *    crash ever happened (the normal state after a host reboot, a hard kill
+ *    of the supervisor, or a jarvis upgrade). Fixed in daemons.py itself —
+ *    see status()'s own H.1.2 comment. Nothing changed here; this file just
+ *    displays whatever daemons.py now reports.
+ *  - H.1.3: no working Stop control on a "starting"/"restarting" daemon —
+ *    see isStoppable() below; it used to key off `running` alone.
+ *  - H.1.4: "Add your own" is now its own editor (#dmn-add-editor), not a
+ *    4-field inline row — see wireAddDaemonEditor() below.
  * ========================================================================= */
 
 (function (global) {
@@ -138,8 +152,24 @@
     if (status === "running") return "daemon-dot daemon-dot--up";
     if (status === "crashed") return "daemon-dot daemon-dot--bad";
     if (status === "scheduled") return "daemon-dot daemon-dot--wait";
+    if (status === "starting") return "daemon-dot daemon-dot--wait";
+    if (status === "restarting") return "daemon-dot daemon-dot--restarting";
     if (status === "stopped") return "daemon-dot daemon-dot--stopped";
     return "daemon-dot";
+  }
+
+  // H.1.3 (owner-reported, 2026-09-27): the Start/Stop toggle used to key
+  // off `entry.running` alone, so a daemon mid crash-loop backoff (status
+  // "restarting") or mid-start (status "starting") — which is not yet
+  // `running` but very much has a live supervisor already — showed "Start"
+  // instead of "Stop", with no way to actually stop it from the row. The
+  // backend's daemon-stop already handles this fine (it acts on any live
+  // supervisor, not only a live child — see daemons.stop()); this was a
+  // frontend-only gap. `supervisor_pid` is already exactly "the recorded
+  // supervisor pid, or null if it isn't actually alive" (see daemons.py's
+  // status()), so it's the one field that already means what we need here.
+  function isStoppable(entry) {
+    return Boolean(entry.running) || Boolean(entry.supervisor_pid);
   }
 
   function crashLoopBadge(entry) {
@@ -156,12 +186,12 @@
   }
 
   function renderDaemonRow(entry, index) {
-    const running = Boolean(entry.running);
+    const stoppable = isStoppable(entry);
     const actions = el("div", { class: "daemon-actions" }, [
       el("button", {
         class: "btn btn--ghost btn--sm",
-        onclick: (ev) => { ev.stopPropagation(); daemonAction(entry.id, running ? "stop" : "start"); },
-      }, running ? "Stop" : "Start"),
+        onclick: (ev) => { ev.stopPropagation(); daemonAction(entry.id, stoppable ? "stop" : "start"); },
+      }, stoppable ? "Stop" : "Start"),
       el("button", {
         class: "btn btn--ghost btn--sm",
         onclick: (ev) => { ev.stopPropagation(); daemonAction(entry.id, "restart"); },
@@ -353,6 +383,110 @@
     }
   }
 
+  /* ---- H.1.4: Add-your-own-daemon editor -----------------------------------
+   * Its own sub-panel (see index.html's #dmn-add-editor), the same idea as
+   * the Custom Tools panel's own editor pane, rather than the old 4-field
+   * inline row. Every field posts straight through to the daemon-add flags
+   * the CLI/backend already accepted before this patch — see server.js's
+   * POST /api/daemons and workspace_cli.py's daemon-add usage string.
+   * ------------------------------------------------------------------------*/
+
+  function addEnvRow(key, value) {
+    const wrap = $("#dmn-add-env");
+    if (!wrap) return;
+    const row = el("div", { class: "dmn-env-row" }, [
+      el("input", { type: "text", class: "dmn-env-key", placeholder: "KEY", value: key || "" }),
+      el("input", { type: "text", class: "dmn-env-value", placeholder: "value", value: value || "" }),
+      el("button", {
+        class: "btn btn--ghost btn--sm", type: "button",
+        onclick: () => row.remove(),
+      }, "\u2212"),
+    ]);
+    wrap.appendChild(row);
+  }
+
+  function collectEnvPairs() {
+    return Array.from(document.querySelectorAll("#dmn-add-env .dmn-env-row"))
+      .map((row) => {
+        const key = row.querySelector(".dmn-env-key")?.value.trim() || "";
+        const value = row.querySelector(".dmn-env-value")?.value ?? "";
+        return key ? `${key}=${value}` : null;
+      })
+      .filter(Boolean);
+  }
+
+  function resetAddDaemonEditor() {
+    ["#daemon-new-id", "#daemon-new-name", "#daemon-new-command",
+     "#daemon-new-description", "#daemon-new-cwd"].forEach((sel) => {
+      const node = $(sel);
+      if (node) node.value = "";
+    });
+    ["#daemon-new-stdin", "#daemon-new-shell", "#daemon-new-autostart"].forEach((sel) => {
+      const node = $(sel);
+      if (node) node.checked = false;
+    });
+    const restart = $("#daemon-new-restart"); if (restart) restart.value = "never";
+    const delay = $("#daemon-new-restart-delay"); if (delay) delay.value = "5";
+    const maxR = $("#daemon-new-max-restarts"); if (maxR) maxR.value = "5";
+    const sig = $("#daemon-new-stop-signal"); if (sig) sig.value = "TERM";
+    const timeout = $("#daemon-new-stop-timeout"); if (timeout) timeout.value = "10";
+    const envWrap = $("#dmn-add-env"); if (envWrap) envWrap.innerHTML = "";
+  }
+
+  function openAddDaemonEditor() {
+    const editor = $("#dmn-add-editor");
+    if (!editor) return;
+    editor.hidden = false;
+    if (!editor.dataset.wired) {
+      editor.dataset.wired = "1";
+      if (!$("#dmn-add-env").children.length) addEnvRow("", "");
+    }
+    $("#daemon-new-id")?.focus();
+  }
+
+  function closeAddDaemonEditor() {
+    const editor = $("#dmn-add-editor");
+    if (editor) editor.hidden = true;
+  }
+
+  function wireAddDaemonEditor() {
+    $("#btn-daemon-add-open")?.addEventListener("click", openAddDaemonEditor);
+    $("#btn-daemon-add-cancel")?.addEventListener("click", () => {
+      resetAddDaemonEditor();
+      closeAddDaemonEditor();
+    });
+    $("#btn-daemon-env-add")?.addEventListener("click", () => addEnvRow("", ""));
+
+    $("#btn-daemon-add")?.addEventListener("click", async () => {
+      const id = ($("#daemon-new-id")?.value || "").trim();
+      const command = ($("#daemon-new-command")?.value || "").trim();
+      if (!id || !command) { toast("An id and a command are both required."); return; }
+      try {
+        await Api.post("/api/daemons", {
+          id, command,
+          name: ($("#daemon-new-name")?.value || "").trim(),
+          description: ($("#daemon-new-description")?.value || "").trim(),
+          cwd: ($("#daemon-new-cwd")?.value || "").trim(),
+          stdin: Boolean($("#daemon-new-stdin")?.checked),
+          shell: Boolean($("#daemon-new-shell")?.checked),
+          autostart: Boolean($("#daemon-new-autostart")?.checked),
+          restart: $("#daemon-new-restart")?.value || "never",
+          restartDelay: $("#daemon-new-restart-delay")?.value || "5",
+          maxRestarts: $("#daemon-new-max-restarts")?.value || "5",
+          stopSignal: $("#daemon-new-stop-signal")?.value || "TERM",
+          stopTimeout: $("#daemon-new-stop-timeout")?.value || "10",
+          env: collectEnvPairs(),
+        });
+        toast(`Registered '${id}'.`, "info");
+        resetAddDaemonEditor();
+        closeAddDaemonEditor();
+        refreshDaemons();
+      } catch (err) {
+        toast(err.message || "Couldn't register that service.");
+      }
+    });
+  }
+
   /* ---- keyboard: Up/Down between services, page the console -------------*/
 
   function moveSelection(delta) {
@@ -406,24 +540,7 @@
     $("#btn-daemon-refresh")?.addEventListener("click", () => { refreshDaemons(); refreshDaemonConsole(); });
     dom.filePicker?.addEventListener("change", refreshDaemonConsole);
 
-    $("#btn-daemon-add")?.addEventListener("click", async () => {
-      const id = ($("#daemon-new-id")?.value || "").trim();
-      const command = ($("#daemon-new-command")?.value || "").trim();
-      if (!id || !command) { toast("An id and a command are both required."); return; }
-      try {
-        await Api.post("/api/daemons", {
-          id, command,
-          cwd: ($("#daemon-new-cwd")?.value || "").trim(),
-          stdin: Boolean($("#daemon-new-stdin")?.checked),
-        });
-        $("#daemon-new-id").value = "";
-        $("#daemon-new-command").value = "";
-        $("#daemon-new-cwd").value = "";
-        refreshDaemons();
-      } catch (err) {
-        toast(err.message || "Couldn't register that service.");
-      }
-    });
+    wireAddDaemonEditor();
 
     $("#btn-daemon-send")?.addEventListener("click", async () => {
       const input = dom.inputText;

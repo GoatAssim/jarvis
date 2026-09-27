@@ -96,15 +96,46 @@ def test_status_of_something_never_started_is_stopped():
 
 def test_stale_running_status_is_reconciled_against_the_real_os():
     """A hard kill never writes 'stopped', so a status file claiming a dead
-    pid is the normal case and must be corrected on read, not trusted."""
+    pid is the normal case and must be corrected on read, not trusted.
+
+    REVISED under H.1.2 (owner-reported, 2026-09-27: "every daemon shows as
+    crashed"). This test's original assertion here — "not asked to stop and
+    it isn't there -> that's a crash, not a stop" — is exactly what the
+    owner is describing: with no supervisor_pid ever recorded (the state
+    this test constructs), that rule reads as CRASHED for every daemon that
+    was ever RUNNING the moment its record goes stale, including the
+    ordinary case of a host reboot or a hard-killed supervisor, where there
+    is no actual evidence anything crashed. See daemons.py's status(), the
+    RUNNING branch's H.1.2 comment: the reading now depends on whether the
+    supervisor itself is also gone. A supervisor recorded and still alive
+    (not this test's scenario — see the sibling test below) is still an
+    immediate crash, unchanged from H.1.1's own regression coverage."""
     daemons.add("ghost", "python3 -c pass")
     daemons._write_status("ghost", status=daemons.STATUS_RUNNING,
                           child_pid=999999, stop_requested=False)
     state = daemons.status("ghost")
     assert state["running"] is False
-    # Not asked to stop and it isn't there -> that's a crash, not a stop.
-    assert state["status"] == daemons.STATUS_CRASHED, state
+    # No supervisor was ever recorded (None), so pid_alive(None) is False —
+    # the "supervisor also gone" branch. Not asked to stop, and no evidence
+    # of a crash beyond "isn't running right now": stopped, not crashed.
+    assert state["status"] == daemons.STATUS_STOPPED, state
     daemons.remove("ghost")
+
+
+def test_running_with_a_still_alive_supervisor_is_still_an_immediate_crash():
+    """The narrower case H.1.2 deliberately preserves: a supervisor that IS
+    still alive and recorded, with its child gone, means something really
+    did go wrong under active supervision — still an immediate crash, same
+    as H.1.1's own regression test (test_h11_daemon_status.py) already
+    locks in."""
+    daemons.add("ghost1b", "python3 -c pass")
+    daemons._write_status("ghost1b", status=daemons.STATUS_RUNNING,
+                          child_pid=999999, supervisor_pid=os.getpid(),
+                          stop_requested=False)
+    state = daemons.status("ghost1b")
+    assert state["running"] is False
+    assert state["status"] == daemons.STATUS_CRASHED, state
+    daemons.remove("ghost1b")
 
 
 def test_a_requested_stop_reads_as_stopped_not_crashed():

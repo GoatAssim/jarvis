@@ -1300,6 +1300,16 @@ app.post("/api/daemons/:id/schedule", requireJarvis, async (req, res) => {
   return parseJarvisJSON(result, res, "Couldn't schedule that daemon.");
 });
 
+// H.1.4 (owner feedback, 2026-09-27): daemon-add on the CLI has always
+// accepted a full set of fields (restart policy, stop signal/timeout,
+// description, shell, notes) — this route just never forwarded them, which
+// is what made "add your own daemon" look far thinner than it actually is
+// on the backend. RESTART_POLICIES/STOP_SIGNALS below mirror daemons.py's
+// own allow-lists so a bad value is rejected here with a clear error
+// instead of being silently normalized three layers down.
+const DAEMON_RESTART_POLICIES = new Set(["never", "on-failure", "always"]);
+const DAEMON_STOP_SIGNALS = new Set(["TERM", "INT", "KILL"]);
+
 app.post("/api/daemons", requireJarvis, async (req, res) => {
   const id = typeof req.body?.id === "string" ? req.body.id.trim() : "";
   const command = typeof req.body?.command === "string" ? req.body.command.trim() : "";
@@ -1307,9 +1317,29 @@ app.post("/api/daemons", requireJarvis, async (req, res) => {
   if (!command) return res.status(400).json({ error: "A command is required." });
   const args = ["daemon-add", id, command];
   if (req.body?.name) args.push("--name", String(req.body.name));
+  if (req.body?.description) args.push("--description", String(req.body.description));
   if (req.body?.cwd) args.push("--cwd", String(req.body.cwd));
   if (req.body?.stdin) args.push("--stdin");
+  if (req.body?.shell) args.push("--shell");
   if (req.body?.autostart) args.push("--autostart");
+  if (req.body?.notes) args.push("--notes", String(req.body.notes));
+  if (req.body?.restart !== undefined) {
+    const restart = String(req.body.restart);
+    if (!DAEMON_RESTART_POLICIES.has(restart)) {
+      return res.status(400).json({ error: "restart must be one of: never, on-failure, always." });
+    }
+    args.push("--restart", restart);
+  }
+  if (req.body?.restartDelay !== undefined) args.push("--restart-delay", String(req.body.restartDelay));
+  if (req.body?.maxRestarts !== undefined) args.push("--max-restarts", String(req.body.maxRestarts));
+  if (req.body?.stopSignal !== undefined) {
+    const stopSignal = String(req.body.stopSignal).toUpperCase();
+    if (!DAEMON_STOP_SIGNALS.has(stopSignal)) {
+      return res.status(400).json({ error: "stopSignal must be one of: TERM, INT, KILL." });
+    }
+    args.push("--stop-signal", stopSignal);
+  }
+  if (req.body?.stopTimeout !== undefined) args.push("--stop-timeout", String(req.body.stopTimeout));
   for (const pair of Array.isArray(req.body?.env) ? req.body.env : []) {
     if (typeof pair === "string" && pair.includes("=")) args.push("--env", pair);
   }
