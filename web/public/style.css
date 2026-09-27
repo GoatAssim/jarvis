@@ -2975,70 +2975,14 @@ body.layout--focus .btn--ask-jarvis{ display: none; }
 .panel-menu--focus-only{ display: none; }
 body.layout--focus .panel-menu--focus-only{ display: inline-flex; }
 
-/* --- daemons ---------------------------------------------------------------
-   .daemon-row rides alongside .skill-row (same list, same base spacing/
-   click target) but overrides its look entirely to match .debug-tool-card:
-   a real bordered card with a filled background and a hover lift, instead
-   of a flat row that just tints on hover. Declared after .skill-row in the
-   stylesheet so these win on the properties both set (background, border,
-   border-left) without needing !important. */
-.daemon-row{
-  display: flex; align-items: flex-start; gap: 10px;
-  border: 1px solid var(--border);
-  border-left: 2px solid var(--border-strong);
-  border-radius: 2px;
-  background: var(--bg-panel-2);
-  transition: border-color 0.15s, background 0.15s, transform 0.15s;
-}
-.daemon-row:hover{
-  background: var(--bg-panel-2);
-  border-color: var(--accent-soft);
-  border-left-color: var(--accent);
-  transform: translateX(2px);
-}
-.daemon-row.is-selected{
-  border-color: var(--accent);
-  border-left-color: var(--accent);
-  background: linear-gradient(90deg, color-mix(in srgb, var(--accent) 12%, transparent), var(--bg-panel-2) 70%);
-}
-.daemon-row__main{ display: flex; gap: 10px; flex: 1; min-width: 0; }
-.daemon-row__text{ min-width: 0; flex: 1; }
-.daemon-row__cmd{
-  font-family: var(--font-mono);
-  font-size: 11px;
-  /* BUGFIX: was var(--muted), a token that's never defined anywhere in
-     :root — with no fallback that's invalid at computed-value time, and
-     for an inherited property like `color` that means it silently falls
-     back to whatever color the row already had (full-brightness text),
-     not the dimmed secondary tone it was clearly meant to be. Same fix
-     applies throughout this section (.daemon-dot, .daemon-stdin-toggle,
-     .kanban__empty, .setup-step__icon, .setup-step__detail below) — for
-     `background` (non-inherited) the effect was worse: an invisible,
-     fully transparent daemon status dot by default. */
-  color: var(--text-dimmer);
-  margin-top: 3px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.daemon-actions{ display: flex; flex-wrap: wrap; gap: 6px; }
-
-/* Three states, one glyph. Colour alone never carries the meaning — the row's
-   text says "running"/"crashed" too, because a status you can only read by
-   hue is one some people cannot read at all. */
-.daemon-dot{
-  width: 9px; height: 9px; border-radius: 50%;
-  background: var(--text-dimmer);
-  flex: 0 0 auto;
-  margin-top: 5px;
-}
-.daemon-dot--up{
-  background: var(--status-online, #4ade80);
-  box-shadow: 0 0 8px var(--status-online, #4ade80);
-  animation: pulse 2.4s ease-in-out infinite;
-}
-.daemon-dot--bad{ background: #f87171; box-shadow: 0 0 8px rgba(248,113,113,0.6); }
-.daemon-dot--wait{ background: var(--accent-secondary); }
+/* --- daemons -----------------------------------------------------------
+   H.1 rework: .daemon-row/.daemon-row__*/.daemon-actions/.daemon-dot*/
+   .daemon-stdin-toggle/.daemon-input-row (all daemon-exclusive) moved to
+   their own daemons.css, the way test-checklist.css already does for that
+   panel — see that file's header. Only what's genuinely shared with other
+   panels stays here: .daemon-console's base monospace-pane look (the
+   Subagents panel reuses it verbatim for its own history/result panes) and
+   .daemon-log-picker's <select> chrome (shared with Backlog/Log search). */
 
 .daemon-console{
   flex: 1 1 auto;
@@ -3068,11 +3012,6 @@ body.layout--focus .panel-menu--focus-only{ display: inline-flex; }
   font-family: inherit;
   font-size: 11px;
 }
-.daemon-stdin-toggle{
-  display: flex; align-items: center; gap: 6px;
-  font-size: 11.5px; color: var(--text-dimmer);
-}
-.daemon-input-row input{ font-family: var(--font-mono); }
 
 /* Collapsible "thinking" trace — see renderThreadExtra's "thinking" case
    for why this only appears after a round finishes rather than live. Native
@@ -3340,7 +3279,7 @@ body.layout--focus .panel-menu--focus-only{ display: inline-flex; }
 
 @media (max-width: 900px){
   .kanban{ grid-auto-flow: row; grid-auto-columns: auto; }
-  .daemon-actions{ width: 100%; }
+  /* .daemon-actions{ width: 100%; } — moved to daemons.css (H.1) */
 }
 
 /* =========================================================================

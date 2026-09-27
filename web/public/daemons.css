@@ -1,0 +1,167 @@
+/* ============================================================================
+ * daemons.css — Menu → Daemons.
+ *
+ * Part H.1 rework: brings this panel up to the same bar as Test Checklist
+ * (see test-checklist.css's own header for the shared reasoning). Same
+ * approach — own file, driven off the existing :root tokens, sits inside the
+ * shared .debug-overlay/.debug-panel chrome so frame/corners/glow/scroll-lock
+ * all still come free from style.css.
+ *
+ * .daemon-row/.daemon-row__*/.daemon-actions/.daemon-dot*/.daemon-stdin-toggle
+ * moved here wholesale from style.css — they were already daemon-exclusive
+ * selectors, just declared in the shared file. .daemon-console (the base
+ * monospace pane look) stays in style.css: the Subagents panel reuses it
+ * verbatim for its own history/result panes, so it's genuinely shared, not
+ * daemon-only. Everything in this file is prefixed `dmn-` and is new with
+ * this rework.
+ * ========================================================================= */
+
+/* ---- list rows (moved from style.css, unchanged) ------------------------ */
+
+.daemon-row{
+  display: flex; align-items: flex-start; gap: 10px;
+  border: 1px solid var(--border);
+  border-left: 2px solid var(--border-strong);
+  border-radius: 2px;
+  background: var(--bg-panel-2);
+  transition: border-color 0.15s, background 0.15s, transform 0.15s;
+}
+.daemon-row:hover{
+  background: var(--bg-panel-2);
+  border-color: var(--accent-soft);
+  border-left-color: var(--accent);
+  transform: translateX(2px);
+}
+.daemon-row.is-selected{
+  border-color: var(--accent);
+  border-left-color: var(--accent);
+  background: linear-gradient(90deg, color-mix(in srgb, var(--accent) 12%, transparent), var(--bg-panel-2) 70%);
+}
+/* H.1: focus needs its own visible state, separate from is-selected — a
+   keyboard user arrowing through the list is not the same thing as having
+   opened a console, and relying on :focus-visible alone would be lost the
+   moment the row is re-rendered (a new element, no stored focus). */
+.daemon-row.is-focused{ outline: 1px dashed var(--accent-soft); outline-offset: -1px; }
+.daemon-row__main{ display: flex; gap: 10px; flex: 1; min-width: 0; }
+.daemon-row__text{ min-width: 0; flex: 1; }
+.daemon-row__cmd{
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-dimmer);
+  margin-top: 3px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.daemon-actions{ display: flex; flex-wrap: wrap; gap: 6px; }
+
+/* Three states, one glyph. Colour alone never carries the meaning — the row's
+   text says "running"/"crashed" too. */
+.daemon-dot{
+  width: 9px; height: 9px; border-radius: 50%;
+  background: var(--text-dimmer);
+  flex: 0 0 auto;
+  margin-top: 5px;
+}
+.daemon-dot--up{
+  background: var(--status-online, #4ade80);
+  box-shadow: 0 0 8px var(--status-online, #4ade80);
+  animation: pulse 2.4s ease-in-out infinite;
+}
+.daemon-dot--bad{ background: #f87171; box-shadow: 0 0 8px rgba(248,113,113,0.6); }
+.daemon-dot--wait{ background: var(--accent-secondary); }
+/* New with H.1: an explicit stopped look, rather than falling through to the
+   bare default dot (which reads more like "unknown" than "off, on purpose"). */
+.daemon-dot--stopped{ background: var(--text-dimmer); opacity: 0.6; }
+
+.daemon-stdin-toggle{
+  display: flex; align-items: center; gap: 6px;
+  font-size: 11.5px; color: var(--text-dimmer);
+}
+.daemon-input-row input{ font-family: var(--font-mono); }
+
+/* ---- H.1: crash-loop badge, surfaced in the row itself ------------------
+   Data is already there (daemons.status()'s `restarts`, the registry's own
+   `max_restarts`) — this only needed a place to show it. Two severities:
+   "has restarted recently" (informational) vs "about to hit/at the restart
+   ceiling" (the thing a tester actually needs to notice without opening the
+   console to find out). */
+.dmn-badge{
+  display: inline-flex; align-items: center; gap: 4px;
+  font-size: 10px; letter-spacing: 0.04em; text-transform: uppercase;
+  padding: 2px 6px; border-radius: 3px; flex: 0 0 auto;
+  border: 1px solid var(--border-strong); color: var(--text-dimmer);
+  white-space: nowrap;
+}
+.dmn-badge--looping{
+  color: var(--accent-secondary); border-color: rgba(var(--accent-secondary-rgb), 0.4);
+  background: rgba(var(--accent-secondary-rgb), 0.08);
+}
+.dmn-badge--maxed{
+  color: var(--red); border-color: rgba(255, 92, 108, 0.4);
+  background: rgba(255, 92, 108, 0.08);
+}
+.daemon-row__badges{ display: flex; gap: 6px; margin-top: 4px; flex-wrap: wrap; }
+
+/* ---- H.1: console re-done as classed lines, not a flat <pre> ------------
+   #daemon-console is a scrollable <div> now (was <pre>); each output line is
+   its own .dmn-line, coloured by where it came from. See daemons.js's
+   classifyLine() — stdout/stderr are two real OS pipes as of this rework
+   (daemons.py's run_supervisor), so this is a real distinction, not a
+   guess. */
+.dmn-console-toolbar{
+  display: flex; align-items: center; gap: 6px; flex-wrap: wrap;
+  padding: 6px 14px; border-bottom: 1px solid var(--border);
+}
+.dmn-chip{
+  display: inline-flex; align-items: center; gap: 5px;
+  background: transparent; color: var(--text-dim);
+  border: 1px solid var(--border); border-radius: 2px;
+  padding: 3px 8px; font-size: 10.5px; letter-spacing: 0.05em; text-transform: uppercase;
+  cursor: pointer; transition: border-color .15s, color .15s, background .15s;
+}
+.dmn-chip:hover{ border-color: var(--accent-soft); color: var(--text); }
+.dmn-chip.is-active{
+  border-color: var(--accent); color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 10%, transparent);
+}
+.dmn-chip__n{ font-family: var(--font-mono); font-size: 10px; opacity: .75; }
+.dmn-console-toolbar .dmn-autoscroll{
+  margin-left: auto; display: flex; align-items: center; gap: 5px;
+  font-size: 10.5px; color: var(--text-dimmer);
+}
+
+.dmn-line{ white-space: pre-wrap; word-break: break-word; }
+.dmn-line--stdout{ color: var(--text); }
+.dmn-line--stderr{ color: var(--accent-secondary); }
+.dmn-line--crash{
+  color: var(--red);
+  background: rgba(255, 92, 108, 0.06);
+  border-left: 2px solid var(--red);
+  padding-left: 6px; margin-left: -8px;
+}
+.dmn-line--meta{ color: var(--accent-soft); font-style: italic; }
+.dmn-line--stdin{ color: var(--accent); }
+.dmn-line.is-match mark{ background: color-mix(in srgb, var(--accent) 55%, transparent); color: #fff; border-radius: 2px; }
+
+.dmn-console-empty{ color: var(--text-dimmer); font-style: italic; }
+
+/* Small, dismissable reminder of the shortcuts below the console — same
+   spirit as Test Checklist's own hint row, kept to one line. */
+.dmn-keyhint{
+  padding: 5px 14px; font-size: 10.5px; color: var(--text-dimmer);
+  border-top: 1px solid var(--border); font-family: var(--font-mono);
+}
+.dmn-keyhint kbd{
+  font-family: var(--font-mono); border: 1px solid var(--border-strong);
+  border-radius: 3px; padding: 0 4px; margin: 0 2px; color: var(--text-dim);
+}
+
+@media (max-width: 900px){
+  .daemon-actions{ width: 100%; } /* moved from style.css, unchanged */
+}
+
+@media (max-width: 760px){
+  .dmn-console-toolbar{ padding: 6px 10px; }
+  .dmn-keyhint{ display: none; } /* no keyboard on a touch layout */
+}

@@ -11,6 +11,7 @@
 <link rel="stylesheet" href="style.css">
 <link rel="stylesheet" href="ui-kit.css">
 <link rel="stylesheet" href="test-checklist.css">
+<link rel="stylesheet" href="daemons.css">
 </head>
 <body>
 
@@ -1378,7 +1379,17 @@
           <h3 id="daemon-console-title">Console</h3>
           <select id="daemon-console-file" class="daemon-log-picker" title="Current console, or an older rotated log"></select>
         </div>
-        <pre class="daemon-console" id="daemon-console">Pick a service to see its output.</pre>
+        <!-- H.1: filter chips (All/Output/Errors) + auto-scroll toggle, filled
+             in by daemons.js's renderConsoleToolbar(). -->
+        <div class="dmn-console-toolbar" id="dmn-console-toolbar"></div>
+        <!-- Was a flat <pre>; now a scrollable container of classed
+             .dmn-line divs (stdout/stderr/crash traceback/meta/stdin-echo) —
+             see daemons.js's classifyLine(). tabindex so PageUp/PageDown/
+             Home/End (wired in daemons.js) have somewhere to act even before
+             the pane itself has been clicked into. -->
+        <div class="daemon-console dmn-console" id="daemon-console" tabindex="0">
+          <div class="dmn-console-empty">Pick a service to see its output.</div>
+        </div>
         <!-- Only enabled for a running daemon whose definition says it reads
              stdin — see daemons.send_input, which refuses otherwise rather
              than silently swallowing the line. -->
@@ -1389,6 +1400,12 @@
         <div class="sched-add">
           <input type="text" id="daemon-schedule-when" placeholder="start it later &mdash; e.g. in 2 hours, tomorrow 9am" />
           <button class="btn btn--ghost btn--sm" id="btn-daemon-schedule" type="button">Schedule start</button>
+        </div>
+        <div class="dmn-keyhint">
+          <kbd>&uarr;</kbd><kbd>&darr;</kbd> services &middot;
+          <kbd>Enter</kbd> open console &middot;
+          <kbd>PgUp</kbd><kbd>PgDn</kbd><kbd>Home</kbd><kbd>End</kbd> scroll &middot;
+          <kbd>R</kbd> refresh &middot; <kbd>Esc</kbd> close
         </div>
       </section>
     </div>
@@ -1566,6 +1583,7 @@
 <script src="custom-tools.js"></script>
 <script src="test-checklist-data.js"></script>
 <script src="test-checklist.js"></script>
+<script src="daemons.js"></script>
 
 </body>
 </html>

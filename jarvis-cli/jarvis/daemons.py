@@ -1048,7 +1048,7 @@ def run_supervisor(daemon_id):
                 env=env,
                 stdin=subprocess.PIPE if wants_stdin else subprocess.DEVNULL,
                 stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
+                stderr=subprocess.PIPE,
                 bufsize=1,
                 text=True,
                 encoding=ENCODING,
@@ -1068,18 +1068,33 @@ def run_supervisor(daemon_id):
                       stop_requested=False, exit_code=None, last_error="",
                       restarts=len(restarts))
 
-        # stdout is drained on its own thread. Doing it inline would mean the
-        # stdin queue is only checked between output lines, so a silent
-        # daemon would never receive anything typed at it.
-        def _pump(stream=proc.stdout):
+        # stdout/stderr are drained on their own threads, one each. Doing it
+        # inline would mean the stdin queue is only checked between output
+        # lines, so a silent daemon would never receive anything typed at it.
+        #
+        # H.1 (Daemons UI rework): stdout and stderr used to be merged at the
+        # OS level (stderr=STDOUT) before either byte reached this process,
+        # which threw the distinction away for good — no amount of frontend
+        # cleverness can recover it after the fact. They are now two real
+        # pipes and two pump threads; the "E: " prefix is the one place that
+        # distinction survives into the flat console.log file, and it is
+        # deliberately a plain, greppable text marker rather than a control
+        # byte, so `tail`/`grep -v '^E: '` on the raw file still works. The
+        # web console (daemons.js) strips it back off for display and uses
+        # it, plus a traceback-shaped-line check, to colour stdout / stderr /
+        # crash traceback separately.
+        def _pump(stream, prefix=""):
             try:
                 for line in stream:
-                    _console_write(handle, line if line.endswith("\n") else line + "\n")
+                    text = line if line.endswith("\n") else line + "\n"
+                    _console_write(handle, (prefix + text) if prefix else text)
             except (OSError, ValueError):
                 pass
 
-        pump = threading.Thread(target=_pump, daemon=True)
-        pump.start()
+        pump_out = threading.Thread(target=_pump, args=(proc.stdout,), daemon=True)
+        pump_err = threading.Thread(target=_pump, args=(proc.stderr, "E: "), daemon=True)
+        pump_out.start()
+        pump_err.start()
 
         def _drain_queue(child=proc):
             if not wants_stdin or not queue.exists():
@@ -1119,7 +1134,8 @@ def run_supervisor(daemon_id):
             asked_to_stop = True
             _terminate(proc.pid, stop_signal)
 
-        pump.join(timeout=2)
+        pump_out.join(timeout=2)
+        pump_err.join(timeout=2)
         code = proc.returncode
         elapsed = time.time() - started
         _console_write(handle,
@@ -1137,9 +1153,11 @@ def run_supervisor(daemon_id):
                 # Almost always a config problem rather than a runtime one,
                 # and saying so here saves reading the console to find out.
                 tail = [ln for ln in read_console(did, lines=8) if ln.strip()]
+                last = tail[-1] if tail else "(none)"
+                if last.startswith("E: "):
+                    last = last[3:]  # the "came from stderr" marker, not part of the message
                 error += (f" after {elapsed:.1f}s — it failed to start rather "
-                          f"than stopping. Last output: "
-                          + (tail[-1] if tail else "(none)"))
+                          f"than stopping. Last output: " + last)
 
         # --- should it come back? ------------------------------------------
         if policy == RESTART_NEVER:
