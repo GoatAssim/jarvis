@@ -2874,6 +2874,32 @@ window.JARVIS_TEST_CHECKLIST = /*JSON-BEGIN*/ {
     "Discord or Instagram configured with an owner account"
    ]
   },
+  "recent_dms": {
+   "group": "channels",
+   "does": "Lists recent DM threads (Discord/Instagram) with a short snippet each, newest first.",
+   "steps": [
+    {
+     "ask": "Who DMed me recently?",
+     "expect": "A short list of recent DM senders with a brief snippet each, not a full transcript dump."
+    },
+    {
+     "run": {
+      "platform": "discord",
+      "limit": 3
+     },
+     "expect": "ok: true, at most 3 Discord threads, each with 'person', 'last_message_at', and a short 'messages' list."
+    },
+    {
+     "run": {},
+     "expect": "ok: true with an empty or small 'threads' list on a fresh install with no channel history — never an exception."
+    }
+   ],
+   "care": "Cross-person read of DM history — verify it refuses when JARVIS_CHANNEL_SENDER is set to a non-owner sender (simulate a guest chat message) before shipping.",
+   "watch": [
+    "Must exclude group/guild channels — only true 1:1 DM threads.",
+    "A torn/corrupt trailing JSONL line in a transcript file must not crash the tool (read_thread already skips it)."
+   ]
+  },
   "mcp_list_servers": {
    "group": "mcp",
    "does": "Lists connected MCP servers and their tool counts.",

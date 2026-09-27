@@ -190,7 +190,14 @@ TOOL_PACK_INSTRUCTION = (
     "remember_sender saves the name of whoever is messaging you over chat. "
     "If the identity block says you don't know them yet, ask what to call "
     "them and save it the moment they answer — don't ask twice, and don't "
-    "guess a name from their handle."
+    "guess a name from their handle. "
+    # L.1 — this is the group's own instruction and, per
+    # tool_registry.TOOL_PACK_INSTRUCTIONS's setdefault-merge, the one that
+    # actually reaches the model for "channels" (see actions/recent_dms.py's
+    # own TOOL_PACK_INSTRUCTION for why it can't just add its own instead).
+    "recent_dms is read-only and owner-only — it answers questions about who "
+    "has DMed the owner, never a lookup on behalf of whoever is currently "
+    "chatting."
 )
 
 # Neither tool touches anything outside one guest's own small record, so
