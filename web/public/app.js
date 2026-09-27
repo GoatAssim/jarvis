@@ -1536,13 +1536,19 @@
   }
 
   let toastTimer = null;
-  function toast(message, kind = "error") {
+  function toast(message, kind = "error", opts = {}) {
     const t = qs("#toast");
+    const sticky = Boolean(opts.sticky);
     t.textContent = message;
-    t.className = "toast" + (kind === "info" ? " is-info" : "");
+    t.className = "toast" + (kind === "info" ? " is-info" : "") + (sticky ? " is-sticky" : "");
     t.hidden = false;
     clearTimeout(toastTimer);
-    toastTimer = setTimeout(() => { t.hidden = true; }, 4200);
+    // D.2.1 level 3+ (Persistent): the toast doesn't auto-dismiss — it
+    // stays until the user clicks it away, instead of the usual timeout.
+    t.onclick = sticky ? () => { t.hidden = true; t.onclick = null; } : null;
+    if (!sticky) {
+      toastTimer = setTimeout(() => { t.hidden = true; }, 4200);
+    }
   }
 
   // Bottom-left popup for a directly-run saved command that's paused on
@@ -1642,23 +1648,50 @@
   // reminder is that it reaches you when you're not looking at Jarvis.
   function showNotification(note) {
     if (!note || (!note.title && !note.message)) return;
+    // D.2.1 — the level this notification was resolved at. Anything from
+    // before this system existed (or that omits it) has no `level` field
+    // at all, so it defaults to 2 (Standard) — the previous unconditional
+    // "always toast" behavior — rather than being silently swallowed.
+    const level = Number.isFinite(Number(note.level)) ? Number(note.level) : 2;
     const title = String(note.title || "Jarvis").slice(0, 120);
     const body = String(note.message || "").slice(0, 400);
     const isFailure = Boolean(note.failed);
-    toast(`${title}${body ? " \u2014 " + body.slice(0, 160) : ""}`, isFailure ? "error" : "info");
-    if (!jarvisTabVisible() && "Notification" in window && Notification.permission === "granted") {
-      try {
-        // Tagged per notification id, not a shared tag: two reminders
-        // firing in the same tick must not collapse into one toast the way
-        // notifyIfAway's fixed "jarvis-task" tag deliberately does.
-        const n = new Notification(title, {
-          body,
-          tag: `jarvis-note-${note.id || Date.now()}`,
-        });
-        n.onclick = () => { window.focus(); n.close(); };
-      } catch {
-        /* private mode / unsupported */
+
+    // Level 1 (Silent): inbox-tab entry only — no toast, no OS
+    // notification, no interruption. The inbox/badge itself is updated by
+    // the caller of showNotification, not here.
+    if (level >= 2) {
+      const sticky = level >= 3 || Boolean(note.persistent);
+      toast(`${title}${body ? " \u2014 " + body.slice(0, 160) : ""}`, isFailure ? "error" : "info",
+            { sticky });
+
+      if (!jarvisTabVisible() && "Notification" in window && Notification.permission === "granted") {
+        try {
+          // Tagged per notification id, not a shared tag: two reminders
+          // firing in the same tick must not collapse into one toast the way
+          // notifyIfAway's fixed "jarvis-task" tag deliberately does.
+          const n = new Notification(title, {
+            body,
+            tag: `jarvis-note-${note.id || Date.now()}`,
+          });
+          n.onclick = () => { window.focus(); n.close(); };
+        } catch {
+          /* private mode / unsupported */
+        }
       }
+    }
+
+    // Level 5 (Confirm): a blocking surface requiring an explicit
+    // acknowledgment, reusing the same confirm pattern the server already
+    // drives tool-risk confirmations through — not just another toast.
+    if ((level >= 5 || note.confirm_required) && window.JarvisUI
+        && typeof window.JarvisUI.confirm === "function") {
+      window.JarvisUI.confirm({
+        title,
+        body: body || "Acknowledge this notification.",
+        confirmLabel: "Acknowledge",
+        cancelLabel: "Dismiss",
+      }).catch(() => {});
     }
   }
 

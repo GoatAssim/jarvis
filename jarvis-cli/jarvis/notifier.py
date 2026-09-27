@@ -66,10 +66,28 @@ DEFAULT_CONFIG = {
     "enabled": True,
     # Per-kind default channels. "inbox" is in every one of these on
     # purpose: it's the only channel that survives nothing being open.
+    # Superseded as the primary knob by "levels" below (D.2.1/K.2.7) —
+    # kept, unchanged, as the explicit-`channels`-override path notify()
+    # still honors, so nothing that already passes channels= breaks.
     "channels": {
         "reminder": ["inbox", "stream", "toast"],
         "notify": ["inbox", "stream", "toast"],
         "task": ["inbox", "stream"],
+    },
+    # D.2.1 — per-kind (or per custom-tool `source`) importance level
+    # default, 1-5, looked up when a caller doesn't pass an explicit
+    # `level`. See normalize_level()'s docstring for the full lookup order
+    # and LEVEL_NAMES for what each number means. clipboard_watch defaults
+    # to 2 (Standard) — a deliberate choice, not a carry-over from the old
+    # channels default above: it keeps the previous toast-on-change
+    # behavior while making flood control (K.2.7.2) apply to it by default
+    # instead of every burst toasting individually.
+    "levels": {
+        "reminder": 2,
+        "notify": 2,
+        "task": 2,
+        "clipboard_watch": 2,
+        "ambient": 1,
     },
     # Windows toasts go through PowerShell's BurntToast module when it's
     # installed (much nicer looking), falling back to a plain balloon via
@@ -77,6 +95,86 @@ DEFAULT_CONFIG = {
     "prefer_burnt_toast": True,
     "voice_enabled": False,
 }
+
+# D.2.1 — five cumulative importance levels, each including everything
+# below it:
+#   1 Silent      inbox entry only — no toast, no interruption.
+#   2 Standard     + a native/live toast (this module's existing default
+#                  behavior before this level system existed).
+#   3 Persistent   + the toast doesn't auto-dismiss; it re-surfaces until
+#                  acknowledged. A delivery-BEHAVIOR change on the same
+#                  toast, not a new channel — carried as record["persistent"]
+#                  for the frontend to act on, not a CHANNELS entry.
+#   4 Broadcast    + pushed as a DM to the owner on every currently
+#                  connected channel (discord/instagram), not just this
+#                  session's own surface.
+#   5 Confirm      + a blocking confirm surface requiring an explicit
+#                  acknowledgment, not an ambient toast — record
+#                  ["confirm_required"], again a frontend behavior flag
+#                  rather than a channel.
+LEVEL_NAMES = {1: "silent", 2: "standard", 3: "persistent", 4: "broadcast", 5: "confirm"}
+MIN_LEVEL, MAX_LEVEL = 1, 5
+DEFAULT_LEVEL = 2
+
+# Accepted for backward/forward compatibility: anything still speaking the
+# old three-tier digest.py vocabulary (low/normal/high), or a plain English
+# importance word, maps onto the new 1-5 scale. Never the primary interface
+# going forward — normalize_level()'s numeric/per-kind paths are — but a
+# caller that passes a familiar word instead of memorizing "3" still works.
+_LEVEL_ALIASES = {
+    "silent": 1, "standard": 2, "persistent": 3, "broadcast": 4, "confirm": 5,
+    "low": 1, "normal": 2, "high": 3,
+    "routine": 1, "quiet": 1, "batch": 1, "digest": 1, "fyi": 1, "info": 1,
+    "urgent": 3, "important": 3, "critical": 3, "now": 3,
+}
+
+
+def normalize_level(value, kind=None, source=None, config=None):
+    """Resolve an explicit level to an int 1-5.
+
+    Lookup order:
+      1. `value` itself, if it's a valid level (1-5, or one of
+         _LEVEL_ALIASES's legacy words/priorities).
+      2. `config["levels"][source]` — lets a custom tool/action (K.2.7.1a)
+         declare its own default the same way a built-in kind does, keyed
+         by its own name instead of a shared "kind".
+      3. `config["levels"][kind]`.
+      4. DEFAULT_LEVEL.
+    """
+    if value is not None:
+        try:
+            lvl = int(value)
+            if MIN_LEVEL <= lvl <= MAX_LEVEL:
+                return lvl
+        except (TypeError, ValueError):
+            pass
+        text = str(value).strip().lower()
+        if text in _LEVEL_ALIASES:
+            return _LEVEL_ALIASES[text]
+
+    config = config if config is not None else _load_config()
+    levels = config.get("levels") or {}
+    for candidate_key in (source, kind):
+        if not candidate_key:
+            continue
+        try:
+            lvl = int(levels[candidate_key])
+            if MIN_LEVEL <= lvl <= MAX_LEVEL:
+                return lvl
+        except (KeyError, TypeError, ValueError):
+            continue
+    return DEFAULT_LEVEL
+
+
+def _channels_for_level(level):
+    """The channel set implied by a bare level, before any explicit
+    `channels` override (which still wins outright — see notify())."""
+    chans = ["inbox"]
+    if level >= 2:
+        chans += ["stream", "toast"]
+    if level >= 4:
+        chans += ["discord", "instagram"]
+    return chans
 
 
 def _load_config():
@@ -87,8 +185,8 @@ def _load_config():
     config = json.loads(json.dumps(DEFAULT_CONFIG))  # deep copy
     if isinstance(data, dict):
         for key, value in data.items():
-            if key == "channels" and isinstance(value, dict):
-                config["channels"].update(value)
+            if key in ("channels", "levels") and isinstance(value, dict):
+                config[key].update(value)
             else:
                 config[key] = value
     return config
@@ -215,7 +313,7 @@ def history(limit=50):
 
 
 def notify(title, message, channels=None, kind="notify", job_id=None,
-           conv_id=None, failed=False, actions=None):
+           conv_id=None, failed=False, actions=None, level=None, source=None):
     """Deliver one notification across every resolved channel.
 
     Never raises. Returns the notification record, with a `delivered` list
@@ -239,8 +337,26 @@ def notify(title, message, channels=None, kind="notify", job_id=None,
     short form with the full text available on expand, instead of dumping
     an entire reply — including, for a task/command notification, output
     that can run to paragraphs — into every entry in the list.
+
+    `level` (1-5, D.2.1/K.2.7) resolves via normalize_level() — an explicit
+    value here, else `source`'s or `kind`'s configured default, else
+    DEFAULT_LEVEL. `source`, if given, tags where this came from (a custom
+    tool/action's own name, K.2.7.1a) and can also carry its own configured
+    default level the same way a built-in `kind` does.
+
+    An explicit `channels` list still wins outright over whatever the
+    resolved level implies — this is the same "explicit beats default"
+    contract the old channels-only model already had, just with the level
+    as the new default source instead of `kind` alone.
+
+    Levels 1-2 are digest-eligible: when digest.py's batching is enabled,
+    delivery beyond the durable inbox is deferred into the batched summary
+    instead of firing now (record["deferred_to_digest"] = True). Levels 3-5
+    never batch or get suppressed, matching the old "high" priority's
+    guarantee.
     """
     config = _load_config()
+    resolved_level = normalize_level(level, kind=kind, source=source, config=config)
     clean_message = ask_output.strip_protocol_lines((message or "").strip()) or ""
     summarized = ask_output.summarize(clean_message)
     record = {
@@ -258,20 +374,43 @@ def notify(title, message, channels=None, kind="notify", job_id=None,
         "seen_by": [],
         "delivered": [],
         "failed_channels": [],
+        "level": resolved_level,
+        "level_name": LEVEL_NAMES.get(resolved_level, "standard"),
+        "persistent": resolved_level >= 3,
+        "confirm_required": resolved_level >= 5,
     }
+    if source:
+        record["source"] = str(source)[:100]
 
     if not config.get("enabled", True):
         record["delivered"] = []
         record["failed_channels"] = ["disabled"]
         return record
 
-    wanted = channels or config.get("channels", {}).get(record["kind"]) or ["inbox", "stream"]
-    wanted = [c for c in wanted if c in CHANNELS]
-    if "inbox" not in wanted:
-        # Always durable. A caller opting out of every channel would
-        # otherwise create a notification that exists nowhere — the failure
-        # this module's docstring exists to prevent.
-        wanted = ["inbox"] + wanted
+    if channels:
+        wanted = [c for c in channels if c in CHANNELS]
+        if "inbox" not in wanted:
+            wanted = ["inbox"] + wanted
+    else:
+        wanted = _channels_for_level(resolved_level)
+
+    # K.2.7 digest interaction: levels 1-2 defer their non-inbox delivery to
+    # the batched summary when digest is on, exactly like the old low/normal
+    # priorities did — just keyed off the new resolved level, the single
+    # source of truth digest.py now reads too (see digest.should_batch_level).
+    from . import digest as digest_mod
+    if not channels and resolved_level <= 2 and digest_mod.should_batch_level(resolved_level):
+        try:
+            ok = _deliver_inbox(record, config)
+        except Exception:  # noqa: BLE001
+            ok = False
+        (record["delivered"] if ok else record["failed_channels"]).append("inbox")
+        try:
+            digest_mod.enqueue(record)
+            record["deferred_to_digest"] = True
+        except Exception:  # noqa: BLE001 — digest is advice, never a reason to fail delivery
+            record["deferred_to_digest"] = False
+        return record
 
     for channel in dict.fromkeys(wanted):
         try:

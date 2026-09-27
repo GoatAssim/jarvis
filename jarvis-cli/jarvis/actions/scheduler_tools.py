@@ -110,6 +110,26 @@ def _channels(args):
     return channels or None
 
 
+_LEVEL_HELP = (
+    "How important this is, 1-5 (K.2.7): 1 silent (inbox only), "
+    "2 standard (adds a native toast — the default), 3 persistent (the "
+    "toast stays until acknowledged), 4 broadcast (also DMs the owner on "
+    "every connected channel), 5 confirm (requires an explicit "
+    "acknowledgment, not just a toast). Omit to use the configured default."
+)
+
+
+def _level(args):
+    raw = args.get("level")
+    if raw is None or raw == "":
+        return None
+    try:
+        lvl = int(raw)
+    except (TypeError, ValueError):
+        return None
+    return lvl if 1 <= lvl <= 5 else None
+
+
 def scheduler_channels():
     from .. import notifier
     return notifier.CHANNELS
@@ -135,6 +155,7 @@ def tool_remind_me(args, context=None):
             when=when,
             message=message,
             channels=_channels(args),
+            level=_level(args),
             conv_id=getattr(context, "conv_id", None),
             max_runs=args.get("times"),
         )
@@ -160,6 +181,7 @@ def tool_notify_me(args, context=None):
             title=(args.get("title") or "Jarvis").strip(),
             message=message,
             channels=_channels(args),
+            level=_level(args),
             kind="notify",
             conv_id=getattr(context, "conv_id", None),
         )
@@ -174,6 +196,7 @@ def tool_notify_me(args, context=None):
             when=when,
             message=message,
             channels=_channels(args),
+            level=_level(args),
             conv_id=getattr(context, "conv_id", None),
             max_runs=args.get("times"),
         )
@@ -232,6 +255,7 @@ def tool_schedule_task(args, context=None):
             when=when,
             action=action,
             channels=_channels(args),
+            level=_level(args),
             conv_id=getattr(context, "conv_id", None),
             emit_on_done=args.get("emit_on_done"),
             max_runs=args.get("times"),
@@ -311,6 +335,7 @@ def tool_schedule_watch(args, context=None):
             when=when,
             action=action,
             channels=_channels(args),
+            level=_level(args),
             conv_id=getattr(context, "conv_id", None),
             emit_on_done=args.get("emit_on_done"),
             max_runs=args.get("times"),
@@ -411,6 +436,7 @@ TOOL_SCHEMAS = [
                     "type": "array", "items": {"type": "string"},
                     "description": _CHANNEL_HELP,
                 },
+                "level": {"type": "integer", "description": _LEVEL_HELP},
                 "times": {
                     "type": "integer",
                     "description": "For a repeating reminder, stop after this many "
@@ -444,6 +470,7 @@ TOOL_SCHEMAS = [
                     "type": "array", "items": {"type": "string"},
                     "description": _CHANNEL_HELP,
                 },
+                "level": {"type": "integer", "description": _LEVEL_HELP},
                 "times": {
                     "type": "integer",
                     "description": "For a repeating/event notification, stop after "
@@ -511,6 +538,7 @@ TOOL_SCHEMAS = [
                 },
                 "times": {"type": "integer", "description": "Stop after this many runs."},
                 "channels": {"type": "array", "items": {"type": "string"}, "description": _CHANNEL_HELP},
+                "level": {"type": "integer", "description": _LEVEL_HELP},
             },
             "required": ["when"],
         },
@@ -593,6 +621,7 @@ TOOL_SCHEMAS = [
                 },
                 "times": {"type": "integer", "description": "Stop after this many runs."},
                 "channels": {"type": "array", "items": {"type": "string"}, "description": _CHANNEL_HELP},
+                "level": {"type": "integer", "description": _LEVEL_HELP},
             },
             "required": ["when", "checks"],
         },
