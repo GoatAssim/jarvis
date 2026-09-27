@@ -38,7 +38,7 @@ import threading
 
 import requests
 
-from . import logs, prompt_cache
+from . import key_health, logs, prompt_cache
 from . import token_usage
 
 MAX_TOOL_ROUNDS = 5  # follow-up requests allowed after a tool call, per ask — plenty for simple
@@ -83,6 +83,40 @@ DISCOVERY_TOOL_NAMES = frozenset({"search_tools", "get_tool_schema", "load_skill
 # how DISCOVERY_TOOL_NAMES itself is deliberately not exhaustive either;
 # widen this only with the same evidence-driven care F.2 itself used.
 PROJECT_DISCOVERY_TOOL_NAMES = frozenset({"search_files", "list_dir"})
+
+
+def _pace_round(provider, api_key, cfg_defaults):
+    """K.3.6 (F.9 item 3, the "pace" half spread_keys() didn't cover): called
+    once per round, in every one of the five adapters below, right before
+    that round's request goes out. See key_health.pace_key() for the actual
+    wait/record logic — this just resolves which provider label and
+    interval apply.
+
+    `provider.get("name") or provider.get("type") or "provider"` mirrors
+    ai_client._provider_label() exactly (that's the string key_health's
+    other callers — record_success/record_failure/order_keys, all reached
+    via ai_client.py — already key their state under for this same
+    provider). Duplicated rather than imported: ai_providers.py doesn't
+    import ai_client anywhere else either, and this module's whole adapter
+    layer is deliberately built with small, self-contained pieces over
+    shared cross-module plumbing (see this file's own docstring).
+
+    min_round_interval_seconds can be set on the provider block itself
+    (a tight free-tier key wants a bigger floor than a paid one) and falls
+    back to cfg_defaults, then to key_health.DEFAULT_MIN_ROUND_INTERVAL;
+    either can be 0 to disable pacing for that provider/ask entirely.
+    """
+    value = provider.get("min_round_interval_seconds")
+    if value is None:
+        value = (cfg_defaults or {}).get("min_round_interval_seconds")
+    if value is None:
+        value = key_health.DEFAULT_MIN_ROUND_INTERVAL
+    try:
+        interval = float(value)
+    except (TypeError, ValueError):
+        interval = key_health.DEFAULT_MIN_ROUND_INTERVAL
+    label = provider.get("name") or provider.get("type") or "provider"
+    key_health.pace_key(label, api_key, interval)
 
 
 class RoundBudget:
@@ -2085,6 +2119,7 @@ def call_openai_compatible(provider, messages, timeout, tools=None, tool_executo
             # beats what the thinking level asked for.
             payload.update(extra)
 
+        _pace_round(provider, api_key, cfg_defaults)
         resp, net_err = _post(payload)
         # One retry without the thinking keys if THAT is what was rejected.
         # Some OpenAI-compatible hosts 400 on an unknown field (Groq does
@@ -2477,6 +2512,7 @@ def call_anthropic(provider, messages, timeout, tools=None, tool_executor=None, 
         if round_num == 0:
             _log_cache_plan(plan, "anthropic")
 
+        _pace_round(provider, api_key, cfg_defaults)
         resp, net_err = _post(payload)
         if net_err:
             return AIResult(False, error=net_err, tool_history=_history())
@@ -2989,6 +3025,7 @@ def call_gemini(provider, messages, timeout, tools=None, tool_executor=None, rou
                     payload["contents"] = working_contents + [
                         {"role": "user", "parts": [{"text": _TOOLS_WITHHELD_NOTICE}]}]
 
+            _pace_round(provider, api_key, cfg_defaults)
             if stream_enabled():
                 stream_url = _gemini_stream_url(url)
                 resp, net_err = _post_stream(stream_url, headers, payload, timeout)
@@ -3298,6 +3335,7 @@ def call_cohere(provider, messages, timeout, tools=None, tool_executor=None, rou
             # F.1: withheld and the model is told so. Request-only.
             payload["messages"] = working_messages + [{"role": "user", "content": _TOOLS_WITHHELD_NOTICE}]
 
+        _pace_round(provider, api_key, cfg_defaults)
         if stream_enabled():
             payload["stream"] = True
             resp, net_err = _post_stream(base_url, headers, payload, timeout)
@@ -3532,6 +3570,10 @@ def call_ollama(provider, messages, timeout, tools=None, tool_executor=None, rou
             # F.1: withheld and the model is told so. Request-only.
             payload["messages"] = working_messages + [{"role": "user", "content": _TOOLS_WITHHELD_NOTICE}]
 
+        # No api_key on this adapter (local server, no per-key quota) —
+        # _pace_round/pace_key is a no-op on a None key, kept here only for
+        # uniformity with the other four adapters.
+        _pace_round(provider, provider.get("api_key"), cfg_defaults)
         if stream_enabled():
             resp, net_err = _post_stream(base_url, headers, payload, timeout)
             if net_err:

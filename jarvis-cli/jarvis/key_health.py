@@ -7,7 +7,8 @@ was the first thing the very next ask tried again (Case 2b started on the key
 that had 503'd in 2a and got another 503). This file is that memory, on disk:
 
     ~/.jarvis/key_health.json
-    {"keys":      {"<provider>:<key-hash>": {"cooldown_until": ts, "last_status": "...", "last_ok": ts}},
+    {"keys":      {"<provider>:<key-hash>": {"cooldown_until": ts, "last_status": "...",
+                                              "last_ok": ts, "last_request": ts}},
      "models":    {"<provider>|<model>":    {"cooldown_until": ts}},
      "last_good": {"<provider>": "<provider>:<key-hash>"}}
 
@@ -24,6 +25,8 @@ POLICY (deliberately conservative — it only ever REORDERS, never removes):
   soonest-to-recover first, so a cooling key is still tried if nothing else is
   left. A provider whose model is cooling from an overload goes to the back of
   the provider list the same way — never out of it.
+  * pace_key() (K.3.6): a floor between two requests on the SAME key,
+    regardless of success/failure — see its own docstring.
 
 Never raises: a corrupt or unwritable file means "no memory", i.e. the
 behaviour from before this module existed.
@@ -45,6 +48,18 @@ MAX_COOLDOWN = 3600.0                   # never park a key longer than this on a
 BAD_KEY_COOLDOWN = 3600.0               # 401/403/402
 OVERLOAD_MODEL_COOLDOWN = 45.0          # a 503 on a model
 _PRUNE_AFTER = 86400.0
+
+# K.3.6/F.9 item 3 ("pace ... or give it a different key" — spread_keys()
+# above is the "or"; this is the "pace"). A conservative floor between two
+# requests on the SAME key: enough to visibly slow a tight, near-instant
+# tool-call loop (the failure mode in the 2026-09-20 log — code_agent's
+# inner loop firing round after round on one key) without noticeably
+# touching an ordinary ask, whose rounds are normally paced by real model
+# latency anyway. Deliberately looser than "safe for a 5-req/min free
+# tier" (~12s) — that's a per-provider call the owner can make with
+# min_round_interval_seconds, not a default every high-limit provider
+# should eat. 0 disables pacing entirely.
+DEFAULT_MIN_ROUND_INTERVAL = 3.0
 
 # What providers actually say. Gemini: `"retryDelay": "26s"` and "Please retry in
 # 26.06s"; OpenAI/Groq: "try again in 20s" / "in 2m3.5s"; plus the header.
@@ -101,7 +116,8 @@ def _save(state, now):
     for section in ("keys", "models"):
         state[section] = {k: v for k, v in state[section].items()
                           if isinstance(v, dict) and (v.get("cooldown_until", 0) > now - _PRUNE_AFTER
-                                                      or v.get("last_ok", 0) > now - _PRUNE_AFTER)}
+                                                      or v.get("last_ok", 0) > now - _PRUNE_AFTER
+                                                      or v.get("last_request", 0) > now - _PRUNE_AFTER)}
     try:
         HEALTH_FILE.parent.mkdir(parents=True, exist_ok=True)
         fd, tmp = tempfile.mkstemp(dir=str(HEALTH_FILE.parent), prefix=".key_health-")
@@ -158,6 +174,41 @@ def spread_keys(provider_name, keys, now=None):
     if len(ready) >= 2 and ordered[0] == ready[0]:
         ordered = ordered[1:2] + ordered[:1] + ordered[2:]
     return ordered
+
+
+def pace_key(provider_name, key, interval=None, now=None):
+    """K.3.6: block until this key's last request (recorded by ANY process —
+    see module docstring re: `jarvis` being a new process per call) was at
+    least `interval` seconds ago, then record this request's timestamp.
+    Called once per round, right before the request goes out, from the
+    shared spot in each of ai_providers.py's five adapter loops.
+
+    Distinct from spread_keys(): that gives a nested loop a different key
+    up front (when one exists); this paces requests on whichever key is
+    ACTUALLY in use, same-key or not, single provider or many keys. A key
+    with only one entry in its provider block still gets this — spread_keys
+    can't help there (nothing to spread to), pacing still can.
+
+    `key=None` (Ollama; no per-key quota to protect) and `interval<=0`
+    (explicitly disabled) are both no-ops — neither sleeps nor touches the
+    file, so a keyless/local provider's timing is completely unaffected.
+    """
+    if key is None:
+        return
+    interval = DEFAULT_MIN_ROUND_INTERVAL if interval is None else interval
+    if interval <= 0:
+        return
+    now = time.time() if now is None else now
+    kid = key_id(provider_name, key)
+    state = _load()
+    entry = state["keys"].setdefault(kid, {})
+    last = entry.get("last_request") or 0
+    wait = interval - (now - last)
+    if wait > 0:
+        time.sleep(wait)
+        now += wait
+    entry["last_request"] = now
+    _save(state, now)
 
 
 def record_success(provider_name, model, key, now=None):

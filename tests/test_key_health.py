@@ -238,12 +238,78 @@ def test_inner_agent_uses_a_different_key_and_reports_failures():
     check("the key the inner loop burned is parked for the outer ask", kh.cooldown_until("gem", "b") > 0)
 
 
+def test_pace_key_waits_out_the_floor_on_the_same_key():
+    _reset()
+    sleeps = []
+    orig_sleep = kh.time.sleep
+    kh.time.sleep = lambda s: sleeps.append(s)
+    try:
+        kh.pace_key("gem", "k1", interval=5, now=T)
+        kh.pace_key("gem", "k1", interval=5, now=T + 2)
+        check("second request within the floor sleeps out the remainder", sleeps == [3.0], sleeps)
+        sleeps.clear()
+        kh.pace_key("gem", "k1", interval=5, now=T + 2 + 3 + 5)
+        check("a request already past the floor doesn't sleep", sleeps == [], sleeps)
+        sleeps.clear()
+        kh.pace_key("gem", "k2", interval=5, now=T + 2)
+        check("a different key on the same provider isn't paced by k1's timing", sleeps == [], sleeps)
+    finally:
+        kh.time.sleep = orig_sleep
+
+
+def test_pace_key_noops_for_keyless_or_disabled():
+    _reset()
+    sleeps = []
+    orig_sleep = kh.time.sleep
+    kh.time.sleep = lambda s: sleeps.append(s)
+    try:
+        kh.pace_key("ollama", None, interval=5, now=T)
+        kh.pace_key("ollama", None, interval=5, now=T + 1)
+        check("key=None (e.g. Ollama) never sleeps or writes", sleeps == [] and not kh.HEALTH_FILE.exists())
+        kh.pace_key("gem", "k1", interval=0, now=T)
+        kh.pace_key("gem", "k1", interval=0, now=T + 0.001)
+        check("interval<=0 disables pacing entirely", sleeps == [])
+    finally:
+        kh.time.sleep = orig_sleep
+
+
+def test_pace_round_reads_provider_then_defaults_then_builtin():
+    _reset()
+    sleeps = []
+    orig_sleep = kh.time.sleep
+    kh.time.sleep = lambda s: sleeps.append(s)
+    try:
+        # Provider-level min_round_interval_seconds wins over cfg_defaults.
+        ai_providers._pace_round({"type": "gem", "min_round_interval_seconds": 2}, "k1",
+                                  {"min_round_interval_seconds": 99}, )
+        ai_providers._pace_round({"type": "gem", "min_round_interval_seconds": 2}, "k1",
+                                  {"min_round_interval_seconds": 99}, )
+        check("provider-level interval (2s) used, not cfg_defaults' 99s", sleeps == [2.0], sleeps)
+        sleeps.clear()
+
+        # No provider-level value -> cfg_defaults' value is used instead.
+        ai_providers._pace_round({"type": "cohere"}, "k2", {"min_round_interval_seconds": 1})
+        ai_providers._pace_round({"type": "cohere"}, "k2", {"min_round_interval_seconds": 1})
+        check("falls back to cfg_defaults' interval (1s)", sleeps == [1.0], sleeps)
+        sleeps.clear()
+
+        # Neither set -> the key_health built-in default, no crash on None defaults.
+        ai_providers._pace_round({"type": "anthropic"}, "k3", None)
+        check("no explicit interval anywhere -> no crash, request still recorded",
+              sleeps == [] and kh.HEALTH_FILE.exists())
+    finally:
+        kh.time.sleep = orig_sleep
+
+
 for fn in (test_parse_retry_delay, test_status_reason_carries_the_stated_delay, test_cooldown_ordering_and_readmission,
            test_last_good_leads_and_success_clears, test_overload_is_per_model_not_per_key, test_file_hygiene,
            test_two_asks_second_skips_the_key_that_returned_429,
            test_overload_stops_key_rotation_and_demotes_the_provider,
            test_refused_connection_skips_siblings_on_the_same_host,
-           test_inner_agent_uses_a_different_key_and_reports_failures):
+           test_inner_agent_uses_a_different_key_and_reports_failures,
+           test_pace_key_waits_out_the_floor_on_the_same_key,
+           test_pace_key_noops_for_keyless_or_disabled,
+           test_pace_round_reads_provider_then_defaults_then_builtin):
     fn()
 
 print(f"\n{len(PASS)} passed, {len(FAIL)} failed")
