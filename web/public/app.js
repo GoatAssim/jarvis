@@ -1536,19 +1536,56 @@
   }
 
   let toastTimer = null;
+  let resurfaceTimer = null;
+  // D-N1 (owner-decided 2026-09-26i): level 3+ re-surfaces on an interval
+  // until acknowledged, rather than simply never auto-dismissing (that was
+  // the previously-shipped behavior, and the option the owner did NOT
+  // pick — see the master plan's D-N1 entry for both options that were on
+  // the table). Interval/cap weren't owner-specified, so these default to
+  // something conservative per D-N1's own note, pending further input if
+  // it feels wrong in practice.
+  const RESURFACE_INTERVAL_MS = 10 * 60 * 1000; // every 10 minutes
+  const RESURFACE_MAX = 6; // ~1 hour of re-surfacing, then give up quietly
   function toast(message, kind = "error", opts = {}) {
     const t = qs("#toast");
-    const sticky = Boolean(opts.sticky);
+    const persistent = Boolean(opts.persistent);
     t.textContent = message;
-    t.className = "toast" + (kind === "info" ? " is-info" : "") + (sticky ? " is-sticky" : "");
+    t.className = "toast" + (kind === "info" ? " is-info" : "") + (persistent ? " is-sticky" : "");
     t.hidden = false;
     clearTimeout(toastTimer);
-    // D.2.1 level 3+ (Persistent): the toast doesn't auto-dismiss — it
-    // stays until the user clicks it away, instead of the usual timeout.
-    t.onclick = sticky ? () => { t.hidden = true; t.onclick = null; } : null;
-    if (!sticky) {
+    clearInterval(resurfaceTimer);
+    resurfaceTimer = null;
+    if (!persistent) {
+      t.onclick = null;
       toastTimer = setTimeout(() => { t.hidden = true; }, 4200);
+      return;
     }
+    // Persistent: auto-dismiss like a normal toast, but re-show the same
+    // message every RESURFACE_INTERVAL_MS until the user clicks it away
+    // (acknowledges it) or RESURFACE_MAX re-surfaces is reached.
+    let shown = 1;
+    const acknowledge = () => {
+      t.hidden = true;
+      t.onclick = null;
+      clearInterval(resurfaceTimer);
+      resurfaceTimer = null;
+    };
+    t.onclick = acknowledge;
+    toastTimer = setTimeout(() => { t.hidden = true; }, 4200);
+    resurfaceTimer = setInterval(() => {
+      if (shown >= RESURFACE_MAX) {
+        clearInterval(resurfaceTimer);
+        resurfaceTimer = null;
+        return;
+      }
+      shown += 1;
+      t.textContent = message;
+      t.className = "toast" + (kind === "info" ? " is-info" : "") + " is-sticky";
+      t.hidden = false;
+      t.onclick = acknowledge;
+      clearTimeout(toastTimer);
+      toastTimer = setTimeout(() => { t.hidden = true; }, 4200);
+    }, RESURFACE_INTERVAL_MS);
   }
 
   // Bottom-left popup for a directly-run saved command that's paused on
@@ -1661,9 +1698,9 @@
     // notification, no interruption. The inbox/badge itself is updated by
     // the caller of showNotification, not here.
     if (level >= 2) {
-      const sticky = level >= 3 || Boolean(note.persistent);
+      const persistent = level >= 3 || Boolean(note.persistent);
       toast(`${title}${body ? " \u2014 " + body.slice(0, 160) : ""}`, isFailure ? "error" : "info",
-            { sticky });
+            { persistent });
 
       if (!jarvisTabVisible() && "Notification" in window && Notification.permission === "granted") {
         try {
@@ -3067,10 +3104,11 @@
         break;
       case "scheduled-tick":
         // Only refresh the panel if it's actually open; a background tick
-        // shouldn't cost a re-render nobody is looking at.
-        if ((msg.ran || []).length && typeof refreshScheduledPanel === "function") {
-          refreshScheduledPanel();
-        }
+        // shouldn't cost a re-render nobody is looking at. Schedules is its
+        // own module since the H.2 rework (schedules.js) — refresh() no-ops
+        // internally when the panel is closed, same contract the old
+        // in-app.js refreshScheduledPanel() had.
+        if ((msg.ran || []).length) window.JarvisSchedules?.refresh?.();
         break;
       case "commands":
         applyCommandsFromServer(msg.commands);
@@ -8081,125 +8119,12 @@
   runBoot();
 
   // -------------------------------------------------------------------------
-  // Scheduled panel — jobs and quick-add. MCP server status now lives in its
-  // own panel (see refreshMcpPanel/openMcp below) — the two used to share one
-  // overlay, but scheduling and MCP are unrelated concerns and each earns its
-  // own menu entry.
-  //
-  // Read-mostly on purpose. Creating anything that RUNS (a command, a tool, a
-  // full ask) is deliberately not offered here: those go through the approval
-  // gate (scheduler._needs_approval) and are far easier to express by asking
-  // Jarvis than by filling in a form. What this panel is for is seeing what's
-  // set, approving what's parked, and killing what you no longer want.
-  // -------------------------------------------------------------------------
-  const schedOverlay = qs("#sched-overlay");
-
-  async function refreshScheduledPanel() {
-    if (!schedOverlay || schedOverlay.hidden) return;
-    const list = qs("#sched-list");
-    const statusLine = qs("#sched-status-line");
-    try {
-      const data = await Api.get("/api/scheduled");
-      const jobs = data.jobs || [];
-      const counts = data.counts || {};
-      statusLine.textContent = jobs.length
-        ? `${jobs.length} active \u2014 ${counts.reminders || 0} reminder(s), ${counts.tasks || 0} task(s)` +
-          (counts.needs_approval ? `, ${counts.needs_approval} awaiting approval` : "")
-        : "nothing scheduled";
-      list.innerHTML = "";
-      if (!jobs.length) {
-        list.appendChild(el("div", { class: "skills-empty" }, "Nothing scheduled yet."));
-        return;
-      }
-      for (const job of jobs) list.appendChild(renderSchedJob(job));
-    } catch (err) {
-      statusLine.textContent = "couldn't read the schedule";
-      list.innerHTML = "";
-      list.appendChild(el("div", { class: "skills-empty" }, err.message || "Failed."));
-    }
-  }
-
-  function renderSchedJob(job) {
-    const meta = [job.kind, job.when, job.in ? `in ${job.in}` : null]
-      .filter(Boolean).join(" \u00b7 ");
-    const actions = [];
-    const act = (label, action, body) => {
-      const b = el("button", { class: "btn btn--ghost btn--sm", type: "button" }, label);
-      b.addEventListener("click", async () => {
-        b.disabled = true;
-        try {
-          await Api.post(`/api/scheduled/${job.id}/${action}`, body || {});
-          await refreshScheduledPanel();
-        } catch (err) {
-          toast(err.message || "That didn't work.");
-          b.disabled = false;
-        }
-      });
-      actions.push(b);
-    };
-    // Approve is only offered for a job actually waiting on it — showing it
-    // on everything would suggest every job needs approving, which would
-    // make the ones that genuinely do stop standing out.
-    if (job.needs_approval) act("Approve", "approve");
-    if (job.status === "paused") act("Resume", "resume");
-    else if (!job.needs_approval) act("Pause", "pause");
-    act("Snooze 10m", "snooze", { delay: "10 minutes" });
-    act("Cancel", "cancel");
-
-    return el("div", { class: "skills-item" + (job.needs_approval ? " is-warn" : "") }, [
-      el("div", { class: "skills-item__name" }, job.title || "(untitled)"),
-      el("div", { class: "skills-item__desc" }, meta),
-      job.last_error ? el("div", { class: "skills-item__desc" }, `last error: ${job.last_error}`) : null,
-      el("div", { class: "skills-item__actions" }, actions),
-    ].filter(Boolean));
-  }
-
-  function openScheduled() {
-    if (!schedOverlay) return;
-    schedOverlay.hidden = false;
-    ensureNotifPermission();
-    refreshScheduledPanel();
-  }
-
-  function closeScheduled() {
-    if (schedOverlay) schedOverlay.hidden = true;
-  }
-
-  qs("#sched-close")?.addEventListener("click", closeScheduled);
-  schedOverlay?.addEventListener("click", (e) => { if (e.target === schedOverlay) closeScheduled(); });
-  document.addEventListener("keydown", (e) => {
-    if (e.key === "Escape" && schedOverlay && !schedOverlay.hidden) closeScheduled();
-  });
-
-  qs("#btn-sched-add")?.addEventListener("click", async () => {
-    const when = qs("#sched-when").value.trim();
-    const message = qs("#sched-message").value.trim();
-    if (!when || !message) return toast("Both a time and a message are needed.");
-    try {
-      await Api.post("/api/scheduled", { when, message, kind: "reminder" });
-      qs("#sched-when").value = "";
-      qs("#sched-message").value = "";
-      toast("Scheduled.", "info");
-      refreshScheduledPanel();
-    } catch (err) {
-      // The server passes scheduler/timespec's own error text straight
-      // through, which is written to be read by a person ("couldn't read
-      // 'nexr tuesday' as a time — try ..."), so it's shown verbatim.
-      toast(err.data?.error || err.message || "Couldn't schedule that.");
-    }
-  });
-
-  qs("#btn-sched-tick")?.addEventListener("click", async () => {
-    try {
-      const result = await Api.post("/api/scheduled/tick", {});
-      const n = (result.ran || []).length;
-      toast(n ? `Ran ${n} job(s).` : "Nothing was due.", "info");
-      refreshScheduledPanel();
-    } catch (err) {
-      toast(err.message || "Tick failed.");
-    }
-  });
-
+  // Scheduled panel — H.2 rework: its own module now (schedules.js), the
+  // same way Daemons/Backlog/Log Search are — see index.html's "Scripts
+  // load LAST" comment for why that file, not this one, owns the
+  // qs("#sched-overlay") lookup and all click/keydown wiring for this
+  // panel. app.js only opens it (menu wiring, above) and pokes its
+  // refresh() from the scheduled-tick websocket handler (also above).
   // -------------------------------------------------------------------------
   // MCP Servers panel — its own menu entry, its own overlay. Read-mostly:
   // servers are added by editing mcp_config.json by hand (see mcp_client.py's
@@ -9041,7 +8966,7 @@
     if (window.JarvisTestChecklist) window.JarvisTestChecklist.open();
   });
   qs("#menu-item-skills")?.addEventListener("click", () => { closePanelMenu(); openSkills(); });
-  qs("#menu-item-scheduled")?.addEventListener("click", () => { closePanelMenu(); openScheduled(); });
+  qs("#menu-item-scheduled")?.addEventListener("click", () => { closePanelMenu(); window.JarvisSchedules?.open(); });
   qs("#menu-item-mcp")?.addEventListener("click", () => { closePanelMenu(); openMcp(); });
   qs("#menu-item-channels")?.addEventListener("click", () => { closePanelMenu(); openChannels(); });
   qs("#menu-item-ctools")?.addEventListener("click", () => {
@@ -9533,193 +9458,10 @@
   // comment for why that file, not this one, owns the qs("#daemons-overlay")
   // lookup and all click/keydown wiring for that panel. app.js only opens it.
 
-  // --- backlog ----------------------------------------------------------
-  const backlogOverlay = qs("#backlog-overlay");
-  const BACKLOG_COLUMNS = [
-    ["idea", "Ideas"], ["todo", "To do"], ["doing", "Doing"],
-    ["blocked", "Blocked"], ["done", "Done"],
-  ];
-
-  function renderBacklogCard(item) {
-    const next = { idea: "todo", todo: "doing", doing: "done", blocked: "doing", done: "todo" };
-    return el("div", { class: `kanban__card kanban__card--${item.priority || "normal"}` }, [
-      el("div", { class: "kanban__title" }, item.title),
-      item.project ? el("div", { class: "kanban__project" }, item.project) : null,
-      item.blocked_on ? el("div", { class: "kanban__blocked" }, `waiting on ${item.blocked_on}`) : null,
-      el("div", { class: "kanban__actions" }, [
-        el("button", {
-          class: "btn btn--ghost btn--sm",
-          onclick: () => updateBacklog(item.id, { state: next[item.state] || "todo" }),
-        }, item.state === "done" ? "Reopen" : `\u2192 ${next[item.state] || "todo"}`),
-        el("button", {
-          class: "btn btn--ghost btn--sm",
-          onclick: () => {
-            const reason = window.prompt("Blocked on what?", item.blocked_on || "");
-            if (reason === null) return;
-            // BUGFIX: this used to send only { blocked_on: reason }. The
-            // server sets state to "blocked" for you when blocked_on is
-            // non-empty (backlog.py's update()), but clearing it back to ""
-            // has no matching rule — nothing ever moved the card OUT of the
-            // Blocked column, so clearing the reason here left it stranded
-            // there with no visible note and no obvious way back except the
-            // unrelated advance button. Mirror that server rule on the way
-            // out: clearing the reason on an already-blocked item unblocks
-            // it too.
-            const fields = { blocked_on: reason };
-            if (!reason && item.state === "blocked") fields.state = "doing";
-            updateBacklog(item.id, fields);
-          },
-        }, "Block"),
-        el("button", {
-          class: "btn btn--ghost btn--sm",
-          onclick: () => removeBacklog(item.id),
-        }, "\u00d7"),
-      ]),
-    ]);
-  }
-
-  async function refreshBacklog() {
-    if (!backlogOverlay || backlogOverlay.hidden) return;
-    const board = qs("#backlog-board");
-    const statusLine = qs("#backlog-status-line");
-    try {
-      const data = await Api.get("/api/backlog");
-      const grouped = data.board || {};
-      const summary = data.summary || {};
-      const blocked = (summary.blocked || []).length;
-      statusLine.textContent =
-        `${summary.open || 0} open` + (blocked ? `, ${blocked} blocked` : "") +
-        ((summary.stale_doing || []).length ? `, ${summary.stale_doing.length} stale` : "");
-      board.innerHTML = "";
-      for (const [state, label] of BACKLOG_COLUMNS) {
-        const items = grouped[state] || [];
-        const column = el("div", { class: "kanban__col" }, [
-          el("div", { class: "kanban__colhead" }, `${label} (${items.length})`),
-        ]);
-        for (const item of items) column.appendChild(renderBacklogCard(item));
-        if (!items.length) column.appendChild(el("div", { class: "kanban__empty" }, "\u2014"));
-        board.appendChild(column);
-      }
-    } catch (err) {
-      statusLine.textContent = "couldn't read the backlog";
-      board.innerHTML = "";
-      board.appendChild(el("div", { class: "skills-empty" }, err.message || "Failed."));
-    }
-  }
-
-  async function updateBacklog(id, fields) {
-    try {
-      await api("PATCH", `/api/backlog/${encodeURIComponent(id)}`, fields);
-      refreshBacklog();
-    } catch (err) {
-      toast(err.message || "Couldn't update that item.");
-    }
-  }
-
-  async function removeBacklog(id) {
-    try {
-      await api("DELETE", `/api/backlog/${encodeURIComponent(id)}`);
-      refreshBacklog();
-    } catch (err) {
-      toast(err.message || "Couldn't remove that item.");
-    }
-  }
-
-  qs("#btn-backlog-add")?.addEventListener("click", async () => {
-    const title = (qs("#backlog-new-title")?.value || "").trim();
-    if (!title) return;
-    try {
-      await Api.post("/api/backlog", {
-        title,
-        project: (qs("#backlog-new-project")?.value || "").trim(),
-        state: qs("#backlog-new-state")?.value || "todo",
-      });
-      qs("#backlog-new-title").value = "";
-      refreshBacklog();
-    } catch (err) {
-      toast(err.message || "Couldn't add that.");
-    }
-  });
-
-  qs("#backlog-new-title")?.addEventListener("keydown", (ev) => {
-    if (ev.key === "Enter") qs("#btn-backlog-add")?.click();
-  });
-
-  function openBacklog() {
-    if (!backlogOverlay) return;
-    backlogOverlay.hidden = false;
-    refreshBacklog();
-  }
-
-  function closeBacklog() {
-    if (backlogOverlay) backlogOverlay.hidden = true;
-  }
-
-  qs("#backlog-close")?.addEventListener("click", closeBacklog);
-  backlogOverlay?.addEventListener("click", (ev) => {
-    if (ev.target === backlogOverlay) closeBacklog();
-  });
-
-  // --- log search -------------------------------------------------------
-  const logsearchOverlay = qs("#logsearch-overlay");
-
-  async function runLogSearch() {
-    const query = (qs("#logsearch-query")?.value || "").trim();
-    const results = qs("#logsearch-results");
-    const statusLine = qs("#logsearch-status-line");
-    if (!query) return;
-    results.innerHTML = "";
-    results.appendChild(el("div", { class: "skills-empty" }, "Searching\u2026"));
-    const params = new URLSearchParams({ q: query, context: "1", limit: "120" });
-    const mode = qs("#logsearch-mode")?.value;
-    if (mode) params.set("mode", mode);
-    const set = qs("#logsearch-set")?.value;
-    if (set) params.set("set", set);
-    const path = (qs("#logsearch-path")?.value || "").trim();
-    if (path) params.set("path", path);
-    try {
-      const data = await Api.get(`/api/log-files/search?${params.toString()}`);
-      const hits = data.results || [];
-      statusLine.textContent =
-        `${hits.length} match(es) across ${data.files_scanned || 0} file(s)` +
-        (data.truncated ? " (truncated)" : "");
-      results.innerHTML = "";
-      if (!hits.length) {
-        results.appendChild(el("div", { class: "skills-empty" }, "Nothing matched."));
-        return;
-      }
-      for (const hit of hits) {
-        results.appendChild(el("div", { class: "logsearch-hit" }, [
-          el("div", { class: "logsearch-hit__where" }, `${hit.file}:${hit.line}`),
-          el("pre", { class: "logsearch-hit__text" }, hit.text),
-        ]));
-      }
-    } catch (err) {
-      statusLine.textContent = "search failed";
-      results.innerHTML = "";
-      results.appendChild(el("div", { class: "skills-empty" }, err.message || "Failed."));
-    }
-  }
-
-  qs("#btn-logsearch")?.addEventListener("click", runLogSearch);
-  qs("#logsearch-query")?.addEventListener("keydown", (ev) => {
-    if (ev.key === "Enter") runLogSearch();
-  });
-
-  function openLogSearch() {
-    if (!logsearchOverlay) return;
-    logsearchOverlay.hidden = false;
-    qs("#logsearch-query")?.focus();
-  }
-
-  function closeLogSearch() {
-    if (logsearchOverlay) logsearchOverlay.hidden = true;
-  }
-
-  qs("#logsearch-close")?.addEventListener("click", closeLogSearch);
-  logsearchOverlay?.addEventListener("click", (ev) => {
-    if (ev.target === logsearchOverlay) closeLogSearch();
-  });
+  // --- backlog / log search -------------------------------------------------
+  // H.1 rework: both are now their own modules (backlog.js, logsearch.js),
+  // same reasoning as daemons.js immediately above. app.js only opens them
+  // (menu wiring, below).
 
   // --- notifications -------------------------------------------------------
   // Every notification Jarvis has ever sent (reminders, task-done, plain
@@ -9953,18 +9695,29 @@
 
   // --- menu wiring ------------------------------------------------------
   qs("#menu-item-daemons")?.addEventListener("click", () => { closePanelMenu(); window.JarvisDaemons?.open(); });
-  qs("#menu-item-backlog")?.addEventListener("click", () => { closePanelMenu(); openBacklog(); });
-  qs("#menu-item-logsearch")?.addEventListener("click", () => { closePanelMenu(); openLogSearch(); });
+  qs("#menu-item-backlog")?.addEventListener("click", () => { closePanelMenu(); window.JarvisBacklog?.open(); });
+  qs("#menu-item-logsearch")?.addEventListener("click", () => { closePanelMenu(); window.JarvisLogSearch?.open(); });
   qs("#menu-item-setup")?.addEventListener("click", () => { closePanelMenu(); openSetup(); });
 
   // Escape closes whichever of these is on top, matching the existing panels.
   document.addEventListener("keydown", (ev) => {
     if (ev.key !== "Escape") return;
     if (setupOverlay && !setupOverlay.hidden) return closeSetup();
-    if (logsearchOverlay && !logsearchOverlay.hidden) return closeLogSearch();
-    if (backlogOverlay && !backlogOverlay.hidden) return closeBacklog();
-    // Daemons handles its own Escape now (daemons.js, same as Test Checklist).
+    // Daemons/Backlog/Log Search/Scheduled all handle their own Escape now
+    // (daemons.js/backlog.js/logsearch.js/schedules.js, same as Test
+    // Checklist) — each module wires document.addEventListener("keydown", ...)
+    // itself and no-ops when its own overlay is hidden.
   });
+
+  // Small, deliberately narrow hooks other standalone panel modules
+  // (logsearch.js, so far) can call into without reaching into any of
+  // app.js's other internals — see logsearch.js's own header comment for
+  // why a log hit pointing at a conversation needs this.
+  window.JarvisAsk = { openConversation: async (id) => { await selectConversation(id); openAsk(); } };
+  // Same idea, for the one notification-permission prompt Schedules used to
+  // trigger itself before it was split out (H.2) — kept as a real user
+  // gesture (opening the panel), not moved to page load.
+  window.JarvisNotifyPermission = ensureNotifPermission;
 
   loadLayout();
   maybeOpenOnboarding();

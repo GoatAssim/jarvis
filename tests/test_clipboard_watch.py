@@ -102,13 +102,31 @@ def test_save_config_updates_poll_seconds():
 
 # --- run() loop -----------------------------------------------------------
 
-def _install_fake_notifier():
+def _install_fake_notifier(stop_after=1):
+    """Install a fake in place of `jarvis.notifier`. Records every notify()
+    call and raises SystemExit once `stop_after` calls have been captured,
+    breaking run()'s infinite loop at a caller-chosen point instead of
+    always after the very first call — lets a test observe a short burst
+    of calls (K.2.7.2) instead of only ever the first one.
+
+    Also exposes normalize_level(), delegating to the real implementation.
+    run() calls `notifier.normalize_level()` directly (to decide
+    push-vs-buffer *before* notify() is ever reached), so a fake that only
+    stubs notify() breaks with an AttributeError the instant a matching
+    change comes in — this is exactly what broke 3 tests here when K.2.7.2
+    added that call (see the master plan's K.2.7 for the regression this
+    fixes). normalize_level()'s own lookup logic already has dedicated
+    coverage elsewhere (K.2.7.1, test_notification_levels.py), so this
+    delegates rather than re-implementing it — this fixture's job is only
+    to intercept delivery, not to re-test level resolution.
+    """
     notified = []
     def fake_notify(title, message, **kw):
         notified.append((title, message, kw))
-        raise SystemExit(0)  # stop run()'s infinite loop after the first hit
+        if len(notified) >= stop_after:
+            raise SystemExit(0)
     orig = cw.notifier
-    cw.notifier = types.SimpleNamespace(notify=fake_notify)
+    cw.notifier = types.SimpleNamespace(notify=fake_notify, normalize_level=orig.normalize_level)
     return notified, orig
 
 
@@ -184,6 +202,110 @@ def test_run_truncates_long_clipboard_text_in_notification():
     finally:
         ct._get = orig_get
         cw.notifier = orig_notifier
+
+
+def test_run_coalesces_rapid_burst_into_bounded_live_pushes_with_full_inbox_record():
+    # K.2.7.2: a rapid run of matching changes must not toast once per
+    # change (flood) but must still keep a durable inbox record of every
+    # individual change — "no lost events" (see clipboard_watch.py's
+    # _burst_decision docstring / the master plan's K.8 acceptance
+    # criterion). coalesce_seconds is set far longer than this test's real
+    # wall-clock runtime so the burst can never age into a flush, keeping
+    # the outcome independent of scheduling jitter between test runs.
+    orig_get = ct._get
+    notified, orig_notifier = _install_fake_notifier(stop_after=6)
+    seq = iter(["a", "b", "c", "d", "e", "f", "g"])
+    ct._get = lambda: (next(seq, "g"), None)
+    cw.set_pattern(None)
+    cw.save_config(poll_seconds=0.01, coalesce_seconds=5.0)
+    try:
+        try:
+            cw.run()
+        except SystemExit:
+            pass
+        assert len(notified) == 6, \
+            "expected exactly 6 notify() calls: 1 live push + 5 buffered inbox records"
+        first_title, first_message, first_kw = notified[0]
+        assert first_message == "b"
+        assert first_kw.get("channels") is None, \
+            "the first, isolated change must still push live (no burst yet in progress)"
+        buffered = notified[1:]
+        assert [m for (_, m, _) in buffered] == ["c", "d", "e", "f", "g"], \
+            "every individual buffered change must keep its own durable inbox record — none lost"
+        assert all(kw.get("channels") == ["inbox"] for (_, _, kw) in buffered), \
+            "changes during an active burst must be inbox-only, not re-toasted one per change"
+    finally:
+        ct._get = orig_get
+        cw.notifier = orig_notifier
+        cw.save_config(coalesce_seconds=3.0)
+
+
+# --- K.2.7.2 burst-coalescing pure functions --------------------------------
+# Dedicated coverage for the decision functions clipboard_watch.py's own
+# docstring says were split out specifically so they're testable with a
+# synthetic clock instead of run()'s real time.sleep loop. Previously these
+# had zero tests of their own — only ever exercised indirectly through
+# run() at real-clock speed (see the master plan's K.2.7.3).
+
+def test_burst_decision_level_3_and_up_always_pushes():
+    # D.2.1's "never suppressed" guarantee for levels 3+ — even mid-burst,
+    # with a push a moment ago.
+    assert cw._burst_decision(3, 100.0, 99.99, {"count": 1}, 3.0) == "push"
+    assert cw._burst_decision(5, 100.0, 100.0, None, 3.0) == "push"
+
+
+def test_burst_decision_pushes_isolated_change_after_idle_period():
+    # No burst in progress, and the last live push was outside the
+    # coalescing window — a lone change should still arrive promptly.
+    assert cw._burst_decision(2, 100.0, 90.0, None, 3.0) == "push"
+
+
+def test_burst_decision_buffers_when_burst_already_in_progress():
+    assert cw._burst_decision(2, 100.0, 90.0, {"count": 1}, 3.0) == "buffer"
+
+
+def test_burst_decision_buffers_when_last_push_too_recent():
+    assert cw._burst_decision(2, 100.0, 99.0, None, 3.0) == "buffer"
+
+
+def test_buffer_change_starts_new_buffer():
+    pending = cw._buffer_change(None, "hello", False, 100.0)
+    assert pending == {"count": 1, "preview": "hello", "truncated": False, "since": 100.0}
+
+
+def test_buffer_change_accumulates_count_and_keeps_original_since():
+    pending = cw._buffer_change(None, "first", False, 100.0)
+    pending = cw._buffer_change(pending, "second", True, 100.5)
+    assert pending["count"] == 2
+    assert pending["preview"] == "second"  # latest preview wins
+    assert pending["truncated"] is True
+    assert pending["since"] == 100.0, "the burst's start time must not reset while it's still active"
+
+
+def test_maybe_flush_none_when_nothing_pending():
+    assert cw._maybe_flush(None, 100.0, 3.0) is None
+
+
+def test_maybe_flush_none_before_window_elapses():
+    pending = {"count": 1, "preview": "x", "truncated": False, "since": 100.0}
+    assert cw._maybe_flush(pending, 101.0, 3.0) is None
+
+
+def test_maybe_flush_returns_pending_once_window_elapses():
+    pending = {"count": 2, "preview": "x", "truncated": False, "since": 100.0}
+    assert cw._maybe_flush(pending, 103.0, 3.0) == pending
+
+
+def test_flush_title_and_message_singular():
+    title, message = cw._flush_title_and_message({"count": 1, "preview": "hi", "truncated": False})
+    assert title == "Clipboard changed"
+    assert message == "hi"
+
+
+def test_flush_title_and_message_plural_and_truncated():
+    title, message = cw._flush_title_and_message({"count": 4, "preview": "hi", "truncated": True})
+    assert title == "Clipboard changed (4\u00d7)"
+    assert message == "4 changes \u2014 latest: hi \u2026"
 
 
 # --- CLI dispatch -----------------------------------------------------------

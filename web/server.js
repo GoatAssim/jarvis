@@ -1202,6 +1202,20 @@ app.post("/api/scheduled", requireJarvis, async (req, res) => {
   return parseJarvisJSON(result, res, "Couldn't create that job.");
 });
 
+// H.2 rework: the list route (above) only ever returned scheduler.summarize()
+// shapes — enough for a row, not enough for a detail pane (no action.prompt/
+// command/tool text, no channels/level/trigger detail). scheduler.get() has
+// always had the full job; nothing before this exposed it over HTTP. Read-
+// only, same id validation as the action route below.
+app.get("/api/scheduled/:id", requireJarvis, async (req, res) => {
+  const { id } = req.params;
+  if (!/^[a-f0-9]{8,32}$/.test(id)) {
+    return res.status(400).json({ error: "Invalid job id." });
+  }
+  const result = await runJarvisOnce(["sched-show", id], 15000);
+  return parseJarvisJSON(result, res, "Couldn't read that job.");
+});
+
 // One route for every per-job verb. The action is validated against a fixed
 // list here so a request body can never name an arbitrary `sched-*` argv.
 const SCHED_ACTIONS = new Set(["cancel", "pause", "resume", "approve", "snooze"]);

@@ -1,0 +1,108 @@
+/* ============================================================================
+ * backlog.css — Menu → Backlog.
+ *
+ * Part H.1 rework: brings this panel up to the same bar as Test Checklist /
+ * Daemons (see test-checklist.css's and daemons.css's own headers for the
+ * shared reasoning). Own file, driven off the existing :root tokens, sits
+ * inside the shared .debug-overlay/.debug-panel chrome so frame/corners/
+ * glow/scroll-lock all still come free from style.css.
+ *
+ * .kanban/.kanban__*/.backlog-add stay in style.css — they're the baseline
+ * board that already worked and this rework doesn't touch their look.
+ * Everything here is new: the toolbar (live search + project filter), the
+ * two-column layout that makes room for the Overview pane, and drag-reorder
+ * (style.css's own .kanban__card comment has claimed cards were "drag-
+ * reorderable" for a while; there was no dragstart/dragover/drop handler
+ * anywhere in app.js to back that up — see bk-drag-target below for the
+ * actual implementation, added as part of this pass, and backlog.js's own
+ * header for the full note).
+ * ========================================================================= */
+
+.bk-toolbar{
+  display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+  padding: 10px 14px; border-bottom: 1px solid var(--border); flex-shrink: 0;
+}
+.bk-toolbar .panel__search{ flex: 1 1 220px; max-width: 340px; }
+.bk-select{
+  padding: 5px 7px; background: var(--bg-panel-2); color: var(--text);
+  border: 1px solid var(--border); border-radius: 4px; font-size: 11.5px;
+  max-width: 220px;
+}
+.bk-toolbar__count{
+  font-family: var(--font-mono); font-size: 10.5px; color: var(--text-dimmer);
+  margin-left: auto; white-space: nowrap;
+}
+
+.bk-body{
+  flex: 1; min-height: 0;
+  display: grid; grid-template-columns: minmax(0, 1fr) 280px;
+}
+.bk-board-wrap{
+  min-width: 0; min-height: 0;
+  display: flex; flex-direction: column;
+  border-right: 1px solid var(--border);
+}
+.bk-board-wrap .kanban{ flex: 1; }
+
+/* Drag-and-drop: the actual implementation the old style.css comment on
+   .kanban__card only ever claimed existed. A column under an active drag
+   gets a dashed highlight; the dragged card itself dims so it's clear
+   which one is being moved. */
+.kanban__card[draggable="true"]{ cursor: grab; }
+.kanban__card.bk-dragging{ opacity: 0.4; }
+.kanban__col.bk-drop-target{
+  border-color: var(--accent-soft);
+  background: color-mix(in srgb, var(--accent) 8%, var(--bg-panel-2));
+  outline: 1px dashed var(--accent-soft); outline-offset: -3px;
+}
+
+/* ---- right: Overview pane ---------------------------------------------- */
+
+.bk-side{ overflow-y: auto; }
+.bk-side-content{ padding: 12px 14px; display: flex; flex-direction: column; gap: 16px; }
+.bk-side h4{
+  font-size: 10.5px; letter-spacing: 0.14em; text-transform: uppercase;
+  color: var(--text-dimmer); margin-bottom: 8px; font-weight: 600;
+}
+
+.bk-counts{ display: flex; flex-direction: column; gap: 5px; }
+.bk-count-row{
+  display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--text-dim);
+}
+.bk-count-row__label{ flex: 1; text-transform: capitalize; }
+.bk-count-row__n{ font-family: var(--font-mono); color: var(--text); min-width: 1.5em; text-align: right; }
+.bk-count-bar{
+  height: 4px; border-radius: 2px; background: var(--bg-raised); overflow: hidden; margin-top: 2px;
+}
+.bk-count-bar > i{ display: block; height: 100%; background: var(--accent); }
+
+.bk-list{ display: flex; flex-direction: column; gap: 6px; }
+.bk-list-empty{ color: var(--text-dimmer); font-size: 11.5px; }
+.bk-flag-item{
+  display: block; width: 100%; text-align: left; cursor: pointer;
+  border: 1px solid var(--border); border-left: 2px solid var(--accent-secondary);
+  border-radius: 2px; background: var(--bg-panel-2);
+  padding: 6px 8px; font: inherit; color: inherit;
+}
+.bk-flag-item:hover{ border-color: var(--accent-soft); }
+.bk-flag-item__title{ font-size: 11.5px; color: var(--text); }
+.bk-flag-item__note{ font-size: 10.5px; color: var(--accent-secondary); margin-top: 2px; }
+.bk-flag-item--stale .bk-flag-item__note{ color: var(--orange); }
+
+.bk-projects{ display: flex; flex-direction: column; gap: 4px; }
+.bk-project-row{
+  display: flex; align-items: center; gap: 6px; width: 100%; text-align: left;
+  background: transparent; border: 1px solid transparent; border-radius: 3px;
+  padding: 4px 6px; cursor: pointer; font: inherit; color: var(--text-dim); font-size: 11.5px;
+}
+.bk-project-row:hover{ border-color: var(--border); color: var(--text); }
+.bk-project-row.is-active{ border-color: var(--accent); color: var(--accent-soft); background: color-mix(in srgb, var(--accent) 10%, transparent); }
+.bk-project-row__name{ flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.bk-project-row__n{ font-family: var(--font-mono); font-size: 10.5px; color: var(--text-dimmer); }
+.bk-project-row__blocked{ font-size: 10px; color: var(--accent-secondary); }
+
+@media (max-width: 900px){
+  .bk-body{ grid-template-columns: minmax(0, 1fr); grid-template-rows: minmax(0, 1fr) auto; }
+  .bk-board-wrap{ border-right: none; border-bottom: 1px solid var(--border); }
+  .bk-side{ max-height: 220px; }
+}

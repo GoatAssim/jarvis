@@ -2298,6 +2298,9 @@ window.JARVIS_TEST_CHECKLIST = /*JSON-BEGIN*/ {
      "ask": "Remind me every weekday at 8:30 to check email.",
      "expect": "Recurring reminder appears in list_scheduled."
     }
+   ],
+   "watch": [
+    "Menu \u2192 Scheduled \u2192 + New \u2192 Reminder creates the same job through the panel itself (channels/importance/repeat count live under Advanced options) \u2014 try that path too, not only by asking."
    ]
   },
   "notify_me": {
@@ -2312,6 +2315,9 @@ window.JARVIS_TEST_CHECKLIST = /*JSON-BEGIN*/ {
      "ask": "Tell me when backup_done happens.",
      "expect": "Waits idle until signal_event('backup_done')."
     }
+   ],
+   "watch": [
+    "Menu \u2192 Scheduled \u2192 + New \u2192 Notify: leaving When blank sends immediately, same as omitting it here; filling it in schedules it. Title/channels/importance/repeat live under Advanced options."
    ]
   },
   "schedule_task": {
@@ -2327,7 +2333,10 @@ window.JARVIS_TEST_CHECKLIST = /*JSON-BEGIN*/ {
      "expect": "Recurring 'ask' job listed in list_scheduled."
     }
    ],
-   "care": "Recurring jobs keep firing — cancel the test jobs afterwards."
+   "care": "Recurring jobs keep firing — cancel the test jobs afterwards.",
+   "watch": [
+    "Menu \u2192 Scheduled \u2192 + New \u2192 Task now exposes Ask/Command/Tool directly (with a saved-command or tool-name picker), plus catch-up/emit-on-done/report under Advanced. Click a job afterwards \u2014 the detail pane shows its actual prompt/command/tool text, not just its title."
+   ]
   },
   "schedule_watch": {
    "group": "scheduling",
@@ -2341,7 +2350,10 @@ window.JARVIS_TEST_CHECKLIST = /*JSON-BEGIN*/ {
    "needs": [
     "Tesseract OCR installed (local OCR — nothing leaves the PC)"
    ],
-   "care": "Cancel the watch afterwards or it keeps reading your screen."
+   "care": "Cancel the watch afterwards or it keeps reading your screen.",
+   "watch": [
+    "Menu \u2192 Scheduled \u2192 + New \u2192 Watch builds the if-screen-shows/then checks list directly (add/remove conditions), rather than only through Task's own ask prompt. The list also tags a job created this way with a small 'watch' badge \u2014 best-effort, based on the default 'Watch: ...' title, so a hand-authored ask job named the same way would also show it."
+   ]
   },
   "list_scheduled": {
    "group": "scheduling",
@@ -2360,7 +2372,8 @@ window.JARVIS_TEST_CHECKLIST = /*JSON-BEGIN*/ {
     }
    ],
    "watch": [
-    "A job showing needs_approval has never run."
+    "A job showing needs_approval has never run.",
+    "Menu \u2192 Scheduled now filters by kind and by status (needs approval/paused/failed) with a live search box, and its Overview pane shows counts per kind, a paused/failed roll-up, a 'next up' list, and the scheduler's own recent-signal history and last-tick time \u2014 check all of it matches what this tool reports."
    ]
   },
   "cancel_scheduled": {
@@ -2382,6 +2395,9 @@ window.JARVIS_TEST_CHECKLIST = /*JSON-BEGIN*/ {
      },
      "expect": "Job pauses and shows as paused."
     }
+   ],
+   "watch": [
+    "Approve/Pause/Resume/Snooze/Cancel are also on each job's own detail pane in Menu \u2192 Scheduled (click a job in the list) \u2014 check the buttons offered there match the job's actual state (e.g. Approve only appears on a job that actually needs it)."
    ]
   },
   "signal_event": {
@@ -2415,6 +2431,9 @@ window.JARVIS_TEST_CHECKLIST = /*JSON-BEGIN*/ {
      "ask": "I should sort my photos at some point.",
      "expect": "Goes to the backlog, not a reminder."
     }
+   ],
+   "watch": [
+    "It should show up immediately in Menu \u2192 Backlog's board, and in its Overview pane's project list/counts on the right."
    ]
   },
   "backlog_list": {
@@ -2437,6 +2456,9 @@ window.JARVIS_TEST_CHECKLIST = /*JSON-BEGIN*/ {
      },
      "expect": "Only in-progress items."
     }
+   ],
+   "watch": [
+    "Menu \u2192 Backlog now has a live search box (title/project/note) and a project filter, both narrowing the board client-side \u2014 check the per-column counts update as you filter."
    ]
   },
   "backlog_summary": {
@@ -2447,6 +2469,9 @@ window.JARVIS_TEST_CHECKLIST = /*JSON-BEGIN*/ {
      "ask": "What am I working on and what's blocked?",
      "expect": "Groups in-progress and blocked (with what they're blocked on) plus stale items."
     }
+   ],
+   "watch": [
+    "Menu \u2192 Backlog's Overview pane now shows this same data directly \u2014 counts per column, a blocked roll-up, and a stale-in-Doing roll-up \u2014 without having to ask. Check it matches."
    ]
   },
   "backlog_update": {
@@ -2465,6 +2490,9 @@ window.JARVIS_TEST_CHECKLIST = /*JSON-BEGIN*/ {
      "ask": "Mark it done.",
      "expect": "Moves to done."
     }
+   ],
+   "watch": [
+    "Try this from the board too, not just by asking: drag a card to a different column (its state should update to match), and use a card's own Block button \u2014 clearing the reason on an already-blocked card should move it back out of Blocked automatically."
    ]
   },
   "list_daemons": {

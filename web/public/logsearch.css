@@ -1,0 +1,71 @@
+/* ============================================================================
+ * logsearch.css — Menu → Log Search.
+ *
+ * Part H.1 rework: brings this panel up to the same bar as Test Checklist /
+ * Daemons / Backlog (see those files' own headers for the shared reasoning).
+ * Own file, driven off the existing :root tokens, sits inside the shared
+ * .debug-overlay/.debug-panel chrome.
+ *
+ * .logsearch-hit/__where/__text (style.css) are kept as-is for the compact
+ * row look and reused here for individual results; everything with an
+ * `ls-` prefix is new with this pass — the two-pane layout (results list +
+ * detail), live search-as-you-type, query-term highlighting, and the jump-
+ * to-Ask/Daemons/Schedules buttons.
+ * ========================================================================= */
+
+.ls-toolbar{
+  display: flex; flex-direction: column; gap: 8px;
+  padding: 10px 14px; border-bottom: 1px solid var(--border); flex-shrink: 0;
+}
+.ls-toolbar__row{ display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.ls-toolbar__row .panel__search{ flex: 1 1 260px; }
+.ls-sets{ display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.ls-set-toggle{
+  display: inline-flex; align-items: center; gap: 5px; cursor: pointer; user-select: none;
+  font-size: 11px; color: var(--text-dim);
+}
+.ls-set-toggle input{ accent-color: var(--accent); }
+.ls-select{
+  padding: 5px 7px; background: var(--bg-panel-2); color: var(--text);
+  border: 1px solid var(--border); border-radius: 4px; font-size: 11.5px;
+}
+.ls-path-input{ flex: 1 1 220px; }
+
+.ls-body{
+  flex: 1; min-height: 0;
+  display: grid; grid-template-columns: minmax(0, 1fr) 380px;
+}
+.ls-results-pane{ min-width: 0; min-height: 0; display: flex; flex-direction: column; border-right: 1px solid var(--border); }
+.ls-results{
+  flex: 1 1 auto; overflow: auto; padding: 8px 10px 14px; min-height: 0;
+  display: flex; flex-direction: column; gap: 6px;
+}
+.ls-results .logsearch-hit{ cursor: pointer; width: 100%; text-align: left; font: inherit; color: inherit; }
+.ls-results .logsearch-hit.is-active{ border-color: var(--accent); border-left-color: var(--accent); }
+.ls-results .logsearch-hit__text{ max-height: 4.6em; overflow: hidden; text-overflow: ellipsis; }
+
+.ls-detail-pane{ min-width: 0; min-height: 0; display: flex; flex-direction: column; overflow: hidden; }
+.ls-detail{ flex: 1; overflow-y: auto; padding: 12px 14px; }
+.ls-detail-empty{ color: var(--text-dimmer); font-size: 12px; padding: 6px 0; }
+.ls-detail__where{
+  font-family: var(--font-mono); font-size: 11.5px; color: var(--accent);
+  word-break: break-all; margin-bottom: 8px;
+}
+.ls-detail__context{
+  background: var(--bg-panel-2); border: 1px solid var(--border); border-radius: 4px;
+  padding: 8px 10px; font-family: var(--font-mono); font-size: 11.5px; line-height: 1.65;
+  white-space: pre-wrap; word-break: break-word; overflow-x: auto;
+}
+.ls-detail__context-line{ display: block; }
+.ls-detail__context-line.is-match{ background: color-mix(in srgb, var(--accent) 14%, transparent); margin: 0 -10px; padding: 0 10px; }
+.ls-detail__context-line .ls-lineno{ color: var(--text-dimmer); margin-right: 8px; user-select: none; }
+.ls-detail__actions{ display: flex; gap: 6px; flex-wrap: wrap; margin-top: 10px; }
+mark.ls-mark{ background: color-mix(in srgb, var(--accent) 55%, transparent); color: var(--text); border-radius: 2px; padding: 0 1px; }
+
+.ls-summary{ padding: 4px 14px 0; font-size: 10.5px; color: var(--text-dimmer); font-family: var(--font-mono); }
+.ls-summary .is-truncated{ color: var(--orange); }
+
+@media (max-width: 900px){
+  .ls-body{ grid-template-columns: minmax(0, 1fr); grid-template-rows: minmax(0, 1fr) 260px; }
+  .ls-results-pane{ border-right: none; border-bottom: 1px solid var(--border); }
+}
