@@ -1367,14 +1367,18 @@
   </div>
 </div>
 
-<!-- DAEMONS — every long-running background service in one place: the three
-     built-ins (scheduler, Discord, Instagram) and anything the user has
-     registered. Uses the .debug-overlay/.debug-panel chrome (same as Debug
-     and Logs) rather than the plainer .menu-panel — this panel has a real
-     list+console split just like Logs does, so it earns the bigger, more
-     capable frame instead of the compact one. -->
+<!-- DAEMONS — every long-running background service in one place: the
+     built-ins (scheduler, Discord, Instagram, clipboard watch, browser) and
+     anything the user has registered. H.1.5 rework: same three-pane
+     information architecture as Test Checklist (services / selected service
+     / overview) — see daemons.css's own header. Only the markup that has to
+     exist before daemons.js runs lives here (the overlay frame, the head,
+     the three empty pane containers); everything inside Services, the
+     selected-service pane and Overview is built by daemons.js, the same
+     split Test Checklist uses between its own static shell and
+     test-checklist.js's rendering. -->
 <div class="debug-overlay" id="daemons-overlay" hidden>
-  <div class="debug-panel">
+  <div class="debug-panel dmn-panel" id="dmn-panel" role="dialog" aria-modal="true" aria-labelledby="dmn-title">
     <div class="panel__corner panel__corner--tl"></div>
     <div class="panel__corner panel__corner--br"></div>
 
@@ -1385,115 +1389,58 @@
         <circle cx="20" cy="20" r="3" class="brand-mark__core"/>
       </svg>
       <div class="debug-panel__titles">
-        <div class="debug-panel__title">DAEMONS</div>
-        <div class="debug-panel__subtitle" id="daemons-status-line">reading services&hellip;</div>
+        <div class="debug-panel__title" id="dmn-title">DAEMONS</div>
+        <div class="debug-panel__subtitle" id="daemons-status-line" aria-live="polite">reading services&hellip;</div>
       </div>
-      <button class="btn btn--ghost btn--sm" id="btn-daemon-refresh" type="button" title="Re-read every daemon's live status">Refresh</button>
+      <div class="dmn-head-actions">
+        <button class="dmn-live" id="btn-daemon-live" type="button" aria-pressed="true" title="Pause or resume automatic refresh">&#9679; Live</button>
+        <button class="btn btn--ghost btn--sm" id="btn-daemon-refresh" type="button" title="Re-read every daemon's live status now">Refresh</button>
+      </div>
       <button class="modal__close" id="daemons-close" type="button" aria-label="Close">&times;</button>
     </div>
 
-    <div class="menu-body">
-      <section class="skills-pane skills-pane--list" aria-label="Background services">
-        <div class="skills-pane__head"><h3>Services</h3></div>
-        <div class="skills-list" id="daemons-list">
-          <div class="skills-empty">Loading&hellip;</div>
+    <div class="debug-body dmn-body">
+
+      <!-- LEFT: every service, searchable, filterable by state and by kind -->
+      <section class="debug-pane" aria-label="Services">
+        <div class="debug-pane__head">
+          <h3>Services</h3>
+          <span class="debug-tool-count" id="dmn-count"></span>
         </div>
-        <div class="skills-pane__head">
-          <h3>Add your own</h3>
-          <button class="btn btn--ghost btn--sm" id="btn-daemon-add-open" type="button">+ Add daemon</button>
+        <div class="panel__search debug-search">
+          <svg class="panel__search-icon" viewBox="0 0 20 20" aria-hidden="true">
+            <circle cx="8.7" cy="8.7" r="6" fill="none" stroke="currentColor" stroke-width="1.6"/>
+            <line x1="13.2" y1="13.2" x2="17.5" y2="17.5" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/>
+          </svg>
+          <input type="search" id="dmn-search" class="panel__search-input" placeholder="Search services, commands, notes&hellip;" autocomplete="off">
         </div>
-        <!-- H.1.4 (owner feedback, 2026-09-27): its own editor, the same
-             pattern the Custom Tools panel uses for "Add Command" — not a
-             bare inline row squeezed into the list. Hidden until "+ Add
-             daemon" is clicked. Every field here maps straight to a
-             daemon-add flag the CLI/backend already accepted before this
-             patch (see workspace_cli.py's daemon-add usage string); the
-             old inline row only ever surfaced 4 of them (id, command, cwd,
-             stdin). daemons.js's addDaemonEditor* functions own this
-             block's wiring. -->
-        <div class="dmn-add-editor" id="dmn-add-editor" hidden>
-          <div class="dmn-add-editor__row">
-            <input type="text" id="daemon-new-id" placeholder="id &mdash; e.g. web" />
-            <input type="text" id="daemon-new-name" placeholder="display name (optional)" />
-          </div>
-          <input type="text" id="daemon-new-command" class="dmn-add-editor__wide" placeholder="command &mdash; e.g. node server.js --port 3000" />
-          <textarea id="daemon-new-description" class="dmn-add-editor__desc" rows="2" placeholder="description / notes (optional, shown in the row's tooltip)"></textarea>
-          <div class="dmn-add-editor__row">
-            <input type="text" id="daemon-new-cwd" placeholder="working directory (optional)" />
-            <label class="daemon-stdin-toggle"><input type="checkbox" id="daemon-new-shell" /> run via shell</label>
-          </div>
-
-          <div class="dmn-add-editor__head">Environment variables</div>
-          <div class="dmn-add-editor__env" id="dmn-add-env"></div>
-          <button class="btn btn--ghost btn--sm" id="btn-daemon-env-add" type="button">+ variable</button>
-
-          <div class="dmn-add-editor__head">Restart policy</div>
-          <div class="dmn-add-editor__row">
-            <select id="daemon-new-restart" class="jui-input" title="What to do when the process exits">
-              <option value="never">Never restart</option>
-              <option value="on-failure">Restart on failure</option>
-              <option value="always">Always restart</option>
-            </select>
-            <input type="number" id="daemon-new-restart-delay" min="0" placeholder="restart delay (s)" value="5" title="Seconds to wait before a restart" />
-            <input type="number" id="daemon-new-max-restarts" min="0" placeholder="max restarts / 10 min" value="5" title="0 = unlimited" />
-          </div>
-
-          <div class="dmn-add-editor__head">Stop behavior</div>
-          <div class="dmn-add-editor__row">
-            <select id="daemon-new-stop-signal" class="jui-input" title="Signal sent on Stop (Windows always force-kills)">
-              <option value="TERM">TERM (polite)</option>
-              <option value="INT">INT</option>
-              <option value="KILL">KILL (force)</option>
-            </select>
-            <input type="number" id="daemon-new-stop-timeout" min="1" placeholder="stop timeout (s)" value="10" title="How long to wait before force-killing" />
-          </div>
-
-          <div class="dmn-add-editor__row">
-            <label class="daemon-stdin-toggle"><input type="checkbox" id="daemon-new-stdin" /> reads stdin</label>
-            <label class="daemon-stdin-toggle"><input type="checkbox" id="daemon-new-autostart" /> autostart</label>
-          </div>
-
-          <div class="dmn-add-editor__row">
-            <button class="btn btn--primary btn--sm" id="btn-daemon-add" type="button">Register</button>
-            <button class="btn btn--ghost btn--sm" id="btn-daemon-add-cancel" type="button">Cancel</button>
-          </div>
+        <div class="dmn-filters">
+          <div class="dmn-chips" id="dmn-chips" role="group" aria-label="Filter by state"></div>
+          <select class="dmn-select" id="dmn-kind-filter" aria-label="Filter by kind"></select>
+        </div>
+        <div class="dmn-list" id="daemons-list">
+          <div class="debug-empty">Loading&hellip;</div>
+        </div>
+        <div style="padding:8px 12px 10px;">
+          <button class="btn btn--primary btn--sm btn--wide" id="btn-daemon-add-open" type="button">+ Add daemon</button>
         </div>
       </section>
 
-      <section class="skills-pane skills-pane--editor" aria-label="Daemon console">
-        <div class="skills-pane__head">
-          <h3 id="daemon-console-title">Console</h3>
-          <select id="daemon-console-file" class="daemon-log-picker" title="Current console, or an older rotated log"></select>
-        </div>
-        <!-- H.1: filter chips (All/Output/Errors) + auto-scroll toggle, filled
-             in by daemons.js's renderConsoleToolbar(). -->
-        <div class="dmn-console-toolbar" id="dmn-console-toolbar"></div>
-        <!-- Was a flat <pre>; now a scrollable container of classed
-             .dmn-line divs (stdout/stderr/crash traceback/meta/stdin-echo) —
-             see daemons.js's classifyLine(). tabindex so PageUp/PageDown/
-             Home/End (wired in daemons.js) have somewhere to act even before
-             the pane itself has been clicked into. -->
-        <div class="daemon-console dmn-console" id="daemon-console" tabindex="0">
-          <div class="dmn-console-empty">Pick a service to see its output.</div>
-        </div>
-        <!-- Only enabled for a running daemon whose definition says it reads
-             stdin — see daemons.send_input, which refuses otherwise rather
-             than silently swallowing the line. -->
-        <div class="sched-add daemon-input-row" id="daemon-input-row" hidden>
-          <input type="text" id="daemon-input-text" placeholder="type a line into this service's console&hellip;" />
-          <button class="btn btn--primary btn--sm" id="btn-daemon-send" type="button">Send</button>
-        </div>
-        <div class="sched-add">
-          <input type="text" id="daemon-schedule-when" placeholder="start it later &mdash; e.g. in 2 hours, tomorrow 9am" />
-          <button class="btn btn--ghost btn--sm" id="btn-daemon-schedule" type="button">Schedule start</button>
-        </div>
-        <div class="dmn-keyhint">
-          <kbd>&uarr;</kbd><kbd>&darr;</kbd> services &middot;
-          <kbd>Enter</kbd> open console &middot;
-          <kbd>PgUp</kbd><kbd>PgDn</kbd><kbd>Home</kbd><kbd>End</kbd> scroll &middot;
-          <kbd>R</kbd> refresh &middot; <kbd>Esc</kbd> close
-        </div>
+      <!-- MIDDLE: the selected service — summary, alerts, actions, then a
+           Console/Details tab strip. Replaced wholesale by the add/edit
+           editor when one is open. -->
+      <section class="debug-pane" aria-label="Selected service">
+        <div id="dmn-main"></div>
+        <div class="dmn-foot" id="dmn-foot"></div>
       </section>
+
+      <!-- RIGHT: progress, by-state legend, needs attention, coming up,
+           by kind, actions, guide — same shape as Test Checklist's Overview. -->
+      <section class="debug-pane" aria-label="Overview">
+        <div class="debug-pane__head"><h3>Overview</h3></div>
+        <div class="dmn-side" id="dmn-side"></div>
+      </section>
+
     </div>
   </div>
 </div>

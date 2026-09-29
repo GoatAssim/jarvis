@@ -180,7 +180,11 @@ web/
                                  create form onto remind_me/notify_me/
                                  schedule_task/schedule_watch via /api/tools/run,
                                  kind/status filters, Overview pane)
-```
+    public/daemons.js            Menu -> Daemons (three-pane: services / selected service /
+                                 overview; Console + Details tabs; add/edit form). Pure
+                                 helpers are exposed as JarvisDaemons._pure for the node test
+    public/daemons.css           its styling (own `dmn-` prefix, reuses the debug-* chrome)                             
+```                
 
 ---
 

@@ -266,11 +266,14 @@
   function confirm(o) {
     o = typeof o === "string" ? { title: o } : (o || {});
     const foot = [
+      // focusCancel: for a destructive confirm, where a stray Enter should
+      // mean "no". Off by default, so every existing caller behaves as before.
       el("button", { class: "jui-btn", type: "button",
+                     "data-autofocus": o.focusCancel ? true : null,
                      onclick: () => closeModal(false) }, o.cancelLabel || "Cancel"),
       el("button", {
         class: "jui-btn jui-btn--" + (level(o.level) === "info" ? "primary" : level(o.level)),
-        type: "button", "data-autofocus": true,
+        type: "button", "data-autofocus": o.focusCancel ? null : true,
         onclick: () => closeModal(true),
       }, o.confirmLabel || "Confirm"),
     ];

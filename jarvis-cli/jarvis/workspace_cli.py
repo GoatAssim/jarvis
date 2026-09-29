@@ -42,10 +42,11 @@ USAGE = """workspace commands:
                      [--restart-delay S] [--max-restarts N]
                      [--stop-signal TERM|INT|KILL] [--stop-timeout S]
                      [--autostart] [--description D]
-  daemon-edit   <id> [--name N] [--cwd D] [--enabled true|false]
+  daemon-edit   <id> [--name N] [--description D] [--cwd D] [--enabled true|false]
                      [--autostart true|false] [--command C] [--shell true|false]
                      [--restart P] [--restart-delay S] [--max-restarts N]
-                     [--stop-signal S] [--stop-timeout S] [--env K=V]
+                     [--stop-signal S] [--stop-timeout S] [--env K=V ...]
+                     [--env-replace]   # env becomes exactly the given --env pairs
   daemon-remove <id>
   daemon-run    <id>                   THE SUPERVISOR — runs in the foreground
   daemons-tick                         start whatever is scheduled and due
@@ -217,6 +218,8 @@ def handle(argv):
             fields["name"] = _one(flags, "name")
         if "cwd" in flags:
             fields["cwd"] = _one(flags, "cwd")
+        if "description" in flags:
+            fields["description"] = _one(flags, "description")
         if "command" in flags:
             fields["argv"] = _one(flags, "command")
         if "enabled" in flags:
@@ -238,16 +241,35 @@ def handle(argv):
                 fields[field] = _one(flags, flag)
         if "stop-signal" in flags:
             fields["stop_signal"] = str(_one(flags, "stop-signal") or "").upper()
-        if "env" in flags:
-            # Merged onto whatever is already stored rather than replacing it,
-            # so `--env PORT=81` doesn't silently drop every other variable.
-            merged_env = dict((daemons.get(positional[0]) or {}).get("env") or {})
-            for pair in flags.get("env", []):
-                if pair is True or "=" not in str(pair):
-                    continue
-                key, _, value = str(pair).partition("=")
-                merged_env[key.strip()] = value
-            fields["env"] = merged_env
+        if "env" in flags or "env-replace" in flags:
+            # "env-replace" alone (no "--env" at all) is a real, deliberate
+            # case: it means the caller wants zero variables — an editor
+            # that shows every row and lets you delete the last one has to
+            # be able to send "now there are none," not just "unchanged."
+            # Default: merged onto whatever is already stored, so a bare
+            # `--env PORT=81` from a terminal doesn't silently drop every
+            # other variable the daemon has. `--env-replace` opts into the
+            # opposite: the given set of `--env` pairs (zero or more) becomes
+            # the WHOLE environment, so a variable that's missing from it is
+            # actually removed — the one thing a merge can never do, and
+            # exactly what a form that shows and re-submits every row needs
+            # (see web/server.js's PATCH /api/daemons/:id, `envReplace`).
+            if "env-replace" in flags:
+                new_env = {}
+                for pair in flags.get("env", []):
+                    if pair is True or "=" not in str(pair):
+                        continue
+                    key, _, value = str(pair).partition("=")
+                    new_env[key.strip()] = value
+                fields["env"] = new_env
+            else:
+                merged_env = dict((daemons.get(positional[0]) or {}).get("env") or {})
+                for pair in flags.get("env", []):
+                    if pair is True or "=" not in str(pair):
+                        continue
+                    key, _, value = str(pair).partition("=")
+                    merged_env[key.strip()] = value
+                fields["env"] = merged_env
         if not fields:
             _fail("nothing to change")
         ok, err = daemons.edit(positional[0], **fields)
