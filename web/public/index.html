@@ -12,6 +12,9 @@
 <link rel="stylesheet" href="ui-kit.css">
 <link rel="stylesheet" href="test-checklist.css">
 <link rel="stylesheet" href="daemons.css">
+<link rel="stylesheet" href="backlog.css">
+<link rel="stylesheet" href="logsearch.css">
+<link rel="stylesheet" href="schedules.css">
 </head>
 <body>
 
@@ -453,43 +456,76 @@
      so it's shown rather than hidden. -->
 <!-- SCHEDULED — jobs, reminders, notifications. Own panel (separate from MCP,
      which used to share this space) so each menu item opens exactly one
-     concern. Uses the shared .menu-overlay/.menu-panel chrome — the same
-     chrome the Debug and Ask panels use — rather than a bespoke look. -->
-<div class="menu-overlay" id="sched-overlay" hidden>
-  <div class="menu-panel">
+     concern.
+     Part H.2 rework: escalated to the same Test-Checklist-quality bar as
+     H.1 (see the master plan's H.2) after the owner flagged that the old
+     add row (sched-when/sched-message only) couldn't express a task prompt,
+     a command/tool call, or a screen watch — only the simplest reminder.
+     Promoted from .menu-overlay/.menu-panel (the smaller modal chrome) to
+     .debug-overlay/.debug-panel — the same bigger chrome Daemons/Backlog/
+     Log Search/Test Checklist use — because a 3-pane list/editor/overview
+     layout needs the room those panels get. All behavior and styling now
+     live in schedules.js/schedules.css; only markup stays here, per
+     index.html's own "Scripts load LAST" convention. -->
+<div class="debug-overlay" id="sched-overlay" hidden>
+  <div class="debug-panel">
     <div class="panel__corner panel__corner--tl"></div>
     <div class="panel__corner panel__corner--br"></div>
 
-    <div class="menu-panel__head">
+    <div class="debug-panel__head">
       <svg class="brand-mark" viewBox="0 0 40 40" aria-hidden="true">
         <circle cx="20" cy="20" r="18" class="brand-mark__ring"/>
         <circle cx="20" cy="20" r="11" class="brand-mark__ring brand-mark__ring--in"/>
         <circle cx="20" cy="20" r="3" class="brand-mark__core"/>
       </svg>
-      <div class="menu-panel__titles">
-        <div class="menu-panel__title">SCHEDULED</div>
-        <div class="menu-panel__subtitle" id="sched-status-line">reading schedule&hellip;</div>
+      <div class="debug-panel__titles">
+        <div class="debug-panel__title">SCHEDULED</div>
+        <div class="debug-panel__subtitle" id="sched-status-line">reading schedule&hellip;</div>
       </div>
-      <button class="btn btn--ghost btn--sm" id="btn-sched-tick" type="button" title="Fire everything that is due right now, without waiting for the next tick">Run due now</button>
+      <div class="tc-head-actions">
+        <button class="btn btn--ghost btn--sm" id="btn-sched-refresh" type="button" title="Re-read the schedule">Refresh</button>
+        <button class="btn btn--ghost btn--sm" id="btn-sched-tick" type="button" title="Fire everything that is due right now, without waiting for the next tick">Run due now</button>
+      </div>
       <button class="modal__close" id="sched-close" type="button" aria-label="Close">&times;</button>
     </div>
 
-    <div class="menu-body">
-      <section class="skills-pane skills-pane--list" aria-label="Scheduled jobs">
-        <div class="skills-pane__head"><h3>Jobs</h3></div>
-        <div class="skills-list" id="sched-list">
+    <div class="debug-body sch-body">
+
+      <!-- LEFT: search, kind/status filters, job list -->
+      <section class="debug-pane" aria-label="Jobs">
+        <div class="debug-pane__head">
+          <h3>Jobs</h3>
+          <span class="debug-tool-count" id="sch-count"></span>
+        </div>
+        <div class="panel__search debug-search">
+          <svg class="panel__search-icon" viewBox="0 0 20 20" aria-hidden="true">
+            <circle cx="8.7" cy="8.7" r="6" fill="none" stroke="currentColor" stroke-width="1.6"/>
+            <line x1="13.2" y1="13.2" x2="17.5" y2="17.5" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/>
+          </svg>
+          <input type="search" id="sch-search" class="panel__search-input" placeholder="Search jobs&hellip;" autocomplete="off">
+        </div>
+        <div class="sch-chips" id="sch-kind-chips" role="group" aria-label="Filter by kind"></div>
+        <div class="sch-chips" id="sch-status-chips" role="group" aria-label="Filter by status"></div>
+        <div class="sch-list" id="sch-list">
           <div class="skills-empty">Loading&hellip;</div>
         </div>
       </section>
 
-      <section class="skills-pane skills-pane--editor" aria-label="Add a reminder">
-        <div class="skills-pane__head"><h3>Add a reminder</h3></div>
-        <div class="sched-add">
-          <input type="text" id="sched-when" placeholder="when — e.g. tomorrow at 9am, every weekday at 08:30" />
-          <input type="text" id="sched-message" placeholder="what to say" />
-          <button class="btn btn--primary btn--sm" id="btn-sched-add" type="button">Schedule</button>
+      <!-- MIDDLE: selected job's detail, or the new-job form -->
+      <section class="debug-pane" aria-label="Job">
+        <div class="debug-pane__head">
+          <h3 id="sch-mid-title">New job</h3>
+          <button class="btn btn--ghost btn--sm" id="btn-sch-new" type="button">+ New</button>
         </div>
+        <div class="sch-mid" id="sch-mid"></div>
       </section>
+
+      <!-- RIGHT: counts, paused/failed roll-up, next up, recent events -->
+      <section class="debug-pane" aria-label="Overview">
+        <div class="debug-pane__head"><h3>Overview</h3></div>
+        <div class="sch-side" id="sch-side"></div>
+      </section>
+
     </div>
   </div>
 </div>
@@ -1464,9 +1500,12 @@
 
 <!-- BACKLOG — untimed work. Deliberately NOT in the Scheduled panel: that
      one is about things that fire at a moment, this is about things with no
-     moment at all. See backlog.py's module docstring. Same bigger
-     .debug-overlay/.debug-panel chrome as Daemons/Log search/Debug/Logs — a
-     five-column board wants the room. -->
+     moment at all. See backlog.py's module docstring.
+     Part H.1 rework: own .css/.js (backlog.css/backlog.js — see the latter's
+     header), live search + project filter + an Overview pane added around
+     the existing kanban board. Same bigger .debug-overlay/.debug-panel
+     chrome as Daemons/Log search/Debug/Logs — a five-column board plus an
+     Overview pane wants the room. -->
 <div class="debug-overlay" id="backlog-overlay" hidden>
   <div class="debug-panel">
     <div class="panel__corner panel__corner--tl"></div>
@@ -1485,18 +1524,37 @@
       <button class="modal__close" id="backlog-close" type="button" aria-label="Close">&times;</button>
     </div>
 
-    <div class="menu-body menu-body--wide">
-      <div class="kanban" id="backlog-board"></div>
-      <div class="sched-add backlog-add">
-        <input type="text" id="backlog-new-title" placeholder="what needs doing&hellip;" />
-        <input type="text" id="backlog-new-project" placeholder="project (optional)" />
-        <select id="backlog-new-state">
-          <option value="idea">idea</option>
-          <option value="todo" selected>todo</option>
-          <option value="doing">doing</option>
-        </select>
-        <button class="btn btn--primary btn--sm" id="btn-backlog-add" type="button">Add</button>
+    <div class="bk-toolbar">
+      <div class="panel__search debug-search">
+        <svg class="panel__search-icon" viewBox="0 0 20 20" aria-hidden="true">
+          <circle cx="8.7" cy="8.7" r="6" fill="none" stroke="currentColor" stroke-width="1.6"/>
+          <line x1="13.2" y1="13.2" x2="17.5" y2="17.5" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/>
+        </svg>
+        <input type="search" id="backlog-search" class="panel__search-input" placeholder="Search title, project, note&hellip;" autocomplete="off">
       </div>
+      <select id="backlog-project-filter" class="bk-select" aria-label="Filter by project">
+        <option value="">All projects</option>
+      </select>
+      <span class="bk-toolbar__count" id="backlog-toolbar-count"></span>
+    </div>
+
+    <div class="bk-body">
+      <div class="bk-board-wrap">
+        <div class="kanban" id="backlog-board"></div>
+        <div class="sched-add backlog-add">
+          <input type="text" id="backlog-new-title" placeholder="what needs doing&hellip;" />
+          <input type="text" id="backlog-new-project" placeholder="project (optional)" />
+          <select id="backlog-new-state">
+            <option value="idea">idea</option>
+            <option value="todo" selected>todo</option>
+            <option value="doing">doing</option>
+          </select>
+          <button class="btn btn--primary btn--sm" id="btn-backlog-add" type="button">Add</button>
+        </div>
+      </div>
+      <aside class="debug-pane bk-side" aria-label="Overview">
+        <div class="bk-side-content" id="backlog-side"></div>
+      </aside>
     </div>
   </div>
 </div>
@@ -1504,9 +1562,11 @@
 <!-- LOG SEARCH — the raw files on disk, line by line. The existing Logs
      viewer shows parsed conversation entries; this one finds the line that
      failed to parse, the traceback in a daemon console, and anything in a
-     file the user points it at. Same bigger .debug-overlay/.debug-panel
-     chrome as Daemons/Backlog/Debug/Logs — a results list this dense wants
-     the room too. -->
+     file the user points it at.
+     Part H.1 rework: own .css/.js (logsearch.css/logsearch.js — see the
+     latter's header), live search + query highlighting + a results/detail
+     two-pane layout with jump-to-source actions. Same bigger
+     .debug-overlay/.debug-panel chrome as Daemons/Backlog/Debug/Logs. -->
 <div class="debug-overlay" id="logsearch-overlay" hidden>
   <div class="debug-panel">
     <div class="panel__corner panel__corner--tl"></div>
@@ -1525,26 +1585,45 @@
       <button class="modal__close" id="logsearch-close" type="button" aria-label="Close">&times;</button>
     </div>
 
-    <div class="menu-body menu-body--wide">
-      <div class="sched-add logsearch-controls">
-        <input type="text" id="logsearch-query" placeholder="what to find &mdash; e.g. traceback, connection refused" />
-        <select id="logsearch-mode">
+    <div class="ls-toolbar">
+      <div class="ls-toolbar__row">
+        <div class="panel__search debug-search">
+          <svg class="panel__search-icon" viewBox="0 0 20 20" aria-hidden="true">
+            <circle cx="8.7" cy="8.7" r="6" fill="none" stroke="currentColor" stroke-width="1.6"/>
+            <line x1="13.2" y1="13.2" x2="17.5" y2="17.5" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/>
+          </svg>
+          <input type="search" id="logsearch-query" class="panel__search-input" placeholder="what to find &mdash; e.g. traceback, connection refused" autocomplete="off">
+        </div>
+        <select id="logsearch-mode" class="ls-select">
           <option value="words" selected>all words</option>
           <option value="phrase">exact phrase</option>
           <option value="regex">regex</option>
         </select>
-        <select id="logsearch-set">
-          <option value="">all Jarvis logs</option>
-          <option value="conversations">conversations</option>
-          <option value="daemons">daemon consoles</option>
-          <option value="scheduler">scheduler</option>
-        </select>
-        <input type="text" id="logsearch-path" placeholder="or a file/glob of your own (optional)" />
         <button class="btn btn--primary btn--sm" id="btn-logsearch" type="button">Search</button>
       </div>
-      <div class="logsearch-results" id="logsearch-results">
-        <div class="skills-empty">Enter something to search for.</div>
+      <div class="ls-toolbar__row">
+        <div class="ls-sets">
+          <label class="ls-set-toggle"><input type="checkbox" id="ls-set-conversations" checked> Conversations</label>
+          <label class="ls-set-toggle"><input type="checkbox" id="ls-set-daemons" checked> Daemon consoles</label>
+          <label class="ls-set-toggle"><input type="checkbox" id="ls-set-scheduler" checked> Scheduler</label>
+          <label class="ls-set-toggle"><input type="checkbox" id="ls-set-notifications"> Notifications</label>
+        </div>
+        <input type="text" id="logsearch-path" class="ls-path-input" placeholder="or a file/glob of your own (optional)" />
       </div>
+      <div class="ls-summary" id="logsearch-summary"></div>
+    </div>
+
+    <div class="debug-body ls-body">
+      <section class="debug-pane ls-results-pane" aria-label="Results">
+        <div class="ls-results" id="logsearch-results">
+          <div class="skills-empty">Enter something to search for.</div>
+        </div>
+      </section>
+      <section class="debug-pane ls-detail-pane" aria-label="Detail">
+        <div class="ls-detail" id="logsearch-detail">
+          <div class="ls-detail-empty">Select a result to see its context.</div>
+        </div>
+      </section>
     </div>
   </div>
 </div>
@@ -1619,9 +1698,13 @@
      search, Notifications and Setup panels (all appended near the end of
      <body>, after where these tags used to sit) didn't respond to clicks:
      the qs() lookups all ran before their markup existed. Guides, Debug,
-     Skills, Scheduled, MCP and Channels worked fine only because their
-     markup happens to sit earlier in the file. Keep these tags below every
-     panel div, not just below the ones that exist today. -->
+     Skills, MCP and Channels worked fine only because their markup happens
+     to sit earlier in the file. Scheduled (H.2 rework) is the same story as
+     Daemons/Backlog/Log search now: schedules.js does its own
+     qs("#sched-overlay") lookup, loaded from down here, so where
+     #sched-overlay's markup itself sits no longer matters the way it used
+     to when app.js held that lookup. Keep these tags below every panel div,
+     not just below the ones that exist today. -->
 <script src="https://cdn.jsdelivr.net/npm/marked@15/marked.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/dompurify@3/dist/purify.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js"></script>
@@ -1634,6 +1717,9 @@
 <script src="test-checklist-data.js"></script>
 <script src="test-checklist.js"></script>
 <script src="daemons.js"></script>
+<script src="backlog.js"></script>
+<script src="logsearch.js"></script>
+<script src="schedules.js"></script>
 
 </body>
 </html>

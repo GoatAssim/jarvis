@@ -1,0 +1,171 @@
+/* ============================================================================
+ * schedules.css — Menu → Scheduled.
+ *
+ * Part H.2 rework: brings this panel up to the same bar as Test Checklist /
+ * Daemons / Backlog / Log Search (see those files' own headers for the
+ * shared reasoning) — escalated from "a slighter pass" to the full H.1 bar
+ * after the owner flagged the old add row as missing whole categories of
+ * interaction (task prompt, ask/command/tool, a kind selector) rather than
+ * being merely unpolished. Own file, driven off the existing :root tokens,
+ * sits inside the shared .debug-overlay/.debug-panel chrome — this panel
+ * moved INTO that chrome as part of this pass (it used to be the smaller
+ * .menu-overlay/.menu-panel modal), because a 3-pane list/editor/overview
+ * layout needs the room those panels get.
+ *
+ * Deliberately its own class prefix (`sch-`), not a reuse of test-checklist's
+ * `tc-` classes, even though a few (chips, a status dot) are visually
+ * similar — see daemons.css's/backlog.css's own note on the same choice:
+ * every reworked panel stays independent of the others' files.
+ * ========================================================================= */
+
+.sch-body{ grid-template-columns: 300px minmax(0, 1fr) 300px; }
+
+/* ---- left: search, filters, list ---------------------------------------- */
+
+.sch-chips{ display: flex; flex-wrap: wrap; gap: 5px; padding: 0 12px 8px; }
+.sch-chip{
+  display: inline-flex; align-items: center; gap: 5px;
+  background: transparent; color: var(--text-dim);
+  border: 1px solid var(--border); border-radius: 2px;
+  padding: 3px 7px; font-size: 10.5px; letter-spacing: 0.05em; text-transform: uppercase;
+  cursor: pointer; transition: border-color .15s, color .15s, background .15s;
+}
+.sch-chip:hover{ border-color: var(--accent-soft); color: var(--text); }
+.sch-chip.is-active{
+  border-color: var(--accent); color: var(--accent-soft);
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+}
+.sch-chip__n{ font-family: var(--font-mono); font-size: 10px; opacity: .75; }
+
+.sch-list{ flex: 1; min-height: 0; overflow-y: auto; padding: 4px 8px 12px; }
+.sch-row{
+  display: block; width: 100%; text-align: left; cursor: pointer;
+  border: 1px solid var(--border); border-left: 2px solid var(--border-strong);
+  border-radius: 2px; background: var(--bg-panel-2);
+  padding: 7px 9px; margin-top: 5px; color: inherit; font: inherit;
+  transition: border-color .15s, background .15s, transform .15s;
+}
+.sch-row:hover{ border-color: var(--accent-soft); transform: translateX(2px); }
+.sch-row.is-active{
+  border-color: var(--accent); border-left-color: var(--accent);
+  background: linear-gradient(90deg, color-mix(in srgb, var(--accent) 12%, transparent), transparent);
+}
+.sch-row.is-needs-approval{ border-left-color: var(--accent-secondary); }
+.sch-row.is-paused{ border-left-color: var(--orange); }
+.sch-row.is-error{ border-left-color: var(--red); }
+.sch-row__top{ display: flex; align-items: center; gap: 7px; }
+.sch-dot{ width: 8px; height: 8px; border-radius: 50%; background: var(--text-dimmer); flex: 0 0 auto; }
+.sch-dot--pending{ background: var(--green); }
+.sch-dot--paused{ background: var(--orange); }
+.sch-dot--error{ background: var(--red); box-shadow: 0 0 6px rgba(248,113,113,0.5); }
+.sch-dot--needs_approval{ background: var(--accent-secondary); }
+.sch-dot--done, .sch-dot--cancelled{ background: var(--text-dimmer); opacity: 0.6; }
+.sch-row__title{ font-size: 12.5px; color: var(--text); flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sch-row.is-done .sch-row__title, .sch-row.is-cancelled .sch-row__title{ text-decoration: line-through; opacity: 0.6; }
+.sch-row__meta{ font-size: 10.5px; color: var(--text-dimmer); margin-top: 3px; display: flex; gap: 6px; flex-wrap: wrap; }
+.sch-tag{
+  display: inline-block; border: 1px solid var(--border); border-radius: 2px;
+  padding: 1px 5px; font-size: 9.5px; letter-spacing: 0.04em; text-transform: uppercase;
+  color: var(--text-dimmer);
+}
+.sch-tag--warn{ color: var(--accent-secondary); border-color: var(--accent-secondary); }
+.sch-tag--bad{ color: var(--red); border-color: var(--red); }
+
+/* ---- middle: new-job form / job detail ----------------------------------- */
+
+.sch-mid{ flex: 1; overflow-y: auto; padding: 12px 14px; }
+
+.sch-kindbar{ display: flex; gap: 4px; margin-bottom: 12px; flex-wrap: wrap; }
+.sch-kindbar button{
+  flex: 1 1 auto; padding: 6px 8px; font-size: 11px; letter-spacing: 0.03em;
+  border: 1px solid var(--border); border-radius: 3px; background: var(--bg-panel-2);
+  color: var(--text-dim); cursor: pointer; transition: border-color .15s, color .15s, background .15s;
+}
+.sch-kindbar button:hover{ border-color: var(--accent-soft); color: var(--text); }
+.sch-kindbar button.is-active{ border-color: var(--accent); color: var(--accent-soft); background: color-mix(in srgb, var(--accent) 12%, transparent); }
+
+.sch-field{ display: flex; flex-direction: column; gap: 4px; margin-bottom: 12px; }
+.sch-field__label{ font-size: 11.5px; color: var(--text-dim); }
+.sch-field__hint{ font-size: 10.5px; color: var(--text-dimmer); margin-top: 2px; }
+.sch-field input[type="text"], .sch-field input[type="number"], .sch-field select, .sch-field textarea{
+  width: 100%; padding: 6px 8px; background: var(--bg-panel); color: var(--text);
+  border: 1px solid var(--border); border-radius: 3px; font-size: 12px; font-family: inherit;
+}
+.sch-field textarea{ resize: vertical; min-height: 64px; font-family: var(--font-mono); font-size: 11.5px; }
+
+.sch-checks{ display: flex; flex-direction: column; gap: 8px; margin-bottom: 8px; }
+.sch-check-row{
+  border: 1px solid var(--border); border-radius: 3px; padding: 8px; background: var(--bg-panel-2);
+  display: flex; flex-direction: column; gap: 6px;
+}
+.sch-check-row__head{ display: flex; align-items: center; justify-content: space-between; }
+.sch-check-row__label{ font-size: 10px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--text-dimmer); }
+
+.sch-channels{ display: flex; flex-wrap: wrap; gap: 10px; }
+.sch-channel-toggle{ display: inline-flex; align-items: center; gap: 5px; font-size: 11.5px; color: var(--text-dim); cursor: pointer; user-select: none; }
+.sch-channel-toggle input{ accent-color: var(--accent); }
+
+.sch-advanced{ border: 1px solid var(--border); border-radius: 4px; padding: 2px 10px 8px; margin-bottom: 12px; }
+.sch-advanced > summary{ cursor: pointer; padding: 8px 0; font-size: 11px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--text-dim); }
+.sch-advanced[open] > summary{ border-bottom: 1px solid var(--border); margin-bottom: 8px; }
+.sch-check-toggle{ display: inline-flex; align-items: center; gap: 6px; font-size: 11.5px; color: var(--text-dim); cursor: pointer; user-select: none; margin-bottom: 10px; }
+
+.sch-submit-row{ display: flex; gap: 8px; margin-top: 4px; }
+
+/* ---- job detail ----------------------------------------------------------- */
+
+.sch-detail__title{ font-size: 14px; color: var(--text); margin-bottom: 4px; word-break: break-word; }
+.sch-detail__row{ display: flex; gap: 8px; font-size: 12px; padding: 4px 0; border-bottom: 1px solid var(--border); }
+.sch-detail__row dt{ color: var(--text-dimmer); flex: 0 0 110px; }
+.sch-detail__row dd{ color: var(--text); flex: 1; min-width: 0; word-break: break-word; margin: 0; }
+.sch-detail__prompt{
+  background: var(--bg-panel-2); border: 1px solid var(--border); border-radius: 4px;
+  padding: 8px 10px; font-family: var(--font-mono); font-size: 11.5px; white-space: pre-wrap;
+  word-break: break-word; margin-top: 8px; max-height: 220px; overflow-y: auto;
+}
+.sch-detail__actions{ display: flex; flex-wrap: wrap; gap: 6px; margin-top: 12px; }
+.sch-detail__error{ color: var(--red); font-size: 11.5px; margin-top: 8px; }
+.sch-detail__note{
+  margin-top: 10px; padding: 8px 10px; border-radius: 4px; font-size: 11.5px; line-height: 1.5;
+  border: 1px solid var(--accent-secondary); color: var(--accent-secondary);
+  background: color-mix(in srgb, var(--accent-secondary) 8%, transparent);
+}
+
+/* ---- right: Overview pane --------------------------------------------------- */
+
+.sch-side{ overflow-y: auto; padding: 12px 14px; display: flex; flex-direction: column; gap: 16px; }
+.sch-side h4{
+  font-size: 10.5px; letter-spacing: 0.14em; text-transform: uppercase;
+  color: var(--text-dimmer); margin-bottom: 8px; font-weight: 600;
+}
+.sch-side-counts{ display: flex; flex-direction: column; gap: 5px; }
+.sch-side-count-row{ display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--text-dim); }
+.sch-side-count-row__label{ flex: 1; text-transform: capitalize; }
+.sch-side-count-row__n{ font-family: var(--font-mono); color: var(--text); }
+.sch-side-count-row.is-flag .sch-side-count-row__n{ color: var(--orange); }
+.sch-nextup{ display: flex; flex-direction: column; gap: 5px; }
+.sch-nextup-row{
+  display: block; width: 100%; text-align: left; cursor: pointer; font: inherit; color: inherit;
+  border: 1px solid var(--border); border-radius: 2px; background: var(--bg-panel-2);
+  padding: 5px 7px; font-size: 11px;
+}
+.sch-nextup-row:hover{ border-color: var(--accent-soft); }
+.sch-nextup-row__title{ color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sch-nextup-row__in{ color: var(--text-dimmer); font-family: var(--font-mono); font-size: 10px; }
+.sch-events{ display: flex; flex-direction: column; gap: 4px; font-size: 11px; color: var(--text-dim); }
+.sch-events-empty, .sch-side-empty{ color: var(--text-dimmer); font-size: 11.5px; }
+.sch-last-tick{ font-size: 10.5px; color: var(--text-dimmer); font-family: var(--font-mono); }
+
+@media (max-width: 1080px){
+  .sch-body{ grid-template-columns: 260px minmax(0, 1fr) 260px; }
+}
+/* Same approach test-checklist.css's own 900px rule uses: a 3-pane grid
+   reads badly squeezed into one narrow column, so it becomes a single
+   scrolling stack instead (list pane keeps a fixed height; detail and
+   overview just grow) rather than hiding a pane outright. */
+@media (max-width: 900px){
+  .sch-body{ grid-template-columns: 1fr; grid-template-rows: 340px max-content max-content; overflow-y: auto; }
+  .sch-body > .debug-pane{ border-left: none !important; border-right: none; border-bottom: 1px solid var(--border); overflow: visible; }
+  .sch-body > .debug-pane:first-child{ overflow: hidden; }
+  .sch-mid, .sch-side{ flex: none; overflow: visible; }
+}

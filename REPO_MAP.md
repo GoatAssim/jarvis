@@ -168,6 +168,18 @@ web/
                                  add/rename/remove one. A tool module can carry its
                                  own entry instead (TEST_CHECKLIST) - see checklist_schema.py
     public/test-checklist.css    its styling (reuses the debug-* panel chrome)
+    public/daemons.js/.css       Menu -> Daemons (Part H.1 rework: own file,
+                                 same debug-*/menu-* chrome as Test Checklist)
+    public/backlog.js/.css       Menu -> Backlog (Part H.1 rework: search,
+                                 project filter, Overview pane, drag-and-drop
+                                 between kanban columns)
+    public/logsearch.js/.css     Menu -> Log Search (Part H.1 rework: live
+                                 search, query highlighting, results/detail
+                                 two-pane layout, jump-to-Ask/Daemons/Schedules)
+    public/schedules.js/.css     Menu -> Scheduled (Part H.2 rework: full
+                                 create form onto remind_me/notify_me/
+                                 schedule_task/schedule_watch via /api/tools/run,
+                                 kind/status filters, Overview pane)
 ```
 
 ---
