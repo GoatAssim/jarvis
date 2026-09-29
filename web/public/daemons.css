@@ -1,200 +1,595 @@
 /* ============================================================================
  * daemons.css — Menu → Daemons.
  *
- * Part H.1 rework: brings this panel up to the same bar as Test Checklist
- * (see test-checklist.css's own header for the shared reasoning). Same
- * approach — own file, driven off the existing :root tokens, sits inside the
- * shared .debug-overlay/.debug-panel chrome so frame/corners/glow/scroll-lock
- * all still come free from style.css.
+ * H.1.5 rework (rev. 2026-09-28): full rebuild to the Test Checklist bar (see
+ * that panel's own test-checklist.css header for the shared reasoning). Same
+ * approach — own file, driven entirely off the existing :root tokens, sits
+ * inside the shared .debug-overlay/.debug-panel chrome so frame, corners,
+ * glow and scroll-lock all still come free from style.css.
  *
- * .daemon-row/.daemon-row__*/.daemon-actions/.daemon-dot*/.daemon-stdin-toggle
- * moved here wholesale from style.css — they were already daemon-exclusive
- * selectors, just declared in the shared file. .daemon-console (the base
- * monospace pane look) stays in style.css: the Subagents panel reuses it
- * verbatim for its own history/result panes, so it's genuinely shared, not
- * daemon-only. Everything in this file is prefixed `dmn-` and is new with
- * this rework.
+ * LAYOUT
+ * ------
+ * Three columns, same grid Test Checklist uses (.tc-body):
+ *   dmn-left    services — search, state chips, kind select, grouped list
+ *   dmn-main    the selected service — summary/alerts/actions, then a
+ *               Console/Details tab strip. In edit mode this column is
+ *               entirely replaced by the .dmn-form editor.
+ *   dmn-side    overview — ring, by-state legend, needs attention, coming
+ *               up, by kind, actions, guide (mirrors .tc-side exactly)
+ *
+ * `[data-state]` is the one place a status maps to a colour (--dmn-c);
+ * everything else — dots, bars, tags, alerts — reads that variable, the same
+ * pattern test-checklist.css uses for verdicts. `--red`/`--green` stay fixed
+ * across skins on purpose (style.css), so "crashed"/"running" read the same
+ * whichever skin is active.
+ *
+ * `.daemon-console`'s old shared base (style.css) is untouched — the
+ * Subagents panel still uses it for its own history/result panes. This
+ * file's `.dmn-console` is a full, independent replacement rather than a
+ * variant of it: the console here needs line-level structure (classed
+ * .dmn-line rows, a sticky toolbar, a jump-to-latest button) a flat <pre>
+ * can't give.
  * ========================================================================= */
 
-/* ---- list rows (moved from style.css, unchanged) ------------------------ */
+[data-state="running"]{   --dmn-c: var(--green); }
+[data-state="starting"]{  --dmn-c: var(--accent-secondary); }
+[data-state="stopped"]{   --dmn-c: var(--text-dimmer); }
+[data-state="crashed"]{   --dmn-c: var(--red); }
+[data-state="scheduled"]{ --dmn-c: var(--accent-soft); }
 
-.daemon-row{
-  display: flex; align-items: flex-start; gap: 10px;
-  border: 1px solid var(--border);
-  border-left: 2px solid var(--border-strong);
-  border-radius: 2px;
-  background: var(--bg-panel-2);
-  transition: border-color 0.15s, background 0.15s, transform 0.15s;
+.dmn-body{ grid-template-columns: 300px minmax(0, 1fr) 320px; }
+.dmn-body > .debug-pane:first-child{ border-right: 1px solid var(--border); }
+.dmn-body > .debug-pane:last-child{ border-right: none; border-left: 1px solid var(--border); }
+
+.dmn-head-actions{ display: flex; gap: 8px; margin-left: auto; align-items: center; }
+.dmn-head-actions + .modal__close{ margin-left: 0 !important; }
+
+.dmn-live{
+  display: inline-flex; align-items: center; gap: 5px;
+  background: transparent; color: var(--green);
+  border: 1px solid var(--border); border-radius: 2px;
+  padding: 4px 9px; font-size: 10.5px; letter-spacing: 0.05em; text-transform: uppercase;
+  cursor: pointer; font-family: var(--font-mono); white-space: nowrap; transition: border-color .15s, color .15s, background .15s;
 }
-.daemon-row:hover{
-  background: var(--bg-panel-2);
-  border-color: var(--accent-soft);
-  border-left-color: var(--accent);
-  transform: translateX(2px);
+.dmn-live:hover{ border-color: var(--accent-soft); }
+.dmn-live.is-paused{ color: var(--text-dimmer); }
+
+/* ------------------------------------------------------------------ left */
+
+.dmn-filters{ padding: 0 12px 10px; display: flex; flex-direction: column; gap: 8px; }
+.dmn-chips{ display: flex; flex-wrap: wrap; gap: 5px; }
+.dmn-chip{
+  display: inline-flex; align-items: center; gap: 5px;
+  background: transparent; color: var(--text-dim);
+  border: 1px solid var(--border); border-radius: 2px;
+  padding: 3px 7px; font-size: 10.5px; letter-spacing: 0.06em; text-transform: uppercase;
+  cursor: pointer; transition: border-color .15s, color .15s, background .15s;
 }
-.daemon-row.is-selected{
-  border-color: var(--accent);
-  border-left-color: var(--accent);
+.dmn-chip:hover{ border-color: var(--accent-soft); color: var(--text); }
+.dmn-chip.is-active{
+  border-color: var(--dmn-c, var(--accent)); color: var(--dmn-c, var(--accent));
+  background: color-mix(in srgb, var(--dmn-c, var(--accent)) 10%, transparent);
+}
+.dmn-chip__dot{ width: 6px; height: 6px; border-radius: 50%; background: var(--dmn-c, var(--text-dimmer)); flex-shrink: 0; }
+.dmn-chip__n{ font-family: var(--font-mono); font-size: 10px; opacity: .75; }
+/* the "Attention" chip carries no backend status of its own — orange reads
+   as "needs a look" the same way it does on a card's crash-loop tag */
+.dmn-chip[data-state="attention"]{ --dmn-c: var(--orange); }
+
+.dmn-select{
+  width: 100%; padding: 5px 7px; background: var(--bg-panel-2); color: var(--text);
+  border: 1px solid var(--border); border-radius: 4px; font-size: 11.5px;
+}
+
+.dmn-list{ flex: 1; min-height: 0; overflow-y: auto; padding: 6px 8px 12px; }
+.dmn-group{ margin-top: 6px; }
+.dmn-group__head{
+  width: 100%; display: grid; grid-template-columns: 14px 1fr auto; align-items: center; gap: 6px;
+  padding: 7px 6px 5px; background: var(--bg-1); border: none; cursor: pointer; text-align: left;
+  color: var(--text-dim); position: sticky; top: -6px; z-index: 1;
+}
+.dmn-group__caret{
+  width: 7px; height: 7px; border-right: 1.5px solid currentColor; border-bottom: 1.5px solid currentColor;
+  transform: rotate(-45deg); transition: transform .15s; justify-self: center;
+}
+.dmn-group:not(.is-collapsed) .dmn-group__caret{ transform: rotate(45deg); }
+.dmn-group__label{ font-size: 11px; letter-spacing: .14em; text-transform: uppercase; font-weight: 600; }
+.dmn-group__count{ font-family: var(--font-mono); font-size: 10.5px; color: var(--text-dimmer); }
+.dmn-group__bar{ grid-column: 2 / -1; height: 3px; }
+.dmn-group.is-collapsed .dmn-card{ display: none; }
+
+.dmn-card{
+  display: block; width: 100%; text-align: left; cursor: pointer;
+  border: 1px solid var(--border); border-left: 2px solid var(--dmn-c, var(--border-strong));
+  border-radius: 2px; background: var(--bg-panel-2);
+  padding: 8px 10px; margin-top: 5px; color: inherit; font: inherit;
+  transition: border-color .15s, background .15s, transform .15s;
+}
+.dmn-card:hover{ border-color: var(--accent-soft); border-left-color: var(--dmn-c, var(--accent)); transform: translateX(2px); }
+.dmn-card.is-active{
+  border-color: var(--accent); border-left-color: var(--dmn-c, var(--accent));
   background: linear-gradient(90deg, color-mix(in srgb, var(--accent) 12%, transparent), var(--bg-panel-2) 70%);
 }
-/* H.1: focus needs its own visible state, separate from is-selected — a
-   keyboard user arrowing through the list is not the same thing as having
-   opened a console, and relying on :focus-visible alone would be lost the
-   moment the row is re-rendered (a new element, no stored focus). */
-.daemon-row.is-focused{ outline: 1px dashed var(--accent-soft); outline-offset: -1px; }
-.daemon-row__main{ display: flex; gap: 10px; flex: 1; min-width: 0; }
-.daemon-row__text{ min-width: 0; flex: 1; }
-.daemon-row__cmd{
-  font-family: var(--font-mono);
-  font-size: 11px;
-  color: var(--text-dimmer);
-  margin-top: 3px;
-  overflow: hidden;
-  text-overflow: ellipsis;
+.dmn-card:focus-visible{ outline: 1px solid var(--accent); outline-offset: 1px; }
+.dmn-card__row{ display: flex; align-items: baseline; gap: 8px; }
+.dmn-card__name{ font-family: var(--font-mono); font-size: 12.5px; color: var(--text); word-break: break-word; flex: 1; min-width: 0; }
+.dmn-card__state{ font-size: 10.5px; color: var(--dmn-c, var(--text-dimmer)); flex-shrink: 0; white-space: nowrap; }
+.dmn-card__cmd{
+  font-family: var(--font-mono); font-size: 11px; color: var(--text-dimmer); margin-top: 3px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.dmn-card__meta{ display: flex; gap: 6px; align-items: center; margin-top: 5px; flex-wrap: wrap; }
+.dmn-card--empty{ border-style: dashed; opacity: .9; cursor: pointer; }
+.dmn-card--empty .dmn-card__cmd{ white-space: normal; }
+
+/* Colour alone never carries the meaning — the row's own text says the
+   state too (see .dmn-card__state / STATE.label in daemons.js). */
+.dmn-dot{
+  width: 9px; height: 9px; border-radius: 50%; flex: 0 0 auto; margin-top: 3px;
+  background: var(--dmn-c, var(--text-dimmer));
+}
+[data-state="running"] .dmn-dot{ box-shadow: 0 0 8px var(--dmn-c); animation: dmn-pulse 2.4s ease-in-out infinite; }
+[data-state="starting"] .dmn-dot{ animation: dmn-pulse 1.2s ease-in-out infinite; }
+[data-state="stopped"] .dmn-dot{ opacity: .55; }
+@keyframes dmn-pulse{ 0%,100%{ opacity: 1; } 50%{ opacity: .45; } }
+@media (prefers-reduced-motion: reduce){ .dmn-dot{ animation: none !important; } }
+
+.dmn-uptime{ font-family: var(--font-mono); }
+
+.dmn-tag{
+  font-family: var(--font-mono); font-size: 9.5px; letter-spacing: .05em; text-transform: uppercase;
+  color: var(--text-dimmer); border: 1px solid var(--border); border-radius: 2px; padding: 0 5px; line-height: 15px;
   white-space: nowrap;
 }
-.daemon-actions{ display: flex; flex-wrap: wrap; gap: 6px; }
+.dmn-tag--warn{ color: var(--accent-secondary); border-color: rgba(var(--accent-secondary-rgb), .35); }
+.dmn-tag--bad{ color: var(--red); border-color: rgba(255,92,108,.4); }
+.dmn-tag--info{ color: var(--accent-soft); border-color: var(--accent-dim); }
 
-/* Three states, one glyph. Colour alone never carries the meaning — the row's
-   text says "running"/"crashed" too. */
-.daemon-dot{
-  width: 9px; height: 9px; border-radius: 50%;
-  background: var(--text-dimmer);
-  flex: 0 0 auto;
-  margin-top: 5px;
-}
-.daemon-dot--up{
-  background: var(--status-online, #4ade80);
-  box-shadow: 0 0 8px var(--status-online, #4ade80);
-  animation: pulse 2.4s ease-in-out infinite;
-}
-.daemon-dot--bad{ background: #f87171; box-shadow: 0 0 8px rgba(248,113,113,0.6); }
-.daemon-dot--wait{ background: var(--accent-secondary); }
-/* New with H.1: an explicit stopped look, rather than falling through to the
-   bare default dot (which reads more like "unknown" than "off, on purpose"). */
-.daemon-dot--stopped{ background: var(--text-dimmer); opacity: 0.6; }
-/* H.1.3: "restarting" (crash-loop backoff) had no dot state at all before —
-   it fell through to the bare default dot, which is exactly the state that
-   also had no working Stop control (see daemons.js's isStoppable()). Reuses
-   --wait's "in transition, not a steady state" colour rather than a new one. */
-.daemon-dot--restarting{ background: var(--accent-secondary); animation: pulse 1.2s ease-in-out infinite; }
+/* stacked state bar — used by groups, the overview and the restart meter */
+.dmn-bar{ display: flex; height: 100%; width: 100%; background: var(--bg-raised); border-radius: 2px; overflow: hidden; }
+.dmn-bar > i{ display: block; height: 100%; background: var(--dmn-c); transition: width .25s ease; }
 
-/* ---- H.1.4: "Add your own" — its own editor, not a bare inline row ------
-   Same idea as the Custom Tools panel's own editor pane: a real, labeled
-   form for the fields daemon-add already accepted on the backend (restart
-   policy, stop signal/timeout, env vars, autostart, shell, description) —
-   the old inline row only ever exposed 4 of them. */
-.dmn-add-editor{
-  display: flex; flex-direction: column; gap: 8px;
-  padding: 10px; margin-top: 4px;
-  border: 1px solid var(--border); border-radius: 3px;
-  background: var(--bg-panel-2);
-}
-.dmn-add-editor__row{ display: flex; gap: 8px; flex-wrap: wrap; }
-.dmn-add-editor__row > *{ flex: 1 1 140px; min-width: 0; }
-.dmn-add-editor__wide{ width: 100%; }
-.dmn-add-editor__desc{
-  width: 100%; resize: vertical; font-family: inherit; font-size: 12px;
-  background: var(--bg-panel); border: 1px solid var(--border); border-radius: 2px;
-  color: var(--text); padding: 6px 8px;
-}
-.dmn-add-editor__head{
-  font-size: 10.5px; letter-spacing: 0.05em; text-transform: uppercase;
-  color: var(--text-dimmer); margin-top: 4px;
-}
-.dmn-add-editor__env{ display: flex; flex-direction: column; gap: 6px; }
-.dmn-env-row{ display: flex; gap: 6px; }
-.dmn-env-row input{ flex: 1 1 auto; min-width: 0; }
-.dmn-env-row button{ flex: 0 0 auto; }
+.dmn-empty-list{ padding: 30px 16px; text-align: center; color: var(--text-dimmer); font-size: 12.5px; display: flex; flex-direction: column; gap: 10px; align-items: center; }
 
-.daemon-stdin-toggle{
-  display: flex; align-items: center; gap: 6px;
-  font-size: 11.5px; color: var(--text-dimmer);
-}
-.daemon-input-row input{ font-family: var(--font-mono); }
+/* ------------------------------------------------------------------ main */
 
-/* ---- H.1: crash-loop badge, surfaced in the row itself ------------------
-   Data is already there (daemons.status()'s `restarts`, the registry's own
-   `max_restarts`) — this only needed a place to show it. Two severities:
-   "has restarted recently" (informational) vs "about to hit/at the restart
-   ceiling" (the thing a tester actually needs to notice without opening the
-   console to find out). */
-.dmn-badge{
-  display: inline-flex; align-items: center; gap: 4px;
-  font-size: 10px; letter-spacing: 0.04em; text-transform: uppercase;
-  padding: 2px 6px; border-radius: 3px; flex: 0 0 auto;
-  border: 1px solid var(--border-strong); color: var(--text-dimmer);
-  white-space: nowrap;
+.dmn-empty{
+  height: 100%; display: flex; flex-direction: column; align-items: center; justify-content: center;
+  gap: 10px; padding: 40px 24px; text-align: center; color: var(--text-dimmer); font-size: 13px; line-height: 1.7;
 }
-.dmn-badge--looping{
-  color: var(--accent-secondary); border-color: rgba(var(--accent-secondary-rgb), 0.4);
-  background: rgba(var(--accent-secondary-rgb), 0.08);
-}
-.dmn-badge--maxed{
-  color: var(--red); border-color: rgba(255, 92, 108, 0.4);
-  background: rgba(255, 92, 108, 0.08);
-}
-.daemon-row__badges{ display: flex; gap: 6px; margin-top: 4px; flex-wrap: wrap; }
+.dmn-empty__big{ font-family: var(--font-display); font-size: 15px; color: var(--text-dim); letter-spacing: .04em; }
 
-/* ---- H.1: console re-done as classed lines, not a flat <pre> ------------
-   #daemon-console is a scrollable <div> now (was <pre>); each output line is
-   its own .dmn-line, coloured by where it came from. See daemons.js's
-   classifyLine() — stdout/stderr are two real OS pipes as of this rework
-   (daemons.py's run_supervisor), so this is a real distinction, not a
-   guess. */
-.dmn-console-toolbar{
-  display: flex; align-items: center; gap: 6px; flex-wrap: wrap;
-  padding: 6px 14px; border-bottom: 1px solid var(--border);
+.dmn-detail{ flex: 1; min-height: 0; display: flex; flex-direction: column; }
+.dmn-summary{ padding: 16px 18px 4px; flex-shrink: 0; }
+
+.dmn-hero{ display: flex; gap: 12px; align-items: flex-start; }
+.dmn-hero__dot{
+  width: 11px; height: 11px; border-radius: 50%; margin-top: 6px; flex: 0 0 auto;
+  background: var(--dmn-c, var(--text-dimmer));
 }
-.dmn-chip{
+[data-state="running"] .dmn-hero__dot{ box-shadow: 0 0 calc(10px * var(--jui-glow-scale, 1)) var(--dmn-c); animation: dmn-pulse 2.4s ease-in-out infinite; }
+[data-state="starting"] .dmn-hero__dot{ animation: dmn-pulse 1.2s ease-in-out infinite; }
+.dmn-hero__text{ min-width: 0; flex: 1; }
+
+.dmn-title-row{ display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.dmn-title{ font-family: var(--font-mono); font-size: 17px; color: var(--accent-soft); word-break: break-word; }
+.dmn-pill{
+  font-family: var(--font-mono); font-size: 10.5px; letter-spacing: .05em; text-transform: uppercase;
+  color: var(--dmn-c); border: 1px solid var(--dmn-c); border-radius: 20px; padding: 2px 9px;
+  background: color-mix(in srgb, var(--dmn-c) 12%, transparent);
+}
+.dmn-sub{ font-family: var(--font-mono); font-size: 11.5px; color: var(--text-dimmer); margin-top: 4px; }
+.dmn-sub code{ color: var(--text-dim); }
+.dmn-does{ font-size: 13px; line-height: 1.55; color: var(--text-dim); margin-top: 7px; }
+.dmn-badges{ display: flex; flex-wrap: wrap; gap: 6px; margin-top: 9px; }
+
+.dmn-alerts{ display: flex; flex-direction: column; gap: 8px; margin-top: 12px; }
+.dmn-alert{
+  border: 1px solid var(--border); border-left: 2px solid var(--accent-secondary);
+  background: color-mix(in srgb, var(--accent-secondary) 6%, transparent);
+  padding: 9px 12px; border-radius: 2px;
+}
+.dmn-alert--bad{ border-left-color: var(--red); background: color-mix(in srgb, var(--red) 7%, transparent); }
+.dmn-alert--info{ border-left-color: var(--accent-soft); background: color-mix(in srgb, var(--accent-soft) 6%, transparent); }
+.dmn-alert__label{ font-size: 10.5px; letter-spacing: .1em; text-transform: uppercase; color: var(--accent-secondary); }
+.dmn-alert--bad .dmn-alert__label{ color: var(--red); }
+.dmn-alert--info .dmn-alert__label{ color: var(--accent-soft); }
+.dmn-alert__text{ font-size: 12.5px; color: var(--text-dim); margin-top: 3px; line-height: 1.5; }
+.dmn-alert__btns{ display: flex; gap: 6px; margin-top: 8px; flex-wrap: wrap; }
+
+.dmn-actions{ display: flex; gap: 7px; margin-top: 13px; flex-wrap: wrap; }
+.dmn-act{
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 7px 11px; background: var(--bg-panel-2); color: var(--text-dim);
+  border: 1px solid var(--border); border-radius: 2px; cursor: pointer; font: inherit; font-size: 12px;
+  transition: border-color .15s, background .15s, color .15s;
+}
+.dmn-act:hover{ border-color: var(--accent-soft); color: var(--text); }
+.dmn-act:disabled{ opacity: .45; cursor: not-allowed; }
+.dmn-act.is-primary{ border-color: var(--accent); color: var(--accent-soft); background: color-mix(in srgb, var(--accent) 10%, var(--bg-panel-2)); }
+.dmn-act--danger{ color: var(--red); border-color: rgba(255,92,108,.35); }
+.dmn-act--danger:hover{ border-color: var(--red); }
+.dmn-act__glyph{ font-size: 11px; }
+.dmn-act__key{ font-family: var(--font-mono); font-size: 9.5px; color: var(--text-dimmer); border: 1px solid var(--border-strong); border-radius: 3px; padding: 0 4px; }
+.dmn-act:disabled .dmn-act__key{ display: none; }
+
+/* tabs */
+.dmn-tabs{ display: flex; gap: 2px; padding: 12px 18px 0; border-bottom: 1px solid var(--border); flex-shrink: 0; }
+.dmn-tab{
+  background: transparent; border: none; border-bottom: 2px solid transparent; cursor: pointer;
+  padding: 8px 4px 9px; margin-right: 18px; font: inherit; font-size: 11.5px; letter-spacing: .1em;
+  text-transform: uppercase; color: var(--text-dimmer); display: inline-flex; align-items: center; gap: 6px;
+  transition: color .15s, border-color .15s;
+}
+.dmn-tab:hover{ color: var(--text-dim); }
+.dmn-tab.is-active{ color: var(--accent-soft); border-bottom-color: var(--accent); }
+.dmn-tab__n{
+  font-family: var(--font-mono); font-size: 10px; color: var(--red); border: 1px solid rgba(255,92,108,.4);
+  border-radius: 8px; padding: 0 5px; line-height: 15px;
+}
+
+.dmn-tabpanel{ flex: 1; min-height: 0; display: flex; flex-direction: column; }
+.dmn-tabpanel[hidden]{ display: none; }
+
+/* the middle pane's two children — see index.html's #dmn-main/#dmn-foot —
+   sit directly in a plain .debug-pane (flex column, min-height:0,
+   overflow:hidden; style.css). #dmn-main has to claim the pane's remaining
+   height itself or .dmn-detail/.dmn-form/.dmn-empty's own height:100%-style
+   flex children (built by daemons.js) have nothing real to fill, and any tab
+   or editor content past the fold silently overflows the whole panel instead
+   of scrolling inside its own pane — exactly what happened before this rule
+   existed. */
+#dmn-main{ flex: 1; min-height: 0; display: flex; flex-direction: column; }
+
+/* -------------------------------------------------------------- console */
+
+.dmn-cbar{
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  padding: 8px 18px; border-bottom: 1px solid var(--border); flex-shrink: 0;
+}
+.dmn-cbar--2{ padding-top: 6px; }
+.dmn-cchips{ display: flex; gap: 5px; flex-wrap: wrap; }
+.dmn-cchip{
   display: inline-flex; align-items: center; gap: 5px;
   background: transparent; color: var(--text-dim);
   border: 1px solid var(--border); border-radius: 2px;
   padding: 3px 8px; font-size: 10.5px; letter-spacing: 0.05em; text-transform: uppercase;
   cursor: pointer; transition: border-color .15s, color .15s, background .15s;
 }
-.dmn-chip:hover{ border-color: var(--accent-soft); color: var(--text); }
-.dmn-chip.is-active{
-  border-color: var(--accent); color: var(--accent);
-  background: color-mix(in srgb, var(--accent) 10%, transparent);
-}
+.dmn-cchip:hover{ border-color: var(--accent-soft); color: var(--text); }
+.dmn-cchip.is-active{ border-color: var(--accent); color: var(--accent); background: color-mix(in srgb, var(--accent) 10%, transparent); }
+.dmn-cchip[data-state="crashed"]{ border-color: rgba(255,92,108,.4); color: var(--red); }
 .dmn-chip__n{ font-family: var(--font-mono); font-size: 10px; opacity: .75; }
-.dmn-console-toolbar .dmn-autoscroll{
-  margin-left: auto; display: flex; align-items: center; gap: 5px;
-  font-size: 10.5px; color: var(--text-dimmer);
+
+.dmn-csearch-wrap{ position: relative; flex: 1 1 160px; min-width: 120px; display: flex; align-items: center; }
+.dmn-csearch{
+  width: 100%; padding: 5px 8px; background: var(--bg-panel-2); color: var(--text);
+  border: 1px solid var(--border); border-radius: 3px; font-size: 11.5px;
+}
+.dmn-csearch:focus{ outline: none; border-color: var(--accent); }
+.dmn-csearch__n{ position: absolute; right: 8px; font-family: var(--font-mono); font-size: 10px; color: var(--text-dimmer); pointer-events: none; }
+
+.dmn-check{ display: inline-flex; align-items: center; gap: 5px; font-size: 10.5px; color: var(--text-dimmer); white-space: nowrap; cursor: pointer; }
+.dmn-check input{ accent-color: var(--accent); width: 13px; height: 13px; }
+
+.dmn-cwrap{ position: relative; flex: 1; min-height: 0; display: flex; }
+.dmn-console{
+  flex: 1; min-height: 0; overflow: auto; padding: 10px 14px;
+  background: var(--bg-1); font-family: var(--font-mono); font-size: 11.5px; line-height: 1.6; color: var(--text);
+}
+.dmn-console:focus{ outline: none; }
+.dmn-console:focus-visible{ box-shadow: inset 0 0 0 1px var(--accent-dim); }
+.dmn-line{ display: flex; gap: 10px; white-space: pre-wrap; word-break: break-word; padding: 0 2px; border-radius: 2px; }
+.dmn-line.is-match{ background: color-mix(in srgb, var(--accent) 8%, transparent); }
+.dmn-ln{ flex: 0 0 auto; width: 3.5ch; text-align: right; color: var(--text-dimmer); opacity: .55; user-select: none; }
+.dmn-tx{ flex: 1; min-width: 0; }
+.dmn-line--stdout .dmn-tx{ color: var(--text); }
+.dmn-line--stderr .dmn-tx{ color: var(--accent-secondary); }
+.dmn-line--crash .dmn-tx{ color: var(--red); }
+.dmn-line--meta .dmn-tx{ color: var(--accent-soft); font-style: italic; }
+.dmn-line--meta.is-bad .dmn-tx{ color: var(--red); font-style: normal; }
+.dmn-line--stdin .dmn-tx{ color: var(--accent); }
+.dmn-tx mark{ background: color-mix(in srgb, var(--accent) 55%, transparent); color: #fff; border-radius: 2px; padding: 0 1px; }
+
+.dmn-trace{
+  border-left: 2px solid var(--red); background: rgba(255,92,108,0.06); border-radius: 2px;
+  margin: 2px 0; padding: 2px 0;
+}
+.dmn-trace__head{
+  font-family: var(--font-mono); font-size: 9.5px; letter-spacing: .12em; text-transform: uppercase;
+  color: var(--red); opacity: .8; padding: 3px 2px 0 12px;
+}
+.dmn-trace .dmn-line{ padding-left: 4px; }
+
+.dmn-console-empty{ color: var(--text-dimmer); font-style: italic; padding: 4px 2px; }
+.dmn-console-empty.is-error{ color: var(--red); font-style: normal; }
+
+.dmn-jump{
+  position: absolute; bottom: 12px; right: 16px;
+  display: inline-flex; align-items: center; gap: 6px;
+  background: var(--bg-raised); color: var(--accent-soft); border: 1px solid var(--accent-dim);
+  border-radius: 20px; padding: 5px 12px; font-size: 11px; cursor: pointer;
+  box-shadow: 0 4px 16px rgba(0,0,0,.4);
+}
+.dmn-jump:hover{ border-color: var(--accent); }
+
+.dmn-stdin{ display: flex; gap: 8px; padding: 8px 18px; border-top: 1px solid var(--border); flex-shrink: 0; }
+.dmn-stdin__input{
+  flex: 1; padding: 6px 9px; background: var(--bg-panel-2); color: var(--text);
+  border: 1px solid var(--border); border-radius: 3px; font-family: var(--font-mono); font-size: 12px;
+}
+.dmn-stdin__input:focus{ outline: none; border-color: var(--accent); }
+
+.dmn-cmeta{
+  padding: 5px 18px; font-family: var(--font-mono); font-size: 10.5px; color: var(--text-dimmer);
+  border-top: 1px solid var(--border); flex-shrink: 0;
 }
 
-.dmn-line{ white-space: pre-wrap; word-break: break-word; }
-.dmn-line--stdout{ color: var(--text); }
-.dmn-line--stderr{ color: var(--accent-secondary); }
-.dmn-line--crash{
-  color: var(--red);
-  background: rgba(255, 92, 108, 0.06);
-  border-left: 2px solid var(--red);
-  padding-left: 6px; margin-left: -8px;
+.dmn-link{
+  background: none; border: none; padding: 0; color: var(--accent-soft); font: inherit; font-size: inherit;
+  cursor: pointer; text-decoration: underline; text-underline-offset: 2px;
 }
-.dmn-line--meta{ color: var(--accent-soft); font-style: italic; }
-.dmn-line--stdin{ color: var(--accent); }
-.dmn-line.is-match mark{ background: color-mix(in srgb, var(--accent) 55%, transparent); color: #fff; border-radius: 2px; }
+.dmn-link:hover{ color: var(--accent); }
 
-.dmn-console-empty{ color: var(--text-dimmer); font-style: italic; }
+/* -------------------------------------------------------------- details */
 
-/* Small, dismissable reminder of the shortcuts below the console — same
-   spirit as Test Checklist's own hint row, kept to one line. */
-.dmn-keyhint{
-  padding: 5px 14px; font-size: 10.5px; color: var(--text-dimmer);
-  border-top: 1px solid var(--border); font-family: var(--font-mono);
+.dmn-detail-scroll{ flex: 1; min-height: 0; overflow-y: auto; padding: 16px 18px 24px; }
+.dmn-block{ margin-top: 20px; }
+.dmn-block:first-child{ margin-top: 0; }
+.dmn-section-title{
+  font-size: 10.5px; letter-spacing: .16em; text-transform: uppercase; color: var(--text-dimmer);
+  margin: 0 0 9px; display: flex; align-items: center; gap: 8px;
 }
-.dmn-keyhint kbd{
-  font-family: var(--font-mono); border: 1px solid var(--border-strong);
-  border-radius: 3px; padding: 0 4px; margin: 0 2px; color: var(--text-dim);
+.dmn-section-title::after{ content: ""; flex: 1; height: 1px; background: var(--border); }
+.dmn-section-title__aside{ order: 3; font-family: var(--font-mono); letter-spacing: 0; text-transform: none; color: var(--text-dimmer); }
+
+.dmn-kvs{ display: grid; grid-template-columns: minmax(0,1fr) minmax(0,1fr); gap: 12px 16px; }
+.dmn-kv--wide{ grid-column: 1 / -1; }
+.dmn-kv__k{ font-size: 10px; letter-spacing: .08em; text-transform: uppercase; color: var(--text-dimmer); margin-bottom: 3px; }
+.dmn-kv__v{ font-size: 12.5px; color: var(--text); line-height: 1.5; word-break: break-word; }
+.dmn-kv__v.is-mono{ font-family: var(--font-mono); font-size: 12px; }
+.dmn-dim{ color: var(--text-dimmer); }
+
+.dmn-statetext{ display: inline-flex; align-items: center; gap: 6px; color: var(--dmn-c); }
+.dmn-statetext .dmn-dot{ margin-top: 0; }
+
+.dmn-meter{ height: 4px; border-radius: 2px; background: var(--bg-raised); overflow: hidden; margin-top: 6px; }
+.dmn-meter i{ display: block; height: 100%; background: var(--dmn-c); transition: width .25s ease; }
+
+.dmn-cmdrow{ display: flex; align-items: center; gap: 8px; }
+.dmn-cmd{
+  font-family: var(--font-mono); font-size: 12px; color: var(--text); background: var(--bg-panel-2);
+  border: 1px solid var(--border); border-radius: 2px; padding: 3px 7px; word-break: break-word; flex: 1; min-width: 0;
+}
+.dmn-cmd--block{ display: block; padding: 8px 10px; white-space: pre-wrap; }
+.dmn-copy{ flex-shrink: 0; }
+
+.dmn-env{ display: flex; flex-direction: column; gap: 4px; margin-bottom: 6px; }
+.dmn-env__row{ display: flex; align-items: center; gap: 6px; font-family: var(--font-mono); font-size: 11.5px; }
+.dmn-env__k{ color: var(--accent-soft); }
+.dmn-env__eq{ color: var(--text-dimmer); }
+.dmn-env__v{ color: var(--text-dim); word-break: break-all; }
+.dmn-env__v.is-masked{ letter-spacing: 2px; color: var(--text-dimmer); }
+.dmn-notes{ white-space: pre-wrap; line-height: 1.55; }
+
+.dmn-switches{ display: flex; flex-direction: column; gap: 4px; }
+.dmn-switch{ display: flex; align-items: center; gap: 10px; padding: 7px 2px; cursor: pointer; }
+.dmn-switch input{ position: absolute; opacity: 0; width: 1px; height: 1px; }
+.dmn-switch__track{
+  width: 32px; height: 18px; border-radius: 10px; background: var(--bg-raised); border: 1px solid var(--border-strong);
+  position: relative; flex-shrink: 0; transition: background .15s, border-color .15s;
+}
+.dmn-switch__track::after{
+  content: ""; position: absolute; top: 1px; left: 1px; width: 14px; height: 14px; border-radius: 50%;
+  background: var(--text-dimmer); transition: transform .15s, background .15s;
+}
+.dmn-switch input:checked + .dmn-switch__track{ background: color-mix(in srgb, var(--accent) 30%, var(--bg-raised)); border-color: var(--accent); }
+.dmn-switch input:checked + .dmn-switch__track::after{ transform: translateX(14px); background: var(--accent); }
+.dmn-switch input:focus-visible + .dmn-switch__track{ outline: 1px solid var(--accent); outline-offset: 2px; }
+.dmn-switch__text{ font-size: 12.5px; color: var(--text); display: flex; flex-direction: column; gap: 2px; }
+.dmn-switch__text small{ font-size: 11px; color: var(--text-dimmer); font-weight: 400; }
+
+.dmn-row{ display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.dmn-input{
+  padding: 7px 9px; background: var(--bg-panel-2); color: var(--text);
+  border: 1px solid var(--border); border-radius: 3px; font-size: 12.5px; font-family: inherit;
+}
+.dmn-input:focus{ outline: none; border-color: var(--accent); }
+#dmn-schedule-when{ flex: 1; min-width: 160px; }
+.dmn-note{ font-size: 11.5px; line-height: 1.55; color: var(--text-dimmer); margin-top: 7px; }
+.dmn-note.is-ok{ color: var(--green); }
+.dmn-note.is-warn{ color: var(--accent-secondary); }
+
+/* ---------------------------------------------------------------- editor */
+
+.dmn-editor{ height: 100%; display: flex; flex-direction: column; min-height: 0; font-size: 12.5px; }
+.dmn-editor-head{ padding: 16px 18px 12px; border-bottom: 1px solid var(--border); flex-shrink: 0; }
+.dmn-editor-body{ flex: 1; min-height: 0; overflow-y: auto; padding: 4px 18px 20px; }
+.dmn-form{ display: flex; flex-direction: column; gap: 20px; }
+.dmn-fsec{ padding-top: 2px; }
+.dmn-fsec + .dmn-fsec{ padding-top: 18px; border-top: 1px solid var(--border); }
+
+.dmn-grid{ display: grid; grid-template-columns: minmax(0,1fr) minmax(0,1fr); gap: 12px 14px; }
+.dmn-grid--3{ grid-template-columns: minmax(0,1fr) minmax(0,1fr); }
+.dmn-field{ display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+.dmn-field--wide{ grid-column: 1 / -1; }
+.dmn-field__label{ font-size: 10.5px; letter-spacing: .08em; text-transform: uppercase; color: var(--text-dimmer); }
+.dmn-field__hint{ font-size: 11px; color: var(--text-dimmer); line-height: 1.45; }
+.dmn-field__err{ font-size: 11px; color: var(--red); min-height: 0; line-height: 1.4; }
+.dmn-field.has-error .dmn-input,
+.dmn-env-row.has-error input{ border-color: var(--red); }
+
+.dmn-input.is-mono{ font-family: var(--font-mono); }
+.dmn-input{ line-height: 1.5; } /* a tighter line box clips the underscore in NAME_LIKE_THIS */
+.dmn-input.is-masked{ -webkit-text-security: disc; }
+textarea.dmn-input{ resize: vertical; min-height: 54px; line-height: 1.5; }
+.dmn-fixed{
+  font-family: var(--font-mono); font-size: 12.5px; color: var(--text-dim); background: var(--bg-panel-2);
+  border: 1px solid var(--border); border-radius: 3px; padding: 7px 9px; display: block;
+}
+.dmn-locked{
+  display: flex; align-items: center; gap: 6px; font-size: 11px; color: var(--text-dimmer); margin: 6px 0 12px;
 }
 
+.dmn-check--block{ display: flex; align-items: flex-start; gap: 8px; padding: 6px 0; cursor: pointer;
+  /* .dmn-check (the console's compact checkboxes) is nowrap; the editor's hint
+     sentences have to wrap, or they run off the edge of the panel. */
+  white-space: normal; min-width: 0; }
+.dmn-check--block input{ margin-top: 2px; accent-color: var(--accent); width: 14px; height: 14px; flex-shrink: 0; }
+.dmn-check--block > span{ display: flex; flex-direction: column; gap: 2px; font-size: 12.5px; color: var(--text); min-width: 0; }
+.dmn-check--block small{ font-size: 11px; color: var(--text-dimmer); }
+.dmn-check--block.is-locked{ opacity: .55; }
+
+.dmn-env-list{ display: flex; flex-direction: column; gap: 3px; margin-bottom: 8px; }
+.dmn-env-row{ display: grid; grid-template-columns: 1fr auto 1fr auto; gap: 6px; align-items: center; }
+.dmn-env-row .dmn-input{ width: 100%; }
+.dmn-env__eq{ color: var(--text-dimmer); font-family: var(--font-mono); }
+.dmn-env-row .dmn-field__err{ grid-column: 1 / -1; margin-top: -2px; }
+
+.dmn-radios{ display: grid; grid-template-columns: repeat(3, minmax(0,1fr)); gap: 8px; margin-bottom: 12px; }
+.dmn-radio{
+  display: flex; flex-direction: column; gap: 3px; text-align: left; padding: 9px 10px;
+  background: var(--bg-panel-2); border: 1px solid var(--border); border-radius: 2px; cursor: pointer; font: inherit;
+  transition: border-color .15s, background .15s;
+}
+.dmn-radio:hover{ border-color: var(--accent-soft); }
+.dmn-radio.is-active{ border-color: var(--accent); background: color-mix(in srgb, var(--accent) 10%, var(--bg-panel-2)); }
+.dmn-radio__label{ font-size: 12px; color: var(--text); font-weight: 600; }
+.dmn-radio__hint{ font-size: 10.5px; color: var(--text-dimmer); line-height: 1.4; }
+.dmn-grid--3.is-off{ opacity: .5; }
+
+.dmn-editor-foot{
+  display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap;
+  padding: 11px 18px; border-top: 1px solid var(--border); flex-shrink: 0; background: var(--bg-1);
+}
+.dmn-editor-status{ font-size: 11.5px; color: var(--text-dimmer); }
+.dmn-editor-status.is-bad{ color: var(--accent-secondary); }
+
+.dmn-banner{
+  border: 1px solid var(--border); border-left: 2px solid var(--accent-soft); border-radius: 2px;
+  padding: 9px 12px; font-size: 12px; line-height: 1.5; color: var(--text-dim); margin-bottom: 12px;
+}
+.dmn-banner--bad{ border-left-color: var(--red); background: color-mix(in srgb, var(--red) 6%, transparent); color: var(--text-dim); }
+.dmn-banner--bad b{ color: var(--red); }
+.dmn-banner--info{ border-left-color: var(--accent-soft); background: color-mix(in srgb, var(--accent-soft) 6%, transparent); }
+
+/* ---------------------------------------------------------------- foot */
+
+.dmn-foot{
+  display: flex; align-items: center; gap: 10px; flex-wrap: wrap; justify-content: flex-end;
+  padding: 9px 14px; border-top: 1px solid var(--border); flex-shrink: 0;
+  font-family: var(--font-mono); font-size: 10.5px; color: var(--text-dimmer);
+}
+.dmn-kbd{ display: inline-block; border: 1px solid var(--border-strong); border-bottom-width: 2px; border-radius: 3px; padding: 0 5px; margin: 0 2px; color: var(--text-dim); }
+
+/* ----------------------------------------------------------------- side */
+
+.dmn-side{ flex: 1; min-height: 0; overflow-y: auto; padding: 14px; display: flex; flex-direction: column; gap: 18px; }
+
+.dmn-ring-wrap{ display: flex; align-items: center; gap: 14px; }
+.dmn-ring{ width: 92px; height: 92px; flex-shrink: 0; transform: rotate(-90deg); }
+.dmn-ring__track{ fill: none; stroke: var(--bg-raised); stroke-width: 7; }
+.dmn-ring__val{
+  fill: none; stroke: var(--accent); stroke-width: 7; stroke-linecap: round;
+  transition: stroke-dashoffset .5s ease; filter: drop-shadow(0 0 calc(5px * var(--jui-glow-scale, 1)) var(--accent-glow));
+}
+.dmn-ring-label{ position: relative; width: 92px; height: 92px; flex-shrink: 0; }
+.dmn-ring-label .dmn-ring{ position: absolute; inset: 0; }
+.dmn-ring__pct{
+  position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center;
+  font-family: var(--font-display); font-size: 16px; font-weight: 700; color: var(--text); line-height: 1;
+}
+.dmn-ring__pct small{ font-family: var(--font-ui); font-size: 9.5px; letter-spacing: .12em; color: var(--text-dimmer); margin-top: 4px; font-weight: 500; text-transform: uppercase; }
+.dmn-ring-side{ flex: 1; min-width: 0; }
+.dmn-ring-side .dmn-bar{ height: 7px; margin-bottom: 8px; }
+.dmn-ring-side__line{ font-size: 12px; color: var(--text-dim); line-height: 1.5; }
+
+.dmn-legend{ display: flex; flex-direction: column; gap: 2px; }
+.dmn-legend__row{
+  display: grid; grid-template-columns: 14px 1fr auto; gap: 8px; align-items: center;
+  padding: 5px 7px; background: transparent; border: 1px solid transparent; border-radius: 2px;
+  color: var(--text-dim); font: inherit; font-size: 12.5px; cursor: pointer; text-align: left; width: 100%;
+  transition: background .15s, border-color .15s;
+}
+.dmn-legend__row:hover{ background: var(--bg-panel-2); border-color: var(--border); }
+.dmn-legend__row.is-active{ border-color: var(--dmn-c); background: color-mix(in srgb, var(--dmn-c) 9%, transparent); }
+.dmn-legend__glyph{ color: var(--dmn-c); text-align: center; }
+.dmn-legend__n{ font-family: var(--font-mono); font-size: 11.5px; color: var(--text); }
+.dmn-legend__hint{ grid-column: 2 / -1; font-size: 10.5px; color: var(--text-dimmer); margin-top: -3px; line-height: 1.35; }
+
+.dmn-attn{ display: flex; flex-direction: column; gap: 4px; }
+.dmn-attn__row{
+  display: grid; grid-template-columns: 14px minmax(0, 1fr); gap: 8px; align-items: baseline;
+  padding: 5px 7px; border: 1px solid var(--border); border-left: 2px solid var(--dmn-c); border-radius: 2px;
+  background: var(--bg-panel-2); cursor: pointer; text-align: left; font: inherit; color: inherit; width: 100%;
+}
+.dmn-attn__row:hover{ border-color: var(--accent-soft); border-left-color: var(--dmn-c); }
+.dmn-attn__glyph{ color: var(--dmn-c); text-align: center; font-size: 11px; }
+.dmn-attn__name{ font-family: var(--font-mono); font-size: 11.5px; color: var(--text); word-break: break-word; }
+.dmn-attn__note{ grid-column: 2; font-size: 11px; color: var(--text-dimmer); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dmn-more{ font-size: 11px; color: var(--text-dimmer); padding: 2px 7px; }
+
+.dmn-mini{ display: flex; flex-direction: column; gap: 8px; }
+.dmn-mini__row{
+  display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 2px 8px; align-items: center; cursor: pointer;
+  background: none; border: 1px solid transparent; border-radius: 2px; padding: 3px 5px; margin: -3px -5px;
+  color: inherit; font: inherit; text-align: left; transition: background .15s, border-color .15s;
+}
+.dmn-mini__row:hover{ background: var(--bg-panel-2); }
+.dmn-mini__row.is-active{ border-color: var(--accent-dim); background: color-mix(in srgb, var(--accent) 8%, transparent); }
+.dmn-mini__label{ font-size: 11.5px; color: var(--text-dim); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.dmn-mini__row:hover .dmn-mini__label{ color: var(--text); }
+.dmn-mini__n{ font-family: var(--font-mono); font-size: 10.5px; color: var(--text-dimmer); }
+.dmn-mini__bar{ grid-column: 1 / -1; height: 3px; }
+
+.dmn-actions-grid{ display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
+.dmn-actions-grid .btn{ justify-content: center; }
+.dmn-actions-grid .btn--wide{ grid-column: 1 / -1; }
+
+.dmn-guide{ border: 1px solid var(--border); border-radius: 2px; background: var(--bg-panel-2); }
+.dmn-guide > summary{
+  cursor: pointer; padding: 9px 12px; font-size: 10.5px; letter-spacing: .16em; text-transform: uppercase;
+  color: var(--text-dim); list-style: none; display: flex; align-items: center; gap: 8px;
+}
+.dmn-guide > summary::-webkit-details-marker{ display: none; }
+.dmn-guide > summary::before{
+  content: ""; width: 6px; height: 6px; border-right: 1.5px solid currentColor; border-bottom: 1.5px solid currentColor;
+  transform: rotate(-45deg); transition: transform .15s;
+}
+.dmn-guide[open] > summary::before{ transform: rotate(45deg); }
+.dmn-guide__body{ padding: 0 12px 12px; display: flex; flex-direction: column; gap: 9px; }
+.dmn-guide__body p{ font-size: 12px; line-height: 1.6; color: var(--text-dim); }
+.dmn-guide__body b{ color: var(--text); font-weight: 600; }
+
+/* --------------------------------------------------------------- narrow */
+
+@media (max-width: 1080px){
+  .dmn-body{ grid-template-columns: 240px minmax(0, 1fr) 260px; }
+  .dmn-grid, .dmn-grid--3{ grid-template-columns: minmax(0,1fr); }
+  .dmn-radios{ grid-template-columns: minmax(0,1fr); }
+  .dmn-kvs{ grid-template-columns: minmax(0,1fr); }
+}
 @media (max-width: 900px){
-  .daemon-actions{ width: 100%; } /* moved from style.css, unchanged */
+  /* style.css turns .debug-body into a scrolling one-column stack here; see
+     test-checklist.css's own comment for the same reasoning — the list keeps
+     its own fixed-height scroll, the rest of the panel just grows. */
+  .dmn-body{ grid-template-columns: 1fr; grid-template-rows: 420px max-content max-content; overflow-y: auto; }
+  .dmn-body > .debug-pane{ border-left: none !important; border-right: none; border-bottom: 1px solid var(--border); overflow: visible; }
+  .dmn-body > .debug-pane:first-child{ overflow: hidden; order: 0; }
+  .dmn-body > .debug-pane:not(:first-child){ min-height: max-content; }
+  .dmn-detail, .dmn-side, .dmn-tabpanel{ flex: none; overflow: visible; }
+  .dmn-cwrap{ min-height: 260px; }
+  .dmn-foot{ display: none; }
+  .dmn-actions-grid{ grid-template-columns: 1fr; }
 }
-
 @media (max-width: 760px){
-  .dmn-console-toolbar{ padding: 6px 10px; }
-  .dmn-keyhint{ display: none; } /* no keyboard on a touch layout */
+  .dmn-cbar{ padding: 8px 12px; }
+  .dmn-stdin, .dmn-cmeta{ padding-left: 12px; padding-right: 12px; }
+  .dmn-summary{ padding: 14px 14px 4px; }
+  .dmn-tabs{ padding: 10px 14px 0; }
+  .dmn-editor-head, .dmn-editor-body, .dmn-editor-foot{ padding-left: 14px; padding-right: 14px; }
+}
+@media (prefers-reduced-motion: reduce){
+  .dmn-card, .dmn-bar > i, .dmn-ring__val, .dmn-group__caret, .dmn-meter i,
+  .dmn-hero__dot, .dmn-radio, .dmn-switch__track, .dmn-switch__track::after{ transition: none !important; }
 }

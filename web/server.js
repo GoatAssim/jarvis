@@ -1361,17 +1361,50 @@ app.post("/api/daemons", requireJarvis, async (req, res) => {
   return parseJarvisJSON(result, res, "Couldn't add that daemon.");
 });
 
+// H.1.5 (Daemons rework): the editor's Edit form needs to change everything
+// Add can set — restart policy, stop signal/timeout, environment — which
+// daemon-edit has always accepted (see workspace_cli.py's daemon-edit) but
+// this route never forwarded, exactly the gap H.1.4's own notes flagged as
+// "worth its own follow-up pass." Mirrors the POST route's validation so a
+// bad value is rejected here with a clear error, not three layers down.
 app.patch("/api/daemons/:id", requireJarvis, async (req, res) => {
   const { id } = req.params;
   if (badDaemonId(id, res)) return;
   const args = ["daemon-edit", id];
-  const flags = { name: "--name", cwd: "--cwd", command: "--command", notes: "--notes" };
+  const flags = { name: "--name", description: "--description", cwd: "--cwd", command: "--command", notes: "--notes" };
   for (const [key, flag] of Object.entries(flags)) {
     if (typeof req.body?.[key] === "string") args.push(flag, req.body[key]);
   }
-  for (const key of ["enabled", "autostart", "stdin"]) {
+  for (const key of ["enabled", "autostart", "stdin", "shell"]) {
     if (typeof req.body?.[key] === "boolean") {
       args.push(`--${key}`, req.body[key] ? "true" : "false");
+    }
+  }
+  if (req.body?.restart !== undefined) {
+    const restart = String(req.body.restart);
+    if (!DAEMON_RESTART_POLICIES.has(restart)) {
+      return res.status(400).json({ error: "restart must be one of: never, on-failure, always." });
+    }
+    args.push("--restart", restart);
+  }
+  if (req.body?.restartDelay !== undefined) args.push("--restart-delay", String(req.body.restartDelay));
+  if (req.body?.maxRestarts !== undefined) args.push("--max-restarts", String(req.body.maxRestarts));
+  if (req.body?.stopSignal !== undefined) {
+    const stopSignal = String(req.body.stopSignal).toUpperCase();
+    if (!DAEMON_STOP_SIGNALS.has(stopSignal)) {
+      return res.status(400).json({ error: "stopSignal must be one of: TERM, INT, KILL." });
+    }
+    args.push("--stop-signal", stopSignal);
+  }
+  if (req.body?.stopTimeout !== undefined) args.push("--stop-timeout", String(req.body.stopTimeout));
+  if (Array.isArray(req.body?.env)) {
+    // envReplace: the editor always sends the full, current set of variables
+    // (it has to — a row the user deleted has to actually disappear), so it
+    // asks for a replace rather than daemon-edit's default merge-only "add
+    // or overwrite a key" behavior, which can never remove one.
+    if (req.body.envReplace) args.push("--env-replace");
+    for (const pair of req.body.env) {
+      if (typeof pair === "string" && pair.includes("=")) args.push("--env", pair);
     }
   }
   if (args.length === 2) return res.status(400).json({ error: "Nothing to change." });

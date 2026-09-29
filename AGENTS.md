@@ -134,13 +134,17 @@ adapter-loop tests are added. Set `min_round_interval_seconds` to `0` on a
 provider block, or pass `--timeout` generously, in the meantime.
 
 Front-end logic that's pure enough to run outside a browser gets a plain
-Node script instead, same no-framework convention (each slices the real
+Node script instead, same no-framework convention (the first two slice the real
 function straight out of `web/public/app.js` by source range, so it can't
-silently drift out of sync with a copy — `npm install marked` inside
-`tests/` first for the one that needs it to actually render Markdown):
+silently drift out of sync with a copy; `verify_daemons_panel.js` instead
+loads all of `web/public/daemons.js` into a bare `window` with `vm` and calls
+its exposed `JarvisDaemons._pure` helpers. `npm install marked` inside
+`tests/` first for `verify_math_rendering.js`, the one that needs it to
+actually render Markdown):
 
     node tests/verify_math_rendering.js
     node tests/verify_ask_trace_replay.js
+    node tests/verify_daemons_panel.js
 
 Two things that will waste your time if nobody tells you:
 

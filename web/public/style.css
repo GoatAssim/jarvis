@@ -2977,13 +2977,14 @@ body.layout--focus .btn--ask-jarvis{ display: none; }
 body.layout--focus .panel-menu--focus-only{ display: inline-flex; }
 
 /* --- daemons -----------------------------------------------------------
-   H.1 rework: .daemon-row/.daemon-row__*/.daemon-actions/.daemon-dot*/
-   .daemon-stdin-toggle/.daemon-input-row (all daemon-exclusive) moved to
-   their own daemons.css, the way test-checklist.css already does for that
-   panel — see that file's header. Only what's genuinely shared with other
-   panels stays here: .daemon-console's base monospace-pane look (the
-   Subagents panel reuses it verbatim for its own history/result panes) and
-   .daemon-log-picker's <select> chrome (shared with Backlog/Log search). */
+   H.1.5 rework: the Daemons panel itself (list, cards, console, editor —
+   everything with a `dmn-` prefix) now lives entirely in daemons.css, the
+   way test-checklist.css already does for that panel — see that file's own
+   header. Nothing daemon-panel-specific remains here. `.daemon-console` (no
+   `dmn-` prefix — a different, older class) stays because it's genuinely
+   shared: the Subagents panel reuses it verbatim for its own history/result
+   panes, which the Daemons panel's own `.dmn-console` (daemons.css) does not
+   touch. */
 
 .daemon-console{
   flex: 1 1 auto;
@@ -3001,7 +3002,6 @@ body.layout--focus .panel-menu--focus-only{ display: inline-flex; }
   word-break: break-word;
   min-height: 0;
 }
-.daemon-log-picker,
 .backlog-add select,
 .logsearch-controls select{
   margin-left: auto;
