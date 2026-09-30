@@ -489,7 +489,7 @@ async function main() {
     env.setSlash({ ok: true, code: 0, stdout: "line one\nline two", stderr: "", error: "" });
     await submit(env, "/policy");
     check("multi-line output opens a dialog with the text, not a toast", last(env)[0] === "dialog" && last(env)[2] === "line one\nline two" && last(env)[3] === "info");
-    env.setSlash({ ok: false, code: 2, stdout: "", stderr: "usage: jarvis calendar-add <when> <title>", error: "" });
+    env.setSlash({ ok: false, code: 2, stdout: "", stderr: "usage: jarvis calendar-add <name> <ics-url>", error: "" });
     await submit(env, "/calendar-add");
     check("a failing command shows its stderr and exit code in an error dialog", last(env)[0] === "dialog" && /exit 2/.test(last(env)[1]) && last(env)[3] === "error" && /usage:/.test(last(env)[2]));
     env.setSlash({ ok: true, code: 0, stdout: "", stderr: "", error: "" });
@@ -506,11 +506,14 @@ async function main() {
     env.setConfirm(true);
     r = await submit(env, "/mcp-call srv tool");
     check("confirming runs it with its args", r.status === "handled" && JSON.stringify(posts().slice(-1)[0]) === '{"name":"mcp-call","args":["srv","tool"]}');
-    for (const n of ["notify-send", "notify-clear", "sched-clear", "console-clear", "conv-delete"]) {
+    for (const [n, args] of [["notify-send", " c2"], ["notify-clear", " c2"], ["sched-clear", ""], ["conv-delete", " c2"]]) {
       env.calls.length = 0;
-      await submit(env, `/${n} c2`);
+      await submit(env, `/${n}${args}`);
       check(`/${n} (dangerous) confirms`, called(env, "confirm"));
     }
+    env.calls.length = 0;
+    await submit(env, "/console-clear c2");
+    check("/console-clear only marks the live console cleared (caution), so it runs without a dialog", !called(env, "confirm") && posts().slice(-1)[0].name === "console-clear");
     r = await submit(env, "/conv-delete c1");
     check("deleting the chat you have open is refused (the UI would be left pointing at nothing)", r.status === "blocked" && env.toasts.some((t) => /chat you have open/.test(t[1])));
     env.calls.length = 0;
@@ -530,6 +533,79 @@ async function main() {
 
     check("isComplete: an exact passthrough name is complete", env.S.isComplete("/doctor") && env.S.isComplete("/memory-recall some query"));
     check("MRU: a run is remembered by verb id", JSON.parse(env.store["jarvis.slash.mru"]).includes("v:doctor"));
+  }
+
+  // ---- passthrough: exit codes, argument caps, secrets (I-B13, I-B15..I-B17) ------------
+  {
+    const env = makeEnv();
+    const posts = () => env.fetches.filter((f) => f[0] === "POST" && f[1] === "/api/slash/run").map((f) => JSON.parse(f[2]));
+    const reg = JSON.parse(/\/\*JSON-BEGIN\*\/([\s\S]*)\/\*JSON-END\*\//.exec(fs.readFileSync(path.join(PUBLIC, "slash-commands-data.js"), "utf8"))[1]);
+
+    // I-B13: doctor's exit 1 is warnings, not a failure
+    env.setSlash({ ok: false, code: 1, stdout: "doctor: 2 warnings\n- a\n- b", stderr: "", error: "" });
+    await submit(env, "/doctor");
+    check("/doctor exit 1 opens a WARN dialog titled 'warnings', not 'failed'",
+      last(env)[0] === "dialog" && last(env)[3] === "warn" && /warnings \(exit 1\)/.test(last(env)[1]) && !/failed/.test(last(env)[1]), JSON.stringify(last(env)));
+    env.setSlash({ ok: false, code: 2, stdout: "doctor: broken", stderr: "", error: "" });
+    await submit(env, "/doctor");
+    check("/doctor exit 2 is still an error dialog, now named 'problems found'",
+      last(env)[0] === "dialog" && last(env)[3] === "error" && /problems found \(exit 2\)/.test(last(env)[1]), JSON.stringify(last(env)));
+    env.setSlash({ ok: false, code: 1, stdout: "", stderr: "", error: "" });
+    env.toasts.length = 0;
+    await submit(env, "/doctor");
+    check("/doctor exit 1 with no output is a warn toast", env.toasts.some((t) => t[0] === "warn" && /warnings \(exit 1\)/.test(t[1])), JSON.stringify(env.toasts));
+    env.setSlash({ ok: false, code: 1, stdout: "", stderr: "boom", error: "" });
+    await submit(env, "/policy");
+    check("an exit code the registry does NOT name is still a failure (only doctor is softened)",
+      last(env)[0] === "dialog" && last(env)[3] === "error" && /failed \(exit 1\)/.test(last(env)[1]), JSON.stringify(last(env)));
+    env.setSlash({ ok: true, code: 0, stdout: "healthy\nall checks passed", stderr: "", error: "" });
+    await submit(env, "/doctor");
+    check("/doctor exit 0 is an ordinary info dialog", last(env)[0] === "dialog" && last(env)[3] === "info" && last(env)[1] === "/doctor");
+
+    // I-B16: /subagent-keys is list-only and never takes a key
+    env.setSlash({ ok: true, code: 0, stdout: "{}", stderr: "", error: "" });
+    const before = posts().length;
+    env.toasts.length = 0;
+    let r = await submit(env, "/subagent-keys researcher openai sk-SECRET-123");
+    check("/subagent-keys with arguments is refused and NOTHING is posted", r.status === "blocked" && posts().length === before);
+    check("...the refusal says nothing was sent or saved", env.toasts.some((t) => t[0] === "warn" && /nothing you typed was sent or saved/.test(t[1])), JSON.stringify(env.toasts));
+    check("...and the key is NOT handed back in the composer", env.input.value === "/subagent-keys" && !/sk-SECRET/.test(env.input.value), env.input.value);
+    check("...nor does it appear in any toast", !env.toasts.some((t) => /sk-SECRET/.test(t[1])));
+    r = await submit(env, "/subagent-keys");
+    check("/subagent-keys with no arguments still lists the pools", r.status === "handled" && posts().slice(-1)[0].name === "subagent-keys" && posts().slice(-1)[0].args.length === 0);
+
+    // ...and the typo path: the second Enter must not send the keys to the model
+    env.toasts.length = 0;
+    r = await submit(env, "/subagent-keyz researcher openai sk-SECRET-123");
+    check("a typo'd /subagent-keys WITH arguments is blocked", r.status === "blocked");
+    check("...the typed keys are wiped from the composer", env.input.value === "/subagent-keyz" && !/sk-SECRET/.test(env.input.value), env.input.value);
+    check("...the toast explains why and does not echo the key", env.toasts.some((t) => /did you mean \/subagent-keys/.test(t[1]) && /secrets/.test(t[1])) && !env.toasts.some((t) => /sk-SECRET/.test(t[1])));
+    r = await submit(env, "/subagent-keyz researcher openai sk-SECRET-123");
+    check("...and pressing Enter again STILL does not send it (no Send anyway for secrets)", r.status === "blocked", r.status);
+    r = await submit(env, "//subagent-keys researcher openai sk-SECRET-123");
+    check("the explicit // escape hatch still sends a message (deliberate, one slash stripped)", r.status === "passthrough" && env.input.value === "/subagent-keys researcher openai sk-SECRET-123");
+    env.toasts.length = 0;
+    r = await submit(env, "/subagent-keyz");
+    check("a typo with NO arguments keeps the normal 'send anyway' flow", r.status === "blocked" && env.toasts.some((t) => /Press Enter again/.test(t[1])));
+    r = await submit(env, "/docter --deep");
+    check("a non-secret near-miss with arguments is unchanged (Send anyway still offered)", r.status === "blocked" && env.toasts.some((t) => /did you mean \/doctor/.test(t[1]) && /Press Enter again/.test(t[1])));
+
+    // I-B17: /sched-clear has no options
+    env.calls.length = 0;
+    const b2 = posts().length;
+    env.toasts.length = 0;
+    r = await submit(env, "/sched-clear --all");
+    check("/sched-clear --all is refused (the CLI never parsed --all) without asking or posting", r.status === "blocked" && !called(env, "confirm") && posts().length === b2);
+    check("...with its own hint, and the text is handed back", env.toasts.some((t) => /takes no options/.test(t[1])) && env.input.value === "/sched-clear --all");
+    r = await submit(env, "/sched-clear");
+    check("/sched-clear (no arguments) is still dangerous: it confirms, naming the exact command", called(env, "confirm") && env.calls.find((c) => c[0] === "confirm")[2] === "jarvis sched-clear" && r.status === "handled");
+
+    // registry-level facts the UI relies on
+    check("the confirm text for sched-clear says what it removes and what it keeps", /finished/.test(reg.passthrough["sched-clear"].summary) && /kept/.test(reg.passthrough["sched-clear"].summary));
+    check("/memory-ns is caution, since an argument switches the active namespace (I-B15)", reg.passthrough["memory-ns"].riskTier === "caution");
+    env.calls.length = 0;
+    await submit(env, "/memory-ns work");
+    check("/memory-ns <name> runs without a dialog and passes the namespace as argv", !called(env, "confirm") && JSON.stringify(posts().slice(-1)[0]) === '{"name":"memory-ns","args":["work"]}');
   }
 
   // ---- popover: new behaviours -----------------------------------------------------------------

@@ -1181,10 +1181,12 @@ const SLASH_PASSTHROUGH = (() => {
   try {
     const text = readFileSync(path.join(__dirname, "public", "slash-commands-data.js"), "utf8");
     const m = /\/\*JSON-BEGIN\*\/([\s\S]*)\/\*JSON-END\*\//.exec(text);
-    return new Set(Object.keys(JSON.parse(m[1]).passthrough || {}));
+    // name -> registry entry. The keys are the allowlist; an entry may also
+    // carry `maxArgs` (see the route below).
+    return new Map(Object.entries(JSON.parse(m[1]).passthrough || {}));
   } catch (e) {
     console.warn("slash passthrough allowlist unavailable:", e.message);
-    return new Set();   // fail closed: nothing runs
+    return new Map();   // fail closed: nothing runs
   }
 })();
 
@@ -1197,6 +1199,14 @@ app.post("/api/slash/run", requireJarvis, async (req, res) => {
   if (!Array.isArray(args) || args.length > 24
       || args.some((a) => typeof a !== "string" || a.length > 2000 || a.includes("\0"))) {
     return res.status(400).json({ error: "Arguments must be up to 24 short strings." });
+  }
+  // `maxArgs` in the registry caps a command's arguments: /subagent-keys is
+  // list-only from the palette (so API keys are never typed into a chat box)
+  // and /sched-clear has no options. Enforced here, not just in the client,
+  // because this route is the boundary; a hand-made request gets the same answer.
+  const maxArgs = SLASH_PASSTHROUGH.get(name)?.maxArgs;
+  if (Number.isInteger(maxArgs) && args.length > maxArgs) {
+    return res.status(400).json({ error: `/${name} takes ${maxArgs === 0 ? "no arguments" : "at most " + maxArgs} from the palette.` });
   }
   const result = await runJarvisOnce([name, ...args], 60000);
   return res.json({

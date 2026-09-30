@@ -1158,21 +1158,51 @@
   // registry's `passthrough` table. The server re-checks the name against the
   // same table and runs it as an argv array (no shell), so nothing typed here
   // can become anything but arguments to that one command.
-  function showResult(name, d) {
+  //
+  // A non-zero exit is not always "it failed": `jarvis doctor` exits 1 for
+  // warnings and 2 for something broken (I-B13). A registry entry can name
+  // such codes in `exitCodes: {"1": {label, level}}`. A code with a level
+  // other than "error" is shown as a result with that level, not as a
+  // failure; a code with level "error" is still a failure, just named.
+  function exitMeaning(entry, d) {
+    const codes = entry && entry.exitCodes;
+    if (!codes || d.code == null) return null;
+    const m = codes[String(d.code)];
+    return m && typeof m.label === "string" ? { label: m.label, level: m.level || "error" } : null;
+  }
+
+  function showResult(name, d, entry) {
     const out = [d.stdout, d.stderr, d.error].filter(Boolean).join("\n").trim();
-    const failed = !d.ok;
-    if (!out) { info(failed ? `/${name} failed (exit ${d.code == null ? "?" : d.code}).` : `/${name} done.`); return; }
-    if (!failed && out.length <= 120 && !out.includes("\n")) { info(out); return; }
+    const meaning = exitMeaning(entry, d);
+    const soft = !d.ok && !!meaning && meaning.level !== "error";   // non-zero, but not a failure
+    const failed = !d.ok && !soft;
+    const level = soft ? meaning.level : (failed ? "error" : "info");
+    if (!out) {
+      if (meaning) toast(`/${name}: ${meaning.label} (exit ${d.code}).`, level);
+      else info(failed ? `/${name} failed (exit ${d.code == null ? "?" : d.code}).` : `/${name} done.`);
+      return;
+    }
+    if (!failed && out.length <= 120 && !out.includes("\n")) { toast(out, level); return; }
     const h = host();
-    const title = `/${name}` + (failed ? ` \u2014 failed${d.code != null ? ` (exit ${d.code})` : ""}` : "");
+    const title = `/${name}` + (meaning
+      ? ` \u2014 ${meaning.label} (exit ${d.code})`
+      : (failed ? ` \u2014 failed${d.code != null ? ` (exit ${d.code})` : ""}` : ""));
     const text = out.length > 20000 ? out.slice(0, 20000) + "\n\u2026 (truncated)" : out;
-    if (h && h.dialog) h.dialog({ title, pre: text, level: failed ? "error" : "info" });
-    else toast(out.slice(0, 300), failed ? "error" : "info");
+    if (h && h.dialog) h.dialog({ title, pre: text, level });
+    else toast(out.slice(0, 300), level);
   }
 
   async function runPassthrough(name, entry, argText) {
     const h = host();
     const args = shellSplit(argText);
+    // Some commands are deliberately argument-less from the palette (the
+    // registry's `maxArgs`): /subagent-keys is list-only so API keys are never
+    // typed into a chat box, /sched-clear has no options. The server enforces
+    // the same cap; this is the friendly version of that refusal.
+    if (Number.isInteger(entry.maxArgs) && args.length > entry.maxArgs) {
+      toast(entry.noArgsHint || `/${name} takes ${entry.maxArgs === 0 ? "no arguments" : "at most " + entry.maxArgs}.`, "warn");
+      return false;
+    }
     if (name === "conv-delete" && args[0] && args[0] === h.state().activeConversationId) {
       toast("That's the chat you have open. Switch to another one first.", "warn");
       return false;
@@ -1187,7 +1217,7 @@
       if (!ok) return false;
     }
     const data = await apiSend("POST", "/api/slash/run", { name, args });
-    showResult(name, data);
+    showResult(name, data, entry);
     if (name.startsWith("conv-") && h.refreshChats) h.refreshChats();
     return true;
   }
@@ -1211,6 +1241,18 @@
       const known = NOT_EXPOSED[p.tokenLc];
       const near = known ? null : nearestVerb(p.tokenLc);
       if (!known && !near) return PASS;
+      // A near-miss of a command whose arguments are secrets (/subagent-keyz
+      // role provider KEY...) must not get the usual "press Enter again to
+      // send it as a message": that second Enter would hand the keys to the
+      // model and write them into the chat history. Drop the arguments instead.
+      const nearEntry = near ? PASSTHROUGH[near] : null;
+      if (nearEntry && nearEntry.secret && p.rest.trim()) {
+        ui.lastNearMiss = null;
+        input.value = "/" + p.token;
+        setOpen(false);
+        toast(`No command "/${p.token}" \u2014 did you mean /${near}? Its arguments can be secrets, so this wasn't sent to the model. Use \`//${p.token} ...\` if you really mean to send it as a message.`, "warn");
+        return BLOCKED;
+      }
       if (ui.lastNearMiss === trimmed) { ui.lastNearMiss = null; setOpen(false); return PASS; }   // "Send anyway"
       ui.lastNearMiss = trimmed;
       setOpen(false);
@@ -1228,7 +1270,13 @@
       let ran;
       try { ran = await runPassthrough(p.tokenLc, pass, p.rest.trim()); }
       catch (e) { toast(e && e.message ? e.message : `/${p.tokenLc} failed.`); ran = false; }
-      if (ran === false) { input.value = raw; refresh(); return BLOCKED; }
+      if (ran === false) {
+        // For a command whose arguments are secrets, never hand them back:
+        // leave just the verb in the box.
+        input.value = pass.secret && p.rest.trim() ? "/" + p.token : raw;
+        refresh();
+        return BLOCKED;
+      }
       mruBump("v:" + p.tokenLc);
       return HANDLED;
     }
