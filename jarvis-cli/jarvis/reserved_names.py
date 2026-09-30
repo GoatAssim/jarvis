@@ -50,6 +50,7 @@ RESERVED_NAMES = {
     "personas-list",
     "skills-list", "skills-get", "skills-save", "skills-add", "skills-create",
     "skills-remove", "skillmake", "skilladd", "skillload", "skillunload",
+    "skills-loaded",
     "conv-new", "conv-list", "conv-show", "conv-switch", "conv-delete", "conv-export",
     "logs", "logs-list", "logs-show", "logs-append-run", "logs-clear",
     "console-append-run", "console-read", "console-clear",

@@ -159,7 +159,8 @@ jarvis-cli/jarvis/
 web/
     server.js             Express + WS; shells out to `jarvis` for everything
     public/index.html     the whole UI
-    public/app.js         the whole front-end
+    public/app.js         the whole front-end (also defines window.JarvisHost, the
+                          small facade slash-palette.js talks to it through)
     public/style.css      theme + layout, including the classic/focus switch
     public/custom-tools.js       Custom Tools panel
     public/test-checklist.js     Menu -> Test Checklist (UI, browser-only results)
@@ -183,8 +184,15 @@ web/
     public/daemons.js            Menu -> Daemons (three-pane: services / selected service /
                                  overview; Console + Details tabs; add/edit form). Pure
                                  helpers are exposed as JarvisDaemons._pure for the node test
-    public/daemons.css           its styling (own `dmn-` prefix, reuses the debug-* chrome)                             
-```                
+    public/daemons.css           its styling (own `dmn-` prefix, reuses the debug-* chrome)
+    public/slash-commands-data.js  the "/" command palette's REGISTRY: every typeable
+                                 verb (35) + a risk-tiered disposition for every other
+                                 name in reserved_names.py. Edit it whenever you
+                                 add/rename/remove a jarvis-cli subcommand - see
+                                 AGENTS.md -> "The / command palette"
+    public/slash-palette.js      the palette's engine + popover UI (parse, rank, complete,
+                                 keyboard, submit routing, one handler per verb)
+```
 
 ---
 
@@ -347,6 +355,63 @@ read-only `GET /api/tools` Debug already uses, which carries a tool's own
 `checklist` / `checklist_group` when its module defined them.
 See AGENTS.md -> "Test Checklist".
 
+### The `/` command palette
+
+Typing `/` at the start of the Ask box opens a floating, keyboard-driven
+palette (master plan Part I.2). Level 1 lists the verbs grouped Chat / Model /
+Skills / Run / Panels / View, each with a risk badge, a one-line summary and a
+footer that says what Enter will do; Level 2 completes the verb's argument from a
+live list (chats, saved commands, installed/loaded skills, providers, services,
+capacity modes). It replaced the old `/skillload` / `/skillunload` regex + inline
+suggest box - there is now exactly one place in the front-end that parses a
+leading `/`.
+
+- **Grammar.** Only a `/` at column 0 of a single-line message with no quote
+  attached is a command; a second `/` in the first token (`/etc/hosts...`) or a
+  leading `//` is prose (`//` sends the text with one slash stripped). Exact
+  verb or alias only - a prefix never auto-runs on submit. An unknown verb within
+  edit distance 2 is blocked once with "did you mean"; an identical second Enter
+  sends it as a message.
+- **Enter is two-step where a mistake would cost something.** A plain-`safe` verb
+  with nothing required to fill in and outside the Chat group (panel openers,
+  `/skills`, `/config`, `/help`...) runs on the first Enter. Everything else
+  completes on the first Enter and runs on the second, so a half-typed `/cl` can
+  never wipe a chat. Tab and a click only ever *fill*. Enter during IME
+  composition is ignored.
+- **Every reserved name is in exactly one of three places** in
+  `slash-commands-data.js` (`tests/test_slash_coverage.py` enforces it):
+  a verb's `covers` (reached through a typed verb - most are the plumbing a
+  panel already drives), `passthrough` (runnable as `/<cli-name> [args]`: 31
+  one-shot, headless commands such as `/doctor`, `/memory-recall`, `/logs-clear`),
+  or `notExposed` (30 that cannot run from a chat box for a *technical* reason -
+  a long-running supervisor, an interactive terminal flow, the microphone, an
+  internal hook, a syntax token). Being destructive is not a reason to hide a
+  command: it is `passthrough` with tier `dangerous`.
+- **Passthrough is allowlisted twice.** The client sends `POST /api/slash/run
+  {name, args}`; `server.js` re-reads the same `passthrough` table from the data
+  file (one list, not two) and refuses any other name, then runs
+  `jarvis <name> <args...>` as an **argv array, no shell**. `dangerous`-tier ones
+  go through the same `JarvisUI.confirm` modal as `/clear`, showing the exact
+  command line. Output is a toast if it is one short line, otherwise a dialog with
+  the text (and the exit code if it failed).
+- **Confirmations.** `/clear` and the toolbar Clear button share `clearAiChat()`,
+  which confirms first (D-I7); `/daemon stop` always asks and `/daemon restart`
+  asks when the service is actually up - the same rule the Daemons panel applies
+  itself. `start` and `status` never ask.
+- **Plumbing.** `slash-palette.js` fetches its own read-only lists over REST and
+  goes through `window.JarvisHost` (bottom of `app.js`) for anything stateful -
+  which chat is open, the websocket, opening a panel. Panels that live in their own
+  file are opened through their own global (`JarvisSchedules`, `JarvisBacklog`,
+  `JarvisLogSearch`, `JarvisDaemons`, ...). `GET /api/skills/loaded`
+  (CLI: `jarvis skills-loaded [conv-id]`) exists only so `/skillunload` can offer
+  the skills that are actually loaded. Recent use breaks ranking ties via a small
+  MRU in `localStorage` (`jarvis.slash.mru`; verb ids and skill / saved-command
+  names only, never chat titles).
+- **Not built yet:** commands contributed by custom tools (I.2.11 - the plan says
+  it needs its own tracking id and contract), copying an individual code block
+  (`/copy 2` waits on Part I.1), and touch long-press for the hover tooltip (the
+  footer describes the highlighted row; on touch there is no hover to move it).
+
 ---
 
 ## 7. Testing
@@ -378,6 +443,8 @@ silently never runs.
 | `test_schemas_for_tools.py` | router ↔ catalog consistency |
 | `test_dev_agent_sandbox.py` | path escapes, dependency validation |
 | `test_scheduler.py` / `test_timespec.py` | jobs and time parsing |
+| `test_slash_coverage.py` | every `reserved_names.py` name is in the `/` palette registry exactly once, with a valid risk tier |
+| `verify_slash_palette.js` (`node`) | the palette engine: parsing, submit routing, near-miss, every verb's handler, confirm gates, keyboard model |
 
 ---
 

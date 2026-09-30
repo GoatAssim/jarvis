@@ -2412,6 +2412,23 @@ def main():
         }, indent=2))
         return
 
+    if argv[0] == "skills-loaded":
+        # jarvis skills-loaded [conversation-id]
+        # Read-only counterpart to skillload/skillunload: every skill name
+        # manually forced into context for this scope (conversation-scoped
+        # entries first, then anything loaded globally — see
+        # skill_stickiness.get_loaded()). Added for the web UI's "/"
+        # command palette (Part I.2 of the master plan): the /skillunload
+        # verb's argument list needs to offer only names that are actually
+        # loaded right now, rather than every installed skill, so a
+        # mistyped or already-unloaded name can't be picked in the first
+        # place (see I-B3 in the status audit — that CLI-level bug is
+        # unchanged here, this just keeps the palette from walking into it).
+        from . import skill_stickiness
+        conv_id = argv[1].strip() if len(argv) > 1 else ""
+        print(json.dumps({"loaded": skill_stickiness.get_loaded(conv_id or None)}, indent=2))
+        return
+
     if argv[0] == "subagent-keys":
         # jarvis subagent-keys                              -- list pools (redacted)
         # jarvis subagent-keys <role> <provider> <key> [k2 ...]  -- set a pool

@@ -15,7 +15,7 @@
 import express from "express";
 import { WebSocketServer } from "ws";
 import { spawn } from "node:child_process";
-import { watch } from "node:fs";
+import { watch, readFileSync } from "node:fs";
 import { createServer } from "node:http";
 import fs from "node:fs/promises";
 import os from "node:os";
@@ -1162,6 +1162,61 @@ app.delete("/api/skills/:name/load", requireJarvis, async (req, res) => {
     : (typeof req.query?.conversationId === "string" ? req.query.conversationId : "");
   const result = await runJarvisOnce(["skillunload", req.params.name, convId], 15000);
   return parseSkillsResult(result, res, "Couldn't unload that skill.");
+});
+
+// ---- "/" palette: CLI passthrough (master plan I.2.10, owner decision D-I4)
+//
+// The palette can run any jarvis-cli subcommand that is one-shot and headless
+// (`/memory-recall foo`, `/doctor`, `/logs-clear`...). What it may run is NOT
+// decided here: the allowlist is the `passthrough` table in
+// public/slash-commands-data.js, read from that file so there is exactly one
+// list, and tests/test_slash_coverage.py already forces every entry to be a
+// real reserved name with a risk tier. The client confirms dangerous-tier ones
+// before it ever calls this; this route is the backstop that makes the
+// allowlist real rather than advisory.
+//
+// argv, never a shell: each argument is one array element handed straight to
+// spawn(), so quoting/metacharacters in what the user typed are inert.
+const SLASH_PASSTHROUGH = (() => {
+  try {
+    const text = readFileSync(path.join(__dirname, "public", "slash-commands-data.js"), "utf8");
+    const m = /\/\*JSON-BEGIN\*\/([\s\S]*)\/\*JSON-END\*\//.exec(text);
+    return new Set(Object.keys(JSON.parse(m[1]).passthrough || {}));
+  } catch (e) {
+    console.warn("slash passthrough allowlist unavailable:", e.message);
+    return new Set();   // fail closed: nothing runs
+  }
+})();
+
+app.post("/api/slash/run", requireJarvis, async (req, res) => {
+  const name = req.body?.name;
+  const args = req.body?.args;
+  if (typeof name !== "string" || !SLASH_PASSTHROUGH.has(name)) {
+    return res.status(400).json({ error: `"${String(name).slice(0, 60)}" isn't a command the palette can run.` });
+  }
+  if (!Array.isArray(args) || args.length > 24
+      || args.some((a) => typeof a !== "string" || a.length > 2000 || a.includes("\0"))) {
+    return res.status(400).json({ error: "Arguments must be up to 24 short strings." });
+  }
+  const result = await runJarvisOnce([name, ...args], 60000);
+  return res.json({
+    ok: Boolean(result.ok),
+    code: result.code ?? null,
+    stdout: result.stdout || "",
+    stderr: result.stderr || "",
+    error: result.error || "",
+  });
+});
+
+// Read-only: which skills are manually loaded right now (conversation-scoped
+// plus anything loaded globally — see skill_stickiness.get_loaded()). Added
+// for the "/" command palette's /skillunload argument list (Part I.2 of the
+// master plan), so it can offer only names that are actually loaded instead
+// of every installed skill.
+app.get("/api/skills/loaded", requireJarvis, async (req, res) => {
+  const convId = typeof req.query?.conversationId === "string" ? req.query.conversationId : "";
+  const result = await runJarvisOnce(["skills-loaded", convId], 15000);
+  return parseSkillsResult(result, res, "Couldn't read loaded skills.");
 });
 
 // ---------------------------------------------------------------------------
