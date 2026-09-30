@@ -490,6 +490,80 @@ def console_backups(daemon_id):
 # status
 # ---------------------------------------------------------------------------
 
+def _on_windows():
+    # A function rather than a constant so a test can exercise the Windows
+    # branch on any host.
+    return os.name == "nt"
+
+
+# Win32 constants for the liveness probe below.
+_WIN_QUERY_LIMITED_INFORMATION = 0x1000   # enough for GetExitCodeProcess
+_WIN_ACCESS_DENIED = 5                    # ERROR_ACCESS_DENIED
+_WIN_STILL_ACTIVE = 259
+
+
+def _win_kernel32():
+    import ctypes
+    from ctypes import wintypes
+    k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    k32.OpenProcess.restype = wintypes.HANDLE
+    k32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+    k32.GetExitCodeProcess.restype = wintypes.BOOL
+    k32.GetExitCodeProcess.argtypes = [wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD)]
+    k32.CloseHandle.restype = wintypes.BOOL
+    k32.CloseHandle.argtypes = [wintypes.HANDLE]
+    return k32
+
+
+def _win_last_error():
+    import ctypes
+    getter = getattr(ctypes, "get_last_error", None)   # Windows-only attribute
+    return getter() if getter else 0
+
+
+def _pid_alive_windows(pid):
+    """Is this pid a running process? Never signals it.
+
+    H.1.6 (owner-reported, 2026-09-29: the Daemons panel never showed
+    anything as running). This used to be `os.kill(pid, 0)` on every
+    platform. On POSIX signal 0 is the standard existence probe; on Windows
+    it is not — `signal.CTRL_C_EVENT` is 0, so CPython turns `os.kill(pid,
+    0)` into GenerateConsoleCtrlEvent(CTRL_C_EVENT, pid). That is not an
+    existence check: it targets a console process *group*, so for an
+    ordinary pid it fails with an OSError (which the old code read as \"no
+    such process\" — every live daemon looked dead) and where it does
+    land it delivers a real Ctrl+C to the target. With every pid reading
+    dead, status() reported a STARTING daemon as crashed and a RUNNING one
+    as stopped, on every poll, for every daemon.
+
+    OpenProcess + GetExitCodeProcess is the supported probe. Merely being
+    able to open a handle is not enough (a process that has exited stays
+    openable while anything holds a handle to it), hence the exit-code
+    check.
+    """
+    try:
+        k32 = _win_kernel32()
+        import ctypes
+        from ctypes import wintypes
+        handle = k32.OpenProcess(_WIN_QUERY_LIMITED_INFORMATION, False, int(pid))
+        if not handle:
+            # Access denied means the process exists but isn't ours to
+            # inspect; anything else (typically ERROR_INVALID_PARAMETER)
+            # means there is no such pid.
+            return _win_last_error() == _WIN_ACCESS_DENIED
+        try:
+            code = wintypes.DWORD()
+            if not k32.GetExitCodeProcess(handle, ctypes.pointer(code)):
+                return True    # opened it, couldn't read it: don't declare it dead
+            return code.value == _WIN_STILL_ACTIVE
+        finally:
+            k32.CloseHandle(handle)
+    except Exception:  # noqa: BLE001 — a probe that can't run must not crash status()
+        # Same stance as tasks._pid_alive: a pid we can't check is assumed
+        # alive, so a probe failure can't make a live daemon look dead.
+        return True
+
+
 def pid_alive(pid):
     try:
         pid = int(pid)
@@ -497,6 +571,8 @@ def pid_alive(pid):
         return False
     if pid <= 0:
         return False
+    if _on_windows():
+        return _pid_alive_windows(pid)
     try:
         os.kill(pid, 0)
     except ProcessLookupError:
