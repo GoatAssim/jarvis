@@ -5250,20 +5250,30 @@
   qs("#ask-form").addEventListener("submit", async (e) => {
     e.preventDefault();
     const input = qs("#ask-input");
-    const text = input.value.trim();
     const quotes = state.askQuotes.slice();
-    if (!text && quotes.length === 0) return;
 
-    const skillSlashMatch = quotes.length === 0 ? SKILL_SLASH_RE.exec(text) : null;
-    if (skillSlashMatch) {
-      input.value = "";
-      askInputAutoGrow(input);
-      hideSkillSuggest();
-      await handleSkillSlashCommand(skillSlashMatch[1].toLowerCase(), skillSlashMatch[2].trim());
-      return;
+    // "/" command palette (Part I.2) gets first look at the raw input,
+    // before it's even trimmed — it needs to see a leading "/" and decide
+    // whether this is a recognized command, a near-miss typo (blocked
+    // pending an identical second Enter — its "Send anyway"), or an
+    // ordinary message ("passthrough", falling through to everything below
+    // exactly as before this existed). It may also rewrite input.value
+    // itself (the "//" escape hatch strips one leading slash before
+    // passthrough). Replaces the old SKILL_SLASH_RE interception that used
+    // to live here — see slash-palette.js's handleSubmit().
+    if (window.JarvisSlash) {
+      const result = await window.JarvisSlash.handleSubmit(input, quotes);
+      if (result.status !== "passthrough") { askInputAutoGrow(input); return; }
     }
 
-    const organizeMatch = quotes.length === 0 ? ORGANIZE_JSON_RE.exec(text) : null;
+    const text = input.value.trim();
+    if (!text && quotes.length === 0) return;
+
+    // "/organize-json <path>" is the palette's alias for the same bare
+    // "organize-json <path>" form ORGANIZE_JSON_RE has always matched —
+    // strip the leading slash before matching so both spellings land here.
+    const organizeSource = /^\/organize-json\b/i.test(text) ? text.slice(1) : text;
+    const organizeMatch = quotes.length === 0 ? ORGANIZE_JSON_RE.exec(organizeSource) : null;
     if (organizeMatch) {
       if (!state.activeConversationId) await startNewConversation();
       input.value = "";
@@ -5429,6 +5439,13 @@
   // old single-line <input> used to; Shift+Enter inserts a real newline
   // instead, the same convention as Slack/Discord/etc.
   qs("#ask-input").addEventListener("keydown", (e) => {
+    // The "/" command palette (slash-palette.js) gets first look at
+    // navigation/completion keys while it's open — arrow keys, Tab, Escape,
+    // and an Enter that would only complete an argument rather than run
+    // anything yet. It returns true when it fully handled the key itself
+    // (having already called preventDefault()); everything else here is
+    // unchanged from before the palette existed.
+    if (window.JarvisSlash && window.JarvisSlash.handleComposerKeydown(e, e.currentTarget)) return;
     if (e.key === "Enter" && !e.shiftKey) {
       e.preventDefault();
       qs("#ask-form").requestSubmit();
@@ -5443,7 +5460,18 @@
   }
   qs("#ask-input").addEventListener("input", (e) => askInputAutoGrow(e.target));
 
-  qs("#btn-ask-clear").addEventListener("click", async () => {
+  // Shared by the toolbar's Clear button and the "/" palette's /clear verb
+  // (D-I7: both now confirm first — clearing a chat's history has no undo,
+  // and until this the button ran on a single click with nothing standing
+  // between a mis-click and a permanently gone conversation).
+  async function clearAiChat() {
+    const ok = await JarvisUI.confirm({
+      title: "Clear this conversation?",
+      body: "This clears Jarvis's memory of everything said in this chat so far. It can't be undone.",
+      confirmLabel: "Clear",
+      level: "danger",
+    });
+    if (!ok) return;
     try {
       await Api.clearAiHistory(state.activeConversationId);
     } catch (e) {
@@ -5458,7 +5486,8 @@
     askPromptReset();
     refreshConvoList();
     toast("Conversation cleared.", "info");
-  });
+  }
+  qs("#btn-ask-clear").addEventListener("click", clearAiChat);
 
   // ---- Ask panel: provider-override picker -----------------------------
   //
@@ -6381,10 +6410,6 @@
       skillsCache = data.skills || [];
       const stats = data.stats || {};
       skillsCost.textContent = `${stats.catalog_tokens || 0} tok in every prompt`;
-      // Keep the slash-command autocomplete's name list in sync whenever
-      // the manager refreshes (create/save/remove all call this) instead of
-      // only ever fetching it lazily on first keystroke.
-      skillNamesCache = skillsCache.map((s) => s.name);
       skillsStatus.textContent = skillsCache.length
         ? `${stats.valid || 0} of ${skillsCache.length} loadable \u00b7 instructions load on demand`
         : "no skills installed";
@@ -6540,70 +6565,22 @@
   }
 
   // ===========================================================================
-  // Manual skill loading — "/skillload <name>" / "/skillunload <name>" typed
-  // directly into the chat box, plus "/skillmake" / "/skilladd" as shortcuts
-  // that open the manager to the right pane. Recognized and handled locally,
-  // same "never sent to the model" pattern as ORGANIZE_JSON_RE just above.
-  // load/unload are the CLI's `jarvis skillload`/`skillunload` one layer up
-  // (see skill_stickiness.py) — this forces the skill's full instructions
-  // into every ask for this conversation until unloaded, rather than hoping
-  // the model calls its own load_skill tool.
+  // Manual skill loading — the actual load/unload/make/add REST calls behind
+  // the "/" command palette's /skillload, /skillunload, /skillmake and
+  // /skilladd verbs (see slash-commands-data.js + slash-palette.js, master
+  // plan Part I.2). load/unload are the CLI's `jarvis skillload`/
+  // `skillunload` one layer up (see skill_stickiness.py) — this forces the
+  // skill's full instructions into every ask for this conversation until
+  // unloaded, rather than hoping the model calls its own load_skill tool.
+  //
+  // Used to be reached through its own regex match on the raw textarea
+  // value (SKILL_SLASH_RE) with a parallel autocomplete box
+  // (SKILL_SUGGEST_RE / #skill-slash-suggest) hand-rolled just for these
+  // four verbs. Both are gone — the palette is now the one and only
+  // "/"-parsing surface, and JarvisHost.skillSlash (below) is this function,
+  // exposed so the palette's verb handlers can call straight into it rather
+  // than duplicating the load/unload fetch calls and their toast copy.
   // ===========================================================================
-  const SKILL_SLASH_RE = /^\/skill(load|unload|make|add)\b\s*(.*)$/i;
-  const SKILL_SUGGEST_RE = /^\/skill(load|unload)\s+(\S*)$/i;
-  let skillNamesCache = null;
-
-  async function ensureSkillNamesCache() {
-    if (skillNamesCache) return skillNamesCache;
-    try {
-      const data = await api("GET", "/api/skills");
-      skillNamesCache = (data.skills || []).map((s) => s.name);
-    } catch {
-      skillNamesCache = [];
-    }
-    return skillNamesCache;
-  }
-
-  function hideSkillSuggest() {
-    const box = qs("#skill-slash-suggest");
-    if (box) box.hidden = true;
-  }
-
-  async function updateSkillSuggest(text) {
-    const match = SKILL_SUGGEST_RE.exec(text);
-    const box = qs("#skill-slash-suggest");
-    if (!match || !box) { hideSkillSuggest(); return; }
-    const verb = match[1].toLowerCase();
-    const partial = match[2].toLowerCase();
-    const names = await ensureSkillNamesCache();
-    const hits = names.filter((n) => n.toLowerCase().includes(partial)).slice(0, 8);
-    if (!hits.length) { hideSkillSuggest(); return; }
-    box.innerHTML = "";
-    for (const name of hits) {
-      const item = document.createElement("button");
-      item.type = "button";
-      item.className = "skill-slash-suggest__item";
-      item.textContent = name;
-      // mousedown, not click: fires before the textarea's blur handler, so
-      // the suggestion lands in the input before hideSkillSuggest() (wired
-      // to blur, below) would otherwise race it and close the dropdown
-      // with nothing selected.
-      item.addEventListener("mousedown", (e) => {
-        e.preventDefault();
-        const input = qs("#ask-input");
-        input.value = `/skill${verb} ${name} `;
-        askInputAutoGrow(input);
-        input.focus();
-        hideSkillSuggest();
-      });
-      box.appendChild(item);
-    }
-    box.hidden = false;
-  }
-
-  qs("#ask-input").addEventListener("input", (e) => updateSkillSuggest(e.target.value));
-  qs("#ask-input").addEventListener("blur", () => setTimeout(hideSkillSuggest, 150));
-
   async function handleSkillSlashCommand(verb, arg) {
     // "make"/"add" don't take a meaningful single-line argument (a whole
     // skill, or a folder/zip path, doesn't fit one chat line) — they just
@@ -6620,9 +6597,10 @@
       } else {
         const data = await api("DELETE", `/api/skills/${encodeURIComponent(arg)}/load`,
           { conversationId: state.activeConversationId });
-        toast(`"${data.name || arg}" unloaded.`, "info");
+        toast(data && data.unloaded_all
+          ? "Every manually-loaded skill unloaded for this chat."
+          : `"${data.name || arg}" unloaded.`, "info");
       }
-      skillNamesCache = null; // stale after add/remove elsewhere; cheap to just refetch next time
     } catch (e) {
       toast(e.message || `Couldn't ${verb} that skill.`);
     }
@@ -9720,6 +9698,137 @@
       if (data && data.should_prompt) openSetup();
     } catch { /* first run with the CLI unreachable — doctor covers that */ }
   }
+
+  // ===========================================================================
+  // JarvisHost — thin facade for slash-palette.js (master plan Part I.2).
+  // slash-palette.js is a separate file loaded after this one, in the
+  // "own small file, own qs/api helpers" style daemons.js and
+  // test-checklist.js already use (REPO_MAP.md), and does its own reads
+  // (skills, daemons, commands, providers, conversations) straight over
+  // REST rather than reaching in here for them. What it genuinely can't get
+  // any other way is exposed here instead: live client-only state (which
+  // conversation is open, whether a reply is in flight), the websocket
+  // (ask/run/cancel), and UI actions that already have exactly one correct
+  // implementation in this file (opening a panel, redoing a prompt,
+  // clearing a chat) — duplicating any of those into a second file is
+  // exactly the "two copies of one behavior" trap I-B10 exists to avoid.
+  // ===========================================================================
+  window.JarvisHost = {
+    toast,
+    confirm: (opts) => JarvisUI.confirm(opts),
+    dialog: (opts) => JarvisUI.dialog(opts),
+    refreshChats: () => refreshConvoList(),
+    originLabel: (origin) => (ORIGIN_LABELS[origin] && ORIGIN_LABELS[origin].text) || "",
+    copyLastReply() {
+      const msgs = askThread.querySelectorAll(".ask-msg--jarvis");
+      const last = msgs[msgs.length - 1];
+      if (!last) { toast("Nothing to copy yet."); return; }
+      copyAskRaw(last);
+    },
+    lastReplyRaw() {
+      const msgs = askThread.querySelectorAll(".ask-msg--jarvis");
+      const last = msgs[msgs.length - 1];
+      return last ? (last.dataset.raw || "") : "";
+    },
+    state() {
+      return {
+        activeConversationId: state.activeConversationId,
+        running: state.running,
+        conversations: state.conversations,
+        commands: state.commands,
+        providerOverride: state.providerOverride.slice(),
+        aiProviders: state.aiProviders,
+        thinkLevel: thinkState.level,
+        thinkShow: thinkState.show,
+        thinkLoaded: thinkState.loaded,
+        capacityMode: qs("#btn-mode-switch").dataset.mode || null,
+        modeOptions,
+        layout: currentLayout,
+      };
+    },
+    openPanel(id) {
+      const openers = {
+        guides: openGuides,
+        debug: openDebug,
+        checklist: () => window.JarvisTestChecklist?.open(),
+        skills: openSkills,
+        schedule: () => window.JarvisSchedules?.open(),
+        mcp: openMcp,
+        ctools: () => window.JarvisCustomTools?.open(),
+        channels: openChannels,
+        daemons: () => window.JarvisDaemons?.open(),
+        backlog: () => window.JarvisBacklog?.open(),
+        logsearch: () => window.JarvisLogSearch?.open(),
+        setup: openSetup,
+        subagents: openSubagents,
+        notifications: openNotifications,
+        logs: openLogs,
+        config: () => openSettings(),
+        skin: openSkinModal,
+      };
+      const fn = openers[id];
+      if (fn) fn();
+      else toast(`No panel called "${id}".`);
+    },
+    openSkillsToPane(pane) {
+      openSkills();
+      qs(pane === "new" ? "#btn-skill-new" : "#btn-skill-import").click();
+    },
+    async newChat() {
+      await startNewConversation();
+    },
+    async selectChat(id) {
+      await selectConversation(id);
+    },
+    async loadConversations() {
+      try {
+        state.conversations = await Api.listConversations(state.convoSearch);
+      } catch {
+        // Non-fatal — the palette just shows whatever it already had cached
+        // (possibly nothing yet) rather than blocking on this.
+      }
+      return state.conversations;
+    },
+    stop() {
+      wsSend({ type: "cancel" });
+    },
+    redo() {
+      const msg = askThread.lastElementChild;
+      if (!msg) { toast("No prompt to redo."); return; }
+      redoAskMessage(msg);
+    },
+    clearChat() {
+      return clearAiChat();
+    },
+    setProvider(value) {
+      const raw = (value || "").trim().toLowerCase();
+      if (!raw || raw === "auto") { clearProviderOverride(); return; }
+      state.providerOverride = raw.split(",").map((s) => s.trim()).filter(Boolean);
+      updateProviderLabel();
+      closeProviderMenu();
+    },
+    async setThink(level) {
+      if (level === "show") return setThinkShow(true);
+      if (level === "hide") return setThinkShow(false);
+      return setThinkLevel(level);
+    },
+    async setCapacity(mode) {
+      const data = await Api.setMode(mode);
+      if (Array.isArray(data.options) && data.options.length) modeOptions = data.options;
+      renderMode(data.mode);
+      return data;
+    },
+    async setLayout(mode) {
+      applyLayout(mode);
+      await Api.post("/api/ui-mode", { mode });
+    },
+    runSegments(segments) {
+      runSegments(segments);
+    },
+    async skillSlash(verb, arg) {
+      return handleSkillSlashCommand(verb, arg);
+    },
+  };
 
   // --- menu wiring ------------------------------------------------------
   qs("#menu-item-daemons")?.addEventListener("click", () => { closePanelMenu(); window.JarvisDaemons?.open(); });

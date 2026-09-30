@@ -410,11 +410,13 @@
 
         <div class="ask-quote-bar" id="ask-quote-bar" hidden></div>
 
-        <!-- Autocomplete for "/skillload <name>" / "/skillunload <name>" — see
-     app.js's updateSkillSuggest(). Positioned above the input row by CSS. -->
-<div class="skill-slash-suggest" id="skill-slash-suggest" hidden></div>
-<form class="ask-input-row" id="ask-form">
-          <textarea id="ask-input" rows="1" placeholder="Ask Jarvis anything&hellip; highlight text above to quote it" maxlength="4000"></textarea>
+        <form class="ask-input-row" id="ask-form">
+          <!-- The "/" command palette (slash-palette.js). A child of the
+               form so it can float absolutely above the composer
+               (.ask-input-row is position: relative) instead of pushing
+               the thread around like the old inline skill-suggest box did. -->
+          <div class="slash-palette" id="slash-palette" hidden></div>
+          <textarea id="ask-input" rows="1" placeholder="Ask Jarvis anything&hellip; type / for commands, or highlight text above to quote it" maxlength="4000"></textarea>
           <button class="btn btn--ghost btn--icon" id="btn-ask-mic" type="button" title="Record a voice message">
             <svg class="mic-icon" id="mic-icon" viewBox="0 0 24 24" aria-hidden="true">
               <path d="M12 15a3 3 0 0 0 3-3V6a3 3 0 0 0-6 0v6a3 3 0 0 0 3 3z" fill="currentColor"/>
@@ -1660,6 +1662,8 @@
      JARVIS_MEDIA dispatch, so the global has to exist by then. -->
 <script src="ui-kit.js"></script>
 <script src="app.js"></script>
+<script src="slash-commands-data.js"></script>
+<script src="slash-palette.js"></script>
 <script src="custom-tools.js"></script>
 <script src="test-checklist-data.js"></script>
 <script src="test-checklist.js"></script>

@@ -148,6 +148,8 @@ actually render Markdown):
     node tests/verify_daemons_panel.js
     node tests/verify_daemons_console.js   # the console line classifier (H.1.7)
     node tests/verify_l9_sequence_bar.js   # L.9: sequence bar reachable; needs `playwright` + Chromium, prints SKIP without them
+    node tests/verify_slash_palette.js      # no npm install; runs the real palette
+                                            # against a fake DOM + fake JarvisHost
 
 Two things that will waste your time if nobody tells you:
 
@@ -284,6 +286,48 @@ The data file is strict JSON between its `JSON-BEGIN` / `JSON-END` markers
 (double quotes, no trailing commas, no comments) because both the browser and
 that test parse it. A module's `TEST_CHECKLIST` is ordinary Python, but its
 values must be plain JSON types (it is sent to the browser as JSON).
+
+## The `/` command palette - adding a CLI subcommand or a Menu panel means updating its registry
+
+The Ask box's `/` palette (`web/public/slash-commands-data.js` +
+`slash-palette.js`) is a map of **every** name `jarvis-cli` reserves. When you add,
+rename, or remove a subcommand:
+
+1. Add/remove it in `jarvis-cli/jarvis/reserved_names.py` (already required).
+2. Put the same name in `slash-commands-data.js` in exactly one place:
+   - a verb's `covers` list (that verb is how a user reaches it), or
+   - `passthrough` if it runs one-shot and headless - give it a `summary`, a
+     `usage` string and a `riskTier`. This table is *also* the server allowlist
+     for `POST /api/slash/run` (`server.js` reads this file), so adding a name
+     here is what makes it runnable from a chat box, and nothing else is;
+   - `notExposed`, with a one-line reason, **only for a technical reason**: it
+     never exits (a supervisor), it needs a terminal or the microphone, it is an
+     internal hook, or it is a syntax token. Destructive is not a technical reason:
+     mark it `dangerous` in `passthrough` (owner decision D-I4 - flagged, not hidden).
+   `tests/test_slash_coverage.py` fails if a reserved name is in none of the three,
+   in two, or in the registry but not in `reserved_names.py`.
+3. Tier honestly: `safe` (read-only or trivially reversible), `caution` (changes
+   state but scoped and recoverable), `dangerous` (bulk-destructive, irreversible,
+   or broad blast radius). `dangerous` passthrough commands are confirmed
+   client-side before the request is made.
+4. A new *verb* means a handler in `slash-palette.js`, a `riskTier` that matches
+   what a typo costs, `confirm` if it is destructive or interrupts something
+   running, `whileReplying: false` if it must not fire mid-reply, and a `preview`
+   line. Keep "first Enter completes, second runs" for anything that is not a
+   plain `safe`, non-Chat verb with nothing required to fill in
+   (`runsOnFirstEnter()`).
+5. Add the case to `tests/verify_slash_palette.js`, and the manual steps to
+   `DOCUMENTATION/COMMAND_PALETTE_TESTING.md`.
+6. Passthrough arguments are an argv array, never a shell string. Do not build a
+   command line by string concatenation anywhere on this path.
+
+Adding a **Menu panel** (a new `menu-item-*` in `index.html`) is the same rule:
+give the verb that opens it a `menu` field naming that id, and an opener in
+`JarvisHost.openPanel()` (bottom of `app.js`). `test_slash_coverage.py` fails until
+every `menu-item-*` is claimed by exactly one verb.
+
+The parser lives in one place. Do not add another `/`-prefix regex to the ask-form
+submit handler in `app.js`: register a verb instead.
 
 ## Patch conventions
 
