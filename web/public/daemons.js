@@ -284,29 +284,79 @@
   /* ---- console lines ---------------------------------------------------- */
 
   // Meta ("=== ...") and stdin-echo ("<<< ...") lines are stamped by
-  // daemons.py's _stamp() with "[YYYY-MM-DD HH:MM:SS] ". Real process output
-  // never gets that stamp. A stderr-origin line carries a plain "E: " marker
-  // (run_supervisor's _pump); a traceback is a stderr line of one of the
-  // shapes below.
+  // daemons.py's _stamp() with "[YYYY-MM-DD HH:MM:SS] ". A stderr-origin line
+  // carries a plain "E: " marker (run_supervisor's _pump); a traceback is a
+  // stderr line of one of the shapes below.
+  //
+  // H.1.7 (owner-reported, 2026-09-29: the Error / System / Output detector
+  // misfiled lines). The old rules were too shallow in four ways, each
+  // reproduced against realistic console text before being fixed:
+  //   1. Any "[YYYY-MM-DD HH:MM:SS] " prefix meant System. Plenty of daemons
+  //      stamp their own output the same way, so their ordinary stdout
+  //      landed in System. Only the supervisor's own "=== " banners and
+  //      "<<< " stdin echoes are System now.
+  //   2. Everything on stderr was an "error". Python's logging, discord.py,
+  //      uvicorn, Flask and friends write routine INFO/DEBUG lines to stderr,
+  //      so the Errors chip and the "N error lines" counter filled up with
+  //      health-check noise. A stderr line that states an INFO/DEBUG level is
+  //      Output now.
+  //   3. The reverse: a daemon that logs to stdout ("ERROR ..." from print,
+  //      console.log, or a shell wrapper doing `2>&1`) never showed anything
+  //      under Errors, and a Python traceback on stdout was plain output. An
+  //      explicit ERROR/CRITICAL/FATAL level, or a traceback, is an error
+  //      wherever it was written.
+  //   4. "...Warning:" counted as the end of a crash, so a DeprecationWarning
+  //      was drawn as a crash block; and Node stack frames ("    at ...")
+  //      were never grouped with the error above them.
   const STAMP_RE = /^\[\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\] /;
   const TRACEBACK_HEAD_RE = /^Traceback \(most recent call last\):/;
   const TRACEBACK_FRAME_RE = /^\s+File "/;
-  const TRACEBACK_TAIL_RE = /^[A-Za-z_][\w.]*(Error|Exception|Warning)\b/;
+  const TRACEBACK_TAIL_RE = /^[A-Za-z_][\w.]*(Error|Exception)\b/;
+  const JS_FRAME_RE = /^\s+at\s+(?:\S+\s+\(.*:\d+:\d+\)|[^\s(]+:\d+:\d+)\s*$/;
+  const JS_ERROR_HEAD_RE = /^(?:[A-Za-z_][\w.]*)?(?:Error|Exception)\b/;
   const BAD_EXIT_RE = /=== exited with code (?!0\b)-?\d+/;
+  const BAD_META_RE = /=== (?:failed to start|restart limit reached)/;
+
+  // An explicit severity token near the start of a line, optionally behind a
+  // timestamp: "INFO:discord.client: ...", "[INFO] ...", "2026-09-29
+  // 12:00:00,123 - INFO - ...", "12:00:00 ERROR ...". Upper-case only, so
+  // ordinary prose that happens to begin with the word "info" or "error" is
+  // not read as a log level.
+  const LEVEL_PREFIX = "^(?:\\[?\\d{4}-\\d{2}-\\d{2}[ T]\\d{2}:\\d{2}:\\d{2}(?:[.,]\\d+)?(?:Z|[+-]\\d{2}:?\\d{2})?\\]?[\\s:,|-]*"
+    + "|\\[?\\d{2}:\\d{2}:\\d{2}(?:[.,]\\d+)?\\]?[\\s:,|-]*)?\\[?\\s*";
+  const LEVEL_END = "\\s*\\]?(?=[\\s:|,-]|$)";
+  const LEVEL_QUIET_RE = new RegExp(LEVEL_PREFIX + "(?:DEBUG|INFO|NOTICE|TRACE|VERBOSE)" + LEVEL_END);
+  const LEVEL_ERROR_RE = new RegExp(LEVEL_PREFIX + "(?:ERROR|CRITICAL|FATAL|SEVERE)" + LEVEL_END);
 
   function classifyLine(raw) {
     const line = String(raw == null ? "" : raw);
     if (STAMP_RE.test(line)) {
       const rest = line.replace(STAMP_RE, "");
-      if (rest.startsWith("<<< ")) return { cls: "stdin", text: line, bad: false };
-      return { cls: "meta", text: line, bad: BAD_EXIT_RE.test(rest) || /=== failed to start/.test(rest) };
+      if (rest.startsWith("<<< ")) return { cls: "stdin", text: line, bad: false, origin: "meta" };
+      if (rest.startsWith("=== ")) {
+        return { cls: "meta", text: line, bad: BAD_EXIT_RE.test(rest) || BAD_META_RE.test(rest), origin: "meta" };
+      }
+      // A stamp that isn't one of ours: the daemon's own output.
+      return classifyOutput(line, "stdout");
     }
-    if (line.startsWith("E: ")) {
-      const text = line.slice(3);
-      const crash = TRACEBACK_HEAD_RE.test(text) || TRACEBACK_FRAME_RE.test(text) || TRACEBACK_TAIL_RE.test(text);
-      return { cls: crash ? "crash" : "stderr", text, bad: false };
+    if (line.startsWith("E: ")) return classifyOutput(line.slice(3), "stderr");
+    return classifyOutput(line, "stdout");
+  }
+
+  // `origin` is the stream the line arrived on; `cls` is what it *is*.
+  function classifyOutput(text, origin) {
+    if (TRACEBACK_HEAD_RE.test(text) || TRACEBACK_FRAME_RE.test(text) || JS_FRAME_RE.test(text)) {
+      return { cls: "crash", text, bad: false, origin };
     }
-    return { cls: "stdout", text: line, bad: false };
+    if (origin === "stderr") {
+      // A blank line on stderr is spacing, not an error.
+      if (!text.trim()) return { cls: "stdout", text, bad: false, origin };
+      if (TRACEBACK_TAIL_RE.test(text)) return { cls: "crash", text, bad: false, origin };
+      if (LEVEL_QUIET_RE.test(text)) return { cls: "stdout", text, bad: false, origin };
+      return { cls: "stderr", text, bad: false, origin };
+    }
+    if (LEVEL_ERROR_RE.test(text)) return { cls: "stderr", text, bad: false, origin };
+    return { cls: "stdout", text, bad: false, origin };
   }
 
   // n is the 1-based position in the tail that was fetched, so a line keeps
@@ -316,33 +366,45 @@
   // frame/source lines between the head and the exception message ("    File
   // ...", then the literal source line under it, e.g. "    client.run(token)")
   // don't look like anything classifyLine alone can recognize, and the
-  // exception message itself is only reliably "the first unindented stderr
-  // line after the head" — plenty of real exception class names (Discord.py's
-  // own LoginFailure, for one) don't end in Error/Exception/Warning at all.
-  // So this keeps a small piece of state — inTrace — across the whole tail:
-  // once the head line is seen, every following stderr line is swept into
-  // the same block until the first unindented one closes it, which is
-  // exactly how CPython itself lays a traceback out.
+  // exception message itself is only reliably "the first unindented line
+  // after the head" — plenty of real exception class names (Discord.py's own
+  // LoginFailure, for one) don't end in Error/Exception at all. So this
+  // keeps a small piece of state — the stream a traceback started on —
+  // across the whole tail: once the head line is seen, every following line
+  // from the SAME stream is swept into the same block until the first
+  // unindented one closes it, which is exactly how CPython lays a traceback
+  // out. A line from the other stream ends the block (the two streams are
+  // written by separate threads, so they can interleave), and so does
+  // anything the supervisor wrote.
   function annotateLines(rawLines) {
-    let inTrace = false;
-    return (rawLines || []).map((raw, i) => {
+    let traceOrigin = null;
+    const out = [];
+    (rawLines || []).forEach((raw, i) => {
       const base = classifyLine(raw);
       let cls = base.cls;
       const indented = /^\s/.test(base.text);
+      const blank = !base.text.trim();
       if (cls === "crash" && TRACEBACK_HEAD_RE.test(base.text)) {
-        inTrace = true;
-      } else if (cls === "stderr" && inTrace) {
+        traceOrigin = base.origin;
+      } else if (traceOrigin && base.origin === traceOrigin && (cls === "stderr" || cls === "stdout" || cls === "crash")) {
         cls = "crash";
-        if (!indented) inTrace = false; // unindented: this is the exception line, block ends here
-      } else if (cls === "crash" && inTrace && !indented) {
-        // classifyLine already recognized this one on its own (it happens to
-        // match TRACEBACK_TAIL_RE) — still the line that closes the block.
-        inTrace = false;
-      } else if (cls !== "stderr" && cls !== "crash") {
-        inTrace = false; // stdout/meta/stdin breaks any run in progress
+        // An unindented, non-blank line is the exception line: the block ends here.
+        if (!indented && !blank) traceOrigin = null;
+      } else if (traceOrigin && base.origin !== traceOrigin && base.origin !== "meta") {
+        // The other stream interleaved. Leave this line as classified and
+        // keep the block open: its remaining lines are still coming.
+      } else {
+        traceOrigin = null;
       }
-      return Object.assign({ n: i + 1 }, base, { cls });
+      // A JS stack is "Error: message" followed by "    at ..." frames; the
+      // message line above the first frame belongs to the same block.
+      if (cls === "crash" && JS_FRAME_RE.test(base.text) && out.length) {
+        const prev = out[out.length - 1];
+        if (prev.cls === "stderr" && prev.origin === base.origin && JS_ERROR_HEAD_RE.test(prev.text)) prev.cls = "crash";
+      }
+      out.push(Object.assign({ n: i + 1 }, base, { cls }));
     });
+    return out;
   }
 
   function summarizeLines(items) {
