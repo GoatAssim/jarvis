@@ -639,13 +639,14 @@ def check_daemons():
 
 
 def _pid_alive(pid):
-    try:
-        os.kill(pid, 0)
-        return True
-    except OSError:
-        return False
-    except Exception:  # noqa: BLE001
-        return False
+    """Is this pid a running process? Delegates to daemons.pid_alive().
+
+    `os.kill(pid, 0)` is not an existence probe on Windows (signal 0 is
+    CTRL_C_EVENT), which made `jarvis doctor` report a live daemon as a
+    stale pid file. See daemons.pid_alive().
+    """
+    from . import daemons
+    return daemons.pid_alive(pid)
 
 
 def check_scheduler():

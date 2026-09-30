@@ -984,9 +984,19 @@ window.JARVIS_SLASH_COMMANDS = /*JSON-BEGIN*/
   },
   "passthrough": {
     "doctor": {
-      "summary": "Check the install for problems.",
+      "summary": "Check the install for problems. Exit 1 means warnings, 2 means something is broken.",
       "riskTier": "safe",
-      "usage": "[--deep]"
+      "usage": "[--deep] [--json] [--verbose] [group ...]",
+      "exitCodes": {
+        "1": {
+          "label": "warnings",
+          "level": "warn"
+        },
+        "2": {
+          "label": "problems found",
+          "level": "error"
+        }
+      }
     },
     "version": {
       "summary": "Print the jarvis version.",
@@ -994,19 +1004,19 @@ window.JARVIS_SLASH_COMMANDS = /*JSON-BEGIN*/
       "usage": ""
     },
     "memory-ns": {
-      "summary": "List memory namespaces.",
-      "riskTier": "safe",
-      "usage": ""
+      "summary": "List memory namespaces, or switch the active one.",
+      "riskTier": "caution",
+      "usage": "[namespace]"
     },
     "memory-list": {
-      "summary": "List stored memories.",
+      "summary": "List stored memories. --auto shows only the ones saved automatically.",
       "riskTier": "safe",
-      "usage": "[namespace]"
+      "usage": "[--auto]"
     },
     "memory-recall": {
       "summary": "Search stored memories.",
       "riskTier": "safe",
-      "usage": "<query>"
+      "usage": "<what you remember>"
     },
     "memory-stats": {
       "summary": "Show memory store statistics.",
@@ -1014,14 +1024,14 @@ window.JARVIS_SLASH_COMMANDS = /*JSON-BEGIN*/
       "usage": ""
     },
     "memory-consolidate": {
-      "summary": "Merge and tidy stored memories.",
+      "summary": "Merge and tidy stored memories (default: the last 7 days).",
       "riskTier": "caution",
-      "usage": "[namespace]"
+      "usage": "[--days N] [--review | --dry-run] [--no-model]"
     },
     "memory-reindex": {
-      "summary": "Rebuild the memory search index.",
+      "summary": "Rebuild the memory search index. --embeddings also rebuilds the embeddings.",
       "riskTier": "caution",
-      "usage": ""
+      "usage": "[--embeddings]"
     },
     "calendar-list": {
       "summary": "List calendar entries.",
@@ -1034,14 +1044,14 @@ window.JARVIS_SLASH_COMMANDS = /*JSON-BEGIN*/
       "usage": ""
     },
     "calendar-add": {
-      "summary": "Add a calendar entry.",
+      "summary": "Add an ICS calendar feed and check that it can be reached.",
       "riskTier": "caution",
-      "usage": "<when> <title>"
+      "usage": "<name> <ics-url>"
     },
     "calendar-remove": {
-      "summary": "Remove a calendar entry.",
+      "summary": "Remove a calendar feed by name.",
       "riskTier": "caution",
-      "usage": "<id>"
+      "usage": "<name>"
     },
     "digest-status": {
       "summary": "Show whether the daily digest is on.",
@@ -1054,9 +1064,9 @@ window.JARVIS_SLASH_COMMANDS = /*JSON-BEGIN*/
       "usage": ""
     },
     "digest-on": {
-      "summary": "Turn the daily digest on.",
+      "summary": "Turn the notification digest on (default: daily).",
       "riskTier": "caution",
-      "usage": ""
+      "usage": "[schedule] [time]"
     },
     "digest-off": {
       "summary": "Turn the daily digest off.",
@@ -1076,32 +1086,35 @@ window.JARVIS_SLASH_COMMANDS = /*JSON-BEGIN*/
     "policy-check": {
       "summary": "Check whether a tool call would be allowed.",
       "riskTier": "safe",
-      "usage": "<tool> [args]"
+      "usage": "<tool> [--args JSON] [--context CTX]"
     },
     "policy-dry-run": {
       "summary": "Dry-run the policy against a tool call.",
       "riskTier": "safe",
-      "usage": "<tool> [args]"
+      "usage": "<tool> [--args JSON] [--context CTX]"
     },
     "console-read": {
-      "summary": "Read the stored console output.",
+      "summary": "Read one conversation's stored console output.",
       "riskTier": "safe",
-      "usage": "[run-id]"
+      "usage": "<conversation-id> [--since N] [--kinds a,b] [--turn T] [--limit N] [--surface S] [--after-last-clear]"
     },
     "conv-export": {
-      "summary": "Export a conversation to a file.",
+      "summary": "Export a conversation to a file (default: the current one).",
       "riskTier": "caution",
-      "usage": "<conversation-id> [path]"
+      "usage": "[conversation-id] [--format F] [--out DIR] [--tools] [--thinking] [--trace]"
     },
     "clipboard-watch-config": {
       "summary": "Show or change the clipboard-watch settings.",
       "riskTier": "caution",
-      "usage": "[key value]"
+      "usage": "[--pattern REGEX | --clear-pattern] [--poll-seconds N]"
     },
     "subagent-keys": {
-      "summary": "Show or change the subagent provider keys.",
+      "summary": "List the subagent key pools (keys are hidden). To set or clear a pool, run jarvis subagent-keys in a terminal.",
       "riskTier": "caution",
-      "usage": "[provider]"
+      "usage": "",
+      "maxArgs": 0,
+      "noArgsHint": "Setting keys from the chat box isn't supported, so nothing you typed was sent or saved. Use jarvis subagent-keys in a terminal.",
+      "secret": true
     },
     "conv-delete": {
       "summary": "Delete an entire conversation. Irreversible.",
@@ -1109,34 +1122,36 @@ window.JARVIS_SLASH_COMMANDS = /*JSON-BEGIN*/
       "usage": "<conversation-id>"
     },
     "logs-clear": {
-      "summary": "Wipe the stored logs. Irreversible.",
+      "summary": "Delete one conversation's stored log file. Irreversible.",
       "riskTier": "dangerous",
-      "usage": ""
+      "usage": "<conversation-id>"
     },
     "console-clear": {
-      "summary": "Wipe the stored console output. Irreversible.",
-      "riskTier": "dangerous",
-      "usage": ""
+      "summary": "Mark one conversation's live console as cleared. Nothing is deleted.",
+      "riskTier": "caution",
+      "usage": "<conversation-id>"
     },
     "sched-clear": {
-      "summary": "Remove scheduled jobs in bulk.",
+      "summary": "Remove every finished scheduled job (done, cancelled, error). Active jobs are kept. Irreversible.",
       "riskTier": "dangerous",
-      "usage": "[--all]"
+      "usage": "",
+      "maxArgs": 0,
+      "noArgsHint": "/sched-clear takes no options; it always removes every finished job and keeps the active ones."
     },
     "notify-clear": {
-      "summary": "Clear every notification in bulk.",
+      "summary": "Empty the notification inbox. With a consumer name, only marks everything seen for that consumer.",
       "riskTier": "dangerous",
-      "usage": ""
+      "usage": "[consumer]"
     },
     "notify-send": {
       "summary": "Send a message to every configured channel.",
       "riskTier": "dangerous",
-      "usage": "<message>"
+      "usage": "<message> [title] [channels,csv]"
     },
     "mcp-call": {
       "summary": "Run an arbitrary MCP tool by name.",
       "riskTier": "dangerous",
-      "usage": "<server> <tool> [json-args]"
+      "usage": "<server> <tool> [json-arguments]"
     }
   }
 }

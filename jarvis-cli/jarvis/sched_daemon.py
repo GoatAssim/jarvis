@@ -53,13 +53,16 @@ def _handle_stop(signum, frame):
 
 
 def _pid_alive(pid):
-    try:
-        os.kill(pid, 0)
-    except OSError:
-        return False
-    except Exception:
-        return False
-    return True
+    """Is this pid a running process? Delegates to daemons.pid_alive().
+
+    This used to be `os.kill(pid, 0)`, which is only an existence probe on
+    POSIX. On Windows signal 0 is CTRL_C_EVENT, so it raised OSError for an
+    ordinary pid and a live scheduler read as dead (`--status` said "not
+    running", stop_running() never signalled it). daemons.pid_alive() is the
+    one probe that is right on both platforms; keep it the only one.
+    """
+    from . import daemons
+    return daemons.pid_alive(pid)
 
 
 def _read_pid_file():

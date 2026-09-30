@@ -242,6 +242,7 @@ TOOL_KEYWORDS = {
         "recent conversations": 7,
         "recent instagram": 7,
         "recent discord": 7,
+        "discord":9,
         # Deliberately NOT "message me" / "reply to" / "send a message" —
         # those are actions/notify_owner.py's/outbound sending's territory,
         # not this read-only tool, and overlapping them would blur the two

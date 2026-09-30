@@ -266,6 +266,102 @@ def test_confirm_gated_verbs_are_never_marked_safe():
             )
 
 
+# ---------------------------------------------------------------------------
+# Passthrough `usage` must describe what the CLI really accepts (I-B14)
+# ---------------------------------------------------------------------------
+# The registry's `usage` and `summary` are what the footer, the hover text and
+# the dangerous-command confirm dialog show. They drifted from the CLI once
+# (calendar-add was documented as "<when> <title>" but takes "<name> <ics-url>";
+# sched-clear advertised a --all flag the CLI never parsed; console-clear was
+# described as wiping data it only marks), and nothing noticed, because the
+# coverage test only looked at names and tiers.
+#
+# What this can and cannot check. The CLI keeps no machine-readable argument
+# spec, so there are two mechanical checks and one rule:
+#   1. where cli.py prints its own "usage: jarvis <name> ..." line, the registry
+#      `usage` must be that text exactly;
+#   2. every --flag named in a `usage` must appear as a quoted literal somewhere
+#      in jarvis-cli/jarvis/*.py (catches a flag that does not exist anywhere;
+#      it cannot prove the flag belongs to THAT command);
+#   3. positional shapes for commands with no usage line in the CLI are
+#      hand-verified against the handlers, and this test does not see them.
+# If you change a command's arguments in cli.py, update the registry by hand.
+
+CLI_SOURCES = sorted((JARVIS_CLI / "jarvis").glob("*.py"))
+CLI_TEXT = "\n".join(p.read_text(encoding="utf-8") for p in CLI_SOURCES)
+USAGE_LITERAL_RE = re.compile(r'usage: jarvis ([a-z][a-z0-9-]*) ([^"\\\n]*)')
+
+
+def cli_usage_literals():
+    found = {}
+    for name, tail in USAGE_LITERAL_RE.findall(CLI_TEXT):
+        found.setdefault(name, set()).add(tail.strip())
+    return found
+
+
+def test_passthrough_usage_matches_the_clis_own_usage_line():
+    literals = cli_usage_literals()
+    for name, entry in load_registry()["passthrough"].items():
+        if name not in literals:
+            continue
+        if entry.get("maxArgs") == 0:
+            continue   # deliberately narrower than the CLI (subagent-keys, sched-clear)
+        check(
+            f'passthrough["{name}"] usage equals the CLI\'s own usage line',
+            entry["usage"].strip() in literals[name],
+            f"registry says {entry['usage']!r}; cli.py says {sorted(literals[name])!r}",
+        )
+
+
+def test_passthrough_usage_flags_exist_in_the_cli():
+    for name, entry in load_registry()["passthrough"].items():
+        for flag in re.findall(r"--[a-z][a-z0-9-]*", entry["usage"] + " " + entry["summary"]):
+            check(
+                f'passthrough["{name}"] mentions {flag}, which the CLI knows',
+                f'"{flag}"' in CLI_TEXT or f"'{flag}'" in CLI_TEXT,
+                f"{flag} is not a quoted literal anywhere in jarvis-cli/jarvis/*.py",
+            )
+
+
+def test_passthrough_argument_limits_and_exit_codes_are_well_formed():
+    for name, entry in load_registry()["passthrough"].items():
+        if "maxArgs" in entry:
+            check(f'passthrough["{name}"] maxArgs is a non-negative integer',
+                  isinstance(entry["maxArgs"], int) and not isinstance(entry["maxArgs"], bool) and entry["maxArgs"] >= 0)
+            check(f'passthrough["{name}"] with maxArgs explains the refusal in noArgsHint',
+                  bool((entry.get("noArgsHint") or "").strip()))
+        if entry.get("maxArgs") == 0:
+            check(f'passthrough["{name}"] takes no arguments, so its usage is empty',
+                  entry["usage"] == "", f"usage is {entry['usage']!r}")
+        if "secret" in entry:
+            check(f'passthrough["{name}"] secret is a real boolean', isinstance(entry["secret"], bool))
+        if entry.get("secret"):
+            check(f'passthrough["{name}"] takes secrets, so it must accept no arguments from the palette',
+                  entry.get("maxArgs") == 0)
+        for code, meaning in (entry.get("exitCodes") or {}).items():
+            check(f'passthrough["{name}"] exitCodes key {code!r} is a positive integer string',
+                  code.isdigit() and int(code) > 0)
+            check(f'passthrough["{name}"] exitCode {code} has a label and a valid level',
+                  bool((meaning.get("label") or "").strip())
+                  and meaning.get("level") in {"info", "success", "warn", "error"},
+                  f"{meaning!r}")
+
+
+def test_commands_that_take_secrets_or_change_state_are_not_tiered_safe():
+    # I-B15 / I-B16. `jarvis memory-ns <name>` switches the active namespace, so
+    # a registry entry that advertises an argument must not be `safe`.
+    registry = load_registry()["passthrough"]
+    ns = registry["memory-ns"]
+    check('"memory-ns" accepts a namespace to switch to and is not tiered "safe"',
+          "[namespace]" in ns["usage"] and ns["riskTier"] != "safe", f"got {ns!r}")
+    keys = registry["subagent-keys"]
+    check('"subagent-keys" is list-only from the palette and flagged secret',
+          keys.get("maxArgs") == 0 and keys.get("secret") is True, f"got {keys!r}")
+    check('"doctor" names exit codes 1 and 2 instead of reporting warnings as a failure',
+          set((registry["doctor"].get("exitCodes") or {}).keys()) == {"1", "2"}
+          and registry["doctor"]["exitCodes"]["1"]["level"] != "error")
+
+
 if __name__ == "__main__":
     test_every_reserved_name_is_accounted_for_exactly_once()
     test_every_verb_is_well_formed()
@@ -277,6 +373,10 @@ if __name__ == "__main__":
     test_verbs_and_aliases_are_well_formed_tokens()
     test_every_verb_has_a_summary_and_known_argument_sources()
     test_confirm_gated_verbs_are_never_marked_safe()
+    test_passthrough_usage_matches_the_clis_own_usage_line()
+    test_passthrough_usage_flags_exist_in_the_cli()
+    test_passthrough_argument_limits_and_exit_codes_are_well_formed()
+    test_commands_that_take_secrets_or_change_state_are_not_tiered_safe()
     print(f"\n{pass_count} passed, {fail_count} failed")
     if fail_count:
         sys.exit(1)
