@@ -2501,11 +2501,38 @@
   // Sequence bar
   // ===========================================================================
 
+  // L.9: while the bar is visible, everything else fixed to the bottom edge
+  // (Logs / Notifications fabs, the online pill, toasts) lifts above it -- see
+  // the L.9 block in style.css. The bar's height isn't constant (it wraps to
+  // two rows on narrow screens and its chips can change that), so measure it
+  // and publish it as --seq-clear on <body>; a ResizeObserver keeps it right
+  // as the bar or the window resizes. Called from renderSequenceBar().
+  let seqResizeObserver = null;
+  function syncSequenceClearance() {
+    const bar = qs("#sequence-bar");
+    if (!bar) return;
+    const body = document.body;
+    if (bar.hidden) {
+      body.classList.remove("has-sequence");
+      body.style.removeProperty("--seq-clear");
+      return;
+    }
+    // bar sits 18px off the bottom (style.css .sequence-bar) + 10px breathing room
+    const clear = Math.ceil(bar.getBoundingClientRect().height) + 18 + 10;
+    body.style.setProperty("--seq-clear", clear + "px");
+    body.classList.add("has-sequence");
+    if (!seqResizeObserver && typeof ResizeObserver === "function") {
+      seqResizeObserver = new ResizeObserver(() => syncSequenceClearance());
+      seqResizeObserver.observe(bar);
+    }
+  }
+
   function renderSequenceBar() {
     const bar = qs("#sequence-bar");
     const items = qs("#sequence-items");
     if (state.sequence.length === 0) {
       bar.hidden = true;
+      syncSequenceClearance();
       return;
     }
     bar.hidden = false;
@@ -2532,6 +2559,7 @@
         el("span", { class: "seq-chip__x", onclick: () => { state.sequence.splice(i, 1); renderSequenceBar(); } }, "\u00d7"),
       ]));
     });
+    syncSequenceClearance();
   }
 
   function pruneSequence(name) {

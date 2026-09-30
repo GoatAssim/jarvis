@@ -772,7 +772,34 @@ input.is-invalid{ border-color: var(--red) !important; }
 
 @media (max-width: 780px){
   .sequence-bar{ flex-wrap: wrap; left: 12px; right: 12px; }
-  .sequence-bar__items{ order: 3; width: 100%; }
+  /* L.9.3 fix: was `width: 100%`, which never took effect -- the base
+     `.sequence-bar__items{ flex: 1 }` sets flex-basis 0%, and flex-basis beats
+     width, so the chips were squeezed onto the label/button row into a sliver
+     instead of wrapping to their own row (chip x / mode controls unusable). */
+  .sequence-bar__items{ order: 3; flex: 1 1 100%; }
+}
+
+/* L.9 -- the sequence bar owns the bottom edge while it is visible.
+   Before: the bar (z 40, full width, bottom 18px) shared its strip with the
+   online pill (z 45), the Logs fab and the Notifications fab (z 60), all
+   fixed to the same bottom edge, so the pill covered its middle and the fabs
+   covered its right end -- including the Run Sequence button (the Logs fab hid
+   ~half of it). z-index can't fix that: raising the bar would just hide the
+   fabs instead. So while the bar is showing, the things that share its strip
+   lift above it.
+   app.js (`syncSequenceClearance`) toggles body.has-sequence and writes the
+   bar's *measured* height into --seq-clear = the bottom offset a lifted
+   element needs to sit 10px above the bar (bar bottom 18px + bar height + 10).
+   Measured, not hard-coded, because the bar grows: it wraps to two rows under
+   780px. Fallback 90px = the one-row height, for the instant before JS runs.
+   Specificity (body.has-sequence .x) deliberately beats the plain `.x` rules
+   and their media queries, wherever those sit in the file. */
+body.has-sequence .logs-fab{ bottom: var(--seq-clear, 90px); }
+body.has-sequence .notifications-fab{ bottom: calc(var(--seq-clear, 90px) + 56px); }
+body.has-sequence .bottom-status-bar{ bottom: var(--seq-clear, 90px); }
+body.has-sequence .jui-toasts{ bottom: var(--seq-clear, 90px); } /* "Added to sequence" toasts used to land on Run Sequence */
+@media (max-width: 900px){
+  body.has-sequence .notifications-fab{ bottom: calc(var(--seq-clear, 90px) + 54px); }
 }
 
 /* =========================================================================
@@ -2101,7 +2128,17 @@ audio.ask-dl-player{ max-height: none; background: transparent; }
    straight stack-above-Logs would put it (smaller `right` = closer to the
    edge = further right on screen) — nudged again per feedback that the
    first pass wasn't far enough. */
-.notifications-fab{ bottom: 78px; right: 2px; position: relative; }
+/* L.9.2 fix: this rule used to say `position: relative`, which silently beat
+   `.logs-fab`'s `position: fixed` (same specificity, later in the file). A
+   relative button sits in normal page flow -- right after .app, so at the
+   bottom-LEFT of the page, 2px off the edge, and far below the viewport on
+   narrow screens -- and `bottom`/`right` merely nudged it from there. It is
+   now what every comment here always said it was: fixed, same right edge
+   as the Logs fab, stacked directly above it (Logs fab height 42 + 14 gap
+   = 56 above Logs' own 22px; 44 + 10 = 54 above 16px on narrow screens).
+   The old `right: 2px` nudge only made sense for the relative box and is
+   dropped so the two buttons line up. */
+.notifications-fab{ bottom: 78px; right: 22px; }
 .notifications-fab__badge{
   position: absolute; top: -6px; right: -6px;
   min-width: 18px; height: 18px; padding: 0 4px;
@@ -2112,7 +2149,7 @@ audio.ask-dl-player{ max-height: none; background: transparent; }
   box-shadow: 0 0 0 2px var(--bg-raised);
 }
 @media (max-width: 900px){
-  .notifications-fab{ bottom: 70px; right: 1px; }
+  .notifications-fab{ bottom: 70px; right: 16px; }
 }
 
 /* --- notifications panel -------------------------------------------------
