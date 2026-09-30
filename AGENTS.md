@@ -147,6 +147,7 @@ actually render Markdown):
     node tests/verify_ask_trace_replay.js
     node tests/verify_daemons_panel.js
     node tests/verify_daemons_console.js   # the console line classifier (H.1.7)
+    node tests/verify_l9_sequence_bar.js   # L.9: sequence bar reachable; needs `playwright` + Chromium, prints SKIP without them
 
 Two things that will waste your time if nobody tells you:
 
