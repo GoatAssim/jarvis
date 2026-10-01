@@ -183,9 +183,41 @@ def _words_to_lines(words):
     return [text for _top, text in lines]
 
 
+def _vision_fallback(image_path):
+    """Tier-3 transcription for read_screen when OCR is unavailable.
+
+    Returns (text, None) on success or (None, error). A separate function so
+    tests can switch it off: the real one reads the provider config and makes
+    a network call.
+    """
+    from . import vision_call, vision_tools  # noqa: PLC0415 -- lazy, import cycle
+    if not vision_tools.vision_available():
+        return None, "no configured provider can look at an image"
+    out = vision_call.describe_image(image_path, vision_call.TRANSCRIBE_PROMPT)
+    if out.get("ok"):
+        return out["text"], None
+    return None, out.get("error") or "vision call failed"
+
+
+def _with_vision_failure(ocr_error, vision_error):
+    """The original 'OCR missing' error, extended so the caller knows the
+    second tier was tried too and that retrying is pointless."""
+    out = dict(ocr_error)
+    out["error"] = "%s Vision fallback also unavailable: %s." % (out["error"], vision_error)
+    out["can_see_screen"] = False
+    out["retryable"] = False
+    return out
+
+
 def tool_read_screen(args=None):
-    if pytesseract is None or Image is None:
-        return _no_pytesseract()
+    ocr_missing = pytesseract is None or Image is None
+    if ocr_missing:
+        # Tiered vision (L.16, Q-L16c): no OCR engine is not the end of the
+        # road. Skip the capture entirely if there is no vision route either,
+        # so the failure is as cheap and as fast as it ever was.
+        from . import vision_tools  # noqa: PLC0415
+        if not vision_tools.vision_available():
+            return _no_pytesseract()
     args = args or {}
     try:
         min_confidence = float(args.get("min_confidence", 0))
@@ -203,10 +235,19 @@ def tool_read_screen(args=None):
         if err or meta is None:
             return {"error": f"screen capture failed: {err or 'unknown error'}"}
 
+        if ocr_missing:
+            text, verr = _vision_fallback(tmp_path)
+            if text is None:
+                return _with_vision_failure(_no_pytesseract(), verr)
+            return _vision_read_result(text)
+
         try:
             words = _ocr_words(tmp_path)
         except pytesseract.TesseractNotFoundError as e:
-            return _no_tesseract_binary(str(e))
+            text, verr = _vision_fallback(tmp_path)
+            if text is None:
+                return _with_vision_failure(_no_tesseract_binary(str(e)), verr)
+            return _vision_read_result(text)
         except Exception as e:
             return {"error": f"OCR failed: {e}"}
     finally:
@@ -225,6 +266,18 @@ def tool_read_screen(args=None):
         "text": text,
         "line_count": len(lines),
         "word_count": len(words),
+    }
+
+
+def _vision_read_result(text):
+    lines = [ln for ln in text.splitlines() if ln.strip()]
+    return {
+        "ok": True,
+        "text": "\n".join(lines),
+        "line_count": len(lines),
+        "source": "vision",
+        "note": "OCR isn't installed, so this was transcribed by a vision "
+                "model. It can contain mistakes; say so if a decision depends on it.",
     }
 
 
@@ -331,7 +384,8 @@ OCR_TOOL_SCHEMAS = [
             "'done' or an error) rather than needing to actually see the "
             "screen's layout/visuals. Cheaper than a screenshot round-trip "
             "through you: the OCR happens locally and only the recognized "
-            "text comes back."
+            "text comes back. If OCR isn't installed it transcribes with a "
+            "vision model instead (result has source='vision')."
         ),
         "parameters": {
             "type": "object",

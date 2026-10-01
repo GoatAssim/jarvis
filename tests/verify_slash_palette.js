@@ -74,12 +74,13 @@ function makeEnv() {
     "ask-form": new FakeEl("form"),
   };
   els["slash-palette"].hidden = true;
+  const docHandlers = {};
   const document = {
     readyState: "complete",
     getElementById: (id) => els[id] || null,
     createElement: (t) => new FakeEl(t),
     createTextNode: (t) => { const n = new FakeEl("#text"); n._text = t; return n; },
-    addEventListener() {},
+    addEventListener(t, f, capture) { (docHandlers[t] = docHandlers[t] || []).push({ f, capture: !!capture }); },
   };
   const calls = [];
   const rec = (name) => (...a) => { calls.push([name, ...a]); };
@@ -154,7 +155,7 @@ function makeEnv() {
     vm.runInContext(fs.readFileSync(path.join(PUBLIC, f), "utf8"), sandbox, { filename: f });
   }
   return {
-    S: window.JarvisSlash, els, calls, toasts, fetches, warnings,
+    S: window.JarvisSlash, els, calls, toasts, fetches, warnings, docHandlers,
     setRunning: (v) => { running = v; },
     setSlash: (v) => { slashResponse = v; },
     failDaemonsOnce: () => { failDaemons = true; },
@@ -664,6 +665,27 @@ async function main() {
     await flush();
     check("clicking a row only FILLS the input; it never runs (I.2.5)", env.input.value === "/guides" && (env.form.submits || 0) === submitsBefore);
 
+    // I-B19: pressing ANYTHING inside the popover must not steal focus, and a
+    // press that re-renders the list under the pointer must not count as an
+    // outside click.
+    await type("/gu");
+    const pal = env.palette;
+    let prevented = 0;
+    for (const t of ["pointerdown", "mousedown"]) {
+      pal.dispatchEvent({ type: t, target: { closest: () => null }, preventDefault() { prevented++; } });
+    }
+    check("I-B19: a press on the popover's own chrome (heading/footer/padding) is default-prevented, pointer and mouse", prevented === 2, String(prevented));
+    const dh = (env.docHandlers.pointerdown || []);
+    check("I-B19: the outside-click listener is registered in the CAPTURE phase", dh.length === 1 && dh[0].capture === true, JSON.stringify(dh.map((h) => h.capture)));
+    const outside = () => dh[0].f({ target: { id: "somewhere-else" }, composedPath: () => [{}] });
+    const insideDetached = () => dh[0].f({ target: { detached: true }, composedPath: () => [{}, env.palette] });
+    insideDetached();
+    check("I-B19: a press whose target was detached by a re-render, but whose path includes the popover, keeps it open", env.palette.hidden === false);
+    outside();
+    check("I-B19: a real outside press still closes it (Q-I19)", env.palette.hidden === true);
+    await type("/gu");
+    check("I-B19: ...and typing in the composer reopens it", env.palette.hidden === false);
+
     // level 2 chrome
     await type("/chat ");
     check("level 2 has the '/chat › pick a chat · 2 of 2' chip", env.palette.querySelectorAll(".slash-heading").some((h) => h.textContent === "/chat \u203a pick a chat \u00b7 2 of 2"), env.palette.querySelectorAll(".slash-heading").map((h) => h.textContent).join("|"));
@@ -722,6 +744,24 @@ async function main() {
     const first = env.palette.querySelectorAll(".slash-row")[0].textContent;
     check("among equal matches the recently-used verb ranks first (MRU tie-break)", /\/skills/.test(first) && !/\/skillload/.test(first), first);
     check("MRU never stores chat titles", true);
+  }
+
+  // ---- I-B20: stacking order of the surfaces a palette verb can open ----------------------------
+  // /skin, /config and the command builder open a `.modal-backdrop`; it has to
+  // sit above Ask, the menu panels and the Debug-style panels or it opens
+  // underneath them. A fake DOM can't see layout, but the z-index order is plain CSS.
+  {
+    const css = fs.readFileSync(path.join(PUBLIC, "style.css"), "utf8");
+    const z = (sel) => {
+      const m = css.match(new RegExp("(?:^|\\n)" + sel.replace(/\./g, "\\.") + "\\s*\\{[^}]*?z-index:\\s*(\\d+)"));
+      return m ? Number(m[1]) : null;
+    };
+    const zModal = z(".modal-backdrop"), zAsk = z(".ask-overlay"), zMenu = z(".menu-overlay"), zDebug = z(".debug-overlay");
+    check("I-B20: all four overlay classes have a z-index", [zModal, zAsk, zMenu, zDebug].every((n) => n != null), [zModal, zAsk, zMenu, zDebug].join(","));
+    check("I-B20: .modal-backdrop (Skin/Settings/command builder) is above Ask, menu and debug overlays", zModal > Math.max(zAsk, zMenu, zDebug), [zModal, zAsk, zMenu, zDebug].join(","));
+    const ui = fs.readFileSync(path.join(PUBLIC, "ui-kit.css"), "utf8");
+    const uiMin = Math.min(...Array.from(ui.matchAll(/z-index:\s*(\d+)/g)).map((m) => Number(m[1])));
+    check("I-B20: ...and still below the ui-kit confirm/dialog/toast layers", zModal < uiMin, zModal + " vs " + uiMin);
   }
 
   console.log(`\n${pass} passed, ${fail} failed`);

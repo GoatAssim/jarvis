@@ -1755,6 +1755,7 @@
     // Ask Jarvis \u2014 state for the turn currently streaming in, if any.
     askPendingBubble: null,  // the DOM node for Jarvis's in-progress reply bubble
     askReplyLines: [],       // accumulated (post prefix-strip) lines of that reply, raw (untriaged)
+    askStream: null,         // live-streaming state for the turn in flight (§8 / K.3.1.5) — see applyAskStreamEvent
     askTraceBubble: null,    // the DOM node for the current turn's console-dump bubble, if any
     askQuotes: [],           // highlighted excerpts attached to the next ask
     lastTaskLabel: "",       // user request / command name for away notifications
@@ -3214,6 +3215,7 @@
       case "ask-start":
         setRunning(true);
         state.askReplyLines = [];
+        state.askStream = null;
         state.askTraceBubble = null;
         state.askPendingBubble = addJarvisBubblePending();
         setAskStatus("thinking\u2026", "busy");
@@ -3221,6 +3223,13 @@
         break;
       case "ask-stdout":
         appendAskReplyLine(msg.line);
+        break;
+      case "ask-stream":
+        // §8 / K.3.1.4: one live event from the model as it generates —
+        // {k: "text"|"thinking"|"tool"|"round_end"|"reset", ...}. The
+        // finished reply still arrives as ordinary ask-stdout lines below
+        // and stays authoritative (see finalizeAskBubble).
+        applyAskStreamEvent(msg.ev);
         break;
       case "ask-stderr":
         addAskPromptTrace(msg.line);
@@ -4778,13 +4787,265 @@
     return msg;
   }
 
+  // ---- §8 live streaming (K.3.1.5) BEGIN --------------------------------
+  // The ONE browser entry point for streamed model output: handleWsMessage's
+  // "ask-stream" case calls applyAskStreamEvent() and nothing else touches
+  // this state. One assistant turn is an ordered run of segments —
+  // thinking -> text -> tool -> thinking -> text ... — built as the events
+  // arrive:
+  //   * thinking: its own collapsible <details> (same .thinking-block look as
+  //     a saved thinking extra), streaming plain text while the model
+  //     thinks, collapsing to "Thought for N s" when the segment ends.
+  //   * text: streams into the turn's pending bubble as markdown.
+  //   * a round that ends in a tool call COMMITS its text as its own bubble
+  //     (it's a real interim message, §8.4 — never provisional), and the
+  //     pending bubble starts over for the next round.
+  //   * a round that ends `done` stays in the pending bubble, provisional
+  //     until the process exits: the final reply printed at exit replaces it
+  //     (finalizeAskBubble), so what's shown and what's saved can't drift.
+  //   * "reset" (mid-stream failover, §8.6) discards only the CURRENT
+  //     round's uncommitted output.
+  // Thinking show/hide is the existing "Show reasoning trace" toggle
+  // (thinkState.show): purely a display switch, applied instantly and
+  // mid-turn by syncStreamThinkingVisibility() — thinking events are always
+  // forwarded, so turning it on partway reveals everything streamed so far.
+
+  // Close any code fence still open at the end of half-streamed markdown, so
+  // an unclosed ``` doesn't render the rest of the message — or, worse, the
+  // text that hasn't arrived yet — as one giant code block mid-stream. Only
+  // ever applied to the preview; the final render always gets the real text.
+  function balanceStreamingMarkdown(text) {
+    let open = null; // the fence marker currently open: "`" or "~", plus its length
+    const lines = String(text).split("\n");
+    for (const line of lines) {
+      const m = /^ {0,3}(`{3,}|~{3,})/.exec(line);
+      if (!m) continue;
+      const ch = m[1][0];
+      const len = m[1].length;
+      if (!open) {
+        open = { ch, len };
+      } else if (open.ch === ch && len >= open.len && /^ {0,3}[`~]+\s*$/.test(line)) {
+        open = null; // a closing fence has no info string
+      }
+    }
+    if (!open) return text;
+    const closer = open.ch.repeat(Math.max(3, open.len));
+    return text + (text.endsWith("\n") ? "" : "\n") + closer;
+  }
+
+  function newAskStream() {
+    return {
+      text: "",          // uncommitted text of the current round
+      thinkEl: null,     // the <details> of the thinking segment streaming right now
+      thinkBody: null,
+      thinkStart: 0,
+      roundThinkEls: [], // this round's thinking blocks — what a reset discards
+      toolName: "",
+      frame: 0,          // pending render id (0 = none); frameIsRaf says which kind
+      frameIsRaf: false,
+    };
+  }
+
+  function streamNearBottom() {
+    // Follow the stream only while the reader is already at the bottom;
+    // scrolling up to read something must not get yanked back down.
+    return askThread.scrollHeight - askThread.scrollTop - askThread.clientHeight < 80;
+  }
+
+  function resetPendingBubbleToTyping() {
+    if (!state.askPendingBubble) return;
+    const bubble = qs(".ask-msg__bubble", state.askPendingBubble);
+    if (!bubble) return;
+    bubble.innerHTML = "";
+    bubble.appendChild(el("span", { class: "ask-typing" }, [el("span", {}), el("span", {}), el("span", {})]));
+  }
+
+  function renderStreamText() {
+    const st = state.askStream;
+    if (!st) return;
+    st.frame = 0;
+    // The finished reply has started arriving as stdout lines: it is
+    // authoritative, and a late animation frame must not paint the streamed
+    // preview back over it.
+    if (state.askReplyLines.length) return;
+    if (!state.askPendingBubble || !isViewingAskThread()) return;
+    const follow = streamNearBottom();
+    const bubble = qs(".ask-msg__bubble", state.askPendingBubble);
+    if (!bubble) return;
+    bubble.innerHTML = renderMarkdown(balanceStreamingMarkdown(st.text));
+    linkifyPaths(bubble);
+    if (follow) askThreadScrollToEnd();
+  }
+
+  function scheduleStreamRender() {
+    const st = state.askStream;
+    if (!st || st.frame) return;
+    // At most one markdown render per animation frame: re-rendering the
+    // whole message per token would be O(n^2) at token rate (§8.5).
+    if (typeof requestAnimationFrame === "function") {
+      st.frameIsRaf = true;
+      st.frame = requestAnimationFrame(renderStreamText);
+    } else {
+      st.frameIsRaf = false;
+      st.frame = setTimeout(renderStreamText, 16);
+    }
+  }
+
+  // rAF ids and timer ids are separate namespaces that can collide
+  // numerically, so cancel with the call that matches how it was scheduled.
+  function cancelStreamFrame(st) {
+    if (!st.frame) return;
+    if (st.frameIsRaf) cancelAnimationFrame(st.frame);
+    else clearTimeout(st.frame);
+    st.frame = 0;
+  }
+
+  function endThinkingSegment(st) {
+    if (!st.thinkEl) return;
+    const secs = Math.max(1, Math.round((Date.now() - st.thinkStart) / 1000));
+    const summary = qs(".thinking-block__summary", st.thinkEl);
+    if (summary) summary.textContent = `Thought for ${secs} s`;
+    st.thinkEl.classList.remove("thinking-block--live");
+    st.thinkEl.open = false; // collapsed once finished, click to expand (like Claude/ChatGPT)
+    st.thinkEl = null;
+    st.thinkBody = null;
+  }
+
+  function streamThinkingDelta(st, delta) {
+    if (!isViewingAskThread()) return;
+    // The thread can be rebuilt under a running turn (switching
+    // conversations and back); a block that's no longer in it is stale.
+    if (st.thinkEl && !askThread.contains(st.thinkEl)) { st.thinkEl = null; st.thinkBody = null; }
+    if (!st.thinkEl) {
+      const body = el("pre", { class: "thinking-block__text" });
+      const details = el("details", { class: "thinking-block thinking-block--stream thinking-block--live" }, [
+        el("summary", { class: "thinking-block__summary" }, "Thinking\u2026"),
+        body,
+      ]);
+      details.open = thinkState.show;
+      details.hidden = !thinkState.show;
+      st.thinkEl = details;
+      st.thinkBody = body;
+      st.thinkStart = Date.now();
+      st.roundThinkEls.push(details);
+      insertIntoAskThread(details);
+    }
+    const follow = streamNearBottom();
+    st.thinkBody.textContent += delta;
+    if (thinkState.show) st.thinkBody.scrollTop = st.thinkBody.scrollHeight;
+    if (follow) askThreadScrollToEnd();
+  }
+
+  // "Show reasoning trace" flipped (see setThinkShow): apply instantly to
+  // every thinking block already streamed in this thread, live or finished.
+  function syncStreamThinkingVisibility() {
+    for (const d of askThread.querySelectorAll(".thinking-block--stream")) {
+      d.hidden = !thinkState.show;
+      if (d.classList.contains("thinking-block--live")) d.open = thinkState.show;
+    }
+  }
+
+  function commitRoundText(st) {
+    const text = st.text;
+    st.text = "";
+    cancelStreamFrame(st);
+    if (!text.trim()) return;
+    if (isViewingAskThread()) {
+      const follow = streamNearBottom();
+      const msg = el("div", { class: "ask-msg ask-msg--jarvis ask-msg--interim" }, [
+        el("div", { class: "ask-msg__role" }, currentAssistantName()),
+        el("div", { class: "ask-msg__bubble" }),
+      ]);
+      msg.dataset.raw = text;
+      const bubbleEl = qs(".ask-msg__bubble", msg);
+      bubbleEl.innerHTML = renderMarkdown(text);
+      linkifyPaths(bubbleEl);
+      renderMathIn(bubbleEl);
+      addAskMsgActions(msg);
+      insertIntoAskThread(msg); // lands above the pending bubble, in order
+      resetPendingBubbleToTyping();
+      if (follow) askThreadScrollToEnd();
+    }
+  }
+
+  function discardRoundOutput(st) {
+    const hadOutput = Boolean(st.text) || st.roundThinkEls.length > 0;
+    st.text = "";
+    cancelStreamFrame(st);
+    for (const d of st.roundThinkEls) d.remove();
+    st.roundThinkEls = [];
+    st.thinkEl = null;
+    st.thinkBody = null;
+    if (!hadOutput || !isViewingAskThread()) return;
+    resetPendingBubbleToTyping();
+    insertIntoAskThread(el("div", { class: "ask-stream-note" },
+      "Switching provider \u2014 discarded the partial output above."));
+  }
+
+  function applyAskStreamEvent(ev) {
+    if (!ev || typeof ev !== "object") return;
+    // Only meaningful while a turn is in flight with a bubble to land in.
+    if (!state.running || !state.askPendingBubble) return;
+    const st = state.askStream || (state.askStream = newAskStream());
+    switch (ev.k) {
+      case "thinking":
+        streamThinkingDelta(st, String(ev.d || ""));
+        setAskStatus("thinking\u2026", "busy");
+        break;
+      case "text":
+        endThinkingSegment(st);
+        st.text += String(ev.d || "");
+        scheduleStreamRender();
+        setAskStatus("writing\u2026", "busy");
+        break;
+      case "tool":
+        endThinkingSegment(st);
+        st.toolName = String(ev.name || "");
+        break;
+      case "round_end":
+        endThinkingSegment(st);
+        if (ev.finish === "tool") {
+          // Text before a tool call is a real interim message — keep it.
+          commitRoundText(st);
+          st.roundThinkEls = []; // committed with the round; a later reset must not touch them
+          setAskStatus(st.toolName ? `running ${st.toolName}\u2026` : "running tool\u2026", "busy");
+          st.toolName = "";
+        }
+        break;
+      case "reset":
+        discardRoundOutput(st);
+        setAskStatus("thinking\u2026", "busy");
+        break;
+    }
+  }
+
+  // Called once when the turn ends (finalizeAskBubble): stops any pending
+  // frame, closes a still-open thinking segment so it never stays on
+  // "Thinking…" after a Stop, and hands back whatever text was streamed but
+  // never superseded by a finished reply (the Stop / failure case).
+  function takeAskStreamPartial() {
+    const st = state.askStream;
+    state.askStream = null;
+    if (!st) return "";
+    cancelStreamFrame(st);
+    endThinkingSegment(st);
+    return st.text || "";
+  }
+  // ---- §8 live streaming (K.3.1.5) END ----------------------------------
+
   // Shared between a normal incoming reply line and re-painting whatever's
   // accumulated so far into a freshly (re)created pending bubble — e.g.
   // after switching back into a still-running conversation, where the old
   // bubble's DOM node was destroyed by loadConversationIntoThread rebuilding
   // the thread from scratch (see selectConversation).
   function rerenderAskPendingBubble() {
-    if (!state.askPendingBubble || !state.askReplyLines.length) return;
+    if (!state.askPendingBubble) return;
+    if (!state.askReplyLines.length) {
+      // Nothing from the finished reply yet — repaint the streamed preview
+      // (if any) into the freshly created bubble.
+      if (state.askStream && state.askStream.text) renderStreamText();
+      return;
+    }
     const { name, dump, reply } = splitConsoleDump(state.askReplyLines);
     if (name) qs(".ask-msg__role", state.askPendingBubble).textContent = name;
     renderAskTrace(dump);
@@ -4803,6 +5064,8 @@
   }
 
   function finalizeAskBubble(overrideMessage) {
+    // Streamed-but-never-superseded text, if any (a Stop or a failed turn).
+    const streamedPartial = takeAskStreamPartial();
     if (!isViewingAskThread()) {
       state.askPendingBubble = null;
       state.askReplyLines = [];
@@ -4816,7 +5079,18 @@
     const bubble = state.askPendingBubble;
     if (bubble) {
       bubble.classList.remove("is-pending");
-      if (state.askReplyLines.length === 0) {
+      if (state.askReplyLines.length === 0 && streamedPartial.trim()) {
+        // Stopped (or failed) mid-generation: keep what streamed so far
+        // rather than replacing it with "(no response)" — and say so (§8.5).
+        bubble.dataset.raw = streamedPartial;
+        bubble.classList.add("is-stopped");
+        const bubbleEl = qs(".ask-msg__bubble", bubble);
+        bubbleEl.innerHTML = renderMarkdown(streamedPartial);
+        linkifyPaths(bubbleEl);
+        renderMathIn(bubbleEl);
+        bubbleEl.appendChild(el("div", { class: "ask-stream-note" },
+          overrideMessage ? `Stopped \u2014 ${overrideMessage}` : "Stopped \u2014 this reply is incomplete."));
+      } else if (state.askReplyLines.length === 0) {
         const raw = overrideMessage || "(no response)";
         bubble.dataset.raw = raw;
         bubble.classList.add("is-error");
@@ -5678,11 +5952,13 @@
     const prev = thinkState.show;
     thinkState.show = show;
     renderThinkMenu();
+    syncStreamThinkingVisibility(); // §8.5: a display switch — instant, also mid-turn
     try {
       await Api.post("/api/think", { level: thinkState.level, show });
     } catch (err) {
       thinkState.show = prev;
       renderThinkMenu();
+      syncStreamThinkingVisibility();
       toast(err.message || "Couldn't change that.");
     }
   }

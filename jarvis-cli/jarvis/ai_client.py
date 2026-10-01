@@ -2861,15 +2861,15 @@ def ask(user_text, commands=None, on_attempt=None, on_tool_call=None, on_tool_re
     on_stream(kind, **data), if given, fires with live deltas as an adapter's
     response streams in \u2014 master plan \u00a78. `kind` is one of
     ai_providers.EVENT_TEXT/EVENT_THINKING/EVENT_TOOL/EVENT_ROUND_END/
-    EVENT_RESET. Only takes effect when this ask()'s config has
-    `defaults.stream: true` \u2014 see stream_this_ask above for why that isn't
-    the default yet. All five adapters (Ollama, OpenAI-compatible,
-    Anthropic, Gemini, Cohere) natively stream as of \u00a78.7's K.3.1.2; what's
-    still missing is anything downstream that could consume the callback
-    (K.3.1.4's CLI marker line, K.3.1.5's web WS/SSE framing and browser
-    render entry point), which is the actual reason `stream: true` isn't
-    turned on anywhere yet \u2014 flipping it now would just mean nobody's
-    listening.
+    EVENT_RESET. Passing it opts this ask() into the streaming transport
+    (K.3.1.4 \u2014 see stream_this_ask below); an explicit
+    `defaults.stream: false` overrides that and keeps the blocking path.
+    All five adapters (Ollama, OpenAI-compatible, Anthropic, Gemini,
+    Cohere) natively stream as of \u00a78.7's K.3.1.2. EVENT_RESET fires from
+    here, not from an adapter: when an attempt fails (or its finished reply
+    is rejected) after uncommitted text/thinking already streamed, so the
+    consumer can discard that partial output before the next key/provider
+    starts over (\u00a78.6). Text streamed before a tool call is never reset.
 
     conversation_id picks which conversation (see conversations.py) this
     exchange belongs to and gets appended to. When omitted, the CLI's
@@ -3274,17 +3274,50 @@ def ask(user_text, commands=None, on_attempt=None, on_tool_call=None, on_tool_re
     # rotating keys. 30 by default; 0 disables (see _short_429_wait_seconds).
     max_429_wait = float(_defaults.get("max_429_wait_seconds", 30) or 0)
     # Master plan §8: whether adapters should use their streaming transport
-    # this ask() at all. Default False FOR NOW, not the on-by-default §8.2
-    # ultimately wants — see ai_providers.py's own module comment (right
-    # above stream_enabled()) for why: nothing downstream of on_stream
-    # exists yet to consume it (no JARVIS_STREAM marker line, no web
-    # forwarding, no UI), so there is no user-visible reason to turn this on
-    # by default before that lands, and doing so early would silently
-    # change behavior for every existing caller/test that mocks
-    # ai_providers._post_json without knowing _post_stream exists.
-    # `defaults.stream: true` (or passing on_stream=...) opts in early for
-    # testing one adapter at a time as each is converted (§8.7's order).
-    stream_this_ask = bool(_defaults.get("stream", False))
+    # this ask() at all. Still NOT the blanket on-by-default §8.2 ultimately
+    # wants — doing that here would silently change behavior for every
+    # existing caller/test that mocks ai_providers._post_json without
+    # knowing _post_stream exists (see ai_providers.py's module comment
+    # above stream_enabled()). What changed with K.3.1.4: a caller that
+    # passes on_stream= has, by doing so, said somebody is listening, so
+    # that alone opts this ask() in (the CLI does this only when
+    # web/server.js asked for it — see cli.py's JARVIS_STREAM_MARKERS).
+    # `defaults.stream` stays the explicit override in BOTH directions: true
+    # streams even with nobody listening (hang detection), and an explicit
+    # false forces the blocking path even when on_stream= was passed — the
+    # §8.2 escape hatch for a proxy that mangles event streams. Unset
+    # (the shipped default) means "follow whether anyone is listening".
+    _cfg_stream = _defaults.get("stream")
+    stream_this_ask = bool(_cfg_stream) if _cfg_stream is not None else (on_stream is not None)
+
+    # §8.6 mid-stream failover: a key can die AFTER partial output already
+    # reached the sink (429/503 mid-response, a dropped connection, or the
+    # post-hoc rejection of a finished reply below). ask() then moves on to
+    # the next key/provider, so the sink must hear EVENT_RESET or the UI
+    # would show half a sentence followed by a different model's full
+    # answer. `dirty` is True from the first text/thinking delta until a
+    # round ends in a tool call — text streamed before a tool call is a
+    # legitimate interim message that is kept (§8.4), so it is never reset;
+    # a round that ended `done` stays provisional until the attempt is
+    # accepted, which is what lets the post-hoc rejection reset it too.
+    _stream_state = {"dirty": False}
+    user_on_stream = on_stream
+
+    def _tracked_on_stream(kind, **data):
+        if kind in (ai_providers.EVENT_TEXT, ai_providers.EVENT_THINKING):
+            _stream_state["dirty"] = True
+        elif kind == ai_providers.EVENT_ROUND_END and data.get("finish") == ai_providers.FINISH_ROUND_TOOL:
+            _stream_state["dirty"] = False
+        elif kind == ai_providers.EVENT_RESET:
+            _stream_state["dirty"] = False
+        if user_on_stream:
+            user_on_stream(kind, **data)
+
+    def _reset_stream_if_dirty():
+        if stream_this_ask and user_on_stream and _stream_state["dirty"]:
+            ai_providers._emit_stream(ai_providers.EVENT_RESET)
+
+    on_stream = _tracked_on_stream if user_on_stream else None
     forced_end = None
 
     tool_executor = _make_tool_executor(
@@ -3517,6 +3550,12 @@ def ask(user_text, commands=None, on_attempt=None, on_tool_call=None, on_tool_re
             if not result.ok:
                 wait_s = _short_429_wait_seconds(result.kind, result.error, max_429_wait)
                 if wait_s is not None:
+                    # The sink is cleared by clear_log_context() above, so
+                    # re-arm it just long enough to say "discard that
+                    # partial output" before the wait + retry.
+                    ai_providers.set_stream_sink(on_stream)
+                    _reset_stream_if_dirty()
+                    ai_providers.set_stream_sink(None)
                     if on_attempt:
                         on_attempt(f"{key_label} [rate limited \u2014 waiting {wait_s:.0f}s before retrying]")
                     console_store.log("provider", f"{key_label} [rate limited \u2014 waiting {wait_s:.0f}s before retrying]")
@@ -3546,6 +3585,13 @@ def ask(user_text, commands=None, on_attempt=None, on_tool_call=None, on_tool_re
                 result = ai_providers.AIResult(
                     False, error="model echoed tool-call traces instead of an answer"
                 )
+
+            if not result.ok:
+                # Covers a plain failed attempt and the post-hoc rejection
+                # just above; a no-op when nothing uncommitted was streamed.
+                ai_providers.set_stream_sink(on_stream)
+                _reset_stream_if_dirty()
+                ai_providers.set_stream_sink(None)
 
             if result.ok:
                 key_health.record_success(_provider_label(provider), resolved.get("model"), key)

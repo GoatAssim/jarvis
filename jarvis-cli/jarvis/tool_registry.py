@@ -321,7 +321,11 @@ TOOL_KEYWORDS = {
                        "grayed out": 10, "what does the icon": 10,
                        "look at my screen": 10, "what does my screen": 9,
                        "on my screen": 7, "what is on screen": 9,
-                       "describe the screen": 10, "can you see": 7},
+                       "describe the screen": 10, "can you see": 7,
+                       # L.16: the one-shot imperative that used to route to
+                       # schedule_watch and never got a tool that can look.
+                       "check the screen": 9, "check my screen": 9,
+                       "look at the screen": 10, "check the display": 8},
     "audio_status": {"volume": 6, "sound": 5, "audio": 5, "output device": 8,
                      "playback device": 8, "speakers": 6, "headphones": 6},
     "set_volume": {"set volume": 10, "volume to": 10, "turn the volume": 9,

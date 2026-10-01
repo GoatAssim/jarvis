@@ -48,12 +48,25 @@ asking three questions about one unchanged screen costs one vision call.
 Same spirit and same failure mode as discovery_cache.py: best-effort, TTL'd,
 and a corrupt cache file degrades to "no cache" rather than an error.
 
-WHAT THIS MODULE DOESN'T DO
----------------------------
-It doesn't call a model. `describe_screen()` returns a *decision* plus the
-image path when escalation is warranted; `ai_client` is what actually
-attaches the image. Keeping the policy free of I/O is what lets the whole
-escalation ladder be tested without a provider (see tests/test_vision.py).
+TIER 3 IS A SIDE CALL (L.16, Q-L16c)
+------------------------------------
+Escalation used to return an `image_path` for "ai_client to attach" -- and
+nothing in ai_client or the provider adapters ever did, so tier 3 did not
+exist and a PC without Tesseract could not see its own screen. Tier 3 is now
+vision_call.describe_image(): ONE request carrying the screenshot to a
+multimodal provider, answer returned as text. The main tool loop stays
+text-only and the image is never resent on later rounds.
+
+The escalation policy itself (should_escalate) is still a pure function with
+no I/O, which is what lets the whole ladder be tested without a provider.
+
+TIER 1 MISSING IS NOT A REASON TO GIVE UP
+-----------------------------------------
+Tesseract not installed (or pytesseract/Pillow missing) means the text tier
+is unavailable, which pushes straight to tier 3. Only when BOTH tiers are
+unavailable does the tool fail -- once, with a clear, non-retryable message
+that names what is missing, so an unattended job can stop at once instead of
+improvising (L.16 RC1/RC2).
 """
 
 import hashlib
@@ -275,42 +288,27 @@ def cache_store(fp, question, description):
 # Capability probe
 # ---------------------------------------------------------------------------
 
-# Provider types whose adapters can carry an image part. Mirrors the shape of
-# reasoning.CAPABILITIES, and for the same reason: one table, consulted
-# before building a request, rather than a per-adapter branch.
-VISION_CAPABLE_TYPES = {
-    "anthropic": True,
-    "gemini": True,
-    "openai_compatible": True,   # most, but see the model check below
-    "ollama": True,              # only for multimodal local models
-    "cohere": False,
-}
-
-# Model names that are known text-only despite living on a vision-capable
-# provider type. Cheap guard against a guaranteed-400 round trip.
-_TEXT_ONLY_MODEL_RE = re.compile(
-    r"(whisper|embed|tts|moderation|rerank|instruct-text|-text-only)", re.I)
+# Which providers can take an image lives in vision_call.provider_supports_images
+# (one table, consulted before building a request). openai_compatible and
+# ollama need a model name positively known to accept images, because a
+# text-only model answers an image request with a 400 -- a wasted round trip
+# and a cooldown mark against a healthy key.
 
 
 def vision_available(providers=None):
     """Is there at least one configured provider that could take an image?"""
+    from . import vision_call  # noqa: PLC0415
     if providers is None:
         try:
             from . import ai_config, ai_client
             cfg = ai_config.load_ai_config()
+            if not vision_call.vision_enabled(cfg):
+                return False
             providers = ai_client._eligible_providers(
                 cfg.get("providers") or [], cfg.get("defaults") or {})
         except Exception:
             return False
-    for provider in providers or []:
-        if not isinstance(provider, dict):
-            continue
-        if not VISION_CAPABLE_TYPES.get(provider.get("type")):
-            continue
-        if _TEXT_ONLY_MODEL_RE.search(str(provider.get("model") or "")):
-            continue
-        return True
-    return False
+    return bool(vision_call.vision_providers(providers))
 
 
 # ---------------------------------------------------------------------------
@@ -350,23 +348,31 @@ def _capture_once():
     return path, None
 
 
-def _ocr_file(path):
-    """OCR an existing image. Returns text (possibly empty) — never raises.
+def _ocr_file_status(path):
+    """OCR an existing image. Returns (text, status), never raises.
 
-    Empty text is a legitimate, meaningful result here (it's escalation
-    signal #2), so every failure mode collapses to "" rather than an error
-    shape. A missing Tesseract binary means the text tier is simply
-    unavailable, which correctly pushes the decision toward vision.
+    status is "ok" (text may still be empty -- a legitimate result and
+    escalation signal #2), "unavailable" (pytesseract/Pillow missing or the
+    Tesseract binary not on PATH: the text tier does not exist on this PC),
+    or "failed" (OCR ran and broke). The distinction matters: an empty screen
+    and a missing OCR engine need different messages and different next steps.
     """
-    from . import ocr_tools  # noqa: PLC0415 — heavy, lazy
+    from . import ocr_tools  # noqa: PLC0415 -- heavy, lazy
 
     if ocr_tools.pytesseract is None or ocr_tools.Image is None:
-        return ""
+        return "", "unavailable"
     try:
         words = ocr_tools._ocr_words(path)
-        return "\n".join(ocr_tools._words_to_lines(words))
+        return "\n".join(ocr_tools._words_to_lines(words)), "ok"
+    except ocr_tools.pytesseract.TesseractNotFoundError:
+        return "", "unavailable"
     except Exception:
-        return ""
+        return "", "failed"
+
+
+def _ocr_file(path):
+    """Text only, "" on any failure. Kept for callers that don't care why."""
+    return _ocr_file_status(path)[0]
 
 
 def _prune_frames(keep=8):
@@ -382,18 +388,50 @@ def _prune_frames(keep=8):
         pass
 
 
+def _answer_key(fp, question):
+    """Cache key for an ANSWER. The older screen-only key suited a general
+    description reused across questions; a tier-3 answer is specific to the
+    question asked, so the question is part of the key."""
+    if not fp:
+        return None
+    norm = " ".join((question or "").lower().split())
+    return "%s:%s" % (fp, hashlib.sha256(norm.encode()).hexdigest()[:10])
+
+
+def _cannot_see(ocr_status, vision_ok, detail=None):
+    """The one clear failure for 'neither tier works'. Non-retryable by design:
+    an unattended job must be able to stop on this at once."""
+    parts = []
+    if ocr_status == "unavailable":
+        parts.append("the OCR engine (Tesseract) is not installed")
+    elif ocr_status == "failed":
+        parts.append("OCR failed")
+    if not vision_ok:
+        parts.append("no configured provider can look at an image "
+                     "(add a Gemini or Claude key)")
+    elif detail:
+        parts.append(detail)
+    return {
+        "error": "Can't see the screen: " + "; ".join(parts) + ".",
+        "can_see_screen": False,
+        "retryable": False,
+        "hint": ("Don't retry, don't guess, and don't click or type based on a "
+                 "screen you haven't read. Report that the screen can't be read."),
+    }
+
+
 def tool_look_at_screen(args):
     """Answer a question about the screen, using the cheapest tier that can.
 
-    Returns one of three shapes:
+    Tiers: 1 OCR (local, free) -> 2 does the text answer it? -> 3 ask a
+    multimodal model about the screenshot (vision_call.describe_image).
 
-        tier="ocr"     -> answered from text; `text` holds the OCR output
-        tier="cached"  -> this exact screen was described recently
-        tier="vision"  -> `image_path` is set; the caller attaches the image
-
-    The tool never *sends* the image itself. It hands back a decision, and
-    ai_client attaches the file — so the escalation policy stays a pure
-    function and this module needs no provider, no network and no key.
+    Returns one of:
+        tier="ocr"     answered from text; `text` holds the OCR output
+        tier="cached"  this exact screen + question was answered recently
+        tier="vision"  `answer` is a multimodal model's answer
+    or an {"error", "can_see_screen": False, "retryable": False} when neither
+    tier is available.
     """
     args = args or {}
     question = str(args.get("question") or "").strip()
@@ -406,17 +444,24 @@ def tool_look_at_screen(args):
     if err:
         return {"error": err}
 
-    ocr_text = _ocr_file(image_path)
+    ocr_text, ocr_status = _ocr_file_status(image_path)
     available = vision_available()
+    _prune_frames()
+
+    # Neither tier exists: fail now, once, before spending anything.
+    if ocr_status != "ok" and not available:
+        return _cannot_see(ocr_status, False)
 
     if force:
         escalate = available
         reason = ("explicitly requested" if available
                   else "no vision-capable provider configured")
+    elif ocr_status != "ok":
+        escalate = True
+        reason = ("OCR is unavailable on this PC" if ocr_status == "unavailable"
+                  else "OCR failed")
     else:
         escalate, reason = should_escalate(question, ocr_text, available)
-
-    _prune_frames()
 
     if not escalate:
         return {
@@ -429,29 +474,43 @@ def tool_look_at_screen(args):
                     "only if the text genuinely cannot answer the question.",
         }
 
-    fp = fingerprint(image_path)
-    cached = cache_lookup(fp, question)
+    key = _answer_key(fingerprint(image_path), question)
+    cached = cache_lookup(key, question)
     if cached:
         return {
             "tier": "cached",
             "question": question,
-            "description": cached,
-            "text": ocr_text[:2000],
+            "answer": cached,
             "escalated": False,
-            "reason": "this screen was already described recently (unchanged)",
+            "reason": "this screen was already asked this exact question recently (unchanged)",
         }
 
-    return {
-        "tier": "vision",
-        "question": question,
-        "image_path": str(image_path),
-        "fingerprint": fp,
-        "text": ocr_text[:2000],
-        "escalated": True,
-        "reason": reason,
-        "note": "Look at the attached image to answer. The OCR text is "
-                "included for context but did not answer the question.",
-    }
+    from . import vision_call  # noqa: PLC0415
+    out = vision_call.describe_image(image_path, vision_call.answer_prompt(question))
+    if out.get("ok"):
+        cache_store(key, question, out["text"])
+        return {
+            "tier": "vision",
+            "question": question,
+            "answer": out["text"],
+            "escalated": True,
+            "reason": reason,
+            "provider": out.get("provider"),
+        }
+
+    # The vision call failed. If OCR did read something, it is better than
+    # nothing -- say so plainly rather than pretending it answered.
+    if ocr_status == "ok" and ocr_text.strip():
+        return {
+            "tier": "ocr",
+            "question": question,
+            "text": ocr_text[:6000],
+            "escalated": False,
+            "reason": "vision failed (%s)" % out.get("error"),
+            "note": "Vision could not be used, so this is the OCR text only. "
+                    "If it does not answer the question, say so -- do not guess.",
+        }
+    return _cannot_see(ocr_status, True, out.get("error"))
 
 
 def remember_description(fingerprint_value, question, description):
@@ -466,9 +525,10 @@ VISION_TOOL_SCHEMAS = [
         "description": (
             "Answer a question about what's on screen. Reads the screen text "
             "first (free) and only falls back to actually looking at the "
-            "pixels when the text can't answer it — e.g. colours, icons, "
-            "greyed-out buttons, charts, layout. Prefer read_screen when you "
-            "only need text."
+            "pixels when the text can't answer it, or when OCR isn't installed "
+            "— e.g. colours, icons, greyed-out buttons, charts, layout, 'is "
+            "usage exhausted'. The result is a text answer. If it says it "
+            "can't see the screen, stop: don't retry or act blind."
         ),
         "parameters": {
             "type": "object",

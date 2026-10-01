@@ -42,6 +42,11 @@ def _patched(monkeypatch_words=None, capture_error=None):
     orig_image = ocr_tools.Image
     orig_ocr_words = ocr_tools._ocr_words
     orig_capture = screenshot_tools.capture_to
+    orig_fallback = ocr_tools._vision_fallback
+    # The tiered-vision fallback reads the real provider config and would make
+    # a network call on a machine with API keys. Off for these OCR tests;
+    # tests/test_tiered_vision.py covers the fallback itself.
+    ocr_tools._vision_fallback = lambda path: (None, "disabled in this test")
 
     ocr_tools.pytesseract = _FakePytesseract()
     ocr_tools.Image = object()  # just needs to be non-None
@@ -65,6 +70,7 @@ def _patched(monkeypatch_words=None, capture_error=None):
         ocr_tools.Image = orig_image
         ocr_tools._ocr_words = orig_ocr_words
         screenshot_tools.capture_to = orig_capture
+        ocr_tools._vision_fallback = orig_fallback
     return restore
 
 
@@ -146,14 +152,18 @@ def test_read_screen_reports_missing_tesseract_binary():
 
 
 def test_read_screen_reports_missing_pytesseract_package():
+    from jarvis import vision_tools
     orig = ocr_tools.pytesseract
+    orig_avail = vision_tools.vision_available
     ocr_tools.pytesseract = None
+    vision_tools.vision_available = lambda providers=None: False  # no tier-3 route either
     try:
         result = ocr_tools.tool_read_screen({})
         check("a missing pytesseract package is a clear error",
               "error" in result and "pytesseract" in result["error"].lower(), result)
     finally:
         ocr_tools.pytesseract = orig
+        vision_tools.vision_available = orig_avail
 
 
 def test_read_screen_is_registered():

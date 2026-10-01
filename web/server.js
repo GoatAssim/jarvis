@@ -2403,6 +2403,17 @@ const CONFIRM_MARKER = "JARVIS_CONFIRM_REQUEST ";
 // CONFIRM_MARKER above, forwarded to the browser as "ask-usage" so the
 // debug menu / chat UI can render a per-turn token breakdown.
 const USAGE_MARKER = "JARVIS_USAGE ";
+// Master plan §8 / K.3.1.4: live token streaming. cli.py (only when we set
+// JARVIS_STREAM_MARKERS=1 on the spawned child — see the "ask" handler) prints
+// one `JARVIS_STREAM {"k":"text"|"thinking"|"tool"|"round_end"|"reset",...}`
+// line per coalesced event (jarvis/stream_markers.py has the wire shape).
+// Same marker-on-stdout protocol as the two above, forwarded to the browser
+// as "ask-stream" and rendered by app.js's stream entry point. The final
+// assembled reply is still printed as ordinary stdout at the end, so an
+// older browser tab that doesn't know "ask-stream" just ignores these and
+// behaves exactly as before.
+const STREAM_MARKER = "JARVIS_STREAM ";
+const STREAM_KINDS = new Set(["text", "thinking", "tool", "round_end", "reset"]);
 // Generic UI round-trip (jarvis/ui_bridge.py). Same marker-on-stdout,
 // answer-on-stdin protocol as CONFIRM_MARKER — generalized so ANY tool can
 // ask the user something, instead of confirmation being the only question
@@ -2610,6 +2621,13 @@ wss.on("connection", (ws) => {
       const fullArgs = [...JARVIS.args, prompt];
       send(ws, { type: "ask-start", cmdline: [JARVIS.cmd, ...JARVIS.args, "<your message>"].join(" ") });
       const extraEnv = { ...conversationEnv(msg.conversationId), JARVIS_UI: "web" };
+      // Live streaming is on for web asks. JARVIS_WEB_STREAM=0 in the server's
+      // own environment is the escape hatch back to the blocking transport
+      // (a proxy that mangles event streams, or bisecting a regression) —
+      // the browser then just gets the finished reply, as before K.3.1.4.
+      if (process.env.JARVIS_WEB_STREAM !== "0") {
+        extraEnv.JARVIS_STREAM_MARKERS = "1";
+      }
       if (typeof msg.allowedTools === "string") {
         extraEnv.JARVIS_ALLOWED_TOOLS = msg.allowedTools;
       }
@@ -2626,6 +2644,23 @@ wss.on("connection", (ws) => {
         extraEnv.JARVIS_PROVIDER_OVERRIDE = msg.provider;
       }
       const onStdoutLine = (line) => {
+        if (line.startsWith(STREAM_MARKER)) {
+          let ev;
+          try {
+            ev = JSON.parse(line.slice(STREAM_MARKER.length));
+          } catch {
+            return false; // malformed — let it through as plain text rather than swallow it silently
+          }
+          // Whitelist the shape instead of relaying whatever the child
+          // printed: the browser only ever sees these five kinds.
+          if (!ev || typeof ev !== "object" || !STREAM_KINDS.has(ev.k)) return false;
+          const out = { k: ev.k };
+          if (ev.k === "text" || ev.k === "thinking") out.d = typeof ev.d === "string" ? ev.d : "";
+          if (ev.k === "tool") out.name = typeof ev.name === "string" ? ev.name : "";
+          if (ev.k === "round_end") out.finish = ev.finish === "tool" ? "tool" : "done";
+          send(ws, { type: "ask-stream", ev: out });
+          return true;
+        }
         if (line.startsWith(USAGE_MARKER)) {
           let usage;
           try {
