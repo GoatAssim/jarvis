@@ -482,11 +482,19 @@
     ui.root.appendChild(ui.list);
     ui.root.appendChild(ui.foot);
     ui.root.appendChild(ui.sr);
-    // pointerdown + preventDefault so the textarea keeps focus and blur can't
-    // close the popover out from under the pick (mouse and touch alike).
+    // I-B19: a press ANYWHERE inside the popover (rows, headings, footer,
+    // padding, the list's scrollbar gutter) must keep the textarea focused,
+    // or its blur closes the popover 120 ms later. This used to
+    // preventDefault only for `.slash-row` presses, so pressing a heading or
+    // the footer closed the palette. Listening on the root covers all of it.
+    // mousedown too: not every browser skips the focus change when only
+    // pointerdown is cancelled.
+    ui.root.addEventListener("pointerdown", (e) => { e.preventDefault(); });
+    ui.root.addEventListener("mousedown", (e) => { e.preventDefault(); });
+    // pointerdown so the pick lands before blur (mouse and touch alike).
     // Picking a row only ever FILLS the input; it never runs anything.
     ui.list.addEventListener("pointerdown", (e) => {
-      const rowEl = e.target.closest(".slash-row");
+      const rowEl = e.target.closest && e.target.closest(".slash-row");
       if (!rowEl) return;
       e.preventDefault();
       const idx = Number(rowEl.dataset.index);
@@ -1330,9 +1338,20 @@
     });
     ui.input.addEventListener("blur", () => setTimeout(() => setOpen(false), 120));
     ui.input.addEventListener("focus", () => { if (parse(ui.input.value)) refresh(); });
+    // I-B19: this listener is in the CAPTURE phase on purpose. As a bubble
+    // listener it ran AFTER the list's own pointerdown handler, which can
+    // re-render the rows (e.g. "Show the other N commands" rebuilds the list
+    // via innerHTML = ""). By then e.target was detached, so
+    // ui.root.contains(e.target) was false and a press on the palette's own
+    // row counted as an "outside click". Capture runs before any handler
+    // below the document, while the DOM is still intact; composedPath() is
+    // fixed at dispatch time, so it is a second line of defence either way.
     document.addEventListener("pointerdown", (e) => {
-      if (ui.open && !ui.root.contains(e.target) && e.target !== ui.input) setOpen(false);
-    });
+      if (!ui.open) return;
+      const path = typeof e.composedPath === "function" ? e.composedPath() : [];
+      const inside = ui.root.contains(e.target) || path.includes(ui.root);
+      if (!inside && e.target !== ui.input && !path.includes(ui.input)) setOpen(false);
+    }, true);
   }
 
   global.JarvisSlash = { handleSubmit, handleComposerKeydown, parse, score, editDistance, isComplete };

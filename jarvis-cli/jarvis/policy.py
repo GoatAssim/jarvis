@@ -114,6 +114,8 @@ _TOOL_RISK = {
     "notify_owner": 15, "send_digest": 5,
     "spotify_play": 5, "playnite_launch_game": 20,
     "radio_set": 30, "set_capacity_mode": 10,
+    # Powers the PC off / restarts / sleeps / locks it (L.16, actions/power_tools.py).
+    "power_action": 60,
 }
 
 # Context multipliers. Unattended execution roughly doubles the risk of

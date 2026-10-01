@@ -904,13 +904,33 @@ def handle_ai_prompt(text, commands, provider_override=None, think_override=None
         if env_think and env_think.strip():
             think_override = reasoning.normalize_level(env_think.strip())
 
-    result = ai_client.ask(
-        text, commands, on_attempt=on_attempt, on_tool_call=on_tool_call,
-        on_tool_result=on_tool_result,
-        conversation_id=conv_id, on_confirm_request=on_confirm_request,
-        on_route=on_route, provider_override=provider_override,
-        think_override=think_override, on_interim_text=on_interim_text,
-    )
+    # Master plan §8 / K.3.1.4: live streaming for the web UI. Opt-in per
+    # process via JARVIS_STREAM_MARKERS=1, which only web/server.js's "ask"
+    # handler sets — a plain terminal run, the scheduler, subagent steps and
+    # every other caller of this function are untouched (no on_stream means
+    # ai_client.ask() keeps its blocking transport exactly as before). Each
+    # event becomes one `JARVIS_STREAM {json}` stdout line; see
+    # stream_markers.py for the wire shape and why deltas are coalesced.
+    stream_sink = None
+    if os.environ.get("JARVIS_STREAM_MARKERS") == "1":
+        from .stream_markers import StreamMarkerSink
+        stream_sink = StreamMarkerSink()
+
+    try:
+        result = ai_client.ask(
+            text, commands, on_attempt=on_attempt, on_tool_call=on_tool_call,
+            on_tool_result=on_tool_result,
+            conversation_id=conv_id, on_confirm_request=on_confirm_request,
+            on_route=on_route, provider_override=provider_override,
+            think_override=think_override, on_interim_text=on_interim_text,
+            on_stream=stream_sink,
+        )
+    finally:
+        # Anything still buffered (the last few tokens before the process
+        # moves on to print the reply) must go out before the reply lines,
+        # or the browser would see the final text arrive ahead of its tail.
+        if stream_sink is not None:
+            stream_sink.close()
 
     for label, err in result.attempts:
         print(f"{ERR.DIM}  \u2717 {label} \u2014 {err}{ERR.RESET}", file=sys.stderr, flush=True)

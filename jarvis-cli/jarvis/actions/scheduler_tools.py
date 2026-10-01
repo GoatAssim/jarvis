@@ -746,7 +746,20 @@ TOOL_KEYWORDS = {
         "in the background later": 7, "every hour": 8, "daily": 7, "hourly": 7,
     },
     "schedule_watch": {
-        "check if the screen": 10, "check the screen": 9, "read the screen and": 9,
+        # L.16: a bare "check the screen" used to be a weight-9 phrase here, so a
+        # plain one-shot imperative ("check the screen to see if usage is
+        # exhausted, then...") routed to schedule_watch and offered no way to
+        # actually look. A watch needs a recurrence or a trigger, so the
+        # phrases below carry one. (The router ignores any phrase under
+        # MIN_SCORE entirely, so it cannot be "nudged" down -- it has to go.)
+        "check if the screen": 10,
+        "check the screen every": 10, "check the screen whenever": 10,
+        "check the screen periodically": 10, "check the screen until": 9,
+        "check the screen again": 8, "keep checking the screen": 10,
+        "check the screen in": 8, "check the screen at": 8,
+        "check the screen and tell me when": 10,
+        "check the screen and let me know when": 10,
+        "read the screen and": 9,
         "watch the screen": 9, "if it says": 6, "if it shows": 6,
     },
     "list_scheduled": {

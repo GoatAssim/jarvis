@@ -1055,9 +1055,10 @@ window.JARVIS_TEST_CHECKLIST = /*JSON-BEGIN*/ {
     }
    ],
    "needs": [
-    "Tesseract OCR installed (local OCR — nothing leaves the PC)"
+    "Tesseract OCR installed (local OCR — nothing leaves the PC). Without it, read_screen transcribes with a vision model instead (source 'vision'), which does send one screenshot to a cloud provider."
    ],
    "watch": [
+    "With Tesseract missing and a Gemini/Claude key set, read_screen returns ok with source 'vision' and a note that it may contain mistakes. With neither, the error says so and retryable is false.",
     "A failed OCR call carries a diagnosis naming the real cause: Tesseract not on PATH (restart the web server from a fresh terminal), language data missing (TESSDATA_PREFIX), or the pip packages missing. It should never tell you to install something that is already installed."
    ],
    "care": "Moves the real mouse/keyboard. Open Notepad (or another harmless target) first and keep it focused."
@@ -1076,9 +1077,10 @@ window.JARVIS_TEST_CHECKLIST = /*JSON-BEGIN*/ {
     }
    ],
    "needs": [
-    "Tesseract OCR installed (local OCR — nothing leaves the PC)"
+    "Tesseract OCR installed (local OCR — nothing leaves the PC). Without it, read_screen transcribes with a vision model instead (source 'vision'), which does send one screenshot to a cloud provider."
    ],
    "watch": [
+    "With Tesseract missing and a Gemini/Claude key set, read_screen returns ok with source 'vision' and a note that it may contain mistakes. With neither, the error says so and retryable is false.",
     "A failed OCR call carries a diagnosis naming the real cause: Tesseract not on PATH (restart the web server from a fresh terminal), language data missing (TESSDATA_PREFIX), or the pip packages missing. It should never tell you to install something that is already installed."
    ]
   },
@@ -1103,8 +1105,14 @@ window.JARVIS_TEST_CHECKLIST = /*JSON-BEGIN*/ {
     }
    ],
    "needs": [
-    "Tesseract OCR installed (local OCR — nothing leaves the PC)",
-    "A provider that can read images (for the pixel path)"
+    "Tesseract OCR installed (optional now: without it, the pixel path answers instead)",
+    "A Gemini or Claude key, or an OpenAI-compatible/Ollama model that takes images (for the pixel path)"
+   ],
+   "care": "The pixel path sends one screenshot to a cloud provider. Set defaults.vision_enabled to false in ai_config.json to keep screens on this PC.",
+   "watch": [
+    "With Tesseract uninstalled (rename it off PATH) and a Gemini key set, 'is anything red on screen' must still answer, tier 'vision'.",
+    "With Tesseract missing AND no image-capable provider, it must fail ONCE with 'Can't see the screen' and retryable false — no retries, no guessing.",
+    "Asking a second, different question about an unchanged screen must make a new request (answers are cached per question, not per screen)."
    ]
   },
   "audio_status": {
@@ -1241,6 +1249,61 @@ window.JARVIS_TEST_CHECKLIST = /*JSON-BEGIN*/ {
    "care": "Turning Wi-Fi off cuts cloud-model access. Have a wired or local-model fallback and turn it back on.",
    "watch": [
     "May need Administrator."
+   ]
+  },
+  "power_action": {
+   "group": "system_control",
+   "does": "Shuts down, restarts, sleeps or locks the PC, or cancels a pending shutdown/restart.",
+   "steps": [
+    {
+     "run": {
+      "action": "shutdown"
+     },
+     "expect": "With JARVIS_POWER_DRY_RUN=1 set: ok true, dry_run true, delay_seconds 15, command shutdown /s /t 15. Nothing is shut down."
+    },
+    {
+     "run": {
+      "action": "restart",
+      "delay_seconds": 0,
+      "force": true
+     },
+     "expect": "With JARVIS_POWER_DRY_RUN=1 set: command is shutdown /r /t 0 /f."
+    },
+    {
+     "run": {
+      "action": "lock"
+     },
+     "expect": "The screen locks immediately. Unlock it and carry on."
+    },
+    {
+     "run": {
+      "action": "shutdown",
+      "delay_seconds": 120
+     },
+     "expect": "ok true and a note that the PC will shut down in 120 seconds."
+    },
+    {
+     "run": {
+      "action": "cancel"
+     },
+     "expect": "ok true, cancelled true — the pending shutdown above is gone. Running it again with nothing pending is a calm ok (cancelled false)."
+    },
+    {
+     "ask": "Shut down the PC.",
+     "expect": "A confirmation prompt appears BEFORE anything happens. Decline it: the PC stays on and Jarvis says it did not run."
+    },
+    {
+     "run": {
+      "action": "hibernate"
+     },
+     "expect": "ok false, 'action must be one of: ...' — nothing happens."
+    }
+   ],
+   "os": "windows",
+   "care": "Real runs (without JARVIS_POWER_DRY_RUN) really lock, sleep, restart or shut down this PC. Save your work first.",
+   "watch": [
+    "A scheduled job containing this tool shows NEEDS APPROVAL until a person approves it, then runs with no further prompt.",
+    "sleep must sleep, not hibernate, even when hibernation is enabled."
    ]
   },
   "bluetooth_set": {
