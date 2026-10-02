@@ -475,3 +475,13 @@ silently never runs.
 - Log entries for a request to a different host are labelled by host (`_log_provider_for`).
 - Router: last line of a 3+ line, 200+ char message gets +2 (`tool_router.LAST_LINE_BONUS`);
   highlight-quote wrappers are stripped before routing (`_strip_highlight_excerpt`).
+- Router keyword entries can carry `needs_any` (L.24 T1): the phrase counts only if one of
+  the listed words also appears, so a bare platform word (`discord`) triggers `click` only
+  with an action word. Used together with `not_with`; see `tool_registry.keyword_needs()`.
+- Token accounting (L.24 T6): `ai_providers.get_usage_summary()` describes ONE attempt;
+  `token_usage.AskUsage` (fed by `ai_client.ask()` after every adapter call, including
+  failed attempts and same-key 429 retries) is the per-ask total, exposed as
+  `AskResult.usage["ask_total"]`, the turn trace's `tokens`, a `logs` "info" row and the
+  CLI/web token lines. Gemini `thoughtsTokenCount` is billed ON TOP of output and is added
+  to totals; OpenAI-style `reasoning_tokens` are already inside output and are not.
+  `tests/measure_l24.py` reprints the measurements behind these numbers.

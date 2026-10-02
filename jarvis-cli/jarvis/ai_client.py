@@ -25,6 +25,7 @@ from . import logs
 from . import policy
 from . import job_risk
 from . import tool_diagnosis
+from . import token_usage
 from . import tool_result_shaping
 from . import tool_router
 from . import route_stickiness
@@ -383,6 +384,37 @@ _SIMPLE_OVERRIDE_KEYS = {"max_commands", "tool_result_budget"}  # not run throug
 # stays roughly current without an extra AI round-trip on every single ask.
 TITLE_REGEN_EVERY = 5
 _JSON_OBJECT_RE = re.compile(r"\{.*\}", re.S)
+
+
+def _with_ask_total(usage, ask_usage, conv_id=None):
+    """L.24 T6: attach the per-ASK total (every attempt, thinking included).
+
+    `usage` is ai_providers.get_usage_summary() for the attempt that answered
+    (or None). Its top-level numbers keep meaning "the answering attempt" so
+    nothing that reads them changes; the new `ask_total` key is what the turn
+    actually cost across failovers, key rotations and same-key 429 retries.
+    With no usage from a winning attempt (every provider failed, forced
+    ending) the top-level numbers are filled from the ask total instead.
+    """
+    if not ask_usage:
+        return usage
+    total = ask_usage.to_dict()
+    out = dict(usage) if isinstance(usage, dict) else {
+        "input_tokens": total["input_tokens"],
+        "output_tokens": total["output_tokens"],
+        "total_tokens": total["total_tokens"],
+        "rounds": [],
+        "tool_calls": [],
+    }
+    if total.get("thinking_tokens") and not isinstance(usage, dict):
+        out["thinking_tokens"] = total["thinking_tokens"]
+    out["ask_total"] = total
+    if conv_id:
+        try:
+            logs.log(conv_id, "info", {"ask_usage": total}, provider="ask total")
+        except Exception:  # noqa: BLE001 - measurement never fails a turn
+            pass
+    return out
 
 
 class AskResult:
@@ -3499,6 +3531,7 @@ def ask(user_text, commands=None, on_attempt=None, on_tool_call=None, on_tool_re
 
     on_stream = _tracked_on_stream if user_on_stream else None
     forced_end = None
+    ask_usage = token_usage.AskUsage()  # L.24 T6: every attempt's spend
 
     tool_executor = _make_tool_executor(
         on_tool_call, full_schemas, on_confirm_request=on_confirm_request,
@@ -3718,6 +3751,11 @@ def ask(user_text, commands=None, on_attempt=None, on_tool_call=None, on_tool_re
                 result = ai_providers.AIResult(False, error=f"unexpected error: {e}")
             finally:
                 ai_providers.clear_log_context()
+            # L.24 T6: record THIS attempt before anything resets the
+            # thread-local round list (the 429 retry below calls
+            # set_log_context again). Failed attempts carry no usage on their
+            # AIResult, so this is the only place their spend is still known.
+            ask_usage.add(key_label, ai_providers.get_usage_summary(), ok=result.ok)
 
             # D5 (master plan F.9/F.16): a 429 that stated a short retry
             # delay is worth waiting out ONCE, on this SAME key, rather than
@@ -3755,6 +3793,7 @@ def ask(user_text, commands=None, on_attempt=None, on_tool_call=None, on_tool_re
                         result = ai_providers.AIResult(False, error=f"unexpected error: {e}")
                     finally:
                         ai_providers.clear_log_context()
+                    ask_usage.add(f"{key_label} (retry)", ai_providers.get_usage_summary(), ok=result.ok)
                     if not result.ok:
                         result.error = f"{result.error} [waited {wait_s:.0f}s for the stated rate limit, still failed]"
                     if on_attempt:
@@ -3809,6 +3848,8 @@ def ask(user_text, commands=None, on_attempt=None, on_tool_call=None, on_tool_re
                 interim_items = ai_providers.get_interim_text()
                 if interim_items:
                     extras.append({"type": "interimText", "data": {"items": interim_items}})
+                if ask_usage:
+                    trace.tokens = ask_usage.to_dict()
                 extras.append({"type": "trace", "data": trace.to_dict()})
                 if on_trace:
                     try:
@@ -3854,7 +3895,7 @@ def ask(user_text, commands=None, on_attempt=None, on_tool_call=None, on_tool_re
                 _spawn_title_update(conv_id, exchange_count)
                 return AskResult(True, text=reply_text, provider=label, attempts=attempts,
                                  assistant_name=assistant_name, address_user_as=address,
-                                 usage=result.usage, ending=ending)
+                                 usage=_with_ask_total(result.usage, ask_usage, conv_id), ending=ending)
 
             # A rejection of the REQUEST itself (Groq's "Tool choice is none,
             # but model called a tool", a tool-argument schema mismatch, ...)
@@ -3939,7 +3980,8 @@ def ask(user_text, commands=None, on_attempt=None, on_tool_call=None, on_tool_re
         _pending_turn[0] = None
         return AskResult(True, text=reply, provider=None, attempts=attempts,
                          assistant_name=assistant_name, address_user_as=address,
-                         degraded=True, ending=ending, last_words=forced_end.last_words)
+                         degraded=True, ending=ending, last_words=forced_end.last_words,
+                         usage=_with_ask_total(None, ask_usage, conv_id))
 
     # Every provider failed on the closing text call. That used to always
     # mean "no provider answered" and get reported as a hard failure — but
@@ -3979,7 +4021,8 @@ def ask(user_text, commands=None, on_attempt=None, on_tool_call=None, on_tool_re
         _pending_turn[0] = None
         return AskResult(True, text=summary, provider=None, attempts=attempts,
                          assistant_name=assistant_name, address_user_as=address,
-                         degraded=True, ending="no_provider")
+                         degraded=True, ending="no_provider",
+                         usage=_with_ask_total(None, ask_usage, conv_id))
 
     # The turn is still real — the user asked something and got nothing at
     # all, not even a completed side effect — so it's recorded as such
@@ -3996,4 +4039,5 @@ def ask(user_text, commands=None, on_attempt=None, on_tool_call=None, on_tool_re
             extras=extras,
         )
     _pending_turn[0] = None
-    return AskResult(False, attempts=attempts, assistant_name=assistant_name, address_user_as=address)
+    return AskResult(False, attempts=attempts, assistant_name=assistant_name, address_user_as=address,
+                     usage=_with_ask_total(None, ask_usage, conv_id))
