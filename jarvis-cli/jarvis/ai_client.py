@@ -22,6 +22,8 @@ from . import dev_agent_events as _dev_agent_events
 from . import discovery_cache
 from . import key_health
 from . import logs
+from . import policy
+from . import job_risk
 from . import tool_diagnosis
 from . import tool_result_shaping
 from . import tool_router
@@ -946,6 +948,32 @@ def _system_prompt(*args, **kwargs):
     return "\n\n".join(p for p in (static, dynamic) if p)
 
 
+# L.16 RC3. The scheduler sets JARVIS_SCHEDULED, but until now only policy.py
+# read it: nothing told the MODEL it had no human, so it ended an unattended run
+# with "does the usage indicator show that usage is exhausted?" -- a question to
+# nobody -- and the job was recorded as a success.
+#
+# Per-run content, so it goes in the per-request TAIL (AGENTS.md: the static
+# prefix is shared across turns; this is absent for every interactive ask, which
+# therefore stays byte-identical to before). Deliberately short: it is paid on
+# every round of an unattended run.
+UNATTENDED_DIRECTIVE = (
+    "UNATTENDED RUN: the scheduler started this task. No person is at the "
+    "keyboard and nobody will read anything until it has finished, so you cannot "
+    "be answered. Never ask a question, offer options or wait for confirmation, "
+    "and never end by asking whether to proceed. Do the task or, if you cannot "
+    "verify or complete a step, say in one plain line what failed and stop. Never "
+    "click, type or press keys based on a screen you have not read. If a tool "
+    "result says retryable false, or that a call was blocked, stop there and "
+    "report it; do not try a different tool to get around it."
+)
+
+
+def _unattended_directive():
+    """UNATTENDED_DIRECTIVE when this process is a scheduled run, else ""."""
+    return UNATTENDED_DIRECTIVE if os.environ.get("JARVIS_SCHEDULED") else ""
+
+
 def _system_prompt_parts(persona, commands_ctx, freq_ctx, tools_enabled,
                          compact_tools=False, compact_persona=False, ultra=False, has_history=False,
                          memory_ctx="", has_playnite=False, has_spotify=False, other_convos_ctx="",
@@ -1073,6 +1101,11 @@ def _system_prompt_parts(persona, commands_ctx, freq_ctx, tools_enabled,
     # below varies per request or per conversation. The breakpoint goes here.
     static_parts = list(parts)
     parts = []
+
+    # First of all: whether anyone is there to answer. See UNATTENDED_DIRECTIVE.
+    unattended_ctx = _unattended_directive()
+    if unattended_ctx:
+        parts.append(unattended_ctx)
 
     # WHO IS TYPING. First in the tail, ahead of memory_ctx, deliberately:
     # everything below is written as though the owner is on the other end,
@@ -1502,6 +1535,70 @@ _REPEAT_FAILURE_DETECTORS = [
 ]
 
 
+def _stop_unattended_run(round_budget):
+    """Make every adapter treat this ask's tool budget as spent.
+
+    The adapters already stop offering tools (and run their forced-ending path,
+    which writes the final reply) when RoundBudget.remaining() is 0 and no grace
+    round is left. Emptying every pool, grace included, is therefore the whole
+    circuit breaker: the model still gets ONE more call, to say in a line what
+    failed, but it can no longer improvise with other tools. See L.16 RC2/RC4.
+    """
+    if round_budget is None:
+        return
+    for attr, value in (("used", getattr(round_budget, "limit", 0)),
+                        ("discovery_used", getattr(round_budget, "discovery_limit", 0)),
+                        ("project_discovery_used",
+                         getattr(round_budget, "project_discovery_limit", 0))):
+        try:
+            setattr(round_budget, attr, value)
+        except Exception:  # noqa: BLE001 -- a foreign budget object: best effort
+            pass
+    try:
+        round_budget.grace_used = True
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def _unattended_gate(name, arguments):
+    """policy.decide() for one call in a scheduled/unattended run.
+
+    Returns None when the call is not subject to the gate (an ordinary
+    interactive ask, which behaves exactly as before), else the verdict dict.
+    Fails closed for the tools job_risk flags, open for the rest: a bug in the
+    policy module must not be able to start a shutdown, and must also not turn
+    every unattended `get_datetime` into an error.
+    """
+    context = policy.unattended_context_from_env()
+    if context is None:
+        return None
+    approved_kinds = policy.approved_kinds_from_env()
+    try:
+        verdict = policy.decide(name, arguments, context=context,
+                                approved_kinds=approved_kinds)
+    except Exception as exc:  # noqa: BLE001
+        if job_risk.covering_kind(name):
+            return {"decision": policy.DENY, "approved": False,
+                    "because": "the policy check failed (%s)" % exc}
+        return None
+
+    # Deny-by-default for the flagged kinds. decide() only denies on a rule or a
+    # score, so a flagged tool the approval did NOT list (run_shell in a job
+    # approved only for the desktop) could otherwise slide through to the old
+    # confirm path -- which has no human to answer it. Scoped to scheduler jobs:
+    # scheduler._do_ask ALWAYS sets JARVIS_JOB_APPROVED_KINDS (empty included),
+    # and task_runner removes it, so a task step keeps its existing behaviour.
+    if (verdict.get("decision") != policy.DENY and not verdict.get("approved")
+            and "JARVIS_JOB_APPROVED_KINDS" in os.environ):
+        kind = job_risk.kind_of(name)
+        read_only_shell = (name == "run_shell" and tool_safety.is_allowlisted_read_only_shell(
+            arguments.get("command") if isinstance(arguments, dict) else None))
+        if kind and not read_only_shell:
+            return dict(verdict, decision=policy.DENY, approved=False,
+                        because="this job was not approved to %s" % job_risk.phrase(kind))
+    return verdict
+
+
 def _make_tool_executor(on_tool_call, schemas=None, on_confirm_request=None,
                          cfg=None, provider_ref=None, verbosity_ref=None,
                          discover_sink=None, cache_query=None,
@@ -1562,10 +1659,43 @@ def _make_tool_executor(on_tool_call, schemas=None, on_confirm_request=None,
     # count. See _REPEAT_FAILURE_DETECTORS above for the active patterns.
     _repeat_failures = {}
     _surfaced = set()
+    # Circuit breaker (L.16 RC2/RC4). Set once, to a one-line reason, when an
+    # UNATTENDED run hits something that retrying or improvising cannot fix: a
+    # tool that reports retryable=false, or a call the policy refuses. After
+    # that every call returns the same stop result without running -- including
+    # the rest of a parallel batch -- and the round budget is emptied so the
+    # adapters stop offering tools. Interactive asks never trip it: a person is
+    # there to fix the cause (install Tesseract) and decide what to do next.
+    _breaker = {"reason": None}
+
+    def _stop_result(reason):
+        return {
+            "ok": False, "blocked": True, "retryable": False,
+            "error": "Stopped: %s" % reason,
+            "hint": ("This unattended run has been stopped. Do not call any more "
+                     "tools. Reply with ONE plain line saying what could not be "
+                     "done and why."),
+        }
+
+    def _trip(reason):
+        if _breaker["reason"] is None:
+            _breaker["reason"] = reason
+            _stop_unattended_run(round_budget)
+            try:
+                console_store.log("error", "unattended run stopped: " + reason)
+            except Exception:  # noqa: BLE001 -- logging never breaks a tool call
+                pass
 
     def _executor(name, arguments):
         arguments = arguments or {}
         key = _cache_key(name, arguments)
+        if _breaker["reason"] is not None and key not in cache:
+            # Not cached and not run: a stopped call must not be replayed on a
+            # failover as though it had really happened.
+            _executor._cache_hit = False
+            result = _stop_result(_breaker["reason"])
+            runs.append({"name": name, "arguments": arguments, "result": result})
+            return result
         if key in cache:
             # Signal the cache hit to ai_providers._call_tool_safely so it
             # doesn't re-log/re-estimate token usage or append a duplicate
@@ -1591,6 +1721,35 @@ def _make_tool_executor(on_tool_call, schemas=None, on_confirm_request=None,
                 cache[key] = result
                 runs.append({"name": name, "arguments": arguments, "result": result})
                 return result
+
+        # L.16 RC4: enforce policy.decide() on the live path. Only in a
+        # scheduled/unattended run (policy.unattended_context_from_env), and
+        # only the verdicts that matter there:
+        #   deny     -> the call does not run, and the run is stopped (breaker).
+        #   approved -> this tool's kind was approved WITH the job (the owner's
+        #               2026-10-01 answer, "allowed when this job was approved").
+        #               No human exists to answer tool_safety's confirm prompt,
+        #               so the approval stands in for it, below.
+        # confirm/review verdicts change nothing here: they fall through to the
+        # existing gate, which is untouched (AGENTS.md).
+        job_approved = False
+        gate = _unattended_gate(name, arguments)
+        if gate is not None:
+            if gate.get("decision") == policy.DENY:
+                reason = "%s was not run: %s" % (name, gate.get("because") or "blocked by policy")
+                result = {
+                    "ok": False, "blocked": True, "retryable": False,
+                    "error": reason,
+                    "hint": ("Nothing unattended may do this. Do not try another "
+                             "tool to get the same effect; report it in one line "
+                             "and stop."),
+                }
+                cache[key] = result
+                runs.append({"name": name, "arguments": arguments, "result": result})
+                console_store.log("tool-result", "blocked by policy: " + reason, tool=name)
+                _trip(reason)
+                return result
+            job_approved = bool(gate.get("approved"))
 
         # Tool-level gate (tool_safety.json, keyed by tool name) is OR'd with
         # the per-*saved-command* flags on run_command/run_chain (see
@@ -1618,6 +1777,13 @@ def _make_tool_executor(on_tool_call, schemas=None, on_confirm_request=None,
         # exact allow-list rather than folding into any broader condition.
         if name == "run_shell" and tool_safety.is_allowlisted_read_only_shell(
                 arguments.get("command") if isinstance(arguments, dict) else None):
+            pass
+        elif job_approved:
+            # Approved with the job and allowed by policy.decide() above: the
+            # approval IS the confirmation (owner, 2026-10-01: a scheduled task
+            # needs no further confirm, the shutdown included). Reached only
+            # when approved_kinds names this tool's kind in an unattended run;
+            # an interactive ask can never set job_approved.
             pass
         elif (tool_safety.requires_confirmation(name)
                 or command_tools.command_call_requires_confirmation(name, arguments)
@@ -1749,6 +1915,20 @@ def _make_tool_executor(on_tool_call, schemas=None, on_confirm_request=None,
         # the call succeeded or nothing is known about the error, so the
         # happy path is byte-identical to before.
         shaped_result = tool_diagnosis.annotate(name, shaped_result)
+        # L.16 RC2: a tool that says retrying is pointless (the screen tools'
+        # `retryable: false`) ends an unattended run. Checked on the raw result
+        # AND the shaped one, since shaping may drop fields.
+        if (policy.unattended_context_from_env() is not None
+                and any(isinstance(r, dict) and r.get("retryable") is False
+                        and r.get("ok") is not True
+                        for r in (result, shaped_result))):
+            detail = ""
+            for r in (result, shaped_result):
+                if isinstance(r, dict) and r.get("error"):
+                    detail = str(r["error"]).strip()
+                    break
+            _trip("%s failed and cannot be retried%s"
+                  % (name, (": " + detail[:200]) if detail else ""))
         cache[key] = shaped_result
         run_entry = {"name": name, "arguments": arguments, "result": result}
         if confirm_meta is not None:

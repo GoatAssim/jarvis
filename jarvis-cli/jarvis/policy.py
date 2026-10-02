@@ -77,6 +77,8 @@ import os
 import re
 from pathlib import Path
 
+from . import job_risk
+
 JARVIS_DIR = Path.home() / ".jarvis"
 POLICY_FILE = JARVIS_DIR / "policy.json"
 ENCODING = "utf-8"
@@ -482,12 +484,25 @@ def escalate(current, proposed):
 
 
 def decide(tool_name, arguments=None, context=CTX_INTERACTIVE, source="builtin",
-           trusted=True, policy=None, baseline=None):
+           trusted=True, policy=None, baseline=None, approved_kinds=None):
     """The whole decision for one call.
 
     `baseline` is what tool_safety.py already decided (CONFIRM when the tool
     is flagged). The result can only ever be that or stricter — see the
     module docstring on why policy is allowed to tighten and not loosen.
+
+    `approved_kinds` is the one thing that can LOOSEN a decision, and only in
+    an unattended context (scheduled / unattended): the flagged kinds
+    (job_risk.KINDS) a person approved when they approved this job. An
+    unattended call whose tool is of an approved kind is allowed -- that is the
+    owner's 2026-10-01 answer, "allowed when this job was approved", replacing
+    deny-by-default for those kinds -- unless it trips one of two floors that
+    approval alone never buys: it touches a sensitive path (SSH keys, Jarvis's
+    own safety files...) or matches a destructive argument pattern (formats a
+    disk, deletes a directory tree...). The approval summary said "can delete or
+    overwrite files", not "can wipe a directory or edit its own guard rails".
+    A tool of a kind the approval did NOT list stays on the normal path: the
+    person never saw it, so they never agreed to it.
     """
     policy, problems = (policy, []) if policy else load_policy()
     group = _group_of(tool_name)
@@ -519,6 +534,33 @@ def decide(tool_name, arguments=None, context=CTX_INTERACTIVE, source="builtin",
             because = rule.get("because") or because
             break  # first match wins — the order in the file is the priority
 
+    approved = False
+    if approved_kinds and context in (CTX_SCHEDULED, CTX_UNATTENDED):
+        kind = job_risk.covering_kind(tool_name)
+        # A rule the owner wrote themselves is a standing instruction ("never
+        # let anything scheduled touch X") and approval of one job does not
+        # outrank it. Only the BUILT-IN rules -- the deny-by-default this
+        # feature replaces -- yield to approval. policy.json is seeded with the
+        # defaults (ensure_policy), so "built-in" means "equal to a default
+        # rule", not "absent from the file".
+        owner_rule = bool(matched) and matched not in DEFAULT_POLICY["rules"]
+        if kind and kind in approved_kinds and not owner_rule:
+            blocker = _approval_floor(reasons)
+            if blocker:
+                because = ("%s -- the job's approval (%s) doesn't cover that"
+                           % (blocker, job_risk.phrase(kind)))
+                decision = DENY
+                matched = {"because": because}
+            else:
+                approved = True
+                decision = ALLOW
+                because = "approved with this job (%s)" % job_risk.phrase(kind)
+                matched = {"because": because}
+                # Approval replaces the confirm that tool_safety would ask a
+                # human for: nobody is there. `baseline` is deliberately NOT
+                # re-applied below for the same reason.
+                baseline = None
+
     if baseline:
         decision = escalate(decision, baseline)
 
@@ -526,10 +568,25 @@ def decide(tool_name, arguments=None, context=CTX_INTERACTIVE, source="builtin",
         "decision": decision, "score": score, "reasons": reasons,
         "because": because, "matched_rule": (matched or {}).get("because"),
         "context": context, "group": group, "problems": problems,
+        "approved": approved,
     }
     if policy.get("audit"):
         _audit(tool_name, arguments, result)
     return result
+
+
+def _approval_floor(reasons):
+    """Why a job's approval does NOT cover this call, or "" when it does.
+
+    Reads the reasons score_call() already produced, so there is one source of
+    truth for what counts as a sensitive path or a destructive pattern.
+    """
+    for source, weight, text in reasons:
+        if source == "path" and text.startswith("it touches"):
+            return text[0].upper() + text[1:]
+        if source == "argument" and weight >= 45:
+            return text[0].upper() + text[1:]
+    return ""
 
 
 def _group_of(tool_name):
@@ -657,3 +714,33 @@ def context_from_env():
     except Exception:  # noqa: BLE001
         pass
     return CTX_UNATTENDED
+
+
+def unattended_context_from_env():
+    """The unattended context this process is running in, or None.
+
+    Narrower than context_from_env() on purpose. That one answers "who is
+    watching?" and says `unattended` whenever it cannot tell, which is right for
+    scoring but would be wrong for ENFORCING: a bare non-tty `jarvis ask` from a
+    script is not a scheduled job and should keep behaving as it always has.
+    Enforcement therefore keys off an explicit signal only -- JARVIS_SCHEDULED
+    (set by scheduler._do_ask / task_runner._spawn_ask) or JARVIS_CONTEXT naming
+    an unattended context.
+
+    JARVIS_SCHEDULED wins over a JARVIS_CONTEXT that says `interactive`: a stray
+    inherited variable must not turn enforcement off for a job that is
+    unmistakably scheduled.
+    """
+    if os.environ.get("JARVIS_SCHEDULED"):
+        return (CTX_UNATTENDED if os.environ.get("JARVIS_CONTEXT") == CTX_UNATTENDED
+                else CTX_SCHEDULED)
+    if os.environ.get("JARVIS_CONTEXT") in (CTX_SCHEDULED, CTX_UNATTENDED):
+        return os.environ["JARVIS_CONTEXT"]
+    return None
+
+
+def approved_kinds_from_env():
+    """Kinds this run's job was approved for (JARVIS_JOB_APPROVED_KINDS), as a
+    list. Absent / empty means nothing risky was approved."""
+    raw = os.environ.get("JARVIS_JOB_APPROVED_KINDS") or ""
+    return [k for k in (part.strip() for part in raw.split(",")) if k in job_risk.KINDS]

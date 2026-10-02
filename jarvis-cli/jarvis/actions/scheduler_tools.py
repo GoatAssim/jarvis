@@ -89,6 +89,11 @@ def _ok(job, note=None):
             "with `jarvis sched-approve %s` — you cannot approve it yourself."
             % job["id"]
         )
+        lines = (summary.get("risk") or {}).get("lines") or []
+        if lines:
+            # Say what approval would authorise, so the model can tell the user
+            # plainly instead of "it needs approval" with no why.
+            out["approval_covers"] = lines
     if note:
         out["note"] = note
     return out
