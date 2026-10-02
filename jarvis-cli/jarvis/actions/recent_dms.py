@@ -243,6 +243,25 @@ TOOL_KEYWORDS = {
         "recent instagram": 7,
         "recent discord": 7,
         "discord":9,
+        # L.24 T1: "has anyone texted you on discord" has no phrase of its
+        # own - the bare word above was the only thing routing it, and with
+        # a platform-less "has anyone texted you" nothing routed at all.
+        # These are read-the-inbox phrasings only: "text me" / "text X" are
+        # sending, which this tool deliberately does not cover (see below).
+        "texted you": 9,
+        "anyone texted": 10,
+        "has anyone texted": 10,
+        "did anyone text": 10,
+        "who texted": 10,
+        "who texted me": 10,
+        "anyone dmed": 10,
+        "anyone dm'd": 10,
+        "did anyone dm": 10,
+        "who dm'd me": 10,
+        "anyone messaged you": 9,
+        "anyone message you": 9,
+        "new dms": 9,
+        "unread dms": 9,
         # Deliberately NOT "message me" / "reply to" / "send a message" —
         # those are actions/notify_owner.py's/outbound sending's territory,
         # not this read-only tool, and overlapping them would blur the two

@@ -83,6 +83,15 @@ def extract_usage(provider_type, data):
             if cached:
                 entry["cache_read_tokens"] = cached
                 entry["cache_write_tokens"] = 0
+        # L.24 T6: reasoning models report how much of completion_tokens was
+        # hidden thinking. It is a COMPONENT of completion_tokens (already in
+        # output_tokens), so it is flagged and never added a second time.
+        cdetails = usage.get("completion_tokens_details")
+        if isinstance(cdetails, dict):
+            reasoning = _as_int(cdetails.get("reasoning_tokens"))
+            if reasoning:
+                entry["thinking_tokens"] = reasoning
+                entry["thinking_in_output"] = True
         return entry
 
     if provider_type == "anthropic":
@@ -133,6 +142,14 @@ def extract_usage(provider_type, data):
         cached = _as_int(meta.get("cachedContentTokenCount"))
         if cached:
             entry["cache_read_tokens"] = cached
+        # L.24 T6: Gemini bills thinking SEPARATELY from candidatesTokenCount
+        # (totalTokenCount = promptTokenCount + candidatesTokenCount +
+        # thoughtsTokenCount - checked on both real logs in tests/fixtures).
+        # It used to be dropped here, so every Gemini total understated the
+        # spend. Additive: it is NOT inside output_tokens.
+        thoughts = _as_int(meta.get("thoughtsTokenCount"))
+        if thoughts:
+            entry["thinking_tokens"] = thoughts
         return entry
 
     if provider_type == "cohere":
@@ -177,3 +194,106 @@ def extract_usage(provider_type, data):
         return entry
 
     return None
+
+
+# ---------------------------------------------------------------------------
+# L.24 T6: totals that count everything that was billed.
+# ---------------------------------------------------------------------------
+
+def extra_thinking(entry):
+    """Thinking tokens billed IN ADDITION to entry["output_tokens"].
+
+    Gemini reports thoughtsTokenCount outside candidatesTokenCount, so it
+    adds to the bill. OpenAI-style reasoning_tokens are already inside
+    completion_tokens (the entry carries thinking_in_output) and add nothing.
+    """
+    if not isinstance(entry, dict) or entry.get("thinking_in_output"):
+        return 0
+    return _as_int(entry.get("thinking_tokens")) or 0
+
+
+def entry_total(entry):
+    """input + output + any thinking not already counted in output."""
+    if not isinstance(entry, dict):
+        return 0
+    return ((_as_int(entry.get("input_tokens")) or 0)
+            + (_as_int(entry.get("output_tokens")) or 0)
+            + extra_thinking(entry))
+
+
+class AskUsage:
+    """Everything one ask() spent, across EVERY provider attempt.
+
+    ai_providers.get_usage_summary() describes one attempt only: the
+    thread-local round list is reset by set_log_context() at the start of each
+    attempt (and again for a same-key 429 retry), and a failed attempt's
+    AIResult carries no usage at all. So after a failover the figure shown for
+    the turn was the winning attempt alone. Measured on the two real logs in
+    tests/fixtures: 3,466 of 49,276 logged tokens (7%) for 81b52bb561796954 and
+    1,514 of 35,444 (4%) for cb140e091ddc66e8, before thinking tokens.
+    ask() calls add() after every adapter call, so nothing is lost.
+    """
+
+    def __init__(self):
+        self._attempts = []
+
+    def add(self, label, summary, ok=False):
+        """Record one attempt. `summary` is ai_providers.get_usage_summary()'s
+        dict (or None). An attempt that made no request is not recorded."""
+        if not isinstance(summary, dict):
+            return
+        rounds = [r for r in (summary.get("rounds") or []) if isinstance(r, dict)]
+        if not rounds:
+            return
+        self._attempts.append({
+            "label": str(label or ""),
+            "ok": bool(ok),
+            "rounds": len(rounds),
+            "input_tokens": sum(_as_int(r.get("input_tokens")) or 0 for r in rounds),
+            "output_tokens": sum(_as_int(r.get("output_tokens")) or 0 for r in rounds),
+            # Billed ON TOP of output_tokens (Gemini). Reasoning that is
+            # already inside output_tokens is kept apart so no reader adds
+            # it twice.
+            "thinking_tokens": sum(extra_thinking(r) for r in rounds),
+            "thinking_in_output_tokens": sum(
+                (_as_int(r.get("thinking_tokens")) or 0) for r in rounds if r.get("thinking_in_output")),
+            "total_tokens": sum(entry_total(r) for r in rounds),
+            "cache_read_tokens": sum(_as_int(r.get("cache_read_tokens")) or 0 for r in rounds),
+        })
+
+    def __bool__(self):
+        return bool(self._attempts)
+
+    def to_dict(self):
+        a = self._attempts
+        out = {
+            "input_tokens": sum(x["input_tokens"] for x in a),
+            "output_tokens": sum(x["output_tokens"] for x in a),
+            "thinking_tokens": sum(x["thinking_tokens"] for x in a),
+            "thinking_in_output_tokens": sum(x["thinking_in_output_tokens"] for x in a),
+            "total_tokens": sum(x["total_tokens"] for x in a),
+            "rounds": sum(x["rounds"] for x in a),
+            "attempt_count": len(a),
+            "attempts": [dict(x) for x in a],
+        }
+        cache = sum(x["cache_read_tokens"] for x in a)
+        if cache:
+            out["cache_read_tokens"] = cache
+        return out
+
+
+def format_ask_total(ask_total):
+    """One human-readable line for the per-ask total, or "" if there is none."""
+    if not isinstance(ask_total, dict) or not ask_total.get("attempt_count"):
+        return ""
+    bits = ["in=%d" % (ask_total.get("input_tokens") or 0),
+            "out=%d" % (ask_total.get("output_tokens") or 0)]
+    if ask_total.get("thinking_tokens"):
+        bits.append("thinking=%d" % ask_total["thinking_tokens"])
+    if ask_total.get("thinking_in_output_tokens"):
+        bits.append("reasoning-inside-out=%d" % ask_total["thinking_in_output_tokens"])
+    n = ask_total["attempt_count"]
+    return "ask total=%d (%s) across %d attempt%s, %d round%s" % (
+        ask_total.get("total_tokens") or 0, " ".join(bits), n, "" if n == 1 else "s",
+        ask_total.get("rounds") or 0, "" if ask_total.get("rounds") == 1 else "s")
+

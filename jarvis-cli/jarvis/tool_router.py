@@ -24,7 +24,9 @@ the old code would have handled.
 
 import re
 
-from .tool_registry import TOOL_GROUPS, TOOL_KEYWORDS, group_of, keyword_exclusions, keyword_weight
+from .tool_registry import (
+    TOOL_GROUPS, TOOL_KEYWORDS, group_of, keyword_exclusions, keyword_needs, keyword_weight,
+)
 
 # A keyword only counts as a real signal at this weight or above (see
 # TOOL_KEYWORDS in tool_registry.py) — low-weight entries like "power": 4
@@ -133,6 +135,12 @@ def route(user_text):
             # instead of activating its group off this one.
             excluded = keyword_exclusions(value)
             if excluded and any(re.search(rf"\b{re.escape(term)}\b", text) for term in excluded):
+                continue
+            # L.24 T1: a phrase can also demand a companion word (needs_any):
+            # it counts only if one of them matches too. Checked after
+            # not_with so both conditions stay independent.
+            needed = keyword_needs(value)
+            if needed and not any(re.search(rf"\b{re.escape(term)}\b", text) for term in needed):
                 continue
             group = group or group_of(name)
             # Accumulate every qualifying match for this tool, not just

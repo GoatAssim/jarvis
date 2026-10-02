@@ -3251,6 +3251,17 @@
             `total=${u.total_tokens || 0}  rounds=${rounds.length} tools=${tools.length}`,
             "tool"
           );
+          // L.24 T6: the whole ask across every attempt, thinking included.
+          const at = u.ask_total;
+          if (at && at.attempt_count) {
+            askPromptLine(
+              `$ ask total=${at.total_tokens || 0} (in=${at.input_tokens || 0} out=${at.output_tokens || 0}` +
+              `${at.thinking_tokens ? ` thinking=${at.thinking_tokens}` : ""}) ` +
+              `over ${at.rounds || 0} round${at.rounds === 1 ? "" : "s"}, ` +
+              `${at.attempt_count} attempt${at.attempt_count === 1 ? "" : "s"}`,
+              "tool"
+            );
+          }
         }
         renderDebugUsage();
         break;
@@ -6145,6 +6156,21 @@
       `input=${u.input_tokens || 0}  output=${u.output_tokens || 0}  ` +
       `total=${u.total_tokens || 0}  rounds=${rounds.length}  tool calls=${toolCalls.length}`
     ));
+    const at = u.ask_total;
+    if (at && at.attempt_count) {
+      debugUsage.appendChild(el("div", { class: "debug-docs__section-title" }, "Whole ask (all attempts)"));
+      debugUsage.appendChild(el("div", { class: "debug-docs__desc" },
+        `total=${at.total_tokens || 0}  input=${at.input_tokens || 0}  output=${at.output_tokens || 0}  ` +
+        `thinking=${at.thinking_tokens || 0}  rounds=${at.rounds || 0}  attempts=${at.attempt_count}`
+      ));
+      for (const a of (at.attempts || [])) {
+        debugUsage.appendChild(el("div", { class: "debug-empty" },
+          `${a.ok ? "answered" : "failed"} - ${a.label}: total=${a.total_tokens || 0} ` +
+          `(in=${a.input_tokens || 0} out=${a.output_tokens || 0} thinking=${a.thinking_tokens || 0}) ` +
+          `rounds=${a.rounds || 0}`
+        ));
+      }
+    }
     if (rounds.length) {
       debugUsage.appendChild(el("div", { class: "debug-docs__section-title" }, "Per round (reported)"));
       for (const r of rounds) {

@@ -112,6 +112,9 @@ def _explain_keyword_matches(text):
                 term for term in tool_registry.keyword_exclusions(value)
                 if re.search(rf"\b{re.escape(term)}\b", lowered)
             ]
+            needed = tool_registry.keyword_needs(value)   # L.24 T1 (mirrors tool_router.route)
+            if needed and not any(re.search(rf"\b{re.escape(term)}\b", lowered) for term in needed):
+                continue
             tool_group = tool_registry.group_of(name)
             matches.append({
                 "tool": name, "phrase": phrase, "weight": weight,

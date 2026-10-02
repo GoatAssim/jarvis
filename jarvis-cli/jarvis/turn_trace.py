@@ -142,7 +142,7 @@ class TurnTrace:
 
     __slots__ = ("route", "sticky_groups", "cache_seeded", "steps",
                  "attempts", "provider", "thinking_level", "thinking_chars",
-                 "skills", "mode", "tool_count", "degraded", "ending")
+                 "skills", "mode", "tool_count", "degraded", "ending", "tokens")
 
     def __init__(self):
         self.route = None            # (groups, matches, confident)
@@ -161,6 +161,9 @@ class TurnTrace:
         # (same vocabulary as ai_client.AskResult.ending): None, "forced",
         # "cutoff", "truncated", "no_provider", "pending_action".
         self.ending = None
+        # L.24 T6: token_usage.AskUsage.to_dict() for the whole ask - every
+        # provider attempt, thinking tokens included. None until ask() sets it.
+        self.tokens = None
 
     # -- collection ------------------------------------------------------
 
@@ -225,6 +228,7 @@ class TurnTrace:
             "toolsOffered": self.tool_count,
             "degraded": self.degraded,
             "ending": self.ending,
+            "tokens": self.tokens,
         }
 
     def summary(self):
@@ -306,6 +310,18 @@ class TurnTrace:
         elif self.degraded:
             out.append("The actions finished, but no provider was left to write a reply about "
                        "them — so this summary is mine, not the model's.")
+
+        if self.tokens and self.tokens.get("attempt_count"):
+            tk = self.tokens
+            line = "Spent %d tokens in all (%d in, %d out" % (
+                tk.get("total_tokens") or 0, tk.get("input_tokens") or 0, tk.get("output_tokens") or 0)
+            if tk.get("thinking_tokens"):
+                line += ", %d thinking" % tk["thinking_tokens"]
+            n = tk["attempt_count"]
+            line += ") over %d model call%s" % (tk.get("rounds") or 0, "" if tk.get("rounds") == 1 else "s")
+            if n > 1:
+                line += " on %d attempts" % n
+            out.append(line + ".")
 
         if self.provider and not self.attempts:
             out.append("Answered by %s." % self.provider)

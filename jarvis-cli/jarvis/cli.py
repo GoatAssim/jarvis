@@ -10,7 +10,7 @@ import sys
 import threading
 from pathlib import Path
 
-from . import conditions, stats
+from . import conditions, stats, token_usage
 from .palette import Palette
 from .persona_name import current_cli_name, current_display_name, banner_letters
 from .reserved_names import RESERVED_NAMES, CHAIN_SEP, PARALLEL_SEP
@@ -972,6 +972,11 @@ def handle_ai_prompt(text, commands, provider_override=None, think_override=None
             f"rounds={len(rounds)} tools={len(tool_calls)}{ERR.RESET}",
             file=sys.stderr, flush=True,
         )
+        # L.24 T6: what the whole ask cost across every attempt, thinking
+        # included. The line above is only the attempt that answered.
+        ask_line = token_usage.format_ask_total(usage.get("ask_total"))
+        if ask_line:
+            print(f"{ERR.DIM}  {ask_line}{ERR.RESET}", file=sys.stderr, flush=True)
         print("JARVIS_USAGE " + json.dumps(usage, default=str, ensure_ascii=False),
               flush=True)
 
@@ -1028,6 +1033,11 @@ def handle_ai_prompt(text, commands, provider_override=None, think_override=None
             f"rounds={len(rounds)} tools={len(tool_calls)}{ERR.RESET}",
             file=sys.stderr, flush=True,
         )
+        # L.24 T6: what the whole ask cost across every attempt, thinking
+        # included. The line above is only the attempt that answered.
+        ask_line = token_usage.format_ask_total(usage.get("ask_total"))
+        if ask_line:
+            print(f"{ERR.DIM}  {ask_line}{ERR.RESET}", file=sys.stderr, flush=True)
         print("JARVIS_USAGE " + json.dumps(usage, default=str, ensure_ascii=False),
               flush=True)
 

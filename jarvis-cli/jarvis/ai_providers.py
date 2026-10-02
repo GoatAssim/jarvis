@@ -766,13 +766,23 @@ def get_usage_summary():
     tool_calls = getattr(_log_local, "tool_usage", None) or []
     total_input = sum(r.get("input_tokens") or 0 for r in rounds)
     total_output = sum(r.get("output_tokens") or 0 for r in rounds)
+    # L.24 T6: thinking tokens that are billed on top of output_tokens
+    # (Gemini's thoughtsTokenCount) count toward total_tokens; ones already
+    # inside output_tokens (OpenAI-style reasoning_tokens) do not.
+    extra_thinking = sum(token_usage.extra_thinking(r) for r in rounds)
+    thinking = extra_thinking
+    in_output = sum(r.get("thinking_tokens") or 0 for r in rounds if r.get("thinking_in_output"))
     summary = {
         "input_tokens": total_input,
         "output_tokens": total_output,
-        "total_tokens": total_input + total_output,
+        "total_tokens": total_input + total_output + extra_thinking,
         "rounds": rounds,
         "tool_calls": tool_calls,
     }
+    if thinking:
+        summary["thinking_tokens"] = thinking
+    if in_output:
+        summary["thinking_in_output_tokens"] = in_output
     # Prompt-cache totals (see prompt_cache.py). Included only when at
     # least one round actually reported cache activity, so a provider that
     # never caches — or a model below its cacheable floor — reads exactly

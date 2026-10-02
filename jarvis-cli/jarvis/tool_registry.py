@@ -280,7 +280,27 @@ TOOL_KEYWORDS = {
     "press_key": {"press": 5, "key": 4},
     "hotkey": {"hotkey": 9, "shortcut": 7},
     "take_screenshot": {"screenshot": 10, "screen shot": {"weight": 10, "not_with": ["recording", "record"]}, "capture screen": 8},
-    "click": {"discord": 8, "click": 6},
+    # L.24 T1: bare "discord" used to be a confident `click` trigger, so
+    # "has anyone texted you on discord" offered the whole desktop group
+    # (22 tools with channels) for a question one recent_dms call answers.
+    # It now needs an action word (needs_any) and is cancelled by a
+    # read-the-inbox word (not_with); "open discord" / "go on Discord and
+    # say hi" still route to desktop exactly as before.
+    "click": {
+        "discord": {
+            "weight": 8,
+            "needs_any": [
+                "open", "launch", "start", "go", "switch", "focus", "click",
+                "tag", "ping", "type", "send", "say", "tell", "post",
+                "write", "paste", "reply", "join", "call", "mute", "unmute",
+            ],
+            "not_with": [
+                "anyone", "anybody", "who", "texted", "dmed", "dm'd", "dms",
+                "unread", "notifications",
+            ],
+        },
+        "click": 6,
+    },
     "click_on_text": {"click on": 6, "ocr": 8},
     "read_screen": {"read the screen": 10, "what does the screen say": 9, "read screen": 10},
     "list_windows": {"windows": 5, "open windows": 8},
@@ -522,6 +542,19 @@ def keyword_exclusions(value):
         not_with = value.get("not_with")
         if isinstance(not_with, list):
             return not_with
+    return []
+
+
+def keyword_needs(value):
+    """The phrase's needs_any list (L.24 T1): the phrase only counts when at
+    least one of these words ALSO appears in the message, or [] for an entry
+    with no such condition. This is how a bare platform word ("discord")
+    stops being a confident trigger for a tool that ACTS on it (click) while
+    still counting when an action word is present ("open discord")."""
+    if isinstance(value, dict):
+        needs = value.get("needs_any")
+        if isinstance(needs, list):
+            return needs
     return []
 
 
