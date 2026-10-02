@@ -1263,6 +1263,8 @@ def run_scheduler_command(argv):
                     print("%s  %-8s %-9s %s%s%s" % (
                         s["id"], s["kind"], s["status"], s["when"], eta, flag))
                     print("    %s" % s["title"])
+                    for line in (s.get("risk") or {}).get("lines") or []:
+                        print("    ! %s" % line)
                 return 0
             return emit(scheduler.overview())
 
@@ -1324,7 +1326,10 @@ def run_scheduler_command(argv):
             job = scheduler.get(job_id)
             if not job:
                 return emit({"error": "no such job"}, 1)
-            return emit(job)
+            # The detail pane renders this as the approval summary; a job
+            # created before `risk` was stored gets it derived here so a risky
+            # old job never shows up looking empty.
+            return emit(dict(job, risk=scheduler.risk_of(job)))
 
         if cmd == "sched-add":
             # jarvis sched-add <when> <message> [kind]
@@ -1346,6 +1351,13 @@ def run_scheduler_command(argv):
                 return 1
             fn = {"sched-cancel": scheduler.cancel, "sched-pause": scheduler.pause,
                   "sched-resume": scheduler.resume, "sched-approve": scheduler.approve}[cmd]
+            if cmd == "sched-approve":
+                # Say what is being authorised, on stderr so the JSON on stdout
+                # (both the web server and scripts parse it) is unchanged.
+                pending = scheduler.get(job_id)
+                if pending and pending.get("status") == scheduler.STATUS_NEEDS_APPROVAL:
+                    for line in scheduler.risk_of(pending).get("lines") or []:
+                        print("approving: %s" % line, file=sys.stderr)
             return emit(scheduler.summarize(fn(job_id)))
 
         if cmd == "sched-snooze":

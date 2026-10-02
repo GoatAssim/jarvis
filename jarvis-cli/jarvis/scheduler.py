@@ -87,6 +87,7 @@ import time
 from datetime import datetime, timedelta
 from pathlib import Path
 
+from . import job_risk
 from . import timespec
 from .timespec import TimeSpecError
 from . import ask_output as _ask_output
@@ -462,6 +463,11 @@ def create(kind="reminder", title="", when=None, trigger=None, action=None,
         "run_count": 0,
         "last_result": None,
         "last_error": None,
+        # What this job contains, derived from its tool list (job_risk.assess),
+        # computed once here so the approval surface and the later run work from
+        # the SAME answer. A job that can't do anything risky stores an empty
+        # `kinds`, which is also a statement worth keeping.
+        "risk": job_risk.assess(action),
     }
     store["jobs"].append(job)
     save_store(store)
@@ -545,6 +551,15 @@ def approve(job_id):
             return
         job["status"] = STATUS_PENDING
         job["approved_at"] = timespec.to_iso(datetime.now())
+        # Freeze exactly what the approval surface showed. The run is allowed
+        # these kinds and no others (policy.decide's `approved_kinds`), so a job
+        # approved for "controls the desktop" cannot later reach for the shell.
+        # A job created before `risk` existed is assessed now.
+        risk = job.get("risk")
+        if not isinstance(risk, dict) or not isinstance(risk.get("kinds"), list):
+            risk = job_risk.assess(job.get("action") or {})
+            job["risk"] = risk
+        job["approved_kinds"] = [k for k in job_risk.KINDS if k in risk["kinds"]]
     return _mutate(job_id, _approve)
 
 
@@ -1115,6 +1130,10 @@ def _do_ask(job, action):
     env = dict(os.environ)
     env["JARVIS_UI"] = env.get("JARVIS_UI", "cli")
     env["JARVIS_SCHEDULED"] = "1"  # lets any tool notice it has no human
+    # What the person approved this job for (job_risk kinds). ALWAYS set,
+    # empty included, so a value inherited from an outer approved run (a tick
+    # fired from inside another job's tool call) can never leak into this one.
+    env["JARVIS_JOB_APPROVED_KINDS"] = ",".join(job_risk.authorized_kinds(job))
     # D.6: every scheduler-triggered run gets its own brand-new, origin-
     # tagged conversation — never the conversation that created the job,
     # and never whatever ai_client.ask() would otherwise fall back to
@@ -1316,7 +1335,18 @@ def summarize(job):
         "last_run": job.get("last_run"),
         "last_error": job.get("last_error"),
         "needs_approval": job.get("status") == STATUS_NEEDS_APPROVAL,
+        # The approval surface's "what is in this job" (job_risk.assess).
+        # Missing on jobs created before it existed; derived on demand so the
+        # panel never shows a risky job as having nothing in it.
+        "risk": risk_of(job),
     }
+
+
+def risk_of(job):
+    risk = job.get("risk")
+    if isinstance(risk, dict) and isinstance(risk.get("kinds"), list):
+        return risk
+    return job_risk.assess(job.get("action") or {})
 
 
 def overview():

@@ -71,6 +71,11 @@ def _spawn_ask(task, prompt):
     # Lets any tool notice there is no human watching this particular ask,
     # the same signal scheduler._do_ask sets.
     env["JARVIS_SCHEDULED"] = "1"
+    # A task step carries no job approval of its own, so it is approved for
+    # nothing risky. Drop anything inherited from an outer approved run (a task
+    # started from inside a scheduled job's tool call) rather than let that
+    # job's authorisation ride along.
+    env.pop("JARVIS_JOB_APPROVED_KINDS", None)
     env["JARVIS_TASK_ID"] = task.get("id") or ""
     # L.3: the human-readable title already exists on the task (tasks.py
     # clips it to 200 chars at creation) — hand it down the same way

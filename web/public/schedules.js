@@ -497,13 +497,40 @@
 
   /* ---- middle: job detail ------------------------------------------------- */
 
+  // What approving this job authorises, as sentences. Computed server-side from
+  // the job's TOOL LIST (jarvis/job_risk.py), never from its prompt text, so the
+  // wording cannot be steered by what the prompt says. Empty when the job
+  // contains nothing flagged.
+  function riskLines(job) {
+    return ((job && job.risk && job.risk.lines) || []).filter(Boolean);
+  }
+
+  // Approval is the authorisation: once approved the job runs unattended with
+  // no further confirm. So a job with flagged actions is approved through a
+  // dialog that says what it contains; a plain job is approved in one click,
+  // as before.
+  async function confirmApprove(job) {
+    const lines = riskLines(job);
+    if (!lines.length) return true;
+    const body = lines.join("\n") +
+      "\n\nApproving lets it do this on its own, with nobody there to confirm, " +
+      "every time it runs.";
+    const UI = global.JarvisUI;
+    if (UI && UI.confirm) {
+      return UI.confirm({ title: "Approve this job?", body, pre: (job.action || {}).prompt || "",
+                          confirmLabel: "Approve", level: "warn", focusCancel: true });
+    }
+    return global.confirm(body);
+  }
+
   function actionButtons(job) {
     const buttons = [];
-    const act = (label, action, body) => {
+    const act = (label, action, body, guard) => {
       const b = el("button", { class: "btn btn--ghost btn--sm", type: "button" }, label);
       b.addEventListener("click", async () => {
         b.disabled = true;
         try {
+          if (guard && !(await guard(job))) { b.disabled = false; return; }
           await Api.post(`/api/scheduled/${job.id}/${action}`, body || {});
           refresh();
           selectJob(job.id);
@@ -514,7 +541,7 @@
       });
       buttons.push(b);
     };
-    if (job.status === "needs_approval") act("Approve", "approve");
+    if (job.status === "needs_approval") act("Approve", "approve", undefined, confirmApprove);
     if (job.status === "paused") act("Resume", "resume");
     else if (job.status !== "needs_approval" && job.status !== "done" && job.status !== "cancelled") act("Pause", "pause");
     if (job.status !== "done" && job.status !== "cancelled") act("Snooze 10m", "snooze", { delay: "10 minutes" });
@@ -550,6 +577,12 @@
 
     dom.mid.textContent = "";
     dom.mid.appendChild(dl);
+    const risk = riskLines(job);
+    if (risk.length) {
+      dom.mid.appendChild(el("div", { class: "sch-detail__risk" },
+        [el("strong", null, job.needs_approval ? "Approving this allows:" : "This job:")]
+          .concat(risk.map((line) => el("div", null, line)))));
+    }
     const detail = actionDetail(job);
     if (detail) dom.mid.appendChild(detail);
     if (job.last_error) dom.mid.appendChild(el("div", { class: "sch-detail__error" }, `Last error: ${job.last_error}`));
