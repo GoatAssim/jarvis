@@ -86,7 +86,7 @@ accounts — everything lives in `~/.jarvis/commands.json`, same as the CLI.
   is written by the CLI. The catalogue is `public/test-checklist-data.js` for
   tools that ship with jarvis; a tool can also carry its own entry in its
   module (`TEST_CHECKLIST`), which is how a tool you wrote yourself under
-  Menu → Custom Tools gets one — the panel picks it up from `GET /api/tools`.
+  Menu → Tool Manager gets one — the panel picks it up from `GET /api/tools`.
   See AGENTS.md for the rule that keeps it in step with the tools.
 
 Nothing here is faked or mocked — every action above goes through the

@@ -223,7 +223,7 @@ looks like, and a place to record what works and what doesn't. An entry has
   plus `TEST_CHECKLIST_GROUP` if the module invents a brand-new `TOOL_GROUP`
   (or more than one — see below). This is the **only** option for a user's own
   tool in `~/.jarvis/tools/`, which can never be in a file that ships with the
-  app. `actions/_template.py` section 8 documents it; every Custom Tools
+  app. `actions/_template.py` section 8 documents it; every Tool Manager
   template carries an example. Discovery reads it, `jarvis tools-list` (GET
   `/api/tools`) carries it, and the panel merges it in. Use ONE home per tool —
   the coverage test fails if a tool has an entry in both.

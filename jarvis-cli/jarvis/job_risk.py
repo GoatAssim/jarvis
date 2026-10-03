@@ -49,9 +49,14 @@ KIND_POWER = "power"
 KIND_DESKTOP = "desktop"
 KIND_FILES = "files"
 KIND_SHELL = "shell"
+# Tools the owner switched ON for the approval summary in the Tool Manager that
+# job_risk has no built-in kind for (a custom tool, an MCP tool, ...). One
+# shared kind on purpose: the summary names the tools, and approving it covers
+# the tools it named -- "we'll get to more customization later" (owner).
+KIND_MARKED = "marked"
 
 # Most consequential first: this is the order the approval summary lists them.
-KINDS = (KIND_POWER, KIND_DESKTOP, KIND_FILES, KIND_SHELL)
+KINDS = (KIND_POWER, KIND_DESKTOP, KIND_FILES, KIND_SHELL, KIND_MARKED)
 
 # Which tools count, by name. Explicit rather than "everything in group X":
 # the desktop group also holds read-only probes (list_windows, read_screen,
@@ -85,6 +90,7 @@ _PHRASE = {
                   "whatever window is focused)",
     KIND_FILES: "delete or overwrite files",
     KIND_SHELL: "run shell commands",
+    KIND_MARKED: "use tools you marked for review",
 }
 
 _POWER_VERBS = {
@@ -94,9 +100,41 @@ _POWER_VERBS = {
 }
 
 
+def is_builtin_flagged(tool_name):
+    """True when job_risk flags this tool out of the box (the approval_summary
+    default in tool_safety.py)."""
+    return (tool_name or "").strip() in _TOOL_KIND
+
+
+def _summary_flag(name):
+    """The tool's approval_summary switch from tool_safety.json (Tool Manager).
+
+    Falls back to the built-in default when tool_safety can't be read: during
+    partial init (see the module docstring) the safe answer is "what job_risk
+    always flagged", never "nothing".
+    """
+    try:
+        from . import tool_safety  # lazy: tool_safety lazily imports us back
+        return bool(tool_safety.get_flags(name)["approval_summary"])
+    except Exception:  # noqa: BLE001
+        return name in _TOOL_KIND
+
+
 def kind_of(tool_name):
-    """The flagged kind a tool belongs to, or None when it is not flagged."""
-    return _TOOL_KIND.get((tool_name or "").strip())
+    """The flagged kind a tool belongs to, or None when it is not flagged.
+
+    The Tool Manager's per-tool approval_summary switch decides: a built-in
+    flagged tool switched OFF is not flagged (so an approval no longer covers
+    it); any other tool switched ON is flagged as KIND_MARKED.
+    """
+    name = (tool_name or "").strip()
+    if not name:
+        return None
+    builtin = _TOOL_KIND.get(name)
+    on = _summary_flag(name)
+    if builtin:
+        return builtin if on else None
+    return KIND_MARKED if on else None
 
 
 def covering_kind(tool_name):
@@ -113,6 +151,10 @@ def covering_kind(tool_name):
     own = kind_of(tool_name)
     if own:
         return own
+    if is_builtin_flagged(tool_name):
+        # The owner switched this tool out of the approval summary. It must not
+        # sneak back in through the desktop group's read-only cover below.
+        return None
     try:
         from . import tool_registry  # lazy: import cycle, see module docstring
         if tool_registry.group_of((tool_name or "").strip()) == "desktop":
@@ -196,6 +238,8 @@ def assess(action):
     lines = []
     for kind in kinds:
         text = _PHRASE[kind]
+        if kind == KIND_MARKED:
+            text = "%s (%s)" % (text, ", ".join(by_kind.get(kind) or []))
         if kind == KIND_POWER and certain:
             verb = _POWER_VERBS.get(str(((action or {}).get("args") or {})
                                         .get("action") or "").strip().lower())

@@ -76,7 +76,7 @@ Failure mode differs from TOOL_KEYWORDS on purpose: a malformed entry is
 dropped and logged, and the TOOL FILE STILL LOADS. A checklist entry is notes
 about a tool, and rejecting a working tool over a typo in them would be the
 wrong trade — the loud place for the report is the log line here and the
-Custom Tools editor's Check button (custom_tools_store.validate_source).
+Tool Manager editor's Validate button (custom_tools_store.validate_source).
 
 --- Why TOOL_KEYWORDS is not really optional ---
 

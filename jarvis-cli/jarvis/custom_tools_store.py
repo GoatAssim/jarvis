@@ -26,7 +26,7 @@ WHAT THIS ADDS ON TOP
 2. **Enable/disable without deleting** — a `.disabled` suffix, so switching
    a misbehaving tool off doesn't mean losing it.
 3. **Management API** — list/read/write/delete/validate/test, which is what
-   the Custom Tools tab drives. Editing Python in a browser textarea is only
+   the Tool Manager tab drives. Editing Python in a browser textarea is only
    reasonable if saving something broken tells you *why* immediately, rather
    than failing silently at the next startup (which is exactly how a
    rejected action file behaves today — see actions/_template.py's warning
@@ -244,6 +244,13 @@ def delete_tool(name):
     path, _enabled = _resolve(name)
     if not path:
         return {"ok": False, "error": "no custom tool named %r" % name}
+    # Which tools the file provides, read BEFORE it goes, so their Tool Manager
+    # on/off switches can be dropped with it (a new tool that reuses a name must
+    # not inherit an old "off"). Same validation the list/show already ran.
+    try:
+        provided = list(validate_source(_read(path), name).get("tools") or [])
+    except Exception:  # noqa: BLE001 -- a file that won't import has nothing to forget
+        provided = []
     try:
         path.unlink()
     except OSError as exc:
@@ -251,6 +258,9 @@ def delete_tool(name):
     meta = _meta()
     meta.pop(name, None)
     _save_meta(meta)
+    from . import tool_disable
+    for tool_name in provided:
+        tool_disable.forget_tool(tool_name)
     return {"ok": True, "name": name}
 
 
@@ -362,6 +372,25 @@ def validate_source(source, name="custom_tool"):
         return {"ok": False, "stage": "contract",
                 "error": "TOOLS has handler(s) with no matching schema: %s"
                          % ", ".join(sorted(extra))}
+
+    # The loader (tool_loader._validate) rejects the whole file for these three
+    # as well. Without the same checks here the editor said "valid", Save wrote
+    # the file, and the tool then silently never loaded -- the exact failure
+    # this editor exists to prevent. Same wording as the loader on purpose.
+    keywords = getattr(module, "TOOL_KEYWORDS", {}) or {}
+    if not isinstance(keywords, dict):
+        return {"ok": False, "stage": "contract",
+                "error": "TOOL_KEYWORDS must be a dict if present."}
+    stray_kw = set(keywords) - set(names)
+    if stray_kw:
+        return {"ok": False, "stage": "contract",
+                "error": "TOOL_KEYWORDS has entries for name(s) not in this file's TOOLS: %s."
+                         % sorted(stray_kw),
+                "hint": "Rename the TOOL_KEYWORDS keys to match your tool names, "
+                        "or remove them."}
+    if not isinstance(getattr(module, "TOOL_RESULT_SPECS", {}) or {}, dict):
+        return {"ok": False, "stage": "contract",
+                "error": "TOOL_RESULT_SPECS must be a dict if present."}
 
     # Collide with a built-in and the loader will reject the whole file at
     # startup — better to say so now, while the editor is still open.
@@ -794,5 +823,5 @@ To show something on screen or ask a question:
     ui.toast("done", level="success")
     if ui.confirm("Really?", default=False): ...
 
-Manage these from the web UI: Menu > Custom Tools.
+Manage these from the web UI: Menu > Tool Manager.
 """

@@ -165,7 +165,8 @@ web/
     public/app.js         the whole front-end (also defines window.JarvisHost, the
                           small facade slash-palette.js talks to it through)
     public/style.css      theme + layout, including the classic/focus switch
-    public/custom-tools.js       Custom Tools panel
+    public/tool-manager.js (+ .css)  Tool Manager panel (L.25): catalogue, per-tool safeguards, user tools
+    public/custom-tools.js       theme gallery for the Skin modal (the old Custom Tools panel moved to tool-manager.js)
     public/test-checklist.js     Menu -> Test Checklist (UI, browser-only results)
     public/test-checklist-data.js  the SHIPPED checklist catalogue: an entry per
                                  tool that ships with jarvis. Edit it whenever you
@@ -349,7 +350,7 @@ everything is still in the same Menu. A feature reachable only in classic
 would turn a presentation preference into a trap.
 
 Panels: Guides, Debug, **Test Checklist**, Skills, Scheduled, MCP Servers,
-Custom Tools, Channels, **Daemons**, **Backlog**, **Log search**, **Setup**.
+Tool Manager (was Custom Tools), Channels, **Daemons**, **Backlog**, **Log search**, **Setup**.
 
 Test Checklist is the one panel with no server route and no CLI command: its
 catalogue is a static file plus any entries tool modules supply themselves, and

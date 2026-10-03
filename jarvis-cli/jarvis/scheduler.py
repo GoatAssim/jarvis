@@ -1264,6 +1264,25 @@ def _do_command(job, action):
     """Run a saved command (`jarvis <name> --flag value`) — the same argv the
     user would type, built the same way web/server.js builds it."""
     name = (action.get("command") or "").strip()
+    from . import tool_disable  # lazy, same import-cycle reason as _needs_approval
+    if tool_disable.is_command_disabled(name):
+        # Switched off in the Tool Manager: do not spawn it, and say so out loud
+        # (job.last_error + the run log + a notification) rather than run it or
+        # quietly do nothing. The owner can still run it by hand.
+        message = ("The saved command %s is switched off in the Tool Manager, so this job "
+                   "did not run. Switch it back on to let it run." % name)
+        run_conv_id = _new_scheduled_conversation(job, action)
+        _log_run_exchange(run_conv_id, "jarvis %s" % name, message)
+        note = None
+        if _should_report(job):
+            from . import notifier
+            note = notifier.notify(
+                title=job.get("title") or ("Command: %s" % name), message=message,
+                channels=job.get("channels"), kind="task", level=job.get("level"),
+                job_id=job.get("id"), conv_id=run_conv_id, failed=True,
+            )
+        return {"ok": False, "summary": message, "error": message,
+                "notification": note, "conv_id": run_conv_id}
     argv = _jarvis_argv() + [name]
     args_text = ""
     for key, value in (action.get("args") or {}).items():
@@ -1303,6 +1322,29 @@ def _do_command(job, action):
     return {"ok": ok, "summary": output,
             "error": None if ok else "exit code %s" % proc.returncode,
             "notification": note, "conv_id": run_conv_id}
+
+
+def jobs_using(kind, name):
+    """Active scheduled jobs whose action names this tool or saved command.
+
+    The Tool Manager shows this before it switches something off, so a job that
+    would fail at fire time is never a surprise (master plan Q-L25g). Covers the
+    two action types that name a target -- `tool` and `command`. An `ask` job
+    lets the model choose its tools, so it can't be listed here; the caller says
+    so. kind is "tool" or "command".
+    """
+    key = {"tool": "tool", "command": "command"}.get(kind)
+    wanted = (name or "").strip()
+    if not key or not wanted:
+        return []
+    out = []
+    for job in list_jobs():
+        action = job.get("action") or {}
+        if action.get("type") == key and (action.get(key) or "").strip() == wanted:
+            out.append({"id": job.get("id"), "title": job.get("title") or "",
+                        "kind": job.get("kind"), "status": job.get("status"),
+                        "next_run": job.get("next_run")})
+    return out
 
 
 def _do_tool(job, action):

@@ -18,9 +18,19 @@ Two independent per-tool flags:
     include that note alongside the prompt. Best-effort: if no second
     provider is configured, the prompt just shows without a risk note.
 
-Both are toggled per tool from the web console's Debug dashboard, right
-under a tool's description ("Toggle warning:" / "Toggle AI review:"), via
-`jarvis tool-safety-set <name> <key> <true|false>`.
+A third flag is about scheduled jobs rather than a single call:
+
+  approval_summary — when a scheduled job that can use this tool is waiting
+    for approval, say so in the approval summary ("This job can run shell
+    commands."). The default is what job_risk.py already flags, so nothing
+    changes until someone flips it. Turning it OFF for a tool job_risk flags
+    also stops that approval from covering the tool, so an unattended call
+    to it is refused instead of waved through: what was not shown was not
+    authorised. Turning it ON for any other tool adds it to the summary under
+    its own line (job_risk.KIND_MARKED).
+
+All three are toggled per tool from the web console's Debug dashboard and the
+Tool Manager, via `jarvis tool-safety-set <name> <key> <true|false>`.
 """
 
 import json
@@ -75,7 +85,7 @@ DEFAULT_CONFIRM_REQUIRED = {
 # could-go-wrong action a second opinion is meant to catch.
 DEFAULT_AI_REVIEW = {"run_custom_command", "click_on_text"}
 
-VALID_KEYS = ("confirm_required", "ai_review")
+VALID_KEYS = ("confirm_required", "ai_review", "approval_summary")
 
 
 def ensure_config():
@@ -100,19 +110,43 @@ def _save(data):
     CONFIG_FILE.write_text(json.dumps(data, indent=2) + "\n", encoding=ENCODING)
 
 
+def _approval_default(name):
+    """Built-in default for approval_summary: on exactly when job_risk.py
+    already flags the tool. Lazy import — job_risk is import-light and must
+    stay importable before this module (see its docstring)."""
+    try:
+        from . import job_risk
+        return job_risk.is_builtin_flagged(name)
+    except Exception:  # noqa: BLE001 -- a default must never raise
+        return False
+
+
+def default_flags(name):
+    """The built-in value of each switch, ignoring tool_safety.json. The Tool
+    Manager compares against it to show which switches the owner changed and to
+    offer "reset to default"."""
+    return {"confirm_required": name in DEFAULT_CONFIRM_REQUIRED,
+            "ai_review": name in DEFAULT_AI_REVIEW,
+            "approval_summary": _approval_default(name)}
+
+
 def get_flags(name):
-    """{'confirm_required': bool, 'ai_review': bool} for one tool. An
-    explicit entry in tool_safety.json always wins; otherwise falls back to
-    the built-in defaults above (never raises, never returns partial dicts)."""
+    """{'confirm_required': bool, 'ai_review': bool, 'approval_summary': bool}
+    for one tool. An explicit entry in tool_safety.json always wins; otherwise
+    falls back to the built-in defaults above (never raises, never returns
+    partial dicts)."""
     data = _load()
     entry = data["tools"].get(name)
     confirm_default = name in DEFAULT_CONFIRM_REQUIRED
     review_default = name in DEFAULT_AI_REVIEW
+    approval_default = _approval_default(name)
     if not isinstance(entry, dict):
-        return {"confirm_required": confirm_default, "ai_review": review_default}
+        return {"confirm_required": confirm_default, "ai_review": review_default,
+                "approval_summary": approval_default}
     return {
         "confirm_required": bool(entry.get("confirm_required", confirm_default)),
         "ai_review": bool(entry.get("ai_review", review_default)),
+        "approval_summary": bool(entry.get("approval_summary", approval_default)),
     }
 
 
@@ -122,6 +156,10 @@ def requires_confirmation(name):
 
 def requires_ai_review(name):
     return get_flags(name)["ai_review"]
+
+
+def in_approval_summary(name):
+    return get_flags(name)["approval_summary"]
 
 
 # ---------------------------------------------------------------------------
@@ -177,7 +215,7 @@ def set_flag(name, key, value):
 
 
 def all_flags(tool_names):
-    """{name: {'confirm_required':..., 'ai_review':...}} for every name in
+    """{name: {'confirm_required':..., 'ai_review':..., 'approval_summary':...}} for every name in
     tool_names — lets the debug dashboard paint every toggle's current
     state from a single pass."""
     return {name: get_flags(name) for name in tool_names}

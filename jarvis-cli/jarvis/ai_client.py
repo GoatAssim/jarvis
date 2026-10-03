@@ -18,6 +18,7 @@ import sys
 import time
 
 from . import ai_config, ai_providers, command_tools, conversations, memory, playnite_config, skill_stickiness, skills, stats, tool_safety
+from . import tool_disable
 from . import console_store
 from . import dev_agent_events as _dev_agent_events
 from . import discovery_cache
@@ -1806,6 +1807,22 @@ def _make_tool_executor(on_tool_call, schemas=None, on_confirm_request=None,
             result = _stop_result(_breaker["reason"])
             runs.append({"name": name, "arguments": arguments, "result": result})
             return result
+        if tool_disable.is_tool_disabled(name):
+            # Switched off by the owner (Tool Manager). The model was never
+            # offered it, so this is a stale prompt or a guessed name -- refuse,
+            # run nothing, and don't serve an earlier cached result either.
+            # Deliberately BEFORE the cache lookup and the confirm gate: a
+            # disabled tool must not even ask the owner to confirm it.
+            _executor._cache_hit = False
+            result = tool_disable.refusal_for_tool(name)
+            runs.append({"name": name, "arguments": arguments, "result": result})
+            console_store.log("tool-result", "blocked: switched off by the owner", tool=name)
+            if policy.unattended_context_from_env() is not None:
+                # Nobody is there to say "ok, use something else": stop the run
+                # the way a policy refusal does, so it fails clearly instead of
+                # improvising around the owner's switch.
+                _trip("%s is switched off by the owner" % name)
+            return result
         if key in cache:
             # Signal the cache hit to ai_providers._call_tool_safely so it
             # doesn't re-log/re-estimate token usage or append a duplicate
@@ -3217,6 +3234,11 @@ def _ask_impl(user_text, commands=None, on_attempt=None, on_tool_call=None, on_t
     result.attempts names every requested provider so the caller can say
     why.
     """
+    # A saved command the owner switched off must not reach the model by ANY
+    # route, and the system prompt's "Saved commands" block and the frequent-
+    # commands block both read this dict. Filtered once, here, so every
+    # downstream use is covered. (tool_disable.py)
+    commands = tool_disable.visible_commands(commands)
     cfg = ai_config.load_ai_config()
     persona = cfg["persona"]
     assistant_name = persona.get("assistant_name") or DEFAULT_ASSISTANT_NAME

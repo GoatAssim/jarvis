@@ -6,7 +6,7 @@ Returns structured needs_clarification responses instead of guessing.
 
 import json
 
-from . import commands_config
+from . import commands_config, tool_disable
 
 
 def _resolve_command(commands, name):
@@ -16,6 +16,20 @@ def _resolve_command(commands, name):
             "message": "Which command should I run?",
         }
     name = name.strip()
+    # Saved commands the owner switched off (tool_disable.py). Every model-
+    # facing path resolves a name through here (run_command, run_chain,
+    # update_command), so this one check covers all three. A name that matches a
+    # disabled command EXACTLY gets a clear refusal; every fuzzy/partial lookup
+    # below runs on the enabled commands only, so a disabled one is never
+    # suggested, listed in "available", or guessed into.
+    off = tool_disable.disabled_commands()
+    if off:
+        lowered = name.lower()
+        for disabled_name in sorted(off):
+            if disabled_name == name or disabled_name.lower() == lowered:
+                if disabled_name in commands:
+                    return None, tool_disable.refusal_for_command(disabled_name)
+        commands = {n: sp for n, sp in commands.items() if n not in off}
     if name in commands:
         return name, commands[name]
 
@@ -330,7 +344,7 @@ def tool_search_commands(args):
     """Search (or list) the user's FULL saved command set — not just the
     handful the system prompt shows up front. Exists so the AI looks up an
     unfamiliar command instead of guessing a name at run_command/run_chain."""
-    commands = commands_config.load_commands_dict()
+    commands = tool_disable.visible_commands(commands_config.load_commands_dict())
     if not commands:
         return {"matches": [], "total_commands": 0, "message": "No commands are saved yet."}
 
@@ -442,6 +456,11 @@ def tool_update_command(args):
         return {"needs_clarification": True, "message": "Which command should I update?"}
 
     commands = commands_config.load_commands_dict()
+    # The resolver below refuses a disabled command, but it is only reached when
+    # the exact name isn't found -- so an exact-name update would skip it. The
+    # model must not be able to rewrite a command it was told is switched off.
+    if tool_disable.is_command_disabled(name.strip()):
+        return tool_disable.refusal_for_command(name.strip())
     if name not in commands:
         resolved_name, spec_or_err = _resolve_command(commands, name)
         if resolved_name is None:

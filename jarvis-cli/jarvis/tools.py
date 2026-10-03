@@ -26,6 +26,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Callable, Optional
 
+from . import tool_disable
 from .command_tools import COMMAND_TOOL_SCHEMAS, COMMAND_TOOLS
 from .custom_tools import CUSTOM_TOOL_SCHEMAS, CUSTOM_TOOLS
 from .desktop_tools import DESKTOP_TOOL_SCHEMAS, DESKTOP_TOOLS
@@ -294,8 +295,11 @@ def tool_search_tools(args):
     if not query:
         # No query: hand back the group list, not every tool — still tiny,
         # still enough to narrow down on the next call.
+        off_now = tool_disable.disabled_tools()
         return {
-            "groups": sorted(tool_registry.TOOL_GROUPS),
+            # A group whose every tool is switched off is not offered either.
+            "groups": sorted(g for g, members in tool_registry.TOOL_GROUPS.items()
+                             if any(n not in off_now for n in members)),
             "message": "Pass a query (a group name, or a keyword) to see matching tools.",
         }
 
@@ -313,7 +317,10 @@ def tool_search_tools(args):
         tokens = [query]
 
     scored = []
+    off = tool_disable.disabled_tools()
     for name, schema in index.items():
+        if name in off:
+            continue
         group = tool_registry.group_of(name) or "misc"
         keywords = " ".join(tool_registry.keywords_for(name).keys())
         name_lower = name.replace("_", " ").lower()
@@ -415,9 +422,10 @@ def _unknown_tool_hint(name):
     hint which real tool it meant)."""
     from . import tool_registry
 
+    off = tool_disable.disabled_tools()
     near = sorted(
         n for n in tool_registry.TOOL_INDEX
-        if name in n or n in name or n.split("_")[0] == name.split("_")[0]
+        if n not in off and (name in n or n in name or n.split("_")[0] == name.split("_")[0])
     )[:5]
     out = {"error": f"no such tool: {name}"}
     if near:
@@ -447,6 +455,9 @@ def tool_get_tool_schema(args):
     name = raw.strip()
     if not name:
         return {"error": "Pass the exact name of the tool you want the schema for."}
+
+    if tool_disable.is_tool_disabled(name):
+        return tool_disable.refusal_for_tool(name)
 
     schema = tool_registry.TOOL_INDEX.get(name)
     if schema is None:
@@ -700,6 +711,12 @@ def tool_schemas_for_session():
     allowed = allowed_tools_from_env()
     if allowed is not None:
         out = [schema for schema in out if schema.get("name") in allowed]
+    # Tools the owner switched off in the Tool Manager are never offered. The
+    # tools themselves stay in TOOLS (AGENTS.md); this only decides what the
+    # model is shown. See tool_disable.py.
+    off = tool_disable.disabled_tools()
+    if off:
+        out = [schema for schema in out if schema.get("name") not in off]
     return out
 
 
@@ -736,10 +753,11 @@ def schemas_for_tools(names):
     tests/test_schemas_for_tools.py.
     """
     index = _tool_index()
+    off = tool_disable.disabled_tools()
     out = []
     seen = set()
     for name in names or []:
-        if name in seen:
+        if name in seen or name in off:
             continue
         schema = index.get(name)
         if schema is not None:
@@ -748,14 +766,39 @@ def schemas_for_tools(names):
     return out
 
 
+def _tool_group(name):
+    """The router group a tool belongs to ("" when it has none) — the Tool
+    Manager groups its list by this. Never raises."""
+    try:
+        from . import tool_registry
+        return tool_registry.group_of(name) or ""
+    except Exception:  # noqa: BLE001
+        return ""
+
+
+def _tool_file(name):
+    """The tool file a discovered tool came from ("scheduler_tools.py"), or ""
+    for a hand-wired built-in. The Tool Manager shows it so a person can tell
+    which file to open or switch off. Never raises."""
+    try:
+        for record in _AUTO_RECORDS:
+            if record.valid and name in record.tools:
+                return os.path.basename(str(record.file or ""))
+    except Exception:  # noqa: BLE001
+        pass
+    return ""
+
+
 def tools_list_payload():
     """Full catalog for remote permission UIs — not filtered by session or env.
 
     Includes the full (uncompacted) parameter schema for each tool so a
     remote debug/permission UI can render argument inputs and docs without
     guessing — this is the same schema the model itself receives. Also
-    includes each tool's current confirm_required/ai_review safety flags
-    (see tool_safety.py) so the debug dashboard's toggles reflect real
+    includes each tool's current confirm_required/ai_review/approval_summary
+    safety flags (see tool_safety.py), its router `group`, whether the owner
+    has switched it off (`disabled`, tool_disable.py) and, for the few tools that
+    can't be switched off, why (`protected`) so the debug dashboard's toggles reflect real
     state, not a hardcoded guess.
 
     Additive, only when present (G.1, extended by G.2): a tool whose own
@@ -772,6 +815,7 @@ def tools_list_payload():
     """
     from . import tool_safety
 
+    off = tool_disable.disabled_tools()      # read once, not once per tool
     items = []
     seen = set()
     for schema in TOOL_SCHEMAS:
@@ -786,7 +830,13 @@ def tools_list_payload():
             "parameters": schema.get("parameters") or _NO_PARAMS,
             "confirm_required": flags["confirm_required"],
             "ai_review": flags["ai_review"],
+            "approval_summary": flags["approval_summary"],
+            "defaults": tool_safety.default_flags(name),
+            "group": _tool_group(name),
+            "file": _tool_file(name),
             "source": _tool_source(name),
+            "disabled": name in off,
+            "protected": tool_disable.protected_reason(name) or "",
         }
         supplied = AUTO_TEST_CHECKLIST.get(name)
         if supplied:
@@ -805,7 +855,13 @@ def tools_list_payload():
                 "parameters": _NO_PARAMS,
                 "confirm_required": flags["confirm_required"],
                 "ai_review": flags["ai_review"],
+                "approval_summary": flags["approval_summary"],
+                "defaults": tool_safety.default_flags(name),
+                "group": _tool_group(name),
+                "file": _tool_file(name),
                 "source": _tool_source(name),
+                "disabled": name in off,
+                "protected": tool_disable.protected_reason(name) or "",
             })
     return items
 
@@ -1170,7 +1226,7 @@ def _drop_null_optionals(name, arguments):
             if not (v is None and k in params["properties"] and k not in required)}
 
 
-def execute_tool(name, arguments=None, verbosity=None, context=None):
+def execute_tool(name, arguments=None, verbosity=None, context=None, owner=False):
     """Run one tool by name and return a JSON-serializable result — always,
     even on failure. Never raises.
 
@@ -1182,6 +1238,9 @@ def execute_tool(name, arguments=None, verbosity=None, context=None):
     Omitted/None leaves the result untouched, same as before this
     parameter existed.
 
+    `owner=True` marks a run the owner started by hand (the Debug panel), the
+    only caller allowed to run a tool switched off in the Tool Manager.
+
     `context`, if given, is a ToolContext — passed as a second positional
     argument to any handler whose signature accepts one (see
     _accepts_context). Every handler that only takes one argument keeps
@@ -1190,6 +1249,13 @@ def execute_tool(name, arguments=None, verbosity=None, context=None):
     allowed = allowed_tools_from_env()
     if allowed is not None and name not in allowed:
         return {"error": "tool not permitted"}
+    # A tool the owner switched off (tool_disable.py) runs for the owner and for
+    # nobody else. Default-deny: this is the single function every automatic
+    # caller goes through (the model's executor, the scheduler), so a path that
+    # forgets to check still can't run a disabled tool. Only the owner's own
+    # hands (the Debug panel's direct run) pass owner=True.
+    if not owner and tool_disable.is_tool_disabled(name):
+        return tool_disable.refusal_for_tool(name)
     fn = TOOLS.get(name)
     if fn is None:
         return _unknown_tool_hint(name)

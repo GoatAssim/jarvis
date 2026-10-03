@@ -167,7 +167,7 @@ With the palette open:
       and the bubble shows what you typed
 
 **Panels** (each opens the right one, also mid-reply)
-- [ ] `/guides` `/debug` (`/tools`) `/checklist` (`/tests`) `/schedule` (`/sched`) `/mcp` `/ctools` `/channels`
+- [ ] `/guides` `/debug` (`/tools`) `/checklist` (`/tests`) `/schedule` (`/sched`) `/mcp` `/ctools` (`/toolmanager`) `/channels`
       `/daemons` `/backlog` `/logsearch` `/setup` `/subagents` `/notifications` `/logs`
 - [ ] `/config` opens Config; `/skin` opens Skin
 - [ ] `/layout classic|focus` switches and persists across a reload
