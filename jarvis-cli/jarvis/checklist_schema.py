@@ -47,7 +47,7 @@ Entry shape (identical in both places — see AGENTS.md > Test Checklist):
 A malformed SUPPLIED entry is dropped and reported; it never rejects the tool
 file it sits in. A checklist entry is documentation about a tool — breaking a
 working tool over a typo in its test notes would be the wrong trade — but it
-is REPORTED (discovery log, and the Custom Tools editor's Check button) so it
+is REPORTED (discovery log, and the Tool Manager editor's Validate button) so it
 doesn't fail quietly.
 
 Pure functions, no I/O, no imports from the rest of jarvis: safe to import from

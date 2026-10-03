@@ -460,6 +460,11 @@ app.put("/api/commands/:name", requireJarvis, async (req, res) => {
     if (targetName !== oldName) delete data.commands[oldName];
     data.commands[targetName] = spec;
     await writeConfig(data);
+    // A disabled command keeps its switch through a rename (otherwise renaming
+    // it would quietly turn it back on). Best-effort: the rename itself is done.
+    if (targetName !== oldName) {
+      await runJarvisOnce(["command-disable-set", oldName, "rename", targetName], 15000);
+    }
     res.json({ ok: true, name: targetName });
   } catch (e) {
     res.status(500).json({ error: `Couldn't save command: ${e.message}` });
@@ -474,6 +479,8 @@ app.delete("/api/commands/:name", requireJarvis, async (req, res) => {
     }
     delete data.commands[req.params.name];
     await writeConfig(data);
+    // Drop its on/off switch with it, so a new command with the same name starts on.
+    await runJarvisOnce(["command-disable-set", req.params.name, "forget"], 15000);
     res.json({ ok: true });
   } catch (e) {
     res.status(500).json({ error: `Couldn't delete command: ${e.message}` });
@@ -1826,13 +1833,14 @@ app.post("/api/tools/preview", requireJarvis, async (req, res) => {
   res.status(500).json({ error: result.error || result.stderr || "Tool preview failed." });
 });
 
-// Debug dashboard: flip one of a tool's two safety toggles (confirm_required
-// or ai_review — see jarvis-cli/jarvis/tool_safety.py). Returns the tool's
+// Debug dashboard / Tool Manager: flip one of a tool's three safety toggles
+// (confirm_required, ai_review or approval_summary — see
+// jarvis-cli/jarvis/tool_safety.py). Returns the tool's
 // full updated flag set.
 app.post("/api/tools/safety", requireJarvis, async (req, res) => {
   const name = typeof req.body?.name === "string" ? req.body.name.trim() : "";
   const key = typeof req.body?.key === "string" ? req.body.key.trim() : "";
-  if (!name || !["confirm_required", "ai_review"].includes(key)) {
+  if (!name || !["confirm_required", "ai_review", "approval_summary"].includes(key)) {
     return res.status(400).json({ error: "Missing or invalid name/key." });
   }
   const value = req.body?.value ? "true" : "false";
@@ -1845,6 +1853,44 @@ app.post("/api/tools/safety", requireJarvis, async (req, res) => {
     return res.json(parsed);
   }
   res.status(500).json({ error: (parsed && parsed.error) || result.error || result.stderr || "Couldn't update tool safety flag." });
+});
+
+// Tool Manager: switch a tool OFF for the model (hidden from it, refused if it
+// calls it anyway; the owner can still run it from Debug). Persisted in
+// ~/.jarvis/disabled.json by tool_disable.py. 400 for a protected tool, with
+// {protected: true}, so the UI can say why instead of showing a generic failure.
+async function relayJarvisJson(res, args, fallback) {
+  const result = await runJarvisOnce(args, 15000);
+  let parsed;
+  try { parsed = JSON.parse(result.stdout); } catch { /* not JSON — fall through */ }
+  if (parsed !== undefined && !parsed.error) return res.json(parsed);
+  const status = parsed && parsed.protected ? 400 : 500;
+  res.status(status).json({
+    error: (parsed && parsed.error) || result.error || result.stderr || fallback,
+    ...(parsed && parsed.protected ? { protected: true } : {}),
+  });
+}
+
+app.post("/api/tools/disabled", requireJarvis, async (req, res) => {
+  const name = typeof req.body?.name === "string" ? req.body.name.trim() : "";
+  if (!name) return res.status(400).json({ error: "Missing tool name." });
+  await relayJarvisJson(res, ["tool-disable-set", name, req.body?.value ? "true" : "false"], "Couldn't switch the tool.");
+});
+
+app.post("/api/commands/:name/disabled", requireJarvis, async (req, res) => {
+  await relayJarvisJson(res, ["command-disable-set", req.params.name, req.body?.value ? "true" : "false"], "Couldn't switch the command.");
+});
+
+app.get("/api/disabled", requireJarvis, async (req, res) => {
+  await relayJarvisJson(res, ["disabled-list"], "Couldn't read the disabled list.");
+});
+
+// Scheduled jobs that name this tool/command — shown before switching it off.
+app.get("/api/disabled/dependents", requireJarvis, async (req, res) => {
+  const kind = req.query.kind === "command" ? "command" : req.query.kind === "tool" ? "tool" : "";
+  const name = typeof req.query.name === "string" ? req.query.name.trim() : "";
+  if (!kind || !name) return res.status(400).json({ error: "Need kind=tool|command and a name." });
+  await relayJarvisJson(res, ["disabled-dependents", kind, name], "Couldn't look up scheduled jobs.");
 });
 
 // ---------------------------------------------------------------------------

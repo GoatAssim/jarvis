@@ -2750,7 +2750,10 @@ def main():
         try:
             sys.stdout.flush()
             os.dup2(devnull_fd, 1)
-            result = system_tools.execute_tool(tool_name, arguments, verbosity=verbosity)
+            # owner=True: this is the Debug panel / Test Checklist, the owner's own
+            # hands. A tool switched off in the Tool Manager is hidden from and
+            # refused to the MODEL and to scheduled jobs, not to its owner.
+            result = system_tools.execute_tool(tool_name, arguments, verbosity=verbosity, owner=True)
         finally:
             sys.stdout.flush()
             os.dup2(saved_stdout_fd, 1)
@@ -2856,15 +2859,15 @@ def main():
         return
 
     if argv[0] == "tool-safety-set":
-        # jarvis tool-safety-set <name> <confirm_required|ai_review> <true|false>
-        # Flips one of a tool's two safety toggles (see tool_safety.py).
+        # jarvis tool-safety-set <name> <confirm_required|ai_review|approval_summary> <true|false>
+        # Flips one of a tool's three safety toggles (see tool_safety.py).
         # Powers the "Toggle warning:" / "Toggle AI review:" switches in
-        # the web UI's debug dashboard, right under a tool's description.
+        # the web UI's debug dashboard and the Tool Manager's per-tool switches.
         from . import tool_safety
 
         if len(argv) < 4:
             print(json.dumps({
-                "error": "usage: jarvis tool-safety-set <name> <confirm_required|ai_review> <true|false>",
+                "error": "usage: jarvis tool-safety-set <name> <confirm_required|ai_review|approval_summary> <true|false>",
             }))
             sys.exit(1)
 
@@ -2876,6 +2879,89 @@ def main():
             print(json.dumps({"error": str(e)}))
             sys.exit(1)
         print(json.dumps({"name": tool_name, **flags}, indent=2))
+        return
+
+    if argv[0] == "tool-disable-set":
+        # jarvis tool-disable-set <name> <true|false>
+        # Switches a tool OFF (true) or back ON (false) for the model: hidden from
+        # it and refused if it calls it anyway. The owner can still run it from
+        # Debug. Persisted in ~/.jarvis/disabled.json (see tool_disable.py).
+        from . import tool_disable
+        from . import tools as system_tools
+
+        if len(argv) < 3:
+            print(json.dumps({"error": "usage: jarvis tool-disable-set <name> <true|false>"}))
+            sys.exit(1)
+        tool_name = argv[1].strip()
+        value = argv[2].strip().lower() in ("1", "true", "yes", "y", "on")
+        try:
+            if value and tool_name not in system_tools.TOOLS:
+                raise ValueError("no such tool: %s" % tool_name)
+            result = tool_disable.set_tool_disabled(tool_name, value)
+        except tool_disable.ProtectedToolError as e:
+            print(json.dumps({"error": str(e), "protected": True}))
+            sys.exit(1)
+        except (ValueError, OSError) as e:
+            print(json.dumps({"error": str(e)}))
+            sys.exit(1)
+        print(json.dumps({**result, "protected": tool_disable.protected_reason(tool_name) or ""}, indent=2))
+        return
+
+    if argv[0] == "command-disable-set":
+        # jarvis command-disable-set <name> <true|false|forget>  |  <old> rename <new>
+        # Same switch for a SAVED command (commands.json). `forget` drops the
+        # entry without checking the command still exists -- used when a command
+        # is deleted, so a new command with the same name starts switched on.
+        from . import commands_config, tool_disable
+
+        if len(argv) < 3:
+            print(json.dumps({"error": "usage: jarvis command-disable-set <name> <true|false|forget>"}))
+            sys.exit(1)
+        cmd_name = argv[1].strip()
+        raw = argv[2].strip().lower()
+        try:
+            if raw == "forget":
+                tool_disable.forget_command(cmd_name)
+                print(json.dumps({"name": cmd_name, "disabled": False}))
+                return
+            if raw == "rename":
+                # jarvis command-disable-set <old> rename <new>
+                new_name = argv[3].strip() if len(argv) > 3 else ""
+                tool_disable.rename_command(cmd_name, new_name)
+                print(json.dumps({"name": new_name, "disabled": tool_disable.is_command_disabled(new_name)}))
+                return
+            value = raw in ("1", "true", "yes", "y", "on")
+            if value and cmd_name not in commands_config.load_commands_dict():
+                raise ValueError("no saved command named %s" % cmd_name)
+            result = tool_disable.set_command_disabled(cmd_name, value)
+        except (ValueError, OSError) as e:
+            print(json.dumps({"error": str(e)}))
+            sys.exit(1)
+        print(json.dumps(result, indent=2))
+        return
+
+    if argv[0] == "disabled-list":
+        # jarvis disabled-list
+        # What the owner has switched off, plus the tools that can't be.
+        from . import tool_disable
+
+        print(json.dumps({
+            "tools": sorted(tool_disable.disabled_tools()),
+            "commands": sorted(tool_disable.disabled_commands()),
+            "protected": tool_disable.PROTECTED_TOOLS,
+        }, indent=2))
+        return
+
+    if argv[0] == "disabled-dependents":
+        # jarvis disabled-dependents <tool|command> <name>
+        # Scheduled jobs that name this tool/command: the Tool Manager lists them
+        # before switching it off, since they would fail when they next fire.
+        from . import scheduler
+
+        if len(argv) < 3 or argv[1] not in ("tool", "command"):
+            print(json.dumps({"error": "usage: jarvis disabled-dependents <tool|command> <name>"}))
+            sys.exit(1)
+        print(json.dumps({"jobs": scheduler.jobs_using(argv[1], argv[2])}, indent=2))
         return
 
     if argv[0] == "commands-check-name":

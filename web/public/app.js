@@ -8676,7 +8676,7 @@
           "Rule of thumb: if you'd write it as instructions, make it a skill; if you'd write it as a function, make it a tool.",
         ]},
         { heading: "Step 1 \u2014 open the editor and pick a template", steps: [
-          "Menu > Custom Tools. Choose a template from the dropdown, then New.",
+          "Menu > Tool Manager > Create a tool. Choose a template, name the file, and Save.",
           "'Minimal' is one tool with one argument. 'Shows a popup' demonstrates toasts and in-chat cards. 'Asks the user something' shows a blocking confirm with a safe default. 'Calls an API' shows HTTP plus result shaping.",
           "Give it a filename in the Name box: lower_snake_case, starts with a letter. This is the FILE name \u2014 one file can define several tools.",
         ]},
@@ -8752,14 +8752,14 @@
       ],
     },
     {
-      id: "custom-tools", name: "Custom Tools", blurb: "Write your own Python tools",
+      id: "custom-tools", name: "Tool Manager & custom tools", blurb: "See every tool, set its safeguards, write your own",
       tags: "custom tools python actions write code extend plugin handler schema popup ui",
       sections: [
         { heading: "Where they live", steps: [
-          "Menu > Custom Tools, or the folder directly: ~/.jarvis/tools/",
+          "Menu > Tool Manager (it replaced the Custom Tools panel), or the folder directly: ~/.jarvis/tools/",
           "NOT jarvis/actions/ — script.bat overwrites the install directory on every rebuild, so a tool written there is destroyed by the next build. ~/.jarvis never moves.",
           "One .py file per tool set. A file starting with _ is ignored, so _helpers.py is safe to keep alongside.",
-          "x.py.disabled is switched off but kept — that's what the Enabled checkbox toggles.",
+          "x.py.disabled is switched off but kept — that's what the \"File enabled\" switch in the Tool Manager toggles.",
         ]},
         { heading: "The contract — three names, all required", steps: [
           "TOOL_SCHEMAS = [{\"name\", \"description\", \"parameters\"}]  — the description is what tells the model WHEN to use it, so write it like briefing a coworker.",
@@ -8774,10 +8774,11 @@
           "Name it something no built-in already uses. The editor checks and tells you.",
         ]},
         { heading: "Buttons in the editor", steps: [
-          "Check — validates without saving. Reports syntax, import and contract errors separately, because they need different fixes.",
+          "Validate — checks without saving. The panel on the right shows which of syntax, imports or contract failed, and the line is marked in the gutter.",
           "Save — validates FIRST and refuses to write a file that would be silently rejected at startup. Keeps a .bak of the previous version.",
-          "Run — actually executes the handler with arguments you supply. Real side effects really happen; there is no sandbox.",
-          "Ctrl+S saves. Tab indents four spaces instead of leaving the box.",
+          "Run a test (right-hand panel, for a saved tool) — actually executes the handler with the JSON arguments you supply. Real side effects really happen; there is no sandbox.",
+          "Ctrl+S saves, Ctrl+Enter validates. Tab indents four spaces; press Esc and then Tab to leave the box.",
+          "Import… (or drop a .py on the panel) shows you the source and asks before anything runs. Creating or saving in the editor does not ask.",
         ]},
         { heading: "Picking it up", steps: [
           "Tools are discovered once, at process start. A new tool is live on the next command you run.",
@@ -8827,7 +8828,7 @@
         ]},
       ],
       notes: [
-        "Start from Menu > Custom Tools > template 'Shows a popup' or 'Asks the user something' — both are working examples of everything above.",
+        "Start from Menu > Tool Manager > Create a tool > template 'Shows a popup' or 'Asks the user something' — both are working examples of everything above.",
       ],
     },
     {
@@ -9288,7 +9289,7 @@
   qs("#menu-item-channels")?.addEventListener("click", () => { closePanelMenu(); openChannels(); });
   qs("#menu-item-ctools")?.addEventListener("click", () => {
     closePanelMenu();
-    if (window.JarvisCustomTools) window.JarvisCustomTools.open();
+    window.JarvisToolManager?.open();
   });
 
   // ===========================================================================
@@ -10065,7 +10066,7 @@
         skills: openSkills,
         schedule: () => window.JarvisSchedules?.open(),
         mcp: openMcp,
-        ctools: () => window.JarvisCustomTools?.open(),
+        ctools: () => window.JarvisToolManager?.open(),
         channels: openChannels,
         daemons: () => window.JarvisDaemons?.open(),
         backlog: () => window.JarvisBacklog?.open(),

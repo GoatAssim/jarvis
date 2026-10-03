@@ -591,10 +591,12 @@ window.JARVIS_SLASH_COMMANDS = /*JSON-BEGIN*/
     },
     {
       "verb": "ctools",
-      "aliases": [],
+      "aliases": [
+        "toolmanager"
+      ],
       "group": "panels",
       "menu": "menu-item-ctools",
-      "summary": "Open Custom Tools",
+      "summary": "Open the Tool Manager",
       "riskTier": "safe",
       "instant": true,
       "whileReplying": true,
@@ -608,10 +610,14 @@ window.JARVIS_SLASH_COMMANDS = /*JSON-BEGIN*/
         "ctools-delete",
         "ctools-run",
         "ctools-toggle",
-        "ctools-templates"
+        "ctools-templates",
+        "tool-disable-set",
+        "command-disable-set",
+        "disabled-list",
+        "disabled-dependents"
       ],
       "example": "/ctools",
-      "preview": "Open Custom Tools."
+      "preview": "Open the Tool Manager."
     },
     {
       "verb": "channels",

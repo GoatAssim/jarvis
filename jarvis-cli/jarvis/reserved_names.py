@@ -47,6 +47,7 @@ RESERVED_NAMES = {
     "playnite-config", "spotify-config", "spotify-login",
     "memory-config", "everything-config",
     "tools-list", "tool-run", "tool-preview", "tool-safety-set",
+    "tool-disable-set", "command-disable-set", "disabled-list", "disabled-dependents",
     "personas-list",
     "skills-list", "skills-get", "skills-save", "skills-add", "skills-create",
     "skills-remove", "skillmake", "skilladd", "skillload", "skillunload",
