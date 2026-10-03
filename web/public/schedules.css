@@ -59,6 +59,11 @@
 .sch-dot--paused{ background: var(--orange); }
 .sch-dot--error{ background: var(--red); box-shadow: 0 0 6px rgba(248,113,113,0.5); }
 .sch-dot--needs_approval{ background: var(--accent-secondary); }
+.sch-dot--over_budget{ background: var(--orange); box-shadow: 0 0 6px rgba(251,146,60,0.5); }
+.sch-row.is-over-budget{ border-left-color: var(--orange); }
+.sch-detail__budget{ margin: 10px 0; display: grid; gap: 6px; }
+.sch-detail__budget-row{ display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.sch-detail__hint{ color: var(--text-dimmer); font-size: 12px; }
 .sch-dot--done, .sch-dot--cancelled{ background: var(--text-dimmer); opacity: 0.6; }
 .sch-row__title{ font-size: 12.5px; color: var(--text); flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .sch-row.is-done .sch-row__title, .sch-row.is-cancelled .sch-row__title{ text-decoration: line-through; opacity: 0.6; }

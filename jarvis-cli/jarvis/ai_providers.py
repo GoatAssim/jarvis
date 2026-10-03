@@ -210,6 +210,11 @@ class RoundBudget:
         first: the two pools are independent, so a model that's spent its
         project-discovery budget still has its (unrelated) tool-discovery
         budget intact, and vice versa."""
+        # L.16 item 8: once the ask's token ledger is over its limit no further
+        # round may start, whichever pool it would have drawn from -- a free
+        # discovery round still resends the whole transcript.
+        if token_budget_exceeded():
+            return False
         if names is not None and self.project_discovery_limit and self._is_project_discovery_round(names):
             if self.project_discovery_used < self.project_discovery_limit:
                 self.project_discovery_used += 1
@@ -240,6 +245,112 @@ class RoundBudget:
             return False
         self.grace_used = True
         return True
+
+
+
+# ---------------------------------------------------------------------------
+# Per-ask token ledger / budget (L.16 item 8).
+#
+# RoundBudget counts tool ROUNDS and says nothing about what they cost; the
+# per-attempt usage list (get_usage_summary) is reset for every provider/key
+# attempt, so after a failover it describes only the latest one. L.16 RC5
+# measured the consequence: a turn that failed over twice spent 32,219 logged
+# tokens (about 36.3K with Gemini's hidden thinking tokens) and nothing in the
+# process ever added them up.
+#
+# TokenBudget is that sum: ONE per ask(), fed by _record_usage (the single
+# place every adapter reports a round's usage, forced-ending calls included),
+# kept in a thread-local that set_log_context() does NOT reset. It always
+# counts. It only ENFORCES when it was given a limit, and ai_client.ask() gives
+# one only to an unattended (scheduled) run.
+#
+# Enforcement is deliberately not an exception thrown from _record_usage (the
+# adapters' own try/except blocks would turn that into a retry or a failover):
+#   * RoundBudget.take() returns False once the ledger is over its limit, so an
+#     adapter that just got a response asking for tools does not run them and
+#     returns its ordinary "gave up" result -- no further request is made;
+#   * _forced_ending() declines to make its closing call;
+#   * ask() checks between attempts and ends the turn itself.
+# A response that already carries a final answer is never discarded: the check
+# bites only when the model is asking for MORE work.
+# ---------------------------------------------------------------------------
+class TokenBudget:
+    """Running token total for one ask(), across every provider/key attempt.
+
+    Counts input + output + (Gemini) hidden thinking tokens. `limit` None means
+    count only. `exceeded()` is strict: a run that lands exactly on its limit
+    has not gone over it."""
+
+    def __init__(self, limit=None):
+        try:
+            limit = int(limit) if limit is not None else None
+        except (TypeError, ValueError):
+            limit = None
+        self.limit = limit if limit and limit > 0 else None
+        self.input_tokens = 0
+        self.output_tokens = 0
+        self.thinking_tokens = 0
+        self.requests = 0
+
+    @property
+    def used(self):
+        return self.input_tokens + self.output_tokens + self.thinking_tokens
+
+    def add(self, entry):
+        """Fold one _record_usage entry in. Never raises."""
+        if not isinstance(entry, dict):
+            return
+        for attr, key in (("input_tokens", "input_tokens"), ("output_tokens", "output_tokens")):
+            try:
+                setattr(self, attr, getattr(self, attr) + int(entry.get(key) or 0))
+            except (TypeError, ValueError):
+                pass
+        # Only thinking that is billed ON TOP of output_tokens (Gemini's
+        # thoughtsTokenCount). OpenAI-style reasoning_tokens are already inside
+        # output_tokens (the entry carries thinking_in_output), so adding them
+        # again would overcount and stop a scheduled run before its real limit.
+        # Same rule token_usage.AskUsage and get_usage_summary use (L.24 T6).
+        try:
+            self.thinking_tokens += int(token_usage.extra_thinking(entry))
+        except (TypeError, ValueError):
+            pass
+        self.requests += 1
+
+    def exceeded(self):
+        return self.limit is not None and self.used > self.limit
+
+    def summary(self):
+        return {
+            "input_tokens": self.input_tokens,
+            "output_tokens": self.output_tokens,
+            "thinking_tokens": self.thinking_tokens,
+            "total_tokens": self.used,
+            "requests": self.requests,
+            "limit": self.limit,
+            "exceeded": self.exceeded(),
+        }
+
+
+# Separate from _log_local on purpose: set_log_context() runs once per provider
+# ATTEMPT and resets that one, while this must survive every attempt of the ask.
+_token_local = threading.local()
+
+
+def set_token_budget(budget):
+    """Install `budget` (a TokenBudget or None) for this thread and return the
+    one it replaces, so a nested ask() can put the outer one back."""
+    previous = getattr(_token_local, "budget", None)
+    _token_local.budget = budget
+    return previous
+
+
+def get_token_budget():
+    return getattr(_token_local, "budget", None)
+
+
+def token_budget_exceeded():
+    budget = getattr(_token_local, "budget", None)
+    return bool(budget is not None and budget.exceeded())
 
 
 
@@ -751,6 +862,9 @@ def _record_usage(provider_type, data, round_num):
         rounds = []
         _log_local.usage_rounds = rounds
     rounds.append(entry)
+    ledger = getattr(_token_local, "budget", None)
+    if ledger is not None:
+        ledger.add(entry)
     conv_id = _log_conv_id()
     if conv_id:
         logs.log(conv_id, "usage", entry, provider=_log_provider(), round_num=round_num)
@@ -979,6 +1093,37 @@ def is_request_shape_error(reason):
         return False
     lowered = str(reason).lower()
     return any(marker in lowered for marker in _REQUEST_SHAPE_MARKERS)
+
+
+# ---------------------------------------------------------------------------
+# A host that refuses `stream_options` (master plan section 8.3, "where
+# supported").
+#
+# call_openai_compatible asks for a final usage chunk with
+# stream_options.include_usage on every streamed request. The OpenAI-compatible
+# family is large and uneven: most hosts accept it, some ignore it, and a few
+# strict ones answer 400/422 "unknown/unsupported field" instead. Without a
+# retry that is the exact failure the thinking-keys and prompt_cache_key retries
+# exist to prevent: a key (and then every other key on the provider) burned over
+# a request shape jarvis chose. Streaming itself is fine on such a host; only the
+# usage hint has to go, and the adapter drops it for the rest of that call.
+# ---------------------------------------------------------------------------
+_STREAM_OPTIONS_REJECT_RE = re.compile(
+    r"(stream_options|include_usage).{0,80}?(unsupported|not supported|unrecognized|unknown|"
+    r"invalid|not permitted|not allowed|extra|unexpected|not a valid|does not support)"
+    r"|(unsupported|unrecognized|unknown|invalid|extra|unexpected|not permitted|not allowed).{0,80}?"
+    r"(stream_options|include_usage)",
+    re.I | re.S,
+)
+
+
+def looks_like_stream_options_rejected(reason):
+    """Did this error come from the `stream_options` field specifically?
+
+    Conservative in the same direction as reasoning.looks_like_thinking_rejected:
+    a false positive costs one extra request without the usage hint, a false
+    negative burns an API key over a field jarvis added."""
+    return bool(reason and _STREAM_OPTIONS_REJECT_RE.search(str(reason)))
 
 
 # ---------------------------------------------------------------------------
@@ -1756,6 +1901,11 @@ def _forced_ending(adapter, provider, generic, timeout, tools, tool_executor, ro
     _log_local.forced = state
     try:
         history = _flatten_tool_scaffold(generic)
+        if token_budget_exceeded():
+            # L.16 item 8: the closing call is itself a request that resends the
+            # whole transcript. Over the limit means no more requests; ask()
+            # writes the reply.
+            return AIResult(False, error=_give_up_error(), tool_history=history, kind=KIND_BUDGET)
 
         def _wanted(result):
             """Calls the model wanted: captured natively, written into its
@@ -2053,6 +2203,11 @@ def call_openai_compatible(provider, messages, timeout, tools=None, tool_executo
     )
     _log_cache_plan(cache_plan, "openai_compatible")
 
+    # Flipped off for the rest of this call the first time the host refuses
+    # `stream_options` (see looks_like_stream_options_rejected), so later
+    # rounds of the same ask don't re-trigger the 400 + retry every time.
+    send_stream_usage = True
+
     for round_num in range(MAX_TOOL_ROUNDS + 1):
         # Trim tool results from earlier rounds before rebuilding this
         # round's payload — see _compact_prior_tool_results. Without this,
@@ -2090,7 +2245,8 @@ def call_openai_compatible(provider, messages, timeout, tools=None, tool_executo
             # an extra key it doesn't recognize rather than rejecting the
             # whole request over it, unlike prompt_cache_key on Groq.
             payload["stream"] = True
-            payload["stream_options"] = {"include_usage": True}
+            if send_stream_usage:
+                payload["stream_options"] = {"include_usage": True}
         # Prompt caching for the whole OpenAI-compatible family (Groq,
         # OpenAI, xAI, Mistral, DeepSeek, OpenRouter). These hosts cache
         # prefixes AUTOMATICALLY above ~1024 tokens, with no opt-in and no
@@ -2136,16 +2292,27 @@ def call_openai_compatible(provider, messages, timeout, tools=None, tool_executo
         # exactly this for prompt_cache_key), and burning a whole API key
         # over a request shape jarvis chose — not something the user did —
         # is the failure this avoids.
-        if not net_err:
+        # Up to two corrective retries (thinking keys, stream_options), each at
+        # most once, because a single request can carry both offending fields.
+        for _attempt in range(2):
+            if net_err:
+                break
             _reason = _status_reason(resp)
-            if _reason:
-                from . import reasoning as _r
-                if _r.looks_like_thinking_rejected(_reason) and _r.strip_from_payload(payload):
-                    try:
-                        resp.close()
-                    except Exception:  # noqa: BLE001 — discarding a rejected stream response
-                        pass
-                    resp, net_err = _post(payload)
+            if not _reason:
+                break
+            from . import reasoning as _r
+            if _r.looks_like_thinking_rejected(_reason) and _r.strip_from_payload(payload):
+                pass
+            elif "stream_options" in payload and looks_like_stream_options_rejected(_reason):
+                payload.pop("stream_options", None)
+                send_stream_usage = False
+            else:
+                break
+            try:
+                resp.close()
+            except Exception:  # noqa: BLE001 — discarding a rejected stream response
+                pass
+            resp, net_err = _post(payload)
         if net_err:
             return AIResult(False, error=net_err,
                             tool_history=_openai_messages_to_generic(working_messages) if ran_tools else None)

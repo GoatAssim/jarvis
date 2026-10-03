@@ -47,6 +47,13 @@ things that were already fixed once.
   (a chat guest, a fetched page, a file it was asked to read). There is
   deliberately no `daemon_add` tool. Same reasoning as `notify_owner`
   taking no recipient.
+- **`send_dm` is the one tool that takes a recipient, so every limit on it is
+  load-bearing.** It must stay owner-only (`JARVIS_CHANNEL_SENDER`), resolve
+  only known contacts and never guess between two matches, stay in
+  `TOOL_CONFIRM_REQUIRED`, keep its on-disk per-recipient rate limit, and
+  refuse scheduled/unattended runs. `notify_owner` takes no recipient for the
+  same reason; don't add one to it, and don't loosen `send_dm` to match.
+  `tests/test_send_dm.py` pins each of these.
 - **A chat guest's details never go in `memory.py`.** That store rides
   along in the owner's own prompts. Guest facts belong in
   `channels/people.py`, which is capped, keyed by platform id, and only

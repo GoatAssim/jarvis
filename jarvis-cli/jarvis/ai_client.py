@@ -8,6 +8,7 @@ one provider's wire format) \u2014 this module is the one place that knows
 told about itself, and what gets remembered.
 """
 
+import functools
 import json
 import re
 import threading
@@ -417,17 +418,40 @@ def _with_ask_total(usage, ask_usage, conv_id=None):
     return out
 
 
+def _with_budget_fields(total, budget):
+    """L.16 item 8 + L.24 T6 meet here. Two ledgers cover one ask: token_usage.
+    AskUsage (per attempt: attempt_count, cache fields, ...) and ai_providers.
+    TokenBudget (per request, enforces the scheduled-run limit). The AskUsage
+    dict stays the source of the numbers; only what the budget alone knows --
+    `limit` and `exceeded` -- is layered on, so the debug panel, the trace and
+    the scheduler's over-budget check all read one `ask_total`. Never raises."""
+    try:
+        out = dict(total) if isinstance(total, dict) else {}
+        if budget is not None:
+            out["limit"] = budget.limit
+            out["exceeded"] = bool(budget.exceeded())
+        return out
+    except Exception:  # noqa: BLE001 - measurement never fails a turn
+        return total
+
+
 class AskResult:
     """Everything cli.py (or, via the web console, server.js re-running the
     CLI) needs to present one 'jarvis <text>' call to a person."""
 
     __slots__ = ("ok", "text", "provider", "attempts", "assistant_name", "address_user_as", "usage", "degraded",
-                 "ending", "last_words")
+                 "ending", "last_words", "usage_total")
 
     def __init__(self, ok, text=None, provider=None, attempts=None,
                  assistant_name=DEFAULT_ASSISTANT_NAME, address_user_as=DEFAULT_ADDRESS,
-                 usage=None, degraded=False, ending=None, last_words=None):
+                 usage=None, degraded=False, ending=None, last_words=None, usage_total=None):
         self.ok = ok
+        # L.16 item 8: ai_providers.TokenBudget.summary() -- the whole ask()'s
+        # tokens across EVERY provider/key attempt (input, output, hidden
+        # thinking, request count, the limit if one applied). `usage` above
+        # describes only the attempt that answered. None when ask() ended
+        # before the ledger existed.
+        self.usage_total = usage_total
         self.text = text
         self.provider = provider
         self.attempts = attempts or []          # [(provider_label, error_reason), ...]
@@ -1565,6 +1589,60 @@ _REPEAT_FAILURE_DETECTORS = [
         ["list_windows"],
     ),
 ]
+
+
+# L.16 item 8 -- per-task token budget for scheduled asks.
+#
+# An unattended run has nobody watching what it spends, and the incident this
+# came from (L.16 RC5) burned ~36K tokens on a job that could not be done. The
+# circuit breaker below stops a run that hits a *known* dead end; this is the
+# backstop for the ones nobody predicted. The number is ONE ask()'s total across
+# every provider/key attempt, hidden thinking included (ai_providers.TokenBudget).
+#
+# 30,000 is a judgement call, not a measurement of the owner's jobs: it is below
+# the incident's 36.3K and well above the ~10K a simple ask costs (L.24). A job
+# that legitimately needs more raises defaults.scheduled_token_budget; 0 turns
+# the limit off. JARVIS_TOKEN_BUDGET overrides both for one run.
+SCHEDULED_TOKEN_BUDGET_DEFAULT = 30000
+TOKEN_BUDGET_ENV = "JARVIS_TOKEN_BUDGET"
+
+
+def _token_budget_limit(defaults):
+    """Tokens one ask() may spend, or None for no limit. Only an UNATTENDED run
+    (policy.unattended_context_from_env: JARVIS_SCHEDULED / an unattended
+    JARVIS_CONTEXT) is limited -- an interactive ask has a person watching and
+    is never cut off. An unreadable setting falls back to the default rather
+    than to "no limit": a typo must not switch the protection off."""
+    if policy.unattended_context_from_env() is None:
+        return None
+    raw = os.environ.get(TOKEN_BUDGET_ENV)
+    if raw is None or not str(raw).strip():
+        raw = (defaults or {}).get("scheduled_token_budget", SCHEDULED_TOKEN_BUDGET_DEFAULT)
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        return SCHEDULED_TOKEN_BUDGET_DEFAULT
+    return value if value > 0 else None
+
+
+def _token_budget_reply(budget, runs):
+    """The one-paragraph report for a run stopped over its token limit. It is
+    what the scheduler's notification carries, so it says what happened, what
+    ran, and which setting to change -- and never offers to "go ahead"."""
+    ran = []
+    for r in runs or []:
+        name = r.get("name") or ""
+        if name and name not in _DISCOVERY_ONLY_TOOLS and name not in ran:
+            ran.append(name)
+    line = ("Stopped: this scheduled run used %s tokens, over its limit of %s, so it was "
+            "ended before it finished." % (format(budget.used, ","), format(budget.limit or 0, ",")))
+    if ran:
+        line += " It had run: %s." % ", ".join(ran[:6])
+    else:
+        line += " Nothing had run yet."
+    line += (" To allow more, raise defaults.scheduled_token_budget in the AI config "
+             "(0 turns the limit off).")
+    return line
 
 
 def _stop_unattended_run(round_budget):
@@ -3037,7 +3115,7 @@ def _merged_sticky_groups_for_confirmation(route, existing_sticky_groups, user_t
     return merged
 
 
-def ask(user_text, commands=None, on_attempt=None, on_tool_call=None, on_tool_result=None, conversation_id=None,
+def _ask_impl(user_text, commands=None, on_attempt=None, on_tool_call=None, on_tool_result=None, conversation_id=None,
         on_confirm_request=None, on_route=None, provider_override=None,
         think_override=None, on_trace=None, sender_context="", on_interim_text=None, on_stream=None):
     """Ask Jarvis something, trying every configured, enabled provider in
@@ -3533,6 +3611,13 @@ def ask(user_text, commands=None, on_attempt=None, on_tool_call=None, on_tool_re
     forced_end = None
     ask_usage = token_usage.AskUsage()  # L.24 T6: every attempt's spend
 
+    # L.16 item 8: the ask-level token ledger. One per ask(), spanning every
+    # provider/key attempt; it always counts, and it only has a limit (and so
+    # only stops anything) in an unattended run. ask() restores the previous
+    # ledger on the way out.
+    token_budget = ai_providers.TokenBudget(_token_budget_limit(_defaults))
+    ai_providers.set_token_budget(token_budget)
+
     tool_executor = _make_tool_executor(
         on_tool_call, full_schemas, on_confirm_request=on_confirm_request,
         cfg=cfg, provider_ref=provider_ref, verbosity_ref=verbosity_ref,
@@ -3681,6 +3766,13 @@ def ask(user_text, commands=None, on_attempt=None, on_tool_call=None, on_tool_re
         keys = key_health.order_keys(_provider_label(provider), keys)
 
         for i, key in enumerate(keys, start=1):
+            if token_budget.exceeded():
+                # A failover must not start a fresh attempt (and resend the whole
+                # prompt) for a run that is already over its token limit.
+                forced_end = ai_providers.AIResult(False, error="over the token limit",
+                                                   kind=ai_providers.KIND_BUDGET)
+                attempts.append((label, "skipped: this run is over its token limit"))
+                break
             messages = _build_messages(
                 persona, commands, user_text, tools_enabled, profile, conv_id,
                 route=route if tools_enabled else None,
@@ -3849,7 +3941,7 @@ def ask(user_text, commands=None, on_attempt=None, on_tool_call=None, on_tool_re
                 if interim_items:
                     extras.append({"type": "interimText", "data": {"items": interim_items}})
                 if ask_usage:
-                    trace.tokens = ask_usage.to_dict()
+                    trace.tokens = _with_budget_fields(ask_usage.to_dict(), token_budget)
                 extras.append({"type": "trace", "data": trace.to_dict()})
                 if on_trace:
                     try:
@@ -3895,7 +3987,8 @@ def ask(user_text, commands=None, on_attempt=None, on_tool_call=None, on_tool_re
                 _spawn_title_update(conv_id, exchange_count)
                 return AskResult(True, text=reply_text, provider=label, attempts=attempts,
                                  assistant_name=assistant_name, address_user_as=address,
-                                 usage=_with_ask_total(result.usage, ask_usage, conv_id), ending=ending)
+                                 usage=_with_ask_total(result.usage, ask_usage, conv_id), ending=ending,
+                                 usage_total=token_budget.summary())
 
             # A rejection of the REQUEST itself (Groq's "Tool choice is none,
             # but model called a tool", a tool-argument schema mismatch, ...)
@@ -3950,6 +4043,38 @@ def ask(user_text, commands=None, on_attempt=None, on_tool_call=None, on_tool_re
         if forced_end is not None:
             break
 
+    if token_budget.exceeded():
+        # L.16 item 8: stopped for cost, not for a failed key or a spent round
+        # budget. Nothing is offered to "go ahead" with (no pendingAction extra):
+        # an unattended run has no one to say it, and the next message in this
+        # conversation must not resume a run that was stopped on purpose.
+        turn_runs = getattr(tool_executor, "runs", None) if tool_executor else None
+        reply = _token_budget_reply(token_budget, turn_runs)
+        trace.degraded = True
+        trace.ending = "token_budget"
+        trace.tokens = token_budget.summary()
+        console_store.log("error", reply)
+        if conv_id:
+            stop_extras = _extras_from_runs(turn_runs)
+            stop_extras.append({"type": "trace", "data": trace.to_dict()})
+            declined_extra = _declined_action_extra(turn_runs)
+            if declined_extra:
+                stop_extras.append(declined_extra)
+            console_pointer = console_store.end_turn("status", "stopped \u2014 over the token limit")
+            if console_pointer:
+                stop_extras.append({"type": "consoleRef", "data": console_pointer})
+            exchange_count = conversations.complete_exchange(
+                conv_id, user_text, reply,
+                "(stopped \u2014 over the token limit)",
+                extras=stop_extras,
+            )
+            _spawn_title_update(conv_id, exchange_count)
+        _pending_turn[0] = None
+        return AskResult(True, text=reply, provider=None, attempts=attempts,
+                         assistant_name=assistant_name, address_user_as=address,
+                         degraded=True, ending="token_budget",
+                         usage_total=token_budget.summary())
+
     if forced_end is not None:
         turn_runs = getattr(tool_executor, "runs", None) if tool_executor else None
         is_cutoff = forced_end.kind == ai_providers.KIND_CUTOFF
@@ -3981,7 +4106,8 @@ def ask(user_text, commands=None, on_attempt=None, on_tool_call=None, on_tool_re
         return AskResult(True, text=reply, provider=None, attempts=attempts,
                          assistant_name=assistant_name, address_user_as=address,
                          degraded=True, ending=ending, last_words=forced_end.last_words,
-                         usage=_with_ask_total(None, ask_usage, conv_id))
+                         usage=_with_ask_total(None, ask_usage, conv_id),
+                         usage_total=token_budget.summary())
 
     # Every provider failed on the closing text call. That used to always
     # mean "no provider answered" and get reported as a hard failure — but
@@ -4022,7 +4148,8 @@ def ask(user_text, commands=None, on_attempt=None, on_tool_call=None, on_tool_re
         return AskResult(True, text=summary, provider=None, attempts=attempts,
                          assistant_name=assistant_name, address_user_as=address,
                          degraded=True, ending="no_provider",
-                         usage=_with_ask_total(None, ask_usage, conv_id))
+                         usage=_with_ask_total(None, ask_usage, conv_id),
+                         usage_total=token_budget.summary())
 
     # The turn is still real — the user asked something and got nothing at
     # all, not even a completed side effect — so it's recorded as such
@@ -4040,4 +4167,53 @@ def ask(user_text, commands=None, on_attempt=None, on_tool_call=None, on_tool_re
         )
     _pending_turn[0] = None
     return AskResult(False, attempts=attempts, assistant_name=assistant_name, address_user_as=address,
-                     usage=_with_ask_total(None, ask_usage, conv_id))
+                     usage=_with_ask_total(None, ask_usage, conv_id),
+                     usage_total=token_budget.summary())
+
+
+def _attach_ask_total(result):
+    """Make result.usage -- which cli.py prints as the JARVIS_USAGE line, so the
+    web debug panel and the scheduler both get it with no new protocol -- carry
+    the budget's `limit`/`exceeded` in `ask_total`, and mark a run stopped over
+    budget (ending="token_budget"). `usage` otherwise describes only the attempt
+    that answered; a run stopped over budget has no such attempt, so one is
+    built from the ledger alone. An `ask_total` already set by _with_ask_total
+    (L.24 T6) is kept and extended, never replaced. Never raises: a result is
+    never lost to this."""
+    try:
+        total = getattr(result, "usage_total", None)
+        if not total:
+            return result
+        usage = dict(result.usage) if isinstance(result.usage, dict) else {
+            "input_tokens": total.get("input_tokens", 0), "output_tokens": total.get("output_tokens", 0),
+            "total_tokens": total.get("total_tokens", 0), "rounds": [], "tool_calls": []}
+        existing = usage.get("ask_total")
+        if isinstance(existing, dict):
+            merged = dict(existing)
+            merged["limit"] = total.get("limit")
+            merged["exceeded"] = bool(total.get("exceeded"))
+            usage["ask_total"] = merged
+        else:
+            usage["ask_total"] = total
+        if getattr(result, "ending", None) == "token_budget":
+            usage["ending"] = "token_budget"
+        result.usage = usage
+    except Exception:  # noqa: BLE001
+        pass
+    return result
+
+
+@functools.wraps(_ask_impl)
+def ask(*args, **kwargs):
+    """See _ask_impl. This wrapper only scopes the ask-level token ledger
+    (ai_providers.TokenBudget) to the call: whatever ledger was installed on
+    this thread before is put back when ask() returns or raises, so a nested
+    ask() cannot clear its caller's, and a finished ask() cannot leave a spent
+    ledger behind to stop the next one in the same process (tests, the web
+    server's long-lived threads)."""
+    previous = ai_providers.get_token_budget()
+    try:
+        result = _ask_impl(*args, **kwargs)
+    finally:
+        ai_providers.set_token_budget(previous)
+    return _attach_ask_total(result)

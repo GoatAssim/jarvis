@@ -129,7 +129,7 @@ jarvis-cli/jarvis/
         directory.py      @handle -> id, learned from real messages
         people.py         NEW — WHO a person is: name, notes, follow state
         dedupe.py         NEW — has this message id already been handled
-        outbound.py       DM the owner
+        outbound.py       DM the owner (dm_owner) or one known person (dm_person, L.20)
 
     # --- observability ----------------------------------------------------
     logs.py               structured conversation log entries + search
@@ -151,6 +151,9 @@ jarvis-cli/jarvis/
         dev_agent.py      plan -> write -> install -> run -> fix, sandboxed
         code_agent.py  calendar_tools.py  mcp_tools.py  scheduler_tools.py
         conv_search_tools.py  notify_owner.py
+        recent_dms.py         read-only, owner-only: who DMed the owner
+        send_dm.py            NEW (L.20) — DM ONE known person; owner-only, confirm-gated,
+                              rate-limited (~/.jarvis/channels/dm_sends.json), refuses unattended
         channel_people.py     NEW — remember_sender / who_am_i_talking_to
         workspace_tools.py    NEW — daemons, log search, backlog as AI tools
         path_tools.py         NEW — move/copy/rename/make_dir/delete-to-trash
@@ -443,6 +446,7 @@ silently never runs.
 | `test_schemas_for_tools.py` | router ↔ catalog consistency |
 | `test_dev_agent_sandbox.py` | path escapes, dependency validation |
 | `test_scheduler.py` / `test_timespec.py` | jobs and time parsing |
+| `test_l16_caps_and_budget.py` / `test_l16_scheduler_budget.py` / `test_l16_replay.py` | L.16 items 7, 8, 10: `list_windows` cap, per-ask token ledger and budget, per-job limit + "over budget" status, and the incident `1a99e1e3f0d3af0e` replayed through the real `ask()` (fixture: `tests/fixtures/1a99e1e3f0d3af0e.jsonl`) |
 | `test_slash_coverage.py` | every `reserved_names.py` name is in the `/` palette registry exactly once, with a valid risk tier |
 | `verify_slash_palette.js` (`node`) | the palette engine: parsing, submit routing, near-miss, every verb's handler, confirm gates, keyboard model |
 

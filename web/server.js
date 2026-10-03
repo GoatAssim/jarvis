@@ -1283,7 +1283,7 @@ app.get("/api/scheduled/:id", requireJarvis, async (req, res) => {
 
 // One route for every per-job verb. The action is validated against a fixed
 // list here so a request body can never name an arbitrary `sched-*` argv.
-const SCHED_ACTIONS = new Set(["cancel", "pause", "resume", "approve", "snooze"]);
+const SCHED_ACTIONS = new Set(["cancel", "pause", "resume", "approve", "snooze", "budget"]);
 
 app.post("/api/scheduled/:id/:action", requireJarvis, async (req, res) => {
   const { id, action } = req.params;
@@ -1296,6 +1296,15 @@ app.post("/api/scheduled/:id/:action", requireJarvis, async (req, res) => {
   const args = [`sched-${action}`, id];
   if (action === "snooze" && typeof req.body?.delay === "string" && req.body.delay.trim()) {
     args.push(req.body.delay.trim());
+  }
+  if (action === "budget") {
+    // Per-job token limit (L.16 item 8): "default", "off" (never stop it for
+    // cost) or a whole number. Validated here so the body can't smuggle argv.
+    const raw = String(req.body?.limit ?? "default").trim().toLowerCase();
+    if (!(raw === "default" || raw === "off" || /^[0-9][0-9,_]{0,11}$/.test(raw))) {
+      return res.status(400).json({ error: "limit must be 'default', 'off' or a number." });
+    }
+    args.push(raw);
   }
   const result = await runJarvisOnce(args, 15000);
   return parseJarvisJSON(result, res, "Couldn't update that job.");

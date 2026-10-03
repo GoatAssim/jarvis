@@ -217,7 +217,13 @@ def tool_read_screen(args=None):
         # so the failure is as cheap and as fast as it ever was.
         from . import vision_tools  # noqa: PLC0415
         if not vision_tools.vision_available():
-            return _no_pytesseract()
+            # Neither tier exists. Flag it the same way the "vision tried and
+            # failed" branch below does (can_see_screen False, retryable False):
+            # that flag is what ends an unattended run after this one failure.
+            # Without it the plain install note let the incident's run carry on
+            # for 9 model calls (tests/test_l16_replay.py, scenario B).
+            return _with_vision_failure(_no_pytesseract(),
+                                        "no configured provider can look at an image")
     args = args or {}
     try:
         min_confidence = float(args.get("min_confidence", 0))

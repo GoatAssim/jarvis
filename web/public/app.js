@@ -6156,12 +6156,21 @@
       `input=${u.input_tokens || 0}  output=${u.output_tokens || 0}  ` +
       `total=${u.total_tokens || 0}  rounds=${rounds.length}  tool calls=${toolCalls.length}`
     ));
+    // The whole ask across every provider/key attempt, hidden thinking
+    // included (L.24 T6: attempts; L.16 item 8: the token limit and the
+    // over-budget stop). Unlike the per-attempt numbers above. A run stopped
+    // over budget has no attempt_count, only the ledger's request count.
     const at = u.ask_total;
-    if (at && at.attempt_count) {
-      debugUsage.appendChild(el("div", { class: "debug-docs__section-title" }, "Whole ask (all attempts)"));
+    if (at && (at.attempt_count || at.total_tokens)) {
+      const stopped = u.ending === "token_budget";
+      debugUsage.appendChild(el("div", { class: "debug-docs__section-title" },
+        stopped ? "Stopped: over budget" : (at.attempt_count ? "Whole ask (all attempts)" : "Whole ask")));
+      const calls = at.attempt_count ? `rounds=${at.rounds || 0}  attempts=${at.attempt_count}`
+                                     : `model calls=${at.requests || 0}`;
+      const limitText = at.limit ? `  limit=${Number(at.limit).toLocaleString()}` : "";
       debugUsage.appendChild(el("div", { class: "debug-docs__desc" },
         `total=${at.total_tokens || 0}  input=${at.input_tokens || 0}  output=${at.output_tokens || 0}  ` +
-        `thinking=${at.thinking_tokens || 0}  rounds=${at.rounds || 0}  attempts=${at.attempt_count}`
+        `thinking=${at.thinking_tokens || 0}  ${calls}${limitText}`
       ));
       for (const a of (at.attempts || [])) {
         debugUsage.appendChild(el("div", { class: "debug-empty" },

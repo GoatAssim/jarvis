@@ -563,7 +563,8 @@ window.JARVIS_SLASH_COMMANDS = /*JSON-BEGIN*/
         "sched-pause",
         "sched-resume",
         "sched-snooze",
-        "sched-approve"
+        "sched-approve",
+        "sched-budget"
       ],
       "example": "/schedule",
       "preview": "Open Scheduled tasks & reminders."

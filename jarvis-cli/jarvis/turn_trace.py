@@ -84,6 +84,7 @@ _VERBS = {
     "schedule_task": "scheduled something",
     "list_scheduled": "listed your scheduled jobs",
     "notify_owner": "sent you a message",
+    "send_dm": "sent a message to someone",
     "get_datetime": "checked the time",
     "get_battery": "checked the battery",
     "get_wifi_info": "checked the network",
@@ -127,6 +128,8 @@ _ENDING_LINES = {
     "truncated": "The model's reply hit its output limit, so it stops mid-thought.",
     "no_provider": ("The actions finished, but no provider was left to write a reply about "
                     "them — so this summary is mine, not the model's."),
+    "token_budget": ("I stopped this run because it went over its token limit, so the reply "
+                     "is my report of what ran, not the model's answer."),
     "pending_action": ("You said go ahead, so I ran the step I had proposed directly, after "
                        "the usual confirmation."),
 }
@@ -248,6 +251,10 @@ class TurnTrace:
             bits.append("thought first (%s)" % self.thinking_level)
         if self.provider:
             bits.append("answered by %s" % self.provider)
+        if self.tokens and self.tokens.get("exceeded"):
+            bits.append("stopped: over budget")
+        elif self.tokens and self.tokens.get("total_tokens"):
+            bits.append("%s tokens" % format(int(self.tokens["total_tokens"]), ","))
         return " · ".join(bits)
 
     def lines(self):
@@ -310,9 +317,13 @@ class TurnTrace:
         elif self.degraded:
             out.append("The actions finished, but no provider was left to write a reply about "
                        "them — so this summary is mine, not the model's.")
-
-        if self.tokens and self.tokens.get("attempt_count"):
-            tk = self.tokens
+        # One sentence about cost, from whichever ledger filled self.tokens:
+        # the per-attempt AskUsage dict (L.24 T6: attempt_count, rounds) when
+        # the ask ran to an answer, or the bare TokenBudget summary (L.16 item
+        # 8) when the run was stopped over its limit. Either may carry the
+        # budget's `limit`, which is appended so a stop reads as a stop.
+        tk = self.tokens
+        if tk and tk.get("attempt_count"):
             line = "Spent %d tokens in all (%d in, %d out" % (
                 tk.get("total_tokens") or 0, tk.get("input_tokens") or 0, tk.get("output_tokens") or 0)
             if tk.get("thinking_tokens"):
@@ -321,6 +332,18 @@ class TurnTrace:
             line += ") over %d model call%s" % (tk.get("rounds") or 0, "" if tk.get("rounds") == 1 else "s")
             if n > 1:
                 line += " on %d attempts" % n
+            if tk.get("limit"):
+                line += ", against a limit of %s" % format(int(tk["limit"]), ",")
+            out.append(line + ".")
+        elif tk and tk.get("total_tokens"):
+            line = "This turn used %s tokens (%s in, %s out" % (
+                format(int(tk["total_tokens"]), ","), format(int(tk.get("input_tokens") or 0), ","),
+                format(int(tk.get("output_tokens") or 0), ","))
+            if tk.get("thinking_tokens"):
+                line += ", %s thinking" % format(int(tk["thinking_tokens"]), ",")
+            line += ")"
+            if tk.get("limit"):
+                line += " against a limit of %s" % format(int(tk["limit"]), ",")
             out.append(line + ".")
 
         if self.provider and not self.attempts:
@@ -445,4 +468,6 @@ def from_extra(data):
     trace.tool_count = int(data.get("toolsOffered") or 0)
     trace.degraded = bool(data.get("degraded"))
     trace.ending = data.get("ending") or None
+    tokens = data.get("tokens")
+    trace.tokens = dict(tokens) if isinstance(tokens, dict) else None
     return trace

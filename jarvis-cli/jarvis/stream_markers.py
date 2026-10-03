@@ -122,3 +122,116 @@ class StreamMarkerSink:
                 self._flush_locked()
         except Exception:  # noqa: BLE001
             pass
+
+
+class TerminalStreamSink:
+    """Plain-terminal (TTY) half of master plan 8.2 item 5.
+
+    Same `on_stream(kind, **data)` contract as StreamMarkerSink, but instead
+    of marker lines it prints for a human at a terminal: text deltas straight
+    to stdout as they arrive, thinking deltas dimmed on stderr only when the
+    show-thinking setting is on (reasoning `show`, the same setting as
+    `jarvis think`).
+
+    Text that streams before a tool call is a real interim message (8.4), so
+    it stays on screen; the line is simply closed when the round ends. A
+    `reset` (mid-stream failover, 8.6) can't un-print a terminal, so it ends
+    the line and notes on stderr that the reply is restarting.
+
+    cli.py still reconciles at the end: if `covers(final_text)` the streamed
+    text already IS the reply and only a trailing newline is needed;
+    otherwise the authoritative final reply is printed as before, so what is
+    displayed and what is saved can never silently drift.
+    """
+
+    def __init__(self, out=None, err=None, prefix="", dim="", reset="", show_thinking=False):
+        self._out = out if out is not None else sys.stdout
+        self._err = err if err is not None else sys.stderr
+        self._prefix = prefix
+        self._dim = dim
+        self._reset = reset
+        self._show_thinking = bool(show_thinking)
+        self._text_open = False      # a stdout line is mid-sentence
+        self._thinking_open = False  # a stderr line is mid-sentence
+        self._segment = []           # text of the round currently streaming
+        self.final_text = ""         # text of the last round that ended "done"
+        self.streamed_any = False
+
+    # -- internals -------------------------------------------------------------
+
+    def _w(self, stream, s):
+        try:
+            stream.write(s)
+            stream.flush()
+        except Exception:  # noqa: BLE001 — a stream hook must never break the turn
+            pass
+
+    def _close_thinking(self):
+        if self._thinking_open:
+            self._w(self._err, self._reset + "\n")
+            self._thinking_open = False
+
+    def _close_text(self):
+        if self._text_open:
+            self._w(self._out, "\n")
+            self._text_open = False
+
+    # -- public ----------------------------------------------------------------
+
+    def __call__(self, kind, **data):
+        try:
+            if kind == "text":
+                delta = data.get("delta")
+                if not delta:
+                    return
+                self._close_thinking()
+                if not self._text_open:
+                    self._w(self._out, self._prefix)
+                    self._text_open = True
+                self._w(self._out, str(delta))
+                self._segment.append(str(delta))
+                self.streamed_any = True
+            elif kind == "thinking":
+                delta = data.get("delta")
+                if not delta or not self._show_thinking:
+                    return
+                self._close_text()
+                if not self._thinking_open:
+                    self._w(self._err, self._dim + "  thinking: ")
+                    self._thinking_open = True
+                self._w(self._err, str(delta).replace("\n", " "))
+            elif kind == "tool":
+                self._close_thinking()
+                self._close_text()
+            elif kind == "round_end":
+                self._close_thinking()
+                self._close_text()
+                text = "".join(self._segment)
+                self._segment = []
+                if str(data.get("finish") or "done") == "done":
+                    self.final_text = text
+                else:
+                    self.final_text = ""
+            elif kind == "reset":
+                self._close_thinking()
+                had_text = self._text_open or bool(self._segment)
+                self._close_text()
+                self._segment = []
+                self.final_text = ""
+                if had_text:
+                    self._w(self._err, f"{self._dim}  \u21ba switching provider \u2014 restarting the reply{self._reset}\n")
+        except Exception:  # noqa: BLE001
+            pass
+
+    def covers(self, final_text):
+        """True when what was streamed is the whole final reply (compared
+        ignoring whitespace differences), so it must not be printed again."""
+        norm = lambda s: " ".join(str(s or "").split())  # noqa: E731
+        return bool(self.final_text) and norm(self.final_text) == norm(final_text)
+
+    def close(self):
+        try:
+            self._close_thinking()
+            self._close_text()
+        except Exception:  # noqa: BLE001
+            pass

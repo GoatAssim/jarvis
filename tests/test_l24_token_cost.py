@@ -294,7 +294,11 @@ def test_discord_question_no_longer_offers_desktop():
     r = _route("hey jarvis has anyone texted you on discord")
     check("5267 prompt routes to channels only", r.groups == ["channels"], r.groups)
     check("5267 prompt offers recent_dms", "recent_dms" in r.tools, r.tools)
-    check("5267 prompt offers 4 tools, not 22", len(r.tools) == 4, len(r.tools))
+    # Was 4. L.20 added send_dm to the channels group (notify_owner, recent_dms,
+    # remember_sender, who_am_i_talking_to, send_dm). The point of this check is
+    # "the channels group, not the 22-tool desktop group"; keep it exact so
+    # unplanned growth of the group is still noticed.
+    check("5267 prompt offers 5 tools, not 22", len(r.tools) == 5, (len(r.tools), r.tools))
     check("no desktop tool is offered", not any(t in r.tools for t in ("click", "read_screen", "take_screenshot", "focus_window")), r.tools)
 
     full = system_tools.compact_schemas_for_prompt(system_tools.schemas_for_tools(r.tools))

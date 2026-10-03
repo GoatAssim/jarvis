@@ -713,6 +713,23 @@ def _extract_think_override(argv):
     return out, override
 
 
+def _tty_streaming_wanted():
+    """Stream the reply live to a real terminal? Only for an interactive
+    human: stdout AND stderr are ttys, not the web UI, not a marker run, not
+    a scheduled/unattended job."""
+    if os.environ.get("JARVIS_TTY_STREAM") == "0":
+        return False
+    if os.environ.get("JARVIS_UI") == "web" or os.environ.get("JARVIS_STREAM_MARKERS") == "1":
+        return False
+    try:
+        from . import policy
+        if policy.unattended_context_from_env():
+            return False
+        return bool(sys.stdout.isatty() and sys.stderr.isatty())
+    except Exception:  # noqa: BLE001
+        return False
+
+
 def handle_ai_prompt(text, commands, provider_override=None, think_override=None):
     """Anything typed at jarvis that isn't a known command name lands here
     instead of the "Unknown command" error \u2014 it's treated as a message for
@@ -848,6 +865,8 @@ def handle_ai_prompt(text, commands, provider_override=None, think_override=None
             file=sys.stderr, flush=True,
         )
 
+    tty_stream_active = [False]
+
     def on_interim_text(text, round_num):
         # Master plan Part A §5: text the model sent alongside a tool call
         # ("I'll check that now") — previously silently dropped. Printed as
@@ -856,6 +875,8 @@ def handle_ai_prompt(text, commands, provider_override=None, think_override=None
         # nothing here is conditional). server.js already forwards a running
         # jarvis process's stderr to the web UI live, so this also reaches
         # the browser's console output without any change on that side.
+        if tty_stream_active[0]:
+            return  # already streamed live to the terminal
         text = text.replace("\n", " ").strip()
         # Was 240; a whole interim message is a sentence or two, and cutting
         # it mid-word hid most of what the model said (plan §0.5 item 4b).
@@ -912,9 +933,29 @@ def handle_ai_prompt(text, commands, provider_override=None, think_override=None
     # event becomes one `JARVIS_STREAM {json}` stdout line; see
     # stream_markers.py for the wire shape and why deltas are coalesced.
     stream_sink = None
+    tty_stream = False
     if os.environ.get("JARVIS_STREAM_MARKERS") == "1":
         from .stream_markers import StreamMarkerSink
         stream_sink = StreamMarkerSink()
+    elif _tty_streaming_wanted():
+        # §8.2 item 5, terminal half: a human at a real terminal sees the
+        # reply (and, if `jarvis think show` is on, the thinking) as it is
+        # written. Never for the web UI, a pipe, the scheduler or any other
+        # unattended run; JARVIS_TTY_STREAM=0 is the escape hatch.
+        from .stream_markers import TerminalStreamSink
+        try:
+            from . import ai_config as _ai_config
+            _cfg = _ai_config.load_ai_config()
+            _name = (_cfg.get("persona") or {}).get("assistant_name") or "Jarvis"
+            _show = bool(reasoning.resolve_config(_cfg.get("defaults")).get("show"))
+        except Exception:  # noqa: BLE001 — streaming is optional polish
+            _name, _show = "Jarvis", False
+        stream_sink = TerminalStreamSink(
+            prefix=f"{OUT.CYAN}{OUT.BOLD}{_name}:{OUT.RESET} ",
+            dim=ERR.DIM, reset=ERR.RESET, show_thinking=_show,
+        )
+        tty_stream = True
+        tty_stream_active[0] = True
 
     try:
         result = ai_client.ask(
@@ -1000,7 +1041,10 @@ def handle_ai_prompt(text, commands, provider_override=None, think_override=None
         except Exception:  # noqa: BLE001 — never block a reply over this
             pass
 
-    print(f"{prefix}{result.text}")
+    if tty_stream and stream_sink.covers(result.text):
+        pass  # already on screen, token by token; the sink closed the line
+    else:
+        print(f"{prefix}{result.text}")
     ending = getattr(result, "ending", None)
     note = {
         "forced": "the step limit was reached, so the text above is a summary of what ran, not a "
@@ -1008,6 +1052,8 @@ def handle_ai_prompt(text, commands, provider_override=None, think_override=None
         "cutoff": "the model's reply hit its output limit while writing its next step, so the text "
                   "above is a summary of what ran, not a model-written answer",
         "truncated": "the model's reply hit its output limit and was cut off",
+        "token_budget": "this scheduled run went over its token limit and was stopped, so the text "
+                        "above is a report of what ran, not a model-written answer",
         "pending_action": "you said go ahead, so the step proposed last turn was run directly",
     }.get(ending)
     if note is None and getattr(result, "degraded", False):
@@ -1145,7 +1191,7 @@ def run_logs_command(argv, commands):
 # model can't reach it (see scheduler._needs_approval).
 SCHEDULER_COMMANDS = {
     "sched-list", "sched-tick", "sched-daemon", "sched-ask-log", "sched-add",
-    "sched-show", "sched-cancel", "sched-pause", "sched-resume", "sched-snooze",
+    "sched-show", "sched-cancel", "sched-pause", "sched-resume", "sched-snooze", "sched-budget",
     "sched-approve", "sched-signal", "sched-clear", "notify-send",
     "notify-list", "notify-history", "notify-ack", "notify-clear", "notify-config",
     "conv-search", "mcp-status", "mcp-refresh", "mcp-config", "mcp-call",
@@ -1369,6 +1415,26 @@ def run_scheduler_command(argv):
                     for line in scheduler.risk_of(pending).get("lines") or []:
                         print("approving: %s" % line, file=sys.stderr)
             return emit(scheduler.summarize(fn(job_id)))
+
+        if cmd == "sched-budget":
+            # jarvis sched-budget <id> <default|off|N>  (L.16 item 8)
+            job_id = need_id()
+            if not job_id:
+                return 1
+            value = " ".join(rest[1:]).strip().lower()
+            if value in ("", "default"):
+                tokens = None
+            elif value in ("off", "none", "never", "unlimited", "0"):
+                tokens = 0
+            else:
+                try:
+                    tokens = int(value.replace(",", "").replace("_", ""))
+                except ValueError:
+                    return emit({"error": "usage: jarvis sched-budget <id> <default|off|N>"}, 1)
+            try:
+                return emit(scheduler.summarize(scheduler.set_token_budget(job_id, tokens)))
+            except scheduler.SchedulerError as e:
+                return emit({"error": str(e)}, 1)
 
         if cmd == "sched-snooze":
             job_id = need_id()
