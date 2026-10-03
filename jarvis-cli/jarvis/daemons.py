@@ -1092,14 +1092,31 @@ def tick(now=None):
 
 
 def autostart_all():
-    """Bring up every daemon flagged autostart that isn't already up."""
+    """Bring up every daemon flagged autostart that isn't already up.
+
+    L.27: this is called from the scheduler's STARTUP tick (see
+    scheduler.tick), which is the one place every long-lived driver — the
+    web server, `jarvis sched-daemon`, `jarvis sched-tick --startup` from
+    Task Scheduler — already agrees means "Jarvis just started".
+
+    Safe to call twice. A daemon is left alone if its child is running OR if
+    its supervisor is alive (STARTING, or RESTARTING in crash-loop backoff):
+    start() would refuse the latter with the H.1.3 guard, and "already being
+    brought up" is not a failure worth reporting. A real failure is recorded
+    on the daemon's own status (last_error) so the Daemons panel shows it
+    instead of the daemon silently staying down.
+    """
     results = []
     for entry in _load_registry().values():
         if not entry.get("autostart") or not entry.get("enabled", True):
             continue
-        if status(entry["id"])["running"]:
+        current = status(entry["id"])
+        if current["running"] or current["supervisor_pid"]:
             continue
         ok, msg = start(entry["id"])
+        if not ok:
+            _write_status(entry["id"], status=STATUS_STOPPED,
+                          last_error=f"autostart failed: {msg}")
         results.append({"id": entry["id"], "ok": ok, "message": msg})
     return results
 

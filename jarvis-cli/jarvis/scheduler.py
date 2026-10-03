@@ -883,6 +883,20 @@ def tick(now=None, startup=False, limit=25):
     except Exception:  # noqa: BLE001
         started_daemons = []
 
+    # L.27: daemons flagged Autostart come up on the STARTUP tick — the same
+    # "Jarvis just started" moment that fires "on next startup" jobs. It is
+    # deliberately not on every tick (a daemon the owner stopped by hand must
+    # stay stopped until the next startup), and it lives here rather than in
+    # one driver so the web server, sched-daemon and a Task Scheduler
+    # `sched-tick --startup` all get it.
+    autostarted = []
+    if startup:
+        try:
+            from . import daemons as _daemons
+            autostarted = _daemons.autostart_all()
+        except Exception:  # noqa: BLE001 — must never cost a reminder
+            autostarted = []
+
     noticed = {}
     try:
         from . import ambient as _ambient
@@ -892,6 +906,7 @@ def tick(now=None, startup=False, limit=25):
 
     return {"ok": True, "ran": ran, "notifications": notifications,
             "daemons_started": started_daemons,
+            "daemons_autostarted": autostarted,
             "noticed": noticed.get("new") or [],
             "at": timespec.to_iso(datetime.now())}
 

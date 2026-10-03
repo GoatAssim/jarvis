@@ -162,10 +162,22 @@
     return prev[n];
   }
 
+  // I-B18: the user's saved commands are real slash targets too, so a typo
+  // of one ("/depoly") gets the same did-you-mean as a typo of a built-in.
+  // An EXACT saved name is not a typo and must reach the normal send path.
+  function savedNames() {
+    try {
+      const st = host().state();
+      return Object.keys((st && st.commands) || {}).map((n) => n.toLowerCase());
+    } catch { return []; }
+  }
+
   function nearestVerb(token) {
     if (token.length < 3) return null;
+    const saved = savedNames();
+    if (saved.includes(token)) return null;
     let best = null, bestD = 3;
-    for (const t of ALL_TOKENS) {
+    for (const t of ALL_TOKENS.concat(saved)) {
       const d = editDistance(token, t);
       if (d < bestD) { bestD = d; best = t; }
     }
@@ -1132,7 +1144,7 @@
       if (!STATIC_LISTS.layouts.some((r) => r.value === mode)) { toast("Layout must be classic or focus."); return false; }
       await host().setLayout(mode);
     },
-    help({ argText }) { showHelp(argText.trim().toLowerCase()); return "keep-open"; },
+    help({ argText }) { return showHelp(argText.trim().toLowerCase()) === false ? false : "keep-open"; },
   };
   for (const v of PANEL_VERBS) HANDLERS[v] = () => host().openPanel(v);
   // organize-json is deliberately NOT here: its rendering is tied to app.js
@@ -1146,10 +1158,20 @@
     const input = ui.input;
     const spec = token ? BY_TOKEN.get(token.replace(/^\//, "")) : null;
     if (!spec) {
+      // I-B18: `/help <unknown>` used to wipe what was typed and reopen the
+      // list at "/". Keep the text (so the typo can be fixed in place), say
+      // what was not found, and offer the nearest real command. A bare /help
+      // still opens the full list.
+      if (token) {
+        const near = nearestVerb(token.replace(/^\//, ""));
+        info(`No command called "${token}".` + (near ? ` Did you mean /${near}?` : ""));
+        // handleSubmit blanks the box before a handler runs and gives the
+        // text back when the handler returns false, so false is what keeps it.
+        return false;
+      }
       input.value = "/";
       input.dispatchEvent(new Event("input", { bubbles: true }));
       input.focus();
-      if (token) info(`No command called "${token}".`);
       return;
     }
     input.value = "/" + spec.verb;

@@ -1774,7 +1774,7 @@
     det.quick.appendChild(el("h4", { class: "dmn-section-title" }, "Quick settings"));
     det.quick.appendChild(el("div", { class: "dmn-switches" }, [
       switchNode(e.enabled, "Enabled", "A disabled service can\u2019t be started or scheduled.", (on, input) => quickPatch(entry.id, { enabled: on }, on ? "Enabled" : "Disabled", input)),
-      switchNode(Boolean(entry.autostart), "Autostart", "Marks it to start with Jarvis. Stored in the registry; nothing in the current build launches autostart daemons yet.", (on, input) => quickPatch(entry.id, { autostart: on }, on ? "Autostart on" : "Autostart off", input)),
+      switchNode(Boolean(entry.autostart), "Autostart", "Starts it each time Jarvis starts (the web console or the scheduler coming up). One you stopped by hand stays stopped until then.", (on, input) => quickPatch(entry.id, { autostart: on }, on ? "Autostart on" : "Autostart off", input)),
     ]));
     det.quick.appendChild(el("div", { class: "dmn-note" }, "For anything else \u2014 command, restart policy, environment \u2014 use Edit. Changes apply the next time it starts."));
 
@@ -2065,7 +2065,7 @@
     // options
     const optSec = el("section", { class: "dmn-fsec" }, [
       el("h4", { class: "dmn-section-title" }, "Options"),
-      checkInput("autostart", "Autostart", "Marks it to start with Jarvis. Stored in the registry; nothing in the current build launches autostart daemons yet."),
+      checkInput("autostart", "Autostart", "Starts it each time Jarvis starts (the web console or the scheduler coming up). One you stopped by hand stays stopped until then."),
       ed.mode === "edit" ? checkInput("enabled", "Enabled", "A disabled service can\u2019t be started or scheduled.") : null,
       field("notes", "Notes", textInput("notes", { area: true, rows: 3, attrs: { placeholder: "anything worth remembering about this service" } }), null, true),
     ]);
