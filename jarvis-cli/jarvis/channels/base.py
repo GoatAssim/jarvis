@@ -35,6 +35,7 @@ import json
 import os
 import sys
 import threading
+import time
 import traceback
 
 from . import PLATFORMS
@@ -43,6 +44,16 @@ from . import dedupe, people, permissions, transcript
 
 # Serializes ask() calls so the JARVIS_ALLOWED_TOOLS mutation below is safe.
 _ASK_LOCK = threading.Lock()
+
+# L.28 #5: an ask that never finished and left no row at all (an owner message
+# went unanswered for 4+ minutes and the logs showed a request, then silence).
+# The cause is unknown (a hung HTTP call with no overall deadline, a stuck
+# tool, or a killed process all look identical), and because asks are
+# serialized under _ASK_LOCK one stuck ask silently blocks every other chat.
+# This does not guess at a cause or kill anything: it makes the stall
+# visible, once per STALL_LOG_SECONDS, with what the ask was last doing.
+STALL_LOG_SECONDS = 90.0
+LOCK_WAIT_LOG_SECONDS = 5.0
 
 # Who sent the message currently being answered, as JSON, for tools that
 # need the *current* sender rather than one named in their arguments (see
@@ -139,14 +150,27 @@ def _ask_jarvis(text, conv_id, may_use_tools, on_tool_call=None, platform="",
     reason: os.environ is process-global and this process handles several
     people's messages.
     """
-    from .. import ai_client, commands_config
+    from .. import ai_client, commands_config, logs
 
     try:
         commands = commands_config.load_commands_dict()
     except Exception:  # noqa: BLE001 — a broken commands file must not block a reply
         commands = {}
 
+    def _note(message):
+        """stderr + one error row in this conversation's log. Never raises."""
+        try:
+            _log(message)
+            logs.log(conv_id, "error", {"error": message}, provider="watchdog")
+        except Exception:  # noqa: BLE001 — a diagnostic must never break an ask
+            pass
+
+    queued_at = time.time()
     with _ASK_LOCK:
+        queued = time.time() - queued_at
+        if queued >= LOCK_WAIT_LOG_SECONDS:
+            _note(f"this ask waited {queued:.0f}s for the ask lock - another "
+                  "chat's ask was still running")
         previous = os.environ.get("JARVIS_ALLOWED_TOOLS")
         previous_source = os.environ.get("JARVIS_LOG_SOURCE")
         previous_sender = os.environ.get(SENDER_ENV)
@@ -166,15 +190,39 @@ def _ask_jarvis(text, conv_id, may_use_tools, on_tool_call=None, platform="",
             # Empty string -> empty allowlist -> no tool reaches the model.
             # Note this is NOT the same as unsetting it (None = unrestricted).
             os.environ["JARVIS_ALLOWED_TOOLS"] = ""
+        progress = {"attempt": "", "tool": ""}
+        finished = threading.Event()
+
+        def _on_attempt(label):
+            progress["attempt"] = str(label)
+
+        def _on_tool_call(*args, **kwargs):
+            progress["tool"] = str(args[0]) if args else ""
+            if on_tool_call:
+                return on_tool_call(*args, **kwargs)
+            return None
+
+        def _watch():
+            started = time.time()
+            while not finished.wait(STALL_LOG_SECONDS):
+                _note(f"ask still running after {time.time() - started:.0f}s with "
+                      f"no answer - last provider attempt: "
+                      f"{progress['attempt'] or '(none yet)'}; last tool: "
+                      f"{progress['tool'] or '(none)'}. Every other chat is "
+                      "waiting behind it.")
+
+        threading.Thread(target=_watch, name="ask-watchdog", daemon=True).start()
         try:
             result = ai_client.ask(
                 text,
                 commands=commands,
                 conversation_id=conv_id,
-                on_tool_call=on_tool_call,
+                on_attempt=_on_attempt,
+                on_tool_call=_on_tool_call,
                 sender_context=sender_context,
             )
         finally:
+            finished.set()
             # Restore exactly, including the "wasn't set at all" case —
             # leaving an empty string behind would silently disable tools
             # for every later message in this process.

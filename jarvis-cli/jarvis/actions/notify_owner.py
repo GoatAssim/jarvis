@@ -124,6 +124,33 @@ TOOL_KEYWORDS = {
         # co-occurs with one of the stronger phrases above.
         "when you're done": 5,
         "when it's finished": 5,
+        # L.28 #1: how a chat GUEST asks for the same tool. The phrases above
+        # are all in the owner's voice ("me"); a guest says "tell ur owner hi"
+        # and none matched, so the router offered only the discovery tools and
+        # a one-line greeting took five asks (27,631 tokens): the model asked
+        # for the wording three times, then search_tools -> get_tool_schema ->
+        # notify_owner. Possessive/definite "owner" only, and always with a
+        # verb of messaging, so ordinary mentions of an owner don't route here.
+        "tell your owner": 10,
+        "tell ur owner": 10,
+        "tell the owner": 10,
+        "tell my owner": 8,
+        "let your owner know": 10,
+        "let ur owner know": 10,
+        "let the owner know": 10,
+        "message your owner": 10,
+        "message ur owner": 10,
+        "message the owner": 10,
+        "text your owner": 9,
+        "text ur owner": 9,
+        "dm your owner": 10,
+        "dm ur owner": 10,
+        "dm the owner": 10,
+        "ping your owner": 9,
+        "ping ur owner": 9,
+        "notify your owner": 10,
+        "notify ur owner": 10,
+        "notify the owner": 10,
     },
 }
 

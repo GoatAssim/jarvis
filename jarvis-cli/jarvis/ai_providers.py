@@ -1083,6 +1083,14 @@ _REQUEST_SHAPE_MARKERS = (
     "did not match schema",                # same family, other wording
     "which was not in request.tools",      # Groq: called a tool that wasn't offered this round
     "duplicate function declaration",      # Gemini: same tool declared twice
+    # L.28 #4: Groq's error CODE for every 400 where the model's tool call
+    # was unusable (a tool not in request.tools, "Failed to call a function",
+    # a tool-choice mismatch). The identical payload is rejected the same way
+    # on every other key of the provider, so rotating keys only burns
+    # requests (3 such 400s in one guest thread). Trade-off, accepted: a
+    # garbled generation is nondeterministic, so another key *might* have
+    # worked; the next provider is the better second try.
+    "tool_use_failed",
 )
 
 

@@ -831,6 +831,34 @@ def start(daemon_id):
     return True, f"starting '{did}' (supervisor pid {proc.pid})"
 
 
+def _reap(pid):
+    """Collect `pid` if it is OUR already-exited child (POSIX only).
+
+    A supervisor that start() spawned from this same long-lived process (the
+    Discord gateway, the web server's tool runner) stays a zombie until its
+    parent waits on it, and pid_alive() counts a zombie as alive — so stop()
+    would wait out its whole timeout for a supervisor that is really gone.
+    A non-child (the normal case: each daemon op is its own process) raises
+    ChildProcessError, which is ignored.
+    """
+    if os.name == "nt" or not pid:
+        return
+    try:
+        os.waitpid(int(pid), os.WNOHANG)
+    except (ChildProcessError, OSError, ValueError):
+        pass
+
+
+def _is_other_process(pid):
+    """True for a recorded supervisor that is a genuinely separate process.
+
+    A supervisor run as a thread of THIS process (tests; run_supervisor()
+    called directly) records our own pid. It can never "exit" while we wait
+    for it, and the force-kill fallback below must never signal ourselves.
+    """
+    return bool(pid) and int(pid) != os.getpid()
+
+
 def stop(daemon_id, timeout=None):
     """Ask a daemon to shut down, then insist. Returns (ok, message).
 
@@ -855,9 +883,17 @@ def stop(daemon_id, timeout=None):
         pass
     _write_status(did, stop_requested=True)
 
+    # L.26: "stopped" means the child AND its supervisor are gone. The
+    # supervisor outlives its child (it still joins the pump threads, writes
+    # the exit line and the final status), so declaring success on the child
+    # alone let restart() call start() while the old supervisor was alive and
+    # lose to the H.1.3 guard every time.
     deadline = time.time() + timeout
     while time.time() < deadline:
-        if not status(did)["running"]:
+        _reap(_read_status(did).get("supervisor_pid"))
+        now = status(did)
+        if not now["running"] and not (
+                now["supervisor_pid"] and _is_other_process(now["supervisor_pid"])):
             return True, f"'{did}' stopped"
         time.sleep(0.25)
 
@@ -867,7 +903,7 @@ def stop(daemon_id, timeout=None):
     sig = entry.get("stop_signal") or "TERM"
     killed = []
     for pid in (status(did).get("pid"), _read_status(did).get("supervisor_pid")):
-        if pid and pid_alive(pid):
+        if pid and _is_other_process(pid) and pid_alive(pid):
             if _terminate(pid, sig):
                 killed.append(pid)
     _write_status(did, status=STATUS_STOPPED, child_pid=None)
@@ -903,13 +939,45 @@ def _terminate(pid, sig="TERM"):
         return False
 
 
+# How long restart() waits for a stopping supervisor to finish exiting after
+# stop() reported success. stop() already waits for it, so this is only a
+# belt-and-braces bound for the adopted/force-killed paths.
+RESTART_SUPERVISOR_WAIT = 5.0
+
+
 def restart(daemon_id, timeout=None):
+    """Stop (if anything is up) and start again. Returns (ok, message).
+
+    L.26: stop whenever the child is running OR a supervisor is alive — a
+    `starting` / `restarting` (crash-loop backoff) daemon has no running
+    child but its supervisor still owns the slot, and start() refuses while
+    one is alive. Then wait for that supervisor to actually be gone before
+    starting, so the H.1.3 guard (which stays) only ever refuses a genuine
+    second supervisor. A failure after the stop says what state the daemon
+    was left in rather than leaving it silently stopped.
+    """
     did = normalize_id(daemon_id)
-    if status(did)["running"]:
+    before = status(did)
+    stopped_first = False
+    if before["running"] or before["supervisor_pid"]:
         ok, msg = stop(did, timeout=timeout)
         if not ok:
-            return False, f"could not stop before restart: {msg}"
-    return start(did)
+            now = status(did)
+            state = "still running" if now["running"] else now["status"]
+            return False, (f"could not stop before restart: {msg} "
+                           f"('{did}' is {state})")
+        stopped_first = True
+        deadline = time.time() + RESTART_SUPERVISOR_WAIT
+        while time.time() < deadline:
+            _reap(_read_status(did).get("supervisor_pid"))
+            sup = status(did)["supervisor_pid"]
+            if not (sup and _is_other_process(sup)):
+                break
+            time.sleep(0.1)
+    ok, msg = start(did)
+    if not ok and stopped_first:
+        return False, f"stopped '{did}' but could not start it again: {msg}"
+    return ok, msg
 
 
 # ---------------------------------------------------------------------------

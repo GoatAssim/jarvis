@@ -14,6 +14,7 @@ tool-use guidance.
 """
 
 import inspect
+import json
 import os
 import platform
 import re
@@ -318,8 +319,9 @@ def tool_search_tools(args):
 
     scored = []
     off = tool_disable.disabled_tools()
+    hidden = hidden_from_sender()
     for name, schema in index.items():
-        if name in off:
+        if name in off or name in hidden:
             continue
         group = tool_registry.group_of(name) or "misc"
         keywords = " ".join(tool_registry.keywords_for(name).keys())
@@ -458,6 +460,9 @@ def tool_get_tool_schema(args):
 
     if tool_disable.is_tool_disabled(name):
         return tool_disable.refusal_for_tool(name)
+
+    if name in hidden_from_sender():
+        return {"error": f"{name} is owner-only and not available in this chat"}
 
     schema = tool_registry.TOOL_INDEX.get(name)
     if schema is None:
@@ -600,6 +605,38 @@ PLAYNITE_AND_SPOTIFY = [*PLAYNITE_TOOL_SCHEMAS, *SPOTIFY_TOOL_SCHEMAS]
 # TOOL_SCHEMAS/TOOL_INDEX so tool_registry.TOOL_INDEX, schemas_for_tools(),
 # and the tool executor's arg-validation all know about it.
 TOOL_SCHEMAS = [*CORE_TOOL_SCHEMAS, *PLAYNITE_AND_SPOTIFY, *DISCOVERY_TOOL_SCHEMAS]
+
+
+# L.28 (guests with tools): tools whose handler refuses anyone but the owner
+# (they read or write OTHER people's private DMs). A chat guest who is allowed
+# tools was still offered them — ~2 schemas of tokens on every round — and
+# search_tools listed them, so a guest's "dm ..." request cost rounds on calls
+# that are guaranteed to be refused. They are now simply not OFFERED to a
+# non-owner chat sender. Execution is untouched: the handlers still do their
+# own owner check (that is the real gate, and tests/test_send_dm.py pins it),
+# and TOOLS / tool_safety / confirmation are not involved at all.
+OWNER_ONLY_TOOLS = frozenset({"send_dm", "recent_dms"})
+
+
+def _chat_sender_is_guest():
+    """True only when this process is answering a chat message from someone
+    who is NOT the owner. No chat context (the PC, a scheduled job) is the
+    owner's own trusted context, same convention as the handlers."""
+    raw = os.environ.get("JARVIS_CHANNEL_SENDER") or ""
+    if not raw.strip():
+        return False
+    try:
+        data = json.loads(raw)
+    except (ValueError, TypeError):
+        return False
+    if not isinstance(data, dict) or not data.get("platform") or not data.get("user_id"):
+        return False
+    return not data.get("is_owner")
+
+
+def hidden_from_sender():
+    """Tool names that must not be offered to / listed for the current sender."""
+    return OWNER_ONLY_TOOLS if _chat_sender_is_guest() else frozenset()
 
 
 def allowed_tools_from_env():
@@ -754,10 +791,11 @@ def schemas_for_tools(names):
     """
     index = _tool_index()
     off = tool_disable.disabled_tools()
+    hidden = hidden_from_sender()
     out = []
     seen = set()
     for name in names or []:
-        if name in seen or name in off:
+        if name in seen or name in off or name in hidden:
             continue
         schema = index.get(name)
         if schema is not None:

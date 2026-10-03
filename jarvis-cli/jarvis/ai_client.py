@@ -508,6 +508,16 @@ def _host_of(provider):
         return None
 
 
+def _is_loopback_host(host):
+    """True for localhost / 127.x / ::1 (with or without a port)."""
+    h = str(host or "").strip().lower()
+    if h.startswith("["):                     # [::1]:11434
+        h = h[1:].split("]", 1)[0]
+    elif h.count(":") == 1:                   # host:port
+        h = h.split(":", 1)[0]
+    return h in ("localhost", "::1") or h.startswith("127.")
+
+
 def _eligible_providers(providers, defaults=None):
     """Enabled, and either local (ollama — no key needed) or actually has at
     least one real key (see ai_config.provider_keys — handles both the
@@ -3132,6 +3142,16 @@ def _merged_sticky_groups_for_confirmation(route, existing_sticky_groups, user_t
     return merged
 
 
+def _allowlist_is_empty():
+    """True when JARVIS_ALLOWED_TOOLS is set to an empty allowlist (no tool
+    permitted at all) — as opposed to unset, which is unrestricted."""
+    try:
+        allowed = system_tools.allowed_tools_from_env()
+    except Exception:  # noqa: BLE001 — never let a probe break an ask
+        return False
+    return allowed is not None and len(allowed) == 0
+
+
 def _ask_impl(user_text, commands=None, on_attempt=None, on_tool_call=None, on_tool_result=None, conversation_id=None,
         on_confirm_request=None, on_route=None, provider_override=None,
         think_override=None, on_trace=None, sender_context="", on_interim_text=None, on_stream=None):
@@ -3278,6 +3298,18 @@ def _ask_impl(user_text, commands=None, on_attempt=None, on_tool_call=None, on_t
     trace.thinking_level = think_level
 
     tools_enabled = cfg["defaults"].get("tools_enabled", DEFAULT_TOOLS_ENABLED)
+    # L.28 #2: an EXPLICITLY EMPTY allowlist (JARVIS_ALLOWED_TOOLS="", which is
+    # what channels/base.py sets for a chat sender with no tool permission)
+    # means no tool may run for this ask. The discovery tools were still being
+    # offered anyway — search_tools / get_tool_schema / search_commands — and
+    # every call to them is answered "tool not permitted", so a tools-off
+    # guest paid whole rounds (11,750 tokens in one day) for guaranteed
+    # failures, while the prompt told the model to "call search_tools first".
+    # Run this ask as a plain no-tools ask instead: no schemas, no tools
+    # blurb, no executor. Unset (None) still means unrestricted, and a
+    # non-empty allowlist is untouched.
+    if tools_enabled and _allowlist_is_empty():
+        tools_enabled = False
     full_schemas = []
     if tools_enabled:
         full_schemas = system_tools.tool_schemas_for_session()
@@ -3778,6 +3810,18 @@ def _ask_impl(user_text, commands=None, on_attempt=None, on_tool_call=None, on_t
             # guaranteed (F.8's table). Don't spend a request finding that out.
             attempts.append((label, f"skipped: {host} already refused a connection this turn"))
             continue
+        # L.28 #4: the same, across asks, for a LOCAL endpoint that refused a
+        # connection within the last minute (Ollama not running cost ~4 s on
+        # every ask that reached it). Never applied when it is the only
+        # provider (nothing else to try, and the owner may have just started
+        # it) and never to a remote host (a network blip must not park a cloud
+        # provider).
+        if host and len(providers) > 1 and _is_loopback_host(host):
+            left = key_health.host_recently_refused(host)
+            if left > 0:
+                attempts.append((label, f"skipped: {host} refused a connection "
+                                        f"recently (retrying in {int(left) + 1}s)"))
+                continue
 
         # Ollama (or anything else with no configured keys but still
         # eligible \u2014 i.e. local, no auth needed) gets exactly one pass with
@@ -3928,6 +3972,8 @@ def _ask_impl(user_text, commands=None, on_attempt=None, on_tool_call=None, on_t
 
             if result.ok:
                 key_health.record_success(_provider_label(provider), resolved.get("model"), key)
+                if host and _is_loopback_host(host):
+                    key_health.clear_host_refused(host)   # it answered: end the L.28 #4 window
                 turn_runs = getattr(tool_executor, "runs", None) if tool_executor else None
                 extras = _extras_from_runs(turn_runs)
                 declined_extra = _declined_action_extra(turn_runs)
@@ -4041,6 +4087,8 @@ def _ask_impl(user_text, commands=None, on_attempt=None, on_tool_call=None, on_t
                 # Same endpoint for every key AND for any sibling provider.
                 if host:
                     dead_hosts.add(host)
+                    if _is_loopback_host(host):
+                        key_health.record_host_refused(host)
                 if i < len(keys):
                     skip_remaining_keys = True
                     failure = (f"{failure} [the service refused the connection - "
