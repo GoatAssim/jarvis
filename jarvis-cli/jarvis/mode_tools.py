@@ -122,7 +122,7 @@ CAPACITY_TOOL_SCHEMAS = [
     {
         "name": "get_capacity_mode",
         "description": (
-            "Read Jarvis's current prompt 'capacity' mode (how much history/commands/tool-"
+            "Read Jarvis's current prompt 'capacity' mode (how much history/tool-"
             "schema detail is sent per ask) and every mode currently available."
         ),
         "parameters": {"type": "object", "properties": {}, "required": []},

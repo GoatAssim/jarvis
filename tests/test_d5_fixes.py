@@ -144,7 +144,7 @@ def test_ai_client_passes_assistant_name_through():
 
 def _persona_static_prefix(compact_persona, ultra):
     static, _tail = ai_client._system_prompt_parts(
-        persona={}, commands_ctx="", freq_ctx="", tools_enabled=False,
+        persona={}, tools_enabled=False,
         compact_persona=compact_persona, ultra=ultra,
     )
     return static

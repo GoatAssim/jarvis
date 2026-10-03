@@ -261,8 +261,14 @@ r = command_tools.tool_update_command({"name": "deploy-prod", "description": "pw
 check("update_command by EXACT name is refused (the model can't rewrite a switched-off command)",
       r.get("disabled") is True, r)
 check("…and the command is unchanged on disk", json.dumps(commands_config.load_commands_dict()["deploy-prod"], sort_keys=True) == before)
-ctx = ai_client._commands_context(tool_disable.visible_commands(commands_config.load_commands_dict()))
-check("the system prompt's 'Saved commands' block omits it", "deploy-prod" not in ctx and "list-files" in ctx, ctx)
+# L.41 removed the 'Saved commands' listing from the prompt, so the old check (the listing omits a
+# switched-off command) has nothing to inspect. The property it protected is stronger now: with the
+# commands saved on disk, the built system prompt names NONE of them, off or on. They are reachable
+# only through search_commands, which filters switched-off ones (checked above).
+_sys = " ".join(m["content"] for m in ai_client._build_messages(
+    {}, "run my deploy command", True, ai_client._MODE_BY_NAME["full"], None, route=None) if m["role"] == "system")
+check("the system prompt names no saved command (the listing is gone, nothing to leak a switched-off one)",
+      "deploy-prod" not in _sys and "list-files" not in _sys and "nightly" not in _sys, _sys[:300])
 check("visible_commands hands back the same object when nothing is off",
       (lambda d: tool_disable.visible_commands(d) is d)({"a": {}}) if not tool_disable.disabled_commands() else True)
 ask_src = (CLI_DIR / "jarvis" / "ai_client.py").read_text(encoding="utf-8")

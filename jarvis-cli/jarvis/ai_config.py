@@ -114,7 +114,6 @@ DEFAULT_AI_CONFIG = {
         ],
         "compact_prompt": True,
         "compact_prompt_providers": ["groq"],
-        "compact_max_commands": 6,
         "compact_history_char_budget": 4800,
         "compact_history_exchanges": 10,
         "prompt_mode": "compact",
