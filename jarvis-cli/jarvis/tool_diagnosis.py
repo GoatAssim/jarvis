@@ -85,6 +85,7 @@ _TOOL_DEPS = {
     "listen": {"packages": ["sounddevice"]},
     "transcribe": {"packages": ["sounddevice"]},
     "notify_owner": {"packages": ["discord"]},
+    "send_dm": {"packages": ["discord"]},
 }
 
 # (pattern, cause, fix). Ordered — the first match wins, so put the

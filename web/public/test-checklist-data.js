@@ -936,7 +936,7 @@ window.JARVIS_TEST_CHECKLIST = /*JSON-BEGIN*/ {
     },
     {
      "run": {},
-     "expect": "Full JSON list."
+     "expect": "JSON list of at most 15 windows (active first, then visible, then minimized); titles over 80 characters are cut. With more than 15 windows open it also says truncated, how many were not shown, and that focus_window takes part of a title."
     }
    ],
    "needs": [
@@ -2989,6 +2989,41 @@ window.JARVIS_TEST_CHECKLIST = /*JSON-BEGIN*/ {
    "watch": [
     "Must exclude group/guild channels — only true 1:1 DM threads.",
     "A torn/corrupt trailing JSONL line in a transcript file must not crash the tool (read_thread already skips it)."
+   ]
+  },
+  "send_dm": {
+   "group": "channels",
+   "does": "Sends a DM to one known person (Discord/Instagram) on the owner's behalf. Owner-only, confirmed, rate limited.",
+   "steps": [
+    {
+     "run": {
+      "person": "<a name or @handle from channels-people>",
+      "message": "test",
+      "dry_run": true
+     },
+     "expect": "ok: true, dry_run: true, would_send_to shows the right platform/name/user_id, and nothing is sent."
+    },
+    {
+     "run": {
+      "person": "nobody-by-this-name",
+      "message": "hi"
+     },
+     "expect": "ok: false, \"I don't know anyone called ...\" with a known_contacts list. Never a guess."
+    },
+    {
+     "ask": "DM <a known person> that I'll be late",
+     "expect": "A confirm prompt showing the exact recipient and text; after Yes, <that person> receives it and the result says sent."
+    }
+   ],
+   "needs": [
+    "Discord bot token (or Instagram access token) configured",
+    "The recipient has messaged the bot at least once and shares a server with it (Discord) / is inside the 24h window (Instagram)"
+   ],
+   "care": "Sends a real message to a third party as the bot. Test against your own second account first. Verify it refuses when JARVIS_CHANNEL_SENDER is a non-owner and when JARVIS_SCHEDULED is set.",
+   "watch": [
+    "Ambiguous name (two people called the same) must list candidates, not pick one.",
+    "More than 5 sends to one person per hour is refused (20 overall).",
+    "Each attempt, delivered or not, appears as an outbound owner_dm line in that person's transcript thread."
    ]
   },
   "mcp_list_servers": {

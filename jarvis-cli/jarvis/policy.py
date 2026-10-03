@@ -114,6 +114,10 @@ _TOOL_RISK = {
     "memory_forget": 30, "memory_save": 10,
     "schedule_task": 25, "cancel_scheduled": 20,
     "notify_owner": 15, "send_digest": 5,
+    # Messages a THIRD PARTY as the bot (L.20, actions/send_dm.py). 50 sits in
+    # the confirm band interactively, becomes `review` from chat (x1.35) and
+    # when scheduled (x1.6); the tool itself refuses unattended runs outright.
+    "send_dm": 50,
     "spotify_play": 5, "playnite_launch_game": 20,
     "radio_set": 30, "set_capacity_mode": 10,
     # Powers the PC off / restarts / sleeps / locks it (L.16, actions/power_tools.py).
@@ -684,6 +688,14 @@ def _describe_effect(tool_name, arguments):
         return {"summary": "type %r into whatever window is focused"
                            % (arguments.get("text") or "")[:60],
                 "reversible": False, "targets": ["the focused window"]}
+    if name == "send_dm":
+        return {"summary": "send %r to %s%s as the Jarvis bot"
+                           % (str(arguments.get("message") or "")[:120],
+                              arguments.get("person") or "?",
+                              (" on " + str(arguments["platform"]))
+                              if arguments.get("platform") else ""),
+                "reversible": False,
+                "targets": [str(arguments.get("person") or "?")]}
     if name.startswith(("get_", "list_", "search_", "read_")):
         return {"summary": "read something and report back; change nothing",
                 "reversible": True, "targets": paths}

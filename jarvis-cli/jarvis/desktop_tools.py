@@ -282,6 +282,27 @@ def _window_summary(win):
         return {"title": getattr(win, "title", "")}
 
 
+# L.16 item 7: list_windows used to return EVERY titled window, each with a
+# full title. On a busy desktop that is a result of unbounded size which then
+# rides along in every later round of the turn (each round resends the whole
+# transcript). The cap lives here, in the tool, and not in tool_result_shaping:
+# that module is verbosity-gated ("full" bypasses it entirely) and its own
+# docstring leaves item *counts* to the tool, so a cap there would bound the
+# result at some capacity modes and not at others.
+LIST_WINDOWS_MAX = 15
+LIST_WINDOW_TITLE_MAX = 80
+
+
+def _cap_window_title(title):
+    """Cut a long title. No ellipsis is appended on purpose: focus_window /
+    get_window_info match by *partial* title, so the model may paste what it
+    sees straight back in, and a trailing "..." would stop that matching."""
+    title = title if isinstance(title, str) else str(title or "")
+    if len(title) <= LIST_WINDOW_TITLE_MAX:
+        return title, False
+    return title[:LIST_WINDOW_TITLE_MAX].rstrip(), True
+
+
 def tool_list_windows(args=None):
     if gw is None:
         return _no_pygetwindow()
@@ -290,7 +311,29 @@ def tool_list_windows(args=None):
     except Exception as e:
         return {"error": f"list_windows failed: {e}"}
     windows = [_window_summary(w) for w in wins if (w.title or "").strip()]
-    return {"ok": True, "count": len(windows), "windows": windows}
+    total = len(windows)
+    # Most useful first, so the cap drops the least useful windows: the active
+    # one, then the visible ones, then the minimized ones. sorted() is stable,
+    # so the OS's own order (front-to-back on Windows) is kept inside each group.
+    windows = sorted(windows, key=lambda w: (not w.get("isActive"), bool(w.get("isMinimized"))))
+    shown = windows[:LIST_WINDOWS_MAX]
+    cut_titles = False
+    for w in shown:
+        w["title"], was_cut = _cap_window_title(w.get("title"))
+        cut_titles = cut_titles or was_cut
+    result = {"ok": True, "count": total, "windows": shown}
+    if total > len(shown):
+        result["truncated"] = True
+        result["not_shown"] = total - len(shown)
+        result["hint"] = (
+            "Only the first %d windows are listed (active first, then visible, "
+            "then minimized). To work with another one, give focus_window or "
+            "get_window_info part of its title." % len(shown))
+    if cut_titles:
+        result["titles_cut"] = True
+        result.setdefault("hint", "Long titles are cut; part of a title is enough for "
+                                  "focus_window / get_window_info.")
+    return result
 
 
 def tool_focus_window(args=None):

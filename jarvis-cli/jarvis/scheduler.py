@@ -108,6 +108,11 @@ STATUS_CANCELLED = "cancelled"
 STATUS_PAUSED = "paused"
 STATUS_ERROR = "error"
 STATUS_NEEDS_APPROVAL = "needs_approval"
+# L.16 item 8: a scheduled ask that the per-run token budget stopped. Its own
+# status, not "error": nothing broke, the run was ended for cost, and what the
+# person does about it (raise the job's limit, or turn the limit off) differs
+# from what they do about a failure. Terminal until they resume it.
+STATUS_OVER_BUDGET = "over_budget"
 ACTIVE_STATUSES = (STATUS_PENDING, STATUS_PAUSED, STATUS_NEEDS_APPROVAL)
 
 # A tick that died mid-run (power cut, kill -9) would otherwise leave its
@@ -531,7 +536,7 @@ def pause(job_id):
 
 def resume(job_id):
     def _resume(job):
-        if job.get("status") not in (STATUS_PAUSED, STATUS_ERROR):
+        if job.get("status") not in (STATUS_PAUSED, STATUS_ERROR, STATUS_OVER_BUDGET):
             return
         job["status"] = STATUS_PENDING
         # A paused recurring job's next_run is in the past by the time it's
@@ -540,6 +545,29 @@ def resume(job_id):
         if job["trigger"].get("type") == "every":
             job["next_run"] = timespec.to_iso(_advance(job, datetime.now()))
     return _mutate(job_id, _resume)
+
+
+def set_token_budget(job_id, tokens):
+    """Per-job token limit for scheduled asks (L.16 item 8).
+
+    None  -> the default (defaults.scheduled_token_budget, 30,000)
+    0     -> NO limit: this job is never stopped for cost
+    N > 0 -> this job may spend N tokens per run
+    Takes effect on the job's next run. Stored on the job so it survives
+    restarts and is shown in the scheduler UI."""
+    if tokens is not None:
+        try:
+            tokens = int(tokens)
+        except (TypeError, ValueError):
+            raise SchedulerError("token limit must be a number, 0 (no limit) or empty (default)")
+        if tokens < 0:
+            raise SchedulerError("token limit can't be negative")
+        if 0 < tokens < 1000:
+            raise SchedulerError("a token limit under 1,000 would stop every run before it starts")
+
+    def _set(job):
+        job["token_budget"] = tokens
+    return _mutate(job_id, _set)
 
 
 def approve(job_id):
@@ -885,6 +913,14 @@ def _apply_next_state(job, outcome, now):
     ttype = trig.get("type")
     failed = not (outcome and outcome.get("ok"))
 
+    if outcome and outcome.get("over_budget"):
+        # Any trigger type, recurring included: unlike a transient failure, a
+        # run that blew its budget will do it again tomorrow, so it is parked
+        # (not re-fired daily) until the owner resumes it or changes its limit.
+        job["status"] = STATUS_OVER_BUDGET
+        job["next_run"] = None
+        return
+
     if failed and ttype != "every":
         job["status"] = STATUS_ERROR
         job["next_run"] = None
@@ -1134,6 +1170,14 @@ def _do_ask(job, action):
     # empty included, so a value inherited from an outer approved run (a tick
     # fired from inside another job's tool call) can never leak into this one.
     env["JARVIS_JOB_APPROVED_KINDS"] = ",".join(job_risk.authorized_kinds(job))
+    # L.16 item 8: this job's own token limit. ALWAYS set or cleared, like the
+    # line above, so one inherited from an outer run can never leak in. Unset =
+    # the config default; "0" = no limit (the job is never stopped for cost).
+    job_limit = job.get("token_budget")
+    if job_limit is None:
+        env.pop("JARVIS_TOKEN_BUDGET", None)
+    else:
+        env["JARVIS_TOKEN_BUDGET"] = str(int(job_limit))
     # D.6: every scheduler-triggered run gets its own brand-new, origin-
     # tagged conversation — never the conversation that created the job,
     # and never whatever ai_client.ask() would otherwise fall back to
@@ -1179,17 +1223,41 @@ def _do_ask(job, action):
     # person, via the notification below and the summary this returns.
     _log_scheduled_ask(job, prompt, ok=True, reply=raw_reply, conv_id=run_conv_id)
 
+    over_budget = _ask_stopped_over_budget(raw_reply)
     note = None
-    if _should_report(job):
+    if _should_report(job) or over_budget:
+        # A cost stop is ALWAYS reported, even for a job that normally stays
+        # quiet: a run that was cut off is exactly what its owner must hear about.
         from . import notifier
         note = notifier.notify(
-            title=job.get("title") or "Scheduled task",
+            title=(("Stopped: over budget \u2014 " if over_budget else "")
+                   + (job.get("title") or "Scheduled task")),
             message=reply or "(no output)",
             channels=job.get("channels"), level=job.get("level"),
             kind="task", job_id=job.get("id"), conv_id=run_conv_id,
         )
+    if over_budget:
+        return {"ok": False, "over_budget": True, "summary": reply, "notification": note,
+                "error": "stopped: over its token limit", "conv_id": run_conv_id}
     return {"ok": True, "summary": reply, "notification": note, "error": None,
             "conv_id": run_conv_id}
+
+
+def _ask_stopped_over_budget(raw_reply):
+    """True when the ask's own JARVIS_USAGE line says the token budget ended it
+    (cli.py prints that line for every ask; ai_client.ask() puts ending and the
+    whole-ask ledger on it). Reads the machine-readable marker, never the reply
+    text, so a reply that merely mentions tokens can't trip it."""
+    for ln in (raw_reply or "").split("\n"):
+        if not ln.startswith("JARVIS_USAGE "):
+            continue
+        try:
+            usage = json.loads(ln[len("JARVIS_USAGE "):])
+        except ValueError:
+            continue
+        if isinstance(usage, dict) and usage.get("ending") == "token_budget":
+            return True
+    return False
 
 
 def _do_command(job, action):
@@ -1334,6 +1402,7 @@ def summarize(job):
         "run_count": job.get("run_count", 0),
         "last_run": job.get("last_run"),
         "last_error": job.get("last_error"),
+        "token_budget": job.get("token_budget"),
         "needs_approval": job.get("status") == STATUS_NEEDS_APPROVAL,
         # The approval surface's "what is in this job" (job_risk.assess).
         # Missing on jobs created before it existed; derived on demand so the

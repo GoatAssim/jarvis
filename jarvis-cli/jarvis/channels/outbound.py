@@ -1,5 +1,8 @@
 """Sending a DM to the owner — the "Jarvis tells you something" direction.
 
+(L.20 added dm_person() below: the same delivery to a specific known person,
+for the owner-only `send_dm` tool.)
+
 Used by three callers:
   * the `notify_owner` tool, so Jarvis can say "that finished" on its own
   * notifier.py's new `discord`/`instagram` channels, so scheduled jobs and
@@ -90,6 +93,86 @@ def dm_owner_instagram(text, cfg=None):
         hours = remaining // 3600
         return True, f"sent (window closes in ~{hours}h)"
     return False, err
+
+
+# ---------------------------------------------------------------------------
+# Sending to a specific person (L.20)
+# ---------------------------------------------------------------------------
+#
+# dm_owner_* above can only ever address the one configured owner. These
+# address an arbitrary platform user id, and are the single path the
+# `send_dm` tool goes through -- deciding WHO may be messaged (a known
+# contact, owner-only caller, confirmed, rate limited) is the tool's job;
+# this layer only delivers and says why it could not. Same (ok, detail)
+# contract as the owner senders, never raises.
+
+
+def dm_person_discord(user_id, text, cfg=None):
+    cfg = cfg or channel_config.platform_config(DISCORD)
+    if not cfg.get("enabled"):
+        return False, "discord channel is disabled"
+    user_id = str(user_id or "").strip()
+    if not user_id.isdigit():
+        # Same reasoning as dm_owner_discord: fetch_user() wants a snowflake.
+        return False, (f"discord user '{user_id}' is not a numeric user id, so "
+                       "it cannot be messaged")
+    token = str(cfg.get("bot_token") or "").strip()
+    if not token:
+        return False, "no discord bot_token configured"
+
+    from . import discord_gateway
+    discord, err = discord_gateway.import_discord()
+    if discord is None:
+        return False, err
+    try:
+        return asyncio.run(
+            discord_gateway.send_dm(discord, token, user_id, text, cfg=cfg))
+    except RuntimeError as exc:
+        return False, f"could not start an event loop: {exc}"
+    except Exception as exc:  # noqa: BLE001
+        return False, str(exc)
+
+
+def dm_person_instagram(user_id, text, cfg=None):
+    cfg = cfg or channel_config.platform_config(INSTAGRAM)
+    if not cfg.get("enabled"):
+        return False, "instagram channel is disabled"
+    user_id = str(user_id or "").strip()
+    if not user_id:
+        return False, "no instagram user id"
+
+    from . import instagram_gateway
+    open_now, remaining = instagram_gateway.window_open_for(user_id)
+    if not open_now:
+        return False, (
+            "instagram's 24-hour messaging window is closed for this person. "
+            "Instagram does not allow a bot to open a conversation -- they "
+            "have to message the bot first.")
+    ok, err = instagram_gateway.send_message(user_id, text, cfg=cfg)
+    if ok:
+        return True, f"sent (window closes in ~{remaining // 3600}h)"
+    return False, err
+
+
+_PERSON_SENDERS = {
+    DISCORD: dm_person_discord,
+    INSTAGRAM: dm_person_instagram,
+}
+
+
+def dm_person(platform, person_id, text):
+    """Send `text` to one platform user by id. Returns (ok, detail)."""
+    sender = _PERSON_SENDERS.get(platform)
+    if sender is None:
+        return False, f"unknown platform '{platform}'"
+    if not str(person_id or "").strip():
+        return False, "no recipient"
+    if not (text or "").strip():
+        return False, "empty message"
+    try:
+        return sender(person_id, text)
+    except Exception as exc:  # noqa: BLE001 -- never let delivery raise
+        return False, str(exc)
 
 
 _SENDERS = {

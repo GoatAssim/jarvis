@@ -111,7 +111,7 @@
     ["3", "3 \u00b7 Persistent"], ["4", "4 \u00b7 Broadcast"], ["5", "5 \u00b7 Confirm"],
   ];
   const KIND_CHIPS = [["all", "All"], ["reminder", "Reminder"], ["notify", "Notify"], ["task", "Task"]];
-  const STATUS_CHIPS = [["all", "All statuses"], ["needs_approval", "Needs approval"], ["paused", "Paused"], ["error", "Failed"]];
+  const STATUS_CHIPS = [["all", "All statuses"], ["needs_approval", "Needs approval"], ["paused", "Paused"], ["error", "Failed"], ["over_budget", "Over budget"]];
   // Cosmetic only, not a real scheduler.py kind — see the module comment
   // above and tool_schedule_watch's own docstring ("mechanically also
   // schedule_task with action={type: ask}"). A hand-authored ask job that
@@ -160,6 +160,7 @@
     if (state.statusFilter === "needs_approval" && !job.needs_approval) return false;
     if (state.statusFilter === "paused" && job.status !== "paused") return false;
     if (state.statusFilter === "error" && job.status !== "error") return false;
+    if (state.statusFilter === "over_budget" && job.status !== "over_budget") return false;
     const q = state.search.trim().toLowerCase();
     if (!q) return true;
     return [job.title, job.kind, job.when, job.action].filter(Boolean).join("\n").toLowerCase().includes(q);
@@ -186,6 +187,7 @@
       const n = id === "all" ? state.jobs.length
         : id === "needs_approval" ? (state.counts.needs_approval || 0)
         : id === "paused" ? state.jobs.filter((j) => j.status === "paused").length
+        : id === "over_budget" ? state.jobs.filter((j) => j.status === "over_budget").length
         : state.jobs.filter((j) => j.status === "error").length;
       dom.statusChips.appendChild(el("button", {
         class: "sch-chip" + (state.statusFilter === id ? " is-active" : ""), type: "button",
@@ -207,6 +209,7 @@
     if (job.needs_approval) rowClasses.push("is-needs-approval");
     if (job.status === "paused") rowClasses.push("is-paused");
     if (job.status === "error") rowClasses.push("is-error");
+    if (job.status === "over_budget") rowClasses.push("is-over-budget");
     if (job.status === "done") rowClasses.push("is-done");
     if (job.status === "cancelled") rowClasses.push("is-cancelled");
     return el("button", { class: rowClasses.join(" "), type: "button", onclick: () => selectJob(job.id) }, [
@@ -219,7 +222,8 @@
         rowTag(job),
         job.when ? el("span", null, job.when) : null,
         job.in ? el("span", null, `in ${job.in}`) : null,
-        job.last_error ? el("span", { class: "sch-tag sch-tag--bad" }, "error") : null,
+        job.status === "over_budget" ? el("span", { class: "sch-tag sch-tag--bad" }, "stopped: over budget")
+          : job.last_error ? el("span", { class: "sch-tag sch-tag--bad" }, "error") : null,
       ].filter(Boolean)),
     ]);
   }
@@ -543,6 +547,7 @@
     };
     if (job.status === "needs_approval") act("Approve", "approve", undefined, confirmApprove);
     if (job.status === "paused") act("Resume", "resume");
+    else if (job.status === "over_budget") act("Resume", "resume");
     else if (job.status !== "needs_approval" && job.status !== "done" && job.status !== "cancelled") act("Pause", "pause");
     if (job.status !== "done" && job.status !== "cancelled") act("Snooze 10m", "snooze", { delay: "10 minutes" });
     if (job.status !== "cancelled") act("Cancel", "cancel");
@@ -558,13 +563,55 @@
     return null;
   }
 
+  /* Per-job token limit (L.16 item 8). Only an `ask` job spends model tokens.
+     Default = the config's 30,000; "Custom" overrides it for this job; "No limit"
+     means this job is never stopped for cost. Saved immediately, applies from
+     the job's next run. */
+  function tokenLimitControl(job) {
+    if ((job.action || "") !== "ask" && (job.action || {}).type !== "ask") return null;
+    const cur = job.token_budget;
+    const mode = cur === null || cur === undefined ? "default" : cur === 0 ? "off" : "custom";
+    const select = el("select", { class: "sch-input", "aria-label": "Token limit" }, [
+      el("option", { value: "default" }, "Default (30,000 tokens)"),
+      el("option", { value: "custom" }, "Custom limit\u2026"),
+      el("option", { value: "off" }, "No limit \u2014 never stop this job for cost"),
+    ]);
+    select.value = mode;
+    const number = el("input", { class: "sch-input", type: "number", min: "1000", step: "1000",
+      value: mode === "custom" ? String(cur) : "30000", "aria-label": "Custom token limit" });
+    number.style.display = mode === "custom" ? "" : "none";
+    const save = el("button", { class: "btn btn--ghost btn--sm", type: "button" }, "Save limit");
+    select.addEventListener("change", () => { number.style.display = select.value === "custom" ? "" : "none"; });
+    save.addEventListener("click", async () => {
+      const limit = select.value === "custom" ? String(parseInt(number.value, 10) || "") : select.value;
+      if (!limit) { toast("Enter a number of tokens."); return; }
+      save.disabled = true;
+      try {
+        await Api.post(`/api/scheduled/${job.id}/budget`, { limit });
+        toast(select.value === "off" ? "This job will no longer be stopped for cost." : "Limit saved.", "info");
+        refresh();
+        selectJob(job.id);
+      } catch (err) {
+        toast(err.message || "That didn't work.");
+        save.disabled = false;
+      }
+    });
+    return el("div", { class: "sch-detail__budget" }, [
+      el("strong", null, "Token limit per run"),
+      el("div", { class: "sch-detail__budget-row" }, [select, number, save]),
+      el("div", { class: "sch-detail__hint" },
+        "A scheduled run that goes over its limit is stopped, reported, and parked as \u201cstopped: over budget\u201d."),
+    ]);
+  }
+
   function renderDetailFor(job) {
     dom.midTitle.textContent = job.title || "(untitled)";
     const isWatch = job.kind === "task" && (job.action || {}).type === "ask" && WATCH_TITLE_RE.test(job.title || "");
     const dl = el("dl", null);
     const row = (label, value) => value !== undefined && value !== null && value !== "" && dl.appendChild(el("div", { class: "sch-detail__row" }, [el("dt", null, label), el("dd", null, String(value))]));
     row("Kind", isWatch ? "task (watch)" : job.kind);
-    row("Status", job.status + (job.needs_approval ? " \u2014 needs approval" : ""));
+    row("Status", job.status === "over_budget" ? "stopped: over budget"
+      : job.status + (job.needs_approval ? " \u2014 needs approval" : ""));
     row("Next run", job.next_run ? `${job.next_run}${job.in ? ` (in ${job.in})` : ""}` : "\u2014");
     row("Action", (job.action || {}).type);
     row("Channels", (job.channels || []).join(", ") || "(configured defaults)");
@@ -585,7 +632,15 @@
     }
     const detail = actionDetail(job);
     if (detail) dom.mid.appendChild(detail);
-    if (job.last_error) dom.mid.appendChild(el("div", { class: "sch-detail__error" }, `Last error: ${job.last_error}`));
+    if (job.status === "over_budget") {
+      dom.mid.appendChild(el("div", { class: "sch-detail__error" },
+        "Stopped: over budget. The last run used more tokens than this job's limit, so it was ended and the job is parked. " +
+        "Raise its limit or turn the limit off below, then Resume."));
+    } else if (job.last_error) {
+      dom.mid.appendChild(el("div", { class: "sch-detail__error" }, `Last error: ${job.last_error}`));
+    }
+    const budgetControl = tokenLimitControl(job);
+    if (budgetControl) dom.mid.appendChild(budgetControl);
     if (job.conv_id && global.JarvisAsk) {
       dom.mid.appendChild(el("div", { class: "sch-detail__actions" }, [
         el("button", { class: "btn btn--ghost btn--sm", type: "button", onclick: () => { close(); global.JarvisAsk.openConversation(job.conv_id); } }, "Open conversation"),
@@ -641,10 +696,11 @@
 
     const paused = state.jobs.filter((j) => j.status === "paused").length;
     const failed = state.jobs.filter((j) => j.status === "error").length;
+    const overBudget = state.jobs.filter((j) => j.status === "over_budget").length;
     dom.side.appendChild(el("div", null, [
       el("h4", null, "Needs attention"),
       el("div", { class: "sch-side-counts" }, [
-        ["Needs approval", c.needs_approval || 0], ["Paused", paused], ["Failed", failed],
+        ["Needs approval", c.needs_approval || 0], ["Paused", paused], ["Failed", failed], ["Over budget", overBudget],
       ].map(([label, n]) => el("div", { class: "sch-side-count-row" + (n ? " is-flag" : "") }, [
         el("span", { class: "sch-side-count-row__label" }, label), el("span", { class: "sch-side-count-row__n" }, String(n)),
       ]))),
