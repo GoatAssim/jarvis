@@ -2145,6 +2145,49 @@ def _stream_openai_compatible_chat(resp, url):
     return data, None
 
 
+# Keys a streamed assistant message carries for the model's own reasoning
+# (_stream_openai_compatible_chat sets `reasoning_content`; hosts return
+# `reasoning` or `reasoning_content` when not streaming). They exist so the
+# trace can be shown and logged. Echoing them back inside the transcript is
+# a different matter: Groq answers 400 "property 'reasoning_content' is
+# unsupported" for an assistant message that has it, which turned every tool
+# round on Groq into a failed key. DeepSeek is the one host in this family
+# that wants the reasoning handed back during a tool loop, so it keeps it.
+_REASONING_ECHO_KEYS = ("reasoning_content", "reasoning")
+
+
+def _host_wants_reasoning_echoed(provider):
+    base = f"{provider.get('name') or ''} {provider.get('base_url') or ''} {provider.get('model') or ''}"
+    return "deepseek" in base.lower()
+
+
+def _history_message(message, provider):
+    """The assistant `message` as it is appended to the transcript sent on the
+    next round. A copy without the reasoning keys, except for hosts that want
+    them back. The original dict (read for the trace, usage and the log) is
+    left alone."""
+    if not isinstance(message, dict) or _host_wants_reasoning_echoed(provider):
+        return message
+    if not any(k in message for k in _REASONING_ECHO_KEYS):
+        return message
+    return {k: v for k, v in message.items() if k not in _REASONING_ECHO_KEYS}
+
+
+def _strip_reasoning_from_messages(messages):
+    """In place. True if anything was removed. Used when a host names the
+    reasoning key as the problem, so the retry fixes the thing that was
+    rejected (the thinking-knob retry would strip `reasoning_effort` from the
+    payload, which was never the cause)."""
+    changed = False
+    for m in messages or []:
+        if isinstance(m, dict) and m.get("role") == "assistant":
+            for k in _REASONING_ECHO_KEYS:
+                if k in m:
+                    del m[k]
+                    changed = True
+    return changed
+
+
 def call_openai_compatible(provider, messages, timeout, tools=None, tool_executor=None, round_budget=None,
                            cfg_defaults=None):
     base_url = provider.get("base_url") or ""
@@ -2309,7 +2352,12 @@ def call_openai_compatible(provider, messages, timeout, tools=None, tool_executo
             if not _reason:
                 break
             from . import reasoning as _r
-            if _r.looks_like_thinking_rejected(_reason) and _r.strip_from_payload(payload):
+            if "reasoning_content" in _reason and _strip_reasoning_from_messages(payload.get("messages")):
+                # The rejected field is in the transcript, not a request knob.
+                # (A transcript built before _history_message existed, or a
+                # failover hand-over, can still carry it.)
+                pass
+            elif _r.looks_like_thinking_rejected(_reason) and _r.strip_from_payload(payload):
                 pass
             elif "stream_options" in payload and looks_like_stream_options_rejected(_reason):
                 payload.pop("stream_options", None)
@@ -2405,8 +2453,9 @@ def call_openai_compatible(provider, messages, timeout, tools=None, tool_executo
                                 tool_history=_openai_messages_to_generic(working_messages) if ran_tools else None)
             ran_tools = True
             _surface_interim_text(round_num, text)
-            # `message` is appended whole: content AND tool_calls travel together.
-            working_messages.append(message)
+            # content AND tool_calls travel together; the reasoning trace does
+            # not (see _history_message).
+            working_messages.append(_history_message(message, provider))
             for call in tool_calls:
                 fn = call.get("function") or {}
                 name = fn.get("name", "")
