@@ -377,7 +377,7 @@ def test_do_ask_always_sets_the_approved_kinds_env():
 
 def _prompt_parts():
     return ai_client._system_prompt_parts(
-        {}, "", "", True, compact_tools=True, compact_persona=True, offered_names=set())
+        {}, True, compact_tools=True, compact_persona=True, offered_names=set())
 
 
 def test_directive_only_when_scheduled_and_only_in_the_tail():

@@ -17,7 +17,7 @@ import subprocess
 import sys
 import time
 
-from . import ai_config, ai_providers, command_tools, conversations, memory, playnite_config, skill_stickiness, skills, stats, tool_safety
+from . import ai_config, ai_providers, command_tools, conversations, memory, playnite_config, skill_stickiness, skills, tool_safety
 from . import tool_disable
 from . import console_store
 from . import dev_agent_events as _dev_agent_events
@@ -102,9 +102,6 @@ try:
 except Exception:
     pass
 
-MAX_COMMANDS_LISTED = 12  # cap how many command names+descriptions go into every prompt
-COMPACT_MAX_COMMANDS = 6
-COMPACT_DESC_MAX_LEN = 50
 COMPACT_HISTORY_CHAR_BUDGET = 4800
 COMPACT_HISTORY_EXCHANGES = 10
 COMPACT_RECAP_EXCHANGES = 16
@@ -196,13 +193,10 @@ class OrderedSchemaSet:
 # wraps around.
 #
 # Knobs, in the order they appear below:
-#   max_commands        \u2014 how many saved commands get listed in the prompt
-#   desc_max_len         \u2014 max chars of each command's description
 #   history_char_budget  \u2014 total chars of prior-turn history included
 #   history_exchanges    \u2014 max prior exchanges included
 #   recap_exchanges       \u2014 how many older exchanges get folded into a recap
 #   recap_budget          \u2014 max chars of that recap
-#   include_freq          \u2014 include the "frequently used commands" context
 #   compact_tools_blurb    \u2014 use the short "tools" explainer vs the long one
 #   compact_persona        \u2014 use the short persona blurb vs the long one
 #   playnite_freq_games    \u2014 how many frequent Playnite games get listed
@@ -237,13 +231,10 @@ PROMPT_MODE_DEFS = [
         "name": "full",
         "label": "400% Capacity",
         "summary": "Fullest context and richest answers. Most tokens per ask.",
-        "max_commands": MAX_COMMANDS_LISTED,
-        "desc_max_len": COMPACT_DESC_MAX_LEN * 2,
         "history_char_budget": 6000,
         "history_exchanges": 12,
         "recap_exchanges": 20,
         "recap_budget": 1800,
-        "include_freq": True,
         "compact_tools_blurb": False,
         "compact_persona": False,
         "playnite_freq_games": 8,
@@ -255,14 +246,11 @@ PROMPT_MODE_DEFS = [
     {
         "name": "compact",
         "label": "100% Capacity",
-        "summary": "The balanced default \u2014 trimmed history/commands, still full tool schemas.",
-        "max_commands": COMPACT_MAX_COMMANDS,
-        "desc_max_len": COMPACT_DESC_MAX_LEN,
+        "summary": "The balanced default \u2014 trimmed history, still full tool schemas.",
         "history_char_budget": COMPACT_HISTORY_CHAR_BUDGET,
         "history_exchanges": COMPACT_HISTORY_EXCHANGES,
         "recap_exchanges": COMPACT_RECAP_EXCHANGES,
         "recap_budget": COMPACT_RECAP_CHAR_BUDGET,
-        "include_freq": False,
         "compact_tools_blurb": True,
         "compact_persona": True,
         "playnite_freq_games": 0,
@@ -275,18 +263,15 @@ PROMPT_MODE_DEFS = [
         "name": "precise",
         "label": "150% Capacity",
         "summary": (
-            "Same history/command budgets as 100%, but full uncompacted tool "
+            "Same history budgets as 100%, but full uncompacted tool "
             "schemas (every field, no description clipping) and a sharper, "
             "precision-focused system prompt. More tokens per ask than 100%, "
             "well under 400%."
         ),
-        "max_commands": COMPACT_MAX_COMMANDS,
-        "desc_max_len": COMPACT_DESC_MAX_LEN,
         "history_char_budget": COMPACT_HISTORY_CHAR_BUDGET,
         "history_exchanges": COMPACT_HISTORY_EXCHANGES,
         "recap_exchanges": COMPACT_RECAP_EXCHANGES,
         "recap_budget": COMPACT_RECAP_CHAR_BUDGET,
-        "include_freq": False,
         "compact_tools_blurb": False,
         "compact_persona": False,
         "precise_persona": True,
@@ -308,13 +293,10 @@ PROMPT_MODE_DEFS = [
             "to the minimum that still works. Cheapest mode; a tool needing "
             "arguments may cost one extra round trip the first time it's called."
         ),
-        "max_commands": 4,
-        "desc_max_len": 30,
         "history_char_budget": 1800,
         "history_exchanges": 4,
         "recap_exchanges": 6,
         "recap_budget": 500,
-        "include_freq": False,
         "compact_tools_blurb": True,
         "compact_persona": True,
         "playnite_freq_games": 0,
@@ -352,7 +334,7 @@ def mode_options():
     ]
 
 # Legacy per-key overrides, kept only for the three built-in modes so an
-# older hand-edited ai_config.json (compact_max_commands, history_char_budget,
+# older hand-edited ai_config.json (compact_history_char_budget,
 # etc.) keeps working exactly as before. A custom mode appended to
 # PROMPT_MODE_DEFS above has no legacy keys to honor, so it's used as-is.
 _LEGACY_OVERRIDE_KEYS = {
@@ -363,14 +345,12 @@ _LEGACY_OVERRIDE_KEYS = {
         "recap_budget": ("recap_char_budget",),
     },
     "compact": {
-        "max_commands": ("compact_max_commands",),
         "history_char_budget": ("history_char_budget", "compact_history_char_budget"),
         "history_exchanges": ("history_exchanges", "compact_history_exchanges"),
         "recap_exchanges": ("recap_exchanges", "compact_recap_exchanges"),
         "recap_budget": ("recap_char_budget", "compact_recap_char_budget"),
     },
     "ultra": {
-        "max_commands": ("ultra_max_commands",),
         "history_char_budget": ("ultra_history_char_budget",),
         "history_exchanges": ("ultra_history_exchanges",),
         "recap_exchanges": ("ultra_recap_exchanges",),
@@ -378,7 +358,7 @@ _LEGACY_OVERRIDE_KEYS = {
         "tool_result_budget": ("ultra_tool_result_budget",),
     },
 }
-_SIMPLE_OVERRIDE_KEYS = {"max_commands", "tool_result_budget"}  # not run through _history_int's floor check
+_SIMPLE_OVERRIDE_KEYS = {"tool_result_budget"}  # not run through _history_int's floor check
 
 # How often a conversation's AI-generated title + one-line gist get
 # (re)computed: right after the very first exchange (so the sidebar has
@@ -634,47 +614,6 @@ def _resolve(provider, defaults):
     return merged
 
 
-def _format_var_summary(spec):
-    parts = []
-    for var_name, var_spec in (spec.get("vars") or {}).items():
-        if not isinstance(var_spec, dict):
-            continue
-        if "default" in var_spec:
-            parts.append(f"{var_name}={var_spec['default']}")
-        else:
-            parts.append(f"{var_name}*")
-    return ", ".join(parts)
-
-
-def _commands_context(commands, max_listed=MAX_COMMANDS_LISTED, desc_max_len=None, compact=False):
-    if not commands:
-        return ""
-    all_names = list(commands.items())
-    names = all_names[:max_listed]
-    lines = []
-    for name, spec in names:
-        if not isinstance(spec, dict):
-            continue
-        desc = spec.get("description", "")
-        if desc_max_len is not None and len(desc) > desc_max_len:
-            desc = desc[: desc_max_len - 1].rstrip() + "…"
-        var_part = _format_var_summary(spec)
-        if var_part:
-            lines.append(f"- {name} ({var_part}): {desc}")
-        else:
-            lines.append(f"- {name}: {desc}")
-    listing = "\n".join(lines)
-    header = "Commands:\n" if compact else "Saved commands:\n"
-    ctx = header + listing
-    remaining = len(all_names) - len(names)
-    if remaining > 0:
-        ctx += (
-            f"\n…and {remaining} more not shown here. If the command the user means "
-            "isn't in this list, call search_commands instead of guessing a name."
-        )
-    return ctx
-
-
 def _history_int(defaults, keys, floor, fallback):
     """Prefer explicit history_* knobs. Ignore leftover compact_history_*
     values from older configs that were too small to keep a conversation."""
@@ -850,17 +789,6 @@ def _tools_blurb(compact, ultra):
 # string means "this clause doesn't exist at that verbosity", which is how
 # ultra stays as lean as it was before.
 _TOOL_WORKFLOW_CLAUSES = (
-    (
-        ("search_commands", "run_command", "run_chain"),
-        "COMMANDS: the 'Saved commands' list above is only a partial preview. Before "
-        "run_command or run_chain, if you aren't certain of the exact saved command "
-        "name, call search_commands first — pass a keyword, or no query to list every "
-        "saved command. Do this instead of guessing a name and hoping it resolves.",
-        "COMMANDS: only some are listed above — if you're not sure of the exact "
-        "saved command name, call search_commands (with a keyword, or no query "
-        "for the full list) before run_command/run_chain. Never guess a name.",
-        "Unsure of a saved command's exact name? search_commands first, never guess.",
-    ),
     (
         ("radio_status", "wifi_set", "bluetooth_set"),
         "RADIOS: wifi_set/bluetooth_set action on|off. Off requires confirm=true (may need Admin).",
@@ -1041,7 +969,7 @@ def _unattended_directive():
     return UNATTENDED_DIRECTIVE if os.environ.get("JARVIS_SCHEDULED") else ""
 
 
-def _system_prompt_parts(persona, commands_ctx, freq_ctx, tools_enabled,
+def _system_prompt_parts(persona, tools_enabled,
                          compact_tools=False, compact_persona=False, ultra=False, has_history=False,
                          memory_ctx="", has_playnite=False, has_spotify=False, other_convos_ctx="",
                          playnite_freq_games=None, precise=False, pack_instructions_ctx="",
@@ -1060,8 +988,7 @@ def _system_prompt_parts(persona, commands_ctx, freq_ctx, tools_enabled,
 
       PER-REQUEST — memory context (keyed on the user's message, so it is
         different on literally every turn), the other-conversations context,
-        the Playnite frequent-games block, saved-commands listing, and
-        frequency stats.
+        the Playnite frequent-games block.
 
     Before this split they were interleaved and joined, which put
     query-dependent text in front of static text and made the prefix differ
@@ -1230,34 +1157,12 @@ def _system_prompt_parts(persona, commands_ctx, freq_ctx, tools_enabled,
         parts.append(playnite_ctx)
     if extra:
         parts.append(extra)
-    if commands_ctx:
-        parts.append(commands_ctx)
-    if freq_ctx:
-        parts.append(freq_ctx)
     return "\n\n".join(static_parts), "\n\n".join(parts)
 
 
-def _build_messages(persona, commands, user_text, tools_enabled, profile, conversation_id, route=None,
+def _build_messages(persona, user_text, tools_enabled, profile, conversation_id, route=None,
                     sender_ctx=""):
     compact = profile.get("compact_tools_blurb", False)
-    # Phase 8 of the token-optimization plan (see new_plan.md): the full
-    # saved-commands listing only earns its tokens when the "commands"
-    # tool group is actually in play. When the router is confident about a
-    # *different* group, search_commands/run_command/etc. aren't even
-    # being offered this round (see ask()'s active_schemas) — so a dozen
-    # inlined command names+descriptions would be pure overhead with no
-    # tool available to act on them anyway. Stay unconditional (the exact
-    # prior behavior) whenever the router has no opinion or "commands" is
-    # itself one of the matched groups, since that's the safe/no-regression
-    # case this phase must not touch.
-    skip_commands_listing = bool(route) and route.confident and "commands" not in route.groups
-    commands_ctx = "" if skip_commands_listing else _commands_context(
-        commands,
-        max_listed=profile["max_commands"],
-        desc_max_len=profile["desc_max_len"],
-        compact=compact,
-    )
-    freq_ctx = stats.frequent_commands_context(commands) if profile["include_freq"] else ""
     prior_turns = conversations.conversation_messages(
         conversation_id,
         max_exchanges=profile["history_exchanges"],
@@ -1361,8 +1266,6 @@ def _build_messages(persona, commands, user_text, tools_enabled, profile, conver
 
     static_system, dynamic_system = _system_prompt_parts(
         persona,
-        commands_ctx,
-        freq_ctx,
         tools_enabled,
         compact_tools=compact,
         compact_persona=compact_persona,
@@ -3840,7 +3743,7 @@ def _ask_impl(user_text, commands=None, on_attempt=None, on_tool_call=None, on_t
                 attempts.append((label, "skipped: this run is over its token limit"))
                 break
             messages = _build_messages(
-                persona, commands, user_text, tools_enabled, profile, conv_id,
+                persona, user_text, tools_enabled, profile, conv_id,
                 route=route if tools_enabled else None,
                 sender_ctx=sender_context,
             )

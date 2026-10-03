@@ -2,9 +2,9 @@
 
 cli.py's run_command() bumps a counter here on every real invocation \u2014
 whether typed directly ('jarvis updateSpotify') or, once the AI can run
-commands itself, triggered by a natural-language ask. That data powers the
-"frequently used commands" context handed to the AI on every 'jarvis <text>'
-call (see frequent_commands_context() below, used by ai_client.py).
+commands itself, triggered by a natural-language ask. top() reads it back.
+Nothing puts it in the AI's system prompt any more (L.41 removed the
+"frequently used commands" block).
 """
 
 import json
@@ -56,14 +56,3 @@ def top(n=5):
     """[(name, count), ...] sorted most- to least-used."""
     counts = _load()
     return sorted(counts.items(), key=lambda kv: kv[1], reverse=True)[:n]
-
-
-def frequent_commands_context(commands, n=5):
-    """A short text block naming the user's most-used commands, meant to be
-    folded into the system prompt. Skips names no longer in commands.json
-    (renamed or deleted since), and returns "" once nothing qualifies."""
-    ranked = [(name, count) for name, count in top(n * 2) if name in (commands or {})][:n]
-    if not ranked:
-        return ""
-    bits = ", ".join(f"{name} ({count}x)" for name, count in ranked)
-    return f"The user's most frequently used jarvis commands are: {bits}."

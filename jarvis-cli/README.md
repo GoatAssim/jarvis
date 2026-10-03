@@ -449,19 +449,16 @@ pointless failover.
 
 ### What Jarvis actually knows
 
-Every ask includes, as context: the commands you've defined (names +
-descriptions only), your most-used commands, and a recap of your last
-few exchanges. Each `jarvis` call is its own fresh process — that recap
-is what stands in for a long-running conversation, giving it real
-continuity between separate calls. `jarvis ai-clear` wipes that memory
-and starts fresh.
+Every ask includes, as context, a recap of your last few exchanges. Each
+`jarvis` call is its own fresh process — that recap is what stands in
+for a long-running conversation, giving it real continuity between
+separate calls. `jarvis ai-clear` wipes that memory and starts fresh.
 
-That commands list in the prompt is capped (12 commands normally, 6 in
-the token-saving "compact" mode some providers use) so it doesn't eat
-your whole context window on every call. Past that cap, Jarvis doesn't
-guess at a name it can't see — it calls `search_commands` (keyword, or
-no query for the full list) to look up the rest of `commands.json`
-before running anything.
+Your saved commands are **not** listed in the prompt (neither the list
+nor a most-used block; that was removed to save tokens on every ask).
+The model finds them on demand: `search_commands` (keyword, or no query
+for the full list) looks them up in `commands.json` before anything is
+run.
 
 **It can't run your commands yet, and says so.** Jarvis is told what
 commands you have but isn't given any way to actually trigger one, and
@@ -527,7 +524,7 @@ cost of some context/answer richness. Three modes ship today:
 | Mode | Label | What it trims |
 | --- | --- | --- |
 | `full` | 400% Capacity | Fullest context and richest answers. Most tokens per ask. |
-| `compact` | 100% Capacity | The balanced default — trimmed history/commands, still full tool schemas. |
+| `compact` | 100% Capacity | The balanced default — trimmed history, still full tool schemas. |
 | `ultra` | 50% Capacity | Ultra compact — name-only tool schemas plus every other budget cut to the minimum that still works. Cheapest mode; a tool needing arguments may cost one extra round trip the first time it's called. |
 
 Three equivalent ways to read/change it:

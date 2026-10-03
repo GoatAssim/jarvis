@@ -180,8 +180,8 @@ def test_split_is_byte_identical_to_the_old_single_string():
     """Non-Anthropic providers get these halves re-joined by
     ai_providers._merge_system. If the join ever stops reproducing the
     original text, every provider's prompt silently changes."""
-    joined = ai_client._system_prompt(PERSONA, "CMDS", "FREQ", True, **KW)
-    static, dynamic = ai_client._system_prompt_parts(PERSONA, "CMDS", "FREQ", True, **KW)
+    joined = ai_client._system_prompt(PERSONA, True, **KW)
+    static, dynamic = ai_client._system_prompt_parts(PERSONA, True, **KW)
     check("rejoined halves == old single string",
           "\n\n".join(p for p in (static, dynamic) if p) == joined)
 
@@ -190,9 +190,9 @@ def test_static_half_is_stable_across_turns():
     """The whole point. memory_ctx is keyed on the user's message, so it
     differs every turn; if it were in the static half the prefix would never
     match and no cache would ever hit."""
-    a = ai_client._system_prompt_parts(PERSONA, "CMDS", "FREQ", True,
+    a = ai_client._system_prompt_parts(PERSONA, True,
                                        **{**KW, "memory_ctx": "MEM: turn one"})[0]
-    b = ai_client._system_prompt_parts(PERSONA, "CMDS", "FREQ", True,
+    b = ai_client._system_prompt_parts(PERSONA, True,
                                        **{**KW, "memory_ctx": "MEM: totally different"})[0]
     check("static prefix identical across differing memory context", a == b)
     check("query-specific text is not in the static prefix", "turn one" not in a)
@@ -200,7 +200,7 @@ def test_static_half_is_stable_across_turns():
 
 def test_skills_catalog_rides_in_the_cached_prefix():
     static, dynamic = ai_client._system_prompt_parts(
-        PERSONA, "CMDS", "FREQ", True, skills_ctx="SKILLCATALOG", **KW)
+        PERSONA, True, skills_ctx="SKILLCATALOG", **KW)
     check("skills catalog is in the static (cached) half", "SKILLCATALOG" in static)
     check("and not in the per-request tail", "SKILLCATALOG" not in dynamic)
 
@@ -213,9 +213,9 @@ def test_pack_instructions_does_not_invalidate_the_static_cache():
     block on every such turn — a marked block caches as a whole; any byte
     difference inside it is a miss for the whole block, not a partial hit."""
     static_a, dynamic_a = ai_client._system_prompt_parts(
-        PERSONA, "CMDS", "FREQ", True, **{**KW, "pack_instructions_ctx": "GROUP-A-INSTRUCTIONS"})
+        PERSONA, True, **{**KW, "pack_instructions_ctx": "GROUP-A-INSTRUCTIONS"})
     static_b, dynamic_b = ai_client._system_prompt_parts(
-        PERSONA, "CMDS", "FREQ", True, **{**KW, "pack_instructions_ctx": "GROUP-B-INSTRUCTIONS"})
+        PERSONA, True, **{**KW, "pack_instructions_ctx": "GROUP-B-INSTRUCTIONS"})
     check("static half is IDENTICAL regardless of which group routed this turn",
           static_a == static_b)
     check("pack instructions correctly live in the dynamic tail instead",
@@ -228,14 +228,14 @@ def test_loaded_skills_ctx_is_dynamic_not_static():
     in the per-request tail alongside memory_ctx, not the globally-static
     prefix that's meant to be identical for everyone on this capacity mode."""
     static, dynamic = ai_client._system_prompt_parts(
-        PERSONA, "CMDS", "FREQ", True, loaded_skills_ctx="FORCED-SKILL-BODY", **KW)
+        PERSONA, True, loaded_skills_ctx="FORCED-SKILL-BODY", **KW)
     check("loaded-skill content is in the dynamic tail", "FORCED-SKILL-BODY" in dynamic)
     check("and not in the static prefix", "FORCED-SKILL-BODY" not in static)
 
 
 def test_build_messages_emits_two_system_messages():
     msgs = ai_client._build_messages(
-        PERSONA, {}, "hello there", True,
+        PERSONA, "hello there", True,
         ai_client._MODE_BY_NAME["compact"], None, route=None)
     systems = [m for m in msgs if m["role"] == "system"]
     check("two system messages emitted", len(systems) == 2, f"got {len(systems)}")
