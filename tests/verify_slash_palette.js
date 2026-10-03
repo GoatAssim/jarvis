@@ -217,6 +217,14 @@ async function main() {
     check("near-miss warns with a did-you-mean", env.toasts.some((t) => /did you mean \/new/.test(t[1])));
     const again = await submit(env, "/nwe");
     check("an identical second Enter sends it (Send anyway)", again.status === "passthrough");
+
+    // I-B18: saved-command names take part in near-miss detection.
+    env.toasts.length = 0;
+    const sv = await submit(env, "/nigtly");
+    check("a typo of a SAVED command is blocked with a did-you-mean", sv.status === "blocked" && env.toasts.some((t) => /did you mean \/nightly/.test(t[1])), JSON.stringify(env.toasts));
+    env.toasts.length = 0;
+    const ex = await submit(env, "/nightly run");
+    check("an exact saved-command name is not treated as a typo", ex.status !== "blocked" || !env.toasts.some((t) => /did you mean/.test(t[1])), JSON.stringify(env.toasts));
     check("...and only once", (await submit(env, "/nwe")).status === "blocked");
 
     const ne = await submit(env, "/spotify-login");
@@ -430,6 +438,21 @@ async function main() {
     key("Enter");
     check("/help is instant (I.2.3): one Enter runs it", (env.form.submits || 0) === before3 + 1 && env.input.value === "/help");
     check("a bare '/help ' counts as finished", env.S.isComplete("/help "));
+
+    // I-B18: /help <unknown> must not wipe what was typed.
+    env.toasts.length = 0;
+    env.input.value = "/help nwe";
+    await env.S.handleSubmit(env.input, []);
+    check("/help <unknown> keeps the typed text", env.input.value === "/help nwe", env.input.value);
+    check("/help <unknown> says what was not found", env.toasts.some((t) => /No command called "nwe"/.test(t[1])), JSON.stringify(env.toasts));
+    check("/help <typo> offers the nearest command", env.toasts.some((t) => /Did you mean \/new\?/.test(t[1])), JSON.stringify(env.toasts));
+    env.toasts.length = 0;
+    env.input.value = "/help qwertyuiop";
+    await env.S.handleSubmit(env.input, []);
+    check("/help <nothing close> keeps the text and has no suggestion", env.input.value === "/help qwertyuiop" && env.toasts.length === 1 && !/Did you mean/.test(env.toasts[0][1]), JSON.stringify(env.toasts));
+    env.input.value = "/help";
+    await env.S.handleSubmit(env.input, []);
+    check("bare /help still opens the list", env.input.value === "/" || env.input.value === "/help", env.input.value);
 
     env.input.value = "/cl";
     env.input.dispatchEvent(new Event("input"));
