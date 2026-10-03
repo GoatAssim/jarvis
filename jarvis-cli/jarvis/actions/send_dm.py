@@ -116,16 +116,53 @@ def _describe(rec):
     }
 
 
-def _known_hint(people_mod, platforms):
+def _closeness(needle, rec):
+    """0..1: how close `needle` is to any word of this contact's name or
+    handle. Only ever used to ORDER and LABEL suggestions -- never to pick."""
+    import difflib
+    import re
+    words = []
+    for field in (rec.get("name"), rec.get("handle")):
+        field = (field or "").lower()
+        if field:
+            words.append(field)
+            words.extend(w for w in re.split(r"[^a-z0-9]+", field) if w)
+    return max((difflib.SequenceMatcher(None, needle, w).ratio() for w in words),
+               default=0.0)
+
+
+NEAR_MISS_RATIO = 0.75      # "mariem" vs "maryem" = 0.83; "mar" vs "maryem" = 0.67
+MAX_NEAR_MISSES = 3
+
+
+def _known_hint(people_mod, platforms, needle=""):
     out = []
     for platform in platforms:
         for rec in people_mod.all_people(platform):
             if rec.get("is_owner"):
                 continue
-            out.append(_describe(rec))
-            if len(out) >= MAX_LISTED:
-                return out
-    return out
+            out.append(rec)
+    if needle:
+        out.sort(key=lambda r: -_closeness(needle, r))   # stable: ties keep order
+    return [_describe(r) for r in out[:MAX_LISTED]]
+
+
+def _near_misses(people_mod, platforms, needle):
+    """Known contacts whose name/handle is a close SPELLING of what the owner
+    said ("mariem" for "maryem"). Suggestions to confirm, never a match:
+    _resolve() still refuses to guess a recipient."""
+    if len(needle) < 3:
+        return []
+    scored = []
+    for platform in platforms:
+        for rec in people_mod.all_people(platform):
+            if rec.get("is_owner") or not rec.get("user_id"):
+                continue
+            ratio = _closeness(needle, rec)
+            if ratio >= NEAR_MISS_RATIO:
+                scored.append((-ratio, _describe(rec)))
+    scored.sort(key=lambda x: x[0])
+    return [d for _, d in scored[:MAX_NEAR_MISSES]]
 
 
 def _resolve(person, platform_arg):
@@ -206,14 +243,22 @@ def _resolve(person, platform_arg):
             unique.append(rec)
 
     if not unique:
-        return None, {
+        err = {
             "ok": False,
             "error": f"I don't know anyone called '{raw}'",
             "hint": ("Jarvis only knows people who have messaged the bot. "
                      "Ask them to DM it first, or give a numeric id with a "
                      "platform."),
-            "known_contacts": _known_hint(people, platforms),
+            "known_contacts": _known_hint(people, platforms, needle),
         }
+        close = _near_misses(people, platforms, needle)
+        if close:
+            err["did_you_mean"] = close
+            err["hint"] = ("Nobody matches that exactly, but did_you_mean lists "
+                           "close spellings of known contacts. They are "
+                           "suggestions, not matches: confirm with the owner "
+                           "which one they mean before sending, never pick.")
+        return None, err
     if len(unique) > 1:
         return None, {
             "ok": False,

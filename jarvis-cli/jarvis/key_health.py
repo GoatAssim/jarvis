@@ -48,6 +48,7 @@ MAX_COOLDOWN = 3600.0                   # never park a key longer than this on a
 BAD_KEY_COOLDOWN = 3600.0               # 401/403/402
 OVERLOAD_MODEL_COOLDOWN = 45.0          # a 503 on a model
 _PRUNE_AFTER = 86400.0
+HOST_REFUSED_COOLDOWN = 60.0           # L.28 #4: a host that refused a connection (e.g. Ollama not running)
 
 # K.3.6/F.9 item 3 ("pace ... or give it a different key" — spread_keys()
 # above is the "or"; this is the "pace"). A conservative floor between two
@@ -102,13 +103,13 @@ def _load():
     try:
         data = json.loads(HEALTH_FILE.read_text(encoding="utf-8"))
         if isinstance(data, dict):
-            for section in ("keys", "models", "last_good"):
+            for section in ("keys", "models", "last_good", "hosts"):
                 if not isinstance(data.get(section), dict):
                     data[section] = {}
             return data
     except (OSError, ValueError):
         pass
-    return {"keys": {}, "models": {}, "last_good": {}}
+    return {"keys": {}, "models": {}, "last_good": {}, "hosts": {}}
 
 
 def _save(state, now):
@@ -118,6 +119,8 @@ def _save(state, now):
                           if isinstance(v, dict) and (v.get("cooldown_until", 0) > now - _PRUNE_AFTER
                                                       or v.get("last_ok", 0) > now - _PRUNE_AFTER
                                                       or v.get("last_request", 0) > now - _PRUNE_AFTER)}
+    state["hosts"] = {k: v for k, v in (state.get("hosts") or {}).items()
+                      if isinstance(v, dict) and (v.get("refused_until", 0) > now)}
     try:
         HEALTH_FILE.parent.mkdir(parents=True, exist_ok=True)
         fd, tmp = tempfile.mkstemp(dir=str(HEALTH_FILE.parent), prefix=".key_health-")
@@ -255,3 +258,37 @@ def cooling_keys(now=None):
     return [(k, v["cooldown_until"] - now, v.get("last_status", ""))
             for k, v in _load()["keys"].items()
             if isinstance(v, dict) and (v.get("cooldown_until") or 0) > now]
+
+
+# --- L.28 #4: remember an endpoint that refused a connection ---------------
+# ai_client already skips a host that refused a connection earlier in the SAME
+# ask. jarvis is a fresh process per call and a chat gateway answers many asks,
+# so an Ollama that is simply not running cost a ~4 s connect failure on every
+# ask that reached it. This carries the refusal across asks for a short window.
+
+def record_host_refused(host, now=None):
+    if not host:
+        return
+    now = time.time() if now is None else now
+    state = _load()
+    state["hosts"][str(host)] = {"refused_until": now + HOST_REFUSED_COOLDOWN}
+    _save(state, now)
+
+
+def host_recently_refused(host, now=None):
+    """Seconds left on the refusal window for `host`, or 0."""
+    if not host:
+        return 0.0
+    now = time.time() if now is None else now
+    entry = _load()["hosts"].get(str(host)) or {}
+    until = entry.get("refused_until") or 0
+    return float(until - now) if until > now else 0.0
+
+
+def clear_host_refused(host):
+    """A successful call to the host ends the window early."""
+    if not host:
+        return
+    state = _load()
+    if state["hosts"].pop(str(host), None) is not None:
+        _save(state, time.time())
