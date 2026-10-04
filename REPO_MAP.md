@@ -141,7 +141,9 @@ jarvis-cli/jarvis/
                           may DM them; fails closed (`PermsUnreadable` -> tools off)
         user_admin.py     L.36: one person, every switch (dm/reply/tool/owner/send_dm/blocked
                           + tool scope); the ONE implementation behind the panel and
-                          `jarvis channels-user`; registered people only
+                          `jarvis channels-user`; registered people only. L.36b adds
+                          add_person / rename / remove_person / link_accounts and the
+                          allow-list reconcile (sync_listed) run on every list_view
         dedupe.py         NEW — has this message id already been handled
         outbound.py       DM the owner (dm_owner) or one known person (dm_person, L.20)
 
@@ -153,7 +155,7 @@ jarvis-cli/jarvis/
     turn_trace.py  token_usage.py
 
     # --- command surfaces -------------------------------------------------
-    channels_cli.py       channels-* (incl. channels-users/-user/-user-tools, L.36), discord-daemon, instagram-serve
+    channels_cli.py       channels-* (incl. channels-users/-user/-user-tools, L.36; -add-person/-rename/-remove-person/-link/-unlink, L.36b), discord-daemon, instagram-serve
     workspace_cli.py      NEW — daemons, log-file search, backlog, ambient,
                           onboarding, ui-mode
 
@@ -377,6 +379,11 @@ jarvis channels-follow|block <platform> <id-or-@handle>
 jarvis channels-users [platform]                      # every registered person + every switch (JSON)
 jarvis channels-user <platform> <id> <dm|reply|tool|owner|send_dm|blocked> <on|off>
 jarvis channels-user-tools <platform> <id> inherit | custom [tool ...]
+jarvis channels-add-person <platform> <id|@handle> [name ...]   # someone who hasn't messaged yet; grants nothing
+jarvis channels-rename <platform> <id|@handle> [name ...]       # no name clears it
+jarvis channels-remove-person <platform> <id|@handle>           # hand-added and never messaged only
+jarvis channels-link <platform> <id|@handle> <other-platform> <id|@handle|name ...>   # same human; identity only
+jarvis channels-unlink <platform> <id|@handle>
 jarvis discord-daemon     jarvis instagram-serve
 
 # MCP servers (a human action; no model tool can reach the edit path)
@@ -503,6 +510,7 @@ silently never runs.
 | `test_workspace.py` | daemons, log_files, backlog, ambient, diagnosis, onboarding |
 | `test_channel_people.py` | identity, the gate split, dedupe, remember_sender |
 | `test_channels.py` | the permission gate, config, transcripts |
+| `test_channel_manual_people.py` | L.36b: people named in an allow-list get a row, hand-added people, handle-only placeholder adopted on first message (tool limits migrated), locked names vs `remember_sender`, linked accounts (by id / handle / name, ambiguity, owner never inherited), remove, `send_dm` skips a handle-only person, the `channels-*` commands |
 | `test_user_admin.py` | L.36: `user_perms` store (fails closed), `user_admin` switches (registered only, wildcard refusal, owner moves, block removes from all lists), the `base._ask_jarvis` enforcement point, the `send_dm` refusal, avatar validation in `people.py` |
 | `verify_channels_panel.js` (`node`) | L.36: `channels-panel.js` pure helpers (initials, hue, relative time, list filters and search, tool-scope diffing/grouping, and that only fixed icon strings reach `innerHTML`) |
 | `test_prompt_cache.py` | the static/dynamic prompt split |

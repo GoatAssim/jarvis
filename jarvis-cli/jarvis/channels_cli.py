@@ -23,6 +23,8 @@ COMMANDS = (
     "channels-deny", "channels-test", "channels-whoami", "channels-log",
     "channels-directory", "channels-people", "channels-follow",
     "channels-block", "channels-users", "channels-user", "channels-user-tools",
+    "channels-add-person", "channels-rename", "channels-remove-person",
+    "channels-link", "channels-unlink",
     "discord-daemon", "instagram-serve", "logs-search",
 )
 
@@ -45,6 +47,16 @@ USAGE = """channel commands:
                                         dm, reply, tool, owner, send_dm, blocked
   channels-user-tools <platform> <id> inherit | custom [tool ...]
                                         which tools that person may run (custom = ONLY those)
+  channels-add-person <platform> <id|@handle> [name ...]
+                                        add someone who hasn't messaged yet (grants nothing)
+  channels-rename <platform> <id|@handle> [name ...]
+                                        set what they're called; no name clears it
+  channels-remove-person <platform> <id|@handle>
+                                        delete a hand-added person who never messaged
+  channels-link <platform> <id|@handle> <other-platform> <id|@handle|name ...>
+                                        same human on both platforms (identity only)
+  channels-unlink <platform> <id|@handle>
+                                        undo a link
   discord-daemon                        run the Discord bot (foreground)
   instagram-serve                       run the Instagram webhook (foreground)
   logs-search <query> [--mode m] [--origin o] [--source s] [--direction d]
@@ -89,6 +101,20 @@ def _coerce(value):
 def _fail(message, code=1):
     print(json.dumps({"ok": False, "error": message}, indent=2))
     sys.exit(code)
+
+
+def _person_id(platform, entry):
+    """An id or @handle -> the stored id, looking only at people on file
+    (never directory.py: these commands change who someone is, so a guess
+    would be worse than an error)."""
+    uid = str(entry or "").strip().lstrip("@")
+    if uid.isdigit() and people.get(platform, uid):
+        return uid
+    for rec in people.all_people(platform if platform in PLATFORMS else None):
+        if uid.lower() in ((rec.get("handle") or "").lower(),
+                           str(rec.get("user_id") or "").lower()):
+            return rec.get("user_id")
+    return uid
 
 
 def handle(argv):
@@ -282,6 +308,72 @@ def handle(argv):
         print(json.dumps({"ok": ok, "error": err, "platform": platform,
                           "user_id": uid, "mode": mode,
                           "tools": rest[3:] if mode == "custom" else []}, indent=2))
+        sys.exit(0 if ok else 1)
+
+    if cmd == "channels-add-person":
+        if len(rest) < 2:
+            _fail("usage: channels-add-person <platform> <id|@handle> [name ...]")
+        platform, ident, name = rest[0], rest[1], " ".join(rest[2:])
+        ok, err, rec, existing = user_admin.add_person(platform, ident, name)
+        rec = rec or {}
+        if not ok:
+            note = ""
+        elif existing:
+            note = "already on file — nothing changed"
+        elif rec.get("placeholder"):
+            note = ("added — nothing is switched on for them yet. Only their "
+                    "handle is known; the id fills in when they first message.")
+        else:
+            note = "added — nothing is switched on for them yet."
+        print(json.dumps({
+            "ok": ok, "error": err, "platform": platform,
+            "user_id": rec.get("user_id", ""),
+            "placeholder": bool(rec.get("placeholder")),
+            "existing": existing, "note": note,
+        }, indent=2))
+        sys.exit(0 if ok else 1)
+
+    if cmd == "channels-rename":
+        if len(rest) < 2:
+            _fail("usage: channels-rename <platform> <id|@handle> [name ...]")
+        platform = rest[0]
+        uid = _person_id(platform, rest[1])
+        ok, err, now = user_admin.rename(platform, uid, " ".join(rest[2:]))
+        print(json.dumps({"ok": ok, "error": err, "platform": platform,
+                          "user_id": uid, "name": now}, indent=2))
+        sys.exit(0 if ok else 1)
+
+    if cmd == "channels-remove-person":
+        if len(rest) < 2:
+            _fail("usage: channels-remove-person <platform> <id|@handle>")
+        platform = rest[0]
+        uid = _person_id(platform, rest[1])
+        ok, err = user_admin.remove_person(platform, uid)
+        print(json.dumps({"ok": ok, "error": err, "platform": platform,
+                          "user_id": uid}, indent=2))
+        sys.exit(0 if ok else 1)
+
+    if cmd == "channels-link":
+        if len(rest) < 4:
+            _fail("usage: channels-link <platform> <id|@handle> "
+                  "<other-platform> <id|@handle|name ...>")
+        platform = rest[0]
+        uid = _person_id(platform, rest[1])
+        ok, err, note = user_admin.link_accounts(
+            platform, uid, rest[2], " ".join(rest[3:]))
+        print(json.dumps({"ok": ok, "error": err, "note": note,
+                          "platform": platform, "user_id": uid,
+                          "other_platform": rest[2]}, indent=2))
+        sys.exit(0 if ok else 1)
+
+    if cmd == "channels-unlink":
+        if len(rest) < 2:
+            _fail("usage: channels-unlink <platform> <id|@handle>")
+        platform = rest[0]
+        uid = _person_id(platform, rest[1])
+        ok, err = user_admin.unlink_accounts(platform, uid)
+        print(json.dumps({"ok": ok, "error": err, "platform": platform,
+                          "user_id": uid}, indent=2))
         sys.exit(0 if ok else 1)
 
     if cmd == "channels-log":

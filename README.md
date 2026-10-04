@@ -771,6 +771,22 @@ jarvis channels-user-tools discord 1234567890 custom read_file web_search
 jarvis channels-user-tools discord 1234567890 inherit  # back to the default
 ```
 
+Someone who hasn't messaged yet can be added by hand (the panel's **+ Add a new
+person**, or the terminal) — an id, or just an @handle, which is the normal case
+on Instagram. Adding grants nothing; it only gives them a row to switch things
+on. Anyone you put in a Global list appears there too. You can rename anyone
+(your name beats what they tell Jarvis in chat), and **link** a Discord account to
+an Instagram one as the same human — Jarvis then shares their name and notes,
+but each account keeps its own permissions:
+
+```
+jarvis channels-add-person instagram @someone Sam      # id or @handle, optional name
+jarvis channels-rename discord 1234567890 Sam          # no name = clear it
+jarvis channels-link discord 1234567890 instagram @someone   # id, @handle or name
+jarvis channels-unlink discord 1234567890
+jarvis channels-remove-person instagram @someone       # only if added by hand and never messaged
+```
+
 A person limited to a custom tool list can only ever run those tools (plus
 the few Jarvis needs to find them), and a switch can only take access away,
 never add what the gate refuses. Bot tokens are never shown or edited in the
@@ -809,6 +825,10 @@ separately run `jarvis channels-allow discord tool <id>`.
 | `jarvis channels-users [platform]` | Every registered person and their switches |
 | `jarvis channels-user <platform> <id> <switch> <on\|off>` | Flip one switch for one person |
 | `jarvis channels-user-tools <platform> <id> inherit\|custom [tool ...]` | Which tools that person may run |
+| `jarvis channels-add-person <platform> <id\|@handle> [name ...]` | Add someone who hasn't messaged yet (grants nothing) |
+| `jarvis channels-rename <platform> <id> [name ...]` | Set or clear what they're called |
+| `jarvis channels-link <platform> <id> <other-platform> <id\|@handle\|name>` | Same person on both apps (identity only) |
+| `jarvis channels-unlink` / `channels-remove-person` | Undo a link / delete a hand-added person who never wrote |
 | `jarvis mcp-edit <enable\|disable\|trust\|untrust\|remove> <name>` | Change an MCP server (also `save <name> <json>`); the MCP Servers panel does the same |
 
 ## Notes

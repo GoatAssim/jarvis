@@ -23,6 +23,16 @@
  * terminal runs — so this panel and the CLI cannot disagree. After every
  * change the whole list is re-read, so what you see is what the gate reads.
  *
+ * ADD / RENAME / LINK
+ * -------------------
+ * "+ Add a new person" puts someone who hasn't messaged yet on the list (an id,
+ * or an @handle — Instagram only reveals an id after the person writes); it
+ * grants nothing, the switches do. A person named in an allow-list but not
+ * yet seen is listed too (the server reconciles that on every read). The
+ * name is editable by hand and then locked against a guest's own "call me X".
+ * A Discord and an Instagram account can be LINKED as one human: identity
+ * only, no permission is shared.
+ *
  * BOT TOKENS NEVER PASS THROUGH HERE. The platform cards only say whether one
  * is set and print the terminal command to set it (same standing rule as the
  * panel this replaces).
@@ -69,6 +79,9 @@
     shield: P('<path d="M12 3 4.5 6v5.5c0 4.4 3 7.8 7.5 9.5 4.5-1.7 7.5-5.1 7.5-9.5V6L12 3Z"/><path d="m8.8 12 2.3 2.3 4.2-4.6"/>'),
     discord: P('<path d="M7 7.5c1.6-.7 3.2-1 5-1s3.4.3 5 1c1.3 2.4 2 5 2 8-1.2.9-2.6 1.4-4 1.6l-.9-1.6M7 7.5c-1.3 2.4-2 5-2 8 1.2.9 2.6 1.4 4 1.6l.9-1.6"/><circle cx="9.4" cy="12.2" r="1.1"/><circle cx="14.6" cy="12.2" r="1.1"/>'),
     instagram: P('<rect x="4" y="4" width="16" height="16" rx="4.5"/><circle cx="12" cy="12" r="3.6"/><circle cx="16.8" cy="7.2" r=".6"/>'),
+    plus: P('<path d="M12 5v14M5 12h14"/>'),
+    link: P('<path d="M10 14a4 4 0 0 0 5.7 0l3-3a4 4 0 0 0-5.7-5.7l-1 1"/><path d="M14 10a4 4 0 0 0-5.7 0l-3 3a4 4 0 0 0 5.7 5.7l1-1"/>'),
+    edit: P('<path d="M4 20h4L19 9a2.8 2.8 0 0 0-4-4L4 16v4Z"/><path d="m13.5 6.5 4 4"/>'),
     people: P('<circle cx="9" cy="8.5" r="3.2"/><path d="M3 19.5a6 6 0 0 1 12 0"/><path d="M16 5.6a3.2 3.2 0 0 1 0 5.8M18 14.2a6 6 0 0 1 3 5.3"/>'),
   };
   function icon(name) {
@@ -114,10 +127,13 @@
 
   const pkey = (p) => `${p.platform}:${p.user_id}`;
 
-  function displayName(p) { return p.name || (p.handle ? "@" + p.handle : "") || p.user_id || "unknown"; }
+  // Their own name, else the linked account's (the server works that out),
+  // else @handle, else the id.
+  const nameOf = (p) => p.name_effective || p.name || "";
+  function displayName(p) { return nameOf(p) || (p.handle ? "@" + p.handle : "") || p.user_id || "unknown"; }
 
   function initials(p) {
-    const base = (p.name || p.handle || p.user_id || "?").replace(/^@/, "").trim();
+    const base = (nameOf(p) || p.handle || p.user_id || "?").replace(/^@/, "").trim();
     const parts = base.split(/[\s._-]+/).filter(Boolean);
     const letters = parts.length >= 2 ? parts[0][0] + parts[1][0] : base.slice(0, 2);
     return (letters || "?").toUpperCase();
@@ -172,7 +188,7 @@
       if (platform && platform !== "all" && p.platform !== platform) return false;
       if (!st.test(p)) return false;
       if (!q) return true;
-      return [p.name, p.handle, p.user_id].some((v) => String(v || "").toLowerCase().includes(q));
+      return [p.name, p.name_effective, p.handle, p.user_id, p.linked && p.linked.handle, p.linked && p.linked.name].some((v) => String(v || "").toLowerCase().includes(q));
     });
   }
 
@@ -220,6 +236,10 @@
     confirm: null, // { key, flag, ... }
     busy: new Set(), // "<key>|<flag>"
     prevFocus: null,
+    adding: false, // the "Add a new person" form is open
+    addPlatform: "discord",
+    editingName: null, // person key whose name is being typed
+    confirmRemove: null, // person key awaiting "Remove" confirmation
   };
   let dom = null;
 
@@ -313,6 +333,74 @@
     await load(true);
   }
 
+  // Name, add, remove, link. Same pattern as setFlag: the server decides, then
+  // the whole list is re-read so the panel shows what the gate has.
+  async function personPost(p, action, body) {
+    return api("POST", `/api/channels/people/${encodeURIComponent(p.platform)}/${encodeURIComponent(p.user_id)}/${action}`, body || {});
+  }
+
+  async function saveName(p, name) {
+    try {
+      const out = await personPost(p, "name", { name });
+      state.editingName = null;
+      toast(out.name ? `Now called ${out.name}.` : "Name cleared.", "success");
+    } catch (err) {
+      toast(err.message || "Couldn't save the name.", "error");
+      return;
+    }
+    await load(true);
+  }
+
+  async function addPerson(platform, ident, name, errEl) {
+    if (errEl) errEl.textContent = "";
+    try {
+      const out = await api("POST", "/api/channels/people", { platform, ident, name });
+      state.adding = false;
+      state.platformFilter = "all";
+      state.stateFilter = "all";
+      state.search = "";
+      if (dom) dom.search.value = "";
+      state.selected = `${platform}:${out.user_id}`;
+      state.tab = "perms";
+      await load(true);
+      toast(out.existing ? "They were already on the list." : (out.note || "Added."), out.existing ? "info" : "success");
+      const card = dom && dom.list.querySelector(".ch-card.is-active");
+      if (card && card.scrollIntoView) card.scrollIntoView({ block: "nearest" });
+    } catch (err) {
+      if (errEl) errEl.textContent = err.message || "Couldn't add them.";
+    }
+  }
+
+  async function removePerson(p) {
+    try {
+      await personPost(p, "remove");
+      state.confirmRemove = null;
+      toast(`${displayName(p)} removed.`, "success");
+    } catch (err) {
+      toast(err.message || "Couldn't remove them.", "error");
+    }
+    await load(false);
+  }
+
+  async function linkPerson(p, ident, errEl) {
+    if (errEl) errEl.textContent = "";
+    const other = otherPlatform(p.platform);
+    try {
+      const out = await personPost(p, "link", { other_platform: other, ident });
+      await load(true);
+      toast(out.note || `Linked to their ${PLATFORMS[other].label} account.`, out.note ? "info" : "success");
+    } catch (err) {
+      if (errEl) errEl.textContent = err.message || "Couldn't link them.";
+    }
+  }
+
+  async function unlinkPerson(p) {
+    try { await personPost(p, "unlink"); toast("Unlinked.", "success"); } catch (err) { toast(err.message || "Couldn't unlink.", "error"); }
+    await load(true);
+  }
+
+  function otherPlatform(platform) { return Object.keys(PLATFORMS).find((id) => id !== platform) || platform; }
+
   async function globalMutate(platform, short, entry, remove, errEl) {
     if (errEl) errEl.textContent = "";
     try {
@@ -392,9 +480,8 @@
     dom.count.textContent = rows.length === state.people.length ? `${rows.length}` : `${rows.length} / ${state.people.length}`;
     if (!state.people.length) {
       list.appendChild(el("div", { class: "ch-empty" }, [
-        el("b", null, "Nobody has messaged Jarvis yet."), el("br"),
-        "People appear here the first time they DM or mention Jarvis. To let someone in, open them here, or run ",
-        el("code", null, "jarvis channels-allow discord reply <id>"), " and have them message the bot.",
+        el("b", null, "Nobody is on the list yet."), el("br"),
+        "People appear here the first time they DM or mention Jarvis, or when you add them with “+ Add a new person” (an id or @handle is enough). Anyone you put in a Global list shows up here too.",
       ]));
       return;
     }
@@ -410,6 +497,8 @@
       }
       const k = pkey(p);
       const badges = [];
+      if (p.linked) badges.push(tag(PLATFORMS[p.linked.platform] ? PLATFORMS[p.linked.platform].label : "Linked", null, "link"));
+      if (p.manual && !p.messages) badges.push(tag("Not seen yet", null, "plus"));
       if (p.owner) badges.push(tag("Owner", "owner", "owner"));
       if (p.blocked) badges.push(tag("Blocked", "bad", "blocked"));
       else {
@@ -425,7 +514,7 @@
         avatar(p),
         el("div", { style: "min-width:0" }, [
           el("div", { class: "ch-card__name" }, displayName(p)),
-          el("div", { class: "ch-card__sub" }, (p.name && p.handle ? "@" + p.handle + " · " : "") + p.user_id),
+          el("div", { class: "ch-card__sub" }, subLine(p)),
           el("div", { class: "ch-card__badges" }, badges),
         ]),
         el("div", { class: "ch-card__when", title: dateText(p.last_seen) }, relTime(p.last_seen)),
@@ -434,28 +523,60 @@
     }
   }
 
+  // The grey line under a name. A handle-only person has no id yet, so say so
+  // instead of printing the handle twice.
+  function subLine(p) {
+    if (p.placeholder) return "@" + p.handle + " · id arrives with their first message";
+    return (nameOf(p) && p.handle ? "@" + p.handle + " · " : "") + p.user_id;
+  }
+
   function select(k) {
     if (state.selected === k) return;
     state.selected = k;
     state.confirm = null;
+    state.editingName = null;
+    state.confirmRemove = null;
     state.toolSearch = "";
     renderList();
     renderDetail(true);
   }
 
   // ---- middle -----------------------------------------------------------
+  function nameEditor(p) {
+    const input = el("input", { type: "text", class: "ch-name-input", maxlength: "48", autocomplete: "off", spellcheck: "false", "aria-label": "Name", placeholder: "What should Jarvis call them?", value: p.name || "" });
+    input.value = p.name || "";
+    const save = () => saveName(p, input.value);
+    input.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") { e.preventDefault(); save(); }
+      else if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); state.editingName = null; renderDetail(); }
+    });
+    const row = el("div", { class: "ch-name-edit" }, [
+      input,
+      el("button", { type: "button", class: "btn btn--primary btn--sm", onclick: save }, "Save"),
+      p.name ? el("button", { type: "button", class: "btn btn--ghost btn--sm", title: "Remove the name, so Jarvis asks them again", onclick: () => saveName(p, "") }, "Clear") : null,
+      el("button", { type: "button", class: "btn btn--ghost btn--sm", onclick: () => { state.editingName = null; renderDetail(); } }, "Cancel"),
+    ]);
+    setTimeout(() => { if (input.isConnected) { input.focus(); input.select(); } }, 0);
+    return row;
+  }
+
   function hero(p) {
     const ids = el("div", { class: "ch-hero__ids" }, [
-      el("span", { class: "ch-id" }, [p.user_id, el("button", { type: "button", onclick: async () => toast((await copyText(p.user_id)) ? "ID copied" : "Couldn't copy", "info") }, "copy")]),
+      el("span", { class: "ch-id" }, [p.placeholder ? "no id yet" : p.user_id, p.placeholder ? null : el("button", { type: "button", onclick: async () => toast((await copyText(p.user_id)) ? "ID copied" : "Couldn't copy", "info") }, "copy")]),
       tag(PLATFORMS[p.platform] ? PLATFORMS[p.platform].label : p.platform, null, p.platform),
     ]);
     if (p.owner) ids.appendChild(tag("Owner", "owner", "owner"));
     if (p.blocked) ids.appendChild(tag("Blocked", "bad", "blocked"));
+    const editing = state.editingName === pkey(p);
+    const nameLine = editing ? nameEditor(p) : el("div", { class: "ch-hero__nameline" }, [
+      el("div", { class: "ch-hero__name" }, displayName(p)),
+      el("button", { type: "button", class: "ch-iconbtn", title: "Change name", "aria-label": `Change ${displayName(p)}'s name`, onclick: () => { state.editingName = pkey(p); renderDetail(); } }, [icon("edit")]),
+    ]);
     return el("div", { class: "ch-hero", style: `--hue: hsl(${hueFor(pkey(p))} 70% 58%)` }, [
       avatar(p, "lg"),
       el("div", { class: "ch-hero__main" }, [
-        el("div", { class: "ch-hero__name" }, displayName(p)),
-        p.name && p.handle ? el("div", { class: "ch-hero__handle" }, "@" + p.handle) : null,
+        nameLine,
+        nameOf(p) && p.handle ? el("div", { class: "ch-hero__handle" }, "@" + p.handle) : null,
         ids,
       ]),
     ]);
@@ -512,20 +633,88 @@
     pane.appendChild(el("div", null, [
       el("div", { class: "ch-section-title" }, "Details"),
       el("dl", { class: "ch-facts" }, [
-        el("div", null, [el("dt", null, "Name"), el("dd", null, p.name || "— not told yet")]),
+        el("div", null, [el("dt", null, "Name"), el("dd", null, [
+          p.name || (p.name_from === "linked" ? p.name_effective + " (from the linked account)" : "— not told yet"),
+          p.name && p.name_locked ? el("span", { class: "ch-row__hint", title: "Set by you. What they tell Jarvis in chat won't replace it." }, " · set by you") : null,
+        ])]),
         el("div", null, [el("dt", null, "Handle"), el("dd", null, p.handle ? "@" + p.handle : "—")]),
         el("div", null, [el("dt", null, "First seen"), el("dd", null, dateText(p.first_seen))]),
         el("div", null, [el("dt", null, "Last seen"), el("dd", null, dateText(p.last_seen))]),
         el("div", null, [el("dt", null, "Messages"), el("dd", null, String(p.messages))]),
+        p.manual ? el("div", null, [el("dt", null, "Added"), el("dd", null, p.messages ? "by you, then they wrote" : "by you — hasn't written yet")]) : null,
         el("div", null, [el("dt", null, "Follow status"), el("dd", null, p.follow)]),
       ]),
     ]));
+    pane.appendChild(linkSection(p));
+    const rm = removeSection(p);
     pane.appendChild(el("div", null, [
       el("div", { class: "ch-section-title" }, ["What Jarvis remembers", el("span", { class: "ch-section-title__aside" }, `${p.notes.length}`)]),
       p.notes.length ? el("ul", { class: "ch-notes" }, p.notes.map((n) => el("li", null, n)))
         : el("div", { class: "ch-row__hint" }, "Nothing yet. Notes come from the person telling Jarvis about themselves; they stay in this record and never enter your own memory."),
     ]));
+    if (rm) pane.appendChild(rm);
     return pane;
+  }
+
+  // ---- linked account ---------------------------------------------------
+  function linkSection(p) {
+    const other = otherPlatform(p.platform);
+    const oname = PLATFORMS[other].label;
+    const sec = el("div", null, [el("div", { class: "ch-section-title" }, "Same person on " + oname)]);
+    if (p.linked) {
+      const l = p.linked;
+      const target = state.people.find((x) => x.platform === l.platform && x.user_id === l.user_id);
+      const who = l.name || (l.handle ? "@" + l.handle : l.user_id);
+      sec.appendChild(el("div", { class: "ch-link" }, [
+        avatar(target || { platform: l.platform, user_id: l.user_id, handle: l.handle, name: l.name, avatar: l.avatar }),
+        el("div", { class: "ch-link__who" }, [
+          el("div", { class: "ch-link__name" }, who),
+          el("div", { class: "ch-row__hint" }, `${PLATFORMS[l.platform] ? PLATFORMS[l.platform].label : l.platform}${l.handle && l.name ? " · @" + l.handle : ""}${l.owner ? " · the owner account" : ""}`),
+        ]),
+        target ? el("button", { type: "button", class: "btn btn--ghost btn--sm", onclick: () => select(pkey(target)) }, "Open") : null,
+        el("button", { type: "button", class: "btn btn--ghost btn--sm", onclick: () => unlinkPerson(p) }, "Unlink"),
+      ]));
+      if (l.owner && !p.owner) {
+        sec.appendChild(el("div", { class: "ch-row__note ch-row__note--info" }, [icon("info"), el("span", null, `Linking doesn't make this account the owner. If this is you, switch Owner on for it under Permissions.`)]));
+      }
+    } else {
+      const input = el("input", { type: "text", class: "ch-link-input", list: "ch-link-options", placeholder: `Their ${oname} id, @handle or name`, autocomplete: "off", maxlength: "64", "aria-label": `${oname} account to link` });
+      const err = el("div", { class: "ch-gset__err" });
+      const go = () => { const v = input.value.trim(); if (!v) { err.textContent = "Type their id, @handle or name."; return; } linkPerson(p, v, err); };
+      input.addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); go(); } });
+      const options = el("datalist", { id: "ch-link-options" });
+      for (const x of state.people.filter((x) => x.platform === other)) {
+        if (x.name) options.appendChild(el("option", { value: x.name }, x.handle ? "@" + x.handle : x.user_id));
+        if (x.handle) options.appendChild(el("option", { value: "@" + x.handle }, x.name || ""));
+      }
+      sec.appendChild(el("div", { class: "ch-gset__add" }, [input, options, el("button", { type: "button", class: "btn btn--ghost btn--sm", onclick: go }, "Link")]));
+      sec.appendChild(err);
+      sec.appendChild(el("div", { class: "ch-row__hint" }, `One human on both apps. Jarvis then shares their name and notes between the two accounts. It doesn't share permissions — each account keeps its own switches. An ${oname} id or @handle that isn't on the list yet is added for you.`));
+    }
+    return sec;
+  }
+
+  // Only someone added by hand who has never written can be removed; anyone
+  // else is blocked instead (their history can't be regenerated).
+  function removeSection(p) {
+    if (!p.manual || p.messages || p.owner) return null;
+    const asking = state.confirmRemove === pkey(p);
+    const sec = el("div", null, [el("div", { class: "ch-section-title" }, "Remove")]);
+    if (!asking) {
+      sec.appendChild(el("div", { class: "ch-gset__add" }, [
+        el("div", { class: "ch-row__hint", style: "flex:1" }, "You added them and they haven't written. Removing takes them off every list too."),
+        el("button", { type: "button", class: "btn btn--ghost btn--sm", onclick: () => { state.confirmRemove = pkey(p); renderDetail(); } }, "Remove person"),
+      ]));
+    } else {
+      sec.appendChild(el("div", { class: "ch-confirm", role: "alertdialog", "aria-label": "Confirm removal" }, [
+        el("div", { class: "ch-confirm__text" }, `Remove ${displayName(p)}? They leave the DM, reply and tool lists.`),
+        el("div", { class: "ch-confirm__btns" }, [
+          el("button", { type: "button", class: "btn btn--danger btn--sm", onclick: () => removePerson(p) }, "Remove"),
+          el("button", { type: "button", class: "btn btn--ghost btn--sm", onclick: () => { state.confirmRemove = null; renderDetail(); } }, "Cancel"),
+        ]),
+      ]));
+    }
+    return sec;
   }
 
   // One switch row. `opts`: flag, ch (colour when on), hint, danger, locked
@@ -871,7 +1060,58 @@
     dom.statusLine.textContent = `${state.people.length} registered · ${answered} answered · ${tooled} with tools · ${owners} owner${owners === 1 ? "" : "s"}${blocked ? ` · ${blocked} blocked` : ""}`;
   }
 
-  function renderAll() { if (!dom) return; renderStatusLine(); renderChips(); renderList(); renderDetail(); renderSide(); }
+  // ---- "+ Add a new person" ---------------------------------------------
+  function renderAdd() {
+    if (!dom || !dom.add || !dom.addBtn) return;
+    dom.addBtn.setAttribute("aria-expanded", state.adding ? "true" : "false");
+    dom.add.hidden = !state.adding;
+    if (!state.adding) { dom.add.textContent = ""; return; }
+    if (dom.add.childNodes.length) return; // keep what they're typing across re-renders
+    const plat = el("select", { class: "ch-add__plat", "aria-label": "Platform" },
+      Object.keys(PLATFORMS).map((id) => el("option", { value: id }, PLATFORMS[id].label)));
+    plat.value = state.addPlatform;
+    const hint = el("div", { class: "ch-row__hint" });
+    const ident = el("input", { type: "text", class: "ch-add__ident", autocomplete: "off", spellcheck: "false", maxlength: "64", "aria-label": "Id or handle" });
+    const name = el("input", { type: "text", class: "ch-add__name", autocomplete: "off", maxlength: "48", placeholder: "Name (optional)", "aria-label": "Name" });
+    const err = el("div", { class: "ch-gset__err" });
+    const sync = () => {
+      state.addPlatform = plat.value;
+      ident.placeholder = plat.value === "discord" ? "Discord user id or username" : "Instagram handle or id";
+      hint.textContent = plat.value === "discord"
+        ? "A user id is best (it never changes). A username works too; Jarvis fills the id in when they first write."
+        : "Instagram only shows an id after the person messages you, so a handle is normal here. Jarvis fills the id in when they first write.";
+    };
+    plat.addEventListener("change", sync);
+    sync();
+    const go = () => {
+      const v = ident.value.trim().replace(/^@/, "");
+      if (!v) { err.textContent = "Type an id or @handle."; ident.focus(); return; }
+      addPerson(plat.value, v, name.value.trim(), err);
+    };
+    for (const input of [ident, name]) {
+      input.addEventListener("keydown", (e) => {
+        if (e.key === "Enter") { e.preventDefault(); go(); }
+        else if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); closeAdd(); }
+      });
+    }
+    dom.add.appendChild(el("div", { class: "ch-add__row" }, [plat, ident]));
+    dom.add.appendChild(name);
+    dom.add.appendChild(hint);
+    dom.add.appendChild(el("div", { class: "ch-add__row ch-add__row--end" }, [
+      el("button", { type: "button", class: "btn btn--ghost btn--sm", onclick: closeAdd }, "Cancel"),
+      el("button", { type: "button", class: "btn btn--primary btn--sm", onclick: go }, "Add"),
+    ]));
+    dom.add.appendChild(err);
+    dom.add.appendChild(el("div", { class: "ch-row__hint" }, "Adding someone grants nothing. Open them afterwards to switch on replies, tools and so on."));
+    setTimeout(() => { if (ident.isConnected) ident.focus(); }, 0);
+  }
+  function openAdd() { state.adding = true; renderAdd(); }
+  function closeAdd() {
+    state.adding = false;
+    if (dom) { renderAdd(); dom.addBtn.focus({ preventScroll: true }); }
+  }
+
+  function renderAll() { if (!dom) return; renderStatusLine(); renderChips(); renderList(); renderDetail(); renderSide(); renderAdd(); }
 
   // --------------------------------------------------------------- plumbing
   function grabDom() {
@@ -880,6 +1120,7 @@
     return {
       overlay, search: $("#ch-search"), platChips: $("#ch-platform-chips"), stateChips: $("#ch-state-chips"), list: $("#ch-list"),
       count: $("#ch-count"), detail: $("#ch-detail"), side: $("#ch-side"), statusLine: $("#channels-status-line"), refresh: $("#btn-ch-refresh"),
+      add: $("#ch-add"), addBtn: $("#btn-ch-add"),
     };
   }
 
@@ -888,6 +1129,9 @@
     const typing = /^(INPUT|TEXTAREA|SELECT)$/.test((e.target && e.target.tagName) || "");
     if (e.key === "Escape") {
       if (state.confirm) { state.confirm = null; renderDetail(); e.preventDefault(); return; }
+      if (state.confirmRemove) { state.confirmRemove = null; renderDetail(); e.preventDefault(); return; }
+      if (state.editingName) { state.editingName = null; renderDetail(); e.preventDefault(); return; }
+      if (state.adding) { closeAdd(); e.preventDefault(); return; }
       if (typing && e.target.value) { e.target.value = ""; e.target.dispatchEvent(new Event("input")); return; }
       close(); return;
     }
@@ -911,6 +1155,7 @@
     if (!dom) return false;
     dom.search.addEventListener("input", () => { state.search = dom.search.value; renderChips(); renderList(); });
     dom.refresh.addEventListener("click", () => { state.tools = null; state.toolsState = "idle"; load(true); });
+    if (dom.addBtn) dom.addBtn.addEventListener("click", () => (state.adding ? closeAdd() : openAdd()));
     $("#channels-close").addEventListener("click", close);
     dom.overlay.addEventListener("click", (e) => { if (e.target === dom.overlay) close(); });
     document.addEventListener("keydown", onKey);
@@ -931,6 +1176,8 @@
     if (!dom || dom.overlay.hidden) return;
     if (state.drafts.size && !global.confirm("You have unsaved tool changes. Close anyway?")) return;
     state.drafts.clear();
+    state.adding = false; state.editingName = null; state.confirmRemove = null;
+    renderAdd();
     dom.overlay.hidden = true;
     const prev = state.prevFocus; state.prevFocus = null;
     if (prev && prev.focus && document.contains(prev)) { try { prev.focus(); } catch (_) { /* gone */ } }

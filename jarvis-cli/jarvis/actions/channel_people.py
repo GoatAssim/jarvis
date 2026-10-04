@@ -88,7 +88,16 @@ def tool_remember_sender(args):
         entry = people.add_note(platform, user_id, note)
 
     entry = entry or {}
+    result_extra = {}
+    if name and entry.get("name_locked"):
+        # The owner typed this person's name in the Channels panel; what the
+        # guest says does not replace it. Say so, so the model doesn't
+        # announce a name that was not stored.
+        result_extra["name_kept"] = True
+        result_extra["hint"] = ("The owner already set this person's name; "
+                                "it was kept. Use the stored name.")
     return {
+        **result_extra,
         "ok": True,
         "name": entry.get("name") or "",
         "notes": entry.get("notes") or [],
