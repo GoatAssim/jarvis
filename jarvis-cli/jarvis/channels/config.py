@@ -249,10 +249,22 @@ def load_config():
         for key in PERM_SETS:
             block[key] = _normalize_entries(block.get(key))
         block["owner"] = _normalize_entry(block.get("owner"))
+        # Same for the two location filters. `"allowed_guilds": 123456789012345678`
+        # (a bare snowflake, no brackets) used to reach servers.view() and
+        # permissions.decide() as an int and crash with
+        # "TypeError: 'int' object is not iterable".
+        for key in LOCATION_SETS:
+            if key in block:
+                block[key] = _normalize_entries(block.get(key))
         _coerce_text_fields(block)
         cfg[platform] = block
     return cfg
 
+
+# The two "where" filters (empty = unrestricted). Normalized to a list of
+# clean id strings on load exactly like the allowlists above, so every reader
+# can iterate them without caring what was typed into the file.
+LOCATION_SETS = ("allowed_guilds", "allowed_channels")
 
 # Fields every consumer treats as text — `(cfg.get(k) or "").strip()` is the
 # idiom used in roughly twenty places across channels/, spotify_*, playnite_*

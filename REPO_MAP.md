@@ -139,6 +139,12 @@ jarvis-cli/jarvis/
         usage.py          L.36-P2: per-person usage ledger, one counts-only line per answered
                           ask in `channels/usage.jsonl` (tokens, requests, tool NAMES; never
                           text). Tokens as the provider counted them, no prices
+        servers.py        L.36-P7: the Discord servers + channels the bot is in (names only,
+                          `channels/servers.json`, kept by the gateway) and per-server /
+                          per-channel switches written ONLY into `scopes` of channels.json;
+                          switches can only take access away. `view()` is the read model.
+                          `_ids()` delegates to `config.normalize_entries` (a bare id where a
+                          list belongs must never crash it)
         directory.py      @handle -> id, learned from real messages
         people.py         NEW — WHO a person is: name, notes, follow state, and (L.36) a
                           platform-given avatar URL (https + image-CDN allow-list only)
@@ -273,6 +279,7 @@ Everything is under `~/.jarvis/`:
 | `channels/directory.json` | channels/directory.py | @handle → id |
 | `channels/people.json` | channels/people.py | who each person is (name, notes, follow state, avatar URL) |
 | `channels/user_perms.json` | channels/user_perms.py | per-person tool scope + "Jarvis may DM them"; only non-default values stored; unreadable = fail closed |
+| `channels/servers.json` | channels/servers.py | L.36-P7: `{platform: {guild_id: {name, left, seen, channels}}}` -- names only, a cache; losing it costs labels, not behaviour |
 | `channels/usage.jsonl` | channels/usage.py | L.36-P2: one counts-only line per answered ask (who, when, tokens, tool names); rotated, never deleted |
 | `channels/seen_messages.json` | channels/dedupe.py | redelivery guard |
 | `daemons.json` | daemons.py | the daemon registry |
@@ -405,6 +412,8 @@ jarvis channels-presets                                         # the quick setu
 jarvis channels-preset <platform> <id|@handle> <setup> [preview]   # none|chat_only|chat_notify|trusted for ONE person; `preview` writes nothing
 jarvis channels-bulk flag <switch> <on|off> <platform:id> ...      # one switch for several people; refusals reported per person
 jarvis channels-bulk preset|preview <setup> <platform:id> ...      # a quick setup for several people / what it would change
+jarvis channels-servers [platform]                                # Discord servers + channels Jarvis knows, with their switches (JSON)
+jarvis channels-server-set <platform> guild|channel <id> <enabled|tools|mention> <on|off|inherit>   # can only take access away
 jarvis channels-add-person <platform> <id|@handle> [name ...]   # someone who hasn't messaged yet; grants nothing
 jarvis channels-rename <platform> <id|@handle> [name ...]       # no name clears it
 jarvis channels-remove-person <platform> <id|@handle>           # hand-added and never messaged only
@@ -558,6 +567,7 @@ silently never runs.
 | `test_channels.py` | the permission gate, config, transcripts |
 | `test_channel_manual_people.py` | L.36b: people named in an allow-list get a row, hand-added people, handle-only placeholder adopted on first message (tool limits migrated), locked names vs `remember_sender`, linked accounts (by id / handle / name, ambiguity, owner never inherited), remove, `send_dm` skips a handle-only person, the `channels-*` commands |
 | `test_user_admin.py` | L.36: `user_perms` store (fails closed), `user_admin` switches (registered only, wildcard refusal, owner moves, block removes from all lists), the `base._ask_jarvis` enforcement point, the `send_dm` refusal, avatar validation in `people.py` |
+| `test_channel_servers.py` | L.36-P7 + tool calls in the Conversation view: the server registry, switches that only take access away (checked against the REAL `permissions.decide`), `servers.view`, thread -> parent-channel routing, tool-call scrubbing/clipping and attribution to the first reply chunk, the CLI; and (S3) a bare-id `allowed_guilds` / `allowed_channels` no longer crashes `view` or the gate |
 | `test_channel_insights.py` | L.36-P1/P2/P3: per-person conversation attribution (DM vs group, rotated files, torn lines), the usage ledger (counts only, failed asks, windows, rotation), and `simulate` (agrees with what `handle_message` really hands the model; writes nothing, calls no model — snapshot of `~/.jarvis` before/after) |
 | `verify_l36_insights_ui.py` (`python3`) | L.36-P1/P2/P3 tabs in a real browser against real backend output (`_channels_fixture.py`); SKIPs without playwright + Chromium |
 | `verify_channels_panel.js` (`node`) | L.36: `channels-panel.js` pure helpers (initials, hue, relative time, list filters and search, tool-scope diffing/grouping, and that only fixed icon strings reach `innerHTML`) |
