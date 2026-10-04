@@ -638,7 +638,7 @@
       <section class="debug-pane" aria-label="Selected person">
         <div class="ch-detail" id="ch-detail"></div>
         <div class="tc-foot ch-foot">
-          <span><kbd class="tc-kbd">&uarr;</kbd><kbd class="tc-kbd">&darr;</kbd> move &nbsp;<kbd class="tc-kbd">1</kbd><kbd class="tc-kbd">2</kbd> tab &nbsp;<kbd class="tc-kbd">/</kbd> search &nbsp;<kbd class="tc-kbd">Esc</kbd> close</span>
+          <span><kbd class="tc-kbd">&uarr;</kbd><kbd class="tc-kbd">&darr;</kbd> move &nbsp;<kbd class="tc-kbd">1</kbd>&ndash;<kbd class="tc-kbd">5</kbd> tab &nbsp;<kbd class="tc-kbd">/</kbd> search &nbsp;<kbd class="tc-kbd">Esc</kbd> close</span>
         </div>
       </section>
 
@@ -1368,6 +1368,9 @@
         <div class="debug-panel__subtitle" id="tm-status-line" aria-live="polite">reading the catalogue&hellip;</div>
       </div>
       <div class="tm-head-actions">
+        <!-- L.44: the two side panes can be hidden so the editor gets the room. -->
+        <button class="btn btn--ghost btn--sm tm-pane-toggle" id="btn-tm-toggle-tools" type="button" aria-pressed="true" title="Show or hide the Tools list">Tools</button>
+        <button class="btn btn--ghost btn--sm tm-pane-toggle" id="btn-tm-toggle-side" type="button" aria-pressed="true" title="Show or hide the Overview panel">Overview</button>
         <button class="btn btn--ghost btn--sm" id="btn-tm-import" type="button" title="Import a .py tool file — you are asked to confirm before anything runs">Import&hellip;</button>
         <button class="btn btn--primary btn--sm" id="btn-tm-create" type="button">Create a tool</button>
         <button class="btn btn--ghost btn--sm" id="btn-tm-refresh" type="button" title="Re-read the tool catalogue and your tool files">Refresh</button>
@@ -1382,6 +1385,7 @@
         <div class="debug-pane__head">
           <h3>Tools</h3>
           <span class="debug-tool-count" id="tm-count"></span>
+          <button class="tm-pane-close" id="tm-close-tools" type="button" aria-label="Hide the Tools list" title="Hide the Tools list (bring it back with the Tools button up top)">&times;</button>
         </div>
         <div class="panel__search debug-search">
           <svg class="panel__search-icon" viewBox="0 0 20 20" aria-hidden="true">
@@ -1410,6 +1414,8 @@
       <!-- MIDDLE: the selected tool, the editor, or an import under review -->
       <section class="debug-pane" aria-label="Selected tool">
         <div class="debug-pane__head"><h3 id="tm-mid-title">Tool</h3></div>
+        <!-- L.43/L.44: open editors live here as tabs, like an IDE. Hidden until one is open. -->
+        <div class="tm-tabs" id="tm-tabs" role="tablist" aria-label="Open tool editors" hidden></div>
         <div class="tm-detail" id="tm-detail"></div>
         <div class="tm-foot" id="tm-foot">
           <span><kbd class="tm-kbd">&uarr;</kbd><kbd class="tm-kbd">&darr;</kbd> move &nbsp;<kbd class="tm-kbd">1</kbd> ask first &nbsp;<kbd class="tm-kbd">2</kbd> AI overview &nbsp;<kbd class="tm-kbd">3</kbd> approval summary &nbsp;<kbd class="tm-kbd">4</kbd> on/off for Jarvis &nbsp;<kbd class="tm-kbd">/</kbd> search &nbsp;<kbd class="tm-kbd">Esc</kbd> close</span>
@@ -1418,7 +1424,9 @@
 
       <!-- RIGHT: overview, what needs attention, add a tool / check results -->
       <section class="debug-pane" aria-label="Overview">
-        <div class="debug-pane__head"><h3>Overview</h3></div>
+        <div class="debug-pane__head"><h3>Overview</h3>
+          <button class="tm-pane-close" id="tm-close-side" type="button" aria-label="Hide the Overview panel" title="Hide the Overview panel (bring it back with the Overview button up top)">&times;</button>
+        </div>
         <div class="tm-side" id="tm-side"></div>
         <input type="file" class="tm-file-input" id="tm-file" accept=".py,text/x-python" tabindex="-1" aria-hidden="true">
       </section>

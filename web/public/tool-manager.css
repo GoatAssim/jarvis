@@ -385,3 +385,86 @@
 .tm-shortcuts summary:focus-visible{ outline: 2px solid var(--accent); outline-offset: 2px; }
 .tm-keys{ display: grid; gap: 5px; margin-top: 8px; }
 .tm-keys > div{ display: flex; justify-content: space-between; gap: 10px; font-size: 12px; color: var(--text-dim); align-items: center; }
+
+/* =========================================================================
+   L.44 — closable side panes
+   The Tools list (left) and Overview (right) each have an x in their header
+   and a toggle up top. Hiding one gives its column to the editor. Specificity
+   (.tm-panel.tm-hide-* .tm-body) beats the responsive rules above on purpose:
+   whatever the viewport decided, a pane the owner closed stays closed.
+   ========================================================================= */
+.tm-body .debug-pane__head{ gap: 10px; }
+.tm-body .debug-pane__head h3{ margin-right: auto; }
+.tm-pane-close{
+  background: none; border: 1px solid transparent; border-radius: 3px; color: var(--text-dimmer);
+  font-size: 17px; line-height: 1; width: 24px; height: 24px; cursor: pointer; padding: 0;
+}
+.tm-pane-close:hover{ color: var(--text); border-color: var(--border); background: var(--bg-panel-2); }
+.tm-pane-toggle[aria-pressed="false"]{ opacity: .62; border-style: dashed; }
+.tm-panel.tm-hide-tools .tm-body > .debug-pane:first-child,
+.tm-panel.tm-hide-side .tm-body > .debug-pane:last-child{ display: none; }
+.tm-panel.tm-hide-tools .tm-body{ grid-template-columns: minmax(0, 1fr) 320px; }
+.tm-panel.tm-hide-side .tm-body{ grid-template-columns: 330px minmax(0, 1fr); }
+.tm-panel.tm-hide-tools.tm-hide-side .tm-body{ grid-template-columns: minmax(0, 1fr); }
+.tm-panel.tm-hide-tools .tm-body > .debug-pane:nth-child(2){ border-left: none; }
+
+/* =========================================================================
+   L.43 — editor tabs (one per open tool, like an IDE)
+   ========================================================================= */
+.tm-tabs{
+  display: flex; align-items: flex-end; gap: 2px; padding: 6px 8px 0; overflow-x: auto; flex-shrink: 0;
+  background: var(--bg-panel-2); border-bottom: 1px solid var(--border); scrollbar-width: thin;
+}
+.tm-tabs[hidden]{ display: none; }
+.tm-tab{
+  display: inline-flex; align-items: center; gap: 7px; max-width: 220px; min-width: 0; flex-shrink: 0;
+  padding: 6px 8px 6px 11px; cursor: pointer; user-select: none;
+  font-family: var(--font-mono); font-size: 12px; color: var(--text-dim);
+  background: transparent; border: 1px solid transparent; border-bottom: none; border-radius: 4px 4px 0 0;
+}
+.tm-tab:hover{ color: var(--text); background: color-mix(in srgb, var(--accent) 6%, transparent); }
+.tm-tab:focus-visible{ outline: 1px solid var(--accent); outline-offset: -1px; }
+.tm-tab.is-active{
+  color: var(--accent-soft); background: var(--bg-1); border-color: var(--border);
+  box-shadow: 0 2px 0 var(--bg-1), inset 0 2px 0 var(--accent); margin-bottom: -1px;
+}
+.tm-tab__label{ overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+.tm-tab__dot{ width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0; background: transparent; }
+.tm-tab.is-dirty .tm-tab__dot{ background: var(--accent-secondary); }
+.tm-tab.is-ai .tm-tab__dot{ background: var(--accent); animation: tm-tab-pulse 1s ease-in-out infinite; }
+@keyframes tm-tab-pulse{ 50%{ opacity: .25; } }
+.tm-tab--static{ padding-left: 11px; }
+.tm-tab--static .tm-tab__dot{ display: none; }
+.tm-tab__x{
+  background: none; border: none; color: var(--text-dimmer); cursor: pointer; font-size: 14px; line-height: 1;
+  width: 18px; height: 18px; border-radius: 3px; padding: 0; flex-shrink: 0;
+}
+.tm-tab__x:hover{ color: var(--text); background: color-mix(in srgb, var(--red) 25%, transparent); }
+.tm-tab--add{ padding: 6px 10px; font-size: 15px; line-height: 1; color: var(--text-dimmer); }
+.tm-tab--add:hover{ color: var(--accent); }
+
+/* =========================================================================
+   L.43 — "Ask Jarvis" dock under the code
+   ========================================================================= */
+.tm-agent{ flex-shrink: 0; border-top: 1px solid var(--border); background: var(--bg-panel-2); display: flex; flex-direction: column; }
+.tm-agent__head{ display: flex; align-items: center; gap: 8px; padding: 6px 12px; cursor: pointer; user-select: none; }
+.tm-agent__title{ font-size: 10.5px; letter-spacing: .16em; text-transform: uppercase; color: var(--accent-soft); font-weight: 600; }
+.tm-agent__state{ font-family: var(--font-mono); font-size: 10.5px; color: var(--text-dimmer); }
+.tm-agent__state.is-live{ color: var(--accent); }
+.tm-agent__caret{ margin-left: auto; color: var(--text-dimmer); font-size: 11px; }
+.tm-agent__log{ max-height: 190px; overflow-y: auto; padding: 4px 12px 8px; display: flex; flex-direction: column; gap: 7px; }
+.tm-agent__msg{ font-size: 12.5px; line-height: 1.5; white-space: pre-wrap; word-break: break-word; padding: 6px 9px; border-radius: 4px; max-width: 94%; }
+.tm-agent__msg--user{ align-self: flex-end; background: color-mix(in srgb, var(--accent) 14%, transparent); color: var(--text); }
+.tm-agent__msg--ai{ align-self: flex-start; background: var(--bg-1); border: 1px solid var(--border); color: var(--text-dim); }
+.tm-agent__msg--err{ border-color: rgba(255,92,108,.45); color: var(--red); }
+.tm-agent__msg.is-pending::after{ content: "▍"; color: var(--accent); animation: tm-tab-pulse 1s steps(2) infinite; }
+.tm-agent__meta{ font-family: var(--font-mono); font-size: 10.5px; color: var(--text-dimmer); margin-top: 3px; }
+.tm-agent__compose{ display: flex; gap: 8px; align-items: flex-end; padding: 4px 12px 10px; }
+.tm-agent__input{
+  flex: 1; min-width: 0; resize: none; min-height: 38px; max-height: 120px; background: var(--bg-1); color: var(--text);
+  border: 1px solid var(--border); border-radius: 3px; padding: 7px 9px; font: inherit; font-size: 13px; line-height: 1.45;
+}
+.tm-agent__input:focus{ outline: none; border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent-dim); }
+.tm-agent__btns{ display: flex; flex-direction: column; gap: 5px; }
+.tm-code.is-ai-writing, .tm-editor .ce.is-ai-writing{ box-shadow: inset 0 0 0 1px var(--accent); }
+.tm-agent [hidden]{ display: none !important; }   /* the flex rules above would otherwise beat the hidden attribute */

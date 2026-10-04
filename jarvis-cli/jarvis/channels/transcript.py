@@ -127,8 +127,14 @@ def log_inbound(platform, msg, decision, conv_id=None):
 
 
 def log_outbound(platform, thread_id, text, conv_id=None, kind="reply",
-                 ok=True, error="", provider=""):
-    return append(platform, thread_id, {
+                 ok=True, error="", provider="", to_user=None):
+    """Record one reply. `to_user` is the stable id of the person it answers.
+
+    It exists because a group thread mixes people and an outbound line used to
+    say nothing about who it was for, so the per-person Conversation view
+    (L.36-P1) could attribute replies in a DM thread but never in a group.
+    Written only when given, so older lines and callers are unchanged."""
+    record = {
         "dir": "out",
         "kind": kind,
         "text": text,
@@ -136,7 +142,10 @@ def log_outbound(platform, thread_id, text, conv_id=None, kind="reply",
         "ok": bool(ok),
         "error": error or "",
         "provider": provider or "",
-    })
+    }
+    if to_user:
+        record["to_user"] = str(to_user)
+    return append(platform, thread_id, record)
 
 
 def read_thread(platform, thread_id, limit=200):
@@ -183,6 +192,156 @@ def list_threads(platform=None):
     for item in out:
         item.pop("_mtime", None)
     return out
+
+
+# ---------------------------------------------------------------------------
+# One person's slice of the logs  (L.36-P1 Conversation view, P2 usage counts)
+# ---------------------------------------------------------------------------
+# The files are keyed by THREAD, not by person, so a person's conversation is
+# assembled by reading the thread files and keeping what is provably theirs:
+#
+#   inbound    user_id == theirs.                                    (direct)
+#   outbound   `to_user` == theirs (written since L.36-P1).          (direct)
+#   outbound   no `to_user` (older lines): theirs ONLY when every inbound line
+#              in that thread is from them and every one was a DM. A DM thread
+#              has exactly one other party, so the reply can only be to them.
+#                                                                    (thread)
+#   anything else is left out and counted as `unattributed_replies`, because
+#   guessing which of several people in a group a reply was for would put
+#   one person's conversation in another person's view.
+#
+# Read-only. Nothing here writes, rotates or creates a file.
+
+MAX_TEXT_CHARS = 4000          # per message handed to a viewer
+_ROTATED = re.compile(r"^(?P<base>.+)\.(?P<stamp>\d{8}-\d{6})$")
+
+
+def _thread_groups(platform):
+    """{thread name: [paths oldest first, live file last]} for one platform.
+    A rotated copy (`name.20260101-120000.jsonl`) belongs to the same thread
+    as `name.jsonl`; reading only the live file would drop its history."""
+    folder = CHANNELS_DIR / platform
+    groups = {}
+    if not folder.is_dir():
+        return groups
+    for path in folder.glob("*.jsonl"):
+        match = _ROTATED.match(path.stem)
+        base = match.group("base") if match else path.stem
+        stamp = match.group("stamp") if match else "99999999-999999"
+        groups.setdefault(base, []).append((stamp, path))
+    return {base: [p for _, p in sorted(items, key=lambda it: it[0])]
+            for base, items in groups.items()}
+
+
+def _read_records(paths):
+    out = []
+    for path in paths:
+        try:
+            text = path.read_text(encoding=ENCODING)
+        except (OSError, UnicodeDecodeError):
+            continue
+        for line in text.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                record = json.loads(line)
+            except json.JSONDecodeError:
+                continue  # a torn line from a crash
+            if isinstance(record, dict):
+                out.append(record)
+    return out
+
+
+def person_records(platform, user_id):
+    """Everything attributable to one person, oldest first.
+
+    Returns (matched, unattributed): `matched` is a list of
+    (record, via, thread) where `via` is "direct" or "thread" (see above), and
+    `unattributed` counts older group-chat replies that could not be matched
+    to anyone."""
+    uid = str(user_id or "").strip()
+    unattributed = 0
+    matched = []
+    if not uid or platform not in PLATFORMS:
+        return matched, unattributed
+    for thread, paths in _thread_groups(platform).items():
+        records = _read_records(paths)
+        inbound = [r for r in records if r.get("dir") == "in"]
+        senders = {str(r.get("user_id") or "") for r in inbound}
+        if uid not in senders and not any(
+                str(r.get("to_user") or "") == uid for r in records):
+            continue
+        solo = (senders == {uid}
+                and all(r.get("context") == "dm" for r in inbound))
+        for record in records:
+            if record.get("dir") == "in":
+                if str(record.get("user_id") or "") == uid:
+                    matched.append((record, "direct", thread))
+            elif record.get("dir") == "out":
+                to = str(record.get("to_user") or "")
+                if to:
+                    if to == uid:
+                        matched.append((record, "direct", thread))
+                elif solo:
+                    matched.append((record, "thread", thread))
+                elif uid in senders:
+                    unattributed += 1
+    matched.sort(key=lambda item: str(item[0].get("at") or ""))
+    return matched, unattributed
+
+
+def _clip(text):
+    text = "" if text is None else str(text)
+    if len(text) > MAX_TEXT_CHARS:
+        return text[:MAX_TEXT_CHARS], True
+    return text, False
+
+
+def read_person(platform, user_id, limit=100):
+    """The newest `limit` messages to/from one person, oldest first, shaped
+    for a viewer. `total` is how many exist, `unattributed_replies` how many
+    older group-chat replies could not be matched to anyone (see above)."""
+    try:
+        limit = max(1, min(int(limit), 500))
+    except (TypeError, ValueError):
+        limit = 100
+    matched, unattributed = person_records(platform, user_id)
+    entries = []
+    for record, via, thread in matched[-limit:]:
+        text, clipped = _clip(record.get("text"))
+        entry = {
+            "at": record.get("at") or "",
+            "dir": record.get("dir"),
+            "thread_id": thread,
+            "text": text,
+            "clipped": clipped,
+            "via": via,
+        }
+        if record.get("dir") == "in":
+            entry.update({
+                "context": record.get("context") or "",
+                "mentioned": bool(record.get("mentioned")),
+                "allowed": record.get("allowed"),
+                "stage": record.get("stage"),
+                "reason": record.get("reason"),
+                "may_use_tools": record.get("may_use_tools"),
+            })
+        else:
+            entry.update({
+                "kind": record.get("kind") or "reply",
+                "ok": record.get("ok") is not False,
+                "error": record.get("error") or "",
+                "provider": record.get("provider") or "",
+            })
+        entries.append(entry)
+    return {
+        "entries": entries,
+        "total": len(matched),
+        "shown": len(entries),
+        "threads": len({thread for _, _, thread in matched}),
+        "unattributed_replies": unattributed,
+    }
 
 
 # ---------------------------------------------------------------------------
