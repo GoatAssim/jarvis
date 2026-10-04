@@ -393,7 +393,7 @@
     if (!state.people.length) {
       list.appendChild(el("div", { class: "ch-empty" }, [
         el("b", null, "Nobody has messaged Jarvis yet."), el("br"),
-        "People appear here the first time they get past the gate. To let someone in, add them with ",
+        "People appear here the first time they DM or mention Jarvis. To let someone in, open them here, or run ",
         el("code", null, "jarvis channels-allow discord reply <id>"), " and have them message the bot.",
       ]));
       return;
@@ -771,7 +771,7 @@
     const p = current();
     if (!p) {
       dom.detail.appendChild(el("div", { class: "ch-state" }, [icon("people"), el("div", { class: "ch-state__t" }, state.loading ? "Loading…" : state.people.length ? "Pick someone" : "No one registered yet"),
-        el("div", { class: "ch-state__d" }, state.loading ? "" : state.people.length ? "Choose a person on the left to see and change what they can do." : "People show up here the first time they message Jarvis and get past the gate.")]));
+        el("div", { class: "ch-state__d" }, state.loading ? "" : state.people.length ? "Choose a person on the left to see and change what they can do." : "People show up here the first time they DM or mention Jarvis.")]));
       return;
     }
     dom.detail.appendChild(hero(p));
