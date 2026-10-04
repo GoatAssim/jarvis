@@ -428,10 +428,13 @@ def test_the_actions_template_example_is_valid():
     entries, group_meta, problems = checklist_schema.extract_supplied(
         m.TEST_CHECKLIST, m.TEST_CHECKLIST_GROUP, set(m.TOOLS), m.TOOL_GROUP)
     assert not problems, problems
-    # G.2: the template now demonstrates BOTH extensions at once — two tools,
-    # each with its own entry, split across two declared checklist groups.
-    assert set(entries) == set(m.TOOLS) == {"example_ping", "example_echo"}
+    # G.2: the template demonstrates BOTH extensions at once — each tool has
+    # its own entry, split across two declared checklist groups. example_ui_demo
+    # is the UI-bridge example (toast/card/modal/progress/confirm/choose/
+    # prompt/form); it stays in TOOL_GROUP's own section like example_ping.
+    assert set(entries) == set(m.TOOLS) == {"example_ping", "example_echo", "example_ui_demo"}
     assert entries["example_ping"]["group"] == m.TOOL_GROUP
+    assert entries["example_ui_demo"]["group"] == m.TOOL_GROUP
     assert entries["example_echo"]["group"] != m.TOOL_GROUP
     assert set(group_meta) == {m.TOOL_GROUP, entries["example_echo"]["group"]}
     assert all(g["label"] for g in group_meta.values())

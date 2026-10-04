@@ -91,7 +91,7 @@ _BINARIES = {
         },
     },
     "tesseract": {
-        "why": "click_on_text — without it, clicking by visible label can't work at all",
+        "why": "click_on_text (clicking a control by its visible label)",
         "needed_by": "ocr",
         "install": {
             "Windows": "winget install UB-Mannheim.TesseractOCR",
@@ -621,7 +621,7 @@ def check_daemons():
                              "not running", start_cmd, "daemons"))
             continue
         try:
-            pid = int(pid_file.read_text(encoding=ENCODING).strip())
+            pid = _read_pid(pid_file)
         except (ValueError, OSError):
             out.append(Check("daemon.%s" % name, "%s daemon" % name, WARN,
                              "pid file is unreadable",
@@ -636,6 +636,30 @@ def check_daemons():
                              "will refuse to start until this is cleared" % pid,
                              "Delete %s, then: %s" % (pid_file, start_cmd), "daemons"))
     return out
+
+
+def _read_pid(pid_file):
+    """The pid a daemon's pid file names. Accepts BOTH formats in use:
+
+    * a bare integer — what channels/discord_gateway.py writes;
+    * JSON `{"pid": N, "started": ...}` — what sched_daemon.py writes
+      (sched_daemon._write_pid_file).
+
+    check_daemons() and _pid_alive_from() used to int() the whole file, which
+    can never parse the scheduler's JSON, so a perfectly healthy scheduler
+    was reported as "pid file is unreadable" (and, when a job was overdue, as
+    "nothing is ticking the scheduler"). Raises ValueError/OSError on a file
+    that is genuinely unreadable, same contract the callers already catch.
+    """
+    text = pid_file.read_text(encoding=ENCODING).strip()
+    try:
+        return int(text)
+    except ValueError:
+        pass
+    try:
+        return int(json.loads(text)["pid"])
+    except (ValueError, TypeError, KeyError) as exc:
+        raise ValueError("not a pid: %r" % text[:40]) from exc
 
 
 def _pid_alive(pid):
@@ -710,7 +734,7 @@ def check_scheduler():
 
 def _pid_alive_from(pid_file):
     try:
-        return _pid_alive(int(pid_file.read_text(encoding=ENCODING).strip()))
+        return _pid_alive(_read_pid(pid_file))
     except (ValueError, OSError):
         return False
 
@@ -887,7 +911,16 @@ def check_tools():
         return [Check("tools.discovery", "Tool auto-discovery", WARN,
                       "couldn't run: %s" % exc, group="tools")]
 
-    bad = [r for r in records if not r.valid]
+    # A persona-only file (PERSONAS but no TOOL_SCHEMAS/TOOLS/TOOL_GROUP — e.g.
+    # actions/starter_personas.py) is a legitimate file, not a rejected one.
+    # tool_loader keeps it as valid=False with error "__not_an_action__"
+    # purely so its personas still reach tools.py's aggregation step (see
+    # tool_loader.discover_actions); it only ever keeps such a record when
+    # the file actually registered personas. Counting it as "rejected" made
+    # `jarvis doctor` report a FAIL for a file working exactly as designed.
+    persona_only = [r for r in records
+                    if not r.valid and r.error == "__not_an_action__"]
+    bad = [r for r in records if not r.valid and r.error != "__not_an_action__"]
     good = [r for r in records if r.valid]
     if bad:
         for rec in bad:
@@ -895,10 +928,18 @@ def check_tools():
                              FAIL, rec.error,
                              "Fix it against jarvis/actions/_template.py — until then "
                              "its tools don't exist anywhere.", "tools"))
+    for rec in persona_only:
+        n = len(rec.personas)
+        out.append(Check("tools.personas.%s" % rec.file, "Persona file %s" % rec.file,
+                         OK, "%d persona%s registered (no tools in this file, by design)"
+                         % (n, "" if n == 1 else "s"), group="tools"))
+    detail = ("%d action file%s loaded, %d rejected"
+              % (len(good), "" if len(good) == 1 else "s", len(bad)))
+    if persona_only:
+        detail += ", %d persona-only file%s" % (
+            len(persona_only), "" if len(persona_only) == 1 else "s")
     out.append(Check("tools.discovery", "Tool auto-discovery", OK if not bad else WARN,
-                     "%d action file%s loaded, %d rejected"
-                     % (len(good), "" if len(good) == 1 else "s", len(bad)),
-                     group="tools"))
+                     detail, group="tools"))
 
     try:
         from . import tool_registry
