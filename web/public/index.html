@@ -12,10 +12,12 @@
 <link rel="stylesheet" href="ui-kit.css">
 <link rel="stylesheet" href="test-checklist.css">
 <link rel="stylesheet" href="tool-manager.css">
+<link rel="stylesheet" href="category-input.css">
 <link rel="stylesheet" href="daemons.css">
 <link rel="stylesheet" href="backlog.css">
 <link rel="stylesheet" href="logsearch.css">
 <link rel="stylesheet" href="schedules.css">
+<link rel="stylesheet" href="notifications.css">
 </head>
 <body>
 
@@ -919,9 +921,9 @@
 </button>
 
 <!-- NOTIFICATIONS FAB — stacked directly above the Logs fab, same corner.
-     The badge shows how many notifications have arrived since the panel
-     was last opened (client-side counter only; the underlying history
-     itself is server-side and never cleared by viewing it). -->
+     L.30: the badge is the number of UNREAD notifications, read from the
+     durable inbox (notifications.js asks the server on load and after every
+     change), so it survives a page reload instead of resetting to zero. -->
 <button class="logs-fab notifications-fab" id="btn-notifications-fab" type="button" title="Notifications — everything Jarvis has ever sent, persisted on disk">
   <svg viewBox="0 0 24 24" aria-hidden="true">
     <path d="M12 3a6 6 0 0 0-6 6v3.2c0 .7-.24 1.37-.68 1.9L4 16h16l-1.32-1.9a3 3 0 0 1-.68-1.9V9a6 6 0 0 0-6-6z" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/>
@@ -1462,7 +1464,7 @@
         </div>
         <div class="dmn-filters">
           <div class="dmn-chips" id="dmn-chips" role="group" aria-label="Filter by state"></div>
-          <select class="dmn-select" id="dmn-kind-filter" aria-label="Filter by kind"></select>
+          <select class="dmn-select" id="dmn-kind-filter" aria-label="Filter by category"></select>
         </div>
         <div class="dmn-list" id="daemons-list">
           <div class="debug-empty">Loading&hellip;</div>
@@ -1622,13 +1624,14 @@
 </div>
 
 
-<!-- NOTIFICATIONS — every notification Jarvis has ever sent (toasts, OS
-     notifications, reminders), newest first. Backed by the durable inbox at
-     ~/.jarvis/notifications.json via /api/notifications/history, so it
-     survives closing the tab, the browser, or the machine restarting —
-     nothing here is stored client-side. -->
+<!-- NOTIFICATIONS — the inbox (L.30 rework). Every notification Jarvis has
+     sent, newest first, backed by the durable store at
+     ~/.jarvis/notifications.json, so it survives closing the tab, the
+     browser or the machine restarting — nothing here is kept client-side.
+     The dynamic parts (filter chips, kind list, rows) are built by
+     notifications.js; this is only the frame. -->
 <div class="menu-overlay" id="notifications-overlay" hidden>
-  <div class="menu-panel">
+  <div class="menu-panel" role="dialog" aria-modal="true" aria-label="Notifications">
     <div class="panel__corner panel__corner--tl"></div>
     <div class="panel__corner panel__corner--br"></div>
     <div class="menu-panel__head">
@@ -1639,16 +1642,24 @@
       </svg>
       <div class="menu-panel__titles">
         <div class="menu-panel__title">NOTIFICATIONS</div>
-        <div class="menu-panel__subtitle" id="notifications-status-line">everything ever sent, persisted on disk</div>
+        <div class="menu-panel__subtitle" id="notifications-status-line">loading&hellip;</div>
       </div>
+      <button class="btn btn--ghost btn--sm" id="btn-notifications-markall" type="button" title="Mark everything read (and acknowledge anything waiting)">Mark all read</button>
+      <button class="btn btn--ghost btn--sm" id="btn-notifications-clearread" type="button" title="Delete every notification you have already read">Clear read</button>
       <button class="btn btn--ghost btn--sm" id="btn-notifications-refresh" type="button">Refresh</button>
       <button class="modal__close" id="notifications-close" type="button" aria-label="Close">&times;</button>
     </div>
-    <div class="menu-body menu-body--wide">
+    <div class="nt-toolbar">
+      <input class="nt-search" id="notif-search" type="search" placeholder="Search notifications   ( / )" aria-label="Search notifications" autocomplete="off">
+      <div class="nt-chips" id="notif-chips" role="group" aria-label="Filter notifications"></div>
+      <select class="nt-kind" id="notif-kind" aria-label="Filter by kind"><option value="">All kinds</option></select>
+    </div>
+    <div class="menu-body notif-body">
       <div class="notif-list" id="notifications-list">
-        <div class="skills-empty">Loading&hellip;</div>
+        <div class="nt-empty"><div class="nt-empty__text">Loading&hellip;</div></div>
       </div>
     </div>
+    <div class="nt-hint"><kbd>/</kbd> search &nbsp; <kbd>j</kbd>/<kbd>k</kbd> move &nbsp; <kbd>r</kbd> mark read &nbsp; <kbd>x</kbd> dismiss &nbsp; <kbd>Esc</kbd> close</div>
   </div>
 </div>
 
@@ -1706,12 +1717,16 @@
      JARVIS_MEDIA dispatch, so the global has to exist by then. -->
 <script src="ui-kit.js"></script>
 <script src="app.js"></script>
+<script src="notifications.js"></script>
 <script src="slash-commands-data.js"></script>
 <script src="slash-palette.js"></script>
 <script src="custom-tools.js"></script>
 <script src="tool-manager.js"></script>
 <script src="test-checklist-data.js"></script>
 <script src="test-checklist.js"></script>
+<!-- category-input.js BEFORE daemons.js: the Daemons panel builds its category
+     filter and editor field from JarvisCategories (L.11). -->
+<script src="category-input.js"></script>
 <script src="daemons.js"></script>
 <script src="backlog.js"></script>
 <script src="logsearch.js"></script>

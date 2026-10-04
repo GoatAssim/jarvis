@@ -159,6 +159,7 @@ actually render Markdown):
     node tests/verify_daemons_panel.js
     node tests/verify_daemons_console.js   # the console line classifier (H.1.7)
     node tests/verify_l9_sequence_bar.js   # L.9: sequence bar reachable; needs `playwright` + Chromium, prints SKIP without them
+    python3 tests/verify_l11_daemon_categories.py # L.11: daemon categories in a real browser; needs `playwright` (Python) + Chromium, prints SKIP without them
     python3 tests/verify_l13_favorite_daemons.py  # L.13: favorite daemons in a real browser; needs `playwright` (Python) + Chromium, prints SKIP without them
     node tests/verify_slash_palette.js      # no npm install; runs the real palette
                                             # against a fake DOM + fake JarvisHost
@@ -342,6 +343,17 @@ every `menu-item-*` is claimed by exactly one verb.
 
 The parser lives in one place. Do not add another `/`-prefix regex to the ask-form
 submit handler in `app.js`: register a verb instead.
+
+## Categories (L.11 daemons, L.14 commands)
+
+A daemon's `categories` is a list of labels - not a kind, and not the `builtin` flag, which is also a
+lock and stays separate. Empty means "Undefined" in the panel. The name rules live twice and must
+agree: `jarvis-cli/jarvis/categories.py` and `web/public/category-input.js`;
+`tests/test_categories.py` runs one corpus through both. Vocabularies are per surface (a daemon's
+suggestions never come from commands). A name reaches the CLI as `--category NAME`, and the flag
+parser reads any following `--...` token as a flag, so `server.js` refuses names starting with `--`
+(`daemonCategoryArgs`). Writes are strict (refused with a reason, nothing saved); reads of a
+hand-edited registry are lenient. L.14 should reuse both files rather than copy them.
 
 ## Patch conventions
 

@@ -199,20 +199,14 @@ def _read_json_with_backup(path, expect):
     return None, False
 
 
-def _cap_exchanges(conv_id, exchanges):
-    """Keep the newest MAX_STORED_EXCHANGES. Whatever falls off the front is
-    handed to the raw archive (L.38 a) instead of vanishing -- the 60-exchange
-    cap bounds the conversation file and the prompt, not what is remembered."""
-    if len(exchanges) <= MAX_STORED_EXCHANGES:
-        return exchanges
-    dropped = exchanges[:-MAX_STORED_EXCHANGES]
+def _raw(kind, conv_id, data):
+    """Hand one event to the raw event log (L.38). Never raises: the log is a
+    record of the turn, not a reason for the turn to fail."""
     try:
         from . import raw_archive
-        raw_archive.record(conv_id, "exchange_overflow",
-                           {"reason": "stored-exchange cap", "exchanges": dropped})
-    except Exception:  # noqa: BLE001 -- archiving must never break saving
+        raw_archive.record(conv_id, kind, data)
+    except Exception:  # noqa: BLE001
         pass
-    return exchanges[-MAX_STORED_EXCHANGES:]
 
 
 def _save_conv(record):
@@ -516,10 +510,11 @@ def begin_exchange(conv_id, user_text, console_turn=None):
     if console_turn:
         exchange["consoleTurn"] = console_turn
     record.setdefault("exchanges", []).append(exchange)
-    record["exchanges"] = _cap_exchanges(conv_id, record["exchanges"])
+    record["exchanges"] = record["exchanges"][-MAX_STORED_EXCHANGES:]
     record["updated_at"] = _now()
     _save_conv(record)
     _upsert_index(record)
+    _raw("user", conv_id, {"text": user_text})   # L.38: exactly what was sent, uncapped
     return len(record["exchanges"]) - 1
 
 
@@ -593,7 +588,7 @@ def _finish_pending(record, user_text, patch):
     exchange = {"ts": _now(), "user": user_text}
     exchange.update(patch)
     exchanges.append(exchange)
-    record["exchanges"] = _cap_exchanges(record.get("id"), exchanges)
+    record["exchanges"] = exchanges[-MAX_STORED_EXCHANGES:]
     return len(record["exchanges"]) - 1
 
 
@@ -612,10 +607,17 @@ def complete_exchange(conv_id, user_text, jarvis_text, provider, extras=None):
     patch = {"ts": _now(), "jarvis": jarvis_text, "provider": provider}
     if extras:
         patch["extras"] = extras
+    had_pending = any(e.get("pending") for e in record.get("exchanges") or [])
     _finish_pending(record, user_text, patch)
     record["updated_at"] = _now()
     _save_conv(record)
     _upsert_index(record)
+    reply_event = {"text": jarvis_text, "provider": provider, "status": "answered"}
+    if extras:
+        reply_event["extras"] = extras
+    if not had_pending:
+        reply_event["user"] = user_text   # no `user` event came first (L.38)
+    _raw("reply", conv_id, reply_event)
     return len(record["exchanges"])
 
 
@@ -671,10 +673,17 @@ def abandon_exchange(conv_id, user_text=None, reason="interrupted", extras=None)
     patch = {"ts": _now(), "jarvis": "", "provider": None, "interrupted": reason}
     if extras:
         patch["extras"] = extras
+    had_pending = any(e.get("pending") for e in exchanges)
     _finish_pending(record, user_text, patch)
     record["updated_at"] = _now()
     _save_conv(record)
     _upsert_index(record)
+    reply_event = {"text": "", "provider": None, "status": "interrupted", "reason": reason}
+    if extras:
+        reply_event["extras"] = extras
+    if not had_pending:
+        reply_event["user"] = user_text or ""
+    _raw("reply", conv_id, reply_event)
     return True
 
 
@@ -710,10 +719,14 @@ def append_exchange(conv_id, user_text, jarvis_text, provider, extras=None):
     if extras:
         exchange["extras"] = extras
     record.setdefault("exchanges", []).append(exchange)
-    record["exchanges"] = _cap_exchanges(conv_id, record["exchanges"])
+    record["exchanges"] = record["exchanges"][-MAX_STORED_EXCHANGES:]
     record["updated_at"] = _now()
     _save_conv(record)
     _upsert_index(record)
+    reply_event = {"user": user_text, "text": jarvis_text, "provider": provider, "status": "answered"}
+    if extras:
+        reply_event["extras"] = extras
+    _raw("reply", conv_id, reply_event)
     return len(record["exchanges"])
 
 
@@ -734,12 +747,7 @@ def drop_from_user(conv_id, user_text):
             break
     if idx is None:
         return False
-    try:
-        from . import raw_archive
-        raw_archive.record(conv_id, "exchange_dropped",
-                           {"reason": "redo", "exchanges": exchanges[idx:]})
-    except Exception:  # noqa: BLE001
-        pass
+    _raw("exchange_removed", conv_id, {"reason": "redo", "exchanges": exchanges[idx:]})
     record["exchanges"] = exchanges[:idx]
     record["updated_at"] = _now()
     _save_conv(record)

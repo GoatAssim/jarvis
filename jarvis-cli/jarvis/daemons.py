@@ -67,7 +67,7 @@ import sys
 import time
 from pathlib import Path
 
-from . import atomic_io
+from . import atomic_io, categories as _categories
 
 JARVIS_DIR = Path.home() / ".jarvis"
 DAEMON_DIR = JARVIS_DIR / "daemons"
@@ -143,6 +143,7 @@ BUILTINS = {
         "builtin": True,
         "argv": [JARVIS_TOKEN, "sched-daemon"],
         "description": "Fires reminders, scheduled tasks and watches on time.",
+        "categories": ["core"],
         "supports_stdin": False,
         "enabled": True,
     },
@@ -152,6 +153,7 @@ BUILTINS = {
         "builtin": True,
         "argv": [JARVIS_TOKEN, "discord-daemon"],
         "description": "Holds the Discord WebSocket open and answers messages.",
+        "categories": ["chat"],
         "supports_stdin": False,
         "enabled": True,
     },
@@ -161,6 +163,7 @@ BUILTINS = {
         "builtin": True,
         "argv": [JARVIS_TOKEN, "instagram-serve"],
         "description": "Receives Instagram DMs over the Meta webhook.",
+        "categories": ["chat"],
         "supports_stdin": False,
         "enabled": True,
     },
@@ -174,6 +177,7 @@ BUILTINS = {
             "regex pattern set via 'jarvis clipboard-watch-config'). Off by "
             "default — start it with daemon_start/daemon-start when wanted."
         ),
+        "categories": ["desktop"],
         "supports_stdin": False,
         "enabled": True,
     },
@@ -193,6 +197,7 @@ BUILTINS = {
             "running or doesn't answer. Off by default — start it with "
             "daemon_start/daemon-start when wanted."
         ),
+        "categories": ["desktop"],
         "supports_stdin": False,
         "enabled": True,
     },
@@ -245,6 +250,7 @@ def _load_registry():
                     continue
                 if field in stored:
                     entry[field] = stored[field]
+        entry["categories"] = _clean_categories(entry.get("categories"))
         merged[did] = entry
     for did, stored in entries.items():
         if did in BUILTINS or not isinstance(stored, dict):
@@ -252,8 +258,19 @@ def _load_registry():
         entry = dict(stored)
         entry["id"] = did
         entry["builtin"] = False
+        # A daemon saved before categories existed has no key at all: that
+        # is "no category" (shown as Undefined), not an error and not a
+        # migration to run.
+        entry["categories"] = _clean_categories(entry.get("categories"))
         merged[did] = entry
     return merged
+
+
+def _clean_categories(value):
+    """Lenient read of a stored `categories`: fix what can be fixed, drop the
+    rest. A hand-edited registry must never fail to load over one odd name -
+    that would take every daemon down with it (see categories.py)."""
+    return _categories.normalize_list(value)[0]
 
 
 def _save_registry(merged):
@@ -332,7 +349,7 @@ def add(daemon_id, command, name="", cwd="", env=None, supports_stdin=False,
         description="", autostart=False, shell=False,
         restart=RESTART_NEVER, restart_delay=DEFAULT_RESTART_DELAY,
         max_restarts=DEFAULT_MAX_RESTARTS, stop_signal="TERM",
-        stop_timeout=DEFAULT_STOP_TIMEOUT, notes=""):
+        stop_timeout=DEFAULT_STOP_TIMEOUT, notes="", categories=None):
     """Register a user-defined daemon.
 
     `command` may be a list (used verbatim — the safe form) or a string,
@@ -349,6 +366,11 @@ def add(daemon_id, command, name="", cwd="", env=None, supports_stdin=False,
     merged = _load_registry()
     if did in merged:
         return False, f"'{did}' already exists — use daemon-edit"
+    # Strict, and before anything else is built: a write that cannot be
+    # honoured says so instead of quietly keeping a different set.
+    cats, cat_err = _categories.normalize_list(categories, strict=True)
+    if cat_err:
+        return False, cat_err
 
     # A SHELL command is stored verbatim, as a single element, and never
     # split. Splitting it and re-joining at spawn time silently destroys the
@@ -378,6 +400,9 @@ def add(daemon_id, command, name="", cwd="", env=None, supports_stdin=False,
         "env": dict(env or {}),
         "supports_stdin": bool(supports_stdin),
         "description": description or "",
+        # Empty = "Undefined" in the panel (L.11). Not a category in its own
+        # right, and not the same thing as `builtin`, which is a lock.
+        "categories": cats,
         "enabled": True,
         "autostart": bool(autostart),
         "next_start": None,
@@ -404,7 +429,7 @@ def add(daemon_id, command, name="", cwd="", env=None, supports_stdin=False,
 _EDITABLE = ("name", "argv", "cwd", "env", "supports_stdin", "description",
              "enabled", "autostart", "next_start", "notes", "shell",
              "restart", "restart_delay", "max_restarts", "stop_signal",
-             "stop_timeout")
+             "stop_timeout", "categories")
 
 # Fields a built-in refuses to change. All three decide what actually gets
 # executed or how: rewriting them would turn "start the scheduler" into
@@ -465,6 +490,14 @@ def edit(daemon_id, **fields):
                            + ", ".join(RESTART_POLICIES))
         if key == "stop_signal" and value not in STOP_SIGNALS:
             return False, "stop_signal must be one of: " + ", ".join(STOP_SIGNALS)
+        if key == "categories":
+            # The whole set is replaced, never merged: an editor that shows
+            # every chip and lets one be removed has to be able to say "now
+            # there are fewer". `[]` is therefore a real value (clear them
+            # all); only None - skipped above - means "leave it alone".
+            value, cat_err = _categories.normalize_list(value, strict=True)
+            if cat_err:
+                return False, cat_err
         if key in _EDIT_COERCE:
             try:
                 value = _EDIT_COERCE[key](value)

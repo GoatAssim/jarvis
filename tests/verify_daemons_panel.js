@@ -25,7 +25,11 @@ const vm = require("vm");
 
 const PANEL_JS = path.join(__dirname, "..", "web", "public", "daemons.js");
 const win = {};
-vm.runInNewContext(fs.readFileSync(PANEL_JS, "utf8"), { window: win, console });
+const ctx = vm.createContext({ window: win, console });
+// category-input.js first, as in index.html: daemons.js builds its category
+// filter and editor field from JarvisCategories (L.11).
+vm.runInContext(fs.readFileSync(path.join(path.dirname(PANEL_JS), "category-input.js"), "utf8"), ctx);
+vm.runInContext(fs.readFileSync(PANEL_JS, "utf8"), ctx);
 const P = win.JarvisDaemons && win.JarvisDaemons._pure;
 assert.ok(P, "window.JarvisDaemons._pure did not load");
 
@@ -128,7 +132,7 @@ ok("attentionOf: a healthy running daemon has nothing to report", P.attentionOf(
   ok("matchesFilters: matches on command", P.matchesFilters(e, { search: "server.js" }));
   ok("matchesFilters: every search term must match (AND)", !P.matchesFilters(e, { search: "web nonexistentterm" }));
   ok("matchesFilters: kind=builtin excludes a custom daemon", !P.matchesFilters(e, { kind: "builtin" }));
-  ok("matchesFilters: kind=custom includes a custom daemon", P.matchesFilters(e, { kind: "custom" }));
+  ok("matchesFilters: the retired kind=custom filters nothing (L.11)", P.matchesFilters(e, { kind: "custom" }) && P.matchesFilters({ id: "b", builtin: true }, { kind: "custom" }));
 }
 {
   const running = { id: "a", status: "running", running: true };
@@ -352,6 +356,66 @@ ok("envPairs: drops rows with no name, keeps the rest as K=V", JSON.stringify(P.
   const off = P.toggleFavoriteId(["a", "b"], "a");
   ok("toggleFavoriteId: removes one that was", off.now === false && JSON.stringify(off.ids) === JSON.stringify(["b"]));
   ok("toggleFavoriteId: tolerates a missing list", JSON.stringify(P.toggleFavoriteId(undefined, "x").ids) === JSON.stringify(["x"]));
+}
+
+// --- L.11: daemon categories ---------------------------------------------------
+{
+  const mk = (id, cats, extra) => Object.assign({ id, name: id, builtin: false, categories: cats, status: "stopped" }, extra || {});
+  const names = (list) => list.map((e) => e.id).join(",");
+  const web = mk("web", ["Tools", "chat"], { status: "running", running: true, pid: 1, command: "node server.js" });
+  const bot = mk("bot", ["chat"]);
+  const raw = mk("raw", []);
+  const old = { id: "old", name: "old", builtin: false, status: "stopped" }; // saved before categories existed
+  const core = mk("scheduler", ["core"], { builtin: true });
+  const all = [web, bot, raw, old, core];
+  const f = (kind) => all.filter((e) => P.matchesFilters(e, { kind }));
+
+  ok("categoriesOf: a missing key is no categories", P.categoriesOf(old).length === 0);
+  ok("categoriesOf: cleans and de-duplicates case-insensitively", JSON.stringify(P.categoriesOf({ categories: ["  Tools ", "tools", "x\ty", 5] })) === JSON.stringify(["Tools", "x y"]));
+  ok("matchesFilters: cat:<key> matches a daemon carrying it, case-insensitively", names(f("cat:chat")) === "web,bot" && names(f("cat:tools")) === "web");
+  ok("matchesFilters: cat: excludes a daemon without it", !P.matchesFilters(raw, { kind: "cat:chat" }));
+  ok("matchesFilters: undefined = no category, with or without the key", names(f("undefined")) === "raw,old");
+  ok("matchesFilters: built-in is still its own flag, independent of categories", names(f("builtin")) === "scheduler");
+  ok("matchesFilters: a category AND the state chip compose", P.matchesFilters(web, { kind: "cat:chat", state: "running" }) && !P.matchesFilters(bot, { kind: "cat:chat", state: "running" }));
+  ok("matchesFilters: a category AND favorites compose", !P.matchesFilters(web, { kind: "cat:chat", favOnly: true, favorites: new Set(["bot"]) }) && P.matchesFilters(bot, { kind: "cat:chat", favOnly: true, favorites: new Set(["bot"]) }));
+  ok("matchesFilters: search finds a category name", P.matchesFilters(web, { search: "tools" }) && !P.matchesFilters(bot, { search: "tools" }));
+
+  const c = P.countEntries(all);
+  ok("countEntries: categories are most-used first", c.categories[0].key === "chat" && c.categories[0].total === 2);
+  ok("countEntries: a daemon in two categories counts in both", c.categories.find((x) => x.key === "tools").total === 1 && c.categories.find((x) => x.key === "chat").total === 2);
+  ok("countEntries: running counts are per category", c.categories.find((x) => x.key === "chat").running === 1 && c.categories.find((x) => x.key === "core").running === 0);
+  ok("countEntries: uncategorised is the Undefined bucket", c.uncategorised.total === 2 && c.uncategorised.running === 0);
+  ok("countEntries: built-in/custom totals unchanged", c.kinds.builtin.total === 1 && c.kinds.custom.total === 4);
+  ok("countEntries: two spellings are one category, shown in the commoner one",
+    (() => { const k = P.countEntries([mk("a", ["Util"]), mk("b", ["util"]), mk("c", ["util"])]).categories; return k.length === 1 && k[0].name === "util" && k[0].total === 3; })());
+
+  // the saved-preference migration the plan calls out
+  ok("normalizeKind: old saved 'custom' becomes 'all'", P.normalizeKind("custom") === "all");
+  ok("normalizeKind: garbage and non-strings become 'all'", P.normalizeKind("cat:") === "all" && P.normalizeKind(null) === "all" && P.normalizeKind({}) === "all");
+  ok("normalizeKind: the live values pass through", ["all", "builtin", "undefined", "cat:chat"].every((k) => P.normalizeKind(k) === k));
+  ok("reconcileKind: a category nobody has any more falls back to 'all'", P.reconcileKind("cat:gone", all) === "all");
+  ok("reconcileKind: a category still in use is kept", P.reconcileKind("cat:chat", all) === "cat:chat");
+  ok("reconcileKind: 'undefined' is kept even when empty (it just shows nothing left)", P.reconcileKind("undefined", [web]) === "undefined");
+  ok("an old saved 'custom' never produces an empty list", all.filter((e) => P.matchesFilters(e, { kind: P.reconcileKind(P.normalizeKind("custom"), all) })).length === all.length);
+
+  // draft + payloads
+  const d = P.draftFromEntry(web);
+  ok("draftFromEntry: carries the categories", JSON.stringify(d.categories) === JSON.stringify(["Tools", "chat"]));
+  ok("draftFromEntry: a daemon without the key gets []", JSON.stringify(P.draftFromEntry(old).categories) === "[]");
+  ok("blankDraft: starts with no categories", JSON.stringify(P.blankDraft().categories) === "[]");
+  ok("buildAddPayload: sends categories only when there are some",
+    JSON.stringify(P.buildAddPayload(Object.assign(P.blankDraft(), { id: "x", command: "c", categories: ["a"] })).categories) === '["a"]'
+    && !("categories" in P.buildAddPayload(Object.assign(P.blankDraft(), { id: "x", command: "c" }))));
+  const edited = (cats) => P.buildEditPayload(Object.assign({}, d, { categories: cats }), d, { builtin: false });
+  ok("buildEditPayload: unchanged categories send nothing", !("categories" in edited(["Tools", "chat"])));
+  ok("buildEditPayload: a changed set is sent whole", JSON.stringify(edited(["chat"]).categories) === '["chat"]');
+  ok("buildEditPayload: removing the last one sends [] (the server turns it into --clear-categories)", JSON.stringify(P.buildEditPayload(Object.assign({}, d, { categories: [] }), d, { builtin: false }).categories) === "[]");
+  ok("buildEditPayload: a built-in can still be re-categorised", JSON.stringify(P.buildEditPayload(Object.assign({}, d, { categories: ["x"] }), d, { builtin: true }).categories) === '["x"]');
+  ok("validateDraft: a normal set is fine", P.validateDraft(d, { mode: "edit", builtin: false }).ok);
+  const nine = Object.assign({}, d, { categories: "abcdefghi".split("") });
+  ok("validateDraft: more than 8 is an error on 'categories', first in form order after id",
+    (() => { const v = P.validateDraft(nine, { mode: "edit", builtin: false }); return !v.ok && !!v.errors.categories && v.order[0] === "categories"; })());
+  ok("entrySignature: a categories change re-renders the list", P.entrySignature(web) !== P.entrySignature(Object.assign({}, web, { categories: ["chat"] })));
 }
 
 console.log(`\n${n}/${n} checks passed`);
