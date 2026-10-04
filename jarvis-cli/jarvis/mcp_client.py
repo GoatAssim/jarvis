@@ -654,29 +654,137 @@ def call_tool(server, tool, arguments=None, timeout=CALL_TIMEOUT):
     return payload
 
 
+def _redact_url(url):
+    """(display_url, was_redacted) for a server URL.
+
+    A remote MCP URL very often carries a credential — userinfo, or a
+    `?token=` / `?key=` query — and /api/mcp is read by the browser, logged
+    by the web server's debugging, and pasted into bug reports. So the panel
+    only ever gets scheme://host[:port]/path, with "?…" standing in for a
+    query. The full URL stays in mcp_config.json; an edit that leaves the
+    URL box untouched sends `null`, which save_server() reads as "keep it".
+    """
+    from urllib.parse import urlsplit
+    text = str(url or "").strip()
+    if not text:
+        return "", False
+    try:
+        parts = urlsplit(text)
+        host = parts.hostname or ""
+        if ":" in host:
+            host = "[%s]" % host
+        if parts.port:
+            host = "%s:%d" % (host, parts.port)
+    except ValueError:
+        return "(unreadable URL)", True
+    if not parts.scheme or not host:
+        return "(unreadable URL)", True
+    shown = "%s://%s%s" % (parts.scheme, host, parts.path or "")
+    redacted = bool(parts.username or parts.password or parts.query or parts.fragment)
+    if parts.query:
+        shown += "?\u2026"
+    return shown, redacted
+
+
+def _server_state(enabled, problems, entry, stale):
+    """One word for how a server is doing, decided in ONE place so the panel,
+    `jarvis mcp-status` and anything later agree.
+
+      disabled       switched off in the config
+      misconfigured  switched on but the definition can't start (no command…)
+      error          the last refresh failed (the error text is on the row)
+      not_refreshed  switched on, never listed — a refresh is needed
+      stale          the cached tool list is older than CACHE_TTL_SECONDS
+      ok             switched on and the last refresh succeeded
+    """
+    if not enabled:
+        return "disabled"
+    if problems:
+        return "misconfigured"
+    if entry.get("error"):
+        return "error"
+    if not entry.get("fetched_at"):
+        return "not_refreshed"
+    if stale:
+        return "stale"
+    return "ok"
+
+
+def _disabled_tool_names():
+    """Tools switched off in the Tool Manager (L.25), so the MCP panel can say
+    'plugged in but the model can't use 3 of its 9 tools'. Best effort: a
+    missing or unreadable switch file just means nothing is marked."""
+    try:
+        from . import tool_disable
+        return set(tool_disable.disabled_tools())
+    except Exception:  # noqa: BLE001
+        return set()
+
+
 def status():
     """Everything `jarvis mcp-status` and the web panel need in one read —
-    no subprocess, so it's safe to call from a UI poll."""
+    no subprocess, so it's safe to call from a UI poll.
+
+    The original fields are unchanged; L.31 only ADDS per-server fields
+    (`state`, `problems`, `description`, `command`, `args`, `cwd`, `url`,
+    `url_redacted`, `env_keys`, `tools`, `disabled_tool_count`) so an older
+    reader keeps working. Secrets stay out: environment VALUES are never
+    returned (only the variable names) and a URL's userinfo/query is masked.
+    """
     configured = load_config().get("servers") or {}
     slugs = _assign_slugs(configured)
     servers = enabled_servers()
     cache = load_cache()
+    off = _disabled_tool_names()
+    now = time.time()
     out = []
     collisions = []
     for raw_name, spec in configured.items():
         name, renamed = slugs.get(raw_name, ("", False))
         entry = cache.get(name) or {}
+        if not isinstance(entry, dict):
+            entry = {}
+        good = isinstance(spec, dict)
         fetched = entry.get("fetched_at")
+        stale = bool(fetched) and (now - float(fetched)) > CACHE_TTL_SECONDS
+        enabled = bool(spec.get("enabled")) if good else False
+        problems = validate_server_spec(spec) if good else ["the definition isn't a JSON object"]
+        if not name:
+            problems = ["the name can't be turned into a tool prefix (use letters or digits)"] + problems
+        shown_url, url_redacted = _redact_url(spec.get("url")) if good else ("", False)
+        tools = []
+        for tool in (entry.get("tools") or []):
+            if not isinstance(tool, dict) or not tool.get("name"):
+                continue
+            full = tool_name_for(name, tool["name"])
+            tools.append({
+                "name": str(tool["name"]),
+                "tool_name": full,
+                "description": str(tool.get("description") or "").strip()[:300],
+                "disabled": full in off,
+            })
         row = {
             "name": raw_name,
             "slug": name,
-            "enabled": bool(spec.get("enabled")) if isinstance(spec, dict) else False,
-            "transport": (spec.get("transport") if isinstance(spec, dict) else None) or "stdio",
-            "trusted": bool(spec.get("trusted")) if isinstance(spec, dict) else False,
+            "enabled": enabled,
+            "transport": (spec.get("transport") if good else None) or "stdio",
+            "trusted": bool(spec.get("trusted")) if good else False,
             "tool_count": len(entry.get("tools") or []),
             "last_refreshed": fetched,
-            "stale": bool(fetched) and (time.time() - float(fetched)) > CACHE_TTL_SECONDS,
+            "stale": stale,
             "error": entry.get("error"),
+            # --- L.31 additions -------------------------------------------
+            "state": _server_state(enabled, problems, entry, stale),
+            "problems": problems,
+            "description": str(spec.get("description") or "") if good else "",
+            "command": str(spec.get("command") or "") if good else "",
+            "args": [str(a) for a in (spec.get("args") or [])] if good and isinstance(spec.get("args"), list) else [],
+            "cwd": str(spec.get("cwd") or "") if good else "",
+            "url": shown_url,
+            "url_redacted": url_redacted,
+            "env_keys": sorted(str(k) for k in (spec.get("env") or {})) if good and isinstance(spec.get("env"), dict) else [],
+            "tools": tools,
+            "disabled_tool_count": sum(1 for t in tools if t["disabled"]),
         }
         if renamed:
             # Made visible on purpose — this used to be the exact case that
@@ -694,3 +802,352 @@ def status():
     if collisions:
         result["name_collisions"] = collisions
     return result
+
+
+# ---------------------------------------------------------------------------
+# Editing the config (L.31) — a HUMAN action, never a model tool
+# ---------------------------------------------------------------------------
+#
+# The security rule at the top of this file is unchanged: nothing the model
+# can say may introduce a new executable. Everything below is reachable only
+# from the `jarvis mcp-edit` CLI verb (typed by the owner, or sent by the web
+# panel's own buttons) — there is deliberately no entry in any TOOL_SCHEMAS
+# and `actions/mcp_tools.py` imports none of it. tests/test_mcp_edit.py pins
+# that.
+
+MAX_NAME_CHARS = 64
+_ENV_KEY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+_RUNTIME_TRANSPORTS = ("stdio", "http", "https", "sse")
+# The keys the editor owns. Anything else in a server's entry (a hand-added
+# "headers", a note) is carried through an edit untouched.
+_EDIT_KEYS = ("enabled", "transport", "command", "args", "env", "cwd", "url",
+              "trusted", "description")
+_FLAG_KEYS = ("enabled", "trusted")
+
+
+class ConfigEditError(MCPError):
+    """A config edit that was refused. Nothing was written."""
+
+
+def _connection_signature(spec):
+    """What makes a server THIS server, normalised so that a missing key and
+    its empty default compare equal (an old hand-written entry with no "env"
+    must not look 'changed' just because the editor writes "env": {})."""
+    spec = spec if isinstance(spec, dict) else {}
+    transport = spec.get("transport")
+    args = spec.get("args")
+    env = spec.get("env")
+    return (
+        "stdio" if transport in (None, "") else str(transport).strip().lower(),
+        str(spec.get("command") or "").strip(),
+        [] if args is None else [str(a) for a in args] if isinstance(args, list) else args,
+        {} if env is None else {str(k): str(v) for k, v in env.items()} if isinstance(env, dict) else env,
+        str(spec.get("cwd") or ""),
+        str(spec.get("url") or "").strip(),
+    )
+
+
+def validate_server_spec(spec):
+    """List of human-readable problems with one server definition (empty when
+    it can start). Shared by the editor (strict, refuses to save) and
+    status() (shows the problem on the card), so the two never disagree."""
+    if not isinstance(spec, dict):
+        return ["the server definition must be a JSON object"]
+    problems = []
+    raw_transport = spec.get("transport")
+    transport = "stdio" if raw_transport in (None, "") else str(raw_transport).strip().lower()
+    if transport not in _RUNTIME_TRANSPORTS:
+        problems.append("transport must be \"stdio\" or \"http\" (got %r)" % transport)
+    elif transport == "stdio":
+        command = spec.get("command")
+        if not isinstance(command, str) or not command.strip():
+            problems.append("a stdio server needs a command (for example npx or uvx)")
+        elif len(command) > 500 or "\n" in command or "\x00" in command:
+            problems.append("the command must be one line of at most 500 characters")
+    else:
+        url = spec.get("url")
+        if not isinstance(url, str) or not url.strip().lower().startswith(("http://", "https://")):
+            problems.append("an http server needs a url starting with http:// or https://")
+        elif len(url.strip()) > 2000 or re.search(r"\s", url.strip()):
+            problems.append("the url must be a single token of at most 2000 characters, with no spaces")
+
+    args = spec.get("args")
+    if args is not None:
+        if not isinstance(args, list):
+            problems.append("args must be a list")
+        elif len(args) > 100:
+            problems.append("at most 100 arguments")
+        else:
+            for item in args:
+                if isinstance(item, bool) or not isinstance(item, (str, int, float)):
+                    problems.append("every argument must be text or a number")
+                    break
+                if len(str(item)) > 2000 or "\x00" in str(item):
+                    problems.append("an argument is over 2000 characters or contains a NUL")
+                    break
+
+    env = spec.get("env")
+    if env is not None:
+        if not isinstance(env, dict):
+            problems.append("env must be an object of NAME: value pairs")
+        elif len(env) > 100:
+            problems.append("at most 100 environment variables")
+        else:
+            for key, value in env.items():
+                if not _ENV_KEY_RE.match(str(key)):
+                    problems.append("%r isn't a valid environment variable name" % key)
+                    break
+                if isinstance(value, bool) or not isinstance(value, (str, int, float)):
+                    problems.append("the value of %s must be text" % key)
+                    break
+                if len(str(value)) > 4000 or "\x00" in str(value):
+                    problems.append("the value of %s is over 4000 characters or contains a NUL" % key)
+                    break
+
+    cwd = spec.get("cwd")
+    if cwd not in (None, "") and (not isinstance(cwd, str) or len(cwd) > 1000 or "\x00" in cwd):
+        problems.append("cwd must be a path of at most 1000 characters")
+    description = spec.get("description")
+    if description not in (None, "") and (not isinstance(description, str) or len(description) > 300):
+        problems.append("the description must be text of at most 300 characters")
+    return problems
+
+
+def _clean_name(raw):
+    name = str(raw if raw is not None else "").strip()
+    if not name:
+        raise ConfigEditError("give the server a name")
+    if len(name) > MAX_NAME_CHARS:
+        raise ConfigEditError("the name is longer than %d characters" % MAX_NAME_CHARS)
+    if any(ord(ch) < 32 or ord(ch) == 127 for ch in name):
+        raise ConfigEditError("the name can't contain control characters")
+    if not sanitize_name(name):
+        # The name becomes part of every tool name (mcp_<name>_<tool>), so it
+        # has to contain at least one letter or digit.
+        raise ConfigEditError("the name needs at least one letter or digit — it becomes "
+                              "part of every tool name this server adds")
+    return name
+
+
+def _read_config_for_edit():
+    """The whole parsed config, for a read-modify-write.
+
+    Unlike load_config() this refuses to carry on when the file exists but
+    isn't valid JSON: load_config() quietly returns "no servers", and writing
+    on top of that would wipe a hand-edited file the owner merely made a typo
+    in. A missing file is fine — it starts empty."""
+    try:
+        text = CONFIG_FILE.read_text(encoding=ENCODING)
+    except FileNotFoundError:
+        return {"servers": {}}
+    except (OSError, UnicodeDecodeError) as e:
+        raise ConfigEditError("couldn't read %s: %s" % (CONFIG_FILE, e))
+    if not text.strip():
+        return {"servers": {}}
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError as e:
+        raise ConfigEditError(
+            "%s isn't valid JSON (line %d, column %d) — fix it by hand first; "
+            "nothing was changed" % (CONFIG_FILE.name, e.lineno, e.colno))
+    if not isinstance(data, dict):
+        raise ConfigEditError("%s must contain a JSON object — nothing was changed" % CONFIG_FILE.name)
+    if not isinstance(data.get("servers"), dict):
+        if "servers" in data and data["servers"] not in (None, {}):
+            raise ConfigEditError("\"servers\" in %s must be an object — nothing was changed" % CONFIG_FILE.name)
+        data["servers"] = {}
+    return data
+
+
+def _write_config(data):
+    from . import atomic_io
+    if not atomic_io.write_json(CONFIG_FILE, data):
+        raise ConfigEditError("couldn't write %s (disk full or read-only?) — nothing was changed" % CONFIG_FILE)
+
+
+def _drop_cache(*slugs):
+    """Forget cached tool lists. A server that was switched off, edited or
+    removed must not keep offering the tools it listed last time."""
+    cache = load_cache()
+    changed = False
+    for slug in slugs:
+        if slug and slug in cache:
+            cache.pop(slug)
+            changed = True
+    if changed:
+        save_cache(cache)
+    return changed
+
+
+def _forget_tool_switches(slug):
+    """On removal, drop the Tool Manager's on/off switches for the server's
+    tools, so adding a server with the same name later starts clean (the same
+    courtesy deleting a saved command gets)."""
+    try:
+        from . import tool_disable
+        for tool in ((load_cache().get(slug) or {}).get("tools") or []):
+            if isinstance(tool, dict) and tool.get("name"):
+                tool_disable.forget_tool(tool_name_for(slug, tool["name"]))
+    except Exception:  # noqa: BLE001 — cosmetic; never fail a removal over it
+        pass
+
+
+def save_server(name, spec, replace=None):
+    """Add a server (replace=None) or edit/rename one (replace=<its current
+    name>). Returns a small result dict; raises ConfigEditError, writing
+    nothing, on any problem.
+
+    `None` for a URL or an environment value means "keep what's there" — the
+    panel never receives those values (see _redact_url), so an edit form
+    can't send them back, and a blank box must not wipe a secret.
+
+    A new server starts switched off and confirm-gated unless the caller says
+    otherwise; an edit keeps the existing switches unless told.
+    """
+    name = _clean_name(name)
+    if not isinstance(spec, dict):
+        raise ConfigEditError("the server definition must be a JSON object")
+    data = _read_config_for_edit()
+    servers = data["servers"]
+    if replace is not None:
+        replace = str(replace)
+        if replace not in servers:
+            raise ConfigEditError("there is no server named %r to edit" % replace)
+    elif name in servers:
+        raise ConfigEditError("a server named %r already exists — edit it instead" % name)
+    if replace is not None and name != replace and name in servers:
+        raise ConfigEditError("another server is already named %r" % name)
+    for other in servers:
+        if other != replace and other != name and sanitize_name(other) == sanitize_name(name):
+            raise ConfigEditError(
+                "%r would share the tool prefix mcp_%s_ with the existing server %r — "
+                "pick a name that differs in letters or digits" % (name, sanitize_name(name), other))
+
+    previous = servers.get(replace) if replace is not None else None
+    previous = previous if isinstance(previous, dict) else {}
+
+    transport = spec.get("transport") if spec.get("transport") not in (None, "") else previous.get("transport")
+    transport = "stdio" if transport in (None, "") else str(transport).strip().lower()
+    new = {k: v for k, v in previous.items() if k not in _EDIT_KEYS}  # carried-through extras
+    new["enabled"] = bool(spec["enabled"]) if "enabled" in spec else bool(previous.get("enabled", False))
+    new["transport"] = transport
+    if transport == "stdio":
+        # A key the caller left OUT is kept as it was; a key it sent is the
+        # new value. (So a one-field edit over the CLI can't wipe the rest.)
+        new["command"] = spec["command"] if "command" in spec else previous.get("command")
+        new["args"] = spec["args"] if "args" in spec and spec["args"] is not None else (
+            [] if "args" in spec else previous.get("args", []))
+        old_env = previous.get("env") if isinstance(previous.get("env"), dict) else {}
+        env_in = spec["env"] if "env" in spec else dict(old_env)
+        if env_in is None:
+            env_in = {}
+        if isinstance(env_in, dict):
+            env_out = {}
+            for key, value in env_in.items():
+                if value is None:
+                    if key not in old_env:
+                        raise ConfigEditError("%s has no stored value to keep — type one" % key)
+                    env_out[key] = old_env[key]
+                else:
+                    env_out[key] = value
+            new["env"] = env_out
+        else:
+            new["env"] = env_in  # not a dict: validate_server_spec reports it below
+        cwd = spec["cwd"] if "cwd" in spec else previous.get("cwd")
+        if cwd:
+            new["cwd"] = cwd
+    else:
+        url = spec.get("url")
+        if url is None:  # left out, or null = "keep the stored one" (see _redact_url)
+            url = previous.get("url")
+        new["url"] = url
+    new["trusted"] = bool(spec["trusted"]) if "trusted" in spec else bool(previous.get("trusted", False))
+    description = spec["description"] if "description" in spec else previous.get("description")
+    if description:
+        new["description"] = description
+
+    problems = validate_server_spec(new)
+    if problems:
+        raise ConfigEditError("; ".join(problems))
+    if isinstance(new.get("command"), str):
+        new["command"] = new["command"].strip()
+    if isinstance(new.get("url"), str):
+        new["url"] = new["url"].strip()
+    if isinstance(new.get("args"), list):
+        new["args"] = [a if isinstance(a, str) else str(a) for a in new["args"]]
+
+    old_slug = _assign_slugs(servers).get(replace, ("", False))[0] if replace is not None else ""
+    # Rebuild the dict so a rename keeps the server where it was in the file.
+    rebuilt = {}
+    if replace is None:
+        rebuilt.update(servers)
+        rebuilt[name] = new
+    else:
+        for key, value in servers.items():
+            if key == replace:
+                rebuilt[name] = new
+            else:
+                rebuilt[key] = value
+    data["servers"] = rebuilt
+    new_slug = _assign_slugs(rebuilt).get(name, ("", False))[0]
+
+    connection_changed = (replace is None or name != replace
+                          or _connection_signature(previous) != _connection_signature(new))
+    _write_config(data)
+    if replace is not None and name != replace:
+        # A rename changes every tool name, so the Tool Manager's switches
+        # for the old names would point at tools that no longer exist.
+        _forget_tool_switches(old_slug)
+    if replace is not None and (connection_changed or not new["enabled"]):
+        _drop_cache(old_slug)
+    if connection_changed or not new["enabled"]:
+        _drop_cache(new_slug)
+    return {
+        "ok": True, "action": "save", "name": name, "slug": new_slug,
+        "created": replace is None, "enabled": new["enabled"], "trusted": new["trusted"],
+        "needs_refresh": bool(new["enabled"] and connection_changed),
+    }
+
+
+def set_server_flag(name, key, value):
+    """Switch one server on/off (`enabled`) or trusted/confirm-gated
+    (`trusted`). Switching off drops its cached tools at once, so they leave
+    the catalog on the very next jarvis process rather than after a refresh."""
+    if key not in _FLAG_KEYS:
+        raise ConfigEditError("only %s can be switched here" % " and ".join(_FLAG_KEYS))
+    data = _read_config_for_edit()
+    servers = data["servers"]
+    name = str(name)
+    if name not in servers:
+        raise ConfigEditError("there is no server named %r" % name)
+    spec = servers[name]
+    if not isinstance(spec, dict):
+        raise ConfigEditError("the entry for %r isn't a JSON object — fix it by hand" % name)
+    slug = _assign_slugs(servers).get(name, ("", False))[0]
+    was = bool(spec.get(key))
+    spec[key] = bool(value)
+    _write_config(data)
+    needs_refresh = False
+    if key == "enabled":
+        if not value:
+            _drop_cache(slug)
+        else:
+            needs_refresh = not was and slug not in load_cache()
+    return {"ok": True, "action": "enable" if key == "enabled" and value else
+            "disable" if key == "enabled" else "trust" if value else "untrust",
+            "name": name, "slug": slug, key: bool(value), "needs_refresh": needs_refresh}
+
+
+def remove_server(name):
+    """Delete a server's entry (and its cached tools and tool switches)."""
+    data = _read_config_for_edit()
+    servers = data["servers"]
+    name = str(name)
+    if name not in servers:
+        raise ConfigEditError("there is no server named %r" % name)
+    slug = _assign_slugs(servers).get(name, ("", False))[0]
+    _forget_tool_switches(slug)
+    del servers[name]
+    _write_config(data)
+    _drop_cache(slug)
+    return {"ok": True, "action": "remove", "name": name, "slug": slug}

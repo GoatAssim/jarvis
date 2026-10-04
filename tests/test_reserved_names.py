@@ -96,6 +96,7 @@ def test_known_previously_missing_names_are_now_covered():
         "digest-status", "digest-on", "digest-off", "digest-now", "digest-preview",
         "ctools-list", "ctools-show", "ctools-write", "ctools-check",
         "ctools-delete", "ctools-run", "ctools-toggle", "ctools-templates",
+        "ctools-suggest",
     }
     still_missing = sorted(previously_missing - RESERVED_NAMES)
     check(

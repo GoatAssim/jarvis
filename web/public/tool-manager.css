@@ -244,6 +244,11 @@
 .tm-state-chip.is-dirty{ color: var(--accent-secondary); border-color: rgba(var(--accent-secondary-rgb), .45); }
 .tm-state-chip.is-saved{ color: var(--green); border-color: rgba(70,240,182,.4); }
 
+/* top bar actions (L.33: Save / Validate / Back live next to the name, not under the code) */
+.tm-editor__actions{ display: flex; gap: 6px; align-items: center; }
+.tm-editor__bar{ padding: 10px 14px; background: var(--bg-panel-2); }
+.tm-editor .tm-state-chip{ margin-left: auto; }
+
 .tm-code{ position: relative; flex: 1; min-height: 240px; display: grid; grid-template-columns: auto 1fr; background: var(--bg-1); overflow: hidden; }
 .tm-gutter{
   padding: 12px 8px 12px 12px; text-align: right; font-family: var(--font-mono); font-size: 12.5px; line-height: 1.6;
@@ -345,3 +350,38 @@
   .tm-body{ grid-template-columns: 1fr; }
   .tm-body > .debug-pane:first-child{ border-right: none; max-height: 40vh; }
 }
+
+/* ---------------------------------------------------- editor side panel (L.33) */
+
+.tm-jump{ margin-top: 8px; }
+.tm-outline{ display: flex; flex-direction: column; gap: 2px; max-height: 190px; overflow-y: auto; }
+.tm-outline__item{
+  all: unset; box-sizing: border-box; display: flex; align-items: center; gap: 8px; padding: 4px 8px; border-radius: 3px; cursor: pointer;
+  font-family: var(--font-mono); font-size: 12px; color: var(--text); border: 1px solid transparent;
+}
+.tm-outline__item:hover{ background: color-mix(in srgb, var(--accent) 9%, transparent); border-color: var(--border); }
+.tm-outline__item:focus-visible{ outline: 2px solid var(--accent); outline-offset: 1px; }
+.tm-outline__kind{ flex: none; width: 18px; height: 18px; display: inline-flex; align-items: center; justify-content: center; border-radius: 3px; font-size: 10px;
+  background: color-mix(in srgb, var(--accent) 22%, transparent); color: var(--accent); }
+.tm-outline__kind--class{ background: color-mix(in srgb, var(--accent-secondary) 25%, transparent); color: var(--accent-secondary); }
+.tm-outline__kind--const{ background: color-mix(in srgb, var(--text-dimmer) 35%, transparent); color: var(--text-dim); }
+.tm-outline__name{ flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tm-outline__line{ flex: none; color: var(--text-dimmer); font-size: 11px; }
+
+.tm-snips{ display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
+.tm-snip{
+  all: unset; box-sizing: border-box; display: flex; flex-direction: column; gap: 2px; padding: 6px 8px; border-radius: 3px; cursor: pointer;
+  border: 1px solid var(--border); background: var(--bg-panel-2);
+}
+.tm-snip:hover{ border-color: var(--border-strong); background: color-mix(in srgb, var(--accent) 7%, transparent); }
+.tm-snip:focus-visible{ outline: 2px solid var(--accent); outline-offset: 1px; }
+.tm-snip code{ font-family: var(--font-mono); font-size: 12px; color: var(--accent); }
+.tm-snip span{ font-size: 11px; color: var(--text-dimmer); line-height: 1.3; }
+
+.tm-switchrow{ display: flex; align-items: center; gap: 10px; font-size: 12.5px; color: var(--text-dim); }
+
+.tm-shortcuts summary{ cursor: pointer; font-size: 11px; letter-spacing: .14em; text-transform: uppercase; color: var(--text-dimmer); padding: 2px 0; }
+.tm-shortcuts summary:hover{ color: var(--text-dim); }
+.tm-shortcuts summary:focus-visible{ outline: 2px solid var(--accent); outline-offset: 2px; }
+.tm-keys{ display: grid; gap: 5px; margin-top: 8px; }
+.tm-keys > div{ display: flex; justify-content: space-between; gap: 10px; font-size: 12px; color: var(--text-dim); align-items: center; }

@@ -74,6 +74,7 @@ RESERVED_NAMES = {
     "digest-status", "digest-on", "digest-off", "digest-now", "digest-preview",
     "ctools-list", "ctools-show", "ctools-write", "ctools-check",
     "ctools-delete", "ctools-run", "ctools-toggle", "ctools-templates",
+    "ctools-suggest",
     # commands-check-name: added by this same fix (I-B2 item 2) so
     # web/server.js can ask the CLI instead of keeping its own copy.
     "commands-check-name",
@@ -84,6 +85,7 @@ RESERVED_NAMES = {
     "notify-send", "notify-list", "notify-history", "notify-ack",
     "notify-clear", "notify-config", "notify-summary", "notify-read", "notify-dismiss",
     "conv-search", "mcp-status", "mcp-refresh", "mcp-config", "mcp-call", "mcp-tools",
+    "mcp-edit",
     # --- workspace_cli.COMMANDS ----------------------------------------------
     "daemons", "daemon-start", "daemon-stop", "daemon-restart", "daemon-status",
     "daemon-console", "daemon-input", "daemon-schedule", "daemon-add",
@@ -97,6 +99,7 @@ RESERVED_NAMES = {
     "channels-config", "channels-status", "channels-set", "channels-allow",
     "channels-deny", "channels-test", "channels-whoami", "channels-log",
     "channels-directory", "channels-people", "channels-follow", "channels-block",
+    "channels-users", "channels-user", "channels-user-tools",
     "discord-daemon", "instagram-serve", "logs-search",
     # --- clipboard_cli.COMMANDS ----------------------------------------------
     "clipboard-watch", "clipboard-watch-config",

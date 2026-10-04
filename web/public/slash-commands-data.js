@@ -584,7 +584,8 @@ window.JARVIS_SLASH_COMMANDS = /*JSON-BEGIN*/
         "mcp-status",
         "mcp-refresh",
         "mcp-tools",
-        "mcp-config"
+        "mcp-config",
+        "mcp-edit"
       ],
       "example": "/mcp",
       "preview": "Open MCP servers & tools."
@@ -611,6 +612,7 @@ window.JARVIS_SLASH_COMMANDS = /*JSON-BEGIN*/
         "ctools-run",
         "ctools-toggle",
         "ctools-templates",
+        "ctools-suggest",
         "tool-disable-set",
         "command-disable-set",
         "disabled-list",
@@ -642,7 +644,10 @@ window.JARVIS_SLASH_COMMANDS = /*JSON-BEGIN*/
         "channels-allow",
         "channels-deny",
         "channels-follow",
-        "channels-block"
+        "channels-block",
+        "channels-users",
+        "channels-user",
+        "channels-user-tools"
       ],
       "example": "/channels",
       "preview": "Open Channels."

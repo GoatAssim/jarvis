@@ -93,7 +93,10 @@ jarvis-cli/jarvis/
     conversations.py      on-disk conversation history (a derived view: newest 60 exchanges)
     raw_archive.py        L.38: the raw event log -- what actually happened, uncapped
                           and unsplit; conversation/console views can be rebuilt from
-                          it; `conv-export --raw` and `console-read` read it
+                          it; `conv-export --raw` and `console-read` read it;
+                          `replay_record()` is what the web UI replays
+    thread_extras.py      the saved screenshot/download/... cards derived from a turn's
+                          tool runs; used at write time and when rebuilt from the log
     history.py            (module docstring explains the process model)
     history_summarizer.py AI recap of older turns
     conv_search.py        search what was SAID
@@ -105,7 +108,7 @@ jarvis-cli/jarvis/
     web_tools.py      ytdl_tools.py        audio_tools.py  radio_tools.py
     spotify_*.py      playnite_*.py        json_tools.py
     command_tools.py  commands_config.py   saved user commands
-    custom_tools*.py  user Python tools from ~/.jarvis/tools/
+    custom_tools*.py  user Python tools from ~/.jarvis/tools/ (custom_tools_suggest.py = the editor's inline suggestions, `ctools-suggest`; returns text only, never writes a tool)
 
     # --- time, work and supervision --------------------------------------
     scheduler.py          jobs/reminders/watches; tick() is the heartbeat
@@ -131,7 +134,14 @@ jarvis-cli/jarvis/
         instagram_gateway.py   wire adapter (webhook server)
         transcript.py     per-thread logs + cooldown state
         directory.py      @handle -> id, learned from real messages
-        people.py         NEW — WHO a person is: name, notes, follow state
+        people.py         NEW — WHO a person is: name, notes, follow state, and (L.36) a
+                          platform-given avatar URL (https + image-CDN allow-list only)
+        user_perms.py     L.36: per-person permissions the three allow-lists can't say —
+                          WHICH tools (an allow-list, never a deny-list) and whether Jarvis
+                          may DM them; fails closed (`PermsUnreadable` -> tools off)
+        user_admin.py     L.36: one person, every switch (dm/reply/tool/owner/send_dm/blocked
+                          + tool scope); the ONE implementation behind the panel and
+                          `jarvis channels-user`; registered people only
         dedupe.py         NEW — has this message id already been handled
         outbound.py       DM the owner (dm_owner) or one known person (dm_person, L.20)
 
@@ -143,7 +153,7 @@ jarvis-cli/jarvis/
     turn_trace.py  token_usage.py
 
     # --- command surfaces -------------------------------------------------
-    channels_cli.py       channels-*, discord-daemon, instagram-serve
+    channels_cli.py       channels-* (incl. channels-users/-user/-user-tools, L.36), discord-daemon, instagram-serve
     workspace_cli.py      NEW — daemons, log-file search, backlog, ambient,
                           onboarding, ui-mode
 
@@ -170,6 +180,7 @@ web/
                           small facade slash-palette.js talks to it through)
     public/style.css      theme + layout, including the classic/focus switch
     public/tool-manager.js (+ .css)  Tool Manager panel (L.25): catalogue, per-tool safeguards, user tools
+    public/code-editor.js (+ .css)   the Tool Manager's code editor (L.33): Python highlighting, VS Code-style editing, completions, inline Jarvis suggestions; pure helpers in JarvisCodeEditor._pure
     public/custom-tools.js       theme gallery for the Skin modal (the old Custom Tools panel moved to tool-manager.js)
     public/test-checklist.js     Menu -> Test Checklist (UI, browser-only results)
     public/test-checklist-data.js  the SHIPPED checklist catalogue: an entry per
@@ -189,6 +200,17 @@ web/
                                  create form onto remind_me/notify_me/
                                  schedule_task/schedule_watch via /api/tools/run,
                                  kind/status filters, Overview pane)
+    public/channels-panel.js/.css  Menu -> Channels (L.36 rework): per-person, Test-Checklist-style
+                                 (people list | Profile + Permissions tabs | platform cards and the
+                                 old global allow-lists as a fallback). Every switch POSTs to
+                                 /api/channels/people/...; app.js only calls JarvisChannels.open().
+                                 Pure helpers in JarvisChannels._pure. Tokens never pass through it.
+    public/mcp-servers.js/.css   Menu -> MCP Servers (L.31 rework): server cards with
+                                 on/off + Trusted switches, per-server Refresh,
+                                 Add/Edit/Remove form, tool lists, search and
+                                 filter chips. Talks to /api/mcp and the
+                                 /api/mcp/server routes; app.js only opens it.
+                                 Pure helpers in JarvisMcp._pure.
     public/notifications.js/.css Notifications (L.30 rework): the toast stack, the
                                  inbox panel (read/unread, filters, search, burst
                                  collapsing, dismiss), the unread badge and the
@@ -229,7 +251,8 @@ Everything is under `~/.jarvis/`:
 | `tasks/` | tasks.py | one file per long-running task |
 | `channels.json` | channels/config.py | both platforms, all allowlists |
 | `channels/directory.json` | channels/directory.py | @handle → id |
-| `channels/people.json` | channels/people.py | who each person is |
+| `channels/people.json` | channels/people.py | who each person is (name, notes, follow state, avatar URL) |
+| `channels/user_perms.json` | channels/user_perms.py | per-person tool scope + "Jarvis may DM them"; only non-default values stored; unreadable = fail closed |
 | `channels/seen_messages.json` | channels/dedupe.py | redelivery guard |
 | `daemons.json` | daemons.py | the daemon registry |
 | `daemons/<id>/` | daemons.py | console.log, status.json, stdin.queue |
@@ -261,6 +284,19 @@ independent sets (`dm_allowlist`, `reply_allowlist`, `tool_allowlist`, plus
 the `allow_tools` master switch), empty means deny, `"*"` means everyone.
 Tool permission is computed independently of whether the message is
 answered, so "answer them but touch nothing" is expressible.
+
+**Per-person narrowing (L.36).** The gate above still decides *whether* someone
+is answered and *whether* tools are allowed at all. Two things sit on top, and
+both can only take access away: `user_perms.effective_tool_scope()` turns a
+person's "custom" tool list into the `JARVIS_ALLOWED_TOOLS` allowlist for that
+one ask (same variable, same lock as the tools-off case in `base._ask_jarvis`;
+tools off always wins), and `user_perms.dm_allowed()` makes `send_dm` refuse a
+person the owner switched DMs off for. An unreadable `user_perms.json` answers
+that message with no tools (it never reads as "no limits"). The first three
+panel switches (dm / reply / tool) are the same allow-list entries
+`channels-allow` writes; the rest (owner, send_dm, blocked, tool scope) are
+handled in `channels/user_admin.py`. A person covered by a `"*"` entry can't be
+switched off individually — `set_flag()` refuses and says why.
 
 Order matters: `reachable` is checked before any allowlist so a message that
 was never addressed to us is dropped without being logged — and, since the
@@ -338,7 +374,15 @@ jarvis notify-summary    jarvis notify-read <ids|all>    jarvis notify-dismiss <
 jarvis channels-status/set/allow/deny/test/whoami/log/directory
 jarvis channels-people [platform] [--pending]
 jarvis channels-follow|block <platform> <id-or-@handle>
+jarvis channels-users [platform]                      # every registered person + every switch (JSON)
+jarvis channels-user <platform> <id> <dm|reply|tool|owner|send_dm|blocked> <on|off>
+jarvis channels-user-tools <platform> <id> inherit | custom [tool ...]
 jarvis discord-daemon     jarvis instagram-serve
+
+# MCP servers (a human action; no model tool can reach the edit path)
+jarvis mcp-status/tools/refresh/call/config
+jarvis mcp-edit <enable|disable|trust|untrust|remove> <name>
+jarvis mcp-edit save <name> <json-definition> [--replace <current-name>]
 
 # monitoring and setup
 jarvis ambient            jarvis ambient-tick
@@ -459,6 +503,8 @@ silently never runs.
 | `test_workspace.py` | daemons, log_files, backlog, ambient, diagnosis, onboarding |
 | `test_channel_people.py` | identity, the gate split, dedupe, remember_sender |
 | `test_channels.py` | the permission gate, config, transcripts |
+| `test_user_admin.py` | L.36: `user_perms` store (fails closed), `user_admin` switches (registered only, wildcard refusal, owner moves, block removes from all lists), the `base._ask_jarvis` enforcement point, the `send_dm` refusal, avatar validation in `people.py` |
+| `verify_channels_panel.js` (`node`) | L.36: `channels-panel.js` pure helpers (initials, hue, relative time, list filters and search, tool-scope diffing/grouping, and that only fixed icon strings reach `innerHTML`) |
 | `test_prompt_cache.py` | the static/dynamic prompt split |
 | `test_schemas_for_tools.py` | router ↔ catalog consistency |
 | `test_dev_agent_sandbox.py` | path escapes, dependency validation |
@@ -466,6 +512,9 @@ silently never runs.
 | `test_h3_creation_confirmation.py` | H.3: `remind_me` / `schedule_task` / `schedule_watch` / timed `notify_me` send one `scheduled`-kind confirmation (not for immediate `notify_me`; `confirm: false` suppresses; level from `levels.scheduled`, not the job's own) |
 | `test_l16_caps_and_budget.py` / `test_l16_scheduler_budget.py` / `test_l16_replay.py` | L.16 items 7, 8, 10: `list_windows` cap, per-ask token ledger and budget, per-job limit + "over budget" status, and the incident `1a99e1e3f0d3af0e` replayed through the real `ask()` (fixture: `tests/fixtures/1a99e1e3f0d3af0e.jsonl`) |
 | `test_notification_inbox.py` | L.30: owner read/acknowledge state vs delivery (`seen_by`), mark read/all, dismiss, clear read, `summary()`, history filters, state-aware pruning (read first, unacknowledged last), the inbox lock, the `notify-*` verbs |
+| `test_mcp_edit.py` | L.31: editing `mcp_config.json` (`save_server` / `set_server_flag` / `remove_server`), validation, secrets kept on edit, a malformed config is never overwritten, the extra `status()` fields and states, the `mcp-edit` CLI verb, and that no model tool can reach the edit functions |
+| `verify_mcp_servers.js` (`node`) | L.31: `mcp-servers.js` pure helpers (state labels, search by tool name, filter chips, `buildSpec` and what a blank secret means) |
+| `verify_mcp_servers_ui.py` (`python`, not run by `run_tests.py`) | L.31: the real page in headless Chromium against the real CLI verbs and a real stdio MCP server — add/edit/rename/remove, on/off, Trusted confirm, secrets never in the page, search/filters, keyboard, phone width |
 | `verify_notifications.js` (`node`) | L.30: `notifications.js` pure helpers (burst collapsing, day sections, query string, read/ack readers, level badges) |
 | `verify_notifications_ui.py` (`python`, not run by `run_tests.py`) | L.30: the real page in headless Chromium against the real CLI verbs — toast stack, level 5 dialog, panel filters/dismiss/mark-read, re-surfacing on a fake clock. Needs Playwright; skips cleanly without it |
 | `test_slash_coverage.py` | every `reserved_names.py` name is in the `/` palette registry exactly once, with a valid risk tier |

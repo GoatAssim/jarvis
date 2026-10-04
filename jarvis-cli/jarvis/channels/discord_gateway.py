@@ -98,6 +98,25 @@ def strip_mentions(text, bot_id=None):
     return text.strip()
 
 
+def _avatar_url(author):
+    """The author's avatar as a small https URL, or "" when there is none.
+
+    Pure attribute access on the discord.py user object, wrapped so a library
+    version without `display_avatar` (or a user object that raises) costs the
+    panel a picture and never costs the owner a reply. `display_avatar` falls
+    back to Discord's default avatar for users who never set one, so a URL
+    comes back for everyone. people._clean_avatar() re-validates the host."""
+    try:
+        asset = getattr(author, "display_avatar", None)
+        if asset is None:
+            return ""
+        url = str(getattr(asset, "url", "") or "")
+        # Ask the CDN for a thumbnail: the panel draws it at 40-96px.
+        return url + ("&" if "?" in url else "?") + "size=128" if url else ""
+    except Exception:  # noqa: BLE001 — a picture is never worth a crash
+        return ""
+
+
 def _pid_alive(pid):
     """Is this pid a running process? Delegates to daemons.pid_alive().
 
@@ -193,6 +212,7 @@ def build_client(discord, cfg):
             message_id=str(message.id),
             thread_id=str(message.channel.id),
             raw=message,
+            avatar=_avatar_url(message.author),
         )
 
         # A message with no text left after stripping the mention is a bare

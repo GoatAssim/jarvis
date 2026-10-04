@@ -278,6 +278,16 @@ def _resolve(person, platform_arg):
                       "error": f"{_label(rec)} is blocked, so I won't message them",
                       "hint": ("Unblock them first (`jarvis channels-follow`) "
                                "if the owner really wants this.")}
+    # The owner can also switch DMs off for ONE person without blocking them
+    # (Menu > Channels > Permissions). This only ever adds a refusal: it is
+    # one more reason to say no, so none of the limits above are loosened.
+    # An unreadable permissions file answers "no" (user_perms.dm_allowed).
+    from ..channels import user_perms
+    if not user_perms.dm_allowed(rec.get("platform") or "", rec.get("user_id") or ""):
+        return None, {"ok": False,
+                      "error": f"DMs to {_label(rec)} are switched off, so I won't message them",
+                      "hint": ("The owner can switch this on in Menu > Channels > "
+                               "Permissions, or with `jarvis channels-user`.")}
     return rec, None
 
 

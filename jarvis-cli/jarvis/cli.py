@@ -1196,7 +1196,7 @@ SCHEDULER_COMMANDS = {
     "notify-list", "notify-history", "notify-ack", "notify-clear", "notify-config",
     "notify-summary", "notify-read", "notify-dismiss",
     "conv-search", "mcp-status", "mcp-refresh", "mcp-config", "mcp-call",
-    "mcp-tools",
+    "mcp-tools", "mcp-edit",
 }
 
 
@@ -1262,6 +1262,44 @@ def run_search_or_mcp_command(argv):
             return emit({"error": str(e)}, 1)
         failed = [s for s in summary if s.get("error")]
         return emit({"refreshed": summary, "ok": not failed}, 1 if failed else 0)
+
+    if cmd == "mcp-edit":
+        # L.31 — the MCP panel's write path. A HUMAN action by design: this verb
+        # is reachable from the owner's terminal and the web panel's buttons and
+        # from no model tool (see the security note in mcp_client.py). Every
+        # failure is a refusal with a reason and nothing written.
+        usage = ("usage: jarvis mcp-edit <enable|disable|trust|untrust|remove> <name>   |   "
+                 "jarvis mcp-edit save <name> <json-definition> [--replace <current-name>]")
+        if len(rest) < 2 or not rest[1].strip():
+            return emit({"error": usage}, 1)
+        action, target = rest[0].strip().lower(), rest[1]
+        try:
+            if action in ("enable", "disable"):
+                result = mcp_client.set_server_flag(target, "enabled", action == "enable")
+            elif action in ("trust", "untrust"):
+                result = mcp_client.set_server_flag(target, "trusted", action == "trust")
+            elif action == "remove":
+                result = mcp_client.remove_server(target)
+            elif action == "save":
+                if len(rest) < 3:
+                    return emit({"error": usage}, 1)
+                try:
+                    definition = json.loads(rest[2])
+                except json.JSONDecodeError as e:
+                    return emit({"error": "the definition must be valid JSON: %s" % e}, 1)
+                replace = None
+                tail = rest[3:]
+                if "--replace" in tail:
+                    at = tail.index("--replace")
+                    if at + 1 >= len(tail) or not tail[at + 1].strip():
+                        return emit({"error": "--replace needs the server's current name"}, 1)
+                    replace = tail[at + 1]
+                result = mcp_client.save_server(target, definition, replace=replace)
+            else:
+                return emit({"error": "unknown action %r. %s" % (action, usage)}, 1)
+        except mcp_client.MCPError as e:
+            return emit({"error": str(e)}, 1)
+        return emit(result)
 
     if cmd == "mcp-call":
         # jarvis mcp-call <server> <tool> [json-args] — the debugging path,
@@ -1677,6 +1715,14 @@ def main():
         if not record:
             print(json.dumps({"error": "no such conversation"}))
             sys.exit(1)
+        if "--replay" in argv[2:]:
+            # L.38: what the web UI shows -- the exchanges rebuilt from the raw
+            # event log (all of them, cards re-derived from the logged tool
+            # runs), falling back to the file when there is no usable log.
+            # `replay` in the output says which one you got.
+            from . import raw_archive
+            replayed, info = raw_archive.replay_record(conv_id)
+            record = dict(replayed or record, replay=info)
         print(json.dumps(record, indent=2))
         return
 
@@ -1878,9 +1924,26 @@ def main():
     # multi-line Python with quotes and backslashes in it, and argv escaping
     # that survives both cmd.exe and sh does not exist.
     if argv[0] in ("ctools-list", "ctools-show", "ctools-write", "ctools-check",
-                   "ctools-run", "ctools-toggle", "ctools-delete", "ctools-templates"):
+                   "ctools-run", "ctools-toggle", "ctools-delete", "ctools-templates",
+                   "ctools-suggest"):
         from . import custom_tools_store as ctools
         cmd = argv[0]
+
+        if cmd == "ctools-suggest":
+            # Inline editor suggestions (L.33). stdin carries {"source": ...,
+            # "cursor": N}; the reply is {"ok": bool, "text": ...}. Never
+            # writes anything and never raises.
+            from . import custom_tools_suggest
+            try:
+                payload = json.loads(sys.stdin.read() or "{}")
+                if not isinstance(payload, dict):
+                    payload = {}
+            except ValueError:
+                payload = {}
+            sname = argv[1].strip().lower() if len(argv) > 1 else "draft"
+            print(json.dumps(custom_tools_suggest.suggest(
+                payload.get("source"), payload.get("cursor", 0), sname)))
+            return
 
         if cmd == "ctools-templates":
             print(json.dumps({"templates": ctools.templates()}, indent=2))
