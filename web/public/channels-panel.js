@@ -25,9 +25,10 @@
  *
  * ADD / RENAME / LINK
  * -------------------
- * "+ Add a new person" puts someone who hasn't messaged yet on the list (an id,
- * or an @handle — Instagram only reveals an id after the person writes); it
- * grants nothing, the switches do. A person named in an allow-list but not
+ * "+ Add a new person" opens a panel of its own (stacked over this one) that puts
+ * someone who hasn't messaged yet on the list (an id, or an @handle —
+ * Instagram only reveals an id after the person writes); it grants nothing,
+ * the switches do. A person named in an allow-list but not
  * yet seen is listed too (the server reconciles that on every read). The
  * name is editable by hand and then locked against a guest's own "call me X".
  * A Discord and an Instagram account can be LINKED as one human: identity
@@ -363,6 +364,7 @@
       state.selected = `${platform}:${out.user_id}`;
       state.tab = "perms";
       await load(true);
+      if (dom) dom.addBtn.focus({ preventScroll: true });
       toast(out.existing ? "They were already on the list." : (out.note || "Added."), out.existing ? "info" : "success");
       const card = dom && dom.list.querySelector(".ch-card.is-active");
       if (card && card.scrollIntoView) card.scrollIntoView({ block: "nearest" });
@@ -1060,55 +1062,171 @@
     dom.statusLine.textContent = `${state.people.length} registered · ${answered} answered · ${tooled} with tools · ${owners} owner${owners === 1 ? "" : "s"}${blocked ? ` · ${blocked} blocked` : ""}`;
   }
 
-  // ---- "+ Add a new person" ---------------------------------------------
+  // ---- "+ Add a new person" — a panel of its own --------------------------
+  // Opens #channels-add-overlay, stacked above the Channels panel: platform
+  // cards, id/handle, optional name, and a live preview of the list entry.
+  // Same rule server.js applies to the id, so a typo is caught before the trip.
+  const IDENT_OK = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
+  const PLAT_BLURB = {
+    discord: "A numeric user id is best — it never changes. A username works too.",
+    instagram: "A handle is normal: Instagram only shows an id once the person writes.",
+  };
+  let addForm = null; // { plat, ident, name, err, notice, submit, sync } while the panel is open
+
+  const identOf = (raw) => String(raw || "").trim().replace(/^@/, "");
+  function findExisting(platform, ident) {
+    const v = ident.toLowerCase();
+    if (!v) return null;
+    return state.people.find((p) => p.platform === platform && ((p.user_id || "").toLowerCase() === v || (p.handle || "").toLowerCase() === v)) || null;
+  }
+
   function renderAdd() {
-    if (!dom || !dom.add || !dom.addBtn) return;
-    dom.addBtn.setAttribute("aria-expanded", state.adding ? "true" : "false");
-    dom.add.hidden = !state.adding;
-    if (!state.adding) { dom.add.textContent = ""; return; }
-    if (dom.add.childNodes.length) return; // keep what they're typing across re-renders
-    const plat = el("select", { class: "ch-add__plat", "aria-label": "Platform" },
-      Object.keys(PLATFORMS).map((id) => el("option", { value: id }, PLATFORMS[id].label)));
-    plat.value = state.addPlatform;
-    const hint = el("div", { class: "ch-row__hint" });
-    const ident = el("input", { type: "text", class: "ch-add__ident", autocomplete: "off", spellcheck: "false", maxlength: "64", "aria-label": "Id or handle" });
-    const name = el("input", { type: "text", class: "ch-add__name", autocomplete: "off", maxlength: "48", placeholder: "Name (optional)", "aria-label": "Name" });
-    const err = el("div", { class: "ch-gset__err" });
-    const sync = () => {
-      state.addPlatform = plat.value;
-      ident.placeholder = plat.value === "discord" ? "Discord user id or username" : "Instagram handle or id";
-      hint.textContent = plat.value === "discord"
-        ? "A user id is best (it never changes). A username works too; Jarvis fills the id in when they first write."
-        : "Instagram only shows an id after the person messages you, so a handle is normal here. Jarvis fills the id in when they first write.";
-    };
-    plat.addEventListener("change", sync);
-    sync();
-    const go = () => {
-      const v = ident.value.trim().replace(/^@/, "");
-      if (!v) { err.textContent = "Type an id or @handle."; ident.focus(); return; }
-      addPerson(plat.value, v, name.value.trim(), err);
-    };
-    for (const input of [ident, name]) {
-      input.addEventListener("keydown", (e) => {
-        if (e.key === "Enter") { e.preventDefault(); go(); }
-        else if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); closeAdd(); }
-      });
-    }
-    dom.add.appendChild(el("div", { class: "ch-add__row" }, [plat, ident]));
-    dom.add.appendChild(name);
-    dom.add.appendChild(hint);
-    dom.add.appendChild(el("div", { class: "ch-add__row ch-add__row--end" }, [
-      el("button", { type: "button", class: "btn btn--ghost btn--sm", onclick: closeAdd }, "Cancel"),
-      el("button", { type: "button", class: "btn btn--primary btn--sm", onclick: go }, "Add"),
+    if (!dom || !dom.addOverlay) return;
+    dom.addOverlay.hidden = !state.adding;
+    if (!state.adding) { dom.addBody.textContent = ""; addForm = null; return; }
+    if (dom.addBody.childNodes.length) return; // keep what they're typing across re-renders
+    buildAddForm();
+  }
+
+  function buildAddForm() {
+    const body = dom.addBody;
+    const ident = el("input", { type: "text", id: "ch-add-ident", class: "ch-addp__input ch-addp__input--mono", autocomplete: "off", spellcheck: "false", maxlength: "65", "aria-describedby": "ch-add-ident-hint" });
+    const name = el("input", { type: "text", id: "ch-add-name", class: "ch-addp__input", autocomplete: "off", maxlength: "48", placeholder: "Optional" });
+    const identHint = el("div", { class: "ch-addp__hint", id: "ch-add-ident-hint" });
+    const nameHint = el("div", { class: "ch-addp__hint" });
+    const notice = el("div", { class: "ch-addp__notice", hidden: true, role: "status" });
+    const err = el("div", { class: "ch-addp__err", role: "alert" });
+    const submit = dom.addSubmit;
+    const previewHost = el("div", { class: "ch-addp__preview" });
+    const nextHost = el("div", { class: "ch-addp__next" });
+
+    // -- platform cards (a radio group)
+    const cards = Object.keys(PLATFORMS).map((id) => el("button", {
+      type: "button", class: "ch-addp__plat", role: "radio", "data-plat": id, "data-id": id,
+      onclick: () => { state.addPlatform = id; sync(); ident.focus(); },
+    }, [
+      el("span", { class: "ch-addp__plat-ico" }, [icon(id)]),
+      el("span", { class: "ch-addp__plat-txt" }, [el("b", null, PLATFORMS[id].label), el("small", null, PLAT_BLURB[id] || "")]),
     ]));
-    dom.add.appendChild(err);
-    dom.add.appendChild(el("div", { class: "ch-row__hint" }, "Adding someone grants nothing. Open them afterwards to switch on replies, tools and so on."));
+    const group = el("div", { class: "ch-addp__plats", role: "radiogroup", "aria-label": "Platform" }, cards);
+    group.addEventListener("keydown", (e) => {
+      if (!/^Arrow(Left|Right|Up|Down)$/.test(e.key)) return;
+      e.preventDefault();
+      const ids = Object.keys(PLATFORMS);
+      const dir = e.key === "ArrowLeft" || e.key === "ArrowUp" ? -1 : 1;
+      state.addPlatform = ids[(ids.indexOf(state.addPlatform) + dir + ids.length) % ids.length];
+      sync();
+      const on = group.querySelector('[aria-checked="true"]'); if (on) on.focus();
+    });
+
+    function renderPreview() {
+      const v = identOf(ident.value);
+      const nm = name.value.trim();
+      const ghost = { platform: state.addPlatform, user_id: v || "?", handle: v, name: nm };
+      previewHost.textContent = "";
+      const title = nm || (v ? "@" + v : "Name or handle");
+      previewHost.appendChild(el("div", { class: "ch-addp__card", style: `--hue: hsl(${hueFor(pkey(ghost))} 70% 58%)`, "data-plat": state.addPlatform }, [
+        avatar(ghost, "lg"),
+        el("div", { class: "ch-addp__card-main" }, [
+          el("div", { class: "ch-hero__name" + (nm || v ? "" : " is-ghost") }, title),
+          el("div", { class: "ch-hero__handle" }, v ? `${PLATFORMS[state.addPlatform].label} · ${nm && v ? "@" + v : v}` : PLATFORMS[state.addPlatform].label),
+          el("div", { class: "ch-card__badges" }, [tag("Not seen yet", null, "plus"), tag("No reply", "off")]),
+        ]),
+      ]));
+    }
+
+    function renderNext() {
+      nextHost.textContent = "";
+      const nm = name.value.trim();
+      const rows = [
+        ["shield", "Grants nothing", "No replies, no DMs and no tools until you switch them on in their Permissions tab."],
+        ["user", "Id fills in later", state.addPlatform === "discord"
+          ? "If you typed a username, Jarvis swaps in the real id the first time they write."
+          : "Jarvis swaps in the real id the first time they write — until then they are listed by handle."],
+      ];
+      if (nm) rows.push(["lock", "Name is locked", "They can't rename themselves by telling Jarvis “call me …”. You can change it later from their Profile tab."]);
+      for (const [ico, t, d] of rows) {
+        nextHost.appendChild(el("div", { class: "ch-addp__note" }, [
+          el("span", { class: "ch-addp__note-ico" }, [icon(ico)]),
+          el("div", null, [el("b", null, t), el("div", { class: "ch-row__hint" }, d)]),
+        ]));
+      }
+    }
+
+    function sync() {
+      const plat = state.addPlatform;
+      for (const c of cards) {
+        const on = c.dataset.id === plat;
+        c.setAttribute("aria-checked", on ? "true" : "false");
+        c.tabIndex = on ? 0 : -1;
+      }
+      ident.placeholder = plat === "discord" ? "Discord user id or username" : "Instagram handle or id";
+      identHint.textContent = plat === "discord"
+        ? "Right-click their profile in Discord (Developer Mode on) → Copy User ID. A leading @ is ignored."
+        : "Their Instagram @handle, without spaces. A leading @ is ignored.";
+      nameHint.textContent = "What Jarvis should call them. Leave empty to show their handle or id instead.";
+      const v = identOf(ident.value);
+      const bad = !!v && !IDENT_OK.test(v);
+      ident.setAttribute("aria-invalid", bad ? "true" : "false");
+      if (!bad) err.textContent = "";
+      const hit = !bad ? findExisting(plat, v) : null;
+      notice.hidden = !hit;
+      notice.textContent = hit ? `${displayName(hit)} is already on the list — adding will just open them.` : "";
+      renderPreview();
+      renderNext();
+    }
+
+    async function go() {
+      const v = identOf(ident.value);
+      if (!v) { err.textContent = "Type an id or @handle."; ident.setAttribute("aria-invalid", "true"); ident.focus(); return; }
+      if (!IDENT_OK.test(v)) {
+        err.textContent = "Letters, digits, . _ - only — no spaces, and it can't start with . or -. Put their name in the Name box.";
+        ident.setAttribute("aria-invalid", "true"); ident.focus(); return;
+      }
+      submit.disabled = true; submit.textContent = "Adding…";
+      try { await addPerson(state.addPlatform, v, name.value.trim(), err); }
+      finally { submit.disabled = false; submit.textContent = "Add person"; }
+    }
+
+    for (const input of [ident, name]) {
+      input.addEventListener("input", sync);
+      input.addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); go(); } });
+    }
+
+    const field = (label, aside, input, hint) => el("div", { class: "ch-addp__field" }, [
+      el("label", { class: "ch-addp__label", for: input.id }, aside ? [label, el("i", null, aside)] : label),
+      input, hint,
+    ]);
+    body.appendChild(el("div", { class: "ch-addp__form" }, [
+      el("div", { class: "ch-addp__field" }, [el("div", { class: "ch-section-title", id: "ch-add-plat-label" }, "1 · Platform"), group]),
+      el("div", { class: "ch-addp__field" }, [el("div", { class: "ch-section-title" }, "2 · Who"), field("Id or @handle", "", ident, identHint), notice]),
+      el("div", { class: "ch-addp__field" }, [el("div", { class: "ch-section-title" }, "3 · Name"), field("Display name", "optional", name, nameHint)]),
+      err,
+    ]));
+    body.appendChild(el("aside", { class: "ch-addp__aside", "aria-label": "Preview" }, [
+      el("div", null, [el("div", { class: "ch-section-title" }, "How they will appear"), previewHost]),
+      el("div", null, [el("div", { class: "ch-section-title" }, "What adding does"), nextHost]),
+    ]));
+    group.setAttribute("aria-labelledby", "ch-add-plat-label");
+
+    addForm = { ident, name, err, sync, go, isDirty: () => !!(ident.value.trim() || name.value.trim()) };
+    sync();
     setTimeout(() => { if (ident.isConnected) ident.focus(); }, 0);
   }
+
   function openAdd() { state.adding = true; renderAdd(); }
   function closeAdd() {
     state.adding = false;
     if (dom) { renderAdd(); dom.addBtn.focus({ preventScroll: true }); }
+  }
+  // Tab stays inside the add panel while it is open.
+  function trapAddTab(e) {
+    if (e.key !== "Tab" || !state.adding) return;
+    const nodes = [...dom.addOverlay.querySelectorAll("button, input, [tabindex]")].filter((n) => !n.disabled && n.tabIndex >= 0 && n.offsetParent !== null);
+    if (!nodes.length) return;
+    const first = nodes[0], last = nodes[nodes.length - 1];
+    if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last.focus(); }
+    else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus(); }
   }
 
   function renderAll() { if (!dom) return; renderStatusLine(); renderChips(); renderList(); renderDetail(); renderSide(); renderAdd(); }
@@ -1120,18 +1238,22 @@
     return {
       overlay, search: $("#ch-search"), platChips: $("#ch-platform-chips"), stateChips: $("#ch-state-chips"), list: $("#ch-list"),
       count: $("#ch-count"), detail: $("#ch-detail"), side: $("#ch-side"), statusLine: $("#channels-status-line"), refresh: $("#btn-ch-refresh"),
-      add: $("#ch-add"), addBtn: $("#btn-ch-add"),
+      addBtn: $("#btn-ch-add"), addOverlay: $("#channels-add-overlay"), addBody: $("#ch-add-body"),
+      addSubmit: $("#ch-add-submit"), addCancel: $("#ch-add-cancel"), addClose: $("#ch-add-close"),
     };
   }
 
   function onKey(e) {
     if (!dom || dom.overlay.hidden) return;
+    if (state.adding) { // the add panel owns the keyboard while it is open
+      if (e.key === "Escape") { e.preventDefault(); closeAdd(); }
+      return;
+    }
     const typing = /^(INPUT|TEXTAREA|SELECT)$/.test((e.target && e.target.tagName) || "");
     if (e.key === "Escape") {
       if (state.confirm) { state.confirm = null; renderDetail(); e.preventDefault(); return; }
       if (state.confirmRemove) { state.confirmRemove = null; renderDetail(); e.preventDefault(); return; }
       if (state.editingName) { state.editingName = null; renderDetail(); e.preventDefault(); return; }
-      if (state.adding) { closeAdd(); e.preventDefault(); return; }
       if (typing && e.target.value) { e.target.value = ""; e.target.dispatchEvent(new Event("input")); return; }
       close(); return;
     }
@@ -1155,7 +1277,15 @@
     if (!dom) return false;
     dom.search.addEventListener("input", () => { state.search = dom.search.value; renderChips(); renderList(); });
     dom.refresh.addEventListener("click", () => { state.tools = null; state.toolsState = "idle"; load(true); });
-    if (dom.addBtn) dom.addBtn.addEventListener("click", () => (state.adding ? closeAdd() : openAdd()));
+    if (dom.addBtn) dom.addBtn.addEventListener("click", openAdd);
+    if (dom.addOverlay) {
+      dom.addCancel.addEventListener("click", closeAdd);
+      dom.addClose.addEventListener("click", closeAdd);
+      dom.addSubmit.addEventListener("click", () => { if (addForm) addForm.go(); });
+      // A stray click on the backdrop must not throw away what was typed.
+      dom.addOverlay.addEventListener("click", (e) => { if (e.target === dom.addOverlay && !(addForm && addForm.isDirty())) closeAdd(); });
+      dom.addOverlay.addEventListener("keydown", trapAddTab);
+    }
     $("#channels-close").addEventListener("click", close);
     dom.overlay.addEventListener("click", (e) => { if (e.target === dom.overlay) close(); });
     document.addEventListener("keydown", onKey);

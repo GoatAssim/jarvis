@@ -381,21 +381,12 @@
 
 /* ---- add a person / rename / linked account ------------------------------ */
 .ch-add-btn{ margin-left: auto; margin-right: 10px; white-space: nowrap; }
-.ch-add{
-  display: flex; flex-direction: column; gap: 8px;
-  padding: 10px 12px; border-bottom: 1px solid var(--border);
-  background: color-mix(in srgb, var(--accent) 5%, transparent);
-}
-.ch-add[hidden]{ display: none; }
-.ch-add__row{ display: flex; gap: 6px; align-items: stretch; }
-.ch-add__row--end{ justify-content: flex-end; }
-.ch-add__plat, .ch-add input, .ch-name-input, .ch-link-input{
+.ch-name-input, .ch-link-input{
   font: inherit; font-size: 12.5px; color: var(--text);
   background: var(--bg-input, rgba(255,255,255,.04)); border: 1px solid var(--border);
   border-radius: 6px; padding: 6px 9px; min-width: 0;
 }
-.ch-add__ident{ flex: 1; font-family: var(--font-mono); }
-.ch-add__plat:focus, .ch-add input:focus, .ch-name-input:focus, .ch-link-input:focus{
+.ch-name-input:focus, .ch-link-input:focus{
   outline: none; border-color: var(--accent); box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 25%, transparent);
 }
 .ch-hero__nameline{ display: flex; align-items: center; gap: 6px; min-width: 0; }
@@ -414,3 +405,87 @@
 .ch-link__who{ flex: 1; min-width: 0; }
 .ch-link__name{ font-size: 13.5px; color: var(--text); overflow-wrap: anywhere; }
 .ch-link-input{ flex: 1; }
+
+/* ---- "+ Add a new person": a panel of its own ----------------------------
+ * Same chrome as the Channels panel (.debug-overlay > .debug-panel), stacked
+ * above it. Left: the form. Right: how the entry will look + what adding does. */
+.ch-add-overlay{ z-index: 96; }
+.ch-addp{ width: min(960px, 100%); height: min(640px, 92vh); }
+.ch-addp__body{ flex: 1; min-height: 0; display: grid; grid-template-columns: minmax(0, 1fr) 340px; }
+.ch-addp__form{ min-width: 0; overflow-y: auto; padding: 22px 26px 26px; display: flex; flex-direction: column; gap: 22px; }
+.ch-addp__aside{
+  min-width: 0; overflow-y: auto; padding: 22px; display: flex; flex-direction: column; gap: 24px;
+  border-left: 1px solid var(--border); background: color-mix(in srgb, var(--accent) 3%, transparent);
+}
+.ch-addp__field{ display: flex; flex-direction: column; gap: 7px; }
+.ch-addp__label{ font-size: 11px; letter-spacing: .14em; text-transform: uppercase; color: var(--text-dim); font-weight: 600; }
+.ch-addp__label i{ font-style: normal; letter-spacing: 0; text-transform: none; color: var(--text-dimmer); font-weight: 400; margin-left: 8px; }
+.ch-addp__input{
+  width: 100%; box-sizing: border-box; font: inherit; font-size: 14px; color: var(--text);
+  background: var(--bg-input, rgba(255,255,255,.04)); border: 1px solid var(--border);
+  border-radius: 6px; padding: 10px 12px; min-width: 0;
+}
+.ch-addp__input--mono{ font-family: var(--font-mono); font-size: 13.5px; }
+.ch-addp__input:focus{ outline: none; border-color: var(--accent); box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 25%, transparent); }
+.ch-addp__input[aria-invalid="true"]{ border-color: var(--red); }
+.ch-addp__hint{ font-size: 12.5px; color: var(--text-dim); line-height: 1.5; }
+.ch-addp__err{ font-size: 12.5px; color: var(--red); line-height: 1.5; }
+.ch-addp__err:empty{ display: none; }
+.ch-addp__notice{
+  padding: 8px 11px; font-size: 12.5px; line-height: 1.5; color: var(--text);
+  border: 1px solid color-mix(in srgb, var(--accent-secondary) 45%, var(--border)); border-left-width: 2px;
+  border-radius: var(--ch-radius); background: color-mix(in srgb, var(--accent-secondary) 8%, transparent);
+}
+.ch-addp__notice[hidden]{ display: none; }
+
+.ch-addp__plats{ display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+.ch-addp__plat{
+  display: flex; gap: 12px; align-items: flex-start; text-align: left; font: inherit; color: var(--text-dim);
+  background: transparent; border: 1px solid var(--border); border-radius: 8px; padding: 13px 14px; cursor: pointer;
+  transition: border-color .15s, background .15s, color .15s;
+}
+.ch-addp__plat:hover{ border-color: var(--border-strong); }
+.ch-addp__plat[aria-checked="true"]{
+  color: var(--text); border-color: var(--plat, var(--accent));
+  background: color-mix(in srgb, var(--plat, var(--accent)) 10%, transparent);
+  box-shadow: 0 0 0 1px var(--plat, var(--accent)) inset;
+}
+.ch-addp__plat:focus-visible{ outline: 2px solid var(--accent); outline-offset: 2px; }
+.ch-addp__plat-ico{ width: 26px; height: 26px; flex-shrink: 0; color: var(--plat, var(--accent)); }
+.ch-addp__plat-ico svg{ width: 100%; height: 100%; display: block; }
+.ch-addp__plat-txt{ display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+.ch-addp__plat-txt b{ font-size: 14px; font-weight: 600; color: inherit; }
+.ch-addp__plat-txt small{ font-size: 11.5px; line-height: 1.45; color: var(--text-dim); }
+
+.ch-addp__card{
+  display: flex; align-items: center; gap: 14px; padding: 16px; border: 1px solid var(--border); border-radius: 8px;
+  background: radial-gradient(ellipse 320px 140px at 0% 0%, color-mix(in srgb, var(--hue, var(--accent)) 14%, transparent), transparent 70%);
+}
+.ch-addp__card-main{ min-width: 0; flex: 1; }
+.ch-addp__card .ch-hero__name{ font-size: 16px; }
+.ch-addp__card .ch-hero__name.is-ghost{ color: var(--text-dimmer); }
+.ch-addp__card .ch-card__badges{ margin-top: 9px; }
+.ch-addp__next{ display: flex; flex-direction: column; gap: 12px; }
+.ch-addp__note{ display: flex; gap: 10px; align-items: flex-start; }
+.ch-addp__note b{ font-size: 13px; font-weight: 600; color: var(--text); }
+.ch-addp__note-ico{ width: 18px; height: 18px; flex-shrink: 0; margin-top: 1px; color: var(--accent-soft); }
+.ch-addp__note-ico svg{ width: 100%; height: 100%; display: block; }
+
+.ch-addp__foot{ gap: 14px; }
+.ch-addp__actions{ display: flex; gap: 8px; margin-left: auto; }
+
+@media (max-width: 900px){
+  .ch-addp{ width: 100%; height: 100%; } /* same as .debug-panel's own phone rule, which .ch-addp's sizing would otherwise beat */
+}
+@media (max-width: 860px){
+  .ch-addp__body{ grid-template-columns: 1fr; overflow-y: auto; }
+  .ch-addp__form{ overflow: visible; padding: 18px 16px; }
+  .ch-addp__aside{ overflow: visible; border-left: none; border-top: 1px solid var(--border); padding: 18px 16px; }
+  .ch-addp__keys{ display: none; }
+}
+@media (max-width: 520px){
+  .ch-addp__plats{ grid-template-columns: 1fr; }
+}
+@media (prefers-reduced-motion: reduce){
+  .ch-addp__plat{ transition: none; }
+}
