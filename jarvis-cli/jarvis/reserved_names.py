@@ -74,7 +74,7 @@ RESERVED_NAMES = {
     "digest-status", "digest-on", "digest-off", "digest-now", "digest-preview",
     "ctools-list", "ctools-show", "ctools-write", "ctools-check",
     "ctools-delete", "ctools-run", "ctools-toggle", "ctools-templates",
-    "ctools-suggest",
+    "ctools-suggest", "ctools-agent",
     # commands-check-name: added by this same fix (I-B2 item 2) so
     # web/server.js can ask the CLI instead of keeping its own copy.
     "commands-check-name",
@@ -102,6 +102,7 @@ RESERVED_NAMES = {
     "channels-users", "channels-user", "channels-user-tools",
     "channels-add-person", "channels-rename", "channels-remove-person",
     "channels-link", "channels-unlink",
+    "channels-conversation", "channels-usage", "channels-user-test",
     "discord-daemon", "instagram-serve", "logs-search",
     # --- clipboard_cli.COMMANDS ----------------------------------------------
     "clipboard-watch", "clipboard-watch-config",

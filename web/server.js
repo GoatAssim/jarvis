@@ -1224,6 +1224,54 @@ app.post("/api/channels/people/:platform/:id/link", requireJarvis, async (req, r
     ["channels-link", platform, id, other, req.body.ident.trim()], 10000), res);
 });
 
+// --- Channels > People: Conversation / Usage / Test as this person ---------
+// (L.36-P1, P2, P3.) All three are READ-ONLY: the first two read the transcript
+// and the usage ledger, the third is a dry run of the gate that calls no model,
+// sends nothing and writes nothing. Same proxy rules as above: argv arrays only,
+// every value validated first, the CLI does the work. The query values are bare
+// integers, so neither can start with "-" and be read as a flag.
+function channelPersonArgs(req, res) {
+  const { platform, id } = req.params;
+  if (!CHANNEL_PLATFORMS.has(platform)) { res.status(400).json({ error: "Unknown platform." }); return null; }
+  if (!CHANNEL_USER_ID.test(id)) { res.status(400).json({ error: "Invalid user id." }); return null; }
+  return { platform, id };
+}
+function channelInt(value, fallback, min, max) {
+  if (typeof value !== "string" || !/^[0-9]{1,4}$/.test(value)) return fallback;
+  return Math.min(max, Math.max(min, parseInt(value, 10)));
+}
+
+app.get("/api/channels/people/:platform/:id/conversation", requireJarvis, async (req, res) => {
+  const who = channelPersonArgs(req, res);
+  if (!who) return;
+  const limit = channelInt(req.query.limit, 100, 1, 500);
+  sendChannelResult(await runJarvisOnce(
+    ["channels-conversation", who.platform, who.id, String(limit)], 15000), res);
+});
+
+app.get("/api/channels/people/:platform/:id/usage", requireJarvis, async (req, res) => {
+  const who = channelPersonArgs(req, res);
+  if (!who) return;
+  const days = channelInt(req.query.days, 30, 1, 90);
+  sendChannelResult(await runJarvisOnce(
+    ["channels-usage", who.platform, who.id, String(days)], 15000), res);
+});
+
+// POST, though it changes nothing: it takes a small body, and a GET that looks
+// like "ask the bot as this person" should not be something a stray prefetch or
+// link preview can trigger.
+app.post("/api/channels/people/:platform/:id/test", requireJarvis, async (req, res) => {
+  const who = channelPersonArgs(req, res);
+  if (!who) return;
+  const context = req.body?.context;
+  if (context !== "dm" && context !== "group") return res.status(400).json({ error: "context must be dm or group." });
+  const mentioned = req.body?.mentioned === undefined ? true : req.body.mentioned;
+  if (typeof mentioned !== "boolean") return res.status(400).json({ error: "mentioned must be true or false." });
+  const args = ["channels-user-test", who.platform, who.id, context];
+  if (context === "group") args.push(mentioned ? "mentioned" : "unmentioned");
+  sendChannelResult(await runJarvisOnce(args, 10000), res);
+});
+
 app.post("/api/channels/people/:platform/:id/unlink", requireJarvis, async (req, res) => {
   const { platform, id } = req.params;
   if (!CHANNEL_PLATFORMS.has(platform)) return res.status(400).json({ error: "Unknown platform." });
@@ -2765,6 +2813,78 @@ app.post("/api/ctools/:name/suggest", requireJarvis, async (req, res) => {
   const result = await runJarvisOnce(["ctools-suggest", req.params.name], 30000, {}, JSON.stringify({ source, cursor }));
   try { res.json(JSON.parse(result.stdout)); }
   catch (e) { res.json({ ok: false, error: (result.stderr || e.message || "no answer").slice(0, 200) }); }
+});
+
+// "Ask Jarvis" in the Tool Manager editor (L.43). Streams the model's reply to
+// the browser as newline-delimited JSON so the code appears in the editor tab
+// while it is being written:
+//   {"type":"stream","k":"text","d":"..."}   token delta  (k may be "reset")
+//   {"type":"done","ok":true,"note":"...","code":"...","provider":"..."}
+//   {"type":"done","ok":false,"error":"..."}
+// Text only: the CLI side (custom_tools_agent.py) never writes a tool file, so
+// this route is no more powerful than /suggest. Closing the request (the
+// editor's Stop button aborts the fetch) kills the child so no tokens keep
+// being paid for after the owner gave up.
+app.post("/api/ctools/:name/agent", requireJarvis, (req, res) => {
+  if (!CTOOL_NAME_RE.test(req.params.name)) return res.status(400).json({ error: "Invalid tool name." });
+  const instruction = typeof req.body?.instruction === "string" ? req.body.instruction.trim() : "";
+  const source = typeof req.body?.source === "string" ? req.body.source : "";
+  if (!instruction) return res.status(400).json({ error: "Say what you want the tool to do." });
+  if (instruction.length > 4000) return res.status(400).json({ error: "That request is too long (4000 characters max)." });
+  if (source.length > 120000) return res.status(400).json({ error: "The file is too large to work on here." });
+  const history = Array.isArray(req.body?.history)
+    ? req.body.history.slice(-6).filter((t) => t && typeof t.content === "string")
+        .map((t) => ({ role: t.role === "assistant" ? "assistant" : "user", content: t.content.slice(0, 600) }))
+    : [];
+
+  res.status(200);
+  res.setHeader("Content-Type", "application/x-ndjson; charset=utf-8");
+  res.setHeader("Cache-Control", "no-cache, no-transform");
+  res.setHeader("X-Accel-Buffering", "no");
+  if (typeof res.flushHeaders === "function") res.flushHeaders();
+
+  let finished = false;
+  let sentDone = false;
+  const write = (obj) => { try { res.write(JSON.stringify(obj) + "\n"); } catch { /* browser went away */ } };
+  let child;
+  try {
+    child = spawn(JARVIS.cmd, [...JARVIS.args, "ctools-agent", req.params.name], {
+      windowsHide: true,
+      detached: process.platform !== "win32",
+      env: { ...process.env, PYTHONUNBUFFERED: "1", PYTHONIOENCODING: "utf-8" },
+    });
+  } catch (e) {
+    write({ type: "done", ok: false, error: `Couldn't start jarvis: ${e.message}` });
+    return res.end();
+  }
+  try { child.stdin.write(JSON.stringify({ instruction, source, history })); child.stdin.end(); } catch { /* exit handler reports it */ }
+
+  const onOut = makeLineBuffer((line) => {
+    if (line.startsWith(STREAM_MARKER)) {
+      try {
+        const ev = JSON.parse(line.slice(STREAM_MARKER.length));
+        if (ev && (ev.k === "text" || ev.k === "reset")) write({ type: "stream", k: ev.k, d: typeof ev.d === "string" ? ev.d : "" });
+      } catch { /* a malformed marker is dropped, never shown */ }
+    } else if (line.startsWith("JARVIS_AGENT_DONE ")) {
+      try { write(Object.assign({ type: "done" }, JSON.parse(line.slice("JARVIS_AGENT_DONE ".length)))); sentDone = true; }
+      catch { /* handled by the exit fallback below */ }
+    }
+    // Anything else on stdout (tool auto-discovery chatter etc.) is not for the editor.
+  });
+  let stderr = "";
+  child.stdout.on("data", onOut);
+  child.stderr.on("data", (d) => { if (stderr.length < 2000) stderr += d.toString(); });
+  const timer = setTimeout(() => { if (!finished) killTree(child); }, 200000);
+  child.on("error", (e) => { if (!sentDone) { write({ type: "done", ok: false, error: e.message }); sentDone = true; } });
+  child.on("exit", () => {
+    finished = true;
+    clearTimeout(timer);
+    onOut.flush();
+    if (!sentDone) write({ type: "done", ok: false, error: (stderr.trim().split("\n").pop() || "Jarvis stopped before answering.").slice(0, 200) });
+    res.end();
+  });
+  // The browser's Stop button (AbortController) closes the socket mid-reply.
+  res.on("close", () => { if (!finished) killTree(child); });
 });
 
 app.post("/api/ctools/:name/run", requireJarvis, async (req, res) => {

@@ -1925,7 +1925,7 @@ def main():
     # that survives both cmd.exe and sh does not exist.
     if argv[0] in ("ctools-list", "ctools-show", "ctools-write", "ctools-check",
                    "ctools-run", "ctools-toggle", "ctools-delete", "ctools-templates",
-                   "ctools-suggest"):
+                   "ctools-suggest", "ctools-agent"):
         from . import custom_tools_store as ctools
         cmd = argv[0]
 
@@ -1943,6 +1943,21 @@ def main():
             sname = argv[1].strip().lower() if len(argv) > 1 else "draft"
             print(json.dumps(custom_tools_suggest.suggest(
                 payload.get("source"), payload.get("cursor", 0), sname)))
+            return
+
+        if cmd == "ctools-agent":
+            # "Ask Jarvis" in the Tool Manager editor (L.43). stdin carries
+            # {"instruction", "source", "name", "history"}; stdout carries
+            # JARVIS_STREAM token lines and one JARVIS_AGENT_DONE line. It
+            # returns text only and never writes a tool file.
+            from . import custom_tools_agent
+            try:
+                payload = json.loads(sys.stdin.read() or "{}")
+            except ValueError:
+                payload = {}
+            custom_tools_agent.run(
+                dict(payload, name=argv[1].strip().lower() if len(argv) > 1 else "draft")
+                if isinstance(payload, dict) else {})
             return
 
         if cmd == "ctools-templates":

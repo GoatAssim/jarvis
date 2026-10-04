@@ -105,5 +105,21 @@ const dataInner = src.split("\n").filter((l) => /innerHTML/.test(l) && !/^\s*(\/
 check("innerHTML only parses the fixed icon strings", dataInner.length === 1 && /t\.innerHTML = ICON\[name\]/.test(dataInner[0]), dataInner.join(" | "));
 
 for (const m of failed) console.log("FAILED:", m);
+// ---- L.36-P1/P2/P3: helpers behind the Conversation / Usage / Test tabs
+check("dayOf reads the local ISO stamp", T.dayOf("2026-10-01T10:00:05") === "2026-10-01");
+check("dayOf tolerates junk", T.dayOf("") === "" && T.dayOf(null) === "" && T.dayOf("yesterday") === "");
+check("clockOf is HH:MM", T.clockOf("2026-10-01T10:00:05") === "10:00" && T.clockOf("2026-10-01") === "");
+check("dayLabel: today / yesterday / unknown", T.dayLabel("2026-10-04", "2026-10-04") === "Today" && T.dayLabel("2026-10-03", "2026-10-04") === "Yesterday" && T.dayLabel("", "2026-10-04") === "Earlier");
+check("dayLabel crosses a month boundary", T.dayLabel("2026-09-30", "2026-10-01") === "Yesterday");
+const grouped = T.groupByDay([{ at: "2026-10-01T09:00:00" }, { at: "2026-10-01T10:00:00" }, { at: "2026-10-02T08:00:00" }, {}]);
+check("groupByDay keeps order and splits on the day", grouped.length === 3 && grouped[0].entries.length === 2 && grouped[1].day === "2026-10-02" && grouped[2].day === "");
+check("groupByDay of nothing is nothing", T.groupByDay([]).length === 0 && T.groupByDay(null).length === 0);
+check("fmtTokens small / k / M", T.fmtTokens(0) === "0" && T.fmtTokens(999) === "999" && T.fmtTokens(1200) === "1.2k" && T.fmtTokens(17000) === "17k" && T.fmtTokens(2500000) === "2.5M");
+check("fmtTokens never prints NaN", T.fmtTokens(undefined) === "0" && T.fmtTokens("x") === "0");
+const bm = T.barModel([{ date: "a", total_tokens: 0, asks: 0 }, { date: "b", total_tokens: 1, asks: 1 }, { date: "c", total_tokens: 1000, asks: 2 }]);
+check("barModel: empty day is 0, tiny day is still visible, biggest is 100", bm[0].pct === 0 && bm[1].pct >= 6 && bm[2].pct === 100);
+check("barModel: all-zero series stays flat, no divide by zero", T.barModel([{ date: "a", total_tokens: 0 }]).every((b) => b.pct === 0) && T.barModel(null).length === 0);
+check("convNote wording", T.convNote({ total: 0 }) === "No messages logged for them yet." && T.convNote({ total: 1, shown: 1 }) === "1 message." && T.convNote({ total: 9, shown: 5 }) === "Showing the latest 5 of 9 messages.");
+
 console.log(`${passed} passed, ${failed.length} failed`);
 process.exit(failed.length ? 1 : 0);

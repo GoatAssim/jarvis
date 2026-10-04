@@ -25,6 +25,19 @@
  * (Jarvis breaks without them); they show a lock and the reason. The rules live
  * in jarvis/tool_disable.py — this file only shows and flips them.
  *
+ * EDITOR TABS, ASK JARVIS, CLOSABLE PANES (L.43 / L.44)
+ * -----------------------------------------------------
+ * Every tool you open or create is a TAB over the middle pane, like an IDE.
+ * Closing the Tool Manager does not close them: the overlay only hides, and the
+ * tabs (with unsaved text) are also kept in this browser so a reload brings them
+ * back. "Create a tool" opens a NEW tab each time. Under the code of every tab
+ * is an "Ask Jarvis" dock: describe the tool, and Jarvis writes the file into
+ * that tab's editor while you watch it stream in (/api/ctools/:name/agent).
+ * Jarvis only fills the unsaved buffer. It never saves, never runs anything,
+ * and "Undo AI edit" puts the previous text back; Save is still yours. The Tools
+ * list and the Overview panel each have an x (and a toggle in the header) so the
+ * editor can have the whole width.
+ *
  * TALKS TO THE SERVER ONLY THROUGH EXISTING ROUTES
  *   GET  /api/tools                read-only catalogue (+ flags, defaults, group, file, disabled, protected)
  *   POST /api/tools/safety         flip one safeguard
@@ -315,6 +328,40 @@
 
   function lineCount(text) { return String(text || "").split("\n").length; }
 
+  // L.43: the smallest "untitled N" not already used by an open tab.
+  function nextFree(used) {
+    const taken = new Set(used || []);
+    let n = 1;
+    while (taken.has(n)) n += 1;
+    return n;
+  }
+
+  // L.43: split a (possibly still streaming) Ask Jarvis reply into the short
+  // note and the file. Mirrors custom_tools_agent.split_reply on the Python
+  // side; the DONE line from the server is authoritative, this only lets the
+  // editor type along while tokens arrive. A trailing partial fence ("\n``")
+  // is held back so it never flashes into the code.
+  const AGENT_FENCE_OPEN = /```[ \t]*(?:python|py)?[ \t]*\n/i;
+  function splitAgentReply(text) {
+    const t = String(text == null ? "" : text).replace(/\r\n/g, "\n");
+    const m = AGENT_FENCE_OPEN.exec(t);
+    if (!m) return { note: t.trim(), code: "", complete: false };
+    let note = t.slice(0, m.index).trim();
+    const rest = t.slice(m.index + m[0].length);
+    let body, complete = false, after = "";
+    const close = rest.indexOf("\n```");
+    if (close >= 0) { body = rest.slice(0, close); after = rest.slice(close + 4).trim(); complete = true; }
+    else {
+      const trimmed = rest.replace(/\s+$/, "");
+      if (trimmed.endsWith("```")) { body = trimmed.slice(0, -3); complete = true; }
+      else body = rest.replace(/\n`{1,2}$/, "");
+    }
+    let code = body.replace(/^\n+|\n+$/g, "");
+    if (code) code += "\n";
+    if (after && complete) note = note ? note + "\n\n" + after : after;
+    return { note, code, complete };
+  }
+
   function formatBytes(n) {
     n = Number(n) || 0;
     return n < 1024 ? n + " B" : (n / 1024).toFixed(n < 10240 ? 1 : 0) + " KB";
@@ -344,6 +391,7 @@
     SAFEGUARDS, KEYS, NAME_RE, STAGES, MAX_SOURCE_CHARS, bucketOf, groupLabel, buildRows, matchesSearch, matchesSafeguard,
     matchesSource, filterRows, groupRows, coverage, callOutcome, jobOutcome, changedKeys, nameProblem, importNameFromFile,
     importProblem, sourceProblem, parseErrorLine, stageStates, lineCount, formatBytes, parseArgs, paramList,
+    nextFree, splitAgentReply,
   };
 
   /* =======================================================================
@@ -364,6 +412,10 @@
     collapsed: new Set(), busy: new Set(),
     editor: null, draft: null, run: null, prevFocus: null,
     suggest: true,                      // Jarvis inline suggestions in the editor (L.33); on by default, one click to turn off
+    tabs: [],                           // L.43: every open editor, in tab order; state.editor is the active one while view === "editor"
+    tabSeq: 0, restored: false, persistOk: true,
+    hideTools: false, hideSide: false,  // L.44: the owner closed that pane
+    agentOpen: true,                    // L.43: the Ask Jarvis dock is expanded
   };
   let dom = null;
 
@@ -373,10 +425,14 @@
       if (Array.isArray(p.collapsed)) state.collapsed = new Set(p.collapsed);
       if (typeof p.source === "string") state.source = p.source;
       if (typeof p.suggest === "boolean") state.suggest = p.suggest;
+      if (typeof p.hideTools === "boolean") state.hideTools = p.hideTools;
+      if (typeof p.hideSide === "boolean") state.hideSide = p.hideSide;
+      if (typeof p.agentOpen === "boolean") state.agentOpen = p.agentOpen;
     } catch (_) { /* private mode / bad JSON: defaults */ }
   }
   function savePrefs() {
-    try { global.localStorage.setItem(PREF_KEY, JSON.stringify({ collapsed: Array.from(state.collapsed), source: state.source, suggest: state.suggest })); }
+    try { global.localStorage.setItem(PREF_KEY, JSON.stringify({ collapsed: Array.from(state.collapsed), source: state.source, suggest: state.suggest,
+      hideTools: state.hideTools, hideSide: state.hideSide, agentOpen: state.agentOpen })); }
     catch (_) { /* nowhere to save: fine */ }
   }
 
@@ -409,6 +465,8 @@
       chips: $("#tm-chips"), groupSel: $("#tm-group-filter"), safeSel: $("#tm-safeguard-filter"), list: $("#tm-list"),
       count: $("#tm-count"), midTitle: $("#tm-mid-title"), detail: $("#tm-detail"), foot: $("#tm-foot"), side: $("#tm-side"),
       file: $("#tm-file"), refresh: $("#btn-tm-refresh"), btnImport: $("#btn-tm-import"), btnCreate: $("#btn-tm-create"),
+      tabs: $("#tm-tabs"), toggleTools: $("#btn-tm-toggle-tools"), toggleSide: $("#btn-tm-toggle-side"),
+      closeTools: $("#tm-close-tools"), closeSide: $("#tm-close-side"),
     };
   }
 
@@ -539,9 +597,10 @@
 
   async function select(id) {
     if (id === state.selected && state.view === "tool") return;
-    if (!(await leaveEditor())) return;
-    state.selected = id; state.view = "tool"; state.draft = null; state.run = null;
-    renderMain();
+    // L.43: picking a tool in the list never discards an open editor - it just
+    // shows that tool's details; the editor stays in its tab.
+    state.draft = null; state.run = null; state.selected = id;
+    if (state.view === "editor") showDetails(); else { state.view = "tool"; renderMain(); }
     const card = dom.list.querySelector('.tm-card[data-id="' + (global.CSS && CSS.escape ? CSS.escape(id) : id) + '"]');
     if (card && card.scrollIntoView) card.scrollIntoView({ block: "nearest" });
   }
@@ -550,6 +609,7 @@
     renderList();
     renderDetail();
     renderSide();
+    renderTabs();
   }
 
   /* ---- middle pane: a tool ------------------------------------------------- */
@@ -1000,7 +1060,9 @@
     try {
       const r = await ctools("/" + encodeURIComponent(fileName), { method: "DELETE" });
       if (r && r.ok === false) throw new Error(r.error || "Couldn’t delete.");
-      if (state.editor && state.editor.origName === fileName) { state.editor = null; state.view = "tool"; }
+      // The file is gone, so its tab (if open) goes too, no questions asked.
+      const openTab = state.tabs.find((t) => t.mode === "edit" && t.origName === fileName);
+      if (openTab) await closeTab(openTab, { force: true });
       state.selected = null; state.run = null;
       await loadAll({ quiet: true });
       toast("Deleted " + fileName + ".", "success");
@@ -1026,28 +1088,121 @@
    * Editor (the reworked "Create a tool")
    * ===================================================================== */
 
+  // L.43: a pending import review is the only thing that "leaving" still
+  // discards; editors are tabs now and stay open until their x is pressed.
   async function leaveEditor() {
-    const ed = state.editor;
-    if (state.view === "import" && state.draft) { state.draft = null; state.view = "tool"; return true; }
-    if (state.view !== "editor" || !ed) return true;
-    if (ed.dirty) {
-      const ok = await UI().confirm({ title: "Discard unsaved changes?", level: "warn", focusCancel: true, confirmLabel: "Discard",
-        body: "You’ve edited " + (ed.name || "this tool") + " without saving." });
-      if (!ok) return false;
-    }
-    disposeEditor();
-    state.editor = null; state.view = "tool";
-    restoreDetailBox();
+    if (state.view === "import" && state.draft) { state.draft = null; state.view = "tool"; }
     return true;
   }
 
-  function disposeEditor() {
-    const ed = state.editor;
-    if (ed && ed.cm) { try { ed.cm.dispose(); } catch (_) { /* already gone */ } ed.cm = null; }
+  function tabLabel(ed) {
+    return ed.mode === "edit" ? ed.origName : (ed.name || "untitled " + ed.untitled);
+  }
+
+  function newEditorState(opts) {
+    const mode = opts.mode || "new";
+    state.tabSeq += 1;
+    const ed = {
+      id: "ed" + state.tabSeq, mode,
+      origName: mode === "edit" ? opts.name : "", name: mode === "edit" ? opts.name : (opts.name || ""),
+      source: opts.source || "", template: opts.template || "minimal", dirty: !!opts.dirty, saved: mode === "edit",
+      result: null, errorLine: null, busy: "", nameTouched: false, untitled: 0,
+      pane: null, cm: null, ui: null, sourceBeforeAi: null,
+      chat: { messages: [], history: [], busy: false, abort: null, backup: null, undoable: false },
+    };
+    if (mode === "new") {
+      const used = state.tabs.filter((t) => t.mode === "new").map((t) => t.untitled);
+      ed.untitled = opts.untitled && !used.includes(opts.untitled) ? opts.untitled : nextFree(used);
+    }
+    if (opts.initial && opts.initial.valid === false) {
+      ed.result = { ok: false, stage: opts.initial.stage || "contract", error: opts.initial.error || "this file won’t load" };
+      ed.errorLine = parseErrorLine(ed.result.error);
+    }
+    return ed;
+  }
+
+  /* ---- tab bar ----------------------------------------------------------- */
+
+  function renderTabs() {
+    if (!dom || !dom.tabs) return;
+    const bar = dom.tabs;
+    clear(bar);
+    bar.hidden = !state.tabs.length;
+    if (!state.tabs.length) return;
+    const onDetails = state.view !== "editor";
+    const row = selectedRow();
+    bar.appendChild(el("button", { class: "tm-tab tm-tab--static" + (onDetails ? " is-active" : ""), type: "button", role: "tab",
+      "aria-selected": onDetails ? "true" : "false", title: "The selected tool’s details and safeguards", onclick: () => { if (!onDetails) showDetails(); } },
+    [el("span", { class: "tm-tab__label" }, row ? row.name : "Tool details")]));
+    state.tabs.forEach((ed) => {
+      const active = state.view === "editor" && state.editor === ed;
+      const label = tabLabel(ed);
+      const close = (e) => { if (e) { e.stopPropagation(); e.preventDefault(); } closeTab(ed); };
+      bar.appendChild(el("div", {
+        class: "tm-tab" + (active ? " is-active" : "") + (ed.dirty ? " is-dirty" : "") + (ed.chat.busy ? " is-ai" : ""),
+        role: "tab", tabindex: "0", "aria-selected": active ? "true" : "false",
+        title: label + (ed.dirty ? " — unsaved changes" : "") + (ed.chat.busy ? " — Jarvis is writing" : ""),
+        onclick: () => { if (!active) showEditor(ed); },
+        onauxclick: (e) => { if (e.button === 1) close(e); },
+        onkeydown: (e) => {
+          if (e.key === "Enter" || e.key === " ") { e.preventDefault(); showEditor(ed); }
+          else if (e.key === "Delete") close(e);
+        },
+      }, [
+        el("span", { class: "tm-tab__dot", "aria-hidden": "true" }),
+        el("span", { class: "tm-tab__label" }, label),
+        el("button", { class: "tm-tab__x", type: "button", tabindex: "-1", "aria-label": "Close " + label, title: "Close tab", onclick: close }, "×"),
+      ]));
+    });
+    bar.appendChild(el("button", { class: "tm-tab tm-tab--add", type: "button", "aria-label": "New tool tab", title: "New tool in a new tab",
+      onclick: () => enterEditor({ mode: "new" }) }, "+"));
+  }
+
+  function showDetails() {
+    state.editor = null; state.view = "tool"; state.draft = null;
+    restoreDetailBox();
+    renderMain();
+  }
+
+  function showEditor(ed) {
+    if (!ed || !state.tabs.includes(ed)) return;
+    state.draft = null; state.run = null;
+    state.editor = ed; state.view = "editor";
+    buildEditor(ed);
+    renderTabs(); renderSide(); renderList();
+    if (ed.cm && !ed.chat.busy) ed.cm.focus();
+  }
+
+  async function closeTab(ed, opts) {
+    if (!ed || !state.tabs.includes(ed)) return true;
+    if (!(opts && opts.force)) {
+      const note = ed.chat.busy ? " Jarvis is still writing into it." : "";
+      if (ed.dirty || ed.chat.busy) {
+        const ok = await UI().confirm({ title: "Close " + tabLabel(ed) + " without saving?", level: "warn", focusCancel: true, confirmLabel: "Discard",
+          body: ed.dirty ? "You’ve edited " + tabLabel(ed) + " without saving." + note : "Jarvis is still writing into it." });
+        if (!ok) return false;
+      }
+    }
+    if (ed.chat.abort) { try { ed.chat.abort.abort(); } catch (_) { /* already finished */ } }
+    const idx = state.tabs.indexOf(ed);
+    if (idx < 0) return true;                       // closed twice while the confirm was open
+    const wasActive = state.view === "editor" && state.editor === ed;
+    state.tabs.splice(idx, 1);
+    if (ed.cm) { try { ed.cm.dispose(); } catch (_) { /* already gone */ } ed.cm = null; }
+    if (ed.pane && ed.pane.parentNode) ed.pane.parentNode.removeChild(ed.pane);
+    ed.pane = null; ed.ui = null;
+    if (state.editor === ed) state.editor = null;
+    if (wasActive) {
+      const next = state.tabs[Math.min(idx, state.tabs.length - 1)];   // the tab that slid into its place, else the one before
+      if (next) showEditor(next); else showDetails();
+    } else renderTabs();
+    persistSoon();
+    return true;
   }
 
   async function editFile(fileName) {
-    if (!(await leaveEditor())) return;
+    const open = state.tabs.find((t) => t.mode === "edit" && t.origName === fileName);
+    if (open) { showEditor(open); return; }
     try {
       const data = await ctools("/" + encodeURIComponent(fileName));
       await enterEditor({ mode: "edit", name: fileName, source: data.source || "", enabled: data.enabled !== false, initial: data });
@@ -1055,28 +1210,26 @@
   }
 
   async function enterEditor(opts) {
-    if (!(await leaveEditor())) return;
+    opts = opts || {};
+    if (state.view === "import" && state.draft) state.draft = null;
     const mode = opts.mode || "new";
-    state.editor = {
-      mode, origName: mode === "edit" ? opts.name : "", name: mode === "edit" ? opts.name : "", source: opts.source || "",
-      template: "minimal", dirty: false, saved: mode === "edit", result: null, errorLine: null, busy: "",
-      nameTouched: false,
-    };
-    if (opts.initial && opts.initial.valid === false) {
-      state.editor.result = { ok: false, stage: opts.initial.stage || "contract", error: opts.initial.error || "this file won’t load" };
-      state.editor.errorLine = parseErrorLine(state.editor.result.error);
+    if (mode === "edit") {
+      const open = state.tabs.find((t) => t.mode === "edit" && t.origName === opts.name);
+      if (open) { showEditor(open); return open; }
     }
-    state.view = "editor"; state.draft = null; state.run = null;
-    buildEditor();
-    renderSide();
-    renderList();
-    if (mode === "new") await loadTemplate(state.editor.template, true);
-    if (state.editor.errorLine) { state.editor.cm.setErrorLine(state.editor.errorLine); revealLine(state.editor.errorLine); }
-    if (mode === "new") { const n = $("#tm-ed-name"); if (n) n.focus(); } else state.editor.cm.focus();
+    const ed = newEditorState(opts);
+    state.tabs.push(ed);
+    showEditor(ed);
+    if (mode === "new") await loadTemplate(ed, ed.template, true);
+    if (ed.errorLine && ed.cm) { ed.cm.setErrorLine(ed.errorLine); if (state.editor === ed) revealLine(ed.errorLine); }
+    if (state.editor === ed && ed.pane) {
+      if (mode === "new") { const n = ed.pane.querySelector("#tm-ed-name"); if (n) n.focus(); } else if (ed.cm) ed.cm.focus();
+    }
+    persistSoon();
+    return ed;
   }
 
-  async function loadTemplate(id, silent) {
-    const ed = state.editor;
+  async function loadTemplate(ed, id, silent) {
     if (!ed) return;
     try {
       const data = await ctools("/draft?template=" + encodeURIComponent(id));
@@ -1084,18 +1237,23 @@
     } catch (_) { ed.source = ""; if (!silent) toast("Couldn’t load that template — starting empty.", "warn"); }
     ed.template = id; ed.dirty = false;
     if (ed.cm) ed.cm.setValue(ed.source, { silent: true });
-    updateChip(); updateOutline();
+    updateChip(ed); renderTabs();
+    if (state.editor === ed) updateOutline();
   }
 
-  function updateChip() {
-    const ed = state.editor, chip = $("#tm-ed-chip");
-    if (!ed || !chip) return;
+  const inPane = (ed, sel) => (ed && ed.pane ? ed.pane.querySelector(sel) : null);
+
+  function updateChip(ed) {
+    ed = ed || state.editor;
+    const chip = inPane(ed, "#tm-ed-chip");
+    if (!chip) return;
     chip.className = "tm-state-chip" + (ed.dirty ? " is-dirty" : ed.saved ? " is-saved" : "");
     chip.textContent = ed.dirty ? "Unsaved changes" : ed.saved ? "Saved" : "Not saved yet";
   }
 
-  function nameHelp() {
-    const ed = state.editor, input = $("#tm-ed-name"), help = $("#tm-ed-name-help");
+  function nameHelp(ed) {
+    ed = ed || state.editor;
+    const input = inPane(ed, "#tm-ed-name"), help = inPane(ed, "#tm-ed-name-help");
     if (!ed || !input || !help) return;
     const problem = ed.mode === "edit" ? "" : nameProblem(input.value, userFileNames(), ed.mode);
     const show = ed.nameTouched && problem;
@@ -1104,28 +1262,39 @@
     help.textContent = show ? problem : ed.mode === "edit" ? "The file name can’t change here." : "lower_snake_case — becomes ~/.jarvis/tools/<name>.py";
   }
 
-  function buildEditor() {
-    const ed = state.editor, d = dom.detail;
+  // Attach this tab's editor to the middle pane, building it the first time.
+  // The pane (and the code editor inside it, with its caret, scroll and undo
+  // history) is kept alive while another tab is showing - that is what makes
+  // switching tabs lossless.
+  function buildEditor(ed) {
+    const d = dom.detail;
     clear(d);
     setText(dom.midTitle, ed.mode === "edit" ? "Editing " + ed.origName : "Create a tool");
     dom.foot.hidden = true;
+    if (!ed.pane) createEditorPane(ed);
+    d.appendChild(ed.pane);
+    d.style.padding = "0"; d.style.overflow = "hidden"; d.style.display = "flex";
+    if (ed.cm && ed.cm.remeasure) ed.cm.remeasure();
+    updateChip(ed); nameHelp(ed); renderAgent(ed);
+  }
 
+  function createEditorPane(ed) {
     const name = el("input", { class: "tm-input", id: "tm-ed-name", type: "text", autocomplete: "off", spellcheck: "false",
       placeholder: "my_tool", value: ed.name, readonly: ed.mode === "edit" || null, "aria-describedby": "tm-ed-name-help", style: "width:210px" });
-    name.addEventListener("input", () => { ed.name = name.value.trim().toLowerCase(); ed.nameTouched = true; ed.dirty = true; updateChip(); nameHelp(); });
+    name.addEventListener("input", () => { ed.name = name.value.trim().toLowerCase(); ed.nameTouched = true; ed.dirty = true; updateChip(ed); nameHelp(ed); renderTabs(); persistSoon(); });
     const tpl = el("select", { class: "tm-select", id: "tm-ed-template", "aria-label": "Start from a template", style: "min-width:150px",
       onchange: async (e) => {
         const id = e.target.value;
         if (ed.dirty && ed.source.trim() && !(await UI().confirm({ title: "Replace what’s in the editor?", level: "warn", focusCancel: true,
           confirmLabel: "Replace", body: "Loading a template overwrites the code you’ve typed." }))) { e.target.value = ed.template; return; }
-        await loadTemplate(id);
+        await loadTemplate(ed, id);
       } }, (state.templates.length ? state.templates : [{ id: "minimal", label: "Minimal" }]).map((t) => el("option", { value: t.id, title: t.hint || "" }, t.label)));
     tpl.value = ed.template;
 
     const actions = el("div", { class: "tm-editor__actions" }, [
       el("button", { class: "btn btn--primary", type: "button", id: "tm-ed-save", onclick: saveEditor, title: "Save (Ctrl+S)" }, "Save"),
       el("button", { class: "btn btn--ghost", type: "button", id: "tm-ed-check", onclick: validateEditor, title: "Checks the file without saving it (Ctrl+Enter)" }, "Validate"),
-      el("button", { class: "btn btn--ghost", type: "button", onclick: backFromEditor }, "Back"),
+      el("button", { class: "btn btn--ghost", type: "button", onclick: () => closeTab(ed), title: "Close this tab" }, "Close"),
     ]);
     const bar = el("div", { class: "tm-editor__bar" }, [
       el("div", { class: "tm-field" }, [el("label", { class: "tm-field__label", for: "tm-ed-name" }, "File name"), name, el("span", { class: "tm-field__help", id: "tm-ed-name-help" })]),
@@ -1135,10 +1304,7 @@
     ]);
 
     ed.cm = makeCodeEditor(ed);
-    d.appendChild(el("div", { class: "tm-editor" }, [bar, ed.cm.el]));
-    d.style.padding = "0"; d.style.overflow = "hidden"; d.style.display = "flex";
-    if (ed.cm.remeasure) ed.cm.remeasure();
-    updateChip(); nameHelp();
+    ed.pane = el("div", { class: "tm-editor", "data-tab": ed.id }, [bar, ed.cm.el, buildAgentDock(ed)]);
   }
 
   // The editor itself is code-editor.js. If that script didn't load, a plain
@@ -1146,8 +1312,8 @@
   // idea as I-B18(c): say so instead of leaving a dead panel).
   function makeCodeEditor(ed) {
     const common = {
-      value: ed.source, label: "Tool source code", placeholder: "Pick a template above, or write a tool here.",
-      onChange: (v) => { ed.source = v; ed.dirty = true; ed.errorLine = null; updateChip(); scheduleOutline(); },
+      value: ed.source, label: "Tool source code", placeholder: "Pick a template above, write a tool here, or ask Jarvis below.",
+      onChange: (v) => { ed.source = v; ed.dirty = true; ed.errorLine = null; updateChip(ed); renderTabs(); if (state.editor === ed) scheduleOutline(); persistSoon(); },
       onSave: saveEditor, onValidate: validateEditor,
     };
     if (global.JarvisCodeEditor) {
@@ -1167,6 +1333,7 @@
     return {
       el: wrap, getValue: () => ta.value, focus: () => ta.focus(), dispose() {}, remeasure() {},
       setValue(t) { ta.value = t; }, setErrorLine() {}, revealLine() {}, gotoLine() { ta.focus(); },
+      setReadOnly(on) { ta.readOnly = !!on; }, scrollToEnd() { ta.scrollTop = ta.scrollHeight; },
       insertSnippet() {}, setSuggestEnabled() {}, isSuggestEnabled: () => false, fallback: true,
     };
   }
@@ -1181,64 +1348,311 @@
 
   function restoreDetailBox() { dom.detail.style.padding = ""; dom.detail.style.overflow = ""; dom.detail.style.display = ""; }
 
-  async function backFromEditor() {
-    if (!(await leaveEditor())) return;
-    restoreDetailBox();
-    renderMain();
-  }
-
   // Bring a line into the editor's viewport (a marker you can't see isn't a marker).
   function revealLine(n) {
     const ed = state.editor;
     if (ed && ed.cm && n) ed.cm.revealLine(n);
   }
 
-  function applyResult(result) {
-    const ed = state.editor;
+  function applyResult(result, ed) {
+    ed = ed || state.editor;
     ed.result = result;
     ed.errorLine = result && !result.ok ? parseErrorLine(result.error) : null;
     if (ed.cm) ed.cm.setErrorLine(ed.errorLine || 0);
-    renderSide();
-    if (ed.errorLine) revealLine(ed.errorLine);
+    if (state.editor === ed) { renderSide(); if (ed.errorLine) revealLine(ed.errorLine); }
   }
 
   async function validateEditor() {
     const ed = state.editor;
     if (!ed || ed.busy) return;
+    if (ed.chat.busy) { toast("Jarvis is still writing — stop it or wait for it to finish first.", "info"); return; }
     ed.busy = "check"; renderSide();
     try {
       const name = ed.name || "draft";
-      applyResult(await ctools("/" + encodeURIComponent(NAME_RE.test(name) ? name : "draft") + "/check", { method: "POST", body: JSON.stringify({ source: ed.source }) }));
-    } catch (e) { applyResult({ ok: false, stage: "error", error: e.message }); }
-    ed.busy = ""; renderSide();
+      applyResult(await ctools("/" + encodeURIComponent(NAME_RE.test(name) ? name : "draft") + "/check", { method: "POST", body: JSON.stringify({ source: ed.source }) }), ed);
+    } catch (e) { applyResult({ ok: false, stage: "error", error: e.message }, ed); }
+    ed.busy = ""; if (state.editor === ed) renderSide();
   }
 
   async function saveEditor() {
     const ed = state.editor;
     if (!ed || ed.busy) return;
-    ed.nameTouched = true; nameHelp();
+    if (ed.chat.busy) { toast("Jarvis is still writing — stop it or wait for it to finish before saving.", "info"); return; }
+    ed.nameTouched = true; nameHelp(ed);
     const problem = nameProblem(ed.name, userFileNames(), ed.mode);
-    if (problem) { $("#tm-ed-name").focus(); return; }
+    if (problem) { const n = inPane(ed, "#tm-ed-name"); if (n) n.focus(); return; }
     ed.busy = "save"; renderSide();
     try {
       const r = await ctools("/" + encodeURIComponent(ed.name), { method: "PUT", body: JSON.stringify({ source: ed.source }) });
-      applyResult(r);
+      applyResult(r, ed);
       if (r && r.ok) {
         ed.mode = "edit"; ed.origName = ed.name; ed.dirty = false; ed.saved = true;
-        setText(dom.midTitle, "Editing " + ed.origName);
+        if (state.editor === ed) setText(dom.midTitle, "Editing " + ed.origName);
         // From here on this IS that file. Lock the name (a retyped name in "edit"
         // mode would skip the collision check and could overwrite another tool)
         // and drop the template picker (it would replace the saved file's code).
-        const nameInput = $("#tm-ed-name");
+        const nameInput = inPane(ed, "#tm-ed-name");
         if (nameInput) { nameInput.readOnly = true; nameInput.value = ed.origName; }
-        const tplField = $("#tm-ed-template");
+        const tplField = inPane(ed, "#tm-ed-template");
         if (tplField && tplField.closest(".tm-field")) tplField.closest(".tm-field").remove();
         toast("Saved " + ed.name + ". " + (r.note || ""), "success");
         await loadAll({ quiet: true, keepView: true });
-        nameHelp();
+        nameHelp(ed); renderTabs(); persistSoon();
       }
-    } catch (e) { applyResult(e.data && e.data.error ? Object.assign({ ok: false }, e.data) : { ok: false, stage: "error", error: e.message }); }
-    ed.busy = ""; updateChip(); renderSide();
+    } catch (e) { applyResult(e.data && e.data.error ? Object.assign({ ok: false }, e.data) : { ok: false, stage: "error", error: e.message }, ed); }
+    ed.busy = ""; updateChip(ed); if (state.editor === ed) renderSide();
+  }
+
+  /* ---- keeping tabs across closing the panel and reloading the page ---------- */
+
+  const TABS_KEY = "jarvis-tool-manager-tabs";
+  const TABS_MAX_CHARS = 400000;
+  let persistTimer = 0;
+
+  function persistSoon() {
+    if (persistTimer) clearTimeout(persistTimer);
+    persistTimer = setTimeout(() => { persistTimer = 0; persistTabs(); }, 500);
+  }
+
+  function persistTabs() {
+    try {
+      const items = state.tabs.map((ed) => ({
+        mode: ed.mode, name: ed.name, origName: ed.origName, dirty: !!ed.dirty, untitled: ed.untitled, template: ed.template,
+        // A clean saved file is re-read from disk on restore; anything else needs its text kept.
+        source: ed.dirty || ed.mode === "new" ? ed.source : "",
+      }));
+      const payload = JSON.stringify({ v: 1, tabs: items });
+      if (payload.length > TABS_MAX_CHARS) { state.persistOk = false; return; }
+      if (items.length) global.localStorage.setItem(TABS_KEY, payload); else global.localStorage.removeItem(TABS_KEY);
+      state.persistOk = true;
+    } catch (_) { state.persistOk = false; }
+  }
+
+  async function restoreTabs() {
+    if (state.restored) return;
+    state.restored = true;
+    let saved = null;
+    try { saved = JSON.parse(global.localStorage.getItem(TABS_KEY) || "null"); } catch (_) { return; }
+    if (!saved || !Array.isArray(saved.tabs)) return;
+    for (const t of saved.tabs.slice(0, 12)) {
+      if (!t || typeof t !== "object") continue;
+      const text = typeof t.source === "string" ? t.source : "";
+      if (t.mode === "edit") {
+        if (!NAME_RE.test(t.origName || "") || !userFileNames().includes(t.origName)) continue;      // deleted since
+        if (state.tabs.some((x) => x.mode === "edit" && x.origName === t.origName)) continue;
+        let source = text, initial = null;
+        if (!(t.dirty && text)) {
+          try { initial = await ctools("/" + encodeURIComponent(t.origName)); source = (initial && initial.source) || ""; } catch (_) { continue; }
+        }
+        state.tabs.push(newEditorState({ mode: "edit", name: t.origName, source, initial, dirty: !!(t.dirty && text) }));
+      } else if (t.mode === "new") {
+        const ed = newEditorState({ mode: "new", name: NAME_RE.test(t.name || "") ? t.name : "", source: text, dirty: !!t.dirty,
+          template: typeof t.template === "string" ? t.template : "minimal", untitled: Number(t.untitled) || 0 });
+        state.tabs.push(ed);
+      }
+    }
+    renderTabs();
+  }
+
+  /* ---- Ask Jarvis: the agent dock under the code (L.43) ------------------------ */
+
+  function buildAgentDock(ed) {
+    const caret = el("span", { class: "tm-agent__caret", "aria-hidden": "true" });
+    const stateEl = el("span", { class: "tm-agent__state" });
+    const head = el("div", { class: "tm-agent__head", role: "button", tabindex: "0", "aria-expanded": "true",
+      title: "Describe what you want and Jarvis writes it into this editor",
+      onclick: () => toggleAgent(ed),
+      onkeydown: (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); toggleAgent(ed); } } },
+    [el("span", { class: "tm-agent__title" }, "Ask Jarvis"), stateEl, caret]);
+    const log = el("div", { class: "tm-agent__log", "aria-live": "polite" });
+    const input = el("textarea", { class: "tm-agent__input", rows: "2", maxlength: "4000", spellcheck: "true",
+      "aria-label": "Tell Jarvis what the tool should do",
+      placeholder: ed.mode === "edit" ? "Ask Jarvis to change this tool…  (Enter sends, Shift+Enter adds a line)" : "Describe the tool you want — Jarvis writes it here while you watch…  (Enter sends)" });
+    const send = el("button", { class: "btn btn--primary btn--sm", type: "button", onclick: () => sendAgent(ed) }, "Send");
+    const stop = el("button", { class: "btn btn--ghost btn--sm", type: "button", hidden: true, title: "Stop writing (keeps what is already in the editor)", onclick: () => stopAgent(ed) }, "Stop");
+    const undo = el("button", { class: "btn btn--ghost btn--sm", type: "button", hidden: true, title: "Put back the text from before Jarvis’s last edit", onclick: () => undoAgent(ed) }, "Undo AI edit");
+    input.addEventListener("keydown", (e) => {
+      if (e.key === "Enter" && !e.shiftKey && !e.isComposing) { e.preventDefault(); sendAgent(ed); }
+    });
+    const compose = el("div", { class: "tm-agent__compose" }, [input, el("div", { class: "tm-agent__btns" }, [send, stop, undo])]);
+    const dock = el("div", { class: "tm-agent" }, [head, log, compose]);
+    ed.ui = { dock, head, caret, stateEl, log, compose, input, send, stop, undo };
+    return dock;
+  }
+
+  function toggleAgent(ed) { state.agentOpen = !state.agentOpen; savePrefs(); renderAgent(ed); }
+
+  function paintAgentLog(ed) {
+    const u = ed.ui; if (!u) return;
+    const nearEnd = u.log.scrollHeight - u.log.scrollTop - u.log.clientHeight < 40;
+    clear(u.log);
+    ed.chat.messages.forEach((m) => {
+      u.log.appendChild(el("div", { class: "tm-agent__msg " + (m.role === "user" ? "tm-agent__msg--user" : "tm-agent__msg--ai") + (m.err ? " tm-agent__msg--err" : "") + (m.pending ? " is-pending" : "") },
+        m.text || (m.pending ? "Thinking" : "")));
+    });
+    u.log.hidden = !state.agentOpen || !ed.chat.messages.length;
+    if (nearEnd) u.log.scrollTop = u.log.scrollHeight;
+  }
+
+  function renderAgent(ed) {
+    const u = ed && ed.ui; if (!u) return;
+    const busy = ed.chat.busy;
+    u.head.setAttribute("aria-expanded", state.agentOpen ? "true" : "false");
+    u.caret.textContent = state.agentOpen ? "▾" : "▴";
+    u.stateEl.textContent = busy ? "writing into this editor…" : (ed.chat.messages.length ? "" : "describe a tool, or ask for a change");
+    u.stateEl.classList.toggle("is-live", busy);
+    u.compose.hidden = !state.agentOpen;
+    u.input.disabled = busy;
+    u.send.hidden = busy; u.stop.hidden = !busy;
+    u.undo.hidden = busy || !ed.chat.undoable;
+    paintAgentLog(ed);
+  }
+
+  // While tokens stream, only the last bubble's text changes - no rebuild, so
+  // the caret in the input and the scroll position of the log are left alone.
+  function paintAgentLive(ed) {
+    const u = ed.ui; if (!u) return;
+    const last = u.log.lastElementChild, msg = ed.chat.messages[ed.chat.messages.length - 1];
+    if (!last || !msg) { paintAgentLog(ed); return; }
+    last.textContent = msg.text || "Thinking";
+    u.log.scrollTop = u.log.scrollHeight;
+  }
+
+  function setAgentBuffer(ed, text) {
+    if (!ed.cm) return;
+    ed.cm.setValue(text, { silent: true });
+    ed.source = text; ed.dirty = true; ed.errorLine = null;
+    ed.result = null;                                   // a check of the old text says nothing about this one
+    updateChip(ed); renderTabs();
+    if (state.editor === ed) renderSide();
+  }
+
+  function sendAgent(ed) {
+    const u = ed.ui; if (!u) return;
+    const text = u.input.value.trim();
+    if (!text) { u.input.focus(); return; }
+    u.input.value = "";
+    if (!state.agentOpen) { state.agentOpen = true; savePrefs(); }
+    askAgent(ed, text);
+  }
+
+  function stopAgent(ed) { if (ed.chat.abort) { try { ed.chat.abort.abort(); } catch (_) { /* done already */ } } }
+
+  function undoAgent(ed) {
+    const chat = ed.chat;
+    if (chat.busy || chat.backup === null || !chat.undoable) return;
+    setAgentBuffer(ed, chat.backup);
+    chat.undoable = false;
+    chat.messages.push({ role: "ai", text: "Put back the text from before my last edit." });
+    renderAgent(ed); persistSoon();
+  }
+
+  async function askAgent(ed, instruction) {
+    const chat = ed.chat;
+    if (chat.busy || !ed.cm) return;
+    const name = NAME_RE.test(ed.name) ? ed.name : "draft";
+    const before = ed.cm.getValue();
+    const reply = { role: "ai", text: "", pending: true, err: false };
+    chat.messages.push({ role: "user", text: instruction }, reply);
+    chat.busy = true; chat.backup = before; chat.undoable = false;
+    chat.abort = typeof AbortController !== "undefined" ? new AbortController() : null;
+    if (ed.cm.setReadOnly) ed.cm.setReadOnly(true);
+    ed.cm.el.classList.add("is-ai-writing");
+    renderAgent(ed); renderTabs();
+
+    let acc = "", wrote = false, finished = false, raf = 0, pendingCode = null;
+    const flush = () => {
+      raf = 0;
+      if (pendingCode === null || !ed.cm) return;
+      const code = pendingCode; pendingCode = null;
+      ed.cm.setValue(code, { silent: true });
+      ed.source = code; ed.dirty = true;
+      if (ed.cm.scrollToEnd) ed.cm.scrollToEnd();
+    };
+    const live = (code) => {
+      pendingCode = code;
+      if (!wrote) { wrote = true; ed.errorLine = null; ed.result = null; updateChip(ed); renderTabs(); if (state.editor === ed) renderSide(); }
+      if (!raf) raf = (global.requestAnimationFrame || ((f) => setTimeout(f, 16)))(flush);
+    };
+    const settle = () => { if (raf && global.cancelAnimationFrame) global.cancelAnimationFrame(raf); raf = 0; flush(); };
+
+    try {
+      const res = await fetch("/api/ctools/" + encodeURIComponent(name) + "/agent", {
+        method: "POST", headers: { "Content-Type": "application/json" }, signal: chat.abort ? chat.abort.signal : undefined,
+        body: JSON.stringify({ instruction, source: before, history: chat.history }),
+      });
+      if (!res.ok) {
+        let msg = res.statusText || ("HTTP " + res.status);
+        try { const j = await res.json(); msg = j.error || msg; } catch (_) { /* not JSON */ }
+        throw new Error(msg);
+      }
+      const reader = res.body.getReader(), dec = new TextDecoder();
+      let buf = "";
+      for (;;) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        buf += dec.decode(value, { stream: true });
+        let nl;
+        while ((nl = buf.indexOf("\n")) >= 0) {
+          const line = buf.slice(0, nl).trim(); buf = buf.slice(nl + 1);
+          if (!line) continue;
+          let ev; try { ev = JSON.parse(line); } catch (_) { continue; }
+          if (ev.type === "stream") {
+            if (ev.k === "reset") {                    // a key failed mid-reply; the next one starts over
+              acc = ""; reply.text = ""; pendingCode = null;
+              if (wrote) { settle(); setAgentBuffer(ed, before); wrote = false; }
+            } else {
+              acc += ev.d || "";
+              const sp = splitAgentReply(acc);
+              reply.text = sp.note;
+              if (sp.code) live(sp.code);
+            }
+            if (state.editor === ed) paintAgentLive(ed);
+          } else if (ev.type === "done") {
+            finished = true;
+            settle();
+            if (ev.ok) {
+              if (ev.code) {
+                setAgentBuffer(ed, ev.code);
+                chat.undoable = ev.code !== before;
+                reply.text = (ev.note || "Done — the file is updated.") + "\n\nRead it through, then Validate or Save. Validate runs the file’s top level, so look before you click.";
+              } else {
+                if (wrote) setAgentBuffer(ed, before);   // no complete file came back: leave the editor as it was
+                reply.text = ev.note || "Jarvis had nothing to change.";
+              }
+              chat.history.push({ role: "user", content: instruction }, { role: "assistant", content: (ev.note || (ev.code ? "(updated the file)" : "")).slice(0, 600) });
+              if (chat.history.length > 12) chat.history.splice(0, chat.history.length - 12);
+            } else {
+              if (wrote) setAgentBuffer(ed, before);
+              reply.text = ev.error || "Jarvis couldn’t answer.";
+              reply.err = true;
+            }
+          }
+        }
+      }
+      if (!finished) {
+        settle();
+        reply.text = (reply.text ? reply.text + "\n\n" : "") + "The connection ended before Jarvis finished. What was written so far is in the editor; Undo AI edit puts the old text back.";
+        reply.err = true; chat.undoable = wrote;
+      }
+    } catch (e) {
+      settle();
+      if (e && e.name === "AbortError") {
+        reply.text = (reply.text ? reply.text + "\n\n" : "") + "Stopped." + (wrote ? " The editor keeps what was written; Undo AI edit puts the old text back." : "");
+        chat.undoable = wrote;
+      } else {
+        if (wrote) { setAgentBuffer(ed, before); wrote = false; }
+        reply.text = e && e.message ? e.message : "Couldn’t reach Jarvis.";
+        reply.err = true;
+      }
+    } finally {
+      settle();
+      reply.pending = false;
+      chat.busy = false; chat.abort = null;
+      if (ed.cm) { if (ed.cm.setReadOnly) ed.cm.setReadOnly(false); ed.cm.el.classList.remove("is-ai-writing"); }
+      renderAgent(ed); renderTabs(); updateChip(ed); persistSoon();
+      if (state.editor === ed && ed.ui) ed.ui.input.focus();
+    }
   }
 
   /* ---- editor side panel: outline, snippets, suggestions, shortcuts (L.33) ---- */
@@ -1344,7 +1758,7 @@
     side.appendChild(suggestSection());
     side.appendChild(shortcutsSection());
     side.appendChild(el("div", null, [sectionTitle("Good to know"), el("div", { class: "tm-hint" },
-      "A custom tool is Python running as you. The model can’t write these files — that’s deliberate. Tools you save aren’t asked about again; imports are. Safeguards for a new tool appear in the list once it’s saved."),
+      "A custom tool is Python running as you. Jarvis can draft code into this editor (Ask Jarvis, under the code) but it can’t save or run a file — only your Save does, and Validate runs the file’s top level, so read AI-written code first. Tools you save aren’t asked about again; imports are. Safeguards for a new tool appear in the list once it’s saved."),
     ]));
     updateOutline();
   }
@@ -1362,7 +1776,7 @@
       const text = String(reader.result || "");
       const problem = sourceProblem(text);
       if (problem) { toast(file.name + ": " + problem, "warn"); return; }
-      if (!(await leaveEditor())) return;
+      state.editor = null;                              // L.43: open tabs stay open; the review just takes the pane
       restoreDetailBox();
       state.draft = { fileName: file.name, name: importNameFromFile(file.name), source: text, size: file.size, result: null, busy: false, nameTouched: true };
       state.view = "import"; state.run = null;
@@ -1473,8 +1887,26 @@
     if (state.toolsError) setStatusLine("catalogue unavailable — " + state.toolsError.slice(0, 80), "error");
     else if (!opts.quiet || dom.statusLine.textContent.startsWith("reading")) setStatusLine(cov.total + " tools available" + (offSummary(cov) ? " · " + offSummary(cov) + " off" : "") + (cov.commands ? " · " + cov.commands + (cov.commands === 1 ? " saved command" : " saved commands") : "") + (state.commandsError ? " · saved commands unavailable" : "") + (failed ? " · " + failed + " file" + (failed > 1 ? "s" : "") + " rejected" : "") + (state.filesError ? " · your tool files couldn’t be read" : ""), state.filesError || state.commandsError ? "error" : "");
     renderChips(); renderGroupSelect();
-    if (state.view === "editor") { renderList(); renderSide(); return; }
+    if (state.view === "editor") { renderList(); renderSide(); renderTabs(); return; }
     renderMain();
+  }
+
+  /* ---- L.44: closable side panes ------------------------------------------ */
+
+  function applyPanes() {
+    if (!dom) return;
+    dom.panel.classList.toggle("tm-hide-tools", state.hideTools);
+    dom.panel.classList.toggle("tm-hide-side", state.hideSide);
+    if (dom.toggleTools) dom.toggleTools.setAttribute("aria-pressed", state.hideTools ? "false" : "true");
+    if (dom.toggleSide) dom.toggleSide.setAttribute("aria-pressed", state.hideSide ? "false" : "true");
+    // The editor's column just changed width; let it re-measure once layout settles.
+    const ed = state.view === "editor" ? state.editor : null;
+    if (ed && ed.cm && ed.cm.remeasure) (global.requestAnimationFrame || setTimeout)(() => { if (ed.cm) ed.cm.remeasure(); });
+  }
+
+  function setPane(which, hidden) {
+    if (which === "tools") state.hideTools = !!hidden; else state.hideSide = !!hidden;
+    savePrefs(); applyPanes();
   }
 
   function modalOpen() { return !!document.querySelector("#jui-layer .jui-modal"); }
@@ -1489,7 +1921,7 @@
       close(); return;
     }
     if (typing || e.ctrlKey || e.metaKey || e.altKey) return;
-    if (e.key === "/") { e.preventDefault(); dom.search.focus(); return; }
+    if (e.key === "/") { e.preventDefault(); if (state.hideTools) setPane("tools", false); dom.search.focus(); return; }
     if (e.key === "ArrowDown" || e.key === "ArrowUp") {
       const rows = visibleRows().filter((r) => !state.collapsed.has(r.group) || state.search);
       const ordered = groupRows(rows).flatMap((g) => g.rows);
@@ -1545,6 +1977,18 @@
     dom.btnCreate.addEventListener("click", () => enterEditor({ mode: "new" }));
     dom.file.addEventListener("change", () => { const f = dom.file.files && dom.file.files[0]; dom.file.value = ""; if (f) startImport(f); });
     $("#tm-close").addEventListener("click", close);
+    // L.44: hide / show the two side panes (remembered between visits).
+    dom.closeTools.addEventListener("click", () => setPane("tools", true));
+    dom.closeSide.addEventListener("click", () => setPane("side", true));
+    dom.toggleTools.addEventListener("click", () => setPane("tools", !state.hideTools));
+    dom.toggleSide.addEventListener("click", () => setPane("side", !state.hideSide));
+    applyPanes();
+    // L.43: unsaved tabs are also kept in this browser; only warn about leaving when
+    // that could not be done (storage blocked / too big) or Jarvis is mid-write.
+    global.addEventListener("beforeunload", (e) => {
+      const risky = state.tabs.some((t) => t.chat.busy || (t.dirty && !state.persistOk));
+      if (risky) { e.preventDefault(); e.returnValue = ""; }
+    });
     dom.overlay.addEventListener("click", (e) => { if (e.target === dom.overlay) close(); });
     document.addEventListener("keydown", onKey);
     wireDrop();
@@ -1556,25 +2000,23 @@
     if (!ensureBuilt()) { toast("Tool Manager markup is missing from index.html.", "error"); return; }
     state.prevFocus = document.activeElement;
     dom.overlay.hidden = false;
-    restoreDetailBox();
-    if (state.view !== "editor") { state.view = "tool"; }
+    // L.43: reopening lands exactly where you left it - an open editor tab stays on screen.
+    if (state.view !== "editor") { restoreDetailBox(); state.view = "tool"; }
     renderChips(); renderGroupSelect();
-    if (state.rows.length) renderMain(); else renderDetail();
-    dom.search.focus({ preventScroll: true });
+    if (state.view === "editor") { renderList(); renderSide(); renderTabs(); if (state.editor && state.editor.cm && state.editor.cm.remeasure) state.editor.cm.remeasure(); }
+    else if (state.rows.length) renderMain(); else renderDetail();
+    if (state.view !== "editor" && !state.hideTools) dom.search.focus({ preventScroll: true });
     await loadAll();
+    await restoreTabs();
     if (opts && opts.create) enterEditor({ mode: "new" });
     else if (opts && opts.tool) { const r = rowByName(opts.tool); if (r) select(r.id); }
   }
 
+  // L.43: closing only hides the panel. Open editor tabs (and anything unsaved in
+  // them) stay exactly as they are, so there is nothing to confirm or lose here.
   async function close() {
     if (!dom || dom.overlay.hidden) return;
-    if (state.view === "editor" && state.editor && state.editor.dirty) {
-      const ok = await UI().confirm({ title: "Close with unsaved changes?", level: "warn", focusCancel: true, confirmLabel: "Discard and close",
-        body: "You’ve edited " + (state.editor.name || "a new tool") + " without saving." });
-      if (!ok) return;
-    }
-    if (state.view === "editor") { state.editor = null; state.view = "tool"; restoreDetailBox(); }
-    state.draft = null;
+    state.draft = state.view === "import" ? state.draft : null;
     dom.overlay.hidden = true;
     const prev = state.prevFocus; state.prevFocus = null;
     if (prev && prev.focus && document.contains(prev)) { try { prev.focus(); } catch (_) { /* gone */ } }

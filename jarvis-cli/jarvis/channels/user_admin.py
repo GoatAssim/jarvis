@@ -38,6 +38,15 @@ every read: anyone in dm/reply/tool_allowlist or `owner` gets a record, so a
 person added through "Global lists" or `channels-allow` shows up in the panel
 instead of being invisible until their first message.
 
+READ-ONLY VIEWS  (L.36-P1 / P2 / P3)
+------------------------------------
+conversation_view, usage_view and simulate change nothing. The first two read
+the transcript and the usage ledger; simulate is a dry run of the gate for one
+person ("Test as this person") that calls no model, sends nothing, and writes
+NOTHING -- no transcript line, no usage line, no people.json touch, no
+cooldown mark, no conversation. tests/test_channel_insights.py snapshots the
+whole ~/.jarvis tree around a run to hold it to that.
+
 WHAT A SWITCH CANNOT DO
 -----------------------
 There is no deny-list in the gate. A person covered by a `"*"` entry cannot be
@@ -47,7 +56,7 @@ removing an id that was never the reason they got through.
 
 from . import PLATFORMS, PERM_DM, PERM_REPLY, PERM_TOOLS
 from . import config as channel_config
-from . import people, permissions, user_perms
+from . import people, permissions, transcript, usage, user_perms
 from .config import WILDCARD
 
 FLAGS = ("dm", "reply", "tool", "owner", "send_dm", "blocked")
@@ -407,3 +416,166 @@ def unlink_accounts(platform, user_id):
     if rec is None:
         return False, err
     return people.unlink(platform, rec["user_id"])
+
+
+# --------------------------------------------------------------------------
+# Read-only views: Conversation (P1), Usage (P2), Test as this person (P3)
+# --------------------------------------------------------------------------
+
+def conversation_view(platform, user_id, limit=100):
+    """What this person sent and how Jarvis answered, newest `limit` messages
+    oldest-first. Registered people only. See transcript.person_records for
+    how a reply is attributed (and why some older group replies are not)."""
+    rec, err = _registered(platform, user_id)
+    if rec is None:
+        return {"ok": False, "error": err}
+    out = transcript.read_person(platform, rec["user_id"], limit)
+    out.update({"ok": True, "platform": platform,
+                "user_id": str(rec["user_id"])})
+    return out
+
+
+def usage_view(platform, user_id, days=30):
+    """Usage for one registered person -- see channels/usage.py."""
+    rec, err = _registered(platform, user_id)
+    if rec is None:
+        return {"ok": False, "error": err}
+    return usage.summary(platform, rec["user_id"], days)
+
+
+# The gate's stages in the order permissions.decide() runs them, per kind of
+# message. tests/test_channel_insights.py forces a denial at every one of these
+# against the real decide(), so a stage added or renamed there fails here
+# instead of silently showing a wrong walkthrough.
+GATE_STAGES = {
+    permissions.CTX_DM: ("enabled", "self", "reachable", "dm_allowed",
+                         "reply", "cooldown"),
+    permissions.CTX_GROUP: ("enabled", "self", "reachable", "where",
+                            "reply", "cooldown"),
+}
+STAGE_LABELS = {
+    "enabled": "Platform is switched on",
+    "self": "Not Jarvis's own message",
+    "reachable": "Addressed to Jarvis",
+    "dm_allowed": "On the DM list",
+    "where": "Server and channel allowed",
+    "reply": "On the reply list",
+    "cooldown": "Not sending too fast",
+}
+
+
+def _stage_rows(context, decision):
+    """Every stage with pass / fail / skipped, ending at the one that decided.
+    A stage after the denial was never reached, so it is `skipped`, not
+    `pass` -- the gate stops at the first no."""
+    rows, stopped = [], False
+    for stage in GATE_STAGES[context]:
+        if stopped:
+            state, detail = "skipped", ""
+        elif not decision.allowed and decision.stage == stage:
+            state, detail, stopped = "fail", decision.reason, True
+        else:
+            state, detail = "pass", ""
+        rows.append({"id": stage, "label": STAGE_LABELS[stage],
+                     "state": state, "detail": detail})
+    return rows
+
+
+def simulate(platform, user_id, context=permissions.CTX_DM, mentioned=True):
+    """What the gate would do with a message from this person -- a DRY RUN.
+
+    Builds an in-memory message and asks permissions.decide() and
+    user_perms.resolve_tool_access(), the very functions a real message goes
+    through. It never calls a model, never sends, and writes nothing: no
+    transcript, no usage line, no people.json record, no cooldown mark, no
+    conversation. `saved` and `model_called` are in the result so a caller can
+    say so without having to know.
+
+    The message TEXT is deliberately not an input: no stage of the gate reads
+    it (who and where decide everything), so a text box would only suggest
+    that wording matters. Returns a dict; {"ok": False, ...} for an
+    unregistered person or a bad argument."""
+    rec, err = _registered(platform, user_id)
+    if rec is None:
+        return {"ok": False, "error": err}
+    if context not in GATE_STAGES:
+        return {"ok": False, "error": "context must be dm or group"}
+    cfg = channel_config.platform_config(platform)
+    msg = permissions.IncomingMessage(
+        platform, context, user_id=rec["user_id"],
+        user_handle=rec.get("handle") or "", text="",
+        mentioned=bool(mentioned) if context == permissions.CTX_GROUP else False)
+    # No guild / channel / thread id on purpose: decide() skips its location
+    # filters for a message that names no place, whereas an invented id would
+    # be refused by any allowed_channels list and show a denial that no real
+    # message gets. The note below says the filters are not applied.
+    # last_seen_at stays None: cooldown is gateway memory, which this process
+    # does not have, so that stage can only ever pass here (noted below).
+    decision = permissions.decide(cfg, msg, last_seen_at=None)
+    answered = bool(decision.allowed)
+
+    may_use, scope, label, problem = user_perms.resolve_tool_access(
+        platform, rec["user_id"], decision.may_use_tools)
+    if not answered:
+        tools = {"state": "none", "why": "They would not be answered at all.",
+                 "allowed": None, "count": None, "plumbing": []}
+    elif may_use and scope is None:
+        tools = {"state": "all", "allowed": None, "count": None, "plumbing": [],
+                 "why": "Every tool the platform allows (owner-only tools "
+                        "such as send_dm stay owner-only)."}
+    elif may_use:
+        ticked = sorted(set(scope) - set(user_perms.PLUMBING_TOOLS))
+        tools = {"state": "custom", "allowed": ticked, "count": len(ticked),
+                 "plumbing": sorted(user_perms.PLUMBING_TOOLS),
+                 "why": "Only the tools ticked for them, plus the helpers "
+                        "Jarvis needs to find them."}
+    else:
+        if problem:
+            why = ("Their tool limits could not be read, so this message "
+                   "runs with no tools until that is fixed.")
+        elif scope is not None:
+            why = "Their custom tool list is empty."
+        elif not cfg.get("allow_tools"):
+            why = (f"The {platform} master tools switch is off "
+                   f"(jarvis channels-set {platform} allow_tools true).")
+        else:
+            why = "They are not on the tool list."
+        tools = {"state": "none", "why": why, "allowed": None, "count": None,
+                 "plumbing": []}
+
+    notes = []
+    if int(cfg.get("cooldown_seconds") or 0) > 0:
+        notes.append(f"Cooldown ({int(cfg['cooldown_seconds'])}s between "
+                     f"messages) is not simulated: it depends on when they "
+                     f"last wrote, which only the running bot knows.")
+    if context == permissions.CTX_GROUP and (cfg.get("allowed_guilds")
+                                              or cfg.get("allowed_channels")):
+        notes.append("This platform limits which servers or channels Jarvis "
+                     "answers in. That filter is not applied here, because "
+                     "the test names no particular server or channel.")
+    if context == permissions.CTX_GROUP and cfg.get("scopes"):
+        notes.append("Per-server and per-channel overrides exist in the config "
+                     "and are not applied here, because this test has no "
+                     "particular server or channel.")
+    if (rec.get("follow") or "") == people.FOLLOW_BLOCKED and answered:
+        notes.append("They are marked blocked but still get through: a "
+                     "\"*\" (everyone) entry covers them.")
+    if answered and not user_perms.dm_allowed(platform, rec["user_id"]):
+        notes.append("Jarvis would not DM them on your behalf (send_dm is off "
+                     "for them).")
+
+    return {
+        "ok": True,
+        "platform": platform,
+        "user_id": str(rec["user_id"]),
+        "context": context,
+        "mentioned": bool(mentioned) if context == permissions.CTX_GROUP else None,
+        "answered": answered,
+        "stage": decision.stage,
+        "reason": decision.reason,
+        "stages": _stage_rows(context, decision),
+        "tools": tools,
+        "notes": notes,
+        "saved": False,
+        "model_called": False,
+    }

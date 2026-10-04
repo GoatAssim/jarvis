@@ -489,3 +489,102 @@
 @media (prefers-reduced-motion: reduce){
   .ch-addp__plat{ transition: none; }
 }
+
+/* ---- Conversation / Usage / Test as this person  (L.36-P1 / P2 / P3) ------ */
+/* Five tabs have to fit a middle pane that can be ~480px wide: tighter spacing,
+   and a scroll (not a wrap) when even that is not enough. */
+.ch-tabs{ overflow-x: auto; scrollbar-width: none; }
+.ch-tabs::-webkit-scrollbar{ display: none; }
+.ch-tab{ padding-left: 11px; padding-right: 11px; letter-spacing: .1em; white-space: nowrap; flex-shrink: 0; }
+
+.ch-conv__head{ display: flex; align-items: center; justify-content: space-between; gap: 10px; flex-wrap: wrap; }
+.ch-conv__head .btn svg{ width: 12px; height: 12px; margin-right: 5px; vertical-align: -2px; }
+.ch-conv__older{ align-self: center; }
+
+.ch-day{
+  display: flex; align-items: center; gap: 10px; margin-top: 4px;
+  font-size: 10px; letter-spacing: .16em; text-transform: uppercase; color: var(--text-dimmer);
+}
+.ch-day::before, .ch-day::after{ content: ""; flex: 1; height: 1px; background: var(--border); }
+.ch-conv{ display: flex; flex-direction: column; gap: 8px; }
+
+/* Their words on the left, Jarvis's on the right, like the chat they happened in. */
+.ch-msg{
+  max-width: min(88%, 560px); padding: 8px 11px 9px; border: 1px solid var(--border);
+  border-left: 2px solid var(--ch-c, var(--border-strong)); border-radius: var(--ch-radius); background: var(--bg-panel-2);
+}
+.ch-msg--in{ align-self: flex-start; }
+.ch-msg--out{
+  align-self: flex-end; --ch-c: var(--accent);
+  background: color-mix(in srgb, var(--accent) 6%, var(--bg-panel-2));
+}
+.ch-msg__meta{
+  display: flex; align-items: center; flex-wrap: wrap; gap: 6px; margin-bottom: 4px;
+  font-size: 10px; letter-spacing: .12em; text-transform: uppercase; color: var(--text-dimmer);
+}
+.ch-msg__time{ font-family: var(--font-mono); letter-spacing: 0; }
+.ch-msg__prov{ font-family: var(--font-mono); letter-spacing: 0; text-transform: none; opacity: .8; }
+/* Strangers' text and model text: wrap anything, keep their line breaks. */
+.ch-msg__text{ font-size: 13px; line-height: 1.5; color: var(--text); white-space: pre-wrap; overflow-wrap: anywhere; word-break: break-word; }
+.ch-msg__text.is-empty::before{ content: "(no text)"; color: var(--text-dimmer); font-style: italic; }
+.ch-msg__more{ margin-top: 4px; font-size: 11px; color: var(--text-dimmer); font-style: italic; }
+.ch-msg__why{ display: flex; gap: 6px; align-items: flex-start; margin-top: 6px; font-size: 11.5px; line-height: 1.45; color: var(--red); overflow-wrap: anywhere; }
+.ch-msg__why svg{ width: 12px; height: 12px; flex-shrink: 0; margin-top: 2px; }
+
+/* Usage */
+.ch-summary + .ch-summary{ margin-top: 8px; }
+.ch-bars{
+  display: flex; align-items: flex-end; gap: 2px; height: 96px; padding: 8px 10px 0;
+  border: 1px solid var(--border); border-radius: var(--ch-radius); background: var(--bg-panel-2);
+}
+.ch-bar{
+  flex: 1; min-width: 2px; border-radius: 2px 2px 0 0; background: var(--accent);
+  box-shadow: 0 0 calc(8px * var(--jui-glow-scale, 1)) var(--accent-glow);
+}
+.ch-bar.is-zero{ height: 2px !important; background: var(--border-strong); box-shadow: none; }
+
+/* Test as this person */
+.ch-test__controls{ display: flex; align-items: center; flex-wrap: wrap; gap: 12px; }
+.ch-seg{ display: inline-flex; border: 1px solid var(--border); border-radius: var(--ch-radius); overflow: hidden; }
+.ch-seg__btn{
+  padding: 6px 12px; background: transparent; border: none; color: var(--text-dim); font: inherit; font-size: 12px; cursor: pointer;
+}
+.ch-seg__btn + .ch-seg__btn{ border-left: 1px solid var(--border); }
+.ch-seg__btn:hover{ color: var(--text); }
+.ch-seg__btn[aria-pressed="true"]{ color: var(--accent); background: color-mix(in srgb, var(--accent) 12%, transparent); font-weight: 600; }
+.ch-seg__btn:focus-visible{ outline: 1px solid var(--accent); outline-offset: -3px; }
+.ch-test__check{ display: inline-flex; align-items: center; gap: 7px; font-size: 12.5px; color: var(--text); cursor: pointer; }
+.ch-test__out{ display: flex; flex-direction: column; gap: 18px; transition: opacity .15s; }
+.ch-test__out.is-stale{ opacity: .5; }
+.ch-verdict{
+  padding: 14px 16px; border: 1px solid var(--border); border-left: 3px solid var(--ch-c, var(--border-strong));
+  border-radius: var(--ch-radius); background: linear-gradient(90deg, color-mix(in srgb, var(--ch-c, transparent) 8%, var(--bg-panel-2)), var(--bg-panel-2));
+}
+.ch-verdict__k{ font-size: 10px; letter-spacing: .14em; text-transform: uppercase; color: var(--text-dimmer); }
+.ch-verdict__v{ font-family: var(--font-display); font-size: 17px; letter-spacing: .06em; color: var(--ch-c, var(--text)); margin-top: 3px; }
+.ch-verdict[data-ch="off"] .ch-verdict__v{ color: var(--text); }   /* "ignored" is a result, not a disabled control */
+.ch-verdict__s{ font-size: 12.5px; color: var(--text-dim); margin-top: 4px; line-height: 1.5; overflow-wrap: anywhere; }
+.ch-stages{ list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 4px; }
+.ch-stage{
+  display: grid; grid-template-columns: 22px auto minmax(0, 1fr); gap: 8px; align-items: baseline; padding: 6px 10px;
+  border: 1px solid var(--border); border-left: 2px solid var(--ch-c, var(--border-strong)); border-radius: var(--ch-radius);
+  background: var(--bg-panel-2); font-size: 12.5px;
+}
+.ch-stage__g{ font-family: var(--font-mono); color: var(--ch-c, var(--text-dimmer)); text-align: center; font-weight: 700; }
+.ch-stage__l{ color: var(--text); }
+.ch-stage__d{ color: var(--text-dimmer); font-size: 11.5px; overflow-wrap: anywhere; }
+.ch-stage[data-ch="bad"] .ch-stage__d{ color: var(--red); }
+.ch-stage[data-ch="off"]{ opacity: .6; }
+.ch-test__tools{ margin-top: 8px; }
+.ch-test__foot{
+  display: flex; align-items: center; gap: 8px; padding-top: 12px; border-top: 1px solid var(--border);
+  font-size: 11.5px; color: var(--text-dimmer);
+}
+.ch-test__foot svg{ width: 14px; height: 14px; flex-shrink: 0; color: var(--green); }
+
+@media (max-width: 760px){
+  .ch-msg{ max-width: 100%; }
+  .ch-stage{ grid-template-columns: 22px minmax(0, 1fr); }
+  .ch-stage__d{ grid-column: 2; }
+}
+@media (prefers-reduced-motion: reduce){ .ch-test__out{ transition: none; } }

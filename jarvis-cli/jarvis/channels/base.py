@@ -40,7 +40,7 @@ import traceback
 
 from . import PLATFORMS
 from . import config as channel_config
-from . import dedupe, people, permissions, transcript, user_perms
+from . import dedupe, people, permissions, transcript, usage, user_perms
 
 # Serializes ask() calls so the JARVIS_ALLOWED_TOOLS mutation below is safe.
 _ASK_LOCK = threading.Lock()
@@ -489,30 +489,18 @@ def handle_message(platform, msg, send, cfg=None, on_tool_call=None, decision=No
     # otherwise), and it fails CLOSED: an unreadable user_perms.json means
     # "this person's limits are unknown", so this one message runs with no
     # tools rather than with the whole catalogue.
-    tool_scope = None
-    tools_label = "on" if decision.may_use_tools else "off"
-    may_use_tools = decision.may_use_tools
-    if may_use_tools:
-        try:
-            tool_scope = user_perms.effective_tool_scope(platform, msg.user_id)
-        except user_perms.PermsUnreadable as exc:
-            _log(f"per-person tool limits unreadable ({exc}); "
-                 f"answering without tools")
-            may_use_tools, tools_label = False, "off (limits unreadable)"
-        except Exception as exc:  # noqa: BLE001 — same stance: unknown = none
-            _log(f"per-person tool limits failed ({exc}); "
-                 f"answering without tools")
-            may_use_tools, tools_label = False, "off (limits failed)"
-        else:
-            if tool_scope is not None:
-                if not tool_scope:
-                    may_use_tools, tools_label = False, "off (person's list is empty)"
-                else:
-                    tools_label = f"custom ({len(tool_scope)})"
+    # The decision itself lives in user_perms.resolve_tool_access so the
+    # panel's dry run ("Test as this person") asks the same function.
+    may_use_tools, tool_scope, tools_label, problem = (
+        user_perms.resolve_tool_access(platform, msg.user_id,
+                                       decision.may_use_tools))
+    if problem:
+        _log(problem)
 
     _log(f"accepted {platform} msg from {msg.user_handle or msg.user_id} "
          f"({'owner' if is_owner else 'guest'}, tools={tools_label})")
 
+    ask_ok, ask_error, result = True, "", None
     try:
         result = _ask_jarvis(msg.text, conv_id, may_use_tools,
                              on_tool_call=on_tool_call, platform=platform,
@@ -523,10 +511,20 @@ def handle_message(platform, msg, send, cfg=None, on_tool_call=None, decision=No
         if not text:
             error = getattr(result, "error", "") or ""
             text = f"{_EMPTY_REPLY} {error}".strip()
+            ask_ok, ask_error = False, error or "empty answer"
     except Exception as exc:  # noqa: BLE001
         _log("ask failed:\n" + traceback.format_exc())
         text = f"Something broke while answering: {exc}"
         provider = ""
+        ask_ok, ask_error = False, str(exc)
+
+    # L.36-P2: one counts-only line per finished ask, attributed to the person
+    # who sent it (see channels/usage.py). Never raises.
+    usage.record(platform, msg.user_id, thread_id=msg.thread_id, conv_id=conv_id,
+                 provider=provider, ok=ask_ok,
+                 usage_total=getattr(result, "usage_total", None),
+                 tool_names=usage.tools_from_result(result),
+                 tools_mode=tools_label, error=ask_error)
 
     limit = int(cfg.get("max_reply_chars") or 1900)
     sent_ok = True
@@ -540,11 +538,13 @@ def handle_message(platform, msg, send, cfg=None, on_tool_call=None, decision=No
             if cfg.get("log_conversations", True):
                 transcript.log_outbound(platform, msg.thread_id, chunk,
                                         conv_id=conv_id, ok=False,
-                                        error=str(exc), provider=provider)
+                                        error=str(exc), provider=provider,
+                                        to_user=msg.user_id)
             break
         if cfg.get("log_conversations", True):
             transcript.log_outbound(platform, msg.thread_id, chunk,
-                                    conv_id=conv_id, ok=True, provider=provider)
+                                    conv_id=conv_id, ok=True, provider=provider,
+                                    to_user=msg.user_id)
 
     return decision
 

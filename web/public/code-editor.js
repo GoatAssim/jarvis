@@ -953,6 +953,11 @@
         if (!(o && o.silent) && opts.onChange) opts.onChange(st.value);
       },
       focus() { ta.focus(); },
+      // L.43: the Ask Jarvis agent types into this buffer; while it does the
+      // textarea is read-only (a keystroke mid-stream would be overwritten by
+      // the next chunk), and the view follows the newest line like a terminal.
+      setReadOnly(on) { ta.readOnly = !!on; },
+      scrollToEnd() { ta.scrollTop = ta.scrollHeight; syncScroll(); },
       remeasure() { metrics(); st.lines = 0; paintAll(); },
       setErrorLine(n) { st.errorLine = n > 0 ? n : 0; paintGutter(); paintBands(); },
       revealLine(n) {

@@ -25,6 +25,7 @@ COMMANDS = (
     "channels-block", "channels-users", "channels-user", "channels-user-tools",
     "channels-add-person", "channels-rename", "channels-remove-person",
     "channels-link", "channels-unlink",
+    "channels-conversation", "channels-usage", "channels-user-test",
     "discord-daemon", "instagram-serve", "logs-search",
 )
 
@@ -57,6 +58,12 @@ USAGE = """channel commands:
                                         same human on both platforms (identity only)
   channels-unlink <platform> <id|@handle>
                                         undo a link
+  channels-conversation <platform> <id> [limit]
+                                        what that person sent and how Jarvis answered (JSON, read-only)
+  channels-usage <platform> <id> [days] their messages, tokens and tool calls (JSON, read-only)
+  channels-user-test <platform> <id> dm | group [mentioned|unmentioned]
+                                        dry run: what the gate would do with a message from them.
+                                        Calls no model, sends nothing, saves nothing
   discord-daemon                        run the Discord bot (foreground)
   instagram-serve                       run the Instagram webhook (foreground)
   logs-search <query> [--mode m] [--origin o] [--source s] [--direction d]
@@ -309,6 +316,29 @@ def handle(argv):
                           "user_id": uid, "mode": mode,
                           "tools": rest[3:] if mode == "custom" else []}, indent=2))
         sys.exit(0 if ok else 1)
+
+    if cmd in ("channels-conversation", "channels-usage", "channels-user-test"):
+        # Read-only (and, for -user-test, a dry run). The id is resolved the same
+        # strict way channels-user resolves it: people on file only.
+        if len(rest) < 2:
+            _fail(f"usage: {cmd} <platform> <id>"
+                  + (" [limit]" if cmd == "channels-conversation" else
+                     " [days]" if cmd == "channels-usage" else
+                     " dm | group [mentioned|unmentioned]"))
+        platform, uid = rest[0], _person_id(rest[0], rest[1])
+        extra = rest[2:]
+        if cmd == "channels-conversation":
+            number = int(extra[0]) if extra and extra[0].isdigit() else 100
+            result = user_admin.conversation_view(platform, uid, number)
+        elif cmd == "channels-usage":
+            number = int(extra[0]) if extra and extra[0].isdigit() else 30
+            result = user_admin.usage_view(platform, uid, number)
+        else:
+            context = (extra[0].lower() if extra else "dm")
+            mentioned = not (len(extra) > 1 and extra[1].lower() == "unmentioned")
+            result = user_admin.simulate(platform, uid, context, mentioned)
+        print(json.dumps(result, indent=2))
+        sys.exit(0 if result.get("ok") else 1)
 
     if cmd == "channels-add-person":
         if len(rest) < 2:

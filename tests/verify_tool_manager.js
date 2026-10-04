@@ -185,4 +185,25 @@ ok("NAME_RE matches the server's CTOOL_NAME_RE", String(P.NAME_RE) === String(/^
 const src = fs.readFileSync(path.join(__dirname, "..", "web", "public", "tool-manager.js"), "utf8");
 ok("tool-manager.js never assigns innerHTML / outerHTML / insertAdjacentHTML", !/\.(innerHTML|outerHTML)\s*=|insertAdjacentHTML/.test(src.replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/.*$/gm, "")));
 
+
+// ---- L.43: Ask Jarvis reply splitting + tab numbering ----------------------
+{
+  const S = P.splitAgentReply;
+  const code = 'TOOL_GROUP = "custom"\nTOOLS = {}\n';
+  let r = S("Adding it.\n```python\n" + code + "```\nRead first.");
+  ok("agent: note and code split", r.note.startsWith("Adding it.") && r.note.includes("Read first.") && r.code === code && r.complete === true);
+  r = S("Which folder?");
+  ok("agent: no fence is a question", r.code === "" && r.note === "Which folder?" && r.complete === false);
+  r = S("On it.\n```python\nx = 1\ny = 2");
+  ok("agent: streaming - open fence types what it has", r.code === "x = 1\ny = 2\n" && r.complete === false);
+  r = S("On it.\n```python\nx = 1\n``");
+  ok("agent: a half-typed closing fence never flashes into the code", r.code === "x = 1\n" && r.complete === false);
+  r = S("n\n```python\nx = 1```");
+  ok("agent: fence closed without a newline", r.code === "x = 1\n" && r.complete === true);
+  r = S("n\n```py\nx = 1\n```");
+  ok("agent: ```py is accepted", r.code === "x = 1\n");
+  ok("agent: empty input is safe", S("").code === "" && S(null).note === "");
+  ok("untitled numbering: smallest free", P.nextFree([]) === 1 && P.nextFree([1, 2, 4]) === 3 && P.nextFree([2]) === 1);
+}
+
 console.log(`\n${n} passed, 0 failed`);

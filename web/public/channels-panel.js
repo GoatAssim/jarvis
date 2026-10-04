@@ -23,6 +23,15 @@
  * terminal runs — so this panel and the CLI cannot disagree. After every
  * change the whole list is re-read, so what you see is what the gate reads.
  *
+ * CONVERSATION / USAGE / TEST  (L.36-P1, P2, P3)
+ * ----------------------------------------------
+ * Three more tabs on a person, all READ-ONLY. Conversation shows what they sent
+ * and how Jarvis answered (including what the gate turned away); Usage shows
+ * their messages, tokens and tool calls; Test runs the gate as them — a dry run
+ * that calls no model, sends nothing and saves nothing, so it never appears in
+ * their conversation or in their usage. Each loads when its tab is opened, not
+ * before, and every number comes from the server.
+ *
  * ADD / RENAME / LINK
  * -------------------
  * "+ Add a new person" opens a panel of its own (stacked over this one) that puts
@@ -83,6 +92,10 @@
     plus: P('<path d="M12 5v14M5 12h14"/>'),
     link: P('<path d="M10 14a4 4 0 0 0 5.7 0l3-3a4 4 0 0 0-5.7-5.7l-1 1"/><path d="M14 10a4 4 0 0 0-5.7 0l-3 3a4 4 0 0 0 5.7 5.7l1-1"/>'),
     edit: P('<path d="M4 20h4L19 9a2.8 2.8 0 0 0-4-4L4 16v4Z"/><path d="m13.5 6.5 4 4"/>'),
+    chat: P('<path d="M4 5h16v11H9l-5 4V5Z"/><path d="M8 9.5h8M8 12.5h5"/>'),
+    chart: P('<path d="M4 4v16h16"/><path d="M8 16v-4M12 16V8M16 16v-6"/>'),
+    flask: P('<path d="M9 3h6M10 3v6l-5.5 9.5A1.5 1.5 0 0 0 5.8 21h12.4a1.5 1.5 0 0 0 1.3-2.5L14 9V3"/><path d="M7.5 15h9"/>'),
+    refresh: P('<path d="M20 11a8 8 0 1 0-2.3 5.7"/><path d="M20 4v7h-7"/>'),
     people: P('<circle cx="9" cy="8.5" r="3.2"/><path d="M3 19.5a6 6 0 0 1 12 0"/><path d="M16 5.6a3.2 3.2 0 0 1 0 5.8M18 14.2a6 6 0 0 1 3 5.3"/>'),
   };
   function icon(name) {
@@ -182,6 +195,55 @@
     { id: "blocked", label: "Blocked", ch: "bad", test: (p) => p.blocked },
   ];
 
+  // ---- helpers for the Conversation / Usage / Test tabs (pure, no DOM) ----
+  // The transcript stamps local, zone-less ISO times ("2026-10-01T10:00:05").
+  const dayOf = (at) => (typeof at === "string" && /^\d{4}-\d{2}-\d{2}/.test(at)) ? at.slice(0, 10) : "";
+  const clockOf = (at) => (typeof at === "string" && at.length >= 16 && at[10] === "T") ? at.slice(11, 16) : "";
+  function localDay(d) {
+    const x = d || new Date();
+    return `${x.getFullYear()}-${String(x.getMonth() + 1).padStart(2, "0")}-${String(x.getDate()).padStart(2, "0")}`;
+  }
+  function dayLabel(day, today) {
+    if (!day) return "Earlier";
+    const t = today || localDay();
+    if (day === t) return "Today";
+    const y = new Date(`${t}T12:00:00`); y.setDate(y.getDate() - 1);
+    if (day === localDay(y)) return "Yesterday";
+    try { return new Date(`${day}T12:00:00`).toLocaleDateString(undefined, { weekday: "short", day: "numeric", month: "short", year: "numeric" }); } catch (_) { return day; }
+  }
+  // Consecutive messages sharing a day, in the order given.
+  function groupByDay(entries) {
+    const out = [];
+    for (const e of entries || []) {
+      const day = dayOf(e && e.at);
+      const last = out[out.length - 1];
+      if (last && last.day === day) last.entries.push(e); else out.push({ day, entries: [e] });
+    }
+    return out;
+  }
+  function fmtTokens(n) {
+    n = Number(n) || 0;
+    if (n < 1000) return String(Math.round(n));
+    if (n < 10000) return (n / 1000).toFixed(1).replace(/\.0$/, "") + "k";
+    if (n < 1e6) return Math.round(n / 1000) + "k";
+    return (n / 1e6).toFixed(1).replace(/\.0$/, "") + "M";
+  }
+  // Heights (0-100) for the per-day bars. A day with any usage is never
+  // invisible; a day with none is exactly 0.
+  function barModel(series) {
+    const rows = Array.isArray(series) ? series : [];
+    const max = rows.reduce((m, r) => Math.max(m, Number(r.total_tokens) || 0), 0);
+    return rows.map((r) => {
+      const t = Number(r.total_tokens) || 0;
+      return { date: r.date, asks: Number(r.asks) || 0, tokens: t, pct: t > 0 && max > 0 ? Math.max(6, Math.round((t / max) * 100)) : 0 };
+    });
+  }
+  function convNote(d) {
+    if (!d) return "";
+    if (!d.total) return "No messages logged for them yet.";
+    return d.shown < d.total ? `Showing the latest ${d.shown} of ${d.total} messages.` : `${d.total} message${d.total === 1 ? "" : "s"}.`;
+  }
+
   function filterPeople(list, { search, platform, state }) {
     const q = String(search || "").trim().toLowerCase().replace(/^@/, "");
     const st = STATE_FILTERS.find((s) => s.id === state) || STATE_FILTERS[0];
@@ -241,6 +303,12 @@
     addPlatform: "discord",
     editingName: null, // person key whose name is being typed
     confirmRemove: null, // person key awaiting "Remove" confirmation
+    // Per-person data for the read-only tabs, keyed by person key. Cleared by
+    // the Refresh button; each entry guards against a stale reply with `req`.
+    conv: new Map(),   // { status, data, error, limit, req }
+    usage: new Map(),  // { status, data, error, days, req }
+    sim: new Map(),    // { context, mentioned, status, result, error, req }
+    scrollEnd: false,  // after the next render, show the newest message
   };
   let dom = null;
 
@@ -541,6 +609,7 @@
     state.toolSearch = "";
     renderList();
     renderDetail(true);
+    runTabLoader();
   }
 
   // ---- middle -----------------------------------------------------------
@@ -588,6 +657,9 @@
     const defs = [
       { id: "profile", label: "Profile", ico: "user" },
       { id: "perms", label: "Permissions", ico: "shield" },
+      { id: "conv", label: "Conversation", ico: "chat" },
+      { id: "usage", label: "Usage", ico: "chart" },
+      { id: "test", label: "Test", ico: "flask", title: "Test as this person" },
     ];
     const bar = el("div", { class: "ch-tabs", role: "tablist", "aria-label": "Person" });
     defs.forEach((d, i) => {
@@ -595,12 +667,13 @@
       const b = el("button", {
         type: "button", class: "ch-tab", role: "tab", id: `ch-tab-${d.id}`, "aria-selected": state.tab === d.id ? "true" : "false",
         "aria-controls": `ch-pane-${d.id}`, tabindex: state.tab === d.id ? "0" : "-1",
-        onclick: () => { state.tab = d.id; renderDetail(); if (d.id === "perms") ensureTools(); },
+        title: d.title || null,
+        onclick: () => activateTab(d.id),
         onkeydown: (e) => {
           if (e.key === "ArrowRight" || e.key === "ArrowLeft") {
             e.preventDefault();
             const next = defs[(i + (e.key === "ArrowRight" ? 1 : defs.length - 1)) % defs.length];
-            state.tab = next.id; renderDetail(); const nb = $(`#ch-tab-${next.id}`); if (nb) nb.focus();
+            activateTab(next.id); const nb = $(`#ch-tab-${next.id}`); if (nb) nb.focus();
           }
         },
       }, [icon(d.ico), d.label, dirty ? el("span", { class: "ch-tab__n", title: "Unsaved tool changes" }, "•") : null]);
@@ -953,6 +1026,10 @@
   function renderDetail(resetScroll) {
     if (!dom) return;
     const keepTop = resetScroll ? 0 : dom.detail.scrollTop;
+    // A redraw replaces every node, so keyboard focus would fall back to the
+    // page. Put it back on the element with the same id (tabs, the Test
+    // controls) when the same person is still showing.
+    const focusId = (!resetScroll && document.activeElement && dom.detail.contains(document.activeElement)) ? document.activeElement.id : "";
     dom.detail.textContent = "";
     if (state.error) {
       dom.detail.appendChild(el("div", { class: "ch-state" }, [icon("warn"), el("div", { class: "ch-state__t" }, "Couldn't read channels"), el("div", { class: "ch-state__d" }, state.error),
@@ -966,12 +1043,301 @@
       return;
     }
     dom.detail.appendChild(hero(p));
-    dom.detail.appendChild(tabs(p));
-    dom.detail.appendChild(state.tab === "profile" ? renderProfile(p) : renderPerms(p));
+    const tabBar = tabs(p);
+    dom.detail.appendChild(tabBar);
+    // Five tabs don't fit a phone: scroll the bar so the active one is visible.
+    const activeTab = tabBar.querySelector('.ch-tab[aria-selected="true"]');
+    if (activeTab && activeTab.offsetLeft + activeTab.offsetWidth > tabBar.clientWidth) tabBar.scrollLeft = activeTab.offsetLeft - 16;
+    const pane = { profile: renderProfile, conv: renderConv, usage: renderUsage, test: renderTest }[state.tab] || renderPerms;
+    dom.detail.appendChild(pane(p));
     const bar = state.tab === "perms" ? savebar(p) : null;
     if (bar) dom.detail.appendChild(bar);
     dom.detail.scrollTop = keepTop;
+    if (state.scrollEnd && state.tab === "conv") { dom.detail.scrollTop = dom.detail.scrollHeight; state.scrollEnd = false; }
+    if (focusId) { const again = document.getElementById(focusId); if (again) again.focus({ preventScroll: true }); }
     if (state.tab === "perms") ensureTools();
+  }
+
+  // ---- Conversation / Usage / Test as this person  (L.36-P1 / P2 / P3) -------
+  const CONV_STEP = 100, CONV_MAX = 500;
+  const personUrl = (p, tail) => `/api/channels/people/${encodeURIComponent(p.platform)}/${encodeURIComponent(p.user_id)}/${tail}`;
+  const slot = (map, p, init) => { const k = pkey(p); if (!map.has(k)) map.set(k, init()); return map.get(k); };
+  const convSlot = (p) => slot(state.conv, p, () => ({ status: "idle", data: null, error: "", limit: CONV_STEP, req: 0 }));
+  const usageSlot = (p) => slot(state.usage, p, () => ({ status: "idle", data: null, error: "", days: 30, req: 0 }));
+  const simSlot = (p) => slot(state.sim, p, () => ({ context: "dm", mentioned: true, status: "idle", result: null, error: "", req: 0 }));
+  const showing = (p, tab) => !!dom && state.selected === pkey(p) && state.tab === tab;
+
+  async function ensureConv(p, more) {
+    const s = convSlot(p);
+    if (more) s.limit = Math.min(CONV_MAX, s.limit + CONV_STEP * 2);
+    else if (s.status === "ok" || s.status === "loading") return;
+    const req = ++s.req;
+    s.status = "loading"; s.error = "";
+    if (showing(p, "conv")) renderDetail();
+    // "Load older" adds rows ABOVE what is on screen: keep the same message under the cursor.
+    const h0 = dom ? dom.detail.scrollHeight : 0, t0 = dom ? dom.detail.scrollTop : 0;
+    try {
+      const data = await api("GET", personUrl(p, `conversation?limit=${s.limit}`));
+      if (s.req !== req) return;
+      s.data = data; s.status = "ok";
+      if (!more) state.scrollEnd = true;
+    } catch (err) {
+      if (s.req !== req) return;
+      s.status = "error"; s.error = err.message || "Couldn't read the conversation.";
+    }
+    if (showing(p, "conv")) {
+      renderDetail();
+      if (more && dom) dom.detail.scrollTop = t0 + (dom.detail.scrollHeight - h0);
+    }
+  }
+
+  async function ensureUsage(p, days) {
+    const s = usageSlot(p);
+    if (days && days !== s.days) { s.days = days; s.status = "idle"; }
+    if (s.status === "ok" || s.status === "loading") return;
+    const req = ++s.req;
+    s.status = "loading"; s.error = "";
+    if (showing(p, "usage")) renderDetail();
+    try {
+      const data = await api("GET", personUrl(p, `usage?days=${s.days}`));
+      if (s.req !== req) return;
+      s.data = data; s.status = "ok";
+    } catch (err) {
+      if (s.req !== req) return;
+      s.status = "error"; s.error = err.message || "Couldn't read their usage.";
+    }
+    if (showing(p, "usage")) renderDetail();
+  }
+
+  // The dry run. Re-run every time the tab is opened or an option changes,
+  // because a switch flipped on the Permissions tab makes any earlier answer stale.
+  async function runSim(p) {
+    const s = simSlot(p);
+    const req = ++s.req;
+    s.status = "loading"; s.error = "";
+    if (showing(p, "test")) renderDetail();
+    try {
+      const body = { context: s.context };
+      if (s.context === "group") body.mentioned = s.mentioned;
+      const result = await personPost(p, "test", body);
+      if (s.req !== req) return;
+      s.result = result; s.status = "ok";
+    } catch (err) {
+      if (s.req !== req) return;
+      s.status = "error"; s.error = err.message || "The test couldn't run.";
+    }
+    if (showing(p, "test")) renderDetail();
+  }
+
+  // What to fetch when a tab (or a person) comes into view.
+  function runTabLoader() {
+    const p = current();
+    if (!p) return;
+    if (state.tab === "perms") ensureTools();
+    else if (state.tab === "conv") ensureConv(p);
+    else if (state.tab === "usage") ensureUsage(p);
+    else if (state.tab === "test") runSim(p);
+  }
+  function activateTab(id) {
+    state.tab = id;
+    renderDetail();
+    runTabLoader();
+  }
+
+  function loadingBlock(label) {
+    return el("div", { class: "ch-state" }, [icon("info"), el("div", { class: "ch-state__t" }, label)]);
+  }
+  function errorBlock(message, retry) {
+    return el("div", { class: "ch-state" }, [icon("warn"), el("div", { class: "ch-state__t" }, "Couldn't load this"),
+      el("div", { class: "ch-state__d" }, message), el("button", { type: "button", class: "btn btn--ghost btn--sm", onclick: retry }, "Try again")]);
+  }
+
+  function messageNode(e) {
+    const mine = e.dir === "in";
+    const wrap = el("div", { class: "ch-msg " + (mine ? "ch-msg--in" : "ch-msg--out"), "data-ch": mine && e.allowed === false ? "bad" : null });
+    const meta = el("div", { class: "ch-msg__meta" }, [
+      el("span", null, mine ? "They wrote" : "Jarvis"),
+      clockOf(e.at) ? el("span", { class: "ch-msg__time" }, clockOf(e.at)) : null,
+    ]);
+    if (mine) {
+      meta.appendChild(tag(e.context === "group" ? "group" : "DM", null, null));
+      if (e.allowed === false) meta.appendChild(tag("Turned away", "bad", "blocked"));
+      else if (e.may_use_tools) meta.appendChild(tag("tools on", "limited", "tool"));
+    } else {
+      if (e.ok === false) meta.appendChild(tag("Not delivered", "bad", "warn"));
+      if (e.provider) meta.appendChild(el("span", { class: "ch-msg__prov" }, e.provider));
+    }
+    wrap.appendChild(meta);
+    // Always text. These are strangers' words and the model's.
+    const body = el("div", { class: "ch-msg__text" }, e.text || "");
+    if (!e.text) body.classList.add("is-empty");
+    wrap.appendChild(body);
+    if (e.clipped) wrap.appendChild(el("div", { class: "ch-msg__more" }, "(shortened here — the full text is in the log)"));
+    if (mine && e.allowed === false) {
+      wrap.appendChild(el("div", { class: "ch-msg__why" }, [icon("info"), el("span", null, `Stopped at “${e.stage || "gate"}”${e.reason ? ": " + e.reason : ""}`)]));
+    }
+    if (!mine && e.ok === false && e.error) {
+      wrap.appendChild(el("div", { class: "ch-msg__why" }, [icon("warn"), el("span", null, e.error)]));
+    }
+    if (e.via === "thread") wrap.title = "An older reply: matched to them because this chat is a DM with only them.";
+    return wrap;
+  }
+
+  function renderConv(p) {
+    const pane = el("div", { class: "ch-tabpane", id: "ch-pane-conv", role: "tabpanel", "aria-labelledby": "ch-tab-conv" });
+    const s = convSlot(p);
+    if (s.status === "idle" || (s.status === "loading" && !s.data)) { pane.appendChild(loadingBlock("Reading the log…")); return pane; }
+    if (s.status === "error" && !s.data) { pane.appendChild(errorBlock(s.error, () => { s.status = "idle"; ensureConv(p); })); return pane; }
+    const d = s.data || { entries: [], total: 0, shown: 0, threads: 0, unattributed_replies: 0 };
+    const head = el("div", { class: "ch-conv__head" }, [
+      el("div", { class: "ch-row__hint" }, [convNote(d), d.threads > 1 ? ` Across ${d.threads} chats.` : ""]),
+      el("button", { type: "button", class: "btn btn--ghost btn--sm", disabled: s.status === "loading", onclick: () => { s.status = "idle"; ensureConv(p); } }, [icon("refresh"), "Refresh"]),
+    ]);
+    pane.appendChild(head);
+    if (d.total > d.shown && s.limit < CONV_MAX) {
+      pane.appendChild(el("button", { type: "button", class: "btn btn--ghost btn--sm ch-conv__older", disabled: s.status === "loading", onclick: () => ensureConv(p, true) }, "Show older messages"));
+    } else if (d.total > d.shown) {
+      pane.appendChild(el("div", { class: "ch-row__hint" }, `That's the most the panel shows (${CONV_MAX}). The full history is in the log: jarvis channels-log ${p.platform} <thread>.`));
+    }
+    if (!d.entries.length) {
+      pane.appendChild(el("div", { class: "ch-empty" }, [el("b", null, "Nothing here yet. "), "Messages appear once they write in. If you've turned off ", el("code", null, "log_conversations"), " for this platform, nothing is recorded."]));
+      return pane;
+    }
+    const today = localDay();
+    for (const g of groupByDay(d.entries)) {
+      pane.appendChild(el("div", { class: "ch-day" }, dayLabel(g.day, today)));
+      const col = el("div", { class: "ch-conv" });
+      g.entries.forEach((e) => col.appendChild(messageNode(e)));
+      pane.appendChild(col);
+    }
+    if (d.unattributed_replies > 0) {
+      pane.appendChild(el("div", { class: "ch-row__note ch-row__note--info" }, [icon("info"),
+        el("span", null, `${d.unattributed_replies} older repl${d.unattributed_replies === 1 ? "y" : "ies"} in group chats ${d.unattributed_replies === 1 ? "isn't" : "aren't"} shown: before replies were tagged with who they were for, a group reply couldn't be tied to one person. New replies are.`)]));
+    }
+    return pane;
+  }
+
+  function renderUsage(p) {
+    const pane = el("div", { class: "ch-tabpane", id: "ch-pane-usage", role: "tabpanel", "aria-labelledby": "ch-tab-usage" });
+    const s = usageSlot(p);
+    if (s.status === "idle" || (s.status === "loading" && !s.data)) { pane.appendChild(loadingBlock("Adding it up…")); return pane; }
+    if (s.status === "error" && !s.data) { pane.appendChild(errorBlock(s.error, () => { s.status = "idle"; ensureUsage(p); })); return pane; }
+    const d = s.data;
+    const w = d.window, m = d.messages, plat = PLATFORMS[p.platform] ? PLATFORMS[p.platform].label : p.platform;
+
+    const range = el("div", { class: "ch-chips", role: "group", "aria-label": "Time range" }, [7, 30, 90].map((n) =>
+      el("button", { type: "button", class: "ch-chip" + (d.days === n ? " is-active" : ""), "aria-pressed": d.days === n ? "true" : "false", onclick: () => ensureUsage(p, n) }, `${n} days`)));
+    pane.appendChild(el("div", { class: "ch-conv__head" }, [range,
+      el("button", { type: "button", class: "btn btn--ghost btn--sm", disabled: s.status === "loading", onclick: () => { s.status = "idle"; ensureUsage(p); } }, [icon("refresh"), "Refresh"])]));
+
+    if (!d.has_ledger) {
+      pane.appendChild(el("div", { class: "ch-row__note ch-row__note--info" }, [icon("info"),
+        el("span", null, "Tokens and tool calls haven't been recorded yet. They're counted from the next message Jarvis answers; the message counts below cover the whole history.")]));
+    } else if (!d.all_time.asks) {
+      pane.appendChild(el("div", { class: "ch-row__note ch-row__note--info" }, [icon("info"),
+        el("span", null, `Nothing counted for them since tracking began (${dateOnly(d.tracking_since)}).`)]));
+    }
+
+    pane.appendChild(el("div", null, [el("div", { class: "ch-section-title" }, `Last ${d.days} days`), el("div", { class: "ch-summary" }, [
+      statCard("Questions answered", String(w.asks), w.failed ? `${w.failed} failed` : "None failed", w.failed ? "limited" : "on"),
+      statCard("Tokens", fmtTokens(w.total_tokens), w.asks ? `about ${fmtTokens(w.avg_tokens_per_ask)} each` : "—", "limited"),
+      statCard("Tool calls", String(w.tool_calls), d.tools.length ? `${d.tools.length} different tool${d.tools.length === 1 ? "" : "s"}` : "—", w.tool_calls ? "limited" : "off"),
+      statCard("Messages sent", String(m.sent), m.turned_away ? `${m.turned_away} turned away` : "None turned away", m.turned_away ? "bad" : "off"),
+      statCard("Replies", String(m.replies), "Jarvis sent them", "off"),
+      statCard("Share of " + plat, d.share_of_platform === null ? "—" : `${d.share_of_platform}%`, d.share_of_platform === null ? "No usage counted yet." : `of ${fmtTokens(d.platform_total_tokens)} tokens`, "off"),
+    ])]));
+
+    const bars = barModel(d.series);
+    const chart = el("div", { class: "ch-bars", role: "img", "aria-label": `Tokens per day, last ${d.days} days` });
+    bars.forEach((b) => chart.appendChild(el("span", { class: "ch-bar" + (b.tokens ? "" : " is-zero"), style: `height:${b.pct}%`, title: `${b.date}: ${b.asks} answered, ${fmtTokens(b.tokens)} tokens` })));
+    pane.appendChild(el("div", null, [el("div", { class: "ch-section-title" }, ["Tokens per day", el("span", { class: "ch-section-title__aside" }, `${d.since} → today`)]), chart]));
+
+    pane.appendChild(el("div", null, [el("div", { class: "ch-section-title" }, "Where the tokens went"), el("dl", { class: "ch-facts" }, [
+      el("div", null, [el("dt", null, "Sent to the model"), el("dd", null, fmtTokens(w.input_tokens))]),
+      el("div", null, [el("dt", null, "Written by the model"), el("dd", null, fmtTokens(w.output_tokens))]),
+      el("div", null, [el("dt", null, "Extra thinking"), el("dd", null, fmtTokens(w.thinking_tokens))]),
+      el("div", null, [el("dt", null, "Requests to providers"), el("dd", null, String(w.requests))]),
+    ])]));
+
+    if (d.tools.length) {
+      pane.appendChild(el("div", null, [el("div", { class: "ch-section-title" }, "Tools they caused"),
+        el("ul", { class: "ch-notes" }, d.tools.map((t) => el("li", null, `${t.tool} — ${t.calls} call${t.calls === 1 ? "" : "s"}`)))]));
+    }
+    if (d.providers.length) {
+      pane.appendChild(el("div", null, [el("div", { class: "ch-section-title" }, "Answered by"),
+        el("ul", { class: "ch-notes" }, d.providers.map((x) => el("li", null, `${x.provider} — ${x.asks} answer${x.asks === 1 ? "" : "s"}, ${fmtTokens(x.total_tokens)} tokens`)))]));
+    }
+    pane.appendChild(el("div", { class: "ch-row__hint" }, [
+      "Tokens are the provider's own count, not money — no prices are known here. ",
+      d.tracking_since ? `Counting began ${dateOnly(d.tracking_since)}; anything earlier was never tied to a person.` : "",
+      " Ever, for them: ", `${d.all_time.asks} answer${d.all_time.asks === 1 ? "" : "s"}, ${fmtTokens(d.all_time.total_tokens)} tokens, ${m.sent_all_time} message${m.sent_all_time === 1 ? "" : "s"} sent.`,
+    ]));
+    return pane;
+  }
+  function dateOnly(at) { return dayOf(at) || "—"; }
+
+  const STATE_GLYPH = { pass: "✓", fail: "✗", skipped: "–" };
+  const STATE_CH = { pass: "on", fail: "bad", skipped: "off" };
+
+  function renderTest(p) {
+    const pane = el("div", { class: "ch-tabpane", id: "ch-pane-test", role: "tabpanel", "aria-labelledby": "ch-tab-test" });
+    const s = simSlot(p);
+    pane.appendChild(el("div", null, [
+      el("div", { class: "ch-section-title" }, "Test as " + displayName(p)),
+      el("div", { class: "ch-row__hint" }, "See what Jarvis would do with a message from them. Nothing is sent, no model is called, and nothing is saved — it won't appear in their conversation or their usage. What they say doesn't matter to the gate, only who they are and where they say it."),
+    ]));
+
+    const seg = (label, value) => el("button", { type: "button", class: "ch-seg__btn", id: `ch-seg-${value}`, "aria-pressed": s.context === value ? "true" : "false",
+      onclick: () => { if (s.context === value) return; s.context = value; runSim(p); } }, label);
+    const controls = el("div", { class: "ch-test__controls" }, [
+      el("div", { class: "ch-seg", role: "group", "aria-label": "Where they write" }, [seg("Direct message", "dm"), seg("Group chat", "group")]),
+    ]);
+    if (s.context === "group") {
+      const box = el("input", { type: "checkbox", id: "ch-test-mention", checked: s.mentioned ? "" : null });
+      box.checked = !!s.mentioned;
+      box.addEventListener("change", () => { s.mentioned = box.checked; runSim(p); });
+      controls.appendChild(el("label", { class: "ch-test__check", for: "ch-test-mention" }, [box, "They @mention Jarvis"]));
+    }
+    controls.appendChild(el("button", { type: "button", class: "btn btn--primary btn--sm", disabled: s.status === "loading", onclick: () => runSim(p) }, s.status === "loading" ? "Testing…" : "Run again"));
+    pane.appendChild(controls);
+
+    if (s.status === "error" && !s.result) { pane.appendChild(errorBlock(s.error, () => runSim(p))); return pane; }
+    const r = s.result;
+    if (!r) { pane.appendChild(loadingBlock("Asking the gate…")); return pane; }
+    const out = el("div", { class: "ch-test__out" + (s.status === "loading" ? " is-stale" : "") });
+
+    const failRow = (r.stages || []).find((x) => x.state === "fail");
+    const where = r.context === "dm" ? "a direct message" : (r.mentioned ? "a group chat, @mentioning Jarvis" : "a group chat, without mentioning Jarvis");
+    out.appendChild(el("div", { class: "ch-verdict", "data-ch": r.answered ? "on" : "off" }, [
+      el("div", { class: "ch-verdict__k" }, "In " + where),
+      el("div", { class: "ch-verdict__v" }, r.answered ? "Jarvis would answer" : "Jarvis would ignore it"),
+      el("div", { class: "ch-verdict__s" }, r.answered ? "The message gets through the gate." : `Stopped at “${failRow ? failRow.label : r.stage}”${r.reason ? " — " + r.reason : ""}.`),
+    ]));
+
+    out.appendChild(el("div", null, [el("div", { class: "ch-section-title" }, "The gate, step by step"),
+      el("ol", { class: "ch-stages" }, (r.stages || []).map((x) => el("li", { class: "ch-stage", "data-ch": STATE_CH[x.state] || "off" }, [
+        el("span", { class: "ch-stage__g", "aria-label": x.state }, STATE_GLYPH[x.state] || "?"),
+        el("span", { class: "ch-stage__l" }, x.label),
+        x.detail ? el("span", { class: "ch-stage__d" }, x.detail) : (x.state === "skipped" ? el("span", { class: "ch-stage__d" }, "not reached") : null),
+      ])))]));
+
+    const t = r.tools || { state: "none" };
+    const toolHead = t.state === "all" ? statCard("Tools", "Everything", "Any tool the platform allows.", "limited")
+      : t.state === "custom" ? statCard("Tools", `${t.count} allowed`, "Only the ones ticked for them.", "limited")
+        : statCard("Tools", "None", r.answered ? "Answers only, touches nothing." : "Not answered, so no tools either.", "off");
+    const toolBox = el("div", null, [el("div", { class: "ch-section-title" }, "Tools"), toolHead, el("div", { class: "ch-row__hint" }, t.why || "")]);
+    if (t.state === "custom" && (t.allowed || []).length) {
+      toolBox.appendChild(el("div", { class: "ch-gset__chips ch-test__tools" }, t.allowed.map((n) => el("span", { class: "ch-tag", "data-ch": "limited" }, n))));
+      toolBox.appendChild(el("div", { class: "ch-row__hint" }, `Plus helpers Jarvis needs to find them: ${(t.plumbing || []).join(", ")}.`));
+    }
+    out.appendChild(toolBox);
+
+    (r.notes || []).forEach((n) => out.appendChild(el("div", { class: "ch-row__note ch-row__note--info" }, [icon("info"), el("span", null, n)])));
+    if (r.saved === false && r.model_called === false) {
+      out.appendChild(el("div", { class: "ch-test__foot" }, [icon("shield"), "Nothing was sent, saved or counted, and no model was called."]));
+    }
+    pane.appendChild(out);
+    return pane;
   }
 
   // ---- right -------------------------------------------------------------
@@ -1259,7 +1625,8 @@
     }
     if (typing) return;
     if (e.key === "/") { e.preventDefault(); dom.search.focus(); return; }
-    if (e.key === "1" || e.key === "2") { state.tab = e.key === "1" ? "profile" : "perms"; renderDetail(); return; }
+    const byKey = { 1: "profile", 2: "perms", 3: "conv", 4: "usage", 5: "test" }[e.key];
+    if (byKey) { activateTab(byKey); return; }
     if (e.key === "ArrowDown" || e.key === "ArrowUp") {
       const rows = visiblePeople();
       if (!rows.length) return;
@@ -1276,7 +1643,11 @@
     dom = grabDom();
     if (!dom) return false;
     dom.search.addEventListener("input", () => { state.search = dom.search.value; renderChips(); renderList(); });
-    dom.refresh.addEventListener("click", () => { state.tools = null; state.toolsState = "idle"; load(true); });
+    dom.refresh.addEventListener("click", () => {
+      state.tools = null; state.toolsState = "idle";
+      state.conv.clear(); state.usage.clear(); state.sim.clear();
+      load(true).then(runTabLoader);
+    });
     if (dom.addBtn) dom.addBtn.addEventListener("click", openAdd);
     if (dom.addOverlay) {
       dom.addCancel.addEventListener("click", closeAdd);
@@ -1298,7 +1669,7 @@
     state.prevFocus = document.activeElement;
     dom.overlay.hidden = false;
     state.confirm = null;
-    load(false);
+    load(false).then(runTabLoader);
     dom.search.focus({ preventScroll: true });
   }
 
@@ -1306,6 +1677,7 @@
     if (!dom || dom.overlay.hidden) return;
     if (state.drafts.size && !global.confirm("You have unsaved tool changes. Close anyway?")) return;
     state.drafts.clear();
+    state.conv.clear(); state.usage.clear(); state.sim.clear();   // don't keep their messages around while it's closed
     state.adding = false; state.editingName = null; state.confirmRemove = null;
     renderAdd();
     dom.overlay.hidden = true;
@@ -1316,6 +1688,7 @@
   // _pure: the logic with no DOM, for tests/verify_channels_panel.js.
   global.JarvisChannels = {
     open, close,
-    _pure: { initials, hueFor, relTime, filterPeople, postureOf, sameScope, scopeOf, groupTools, displayName, STATE_FILTERS },
+    _pure: { initials, hueFor, relTime, filterPeople, postureOf, sameScope, scopeOf, groupTools, displayName, STATE_FILTERS,
+             dayOf, clockOf, localDay, dayLabel, groupByDay, fmtTokens, barModel, convNote },
   };
 })(window);

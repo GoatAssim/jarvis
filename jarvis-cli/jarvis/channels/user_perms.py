@@ -214,6 +214,43 @@ def effective_tool_scope(platform, user_id):
     return frozenset(tools["allow"]) | frozenset(PLUMBING_TOOLS)
 
 
+def resolve_tool_access(platform, user_id, may_use_tools):
+    """The gateway's per-message tool decision, in ONE place.
+
+    `may_use_tools` is what the gate said (permissions.Decision). Returns
+    (may_use_tools, tool_scope, label, problem):
+
+      may_use_tools  the final answer; this can only be False where the gate
+                     said True, never the other way round
+      tool_scope     None (no per-person limit) or the frozenset to put in
+                     JARVIS_ALLOWED_TOOLS for this ask
+      label          the short form the gateway log line prints
+      problem        non-empty when the answer is "off" BECAUSE something went
+                     wrong reading the limits, for the caller to log
+
+    base.handle_message and the Channels panel's "Test as this person" both
+    call this, so the dry run cannot drift from what a real message gets. It
+    fails closed exactly as before: limits that are unreadable or fail to load
+    mean this message runs with tools off."""
+    if not may_use_tools:
+        return False, None, "off", ""
+    try:
+        scope = effective_tool_scope(platform, user_id)
+    except PermsUnreadable as exc:
+        return (False, None, "off (limits unreadable)",
+                f"per-person tool limits unreadable ({exc}); "
+                f"answering without tools")
+    except Exception as exc:  # noqa: BLE001 -- unknown limits mean none
+        return (False, None, "off (limits failed)",
+                f"per-person tool limits failed ({exc}); "
+                f"answering without tools")
+    if scope is None:
+        return True, None, "on", ""
+    if not scope:
+        return False, scope, "off (person's list is empty)", ""
+    return True, scope, f"custom ({len(scope)})", ""
+
+
 def dm_allowed(platform, user_id):
     """May Jarvis message this person on the owner's behalf? Read by send_dm.
     An unreadable file answers False: a restriction we cannot read is treated

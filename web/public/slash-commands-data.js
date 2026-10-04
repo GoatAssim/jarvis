@@ -613,6 +613,7 @@ window.JARVIS_SLASH_COMMANDS = /*JSON-BEGIN*/
         "ctools-toggle",
         "ctools-templates",
         "ctools-suggest",
+        "ctools-agent",
         "tool-disable-set",
         "command-disable-set",
         "disabled-list",
@@ -652,7 +653,10 @@ window.JARVIS_SLASH_COMMANDS = /*JSON-BEGIN*/
         "channels-rename",
         "channels-remove-person",
         "channels-link",
-        "channels-unlink"
+        "channels-unlink",
+        "channels-conversation",
+        "channels-usage",
+        "channels-user-test"
       ],
       "example": "/channels",
       "preview": "Open Channels."
