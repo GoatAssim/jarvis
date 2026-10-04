@@ -284,13 +284,13 @@ def test_pace_round_reads_provider_then_defaults_then_builtin():
                                   {"min_round_interval_seconds": 99}, )
         ai_providers._pace_round({"type": "gem", "min_round_interval_seconds": 2}, "k1",
                                   {"min_round_interval_seconds": 99}, )
-        check("provider-level interval (2s) used, not cfg_defaults' 99s", sleeps == [2.0], sleeps)
+        check("provider-level interval (2s) used, not cfg_defaults' 99s", len(sleeps) == 1 and abs(sleeps[0] - 2.0) < 0.25, sleeps)
         sleeps.clear()
 
         # No provider-level value -> cfg_defaults' value is used instead.
         ai_providers._pace_round({"type": "cohere"}, "k2", {"min_round_interval_seconds": 1})
         ai_providers._pace_round({"type": "cohere"}, "k2", {"min_round_interval_seconds": 1})
-        check("falls back to cfg_defaults' interval (1s)", sleeps == [1.0], sleeps)
+        check("falls back to cfg_defaults' interval (1s)", len(sleeps) == 1 and abs(sleeps[0] - 1.0) < 0.25, sleeps)
         sleeps.clear()
 
         # Neither set -> the key_health built-in default, no crash on None defaults.

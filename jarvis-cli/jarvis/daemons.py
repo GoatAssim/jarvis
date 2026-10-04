@@ -291,6 +291,43 @@ def get(daemon_id):
     return _load_registry().get(normalize_id(daemon_id))
 
 
+def _split_command(command, windows=None):
+    """Split a command string into argv the way the OS will actually see it.
+
+    On Windows `shlex.split(..., posix=False)` leaves the quote characters
+    INSIDE the tokens, so `"C:\\Program Files\\Python\\python.exe" -c "..."`
+    became an argv[0] that literally starts with a `"` and Popen failed with
+    [WinError 2] (L.27 / test_l27 on Windows). CommandLineToArgvW is what
+    every Windows program's own argv is built from, so it is used first;
+    if the WinAPI call is unavailable the fallback is shlex(posix=False)
+    plus stripping ONE surrounding quote pair per token, which is the same
+    result for ordinary command lines. `windows` is overridable so the
+    fallback can be exercised from a non-Windows box.
+    """
+    if windows is None:
+        windows = os.name == "nt"
+    if not windows:
+        return shlex.split(command, posix=True)
+    if not command.strip():
+        # CommandLineToArgvW("") returns the CURRENT executable's path.
+        return []
+    try:
+        import ctypes
+        argc = ctypes.c_int(0)
+        argv_p = ctypes.windll.shell32.CommandLineToArgvW(
+            ctypes.c_wchar_p(command), ctypes.byref(argc))
+        if argv_p:
+            try:
+                return [argv_p[i] for i in range(argc.value)]
+            finally:
+                ctypes.windll.kernel32.LocalFree(argv_p)
+    except Exception:  # noqa: BLE001 - no WinAPI here; use the fallback
+        pass
+    parts = shlex.split(command, posix=False)
+    return [p[1:-1] if len(p) >= 2 and p[0] == p[-1] and p[0] in "\"'" else p
+            for p in parts]
+
+
 def add(daemon_id, command, name="", cwd="", env=None, supports_stdin=False,
         description="", autostart=False, shell=False,
         restart=RESTART_NEVER, restart_delay=DEFAULT_RESTART_DELAY,
@@ -324,7 +361,7 @@ def add(daemon_id, command, name="", cwd="", env=None, supports_stdin=False,
             argv = [command.strip()]
         else:
             try:
-                argv = shlex.split(command, posix=(os.name != "nt"))
+                argv = _split_command(command)
             except ValueError as exc:
                 return False, f"could not parse command: {exc}"
     else:
@@ -420,7 +457,7 @@ def edit(daemon_id, **fields):
                 value = [value.strip()]
             else:
                 try:
-                    value = shlex.split(value, posix=(os.name != "nt"))
+                    value = _split_command(value)
                 except ValueError as exc:
                     return False, f"could not parse command: {exc}"
         if key == "restart" and value not in RESTART_POLICIES:

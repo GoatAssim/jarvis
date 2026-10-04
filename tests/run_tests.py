@@ -31,6 +31,7 @@ a filter matched nothing.
 """
 
 import argparse
+import re
 import subprocess
 import sys
 import time
@@ -108,6 +109,38 @@ def last_line(text):
     return "(no output)"
 
 
+_FAIL_LINE = re.compile(r"^\s*(FAILED|FAIL)\b|^\s*-\s+\S.*:\s")
+_EXC_LINE = re.compile(r"^[\w.]*(Error|Exception|Exit)\b.*")
+_COUNT_LINE = re.compile(r"\d+\s*(/\s*\d+)?\s*(passed|checks passed)", re.I)
+
+
+def failure_summary(text, limit=6):
+    """Why a test file failed, as a short list of lines.
+
+    last_line() alone is misleading for a FAILING test: a test that prints
+    "42 passed, 2 failed" to stdout and then has some library write a
+    "[tools] Auto-discovered ..." notice to stderr ends with that notice as
+    its last line, hiding the real failure (this is exactly what happened
+    with test_key_health / test_path_tools on Windows). So prefer, in order:
+    the FAILED/FAIL lines the tests print themselves, the final exception
+    line of a traceback, and the "N passed, M failed" count line.
+    """
+    lines = [ln.rstrip() for ln in text.splitlines() if ln.strip()]
+    picked = [ln.strip() for ln in lines if _FAIL_LINE.search(ln)]
+    exc = [ln.strip() for ln in lines if _EXC_LINE.match(ln)]
+    if exc:
+        picked.append(exc[-1])
+    counts = [ln.strip() for ln in lines if _COUNT_LINE.search(ln)]
+    if counts:
+        picked.append(counts[-1])
+    seen, out = set(), []
+    for ln in picked:
+        if ln not in seen:
+            seen.add(ln)
+            out.append(ln)
+    return out[:limit] or [last_line(text)]
+
+
 def print_detailed(result):
     path, ok = result["path"], result["ok"]
     status = "PASS" if ok else "FAIL"
@@ -120,7 +153,13 @@ def print_detailed(result):
 def print_simple(result):
     path, ok = result["path"], result["ok"]
     mark = "ok  " if ok else "FAIL"
-    summary = last_line(result["output"])
+    if ok:
+        # Prefer the test's own "N passed" line over whatever a library
+        # happened to write to stderr last.
+        counts = [ln.strip() for ln in result["output"].splitlines() if _COUNT_LINE.search(ln)]
+        summary = counts[-1] if counts else last_line(result["output"])
+    else:
+        summary = failure_summary(result["output"])[0]
     print(f"{mark}  {path.name:<45} {result['elapsed']:6.2f}s  {summary}")
 
 
@@ -190,7 +229,10 @@ def main():
         print("\nFailed:")
         for r in failed:
             tag = "TIMEOUT" if r["timed_out"] else f"exit {r['returncode']}"
-            print(f"  - {r['path'].name}  ({tag}): {last_line(r['output'])}")
+            reasons = failure_summary(r["output"])
+            print(f"  - {r['path'].name}  ({tag}): {reasons[0]}")
+            for extra in reasons[1:]:
+                print(f"        {extra}")
 
     return 0 if not failed else 1
 
