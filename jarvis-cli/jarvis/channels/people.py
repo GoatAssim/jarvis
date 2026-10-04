@@ -101,6 +101,31 @@ def _clean_text(value, limit):
     return text[:limit].strip()
 
 
+# A profile picture is a URL the PLATFORM gave us, rendered by the owner's
+# browser in the Channels panel — so it is held to an allow-list of image
+# CDNs and to https. Nothing a chat guest TYPES ever reaches this field (the
+# gateways pass the platform's own avatar URL), but the panel would load
+# whatever is stored, and a stored URL is the one place an unexpected host
+# could make the owner's browser call out.
+AVATAR_HOSTS = ("discordapp.com", "discordapp.net", "discord.com",
+                "cdninstagram.com", "fbcdn.net")
+MAX_AVATAR_LEN = 300
+
+
+def _clean_avatar(value):
+    """The URL if it is a short https URL on a known image CDN, else ''."""
+    text = str(value or "").strip()
+    if not text or len(text) > MAX_AVATAR_LEN or not text.startswith("https://"):
+        return ""
+    host = text[len("https://"):].split("/", 1)[0].split("?", 1)[0].lower()
+    host = host.split("@")[-1].split(":")[0]
+    if not any(host == h or host.endswith("." + h) for h in AVATAR_HOSTS):
+        return ""
+    if any(ch in text for ch in " \t\r\n\"'<>"):
+        return ""
+    return text
+
+
 def _blank(platform, user_id, handle=""):
     now = time.time()
     return {
@@ -108,6 +133,7 @@ def _blank(platform, user_id, handle=""):
         "user_id": str(user_id or ""),
         "handle": _clean_text(handle, MAX_NAME_LEN).lstrip("@").lower(),
         "name": "",
+        "avatar": "",
         "notes": [],
         "first_seen": now,
         "last_seen": now,
@@ -126,13 +152,18 @@ def get(platform, user_id):
     return entry if isinstance(entry, dict) else None
 
 
-def touch(platform, user_id, handle="", is_owner=False):
+def touch(platform, user_id, handle="", is_owner=False, avatar=""):
     """Record that this person just sent an accepted message.
 
     Creates the record on first contact, bumps last_seen/messages after
     that, and refreshes the handle (people rename themselves). Returns the
     record, which is what the caller renders into the prompt block — so
     the common path is one read, one write, no extra lookup.
+
+    `avatar` is the platform's profile-picture URL when the gateway has one;
+    an empty value never erases a picture we already have (Instagram's
+    webhook does not carry one, so a later message must not wipe a stored
+    picture).
 
     `is_owner` is stored rather than recomputed at read time because the
     config's `owner` field can be edited later and it's genuinely useful
@@ -148,6 +179,9 @@ def touch(platform, user_id, handle="", is_owner=False):
         entry = _blank(platform, user_id, handle)
     if handle:
         entry["handle"] = _clean_text(handle, MAX_NAME_LEN).lstrip("@").lower()
+    picture = _clean_avatar(avatar)
+    if picture:
+        entry["avatar"] = picture
     entry["is_owner"] = bool(is_owner)
     entry["last_seen"] = time.time()
     entry["messages"] = int(entry.get("messages") or 0) + 1
@@ -200,6 +234,17 @@ def set_follow(platform, user_id, status):
         raise ValueError(f"unknown follow state '{status}' — expected one of: "
                          + ", ".join(FOLLOW_STATES))
     return _update(platform, user_id, follow=status)
+
+
+def set_owner_flag(platform, user_id, flag):
+    """Record whether this person is the configured owner RIGHT NOW.
+
+    touch() already refreshes this on every message, but the owner can be
+    changed from the Channels panel between two messages, and the panel reads
+    this field. The config's `owner` stays the source of truth for who IS the
+    owner (permissions.is_owner reads it); this only keeps the record from
+    contradicting it until the next message."""
+    return _update(platform, user_id, is_owner=bool(flag))
 
 
 def mark_notified(platform, user_id):

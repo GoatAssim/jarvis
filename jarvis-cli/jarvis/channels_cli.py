@@ -16,12 +16,13 @@ import sys
 from .channels import PLATFORMS, PERM_SETS
 from .channels import config as channel_config
 from .channels import directory, outbound, people, permissions, transcript
+from .channels import user_admin
 
 COMMANDS = (
     "channels-config", "channels-status", "channels-set", "channels-allow",
     "channels-deny", "channels-test", "channels-whoami", "channels-log",
     "channels-directory", "channels-people", "channels-follow",
-    "channels-block",
+    "channels-block", "channels-users", "channels-user", "channels-user-tools",
     "discord-daemon", "instagram-serve", "logs-search",
 )
 
@@ -38,6 +39,12 @@ USAGE = """channel commands:
   channels-people [platform] [--pending] who has messaged Jarvis, and what it knows about them
   channels-follow <platform> <id|@handle> approve someone: adds them to reply_allowlist
   channels-block  <platform> <id|@handle> refuse someone, and stop being asked about them
+  channels-users [platform]             every registered person + every switch (JSON)
+  channels-user  <platform> <id> <switch> <on|off>
+                                        flip one switch for one person; <switch> is one of:
+                                        dm, reply, tool, owner, send_dm, blocked
+  channels-user-tools <platform> <id> inherit | custom [tool ...]
+                                        which tools that person may run (custom = ONLY those)
   discord-daemon                        run the Discord bot (foreground)
   instagram-serve                       run the Instagram webhook (foreground)
   logs-search <query> [--mode m] [--origin o] [--source s] [--direction d]
@@ -235,6 +242,46 @@ def handle(argv):
                      "also run: jarvis channels-allow "
                      f"{platform} tool {user_id}"),
         }, indent=2))
+        sys.exit(0 if ok else 1)
+
+    if cmd == "channels-users":
+        platform = rest[0] if rest and rest[0] in PLATFORMS else None
+        print(json.dumps(user_admin.list_view(platform), indent=2))
+        return
+
+    if cmd == "channels-user":
+        if len(rest) < 4:
+            _fail("usage: channels-user <platform> <id> <switch> <on|off>  "
+                  "(switch: " + ", ".join(user_admin.FLAGS) + ")")
+        platform, entry, flag, raw = rest[0], rest[1], rest[2].lower(), rest[3]
+        value = _coerce(raw)
+        if not isinstance(value, bool):
+            _fail(f"'{raw}' isn't on or off")
+        # Accept an id or a @handle, resolved only against people who have
+        # actually messaged in (people.py) — never a guess, never directory.py,
+        # because this changes what someone may do.
+        uid = entry.strip().lstrip("@")
+        if not (uid.isdigit() and people.get(platform, uid)):
+            found = None
+            for rec in people.all_people(platform if platform in PLATFORMS else None):
+                if uid.lower() in ((rec.get("handle") or "").lower(),):
+                    found = rec.get("user_id")
+                    break
+            uid = found or uid
+        ok, err, note = user_admin.set_flag(platform, uid, flag, value)
+        print(json.dumps({"ok": ok, "error": err, "note": note,
+                          "platform": platform, "user_id": uid,
+                          "switch": flag, "value": value}, indent=2))
+        sys.exit(0 if ok else 1)
+
+    if cmd == "channels-user-tools":
+        if len(rest) < 3:
+            _fail("usage: channels-user-tools <platform> <id> inherit | custom [tool ...]")
+        platform, uid, mode = rest[0], rest[1].strip().lstrip("@"), rest[2].lower()
+        ok, err = user_admin.set_tools(platform, uid, mode, rest[3:])
+        print(json.dumps({"ok": ok, "error": err, "platform": platform,
+                          "user_id": uid, "mode": mode,
+                          "tools": rest[3:] if mode == "custom" else []}, indent=2))
         sys.exit(0 if ok else 1)
 
     if cmd == "channels-log":

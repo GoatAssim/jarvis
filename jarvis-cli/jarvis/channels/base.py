@@ -40,7 +40,7 @@ import traceback
 
 from . import PLATFORMS
 from . import config as channel_config
-from . import dedupe, people, permissions, transcript
+from . import dedupe, people, permissions, transcript, user_perms
 
 # Serializes ask() calls so the JARVIS_ALLOWED_TOOLS mutation below is safe.
 _ASK_LOCK = threading.Lock()
@@ -133,7 +133,7 @@ def _scope_detail(msg):
 
 
 def _ask_jarvis(text, conv_id, may_use_tools, on_tool_call=None, platform="",
-                sender_context="", sender_env=""):
+                sender_context="", sender_env="", tool_scope=None):
     """One ask, with tools allowed or forbidden for this specific sender.
 
     Imported lazily: ai_client pulls in the whole tool catalog, and a
@@ -149,6 +149,15 @@ def _ask_jarvis(text, conv_id, may_use_tools, on_tool_call=None, platform="",
     under the same _ASK_LOCK as JARVIS_ALLOWED_TOOLS, for exactly the same
     reason: os.environ is process-global and this process handles several
     people's messages.
+
+    `tool_scope` narrows a sender who MAY use tools to a named set of them
+    (user_perms.effective_tool_scope): None leaves the ask exactly as it was,
+    a frozenset becomes the JARVIS_ALLOWED_TOOLS allowlist for this ask. It is
+    the same variable, set and restored under the same lock, as the
+    tools-off case — one enforcement point (tools.run_tool refuses anything
+    not in it), no second mechanism to drift. It can only ever SHRINK what
+    `may_use_tools` allows: a sender with tools off stays at "none" whatever
+    the scope says.
     """
     from .. import ai_client, commands_config, logs
 
@@ -186,10 +195,17 @@ def _ask_jarvis(text, conv_id, may_use_tools, on_tool_call=None, platform="",
             # and the entry label survives even if a chat ask somehow
             # lands in a pre-existing conversation.
             os.environ["JARVIS_LOG_SOURCE"] = platform
+        # What to write into JARVIS_ALLOWED_TOOLS for this ask, or None to
+        # leave it alone. Tools off always wins over any per-person scope.
+        restrict = None
         if not may_use_tools:
             # Empty string -> empty allowlist -> no tool reaches the model.
             # Note this is NOT the same as unsetting it (None = unrestricted).
-            os.environ["JARVIS_ALLOWED_TOOLS"] = ""
+            restrict = ""
+        elif tool_scope is not None:
+            restrict = ",".join(sorted(str(t) for t in tool_scope))
+        if restrict is not None:
+            os.environ["JARVIS_ALLOWED_TOOLS"] = restrict
         progress = {"attempt": "", "tool": ""}
         finished = threading.Event()
 
@@ -226,7 +242,7 @@ def _ask_jarvis(text, conv_id, may_use_tools, on_tool_call=None, platform="",
             # Restore exactly, including the "wasn't set at all" case —
             # leaving an empty string behind would silently disable tools
             # for every later message in this process.
-            if not may_use_tools:
+            if restrict is not None:
                 if previous is None:
                     os.environ.pop("JARVIS_ALLOWED_TOOLS", None)
                 else:
@@ -434,7 +450,8 @@ def handle_message(platform, msg, send, cfg=None, on_tool_call=None, decision=No
     try:
         is_owner = permissions.is_owner(cfg, msg)
         entry = people.touch(platform, msg.user_id,
-                             handle=msg.user_handle, is_owner=is_owner)
+                             handle=msg.user_handle, is_owner=is_owner,
+                             avatar=getattr(msg, "avatar", ""))
         sender_ctx = people.prompt_block(entry, platform)
         sender_env = json.dumps({
             "platform": platform,
@@ -452,14 +469,41 @@ def handle_message(platform, msg, send, cfg=None, on_tool_call=None, decision=No
         # identity block) rather than dropping the message.
         _log(f"sender identity unavailable: {exc}")
 
+    # --- which tools, exactly? --------------------------------------------
+    # The per-person narrowing from the Channels panel. It is looked up only
+    # when tools are already permitted (there is nothing to narrow
+    # otherwise), and it fails CLOSED: an unreadable user_perms.json means
+    # "this person's limits are unknown", so this one message runs with no
+    # tools rather than with the whole catalogue.
+    tool_scope = None
+    tools_label = "on" if decision.may_use_tools else "off"
+    may_use_tools = decision.may_use_tools
+    if may_use_tools:
+        try:
+            tool_scope = user_perms.effective_tool_scope(platform, msg.user_id)
+        except user_perms.PermsUnreadable as exc:
+            _log(f"per-person tool limits unreadable ({exc}); "
+                 f"answering without tools")
+            may_use_tools, tools_label = False, "off (limits unreadable)"
+        except Exception as exc:  # noqa: BLE001 — same stance: unknown = none
+            _log(f"per-person tool limits failed ({exc}); "
+                 f"answering without tools")
+            may_use_tools, tools_label = False, "off (limits failed)"
+        else:
+            if tool_scope is not None:
+                if not tool_scope:
+                    may_use_tools, tools_label = False, "off (person's list is empty)"
+                else:
+                    tools_label = f"custom ({len(tool_scope)})"
+
     _log(f"accepted {platform} msg from {msg.user_handle or msg.user_id} "
-         f"({'owner' if is_owner else 'guest'}, "
-         f"tools={'on' if decision.may_use_tools else 'off'})")
+         f"({'owner' if is_owner else 'guest'}, tools={tools_label})")
 
     try:
-        result = _ask_jarvis(msg.text, conv_id, decision.may_use_tools,
+        result = _ask_jarvis(msg.text, conv_id, may_use_tools,
                              on_tool_call=on_tool_call, platform=platform,
-                             sender_context=sender_ctx, sender_env=sender_env)
+                             sender_context=sender_ctx, sender_env=sender_env,
+                             tool_scope=tool_scope)
         text = (getattr(result, "text", "") or "").strip()
         provider = getattr(result, "provider", "") or ""
         if not text:

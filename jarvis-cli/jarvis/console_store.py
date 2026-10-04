@@ -258,6 +258,50 @@ def _cleared_through_seq(lines):
     return latest
 
 
+_TRIM_MARKER_PREFIX = "earlier output trimmed"
+
+
+def _merge_with_event_log(conv_id, lines):
+    """``full=True``: the console as the raw event log remembers it (L.38).
+
+    This store clips a line at MAX_LINE_CHARS and rotates its oldest lines out
+    at MAX_FILE_BYTES; the event log (raw_archive) kept every line whole. The
+    result is the union of the two by ``seq``: a line the store clipped gets its
+    full text back (``restored``), a line the store rotated away comes back
+    (``recovered``), and the store's own "earlier output trimmed" marker is
+    dropped once the lines it apologises for are back. A conversation with no
+    event log, or a log that adds nothing, comes back exactly as the store has
+    it -- so this can only add, never lose.
+    """
+    from . import raw_archive
+    logged = raw_archive.rebuild_console(conv_id)
+    if not logged:
+        return lines
+    by_seq = {l.get("seq"): l for l in lines if l.get("seq") is not None}
+    merged = dict(by_seq)
+    recovered_seqs = []
+    for e in logged:
+        seq = e.get("seq")
+        if seq is None:
+            continue
+        have = by_seq.get(seq)
+        if have is None:
+            merged[seq] = dict(e, recovered=True)
+            recovered_seqs.append(seq)
+        elif have.get("text") != e.get("text"):
+            merged[seq] = dict(have, text=e.get("text", ""), restored=True)
+    logged_seqs = {e.get("seq") for e in logged}
+    out = [l for l in lines if l.get("seq") is None]      # (none expected; keep, don't lose)
+    for seq, l in merged.items():
+        is_marker = (l.get("kind") == "status" and seq not in logged_seqs
+                     and str(l.get("text", "")).startswith(_TRIM_MARKER_PREFIX))
+        if is_marker and any(r < seq for r in recovered_seqs):
+            continue
+        out.append(l)
+    out.sort(key=lambda l: (l.get("seq") is None, l.get("seq") or 0))
+    return out
+
+
 def read(conv_id, *, since_seq=0, kinds=None, turn=None, limit=2000,
          after_last_clear=False, surface=None, full=False):
     """Replay query behind `GET /api/console/:id` (server.js shells out to
@@ -280,6 +324,9 @@ def read(conv_id, *, since_seq=0, kinds=None, turn=None, limit=2000,
     old conversation still shows something (E.6 step 7).
     """
     lines = _read_raw_lines(conv_id)
+    if full:
+        # L.38 (opt-in): replay from the raw event log -- see _merge_with_event_log.
+        lines = _merge_with_event_log(conv_id, lines)
     if not lines:
         return {"lines": [], "cleared_through_seq": None, "last_seq": None, "legacy": True}
 
@@ -306,20 +353,6 @@ def read(conv_id, *, since_seq=0, kinds=None, turn=None, limit=2000,
     if limit and len(out) > limit:
         out = out[-limit:]
         truncated = True
-    if full:
-        # L.38 (opt-in): a line this store clipped is restored to its full text
-        # from the raw event log, matched by seq. Lines never clipped are left
-        # alone; a conversation with no event log comes back exactly as stored.
-        # Off by default so existing replay is byte-for-byte what it was.
-        if any(str(l.get("text", "")).endswith("chars omitted)") for l in out):
-            from . import raw_archive
-            full_text = raw_archive.console_full_text(conv_id)
-            restored = []
-            for l in out:
-                if str(l.get("text", "")).endswith("chars omitted)") and l.get("seq") in full_text:
-                    l = dict(l, text=full_text[l["seq"]], restored=True)
-                restored.append(l)
-            out = restored
     return {
         "lines": out, "cleared_through_seq": cleared_through,
         "last_seq": last_seq, "legacy": False, "truncated": truncated,

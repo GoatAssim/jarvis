@@ -363,6 +363,7 @@
     search: "", source: "all", group: "all", safeguard: "any",
     collapsed: new Set(), busy: new Set(),
     editor: null, draft: null, run: null, prevFocus: null,
+    suggest: true,                      // Jarvis inline suggestions in the editor (L.33); on by default, one click to turn off
   };
   let dom = null;
 
@@ -371,10 +372,11 @@
       const p = JSON.parse(global.localStorage.getItem(PREF_KEY) || "{}");
       if (Array.isArray(p.collapsed)) state.collapsed = new Set(p.collapsed);
       if (typeof p.source === "string") state.source = p.source;
+      if (typeof p.suggest === "boolean") state.suggest = p.suggest;
     } catch (_) { /* private mode / bad JSON: defaults */ }
   }
   function savePrefs() {
-    try { global.localStorage.setItem(PREF_KEY, JSON.stringify({ collapsed: Array.from(state.collapsed), source: state.source })); }
+    try { global.localStorage.setItem(PREF_KEY, JSON.stringify({ collapsed: Array.from(state.collapsed), source: state.source, suggest: state.suggest })); }
     catch (_) { /* nowhere to save: fine */ }
   }
 
@@ -1033,9 +1035,15 @@
         body: "You’ve edited " + (ed.name || "this tool") + " without saving." });
       if (!ok) return false;
     }
+    disposeEditor();
     state.editor = null; state.view = "tool";
     restoreDetailBox();
     return true;
+  }
+
+  function disposeEditor() {
+    const ed = state.editor;
+    if (ed && ed.cm) { try { ed.cm.dispose(); } catch (_) { /* already gone */ } ed.cm = null; }
   }
 
   async function editFile(fileName) {
@@ -1063,9 +1071,8 @@
     renderSide();
     renderList();
     if (mode === "new") await loadTemplate(state.editor.template, true);
-    if (state.editor.errorLine) revealLine(state.editor.errorLine);
-    const focusEl = mode === "new" ? $("#tm-ed-name") : $("#tm-ed-code");
-    if (focusEl) focusEl.focus();
+    if (state.editor.errorLine) { state.editor.cm.setErrorLine(state.editor.errorLine); revealLine(state.editor.errorLine); }
+    if (mode === "new") { const n = $("#tm-ed-name"); if (n) n.focus(); } else state.editor.cm.focus();
   }
 
   async function loadTemplate(id, silent) {
@@ -1076,9 +1083,8 @@
       ed.source = (data && data.source) || "";
     } catch (_) { ed.source = ""; if (!silent) toast("Couldn’t load that template — starting empty.", "warn"); }
     ed.template = id; ed.dirty = false;
-    const ta = $("#tm-ed-code");
-    if (ta) { ta.value = ed.source; syncGutter(); }
-    updateChip();
+    if (ed.cm) ed.cm.setValue(ed.source, { silent: true });
+    updateChip(); updateOutline();
   }
 
   function updateChip() {
@@ -1086,15 +1092,6 @@
     if (!ed || !chip) return;
     chip.className = "tm-state-chip" + (ed.dirty ? " is-dirty" : ed.saved ? " is-saved" : "");
     chip.textContent = ed.dirty ? "Unsaved changes" : ed.saved ? "Saved" : "Not saved yet";
-  }
-
-  function syncGutter() {
-    const ed = state.editor, g = $("#tm-ed-gutter"), ta = $("#tm-ed-code");
-    if (!ed || !g || !ta) return;
-    const n = lineCount(ta.value);
-    clear(g);
-    for (let i = 1; i <= n; i++) g.appendChild(el("span", { class: ed.errorLine === i ? "is-err" : null }, String(i)));
-    g.scrollTop = ta.scrollTop;
   }
 
   function nameHelp() {
@@ -1125,40 +1122,61 @@
       } }, (state.templates.length ? state.templates : [{ id: "minimal", label: "Minimal" }]).map((t) => el("option", { value: t.id, title: t.hint || "" }, t.label)));
     tpl.value = ed.template;
 
+    const actions = el("div", { class: "tm-editor__actions" }, [
+      el("button", { class: "btn btn--primary", type: "button", id: "tm-ed-save", onclick: saveEditor, title: "Save (Ctrl+S)" }, "Save"),
+      el("button", { class: "btn btn--ghost", type: "button", id: "tm-ed-check", onclick: validateEditor, title: "Checks the file without saving it (Ctrl+Enter)" }, "Validate"),
+      el("button", { class: "btn btn--ghost", type: "button", onclick: backFromEditor }, "Back"),
+    ]);
     const bar = el("div", { class: "tm-editor__bar" }, [
       el("div", { class: "tm-field" }, [el("label", { class: "tm-field__label", for: "tm-ed-name" }, "File name"), name, el("span", { class: "tm-field__help", id: "tm-ed-name-help" })]),
       ed.mode === "new" ? el("div", { class: "tm-field" }, [el("label", { class: "tm-field__label", for: "tm-ed-template" }, "Template"), tpl, el("span", { class: "tm-field__help" }, " ")]) : null,
       el("span", { class: "tm-state-chip", id: "tm-ed-chip" }),
+      actions,
     ]);
 
-    const gutter = el("div", { class: "tm-gutter", id: "tm-ed-gutter", "aria-hidden": "true" });
-    const ta = el("textarea", { class: "tm-textarea", id: "tm-ed-code", spellcheck: "false", autocapitalize: "off", autocomplete: "off",
-      "aria-label": "Tool source code", placeholder: "Pick a template above, or write a tool here." });
+    ed.cm = makeCodeEditor(ed);
+    d.appendChild(el("div", { class: "tm-editor" }, [bar, ed.cm.el]));
+    d.style.padding = "0"; d.style.overflow = "hidden"; d.style.display = "flex";
+    if (ed.cm.remeasure) ed.cm.remeasure();
+    updateChip(); nameHelp();
+  }
+
+  // The editor itself is code-editor.js. If that script didn't load, a plain
+  // textarea with the same small interface keeps the manager usable (the same
+  // idea as I-B18(c): say so instead of leaving a dead panel).
+  function makeCodeEditor(ed) {
+    const common = {
+      value: ed.source, label: "Tool source code", placeholder: "Pick a template above, or write a tool here.",
+      onChange: (v) => { ed.source = v; ed.dirty = true; ed.errorLine = null; updateChip(); scheduleOutline(); },
+      onSave: saveEditor, onValidate: validateEditor,
+    };
+    if (global.JarvisCodeEditor) {
+      return global.JarvisCodeEditor.create(Object.assign(common, {
+        suggestEnabled: state.suggest, suggest: suggestFetcher,
+        onSuggestToggle: (on) => { state.suggest = on; savePrefs(); },
+      }));
+    }
+    const ta = el("textarea", { class: "tm-textarea", spellcheck: "false", "aria-label": common.label, placeholder: common.placeholder });
     ta.value = ed.source;
-    ta.addEventListener("input", () => { ed.source = ta.value; ed.dirty = true; ed.errorLine = null; syncGutter(); updateChip(); });
-    ta.addEventListener("scroll", () => { gutter.scrollTop = ta.scrollTop; });
+    ta.addEventListener("input", () => common.onChange(ta.value));
     ta.addEventListener("keydown", (e) => {
-      if (e.key === "Tab" && !e.shiftKey) {            // keep Tab for indenting; Esc then Tab leaves
-        e.preventDefault();
-        const s = ta.selectionStart;
-        ta.value = ta.value.slice(0, s) + "    " + ta.value.slice(ta.selectionEnd);
-        ta.selectionStart = ta.selectionEnd = s + 4;
-        ta.dispatchEvent(new Event("input"));
-      } else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "s") { e.preventDefault(); saveEditor(); }
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "s") { e.preventDefault(); saveEditor(); }
       else if ((e.ctrlKey || e.metaKey) && e.key === "Enter") { e.preventDefault(); validateEditor(); }
     });
+    const wrap = el("div", { class: "tm-code" }, [el("div", { class: "tm-note tm-note--bad", style: "margin:10px" }, "The code editor script (code-editor.js) didn’t load, so this is a plain text box. Saving and validating still work."), ta]);
+    return {
+      el: wrap, getValue: () => ta.value, focus: () => ta.focus(), dispose() {}, remeasure() {},
+      setValue(t) { ta.value = t; }, setErrorLine() {}, revealLine() {}, gotoLine() { ta.focus(); },
+      insertSnippet() {}, setSuggestEnabled() {}, isSuggestEnabled: () => false, fallback: true,
+    };
+  }
 
-    const foot = el("div", { class: "tm-editor__bar tm-editor__bar--foot" }, [
-      el("button", { class: "btn btn--primary", type: "button", id: "tm-ed-save", onclick: saveEditor }, "Save"),
-      el("button", { class: "btn btn--ghost", type: "button", id: "tm-ed-check", onclick: validateEditor, title: "Checks the file without saving it" }, "Validate"),
-      el("button", { class: "btn btn--ghost", type: "button", onclick: backFromEditor }, "Back"),
-      el("span", { class: "tm-hint", style: "margin-left:auto" }, [el("kbd", { class: "tm-kbd" }, "Ctrl"), "+", el("kbd", { class: "tm-kbd" }, "S"), " save  ",
-        el("kbd", { class: "tm-kbd" }, "Ctrl"), "+", el("kbd", { class: "tm-kbd" }, "↵"), " validate"]),
-    ]);
-
-    d.appendChild(el("div", { class: "tm-editor" }, [bar, el("div", { class: "tm-code" }, [gutter, ta]), foot]));
-    d.style.padding = "0"; d.style.overflow = "hidden"; d.style.display = "flex";
-    updateChip(); nameHelp(); syncGutter();
+  async function suggestFetcher(req) {
+    const ed = state.editor;
+    const name = ed && NAME_RE.test(ed.name) ? ed.name : "draft";
+    const r = await ctools("/" + encodeURIComponent(name) + "/suggest", { method: "POST", body: JSON.stringify({ source: req.source, cursor: req.cursor }), signal: req.signal });
+    if (!r || r.ok === false) throw new Error((r && r.error) || "no suggestion");
+    return r.text || "";
   }
 
   function restoreDetailBox() { dom.detail.style.padding = ""; dom.detail.style.overflow = ""; dom.detail.style.display = ""; }
@@ -1171,19 +1189,16 @@
 
   // Bring a line into the editor's viewport (a marker you can't see isn't a marker).
   function revealLine(n) {
-    const ta = $("#tm-ed-code");
-    if (!ta || !n) return;
-    const lh = parseFloat(global.getComputedStyle(ta).lineHeight) || 20;
-    const top = Math.max(0, (n - 4) * lh);
-    if (ta.scrollTop > top || ta.scrollTop + ta.clientHeight < (n + 1) * lh) ta.scrollTop = top;
-    const g = $("#tm-ed-gutter"); if (g) g.scrollTop = ta.scrollTop;
+    const ed = state.editor;
+    if (ed && ed.cm && n) ed.cm.revealLine(n);
   }
 
   function applyResult(result) {
     const ed = state.editor;
     ed.result = result;
     ed.errorLine = result && !result.ok ? parseErrorLine(result.error) : null;
-    syncGutter(); renderSide();
+    if (ed.cm) ed.cm.setErrorLine(ed.errorLine || 0);
+    renderSide();
     if (ed.errorLine) revealLine(ed.errorLine);
   }
 
@@ -1226,6 +1241,72 @@
     ed.busy = ""; updateChip(); renderSide();
   }
 
+  /* ---- editor side panel: outline, snippets, suggestions, shortcuts (L.33) ---- */
+
+  let outlineTimer = 0;
+  function scheduleOutline() {
+    if (outlineTimer) clearTimeout(outlineTimer);
+    outlineTimer = setTimeout(() => { outlineTimer = 0; updateOutline(); }, 250);
+  }
+
+  function updateOutline() {
+    const box = $("#tm-ed-outline"), ed = state.editor;
+    if (!box || !ed) return;
+    clear(box);
+    const items = global.JarvisCodeEditor ? global.JarvisCodeEditor._pure.outline(ed.source) : [];
+    if (!items.length) { box.appendChild(el("div", { class: "tm-hint" }, "Functions, classes and CONSTANTS in the file are listed here. Click one to jump to it.")); return; }
+    const glyph = { def: "ƒ", class: "C", const: "#" };
+    items.forEach((it) => box.appendChild(el("button", { class: "tm-outline__item", type: "button", title: "Go to line " + it.line,
+      onclick: () => { if (ed.cm) ed.cm.gotoLine(it.line); } }, [
+      el("span", { class: "tm-outline__kind tm-outline__kind--" + it.kind, "aria-hidden": "true" }, glyph[it.kind] || "·"),
+      el("span", { class: "tm-outline__name" }, it.name),
+      el("span", { class: "tm-outline__line" }, String(it.line)),
+    ])));
+  }
+
+  function insertSection() {
+    const list = global.JarvisCodeEditor ? global.JarvisCodeEditor._pure.SNIPPETS : [];
+    const wrap = el("div", null, [sectionTitle("Insert")]);
+    if (!list.length) { wrap.appendChild(el("div", { class: "tm-hint" }, "Snippets need the code editor script.")); return wrap; }
+    const grid = el("div", { class: "tm-snips" });
+    list.slice(0, 6).forEach((sn) => grid.appendChild(el("button", { class: "tm-snip", type: "button", title: sn.detail,
+      onclick: () => { const ed = state.editor; if (ed && ed.cm) ed.cm.insertSnippet(sn.label); } }, [
+      el("code", null, sn.label), el("span", null, sn.detail)])));
+    wrap.appendChild(grid);
+    wrap.appendChild(el("div", { class: "tm-hint", style: "margin-top:8px" }, "Or type a trigger such as jtool in the editor and press Tab."));
+    return wrap;
+  }
+
+  function suggestSection() {
+    const ed = state.editor;
+    const wrap = el("div", null, [sectionTitle("Jarvis suggestions", state.suggest ? "on" : "off")]);
+    if (!global.JarvisCodeEditor) { wrap.appendChild(el("div", { class: "tm-hint" }, "Needs the code editor script.")); return wrap; }
+    const row = el("div", { class: "tm-switchrow" }, [
+      switchEl({ on: state.suggest, label: "Jarvis inline suggestions", onToggle: () => {
+        if (ed && ed.cm) ed.cm.setSuggestEnabled(!state.suggest); else { state.suggest = !state.suggest; savePrefs(); }
+        renderSide();
+      } }),
+      el("span", null, state.suggest ? "Suggesting code as you pause" : "Off — no code is sent anywhere"),
+    ]);
+    wrap.appendChild(row);
+    wrap.appendChild(el("div", { class: "tm-hint", style: "margin-top:8px" },
+      "After a pause at the end of a line, Jarvis shows a dimmed suggestion. Tab accepts it, Ctrl+→ takes one word, Esc dismisses it, Alt+\\ asks right now. " +
+      "Each suggestion sends the code around the caret to your AI provider (a few hundred tokens), at most 40 per editing session. A suggestion is only text on screen until you accept it; saving is still yours."));
+    return wrap;
+  }
+
+  function shortcutsSection() {
+    const rows = [
+      ["Ctrl+S", "Save"], ["Ctrl+Enter", "Validate"], ["Ctrl+Space", "Completions"], ["Ctrl+/", "Comment line"],
+      ["Tab / Shift+Tab", "Indent / outdent"], ["Alt+↑ / ↓", "Move line"], ["Shift+Alt+↑ / ↓", "Copy line"],
+    ];
+    const d = el("details", { class: "tm-shortcuts" }, [el("summary", null, "Keyboard shortcuts")]);
+    const t = el("div", { class: "tm-keys" });
+    rows.forEach((r) => t.appendChild(el("div", null, [el("kbd", { class: "tm-kbd" }, r[0]), el("span", null, r[1])])));
+    d.appendChild(t);
+    return el("div", null, [d]);
+  }
+
   function checklistLines(result) {
     const lines = [];
     (result.checklist_problems || []).forEach((p) => lines.push("Ignored (the tool still loads): " + p));
@@ -1249,7 +1330,8 @@
       res.appendChild(el("div", null, ["Loads cleanly. Provides ", el("b", null, (r.tools || []).join(", ") || "—"), r.group ? " in group “" + r.group + "”." : "."]));
       checklistLines(r).forEach((l) => res.appendChild(el("div", { class: "tm-note", style: "margin-top:8px" }, l)));
     } else {
-      res.appendChild(el("div", { class: "tm-errbox" }, (r.stage ? "[" + r.stage + "] " : "") + (r.error || "Unknown error") + (ed.errorLine ? "\n→ line " + ed.errorLine + " is marked in the gutter" : "")));
+      res.appendChild(el("div", { class: "tm-errbox" }, (r.stage ? "[" + r.stage + "] " : "") + (r.error || "Unknown error") + (ed.errorLine ? "\n→ line " + ed.errorLine + " is marked in the editor" : "")));
+      if (ed.errorLine && ed.cm) res.appendChild(el("button", { class: "btn btn--ghost tm-jump", type: "button", onclick: () => ed.cm.gotoLine(ed.errorLine) }, "Go to line " + ed.errorLine));
       if (r.hint) res.appendChild(el("div", { class: "tm-note", style: "margin-top:8px" }, r.hint));
     }
     side.appendChild(res);
@@ -1257,9 +1339,14 @@
       const f = state.files.find((x) => x.name === ed.origName);
       side.appendChild(runCard(f.name, f.tools, ed.dirty ? "Runs the saved file, not your unsaved edits. " : ""));
     }
+    side.appendChild(el("div", null, [sectionTitle("Outline"), el("div", { class: "tm-outline", id: "tm-ed-outline" })]));
+    side.appendChild(insertSection());
+    side.appendChild(suggestSection());
+    side.appendChild(shortcutsSection());
     side.appendChild(el("div", null, [sectionTitle("Good to know"), el("div", { class: "tm-hint" },
       "A custom tool is Python running as you. The model can’t write these files — that’s deliberate. Tools you save aren’t asked about again; imports are. Safeguards for a new tool appear in the list once it’s saved."),
     ]));
+    updateOutline();
   }
 
   /* =======================================================================

@@ -797,7 +797,15 @@ app.get("/api/conversations/:id", requireJarvis, async (req, res) => {
   if (!isValidConversationId(req.params.id)) {
     return res.status(400).json({ error: "Invalid conversation id." });
   }
-  const result = await runJarvisOnce(["conv-show", req.params.id], 10000);
+  // L.38: replay from the raw event log -- every exchange, past the file's
+  // 60-cap, with the screenshot/download/... cards re-derived from the logged
+  // tool runs. `replay` in the reply says which source was used; with no usable
+  // log it is the conversation file exactly as before. `?source=file` asks for
+  // the file alone (debugging). A jarvis build that predates --replay ignores
+  // the flag and returns the file, so this degrades the same way.
+  const args = ["conv-show", req.params.id];
+  if (req.query.source !== "file") args.push("--replay");
+  const result = await runJarvisOnce(args, 20000);
   let parsed;
   try {
     parsed = JSON.parse(result.stdout);
@@ -910,6 +918,9 @@ app.get("/api/console/:id", requireJarvis, async (req, res) => {
   }
   const limitRaw = typeof req.query.limit === "string" ? req.query.limit.trim() : "";
   if (/^\d{1,5}$/.test(limitRaw)) args.push("--limit", limitRaw);
+  // L.38: a history load (not the ~1 s poll) asks for the console as the raw
+  // event log remembers it -- clipped lines whole, rotated-out lines back.
+  if (req.query.full === "1" || req.query.full === "true") args.push("--full");
   // The Live Feed's own reload passes this so a Clear it already did stays
   // cleared on reconnect; the Ask console's reload (and anything asking
   // for full history) leaves it off — see console-read's docstring.
@@ -1107,6 +1118,57 @@ app.post("/api/channels/:platform/:set", requireJarvis, async (req, res) => {
   } catch (e) {
     res.status(500).json({ error: result.error || result.stderr || e.message });
   }
+});
+
+// --- Channels > People: per-person switches (L.36) -------------------------
+// Everything here proxies `jarvis channels-users / channels-user /
+// channels-user-tools`, which delegate to channels/user_admin.py - the same
+// code a terminal runs, so the panel and the CLI cannot disagree. Argv arrays
+// only, every value validated first, and no token ever crosses this route.
+const CHANNEL_FLAGS = new Set(["dm", "reply", "tool", "owner", "send_dm", "blocked"]);
+const CHANNEL_USER_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/; // not "-x": the CLI's flag parser would read it as a flag
+const CHANNEL_TOOL_NAME = /^[A-Za-z0-9_.:-]{1,64}$/;
+
+function sendChannelResult(result, res) {
+  try {
+    const parsed = JSON.parse(result.stdout);
+    return parsed.ok === false ? res.status(400).json(parsed) : res.json(parsed);
+  } catch (e) {
+    res.status(500).json({ error: result.error || result.stderr || e.message });
+  }
+}
+
+app.get("/api/channels/people", requireJarvis, async (req, res) => {
+  const platform = typeof req.query.platform === "string" ? req.query.platform : "";
+  const args = ["channels-users"];
+  if (CHANNEL_PLATFORMS.has(platform)) args.push(platform);
+  sendChannelResult(await runJarvisOnce(args, 15000), res);
+});
+
+app.post("/api/channels/people/:platform/:id/flag", requireJarvis, async (req, res) => {
+  const { platform, id } = req.params;
+  if (!CHANNEL_PLATFORMS.has(platform)) return res.status(400).json({ error: "Unknown platform." });
+  if (!CHANNEL_USER_ID.test(id)) return res.status(400).json({ error: "Invalid user id." });
+  const flag = req.body?.flag;
+  if (typeof flag !== "string" || !CHANNEL_FLAGS.has(flag)) return res.status(400).json({ error: "Unknown switch." });
+  if (typeof req.body?.value !== "boolean") return res.status(400).json({ error: "value must be true or false." });
+  sendChannelResult(await runJarvisOnce(
+    ["channels-user", platform, id, flag, req.body.value ? "on" : "off"], 10000), res);
+});
+
+app.post("/api/channels/people/:platform/:id/tools", requireJarvis, async (req, res) => {
+  const { platform, id } = req.params;
+  if (!CHANNEL_PLATFORMS.has(platform)) return res.status(400).json({ error: "Unknown platform." });
+  if (!CHANNEL_USER_ID.test(id)) return res.status(400).json({ error: "Invalid user id." });
+  const mode = req.body?.mode;
+  if (mode !== "inherit" && mode !== "custom") return res.status(400).json({ error: "mode must be inherit or custom." });
+  const tools = Array.isArray(req.body?.tools) ? req.body.tools : [];
+  if (tools.length > 400 || !tools.every((t) => typeof t === "string" && CHANNEL_TOOL_NAME.test(t))) {
+    return res.status(400).json({ error: "Invalid tool list." });
+  }
+  const args = ["channels-user-tools", platform, id, mode];
+  if (mode === "custom") args.push(...tools);
+  sendChannelResult(await runJarvisOnce(args, 10000), res);
 });
 
 // ---------------------------------------------------------------------------
@@ -1878,6 +1940,66 @@ app.post("/api/mcp/refresh", requireJarvis, async (req, res) => {
   return parseJarvisJSON(result, res, "Couldn't refresh MCP servers.");
 });
 
+// L.31 — editing MCP servers from the panel. These routes exist for the
+// OWNER's own clicks and are the only way the web UI changes mcp_config.json;
+// every one of them is a thin pass-through to `jarvis mcp-edit`, which does
+// all the validation (so the CLI and the panel can never disagree) and writes
+// nothing on a refusal. There is deliberately no model tool behind any of
+// this: adding a server adds an executable, and nothing the model can say
+// may do that (see the security note in mcp_client.py).
+//
+// A server name reaches the CLI as a positional argument, so a name that
+// starts with "-" is refused here, the same precaution daemonCategoryArgs
+// takes — the CLI would also refuse it, but a flag-looking value must never
+// get that far.
+function mcpServerName(value) {
+  if (typeof value !== "string") return "";
+  const name = value.trim();
+  if (!name || name.length > 64 || name.startsWith("-")) return "";
+  // eslint-disable-next-line no-control-regex
+  if (/[\u0000-\u001f\u007f]/.test(name)) return "";
+  return name;
+}
+
+app.post("/api/mcp/server", requireJarvis, async (req, res) => {
+  const name = mcpServerName(req.body?.name);
+  if (!name) {
+    return res.status(400).json({ error: "Give the server a name (up to 64 characters, not starting with '-')." });
+  }
+  const spec = req.body?.spec;
+  if (!spec || typeof spec !== "object" || Array.isArray(spec)) {
+    return res.status(400).json({ error: "The server definition must be an object." });
+  }
+  const args = ["mcp-edit", "save", name, JSON.stringify(spec)];
+  if (req.body?.replace !== undefined && req.body?.replace !== null && req.body?.replace !== "") {
+    const replace = mcpServerName(req.body.replace);
+    if (!replace) return res.status(400).json({ error: "That server name to edit isn't valid." });
+    args.push("--replace", replace);
+  }
+  const result = await runJarvisOnce(args, 15000);
+  return parseJarvisJSON(result, res, "Couldn't save that server.");
+});
+
+const MCP_SERVER_ACTIONS = new Set(["enable", "disable", "trust", "untrust"]);
+
+app.post("/api/mcp/server/:name/:action", requireJarvis, async (req, res) => {
+  const name = mcpServerName(req.params.name);
+  if (!name) return res.status(400).json({ error: "That server name isn't valid." });
+  const action = String(req.params.action || "");
+  if (!MCP_SERVER_ACTIONS.has(action)) {
+    return res.status(404).json({ error: `Unknown action "${action}".` });
+  }
+  const result = await runJarvisOnce(["mcp-edit", action, name], 15000);
+  return parseJarvisJSON(result, res, `Couldn't ${action} that server.`);
+});
+
+app.delete("/api/mcp/server/:name", requireJarvis, async (req, res) => {
+  const name = mcpServerName(req.params.name);
+  if (!name) return res.status(400).json({ error: "That server name isn't valid." });
+  const result = await runJarvisOnce(["mcp-edit", "remove", name], 15000);
+  return parseJarvisJSON(result, res, "Couldn't remove that server.");
+});
+
 app.get("/api/tools", requireJarvis, async (req, res) => {
   const result = await runJarvisOnce(["tools-list"], 15000);
   if (!result.ok) {
@@ -2570,6 +2692,19 @@ app.post("/api/ctools/:name/check", requireJarvis, async (req, res) => {
   const result = await runJarvisOnce(["ctools-check", req.params.name, "--stdin"], 20000, {}, source);
   try { res.json(JSON.parse(result.stdout)); }
   catch (e) { res.status(500).json({ error: result.stderr || e.message }); }
+});
+
+// Inline editor suggestions (L.33). Same stdin convention as /check: the source
+// never touches argv. Always answers 200 with {ok, text} - a suggestion that
+// couldn't be made is not a server error, the editor just stays quiet.
+app.post("/api/ctools/:name/suggest", requireJarvis, async (req, res) => {
+  if (!CTOOL_NAME_RE.test(req.params.name)) return res.status(400).json({ error: "Invalid tool name." });
+  const source = typeof req.body?.source === "string" ? req.body.source : "";
+  if (source.length > 200000) return res.json({ ok: false, error: "file is too large for suggestions" });
+  const cursor = Number.isFinite(req.body?.cursor) ? Math.max(0, Math.floor(req.body.cursor)) : source.length;
+  const result = await runJarvisOnce(["ctools-suggest", req.params.name], 30000, {}, JSON.stringify({ source, cursor }));
+  try { res.json(JSON.parse(result.stdout)); }
+  catch (e) { res.json({ ok: false, error: (result.stderr || e.message || "no answer").slice(0, 200) }); }
 });
 
 app.post("/api/ctools/:name/run", requireJarvis, async (req, res) => {

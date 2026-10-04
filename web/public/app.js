@@ -1853,6 +1853,9 @@
       if (opts.surface) params.set("surface", opts.surface);
       if (opts.limit) params.set("limit", String(opts.limit));
       if (opts.afterLastClear) params.set("afterLastClear", "1");
+      // L.38: history loads pass full:true (clipped lines whole, rotated-out
+      // lines back, from the raw event log); the ~1 s poll never does.
+      if (opts.full) params.set("full", "1");
       const qs_ = params.toString();
       return api("GET", `/api/console/${encodeURIComponent(id)}${qs_ ? `?${qs_}` : ""}`);
     },
@@ -2653,7 +2656,7 @@
     if (convId == null || state.askTraceByConv[convId]) return;
     let result = null;
     try {
-      result = await Api.getConsole(convId, { surface: "ask", afterLastClear: true, limit: 2000 });
+      result = await Api.getConsole(convId, { surface: "ask", afterLastClear: true, limit: 2000, full: true });
     } catch {
       result = null; // no ask history yet for this conversation — that's fine
     }
@@ -7417,7 +7420,7 @@
     let result = null;
     if (convId != null) {
       try {
-        result = await Api.getConsole(convId, { surface: "live", afterLastClear: true, limit: 2000 });
+        result = await Api.getConsole(convId, { surface: "live", afterLastClear: true, limit: 2000, full: true });
       } catch {
         result = null; // no console history yet for this conversation — that's fine
       }
@@ -8371,214 +8374,37 @@
   // panel. app.js only opens it (menu wiring, above) and pokes its
   // refresh() from the scheduled-tick websocket handler (also above).
   // -------------------------------------------------------------------------
-  // MCP Servers panel — its own menu entry, its own overlay. Read-mostly:
-  // servers are added by editing mcp_config.json by hand (see mcp_client.py's
-  // docstring on why that's a deliberate restriction), so the only action
-  // this panel offers is Refresh.
+  // MCP Servers panel — its own menu entry, its own overlay. L.31: the panel
+  // (cards, on/off and Trusted switches, per-server Refresh, Add/Edit/Remove,
+  // search) lives in mcp-servers.js (JarvisMcp), backed by /api/mcp and the
+  // /api/mcp/server routes. app.js only opens it (menu wiring and the
+  // JarvisHost.openPanel table below). It used to be a read-only list here whose
+  // only action was Refresh, with servers added by editing mcp_config.json.
   // -------------------------------------------------------------------------
-  const mcpOverlay = qs("#mcp-overlay");
-
-  async function refreshMcpPanel() {
-    if (!mcpOverlay || mcpOverlay.hidden) return;
-    const list = qs("#mcp-list");
-    const statusLine = qs("#mcp-status-line");
-    try {
-      const data = await Api.get("/api/mcp");
-      const servers = data.servers || [];
-      statusLine.textContent = servers.length
-        ? `${data.enabled_count || 0} enabled \u00b7 ${data.total_tools || 0} tool(s)` +
-          (data.needs_refresh ? " \u00b7 refresh recommended" : "")
-        : "no servers configured";
-      list.innerHTML = "";
-      if (!servers.length) {
-        list.appendChild(el("div", { class: "skills-empty" },
-          "No MCP servers configured. Add them in mcp_config.json, then Refresh."));
-        return;
-      }
-      for (const s of servers) {
-        const bits = [
-          s.enabled ? "enabled" : "disabled",
-          s.transport,
-          `${s.tool_count} tool(s)`,
-          s.trusted ? "trusted" : "confirm-gated",
-          s.stale ? "stale" : null,
-        ].filter(Boolean).join(" \u00b7 ");
-        list.appendChild(el("div", { class: "skills-item" + (s.error ? " is-warn" : "") }, [
-          el("div", { class: "skills-item__name" }, s.name),
-          el("div", { class: "skills-item__desc" }, bits),
-          s.error ? el("div", { class: "skills-item__desc" }, s.error) : null,
-        ].filter(Boolean)));
-      }
-    } catch (err) {
-      statusLine.textContent = "couldn't read MCP status";
-      list.innerHTML = "";
-      list.appendChild(el("div", { class: "skills-empty" }, err.message || "Failed."));
-    }
-  }
-
   function openMcp() {
-    if (!mcpOverlay) return;
-    mcpOverlay.hidden = false;
-    refreshMcpPanel();
+    if (window.JarvisMcp && window.JarvisMcp.open) {
+      window.JarvisMcp.open();
+    }
   }
-
-  function closeMcp() {
-    if (mcpOverlay) mcpOverlay.hidden = true;
-  }
-
-  qs("#mcp-close")?.addEventListener("click", closeMcp);
-  mcpOverlay?.addEventListener("click", (e) => { if (e.target === mcpOverlay) closeMcp(); });
-  document.addEventListener("keydown", (e) => {
-    if (e.key === "Escape" && mcpOverlay && !mcpOverlay.hidden) closeMcp();
-  });
 
   // ===========================================================================
-  // Channels panel — Discord/Instagram allowlists. The backend API this
-  // drives (GET /api/channels, POST /api/channels/:platform/:set — see
-  // server.js) already existed; this is the missing frontend for it, so
-  // "who gets a reply" no longer requires a terminal.
+  // Channels panel (L.36) - now per person, in its own module
+  // (channels-panel.js, same pattern as test-checklist.js). The markup is
+  // #channels-overlay in index.html; the backend is /api/channels/people/* and
+  // the original /api/channels/:platform/:set (the allow-lists), which the
+  // panel keeps as its "Global lists" fallback.
   //
-  // Token/enabled/owner setup is deliberately left out (and still pointed
-  // at the Guides panel) — see server.js's own comment on /api/channels:
-  // the UI shows posture and edits allowlists, but a bot token must never
-  // pass through this browser.
+  // Token/enabled/owner-id setup is still deliberately NOT in the browser: the
+  // panel shows posture and prints the terminal command, because a bot token
+  // must never pass through this page (see server.js's comment on
+  // /api/channels).
   // ===========================================================================
-  const channelsOverlay = qs("#channels-overlay");
-  const CHANNELS_META = {
-    discord: { label: "Discord" },
-    instagram: { label: "Instagram" },
-  };
-  const CHANNELS_SETS = [
-    { key: "dm_allowlist", short: "dm", label: "DM allowlist", hint: "May open a DM conversation with the bot at all." },
-    { key: "reply_allowlist", short: "reply", label: "Reply allowlist", hint: "Actually gets an answer back." },
-    { key: "tool_allowlist", short: "tool", label: "Tool allowlist", hint: "May cause a tool to run on this PC." },
-  ];
-
-  function channelsChip(entry, onRemove) {
-    const isWildcard = entry === "*";
-    return el("span", { class: "channels-chip" + (isWildcard ? " channels-chip--wildcard" : "") }, [
-      isWildcard ? "everyone (*)" : entry,
-      el("button", {
-        type: "button", class: "channels-chip__remove", title: `Remove ${entry}`,
-        onclick: onRemove,
-      }, "\u00d7"),
-    ]);
-  }
-
-  async function channelsMutate(platform, short, entry, remove, statusEl) {
-    if (statusEl) statusEl.textContent = "";
-    try {
-      const result = await Api.setChannelEntry(platform, short, entry, remove);
-      if (!result || result.ok === false) {
-        throw new Error((result && result.error) || "Request failed.");
-      }
-      await refreshChannelsPanel();
-    } catch (err) {
-      if (statusEl) statusEl.textContent = err.message || "Couldn't save that.";
-    }
-  }
-
-  function renderChannelsPlatform(platform, block) {
-    const meta = CHANNELS_META[platform];
-    const enabled = !!block.enabled;
-    const tokenSet = block.bot_token === "set" || block.access_token === "set";
-    const header = el("div", { class: "skills-item__name" }, [
-      `${meta.label} — `,
-      el("span", { style: enabled ? "color: var(--accent);" : "color: var(--text-dimmer);" },
-        enabled ? "enabled" : "disabled"),
-      " \u00b7 token ",
-      tokenSet ? "set" : "not set",
-      block.owner ? ` \u00b7 owner: ${block.owner}` : " \u00b7 owner: (unset)",
-    ]);
-
-    const setBlocks = CHANNELS_SETS.map((set) => {
-      const entries = Array.isArray(block[set.key]) ? block[set.key] : [];
-      const chips = el("div", { class: "channels-chips" });
-      if (!entries.length) {
-        chips.appendChild(el("div", { class: "channels-empty-hint" },
-          set.short === "reply" ? "nobody — the bot won't reply to anyone yet" : "nobody"));
-      } else {
-        for (const entry of entries) {
-          chips.appendChild(channelsChip(entry, () =>
-            channelsMutate(platform, set.short, entry, true, statusLine)));
-        }
-      }
-      const input = el("input", {
-        type: "text", placeholder: "id, handle, or * for everyone", autocomplete: "off",
-      });
-      const addBtn = el("button", { type: "button", class: "btn btn--ghost btn--sm" }, "Add");
-      const statusLine = el("div", { class: "channels-empty-hint" });
-      const doAdd = () => {
-        const value = input.value.trim();
-        if (!value) return;
-        input.value = "";
-        channelsMutate(platform, set.short, value, false, statusLine);
-      };
-      addBtn.addEventListener("click", doAdd);
-      input.addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); doAdd(); } });
-      return el("div", { class: "channels-set" }, [
-        el("div", { class: "channels-set__label" }, `${set.label} \u2014 ${set.hint}`),
-        chips,
-        el("div", { class: "channels-add" }, [input, addBtn]),
-        statusLine,
-      ]);
-    });
-
-    return el("div", { class: "skills-item" }, [header, ...setBlocks]);
-  }
-
-  async function refreshChannelsPanel() {
-    if (!channelsOverlay || channelsOverlay.hidden) return;
-    const list = qs("#channels-list");
-    const statusLine = qs("#channels-status-line");
-    try {
-      const data = await Api.getChannels();
-      const cfg = (data && data.config) || {};
-      statusLine.textContent = Object.entries(data.summary || {})
-        .map(([p, s]) => `${CHANNELS_META[p]?.label || p}: ${(s || "").split("\n")[0]}`)
-        .join("  \u00b7  ") || "";
-      list.innerHTML = "";
-      for (const platform of Object.keys(CHANNELS_META)) {
-        list.appendChild(renderChannelsPlatform(platform, cfg[platform] || {}));
-      }
-    } catch (err) {
-      statusLine.textContent = "couldn't read channel status";
-      list.innerHTML = "";
-      list.appendChild(el("div", { class: "skills-empty" }, err.message || "Failed."));
-    }
-  }
-
   function openChannels() {
-    if (!channelsOverlay) return;
-    channelsOverlay.hidden = false;
-    refreshChannelsPanel();
+    if (window.JarvisChannels) window.JarvisChannels.open();
+    else toast("The Channels panel script (channels-panel.js) didn't load.");
   }
+  function closeChannels() { window.JarvisChannels?.close(); }
 
-  function closeChannels() {
-    if (channelsOverlay) channelsOverlay.hidden = true;
-  }
-
-  qs("#channels-close")?.addEventListener("click", closeChannels);
-  channelsOverlay?.addEventListener("click", (e) => { if (e.target === channelsOverlay) closeChannels(); });
-  document.addEventListener("keydown", (e) => {
-    if (e.key === "Escape" && channelsOverlay && !channelsOverlay.hidden) closeChannels();
-  });
-
-  qs("#btn-mcp-refresh")?.addEventListener("click", async () => {
-    const btn = qs("#btn-mcp-refresh");
-    btn.disabled = true;
-    btn.textContent = "Refreshing\u2026";
-    try {
-      await Api.post("/api/mcp/refresh", {});
-      toast("MCP servers refreshed. Restart Jarvis for new tools to appear.", "info");
-      refreshMcpPanel();
-    } catch (err) {
-      toast(err.data?.error || err.message || "Refresh failed.");
-    } finally {
-      btn.disabled = false;
-      btn.textContent = "Refresh";
-    }
-  });
 
 
   // -------------------------------------------------------------------------
@@ -9006,16 +8832,21 @@
       id: "mcp", name: "MCP servers", blurb: "External tools over Model Context Protocol",
       tags: "mcp model context protocol server external tools",
       sections: [
-        { heading: "Connect", steps: [
-          "jarvis mcp-config     (prints the config path)",
-          "Add a server entry with its command and args.",
+        { heading: "Connect (Menu → MCP Servers)", steps: [
+          "Press + Add server and fill in the command and its arguments (one per line), or a URL for a remote server.",
+          "Switch it on — Jarvis connects once and lists the server's tools.",
+          "Each card has Refresh, Edit, Remove, a Trusted switch and a Tools list. Search finds a server by one of its tools.",
+        ]},
+        { heading: "Or from the terminal", steps: [
+          "jarvis mcp-config     (prints the config path — you can still edit the file by hand)",
+          "jarvis mcp-edit save <name> '<json>' | enable | disable | trust | untrust | remove <name>",
           "jarvis mcp-refresh    to pull its tool list.",
           "jarvis mcp-status     to check what's connected.",
-          "The MCP Servers panel in this menu shows the same thing visually.",
         ]},
       ],
       notes: [
         "MCP tools join the normal router, so they're only sent to the model when relevant — they don't inflate every prompt.",
+        "MCP tools ask for confirmation before they run unless you mark that server Trusted. Only you can add a server — Jarvis has no tool for it.",
       ],
     },
     {

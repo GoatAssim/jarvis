@@ -135,11 +135,11 @@ class IncomingMessage:
 
     __slots__ = ("platform", "context", "user_id", "user_handle", "text",
                  "mentioned", "guild_id", "channel_id", "message_id",
-                 "thread_id", "timestamp", "raw")
+                 "thread_id", "timestamp", "raw", "avatar")
 
     def __init__(self, platform, context, user_id="", user_handle="", text="",
                  mentioned=False, guild_id="", channel_id="", message_id="",
-                 thread_id="", timestamp=None, raw=None):
+                 thread_id="", timestamp=None, raw=None, avatar=""):
         self.platform = platform
         self.context = context
         self.user_id = str(user_id or "")
@@ -153,6 +153,10 @@ class IncomingMessage:
         self.thread_id = str(thread_id or channel_id or "")
         self.timestamp = timestamp if timestamp is not None else time.time()
         self.raw = raw
+        # The sender's profile-picture URL when the platform hands us one
+        # (Discord does, on every event). Data for the Channels panel only —
+        # no stage of decide() reads it.
+        self.avatar = str(avatar or "")
 
     def identities(self):
         """Every form of this sender an allowlist entry could name, in the

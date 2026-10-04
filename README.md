@@ -758,6 +758,24 @@ jarvis channels-follow discord 1234567890
 jarvis channels-block  discord 1234567890
 ```
 
+For finer control, open **Menu → Channels**: it lists everyone who has
+messaged Jarvis (registered people only), and each person has their own
+switches — may they DM the bot, do they get a reply, may their messages
+cause tools to run (and *which* tools), may Jarvis DM them for you, make
+them the owner, block them. The terminal does the same thing:
+
+```
+jarvis channels-users                                  # everyone + every switch
+jarvis channels-user discord 1234567890 tool on        # dm | reply | tool | owner | send_dm | blocked
+jarvis channels-user-tools discord 1234567890 custom read_file web_search
+jarvis channels-user-tools discord 1234567890 inherit  # back to the default
+```
+
+A person limited to a custom tool list can only ever run those tools (plus
+the few Jarvis needs to find them), and a switch can only take access away,
+never add what the gate refuses. Bot tokens are never shown or edited in the
+browser.
+
 Approving adds them to `reply_allowlist`. Tools stay off until you
 separately run `jarvis channels-allow discord tool <id>`.
 
@@ -788,6 +806,10 @@ separately run `jarvis channels-allow discord tool <id>`.
 | `jarvis ambient` | What Jarvis has noticed on its own |
 | `jarvis channels-people` | Who has messaged Jarvis on Discord/Instagram |
 | `jarvis channels-follow/block <platform> <id>` | Decide about someone |
+| `jarvis channels-users [platform]` | Every registered person and their switches |
+| `jarvis channels-user <platform> <id> <switch> <on\|off>` | Flip one switch for one person |
+| `jarvis channels-user-tools <platform> <id> inherit\|custom [tool ...]` | Which tools that person may run |
+| `jarvis mcp-edit <enable\|disable\|trust\|untrust\|remove> <name>` | Change an MCP server (also `save <name> <json>`); the MCP Servers panel does the same |
 
 ## Notes
 

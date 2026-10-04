@@ -21,6 +21,7 @@ from . import ai_config, ai_providers, command_tools, conversations, memory, pla
 from . import tool_disable
 from . import console_store
 from . import raw_archive
+from . import thread_extras
 from . import dev_agent_events as _dev_agent_events
 from . import discovery_cache
 from . import key_health
@@ -2060,88 +2061,10 @@ def _make_tool_executor(on_tool_call, schemas=None, on_confirm_request=None,
 
 
 def _extras_from_runs(runs):
-    """Turns this turn's tool_executor.runs (see _make_tool_executor) into
-    the same lightweight 'screenshot / download / organizeJson / confirm'
-    shape the web UI already builds client-side for a live ask (see
-    web/public/app.js's pushThreadExtra) so conversations.append_exchange
-    can save them alongside the exchange. That's what lets the browser
-    replay a screenshot, download card, organize-json result, or a
-    resolved confirmation after a genuine page reload/reconnect — not just
-    for as long as that browser tab's in-memory state happens to survive.
-    """
-    extras = []
-    for run in (runs or []):
-        name = run.get("name")
-        result = run.get("result") if isinstance(run.get("result"), dict) else {}
-        confirm = run.get("confirm")
-        if isinstance(confirm, dict):
-            extras.append({
-                "type": "confirm",
-                "data": {
-                    "tool": name,
-                    "arguments": run.get("arguments") or {},
-                    "risk_note": confirm.get("risk_note"),
-                    "resolved": bool(confirm.get("approved")),
-                },
-            })
-        if name == "take_screenshot" and result.get("ok") and result.get("file"):
-            extras.append({"type": "screenshot", "data": {"filename": result["file"]}})
-        elif name == "organize_json" and result.get("ok") and result.get("path"):
-            extras.append({"type": "organizeJson", "data": {"targetPath": result["path"], "payload": None}})
-        elif name == "ytdl_download" and result.get("ok") and result.get("job_id"):
-            # Mirror ytdl_tools.py's own MAX_MEDIA_EMITTED cap — only the
-            # first few files ever got an inline player card live (see its
-            # _emit_media loop), so a saved/replayed turn shouldn't show
-            # more cards than the user actually saw at the time.
-            for f in (result.get("files") or [])[:5]:
-                if isinstance(f, dict) and f.get("file"):
-                    extras.append({
-                        "type": "download",
-                        "data": {
-                            "jobId": result["job_id"],
-                            "filename": f["file"],
-                            "title": f.get("title") or f["file"],
-                        },
-                    })
-        elif name == "present_file" and result.get("ok"):
-            # The gap that made present_file cards disappear on reload: every
-            # other media tool had an entry here, this one never did, so its
-            # card lived only in the live JARVIS_MEDIA stream. The field
-            # names match app.js's showAskPresentFile(info) argument exactly
-            # so the replay path can hand this straight to the same renderer
-            # the live path uses, rather than a second near-copy of it.
-            extras.append({
-                "type": "presentFile",
-                "data": {
-                    "jobId": result.get("job_id"),
-                    "filename": result.get("download_filename"),
-                    "name": result.get("name"),
-                    "type": result.get("type") or "file",
-                    "sizeBytes": result.get("size_bytes"),
-                    "path": result.get("path"),
-                },
-            })
-        elif name == "dev_agent" and isinstance(result.get("steps"), list):
-            # §3.6 plan §6. `result` here is run["result"] — the FULL,
-            # pre-shaping copy (see the ordering fix in _executor above) —
-            # so `steps` still has every preview/stdout_tail/stderr_tail
-            # field a live view showed, not whatever verbosity trimmed for
-            # the model. These are the exact same event dicts the live
-            # stream already displayed (see dev_agent_events.emit's
-            # docstring: dev_agent.py's own `steps` list is built from
-            # emit()'s return value, never reconstructed separately), so a
-            # reload replays provably the same trace, not an approximation
-            # of it.
-            extras.append({
-                "type": "devAgent",
-                "data": {
-                    "jobId": result.get("job_id"),
-                    "ok": result.get("ok"),
-                    "projectDir": result.get("project_dir"),
-                    "steps": result["steps"],
-                },
-            })
-    return extras
+    """Thin wrapper: the derivation lives in thread_extras.py so the same code
+    builds the saved extras at write time and rebuilds them from the raw event
+    log (L.38) -- see thread_extras.extras_from_runs for what each card is."""
+    return thread_extras.extras_from_runs(runs)
 
 
 def _completed_mutations(runs):
@@ -2387,25 +2310,9 @@ def _pending_action_reply(name, args, result):
 # ---------------------------------------------------------------------------
 
 def _declined_action_extra(turn_runs):
-    """A `declinedAction` extra for THIS turn if its LAST tool call was
-    declined by the user — None otherwise. Only the last call counts: a
-    decline three calls back in a turn that went on to do other things
-    isn't "the thing that just got declined" by the time the turn ends."""
-    if not turn_runs:
-        return None
-    last = turn_runs[-1]
-    result = last.get("result")
-    name, args = last.get("name"), last.get("arguments")
-    if (not isinstance(result, dict) or not result.get("cancelled")
-            or not isinstance(name, str) or not isinstance(args, dict)):
-        return None
-    try:
-        json.dumps(args)
-    except (TypeError, ValueError):
-        return None
-    return {"type": "declinedAction", "data": {
-        "name": name, "arguments": args, "ts": time.time(),
-    }}
+    """Thin wrapper over thread_extras.declined_action_extra (same code at write
+    time and when the extras are rebuilt from the event log)."""
+    return thread_extras.declined_action_extra(turn_runs)
 
 
 def _load_declined_repeat(conv_id, user_text, now=None):

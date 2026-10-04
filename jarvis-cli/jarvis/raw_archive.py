@@ -71,7 +71,7 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
-from . import conversations
+from . import conversations, thread_extras
 
 JARVIS_DIR = Path.home() / ".jarvis"
 ARCHIVE_DIR = JARVIS_DIR / "events"
@@ -122,12 +122,21 @@ def read(conv_id, kinds=None):
     if not path.exists():
         return []
     wanted = set(kinds) if kinds else None
+    # record() writes json.dumps(entry) with its default separators, so a line
+    # of kind K always contains the text `"kind": "K"`. Lines without any
+    # wanted kind's marker are skipped before json.loads -- a replay that only
+    # needs user / reply events never parses a megabyte of console lines. A
+    # line that merely CONTAINS such text in its payload is parsed and then
+    # filtered exactly as before, so this can skip work but never a match.
+    markers = tuple('"kind": %s' % json.dumps(k) for k in wanted) if wanted else None
     out = []
     try:
         with path.open("r", encoding=ENCODING) as f:
             for raw in f:
                 raw = raw.strip()
                 if not raw:
+                    continue
+                if markers is not None and not any(m in raw for m in markers):
                     continue
                 try:
                     entry = json.loads(raw)
@@ -190,23 +199,63 @@ def rebuild_console(conv_id):
     return lines
 
 
-def rebuild_exchanges(conv_id):
+def _epoch(iso):
+    """Event timestamp -> epoch seconds, or None if it doesn't parse."""
+    try:
+        return datetime.fromisoformat(str(iso)).timestamp()
+    except (TypeError, ValueError):
+        return None
+
+
+def _runs_of(tool_run_events):
+    """tool_run events -> the ``runs`` list ai_client's executor keeps (the
+    shape thread_extras.extras_from_runs reads)."""
+    runs = []
+    for e in tool_run_events:
+        run = {"name": e.get("name"), "arguments": e.get("arguments"), "result": e.get("result")}
+        if e.get("confirm") is not None:
+            run["confirm"] = e.get("confirm")
+        runs.append(run)
+    return runs
+
+
+def rebuild_exchanges(conv_id, derive_extras=False):
     """The conversation's exchanges, rebuilt from events alone -- every one,
     not just the newest 60. Same shape as the conversation file's exchanges
     (``ts``, ``user``, ``jarvis``, ``provider``, optional ``extras`` /
     ``interrupted``). A redo removes the exchanges the live file removed.
+
+    ``derive_extras=False`` (default) returns each exchange's extras exactly as
+    the conversation file was given them. ``derive_extras=True`` re-derives the
+    tool-driven ones (screenshot / download / presented-file / organize-json /
+    dev_agent cards, confirmations, a declined action) from the turn's logged
+    tool runs with ``thread_extras`` -- the same code the write path uses -- and
+    keeps the saved copy of the rest (thinking, interim text, trace, console).
+    A turn with no logged tool runs keeps its saved extras untouched. A turn
+    that was interrupted gets the cards for what it did before it stopped.
     """
     exchanges = []
     open_user = None   # (ts, text) of a `user` event with no `reply` yet
-    for e in read(conv_id, kinds=("user", "reply", "exchange_removed")):
+    runs = []          # tool_run events since the turn began
+    kinds = ("user", "reply", "exchange_removed") + (("tool_run",) if derive_extras else ())
+    for e in read(conv_id, kinds=kinds):
         kind = e["kind"]
-        if kind == "user":
+        if kind == "tool_run":
+            runs.append(e)
+        elif kind == "user":
             if open_user is not None:
                 # the previous turn never resolved (hard kill): the live file
                 # downgrades it to `interrupted` on the next begin -- same here
-                exchanges.append({"ts": open_user[0], "user": open_user[1], "jarvis": "",
-                                  "provider": None, "interrupted": "interrupted"})
+                ex = {"ts": open_user[0], "user": open_user[1], "jarvis": "",
+                      "provider": None, "interrupted": "interrupted"}
+                if derive_extras and runs:
+                    extras = thread_extras.rebuild_turn_extras(
+                        _runs_of(runs), None, ts=_epoch(runs[-1].get("ts")))
+                    if extras:
+                        ex["extras"] = extras
+                exchanges.append(ex)
             open_user = (e.get("ts"), e.get("text", ""))
+            runs = []
         elif kind == "reply":
             if "user" in e:
                 user_text = e.get("user", "")
@@ -219,8 +268,14 @@ def rebuild_exchanges(conv_id):
                   "provider": e.get("provider")}
             if e.get("status") == "interrupted":
                 ex["interrupted"] = e.get("reason") or "interrupted"
-            if e.get("extras"):
-                ex["extras"] = e["extras"]
+            if derive_extras and runs:
+                extras = thread_extras.rebuild_turn_extras(
+                    _runs_of(runs), e.get("extras"), ts=_epoch(runs[-1].get("ts")))
+            else:
+                extras = e.get("extras")
+            if extras:
+                ex["extras"] = extras
+            runs = []
             exchanges.append(ex)
         elif kind == "exchange_removed":
             n = len(e.get("exchanges") or [])
@@ -231,6 +286,61 @@ def rebuild_exchanges(conv_id):
         exchanges.append({"ts": open_user[0], "user": open_user[1], "jarvis": "",
                           "provider": None, "pending": True})
     return exchanges
+
+
+def _same_turn(a, b):
+    """Do two exchanges (one from the conversation file, one rebuilt from the
+    log) describe the same turn? Text must match; whitespace at the ends and
+    the file's pending/interrupted bookkeeping are ignored."""
+    def norm(x):
+        return (x or "").strip()
+    return (norm(a.get("user")) == norm(b.get("user"))
+            and norm(a.get("jarvis")) == norm(b.get("jarvis")))
+
+
+def replay_record(conv_id):
+    """What the web UI should show for this conversation: ``(record, info)``.
+
+    The conversation file's record, with ``exchanges`` replaced by the ones
+    rebuilt from the event log (extras re-derived from the logged tool runs) --
+    every exchange, past the file's 60-cap. ``info`` says where it came from:
+
+      source "events"            log used. ``from_log`` exchanges came from it;
+                                 ``from_file`` older ones (a log that began
+                                 after the conversation did) were kept from the
+                                 file in front of them.
+      source "conversation-file" the file's own record, untouched: no log, or a
+                                 log that does not line up with the file (so it
+                                 is not trusted to replace it), ``reason`` says
+                                 which.
+
+    The log must AGREE with the file on the turns they share -- same user and
+    reply text, newest first -- before it is allowed to replace anything, so
+    this can only ever add history and cards, never swap in a different
+    conversation. Returns ``(None, {...})`` when there is no such conversation.
+    """
+    record = conversations.get_conversation(conv_id) if conversations.is_valid_id(conv_id) else None
+    if not record:
+        return None, {"source": "none", "reason": "no such conversation"}
+    file_ex = list(record.get("exchanges") or [])
+    rebuilt = rebuild_exchanges(conv_id, derive_extras=True)
+    if not rebuilt:
+        return record, {"source": "conversation-file", "reason": "no event log",
+                        "exchanges": len(file_ex)}
+    n = min(len(file_ex), len(rebuilt))
+    if n and not all(_same_turn(f, r) for f, r in zip(file_ex[-n:], rebuilt[-n:])):
+        return record, {"source": "conversation-file",
+                        "reason": "event log does not match the conversation file",
+                        "exchanges": len(file_ex)}
+    if len(rebuilt) >= len(file_ex):
+        merged, from_file = rebuilt, 0
+    else:
+        from_file = len(file_ex) - len(rebuilt)
+        merged = file_ex[:from_file] + rebuilt
+    out = dict(record)
+    out["exchanges"] = merged
+    return out, {"source": "events", "exchanges": len(merged), "from_log": len(rebuilt),
+                 "from_file": from_file, "file_exchanges": len(file_ex)}
 
 
 def export_records(conv_id):

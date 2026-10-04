@@ -63,6 +63,23 @@ things that were already fixed once.
   replays on a resumed session). `channels/dedupe.py` is the guard and it
   is on disk, not in memory, because a gateway restart is exactly when a
   redelivery happens.
+- **Per-person permissions can only take access away, and they fail closed
+  (L.36).** `channels/user_perms.py` narrows what someone the gate already
+  lets use tools may run (an allow-list, never a deny-list, so a tool added
+  next month isn't silently open to a limited person) and whether Jarvis may
+  DM them. It must never *grant* anything the gate or `send_dm`'s owner-only
+  rules refuse. An unreadable `user_perms.json` means "limits unknown" — that
+  message runs with tools off and `send_dm` refuses; it never reads as "no
+  restrictions". The Channels panel and `jarvis channels-user` both go
+  through `channels/user_admin.py` and edit the same allow-lists as
+  `channels-allow`; don't add a second path that writes them, and don't let a
+  bot token pass through the browser. `tests/test_user_admin.py` pins this.
+- **MCP servers are added or changed only by a human.** The MCP panel's
+  buttons, `jarvis mcp-edit` and a hand-edit of `mcp_config.json` are the only
+  write paths (`mcp_client.save_server` / `set_server_flag` / `remove_server`);
+  no model tool may reach them, MCP tools stay confirm-gated unless the owner
+  marks a server Trusted, and secrets (env values, a URL's userinfo/query)
+  never go back to the browser. `tests/test_mcp_edit.py` pins this.
 
 - **Never touch `tool_safety.py`, confirmation prompts, `risk_review()`,
   or the AI-review gating inside `_make_tool_executor()`** while doing
@@ -162,6 +179,11 @@ actually render Markdown):
     python3 tests/verify_l11_daemon_categories.py # L.11: daemon categories in a real browser; needs `playwright` (Python) + Chromium, prints SKIP without them
     python3 tests/verify_l13_favorite_daemons.py  # L.13: favorite daemons in a real browser; needs `playwright` (Python) + Chromium, prints SKIP without them
     node tests/verify_slash_palette.js      # no npm install; runs the real palette
+    node tests/verify_channels_panel.js     # L.36: the Channels panel's pure helpers (people list, filters, tool-scope diffing); no npm install
+    node tests/verify_mcp_servers.js        # L.31: the MCP panel's pure helpers (state labels, search, filters, what a blank secret means); no npm install
+    python3 tests/verify_mcp_servers_ui.py  # L.31: the MCP panel in a real browser against a real stdio MCP server; needs `playwright` (Python) + Chromium, prints SKIP without them
+    node tests/verify_code_editor.js        # L.33: the Tool Manager editor's tokenizer, edit helpers and completions; no npm install
+    python3 tests/verify_l33_code_editor.py # L.33: the editor in a real browser (keys, undo, ghost suggestions, scroll sync); needs `playwright` (Python) + Chromium, prints SKIP without them
                                             # against a fake DOM + fake JarvisHost
     node tests/verify_panel_open_guard.js   # I-B18(c): openScriptPanel() says so when a panel's script didn't load; no npm install
     python3 tests/verify_panel_open_guard.py  # same, in a real browser with daemons.js blocked; needs `playwright` (Python) + Chromium, prints SKIP without them

@@ -3011,6 +3011,14 @@ window.JARVIS_TEST_CHECKLIST = /*JSON-BEGIN*/ {
      "expect": "ok: false, \"I don't know anyone called ...\" with a known_contacts list. Never a guess."
     },
     {
+     "run": {
+      "person": "<a known person you switched \"Jarvis may DM them\" OFF for in Menu > Channels > Permissions>",
+      "message": "hi",
+      "dry_run": true
+     },
+     "expect": "ok: false, \"DMs to ... are switched off\" with a hint pointing at Menu > Channels > Permissions. Switch it back on and the same call succeeds."
+    },
+    {
      "ask": "DM <a known person> that I'll be late",
      "expect": "A confirm prompt showing the exact recipient and text; after Yes, <that person> receives it and the result says sent."
     }
@@ -3023,7 +3031,8 @@ window.JARVIS_TEST_CHECKLIST = /*JSON-BEGIN*/ {
    "watch": [
     "Ambiguous name (two people called the same) must list candidates, not pick one.",
     "More than 5 sends to one person per hour is refused (20 overall).",
-    "Each attempt, delivered or not, appears as an outbound owner_dm line in that person's transcript thread."
+    "Each attempt, delivered or not, appears as an outbound owner_dm line in that person's transcript thread.",
+    "The per-person \"Jarvis may DM them\" switch (Menu > Channels > Permissions) only ever adds a refusal: it never lets a non-owner use the tool, and an unreadable user_perms.json counts as switched off."
    ]
   },
   "mcp_list_servers": {
