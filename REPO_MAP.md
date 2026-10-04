@@ -132,7 +132,13 @@ jarvis-cli/jarvis/
         base.py           the pipeline every gateway runs
         discord_gateway.py     wire adapter (the only file importing discord.py)
         instagram_gateway.py   wire adapter (webhook server)
-        transcript.py     per-thread logs + cooldown state
+        transcript.py     per-thread logs + cooldown state. L.36-P1: outbound lines carry
+                          `to_user`, and `read_person()` assembles one person's slice of the
+                          thread files (a rotated copy counts as its thread; an older group
+                          reply with no `to_user` is attributed to nobody, never guessed)
+        usage.py          L.36-P2: per-person usage ledger, one counts-only line per answered
+                          ask in `channels/usage.jsonl` (tokens, requests, tool NAMES; never
+                          text). Tokens as the provider counted them, no prices
         directory.py      @handle -> id, learned from real messages
         people.py         NEW — WHO a person is: name, notes, follow state, and (L.36) a
                           platform-given avatar URL (https + image-CDN allow-list only)
@@ -143,7 +149,11 @@ jarvis-cli/jarvis/
                           + tool scope); the ONE implementation behind the panel and
                           `jarvis channels-user`; registered people only. L.36b adds
                           add_person / rename / remove_person / link_accounts and the
-                          allow-list reconcile (sync_listed) run on every list_view
+                          allow-list reconcile (sync_listed) run on every list_view.
+                          L.36-P1/P2/P3 add three READ-ONLY views: conversation_view,
+                          usage_view and simulate (the "Test as this person" dry run:
+                          calls permissions.decide + user_perms.resolve_tool_access, the
+                          same functions a real message uses; writes nothing)
         dedupe.py         NEW — has this message id already been handled
         outbound.py       DM the owner (dm_owner) or one known person (dm_person, L.20)
 
@@ -255,6 +265,7 @@ Everything is under `~/.jarvis/`:
 | `channels/directory.json` | channels/directory.py | @handle → id |
 | `channels/people.json` | channels/people.py | who each person is (name, notes, follow state, avatar URL) |
 | `channels/user_perms.json` | channels/user_perms.py | per-person tool scope + "Jarvis may DM them"; only non-default values stored; unreadable = fail closed |
+| `channels/usage.jsonl` | channels/usage.py | L.36-P2: one counts-only line per answered ask (who, when, tokens, tool names); rotated, never deleted |
 | `channels/seen_messages.json` | channels/dedupe.py | redelivery guard |
 | `daemons.json` | daemons.py | the daemon registry |
 | `daemons/<id>/` | daemons.py | console.log, status.json, stdin.queue |
@@ -379,6 +390,9 @@ jarvis channels-follow|block <platform> <id-or-@handle>
 jarvis channels-users [platform]                      # every registered person + every switch (JSON)
 jarvis channels-user <platform> <id> <dm|reply|tool|owner|send_dm|blocked> <on|off>
 jarvis channels-user-tools <platform> <id> inherit | custom [tool ...]
+jarvis channels-conversation <platform> <id|@handle> [limit]    # what they sent and how Jarvis answered (JSON, read-only)
+jarvis channels-usage <platform> <id|@handle> [days]            # their messages, tokens, tool calls (JSON, read-only)
+jarvis channels-user-test <platform> <id|@handle> dm|group [mentioned|unmentioned]   # DRY RUN of the gate: no model, nothing sent or saved
 jarvis channels-add-person <platform> <id|@handle> [name ...]   # someone who hasn't messaged yet; grants nothing
 jarvis channels-rename <platform> <id|@handle> [name ...]       # no name clears it
 jarvis channels-remove-person <platform> <id|@handle>           # hand-added and never messaged only
@@ -512,6 +526,8 @@ silently never runs.
 | `test_channels.py` | the permission gate, config, transcripts |
 | `test_channel_manual_people.py` | L.36b: people named in an allow-list get a row, hand-added people, handle-only placeholder adopted on first message (tool limits migrated), locked names vs `remember_sender`, linked accounts (by id / handle / name, ambiguity, owner never inherited), remove, `send_dm` skips a handle-only person, the `channels-*` commands |
 | `test_user_admin.py` | L.36: `user_perms` store (fails closed), `user_admin` switches (registered only, wildcard refusal, owner moves, block removes from all lists), the `base._ask_jarvis` enforcement point, the `send_dm` refusal, avatar validation in `people.py` |
+| `test_channel_insights.py` | L.36-P1/P2/P3: per-person conversation attribution (DM vs group, rotated files, torn lines), the usage ledger (counts only, failed asks, windows, rotation), and `simulate` (agrees with what `handle_message` really hands the model; writes nothing, calls no model — snapshot of `~/.jarvis` before/after) |
+| `verify_l36_insights_ui.py` (`python3`) | L.36-P1/P2/P3 tabs in a real browser against real backend output (`_channels_fixture.py`); SKIPs without playwright + Chromium |
 | `verify_channels_panel.js` (`node`) | L.36: `channels-panel.js` pure helpers (initials, hue, relative time, list filters and search, tool-scope diffing/grouping, and that only fixed icon strings reach `innerHTML`) |
 | `test_prompt_cache.py` | the static/dynamic prompt split |
 | `test_schemas_for_tools.py` | router ↔ catalog consistency |
