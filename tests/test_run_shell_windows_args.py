@@ -177,9 +177,12 @@ def test_non_windows_platform_never_routes_through_cmd():
         raise FileNotFoundError("stand-in")
 
     code_agent.subprocess.run = fake_run
+    orig_platform = sys.platform
+    sys.platform = "linux"  # the test is about NOT-Windows; don't inherit the host's
     try:
         code_agent._run_shell_impl("echo hi", cwd=Path("."))
     finally:
+        sys.platform = orig_platform
         code_agent.subprocess.run = orig_run
 
     check("non-Windows echo is never routed through cmd", seen.get("argv") == ["echo", "hi"], seen.get("argv"))

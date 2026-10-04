@@ -118,7 +118,11 @@ stripped, case-insensitive — `clipboard`, `clipboard_watch`, and
 test passed, 1 if any failed, 2 if a filter matched nothing. Each test
 runs as its own subprocess (`stdin` closed, so nothing can silently hang
 waiting on input) with its own timeout, so one crashing or hanging file
-can't take the rest of the run down with it.
+can't take the rest of the run down with it. For a FAILING file the
+summary shows the test's own `FAILED` lines, the final exception line and
+its `N passed` count -- not the last line of output, which was often an
+unrelated stderr notice (e.g. `[tools] Auto-discovered ...`) that hid the
+real reason.
 
 **Read the default timeout's own `--help` text before assuming a file is
 hung** — several tests now involve real, unmocked sleeps.

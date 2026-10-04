@@ -73,6 +73,13 @@ def test_lists_a_dm_thread_newest_first():
     _clear_sender()
     _log_dm(DISCORD, "dm-a", "u-a", "alice", "hello", reply="hi alice")
     _log_dm(DISCORD, "dm-b", "u-b", "bob", "yo")
+    # Threads are ordered by file mtime. Two writes a few ms apart can land
+    # on the SAME mtime on Windows/NTFS, which makes "newest first" a tie
+    # the sort can't break -- so pin the mtimes instead of trusting the clock.
+    older = transcript.thread_path(DISCORD, "dm-a")
+    newer = transcript.thread_path(DISCORD, "dm-b")
+    base = newer.stat().st_mtime
+    os.utime(older, (base - 60, base - 60))
     out = rd.tool_recent_dms({"platform": DISCORD})
     assert out["ok"] is True
     ids = [t["thread_id"] for t in out["threads"]]

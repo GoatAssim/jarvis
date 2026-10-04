@@ -36,6 +36,14 @@ import sys
 import tempfile
 from pathlib import Path
 
+# Windows consoles default to cp1252 and the log lines contain "→"; a failing
+# check would otherwise die in print() and hide the real failure.
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:  # noqa: BLE001
+        pass
+
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "jarvis-cli"))
 
 # jarvis.tools scans a ~/.jarvis/tools/ directory for auto-discovered action
@@ -231,8 +239,8 @@ def test_end_to_end_failure_still_reports_last_error_and_a_useful_log():
         # than a synthetic dict.
         executor("list_dir", {"path": "."})
         executor("read_file", {"path": "main.py"})
-        executor("run_shell", {"command": "python3 -c \"print(1)\""})
-        executor("run_shell", {"command": "python3 -c \"import sys; sys.exit(3)\""})
+        executor("run_shell", {"command": f'"{sys.executable}" -c "print(1)"'})
+        executor("run_shell", {"command": f'"{sys.executable}" -c "import sys; sys.exit(3)"'})
         return None, "gemini: gave up after 5 rounds of tool calls with no final answer", None
 
     code_agent._run_agent_loop = fake_loop
