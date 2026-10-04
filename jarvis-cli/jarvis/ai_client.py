@@ -20,6 +20,7 @@ import time
 from . import ai_config, ai_providers, command_tools, conversations, memory, playnite_config, skill_stickiness, skills, tool_safety
 from . import tool_disable
 from . import console_store
+from . import raw_archive
 from . import dev_agent_events as _dev_agent_events
 from . import discovery_cache
 from . import key_health
@@ -1974,6 +1975,14 @@ def _make_tool_executor(on_tool_call, schemas=None, on_confirm_request=None,
         if confirm_meta is not None:
             run_entry["confirm"] = confirm_meta
         runs.append(run_entry)
+        try:
+            # L.38 (a): the model is handed `shaped_result`; the archive keeps
+            # the full pre-shaping result so nothing the tool returned is lost.
+            raw_archive.record(conv_id, "tool_run", {
+                "name": name, "arguments": arguments, "result": run_entry["result"],
+                "confirm": run_entry.get("confirm")})
+        except Exception:  # noqa: BLE001 -- archiving must never break a tool call
+            pass
         result = shaped_result
         try:
             ok = not (isinstance(result, dict) and result.get("ok") is False)

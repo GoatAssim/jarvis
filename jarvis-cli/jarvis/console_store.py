@@ -161,6 +161,14 @@ def append(conv_id, kind, text, *, surface="ask", turn=None, tool=None,
         "stream": stream,
         "text": _clip(text),
     }
+    # L.38 (a): the clip keeps the stored line small, not the record small --
+    # the untruncated text goes to the raw archive, tied to this line by seq.
+    full_text = "" if text is None else str(text)
+    if len(full_text) > MAX_LINE_CHARS:
+        from . import raw_archive
+        raw_archive.record(conv_id, "console_full", {
+            "seq": line["seq"], "turn": turn, "surface": surface,
+            "console_kind": kind, "tool": tool, "text": full_text})
     try:
         CONSOLE_DIR.mkdir(parents=True, exist_ok=True)
         path = _path(conv_id)
@@ -210,6 +218,12 @@ def _trim(conv_id):
         return
     dropped = len(lines) - KEEP_LINES_ON_TRIM
     kept = lines[-KEEP_LINES_ON_TRIM:]
+    # L.38 (a): rotated-out lines go to the raw archive, not into the void.
+    from . import raw_archive
+    for old_line in lines[:-KEEP_LINES_ON_TRIM]:
+        if old_line.get("kind") == "status" and str(old_line.get("text", "")).startswith("earlier output trimmed"):
+            continue  # the marker from a previous trim is bookkeeping, not output
+        raw_archive.record(conv_id, "console_trimmed", {"line": old_line})
     marker = {
         "seq": _next_tick(), "ts": _now_iso(), "turn": None, "surface": "live",
         "kind": "status", "tool": None, "provider": None, "stream": None,

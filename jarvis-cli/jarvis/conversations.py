@@ -199,6 +199,22 @@ def _read_json_with_backup(path, expect):
     return None, False
 
 
+def _cap_exchanges(conv_id, exchanges):
+    """Keep the newest MAX_STORED_EXCHANGES. Whatever falls off the front is
+    handed to the raw archive (L.38 a) instead of vanishing -- the 60-exchange
+    cap bounds the conversation file and the prompt, not what is remembered."""
+    if len(exchanges) <= MAX_STORED_EXCHANGES:
+        return exchanges
+    dropped = exchanges[:-MAX_STORED_EXCHANGES]
+    try:
+        from . import raw_archive
+        raw_archive.record(conv_id, "exchange_overflow",
+                           {"reason": "stored-exchange cap", "exchanges": dropped})
+    except Exception:  # noqa: BLE001 -- archiving must never break saving
+        pass
+    return exchanges[-MAX_STORED_EXCHANGES:]
+
+
 def _save_conv(record):
     CONV_DIR.mkdir(parents=True, exist_ok=True)
     try:
@@ -413,6 +429,8 @@ def delete_conversation(conv_id):
     except OSError:
         return False
     _remove_from_index(conv_id)
+    from . import raw_archive
+    raw_archive.delete(conv_id)
     try:
         data = json.loads(CURRENT_FILE.read_text(encoding=ENCODING))
         if isinstance(data, dict) and data.get("id") == conv_id:
@@ -498,7 +516,7 @@ def begin_exchange(conv_id, user_text, console_turn=None):
     if console_turn:
         exchange["consoleTurn"] = console_turn
     record.setdefault("exchanges", []).append(exchange)
-    record["exchanges"] = record["exchanges"][-MAX_STORED_EXCHANGES:]
+    record["exchanges"] = _cap_exchanges(conv_id, record["exchanges"])
     record["updated_at"] = _now()
     _save_conv(record)
     _upsert_index(record)
@@ -575,7 +593,7 @@ def _finish_pending(record, user_text, patch):
     exchange = {"ts": _now(), "user": user_text}
     exchange.update(patch)
     exchanges.append(exchange)
-    record["exchanges"] = exchanges[-MAX_STORED_EXCHANGES:]
+    record["exchanges"] = _cap_exchanges(record.get("id"), exchanges)
     return len(record["exchanges"]) - 1
 
 
@@ -692,7 +710,7 @@ def append_exchange(conv_id, user_text, jarvis_text, provider, extras=None):
     if extras:
         exchange["extras"] = extras
     record.setdefault("exchanges", []).append(exchange)
-    record["exchanges"] = record["exchanges"][-MAX_STORED_EXCHANGES:]
+    record["exchanges"] = _cap_exchanges(conv_id, record["exchanges"])
     record["updated_at"] = _now()
     _save_conv(record)
     _upsert_index(record)
@@ -716,6 +734,12 @@ def drop_from_user(conv_id, user_text):
             break
     if idx is None:
         return False
+    try:
+        from . import raw_archive
+        raw_archive.record(conv_id, "exchange_dropped",
+                           {"reason": "redo", "exchanges": exchanges[idx:]})
+    except Exception:  # noqa: BLE001
+        pass
     record["exchanges"] = exchanges[:idx]
     record["updated_at"] = _now()
     _save_conv(record)
@@ -736,6 +760,8 @@ def clear(conv_id):
     _upsert_index(record)
     from . import route_stickiness
     route_stickiness.clear_sticky(conv_id)
+    from . import raw_archive
+    raw_archive.delete(conv_id)  # Clear means gone (L.38): no hidden copy survives it
     return True
 
 
