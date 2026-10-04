@@ -56,7 +56,7 @@ removing an id that was never the reason they got through.
 
 from . import PLATFORMS, PERM_DM, PERM_REPLY, PERM_TOOLS
 from . import config as channel_config
-from . import people, permissions, transcript, usage, user_perms
+from . import people, permissions, presets, transcript, usage, user_perms
 from .config import WILDCARD
 
 FLAGS = ("dm", "reply", "tool", "owner", "send_dm", "blocked")
@@ -206,6 +206,9 @@ def list_view(platform=None):
         "platforms": {p: platform_view(p, cfg_all.get(p) or {}) for p in platforms},
         "people": out_people,
         "perms_error": perms_error,
+        # Quick setups (L.36-P4): fixed in code, so the panel needs no call of
+        # its own to know what to offer.
+        "presets": presets.public_view(),
     }
 
 
@@ -247,6 +250,26 @@ def _remove_everywhere(platform, which, rec):
     return ok, err
 
 
+def list_flag_refusal(flag, value, rec, cfg):
+    """Why a dm / reply / tool switch cannot be set to `value` for this person,
+    or "" when it can.
+
+    ONE place for the two refusals, used by set_flag() and by the quick-setup
+    preview (preset_admin), so a preview can never promise what the switch
+    would then refuse: turning one ON for someone who is blocked, and turning
+    one OFF for someone a "*" (everyone) entry still covers."""
+    if flag not in _SET_FOR:
+        return ""
+    if value:
+        if (rec.get("follow") or "") == people.FOLLOW_BLOCKED:
+            return "they're blocked — unblock them first"
+        return ""
+    if membership(cfg, _SET_FOR[flag], rec)["via"] == "wildcard":
+        return (f"covered by \"*\" (everyone) in the {flag} list — "
+                f"a switch for one person can't undo that")
+    return ""
+
+
 def set_flag(platform, user_id, flag, value):
     """Flip one switch. Returns (ok, error, note); `note` is a heads-up the
     panel shows after a SUCCESSFUL change (something still true that the person
@@ -263,15 +286,12 @@ def set_flag(platform, user_id, flag, value):
 
     if flag in _SET_FOR:
         which = _SET_FOR[flag]
+        refusal = list_flag_refusal(flag, value, rec, cfg)
+        if refusal:
+            return False, refusal, ""
         if value:
-            if blocked:
-                return False, "they're blocked — unblock them first", ""
             ok, err = channel_config.add_to_set(platform, which, uid)
             return ok, err, ""
-        member = membership(cfg, which, rec)
-        if member["via"] == "wildcard":
-            return False, (f"covered by \"*\" (everyone) in the {flag} list — "
-                           f"a switch for one person can't undo that"), ""
         ok, err = _remove_everywhere(platform, which, rec)
         return ok, err, ""
 

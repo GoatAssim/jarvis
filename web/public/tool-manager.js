@@ -362,6 +362,21 @@
     return { note, code, complete };
   }
 
+  // L.45: what the editor SHOWS while Jarvis rewrites a file. The model sends
+  // the whole new file, so showing only what has arrived makes a 300-line tool
+  // collapse to five lines and grow back — it reads as a reload. Instead the
+  // lines that have arrived replace the same lines of the old file and the old
+  // lines not yet reached stay underneath (dimmed by the editor), like
+  // overwriting in place. `head` is the 0-based line being written.
+  function overwriteView(code, old) {
+    const c = String(code == null ? "" : code), o = String(old == null ? "" : old);
+    const done = c.replace(/\n$/, "").split("\n").length;           // lines the new text covers so far
+    const oldLines = o.split("\n");
+    const rest = oldLines.length > done ? oldLines.slice(done).join("\n") : "";
+    const text = rest ? c.replace(/\n?$/, "\n") + rest : c;
+    return { text, head: c ? done - 1 : -1, tail: !!rest };
+  }
+
   function formatBytes(n) {
     n = Number(n) || 0;
     return n < 1024 ? n + " B" : (n / 1024).toFixed(n < 10240 ? 1 : 0) + " KB";
@@ -391,7 +406,7 @@
     SAFEGUARDS, KEYS, NAME_RE, STAGES, MAX_SOURCE_CHARS, bucketOf, groupLabel, buildRows, matchesSearch, matchesSafeguard,
     matchesSource, filterRows, groupRows, coverage, callOutcome, jobOutcome, changedKeys, nameProblem, importNameFromFile,
     importProblem, sourceProblem, parseErrorLine, stageStates, lineCount, formatBytes, parseArgs, paramList,
-    nextFree, splitAgentReply,
+    nextFree, splitAgentReply, overwriteView,
   };
 
   /* =======================================================================
@@ -1482,13 +1497,28 @@
 
   function toggleAgent(ed) { state.agentOpen = !state.agentOpen; savePrefs(); renderAgent(ed); }
 
+  // L.45: Jarvis's replies are Markdown (the shared renderer in app.js:
+  // sanitized, no images, links in a new tab). What the owner typed and error
+  // messages stay plain text, as does everything if the renderer isn't there.
+  function paintAgentText(node, m) {
+    const md = global.JarvisMarkdown;
+    const text = m.text || (m.pending ? "Thinking" : "");
+    if (m.role !== "user" && !m.err && m.text && md && md.renderInto) {
+      node.classList.add("jv-md");
+      try { md.renderInto(node, m.text, { streaming: !!m.pending }); return; }
+      catch (_) { node.classList.remove("jv-md"); }
+    }
+    node.textContent = text;
+  }
+
   function paintAgentLog(ed) {
     const u = ed.ui; if (!u) return;
     const nearEnd = u.log.scrollHeight - u.log.scrollTop - u.log.clientHeight < 40;
     clear(u.log);
     ed.chat.messages.forEach((m) => {
-      u.log.appendChild(el("div", { class: "tm-agent__msg " + (m.role === "user" ? "tm-agent__msg--user" : "tm-agent__msg--ai") + (m.err ? " tm-agent__msg--err" : "") + (m.pending ? " is-pending" : "") },
-        m.text || (m.pending ? "Thinking" : "")));
+      const node = el("div", { class: "tm-agent__msg " + (m.role === "user" ? "tm-agent__msg--user" : "tm-agent__msg--ai") + (m.err ? " tm-agent__msg--err" : "") + (m.pending ? " is-pending" : "") });
+      paintAgentText(node, m);
+      u.log.appendChild(node);
     });
     u.log.hidden = !state.agentOpen || !ed.chat.messages.length;
     if (nearEnd) u.log.scrollTop = u.log.scrollHeight;
@@ -1514,13 +1544,16 @@
     const u = ed.ui; if (!u) return;
     const last = u.log.lastElementChild, msg = ed.chat.messages[ed.chat.messages.length - 1];
     if (!last || !msg) { paintAgentLog(ed); return; }
-    last.textContent = msg.text || "Thinking";
+    last.classList.remove("jv-md");
+    paintAgentText(last, msg);
     u.log.scrollTop = u.log.scrollHeight;
   }
 
   function setAgentBuffer(ed, text) {
     if (!ed.cm) return;
-    ed.cm.setValue(text, { silent: true });
+    // L.45: keep the view where it is (stream(), not setValue()) so the end of
+    // an edit, an Undo and a failed edit's restore don't snap the editor to line 1.
+    if (ed.cm.stream) ed.cm.stream(text, -1); else ed.cm.setValue(text, { silent: true });
     ed.source = text; ed.dirty = true; ed.errorLine = null;
     ed.result = null;                                   // a check of the old text says nothing about this one
     updateChip(ed); renderTabs();
@@ -1536,7 +1569,10 @@
     askAgent(ed, text);
   }
 
-  function stopAgent(ed) { if (ed.chat.abort) { try { ed.chat.abort.abort(); } catch (_) { /* done already */ } } }
+  function stopAgent(ed) {
+    ed.chat.stopped = true;                             // also ends the typed-in reveal, which has no request to abort
+    if (ed.chat.abort) { try { ed.chat.abort.abort(); } catch (_) { /* done already */ } }
+  }
 
   function undoAgent(ed) {
     const chat = ed.chat;
@@ -1554,26 +1590,55 @@
     const before = ed.cm.getValue();
     const reply = { role: "ai", text: "", pending: true, err: false };
     chat.messages.push({ role: "user", text: instruction }, reply);
-    chat.busy = true; chat.backup = before; chat.undoable = false;
+    chat.busy = true; chat.backup = before; chat.undoable = false; chat.stopped = false;
     chat.abort = typeof AbortController !== "undefined" ? new AbortController() : null;
     if (ed.cm.setReadOnly) ed.cm.setReadOnly(true);
     ed.cm.el.classList.add("is-ai-writing");
     renderAgent(ed); renderTabs();
 
     let acc = "", wrote = false, finished = false, raf = 0, pendingCode = null;
+    let lastCode = null, tailShown = false;
+    // L.45: paint what has arrived over the old file (see overwriteView). ed.source
+    // holds only the NEW text so far, never the old tail mixed in.
+    const paintStream = (code) => {
+      if (!ed.cm) return;
+      lastCode = code;
+      if (ed.cm.stream) {
+        const v = overwriteView(code, before);
+        tailShown = v.tail;
+        ed.cm.stream(v.text, v.head);
+      } else { ed.cm.setValue(code, { silent: true }); if (ed.cm.scrollToEnd) ed.cm.scrollToEnd(); }
+      ed.source = code; ed.dirty = true;
+    };
     const flush = () => {
       raf = 0;
       if (pendingCode === null || !ed.cm) return;
       const code = pendingCode; pendingCode = null;
-      ed.cm.setValue(code, { silent: true });
-      ed.source = code; ed.dirty = true;
-      if (ed.cm.scrollToEnd) ed.cm.scrollToEnd();
+      paintStream(code);
+    };
+    const begin = () => {
+      if (wrote) return;
+      wrote = true; ed.errorLine = null; ed.result = null; updateChip(ed); renderTabs(); if (state.editor === ed) renderSide();
     };
     const live = (code) => {
       pendingCode = code;
-      if (!wrote) { wrote = true; ed.errorLine = null; ed.result = null; updateChip(ed); renderTabs(); if (state.editor === ed) renderSide(); }
+      begin();
       if (!raf) raf = (global.requestAnimationFrame || ((f) => setTimeout(f, 16)))(flush);
     };
+    // A model/provider that doesn't stream hands over the whole file at the end.
+    // Type it in by lines (about a second and a half at most) so the edit is
+    // still seen happening instead of the file silently swapping. Stop ends it.
+    const reveal = async (full) => {
+      const lines = full.replace(/\n$/, "").split("\n"), step = Math.max(1, Math.ceil(lines.length / 50));
+      begin();
+      for (let n = step; n < lines.length; n += step) {
+        if (chat.stopped) return false;
+        paintStream(lines.slice(0, n).join("\n") + "\n");
+        await new Promise((r) => setTimeout(r, 30));
+      }
+      return !chat.stopped;
+    };
+    const commit = (text) => { tailShown = false; setAgentBuffer(ed, text); };
     const settle = () => { if (raf && global.cancelAnimationFrame) global.cancelAnimationFrame(raf); raf = 0; flush(); };
 
     try {
@@ -1600,7 +1665,7 @@
           if (ev.type === "stream") {
             if (ev.k === "reset") {                    // a key failed mid-reply; the next one starts over
               acc = ""; reply.text = ""; pendingCode = null;
-              if (wrote) { settle(); setAgentBuffer(ed, before); wrote = false; }
+              if (wrote) { settle(); commit(before); wrote = false; }
             } else {
               acc += ev.d || "";
               const sp = splitAgentReply(acc);
@@ -1613,17 +1678,18 @@
             settle();
             if (ev.ok) {
               if (ev.code) {
-                setAgentBuffer(ed, ev.code);
+                if (!wrote && ev.code !== before && !(await reveal(ev.code))) { const e = new Error("stopped"); e.name = "AbortError"; throw e; }
+                commit(ev.code);
                 chat.undoable = ev.code !== before;
                 reply.text = (ev.note || "Done — the file is updated.") + "\n\nRead it through, then Validate or Save. Validate runs the file’s top level, so look before you click.";
               } else {
-                if (wrote) setAgentBuffer(ed, before);   // no complete file came back: leave the editor as it was
+                if (wrote) commit(before);   // no complete file came back: leave the editor as it was
                 reply.text = ev.note || "Jarvis had nothing to change.";
               }
               chat.history.push({ role: "user", content: instruction }, { role: "assistant", content: (ev.note || (ev.code ? "(updated the file)" : "")).slice(0, 600) });
               if (chat.history.length > 12) chat.history.splice(0, chat.history.length - 12);
             } else {
-              if (wrote) setAgentBuffer(ed, before);
+              if (wrote) commit(before);
               reply.text = ev.error || "Jarvis couldn’t answer.";
               reply.err = true;
             }
@@ -1641,12 +1707,15 @@
         reply.text = (reply.text ? reply.text + "\n\n" : "") + "Stopped." + (wrote ? " The editor keeps what was written; Undo AI edit puts the old text back." : "");
         chat.undoable = wrote;
       } else {
-        if (wrote) { setAgentBuffer(ed, before); wrote = false; }
+        if (wrote) { commit(before); wrote = false; }
         reply.text = e && e.message ? e.message : "Couldn’t reach Jarvis.";
         reply.err = true;
       }
     } finally {
       settle();
+      // Interrupted (Stop, dropped connection): keep what was written, minus the
+      // old text that was only showing underneath it.
+      if (tailShown && lastCode !== null && ed.cm && ed.cm.stream) { ed.cm.stream(lastCode, -1); tailShown = false; }
       reply.pending = false;
       chat.busy = false; chat.abort = null;
       if (ed.cm) { if (ed.cm.setReadOnly) ed.cm.setReadOnly(false); ed.cm.el.classList.remove("is-ai-writing"); }

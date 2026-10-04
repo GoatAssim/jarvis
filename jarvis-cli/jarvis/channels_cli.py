@@ -16,7 +16,7 @@ import sys
 from .channels import PLATFORMS, PERM_SETS
 from .channels import config as channel_config
 from .channels import directory, outbound, people, permissions, transcript
-from .channels import user_admin
+from .channels import preset_admin, presets, user_admin
 
 COMMANDS = (
     "channels-config", "channels-status", "channels-set", "channels-allow",
@@ -26,6 +26,7 @@ COMMANDS = (
     "channels-add-person", "channels-rename", "channels-remove-person",
     "channels-link", "channels-unlink",
     "channels-conversation", "channels-usage", "channels-user-test",
+    "channels-presets", "channels-preset", "channels-bulk",
     "discord-daemon", "instagram-serve", "logs-search",
 )
 
@@ -64,6 +65,17 @@ USAGE = """channel commands:
   channels-user-test <platform> <id> dm | group [mentioned|unmentioned]
                                         dry run: what the gate would do with a message from them.
                                         Calls no model, sends nothing, saves nothing
+  channels-presets                      the quick setups (JSON): what each one switches on
+  channels-preset <platform> <id|@handle> <setup> [preview]
+                                        apply a quick setup to one person; `preview` only shows
+                                        what it would change. Setups: none, chat_only,
+                                        chat_notify, trusted
+  channels-bulk flag <switch> <on|off> <platform:id> ...
+                                        one switch for several people (each refusal is reported
+                                        per person). <switch>: dm, reply, tool (off only), send_dm,
+                                        blocked
+  channels-bulk preset|preview <setup> <platform:id> ...
+                                        a quick setup for several people / what it would change
   discord-daemon                        run the Discord bot (foreground)
   instagram-serve                       run the Instagram webhook (foreground)
   logs-search <query> [--mode m] [--origin o] [--source s] [--direction d]
@@ -316,6 +328,56 @@ def handle(argv):
                           "user_id": uid, "mode": mode,
                           "tools": rest[3:] if mode == "custom" else []}, indent=2))
         sys.exit(0 if ok else 1)
+
+    if cmd == "channels-presets":
+        print(json.dumps({"ok": True, "presets": presets.public_view()}, indent=2))
+        return
+
+    if cmd == "channels-preset":
+        # A quick setup for ONE person (L.36-P4). Same strict id resolution as
+        # channels-user: people on file only.
+        if len(rest) < 3:
+            _fail("usage: channels-preset <platform> <id|@handle> <setup> [preview]  "
+                  "(setup: " + ", ".join(presets.ids()) + ")")
+        platform, uid, setup = rest[0], _person_id(rest[0], rest[1]), rest[2].lower()
+        if len(rest) > 3 and rest[3].lower() == "preview":
+            result = preset_admin.plan_preset(platform, uid, setup)
+        else:
+            result = preset_admin.apply_preset(platform, uid, setup)
+        print(json.dumps(result, indent=2))
+        sys.exit(0 if result.get("ok") else 1)
+
+    if cmd == "channels-bulk":
+        # Several people at once (L.36-P5). People are written <platform:id>
+        # (an id or @handle after the colon), resolved one by one the same
+        # strict way; an unknown one is reported as refused, not dropped.
+        usage = ("usage: channels-bulk flag <switch> <on|off> <platform:id> ...  |  "
+                 "channels-bulk preset|preview <setup> <platform:id> ...")
+        if len(rest) < 3:
+            _fail(usage)
+        mode = rest[0].lower()
+        if mode == "flag":
+            if len(rest) < 4:
+                _fail(usage)
+            flag, value, entries = rest[1].lower(), _coerce(rest[2]), rest[3:]
+            if not isinstance(value, bool):
+                _fail(f"'{rest[2]}' isn't on or off")
+        elif mode in ("preset", "preview"):
+            setup, entries = rest[1].lower(), rest[2:]
+        else:
+            _fail(usage)
+        refs = []
+        for entry in entries:
+            platform, _, ident = entry.partition(":")
+            if not ident:
+                _fail(f"'{entry}' isn't <platform:id>")
+            refs.append((platform, _person_id(platform, ident)))
+        if mode == "flag":
+            result = preset_admin.bulk_flag(refs, flag, value)
+        else:
+            result = preset_admin.bulk_preset(refs, setup, preview=(mode == "preview"))
+        print(json.dumps(result, indent=2))
+        sys.exit(0 if result.get("ok") else 1)
 
     if cmd in ("channels-conversation", "channels-usage", "channels-user-test"):
         # Read-only (and, for -user-test, a dry run). The id is resolved the same

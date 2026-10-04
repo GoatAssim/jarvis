@@ -656,7 +656,10 @@ window.JARVIS_SLASH_COMMANDS = /*JSON-BEGIN*/
         "channels-unlink",
         "channels-conversation",
         "channels-usage",
-        "channels-user-test"
+        "channels-user-test",
+        "channels-presets",
+        "channels-preset",
+        "channels-bulk"
       ],
       "example": "/channels",
       "preview": "Open Channels."

@@ -32,6 +32,17 @@
  * their conversation or in their usage. Each loads when its tab is opened, not
  * before, and every number comes from the server.
  *
+ * QUICK SETUPS AND BULK EDIT  (L.36-P4, P5)
+ * -----------------------------------------
+ * A "quick setup" is the existing switches written together (No access, Chat
+ * only, Chat + tell the owner, Trusted). It is only ever a PREVIEW first — a
+ * dry run that writes nothing, with each switch's before and after — and
+ * Apply is a separate click. "Select people…" lets you tick several people and
+ * apply a setup or one switch to all of them; each person's refusals (blocked,
+ * covered by "*", the owner) come back per person and are listed, never hidden.
+ * The server runs both through the very calls the single switches use
+ * (channels/preset_admin.py), so nothing here can make a state a switch can't.
+ *
  * ADD / RENAME / LINK
  * -------------------
  * "+ Add a new person" opens a panel of its own (stacked over this one) that puts
@@ -309,6 +320,16 @@
     usage: new Map(),  // { status, data, error, days, req }
     sim: new Map(),    // { context, mentioned, status, result, error, req }
     scrollEnd: false,  // after the next render, show the newest message
+    // Quick setups (P4): the list the server sends, the open preview, and the
+    // last result (shown until dismissed or another person is picked).
+    presets: [],
+    presetPrev: null,  // { key, preset, status: loading|ready|error, data, error, ack, req }
+    presetDone: null,  // { key, result }
+    // Bulk edit (P5).
+    selectMode: false,
+    picked: new Set(), // person keys
+    bulkOpen: false,   // the middle pane shows the bulk editor
+    bulk: newBulk(),
   };
   let dom = null;
 
@@ -327,7 +348,11 @@
       ]);
       state.platforms = ppl.platforms || {};
       state.people = Array.isArray(ppl.people) ? ppl.people : [];
+      state.presets = Array.isArray(ppl.presets) ? ppl.presets : [];
       state.permsError = ppl.perms_error || "";
+      // Someone removed or no longer listed can't stay ticked.
+      for (const k of [...state.picked]) if (!personByKey(k)) state.picked.delete(k);
+      if (!state.picked.size && state.bulkOpen) { state.bulkOpen = false; state.bulk = newBulk(); }
       state.config = (cfg && cfg.config) || {};
       // Drop drafts for people who no longer exist or whose stored scope now
       // equals the draft (saved elsewhere, e.g. from the terminal).
@@ -576,11 +601,15 @@
         if (p.effective.tools === "all") badges.push(tag("All tools", "limited", "tool"));
         else if (p.effective.tools === "custom") badges.push(tag(`${p.effective.tool_count} tool${p.effective.tool_count === 1 ? "" : "s"}`, "limited", "tool"));
       }
+      const picking = state.selectMode;
+      const picked = picking && state.picked.has(k);
       const card = el("button", {
-        type: "button", class: "ch-card" + (k === state.selected ? " is-active" : ""), role: "option", "aria-selected": k === state.selected ? "true" : "false",
+        type: "button", class: "ch-card" + (picking ? " ch-card--pick" : "") + (k === state.selected && !picking ? " is-active" : "") + (picked ? " is-picked" : ""), role: "option",
+        "aria-selected": (picking ? picked : k === state.selected) ? "true" : "false",
         "data-key": k, "data-ch": postureOf(p),
-        onclick: () => select(k),
+        onclick: () => (picking ? togglePick(k) : select(k)),
       }, [
+        picking ? el("span", { class: "ch-pick" + (picked ? " is-on" : ""), "aria-hidden": "true" }) : null,
         avatar(p),
         el("div", { style: "min-width:0" }, [
           el("div", { class: "ch-card__name" }, displayName(p)),
@@ -607,6 +636,8 @@
     state.editingName = null;
     state.confirmRemove = null;
     state.toolSearch = "";
+    state.presetPrev = null;
+    state.presetDone = null;
     renderList();
     renderDetail(true);
     runTabLoader();
@@ -963,6 +994,10 @@
     if (state.permsError) pane.appendChild(el("div", { class: "ch-banner", style: "margin:0" }, `Per-person limits can't be read (${state.permsError}). Until that's fixed Jarvis answers these people without tools, and the tool and DM switches below can't be saved.`));
     if (!plat.enabled) pane.appendChild(el("div", { class: "ch-banner", style: "margin:0;border-color:var(--border);background:transparent" }, `${pname} isn't enabled, so nothing below has any effect yet. Run: jarvis channels-set ${p.platform} enabled true`));
 
+    // --- Quick setups (P4)
+    const quick = presetSection(p);
+    if (quick) pane.appendChild(quick);
+
     // --- Access
     pane.appendChild(el("div", null, [
       el("div", { class: "ch-section-title" }, "Access"),
@@ -1023,6 +1058,392 @@
     ]);
   }
 
+  // ---- Quick setups (L.36-P4) and bulk edit (L.36-P5) --------------------------
+  // The server does all of it (channels/preset_admin.py -> the same calls the
+  // single switches make). Here: a click on a setup only PREVIEWS it, Apply is a
+  // second click, and every refusal is shown where it happened.
+  const STEP_CH = { change: "on", done: "on", same: "off", refused: "bad", failed: "bad", skipped: "bad" };
+  const STEP_TEXT = { change: "will change", done: "done", same: "already", refused: "can't", failed: "failed", skipped: "skipped" };
+  const STATUS_CH = { applied: "on", unchanged: "off", partial: "limited", refused: "bad", failed: "bad", preview: "limited" };
+  const STATUS_TEXT = { applied: "changed", unchanged: "no change", partial: "partly done", refused: "not changed", failed: "failed" };
+  let presetReq = 0;
+  let bulkReq = 0;
+
+  function newBulk() {
+    return { mode: "", preset: "", flag: "", value: false, status: "idle", data: null, results: null, summary: null, action: "", error: "", req: 0, ack: false };
+  }
+  function presetById(id) { return state.presets.find((x) => x.id === id) || null; }
+
+  // "3 would change · 1 already set · 1 can't be changed" — pure.
+  function summaryText(action, s) {
+    if (!s) return "";
+    const parts = [];
+    const add = (n, t) => { if (n) parts.push(`${n} ${t}`); };
+    if (action === "preview") {
+      add(s.would_change, "would change"); add(s.unchanged, "already set"); add(s.refused, "can't be changed"); add(s.failed, "failed");
+    } else {
+      add(s.applied, "changed"); add(s.unchanged, "no change"); add(s.partial, "partly done"); add(s.refused, "not changed"); add(s.failed, "failed");
+    }
+    return parts.join(" \u00b7 ") || "Nothing to report.";
+  }
+
+  // The steps of one setup for one person. `onlyChanges` hides the switches
+  // that are already right, which is what a long bulk list wants.
+  function stepList(steps, onlyChanges) {
+    const rows = (steps || []).filter((s) => !onlyChanges || s.state !== "same");
+    const ul = el("ul", { class: "ch-steps" });
+    if (!rows.length) { ul.appendChild(el("li", { class: "ch-steps__none" }, "Nothing to change \u2014 it's already set that way.")); return ul; }
+    for (const s of rows) {
+      ul.appendChild(el("li", { class: "ch-step", "data-ch": STEP_CH[s.state] || "off" }, [
+        el("span", { class: "ch-step__label" }, s.label),
+        el("span", { class: "ch-step__change" }, s.state === "same" ? s.to : `${s.from} \u2192 ${s.to}`),
+        tag(STEP_TEXT[s.state] || s.state, STEP_CH[s.state] || "off"),
+        s.reason ? el("span", { class: "ch-step__why" }, s.reason) : null,
+      ]));
+    }
+    return ul;
+  }
+
+  function noteLine(text, kind) {
+    return el("div", { class: "ch-row__note" + (kind === "bad" ? " ch-row__note--bad" : kind === "info" ? " ch-row__note--info" : "") }, [icon(kind === "info" ? "info" : "warn"), el("span", null, text)]);
+  }
+
+  function presetButtons(onPick, activeId, disabled, why) {
+    const row = el("div", { class: "ch-presets", role: "group", "aria-label": "Quick setups" });
+    for (const pr of state.presets) {
+      const active = activeId === pr.id;
+      row.appendChild(el("button", {
+        type: "button", class: "ch-preset" + (active ? " is-active" : ""), "data-risk": pr.risk, "aria-pressed": active ? "true" : "false",
+        disabled: disabled ? "" : null, title: disabled ? why : pr.summary, onclick: () => onPick(pr.id),
+      }, [el("span", { class: "ch-preset__name" }, pr.label), el("span", { class: "ch-preset__sum" }, pr.summary)]));
+    }
+    return row;
+  }
+
+  // -- one person --------------------------------------------------------
+  async function previewPreset(p, id) {
+    const req = ++presetReq;
+    state.presetDone = null;
+    state.presetPrev = { key: pkey(p), preset: id, status: "loading", data: null, error: "", ack: false, req };
+    renderDetail();
+    try {
+      const out = await personPost(p, "preset", { preset: id, preview: true });
+      if (!state.presetPrev || state.presetPrev.req !== req) return;
+      state.presetPrev.status = "ready";
+      state.presetPrev.data = out;
+    } catch (err) {
+      if (!state.presetPrev || state.presetPrev.req !== req) return;
+      state.presetPrev.status = "error";
+      state.presetPrev.error = err.message || "Couldn't preview that.";
+    }
+    renderDetail();
+  }
+
+  async function applyPreset(p, id) {
+    const bkey = `${pkey(p)}|preset`;
+    state.busy.add(bkey);
+    renderDetail();
+    let out = null;
+    let failure = "";
+    try { out = await personPost(p, "preset", { preset: id }); } catch (err) { failure = err.message || "Couldn't apply that."; }
+    state.busy.delete(bkey);
+    state.presetPrev = null;
+    const pr = presetById(id);
+    if (out) {
+      state.presetDone = { key: pkey(p), result: out };
+      const label = pr ? pr.label : id;
+      if (out.status === "applied") toast(`${label} applied to ${displayName(p)}.`, "success");
+      else if (out.status === "unchanged") toast(`${displayName(p)} was already set up that way.`, "info");
+      else toast(`${label} was only partly applied to ${displayName(p)} \u2014 see what wasn't.`, "info");
+    } else {
+      toast(failure, "error");
+    }
+    await load(true);
+  }
+
+  function presetCard(p) {
+    const pv = state.presetPrev;
+    if (!pv || pv.key !== pkey(p)) return null;
+    const pr = presetById(pv.preset);
+    const card = el("div", { class: "ch-prev", "data-risk": pr ? pr.risk : null, role: "region", "aria-label": "Quick setup preview" });
+    card.appendChild(el("div", { class: "ch-prev__head" }, [el("b", null, pr ? pr.label : pv.preset), ` for ${displayName(p)}`]));
+    const close = el("button", { type: "button", class: "btn btn--ghost btn--sm", onclick: () => { state.presetPrev = null; renderDetail(); } }, "Cancel");
+    if (pv.status === "loading") { card.appendChild(el("div", { class: "ch-skel" })); return card; }
+    if (pv.status === "error") {
+      card.appendChild(noteLine(pv.error, "bad"));
+      card.appendChild(el("div", { class: "ch-confirm__btns" }, [close]));
+      return card;
+    }
+    const d = pv.data || {};
+    const busy = state.busy.has(`${pkey(p)}|preset`);
+    const will = d.will_change || 0;
+    card.appendChild(el("div", { class: "ch-prev__sub" }, "This is a preview \u2014 nothing has changed yet."));
+    card.appendChild(stepList(d.steps, false));
+    if ((d.steps || []).some((s) => s.state === "refused")) {
+      card.appendChild(noteLine("A switch marked \u201ccan't\u201d stays as it is; the rest still applies.", "info"));
+    }
+    for (const n of d.notes || []) card.appendChild(noteLine(n, "info"));
+    const broad = pr && pr.risk === "broad";
+    if (broad && will) {
+      const input = el("input", { type: "checkbox", id: "ch-preset-ack" });
+      input.checked = !!pv.ack;
+      input.addEventListener("change", () => { pv.ack = input.checked; renderDetail(); });
+      card.appendChild(el("label", { class: "ch-ack" }, [input, el("span", null, `I understand ${displayName(p)} will be able to make Jarvis run any tool on this PC.`)]));
+    }
+    const apply = el("button", {
+      type: "button", class: "btn btn--sm " + (broad ? "btn--danger" : "btn--primary"),
+      disabled: (!will || busy || (broad && !pv.ack)) ? "" : null, onclick: () => applyPreset(p, pv.preset),
+    }, busy ? "Applying\u2026" : will ? `Apply (${will} change${will === 1 ? "" : "s"})` : "Nothing to apply");
+    card.appendChild(el("div", { class: "ch-confirm__btns" }, [apply, close]));
+    return card;
+  }
+
+  function presetDoneCard(p) {
+    const done = state.presetDone;
+    if (!done || done.key !== pkey(p)) return null;
+    const r = done.result || {};
+    const card = el("div", { class: "ch-prev ch-prev--done", "data-ch": STATUS_CH[r.status] || "off", role: "status" });
+    card.appendChild(el("div", { class: "ch-prev__head" }, [el("b", null, r.label || "Quick setup"), tag(STATUS_TEXT[r.status] || r.status, STATUS_CH[r.status] || "off")]));
+    card.appendChild(stepList(r.steps, false));
+    for (const n of r.notes || []) card.appendChild(noteLine(n, "info"));
+    card.appendChild(el("div", { class: "ch-confirm__btns" }, [el("button", { type: "button", class: "btn btn--ghost btn--sm", onclick: () => { state.presetDone = null; renderDetail(); } }, "Dismiss")]));
+    return card;
+  }
+
+  function presetSection(p) {
+    if (!state.presets.length) return null;
+    const key = pkey(p);
+    const locked = p.owner ? "Quick setups leave the owner's account alone \u2014 use the switches below."
+      : state.drafts.has(key) ? "Save or discard the unsaved tool list first." : "";
+    const busy = state.busy.has(`${key}|preset`);
+    const active = state.presetPrev && state.presetPrev.key === key ? state.presetPrev.preset : "";
+    const wrap = el("div", null, [
+      el("div", { class: "ch-section-title" }, "Quick setups"),
+      presetButtons((id) => previewPreset(p, id), active, !!locked || busy, locked),
+    ]);
+    if (locked) wrap.appendChild(el("div", { class: "ch-row__hint", style: "margin-top:6px" }, locked));
+    else wrap.appendChild(el("div", { class: "ch-row__hint", style: "margin-top:6px" }, "A click shows what would change first. Nothing is saved until you press Apply."));
+    const prev = presetCard(p);
+    if (prev) wrap.appendChild(prev);
+    const done = presetDoneCard(p);
+    if (done) wrap.appendChild(done);
+    return wrap;
+  }
+
+  // -- several people (P5) -----------------------------------------------
+  function pickedPeople() { return state.people.filter((p) => state.picked.has(pkey(p))); }
+  function bulkRefs() { return pickedPeople().map((p) => ({ platform: p.platform, id: p.user_id })); }
+
+  function setSelectMode(on) {
+    state.selectMode = !!on;
+    if (!on) { state.picked.clear(); state.bulkOpen = false; state.bulk = newBulk(); }
+    renderList(); renderSelBar(); renderDetail(true);
+  }
+  function togglePick(k) {
+    if (state.picked.has(k)) state.picked.delete(k); else state.picked.add(k);
+    // A different group: an old preview no longer describes who would change.
+    if (state.bulkOpen) state.bulk = newBulk();
+    if (!state.picked.size) state.bulkOpen = false;
+    renderList(); renderSelBar();
+    if (state.bulkOpen || !state.picked.size) renderDetail(true);
+  }
+  function pickAllShown() {
+    for (const p of visiblePeople()) state.picked.add(pkey(p));
+    if (state.bulkOpen) state.bulk = newBulk();
+    renderList(); renderSelBar();
+    if (state.bulkOpen) renderDetail(true);
+  }
+  function clearPicks() {
+    state.picked.clear(); state.bulkOpen = false; state.bulk = newBulk();
+    renderList(); renderSelBar(); renderDetail(true);
+  }
+  function openBulk() { state.bulkOpen = true; state.bulk = newBulk(); renderSelBar(); renderDetail(true); }
+  function closeBulk() { state.bulkOpen = false; state.bulk = newBulk(); renderSelBar(); renderDetail(true); }
+
+  function renderSelBar() {
+    const bar = dom && dom.selbar;
+    if (!bar) return;
+    bar.textContent = "";
+    if (!state.selectMode) {
+      bar.appendChild(el("button", { type: "button", class: "btn btn--ghost btn--sm", disabled: state.people.length ? null : "", onclick: () => setSelectMode(true), title: "Tick several people and change them together" }, "Select people\u2026"));
+      return;
+    }
+    const n = state.picked.size;
+    bar.appendChild(el("span", { class: "ch-selbar__n" }, [el("b", null, String(n)), " selected"]));
+    bar.appendChild(el("button", { type: "button", class: "btn btn--ghost btn--sm", onclick: pickAllShown, title: "Tick everyone the filters currently show" }, "All shown"));
+    bar.appendChild(el("button", { type: "button", class: "btn btn--ghost btn--sm", disabled: n ? null : "", onclick: clearPicks }, "None"));
+    bar.appendChild(el("button", { type: "button", class: "btn btn--primary btn--sm", disabled: n ? null : "", onclick: openBulk }, "Edit selected\u2026"));
+    bar.appendChild(el("button", { type: "button", class: "btn btn--ghost btn--sm", onclick: () => setSelectMode(false) }, "Done"));
+  }
+
+  async function bulkPreview(id) {
+    const req = ++bulkReq;
+    state.bulk = Object.assign(newBulk(), { mode: "preset", preset: id, status: "loading", req });
+    renderDetail();
+    try {
+      const out = await api("POST", "/api/channels/bulk", { action: "preview", preset: id, people: bulkRefs() });
+      if (state.bulk.req !== req) return;
+      Object.assign(state.bulk, { status: "ready", data: out, results: out.results, summary: out.summary, action: "preview" });
+    } catch (err) {
+      if (state.bulk.req !== req) return;
+      Object.assign(state.bulk, { status: "error", error: err.message || "Couldn't preview that." });
+    }
+    renderDetail();
+  }
+
+  function bulkChooseFlag(flag, value) {
+    const req = ++bulkReq;
+    state.bulk = Object.assign(newBulk(), { mode: "flag", flag, value, status: "ready", req });
+    renderDetail();
+  }
+
+  async function bulkApply() {
+    const b = state.bulk;
+    const req = ++bulkReq;
+    b.req = req;
+    b.status = "applying";
+    renderDetail();
+    const people = bulkRefs();
+    const body = b.mode === "preset" ? { action: "preset", preset: b.preset, people } : { action: "flag", flag: b.flag, value: b.value, people };
+    let out = null;
+    let failure = "";
+    try { out = await api("POST", "/api/channels/bulk", body); } catch (err) { failure = err.message || "Couldn't apply that."; }
+    if (state.bulk.req !== req) return;
+    if (out) {
+      Object.assign(b, { status: "done", results: out.results, summary: out.summary, action: out.action });
+      toast(summaryText(out.action, out.summary), "info");
+    } else {
+      Object.assign(b, { status: "error", error: failure });
+    }
+    await load(true);
+  }
+
+  function bulkPersonRow(r, action) {
+    const previewing = action === "preview";
+    let text;
+    if (previewing) text = !r.ok ? "can't" : (r.will_change ? "will change" : "already set");
+    else text = STATUS_TEXT[r.status] || r.status;
+    const ch = previewing ? (!r.ok ? "bad" : r.will_change ? "on" : "off") : (STATUS_CH[r.status] || "off");
+    const li = el("li", { class: "ch-bres", "data-ch": ch }, [
+      el("div", { class: "ch-bres__top" }, [
+        el("span", { class: "ch-bres__name" }, r.name || r.user_id || "unknown"),
+        tag(PLATFORMS[r.platform] ? PLATFORMS[r.platform].label : String(r.platform || ""), null),
+        tag(text, ch),
+      ]),
+    ]);
+    if (r.reason && !(r.steps && r.steps.length)) li.appendChild(el("div", { class: "ch-bres__why" }, r.reason));
+    const changing = (r.steps || []).filter((s) => s.state !== "same");
+    if (changing.length) li.appendChild(stepList(changing, false));
+    for (const n of (r.notes || [])) li.appendChild(el("div", { class: "ch-bres__why ch-bres__why--info" }, n));
+    if (r.note) li.appendChild(el("div", { class: "ch-bres__why ch-bres__why--info" }, r.note));
+    return li;
+  }
+
+  function bulkResultList(results, action) {
+    const ul = el("ul", { class: "ch-bres-list" });
+    for (const r of results || []) ul.appendChild(bulkPersonRow(r, action));
+    return ul;
+  }
+
+  const BULK_FLAG_ROWS = [
+    { flag: "dm", label: "Direct messages", on: "Allow", off: "Stop allowing" },
+    { flag: "reply", label: "Replies", on: "Answer them", off: "Stop answering" },
+    { flag: "tool", label: "Tool use", off: "Take tools away", onNote: "To give tools, use a quick setup \u2014 it also decides which tools." },
+    { flag: "send_dm", label: "Jarvis may DM them", on: "Allow", off: "Stop allowing" },
+    { flag: "blocked", label: "Blocked", on: "Block", off: "Unblock", danger: true },
+  ];
+
+  function renderBulk() {
+    const b = state.bulk;
+    const people = pickedPeople();
+    const n = people.length;
+    const pane = el("div", { class: "ch-tabpane ch-bulk", role: "region", "aria-label": "Edit several people" });
+    pane.appendChild(el("div", { class: "ch-bulk__head" }, [
+      el("div", null, [el("div", { class: "ch-bulk__title" }, `Edit ${n} ${n === 1 ? "person" : "people"}`), el("div", { class: "ch-row__hint" }, "Each person is checked on their own. Anyone who can't be changed is listed with the reason.")]),
+      el("button", { type: "button", class: "btn btn--ghost btn--sm", onclick: closeBulk }, "Back"),
+    ]));
+    const chips = el("div", { class: "ch-bulk__who" });
+    for (const p of people) chips.appendChild(el("span", { class: "channels-chip" }, [displayName(p), el("button", { type: "button", class: "channels-chip__remove", title: `Leave out ${displayName(p)}`, "aria-label": `Leave out ${displayName(p)}`, onclick: () => togglePick(pkey(p)) }, "\u00d7")]));
+    pane.appendChild(chips);
+
+    const drafted = people.filter((p) => state.drafts.has(pkey(p)));
+    if (drafted.length) pane.appendChild(noteLine(`${drafted.map(displayName).join(", ")} ${drafted.length === 1 ? "has" : "have"} an unsaved tool list. Save or discard it first, so this can't overwrite it.`, "bad"));
+    const busy = b.status === "loading" || b.status === "applying";
+    const locked = !!drafted.length || busy || b.status === "done";
+
+    if (b.status === "done") {
+      pane.appendChild(el("div", { class: "ch-section-title" }, "Result"));
+      pane.appendChild(el("div", { class: "ch-bulk__sum", role: "status" }, summaryText(b.action, b.summary)));
+      pane.appendChild(bulkResultList(b.results, b.action));
+      pane.appendChild(el("div", { class: "ch-confirm__btns" }, [
+        el("button", { type: "button", class: "btn btn--primary btn--sm", onclick: () => { state.bulk = newBulk(); renderDetail(); } }, "Do another change"),
+        el("button", { type: "button", class: "btn btn--ghost btn--sm", onclick: closeBulk }, "Close"),
+      ]));
+      return pane;
+    }
+
+    pane.appendChild(el("div", { class: "ch-section-title" }, "Quick setup"));
+    pane.appendChild(presetButtons(bulkPreview, b.mode === "preset" ? b.preset : "", locked, drafted.length ? "Save or discard the unsaved tool list first." : ""));
+    pane.appendChild(el("div", { class: "ch-section-title" }, "Or one switch"));
+    const rows = el("div", { class: "ch-rows" });
+    for (const r of BULK_FLAG_ROWS) {
+      const mk = (label, value) => el("button", {
+        type: "button", class: "btn btn--sm " + (r.danger && value ? "btn--danger" : "btn--ghost"), disabled: locked ? "" : null,
+        "aria-pressed": b.mode === "flag" && b.flag === r.flag && b.value === value ? "true" : "false", onclick: () => bulkChooseFlag(r.flag, value),
+      }, label);
+      rows.appendChild(el("div", { class: "ch-row ch-bulkrow", "data-flag": r.flag }, [
+        el("div", { class: "ch-row__icon" }, [icon(r.flag)]),
+        el("div", null, [el("div", { class: "ch-row__label" }, r.label), r.onNote ? el("div", { class: "ch-row__hint" }, r.onNote) : null]),
+        el("div", { class: "ch-bulkrow__btns" }, [r.on ? mk(r.on, true) : null, mk(r.off, false)]),
+      ]));
+    }
+    pane.appendChild(rows);
+    pane.appendChild(el("div", { class: "ch-row__hint" }, "Ownership isn't offered here: only one person can hold it, so set it on that person's own page."));
+
+    if (b.mode === "preset") {
+      const pr = presetById(b.preset);
+      const card = el("div", { class: "ch-prev", "data-risk": pr ? pr.risk : null, role: "region", "aria-label": "Quick setup preview" });
+      card.appendChild(el("div", { class: "ch-prev__head" }, [el("b", null, pr ? pr.label : b.preset), ` for ${n} ${n === 1 ? "person" : "people"}`]));
+      if (b.status === "loading") card.appendChild(el("div", { class: "ch-skel" }));
+      else if (b.status === "error") card.appendChild(noteLine(b.error, "bad"));
+      else {
+        card.appendChild(el("div", { class: "ch-prev__sub" }, "This is a preview \u2014 nothing has changed yet."));
+        card.appendChild(el("div", { class: "ch-bulk__sum" }, summaryText("preview", b.summary)));
+        card.appendChild(bulkResultList(b.results, "preview"));
+        const will = (b.summary && b.summary.would_change) || 0;
+        const broad = pr && pr.risk === "broad";
+        if (broad && will) {
+          const input = el("input", { type: "checkbox", id: "ch-bulk-ack" });
+          input.checked = !!b.ack;
+          input.addEventListener("change", () => { b.ack = input.checked; renderDetail(); });
+          card.appendChild(el("label", { class: "ch-ack" }, [input, el("span", null, `I understand ${will === 1 ? "this person" : `these ${will} people`} will be able to make Jarvis run any tool on this PC.`)]));
+        }
+        card.appendChild(el("div", { class: "ch-confirm__btns" }, [
+          el("button", { type: "button", class: "btn btn--sm " + (broad ? "btn--danger" : "btn--primary"), disabled: (!will || busy || drafted.length || (broad && !b.ack)) ? "" : null, onclick: bulkApply },
+            busy ? "Applying\u2026" : will ? `Apply to ${will} ${will === 1 ? "person" : "people"}` : "Nothing to apply"),
+          el("button", { type: "button", class: "btn btn--ghost btn--sm", onclick: () => { state.bulk = newBulk(); renderDetail(); } }, "Cancel"),
+        ]));
+      }
+      pane.appendChild(card);
+    } else if (b.mode === "flag") {
+      const row = BULK_FLAG_ROWS.find((x) => x.flag === b.flag);
+      const verb = b.value ? (row.on || "Turn on") : (row.off || "Turn off");
+      const danger = b.flag === "blocked" && b.value;
+      const card = el("div", { class: "ch-prev", "data-risk": danger ? "broad" : "narrow", role: "region", "aria-label": "Confirm the change" });
+      card.appendChild(el("div", { class: "ch-prev__head" }, [el("b", null, `${row.label}: ${verb.toLowerCase()}`), ` for ${n} ${n === 1 ? "person" : "people"}`]));
+      card.appendChild(el("div", { class: "ch-prev__sub" }, danger
+        ? "They're removed from the DM, reply and tool lists and Jarvis stops asking about them. The owner and anyone covered by \u201c*\u201d are refused and listed afterwards."
+        : "Anyone who can't be changed (the owner, blocked, covered by \u201c*\u201d) is listed afterwards with the reason. There's no per-person preview for a single switch."));
+      card.appendChild(el("div", { class: "ch-confirm__btns" }, [
+        el("button", { type: "button", class: "btn btn--sm " + (danger ? "btn--danger" : "btn--primary"), disabled: (busy || drafted.length) ? "" : null, onclick: bulkApply }, busy ? "Applying\u2026" : `${verb} \u2014 ${n} ${n === 1 ? "person" : "people"}`),
+        el("button", { type: "button", class: "btn btn--ghost btn--sm", onclick: () => { state.bulk = newBulk(); renderDetail(); } }, "Cancel"),
+      ]));
+      if (b.status === "error") card.appendChild(noteLine(b.error, "bad"));
+      pane.appendChild(card);
+    }
+    return pane;
+  }
+
   function renderDetail(resetScroll) {
     if (!dom) return;
     const keepTop = resetScroll ? 0 : dom.detail.scrollTop;
@@ -1034,6 +1455,11 @@
     if (state.error) {
       dom.detail.appendChild(el("div", { class: "ch-state" }, [icon("warn"), el("div", { class: "ch-state__t" }, "Couldn't read channels"), el("div", { class: "ch-state__d" }, state.error),
         el("button", { type: "button", class: "btn btn--ghost btn--sm", onclick: () => load(true) }, "Try again")]));
+      return;
+    }
+    if (state.bulkOpen && state.selectMode && state.picked.size) {
+      dom.detail.appendChild(renderBulk());
+      dom.detail.scrollTop = keepTop;
       return;
     }
     const p = current();
@@ -1168,9 +1594,17 @@
       if (e.provider) meta.appendChild(el("span", { class: "ch-msg__prov" }, e.provider));
     }
     wrap.appendChild(meta);
-    // Always text. These are strangers' words and the model's.
-    const body = el("div", { class: "ch-msg__text" }, e.text || "");
+    // What THEY wrote is always plain text — those are strangers' words. What
+    // Jarvis wrote back is Markdown (L.45), through the shared sanitizing
+    // renderer: no images, links in a new tab. If that renderer isn't there
+    // (app.js failed) it stays text, never raw HTML.
+    const body = el("div", { class: "ch-msg__text" }, mine || !e.text || !(global.JarvisMarkdown && global.JarvisMarkdown.renderInto) ? (e.text || "") : "");
     if (!e.text) body.classList.add("is-empty");
+    else if (!mine && global.JarvisMarkdown && global.JarvisMarkdown.renderInto) {
+      body.classList.add("ch-msg__text--md", "jv-md");
+      try { global.JarvisMarkdown.renderInto(body, e.text, { balance: !!e.clipped }); }
+      catch (_) { body.classList.remove("ch-msg__text--md", "jv-md"); body.textContent = e.text; }
+    }
     wrap.appendChild(body);
     if (e.clipped) wrap.appendChild(el("div", { class: "ch-msg__more" }, "(shortened here — the full text is in the log)"));
     if (mine && e.allowed === false) {
@@ -1595,7 +2029,7 @@
     else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus(); }
   }
 
-  function renderAll() { if (!dom) return; renderStatusLine(); renderChips(); renderList(); renderDetail(); renderSide(); renderAdd(); }
+  function renderAll() { if (!dom) return; renderStatusLine(); renderChips(); renderList(); renderSelBar(); renderDetail(); renderSide(); renderAdd(); }
 
   // --------------------------------------------------------------- plumbing
   function grabDom() {
@@ -1604,7 +2038,7 @@
     return {
       overlay, search: $("#ch-search"), platChips: $("#ch-platform-chips"), stateChips: $("#ch-state-chips"), list: $("#ch-list"),
       count: $("#ch-count"), detail: $("#ch-detail"), side: $("#ch-side"), statusLine: $("#channels-status-line"), refresh: $("#btn-ch-refresh"),
-      addBtn: $("#btn-ch-add"), addOverlay: $("#channels-add-overlay"), addBody: $("#ch-add-body"),
+      addBtn: $("#btn-ch-add"), selbar: $("#ch-selbar"), addOverlay: $("#channels-add-overlay"), addBody: $("#ch-add-body"),
       addSubmit: $("#ch-add-submit"), addCancel: $("#ch-add-cancel"), addClose: $("#ch-add-close"),
     };
   }
@@ -1620,11 +2054,14 @@
       if (state.confirm) { state.confirm = null; renderDetail(); e.preventDefault(); return; }
       if (state.confirmRemove) { state.confirmRemove = null; renderDetail(); e.preventDefault(); return; }
       if (state.editingName) { state.editingName = null; renderDetail(); e.preventDefault(); return; }
+      if (state.bulkOpen) { closeBulk(); e.preventDefault(); return; }
+      if (state.selectMode && !(typing && e.target.value)) { setSelectMode(false); e.preventDefault(); return; }
       if (typing && e.target.value) { e.target.value = ""; e.target.dispatchEvent(new Event("input")); return; }
       close(); return;
     }
     if (typing) return;
     if (e.key === "/") { e.preventDefault(); dom.search.focus(); return; }
+    if (state.bulkOpen) return; // the bulk editor has no tabs, and the arrows must not move the person behind it
     const byKey = { 1: "profile", 2: "perms", 3: "conv", 4: "usage", 5: "test" }[e.key];
     if (byKey) { activateTab(byKey); return; }
     if (e.key === "ArrowDown" || e.key === "ArrowUp") {
@@ -1679,6 +2116,8 @@
     state.drafts.clear();
     state.conv.clear(); state.usage.clear(); state.sim.clear();   // don't keep their messages around while it's closed
     state.adding = false; state.editingName = null; state.confirmRemove = null;
+    state.selectMode = false; state.picked.clear(); state.bulkOpen = false; state.bulk = newBulk();
+    state.presetPrev = null; state.presetDone = null;
     renderAdd();
     dom.overlay.hidden = true;
     const prev = state.prevFocus; state.prevFocus = null;
@@ -1689,6 +2128,6 @@
   global.JarvisChannels = {
     open, close,
     _pure: { initials, hueFor, relTime, filterPeople, postureOf, sameScope, scopeOf, groupTools, displayName, STATE_FILTERS,
-             dayOf, clockOf, localDay, dayLabel, groupByDay, fmtTokens, barModel, convNote },
+             dayOf, clockOf, localDay, dayLabel, groupByDay, fmtTokens, barModel, convNote, summaryText },
   };
 })(window);

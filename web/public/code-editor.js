@@ -539,7 +539,7 @@
       cw: 0, lh: 0, padL: 14, padT: 12,
       ghost: "", ghostAt: -1, pop: null, popIndex: 0,
       suggestOn: opts.suggestEnabled !== false, suggestState: "idle", suggestMsg: "",
-      timer: 0, ctrl: null, requests: 0, cache: new Map(), composing: false, renderQueued: false, curLine: 0,
+      timer: 0, ctrl: null, requests: 0, cache: new Map(), composing: false, renderQueued: false, curLine: 0, aiHead: -1,
     };
 
     const ta = h("textarea", { class: "ce__ta", spellcheck: "false", autocapitalize: "off", autocomplete: "off",
@@ -549,9 +549,14 @@
     const pre = h("pre", { class: "ce__hl", "aria-hidden": "true" }, [code]);
     const bandCur = h("div", { class: "ce__band ce__band--cur" });
     const bandErr = h("div", { class: "ce__band ce__band--err" });
+    // L.45: while the Ask Jarvis agent types, `bandAi` marks the line being
+    // written and `bandPend` dims everything below it (the old text that has
+    // not been rewritten yet).
+    const bandAi = h("div", { class: "ce__band ce__band--ai" });
+    const bandPend = h("div", { class: "ce__band ce__band--pend" });
     const ghostFirst = h("span", { class: "ce__ghost ce__ghost--first" });
     const ghostRest = h("div", { class: "ce__ghost ce__ghost--rest" });
-    const inner = h("div", { class: "ce__inner" }, [bandCur, bandErr, pre, ghostFirst, ghostRest]);
+    const inner = h("div", { class: "ce__inner" }, [bandCur, bandErr, bandAi, pre, bandPend, ghostFirst, ghostRest]);
     const layers = h("div", { class: "ce__layers", "aria-hidden": "true" }, [inner]);
     const gutterInner = h("div", { class: "ce__gutter-inner" });
     const gutter = h("div", { class: "ce__gutter", "aria-hidden": "true" }, [gutterInner]);
@@ -602,6 +607,14 @@
       const e = st.errorLine > 0 && st.errorLine <= st.lines;
       bandErr.style.display = e ? "block" : "none";
       if (e) { bandErr.style.top = (st.padT + (st.errorLine - 1) * st.lh) + "px"; bandErr.style.height = st.lh + "px"; }
+      const w = st.aiHead >= 0;
+      bandAi.style.display = w ? "block" : "none";
+      bandPend.style.display = w && st.aiHead + 1 < st.lines ? "block" : "none";
+      if (w) {
+        bandAi.style.top = (st.padT + st.aiHead * st.lh) + "px"; bandAi.style.height = st.lh + "px";
+        bandPend.style.top = (st.padT + (st.aiHead + 1) * st.lh) + "px";
+        bandPend.style.height = Math.max(0, (st.lines - st.aiHead - 1) * st.lh + st.padT) + "px";
+      }
     }
 
     function paintCode() {
@@ -956,8 +969,31 @@
       // L.43: the Ask Jarvis agent types into this buffer; while it does the
       // textarea is read-only (a keystroke mid-stream would be overwritten by
       // the next chunk), and the view follows the newest line like a terminal.
-      setReadOnly(on) { ta.readOnly = !!on; },
+      setReadOnly(on) {
+        ta.readOnly = !!on;
+        if (on) { cancelSuggest(); clearGhost(); closePop(); }
+        else if (st.aiHead >= 0) { st.aiHead = -1; paintBands(); }
+      },
       scrollToEnd() { ta.scrollTop = ta.scrollHeight; syncScroll(); },
+      // L.45: replace the text WITHOUT the "new file" reset setValue does (scroll
+      // to the top, caret to 0, everything torn down). setValue on every streamed
+      // chunk is what made the editor look like it reloaded: the view snapped to
+      // line 1 and was dragged back down on each token. `head` is the 0-based line
+      // being written (-1 = none): that line is marked, the text below it is dimmed,
+      // and the view only moves when the head leaves it.
+      stream(text, head) {
+        const v = String(text == null ? "" : text);
+        if (v !== st.value) { st.value = v; ta.value = v; }
+        st.errorLine = 0;
+        st.aiHead = typeof head === "number" && head >= 0 ? head : -1;
+        paintAll();
+        if (st.aiHead >= 0) {
+          if (!st.lh) metrics();
+          const top = st.padT + st.aiHead * st.lh, view = ta.clientHeight;
+          if (top < ta.scrollTop + st.lh || top + st.lh * 3 > ta.scrollTop + view) ta.scrollTop = Math.max(0, top - view * 0.7);
+        }
+        syncScroll();
+      },
       remeasure() { metrics(); st.lines = 0; paintAll(); },
       setErrorLine(n) { st.errorLine = n > 0 ? n : 0; paintGutter(); paintBands(); },
       revealLine(n) {

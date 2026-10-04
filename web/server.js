@@ -1272,6 +1272,65 @@ app.post("/api/channels/people/:platform/:id/test", requireJarvis, async (req, r
   sendChannelResult(await runJarvisOnce(args, 10000), res);
 });
 
+// --- Channels > People: quick setups (P4) and bulk edit (P5) -----------------
+// `jarvis channels-presets / channels-preset / channels-bulk`, which delegate to
+// channels/preset_admin.py. That module only ever calls the same functions the
+// single switches call, so nothing here can set a state a switch cannot, and
+// every refusal comes back per person. Same proxy rules as above: argv arrays
+// only, every value validated first, no token ever crosses this route.
+//
+// Two things the browser is NOT offered, enforced here and not just in the UI:
+// `owner` (one per platform - set on that person's own page) and turning
+// `tool` ON in bulk (a quick setup says WHICH tools; a bare switch would not).
+const CHANNEL_PRESET_ID = /^[a-z][a-z0-9_]{0,31}$/;
+const CHANNEL_BULK_FLAGS = new Set(["dm", "reply", "tool", "send_dm", "blocked"]);
+const CHANNEL_BULK_MAX = 100;
+
+app.get("/api/channels/presets", requireJarvis, async (req, res) => {
+  sendChannelResult(await runJarvisOnce(["channels-presets"], 10000), res);
+});
+
+app.post("/api/channels/people/:platform/:id/preset", requireJarvis, async (req, res) => {
+  const who = channelPersonArgs(req, res);
+  if (!who) return;
+  const preset = req.body?.preset;
+  if (typeof preset !== "string" || !CHANNEL_PRESET_ID.test(preset)) return res.status(400).json({ error: "Unknown quick setup." });
+  const preview = req.body?.preview === true;
+  const args = ["channels-preset", who.platform, who.id, preset];
+  if (preview) args.push("preview");
+  sendChannelResult(await runJarvisOnce(args, 15000), res);
+});
+
+app.post("/api/channels/bulk", requireJarvis, async (req, res) => {
+  const action = req.body?.action;
+  if (action !== "flag" && action !== "preset" && action !== "preview") return res.status(400).json({ error: "action must be flag, preset or preview." });
+  const list = req.body?.people;
+  if (!Array.isArray(list) || !list.length) return res.status(400).json({ error: "Pick at least one person." });
+  if (list.length > CHANNEL_BULK_MAX) return res.status(400).json({ error: `Too many people at once (max ${CHANNEL_BULK_MAX}).` });
+  const refs = [];
+  for (const item of list) {
+    const platform = item && item.platform;
+    const id = item && item.id;
+    if (!CHANNEL_PLATFORMS.has(platform) || typeof id !== "string" || !CHANNEL_USER_ID.test(id)) {
+      return res.status(400).json({ error: "Invalid person in the list." });
+    }
+    refs.push(`${platform}:${id}`);
+  }
+  let args;
+  if (action === "flag") {
+    const flag = req.body?.flag;
+    if (typeof flag !== "string" || !CHANNEL_BULK_FLAGS.has(flag)) return res.status(400).json({ error: "That switch can't be changed for several people at once." });
+    if (typeof req.body?.value !== "boolean") return res.status(400).json({ error: "value must be true or false." });
+    if (flag === "tool" && req.body.value) return res.status(400).json({ error: "Use a quick setup to turn tools on - it also sets which tools." });
+    args = ["channels-bulk", "flag", flag, req.body.value ? "on" : "off", ...refs];
+  } else {
+    const preset = req.body?.preset;
+    if (typeof preset !== "string" || !CHANNEL_PRESET_ID.test(preset)) return res.status(400).json({ error: "Unknown quick setup." });
+    args = ["channels-bulk", action, preset, ...refs];
+  }
+  sendChannelResult(await runJarvisOnce(args, 60000), res);
+});
+
 app.post("/api/channels/people/:platform/:id/unlink", requireJarvis, async (req, res) => {
   const { platform, id } = req.params;
   if (!CHANNEL_PLATFORMS.has(platform)) return res.status(400).json({ error: "Unknown platform." });

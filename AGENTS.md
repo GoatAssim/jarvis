@@ -96,6 +96,20 @@ things that were already fixed once.
   `permissions.decide`, add it to `user_admin.GATE_STAGES`
   (`tests/test_channel_insights.py` forces a denial at every stage and fails if
   the walkthrough is missing one). `tests/test_channel_insights.py` pins all of this.
+- **Quick setups and bulk edits are the single switches, written together
+  (L.36-P4/P5).** `channels/preset_admin.py` changes nothing except by calling
+  `user_admin.set_flag` and `user_admin.set_tools`; don't give it a second way
+  to write an allow-list or `user_perms.json`. Presets live in `channels/presets.py`,
+  fixed in code on purpose (a tool list is a permission; adding one is a reviewed
+  change, not a file edit). A setup that turns tools on writes the tool LIST first
+  and the `tool` switch second, and does not turn it on if the list failed -- never
+  "every tool" by accident. It leaves the owner, `send_dm`, blocking and the
+  platform's `allow_tools` alone, and is refused for the owner. A bulk edit may not
+  set `owner`, and may turn `tool` OFF but not ON (a setup says which tools).
+  Every refusal (blocked, covered by `"*"`, unreadable limits) is returned per
+  person; never collapse it into one success. The panel previews a setup (a dry
+  run that writes nothing) before Apply. `user_admin.list_flag_refusal` is the one
+  place the blocked / wildcard rule lives, so a preview cannot drift from the switch.
 - **MCP servers are added or changed only by a human.** The MCP panel's
   buttons, `jarvis mcp-edit` and a hand-edit of `mcp_config.json` are the only
   write paths (`mcp_client.save_server` / `set_server_flag` / `remove_server`);
