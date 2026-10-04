@@ -48,7 +48,7 @@ from pathlib import Path
 
 from . import DISCORD
 from . import config as channel_config
-from . import base, permissions, transcript, directory
+from . import base, permissions, transcript, directory, servers
 
 PID_FILE = Path.home() / ".jarvis" / "discord_daemon.pid"
 
@@ -156,6 +156,48 @@ def _release_pid_file():
         pass
 
 
+def _text_channels(guild):
+    """[(id, name, kind)] for the channels in a server people can talk in.
+    Defensive attribute access: a guild object from a different discord.py
+    version, or one that is still partially cached, costs the panel a label,
+    never a reply."""
+    out = []
+    try:
+        for ch in getattr(guild, "text_channels", None) or []:
+            out.append((ch.id, getattr(ch, "name", ""), "text"))
+    except Exception:  # noqa: BLE001
+        pass
+    return out
+
+
+def _record_guild(guild):
+    servers.note_guild(DISCORD, getattr(guild, "id", ""), getattr(guild, "name", ""),
+                       channels=_text_channels(guild), left=False)
+
+
+def _where(discord, message):
+    """(guild_name, channel_id, thread_id, channel_name) for one message.
+
+    A message in a THREAD arrives with the thread as its channel. The gate's
+    `allowed_channels` and `channel:<id>` scopes are about the channel people
+    think of -- the one the thread hangs off -- so the parent is reported as
+    the channel and the thread keeps its own id as `thread_id`
+    (permissions.scope_keys already has a `thread:` rung for exactly this).
+    Everywhere else thread_id == channel_id, as before."""
+    channel = message.channel
+    guild_name = getattr(getattr(message, "guild", None), "name", "") or ""
+    channel_id = str(channel.id)
+    thread_id = channel_id
+    name = getattr(channel, "name", "") or ""
+    thread_cls = getattr(discord, "Thread", None)
+    if thread_cls is not None and isinstance(channel, thread_cls):
+        parent_id = getattr(channel, "parent_id", None)
+        if parent_id:
+            channel_id = str(parent_id)
+            name = getattr(getattr(channel, "parent", None), "name", "") or name
+    return guild_name, channel_id, thread_id, name
+
+
 def build_client(discord, cfg):
     """Construct the discord.py client with the right intents and handlers.
 
@@ -183,8 +225,48 @@ def build_client(discord, cfg):
         if str(current.get("bot_user_id") or "") != str(me.id):
             channel_config.set_value(DISCORD, "bot_user_id", str(me.id))
             base._log(f"recorded bot_user_id={me.id} in channels.json")
+        # Learn the names of every server and channel we are in, so the
+        # Channels panel can show "My Server / #general" instead of two
+        # snowflakes. Names only, and a failure here changes nothing.
+        for guild in list(getattr(client, "guilds", None) or []):
+            _record_guild(guild)
         print(permissions.describe(channel_config.platform_config(DISCORD)),
               file=sys.stderr, flush=True)
+
+    # --- keep the server list current while connected ----------------------
+    # All of these ride on the `guilds` intent we already have; none is
+    # privileged and none carries message content.
+    @client.event
+    async def on_guild_join(guild):  # noqa: F811
+        base._log(f"joined server {getattr(guild, 'name', '?')} ({guild.id})")
+        _record_guild(guild)
+
+    @client.event
+    async def on_guild_update(before, after):  # noqa: F811
+        _record_guild(after)
+
+    @client.event
+    async def on_guild_remove(guild):  # noqa: F811
+        base._log(f"left server {getattr(guild, 'name', '?')} ({guild.id})")
+        servers.note_guild(DISCORD, guild.id, getattr(guild, "name", ""), left=True)
+
+    @client.event
+    async def on_guild_channel_create(channel):  # noqa: F811
+        guild = getattr(channel, "guild", None)
+        if guild is not None:
+            _record_guild(guild)
+
+    @client.event
+    async def on_guild_channel_update(before, after):  # noqa: F811
+        guild = getattr(after, "guild", None)
+        if guild is not None:
+            _record_guild(guild)
+
+    @client.event
+    async def on_guild_channel_delete(channel):  # noqa: F811
+        guild = getattr(channel, "guild", None)
+        if guild is not None:
+            servers.forget_channel(DISCORD, guild.id, channel.id)
 
     @client.event
     async def on_message(message):  # noqa: F811
@@ -200,6 +282,7 @@ def build_client(discord, cfg):
         is_dm = isinstance(message.channel, discord.DMChannel)
         mentioned = bool(client.user and client.user in getattr(message, "mentions", []))
 
+        guild_name, channel_id, thread_id, channel_name = _where(discord, message)
         msg = permissions.IncomingMessage(
             platform=DISCORD,
             context=permissions.CTX_DM if is_dm else permissions.CTX_GROUP,
@@ -208,12 +291,20 @@ def build_client(discord, cfg):
             text=strip_mentions(message.content, client.user.id if client.user else None),
             mentioned=mentioned or is_dm,
             guild_id=str(message.guild.id) if message.guild else "",
-            channel_id=str(message.channel.id),
+            channel_id=channel_id,
             message_id=str(message.id),
-            thread_id=str(message.channel.id),
+            thread_id=thread_id,
             raw=message,
             avatar=_avatar_url(message.author),
+            guild_name=guild_name,
+            channel_name=channel_name,
         )
+        # Teach the registry this channel's name (a cached no-op after the
+        # first message). Labels only; runs before the gate on purpose so the
+        # panel can list a server the owner has not allowed anyone in yet.
+        if msg.guild_id:
+            servers.note_channel(DISCORD, msg.guild_id, msg.channel_id,
+                                 channel_name, guild_name=guild_name)
 
         # A message with no text left after stripping the mention is a bare
         # ping ("@jarvis"). Treat it as a greeting rather than asking the

@@ -1241,6 +1241,35 @@ function channelInt(value, fallback, min, max) {
   return Math.min(max, Math.max(min, parseInt(value, 10)));
 }
 
+// --- Channels > Servers (Discord servers and their channels) ---------------
+// Proxies `jarvis channels-servers / channels-server-set`, which delegate to
+// channels/servers.py. The switches can only take access away (see that
+// module) and nothing here touches allowed_guilds / allowed_channels, so the
+// browser cannot widen who can reach the bot. Digits-only ids: a Discord id is
+// a snowflake, and "-x" must never reach the CLI's flag parser.
+const CHANNEL_SNOWFLAKE = /^[0-9]{1,25}$/;
+const SERVER_KINDS = new Set(["guild", "channel"]);
+const SERVER_SWITCHES = new Set(["enabled", "tools", "mention"]);
+const SERVER_VALUES = new Set(["on", "off", "inherit"]);
+
+app.get("/api/channels/servers", requireJarvis, async (req, res) => {
+  const platform = typeof req.query.platform === "string" && CHANNEL_PLATFORMS.has(req.query.platform)
+    ? req.query.platform : "discord";
+  sendChannelResult(await runJarvisOnce(["channels-servers", platform], 15000), res);
+});
+
+app.post("/api/channels/servers/:platform/:kind/:id", requireJarvis, async (req, res) => {
+  const { platform, kind, id } = req.params;
+  if (!CHANNEL_PLATFORMS.has(platform)) return res.status(400).json({ error: "Unknown platform." });
+  if (!SERVER_KINDS.has(kind)) return res.status(400).json({ error: "kind must be guild or channel." });
+  if (!CHANNEL_SNOWFLAKE.test(id)) return res.status(400).json({ error: "Invalid id." });
+  const sw = req.body?.switch, value = req.body?.value;
+  if (typeof sw !== "string" || !SERVER_SWITCHES.has(sw)) return res.status(400).json({ error: "Unknown switch." });
+  if (typeof value !== "string" || !SERVER_VALUES.has(value)) return res.status(400).json({ error: "value must be on, off or inherit." });
+  sendChannelResult(await runJarvisOnce(
+    ["channels-server-set", platform, kind, id, sw, value], 10000), res);
+});
+
 app.get("/api/channels/people/:platform/:id/conversation", requireJarvis, async (req, res) => {
   const who = channelPersonArgs(req, res);
   if (!who) return;
