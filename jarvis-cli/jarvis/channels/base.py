@@ -417,6 +417,20 @@ def handle_message(platform, msg, send, cfg=None, on_tool_call=None, decision=No
         transcript.log_inbound(platform, msg, decision, conv_id=conv_id)
 
     if not decision.allowed:
+        # Register anyone who actually addressed us (a DM or an @mention) even
+        # though the gate refused to answer them. Without this, a person who
+        # DMs the bot before the owner has allowed them never appears in the
+        # Channels panel, so there is nothing to click to let them in. This
+        # only creates/refreshes the record: it grants nothing, answers
+        # nothing and does NOT ping the owner. Unaddressed chatter in a busy
+        # server is excluded by addressed_to_us().
+        if addressed:
+            try:
+                people.touch(platform, msg.user_id, handle=msg.user_handle,
+                             is_owner=permissions.is_owner(cfg, msg),
+                             avatar=getattr(msg, "avatar", ""))
+            except Exception as exc:  # noqa: BLE001
+                _log(f"could not register denied sender: {exc}")
         if decision.stage not in ("reachable", "self", "enabled"):
             _log(f"denied {platform} msg from {msg.user_handle or msg.user_id} "
                  f"at [{decision.stage}]: {decision.reason}")

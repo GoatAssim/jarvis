@@ -2803,7 +2803,7 @@ audio.ask-dl-player{ max-height: none; background: transparent; }
    body-level element, but below full-screen overlays (85+), which never
    need to coexist with it anyway. */
 .panel-menu__list{
-  position: fixed; top: 60px; right: 12px; z-index: 70;
+  position: fixed; top: 60px; right: 12px; z-index: 9000;
   min-width: 230px;
   background: var(--bg-raised); border: 1px solid var(--border-strong); border-radius: var(--radius);
   box-shadow: 0 8px 28px rgba(0,0,0,0.5), 0 0 18px var(--accent-glow);

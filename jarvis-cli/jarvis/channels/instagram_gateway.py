@@ -403,6 +403,29 @@ def _fetch_username(user_id, cfg):
         return ""
 
 
+def _fetch_profile_pic(user_id, cfg):
+    """Best-effort profile-picture URL for the Channels panel ("" on any
+    failure). Separate from _fetch_username so a missing picture field or
+    permission can never break username lookup. people.py re-validates the
+    host against its image-CDN allow-list before storing it."""
+    token = str(cfg.get("access_token") or "").strip()
+    if not token or not user_id:
+        return ""
+    try:
+        import requests
+        version = cfg.get("graph_version") or "v21.0"
+        resp = requests.get(
+            f"{GRAPH_HOST}/{version}/{user_id}",
+            params={"fields": "profile_pic", "access_token": token},
+            timeout=10,
+        )
+        if resp.status_code >= 400:
+            return ""
+        return str(resp.json().get("profile_pic") or "")
+    except Exception:  # noqa: BLE001
+        return ""
+
+
 def _process_payload(payload, cfg):
     """Handle one webhook body off the response path.
 
@@ -443,6 +466,8 @@ def _process_payload(payload, cfg):
             msg.user_handle = _fetch_username(msg.user_id, cfg)
         if msg.user_handle:
             directory.record(INSTAGRAM, msg.user_handle, msg.user_id)
+        if not msg.avatar:
+            msg.avatar = _fetch_profile_pic(msg.user_id, cfg)
         base._log(f"instagram message from user_id={msg.user_id!r} "
                   f"handle={msg.user_handle!r} context={msg.context} "
                   f"thread={msg.thread_id!r} text={msg.text[:80]!r}")

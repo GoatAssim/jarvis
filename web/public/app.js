@@ -5085,7 +5085,12 @@
 
   qs("#btn-ask-jarvis").addEventListener("click", openAsk);
   qs("#ask-close").addEventListener("click", closeAsk);
-  askOverlay.addEventListener("click", (e) => { if (e.target === askOverlay) closeAsk(); });
+  askOverlay.addEventListener("click", (e) => {
+    // In Focus the overlay IS the page (its padding/gutters are not a backdrop),
+    // so a stray click there must never close the Ask surface.
+    if (currentLayout === "focus") return;
+    if (e.target === askOverlay) closeAsk();
+  });
   document.addEventListener("keydown", (e) => {
     // L.32: in Focus the Ask panel is the page itself, so Escape must not close it.
     if (e.key === "Escape" && !askOverlay.hidden && currentLayout !== "focus") closeAsk();
