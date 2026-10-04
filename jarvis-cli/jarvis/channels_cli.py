@@ -16,7 +16,7 @@ import sys
 from .channels import PLATFORMS, PERM_SETS
 from .channels import config as channel_config
 from .channels import directory, outbound, people, permissions, transcript
-from .channels import preset_admin, presets, user_admin
+from .channels import preset_admin, presets, servers, user_admin
 
 COMMANDS = (
     "channels-config", "channels-status", "channels-set", "channels-allow",
@@ -27,6 +27,7 @@ COMMANDS = (
     "channels-link", "channels-unlink",
     "channels-conversation", "channels-usage", "channels-user-test",
     "channels-presets", "channels-preset", "channels-bulk",
+    "channels-servers", "channels-server-set",
     "discord-daemon", "instagram-serve", "logs-search",
 )
 
@@ -76,6 +77,12 @@ USAGE = """channel commands:
                                         blocked
   channels-bulk preset|preview <setup> <platform:id> ...
                                         a quick setup for several people / what it would change
+  channels-servers [platform]           Discord servers + channels Jarvis knows, with their switches (JSON)
+  channels-server-set <platform> guild|channel <id> <switch> <on|off|inherit>
+                                        per-server / per-channel switch. <switch>: enabled (answer
+                                        here), tools (allow tools here), mention (require @mention).
+                                        These can only take access away: enabled/tools "on" means
+                                        inherit; mention can be turned on or inherited, never off
   discord-daemon                        run the Discord bot (foreground)
   instagram-serve                       run the Instagram webhook (foreground)
   logs-search <query> [--mode m] [--origin o] [--source s] [--direction d]
@@ -466,6 +473,23 @@ def handle(argv):
         ok, err = user_admin.unlink_accounts(platform, uid)
         print(json.dumps({"ok": ok, "error": err, "platform": platform,
                           "user_id": uid}, indent=2))
+        sys.exit(0 if ok else 1)
+
+    if cmd == "channels-servers":
+        platform = rest[0] if rest else "discord"
+        if platform not in PLATFORMS:
+            _fail(f"unknown platform '{platform}'")
+        print(json.dumps(servers.view(platform), indent=2))
+        return
+
+    if cmd == "channels-server-set":
+        if len(rest) < 5:
+            _fail("usage: channels-server-set <platform> guild|channel <id> "
+                  "<enabled|tools|mention> <on|off|inherit>")
+        platform, kind, ident, switch, value = rest[:5]
+        ok, err, detail = servers.set_switch(platform, kind, ident, switch, value)
+        print(json.dumps({"ok": ok, "error": err, "platform": platform,
+                          "kind": kind, "id": ident, **detail}, indent=2))
         sys.exit(0 if ok else 1)
 
     if cmd == "channels-log":

@@ -107,6 +107,7 @@
     chart: P('<path d="M4 4v16h16"/><path d="M8 16v-4M12 16V8M16 16v-6"/>'),
     flask: P('<path d="M9 3h6M10 3v6l-5.5 9.5A1.5 1.5 0 0 0 5.8 21h12.4a1.5 1.5 0 0 0 1.3-2.5L14 9V3"/><path d="M7.5 15h9"/>'),
     refresh: P('<path d="M20 11a8 8 0 1 0-2.3 5.7"/><path d="M20 4v7h-7"/>'),
+    server: P('<rect x="4" y="4" width="16" height="6" rx="1.5"/><rect x="4" y="14" width="16" height="6" rx="1.5"/><path d="M8 7h.01M8 17h.01"/>'),
     people: P('<circle cx="9" cy="8.5" r="3.2"/><path d="M3 19.5a6 6 0 0 1 12 0"/><path d="M16 5.6a3.2 3.2 0 0 1 0 5.8M18 14.2a6 6 0 0 1 3 5.3"/>'),
   };
   function icon(name) {
@@ -320,6 +321,12 @@
     usage: new Map(),  // { status, data, error, days, req }
     sim: new Map(),    // { context, mentioned, status, result, error, req }
     scrollEnd: false,  // after the next render, show the newest message
+    hideTools: false,  // Conversation tab: collapse the "used these tools" rows away
+    // Discord servers (the registry + switches from /api/channels/servers).
+    servers: null,     // the server's view, or null while unknown / unavailable
+    serversError: "",
+    serverOpen: new Set(), // server ids whose card is expanded
+    serverBusy: new Set(), // "<kind>:<id>|<switch>" while a write is in flight
     // Quick setups (P4): the list the server sends, the open preview, and the
     // last result (shown until dismissed or another person is picked).
     presets: [],
@@ -342,10 +349,13 @@
     state.error = "";
     renderAll();
     try {
-      const [ppl, cfg] = await Promise.all([
+      const [ppl, cfg, srv] = await Promise.all([
         api("GET", "/api/channels/people"),
         api("GET", "/api/channels").catch(() => null),
+        api("GET", "/api/channels/servers?platform=discord").catch((e) => ({ _error: e.message || "Couldn't read servers." })),
       ]);
+      state.servers = srv && !srv._error ? srv : null;
+      state.serversError = srv && srv._error ? srv._error : "";
       state.platforms = ppl.platforms || {};
       state.people = Array.isArray(ppl.people) ? ppl.people : [];
       state.presets = Array.isArray(ppl.presets) ? ppl.presets : [];
@@ -495,6 +505,25 @@
   }
 
   function otherPlatform(platform) { return Object.keys(PLATFORMS).find((id) => id !== platform) || platform; }
+
+  // ---- Discord servers ---------------------------------------------------
+  async function loadServers() {
+    try {
+      const srv = await api("GET", "/api/channels/servers?platform=discord");
+      state.servers = srv; state.serversError = "";
+    } catch (err) { state.serversError = err.message || "Couldn't read servers."; }
+    renderSide();
+  }
+  async function serverSwitch(kind, id, sw, value) {
+    const key = `${kind}:${id}|${sw}`;
+    if (state.serverBusy.has(key)) return;
+    state.serverBusy.add(key); renderSide();
+    try {
+      await api("POST", `/api/channels/servers/discord/${encodeURIComponent(kind)}/${encodeURIComponent(id)}`, { switch: sw, value });
+    } catch (err) { toast(err.message || "Couldn't save that.", "error"); }
+    state.serverBusy.delete(key);
+    await loadServers();
+  }
 
   async function globalMutate(platform, short, entry, remove, errEl) {
     if (errEl) errEl.textContent = "";
@@ -1578,6 +1607,44 @@
       el("div", { class: "ch-state__d" }, message), el("button", { type: "button", class: "btn btn--ghost btn--sm", onclick: retry }, "Try again")]);
   }
 
+  // One-line label for a reply's tool calls: "web_search, get_datetime ×2".
+  function toolCallsLabel(calls) {
+    const list = Array.isArray(calls) ? calls : [];
+    if (!list.length) return "";
+    const counts = new Map();
+    for (const c of list) counts.set(c.name || "?", (counts.get(c.name || "?") || 0) + 1);
+    return [...counts].map(([n, k]) => (k > 1 ? `${n} ×${k}` : n)).join(", ");
+  }
+  function toolCallsNode(calls) {
+    const list = Array.isArray(calls) ? calls : [];
+    if (!list.length) return null;
+    const failed = list.filter((c) => c.ok === false).length;
+    const box = el("details", { class: "ch-tools" + (failed ? " has-failed" : "") });
+    box.appendChild(el("summary", null, [
+      icon("tool"),
+      el("span", { class: "ch-tools__count" }, `Used ${list.length} tool${list.length === 1 ? "" : "s"}`),
+      el("span", { class: "ch-tools__names" }, toolCallsLabel(list)),
+      failed ? tag(`${failed} failed`, "bad", "warn") : null,
+    ]));
+    const ul = el("ol", { class: "ch-tools__list" });
+    list.forEach((c) => {
+      const state_ = c.ok === false ? "bad" : c.ok === true ? "ok" : "unknown";
+      const li = el("li", { class: "ch-tool", "data-state": state_ }, [
+        el("div", { class: "ch-tool__head" }, [
+          el("span", { class: "ch-tool__name" }, c.name || "?"),
+          el("span", { class: "ch-tool__state" }, c.ok === false ? "failed" : c.ok === true ? "done" : "no result recorded"),
+          c.confirm ? el("span", { class: "ch-tool__state" }, c.confirm) : null,
+        ]),
+      ]);
+      if (c.args) li.appendChild(el("div", { class: "ch-tool__line" }, [el("span", { class: "ch-tool__k" }, "with"), el("code", null, c.args)]));
+      if (c.result) li.appendChild(el("div", { class: "ch-tool__line" }, [el("span", { class: "ch-tool__k" }, c.ok === false ? "error" : "result"), el("code", null, c.result)]));
+      ul.appendChild(li);
+    });
+    box.appendChild(ul);
+    if (list.some((c) => c.clipped)) box.appendChild(el("div", { class: "ch-msg__more" }, "(long values are shortened here — the full run is in the conversation's raw log)"));
+    return box;
+  }
+
   function messageNode(e) {
     const mine = e.dir === "in";
     const wrap = el("div", { class: "ch-msg " + (mine ? "ch-msg--in" : "ch-msg--out"), "data-ch": mine && e.allowed === false ? "bad" : null });
@@ -1587,6 +1654,10 @@
     ]);
     if (mine) {
       meta.appendChild(tag(e.context === "group" ? "group" : "DM", null, null));
+      if (e.context === "group" && (e.channel_name || e.guild_name)) {
+        meta.appendChild(el("span", { class: "ch-msg__where", title: [e.guild_name, e.channel_name && "#" + e.channel_name].filter(Boolean).join(" / ") },
+          [e.channel_name ? "#" + e.channel_name : "", e.channel_name && e.guild_name ? " · " : "", e.guild_name || ""].join("")));
+      }
       if (e.allowed === false) meta.appendChild(tag("Turned away", "bad", "blocked"));
       else if (e.may_use_tools) meta.appendChild(tag("tools on", "limited", "tool"));
     } else {
@@ -1594,6 +1665,11 @@
       if (e.provider) meta.appendChild(el("span", { class: "ch-msg__prov" }, e.provider));
     }
     wrap.appendChild(meta);
+    // The tools behind a reply come first: they happened before the words did.
+    if (!mine && !state.hideTools) {
+      const used = toolCallsNode(e.tool_calls);
+      if (used) wrap.appendChild(used);
+    }
     // What THEY wrote is always plain text — those are strangers' words. What
     // Jarvis wrote back is Markdown (L.45), through the shared sanitizing
     // renderer: no images, links in a new tab. If that renderer isn't there
@@ -1625,7 +1701,13 @@
     const d = s.data || { entries: [], total: 0, shown: 0, threads: 0, unattributed_replies: 0 };
     const head = el("div", { class: "ch-conv__head" }, [
       el("div", { class: "ch-row__hint" }, [convNote(d), d.threads > 1 ? ` Across ${d.threads} chats.` : ""]),
-      el("button", { type: "button", class: "btn btn--ghost btn--sm", disabled: s.status === "loading", onclick: () => { s.status = "idle"; ensureConv(p); } }, [icon("refresh"), "Refresh"]),
+      el("div", { class: "ch-conv__btns" }, [
+        d.entries.some((x) => Array.isArray(x.tool_calls) && x.tool_calls.length)
+          ? el("button", { type: "button", class: "btn btn--ghost btn--sm", "aria-pressed": state.hideTools ? "false" : "true", title: "Show or hide the tools Jarvis used for each reply",
+              onclick: () => { state.hideTools = !state.hideTools; renderDetail(); } }, [icon("tool"), state.hideTools ? "Show tool calls" : "Hide tool calls"])
+          : null,
+        el("button", { type: "button", class: "btn btn--ghost btn--sm", disabled: s.status === "loading", onclick: () => { s.status = "idle"; ensureConv(p); } }, [icon("refresh"), "Refresh"]),
+      ]),
     ]);
     pane.appendChild(head);
     if (d.total > d.shown && s.limit < CONV_MAX) {
@@ -1807,6 +1889,93 @@
     });
   }
 
+  // ---- Servers (Discord) --------------------------------------------------
+  // One compact switch row. `locked` is the reason it can't be changed.
+  function srvRow(label, hint, on, locked, busy, onToggle) {
+    const sw = el("button", {
+      type: "button", class: "ch-switch", role: "switch", "aria-checked": on ? "true" : "false",
+      "aria-label": `${label}: ${on ? "on" : "off"}`, disabled: !!locked || busy, title: locked || null,
+      onclick: () => { if (!locked && !busy) onToggle(!on); },
+    });
+    return el("div", { class: "ch-srow" + (locked ? " is-locked" : "") + (busy ? " is-busy" : "") }, [
+      el("div", { class: "ch-srow__t" }, [el("div", { class: "ch-srow__label" }, label),
+        el("div", { class: "ch-srow__hint" }, locked || hint)]),
+      sw,
+    ]);
+  }
+  const srvBusy = (kind, id, sw) => state.serverBusy.has(`${kind}:${id}|${sw}`);
+
+  function channelRow(s, c) {
+    const offHere = c.override.enabled === "off";
+    // We never write "on" for a channel inside a switched-off server (that would
+    // be a grant), so the way back is to turn the server on first.
+    const serverOff = s.override.enabled === "off";
+    let locked = "";
+    if (!offHere && !c.answering) locked = c.why_not.length ? `Not answering: ${c.why_not.join("; ")}.` : "Not answering here.";
+    else if (offHere && serverOff) locked = "The whole server is switched off. Turn the server on first.";
+    const row = srvRow("#" + (c.name || c.id), c.name ? c.id : "Name not seen yet", c.answering && !offHere, locked, srvBusy("channel", c.id, "enabled"),
+      (turnOn) => serverSwitch("channel", c.id, "enabled", turnOn ? "inherit" : "off"));
+    row.classList.add("ch-srow--chan");
+    return row;
+  }
+
+  function serverCard(s, v) {
+    const open = state.serverOpen.has(s.id);
+    const status = s.left ? tag("Left", "off", "blocked") : s.answering ? tag("Answering", "on", "chat") : tag("Not answering", "off", "blocked");
+    const det = el("details", { class: "ch-server" + (s.left ? " is-left" : ""), "data-server": s.id });
+    if (open) det.setAttribute("open", "");
+    det.addEventListener("toggle", () => { if (det.open) state.serverOpen.add(s.id); else state.serverOpen.delete(s.id); });
+    det.appendChild(el("summary", null, [
+      el("div", { class: "ch-server__t" }, [
+        el("div", { class: "ch-server__name" }, s.name || "Unnamed server"),
+        el("div", { class: "ch-server__id" }, s.id + (s.channels.length ? ` · ${s.channels.length} channel${s.channels.length === 1 ? "" : "s"}` : "")),
+      ]),
+      status,
+    ]));
+    const body = el("div", { class: "ch-server__body" });
+    if (!s.known) body.appendChild(el("div", { class: "ch-row__note ch-row__note--info" }, [icon("info"),
+      el("span", null, "Jarvis hasn't seen this server yet. It appears in the list because the config mentions it; its name shows up once the bot connects.")]));
+    if (!s.left && !s.answering && s.why_not.length) body.appendChild(el("div", { class: "ch-row__note" }, [icon("warn"), el("span", null, "Not answering: " + s.why_not.join("; ") + ".")]));
+    body.appendChild(srvRow("Answer here", "Jarvis replies when it's addressed in this server.", s.override.enabled !== "off", s.left ? "Jarvis is no longer in this server." : "", srvBusy("guild", s.id, "enabled"),
+      (turnOn) => serverSwitch("guild", s.id, "enabled", turnOn ? "inherit" : "off")));
+    body.appendChild(srvRow("Allow tools", "Whether people here can make Jarvis run tools.", s.tools, v.platform_tools ? "" : "Tools are off for all of Discord (allow_tools).", srvBusy("guild", s.id, "tools"),
+      (turnOn) => serverSwitch("guild", s.id, "tools", turnOn ? "inherit" : "off")));
+    body.appendChild(srvRow("Needs an @mention", "Only reply to messages that mention Jarvis.", s.mention, v.platform_mention && s.override.mention !== "on" ? "Discord requires a mention everywhere." : "", srvBusy("guild", s.id, "mention"),
+      (turnOn) => serverSwitch("guild", s.id, "mention", turnOn ? "on" : "inherit")));
+    if (s.channels.length) {
+      body.appendChild(el("div", { class: "ch-section-title" }, "Channels"));
+      const list = el("div", { class: "ch-chans" });
+      s.channels.forEach((c) => list.appendChild(channelRow(s, c)));
+      body.appendChild(list);
+    } else if (s.known) {
+      body.appendChild(el("div", { class: "ch-row__hint" }, "No text channels recorded yet. They're read when the bot connects."));
+    }
+    det.appendChild(body);
+    return det;
+  }
+
+  function serversSection() {
+    const v = state.servers;
+    const box = el("div", { class: "ch-servers" });
+    box.appendChild(el("div", { class: "ch-plat__head" }, [icon("server"), el("div", { class: "ch-plat__name" }, "Discord servers"),
+      el("button", { type: "button", class: "btn btn--ghost btn--sm", title: "Reload the server list", onclick: loadServers }, [icon("refresh")])]));
+    const inner = el("div", { class: "ch-servers__body" });
+    if (!v) {
+      inner.appendChild(el("div", { class: "ch-row__hint" }, state.serversError || "Servers aren't loaded."));
+    } else {
+      if (!v.servers.length) inner.appendChild(el("div", { class: "ch-row__hint" }, "No servers recorded yet. Start the bot (jarvis discord-daemon) and invite it to a server; it shows up here once connected."));
+      v.servers.forEach((s) => inner.appendChild(serverCard(s, v)));
+      const notes = [];
+      if (v.allowed_guilds.length) notes.push(`allowed_guilds is set (${v.allowed_guilds.length}): any server not on it is ignored.`);
+      if (v.allowed_channels.length) notes.push(`allowed_channels is set (${v.allowed_channels.length}): any channel not on it is ignored.`);
+      if (v.orphans.length) notes.push(`${v.orphans.length} channel${v.orphans.length === 1 ? "" : "s"} in the config aren't in any server Jarvis has seen.`);
+      for (const n of notes) inner.appendChild(el("div", { class: "ch-row__hint" }, n));
+      inner.appendChild(el("div", { class: "ch-row__hint" }, "These switches only take access away. To let more people in, use the lists on the left; allowed_guilds and allowed_channels are edited by hand."));
+    }
+    box.appendChild(inner);
+    return box;
+  }
+
   function renderSide() {
     if (!dom) return;
     dom.side.textContent = "";
@@ -1834,6 +2003,7 @@
       if (!pl.owner) hints.push(["Pick an owner: ", `jarvis channels-set ${id} owner YOUR_USER_ID`]);
       for (const [lead, cmd] of hints) card.appendChild(el("div", { class: "ch-plat__hint" }, [lead, el("code", null, cmd)]));
       dom.side.appendChild(card);
+      if (id === "discord") dom.side.appendChild(serversSection());
     }
     const g = el("details", { class: "ch-globals" }, [el("summary", null, "Global lists")]);
     const body = el("div", { class: "ch-globals__body" }, [
@@ -2128,6 +2298,7 @@
   global.JarvisChannels = {
     open, close,
     _pure: { initials, hueFor, relTime, filterPeople, postureOf, sameScope, scopeOf, groupTools, displayName, STATE_FILTERS,
-             dayOf, clockOf, localDay, dayLabel, groupByDay, fmtTokens, barModel, convNote, summaryText },
+             dayOf, clockOf, localDay, dayLabel, groupByDay, fmtTokens, barModel, convNote, summaryText,
+             toolCallsLabel },
   };
 })(window);

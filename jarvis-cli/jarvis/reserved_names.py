@@ -104,6 +104,7 @@ RESERVED_NAMES = {
     "channels-link", "channels-unlink",
     "channels-conversation", "channels-usage", "channels-user-test",
     "channels-presets", "channels-preset", "channels-bulk",
+    "channels-servers", "channels-server-set",
     "discord-daemon", "instagram-serve", "logs-search",
     # --- clipboard_cli.COMMANDS ----------------------------------------------
     "clipboard-watch", "clipboard-watch-config",

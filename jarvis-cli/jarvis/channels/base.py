@@ -123,9 +123,11 @@ def _scope_detail(msg):
     else:
         bits.append("group")
     if msg.guild_id:
-        bits.append(f"guild {msg.guild_id}")
+        name = getattr(msg, "guild_name", "")
+        bits.append(f"server {name} ({msg.guild_id})" if name else f"guild {msg.guild_id}")
     if msg.channel_id and msg.channel_id != msg.guild_id:
-        bits.append(f"channel {msg.channel_id}")
+        name = getattr(msg, "channel_name", "")
+        bits.append(f"channel #{name} ({msg.channel_id})" if name else f"channel {msg.channel_id}")
     who = msg.user_handle or msg.user_id
     if who:
         bits.append(f"with {who}")
@@ -133,7 +135,7 @@ def _scope_detail(msg):
 
 
 def _ask_jarvis(text, conv_id, may_use_tools, on_tool_call=None, platform="",
-                sender_context="", sender_env="", tool_scope=None):
+                sender_context="", sender_env="", tool_scope=None, tool_log=None):
     """One ask, with tools allowed or forbidden for this specific sender.
 
     Imported lazily: ai_client pulls in the whole tool catalog, and a
@@ -158,6 +160,11 @@ def _ask_jarvis(text, conv_id, may_use_tools, on_tool_call=None, platform="",
     not in it), no second mechanism to drift. It can only ever SHRINK what
     `may_use_tools` allows: a sender with tools off stays at "none" whatever
     the scope says.
+
+    `tool_log`, if a list, collects {"name", "arguments"} for every tool the
+    model calls during this ask, in order, for the Conversation view. It is
+    filled from the same callback the stall watchdog already uses, so it adds
+    no new hook into ai_client.
     """
     from .. import ai_client, commands_config, logs
 
@@ -214,6 +221,12 @@ def _ask_jarvis(text, conv_id, may_use_tools, on_tool_call=None, platform="",
 
         def _on_tool_call(*args, **kwargs):
             progress["tool"] = str(args[0]) if args else ""
+            if tool_log is not None and args:
+                try:
+                    tool_log.append({"name": str(args[0]),
+                                     "arguments": args[1] if len(args) > 1 else None})
+                except Exception:  # noqa: BLE001 -- a log must never break a tool call
+                    pass
             if on_tool_call:
                 return on_tool_call(*args, **kwargs)
             return None
@@ -260,6 +273,38 @@ def _ask_jarvis(text, conv_id, may_use_tools, on_tool_call=None, platform="",
                 else:
                     os.environ["JARVIS_LOG_SOURCE"] = previous_source
     return result
+
+
+def _utc_stamp():
+    """Same format raw_archive stamps its events with, so the two compare as
+    plain strings."""
+    from datetime import datetime, timezone
+    return datetime.now(timezone.utc).isoformat(timespec="milliseconds")
+
+
+def _tool_calls_for_log(captured, conv_id, since):
+    """The tool calls of ONE finished ask, shaped for the transcript.
+
+    The model-facing callback only knows a call's name and arguments. The
+    outcome lives in the raw event log (raw_archive.py, which keeps every tool
+    run at full size), so when that log has runs for this conversation since
+    `since` they are the source: name, arguments AND result. When it does not
+    (archive switched off, no conversation id) the captured calls are used
+    with no outcome rather than dropping them. Never raises."""
+    try:
+        events = []
+        if conv_id:
+            from .. import raw_archive
+            events = [e for e in raw_archive.read(conv_id, ["tool_run"])
+                      if str(e.get("ts") or "") >= since]
+        if events:
+            return [transcript.tool_call_record(e.get("name"), e.get("arguments"),
+                                                e.get("result"), e.get("confirm"))
+                    for e in events[:transcript.MAX_TOOL_CALLS]]
+        return [transcript.tool_call_record(c.get("name"), c.get("arguments"))
+                for c in (captured or [])[:transcript.MAX_TOOL_CALLS]]
+    except Exception:  # noqa: BLE001 -- the audit log must never break a reply
+        return []
 
 
 def _conv_id_for(platform, thread_id, detail=""):
@@ -501,11 +546,12 @@ def handle_message(platform, msg, send, cfg=None, on_tool_call=None, decision=No
          f"({'owner' if is_owner else 'guest'}, tools={tools_label})")
 
     ask_ok, ask_error, result = True, "", None
+    captured_tools, ask_since = [], _utc_stamp()
     try:
         result = _ask_jarvis(msg.text, conv_id, may_use_tools,
                              on_tool_call=on_tool_call, platform=platform,
                              sender_context=sender_ctx, sender_env=sender_env,
-                             tool_scope=tool_scope)
+                             tool_scope=tool_scope, tool_log=captured_tools)
         text = (getattr(result, "text", "") or "").strip()
         provider = getattr(result, "provider", "") or ""
         if not text:
@@ -526,6 +572,12 @@ def handle_message(platform, msg, send, cfg=None, on_tool_call=None, decision=No
                  tool_names=usage.tools_from_result(result),
                  tools_mode=tools_label, error=ask_error)
 
+    # The tool calls behind this reply ride on its FIRST logged line (see
+    # transcript.py's "Tool calls shown in the Conversation view"). Only built
+    # when conversations are being logged at all.
+    pending_tools = (_tool_calls_for_log(captured_tools, conv_id, ask_since)
+                     if cfg.get("log_conversations", True) else [])
+
     limit = int(cfg.get("max_reply_chars") or 1900)
     sent_ok = True
     for chunk in chunk_text(text, limit):
@@ -539,12 +591,16 @@ def handle_message(platform, msg, send, cfg=None, on_tool_call=None, decision=No
                 transcript.log_outbound(platform, msg.thread_id, chunk,
                                         conv_id=conv_id, ok=False,
                                         error=str(exc), provider=provider,
-                                        to_user=msg.user_id)
+                                        to_user=msg.user_id,
+                                        tool_calls=pending_tools)
+                pending_tools = []
             break
         if cfg.get("log_conversations", True):
             transcript.log_outbound(platform, msg.thread_id, chunk,
                                     conv_id=conv_id, ok=True, provider=provider,
-                                    to_user=msg.user_id)
+                                    to_user=msg.user_id,
+                                    tool_calls=pending_tools)
+            pending_tools = []
 
     return decision
 

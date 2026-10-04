@@ -135,11 +135,13 @@ class IncomingMessage:
 
     __slots__ = ("platform", "context", "user_id", "user_handle", "text",
                  "mentioned", "guild_id", "channel_id", "message_id",
-                 "thread_id", "timestamp", "raw", "avatar")
+                 "thread_id", "timestamp", "raw", "avatar",
+                 "guild_name", "channel_name")
 
     def __init__(self, platform, context, user_id="", user_handle="", text="",
                  mentioned=False, guild_id="", channel_id="", message_id="",
-                 thread_id="", timestamp=None, raw=None, avatar=""):
+                 thread_id="", timestamp=None, raw=None, avatar="",
+                 guild_name="", channel_name=""):
         self.platform = platform
         self.context = context
         self.user_id = str(user_id or "")
@@ -157,6 +159,12 @@ class IncomingMessage:
         # (Discord does, on every event). Data for the Channels panel only —
         # no stage of decide() reads it.
         self.avatar = str(avatar or "")
+        # Human labels for the server and channel (Discord hands both over on
+        # every event). Display only -- NO stage of decide() reads them; the
+        # gate matches ids, because a name can be changed by anyone with
+        # Manage Channels.
+        self.guild_name = str(guild_name or "")
+        self.channel_name = str(channel_name or "")
 
     def identities(self):
         """Every form of this sender an allowlist entry could name, in the

@@ -112,6 +112,8 @@ def log_inbound(platform, msg, decision, conv_id=None):
         "guild_id": msg.guild_id,
         "channel_id": msg.channel_id,
         "message_id": msg.message_id,
+        **({"guild_name": msg.guild_name} if getattr(msg, "guild_name", "") else {}),
+        **({"channel_name": msg.channel_name} if getattr(msg, "channel_name", "") else {}),
         # `is not None`, NOT a truthiness test: Decision.__bool__ returns
         # .allowed, so a DENIED decision is falsy and `if decision` would
         # silently record it as "no decision at all" — dropping precisely
@@ -127,7 +129,7 @@ def log_inbound(platform, msg, decision, conv_id=None):
 
 
 def log_outbound(platform, thread_id, text, conv_id=None, kind="reply",
-                 ok=True, error="", provider="", to_user=None):
+                 ok=True, error="", provider="", to_user=None, tool_calls=None):
     """Record one reply. `to_user` is the stable id of the person it answers.
 
     It exists because a group thread mixes people and an outbound line used to
@@ -145,7 +147,115 @@ def log_outbound(platform, thread_id, text, conv_id=None, kind="reply",
     }
     if to_user:
         record["to_user"] = str(to_user)
+    calls = clean_tool_calls(tool_calls)
+    if calls:
+        record["tool_calls"] = calls
     return append(platform, thread_id, record)
+
+
+# ---------------------------------------------------------------------------
+# Tool calls shown in the Conversation view
+# ---------------------------------------------------------------------------
+# A reply may have been produced by running tools. The owner wants to see which,
+# with what, and how it went. This is the AUDIT log (it already holds every
+# message verbatim), so it may hold a clipped view of a call -- unlike
+# channels/usage.py, which is written even with log_conversations off and
+# therefore holds counts and tool names only. Rules for what lands here:
+#   * only when log_conversations is on (base.handle_message decides);
+#   * arguments and results are SCRUBBED of secret-looking keys, then clipped
+#     hard -- this is a glance, not an archive (raw_archive.py keeps the full
+#     run per conversation);
+#   * the record rides on the reply it produced (`tool_calls` on a dir="out"
+#     line), so it is attributed to the same person as that reply.
+
+MAX_TOOL_CALLS = 25            # per reply
+MAX_TOOL_ARG_CHARS = 300
+MAX_TOOL_RESULT_CHARS = 500
+_SECRET_KEY = re.compile(
+    r"(token|secret|passw(or)?d|passwd|api[_-]?key|authorization|cookie|credential|private[_-]?key)",
+    re.IGNORECASE)
+
+
+def _scrub(value, depth=0):
+    """Copy of `value` with the contents of secret-looking keys hidden."""
+    if depth > 4:
+        return "..."
+    if isinstance(value, dict):
+        out = {}
+        for key, item in list(value.items())[:40]:
+            out[str(key)] = ("(hidden)" if _SECRET_KEY.search(str(key))
+                             else _scrub(item, depth + 1))
+        return out
+    if isinstance(value, (list, tuple)):
+        return [_scrub(item, depth + 1) for item in list(value)[:20]]
+    if isinstance(value, str) and len(value) > 2000:
+        return value[:2000]
+    return value
+
+
+def _compact(value, limit):
+    """(text, clipped) -- one-line JSON (or plain text) of `value`, clipped."""
+    if value is None:
+        return "", False
+    try:
+        text = value if isinstance(value, str) else json.dumps(
+            _scrub(value), ensure_ascii=False, default=str)
+    except (TypeError, ValueError):
+        text = str(value)
+    text = " ".join(text.split())
+    if len(text) > limit:
+        return text[:limit].rstrip() + "\u2026", True
+    return text, False
+
+
+def tool_call_record(name, arguments=None, result=None, confirm=None):
+    """One tool run as the Conversation view shows it. Pure; never raises.
+
+    `ok` is None when no result was captured (the call is known, its outcome
+    is not)."""
+    try:
+        args_text, args_clipped = _compact(arguments, MAX_TOOL_ARG_CHARS)
+        ok, res_text, res_clipped = None, "", False
+        if isinstance(result, dict):
+            ok = result.get("ok") is not False and not result.get("cancelled")
+            shown = result.get("error") if not ok and result.get("error") else result
+            res_text, res_clipped = _compact(shown, MAX_TOOL_RESULT_CHARS)
+        elif result is not None:
+            ok = True
+            res_text, res_clipped = _compact(result, MAX_TOOL_RESULT_CHARS)
+        record = {"name": str(name or "?")[:64], "args": args_text,
+                  "ok": ok, "result": res_text,
+                  "clipped": bool(args_clipped or res_clipped)}
+        if isinstance(confirm, dict):
+            record["confirm"] = "approved" if confirm.get("approved") else "declined"
+        return record
+    except Exception:  # noqa: BLE001 -- a log line must never break a reply
+        return {"name": str(name or "?")[:64], "args": "", "ok": None,
+                "result": "", "clipped": False}
+
+
+def clean_tool_calls(calls):
+    """Whatever is stored or passed in -> a bounded list of well-formed
+    records. Applied on write AND on read, so a hand-edited or older line can
+    never hand the panel a wrong type or an unbounded string."""
+    out = []
+    if not isinstance(calls, (list, tuple)):
+        return out
+    for call in list(calls)[:MAX_TOOL_CALLS]:
+        if not isinstance(call, dict):
+            continue
+        ok = call.get("ok")
+        record = {
+            "name": str(call.get("name") or "?")[:64],
+            "args": str(call.get("args") or "")[:MAX_TOOL_ARG_CHARS + 1],
+            "ok": ok if isinstance(ok, bool) else None,
+            "result": str(call.get("result") or "")[:MAX_TOOL_RESULT_CHARS + 1],
+            "clipped": bool(call.get("clipped")),
+        }
+        if call.get("confirm") in ("approved", "declined"):
+            record["confirm"] = call["confirm"]
+        out.append(record)
+    return out
 
 
 def read_thread(platform, thread_id, limit=200):
@@ -326,6 +436,10 @@ def read_person(platform, user_id, limit=100):
                 "stage": record.get("stage"),
                 "reason": record.get("reason"),
                 "may_use_tools": record.get("may_use_tools"),
+                "guild_id": str(record.get("guild_id") or ""),
+                "channel_id": str(record.get("channel_id") or ""),
+                "guild_name": str(record.get("guild_name") or "")[:100],
+                "channel_name": str(record.get("channel_name") or "")[:100],
             })
         else:
             entry.update({
@@ -333,6 +447,7 @@ def read_person(platform, user_id, limit=100):
                 "ok": record.get("ok") is not False,
                 "error": record.get("error") or "",
                 "provider": record.get("provider") or "",
+                "tool_calls": clean_tool_calls(record.get("tool_calls")),
             })
         entries.append(entry)
     return {
