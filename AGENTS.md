@@ -155,8 +155,11 @@ actually render Markdown):
     node tests/verify_daemons_panel.js
     node tests/verify_daemons_console.js   # the console line classifier (H.1.7)
     node tests/verify_l9_sequence_bar.js   # L.9: sequence bar reachable; needs `playwright` + Chromium, prints SKIP without them
+    python3 tests/verify_l13_favorite_daemons.py  # L.13: favorite daemons in a real browser; needs `playwright` (Python) + Chromium, prints SKIP without them
     node tests/verify_slash_palette.js      # no npm install; runs the real palette
                                             # against a fake DOM + fake JarvisHost
+    node tests/verify_panel_open_guard.js   # I-B18(c): openScriptPanel() says so when a panel's script didn't load; no npm install
+    python3 tests/verify_panel_open_guard.py  # same, in a real browser with daemons.js blocked; needs `playwright` (Python) + Chromium, prints SKIP without them
 
 Two things that will waste your time if nobody tells you:
 

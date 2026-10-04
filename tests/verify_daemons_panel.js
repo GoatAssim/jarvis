@@ -319,4 +319,39 @@ ok("envPairs: drops rows with no name, keeps the rest as K=V", JSON.stringify(P.
   ok("buildReport: surfaces the crashed one's error under Needs attention", /Needs attention[\s\S]*worker[\s\S]*boom/.test(report));
 }
 
+// --- favorites (L.13) -------------------------------------------------------------
+{
+  const entries = [
+    { id: "web", status: "running", running: true, builtin: true },
+    { id: "bot", status: "crashed", last_error: "boom", restarts: 1 },
+    { id: "spotify", status: "stopped" },
+    { id: "cron", status: "stopped" },
+  ];
+  const favs = new Set(["bot", "spotify", "gone"]); // "gone" has no entry any more
+  const f = (extra) => entries.filter((e) => P.matchesFilters(e, Object.assign({ favorites: favs }, extra))).map((e) => e.id);
+
+  ok("matchesFilters: favOnly keeps only starred services", JSON.stringify(f({ favOnly: true })) === JSON.stringify(["bot", "spotify"]));
+  ok("matchesFilters: favOnly off ignores the favorites set", f({ favOnly: false }).length === 4);
+  ok("matchesFilters: favOnly with no favorites set matches nothing", entries.filter((e) => P.matchesFilters(e, { favOnly: true })).length === 0);
+  ok("matchesFilters: favorites AND a state filter", JSON.stringify(f({ favOnly: true, state: "crashed" })) === JSON.stringify(["bot"]));
+  ok("matchesFilters: favorites AND search", JSON.stringify(f({ favOnly: true, search: "spot" })) === JSON.stringify(["spotify"]));
+  ok("matchesFilters: favorites AND kind", f({ favOnly: true, kind: "builtin" }).length === 0);
+  ok("matchesFilters: old filter shape (no favOnly) is unchanged", entries.every((e) => P.matchesFilters(e, { search: "", state: "all", kind: "all" })));
+
+  ok("countEntries: counts only favorites that still exist", P.countEntries(entries, favs).favorites === 2);
+  ok("countEntries: no favorites argument counts zero", P.countEntries(entries).favorites === 0);
+  ok("countEntries: totals are unchanged by passing favorites", P.countEntries(entries, favs).total === 4);
+
+  const sorted = P.sortFavoritesFirst(entries, favs).map((e) => e.id);
+  ok("sortFavoritesFirst: starred first, each half keeps its order", JSON.stringify(sorted) === JSON.stringify(["bot", "spotify", "web", "cron"]));
+  ok("sortFavoritesFirst: nothing starred returns the same order", JSON.stringify(P.sortFavoritesFirst(entries, new Set()).map((e) => e.id)) === JSON.stringify(entries.map((e) => e.id)));
+  ok("sortFavoritesFirst: does not mutate its input", entries[0].id === "web");
+
+  const on = P.toggleFavoriteId(["a"], "b");
+  ok("toggleFavoriteId: adds an id that was not starred", on.now === true && JSON.stringify(on.ids) === JSON.stringify(["a", "b"]));
+  const off = P.toggleFavoriteId(["a", "b"], "a");
+  ok("toggleFavoriteId: removes one that was", off.now === false && JSON.stringify(off.ids) === JSON.stringify(["b"]));
+  ok("toggleFavoriteId: tolerates a missing list", JSON.stringify(P.toggleFavoriteId(undefined, "x").ids) === JSON.stringify(["x"]));
+}
+
 console.log(`\n${n}/${n} checks passed`);
