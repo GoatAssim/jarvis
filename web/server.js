@@ -379,6 +379,57 @@ app.post("/api/favorites", async (req, res) => {
   }
 });
 
+// ---------------------------------------------------------------------------
+// Favorited daemons (L.13) — same idea as favorited commands above, but a
+// SEPARATE file and route on purpose: a daemon id and a command name can be
+// the same string (a daemon "spotify" and the command "spotify" both exist
+// today), and sharing one list would star both at once. favorites.json is not
+// touched, so an old install keeps working unchanged.
+// ---------------------------------------------------------------------------
+
+const FAVORITE_DAEMONS_PATH = path.join(__dirname, "data", "favorite-daemons.json");
+const MAX_FAVORITE_DAEMONS = 500;
+
+async function readFavoriteDaemons() {
+  try {
+    const parsed = JSON.parse(await fs.readFile(FAVORITE_DAEMONS_PATH, "utf-8"));
+    return Array.isArray(parsed) ? parsed.filter((n) => typeof n === "string") : [];
+  } catch (e) {
+    return []; // first run or corrupt file: "no favorites yet"
+  }
+}
+
+async function writeFavoriteDaemons(ids) {
+  await fs.mkdir(path.dirname(FAVORITE_DAEMONS_PATH), { recursive: true });
+  await fs.writeFile(FAVORITE_DAEMONS_PATH, JSON.stringify(ids, null, 2) + "\n", "utf-8");
+}
+
+app.get("/api/favorite-daemons", async (req, res) => {
+  res.json(await readFavoriteDaemons());
+});
+
+app.post("/api/favorite-daemons", async (req, res) => {
+  const ids = req.body?.ids;
+  if (!Array.isArray(ids) || !ids.every((n) => typeof n === "string")) {
+    return res.status(400).json({ error: "Body must be { ids: string[] }." });
+  }
+  // Only well-formed daemon ids are stored. DAEMON_ID is declared further
+  // down but is only read at request time, long after module load.
+  if (!ids.every((n) => DAEMON_ID.test(n))) {
+    return res.status(400).json({ error: "Invalid daemon id in list." });
+  }
+  const unique = [...new Set(ids)];
+  if (unique.length > MAX_FAVORITE_DAEMONS) {
+    return res.status(400).json({ error: `At most ${MAX_FAVORITE_DAEMONS} favorites.` });
+  }
+  try {
+    await writeFavoriteDaemons(unique);
+    res.json({ ok: true });
+  } catch (e) {
+    res.status(500).json({ error: `Couldn't save favorites: ${e.message}` });
+  }
+});
+
 app.post("/api/reconnect", async (req, res) => {
   // Re-resolving can fail transiently even though the executable we're
   // already talking to is fine — e.g. right after switching a persona
@@ -1497,6 +1548,17 @@ app.delete("/api/daemons/:id", requireJarvis, async (req, res) => {
   const { id } = req.params;
   if (badDaemonId(id, res)) return;
   const result = await runJarvisOnce(["daemon-remove", id], 10000);
+  // L.13: a removed daemon must not leave a favorite behind (a new daemon
+  // given the same id later would otherwise come back already starred).
+  // Only on a clean removal, so a failed one keeps its star.
+  let removed = false;
+  try { removed = result.ok && JSON.parse(result.stdout)?.ok === true; } catch (_) { /* not JSON */ }
+  if (removed) {
+    try {
+      const favs = await readFavoriteDaemons();
+      if (favs.includes(id)) await writeFavoriteDaemons(favs.filter((n) => n !== id));
+    } catch (_) { /* best effort: the client also ignores ids that no longer exist */ }
+  }
   return parseJarvisJSON(result, res, "Couldn't remove that daemon.");
 });
 

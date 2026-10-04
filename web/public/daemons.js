@@ -236,9 +236,13 @@
     return bits.filter(Boolean).join(" \u0001 ").toLowerCase();
   }
 
-  // filters = { search, state: all|attention|<bucket>, kind: all|builtin|custom }
+  // filters = { search, state: all|attention|<bucket>, kind: all|builtin|custom,
+  //             favOnly?: boolean, favorites?: Set<id> }
+  // favOnly is its own switch rather than another `state` value so it composes
+  // (AND) with the state chips, the kind select and the search box.
   function matchesFilters(entry, filters) {
     const f = filters || {};
+    if (f.favOnly && !(f.favorites && f.favorites.has && f.favorites.has(entry.id))) return false;
     if (f.state && f.state !== "all") {
       if (f.state === "attention") { if (!attentionOf(entry).length) return false; }
       else if (bucketOf(entry) !== f.state) return false;
@@ -253,9 +257,13 @@
     return true;
   }
 
-  function countEntries(entries) {
+  // `favorites` (optional Set of ids) adds a `favorites` count. It counts only
+  // ids that still have an entry, so a stale id left in the saved list can
+  // never inflate the chip.
+  function countEntries(entries, favorites) {
     const byState = { running: 0, starting: 0, stopped: 0, crashed: 0, scheduled: 0 };
     let attention = 0;
+    let favs = 0;
     const kinds = { builtin: { total: 0, running: 0 }, custom: { total: 0, running: 0 } };
     (entries || []).forEach((e) => {
       const b = bucketOf(e);
@@ -264,8 +272,30 @@
       const k = e.builtin ? kinds.builtin : kinds.custom;
       k.total += 1;
       if (b === "running") k.running += 1;
+      if (favorites && favorites.has && favorites.has(e.id)) favs += 1;
     });
-    return { total: (entries || []).length, byState, attention, kinds };
+    return { total: (entries || []).length, byState, attention, kinds, favorites: favs };
+  }
+
+  // Favorites float to the top, everything else keeps its incoming order
+  // (a stable partition, not a sort, so the order the backend gave is kept
+  // inside each half). Applied per group by both the list and the arrow-key
+  // walk, so what you see and what ArrowDown visits stay the same order.
+  function sortFavoritesFirst(entries, favorites) {
+    if (!favorites || !favorites.size) return entries;
+    const top = [];
+    const rest = [];
+    entries.forEach((e) => (favorites.has(e.id) ? top : rest).push(e));
+    return top.concat(rest);
+  }
+
+  // The favorites list after toggling one id, as a new array (the caller
+  // owns the Set). Returns { ids, now } where `now` is the new state of `id`.
+  function toggleFavoriteId(ids, id) {
+    const set = new Set(ids || []);
+    const now = !set.has(id);
+    if (now) set.add(id); else set.delete(id);
+    return { ids: [...set], now };
   }
 
   // The fields whose change should repaint a card / the summary. Uptime is
@@ -724,6 +754,13 @@
     search: "",
     stateFilter: "all",
     kindFilter: "all",
+    // L.13: favorites. The ids live on the server (data/favorite-daemons.json,
+    // so every browser sees the same stars); only the on/off of the filter is
+    // a per-browser preference like the other filters.
+    favorites: new Set(),
+    favLoaded: false,
+    favSaving: Promise.resolve(),
+    favOnly: false,
     collapsed: new Set(),
     tab: "console",
     // console
@@ -767,6 +804,7 @@
         if (typeof ui.selected === "string") state.selected = ui.selected;
         if (typeof ui.stateFilter === "string") state.stateFilter = ui.stateFilter;
         if (["all", "builtin", "custom"].includes(ui.kindFilter)) state.kindFilter = ui.kindFilter;
+        if (typeof ui.favOnly === "boolean") state.favOnly = ui.favOnly;
         if (Array.isArray(ui.collapsed)) state.collapsed = new Set(ui.collapsed.filter((x) => typeof x === "string"));
         if (["console", "details"].includes(ui.tab)) state.tab = ui.tab;
         if (CONSOLE_FILTERS.some((f) => f.id === ui.consoleFilter)) state.consoleFilter = ui.consoleFilter;
@@ -779,7 +817,7 @@
     try {
       global.localStorage.setItem(UI_KEY, JSON.stringify({
         selected: state.selected, stateFilter: state.stateFilter, kindFilter: state.kindFilter,
-        collapsed: [...state.collapsed], tab: state.tab, consoleFilter: state.consoleFilter,
+        favOnly: state.favOnly, collapsed: [...state.collapsed], tab: state.tab, consoleFilter: state.consoleFilter,
         onlyMatches: state.onlyMatches, tail: state.tail,
       }));
     } catch (_) { storageOk = false; }
@@ -808,8 +846,12 @@
   const entryById = (id) => state.entries.find((e) => e.id === id) || null;
   const selectedEntry = () => (state.selected ? entryById(state.selected) : null);
   const displayName = (e) => (e && (e.name || e.id)) || "";
-  const activeFilters = () => ({ search: state.search, state: state.stateFilter, kind: state.kindFilter });
-  const isFiltering = () => Boolean(state.search.trim()) || state.stateFilter !== "all" || state.kindFilter !== "all";
+  const activeFilters = () => ({
+    search: state.search, state: state.stateFilter, kind: state.kindFilter,
+    favOnly: state.favOnly, favorites: state.favorites,
+  });
+  const isFiltering = () => Boolean(state.search.trim()) || state.stateFilter !== "all" || state.kindFilter !== "all" || state.favOnly;
+  const isFavorite = (id) => state.favorites.has(id);
   const visibleEntries = () => state.entries.filter((e) => matchesFilters(e, activeFilters()));
 
   // The order the cards are drawn in, which is the order the arrow keys walk.
@@ -819,7 +861,7 @@
     const out = [];
     ["builtin", "custom"].forEach((gid) => {
       if (!filtering && state.collapsed.has(gid)) return;
-      shown.filter((e) => (gid === "builtin") === Boolean(e.builtin)).forEach((e) => out.push(e));
+      sortFavoritesFirst(shown.filter((e) => (gid === "builtin") === Boolean(e.builtin)), state.favorites).forEach((e) => out.push(e));
     });
     return out;
   }
@@ -857,8 +899,16 @@
     renderSide(true);
   }
 
+  function setFavOnly(on) {
+    state.favOnly = Boolean(on);
+    savePrefs();
+    renderChips();
+    renderList(true);
+    renderSide(true);
+  }
+
   function renderChips() {
-    const n = countEntries(state.entries);
+    const n = countEntries(state.entries, state.favorites);
     dom.chips.textContent = "";
     const mk = (id, label, count, colourState, always) => {
       const active = state.stateFilter === id;
@@ -874,6 +924,17 @@
       ]));
     };
     mk("all", "All", n.total, null, true);
+    // Favorites is a toggle on top of the state chips, not one of them: it
+    // narrows whatever else is selected (e.g. Favorites + Crashed).
+    dom.chips.appendChild(el("button", {
+      class: "dmn-chip dmn-chip--fav" + (state.favOnly ? " is-active" : ""), type: "button",
+      "aria-pressed": state.favOnly ? "true" : "false", title: "Show only favorites",
+      onclick: () => setFavOnly(!state.favOnly),
+    }, [
+      el("span", { class: "dmn-chip__star", "aria-hidden": "true" }, "\u2605"),
+      "Favorites",
+      el("span", { class: "dmn-chip__n" }, String(n.favorites)),
+    ]));
     mk("attention", "Attention", n.attention, "attention", true);
     mk("running", "Running", n.byState.running, "running", true);
     mk("starting", "Starting", n.byState.starting, "starting", false);
@@ -922,6 +983,22 @@
     return el("span", { class: "dmn-uptime", "data-started": String(entry.started_at) }, fmtDuration(secs));
   }
 
+  // The star on a card. The card itself is a <button>, so this is a
+  // role="button" span (a real <button> inside one is invalid HTML and some
+  // browsers won't deliver the click to it). It is a mouse/touch shortcut and
+  // is kept out of the tab order: keyboard users have the * key and the real
+  // Favorite button in the detail pane, both of which do the same thing.
+  function favStar(entry) {
+    const on = isFavorite(entry.id);
+    return el("span", {
+      class: "dmn-star" + (on ? " is-on" : ""), role: "button", tabindex: "-1",
+      "aria-pressed": on ? "true" : "false",
+      "aria-label": (on ? "Remove " : "Add ") + displayName(entry) + (on ? " from favorites" : " to favorites"),
+      title: on ? "Unfavorite" : "Favorite",
+      onclick: (ev) => { ev.stopPropagation(); ev.preventDefault(); toggleFavorite(entry.id); },
+    }, on ? "\u2605" : "\u2606");
+  }
+
   function renderCard(entry) {
     const b = bucketOf(entry);
     const active = state.selected === entry.id;
@@ -944,6 +1021,7 @@
         el("span", { class: "dmn-dot", "aria-hidden": "true" }),
         el("span", { class: "dmn-card__name" }, displayName(entry)),
         el("span", { class: "dmn-card__state" }, [STATE[b].label, uptimeNode(entry) ? " \u00B7 " : null, uptimeNode(entry)]),
+        favStar(entry),
       ]),
       el("div", { class: "dmn-card__cmd" }, entry.command || "(no command)"),
       tags.length ? el("div", { class: "dmn-card__meta" }, tags) : null,
@@ -983,7 +1061,7 @@
 
   function renderList(force) {
     if (!dom) return;
-    const sig = JSON.stringify([state.dataSig, activeFilters(), state.selected, [...state.collapsed], state.loadedOnce, state.loadError && 1]);
+    const sig = JSON.stringify([state.dataSig, activeFilters(), [...state.favorites].sort(), state.selected, [...state.collapsed], state.loadedOnce, state.loadError && 1]);
     if (!force && sig === state.listSig) return;
     state.listSig = sig;
 
@@ -1006,8 +1084,13 @@
       return;
     }
     if (isFiltering() && !shown.length) {
+      // Favorites on with nothing starred is not "no match", it is "you
+      // haven't picked any yet" - say how, rather than show a blank list.
+      const noneStarred = state.favOnly && !countEntries(state.entries, state.favorites).favorites;
       dom.list.appendChild(el("div", { class: "dmn-empty-list" }, [
-        el("div", null, "Nothing matches these filters."),
+        el("div", null, noneStarred
+          ? "No favorites yet. Click the \u2606 on a service (or select it and press *) and it will show up here."
+          : "Nothing matches these filters."),
         el("button", { class: "btn btn--ghost btn--sm", type: "button", onclick: clearFilters }, "Clear filters"),
       ]));
       return;
@@ -1017,7 +1100,7 @@
       ["custom", "Custom", state.entries.filter((e) => !e.builtin)],
     ];
     groups.forEach(([gid, label, all]) => {
-      const inGroup = shown.filter((e) => (gid === "builtin") === Boolean(e.builtin));
+      const inGroup = sortFavoritesFirst(shown.filter((e) => (gid === "builtin") === Boolean(e.builtin)), state.favorites);
       if (isFiltering() && !inGroup.length) return;
       dom.list.appendChild(renderGroup(gid, label, all, inGroup));
     });
@@ -1029,6 +1112,7 @@
     dom.search.value = "";
     state.stateFilter = "all";
     state.kindFilter = "all";
+    state.favOnly = false;
     dom.kind.value = "all";
     savePrefs();
     renderChips();
@@ -1068,7 +1152,7 @@
 
   function renderSide(force) {
     if (!dom) return;
-    const sig = JSON.stringify([state.dataSig, state.stateFilter, state.kindFilter, state.live, state.loadedOnce, state.loadError && 1]);
+    const sig = JSON.stringify([state.dataSig, state.stateFilter, state.kindFilter, state.favOnly, state.live, state.loadedOnce, state.loadError && 1]);
     if (!force && sig === state.sideSig) return;
     state.sideSig = sig;
     const keep = dom.side.scrollTop;
@@ -1199,7 +1283,7 @@
         p(el("b", null, "Restart policy. "), "Restarts are counted in a rolling 10-minute window. At the limit Jarvis stops retrying and shows \u201CRestart limit reached\u201D until you start it yourself."),
         p(el("b", null, "Outside Jarvis. "), "A scheduler or Discord gateway that was started in a terminal still shows as running; its console isn\u2019t captured here."),
         p(el("b", null, "Who can create daemons. "), "You can, here. Jarvis\u2019s model can start, stop and inspect them but never register one."),
-        p(el("b", null, "Keys. "), "\u2191/\u2193 move, / search, S start/stop, Shift+R restart, E edit, N new, 1 console, 2 details, Esc closes."),
+        p(el("b", null, "Keys. "), "\u2191/\u2193 move, / search, S start/stop, Shift+R restart, E edit, * favorite, N new, 1 console, 2 details, Esc closes."),
       ]),
     ]);
   }
@@ -1268,7 +1352,7 @@
   function updateShell(entry, force) {
     const sh = state.shell;
     if (!sh) return;
-    const sig = entrySignature(entry) + "|" + (state.busy[entry.id] || "") + "|" + state.showEnv;
+    const sig = entrySignature(entry) + "|" + (state.busy[entry.id] || "") + "|" + state.showEnv + "|" + (isFavorite(entry.id) ? "fav" : "");
     if (force || sig !== sh.sig) {
       sh.sig = sig;
       renderSummary(entry);
@@ -1411,6 +1495,10 @@
         onclick: () => runAction(entry.id, "restart"),
       }),
       act("edit", "\u270E", "Edit", "E", { onclick: () => openEditor("edit", entry.id) }),
+      act("favorite", isFavorite(entry.id) ? "\u2605" : "\u2606", isFavorite(entry.id) ? "Favorited" : "Favorite", "*", {
+        title: isFavorite(entry.id) ? "Remove from favorites" : "Add to favorites",
+        onclick: () => toggleFavorite(entry.id),
+      }),
     ];
     if (!entry.builtin) {
       buttons.push(act("remove", "\u2715", busy === "remove" ? verb.remove : "Remove", "", {
@@ -2209,6 +2297,49 @@
     return state.inflight;
   }
 
+  // Favorites come from the server, separately from the (CLI-backed) service
+  // list, so a failure here never blanks the panel: the stars just don't show.
+  async function loadFavorites() {
+    try {
+      const data = await Api.get("/api/favorite-daemons");
+      state.favorites = new Set(Array.isArray(data) ? data.filter((x) => typeof x === "string") : []);
+      state.favLoaded = true;
+    } catch (_) { /* keep whatever we had */ }
+    if (dom) onFavoritesChanged();
+  }
+
+  function onFavoritesChanged() {
+    renderChips();
+    renderList(true);
+    renderSide(true);
+    const entry = selectedEntry();
+    if (entry && state.shell && !state.editor) updateShell(entry, true);
+  }
+
+  async function toggleFavorite(id) {
+    if (!entryById(id)) return;
+    // Never save before the saved list has been read once: the POST replaces
+    // the whole list, so saving first would wipe every existing favorite.
+    if (!state.favLoaded) {
+      await loadFavorites();
+      if (!state.favLoaded) { toast("Couldn\u2019t read your favorites, so nothing was changed.", "error"); return; }
+    }
+    const { ids } = toggleFavoriteId([...state.favorites], id);
+    state.favorites = new Set(ids);
+    onFavoritesChanged();
+    // Saves run one after another and each sends the set as it is *then*, so
+    // two quick clicks can't land out of order and drop the second one.
+    state.favSaving = state.favSaving.then(async () => {
+      try {
+        await Api.post("/api/favorite-daemons", { ids: [...state.favorites] });
+      } catch (err) {
+        toast(`Couldn\u2019t save favorites: ${err.message}`, "error");
+        await loadFavorites(); // show what the server really has
+      }
+    });
+    return state.favSaving;
+  }
+
   function onEntries() {
     if (!dom) return;
     state.dataSig = state.entries.map(entrySignature).join("|");
@@ -2235,7 +2366,7 @@
   }
 
   async function refreshAll(manual) {
-    if (manual) { dom.statusLine.textContent = "refreshing\u2026"; dom.statusLine.classList.add("is-busy"); }
+    if (manual) { dom.statusLine.textContent = "refreshing\u2026"; dom.statusLine.classList.add("is-busy"); loadFavorites(); }
     await loadEntries();
     if (state.shell && !state.editor && state.tab === "console") await loadConsole({ force: Boolean(manual) });
   }
@@ -2287,6 +2418,7 @@
         await Api.del(`/api/daemons/${enc(id)}`);
         toast(`Removed \u201C${name}\u201D. Its console logs stay on disk.`, "info");
         if (state.selected === id) { state.selected = null; resetConsoleState(); }
+        state.favorites.delete(id); // the server prunes its copy on a clean removal
       } else {
         const data = await Api.post(`/api/daemons/${enc(id)}/${action}`);
         toast(data.message || `${action} requested.`, "success");
@@ -2410,6 +2542,7 @@
       case "s": if (entry) { e.preventDefault(); runAction(entry.id, isStoppable(entry) ? "stop" : "start"); } return;
       case "R": if (entry) { e.preventDefault(); runAction(entry.id, "restart"); } return;
       case "e": if (entry) { e.preventDefault(); openEditor("edit", entry.id); } return;
+      case "*": if (entry) { e.preventDefault(); toggleFavorite(entry.id); } return;
       case "n": e.preventDefault(); openEditor("add"); return;
       case "1": e.preventDefault(); setTab("console"); return;
       case "2": e.preventDefault(); setTab("details"); return;
@@ -2467,6 +2600,7 @@
     renderList(true);
     renderSide(true);
     renderMain();
+    loadFavorites();
     loadEntries().then(() => {
       const card = dom.list.querySelector(".dmn-card.is-active");
       if (card && card.scrollIntoView) card.scrollIntoView({ block: "center" });
@@ -2497,7 +2631,7 @@
     _pure: {
       normalizeId, bucketOf, withDefaults, isStoppable, fmtDuration, uptimeSeconds, fmtStamp,
       describeNextStart, restartSummary, stopSummary, attentionOf, searchHaystack, matchesFilters,
-      countEntries, entrySignature, classifyLine, annotateLines, summarizeLines, filterLines,
+      countEntries, sortFavoritesFirst, toggleFavoriteId, entrySignature, classifyLine, annotateLines, summarizeLines, filterLines,
       groupTraces, highlightSegments, draftFromEntry, blankDraft, validateDraft, envPairs,
       buildAddPayload, buildEditPayload, buildReport, STATES, CONSOLE_FILTERS,
     },

@@ -119,6 +119,21 @@
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
 .dmn-card__meta{ display: flex; gap: 6px; align-items: center; margin-top: 5px; flex-wrap: wrap; }
+/* L.13 favorites: the star on a card, and the Favorites chip. The empty star
+   is faint until the card is hovered/focused so a long list isn't a column of
+   outlines; a favorited one is always solid. Shape (filled vs outline), not
+   colour alone, says which is which. */
+.dmn-star{
+  flex-shrink: 0; align-self: center; line-height: 1; font-size: 13px; padding: 0 2px;
+  color: var(--text-dimmer); opacity: .4; cursor: pointer; user-select: none;
+  transition: opacity .15s, color .15s, transform .15s;
+}
+.dmn-card:hover .dmn-star, .dmn-card:focus-visible .dmn-star, .dmn-card.is-active .dmn-star{ opacity: .85; }
+.dmn-star:hover{ color: var(--accent); opacity: 1; transform: scale(1.2); }
+.dmn-star.is-on{ color: var(--accent); opacity: 1; }
+.dmn-chip__star{ font-size: 11px; line-height: 1; color: var(--accent); }
+.dmn-chip--fav.is-active .dmn-chip__star{ color: inherit; }
+
 .dmn-card--empty{ border-style: dashed; opacity: .9; cursor: pointer; }
 .dmn-card--empty .dmn-card__cmd{ white-space: normal; }
 
@@ -590,6 +605,6 @@ textarea.dmn-input{ resize: vertical; min-height: 54px; line-height: 1.5; }
   .dmn-editor-head, .dmn-editor-body, .dmn-editor-foot{ padding-left: 14px; padding-right: 14px; }
 }
 @media (prefers-reduced-motion: reduce){
-  .dmn-card, .dmn-bar > i, .dmn-ring__val, .dmn-group__caret, .dmn-meter i,
+  .dmn-card, .dmn-star, .dmn-bar > i, .dmn-ring__val, .dmn-group__caret, .dmn-meter i,
   .dmn-hero__dot, .dmn-radio, .dmn-switch__track, .dmn-switch__track::after{ transition: none !important; }
 }
