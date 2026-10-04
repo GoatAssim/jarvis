@@ -253,6 +253,51 @@ def test_view_reports_allowed_lists_and_unknown_servers():
     check("instagram reports unsupported", servers.view(INSTAGRAM)["supported"] is False)
 
 
+def test_bare_id_where_filters_do_not_crash():
+    """`"allowed_guilds": 123` (no brackets) used to crash `jarvis channels-servers`
+    with "TypeError: 'int' object is not iterable" -- and the gate the same way.
+    A hand edit must degrade to a one-entry list, never a traceback."""
+    for bad in (int(G1), G1, [int(G1), "", None], None):
+        # written RAW to the file, exactly as a hand edit would be
+        reset()
+        raw = json.loads(channel_config.CONFIG_FILE.read_text(encoding="utf-8"))
+        raw[DISCORD]["allowed_guilds"] = bad
+        raw[DISCORD]["allowed_channels"] = int(C1) if bad is not None else None
+        channel_config.CONFIG_FILE.write_text(json.dumps(raw), encoding="utf-8")
+        servers.note_guild(DISCORD, G1, "Alpha", channels=[(C1, "general", "text"), (C2, "other", "text")])
+        try:
+            v = servers.view(DISCORD)
+            ok = True
+        except Exception as exc:  # noqa: BLE001
+            ok, v = False, {"err": repr(exc)}
+        check(f"view survives allowed_guilds={bad!r}", ok, str(v))
+        if not ok:
+            continue
+        cfg = channel_config.platform_config(DISCORD)
+        check(f"load_config normalizes both filters to lists ({bad!r})",
+              isinstance(cfg["allowed_guilds"], list) and isinstance(cfg["allowed_channels"], list))
+        if bad is not None:
+            check(f"the bare id is honoured as a one-entry list ({bad!r})",
+                  v["allowed_guilds"] == [G1] and v["allowed_channels"] == [C1], str(v["allowed_guilds"]))
+            ch = {c["id"]: c for c in v["servers"][0]["channels"]}
+            check("channel outside the bare allowed_channels is not answering",
+                  ch[C1]["answering"] and not ch[C2]["answering"])
+        else:
+            check("null filters mean unrestricted", v["allowed_guilds"] == [] and v["allowed_channels"] == [])
+    # the gate itself, with a hand-built cfg that skipped load_config
+    reset()
+    cfg = dict(channel_config.platform_config(DISCORD), allowed_guilds=int(G1), allowed_channels=int(C1))
+    ok_msg = group_msg(guild=G1, channel=C1)
+    d = permissions.decide(cfg, ok_msg)
+    check("gate: bare-int filters admit the matching place", d.allowed, d.reason)
+    d = permissions.decide(cfg, group_msg(guild=G2, channel=C1))
+    check("gate: bare-int filters still refuse another server", (not d.allowed) and d.stage == "where", f"{d.stage} {d.reason}")
+    # and a scope override carrying a bare id
+    reset({"scopes": {f"guild:{G1}": {"allowed_channels": int(C1)}}})
+    merged = permissions.resolve_scope(channel_config.platform_config(DISCORD), group_msg(guild=G1, channel=C2))
+    check("scope override: bare-int allowed_channels normalized", merged["allowed_channels"] == [C1], str(merged.get("allowed_channels")))
+
+
 def test_view_never_leaks_the_token():
     reset({"bot_token": "SECRET-TOKEN-123"})
     check("view carries no token", "SECRET-TOKEN-123" not in json.dumps(servers.view(DISCORD)))

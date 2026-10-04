@@ -96,6 +96,18 @@ things that were already fixed once.
   `permissions.decide`, add it to `user_admin.GATE_STAGES`
   (`tests/test_channel_insights.py` forces a denial at every stage and fails if
   the walkthrough is missing one). `tests/test_channel_insights.py` pins all of this.
+- **Server / channel switches only take access away, and the "where" filters are
+  normalized once (L.36-P7).** `channels/servers.py` writes ONLY into `scopes`
+  (`guild:<id>` / `channel:<id>`): `enabled` / `tools` off -> `false`, on -> the key
+  is removed (never written `true`, which would GRANT over a switched-off platform);
+  `mention` can be turned on or inherited, never off. It must never write
+  `allowed_guilds` / `allowed_channels` -- they are "empty = unrestricted", so removing
+  the last entry would open every server. Those two lists, like the allow-lists, go
+  through `config.normalize_entries` in `load_config()`, in `permissions.resolve_scope()`
+  and in `permissions.decide()`: a hand-typed bare id (`"allowed_guilds": 123`) is a
+  one-entry list, not a `TypeError`. Never iterate a config list directly -- use the
+  normalizer. Names (`guild_name`, `channel_name`) are display only; no stage of
+  `decide()` reads them. `tests/test_channel_servers.py` pins all of this.
 - **Quick setups and bulk edits are the single switches, written together
   (L.36-P4/P5).** `channels/preset_admin.py` changes nothing except by calling
   `user_admin.set_flag` and `user_admin.set_tools`; don't give it a second way

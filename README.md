@@ -782,6 +782,16 @@ their conversation or usage. The terminal has the same views:
 Token and tool counts start from the first message answered after upgrading;
 the message counts cover the whole history.
 
+**Discord servers** (a card per server in the Discord section) lists every server
+Jarvis is in, with its channels by name, and three switches per server and one per
+channel: *Answer here*, *Allow tools*, *Needs an @mention*. They can only **take access
+away** -- to let more people in, use the lists on the left. `allowed_guilds` and
+`allowed_channels` are still edited by hand in `channels.json`; a single id there
+(`"allowed_guilds": 123456789012345678`) works as a list of one. The Conversation tab
+also shows which tools Jarvis used for each reply (hide them with *Hide tool calls*), and
+which server / channel a message came from. Terminal: `jarvis channels-servers` and
+`channels-server-set`.
+
 **Quick setups** (top of the Permissions tab) set a person's DM / reply / tool
 switches and tool list in one go: *No access*, *Chat only*, *Chat + tell the
 owner* and *Trusted* (every tool). Clicking one shows what would change first;
@@ -850,6 +860,7 @@ separately run `jarvis channels-allow discord tool <id>`.
 | `jarvis channels-user-test <platform> <id> dm\|group [mentioned\|unmentioned]` | Dry run: what the gate would do with a message from them |
 | `jarvis channels-presets` / `channels-preset <platform> <id> <setup> [preview]` | The quick setups / apply one to a person (or just preview it) |
 | `jarvis channels-bulk flag <switch> <on\|off> <platform:id> ...` / `channels-bulk preset\|preview <setup> <platform:id> ...` | One switch or a quick setup for several people |
+| `jarvis channels-servers [platform]` / `channels-server-set <platform> guild\|channel <id> <enabled\|tools\|mention> <on\|off\|inherit>` | Discord servers + channels and their switches / flip one (can only take access away) |
 | `jarvis channels-add-person <platform> <id\|@handle> [name ...]` | Add someone who hasn't messaged yet (grants nothing) |
 | `jarvis channels-rename <platform> <id> [name ...]` | Set or clear what they're called |
 | `jarvis channels-link <platform> <id> <other-platform> <id\|@handle\|name>` | Same person on both apps (identity only) |

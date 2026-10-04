@@ -116,7 +116,7 @@ def resolve_scope(cfg, msg):
         if merged is None:
             merged = dict(cfg)
         for field, value in override.items():
-            if field in PERM_SETS:
+            if field in PERM_SETS or field in config.LOCATION_SETS:
                 value = config.normalize_entries(value)
             elif field == "owner":
                 value = config.normalize_entry(value)
@@ -282,11 +282,14 @@ def decide(cfg, msg, last_seen_at=None, now=None):
         # Location filters. Unlike the allowlists these are empty=unrestricted:
         # they narrow *where* an already-authorized person may talk to the
         # bot, and the who-gate below still fails closed on its own.
-        guilds = cfg.get("allowed_guilds") or []
-        if guilds and msg.guild_id and str(msg.guild_id) not in [str(g) for g in guilds]:
+        # normalize_entries tolerates a bare id / string where a list belongs
+        # (load_config already did this; repeated here so a cfg built by hand
+        # -- tests, a scope override -- cannot crash the gate either).
+        guilds = config.normalize_entries(cfg.get("allowed_guilds"))
+        if guilds and msg.guild_id and str(msg.guild_id) not in guilds:
             return Decision(False, "where", f"guild {msg.guild_id} not allowed")
-        channels = cfg.get("allowed_channels") or []
-        if channels and msg.channel_id and str(msg.channel_id) not in [str(c) for c in channels]:
+        channels = config.normalize_entries(cfg.get("allowed_channels"))
+        if channels and msg.channel_id and str(msg.channel_id) not in channels:
             return Decision(False, "where", f"channel {msg.channel_id} not allowed")
 
     # --- reply: may this person get an answer? ---------------------------

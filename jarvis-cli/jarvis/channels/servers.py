@@ -293,7 +293,11 @@ def _override(scopes, kind, ident, field):
 
 
 def _ids(value):
-    return [str(v).strip() for v in (value or []) if str(v).strip()]
+    """A config id-list as clean strings. Tolerates what a hand edit produces:
+    a bare number (`"allowed_guilds": 123`), a bare string, None, or a list
+    with blanks -- never raises. (load_config already normalizes these; this
+    keeps the read model safe when handed a config that did not come from it.)"""
+    return channel_config.normalize_entries(value)
 
 
 def view(platform=DISCORD):
