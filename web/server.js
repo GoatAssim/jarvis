@@ -1456,6 +1456,32 @@ app.post("/api/daemons/:id/schedule", requireJarvis, async (req, res) => {
 const DAEMON_RESTART_POLICIES = new Set(["never", "on-failure", "always"]);
 const DAEMON_STOP_SIGNALS = new Set(["TERM", "INT", "KILL"]);
 
+// L.11: category names reach the CLI as `--category NAME`, and the CLI's flag
+// parser (workspace_cli._opts) treats ANY following token that starts with
+// "--" as the next flag, not as a value. So a name like "--shell" would not
+// be a category at all - it would switch a different option on. Refuse those
+// here, where the request is still a request. Names are otherwise left to
+// categories.py (trim, case-insensitive uniqueness, the 24-character and
+// 8-per-daemon limits), which is the one place those rules live; the count
+// check below is only a sanity bound so a hostile body cannot build a huge argv.
+function daemonCategoryArgs(value) {
+  if (value === undefined) return { args: null };
+  if (!Array.isArray(value)) return { error: "categories must be a list of names." };
+  if (value.length > 50) return { error: "Too many categories." };
+  const names = [];
+  for (const raw of value) {
+    if (typeof raw !== "string") return { error: "Category names must be text." };
+    const name = raw.trim();
+    if (!name) continue;
+    if (name.startsWith("--")) return { error: "A category name can't start with two dashes." };
+    names.push(name);
+  }
+  // An empty list is a real request ("remove them all"), which on the CLI is
+  // its own flag - a bare --category is an error there, on purpose.
+  if (!names.length) return { args: ["--clear-categories"] };
+  return { args: names.flatMap((n) => ["--category", n]) };
+}
+
 app.post("/api/daemons", requireJarvis, async (req, res) => {
   const id = typeof req.body?.id === "string" ? req.body.id.trim() : "";
   const command = typeof req.body?.command === "string" ? req.body.command.trim() : "";
@@ -1489,6 +1515,10 @@ app.post("/api/daemons", requireJarvis, async (req, res) => {
   for (const pair of Array.isArray(req.body?.env) ? req.body.env : []) {
     if (typeof pair === "string" && pair.includes("=")) args.push("--env", pair);
   }
+  const cats = daemonCategoryArgs(req.body?.categories);
+  if (cats.error) return res.status(400).json({ error: cats.error });
+  // New daemons start with no categories, so an empty list adds nothing.
+  if (cats.args && cats.args[0] !== "--clear-categories") args.push(...cats.args);
   const result = await runJarvisOnce(args, 15000);
   return parseJarvisJSON(result, res, "Couldn't add that daemon.");
 });
@@ -1539,6 +1569,9 @@ app.patch("/api/daemons/:id", requireJarvis, async (req, res) => {
       if (typeof pair === "string" && pair.includes("=")) args.push("--env", pair);
     }
   }
+  const cats = daemonCategoryArgs(req.body?.categories);
+  if (cats.error) return res.status(400).json({ error: cats.error });
+  if (cats.args) args.push(...cats.args);
   if (args.length === 2) return res.status(400).json({ error: "Nothing to change." });
   const result = await runJarvisOnce(args, 15000);
   return parseJarvisJSON(result, res, "Couldn't update that daemon.");
@@ -1730,8 +1763,61 @@ app.get("/api/notifications", requireJarvis, async (req, res) => {
 app.get("/api/notifications/history", requireJarvis, async (req, res) => {
   const limitRaw = typeof req.query.limit === "string" ? req.query.limit.trim() : "";
   const limit = /^\d{1,4}$/.test(limitRaw) ? limitRaw : "200";
-  const result = await runJarvisOnce(["notify-history", limit], 10000);
+  const args = ["notify-history", limit];
+  // L.30 filters. Each is optional; values are length-capped and passed as
+  // single argv entries (no shell), so a search string can't become a flag.
+  const flag = (name) => req.query[name] === "1" || req.query[name] === "true";
+  if (flag("unread")) args.push("--unread");
+  if (flag("failed")) args.push("--failed");
+  if (flag("needs_ack")) args.push("--needs-ack");
+  const word = (name, max) => (typeof req.query[name] === "string"
+    ? req.query[name].replace(/[\r\n]+/g, " ").trim().slice(0, max) : "");
+  const kind = word("kind", 60);
+  const source = word("source", 100);
+  const q = word("q", 120);
+  if (kind) args.push(`--kind=${kind}`);
+  if (source) args.push(`--source=${source}`);
+  if (q) args.push(`--q=${q}`);
+  const result = await runJarvisOnce(args, 10000);
   return parseJarvisJSON(result, res, "Couldn't read notification history.");
+});
+
+// L.30 — counts for the badge plus the persistent / confirm-level items still
+// awaiting the owner. Read-only; the page calls it on load and on reconnect so
+// the badge is the durable inbox's number rather than a counter in the tab.
+app.get("/api/notifications/summary", requireJarvis, async (req, res) => {
+  const result = await runJarvisOnce(["notify-summary"], 10000);
+  return parseJarvisJSON(result, res, "Couldn't read the notification summary.");
+});
+
+// L.30 — the owner read (and, for a persistent / confirm-level one,
+// acknowledged) these. `ids` is a list of notification ids, or `all: true`.
+// Distinct from /ack above, which only records delivery to this consumer.
+app.post("/api/notifications/read", requireJarvis, async (req, res) => {
+  if (req.body?.all === true) {
+    const result = await runJarvisOnce(["notify-read", "all"], 10000);
+    return parseJarvisJSON(result, res, "Couldn't mark notifications read.");
+  }
+  const ids = Array.isArray(req.body?.ids)
+    ? req.body.ids.filter((i) => typeof i === "string" && /^[A-Za-z0-9_-]{1,40}$/.test(i)) : [];
+  if (!ids.length) return res.json({ read: 0 });
+  const result = await runJarvisOnce(["notify-read", ids.join(",")], 10000);
+  return parseJarvisJSON(result, res, "Couldn't mark notifications read.");
+});
+
+// L.30 — delete for good. `ids`, or `scope: "read"` (everything already read)
+// or `scope: "all"`.
+app.post("/api/notifications/dismiss", requireJarvis, async (req, res) => {
+  const scope = req.body?.scope;
+  if (scope === "read" || scope === "all") {
+    const result = await runJarvisOnce(["notify-dismiss", scope], 10000);
+    return parseJarvisJSON(result, res, "Couldn't dismiss notifications.");
+  }
+  const ids = Array.isArray(req.body?.ids)
+    ? req.body.ids.filter((i) => typeof i === "string" && /^[A-Za-z0-9_-]{1,40}$/.test(i)) : [];
+  if (!ids.length) return res.json({ dismissed: 0 });
+  const result = await runJarvisOnce(["notify-dismiss", ids.join(",")], 10000);
+  return parseJarvisJSON(result, res, "Couldn't dismiss notifications.");
 });
 
 app.post("/api/notifications/ack", requireJarvis, async (req, res) => {

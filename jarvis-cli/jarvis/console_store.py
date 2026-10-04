@@ -161,14 +161,13 @@ def append(conv_id, kind, text, *, surface="ask", turn=None, tool=None,
         "stream": stream,
         "text": _clip(text),
     }
-    # L.38 (a): the clip keeps the stored line small, not the record small --
-    # the untruncated text goes to the raw archive, tied to this line by seq.
-    full_text = "" if text is None else str(text)
-    if len(full_text) > MAX_LINE_CHARS:
-        from . import raw_archive
-        raw_archive.record(conv_id, "console_full", {
-            "seq": line["seq"], "turn": turn, "surface": surface,
-            "console_kind": kind, "tool": tool, "text": full_text})
+    # L.38: the store clips its own copy (it serves the UI); the event log
+    # keeps the line at full length, tied to this one by seq.
+    from . import raw_archive
+    raw_archive.record(conv_id, "console", {
+        "seq": line["seq"], "console_ts": line["ts"], "turn": turn, "surface": surface,
+        "console_kind": kind, "tool": tool, "provider": provider, "stream": stream,
+        "text": "" if text is None else str(text)})
     try:
         CONSOLE_DIR.mkdir(parents=True, exist_ok=True)
         path = _path(conv_id)
@@ -218,12 +217,6 @@ def _trim(conv_id):
         return
     dropped = len(lines) - KEEP_LINES_ON_TRIM
     kept = lines[-KEEP_LINES_ON_TRIM:]
-    # L.38 (a): rotated-out lines go to the raw archive, not into the void.
-    from . import raw_archive
-    for old_line in lines[:-KEEP_LINES_ON_TRIM]:
-        if old_line.get("kind") == "status" and str(old_line.get("text", "")).startswith("earlier output trimmed"):
-            continue  # the marker from a previous trim is bookkeeping, not output
-        raw_archive.record(conv_id, "console_trimmed", {"line": old_line})
     marker = {
         "seq": _next_tick(), "ts": _now_iso(), "turn": None, "surface": "live",
         "kind": "status", "tool": None, "provider": None, "stream": None,
@@ -266,7 +259,7 @@ def _cleared_through_seq(lines):
 
 
 def read(conv_id, *, since_seq=0, kinds=None, turn=None, limit=2000,
-         after_last_clear=False, surface=None):
+         after_last_clear=False, surface=None, full=False):
     """Replay query behind `GET /api/console/:id` (server.js shells out to
     the `console-read` CLI command, which calls this \u2014 see that
     command's docstring for why it's a CLI command and not a direct file
@@ -313,6 +306,20 @@ def read(conv_id, *, since_seq=0, kinds=None, turn=None, limit=2000,
     if limit and len(out) > limit:
         out = out[-limit:]
         truncated = True
+    if full:
+        # L.38 (opt-in): a line this store clipped is restored to its full text
+        # from the raw event log, matched by seq. Lines never clipped are left
+        # alone; a conversation with no event log comes back exactly as stored.
+        # Off by default so existing replay is byte-for-byte what it was.
+        if any(str(l.get("text", "")).endswith("chars omitted)") for l in out):
+            from . import raw_archive
+            full_text = raw_archive.console_full_text(conv_id)
+            restored = []
+            for l in out:
+                if str(l.get("text", "")).endswith("chars omitted)") and l.get("seq") in full_text:
+                    l = dict(l, text=full_text[l["seq"]], restored=True)
+                restored.append(l)
+            out = restored
     return {
         "lines": out, "cleared_through_seq": cleared_through,
         "last_seq": last_seq, "legacy": False, "truncated": truncated,

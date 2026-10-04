@@ -304,10 +304,10 @@ def _html_to_pdf(html_text, out_path):
 
 
 def export_raw(conv_id, out_dir=None):
-    """L.38 (a): write the complete record -- every exchange (including the
-    ones past the 60-exchange cap), every console line at full length and
-    every tool run with its full result -- as JSON Lines. Ignores the format
-    and include_* options: raw means nothing is left out. Never raises."""
+    """L.38: write the whole raw event stream -- what was typed, the model's
+    unsplit replies, full thinking, every console line, every tool result at
+    full size -- as JSON Lines. Ignores the format and include_* options:
+    raw means nothing is left out. Never raises."""
     from . import raw_archive
     if not conversations.is_valid_id(conv_id):
         return {"ok": False, "error": "invalid conversation id"}
@@ -329,11 +329,11 @@ def export_raw(conv_id, out_dir=None):
     except OSError as exc:
         return {"ok": False, "error": "couldn't write the file: %s" % exc}
     result = {"ok": True, "format": "jsonl-raw", "path": str(path),
-              "title": record.get("title"), "records": len(items) - 1,
+              "title": record.get("title"), "events": len(items) - 1,
               "counts": items[0].get("counts", {}), "bytes": path.stat().st_size}
-    if not raw_archive.enabled():
-        result["warning"] = ("JARVIS_RAW_ARCHIVE is off: anything capped or trimmed "
-                             "while it was off is not in this file.")
+    if len(items) == 1:
+        result["warning"] = ("no raw events are stored for this conversation (it predates "
+                             "the event log, or JARVIS_RAW_ARCHIVE was off).")
     return result
 
 

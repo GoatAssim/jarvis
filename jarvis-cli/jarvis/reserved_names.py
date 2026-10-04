@@ -82,7 +82,7 @@ RESERVED_NAMES = {
     "sched-show", "sched-cancel", "sched-pause", "sched-resume", "sched-snooze",
     "sched-approve", "sched-signal", "sched-clear", "sched-budget",
     "notify-send", "notify-list", "notify-history", "notify-ack",
-    "notify-clear", "notify-config",
+    "notify-clear", "notify-config", "notify-summary", "notify-read", "notify-dismiss",
     "conv-search", "mcp-status", "mcp-refresh", "mcp-config", "mcp-call", "mcp-tools",
     # --- workspace_cli.COMMANDS ----------------------------------------------
     "daemons", "daemon-start", "daemon-stop", "daemon-restart", "daemon-status",

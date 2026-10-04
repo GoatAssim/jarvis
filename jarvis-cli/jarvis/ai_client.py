@@ -1976,12 +1976,12 @@ def _make_tool_executor(on_tool_call, schemas=None, on_confirm_request=None,
             run_entry["confirm"] = confirm_meta
         runs.append(run_entry)
         try:
-            # L.38 (a): the model is handed `shaped_result`; the archive keeps
-            # the full pre-shaping result so nothing the tool returned is lost.
+            # L.38: the model is handed `shaped_result`; the event log keeps the
+            # full pre-shaping result, arguments and confirmation.
             raw_archive.record(conv_id, "tool_run", {
                 "name": name, "arguments": arguments, "result": run_entry["result"],
                 "confirm": run_entry.get("confirm")})
-        except Exception:  # noqa: BLE001 -- archiving must never break a tool call
+        except Exception:  # noqa: BLE001 -- logging must never break a tool call
             pass
         result = shaped_result
         try:
@@ -3960,6 +3960,17 @@ def _ask_impl(user_text, commands=None, on_attempt=None, on_tool_call=None, on_t
                 console_pointer = console_store.end_turn("status", "answered")
                 if console_pointer:
                     extras.append({"type": "consoleRef", "data": console_pointer})
+                try:
+                    # L.38: the model's output as it came back -- before the
+                    # console-dump split, with the cut note, the FULL thinking
+                    # (the saved extra is clipped) and every interim narration.
+                    raw_archive.record(conv_id, "model_reply", {
+                        "text": result.text, "saved_text": clean_text,
+                        "provider": label, "cut": getattr(result, "cut", None),
+                        "ending": ending, "thinking": thinking,
+                        "interim": interim_items, "trace": trace.to_dict()})
+                except Exception:  # noqa: BLE001
+                    pass
                 exchange_count = conversations.complete_exchange(
                     conv_id, user_text, clean_text, label, extras=extras
                 )

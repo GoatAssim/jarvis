@@ -40,6 +40,8 @@ import shutil
 import subprocess
 import sys
 import secrets
+import time
+from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
 
@@ -56,7 +58,13 @@ CHANNELS = ("inbox", "stream", "toast", "voice", "playnite",
 # Cap on retained notifications. The inbox is a queue — unacknowledged items
 # are kept, but a consumer that never acknowledges (a browser nobody opens
 # again) shouldn't grow the file without bound.
-MAX_INBOX = 200
+#
+# L.30: raised from 200 and the pruning made state-aware (see _prune). The
+# Notifications panel promises "everything ever sent"; a flat newest-200
+# window quietly threw away an unread reminder the moment a clipboard burst
+# pushed it out of the window. Now the oldest READ items go first, and an item
+# that still needs an acknowledgment is the last thing ever dropped.
+MAX_INBOX = 500
 MAX_MESSAGE_CHARS = 2000
 TOAST_TIMEOUT = 15
 
@@ -223,16 +231,107 @@ def _load_inbox():
     return data if isinstance(data, list) else []
 
 
+def _needs_ack(item):
+    """True while a persistent / confirm-level notification has not been
+    acknowledged by the owner (L.30). Level 1-2 items never need one."""
+    if not isinstance(item, dict):
+        return False
+    if not (item.get("persistent") or item.get("confirm_required")):
+        return False
+    return not item.get("acked_at")
+
+
+def _is_unread(item):
+    return isinstance(item, dict) and not item.get("read_at")
+
+
+def _prune(items):
+    """Trim to MAX_INBOX, oldest first, but never drop what the owner still
+    has to deal with if something less important can go instead.
+
+    Drop order: (1) read items, (2) unread items that need no acknowledgment,
+    (3) items still awaiting an acknowledgment — only if nothing else is left.
+    Within a class the oldest goes first; the survivors keep their original
+    order, so the file stays chronological.
+    """
+    if len(items) <= MAX_INBOX:
+        return items
+    excess = len(items) - MAX_INBOX
+
+    def rank(item):
+        if _needs_ack(item):
+            return 2
+        return 1 if _is_unread(item) else 0
+
+    doomed = set()
+    for want in (0, 1, 2):
+        for idx, item in enumerate(items):
+            if excess <= 0:
+                break
+            if idx not in doomed and rank(item) == want:
+                doomed.add(idx)
+                excess -= 1
+    return [item for idx, item in enumerate(items) if idx not in doomed]
+
+
 def _save_inbox(items):
     try:
         JARVIS_DIR.mkdir(parents=True, exist_ok=True)
         tmp = INBOX_FILE.with_suffix(".json.tmp")
-        tmp.write_text(json.dumps(items[-MAX_INBOX:], indent=2, default=str) + "\n",
+        tmp.write_text(json.dumps(_prune(list(items)), indent=2, default=str) + "\n",
                        encoding=ENCODING)
         os.replace(str(tmp), str(INBOX_FILE))
         return True
     except OSError:
         return False
+
+
+# A lock around every load-modify-save of the inbox (L.30). The inbox is now
+# written from more places at once — a scheduler tick appending, the web
+# server marking things read, a terminal draining — and each of those is a
+# read-modify-write of one whole file, so two overlapping ones used to lose
+# the later writer's change: a notification could vanish, or a "read" mark
+# could be undone. Same O_CREAT|O_EXCL approach as subagents.py's spawn lock
+# (no fcntl/msvcrt, so identical on Windows and POSIX). Best effort on
+# purpose: if the lock cannot be taken in time, proceed without it — a
+# notification that arrives is better than one that waits on a stuck lockfile.
+_LOCK_STALE_AFTER = 10.0
+_LOCK_WAIT = 3.0
+
+
+@contextmanager
+def _inbox_lock():
+    lock_path = str(INBOX_FILE.with_suffix(".lock"))
+    held = False
+    try:
+        JARVIS_DIR.mkdir(parents=True, exist_ok=True)
+        deadline = time.time() + _LOCK_WAIT
+        while True:
+            try:
+                fd = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+                os.close(fd)
+                held = True
+                break
+            except FileExistsError:
+                try:
+                    if time.time() - os.path.getmtime(lock_path) > _LOCK_STALE_AFTER:
+                        os.remove(lock_path)
+                        continue
+                except OSError:
+                    pass
+                if time.time() >= deadline:
+                    break
+                time.sleep(0.03)
+    except OSError:
+        pass
+    try:
+        yield held
+    finally:
+        if held:
+            try:
+                os.remove(lock_path)
+            except OSError:
+                pass
 
 
 def _hydrate(item):
@@ -247,7 +346,7 @@ def _hydrate(item):
     if not isinstance(item, dict):
         return item
     if "summary" in item and not (item.get("message") or "").startswith(ask_output.PROTOCOL_LINE_PREFIXES):
-        return item
+        return _decorate(item)
     item = dict(item)
     cleaned = ask_output.strip_protocol_lines(item.get("message") or "") or ""
     item["message"] = cleaned[:MAX_MESSAGE_CHARS]
@@ -255,7 +354,16 @@ def _hydrate(item):
         summarized = ask_output.summarize(cleaned)
         item["summary"] = summarized["summary"][:MAX_MESSAGE_CHARS]
         item["summary_truncated"] = summarized["truncated"] or len(cleaned) > MAX_MESSAGE_CHARS
-    return item
+    return _decorate(item)
+
+
+def _decorate(item):
+    """Add the derived, never-stored fields the panel reads (L.30): `unread`
+    and `needs_ack`. Returns a copy; the stored record is not touched."""
+    out = dict(item)
+    out["unread"] = _is_unread(item)
+    out["needs_ack"] = _needs_ack(item)
+    return out
 
 
 def pending(consumer="web", limit=50):
@@ -284,16 +392,17 @@ def acknowledge(ids, consumer="web"):
     that knows every consumer is done with them."""
     consumer = (consumer or "web").strip() or "web"
     wanted = set(ids or [])
-    items = _load_inbox()
-    touched = 0
-    for item in items:
-        if item.get("id") in wanted:
-            seen = list(item.get("seen_by") or [])
-            if consumer not in seen:
-                seen.append(consumer)
-                item["seen_by"] = seen
-                touched += 1
-    _save_inbox(items)
+    with _inbox_lock():
+        items = _load_inbox()
+        touched = 0
+        for item in items:
+            if item.get("id") in wanted:
+                seen = list(item.get("seen_by") or [])
+                if consumer not in seen:
+                    seen.append(consumer)
+                    item["seen_by"] = seen
+                    touched += 1
+        _save_inbox(items)
     return touched
 
 
@@ -302,13 +411,157 @@ def clear(consumer=None):
     if consumer:
         items = _load_inbox()
         return acknowledge([i.get("id") for i in items], consumer)
-    count = len(_load_inbox())
-    _save_inbox([])
+    with _inbox_lock():
+        count = len(_load_inbox())
+        _save_inbox([])
     return count
 
 
-def history(limit=50):
-    return [_hydrate(i) for i in list(reversed(_load_inbox()))[:limit]]
+def _matches(item, unread_only=False, failed_only=False, needs_ack_only=False,
+             kind=None, source=None, query=None):
+    if unread_only and not _is_unread(item):
+        return False
+    if failed_only and not item.get("failed"):
+        return False
+    if needs_ack_only and not _needs_ack(item):
+        return False
+    if kind and (item.get("kind") or "notify") != kind:
+        return False
+    if source and (item.get("source") or "") != source:
+        return False
+    if query:
+        hay = " ".join(str(item.get(k) or "") for k in
+                       ("title", "message", "summary", "kind", "source")).lower()
+        if not all(word in hay for word in str(query).lower().split()):
+            return False
+    return True
+
+
+def history(limit=50, **filters):
+    """Newest first, regardless of delivery state. `filters` (all optional):
+    unread_only, failed_only, needs_ack_only, kind, source, query — see
+    _matches(). With no filters this is exactly what it always was."""
+    out = []
+    for item in reversed(_load_inbox()):
+        if filters and not _matches(item, **filters):
+            continue
+        out.append(_hydrate(item))
+        if len(out) >= limit:
+            break
+    return out
+
+
+def summary():
+    """Counts for the panel and the badge, computed from the durable inbox so
+    they survive a page reload (the old badge was a browser-side counter that
+    reset to zero every time the page loaded).
+
+    `needs_ack` lists the persistent / confirm-level items still awaiting the
+    owner, newest first — what the page re-surfaces when it (re)connects."""
+    items = _load_inbox()
+    kinds = {}
+    unread = failed_unread = 0
+    awaiting = []
+    for item in items:
+        kinds[item.get("kind") or "notify"] = kinds.get(item.get("kind") or "notify", 0) + 1
+        if _is_unread(item):
+            unread += 1
+            if item.get("failed"):
+                failed_unread += 1
+        if _needs_ack(item):
+            awaiting.append(_hydrate(item))
+    awaiting.reverse()
+    return {
+        "total": len(items),
+        "unread": unread,
+        "failed_unread": failed_unread,
+        "needs_ack": awaiting,
+        "kinds": kinds,
+    }
+
+
+def _now():
+    return datetime.now().replace(microsecond=0).isoformat()
+
+
+def mark_read(ids, ack=True):
+    """The owner has seen these (L.30). Sets `read_at`; with `ack` (the
+    default) it also sets `acked_at` on a persistent / confirm-level item, so
+    reading it in the panel or clicking Acknowledge on its toast stops it
+    from re-surfacing. Returns how many records changed.
+
+    This is the OWNER's read state. It is deliberately separate from
+    `seen_by` (acknowledge() above), which only records which consumer a
+    notification was *delivered* to — delivery is not reading."""
+    wanted = set(ids or [])
+    if not wanted:
+        return 0
+    changed = 0
+    stamp = _now()
+    with _inbox_lock():
+        items = _load_inbox()
+        for item in items:
+            if item.get("id") not in wanted:
+                continue
+            touched = False
+            if not item.get("read_at"):
+                item["read_at"] = stamp
+                touched = True
+            if ack and (item.get("persistent") or item.get("confirm_required")) \
+                    and not item.get("acked_at"):
+                item["acked_at"] = stamp
+                touched = True
+            changed += 1 if touched else 0
+        if changed:
+            _save_inbox(items)
+    return changed
+
+
+def mark_all_read():
+    """Mark everything read — and acknowledged, since "mark all read" is an
+    explicit act by the owner."""
+    stamp = _now()
+    changed = 0
+    with _inbox_lock():
+        items = _load_inbox()
+        for item in items:
+            touched = False
+            if not item.get("read_at"):
+                item["read_at"] = stamp
+                touched = True
+            if (item.get("persistent") or item.get("confirm_required")) \
+                    and not item.get("acked_at"):
+                item["acked_at"] = stamp
+                touched = True
+            changed += 1 if touched else 0
+        if changed:
+            _save_inbox(items)
+    return changed
+
+
+def dismiss(ids):
+    """Delete specific notifications from the inbox for good."""
+    wanted = set(ids or [])
+    if not wanted:
+        return 0
+    with _inbox_lock():
+        items = _load_inbox()
+        kept = [i for i in items if i.get("id") not in wanted]
+        removed = len(items) - len(kept)
+        if removed:
+            _save_inbox(kept)
+    return removed
+
+
+def clear_read():
+    """Delete every notification that has been read, keeping the unread."""
+    with _inbox_lock():
+        items = _load_inbox()
+        kept = [i for i in items if _is_unread(i)]
+        removed = len(items) - len(kept)
+        if removed:
+            _save_inbox(kept)
+    return removed
 
 
 # ---------------------------------------------------------------------------
@@ -382,6 +635,10 @@ def notify(title, message, channels=None, kind="notify", job_id=None,
         "level_name": LEVEL_NAMES.get(resolved_level, "standard"),
         "persistent": resolved_level >= 3,
         "confirm_required": resolved_level >= 5,
+        # L.30 — the owner's read/acknowledge state, stamped later by
+        # mark_read()/mark_all_read(). Absent == not read yet.
+        "read_at": None,
+        "acked_at": None,
     }
     if source:
         record["source"] = str(source)[:100]
@@ -432,9 +689,10 @@ def notify(title, message, channels=None, kind="notify", job_id=None,
 
 
 def _deliver_inbox(record, config):
-    items = _load_inbox()
-    items.append(record)
-    return _save_inbox(items)
+    with _inbox_lock():
+        items = _load_inbox()
+        items.append(record)
+        return _save_inbox(items)
 
 
 def _deliver_stream(record, config):

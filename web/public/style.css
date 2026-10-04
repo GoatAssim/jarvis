@@ -1163,7 +1163,9 @@ body.has-sequence .jui-toasts{ bottom: var(--seq-clear, 90px); } /* "Added to se
 
 .toast{
   position: fixed; top: 18px; left: 50%; transform: translateX(-50%);
-  z-index: 200;
+  /* Above the notification stack (notifications.css, z 9200), which sits in
+     the same place: an error must never be hidden behind a notification card. */
+  z-index: 9300;
   background: var(--bg-raised);
   border: 1px solid var(--red);
   color: var(--text);
@@ -1174,26 +1176,6 @@ body.has-sequence .jui-toasts{ bottom: var(--seq-clear, 90px); } /* "Added to se
   max-width: min(560px, 90vw);
 }
 .toast.is-info{ border-color: var(--accent); box-shadow: 0 0 24px var(--accent-glow); }
-/* D.2.1 level 3+ (Persistent), D-N1: re-surfaces on an interval until
-   acknowledged rather than fading for good — the pulsing outline and
-   pointer cursor are the only visible cue that this one needs a click,
-   since it otherwise reuses the same toast element and styling as an
-   ordinary one each time it re-appears. */
-.toast.is-sticky{
-  cursor: pointer;
-  animation: jarvis-toast-pulse 2.2s ease-in-out infinite;
-}
-@keyframes jarvis-toast-pulse{
-  0%, 100% { box-shadow: 0 0 24px rgba(255,92,108,0.25); }
-  50% { box-shadow: 0 0 36px rgba(255,92,108,0.55); }
-}
-.toast.is-sticky.is-info{
-  animation-name: jarvis-toast-pulse-info;
-}
-@keyframes jarvis-toast-pulse-info{
-  0%, 100% { box-shadow: 0 0 24px var(--accent-glow); }
-  50% { box-shadow: 0 0 36px var(--accent-glow); }
-}
 
 /* =========================================================================
    Run-confirm popup (direct command run, gated by its own confirm_required/
@@ -2159,38 +2141,8 @@ audio.ask-dl-player{ max-height: none; background: transparent; }
   .notifications-fab{ bottom: 70px; right: 16px; }
 }
 
-/* --- notifications panel -------------------------------------------------
-   One card per notification, newest first. Distinguishes "kind" (reminder /
-   task / notify) and a failed state, the way daemon rows distinguish
-   running/crashed — colour never carries the only signal, the text does. */
-.notif-list{ flex: 1 1 auto; overflow-y: auto; padding: 10px 14px; display: flex; flex-direction: column; gap: 8px; }
-.notif-card{
-  border: 1px solid var(--border);
-  border-left: 3px solid var(--border-strong);
-  border-radius: 5px;
-  padding: 9px 12px;
-  background: var(--bg-panel-2);
-}
-.notif-card--failed{ border-left-color: #f87171; }
-.notif-card--reminder{ border-left-color: var(--accent); }
-.notif-card--task{ border-left-color: var(--accent-secondary); }
-.notif-card__head{ display: flex; align-items: baseline; justify-content: space-between; gap: 10px; }
-.notif-card__title{ font-size: 13px; font-weight: 600; color: var(--text); }
-.notif-card__meta{
-  font-family: "JetBrains Mono", monospace; font-size: 10.5px; color: var(--text-dimmer);
-  white-space: nowrap; flex-shrink: 0;
-}
-.notif-card__body{ font-size: 12.5px; color: var(--text-dim); margin-top: 4px; line-height: 1.5; white-space: pre-wrap; word-break: break-word; }
-.notif-card__expand{
-  margin-top: 4px; padding: 0; border: 0; background: none; cursor: pointer;
-  font-family: "JetBrains Mono", monospace; font-size: 10.5px; color: var(--accent-soft);
-}
-.notif-card__expand:hover{ color: var(--accent); text-decoration: underline; }
-.notif-card__kind{
-  display: inline-block; margin-top: 6px;
-  font-family: "JetBrains Mono", monospace; font-size: 10px; letter-spacing: 0.06em; text-transform: uppercase;
-  color: var(--accent-soft);
-}
+/* The notifications panel and the toast stack are styled in notifications.css
+   (L.30). The old .notif-card rules that lived here had no remaining users. */
 
 .logs-body{ grid-template-columns: 260px minmax(0, 1fr) 260px; }
 

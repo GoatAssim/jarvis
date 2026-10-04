@@ -1536,56 +1536,17 @@
   }
 
   let toastTimer = null;
-  let resurfaceTimer = null;
-  // D-N1 (owner-decided 2026-09-26i): level 3+ re-surfaces on an interval
-  // until acknowledged, rather than simply never auto-dismissing (that was
-  // the previously-shipped behavior, and the option the owner did NOT
-  // pick — see the master plan's D-N1 entry for both options that were on
-  // the table). Interval/cap weren't owner-specified, so these default to
-  // something conservative per D-N1's own note, pending further input if
-  // it feels wrong in practice.
-  const RESURFACE_INTERVAL_MS = 10 * 60 * 1000; // every 10 minutes
-  const RESURFACE_MAX = 6; // ~1 hour of re-surfacing, then give up quietly
-  function toast(message, kind = "error", opts = {}) {
+  // The generic one-line toast: errors and short confirmations ("Copied").
+  // Notifications no longer go through it — they have their own stack in
+  // notifications.js (L.30), including the D-N1 re-surfacing rule that used to
+  // be wired in here with one shared timer for the whole page.
+  function toast(message, kind = "error") {
     const t = qs("#toast");
-    const persistent = Boolean(opts.persistent);
     t.textContent = message;
-    t.className = "toast" + (kind === "info" ? " is-info" : "") + (persistent ? " is-sticky" : "");
+    t.className = "toast" + (kind === "info" ? " is-info" : "");
     t.hidden = false;
     clearTimeout(toastTimer);
-    clearInterval(resurfaceTimer);
-    resurfaceTimer = null;
-    if (!persistent) {
-      t.onclick = null;
-      toastTimer = setTimeout(() => { t.hidden = true; }, 4200);
-      return;
-    }
-    // Persistent: auto-dismiss like a normal toast, but re-show the same
-    // message every RESURFACE_INTERVAL_MS until the user clicks it away
-    // (acknowledges it) or RESURFACE_MAX re-surfaces is reached.
-    let shown = 1;
-    const acknowledge = () => {
-      t.hidden = true;
-      t.onclick = null;
-      clearInterval(resurfaceTimer);
-      resurfaceTimer = null;
-    };
-    t.onclick = acknowledge;
     toastTimer = setTimeout(() => { t.hidden = true; }, 4200);
-    resurfaceTimer = setInterval(() => {
-      if (shown >= RESURFACE_MAX) {
-        clearInterval(resurfaceTimer);
-        resurfaceTimer = null;
-        return;
-      }
-      shown += 1;
-      t.textContent = message;
-      t.className = "toast" + (kind === "info" ? " is-info" : "") + " is-sticky";
-      t.hidden = false;
-      t.onclick = acknowledge;
-      clearTimeout(toastTimer);
-      toastTimer = setTimeout(() => { t.hidden = true; }, 4200);
-    }, RESURFACE_INTERVAL_MS);
   }
 
   // Bottom-left popup for a directly-run saved command that's paused on
@@ -1678,58 +1639,25 @@
     }
   }
 
-  // One place every notification is displayed, whichever path it arrived by
+  // One place every notification enters the UI, whichever path it arrived by
   // (live stderr stream during an ask, or a WS push from the tick loop).
-  // Always shows an in-page toast; additionally raises a real OS
-  // notification when the tab isn't visible, since the whole point of a
-  // reminder is that it reaches you when you're not looking at Jarvis.
+  //
+  // L.30: the display logic moved to notifications.js (JarvisNotifications) —
+  // a real toast stack, the unread badge, the acknowledgment rules for levels
+  // 3-5 and the OS notification when the tab is hidden. This used to push
+  // every notification through the single shared #toast element, so two
+  // arriving together overwrote each other and any error toast wiped a
+  // reminder. Only a last-resort fallback stays here, for the case where
+  // notifications.js failed to load, so a notification is never silently lost.
   function showNotification(note) {
     if (!note || (!note.title && !note.message)) return;
-    // D.2.1 — the level this notification was resolved at. Anything from
-    // before this system existed (or that omits it) has no `level` field
-    // at all, so it defaults to 2 (Standard) — the previous unconditional
-    // "always toast" behavior — rather than being silently swallowed.
-    const level = Number.isFinite(Number(note.level)) ? Number(note.level) : 2;
+    if (window.JarvisNotifications && typeof window.JarvisNotifications.show === "function") {
+      window.JarvisNotifications.show(note);
+      return;
+    }
     const title = String(note.title || "Jarvis").slice(0, 120);
-    const body = String(note.message || "").slice(0, 400);
-    const isFailure = Boolean(note.failed);
-
-    // Level 1 (Silent): inbox-tab entry only — no toast, no OS
-    // notification, no interruption. The inbox/badge itself is updated by
-    // the caller of showNotification, not here.
-    if (level >= 2) {
-      const persistent = level >= 3 || Boolean(note.persistent);
-      toast(`${title}${body ? " \u2014 " + body.slice(0, 160) : ""}`, isFailure ? "error" : "info",
-            { persistent });
-
-      if (!jarvisTabVisible() && "Notification" in window && Notification.permission === "granted") {
-        try {
-          // Tagged per notification id, not a shared tag: two reminders
-          // firing in the same tick must not collapse into one toast the way
-          // notifyIfAway's fixed "jarvis-task" tag deliberately does.
-          const n = new Notification(title, {
-            body,
-            tag: `jarvis-note-${note.id || Date.now()}`,
-          });
-          n.onclick = () => { window.focus(); n.close(); };
-        } catch {
-          /* private mode / unsupported */
-        }
-      }
-    }
-
-    // Level 5 (Confirm): a blocking surface requiring an explicit
-    // acknowledgment, reusing the same confirm pattern the server already
-    // drives tool-risk confirmations through — not just another toast.
-    if ((level >= 5 || note.confirm_required) && window.JarvisUI
-        && typeof window.JarvisUI.confirm === "function") {
-      window.JarvisUI.confirm({
-        title,
-        body: body || "Acknowledge this notification.",
-        confirmLabel: "Acknowledge",
-        cancelLabel: "Dismiss",
-      }).catch(() => {});
-    }
+    const body = String(note.message || "").slice(0, 160);
+    toast(`${title}${body ? " \u2014 " + body : ""}`, note.failed ? "error" : "info");
   }
 
   function notifyTaskDone(summary, failed) {
@@ -3129,7 +3057,6 @@
         // that fired from cron, a scheduled task that finished overnight --
         // so they arrive here rather than through any ask's stderr stream.
         (msg.notifications || []).forEach(showNotification);
-        recordLiveNotifications(msg.notifications || []);
         break;
       case "scheduled-tick":
         // Only refresh the panel if it's actually open; a background tick
@@ -9782,131 +9709,17 @@
   // (menu wiring, below).
 
   // --- notifications -------------------------------------------------------
-  // Every notification Jarvis has ever sent (reminders, task-done, plain
-  // notify-send), newest first, backed by the durable inbox on disk (see
-  // /api/notifications/history and notifier.history() server-side) rather
-  // than anything kept in the browser — so it survives a tab close, a
-  // browser restart, or the machine rebooting, which "persist restarts"
-  // means here. The panel never acknowledges anything it reads (that stays
-  // /api/notifications's job, driven by the tick loop's toasts/OS
-  // notifications), so opening it can't make an unread item vanish before
-  // the person has actually seen it delivered live.
-  const notificationsOverlay = qs("#notifications-overlay");
-  const notificationsFab = qs("#btn-notifications-fab");
-  const notificationsBadge = qs("#notifications-fab-badge");
-  let notifUnseenCount = 0;
-
-  function notifKindClass(note) {
-    if (note.failed) return "notif-card notif-card--failed";
-    if (note.kind === "reminder") return "notif-card notif-card--reminder";
-    if (note.kind === "task") return "notif-card notif-card--task";
-    return "notif-card";
-  }
-
-  function notifTimestamp(note) {
-    const raw = note.created_at || note.ts || "";
-    return raw ? raw.replace("T", " ").slice(0, 19) : "";
-  }
-
-  function renderNotifCard(note) {
-    // D.2 (master plan): the raw `message` can be a whole ask/command
-    // reply — the bug report this fixed was exactly a notification list
-    // showing raw JARVIS_USAGE {...} JSON under every entry. The backend
-    // (notifier.py) now always ships a short, pre-cleaned `summary`
-    // alongside the full `message`; this renders the summary by default
-    // and only offers to expand to the full text when there's more to
-    // see (`summary_truncated`), instead of showing everything inline.
-    const hasMore = !!note.summary_truncated && note.message && note.message !== note.summary;
-    const bodyText = note.summary || note.message || "";
-    const bodyChildren = [bodyText];
-    let expanded = false;
-    let toggleBtn = null;
-    let bodyEl = null;
-    if (hasMore) {
-      toggleBtn = el("button", {
-        type: "button",
-        class: "notif-card__expand",
-        onclick: () => {
-          expanded = !expanded;
-          bodyEl.textContent = expanded ? note.message : note.summary;
-          toggleBtn.textContent = expanded ? "Show less" : "Show more";
-        },
-      }, "Show more");
-    }
-    bodyEl = el("div", { class: "notif-card__body" }, bodyChildren);
-    return el("div", { class: notifKindClass(note) }, [
-      el("div", { class: "notif-card__head" }, [
-        el("div", { class: "notif-card__title" }, note.title || "Jarvis"),
-        el("div", { class: "notif-card__meta" }, notifTimestamp(note)),
-      ]),
-      bodyText ? bodyEl : null,
-      toggleBtn,
-      el("div", { class: "notif-card__kind" },
-        `${note.kind || "notify"}${note.failed ? " \u2014 failed" : ""}`),
-    ]);
-  }
-
-  async function refreshNotifications() {
-    if (!notificationsOverlay || notificationsOverlay.hidden) return;
-    const list = qs("#notifications-list");
-    const statusLine = qs("#notifications-status-line");
-    try {
-      const data = await Api.get("/api/notifications/history?limit=200");
-      const items = data.notifications || [];
-      statusLine.textContent = items.length
-        ? `${items.length} notification${items.length === 1 ? "" : "s"}, newest first`
-        : "everything ever sent, persisted on disk";
-      list.innerHTML = "";
-      if (!items.length) {
-        list.appendChild(el("div", { class: "skills-empty" }, "Nothing sent yet."));
-        return;
-      }
-      for (const note of items) list.appendChild(renderNotifCard(note));
-    } catch (err) {
-      statusLine.textContent = "couldn't read notifications";
-      list.innerHTML = "";
-      list.appendChild(el("div", { class: "skills-empty" }, err.message || "Failed."));
-    }
-  }
-
-  function updateNotifBadge() {
-    if (!notificationsBadge) return;
-    notificationsBadge.hidden = notifUnseenCount <= 0;
-    notificationsBadge.textContent = notifUnseenCount > 99 ? "99+" : String(notifUnseenCount);
-  }
-
-  // Called for every notification pushed live over the websocket (see
-  // handleWsMessage's "notifications" case) so the badge and, if the panel
-  // happens to be open, the list itself stay current without waiting for
-  // the next manual refresh.
-  function recordLiveNotifications(items) {
-    if (!items.length) return;
-    if (notificationsOverlay && !notificationsOverlay.hidden) {
-      refreshNotifications();
-    } else {
-      notifUnseenCount += items.length;
-      updateNotifBadge();
-    }
-  }
-
+  // L.30: the Notifications panel, the unread badge and the toast stack all
+  // live in notifications.js now (JarvisNotifications), backed by the durable
+  // inbox on disk. These two names remain only because the Menu registry and
+  // the slash palette call them.
   function openNotifications() {
-    if (!notificationsOverlay) return;
-    notificationsOverlay.hidden = false;
-    notifUnseenCount = 0;
-    updateNotifBadge();
-    refreshNotifications();
+    if (window.JarvisNotifications && window.JarvisNotifications.open) {
+      window.JarvisNotifications.open();
+    } else {
+      toast("The notifications panel didn't load \u2014 reload the page.");
+    }
   }
-
-  function closeNotifications() {
-    if (notificationsOverlay) notificationsOverlay.hidden = true;
-  }
-
-  notificationsFab?.addEventListener("click", openNotifications);
-  qs("#btn-notifications-refresh")?.addEventListener("click", refreshNotifications);
-  qs("#notifications-close")?.addEventListener("click", closeNotifications);
-  notificationsOverlay?.addEventListener("click", (ev) => {
-    if (ev.target === notificationsOverlay) closeNotifications();
-  });
 
   // --- setup / onboarding -----------------------------------------------
   const setupOverlay = qs("#setup-overlay");

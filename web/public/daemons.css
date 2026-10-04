@@ -159,6 +159,12 @@
 .dmn-tag--warn{ color: var(--accent-secondary); border-color: rgba(var(--accent-secondary-rgb), .35); }
 .dmn-tag--bad{ color: var(--red); border-color: rgba(255,92,108,.4); }
 .dmn-tag--info{ color: var(--accent-soft); border-color: var(--accent-dim); }
+/* L.11 categories. Shown as typed (no uppercase) so the exact spelling is what
+   you see. On a card they sit on ONE clipped row: wrap + a one-line max-height
+   hides any chip that doesn't fit instead of wrapping or truncating it. */
+.dmn-tag--cat{ text-transform: none; letter-spacing: 0; font-size: 10.5px; max-width: 100%; overflow: hidden; text-overflow: ellipsis; color: var(--accent-soft); border-color: var(--accent-dim); }
+.dmn-card__cats{ display: flex; flex-wrap: wrap; gap: 6px; margin-top: 5px; max-height: 17px; overflow: hidden; }
+.dmn-cats{ display: flex; flex-wrap: wrap; gap: 6px; }
 
 /* stacked state bar — used by groups, the overview and the restart meter */
 .dmn-bar{ display: flex; height: 100%; width: 100%; background: var(--bg-raised); border-radius: 2px; overflow: hidden; }

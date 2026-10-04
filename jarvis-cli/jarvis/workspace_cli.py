@@ -42,11 +42,14 @@ USAGE = """workspace commands:
                      [--restart-delay S] [--max-restarts N]
                      [--stop-signal TERM|INT|KILL] [--stop-timeout S]
                      [--autostart] [--description D]
+                     [--category NAME ...]   # repeatable; up to 8, 24 chars each
   daemon-edit   <id> [--name N] [--description D] [--cwd D] [--enabled true|false]
                      [--autostart true|false] [--command C] [--shell true|false]
                      [--restart P] [--restart-delay S] [--max-restarts N]
                      [--stop-signal S] [--stop-timeout S] [--env K=V ...]
                      [--env-replace]   # env becomes exactly the given --env pairs
+                     [--category NAME ...]   # the whole set is replaced, not merged
+                     [--clear-categories]    # remove them all (shown as "Undefined")
   daemon-remove <id>
   daemon-run    <id>                   THE SUPERVISOR — runs in the foreground
   daemons-tick                         start whatever is scheduled and due
@@ -105,6 +108,21 @@ def _opts(rest):
 def _one(flags, key, default=None):
     value = flags.get(key)
     return value[0] if value else default
+
+
+def _category_values(flags):
+    """The names given with repeated `--category NAME`, in order.
+
+    A bare `--category` (no name) is an error rather than "clear them": a
+    typo that quietly wiped a daemon's categories would be a nasty surprise,
+    and `--clear-categories` exists for the deliberate case. Returns
+    (names, error) so the caller reports it the way every other bad flag is.
+    """
+    values = flags.get("category", [])
+    if any(v is True for v in values):
+        return [], ("--category needs a name "
+                    "(use --clear-categories to remove them all)")
+    return [str(v) for v in values], ""
 
 
 def _bool(value, default=False):
@@ -178,6 +196,9 @@ def handle(argv):
     if cmd == "daemon-add":
         if len(positional) < 2:
             _fail('usage: daemon-add <id> "<command>" [--name N] [--cwd D] [--stdin]')
+        cats, cat_err = _category_values(flags)
+        if cat_err:
+            _fail(cat_err)
         env = {}
         for pair in flags.get("env", []):
             if pair is True or "=" not in str(pair):
@@ -204,6 +225,7 @@ def handle(argv):
                 stop_timeout=_one(flags, "stop-timeout",
                                   daemons.DEFAULT_STOP_TIMEOUT),
                 notes=_one(flags, "notes", ""),
+                categories=cats,
             )
         except (TypeError, ValueError) as exc:
             _fail(f"bad value: {exc}")
@@ -241,6 +263,13 @@ def handle(argv):
                 fields[field] = _one(flags, flag)
         if "stop-signal" in flags:
             fields["stop_signal"] = str(_one(flags, "stop-signal") or "").upper()
+        if "category" in flags or "clear-categories" in flags:
+            cats, cat_err = _category_values(flags)
+            if cat_err:
+                _fail(cat_err)
+            # --clear-categories wins over a stray --category: "remove them
+            # all" is the more specific thing to have typed.
+            fields["categories"] = [] if "clear-categories" in flags else cats
         if "env" in flags or "env-replace" in flags:
             # "env-replace" alone (no "--env" at all) is a real, deliberate
             # case: it means the caller wants zero variables — an editor

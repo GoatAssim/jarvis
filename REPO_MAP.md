@@ -90,10 +90,10 @@ jarvis-cli/jarvis/
     memory.py             durable facts, namespaced, relevance-scored
     memory_semantic.py    embedding/ngram similarity layer over the above
     memory_consolidation.py
-    conversations.py      on-disk conversation history (newest 60 exchanges)
-    raw_archive.py        L.38a: lossless per-conversation archive of what the
-                          capped stores drop (overflow, clipped/trimmed console
-                          lines, full tool results); `conv-export --raw` reads it
+    conversations.py      on-disk conversation history (a derived view: newest 60 exchanges)
+    raw_archive.py        L.38: the raw event log -- what actually happened, uncapped
+                          and unsplit; conversation/console views can be rebuilt from
+                          it; `conv-export --raw` and `console-read` read it
     history.py            (module docstring explains the process model)
     history_summarizer.py AI recap of older turns
     conv_search.py        search what was SAID
@@ -114,6 +114,7 @@ jarvis-cli/jarvis/
     tasks.py              long-running checkpointed work
     task_runner.py        one task step per process
     subagents.py          child agents with isolated API keys
+    categories.py         L.11/L.14.3 category-name rules (trim, case-insensitive unique, 24 chars, 8 per item)
     daemons.py            NEW — registry + supervisor for every background
                           service, built-in or user-defined
     backlog.py            NEW — untimed work: idea/todo/doing/blocked/done
@@ -188,6 +189,15 @@ web/
                                  create form onto remind_me/notify_me/
                                  schedule_task/schedule_watch via /api/tools/run,
                                  kind/status filters, Overview pane)
+    public/notifications.js/.css Notifications (L.30 rework): the toast stack, the
+                                 inbox panel (read/unread, filters, search, burst
+                                 collapsing, dismiss), the unread badge and the
+                                 acknowledgment rules for levels 3-5. app.js only
+                                 calls JarvisNotifications.show()/open(). Pure
+                                 helpers exported as JarvisNotifications._pure.
+    public/category-input.js/.css  L.11/L.14.3: the ONE category component - name rules (same as
+                                 jarvis/categories.py, parity-tested), vocabulary, prefix suggest, chip input.
+                                 Loaded before daemons.js; commands (L.14) will reuse it.
     public/daemons.js            Menu -> Daemons (three-pane: services / selected service /
                                  overview; Console + Details tabs; add/edit form). Pure
                                  helpers are exposed as JarvisDaemons._pure for the node test
@@ -213,7 +223,7 @@ Everything is under `~/.jarvis/`:
 | `memory.json` | memory.py | durable facts |
 | `conversations/` | conversations.py | chat history |
 | `logs/<conv>.jsonl` | logs.py | model↔backend traffic |
-| `archive/<conv>.jsonl` | raw_archive.py | uncapped copy of everything the stores above clip, trim or drop; deleted with the conversation or on Clear; `JARVIS_RAW_ARCHIVE=0` stops writing |
+| `events/<conv>.jsonl` | raw_archive.py | raw event log (user text, unsplit model replies, full thinking, every console line, full tool results); deleted with the conversation or on Clear; `JARVIS_RAW_ARCHIVE=0` stops writing |
 | `commands.json` | commands_config.py | saved commands |
 | `scheduler.json` | scheduler.py | jobs and reminders |
 | `tasks/` | tasks.py | one file per long-running task |
@@ -321,6 +331,8 @@ jarvis backlog-done|update|remove <item>    jarvis backlog-board
 # time
 jarvis sched-list/add/cancel/snooze/approve/tick/daemon
 jarvis notify-send/list/ack/clear
+jarvis notify-history [N] [--unread --failed --needs-ack --kind=K --source=S --q=words]
+jarvis notify-summary    jarvis notify-read <ids|all>    jarvis notify-dismiss <ids|read|all>
 
 # reachability
 jarvis channels-status/set/allow/deny/test/whoami/log/directory
@@ -453,6 +465,9 @@ silently never runs.
 | `test_scheduler.py` / `test_timespec.py` | jobs and time parsing |
 | `test_h3_creation_confirmation.py` | H.3: `remind_me` / `schedule_task` / `schedule_watch` / timed `notify_me` send one `scheduled`-kind confirmation (not for immediate `notify_me`; `confirm: false` suppresses; level from `levels.scheduled`, not the job's own) |
 | `test_l16_caps_and_budget.py` / `test_l16_scheduler_budget.py` / `test_l16_replay.py` | L.16 items 7, 8, 10: `list_windows` cap, per-ask token ledger and budget, per-job limit + "over budget" status, and the incident `1a99e1e3f0d3af0e` replayed through the real `ask()` (fixture: `tests/fixtures/1a99e1e3f0d3af0e.jsonl`) |
+| `test_notification_inbox.py` | L.30: owner read/acknowledge state vs delivery (`seen_by`), mark read/all, dismiss, clear read, `summary()`, history filters, state-aware pruning (read first, unacknowledged last), the inbox lock, the `notify-*` verbs |
+| `verify_notifications.js` (`node`) | L.30: `notifications.js` pure helpers (burst collapsing, day sections, query string, read/ack readers, level badges) |
+| `verify_notifications_ui.py` (`python`, not run by `run_tests.py`) | L.30: the real page in headless Chromium against the real CLI verbs — toast stack, level 5 dialog, panel filters/dismiss/mark-read, re-surfacing on a fake clock. Needs Playwright; skips cleanly without it |
 | `test_slash_coverage.py` | every `reserved_names.py` name is in the `/` palette registry exactly once, with a valid risk tier |
 | `verify_slash_palette.js` (`node`) | the palette engine: parsing, submit routing, near-miss, every verb's handler, confirm gates, keyboard model |
 

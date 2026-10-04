@@ -1,0 +1,57 @@
+/* ============================================================================
+ * category-input.css - styles for category-input.js (L.11 / L.14.3).
+ *
+ * Only theme tokens, never a literal colour, so it follows every theme the
+ * way the panels around it do (L.6). Class names are `jcat__*`, not `dmn-*`:
+ * this component is shared by more than the Daemons panel.
+ * ========================================================================= */
+
+.jcat{ position: relative; min-width: 0; }
+
+/* The box looks like a text input (same fill, border and focus ring as
+   .dmn-input) and holds the chips and the real <input> on one wrapping line. */
+.jcat__box{
+  display: flex; flex-wrap: wrap; align-items: center; gap: 5px;
+  padding: 5px 7px; min-height: 34px; box-sizing: border-box; cursor: text;
+  background: var(--bg-panel-2); color: var(--text);
+  border: 1px solid var(--border); border-radius: 3px;
+}
+.jcat__box:focus-within{ border-color: var(--accent); }
+.jcat.is-full .jcat__box{ cursor: default; }
+
+.jcat__chip{
+  display: inline-flex; align-items: center; gap: 2px; max-width: 100%;
+  padding: 0 2px 0 7px; line-height: 20px; font-size: 11.5px;
+  color: var(--accent-soft); background: color-mix(in srgb, var(--accent) 9%, transparent);
+  border: 1px solid var(--accent-dim); border-radius: 3px;
+}
+.jcat__name{ overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.jcat__x{
+  appearance: none; background: none; border: 0; cursor: pointer; color: inherit; opacity: .65;
+  font-size: 14px; line-height: 1; padding: 0 5px; border-radius: 2px;
+}
+.jcat__x:hover, .jcat__x:focus-visible{ opacity: 1; background: color-mix(in srgb, var(--accent) 18%, transparent); outline: none; }
+
+.jcat__input{
+  flex: 1 1 110px; min-width: 90px; border: 0; outline: none; background: transparent; color: inherit;
+  font: inherit; font-size: 12.5px; line-height: 1.5; padding: 2px 0;
+}
+.jcat__input::placeholder{ color: var(--text-dimmer); }
+.jcat__input:disabled{ cursor: not-allowed; }
+
+/* Suggestions. position:absolute so opening the list never moves the form
+   under it (L.8 is exactly that kind of bug - a layout shift from a popup). */
+.jcat__list{
+  position: absolute; z-index: 30; left: 0; right: 0; top: calc(100% + 2px);
+  margin: 0; padding: 3px; list-style: none; max-height: 190px; overflow-y: auto;
+  background: var(--bg-panel); border: 1px solid var(--accent-dim); border-radius: 3px;
+  box-shadow: 0 6px 18px rgba(0,0,0,.35);
+}
+.jcat__list[hidden]{ display: none; }
+.jcat__opt{
+  display: flex; align-items: baseline; justify-content: space-between; gap: 10px;
+  padding: 5px 8px; font-size: 12px; color: var(--text); border-radius: 2px; cursor: pointer;
+}
+.jcat__opt:hover, .jcat__opt.is-hi{ background: color-mix(in srgb, var(--accent) 14%, transparent); }
+.jcat__optname{ overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.jcat__optn{ font-size: 10.5px; color: var(--text-dimmer); flex-shrink: 0; font-variant-numeric: tabular-nums; }

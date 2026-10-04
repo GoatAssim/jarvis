@@ -647,7 +647,7 @@ async function main() {
     key("End");
     let k = key("Enter");
     await flush(); await flush();
-    check("the toggle row expands every other command (31 runnable CLI + 30 that can't)", env.palette.querySelectorAll(".slash-row").length === 36 + 31 + 30, env.palette.querySelectorAll(".slash-row").length);
+    check("the toggle row expands every other command (32 runnable CLI + 30 that can't)", env.palette.querySelectorAll(".slash-row").length === 36 + 32 + 30, env.palette.querySelectorAll(".slash-row").length);
     check("...under their own headings", ["CLI commands", "Can't run from chat"].every((h) => env.palette.querySelectorAll(".slash-heading").some((x) => x.textContent === h)));
     check("...and the ones that can't run are disabled", env.palette.querySelectorAll(".slash-row").filter((r) => /is-disabled/.test(r.className)).length === 30);
     key("Escape");

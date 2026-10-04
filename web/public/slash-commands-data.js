@@ -761,7 +761,9 @@ window.JARVIS_SLASH_COMMANDS = /*JSON-BEGIN*/
         "notify-list",
         "notify-history",
         "notify-ack",
-        "notify-config"
+        "notify-config",
+        "notify-summary",
+        "notify-read"
       ],
       "example": "/notifications",
       "preview": "Open Notifications."
@@ -1149,6 +1151,11 @@ window.JARVIS_SLASH_COMMANDS = /*JSON-BEGIN*/
       "summary": "Empty the notification inbox. With a consumer name, only marks everything seen for that consumer.",
       "riskTier": "dangerous",
       "usage": "[consumer]"
+    },
+    "notify-dismiss": {
+      "summary": "Delete notifications for good: by id, every one already read (read), or the whole inbox (all).",
+      "riskTier": "dangerous",
+      "usage": "<id[,id,...]|read|all>"
     },
     "notify-send": {
       "summary": "Send a message to every configured channel.",

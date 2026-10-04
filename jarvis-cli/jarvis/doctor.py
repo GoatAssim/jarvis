@@ -748,17 +748,22 @@ def check_notifications():
     except Exception as exc:  # noqa: BLE001
         return [Check("notify.inbox", "Notification inbox", WARN,
                       "unreadable: %s" % exc, group="notify")]
-    unread = [i for i in items if not i.get("seen_by")]
+    # L.30: "unread" is the OWNER's read state (read_at), not delivery
+    # (seen_by) — a notification the web console was handed is still unread
+    # until someone opens or acknowledges it.
+    unread = [i for i in items if not i.get("read_at")]
+    awaiting = [i for i in items if notifier._needs_ack(i)]
     if len(items) >= notifier.MAX_INBOX * 0.9:
         out.append(Check("notify.inbox", "Notification inbox", WARN,
-                         "%d items, near the %d cap — the oldest are being dropped"
+                         "%d items, near the %d cap — read ones are dropped first, then the oldest"
                          % (len(items), notifier.MAX_INBOX),
-                         "jarvis notify-clear   (or open the web UI, which drains it)",
+                         "jarvis notify-dismiss read   (or Notifications → Clear read in the web UI)",
                          "notify"))
     else:
-        out.append(Check("notify.inbox", "Notification inbox", OK,
-                         "%d stored, %d unread" % (len(items), len(unread)),
-                         group="notify"))
+        detail = "%d stored, %d unread" % (len(items), len(unread))
+        if awaiting:
+            detail += ", %d awaiting acknowledgment" % len(awaiting)
+        out.append(Check("notify.inbox", "Notification inbox", OK, detail, group="notify"))
 
     cfg = notifier._load_config()
     if not cfg.get("enabled", True):

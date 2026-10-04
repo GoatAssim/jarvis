@@ -5,9 +5,10 @@
  * bar after the H.1 / H.1.2–H.1.4 rounds still read as "the old panel with
  * extras". Same three-pane information architecture as Test Checklist:
  *
- *   LEFT    Services — live search (`/`), state chips with counts, built-in /
- *           custom filter, grouped cards with a state colour, uptime and a
- *           crash-loop badge in the card itself.
+ *   LEFT    Services — live search (`/`), state chips with counts, a category
+ *           filter (Built-in, your own categories, Undefined — L.11), grouped
+ *           cards with a state colour, uptime and a crash-loop badge in the
+ *           card itself.
  *   MIDDLE  The selected service — state + actions, alerts that say WHAT is
  *           wrong, a Console tab (stdout / stderr / traceback / system, search
  *           with highlight, tail size, rotated logs, stdin) and a Details tab
@@ -23,6 +24,11 @@
  *    notes: daemon-edit learned `--description` and `--env-replace`, and the
  *    PATCH route forwards the full field set (so an existing daemon can be
  *    edited, which H.1.4 flagged as missing).
+ *  - Categories (L.11) are labels, nothing more. `builtin` stays a separate
+ *    flag because it is also a LOCK (a built-in's command can't be changed);
+ *    a category never locks or unlocks anything. The rules for a name and the
+ *    chip editor live in category-input.js (JarvisCategories), shared with
+ *    commands (L.14) - this file must load after it.
  *  - Nothing here can create a daemon on the model's behalf. The AGENTS.md
  *    invariant ("the model may start, stop and inspect daemons; it may not
  *    create one") is about the model's tools; this is the human's panel.
@@ -224,11 +230,43 @@
     return out;
   }
 
+  /* ---- categories (L.11) -------------------------------------------------- */
+
+  // Names are cleaned by JarvisCategories (category-input.js), the same rules
+  // as categories.py. daemons.open() refuses to open without it.
+  const cat = () => global.JarvisCategories;
+
+  // The names on one daemon, cleaned again here because a test fixture or an
+  // older server can hand over anything. Always an array; [] = Undefined.
+  function categoriesOf(entry) {
+    return cat().normalizeList(entry && entry.categories).list;
+  }
+
+  // The kind filter is one value: "all" | "builtin" | "undefined" | "cat:<key>"
+  // (key = the lower-cased name). "custom" used to be a value; it is retired
+  // - uncategorised daemons are "undefined" now - so anything else, including
+  // an old saved "custom", means "all".
+  const KIND_PATTERN = /^(all|builtin|undefined|cat:.+)$/;
+  function normalizeKind(value) {
+    return typeof value === "string" && KIND_PATTERN.test(value) ? value : "all";
+  }
+
+  // A kind that no longer matches anything - a category nobody has any more -
+  // falls back to "all", so the list is never empty for a reason the person
+  // can't see. ("undefined" is always meaningful: it just means "none left".)
+  function reconcileKind(kind, entries) {
+    const k = normalizeKind(kind);
+    if (!k.startsWith("cat:")) return k;
+    const want = k.slice(4);
+    return (entries || []).some((e) => categoriesOf(e).some((c) => c.toLowerCase() === want)) ? k : "all";
+  }
+
   function searchHaystack(entry) {
     const e = entry || {};
     const bits = [
       e.id, e.name, e.description, e.command, e.cwd, e.notes, e.status, e.last_error,
       e.builtin ? "built-in builtin" : "custom",
+      categoriesOf(e).join(" "),
       e.autostart ? "autostart" : "",
       e.enabled === false ? "disabled" : "",
       e.adopted ? "outside" : "",
@@ -236,7 +274,8 @@
     return bits.filter(Boolean).join(" \u0001 ").toLowerCase();
   }
 
-  // filters = { search, state: all|attention|<bucket>, kind: all|builtin|custom,
+  // filters = { search, state: all|attention|<bucket>,
+  //             kind: all|builtin|undefined|cat:<key>  (see normalizeKind),
   //             favOnly?: boolean, favorites?: Set<id> }
   // favOnly is its own switch rather than another `state` value so it composes
   // (AND) with the state chips, the kind select and the search box.
@@ -247,8 +286,13 @@
       if (f.state === "attention") { if (!attentionOf(entry).length) return false; }
       else if (bucketOf(entry) !== f.state) return false;
     }
-    if (f.kind === "builtin" && !entry.builtin) return false;
-    if (f.kind === "custom" && entry.builtin) return false;
+    const kind = normalizeKind(f.kind);
+    if (kind === "builtin") { if (!entry.builtin) return false; }
+    else if (kind === "undefined") { if (categoriesOf(entry).length) return false; }
+    else if (kind.startsWith("cat:")) {
+      const want = kind.slice(4);
+      if (!categoriesOf(entry).some((c) => c.toLowerCase() === want)) return false;
+    }
     const terms = String(f.search || "").toLowerCase().split(/\s+/).filter(Boolean);
     if (terms.length) {
       const hay = searchHaystack(entry);
@@ -265,6 +309,12 @@
     let attention = 0;
     let favs = 0;
     const kinds = { builtin: { total: 0, running: 0 }, custom: { total: 0, running: 0 } };
+    // L.11: `categories` is every category in use, most-used first, each with
+    // how many of its services are up; `uncategorised` is the "Undefined"
+    // bucket. A service in two categories counts in both, so these do not add
+    // up to `total` - they are filters, not a partition.
+    const runningBy = {};
+    const uncategorised = { total: 0, running: 0 };
     (entries || []).forEach((e) => {
       const b = bucketOf(e);
       byState[b] += 1;
@@ -273,8 +323,13 @@
       k.total += 1;
       if (b === "running") k.running += 1;
       if (favorites && favorites.has && favorites.has(e.id)) favs += 1;
+      const cats = categoriesOf(e);
+      if (!cats.length) { uncategorised.total += 1; if (b === "running") uncategorised.running += 1; }
+      cats.forEach((c) => { if (b === "running") runningBy[c.toLowerCase()] = (runningBy[c.toLowerCase()] || 0) + 1; });
     });
-    return { total: (entries || []).length, byState, attention, kinds, favorites: favs };
+    const categories = cat().vocabulary((entries || []).map(categoriesOf))
+      .map((v) => ({ key: v.key, name: v.name, total: v.count, running: runningBy[v.key] || 0 }));
+    return { total: (entries || []).length, byState, attention, kinds, categories, uncategorised, favorites: favs };
   }
 
   // Favorites float to the top, everything else keeps its incoming order
@@ -307,7 +362,7 @@
       e.id, e.name, e.status, e.running, e.pid, e.supervisor_pid, e.adopted, e.restarts,
       e.max_restarts, e.last_error, e.exit_code, e.next_start, e.enabled, e.autostart,
       e.supports_stdin, e.command, e.cwd, e.description, e.notes, e.shell, e.restart,
-      e.restart_delay, e.stop_signal, e.stop_timeout, e.started_at, e.env,
+      e.restart_delay, e.stop_signal, e.stop_timeout, e.started_at, e.env, e.categories,
     ]);
   }
 
@@ -521,13 +576,14 @@
       autostart: Boolean(e.autostart),
       enabled: e.enabled !== false,
       notes: e.notes || "",
+      categories: categoriesOf(e),
     };
   }
 
   function blankDraft() {
     return draftFromEntry({
       id: "", name: "", description: "", command: "", shell: false, cwd: "", env: {},
-      supports_stdin: false, autostart: false, enabled: true, notes: "",
+      supports_stdin: false, autostart: false, enabled: true, notes: "", categories: [],
     });
   }
 
@@ -551,6 +607,10 @@
     if (!c.builtin) {
       if (!String(d.command).trim()) errors.command = "A command is required.";
     }
+    // The chip box can't produce a bad set (it caps names and the count), so
+    // this is the backstop for a draft that did not come from it.
+    const cats = cat().normalizeList(d.categories, true);
+    if (cats.error) errors.categories = cats.error.charAt(0).toUpperCase() + cats.error.slice(1) + ".";
     const delay = wholeNumber(d.restartDelay);
     if (!(delay >= 1)) errors.restartDelay = "Whole seconds, 1 or more.";
     const max = wholeNumber(d.maxRestarts);
@@ -569,7 +629,7 @@
       seen.add(k);
     });
 
-    const order = ["id", "command", "restartDelay", "maxRestarts", "stopTimeout"]
+    const order = ["id", "categories", "command", "restartDelay", "maxRestarts", "stopTimeout"]
       .concat((d.env || []).map((_, i) => `env.${i}`))
       .filter((f) => errors[f]);
     return { errors, order, ok: order.length === 0 };
@@ -601,6 +661,7 @@
     if (String(draft.description).trim()) body.description = String(draft.description).trim();
     if (String(draft.cwd).trim()) body.cwd = String(draft.cwd).trim();
     if (String(draft.notes).trim()) body.notes = String(draft.notes).trim();
+    if ((draft.categories || []).length) body.categories = draft.categories.slice();
     return body;
   }
 
@@ -626,6 +687,12 @@
       if (wholeNumber(draft[key]) !== wholeNumber(initial[key])) body[key] = String(wholeNumber(draft[key]));
     };
     ["restartDelay", "maxRestarts", "stopTimeout"].forEach(num);
+    // The whole set, sent whenever it differs - including [] ("remove them
+    // all"), which the server turns into --clear-categories. Order counts: it
+    // is the order the chips are shown in.
+    if (JSON.stringify(draft.categories || []) !== JSON.stringify(initial.categories || [])) {
+      body.categories = (draft.categories || []).slice();
+    }
     const a = JSON.stringify(envPairs(draft.env));
     const b = JSON.stringify(envPairs(initial.env));
     if (a !== b) { body.env = envPairs(draft.env); body.envReplace = true; }
@@ -803,7 +870,9 @@
       if (ui && typeof ui === "object") {
         if (typeof ui.selected === "string") state.selected = ui.selected;
         if (typeof ui.stateFilter === "string") state.stateFilter = ui.stateFilter;
-        if (["all", "builtin", "custom"].includes(ui.kindFilter)) state.kindFilter = ui.kindFilter;
+        // An old saved "custom" (retired by L.11) lands on "all", not on a
+        // filter that matches nothing.
+        state.kindFilter = normalizeKind(ui.kindFilter);
         if (typeof ui.favOnly === "boolean") state.favOnly = ui.favOnly;
         if (Array.isArray(ui.collapsed)) state.collapsed = new Set(ui.collapsed.filter((x) => typeof x === "string"));
         if (["console", "details"].includes(ui.tab)) state.tab = ui.tab;
@@ -943,14 +1012,40 @@
     mk("scheduled", "Scheduled", n.byState.scheduled, "scheduled", false);
   }
 
+  // One place that changes the kind filter, so the select, the saved
+  // preference, the list and the overview can't disagree.
+  function setKindFilter(kind) {
+    state.kindFilter = normalizeKind(kind);
+    dom.kind.value = state.kindFilter;
+    savePrefs();
+    renderList(true);
+    renderSide(true);
+  }
+
   function renderKindSelect() {
+    // Once the real list is known, a remembered category that has since
+    // vanished falls back to "all" (see reconcileKind).
+    if (state.loadedOnce) {
+      const fixed = reconcileKind(state.kindFilter, state.entries);
+      if (fixed !== state.kindFilter) { state.kindFilter = fixed; savePrefs(); }
+    }
     const n = countEntries(state.entries);
     dom.kind.textContent = "";
-    [
-      ["all", `All services (${n.total})`],
-      ["builtin", `Built-in (${n.kinds.builtin.total})`],
-      ["custom", `Custom (${n.kinds.custom.total})`],
-    ].forEach(([v, label]) => dom.kind.appendChild(el("option", { value: v }, label)));
+    dom.kind.appendChild(el("option", { value: "all" }, `All services (${n.total})`));
+    dom.kind.appendChild(el("option", { value: "builtin" }, `Built-in (${n.kinds.builtin.total})`));
+    const group = el("optgroup", { label: "Categories" });
+    n.categories.forEach((c) => group.appendChild(el("option", { value: "cat:" + c.key }, `${c.name} (${c.total})`)));
+    // Undefined = no category at all. Shown whenever any service has none, or
+    // when it is the active filter, so the select never loses its own value.
+    if (n.uncategorised.total || state.kindFilter === "undefined") {
+      group.appendChild(el("option", { value: "undefined" }, `Undefined (${n.uncategorised.total})`));
+    }
+    if (group.children.length) dom.kind.appendChild(group);
+    // Before the first load there is no vocabulary yet; keep a remembered
+    // category selectable rather than showing a blank select.
+    if (![...dom.kind.querySelectorAll("option")].some((o) => o.value === state.kindFilter)) {
+      dom.kind.appendChild(el("option", { value: state.kindFilter }, state.kindFilter.replace(/^cat:/, "")));
+    }
     dom.kind.value = state.kindFilter;
   }
 
@@ -999,6 +1094,17 @@
     }, on ? "\u2605" : "\u2606");
   }
 
+  // One row, clipped: flex-wrap plus a one-line max-height in daemons.css means
+  // a chip that doesn't fit wraps onto a hidden second line and is simply not
+  // shown - omitted rather than truncated or wrapped. The Details tab always
+  // lists them all.
+  function categoryRow(entry) {
+    const cs = categoriesOf(entry);
+    if (!cs.length) return null;
+    return el("div", { class: "dmn-card__cats", "aria-label": "Categories" },
+      cs.map((c) => el("span", { class: "dmn-tag dmn-tag--cat", title: `Category: ${c}` }, c)));
+  }
+
   function renderCard(entry) {
     const b = bucketOf(entry);
     const active = state.selected === entry.id;
@@ -1024,6 +1130,7 @@
         favStar(entry),
       ]),
       el("div", { class: "dmn-card__cmd" }, entry.command || "(no command)"),
+      categoryRow(entry),
       tags.length ? el("div", { class: "dmn-card__meta" }, tags) : null,
     ]);
   }
@@ -1235,22 +1342,34 @@
       ]));
     }
 
-    // by kind
-    side.appendChild(el("div", null, [
-      el("h4", { class: "dmn-section-title" }, "By kind"),
-      el("div", { class: "dmn-mini" }, [["builtin", "Built-in"], ["custom", "Custom"]].map(([k, label]) => {
-        const group = list.filter((e) => (k === "builtin") === Boolean(e.builtin));
-        const up = n.kinds[k].running;
-        return el("button", {
-          class: "dmn-mini__row" + (state.kindFilter === k ? " is-active" : ""), type: "button", title: `Show only ${label.toLowerCase()} services`,
-          onclick: () => { state.kindFilter = state.kindFilter === k ? "all" : k; dom.kind.value = state.kindFilter; savePrefs(); renderList(true); renderSide(true); },
-        }, [
-          el("span", { class: "dmn-mini__label" }, label),
-          el("span", { class: "dmn-mini__n" }, `${up}/${group.length} up`),
-          el("div", { class: "dmn-mini__bar" }, group.length ? stateBar(group) : null),
-        ]);
-      })),
-    ]));
+    // by category (L.11). Built-in first: it is a real flag (and a lock), not
+    // a category. Then every category in use, then Undefined (= none). Each
+    // row toggles the same filter as the select in the left pane.
+    const MAX_CAT_ROWS = 12;
+    const rows = [{ id: "builtin", label: "Built-in", tip: "Show only built-in services", group: list.filter((e) => e.builtin), up: n.kinds.builtin.running }];
+    n.categories.slice(0, MAX_CAT_ROWS).forEach((c) => rows.push({
+      id: "cat:" + c.key, label: c.name, tip: `Show only services in \u201C${c.name}\u201D`,
+      group: list.filter((e) => categoriesOf(e).some((x) => x.toLowerCase() === c.key)), up: c.running,
+    }));
+    if (n.uncategorised.total || state.kindFilter === "undefined") {
+      rows.push({ id: "undefined", label: "Undefined", tip: "Show only services with no category", group: list.filter((e) => !categoriesOf(e).length), up: n.uncategorised.running });
+    }
+    const catBlock = el("div", null, [
+      el("h4", { class: "dmn-section-title" }, "By category"),
+      el("div", { class: "dmn-mini" }, rows.map((r) => el("button", {
+        class: "dmn-mini__row" + (state.kindFilter === r.id ? " is-active" : ""), type: "button", title: r.tip,
+        "aria-pressed": state.kindFilter === r.id ? "true" : "false",
+        onclick: () => setKindFilter(state.kindFilter === r.id ? "all" : r.id),
+      }, [
+        el("span", { class: "dmn-mini__label" }, r.label),
+        el("span", { class: "dmn-mini__n" }, `${r.up}/${r.group.length} up`),
+        el("div", { class: "dmn-mini__bar" }, r.group.length ? stateBar(r.group) : null),
+      ]))),
+    ]);
+    if (n.categories.length > MAX_CAT_ROWS) {
+      catBlock.appendChild(el("div", { class: "dmn-more" }, `+ ${n.categories.length - MAX_CAT_ROWS} more \u2014 use the category filter`));
+    }
+    side.appendChild(catBlock);
 
     // actions
     side.appendChild(el("div", null, [
@@ -1845,7 +1964,11 @@
         el("button", { class: "dmn-link", type: "button", onclick: () => { state.showEnv = !state.showEnv; renderDetails(selectedEntry()); } }, state.showEnv ? "Hide values" : "Show values"),
       ])
       : dash();
+    const cats = categoriesOf(entry);
     det.config.appendChild(el("div", { class: "dmn-kvs" }, [
+      kv("Categories", cats.length
+        ? el("div", { class: "dmn-cats" }, cats.map((c) => badge(c, "cat", `Category: ${c}`)))
+        : el("span", { class: "dmn-dim" }, "Undefined \u2014 none set"), { wide: true }),
       kv("Command", el("div", { class: "dmn-cmdrow" }, [el("code", { class: "dmn-cmd" }, entry.command || "(none)"), entry.command ? copyBtn(entry.command, "the command") : null]), { wide: true }),
       kv("Working directory", entry.cwd ? entry.cwd : el("span", { class: "dmn-dim" }, "Jarvis\u2019s own folder"), { mono: true }),
       kv("Run via shell", entry.shell ? "Yes" : "No"),
@@ -1883,7 +2006,7 @@
    * ==================================================================== */
 
   const FIELD_LABEL = {
-    id: "id", command: "command", restartDelay: "restart delay", maxRestarts: "max restarts", stopTimeout: "stop timeout",
+    id: "id", categories: "categories", command: "command", restartDelay: "restart delay", maxRestarts: "max restarts", stopTimeout: "stop timeout",
   };
 
   function editorDirty() {
@@ -2036,6 +2159,25 @@
   }
   const wholeNumberSafe = (t, fallback) => (/^\d+$/.test(String(t).trim()) ? parseInt(String(t).trim(), 10) : fallback);
 
+  // The shared chip box (category-input.js). Its suggestions come from the
+  // categories already on THIS panel's services only - commands keep their own
+  // vocabulary (owner decision Q5). Built-ins can be re-categorised too:
+  // category is a label, and does not touch the fields a built-in locks.
+  function categoryField() {
+    const ed = state.editor;
+    const C = cat();
+    ed.catInput = C.createInput({
+      id: "dmn-f-categories", value: ed.draft.categories, label: "Categories",
+      placeholder: "Add a category\u2026 (Enter to add)",
+      getVocabulary: () => C.vocabulary(state.entries.map(categoriesOf)),
+      onChange: (list) => { ed.draft.categories = list; touch("categories"); },
+    });
+    const f = field("categories", "Categories", ed.catInput.el,
+      `Optional. Group services your own way \u2014 \u201Cchat\u201D, \u201Ctools\u201D \u2014 and filter by them. Up to ${C.MAX_PER_ITEM}, ${C.MAX_NAME_LEN} characters each; with none, a service shows as Undefined.`, true);
+    f.querySelector("label").setAttribute("for", ed.catInput.inputId);
+    return f;
+  }
+
   function renderEditor() {
     const ed = state.editor;
     const d = ed.draft;
@@ -2067,6 +2209,7 @@
         field("name", "Display name", textInput("name", { attrs: { placeholder: ed.mode === "add" ? "optional \u2014 defaults to the id" : "" } }), null),
       ]),
       field("description", "Description", textInput("description", { area: true, rows: 2, attrs: { placeholder: "optional \u2014 shown under the name" } }), null, true),
+      categoryField(),
     ]);
 
     // command
@@ -2587,6 +2730,12 @@
   }
 
   function open() {
+    // The category filter and editor field are built from it; failing here, with
+    // a reason, beats a half-rendered panel and a TypeError.
+    if (!global.JarvisCategories) {
+      toast("category-input.js didn\u2019t load, so the Daemons panel can\u2019t open.", "error");
+      return;
+    }
     if (!ensureBuilt()) {
       toast("Daemons markup is missing from index.html.", "error");
       return;
@@ -2631,7 +2780,7 @@
     _pure: {
       normalizeId, bucketOf, withDefaults, isStoppable, fmtDuration, uptimeSeconds, fmtStamp,
       describeNextStart, restartSummary, stopSummary, attentionOf, searchHaystack, matchesFilters,
-      countEntries, sortFavoritesFirst, toggleFavoriteId, entrySignature, classifyLine, annotateLines, summarizeLines, filterLines,
+      countEntries, categoriesOf, normalizeKind, reconcileKind, sortFavoritesFirst, toggleFavoriteId, entrySignature, classifyLine, annotateLines, summarizeLines, filterLines,
       groupTraces, highlightSegments, draftFromEntry, blankDraft, validateDraft, envPairs,
       buildAddPayload, buildEditPayload, buildReport, STATES, CONSOLE_FILTERS,
     },

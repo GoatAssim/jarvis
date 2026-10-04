@@ -167,7 +167,7 @@ def print_help(commands, file=sys.stdout):
         print(f"  {p.GREEN}{name.ljust(width)}{p.RESET} {spec.get('description', '')}", file=file)
     print(f"\nRun '{p.CYAN}jarvis <command> --help{p.RESET}' for a command's options.", file=file)
     print(f"Chain several with '{p.CYAN}jarvis cmd1 then cmd2{p.RESET}'.", file=file)
-    print(f"Built-in: {p.CYAN}config{p.RESET}, {p.CYAN}ai-config{p.RESET}, {p.CYAN}ai-clear{p.RESET}, {p.CYAN}tools-list{p.RESET} (prints every AI tool as JSON — not an ask), {p.CYAN}tool-run{p.RESET} (runs one AI tool directly), {p.CYAN}conv-new{p.RESET}/{p.CYAN}conv-list{p.RESET}/{p.CYAN}conv-show{p.RESET}/{p.CYAN}conv-switch{p.RESET}/{p.CYAN}conv-delete{p.RESET} (manage conversations), {p.CYAN}logs{p.RESET} (browse the raw model\u2194backend traffic for a conversation), {p.CYAN}mode{p.RESET}/{p.CYAN}mode-set <full|compact|precise|ultra>{p.RESET} (read/set the prompt's token-usage capacity — 400%/100%/150%/50%), {p.CYAN}voice-config{p.RESET} (prints the voice config file path), {p.CYAN}speak <text>{p.RESET} (text-to-speech), {p.CYAN}listen{p.RESET} (record → transcribe → ask → speak, one voice turn), {p.CYAN}transcribe <audio file>{p.RESET} (speech-to-text on an existing file), {p.CYAN}sched-list{p.RESET}/{p.CYAN}sched-add <when> <text>{p.RESET}/{p.CYAN}sched-cancel{p.RESET}/{p.CYAN}sched-snooze{p.RESET}/{p.CYAN}sched-approve{p.RESET} (scheduled tasks, reminders and notifications), {p.CYAN}sched-tick{p.RESET} (fire everything due now \\u2014 point Task Scheduler or cron at this), {p.CYAN}sched-daemon{p.RESET} (run a standing tick loop yourself instead of wiring up Task Scheduler/cron or leaving the web UI open; --interval <secs>, --once, --status, --stop), {p.CYAN}sched-ask-log{p.RESET} (view the prompts the scheduler has sent to `jarvis ask`, even for jobs with no linked conversation; --job <id>, --limit N, --clear), {p.CYAN}sched-signal <event>{p.RESET} (announce something finished, firing jobs waiting on it), {p.CYAN}notify-send <message>{p.RESET}, {p.CYAN}notify-history{p.RESET} (every notification ever sent, newest first, regardless of read state), {p.CYAN}notify-config{p.RESET}, {p.CYAN}think{p.RESET}/{p.CYAN}think <off|low|medium|high>{p.RESET} (read/set how hard Jarvis reasons before answering).", file=file)
+    print(f"Built-in: {p.CYAN}config{p.RESET}, {p.CYAN}ai-config{p.RESET}, {p.CYAN}ai-clear{p.RESET}, {p.CYAN}tools-list{p.RESET} (prints every AI tool as JSON — not an ask), {p.CYAN}tool-run{p.RESET} (runs one AI tool directly), {p.CYAN}conv-new{p.RESET}/{p.CYAN}conv-list{p.RESET}/{p.CYAN}conv-show{p.RESET}/{p.CYAN}conv-switch{p.RESET}/{p.CYAN}conv-delete{p.RESET} (manage conversations), {p.CYAN}logs{p.RESET} (browse the raw model\u2194backend traffic for a conversation), {p.CYAN}mode{p.RESET}/{p.CYAN}mode-set <full|compact|precise|ultra>{p.RESET} (read/set the prompt's token-usage capacity — 400%/100%/150%/50%), {p.CYAN}voice-config{p.RESET} (prints the voice config file path), {p.CYAN}speak <text>{p.RESET} (text-to-speech), {p.CYAN}listen{p.RESET} (record → transcribe → ask → speak, one voice turn), {p.CYAN}transcribe <audio file>{p.RESET} (speech-to-text on an existing file), {p.CYAN}sched-list{p.RESET}/{p.CYAN}sched-add <when> <text>{p.RESET}/{p.CYAN}sched-cancel{p.RESET}/{p.CYAN}sched-snooze{p.RESET}/{p.CYAN}sched-approve{p.RESET} (scheduled tasks, reminders and notifications), {p.CYAN}sched-tick{p.RESET} (fire everything due now \\u2014 point Task Scheduler or cron at this), {p.CYAN}sched-daemon{p.RESET} (run a standing tick loop yourself instead of wiring up Task Scheduler/cron or leaving the web UI open; --interval <secs>, --once, --status, --stop), {p.CYAN}sched-ask-log{p.RESET} (view the prompts the scheduler has sent to `jarvis ask`, even for jobs with no linked conversation; --job <id>, --limit N, --clear), {p.CYAN}sched-signal <event>{p.RESET} (announce something finished, firing jobs waiting on it), {p.CYAN}notify-send <message>{p.RESET}, {p.CYAN}notify-history{p.RESET} (every notification ever sent, newest first, regardless of read state), {p.CYAN}notify-summary{p.RESET}/{p.CYAN}notify-read <ids|all>{p.RESET}/{p.CYAN}notify-dismiss <ids|read|all>{p.RESET} (unread counts, mark read, delete), {p.CYAN}notify-config{p.RESET}, {p.CYAN}think{p.RESET}/{p.CYAN}think <off|low|medium|high>{p.RESET} (read/set how hard Jarvis reasons before answering).", file=file)
     print(f"Edit {p.DIM}{CONFIG_FILE}{p.RESET} to add or change commands.", file=file)
 
 
@@ -1194,6 +1194,7 @@ SCHEDULER_COMMANDS = {
     "sched-show", "sched-cancel", "sched-pause", "sched-resume", "sched-snooze", "sched-budget",
     "sched-approve", "sched-signal", "sched-clear", "notify-send",
     "notify-list", "notify-history", "notify-ack", "notify-clear", "notify-config",
+    "notify-summary", "notify-read", "notify-dismiss",
     "conv-search", "mcp-status", "mcp-refresh", "mcp-config", "mcp-call",
     "mcp-tools",
 }
@@ -1478,9 +1479,59 @@ def run_scheduler_command(argv):
             # seen_by, so it survives both browser restarts and the app
             # being closed and reopened, and doesn't interfere with the
             # unread badge/toast pipeline notify-list feeds.
-            limit_raw = rest[0].strip() if rest and rest[0].strip() else ""
-            limit = int(limit_raw) if limit_raw.isdigit() else 200
-            return emit({"notifications": notifier.history(limit=limit)})
+            #
+            # L.30: optional filters after the limit — `--unread`, `--failed`,
+            # `--needs-ack`, `--kind=K`, `--source=S`, `--q=words`. With none of
+            # them the answer is what it always was; the extra top-level keys
+            # (`total`, `unread`, `needs_ack`, `kinds`) are additive.
+            limit = 200
+            filters = {}
+            for token in rest:
+                token = token.strip()
+                if token.isdigit():
+                    limit = int(token)
+                elif token == "--unread":
+                    filters["unread_only"] = True
+                elif token == "--failed":
+                    filters["failed_only"] = True
+                elif token == "--needs-ack":
+                    filters["needs_ack_only"] = True
+                elif token.startswith("--kind="):
+                    filters["kind"] = token[len("--kind="):].strip() or None
+                elif token.startswith("--source="):
+                    filters["source"] = token[len("--source="):].strip() or None
+                elif token.startswith("--q="):
+                    filters["query"] = token[len("--q="):].strip() or None
+            payload = {"notifications": notifier.history(limit=limit, **filters)}
+            payload.update(notifier.summary())
+            return emit(payload)
+
+        if cmd == "notify-summary":
+            # Counts for the badge, plus whatever persistent / confirm-level
+            # notifications still await the owner. Reads only.
+            return emit(notifier.summary())
+
+        if cmd == "notify-read":
+            # The OWNER read these (distinct from notify-ack, which records
+            # delivery to a consumer). `all` marks everything.
+            if not rest:
+                return emit({"error": "usage: jarvis notify-read <id[,id,...]|all>"}, 1)
+            if rest[0].strip().lower() == "all":
+                return emit({"read": notifier.mark_all_read()})
+            ids = [i.strip() for i in rest[0].split(",") if i.strip()]
+            return emit({"read": notifier.mark_read(ids)})
+
+        if cmd == "notify-dismiss":
+            # Delete for good: ids, `read` (everything already read) or `all`.
+            if not rest:
+                return emit({"error": "usage: jarvis notify-dismiss <id[,id,...]|read|all>"}, 1)
+            target = rest[0].strip().lower()
+            if target == "read":
+                return emit({"dismissed": notifier.clear_read()})
+            if target == "all":
+                return emit({"dismissed": notifier.clear()})
+            ids = [i.strip() for i in rest[0].split(",") if i.strip()]
+            return emit({"dismissed": notifier.dismiss(ids)})
 
         if cmd == "notify-ack":
             if not rest:
@@ -1674,8 +1725,8 @@ def main():
         if not conv_id:
             conv_id = os.environ.get("JARVIS_CONVERSATION_ID") or _conv.get_current_id()
         if "--raw" in flags:
-            # L.38 (a): the complete record as JSON Lines; -f and the include
-            # flags are ignored on purpose (raw leaves nothing out).
+            # L.38: the whole raw event stream as JSON Lines; -f and the
+            # include flags are ignored on purpose (raw leaves nothing out).
             result = conv_export.export_raw(conv_id, out_dir=out_dir)
             print(json.dumps(result, indent=2))
             if not result.get("ok"):
@@ -2194,6 +2245,7 @@ def main():
             print(json.dumps({"error": "invalid conversation id"}))
             sys.exit(1)
         since_seq, kinds, turn, limit, after_last_clear, surface = 0, None, None, 2000, False, None
+        full_lines = False
         rest = argv[2:]
         i = 0
         while i < len(rest):
@@ -2222,11 +2274,15 @@ def main():
             elif flag == "--after-last-clear":
                 after_last_clear = True
                 i += 1
+            elif flag == "--full":
+                full_lines = True    # L.38: restore clipped lines from the raw event log
+                i += 1
             else:
                 i += 1
         result = console_store.read(
             conv_id, since_seq=since_seq, kinds=kinds, turn=turn,
             limit=limit, after_last_clear=after_last_clear, surface=surface,
+            full=full_lines,
         )
         if result.get("legacy"):
             # E.6 step 7: nothing in the new store \u2014 fall back to
