@@ -100,6 +100,8 @@ RESERVED_NAMES = {
     "channels-deny", "channels-test", "channels-whoami", "channels-log",
     "channels-directory", "channels-people", "channels-follow", "channels-block",
     "channels-users", "channels-user", "channels-user-tools",
+    "channels-add-person", "channels-rename", "channels-remove-person",
+    "channels-link", "channels-unlink",
     "discord-daemon", "instagram-serve", "logs-search",
     # --- clipboard_cli.COMMANDS ----------------------------------------------
     "clipboard-watch", "clipboard-watch-config",

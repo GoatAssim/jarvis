@@ -85,6 +85,21 @@ check("no match -> no groups", T.groupTools(tools, "zzz").length === 0);
 check("displayName prefers name, then @handle, then id",
   T.displayName(mk({ name: "N", handle: "h" })) === "N" && T.displayName(mk({ handle: "h" })) === "@h" && T.displayName(mk({ user_id: "42" })) === "42");
 
+// L.36b: linked accounts, hand-added people
+check("displayName uses the linked account's name when they have none",
+  T.displayName(mk({ name: "", name_effective: "Sam", handle: "sam_ig" })) === "Sam");
+check("own name beats the linked name", T.displayName(mk({ name: "Own", name_effective: "Own" })) === "Own");
+check("initials follow the effective name", T.initials(mk({ name: "", name_effective: "Maryem Khaled", handle: "x" })) === "MK");
+const linkedPeople = [
+  mk({ user_id: "7", handle: "d_sam", name_effective: "Sam", linked: { platform: "instagram", user_id: "9", handle: "sam_on_ig", name: "" } }),
+  mk({ user_id: "8", handle: "other" }),
+];
+const fl = (q) => T.filterPeople(linkedPeople, { search: q, platform: "all", state: "all" }).map((p) => p.user_id);
+check("search finds someone by their linked account's handle", fl("@sam_on_ig").join() === "7");
+check("search finds someone by an inherited name", fl("sam").join() === "7");
+check("a handle-only person with no id shows their handle",
+  T.displayName(mk({ user_id: "bobby", handle: "bobby", placeholder: true })) === "@bobby");
+
 // the panel script must not use innerHTML for data
 const dataInner = src.split("\n").filter((l) => /innerHTML/.test(l) && !/^\s*(\/\/|\*)/.test(l));
 check("innerHTML only parses the fixed icon strings", dataInner.length === 1 && /t\.innerHTML = ICON\[name\]/.test(dataInner[0]), dataInner.join(" | "));

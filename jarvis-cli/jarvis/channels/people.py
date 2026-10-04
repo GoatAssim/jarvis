@@ -45,6 +45,31 @@ was answered, so permissions.py stays the single source of truth for who
 may be answered. Two systems that both decide access is how you end up
 with a bot that answers someone every allowlist says it shouldn't.
 
+PEOPLE THE OWNER ADDS BY HAND, AND LINKED ACCOUNTS
+-------------------------------------------------
+A record normally appears when someone messages the bot. Two other things
+create or enrich one, both driven from the Channels panel / `jarvis
+channels-add-person`:
+
+  * `manual` records — the owner typed an id or @handle in before that
+    person ever wrote. They sit at messages=0 until the first real message,
+    which simply continues the same record. If only a HANDLE was known (the
+    usual case on Instagram, which never reveals an id until the person
+    writes), the record is a `placeholder` keyed by the handle; touch()
+    adopts it the first time a real id shows up with that handle and
+    migrates the per-person tool limits across (user_perms.py is keyed by
+    id, and limits that stayed behind would silently widen access).
+  * `linked` — "this Discord account and this Instagram account are the same
+    human". One partner per record, stored on BOTH sides. A link is
+    IDENTITY ONLY: it shares a name and notes with the model and shows both
+    accounts together in the panel. It never shares a permission, never
+    makes one account the owner because the other is, and permissions.py
+    does not read it — two systems deciding access is the failure the
+    follow-state note above already warns about.
+
+  * `name_locked` — the owner typed this person's name by hand. A guest's
+    own remember_sender call can no longer overwrite it.
+
 STORAGE
 -------
     ~/.jarvis/channels/people.json
@@ -54,6 +79,7 @@ store here — this accumulates slowly over months and is not regenerable
 from anything.
 """
 
+import re
 import time
 
 from . import PLATFORMS
@@ -76,6 +102,10 @@ FOLLOW_STATES = (FOLLOW_UNKNOWN, FOLLOW_PENDING, FOLLOW_APPROVED, FOLLOW_BLOCKED
 # own line is the obvious injection to try against a block that sits in the
 # system prompt.
 MAX_NAME_LEN = 48
+# What an id or @handle may look like when the owner types one in. Matches
+# web/server.js's CHANNEL_USER_ID, which is also what keeps a value from being
+# read as a CLI flag.
+IDENT_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 MAX_NOTE_LEN = 160
 MAX_NOTES = 6
 
@@ -141,6 +171,10 @@ def _blank(platform, user_id, handle=""):
         "follow": FOLLOW_UNKNOWN,
         "is_owner": False,
         "notified_at": None,
+        "manual": False,        # added by the owner, not by a message
+        "placeholder": False,   # manual and only a handle is known (user_id == handle)
+        "name_locked": False,   # owner typed the name; a guest cannot overwrite it
+        "linked": "",           # "<other platform>:<user_id>" of the same person
     }
 
 
@@ -176,6 +210,8 @@ def touch(platform, user_id, handle="", is_owner=False, avatar=""):
     k = key(platform, user_id)
     entry = data.get(k)
     if not isinstance(entry, dict):
+        entry = _adopt_placeholder(data, platform, user_id, handle)
+    if not isinstance(entry, dict):
         entry = _blank(platform, user_id, handle)
     if handle:
         entry["handle"] = _clean_text(handle, MAX_NAME_LEN).lstrip("@").lower()
@@ -205,9 +241,22 @@ def _update(platform, user_id, **fields):
     return entry
 
 
-def set_name(platform, user_id, name):
-    """What this person asked to be called. Cleared by an empty name."""
-    return _update(platform, user_id, name=_clean_text(name, MAX_NAME_LEN))
+def set_name(platform, user_id, name, manual=False):
+    """What this person asked to be called. Cleared by an empty name.
+
+    `manual=True` is the owner typing it in the Channels panel (or `jarvis
+    channels-rename`). That locks the name: a later remember_sender call —
+    the person telling Jarvis their own name in chat — leaves it alone,
+    because the owner's word about who someone is outranks what a stranger
+    typed. Clearing the name (empty) unlocks it again."""
+    cleaned = _clean_text(name, MAX_NAME_LEN)
+    existing = get(platform, user_id)
+    if not manual and existing and existing.get("name_locked"):
+        return existing
+    fields = {"name": cleaned}
+    if manual:
+        fields["name_locked"] = bool(cleaned)
+    return _update(platform, user_id, **fields)
 
 
 def add_note(platform, user_id, note):
@@ -281,7 +330,10 @@ def all_people(platform=None, follow=None):
         if follow is not None and (v.get("follow") or FOLLOW_UNKNOWN) != follow:
             continue
         items.append(v)
-    items.sort(key=lambda it: it.get("last_seen") or 0, reverse=True)
+    # A person added by hand has never been seen; fall back to when they were
+    # added so they sort to the top of the list rather than the bottom.
+    items.sort(key=lambda it: it.get("last_seen") or it.get("first_seen") or 0,
+               reverse=True)
     return items
 
 
@@ -307,6 +359,282 @@ def resolve_user_id(platform, entry_text):
     from . import directory
     resolved, _err = directory.resolve(platform, entry_text)
     return resolved
+
+
+# --------------------------------------------------------------------------
+# People the owner adds by hand
+# --------------------------------------------------------------------------
+
+def _ident_of(text):
+    """The id-or-handle the owner typed, or '' when it isn't one. No spaces,
+    no leading '-' (it would read as a CLI flag), a bounded length."""
+    raw = str(text or "").strip().lstrip("@")
+    return raw if IDENT_RE.match(raw) else ""
+
+
+def _find(data, platform, ident):
+    """The record on `platform` whose id or handle is `ident`, or None."""
+    low = ident.lower()
+    for k, v in data.items():
+        if not isinstance(v, dict) or not k.startswith(f"{platform}:"):
+            continue
+        if str(v.get("user_id") or "").lower() == low:
+            return v
+        if (v.get("handle") or "").lower() == low:
+            return v
+    return None
+
+
+def _new_manual(platform, ident):
+    """A blank record for someone who has not written yet.
+
+    A numeric ident is a real platform id. A handle is looked up in
+    directory.py (the notebook of handle -> id pairs seen on real messages);
+    when that knows it the record is a normal one, otherwise it is a
+    placeholder keyed by the handle until the person's first message shows
+    their id (see _adopt_placeholder)."""
+    if ident.isdigit():
+        rec = _blank(platform, ident)
+    else:
+        from . import directory
+        resolved, _err = directory.resolve(platform, "@" + ident)
+        if resolved and str(resolved).strip():
+            rec = _blank(platform, str(resolved).strip(), ident)
+        else:
+            rec = _blank(platform, ident.lower(), ident)
+            rec["placeholder"] = True
+    rec["manual"] = True
+    rec["messages"] = 0
+    rec["last_seen"] = None
+    return rec
+
+
+def add_person(platform, ident, name=""):
+    """Create a record by hand. Returns (record, error).
+
+    Grants NOTHING: no list entry, no tool, no owner status. It only gives
+    the person a row in the Channels panel, so every switch there has
+    something to act on. An id or @handle that is already known returns that
+    record and an error naming it, rather than creating a twin."""
+    if platform not in PLATFORMS:
+        return None, f"unknown platform '{platform}'"
+    typed = str(ident or "").strip()
+    ident = _ident_of(typed)
+    if not ident:
+        return None, ("an id or @handle has no spaces and starts with a "
+                      "letter or digit — put their name in the Name box")
+    data = _load()
+    hit = _find(data, platform, ident)
+    if hit:
+        return hit, f"{platform} already has {hit.get('name') or hit.get('handle') or hit.get('user_id')}"
+    rec = _new_manual(platform, ident)
+    # A resolved handle may now collide with an existing record under the id.
+    clash = data.get(key(platform, rec["user_id"]))
+    if isinstance(clash, dict):
+        return clash, f"{platform} already has {clash.get('name') or clash.get('handle') or clash.get('user_id')}"
+    cleaned = _clean_text(name, MAX_NAME_LEN)
+    if cleaned:
+        rec["name"] = cleaned
+        rec["name_locked"] = True
+    data[key(platform, rec["user_id"])] = rec
+    if not _save(data):
+        return None, "could not write people.json"
+    return rec, ""
+
+
+def adopt_listed(platform, entries):
+    """Give everyone NAMED in an allow-list a record. Returns how many were
+    created.
+
+    The Channels panel lists records, and a record is made by a message — so
+    someone added to dm/reply/tool_allowlist (Global lists, `channels-allow`,
+    a hand-edit) who has not written yet had no row, and every switch on the
+    panel needs a row. They get one here. Idempotent, creates nothing for
+    "*" or for entries that are not an id/handle, and never touches an
+    existing record."""
+    if platform not in PLATFORMS:
+        return 0
+    data = _load()
+    made = 0
+    for raw in entries or []:
+        ident = _ident_of(raw)
+        if not ident or _find(data, platform, ident):
+            continue
+        rec = _new_manual(platform, ident)
+        k = key(platform, rec["user_id"])
+        if isinstance(data.get(k), dict):
+            continue
+        data[k] = rec
+        made += 1
+    if made and not _save(data):
+        return 0
+    return made
+
+
+def remove_person(platform, user_id):
+    """Delete a hand-added record that never sent a message. Returns
+    (ok, error). Anyone who has actually written is blocked, not deleted —
+    their history is not regenerable (see the module docstring)."""
+    data = _load()
+    k = key(platform, user_id)
+    rec = data.get(k)
+    if not isinstance(rec, dict):
+        return False, f"{user_id} isn't in the list"
+    if not rec.get("manual") or int(rec.get("messages") or 0) > 0:
+        return False, ("only a person you added by hand who has never "
+                       "messaged can be removed — block anyone else")
+    partner = rec.get("linked")
+    if partner and isinstance(data.get(partner), dict):
+        data[partner]["linked"] = ""
+    del data[k]
+    return (True, "") if _save(data) else (False, "could not write people.json")
+
+
+def _adopt_placeholder(data, platform, user_id, handle):
+    """First real message from someone the owner added by handle only.
+
+    Returns the placeholder re-keyed under the real id (and removes the old
+    key from `data`), or None when there is nothing to adopt. Per-person tool
+    limits and the DM switch live in user_perms.json, keyed by id, so they are
+    copied to the real id — a limit left under the handle would stop applying
+    the moment the person's real id appeared, which widens access."""
+    ident = _ident_of(handle)
+    if not ident:
+        return None
+    old_key = None
+    for k, v in data.items():
+        if (isinstance(v, dict) and k.startswith(f"{platform}:")
+                and v.get("placeholder")
+                and (v.get("handle") or "").lower() == ident.lower()):
+            old_key = k
+            break
+    if old_key is None:
+        return None
+    rec = data.pop(old_key)
+    old_id = str(rec.get("user_id") or "")
+    rec["user_id"] = str(user_id)
+    rec["placeholder"] = False
+    new_key = key(platform, user_id)
+    try:
+        from . import user_perms
+        store = user_perms._load()
+        old_perm = store.get(user_perms.key(platform, old_id))
+        if old_perm is not None:
+            store[user_perms.key(platform, user_id)] = old_perm
+            store.pop(user_perms.key(platform, old_id), None)
+            user_perms._save(store)
+    except Exception:  # noqa: BLE001 — unreadable limits already fail closed
+        pass
+    partner = rec.get("linked")
+    if partner and isinstance(data.get(partner), dict):
+        data[partner]["linked"] = new_key
+    return rec
+
+
+# --------------------------------------------------------------------------
+# Linked accounts (same person, other platform)
+# --------------------------------------------------------------------------
+
+def partner(entry):
+    """The linked record on the other platform, or None. A dangling link (the
+    other record is gone) reads as no link."""
+    if not isinstance(entry, dict) or not entry.get("linked"):
+        return None
+    other = _load().get(entry["linked"])
+    return other if isinstance(other, dict) else None
+
+
+def effective_name(entry):
+    """Their own name, else the linked account's, else ''."""
+    if not isinstance(entry, dict):
+        return ""
+    if entry.get("name"):
+        return entry["name"]
+    other = partner(entry)
+    return (other or {}).get("name") or ""
+
+
+def _candidates(data, platform, text):
+    """Records on `platform` an id, @handle or name could mean."""
+    low = " ".join(str(text or "").split()).lstrip("@").lower()
+    found = []
+    for k, v in data.items():
+        if not isinstance(v, dict) or not k.startswith(f"{platform}:"):
+            continue
+        if low in (str(v.get("user_id") or "").lower(),
+                   (v.get("handle") or "").lower(),
+                   (v.get("name") or "").lower()):
+            found.append(v)
+    return found
+
+
+def _break(data, k):
+    rec = data.get(k)
+    if not isinstance(rec, dict):
+        return
+    other = rec.get("linked")
+    rec["linked"] = ""
+    if other and isinstance(data.get(other), dict) and data[other].get("linked") == k:
+        data[other]["linked"] = ""
+
+
+def link(platform, user_id, other_platform, ident):
+    """Say two accounts are one person. Returns (ok, error, other_record).
+
+    `ident` is the other account's id, @handle or NAME. A name only matches
+    someone already on file (and must be unambiguous); an id or handle nobody
+    has used yet creates a hand-added record for it, which is what linking
+    an Instagram account that has never written needs. Each record has one
+    partner — linking again moves it. Permissions are not shared."""
+    if platform not in PLATFORMS or other_platform not in PLATFORMS:
+        return False, "unknown platform", None
+    if platform == other_platform:
+        return False, ("link a Discord account to an Instagram one (or the "
+                       "other way round) — not two on the same platform"), None
+    data = _load()
+    me_key = key(platform, user_id)
+    me = data.get(me_key)
+    if not isinstance(me, dict):
+        return False, f"{user_id} isn't registered on {platform}", None
+    text = " ".join(str(ident or "").split())
+    if not text:
+        return False, "type their id, @handle or name", None
+    found = _candidates(data, other_platform, text)
+    if len(found) > 1:
+        return False, (f"more than one person on {other_platform} matches "
+                       f"'{text}' — use their id or @handle"), None
+    if found:
+        other = found[0]
+    else:
+        typed = _ident_of(text)
+        if not typed:
+            return False, (f"nobody on {other_platform} is called '{text}'. "
+                           f"Use their id or @handle to link someone who "
+                           f"hasn't messaged yet"), None
+        other = _new_manual(other_platform, typed)
+        data[key(other_platform, other["user_id"])] = other
+    other_key = key(other_platform, other["user_id"])
+    if me.get("linked") == other_key and other.get("linked") == me_key:
+        return True, "", other
+    _break(data, me_key)
+    _break(data, other_key)
+    data[me_key]["linked"] = other_key
+    data[other_key]["linked"] = me_key
+    if not _save(data):
+        return False, "could not write people.json", None
+    return True, "", data[other_key]
+
+
+def unlink(platform, user_id):
+    """Forget the link, on both sides. Idempotent."""
+    data = _load()
+    k = key(platform, user_id)
+    if not isinstance(data.get(k), dict):
+        return False, f"{user_id} isn't registered on {platform}"
+    if not data[k].get("linked"):
+        return True, ""
+    _break(data, k)
+    return (True, "") if _save(data) else (False, "could not write people.json")
 
 
 def describe(entry):
@@ -351,7 +679,8 @@ def prompt_block(entry, platform):
             f"account. Treat it exactly like a message at the PC."
         )
 
-    who = entry.get("name") or ""
+    other = partner(entry)
+    who = entry.get("name") or (other or {}).get("name") or ""
     handle = entry.get("handle") or ""
     label = who or (f"@{handle}" if handle else "someone you don't know")
     lines = [
@@ -369,7 +698,22 @@ def prompt_block(entry, platform):
         )
     else:
         lines.append(f"They asked to be called {who}.")
-    notes = [n for n in (entry.get("notes") or []) if isinstance(n, str)][:MAX_NOTES]
+    notes = [n for n in (entry.get("notes") or []) if isinstance(n, str)]
+    # A linked account is the same person, so what was learned about them on
+    # the other platform applies here. Deliberately NOT done when the other
+    # account is the owner's own: this block says "not your owner", and a
+    # line saying they are also the owner's account would contradict it.
+    # (Linking never grants ownership — see the module docstring.)
+    if other and not other.get("is_owner"):
+        other_label = (other.get("name") or
+                       (f"@{other['handle']}" if other.get("handle") else "")
+                       or "an account")
+        lines.append(f"They are the same person as {other_label} on "
+                     f"{other.get('platform') or 'the other platform'}.")
+        for n in other.get("notes") or []:
+            if isinstance(n, str) and n not in notes:
+                notes.append(n)
+    notes = notes[:MAX_NOTES]
     if notes:
         lines.append("What you already know about them: " + "; ".join(notes) + ".")
     return " ".join(lines)

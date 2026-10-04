@@ -201,7 +201,11 @@ def _resolve(person, platform_arg):
     records = []
     for platform in platforms:
         for rec in people.all_people(platform):
-            if isinstance(rec, dict) and rec.get("user_id"):
+            # A hand-added person known only by handle (placeholder) has no
+            # platform id yet, so there is nothing a DM could be addressed
+            # to. They become sendable the moment they write once.
+            if (isinstance(rec, dict) and rec.get("user_id")
+                    and not rec.get("placeholder")):
                 records.append(rec)
 
     def _fields(rec):

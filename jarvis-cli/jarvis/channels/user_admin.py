@@ -27,11 +27,16 @@ switches are a different kind of thing and live elsewhere on purpose:
               them, which is not what a Block button means.
     tools     user_perms.tools — which tools, when `tool` is on.
 
-REGISTERED ONLY
----------------
-Every function refuses a person who has no people.json record (nobody who was
-denied at the gate ever gets one — see permissions.py). That is the rule the
-panel is built on, so it is enforced here and not left to the UI.
+REGISTERED ONLY — AND WHO COUNTS AS REGISTERED
+----------------------------------------------
+Every function refuses a person who has no people.json record. That is the
+rule the panel is built on, so it is enforced here and not left to the UI.
+A record comes from one of three places: a message (people.touch), the owner
+adding someone by hand (add_person), or an allow-list that already names
+someone who hasn't written yet. The third is what list_view() reconciles on
+every read: anyone in dm/reply/tool_allowlist or `owner` gets a record, so a
+person added through "Global lists" or `channels-allow` shows up in the panel
+instead of being invisible until their first message.
 
 WHAT A SWITCH CANNOT DO
 -----------------------
@@ -77,6 +82,21 @@ def membership(cfg, which, rec):
     return {"on": wildcard or explicit, "via": via, "explicit": explicit}
 
 
+def _linked_view(rec):
+    """The other half of a link, as the panel shows it, or None."""
+    other = people.partner(rec)
+    if not other:
+        return None
+    return {
+        "platform": other.get("platform") or "",
+        "user_id": str(other.get("user_id") or ""),
+        "handle": other.get("handle") or "",
+        "name": other.get("name") or "",
+        "avatar": other.get("avatar") or "",
+        "owner": bool(other.get("is_owner")),
+    }
+
+
 def person_view(platform, rec, cfg, perms):
     """One person as the panel renders them: identity plus every switch."""
     cfg = cfg or {}
@@ -88,6 +108,16 @@ def person_view(platform, rec, cfg, perms):
         "user_id": str(rec.get("user_id") or ""),
         "handle": rec.get("handle") or "",
         "name": rec.get("name") or "",
+        # What the panel should call them: their own name, else the linked
+        # account's. `name_from` says which, so the Details row can be honest.
+        "name_effective": people.effective_name(rec),
+        "name_from": ("own" if rec.get("name") else
+                      "linked" if people.effective_name(rec) else ""),
+        "name_locked": bool(rec.get("name_locked")),
+        "manual": bool(rec.get("manual")),
+        # Only a handle is known; the id arrives with their first message.
+        "placeholder": bool(rec.get("placeholder")),
+        "linked": _linked_view(rec),
         "avatar": rec.get("avatar") or "",
         "first_seen": rec.get("first_seen"),
         "last_seen": rec.get("last_seen"),
@@ -148,6 +178,8 @@ def list_view(platform=None):
     instead of guessing when user_perms.json is unreadable."""
     cfg_all = channel_config.load_config()
     platforms = [platform] if platform in PLATFORMS else list(PLATFORMS)
+    for p in platforms:
+        sync_listed(p, cfg_all.get(p) or {})
     perms_error = ""
     try:
         store = user_perms._load()
@@ -166,6 +198,22 @@ def list_view(platform=None):
         "people": out_people,
         "perms_error": perms_error,
     }
+
+
+def sync_listed(platform, cfg):
+    """Make sure everyone an allow-list (or `owner`) names has a record.
+    Never raises: a store that can't be written leaves the panel showing what
+    it already had rather than failing to open. Returns how many were made."""
+    entries = []
+    for which in (PERM_DM, PERM_REPLY, PERM_TOOLS):
+        entries.extend(channel_config.normalize_entries((cfg or {}).get(which)))
+    owner = channel_config.normalize_entry((cfg or {}).get("owner"))
+    if owner:
+        entries.append(owner)
+    try:
+        return people.adopt_listed(platform, [e for e in entries if e != WILDCARD])
+    except Exception:  # noqa: BLE001
+        return 0
 
 
 def _registered(platform, user_id):
@@ -285,3 +333,77 @@ def set_tools(platform, user_id, mode, names=None):
     except (ValueError, OSError, user_perms.PermsUnreadable) as exc:
         return False, str(exc)
     return True, ""
+
+
+# --------------------------------------------------------------------------
+# Name, add, remove, link  (the panel's Profile tab and "Add person")
+# --------------------------------------------------------------------------
+
+def add_person(platform, ident, name=""):
+    """Add someone who hasn't messaged yet. Returns (ok, error, record,
+    existing).
+
+    Creates a row and nothing else: no list entry, no tool, no ownership. The
+    owner then flips switches on the row like on anyone else. Adding someone
+    who is already on file is not a failure: `existing` is True and the
+    record returned is theirs, so the panel can simply select them."""
+    rec, err = people.add_person(platform, ident, name)
+    if rec is not None and err:
+        return True, "", rec, True
+    return (rec is not None), err, rec, False
+
+
+def rename(platform, user_id, name):
+    """Set (or, with an empty name, clear) what this person is called. The
+    owner's word outranks a guest's own remember_sender — see
+    people.set_name. Returns (ok, error, name_now)."""
+    rec, err = _registered(platform, user_id)
+    if rec is None:
+        return False, err, ""
+    out = people.set_name(platform, rec["user_id"], name, manual=True)
+    return True, "", out.get("name") or ""
+
+
+def remove_person(platform, user_id):
+    """Remove a hand-added person who never messaged, and take them out of
+    every list that named them (otherwise sync_listed would just re-create
+    the row). Returns (ok, error)."""
+    rec, err = _registered(platform, user_id)
+    if rec is None:
+        return False, err
+    cfg = channel_config.platform_config(platform)
+    if permissions.is_owner(cfg, _idents(rec)):
+        return False, "that's the owner — hand ownership to someone else first"
+    if not rec.get("manual") or int(rec.get("messages") or 0) > 0:
+        return False, ("only someone you added by hand who has never "
+                       "messaged can be removed — block anyone else")
+    for which in (PERM_DM, PERM_REPLY, PERM_TOOLS):
+        ok, err = _remove_everywhere(platform, which, rec)
+        if not ok:
+            return False, err
+    return people.remove_person(platform, rec["user_id"])
+
+
+def link_accounts(platform, user_id, other_platform, ident):
+    """Say this account and one on the other platform are the same person.
+    Identity only: no permission is shared or granted. Returns
+    (ok, error, note)."""
+    rec, err = _registered(platform, user_id)
+    if rec is None:
+        return False, err, ""
+    ok, err, other = people.link(platform, rec["user_id"], other_platform, ident)
+    if not ok:
+        return False, err, ""
+    note = ""
+    if other and other.get("is_owner"):
+        note = (f"that's the {other_platform} owner. Linking doesn't make "
+                f"this account the owner — switch Owner on for it too if "
+                f"it's you")
+    return True, "", note
+
+
+def unlink_accounts(platform, user_id):
+    rec, err = _registered(platform, user_id)
+    if rec is None:
+        return False, err
+    return people.unlink(platform, rec["user_id"])

@@ -1171,6 +1171,66 @@ app.post("/api/channels/people/:platform/:id/tools", requireJarvis, async (req, 
   sendChannelResult(await runJarvisOnce(args, 10000), res);
 });
 
+// --- Channels > People: add / rename / remove / link ------------------------
+// Same rules as the routes above: argv arrays only, every value validated
+// first. A name or a link target is TEXT a person may have typed, so it is
+// length-capped, single-line, and may not start with "-" (the CLI would read
+// it as a flag). None of these grants a permission.
+const CHANNEL_NAME_OK = (v) => typeof v === "string" && v.length <= 48 && !/[\x00-\x1f\x7f]/.test(v) && !v.trim().startsWith("-");
+const CHANNEL_LINK_OK = (v) => typeof v === "string" && v.trim().length > 0 && v.length <= 64 && !/[\x00-\x1f\x7f]/.test(v) && !v.trim().startsWith("-");
+
+app.post("/api/channels/people", requireJarvis, async (req, res) => {
+  const platform = req.body?.platform;
+  if (!CHANNEL_PLATFORMS.has(platform)) return res.status(400).json({ error: "Unknown platform." });
+  const ident = typeof req.body?.ident === "string" ? req.body.ident.trim().replace(/^@/, "") : "";
+  if (!CHANNEL_USER_ID.test(ident)) {
+    return res.status(400).json({ error: "Type an id or @handle (letters, digits, . _ - and no spaces)." });
+  }
+  const name = req.body?.name === undefined || req.body?.name === null ? "" : req.body.name;
+  if (!CHANNEL_NAME_OK(name)) return res.status(400).json({ error: "That name is too long or has odd characters." });
+  const args = ["channels-add-person", platform, ident];
+  if (name.trim()) args.push(name.trim());
+  sendChannelResult(await runJarvisOnce(args, 10000), res);
+});
+
+app.post("/api/channels/people/:platform/:id/name", requireJarvis, async (req, res) => {
+  const { platform, id } = req.params;
+  if (!CHANNEL_PLATFORMS.has(platform)) return res.status(400).json({ error: "Unknown platform." });
+  if (!CHANNEL_USER_ID.test(id)) return res.status(400).json({ error: "Invalid user id." });
+  const name = req.body?.name === undefined || req.body?.name === null ? "" : req.body.name;
+  if (!CHANNEL_NAME_OK(name)) return res.status(400).json({ error: "That name is too long or has odd characters." });
+  const args = ["channels-rename", platform, id];
+  if (name.trim()) args.push(name.trim());
+  sendChannelResult(await runJarvisOnce(args, 10000), res);
+});
+
+app.post("/api/channels/people/:platform/:id/remove", requireJarvis, async (req, res) => {
+  const { platform, id } = req.params;
+  if (!CHANNEL_PLATFORMS.has(platform)) return res.status(400).json({ error: "Unknown platform." });
+  if (!CHANNEL_USER_ID.test(id)) return res.status(400).json({ error: "Invalid user id." });
+  sendChannelResult(await runJarvisOnce(["channels-remove-person", platform, id], 10000), res);
+});
+
+app.post("/api/channels/people/:platform/:id/link", requireJarvis, async (req, res) => {
+  const { platform, id } = req.params;
+  if (!CHANNEL_PLATFORMS.has(platform)) return res.status(400).json({ error: "Unknown platform." });
+  if (!CHANNEL_USER_ID.test(id)) return res.status(400).json({ error: "Invalid user id." });
+  const other = req.body?.other_platform;
+  if (!CHANNEL_PLATFORMS.has(other) || other === platform) {
+    return res.status(400).json({ error: "Pick the other platform." });
+  }
+  if (!CHANNEL_LINK_OK(req.body?.ident)) return res.status(400).json({ error: "Type their id, @handle or name." });
+  sendChannelResult(await runJarvisOnce(
+    ["channels-link", platform, id, other, req.body.ident.trim()], 10000), res);
+});
+
+app.post("/api/channels/people/:platform/:id/unlink", requireJarvis, async (req, res) => {
+  const { platform, id } = req.params;
+  if (!CHANNEL_PLATFORMS.has(platform)) return res.status(400).json({ error: "Unknown platform." });
+  if (!CHANNEL_USER_ID.test(id)) return res.status(400).json({ error: "Invalid user id." });
+  sendChannelResult(await runJarvisOnce(["channels-unlink", platform, id], 10000), res);
+});
+
 // ---------------------------------------------------------------------------
 // Skills (see jarvis-cli/jarvis/skills.py). These proxy the dedicated
 // `jarvis skills-*` CLI commands rather than going through /api/tools/run,

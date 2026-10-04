@@ -74,6 +74,13 @@ things that were already fixed once.
   through `channels/user_admin.py` and edit the same allow-lists as
   `channels-allow`; don't add a second path that writes them, and don't let a
   bot token pass through the browser. `tests/test_user_admin.py` pins this.
+  **Linking two accounts as one person (L.36b) is identity only** — it shares a
+  name and notes with the model and nothing else. `permissions.py` must never
+  read `linked`, and a link must never make an account the owner or inherit a
+  switch. A hand-added person known only by handle is a `placeholder`; when it
+  is adopted on first message its `user_perms.json` entry must move to the real
+  id (a limit left behind widens access). `tests/test_channel_manual_people.py`
+  pins both.
 - **MCP servers are added or changed only by a human.** The MCP panel's
   buttons, `jarvis mcp-edit` and a hand-edit of `mcp_config.json` are the only
   write paths (`mcp_client.save_server` / `set_server_flag` / `remove_server`);
