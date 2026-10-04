@@ -102,6 +102,7 @@ function makeWorld({ show = false, viewing = true } = {}) {
   w.status = [];
   w.scrolls = 0;
   w.mdCalls = 0;
+  w.richCalls = [];
   w.frames = [];
 
   const pending = el("div", { class: "ask-msg ask-msg--jarvis is-pending" }, [
@@ -124,9 +125,14 @@ function makeWorld({ show = false, viewing = true } = {}) {
         w.askThread.insertBefore(msg, w.state.askPendingBubble);
       } else w.askThread.appendChild(msg);
     },
-    renderMarkdown: (t) => { w.mdCalls += 1; return "<md>" + t + "</md>"; },
-    linkifyPaths: () => {},
-    renderMathIn: () => {},
+    // The block draws through app.js's single entry point, renderRich() (I-B10).
+    // The stub records what it was asked to draw; renderRich itself (fence
+    // closing, math, code-block chrome) lives outside this block.
+    renderRich: (bubbleEl, t, opts) => {
+      w.mdCalls += 1;
+      w.richCalls.push({ text: t, opts: opts || {} });
+      bubbleEl.innerHTML = "<md>" + t + "</md>";
+    },
     addAskMsgActions: () => {},
     currentAssistantName: () => "Jarvis",
     askThreadScrollToEnd: () => { w.scrolls += 1; },
@@ -183,8 +189,12 @@ function makeWorld({ show = false, viewing = true } = {}) {
   check("status line says writing…", w.status[w.status.length - 1] === "writing\u2026", w.status);
   w.ev("text", { d: "\n```js\nlet a" });
   w.flush();
-  check("an unclosed fence is closed in the preview only",
-    w.pendingBubble.innerHTML === "<md>Hello world\n```js\nlet a\n```</md>", w.pendingBubble.innerHTML);
+  // renderRich(..., { final: false }) closes the open fence itself (and marks
+  // that last block "writing…"); the block just has to hand it the real text
+  // and flag the render as non-final, math-free.
+  const last = w.richCalls[w.richCalls.length - 1];
+  check("the preview render is non-final and hands over the real, unbalanced text",
+    last.text === "Hello world\n```js\nlet a" && last.opts.final === false && last.opts.math === false, last);
   check("the stored text itself keeps the real, unbalanced content", w.state.askStream.text === "Hello world\n```js\nlet a");
 }
 

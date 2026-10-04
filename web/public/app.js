@@ -3486,6 +3486,42 @@
     }
   }
 
+  // THE render entry point (master plan I-B10): every place a reply is drawn
+  // into a bubble — streamed preview, the pending bubble, finalize, history,
+  // committed interim text — calls this, so a live reply and the same reply
+  // reloaded can't diverge. Order matters: markdown -> sanitise -> innerHTML ->
+  // linkifyPaths -> math -> code-block chrome (DOM post-processing, so
+  // DOMPurify never sees it).
+  //   final  (default true)  false = the text may end mid-fence (it is still
+  //          arriving): the open fence is closed for the preview only, and that
+  //          last block is drawn as "writing..." with Copy disabled.
+  //   math   (default true)  false skips KaTeX (the live token-rate preview
+  //          has never typeset math; it does at finalize).
+  function renderRich(bubbleEl, markdown, opts) {
+    const o = opts || {};
+    const final = o.final !== false;
+    const text = String(markdown == null ? "" : markdown);
+    const src = final ? text : balanceStreamingMarkdown(text);
+    bubbleEl.innerHTML = renderMarkdown(src);
+    linkifyPaths(bubbleEl);
+    if (o.math !== false) renderMathIn(bubbleEl);
+    if (window.JarvisRich) {
+      window.JarvisRich.enhanceCodeBlocks(bubbleEl, { streamingLast: !final && src !== text });
+    }
+    return bubbleEl;
+  }
+
+  // The one clipboard helper for the Ask panel (I-B9). Resolves true/false.
+  async function copyToClipboard(text) {
+    if (window.JarvisRich) return window.JarvisRich.copyText(text);
+    try {
+      await navigator.clipboard.writeText(text);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
   // ===========================================================================
   // Path linkification — turn file/folder paths mentioned in a rendered
   // reply into clickable links that open them, using the same
@@ -3642,6 +3678,10 @@
 
   const askOverlay = qs("#ask-overlay");
   const askThread = qs("#ask-thread");
+  // One delegated click handler for every code block's Wrap / Copy / Show-all
+  // button (rich-text.js). Bubbles are rebuilt via innerHTML, so per-button
+  // listeners would be lost; only buttons the enhancer created are live.
+  if (window.JarvisRich) window.JarvisRich.attach(askThread);
 
   function setAskStatus(text, kind) {
     if (!isViewingAskThread()) return;
@@ -3695,12 +3735,8 @@
       toast("Nothing to copy.");
       return;
     }
-    try {
-      await navigator.clipboard.writeText(text);
-      toast("Copied raw text.", "info");
-    } catch {
-      toast("Couldn't copy to clipboard.");
-    }
+    if (await copyToClipboard(text)) toast("Copied raw text.", "info");
+    else toast("Couldn't copy to clipboard.");
   }
 
   function previousUserMessage(fromMsg) {
@@ -3743,7 +3779,11 @@
         el("blockquote", { class: "ask-msg__quote" }, q)
       )));
     }
-    kids.push(el("div", { class: "ask-msg__bubble" }, text || "About the quoted part"));
+    const userBubble = el("div", { class: "ask-msg__bubble" }, text || "About the quoted part");
+    // D-I2: a fenced block in your own message renders as a code block; the
+    // prose around it stays plain text. No-op when the text has no fence.
+    if (text && window.JarvisRich) window.JarvisRich.renderUserText(userBubble, text);
+    kids.push(userBubble);
     const msg = el("div", { class: "ask-msg ask-msg--user" }, kids);
     msg.dataset.raw = text || quotes.join("\n\n") || "";
     addAskMsgActions(msg);
@@ -4813,8 +4853,7 @@
     const follow = streamNearBottom();
     const bubble = qs(".ask-msg__bubble", state.askPendingBubble);
     if (!bubble) return;
-    bubble.innerHTML = renderMarkdown(balanceStreamingMarkdown(st.text));
-    linkifyPaths(bubble);
+    renderRich(bubble, st.text, { final: false, math: false });
     if (follow) askThreadScrollToEnd();
   }
 
@@ -4899,9 +4938,7 @@
       ]);
       msg.dataset.raw = text;
       const bubbleEl = qs(".ask-msg__bubble", msg);
-      bubbleEl.innerHTML = renderMarkdown(text);
-      linkifyPaths(bubbleEl);
-      renderMathIn(bubbleEl);
+      renderRich(bubbleEl, text);
       addAskMsgActions(msg);
       insertIntoAskThread(msg); // lands above the pending bubble, in order
       resetPendingBubbleToTyping();
@@ -4991,9 +5028,7 @@
     if (name) qs(".ask-msg__role", state.askPendingBubble).textContent = name;
     renderAskTrace(dump);
     const bubble = qs(".ask-msg__bubble", state.askPendingBubble);
-    bubble.innerHTML = renderMarkdown(reply.join("\n"));
-    linkifyPaths(bubble);
-    renderMathIn(bubble);
+    renderRich(bubble, reply.join("\n"), { final: false });
   }
 
   function appendAskReplyLine(line) {
@@ -5026,9 +5061,7 @@
         bubble.dataset.raw = streamedPartial;
         bubble.classList.add("is-stopped");
         const bubbleEl = qs(".ask-msg__bubble", bubble);
-        bubbleEl.innerHTML = renderMarkdown(streamedPartial);
-        linkifyPaths(bubbleEl);
-        renderMathIn(bubbleEl);
+        renderRich(bubbleEl, streamedPartial);
         bubbleEl.appendChild(el("div", { class: "ask-stream-note" },
           overrideMessage ? `Stopped \u2014 ${overrideMessage}` : "Stopped \u2014 this reply is incomplete."));
       } else if (state.askReplyLines.length === 0) {
@@ -5046,9 +5079,7 @@
         const raw = replyLines.join("\n");
         bubble.dataset.raw = raw;
         const bubbleEl = qs(".ask-msg__bubble", bubble);
-        bubbleEl.innerHTML = renderMarkdown(raw);
-        linkifyPaths(bubbleEl);
-        renderMathIn(bubbleEl);
+        renderRich(bubbleEl, raw);
       }
       addAskMsgActions(bubble);
     }
@@ -5196,12 +5227,8 @@
   });
   qs("#ask-sel-copy").addEventListener("click", async () => {
     if (!pendingSelection) return;
-    try {
-      await navigator.clipboard.writeText(pendingSelection);
-      toast("Copied selection.", "info");
-    } catch {
-      toast("Couldn't copy.");
-    }
+    if (await copyToClipboard(pendingSelection)) toast("Copied selection.", "info");
+    else toast("Couldn't copy.");
     hideSelPop();
   });
 
@@ -7342,9 +7369,7 @@
     ]);
     msg.dataset.raw = text || "";
     const bubbleEl = qs(".ask-msg__bubble", msg);
-    bubbleEl.innerHTML = renderMarkdown(text || "");
-    linkifyPaths(bubbleEl);
-    renderMathIn(bubbleEl);
+    renderRich(bubbleEl, text || "");
     addAskMsgActions(msg);
     askThread.appendChild(msg);
     return msg;
@@ -9861,6 +9886,39 @@
   // (logsearch.js, so far) can call into without reaching into any of
   // app.js's other internals — see logsearch.js's own header comment for
   // why a log hit pointing at a conversation needs this.
+  // L.45: the same Markdown pipeline as the main chat (marked + DOMPurify +
+  // KaTeX), handed to the two other places that show Jarvis's own words — the
+  // Channels panel's Conversation tab and the Tool Manager's Ask Jarvis dock —
+  // so there is ONE renderer, not three. It differs from the chat bubble in the
+  // ways that matter for text that may have been steered by a stranger (a chat
+  // guest can shape what Jarvis writes back): images are never loaded (an
+  // <img> pointing at someone's server would tell them the owner opened the
+  // log), every link opens in a new tab with no opener, and only http(s) and
+  // mailto links survive. `streaming` closes a half-written code fence so the
+  // text still to come isn't swallowed into one giant code block.
+  function renderMarkdownInto(target, text, opts) {
+    if (!target) return;
+    const o = opts || {};
+    let src = String(text == null ? "" : text);
+    if (o.streaming || o.balance) src = balanceStreamingMarkdown(src);
+    const tpl = document.createElement("template");
+    tpl.innerHTML = renderMarkdown(src);
+    tpl.content.querySelectorAll("img").forEach((img) => {
+      const alt = img.getAttribute("alt") || img.getAttribute("src") || "image";
+      img.replaceWith(document.createTextNode("[image: " + alt + "]"));
+    });
+    tpl.content.querySelectorAll("a[href]").forEach((a) => {
+      const href = a.getAttribute("href") || "";
+      if (!/^(https?:|mailto:)/i.test(href)) { a.removeAttribute("href"); return; }
+      a.setAttribute("target", "_blank");
+      a.setAttribute("rel", "noopener noreferrer");
+      if (!a.title) a.title = href;
+    });
+    target.innerHTML = "";
+    target.appendChild(tpl.content);
+    renderMathIn(target);
+  }
+  window.JarvisMarkdown = { renderInto: renderMarkdownInto };
   window.JarvisAsk = { openConversation: async (id) => { await selectConversation(id); openAsk(); } };
   // Same idea, for the one notification-permission prompt Schedules used to
   // trigger itself before it was split out (H.2) — kept as a real user

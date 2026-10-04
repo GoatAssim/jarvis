@@ -1,0 +1,152 @@
+/* rich-text.css — fenced code blocks in the Ask thread (master plan Part I.1).
+   Pairs with rich-text.js. Everything is themed through the skin/persona
+   variables (--accent, --green, --bg-raised ...); the --code-* tokens below
+   only default to them, so a skin or persona theme can override any one.
+
+   Specificity note: style.css styles `.ask-msg--jarvis .ask-msg__bubble pre`
+   (0,2,1). The selectors here lead with `.ask-msg__bubble .codeblock` so they
+   win in both Jarvis and user bubbles without !important. */
+
+.codeblock{
+  --code-keyword:  var(--accent);
+  --code-string:   var(--green);
+  --code-comment:  var(--text-dimmer);
+  --code-number:   var(--orange);
+  --code-title:    var(--gold);
+  --code-builtin:  var(--accent-soft);
+  --code-meta:     var(--text-dim);
+  --code-addition: var(--green);
+  --code-deletion: var(--red);
+
+  margin: 0.5em 0 0.8em;
+  max-width: 100%;
+  min-width: 0;
+  border: 1px solid var(--border);
+  border-radius: 2px;
+  background: var(--bg-raised);
+  /* The user bubble is white-space: pre-wrap; the chrome must not inherit it. */
+  white-space: normal;
+  text-align: left;
+  /* NOT overflow:hidden — that would break the sticky bar. Corners are
+     rounded on the bar and the <pre> individually instead. */
+}
+.codeblock:first-child{ margin-top: 0; }
+.codeblock:last-child{ margin-bottom: 0; }
+
+/* ---- the bar --------------------------------------------------------- */
+.codeblock__bar{
+  position: sticky; top: 0; z-index: 1;
+  display: flex; align-items: center; gap: 8px;
+  padding: 3px 6px 3px 10px;
+  background: var(--bg-raised);
+  border-bottom: 1px solid var(--border);
+  border-radius: 2px 2px 0 0;
+  font-family: var(--font-mono); font-size: 11px; line-height: 1.4;
+  color: var(--text-dim);
+  /* The chrome is not selectable, so select-all + Ctrl+C yields clean code. */
+  -webkit-user-select: none; user-select: none;
+}
+.codeblock__lang{ color: var(--accent-soft); letter-spacing: 0.04em; }
+.codeblock__meta{ color: var(--text-dimmer); }
+.codeblock__spacer{ flex: 1; min-width: 0; }
+
+.codeblock__wrap,
+.codeblock__copy,
+.codeblock__more{
+  font: inherit; color: var(--text-dim);
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: 2px;
+  padding: 1px 8px;
+  cursor: pointer;
+}
+.codeblock__wrap:hover:not(:disabled),
+.codeblock__copy:hover:not(:disabled),
+.codeblock__more:hover{
+  color: var(--text); border-color: var(--border-strong);
+}
+.codeblock__wrap:focus-visible,
+.codeblock__copy:focus-visible,
+.codeblock__more:focus-visible,
+.codeblock__pre:focus-visible{
+  outline: 1px solid var(--accent); outline-offset: 1px;
+}
+.codeblock__wrap[aria-pressed="true"]{ color: var(--accent); border-color: var(--accent-dim); }
+.codeblock__copy:disabled{ opacity: 0.45; cursor: not-allowed; }
+.codeblock__copy.is-ok{ color: var(--green); border-color: var(--green); }
+.codeblock__copy.is-fail{ color: var(--red); border-color: var(--red); }
+
+/* ---- the code -------------------------------------------------------- */
+.ask-msg__bubble .codeblock > pre.codeblock__pre{
+  margin: 0; padding: 10px 12px;
+  background: transparent; border: none; border-radius: 0 0 2px 2px;
+  overflow-x: auto;
+  white-space: pre; word-break: normal; overflow-wrap: normal;
+  font-family: var(--font-mono); font-size: 0.85em; line-height: 1.5;
+  color: var(--text);
+  tab-size: 4;
+}
+.ask-msg__bubble .codeblock > pre.codeblock__pre code{
+  background: none; border: none; border-radius: 0; padding: 0;
+  font: inherit; color: inherit; white-space: inherit;
+}
+.codeblock--wrap > pre.codeblock__pre{
+  white-space: pre-wrap !important;
+  overflow-wrap: anywhere; word-break: normal;
+}
+
+/* ---- collapse (a class toggle, no re-render) -------------------------- */
+.ask-msg__bubble .codeblock--collapsed > pre.codeblock__pre{
+  max-height: calc(16 * 1.5em);
+  overflow-y: hidden;
+  -webkit-mask-image: linear-gradient(to bottom, #000 calc(100% - 3.2em), transparent);
+          mask-image: linear-gradient(to bottom, #000 calc(100% - 3.2em), transparent);
+}
+.codeblock__more{
+  display: block; width: 100%;
+  border: none; border-top: 1px solid var(--border); border-radius: 0 0 2px 2px;
+  padding: 4px 10px;
+  font-family: var(--font-mono); font-size: 11px; text-align: center;
+}
+
+/* A block still being written: dim the label so it reads as in progress. */
+.codeblock--streaming .codeblock__meta{ color: var(--accent-soft); }
+
+/* Prose runs in your own bubble, between fences. */
+.codeblock-prose{ white-space: pre-wrap; }
+
+/* ---- token colours ---------------------------------------------------- */
+.codeblock .hljs-keyword,
+.codeblock .hljs-selector-tag,
+.codeblock .hljs-literal,
+.codeblock .hljs-doctag,
+.codeblock .hljs-type{ color: var(--code-keyword); }
+.codeblock .hljs-string,
+.codeblock .hljs-regexp,
+.codeblock .hljs-char,
+.codeblock .hljs-template-variable,
+.codeblock .hljs-link{ color: var(--code-string); }
+.codeblock .hljs-comment,
+.codeblock .hljs-quote{ color: var(--code-comment); font-style: italic; }
+.codeblock .hljs-number,
+.codeblock .hljs-symbol,
+.codeblock .hljs-bullet{ color: var(--code-number); }
+.codeblock .hljs-title,
+.codeblock .hljs-section,
+.codeblock .hljs-name,
+.codeblock .hljs-selector-id,
+.codeblock .hljs-selector-class{ color: var(--code-title); }
+.codeblock .hljs-built_in,
+.codeblock .hljs-attr,
+.codeblock .hljs-attribute,
+.codeblock .hljs-property,
+.codeblock .hljs-variable{ color: var(--code-builtin); }
+.codeblock .hljs-meta,
+.codeblock .hljs-params,
+.codeblock .hljs-operator,
+.codeblock .hljs-punctuation,
+.codeblock .hljs-tag{ color: var(--code-meta); }
+.codeblock .hljs-addition{ color: var(--code-addition); background: rgba(70, 240, 182, 0.08); }
+.codeblock .hljs-deletion{ color: var(--code-deletion); background: rgba(255, 92, 108, 0.08); }
+.codeblock .hljs-emphasis{ font-style: italic; }
+.codeblock .hljs-strong{ font-weight: 700; }

@@ -457,6 +457,9 @@
 .tm-agent__msg--user{ align-self: flex-end; background: color-mix(in srgb, var(--accent) 14%, transparent); color: var(--text); }
 .tm-agent__msg--ai{ align-self: flex-start; background: var(--bg-1); border: 1px solid var(--border); color: var(--text-dim); }
 .tm-agent__msg--err{ border-color: rgba(255,92,108,.45); color: var(--red); }
+.tm-agent__msg.jv-md{ white-space: normal; }
+.tm-agent__msg.jv-md.is-pending::after{ content: none; }
+.tm-agent__msg.jv-md.is-pending > :last-child::after{ content: "▍"; color: var(--accent); margin-left: 2px; animation: tm-tab-pulse 1s steps(2) infinite; }
 .tm-agent__msg.is-pending::after{ content: "▍"; color: var(--accent); animation: tm-tab-pulse 1s steps(2) infinite; }
 .tm-agent__meta{ font-family: var(--font-mono); font-size: 10.5px; color: var(--text-dimmer); margin-top: 3px; }
 .tm-agent__compose{ display: flex; gap: 8px; align-items: flex-end; padding: 4px 12px 10px; }

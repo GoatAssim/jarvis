@@ -213,11 +213,23 @@ kind is currently active.
 web/
 ├── server.js         Express + ws backend — the only thing that talks to jarvis
 ├── package.json
+├── scripts/
+│   └── vendor-highlightjs.mjs   Fetches the offline highlight.js fallback (see below)
 └── public/            Served as static files (this is the entire client)
     ├── index.html
     ├── app.js          All client logic, no build step, no framework
-    └── style.css
+    ├── style.css
+    ├── rich-text.js    Code blocks (bar, Copy, collapse, wrap) + the clipboard helper
+    ├── rich-text.css
+    └── vendor/         Local fallbacks for CDN scripts (highlight.min.js)
 ```
+
+**Code blocks.** Fenced code in replies (and in your own messages) renders with a language label, line
+count, **Wrap** and **Copy**; blocks over 30 lines start collapsed (Copy still copies every line). Syntax
+colouring uses highlight.js from a pinned CDN URL, falling back to `public/vendor/highlight.min.js`, then to
+plain monospace. To (re)create the vendored copy: `node scripts/vendor-highlightjs.mjs` from `web/` (needs
+network once; the version comes from the tag in `index.html`). Wrap is remembered in `localStorage`
+(`jarvis.code.wrap`).
 
 No bundler, no framework, no build step — `public/` is served as-is.
 Editing any of the three front-end files and refreshing the browser is

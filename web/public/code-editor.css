@@ -71,6 +71,8 @@
 /* line bands */
 .ce__band{ position: absolute; left: 0; right: 0; pointer-events: none; }
 .ce__band--cur{ background: color-mix(in srgb, var(--accent) 7%, transparent); border-top: 1px solid color-mix(in srgb, var(--accent) 10%, transparent); border-bottom: 1px solid color-mix(in srgb, var(--accent) 10%, transparent); box-sizing: border-box; }
+.ce__band--ai{ display: none; background: color-mix(in srgb, var(--accent) 16%, transparent); box-shadow: inset 3px 0 0 var(--accent); }
+.ce__band--pend{ display: none; background: color-mix(in srgb, var(--bg-1) 58%, transparent); }
 .ce__band--err{ background: color-mix(in srgb, var(--red) 16%, transparent); box-shadow: inset 3px 0 0 var(--red); display: none; }
 
 /* syntax */

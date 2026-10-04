@@ -145,6 +145,11 @@ jarvis-cli/jarvis/
         user_perms.py     L.36: per-person permissions the three allow-lists can't say —
                           WHICH tools (an allow-list, never a deny-list) and whether Jarvis
                           may DM them; fails closed (`PermsUnreadable` -> tools off)
+        presets.py        L.36-P4: the quick setups (No access / Chat only / Chat + tell the
+                          owner / Trusted) -- pure data, fixed in code, no I/O
+        preset_admin.py   L.36-P4/P5: plan (preview) and apply one setup for one person, and
+                          bulk_flag / bulk_preset for several. Only ever calls
+                          user_admin.set_flag / set_tools; every refusal is per person
         user_admin.py     L.36: one person, every switch (dm/reply/tool/owner/send_dm/blocked
                           + tool scope); the ONE implementation behind the panel and
                           `jarvis channels-user`; registered people only. L.36b adds
@@ -216,6 +221,9 @@ web/
                                  (people list | Profile + Permissions tabs | platform cards and the
                                  old global allow-lists as a fallback). Every switch POSTs to
                                  /api/channels/people/...; app.js only calls JarvisChannels.open().
+                                 L.36-P4/P5: a Quick setups row (preview, then Apply) on the
+                                 Permissions tab, and "Select people..." for a bulk editor
+                                 (/api/channels/bulk, /api/channels/people/:p/:id/preset).
                                  Pure helpers in JarvisChannels._pure. Tokens never pass through it.
     public/mcp-servers.js/.css   Menu -> MCP Servers (L.31 rework): server cards with
                                  on/off + Trusted switches, per-server Refresh,
@@ -393,6 +401,10 @@ jarvis channels-user-tools <platform> <id> inherit | custom [tool ...]
 jarvis channels-conversation <platform> <id|@handle> [limit]    # what they sent and how Jarvis answered (JSON, read-only)
 jarvis channels-usage <platform> <id|@handle> [days]            # their messages, tokens, tool calls (JSON, read-only)
 jarvis channels-user-test <platform> <id|@handle> dm|group [mentioned|unmentioned]   # DRY RUN of the gate: no model, nothing sent or saved
+jarvis channels-presets                                         # the quick setups (JSON)
+jarvis channels-preset <platform> <id|@handle> <setup> [preview]   # none|chat_only|chat_notify|trusted for ONE person; `preview` writes nothing
+jarvis channels-bulk flag <switch> <on|off> <platform:id> ...      # one switch for several people; refusals reported per person
+jarvis channels-bulk preset|preview <setup> <platform:id> ...      # a quick setup for several people / what it would change
 jarvis channels-add-person <platform> <id|@handle> [name ...]   # someone who hasn't messaged yet; grants nothing
 jarvis channels-rename <platform> <id|@handle> [name ...]       # no name clears it
 jarvis channels-remove-person <platform> <id|@handle>           # hand-added and never messaged only
@@ -439,6 +451,26 @@ its results live in the browser's localStorage. The only request it makes is the
 read-only `GET /api/tools` Debug already uses, which carries a tool's own
 `checklist` / `checklist_group` when its module defined them.
 See AGENTS.md -> "Test Checklist".
+
+### Code blocks and the one render path
+
+Every reply drawn into an Ask bubble goes through **`renderRich(bubbleEl, markdown, { final, math })`**
+in `app.js` (master plan Part I.1, I-B10): `renderMarkdown` -> `innerHTML` -> `linkifyPaths` ->
+`renderMathIn` -> code-block chrome. The live stream preview, the pending bubble, a committed interim
+bubble, `finalizeAskBubble` (both branches) and history replay all call it, so a live reply and the same
+reply reloaded can't diverge. `final: false` marks text that may end mid-fence: the open fence is closed
+for the preview only and that last block shows "writing..." with Copy disabled.
+
+`web/public/rich-text.js` (+ `rich-text.css`, loaded before `app.js`, no dependency on it) owns the chrome:
+`enhanceCodeBlocks` wraps each `<pre><code>` in a `.codeblock` (sticky bar with language, line count, Wrap,
+Copy; collapse above 30 lines; highlight.js colouring when the language is known), `copyText` is the one
+clipboard helper (`navigator.clipboard`, then an off-screen `<textarea>` fallback; the message Copy and the
+selection pop-up use it too), and `renderUserText` renders fences in your own bubble (prose stays plain text).
+Copy yields the block's `textContent` minus one trailing newline; only a shell block (bash/sh/shell/console/zsh)
+whose every non-empty line starts with `$ ` loses that prompt, and the button says so. The buttons are built
+after DOMPurify and are live only if `rich-text.js` created them (a `WeakMap`, not a class name), so
+model-authored HTML can't forge one. highlight.js loads from a pinned CDN URL with `web/public/vendor/highlight.min.js`
+as the offline fallback (`node web/scripts/vendor-highlightjs.mjs` fetches it; the version is read from `index.html`).
 
 ### The `/` command palette
 

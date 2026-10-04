@@ -782,6 +782,15 @@ their conversation or usage. The terminal has the same views:
 Token and tool counts start from the first message answered after upgrading;
 the message counts cover the whole history.
 
+**Quick setups** (top of the Permissions tab) set a person's DM / reply / tool
+switches and tool list in one go: *No access*, *Chat only*, *Chat + tell the
+owner* and *Trusted* (every tool). Clicking one shows what would change first;
+nothing is saved until you press Apply, and *Trusted* asks you to tick a box
+too. **Select people…** above the list lets you tick several people and apply a
+setup, or one switch, to all of them; anyone who can't be changed (the owner,
+blocked, covered by `"*"`) is listed with the reason. Terminal:
+`jarvis channels-presets`, `channels-preset` and `channels-bulk`.
+
 Someone who hasn't messaged yet can be added by hand (the panel's **+ Add a new
 person**, or the terminal) — an id, or just an @handle, which is the normal case
 on Instagram. Adding grants nothing; it only gives them a row to switch things
@@ -839,6 +848,8 @@ separately run `jarvis channels-allow discord tool <id>`.
 | `jarvis channels-conversation <platform> <id> [limit]` | What that person sent and how Jarvis answered (read-only) |
 | `jarvis channels-usage <platform> <id> [days]` | Their messages, tokens and tool calls (read-only) |
 | `jarvis channels-user-test <platform> <id> dm\|group [mentioned\|unmentioned]` | Dry run: what the gate would do with a message from them |
+| `jarvis channels-presets` / `channels-preset <platform> <id> <setup> [preview]` | The quick setups / apply one to a person (or just preview it) |
+| `jarvis channels-bulk flag <switch> <on\|off> <platform:id> ...` / `channels-bulk preset\|preview <setup> <platform:id> ...` | One switch or a quick setup for several people |
 | `jarvis channels-add-person <platform> <id\|@handle> [name ...]` | Add someone who hasn't messaged yet (grants nothing) |
 | `jarvis channels-rename <platform> <id> [name ...]` | Set or clear what they're called |
 | `jarvis channels-link <platform> <id> <other-platform> <id\|@handle\|name>` | Same person on both apps (identity only) |
