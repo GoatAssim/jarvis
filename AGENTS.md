@@ -81,6 +81,21 @@ things that were already fixed once.
   is adopted on first message its `user_perms.json` entry must move to the real
   id (a limit left behind widens access). `tests/test_channel_manual_people.py`
   pins both.
+- **The three per-person insight views are read-only, and the usage ledger holds
+  counts, never text (L.36-P1/P2/P3).** `user_admin.conversation_view`,
+  `usage_view` and `simulate` change nothing. `simulate` ("Test as this person")
+  is a dry run of the REAL gate — `permissions.decide` plus
+  `user_perms.resolve_tool_access`, which `base.handle_message` also calls, so the
+  two cannot drift. It must never call a model, send, or write anything: no
+  transcript line, no usage line, no `people.touch`, no cooldown mark, no
+  conversation. `channels/usage.py` records tokens, requests and tool *names* only
+  — never a message, reply, tool argument or result — because it is written even
+  when `log_conversations` is off. A reply with no `to_user` in a group thread is
+  attributed to nobody; don't "improve" `transcript.person_records` into guessing,
+  that puts one person's conversation in another's view. If a stage is added to
+  `permissions.decide`, add it to `user_admin.GATE_STAGES`
+  (`tests/test_channel_insights.py` forces a denial at every stage and fails if
+  the walkthrough is missing one). `tests/test_channel_insights.py` pins all of this.
 - **MCP servers are added or changed only by a human.** The MCP panel's
   buttons, `jarvis mcp-edit` and a hand-edit of `mcp_config.json` are the only
   write paths (`mcp_client.save_server` / `set_server_flag` / `remove_server`);
@@ -186,6 +201,7 @@ actually render Markdown):
     python3 tests/verify_l11_daemon_categories.py # L.11: daemon categories in a real browser; needs `playwright` (Python) + Chromium, prints SKIP without them
     python3 tests/verify_l13_favorite_daemons.py  # L.13: favorite daemons in a real browser; needs `playwright` (Python) + Chromium, prints SKIP without them
     node tests/verify_slash_palette.js      # no npm install; runs the real palette
+    python3 tests/verify_l36_insights_ui.py # L.36-P1/P2/P3: Conversation / Usage / Test tabs in a real browser; needs `playwright` (Python) + Chromium, prints SKIP without them
     node tests/verify_channels_panel.js     # L.36: the Channels panel's pure helpers (people list, filters, tool-scope diffing); no npm install
     node tests/verify_mcp_servers.js        # L.31: the MCP panel's pure helpers (state labels, search, filters, what a blank secret means); no npm install
     python3 tests/verify_mcp_servers_ui.py  # L.31: the MCP panel in a real browser against a real stdio MCP server; needs `playwright` (Python) + Chromium, prints SKIP without them

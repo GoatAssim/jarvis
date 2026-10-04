@@ -771,6 +771,17 @@ jarvis channels-user-tools discord 1234567890 custom read_file web_search
 jarvis channels-user-tools discord 1234567890 inherit  # back to the default
 ```
 
+Three more tabs on each person are read-only. **Conversation** shows what they
+sent and how Jarvis answered, including messages the gate turned away and why.
+**Usage** shows their messages, tokens and tool calls over 7, 30 or 90 days
+(tokens are the provider's own count — there are no prices). **Test** runs the
+gate as them: would they be answered, which step decides, which tools — without
+calling a model, sending anything or saving anything, so it never shows up in
+their conversation or usage. The terminal has the same views:
+`jarvis channels-conversation`, `channels-usage` and `channels-user-test`.
+Token and tool counts start from the first message answered after upgrading;
+the message counts cover the whole history.
+
 Someone who hasn't messaged yet can be added by hand (the panel's **+ Add a new
 person**, or the terminal) — an id, or just an @handle, which is the normal case
 on Instagram. Adding grants nothing; it only gives them a row to switch things
@@ -825,6 +836,9 @@ separately run `jarvis channels-allow discord tool <id>`.
 | `jarvis channels-users [platform]` | Every registered person and their switches |
 | `jarvis channels-user <platform> <id> <switch> <on\|off>` | Flip one switch for one person |
 | `jarvis channels-user-tools <platform> <id> inherit\|custom [tool ...]` | Which tools that person may run |
+| `jarvis channels-conversation <platform> <id> [limit]` | What that person sent and how Jarvis answered (read-only) |
+| `jarvis channels-usage <platform> <id> [days]` | Their messages, tokens and tool calls (read-only) |
+| `jarvis channels-user-test <platform> <id> dm\|group [mentioned\|unmentioned]` | Dry run: what the gate would do with a message from them |
 | `jarvis channels-add-person <platform> <id\|@handle> [name ...]` | Add someone who hasn't messaged yet (grants nothing) |
 | `jarvis channels-rename <platform> <id> [name ...]` | Set or clear what they're called |
 | `jarvis channels-link <platform> <id> <other-platform> <id\|@handle\|name>` | Same person on both apps (identity only) |
