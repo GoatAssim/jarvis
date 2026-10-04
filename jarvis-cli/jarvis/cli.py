@@ -1673,6 +1673,14 @@ def main():
             i += 1
         if not conv_id:
             conv_id = os.environ.get("JARVIS_CONVERSATION_ID") or _conv.get_current_id()
+        if "--raw" in flags:
+            # L.38 (a): the complete record as JSON Lines; -f and the include
+            # flags are ignored on purpose (raw leaves nothing out).
+            result = conv_export.export_raw(conv_id, out_dir=out_dir)
+            print(json.dumps(result, indent=2))
+            if not result.get("ok"):
+                sys.exit(1)
+            return
         result = conv_export.export(
             conv_id, fmt, out_dir=out_dir,
             include_tools="--tools" in flags,

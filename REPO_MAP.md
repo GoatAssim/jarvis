@@ -90,7 +90,10 @@ jarvis-cli/jarvis/
     memory.py             durable facts, namespaced, relevance-scored
     memory_semantic.py    embedding/ngram similarity layer over the above
     memory_consolidation.py
-    conversations.py      on-disk conversation history
+    conversations.py      on-disk conversation history (newest 60 exchanges)
+    raw_archive.py        L.38a: lossless per-conversation archive of what the
+                          capped stores drop (overflow, clipped/trimmed console
+                          lines, full tool results); `conv-export --raw` reads it
     history.py            (module docstring explains the process model)
     history_summarizer.py AI recap of older turns
     conv_search.py        search what was SAID
@@ -210,6 +213,7 @@ Everything is under `~/.jarvis/`:
 | `memory.json` | memory.py | durable facts |
 | `conversations/` | conversations.py | chat history |
 | `logs/<conv>.jsonl` | logs.py | model↔backend traffic |
+| `archive/<conv>.jsonl` | raw_archive.py | uncapped copy of everything the stores above clip, trim or drop; deleted with the conversation or on Clear; `JARVIS_RAW_ARCHIVE=0` stops writing |
 | `commands.json` | commands_config.py | saved commands |
 | `scheduler.json` | scheduler.py | jobs and reminders |
 | `tasks/` | tasks.py | one file per long-running task |
@@ -447,6 +451,7 @@ silently never runs.
 | `test_schemas_for_tools.py` | router ↔ catalog consistency |
 | `test_dev_agent_sandbox.py` | path escapes, dependency validation |
 | `test_scheduler.py` / `test_timespec.py` | jobs and time parsing |
+| `test_h3_creation_confirmation.py` | H.3: `remind_me` / `schedule_task` / `schedule_watch` / timed `notify_me` send one `scheduled`-kind confirmation (not for immediate `notify_me`; `confirm: false` suppresses; level from `levels.scheduled`, not the job's own) |
 | `test_l16_caps_and_budget.py` / `test_l16_scheduler_budget.py` / `test_l16_replay.py` | L.16 items 7, 8, 10: `list_windows` cap, per-ask token ledger and budget, per-job limit + "over budget" status, and the incident `1a99e1e3f0d3af0e` replayed through the real `ask()` (fixture: `tests/fixtures/1a99e1e3f0d3af0e.jsonl`) |
 | `test_slash_coverage.py` | every `reserved_names.py` name is in the `/` palette registry exactly once, with a valid risk tier |
 | `verify_slash_palette.js` (`node`) | the palette engine: parsing, submit routing, near-miss, every verb's handler, confirm gates, keyboard model |

@@ -303,6 +303,40 @@ def _html_to_pdf(html_text, out_path):
             pass
 
 
+def export_raw(conv_id, out_dir=None):
+    """L.38 (a): write the complete record -- every exchange (including the
+    ones past the 60-exchange cap), every console line at full length and
+    every tool run with its full result -- as JSON Lines. Ignores the format
+    and include_* options: raw means nothing is left out. Never raises."""
+    from . import raw_archive
+    if not conversations.is_valid_id(conv_id):
+        return {"ok": False, "error": "invalid conversation id"}
+    record = conversations.get_conversation(conv_id)
+    if not record:
+        return {"ok": False, "error": "no such conversation"}
+    out_dir = Path(out_dir).expanduser() if out_dir else (Path.home() / "Downloads")
+    try:
+        out_dir.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        out_dir = Path(tempfile.gettempdir())
+    stamp = datetime.now().strftime("%Y%m%d-%H%M")
+    path = out_dir / ("jarvis-%s-%s-raw.jsonl" % (_safe_slug(record.get("title")), stamp))
+    items = raw_archive.export_records(conv_id)
+    try:
+        with path.open("w", encoding="utf-8") as f:
+            for item in items:
+                f.write(json.dumps(item, ensure_ascii=False, default=str) + "\n")
+    except OSError as exc:
+        return {"ok": False, "error": "couldn't write the file: %s" % exc}
+    result = {"ok": True, "format": "jsonl-raw", "path": str(path),
+              "title": record.get("title"), "records": len(items) - 1,
+              "counts": items[0].get("counts", {}), "bytes": path.stat().st_size}
+    if not raw_archive.enabled():
+        result["warning"] = ("JARVIS_RAW_ARCHIVE is off: anything capped or trimmed "
+                             "while it was off is not in this file.")
+    return result
+
+
 def export(conv_id, fmt=DEFAULT_FORMAT, out_dir=None, include_tools=False,
            include_thinking=False, include_trace=False, assistant_name="Jarvis"):
     """Write one conversation to a file. Always returns a dict, never raises."""

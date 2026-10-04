@@ -88,6 +88,10 @@ DEFAULT_CONFIG = {
         "task": 2,
         "clipboard_watch": 2,
         "ambient": 1,
+        # H.3 — the "reminder set / task scheduled" confirmation a creating
+        # tool sends at creation time. Its own kind so it can be turned down
+        # to 1 (inbox only) without touching the reminder that fires later.
+        "scheduled": 2,
     },
     # Windows toasts go through PowerShell's BurntToast module when it's
     # installed (much nicer looking), falling back to a plain balloon via

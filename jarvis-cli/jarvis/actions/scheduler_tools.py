@@ -135,6 +135,87 @@ def _level(args):
     return lvl if 1 <= lvl <= 5 else None
 
 
+# ---------------------------------------------------------------------------
+# H.3 — creation-time confirmation
+# ---------------------------------------------------------------------------
+# Until now the only notification a job produced was the one it sent when it
+# FIRED, so "reminder set" existed only as text in one chat turn's reply:
+# nothing reached the user's other channels and nothing in Notifications
+# history showed the job had been set up. After a creating tool succeeds it
+# now sends one short confirmation, through the same notifier and the same
+# `channels` the job itself will use, as its own kind ("scheduled") so it can
+# be told apart from — and given a different default level than — the
+# notification that fires later.
+
+CONFIRM_KIND = "scheduled"
+
+_CONFIRM_HELP = (
+    "Notify that this was scheduled (default true). false when creating "
+    "several back to back."
+)
+
+_CONFIRM_TITLES = {"reminder": "Reminder set", "notify": "Notification scheduled",
+                   "task": "Task scheduled"}
+
+
+def _confirm_requested(args):
+    """`confirm` defaults to true; the usual false-ish spellings a model may
+    send for a boolean ("false", "no", "0", "off") turn it off too."""
+    raw = (args or {}).get("confirm", True)
+    if isinstance(raw, str):
+        return raw.strip().lower() not in ("false", "no", "0", "off", "n")
+    return bool(raw)
+
+
+def _confirmation_text(job):
+    """(title, message) for a freshly created job, built from the same
+    scheduler.summarize() the list views use so the wording of 'when' can
+    never differ between the confirmation and the list."""
+    summary = scheduler.summarize(job)
+    kind = job.get("kind") or "task"
+    title = _CONFIRM_TITLES.get(kind, "Scheduled")
+    when = summary.get("when") or "later"
+    eta = summary.get("in")
+    when_text = "%s (in %s)" % (when, eta) if eta and "next" not in when else when
+    label = (job.get("message") or job.get("title") or "").strip()
+    if kind == "task":
+        label = (job.get("title") or label).strip()
+    message = "%s \u2014 %s: %s" % (title, when_text, label) if label else \
+        "%s \u2014 %s" % (title, when_text)
+    if job.get("status") == scheduler.STATUS_NEEDS_APPROVAL:
+        message += (" Waiting for your approval: web console \u2192 Scheduled, "
+                    "or `jarvis sched-approve %s`." % job.get("id"))
+    return title, message
+
+
+def _announce_created(job, args, context=None):
+    """Send the H.3 confirmation for `job`. Never raises and never changes
+    the tool's result: a notifier problem must not turn a successfully
+    created job into a failed tool call. Returns the notification record, or
+    None when suppressed (`confirm` false) or when nothing could be sent.
+
+    Deliberately NOT passed the job's own `level`: a job set to level 4
+    (broadcast) should broadcast when it fires, not when it is merely
+    created. The confirmation takes the level configured for kind
+    "scheduled" (default 2, standard).
+    """
+    if not _confirm_requested(args):
+        return None
+    try:
+        from .. import notifier
+        title, message = _confirmation_text(job)
+        return notifier.notify(
+            title=title,
+            message=message,
+            channels=_channels(args),
+            kind=CONFIRM_KIND,
+            job_id=job.get("id"),
+            conv_id=getattr(context, "conv_id", None),
+        )
+    except Exception:  # noqa: BLE001
+        return None
+
+
 def scheduler_channels():
     from .. import notifier
     return notifier.CHANNELS
@@ -166,6 +247,7 @@ def tool_remind_me(args, context=None):
         )
     except SchedulerError as e:
         return {"needs_clarification": True, "message": str(e)}
+    _announce_created(job, args, context)
     return _ok(job)
 
 
@@ -207,6 +289,7 @@ def tool_notify_me(args, context=None):
         )
     except SchedulerError as e:
         return {"needs_clarification": True, "message": str(e)}
+    _announce_created(job, args, context)
     return _ok(job)
 
 
@@ -268,6 +351,7 @@ def tool_schedule_task(args, context=None):
         )
     except SchedulerError as e:
         return {"needs_clarification": True, "message": str(e)}
+    _announce_created(job, args, context)
     return _ok(job)
 
 
@@ -348,6 +432,7 @@ def tool_schedule_watch(args, context=None):
         )
     except SchedulerError as e:
         return {"needs_clarification": True, "message": str(e)}
+    _announce_created(job, args, context)
     result = _ok(job)
     result["generated_prompt"] = prompt
     return result
@@ -442,6 +527,7 @@ TOOL_SCHEMAS = [
                     "description": _CHANNEL_HELP,
                 },
                 "level": {"type": "integer", "description": _LEVEL_HELP},
+                "confirm": {"type": "boolean", "description": _CONFIRM_HELP},
                 "times": {
                     "type": "integer",
                     "description": "For a repeating reminder, stop after this many "
@@ -476,6 +562,7 @@ TOOL_SCHEMAS = [
                     "description": _CHANNEL_HELP,
                 },
                 "level": {"type": "integer", "description": _LEVEL_HELP},
+                "confirm": {"type": "boolean", "description": _CONFIRM_HELP},
                 "times": {
                     "type": "integer",
                     "description": "For a repeating/event notification, stop after "
@@ -544,6 +631,7 @@ TOOL_SCHEMAS = [
                 "times": {"type": "integer", "description": "Stop after this many runs."},
                 "channels": {"type": "array", "items": {"type": "string"}, "description": _CHANNEL_HELP},
                 "level": {"type": "integer", "description": _LEVEL_HELP},
+                "confirm": {"type": "boolean", "description": _CONFIRM_HELP},
             },
             "required": ["when"],
         },
@@ -627,6 +715,7 @@ TOOL_SCHEMAS = [
                 "times": {"type": "integer", "description": "Stop after this many runs."},
                 "channels": {"type": "array", "items": {"type": "string"}, "description": _CHANNEL_HELP},
                 "level": {"type": "integer", "description": _LEVEL_HELP},
+                "confirm": {"type": "boolean", "description": _CONFIRM_HELP},
             },
             "required": ["when", "checks"],
         },
