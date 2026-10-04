@@ -12,6 +12,18 @@ if you have it). You should be able to write a correct, complete tool file
 from this template alone, without reading tool_loader.py, tool_registry.py,
 tool_safety.py, or tool_result_shaping.py first.
 
+CONTENTS
+--------
+    1. THE HANDLER(S)        incl. tool_example_ui_demo, a complete UI example
+    2. TOOL_SCHEMAS / TOOLS  what the model sees; one handler per schema
+    3. TOOL_GROUP / TOOL_KEYWORDS / TOOL_PACK_INSTRUCTION   routing
+    4. CONFIRM-GATING        TOOL_CONFIRM_REQUIRED / TOOL_AI_REVIEW
+    5. RESULT SHAPING        TOOL_RESULT_SPECS (worked example)
+    6. TALKING TO THE USER   ui_bridge: toasts, cards, modals, questions
+    7. PERSONAS              optional, independent of tools
+    8. TEST_CHECKLIST        the Menu -> Test Checklist entry for your tools
+    9. CHECKING YOUR FILE    how to know it actually loaded
+
 WHAT MAKES A FILE DISCOVERABLE
 -------------------------------
 Before writing one: if what you're adding is instructions rather than code —
@@ -82,9 +94,10 @@ handful of modules that import back from tools.py.
 # always more useful to the model than a bare exception repr.
 #
 # To SHOW the user something (a toast, a card in the chat, a modal) or to
-# ASK them something (confirm / choose / prompt / form), see section 6 at
-# the bottom of this file — `from jarvis import ui_bridge as ui`. A return
-# value goes to the model, not to the person; ui_bridge is the direct line.
+# ASK them something (confirm / choose / prompt / form), see section 6 below
+# — `from jarvis import ui_bridge as ui` — and tool_example_ui_demo further
+# down this section for a complete, working handler. A return value goes to
+# the model, not to the person; ui_bridge is the direct line.
 #
 # Optional second argument: `fn(args, context)` instead of `fn(args)`.
 # tools.execute_tool() introspects your handler's own signature (via
@@ -123,6 +136,102 @@ def tool_example_echo(args):
         return {"needs_clarification": True, "message": "Echo what?"}
     # ... do the real work here ...
     return {"ok": True, "echo": text}
+
+
+# The UI example. One tool that can show ANY of ui_bridge's elements, picked
+# by args["kind"], so you can try each one from Menu -> Test Checklist and
+# copy whichever you need. It takes the optional second argument (`context`,
+# see the note above) only to show that form; most tools won't.
+#
+# Read it with these four rules in mind (all explained in section 6):
+#   - `from jarvis import ui_bridge as ui` goes INSIDE the handler.
+#   - Pass options by KEYWORD (level=..., default=...). ui_bridge's positional
+#     order is not the order you'd guess, and keywords can't be wrong.
+#   - Every blocking call (confirm/choose/prompt/form) has a safe `default`:
+#     it is what a scheduled or headless run gets, with nobody to answer.
+#   - What you show the person and what you return to the model are separate.
+#     The model still needs a return value that says what happened.
+_UI_KINDS = ("toast", "bubble", "dialog", "progress",
+             "confirm", "choose", "prompt", "form")
+
+
+def tool_example_ui_demo(args, context=None):
+    try:
+        from jarvis import ui_bridge as ui   # lazy: see SAFE IMPORTS above
+
+        args = args or {}
+        kind = (args.get("kind") or "").strip().lower()
+        message = (args.get("message") or "Hello from example_ui_demo.").strip()
+        level = (args.get("level") or "info").strip().lower()
+        if kind not in _UI_KINDS:
+            return {"needs_clarification": True,
+                    "message": "Which UI element? One of: " + ", ".join(_UI_KINDS)}
+
+        # `context.ui` is "web" or "cli" when the call came through a normal
+        # ask. Handy for skipping UI-only extras; never required.
+        out = {"ok": True, "kind": kind,
+               "surface": getattr(context, "ui", None) or "unknown"}
+
+        # ---- SHOW: fire-and-forget, never blocks ------------------------
+        if kind == "toast":
+            # Transient corner message. level="error" stays until dismissed.
+            ui.toast(message, level=level, title="example_ui_demo", timeout=6)
+
+        elif kind == "bubble":
+            # A card IN the chat thread; it persists and can be scrolled back
+            # to. `data` is optional structured extras for the renderer.
+            ui.bubble("Example card", body=message, level=level,
+                      data={"source": "example_ui_demo"})
+
+        elif kind == "dialog":
+            # A modal that interrupts. `actions` are informational only —
+            # clicking one runs nothing and returns nothing. If you need the
+            # person's answer, use confirm() or choose() instead.
+            ui.dialog("Heads up", body=message, level=level, actions=["Got it"])
+
+        elif kind == "progress":
+            # One row, updated in place: keep the id the first call returns.
+            job = ui.progress("Example job")
+            for step in (1, 2, 3):
+                # ... do one unit of the real work here ...
+                ui.progress("Example job", step, 3, job_id=job)
+            ui.progress("Example job", 3, 3, job_id=job, done=True)
+
+        # ---- ASK: blocks until answered (or the default, if nobody can) --
+        elif kind == "confirm":
+            # default=False: an unattended run proceeds with NOTHING done.
+            out["confirmed"] = ui.confirm(
+                "Proceed?", body=message, level="warn",
+                confirm_label="Proceed", cancel_label="Cancel", default=False)
+
+        elif kind == "choose":
+            # Returns one of the option strings; `default` must be one too.
+            out["picked"] = ui.choose(
+                "Pick a colour", ["red", "green", "blue"],
+                body=message, default="green")
+
+        elif kind == "prompt":
+            out["text"] = ui.prompt(
+                "What should I call it?", body=message,
+                default="untitled", placeholder="e.g. weekly-backup")
+
+        elif kind == "form":
+            # Returns {field name: value}; always has every field's key.
+            out["answers"] = ui.form("Example form", [
+                {"name": "title", "label": "Title", "type": "text",
+                 "placeholder": "A short title", "required": True},
+                {"name": "count", "label": "How many", "type": "number",
+                 "default": 3},
+                {"name": "mode", "label": "Mode", "type": "select",
+                 "options": ["fast", "thorough"], "default": "fast"},
+                {"name": "notes", "label": "Notes", "type": "textarea"},
+                {"name": "dry_run", "label": "Dry run", "type": "checkbox",
+                 "default": True},
+            ], body=message)
+
+        return out
+    except Exception as e:  # noqa: BLE001 — a tool never raises (section 1)
+        return {"error": "example_ui_demo failed: %s" % e}
 
 
 # ---------------------------------------------------------------------------
@@ -174,6 +283,32 @@ TOOL_SCHEMAS = [
             "required": ["text"],
         },
     },
+    {
+        "name": "example_ui_demo",
+        "description": (
+            "Example only — shows one UI element (a toast, a chat card, a "
+            "modal, a progress row) or asks the person one question "
+            "(confirm, choose, prompt, form). Shows how a tool talks to the "
+            "person directly instead of only returning a dict; see section 6."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "kind": {
+                    "type": "string",
+                    "enum": list(_UI_KINDS),
+                    "description": "Which UI element to show or question to ask.",
+                },
+                "message": {"type": "string", "description": "Text to show."},
+                "level": {
+                    "type": "string",
+                    "enum": ["info", "success", "warn", "error"],
+                    "description": "Colour and icon for toast/bubble/dialog.",
+                },
+            },
+            "required": ["kind"],
+        },
+    },
 ]
 
 # TOOLS — required. name -> handler, one entry per TOOL_SCHEMAS name (and
@@ -181,6 +316,7 @@ TOOL_SCHEMAS = [
 TOOLS = {
     "example_ping": tool_example_ping,
     "example_echo": tool_example_echo,
+    "example_ui_demo": tool_example_ui_demo,
 }
 
 # ---------------------------------------------------------------------------
@@ -220,6 +356,7 @@ TOOL_GROUP = "example"
 TOOL_KEYWORDS = {
     "example_ping": {"ping": 10, "ping the": 10},
     "example_echo": {"echo": 10},
+    "example_ui_demo": {"ui demo": 10, "ui example": 10, "example popup": 9},
 }
 
 # TOOL_PACK_INSTRUCTION — optional. One short line of workflow guidance,
@@ -294,6 +431,24 @@ TOOL_AI_REVIEW = set()          # e.g. for a tool fuzzy/risky enough to want
 # ---------------------------------------------------------------------------
 
 
+# A worked spec — for a hypothetical tool that returns
+#   {"summary": "...", "raw_html": "...", "results": [{"title", "snippet",
+#    "score"}, ...]}.
+# Each level lists what to cut AT THAT LEVEL (not a diff against the one
+# above), item COUNT is the tool's own job (a max_results argument), and an
+# unlisted tool or field is never touched:
+#
+# TOOL_RESULT_SPECS = {
+#     "my_search": {
+#         "drop_fields": {"medium": ["raw_html"], "low": ["raw_html", "debug"]},
+#         "truncate_fields": {"summary": {"medium": 800, "low": 300}},
+#         "list_item_drop": {"results": {"medium": ["score"],
+#                                         "low": ["score", "snippet"]}},
+#         "list_item_truncate": {"results": {"title": {"medium": 120, "low": 60}}},
+#     },
+# }
+TOOL_RESULT_SPECS = {}
+
 # ---------------------------------------------------------------------------
 # 6. TALKING TO THE USER — popups, dialogs and questions (jarvis/ui_bridge.py)
 #
@@ -311,21 +466,24 @@ TOOL_AI_REVIEW = set()          # e.g. for a tool fuzzy/risky enough to want
 #
 # SHOW SOMETHING (returns immediately, never blocks)
 # --------------------------------------------------
-#     ui.toast(message, level="info", title="", timeout=None)
+#     ui.toast(message, level="info", timeout=None, title="")
 #         Transient corner message. The lightest possible FYI.
 #         level="error" stays until dismissed; everything else fades after
-#         ~4s. This is the same widget the web UI already uses for its own
-#         errors — now reachable from any tool.
+#         ~4s (or `timeout` seconds). This is the same widget the web UI
+#         already uses for its own errors — now reachable from any tool.
 #
-#     ui.bubble(title, body="", level="info")
+#     ui.bubble(title, body="", level="info", data=None)
 #         A card IN the chat thread. Persists, survives a page reload, the
 #         user can scroll back to it. Use for output worth keeping: a table,
-#         a diff, a summary, a report.
+#         a diff, a summary, a report. `data` is optional structured extras.
 #
-#     ui.dialog(title, body="", level="info", actions=None)
+#     ui.dialog(title, body="", level="info", actions=None, blocking=False)
 #         A real modal, outside the chat. It INTERRUPTS. Reserve it for
 #         things that genuinely should — a misconfiguration, a destructive
 #         result, something that needs attention before anything else.
+#         `actions` (up to 6 labels, or {label, value, level} dicts) are
+#         INFORMATIONAL: clicking one runs nothing and answers nothing. When
+#         you need the person's answer, ask with confirm() or choose().
 #
 #     ui.progress(label, value=None, total=None, job_id=None, done=False)
 #         An updatable row, bottom-left. Returns the job_id, so:
@@ -333,27 +491,46 @@ TOOL_AI_REVIEW = set()          # e.g. for a tool fuzzy/risky enough to want
 #             ui.progress("Indexing", 3, 10, job_id=pid)
 #             ui.progress("Indexing", 10, 10, job_id=pid, done=True)
 #
-#     ui.dismiss(event_id)   removes a dialog or progress row early.
+#     ui.dismiss(event_id)   removes a dialog or progress row early. A
+#         toast/bubble/dialog call returns {"ok", "shown", "id"}; that "id"
+#         is what dismiss() takes (for a progress row it is the job_id).
 #
 # `level` is one of: "info", "success", "warn", "error". It controls colour
 # and icon, and it is the ONLY styling a tool can influence — see the safety
-# note at the bottom of this section.
+# note at the bottom of this section. An unknown level quietly becomes "info".
 #
 # ASK SOMETHING (blocks until answered)
 # --------------------------------------
-#     ui.confirm(question, body="", default=False, confirm_label="Yes",
-#                cancel_label="No", level="warn")          -> bool
-#     ui.choose(question, options, default=None)            -> str
-#     ui.prompt(question, default="", placeholder="",
-#               secret=False)                               -> str
-#     ui.form(title, fields)                                -> dict
+#     ui.confirm(question, body="", level="warn", confirm_label="Yes",
+#                cancel_label="No", default=False, timeout=None)  -> bool
+#     ui.choose(question, options, body="", default=None,
+#               level="info", timeout=None)                       -> str
+#     ui.prompt(question, body="", default="", placeholder="",
+#               secret=False, level="info", timeout=None)         -> str
+#     ui.form(title, fields, body="", level="info", timeout=None) -> dict
 #
 #         fields is a list of
 #           {"name", "label", "type", "default", "placeholder",
 #            "options", "required"}
 #         type is text | number | password | select | checkbox | textarea.
 #         An unrecognised type renders as text rather than breaking the
-#         dialog.
+#         dialog. The result always has a key for every field you declared.
+#         choose() options are strings, or {"label", "value"} dicts; the
+#         return is the chosen option's value, and `default` should be one.
+#
+# PASS THESE BY KEYWORD. The positional order differs between calls
+# (toast takes timeout before title; confirm takes level before default), so
+# `ui.confirm("Sure?", "", False)` quietly sets level, not default. Writing
+# level=... / default=... costs nothing and cannot be wrong.
+#
+# Size limits (over-long values are clipped, never an error): titles 120
+# chars, bodies 4000, 12 options, 12 form fields, 6 dialog actions.
+#
+# What each call returns when the person never answers: confirm() gives back
+# `default`; choose() gives back `default` (or its first option if you gave
+# none); prompt() gives back `default`; form() gives back every field's
+# `default`. The call cannot tell you WHICH happened — so design the defaults
+# as safe answers instead of branching on whether someone was there.
 #
 # Escape, clicking the backdrop, and closing the window all resolve to the
 # SAFE answer — a dismissed confirm is never a yes.
@@ -415,8 +592,6 @@ TOOL_AI_REVIEW = set()          # e.g. for a tool fuzzy/risky enough to want
 # output, and the blocking prompts become input() / getpass(). You do not
 # write two code paths — ui_bridge picks the surface per call.
 # ---------------------------------------------------------------------------
-
-TOOL_RESULT_SPECS = {}
 
 # ---------------------------------------------------------------------------
 # 7. PERSONAS — optional, and INDEPENDENT of everything above. A file can
@@ -774,6 +949,23 @@ TEST_CHECKLIST = {
         # one of that dict's own ids, never anything else.
         "group": "example_extra",
     },
+    "example_ui_demo": {
+        # No "group" -> follows TOOL_GROUP ("example"), like example_ping.
+        "does": "Shows one UI element (toast, card, modal, progress) or asks one question (confirm, choose, prompt, form).",
+        "steps": [
+            {"run": {"kind": "toast", "message": "Hello", "level": "success"},
+             "expect": "A green toast appears in the corner and the result is ok: true, kind 'toast'."},
+            {"run": {"kind": "bubble", "message": "A card in the thread"},
+             "expect": "A card titled 'Example card' appears in the chat and stays when you scroll."},
+            {"run": {"kind": "confirm", "message": "Pick either button"},
+             "expect": "A Yes/No style dialog; Proceed gives confirmed: true, Cancel (or Esc) gives confirmed: false."},
+            {"run": {"kind": "form"},
+             "expect": "A five-field form; submitting returns answers with every field's key, and Esc returns the defaults."},
+            {"run": {"kind": "nope"},
+             "expect": "Asks which UI element you meant (needs_clarification) and shows nothing."},
+        ],
+        "watch": ["Dismissing a question (Esc, the backdrop, closing the window) must never read as yes."],
+    },
 }
 
 # The multi-group shape (master plan G.2): two sections instead of one,
@@ -796,6 +988,33 @@ TEST_CHECKLIST_GROUP = {
     },
 }
 
-# That's the whole contract. Delete example_ping, example_echo and this
-# comment block, write your real handler(s) and schema(s) above, and the
-# file is live the next time Jarvis starts — no edits anywhere else.
+# ---------------------------------------------------------------------------
+# 9. CHECKING YOUR FILE — how to know it actually loaded
+#
+# A rejected file is logged once and is otherwise invisible, so check:
+#
+#     jarvis doctor            "Action file <name>" is a FAIL with the reason
+#                              if your file was rejected. A file that only
+#                              carries PERSONAS is reported as a persona file
+#                              (OK), not a rejection.
+#     jarvis tools-list        your tool names are in the catalogue.
+#     jarvis personas-list     your personas, if you registered any.
+#
+# For a tool in ~/.jarvis/tools/, the Custom Tools editor's Check button runs
+# the same validation, including the TEST_CHECKLIST entry.
+#
+# For a tool that ships in jarvis/actions/, AGENTS.md's rule applies: the
+# tool's checklist entry (section 8) is part of the change, not a follow-up.
+# Then run:    python3 tests/run_tests.py checklist
+#
+# One habit worth having: do not print() to stdout inside a handler. ui_bridge
+# carries blocking questions to the web UI as JARVIS_UI_REQUEST lines on
+# stdout, so stray output there can be mistaken for protocol. Use stderr
+# (print(..., file=sys.stderr)) for anything you only want to see while
+# debugging.
+# ---------------------------------------------------------------------------
+
+# That's the whole contract. Delete example_ping, example_echo,
+# example_ui_demo and this comment block, write your real handler(s) and
+# schema(s) above, and the file is live the next time Jarvis starts — no
+# edits anywhere else.
