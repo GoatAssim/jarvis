@@ -335,6 +335,8 @@
     <div class="panel__corner panel__corner--tl"></div>
     <div class="panel__corner panel__corner--br"></div>
 
+    <!-- L.32 Focus "Stage": drawers + scrim. Hidden in Classic (.focus-only). -->
+    <div class="focus-scrim" id="focus-scrim"></div>
     <div class="ask-panel__head">
       <svg class="brand-mark" viewBox="0 0 40 40" aria-hidden="true">
         <circle cx="20" cy="20" r="18" class="brand-mark__ring"/>
@@ -344,6 +346,10 @@
       <div class="ask-panel__titles">
         <div class="ask-panel__title" id="ask-panel-title">ASK JARVIS</div>
         <div class="ask-panel__subtitle" id="ask-status-line">say the word</div>
+      </div>
+      <div class="ask-panel__focus-nav focus-only">
+        <button class="btn btn--ghost btn--sm btn--focus-nav" id="btn-focus-chats" type="button" aria-expanded="false" title="Show or hide your conversations">Chats</button>
+        <button class="btn btn--ghost btn--sm btn--focus-nav" id="btn-focus-activity" type="button" aria-expanded="false" title="Show or hide the live command prompt (glows while Jarvis is running something)">Activity</button>
       </div>
       <div class="ask-panel__actions">
         <div class="provider-picker" id="provider-picker">

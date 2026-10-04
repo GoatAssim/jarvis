@@ -5084,7 +5084,8 @@
   qs("#ask-close").addEventListener("click", closeAsk);
   askOverlay.addEventListener("click", (e) => { if (e.target === askOverlay) closeAsk(); });
   document.addEventListener("keydown", (e) => {
-    if (e.key === "Escape" && !askOverlay.hidden) closeAsk();
+    // L.32: in Focus the Ask panel is the page itself, so Escape must not close it.
+    if (e.key === "Escape" && !askOverlay.hidden && currentLayout !== "focus") closeAsk();
   });
 
   qs("#btn-ask-stop").addEventListener("click", () => wsSend({ type: "cancel" }));
@@ -9247,6 +9248,8 @@
   function applyLayout(mode) {
     currentLayout = mode === "focus" ? "focus" : "classic";
     document.body.classList.toggle("layout--focus", currentLayout === "focus");
+    // L.32: the Stage drawers only exist in Focus — never leave one open behind.
+    if (currentLayout !== "focus") document.body.classList.remove("focus-chats-open", "focus-activity-open");
     const btn = qs("#btn-layout-switch");
     const label = qs("#layout-switch-label");
     if (btn) btn.dataset.layout = currentLayout;
@@ -9313,6 +9316,53 @@
   }
 
   qs("#btn-layout-switch")?.addEventListener("click", toggleLayout);
+
+  // --- L.32 Focus "Stage" drawers: Chats (left) and Activity (right) -------
+  (function initFocusStage() {
+    const body = document.body;
+    const chatsBtn = qs("#btn-focus-chats");
+    const actBtn = qs("#btn-focus-activity");
+    const DRAWERS = { chats: "focus-chats-open", activity: "focus-activity-open" };
+
+    function toggleDrawer(which) {
+      const cls = DRAWERS[which];
+      const willOpen = !body.classList.contains(cls);
+      body.classList.remove(...Object.values(DRAWERS));   // one drawer at a time
+      if (willOpen) body.classList.add(cls);
+    }
+    function closeDrawers() { body.classList.remove(...Object.values(DRAWERS)); }
+    function syncAria() {
+      chatsBtn?.setAttribute("aria-expanded", String(body.classList.contains(DRAWERS.chats)));
+      actBtn?.setAttribute("aria-expanded", String(body.classList.contains(DRAWERS.activity)));
+    }
+
+    chatsBtn?.addEventListener("click", () => toggleDrawer("chats"));
+    actBtn?.addEventListener("click", () => toggleDrawer("activity"));
+    qs("#focus-scrim")?.addEventListener("click", closeDrawers);
+    new MutationObserver(syncAria).observe(body, { attributes: true, attributeFilter: ["class"] });
+
+    // Escape closes an open drawer first (capture phase, so nothing else reacts to it).
+    document.addEventListener("keydown", (e) => {
+      if (e.key !== "Escape") return;
+      if (!body.classList.contains(DRAWERS.chats) && !body.classList.contains(DRAWERS.activity)) return;
+      e.stopImmediatePropagation();
+      closeDrawers();
+    }, true);
+
+    // Picking a chat is the end of that errand — slide the drawer away.
+    qs("#convo-list")?.addEventListener("click", (e) => {
+      if (e.target.closest("button, input, textarea")) return;
+      if (e.target.closest(".convo-card")) closeDrawers();
+    });
+
+    // Activity button glows while the live prompt says it is running something.
+    const state = qs("#ask-prompt-state");
+    if (state && actBtn) {
+      const sync = () => actBtn.classList.toggle("is-live", state.classList.contains("is-live"));
+      new MutationObserver(sync).observe(state, { attributes: true, attributeFilter: ["class"] });
+      sync();
+    }
+  })();
 
   // --- subagents ----------------------------------------------------------
   // Active vs finished split mirrors tasks.py's own ACTIVE_STATUSES /
