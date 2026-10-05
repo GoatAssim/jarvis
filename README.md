@@ -779,6 +779,15 @@ gate as them: would they be answered, which step decides, which tools — withou
 calling a model, sending anything or saving anything, so it never shows up in
 their conversation or usage. The terminal has the same views:
 `jarvis channels-conversation`, `channels-usage` and `channels-user-test`.
+
+A **History** tab lists every change to that person's access (a switch, a tool list,
+a quick setup, a bulk edit, a block, a handle edit) with when it happened, whether it
+came from the panel or the terminal, and which quick setup or bulk edit it belonged to.
+It starts when the log does (`~/.jarvis/channels/changes.jsonl`); earlier changes
+weren't kept. `jarvis channels-history <platform> <id>` prints the same thing. For
+someone you added by hand who hasn't written yet, the pencil next to **Handle**
+corrects a typo and moves their list entries with it (`jarvis channels-handle`);
+once they write, the platform's own handle is used and the edit is refused.
 Token and tool counts start from the first message answered after upgrading;
 the message counts cover the whole history.
 
@@ -862,6 +871,8 @@ separately run `jarvis channels-allow discord tool <id>`.
 | `jarvis channels-user-tools <platform> <id> inherit\|custom [tool ...]` | Which tools that person may run |
 | `jarvis channels-conversation <platform> <id> [limit]` | What that person sent and how Jarvis answered (read-only) |
 | `jarvis channels-usage <platform> <id> [days]` | Their messages, tokens and tool calls (read-only) |
+| `jarvis channels-history <platform> <id> [limit]` | Every recorded change to that person's access (read-only) |
+| `jarvis channels-handle <platform> <id> <new-handle>` | Correct a hand-added person's handle before they write; their lists move with it |
 | `jarvis channels-user-test <platform> <id> dm\|group [mentioned\|unmentioned]` | Dry run: what the gate would do with a message from them |
 | `jarvis channels-presets` / `channels-preset <platform> <id> <setup> [preview]` | The quick setups / apply one to a person (or just preview it) |
 | `jarvis channels-bulk flag <switch> <on\|off> <platform:id> ...` / `channels-bulk preset\|preview <setup> <platform:id> ...` | One switch or a quick setup for several people |

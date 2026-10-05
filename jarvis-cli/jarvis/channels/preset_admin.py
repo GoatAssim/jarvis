@@ -45,7 +45,7 @@ anyone else who cannot be changed.
 
 from . import PERM_DM, PERM_REPLY, PERM_TOOLS
 from . import config as channel_config
-from . import people, permissions, presets, user_admin, user_perms
+from . import changelog, people, permissions, presets, user_admin, user_perms
 
 MAX_BULK = 100                       # people per request
 EXEC_ORDER = ("tools", "tool", "reply", "dm")   # tool list before the switch
@@ -197,6 +197,14 @@ def plan_preset(platform, user_id, preset_id):
 
 
 def apply_preset(platform, user_id, preset_id):
+    """Apply one quick setup to one person, tagging every change-log line it
+    writes with the setup's name (L.36-P15). See _apply_preset."""
+    chosen = presets.get(preset_id)
+    with changelog.reason("Quick setup: " + chosen["label"] if chosen else "Quick setup"):
+        return _apply_preset(platform, user_id, preset_id)
+
+
+def _apply_preset(platform, user_id, preset_id):
     """Apply one quick setup to one person. Returns the plan's shape with each
     step's real outcome: state done | failed | skipped | refused | same.
 
@@ -334,7 +342,8 @@ def bulk_flag(refs, flag, value):
     refs, err = _clean_refs(refs)
     if refs is None:
         return {"ok": False, "error": err}
-    results = [_bulk_flag_one(p, u, flag, value) for p, u in refs]
+    with changelog.reason(f"Bulk edit: {LABELS.get(flag, flag)} {_onoff(value)}"):
+        results = [_bulk_flag_one(p, u, flag, value) for p, u in refs]
     return {"ok": True, "action": "flag", "flag": flag, "value": value,
             "results": results, "summary": _counts(results)}
 
@@ -352,22 +361,24 @@ def bulk_preset(refs, preset_id, preview=False):
         return {"ok": False, "error": err}
     run = plan_preset if preview else apply_preset
     results = []
-    for platform, uid in refs:
-        try:
-            r = run(platform, uid, preset_id)
-        except Exception as exc:  # noqa: BLE001
-            r = {"ok": False, "error": str(exc), "status": ST_FAILED}
-        r.setdefault("platform", platform)
-        r.setdefault("user_id", uid)
-        r.setdefault("name", "")
-        if not r.get("ok"):
-            # Not attempted (owner, blocked, not registered): a per-person
-            # reason, the same field a refused switch uses.
-            r["reason"] = r.get("error", "")
-            r.setdefault("steps", [])
-            if r.get("status") not in (ST_FAILED,):
-                r["status"] = ST_REFUSED
-        results.append(r)
+    chosen = presets.get(preset_id)
+    with changelog.reason("Bulk edit: quick setup " + chosen["label"]):
+        for platform, uid in refs:
+            try:
+                r = run(platform, uid, preset_id)
+            except Exception as exc:  # noqa: BLE001
+                r = {"ok": False, "error": str(exc), "status": ST_FAILED}
+            r.setdefault("platform", platform)
+            r.setdefault("user_id", uid)
+            r.setdefault("name", "")
+            if not r.get("ok"):
+                # Not attempted (owner, blocked, not registered): a per-person
+                # reason, the same field a refused switch uses.
+                r["reason"] = r.get("error", "")
+                r.setdefault("steps", [])
+                if r.get("status") not in (ST_FAILED,):
+                    r["status"] = ST_REFUSED
+            results.append(r)
     summary = _counts(results)
     if preview:
         # Nothing was written, so "applied / partial" make no sense here:

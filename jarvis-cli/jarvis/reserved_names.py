@@ -104,6 +104,7 @@ RESERVED_NAMES = {
     "channels-note", "channels-forget",
     "channels-link", "channels-unlink",
     "channels-conversation", "channels-usage", "channels-user-test",
+    "channels-history", "channels-handle",
     "channels-presets", "channels-preset", "channels-bulk",
     "channels-servers", "channels-server-set",
     "discord-daemon", "instagram-serve", "logs-search",

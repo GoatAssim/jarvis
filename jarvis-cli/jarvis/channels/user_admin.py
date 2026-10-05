@@ -82,7 +82,7 @@ removing an id that was never the reason they got through.
 
 from . import PLATFORMS, PERM_DM, PERM_REPLY, PERM_TOOLS
 from . import config as channel_config
-from . import people, permissions, presets, transcript, usage, user_perms
+from . import changelog, people, permissions, presets, transcript, usage, user_perms
 from .config import WILDCARD
 
 FLAGS = ("dm", "reply", "tool", "owner", "send_dm", "blocked")
@@ -152,6 +152,9 @@ def person_view(platform, rec, cfg, perms):
         "manual": bool(rec.get("manual")),
         # Only a handle is known; the id arrives with their first message.
         "placeholder": bool(rec.get("placeholder")),
+        # The handle can be hand-edited only before they have written and when
+        # they are not the owner (set_handle enforces the same rule).
+        "handle_editable": handle_edit_refusal(rec, owner) == "",
         "linked": _linked_view(rec),
         "avatar": rec.get("avatar") or "",
         "first_seen": rec.get("first_seen"),
@@ -549,6 +552,8 @@ def forget_person(platform, user_id, purge_history=False, dry_run=False):
     ok, err = people.delete_record(platform, uid)
     if not ok:
         return False, err, report
+    changelog.record(platform, changelog.K_FORGOT, uid,
+                     history=bool(purge_history))
     return True, "", report
 
 
@@ -580,6 +585,124 @@ def unlink_accounts(platform, user_id):
 # --------------------------------------------------------------------------
 # Read-only views: Conversation (P1), Usage (P2), Test as this person (P3)
 # --------------------------------------------------------------------------
+
+# --------------------------------------------------------------------------
+# Edit a handle by hand  (L.36-P10)
+# --------------------------------------------------------------------------
+
+def handle_edit_refusal(rec, is_owner=False):
+    """Why this person's handle cannot be edited, or "" when it can.
+
+    Only someone the owner added by hand who has never written: the moment a
+    person messages, people.touch() overwrites the stored handle with the one
+    the platform reports, so an edit would silently revert -- and for someone
+    who has written, the platform's handle is the truth. The owner is refused
+    because the config's `owner` entry may name the old handle."""
+    if is_owner:
+        return "that's the owner — hand ownership to someone else first"
+    if not rec.get("manual") or int(rec.get("messages") or 0) > 0:
+        return ("only a person you added by hand who hasn't written yet can "
+                "have their handle edited — once they write, the platform's "
+                "own handle is used and would replace an edit")
+    return ""
+
+
+def set_handle(platform, user_id, handle):
+    """Correct the handle of a hand-added person who has never written.
+    Returns (ok, error, note, record).
+
+    The handle is more than a label: allow-lists can name someone by it, and a
+    person known ONLY by handle (a placeholder) is keyed by it. So an edit
+    carries their access with them -- anywhere the old handle was listed the
+    new one is listed instead -- and never leaves the old string behind, where
+    whoever really owns it would inherit the owner's grant.
+
+    ORDER (a failure part-way must never leave someone with more access than
+    they had, nor their limits behind):
+
+        1. limits copied to the new key          (placeholder only)
+        2. new handle added to the lists the old one was in
+        3. the people.json record moved / relabelled
+        4. old handle taken out of those lists
+        5. old limits entry removed              (placeholder only)
+
+    A failure at 2-3 leaves the old entries in place and reports; running it
+    again finishes the job. It grants nothing the old handle did not."""
+    rec, err = _registered(platform, user_id)
+    if rec is None:
+        return False, err, "", None
+    cfg = channel_config.platform_config(platform)
+    refusal = handle_edit_refusal(rec, permissions.is_owner(cfg, _idents(rec)))
+    if refusal:
+        return False, refusal, "", None
+    new = people.clean_handle(handle)
+    if not new:
+        return False, ("a handle has no spaces, starts with a letter or digit "
+                       "and isn't only digits (that would read as an id)"), "", None
+    old = rec.get("handle") or ""
+    if new == old:
+        return True, "", "that's already their handle — nothing changed", rec
+    if people.ident_taken(platform, new, rec["user_id"]):
+        return False, f"{platform} already has someone with @{new}", "", None
+
+    uid = str(rec["user_id"])
+    placeholder = bool(rec.get("placeholder"))
+    new_uid = new if placeholder else uid
+    on_lists = [w for w in (PERM_DM, PERM_REPLY, PERM_TOOLS)
+                if old and old in channel_config.normalize_entries(cfg.get(w))]
+    if placeholder:
+        on_lists = [w for w in (PERM_DM, PERM_REPLY, PERM_TOOLS)
+                    if uid.lower() in channel_config.normalize_entries(cfg.get(w))]
+
+    try:
+        if placeholder:
+            user_perms.copy_entry(platform, uid, new_uid)            # 1
+    except (OSError, user_perms.PermsUnreadable) as exc:
+        return False, f"couldn't move their limits — {exc}", "", None
+    for which in on_lists:                                           # 2
+        ok, err = channel_config.add_to_set(platform, which, new)
+        if not ok:
+            return False, err, "", None
+    out, err = people.change_handle(platform, uid, new)              # 3
+    if out is None:
+        return False, err, "", None
+    # Only the OLD HANDLE comes out. A person with a real id keeps their id
+    # entry; only a placeholder's id *was* the handle.
+    stale = ({old.lower()} if old else set()) | ({uid.lower()} if placeholder else set())
+    for which in on_lists:                                           # 4
+        for ident in stale:
+            ok, err = channel_config.remove_from_set(platform, which, ident)
+            if not ok:
+                return False, err, "", out
+    if placeholder:
+        try:
+            user_perms.drop_entry(platform, uid)                     # 5
+        except (OSError, user_perms.PermsUnreadable):
+            pass  # a leftover limits entry under an id nobody has is harmless
+    changelog.record(platform, changelog.K_HANDLE, new_uid,
+                     old=(old or (uid if placeholder else "")) or None)
+    note = ("their access moved to the new handle" if on_lists
+            else "nothing is switched on for them, so no list changed")
+    return True, "", note, out
+
+
+# --------------------------------------------------------------------------
+# Change log view  (L.36-P15)
+# --------------------------------------------------------------------------
+
+def history_view(platform, user_id, limit=100):
+    """Every recorded change to this person's access, oldest first, plus the
+    platform-wide ones that reached them too. Read-only. Registered people
+    only. Each line already carries its `text`; the panel prints it as text."""
+    rec, err = _registered(platform, user_id)
+    if rec is None:
+        return {"ok": False, "error": err}
+    lines, total = changelog.for_person(platform, _idents(rec), limit)
+    return {"ok": True, "platform": platform, "user_id": str(rec["user_id"]),
+            "entries": lines, "total": total,
+            "truncated": total > len(lines),
+            "tracking_since": changelog.started()}
+
 
 def conversation_view(platform, user_id, limit=100):
     """What this person sent and how Jarvis answered, newest `limit` messages

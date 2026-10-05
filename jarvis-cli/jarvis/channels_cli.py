@@ -27,6 +27,7 @@ COMMANDS = (
     "channels-note", "channels-forget",
     "channels-link", "channels-unlink",
     "channels-conversation", "channels-usage", "channels-user-test",
+    "channels-history", "channels-handle",
     "channels-presets", "channels-preset", "channels-bulk",
     "channels-servers", "channels-server-set",
     "discord-daemon", "instagram-serve", "logs-search",
@@ -70,6 +71,14 @@ USAGE = """channel commands:
   channels-conversation <platform> <id> [limit]
                                         what that person sent and how Jarvis answered (JSON, read-only)
   channels-usage <platform> <id> [days] their messages, tokens and tool calls (JSON, read-only)
+  channels-history <platform> <id> [limit]
+                                        every recorded change to their access: who/what/when,
+                                        and whether it came from the panel or the terminal
+                                        (JSON, read-only). Starts when the log does
+  channels-handle <platform> <id|@handle> <new-handle>
+                                        correct the handle of someone you added by hand who
+                                        hasn't written yet; their access moves with it.
+                                        Refused for the owner and for anyone who has written
   channels-user-test <platform> <id> dm | group [mentioned|unmentioned]
                                         dry run: what the gate would do with a message from them.
                                         Calls no model, sends nothing, saves nothing
@@ -392,6 +401,29 @@ def handle(argv):
             result = preset_admin.bulk_preset(refs, setup, preview=(mode == "preview"))
         print(json.dumps(result, indent=2))
         sys.exit(0 if result.get("ok") else 1)
+
+    if cmd == "channels-history":
+        # Read-only. Same strict id resolution as the other per-person views.
+        if len(rest) < 2:
+            _fail("usage: channels-history <platform> <id> [limit]")
+        platform, uid = rest[0], _person_id(rest[0], rest[1])
+        number = int(rest[2]) if len(rest) > 2 and rest[2].isdigit() else 100
+        result = user_admin.history_view(platform, uid, number)
+        print(json.dumps(result, indent=2))
+        sys.exit(0 if result.get("ok") else 1)
+
+    if cmd == "channels-handle":
+        if len(rest) < 3:
+            _fail("usage: channels-handle <platform> <id|@handle> <new-handle>")
+        platform = rest[0]
+        uid = _person_id(platform, rest[1])
+        ok, err, note, rec = user_admin.set_handle(platform, uid, rest[2])
+        rec = rec or {}
+        print(json.dumps({"ok": ok, "error": err, "note": note,
+                          "platform": platform,
+                          "user_id": str(rec.get("user_id") or uid),
+                          "handle": rec.get("handle") or ""}, indent=2))
+        sys.exit(0 if ok else 1)
 
     if cmd in ("channels-conversation", "channels-usage", "channels-user-test"):
         # Read-only (and, for -user-test, a dry run). The id is resolved the same
