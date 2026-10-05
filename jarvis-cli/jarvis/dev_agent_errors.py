@@ -21,19 +21,29 @@ _ADDR_IN_USE = re.compile(r"address already in use|EADDRINUSE", re.IGNORECASE)
 _SYNTAX_ERROR = re.compile(r"SyntaxError: (.+)")
 _IMPORT_ERROR = re.compile(r"ImportError: (.+)")
 _PY_TRACEBACK_FILE = re.compile(r'File "([^"]+)", line (\d+)')
+_TIMEOUT = re.compile(r"^timed out after \d+(?:\.\d+)?s\s*$", re.IGNORECASE)
 _NODE_STACK_FILE = re.compile(r"\(([^():]+):(\d+):(\d+)\)|at .*\(?([^\s():]+\.js):(\d+):(\d+)\)?")
+
+
+def is_timeout(stderr_tail):
+    """True when stderr_tail is just the harness's own "timed out after Ns"
+    marker (no real error text). That is not a code bug, so the fix loop must
+    not hand it to the writer model (BUG-2)."""
+    return bool(_TIMEOUT.match((stderr_tail or "").strip()))
 
 
 def classify(stderr_tail):
     """Return (classified, target_file). `classified` is one of:
     "missing_dependency", "syntax_error", "import_error", "port_in_use",
-    "runtime_error", "unknown". `target_file` is the innermost
+    "runtime_error", "timeout", "unknown". `target_file` is the innermost
     file (absolute or relative, as it appeared in the trace) the loop
     should hand back to the writer model — may be None if none was
     found, e.g. for "missing_dependency" where the fix is
     add-to-requirements, not a file edit."""
     text = stderr_tail or ""
     try:
+        if is_timeout(text):
+            return "timeout", None
         m = _MODULE_NOT_FOUND.search(text)
         if m:
             return "missing_dependency", None
