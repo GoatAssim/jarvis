@@ -117,6 +117,16 @@ def clean_tool_names(names):
     return out
 
 
+def _log_change(platform, user_id, kind, **fields):
+    """One line in the permission change log (changelog.py), after the change
+    was saved. Never raises: the log must not be why a limit fails to apply."""
+    try:
+        from . import changelog
+        changelog.record(platform, kind, user_id, **fields)
+    except Exception:  # noqa: BLE001
+        pass
+
+
 def _defaults():
     return {"tools": {"mode": TOOLS_INHERIT, "allow": []}, "can_dm": True}
 
@@ -179,12 +189,17 @@ def set_tools(platform, user_id, mode, allow=None):
     if mode not in TOOLS_MODES:
         raise ValueError(f"mode must be one of: {', '.join(TOOLS_MODES)}")
     entry = get(platform, user_id)
+    before = dict(entry["tools"])
     if mode == TOOLS_INHERIT:
         entry["tools"] = {"mode": TOOLS_INHERIT, "allow": []}
     else:
         entry["tools"] = {"mode": TOOLS_CUSTOM,
                           "allow": clean_tool_names(allow or [])}
-    return _put(platform, user_id, entry)
+    saved = _put(platform, user_id, entry)
+    if entry["tools"] != before:
+        _log_change(platform, user_id, "tools", mode=entry["tools"]["mode"],
+                    tools=entry["tools"]["allow"])
+    return saved
 
 
 def forget(platform, user_id):
@@ -206,10 +221,39 @@ def forget(platform, user_id):
     return True
 
 
+def copy_entry(platform, old_id, new_id):
+    """Give `new_id` the same stored limits `old_id` has, leaving the old
+    entry in place. Returns True if there was something to copy. Raises
+    PermsUnreadable / OSError like the other writers.
+
+    Used when a hand-added person known only by handle is re-keyed to a
+    corrected handle (user_admin.set_handle): the limits must exist under the
+    new key BEFORE the record moves, or the person would be let through with
+    the defaults for as long as it takes to finish."""
+    data = _load()
+    found = data.get(key(platform, old_id))
+    if found is None:
+        return False
+    data[key(platform, new_id)] = found
+    if not _save(data):
+        raise OSError("could not write user_perms.json")
+    return True
+
+
+def drop_entry(platform, user_id):
+    """Remove one stored entry. The second half of a re-key, after the new
+    key holds the limits. Returns True if one was removed."""
+    return forget(platform, user_id)
+
+
 def set_can_dm(platform, user_id, value):
     entry = get(platform, user_id)
+    before = entry["can_dm"]
     entry["can_dm"] = bool(value)
-    return _put(platform, user_id, entry)
+    saved = _put(platform, user_id, entry)
+    if entry["can_dm"] != before:
+        _log_change(platform, user_id, "send_dm", on=entry["can_dm"])
+    return saved
 
 
 def effective_tool_scope(platform, user_id):

@@ -139,6 +139,12 @@ jarvis-cli/jarvis/
         usage.py          L.36-P2: per-person usage ledger, one counts-only line per answered
                           ask in `channels/usage.jsonl` (tokens, requests, tool NAMES; never
                           text). Tokens as the provider counted them, no prices
+        changelog.py      L.36-P15: the permission change log, one line per ACTUAL change in
+                          `channels/changes.jsonl`. Written by the writers themselves
+                          (config.add_to_set/remove_from_set/set_value[owner, allow_tools],
+                          user_perms.set_tools/set_can_dm, people.set_follow, user_admin
+                          set_handle/forget_person), so panel, quick setups, bulk edits and the
+                          terminal are all covered. Names and switches only; never text or tokens
         servers.py        L.36-P7: the Discord servers + channels the bot is in (names only,
                           `channels/servers.json`, kept by the gateway) and per-server /
                           per-channel switches written ONLY into `scopes` of channels.json;
@@ -282,6 +288,7 @@ Everything is under `~/.jarvis/`:
 | `channels/user_perms.json` | channels/user_perms.py | per-person tool scope + "Jarvis may DM them"; only non-default values stored; unreadable = fail closed |
 | `channels/servers.json` | channels/servers.py | L.36-P7: `{platform: {guild_id: {name, left, seen, channels}}}` -- names only, a cache; losing it costs labels, not behaviour |
 | `channels/usage.jsonl` | channels/usage.py | L.36-P2: one counts-only line per answered ask (who, when, tokens, tool names); rotated, never deleted |
+| `channels/changes.jsonl` | channels/changelog.py | L.36-P15: one line per permission change (when, whose id/handle, what, `via` panel/terminal, optional `why`); rotated, never deleted |
 | `channels/seen_messages.json` | channels/dedupe.py | redelivery guard |
 | `daemons.json` | daemons.py | the daemon registry |
 | `daemons/<id>/` | daemons.py | console.log, status.json, stdin.queue |
@@ -425,6 +432,8 @@ jarvis channels-user <platform> <id> <dm|reply|tool|owner|send_dm|blocked> <on|o
 jarvis channels-user-tools <platform> <id> inherit | custom [tool ...]
 jarvis channels-conversation <platform> <id|@handle> [limit]    # what they sent and how Jarvis answered (JSON, read-only)
 jarvis channels-usage <platform> <id|@handle> [days]            # their messages, tokens, tool calls (JSON, read-only)
+jarvis channels-history <platform> <id|@handle> [limit]         # every recorded change to their access, who/what/when/how (JSON, read-only)
+jarvis channels-handle <platform> <id|@handle> <new-handle>     # L.36-P10: correct the handle of a hand-added person who hasn't written; their list entries move with it
 jarvis channels-user-test <platform> <id|@handle> dm|group [mentioned|unmentioned]   # DRY RUN of the gate: no model, nothing sent or saved
 jarvis channels-presets                                         # the quick setups (JSON)
 jarvis channels-preset <platform> <id|@handle> <setup> [preview]   # none|chat_only|chat_notify|trusted for ONE person; `preview` writes nothing

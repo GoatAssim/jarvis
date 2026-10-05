@@ -124,6 +124,22 @@ things that were already fixed once.
   one-entry list, not a `TypeError`. Never iterate a config list directly -- use the
   normalizer. Names (`guild_name`, `channel_name`) are display only; no stage of
   `decide()` reads them. `tests/test_channel_servers.py` pins all of this.
+- **The permission change log is written by the writers, never by callers
+  (L.36-P15).** `channels/changelog.py` is hooked into `config.add_to_set /
+  remove_from_set / set_value`, `user_perms.set_tools / set_can_dm` and
+  `people.set_follow`; a new way to change access must go through one of them (or
+  call `changelog.record` itself), not around them. A line is written only after the
+  change was saved and only if something changed. It never raises, and it holds names
+  and switches only -- never a message, a note, a token or any config value except the
+  `owner` id and the `allow_tools` flag. `reason()` tags batch routes; the web panel
+  marks itself with `JARVIS_CHANGE_SOURCE=panel` (server.js sets it for every
+  `channels-*` command).
+- **A handle edit moves access, it does not widen it (L.36-P10).**
+  `user_admin.set_handle` works only for a hand-added person who has never written
+  (`touch()` overwrites the handle on every real message) and never for the owner. The
+  order is fixed: limits copied, new handle listed, record moved, old handle
+  de-listed, old limits dropped -- so a failure part-way leaves the old entries, not
+  an orphaned grant. Only the old HANDLE is removed from a list; a real id entry stays.
 - **Quick setups and bulk edits are the single switches, written together
   (L.36-P4/P5).** `channels/preset_admin.py` changes nothing except by calling
   `user_admin.set_flag` and `user_admin.set_tools`; don't give it a second way

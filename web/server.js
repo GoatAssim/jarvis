@@ -550,9 +550,14 @@ function runJarvisOnce(args, timeoutMs = 10000, extraEnv = {}, stdinText = null)
   return new Promise((resolve) => {
     let child;
     try {
+      // Every `channels-*` command run from here is a change made through the
+      // web panel; the permission change log (channels/changelog.py, L.36-P15)
+      // reads this to tell panel changes from terminal ones. extraEnv still wins.
+      const fromPanel = typeof args[0] === "string" && args[0].startsWith("channels-")
+        ? { JARVIS_CHANGE_SOURCE: "panel" } : {};
       child = spawn(JARVIS.cmd, [...JARVIS.args, ...args], {
         windowsHide: true,
-        env: { ...process.env, ...extraEnv },
+        env: { ...process.env, ...fromPanel, ...extraEnv },
       });
     } catch (e) {
       return resolve({ ok: false, error: e.message });
@@ -1315,6 +1320,30 @@ app.get("/api/channels/people/:platform/:id/conversation", requireJarvis, async 
   const limit = channelInt(req.query.limit, 100, 1, 500);
   sendChannelResult(await runJarvisOnce(
     ["channels-conversation", who.platform, who.id, String(limit)], 15000), res);
+});
+
+// Change log of this person's access (L.36-P15). Read-only.
+app.get("/api/channels/people/:platform/:id/history", requireJarvis, async (req, res) => {
+  const who = channelPersonArgs(req, res);
+  if (!who) return;
+  const limit = channelInt(req.query.limit, 100, 1, 500);
+  sendChannelResult(await runJarvisOnce(
+    ["channels-history", who.platform, who.id, String(limit)], 15000), res);
+});
+
+// Correct a hand-added person's handle (L.36-P10). The CLI refuses everyone who
+// has written and the owner; the handle is validated here as well so a value
+// can never be read as a flag. Digits-only is refused (that would read as an id).
+const CHANNEL_HANDLE_OK = (v) => typeof v === "string" && CHANNEL_USER_ID.test(v.trim().replace(/^@/, "")) && !/^[0-9]+$/.test(v.trim().replace(/^@/, ""));
+app.post("/api/channels/people/:platform/:id/handle", requireJarvis, async (req, res) => {
+  const who = channelPersonArgs(req, res);
+  if (!who) return;
+  if (!CHANNEL_HANDLE_OK(req.body?.handle)) {
+    return res.status(400).json({ error: "A handle has no spaces, starts with a letter or digit and isn't only digits." });
+  }
+  const handle = req.body.handle.trim().replace(/^@/, "");
+  sendChannelResult(await runJarvisOnce(
+    ["channels-handle", who.platform, who.id, handle], 10000), res);
 });
 
 app.get("/api/channels/people/:platform/:id/usage", requireJarvis, async (req, res) => {

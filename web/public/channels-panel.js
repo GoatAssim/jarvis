@@ -108,6 +108,7 @@
     chart: P('<path d="M4 4v16h16"/><path d="M8 16v-4M12 16V8M16 16v-6"/>'),
     flask: P('<path d="M9 3h6M10 3v6l-5.5 9.5A1.5 1.5 0 0 0 5.8 21h12.4a1.5 1.5 0 0 0 1.3-2.5L14 9V3"/><path d="M7.5 15h9"/>'),
     refresh: P('<path d="M20 11a8 8 0 1 0-2.3 5.7"/><path d="M20 4v7h-7"/>'),
+    clock: P('<circle cx="12" cy="12" r="9"/><path d="M12 7v5l3.2 2"/>'),
     server: P('<rect x="4" y="4" width="16" height="6" rx="1.5"/><rect x="4" y="14" width="16" height="6" rx="1.5"/><path d="M8 7h.01M8 17h.01"/>'),
     people: P('<circle cx="9" cy="8.5" r="3.2"/><path d="M3 19.5a6 6 0 0 1 12 0"/><path d="M16 5.6a3.2 3.2 0 0 1 0 5.8M18 14.2a6 6 0 0 1 3 5.3"/>'),
   };
@@ -325,6 +326,8 @@
     conv: new Map(),   // { status, data, error, limit, req }
     usage: new Map(),  // { status, data, error, days, req }
     sim: new Map(),    // { context, mentioned, status, result, error, req }
+    hist: new Map(),   // { status, data, error, limit, req }  (change log, L.36-P15)
+    editingHandle: null, // person key whose handle is being retyped (L.36-P10)
     scrollEnd: false,  // after the next render, show the newest message
     hideTools: false,  // Conversation tab: collapse the "used these tools" rows away
     // Discord servers (the registry + switches from /api/channels/servers).
@@ -350,6 +353,7 @@
 
   // ------------------------------------------------------------------- data
   async function load(keepSelection) {
+    state.hist.clear();   // every write ends in load(); a cached change log would be one change behind
     state.loading = true;
     state.error = "";
     renderAll();
@@ -384,6 +388,8 @@
     }
     state.loading = false;
     renderAll();
+    const here = current();
+    if (here && state.tab === "history") ensureHistory(here);
   }
 
   async function ensureTools() {
@@ -667,7 +673,7 @@
     if (state.selected === k) return;
     state.selected = k;
     state.confirm = null;
-    state.editingName = null;
+    state.editingName = null; state.editingHandle = null;
     state.confirmRemove = null;
     state.editingNote = null; state.confirmNote = null; state.forget = null;
     state.toolSearch = "";
@@ -726,6 +732,7 @@
       { id: "conv", label: "Conversation", ico: "chat" },
       { id: "usage", label: "Usage", ico: "chart" },
       { id: "test", label: "Test", ico: "flask", title: "Test as this person" },
+      { id: "history", label: "History", ico: "clock", title: "Changes to this person's access" },
     ];
     const bar = el("div", { class: "ch-tabs", role: "tablist", "aria-label": "Person" });
     defs.forEach((d, i) => {
@@ -775,7 +782,7 @@
       el("div", { class: "ch-section-title" }, "Details"),
       el("dl", { class: "ch-facts" }, [
         nameFact(p),
-        el("div", null, [el("dt", null, "Handle"), el("dd", null, p.handle ? "@" + p.handle : "—")]),
+        handleFact(p),
         el("div", null, [el("dt", null, "First seen"), el("dd", null, dateText(p.first_seen))]),
         el("div", null, [el("dt", null, "Last seen"), el("dd", null, dateText(p.last_seen))]),
         el("div", null, [el("dt", null, "Messages"), el("dd", null, String(p.messages))]),
@@ -808,6 +815,57 @@
         "aria-label": p.name ? `Change ${displayName(p)}'s name` : `Set a name for ${displayName(p)}`,
         onclick: () => { state.editingName = pkey(p); state.nameAt = "details"; renderDetail(); },
       }, [icon("edit")]),
+    ])]);
+  }
+
+  // ---- handle, in the Details list  (L.36-P10) ----------------------------
+  // Editable only for someone you added by hand who hasn't written yet (the
+  // server enforces it; p.handle_editable only decides whether to draw the
+  // pencil). Their access moves with the handle, which the hint says.
+  async function saveHandle(p, value, errEl) {
+    if (errEl) errEl.textContent = "";
+    try {
+      const out = await personPost(p, "handle", { handle: value });
+      state.editingHandle = null;
+      // A person known only by handle is keyed by it, so the card's key changes.
+      if (out && out.user_id) state.selected = `${p.platform}:${out.user_id}`;
+      toast(out.note || "Handle updated.", "success");
+    } catch (err) {
+      if (errEl) errEl.textContent = err.message || "Couldn't change the handle.";
+      else toast(err.message || "Couldn't change the handle.", "error");
+      return;
+    }
+    await load(true);
+  }
+
+  function handleFact(p) {
+    if (state.editingHandle === pkey(p)) {
+      const input = el("input", { type: "text", class: "ch-name-input", maxlength: "64", autocomplete: "off", spellcheck: "false", "aria-label": "Handle", placeholder: "their handle, without the @", value: p.handle || "" });
+      input.value = p.handle || "";
+      const err = el("div", { class: "ch-row__hint", role: "alert" });
+      const save = () => saveHandle(p, input.value, err);
+      input.addEventListener("keydown", (e) => {
+        if (e.key === "Enter") { e.preventDefault(); save(); }
+        else if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); state.editingHandle = null; renderDetail(); }
+      });
+      setTimeout(() => { if (input.isConnected) { input.focus(); input.select(); } }, 0);
+      return el("div", { class: "ch-facts__wide" }, [el("dt", null, "Handle"), el("dd", null, [
+        el("div", { class: "ch-name-edit" }, [
+          input,
+          el("button", { type: "button", class: "btn btn--primary btn--sm", onclick: save }, "Save"),
+          el("button", { type: "button", class: "btn btn--ghost btn--sm", onclick: () => { state.editingHandle = null; renderDetail(); } }, "Cancel"),
+        ]),
+        el("div", { class: "ch-row__hint" }, "If this handle is on a list for them, the new one takes its place. You can only edit it until they write; after that the platform's own handle is used."),
+        err,
+      ])]);
+    }
+    return el("div", null, [el("dt", null, "Handle"), el("dd", { class: "ch-namecell" }, [
+      el("span", null, p.handle ? "@" + p.handle : "—"),
+      p.handle_editable ? el("button", {
+        type: "button", class: "ch-iconbtn", title: "Correct the handle",
+        "aria-label": `Correct ${displayName(p)}'s handle`,
+        onclick: () => { state.editingHandle = pkey(p); renderDetail(); },
+      }, [icon("edit")]) : null,
     ])]);
   }
 
@@ -898,7 +956,7 @@
     try {
       const out = await personPost(p, "forget", { history: !!f.history, confirm: true });
       const k = pkey(p);
-      state.conv.delete(k); state.usage.delete(k); state.sim.delete(k); state.drafts.delete(k);
+      state.conv.delete(k); state.usage.delete(k); state.sim.delete(k); state.hist.delete(k); state.drafts.delete(k);
       state.forget = null;
       toast(`${displayName(p)} forgotten.`, "success");
       if (out && out.report && out.report.history_purged && out.report.history && out.report.history.left_in_groups) {
@@ -1676,10 +1734,10 @@
     dom.detail.appendChild(hero(p));
     const tabBar = tabs(p);
     dom.detail.appendChild(tabBar);
-    // Five tabs don't fit a phone: scroll the bar so the active one is visible.
+    // Six tabs don't fit a phone: scroll the bar so the active one is visible.
     const activeTab = tabBar.querySelector('.ch-tab[aria-selected="true"]');
     if (activeTab && activeTab.offsetLeft + activeTab.offsetWidth > tabBar.clientWidth) tabBar.scrollLeft = activeTab.offsetLeft - 16;
-    const pane = { profile: renderProfile, conv: renderConv, usage: renderUsage, test: renderTest }[state.tab] || renderPerms;
+    const pane = { profile: renderProfile, conv: renderConv, usage: renderUsage, test: renderTest, history: renderHistory }[state.tab] || renderPerms;
     dom.detail.appendChild(pane(p));
     const bar = state.tab === "perms" ? savebar(p) : null;
     if (bar) dom.detail.appendChild(bar);
@@ -1695,6 +1753,7 @@
   const slot = (map, p, init) => { const k = pkey(p); if (!map.has(k)) map.set(k, init()); return map.get(k); };
   const convSlot = (p) => slot(state.conv, p, () => ({ status: "idle", data: null, error: "", limit: CONV_STEP, req: 0 }));
   const usageSlot = (p) => slot(state.usage, p, () => ({ status: "idle", data: null, error: "", days: 30, req: 0 }));
+  const histSlot = (p) => slot(state.hist, p, () => ({ status: "idle", data: null, error: "", limit: CONV_STEP, req: 0 }));
   const simSlot = (p) => slot(state.sim, p, () => ({ context: "dm", mentioned: true, status: "idle", result: null, error: "", req: 0 }));
   const showing = (p, tab) => !!dom && state.selected === pkey(p) && state.tab === tab;
 
@@ -1740,6 +1799,24 @@
     if (showing(p, "usage")) renderDetail();
   }
 
+  async function ensureHistory(p, more) {
+    const s = histSlot(p);
+    if (more) s.limit = Math.min(CONV_MAX, s.limit + CONV_STEP * 2);
+    else if (s.status === "ok" || s.status === "loading") return;
+    const req = ++s.req;
+    s.status = "loading"; s.error = "";
+    if (showing(p, "history")) renderDetail();
+    try {
+      const data = await api("GET", personUrl(p, `history?limit=${s.limit}`));
+      if (s.req !== req) return;
+      s.data = data; s.status = "ok";
+    } catch (err) {
+      if (s.req !== req) return;
+      s.status = "error"; s.error = err.message || "Couldn't read the change log.";
+    }
+    if (showing(p, "history")) renderDetail();
+  }
+
   // The dry run. Re-run every time the tab is opened or an option changes,
   // because a switch flipped on the Permissions tab makes any earlier answer stale.
   async function runSim(p) {
@@ -1768,6 +1845,7 @@
     else if (state.tab === "conv") ensureConv(p);
     else if (state.tab === "usage") ensureUsage(p);
     else if (state.tab === "test") runSim(p);
+    else if (state.tab === "history") ensureHistory(p);
   }
   function activateTab(id) {
     state.tab = id;
@@ -1905,6 +1983,54 @@
     if (d.unattributed_replies > 0) {
       pane.appendChild(el("div", { class: "ch-row__note ch-row__note--info" }, [icon("info"),
         el("span", null, `${d.unattributed_replies} older repl${d.unattributed_replies === 1 ? "y" : "ies"} in group chats ${d.unattributed_replies === 1 ? "isn't" : "aren't"} shown: before replies were tagged with who they were for, a group reply couldn't be tied to one person. New replies are.`)]));
+    }
+    return pane;
+  }
+
+  // ---- History: the change log of this person's access  (L.36-P15) ---------
+  // Every string comes from the log and is shown with textContent (el()).
+  function historyRow(e) {
+    const how = e.via === "panel" ? "panel" : "terminal";
+    return el("div", { class: "ch-hist__row" + (e.everyone ? " is-everyone" : "") }, [
+      el("span", { class: "ch-msg__time" }, clockOf(e.at)),
+      el("span", { class: "ch-hist__text" }, [
+        el("span", null, e.text || e.kind),
+        e.everyone ? el("span", { class: "ch-hist__tag", title: "This change applied to everyone on the platform, so it is shown on every person." }, "everyone") : null,
+      ]),
+      el("span", { class: "ch-hist__meta" }, [
+        el("span", { class: "ch-hist__tag", title: how === "panel" ? "Made from this web panel." : "Made from the terminal (jarvis channels-…) or by Jarvis itself." }, how),
+        e.why ? el("span", { class: "ch-hist__why" }, e.why) : null,
+      ]),
+    ]);
+  }
+
+  function renderHistory(p) {
+    const pane = el("div", { class: "ch-tabpane", id: "ch-pane-history", role: "tabpanel", "aria-labelledby": "ch-tab-history" });
+    const s = histSlot(p);
+    if (s.status === "idle" || (s.status === "loading" && !s.data)) { pane.appendChild(loadingBlock("Reading the change log…")); return pane; }
+    if (s.status === "error" && !s.data) { pane.appendChild(errorBlock(s.error, () => { s.status = "idle"; ensureHistory(p); })); return pane; }
+    const d = s.data;
+    pane.appendChild(el("div", { class: "ch-conv__head" }, [
+      el("div", { class: "ch-row__hint" }, d.tracking_since
+        ? `Changes to ${displayName(p)}'s access, newest last. Recorded since ${dateOnly(d.tracking_since)}; earlier changes weren't kept.`
+        : "Nothing has been recorded yet. Changes are logged from now on."),
+      el("button", { type: "button", class: "btn btn--ghost btn--sm", disabled: s.status === "loading", onclick: () => { s.status = "idle"; ensureHistory(p); } }, [icon("refresh"), "Refresh"]),
+    ]));
+    if (d.truncated && s.limit < CONV_MAX) {
+      pane.appendChild(el("button", { type: "button", class: "btn btn--ghost btn--sm ch-conv__older", disabled: s.status === "loading", onclick: () => ensureHistory(p, true) }, "Show older changes"));
+    } else if (d.truncated) {
+      pane.appendChild(el("div", { class: "ch-row__hint" }, `That's the most the panel shows (${CONV_MAX}). The full log is ~/.jarvis/channels/changes.jsonl.`));
+    }
+    if (!d.entries.length) {
+      pane.appendChild(el("div", { class: "ch-empty" }, [el("b", null, "No changes recorded for them. "), "Switching something on or off, a quick setup, a bulk edit or a handle edit will show up here."]));
+      return pane;
+    }
+    const today = localDay();
+    for (const g of groupByDay(d.entries)) {
+      pane.appendChild(el("div", { class: "ch-day" }, dayLabel(g.day, today)));
+      const col = el("div", { class: "ch-hist" });
+      g.entries.forEach((e) => col.appendChild(historyRow(e)));
+      pane.appendChild(col);
     }
     return pane;
   }
@@ -2411,7 +2537,7 @@
     if (typing) return;
     if (e.key === "/") { e.preventDefault(); dom.search.focus(); return; }
     if (state.bulkOpen) return; // the bulk editor has no tabs, and the arrows must not move the person behind it
-    const byKey = { 1: "profile", 2: "perms", 3: "conv", 4: "usage", 5: "test" }[e.key];
+    const byKey = { 1: "profile", 2: "perms", 3: "conv", 4: "usage", 5: "test", 6: "history" }[e.key];
     if (byKey) { activateTab(byKey); return; }
     if (e.key === "ArrowDown" || e.key === "ArrowUp") {
       const rows = visiblePeople();
@@ -2431,7 +2557,7 @@
     dom.search.addEventListener("input", () => { state.search = dom.search.value; renderChips(); renderList(); });
     dom.refresh.addEventListener("click", () => {
       state.tools = null; state.toolsState = "idle";
-      state.conv.clear(); state.usage.clear(); state.sim.clear();
+      state.conv.clear(); state.usage.clear(); state.sim.clear(); state.hist.clear();
       load(true).then(runTabLoader);
     });
     if (dom.addBtn) dom.addBtn.addEventListener("click", openAdd);
@@ -2463,7 +2589,7 @@
     if (!dom || dom.overlay.hidden) return;
     if (state.drafts.size && !global.confirm("You have unsaved tool changes. Close anyway?")) return;
     state.drafts.clear();
-    state.conv.clear(); state.usage.clear(); state.sim.clear();   // don't keep their messages around while it's closed
+    state.conv.clear(); state.usage.clear(); state.sim.clear(); state.hist.clear();   // don't keep their messages around while it's closed
     state.adding = false; state.editingName = null; state.confirmRemove = null;
     state.editingNote = null; state.confirmNote = null; state.forget = null;
     state.selectMode = false; state.picked.clear(); state.bulkOpen = false; state.bulk = newBulk();

@@ -357,7 +357,16 @@ def set_follow(platform, user_id, status):
     if status not in FOLLOW_STATES:
         raise ValueError(f"unknown follow state '{status}' — expected one of: "
                          + ", ".join(FOLLOW_STATES))
-    return _update(platform, user_id, follow=status)
+    before = (get(platform, user_id) or {}).get("follow") or FOLLOW_UNKNOWN
+    record = _update(platform, user_id, follow=status)
+    if before != status:
+        try:
+            from . import changelog
+            changelog.record(platform, changelog.K_FOLLOW, user_id,
+                             state=status, old=before)
+        except Exception:  # noqa: BLE001 -- the log never blocks a change
+            pass
+    return record
 
 
 def set_owner_flag(platform, user_id, flag):
@@ -563,6 +572,68 @@ def remove_person(platform, user_id):
         data[partner]["linked"] = ""
     del data[k]
     return (True, "") if _save(data) else (False, "could not write people.json")
+
+
+def clean_handle(text):
+    """The handle the owner typed, normalised (no @, lower case), or '' when it
+    is not usable. A handle made only of digits is refused: ids are digits, and
+    the same string would then name two different things."""
+    ident = _ident_of(text)
+    if not ident or ident.isdigit():
+        return ""
+    return ident.lower()
+
+
+def change_handle(platform, user_id, new_handle):
+    """Re-point a hand-added person's handle. Returns (record, error).
+
+    Only the people.json half; user_admin.set_handle owns the rules (who may
+    be edited) and the allow-lists / limits that must move with it.
+
+    A placeholder (known only by handle) is keyed by that handle, so a
+    corrected handle is a new key: the record moves, and the other half of a
+    link is pointed at it. A hand-added person with a real id only gets a new
+    label. The caller has already checked `new_handle` with clean_handle()."""
+    data = _load()
+    k = key(platform, user_id)
+    rec = data.get(k)
+    if not isinstance(rec, dict):
+        return None, f"{user_id} isn't in the list"
+    if _find_other(data, platform, new_handle, k):
+        return None, f"{platform} already has someone called @{new_handle}"
+    rec["handle"] = new_handle
+    if rec.get("placeholder"):
+        new_key = key(platform, new_handle)
+        rec["user_id"] = new_handle
+        del data[k]
+        data[new_key] = rec
+        partner = rec.get("linked")
+        if partner and isinstance(data.get(partner), dict):
+            data[partner]["linked"] = new_key
+    else:
+        data[k] = rec
+    if not _save(data):
+        return None, "could not write people.json"
+    return rec, ""
+
+
+def ident_taken(platform, ident, user_id):
+    """Is `ident` already the id or handle of a record other than the one
+    keyed by `user_id`? Checked BEFORE any list is touched, so a clash can
+    never be discovered half-way through a handle edit."""
+    return _find_other(_load(), platform, ident, key(platform, user_id))
+
+
+def _find_other(data, platform, ident, own_key):
+    """Is `ident` already the id or handle of a DIFFERENT record?"""
+    low = ident.lower()
+    for k, v in data.items():
+        if k == own_key or not isinstance(v, dict) or not k.startswith(f"{platform}:"):
+            continue
+        if (str(v.get("user_id") or "").lower() == low
+                or (v.get("handle") or "").lower() == low):
+            return True
+    return False
 
 
 def delete_record(platform, user_id):

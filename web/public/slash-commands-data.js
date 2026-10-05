@@ -659,6 +659,8 @@ window.JARVIS_SLASH_COMMANDS = /*JSON-BEGIN*/
         "channels-conversation",
         "channels-usage",
         "channels-user-test",
+        "channels-history",
+        "channels-handle",
         "channels-presets",
         "channels-preset",
         "channels-bulk",

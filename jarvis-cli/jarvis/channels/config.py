@@ -372,13 +372,44 @@ normalize_entries = _normalize_entries
 # ---------------------------------------------------------------------------
 
 
+def _log_change(platform, kind, ident, **fields):
+    """Hand one change to the permission change log (changelog.py). Lazy
+    import and a blanket guard: the log must never be the reason a permission
+    change fails."""
+    try:
+        from . import changelog
+        changelog.record(platform, kind, ident, **fields)
+    except Exception:  # noqa: BLE001
+        pass
+
+
+# Only these two config keys are logged, and only as a switch or an id: every
+# other key (tokens, URLs, secrets) must never reach the log.
+def _log_value_change(platform, key, before, after):
+    if key == "owner":
+        was, now = _normalize_entry(before), _normalize_entry(after)
+        if was == now:
+            return
+        if now:
+            _log_change(platform, "owner", now, on=True)
+        else:
+            _log_change(platform, "owner", was, on=False)
+    elif key == "allow_tools":
+        if bool(before) != bool(after):
+            _log_change(platform, "platform", "", key="allow_tools", on=bool(after))
+
+
 def set_value(platform, key, value):
     """Set one key on one platform. Returns (ok, error)."""
     if platform not in PLATFORMS:
         return False, f"unknown platform '{platform}'"
     cfg = load_config()
+    before = cfg[platform].get(key)
     cfg[platform][key] = value
-    return (True, "") if save_config(cfg) else (False, "could not write config")
+    if not save_config(cfg):
+        return False, "could not write config"
+    _log_value_change(platform, key, before, value)
+    return True, ""
 
 
 def add_to_set(platform, which, entry):
@@ -396,7 +427,10 @@ def add_to_set(platform, which, entry):
         return True, ""  # idempotent — re-adding is not an error
     current.append(entry)
     cfg[platform][which] = current
-    return (True, "") if save_config(cfg) else (False, "could not write config")
+    if not save_config(cfg):
+        return False, "could not write config"
+    _log_change(platform, "list", entry, list=which, on=True)
+    return True, ""
 
 
 def remove_from_set(platform, which, entry):
@@ -406,9 +440,14 @@ def remove_from_set(platform, which, entry):
         return False, f"unknown platform '{platform}'"
     entry = _normalize_entry(entry)
     cfg = load_config()
-    current = [e for e in (cfg[platform].get(which) or []) if e != entry]
+    before = cfg[platform].get(which) or []
+    current = [e for e in before if e != entry]
     cfg[platform][which] = current
-    return (True, "") if save_config(cfg) else (False, "could not write config")
+    if not save_config(cfg):
+        return False, "could not write config"
+    if entry in before:
+        _log_change(platform, "list", entry, list=which, on=False)
+    return True, ""
 
 
 def redacted(cfg=None):
