@@ -2807,7 +2807,8 @@ window.JARVIS_TEST_CHECKLIST = /*JSON-BEGIN*/ {
    ],
    "care": "Do this in a scratch folder or throwaway repo, not a real project.",
    "watch": [
-    "Use dev_agent for new projects — code_agent is for existing ones."
+    "Use dev_agent for new projects — code_agent is for existing ones.",
+    "Focus layout: an Agent panel opens beside the chat when it starts, showing the root folder, the file it is on, a tree of the files it listed / read / edited, and a log of shell commands. It shows paths only, never file contents. Classic layout shows none of this."
    ]
   },
   "edit_file": {
@@ -2910,7 +2911,10 @@ window.JARVIS_TEST_CHECKLIST = /*JSON-BEGIN*/ {
      "expect": "One confirmation, then plan → write → install → run → self-fix with a step timeline."
     }
    ],
-   "care": "Creates files and installs dependencies. Watch where it writes."
+   "care": "Creates files and installs dependencies. Watch where it writes.",
+   "watch": [
+    "Focus layout: an Agent panel opens beside the chat when it starts — the project folder, the file being written, a tree of planned files filling in as each is written, and a log of install / run / fix. Closing it mid-run keeps it closed. Classic layout shows none of this."
+   ]
   },
   "remember_sender": {
    "group": "channels",

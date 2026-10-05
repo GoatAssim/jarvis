@@ -47,6 +47,32 @@ NOTHING -- no transcript line, no usage line, no people.json touch, no
 cooldown mark, no conversation. tests/test_channel_insights.py snapshots the
 whole ~/.jarvis tree around a run to hold it to that.
 
+NOTES AND "FORGET THIS PERSON"  (L.36-P11)
+-----------------------------------------
+`edit_note` / `delete_note` change one line of what Jarvis remembers about a
+person, by note id (people.note_id), never by position.
+
+`forget_person` is the one real wipe, and it is deliberately the opposite of
+a switch: it can only ever take things away. In this order -- so that a
+failure part-way leaves the person LESS able to reach Jarvis, never more, and
+the record in place so it can simply be run again:
+
+    1. off every dm / reply / tool list, under every spelling they use
+    2. their stored limits (user_perms) deleted
+    3. optionally, the logs of threads that are only their DMs, and the
+       model-facing conversations those logs point at
+    4. their handle -> id entries in the directory
+    5. the people.json record itself, and the other half of a link
+
+It REFUSES the owner (hand ownership over first), anyone a `"*"` entry covers
+in any list (step 2 would delete a tool limit they would then be let through
+without -- the same reason a switch cannot undo a wildcard), and a person
+whose limits file cannot be read (unknown limits are never wiped). It leaves
+the usage ledger (counts only), group-thread lines other people also wrote in,
+and a linked account on the other platform alone, and says so in its report.
+No model tool reaches it (AGENTS.md); the panel and `jarvis channels-forget`
+are the only callers, and the CLI only acts when told `--yes`.
+
 WHAT A SWITCH CANNOT DO
 -----------------------
 There is no deny-list in the gate. A person covered by a `"*"` entry cannot be
@@ -132,6 +158,8 @@ def person_view(platform, rec, cfg, perms):
         "last_seen": rec.get("last_seen"),
         "messages": int(rec.get("messages") or 0),
         "notes": [n for n in (rec.get("notes") or []) if isinstance(n, str)],
+        # The same notes with their ids, which the edit / delete controls use.
+        "note_items": people.list_notes(rec),
         "follow": follow,
         "owner": bool(owner),
         "blocked": follow == people.FOLLOW_BLOCKED,
@@ -411,6 +439,117 @@ def remove_person(platform, user_id):
         if not ok:
             return False, err
     return people.remove_person(platform, rec["user_id"])
+
+
+def edit_note(platform, user_id, note_id, text):
+    """Rewrite one of what Jarvis remembers about this person. Returns
+    (ok, error, notes). Only the owner reaches this (panel / CLI)."""
+    rec, err = _registered(platform, user_id)
+    if rec is None:
+        return False, err, []
+    return people.edit_note(platform, rec["user_id"], note_id, text)
+
+
+def delete_note(platform, user_id, note_id):
+    """Delete one remembered note. Returns (ok, error, notes)."""
+    rec, err = _registered(platform, user_id)
+    if rec is None:
+        return False, err, []
+    return people.delete_note(platform, rec["user_id"], note_id)
+
+
+def forget_refusal(platform, rec):
+    """Why this person cannot be forgotten, or "" when they can. One place, so
+    the preview and the real thing cannot disagree."""
+    cfg = channel_config.platform_config(platform)
+    if permissions.is_owner(cfg, _idents(rec)):
+        return "that's the owner — hand ownership to someone else first"
+    for which, label in ((PERM_DM, "dm"), (PERM_REPLY, "reply"), (PERM_TOOLS, "tool")):
+        if membership(cfg, which, rec)["via"] == "wildcard":
+            return (f"covered by \"*\" (everyone) in the {label} list — "
+                    f"forgetting them would also delete their limits and "
+                    f"they'd still be let through. Take the \"*\" out first")
+    try:
+        user_perms._load()
+    except user_perms.PermsUnreadable as exc:
+        return (f"their limits can't be read ({exc}) — Jarvis won't delete "
+                f"limits it can't see")
+    return ""
+
+
+def forget_person(platform, user_id, purge_history=False, dry_run=False):
+    """Wipe one person. Returns (ok, error, report).
+
+    `dry_run` reports what would go and changes nothing. `purge_history` adds
+    step 3 of the module docstring; without it their logs and conversations
+    stay on disk as an archive nobody is shown. The report is the same shape
+    either way, so a preview cannot promise something the real run then does
+    differently."""
+    rec, err = _registered(platform, user_id)
+    if rec is None:
+        return False, err, {}
+    refusal = forget_refusal(platform, rec)
+    if refusal:
+        return False, refusal, {}
+    cfg = channel_config.platform_config(platform)
+    uid = str(rec["user_id"])
+    other = people.partner(rec)
+    report = {
+        "platform": platform,
+        "user_id": uid,
+        "name": people.effective_name(rec) or rec.get("handle") or uid,
+        "dry_run": bool(dry_run),
+        "lists": [w for w in (PERM_DM, PERM_REPLY, PERM_TOOLS)
+                  if membership(cfg, w, rec)["explicit"]],
+        "limits": False,
+        "notes": len([n for n in (rec.get("notes") or []) if isinstance(n, str)]),
+        "linked": ({"platform": other.get("platform") or "",
+                    "user_id": str(other.get("user_id") or ""),
+                    "name": other.get("name") or ""} if other else None),
+        # What is on disk for them. Deleted only when `history_purged`; the
+        # panel shows these counts next to the tick-box so the choice is made
+        # knowing how much it is.
+        "history": transcript.history_summary(platform, uid),
+        "history_purged": bool(purge_history),
+        "usage_kept": True,
+    }
+    try:
+        report["limits"] = user_perms.normalize(
+            user_perms._load().get(user_perms.key(platform, uid))) != user_perms._defaults()
+    except user_perms.PermsUnreadable as exc:
+        return False, str(exc), {}
+    if dry_run:
+        return True, "", report
+
+    # 1. access first -- everything after this only tidies up.
+    for which in (PERM_DM, PERM_REPLY, PERM_TOOLS):
+        ok, err = _remove_everywhere(platform, which, rec)
+        if not ok:
+            return False, err, report
+    # 2. their limits.
+    try:
+        user_perms.forget(platform, uid)
+    except (OSError, user_perms.PermsUnreadable) as exc:
+        return False, str(exc), report
+    # 3. history, only when asked.
+    if purge_history:
+        purged = transcript.purge_person(platform, uid)
+        if purged["errors"]:
+            return False, ("couldn't delete every log file — "
+                           + "; ".join(purged["errors"][:3])), report
+        from .. import conversations
+        for conv_id in purged["conv_ids"]:
+            conversations.delete_conversation(conv_id)
+        transcript.forget_conv_ids(purged["conv_ids"])
+        report["history_purged_threads"] = purged["threads"]
+    # 4. handles.
+    from . import directory
+    directory.forget(platform, uid)
+    # 5. the record, last.
+    ok, err = people.delete_record(platform, uid)
+    if not ok:
+        return False, err, report
+    return True, "", report
 
 
 def link_accounts(platform, user_id, other_platform, ident):

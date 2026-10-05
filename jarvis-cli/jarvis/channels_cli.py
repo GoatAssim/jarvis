@@ -24,6 +24,7 @@ COMMANDS = (
     "channels-directory", "channels-people", "channels-follow",
     "channels-block", "channels-users", "channels-user", "channels-user-tools",
     "channels-add-person", "channels-rename", "channels-remove-person",
+    "channels-note", "channels-forget",
     "channels-link", "channels-unlink",
     "channels-conversation", "channels-usage", "channels-user-test",
     "channels-presets", "channels-preset", "channels-bulk",
@@ -56,6 +57,12 @@ USAGE = """channel commands:
                                         set what they're called; no name clears it
   channels-remove-person <platform> <id|@handle>
                                         delete a hand-added person who never messaged
+  channels-note <platform> <id|@handle> list | edit <note-id> <text ...> | delete <note-id>
+                                        what Jarvis remembers about them; ids come from `list`
+  channels-forget <platform> <id|@handle> [--history] [--yes]
+                                        wipe someone: off every list, limits, record
+                                        (--history also their DM logs). Without --yes it
+                                        only PREVIEWS. Refuses the owner and anyone "*" covers
   channels-link <platform> <id|@handle> <other-platform> <id|@handle|name ...>
                                         same human on both platforms (identity only)
   channels-unlink <platform> <id|@handle>
@@ -450,6 +457,50 @@ def handle(argv):
         ok, err = user_admin.remove_person(platform, uid)
         print(json.dumps({"ok": ok, "error": err, "platform": platform,
                           "user_id": uid}, indent=2))
+        sys.exit(0 if ok else 1)
+
+    if cmd == "channels-note":
+        usage = ("usage: channels-note <platform> <id|@handle> "
+                 "list | edit <note-id> <text ...> | delete <note-id>")
+        if len(rest) < 3:
+            _fail(usage)
+        platform = rest[0]
+        uid = _person_id(platform, rest[1])
+        action = rest[2]
+        if action == "list":
+            rec = people.get(platform, uid)
+            if rec is None:
+                _fail(f"{uid} isn't registered on {platform}")
+            print(json.dumps({"ok": True, "platform": platform, "user_id": uid,
+                              "notes": people.list_notes(rec)}, indent=2))
+            return
+        if action == "edit" and len(rest) >= 5:
+            ok, err, notes = user_admin.edit_note(
+                platform, uid, rest[3], " ".join(rest[4:]))
+        elif action == "delete" and len(rest) == 4:
+            ok, err, notes = user_admin.delete_note(platform, uid, rest[3])
+        else:
+            _fail(usage)
+        print(json.dumps({"ok": ok, "error": err, "platform": platform,
+                          "user_id": uid, "notes": notes}, indent=2))
+        sys.exit(0 if ok else 1)
+
+    if cmd == "channels-forget":
+        usage = "usage: channels-forget <platform> <id|@handle> [--history] [--yes]"
+        flags = {a for a in rest[2:] if a.startswith("--")}
+        if len(rest) < 2 or not flags <= {"--history", "--yes"} or \
+                len(rest) - 2 != len(flags):
+            _fail(usage)
+        platform = rest[0]
+        uid = _person_id(platform, rest[1])
+        ok, err, report = user_admin.forget_person(
+            platform, uid, purge_history="--history" in flags,
+            dry_run="--yes" not in flags)
+        print(json.dumps({"ok": ok, "error": err, "report": report,
+                          **({"preview": True,
+                              "hint": "nothing was changed — add --yes to do it"}
+                             if ok and report.get("dry_run") else {})},
+                         indent=2))
         sys.exit(0 if ok else 1)
 
     if cmd == "channels-link":

@@ -401,6 +401,104 @@ def person_records(platform, user_id):
     return matched, unattributed
 
 
+def _history_split(platform, user_id):
+    """Sort one person's logged history into what is theirs alone and what is
+    shared. Returns (solo, in_groups):
+
+      solo       {thread: (paths, conv_ids, records)} -- threads where they are
+                 the ONLY sender and every inbound line was a DM. Same test
+                 person_records uses to attribute an old reply with no
+                 `to_user`: a DM thread has exactly one other party.
+      in_groups  how many of their messages (and replies addressed to them)
+                 sit in threads other people also wrote in.
+
+    Read-only."""
+    uid = str(user_id or "").strip()
+    solo, in_groups = {}, 0
+    if not uid or platform not in PLATFORMS:
+        return solo, in_groups
+    for thread, paths in _thread_groups(platform).items():
+        records = _read_records(paths)
+        inbound = [r for r in records if r.get("dir") == "in"]
+        senders = {str(r.get("user_id") or "") for r in inbound}
+        theirs = uid in senders or any(
+            str(r.get("to_user") or "") == uid for r in records)
+        if not theirs:
+            continue
+        if senders == {uid} and all(r.get("context") == "dm" for r in inbound):
+            conv_ids = {str(r["conv_id"]) for r in records if r.get("conv_id")}
+            solo[thread] = (paths, conv_ids, records)
+        else:
+            in_groups += sum(
+                1 for r in records
+                if (r.get("dir") == "in" and str(r.get("user_id") or "") == uid)
+                or (r.get("dir") == "out" and str(r.get("to_user") or "") == uid))
+    return solo, in_groups
+
+
+def history_summary(platform, user_id):
+    """What forgetting this person's history would delete, without deleting
+    it: {threads, messages, conversations, left_in_groups}."""
+    solo, in_groups = _history_split(platform, user_id)
+    return {
+        "threads": len(solo),
+        "messages": sum(len(v[2]) for v in solo.values()),
+        "conversations": len({c for v in solo.values() for c in v[1]}),
+        "left_in_groups": in_groups,
+    }
+
+
+def forget_conv_ids(conv_ids):
+    """Drop thread -> conversation mappings that point at any of `conv_ids`
+    (the conversations themselves are deleted by the caller). Returns how many
+    mappings went. Best effort: the map is a cache."""
+    wanted = {str(c) for c in conv_ids or []}
+    if not wanted:
+        return 0
+    mapping = _load_map()
+    drop = [k for k, v in mapping.items() if str(v) in wanted]
+    if not drop:
+        return 0
+    for k in drop:
+        del mapping[k]
+    try:
+        MAP_FILE.parent.mkdir(parents=True, exist_ok=True)
+        tmp = MAP_FILE.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(mapping, indent=2) + "\n", encoding=ENCODING)
+        os.replace(str(tmp), str(MAP_FILE))
+    except OSError:
+        return 0
+    return len(drop)
+
+
+def purge_person(platform, user_id):
+    """Delete the logs of every thread that is only this person's DMs (live
+    file and rotated copies). Returns {threads, files, conv_ids, errors,
+    left_in_groups}; `conv_ids` is for the caller to delete the model-facing
+    conversations with. Never raises.
+
+    A thread other people also wrote in is NOT touched: removing a line from a
+    shared file means rewriting it while a gateway may be appending to it, and
+    deleting the file would erase other people's messages. `left_in_groups`
+    says how many of their lines stay behind, so the caller can tell the
+    owner. The usage ledger is counts-only and is left alone too."""
+    solo, in_groups = _history_split(platform, user_id)
+    files, errors, conv_ids = 0, [], set()
+    for thread, (paths, convs, _records) in solo.items():
+        conv_ids |= convs
+        for path in paths:
+            try:
+                path.unlink()
+                files += 1
+            except FileNotFoundError:
+                pass
+            except OSError as exc:
+                errors.append(f"{path.name}: {exc}")
+    return {"threads": len(solo), "files": files,
+            "conv_ids": sorted(conv_ids), "errors": errors,
+            "left_in_groups": in_groups}
+
+
 def _clip(text):
     text = "" if text is None else str(text)
     if len(text) > MAX_TEXT_CHARS:

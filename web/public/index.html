@@ -22,6 +22,7 @@
 <link rel="stylesheet" href="schedules.css">
 <link rel="stylesheet" href="notifications.css">
 <link rel="stylesheet" href="mcp-servers.css">
+<link rel="stylesheet" href="agent-panel.css">
 </head>
 <body>
 
@@ -354,6 +355,9 @@
       <div class="ask-panel__focus-nav focus-only">
         <button class="btn btn--ghost btn--sm btn--focus-nav" id="btn-focus-chats" type="button" aria-expanded="false" title="Show or hide your conversations">Chats</button>
         <button class="btn btn--ghost btn--sm btn--focus-nav" id="btn-focus-activity" type="button" aria-expanded="false" title="Show or hide the live command prompt (glows while Jarvis is running something)">Activity</button>
+        <!-- Agent workspace: hidden until dev_agent / code_agent has run once, glows while one is running.
+             The panel itself opens by itself when a NEW agent job starts (agent-panel.js). -->
+        <button class="btn btn--ghost btn--sm btn--focus-nav" id="btn-focus-agent" type="button" aria-expanded="false" hidden title="Show or hide the agent's workspace: the codebase it is working on, the file it is on, and what it has touched">Agent</button>
       </div>
       <div class="ask-panel__actions">
         <div class="provider-picker" id="provider-picker">
@@ -452,6 +456,36 @@
         </div>
         <div class="ask-prompt__term" id="ask-prompt-term">
           <div class="ask-prompt__idle">Commands Jarvis runs will show up here live.</div>
+        </div>
+      </aside>
+
+      <!-- Focus only (agent-panel.css hides it in Classic). Filled by agent-panel.js from the
+           dev_agent / code_agent progress events; every value is set with textContent. -->
+      <aside class="agent-panel" id="agent-panel" aria-label="Agent workspace">
+        <div class="agent-panel__head">
+          <span class="agent-panel__title">AGENT</span>
+          <span class="agent-panel__kind" id="agent-kind"></span>
+          <span class="agent-state" id="agent-state" data-state="running">idle</span>
+          <button class="modal__close" id="btn-agent-close" type="button" aria-label="Close the agent panel">&times;</button>
+        </div>
+        <div class="agent-panel__body">
+          <section class="agent-sec" aria-label="Codebase">
+            <div class="agent-sec__label"><span>CODEBASE</span><button class="agent-link agent-sec__aside" id="btn-agent-open-folder" type="button" disabled title="Open this folder in your file manager">open folder</button></div>
+            <div class="agent-root" id="agent-root"></div>
+            <div class="agent-task" id="agent-task" hidden></div>
+          </section>
+          <section class="agent-sec" aria-label="Working on">
+            <div class="agent-sec__label"><span>WORKING ON</span><span class="agent-sec__aside" id="agent-elapsed"></span></div>
+            <div class="agent-now" id="agent-now"></div>
+          </section>
+          <section class="agent-sec agent-sec--grow" aria-label="Files">
+            <div class="agent-sec__label"><span>FILES</span><span class="agent-sec__aside" id="agent-files-count"></span><button class="agent-link" id="btn-agent-all" type="button" hidden></button></div>
+            <div class="agent-tree" id="agent-tree"></div>
+          </section>
+          <section class="agent-sec" aria-label="Log">
+            <div class="agent-sec__label"><span>LOG</span></div>
+            <div class="agent-log" id="agent-log"></div>
+          </section>
         </div>
       </aside>
     </div>
@@ -1831,6 +1865,8 @@
 <script src="backlog.js"></script>
 <script src="logsearch.js"></script>
 <script src="schedules.js"></script>
+<!-- agent-panel.js: the Focus layout's Agent side panel. app.js feeds it through window.JarvisAgentPanel?.feed (optional chaining), so load order is not load-bearing. -->
+<script src="agent-panel.js"></script>
 
 </body>
 </html>

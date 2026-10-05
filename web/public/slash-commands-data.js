@@ -652,6 +652,8 @@ window.JARVIS_SLASH_COMMANDS = /*JSON-BEGIN*/
         "channels-add-person",
         "channels-rename",
         "channels-remove-person",
+        "channels-note",
+        "channels-forget",
         "channels-link",
         "channels-unlink",
         "channels-conversation",

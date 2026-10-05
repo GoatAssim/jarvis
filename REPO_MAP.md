@@ -204,6 +204,7 @@ web/
     public/style.css      theme + layout, including the classic/focus switch
     public/tool-manager.js (+ .css)  Tool Manager panel (L.25): catalogue, per-tool safeguards, user tools
     public/code-editor.js (+ .css)   the Tool Manager's code editor (L.33): Python highlighting, VS Code-style editing, completions, inline Jarvis suggestions; pure helpers in JarvisCodeEditor._pure
+    public/agent-panel.js (+ .css)   the Focus layout's Agent side panel: while dev_agent / code_agent runs it shows the codebase root, the file being worked on, a file tree with a status per file, and a short log. Fed by app.js from the existing JARVIS_MEDIA dev_agent events (no server route); reducer + tree builder in JarvisAgentPanel._pure
     public/custom-tools.js       theme gallery for the Skin modal (the old Custom Tools panel moved to tool-manager.js)
     public/test-checklist.js     Menu -> Test Checklist (UI, browser-only results)
     public/test-checklist-data.js  the SHIPPED checklist catalogue: an entry per
@@ -361,6 +362,16 @@ symlink escapes). Python projects get their own venv. `dependencies` come
 from a model and are validated against a package-name pattern before they
 reach `pip`/`npm` — a leading-dash entry is a *flag*, not a package.
 
+Both `dev_agent` and `code_agent` print their progress as one
+`JARVIS_MEDIA\tdev_agent\t<json>` line per step (`dev_agent_events.py`). The
+Focus layout's Agent panel (`web/public/agent-panel.js`) is built purely from
+those events: dev_agent's `plan:start` carries `project_dir`, code_agent's
+carries `root`, and a code_agent `list_dir` result carries a capped `listing`
+on the **live line only** — it is removed from the stored `steps`, because
+code_agent has no result-shaping spec and `steps` goes back to the model
+verbatim. Only dev_agent runs are saved as replay extras (`thread_extras.py`),
+so only a dev_agent job reappears in the panel after a reload.
+
 ---
 
 ## 5. Command surface
@@ -417,6 +428,8 @@ jarvis channels-server-set <platform> guild|channel <id> <enabled|tools|mention>
 jarvis channels-add-person <platform> <id|@handle> [name ...]   # someone who hasn't messaged yet; grants nothing
 jarvis channels-rename <platform> <id|@handle> [name ...]       # no name clears it
 jarvis channels-remove-person <platform> <id|@handle>           # hand-added and never messaged only
+jarvis channels-note <platform> <id|@handle> list|edit <note-id> <text ...>|delete <note-id>   # a note is named by id (hash of its text), not position
+jarvis channels-forget <platform> <id|@handle> [--history] [--yes]   # L.36-P11 wipe; no --yes = preview. Refuses owner / "*"-covered / unreadable limits
 jarvis channels-link <platform> <id|@handle> <other-platform> <id|@handle|name ...>   # same human; identity only
 jarvis channels-unlink <platform> <id|@handle>
 jarvis discord-daemon     jarvis instagram-serve

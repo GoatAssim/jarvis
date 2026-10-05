@@ -815,6 +815,11 @@ jarvis channels-rename discord 1234567890 Sam          # no name = clear it
 jarvis channels-link discord 1234567890 instagram @someone   # id, @handle or name
 jarvis channels-unlink discord 1234567890
 jarvis channels-remove-person instagram @someone       # only if added by hand and never messaged
+jarvis channels-note discord 1234567890 list           # what Jarvis remembers about them, with note ids
+jarvis channels-note discord 1234567890 edit 3f2a9c1d Likes short answers
+jarvis channels-note discord 1234567890 delete 3f2a9c1d
+jarvis channels-forget discord 1234567890              # PREVIEW only: nothing changes without --yes
+jarvis channels-forget discord 1234567890 --history --yes   # wipe them, and their private chat logs
 ```
 
 A person limited to a custom tool list can only ever run those tools (plus
@@ -865,6 +870,8 @@ separately run `jarvis channels-allow discord tool <id>`.
 | `jarvis channels-rename <platform> <id> [name ...]` | Set or clear what they're called |
 | `jarvis channels-link <platform> <id> <other-platform> <id\|@handle\|name>` | Same person on both apps (identity only) |
 | `jarvis channels-unlink` / `channels-remove-person` | Undo a link / delete a hand-added person who never wrote |
+| `jarvis channels-note <platform> <id> list\|edit <note-id> <text>\|delete <note-id>` | Read, retype or delete one thing Jarvis remembers about them |
+| `jarvis channels-forget <platform> <id> [--history] [--yes]` | Wipe a person (record, notes, limits, off every list); without `--yes` it only previews. Refuses the owner and anyone a `"*"` entry covers |
 | `jarvis mcp-edit <enable\|disable\|trust\|untrust\|remove> <name>` | Change an MCP server (also `save <name> <json>`); the MCP Servers panel does the same |
 
 ## Notes

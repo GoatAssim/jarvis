@@ -81,6 +81,22 @@ things that were already fixed once.
   is adopted on first message its `user_perms.json` entry must move to the real
   id (a limit left behind widens access). `tests/test_channel_manual_people.py`
   pins both.
+- **"Forget this person" only takes things away, in a fixed order, and refuses
+  three cases (L.36-P11).** `user_admin.forget_person` removes access first
+  (every dm/reply/tool list), then the person's `user_perms` limits, then -- only
+  if asked -- the logs of threads that are only their DMs plus the conversations
+  those logs point at, then their directory handles, and the `people.json`
+  record LAST, so a failure part-way leaves them with less access and the record
+  still there to retry. It refuses the owner, anyone a `"*"` entry covers in any
+  list (deleting a custom tool limit for someone a wildcard still lets through
+  would WIDEN their access), and anyone whose `user_perms.json` is unreadable
+  (limits we can't see are never wiped). `forget_refusal` is the one place those
+  live; the preview and the real run share it. It never touches the usage ledger
+  (counts only), lines in group threads other people wrote in, or the linked
+  account on the other platform. No model tool may reach it, the CLI only acts
+  with `--yes`, and the route only with `confirm: true`. Notes are edited and
+  deleted by `people.note_id` (a hash of the text), never by position: the list
+  is a ring buffer a guest can push to.
 - **The three per-person insight views are read-only, and the usage ledger holds
   counts, never text (L.36-P1/P2/P3).** `user_admin.conversation_view`,
   `usage_view` and `simulate` change nothing. `simulate` ("Test as this person")
@@ -228,6 +244,7 @@ actually render Markdown):
     python3 tests/verify_l13_favorite_daemons.py  # L.13: favorite daemons in a real browser; needs `playwright` (Python) + Chromium, prints SKIP without them
     node tests/verify_slash_palette.js      # no npm install; runs the real palette
     python3 tests/verify_l36_insights_ui.py # L.36-P1/P2/P3: Conversation / Usage / Test tabs in a real browser; needs `playwright` (Python) + Chromium, prints SKIP without them
+    node tests/verify_agent_panel.js        # L.47: the Focus Agent panel's reducer + tree builder (agent-panel.js); no npm install
     node tests/verify_channels_panel.js     # L.36: the Channels panel's pure helpers (people list, filters, tool-scope diffing); no npm install
     node tests/verify_mcp_servers.js        # L.31: the MCP panel's pure helpers (state labels, search, filters, what a blank secret means); no npm install
     python3 tests/verify_mcp_servers_ui.py  # L.31: the MCP panel in a real browser against a real stdio MCP server; needs `playwright` (Python) + Chromium, prints SKIP without them

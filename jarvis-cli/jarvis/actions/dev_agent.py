@@ -604,7 +604,11 @@ def tool_dev_agent(arguments, context=None):
         emit("plan", "fail", error=f"could not create project directory: {e}")
         return _final_result(job_id, steps, ok=False, project_dir=None, reason="sandbox_failed", last_error=str(e))
 
-    emit("plan", "start", description=description[:300])
+    # project_dir rides on the FIRST event so the Focus-layout Agent panel
+    # (web/public/agent-panel.js) can name the codebase while it is still
+    # being built, not only once the final "done" event arrives. Additive:
+    # every consumer that ignores unknown event fields is unaffected.
+    emit("plan", "start", description=description[:300], project_dir=str(project_dir))
     plan, err = _plan_project(description, language_hint)
     if err:
         emit("plan", "fail", error=err)

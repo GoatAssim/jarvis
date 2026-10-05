@@ -1211,6 +1211,45 @@ app.post("/api/channels/people/:platform/:id/remove", requireJarvis, async (req,
   sendChannelResult(await runJarvisOnce(["channels-remove-person", platform, id], 10000), res);
 });
 
+// Edit / delete one remembered note, and "Forget this person" (L.36-P11).
+// A note is named by its id (a short hash the CLI prints), never by position, so
+// a list that changed between drawing and clicking cannot make this hit the
+// wrong line. The new text is single-line, <= 160 chars, and may not start with
+// "-". Forget is the one destructive route here: it only acts when the body says
+// confirm: true (the panel sends that from its confirmation step; the CLI needs
+// --yes for the same reason), and "preview" runs the same code with nothing
+// written. Both are human-only paths - no model tool reaches them.
+const CHANNEL_NOTE_ID = /^[a-f0-9]{8}$/;
+const CHANNEL_NOTE_OK = (v) => typeof v === "string" && v.trim().length > 0 && v.length <= 160 && !/[\x00-\x1f\x7f]/.test(v) && !v.trim().startsWith("-");
+
+app.post("/api/channels/people/:platform/:id/note", requireJarvis, async (req, res) => {
+  const { platform, id } = req.params;
+  if (!CHANNEL_PLATFORMS.has(platform)) return res.status(400).json({ error: "Unknown platform." });
+  if (!CHANNEL_USER_ID.test(id)) return res.status(400).json({ error: "Invalid user id." });
+  const action = req.body?.action;
+  const note = req.body?.note;
+  if (action !== "edit" && action !== "delete") return res.status(400).json({ error: "action must be edit or delete." });
+  if (typeof note !== "string" || !CHANNEL_NOTE_ID.test(note)) return res.status(400).json({ error: "Invalid note." });
+  const args = ["channels-note", platform, id, action, note];
+  if (action === "edit") {
+    if (!CHANNEL_NOTE_OK(req.body?.text)) return res.status(400).json({ error: "A note is one line, up to 160 characters." });
+    args.push(req.body.text.trim());
+  }
+  sendChannelResult(await runJarvisOnce(args, 10000), res);
+});
+
+app.post("/api/channels/people/:platform/:id/forget", requireJarvis, async (req, res) => {
+  const { platform, id } = req.params;
+  if (!CHANNEL_PLATFORMS.has(platform)) return res.status(400).json({ error: "Unknown platform." });
+  if (!CHANNEL_USER_ID.test(id)) return res.status(400).json({ error: "Invalid user id." });
+  if (req.body?.history !== undefined && typeof req.body.history !== "boolean") return res.status(400).json({ error: "history must be true or false." });
+  if (req.body?.confirm !== undefined && typeof req.body.confirm !== "boolean") return res.status(400).json({ error: "confirm must be true or false." });
+  const args = ["channels-forget", platform, id];
+  if (req.body?.history === true) args.push("--history");
+  if (req.body?.confirm === true) args.push("--yes");
+  sendChannelResult(await runJarvisOnce(args, 20000), res);
+});
+
 app.post("/api/channels/people/:platform/:id/link", requireJarvis, async (req, res) => {
   const { platform, id } = req.params;
   if (!CHANNEL_PLATFORMS.has(platform)) return res.status(400).json({ error: "Unknown platform." });

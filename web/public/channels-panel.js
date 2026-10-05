@@ -103,6 +103,7 @@
     plus: P('<path d="M12 5v14M5 12h14"/>'),
     link: P('<path d="M10 14a4 4 0 0 0 5.7 0l3-3a4 4 0 0 0-5.7-5.7l-1 1"/><path d="M14 10a4 4 0 0 0-5.7 0l-3 3a4 4 0 0 0 5.7 5.7l1-1"/>'),
     edit: P('<path d="M4 20h4L19 9a2.8 2.8 0 0 0-4-4L4 16v4Z"/><path d="m13.5 6.5 4 4"/>'),
+    trash: P('<path d="M5 7h14M10 7V4.5h4V7M7 7l1 13h8l1-13M10.5 11v6M13.5 11v6"/>'),
     chat: P('<path d="M4 5h16v11H9l-5 4V5Z"/><path d="M8 9.5h8M8 12.5h5"/>'),
     chart: P('<path d="M4 4v16h16"/><path d="M8 16v-4M12 16V8M16 16v-6"/>'),
     flask: P('<path d="M9 3h6M10 3v6l-5.5 9.5A1.5 1.5 0 0 0 5.8 21h12.4a1.5 1.5 0 0 0 1.3-2.5L14 9V3"/><path d="M7.5 15h9"/>'),
@@ -314,7 +315,11 @@
     adding: false, // the "Add a new person" form is open
     addPlatform: "discord",
     editingName: null, // person key whose name is being typed
+    nameAt: "hero",    // where that editor is drawn: "hero" (the pencil by the name) or "details"
     confirmRemove: null, // person key awaiting "Remove" confirmation
+    editingNote: null, // { key, id } the remembered note being retyped
+    confirmNote: null, // { key, id } a note awaiting its Delete confirmation
+    forget: null,      // { key, history, status: loading|ready|error|busy, data, error, req } (L.36-P11)
     // Per-person data for the read-only tabs, keyed by person key. Cleared by
     // the Refresh button; each entry guards against a stale reply with `req`.
     conv: new Map(),   // { status, data, error, limit, req }
@@ -664,6 +669,7 @@
     state.confirm = null;
     state.editingName = null;
     state.confirmRemove = null;
+    state.editingNote = null; state.confirmNote = null; state.forget = null;
     state.toolSearch = "";
     state.presetPrev = null;
     state.presetDone = null;
@@ -698,10 +704,10 @@
     ]);
     if (p.owner) ids.appendChild(tag("Owner", "owner", "owner"));
     if (p.blocked) ids.appendChild(tag("Blocked", "bad", "blocked"));
-    const editing = state.editingName === pkey(p);
+    const editing = state.editingName === pkey(p) && state.nameAt !== "details";
     const nameLine = editing ? nameEditor(p) : el("div", { class: "ch-hero__nameline" }, [
       el("div", { class: "ch-hero__name" }, displayName(p)),
-      el("button", { type: "button", class: "ch-iconbtn", title: "Change name", "aria-label": `Change ${displayName(p)}'s name`, onclick: () => { state.editingName = pkey(p); renderDetail(); } }, [icon("edit")]),
+      el("button", { type: "button", class: "ch-iconbtn", title: "Change name", "aria-label": `Change ${displayName(p)}'s name`, onclick: () => { state.editingName = pkey(p); state.nameAt = "hero"; renderDetail(); } }, [icon("edit")]),
     ]);
     return el("div", { class: "ch-hero", style: `--hue: hsl(${hueFor(pkey(p))} 70% 58%)` }, [
       avatar(p, "lg"),
@@ -768,10 +774,7 @@
     pane.appendChild(el("div", null, [
       el("div", { class: "ch-section-title" }, "Details"),
       el("dl", { class: "ch-facts" }, [
-        el("div", null, [el("dt", null, "Name"), el("dd", null, [
-          p.name || (p.name_from === "linked" ? p.name_effective + " (from the linked account)" : "— not told yet"),
-          p.name && p.name_locked ? el("span", { class: "ch-row__hint", title: "Set by you. What they tell Jarvis in chat won't replace it." }, " · set by you") : null,
-        ])]),
+        nameFact(p),
         el("div", null, [el("dt", null, "Handle"), el("dd", null, p.handle ? "@" + p.handle : "—")]),
         el("div", null, [el("dt", null, "First seen"), el("dd", null, dateText(p.first_seen))]),
         el("div", null, [el("dt", null, "Last seen"), el("dd", null, dateText(p.last_seen))]),
@@ -782,13 +785,186 @@
     ]));
     pane.appendChild(linkSection(p));
     const rm = removeSection(p);
-    pane.appendChild(el("div", null, [
-      el("div", { class: "ch-section-title" }, ["What Jarvis remembers", el("span", { class: "ch-section-title__aside" }, `${p.notes.length}`)]),
-      p.notes.length ? el("ul", { class: "ch-notes" }, p.notes.map((n) => el("li", null, n)))
-        : el("div", { class: "ch-row__hint" }, "Nothing yet. Notes come from the person telling Jarvis about themselves; they stay in this record and never enter your own memory."),
-    ]));
+    pane.appendChild(notesSection(p));
     if (rm) pane.appendChild(rm);
+    const fg = forgetSection(p);
+    if (fg) pane.appendChild(fg);
     return pane;
+  }
+
+  // ---- name, in the Details list ----------------------------------------
+  // The same editor and the same route as the pencil by the name at the top;
+  // this just puts the control where "— not told yet" is printed, so an
+  // unnamed person can be named from the row that says they have no name.
+  function nameFact(p) {
+    const editing = state.editingName === pkey(p) && state.nameAt === "details";
+    if (editing) return el("div", { class: "ch-facts__wide" }, [el("dt", null, "Name"), el("dd", null, [nameEditor(p)])]);
+    const label = p.name || (p.name_from === "linked" ? p.name_effective + " (from the linked account)" : "— not told yet");
+    return el("div", null, [el("dt", null, "Name"), el("dd", { class: "ch-namecell" }, [
+      el("span", null, label),
+      p.name && p.name_locked ? el("span", { class: "ch-row__hint", title: "Set by you. What they tell Jarvis in chat won't replace it." }, " · set by you") : null,
+      el("button", {
+        type: "button", class: "ch-iconbtn", title: p.name ? "Change name" : "Set a name",
+        "aria-label": p.name ? `Change ${displayName(p)}'s name` : `Set a name for ${displayName(p)}`,
+        onclick: () => { state.editingName = pkey(p); state.nameAt = "details"; renderDetail(); },
+      }, [icon("edit")]),
+    ])]);
+  }
+
+  // ---- what Jarvis remembers: edit / delete a note ------------------------
+  async function noteAction(p, body, okMsg) {
+    try {
+      await personPost(p, "note", body);
+      state.editingNote = null; state.confirmNote = null;
+      toast(okMsg, "success");
+    } catch (err) {
+      toast(err.message || "Couldn't change the note.", "error");
+      state.confirmNote = null;
+    }
+    await load(true);
+  }
+
+  function noteItem(p, n) {
+    const k = pkey(p);
+    const editing = state.editingNote && state.editingNote.key === k && state.editingNote.id === n.id;
+    const asking = state.confirmNote && state.confirmNote.key === k && state.confirmNote.id === n.id;
+    if (editing) {
+      const input = el("input", { type: "text", class: "ch-name-input ch-note-input", maxlength: "160", autocomplete: "off", spellcheck: "false", "aria-label": "Note", value: n.text });
+      input.value = n.text;
+      const save = () => { const v = input.value.trim(); if (!v) { toast("A note can't be empty — use Delete to remove it.", "error"); return; } noteAction(p, { action: "edit", note: n.id, text: v }, "Note updated."); };
+      input.addEventListener("keydown", (e) => {
+        if (e.key === "Enter") { e.preventDefault(); save(); }
+        else if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); state.editingNote = null; renderDetail(); }
+      });
+      setTimeout(() => { if (input.isConnected) { input.focus(); input.select(); } }, 0);
+      return el("li", { class: "ch-note is-editing" }, [el("div", { class: "ch-name-edit" }, [
+        input,
+        el("button", { type: "button", class: "btn btn--primary btn--sm", onclick: save }, "Save"),
+        el("button", { type: "button", class: "btn btn--ghost btn--sm", onclick: () => { state.editingNote = null; renderDetail(); } }, "Cancel"),
+      ])]);
+    }
+    if (asking) {
+      return el("li", { class: "ch-note" }, [el("div", { class: "ch-confirm", role: "alertdialog", "aria-label": "Confirm deleting this note" }, [
+        el("div", { class: "ch-confirm__text" }, `Delete “${n.text}”? Jarvis stops using it right away.`),
+        el("div", { class: "ch-confirm__btns" }, [
+          el("button", { type: "button", class: "btn btn--danger btn--sm", onclick: () => noteAction(p, { action: "delete", note: n.id }, "Note deleted.") }, "Delete"),
+          el("button", { type: "button", class: "btn btn--ghost btn--sm", onclick: () => { state.confirmNote = null; renderDetail(); } }, "Keep"),
+        ]),
+      ])]);
+    }
+    return el("li", { class: "ch-note" }, [
+      el("span", { class: "ch-note__text" }, n.text),
+      el("span", { class: "ch-note__btns" }, [
+        el("button", { type: "button", class: "ch-iconbtn", title: "Edit this note", "aria-label": "Edit this note", onclick: () => { state.confirmNote = null; state.editingNote = { key: k, id: n.id }; renderDetail(); } }, [icon("edit")]),
+        el("button", { type: "button", class: "ch-iconbtn ch-iconbtn--danger", title: "Delete this note", "aria-label": "Delete this note", onclick: () => { state.editingNote = null; state.confirmNote = { key: k, id: n.id }; renderDetail(); } }, [icon("trash")]),
+      ]),
+    ]);
+  }
+
+  function notesSection(p) {
+    const items = Array.isArray(p.note_items) ? p.note_items : [];
+    const sec = el("div", null, [
+      el("div", { class: "ch-section-title" }, ["What Jarvis remembers", el("span", { class: "ch-section-title__aside" }, `${items.length}`)]),
+    ]);
+    if (items.length) sec.appendChild(el("ul", { class: "ch-notes ch-notes--edit" }, items.map((n) => noteItem(p, n))));
+    else sec.appendChild(el("div", { class: "ch-row__hint" }, "Nothing yet. Notes come from the person telling Jarvis about themselves; they stay in this record and never enter your own memory."));
+    if (items.length) sec.appendChild(el("div", { class: "ch-row__hint" }, "Your edits go straight into what Jarvis is told about them. A new note from them can still push the oldest one out — only six are kept."));
+    if (p.linked) sec.appendChild(el("div", { class: "ch-row__hint" }, "Notes saved on their linked account are shared with Jarvis too; edit those on that account."));
+    return sec;
+  }
+
+  // ---- forget this person (L.36-P11) --------------------------------------
+  // The one real wipe. Opening it asks the server for a PREVIEW (the same code
+  // as the real thing, nothing written); a refusal (the owner, someone a "*"
+  // entry covers, unreadable limits) shows here instead of a button that would
+  // fail. The chat history is a separate tick-box, off by default.
+  async function openForget(p) {
+    const req = Date.now();
+    state.forget = { key: pkey(p), history: false, status: "loading", data: null, error: "", req };
+    renderDetail();
+    try {
+      const out = await personPost(p, "forget", { history: false });
+      if (state.forget && state.forget.req === req) { state.forget.status = "ready"; state.forget.data = out.report || {}; }
+    } catch (err) {
+      if (state.forget && state.forget.req === req) { state.forget.status = "error"; state.forget.error = err.message || "Couldn't check."; }
+    }
+    renderDetail();
+  }
+
+  async function forgetPerson(p) {
+    const f = state.forget;
+    if (!f || f.key !== pkey(p) || f.status === "busy") return;
+    f.status = "busy"; renderDetail();
+    try {
+      const out = await personPost(p, "forget", { history: !!f.history, confirm: true });
+      const k = pkey(p);
+      state.conv.delete(k); state.usage.delete(k); state.sim.delete(k); state.drafts.delete(k);
+      state.forget = null;
+      toast(`${displayName(p)} forgotten.`, "success");
+      if (out && out.report && out.report.history_purged && out.report.history && out.report.history.left_in_groups) {
+        toast(`${out.report.history.left_in_groups} of their lines in group chats were left, because other people wrote in those files.`, "info");
+      }
+    } catch (err) {
+      f.status = "ready";
+      toast(err.message || "Couldn't forget them.", "error");
+      await load(true); // they may be half-forgotten (off the lists already): show what is true now
+      return;
+    }
+    await load(false);
+  }
+
+  function forgetSection(p) {
+    if (p.owner) return null;
+    if (p.manual && !p.messages) return null; // "Remove" covers someone who never wrote
+    const f = state.forget && state.forget.key === pkey(p) ? state.forget : null;
+    const sec = el("div", null, [el("div", { class: "ch-section-title" }, "Forget")]);
+    if (!f) {
+      sec.appendChild(el("div", { class: "ch-gset__add" }, [
+        el("div", { class: "ch-row__hint", style: "flex:1" }, "Delete their record, notes and limits and take them off every list, as if they'd never written. Blocking keeps the record; this doesn't."),
+        el("button", { type: "button", class: "btn btn--ghost btn--sm", onclick: () => openForget(p) }, "Forget this person…"),
+      ]));
+      return sec;
+    }
+    const close = el("button", { type: "button", class: "btn btn--ghost btn--sm", onclick: () => { state.forget = null; renderDetail(); } }, "Cancel");
+    if (f.status === "loading") { sec.appendChild(el("div", { class: "ch-skel" })); return sec; }
+    if (f.status === "error") {
+      sec.appendChild(el("div", { class: "ch-row__note ch-row__note--bad" }, [icon("warn"), el("span", null, f.error)]));
+      sec.appendChild(el("div", { class: "ch-confirm__btns" }, [close]));
+      return sec;
+    }
+    const d = f.data || {};
+    const h = d.history || {};
+    const lists = (d.lists || []).map((w) => ({ dm_allowlist: "DM", reply_allowlist: "reply", tool_allowlist: "tool" }[w] || w));
+    const will = [
+      lists.length ? `Taken off the ${lists.join(", ")} list${lists.length === 1 ? "" : "s"}.` : "They're on none of the lists already.",
+      d.limits ? "Their tool limits and DM setting are deleted." : null,
+      `Their record is deleted: name, handle, first and last seen${d.notes ? `, and ${d.notes} remembered note${d.notes === 1 ? "" : "s"}` : ""}.`,
+      d.linked ? `Their ${(PLATFORMS[d.linked.platform] || {}).label || d.linked.platform} account${d.linked.name ? " (" + d.linked.name + ")" : ""} stays; only the link goes.` : null,
+      "If they message again they're a new person: Jarvis asks you about them again, with nothing switched on.",
+    ].filter(Boolean);
+    const box = el("input", { type: "checkbox", id: "ch-forget-history", "aria-describedby": "ch-forget-history-hint" });
+    box.checked = !!f.history;
+    box.addEventListener("change", () => { f.history = box.checked; renderDetail(); });
+    const historyText = h.threads
+      ? `${h.threads} private chat${h.threads === 1 ? "" : "s"}, ${h.messages} message${h.messages === 1 ? "" : "s"}, and the conversation Jarvis keeps for ${h.threads === 1 ? "it" : "them"}.`
+      : "No private chat history on file.";
+    const kept = [];
+    if (h.left_in_groups) kept.push(`${h.left_in_groups} of their lines in group chats stay — other people's messages are in those files.`);
+    kept.push("Usage counts (numbers only, no text) stay.");
+    sec.appendChild(el("div", { class: "ch-confirm ch-confirm--col", role: "alertdialog", "aria-label": "Confirm forgetting this person" }, [
+      el("div", { class: "ch-confirm__text" }, `Forget ${displayName(p)}? This can't be undone.`),
+      el("ul", { class: "ch-forget__list" }, will.map((t) => el("li", null, t))),
+      el("label", { class: "ch-forget__history", for: "ch-forget-history" }, [box, el("span", null, [
+        el("b", null, "Also delete our chat history with them"),
+        el("span", { class: "ch-row__hint", id: "ch-forget-history-hint" }, ` ${historyText}`),
+      ])]),
+      el("div", { class: "ch-row__hint" }, kept.join(" ")),
+      el("div", { class: "ch-confirm__btns" }, [
+        el("button", { type: "button", class: "btn btn--danger btn--sm", disabled: f.status === "busy", onclick: () => forgetPerson(p) }, f.status === "busy" ? "Forgetting…" : "Forget"),
+        close,
+      ]),
+    ]));
+    return sec;
   }
 
   // ---- linked account ---------------------------------------------------
@@ -2223,6 +2399,9 @@
     if (e.key === "Escape") {
       if (state.confirm) { state.confirm = null; renderDetail(); e.preventDefault(); return; }
       if (state.confirmRemove) { state.confirmRemove = null; renderDetail(); e.preventDefault(); return; }
+      if (state.forget) { state.forget = null; renderDetail(); e.preventDefault(); return; }
+      if (state.confirmNote) { state.confirmNote = null; renderDetail(); e.preventDefault(); return; }
+      if (state.editingNote) { state.editingNote = null; renderDetail(); e.preventDefault(); return; }
       if (state.editingName) { state.editingName = null; renderDetail(); e.preventDefault(); return; }
       if (state.bulkOpen) { closeBulk(); e.preventDefault(); return; }
       if (state.selectMode && !(typing && e.target.value)) { setSelectMode(false); e.preventDefault(); return; }
@@ -2286,6 +2465,7 @@
     state.drafts.clear();
     state.conv.clear(); state.usage.clear(); state.sim.clear();   // don't keep their messages around while it's closed
     state.adding = false; state.editingName = null; state.confirmRemove = null;
+    state.editingNote = null; state.confirmNote = null; state.forget = null;
     state.selectMode = false; state.picked.clear(); state.bulkOpen = false; state.bulk = newBulk();
     state.presetPrev = null; state.presetDone = null;
     renderAdd();

@@ -117,6 +117,24 @@ def resolve(platform, entry):
     )
 
 
+def forget(platform, user_id):
+    """Remove every handle that points at `user_id` on `platform`, so an
+    `@handle` typed into a list or the panel no longer resolves to someone the
+    owner has asked Jarvis to forget. Returns how many entries went."""
+    uid = str(user_id or "").strip()
+    if not uid or platform not in PLATFORMS:
+        return 0
+    data = _load()
+    drop = [k for k, v in data.items()
+            if k.startswith(f"{platform}:") and isinstance(v, dict)
+            and str(v.get("id") or "") == uid]
+    for k in drop:
+        del data[k]
+    if drop:
+        _save(data)
+    return len(drop)
+
+
 def all_entries(platform=None):
     """Every known handle->id mapping, newest first. For `channels-directory`."""
     data = _load()

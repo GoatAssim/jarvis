@@ -1,0 +1,167 @@
+/* ============================================================================
+ * agent-panel.css — the Focus layout's "Agent" side panel (see agent-panel.js).
+ *
+ * Same family as the L.32 Stage drawers in style.css: every rule that draws it
+ * is scoped to body.layout--focus, so Classic never renders it (the base rule
+ * below is display:none). Colours are the existing theme tokens only, so every
+ * skin applies; --red / --green stay fixed across skins on purpose.
+ *
+ * Two placements, one breakpoint (1000 px, the same one JS uses for Escape):
+ *   >= 1000px  docked: the stage gets right padding and the conversation stays
+ *              fully usable beside it. No scrim. When the D.1 subagents dock is
+ *              also open, this sits to the left of it and the stage clears both.
+ *   <  1000px  an overlay drawer from the right with the Focus scrim.
+ * ========================================================================= */
+
+.agent-panel{ display: none; }
+.btn--focus-nav[hidden]{ display: none !important; }   /* .focus-only would otherwise win over [hidden] */
+
+body.layout--focus .agent-panel{
+  --agent-w: min(380px, 86vw);
+  display: flex; flex-direction: column;
+  position: fixed; top: 18px; bottom: 18px; right: 18px; z-index: 58;
+  width: var(--agent-w);
+  background: var(--bg-1);
+  border: 1px solid var(--border-strong); border-radius: var(--radius);
+  box-shadow: 0 10px 40px rgba(0,0,0,0.6);
+  visibility: hidden; transform: translateX(calc(100% + 24px));
+  transition: transform 0.22s ease, visibility 0s linear 0.22s;
+  min-height: 0;
+}
+body.layout--focus.focus-agent-open .agent-panel{
+  transform: none; visibility: visible; transition-delay: 0s;
+}
+
+@media (min-width: 1000px){
+  body.layout--focus .agent-panel{ --agent-w: min(380px, 34vw); }
+  /* docked: the stage steps aside (same trick as the D.1 dock rule) */
+  body.layout--focus.focus-agent-open .ask-overlay{ padding-right: calc(min(380px, 34vw) + 36px); }
+  /* ...and with the subagents dock open too, clear both and sit left of it */
+  body.layout--focus:has(#subagents-overlay.is-docked:not([hidden]):not(.is-collapsed)) .agent-panel{
+    right: calc(min(380px, 34vw) + 36px);
+  }
+  body.layout--focus.focus-agent-open:has(#subagents-overlay.is-docked:not([hidden]):not(.is-collapsed)) .ask-overlay{
+    padding-right: calc((min(380px, 34vw) + 36px) * 2);
+  }
+}
+@media (max-width: 999px){
+  body.layout--focus.focus-agent-open .focus-scrim{
+    display: block; position: fixed; inset: 0; z-index: 55; background: rgba(2,5,10,0.5);
+  }
+}
+@media (max-width: 780px){
+  body.layout--focus .agent-panel{ top: 8px; bottom: 8px; right: 8px; }
+}
+
+/* --- header ------------------------------------------------------------- */
+.agent-panel__head{
+  display: flex; align-items: center; gap: 8px; flex-shrink: 0;
+  padding: 9px 10px; border-bottom: 1px solid var(--border);
+}
+.agent-panel__title{
+  font-family: var(--font-display); font-size: 10px; letter-spacing: 0.18em; color: var(--accent-soft);
+}
+.agent-panel__kind{
+  min-width: 0; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  font-family: var(--font-mono); font-size: 10.5px; color: var(--text-dimmer);
+}
+.agent-state{
+  font-family: var(--font-mono); font-size: 10px; text-transform: uppercase; letter-spacing: 0.08em;
+  padding: 1px 7px; border-radius: 999px; border: 1px solid var(--border); color: var(--text-dim);
+}
+.agent-state[data-state="running"]{ color: var(--green); border-color: var(--green); }
+.agent-state[data-state="ok"]{ color: var(--green); }
+.agent-state[data-state="fail"]{ color: var(--red); border-color: var(--red); }
+
+.agent-panel__body{
+  flex: 1; min-height: 0; overflow: hidden;
+  display: flex; flex-direction: column;
+}
+.agent-sec{ padding: 9px 12px; border-bottom: 1px solid var(--border); flex-shrink: 0; }
+.agent-sec--grow{ flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column; border-bottom: 0; }
+.agent-sec__label{
+  display: flex; align-items: center; gap: 8px; margin-bottom: 5px;
+  font-family: var(--font-display); font-size: 9px; letter-spacing: 0.18em; color: var(--text-dimmer);
+}
+.agent-sec__aside{ margin-left: auto; letter-spacing: 0; font-family: var(--font-mono); font-size: 10px; }
+.agent-link{
+  background: none; border: 0; padding: 0; cursor: pointer;
+  font-family: var(--font-mono); font-size: 10px; color: var(--accent-soft);
+}
+.agent-link:hover{ color: var(--accent); text-decoration: underline; }
+.agent-link:disabled{ color: var(--text-dimmer); cursor: default; text-decoration: none; }
+
+/* --- codebase ----------------------------------------------------------- */
+.agent-root{
+  font-family: var(--font-mono); font-size: 11.5px; color: var(--text); word-break: break-all; line-height: 1.4;
+}
+.agent-task{
+  margin-top: 5px; font-size: 12.5px; color: var(--text-dim); line-height: 1.35;
+  display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden;
+}
+.agent-task[hidden]{ display: none; }   /* the display above would otherwise beat [hidden] */
+
+/* --- working on ----------------------------------------------------------- */
+.agent-now{
+  display: flex; align-items: baseline; gap: 8px; min-height: 18px;
+  font-family: var(--font-mono); font-size: 12px;
+}
+.agent-now__verb{ color: var(--accent); flex-shrink: 0; }
+.agent-now__what{ min-width: 0; color: var(--text); word-break: break-all; }
+.agent-now__idle{ color: var(--text-dimmer); }
+.agent-now.is-live .agent-now__verb::after{
+  content: ""; display: inline-block; width: 6px; height: 6px; margin-left: 7px; border-radius: 50%;
+  background: var(--accent); vertical-align: middle; animation: agent-pulse 1.2s ease-in-out infinite;
+}
+@keyframes agent-pulse{ 0%, 100%{ opacity: 1; } 50%{ opacity: 0.25; } }
+
+/* --- file tree ------------------------------------------------------------- */
+.agent-tree{
+  flex: 1 1 auto; min-height: 60px; overflow: auto;
+  border: 1px solid var(--border); border-radius: var(--radius); background: var(--bg-panel-2);
+  padding: 4px 0; font-family: var(--font-mono); font-size: 11.5px;
+}
+.agent-row{
+  display: flex; align-items: baseline; gap: 7px; padding-top: 1px; padding-bottom: 1px; padding-right: 8px;
+  color: var(--text-dim); white-space: nowrap;
+}
+.agent-row__mark{ width: 12px; flex-shrink: 0; text-align: center; color: var(--text-dimmer); }
+.agent-row__name{ min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.agent-row__meta{ margin-left: auto; flex-shrink: 0; padding-left: 8px; font-size: 10px; color: var(--text-dimmer); }
+.agent-row--dir{ color: var(--text); }
+.agent-row[data-status="planned"]{ color: var(--text-dimmer); }
+.agent-row[data-status="listed"]{ color: var(--text-dimmer); opacity: 0.75; }
+.agent-row[data-status="read"] .agent-row__mark,
+.agent-row[data-status="read"] .agent-row__name{ color: var(--text-dim); }
+.agent-row[data-status="written"],
+.agent-row[data-status="created"],
+.agent-row[data-status="fixed"],
+.agent-row[data-status="edited"]{ color: var(--text); }
+.agent-row[data-status="written"] .agent-row__mark,
+.agent-row[data-status="created"] .agent-row__mark,
+.agent-row[data-status="fixed"] .agent-row__mark{ color: var(--green); }
+.agent-row[data-status="edited"] .agent-row__mark{ color: var(--gold); }
+.agent-row[data-status="failed"]{ color: var(--red); }
+.agent-row[data-status="failed"] .agent-row__mark,
+.agent-row[data-status="failed"] .agent-row__meta{ color: var(--red); }
+.agent-row.is-busy .agent-row__mark{ color: var(--accent); animation: agent-pulse 1.2s ease-in-out infinite; }
+.agent-row.is-active{
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+  box-shadow: inset 2px 0 0 var(--accent);
+}
+.agent-empty{ padding: 8px 10px; font-size: 11px; color: var(--text-dimmer); }
+
+/* --- log --------------------------------------------------------------------- */
+.agent-log{
+  max-height: 120px; overflow: auto; padding: 0;
+  font-family: var(--font-mono); font-size: 10.5px; line-height: 1.45;
+}
+.agent-log__line{ color: var(--text-dim); word-break: break-word; padding: 1px 0; }
+.agent-log__line--ok{ color: var(--green); }
+.agent-log__line--fail{ color: var(--red); }
+
+@media (prefers-reduced-motion: reduce){
+  body.layout--focus .agent-panel{ transition: none; }
+  .agent-now.is-live .agent-now__verb::after,
+  .agent-row.is-busy .agent-row__mark{ animation: none; }
+}

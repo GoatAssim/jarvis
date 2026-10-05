@@ -4015,6 +4015,9 @@
         // visually drift apart.
         item.dom = renderDevAgentCard(item);
         insertIntoAskThread(item.dom);
+        // Same finished job to the Focus Agent panel (never opens it, never
+        // replaces a job that is still running -- see agent-panel.js restore()).
+        try { window.JarvisAgentPanel?.restore(item.data); } catch { /* panel is optional */ }
         break;
     }
   }
@@ -4088,6 +4091,11 @@
         // every other JARVIS_MEDIA branch above uses.
         let event;
         try { event = JSON.parse(parts[2]); } catch { return; }
+        // Focus layout's Agent side panel (agent-panel.js): the same event,
+        // fed live. A NEW job opens the panel there; Classic ignores it. The
+        // try/catch is deliberate -- a bug in a side panel must never stop
+        // the chat card below from updating.
+        try { window.JarvisAgentPanel?.feed(event); } catch { /* panel is optional */ }
         const item = upsertDevAgentCard(event);
         if (item && isViewingAskThread()) {
           clearAskEmptyHint();
@@ -9110,7 +9118,7 @@
     currentLayout = mode === "focus" ? "focus" : "classic";
     document.body.classList.toggle("layout--focus", currentLayout === "focus");
     // L.32: the Stage drawers only exist in Focus — never leave one open behind.
-    if (currentLayout !== "focus") document.body.classList.remove("focus-chats-open", "focus-activity-open");
+    if (currentLayout !== "focus") document.body.classList.remove("focus-chats-open", "focus-activity-open", "focus-agent-open");
     const btn = qs("#btn-layout-switch");
     const label = qs("#layout-switch-label");
     if (btn) btn.dataset.layout = currentLayout;
