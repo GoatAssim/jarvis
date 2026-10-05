@@ -3436,6 +3436,11 @@
   // Markdown renderer (marked.js — loaded via CDN before this script)
   // ===========================================================================
 
+  const MD_SANITIZE_CONFIG = {
+    FORBID_TAGS: ["style", "link", "meta", "base"],
+    FORBID_ATTR: ["style"],
+  };
+
   function renderMarkdown(text) {
     if (typeof marked === "undefined") {
       const d = document.createElement("div");
@@ -3447,7 +3452,12 @@
       breaks: true,
       gfm: true,
     });
-    const clean = typeof DOMPurify !== "undefined" ? DOMPurify.sanitize(html) : html;
+    // <style>/<link>/<meta>/<base> must never survive: a model reply with prose
+    // followed by raw HTML kept its <style> (DOMPurify's default) and restyled
+    // the whole Jarvis page. Inline style="" is dropped for the same reason.
+    const clean = typeof DOMPurify !== "undefined"
+      ? DOMPurify.sanitize(html, MD_SANITIZE_CONFIG)
+      : html;
     return stash.length ? restoreMath(clean, stash) : clean;
   }
 
@@ -4350,7 +4360,7 @@
     return "\u25cb";
   }
 
-  const DEV_AGENT_PHASE_LABELS = { plan: "Plan", write: "Write", install: "Install", run: "Run", fix: "Fix", done: "Done" };
+  const DEV_AGENT_PHASE_LABELS = { plan: "Plan", write: "Write", install: "Install", run: "Run", fix: "Fix", deliver: "Deliver", done: "Done" };
   function devAgentPhaseLabel(phase) {
     return DEV_AGENT_PHASE_LABELS[phase] || phase;
   }
@@ -4384,8 +4394,13 @@
       }
       case "run": {
         if (e.status === "start") return e.command || "";
-        if (e.status === "ok") return `exit ${e.exit_code}`;
+        if (e.status === "ok") return e.long_running ? `started and kept running${e.url ? " at " + e.url : ""}` : `exit ${e.exit_code}`;
         return `exit ${e.exit_code}  \u2014 ${firstLine(e.stderr_tail)}`;
+      }
+      case "deliver": {
+        if (e.status === "fail") return e.error || "could not copy to the destination folder";
+        if (e.status === "start") return e.output_dir || "";
+        return `${e.files_copied == null ? "" : e.files_copied + " files \u2192 "}${e.output_dir || ""}`;
       }
       case "fix": {
         const base = `attempt ${e.attempt}/${e.max_attempts}  ${e.classified_error || ""}`;

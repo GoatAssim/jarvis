@@ -17,9 +17,13 @@ addition. TOOL_CONFIRM_REQUIRED below covers this file's half of §8 but the
 belt-and-suspenders tool_safety.py-side addition still needs doing.
 """
 
+import os
 import re
+import signal
 import subprocess
 import sys
+import tempfile
+import time
 import uuid
 from pathlib import Path
 
@@ -49,6 +53,13 @@ CREATE_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 # from whatever's left of the shared round budget.
 INSTALL_TIMEOUT = 180  # seconds; dependency installs (pip/npm) can be slow
 RUN_TIMEOUT = 30  # seconds; a generated project hanging shouldn't hang jarvis
+# A server that is still alive after this many seconds with no crash is
+# "long_running" -- the expected, successful outcome for a web app/daemon --
+# not a failure. Kept below RUN_TIMEOUT so a healthy server is confirmed
+# quickly instead of always costing the full timeout.
+LONG_RUNNING_GRACE = 8
+_URL_RE = re.compile(r"https?://[^\s'\"<>)]+", re.IGNORECASE)
+_LISTEN_RE = re.compile(r"(?:listening|running|started|serving)[^\n]*?(?:port\s*|:)(\d{2,5})", re.IGNORECASE)
 MAX_FIX_ATTEMPTS_CEILING = 5
 
 # ---------------------------------------------------------------------------
@@ -135,6 +146,109 @@ def _run_subprocess(argv, cwd, timeout):
         "stdout_tail": cap(stdout),
         "stderr_tail": cap(stderr, 2500),
     }
+
+
+def _stop_process_tree(proc):
+    """Stop proc and its children (npm/node spawn grandchildren). Never raises."""
+    try:
+        if sys.platform == "win32":
+            subprocess.run(["taskkill", "/PID", str(proc.pid), "/T", "/F"],
+                           capture_output=True, timeout=10, creationflags=CREATE_NO_WINDOW)
+        else:
+            try:
+                os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
+            except (ProcessLookupError, PermissionError, OSError):
+                proc.terminate()
+    except Exception:  # noqa: BLE001 -- cleanup must not take the run down
+        pass
+    try:
+        proc.wait(timeout=5)
+    except Exception:  # noqa: BLE001
+        try:
+            proc.kill()
+        except Exception:  # noqa: BLE001
+            pass
+
+
+def _extract_url(text):
+    """Best-effort URL a started server printed (or one built from a port)."""
+    m = _URL_RE.search(text or "")
+    if m:
+        return m.group(0).rstrip(".,;")
+    m = _LISTEN_RE.search(text or "")
+    if m:
+        return f"http://localhost:{m.group(1)}"
+    return None
+
+
+def _cap_tail(s, n):
+    s = (s or "").strip()
+    return s if len(s) <= n else s[-n:] + "\n...(truncated, showing tail)"
+
+
+def _run_long_aware(argv, cwd, timeout, grace=None):
+    """Run argv like _run_subprocess, but a process that is still alive and
+    has not crashed is reported as long_running (ok=True), not a timeout
+    failure. Servers never exit on their own, so treating "still running" as
+    an error sent the fix loop off rewriting working code (BUG-2).
+
+    Outcomes (the dict always has exit_code/stdout_tail/stderr_tail):
+      - exited 0            -> (True,  {..., "long_running": False})
+      - exited non-zero     -> (False, {..., "long_running": False})
+      - alive at the grace
+        window, never crashed -> (True,  {..., "long_running": True, "url": ...})
+        The process is then stopped: dev_agent verifies that it starts, it
+        does not leave an unattended server behind.
+    Never raises.
+    """
+    grace = LONG_RUNNING_GRACE if grace is None else grace
+    grace = min(grace, timeout)
+    out_f = tempfile.TemporaryFile()
+    err_f = tempfile.TemporaryFile()
+    popen_kwargs = {"cwd": str(cwd), "stdout": out_f, "stderr": err_f,
+                    "stdin": subprocess.DEVNULL, "creationflags": CREATE_NO_WINDOW}
+    if sys.platform != "win32":
+        popen_kwargs["start_new_session"] = True  # own process group for killpg
+    try:
+        try:
+            proc = subprocess.Popen(argv, **popen_kwargs)
+        except OSError as e:
+            return False, {"exit_code": None, "stdout_tail": "", "stderr_tail": str(e), "long_running": False}
+
+        deadline = time.monotonic() + grace
+        while proc.poll() is None and time.monotonic() < deadline:
+            time.sleep(0.1)
+        still_running = proc.poll() is None
+        if still_running:
+            # Give a just-started server a moment to print its listening line.
+            time.sleep(0.3)
+            _stop_process_tree(proc)
+
+        def read(f):
+            try:
+                f.seek(0)
+                return f.read().decode("utf-8", errors="replace")
+            except Exception:  # noqa: BLE001
+                return ""
+
+        stdout, stderr = read(out_f), read(err_f)
+        if still_running:
+            return True, {
+                "exit_code": None,
+                "stdout_tail": _cap_tail(stdout, 4000),
+                "stderr_tail": _cap_tail(stderr, 2500),
+                "long_running": True,
+                "url": _extract_url(stdout) or _extract_url(stderr),
+            }
+        return proc.returncode == 0, {
+            "exit_code": proc.returncode,
+            "stdout_tail": _cap_tail(stdout, 4000),
+            "stderr_tail": _cap_tail(stderr, 2500),
+            "long_running": False,
+        }
+    finally:
+        out_f.close()
+        err_f.close()
 
 
 def _write_text_file(path, content):
@@ -502,7 +616,7 @@ def _run_project(project_dir, run_command, plan=None):
         venv_python = project_dir / ".venv" / ("Scripts/python.exe" if sys.platform == "win32" else "bin/python")
         if venv_python.exists():
             argv[0] = str(venv_python)
-    return _run_subprocess(argv, project_dir, RUN_TIMEOUT)
+    return _run_long_aware(argv, project_dir, RUN_TIMEOUT)
 
 
 def _shlex_split(command):
@@ -581,6 +695,17 @@ def tool_dev_agent(arguments, context=None):
         return {"error": "description is required"}
     language_hint = (arguments.get("language_hint") or "").strip() or None
 
+    # BUG-3: an optional delivery folder. Validated BEFORE any AI call or
+    # file write so a bad path costs nothing; the build itself still happens
+    # in the sandbox and is only copied here after it passes.
+    dest = None
+    raw_output_dir = arguments.get("output_dir")
+    if isinstance(raw_output_dir, str) and raw_output_dir.strip():
+        dest, dest_err = dev_agent_sandbox.validate_output_dir(raw_output_dir)
+        if dest_err:
+            return {"error": f"output_dir rejected: {dest_err}"}
+    dest_extra = {"output_dir": str(dest), "delivered": False} if dest is not None else {}
+
     job_id = _new_job_id()
     steps = []
     seq = [0]  # mutable cell so the emit closure below can increment it
@@ -602,7 +727,7 @@ def tool_dev_agent(arguments, context=None):
         project_dir = dev_agent_sandbox.new_project_dir(job_id, arguments.get("project_name"))
     except OSError as e:
         emit("plan", "fail", error=f"could not create project directory: {e}")
-        return _final_result(job_id, steps, ok=False, project_dir=None, reason="sandbox_failed", last_error=str(e))
+        return _final_result(job_id, steps, ok=False, **dest_extra, project_dir=None, reason="sandbox_failed", last_error=str(e))
 
     # project_dir rides on the FIRST event so the Focus-layout Agent panel
     # (web/public/agent-panel.js) can name the codebase while it is still
@@ -612,7 +737,7 @@ def tool_dev_agent(arguments, context=None):
     plan, err = _plan_project(description, language_hint)
     if err:
         emit("plan", "fail", error=err)
-        return _final_result(job_id, steps, ok=False, project_dir=str(project_dir), reason="plan_failed", last_error=err)
+        return _final_result(job_id, steps, ok=False, **dest_extra, project_dir=str(project_dir), reason="plan_failed", last_error=err)
     emit("plan", "ok", files=plan["files"], dependencies=plan["dependencies"], run_command=plan["run_command"])
 
     _write_files(project_dir, plan["files_content"], emit)
@@ -622,7 +747,7 @@ def tool_dev_agent(arguments, context=None):
         install_ok, install_out = _install_dependencies(project_dir, plan["dependencies"], plan)
         emit("install", "ok" if install_ok else "fail", dependencies=plan["dependencies"], **install_out)
         if not install_ok:
-            return _final_result(job_id, steps, ok=False, project_dir=str(project_dir),
+            return _final_result(job_id, steps, ok=False, **dest_extra, project_dir=str(project_dir),
                                   reason="install_failed", last_error=install_out.get("stderr_tail"))
 
     if context is not None and getattr(context, "round_budget_remaining", None):
@@ -645,6 +770,10 @@ def tool_dev_agent(arguments, context=None):
     emit("run", "ok" if run_ok else "fail", command=plan["run_command"], **run_out)
 
     while not run_ok and attempt < max_attempts:
+        # A timeout with nothing on stderr is not a bug in the code, so there
+        # is nothing for the writer model to fix (BUG-2). Stop and report.
+        if dev_agent_errors.is_timeout(run_out.get("stderr_tail", "")):
+            break
         attempt += 1
         classified, target_file = dev_agent_errors.classify(run_out.get("stderr_tail", ""))
         emit("fix", "start", attempt=attempt, max_attempts=max_attempts,
@@ -659,20 +788,42 @@ def tool_dev_agent(arguments, context=None):
             install_ok, install_out = _install_dependencies(project_dir, plan["dependencies"], plan)
             emit("install", "ok" if install_ok else "fail", dependencies=plan["dependencies"], **install_out)
             if not install_ok:
-                return _final_result(job_id, steps, ok=False, project_dir=str(project_dir),
+                return _final_result(job_id, steps, ok=False, **dest_extra, project_dir=str(project_dir),
                                       reason="install_failed", last_error=install_out.get("stderr_tail"))
         emit("run", "start", command=plan["run_command"])
         run_ok, run_out = _run_project(project_dir, plan["run_command"], plan)
         emit("run", "ok" if run_ok else "fail", command=plan["run_command"], **run_out)
 
     if run_ok:
-        emit("done", "ok", project_dir=str(project_dir), run_command=plan["run_command"], total_attempts=attempt)
-        return _final_result(job_id, steps, ok=True, project_dir=str(project_dir),
-                              run_command=plan["run_command"], total_attempts=attempt)
+        long_running = bool(run_out.get("long_running"))
+        extra = {"long_running": True, "url": run_out.get("url")} if long_running else {}
 
+        # BUG-3: copy the PASSED build to the folder the user asked for. A
+        # failed copy does not turn a working build into a failure: the
+        # project still exists in the sandbox, so report both facts.
+        if dest is not None:
+            emit("deliver", "start", output_dir=str(dest))
+            delivered, deliver_info = dev_agent_sandbox.deliver(project_dir, dest)
+            emit("deliver", "ok" if delivered else "fail", output_dir=str(dest), **deliver_info)
+            extra.update(dest_extra)
+            extra["delivered"] = delivered
+            if delivered:
+                extra["not_copied"] = deliver_info.get("not_copied") or []
+            else:
+                extra["delivery_error"] = deliver_info.get("error")
+
+        emit("done", "ok", project_dir=str(project_dir), run_command=plan["run_command"],
+             total_attempts=attempt, **extra)
+        return _final_result(job_id, steps, ok=True, project_dir=str(project_dir),
+                              run_command=plan["run_command"], total_attempts=attempt, **extra)
+
+    if dev_agent_errors.is_timeout(run_out.get("stderr_tail", "")):
+        emit("done", "fail", project_dir=str(project_dir), reason="timeout", last_error=run_out.get("stderr_tail"))
+        return _final_result(job_id, steps, ok=False, **dest_extra, project_dir=str(project_dir),
+                              reason="timeout", last_error=run_out.get("stderr_tail"))
     reason = "budget_exhausted" if attempt >= max_attempts and max_attempts < MAX_FIX_ATTEMPTS_CEILING else "max_attempts"
     emit("done", "fail", project_dir=str(project_dir), reason=reason, last_error=run_out.get("stderr_tail"))
-    return _final_result(job_id, steps, ok=False, project_dir=str(project_dir),
+    return _final_result(job_id, steps, ok=False, **dest_extra, project_dir=str(project_dir),
                           reason=reason, last_error=run_out.get("stderr_tail"))
 
 
@@ -700,6 +851,17 @@ TOOL_SCHEMAS = [
                     "description": (
                         "Optional short slug for the project folder (letters/digits/hyphens "
                         "only). If omitted, one is derived from the description."
+                    ),
+                },
+                "output_dir": {
+                    "type": "string",
+                    "description": (
+                        "Optional absolute folder to deliver the finished project into, e.g. "
+                        "'D:/Projects/clock'. Pass it here whenever the user names a destination "
+                        "-- a path written only inside `description` is ignored. The build always "
+                        "happens in Jarvis's private workspace first and is copied here only after "
+                        "it passes. The folder must be new or empty (nothing is overwritten) and "
+                        "can't be inside ~/.jarvis. node_modules/.venv are not copied; reinstall there."
                     ),
                 },
                 "language_hint": {
@@ -763,7 +925,9 @@ TOOL_KEYWORDS = {
 TOOL_PACK_INSTRUCTION = (
     "dev_agent plans, writes, installs, runs, and self-fixes a whole small project from a "
     "plain-language description, in one call. Prefer it over write_file+run_command by hand "
-    "whenever the user wants a runnable project built from scratch, not a single file edited."
+    "whenever the user wants a runnable project built from scratch, not a single file edited. "
+    "If the user names a destination folder, pass it as output_dir (not only in the description); "
+    "check delivered/delivery_error in the result and tell the user where the files ended up."
 )
 
 # TOOL_CONFIRM_REQUIRED — belt-and-suspenders: dev_agent writes files and

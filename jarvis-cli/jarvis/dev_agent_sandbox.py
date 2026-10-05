@@ -8,6 +8,8 @@ front, then the agent writes freely within its own sandbox" safe. See
 §4.3 of the dev_agent implementation plan.
 """
 
+import os
+import shutil
 from pathlib import Path
 
 PROJECTS_ROOT = Path.home() / ".jarvis" / "dev_agent_projects"
@@ -55,3 +57,115 @@ def _slugify(name):
     while "--" in slug:
         slug = slug.replace("--", "-")
     return slug[:40]
+
+
+# ---------------------------------------------------------------------------
+# Delivery to a user-named folder (BUG-3)
+#
+# The build itself ALWAYS happens inside PROJECTS_ROOT (the jail above).
+# `output_dir` only decides where a SUCCESSFUL build is copied afterwards, so
+# the autonomous write/fix loop never gets write access outside the sandbox.
+# The destination arrives as a model-filled tool argument, and the text that
+# produced it can come from anyone Jarvis is reachable by, so it is validated
+# before any AI call is spent: absolute only, never overwrite existing files,
+# never inside (or above) Jarvis's own state directory, never a system folder.
+# dev_agent also stays in TOOL_CONFIRM_REQUIRED, so the person confirms the
+# call (destination included) before anything happens.
+# ---------------------------------------------------------------------------
+
+# Rebuilt by `npm install` / a fresh venv; a venv is not relocatable and
+# node_modules can be huge. Symlinks are never copied either: the run phase
+# executes generated code, which could plant one pointing at a private file.
+_COPY_SKIP_DIRS = frozenset({".venv", "venv", "node_modules", "__pycache__", ".git"})
+
+_POSIX_SYSTEM_DIRS = ("/etc", "/usr", "/bin", "/sbin", "/boot", "/lib", "/lib64",
+                      "/var", "/sys", "/proc", "/dev", "/root")
+
+
+def _system_dirs():
+    dirs = [Path(d) for d in _POSIX_SYSTEM_DIRS]
+    for var in ("SystemRoot", "windir", "ProgramFiles", "ProgramFiles(x86)", "ProgramData"):
+        v = os.environ.get(var)
+        if v:
+            dirs.append(Path(v))
+    return dirs
+
+
+def _is_within(path, parent):
+    try:
+        parent = parent.resolve()
+    except OSError:
+        return False
+    return path == parent or parent in path.parents
+
+
+def validate_output_dir(raw):
+    """Check a requested delivery folder. Returns (Path, None) or (None, reason).
+
+    Never raises. The folder may not exist yet (it is created on delivery) but
+    if it does exist it must be an empty directory: delivery never overwrites
+    or merges into somebody's existing files."""
+    if not isinstance(raw, str) or not raw.strip() or "\x00" in raw:
+        return None, "output_dir must be a non-empty path"
+    try:
+        p = Path(raw.strip()).expanduser()
+        if not p.is_absolute():
+            return None, f"output_dir must be an absolute path (got {raw.strip()!r})"
+        dest = p.resolve()
+        home = Path.home().resolve()
+        jarvis_home = (home / ".jarvis")
+
+        if dest == Path(dest.anchor):
+            return None, "output_dir can't be a drive or filesystem root"
+        if dest == home or dest in home.parents:
+            return None, "output_dir can't be your home folder or a parent of it; name a subfolder"
+        if _is_within(dest, jarvis_home) or _is_within(PROJECTS_ROOT.resolve(), dest):
+            return None, "output_dir can't be inside Jarvis's own ~/.jarvis state folder"
+        for sysdir in _system_dirs():
+            if _is_within(dest, sysdir):
+                return None, f"output_dir can't be inside the system folder {sysdir}"
+
+        if dest.exists():
+            if not dest.is_dir():
+                return None, f"{dest} exists and is a file, not a folder"
+            if any(dest.iterdir()):
+                return None, f"{dest} already exists and is not empty; pick a new or empty folder"
+        return dest, None
+    except (OSError, RuntimeError, ValueError) as e:
+        return None, f"output_dir could not be used: {e}"
+
+
+def deliver(project_dir, dest):
+    """Copy a finished project from the sandbox into `dest` (already passed
+    through validate_output_dir). Returns (ok, info). info on success:
+    {"files_copied": int, "not_copied": [names]} (dependency folders that
+    were left behind, so the caller can say to reinstall); on failure:
+    {"error": str}. Re-checks emptiness at copy time (the folder can change
+    between validation and delivery) and never raises."""
+    try:
+        dest.mkdir(parents=True, exist_ok=True)
+        if any(dest.iterdir()):
+            return False, {"error": f"{dest} is not empty; nothing was copied"}
+        base = Path(project_dir)
+        copied, left_behind = 0, set()
+        for root, dirs, files in os.walk(base, followlinks=False):
+            root_p = Path(root)
+            rel = root_p.relative_to(base)
+            keep = []
+            for d in dirs:
+                if d in _COPY_SKIP_DIRS:
+                    if not rel.parts:  # only report top-level skips
+                        left_behind.add(d)
+                elif not (root_p / d).is_symlink():
+                    keep.append(d)
+            dirs[:] = keep
+            (dest / rel).mkdir(parents=True, exist_ok=True)
+            for f in files:
+                src = root_p / f
+                if src.is_symlink():
+                    continue
+                shutil.copy2(src, dest / rel / f)
+                copied += 1
+        return True, {"files_copied": copied, "not_copied": sorted(left_behind)}
+    except OSError as e:
+        return False, {"error": f"could not copy into {dest}: {e}"}

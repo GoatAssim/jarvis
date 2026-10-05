@@ -225,8 +225,12 @@
       else addLog(job, "install failed \u2014 " + (firstLine(e.stderr_tail) || deps), "fail");
     } else if (phase === "run") {
       if (st === "start") job.current = { verb: "Running", path: "", text: clip(e.command || "", 160) };
-      else if (st === "ok") addLog(job, "run \u2713 exit " + e.exit_code, "ok");
+      else if (st === "ok") addLog(job, e.long_running ? "run \u2713 started and kept running" + (e.url ? " at " + e.url : "") : "run \u2713 exit " + e.exit_code, "ok");
       else addLog(job, "run \u2717 exit " + e.exit_code + (firstLine(e.stderr_tail) ? " \u2014 " + firstLine(e.stderr_tail) : ""), "fail");
+    } else if (phase === "deliver") {
+      if (st === "start") job.current = { verb: "Copying", path: "", text: clip(e.output_dir || "", 160) };
+      else if (st === "ok") addLog(job, "delivered " + (e.files_copied == null ? "" : e.files_copied + " files ") + "\u2192 " + (e.output_dir || "?"), "ok");
+      else addLog(job, "delivery failed \u2014 " + (firstLine(e.error) || "could not copy"), "fail");
     } else if (phase === "fix") {
       const target = e.target_file ? normPath(e.target_file, job.root) : null;
       if (st === "start") {

@@ -3810,7 +3810,14 @@ def _ask_impl(user_text, commands=None, on_attempt=None, on_tool_call=None, on_t
                 except Exception:  # noqa: BLE001 — a trace never fails a turn
                     trace.skills = []
 
-                if thinking.get("text") and think_cfg.get("save", True):
+                # BUG-4: only keep the provider's reasoning as a saved extra
+                # when thinking was actually ON for this ask. Some hosts (Groq's
+                # gpt-oss, others) return reasoning text even though none was
+                # requested; surfacing it showed internal prompt instructions
+                # in a block labelled "off". The full text still goes to the
+                # raw archive below, which is a debug log, not UI.
+                if reasoning.should_save_trace(
+                        think_level, thinking.get("text"), think_cfg.get("save", True)):
                     extras.append({"type": "thinking", "data": {
                         "text": reasoning.clip_trace(
                             thinking["text"], think_cfg.get("max_trace_chars")),

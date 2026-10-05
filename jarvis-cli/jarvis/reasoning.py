@@ -302,6 +302,18 @@ def auto_level(user_text):
     return "off"
 
 
+def should_save_trace(level, text, save=True):
+    """Whether a provider's reasoning text belongs in the saved "thinking" extra.
+
+    Only when thinking was ON for the ask. Some hosts (Groq's gpt-oss and
+    others) return reasoning even though none was requested; saving it put
+    internal prompt instructions in a block the trace itself called "off"
+    (BUG-4). Empty text, or a config with `save` off, never saves."""
+    if not text or not save:
+        return False
+    return normalize_level(level) != "off"
+
+
 def effective_level(user_text, defaults=None, override=None):
     """The level this one ask should actually use.
 
