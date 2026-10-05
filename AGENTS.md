@@ -252,6 +252,7 @@ line classifier). `npm install marked` inside
 actually render Markdown):
 
     node tests/verify_math_rendering.js
+    node tests/verify_thread_extras_collapse.js   # BUG-5/6: answered confirmations are one line, one card per dev_agent job, cards before the reply on reload, saved thinking follows the toggle; no npm install
     node tests/verify_ask_trace_replay.js
     node tests/verify_daemons_panel.js
     node tests/verify_daemons_console.js   # the console line classifier (H.1.7)

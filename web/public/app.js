@@ -3959,11 +3959,16 @@
         // off blocking `stream: false` calls per provider, which is a
         // bigger, separately-planned change.
         if (item.data && item.data.text) {
-          const details = el("details", { class: "thinking-block" }, [
+          const details = el("details", { class: "thinking-block thinking-block--saved" }, [
             el("summary", { class: "thinking-block__summary" },
               `Thinking (${item.data.rounds || 1} round${item.data.rounds === 1 ? "" : "s"}, ${THINK_LEVEL_LABEL[item.data.level] || item.data.level || "default"})`),
             el("pre", { class: "thinking-block__text" }, item.data.text),
           ]);
+          // BUG-5 / BUG-6: a live turn's thinking is hidden until "Show
+          // reasoning trace" is on (streamThinkingDelta), but a replayed one
+          // was always drawn. Same rule for both now, and
+          // syncStreamThinkingVisibility() flips the saved ones too.
+          details.hidden = !thinkState.show;
           insertIntoAskThread(details);
         }
         break;
@@ -4745,6 +4750,13 @@
       if (extraItem) extraItem.data.resolved = approved;
       wsSend({ type: "ask-confirm-response", approved });
       setAskStatus("thinking\u2026", "busy");
+      // BUG-5: collapse the answered prompt into the same one-line summary a
+      // reload draws. No parent (the user switched chats while it waited)
+      // makes replaceWith a no-op, which is right: the thread is rebuilt
+      // from the saved extra when it is opened again.
+      msg.replaceWith(buildResolvedConfirmLine({
+        tool, arguments: args || {}, risk_note: riskNote, resolved: approved,
+      }));
     }
     yesBtn.addEventListener("click", () => resolve(true));
     noBtn.addEventListener("click", () => resolve(false));
@@ -4754,41 +4766,77 @@
     return msg;
   }
 
-  // A static, already-resolved confirm bubble — used to replay history
-  // (see renderThreadExtra) instead of the live interactive one above.
-  function renderResolvedConfirmBubble(data) {
-    clearAskEmptyHint();
-    const bubbleChildren = [
+  // The detail rows of a confirmation (tool, arguments, the command that
+  // would run, the AI review note, the flags). Shared by the one-line
+  // summary below so the expanded view shows everything the live prompt did.
+  function confirmDetailNodes(data) {
+    const nodes = [
       el("div", { class: "ask-confirm__tool" }, data.tool || "(unknown tool)"),
       confirmValuePre(data.arguments || {}, "ask-confirm__args"),
     ];
     if (data.risk_note && data.risk_note.command_run !== undefined && data.risk_note.command_run !== null) {
-      bubbleChildren.push(el("div", { class: "ask-confirm__risk-label" }, "Command:"));
-      bubbleChildren.push(confirmValuePre(data.risk_note.command_run, "ask-confirm__args"));
+      nodes.push(el("div", { class: "ask-confirm__risk-label" }, "Command:"));
+      nodes.push(confirmValuePre(data.risk_note.command_run, "ask-confirm__args"));
     }
     if (data.risk_note && data.risk_note.note) {
       const label = data.risk_note.provider ? `AI review \u2014 ${data.risk_note.provider}` : "AI review";
-      bubbleChildren.push(el("div", { class: "ask-confirm__risk" }, [
+      nodes.push(el("div", { class: "ask-confirm__risk" }, [
         el("div", { class: "ask-confirm__risk-label" }, label),
         el("div", { class: "ask-confirm__risk-note" }, data.risk_note.note),
       ]));
     }
     if (data.risk_note && data.risk_note.command_flags) {
       const cf = data.risk_note.command_flags;
-      bubbleChildren.push(el("div", { class: "ask-confirm__flags" },
+      nodes.push(el("div", { class: "ask-confirm__flags" },
         `Flags: confirm_required=${!!cf.confirm_required}, ai_review=${!!cf.ai_review}`));
     }
-    bubbleChildren.push(el("div", { class: "ask-confirm__actions" }, [
-      el("div", { class: `ask-confirm__result ${data.resolved ? "is-yes" : "is-no"}` },
-        data.resolved ? "\u2713 Approved \u2014 running\u2026" : "\u2717 Declined"),
-    ]));
-    const msg = el("div", { class: "ask-msg ask-msg--jarvis ask-msg--confirm" }, [
-      el("div", { class: "ask-msg__role" }, "Confirm"),
-      el("div", { class: "ask-msg__bubble ask-msg__bubble--confirm" }, bubbleChildren),
+    return nodes;
+  }
+
+  // A few words about WHAT was confirmed, for the collapsed line: the command
+  // when there is one, else nothing (the tool name already says the rest).
+  function confirmOneLineHint(data) {
+    const a = data && data.arguments;
+    let text = "";
+    if (a && typeof a === "object") {
+      if (typeof a.command === "string") text = a.command;
+      else if (typeof a.cmd === "string") text = a.cmd;
+    }
+    if (!text && data && data.risk_note && typeof data.risk_note.command_run === "string") {
+      text = data.risk_note.command_run;
+    }
+    text = text.replace(/\s+/g, " ").trim();
+    return text.length > 90 ? text.slice(0, 89) + "\u2026" : text;
+  }
+
+  // BUG-5: a confirmation that has been answered is history, not a prompt.
+  // Instead of a full card per decision (an agent turn can have several), it
+  // is ONE line -- mark, Approved/Declined, tool name, a short hint of the
+  // command -- that opens to the full detail on a click. The live bubble swaps itself for this line the moment
+  // Yes/No is clicked (addAskConfirmBubble) and a reload draws the same line
+  // (renderResolvedConfirmBubble), so both paths show the same thing.
+  function buildResolvedConfirmLine(data) {
+    const approved = Boolean(data.resolved);
+    const hint = confirmOneLineHint(data);
+    return el("details", { class: "ask-confirm-line" }, [
+      el("summary", { class: "ask-confirm-line__summary" }, [
+        el("span", { class: `ask-confirm-line__mark ${approved ? "is-yes" : "is-no"}` }, approved ? "\u2713" : "\u2717"),
+        el("span", { class: "ask-confirm-line__verb" }, approved ? "Approved" : "Declined"),
+        el("span", { class: "ask-confirm-line__tool" }, data.tool || "(unknown tool)"),
+        hint ? el("span", { class: "ask-confirm-line__hint" }, hint) : null,
+      ]),
+      el("div", { class: "ask-confirm-line__body" }, confirmDetailNodes(data)),
     ]);
-    insertIntoAskThread(msg);
+  }
+
+  // The already-resolved confirmation, drawn when a conversation is
+  // (re)loaded (see renderThreadExtra).
+  function renderResolvedConfirmBubble(data) {
+    clearAskEmptyHint();
+    const line = buildResolvedConfirmLine(data);
+    insertIntoAskThread(line);
     askThreadScrollToEnd();
-    return msg;
+    return line;
   }
 
   // ---- §8 live streaming (K.3.1.5) BEGIN --------------------------------
@@ -4942,7 +4990,7 @@
   // "Show reasoning trace" flipped (see setThinkShow): apply instantly to
   // every thinking block already streamed in this thread, live or finished.
   function syncStreamThinkingVisibility() {
-    for (const d of askThread.querySelectorAll(".thinking-block--stream")) {
+    for (const d of askThread.querySelectorAll(".thinking-block--stream, .thinking-block--saved")) {
       d.hidden = !thinkState.show;
       if (d.classList.contains("thinking-block--live")) d.open = thinkState.show;
     }
@@ -7398,6 +7446,24 @@
     return msg;
   }
 
+  // BUG-5 / BUG-6: which saved extras to draw for one exchange. A pure
+  // function (tests/verify_thread_extras_collapse.js slices it out of this
+  // file by source range). It keeps the saved order and drops every devAgent
+  // card for a job id that appears again later in the same exchange, so one
+  // job is one progress card -- the live path already behaves this way
+  // (upsertDevAgentCard finds the card by job id). A card with no job id is
+  // never merged with another.
+  function replayExtrasForBucket(extras, bucket) {
+    const mine = (extras || []).filter((it) => it && it.bucket === bucket);
+    const lastIndexForJob = new Map();
+    mine.forEach((it, idx) => {
+      if (it.type === "devAgent" && it.data && it.data.jobId) lastIndexForJob.set(it.data.jobId, idx);
+    });
+    return mine.filter((it, idx) => !(
+      it.type === "devAgent" && it.data && it.data.jobId && lastIndexForJob.get(it.data.jobId) !== idx
+    ));
+  }
+
   // The server now saves each turn's screenshots/downloads/organize_json
   // results/confirm decisions alongside it (see conversations.append_exchange
   // and ai_client._extras_from_runs) — this seeds state.threadExtrasByConv
@@ -7423,9 +7489,7 @@
     const exchanges = (record && record.exchanges) || [];
     const extras = (convId != null && state.threadExtrasByConv[convId]) || [];
     const renderExtrasForBucket = (bucket) => {
-      for (const item of extras) {
-        if (item.bucket === bucket) renderThreadExtra(item);
-      }
+      for (const item of replayExtrasForBucket(extras, bucket)) renderThreadExtra(item);
     };
     if (!exchanges.length) {
       renderExtrasForBucket(0);
@@ -7435,8 +7499,13 @@
     } else {
       exchanges.forEach((ex, i) => {
         addUserBubble(ex.user || "");
-        addJarvisStaticBubble(ex.jarvis || "");
+        // BUG-6: a live turn draws its cards (confirmations, the dev_agent
+        // progress card, screenshots...) ABOVE the final reply, because
+        // insertIntoAskThread() puts them before the pending reply bubble.
+        // Replay used to draw the reply first and the cards after it, so the
+        // same turn read in a different order after a reload. Same order now.
         renderExtrasForBucket(i);
+        addJarvisStaticBubble(ex.jarvis || "");
       });
       // Extras for the turn currently in flight (or one that failed after
       // producing media but before finishing) live past the last saved
