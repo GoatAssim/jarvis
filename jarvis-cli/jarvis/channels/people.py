@@ -70,6 +70,21 @@ channels-add-person`:
   * `name_locked` — the owner typed this person's name by hand. A guest's
     own remember_sender call can no longer overwrite it.
 
+NOTES THE OWNER EDITS, AND FORGETTING
+------------------------------------
+A note is identified by `note_id(text)`, a short hash of its text, never by
+its position: the list is a ring buffer a guest can push to, so "note 3" can
+become a different note between the panel drawing it and the owner clicking
+Delete. Editing or deleting by id either hits the note that was shown or says
+it is gone. The text goes through the same `_clean_text` and cap as a note a
+guest wrote, because the owner's edit lands in the same prompt block.
+
+`delete_record` is the unconditional delete behind "Forget this person"
+(user_admin.forget_person). It is NOT what `remove_person` is: that one still
+refuses anyone who has written. The decision to allow it, and everything else
+a forget touches (lists, limits, history), lives in user_admin so the refusals
+sit in one place.
+
 STORAGE
 -------
     ~/.jarvis/channels/people.json
@@ -79,6 +94,7 @@ store here — this accumulates slowly over months and is not regenerable
 from anything.
 """
 
+import hashlib
 import re
 import time
 
@@ -276,6 +292,65 @@ def add_note(platform, user_id, note):
     if note not in notes:
         notes.append(note)
     return _update(platform, user_id, notes=notes[-MAX_NOTES:])
+
+
+# --------------------------------------------------------------------------
+# Notes the owner edits  (L.36-P11)
+# --------------------------------------------------------------------------
+
+def note_id(text):
+    """A short stable id for one note: the first 8 hex digits of a hash of
+    its text. Notes are unique within a record, so this names exactly one."""
+    return hashlib.sha1(str(text).encode("utf-8")).hexdigest()[:8]
+
+
+def list_notes(entry):
+    """[{id, text}] for the notes stored on one record, oldest first."""
+    if not isinstance(entry, dict):
+        return []
+    return [{"id": note_id(n), "text": n}
+            for n in (entry.get("notes") or []) if isinstance(n, str)]
+
+
+def edit_note(platform, user_id, nid, text):
+    """Replace one note's text. Returns (ok, error, notes).
+
+    An empty replacement is refused rather than treated as a delete — a
+    cleared box is more often a slip than a decision, and Delete exists."""
+    rec = get(platform, user_id)
+    if rec is None:
+        return False, f"{user_id} isn't registered on {platform}", []
+    notes = [n for n in (rec.get("notes") or []) if isinstance(n, str)]
+    at = next((i for i, n in enumerate(notes) if note_id(n) == str(nid or "")), None)
+    if at is None:
+        return False, ("that note isn't there any more — it was probably "
+                       "replaced; reopen the person and try again"), list_notes(rec)
+    cleaned = _clean_text(text, MAX_NOTE_LEN)
+    if not cleaned:
+        return False, "a note can't be empty — use Delete to remove it", list_notes(rec)
+    if cleaned == notes[at]:
+        return True, "", list_notes(rec)
+    if cleaned in notes:
+        return False, "they already have a note that says that", list_notes(rec)
+    notes[at] = cleaned
+    out = _update(platform, rec["user_id"], notes=notes)
+    return True, "", list_notes(out)
+
+
+def delete_note(platform, user_id, nid):
+    """Remove one note. Returns (ok, error, notes). Deleting a note that is
+    already gone is reported, not silently accepted, so the panel can say the
+    list changed under it."""
+    rec = get(platform, user_id)
+    if rec is None:
+        return False, f"{user_id} isn't registered on {platform}", []
+    notes = [n for n in (rec.get("notes") or []) if isinstance(n, str)]
+    keep = [n for n in notes if note_id(n) != str(nid or "")]
+    if len(keep) == len(notes):
+        return False, ("that note isn't there any more — it was probably "
+                       "replaced; reopen the person and try again"), list_notes(rec)
+    out = _update(platform, rec["user_id"], notes=keep)
+    return True, "", list_notes(out)
 
 
 def set_follow(platform, user_id, status):
@@ -485,6 +560,24 @@ def remove_person(platform, user_id):
                        "messaged can be removed — block anyone else")
     partner = rec.get("linked")
     if partner and isinstance(data.get(partner), dict):
+        data[partner]["linked"] = ""
+    del data[k]
+    return (True, "") if _save(data) else (False, "could not write people.json")
+
+
+def delete_record(platform, user_id):
+    """Delete one record whatever its history, and clear the other half of a
+    link. Returns (ok, error). Only user_admin.forget_person calls this; it
+    has already taken the person off every list and removed their limits, so
+    this is the last step and a failure earlier leaves the record in place
+    for a retry."""
+    data = _load()
+    k = key(platform, user_id)
+    rec = data.get(k)
+    if not isinstance(rec, dict):
+        return False, f"{user_id} isn't in the list"
+    partner = rec.get("linked")
+    if partner and isinstance(data.get(partner), dict) and data[partner].get("linked") == k:
         data[partner]["linked"] = ""
     del data[k]
     return (True, "") if _save(data) else (False, "could not write people.json")

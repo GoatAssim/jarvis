@@ -58,6 +58,10 @@ RUN_TIMEOUT = 30  # seconds; matches dev_agent.RUN_TIMEOUT's reasoning —
 # a shell step the agent runs to verify its own edit shouldn't be able to
 # hang the whole call.
 
+LISTING_EVENT_CAP = 150  # max list_dir lines carried on one progress event
+# (see the "listing" field in tool_code_agent's executor) -- the Agent panel
+# needs the shape of the tree, not all 400 entries list_dir itself can return.
+
 MAX_ROUNDS_CEILING = 5  # ai_providers.MAX_TOOL_ROUNDS is 5 per adapter
 # attempt regardless of what round_budget we hand it, so asking for more
 # than this from any single provider attempt would be a no-op anyway.
@@ -821,8 +825,26 @@ def tool_code_agent(arguments, context=None):
 
         outcome = _step_outcome(name, result, err)
         log.append(f"{name} → {outcome}")
-        emit("step", "ok" if err is None else "fail", tool=name, outcome=outcome,
-             **({"error": err} if err else {}))
+        extra = {"error": err} if err else {}
+        listing = None
+        if err is None and name == "list_dir" and isinstance(result, dict):
+            # The Focus-layout Agent panel (web/public/agent-panel.js) draws
+            # the codebase tree from this. Names only, never file contents,
+            # and capped: list_dir can return up to 400 lines. The lines are
+            # relative to the directory that was listed (`arguments.path` on
+            # the matching "start" event); a directory is a trailing "/",
+            # depth is two spaces per level.
+            listing = [str(x) for x in (result.get("entries") or [])[:LISTING_EVENT_CAP]]
+            extra["listing"] = listing
+        event = emit("step", "ok" if err is None else "fail", tool=name, outcome=outcome, **extra)
+        if listing is not None:
+            # LIVE STREAM ONLY. emit() has already printed the event (and run
+            # the CLI hook), so the panel has its listing; but this same dict
+            # is what `steps` stores, and code_agent has no entry in
+            # tool_result_shaping.TOOL_RESULT_SPECS, so `steps` goes back to
+            # the outer model verbatim. Left in, every list_dir would add up
+            # to LISTING_EVENT_CAP lines to the model's context on each round.
+            event.pop("listing", None)
         return result if err is None else {"error": err}
 
     ai_schemas = [

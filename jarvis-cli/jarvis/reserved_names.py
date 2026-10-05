@@ -101,6 +101,7 @@ RESERVED_NAMES = {
     "channels-directory", "channels-people", "channels-follow", "channels-block",
     "channels-users", "channels-user", "channels-user-tools",
     "channels-add-person", "channels-rename", "channels-remove-person",
+    "channels-note", "channels-forget",
     "channels-link", "channels-unlink",
     "channels-conversation", "channels-usage", "channels-user-test",
     "channels-presets", "channels-preset", "channels-bulk",

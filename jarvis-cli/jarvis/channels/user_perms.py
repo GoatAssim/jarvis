@@ -187,6 +187,25 @@ def set_tools(platform, user_id, mode, allow=None):
     return _put(platform, user_id, entry)
 
 
+def forget(platform, user_id):
+    """Drop one person's stored limits entirely. Returns True if there was an
+    entry. Raises PermsUnreadable / OSError like the other writers.
+
+    An absent entry reads as the defaults (tools inherit the platform's, DMs
+    allowed), which is MORE access than a custom tool list or a switched-off
+    send_dm. That is why this is not a general "reset": its one caller,
+    user_admin.forget_person, has already taken the person off every
+    allow-list and refused anyone a "*" entry covers, so the defaults it leaves
+    behind belong to nobody the gate lets through. If they write again they
+    start as anyone new does."""
+    data = _load()
+    if data.pop(key(platform, user_id), None) is None:
+        return False
+    if not _save(data):
+        raise OSError("could not write user_perms.json")
+    return True
+
+
 def set_can_dm(platform, user_id, value):
     entry = get(platform, user_id)
     entry["can_dm"] = bool(value)
