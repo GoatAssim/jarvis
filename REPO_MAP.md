@@ -367,10 +367,17 @@ Both `dev_agent` and `code_agent` print their progress as one
 Focus layout's Agent panel (`web/public/agent-panel.js`) is built purely from
 those events: dev_agent's `plan:start` carries `project_dir`, code_agent's
 carries `root`, and a code_agent `list_dir` result carries a capped `listing`
-on the **live line only** — it is removed from the stored `steps`, because
-code_agent has no result-shaping spec and `steps` goes back to the model
-verbatim. Only dev_agent runs are saved as replay extras (`thread_extras.py`),
-so only a dev_agent job reappears in the panel after a reload.
+on the **live line only** — it is removed from the stored `steps` right after
+`emit()` prints it. (`code_agent.py` carries its own `TOOL_RESULT_SPECS`, merged
+in by `tools.py`: it drops each step's `arguments` at medium/low verbosity and
+all `steps` at low, but at high `steps` reach the model verbatim, and `listing`
+is not in that spec — so leaving it in would have fed it to the model.) Both
+agents are saved as `devAgent` replay extras (`thread_extras.py`), so both reappear
+in the panel after a reload. A code_agent run is saved **slimmed**
+(`_slim_code_agent_steps`): its `start` events carry the model's whole tool
+arguments, so only `path` / `command` / `pattern` / `glob` / line range survive
+and file content never reaches the saved conversation. Consequence: a reloaded
+code_agent tree shows only the files it read or changed, not the folders it browsed.
 
 ---
 

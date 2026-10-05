@@ -27,6 +27,42 @@ TOOL_DERIVED_TYPES = frozenset({
 })
 
 
+# code_agent saves its steps too (L.47b), but NOT verbatim. Its "start" events
+# carry the model's whole tool arguments -- the full text of every write_file /
+# edit_file call -- and a saved conversation must not become a second copy of
+# the user's source. Only the small, display-relevant arguments survive: enough
+# for the stepper card and the Focus Agent panel to name the file / command /
+# pattern, nothing that is file content. Every other field is kept as it came.
+_CODE_ARG_KEEP = ("path", "command", "pattern", "glob", "start_line", "end_line", "is_regex")
+_CODE_ARG_CLIP = 300
+_CODE_STEPS_CAP = 400   # a code_agent run is bounded by its rounds; this is a backstop
+_CODE_TEXT_CLIP = 400   # outcome / error strings
+
+
+def _slim_code_agent_steps(steps):
+    out = []
+    for e in steps[:_CODE_STEPS_CAP]:
+        if not isinstance(e, dict):
+            continue
+        e = dict(e)
+        args = e.get("arguments")
+        if isinstance(args, dict):
+            kept = {}
+            for k in _CODE_ARG_KEEP:
+                v = args.get(k)
+                if isinstance(v, str):
+                    kept[k] = v[:_CODE_ARG_CLIP]
+                elif isinstance(v, (int, float, bool)):
+                    kept[k] = v
+            e["arguments"] = kept
+        for k in ("outcome", "error"):
+            if isinstance(e.get(k), str) and len(e[k]) > _CODE_TEXT_CLIP:
+                e[k] = e[k][:_CODE_TEXT_CLIP]
+        e.pop("listing", None)   # live-stream only (see code_agent's executor)
+        out.append(e)
+    return out
+
+
 def extras_from_runs(runs):
     """Turns this turn's tool_executor.runs (see _make_tool_executor) into
     the same lightweight 'screenshot / download / organizeJson / confirm'
@@ -107,6 +143,21 @@ def extras_from_runs(runs):
                     "ok": result.get("ok"),
                     "projectDir": result.get("project_dir"),
                     "steps": result["steps"],
+                },
+            })
+        elif name == "code_agent" and isinstance(result.get("steps"), list):
+            # Same card type as dev_agent: renderThreadExtra's "devAgent" case
+            # and the live stream already draw code_agent's events through
+            # the same stepper, and the Focus Agent panel's restore() reads
+            # this shape. `root` is code_agent's name for dev_agent's
+            # `project_dir`. The steps are slimmed -- see _slim_code_agent_steps.
+            extras.append({
+                "type": "devAgent",
+                "data": {
+                    "jobId": result.get("job_id"),
+                    "ok": result.get("ok"),
+                    "projectDir": result.get("root"),
+                    "steps": _slim_code_agent_steps(result["steps"]),
                 },
             })
     return extras

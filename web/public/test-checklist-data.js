@@ -2808,7 +2808,8 @@ window.JARVIS_TEST_CHECKLIST = /*JSON-BEGIN*/ {
    "care": "Do this in a scratch folder or throwaway repo, not a real project.",
    "watch": [
     "Use dev_agent for new projects — code_agent is for existing ones.",
-    "Focus layout: an Agent panel opens beside the chat when it starts, showing the root folder, the file it is on, a tree of the files it listed / read / edited, and a log of shell commands. It shows paths only, never file contents. Classic layout shows none of this."
+    "Focus layout: an Agent panel opens beside the chat when it starts, showing the root folder, the file it is on, a tree of the files it listed / read / edited, and a log of shell commands. It shows paths only, never file contents. Classic layout shows none of this.",
+    "After a page reload the Agent button and tree come back for this run too, but only with the files it read or changed (the folders it browsed are not saved), and a note says so."
    ]
   },
   "edit_file": {
