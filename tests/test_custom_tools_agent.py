@@ -144,6 +144,45 @@ run({"instruction": "x", "source": ""}, fake, [prov("cheap", completion=True)])
 check("provider: falls back to the helper if it is all there is", fake.calls[0]["provider"]["name"] == "cheap")
 check("run: leaves no files behind", set(os.listdir(tempfile.gettempdir())) == before)
 
+# --- output-limit cut-offs are continued, not thrown away ----------------
+def cutres(text, cut=None):
+    return ai_providers.AIResult(True, text=text, cut=cut)
+
+
+L = ai_providers.CUT_LENGTH
+fake = Fake([cutres("Sure.\n```python\nx = 1\n", L), cutres("y = 2\n```", None)])
+done, _ = run({"instruction": "x", "source": ""}, fake, [prov("p")])
+check("cont: a length cut is continued into one complete file",
+      done[0]["ok"] and done[0]["code"] == "x = 1\ny = 2\n" and len(fake.calls) == 2, str(done))
+check("cont: the continuation call carries the partial reply, then the ask",
+      [m["role"] for m in fake.calls[1]["messages"][-2:]] == ["assistant", "user"]
+      and "x = 1" in fake.calls[1]["messages"][-2]["content"])
+
+fake = Fake([cutres("Sure.\n```python\nx = 1\nyy = 22\n", L),
+             cutres("```python\nyy = 22\nz = 3\n```", None)])
+done, _ = run({"instruction": "x", "source": ""}, fake, [prov("p")])
+check("cont: a re-opened fence and repeated line are dropped at the seam",
+      done[0]["code"] == "x = 1\nyy = 22\nz = 3\n", repr(done[0].get("code")))
+
+fake = Fake([cutres("Sure.\n```python\na\n", L)] + [cutres("b\n", L)] * cta.MAX_CONTINUATIONS)
+done, _ = run({"instruction": "x", "source": ""}, fake, [prov("big")])
+check("cont: bounded -- gives up after MAX_CONTINUATIONS",
+      len(fake.calls) == 1 + cta.MAX_CONTINUATIONS and done[0]["code"] == "")
+check("cont: the give-up note names the output limit and the provider",
+      "output limit" in done[0]["note"] and "big" in done[0]["note"] and "cut off" in done[0]["note"])
+
+fake = Fake([cutres("Sure.\n```python\nx = 1\n", L), RuntimeError("down")])
+done, _ = run({"instruction": "x", "source": ""}, fake, [prov("p")])
+check("cont: a failing continuation still ends in exactly one DONE, nothing applied",
+      len(done) == 1 and done[0]["ok"] and done[0]["code"] == "")
+
+# --- the provider's own max_tokens is a floor-raiser, not overwritten ----
+for cfg_max, want in ((None, cta.AGENT_MAX_TOKENS), (700, cta.AGENT_MAX_TOKENS), (32000, 32000)):
+    fake = Fake([ok(REPLY)])
+    kw = {} if cfg_max is None else {"max_tokens": cfg_max}
+    run({"instruction": "x", "source": ""}, fake, [prov("p", **kw)])
+    check("cap: provider max_tokens=%s -> %d" % (cfg_max, want), fake.calls[0]["provider"]["max_tokens"] == want)
+
 # reserved so a saved command can't shadow it
 from jarvis import reserved_names  # noqa: E402
 names = getattr(reserved_names, "RESERVED_COMMAND_NAMES", None) or getattr(reserved_names, "RESERVED", None)

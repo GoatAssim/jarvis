@@ -41,7 +41,18 @@ from . import ai_providers
 from .custom_tools_suggest import _pick_provider
 
 AGENT_TIMEOUT = 150
-AGENT_MAX_TOKENS = 8000
+AGENT_MAX_TOKENS = 8000          # a FLOOR: a larger max_tokens on the provider block wins
+# A whole-file reply that hits the provider's output cap is continued in a fresh
+# call instead of thrown away. Each continuation is one more full call, so it is
+# bounded; a tool that still doesn't fit after this many is genuinely too big.
+MAX_CONTINUATIONS = 3
+_OVERLAP_WINDOW = 400
+_CONTINUE_PROMPT = (
+    "Your reply was cut off by the output limit. Continue the file from the exact "
+    "character where you stopped. Output ONLY the remaining code followed by the "
+    "closing ``` fence: no new note, no new opening fence, and do not repeat any "
+    "line you already wrote."
+)
 MAX_SOURCE_CHARS = 120_000       # custom_tools_store.MAX_SOURCE_CHARS
 MAX_INSTRUCTION_CHARS = 4000
 MAX_HISTORY_TURNS = 6
@@ -63,7 +74,10 @@ _SYSTEM_PROMPT = (
     "ai_client, tool_router or tool_registry at module level (circular import); "
     "import inside the handler if you must. Prefer the standard library. Never "
     "delete, overwrite or send anything off the machine unless the owner asked "
-    "for exactly that, and say so in your note when a tool does.\n\n"
+    "for exactly that, and say so in your note when a tool does. Keep the file "
+    "compact -- the whole module is re-sent on every turn and replies have a hard "
+    "output limit: short comments, no redundant helpers, at most two test steps "
+    "per tool.\n\n"
     "HOW TO ANSWER. Write a short note first (1-3 plain sentences: what you are "
     "doing or changing). Then give the COMPLETE updated file in a single "
     "```python fence -- the whole module every time, never a fragment or a "
@@ -134,6 +148,47 @@ def _done(payload):
         pass
 
 
+def _output_cap(provider):
+    """The provider's own max_tokens if it set a bigger one than our floor.
+    Overwriting it with a flat 8000 meant raising max_tokens in the AI config
+    did nothing for this feature."""
+    try:
+        configured = int(provider.get("max_tokens") or 0)
+    except (TypeError, ValueError):
+        configured = 0
+    return max(configured, AGENT_MAX_TOKENS)
+
+
+def _join_continuation(prev, more):
+    """Append a continuation to the text so far. A model told to continue
+    sometimes re-opens a fence or repeats its last few characters; drop both."""
+    more = str(more or "").replace("\r\n", "\n")
+    m = _FENCE_OPEN.match(more.lstrip())
+    if m:
+        more = more.lstrip()[m.end():]
+    for k in range(min(len(prev), len(more), _OVERLAP_WINDOW), 7, -1):
+        if prev.endswith(more[:k]):
+            more = more[k:]
+            break
+    return prev + more
+
+
+def _call_once(adapter, attempt, messages, label, out):
+    """One adapter call with streaming wired to `out`. (result, error_text)."""
+    from .stream_markers import StreamMarkerSink
+    sink = StreamMarkerSink(out=out)
+    ai_providers.set_log_context(None, provider=label, stream=True)
+    ai_providers.set_stream_sink(sink)
+    try:
+        return adapter(attempt, messages, attempt["timeout"],
+                       tools=None, tool_executor=None), None
+    except Exception as exc:  # noqa: BLE001
+        return None, str(exc)[:200]
+    finally:
+        sink.close()
+        ai_providers.clear_log_context()
+
+
 def _agent_provider(cfg):
     """A capable model, not the cheap completion one: writing a whole tool is
     the opposite of ghost text. First keyed provider that is not a
@@ -170,11 +225,10 @@ def run(payload, cfg=None, out=None):
     if adapter is None:
         return _done({"ok": False, "error": "unsupported provider type"})
 
-    from .stream_markers import StreamMarkerSink
     messages = build_messages(instruction, source, name, payload.get("history"))
     resolved = dict(provider)
     resolved["timeout"] = max(resolved.get("timeout") or 0, AGENT_TIMEOUT)
-    resolved["max_tokens"] = AGENT_MAX_TOKENS
+    resolved["max_tokens"] = _output_cap(provider)
     label = str(provider.get("name") or provider.get("type") or "")
 
     last_error = "the provider didn't answer"
@@ -183,22 +237,38 @@ def run(payload, cfg=None, out=None):
         attempt = dict(resolved)
         if key_val is not None:
             attempt["api_key"] = key_val
-        sink = StreamMarkerSink(out=out)
-        ai_providers.set_log_context(None, provider=label, stream=True)
-        ai_providers.set_stream_sink(sink)
-        try:
-            result = adapter(attempt, messages, attempt["timeout"],
-                             tools=None, tool_executor=None)
-        except Exception as exc:  # noqa: BLE001
-            result = None
-            last_error = str(exc)[:200] or last_error
-        finally:
-            sink.close()
-            ai_providers.clear_log_context()
+        result, err = _call_once(adapter, attempt, messages, label, out)
+        if err:
+            last_error = err or last_error
         if result is not None and getattr(result, "ok", False):
-            note, code, complete = split_reply(getattr(result, "text", "") or "")
+            text = getattr(result, "text", "") or ""
+            cut = getattr(result, "cut", None)
+            note, code, complete = split_reply(text)
+            # The provider said it stopped on its output limit with the file still
+            # open: ask for the rest instead of discarding everything written.
+            extra = 0
+            while (code and not complete and cut == ai_providers.CUT_LENGTH
+                   and extra < MAX_CONTINUATIONS):
+                extra += 1
+                more, _err = _call_once(
+                    adapter, attempt,
+                    messages + [{"role": "assistant", "content": text},
+                                {"role": "user", "content": _CONTINUE_PROMPT}],
+                    label, out)
+                if more is None or not getattr(more, "ok", False):
+                    break
+                text = _join_continuation(text, getattr(more, "text", "") or "")
+                cut = getattr(more, "cut", None)
+                note, code, complete = split_reply(text)
             if code and not complete:
-                note = (note + "\n\n" if note else "") + "(The reply was cut off before the file ended -- not applied.)"
+                if cut == ai_providers.CUT_LENGTH:
+                    why = ("(The reply was cut off at the output limit (max_tokens %d) "
+                           "before the file ended -- not applied. Raise max_tokens on "
+                           "the %s provider, or ask for a smaller tool.)"
+                           % (attempt.get("max_tokens") or 0, label or "AI"))
+                else:
+                    why = "(The reply was cut off before the file ended -- not applied.)"
+                note = (note + "\n\n" if note else "") + why
                 code = ""
             if len(code) > MAX_SOURCE_CHARS:
                 note, code = "The file came out too large to apply.", ""
