@@ -89,6 +89,31 @@ check("depth follows nesting", all.rows.find((r) => r.name === "b.py").depth ===
 check("cap truncates and says so", P.buildRows(c, true, 2).truncated === true);
 check("summary counts", P.summarize(c).edited === 1 && P.summarize(c).failed === 1);
 
+// ---- a failure must not erase an earlier success (bug-hunt fix) -------------
+let f = P.newJob({ job_id: "f1", phase: "plan", status: "start", task: "t", root: "/r" }, 0, null);
+const step = (tool, args, st, extra) => P.applyEvent(f, Object.assign({ job_id: "f1", phase: "step", status: st, tool, arguments: args }, extra), 1);
+step("edit_file", { path: "a.py" }, "start"); step("edit_file", { path: "a.py" }, "ok", { outcome: "edited" });
+check("first edit lands", f.files["a.py"].status === "edited");
+step("edit_file", { path: "a.py" }, "start");
+check("a second edit in flight shows as writing", f.files["a.py"].status === "writing");
+step("edit_file", { path: "a.py" }, "fail", { error: "old_str not found" });
+check("a failed second edit keeps the file 'edited'", f.files["a.py"].status === "edited", f.files["a.py"]);
+check("...and the failure is still in the log", f.log.some((l) => l.level === "fail" && /old_str not found/.test(l.text)));
+check("...with no stale failure note on the row", !f.files["a.py"].note);
+step("edit_file", { path: "a.py" }, "start"); step("edit_file", { path: "a.py" }, "ok", { outcome: "edited" });
+check("a later success on it is still 'edited'", f.files["a.py"].status === "edited");
+step("write_file", { path: "n.py" }, "start"); step("write_file", { path: "n.py" }, "fail", { error: "already exists" });
+check("a failure on a file never changed is 'failed'", f.files["n.py"].status === "failed" && /already exists/.test(f.files["n.py"].note));
+step("edit_file", { path: "n.py" }, "start"); step("edit_file", { path: "n.py" }, "ok", { outcome: "edited" });
+check("a failed file that is later edited recovers", f.files["n.py"].status === "edited");
+let g = P.newJob({ job_id: "g1", phase: "plan", status: "start", description: "d" }, 0, null);
+const dv = (e) => P.applyEvent(g, Object.assign({ job_id: "g1" }, e), 1);
+dv({ phase: "plan", status: "start", description: "d", project_dir: "/p" });
+dv({ phase: "write", status: "start", path: "app.py" }); dv({ phase: "write", status: "ok", path: "app.py", bytes: 5 });
+dv({ phase: "fix", status: "start", attempt: 1, max_attempts: 3, target_file: "app.py" });
+dv({ phase: "fix", status: "fail", attempt: 1, max_attempts: 3, target_file: "app.py", note: "still broken" });
+check("a failed FIX still shows 'failed' (the file is still broken)", g.files["app.py"].status === "failed" && /still broken/.test(g.files["app.py"].note));
+
 check("elapsed format", P.fmtElapsed(65000) === "1m 05s" && P.fmtElapsed(4000) === "4s" && P.fmtElapsed(-1) === "");
 check("bytes format", P.fmtBytes(500) === "500 B" && P.fmtBytes(2048) === "2.0 KB");
 

@@ -840,10 +840,12 @@ def tool_code_agent(arguments, context=None):
         if listing is not None:
             # LIVE STREAM ONLY. emit() has already printed the event (and run
             # the CLI hook), so the panel has its listing; but this same dict
-            # is what `steps` stores, and code_agent has no entry in
-            # tool_result_shaping.TOOL_RESULT_SPECS, so `steps` goes back to
-            # the outer model verbatim. Left in, every list_dir would add up
-            # to LISTING_EVENT_CAP lines to the model's context on each round.
+            # is what `steps` stores. `steps` goes back to the outer model
+            # (verbatim at high verbosity; this module's TOOL_RESULT_SPECS only
+            # drops each step's `arguments` at medium/low and says nothing
+            # about `listing`) and is also saved as a replay extra. Left in,
+            # every list_dir would add up to LISTING_EVENT_CAP lines to the
+            # model's context on each round and to every saved conversation.
             event.pop("listing", None)
         return result if err is None else {"error": err}
 

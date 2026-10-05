@@ -94,6 +94,11 @@
   // writing/fixing are transient (anything resolves them); failed is overridden
   // by any real outcome but not by "we merely know the file exists".
   const RANK = { listed: 0, planned: 1, read: 2, written: 3, fixed: 3, edited: 4, created: 4 };
+  // Statuses that mean the file's content on disk was changed by the agent.
+  const CHANGED = { written: 1, fixed: 1, edited: 1, created: 1 };
+  // In-flight statuses: they overlay the file's real status for a moment and
+  // must never erase it (setFile keeps the real one in `settled`).
+  const TRANSIENT = { writing: 1, fixing: 1 };
   function stronger(oldS, newS) {
     if (!oldS) return true;
     if (newS === "writing" || newS === "fixing" || newS === "failed") return true;
@@ -116,8 +121,22 @@
     const path = normPath(rawPath, job.root);
     if (!path) return null;
     let f = job.files[path];
-    if (!f) { f = job.files[path] = { path, status: null, bytes: null, note: "" }; }
-    if (stronger(f.status, status)) f.status = status;
+    if (!f) { f = job.files[path] = { path, status: null, bytes: null, note: "", settled: null }; }
+    // `settled` is the file's real status while a transient one is showing.
+    const real = TRANSIENT[f.status] ? f.settled : f.status;
+    if (TRANSIENT[status]) {
+      if (!TRANSIENT[f.status]) f.settled = f.status;
+      f.status = status;
+    } else if (status === "failed") {
+      // A step that failed on a file the agent had ALREADY changed (a second
+      // edit whose old_str did not match, say) did not undo the first change:
+      // keep showing it as changed; the failure is in the log. `force` is for
+      // a failed fix, where the file is still broken and "failed" is the truth.
+      f.status = (CHANGED[real] && !(extra && extra.force)) ? real : "failed";
+      if (f.status !== "failed" && extra) extra = Object.assign({}, extra, { note: undefined });
+    } else {
+      f.status = stronger(real, status) ? status : real;
+    }
     if (extra) {
       if (extra.bytes !== undefined && extra.bytes !== null) f.bytes = extra.bytes;
       if (extra.note !== undefined) f.note = extra.note;
@@ -217,7 +236,7 @@
         if (target) setFile(job, target, "fixed");
         addLog(job, "fix " + e.attempt + "/" + e.max_attempts + " applied" + (e.classified_error ? " (" + e.classified_error + ")" : ""), "ok");
       } else {
-        if (target) setFile(job, target, "failed", { note: firstLine(e.note) || "fix failed" });
+        if (target) setFile(job, target, "failed", { note: firstLine(e.note) || "fix failed", force: true });
         addLog(job, "fix " + e.attempt + "/" + e.max_attempts + " failed" + (e.note ? " \u2014 " + firstLine(e.note) : ""), "fail");
       }
     } else if (phase === "step") {
@@ -484,6 +503,12 @@
       if (r.active) activeNode = row;
     }
     if (built.truncated) tree.appendChild(el("div", "agent-empty", "\u2026 more files not shown"));
+    // A code_agent job reloaded from a saved conversation only knows the files it
+    // read or changed: the folder listings it browsed are deliberately not saved
+    // (they would be a second copy of the project's file names in every chat).
+    if (job.restored && job.kind === "code") {
+      tree.appendChild(el("div", "agent-empty", "Restored after a reload \u2014 only files the agent read or changed are shown."));
+    }
     tree.scrollTop = keepTop;
     // follow the file Jarvis is on, unless the person is looking around the tree
     if (activeNode && job.status === "running" && !tree.matches(":hover") && activeNode.scrollIntoView) {
@@ -530,6 +555,7 @@
     const first = data.steps[0];
     if (!first || typeof first !== "object") return;
     const j = newJob(Object.assign({ job_id: data.jobId || first.job_id }, first), null, hostConvId());
+    j.restored = true;     // render() says so for a code job: its directory listings are not saved
     if (data.projectDir) j.root = String(data.projectDir);
     for (const e of data.steps) { if (e && typeof e === "object") applyEvent(j, e, null); }
     if (j.status === "running") j.status = data.ok === false ? "fail" : "ok";   // an interrupted run is not "running"
