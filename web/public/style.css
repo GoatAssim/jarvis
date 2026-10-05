@@ -1369,6 +1369,33 @@ body.has-sequence .jui-toasts{ bottom: var(--seq-clear, 90px); } /* "Added to se
 .ask-confirm__result.is-yes{ color: var(--green); }
 .ask-confirm__result.is-no{ color: var(--red); }
 
+/* An answered confirmation, collapsed to one line (BUG-5). Built by
+   buildResolvedConfirmLine() in app.js for BOTH the live thread (the prompt
+   swaps itself for this line when Yes/No is clicked) and a reload. A native
+   <details>, so a click opens the full tool / arguments / AI-review detail. */
+.ask-confirm-line{
+  margin: 2px 0; max-width: 720px;
+  border-left: 2px solid var(--border-strong); padding-left: 10px;
+}
+.ask-confirm-line__summary{
+  display: flex; align-items: baseline; gap: 8px; min-width: 0;
+  padding: 3px 0; cursor: pointer; list-style: none; user-select: none;
+  font-family: var(--font-mono); font-size: 12px; color: var(--text-dim);
+}
+.ask-confirm-line__summary::-webkit-details-marker{ display: none; }
+.ask-confirm-line__summary:hover{ color: var(--text); }
+.ask-confirm-line__mark{ flex: none; }
+.ask-confirm-line__mark.is-yes{ color: var(--green); }
+.ask-confirm-line__mark.is-no{ color: var(--red); }
+.ask-confirm-line__verb{ flex: none; }
+.ask-confirm-line__tool{ flex: none; color: var(--accent-soft); }
+.ask-confirm-line__hint{
+  min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.ask-confirm-line__body{
+  display: flex; flex-direction: column; gap: 8px; padding: 6px 0 8px;
+}
+
 /* JSON syntax coloring for confirmation prompts (see jsonSyntaxHtml in
    app.js) — args and resolved command content shown before a flagged
    tool/command runs, in the chat confirm bubble, the direct-run popup,
@@ -3253,7 +3280,8 @@ body.layout--focus:has(#subagents-overlay.is-docked:not([hidden]):not(.is-collap
    still arriving gets a pulsing marker on its summary line; hidden blocks
    (the "Show reasoning trace" toggle off) use the native `hidden` attribute,
    so the display switch is instant with no extra class to keep in sync. */
-.thinking-block--stream[hidden]{ display: none; }
+.thinking-block--stream[hidden],
+.thinking-block--saved[hidden]{ display: none; }
 .thinking-block--live .thinking-block__summary::before{
   content: ""; display: inline-block; width: 7px; height: 7px; margin-right: 8px;
   border-radius: 50%; background: var(--accent); vertical-align: middle;
