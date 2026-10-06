@@ -788,6 +788,19 @@ weren't kept. `jarvis channels-history <platform> <id>` prints the same thing. F
 someone you added by hand who hasn't written yet, the pencil next to **Handle**
 corrects a typo and moves their list entries with it (`jarvis channels-handle`);
 once they write, the platform's own handle is used and the edit is refused.
+**Time-limited tools.** Under the **Tool use** switch, pick 1 hour, 8 hours, 24 hours
+or 7 days and tool use ends by itself (from the terminal: `jarvis channels-tools-for
+<platform> <id> 24h`, anything from 1 minute to 30 days). It works from off (you are
+asked first) or on top of tools that are already on. When time runs out the person is
+taken off the tool list and the History tab says why; switching Tool use on or off
+yourself, or blocking them, ends the countdown (on means for good). Not available for
+the owner, blocked people, or anyone a `"*"` entry covers.
+
+**How Jarvis talks to them.** On the Profile tab, one line of your own (up to 240
+characters, e.g. "keep it short with her") that Jarvis is told is from you. It only
+changes style and can't give anyone access; it applies to that account only
+(`jarvis channels-instruction <platform> <id> set|show|clear`).
+
 Token and tool counts start from the first message answered after upgrading;
 the message counts cover the whole history.
 
@@ -873,6 +886,8 @@ separately run `jarvis channels-allow discord tool <id>`.
 | `jarvis channels-usage <platform> <id> [days]` | Their messages, tokens and tool calls (read-only) |
 | `jarvis channels-history <platform> <id> [limit]` | Every recorded change to that person's access (read-only) |
 | `jarvis channels-handle <platform> <id> <new-handle>` | Correct a hand-added person's handle before they write; their lists move with it |
+| `jarvis channels-tools-for <platform> <id> <30m\|24h\|7d>` | Tool use for a limited time, then it ends by itself |
+| `jarvis channels-instruction <platform> <id> show\|set <text>\|clear` | Your own line on how Jarvis should talk to that person (style only) |
 | `jarvis channels-user-test <platform> <id> dm\|group [mentioned\|unmentioned]` | Dry run: what the gate would do with a message from them |
 | `jarvis channels-presets` / `channels-preset <platform> <id> <setup> [preview]` | The quick setups / apply one to a person (or just preview it) |
 | `jarvis channels-bulk flag <switch> <on\|off> <platform:id> ...` / `channels-bulk preset\|preview <setup> <platform:id> ...` | One switch or a quick setup for several people |

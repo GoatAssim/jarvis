@@ -90,6 +90,10 @@
 .tm-card__row{ display: flex; align-items: center; gap: 8px; }
 .tm-card__name{ font-family: var(--font-mono); font-size: 12.5px; color: var(--text); word-break: break-all; flex: 1; min-width: 0; }
 .tm-card__meta{ display: flex; gap: 6px; align-items: center; margin-top: 5px; flex-wrap: wrap; }
+/* Source: where a row comes from (a file, an MCP server, "ships with Jarvis"). One clipped line on a card. */
+.tm-card__origin{ font-size: 10.5px; color: var(--text-dimmer); margin-top: 3px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tm-origin{ font-size: 11.5px; color: var(--text-dim); margin-top: 4px; word-break: break-word; }
+.tm-origin__k{ font-size: 10px; letter-spacing: .08em; text-transform: uppercase; color: var(--text-dimmer); margin-right: 8px; }
 .tm-card__err{ margin-top: 4px; font-size: 11px; color: var(--red); line-height: 1.4; word-break: break-word; }
 
 /* the three safeguard pips: lit = on. Same trio everywhere in the panel. */

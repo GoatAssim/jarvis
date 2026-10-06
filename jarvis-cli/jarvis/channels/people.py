@@ -85,6 +85,26 @@ refuses anyone who has written. The decision to allow it, and everything else
 a forget touches (lists, limits, history), lives in user_admin so the refusals
 sit in one place.
 
+THE OWNER'S INSTRUCTION FOR ONE PERSON  (L.36-P12)
+--------------------------------------------------
+`instruction` is one line the OWNER typed ("keep it short with her") and that
+rides in the identity block for that person's messages. Rules that keep it
+safe to put in a system prompt:
+
+  * owner-typed only. A chat guest has no path to it: `remember_sender`
+    reaches `name` and `notes`, never this field, and `touch()` leaves it
+    alone. It is set by the panel / `jarvis channels-instruction` only.
+  * one line, capped at MAX_INSTRUCTION_LEN, control characters dropped (the
+    same `_clean_text` a note goes through).
+  * presented to the model as the owner's note on STYLE -- tone, length,
+    language, formality -- and as something that changes nothing about what
+    the person may do. What they may do is decided in code (permissions.py,
+    user_perms.py), never by what the prompt says.
+  * per ACCOUNT. It is not copied across a link the way notes are: the owner
+    typed it for this account.
+  * never for the owner's own account (whose block is fixed text), and it is
+    never put in memory.py (AGENTS.md: guest details stay here).
+
 STORAGE
 -------
     ~/.jarvis/channels/people.json
@@ -124,6 +144,8 @@ MAX_NAME_LEN = 48
 IDENT_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 MAX_NOTE_LEN = 160
 MAX_NOTES = 6
+# The owner's standing instruction for how to talk to one person (L.36-P12).
+MAX_INSTRUCTION_LEN = 240
 
 
 def _load():
@@ -190,6 +212,7 @@ def _blank(platform, user_id, handle=""):
         "manual": False,        # added by the owner, not by a message
         "placeholder": False,   # manual and only a handle is known (user_id == handle)
         "name_locked": False,   # owner typed the name; a guest cannot overwrite it
+        "instruction": "",      # owner-typed note on how to talk to them (L.36-P12)
         "linked": "",           # "<other platform>:<user_id>" of the same person
     }
 
@@ -273,6 +296,22 @@ def set_name(platform, user_id, name, manual=False):
     if manual:
         fields["name_locked"] = bool(cleaned)
     return _update(platform, user_id, **fields)
+
+
+def set_instruction(platform, user_id, text):
+    """Set (or, with empty text, clear) the owner's instruction for this
+    person. Returns the record. Raises ValueError when the text is not a line
+    of plain text within the cap -- a too-long instruction is refused rather
+    than cut mid-sentence into something the owner did not write.
+
+    The caller (user_admin.set_instruction) has already checked the person is
+    registered and is not the owner; this is only the store."""
+    raw = str(text or "")
+    cleaned = _clean_text(raw, MAX_INSTRUCTION_LEN + 1)
+    if len(cleaned) > MAX_INSTRUCTION_LEN:
+        raise ValueError(
+            f"an instruction can be at most {MAX_INSTRUCTION_LEN} characters")
+    return _update(platform, user_id, instruction=cleaned)
 
 
 def add_note(platform, user_id, note):
@@ -880,4 +919,14 @@ def prompt_block(entry, platform):
     notes = notes[:MAX_NOTES]
     if notes:
         lines.append("What you already know about them: " + "; ".join(notes) + ".")
+    instruction = entry.get("instruction")
+    if isinstance(instruction, str) and instruction.strip():
+        # The owner's own words, typed in the Channels panel. Framed as a note
+        # on style so it cannot be read as widening what this person may do or
+        # as lifting the identity rules above; those are enforced in code too.
+        lines.append(
+            "YOUR OWNER'S NOTE ON HOW TO TALK TO THEM (style only: tone, "
+            "length, language. It changes nothing about what they may do or "
+            "learn, and the rules above still apply): "
+            + _clean_text(instruction, MAX_INSTRUCTION_LEN))
     return " ".join(lines)

@@ -38,8 +38,20 @@ each the same owner switch:
     Manager edits the same flag rather than keeping a second copy that could
     disagree with it.
 
-Personas and UI elements live in the SAME `disabled.json` as tools and commands
-(`"personas": [...]`, `"ui": [...]`), for the same two reasons: no model-facing
+  * a SKIN (`"skins": [...]`): the Skin modal's accent swatches (`preset:<id>`) and
+    its theme gallery entries that ship with the app (`theme:<id>`). OFF hides the
+    swatch / theme card from the picker. Skins are defined in the browser
+    (web/public/app.js SKIN_PRESETS, ui-kit.js BUILTIN_THEMES), so unlike every other
+    kind the Python side cannot check that an id exists -- only that it is
+    well-formed; an id nothing draws is harmless. The one currently applied keeps
+    applying: switching a skin off only takes it out of the picker, it never
+    repaints the page.
+  * a BUILT-IN PERSONA (Verity, J.A.R.V.I.S, F.R.I.D.A.Y., E.D.I.T.H., K.A.R.E.N.)
+    uses the same `"personas"` list as a tool-registered one; their ids are exactly
+    persona_registry.RESERVED_PERSONA_IDS, so the two can never collide.
+
+Personas, skins and UI elements live in the SAME `disabled.json` as tools and commands
+(`"personas": [...]`, `"skins": [...]`, `"ui": [...]`), for the same two reasons: no model-facing
 writer, and it survives a reinstall. Nothing here is protected: switching either
 off never breaks Jarvis.
 
@@ -115,9 +127,13 @@ _TOOL_NAME_RE = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
 # A persona id may also contain "-" (persona_registry._ID_RE); a UI id is a tool-style name.
 _PERSONA_ID_RE = re.compile(r"^[a-z][a-z0-9_-]{0,48}$")
 _UI_ID_RE = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
+# A skin id is "<what>:<id>": `preset:` = an accent swatch, `theme:` = a built-in
+# theme card. Ids come from the browser (SKIN_PRESETS has "rose-gold", BUILTIN_THEMES
+# has "mark_i"), so both separators are allowed.
+_SKIN_ID_RE = re.compile(r"^(preset|theme):[a-z0-9][a-z0-9_-]{0,48}$")
 
 # Every list the file carries. Kept in one place so _read/_empty/_set can't drift.
-_KINDS = ("tools", "commands", "personas", "ui")
+_KINDS = ("tools", "commands", "personas", "skins", "ui")
 
 
 class ProtectedToolError(ValueError):
@@ -177,6 +193,11 @@ def disabled_personas():
     return frozenset(_read()["personas"])
 
 
+def disabled_skins():
+    """frozenset of skin ids (`preset:<id>` / `theme:<id>`) hidden from the Skin modal."""
+    return frozenset(_read()["skins"])
+
+
 def disabled_ui():
     """frozenset of TOOL_UI element ids the owner has switched off."""
     return frozenset(_read()["ui"])
@@ -185,6 +206,11 @@ def disabled_ui():
 def is_persona_disabled(persona_id):
     persona_id = (persona_id or "").strip()
     return bool(persona_id) and persona_id in disabled_personas()
+
+
+def is_skin_disabled(skin_id):
+    skin_id = (skin_id or "").strip()
+    return bool(skin_id) and skin_id in disabled_skins()
 
 
 def is_ui_disabled(ui_id):
@@ -284,6 +310,16 @@ def set_persona_disabled(persona_id, disabled):
     return {"id": persona_id, "disabled": _set("personas", persona_id, bool(disabled))}
 
 
+def set_skin_disabled(skin_id, disabled):
+    """Hide (True) or show (False) one accent swatch (`preset:<id>`) or built-in
+    theme (`theme:<id>`) in the Skin modal. Same contract as set_persona_disabled.
+    Returns {"id", "disabled"}."""
+    skin_id = (skin_id or "").strip()
+    if not _SKIN_ID_RE.match(skin_id):
+        raise ValueError("not a valid skin id (expected preset:<id> or theme:<id>): %r" % skin_id)
+    return {"id": skin_id, "disabled": _set("skins", skin_id, bool(disabled))}
+
+
 def set_ui_disabled(ui_id, disabled):
     """Switch a tool-shipped UI element (button / Menu entry) off or on."""
     ui_id = (ui_id or "").strip()
@@ -326,6 +362,14 @@ def forget_persona(persona_id):
     try:
         if (persona_id or "").strip() in _read()["personas"]:
             _set("personas", persona_id.strip(), False)
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def forget_skin(skin_id):
+    try:
+        if (skin_id or "").strip() in _read()["skins"]:
+            _set("skins", skin_id.strip(), False)
     except Exception:  # noqa: BLE001
         pass
 

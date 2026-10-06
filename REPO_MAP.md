@@ -158,7 +158,9 @@ jarvis-cli/jarvis/
                           platform-given avatar URL (https + image-CDN allow-list only)
         user_perms.py     L.36: per-person permissions the three allow-lists can't say —
                           WHICH tools (an allow-list, never a deny-list) and whether Jarvis
-                          may DM them; fails closed (`PermsUnreadable` -> tools off)
+                          may DM them, plus `tools_until` (L.36-P6: a deadline on a
+                          tool grant; past it `resolve_tool_access` says no tools);
+                          fails closed (`PermsUnreadable` -> tools off)
         presets.py        L.36-P4: the quick setups (No access / Chat only / Chat + tell the
                           owner / Trusted) -- pure data, fixed in code, no I/O
         preset_admin.py   L.36-P4/P5: plan (preview) and apply one setup for one person, and
@@ -288,7 +290,7 @@ Everything is under `~/.jarvis/`:
 | `channels.json` | channels/config.py | both platforms, all allowlists |
 | `channels/directory.json` | channels/directory.py | @handle → id |
 | `channels/people.json` | channels/people.py | who each person is (name, notes, follow state, avatar URL) |
-| `channels/user_perms.json` | channels/user_perms.py | per-person tool scope + "Jarvis may DM them"; only non-default values stored; unreadable = fail closed |
+| `channels/user_perms.json` | channels/user_perms.py | per-person tool scope + "Jarvis may DM them" + `tools_until` (L.36-P6 deadline, epoch seconds); only non-default values stored; unreadable = fail closed |
 | `channels/servers.json` | channels/servers.py | L.36-P7: `{platform: {guild_id: {name, left, seen, channels}}}` -- names only, a cache; losing it costs labels, not behaviour |
 | `channels/usage.jsonl` | channels/usage.py | L.36-P2: one counts-only line per answered ask (who, when, tokens, tool names); rotated, never deleted |
 | `channels/changes.jsonl` | channels/changelog.py | L.36-P15: one line per permission change (when, whose id/handle, what, `via` panel/terminal, optional `why`); rotated, never deleted |
@@ -437,6 +439,8 @@ jarvis channels-conversation <platform> <id|@handle> [limit]    # what they sent
 jarvis channels-usage <platform> <id|@handle> [days]            # their messages, tokens, tool calls (JSON, read-only)
 jarvis channels-history <platform> <id|@handle> [limit]         # every recorded change to their access, who/what/when/how (JSON, read-only)
 jarvis channels-handle <platform> <id|@handle> <new-handle>     # L.36-P10: correct the handle of a hand-added person who hasn't written; their list entries move with it
+jarvis channels-tools-for <platform> <id|@handle> <30m|24h|7d>  # L.36-P6: tool use for that long, then it ends by itself (1m..30d); refused for the owner / blocked / "*"-covered
+jarvis channels-instruction <platform> <id|@handle> show|set <text ...>|clear   # L.36-P12: the owner's own line on HOW to talk to them (style only, <=240 chars); refused for the owner
 jarvis channels-user-test <platform> <id|@handle> dm|group [mentioned|unmentioned]   # DRY RUN of the gate: no model, nothing sent or saved
 jarvis channels-presets                                         # the quick setups (JSON)
 jarvis channels-preset <platform> <id|@handle> <setup> [preview]   # none|chat_only|chat_notify|trusted for ONE person; `preview` writes nothing
@@ -600,6 +604,7 @@ silently never runs.
 | `test_channel_manual_people.py` | L.36b: people named in an allow-list get a row, hand-added people, handle-only placeholder adopted on first message (tool limits migrated), locked names vs `remember_sender`, linked accounts (by id / handle / name, ambiguity, owner never inherited), remove, `send_dm` skips a handle-only person, the `channels-*` commands |
 | `test_user_admin.py` | L.36: `user_perms` store (fails closed), `user_admin` switches (registered only, wildcard refusal, owner moves, block removes from all lists), the `base._ask_jarvis` enforcement point, the `send_dm` refusal, avatar validation in `people.py` |
 | `test_channel_servers.py` | L.36-P7 + tool calls in the Conversation view: the server registry, switches that only take access away (checked against the REAL `permissions.decide`), `servers.view`, thread -> parent-channel routing, tool-call scrubbing/clipping and attribution to the first reply chunk, the CLI; and (S3) a bare-id `allowed_guilds` / `allowed_channels` no longer crashes `view` or the gate |
+| `test_channel_timed_and_instruction.py` | L.36-P6 / P12: the `tools_until` deadline (garbage reads as passed, resolver is read-only), grant refusals, `expire_due` + its change-log reason, manual switches / block / forget / `channels-allow|deny` ending a countdown, the gateway sweep, the Test tab's wording, and the instruction (cap, one line, owner refused, prompt framing, not reachable by a guest) |
 | `test_channel_insights.py` | L.36-P1/P2/P3: per-person conversation attribution (DM vs group, rotated files, torn lines), the usage ledger (counts only, failed asks, windows, rotation), and `simulate` (agrees with what `handle_message` really hands the model; writes nothing, calls no model — snapshot of `~/.jarvis` before/after) |
 | `verify_l36_insights_ui.py` (`python3`) | L.36-P1/P2/P3 tabs in a real browser against real backend output (`_channels_fixture.py`); SKIPs without playwright + Chromium |
 | `verify_channels_panel.js` (`node`) | L.36: `channels-panel.js` pure helpers (initials, hue, relative time, list filters and search, tool-scope diffing/grouping, and that only fixed icon strings reach `innerHTML`) |

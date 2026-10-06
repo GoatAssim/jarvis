@@ -1346,6 +1346,41 @@ app.post("/api/channels/people/:platform/:id/handle", requireJarvis, async (req,
     ["channels-handle", who.platform, who.id, handle], 10000), res);
 });
 
+// Time-limited tool access (L.36-P6) and the owner's own line on how to talk to
+// one person (L.36-P12). Both proxy the CLI like every route above. Minutes are
+// a whole number from 1 to 30 days; the instruction is one line of up to 240
+// characters that cannot start with "-" (the CLI would read it as a flag).
+// Neither route lets a chat guest do anything: they are owner-side only, and
+// the instruction is style text that grants nothing.
+const CHANNEL_GRANT_MAX_MINUTES = 30 * 24 * 60;
+const CHANNEL_INSTRUCTION_OK = (v) => typeof v === "string" && v.trim().length > 0 && v.length <= 240 && !/[\x00-\x1f\x7f]/.test(v) && !v.trim().startsWith("-");
+app.post("/api/channels/people/:platform/:id/tools-until", requireJarvis, async (req, res) => {
+  const who = channelPersonArgs(req, res);
+  if (!who) return;
+  const minutes = req.body?.minutes;
+  if (!Number.isInteger(minutes) || minutes < 1 || minutes > CHANNEL_GRANT_MAX_MINUTES) {
+    return res.status(400).json({ error: "minutes must be a whole number from 1 to 43200 (30 days)." });
+  }
+  sendChannelResult(await runJarvisOnce(
+    ["channels-tools-for", who.platform, who.id, `${minutes}m`], 10000), res);
+});
+
+app.post("/api/channels/people/:platform/:id/instruction", requireJarvis, async (req, res) => {
+  const who = channelPersonArgs(req, res);
+  if (!who) return;
+  const text = req.body?.text === undefined || req.body?.text === null ? "" : req.body.text;
+  if (typeof text !== "string") return res.status(400).json({ error: "text must be a string." });
+  if (text.trim() === "") {
+    return sendChannelResult(await runJarvisOnce(
+      ["channels-instruction", who.platform, who.id, "clear"], 10000), res);
+  }
+  if (!CHANNEL_INSTRUCTION_OK(text)) {
+    return res.status(400).json({ error: "An instruction is one line, up to 240 characters, and can't start with a dash." });
+  }
+  sendChannelResult(await runJarvisOnce(
+    ["channels-instruction", who.platform, who.id, "set", text.trim()], 10000), res);
+});
+
 app.get("/api/channels/people/:platform/:id/usage", requireJarvis, async (req, res) => {
   const who = channelPersonArgs(req, res);
   if (!who) return;
@@ -2407,16 +2442,17 @@ async function relayJarvisJson(res, args, fallback) {
   });
 }
 
-// `kind` ("tool" by default, "persona" or "ui") is how the Tool Manager switches the
-// personas and TOOL_UI elements a tool file registered; a fixed list, never forwarded
-// as-is, so a request body can't smuggle another flag into the argv.
-const DISABLE_KINDS = new Set(["tool", "persona", "ui"]);
+// `kind` ("tool" by default, "persona", "skin" or "ui") is how the Tool Manager switches
+// personas (built-in and tool-registered), Skin-modal swatches / themes and the TOOL_UI
+// elements a tool file registered; a fixed list, never forwarded as-is, so a request
+// body can't smuggle another flag into the argv.
+const DISABLE_KINDS = new Set(["tool", "persona", "skin", "ui"]);
 
 app.post("/api/tools/disabled", requireJarvis, async (req, res) => {
   const name = typeof req.body?.name === "string" ? req.body.name.trim() : "";
   if (!name) return res.status(400).json({ error: "Missing tool name." });
   const kind = typeof req.body?.kind === "string" ? req.body.kind : "tool";
-  if (!DISABLE_KINDS.has(kind)) return res.status(400).json({ error: "kind must be tool, persona or ui." });
+  if (!DISABLE_KINDS.has(kind)) return res.status(400).json({ error: "kind must be tool, persona, skin or ui." });
   const argv = ["tool-disable-set", name, req.body?.value ? "true" : "false"];
   if (kind !== "tool") argv.push("--kind", kind);
   await relayJarvisJson(res, argv, "Couldn't switch it.");

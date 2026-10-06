@@ -380,8 +380,31 @@ cts.delete_tool("probe_file_tool")
 check("deleting a user tool file drops its switch", not tool_disable.is_tool_disabled(user_tools[0]), user_tools)
 reset()
 
+# --- 6b. skins (accent swatches / built-in themes) and built-in personas ----------------------------
+reset()
+check("skin off round trip", tool_disable.set_skin_disabled("theme:nebula", True) == {"id": "theme:nebula", "disabled": True}
+      and tool_disable.is_skin_disabled("theme:nebula") and "theme:nebula" in tool_disable.disabled_skins())
+check("a swatch id with a hyphen is accepted", tool_disable.set_skin_disabled("preset:rose-gold", True)["disabled"])
+for bad in ("nebula", "theme:", "theme:Nebula", "other:x", "theme:a b", ""):
+    try:
+        tool_disable.set_skin_disabled(bad, True)
+        check("bad skin id %r is rejected" % bad, False)
+    except ValueError:
+        check("bad skin id %r is rejected" % bad, True)
+check("switching a skin back on removes it", not tool_disable.set_skin_disabled("theme:nebula", False)["disabled"]
+      and not tool_disable.is_skin_disabled("theme:nebula"))
+check("skins live in the same file as tools", "skins" in json.loads(tool_disable.DISABLED_FILE.read_text(encoding="utf-8")))
+check("a built-in persona id switches off through the persona list", tool_disable.set_persona_disabled("friday", True)["disabled"]
+      and tool_disable.is_persona_disabled("friday"))
+payload = system_tools.personas_list_payload()
+check("personas-list carries the whole off lists for the browser",
+      "friday" in payload["disabled_ids"] and "preset:rose-gold" in payload["disabled_skins"], payload.get("disabled_ids"))
+tool_disable.forget_skin("preset:rose-gold"); tool_disable.forget_persona("friday")
+check("forget_skin / forget_persona clear their entries", not tool_disable.disabled_skins() and not tool_disable.disabled_personas())
+reset()
+
 # --- 7. the model cannot flip a switch --------------------------------------------------------------
-WRITERS = r"tool_disable\.(set_tool_disabled|set_command_disabled|set_persona_disabled|set_ui_disabled|rename_command|forget_tool|forget_command|forget_persona|forget_ui|_set|_write|DISABLED_FILE)|disabled\.json"
+WRITERS = r"tool_disable\.(set_tool_disabled|set_command_disabled|set_persona_disabled|set_skin_disabled|set_ui_disabled|rename_command|forget_tool|forget_command|forget_persona|forget_skin|forget_ui|_set|_write|DISABLED_FILE)|disabled\.json"
 offenders = set()
 for tool_name, fn in system_tools.TOOLS.items():
     try:

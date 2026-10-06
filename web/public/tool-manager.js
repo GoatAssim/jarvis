@@ -95,11 +95,13 @@
   ];
   const KEYS = SAFEGUARDS.map((s) => s.key);
 
-  const SOURCE_BUCKETS = { builtin: "shipped", auto: "shipped", mcp: "mcp", user: "user", command: "command", daemon: "daemon", persona: "persona", ui: "ui" };
-  const SOURCE_LABELS = { shipped: "Shipped", user: "Yours", mcp: "MCP", command: "Command", daemon: "Daemon", persona: "Persona", ui: "Screen" };
+  const SOURCE_BUCKETS = { builtin: "shipped", auto: "shipped", mcp: "mcp", user: "user", command: "command", daemon: "daemon", persona: "persona", skin: "skin", ui: "ui" };
+  const SOURCE_LABELS = { shipped: "Shipped", user: "Yours", mcp: "MCP", command: "Command", daemon: "Daemon", persona: "Persona", skin: "Skin", ui: "Screen" };
   // Kinds that are not tools: they get the switch and a short detail, nothing else.
-  const EXTRA_KINDS = ["daemon", "persona", "ui"];
-  const KIND_NOUN = { tool: "tool", command: "saved command", daemon: "daemon", persona: "persona", ui: "screen" };
+  const EXTRA_KINDS = ["daemon", "persona", "skin", "ui"];
+  const KIND_NOUN = { tool: "tool", command: "saved command", daemon: "daemon", persona: "persona", skin: "skin", ui: "screen" };
+  // Buckets drawn with the "info" colour (everything that is not a plain tool).
+  const INFO_BUCKETS = ["mcp", "command", "daemon", "persona", "skin", "ui"];
   // Row states: loaded | off (switched off by you) | fileoff (its file is switched
   // off) | pending (valid file, not loaded yet) | failed (file rejected).
   const OFF_STATES = ["off", "fileoff"];
@@ -114,8 +116,30 @@
     if (id === "commands") return "Saved commands";
     if (id === "daemons") return "Daemons";
     if (id === "personas") return "Personas";
+    if (id === "skins") return "Skins";
     if (id === "ui_elements") return "Screens";
     return String(id || "other").replace(/_/g, " ");
+  }
+
+  // WHERE a row comes from, in one line, for the Source column and the search box.
+  // Tools carry it from the server (`origin`, tools.py _tool_origin); the rest are
+  // worked out here from what the row is. Display only.
+  function originOf(row) {
+    if (!row) return "";
+    if (row.origin) return row.origin;
+    const x = row.extra || {};
+    switch (row.kind) {
+      case "command": return "Saved command (~/.jarvis/commands.json)";
+      case "daemon": return x.builtin ? "Built-in daemon (ships with Jarvis)" : "Your daemon (~/.jarvis/daemons.json)";
+      case "persona": return x.builtin ? "Ships with Jarvis (web/public/app.js)" : (x.file ? "Tool file: " + x.file : "A tool file");
+      case "skin": return x.skinKind === "preset" ? "Ships with Jarvis: accent swatch (web/public/app.js)" : "Ships with Jarvis: built-in theme (web/public/ui-kit.js)";
+      case "ui": return x.file ? "Tool file: " + x.file : "A tool file";
+      case "broken": return row.file ? "Your file: ~/.jarvis/tools/" + row.file : "Your file";
+      default:
+        if (row.source === "user") return row.file ? "Your file: ~/.jarvis/tools/" + row.file : "Your file in ~/.jarvis/tools/";
+        if (row.source === "mcp") return "MCP server";
+        return row.file ? "Ships with Jarvis: actions/" + row.file : "Built in to Jarvis";
+    }
   }
 
   // Rows the list shows. A tool is "loaded" when the CLI offers it and you
@@ -132,7 +156,7 @@
         id: "t:" + t.name, kind: "tool", state: t.disabled ? "off" : "loaded", name: t.name,
         protectedReason: t.protected || "",
         description: t.description || "", source: t.source || "builtin",
-        group: t.group || "other", file: t.file || "", userFile: null, error: "",
+        group: t.group || "other", file: t.file || "", userFile: null, error: "", origin: t.origin || "",
         flags: { confirm_required: !!t.confirm_required, ai_review: !!t.ai_review, approval_summary: !!t.approval_summary },
         defaults: t.defaults ? {
           confirm_required: !!t.defaults.confirm_required, ai_review: !!t.defaults.ai_review,
@@ -197,6 +221,28 @@
         flags: null, defaults: null, parameters: {}, extra: p,
       });
     });
+    // The five personas that ship inside the web app (the browser supplies the list) and the
+    // Skin modal's built-in accent swatches and themes. They share the same off lists as
+    // everything else; `disabledPersonas` / `disabledSkins` come from /api/disabled.
+    const offPersonas = new Set(Array.isArray(ex.disabledPersonas) ? ex.disabledPersonas : []);
+    const offSkins = new Set(Array.isArray(ex.disabledSkins) ? ex.disabledSkins : []);
+    (Array.isArray(ex.builtinPersonas) ? ex.builtinPersonas : []).forEach((p) => {
+      if (!p || typeof p.id !== "string" || !p.id) return;
+      rows.push({
+        id: "p:" + p.id, kind: "persona", state: offPersonas.has(p.id) ? "off" : "loaded", name: p.id, protectedReason: "",
+        description: p.name || "", source: "persona", group: "personas", file: "", userFile: null, error: "",
+        flags: null, defaults: null, parameters: {}, extra: { id: p.id, name: p.name, hex: p.hex, builtin: true, disabled: offPersonas.has(p.id) },
+      });
+    });
+    (Array.isArray(ex.skins) ? ex.skins : []).forEach((k) => {
+      if (!k || typeof k.id !== "string" || !k.id) return;
+      const skinId = (k.skinKind === "preset" ? "preset:" : "theme:") + k.id;
+      rows.push({
+        id: "s:" + skinId, kind: "skin", state: offSkins.has(skinId) ? "off" : "loaded", name: skinId, protectedReason: "",
+        description: (k.skinKind === "preset" ? "Accent swatch — " : "Theme — ") + (k.name || k.id), source: "skin", group: "skins", file: "", userFile: null, error: "",
+        flags: null, defaults: null, parameters: {}, extra: { id: skinId, name: k.name || k.id, hex: k.hex, skinKind: k.skinKind, builtin: true, disabled: offSkins.has(skinId) },
+      });
+    });
     (Array.isArray(ex.ui) ? ex.ui : []).forEach((u) => {
       if (!u || typeof u.id !== "string" || !u.id) return;
       rows.push({
@@ -211,7 +257,7 @@
   function matchesSearch(row, query) {
     const q = String(query || "").trim().toLowerCase();
     if (!q) return true;
-    return [row.name, row.description, row.group, row.file, row.error].some((s) => String(s || "").toLowerCase().includes(q));
+    return [row.name, row.description, row.group, row.file, row.error, originOf(row)].some((s) => String(s || "").toLowerCase().includes(q));
   }
 
   function changedKeys(row) {
@@ -263,7 +309,7 @@
     out.off = rows.filter((r) => r.kind === "tool" && isOff(r)).length;
     out.commands = rows.filter((r) => r.kind === "command").length;
     out.commandsOff = rows.filter((r) => r.kind === "command" && isOff(r)).length;
-    out.extraOff = { daemon: 0, persona: 0, ui: 0 };
+    out.extraOff = { daemon: 0, persona: 0, skin: 0, ui: 0 };
     rows.forEach((r) => { if (EXTRA_KINDS.includes(r.kind) && isOff(r)) out.extraOff[r.kind] += 1; });
     KEYS.forEach((k) => { out[k] = loaded.filter((r) => r.flags[k]).length; });
     out.bySource = { shipped: 0, user: 0, mcp: 0, command: 0 };
@@ -306,6 +352,9 @@
     if (row.kind === "persona") {
       return "Switch off and this persona no longer appears in the Skin picker. Nothing else about Jarvis changes.";
     }
+    if (row.kind === "skin") {
+      return "Switch off and this " + (row.extra && row.extra.skinKind === "preset" ? "colour swatch" : "theme") + " no longer appears in the Skin modal. If it is the one in use it stays applied until you pick another.";
+    }
     if (row.kind === "ui") {
       return "Switch off and this button or Menu entry disappears, and its page is no longer served. The tool it belongs to keeps working.";
     }
@@ -320,6 +369,7 @@
       return "It can’t be started. If it is running right now it keeps running — stop it in the Daemons panel.";
     }
     if (row && row.kind === "persona") return "It is hidden from the Skin picker.";
+    if (row && row.kind === "skin") return "It is hidden from the Skin modal. If it is applied right now it stays applied.";
     if (row && row.kind === "ui") return "Its button or Menu entry is gone and its page isn’t served.";
     if (row && row.kind === "command") {
       return "Jarvis doesn’t know this command exists, and a call to it is refused. Scheduled jobs that run it fail when they fire.";
@@ -343,6 +393,7 @@
     const eo = cov.extraOff || {};
     if (eo.daemon) parts.push(eo.daemon + (eo.daemon === 1 ? " daemon" : " daemons"));
     if (eo.persona) parts.push(eo.persona + (eo.persona === 1 ? " persona" : " personas"));
+    if (eo.skin) parts.push(eo.skin + (eo.skin === 1 ? " skin" : " skins"));
     if (eo.ui) parts.push(eo.ui + (eo.ui === 1 ? " screen" : " screens"));
     return parts.join(", ");
   }
@@ -518,7 +569,7 @@
 
   const PURE = {
     availabilityHint, offOutcome, dependentLines, offSummary, commandSteps, commandVars, needsAttention, isOff, OFF_STATES,
-    SAFEGUARDS, KEYS, NAME_RE, STAGES, MAX_SOURCE_CHARS, bucketOf, groupLabel, buildRows, matchesSearch, matchesSafeguard,
+    SAFEGUARDS, KEYS, NAME_RE, STAGES, MAX_SOURCE_CHARS, bucketOf, groupLabel, originOf, buildRows, matchesSearch, matchesSafeguard,
     matchesSource, filterRows, groupRows, coverage, callOutcome, jobOutcome, changedKeys, nameProblem, importNameFromFile,
     importProblem, sourceProblem, parseErrorLine, stageStates, lineCount, formatBytes, parseArgs, paramList,
     nextFree, splitAgentReply, overwriteView, EXTRA_KINDS, KIND_NOUN, draftTitle, draftAge, newDraftKey, DRAFT_KEY_RE, uiLines,
@@ -537,6 +588,7 @@
   const state = {
     built: false, loading: false, tools: null, files: [], templates: [], rows: [],
     commands: null, disabledCommands: [], toolsError: "", filesError: "", commandsError: "",
+    disabledPersonas: [], disabledSkins: [],                      // /api/disabled: persona ids and skin ids switched off
     daemons: [], personas: [], uiElements: [], extrasError: "",   // the non-tool rows: daemons, tool-registered personas, shipped screens
     drafts: [], draftsError: "",                                  // backups of tools still being written (see "UNFINISHED TOOLS")
     selected: null, view: "tool",
@@ -635,16 +687,16 @@
   /* ---- list ---------------------------------------------------------------- */
 
   function renderChips() {
-    const counts = { all: state.rows.length, shipped: 0, user: 0, mcp: 0, command: 0, daemon: 0, persona: 0, ui: 0, off: 0, attention: 0 };
+    const counts = { all: state.rows.length, shipped: 0, user: 0, mcp: 0, command: 0, daemon: 0, persona: 0, skin: 0, ui: 0, off: 0, attention: 0 };
     state.rows.forEach((r) => {
       counts[bucketOf(r.source)] += 1;
       if (isOff(r)) counts.off += 1;
       if (needsAttention(r)) counts.attention += 1;
     });
-    const defs = [["all", "All"], ["shipped", "Shipped"], ["user", "Yours"], ["mcp", "MCP"], ["command", "Commands"], ["daemon", "Daemons"], ["persona", "Personas"], ["ui", "Screens"], ["off", "Off"], ["attention", "Attention"]];
+    const defs = [["all", "All"], ["shipped", "Shipped"], ["user", "Yours"], ["mcp", "MCP"], ["command", "Commands"], ["daemon", "Daemons"], ["persona", "Personas"], ["skin", "Skins"], ["ui", "Screens"], ["off", "Off"], ["attention", "Attention"]];
     clear(dom.chips);
     defs.forEach(([id, label]) => {
-      if (["mcp", "command", "daemon", "persona", "ui", "off", "attention"].includes(id) && !counts[id] && state.source !== id) return;
+      if (["mcp", "command", "daemon", "persona", "skin", "ui", "off", "attention"].includes(id) && !counts[id] && state.source !== id) return;
       dom.chips.appendChild(el("button", {
         class: "tm-chip" + (id === "attention" ? " tm-chip--bad" : ""), type: "button",
         "aria-pressed": state.source === id ? "true" : "false",
@@ -665,7 +717,7 @@
   function cardFor(row) {
     const active = state.selected === row.id;
     const meta = el("div", { class: "tm-card__meta" });
-    meta.appendChild(tag(SOURCE_LABELS[bucketOf(row.source)], bucketOf(row.source) === "user" ? "warn" : ["mcp", "command", "daemon", "persona", "ui"].includes(bucketOf(row.source)) ? "info" : ""));
+    meta.appendChild(tag(SOURCE_LABELS[bucketOf(row.source)], bucketOf(row.source) === "user" ? "warn" : INFO_BUCKETS.includes(bucketOf(row.source)) ? "info" : ""));
     if (row.state === "off") meta.appendChild(tag("off", "bad", "Switched off — Jarvis can't see or use it"));
     if (row.state === "fileoff") meta.appendChild(tag("file off", ""));
     if (row.protectedReason) meta.appendChild(tag("always on", "info", row.protectedReason));
@@ -675,7 +727,8 @@
     const card = el("button", {
       class: "tm-card" + (active ? " is-active" : ""), type: "button", "data-tm-state": row.state, "data-id": row.id,
       "aria-current": active ? "true" : null, onclick: () => select(row.id),
-    }, [el("div", { class: "tm-card__row" }, [el("span", { class: "tm-card__name" }, row.name)]), meta]);
+    }, [el("div", { class: "tm-card__row" }, [el("span", { class: "tm-card__name" }, row.name)]),
+      el("div", { class: "tm-card__origin", title: "Where this comes from" }, originOf(row)), meta]);
     if (row.state === "failed") card.appendChild(el("div", { class: "tm-card__err" }, String(row.error).slice(0, 140)));
     return card;
   }
@@ -851,6 +904,7 @@
     const desc = row.description || (row.userFile && row.userFile.description) || "";
     head.appendChild(el("div", { class: "tm-does" + (desc ? "" : " is-empty") }, desc || "This tool has no description."));
     const bucket = bucketOf(row.source);
+    head.appendChild(el("div", { class: "tm-origin" }, [el("span", { class: "tm-origin__k" }, "Source"), originOf(row)]));
     head.appendChild(el("div", { class: "tm-badges" }, [
       tag(SOURCE_LABELS[bucket], bucket === "user" ? "warn" : bucket === "mcp" ? "info" : ""),
       tag(groupLabel(row.group)),
@@ -930,7 +984,8 @@
     }
     if (row.kind === "ui") badges.push(tag(x.mode === "menu" ? "Menu entry" : "button"));
     d.appendChild(el("div", null, [
-      el("div", { class: "tm-title" }, row.kind === "daemon" ? (x.name || row.name) : row.kind === "persona" ? (x.name || row.name) : (x.label || row.name)),
+      el("div", { class: "tm-title" }, row.kind === "daemon" ? (x.name || row.name) : (row.kind === "persona" || row.kind === "skin") ? (x.name || row.name) : (x.label || row.name)),
+      el("div", { class: "tm-origin" }, [el("span", { class: "tm-origin__k" }, "Source"), originOf(row)]),
       el("div", { class: "tm-does" + (row.description ? "" : " is-empty") }, row.description || "No description."),
       el("div", { class: "tm-badges" }, badges),
     ]));
@@ -953,8 +1008,14 @@
     } else if (row.kind === "persona") {
       d.appendChild(el("div", null, [sectionTitle("Details"), infoRows([
         ["Id", row.name], ["Assistant name", x.assistant_name], ["Addresses you as", x.address_user_as], ["Colour", x.hex],
-        ["Registered by", x.file ? "~/.jarvis/tools/ or actions/ — " + x.file : ""],
+        ["Registered by", x.builtin ? "Ships with the web app (web/public/app.js)" : (x.file ? "~/.jarvis/tools/ or actions/ — " + x.file : "")],
       ])]));
+    } else if (row.kind === "skin") {
+      d.appendChild(el("div", null, [sectionTitle("Details"), infoRows([
+        ["Id", row.name], ["Kind", x.skinKind === "preset" ? "Accent swatch (Skin modal → Accent)" : "Theme (Skin modal → Themes)"], ["Colour", x.hex],
+        ["Defined in", x.skinKind === "preset" ? "web/public/app.js (SKIN_PRESETS)" : "web/public/ui-kit.js (BUILTIN_THEMES)"],
+      ])]));
+      d.appendChild(el("div", { class: "tm-actions" }, [el("button", { class: "btn btn--ghost btn--sm", type: "button", onclick: () => { close(); if (global.JarvisHost && global.JarvisHost.openPanel) global.JarvisHost.openPanel("skin"); } }, "Open the Skin modal")]));
     } else {
       const files = x.files || {};
       d.appendChild(el("div", null, [sectionTitle("Details"), infoRows([
@@ -1225,7 +1286,7 @@
       if (kind === "daemon") {
         // A daemon's own `enabled` flag (the Daemons panel edits the same one), not a second copy.
         await api("/api/daemons/" + encodeURIComponent(row.name), { method: "PATCH", body: JSON.stringify({ enabled: available }) });
-      } else if (kind === "persona" || kind === "ui") {
+      } else if (kind === "persona" || kind === "skin" || kind === "ui") {
         await api("/api/tools/disabled", { method: "POST", body: JSON.stringify({ name: row.name, value: !available, kind }) });
       } else {
         const path = kind === "command" ? "/api/commands/" + encodeURIComponent(row.name) + "/disabled" : "/api/tools/disabled";
@@ -1235,7 +1296,8 @@
       if (row.extra) row.extra = Object.assign({}, row.extra, kind === "daemon" ? { enabled: available } : { disabled: !available });
       // The rest of the app reads these once; tell it.
       if (kind === "ui" && global.JarvisToolUI) global.JarvisToolUI.refresh();
-      if (kind === "persona" && global.JarvisHost && global.JarvisHost.reloadPersonas) global.JarvisHost.reloadPersonas();
+      // Personas (built-in or registered) and skins are drawn by the Skin modal, which reads the off lists once.
+      if ((kind === "persona" || kind === "skin") && global.JarvisHost && global.JarvisHost.reloadPersonas) global.JarvisHost.reloadPersonas();
       if (kind === "command") {
         state.disabledCommands = available ? state.disabledCommands.filter((n) => n !== row.name) : state.disabledCommands.concat([row.name]);
       }
@@ -1246,6 +1308,21 @@
       state.busy.delete(token);
       renderChips(); refreshAfterAvailability(row);
     }
+  }
+
+  // The personas and skins that ship inside the web app. Only the browser knows them
+  // (app.js SKIN_PRESETS / PERSONA_PRESETS, ui-kit.js BUILTIN_THEMES), so the list is
+  // asked of it; if it isn't there (a test, a stripped build) these rows are simply absent.
+  function skinExtras() {
+    const host = global.JarvisHost;
+    let cat = null;
+    try { cat = host && host.builtinSkinCatalog ? host.builtinSkinCatalog() : null; } catch (_) { cat = null; }
+    const out = { disabledPersonas: state.disabledPersonas, disabledSkins: state.disabledSkins };
+    if (!cat) return out;
+    out.builtinPersonas = cat.personas || [];
+    out.skins = (cat.presets || []).map((p) => Object.assign({ skinKind: "preset" }, p))
+      .concat((cat.themes || []).map((t) => Object.assign({ skinKind: "theme" }, t)));
+    return out;
   }
 
   function refreshAfterAvailability(row) {
@@ -2301,7 +2378,11 @@
     if (commands.status === "fulfilled") state.commands = commands.value && typeof commands.value === "object" ? commands.value : {};
     // If /api/disabled is unreachable we can't tell which commands are off — say so
     // rather than show them all as available.
-    if (disabled.status === "fulfilled") state.disabledCommands = (disabled.value && disabled.value.commands) || [];
+    if (disabled.status === "fulfilled") {
+      state.disabledCommands = (disabled.value && disabled.value.commands) || [];
+      state.disabledPersonas = (disabled.value && disabled.value.personas) || [];
+      state.disabledSkins = (disabled.value && disabled.value.skins) || [];
+    }
     else if (!state.commandsError) state.commandsError = "couldn’t read which commands are switched off";
     // The non-tool rows. Any of the three failing just leaves its rows out and says so in
     // the status line; it never hides the tools.
@@ -2313,7 +2394,7 @@
     state.draftsError = drafts.status === "rejected" ? String(drafts.reason && drafts.reason.message || drafts.reason) : "";
     if (drafts.status === "fulfilled") state.drafts = (drafts.value && drafts.value.drafts) || [];
     state.rows = buildRows(state.toolsError ? [] : state.tools, state.files, state.commandsError ? null : state.commands, state.disabledCommands,
-      { daemons: state.daemons, personas: state.personas, ui: state.uiElements });
+      { daemons: state.daemons, personas: state.personas, ui: state.uiElements, ...skinExtras() });
     if (state.selected && !rowById(state.selected)) state.selected = null;
     if (!state.selected && !opts.keepView) {
       // Land on a normal tool, not on a rejected file: people open this to set

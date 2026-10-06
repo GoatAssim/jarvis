@@ -121,5 +121,11 @@ check("barModel: empty day is 0, tiny day is still visible, biggest is 100", bm[
 check("barModel: all-zero series stays flat, no divide by zero", T.barModel([{ date: "a", total_tokens: 0 }]).every((b) => b.pct === 0) && T.barModel(null).length === 0);
 check("convNote wording", T.convNote({ total: 0 }) === "No messages logged for them yet." && T.convNote({ total: 1, shown: 1 }) === "1 message." && T.convNote({ total: 9, shown: 5 }) === "Showing the latest 5 of 9 messages.");
 
+// time-limited tool access (L.36-P6)
+check("untilLeft: no deadline is empty", T.untilLeft(0, now) === "");
+check("untilLeft: past reads ended", T.untilLeft(now - 5, now) === "ended" && T.untilLeft(now, now) === "ended");
+check("untilLeft: seconds, minutes, hours, days", T.untilLeft(now + 30, now) === "in under 2 min" && T.untilLeft(now + 600, now) === "in 10 min" && T.untilLeft(now + 3 * 3600, now) === "in 3 h" && T.untilLeft(now + 2 * 86400, now) === "in 2 d");
+check("TIME_LIMITS are whole minutes within 1 minute .. 30 days", T.TIME_LIMITS.length >= 3 && T.TIME_LIMITS.every((t) => Number.isInteger(t.minutes) && t.minutes >= 1 && t.minutes <= 43200 && t.label));
+
 console.log(`${passed} passed, ${failed.length} failed`);
 process.exit(failed.length ? 1 : 0);

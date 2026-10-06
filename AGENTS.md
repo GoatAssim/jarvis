@@ -124,6 +124,22 @@ things that were already fixed once.
   one-entry list, not a `TypeError`. Never iterate a config list directly -- use the
   normalizer. Names (`guild_name`, `channel_name`) are display only; no stage of
   `decide()` reads them. `tests/test_channel_servers.py` pins all of this.
+- **A time limit on tool access is a ceiling, enforced at read time, and it only
+  ever means less access (L.36-P6).** The grant is the ordinary `tool_allowlist`
+  entry; `user_perms.tools_until` only says when it ends.
+  `user_perms.resolve_tool_access` answers "no tools" once the deadline has passed
+  and WRITES NOTHING (the Test tab calls it too); `user_admin.expire_due` is the only
+  thing that removes the person from the list and it is never called from a dry run.
+  Order of writes: deadline first, list entry second when granting; list entry first,
+  deadline second when ending. An unreadable deadline counts as passed. Turning
+  `tool` on or off, blocking, forgetting, or `channels-allow|deny ... tool` ends the
+  countdown. `tests/test_channel_timed_and_instruction.py` pins this.
+- **The owner's instruction for a person is style text, owner-typed only
+  (L.36-P12).** `people.instruction` is set by `user_admin.set_instruction` (panel /
+  `channels-instruction`) and by nothing a chat guest can reach (`remember_sender`
+  never touches it); one line, capped, framed in `people.prompt_block` as the
+  owner's note on style that changes nothing about what the person may do. Access is
+  still decided in code. It is not copied across a link and never goes in `memory.py`.
 - **The permission change log is written by the writers, never by callers
   (L.36-P15).** `channels/changelog.py` is hooked into `config.add_to_set /
   remove_from_set / set_value`, `user_perms.set_tools / set_can_dm` and
@@ -263,6 +279,7 @@ actually render Markdown):
     python3 tests/verify_l36_insights_ui.py # L.36-P1/P2/P3: Conversation / Usage / Test tabs in a real browser; needs `playwright` (Python) + Chromium, prints SKIP without them
     python3 tests/test_code_agent_extras.py # L.47b: code_agent runs are saved as replay extras, slimmed (no file content, no listing)
     node tests/verify_agent_panel.js        # L.47: the Focus Agent panel's reducer + tree builder (agent-panel.js); no npm install
+    python3 tests/test_channel_timed_and_instruction.py   # L.36-P6 / P12: time-limited tools and the per-person instruction
     node tests/verify_channels_panel.js     # L.36: the Channels panel's pure helpers (people list, filters, tool-scope diffing); no npm install
     node tests/verify_mcp_servers.js        # L.31: the MCP panel's pure helpers (state labels, search, filters, what a blank secret means); no npm install
     python3 tests/verify_mcp_servers_ui.py  # L.31: the MCP panel in a real browser against a real stdio MCP server; needs `playwright` (Python) + Chromium, prints SKIP without them

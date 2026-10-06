@@ -94,6 +94,10 @@
     host.className = "jui-theme-grid";
 
     Object.entries(themes).forEach(([id, theme]) => {
+      // A built-in theme the owner switched off in the Tool Manager is not offered,
+      // unless it is the one applied. Imported / saved themes are the owner's own and
+      // are never hidden here (they can be deleted instead).
+      if (!custom[id] && id !== current && global.JarvisHost && global.JarvisHost.isSkinOff && global.JarvisHost.isSkinOff("theme:" + id)) return;
       const vars = theme.vars || {};
       // "None" has no colours to swatch — falling back to the same
       // defaults every other theme's missing vars use would make its card
