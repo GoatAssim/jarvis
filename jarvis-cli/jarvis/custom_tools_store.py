@@ -33,7 +33,27 @@ WHAT THIS ADDS ON TOP
    about that).
 4. **Templates** — a starter for each shape of tool, including ones that
    drive the UI bridge, because "what can a tool even do?" is the real
-   barrier, not Python syntax.
+   barrier, not Python syntax. Two of them ship a screen of their own
+   (`TOOL_UI`, tool_ui.py): saving one also writes its starter html/js/css
+   folder, and never overwrites a folder that already exists.
+5. **Drafts** — an unfinished tool is backed up on disk as you type, saved or
+   not (see DRAFTS below).
+
+DRAFTS: UNFINISHED WORK IS BACKED UP WHETHER OR NOT YOU SAVED
+-------------------------------------------------------------
+`write_tool` refuses to persist a file that wouldn't load -- right, since a
+rejected file silently never loads at the next start -- but that means the
+half-written tool you were in the middle of exists ONLY in a browser tab. A
+cleared browser, a different browser, a closed tab and a "Discard" each lose it.
+So the editor syncs its text to `~/.jarvis/tools/_drafts/<key>.json` as you
+type (a few seconds after you stop), and a Save the validator refuses stashes
+the refused text there too, on the server, so even a client that never syncs
+(`jarvis ctools-write`) can't lose it. A draft is a copy, never a tool: it is not
+loaded, not listed as a tool, and not counted as a file the Tool Manager
+manages. It is removed when the same text is saved successfully, kept when a tab
+is closed with "Discard", and pruned after DRAFT_MAX_AGE_DAYS or past MAX_DRAFTS.
+Each draft also keeps a few older snapshots (MAX_DRAFT_HISTORY), so an edit that
+made things worse can be undone from the Tool Manager's "Unfinished tools" list.
 
 THE SAFETY POSITION
 -------------------
@@ -53,13 +73,25 @@ same thing — so that door stays shut.
 import json
 import re
 import shutil
+import time
 from datetime import datetime
 from pathlib import Path
 
 JARVIS_DIR = Path.home() / ".jarvis"
 TOOLS_DIR = JARVIS_DIR / "tools"
 META_FILE = TOOLS_DIR / "_meta.json"
+DRAFTS_DIR = TOOLS_DIR / "_drafts"
 ENCODING = "utf-8"
+
+# Drafts (see the module docstring). The key is client-generated and becomes a
+# file name, so it is validated before it touches a path.
+DRAFT_KEY_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
+MAX_DRAFTS = 30
+DRAFT_MAX_AGE_DAYS = 30
+MAX_DRAFT_HISTORY = 5
+# A new snapshot is pushed onto a draft's history at most this often, so typing
+# for an hour doesn't turn five snapshots into five seconds of undo.
+DRAFT_HISTORY_MIN_GAP = 120
 
 # Same shape as a tool name, because the filename becomes the module name.
 _NAME_RE = re.compile(r"^[a-z][a-z0-9_]{0,48}$")
@@ -155,6 +187,7 @@ def list_tools(include_source=False):
         entry["error"] = check.get("error", "")
         entry["tools"] = check.get("tools", [])
         entry["group"] = check.get("group", "")
+        entry["ui"] = [u["id"] for u in check.get("ui", [])]
         if include_source:
             entry["source"] = _read(path)
         out.append(entry)
@@ -190,11 +223,55 @@ def read_tool(name):
     check = validate_source(source, name)
     return {"ok": True, "name": name, "enabled": enabled, "source": source,
             "valid": check["ok"], "error": check.get("error", ""),
-            "tools": check.get("tools", []), "group": check.get("group", "")}
+            "tools": check.get("tools", []), "group": check.get("group", ""),
+            "ui": check.get("ui", []), "ui_problems": check.get("ui_problems", [])}
 
 
-def write_tool(name, source, description=""):
+def write_tool(name, source, description="", draft_key="", scaffold=""):
     """Create or overwrite. Validates BEFORE writing, and keeps a backup.
+
+    `draft_key` (the editor's tab key) and `scaffold` (a template id) are the two
+    additions over the plain write:
+
+      * a REFUSED save -- the source wouldn't load, wasn't a valid name, was too
+        big -- is stashed as a draft before the refusal is returned, so the text
+        is never only in a browser tab. With no `draft_key` the draft is keyed
+        `failed-<name>`; a save that succeeds removes the draft it was made from.
+        The result carries `draft_saved` either way.
+      * `scaffold` names a template whose starter folder (html/js/css for a
+        TOOL_UI) is written next to the file the first time, never over a folder
+        that already exists. The result lists what was written in `scaffolded`.
+    """
+    result = _write_tool(name, source, description)
+    key = (draft_key or "").strip().lower()
+    if key and not DRAFT_KEY_RE.match(key):
+        key = ""
+    if not result.get("ok"):
+        auto = key or ("failed-%s" % re.sub(r"[^a-z0-9_]", "", (name or "").strip().lower())[:49]).rstrip("-")
+        if DRAFT_KEY_RE.match(auto or "") and (source or "").strip():
+            saved = save_draft(auto, source, name=(name or "").strip().lower(),
+                               mode="edit" if _resolve((name or "").strip().lower())[0] else "new",
+                               reason="save refused: %s" % (result.get("error") or "unknown")[:160])
+            result["draft_saved"] = bool(saved.get("ok") and not saved.get("skipped"))
+            result["draft_key"] = auto
+        return result
+    if key:
+        delete_draft(key)
+    if scaffold:
+        written = scaffold_template(scaffold, source)
+        result["scaffolded"] = written["written"]
+        if written.get("skipped"):
+            result["scaffold_note"] = written["skipped"]
+        if written["written"]:
+            # The first validation ran before the files existed; report again.
+            again = validate_source(source, result["name"])
+            result["ui"] = again.get("ui", [])
+            result["ui_problems"] = again.get("ui_problems", [])
+    return result
+
+
+def _write_tool(name, source, description=""):
+    """The write itself (see write_tool). Validates BEFORE writing, and keeps a backup.
 
     Validating first is the important half: the editor's Save button should
     refuse to persist a file that would be silently rejected at startup. The
@@ -236,6 +313,8 @@ def write_tool(name, source, description=""):
             "checklist": check.get("checklist", []),
             "checklist_missing": check.get("checklist_missing", []),
             "checklist_problems": check.get("checklist_problems", []),
+            "ui": check.get("ui", []),
+            "ui_problems": check.get("ui_problems", []),
             "note": "Restart any running daemon (or just run the next command) "
                     "to pick it up — tools are discovered at process start."}
 
@@ -248,9 +327,11 @@ def delete_tool(name):
     # on/off switches can be dropped with it (a new tool that reuses a name must
     # not inherit an old "off"). Same validation the list/show already ran.
     try:
-        provided = list(validate_source(_read(path), name).get("tools") or [])
+        checked = validate_source(_read(path), name)
+        provided = list(checked.get("tools") or [])
+        provided_ui = [u["id"] for u in checked.get("ui", [])]
     except Exception:  # noqa: BLE001 -- a file that won't import has nothing to forget
-        provided = []
+        provided, provided_ui = [], []
     try:
         path.unlink()
     except OSError as exc:
@@ -261,6 +342,8 @@ def delete_tool(name):
     from . import tool_disable
     for tool_name in provided:
         tool_disable.forget_tool(tool_name)
+    for ui_id in provided_ui:
+        tool_disable.forget_ui(ui_id)
     return {"ok": True, "name": name}
 
 
@@ -282,6 +365,205 @@ def set_enabled(name, enabled):
     except OSError as exc:
         return {"ok": False, "error": str(exc)}
     return {"ok": True, "name": name, "enabled": bool(enabled)}
+
+
+# ---------------------------------------------------------------------------
+# Drafts: unfinished work, backed up whether or not it was saved
+# ---------------------------------------------------------------------------
+
+
+def _draft_path(key):
+    return DRAFTS_DIR / ("%s.json" % key)
+
+
+def _read_draft_file(path):
+    from . import atomic_io
+    data = atomic_io.read_json(path, default=None, expect=dict)
+    if not isinstance(data, dict) or not isinstance(data.get("source"), str):
+        return None
+    return data
+
+
+def save_draft(key, source, name="", mode="new", orig_name="", template="", reason=""):
+    """Back up the text of an editor tab. Never raises; returns {"ok": ...}.
+
+    Blank text is skipped (a draft of nothing is noise, and must not replace a real
+    one). Unchanged text only refreshes nothing -- `unchanged` -- so a client that
+    re-sends on every keystroke costs one comparison. The previous text goes onto a
+    short history when it is at least DRAFT_HISTORY_MIN_GAP old, so the newest few
+    versions survive a bad edit.
+    """
+    key = (key or "").strip().lower()
+    if not DRAFT_KEY_RE.match(key):
+        return {"ok": False, "error": "draft key must be lowercase letters, digits, - or _ (max 64)"}
+    source = source if isinstance(source, str) else ""
+    if not source.strip():
+        return {"ok": True, "skipped": "empty"}
+    if len(source) > MAX_SOURCE_CHARS:
+        return {"ok": False, "error": "draft is too large (max %d characters)" % MAX_SOURCE_CHARS}
+    from . import atomic_io
+    now = time.time()
+    existing = _read_draft_file(_draft_path(key))
+    history = []
+    if existing:
+        if existing.get("source") == source:
+            return {"ok": True, "unchanged": True, "key": key}
+        history = [h for h in (existing.get("history") or [])
+                   if isinstance(h, dict) and isinstance(h.get("source"), str)]
+        last_push = history[-1].get("epoch", 0) if history else 0
+        if existing.get("source", "").strip() and now - float(last_push or 0) >= DRAFT_HISTORY_MIN_GAP:
+            history.append({"source": existing["source"], "saved": existing.get("saved", ""),
+                            "epoch": float(existing.get("saved_epoch") or now)})
+        history = history[-MAX_DRAFT_HISTORY:]
+    record = {
+        "key": key,
+        "name": (name or "").strip().lower()[:49],
+        "mode": "edit" if mode == "edit" else "new",
+        "orig_name": (orig_name or "").strip().lower()[:49],
+        "template": (template or "").strip()[:32],
+        "reason": (reason or "")[:200],
+        "source": source,
+        "saved": datetime.now().replace(microsecond=0).isoformat(),
+        "saved_epoch": now,
+        "history": history,
+    }
+    try:
+        DRAFTS_DIR.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        return {"ok": False, "error": "couldn't create the drafts folder: %s" % exc}
+    if not atomic_io.write_json(_draft_path(key), record):
+        return {"ok": False, "error": "couldn't write the draft"}
+    _prune_drafts()
+    return {"ok": True, "key": key, "saved": record["saved"]}
+
+
+def _draft_summary(data, include_source=False):
+    source = data.get("source", "")
+    name = data.get("orig_name") or data.get("name") or ""
+    on_disk, _enabled = _resolve(name) if name and valid_name(name) else (None, False)
+    summary = {
+        "key": data.get("key", ""),
+        "name": data.get("name", ""),
+        "mode": data.get("mode", "new"),
+        "orig_name": data.get("orig_name", ""),
+        "template": data.get("template", ""),
+        "reason": data.get("reason", ""),
+        "saved": data.get("saved", ""),
+        "chars": len(source),
+        "lines": source.count("\n") + 1,
+        "preview": next((ln.strip() for ln in source.splitlines() if ln.strip()), "")[:120],
+        "versions": len(data.get("history") or []),
+        # The file this draft was taken from has been saved since: restoring would
+        # replace newer text, so the panel says so before it does.
+        "file_newer": bool(on_disk and _mtime_epoch(on_disk) > float(data.get("saved_epoch") or 0) + 1),
+    }
+    if include_source:
+        summary["source"] = source
+        summary["history"] = [{"saved": h.get("saved", ""), "source": h.get("source", "")}
+                              for h in (data.get("history") or []) if isinstance(h, dict)]
+    return summary
+
+
+def _mtime_epoch(path):
+    try:
+        return path.stat().st_mtime
+    except OSError:
+        return 0.0
+
+
+def list_drafts():
+    """Every backed-up draft, newest first, without the source text."""
+    out = []
+    try:
+        files = list(DRAFTS_DIR.glob("*.json"))
+    except OSError:
+        return out
+    for path in files:
+        data = _read_draft_file(path)
+        if data and DRAFT_KEY_RE.match(str(data.get("key", ""))):
+            out.append(_draft_summary(data))
+    out.sort(key=lambda d: d.get("saved", ""), reverse=True)
+    return out
+
+
+def read_draft(key):
+    key = (key or "").strip().lower()
+    if not DRAFT_KEY_RE.match(key):
+        return {"ok": False, "error": "bad draft key"}
+    data = _read_draft_file(_draft_path(key))
+    if not data:
+        return {"ok": False, "error": "no draft %r" % key}
+    return dict(_draft_summary(data, include_source=True), ok=True)
+
+
+def delete_draft(key):
+    key = (key or "").strip().lower()
+    if not DRAFT_KEY_RE.match(key):
+        return {"ok": False, "error": "bad draft key"}
+    try:
+        _draft_path(key).unlink()
+    except FileNotFoundError:
+        return {"ok": True, "key": key, "note": "already gone"}
+    except OSError as exc:
+        return {"ok": False, "error": str(exc)}
+    return {"ok": True, "key": key}
+
+
+def _prune_drafts():
+    """Drop drafts past DRAFT_MAX_AGE_DAYS, then the oldest beyond MAX_DRAFTS.
+    Best-effort: a draft that can't be removed is simply kept."""
+    try:
+        files = list(DRAFTS_DIR.glob("*.json"))
+    except OSError:
+        return
+    cutoff = time.time() - DRAFT_MAX_AGE_DAYS * 86400
+    kept = []
+    for path in files:
+        stamp = _mtime_epoch(path)
+        if stamp and stamp < cutoff:
+            try:
+                path.unlink()
+            except OSError:
+                kept.append((stamp, path))
+        else:
+            kept.append((stamp, path))
+    kept.sort(key=lambda item: item[0], reverse=True)
+    for _stamp, path in kept[MAX_DRAFTS:]:
+        try:
+            path.unlink()
+        except OSError:
+            pass
+
+
+def scaffold_template(template_id, source):
+    """Write a template's starter folder next to the tool file, if it ships one.
+
+    Only when the saved source still declares the template's folder (so a source
+    that was rewritten to point elsewhere doesn't get a stray folder), and never
+    over an existing folder: a second tool made from the same template keeps its
+    own files rather than clobbering the first's. Returns
+    {"written": [relative paths], "skipped": "reason" | ""}. Never raises.
+    """
+    entry = TEMPLATES.get(template_id)
+    folder = (entry or {}).get("folder")
+    files = (entry or {}).get("files")
+    if not folder or not files:
+        return {"written": [], "skipped": ""}
+    if ('"%s"' % folder) not in (source or ""):
+        return {"written": [], "skipped": ""}
+    root = TOOLS_DIR / folder
+    if root.exists():
+        return {"written": [], "skipped": "The folder %s already exists, so its files were left alone." % folder}
+    written = []
+    try:
+        for rel, text in files.items():
+            target = root / rel
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(text, encoding=ENCODING)
+            written.append("%s/%s" % (folder, rel))
+    except OSError as exc:
+        return {"written": written, "skipped": "Couldn't write the starter files: %s" % exc}
+    return {"written": written, "skipped": ""}
 
 
 # ---------------------------------------------------------------------------
@@ -418,11 +700,44 @@ def validate_source(source, name="custom_tool"):
         set(names), group.strip(),
     )
 
+    # TOOL_UI (tool_ui.py): like the checklist, never a reason to fail the check --
+    # the loader drops a bad entry and the tools still load -- but the only place
+    # the author hears about it. Paths resolve against ~/.jarvis/tools, where this
+    # file will live, so "the folder isn't there yet" is reported honestly.
+    ui_entries, ui_problems = [], []
+    if getattr(module, "TOOL_UI", None) is not None:
+        from . import tool_ui
+        ui_entries, ui_problems = tool_ui.validate_ui(
+            getattr(module, "TOOL_UI", None), "%s.py" % name, TOOLS_DIR, set(names))
+        ui_problems = list(ui_problems) + _ui_clashes(ui_entries, name)
+
     return {"ok": True, "tools": names, "group": group.strip(),
             "keywords": getattr(module, "TOOL_KEYWORDS", {}) or {},
             "checklist": sorted(entries),
             "checklist_missing": [n for n in names if n not in entries],
-            "checklist_problems": checklist_problems}
+            "checklist_problems": checklist_problems,
+            "ui": [tool_ui_public(u) for u in ui_entries],
+            "ui_problems": ui_problems}
+
+
+def tool_ui_public(entry):
+    """A TOOL_UI entry as the editor shows it (no absolute paths)."""
+    from . import tool_ui
+    return tool_ui.public(entry)
+
+
+def _ui_clashes(entries, name):
+    """UI element ids already taken by ANOTHER file. Same rule as tool names: the
+    first registration wins and shipped files are scanned before yours, so a clash
+    means this element will be dropped at the next start -- say so now."""
+    try:
+        from . import tools as system_tools
+        taken = {u["id"]: u.get("file", "") for u in getattr(system_tools, "AUTO_UI", []) or []}
+    except Exception:  # noqa: BLE001 -- during partial init, skip the check
+        return []
+    mine = "%s.py" % name
+    return ["UI element id %r is already used by %s -- this one will be ignored" % (u["id"], taken[u["id"]])
+            for u in entries if taken.get(u["id"]) not in (None, "", mine)]
 
 
 def _builtin_clash(names):
@@ -774,13 +1089,31 @@ TEST_CHECKLIST = {
 }
 
 
+# The two templates that ship a TOOL_UI page (and its starter folder). A separate
+# module only because the html/js/css inside them is unpleasant to read in a string
+# shared with a dozen other templates; to every caller they are ordinary templates.
+from .custom_tools_ui_templates import UI_TEMPLATES  # noqa: E402
+
+TEMPLATES.update(UI_TEMPLATES)
+
+
 def templates():
-    return [{"id": k, "label": v["label"], "hint": v["hint"]} for k, v in TEMPLATES.items()]
+    return [{"id": k, "label": v["label"], "hint": v["hint"],
+             "folder": v.get("folder", ""), "files": sorted(v.get("files") or {})}
+            for k, v in TEMPLATES.items()]
 
 
 def template_source(template_id):
     entry = TEMPLATES.get(template_id) or TEMPLATES["minimal"]
     return entry["source"]
+
+
+def template_files(template_id):
+    """{"folder": ..., "files": [names]} for a template that ships a starter
+    folder (the two TOOL_UI ones), else empty -- what the editor tells you saving
+    will also create."""
+    entry = TEMPLATES.get(template_id) or {}
+    return {"folder": entry.get("folder", ""), "files": sorted(entry.get("files") or {})}
 
 
 _README = """# Custom tools
@@ -803,6 +1136,9 @@ Optional:
     TOOL_AI_REVIEW        = {"name"}          # and a second AI's risk check
     TEST_CHECKLIST        = {"name": {...}}   # how to test it, for Menu > Test Checklist
     TEST_CHECKLIST_GROUP  = {"label": "..."}  # names a brand-new TOOL_GROUP there
+    TOOL_UI               = [{"id", "label", "mode", "path"}]  # a button or Menu entry that
+                                              # opens a page/panel built from your own
+                                              # tool.html / tool.js / tool.css in a folder
 
 Rules that bite if you skip them:
 
@@ -815,6 +1151,10 @@ Rules that bite if you skip them:
   marked NO CHECKLIST. A malformed entry is dropped (the tool still loads) and
   the editor's Check button says why. Every template above carries an example.
 * A file starting with `_` is ignored, so `_helpers.py` is safe to keep here.
+* `_drafts/` holds backups of tools you were still writing (saved or not). They are
+  copies, never loaded as tools; restore or delete them from the Tool Manager.
+* A `TOOL_UI` folder sits beside your .py (e.g. `~/.jarvis/tools/my_page/`). Its
+  `path` is relative to the .py that declares it and can't point outside this folder.
 * `x.py.disabled` is switched off but kept.
 
 To show something on screen or ask a question:

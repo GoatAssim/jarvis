@@ -451,6 +451,14 @@ def _apply_thinking(payload, provider, provider_type, round_num, ran_tools, thou
         return False
     level = _thinking.get("level", "off")
     if reasoning.normalize_level(level) == "off":
+        # A host that reasons by default (Groq's gpt-oss) ignores "off" unless
+        # told otherwise. The keys are merged but the round is NOT counted as a
+        # thinking request, so `requested` stays 0 for an off turn.
+        for key, value in reasoning.off_patch(
+                provider_type, provider_name=provider.get("name") or "",
+                model=provider.get("model") or "",
+                base_url=provider.get("base_url") or "").items():
+            payload.setdefault(key, value)
         return False
     # Round 0 always. After that, apply per-round up to the level's own cap
     # (master plan Part A §6 — see reasoning._LEVELS' max_thinking_rounds):
@@ -637,6 +645,32 @@ def _emit_stream(kind, **data):
             pass
 
 
+def _force_utf8(resp):
+    """BUG-7: every provider here speaks UTF-8, but `requests` decodes a
+    `text/*` response with NO charset in its Content-Type as ISO-8859-1 (the
+    HTTP/1.1 default), and an SSE stream is exactly that (`text/event-stream`).
+    `iter_lines(decode_unicode=True)` then turned each UTF-8 multi-byte
+    character into two or three Latin-1 ones: a non-breaking hyphen (E2 80 91)
+    came out as three junk characters (a-circumflex plus two control characters),
+    and box-drawing characters as a-circumflex followed by garbage.
+    Replies that arrived over a non-streamed `application/json` response were
+    clean, which is why the same conversation looked fine on one provider and
+    garbled on another.
+
+    A charset the server DID state is respected; only the missing-charset
+    default (what requests reports as iso-8859-1 for text/*, or None) is
+    replaced. Never raises: a response object without the attribute (a test
+    double) is left alone."""
+    try:
+        content_type = str((resp.headers or {}).get("Content-Type") or "").lower()
+        if "charset=" in content_type:
+            return resp
+        resp.encoding = "utf-8"
+    except Exception:  # noqa: BLE001 -- decoding hygiene must never fail a request
+        pass
+    return resp
+
+
 def _post_stream(url, headers, payload, timeout):
     """Like _post_json, but for a streamed response: same never-raises
     contract (returns (response, None) or (None, human-readable error)), but
@@ -659,6 +693,7 @@ def _post_stream(url, headers, payload, timeout):
         logs.log(conv_id, "request", {"url": url, "payload": payload}, provider=_log_provider_for(url))
     try:
         resp = requests.post(url, headers=headers, json=payload, timeout=timeout, stream=True)
+        _force_utf8(resp)
     except requests.exceptions.Timeout:
         err = f"timed out after {timeout}s"
         if conv_id:
@@ -1018,6 +1053,7 @@ def _post_json(url, headers, payload, timeout):
         logs.log(conv_id, "request", {"url": url, "payload": payload}, provider=_log_provider_for(url))
     try:
         resp = requests.post(url, headers=headers, json=payload, timeout=timeout)
+        _force_utf8(resp)
     except requests.exceptions.Timeout:
         err = f"timed out after {timeout}s"
         if conv_id:

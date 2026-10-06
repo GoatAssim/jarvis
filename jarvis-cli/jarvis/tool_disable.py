@@ -20,6 +20,29 @@ are about to switch back on). This is the "hidden from the model, plus refused
 for anything automatic" reading of master plan Q-L25f -- not "refused
 everywhere".
 
+PERSONAS AND UI ELEMENTS (Tool Manager rows beyond tools and commands)
+----------------------------------------------------------------------
+The Tool Manager also lists the other things a tool file can contribute, and gives
+each the same owner switch:
+
+  * a PERSONA a file registered (`PERSONAS`, persona_registry.py): OFF hides it
+    from the Skin modal's picker (`jarvis personas-list` stops returning it unless
+    `--all`). Nothing about the model's own tools changes.
+  * a UI ELEMENT a file shipped (`TOOL_UI`, tool_ui.py -- a button that opens the
+    tool's own page, or a Menu entry that opens it in a panel): OFF removes the
+    button / Menu entry and refuses to serve its files. The tool that goes with it
+    keeps working; the owner is only hiding its screen.
+  * a DAEMON is NOT stored here. daemons.json already has an `enabled` flag with
+    exactly the right meaning (can't be started by hand, by a schedule, by
+    autostart or by the model) and the Daemons panel already edits it, so the Tool
+    Manager edits the same flag rather than keeping a second copy that could
+    disagree with it.
+
+Personas and UI elements live in the SAME `disabled.json` as tools and commands
+(`"personas": [...]`, `"ui": [...]`), for the same two reasons: no model-facing
+writer, and it survives a reinstall. Nothing here is protected: switching either
+off never breaks Jarvis.
+
 THE AGENTS.md INVARIANT
 -----------------------
 AGENTS.md says `TOOLS` / `CORE_TOOL_SCHEMAS` stay fully loaded and locally
@@ -89,6 +112,12 @@ PROTECTED_TOOLS = {
 }
 
 _TOOL_NAME_RE = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
+# A persona id may also contain "-" (persona_registry._ID_RE); a UI id is a tool-style name.
+_PERSONA_ID_RE = re.compile(r"^[a-z][a-z0-9_-]{0,48}$")
+_UI_ID_RE = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
+
+# Every list the file carries. Kept in one place so _read/_empty/_set can't drift.
+_KINDS = ("tools", "commands", "personas", "ui")
 
 
 class ProtectedToolError(ValueError):
@@ -96,7 +125,7 @@ class ProtectedToolError(ValueError):
 
 
 def _empty():
-    return {"tools": [], "commands": []}
+    return {k: [] for k in _KINDS}
 
 
 def _read():
@@ -110,7 +139,7 @@ def _read():
     if not isinstance(data, dict):
         return _empty()
     out = _empty()
-    for key in ("tools", "commands"):
+    for key in _KINDS:
         raw = data.get(key)
         if isinstance(raw, list):
             out[key] = sorted({n for n in raw if isinstance(n, str) and n.strip()})
@@ -141,6 +170,26 @@ def disabled_tools():
 def disabled_commands():
     """frozenset of saved-command names currently switched off."""
     return frozenset(_read()["commands"])
+
+
+def disabled_personas():
+    """frozenset of persona ids the owner has hidden from the Skin modal."""
+    return frozenset(_read()["personas"])
+
+
+def disabled_ui():
+    """frozenset of TOOL_UI element ids the owner has switched off."""
+    return frozenset(_read()["ui"])
+
+
+def is_persona_disabled(persona_id):
+    persona_id = (persona_id or "").strip()
+    return bool(persona_id) and persona_id in disabled_personas()
+
+
+def is_ui_disabled(ui_id):
+    ui_id = (ui_id or "").strip()
+    return bool(ui_id) and ui_id in disabled_ui()
 
 
 def is_tool_disabled(name):
@@ -225,6 +274,24 @@ def set_command_disabled(name, disabled):
     return {"name": name, "disabled": _set("commands", name, bool(disabled))}
 
 
+def set_persona_disabled(persona_id, disabled):
+    """Hide (True) or show (False) a registered persona in the Skin modal.
+    Same contract as set_tool_disabled: ValueError for a malformed id, OSError if
+    the file couldn't be saved. Returns {"id", "disabled"}."""
+    persona_id = (persona_id or "").strip()
+    if not _PERSONA_ID_RE.match(persona_id):
+        raise ValueError("not a valid persona id: %r" % persona_id)
+    return {"id": persona_id, "disabled": _set("personas", persona_id, bool(disabled))}
+
+
+def set_ui_disabled(ui_id, disabled):
+    """Switch a tool-shipped UI element (button / Menu entry) off or on."""
+    ui_id = (ui_id or "").strip()
+    if not _UI_ID_RE.match(ui_id):
+        raise ValueError("not a valid UI element id: %r" % ui_id)
+    return {"id": ui_id, "disabled": _set("ui", ui_id, bool(disabled))}
+
+
 def rename_command(old, new):
     """A renamed saved command keeps its switch. Without this a disabled command
     could be re-enabled just by renaming it in the commands panel: the new name
@@ -251,5 +318,23 @@ def forget_command(name):
     try:
         if (name or "").strip() in _read()["commands"]:
             _set("commands", name.strip(), False)
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def forget_persona(persona_id):
+    try:
+        if (persona_id or "").strip() in _read()["personas"]:
+            _set("personas", persona_id.strip(), False)
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def forget_ui(ui_id):
+    """Drop a UI element's entry (its tool file was deleted, so a later element with
+    the same id must not inherit an old switch). Never raises."""
+    try:
+        if (ui_id or "").strip() in _read()["ui"]:
+            _set("ui", ui_id.strip(), False)
     except Exception:  # noqa: BLE001
         pass

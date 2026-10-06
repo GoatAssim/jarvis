@@ -381,7 +381,7 @@ check("deleting a user tool file drops its switch", not tool_disable.is_tool_dis
 reset()
 
 # --- 7. the model cannot flip a switch --------------------------------------------------------------
-WRITERS = r"tool_disable\.(set_tool_disabled|set_command_disabled|rename_command|forget_tool|forget_command|_set|_write|DISABLED_FILE)|disabled\.json"
+WRITERS = r"tool_disable\.(set_tool_disabled|set_command_disabled|set_persona_disabled|set_ui_disabled|rename_command|forget_tool|forget_command|forget_persona|forget_ui|_set|_write|DISABLED_FILE)|disabled\.json"
 offenders = set()
 for tool_name, fn in system_tools.TOOLS.items():
     try:

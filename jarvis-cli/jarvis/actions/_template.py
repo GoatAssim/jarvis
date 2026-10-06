@@ -22,7 +22,9 @@ CONTENTS
     6. TALKING TO THE USER   ui_bridge: toasts, cards, modals, questions
     7. PERSONAS              optional, independent of tools
     8. TEST_CHECKLIST        the Menu -> Test Checklist entry for your tools
-    9. CHECKING YOUR FILE    how to know it actually loaded
+    9. TOOL_UI               a screen of your own: a button or a Menu entry that
+                             opens a page you wrote (tool.html / tool.js / tool.css)
+   10. CHECKING YOUR FILE    how to know it actually loaded
 
 WHAT MAKES A FILE DISCOVERABLE
 -------------------------------
@@ -989,7 +991,86 @@ TEST_CHECKLIST_GROUP = {
 }
 
 # ---------------------------------------------------------------------------
-# 9. CHECKING YOUR FILE — how to know it actually loaded
+# 9. TOOL_UI — optional. A screen of your own: a button that opens a page, or a
+#    Menu entry that opens a panel. (The OTHER way to reach the person — a toast,
+#    a card or a question while your tool runs — is section 6, ui_bridge, and is
+#    unchanged. Use that for "say something while I run"; use this when the
+#    owner should be able to open something themselves.)
+#
+#    You write the page; the loader does the rest. Declare it at module level:
+#
+#        TOOL_UI = [
+#            {
+#                "id": "disk_dashboard",     # required. lower_snake_case, unique across
+#                                            #   Jarvis (a clash is logged, first one wins)
+#                "label": "Disk",            # required. The button / Menu entry text
+#                "mode": "button",           # required. "button" or "menu" (below)
+#                "path": "disk_dashboard",   # required. Your folder, relative to THIS file
+#                #   optional:
+#                "html": "tool.html",        # these three are the defaults; name another
+#                "js":   "tool.js",          #   file, or "" for none. At least one must exist
+#                "css":  "tool.css",
+#                "title": "Disk usage",      # heading of the window / panel
+#                "hint": "How full is each drive",   # Menu entries: the grey line
+#                "icon": "D",                # buttons: 1-4 characters before the label
+#                "tool": "disk_report",      # which of THIS file's tools it belongs to
+#            },
+#        ]
+#
+#    THE TWO MODES — you choose:
+#
+#      "button"  A button beside the Menu button. Clicking it opens your page in a
+#                window of its own, inside a SANDBOXED frame: it can't see or touch
+#                the rest of Jarvis, only the `host` object below. Pick this for
+#                anything self-contained, and for anything you didn't write yourself.
+#
+#      "menu"    An entry in the Menu, like Test Checklist or Daemons. Clicking it
+#                opens a panel and your tool.html goes into a div in it. Your
+#                tool.css applies ONLY inside that div (and Jarvis's styles don't
+#                leak in); your tool.js runs against it, and host.root is that div's
+#                shadow root — query it, don't use `document`. Because it shares the
+#                page with the rest of Jarvis, read a menu panel's JS before you
+#                install someone else's.
+#
+#    WHERE THE FILES GO. Any folder under the file that declares them, however
+#    deep: "path": "ui/disk" is fine. `path` is required — nothing is guessed — and
+#    must stay inside this file's directory (no "..", no absolute path, no symlink
+#    out); anything else drops that entry with a logged reason while your tools
+#    still load. For a tool in ~/.jarvis/tools/ the folder sits beside your .py
+#    (the Tool Manager's "Button page" and "Menu panel" templates create theirs for
+#    you on first save). Each file is capped at 400 KB.
+#
+#    THE `host` OBJECT — the same in both modes:
+#
+#        host.id, host.mode, host.tools   which element this is, and your file's tools
+#        host.root                        what to query (the frame's document, or the
+#                                         panel's shadow root)
+#        host.runTool(name, args)         run one of host.tools; resolves to its result.
+#                                         A tool that asks first still asks first.
+#        host.toast(message, level)       a corner message: info / success / warn / error
+#        host.setTitle(text)              the window / panel heading
+#        host.close()                     close it
+#        host.storage.get(k) / .set(k, v) / .remove(k)   small values kept in this
+#                                         browser, per element (Promises, JSON-able, 100 KB)
+#        host.onClose(fn)                 run fn when it closes
+#
+#    Jarvis's colours reach your page as CSS variables (--accent, --bg, --bg-panel,
+#    --border, --text, ...) in both modes, so it follows the current skin.
+#
+#    A worked example of each is in the Tool Manager's templates ("Button page" and
+#    "Menu panel", jarvis/custom_tools_ui_templates.py) — create one and read it.
+#
+#    THE OWNER'S SWITCH. Each element is a row in Menu -> Tool Manager (kind "Screen")
+#    with an on/off switch. Off removes the button / Menu entry and refuses to serve
+#    the files; your tools keep working. A model-facing tool can neither create nor
+#    switch one (same rule as custom tools and daemons).
+#
+#    WHAT IT IS NOT FOR: nothing here runs on its own, and a page can only run the
+#    tools of its own file. If it needs a long-lived process, that is a daemon.
+# ---------------------------------------------------------------------------
+
+# ---------------------------------------------------------------------------
+# 10. CHECKING YOUR FILE — how to know it actually loaded
 #
 # A rejected file is logged once and is otherwise invisible, so check:
 #
@@ -999,12 +1080,16 @@ TEST_CHECKLIST_GROUP = {
 #                              (OK), not a rejection.
 #     jarvis tools-list        your tool names are in the catalogue.
 #     jarvis personas-list     your personas, if you registered any.
+#     jarvis tool-ui list      your TOOL_UI screens, if you declared any.
 #
 # For a tool in ~/.jarvis/tools/, the Custom Tools editor's Check button runs
 # the same validation, including the TEST_CHECKLIST entry.
 #
 # For a tool that ships in jarvis/actions/, AGENTS.md's rule applies: the
 # tool's checklist entry (section 8) is part of the change, not a follow-up.
+# A problem with a TOOL_UI entry (bad path, missing file, id already taken) is
+# logged as "[tool-ui] ..." and shown by the editor's Check button; the tools
+# in the file still load.
 # Then run:    python3 tests/run_tests.py checklist
 #
 # One habit worth having: do not print() to stdout inside a handler. ui_bridge

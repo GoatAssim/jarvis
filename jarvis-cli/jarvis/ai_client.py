@@ -479,6 +479,53 @@ def _provider_label(provider):
     return provider.get("name") or provider.get("type") or "provider"
 
 
+# BUG-8: agent turns and providers that can't be trusted with them.
+#
+# dev_agent / code_agent hand the model long, structured tool results (step
+# logs, run output, file listings) and expect it to act on what they really
+# say. In the first real dev-agent run Gemini answered 503/429 and ask()
+# failed over to Groq, which then misread those results (it "fixed" a server
+# that was working) and wrote garbled text. Falling back is right for a plain
+# chat turn -- a weaker answer beats none -- but for an agent turn a wrong
+# action is worse than an honest "the provider is overloaded, try again".
+#
+# A provider opts OUT with `"agent_safe": false` in its ai_config.json entry.
+# Nothing is flagged by default, so behavior is unchanged until the owner
+# marks a provider. The guard can be switched off for everyone with
+# defaults.agent_fallback_guard = false, and an explicit provider_override
+# (the Ask panel's provider picker) is never second-guessed: the owner chose
+# that order for this ask.
+AGENT_TOOL_NAMES = frozenset({"dev_agent", "code_agent"})
+_FALSE_WORDS = frozenset({"false", "no", "off", "0"})
+
+
+def _provider_agent_safe(provider):
+    """False only when the provider entry says so explicitly (False, or a
+    string like "false"/"no"/"off"); absent or anything else means safe."""
+    value = (provider or {}).get("agent_safe")
+    if value is False:
+        return False
+    if isinstance(value, str) and value.strip().lower() in _FALSE_WORDS:
+        return False
+    return True
+
+
+def _is_agent_turn(tool_executor, route):
+    """True once this ask is (or is clearly about to be) agent-tool work: an
+    agent tool already ran this turn (so a failover would hand a weaker model
+    a transcript full of agent output), or the router offered one for this
+    message (so the very first attempt is agent work too)."""
+    for run in (getattr(tool_executor, "runs", None) or []):
+        if isinstance(run, dict) and run.get("name") in AGENT_TOOL_NAMES:
+            return True
+    return bool(route is not None and AGENT_TOOL_NAMES.intersection(getattr(route, "tools", None) or []))
+
+
+def _agent_guard_skip_note(label):
+    return (f"skipped: agent turn (dev_agent/code_agent) and {label} is marked agent_safe=false "
+            f"-- it does not read tool output reliably, so Jarvis stops rather than let it act")
+
+
 def _host_of(provider):
     """host:port of a provider's endpoint, or None. Used to notice that two
     providers (both Ollama entries, say) share a server that just refused a
@@ -3473,6 +3520,12 @@ def _ask_impl(user_text, commands=None, on_attempt=None, on_tool_call=None, on_t
             _stream_state["dirty"] = False
         elif kind == ai_providers.EVENT_RESET:
             _stream_state["dirty"] = False
+        if kind == ai_providers.EVENT_THINKING and reasoning.normalize_level(think_level) == "off":
+            # Thinking is OFF for this ask. Some hosts (Groq's gpt-oss) send
+            # their reasoning anyway; it must not reach the web bubble or the
+            # CLI's dimmed stderr line as if the person had asked for it. The
+            # raw event log still keeps it (see ai_providers' own logging).
+            return
         if user_on_stream:
             user_on_stream(kind, **data)
 
@@ -3565,6 +3618,9 @@ def _ask_impl(user_text, commands=None, on_attempt=None, on_tool_call=None, on_t
 
     providers = sorted(providers, key=_model_cooling)
     dead_hosts = set()   # endpoints that refused a connection during THIS ask
+    # BUG-8: see AGENT_TOOL_NAMES. Off when the owner chose the provider order
+    # for this ask (provider_override) or set defaults.agent_fallback_guard=false.
+    agent_guard = bool(_defaults.get("agent_fallback_guard", True)) and not provider_override
 
     # Part E.4 point 2 ("Asks... append each as an event in the same
     # process, as it happens") — wrap the caller's own callbacks rather
@@ -3622,6 +3678,16 @@ def _ask_impl(user_text, commands=None, on_attempt=None, on_tool_call=None, on_t
         adapter = ai_providers.ADAPTERS.get(provider.get("type"))
         if adapter is None:
             attempts.append((label, f"unknown provider type '{provider.get('type')}'"))
+            continue
+        if (agent_guard and not _provider_agent_safe(provider)
+                and _is_agent_turn(tool_executor, route if tools_enabled else None)):
+            # BUG-8: never fail an agent turn over to a provider the owner
+            # marked as unreliable with tool output. Recorded like any other
+            # skip so the attempts list (and the error the person sees when
+            # nothing else answers) says exactly why.
+            attempts.append((label, _agent_guard_skip_note(label)))
+            trace.note_attempt_failed(label, _agent_guard_skip_note(label))
+            console_store.log("error", _agent_guard_skip_note(label), provider=label)
             continue
         host = _host_of(provider)
         if host and host in dead_hosts:

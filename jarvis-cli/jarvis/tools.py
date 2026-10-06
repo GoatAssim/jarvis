@@ -992,6 +992,7 @@ TOOLS = {
 # ---------------------------------------------------------------------------
 import sys  # noqa: E402  (deliberately after TOOLS is built, see below)
 from . import tool_loader  # noqa: E402  (deliberately after TOOLS is built)
+from . import tool_ui as tool_ui_module  # noqa: E402  (import-light; used by tool_ui_payload below)
 
 # logger=print (the default) would write auto-discovery log lines to
 # stdout. That's fine for most invocations, but `jarvis tools-list`
@@ -1183,12 +1184,75 @@ for _p in AUTO_PERSONAS:
         AUTO_ATTITUDES[_ca["id"]] = {"label": _ca["label"], "full": _ca["full"], "compact": _ca["compact"]}
 
 
-def personas_list_payload():
+def personas_list_payload(include_disabled=False):
     """Full catalog for the web UI's Skin modal (see `jarvis personas-list`
     / GET /api/personas). Every persona here is already fully validated and
     logo-resolved (PNGs are already base64 data URIs) — the web UI can
-    render this straight through with no further backend round trip."""
-    return {"personas": AUTO_PERSONAS, "attitudes": AUTO_ATTITUDES}
+    render this straight through with no further backend round trip.
+
+    A persona the owner switched off in the Tool Manager (tool_disable.py) is
+    left out, so the Skin modal never offers it. The Tool Manager itself passes
+    `include_disabled=True` (`personas-list --all`) to list every persona with a
+    `disabled` flag, so there is something to switch back on. Entries are copied
+    when flagged -- AUTO_PERSONAS is shared state and must not grow a key."""
+    off = tool_disable.disabled_personas()
+    if include_disabled:
+        personas = [{**p, "disabled": p.get("id") in off, "file": _PERSONA_FILES.get(p.get("id"), "")}
+                    for p in AUTO_PERSONAS]
+    else:
+        personas = [p for p in AUTO_PERSONAS if p.get("id") not in off]
+    return {"personas": personas, "attitudes": AUTO_ATTITUDES}
+
+
+# ---------------------------------------------------------------------------
+# Auto-discovered TOOL_UI elements — a button that opens a tool's own page, or a
+# Menu entry that opens its panel (see tool_ui.py, actions/_template.py section 9).
+# Same two directories and the same _AUTO_RECORDS as everything above; only a
+# record that loaded as a valid tool file can carry any. First registration of an
+# id wins (shipped actions/ is scanned before ~/.jarvis/tools/, so a user's file
+# can't replace a shipped element), a later duplicate is logged and dropped.
+# ---------------------------------------------------------------------------
+AUTO_UI = []
+_seen_ui_ids = {}
+for _r in _AUTO_VALID:
+    for _u in _r.ui:
+        if _u["id"] in _seen_ui_ids:
+            print(
+                f"[tool-ui] Duplicate UI element id {_u['id']!r} in {_r.file} — "
+                f"already registered by {_seen_ui_ids[_u['id']]}, skipped.",
+                file=sys.stderr,
+            )
+            continue
+        _seen_ui_ids[_u["id"]] = _r.file
+        AUTO_UI.append(_u)
+
+# persona id -> the file that registered it, for the Tool Manager's "where does this come from".
+_PERSONA_FILES = {_p["id"]: _seen_persona_ids.get(_p["id"], "") for _p in AUTO_PERSONAS}
+
+
+def tool_ui_payload(include_disabled=False):
+    """What `jarvis tool-ui list` / GET /api/tool-ui return: every UI element a tool
+    file shipped, without absolute paths. The browser asks for the default (switched-
+    off ones left out) to build its buttons and Menu entries; the Tool Manager asks
+    for `include_disabled=True` so it can list them all with a `disabled` flag."""
+    off = tool_disable.disabled_ui()
+    items = [tool_ui_module.public(u, disabled=u["id"] in off) for u in AUTO_UI]
+    if not include_disabled:
+        items = [u for u in items if not u["disabled"]]
+    return {"ui": items}
+
+
+def tool_ui_bundle(ui_id):
+    """The html / js / css of one element, or {"ok": False, ...}. Refuses an element
+    the owner switched off and one that doesn't exist (the browser never gets to
+    ask for an arbitrary path: it names an id, the id names a declared folder)."""
+    ui_id = (ui_id or "").strip()
+    entry = next((u for u in AUTO_UI if u["id"] == ui_id), None)
+    if entry is None:
+        return {"ok": False, "error": "no UI element called %r" % ui_id}
+    if tool_disable.is_ui_disabled(ui_id):
+        return {"ok": False, "disabled": True, "error": "%s is switched off in the Tool Manager" % ui_id}
+    return tool_ui_module.read_bundle(entry)
 
 
 @dataclass

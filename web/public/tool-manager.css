@@ -471,3 +471,15 @@
 .tm-agent__btns{ display: flex; flex-direction: column; gap: 5px; }
 .tm-code.is-ai-writing, .tm-editor .ce.is-ai-writing{ box-shadow: inset 0 0 0 1px var(--accent); }
 .tm-agent [hidden]{ display: none !important; }   /* the flex rules above would otherwise beat the hidden attribute */
+
+/* ------------------------------------------------- unfinished tools (backups) */
+
+.tm-draft{
+  display: flex; flex-direction: column; gap: 3px; padding: 8px 10px; text-align: left;
+  background: var(--bg-panel-2); border: 1px solid var(--border); border-radius: calc(var(--radius) * 0.6);
+}
+.tm-draft__preview{
+  font-family: var(--font-mono); font-size: 10.5px; color: var(--text-dimmer);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.tm-draft__btns{ display: flex; flex-wrap: wrap; gap: 6px; margin-top: 4px; }

@@ -74,7 +74,9 @@ RESERVED_NAMES = {
     "digest-status", "digest-on", "digest-off", "digest-now", "digest-preview",
     "ctools-list", "ctools-show", "ctools-write", "ctools-check",
     "ctools-delete", "ctools-run", "ctools-toggle", "ctools-templates",
-    "ctools-suggest", "ctools-agent",
+    "ctools-suggest", "ctools-agent", "ctools-drafts",
+    # tool-ui: the screens a tool file ships through TOOL_UI (list / bundle / run).
+    "tool-ui",
     # commands-check-name: added by this same fix (I-B2 item 2) so
     # web/server.js can ask the CLI instead of keeping its own copy.
     "commands-check-name",

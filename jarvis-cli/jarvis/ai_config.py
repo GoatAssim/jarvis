@@ -41,6 +41,18 @@ time it calls a tool that needs arguments it didn't supply) and shrinks
 how much of each tool's result gets replayed on a provider failover \u2014
 it's the cheapest mode, at the cost of that occasional extra round trip.
 
+A provider that reads tool output unreliably can be kept out of agent work:
+
+    {"name": "groq", ..., "agent_safe": false}
+
+When a turn is agent work (dev_agent / code_agent already ran, or the router
+offered one for the message), ask() will not fail over to a provider marked
+"agent_safe": false; it records why in the attempts list and stops with an
+honest error (or a report of what already ran) instead. Nothing is marked by
+default. "defaults.agent_fallback_guard": false turns the rule off for every
+provider, and a provider order picked for one ask (provider_override) is never
+second-guessed.
+
 Each provider can hold *more than one* key:
 
     "api_keys": ["sk-first...", "sk-second...", "sk-third..."]

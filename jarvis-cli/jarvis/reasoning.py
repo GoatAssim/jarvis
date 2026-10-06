@@ -391,11 +391,48 @@ def request_patch(provider_type, level, *, provider_name="", model="",
     return {}
 
 
+def off_patch(provider_type, *, provider_name="", model="", base_url=""):
+    """Keys that tell a host which reasons BY DEFAULT to stop (or at least
+    hide it) when the thinking level is `off`.
+
+    Groq's gpt-oss models reason on every request and return the reasoning
+    whether or not anyone asked, so "Thinking: Off" did nothing there: the
+    model still spent the tokens and the text still came back. Every other
+    provider here only thinks when it is sent a thinking knob, so for them
+    `off` already means off and this returns {}.
+
+    Only Groq is covered, matched by provider name or base_url, and only for
+    the model families whose off switch is documented:
+
+      gpt-oss      reasoning_effort "low" (the lowest it accepts) and
+                   include_reasoning false (do not return the text)
+      qwen3        reasoning_effort "none"
+      deepseek-r1  reasoning_format "hidden" (do not return the text)
+
+    Anything else returns {}: an unknown model gets exactly the request it got
+    before. A rejected key costs nothing, because the adapter's one-shot retry
+    already strips every key in _PATCH_KEYS when the host names it in a 400.
+    """
+    if provider_type != "openai_compatible":
+        return {}
+    host = f"{provider_name or ''} {base_url or ''}".lower()
+    if "groq" not in host:
+        return {}
+    m = (model or "").lower()
+    if "gpt-oss" in m:
+        return {"reasoning_effort": "low", "include_reasoning": False}
+    if "qwen3" in m or "qwen-3" in m:
+        return {"reasoning_effort": "none"}
+    if "deepseek-r1" in m or "r1-distill" in m:
+        return {"reasoning_format": "hidden"}
+    return {}
+
+
 # Every key any request_patch() above can introduce. The retry-without-
 # thinking path strips exactly this set, so a provider that rejects one of
 # them never costs a whole API key.
 _PATCH_KEYS = ("thinking", "think", "reasoning", "reasoning_effort",
-               "reasoning_format", "_generationConfig")
+               "reasoning_format", "include_reasoning", "_generationConfig")
 
 
 def strip_from_payload(payload):
