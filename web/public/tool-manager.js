@@ -25,6 +25,25 @@
  * (Jarvis breaks without them); they show a lock and the reason. The rules live
  * in jarvis/tool_disable.py — this file only shows and flips them.
  *
+ * DAEMONS, PERSONAS AND SCREENS
+ * ------------------------------
+ * The list also carries three more kinds of thing, each with the same switch:
+ *   Daemon    a background service (Daemons panel). OFF edits the daemon's own `enabled`
+ *             flag: it can't be started by hand, by a schedule, by autostart or by Jarvis.
+ *             One that is already running keeps running; stop it in the Daemons panel.
+ *   Persona   one a tool file registered (PERSONAS). OFF hides it from the Skin picker.
+ *   Screen    a button or Menu entry a tool file ships (TOOL_UI). OFF removes it and
+ *             refuses to serve its files; the tool itself keeps working.
+ * Personas and screens are kept in ~/.jarvis/disabled.json beside tools and commands.
+ *
+ * UNFINISHED TOOLS
+ * ----------------
+ * Every editor tab with changes is backed up to ~/.jarvis/tools/_drafts a couple of
+ * seconds after you stop typing, saved or not, and a Save Jarvis refuses is backed up
+ * too. The Overview lists them under "Unfinished tools" so a closed tab, a cleared
+ * browser or a Discard never loses the text. Restore opens a new tab; the backup is
+ * removed when that text saves successfully.
+ *
  * EDITOR TABS, ASK JARVIS, CLOSABLE PANES (L.43 / L.44)
  * -----------------------------------------------------
  * Every tool you open or create is a TAB over the middle pane, like an IDE.
@@ -47,6 +66,10 @@
  *   GET  /api/disabled             what is off + the protected map
  *   GET  /api/disabled/dependents  scheduled jobs that name a tool/command
  *   /api/ctools[...]               list / show / check / write / run / enabled / delete / draft / templates
+ *   /api/ctools/drafts[/:key]      the unfinished-tool backups
+ *   GET  /api/daemons, PATCH /api/daemons/:id   daemons and their `enabled` flag
+ *   GET  /api/personas?all=1, GET /api/tool-ui?all=1   registered personas / shipped screens (incl. switched-off)
+ *   POST /api/tools/disabled {kind}  switch a persona or screen off/on
  *
  * EVERYTHING IS TEXT, NEVER MARKUP
  * --------------------------------
@@ -72,8 +95,11 @@
   ];
   const KEYS = SAFEGUARDS.map((s) => s.key);
 
-  const SOURCE_BUCKETS = { builtin: "shipped", auto: "shipped", mcp: "mcp", user: "user", command: "command" };
-  const SOURCE_LABELS = { shipped: "Shipped", user: "Yours", mcp: "MCP", command: "Command" };
+  const SOURCE_BUCKETS = { builtin: "shipped", auto: "shipped", mcp: "mcp", user: "user", command: "command", daemon: "daemon", persona: "persona", ui: "ui" };
+  const SOURCE_LABELS = { shipped: "Shipped", user: "Yours", mcp: "MCP", command: "Command", daemon: "Daemon", persona: "Persona", ui: "Screen" };
+  // Kinds that are not tools: they get the switch and a short detail, nothing else.
+  const EXTRA_KINDS = ["daemon", "persona", "ui"];
+  const KIND_NOUN = { tool: "tool", command: "saved command", daemon: "daemon", persona: "persona", ui: "screen" };
   // Row states: loaded | off (switched off by you) | fileoff (its file is switched
   // off) | pending (valid file, not loaded yet) | failed (file rejected).
   const OFF_STATES = ["off", "fileoff"];
@@ -86,6 +112,9 @@
   function groupLabel(id) {
     if (id === "__failed") return "Failed to load";
     if (id === "commands") return "Saved commands";
+    if (id === "daemons") return "Daemons";
+    if (id === "personas") return "Personas";
+    if (id === "ui_elements") return "Screens";
     return String(id || "other").replace(/_/g, " ");
   }
 
@@ -94,7 +123,7 @@
   // switched off is "fileoff"; an unreadable file is "failed". Saved commands
   // (kind "command") are "loaded" or "off". `disabledCommands` is the list from
   // /api/disabled.
-  function buildRows(tools, files, commands, disabledCommands) {
+  function buildRows(tools, files, commands, disabledCommands, extras) {
     const rows = [];
     const byName = new Map();
     (Array.isArray(tools) ? tools : []).forEach((t) => {
@@ -147,6 +176,35 @@
         });
       });
     }
+    // Daemons, personas and screens (extras = {daemons, personas, ui}, each an array or
+    // missing). A daemon is "off" when its own `enabled` flag is false; a persona or screen
+    // when the owner switched it off (the server flags it `disabled`).
+    const ex = extras && typeof extras === "object" ? extras : {};
+    (Array.isArray(ex.daemons) ? ex.daemons : []).forEach((d) => {
+      if (!d || typeof d.id !== "string" || !d.id) return;
+      rows.push({
+        id: "d:" + d.id, kind: "daemon", state: d.enabled === false ? "off" : "loaded", name: d.id, protectedReason: "",
+        description: d.description || "", source: "daemon", group: "daemons", file: "", userFile: null, error: "",
+        flags: null, defaults: null, parameters: {}, extra: d,
+      });
+    });
+    (Array.isArray(ex.personas) ? ex.personas : []).forEach((p) => {
+      if (!p || typeof p.id !== "string" || !p.id) return;
+      rows.push({
+        id: "p:" + p.id, kind: "persona", state: p.disabled ? "off" : "loaded", name: p.id, protectedReason: "",
+        description: p.name ? (p.name + (p.assistant_name && p.assistant_name !== p.name ? " — " + p.assistant_name : "")) : "",
+        source: "persona", group: "personas", file: p.file || "", userFile: null, error: "",
+        flags: null, defaults: null, parameters: {}, extra: p,
+      });
+    });
+    (Array.isArray(ex.ui) ? ex.ui : []).forEach((u) => {
+      if (!u || typeof u.id !== "string" || !u.id) return;
+      rows.push({
+        id: "u:" + u.id, kind: "ui", state: u.disabled ? "off" : "loaded", name: u.id, protectedReason: "",
+        description: u.hint || u.title || u.label || "", source: "ui", group: "ui_elements", file: u.file || "", userFile: null, error: "",
+        flags: null, defaults: null, parameters: {}, extra: u,
+      });
+    });
     return rows;
   }
 
@@ -205,6 +263,8 @@
     out.off = rows.filter((r) => r.kind === "tool" && isOff(r)).length;
     out.commands = rows.filter((r) => r.kind === "command").length;
     out.commandsOff = rows.filter((r) => r.kind === "command" && isOff(r)).length;
+    out.extraOff = { daemon: 0, persona: 0, ui: 0 };
+    rows.forEach((r) => { if (EXTRA_KINDS.includes(r.kind) && isOff(r)) out.extraOff[r.kind] += 1; });
     KEYS.forEach((k) => { out[k] = loaded.filter((r) => r.flags[k]).length; });
     out.bySource = { shipped: 0, user: 0, mcp: 0, command: 0 };
     loaded.forEach((r) => { out.bySource[bucketOf(r.source)] += 1; });
@@ -240,6 +300,15 @@
   // strip. One place, so the two can't disagree.
   function availabilityHint(row) {
     if (!row) return "";
+    if (row.kind === "daemon") {
+      return "Switch off and this daemon can't be started — by you, by a schedule, by autostart or by Jarvis. One that is already running keeps running until you stop it.";
+    }
+    if (row.kind === "persona") {
+      return "Switch off and this persona no longer appears in the Skin picker. Nothing else about Jarvis changes.";
+    }
+    if (row.kind === "ui") {
+      return "Switch off and this button or Menu entry disappears, and its page is no longer served. The tool it belongs to keeps working.";
+    }
     if (row.kind === "command") {
       return "Switch off and Jarvis can't see or run this saved command; a scheduled job that uses it fails with a clear message. You can still run it yourself.";
     }
@@ -247,6 +316,11 @@
   }
 
   function offOutcome(row) {
+    if (row && row.kind === "daemon") {
+      return "It can’t be started. If it is running right now it keeps running — stop it in the Daemons panel.";
+    }
+    if (row && row.kind === "persona") return "It is hidden from the Skin picker.";
+    if (row && row.kind === "ui") return "Its button or Menu entry is gone and its page isn’t served.";
     if (row && row.kind === "command") {
       return "Jarvis doesn’t know this command exists, and a call to it is refused. Scheduled jobs that run it fail when they fire.";
     }
@@ -266,6 +340,10 @@
     const parts = [];
     if (cov.off) parts.push(cov.off + (cov.off === 1 ? " tool" : " tools"));
     if (cov.commandsOff) parts.push(cov.commandsOff + (cov.commandsOff === 1 ? " saved command" : " saved commands"));
+    const eo = cov.extraOff || {};
+    if (eo.daemon) parts.push(eo.daemon + (eo.daemon === 1 ? " daemon" : " daemons"));
+    if (eo.persona) parts.push(eo.persona + (eo.persona === 1 ? " persona" : " personas"));
+    if (eo.ui) parts.push(eo.ui + (eo.ui === 1 ? " screen" : " screens"));
     return parts.join(", ");
   }
 
@@ -377,6 +455,43 @@
     return { text, head: c ? done - 1 : -1, tail: !!rest };
   }
 
+  // Unfinished-tool backups (the Overview's list). `d` is one entry of /api/ctools/drafts.
+  function draftTitle(d) {
+    const n = (d && (d.orig_name || d.name)) || "";
+    return n ? n : "untitled tool";
+  }
+
+  function draftAge(saved, now) {
+    const t = Date.parse(String(saved || ""));
+    if (!isFinite(t)) return "";
+    const secs = Math.max(0, Math.round(((now == null ? Date.now() : now) - t) / 1000));
+    if (secs < 60) return "just now";
+    if (secs < 3600) return Math.floor(secs / 60) + " min ago";
+    if (secs < 86400) return Math.floor(secs / 3600) + " h ago";
+    return Math.floor(secs / 86400) + " d ago";
+  }
+
+  // A key for a new editor tab's backup: lowercase, matches the server's DRAFT_KEY_RE.
+  const DRAFT_KEY_RE = /^[a-z0-9][a-z0-9_-]{0,63}$/;
+  function newDraftKey(rand, now) {
+    const r = (rand == null ? Math.random() : rand).toString(36).slice(2, 8) || "x";
+    return "d" + (now == null ? Date.now() : now).toString(36) + r;
+  }
+
+  // The lines under a passing check about TOOL_UI. For a NEW tool made from a template
+  // that ships a folder, the folder doesn't exist until the first save, so the server's
+  // "nothing to show" about it is expected: say what will happen instead of alarming.
+  function uiLines(result, templateFolder, isNew) {
+    const lines = [];
+    (result && result.ui_problems || []).forEach((p) => {
+      if (isNew && templateFolder && /no tool\.html|nothing to show/.test(p) && p.indexOf('"' + templateFolder + '"') >= 0) return;
+      if (isNew && templateFolder && /no tool\.html|nothing to show/.test(p) && p.indexOf(templateFolder) >= 0) return;
+      lines.push("Ignored (the tool still loads): " + p);
+    });
+    if (isNew && templateFolder) lines.push("Saving also creates ~/.jarvis/tools/" + templateFolder + "/ with a starter tool.html, tool.js and tool.css (never over a folder that already exists).");
+    return lines;
+  }
+
   function formatBytes(n) {
     n = Number(n) || 0;
     return n < 1024 ? n + " B" : (n / 1024).toFixed(n < 10240 ? 1 : 0) + " KB";
@@ -406,7 +521,7 @@
     SAFEGUARDS, KEYS, NAME_RE, STAGES, MAX_SOURCE_CHARS, bucketOf, groupLabel, buildRows, matchesSearch, matchesSafeguard,
     matchesSource, filterRows, groupRows, coverage, callOutcome, jobOutcome, changedKeys, nameProblem, importNameFromFile,
     importProblem, sourceProblem, parseErrorLine, stageStates, lineCount, formatBytes, parseArgs, paramList,
-    nextFree, splitAgentReply, overwriteView,
+    nextFree, splitAgentReply, overwriteView, EXTRA_KINDS, KIND_NOUN, draftTitle, draftAge, newDraftKey, DRAFT_KEY_RE, uiLines,
   };
 
   /* =======================================================================
@@ -422,6 +537,8 @@
   const state = {
     built: false, loading: false, tools: null, files: [], templates: [], rows: [],
     commands: null, disabledCommands: [], toolsError: "", filesError: "", commandsError: "",
+    daemons: [], personas: [], uiElements: [], extrasError: "",   // the non-tool rows: daemons, tool-registered personas, shipped screens
+    drafts: [], draftsError: "",                                  // backups of tools still being written (see "UNFINISHED TOOLS")
     selected: null, view: "tool",
     search: "", source: "all", group: "all", safeguard: "any",
     collapsed: new Set(), busy: new Set(),
@@ -518,16 +635,16 @@
   /* ---- list ---------------------------------------------------------------- */
 
   function renderChips() {
-    const counts = { all: state.rows.length, shipped: 0, user: 0, mcp: 0, command: 0, off: 0, attention: 0 };
+    const counts = { all: state.rows.length, shipped: 0, user: 0, mcp: 0, command: 0, daemon: 0, persona: 0, ui: 0, off: 0, attention: 0 };
     state.rows.forEach((r) => {
       counts[bucketOf(r.source)] += 1;
       if (isOff(r)) counts.off += 1;
       if (needsAttention(r)) counts.attention += 1;
     });
-    const defs = [["all", "All"], ["shipped", "Shipped"], ["user", "Yours"], ["mcp", "MCP"], ["command", "Commands"], ["off", "Off"], ["attention", "Attention"]];
+    const defs = [["all", "All"], ["shipped", "Shipped"], ["user", "Yours"], ["mcp", "MCP"], ["command", "Commands"], ["daemon", "Daemons"], ["persona", "Personas"], ["ui", "Screens"], ["off", "Off"], ["attention", "Attention"]];
     clear(dom.chips);
     defs.forEach(([id, label]) => {
-      if (["mcp", "command", "off", "attention"].includes(id) && !counts[id] && state.source !== id) return;
+      if (["mcp", "command", "daemon", "persona", "ui", "off", "attention"].includes(id) && !counts[id] && state.source !== id) return;
       dom.chips.appendChild(el("button", {
         class: "tm-chip" + (id === "attention" ? " tm-chip--bad" : ""), type: "button",
         "aria-pressed": state.source === id ? "true" : "false",
@@ -548,7 +665,7 @@
   function cardFor(row) {
     const active = state.selected === row.id;
     const meta = el("div", { class: "tm-card__meta" });
-    meta.appendChild(tag(SOURCE_LABELS[bucketOf(row.source)], bucketOf(row.source) === "user" ? "warn" : (bucketOf(row.source) === "mcp" || bucketOf(row.source) === "command") ? "info" : ""));
+    meta.appendChild(tag(SOURCE_LABELS[bucketOf(row.source)], bucketOf(row.source) === "user" ? "warn" : ["mcp", "command", "daemon", "persona", "ui"].includes(bucketOf(row.source)) ? "info" : ""));
     if (row.state === "off") meta.appendChild(tag("off", "bad", "Switched off — Jarvis can't see or use it"));
     if (row.state === "fileoff") meta.appendChild(tag("file off", ""));
     if (row.protectedReason) meta.appendChild(tag("always on", "info", row.protectedReason));
@@ -658,7 +775,7 @@
     const on = row.state !== "off";
     const eligible = row.state === "loaded" || row.state === "off";
     const locked = !!row.protectedReason || !eligible;
-    const busy = state.busy.has(row.name + ":enabled");
+    const busy = state.busy.has(row.id + ":enabled");
     const hintId = "tm-hint-enabled";
     const body = el("div", null, [
       el("div", { class: "tm-sw-title" }, ["Available to Jarvis", el("span", { class: "tm-sw-key", "aria-hidden": "true", title: "Keyboard shortcut" }, "4"),
@@ -709,8 +826,10 @@
   function renderToolDetail(row) {
     const d = dom.detail;
     clear(d);
-    setText(dom.midTitle, row.kind === "broken" ? "Rejected file" : row.kind === "command" ? "Saved command" : "Tool");
+    setText(dom.midTitle, row.kind === "broken" ? "Rejected file" : row.kind === "command" ? "Saved command"
+      : row.kind === "daemon" ? "Daemon" : row.kind === "persona" ? "Persona" : row.kind === "ui" ? "Screen" : "Tool");
     if (row.kind === "command") { renderCommandDetail(row); return; }
+    if (EXTRA_KINDS.includes(row.kind)) { renderExtraDetail(row); return; }
 
     if (row.kind === "broken") {
       const f = row.userFile;
@@ -784,10 +903,82 @@
         : el("div", { class: "tm-none" }, (row.state === "loaded" || row.state === "off") ? "Takes no parameters." : "Not available until the tool is loaded."),
     ]));
 
+    const screens = screensSection(row);
+    if (screens) d.appendChild(screens);
     if (row.userFile) d.appendChild(fileSection(row));
     else if (row.source === "mcp") {
       d.appendChild(el("div", { class: "tm-note tm-note--info" }, [el("b", null, "MCP tool. "), "Its server is managed in Menu → MCP Servers. Switching this one tool off leaves the rest of the server alone."]));
     }
+  }
+
+  // A daemon, a tool-registered persona or a shipped screen: the on/off switch plus what
+  // it is and where it came from. Everything else about them is edited where it always
+  // was (Daemons panel, the tool file) — this panel only decides whether they are on.
+  function infoRows(pairs) {
+    return el("div", { class: "tm-params" }, pairs.filter((p) => p[1] !== "" && p[1] != null).map((p) => el("div", { class: "tm-param" }, [
+      el("div", { class: "tm-param__name" }, p[0]), el("div", { class: "tm-param__desc" }, String(p[1])),
+    ])));
+  }
+
+  function renderExtraDetail(row) {
+    const d = dom.detail, x = row.extra || {};
+    const label = SOURCE_LABELS[bucketOf(row.source)];
+    const badges = [tag(label, "info"), row.state === "off" ? tag("switched off", "bad") : tag("on", "info")];
+    if (row.kind === "daemon") {
+      if (x.builtin) badges.push(tag("built in"));
+      if (x.status) badges.push(tag(String(x.status), x.running ? "info" : ""));
+    }
+    if (row.kind === "ui") badges.push(tag(x.mode === "menu" ? "Menu entry" : "button"));
+    d.appendChild(el("div", null, [
+      el("div", { class: "tm-title" }, row.kind === "daemon" ? (x.name || row.name) : row.kind === "persona" ? (x.name || row.name) : (x.label || row.name)),
+      el("div", { class: "tm-does" + (row.description ? "" : " is-empty") }, row.description || "No description."),
+      el("div", { class: "tm-badges" }, badges),
+    ]));
+    d.appendChild(el("div", null, [sectionTitle("Availability"), el("div", { class: "tm-sw-list" }, [availabilityRow(row)])]));
+    if (row.kind === "daemon" && row.state === "off" && x.running) {
+      d.appendChild(el("div", { class: "tm-note" }, [el("b", null, "It is still running. "), "Switching it off only stops it being started again. Stop it from the Daemons panel."]));
+    }
+    d.appendChild(el("div", null, [
+      sectionTitle("What this means"),
+      row.state === "off"
+        ? el("div", { class: "tm-outcome", "data-o": "off" }, [el("span", { class: "tm-outcome__glyph", "aria-hidden": "true" }, "⏻"), el("div", null, [el("b", null, "Switched off. "), offOutcome(row)])])
+        : el("div", { class: "tm-outcome", "data-o": "free" }, [el("span", { class: "tm-outcome__glyph", "aria-hidden": "true" }, "▷"), el("div", null, [el("b", null, "On. "), availabilityHint(row).replace(/^Switch off and /, "If you switch it off, ")])]),
+    ]));
+    if (row.kind === "daemon") {
+      d.appendChild(el("div", null, [sectionTitle("Details"), infoRows([
+        ["Id", row.name], ["Status", x.status], ["Autostart", x.autostart ? "yes" : "no"],
+        ["Categories", (x.categories || []).join(", ")], ["Next start", x.next_start || ""], ["Last error", x.last_error || ""],
+      ])]));
+      d.appendChild(el("div", { class: "tm-actions" }, [el("button", { class: "btn btn--ghost btn--sm", type: "button", onclick: () => { close(); if (global.JarvisDaemons) global.JarvisDaemons.open(); } }, "Open the Daemons panel")]));
+    } else if (row.kind === "persona") {
+      d.appendChild(el("div", null, [sectionTitle("Details"), infoRows([
+        ["Id", row.name], ["Assistant name", x.assistant_name], ["Addresses you as", x.address_user_as], ["Colour", x.hex],
+        ["Registered by", x.file ? "~/.jarvis/tools/ or actions/ — " + x.file : ""],
+      ])]));
+    } else {
+      const files = x.files || {};
+      d.appendChild(el("div", null, [sectionTitle("Details"), infoRows([
+        ["Id", row.name], ["Declared in", x.file], ["Opens as", x.mode === "menu" ? "an entry in the Menu, in a panel" : "a button beside the Menu button, in a sandboxed window"],
+        ["Folder", x.path], ["Files", ["html", "js", "css"].map((k) => files[k]).filter(Boolean).join(", ")], ["Its tool", x.tool || ""],
+        ["Problems", (x.missing || []).length ? "declared but missing: " + x.missing.join(", ") : ""],
+      ])]));
+      if (row.state !== "off") {
+        d.appendChild(el("div", { class: "tm-actions" }, [el("button", { class: "btn btn--primary btn--sm", type: "button", onclick: () => { close(); if (global.JarvisToolUI) global.JarvisToolUI.open(row.name); } }, "Open it now")]));
+      }
+    }
+  }
+
+  // The screens a tool file ships, listed on the detail of any tool from that file.
+  function screensSection(row) {
+    const file = row.file || (row.userFile && row.userFile.file) || "";
+    if (!file) return null;
+    const mine = state.rows.filter((r) => r.kind === "ui" && r.file === file);
+    if (!mine.length) return null;
+    return el("div", null, [sectionTitle("Screens from this file", String(mine.length)),
+      el("div", { class: "tm-attn" }, mine.map((r) => el("button", { class: "tm-attn__item", type: "button", "data-tm-state": r.state, onclick: () => select(r.id) }, [
+        el("div", { class: "tm-attn__name" }, r.name),
+        el("div", { class: "tm-attn__why" }, ((r.extra && r.extra.mode === "menu") ? "Menu entry" : "Button") + (r.state === "off" ? " · switched off" : "")),
+      ])))]);
   }
 
   // A saved command (commands.json): read-only here apart from the on/off switch.
@@ -890,12 +1081,14 @@
       offRows.slice(0, 10).forEach((r) => {
         offList.appendChild(el("button", { class: "tm-attn__item", type: "button", "data-tm-state": r.state, onclick: () => select(r.id) }, [
           el("div", { class: "tm-attn__name" }, r.name),
-          el("div", { class: "tm-attn__why" }, (r.kind === "command" ? "Saved command" : "Tool") + (r.state === "fileoff" ? " · its file is switched off" : " · switched off by you")),
+          el("div", { class: "tm-attn__why" }, (r.kind === "command" ? "Saved command" : EXTRA_KINDS.includes(r.kind) ? SOURCE_LABELS[bucketOf(r.source)] : "Tool") + (r.state === "fileoff" ? " · its file is switched off" : " · switched off by you")),
         ]));
       });
       side.appendChild(el("div", null, [sectionTitle("Switched off", String(offRows.length)), offList,
         offRows.length > 10 ? el("div", { class: "tm-hint", style: "margin-top:6px" }, "+" + (offRows.length - 10) + " more — use the Off filter.") : null]));
     }
+
+    if (state.drafts.length || state.draftsError) side.appendChild(draftsSection());
 
     side.appendChild(el("div", null, [sectionTitle("Add a tool"), el("div", { class: "tm-actions" }, [
       el("button", { class: "btn btn--primary", type: "button", onclick: () => enterEditor({ mode: "new" }) }, "Create a tool…"),
@@ -1005,12 +1198,12 @@
   // silently. Switching back on never asks. Nothing changes until the server
   // confirms it saved, so the switch never shows a state that wasn't stored.
   async function setAvailable(row, available) {
-    const token = row.name + ":enabled";
+    const token = row.id + ":enabled";
     if (state.busy.has(token) || row.protectedReason) return;
     if (row.state !== "loaded" && row.state !== "off") return;
-    const kind = row.kind === "command" ? "command" : "tool";
-    const what = kind === "command" ? "saved command" : "tool";
-    if (!available) {
+    const kind = row.kind === "command" ? "command" : EXTRA_KINDS.includes(row.kind) ? row.kind : "tool";
+    const what = KIND_NOUN[kind] || "tool";
+    if (!available && (kind === "tool" || kind === "command")) {
       let jobs = [], unknown = false;
       try {
         const res = await api("/api/disabled/dependents?kind=" + kind + "&name=" + encodeURIComponent(row.name));
@@ -1029,9 +1222,20 @@
     }
     state.busy.add(token); refreshAfterAvailability(row);
     try {
-      const path = kind === "command" ? "/api/commands/" + encodeURIComponent(row.name) + "/disabled" : "/api/tools/disabled";
-      await api(path, { method: "POST", body: JSON.stringify({ name: row.name, value: !available }) });
+      if (kind === "daemon") {
+        // A daemon's own `enabled` flag (the Daemons panel edits the same one), not a second copy.
+        await api("/api/daemons/" + encodeURIComponent(row.name), { method: "PATCH", body: JSON.stringify({ enabled: available }) });
+      } else if (kind === "persona" || kind === "ui") {
+        await api("/api/tools/disabled", { method: "POST", body: JSON.stringify({ name: row.name, value: !available, kind }) });
+      } else {
+        const path = kind === "command" ? "/api/commands/" + encodeURIComponent(row.name) + "/disabled" : "/api/tools/disabled";
+        await api(path, { method: "POST", body: JSON.stringify({ name: row.name, value: !available }) });
+      }
       row.state = available ? "loaded" : "off";
+      if (row.extra) row.extra = Object.assign({}, row.extra, kind === "daemon" ? { enabled: available } : { disabled: !available });
+      // The rest of the app reads these once; tell it.
+      if (kind === "ui" && global.JarvisToolUI) global.JarvisToolUI.refresh();
+      if (kind === "persona" && global.JarvisHost && global.JarvisHost.reloadPersonas) global.JarvisHost.reloadPersonas();
       if (kind === "command") {
         state.disabledCommands = available ? state.disabledCommands.filter((n) => n !== row.name) : state.disabledCommands.concat([row.name]);
       }
@@ -1123,6 +1327,9 @@
       source: opts.source || "", template: opts.template || "minimal", dirty: !!opts.dirty, saved: mode === "edit",
       result: null, errorLine: null, busy: "", nameTouched: false, untitled: 0,
       pane: null, cm: null, ui: null, sourceBeforeAi: null,
+      // The key this tab's backup is stored under (see "UNFINISHED TOOLS"); draftSynced is
+      // the text last sent there, so an unchanged tab sends nothing; draftTimer debounces.
+      draftKey: DRAFT_KEY_RE.test(opts.draftKey || "") ? opts.draftKey : newDraftKey(), draftSynced: opts.draftSynced || "", draftTimer: 0,
       chat: { messages: [], history: [], busy: false, abort: null, backup: null, undoable: false },
     };
     if (mode === "new") {
@@ -1199,6 +1406,7 @@
       }
     }
     if (ed.chat.abort) { try { ed.chat.abort.abort(); } catch (_) { /* already finished */ } }
+    if (state.tabs.includes(ed)) await finishDraftOnClose(ed, !!(opts && opts.force));
     const idx = state.tabs.indexOf(ed);
     if (idx < 0) return true;                       // closed twice while the confirm was open
     const wasActive = state.view === "editor" && state.editor === ed;
@@ -1235,7 +1443,7 @@
     const ed = newEditorState(opts);
     state.tabs.push(ed);
     showEditor(ed);
-    if (mode === "new") await loadTemplate(ed, ed.template, true);
+    if (mode === "new" && !opts.keepSource) await loadTemplate(ed, ed.template, true);
     if (ed.errorLine && ed.cm) { ed.cm.setErrorLine(ed.errorLine); if (state.editor === ed) revealLine(ed.errorLine); }
     if (state.editor === ed && ed.pane) {
       if (mode === "new") { const n = ed.pane.querySelector("#tm-ed-name"); if (n) n.focus(); } else if (ed.cm) ed.cm.focus();
@@ -1264,6 +1472,16 @@
     if (!chip) return;
     chip.className = "tm-state-chip" + (ed.dirty ? " is-dirty" : ed.saved ? " is-saved" : "");
     chip.textContent = ed.dirty ? "Unsaved changes" : ed.saved ? "Saved" : "Not saved yet";
+  }
+
+  // What choosing a template will also create. The two TOOL_UI templates ship a folder.
+  function templateFolderOf(id) {
+    const t = (state.templates || []).find((x) => x.id === id);
+    return t && t.folder ? t.folder : "";
+  }
+  function templateHelpText(id) {
+    const folder = templateFolderOf(id);
+    return folder ? "Saving also creates ~/.jarvis/tools/" + folder + "/" : " ";
   }
 
   function nameHelp(ed) {
@@ -1296,7 +1514,7 @@
   function createEditorPane(ed) {
     const name = el("input", { class: "tm-input", id: "tm-ed-name", type: "text", autocomplete: "off", spellcheck: "false",
       placeholder: "my_tool", value: ed.name, readonly: ed.mode === "edit" || null, "aria-describedby": "tm-ed-name-help", style: "width:210px" });
-    name.addEventListener("input", () => { ed.name = name.value.trim().toLowerCase(); ed.nameTouched = true; ed.dirty = true; updateChip(ed); nameHelp(ed); renderTabs(); persistSoon(); });
+    name.addEventListener("input", () => { ed.name = name.value.trim().toLowerCase(); ed.nameTouched = true; ed.dirty = true; updateChip(ed); nameHelp(ed); renderTabs(); persistSoon(); draftSoon(ed); });
     const tpl = el("select", { class: "tm-select", id: "tm-ed-template", "aria-label": "Start from a template", style: "min-width:150px",
       onchange: async (e) => {
         const id = e.target.value;
@@ -1305,6 +1523,7 @@
         await loadTemplate(ed, id);
       } }, (state.templates.length ? state.templates : [{ id: "minimal", label: "Minimal" }]).map((t) => el("option", { value: t.id, title: t.hint || "" }, t.label)));
     tpl.value = ed.template;
+    tpl.addEventListener("change", () => { const h = inPane(ed, "#tm-ed-template-help"); if (h) h.textContent = templateHelpText(tpl.value); });
 
     const actions = el("div", { class: "tm-editor__actions" }, [
       el("button", { class: "btn btn--primary", type: "button", id: "tm-ed-save", onclick: saveEditor, title: "Save (Ctrl+S)" }, "Save"),
@@ -1313,7 +1532,7 @@
     ]);
     const bar = el("div", { class: "tm-editor__bar" }, [
       el("div", { class: "tm-field" }, [el("label", { class: "tm-field__label", for: "tm-ed-name" }, "File name"), name, el("span", { class: "tm-field__help", id: "tm-ed-name-help" })]),
-      ed.mode === "new" ? el("div", { class: "tm-field" }, [el("label", { class: "tm-field__label", for: "tm-ed-template" }, "Template"), tpl, el("span", { class: "tm-field__help" }, " ")]) : null,
+      ed.mode === "new" ? el("div", { class: "tm-field" }, [el("label", { class: "tm-field__label", for: "tm-ed-template" }, "Template"), tpl, el("span", { class: "tm-field__help", id: "tm-ed-template-help" }, templateHelpText(ed.template))]) : null,
       el("span", { class: "tm-state-chip", id: "tm-ed-chip" }),
       actions,
     ]);
@@ -1328,7 +1547,7 @@
   function makeCodeEditor(ed) {
     const common = {
       value: ed.source, label: "Tool source code", placeholder: "Pick a template above, write a tool here, or ask Jarvis below.",
-      onChange: (v) => { ed.source = v; ed.dirty = true; ed.errorLine = null; updateChip(ed); renderTabs(); if (state.editor === ed) scheduleOutline(); persistSoon(); },
+      onChange: (v) => { ed.source = v; ed.dirty = true; ed.errorLine = null; updateChip(ed); renderTabs(); if (state.editor === ed) scheduleOutline(); persistSoon(); draftSoon(ed); },
       onSave: saveEditor, onValidate: validateEditor,
     };
     if (global.JarvisCodeEditor) {
@@ -1398,9 +1617,17 @@
     if (problem) { const n = inPane(ed, "#tm-ed-name"); if (n) n.focus(); return; }
     ed.busy = "save"; renderSide();
     try {
-      const r = await ctools("/" + encodeURIComponent(ed.name), { method: "PUT", body: JSON.stringify({ source: ed.source }) });
+      // draftKey: a successful save removes this tab's backup, a refused one keeps the text
+      // there. scaffold: the template a NEW file started from, so its html/js/css folder is made.
+      if (ed.draftTimer) { clearTimeout(ed.draftTimer); ed.draftTimer = 0; }
+      const r = await ctools("/" + encodeURIComponent(ed.name), { method: "PUT", body: JSON.stringify({
+        source: ed.source, draftKey: ed.draftKey, scaffold: ed.mode === "new" ? ed.template : "" }) });
       applyResult(r, ed);
       if (r && r.ok) {
+        ed.draftSynced = "";
+        if (r.scaffolded && r.scaffolded.length) toast("Also created " + r.scaffolded.join(", ") + " in ~/.jarvis/tools.", "success");
+        else if (r.scaffold_note) toast(r.scaffold_note, "info");
+        loadDraftsSoon();
         ed.mode = "edit"; ed.origName = ed.name; ed.dirty = false; ed.saved = true;
         if (state.editor === ed) setText(dom.midTitle, "Editing " + ed.origName);
         // From here on this IS that file. Lock the name (a retyped name in "edit"
@@ -1414,8 +1641,138 @@
         await loadAll({ quiet: true, keepView: true });
         nameHelp(ed); renderTabs(); persistSoon();
       }
-    } catch (e) { applyResult(e.data && e.data.error ? Object.assign({ ok: false }, e.data) : { ok: false, stage: "error", error: e.message }, ed); }
+    } catch (e) {
+      applyResult(e.data && e.data.error ? Object.assign({ ok: false }, e.data) : { ok: false, stage: "error", error: e.message }, ed);
+      // A refused save is stashed on the server (draft_saved) so it isn't only in this tab.
+      if (e.data && e.data.draft_saved) { ed.draftSynced = ed.source; loadDraftsSoon(); }
+    }
     ed.busy = ""; updateChip(ed); if (state.editor === ed) renderSide();
+  }
+
+  /* ---- unfinished-tool backups ------------------------------------------------------ */
+
+  // A couple of seconds after the last change, copy a changed tab's text to the server.
+  // Failure is silent: the tab is still kept in this browser (persistTabs); this is the
+  // second copy that survives a cleared browser, a Discard and a refused save.
+  function draftSoon(ed) {
+    if (!ed || !ed.dirty) return;
+    if (ed.draftTimer) clearTimeout(ed.draftTimer);
+    ed.draftTimer = setTimeout(() => { ed.draftTimer = 0; syncDraft(ed); }, 2500);
+  }
+
+  async function syncDraft(ed) {
+    if (!ed || !ed.dirty || !String(ed.source || "").trim() || ed.source === ed.draftSynced) return;
+    const text = ed.source;
+    try {
+      await api("/api/ctools/drafts/" + encodeURIComponent(ed.draftKey), { method: "PUT", body: JSON.stringify({
+        source: text, name: ed.name, mode: ed.mode, origName: ed.origName, template: ed.template }) });
+      ed.draftSynced = text;
+      loadDraftsSoon();
+    } catch (_) { /* kept in the browser regardless */ }
+  }
+
+  let draftsTimer = 0;
+  function loadDraftsSoon() {
+    if (draftsTimer) clearTimeout(draftsTimer);
+    draftsTimer = setTimeout(() => { draftsTimer = 0; loadDrafts(); }, 800);
+  }
+
+  async function loadDrafts() {
+    try { const r = await ctools("/drafts"); state.drafts = (r && r.drafts) || []; state.draftsError = ""; }
+    catch (e) { state.draftsError = e.message; }
+    if (dom && state.view !== "editor") renderSide();
+  }
+
+  // On closing a tab: flush a changed one (so the last seconds aren't lost) and say where
+  // it went; a tab with nothing unfinished drops its backup. Never blocks the close.
+  async function finishDraftOnClose(ed, force) {
+    if (ed.draftTimer) { clearTimeout(ed.draftTimer); ed.draftTimer = 0; }
+    try {
+      if (!force && ed.dirty && String(ed.source || "").trim()) {
+        await syncDraft(ed);
+        if (ed.draftSynced === ed.source) toast(tabLabel(ed) + " closed — its unsaved text is kept under Unfinished tools.", "info");
+      } else if (ed.draftSynced) {
+        await api("/api/ctools/drafts/" + encodeURIComponent(ed.draftKey), { method: "DELETE" });
+        ed.draftSynced = "";
+      }
+    } catch (_) { /* best effort */ }
+    loadDrafts();
+  }
+
+  async function restoreDraft(key, version) {
+    const openTab = state.tabs.find((t) => t.draftKey === key);
+    if (openTab) { toast("That one is already open in a tab.", "info"); showEditor(openTab); return; }
+    let d;
+    try { d = await ctools("/drafts/" + encodeURIComponent(key)); }
+    catch (e) { toast("Couldn’t open that backup: " + e.message, "error"); return; }
+    let source = d.source || "";
+    if (version != null && d.history && d.history[version]) source = d.history[version].source || "";
+    if (d.file_newer) {
+      const ok = await UI().confirm({ title: "Open an older copy?", level: "warn", focusCancel: true, confirmLabel: "Open it",
+        body: "The saved file " + (d.orig_name || d.name) + ".py was changed after this backup was made. Opening the backup puts the older text in a tab; nothing is replaced until you Save." });
+      if (!ok) return;
+    }
+    const asEdit = d.mode === "edit" && NAME_RE.test(d.orig_name || "") && userFileNames().includes(d.orig_name);
+    const latest = version == null;
+    if (asEdit) {
+      const same = state.tabs.find((t) => t.mode === "edit" && t.origName === d.orig_name);
+      if (same) { toast(d.orig_name + " is already open in a tab — close it first to restore into a new one.", "info"); showEditor(same); return; }
+      await enterEditor({ mode: "edit", name: d.orig_name, source, dirty: true, draftKey: key, draftSynced: latest ? source : "", keepSource: true });
+    } else {
+      await enterEditor({ mode: "new", name: NAME_RE.test(d.name || "") ? d.name : "", source, dirty: true,
+        template: d.template || "minimal", draftKey: key, draftSynced: latest ? source : "", keepSource: true });
+    }
+  }
+
+  async function restoreEarlier(key) {
+    let d;
+    try { d = await ctools("/drafts/" + encodeURIComponent(key)); }
+    catch (e) { toast("Couldn’t read that backup: " + e.message, "error"); return; }
+    const hist = (d.history || []).slice().reverse();      // newest first
+    if (!hist.length) { toast("No earlier versions yet.", "info"); return; }
+    const options = hist.map((h, i) => ({ label: String(h.saved || "").replace("T", " ") || "earlier", value: String(hist.length - 1 - i),
+      hint: String(h.source || "").split("\n").length + " lines" }));
+    const pick = await UI().choose({ title: "Restore an earlier version of " + draftTitle(d), body: "Opens that version in a new tab. The newest backup is left as it is.", options });
+    if (pick === null || pick === undefined) return;
+    restoreDraft(key, Number(pick));
+  }
+
+  async function deleteDraft(d) {
+    const ok = await UI().confirm({ title: "Delete the backup of " + draftTitle(d) + "?", level: "error", focusCancel: true, confirmLabel: "Delete",
+      body: "This removes the backed-up text. It can’t be undone." });
+    if (!ok) return;
+    try {
+      await api("/api/ctools/drafts/" + encodeURIComponent(d.key), { method: "DELETE" });
+      const tab = state.tabs.find((t) => t.draftKey === d.key);
+      if (tab) tab.draftSynced = "";
+    } catch (e) { toast("Couldn’t delete it: " + e.message, "error"); }
+    loadDrafts();
+  }
+
+  function draftsSection() {
+    const openKeys = new Set(state.tabs.map((t) => t.draftKey));
+    const wrap = el("div", null, [sectionTitle("Unfinished tools", state.drafts.length ? String(state.drafts.length) : "")]);
+    if (state.draftsError && !state.drafts.length) { wrap.appendChild(el("div", { class: "tm-hint" }, "Couldn’t read the backups: " + state.draftsError)); return wrap; }
+    wrap.appendChild(el("div", { class: "tm-hint", style: "margin-bottom:8px" }, "Tools you were still writing are backed up as you type — saved or not — so a closed tab or a cleared browser doesn’t lose them."));
+    const list = el("div", { class: "tm-attn" });
+    state.drafts.slice(0, 12).forEach((d) => {
+      const isOpen = openKeys.has(d.key);
+      const why = (d.reason ? d.reason + " · " : "") + draftAge(d.saved) + " · " + d.lines + (d.lines === 1 ? " line" : " lines")
+        + (d.file_newer ? " · the saved file is newer" : "") + (isOpen ? " · open in a tab" : "");
+      list.appendChild(el("div", { class: "tm-draft", "data-key": d.key }, [
+        el("div", { class: "tm-attn__name" }, draftTitle(d)),
+        el("div", { class: "tm-attn__why" }, why),
+        d.preview ? el("div", { class: "tm-draft__preview" }, d.preview) : null,
+        el("div", { class: "tm-draft__btns" }, [
+          el("button", { class: "btn btn--primary btn--sm", type: "button", onclick: () => restoreDraft(d.key) }, isOpen ? "Show tab" : "Restore"),
+          d.versions ? el("button", { class: "btn btn--ghost btn--sm", type: "button", onclick: () => restoreEarlier(d.key) }, "Earlier…") : null,
+          el("button", { class: "btn btn--ghost btn--sm tm-danger", type: "button", onclick: () => deleteDraft(d) }, "Delete"),
+        ]),
+      ]));
+    });
+    wrap.appendChild(list);
+    if (state.drafts.length > 12) wrap.appendChild(el("div", { class: "tm-hint", style: "margin-top:6px" }, "+" + (state.drafts.length - 12) + " older ones on disk in ~/.jarvis/tools/_drafts."));
+    return wrap;
   }
 
   /* ---- keeping tabs across closing the panel and reloading the page ---------- */
@@ -1432,7 +1789,7 @@
   function persistTabs() {
     try {
       const items = state.tabs.map((ed) => ({
-        mode: ed.mode, name: ed.name, origName: ed.origName, dirty: !!ed.dirty, untitled: ed.untitled, template: ed.template,
+        mode: ed.mode, name: ed.name, origName: ed.origName, dirty: !!ed.dirty, untitled: ed.untitled, template: ed.template, draftKey: ed.draftKey,
         // A clean saved file is re-read from disk on restore; anything else needs its text kept.
         source: ed.dirty || ed.mode === "new" ? ed.source : "",
       }));
@@ -1459,10 +1816,10 @@
         if (!(t.dirty && text)) {
           try { initial = await ctools("/" + encodeURIComponent(t.origName)); source = (initial && initial.source) || ""; } catch (_) { continue; }
         }
-        state.tabs.push(newEditorState({ mode: "edit", name: t.origName, source, initial, dirty: !!(t.dirty && text) }));
+        state.tabs.push(newEditorState({ mode: "edit", name: t.origName, source, initial, dirty: !!(t.dirty && text), draftKey: t.draftKey }));
       } else if (t.mode === "new") {
         const ed = newEditorState({ mode: "new", name: NAME_RE.test(t.name || "") ? t.name : "", source: text, dirty: !!t.dirty,
-          template: typeof t.template === "string" ? t.template : "minimal", untitled: Number(t.untitled) || 0 });
+          template: typeof t.template === "string" ? t.template : "minimal", untitled: Number(t.untitled) || 0, draftKey: t.draftKey });
         state.tabs.push(ed);
       }
     }
@@ -1558,6 +1915,7 @@
     ed.result = null;                                   // a check of the old text says nothing about this one
     updateChip(ed); renderTabs();
     if (state.editor === ed) renderSide();
+    draftSoon(ed);
   }
 
   function sendAgent(ed) {
@@ -1812,10 +2170,13 @@
     else if (r.ok) {
       res.appendChild(el("div", null, ["Loads cleanly. Provides ", el("b", null, (r.tools || []).join(", ") || "—"), r.group ? " in group “" + r.group + "”." : "."]));
       checklistLines(r).forEach((l) => res.appendChild(el("div", { class: "tm-note", style: "margin-top:8px" }, l)));
+      if ((r.ui || []).length) res.appendChild(el("div", { class: "tm-note tm-note--info", style: "margin-top:8px" }, "Screens: " + r.ui.map((u) => u.label + " (" + (u.mode === "menu" ? "Menu entry" : "button") + ", " + u.path + "/)").join("; ")));
+      uiLines(r, templateFolderOf(ed.template), ed.mode === "new").forEach((l) => res.appendChild(el("div", { class: "tm-note", style: "margin-top:8px" }, l)));
     } else {
       res.appendChild(el("div", { class: "tm-errbox" }, (r.stage ? "[" + r.stage + "] " : "") + (r.error || "Unknown error") + (ed.errorLine ? "\n→ line " + ed.errorLine + " is marked in the editor" : "")));
       if (ed.errorLine && ed.cm) res.appendChild(el("button", { class: "btn btn--ghost tm-jump", type: "button", onclick: () => ed.cm.gotoLine(ed.errorLine) }, "Go to line " + ed.errorLine));
       if (r.hint) res.appendChild(el("div", { class: "tm-note", style: "margin-top:8px" }, r.hint));
+      if (r.draft_saved) res.appendChild(el("div", { class: "tm-note tm-note--info", style: "margin-top:8px" }, "Nothing was saved as a tool, but this text is backed up under Unfinished tools."));
     }
     side.appendChild(res);
     if (ed.mode === "edit" && state.files.find((f) => f.name === ed.origName && f.valid && f.enabled)) {
@@ -1924,9 +2285,10 @@
     if (!dom) return;
     state.loading = true;
     if (!opts.quiet) { setStatusLine("reading the catalogue…"); dom.refresh.disabled = true; }
-    const [tools, files, templates, commands, disabled] = await Promise.allSettled([
+    const [tools, files, templates, commands, disabled, daemons, personas, uiEls, drafts] = await Promise.allSettled([
       api("/api/tools"), ctools(""), state.templates.length ? Promise.resolve(null) : ctools("/templates"),
       api("/api/commands"), api("/api/disabled"),
+      api("/api/daemons"), api("/api/personas?all=1"), api("/api/tool-ui?all=1"), ctools("/drafts"),
     ]);
     state.loading = false;
     dom.refresh.disabled = false;
@@ -1941,7 +2303,17 @@
     // rather than show them all as available.
     if (disabled.status === "fulfilled") state.disabledCommands = (disabled.value && disabled.value.commands) || [];
     else if (!state.commandsError) state.commandsError = "couldn’t read which commands are switched off";
-    state.rows = buildRows(state.toolsError ? [] : state.tools, state.files, state.commandsError ? null : state.commands, state.disabledCommands);
+    // The non-tool rows. Any of the three failing just leaves its rows out and says so in
+    // the status line; it never hides the tools.
+    const failedExtras = [];
+    if (daemons.status === "fulfilled") state.daemons = (daemons.value && daemons.value.daemons) || []; else failedExtras.push("daemons");
+    if (personas.status === "fulfilled") state.personas = (personas.value && personas.value.personas) || []; else failedExtras.push("personas");
+    if (uiEls.status === "fulfilled") state.uiElements = (uiEls.value && uiEls.value.ui) || []; else failedExtras.push("screens");
+    state.extrasError = failedExtras.length ? failedExtras.join(", ") : "";
+    state.draftsError = drafts.status === "rejected" ? String(drafts.reason && drafts.reason.message || drafts.reason) : "";
+    if (drafts.status === "fulfilled") state.drafts = (drafts.value && drafts.value.drafts) || [];
+    state.rows = buildRows(state.toolsError ? [] : state.tools, state.files, state.commandsError ? null : state.commands, state.disabledCommands,
+      { daemons: state.daemons, personas: state.personas, ui: state.uiElements });
     if (state.selected && !rowById(state.selected)) state.selected = null;
     if (!state.selected && !opts.keepView) {
       // Land on a normal tool, not on a rejected file: people open this to set
@@ -1954,7 +2326,7 @@
     const cov = coverage(state.rows);
     const failed = state.rows.filter((r) => r.state === "failed").length;
     if (state.toolsError) setStatusLine("catalogue unavailable — " + state.toolsError.slice(0, 80), "error");
-    else if (!opts.quiet || dom.statusLine.textContent.startsWith("reading")) setStatusLine(cov.total + " tools available" + (offSummary(cov) ? " · " + offSummary(cov) + " off" : "") + (cov.commands ? " · " + cov.commands + (cov.commands === 1 ? " saved command" : " saved commands") : "") + (state.commandsError ? " · saved commands unavailable" : "") + (failed ? " · " + failed + " file" + (failed > 1 ? "s" : "") + " rejected" : "") + (state.filesError ? " · your tool files couldn’t be read" : ""), state.filesError || state.commandsError ? "error" : "");
+    else if (!opts.quiet || dom.statusLine.textContent.startsWith("reading")) setStatusLine(cov.total + " tools available" + (offSummary(cov) ? " · " + offSummary(cov) + " off" : "") + (cov.commands ? " · " + cov.commands + (cov.commands === 1 ? " saved command" : " saved commands") : "") + (state.commandsError ? " · saved commands unavailable" : "") + (state.extrasError ? " · couldn’t read " + state.extrasError : "") + (failed ? " · " + failed + " file" + (failed > 1 ? "s" : "") + " rejected" : "") + (state.filesError ? " · your tool files couldn’t be read" : ""), state.filesError || state.commandsError ? "error" : "");
     renderChips(); renderGroupSelect();
     if (state.view === "editor") { renderList(); renderSide(); renderTabs(); return; }
     renderMain();

@@ -108,7 +108,9 @@ jarvis-cli/jarvis/
     web_tools.py      ytdl_tools.py        audio_tools.py  radio_tools.py
     spotify_*.py      playnite_*.py        json_tools.py
     command_tools.py  commands_config.py   saved user commands
-    custom_tools*.py  user Python tools from ~/.jarvis/tools/ (custom_tools_suggest.py = the editor's inline suggestions, `ctools-suggest`; returns text only, never writes a tool)
+    custom_tools*.py  user Python tools from ~/.jarvis/tools/ (custom_tools_suggest.py = the editor's inline suggestions, `ctools-suggest`; returns text only, never writes a tool). custom_tools_store.py also keeps DRAFTS: ~/.jarvis/tools/_drafts/<key>.json, backups of tools still being written (saved or not); custom_tools_ui_templates.py = the "Button page" / "Menu panel" templates and their starter html/js/css
+    tool_ui.py            TOOL_UI: validates a tool file's own screen (a button or Menu entry opening a page built from the tool's tool.html/js/css) and reads its files; paths can't leave the declaring file's directory. `jarvis tool-ui list|bundle|run`
+    tool_disable.py       the owner's off switches (~/.jarvis/disabled.json): tools, saved commands, tool-registered personas, TOOL_UI screens. Daemons are NOT here (daemons.json `enabled`)
 
     # --- time, work and supervision --------------------------------------
     scheduler.py          jobs/reminders/watches; tick() is the heartbeat
@@ -208,7 +210,8 @@ web/
     public/app.js         the whole front-end (also defines window.JarvisHost, the
                           small facade slash-palette.js talks to it through)
     public/style.css      theme + layout, including the classic/focus switch
-    public/tool-manager.js (+ .css)  Tool Manager panel (L.25): catalogue, per-tool safeguards, user tools
+    public/tool-manager.js (+ .css)  Tool Manager panel (L.25): catalogue, per-tool safeguards, user tools; also lists daemons / tool-registered personas / TOOL_UI screens with an on/off switch, and "Unfinished tools" (draft backups)
+    public/tool-ui.js (+ .css)       renders TOOL_UI screens: buttons beside Menu (sandboxed frame) and Menu entries (shadow-root panel), plus the `host` API they talk to; pure helpers in JarvisToolUI._pure
     public/code-editor.js (+ .css)   the Tool Manager's code editor (L.33): Python highlighting, VS Code-style editing, completions, inline Jarvis suggestions; pure helpers in JarvisCodeEditor._pure
     public/agent-panel.js (+ .css)   the Focus layout's Agent side panel: while dev_agent / code_agent runs it shows the codebase root, the file being worked on, a file tree with a status per file, and a short log. Fed by app.js from the existing JARVIS_MEDIA dev_agent events (no server route); reducer + tree builder in JarvisAgentPanel._pure
     public/custom-tools.js       theme gallery for the Skin modal (the old Custom Tools panel moved to tool-manager.js)

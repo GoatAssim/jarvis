@@ -9843,6 +9843,9 @@
   // ===========================================================================
   window.JarvisHost = {
     toast,
+    // The Tool Manager switches a tool-registered persona off/on; the Skin modal reads
+    // its list once at startup, so the Tool Manager asks it to read again.
+    reloadPersonas: () => loadRegisteredPersonas(),
     confirm: (opts) => JarvisUI.confirm(opts),
     dialog: (opts) => JarvisUI.dialog(opts),
     refreshChats: () => refreshConvoList(),

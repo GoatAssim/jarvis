@@ -1919,6 +1919,43 @@ def main():
             print(json.dumps(verdict, indent=2))
         return
 
+    # --- Custom tool drafts (~/.jarvis/tools/_drafts) -----------------------
+    # jarvis ctools-drafts list
+    # jarvis ctools-drafts show <key>
+    # jarvis ctools-drafts delete <key>
+    # jarvis ctools-drafts save <key> --stdin [--name N] [--mode new|edit] [--orig N] [--template T]
+    # Backups of tools that were still being written, saved or not (see
+    # custom_tools_store.py's DRAFTS section). Source arrives on STDIN, like
+    # ctools-write. A draft is a copy, never a tool: nothing here loads or runs it.
+    if argv[0] == "ctools-drafts":
+        from . import custom_tools_store as ctools
+
+        sub = argv[1] if len(argv) > 1 else ""
+
+        def _flag(name, default=""):
+            return argv[argv.index(name) + 1] if name in argv and len(argv) > argv.index(name) + 1 else default
+
+        if sub == "list":
+            print(json.dumps({"drafts": ctools.list_drafts()}, indent=2))
+            return
+        if sub in ("show", "delete", "save") and len(argv) > 2:
+            key = argv[2]
+            if sub == "show":
+                result = ctools.read_draft(key)
+            elif sub == "delete":
+                result = ctools.delete_draft(key)
+            else:
+                result = ctools.save_draft(
+                    key, sys.stdin.read() if "--stdin" in argv else "",
+                    name=_flag("--name"), mode=_flag("--mode", "new"),
+                    orig_name=_flag("--orig"), template=_flag("--template"))
+            print(json.dumps(result, indent=2))
+            if not result.get("ok"):
+                sys.exit(1)
+            return
+        print(json.dumps({"ok": False, "error": "usage: jarvis ctools-drafts list|show <key>|delete <key>|save <key> --stdin"}))
+        sys.exit(1)
+
     # --- Custom tools (~/.jarvis/tools) ------------------------------------
     # Source arrives on STDIN for write/check, never argv: a tool file is
     # multi-line Python with quotes and backslashes in it, and argv escaping
@@ -1996,7 +2033,13 @@ def main():
             if cmd == "ctools-check":
                 print(json.dumps(ctools.validate_source(source, name), indent=2))
                 return
-            result = ctools.write_tool(name, source)
+            # --draft-key: the editor tab's backup key (removed once this save lands, and
+            # the stash target if it is refused). --scaffold: the template this file
+            # started from, so its starter html/js/css folder is written alongside.
+            def _wflag(flag):
+                return argv[argv.index(flag) + 1] if flag in argv and len(argv) > argv.index(flag) + 1 else ""
+            result = ctools.write_tool(name, source, draft_key=_wflag("--draft-key"),
+                                       scaffold=_wflag("--scaffold"))
             print(json.dumps(result, indent=2))
             if not result.get("ok"):
                 sys.exit(1)
@@ -2830,9 +2873,59 @@ def main():
         # persona_registry.py, tools.AUTO_PERSONAS) as one JSON payload —
         # same single-shot-JSON-to-stdout contract as tools-list, so
         # server.js's GET /api/personas parses it the same way.
+        # `--all` (the Tool Manager) keeps the ones the owner switched off, each
+        # flagged `disabled`; the Skin modal never passes it.
         from . import tools as system_tools
-        print(json.dumps(system_tools.personas_list_payload(), indent=2))
+        print(json.dumps(system_tools.personas_list_payload(include_disabled="--all" in argv[1:]), indent=2))
         return
+
+    if argv[0] == "tool-ui":
+        # jarvis tool-ui list [--all]
+        # jarvis tool-ui bundle <id>
+        # jarvis tool-ui run <id> <tool> [json-arguments]
+        # The screens tool files ship through TOOL_UI (tool_ui.py): `list` is what the
+        # browser builds its buttons and Menu entries from (switched-off ones left
+        # out unless --all, which is the Tool Manager's view), `bundle` is one
+        # element's html/js/css, and `run` runs one of THAT FILE'S OWN tools for the
+        # element's page -- by the same path as `tool-run` (the owner's own hands), so
+        # a page can drive its tool but can't name some other tool to run.
+        from . import tools as system_tools
+
+        sub = argv[1] if len(argv) > 1 else ""
+        if sub == "list":
+            print(json.dumps(system_tools.tool_ui_payload(include_disabled="--all" in argv[2:]), indent=2))
+            return
+        if sub == "bundle":
+            if len(argv) < 3:
+                print(json.dumps({"ok": False, "error": "usage: jarvis tool-ui bundle <id>"}))
+                sys.exit(1)
+            result = system_tools.tool_ui_bundle(argv[2])
+            print(json.dumps(result, indent=2))
+            if not result.get("ok"):
+                sys.exit(1)
+            return
+        if sub == "run":
+            if len(argv) < 4:
+                print(json.dumps({"error": "usage: jarvis tool-ui run <id> <tool> [json-arguments]"}))
+                sys.exit(1)
+            ui_id, run_tool = argv[2].strip(), argv[3].strip()
+            entry = next((u for u in system_tools.AUTO_UI if u["id"] == ui_id), None)
+            from . import tool_disable as _td
+            if entry is None:
+                print(json.dumps({"error": "no UI element called %r" % ui_id}))
+                sys.exit(1)
+            if _td.is_ui_disabled(ui_id):
+                print(json.dumps({"error": "%s is switched off in the Tool Manager" % ui_id}))
+                sys.exit(1)
+            if run_tool not in (entry.get("tools") or []):
+                print(json.dumps({"error": "%s is not one of the tools in %s, the file this page belongs to"
+                                           % (run_tool, entry.get("file"))}))
+                sys.exit(1)
+            # Hand over to the tool-run branch below with the checked name.
+            argv = ["tool-run", run_tool] + (argv[4:5] if len(argv) > 4 else [])
+        else:
+            print(json.dumps({"error": "usage: jarvis tool-ui list|bundle|run ..."}))
+            sys.exit(1)
 
     if argv[0] == "tool-run":
         # jarvis tool-run <name> [json-arguments] [mode]
@@ -3032,11 +3125,27 @@ def main():
         from . import tools as system_tools
 
         if len(argv) < 3:
-            print(json.dumps({"error": "usage: jarvis tool-disable-set <name> <true|false>"}))
+            print(json.dumps({"error": "usage: jarvis tool-disable-set <name> <true|false> [--kind tool|persona|ui]"}))
             sys.exit(1)
         tool_name = argv[1].strip()
         value = argv[2].strip().lower() in ("1", "true", "yes", "y", "on")
+        # --kind: the Tool Manager also lists the personas and UI elements a tool file
+        # registered (tool_disable.py's PERSONAS AND UI ELEMENTS). Same file, same
+        # contract; a tool by default.
+        kind = argv[argv.index("--kind") + 1].strip().lower() if "--kind" in argv and len(argv) > argv.index("--kind") + 1 else "tool"
         try:
+            if kind == "persona":
+                if value and tool_name not in {p.get("id") for p in system_tools.AUTO_PERSONAS}:
+                    raise ValueError("no such persona: %s" % tool_name)
+                print(json.dumps(tool_disable.set_persona_disabled(tool_name, value), indent=2))
+                return
+            if kind == "ui":
+                if value and tool_name not in {u["id"] for u in system_tools.AUTO_UI}:
+                    raise ValueError("no such UI element: %s" % tool_name)
+                print(json.dumps(tool_disable.set_ui_disabled(tool_name, value), indent=2))
+                return
+            if kind != "tool":
+                raise ValueError("--kind must be tool, persona or ui")
             if value and tool_name not in system_tools.TOOLS:
                 raise ValueError("no such tool: %s" % tool_name)
             result = tool_disable.set_tool_disabled(tool_name, value)
@@ -3090,6 +3199,8 @@ def main():
         print(json.dumps({
             "tools": sorted(tool_disable.disabled_tools()),
             "commands": sorted(tool_disable.disabled_commands()),
+            "personas": sorted(tool_disable.disabled_personas()),
+            "ui": sorted(tool_disable.disabled_ui()),
             "protected": tool_disable.PROTECTED_TOOLS,
         }, indent=2))
         return

@@ -15,6 +15,7 @@
 <link rel="stylesheet" href="code-editor.css">
 <link rel="stylesheet" href="channels.css">
 <link rel="stylesheet" href="tool-manager.css">
+<link rel="stylesheet" href="tool-ui.css">
 <link rel="stylesheet" href="category-input.css">
 <link rel="stylesheet" href="daemons.css">
 <link rel="stylesheet" href="backlog.css">
@@ -199,6 +200,9 @@
                Focus mode, that opens this exact list (see the JS —
                panel-menu-list gets reparented to whichever trigger opened
                it, not duplicated). -->
+          <!-- Buttons tools ship through TOOL_UI (mode "button"); built by tool-ui.js.
+               Empty (and hidden) until a tool file declares one. -->
+          <span class="tool-ui-bar" data-tool-ui-bar hidden></span>
           <div class="panel-menu" id="panel-menu">
             <button class="btn btn--ghost" id="btn-panel-menu" type="button"
                     aria-haspopup="true" aria-expanded="false"
@@ -391,6 +395,7 @@
              shown only in Focus via .panel-menu--focus-only in style.css,
              so Menu stays reachable in both layouts without duplicating
              its eleven items and all their click wiring. -->
+        <span class="tool-ui-bar tool-ui-bar--focus" data-tool-ui-bar hidden></span>
         <div class="panel-menu panel-menu--focus-only" id="panel-menu-focus">
           <button class="btn btn--ghost btn--sm" id="btn-panel-menu-focus" type="button"
                   aria-haspopup="true" aria-expanded="false"
@@ -1855,6 +1860,7 @@
 <script src="custom-tools.js"></script>
 <script src="code-editor.js"></script>
 <script src="tool-manager.js"></script>
+<script src="tool-ui.js"></script>
 <script src="test-checklist-data.js"></script>
 <script src="test-checklist.js"></script>
 <script src="channels-panel.js"></script>

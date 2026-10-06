@@ -322,6 +322,37 @@ collapsing to one (have the inspector just read `route.matches`) next time
 you're touching that file, but it hasn't been done yet — don't assume
 they've been unified just because `route.matches` exists.
 
+## Tool screens (TOOL_UI), drafts and the Tool Manager's other switches
+
+A tool file can ship a screen of its own: a module-level `TOOL_UI` list (see
+`jarvis/tool_ui.py`, `actions/_template.py` section 9) whose entries are a
+**button** beside Menu (opens the tool's page in a sandboxed frame) or a **Menu
+entry** (opens it in a shadow-root panel). The older `ui_bridge` way (a tool
+raising a toast/card/question while it runs) is unchanged — do not fold one into
+the other.
+
+- **A page is its author's code, never the model's.** Nothing model-facing may
+  create, edit or switch one — same rule as custom tools and daemons. The browser
+  names an element **id**; the folder it maps to is decided by `jarvis tool-ui`,
+  and every path (`path`, `html`, `js`, `css`) is resolved and must stay inside the
+  declaring file's directory (`tool_ui._resolve_inside`). `server.js` must never
+  build a path from request input.
+- **`host.runTool` is restricted to the element's own file's tools** (checked in
+  `jarvis tool-ui run`, not just in the browser) and keeps the Debug panel's
+  confirmation gate (`/api/tools/preview` first).
+- **The Tool Manager switches** live in `disabled.json` via `tool_disable.py`
+  (`tools`, `commands`, `personas`, `ui`). Daemons are the exception: their switch
+  IS `daemons.json`'s `enabled` flag (the Daemons panel edits the same one) — do not
+  add a second copy. A new setter in `tool_disable.py` must stay out of anything
+  the model can call; `tests/test_tool_disable.py` enforces that.
+- **Drafts** (`custom_tools_store.py`, `~/.jarvis/tools/_drafts/`) are copies, never
+  tools: not loaded, not listed as tool files. A refused save stashes its text there
+  server-side so it is never only in a browser tab. Keep the draft key validated
+  (`DRAFT_KEY_RE`) before it touches a path.
+- A new template that ships a folder goes in `custom_tools_ui_templates.py`; the
+  starter files are embedded as strings because the package has no `package-data`
+  (html/js/css next to the .py would not reach an installed copy).
+
 ## Test Checklist — adding a tool means updating it
 
 The web console has **Menu → Test Checklist**: every tool Jarvis can call, how

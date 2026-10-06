@@ -38,6 +38,18 @@ A file in jarvis/actions/ is discovered as a tool module if it exposes:
                                               # several (master plan G.2; see
                                               # checklist_schema.py)
 
+A file that DOES define tools can also give them a screen of their own:
+
+    TOOL_UI = [ {"id": ..., "label": ..., "mode": "button" | "menu",
+                 "path": "some_folder", ...}, ... ]
+
+...a button that opens the tool's own page, or a Menu entry that opens its panel,
+built from a tool.html / tool.js / tool.css the file ships in a folder it names.
+See tool_ui.py for the contract and for what the files may touch, and
+actions/_template.py section 9 for worked examples of both modes. A bad entry is
+logged and dropped; the tools still load. (It is deliberately not available to a
+file that defines no tools: the screen is for driving the file's own tools.)
+
 A file (with or without the TOOL_SCHEMAS/TOOLS/TOOL_GROUP trio above) can
 ALSO optionally expose:
 
@@ -217,6 +229,9 @@ class ActionModuleRecord:
     # {} / {} when the module supplied none of either.
     checklist: dict = field(default_factory=dict)
     checklist_group: dict = field(default_factory=dict)
+    # TOOL_UI entries, already validated and normalised by tool_ui.validate_ui
+    # (absolute folder kept privately as "_dir"). [] when the module declared none.
+    ui: list = field(default_factory=list)
 
 
 def _validate(module, filename, logger):
@@ -362,11 +377,25 @@ def _validate(module, filename, logger):
         for problem in checklist_problems:
             logger(f"[checklist] {filename}: {problem} — ignored; the tool itself still loads.")
 
+    # TOOL_UI: a screen of the file's own (button or Menu entry). Like the
+    # checklist, never a reason to reject the file: a bad entry is logged and
+    # dropped, the tools load. Needs the tool names (an entry may name the tool
+    # it belongs to) and the file's own directory (every path is relative to it).
+    ui = []
+    raw_ui = getattr(module, "TOOL_UI", None)
+    if raw_ui is not None:
+        from . import tool_ui
+        mod_file = getattr(module, "__file__", None)
+        base_dir = Path(mod_file).resolve().parent if mod_file else None
+        ui, ui_errors = tool_ui.validate_ui(raw_ui, filename, base_dir, names)
+        for problem in ui_errors:
+            logger(f"[tool-ui] {problem}")
+
     return ActionModuleRecord(
         file=filename, valid=True, group=group, schemas=schemas, tools=tools,
         keywords=keywords, pack_instruction=pack_instruction,
         confirm_required=confirm_required, ai_review=ai_review, result_specs=result_specs,
-        personas=personas, checklist=checklist, checklist_group=checklist_group,
+        personas=personas, checklist=checklist, checklist_group=checklist_group, ui=ui,
     )
 
 

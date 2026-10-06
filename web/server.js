@@ -2283,7 +2283,9 @@ app.get("/api/tools", requireJarvis, async (req, res) => {
 // raw SVG markup (both resolved server-side at discovery time), so this
 // route needs no further processing beyond the usual JSON passthrough.
 app.get("/api/personas", requireJarvis, async (req, res) => {
-  const result = await runJarvisOnce(["personas-list"], 15000);
+  // ?all=1 is the Tool Manager's view: the ones the owner switched off are kept,
+  // flagged `disabled`. The Skin modal asks without it and never sees them.
+  const result = await runJarvisOnce(req.query.all === "1" ? ["personas-list", "--all"] : ["personas-list"], 15000);
   if (!result.ok) {
     return res.status(500).json({ error: result.error || result.stderr || "Couldn't list personas." });
   }
@@ -2405,10 +2407,19 @@ async function relayJarvisJson(res, args, fallback) {
   });
 }
 
+// `kind` ("tool" by default, "persona" or "ui") is how the Tool Manager switches the
+// personas and TOOL_UI elements a tool file registered; a fixed list, never forwarded
+// as-is, so a request body can't smuggle another flag into the argv.
+const DISABLE_KINDS = new Set(["tool", "persona", "ui"]);
+
 app.post("/api/tools/disabled", requireJarvis, async (req, res) => {
   const name = typeof req.body?.name === "string" ? req.body.name.trim() : "";
   if (!name) return res.status(400).json({ error: "Missing tool name." });
-  await relayJarvisJson(res, ["tool-disable-set", name, req.body?.value ? "true" : "false"], "Couldn't switch the tool.");
+  const kind = typeof req.body?.kind === "string" ? req.body.kind : "tool";
+  if (!DISABLE_KINDS.has(kind)) return res.status(400).json({ error: "kind must be tool, persona or ui." });
+  const argv = ["tool-disable-set", name, req.body?.value ? "true" : "false"];
+  if (kind !== "tool") argv.push("--kind", kind);
+  await relayJarvisJson(res, argv, "Couldn't switch it.");
 });
 
 app.post("/api/commands/:name/disabled", requireJarvis, async (req, res) => {
@@ -2890,6 +2901,56 @@ const RUN_TYPES = { stdout: "stdout", stderr: "stderr", exit: "exit", error: "er
 const ASK_TYPES = { stdout: "ask-stdout", stderr: "ask-stderr", exit: "ask-exit", error: "ask-error" };
 
 // ---------------------------------------------------------------------------
+// Tool UI (TOOL_UI, jarvis/tool_ui.py): the screens tool files ship -- a button that
+// opens a page, or a Menu entry that opens a panel. Thin proxy over `jarvis tool-ui`
+// like everything else here. The browser only ever names an ELEMENT ID; which folder
+// that is, and that it stays inside its tool file's directory, is decided by the CLI,
+// so this server never builds a path from request input.
+// ---------------------------------------------------------------------------
+
+const TOOL_UI_ID_RE = /^[a-z][a-z0-9_]{0,48}$/;
+const TOOL_NAME_RE = /^[a-z][a-z0-9_]{0,63}$/;
+
+// ?all=1: the Tool Manager's view (switched-off elements kept, flagged `disabled`).
+app.get("/api/tool-ui", requireJarvis, async (req, res) => {
+  const result = await runJarvisOnce(req.query.all === "1" ? ["tool-ui", "list", "--all"] : ["tool-ui", "list"], 15000);
+  if (!result.ok) return res.status(500).json({ error: result.error || result.stderr || "Couldn't list tool screens." });
+  try { res.json(JSON.parse(result.stdout)); }
+  catch (e) { res.status(500).json({ error: `Couldn't parse tool-ui list: ${e.message}` }); }
+});
+
+app.get("/api/tool-ui/:id/bundle", requireJarvis, async (req, res) => {
+  if (!TOOL_UI_ID_RE.test(req.params.id)) return res.status(400).json({ error: "Invalid UI element id." });
+  const result = await runJarvisOnce(["tool-ui", "bundle", req.params.id], 15000);
+  let parsed;
+  try { parsed = JSON.parse(result.stdout); } catch { /* not JSON */ }
+  if (parsed === undefined) return res.status(500).json({ error: result.stderr || result.error || "Couldn't read that screen." });
+  if (parsed.ok === false) return res.status(parsed.disabled ? 403 : 404).json(parsed);
+  res.json(parsed);
+});
+
+// Run one of the element's OWN tool file's tools for its page. `jarvis tool-ui run`
+// refuses a switched-off element and a tool that isn't in that file, then runs it by
+// the same path as the Debug panel. The page's confirmation (if the tool asks first)
+// is the browser's job, via /api/tools/preview, exactly as Debug does it.
+app.post("/api/tool-ui/:id/run", requireJarvis, async (req, res) => {
+  if (!TOOL_UI_ID_RE.test(req.params.id)) return res.status(400).json({ error: "Invalid UI element id." });
+  const tool = typeof req.body?.tool === "string" ? req.body.tool.trim() : "";
+  if (!TOOL_NAME_RE.test(tool)) return res.status(400).json({ error: "Missing or invalid tool name." });
+  let argsJson;
+  try {
+    argsJson = JSON.stringify(req.body?.arguments && typeof req.body.arguments === "object" ? req.body.arguments : {});
+  } catch (e) {
+    return res.status(400).json({ error: `Couldn't serialize arguments: ${e.message}` });
+  }
+  const result = await runJarvisOnce(["tool-ui", "run", req.params.id, tool, argsJson], 30000, { JARVIS_UI: "web" });
+  let parsed;
+  try { parsed = JSON.parse(result.stdout); } catch { /* not JSON */ }
+  if (parsed !== undefined) return res.json({ ok: result.ok, result: parsed });
+  res.status(500).json({ error: result.error || result.stderr || "Tool run failed." });
+});
+
+// ---------------------------------------------------------------------------
 // Custom tools — thin proxy over `jarvis ctools-*`, same pattern as
 // /api/skills and /api/conversations: the web server never touches
 // ~/.jarvis/tools itself, it shells out to the CLI so validation, naming
@@ -2912,6 +2973,49 @@ app.get("/api/ctools/templates", requireJarvis, async (req, res) => {
   if (!result.ok) return res.status(500).json({ error: result.stderr || "Couldn't load templates." });
   try { res.json(JSON.parse(result.stdout)); }
   catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// Drafts: backups of tools still being written, saved or not (custom_tools_store.py,
+// DRAFTS). Registered before /api/ctools/:name for the same reason as /draft below --
+// otherwise "drafts" would be read as a tool called drafts. The source goes over stdin.
+const DRAFT_KEY_RE = /^[a-z0-9][a-z0-9_-]{0,63}$/;
+
+app.get("/api/ctools/drafts", requireJarvis, async (req, res) => {
+  const result = await runJarvisOnce(["ctools-drafts", "list"], 15000);
+  try { res.json(JSON.parse(result.stdout)); }
+  catch (e) { res.status(500).json({ error: result.stderr || e.message }); }
+});
+
+app.get("/api/ctools/drafts/:key", requireJarvis, async (req, res) => {
+  if (!DRAFT_KEY_RE.test(req.params.key)) return res.status(400).json({ error: "Invalid draft key." });
+  const result = await runJarvisOnce(["ctools-drafts", "show", req.params.key], 15000);
+  try {
+    const parsed = JSON.parse(result.stdout);
+    return parsed.ok === false ? res.status(404).json(parsed) : res.json(parsed);
+  } catch (e) { res.status(500).json({ error: result.stderr || e.message }); }
+});
+
+app.put("/api/ctools/drafts/:key", requireJarvis, async (req, res) => {
+  if (!DRAFT_KEY_RE.test(req.params.key)) return res.status(400).json({ error: "Invalid draft key." });
+  const b = req.body || {};
+  const source = typeof b.source === "string" ? b.source : "";
+  const argv = ["ctools-drafts", "save", req.params.key, "--stdin"];
+  if (typeof b.name === "string" && CTOOL_NAME_RE.test(b.name)) argv.push("--name", b.name);
+  if (b.mode === "edit" || b.mode === "new") argv.push("--mode", b.mode);
+  if (typeof b.origName === "string" && CTOOL_NAME_RE.test(b.origName)) argv.push("--orig", b.origName);
+  if (typeof b.template === "string" && /^[a-z_]{1,32}$/.test(b.template)) argv.push("--template", b.template);
+  const result = await runJarvisOnce(argv, 20000, {}, source);
+  try {
+    const parsed = JSON.parse(result.stdout);
+    return parsed.ok === false ? res.status(400).json(parsed) : res.json(parsed);
+  } catch (e) { res.status(500).json({ error: result.stderr || e.message }); }
+});
+
+app.delete("/api/ctools/drafts/:key", requireJarvis, async (req, res) => {
+  if (!DRAFT_KEY_RE.test(req.params.key)) return res.status(400).json({ error: "Invalid draft key." });
+  const result = await runJarvisOnce(["ctools-drafts", "delete", req.params.key], 10000);
+  try { res.json(JSON.parse(result.stdout)); }
+  catch (e) { res.status(500).json({ error: result.stderr || e.message }); }
 });
 
 // Registered before /api/ctools/:name deliberately — Express matches in
@@ -2941,7 +3045,13 @@ app.get("/api/ctools/:name", requireJarvis, async (req, res) => {
 app.put("/api/ctools/:name", requireJarvis, async (req, res) => {
   if (!CTOOL_NAME_RE.test(req.params.name)) return res.status(400).json({ error: "Invalid tool name." });
   const source = typeof req.body?.source === "string" ? req.body.source : "";
-  const result = await runJarvisOnce(["ctools-write", req.params.name, "--stdin"], 20000, {}, source);
+  const writeArgs = ["ctools-write", req.params.name, "--stdin"];
+  // draftKey: this tab's backup (cleared by a successful save, the stash target for a
+  // refused one). scaffold: the template the file started from, so its starter
+  // html/js/css folder is written next to it. Both are validated here AND by the CLI.
+  if (typeof req.body?.draftKey === "string" && DRAFT_KEY_RE.test(req.body.draftKey)) writeArgs.push("--draft-key", req.body.draftKey);
+  if (typeof req.body?.scaffold === "string" && /^[a-z_]{1,32}$/.test(req.body.scaffold)) writeArgs.push("--scaffold", req.body.scaffold);
+  const result = await runJarvisOnce(writeArgs, 20000, {}, source);
   try {
     const parsed = JSON.parse(result.stdout);
     return parsed.ok === false ? res.status(400).json(parsed) : res.json(parsed);
