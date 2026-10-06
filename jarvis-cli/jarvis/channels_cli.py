@@ -11,7 +11,9 @@ what a permission check or a log search actually does.
 """
 
 import json
+import re
 import sys
+import time
 
 from .channels import PLATFORMS, PERM_SETS
 from .channels import config as channel_config
@@ -28,6 +30,7 @@ COMMANDS = (
     "channels-link", "channels-unlink",
     "channels-conversation", "channels-usage", "channels-user-test",
     "channels-history", "channels-handle",
+    "channels-tools-for", "channels-instruction",
     "channels-presets", "channels-preset", "channels-bulk",
     "channels-servers", "channels-server-set",
     "discord-daemon", "instagram-serve", "logs-search",
@@ -52,6 +55,13 @@ USAGE = """channel commands:
                                         dm, reply, tool, owner, send_dm, blocked
   channels-user-tools <platform> <id> inherit | custom [tool ...]
                                         which tools that person may run (custom = ONLY those)
+  channels-tools-for <platform> <id|@handle> <30m|24h|7d>
+                                        tool use for that long, then it ends by itself (1m to 30d).
+                                        Running it again replaces the countdown; `channels-user ... tool
+                                        on|off` ends it (on = for good). Refused for the owner
+  channels-instruction <platform> <id|@handle> show | set <text ...> | clear
+                                        your own line on HOW to talk to that person (style only,
+                                        up to 240 chars; it grants nothing). Refused for the owner
   channels-add-person <platform> <id|@handle> [name ...]
                                         add someone who hasn't messaged yet (grants nothing)
   channels-rename <platform> <id|@handle> [name ...]
@@ -112,6 +122,16 @@ _SET_ALIASES = {
     "dm": "dm_allowlist", "reply": "reply_allowlist", "tool": "tool_allowlist",
     "tools": "tool_allowlist",
 }
+
+
+def _parse_duration(text):
+    """'30m' / '24h' / '7d' -> whole minutes, or None. A bare number is not
+    accepted: whether it means minutes or hours is exactly the kind of
+    ambiguity that turns a one-day grant into a one-minute (or one-month) one."""
+    m = re.match(r"^(\d{1,5})([mhd])$", str(text or "").strip().lower())
+    if not m:
+        return None
+    return int(m.group(1)) * {"m": 1, "h": 60, "d": 1440}[m.group(2)]
 
 
 def _coerce(value):
@@ -217,6 +237,16 @@ def handle(argv):
         ok, err = action(platform, which, actual_entry)
         result = {"ok": ok, "error": err, "platform": platform,
                   "set": which, "entry": actual_entry}
+        if ok and which == "tool_allowlist":
+            # A time limit set from the panel (L.36-P6) is a ceiling on the
+            # tool list. Allowing or denying tools by hand is a decision
+            # about the list itself, so it ends any countdown (allow = for
+            # good, deny = revoked), same as the Tool use switch.
+            _known = people.get(platform, str(actual_entry).lstrip("@"))
+            if _known:
+                _note = user_admin.end_countdown(platform, _known["user_id"])
+                if _note:
+                    result["note"] = _note
         if actual_entry != entry:
             result["resolved_from"] = entry
         print(json.dumps(result, indent=2))
@@ -350,6 +380,50 @@ def handle(argv):
         print(json.dumps({"ok": ok, "error": err, "platform": platform,
                           "user_id": uid, "mode": mode,
                           "tools": rest[3:] if mode == "custom" else []}, indent=2))
+        sys.exit(0 if ok else 1)
+
+    if cmd == "channels-tools-for":
+        # L.36-P6. Same strict id resolution as channels-user: people on file.
+        usage = "usage: channels-tools-for <platform> <id|@handle> <30m|24h|7d>"
+        if len(rest) != 3:
+            _fail(usage)
+        platform, uid = rest[0], _person_id(rest[0], rest[1])
+        minutes = _parse_duration(rest[2])
+        if minutes is None:
+            _fail(f"'{rest[2]}' isn't a time limit \u2014 write it like 30m, 24h or 7d")
+        ok, err, note, until = user_admin.grant_tools_for(platform, uid, minutes)
+        print(json.dumps({"ok": ok, "error": err, "note": note,
+                          "platform": platform, "user_id": uid,
+                          "minutes": minutes, "until": until,
+                          "until_text": (time.strftime("%Y-%m-%d %H:%M",
+                                                       time.localtime(until))
+                                         if until else "")}, indent=2))
+        sys.exit(0 if ok else 1)
+
+    if cmd == "channels-instruction":
+        # L.36-P12. Owner-typed only: nothing a chat guest can reach.
+        usage = ("usage: channels-instruction <platform> <id|@handle> "
+                 "show | set <text ...> | clear")
+        if len(rest) < 3:
+            _fail(usage)
+        platform, uid, action = rest[0], _person_id(rest[0], rest[1]), rest[2].lower()
+        if action == "show" and len(rest) == 3:
+            rec = people.get(platform, uid)
+            if rec is None:
+                _fail(f"{uid} isn't registered on {platform}")
+            print(json.dumps({"ok": True, "platform": platform, "user_id": uid,
+                              "instruction": rec.get("instruction") or ""},
+                             indent=2))
+            return
+        if action == "set" and len(rest) >= 4:
+            ok, err, text = user_admin.set_instruction(
+                platform, uid, " ".join(rest[3:]))
+        elif action == "clear" and len(rest) == 3:
+            ok, err, text = user_admin.set_instruction(platform, uid, "")
+        else:
+            _fail(usage)
+        print(json.dumps({"ok": ok, "error": err, "platform": platform,
+                          "user_id": uid, "instruction": text}, indent=2))
         sys.exit(0 if ok else 1)
 
     if cmd == "channels-presets":

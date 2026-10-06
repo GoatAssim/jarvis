@@ -454,6 +454,14 @@
   // saturation slider actually affects it — see isHardcodedPersona()).
   // ===========================================================================
   let REGISTERED_PERSONAS = [];
+  // What the owner switched off in the Tool Manager (disabled.json via /api/personas):
+  // persona ids -- the built-in five as well as tool-registered ones -- and skin ids
+  // ("preset:<id>" accent swatch, "theme:<id>" built-in theme). Switched-off entries
+  // are left out of the pickers only; whatever is applied right now stays applied.
+  let DISABLED_PERSONA_IDS = new Set();
+  let DISABLED_SKIN_IDS = new Set();
+  const isPersonaOff = (id) => DISABLED_PERSONA_IDS.has(id);
+  const isSkinOff = (id) => DISABLED_SKIN_IDS.has(id);
   // id -> label, merged into the Attitude <select> alongside SKIN_ATTITUDES.
   let REGISTERED_ATTITUDES = [];
 
@@ -515,6 +523,8 @@
       const data = await Api.getPersonas();
       const list = Array.isArray(data && data.personas) ? data.personas : [];
       REGISTERED_PERSONAS = list.map(normalizeRegisteredPersona).filter(Boolean);
+      DISABLED_PERSONA_IDS = new Set(Array.isArray(data && data.disabled_ids) ? data.disabled_ids : []);
+      DISABLED_SKIN_IDS = new Set(Array.isArray(data && data.disabled_skins) ? data.disabled_skins : []);
       const attitudes = (data && data.attitudes && typeof data.attitudes === "object") ? data.attitudes : {};
       REGISTERED_ATTITUDES = Object.entries(attitudes).map(([id, a]) => ({
         id,
@@ -532,6 +542,8 @@
     // person having to close and reopen it.
     if (qs("#skin-backdrop") && !qs("#skin-backdrop").hidden) {
       renderPersonaPresets(currentPersonaId);
+      renderSkinSwatches(currentPresetId);
+      if (window.JarvisCustomTools && window.JarvisCustomTools.renderThemeGallery) window.JarvisCustomTools.renderThemeGallery();
     }
     // Early boot (applySavedSkinEarly(), below) only ever had the
     // hardcoded PERSONA_PRESETS to search — if the browser's last-saved
@@ -967,6 +979,7 @@
     wrap.innerHTML = "";
     for (const preset of SKIN_PRESETS) {
       const isActive = preset.id === activePresetId;
+      if (isSkinOff("preset:" + preset.id) && !isActive) continue;   // Tool Manager switch
       wrap.appendChild(el("button", {
         type: "button",
         class: "skin-swatch" + (isActive ? " is-active" : ""),
@@ -1005,6 +1018,10 @@
     wrap.innerHTML = "";
     for (const persona of allPersonas()) {
       const isActive = persona.id === activeId;
+      // Switched off in the Tool Manager: not offered -- unless it is the one in use,
+      // which stays visible so the picker never shows "nothing selected" for the
+      // persona actually applied.
+      if (isPersonaOff(persona.id) && !isActive) continue;
       const attitudeLabel = (allAttitudes().find((a) => a.id === persona.attitude) || {}).label || persona.attitude;
       const title = attitudeLabel
         ? `${persona.name} — sets the name, a palette, and a "${attitudeLabel}" attitude together`
@@ -9846,6 +9863,17 @@
     // The Tool Manager switches a tool-registered persona off/on; the Skin modal reads
     // its list once at startup, so the Tool Manager asks it to read again.
     reloadPersonas: () => loadRegisteredPersonas(),
+    // The built-in personas, accent swatches and themes live in the browser, not in
+    // Python, so the Tool Manager asks for them here to list them (with a Source) and
+    // switch them. Plain copies; nothing it holds can change the picker.
+    builtinSkinCatalog: () => ({
+      personas: PERSONA_PRESETS.map((p) => ({ id: p.id, name: p.name, hex: p.hex })),
+      presets: SKIN_PRESETS.map((p) => ({ id: p.id, name: p.name, hex: p.hex })),
+      themes: Object.entries((window.JarvisUI && window.JarvisUI.themes.builtin) || {})
+        .map(([id, t]) => ({ id, name: (t && t.label) || id, hex: ((t && t.vars) || {})["--accent"] || "" })),
+    }),
+    isSkinOff,
+    isPersonaOff,
     confirm: (opts) => JarvisUI.confirm(opts),
     dialog: (opts) => JarvisUI.dialog(opts),
     refreshChats: () => refreshConvoList(),

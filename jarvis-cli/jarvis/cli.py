@@ -3125,7 +3125,7 @@ def main():
         from . import tools as system_tools
 
         if len(argv) < 3:
-            print(json.dumps({"error": "usage: jarvis tool-disable-set <name> <true|false> [--kind tool|persona|ui]"}))
+            print(json.dumps({"error": "usage: jarvis tool-disable-set <name> <true|false> [--kind tool|persona|skin|ui]"}))
             sys.exit(1)
         tool_name = argv[1].strip()
         value = argv[2].strip().lower() in ("1", "true", "yes", "y", "on")
@@ -3135,9 +3135,16 @@ def main():
         kind = argv[argv.index("--kind") + 1].strip().lower() if "--kind" in argv and len(argv) > argv.index("--kind") + 1 else "tool"
         try:
             if kind == "persona":
-                if value and tool_name not in {p.get("id") for p in system_tools.AUTO_PERSONAS}:
+                # A tool-registered persona, or one of the five that ship with the
+                # app (their ids live in persona_registry, the palettes in app.js).
+                from . import persona_registry
+                known = {p.get("id") for p in system_tools.AUTO_PERSONAS} | set(persona_registry.RESERVED_PERSONA_IDS)
+                if value and tool_name not in known:
                     raise ValueError("no such persona: %s" % tool_name)
                 print(json.dumps(tool_disable.set_persona_disabled(tool_name, value), indent=2))
+                return
+            if kind == "skin":
+                print(json.dumps(tool_disable.set_skin_disabled(tool_name, value), indent=2))
                 return
             if kind == "ui":
                 if value and tool_name not in {u["id"] for u in system_tools.AUTO_UI}:
@@ -3145,7 +3152,7 @@ def main():
                 print(json.dumps(tool_disable.set_ui_disabled(tool_name, value), indent=2))
                 return
             if kind != "tool":
-                raise ValueError("--kind must be tool, persona or ui")
+                raise ValueError("--kind must be tool, persona, skin or ui")
             if value and tool_name not in system_tools.TOOLS:
                 raise ValueError("no such tool: %s" % tool_name)
             result = tool_disable.set_tool_disabled(tool_name, value)
@@ -3200,6 +3207,7 @@ def main():
             "tools": sorted(tool_disable.disabled_tools()),
             "commands": sorted(tool_disable.disabled_commands()),
             "personas": sorted(tool_disable.disabled_personas()),
+            "skins": sorted(tool_disable.disabled_skins()),
             "ui": sorted(tool_disable.disabled_ui()),
             "protected": tool_disable.PROTECTED_TOOLS,
         }, indent=2))

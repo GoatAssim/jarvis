@@ -140,8 +140,16 @@ def handle(argv):
 
     # --- daemons -----------------------------------------------------------
     if cmd == "daemons":
-        entries = daemons.list_daemons()
-        _emit({"ok": True, "count": len(entries), "daemons": entries})
+        # `--no-usage` skips the CPU / memory sampling (about a third of a
+        # second); the web panel wants it, a script that only reads states may not.
+        if "no-usage" in flags:
+            entries, total = daemons.list_daemons(), None
+        else:
+            entries, total = daemons.list_daemons_with_usage()
+        out = {"ok": True, "count": len(entries), "daemons": entries}
+        if "no-usage" not in flags:
+            out["usage_total"] = total
+        _emit(out)
         return
 
     if cmd in ("daemon-start", "daemon-stop", "daemon-restart"):

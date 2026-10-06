@@ -191,6 +191,26 @@
     try { return new Date(ts * 1000).toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" }); } catch (_) { return "—"; }
   }
 
+  // How long until an epoch-seconds deadline, in the panel's short style.
+  // "now" is injectable so tests need no clock. Past deadlines read "ended".
+  function untilLeft(ts, now) {
+    if (!ts) return "";
+    const sec = Math.round(ts - (now || Date.now() / 1000));
+    if (sec <= 0) return "ended";
+    if (sec < 90) return "in under 2 min";
+    if (sec < 3600) return "in " + Math.round(sec / 60) + " min";
+    if (sec < 86400) return "in " + Math.round(sec / 3600) + " h";
+    return "in " + Math.round(sec / 86400) + " d";
+  }
+  // The time limits the panel offers: label, minutes. The server accepts any
+  // whole number of minutes from 1 to 30 days; these are just the round ones.
+  const TIME_LIMITS = [
+    { label: "1 hour", minutes: 60 },
+    { label: "8 hours", minutes: 480 },
+    { label: "24 hours", minutes: 1440 },
+    { label: "7 days", minutes: 10080 },
+  ];
+
   // One status for a person's overall posture; drives the card's left rule.
   function postureOf(p) {
     if (p.blocked) return "bad";
@@ -310,7 +330,8 @@
     toolsError: "",
     toolSearch: "",
     drafts: new Map(), // person key -> { mode, names:Set }
-    confirm: null, // { key, flag, ... }
+    confirm: null, // { key, flag, ... }  (flag "tool" + timed: minutes = confirming a time-limited grant, L.36-P6)
+    instr: new Map(),  // person key -> the instruction being typed, kept across redraws (L.36-P12)
     busy: new Set(), // "<key>|<flag>"
     prevFocus: null,
     adding: false, // the "Add a new person" form is open
@@ -353,6 +374,7 @@
 
   // ------------------------------------------------------------------- data
   async function load(keepSelection) {
+    let endedNow = [];   // people whose time-limited tool access ended during this load (L.36-P6)
     state.hist.clear();   // every write ends in load(); a cached change log would be one change behind
     state.loading = true;
     state.error = "";
@@ -369,6 +391,7 @@
       state.people = Array.isArray(ppl.people) ? ppl.people : [];
       state.presets = Array.isArray(ppl.presets) ? ppl.presets : [];
       state.permsError = ppl.perms_error || "";
+      endedNow = Array.isArray(ppl.expired_now) ? ppl.expired_now : [];
       // Someone removed or no longer listed can't stay ticked.
       for (const k of [...state.picked]) if (!personByKey(k)) state.picked.delete(k);
       if (!state.picked.size && state.bulkOpen) { state.bulkOpen = false; state.bulk = newBulk(); }
@@ -388,6 +411,10 @@
     }
     state.loading = false;
     renderAll();
+    if (endedNow.length) {
+      const names = endedNow.map((x) => x.name || x.user_id).slice(0, 3).join(", ");
+      toast(`Tool access ended for ${names}${endedNow.length > 3 ? " and others" : ""}: the time limit ran out. It's in their History.`, "info");
+    }
     const here = current();
     if (here && state.tab === "history") ensureHistory(here);
   }
@@ -463,6 +490,51 @@
       toast(err.message || "Couldn't save the name.", "error");
       return;
     }
+    await load(true);
+  }
+
+  // Time-limited tool access (L.36-P6). `scopeFirst` is the "Only tools I
+  // choose" answer for someone with no list yet: the (empty) custom list is
+  // saved BEFORE the grant, so a failure in between leaves them with no tools,
+  // never with every tool. The server writes the deadline before the list entry
+  // for the same reason.
+  async function grantTools(p, minutes, scopeFirst) {
+    const bkey = `${pkey(p)}|tool`;
+    state.busy.add(bkey);
+    renderDetail();
+    let note = "";
+    try {
+      if (scopeFirst) await personPost(p, "tools", { mode: "custom", tools: [] });
+      const out = await personPost(p, "tools-until", { minutes });
+      note = out && out.note ? out.note : "";
+      toast(`${displayName(p)} can use tools until ${out && out.until ? dateText(out.until) : "the time limit"}.`, "success");
+    } catch (err) {
+      toast(err.message || "Couldn't set the time limit.", "error");
+    }
+    state.busy.delete(bkey);
+    await load(true);
+    if (note) toast(note, "info");
+  }
+
+  // One line the owner typed about HOW to talk to a person (L.36-P12). Empty
+  // text clears it. The server refuses the owner's own account and anything
+  // over 240 characters; nothing here can grant access.
+  async function saveInstruction(p, text) {
+    const k = pkey(p);
+    const bkey = `${k}|instruction`;
+    state.busy.add(bkey);
+    renderDetail();
+    try {
+      const out = await personPost(p, "instruction", { text });
+      state.instr.delete(k);
+      toast(out && out.instruction ? "Saved. Jarvis follows it from their next message." : "Instruction cleared.", "success");
+    } catch (err) {
+      toast(err.message || "Couldn't save that.", "error");
+      state.busy.delete(bkey);
+      renderDetail();
+      return;
+    }
+    state.busy.delete(bkey);
     await load(true);
   }
 
@@ -765,8 +837,9 @@
       : e.answered ? statCard("Replies", "Answered", p.dm.on ? "In DMs and when mentioned." : "When mentioned (DMs are off).", "on")
         : statCard("Replies", "Ignored", "Not in the reply list.", "off");
     let tools;
-    if (e.tools === "all") tools = statCard("Tools", "Everything", "Any tool the platform allows.", "limited");
-    else if (e.tools === "custom") tools = statCard("Tools", `${e.tool_count} allowed`, "Only the tools you ticked.", "limited");
+    const ends = p.tool_until && !p.tool_expired ? ` Ends ${dateText(p.tool_until)} (${untilLeft(p.tool_until)}).` : "";
+    if (e.tools === "all") tools = statCard("Tools", "Everything", "Any tool the platform allows." + ends, "limited");
+    else if (e.tools === "custom") tools = statCard("Tools", `${e.tool_count} allowed`, "Only the tools you ticked." + ends, "limited");
     else if (e.tools_blocked_by_platform) tools = statCard("Tools", "Waiting", "Platform master switch is off.", "limited");
     else tools = statCard("Tools", "None", "Answers only, touches nothing.", "off");
     const auth = p.owner ? statCard("Role", "Owner", "Trusted as you, inside chats.", "owner")
@@ -793,6 +866,8 @@
     pane.appendChild(linkSection(p));
     const rm = removeSection(p);
     pane.appendChild(notesSection(p));
+    const how = instructionSection(p);
+    if (how) pane.appendChild(how);
     if (rm) pane.appendChild(rm);
     const fg = forgetSection(p);
     if (fg) pane.appendChild(fg);
@@ -929,6 +1004,41 @@
     if (items.length) sec.appendChild(el("div", { class: "ch-row__hint" }, "Your edits go straight into what Jarvis is told about them. A new note from them can still push the oldest one out — only six are kept."));
     if (p.linked) sec.appendChild(el("div", { class: "ch-row__hint" }, "Notes saved on their linked account are shared with Jarvis too; edit those on that account."));
     return sec;
+  }
+
+  // ---- how Jarvis should talk to them (L.36-P12) ----------------------------
+  // One owner-typed line, shown to the model as "your owner's note on how to
+  // talk to them". Style only: it never changes what they may do. Not shown
+  // for the owner's own account (Jarvis treats that as you at the PC).
+  function instructionSection(p) {
+    if (p.owner) return null;
+    const k = pkey(p);
+    const max = p.instruction_max || 240;
+    const saved = p.instruction || "";
+    const draft = state.instr.has(k) ? state.instr.get(k) : saved;
+    const busy = state.busy.has(`${k}|instruction`);
+    const input = el("input", { type: "text", class: "ch-name-input ch-instr-input", maxlength: String(max), autocomplete: "off", "aria-label": "How Jarvis should talk to them", placeholder: "e.g. Keep it short and casual with her.", disabled: busy });
+    input.value = draft;
+    const count = el("span", { class: "ch-instr__count" }, `${draft.length}/${max}`);
+    const save = el("button", { type: "button", class: "btn btn--primary btn--sm", disabled: busy || draft.trim() === saved, onclick: () => saveInstruction(p, input.value) }, busy ? "Saving…" : "Save");
+    input.addEventListener("input", () => {
+      state.instr.set(k, input.value);
+      count.textContent = `${input.value.length}/${max}`;
+      save.disabled = input.value.trim() === saved;
+    });
+    input.addEventListener("keydown", (e) => {
+      if (e.key === "Enter" && !save.disabled) { e.preventDefault(); saveInstruction(p, input.value); }
+    });
+    const row = el("div", { class: "ch-name-edit" }, [
+      input, save,
+      saved ? el("button", { type: "button", class: "btn btn--ghost btn--sm", disabled: busy, onclick: () => saveInstruction(p, "") }, "Clear") : null,
+    ]);
+    return el("div", null, [
+      el("div", { class: "ch-section-title" }, ["How Jarvis talks to them", el("span", { class: "ch-section-title__aside" }, saved ? "set" : "none")]),
+      row,
+      el("div", { class: "ch-instr__meta" }, [count]),
+      el("div", { class: "ch-row__hint" }, "Your own words on tone, length or language — Jarvis is told the note is from you. It only changes style: it can't give them any access, and they can't see or change it. Applies to this account only."),
+    ]);
   }
 
   // ---- forget this person (L.36-P11) --------------------------------------
@@ -1127,7 +1237,21 @@
       const yes = (label, fn, cls) => el("button", { type: "button", class: "btn btn--sm " + (cls || "btn--danger"), onclick: fn }, label);
       const cancel = el("button", { type: "button", class: "btn btn--ghost btn--sm", onclick: () => { state.confirm = null; renderDetail(); } }, "Cancel");
       let text, btns;
-      if (o.flag === "tool" && !c.off) {
+      if (o.flag === "tool" && c.timed) {
+        const when = (TIME_LIMITS.find((t) => t.minutes === c.timed) || {}).label || `${c.timed} minutes`;
+        const custom = p.tools.mode === "custom";
+        const listed = custom ? (p.tools.allow || []).length : 0;
+        text = `${displayName(p)} will be able to make Jarvis run tools on this PC for ${when}, then it switches off by itself.`
+          + (custom ? (listed ? ` Only the ${listed} tool${listed === 1 ? "" : "s"} you ticked.` : " Their tool list is empty, so tick the tools you want them to have.") : " Pick how much to trust them:");
+        btns = custom
+          ? [yes(`Allow for ${when}`, () => { state.confirm = null; grantTools(p, c.timed, false); }, "btn--primary"), cancel]
+          : [
+            // Restriction first, permission second (see grantTools).
+            yes("Only tools I choose", () => { state.confirm = null; grantTools(p, c.timed, true); }, "btn--primary"),
+            yes("Every tool", () => { state.confirm = null; grantTools(p, c.timed, false); }),
+            cancel,
+          ];
+      } else if (o.flag === "tool" && !c.off) {
         text = `${displayName(p)} will be able to make Jarvis run tools on this PC. Pick how much to trust them:`;
         btns = [
           // Restriction first, permission second: if the second call fails they
@@ -1243,6 +1367,43 @@
     return wrap;
   }
 
+  // ---- time-limited tool access (L.36-P6) ----------------------------------
+  // Sits under the Tool use switch. The grant is the ordinary tool list entry;
+  // this only adds an end time. With tools on it narrows (no confirmation
+  // needed); from off it WIDENS access, so it asks first, like the switch.
+  function timeLimitPanel(p) {
+    if (p.owner || p.blocked || p.tool.via === "wildcard") return null;
+    const k = pkey(p);
+    const busy = state.busy.has(`${k}|tool`);
+    const on = !!p.tool.on;
+    const counting = on && p.tool_until && !p.tool_expired;
+    let head;
+    let label;
+    if (counting) {
+      head = el("div", { class: "ch-row__hint" }, [`Tool use ends ${dateText(p.tool_until)} (${untilLeft(p.tool_until)}), then switches off by itself.`]);
+      label = "Change to";
+    } else if (on) {
+      head = el("div", { class: "ch-row__hint" }, "No time limit — tool use stays on until you switch it off.");
+      label = "End it after";
+    } else {
+      head = el("div", { class: "ch-row__hint" }, "Or let them use tools for a limited time; it switches off by itself.");
+      label = "Allow for";
+    }
+    const btns = TIME_LIMITS.map((t) => el("button", {
+      type: "button", class: "btn btn--ghost btn--sm", disabled: busy,
+      onclick: () => {
+        if (on) { grantTools(p, t.minutes, false); return; }
+        state.confirm = { key: k, flag: "tool", timed: t.minutes };
+        renderDetail();
+      },
+    }, t.label));
+    if (counting) btns.push(el("button", { type: "button", class: "btn btn--ghost btn--sm", disabled: busy, onclick: () => setFlag(p, "tool", true), title: "Remove the time limit" }, "Keep on for good"));
+    return el("div", { class: "ch-timelimit" }, [
+      head,
+      el("div", { class: "ch-timelimit__btns" }, [el("span", { class: "ch-timelimit__label" }, label), ...btns]),
+    ]);
+  }
+
   function renderPerms(p) {
     const pane = el("div", { class: "ch-tabpane", id: "ch-pane-perms", role: "tabpanel", "aria-labelledby": "ch-tab-perms" });
     const plat = state.platforms[p.platform] || {};
@@ -1279,8 +1440,12 @@
       flag: "tool", icon: "tool", ch: "limited", label: "Tool use",
       hint: "May make Jarvis run tools on this PC from chat. Turn it on, then choose exactly which tools.",
       locked: lockFor(p.tool, "tool"), confirmOn: true, notes: toolNotes,
-      tags: p.tool.on ? [tag(p.tools.mode === "custom" ? "custom list" : "every tool", "limited")] : [],
-      extra: p.tool.on || p.tool.via === "wildcard" ? toolScopePanel(p) : null,
+      tags: p.tool.on ? [tag(p.tools.mode === "custom" ? "custom list" : "every tool", "limited"), ...(p.tool_until && !p.tool_expired ? [tag(`ends ${untilLeft(p.tool_until)}`, "limited")] : [])] : [],
+      extra: (() => {
+        const scope = p.tool.on || p.tool.via === "wildcard" ? toolScopePanel(p) : null;
+        const limit = timeLimitPanel(p);
+        return scope || limit ? el("div", { class: "ch-toolextra" }, [scope, limit]) : null;
+      })(),
     });
     pane.appendChild(el("div", null, [el("div", { class: "ch-section-title" }, "Capabilities"), el("div", { class: "ch-rows" }, [toolsRow])]));
 
@@ -2605,6 +2770,6 @@
     open, close,
     _pure: { initials, hueFor, relTime, filterPeople, postureOf, sameScope, scopeOf, groupTools, displayName, STATE_FILTERS,
              dayOf, clockOf, localDay, dayLabel, groupByDay, fmtTokens, barModel, convNote, summaryText,
-             toolCallsLabel },
+             toolCallsLabel, untilLeft, TIME_LIMITS },
   };
 })(window);

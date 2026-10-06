@@ -160,6 +160,51 @@
     return secs >= 0 ? secs : 0;
   }
 
+  /* ---- CPU / memory (daemons.py sample_usage) ------------------------------
+   * Each running row from /api/daemons carries `usage` ({cpu_percent,
+   * cpu_core_percent, rss_bytes, processes, procs[]}) and the response carries
+   * `usage_total`. cpu_percent is a share of the whole machine (Task Manager's
+   * reading); cpu_core_percent a share of one core. These numbers change on every
+   * poll but are NOT part of entrySignature: they are written into existing nodes
+   * (refreshUsage) so a card under the cursor is never repainted. */
+  function fmtBytes(n) {
+    const v = Number(n);
+    if (!isFinite(v) || v < 0) return "\u2014";
+    if (v < 1024) return `${Math.round(v)} B`;
+    const units = ["KB", "MB", "GB", "TB"];
+    let x = v / 1024;
+    let i = 0;
+    while (x >= 1024 && i < units.length - 1) { x /= 1024; i += 1; }
+    return `${x < 10 ? x.toFixed(1) : Math.round(x)} ${units[i]}`;
+  }
+
+  function fmtCpu(p) {
+    const v = Number(p);
+    if (!isFinite(v) || v < 0) return "\u2014";
+    if (v > 0 && v < 0.1) return "<0.1%";
+    return `${v < 10 ? v.toFixed(1) : Math.round(v)}%`;
+  }
+
+  // "CPU 3.2% · RAM 120 MB", or "" when there is nothing to show.
+  function usageText(u) {
+    if (!u || typeof u !== "object") return "";
+    return `CPU ${fmtCpu(u.cpu_percent)} \u00B7 RAM ${fmtBytes(u.rss_bytes)}`;
+  }
+
+  function usageTitle(u) {
+    if (!u || typeof u !== "object") return "";
+    const n = Number(u.processes) || 0;
+    return `CPU is a share of the whole machine (${fmtCpu(u.cpu_core_percent)} of one core). `
+      + `RAM is what ${n} process${n === 1 ? "" : "es"} (the supervisor, the service and anything it started) hold in memory.`;
+  }
+
+  // The whole-panel line: "all running: CPU 12% · RAM 480 MB (7 processes)".
+  function usageTotalText(t) {
+    if (!t || typeof t !== "object") return "";
+    const n = Number(t.processes) || 0;
+    return `all services: CPU ${fmtCpu(t.cpu_percent)} \u00B7 RAM ${fmtBytes(t.rss_bytes)} (${n} process${n === 1 ? "" : "es"})`;
+  }
+
   const pad2 = (n) => String(n).padStart(2, "0");
 
   function fmtStamp(epochSeconds) {
@@ -813,6 +858,7 @@
     built: false,
     entries: [],
     loadedOnce: false,
+    usageTotal: null,       // the response's usage_total (all daemons together), or null
     loadError: "",
     lastOk: 0,
     inflight: false,
@@ -944,6 +990,8 @@
     const bits = [`${n.total} service${n.total === 1 ? "" : "s"}`, `${n.byState.running} running`];
     if (n.byState.crashed) bits.push(`${n.byState.crashed} crashed`);
     if (n.attention) bits.push(`${n.attention} need${n.attention === 1 ? "s" : ""} attention`);
+    const totalText = usageTotalText(state.usageTotal);
+    if (totalText && n.byState.running) bits.push(totalText);
     let text;
     let cls = "";
     if (!state.loadedOnce) { text = state.loadError ? "couldn\u2019t read services" : "reading services\u2026"; cls = state.loadError ? "is-error" : "is-busy"; }
@@ -1078,6 +1126,64 @@
     return el("span", { class: "dmn-uptime", "data-started": String(entry.started_at) }, fmtDuration(secs));
   }
 
+  // A usage readout the poll rewrites in place (see refreshUsage). Rendered only
+  // for a running service; `variant` picks the layout ("card" | "hero").
+  function usageNode(entry, variant) {
+    if (!entry.running && !entry.supervisor_pid) return null;
+    return el("span", {
+      class: "dmn-usage dmn-usage--" + variant, "data-usage-id": entry.id,
+      title: usageTitle(entry.usage) || null,
+    }, usageText(entry.usage));
+  }
+
+  // Details tab: one row per process of the selected service, biggest first.
+  function usageProcsNode(entry) {
+    return el("div", { class: "dmn-procs", "data-usage-procs": entry.id });
+  }
+
+  function fillProcs(node, u) {
+    node.textContent = "";
+    const rows = u && Array.isArray(u.procs) ? u.procs : [];
+    if (!rows.length) { node.appendChild(dash()); return; }
+    rows.forEach((p) => node.appendChild(el("div", { class: "dmn-procs__row" }, [
+      el("code", { class: "dmn-procs__name", title: `pid ${p.pid}` }, `${p.name || "process"} \u00B7 ${p.pid}`),
+      el("span", { class: "dmn-procs__cpu" }, fmtCpu(p.cpu_core_percent)),
+      el("span", { class: "dmn-procs__mem" }, fmtBytes(p.rss_bytes)),
+    ])));
+    if (u.processes > rows.length) {
+      node.appendChild(el("div", { class: "dmn-dim" }, `\u2026and ${u.processes - rows.length} more`));
+    }
+  }
+
+  // Called after every poll, whether or not anything repainted: the numbers move
+  // constantly and must not cost a repaint (that is what entrySignature avoids).
+  function refreshUsage() {
+    if (!dom) return;
+    dom.overlay.querySelectorAll("[data-usage-id]").forEach((node) => {
+      const e = entryById(node.getAttribute("data-usage-id"));
+      node.textContent = e ? usageText(e.usage) : "";
+      const t = e ? usageTitle(e.usage) : "";
+      if (t) node.setAttribute("title", t);
+    });
+    dom.overlay.querySelectorAll("[data-usage-detail]").forEach((node) => {
+      const e = entryById(node.getAttribute("data-usage-detail"));
+      const u = e && e.usage;
+      const kind = node.getAttribute("data-usage-kind");
+      node.textContent = !u ? "\u2014"
+        : kind === "cpu" ? `${fmtCpu(u.cpu_percent)} of the machine \u00B7 ${fmtCpu(u.cpu_core_percent)} of one core`
+          : kind === "mem" ? fmtBytes(u.rss_bytes)
+            : String(u.processes);
+    });
+    dom.overlay.querySelectorAll("[data-usage-procs]").forEach((node) => {
+      const e = entryById(node.getAttribute("data-usage-procs"));
+      fillProcs(node, e && e.usage);
+    });
+  }
+
+  function usageDetail(entry, kind) {
+    return el("span", { "data-usage-detail": entry.id, "data-usage-kind": kind }, "\u2014");
+  }
+
   // The star on a card. The card itself is a <button>, so this is a
   // role="button" span (a real <button> inside one is invalid HTML and some
   // browsers won't deliver the click to it). It is a mouse/touch shortcut and
@@ -1130,6 +1236,7 @@
         favStar(entry),
       ]),
       el("div", { class: "dmn-card__cmd" }, entry.command || "(no command)"),
+      usageNode(entry, "card"),
       categoryRow(entry),
       tags.length ? el("div", { class: "dmn-card__meta" }, tags) : null,
     ]);
@@ -1533,6 +1640,7 @@
           entry.builtin ? " \u00B7 built-in" : " \u00B7 custom",
           entry.pid ? ` \u00B7 pid ${entry.pid}` : "",
         ]),
+        usageNode(entry, "hero"),
         entry.description ? el("div", { class: "dmn-does" }, entry.description) : null,
         el("div", { class: "dmn-badges" }, [
           e.enabled ? null : badge("Disabled", "warn"),
@@ -1945,11 +2053,15 @@
       kv("Uptime", uptimeNode(entry) || dash()),
       kv("Process id", entry.pid ? String(entry.pid) : dash(), { mono: true }),
       kv("Supervisor id", entry.supervisor_pid ? String(entry.supervisor_pid) : dash(), { mono: true }),
+      kv("CPU", entry.running ? usageDetail(entry, "cpu") : dash()),
+      kv("Memory", entry.running ? usageDetail(entry, "mem") : dash()),
+      entry.running ? kv("Processes", el("div", null, [usageDetail(entry, "procs"), usageProcsNode(entry)]), { wide: true }) : null,
       kv("Started", entry.running && entry.started_at ? fmtStamp(entry.started_at) : dash()),
       kv("Last exit", entry.exit_code != null ? `code ${entry.exit_code}` : dash()),
       kv("Restarts", el("div", null, [`${restarts} of ${max > 0 ? max : "\u221E"} in ${RESTART_WINDOW_MIN} min`, meter])),
       kv("Next start", entry.next_start ? (() => { const nx = describeNextStart(entry.next_start, Date.now()); return `${nx.label}${nx.relative ? " \u00B7 " + nx.relative : ""}`; })() : dash()),
-    ]));
+    ].filter(Boolean)));
+    refreshUsage();
 
     // configuration
     det.config.textContent = "";
@@ -2427,6 +2539,7 @@
       try {
         const data = await Api.get("/api/daemons");
         state.entries = Array.isArray(data.daemons) ? data.daemons : [];
+        state.usageTotal = data.usage_total && typeof data.usage_total === "object" ? data.usage_total : null;
         state.loadedOnce = true;
         state.loadError = "";
         state.lastOk = Date.now();
@@ -2498,7 +2611,7 @@
     renderKindSelect();
     renderList();
     renderSide();
-    if (state.editor) return;
+    if (state.editor) { refreshUsage(); return; }
     const entry = selectedEntry();
     if (selectionChanged || !entry || !state.shell || state.shellFor !== entry.id) {
       renderMain();
@@ -2506,6 +2619,7 @@
     } else {
       updateShell(entry, false);
     }
+    refreshUsage();
   }
 
   async function refreshAll(manual) {
@@ -2779,6 +2893,7 @@
     // Pure helpers, exposed for tests/verify_daemons_panel.js only.
     _pure: {
       normalizeId, bucketOf, withDefaults, isStoppable, fmtDuration, uptimeSeconds, fmtStamp,
+      fmtBytes, fmtCpu, usageText, usageTitle, usageTotalText,
       describeNextStart, restartSummary, stopSummary, attentionOf, searchHaystack, matchesFilters,
       countEntries, categoriesOf, normalizeKind, reconcileKind, sortFavoritesFirst, toggleFavoriteId, entrySignature, classifyLine, annotateLines, summarizeLines, filterLines,
       groupTraces, highlightSegments, draftFromEntry, blankDraft, validateDraft, envPairs,

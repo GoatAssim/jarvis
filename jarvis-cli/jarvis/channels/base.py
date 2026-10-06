@@ -541,6 +541,17 @@ def handle_message(platform, msg, send, cfg=None, on_tool_call=None, decision=No
                                        decision.may_use_tools))
     if problem:
         _log(problem)
+    # L.36-P6: a time-limited grant that has run out. This message already
+    # runs without tools (resolve_tool_access said so); now take the person
+    # off the tool list so the panel and the next gate decision agree. The
+    # dry run ("Test as this person") never gets here, so it still writes
+    # nothing. Never raises: cleaning up is not why a reply fails.
+    if tools_label == user_perms.LABEL_EXPIRED:
+        try:
+            from . import user_admin
+            user_admin.expire_due(platform, msg.user_id)
+        except Exception as exc:  # noqa: BLE001
+            _log(f"could not end an expired tool grant: {exc}")
 
     _log(f"accepted {platform} msg from {msg.user_handle or msg.user_id} "
          f"({'owner' if is_owner else 'guest'}, tools={tools_label})")

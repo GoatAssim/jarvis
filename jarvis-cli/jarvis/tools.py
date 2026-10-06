@@ -827,6 +827,26 @@ def _tool_file(name):
     return ""
 
 
+_MCP_TAG_RE = re.compile(r"^\[MCP:\s*([^\]]+)\]")
+
+
+def _tool_origin(name, source, file, description):
+    """One human sentence for "where does this tool come from", shown in the Tool
+    Manager's Source column: the file for a shipped or user tool, the server for an
+    MCP one. Display only -- nothing reads it back. Never raises."""
+    try:
+        if source == "mcp":
+            m = _MCP_TAG_RE.match(description or "")
+            return "MCP server: %s" % m.group(1).strip() if m else "MCP (built-in helper)"
+        if source == "user":
+            return "Your file: ~/.jarvis/tools/%s" % file if file else "Your file in ~/.jarvis/tools/"
+        if source == "auto":
+            return "Ships with Jarvis: actions/%s" % file if file else "Ships with Jarvis (actions/)"
+        return "Built in to Jarvis (tools.py)"
+    except Exception:  # noqa: BLE001
+        return ""
+
+
 def tools_list_payload():
     """Full catalog for remote permission UIs — not filtered by session or env.
 
@@ -876,6 +896,7 @@ def tools_list_payload():
             "disabled": name in off,
             "protected": tool_disable.protected_reason(name) or "",
         }
+        item["origin"] = _tool_origin(name, item["source"], item["file"], item["description"])
         supplied = AUTO_TEST_CHECKLIST.get(name)
         if supplied:
             item["checklist"] = supplied
@@ -901,6 +922,7 @@ def tools_list_payload():
                 "disabled": name in off,
                 "protected": tool_disable.protected_reason(name) or "",
             })
+            items[-1]["origin"] = _tool_origin(name, items[-1]["source"], items[-1]["file"], "")
     return items
 
 
@@ -1201,7 +1223,11 @@ def personas_list_payload(include_disabled=False):
                     for p in AUTO_PERSONAS]
     else:
         personas = [p for p in AUTO_PERSONAS if p.get("id") not in off]
-    return {"personas": personas, "attitudes": AUTO_ATTITUDES}
+    # `disabled_ids` / `disabled_skins` are the WHOLE off lists, not just the
+    # registered personas': the five built-in personas and the accent swatches /
+    # themes are drawn by the browser, which has no other way to learn they are off.
+    return {"personas": personas, "attitudes": AUTO_ATTITUDES,
+            "disabled_ids": sorted(off), "disabled_skins": sorted(tool_disable.disabled_skins())}
 
 
 # ---------------------------------------------------------------------------

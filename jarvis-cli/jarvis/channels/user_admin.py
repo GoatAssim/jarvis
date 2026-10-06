@@ -73,12 +73,44 @@ and a linked account on the other platform alone, and says so in its report.
 No model tool reaches it (AGENTS.md); the panel and `jarvis channels-forget`
 are the only callers, and the CLI only acts when told `--yes`.
 
+TIME-LIMITED TOOLS  (L.36-P6)
+-----------------------------
+`grant_tools_for` switches tool use on for one person until a deadline. The
+grant itself is the ordinary tool_allowlist entry; the deadline lives in
+user_perms.tools_until and is only a ceiling on it. Two things end it:
+
+    every message   user_perms.resolve_tool_access() answers "no tools" for a
+                    person whose deadline has passed, whatever the list says
+                    (this is the enforcement; it reads the clock itself and
+                    needs no sweeper to be running)
+    a sweep         expire_due() takes the person out of the tool list, so the
+                    panel and `channels-users` stop showing tools as on. It
+                    runs when the panel loads the people, when a message
+                    arrives from someone whose time ran out, and from the
+                    terminal; never from the "Test as this person" dry run.
+
+Writes are ordered so a failure part-way leaves LESS access, never more: the
+deadline is stored BEFORE the list entry is added, and removed AFTER the entry
+is. Setting `tool` on or off by hand, blocking, or forgetting someone ends the
+countdown (on = for good, off = revoked). The deadline is ignored for
+the owner (they cannot be given one) and for anyone a "*" entry covers in the
+tool list (a switch for one person cannot undo that, so a deadline for one
+person cannot either).
+
+THE OWNER'S INSTRUCTION FOR ONE PERSON  (L.36-P12)
+--------------------------------------------------
+`set_instruction` stores one owner-typed line about HOW to talk to a person
+(people.py explains the rules and why it is safe in the prompt). It is style
+only and never touches a permission, so it is not written to the change log.
+
 WHAT A SWITCH CANNOT DO
 -----------------------
 There is no deny-list in the gate. A person covered by a `"*"` entry cannot be
 switched off individually — set_flag() refuses and says why instead of
 removing an id that was never the reason they got through.
 """
+
+import time
 
 from . import PLATFORMS, PERM_DM, PERM_REPLY, PERM_TOOLS
 from . import config as channel_config
@@ -171,11 +203,21 @@ def person_view(platform, rec, cfg, perms):
         "tool": membership(cfg, PERM_TOOLS, rec),
         "send_dm": bool(perms["can_dm"]),
         "tools": perms["tools"],
+        # L.36-P6: when their tool access ends by itself (epoch seconds, 0 =
+        # it doesn't). `tool_expired` is a deadline that has passed but that
+        # nothing has swept yet; list_view sweeps first, so it is only ever
+        # true in the instant between the two.
+        "tool_until": int(perms.get("tools_until") or 0),
+        "tool_expired": user_perms.is_expired(perms.get("tools_until")),
+        # L.36-P12: the owner's own line on how to talk to them.
+        "instruction": rec.get("instruction") or "",
+        "instruction_max": people.MAX_INSTRUCTION_LEN,
     }
     # A one-glance summary of what this person can do right now. It restates
     # the gate's own rule (permissions.decide: allow_tools AND tool_allowlist)
     # so the badge on a card can never promise more than the gate gives.
-    tools_live = bool(cfg.get("allow_tools")) and view["tool"]["on"]
+    tools_live = (bool(cfg.get("allow_tools")) and view["tool"]["on"]
+                  and not view["tool_expired"])
     if not (view["reply"]["on"] and tools_live):
         tools_state = "none"
     elif perms["tools"]["mode"] == user_perms.TOOLS_CUSTOM:
@@ -216,6 +258,9 @@ def list_view(platform=None):
     """Everything the panel needs in one call: a header per platform and one
     card per registered person (most recently seen first). `perms_error` is set
     instead of guessing when user_perms.json is unreadable."""
+    # L.36-P6: first take out anyone whose time-limited tool access has run
+    # out, so the lists read below are the truth.
+    expired_now = expire_due(platform if platform in PLATFORMS else None)
     cfg_all = channel_config.load_config()
     platforms = [platform] if platform in PLATFORMS else list(PLATFORMS)
     for p in platforms:
@@ -237,6 +282,9 @@ def list_view(platform=None):
         "platforms": {p: platform_view(p, cfg_all.get(p) or {}) for p in platforms},
         "people": out_people,
         "perms_error": perms_error,
+        # People whose time limit ended during THIS call (the panel says so
+        # once). The permanent record is the History tab.
+        "expired_now": expired_now,
         # Quick setups (L.36-P4): fixed in code, so the panel needs no call of
         # its own to know what to offer.
         "presets": presets.public_view(),
@@ -322,9 +370,16 @@ def set_flag(platform, user_id, flag, value):
             return False, refusal, ""
         if value:
             ok, err = channel_config.add_to_set(platform, which, uid)
-            return ok, err, ""
+            # Switching tools on by hand means "for good": any countdown from
+            # an earlier time-limited grant ends here. Done AFTER the list
+            # write, so a failure leaves the person with a deadline still
+            # running, which is less access, not more.
+            return ok, err, (end_countdown(platform, uid)
+                             if ok and flag == "tool" else "")
         ok, err = _remove_everywhere(platform, which, rec)
-        return ok, err, ""
+        # Off means revoked: the list entry is gone first, then the countdown.
+        return ok, err, (end_countdown(platform, uid)
+                         if ok and flag == "tool" else "")
 
     if flag == "send_dm":
         try:
@@ -373,6 +428,7 @@ def set_flag(platform, user_id, flag, value):
             ok, err = _remove_everywhere(platform, which, rec)
             if not ok:
                 return False, err, ""
+        end_countdown(platform, uid)
         people.set_follow(platform, uid, people.FOLLOW_BLOCKED)
         return True, "", wildcard_note
     # Unblocking goes back to "unknown", not "approved": a panel Block removed
@@ -393,6 +449,152 @@ def set_tools(platform, user_id, mode, names=None):
     except (ValueError, OSError, user_perms.PermsUnreadable) as exc:
         return False, str(exc)
     return True, ""
+
+
+# --------------------------------------------------------------------------
+# Time-limited tool access  (L.36-P6)
+# --------------------------------------------------------------------------
+
+def end_countdown(platform, uid):
+    """Drop a stored tool deadline. Returns "" when done (or when there was
+    none), else a heads-up for the person flipping the switch: the deadline
+    could not be cleared, so it will still end their tool use when it comes.
+    Never raises, and never widens anything -- a deadline left in place only
+    ever means less access."""
+    try:
+        user_perms.set_tools_until(platform, uid, 0)
+    except (OSError, ValueError, user_perms.PermsUnreadable) as exc:
+        return (f"the earlier time limit could not be cleared ({exc}) \u2014 "
+                f"it will still end their tool use when it runs out")
+    return ""
+
+
+def grant_refusal(platform, rec, cfg):
+    """Why this person cannot be given a time-limited grant, or "". One place
+    for the preview text and the real thing."""
+    if permissions.is_owner(cfg, _idents(rec)):
+        return ("that's the owner \u2014 a time limit would cut off your own "
+                "account inside chats. Use the Tool use switch instead")
+    if (rec.get("follow") or "") == people.FOLLOW_BLOCKED:
+        return "they're blocked \u2014 unblock them first"
+    if membership(cfg, PERM_TOOLS, rec)["via"] == "wildcard":
+        return ("covered by \"*\" (everyone) in the tool list \u2014 a time "
+                "limit for one person can't undo that. Take the \"*\" out first")
+    return ""
+
+
+def grant_tools_for(platform, user_id, minutes, now=None):
+    """Switch tool use on for one person until `minutes` from now.
+    Returns (ok, error, note, until) where `until` is epoch seconds.
+
+    Running it again for someone who already has a countdown replaces it
+    (extends or shortens). The tool LIST (which tools) is untouched: a custom
+    list the owner set stays, and a person with none gets whatever tool use
+    already meant for them. Writes the deadline first, then the list entry;
+    see the module docstring."""
+    rec, err = _registered(platform, user_id)
+    if rec is None:
+        return False, err, "", 0
+    try:
+        minutes = user_perms.grant_minutes_ok(minutes)
+    except ValueError as exc:
+        return False, str(exc), "", 0
+    cfg = channel_config.platform_config(platform)
+    refusal = grant_refusal(platform, rec, cfg)
+    if refusal:
+        return False, refusal, "", 0
+    uid = str(rec["user_id"])
+    until = int((time.time() if now is None else now) + minutes * 60)
+    try:
+        user_perms.set_tools_until(platform, uid, until)
+    except (OSError, ValueError, user_perms.PermsUnreadable) as exc:
+        return False, str(exc), "", 0
+    ok, err = channel_config.add_to_set(platform, PERM_TOOLS, uid)
+    if not ok:
+        end_countdown(platform, uid)
+        return False, err or "could not switch tool use on", "", 0
+    changelog.record(platform, changelog.K_TIMED, uid,
+                     until=time.strftime("%Y-%m-%d %H:%M",
+                                         time.localtime(until)),
+                     minutes=minutes)
+    notes = []
+    if not cfg.get("allow_tools"):
+        notes.append(f"The {platform} master tools switch is off, so this has "
+                     f"no effect until it is on (jarvis channels-set "
+                     f"{platform} allow_tools true).")
+    return True, "", " ".join(notes), until
+
+
+def expire_due(platform=None, user_id=None, now=None):
+    """Take everyone whose time-limited tool access has run out off the tool
+    list and clear their deadline. Returns [{platform, user_id, name}] for the
+    ones ended by THIS call. Never raises.
+
+    Safe to call from anywhere that is allowed to write (the panel's people
+    load, the gateway after it refused a message, the terminal) and NOT from
+    a dry run. Idempotent. If removing someone from the list fails, the
+    deadline is left in place: resolve_tool_access keeps refusing them, and
+    the next call tries again. Each removal is tagged why="time limit ended"
+    in the change log."""
+    ended = []
+    try:
+        store = user_perms._load()
+    except user_perms.PermsUnreadable:
+        return ended          # unreadable limits are handled by the callers
+    except Exception:  # noqa: BLE001
+        return ended
+    clock = time.time() if now is None else now
+    for k in list(store):
+        plat, _, uid = k.partition(":")
+        if plat not in PLATFORMS or not uid:
+            continue
+        if platform and plat != platform:
+            continue
+        if user_id and uid != str(user_id):
+            continue
+        entry = user_perms.normalize(store.get(k))
+        if not user_perms.is_expired(entry["tools_until"], clock):
+            continue
+        try:
+            rec = people.get(plat, uid)
+            idents = _idents(rec) if rec else [uid]
+            with changelog.reason("time limit ended"):
+                done = True
+                for ident in idents:
+                    ok, _err = channel_config.remove_from_set(
+                        plat, PERM_TOOLS, ident)
+                    done = done and ok
+            if not done:
+                continue
+            user_perms.set_tools_until(plat, uid, 0)
+            ended.append({"platform": plat, "user_id": uid,
+                          "name": (people.effective_name(rec) if rec else "")
+                          or (rec or {}).get("handle") or uid})
+        except Exception:  # noqa: BLE001 -- the deadline stays; retried later
+            continue
+    return ended
+
+
+def set_instruction(platform, user_id, text):
+    """Set (or, with empty text, clear) the owner's line on how to talk to
+    this person. Returns (ok, error, instruction).
+
+    Refuses the owner's own account (its prompt block is fixed text, so an
+    instruction there would be stored and never used) and anyone not on file.
+    Style only: nothing here touches a permission, and the model is told so."""
+    rec, err = _registered(platform, user_id)
+    if rec is None:
+        return False, err, ""
+    cfg = channel_config.platform_config(platform)
+    if permissions.is_owner(cfg, _idents(rec)):
+        return False, ("that's the owner \u2014 Jarvis treats your own "
+                       "account like you at the PC, so there is nothing to "
+                       "tell it about how to talk to you"), ""
+    try:
+        out = people.set_instruction(platform, rec["user_id"], text)
+    except ValueError as exc:
+        return False, str(exc), rec.get("instruction") or ""
+    return True, "", out.get("instruction") or ""
 
 
 # --------------------------------------------------------------------------
@@ -815,6 +1017,9 @@ def simulate(platform, user_id, context=permissions.CTX_DM, mentioned=True):
         if problem:
             why = ("Their tool limits could not be read, so this message "
                    "runs with no tools until that is fixed.")
+        elif label == user_perms.LABEL_EXPIRED:
+            why = ("Their time-limited tool access has run out. Switch Tool "
+                   "use on again, or give them another time limit.")
         elif scope is not None:
             why = "Their custom tool list is empty."
         elif not cfg.get("allow_tools"):
@@ -842,6 +1047,14 @@ def simulate(platform, user_id, context=permissions.CTX_DM, mentioned=True):
     if (rec.get("follow") or "") == people.FOLLOW_BLOCKED and answered:
         notes.append("They are marked blocked but still get through: a "
                      "\"*\" (everyone) entry covers them.")
+    try:
+        until = user_perms.tools_until(platform, rec["user_id"])
+    except user_perms.PermsUnreadable:
+        until = 0
+    if answered and may_use and until and not user_perms.is_expired(until):
+        notes.append("Tool use is time-limited for them: it ends at "
+                     + time.strftime("%Y-%m-%d %H:%M", time.localtime(until))
+                     + ".")
     if answered and not user_perms.dm_allowed(platform, rec["user_id"]):
         notes.append("Jarvis would not DM them on your behalf (send_dm is off "
                      "for them).")

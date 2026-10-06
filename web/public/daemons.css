@@ -119,6 +119,16 @@
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
 .dmn-card__meta{ display: flex; gap: 6px; align-items: center; margin-top: 5px; flex-wrap: wrap; }
+/* CPU / RAM readout: rewritten in place on every poll (daemons.js refreshUsage),
+   so it must never change the card's height - one clipped line. */
+.dmn-usage{ font-family: var(--font-mono); font-size: 10.5px; color: var(--text-dimmer); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.dmn-usage:empty{ display: none; }
+.dmn-usage--card{ display: block; margin-top: 3px; }
+.dmn-usage--hero{ display: block; margin-top: 4px; font-size: 11.5px; color: var(--text-dim); }
+.dmn-procs{ margin-top: 6px; display: flex; flex-direction: column; gap: 2px; }
+.dmn-procs__row{ display: grid; grid-template-columns: minmax(0,1fr) 64px 72px; gap: 8px; font-size: 11.5px; align-items: baseline; }
+.dmn-procs__name{ overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-dim); }
+.dmn-procs__cpu, .dmn-procs__mem{ font-family: var(--font-mono); text-align: right; color: var(--text); }
 /* L.13 favorites: the star on a card, and the Favorites chip. The empty star
    is faint until the card is hovered/focused so a long list isn't a column of
    outlines; a favorited one is always solid. Shape (filled vs outline), not

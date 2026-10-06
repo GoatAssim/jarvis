@@ -17,6 +17,14 @@ What the lists cannot say is anything finer than "tools: yes/no":
              behalf (the `send_dm` tool). `people.follow == blocked` already
              refuses that, but blocking is a blunt instrument: it also means
              "stop asking me about them".
+    tools_until
+             a deadline (epoch seconds, 0 = none) after which this person's
+             tool access ends by itself (L.36-P6, "tools for 24 hours"). It
+             is a CEILING on a grant that lives in tool_allowlist, not a grant
+             of its own: past the deadline resolve_tool_access() answers "no
+             tools" whatever the list says, and user_admin.expire_due() then
+             takes them out of the list so the panel tells the truth. A
+             deadline that is present but unreadable counts as already passed.
 
 Identity (name, handle, picture, first seen) stays in people.py. This file is
 permission only, keyed the same way: "<platform>:<user_id>".
@@ -39,6 +47,7 @@ record, so the file stays as small as the number of people actually limited.
 """
 
 import re
+import time
 
 from .. import atomic_io
 from .directory import CHANNELS_DIR
@@ -71,6 +80,16 @@ PLUMBING_TOOLS = (
 # would smuggle in a second tool.
 _NAME_RE = re.compile(r"^[A-Za-z0-9_.:-]{1,64}$")
 MAX_TOOLS = 400
+
+# Longest time-limited grant: 30 days, in minutes. A longer grant is just a
+# permanent one with extra steps, and the owner can still switch tools on for
+# good. Shortest: a minute (the panel offers rounder numbers).
+MIN_GRANT_MINUTES = 1
+MAX_GRANT_MINUTES = 30 * 24 * 60
+
+
+# The label resolve_tool_access() returns when a time-limited grant has run out.
+LABEL_EXPIRED = "off (time limit ended)"
 
 
 class PermsUnreadable(Exception):
@@ -128,7 +147,8 @@ def _log_change(platform, user_id, kind, **fields):
 
 
 def _defaults():
-    return {"tools": {"mode": TOOLS_INHERIT, "allow": []}, "can_dm": True}
+    return {"tools": {"mode": TOOLS_INHERIT, "allow": []}, "can_dm": True,
+            "tools_until": 0}
 
 
 def normalize(entry):
@@ -156,6 +176,18 @@ def normalize(entry):
                     if _NAME_RE.match(n)][:MAX_TOOLS]
     if entry.get("can_dm") is False:
         out["can_dm"] = False
+    if "tools_until" in entry:
+        until = entry.get("tools_until")
+        if until in (None, 0, False, ""):
+            pass  # no deadline
+        elif (isinstance(until, (int, float)) and not isinstance(until, bool)
+              and until > 0):
+            out["tools_until"] = int(until)
+        else:
+            # A hand-edit that is not a usable time. This is a store of
+            # RESTRICTIONS, so "cannot tell when it ends" must not read as
+            # "never ends": 1 (1970) is a deadline that has already passed.
+            out["tools_until"] = 1
     return out
 
 
@@ -256,6 +288,49 @@ def set_can_dm(platform, user_id, value):
     return saved
 
 
+def grant_minutes_ok(minutes):
+    """Whole minutes within the allowed range, or raises ValueError. A bool is
+    not a number here (True would otherwise read as one minute)."""
+    if isinstance(minutes, bool) or not isinstance(minutes, int):
+        raise ValueError("the time limit must be a whole number of minutes")
+    if not MIN_GRANT_MINUTES <= minutes <= MAX_GRANT_MINUTES:
+        raise ValueError(
+            f"the time limit must be between {MIN_GRANT_MINUTES} minute and "
+            f"{MAX_GRANT_MINUTES // (24 * 60)} days")
+    return minutes
+
+
+def tools_until(platform, user_id):
+    """The person's tool deadline (epoch seconds) or 0. Raises PermsUnreadable."""
+    return get(platform, user_id)["tools_until"]
+
+
+def is_expired(until, now=None):
+    """True when a deadline exists and has been reached."""
+    if not until:
+        return False
+    return (time.time() if now is None else now) >= until
+
+
+def set_tools_until(platform, user_id, until):
+    """Store (or, with 0, remove) the deadline. Does not touch the lists:
+    user_admin.grant_tools_for / set_flag decide when the list entry changes.
+    Raises ValueError / OSError / PermsUnreadable."""
+    entry = get(platform, user_id)
+    before = entry["tools_until"]
+    if until:
+        if isinstance(until, bool) or not isinstance(until, (int, float)) or until <= 0:
+            raise ValueError("the deadline must be a time in the future")
+        after = int(until)
+    else:
+        after = 0
+    if after == before:
+        return before        # nothing to write (and no file made for nobody)
+    entry["tools_until"] = after
+    _put(platform, user_id, entry)
+    return before
+
+
 def effective_tool_scope(platform, user_id):
     """What the gateway should put in JARVIS_ALLOWED_TOOLS for this sender.
 
@@ -268,7 +343,11 @@ def effective_tool_scope(platform, user_id):
 
     Raises PermsUnreadable; the caller fails closed.
     """
-    entry = get(platform, user_id)
+    return _scope_of(get(platform, user_id))
+
+
+def _scope_of(entry):
+    """The tool scope one normalized entry means (see effective_tool_scope)."""
     tools = entry["tools"]
     if tools["mode"] != TOOLS_CUSTOM:
         return None
@@ -277,7 +356,7 @@ def effective_tool_scope(platform, user_id):
     return frozenset(tools["allow"]) | frozenset(PLUMBING_TOOLS)
 
 
-def resolve_tool_access(platform, user_id, may_use_tools):
+def resolve_tool_access(platform, user_id, may_use_tools, now=None):
     """The gateway's per-message tool decision, in ONE place.
 
     `may_use_tools` is what the gate said (permissions.Decision). Returns
@@ -294,11 +373,16 @@ def resolve_tool_access(platform, user_id, may_use_tools):
     base.handle_message and the Channels panel's "Test as this person" both
     call this, so the dry run cannot drift from what a real message gets. It
     fails closed exactly as before: limits that are unreadable or fail to load
-    mean this message runs with tools off."""
+    mean this message runs with tools off. A time-limited grant that has run
+    out (L.36-P6) is the same kind of answer: tools off, label
+    LABEL_EXPIRED. This function only READS -- the dry run must write nothing
+    -- so removing the person from the list is the caller's job
+    (user_admin.expire_due)."""
     if not may_use_tools:
         return False, None, "off", ""
     try:
-        scope = effective_tool_scope(platform, user_id)
+        entry = get(platform, user_id)
+        scope = _scope_of(entry)
     except PermsUnreadable as exc:
         return (False, None, "off (limits unreadable)",
                 f"per-person tool limits unreadable ({exc}); "
@@ -307,6 +391,8 @@ def resolve_tool_access(platform, user_id, may_use_tools):
         return (False, None, "off (limits failed)",
                 f"per-person tool limits failed ({exc}); "
                 f"answering without tools")
+    if is_expired(entry["tools_until"], now):
+        return False, None, LABEL_EXPIRED, ""
     if scope is None:
         return True, None, "on", ""
     if not scope:

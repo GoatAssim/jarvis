@@ -20,6 +20,11 @@ whichever way it was made:
     user_perms.set_tools / set_can_dm      tool scope, "Jarvis may DM them"
     people.set_follow                      approved / blocked / unknown
     user_admin.set_handle / forget_person  a handle edit, a wipe
+    user_admin.grant_tools_for             "tools until <time>" (kind timed);
+                                           the list flip itself is the usual
+                                           `list` line, and the one written
+                                           when the time runs out carries
+                                           why="time limit ended"
 
 A line is written only when something ACTUALLY changed (re-adding someone who
 is already listed writes nothing), and only after the change itself was saved,
@@ -82,6 +87,7 @@ K_OWNER = "owner"        # became / stopped being the platform's owner
 K_PLATFORM = "platform"  # a platform-wide switch (allow_tools)
 K_HANDLE = "handle"      # the owner edited a hand-added person's handle
 K_FORGOT = "forgot"      # "Forget this person" ran
+K_TIMED = "timed"        # tool use switched on until a deadline (L.36-P6)
 
 _LIST_LABEL = {"dm_allowlist": "direct messages", "reply_allowlist": "replies",
                "tool_allowlist": "tool use"}
@@ -257,6 +263,10 @@ def describe(entry):
         return f"Handle set to @{entry.get('ident') or '?'}"
     if kind == K_FORGOT:
         return "Forgotten (access, limits and record wiped)"
+    if kind == K_TIMED:
+        until = str(entry.get("until") or "").replace("T", " ")
+        return (f"Tool use switched on until {until}" if until
+                else "Tool use switched on for a limited time")
     return str(kind)
 
 

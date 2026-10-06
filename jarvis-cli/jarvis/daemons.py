@@ -304,6 +304,152 @@ def list_daemons():
     return items
 
 
+def list_daemons_with_usage():
+    """list_daemons() plus CPU / memory: every running row gains a `usage` dict
+    (None when it isn't running), and the second value is the total across all
+    daemons (or None). One sampling pass for the whole list, not one per daemon
+    -- which is why this is a separate call: it costs a fraction of a second,
+    and the scheduler tick / `daemon-status` only want the state."""
+    items = list_daemons()
+    per, total = sample_usage(items)
+    for row in items:
+        row["usage"] = per.get(row.get("id"))
+    return items, total
+
+
+# ---------------------------------------------------------------------------
+# CPU / memory per daemon (Daemons panel)
+# ---------------------------------------------------------------------------
+
+# Two CPU readings this far apart make one percentage. `jarvis` is a fresh OS
+# process on every call (AGENTS.md), so there is no earlier sample to diff
+# against: psutil's cpu_percent() needs a baseline, and the only place to get
+# one is inside this call. Short enough that a 4 s panel poll hardly notices,
+# long enough that an idle process reads ~0 and a busy one doesn't read 0 too.
+USAGE_SAMPLE_SECONDS = 0.3
+# Per-process rows kept for the Details tab. A daemon that forks a hundred
+# workers would otherwise ship a hundred rows to the browser every few seconds.
+USAGE_MAX_PROCS = 8
+
+
+def _usage_processes(psutil, row, seen):
+    """The live processes that belong to one daemon: its supervisor, its child
+    and everything the child started (a `via shell` daemon is cmd -> real
+    program, a web server may fork workers). `seen` is shared across daemons so
+    a process is never counted twice."""
+    procs = []
+    for pid in (row.get("supervisor_pid"), row.get("pid")):
+        try:
+            pid = int(pid)
+        except (TypeError, ValueError):
+            continue
+        if pid <= 0:
+            continue
+        try:
+            root = psutil.Process(pid)
+            family = [root] + root.children(recursive=True)
+        except (psutil.Error, OSError):
+            continue
+        for proc in family:
+            if proc.pid in seen:
+                continue
+            seen.add(proc.pid)
+            procs.append(proc)
+    return procs
+
+
+def sample_usage(rows, interval=USAGE_SAMPLE_SECONDS):
+    """CPU and memory for every running daemon in `rows` (describe() dicts).
+
+    Returns (per_daemon, total):
+
+      per_daemon  {id: {"cpu_percent", "cpu_core_percent", "rss_bytes",
+                        "processes", "procs": [...]}}  -- running ones only
+      total       the same numbers summed over every daemon, plus how many
+                  were running, the machine's core count and RAM; or None when
+                  nothing is running or psutil is missing.
+
+    cpu_percent is a share of the WHOLE machine (what Task Manager's CPU column
+    shows); cpu_core_percent is a share of ONE core, so a process using two full
+    cores reads 200. rss_bytes is the working set (Windows) / resident set.
+
+    Never raises: a process that exits mid-sample is simply left out, and a
+    missing psutil (a required dependency, but a broken install happens) means
+    "no numbers", not an error in the Daemons panel."""
+    try:
+        import psutil
+    except ImportError:
+        return {}, None
+    try:
+        seen = set()
+        groups = {}
+        for row in rows or []:
+            if not (row.get("running") or row.get("supervisor_pid")):
+                continue
+            procs = _usage_processes(psutil, row, seen)
+            if procs:
+                groups[row.get("id")] = procs
+        if not groups:
+            return {}, None
+
+        # Baseline pass, wait, read pass. The first cpu_percent() on a Process
+        # object always answers 0.0 and just starts its clock.
+        for procs in groups.values():
+            for proc in procs:
+                try:
+                    proc.cpu_percent(None)
+                except (psutil.Error, OSError):
+                    pass
+        time.sleep(max(0.0, float(interval)))
+
+        cores = psutil.cpu_count(logical=True) or 1
+        per = {}
+        for did, procs in groups.items():
+            cpu_core = 0.0
+            rss = 0
+            detail = []
+            for proc in procs:
+                try:
+                    c = float(proc.cpu_percent(None))
+                    m = int(proc.memory_info().rss)
+                    name = proc.name()
+                except (psutil.Error, OSError, ValueError):
+                    continue          # exited between the two passes
+                cpu_core += c
+                rss += m
+                detail.append({"pid": proc.pid, "name": name, "rss_bytes": m,
+                               "cpu_core_percent": round(c, 1)})
+            if not detail:
+                continue
+            detail.sort(key=lambda d: d["rss_bytes"], reverse=True)
+            per[did] = {
+                "cpu_percent": round(cpu_core / cores, 1),
+                "cpu_core_percent": round(cpu_core, 1),
+                "rss_bytes": rss,
+                "processes": len(detail),
+                "procs": detail[:USAGE_MAX_PROCS],
+            }
+        if not per:
+            return {}, None
+        try:
+            ram = int(psutil.virtual_memory().total)
+        except (psutil.Error, OSError):
+            ram = 0
+        total_core = sum(u["cpu_core_percent"] for u in per.values())
+        total = {
+            "daemons": len(per),
+            "cpu_percent": round(total_core / cores, 1),
+            "cpu_core_percent": round(total_core, 1),
+            "rss_bytes": sum(u["rss_bytes"] for u in per.values()),
+            "processes": sum(u["processes"] for u in per.values()),
+            "cores": cores,
+            "machine_ram_bytes": ram,
+        }
+        return per, total
+    except Exception:  # noqa: BLE001 -- a panel number must never break the panel
+        return {}, None
+
+
 def get(daemon_id):
     return _load_registry().get(normalize_id(daemon_id))
 
