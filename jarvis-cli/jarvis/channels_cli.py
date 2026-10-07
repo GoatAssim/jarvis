@@ -18,6 +18,7 @@ import time
 from .channels import PLATFORMS, PERM_SETS
 from .channels import config as channel_config
 from .channels import directory, outbound, people, permissions, transcript
+from .channels import denied, master_tools, panel_dm
 from .channels import preset_admin, presets, servers, user_admin
 
 COMMANDS = (
@@ -33,6 +34,7 @@ COMMANDS = (
     "channels-tools-for", "channels-instruction",
     "channels-presets", "channels-preset", "channels-bulk",
     "channels-servers", "channels-server-set",
+    "channels-master-tools", "channels-send", "channels-denied",
     "discord-daemon", "instagram-serve", "logs-search",
 )
 
@@ -40,7 +42,7 @@ USAGE = """channel commands:
   channels-config                       print the config file path
   channels-status                       show permissions + readiness (JSON)
   channels-set <platform> <key> <value> set one config key
-  channels-allow <platform> <set> <id>  add to dm|reply|tool allowlist
+  channels-allow <platform> <set> <id>  add to dm|reply|tool|image allowlist
   channels-deny  <platform> <set> <id>  remove from an allowlist
   channels-test  [platform] [message]   send a test DM to the owner
   channels-whoami                       how to find your stable user id
@@ -52,7 +54,8 @@ USAGE = """channel commands:
   channels-users [platform]             every registered person + every switch (JSON)
   channels-user  <platform> <id> <switch> <on|off>
                                         flip one switch for one person; <switch> is one of:
-                                        dm, reply, tool, owner, send_dm, blocked
+                                        dm, reply, tool, image, owner, send_dm, blocked
+                                        (image = may send Jarvis pictures once that exists; the owner always may)
   channels-user-tools <platform> <id> inherit | custom [tool ...]
                                         which tools that person may run (custom = ONLY those)
   channels-tools-for <platform> <id|@handle> <30m|24h|7d>
@@ -109,11 +112,22 @@ USAGE = """channel commands:
                                         here), tools (allow tools here), mention (require @mention).
                                         These can only take access away: enabled/tools "on" means
                                         inherit; mention can be turned on or inherited, never off
+  channels-master-tools <platform> [on|off] [--yes]
+                                        the platform-wide tool switch (allow_tools). No argument shows
+                                        who it would let run tools. `on` only PREVIEWS unless --yes;
+                                        `off` applies at once. `on` is refused while the tool list has "*"
+  channels-send <platform> <id|@handle> [--yes] <message ...>
+                                        DM one known person on your behalf, through the same path, limits
+                                        (5 per person / 20 per hour) and log as the send_dm tool. Without
+                                        --yes it only PREVIEWS. Refused for the owner, someone blocked or
+                                        with DMs switched off, and anyone known only by handle
+  channels-denied [platform] [days]     senders the gate turned away recently, with counts and the gate's
+                                        reason -- never what they wrote (JSON, read-only)
   discord-daemon                        run the Discord bot (foreground)
   instagram-serve                       run the Instagram webhook (foreground)
   logs-search <query> [--mode m] [--origin o] [--source s] [--direction d]
 
-  <set> is one of: dm, reply, tool
+  <set> is one of: dm, reply, tool, image
   <platform> is one of: discord, instagram"""
 
 # Short aliases, because "channels-allow discord dm_allowlist 123" is a lot
@@ -121,6 +135,7 @@ USAGE = """channel commands:
 _SET_ALIASES = {
     "dm": "dm_allowlist", "reply": "reply_allowlist", "tool": "tool_allowlist",
     "tools": "tool_allowlist",
+    "image": "image_allowlist", "images": "image_allowlist",
 }
 
 
@@ -210,11 +225,11 @@ def handle(argv):
 
     if cmd in ("channels-allow", "channels-deny"):
         if len(rest) < 3:
-            _fail(f"usage: {cmd} <platform> <dm|reply|tool> <id-or-@handle>")
+            _fail(f"usage: {cmd} <platform> <dm|reply|tool|image> <id-or-@handle>")
         platform, which, entry = rest[0], rest[1], rest[2]
         which = _SET_ALIASES.get(which.lower(), which)
         if which not in PERM_SETS:
-            _fail(f"unknown set '{rest[1]}' — use dm, reply or tool")
+            _fail(f"unknown set '{rest[1]}' — use dm, reply, tool or image")
 
         # @handle resolution. Only on channels-allow: a channels-deny for a
         # handle nobody has heard of yet is ambiguous (remove what, from
@@ -631,6 +646,58 @@ def handle(argv):
         print(json.dumps({"ok": ok, "error": err, "platform": platform,
                           "user_id": uid}, indent=2))
         sys.exit(0 if ok else 1)
+
+    if cmd == "channels-master-tools":
+        # L.36-P9. Turning it ON widens access, so it only previews unless told
+        # --yes; OFF takes access away and applies at once.
+        usage = "usage: channels-master-tools <platform> [on|off] [--yes]"
+        flags = [a for a in rest[1:] if a.startswith("--")]
+        words = [a for a in rest[1:] if not a.startswith("--")]
+        if not rest or rest[0] not in PLATFORMS or len(words) > 1 \
+                or not set(flags) <= {"--yes"}:
+            _fail(usage)
+        platform = rest[0]
+        if not words:
+            print(json.dumps(master_tools.view(platform), indent=2))
+            return
+        if words[0].lower() not in ("on", "off"):
+            _fail(usage)
+        result = master_tools.set_master(platform, words[0].lower() == "on",
+                                         confirm="--yes" in flags)
+        if result.get("needs_confirm"):
+            result["hint"] = "nothing was changed \u2014 add --yes to turn it on"
+        print(json.dumps(result, indent=2))
+        sys.exit(0 if result.get("ok") else 1)
+
+    if cmd == "channels-send":
+        # L.36-P13. One known person, the owner's own words; same limits as the
+        # send_dm tool because it IS that tool underneath.
+        usage = "usage: channels-send <platform> <id|@handle> [--yes] <message ...>"
+        if len(rest) < 3 or rest[0] not in PLATFORMS:
+            _fail(usage)
+        platform, uid = rest[0], _person_id(rest[0], rest[1])
+        body = rest[2:]
+        confirm = bool(body and body[0] == "--yes")
+        if confirm:
+            body = body[1:]
+        text = " ".join(body).strip()
+        if not text:
+            _fail(usage)
+        result = panel_dm.send(platform, uid, text, confirm=confirm)
+        if result.get("needs_confirm"):
+            result["hint"] = "nothing was sent \u2014 add --yes right after the id to send it"
+        print(json.dumps(result, indent=2))
+        sys.exit(0 if result.get("ok") else 1)
+
+    if cmd == "channels-denied":
+        # L.36-P14. Read-only; never prints what a stranger wrote.
+        platform = rest[0] if rest and rest[0] in PLATFORMS else None
+        tail = rest[1:] if platform else rest
+        if len(tail) > 1 or (tail and not tail[0].isdigit()):
+            _fail("usage: channels-denied [platform] [days]")
+        print(json.dumps(denied.denied_view(
+            platform, int(tail[0]) if tail else denied.DEFAULT_DAYS), indent=2))
+        return
 
     if cmd == "channels-servers":
         platform = rest[0] if rest else "discord"

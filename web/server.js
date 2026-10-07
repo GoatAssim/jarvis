@@ -1093,7 +1093,7 @@ app.get("/api/conversations-search", requireJarvis, async (req, res) => {
 // ---------------------------------------------------------------------------
 
 const CHANNEL_PLATFORMS = new Set(["discord", "instagram"]);
-const CHANNEL_SETS = new Set(["dm", "reply", "tool"]);
+const CHANNEL_SETS = new Set(["dm", "reply", "tool", "image"]);
 
 app.get("/api/channels", requireJarvis, async (req, res) => {
   const result = await runJarvisOnce(["channels-status"], 15000);
@@ -1130,7 +1130,7 @@ app.post("/api/channels/:platform/:set", requireJarvis, async (req, res) => {
 // channels-user-tools`, which delegate to channels/user_admin.py - the same
 // code a terminal runs, so the panel and the CLI cannot disagree. Argv arrays
 // only, every value validated first, and no token ever crosses this route.
-const CHANNEL_FLAGS = new Set(["dm", "reply", "tool", "owner", "send_dm", "blocked"]);
+const CHANNEL_FLAGS = new Set(["dm", "reply", "tool", "image", "owner", "send_dm", "blocked"]);
 const CHANNEL_USER_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/; // not "-x": the CLI's flag parser would read it as a flag
 const CHANNEL_TOOL_NAME = /^[A-Za-z0-9_.:-]{1,64}$/;
 
@@ -1284,6 +1284,53 @@ function channelInt(value, fallback, min, max) {
   if (typeof value !== "string" || !/^[0-9]{1,4}$/.test(value)) return fallback;
   return Math.min(max, Math.max(min, parseInt(value, 10)));
 }
+
+// --- Channels: master tools switch, DM from the panel, turned-away senders --
+// (L.36-P9, P13, P14.) Same proxy rules as above: argv arrays only, every value
+// validated first, the CLI does the work. P9 widens access when turned ON, so
+// the route only applies it with confirm:true (a bare call is a preview) and
+// the CLI refuses it while the tool list holds "*". P13 delivers only with
+// confirm:true, through the same code and limits as the send_dm tool; the text
+// is one message, capped, and may not start with "-" (the CLI would read it as a
+// flag). P14 is read-only and never returns what a stranger wrote. No bot token
+// crosses any of these.
+const CHANNEL_DM_OK = (v) => typeof v === "string" && v.trim().length > 0 && v.length <= 1500 && !/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/.test(v) && !v.trim().startsWith("-");
+
+app.post("/api/channels/platform/:platform/master-tools", requireJarvis, async (req, res) => {
+  const { platform } = req.params;
+  if (!CHANNEL_PLATFORMS.has(platform)) return res.status(400).json({ error: "Unknown platform." });
+  if (typeof req.body?.value !== "boolean") return res.status(400).json({ error: "value must be true or false." });
+  if (req.body?.confirm !== undefined && typeof req.body.confirm !== "boolean") return res.status(400).json({ error: "confirm must be true or false." });
+  const args = ["channels-master-tools", platform, req.body.value ? "on" : "off"];
+  if (req.body.value && req.body.confirm === true) args.push("--yes");
+  sendChannelResult(await runJarvisOnce(args, 10000), res);
+});
+
+app.get("/api/channels/platform/:platform/master-tools", requireJarvis, async (req, res) => {
+  const { platform } = req.params;
+  if (!CHANNEL_PLATFORMS.has(platform)) return res.status(400).json({ error: "Unknown platform." });
+  sendChannelResult(await runJarvisOnce(["channels-master-tools", platform], 10000), res);
+});
+
+app.post("/api/channels/people/:platform/:id/dm", requireJarvis, async (req, res) => {
+  const who = channelPersonArgs(req, res);
+  if (!who) return;
+  if (!CHANNEL_DM_OK(req.body?.text)) {
+    return res.status(400).json({ error: "A DM is one message of up to 1500 characters, and can't start with a dash." });
+  }
+  if (req.body?.confirm !== undefined && typeof req.body.confirm !== "boolean") return res.status(400).json({ error: "confirm must be true or false." });
+  const args = ["channels-send", who.platform, who.id];
+  if (req.body?.confirm === true) args.push("--yes");
+  args.push(req.body.text.trim());
+  sendChannelResult(await runJarvisOnce(args, 30000), res);
+});
+
+app.get("/api/channels/denied", requireJarvis, async (req, res) => {
+  const args = ["channels-denied"];
+  if (typeof req.query.platform === "string" && CHANNEL_PLATFORMS.has(req.query.platform)) args.push(req.query.platform);
+  args.push(String(channelInt(req.query.days, 14, 1, 90)));
+  sendChannelResult(await runJarvisOnce(args, 15000), res);
+});
 
 // --- Channels > Servers (Discord servers and their channels) ---------------
 // Proxies `jarvis channels-servers / channels-server-set`, which delegate to

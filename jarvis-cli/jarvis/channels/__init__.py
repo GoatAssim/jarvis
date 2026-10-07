@@ -46,15 +46,22 @@ DISCORD = "discord"
 INSTAGRAM = "instagram"
 PLATFORMS = (DISCORD, INSTAGRAM)
 
-# The four independent permission sets, in the order the gate applies them.
+# The independent permission sets (the first three, in the order the gate
+# applies them; the image list is read by permissions.may_send_images only).
 # Named here rather than as bare strings at each call site so a typo is an
 # ImportError instead of a silently-always-denied check.
 PERM_DM = "dm_allowlist"
 PERM_REPLY = "reply_allowlist"
 PERM_TOOLS = "tool_allowlist"
-PERM_SETS = (PERM_DM, PERM_REPLY, PERM_TOOLS)
+# L.36-P8 / L.42 (Q-L42i): who besides the owner may send Jarvis pictures. A
+# fourth list, not a field in people.py -- it is a permission, it can be
+# granted before the person has ever written, and the CLI / panel already
+# handle "a named list". It is NOT a stage of the gate: nobody is refused a
+# reply for lacking it. permissions.may_send_images() reads it.
+PERM_IMAGES = "image_allowlist"
+PERM_SETS = (PERM_DM, PERM_REPLY, PERM_TOOLS, PERM_IMAGES)
 
 __all__ = [
     "DISCORD", "INSTAGRAM", "PLATFORMS",
-    "PERM_DM", "PERM_REPLY", "PERM_TOOLS", "PERM_SETS",
+    "PERM_DM", "PERM_REPLY", "PERM_TOOLS", "PERM_IMAGES", "PERM_SETS",
 ]

@@ -90,7 +90,7 @@ K_FORGOT = "forgot"      # "Forget this person" ran
 K_TIMED = "timed"        # tool use switched on until a deadline (L.36-P6)
 
 _LIST_LABEL = {"dm_allowlist": "direct messages", "reply_allowlist": "replies",
-               "tool_allowlist": "tool use"}
+               "tool_allowlist": "tool use", "image_allowlist": "pictures"}
 
 _state = threading.local()
 

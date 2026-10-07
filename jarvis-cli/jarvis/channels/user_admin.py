@@ -112,13 +112,18 @@ removing an id that was never the reason they got through.
 
 import time
 
-from . import PLATFORMS, PERM_DM, PERM_REPLY, PERM_TOOLS
+from . import PLATFORMS, PERM_DM, PERM_REPLY, PERM_TOOLS, PERM_IMAGES
 from . import config as channel_config
 from . import changelog, people, permissions, presets, transcript, usage, user_perms
 from .config import WILDCARD
 
-FLAGS = ("dm", "reply", "tool", "owner", "send_dm", "blocked")
-_SET_FOR = {"dm": PERM_DM, "reply": PERM_REPLY, "tool": PERM_TOOLS}
+FLAGS = ("dm", "reply", "tool", "image", "owner", "send_dm", "blocked")
+_SET_FOR = {"dm": PERM_DM, "reply": PERM_REPLY, "tool": PERM_TOOLS,
+            "image": PERM_IMAGES}
+# Every allow-list a person can be named in. ONE tuple, used by every place that
+# walks "all of someone's lists" (block, forget, handle edit, listing), so a list
+# added later cannot be forgotten in one of them and leave a grant behind.
+LISTS = (PERM_DM, PERM_REPLY, PERM_TOOLS, PERM_IMAGES)
 
 # Platform fields that carry a secret. Mirrors config.redacted(): the view
 # built here only ever says whether one is set.
@@ -201,6 +206,9 @@ def person_view(platform, rec, cfg, perms):
         "dm": membership(cfg, PERM_DM, rec),
         "reply": membership(cfg, PERM_REPLY, rec),
         "tool": membership(cfg, PERM_TOOLS, rec),
+        # L.36-P8: may their pictures be read (once inbound images exist). The
+        # owner always may, whether or not they are named in the list.
+        "image": membership(cfg, PERM_IMAGES, rec),
         "send_dm": bool(perms["can_dm"]),
         "tools": perms["tools"],
         # L.36-P6: when their tool access ends by itself (epoch seconds, 0 =
@@ -234,6 +242,10 @@ def person_view(platform, rec, cfg, perms):
         # a green switch that does nothing.
         "tools_blocked_by_platform": (view["tool"]["on"]
                                       and not cfg.get("allow_tools")),
+        # owner = always; on = named (or covered by "*"); off = not. Only
+        # meaningful for someone who is answered at all.
+        "images": ("owner" if owner else
+                   "on" if view["image"]["on"] else "off"),
     }
     return view
 
@@ -296,7 +308,7 @@ def sync_listed(platform, cfg):
     Never raises: a store that can't be written leaves the panel showing what
     it already had rather than failing to open. Returns how many were made."""
     entries = []
-    for which in (PERM_DM, PERM_REPLY, PERM_TOOLS):
+    for which in LISTS:
         entries.extend(channel_config.normalize_entries((cfg or {}).get(which)))
     owner = channel_config.normalize_entry((cfg or {}).get("owner"))
     if owner:
@@ -339,6 +351,9 @@ def list_flag_refusal(flag, value, rec, cfg):
     one OFF for someone a "*" (everyone) entry still covers."""
     if flag not in _SET_FOR:
         return ""
+    if flag == "image" and permissions.is_owner(cfg, _idents(rec)):
+        return ("that's the owner \u2014 your own pictures are always read, "
+                "so there is no switch for you")
     if value:
         if (rec.get("follow") or "") == people.FOLLOW_BLOCKED:
             return "they're blocked — unblock them first"
@@ -347,6 +362,17 @@ def list_flag_refusal(flag, value, rec, cfg):
         return (f"covered by \"*\" (everyone) in the {flag} list — "
                 f"a switch for one person can't undo that")
     return ""
+
+
+def _image_note(cfg, rec):
+    """The heads-up after switching pictures ON for someone. Honest about the
+    two things the switch does not do: it changes nothing today (inbound
+    pictures are not built, L.42), and it opens no conversation."""
+    note = ("recorded \u2014 Jarvis doesn't read pictures sent in chat yet, so "
+            "this changes nothing until that feature exists")
+    if not membership(cfg, PERM_REPLY, rec)["on"]:
+        note += "; they also need Reply switched on to be answered at all"
+    return note
 
 
 def set_flag(platform, user_id, flag, value):
@@ -370,6 +396,8 @@ def set_flag(platform, user_id, flag, value):
             return False, refusal, ""
         if value:
             ok, err = channel_config.add_to_set(platform, which, uid)
+            if ok and flag == "image":
+                return True, "", _image_note(cfg, rec)
             # Switching tools on by hand means "for good": any countdown from
             # an earlier time-limited grant ends here. Done AFTER the list
             # write, so a failure leaves the person with a deadline still
@@ -417,14 +445,14 @@ def set_flag(platform, user_id, flag, value):
     if value:
         if permissions.is_owner(cfg, _idents(rec)):
             return False, "that's the owner — switch ownership to someone else first", ""
-        for which in (PERM_DM, PERM_REPLY, PERM_TOOLS):
+        for which in LISTS:
             if membership(cfg, which, rec)["via"] == "wildcard":
                 wildcard_note = ("a \"*\" (everyone) entry still covers them in "
                                  "at least one list — blocking can't override it")
                 break
         else:
             wildcard_note = ""
-        for which in (PERM_DM, PERM_REPLY, PERM_TOOLS):
+        for which in LISTS:
             ok, err = _remove_everywhere(platform, which, rec)
             if not ok:
                 return False, err, ""
@@ -639,7 +667,7 @@ def remove_person(platform, user_id):
     if not rec.get("manual") or int(rec.get("messages") or 0) > 0:
         return False, ("only someone you added by hand who has never "
                        "messaged can be removed — block anyone else")
-    for which in (PERM_DM, PERM_REPLY, PERM_TOOLS):
+    for which in LISTS:
         ok, err = _remove_everywhere(platform, which, rec)
         if not ok:
             return False, err
@@ -669,7 +697,8 @@ def forget_refusal(platform, rec):
     cfg = channel_config.platform_config(platform)
     if permissions.is_owner(cfg, _idents(rec)):
         return "that's the owner — hand ownership to someone else first"
-    for which, label in ((PERM_DM, "dm"), (PERM_REPLY, "reply"), (PERM_TOOLS, "tool")):
+    for which, label in ((PERM_DM, "dm"), (PERM_REPLY, "reply"), (PERM_TOOLS, "tool"),
+                         (PERM_IMAGES, "image")):
         if membership(cfg, which, rec)["via"] == "wildcard":
             return (f"covered by \"*\" (everyone) in the {label} list — "
                     f"forgetting them would also delete their limits and "
@@ -704,7 +733,7 @@ def forget_person(platform, user_id, purge_history=False, dry_run=False):
         "user_id": uid,
         "name": people.effective_name(rec) or rec.get("handle") or uid,
         "dry_run": bool(dry_run),
-        "lists": [w for w in (PERM_DM, PERM_REPLY, PERM_TOOLS)
+        "lists": [w for w in LISTS
                   if membership(cfg, w, rec)["explicit"]],
         "limits": False,
         "notes": len([n for n in (rec.get("notes") or []) if isinstance(n, str)]),
@@ -727,7 +756,7 @@ def forget_person(platform, user_id, purge_history=False, dry_run=False):
         return True, "", report
 
     # 1. access first -- everything after this only tidies up.
-    for which in (PERM_DM, PERM_REPLY, PERM_TOOLS):
+    for which in LISTS:
         ok, err = _remove_everywhere(platform, which, rec)
         if not ok:
             return False, err, report
@@ -850,10 +879,10 @@ def set_handle(platform, user_id, handle):
     uid = str(rec["user_id"])
     placeholder = bool(rec.get("placeholder"))
     new_uid = new if placeholder else uid
-    on_lists = [w for w in (PERM_DM, PERM_REPLY, PERM_TOOLS)
+    on_lists = [w for w in LISTS
                 if old and old in channel_config.normalize_entries(cfg.get(w))]
     if placeholder:
-        on_lists = [w for w in (PERM_DM, PERM_REPLY, PERM_TOOLS)
+        on_lists = [w for w in LISTS
                     if uid.lower() in channel_config.normalize_entries(cfg.get(w))]
 
     try:
@@ -1030,6 +1059,19 @@ def simulate(platform, user_id, context=permissions.CTX_DM, mentioned=True):
         tools = {"state": "none", "why": why, "allowed": None, "count": None,
                  "plumbing": []}
 
+    # L.36-P8: would their pictures be read? Reads the same function the
+    # feature will call (permissions.may_send_images), after the gate said yes.
+    if not answered:
+        images = {"state": "none", "why": "They would not be answered at all."}
+    elif permissions.is_owner(cfg, _idents(rec)):
+        images = {"state": "owner", "why": "The owner's pictures are always read."}
+    elif permissions.may_send_images(cfg, msg):
+        images = {"state": "on", "why": "You switched pictures on for them."}
+    else:
+        images = {"state": "off", "why": "Pictures are off for them (default)."}
+    if answered:
+        images["why"] += " Jarvis doesn't read pictures from chat yet, so nothing changes today."
+
     notes = []
     if int(cfg.get("cooldown_seconds") or 0) > 0:
         notes.append(f"Cooldown ({int(cfg['cooldown_seconds'])}s between "
@@ -1070,6 +1112,7 @@ def simulate(platform, user_id, context=permissions.CTX_DM, mentioned=True):
         "reason": decision.reason,
         "stages": _stage_rows(context, decision),
         "tools": tools,
+        "images": images,
         "notes": notes,
         "saved": False,
         "model_called": False,

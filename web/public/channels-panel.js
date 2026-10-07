@@ -100,6 +100,7 @@
     shield: P('<path d="M12 3 4.5 6v5.5c0 4.4 3 7.8 7.5 9.5 4.5-1.7 7.5-5.1 7.5-9.5V6L12 3Z"/><path d="m8.8 12 2.3 2.3 4.2-4.6"/>'),
     discord: P('<path d="M7 7.5c1.6-.7 3.2-1 5-1s3.4.3 5 1c1.3 2.4 2 5 2 8-1.2.9-2.6 1.4-4 1.6l-.9-1.6M7 7.5c-1.3 2.4-2 5-2 8 1.2.9 2.6 1.4 4 1.6l.9-1.6"/><circle cx="9.4" cy="12.2" r="1.1"/><circle cx="14.6" cy="12.2" r="1.1"/>'),
     instagram: P('<rect x="4" y="4" width="16" height="16" rx="4.5"/><circle cx="12" cy="12" r="3.6"/><circle cx="16.8" cy="7.2" r=".6"/>'),
+    image: P('<rect x="3.5" y="5" width="17" height="14" rx="2"/><circle cx="9" cy="10" r="1.6"/><path d="m4 17 5-4.5 3.5 3L16 12l4 4"/>'),
     plus: P('<path d="M12 5v14M5 12h14"/>'),
     link: P('<path d="M10 14a4 4 0 0 0 5.7 0l3-3a4 4 0 0 0-5.7-5.7l-1 1"/><path d="M14 10a4 4 0 0 0-5.7 0l-3 3a4 4 0 0 0 5.7 5.7l1-1"/>'),
     edit: P('<path d="M4 20h4L19 9a2.8 2.8 0 0 0-4-4L4 16v4Z"/><path d="m13.5 6.5 4 4"/>'),
@@ -361,6 +362,12 @@
     presets: [],
     presetPrev: null,  // { key, preset, status: loading|ready|error, data, error, ack, req }
     presetDone: null,  // { key, result }
+    // Platform tools master switch (P9): platform id -> { status, data, error }.
+    master: new Map(),
+    // Message one person from the panel (P13): person key -> { text, status, data, error, req }.
+    dm: new Map(),
+    // Recently turned-away senders (P14): { status: idle|loading|ready|error, data, error, req }.
+    denied: { status: "idle", data: null, error: "", req: 0 },
     // Bulk edit (P5).
     selectMode: false,
     picked: new Set(), // person keys
@@ -417,6 +424,7 @@
     }
     const here = current();
     if (here && state.tab === "history") ensureHistory(here);
+    if (state.denied.status === "idle") loadDenied();
   }
 
   async function ensureTools() {
@@ -868,6 +876,8 @@
     pane.appendChild(notesSection(p));
     const how = instructionSection(p);
     if (how) pane.appendChild(how);
+    const msg = messageSection(p);
+    if (msg) pane.appendChild(msg);
     if (rm) pane.appendChild(rm);
     const fg = forgetSection(p);
     if (fg) pane.appendChild(fg);
@@ -1039,6 +1049,75 @@
       el("div", { class: "ch-instr__meta" }, [count]),
       el("div", { class: "ch-row__hint" }, "Your own words on tone, length or language — Jarvis is told the note is from you. It only changes style: it can't give them any access, and they can't see or change it. Applies to this account only."),
     ]);
+  }
+
+  // ---- message them from here (L.36-P13) ---------------------------------
+  // The owner writes ONE message to ONE person and clicks Send. Two steps: Send
+  // asks the server for a PREVIEW (who gets exactly what, how much of the
+  // hourly allowance is left, nothing sent); "Send it" is the only click that
+  // delivers. The server runs the send_dm tool's own code, so the limits and the
+  // refusals (owner, blocked, DMs off, placeholder, rate) are the tool's, not
+  // copies kept here. The message is plain text and is never put in markup.
+  function dmSlot(p) {
+    const k = pkey(p);
+    if (!state.dm.has(k)) state.dm.set(k, { text: "", status: "idle", data: null, error: "", req: 0 });
+    return state.dm.get(k);
+  }
+  async function dmCall(p, confirm) {
+    const d = dmSlot(p);
+    const req = ++d.req;
+    d.status = confirm ? "sending" : "loading"; d.error = "";
+    renderDetail();
+    try {
+      const data = await api("POST", `/api/channels/people/${encodeURIComponent(p.platform)}/${encodeURIComponent(p.user_id)}/dm`, { text: d.text, confirm: !!confirm });
+      if (req !== d.req) return;
+      if (confirm) { d.status = "sent"; d.data = data; d.text = ""; toast(`Sent to ${displayName(p)}.`, "success"); }
+      else { d.status = "ready"; d.data = data; }
+    } catch (e) {
+      if (req !== d.req) return;
+      d.status = "error"; d.error = e.message || "Couldn't send.";
+    }
+    renderDetail();
+  }
+  function messageSection(p) {
+    if (p.owner) return null;
+    const d = dmSlot(p);
+    const box = el("div", { class: "ch-dm" });
+    const why = p.blocked ? "Blocked — unblock them first."
+      : p.placeholder ? "Known only by handle, so there's no id to message yet. They can be messaged after their first message."
+      : !p.send_dm ? "Switch on “Jarvis may DM them” under Permissions first."
+      : "";
+    const area = el("textarea", { class: "ch-name-input ch-dm__text", rows: "3", maxlength: "1500", "aria-label": `Message to ${displayName(p)}`, placeholder: "Write one message…", disabled: !!why || d.status === "loading" || d.status === "sending" });
+    area.value = d.text;
+    const count = el("span", { class: "ch-instr__count" }, `${d.text.length}/1500`);
+    const go = el("button", { type: "button", class: "btn btn--primary btn--sm", id: "ch-dm-preview", disabled: !!why || !d.text.trim() || d.status === "loading" || d.status === "sending", onclick: () => dmCall(p, false) }, d.status === "loading" ? "Checking…" : "Preview");
+    area.addEventListener("input", () => {
+      d.text = area.value; count.textContent = `${d.text.length}/1500`;
+      if (d.status === "ready" || d.status === "sent" || d.status === "error") { d.status = "idle"; d.data = null; d.error = ""; renderDetail(); area.focus(); return; }
+      go.disabled = !d.text.trim();
+    });
+    box.appendChild(area);
+    box.appendChild(el("div", { class: "ch-instr__meta" }, [count]));
+    if (why) box.appendChild(el("div", { class: "ch-row__note ch-row__note--info" }, [icon("info"), el("span", null, why)]));
+    if (d.status === "error") box.appendChild(el("div", { class: "ch-row__note ch-row__note--bad", role: "alert" }, [icon("warn"), el("span", null, d.error)]));
+    if (d.status === "sent") box.appendChild(el("div", { class: "ch-row__note ch-row__note--info", role: "status" }, [icon("info"), el("span", null, "Sent. It's in their Conversation tab.")]));
+    if (d.status === "ready" && d.data) {
+      const r = d.data.rate || {};
+      const who = d.data.to || {};
+      const lines = [
+        el("div", { class: "ch-confirm__text" }, `Send this to ${displayName(p)} on ${PLATFORMS[p.platform] ? PLATFORMS[p.platform].label : p.platform}? It goes out exactly as written (${d.data.chars} characters).`),
+        el("div", { class: "ch-dm__quote" }, d.data.message),
+        el("div", { class: "ch-row__hint" }, `Allowance this hour: ${r.recipient_used}/${r.recipient_max} to them, ${r.overall_used}/${r.overall_max} overall — shared with the send_dm tool.`),
+      ];
+      if (d.data.limited) lines.push(el("div", { class: "ch-row__note ch-row__note--bad" }, [icon("warn"), el("span", null, d.data.limited)]));
+      const send = el("button", { type: "button", class: "btn btn--primary btn--sm", id: "ch-dm-send", disabled: !!d.data.limited, onclick: () => dmCall(p, true) }, "Send it");
+      const cancel = el("button", { type: "button", class: "btn btn--ghost btn--sm", onclick: () => { d.status = "idle"; d.data = null; renderDetail(); } }, "Cancel");
+      box.appendChild(el("div", { class: "ch-confirm", role: "alertdialog", "aria-label": "Confirm message" }, [...lines, el("div", { class: "ch-confirm__btns" }, [send, cancel])]));
+    } else if (!why) {
+      box.appendChild(el("div", { class: "ch-confirm__btns" }, [go]));
+    }
+    box.appendChild(el("div", { class: "ch-row__hint" }, "Sent as the bot, in your words, to this one person. Same limits and log as when Jarvis does it for you. Nothing here can give them access."));
+    return el("div", null, [el("div", { class: "ch-section-title" }, "Send them a message"), box]);
   }
 
   // ---- forget this person (L.36-P11) --------------------------------------
@@ -1447,7 +1526,18 @@
         return scope || limit ? el("div", { class: "ch-toolextra" }, [scope, limit]) : null;
       })(),
     });
-    pane.appendChild(el("div", null, [el("div", { class: "ch-section-title" }, "Capabilities"), el("div", { class: "ch-rows" }, [toolsRow])]));
+    // L.36-P8: pictures. The owner's are always read; anyone else only when
+    // this is switched on. Stored now, used once inbound images exist (L.42).
+    const imgNotes = [{ kind: "info", text: "Jarvis doesn't read pictures sent in chat yet, so this is recorded but changes nothing today." }];
+    if (p.image.on && !p.reply.on) imgNotes.push({ kind: "warn", text: "They aren't in the reply list, so Jarvis never answers them and pictures never come into play." });
+    const imagesRow = permRow(p, {
+      flag: "image", icon: "image", ch: "on", label: "Pictures",
+      hint: "May send Jarvis pictures to read. Off by default: a picture costs your vision provider, and text inside one can try to steer Jarvis.",
+      on: p.owner ? true : undefined,
+      locked: p.owner ? "This is the owner — your own pictures are always read." : lockFor(p.image, "picture"),
+      notes: p.owner ? [] : imgNotes,
+    });
+    pane.appendChild(el("div", null, [el("div", { class: "ch-section-title" }, "Capabilities"), el("div", { class: "ch-rows" }, [toolsRow, imagesRow])]));
 
     // --- Authority
     const sendLocked = p.owner ? "This is the owner's own account — Jarvis reaches you with notifications, not DMs." : blockedLock;
@@ -2315,6 +2405,10 @@
     }
     out.appendChild(toolBox);
 
+    const im = r.images || { state: "none" };
+    out.appendChild(el("div", { class: "ch-test__images" }, [el("div", { class: "ch-section-title" }, "Pictures"),
+      statCard("Pictures", im.state === "owner" ? "Always read" : im.state === "on" ? "On" : im.state === "off" ? "Off" : "—", im.why || "", im.state === "on" || im.state === "owner" ? "limited" : "off")]));
+
     (r.notes || []).forEach((n) => out.appendChild(el("div", { class: "ch-row__note ch-row__note--info" }, [icon("info"), el("span", null, n)])));
     if (r.saved === false && r.model_called === false) {
       out.appendChild(el("div", { class: "ch-test__foot" }, [icon("shield"), "Nothing was sent, saved or counted, and no model was called."]));
@@ -2334,6 +2428,7 @@
       { key: "dm_allowlist", short: "dm", label: "DM list", hint: "may open a DM" },
       { key: "reply_allowlist", short: "reply", label: "Reply list", hint: "gets an answer" },
       { key: "tool_allowlist", short: "tool", label: "Tool list", hint: "may run tools" },
+      { key: "image_allowlist", short: "image", label: "Picture list", hint: "may send pictures (not used yet)" },
     ];
     return SETS.map((set) => {
       const entries = Array.isArray(block[set.key]) ? block[set.key] : [];
@@ -2443,6 +2538,120 @@
     return box;
   }
 
+  // ---- platform tools master switch (L.36-P9) -----------------------------
+  // The one switch here that WIDENS access when turned on, so it takes two
+  // steps and the second is the server's, not this page's: the first click
+  // asks for a PREVIEW (who would be able to run tools right after; nothing
+  // written), "Turn it on" sends confirm:true. Turning it off applies at once.
+  // The server refuses it while the tool list holds "*".
+  function masterSlot(id) {
+    if (!state.master.has(id)) state.master.set(id, { status: "idle", data: null, error: "" });
+    return state.master.get(id);
+  }
+  async function masterCall(id, value, confirm) {
+    const m = masterSlot(id);
+    m.status = "busy"; m.error = "";
+    renderSide();
+    try {
+      const out = await api("POST", `/api/channels/platform/${encodeURIComponent(id)}/master-tools`, { value, confirm: !!confirm });
+      if (out.dry_run) { m.status = "ready"; m.data = out.view; renderSide(); return; }
+      m.status = "idle"; m.data = null;
+      toast(out.note || (value ? "Tool use switched on." : "Tool use switched off."), value ? "success" : "info");
+      await load(true);
+    } catch (e) {
+      m.status = "error"; m.error = e.message || "Couldn't change it."; renderSide();
+    }
+  }
+  function masterControl(id, pl) {
+    const m = masterSlot(id);
+    const label = PLATFORMS[id].label;
+    const box = el("div", { class: "ch-master", "data-plat": id });
+    const busy = m.status === "busy";
+    if (pl.allow_tools) {
+      box.appendChild(el("button", { type: "button", class: "btn btn--ghost btn--sm", id: `ch-master-off-${id}`, disabled: busy, onclick: () => masterCall(id, false, false) }, "Turn tool use off"));
+      box.appendChild(el("span", { class: "ch-row__hint" }, `Nobody can run tools from ${label} while it's off; the lists and limits stay as they are.`));
+    } else if (m.status === "ready" && m.data) {
+      const v = m.data;
+      const names = (v.people || []).filter((r) => r.reachable && !r.owner).map((r) => r.name);
+      const text = v.reachable_others
+        ? `${v.reachable_others} ${v.reachable_others === 1 ? "person" : "people"} besides you could then make Jarvis run tools on this PC from ${label}: ${names.slice(0, 5).join(", ")}${names.length > 5 ? " and others" : ""}.`
+        : `Nobody besides you is on the ${label} tool list (and answered), so this changes nothing for anyone else yet.`;
+      box.appendChild(el("div", { class: "ch-confirm", role: "alertdialog", "aria-label": "Confirm tool use" }, [
+        el("div", { class: "ch-confirm__text" }, `Turn tool use on for ${label}? ${text}`),
+        v.perms_error ? el("div", { class: "ch-row__note ch-row__note--bad" }, [icon("warn"), el("span", null, "Their limits can't be read, so messages will run without tools until that's fixed.")]) : null,
+        el("div", { class: "ch-confirm__btns" }, [
+          el("button", { type: "button", class: "btn btn--danger btn--sm", id: `ch-master-confirm-${id}`, onclick: () => masterCall(id, true, true) }, "Turn it on"),
+          el("button", { type: "button", class: "btn btn--ghost btn--sm", onclick: () => { m.status = "idle"; m.data = null; renderSide(); } }, "Cancel"),
+        ]),
+      ]));
+    } else {
+      box.appendChild(el("button", { type: "button", class: "btn btn--ghost btn--sm", id: `ch-master-on-${id}`, disabled: busy, onclick: () => masterCall(id, true, false) }, busy ? "Checking…" : "Turn tool use on…"));
+      box.appendChild(el("span", { class: "ch-row__hint" }, "Shows who it would let run tools first; nothing changes until you confirm."));
+    }
+    if (m.status === "error") box.appendChild(el("div", { class: "ch-row__note ch-row__note--bad", role: "alert" }, [icon("warn"), el("span", null, m.error)]));
+    return box;
+  }
+
+  // ---- turned away recently (L.36-P14) ------------------------------------
+  // Who the gate refused lately, from the transcript the gate already writes:
+  // handle, how often, when, which kind of chat, the gate's own reason. Never
+  // what they wrote. Add is the ordinary add-a-person route, which creates a
+  // row and nothing else; people already in the list get Open instead.
+  async function loadDenied() {
+    const d = state.denied;
+    const req = ++d.req;
+    d.status = "loading"; d.error = "";
+    renderSide();
+    try {
+      const data = await api("GET", "/api/channels/denied?days=14");
+      if (req !== d.req) return;
+      d.status = "ready"; d.data = data;
+    } catch (e) {
+      if (req !== d.req) return;
+      d.status = "error"; d.error = e.message || "Couldn't read it.";
+    }
+    renderSide();
+  }
+  async function addDenied(r) {
+    try {
+      await api("POST", "/api/channels/people", { platform: r.platform, ident: r.user_id });
+    } catch (e) { toast(e.message || "Couldn't add them.", "error"); return; }
+    toast("Added to People. They still have no access.", "success");
+    await load(true);
+    loadDenied();
+  }
+  function deniedSection() {
+    const d = state.denied;
+    const box = el("div", { class: "ch-servers ch-denied", id: "ch-denied" });
+    box.appendChild(el("div", { class: "ch-plat__head" }, [icon("shield"), el("div", { class: "ch-plat__name" }, "Turned away recently"),
+      el("button", { type: "button", class: "btn btn--ghost btn--sm", title: "Reload", onclick: loadDenied }, [icon("refresh")])]));
+    const inner = el("div", { class: "ch-servers__body" });
+    if (d.status === "loading" && !d.data) inner.appendChild(el("div", { class: "ch-row__hint" }, "Reading the last two weeks…"));
+    else if (d.status === "error") inner.appendChild(el("div", { class: "ch-row__hint" }, d.error));
+    else if (d.data) {
+      const list = d.data.senders || [];
+      if (!list.length) inner.appendChild(el("div", { class: "ch-row__hint" }, "Nobody has been turned away in the last two weeks."));
+      for (const r of list) {
+        const who = r.name || (r.handle ? "@" + r.handle : r.user_id);
+        const kind = (r.contexts || []).map((c) => (c === "dm" ? "DM" : "group")).join(" + ");
+        const action = r.registered
+          ? el("button", { type: "button", class: "btn btn--ghost btn--sm", onclick: () => { select(`${r.platform}:${r.user_id}`); } }, "Open")
+          : el("button", { type: "button", class: "btn btn--primary btn--sm", onclick: () => addDenied(r) }, "Add");
+        inner.appendChild(el("div", { class: "ch-denied__row", "data-user": r.user_id }, [
+          el("div", null, [
+            el("div", { class: "ch-row__label" }, [who, " ", el("span", { class: "ch-row__hint" }, `· ${PLATFORMS[r.platform] ? PLATFORMS[r.platform].label : r.platform}`)]),
+            el("div", { class: "ch-row__hint" }, `${r.count} ${r.count === 1 ? "message" : "messages"} · ${kind} · ${relTime(Date.parse(r.last_at) / 1000)} · ${r.reason || "not allowed"}${r.blocked ? " · blocked" : ""}`),
+          ]),
+          action,
+        ]));
+      }
+      if (d.data.hidden) inner.appendChild(el("div", { class: "ch-row__hint" }, `${d.data.hidden} more ${d.data.hidden === 1 ? "was" : "were"} turned away but ${d.data.hidden === 1 ? "is" : "are"} allowed now.`));
+      inner.appendChild(el("div", { class: "ch-row__hint" }, "What they wrote isn't shown. Adding someone only puts them in People — they still get no replies, DMs, tools or pictures until you switch those on."));
+    }
+    box.appendChild(inner);
+    return box;
+  }
+
   function renderSide() {
     if (!dom) return;
     dom.side.textContent = "";
@@ -2469,9 +2678,11 @@
       else if (!pl.enabled) hints.push(["Turn it on: ", `jarvis channels-set ${id} enabled true`]);
       if (!pl.owner) hints.push(["Pick an owner: ", `jarvis channels-set ${id} owner YOUR_USER_ID`]);
       for (const [lead, cmd] of hints) card.appendChild(el("div", { class: "ch-plat__hint" }, [lead, el("code", null, cmd)]));
+      if (pl.token_set) card.appendChild(masterControl(id, pl));
       dom.side.appendChild(card);
       if (id === "discord") dom.side.appendChild(serversSection());
     }
+    dom.side.appendChild(deniedSection());
     const g = el("details", { class: "ch-globals" }, [el("summary", null, "Global lists")]);
     const body = el("div", { class: "ch-globals__body" }, [
       el("div", { class: "ch-globals__note" }, "The raw allow-lists the switches on the left read and write. Use these to add someone who hasn't messaged yet, or to manage \"*\" entries."),
