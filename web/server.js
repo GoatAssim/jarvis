@@ -1335,9 +1335,12 @@ app.get("/api/channels/denied", requireJarvis, async (req, res) => {
 // --- Channels > Servers (Discord servers and their channels) ---------------
 // Proxies `jarvis channels-servers / channels-server-set`, which delegate to
 // channels/servers.py. The switches can only take access away (see that
-// module) and nothing here touches allowed_guilds / allowed_channels, so the
-// browser cannot widen who can reach the bot. Digits-only ids: a Discord id is
-// a snowflake, and "-x" must never reach the CLI's flag parser.
+// module), and those switches never touch allowed_guilds / allowed_channels, so
+// they cannot widen who can reach the bot. The ONE route below that does edit
+// allowed_guilds goes through channels/allowed_guilds.py, which only narrows:
+// adding to an empty list (or an unseen id) previews until `confirm: true`, and
+// removing the last entry is refused. Digits-only ids: a Discord id is a
+// snowflake, and "-x" must never reach the CLI's flag parser.
 const CHANNEL_SNOWFLAKE = /^[0-9]{1,25}$/;
 const SERVER_KINDS = new Set(["guild", "channel"]);
 const SERVER_SWITCHES = new Set(["enabled", "tools", "mention"]);
@@ -1359,6 +1362,31 @@ app.post("/api/channels/servers/:platform/:kind/:id", requireJarvis, async (req,
   if (typeof value !== "string" || !SERVER_VALUES.has(value)) return res.status(400).json({ error: "value must be on, off or inherit." });
   sendChannelResult(await runJarvisOnce(
     ["channels-server-set", platform, kind, id, sw, value], 10000), res);
+});
+
+// allowed_guilds ("only these servers"): add / remove one entry (L.36-P17).
+// GET reads the filter. POST { id, remove?, confirm? } -- without `confirm` an
+// add that would turn the filter on (or names a server Jarvis hasn't seen) only
+// returns a preview; the CLI decides, this just validates and passes it on.
+app.get("/api/channels/servers/:platform/allowed-guilds", requireJarvis, async (req, res) => {
+  const { platform } = req.params;
+  if (!CHANNEL_PLATFORMS.has(platform)) return res.status(400).json({ error: "Unknown platform." });
+  sendChannelResult(await runJarvisOnce(["channels-guilds", platform], 10000), res);
+});
+
+app.post("/api/channels/servers/:platform/allowed-guilds", requireJarvis, async (req, res) => {
+  const { platform } = req.params;
+  if (!CHANNEL_PLATFORMS.has(platform)) return res.status(400).json({ error: "Unknown platform." });
+  const id = typeof req.body?.id === "string" ? req.body.id.trim() : "";
+  if (!CHANNEL_SNOWFLAKE.test(id)) return res.status(400).json({ error: "A server id is digits only." });
+  for (const flag of ["remove", "confirm"]) {
+    if (req.body?.[flag] !== undefined && typeof req.body[flag] !== "boolean") {
+      return res.status(400).json({ error: `${flag} must be true or false.` });
+    }
+  }
+  const args = ["channels-guilds", platform, req.body?.remove === true ? "remove" : "add", id];
+  if (req.body?.confirm === true && req.body?.remove !== true) args.push("--yes");
+  sendChannelResult(await runJarvisOnce(args, 10000), res);
 });
 
 app.get("/api/channels/people/:platform/:id/conversation", requireJarvis, async (req, res) => {

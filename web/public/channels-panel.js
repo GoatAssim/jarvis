@@ -230,6 +230,33 @@
     { id: "blocked", label: "Blocked", ch: "bad", test: (p) => p.blocked },
   ];
 
+  // The status dropdown's options: every filter with how many people it would
+  // show under the current search + platform (same counts the chips used to carry).
+  function stateFilterOptions(list, { search, platform }) {
+    const base = filterPeople(list, { search, platform, state: "all" });
+    return STATE_FILTERS.map((f) => ({ id: f.id, label: f.label, ch: f.ch, n: base.filter(f.test).length }));
+  }
+
+  // ---- allowed_guilds helpers (pure; v = the /api/channels/servers view) ----
+  const GUILD_ID = /^[0-9]{1,25}$/;
+  const guildIdOk = (text) => GUILD_ID.test(String(text || "").trim());
+  function guildName(v, id) {
+    const s = ((v && v.servers) || []).find((x) => x.id === id);
+    return s && s.name ? s.name : "";
+  }
+  // Servers that can be picked from the dropdown: seen by the bot, still joined, not already allowed.
+  function guildChoices(v) {
+    const allowed = new Set((v && v.allowed_guilds) || []);
+    return ((v && v.servers) || []).filter((s) => s.known && !s.left && !allowed.has(s.id)).map((s) => ({ id: s.id, name: s.name || "" }));
+  }
+  // What the user typed beats what they picked; "" when neither is a valid id.
+  function guildPick(typed, picked) {
+    const t = String(typed || "").trim();
+    if (t) return guildIdOk(t) ? t : "";
+    const p = String(picked || "").trim();
+    return guildIdOk(p) ? p : "";
+  }
+
   // ---- helpers for the Conversation / Usage / Test tabs (pure, no DOM) ----
   // The transcript stamps local, zone-less ISO times ("2026-10-01T10:00:05").
   const dayOf = (at) => (typeof at === "string" && /^\d{4}-\d{2}-\d{2}/.test(at)) ? at.slice(0, 10) : "";
@@ -357,6 +384,9 @@
     serversError: "",
     serverOpen: new Set(), // server ids whose card is expanded
     serverBusy: new Set(), // "<kind>:<id>|<switch>" while a write is in flight
+    // allowed_guilds editor: what is typed / picked survives a re-render; `preview`
+    // is the server's "this needs a second click" answer for the add in question.
+    guildAdd: { text: "", pick: "", busy: false, error: "", preview: null },
     // Quick setups (P4): the list the server sends, the open preview, and the
     // last result (shown until dismissed or another person is picked).
     presets: [],
@@ -615,6 +645,29 @@
     state.serverBusy.delete(key);
     await loadServers();
   }
+  // Add / remove one server on allowed_guilds. The server decides what needs a
+  // second step: an add that would turn the filter on (or names a server the bot
+  // hasn't seen) comes back as a preview and nothing is written until confirmed.
+  async function guildMutate(id, remove, confirm) {
+    const g = state.guildAdd;
+    if (g.busy) return;
+    g.busy = true; g.error = ""; renderSide();
+    try {
+      const res = await api("POST", "/api/channels/servers/discord/allowed-guilds", { id, remove: !!remove, confirm: !!confirm });
+      if (res && res.needs_confirm && !res.applied) {
+        g.preview = res;
+      } else {
+        g.preview = null;
+        if (res && res.applied) { g.text = ""; g.pick = ""; }
+        else if (res && res.note) toast(res.note);
+      }
+    } catch (err) {
+      g.preview = null;
+      g.error = err.message || "Couldn't save that.";
+    }
+    g.busy = false;
+    await loadServers();
+  }
 
   async function globalMutate(platform, short, entry, remove, errEl) {
     if (errEl) errEl.textContent = "";
@@ -672,16 +725,19 @@
         onclick: () => { state.platformFilter = id; renderList(); renderChips(); },
       }, [id === "all" ? "All platforms" : PLATFORMS[id].label, el("span", { class: "ch-chip__n" }, String(counts[id] || 0))]));
     }
+    // Status filter: one dropdown (All / Owner / Tools / Answered / Not answered / Blocked),
+    // each option carrying its count. It replaced a row of six chips that wrapped badly.
     dom.stateChips.textContent = "";
-    const base = filterPeople(state.people, { search: state.search, platform: state.platformFilter, state: "all" });
-    for (const s of STATE_FILTERS) {
-      const n = base.filter(s.test).length;
-      dom.stateChips.appendChild(el("button", {
-        type: "button", class: "ch-chip" + (state.stateFilter === s.id ? " is-active" : ""), "data-ch": s.ch || null,
-        "aria-pressed": state.stateFilter === s.id ? "true" : "false",
-        onclick: () => { state.stateFilter = s.id; renderList(); renderChips(); },
-      }, [s.ch ? el("span", { class: "ch-chip__dot" }) : null, s.label, el("span", { class: "ch-chip__n" }, String(n))]));
-    }
+    const opts = stateFilterOptions(state.people, { search: state.search, platform: state.platformFilter });
+    const cur = opts.find((o) => o.id === state.stateFilter) || opts[0];
+    const sel = el("select", { class: "ch-filter__select", id: "ch-state-select", "aria-label": "Filter by status", "data-ch": cur.ch || null },
+      opts.map((o) => el("option", { value: o.id, selected: o.id === cur.id }, `${o.label} (${o.n})`)));
+    sel.addEventListener("change", () => {
+      state.stateFilter = sel.value; renderList(); renderChips();
+      const again = dom.stateChips.querySelector("select");   // renderChips rebuilt it: keep the keyboard on it
+      if (again) again.focus();
+    });
+    dom.stateChips.appendChild(sel);
   }
 
   function renderList() {
@@ -2516,6 +2572,72 @@
     return det;
   }
 
+  // "Allowed servers": the allowed_guilds filter, editable. Only narrows access --
+  // the server refuses to remove the last entry (an empty list = every server).
+  function allowedGuildsBlock(v) {
+    const g = state.guildAdd;
+    const ids = v.allowed_guilds || [];
+    const box = el("div", { class: "ch-allowed", "data-allowed-guilds": "" });
+    box.appendChild(el("div", { class: "ch-allowed__title" }, "Allowed servers"));
+    box.appendChild(el("div", { class: "ch-row__hint" }, ids.length
+      ? "Only these servers get answers. Any other server is ignored."
+      : "No filter: Jarvis answers in every server it's in (the switches below still apply). Adding one turns the filter on."));
+    if (ids.length) {
+      const chips = el("div", { class: "ch-gset__chips ch-allowed__chips" });
+      const only = ids.length === 1;
+      ids.forEach((id) => {
+        const name = guildName(v, id);
+        chips.appendChild(el("span", { class: "channels-chip", "data-guild": id }, [
+          name ? `${name} \u00b7 ${id}` : id,
+          el("button", {
+            type: "button", class: "channels-chip__remove", disabled: only || g.busy,
+            title: only ? "This is the only entry. Removing it would open every server; clear it from a terminal if you mean that." : `Stop allowing ${name || id}`,
+            "aria-label": `Stop allowing ${name || id}`, onclick: () => guildMutate(id, true, false),
+          }, "\u00d7"),
+        ]));
+      });
+      box.appendChild(chips);
+      if (only) box.appendChild(el("div", { class: "ch-row__hint" }, [
+        "This is the only entry, so it can't be removed here (an empty list means every server). To clear the filter on purpose: ",
+        el("code", null, "jarvis channels-set discord allowed_guilds []")]));
+    }
+    const choices = guildChoices(v);
+    const select = el("select", { class: "ch-allowed__select", "aria-label": "Pick a server to allow", disabled: g.busy || !choices.length },
+      [el("option", { value: "" }, choices.length ? "Pick a server Jarvis is in\u2026" : "No other servers seen yet")]
+        .concat(choices.map((c) => el("option", { value: c.id, selected: g.pick === c.id }, `${c.name || "Unnamed server"} \u00b7 ${c.id}`))));
+    const input = el("input", { type: "text", class: "ch-allowed__id", inputmode: "numeric", autocomplete: "off", spellcheck: "false", maxlength: "25",
+      placeholder: "or paste a server id", "aria-label": "Server id", value: g.text || null, disabled: g.busy });
+    select.addEventListener("change", () => { g.pick = select.value; if (select.value) { g.text = ""; input.value = ""; } });
+    input.addEventListener("input", () => { g.text = input.value; if (input.value.trim()) { g.pick = ""; select.value = ""; } });
+    const submit = () => {
+      const id = guildPick(input.value, select.value);
+      if (!id) { g.error = "Pick a server from the list or paste its id (digits only)."; renderSide(); return; }
+      g.error = ""; g.preview = null; guildMutate(id, false, false);
+    };
+    input.addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); submit(); } });
+    box.appendChild(el("div", { class: "ch-allowed__add" }, [select, input,
+      el("button", { type: "button", class: "btn btn--ghost btn--sm ch-allowed__btn", disabled: g.busy, onclick: submit }, "Allow")]));
+    if (g.preview) {
+      const p = g.preview;
+      const stop = p.would_stop || [];
+      const total = p.would_stop_total || stop.length;
+      const lines = [];
+      if (total) lines.push(`${total} other server${total === 1 ? "" : "s"} would stop answering: ${stop.map((x) => x.name || x.id).join(", ")}${total > stop.length ? ` and ${total - stop.length} more` : ""}.`);
+      else if (!ids.length) lines.push("This turns the filter on: any server not on the list will be ignored.");
+      if (p.unknown) lines.push("Jarvis hasn't seen this server. If the id is wrong, Jarvis will stay silent everywhere.");
+      box.appendChild(el("div", { class: "ch-allowed__confirm", role: "alert" }, [
+        el("div", { class: "ch-allowed__confirm-t" }, `Allow ${guildName(v, p.id) || p.id}?`),
+        ...lines.map((t) => el("div", { class: "ch-row__hint" }, t)),
+        el("div", { class: "ch-allowed__confirm-btns" }, [
+          el("button", { type: "button", class: "btn btn--primary btn--sm", disabled: g.busy, onclick: () => guildMutate(p.id, false, true) }, "Yes, allow it"),
+          el("button", { type: "button", class: "btn btn--ghost btn--sm", disabled: g.busy, onclick: () => { g.preview = null; renderSide(); } }, "Cancel"),
+        ]),
+      ]));
+    }
+    box.appendChild(el("div", { class: "ch-gset__err", role: "alert" }, g.error || ""));
+    return box;
+  }
+
   function serversSection() {
     const v = state.servers;
     const box = el("div", { class: "ch-servers" });
@@ -2525,14 +2647,17 @@
     if (!v) {
       inner.appendChild(el("div", { class: "ch-row__hint" }, state.serversError || "Servers aren't loaded."));
     } else {
+      inner.appendChild(allowedGuildsBlock(v));
       if (!v.servers.length) inner.appendChild(el("div", { class: "ch-row__hint" }, "No servers recorded yet. Start the bot (jarvis discord-daemon) and invite it to a server; it shows up here once connected."));
-      v.servers.forEach((s) => inner.appendChild(serverCard(s, v)));
+      // A long server list scrolls inside its own box, so it can never push the platform status cards out of view.
+      const list = el("div", { class: "ch-servers__list" });
+      v.servers.forEach((s) => list.appendChild(serverCard(s, v)));
+      if (v.servers.length) inner.appendChild(list);
       const notes = [];
-      if (v.allowed_guilds.length) notes.push(`allowed_guilds is set (${v.allowed_guilds.length}): any server not on it is ignored.`);
       if (v.allowed_channels.length) notes.push(`allowed_channels is set (${v.allowed_channels.length}): any channel not on it is ignored.`);
       if (v.orphans.length) notes.push(`${v.orphans.length} channel${v.orphans.length === 1 ? "" : "s"} in the config aren't in any server Jarvis has seen.`);
       for (const n of notes) inner.appendChild(el("div", { class: "ch-row__hint" }, n));
-      inner.appendChild(el("div", { class: "ch-row__hint" }, "These switches only take access away. To let more people in, use the lists on the left; allowed_guilds and allowed_channels are edited by hand."));
+      inner.appendChild(el("div", { class: "ch-row__hint" }, "These switches only take access away. To let more people in, use the lists on the left; allowed_channels is edited by hand."));
     }
     box.appendChild(inner);
     return box;
@@ -2680,8 +2805,10 @@
       for (const [lead, cmd] of hints) card.appendChild(el("div", { class: "ch-plat__hint" }, [lead, el("code", null, cmd)]));
       if (pl.token_set) card.appendChild(masterControl(id, pl));
       dom.side.appendChild(card);
-      if (id === "discord") dom.side.appendChild(serversSection());
     }
+    // The servers list can be long, so it goes AFTER every platform's status card:
+    // Discord and Instagram status stay at the top whatever the list holds.
+    if (state.platforms.discord) dom.side.appendChild(serversSection());
     dom.side.appendChild(deniedSection());
     const g = el("details", { class: "ch-globals" }, [el("summary", null, "Global lists")]);
     const body = el("div", { class: "ch-globals__body" }, [
@@ -2981,6 +3108,7 @@
     open, close,
     _pure: { initials, hueFor, relTime, filterPeople, postureOf, sameScope, scopeOf, groupTools, displayName, STATE_FILTERS,
              dayOf, clockOf, localDay, dayLabel, groupByDay, fmtTokens, barModel, convNote, summaryText,
-             toolCallsLabel, untilLeft, TIME_LIMITS },
+             toolCallsLabel, untilLeft, TIME_LIMITS,
+             stateFilterOptions, guildIdOk, guildName, guildChoices, guildPick },
   };
 })(window);

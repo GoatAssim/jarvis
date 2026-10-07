@@ -127,5 +127,49 @@ check("untilLeft: past reads ended", T.untilLeft(now - 5, now) === "ended" && T.
 check("untilLeft: seconds, minutes, hours, days", T.untilLeft(now + 30, now) === "in under 2 min" && T.untilLeft(now + 600, now) === "in 10 min" && T.untilLeft(now + 3 * 3600, now) === "in 3 h" && T.untilLeft(now + 2 * 86400, now) === "in 2 d");
 check("TIME_LIMITS are whole minutes within 1 minute .. 30 days", T.TIME_LIMITS.length >= 3 && T.TIME_LIMITS.every((t) => Number.isInteger(t.minutes) && t.minutes >= 1 && t.minutes <= 43200 && t.label));
 
+// status dropdown (L.36-P17): options + counts replace the old row of chips
+{
+  const people = [
+    mk({ user_id: "1", owner: true }),
+    mk({ user_id: "2", effective: { answered: true, tools: "custom" } }),
+    mk({ user_id: "3", reply: { on: false }, effective: { answered: false, tools: "none" } }),
+    mk({ user_id: "4", blocked: true, effective: { answered: false, tools: "none" } }),
+    mk({ user_id: "5", platform: "instagram", handle: "nour.ig" }),
+  ];
+  const o = T.stateFilterOptions(people, { search: "", platform: "all" });
+  check("dropdown: one option per filter, in the filters' order", o.map((x) => x.id).join() === T.STATE_FILTERS.map((x) => x.id).join());
+  const n = (id) => o.find((x) => x.id === id).n;
+  check("dropdown: counts - all 5, owner 1, tools 1, answered 3, not answered 1, blocked 1",
+    n("all") === 5 && n("owner") === 1 && n("tools") === 1 && n("answered") === 3 && n("silent") === 1 && n("blocked") === 1, JSON.stringify(o.map((x) => [x.id, x.n])));
+  const d = T.stateFilterOptions(people, { search: "", platform: "discord" });
+  check("dropdown: counts follow the platform filter", d.find((x) => x.id === "all").n === 4 && d.find((x) => x.id === "answered").n === 2);
+  const q = T.stateFilterOptions(people, { search: "nour", platform: "all" });
+  check("dropdown: counts follow the search box", q.find((x) => x.id === "all").n === 1);
+  check("dropdown: an empty list is all zeros, no throw", T.stateFilterOptions([], { search: "", platform: "all" }).every((x) => x.n === 0));
+  check("dropdown: every option keeps its label", o.every((x) => typeof x.label === "string" && x.label.length));
+}
+
+// allowed_guilds editor helpers (L.36-P17)
+{
+  const v = {
+    allowed_guilds: ["900000000000000001"],
+    servers: [
+      { id: "900000000000000001", name: "Alpha", known: true, left: false },
+      { id: "900000000000000002", name: "Beta", known: true, left: false },
+      { id: "900000000000000003", name: "", known: true, left: false },
+      { id: "900000000000000004", name: "Gone", known: true, left: true },
+      { id: "900000000000000005", name: "", known: false, left: false },
+    ],
+  };
+  check("guildIdOk: digits only, 1..25", T.guildIdOk("123") && T.guildIdOk(" 900000000000000001 ") && !T.guildIdOk("") && !T.guildIdOk("12a") && !T.guildIdOk("-1") && !T.guildIdOk("1".repeat(26)) && !T.guildIdOk(null));
+  check("guildName: finds a name, empty for none / unknown", T.guildName(v, "900000000000000001") === "Alpha" && T.guildName(v, "900000000000000003") === "" && T.guildName(v, "7") === "" && T.guildName(null, "1") === "");
+  const c = T.guildChoices(v).map((x) => x.id);
+  check("guildChoices: seen, still joined and not already allowed", c.join() === "900000000000000002,900000000000000003", c.join());
+  check("guildChoices: nothing seen yet is an empty list, no throw", T.guildChoices({ servers: [], allowed_guilds: [] }).length === 0 && T.guildChoices(null).length === 0);
+  check("guildPick: typed beats picked", T.guildPick("111", "222") === "111");
+  check("guildPick: a bad typed id is NOT silently replaced by the dropdown", T.guildPick("abc", "222") === "");
+  check("guildPick: falls back to the dropdown, then to nothing", T.guildPick("", "222") === "222" && T.guildPick("", "") === "" && T.guildPick("  ", "x") === "");
+}
+
 console.log(`${passed} passed, ${failed.length} failed`);
 process.exit(failed.length ? 1 : 0);

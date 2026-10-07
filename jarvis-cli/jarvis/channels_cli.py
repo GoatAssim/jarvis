@@ -18,7 +18,7 @@ import time
 from .channels import PLATFORMS, PERM_SETS
 from .channels import config as channel_config
 from .channels import directory, outbound, people, permissions, transcript
-from .channels import denied, master_tools, panel_dm
+from .channels import allowed_guilds, denied, master_tools, panel_dm
 from .channels import preset_admin, presets, servers, user_admin
 
 COMMANDS = (
@@ -33,7 +33,7 @@ COMMANDS = (
     "channels-history", "channels-handle",
     "channels-tools-for", "channels-instruction",
     "channels-presets", "channels-preset", "channels-bulk",
-    "channels-servers", "channels-server-set",
+    "channels-servers", "channels-server-set", "channels-guilds",
     "channels-master-tools", "channels-send", "channels-denied",
     "discord-daemon", "instagram-serve", "logs-search",
 )
@@ -108,6 +108,10 @@ USAGE = """channel commands:
                                         a quick setup for several people / what it would change
   channels-servers [platform]           Discord servers + channels Jarvis knows, with their switches (JSON)
   channels-server-set <platform> guild|channel <id> <switch> <on|off|inherit>
+  channels-guilds <platform> [add|remove <id>] [--yes]
+                                        the allowed_guilds filter ("only these servers"). No action = show it.
+                                        add to an EMPTY list, or an id Jarvis hasn't seen, only PREVIEWS unless
+                                        --yes. Removing the LAST entry is always refused (empty = every server)
                                         per-server / per-channel switch. <switch>: enabled (answer
                                         here), tools (allow tools here), mention (require @mention).
                                         These can only take access away: enabled/tools "on" means
@@ -705,6 +709,30 @@ def handle(argv):
             _fail(f"unknown platform '{platform}'")
         print(json.dumps(servers.view(platform), indent=2))
         return
+
+    if cmd == "channels-guilds":
+        # L.36-P17. allowed_guilds from the panel. Narrowing only: see
+        # channels/allowed_guilds.py for what needs --yes and what is refused.
+        usage = "usage: channels-guilds <platform> [add|remove <id>] [--yes]"
+        flags = [a for a in rest[1:] if a.startswith("--")]
+        words = [a for a in rest[1:] if not a.startswith("--")]
+        if not rest or rest[0] not in PLATFORMS or len(words) not in (0, 2) \
+                or not set(flags) <= {"--yes"}:
+            _fail(usage)
+        platform = rest[0]
+        if not words:
+            result = allowed_guilds.view(platform)
+            print(json.dumps(result, indent=2))
+            sys.exit(0 if result.get("ok") else 1)
+        if words[0].lower() not in ("add", "remove"):
+            _fail(usage)
+        result = allowed_guilds.set_allowed(
+            platform, words[1], remove=words[0].lower() == "remove",
+            confirm="--yes" in flags)
+        if result.get("needs_confirm"):
+            result["hint"] = "nothing was changed \u2014 add --yes to apply it"
+        print(json.dumps(result, indent=2))
+        sys.exit(0 if result.get("ok") else 1)
 
     if cmd == "channels-server-set":
         if len(rest) < 5:
