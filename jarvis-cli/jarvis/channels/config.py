@@ -11,6 +11,10 @@ THE FOUR SETS ARE GENUINELY INDEPENDENT
     tool_allowlist  whose request may cause a tool to run
     owner           the single account that receives outbound DMs
 
+(A fifth list, image_allowlist, says who besides the owner may send Jarvis
+pictures. It is not a stage of the gate -- nobody is refused a reply for
+lacking it -- and permissions.may_send_images() is the one place that reads it.)
+
 They are checked in that order and nothing is inherited between them. That
 is the point: "my friend can ping Jarvis in the server and get an answer,
 but only I can make it touch my PC" is exactly one entry in reply_allowlist
@@ -77,6 +81,11 @@ _COMMON_DEFAULTS = {
     "dm_allowlist": [],
     "reply_allowlist": [],
     "tool_allowlist": [],
+    # L.36-P8: who besides the owner may send Jarvis pictures. Empty = nobody
+    # (the owner is always allowed and need not be listed). Nothing reads it
+    # until inbound images are built (L.42); it is stored now so the grant
+    # exists before the feature does.
+    "image_allowlist": [],
 
     # --- gating ------------------------------------------------------
     # require_mention applies to group contexts (a Discord guild channel,

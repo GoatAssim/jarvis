@@ -42,7 +42,7 @@ never saw it.
 
 import time
 
-from . import PERM_DM, PERM_REPLY, PERM_TOOLS, PERM_SETS
+from . import PERM_DM, PERM_REPLY, PERM_TOOLS, PERM_IMAGES, PERM_SETS
 from . import config
 from .config import WILDCARD
 
@@ -312,6 +312,34 @@ def decide(cfg, msg, last_seen_at=None, now=None):
                     may_use_tools=may_use_tools)
 
 
+def may_send_images(cfg, identities):
+    """May this sender's PICTURES be read? (L.36-P8 / L.42, Q-L42g.)
+
+    The owner always may; anyone else only when the owner switched images on
+    for them (image_allowlist). Nobody is on the list by default.
+
+    This is NOT part of decide() and grants nothing by itself: a caller must
+    already have an allowed Decision, and a person the gate refuses never gets
+    here. It only ever ANDs with that, so it cannot open a conversation. The
+    cost of a guest's picture lands on the owner's vision provider and text
+    inside a picture is an injection channel, which is why it is a list the
+    owner fills in rather than something inherited from `reply`.
+
+    Nothing consumes it yet -- inbound images are L.42, not built. It is here
+    so the grant, the panel switch and the Test tab already say the same thing
+    the feature will later enforce. Never raises: a malformed config answers no.
+    """
+    cfg = cfg or {}
+    try:
+        if is_owner(cfg, identities):
+            return True
+        if isinstance(identities, IncomingMessage):
+            identities = identities.identities()
+        return matches(cfg.get(PERM_IMAGES), identities)
+    except Exception:  # noqa: BLE001 -- a broken config must read as "no"
+        return False
+
+
 def is_owner(cfg, identities):
     """Is this sender the configured owner? Used for owner-only commands
     inside a chat (e.g. `@jarvis status`), never as a permission shortcut —
@@ -346,6 +374,7 @@ def describe(cfg):
         f"dm_allowlist:    {render(PERM_DM)}",
         f"reply_allowlist: {render(PERM_REPLY)}",
         f"tool_allowlist:  {render(PERM_TOOLS)}",
+        f"image_allowlist: {render(PERM_IMAGES)}   (not used yet: inbound images are not built)",
         f"allow_tools:     {bool(cfg.get('allow_tools'))}",
         f"require_mention: {bool(cfg.get('require_mention', True))}",
     ]

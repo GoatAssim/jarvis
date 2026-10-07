@@ -166,7 +166,21 @@ jarvis-cli/jarvis/
         preset_admin.py   L.36-P4/P5: plan (preview) and apply one setup for one person, and
                           bulk_flag / bulk_preset for several. Only ever calls
                           user_admin.set_flag / set_tools; every refusal is per person
-        user_admin.py     L.36: one person, every switch (dm/reply/tool/owner/send_dm/blocked
+        master_tools.py   L.36-P9: the platform-wide `allow_tools` switch for the panel / `channels-master-tools`:
+                          view (who it would reach), turn ON only after a preview + confirm, OFF at once,
+                          refused while the tool list holds "*"
+        panel_dm.py       L.36-P13: one DM from the panel / `channels-send`, preview then confirm, through
+                          actions/send_dm.tool_send_dm so the limits and log are shared with the tool
+        denied.py         L.36-P14: recently turned-away senders (who-stages only; never message text)
+        master_tools.py   L.36-P9: the platform-wide `allow_tools` switch for the panel/CLI --
+                          view() of who it would reach, set_master() = preview, then
+                          confirm; refused while the tool list holds "*"; OFF is immediate
+        panel_dm.py       L.36-P13: one DM from the panel, preview then confirm, through
+                          actions/send_dm.tool_send_dm (shared limits, log, delivery);
+                          refuses owner / placeholder / chat-origin / unattended
+        denied.py         L.36-P14: read-only "turned away recently" from the transcript
+                          (who-stages only; handle, count, reason -- never message text)
+        user_admin.py     L.36: one person, every switch (dm/reply/tool/image/owner/send_dm/blocked
                           + tool scope); the ONE implementation behind the panel and
                           `jarvis channels-user`; registered people only. L.36b adds
                           add_person / rename / remove_person / link_accounts and the
@@ -606,6 +620,8 @@ silently never runs.
 | `test_channel_servers.py` | L.36-P7 + tool calls in the Conversation view: the server registry, switches that only take access away (checked against the REAL `permissions.decide`), `servers.view`, thread -> parent-channel routing, tool-call scrubbing/clipping and attribution to the first reply chunk, the CLI; and (S3) a bare-id `allowed_guilds` / `allowed_channels` no longer crashes `view` or the gate |
 | `test_channel_timed_and_instruction.py` | L.36-P6 / P12: the `tools_until` deadline (garbage reads as passed, resolver is read-only), grant refusals, `expire_due` + its change-log reason, manual switches / block / forget / `channels-allow|deny` ending a countdown, the gateway sweep, the Test tab's wording, and the instruction (cap, one line, owner refused, prompt framing, not reachable by a guest) |
 | `test_channel_insights.py` | L.36-P1/P2/P3: per-person conversation attribution (DM vs group, rotated files, torn lines), the usage ledger (counts only, failed asks, windows, rotation), and `simulate` (agrees with what `handle_message` really hands the model; writes nothing, calls no model — snapshot of `~/.jarvis` before/after) |
+| `test_channel_pack_p8_p9_p13_p14.py` | L.36-P8/P9/P13/P14: the picture grant (never a way into a conversation, cleaned up by block / forget, owner locked), the platform tools switch (preview then confirm, refused with `"*"`), panel DM (shared limits, owner / chat-origin refused, preview sends nothing), the turned-away list (who-stages only, never message text) |
+| `verify_l36_pack_ui.py` (`python3`) | L.36-P8/P9/P13/P14/P16 panels + the add-person panel in a real browser against real backend output (`_channels_pack_fixture.py`); SKIPs without playwright + Chromium |
 | `verify_l36_insights_ui.py` (`python3`) | L.36-P1/P2/P3 tabs in a real browser against real backend output (`_channels_fixture.py`); SKIPs without playwright + Chromium |
 | `verify_channels_panel.js` (`node`) | L.36: `channels-panel.js` pure helpers (initials, hue, relative time, list filters and search, tool-scope diffing/grouping, and that only fixed icon strings reach `innerHTML`) |
 | `test_prompt_cache.py` | the static/dynamic prompt split |

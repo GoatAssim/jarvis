@@ -784,3 +784,12 @@
 }
 .ch-hist__meta .ch-hist__tag{ margin-left: 0; }
 .ch-hist__why{ font-style: italic; overflow-wrap: anywhere; }
+
+/* L.36-P9 / P13 / P14 / P8 */
+.ch-master{ display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 0 12px 11px; }
+.ch-master .ch-confirm{ flex: 1 1 100%; }
+.ch-dm__text{ width: 100%; min-height: 72px; resize: vertical; box-sizing: border-box; font-family: var(--font-body, inherit); font-size: 14px; letter-spacing: 0; }
+.ch-dm__quote{ white-space: pre-wrap; overflow-wrap: anywhere; border-left: 3px solid var(--border-strong); padding: 6px 10px; margin: 6px 0; font-size: 13px; color: var(--text); }
+.ch-denied__row{ display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 8px 0; border-top: 1px solid var(--border); }
+.ch-denied__row:first-child{ border-top: none; }
+.ch-denied__row > div{ min-width: 0; overflow-wrap: anywhere; }

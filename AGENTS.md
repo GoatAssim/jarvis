@@ -134,6 +134,25 @@ things that were already fixed once.
   deadline second when ending. An unreadable deadline counts as passed. Turning
   `tool` on or off, blocking, forgetting, or `channels-allow|deny ... tool` ends the
   countdown. `tests/test_channel_timed_and_instruction.py` pins this.
+- **Pictures, the platform tools switch, panel DMs and the turned-away list
+  (L.36-P8 / P9 / P13 / P14).** (1) `image_allowlist` is a fourth list but NOT a
+  stage of the gate: `permissions.may_send_images()` only ever ANDs with an
+  allowed decision, so a picture grant can never open a conversation; nothing
+  reads it until inbound images (L.42) exist, and the panel says so. Every
+  place that walks "all of someone's lists" uses `user_admin.LISTS`, so block,
+  forget, handle edits and listing cannot forget it. It is not a bulk flag or
+  part of any quick setup. (2) `channels/master_tools.py` is the only way the
+  panel touches `allow_tools`: turning it ON previews first and needs
+  `confirm`, is refused while the tool list holds `"*"`, and OFF applies at
+  once. (3) `channels/panel_dm.py` delivers through `actions/send_dm.tool_send_dm`
+  itself (limits, resolver, log and delivery are the tool's, not copies), is
+  preview-then-confirm, and refuses the owner, a placeholder, anyone blocked or
+  with DMs off, and any call made from inside a chat or an unattended run. (4)
+  `channels/denied.py` is read-only, covers only the `dm_allowed` / `reply`
+  stages, and NEVER returns what a stranger wrote. No model tool reaches any of
+  these four (a tool that did would let a guest's message widen access or send
+  as the owner). `tests/test_channel_pack_p8_p9_p13_p14.py` and
+  `tests/verify_l36_pack_ui.py` pin this.
 - **The owner's instruction for a person is style text, owner-typed only
   (L.36-P12).** `people.instruction` is set by `user_admin.set_instruction` (panel /
   `channels-instruction`) and by nothing a chat guest can reach (`remember_sender`
@@ -280,6 +299,8 @@ actually render Markdown):
     python3 tests/test_code_agent_extras.py # L.47b: code_agent runs are saved as replay extras, slimmed (no file content, no listing)
     node tests/verify_agent_panel.js        # L.47: the Focus Agent panel's reducer + tree builder (agent-panel.js); no npm install
     python3 tests/test_channel_timed_and_instruction.py   # L.36-P6 / P12: time-limited tools and the per-person instruction
+    python3 tests/test_channel_pack_p8_p9_p13_p14.py      # L.36-P8 / P9 / P13 / P14: picture grant, platform tools switch, panel DM, turned-away list
+    python3 tests/verify_l36_pack_ui.py     # L.36-P8/P9/P13/P14/P16: those panels + the add-person panel in a real browser; needs `playwright` (Python) + Chromium, prints SKIP without them
     node tests/verify_channels_panel.js     # L.36: the Channels panel's pure helpers (people list, filters, tool-scope diffing); no npm install
     node tests/verify_mcp_servers.js        # L.31: the MCP panel's pure helpers (state labels, search, filters, what a blank secret means); no npm install
     python3 tests/verify_mcp_servers_ui.py  # L.31: the MCP panel in a real browser against a real stdio MCP server; needs `playwright` (Python) + Chromium, prints SKIP without them
