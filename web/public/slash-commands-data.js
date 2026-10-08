@@ -671,6 +671,7 @@ window.JARVIS_SLASH_COMMANDS = /*JSON-BEGIN*/
         "channels-servers",
         "channels-server-set",
         "channels-guilds",
+        "channels-channels",
         "channels-master-tools",
         "channels-send",
         "channels-denied"

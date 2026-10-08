@@ -118,12 +118,19 @@ things that were already fixed once.
   is removed (never written `true`, which would GRANT over a switched-off platform);
   `mention` can be turned on or inherited, never off. It must never write
   `allowed_guilds` / `allowed_channels` -- they are "empty = unrestricted", so removing
-  the last entry would open every server. Those two lists, like the allow-lists, go
+  the last entry would open every server. `allowed_guilds` alone has ONE separate,
+  narrower writer, `channels/allowed_guilds.py` (L.36-P17; panel "Allowed servers" /
+  `jarvis channels-guilds`): adding to an EMPTY list (which turns the filter on and
+  silences every other server) or adding an id the bot has never seen only previews
+  until `confirm` / `--yes`; removing the LAST entry is refused always, confirmed or not
+  (clearing the filter is a deliberate `channels-set discord allowed_guilds []`); it
+  writes only that one key. `allowed_channels` is still hand-edited. Those two lists, like the allow-lists, go
   through `config.normalize_entries` in `load_config()`, in `permissions.resolve_scope()`
   and in `permissions.decide()`: a hand-typed bare id (`"allowed_guilds": 123`) is a
   one-entry list, not a `TypeError`. Never iterate a config list directly -- use the
   normalizer. Names (`guild_name`, `channel_name`) are display only; no stage of
-  `decide()` reads them. `tests/test_channel_servers.py` pins all of this.
+  `decide()` reads them. `tests/test_channel_servers.py` and
+  `tests/test_allowed_guilds.py` pin all of this.
 - **A time limit on tool access is a ceiling, enforced at read time, and it only
   ever means less access (L.36-P6).** The grant is the ordinary `tool_allowlist`
   entry; `user_perms.tools_until` only says when it ends.
@@ -300,6 +307,8 @@ actually render Markdown):
     node tests/verify_agent_panel.js        # L.47: the Focus Agent panel's reducer + tree builder (agent-panel.js); no npm install
     python3 tests/test_channel_timed_and_instruction.py   # L.36-P6 / P12: time-limited tools and the per-person instruction
     python3 tests/test_channel_pack_p8_p9_p13_p14.py      # L.36-P8 / P9 / P13 / P14: picture grant, platform tools switch, panel DM, turned-away list
+    python3 tests/test_allowed_guilds.py    # L.36-P17: allowed_guilds editor (preview-first, last entry never removable, real gate, CLI, route pinned statically)
+    python3 tests/verify_l36_guilds_ui.py   # L.36-P17: status cards with 40 servers, status dropdown, allowed-servers editor in a real browser; needs `playwright` (Python) + Chromium, prints SKIP without them
     python3 tests/verify_l36_pack_ui.py     # L.36-P8/P9/P13/P14/P16: those panels + the add-person panel in a real browser; needs `playwright` (Python) + Chromium, prints SKIP without them
     node tests/verify_channels_panel.js     # L.36: the Channels panel's pure helpers (people list, filters, tool-scope diffing); no npm install
     node tests/verify_mcp_servers.js        # L.31: the MCP panel's pure helpers (state labels, search, filters, what a blank secret means); no npm install

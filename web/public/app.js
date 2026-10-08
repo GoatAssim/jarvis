@@ -3018,6 +3018,9 @@
 
   function setRunning(running) {
     state.running = running;
+    // The tab icon switches to its "working" variant while anything is in flight
+    // (app-icon.js). Guarded: the icon is cosmetic and must never block a run.
+    if (window.JarvisIcon && typeof window.JarvisIcon.setBusy === "function") window.JarvisIcon.setBusy(!!running, "run");
     qs("#btn-execute").disabled = running;
     qs("#btn-seq-run").disabled = running;
     qs("#btn-abort").hidden = !running;

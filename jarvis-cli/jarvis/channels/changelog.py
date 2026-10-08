@@ -91,7 +91,8 @@ K_TIMED = "timed"        # tool use switched on until a deadline (L.36-P6)
 
 _LIST_LABEL = {"dm_allowlist": "direct messages", "reply_allowlist": "replies",
                "tool_allowlist": "tool use", "image_allowlist": "pictures",
-               "allowed_guilds": "the allowed-servers filter"}
+               "allowed_guilds": "the allowed-servers filter",
+               "allowed_channels": "the allowed-channels filter"}
 
 _state = threading.local()
 

@@ -109,7 +109,7 @@ RESERVED_NAMES = {
     "channels-history", "channels-handle",
     "channels-tools-for", "channels-instruction",
     "channels-presets", "channels-preset", "channels-bulk",
-    "channels-servers", "channels-server-set", "channels-guilds",
+    "channels-servers", "channels-server-set", "channels-guilds", "channels-channels",
     "channels-master-tools", "channels-send", "channels-denied",
     "discord-daemon", "instagram-serve", "logs-search",
     # --- clipboard_cli.COMMANDS ----------------------------------------------
