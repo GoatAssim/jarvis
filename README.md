@@ -807,12 +807,22 @@ the message counts cover the whole history.
 **Discord servers** (a card per server in the Discord section) lists every server
 Jarvis is in, with its channels by name, and three switches per server and one per
 channel: *Answer here*, *Allow tools*, *Needs an @mention*. They can only **take access
-away** -- to let more people in, use the lists on the left. `allowed_guilds` and
-`allowed_channels` are still edited by hand in `channels.json`; a single id there
+away** -- to let more people in, use the lists on the left. **Allowed servers** (above
+the cards) edits `allowed_guilds` ("only these servers"): pick a server Jarvis is in or
+paste an id. The first entry turns the filter on and silences every other server, so it
+asks first (and says who goes quiet); so does an id Jarvis has never seen. The last
+entry can't be removed from the panel (an empty list means every server) -- clear it on
+purpose with `jarvis channels-set discord allowed_guilds []`. `allowed_channels` is
+still edited by hand in `channels.json`; a single id there
+`allowed_channels` each have an *Allowed servers* / *Allowed channels* editor under the
+cards (or `jarvis channels-guilds` / `jarvis channels-channels`): adding to an empty list,
+or an id Jarvis hasn't seen, previews first, and the last entry can't be removed from
+there. A single id in `channels.json` (`"allowed_guilds": 123456789012345678`) still
+works as a list of one. The Conversation tab
 (`"allowed_guilds": 123456789012345678`) works as a list of one. The Conversation tab
 also shows which tools Jarvis used for each reply (hide them with *Hide tool calls*), and
 which server / channel a message came from. Terminal: `jarvis channels-servers` and
-`channels-server-set`.
+`channels-server-set`; `jarvis channels-guilds <platform> [add|remove <id>] [--yes]` for the allowed servers.
 
 **Quick setups** (top of the Permissions tab) set a person's DM / reply / tool
 switches and tool list in one go: *No access*, *Chat only*, *Chat + tell the

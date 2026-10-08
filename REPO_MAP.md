@@ -153,6 +153,7 @@ jarvis-cli/jarvis/
                           switches can only take access away. `view()` is the read model.
                           `_ids()` delegates to `config.normalize_entries` (a bare id where a
                           list belongs must never crash it)
+        allowed_channels.py  L.36-P18: add/remove one entry on allowed_channels (panel + `channels-channels`); preview-first, never empties the list
         directory.py      @handle -> id, learned from real messages
         people.py         NEW — WHO a person is: name, notes, follow state, and (L.36) a
                           platform-given avatar URL (https + image-CDN allow-list only)
@@ -166,6 +167,9 @@ jarvis-cli/jarvis/
         preset_admin.py   L.36-P4/P5: plan (preview) and apply one setup for one person, and
                           bulk_flag / bulk_preset for several. Only ever calls
                           user_admin.set_flag / set_tools; every refusal is per person
+        allowed_guilds.py L.36-P17: add / remove one server on `allowed_guilds` (panel "Allowed servers" /
+                          `channels-guilds`); the ONLY writer of that key. Add to an empty list or an unseen
+                          id previews until confirmed; removing the last entry is always refused
         master_tools.py   L.36-P9: the platform-wide `allow_tools` switch for the panel / `channels-master-tools`:
                           view (who it would reach), turn ON only after a preview + confirm, OFF at once,
                           refused while the tool list holds "*"
@@ -249,6 +253,8 @@ web/
                                  create form onto remind_me/notify_me/
                                  schedule_task/schedule_watch via /api/tools/run,
                                  kind/status filters, Overview pane)
+    public/app-icon.js           L.48: browser-tab icon = the skin's logo in the skin's colour; a distinct
+                                 "working" icon (turning arc + badge) while a run is in flight
     public/channels-panel.js/.css  Menu -> Channels (L.36 rework): per-person, Test-Checklist-style
                                  (people list | Profile + Permissions tabs | platform cards and the
                                  old global allow-lists as a fallback). Every switch POSTs to
@@ -462,6 +468,7 @@ jarvis channels-bulk flag <switch> <on|off> <platform:id> ...      # one switch 
 jarvis channels-bulk preset|preview <setup> <platform:id> ...      # a quick setup for several people / what it would change
 jarvis channels-servers [platform]                                # Discord servers + channels Jarvis knows, with their switches (JSON)
 jarvis channels-server-set <platform> guild|channel <id> <enabled|tools|mention> <on|off|inherit>   # can only take access away
+jarvis channels-guilds <platform> [add|remove <id>] [--yes]    # allowed_guilds: add previews unless --yes when it turns the filter on / id unseen; last entry never removable
 jarvis channels-add-person <platform> <id|@handle> [name ...]   # someone who hasn't messaged yet; grants nothing
 jarvis channels-rename <platform> <id|@handle> [name ...]       # no name clears it
 jarvis channels-remove-person <platform> <id|@handle>           # hand-added and never messaged only
@@ -618,10 +625,12 @@ silently never runs.
 | `test_channel_manual_people.py` | L.36b: people named in an allow-list get a row, hand-added people, handle-only placeholder adopted on first message (tool limits migrated), locked names vs `remember_sender`, linked accounts (by id / handle / name, ambiguity, owner never inherited), remove, `send_dm` skips a handle-only person, the `channels-*` commands |
 | `test_user_admin.py` | L.36: `user_perms` store (fails closed), `user_admin` switches (registered only, wildcard refusal, owner moves, block removes from all lists), the `base._ask_jarvis` enforcement point, the `send_dm` refusal, avatar validation in `people.py` |
 | `test_channel_servers.py` | L.36-P7 + tool calls in the Conversation view: the server registry, switches that only take access away (checked against the REAL `permissions.decide`), `servers.view`, thread -> parent-channel routing, tool-call scrubbing/clipping and attribution to the first reply chunk, the CLI; and (S3) a bare-id `allowed_guilds` / `allowed_channels` no longer crashes `view` or the gate |
+| `test_allowed_guilds.py` | L.36-P17: `allowed_guilds` editor -- add (preview-first when it turns the filter on or the id is unseen), remove (the LAST entry is refused even with confirm), checked against the REAL `permissions.decide`, one-key-only writes, change log, `channels-guilds`, and a static check of the `server.js` route |
 | `test_channel_timed_and_instruction.py` | L.36-P6 / P12: the `tools_until` deadline (garbage reads as passed, resolver is read-only), grant refusals, `expire_due` + its change-log reason, manual switches / block / forget / `channels-allow|deny` ending a countdown, the gateway sweep, the Test tab's wording, and the instruction (cap, one line, owner refused, prompt framing, not reachable by a guest) |
 | `test_channel_insights.py` | L.36-P1/P2/P3: per-person conversation attribution (DM vs group, rotated files, torn lines), the usage ledger (counts only, failed asks, windows, rotation), and `simulate` (agrees with what `handle_message` really hands the model; writes nothing, calls no model — snapshot of `~/.jarvis` before/after) |
 | `test_channel_pack_p8_p9_p13_p14.py` | L.36-P8/P9/P13/P14: the picture grant (never a way into a conversation, cleaned up by block / forget, owner locked), the platform tools switch (preview then confirm, refused with `"*"`), panel DM (shared limits, owner / chat-origin refused, preview sends nothing), the turned-away list (who-stages only, never message text) |
 | `verify_l36_pack_ui.py` (`python3`) | L.36-P8/P9/P13/P14/P16 panels + the add-person panel in a real browser against real backend output (`_channels_pack_fixture.py`); SKIPs without playwright + Chromium |
+| `verify_l36_guilds_ui.py` (`python3`) | L.36-P17 in a real browser against real backend output: Discord/Instagram status cards stay visible with 40 servers, the status dropdown, and the allowed-servers editor (preview, cancel, confirm, last entry locked); SKIPs without playwright + Chromium |
 | `verify_l36_insights_ui.py` (`python3`) | L.36-P1/P2/P3 tabs in a real browser against real backend output (`_channels_fixture.py`); SKIPs without playwright + Chromium |
 | `verify_channels_panel.js` (`node`) | L.36: `channels-panel.js` pure helpers (initials, hue, relative time, list filters and search, tool-scope diffing/grouping, and that only fixed icon strings reach `innerHTML`) |
 | `test_prompt_cache.py` | the static/dynamic prompt split |
@@ -638,6 +647,9 @@ silently never runs.
 | `verify_notifications_ui.py` (`python`, not run by `run_tests.py`) | L.30: the real page in headless Chromium against the real CLI verbs — toast stack, level 5 dialog, panel filters/dismiss/mark-read, re-surfacing on a fake clock. Needs Playwright; skips cleanly without it |
 | `test_slash_coverage.py` | every `reserved_names.py` name is in the `/` palette registry exactly once, with a valid risk tier |
 | `verify_slash_palette.js` (`node`) | the palette engine: parsing, submit routing, near-miss, every verb's handler, confirm gates, keyboard model |
+| `test_allowed_channels.py` | L.36-P18: the `allowed_channels` editor -- preview-first, last entry never removed, real `permissions.decide` gate (thread = parent, DMs untouched, server filter warning), only that key written, change log, CLI, route + panel wiring |
+| `verify_app_icon.js` (`node`) | L.48: `app-icon.js` pure helpers and a fake-DOM run (skin/colour change picked up, busy swaps the icon, ticker stops with Animations off) |
+
 
 ---
 

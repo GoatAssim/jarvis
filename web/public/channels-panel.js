@@ -257,6 +257,39 @@
     return guildIdOk(p) ? p : "";
   }
 
+  // ---- allowed_channels helpers (pure; v = the /api/channels/servers view) ----
+  // A channel id is a snowflake like a server id, so the same check applies.
+  const channelIdOk = guildIdOk;
+  // The server + channel names for an id, from the servers the bot has seen
+  // ({ name, guild } -- both "" for an id nobody has seen, e.g. a typo or a thread).
+  function channelInfo(v, id) {
+    for (const s of (v && v.servers) || []) {
+      const c = (s.channels || []).find((x) => x.id === id);
+      if (c) return { name: c.name || "", guild: s.name || "" };
+    }
+    return { name: "", guild: "" };
+  }
+  // "#general in My Server \u00b7 123", falling back to the bare id.
+  function channelLabel(v, id) {
+    const i = channelInfo(v, id);
+    if (!i.name) return id;
+    return `#${i.name}${i.guild ? ` in ${i.guild}` : ""} \u00b7 ${id}`;
+  }
+  // Channels that can be picked from the dropdown, grouped by server: seen by
+  // the bot, in a server it is still in, not already allowed.
+  function channelChoices(v) {
+    const allowed = new Set((v && v.allowed_channels) || []);
+    const out = [];
+    for (const s of (v && v.servers) || []) {
+      if (!s.known || s.left) continue;
+      const channels = (s.channels || []).filter((c) => !allowed.has(c.id)).map((c) => ({ id: c.id, name: c.name || "" }));
+      if (channels.length) out.push({ id: s.id, name: s.name || "", channels });
+    }
+    return out;
+  }
+  // What the user typed beats what they picked; "" when neither is a valid id.
+  const channelPick = guildPick;
+
   // ---- helpers for the Conversation / Usage / Test tabs (pure, no DOM) ----
   // The transcript stamps local, zone-less ISO times ("2026-10-01T10:00:05").
   const dayOf = (at) => (typeof at === "string" && /^\d{4}-\d{2}-\d{2}/.test(at)) ? at.slice(0, 10) : "";
@@ -387,6 +420,8 @@
     // allowed_guilds editor: what is typed / picked survives a re-render; `preview`
     // is the server's "this needs a second click" answer for the add in question.
     guildAdd: { text: "", pick: "", busy: false, error: "", preview: null },
+    // allowed_channels editor (L.36-P18): the same shape, for the channel list.
+    chanAdd: { text: "", pick: "", busy: false, error: "", preview: null },
     // Quick setups (P4): the list the server sends, the open preview, and the
     // last result (shown until dismissed or another person is picked).
     presets: [],
@@ -660,6 +695,32 @@
         g.preview = null;
         if (res && res.applied) { g.text = ""; g.pick = ""; }
         else if (res && res.note) toast(res.note);
+      }
+    } catch (err) {
+      g.preview = null;
+      g.error = err.message || "Couldn't save that.";
+    }
+    g.busy = false;
+    await loadServers();
+  }
+
+  // Add / remove one channel on allowed_channels -- the twin of guildMutate: the
+  // server answers with a preview when the add would turn the filter on or names
+  // a channel the bot hasn't seen, and nothing is written until confirmed.
+  async function chanMutate(id, remove, confirm) {
+    const g = state.chanAdd;
+    if (g.busy) return;
+    g.busy = true; g.error = ""; renderSide();
+    try {
+      const res = await api("POST", "/api/channels/servers/discord/allowed-channels", { id, remove: !!remove, confirm: !!confirm });
+      if (res && res.needs_confirm && !res.applied) {
+        g.preview = res;
+      } else {
+        g.preview = null;
+        if (res && res.applied) {
+          g.text = ""; g.pick = "";
+          if (res.guild_blocked) toast(res.note, "info");
+        } else if (res && res.note) toast(res.note);
       }
     } catch (err) {
       g.preview = null;
@@ -2638,6 +2699,76 @@
     return box;
   }
 
+  // "Allowed channels": the allowed_channels filter, editable (L.36-P18). Only
+  // narrows access -- the server refuses to remove the last entry (an empty list
+  // = every channel). Sits beside "Allowed servers"; both filters must pass.
+  function allowedChannelsBlock(v) {
+    const g = state.chanAdd;
+    const ids = v.allowed_channels || [];
+    const box = el("div", { class: "ch-allowed", "data-allowed-channels": "" });
+    box.appendChild(el("div", { class: "ch-allowed__title" }, "Allowed channels"));
+    box.appendChild(el("div", { class: "ch-row__hint" }, ids.length
+      ? "Only these channels get answers (in a thread, the channel it belongs to). Any other channel is ignored; DMs aren't affected."
+      : "No filter: Jarvis answers in every channel it can see (the switches below still apply). Adding one turns the filter on."));
+    if (ids.length) {
+      const chips = el("div", { class: "ch-gset__chips ch-allowed__chips" });
+      const only = ids.length === 1;
+      ids.forEach((id) => {
+        const label = channelLabel(v, id);
+        chips.appendChild(el("span", { class: "channels-chip", "data-channel": id }, [
+          label,
+          el("button", {
+            type: "button", class: "channels-chip__remove", disabled: only || g.busy,
+            title: only ? "This is the only entry. Removing it would open every channel; clear it from a terminal if you mean that." : `Stop allowing ${label}`,
+            "aria-label": `Stop allowing ${label}`, onclick: () => chanMutate(id, true, false),
+          }, "\u00d7"),
+        ]));
+      });
+      box.appendChild(chips);
+      if (only) box.appendChild(el("div", { class: "ch-row__hint" }, [
+        "This is the only entry, so it can't be removed here (an empty list means every channel). To clear the filter on purpose: ",
+        el("code", null, "jarvis channels-set discord allowed_channels []")]));
+    }
+    const groups = channelChoices(v);
+    const total = groups.reduce((n, grp) => n + grp.channels.length, 0);
+    const select = el("select", { class: "ch-allowed__select", "aria-label": "Pick a channel to allow", disabled: g.busy || !total },
+      [el("option", { value: "" }, total ? "Pick a channel Jarvis can see\u2026" : "No other channels seen yet")]
+        .concat(groups.map((grp) => el("optgroup", { label: grp.name || `Server ${grp.id}` },
+          grp.channels.map((c) => el("option", { value: c.id, selected: g.pick === c.id }, `#${c.name || "unnamed"} \u00b7 ${c.id}`))))));
+    const input = el("input", { type: "text", class: "ch-allowed__id", inputmode: "numeric", autocomplete: "off", spellcheck: "false", maxlength: "25",
+      placeholder: "or paste a channel id", "aria-label": "Channel id", value: g.text || null, disabled: g.busy });
+    select.addEventListener("change", () => { g.pick = select.value; if (select.value) { g.text = ""; input.value = ""; } });
+    input.addEventListener("input", () => { g.text = input.value; if (input.value.trim()) { g.pick = ""; select.value = ""; } });
+    const submit = () => {
+      const id = channelPick(input.value, select.value);
+      if (!id) { g.error = "Pick a channel from the list or paste its id (digits only)."; renderSide(); return; }
+      g.error = ""; g.preview = null; chanMutate(id, false, false);
+    };
+    input.addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); submit(); } });
+    box.appendChild(el("div", { class: "ch-allowed__add" }, [select, input,
+      el("button", { type: "button", class: "btn btn--ghost btn--sm ch-allowed__btn", disabled: g.busy, onclick: submit }, "Allow")]));
+    if (g.preview) {
+      const p = g.preview;
+      const stop = p.would_stop || [];
+      const total = p.would_stop_total || stop.length;
+      const lines = [];
+      if (total) lines.push(`${total} other channel${total === 1 ? "" : "s"} would stop answering: ${stop.map((x) => `#${x.name || x.id}${x.guild_name ? ` (${x.guild_name})` : ""}`).join(", ")}${total > stop.length ? ` and ${total - stop.length} more` : ""}.`);
+      else if (!ids.length) lines.push("This turns the filter on: any channel not on the list will be ignored.");
+      if (p.unknown) lines.push("Jarvis hasn't seen this channel. If the id is wrong (or it is a thread: list the channel it belongs to), Jarvis will stay silent everywhere.");
+      box.appendChild(el("div", { class: "ch-allowed__confirm", role: "alert" }, [
+        el("div", { class: "ch-allowed__confirm-t" }, `Allow ${p.channel_name ? `#${p.channel_name}${p.guild_name ? ` in ${p.guild_name}` : ""}` : p.id}?`),
+        ...lines.map((t) => el("div", { class: "ch-row__hint" }, t)),
+        p.guild_blocked ? el("div", { class: "ch-row__hint" }, "Its server isn't on the allowed servers, so it would stay silent until that server is allowed too.") : null,
+        el("div", { class: "ch-allowed__confirm-btns" }, [
+          el("button", { type: "button", class: "btn btn--primary btn--sm", disabled: g.busy, onclick: () => chanMutate(p.id, false, true) }, "Yes, allow it"),
+          el("button", { type: "button", class: "btn btn--ghost btn--sm", disabled: g.busy, onclick: () => { g.preview = null; renderSide(); } }, "Cancel"),
+        ]),
+      ]));
+    }
+    box.appendChild(el("div", { class: "ch-gset__err", role: "alert" }, g.error || ""));
+    return box;
+  }
+
   function serversSection() {
     const v = state.servers;
     const box = el("div", { class: "ch-servers" });
@@ -2648,6 +2779,7 @@
       inner.appendChild(el("div", { class: "ch-row__hint" }, state.serversError || "Servers aren't loaded."));
     } else {
       inner.appendChild(allowedGuildsBlock(v));
+      inner.appendChild(allowedChannelsBlock(v));
       if (!v.servers.length) inner.appendChild(el("div", { class: "ch-row__hint" }, "No servers recorded yet. Start the bot (jarvis discord-daemon) and invite it to a server; it shows up here once connected."));
       // A long server list scrolls inside its own box, so it can never push the platform status cards out of view.
       const list = el("div", { class: "ch-servers__list" });
@@ -2657,7 +2789,7 @@
       if (v.allowed_channels.length) notes.push(`allowed_channels is set (${v.allowed_channels.length}): any channel not on it is ignored.`);
       if (v.orphans.length) notes.push(`${v.orphans.length} channel${v.orphans.length === 1 ? "" : "s"} in the config aren't in any server Jarvis has seen.`);
       for (const n of notes) inner.appendChild(el("div", { class: "ch-row__hint" }, n));
-      inner.appendChild(el("div", { class: "ch-row__hint" }, "These switches only take access away. To let more people in, use the lists on the left; allowed_channels is edited by hand."));
+      inner.appendChild(el("div", { class: "ch-row__hint" }, "These switches only take access away. To let more people in, use the lists on the left. The two Allowed filters above only narrow too."));
     }
     box.appendChild(inner);
     return box;
@@ -3109,6 +3241,7 @@
     _pure: { initials, hueFor, relTime, filterPeople, postureOf, sameScope, scopeOf, groupTools, displayName, STATE_FILTERS,
              dayOf, clockOf, localDay, dayLabel, groupByDay, fmtTokens, barModel, convNote, summaryText,
              toolCallsLabel, untilLeft, TIME_LIMITS,
-             stateFilterOptions, guildIdOk, guildName, guildChoices, guildPick },
+             stateFilterOptions, guildIdOk, guildName, guildChoices, guildPick,
+             channelIdOk, channelInfo, channelLabel, channelChoices, channelPick },
   };
 })(window);

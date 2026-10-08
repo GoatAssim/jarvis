@@ -1389,6 +1389,33 @@ app.post("/api/channels/servers/:platform/allowed-guilds", requireJarvis, async 
   sendChannelResult(await runJarvisOnce(args, 10000), res);
 });
 
+// allowed_channels ("only these channels"): add / remove one entry (L.36-P18). The
+// twin of the route above, with the same rules and the same split of work: this
+// validates the id and the two booleans and passes argv on; channels/
+// allowed_channels.py decides (preview before the filter turns on or for an id
+// Jarvis hasn't seen; the last entry is never removed). A thread id is a valid
+// snowflake here -- the CLI reports it as unseen rather than this layer guessing.
+app.get("/api/channels/servers/:platform/allowed-channels", requireJarvis, async (req, res) => {
+  const { platform } = req.params;
+  if (!CHANNEL_PLATFORMS.has(platform)) return res.status(400).json({ error: "Unknown platform." });
+  sendChannelResult(await runJarvisOnce(["channels-channels", platform], 10000), res);
+});
+
+app.post("/api/channels/servers/:platform/allowed-channels", requireJarvis, async (req, res) => {
+  const { platform } = req.params;
+  if (!CHANNEL_PLATFORMS.has(platform)) return res.status(400).json({ error: "Unknown platform." });
+  const id = typeof req.body?.id === "string" ? req.body.id.trim() : "";
+  if (!CHANNEL_SNOWFLAKE.test(id)) return res.status(400).json({ error: "A channel id is digits only." });
+  for (const flag of ["remove", "confirm"]) {
+    if (req.body?.[flag] !== undefined && typeof req.body[flag] !== "boolean") {
+      return res.status(400).json({ error: `${flag} must be true or false.` });
+    }
+  }
+  const args = ["channels-channels", platform, req.body?.remove === true ? "remove" : "add", id];
+  if (req.body?.confirm === true && req.body?.remove !== true) args.push("--yes");
+  sendChannelResult(await runJarvisOnce(args, 10000), res);
+});
+
 app.get("/api/channels/people/:platform/:id/conversation", requireJarvis, async (req, res) => {
   const who = channelPersonArgs(req, res);
   if (!who) return;

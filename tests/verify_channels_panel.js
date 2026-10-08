@@ -171,5 +171,34 @@ check("TIME_LIMITS are whole minutes within 1 minute .. 30 days", T.TIME_LIMITS.
   check("guildPick: falls back to the dropdown, then to nothing", T.guildPick("", "222") === "222" && T.guildPick("", "") === "" && T.guildPick("  ", "x") === "");
 }
 
+// allowed_channels helpers (L.36-P18) -- the twins of the guild helpers above.
+{
+  const v = {
+    allowed_channels: ["800000000000000001", "800000000000000077"],
+    servers: [
+      { id: "900000000000000001", name: "Alpha", known: true, left: false, channels: [
+        { id: "800000000000000001", name: "general" }, { id: "800000000000000002", name: "random" }] },
+      { id: "900000000000000002", name: "Beta", known: true, left: false, channels: [{ id: "800000000000000003", name: "" }] },
+      { id: "900000000000000003", name: "Gone", known: true, left: true, channels: [{ id: "800000000000000004", name: "old" }] },
+      { id: "900000000000000004", name: "", known: false, left: false, channels: [{ id: "800000000000000005", name: "ghost" }] },
+    ],
+  };
+  check("channelIdOk is the same digits-only rule as guildIdOk", T.channelIdOk("123") && !T.channelIdOk("12a") && !T.channelIdOk("") && !T.channelIdOk("1".repeat(26)));
+  const i = T.channelInfo(v, "800000000000000001");
+  check("channelInfo: channel and server name", i.name === "general" && i.guild === "Alpha", JSON.stringify(i));
+  const u = T.channelInfo(v, "800000000000000077");
+  check("channelInfo: an id nobody has seen is empty, no throw", u.name === "" && u.guild === "" && T.channelInfo(null, "1").name === "");
+  check("channelLabel: #name in Server . id", T.channelLabel(v, "800000000000000001") === "#general in Alpha \u00b7 800000000000000001", T.channelLabel(v, "800000000000000001"));
+  check("channelLabel: falls back to the bare id", T.channelLabel(v, "800000000000000077") === "800000000000000077");
+  const g = T.channelChoices(v);
+  check("channelChoices: grouped by server, minus allowed, left and unseen servers",
+    g.length === 2 && g[0].name === "Alpha" && g[0].channels.map((c) => c.id).join() === "800000000000000002"
+    && g[1].name === "Beta" && g[1].channels.map((c) => c.id).join() === "800000000000000003", JSON.stringify(g));
+  check("channelChoices: a server with nothing left to pick is dropped",
+    T.channelChoices({ allowed_channels: ["1"], servers: [{ id: "9", name: "S", known: true, left: false, channels: [{ id: "1", name: "a" }] }] }).length === 0);
+  check("channelChoices: nothing seen yet is an empty list, no throw", T.channelChoices({ servers: [], allowed_channels: [] }).length === 0 && T.channelChoices(null).length === 0);
+  check("channelPick: typed beats picked, a bad typed id is not replaced", T.channelPick("111", "222") === "111" && T.channelPick("abc", "222") === "" && T.channelPick("", "222") === "222" && T.channelPick("", "") === "");
+}
+
 console.log(`${passed} passed, ${failed.length} failed`);
 process.exit(failed.length ? 1 : 0);
