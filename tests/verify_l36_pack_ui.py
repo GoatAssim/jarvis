@@ -109,7 +109,13 @@ with sync_playwright() as p:
     pg.evaluate("JarvisChannels.open()")
     pg.wait_for_selector(".ch-card")
 
+    # Home (the old side column) is picked like a person; its tabs hold these panels.
+    pg.locator("#ch-home .ch-card--home").click()
+    check("Home: the side column is gone and Home opens on Platforms",
+          pg.locator("#ch-side").count() == 0 and pg.locator("#ch-tab-platforms").get_attribute("aria-selected") == "true")
+
     # ---- P14: turned away
+    pg.locator("#ch-tab-denied").click()
     pg.wait_for_selector("#ch-denied .ch-denied__row")
     row = pg.locator("#ch-denied .ch-denied__row").first
     t = row.inner_text().lower()
@@ -122,12 +128,13 @@ with sync_playwright() as p:
     check("P14: ...and nothing that grants access", not any(pth.endswith(("/flag", "/allow")) for pth, _ in posts))
 
     # ---- P9: master switch
+    pg.locator("#ch-tab-platforms").click()
     pg.wait_for_selector("#ch-master-on-discord")
     check("P9: the switch reads off with a Turn on button", pg.locator("#ch-master-off-discord").count() == 0)
     pg.locator("#ch-master-on-discord").click()
     pg.wait_for_selector("#ch-master-confirm-discord")
     check("P9: the first click wrote nothing (a preview)", mine("/master-tools") == [{"value": True, "confirm": False}])
-    check("P9: the preview says who it would reach", "1 person" in txt("[data-plat='discord'] .ch-master") or "1 person" in txt("#ch-side"))
+    check("P9: the preview says who it would reach", "1 person" in txt("[data-plat='discord'] .ch-master") or "1 person" in txt("#ch-detail"))
     pg.locator("[data-plat='discord'] .ch-master .btn", has_text="Cancel").click()
     check("P9: Cancel sends nothing more", len(mine("/master-tools")) == 1)
     pg.locator("#ch-master-on-discord").click()

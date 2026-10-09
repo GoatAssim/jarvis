@@ -762,7 +762,10 @@ For finer control, open **Menu → Channels**: it lists everyone who has
 messaged Jarvis (registered people only), and each person has their own
 switches — may they DM the bot, do they get a reply, may their messages
 cause tools to run (and *which* tools), may Jarvis DM them for you, make
-them the owner, block them. The terminal does the same thing:
+them the owner, block them. **Home**, pinned at the top of the list, is picked like a person and
+holds everything that isn't about one person, as tabs: *Platforms* (is each platform
+on, is its token set, who the owner is, the tools master switch), *Servers* (Discord),
+*Turned away* and *Global lists*. The terminal does the same thing:
 
 ```
 jarvis channels-users                                  # everyone + every switch
@@ -804,10 +807,10 @@ changes style and can't give anyone access; it applies to that account only
 Token and tool counts start from the first message answered after upgrading;
 the message counts cover the whole history.
 
-**Discord servers** (a card per server in the Discord section) lists every server
+**Discord servers** (Home -> Servers tab, a card per server) lists every server
 Jarvis is in, with its channels by name, and three switches per server and one per
 channel: *Answer here*, *Allow tools*, *Needs an @mention*. They can only **take access
-away** -- to let more people in, use the lists on the left. **Allowed servers** (above
+away** -- to let more people in, use the Global lists tab or a person's Permissions tab. **Allowed servers** (above
 the cards) edits `allowed_guilds` ("only these servers"): pick a server Jarvis is in or
 paste an id. The first entry turns the filter on and silences every other server, so it
 asks first (and says who goes quiet); so does an id Jarvis has never seen. The last
