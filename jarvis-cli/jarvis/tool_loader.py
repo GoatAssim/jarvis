@@ -50,6 +50,14 @@ actions/_template.py section 9 for worked examples of both modes. A bad entry is
 logged and dropped; the tools still load. (It is deliberately not available to a
 file that defines no tools: the screen is for driving the file's own tools.)
 
+A file that defines tools can also supply background services of its own:
+
+    DAEMONS = [ {"id": ..., "command": [...], ...}, ... ]
+
+...registered in the Daemons panel when the tool is installed and removed when
+it is uninstalled. See tool_daemons.py for the contract, what the tool controls
+and what stays the owner's. A bad entry is logged and dropped; the tools load.
+
 A file (with or without the TOOL_SCHEMAS/TOOLS/TOOL_GROUP trio above) can
 ALSO optionally expose:
 
@@ -232,6 +240,9 @@ class ActionModuleRecord:
     # TOOL_UI entries, already validated and normalised by tool_ui.validate_ui
     # (absolute folder kept privately as "_dir"). [] when the module declared none.
     ui: list = field(default_factory=list)
+    # DAEMONS entries, already validated and normalised by
+    # tool_daemons.validate_daemons (L.12). [] when the module declared none.
+    daemons: list = field(default_factory=list)
 
 
 def _validate(module, filename, logger):
@@ -391,11 +402,25 @@ def _validate(module, filename, logger):
         for problem in ui_errors:
             logger(f"[tool-ui] {problem}")
 
+    # DAEMONS (L.12): background services the tool supplies. Same rule as the
+    # others - a bad entry is logged and dropped, the tools load regardless.
+    # The file's own folder resolves `{tool_dir}` and a relative `cwd`.
+    daemon_decls = []
+    raw_daemons = getattr(module, "DAEMONS", None)
+    if raw_daemons is not None:
+        from . import tool_daemons
+        mod_file = getattr(module, "__file__", None)
+        base_dir = Path(mod_file).resolve().parent if mod_file else None
+        daemon_decls, daemon_errors = tool_daemons.validate_daemons(raw_daemons, filename, base_dir)
+        for problem in daemon_errors:
+            logger(f"[tool-daemons] {problem}")
+
     return ActionModuleRecord(
         file=filename, valid=True, group=group, schemas=schemas, tools=tools,
         keywords=keywords, pack_instruction=pack_instruction,
         confirm_required=confirm_required, ai_review=ai_review, result_specs=result_specs,
         personas=personas, checklist=checklist, checklist_group=checklist_group, ui=ui,
+        daemons=daemon_decls,
     )
 
 

@@ -312,9 +312,28 @@
     };
   }
 
+  // L.14: how many of a row's trailing chips fit beside its fixed badges.
+  // `widths` is every item's width in order, the first `fixedCount` of them
+  // fixed (always shown, whether or not they fit - they were there before
+  // categories existed); the rest are chips. A chip that does not fit is left
+  // out - never wrapped, never cut short - and so is everything after it, so
+  // the chips shown are always the first ones, in the order they were set.
+  // Returns the number of CHIPS to show. Pure, so it needs no browser to test.
+  function fitCount(widths, available, gap, fixedCount) {
+    const list = Array.isArray(widths) ? widths.map((w) => Math.max(0, Number(w) || 0)) : [];
+    const fixed = Math.max(0, Math.min(list.length, Number(fixedCount) || 0));
+    const space = Number(gap) || 0;
+    let used = 0;
+    for (let i = 0; i < list.length; i++) {
+      used += (i > 0 ? space : 0) + list[i];
+      if (i >= fixed && used > available) return i - fixed;
+    }
+    return list.length - fixed;
+  }
+
   global.JarvisCategories = {
     MAX_NAME_LEN, MAX_PER_ITEM,
     normalizeName, keyOf, normalizeList, vocabulary, suggest, canonical,
-    createInput,
+    createInput, fitCount,
   };
 })(typeof window !== "undefined" ? window : globalThis);

@@ -2213,6 +2213,53 @@
     toast(`Added "${name}" to sequence.`, "info");
   }
 
+  // ---- L.14: command categories ---------------------------------------------
+  // Owner-chosen labels on a command, cleaned by the same rules the Daemons
+  // panel uses (category-input.js). They only label: they never change what a
+  // command runs, and a command with none looks exactly as it always did.
+  function commandCategories(spec) {
+    const C = window.JarvisCategories;
+    return C && spec ? C.normalizeList(spec.categories).list : [];
+  }
+
+  function categoryChip(name) {
+    return el("span", { class: "badge badge--cond badge--cat", title: `Category: ${name}` }, name);
+  }
+
+  // A card's meta row is one line. Show as many category chips as fit beside
+  // the step / var / conditional badges and leave out the rest (the info view
+  // lists them all). Chips are laid out first, measured, then hidden - a hidden
+  // element has no width to measure.
+  function fitCommandChips() {
+    const C = window.JarvisCategories;
+    if (!C || typeof C.fitCount !== "function") return;
+    document.querySelectorAll("#cmd-list .cmd-card__meta").forEach((meta) => {
+      const chips = Array.from(meta.querySelectorAll(".badge--cat"));
+      if (!chips.length) return;
+      chips.forEach((chip) => { chip.hidden = false; });
+      const available = meta.clientWidth;
+      if (!available) return;            // not laid out (panel hidden): leave them be
+      const items = Array.from(meta.children);
+      const cs = getComputedStyle(meta);
+      const gap = parseFloat(cs.columnGap || cs.gap) || 0;
+      const show = C.fitCount(items.map((n) => n.offsetWidth), available, gap, items.length - chips.length);
+      chips.forEach((chip, i) => { chip.hidden = i >= show; });
+    });
+  }
+
+  let chipFitFrame = 0;
+  let chipFitWatching = false;
+  function scheduleChipFit() {
+    if (!chipFitWatching) {
+      chipFitWatching = true;
+      const list = qs("#cmd-list");
+      if (list && typeof ResizeObserver === "function") new ResizeObserver(scheduleChipFit).observe(list);
+      if (document.fonts && document.fonts.ready) document.fonts.ready.then(scheduleChipFit);
+    }
+    if (chipFitFrame) return;
+    chipFitFrame = requestAnimationFrame(() => { chipFitFrame = 0; fitCommandChips(); });
+  }
+
   function commandMatchesSearch(name, spec, query) {
     if (!query) return true;
     const haystack = `${name} ${spec.description || ""}`.toLowerCase();
@@ -2279,10 +2326,12 @@
           el("span", { class: "badge" }, `${stepCount(spec)} step${stepCount(spec) === 1 ? "" : "s"}`),
           el("span", { class: "badge" }, `${Object.keys(spec.vars || {}).length} var${Object.keys(spec.vars || {}).length === 1 ? "" : "s"}`),
           hasConditions(spec) ? el("span", { class: "badge badge--cond" }, "conditional") : null,
+          ...commandCategories(spec).map(categoryChip),
         ]),
       ]);
       list.appendChild(card);
     }
+    scheduleChipFit();
   }
 
   async function loadCommands({ silent = false } = {}) {
@@ -2357,6 +2406,12 @@
     const spec = state.commands[name];
     qs("#detail-name").textContent = name;
     qs("#detail-desc").textContent = spec.description || "";
+    // L.14: the info view shows every category - nothing is left out here.
+    const catsEl = qs("#detail-cats");
+    const cats = commandCategories(spec);
+    catsEl.textContent = "";
+    cats.forEach((c) => catsEl.appendChild(categoryChip(c)));
+    catsEl.hidden = cats.length === 0;
 
     const form = qs("#var-form");
     form.innerHTML = "";
@@ -7883,6 +7938,24 @@
 
   const backdrop = qs("#modal-backdrop");
 
+  // L.14: the chip box in the editor. Built once, on first use. Suggestions
+  // come from the categories already on COMMANDS only - the Daemons panel keeps
+  // its own list (owner decision Q5). Edits made here reach the Raw JSON tab
+  // the same way every other builder field does (on switching tabs).
+  let commandCatInput = null;
+  function commandCategoryInput() {
+    if (!commandCatInput) {
+      const C = window.JarvisCategories;
+      commandCatInput = C.createInput({
+        id: "f-categories-input", value: [], label: "Categories",
+        placeholder: "Add a category\u2026 (Enter to add)",
+        getVocabulary: () => C.vocabulary(Object.values(state.commands).map(commandCategories)),
+      });
+      qs("#f-categories").appendChild(commandCatInput.el);
+    }
+    return commandCatInput;
+  }
+
   function openBuilder(mode, name) {
     state.editingOriginalName = mode === "edit" ? name : null;
     qs("#modal-title").textContent = mode === "edit" ? `Edit \u201c${name}\u201d` : "New Command";
@@ -7895,6 +7968,7 @@
     qs("#f-desc").value = spec.description || "";
     qs("#f-confirm-required").checked = !!spec.confirm_required;
     qs("#f-ai-review").checked = !!spec.ai_review;
+    commandCategoryInput().setValue(commandCategories(spec));
 
     buildVarsEditor(spec.vars || {});
     buildStepsEditor(normalizeSteps(spec.run));
@@ -8514,6 +8588,9 @@
     // showCommand pattern above).
     if (qs("#f-confirm-required").checked) spec.confirm_required = true;
     if (qs("#f-ai-review").checked) spec.ai_review = true;
+    // L.14: only written when there are some, same as the two above.
+    const categories = commandCategoryInput().getValue();
+    if (categories.length) spec.categories = categories;
     return spec;
   }
 
@@ -8538,6 +8615,7 @@
     qs("#f-desc").value = parsed.description || "";
     qs("#f-confirm-required").checked = !!parsed.confirm_required;
     qs("#f-ai-review").checked = !!parsed.ai_review;
+    commandCategoryInput().setValue(commandCategories(parsed));
     buildVarsEditor(parsed.vars || {});
     buildStepsEditor(normalizeSteps(parsed.run));
     refreshVarSync();
