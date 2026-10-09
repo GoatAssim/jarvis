@@ -159,6 +159,19 @@ class OrderedSchemaSet:
         for schema in schemas or []:
             self.append(schema)
 
+    def replace(self, schema):
+        """Swap in `schema` for the same-named entry, keeping its position
+        (L.24 T2: a get_tool_schema fetch turns a catalog stub into the real
+        schema). A name not present is simply added. append() can't do this:
+        first occurrence wins there, which is exactly what stranded a demoted
+        tool as a stub."""
+        if not isinstance(schema, dict):
+            return
+        name = schema.get("name")
+        if not name:
+            return
+        self._by_name[name] = schema
+
     def to_list(self):
         return list(self._by_name.values())
 
@@ -322,6 +335,17 @@ DEFAULT_PROMPT_MODE = "compact"
 # groups above it (playnite 31, desktop 16, system_control 11) are where the
 # eager-loading cost actually lives.
 CATALOG_TIER_MIN_TOOLS = 10
+
+# L.24 T2. A tool count says nothing about what demotion actually saves: a
+# catalog entry costs ~50 tokens, not the ~10 this tier was designed around, so
+# the 18-tool desktop group drops only ~290 of its ~1,170 tokens (measured by
+# tests/measure_l24.py) -- less than one extra model round costs by an order of
+# magnitude, and 1a99e1e3f0d3af0e paid exactly that round, three times. The
+# tier now only demotes when the NET saving (full compact schemas minus their
+# catalog lines) clears this bar, which today means playnite (~1,140) and
+# nothing else. A capacity profile may override it with "catalog_min_saving_
+# tokens" (per capacity mode, as the owner asked in Q-L24).
+CATALOG_TIER_MIN_SAVING_TOKENS = 800
 
 
 def mode_options():
@@ -2056,6 +2080,23 @@ def _make_tool_executor(on_tool_call, schemas=None, on_confirm_request=None,
                 if cache_query:
                     discovery_cache.cache_store(cache_query, "tools", found)
 
+        # L.24 T2: get_tool_schema used to return its schema and promote
+        # nothing, so a tool demoted to a catalog line stayed a no-argument
+        # stub on the next round and the model paid again to find out. Hand
+        # exactly the fetched names to the sink's exact-promotion path (a
+        # sink without one -- a test double -- is simply left alone).
+        if name == "get_tool_schema" and discover_sink and isinstance(result, dict):
+            promote = getattr(discover_sink, "promote_exact", None)
+            if promote is not None:
+                fetched = []
+                if result.get("ready") and result.get("name"):
+                    fetched.append(result["name"])
+                for item in result.get("schemas") or []:
+                    if isinstance(item, dict) and item.get("name"):
+                        fetched.append(item["name"])
+                if fetched:
+                    promote(fetched)
+
         # search_commands's own matches are SAVED COMMAND names (e.g.
         # "deploy-prod"), not tool names — they can't be fed to discover_sink
         # directly the way search_tools' matches are. But finding at least
@@ -2495,7 +2536,7 @@ def _tool_runs_note(runs, char_budget, verbosity="full", can_call_tools=True):
     if mutated:
         parts.append(
             "These actions DID run (only claim they happened because of the results below): "
-            + ", ".join(mutated) + "."
+            + ", ".join(mutated) + ". Do not run them again."
         )
     else:
         # Neutral on purpose (F.7 item 3). The old text told every model, on
@@ -3174,6 +3215,9 @@ def _ask_impl(user_text, commands=None, on_attempt=None, on_tool_call=None, on_t
     # Run this ask as a plain no-tools ask instead: no schemas, no tools
     # blurb, no executor. Unset (None) still means unrestricted, and a
     # non-empty allowlist is untouched.
+    # Names currently offered only as a catalog line (L.24 T2); filled by the
+    # hybrid catalog tier below, read by _discover_sink's exact promotion.
+    _catalog_names = set()
     if tools_enabled and _allowlist_is_empty():
         tools_enabled = False
     full_schemas = []
@@ -3374,10 +3418,20 @@ def _ask_impl(user_text, commands=None, on_attempt=None, on_tool_call=None, on_t
             full_set, cold = [], []
             for schema in active_schemas.to_list():
                 (full_set if schema.get("name") in hot else cold).append(schema)
+            _cold_saving = 0
             if cold:
+                _cold_saving = (
+                    token_usage.estimate_tokens_for(system_tools.compact_schemas_for_prompt(cold))
+                    - token_usage.estimate_tokens_for(system_tools.catalog_schemas_for_prompt(cold))
+                )
+            _min_saving = _catalog_tier_profile.get(
+                "catalog_min_saving_tokens", CATALOG_TIER_MIN_SAVING_TOKENS
+            )
+            if cold and _cold_saving >= _min_saving:
                 active_schemas = OrderedSchemaSet(full_set)
                 active_schemas.extend(system_tools.schemas_for_tools(["get_tool_schema"]))
                 catalog_entries = system_tools.catalog_schemas_for_prompt(cold)
+                _catalog_names.update(e.get("name") for e in catalog_entries if e.get("name"))
                 compact_schemas = OrderedSchemaSet(
                     system_tools.compact_schemas_for_prompt(active_schemas)
                 )
@@ -3449,6 +3503,35 @@ def _ask_impl(user_text, commands=None, on_attempt=None, on_tool_call=None, on_t
             active_schemas.extend(full)
             compact_schemas.extend(system_tools.compact_schemas_for_prompt(full))
             name_only_schemas.extend(system_tools.name_only_schemas_for_prompt(full))
+
+    def _promote_exact(names):
+        """L.24 T2: make EXACTLY these tools callable with their full schema.
+
+        Used for get_tool_schema, where the model named the tools it wants:
+        activating each one's whole group (what _discover_sink does for a
+        search_tools hit) would rebuild the very group the catalog tier just
+        demoted. A catalog stub is swapped for the real schema in all three
+        sets, in place, so it keeps its position; a tool not offered yet is
+        added. Returns the names actually promoted.
+        """
+        promoted = []
+        for name in names or []:
+            if not name:
+                continue
+            if name in active_schemas and name not in _catalog_names:
+                continue  # already offered in full
+            full = system_tools.schemas_for_tools([name])
+            if not full:
+                continue
+            real = full[0]
+            active_schemas.replace(real)
+            compact_schemas.replace(system_tools.compact_schemas_for_prompt([real])[0])
+            name_only_schemas.replace(system_tools.name_only_schemas_for_prompt([real])[0])
+            _catalog_names.discard(name)
+            promoted.append(name)
+        return promoted
+
+    _discover_sink.promote_exact = _promote_exact
 
     # Shared across every provider/key attempt below — see RoundBudget's docstring.
     # Each adapter still gets its own local MAX_TOOL_ROUNDS, but a failover to the

@@ -312,6 +312,7 @@ actually render Markdown):
     node tests/verify_ask_trace_replay.js
     node tests/verify_daemons_panel.js
     node tests/verify_daemons_console.js   # the console line classifier (H.1.7)
+    node tests/verify_log_conversation.js  # L.2: Logs Conversation view grouping (turns, tool pairing, failover, side requests, filters) + replays tests/fixtures/*.jsonl; no npm install
     node tests/verify_l9_sequence_bar.js   # L.9: sequence bar reachable; needs `playwright` + Chromium, prints SKIP without them
     python3 tests/verify_l11_daemon_categories.py # L.11: daemon categories in a real browser; needs `playwright` (Python) + Chromium, prints SKIP without them
     python3 tests/verify_l13_favorite_daemons.py  # L.13: favorite daemons in a real browser; needs `playwright` (Python) + Chromium, prints SKIP without them
@@ -499,6 +500,42 @@ The data file is strict JSON between its `JSON-BEGIN` / `JSON-END` markers
 (double quotes, no trailing commas, no comments) because both the browser and
 that test parse it. A module's `TEST_CHECKLIST` is ordinary Python, but its
 values must be plain JSON types (it is sent to the browser as JSON).
+
+**Features are not tools (master plan L.19).** The shipped data file also has a
+top-level `"features"` object for things worth a manual pass that are not tools —
+today the `/` command palette (group `command_palette`, whose entry in `"groups"`
+has `"kind": "feature"`). Same entry shape and the same validator
+(`checklist_schema.validate_entry(..., allow_do=True)`); the one difference is that
+a step may be `{"do": "<what to do by hand in the page>", "expect": "..."}` besides
+`ask` / `run`. `do` is accepted for features only — a tool's own `TEST_CHECKLIST`
+never gets it. The panel lists them next to the tools, tagged **Feature**; the
+tool-coverage tests ignore them, and `tests/test_checklist_features.py` checks them
+on their own. Do not fake a tool to hold a feature entry. If you change the palette's
+behaviour, update its entries there **and** `DOCUMENTATION/COMMAND_PALETTE_TESTING.md`
+(the long manual pass the checklist entries point at rather than copy).
+
+## The Debug panel's source filter (§3, L.18)
+
+Menu → Debug lists every tool read-only. `tools.tools_list_payload()` (`jarvis
+tools-list`, GET `/api/tools`) gives each item two source fields, kept apart on
+purpose:
+
+- `source` — the four coarse **origin buckets**: `builtin`, `auto` (shipped
+  `jarvis/actions/*.py`), `user` (`~/.jarvis/tools`), `mcp`. The button row
+  `#debug-source-filter`.
+- `source_detail` — `{kind, module, label, path?, server?}`: the module / file /
+  MCP server the tool is actually **loaded from** (`screenshot_tools.py`,
+  `actions/notify_owner.py`, `~/.jarvis/tools/mine.py`, `MCP: github`). The second
+  filter row `#debug-module-filter` (chips, or a select past 8 sources) is built
+  from its `label` and AND-combines with the bucket and the search box. It is
+  **derived** by `_tool_source_detail()` from where discovery found the tool —
+  never declared by a tool, so there is nothing for a tool author to add.
+
+A source is not a **group** (`tool_registry.TOOL_GROUPS`: how the router bundles
+tools — two sources can share a group), not a name prefix, not a Test Checklist
+section, not a safety flag. Do not derive one from another. An older CLI that does
+not send `source_detail` just gets no second row. `tests/test_debug_source_detail.py`
+pins the contract.
 
 ## The `/` command palette - adding a CLI subcommand or a Menu panel means updating its registry
 

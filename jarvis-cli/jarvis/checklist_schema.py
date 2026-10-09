@@ -50,6 +50,18 @@ working tool over a typo in its test notes would be the wrong trade — but it
 is REPORTED (discovery log, and the Tool Manager editor's Validate button) so it
 doesn't fail quietly.
 
+FEATURE ENTRIES (master plan L.19)
+----------------------------------
+Not everything worth a manual pass is a tool: the `/` command palette is a piece
+of UI. The shipped data file therefore has a second top-level object,
+"features", next to "tools" -- same entry shape, validated by the same function
+(`allow_do=True`), with two differences: its entries sit in a group whose
+"kind" is "feature", and its steps may be {"do": "...", "expect": "..."} -- a
+manual instruction to carry out in the page ("type / in an empty composer") --
+in addition to ask / run. `do` is for features only; a tool's own TEST_CHECKLIST
+(extract_supplied below) never allows it. Features are not tools: the
+tool-coverage tests ignore them, and nothing fakes a tool to hold one.
+
 Pure functions, no I/O, no imports from the rest of jarvis: safe to import from
 tool_loader at discovery time (see actions/_template.py > SAFE IMPORTS).
 """
@@ -58,6 +70,7 @@ import json
 
 ENTRY_KEYS = {"group", "does", "steps", "needs", "os", "care", "watch"}
 STEP_KEYS = {"ask", "run", "expect"}
+FEATURE_STEP_KEYS = STEP_KEYS | {"do"}      # L.19: features only
 GROUP_META_KEYS = {"label", "blurb"}
 
 # Generous ceilings — the shipped catalogue's longest fields are a fraction of
@@ -78,11 +91,15 @@ def _text(v, limit):
     return isinstance(v, str) and bool(v.strip()) and len(v) <= limit
 
 
-def validate_entry(name, entry):
+def validate_entry(name, entry, allow_do=False):
     """Problems with one entry, as a list of human-readable strings (empty =
     fine). Does NOT judge `group` — whether a group id exists is a question
     for the caller (the shipped file checks its own "groups" list; a module's
-    group is its TOOL_GROUP by construction)."""
+    group is its TOOL_GROUP by construction).
+
+    allow_do=True (L.19, the shipped file's "features" only) additionally
+    accepts {"do": "<manual instruction>", "expect": ...} steps; a step then
+    needs exactly one of ask / run / do."""
     problems = []
     if not isinstance(entry, dict):
         return [f"{name}: entry must be an object, not {type(entry).__name__}"]
@@ -106,15 +123,22 @@ def validate_entry(name, entry):
         if not isinstance(s, dict):
             problems.append(f"{name} step {i}: must be an object")
             continue
-        bad = sorted(set(s) - STEP_KEYS)
+        allowed_keys = FEATURE_STEP_KEYS if allow_do else STEP_KEYS
+        bad = sorted(set(s) - allowed_keys)
         if bad:
-            problems.append(f"{name} step {i}: unknown key(s) {bad} (allowed: ask, run, expect)")
+            problems.append(f"{name} step {i}: unknown key(s) {bad} (allowed: {', '.join(sorted(allowed_keys))})")
         has_ask = isinstance(s.get("ask"), str) and bool(s["ask"].strip())
         has_run = isinstance(s.get("run"), dict)
-        if has_ask == has_run:
-            problems.append(f"{name} step {i}: needs exactly one of 'ask' (text) or 'run' (object)")
+        has_do = allow_do and isinstance(s.get("do"), str) and bool(s["do"].strip())
+        if (has_ask + has_run + has_do) != 1:
+            problems.append(
+                f"{name} step {i}: needs exactly one of 'ask' (text), 'run' (object)"
+                + (" or 'do' (text)" if allow_do else "")
+            )
         if has_ask and len(s["ask"]) > MAX_STEP_TEXT:
             problems.append(f"{name} step {i}: 'ask' is longer than {MAX_STEP_TEXT} characters")
+        if has_do and len(s["do"]) > MAX_STEP_TEXT:
+            problems.append(f"{name} step {i}: 'do' is longer than {MAX_STEP_TEXT} characters")
         if has_run:
             try:
                 run_json = json.dumps(s["run"], sort_keys=True)
@@ -126,8 +150,8 @@ def validate_entry(name, entry):
         if not _text(s.get("expect"), MAX_STEP_TEXT):
             problems.append(f"{name} step {i}: missing 'expect' (a non-empty string of at most {MAX_STEP_TEXT} characters)")
         # Ticks are keyed by the step's text, so two identical steps would tick together.
-        if has_ask != has_run:
-            key = s["ask"] if has_ask else json.dumps(s.get("run"), sort_keys=True, default=str)
+        if (has_ask + has_run + has_do) == 1:
+            key = s["ask"] if has_ask else s["do"] if has_do else json.dumps(s.get("run"), sort_keys=True, default=str)
             if key in seen:
                 problems.append(f"{name}: duplicate step {key!r}")
             seen.add(key)

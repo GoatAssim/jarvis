@@ -104,12 +104,13 @@
   }
   function stepText(step) {
     if (typeof step.ask === "string") return step.ask;
+    if (typeof step.do === "string") return step.do; // L.19: a manual instruction (features only)
     return JSON.stringify(step.run === undefined ? {} : step.run);
   }
   // Keyed by the step's own text, not its position: reordering steps keeps
   // ticks, and editing a step's text clears its tick — a changed test has not
   // been run yet.
-  const stepKey = (step) => (typeof step.ask === "string" ? "a" : "r") + hash(stepText(step));
+  const stepKey = (step) => (typeof step.ask === "string" ? "a" : typeof step.do === "string" ? "d" : "r") + hash(stepText(step));
 
   function fmtWhen(ts) {
     if (!ts) return "never";
@@ -199,6 +200,7 @@
     built: false,
     live: null,          // Map name -> live tool, once /api/tools answered
     supplied: new Set(), // tool names whose entry came from their own module
+    features: new Set(), // L.19: shipped "features" entries (not tools) folded into the rows
     liveBusy: false,
     liveError: "",
     rows: [],
@@ -250,9 +252,23 @@
   //   data  shipped + supplied entries; shipped groups keep their order and
   //         labels, new groups are appended in the order the CLI listed them
   //   from  Set of tool names whose entry was supplied
+  //
+  // L.19: the shipped file's top-level "features" (things worth a manual pass that
+  // are not tools -- the "/" command palette) are folded into the same rows, under
+  // their own group, and reported back as `features` so the panel can mark them
+  // and skip the "Not in CLI" check. A feature id that equals a real tool name
+  // never replaces the tool's entry.
   function mergeCatalogue(shipped, liveList) {
     const data = { ...shipped, groups: (shipped.groups || []).slice(), tools: { ...(shipped.tools || {}) } };
     const from = new Set();
+    const features = new Set();
+    if (isObj(shipped.features)) {
+      Object.entries(shipped.features).forEach(([name, entry]) => {
+        if (data.tools[name]) return;
+        data.tools[name] = entry;
+        features.add(name);
+      });
+    }
     const known = new Set(data.groups.map((g) => g.id));
     (Array.isArray(liveList) ? liveList : []).forEach((t) => {
       if (!isObj(t) || typeof t.name !== "string" || !t.name || t.checklist === undefined) return;
@@ -267,7 +283,18 @@
         known.add(entry.group);
       }
     });
-    return { data, from };
+    return { data, from, features };
+  }
+
+  // No live read (CLI offline, or a merge that threw): the shipped file alone --
+  // but its features still show, they never needed the CLI.
+  function useShippedOnly() {
+    state.supplied = new Set();
+    state.features = new Set();
+    try {
+      if (SHIPPED && SHIPPED.tools) { const m = mergeCatalogue(SHIPPED, []); DATA = m.data; state.features = m.features; return; }
+    } catch (_) { /* fall through to the bare shipped data */ }
+    DATA = SHIPPED;
   }
 
   function buildRows() {
@@ -277,8 +304,9 @@
     Object.entries((DATA && DATA.tools) || {}).forEach(([name, def]) => {
       rows.push({
         name, def, idx: idx++, group: def.group, listed: true, supplied: state.supplied.has(name),
+        feature: state.features.has(name),
         live: state.live ? state.live.get(name) || null : null,
-        stale: !!state.live && state.live.size > 0 && !state.live.has(name),
+        stale: !state.features.has(name) && !!state.live && state.live.size > 0 && !state.live.has(name),
       });
     });
     rows.sort((a, b) => ((order.has(a.group) ? order.get(a.group) : 999) - (order.has(b.group) ? order.get(b.group) : 999)) || a.idx - b.idx);
@@ -439,6 +467,7 @@
       el("div", { class: "tc-card__meta" }, [
         el("span", { class: "tc-card__steps" + (prog.total && prog.done === prog.total ? " is-done" : "") },
           `${prog.done}/${prog.total} steps`),
+        row.feature ? el("span", { class: "tc-tag", title: "A feature of the console, not a tool" }, "Feature") : null,
         row.def.os ? el("span", { class: "tc-tag" }, "Windows") : null,
         row.def.care ? el("span", { class: "tc-tag tc-tag--warn", title: row.def.care }, "Careful") : null,
         live && live.confirm_required ? el("span", { class: "tc-tag tc-tag--info" }, "Confirms") : null,
@@ -530,6 +559,7 @@
   function renderStep(row, step, i) {
     const key = stepKey(step);
     const isAsk = typeof step.ask === "string";
+    const isDo = typeof step.do === "string"; // L.19: a manual instruction, not a prompt or a Debug run
     const text = stepText(step);
     const ticked = !!((rec(row.name) || {}).c || {})[key];
     const box = el("button", {
@@ -549,17 +579,19 @@
       box,
       el("div", null, [
         el("div", { class: "tc-step__head" }, [
-          el("span", { class: "tc-step__kind" + (isAsk ? "" : " tc-step__kind--run") }, isAsk ? "ASK" : "RUN"),
-          el("span", { class: "tc-step__where" }, isAsk ? `Step ${i + 1} \u2014 type this in Ask Jarvis` : `Step ${i + 1} \u2014 Debug \u2192 fill in these arguments \u2192 RUN (skips the model)`),
+          el("span", { class: "tc-step__kind" + (isAsk || isDo ? "" : " tc-step__kind--run") }, isDo ? "DO" : isAsk ? "ASK" : "RUN"),
+          el("span", { class: "tc-step__where" }, isDo ? `Step ${i + 1} \u2014 do this by hand in the console` : isAsk ? `Step ${i + 1} \u2014 type this in Ask Jarvis` : `Step ${i + 1} \u2014 Debug \u2192 fill in these arguments \u2192 RUN (skips the model)`),
         ]),
-        el("pre", { class: "tc-step__code" }, isAsk ? withPlaceholders(text) : withPlaceholders(text === "{}" ? "{}   (no arguments)" : text)),
+        el("pre", { class: "tc-step__code" }, isAsk || isDo ? withPlaceholders(text) : withPlaceholders(text === "{}" ? "{}   (no arguments)" : text)),
         step.expect ? el("div", { class: "tc-step__expect" }, [el("b", null, "Pass"), step.expect]) : null,
         el("div", { class: "tc-step__actions" }, [
           el("button", { class: "btn btn--ghost btn--sm", type: "button",
-            onclick: async () => toast((await copyText(text)) ? (isAsk ? "Prompt copied" : "Arguments copied") : "Couldn't copy", "info") }, isAsk ? "Copy prompt" : "Copy args"),
-          isAsk
-            ? el("button", { class: "btn btn--outline btn--sm", type: "button", onclick: () => sendToAsk(text) }, "Send to Ask")
-            : el("button", { class: "btn btn--outline btn--sm", type: "button", onclick: () => openInDebug(row.name) }, "Open in Debug"),
+            onclick: async () => toast((await copyText(text)) ? (isDo ? "Instruction copied" : isAsk ? "Prompt copied" : "Arguments copied") : "Couldn't copy", "info") }, isDo ? "Copy" : isAsk ? "Copy prompt" : "Copy args"),
+          isDo
+            ? null
+            : isAsk
+              ? el("button", { class: "btn btn--outline btn--sm", type: "button", onclick: () => sendToAsk(text) }, "Send to Ask")
+              : el("button", { class: "btn btn--outline btn--sm", type: "button", onclick: () => openInDebug(row.name) }, "Open in Debug"),
         ]),
       ]),
     ]);
@@ -622,6 +654,7 @@
     const badges = [
       el("span", { class: "tc-tag" }, groupLabel(row.group)),
       def.os ? el("span", { class: "tc-tag" }, "Windows only") : null,
+      row.feature ? el("span", { class: "tc-tag", title: "A feature of the console (not a tool): its steps are things to do by hand in the page" }, "Feature") : null,
       row.supplied ? el("span", { class: "tc-tag", title: "This entry is defined in the tool's own file (TEST_CHECKLIST), not in test-checklist-data.js" }, "From the tool's own file") : null,
       live && live.confirm_required ? el("span", { class: "tc-tag tc-tag--info", title: "Pauses for Yes/No before running (toggle in Debug)" }, "Confirms first") : null,
       live && live.ai_review ? el("span", { class: "tc-tag tc-tag--info", title: "A second AI reviews the call for risk" }, "AI review") : null,
@@ -1054,14 +1087,13 @@
       if (!Array.isArray(body)) throw new Error("unexpected response");
       state.live = new Map(body.filter((t) => t && t.name).map((t) => [t.name, t]));
       if (SHIPPED && SHIPPED.tools) {
-        try { const m = mergeCatalogue(SHIPPED, body); DATA = m.data; state.supplied = m.from; }
-        catch (_) { DATA = SHIPPED; state.supplied = new Set(); }
+        try { const m = mergeCatalogue(SHIPPED, body); DATA = m.data; state.supplied = m.from; state.features = m.features; }
+        catch (_) { useShippedOnly(); }
       }
     } catch (e) {
       state.live = null;
       // No live read, no supplied entries: fall back to the shipped file alone.
-      DATA = SHIPPED;
-      state.supplied = new Set();
+      useShippedOnly();
       state.liveError = String(e && e.message ? e.message : e).slice(0, 80);
     } finally {
       state.liveBusy = false;
@@ -1164,5 +1196,6 @@
 
   // catalogue(): the merged view the panel renders (shipped + supplied).
   // _mergeCatalogue is exposed for tests/test_checklist_supplied.py only.
+  useShippedOnly(); // L.19: features show from the first open, before any live read
   global.JarvisTestChecklist = { open, close, catalogue: () => DATA, _mergeCatalogue: mergeCatalogue };
 })(window);

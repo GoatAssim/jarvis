@@ -256,6 +256,12 @@ web/
     public/logsearch.js/.css     Menu -> Log Search (Part H.1 rework: live
                                  search, query highlighting, results/detail
                                  two-pane layout, jump-to-Ask/Daemons/Schedules)
+    public/log-conversation.js/.css  Menu -> Logs, "Conversation" view (L.2):
+                                 build() turns flat log lines into turns of
+                                 user bubble / assistant bubbles / tool cards /
+                                 timeline rows (pure, vm-tested); render()
+                                 draws them with the Ask panel's bubble classes.
+                                 Raw JSON view still shows every line
     public/schedules.js/.css     Menu -> Scheduled (Part H.2 rework: full
                                  create form onto remind_me/notify_me/
                                  schedule_task/schedule_watch via /api/tools/run,
@@ -649,6 +655,7 @@ silently never runs.
 | `test_scheduler.py` / `test_timespec.py` | jobs and time parsing |
 | `test_h3_creation_confirmation.py` | H.3: `remind_me` / `schedule_task` / `schedule_watch` / timed `notify_me` send one `scheduled`-kind confirmation (not for immediate `notify_me`; `confirm: false` suppresses; level from `levels.scheduled`, not the job's own) |
 | `test_l16_caps_and_budget.py` / `test_l16_scheduler_budget.py` / `test_l16_replay.py` | L.16 items 7, 8, 10: `list_windows` cap, per-ask token ledger and budget, per-job limit + "over budget" status, and the incident `1a99e1e3f0d3af0e` replayed through the real `ask()` (fixture: `tests/fixtures/1a99e1e3f0d3af0e.jsonl`) |
+| `test_l24_fixes.py` | L.24 T2/T3/T4/T7: the catalog tier's net-saving gate, `get_tool_schema` list form and exact promotion (`OrderedSchemaSet.replace`), Gemini dict-result compaction, the interactive sensing-failure hint, and the failover note's "do not run them again" line |
 | `test_notification_inbox.py` | L.30: owner read/acknowledge state vs delivery (`seen_by`), mark read/all, dismiss, clear read, `summary()`, history filters, state-aware pruning (read first, unacknowledged last), the inbox lock, the `notify-*` verbs |
 | `test_mcp_edit.py` | L.31: editing `mcp_config.json` (`save_server` / `set_server_flag` / `remove_server`), validation, secrets kept on edit, a malformed config is never overwritten, the extra `status()` fields and states, the `mcp-edit` CLI verb, and that no model tool can reach the edit functions |
 | `verify_mcp_servers.js` (`node`) | L.31: `mcp-servers.js` pure helpers (state labels, search by tool name, filter chips, `buildSpec` and what a blank secret means) |

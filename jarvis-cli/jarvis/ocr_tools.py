@@ -206,6 +206,15 @@ def _with_vision_failure(ocr_error, vision_error):
     out["error"] = "%s Vision fallback also unavailable: %s." % (out["error"], vision_error)
     out["can_see_screen"] = False
     out["retryable"] = False
+    # L.24 T3. The unattended circuit breaker ends the run on this flag, but an
+    # interactive ask keeps going -- and, with no way to read the screen, the
+    # model spent its next 2-3 rounds on take_screenshot / list_windows
+    # "to look" (both logged incidents). Say plainly what will not work.
+    out["hint"] = (
+        "The screen cannot be read here, and taking a screenshot or listing "
+        "windows will not change that. Do not use them as a substitute: tell "
+        "the user what is missing (the install note above) and stop."
+    )
     return out
 
 

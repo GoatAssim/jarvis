@@ -916,6 +916,16 @@ TOOL_RESULT_SPECS = {}
 #    section) to a tool that supplied them; the panel merges those into its
 #    shipped catalogue, one tool at a time, so a module split across sections
 #    just works — no new route, no storage.
+#
+#    YOUR TOOL'S "SOURCE" IS DERIVED, NEVER DECLARED (L.18)
+#    ------------------------------------------------------
+#    The Debug panel can filter tools by the file / MCP server they are loaded
+#    from. That label (`source_detail` in the same payload) comes from where
+#    discovery found this file — `actions/<this file>` when it ships with
+#    Jarvis, `~/.jarvis/tools/<this file>` when you wrote it — so there is
+#    nothing to put in your module for it. It is separate from TOOL_GROUP
+#    (how the router bundles tools) and from the checklist section above:
+#    two files can share a TOOL_GROUP, and each still shows as its own source.
 # ---------------------------------------------------------------------------
 
 TEST_CHECKLIST = {
