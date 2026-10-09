@@ -166,6 +166,23 @@
   color: var(--text-dimmer); border: 1px solid var(--border); border-radius: 2px; padding: 0 5px; line-height: 15px;
   white-space: nowrap;
 }
+/* L.8 - slots whose box never changes. A slot is always in the layout; "off"
+   only hides it, so flipping the switch behind it can't reflow anything. */
+.dmn-slot.is-off{ visibility: hidden; pointer-events: none; }
+button.dmn-tag--btn{ background: none; cursor: pointer; font: inherit; font-family: var(--font-mono); font-size: 9.5px; letter-spacing: .05em; text-transform: uppercase; line-height: 15px; }
+button.dmn-tag--btn:hover{ border-color: var(--accent-secondary); }
+button.dmn-tag--btn:focus-visible{ outline: 1px solid var(--accent); outline-offset: 1px; }
+/* the two fixed-size marks on a card (Disabled / Autostart): both slots are
+   always rendered, so the card is the same size whichever are on */
+.dmn-card__marks{ display: inline-flex; gap: 3px; flex-shrink: 0; align-self: center; }
+.dmn-mark{
+  box-sizing: border-box; width: 14px; height: 14px; line-height: 12px; text-align: center;
+  font-family: var(--font-mono); font-size: 9px; border: 1px solid var(--border); border-radius: 50%;
+  color: var(--text-dimmer); visibility: hidden;
+}
+.dmn-mark.is-on{ visibility: visible; }
+.dmn-mark--off.is-on{ color: var(--accent-secondary); border-color: rgba(var(--accent-secondary-rgb), .45); }
+.dmn-card.is-disabled .dmn-card__name, .dmn-card.is-disabled .dmn-card__cmd{ opacity: .6; }
 .dmn-tag--warn{ color: var(--accent-secondary); border-color: rgba(var(--accent-secondary-rgb), .35); }
 .dmn-tag--bad{ color: var(--red); border-color: rgba(255,92,108,.4); }
 .dmn-tag--info{ color: var(--accent-soft); border-color: var(--accent-dim); }

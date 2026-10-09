@@ -1211,19 +1211,38 @@
       cs.map((c) => el("span", { class: "dmn-tag dmn-tag--cat", title: `Category: ${c}` }, c)));
   }
 
+  // L.8: "Disabled" and "Autostart" used to be tags in the card's meta row,
+  // which exists only when it has something to show. Flipping either switch
+  // therefore added a whole row to the card and pushed every card below it
+  // down. They are now two fixed-size marks in the card's first row: both
+  // slots are always rendered (hidden when off), so the card is the same size
+  // in every state.
+  function cardMarks(entry) {
+    const off = entry.enabled === false;
+    const auto = Boolean(entry.autostart);
+    const mark = (on, cls, glyph, title) => el("span", {
+      class: "dmn-mark " + cls + (on ? " is-on" : ""),
+      title: on ? title : null,
+      "aria-label": on ? title : null,
+      "aria-hidden": on ? null : "true",
+    }, glyph);
+    return el("span", { class: "dmn-card__marks" }, [
+      mark(off, "dmn-mark--off", "\u2298", "Disabled \u2014 it can\u2019t be started until it\u2019s enabled."),
+      mark(auto, "dmn-mark--auto", "A", "Marked to start automatically."),
+    ]);
+  }
+
   function renderCard(entry) {
     const b = bucketOf(entry);
     const active = state.selected === entry.id;
     const next = entry.next_start ? describeNextStart(entry.next_start, Date.now()) : null;
     const tags = [
       crashBadge(entry),
-      entry.enabled === false ? el("span", { class: "dmn-tag" }, "Disabled") : null,
       entry.adopted ? el("span", { class: "dmn-tag dmn-tag--info", title: "Started outside Jarvis; Jarvis can see it but didn't launch it." }, "Outside Jarvis") : null,
-      entry.autostart ? el("span", { class: "dmn-tag", title: "Marked to start automatically." }, "Autostart") : null,
       next && b !== "running" ? el("span", { class: "dmn-tag dmn-tag--info", title: `Scheduled start ${next.label}` }, `\u25D4 ${next.label.slice(5)}`) : null,
     ].filter(Boolean);
     return el("button", {
-      class: "dmn-card" + (active ? " is-active" : ""), type: "button",
+      class: "dmn-card" + (active ? " is-active" : "") + (entry.enabled === false ? " is-disabled" : ""), type: "button",
       "data-state": b, "data-id": entry.id,
       "aria-current": active ? "true" : null,
       title: entry.description || entry.command || entry.id,
@@ -1233,6 +1252,7 @@
         el("span", { class: "dmn-dot", "aria-hidden": "true" }),
         el("span", { class: "dmn-card__name" }, displayName(entry)),
         el("span", { class: "dmn-card__state" }, [STATE[b].label, uptimeNode(entry) ? " \u00B7 " : null, uptimeNode(entry)]),
+        cardMarks(entry),
         favStar(entry),
       ]),
       el("div", { class: "dmn-card__cmd" }, entry.command || "(no command)"),
@@ -1619,6 +1639,32 @@
     return el("span", { class: "dmn-tag" + (cls ? " dmn-tag--" + cls : ""), title: title || null }, text);
   }
 
+  // L.8. Both of these used to appear and disappear with their switch - the
+  // Disabled one as a full-width alert block above the tabs - which changed
+  // the summary's height (measured: +98px in a 1400x900 window) and moved the
+  // tabs, the Quick-settings row the click had just landed on, and everything
+  // below them. Now each is a fixed slot: same box on or off, only visibility
+  // changes. The "Disabled" slot is also the Enable button, so the one thing
+  // the old alert offered is still one click away.
+  function disabledSlot(entry) {
+    const off = entry.enabled === false;
+    const b = el("button", {
+      class: "dmn-tag dmn-tag--warn dmn-tag--btn dmn-slot" + (off ? "" : " is-off"), type: "button",
+      "data-slot": "disabled", tabindex: off ? null : "-1", disabled: off ? null : true, "aria-hidden": off ? null : "true",
+      title: "Disabled \u2014 it can\u2019t be started, by hand, by a schedule or by autostart, until it\u2019s enabled. Click to enable.",
+      onclick: () => quickPatch(entry.id, { enabled: true }, "Enabled"),
+    }, "Disabled \u00B7 Enable");
+    return b;
+  }
+
+  function autostartSlot(entry) {
+    const on = Boolean(entry.autostart);
+    return el("span", {
+      class: "dmn-tag dmn-slot" + (on ? "" : " is-off"), "data-slot": "autostart",
+      "aria-hidden": on ? null : "true", title: on ? "Marked to start automatically." : null,
+    }, "Autostart");
+  }
+
   function renderSummary(entry) {
     const sh = state.shell;
     const e = withDefaults(entry);
@@ -1643,12 +1689,15 @@
         usageNode(entry, "hero"),
         entry.description ? el("div", { class: "dmn-does" }, entry.description) : null,
         el("div", { class: "dmn-badges" }, [
-          e.enabled ? null : badge("Disabled", "warn"),
           entry.adopted ? badge("Started outside Jarvis", "info", "Jarvis can see this process but didn't launch it, so its output isn't captured here.") : null,
-          entry.autostart ? badge("Autostart", null, "Marked to start automatically.") : null,
           entry.supports_stdin ? badge("Reads stdin") : null,
           entry.shell ? badge("Via shell") : null,
           badge(restartSummary(entry), e.restart === "never" ? null : "info"),
+          // The two switch-driven badges come last and are always in the
+          // row: hidden, they still take their space, so flipping a switch
+          // can't reflow the row (or the summary, tabs and pane under it).
+          disabledSlot(entry),
+          autostartSlot(entry),
         ]),
       ]),
     ]));
@@ -1676,11 +1725,8 @@
     attentionOf(entry).forEach((a) => {
       out.push(alertNode(a.level, a.label, a.note, a.kind === "crashed" ? [errBtn] : null));
     });
-    if (entry.enabled === false) {
-      out.push(alertNode("warn", "Disabled",
-        "It can\u2019t be started \u2014 by hand, by a schedule or by autostart \u2014 until it\u2019s enabled.",
-        [el("button", { class: "btn btn--ghost btn--sm", type: "button", onclick: () => quickPatch(entry.id, { enabled: true }, "Enabled") }, "Enable")]));
-    }
+    // (No "Disabled" alert here any more: it grew the summary when the Enabled
+    // switch flipped - L.8. The summary's "Disabled" slot carries it.)
     if (entry.next_start) {
       const nx = describeNextStart(entry.next_start, Date.now());
       out.push(alertNode("info", "Scheduled start",
@@ -2093,6 +2139,10 @@
     ].filter(Boolean)));
 
     // quick settings
+    // Rebuilt on every change of either switch, i.e. under the user's hand: keep
+    // focus on the switch they were on instead of dropping it to <body>.
+    const focusedSwitch = det.quick.contains(document.activeElement)
+      ? [...det.quick.querySelectorAll("input")].indexOf(document.activeElement) : -1;
     det.quick.textContent = "";
     det.quick.appendChild(el("h4", { class: "dmn-section-title" }, "Quick settings"));
     det.quick.appendChild(el("div", { class: "dmn-switches" }, [
@@ -2100,6 +2150,10 @@
       switchNode(Boolean(entry.autostart), "Autostart", "Starts it each time Jarvis starts (the web console or the scheduler coming up). One you stopped by hand stays stopped until then.", (on, input) => quickPatch(entry.id, { autostart: on }, on ? "Autostart on" : "Autostart off", input)),
     ]));
     det.quick.appendChild(el("div", { class: "dmn-note" }, "For anything else \u2014 command, restart policy, environment \u2014 use Edit. Changes apply the next time it starts."));
+    if (focusedSwitch >= 0) {
+      const again = det.quick.querySelectorAll("input")[focusedSwitch];
+      if (again) again.focus({ preventScroll: true });
+    }
 
     // schedule note
     det.whenClear.hidden = !entry.next_start;
