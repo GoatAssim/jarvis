@@ -1711,12 +1711,15 @@
     debugLoaded: false,
     debugSelected: null,     // name of the currently selected tool
     debugSearch: "",
-    // §3: "" = All. One of "builtin" | "auto" | "user" otherwise, matching
-    // the `source` field tools_list_payload() now returns per tool. There
-    // is deliberately no "mcp" option yet — MCP-bridged tools aren't part
-    // of this catalog at all (see tools.py's _tool_source docstring), so
-    // offering that bucket here would just always show empty.
+    // §3: "" = All. One of "builtin" | "auto" | "user" | "mcp" otherwise,
+    // matching the `source` field tools_list_payload() returns per tool.
     debugSourceFilter: "",
+    // L.18: "" = every source. Otherwise one `source_detail.label` — the module,
+    // file or MCP server a tool is loaded from ("screenshot_tools.py",
+    // "actions/notify_owner.py", "MCP: github"). A second level under the
+    // four buckets above, AND-combined with them and with the search box.
+    // Remembered per browser; see debugLoadModuleFilter().
+    debugModuleFilter: "",
     // Part E.5/K.2.5.3 — Live Feed console replay filter. hiddenKinds is
     // which of console_store.KINDS are unchecked (empty = show every kind,
     // the documented default); the rest are the other independent filter
@@ -1781,7 +1784,10 @@
     logsSearch: "",
     logsSelected: null,       // conv id currently shown in the middle pane
     logsEntries: [],          // entries for logsSelected, oldest first
-    logsViewMode: "organized", // "organized" | "raw"
+    logsViewMode: "conversation", // "conversation" | "raw" (L.2; "organized" was removed)
+    logsHits: null,           // { convId, keys:Set("ts|direction") } from the last deep search (L.2.7)
+    logsFocus: null,          // { ts, direction } to scroll to once the entries load (L.2.7)
+    logsShowAll: false,       // Conversation view: un-fold events the active filter hid
 
     // Voice (jarvis-enhancement-plan.md §3.5/§3a) — the browser owns the
     // mic/speaker; these just track the one recording (if any) and the
@@ -6080,6 +6086,7 @@
   const debugResponse = qs("#debug-response");
   const debugToolList = qs("#debug-tool-list");
   const debugToolCount = qs("#debug-tool-count");
+  const debugModuleRow = qs("#debug-module-filter"); // L.18, see renderDebugModuleFilter()
   const btnDebugRun = qs("#btn-debug-run");
 
   // ---- Debug's own capacity switch ---------------------------------------
@@ -6119,11 +6126,68 @@
     return state.debugTools.find((t) => t.name === name) || null;
   }
 
+  // ---- L.18: the module / file / MCP server a tool is loaded from ----------
+  // `source_detail` is additive on /api/tools; an older CLI simply does not send
+  // it, in which case there is no second filter row and nothing is hidden.
+  const DEBUG_MODULE_KEY = "jarvis.debug.moduleFilter.v1";
+  const DEBUG_MODULE_CHIP_MAX = 8; // more distinct sources than this -> a select
+
+  function debugModuleLabel(tool) {
+    const d = tool && tool.source_detail;
+    return d && typeof d.label === "string" ? d.label : "";
+  }
+
+  function debugLoadModuleFilter() {
+    try {
+      const v = localStorage.getItem(DEBUG_MODULE_KEY);
+      return typeof v === "string" ? v : "";
+    } catch (_) { return ""; }
+  }
+
+  function debugSaveModuleFilter() {
+    try {
+      if (state.debugModuleFilter) localStorage.setItem(DEBUG_MODULE_KEY, state.debugModuleFilter);
+      else localStorage.removeItem(DEBUG_MODULE_KEY);
+    } catch (_) { /* best-effort, like the skin prefs */ }
+  }
+
+  // Distinct source labels, with counts, among the tools the four-bucket row
+  // currently lets through. Deliberately NOT narrowed by the search box, so the
+  // options stay put while you type. Sorted by label.
+  function debugModuleOptions() {
+    const src = state.debugSourceFilter;
+    const counts = new Map();
+    let total = 0;
+    for (const t of state.debugTools) {
+      if (src && (t.source || "builtin") !== src) continue;
+      const label = debugModuleLabel(t);
+      if (!label) continue;
+      counts.set(label, (counts.get(label) || 0) + 1);
+      total++;
+    }
+    const options = Array.from(counts, ([label, count]) => ({ label, count }))
+      .sort((a, b) => a.label.localeCompare(b.label));
+    return { options, total };
+  }
+
+  // A remembered or previously chosen source that the current bucket (or the
+  // current catalogue) no longer contains would silently empty the list. Drop it.
+  function debugReconcileModuleFilter() {
+    if (!state.debugModuleFilter) return;
+    const { options } = debugModuleOptions();
+    if (!options.some((o) => o.label === state.debugModuleFilter)) {
+      state.debugModuleFilter = "";
+      debugSaveModuleFilter();
+    }
+  }
+
   function debugFilteredTools() {
     const q = state.debugSearch.trim().toLowerCase();
     const src = state.debugSourceFilter;
+    const mod = state.debugModuleFilter;
     return state.debugTools.filter((t) => {
       if (src && (t.source || "builtin") !== src) return false;
+      if (mod && debugModuleLabel(t) !== mod) return false;
       if (!q) return true;
       return t.name.toLowerCase().includes(q) || (t.description || "").toLowerCase().includes(q);
     });
@@ -6541,17 +6605,21 @@
   // ---- RIGHT pane: tool list -------------------------------------------------
 
   function renderDebugToolList() {
+    debugReconcileModuleFilter();
+    renderDebugModuleFilter();
     const tools = debugFilteredTools();
-    // Count reflects the active source filter (not just search), so "12"
+    // Count reflects the active source filters (not just search), so "12"
     // next to "Built-in" selected means 12 built-in tools, not the full 170.
-    debugToolCount.textContent = state.debugSourceFilter
+    debugToolCount.textContent = (state.debugSourceFilter || state.debugModuleFilter)
       ? `${tools.length} / ${state.debugTools.length}`
       : `${state.debugTools.length}`;
     debugToolList.innerHTML = "";
     if (!tools.length) {
       const reason = state.debugSearch.trim()
         ? "No tools match your search."
-        : (state.debugSourceFilter ? "No tools in this source." : "No tools reported by jarvis.");
+        : (state.debugModuleFilter
+          ? "No tools from this source."
+          : (state.debugSourceFilter ? "No tools in this source." : "No tools reported by jarvis."));
       debugToolList.appendChild(el("div", { class: "debug-empty" }, reason));
       return;
     }
@@ -6565,6 +6633,9 @@
           el("span", { class: `debug-tool-card__source debug-tool-card__source--${tool.source || "builtin"}` },
             debugSourceLabel(tool.source)),
         ]),
+        debugModuleLabel(tool)
+          ? el("div", { class: "debug-tool-card__module", title: "Where this tool is loaded from" }, debugModuleLabel(tool))
+          : null,
         tool.description ? el("div", { class: "debug-tool-card__desc" }, tool.description) : null,
       ]);
       debugToolList.appendChild(card);
@@ -6594,6 +6665,42 @@
     qsa(".debug-toggle-btn", qs("#debug-source-filter")).forEach((b) => b.classList.toggle("is-active", b === btn));
     renderDebugToolList();
   });
+
+  // L.18 — second filter row: one chip per source (a select once there are more
+  // than DEBUG_MODULE_CHIP_MAX), each with its tool count. Built from the loaded
+  // catalogue, hidden when no tool reports a source_detail.
+  function debugSetModuleFilter(label) {
+    state.debugModuleFilter = label || "";
+    debugSaveModuleFilter();
+    renderDebugToolList();
+  }
+
+  function renderDebugModuleFilter() {
+    if (!debugModuleRow) return;
+    const { options, total } = debugModuleOptions();
+    debugModuleRow.textContent = "";
+    if (!options.length) { debugModuleRow.hidden = true; return; }
+    debugModuleRow.hidden = false;
+    const current = state.debugModuleFilter;
+    if (options.length > DEBUG_MODULE_CHIP_MAX) {
+      const select = el("select", { class: "debug-module-select", "aria-label": "Filter tools by module, file or MCP server" }, [
+        el("option", { value: "" }, `All sources (${total})`),
+        ...options.map((o) => el("option", { value: o.label }, `${o.label} (${o.count})`)),
+      ]);
+      select.value = current;
+      select.addEventListener("change", () => debugSetModuleFilter(select.value));
+      debugModuleRow.appendChild(select);
+      return;
+    }
+    const chip = (label, text, active) => el("button", {
+      type: "button",
+      class: "debug-toggle-btn" + (active ? " is-active" : ""),
+      "data-module": label,
+      onclick: () => debugSetModuleFilter(label),
+    }, text);
+    debugModuleRow.appendChild(chip("", `All (${total})`, !current));
+    options.forEach((o) => debugModuleRow.appendChild(chip(o.label, `${o.label} (${o.count})`, o.label === current)));
+  }
 
   // ---- Run ------------------------------------------------------------------
 
@@ -6673,6 +6780,7 @@
       const tools = await Api.listTools();
       state.debugTools = Array.isArray(tools) ? tools : [];
       state.debugLoaded = true;
+      state.debugModuleFilter = debugLoadModuleFilter(); // L.18; reconciled on render
       debugStatusLine.textContent = `${state.debugTools.length} tools available`;
     } catch (e) {
       debugStatusLine.textContent = `couldn't load tools: ${e.message}`;
@@ -7051,7 +7159,7 @@
       if (badge) titleRow.push(badge);
       const card = el("div", {
         class: "logs-convo-card" + (c.id === state.logsSelected ? " is-active" : ""),
-        onclick: () => logsSelectConvo(c.id),
+        onclick: () => { state.logsHits = null; state.logsFocus = null; logsSelectConvo(c.id); },
         title: c.origin_detail || "",
       }, [
         el("div", { class: "logs-convo-card__title" }, titleRow),
@@ -7059,33 +7167,6 @@
       ]);
       logsConvoList.appendChild(card);
     }
-  }
-
-  function logEntryDirClass(direction) {
-    return `log-entry__dir--${(direction || "info").replace(/[^a-z_]/g, "")}`;
-  }
-
-  // Token count shown right next to the provider (key x/y) badge — see
-  // logs.py (each entry's `data`). "usage" entries carry real,
-  // provider-reported counts (token_usage.extract_usage); "tool_call" /
-  // "tool_result" entries carry local ~estimates (token_usage.estimate_
-  // tokens_for), since no provider reports per-tool-call token counts on
-  // its own. Other directions (request/response/error/info) don't carry a
-  // count of their own, so no badge is shown for them.
-  function logEntryTokenLabel(entry) {
-    const data = entry.data;
-    if (!data || typeof data !== "object") return null;
-    if (entry.direction === "usage") {
-      const total = (data.input_tokens || 0) + (data.output_tokens || 0);
-      return `${total} tok (in=${data.input_tokens || 0} out=${data.output_tokens || 0})`;
-    }
-    if (entry.direction === "tool_call") {
-      return `~${data.input_tokens || 0} tok in`;
-    }
-    if (entry.direction === "tool_result") {
-      return `~${data.output_tokens || 0} tok out`;
-    }
-    return null;
   }
 
   function renderLogsEntries() {
@@ -7104,22 +7185,44 @@
       logsEntriesEl.appendChild(el("pre", { class: "log-entry__body" }, JSON.stringify(state.logsEntries, null, 2)));
       return;
     }
-    for (const entry of state.logsEntries) {
-      const tokenLabel = logEntryTokenLabel(entry);
-      const head = el("div", { class: "log-entry__head" }, [
-        el("span", { class: "log-entry__ts" }, (entry.ts || "").replace("T", " ").replace("Z", "") || "?"),
-        el("span", { class: `log-entry__dir ${logEntryDirClass(entry.direction)}` }, entry.direction || "?"),
-        entry.provider ? el("span", { class: "log-entry__provider" }, entry.provider) : null,
-        tokenLabel ? el("span", { class: "log-entry__tokens" }, tokenLabel) : null,
-        entry.round != null ? el("span", { class: "log-entry__round" }, `round ${entry.round}`) : null,
-        // L.3: which task/job produced this entry, if any — e.g. "Task:
-        // Morning briefing" instead of only the generic "source: task"
-        // the entry's direction/source already show above.
-        entry.task_label ? el("span", { class: "log-entry__task" }, `Task: ${entry.task_label}`) : null,
-      ]);
-      const body = el("pre", { class: "log-entry__body" }, JSON.stringify(entry.data, null, 2));
-      logsEntriesEl.appendChild(el("div", { class: "log-entry" }, [head, body]));
+    // L.2: the Conversation view (log-conversation.js). Grouping/pairing is
+    // done there; this just feeds it the entries, the active filters and any
+    // one-shot "focus this event" request from a search result.
+    const JLC = window.JarvisLogConversation;
+    if (!JLC) {
+      logsEntriesEl.appendChild(el("div", { class: "debug-empty" },
+        "The Conversation view script didn't load (log-conversation.js). Switch to Raw JSON."));
+      return;
     }
+    try {
+      const timeline = JLC.build(state.logsEntries);
+      JLC.render(logsEntriesEl, timeline, {
+        renderRich,
+        assistantName: currentAssistantName(),
+      }, {
+        filter: logsActiveFilter(),
+        showAll: state.logsShowAll,
+        onShowAll: (v) => { state.logsShowAll = !!v; renderLogsEntries(); },
+        focus: state.logsFocus,
+      });
+      state.logsFocus = null; // one-shot: a later filter change must not re-scroll
+    } catch (err) {
+      logsEntriesEl.innerHTML = "";
+      logsEntriesEl.appendChild(el("div", { class: "debug-empty" },
+        `Couldn't build the Conversation view (${err && err.message}). Raw JSON still shows every line.`));
+    }
+  }
+
+  // What the Logs filter row + the last deep search say right now, in the
+  // shape log-conversation.js filters on. null = nothing active.
+  function logsActiveFilter() {
+    const direction = (qs("#logs-filter-direction")?.value || "").trim();
+    const origin = (qs("#logs-filter-origin")?.value || "").trim();
+    const source = (qs("#logs-filter-source")?.value || "").trim();
+    const hits = state.logsHits && state.logsHits.convId === state.logsSelected ? state.logsHits.keys : null;
+    if (!direction && !origin && !source && !hits) return null;
+    const convo = state.logsConvos.find((c) => c.id === state.logsSelected);
+    return { direction, origin, source, hits, convOrigin: (convo && convo.origin) || "" };
   }
 
   // ---- Logs overlay's Settings pane: per-API-key breakdown -----------------
@@ -7165,7 +7268,7 @@
         // console_dump split (see summarizeLogsByKey's caller) — a raw
         // "here's what this key actually did" trace built straight from
         // the tool_call/tool_result entries ai_providers.py already logs
-        // for every tool run, same shape logEntryTokenLabel already reads
+        // for every tool run, same `input_tokens` / `output_tokens` fields the Conversation view's tool cards show
         // elsewhere in this file.
         const args = (() => { try { return JSON.stringify(data.arguments); } catch { return String(data.arguments); } })();
         g.toolTrace.push(`→ called ${data.name || "?"}(${args ?? ""}) — ~${data.input_tokens || 0} tok in`);
@@ -7290,6 +7393,7 @@
   function logsSelectConvo(id) {
     state.logsSelected = id;
     state.logsEntries = [];
+    state.logsShowAll = false;
     logsEntriesTitle.textContent = "Log";
     updateLogsConvoIdTag(id);
     const convo = state.logsConvos.find((c) => c.id === id);
@@ -7331,6 +7435,7 @@
     }
     list.innerHTML = "";
     const results = data.results || [];
+    state.logsHits = null;
     if (!results.length) {
       list.appendChild(el("div", { class: "debug-empty" },
         `No log entries match "${query}".`));
@@ -7348,7 +7453,17 @@
       head.push(el("span", { class: "logs-result__title" }, r.title || r.conv_id));
       list.appendChild(el("div", {
         class: "logs-convo-card logs-result",
-        onclick: () => { logsSelectConvo(r.conv_id); },
+        onclick: () => {
+          // L.2.7: open the conversation focused on THIS match, with every
+          // match of the same search in it highlighted (ts + direction is
+          // how the Conversation view finds the logical event it belongs to).
+          state.logsHits = {
+            convId: r.conv_id,
+            keys: new Set(results.filter((x) => x.conv_id === r.conv_id).map((x) => `${x.ts}|${x.direction}`)),
+          };
+          state.logsFocus = { ts: r.ts, direction: r.direction };
+          logsSelectConvo(r.conv_id);
+        },
       }, [
         el("div", { class: "logs-convo-card__title" }, head),
         el("div", { class: "logs-result__snippet" }, r.snippet || ""),
@@ -7362,7 +7477,7 @@
     if (e.key !== "Enter") return;
     const query = e.target.value.trim();
     if (query) runDeepLogSearch(query);
-    else renderLogsConvoList();
+    else { state.logsHits = null; renderLogsConvoList(); if (state.logsSelected) renderLogsEntries(); }
   });
 
   logsSearchInput.addEventListener("input", (e) => {
@@ -7377,6 +7492,11 @@
     qs(`#${id}`)?.addEventListener("change", () => {
       const query = logsSearchInput.value.trim();
       if (query) runDeepLogSearch(query);
+    });
+    // L.2.7: the Conversation view applies the same direction/source filters
+    // to the conversation that's open, live — no search needed.
+    qs(`#${id}`)?.addEventListener("input", () => {
+      if (state.logsSelected) renderLogsEntries();
     });
   }
 

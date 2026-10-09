@@ -437,26 +437,18 @@ def _unknown_tool_hint(name):
     return out
 
 
-def tool_get_tool_schema(args):
-    """Tier-2 activation: hand back one tool's full argument schema.
+# Most tools one get_tool_schema call may fetch. A demoted catalog group costs
+# one extra model round per lookup (the whole prompt is re-sent); fetching the
+# two or three siblings a task needs in ONE call is the point of the list form,
+# and the cap keeps a lazy "give me everything" from rebuilding the group the
+# catalog tier exists to avoid.
+GET_TOOL_SCHEMA_MAX_NAMES = 6
 
-    The direct analogue of Anthropic's defer_loading / Tool Search
-    fetch-schema step. search_tools answers "does a tool for X exist"; this
-    answers "what arguments does the tool I already know the name of take",
-    which is the cheaper and far more common question once a catalog entry
-    has been seen.
 
-    Like search_tools, the reply is only half the job: ai_client's
-    discover_sink promotes the named tool into this round's live schema sets,
-    so it is genuinely callable on the model's very next reply rather than
-    merely described.
-    """
+def _one_tool_schema(name):
+    """One tool's full-schema reply, or the same refusal/error get_tool_schema
+    has always given for that name (disabled, owner-only, unknown)."""
     from . import tool_registry
-
-    raw = (args or {}).get("name") or ""
-    name = raw.strip()
-    if not name:
-        return {"error": "Pass the exact name of the tool you want the schema for."}
 
     if tool_disable.is_tool_disabled(name):
         return tool_disable.refusal_for_tool(name)
@@ -476,6 +468,63 @@ def tool_get_tool_schema(args):
         "schema": compact_schemas_for_prompt([schema])[0],
         "ready": True,
     }
+
+
+def tool_get_tool_schema(args):
+    """Tier-2 activation: hand back full argument schemas.
+
+    The direct analogue of Anthropic's defer_loading / Tool Search
+    fetch-schema step. search_tools answers "does a tool for X exist"; this
+    answers "what arguments does the tool I already know the name of take",
+    which is the cheaper and far more common question once a catalog entry
+    has been seen.
+
+    `name` fetches one tool (the original shape, unchanged). `names` fetches
+    several in one call (L.24 T2): the reply is {"schemas": [...], "errors":
+    [...], "ready": True}, so a task that needs three siblings pays one round,
+    not three.
+
+    Like search_tools, the reply is only half the job: ai_client's executor
+    hands the fetched names to the discover sink's exact-promotion path, so
+    each tool is genuinely callable on the model's very next reply rather
+    than merely described (before L.24 nothing did this, and a tool demoted
+    to a catalog line stayed a stub with no arguments).
+    """
+    args = args or {}
+    wanted = []
+    raw_list = args.get("names")
+    if isinstance(raw_list, (list, tuple)):
+        wanted.extend(str(n).strip() for n in raw_list if isinstance(n, str) and n.strip())
+    raw = args.get("name")
+    single = raw.strip() if isinstance(raw, str) else ""
+    if single:
+        wanted.insert(0, single)
+    seen = set()
+    wanted = [n for n in wanted if not (n in seen or seen.add(n))]
+    if not wanted:
+        return {"error": "Pass the exact name of the tool you want the schema for."}
+
+    if len(wanted) == 1 and not raw_list:
+        return _one_tool_schema(wanted[0])
+
+    dropped = wanted[GET_TOOL_SCHEMA_MAX_NAMES:]
+    schemas, errors = [], []
+    for name in wanted[:GET_TOOL_SCHEMA_MAX_NAMES]:
+        got = _one_tool_schema(name)
+        if got.get("ready"):
+            schemas.append({k: got[k] for k in ("name", "group", "schema")})
+        else:
+            errors.append(dict(got, name=got.get("name") or name))
+    out = {"schemas": schemas, "ready": bool(schemas)}
+    if errors:
+        out["errors"] = errors
+    if dropped:
+        out["not_fetched"] = dropped
+        out["message"] = (
+            f"At most {GET_TOOL_SCHEMA_MAX_NAMES} tools per call — ask again for: "
+            + ", ".join(dropped)
+        )
+    return out
 
 
 DISCOVERY_TOOL_SCHEMAS = [
@@ -501,10 +550,11 @@ DISCOVERY_TOOL_SCHEMAS = [
     {
         "name": "get_tool_schema",
         "description": (
-            "Get the full argument schema for ONE tool you already know the name of. "
+            "Get the full argument schema for a tool you already know the name of. "
             "Use this when a tool is listed for you without its arguments (its "
             "description says to call this), instead of guessing arguments or "
-            "searching again. The tool becomes callable on your next reply."
+            "searching again. Need several? Pass them all in `names` in ONE call. "
+            "The tools become callable on your next reply."
         ),
         "parameters": {
             "type": "object",
@@ -513,8 +563,13 @@ DISCOVERY_TOOL_SCHEMAS = [
                     "type": "string",
                     "description": "Exact tool name, e.g. 'playnite_launch_game'.",
                 },
+                "names": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Several exact tool names, fetched in one call (max 6).",
+                },
             },
-            "required": ["name"],
+            "required": [],
         },
     },
 ]
@@ -847,6 +902,81 @@ def _tool_origin(name, source, file, description):
         return ""
 
 
+def _builtin_module_label(name):
+    """The jarvis/ module a hand-wired built-in's handler is defined in, as a
+    path-like label ("screenshot_tools.py", "channels/outbound.py").
+
+    Read from the handler's own `__module__` (the plan's L.18: "the Python
+    module for built-in tools"), looking through `functools.partial` and
+    `functools.wraps` wrappers first so a wrapped handler still reports the
+    module that wrote it. Anything that does not resolve to a module inside the
+    jarvis package (a lambda from another library, a C builtin, no handler at
+    all) falls back to "tools.py" -- the file the hand-wiring itself lives in --
+    rather than showing a stdlib module name as a "source". Never raises."""
+    try:
+        fn = TOOLS.get(name)
+        for _ in range(4):
+            inner = getattr(fn, "__wrapped__", None) or getattr(fn, "func", None)
+            if inner is None or not callable(inner):
+                break
+            fn = inner
+        mod = str(getattr(fn, "__module__", "") or "")
+        if mod.startswith("jarvis."):
+            mod = mod[len("jarvis."):]
+        elif mod != "tools":
+            mod = ""
+        return (mod.replace(".", "/") if mod else "tools") + ".py"
+    except Exception:  # noqa: BLE001
+        return "tools.py"
+
+
+def _tool_source_detail(name, source, file, description):
+    """L.18 -- WHERE a tool is loaded from, finer than the four `source` buckets.
+
+    Returns {kind, module, label} plus `path` (user files) or `server` (MCP):
+
+      kind    "module"  a hand-wired built-in; `module` is the jarvis/ file
+              "file"    a discovered tool file, shipped (actions/) or yours
+                        (~/.jarvis/tools/); `module` is the file's name
+              "server"  an MCP tool; `module` is the actions/ file that carries
+                        it and `server` the configured server's name
+      label   what the Debug panel shows and filters on. Distinct across kinds
+              by construction ("tools.py" / "actions/x.py" /
+              "~/.jarvis/tools/x.py" / "MCP: name"), so it doubles as the key.
+
+    This is a tool's SOURCE, not its group, name prefix, checklist section or
+    safety flags -- those are separate fields and stay separate. It is derived
+    from where discovery found the tool, never declared by the tool itself.
+    `source` is untouched; this is additive. Never raises.
+    """
+    try:
+        if source == "mcp":
+            m = _MCP_TAG_RE.match(description or "")
+            server = m.group(1).strip() if m else ""
+            return {
+                "kind": "server",
+                "module": file or "",
+                "server": server,
+                "label": ("MCP: %s" % server) if server else "MCP: built-in helper",
+            }
+        if source == "user":
+            base = file or ""
+            detail = {"kind": "file", "module": base,
+                      "label": ("~/.jarvis/tools/%s" % base) if base else "~/.jarvis/tools/"}
+            user_dir = globals().get("_USER_DIR")
+            if user_dir and base:
+                detail["path"] = os.path.join(str(user_dir), base)
+            return detail
+        if source == "auto":
+            base = file or ""
+            return {"kind": "file", "module": base,
+                    "label": ("actions/%s" % base) if base else "actions/"}
+        label = _builtin_module_label(name)
+        return {"kind": "module", "module": label, "label": label}
+    except Exception:  # noqa: BLE001
+        return {"kind": "module", "module": "", "label": "tools.py"}
+
+
 def tools_list_payload():
     """Full catalog for remote permission UIs — not filtered by session or env.
 
@@ -858,6 +988,11 @@ def tools_list_payload():
     has switched it off (`disabled`, tool_disable.py) and, for the few tools that
     can't be switched off, why (`protected`) so the debug dashboard's toggles reflect real
     state, not a hardcoded guess.
+
+    Additive (L.18): every item carries `source_detail` -- {kind, module, label,
+    path? | server?} -- naming the module / file / MCP server the tool is loaded
+    from, for the Debug panel's finer source filter. `source` (the four coarse
+    buckets) is unchanged. See _tool_source_detail().
 
     Additive, only when present (G.1, extended by G.2): a tool whose own
     module supplied a Test Checklist entry carries it as `checklist` (same
@@ -897,6 +1032,7 @@ def tools_list_payload():
             "protected": tool_disable.protected_reason(name) or "",
         }
         item["origin"] = _tool_origin(name, item["source"], item["file"], item["description"])
+        item["source_detail"] = _tool_source_detail(name, item["source"], item["file"], item["description"])
         supplied = AUTO_TEST_CHECKLIST.get(name)
         if supplied:
             item["checklist"] = supplied
@@ -923,6 +1059,7 @@ def tools_list_payload():
                 "protected": tool_disable.protected_reason(name) or "",
             })
             items[-1]["origin"] = _tool_origin(name, items[-1]["source"], items[-1]["file"], "")
+            items[-1]["source_detail"] = _tool_source_detail(name, items[-1]["source"], items[-1]["file"], "")
     return items
 
 

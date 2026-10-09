@@ -1377,12 +1377,33 @@ def _tool_result_slots(working):
                 # usually under "result"/"content". Trim whichever string
                 # field is actually carrying it rather than assuming one.
                 if isinstance(response, dict):
+                    found_key = False
                     for key in ("result", "content", "output", "text"):
                         if isinstance(response.get(key), str):
                             def setter(value, _r=response, _k=key):
                                 _r[_k] = value
                             slots.append((setter, response[key]))
+                            found_key = True
                             break
+                    if not found_key and response:
+                        # L.24 T7: the Gemini adapter hands a dict result over
+                        # AS the response object ({"windows": [...]}), with no
+                        # "result"/"content" string in it, so the loop above
+                        # found nothing and an old list_windows reply was
+                        # re-sent at full size every later round. Treat the
+                        # whole dict as the text (its JSON), and on trim
+                        # replace fr["response"] with a NEW {"result": ...}
+                        # dict rather than mutating this one: it is the same
+                        # object the tool executor cached, and a failover
+                        # replays the cache.
+                        try:
+                            as_text = json.dumps(response, ensure_ascii=False, default=str)
+                        except (TypeError, ValueError):
+                            as_text = None
+                        if as_text is not None:
+                            def setter(value, _fr=fr):
+                                _fr["response"] = {"result": value}
+                            slots.append((setter, as_text))
                 elif isinstance(response, str):
                     def setter(value, _fr=fr):
                         _fr["response"] = value

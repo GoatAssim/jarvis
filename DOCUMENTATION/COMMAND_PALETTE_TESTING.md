@@ -14,6 +14,11 @@ Test in **both** layouts (classic and focus) where noted, and once at phone widt
 
 ---
 
+> **Short version in the console:** Menu → Test Checklist → *Command palette* has eight
+> tick-off entries (open, search, open a command, switch between commands, close/reopen,
+> click behaviour, busy and safety, sampled panel pairs). They point here instead of
+> copying this list; this file stays the full pass.
+
 ## 0. Before you start
 
 - [ ] `python3 tests/test_slash_coverage.py` - all pass

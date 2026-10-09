@@ -23,6 +23,7 @@
 <link rel="stylesheet" href="daemons.css">
 <link rel="stylesheet" href="backlog.css">
 <link rel="stylesheet" href="logsearch.css">
+<link rel="stylesheet" href="log-conversation.css">
 <link rel="stylesheet" href="schedules.css">
 <link rel="stylesheet" href="notifications.css">
 <link rel="stylesheet" href="mcp-servers.css">
@@ -950,6 +951,11 @@
           <button type="button" class="debug-toggle-btn" data-source="user">User</button>
           <button type="button" class="debug-toggle-btn" data-source="mcp">MCP</button>
         </div>
+        <!-- L.18: second level under the four buckets — the module / file /
+             MCP server a tool is loaded from. Filled in by app.js from each
+             tool's source_detail.label (chips, or a select past 8 sources);
+             stays hidden when the catalogue carries no source_detail. -->
+        <div class="debug-module-filter" id="debug-module-filter" role="group" aria-label="Filter tools by module, file or MCP server" hidden></div>
         <div class="debug-tool-list" id="debug-tool-list">
           <div class="debug-empty">Loading&hellip;</div>
         </div>
@@ -1119,8 +1125,8 @@
           <button class="btn btn--ghost" id="btn-logs-refresh" type="button" disabled>Refresh</button>
           <button class="btn btn--ghost btn--danger" id="btn-logs-clear" type="button" disabled>Clear log</button>
           <div class="debug-response-toggle" id="logs-view-toggle" role="group" aria-label="Entry view">
-            <button type="button" class="debug-toggle-btn is-active" data-mode="organized">Organized</button>
-            <button type="button" class="debug-toggle-btn" data-mode="raw">Raw JSON</button>
+            <button type="button" class="debug-toggle-btn is-active" data-mode="conversation" title="Reads the log as a conversation: your message, replies, one card per tool call">Conversation</button>
+            <button type="button" class="debug-toggle-btn" data-mode="raw" title="Every log line, exactly as stored">Raw JSON</button>
           </div>
         </div>
       </section>
@@ -1869,6 +1875,7 @@
 <script src="category-input.js"></script>
 <script src="daemons.js"></script>
 <script src="backlog.js"></script>
+<script src="log-conversation.js"></script>
 <script src="logsearch.js"></script>
 <script src="schedules.js"></script>
 <!-- agent-panel.js: the Focus layout's Agent side panel. app.js feeds it through window.JarvisAgentPanel?.feed (optional chaining), so load order is not load-bearing. -->

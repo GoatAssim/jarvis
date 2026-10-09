@@ -40,6 +40,17 @@
  * defined once, in jarvis-cli/jarvis/checklist_schema.py, which validates
  * entries from this file and from tool modules alike.
  *
+ * FEATURES (master plan L.19)
+ * ---------------------------
+ * A second top-level object, "features", sits next to "tools": things worth a
+ * manual pass that are NOT tools (today: the "/" command palette). Same entry
+ * shape and the same validator (checklist_schema.validate_entry(allow_do=True)),
+ * but: the entry's group must be one whose "kind" is "feature" in "groups", and
+ * a step may be {"do": "<instruction to carry out by hand>", "expect": "..."}
+ * besides ask / run. The panel folds them into the same list, marked "Feature".
+ * tests/test_checklist_coverage.py ignores them when it checks tool coverage and
+ * checks them separately. Do not fake a tool to hold one.
+ *
  *   group   one of the ids in "groups"
  *   does    one line: what the tool is for
  *   steps   ordered tests. {"ask": "<prompt to type in Ask>", "expect": "..."}
@@ -54,7 +65,7 @@
 
 window.JARVIS_TEST_CHECKLIST = /*JSON-BEGIN*/ {
  "schema": 1,
- "updated": "2026-09-21",
+ "updated": "2026-10-09",
  "groups": [
   {
    "id": "core",
@@ -180,6 +191,12 @@ window.JARVIS_TEST_CHECKLIST = /*JSON-BEGIN*/ {
    "id": "custom",
    "label": "Custom tools",
    "blurb": "Tools you wrote yourself in Menu \u2192 Custom Tools. Their entries come from the tools' own files, not from this file."
+  },
+  {
+   "id": "command_palette",
+   "label": "Command palette",
+   "kind": "feature",
+   "blurb": "The / palette in Ask. A feature of the console, not a tool: do these by hand in the page (see DOCUMENTATION/COMMAND_PALETTE_TESTING.md)."
   }
  ],
  "tools": {
@@ -3418,6 +3435,241 @@ window.JARVIS_TEST_CHECKLIST = /*JSON-BEGIN*/ {
    "care": "Real deletion (recoverable via the Recycle Bin) — use a scratch file.",
    "watch": [
     "There is no permanent-delete option."
+   ]
+  }
+ },
+ "features": {
+  "palette_open": {
+   "group": "command_palette",
+   "does": "Typing / at the start of an empty Ask box opens the command palette above the composer, without moving anything.",
+   "steps": [
+    {
+     "do": "Open Ask. In the empty box type / .",
+     "expect": "The palette floats above the composer; focus stays in the box; the composer and the thread do not move or resize; commands are grouped Chat, Model, Skills, Run, Panels, View, then a \"More\" row."
+    },
+    {
+     "do": "With the palette open press Esc once, then Esc again.",
+     "expect": "The first Esc closes only the palette and Ask stays open; the second Esc closes the Ask panel as it always did."
+    },
+    {
+     "do": "Type // then a word, e.g. //new is just a word, and send it.",
+     "expect": "The message is sent to Jarvis as plain text with one slash removed; no command runs."
+    },
+    {
+     "do": "Type hello /new (slash not first), then backspace a leading / away on a fresh / .",
+     "expect": "The palette never opens for the first; backspacing the / away closes it."
+    },
+    {
+     "do": "Switch to the Focus layout (/layout focus) and repeat the first step, then narrow the window to about 560 px.",
+     "expect": "Same behaviour in both layouts; at narrow width the description column drops out but rows and footer still work."
+    }
+   ],
+   "needs": [
+    "Ask panel open"
+   ],
+   "watch": [
+    "Full manual pass: DOCUMENTATION/COMMAND_PALETTE_TESTING.md sections 1-2."
+   ]
+  },
+  "palette_search": {
+   "group": "command_palette",
+   "does": "Typing after the slash filters and ranks commands; a typo is caught instead of being sent as a message.",
+   "steps": [
+    {
+     "do": "Type /da .",
+     "expect": "Daemons ranks first (or among the first); matched letters are emphasised in each row name."
+    },
+    {
+     "do": "Type /tools, then /tests, then /sched.",
+     "expect": "They find /debug, /checklist and /schedule through their aliases."
+    },
+    {
+     "do": "Type /nwe and press Enter, then press Enter again without changing the text.",
+     "expect": "The first Enter is blocked with \"did you mean /new?\" and the text stays; the identical second Enter sends it as an ordinary message."
+    },
+    {
+     "do": "Type /qwertyuiop and press Enter.",
+     "expect": "The empty state says no command matches and that Enter sends it as a message; it is sent as an ordinary message."
+    },
+    {
+     "do": "Run /skills, then type /sk .",
+     "expect": "The command you used most recently ranks first among equally good matches."
+    }
+   ],
+   "watch": [
+    "A typo must never silently run something else."
+   ]
+  },
+  "palette_open_command": {
+   "group": "command_palette",
+   "does": "Each of the 16 panel commands opens its own panel as the topmost surface; verbs that take an argument fill in first and run on Enter.",
+   "steps": [
+    {
+     "do": "In Classic layout, run each in turn from the palette (closing each panel after): /guides /debug /checklist /schedule /mcp /ctools /channels /daemons /backlog /logsearch /setup /subagents /notifications /logs /config /skin .",
+     "expect": "Each opens the right panel, in front of everything, and its own close control works; the first Enter on a plain panel verb opens it (no second Enter needed)."
+    },
+    {
+     "do": "Switch to Focus (/layout focus) and open /debug, /checklist and /daemons.",
+     "expect": "Same result in Focus; the panel is on top and reachable with the mouse."
+    },
+    {
+     "do": "Type /run and pick a saved command with Tab, then press Enter.",
+     "expect": "Tab only fills the box and runs nothing; Enter then runs it. Same for /skillload followed by a skill name."
+    },
+    {
+     "do": "Start a long reply, then open /debug while it streams.",
+     "expect": "Panel openers still work while Jarvis is replying."
+    }
+   ],
+   "needs": [
+    "At least one saved command and one installed skill for the argument verbs"
+   ],
+   "watch": [
+    "Tab and clicking a row only fill the box; they never run anything.",
+    "Full list of verbs: DOCUMENTATION/COMMAND_PALETTE_TESTING.md section 8."
+   ]
+  },
+  "palette_switch": {
+   "group": "command_palette",
+   "does": "Opening command B while panel A is open replaces A: A closes, B is on top and reacts to its own keys, and the palette still opens. (Regression: Ask stayed on top of Skins, I-B20 / L.17.)",
+   "steps": [
+    {
+     "do": "Open the Ask panel, then type /skin in its box and press Enter.",
+     "expect": "Skin appears in front; the Ask panel is no longer on top and you do not have to close it by hand."
+    },
+    {
+     "do": "Open /daemons, then (without closing it) open /debug via the palette, then /checklist.",
+     "expect": "Each switch leaves exactly one panel visible and topmost; clicking and typing reach that panel, not the one before."
+    },
+    {
+     "do": "With a panel open, use that panel's own keyboard shortcut (for example the filter or search key it documents).",
+     "expect": "Only the topmost panel reacts; a previous panel's shortcut does nothing."
+    },
+    {
+     "do": "With a panel open press / when focus is not in a text box, or use the palette's open shortcut.",
+     "expect": "The palette opens above the panel (if it does not, note it: L.17 still lists this as not built)."
+    },
+    {
+     "do": "Press Esc after switching.",
+     "expect": "Esc closes only the topmost panel; focus returns to the composer."
+    }
+   ],
+   "watch": [
+    "I-B19/I-B20 were fixed in code but never browser-verified; this entry is that verification.",
+    "Whether the palette is reachable while a panel is open is still an open item (L.17 step 4); a failure there is expected, not a regression."
+   ]
+  },
+  "palette_close_reopen": {
+   "group": "command_palette",
+   "does": "Closing the palette and a panel, and reopening them, leaves no stale state.",
+   "steps": [
+    {
+     "do": "Open the palette with / , then click elsewhere on the page.",
+     "expect": "The palette closes; tabbing out of the box closes it too."
+    },
+    {
+     "do": "Type / again after closing.",
+     "expect": "The full list is back, with the highlight at the top and the \"More\" row collapsed."
+    },
+    {
+     "do": "Open a panel (for example /schedule), close it, make a change elsewhere, and open it again.",
+     "expect": "It shows fresh state, not what it showed last time."
+    },
+    {
+     "do": "Open /daemons, start editing a daemon without saving, then open another panel.",
+     "expect": "Jarvis asks before discarding the edit; Cancel keeps the daemons editor open."
+    },
+    {
+     "do": "Press Shift+Enter in the box while the palette is open.",
+     "expect": "The text becomes multi-line and the palette closes."
+    }
+   ],
+   "watch": [
+    "The dirty-editor prompt is the one part of switching L.17 asks for; if there is no prompt, note it."
+   ]
+  },
+  "palette_click_behaviour": {
+   "group": "command_palette",
+   "does": "Clicking inside the palette on anything that is not a command row does not close it (I-B19: \"Show the other N commands\" used to make the whole palette vanish).",
+   "steps": [
+    {
+     "do": "Open / and scroll down to the \"More\" row. Click \"Show the other N commands\".",
+     "expect": "The palette stays open and expands to a CLI commands section and a Can't run from chat section; clicking it again collapses them."
+    },
+    {
+     "do": "Press and hold on a group heading, on the footer, and on the list's scrollbar.",
+     "expect": "None of them closes the palette."
+    },
+    {
+     "do": "Scroll the list with the mouse wheel; on a touch screen, with a finger.",
+     "expect": "It scrolls and stays open."
+    },
+    {
+     "do": "Click a command row (for example /guides).",
+     "expect": "The row fills the box and nothing runs; the second Enter opens the panel."
+    }
+   ],
+   "watch": [
+    "I-B19 was fixed in fix-I-B19-I-B20.patch and never checked in a real browser."
+   ]
+  },
+  "palette_busy_safety": {
+   "group": "command_palette",
+   "does": "Risky commands ask first and carry a risk badge; commands that cannot run while Jarvis is replying say so.",
+   "steps": [
+    {
+     "do": "Open / and look at the badges.",
+     "expect": "Every row has one: /clear dangerous (red), /run and /daemon caution, the rest safe."
+    },
+    {
+     "do": "Type /clear and press Enter twice.",
+     "expect": "The first Enter only completes the command; the second shows a confirm dialog; Cancel keeps the history."
+    },
+    {
+     "do": "Start a long reply, then type / .",
+     "expect": "/clear, /redo and /run are greyed with \"can't run while Jarvis is replying\"; forcing one through with Enter is refused and the text stays in the box."
+    },
+    {
+     "do": "Type /spotify-login and press Enter, then Enter again.",
+     "expect": "Blocked with its reason (it needs a terminal); the identical second Enter sends it as a message."
+    },
+    {
+     "do": "Type /conv-delete with an id, then Cancel the dialog; check the browser's Network tab.",
+     "expect": "A dialog shows the exact command line first; Cancel sends no request to the server."
+    }
+   ],
+   "care": "/clear and /conv-delete really delete when confirmed; use a scratch chat.",
+   "watch": [
+    "/stop, /new, /chat, /think, /provider, /capacity and every panel opener must still work mid-reply."
+   ]
+  },
+  "palette_regression_pairs": {
+   "group": "command_palette",
+   "does": "Sampled pairs of panel commands (the exhaustive version is node tests/verify_panel_switching.js once L.17 builds it).",
+   "steps": [
+    {
+     "do": "Open /guides then /debug.",
+     "expect": "Debug is on top, Guides is gone, Esc closes Debug only."
+    },
+    {
+     "do": "Open /schedule then /mcp.",
+     "expect": "MCP is on top, Schedule is gone, Esc closes MCP only."
+    },
+    {
+     "do": "Open /daemons then /skin.",
+     "expect": "Skin is on top and usable (this pair involves a modal backdrop, the I-B20 cause)."
+    },
+    {
+     "do": "Open /config then /checklist.",
+     "expect": "Checklist is on top and usable."
+    },
+    {
+     "do": "Open /ctools then /logs, then reopen /ctools.",
+     "expect": "Logs is on top; /ctools reopens normally afterwards."
+    }
+   ],
+   "watch": [
+    "Add every pair you find broken to L.17's matrix (which pair, which layout)."
    ]
   }
  }
