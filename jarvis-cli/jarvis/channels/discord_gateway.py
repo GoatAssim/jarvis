@@ -380,6 +380,15 @@ def build_client(discord, cfg):
             sent_any["ok"] = True
             return True
 
+        def send_file(path, name):
+            """Attach one file to the thread this message came from. Same
+            thread-hop as send(); the recipient is never a parameter."""
+            future = asyncio.run_coroutine_threadsafe(
+                message.channel.send(file=discord.File(path, filename=name)), loop)
+            future.result(timeout=120)
+            sent_any["ok"] = True
+            return True
+
         # handle_message still runs on the denied path — it owns the denial
         # log line and the optional notify_on_denied reply, and `send` hops
         # back to this loop via run_coroutine_threadsafe().result(), which
@@ -387,7 +396,7 @@ def build_client(discord, cfg):
         # goes to the executor; only the *visible* parts are conditional.
         def _run():
             return base.handle_message(DISCORD, msg, send, cfg=cfg,
-                                       decision=decision)
+                                       decision=decision, send_file=send_file)
 
         if not answering:
             # Silent by default. react_when_denied is the opt-in for people

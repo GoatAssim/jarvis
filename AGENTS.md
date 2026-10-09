@@ -226,6 +226,20 @@ things that were already fixed once.
   itself explicitly (and update every existing trace call site to respect
   it, not just the new one) if you actually want gating.
 
+- **A picture a tool makes reaches a chat only through `media_out` -> `channels/media_send.py`, and only to the owner who asked (L.42.3).**
+  `jarvis/media_out.py` is a per-ask collector the gateway opens in `base._ask_jarvis`
+  (`collect_media` = the sender is the owner AND the gateway can attach files);
+  `take_screenshot`, `browser_screenshot` and `present_file` (non-folder) `offer()` their file and
+  it is a no-op everywhere else (CLI, web UI). `media_send.prepare` is the one place that decides
+  what may leave the PC: owner only, an extension allow-list (images; plus pdf/text via
+  `present_file`), regular files only, a size cap (`max_upload_mb`, default 8; an oversized image is
+  re-encoded when Pillow is present, otherwise reported), at most `MAX_FILES` per reply and an on-disk hourly limit per thread and overall (`media_sends.json`, like `send_dm`'s). The
+  gateway's `send_file(path, name)` is bound to the thread the message came from; there is NO
+  recipient parameter anywhere, so don't add one. Never open the collector for a guest, never
+  accept a path from the sender or a fetched page, and don't widen the extension list without
+  thinking about exfiltration. Instagram has no `send_file` yet, so nothing is attached there.
+  `tests/test_channel_media_out.py` pins this.
+
 ## Testing
 
 No framework dependency — plain `assert` throughout (also valid as

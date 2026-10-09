@@ -1028,6 +1028,10 @@ window.JARVIS_TEST_CHECKLIST = /*JSON-BEGIN*/ {
     {
      "ask": "Take a screenshot.",
      "expect": "Image card shows in the Jarvis UI. The model only receives an ok/path result, not the image."
+    },
+    {
+     "ask": "Take a screenshot.  (send this from the OWNER's Discord DM, with allow_tools on)",
+     "expect": "The reply text arrives, then the screenshot arrives as an attached picture in the same DM. A guest asking the same thing gets no picture."
     }
    ],
    "needs": [

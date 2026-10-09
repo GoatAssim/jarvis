@@ -507,10 +507,15 @@ def _local_tool_browser_screenshot(args=None):
     # literally (not imported) so the web UI's existing "screenshot" extras
     # case picks this up with zero web UI changes. See module docstring.
     print(f"JARVIS_MEDIA\tscreenshot\t{path.name}", file=sys.stderr, flush=True)
+    # Chat (Discord) has no web UI: hand the file to the gateway's collector.
+    # A no-op (False) everywhere else -- see media_out.py.
+    from . import media_out
+    sent_to_chat = media_out.offer(path, "image")
     size = path.stat().st_size if path.exists() else 0
     return {
         "ok": True,
         "file": path.name,
+        "sent_to_chat": sent_to_chat,
         "path": str(path),
         "bytes": size,
         "url": page.url,
@@ -617,7 +622,19 @@ def tool_browser_get_text(args=None):
 
 
 def tool_browser_screenshot(args=None):
-    return _via_daemon_or_local("screenshot", args, _local_tool_browser_screenshot)
+    result = _via_daemon_or_local("screenshot", args, _local_tool_browser_screenshot)
+    # When the browser daemon took the picture, the offer inside the local
+    # function ran in ANOTHER process and reached no collector. Offer it again
+    # here, in the process that is running the ask (media_out.offer is idempotent
+    # per path and a no-op outside a chat ask).
+    try:
+        if isinstance(result, dict) and result.get("ok") and result.get("path") \
+                and not result.get("sent_to_chat"):
+            from . import media_out
+            result["sent_to_chat"] = media_out.offer(result["path"], "image")
+    except Exception:  # noqa: BLE001 -- delivery is a bonus, never a tool failure
+        pass
+    return result
 
 
 def tool_browser_wait_for(args=None):
