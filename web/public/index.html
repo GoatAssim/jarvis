@@ -631,7 +631,7 @@
 <!-- Channels (L.36): per-person, laid out like the Test Checklist but with
      people where that panel has tools. Same .debug-overlay/.debug-panel chrome.
      Everything dynamic is rendered by channels-panel.js; the allow-list chips
-     the old panel showed live on in the right-hand "Global lists" section.
+     the old panel showed live on in Home's "Global lists" tab.
      Bot tokens still never pass through this browser. -->
 <div class="debug-overlay" id="channels-overlay" hidden>
   <div class="debug-panel ch-panel" role="dialog" aria-modal="true" aria-labelledby="ch-title">
@@ -656,7 +656,7 @@
 
     <div class="debug-body ch-body">
 
-      <!-- LEFT: registered people -->
+      <!-- LEFT: Home (pinned) and the registered people -->
       <section class="debug-pane" aria-label="People">
         <div class="debug-pane__head">
           <h3>People</h3>
@@ -675,21 +675,17 @@
           <div class="ch-filter" id="ch-state-chips"></div>
         </div>
         <div class="ch-selbar" id="ch-selbar" role="toolbar" aria-label="Select several people"></div>
+        <div class="ch-home-slot" id="ch-home"></div>
         <div class="ch-list" id="ch-list" role="listbox" aria-label="Registered people"></div>
       </section>
 
-      <!-- MIDDLE: the selected person -->
-      <section class="debug-pane" aria-label="Selected person">
+      <!-- RIGHT of the list: the selected person, or Home (platforms, servers,
+           turned-away list and the global lists, as tabs) -->
+      <section class="debug-pane" aria-label="Selected person or Home">
         <div class="ch-detail" id="ch-detail"></div>
         <div class="tc-foot ch-foot">
           <span><kbd class="tc-kbd">&uarr;</kbd><kbd class="tc-kbd">&darr;</kbd> move &nbsp;<kbd class="tc-kbd">1</kbd>&ndash;<kbd class="tc-kbd">6</kbd> tab &nbsp;<kbd class="tc-kbd">/</kbd> search &nbsp;<kbd class="tc-kbd">Esc</kbd> close</span>
         </div>
-      </section>
-
-      <!-- RIGHT: platform health + the global lists -->
-      <section class="debug-pane" aria-label="Platforms">
-        <div class="debug-pane__head"><h3>Platforms</h3></div>
-        <div class="ch-side" id="ch-side"></div>
       </section>
 
     </div>

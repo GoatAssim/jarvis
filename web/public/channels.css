@@ -14,9 +14,8 @@
  * ========================================================================= */
 
 .ch-panel{ --ch-radius: 3px; }
-.ch-body{ grid-template-columns: 312px minmax(0, 1fr) 300px; }
+.ch-body{ grid-template-columns: 312px minmax(0, 1fr); }
 .ch-body > .debug-pane:first-child{ border-right: 1px solid var(--border); }
-.ch-body > .debug-pane:last-child{ border-right: none; border-left: 1px solid var(--border); }
 .ch-head-actions{ display: flex; gap: 8px; margin-left: auto; align-items: center; }
 .ch-head-actions + .modal__close{ margin-left: 0 !important; }
 
@@ -330,13 +329,18 @@
 .ch-savebar__text{ flex: 1; font-size: 12.5px; color: var(--text); }
 .ch-savebar__text b{ color: var(--accent-secondary); font-weight: 600; }
 
-/* --------------------------------------------------------------- right */
+/* ---------------------------------------------------------------- Home
+ * What used to be the right-hand side column. Home is picked like a person, so it
+ * shows in the middle pane under a hero and tabs; these are its pieces. */
 
-.ch-side{ flex: 1; min-height: 0; overflow-y: auto; padding: 14px 14px 22px; display: flex; flex-direction: column; gap: 16px; }
-/* A column flexbox shrinks its children to fit. .ch-plat has overflow:hidden (so its min-height
-   is 0) and used to be squashed to nothing, hiding the Discord / Instagram status, whenever the
-   servers list below it was tall. Nothing in here may shrink; the column scrolls instead. */
-.ch-side > *{ flex-shrink: 0; }
+.ch-home-slot{ padding: 2px 8px 0; flex-shrink: 0; }
+.ch-home-slot:empty{ display: none; }
+.ch-card--home{ --ch-c: var(--accent); margin-top: 4px; }
+.ch-avatar--home{ color: var(--accent); }
+.ch-avatar--home svg{ width: 52%; height: 52%; display: block; }
+/* Platform cards sit side by side when there is room and stack when there isn't. */
+.ch-home__cards{ display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 14px; align-items: start; }
+.ch-home__lists{ display: flex; flex-direction: column; }
 .ch-plat{
   border: 1px solid var(--border); border-radius: var(--ch-radius); background: var(--bg-panel-2); overflow: hidden;
 }
@@ -353,16 +357,8 @@
 .ch-plat__hint code{ font-family: var(--font-mono); color: var(--accent-soft); font-size: 10.5px; overflow-wrap: anywhere; }
 .ch-plat__warn{ margin: 0 12px 11px; padding: 7px 9px; border-left: 2px solid var(--accent-secondary); background: color-mix(in srgb, var(--accent-secondary) 7%, transparent); font-size: 11.5px; color: var(--text-dim); line-height: 1.45; }
 
-.ch-globals summary{
-  cursor: pointer; list-style: none; display: flex; align-items: center; gap: 8px; padding: 2px 0;
-  font-size: 10.5px; letter-spacing: .16em; text-transform: uppercase; color: var(--text-dimmer);
-}
-.ch-globals summary::-webkit-details-marker{ display: none; }
-.ch-globals summary::before{ content: ""; width: 6px; height: 6px; border-right: 1.5px solid currentColor; border-bottom: 1.5px solid currentColor; transform: rotate(-45deg); transition: transform .15s; }
-.ch-globals[open] summary::before{ transform: rotate(45deg); }
-.ch-globals summary:hover{ color: var(--text-dim); }
-.ch-globals__body{ margin-top: 10px; display: flex; flex-direction: column; gap: 12px; }
-.ch-globals__note{ font-size: 11px; color: var(--text-dimmer); line-height: 1.5; }
+.ch-globals__body{ display: flex; flex-direction: column; gap: 12px; }
+.ch-globals__note{ font-size: 12px; color: var(--text-dimmer); line-height: 1.5; }
 .ch-gset__label{ font-size: 11px; color: var(--text-dim); margin-bottom: 5px; }
 .ch-gset__label span{ color: var(--text-dimmer); }
 .ch-gset__chips{ display: flex; flex-wrap: wrap; gap: 5px; }
@@ -391,7 +387,6 @@
 
 @media (max-width: 1100px){
   .ch-body{ grid-template-columns: 260px minmax(0, 1fr); }
-  .ch-body > .debug-pane:last-child{ display: none; }
 }
 @media (max-width: 760px){
   .ch-body{ grid-template-columns: 1fr; grid-template-rows: minmax(190px, 40%) minmax(0, 1fr); }

@@ -4,17 +4,22 @@
  * WHAT IT IS
  * ----------
  * The Channels panel, per person instead of global. Laid out like the Test
- * Checklist — a list on the left, the selected item in the middle, an overview
- * on the right — but the items are the PEOPLE who have messaged Jarvis on
- * Discord / Instagram (registered only: anyone denied at the gate never gets a
- * record, see channels/permissions.py).
+ * Checklist — a list on the left, the selected item in the middle — and the
+ * items are the PEOPLE who have messaged Jarvis on Discord / Instagram
+ * (registered only: anyone denied at the gate never gets a record, see
+ * channels/permissions.py).
  *
- *   left    people: avatar, name, handle, what each can do at a glance
+ *   left    "Home" pinned on top, then people: avatar, name, handle, what each
+ *           can do at a glance
  *   middle  one person — Profile tab, and a Permissions tab with a switch for
  *           every thing they can be allowed to do (DMs, replies, tool use and
  *           WHICH tools, whether Jarvis may DM them, ownership, blocking)
- *   right   one card per platform (enabled, token set, owner, master tools
- *           switch) and, collapsed, the old global allow-lists as a fallback
+ *           ...or HOME, which is picked exactly like a person but holds what
+ *           used to be the right-hand side panel, as tabs: Platforms (one card
+ *           each: enabled, token set, owner, master tools switch), Servers
+ *           (Discord), Turned away, and Global lists (the raw allow-lists).
+ *           There is no third column any more; it was hidden under 1100px, which
+ *           made platform health unreachable on a narrow window.
  *
  * WHERE THE TRUTH LIVES
  * ---------------------
@@ -111,6 +116,7 @@
     refresh: P('<path d="M20 11a8 8 0 1 0-2.3 5.7"/><path d="M20 4v7h-7"/>'),
     clock: P('<circle cx="12" cy="12" r="9"/><path d="M12 7v5l3.2 2"/>'),
     server: P('<rect x="4" y="4" width="16" height="6" rx="1.5"/><rect x="4" y="14" width="16" height="6" rx="1.5"/><path d="M8 7h.01M8 17h.01"/>'),
+    home: P('<path d="M3.5 11.2 12 4l8.5 7.2"/><path d="M5.5 10v9.5h13V10"/><path d="M10 19.5v-5h4v5"/>'),
     people: P('<circle cx="9" cy="8.5" r="3.2"/><path d="M3 19.5a6 6 0 0 1 12 0"/><path d="M16 5.6a3.2 3.2 0 0 1 0 5.8M18 14.2a6 6 0 0 1 3 5.3"/>'),
   };
   function icon(name) {
@@ -372,6 +378,28 @@
     return [...groups.entries()].sort((a, b) => a[0].localeCompare(b[0])).map(([id, items]) => ({ id, items: items.sort((x, y) => x.name.localeCompare(y.name)) }));
   }
 
+  // ---- Home (the old side panel, now picked like a person) ----------------
+  // A person's key is "<platform>:<id>", always with a colon, so this can never
+  // collide with one.
+  const HOME_KEY = "home";
+
+  // Tabs on Home. Servers is Discord-only, so it isn't offered without Discord.
+  function homeTabs(platforms) {
+    const defs = [{ id: "platforms", label: "Platforms", ico: "chat", title: "Is each platform on, and who may run tools from it" }];
+    if (platforms && platforms.discord) defs.push({ id: "servers", label: "Servers", ico: "server", title: "Discord servers and channels" });
+    defs.push({ id: "denied", label: "Turned away", ico: "blocked", title: "Who the gate refused lately" });
+    defs.push({ id: "lists", label: "Global lists", ico: "people", title: "The raw allow-lists" });
+    return defs;
+  }
+
+  // One word for how a platform is doing: red = can't work yet (no token),
+  // dim = deliberately off, green = on.
+  function platformState(pl) {
+    if (!pl || !pl.token_set) return { text: "No token", ch: "bad" };
+    if (!pl.enabled) return { text: "Off", ch: "off" };
+    return { text: "On", ch: "on" };
+  }
+
   // ------------------------------------------------------------------ state
   const state = {
     built: false,
@@ -383,6 +411,7 @@
     permsError: "",
     selected: null,
     tab: "perms",
+    homeTab: "platforms", // the tab showing while Home is selected
     search: "",
     platformFilter: "all",
     stateFilter: "all",
@@ -474,9 +503,11 @@
         const p = personByKey(k);
         if (!p || sameScope(d, scopeOf(p))) state.drafts.delete(k);
       }
-      if (!keepSelection || !personByKey(state.selected)) {
+      if (!keepSelection || (state.selected !== HOME_KEY && !personByKey(state.selected))) {
+        // With nobody registered yet Home is the page that has something to show
+        // (the tokens still to set), so it is the fallback rather than an empty pane.
         const first = visiblePeople()[0] || state.people[0];
-        state.selected = first ? pkey(first) : null;
+        state.selected = first ? pkey(first) : HOME_KEY;
       }
     } catch (err) {
       state.error = err.message || "Couldn't read channels.";
@@ -668,12 +699,12 @@
       const srv = await api("GET", "/api/channels/servers?platform=discord");
       state.servers = srv; state.serversError = "";
     } catch (err) { state.serversError = err.message || "Couldn't read servers."; }
-    renderSide();
+    renderHome();
   }
   async function serverSwitch(kind, id, sw, value) {
     const key = `${kind}:${id}|${sw}`;
     if (state.serverBusy.has(key)) return;
-    state.serverBusy.add(key); renderSide();
+    state.serverBusy.add(key); renderHome();
     try {
       await api("POST", `/api/channels/servers/discord/${encodeURIComponent(kind)}/${encodeURIComponent(id)}`, { switch: sw, value });
     } catch (err) { toast(err.message || "Couldn't save that.", "error"); }
@@ -686,7 +717,7 @@
   async function guildMutate(id, remove, confirm) {
     const g = state.guildAdd;
     if (g.busy) return;
-    g.busy = true; g.error = ""; renderSide();
+    g.busy = true; g.error = ""; renderHome();
     try {
       const res = await api("POST", "/api/channels/servers/discord/allowed-guilds", { id, remove: !!remove, confirm: !!confirm });
       if (res && res.needs_confirm && !res.applied) {
@@ -710,7 +741,7 @@
   async function chanMutate(id, remove, confirm) {
     const g = state.chanAdd;
     if (g.busy) return;
-    g.busy = true; g.error = ""; renderSide();
+    g.busy = true; g.error = ""; renderHome();
     try {
       const res = await api("POST", "/api/channels/servers/discord/allowed-channels", { id, remove: !!remove, confirm: !!confirm });
       if (res && res.needs_confirm && !res.applied) {
@@ -802,6 +833,7 @@
   }
 
   function renderList() {
+    renderHomeCard();
     const list = dom.list;
     list.textContent = "";
     if (state.loading && !state.people.length) {
@@ -2097,6 +2129,12 @@
       dom.detail.scrollTop = keepTop;
       return;
     }
+    if (state.selected === HOME_KEY) {
+      dom.detail.appendChild(homeView());
+      dom.detail.scrollTop = keepTop;
+      if (focusId) { const again = document.getElementById(focusId); if (again) again.focus({ preventScroll: true }); }
+      return;
+    }
     const p = current();
     if (!p) {
       dom.detail.appendChild(el("div", { class: "ch-state" }, [icon("people"), el("div", { class: "ch-state__t" }, state.loading ? "Loading…" : state.people.length ? "Pick someone" : "No one registered yet"),
@@ -2672,7 +2710,7 @@
     input.addEventListener("input", () => { g.text = input.value; if (input.value.trim()) { g.pick = ""; select.value = ""; } });
     const submit = () => {
       const id = guildPick(input.value, select.value);
-      if (!id) { g.error = "Pick a server from the list or paste its id (digits only)."; renderSide(); return; }
+      if (!id) { g.error = "Pick a server from the list or paste its id (digits only)."; renderHome(); return; }
       g.error = ""; g.preview = null; guildMutate(id, false, false);
     };
     input.addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); submit(); } });
@@ -2691,7 +2729,7 @@
         ...lines.map((t) => el("div", { class: "ch-row__hint" }, t)),
         el("div", { class: "ch-allowed__confirm-btns" }, [
           el("button", { type: "button", class: "btn btn--primary btn--sm", disabled: g.busy, onclick: () => guildMutate(p.id, false, true) }, "Yes, allow it"),
-          el("button", { type: "button", class: "btn btn--ghost btn--sm", disabled: g.busy, onclick: () => { g.preview = null; renderSide(); } }, "Cancel"),
+          el("button", { type: "button", class: "btn btn--ghost btn--sm", disabled: g.busy, onclick: () => { g.preview = null; renderHome(); } }, "Cancel"),
         ]),
       ]));
     }
@@ -2741,7 +2779,7 @@
     input.addEventListener("input", () => { g.text = input.value; if (input.value.trim()) { g.pick = ""; select.value = ""; } });
     const submit = () => {
       const id = channelPick(input.value, select.value);
-      if (!id) { g.error = "Pick a channel from the list or paste its id (digits only)."; renderSide(); return; }
+      if (!id) { g.error = "Pick a channel from the list or paste its id (digits only)."; renderHome(); return; }
       g.error = ""; g.preview = null; chanMutate(id, false, false);
     };
     input.addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); submit(); } });
@@ -2761,7 +2799,7 @@
         p.guild_blocked ? el("div", { class: "ch-row__hint" }, "Its server isn't on the allowed servers, so it would stay silent until that server is allowed too.") : null,
         el("div", { class: "ch-allowed__confirm-btns" }, [
           el("button", { type: "button", class: "btn btn--primary btn--sm", disabled: g.busy, onclick: () => chanMutate(p.id, false, true) }, "Yes, allow it"),
-          el("button", { type: "button", class: "btn btn--ghost btn--sm", disabled: g.busy, onclick: () => { g.preview = null; renderSide(); } }, "Cancel"),
+          el("button", { type: "button", class: "btn btn--ghost btn--sm", disabled: g.busy, onclick: () => { g.preview = null; renderHome(); } }, "Cancel"),
         ]),
       ]));
     }
@@ -2781,7 +2819,7 @@
       inner.appendChild(allowedGuildsBlock(v));
       inner.appendChild(allowedChannelsBlock(v));
       if (!v.servers.length) inner.appendChild(el("div", { class: "ch-row__hint" }, "No servers recorded yet. Start the bot (jarvis discord-daemon) and invite it to a server; it shows up here once connected."));
-      // A long server list scrolls inside its own box, so it can never push the platform status cards out of view.
+      // A long server list scrolls inside its own box, so the tab itself never grows without bound.
       const list = el("div", { class: "ch-servers__list" });
       v.servers.forEach((s) => list.appendChild(serverCard(s, v)));
       if (v.servers.length) inner.appendChild(list);
@@ -2789,7 +2827,7 @@
       if (v.allowed_channels.length) notes.push(`allowed_channels is set (${v.allowed_channels.length}): any channel not on it is ignored.`);
       if (v.orphans.length) notes.push(`${v.orphans.length} channel${v.orphans.length === 1 ? "" : "s"} in the config aren't in any server Jarvis has seen.`);
       for (const n of notes) inner.appendChild(el("div", { class: "ch-row__hint" }, n));
-      inner.appendChild(el("div", { class: "ch-row__hint" }, "These switches only take access away. To let more people in, use the lists on the left. The two Allowed filters above only narrow too."));
+      inner.appendChild(el("div", { class: "ch-row__hint" }, "These switches only take access away. To let more people in, use the Global lists tab or a person's Permissions tab. The two Allowed filters above only narrow too."));
     }
     box.appendChild(inner);
     return box;
@@ -2808,15 +2846,15 @@
   async function masterCall(id, value, confirm) {
     const m = masterSlot(id);
     m.status = "busy"; m.error = "";
-    renderSide();
+    renderHome();
     try {
       const out = await api("POST", `/api/channels/platform/${encodeURIComponent(id)}/master-tools`, { value, confirm: !!confirm });
-      if (out.dry_run) { m.status = "ready"; m.data = out.view; renderSide(); return; }
+      if (out.dry_run) { m.status = "ready"; m.data = out.view; renderHome(); return; }
       m.status = "idle"; m.data = null;
       toast(out.note || (value ? "Tool use switched on." : "Tool use switched off."), value ? "success" : "info");
       await load(true);
     } catch (e) {
-      m.status = "error"; m.error = e.message || "Couldn't change it."; renderSide();
+      m.status = "error"; m.error = e.message || "Couldn't change it."; renderHome();
     }
   }
   function masterControl(id, pl) {
@@ -2838,7 +2876,7 @@
         v.perms_error ? el("div", { class: "ch-row__note ch-row__note--bad" }, [icon("warn"), el("span", null, "Their limits can't be read, so messages will run without tools until that's fixed.")]) : null,
         el("div", { class: "ch-confirm__btns" }, [
           el("button", { type: "button", class: "btn btn--danger btn--sm", id: `ch-master-confirm-${id}`, onclick: () => masterCall(id, true, true) }, "Turn it on"),
-          el("button", { type: "button", class: "btn btn--ghost btn--sm", onclick: () => { m.status = "idle"; m.data = null; renderSide(); } }, "Cancel"),
+          el("button", { type: "button", class: "btn btn--ghost btn--sm", onclick: () => { m.status = "idle"; m.data = null; renderHome(); } }, "Cancel"),
         ]),
       ]));
     } else {
@@ -2858,7 +2896,7 @@
     const d = state.denied;
     const req = ++d.req;
     d.status = "loading"; d.error = "";
-    renderSide();
+    renderHome();
     try {
       const data = await api("GET", "/api/channels/denied?days=14");
       if (req !== d.req) return;
@@ -2867,7 +2905,7 @@
       if (req !== d.req) return;
       d.status = "error"; d.error = e.message || "Couldn't read it.";
     }
-    renderSide();
+    renderHome();
   }
   async function addDenied(r) {
     try {
@@ -2909,52 +2947,148 @@
     return box;
   }
 
-  function renderSide() {
-    if (!dom) return;
-    dom.side.textContent = "";
-    for (const id of Object.keys(PLATFORMS)) {
-      const pl = state.platforms[id];
-      if (!pl) continue;
-      const ownerRec = pl.owner ? state.people.find((x) => x.platform === id && (x.user_id === pl.owner || x.handle === pl.owner)) : null;
-      const card = el("div", { class: "ch-plat", "data-plat": id }, [
-        el("div", { class: "ch-plat__head" }, [icon(id), el("div", { class: "ch-plat__name" }, PLATFORMS[id].label)]),
-        el("div", { class: "ch-plat__rows" }, [
-          kv("Status", pl.enabled ? "enabled" : "disabled", pl.enabled ? "on" : "off"),
-          kv("Bot token", pl.token_set ? "set" : "not set", pl.token_set ? "on" : "bad"),
-          kv("Owner", ownerRec ? displayName(ownerRec) : pl.owner ? pl.owner : "unset", pl.owner ? "owner" : "off"),
-          kv("Tools master switch", pl.allow_tools ? "on" : "off", pl.allow_tools ? "limited" : "off"),
-          kv("People", String(state.people.filter((x) => x.platform === id).length)),
-        ]),
-      ]);
-      const warns = [];
-      if (pl.wildcard.reply) warns.push('"*" is in the reply list — anyone who reaches the bot gets an answer.');
-      if (pl.wildcard.tool && pl.allow_tools) warns.push('"*" is in the tool list with the master switch on — anyone who reaches the bot can run tools.');
-      for (const w of warns) card.appendChild(el("div", { class: "ch-plat__warn" }, w));
-      const hints = [];
-      if (!pl.token_set) hints.push(["Set the token from a terminal, so it never passes through this browser: ", `jarvis channels-set ${id} ${id === "discord" ? "bot_token" : "access_token"} YOUR_TOKEN`]);
-      else if (!pl.enabled) hints.push(["Turn it on: ", `jarvis channels-set ${id} enabled true`]);
-      if (!pl.owner) hints.push(["Pick an owner: ", `jarvis channels-set ${id} owner YOUR_USER_ID`]);
-      for (const [lead, cmd] of hints) card.appendChild(el("div", { class: "ch-plat__hint" }, [lead, el("code", null, cmd)]));
-      if (pl.token_set) card.appendChild(masterControl(id, pl));
-      dom.side.appendChild(card);
-    }
-    // The servers list can be long, so it goes AFTER every platform's status card:
-    // Discord and Instagram status stay at the top whatever the list holds.
-    if (state.platforms.discord) dom.side.appendChild(serversSection());
-    dom.side.appendChild(deniedSection());
-    const g = el("details", { class: "ch-globals" }, [el("summary", null, "Global lists")]);
-    const body = el("div", { class: "ch-globals__body" }, [
-      el("div", { class: "ch-globals__note" }, "The raw allow-lists the switches on the left read and write. Use these to add someone who hasn't messaged yet, or to manage \"*\" entries."),
+  // ---- Home: what used to be the right-hand side panel ----------------------
+  // Picked like a person (a pinned card at the top of the list), drawn in the
+  // middle pane with a hero and tabs like a person's. Nothing here is new
+  // behaviour: every control below is the one the side panel had.
+  //
+  // Anything that changes what Home shows calls renderHome(), which redraws the
+  // middle pane only while Home is the thing selected.
+  function renderHome() {
+    if (!dom || state.selected !== HOME_KEY) return;
+    if (state.bulkOpen && state.selectMode && state.picked.size) return; // the bulk editor owns the pane
+    renderDetail();
+  }
+
+  function platformIds() { return Object.keys(PLATFORMS).filter((id) => state.platforms[id]); }
+
+  // The pinned "Home" row above the people. It is not a person: no filters apply
+  // to it, it can't be ticked (so it is hidden while selecting), and it lives
+  // outside #ch-list so the list's own counts stay people-only.
+  function renderHomeCard() {
+    const slot = dom && dom.home;
+    if (!slot) return;
+    slot.textContent = "";
+    if (state.selectMode) return;
+    const active = state.selected === HOME_KEY;
+    const badges = platformIds().map((id) => { const st = platformState(state.platforms[id]); return tag(`${PLATFORMS[id].label} ${st.text.toLowerCase()}`, st.ch, id); });
+    slot.appendChild(el("button", {
+      type: "button", class: "ch-card ch-card--home" + (active ? " is-active" : ""), id: "ch-home-card",
+      "aria-current": active ? "true" : null, "data-key": HOME_KEY,
+      onclick: () => select(HOME_KEY),
+    }, [
+      el("span", { class: "ch-avatar-wrap" }, [el("span", { class: "ch-avatar ch-avatar--home", "aria-hidden": "true" }, [icon("home")])]),
+      el("div", { style: "min-width:0" }, [
+        el("div", { class: "ch-card__name" }, "Home"),
+        el("div", { class: "ch-card__sub" }, "Platforms, servers, global lists"),
+        badges.length ? el("div", { class: "ch-card__badges" }, badges) : null,
+      ]),
+    ]));
+  }
+
+  function homeHero() {
+    const tags = platformIds().map((id) => { const st = platformState(state.platforms[id]); return tag(`${PLATFORMS[id].label} · ${st.text.toLowerCase()}`, st.ch, id); });
+    return el("div", { class: "ch-hero" }, [
+      el("span", { class: "ch-avatar-wrap" }, [el("span", { class: "ch-avatar ch-avatar--lg ch-avatar--home", "aria-hidden": "true" }, [icon("home")])]),
+      el("div", { class: "ch-hero__main" }, [
+        el("div", { class: "ch-hero__nameline" }, [el("div", { class: "ch-hero__name" }, "Home")]),
+        el("div", { class: "ch-hero__handle" }, "Platforms, servers and global lists"),
+        tags.length ? el("div", { class: "ch-hero__ids" }, tags) : null,
+      ]),
     ]);
+  }
+
+  function homeTabBar(defs, active) {
+    const bar = el("div", { class: "ch-tabs", role: "tablist", "aria-label": "Home" });
+    defs.forEach((d, i) => {
+      bar.appendChild(el("button", {
+        type: "button", class: "ch-tab", role: "tab", id: `ch-tab-${d.id}`, "aria-selected": active === d.id ? "true" : "false",
+        "aria-controls": `ch-pane-${d.id}`, tabindex: active === d.id ? "0" : "-1", title: d.title || null,
+        onclick: () => activateHomeTab(d.id),
+        onkeydown: (e) => {
+          if (e.key !== "ArrowRight" && e.key !== "ArrowLeft") return;
+          e.preventDefault();
+          const next = defs[(i + (e.key === "ArrowRight" ? 1 : defs.length - 1)) % defs.length];
+          activateHomeTab(next.id); const nb = $(`#ch-tab-${next.id}`); if (nb) nb.focus();
+        },
+      }, [icon(d.ico), d.label]));
+    });
+    return bar;
+  }
+
+  function activateHomeTab(id) {
+    state.homeTab = id;
+    renderDetail(true);
+  }
+
+  function homePane(id, children) {
+    return el("div", { class: "ch-tabpane", id: `ch-pane-${id}`, role: "tabpanel", "aria-labelledby": `ch-tab-${id}` }, children);
+  }
+
+  // One status card per platform (enabled, token, owner, tools master switch).
+  function platformCard(id) {
+    const pl = state.platforms[id];
+    const ownerRec = pl.owner ? state.people.find((x) => x.platform === id && (x.user_id === pl.owner || x.handle === pl.owner)) : null;
+    const card = el("div", { class: "ch-plat", "data-plat": id }, [
+      el("div", { class: "ch-plat__head" }, [icon(id), el("div", { class: "ch-plat__name" }, PLATFORMS[id].label)]),
+      el("div", { class: "ch-plat__rows" }, [
+        kv("Status", pl.enabled ? "enabled" : "disabled", pl.enabled ? "on" : "off"),
+        kv("Bot token", pl.token_set ? "set" : "not set", pl.token_set ? "on" : "bad"),
+        kv("Owner", ownerRec ? displayName(ownerRec) : pl.owner ? pl.owner : "unset", pl.owner ? "owner" : "off"),
+        kv("Tools master switch", pl.allow_tools ? "on" : "off", pl.allow_tools ? "limited" : "off"),
+        kv("People", String(state.people.filter((x) => x.platform === id).length)),
+      ]),
+    ]);
+    const warns = [];
+    if (pl.wildcard.reply) warns.push('"*" is in the reply list — anyone who reaches the bot gets an answer.');
+    if (pl.wildcard.tool && pl.allow_tools) warns.push('"*" is in the tool list with the master switch on — anyone who reaches the bot can run tools.');
+    for (const w of warns) card.appendChild(el("div", { class: "ch-plat__warn" }, w));
+    const hints = [];
+    if (!pl.token_set) hints.push(["Set the token from a terminal, so it never passes through this browser: ", `jarvis channels-set ${id} ${id === "discord" ? "bot_token" : "access_token"} YOUR_TOKEN`]);
+    else if (!pl.enabled) hints.push(["Turn it on: ", `jarvis channels-set ${id} enabled true`]);
+    if (!pl.owner) hints.push(["Pick an owner: ", `jarvis channels-set ${id} owner YOUR_USER_ID`]);
+    for (const [lead, cmd] of hints) card.appendChild(el("div", { class: "ch-plat__hint" }, [lead, el("code", null, cmd)]));
+    if (pl.token_set) card.appendChild(masterControl(id, pl));
+    return card;
+  }
+
+  function platformsPane() {
+    const ids = platformIds();
+    if (!ids.length) return homePane("platforms", [el("div", { class: "ch-row__hint" }, "No platform is configured yet.")]);
+    // Cards sit side by side when the pane is wide and stack when it isn't.
+    return homePane("platforms", [el("div", { class: "ch-home__cards" }, ids.map(platformCard))]);
+  }
+
+  function listsPane() {
+    const blocks = [el("div", { class: "ch-globals__note" }, "The raw allow-lists that the switches on each person's Permissions tab read and write. Use these to add someone who hasn't messaged yet, or to manage \"*\" entries.")];
     for (const id of Object.keys(PLATFORMS)) {
       if (!state.config[id]) continue;
-      body.appendChild(el("div", { class: "ch-section-title" }, PLATFORMS[id].label));
-      globalSets(id).forEach((n) => body.appendChild(n));
+      blocks.push(el("div", { class: "ch-home__lists" }, [
+        el("div", { class: "ch-section-title" }, PLATFORMS[id].label),
+        el("div", { class: "ch-globals__body" }, globalSets(id)),
+      ]));
     }
-    g.appendChild(body);
-    if (state.globalOpen) g.setAttribute("open", "");
-    g.addEventListener("toggle", () => { state.globalOpen = g.open; });
-    dom.side.appendChild(g);
+    return homePane("lists", blocks);
+  }
+
+  function homeView() {
+    const frag = document.createDocumentFragment();
+    frag.appendChild(homeHero());
+    if (state.loading && !platformIds().length) {
+      frag.appendChild(loadingBlock("Reading platforms…"));
+      return frag;
+    }
+    const defs = homeTabs(state.platforms);
+    const active = (defs.find((d) => d.id === state.homeTab) || defs[0]).id;
+    frag.appendChild(homeTabBar(defs, active));
+    const pane = {
+      platforms: platformsPane,
+      servers: () => homePane("servers", [serversSection()]),
+      denied: () => homePane("denied", [deniedSection()]),
+      lists: listsPane,
+    }[active];
+    frag.appendChild(pane());
+    return frag;
   }
 
   function renderStatusLine() {
@@ -3136,7 +3270,7 @@
     else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus(); }
   }
 
-  function renderAll() { if (!dom) return; renderStatusLine(); renderChips(); renderList(); renderSelBar(); renderDetail(); renderSide(); renderAdd(); }
+  function renderAll() { if (!dom) return; renderStatusLine(); renderChips(); renderList(); renderSelBar(); renderDetail(); renderAdd(); }
 
   // --------------------------------------------------------------- plumbing
   function grabDom() {
@@ -3144,7 +3278,7 @@
     if (!overlay) return null;
     return {
       overlay, search: $("#ch-search"), platChips: $("#ch-platform-chips"), stateChips: $("#ch-state-chips"), list: $("#ch-list"),
-      count: $("#ch-count"), detail: $("#ch-detail"), side: $("#ch-side"), statusLine: $("#channels-status-line"), refresh: $("#btn-ch-refresh"),
+      count: $("#ch-count"), detail: $("#ch-detail"), home: $("#ch-home"), statusLine: $("#channels-status-line"), refresh: $("#btn-ch-refresh"),
       addBtn: $("#btn-ch-add"), selbar: $("#ch-selbar"), addOverlay: $("#channels-add-overlay"), addBody: $("#ch-add-body"),
       addSubmit: $("#ch-add-submit"), addCancel: $("#ch-add-cancel"), addClose: $("#ch-add-close"),
     };
@@ -3172,16 +3306,24 @@
     if (typing) return;
     if (e.key === "/") { e.preventDefault(); dom.search.focus(); return; }
     if (state.bulkOpen) return; // the bulk editor has no tabs, and the arrows must not move the person behind it
-    const byKey = { 1: "profile", 2: "perms", 3: "conv", 4: "usage", 5: "test", 6: "history" }[e.key];
+    if (state.selected === HOME_KEY && /^[1-9]$/.test(e.key)) {   // Home has its own, shorter set of tabs
+      const t = homeTabs(state.platforms)[Number(e.key) - 1];
+      if (t) activateHomeTab(t.id);
+      return;
+    }
+    const byKey = state.selected === HOME_KEY ? null : { 1: "profile", 2: "perms", 3: "conv", 4: "usage", 5: "test", 6: "history" }[e.key];
     if (byKey) { activateTab(byKey); return; }
     if (e.key === "ArrowDown" || e.key === "ArrowUp") {
-      const rows = visiblePeople();
-      if (!rows.length) return;
+      // Home is the first stop, then the people the filters show. While ticking
+      // people it isn't shown, so it isn't a stop either.
+      const rows = visiblePeople().map(pkey);
+      const order = state.selectMode ? rows : [HOME_KEY, ...rows];
+      if (!order.length) return;
       e.preventDefault();
-      const i = rows.findIndex((p) => pkey(p) === state.selected);
-      const next = rows[Math.min(rows.length - 1, Math.max(0, (i < 0 ? 0 : i) + (e.key === "ArrowDown" ? 1 : -1)))];
-      select(pkey(next));
-      const card = dom.list.querySelector(".ch-card.is-active"); if (card && card.scrollIntoView) card.scrollIntoView({ block: "nearest" });
+      const i = order.indexOf(state.selected);
+      const next = i < 0 ? order[Math.min(1, order.length - 1)] : order[Math.min(order.length - 1, Math.max(0, i + (e.key === "ArrowDown" ? 1 : -1)))];
+      select(next);
+      const card = (next === HOME_KEY ? dom.home : dom.list).querySelector(".ch-card.is-active"); if (card && card.scrollIntoView) card.scrollIntoView({ block: "nearest" });
     }
   }
 
@@ -3242,6 +3384,7 @@
              dayOf, clockOf, localDay, dayLabel, groupByDay, fmtTokens, barModel, convNote, summaryText,
              toolCallsLabel, untilLeft, TIME_LIMITS,
              stateFilterOptions, guildIdOk, guildName, guildChoices, guildPick,
-             channelIdOk, channelInfo, channelLabel, channelChoices, channelPick },
+             channelIdOk, channelInfo, channelLabel, channelChoices, channelPick,
+             homeTabs, platformState, HOME_KEY },
   };
 })(window);

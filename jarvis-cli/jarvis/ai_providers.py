@@ -39,6 +39,7 @@ import threading
 import requests
 
 from . import key_health, logs, prompt_cache
+from .reply_sanitize import sanitize_reply_text
 from . import token_usage
 
 MAX_TOOL_ROUNDS = 5  # follow-up requests allowed after a tool call, per ask — plenty for simple
@@ -2504,6 +2505,10 @@ def call_openai_compatible(provider, messages, timeout, tools=None, tool_executo
                 })
             continue
 
+        # Degenerate-output guard (see reply_sanitize.py): a reply that is mostly
+        # zero-width/NBSP/ellipsis noise is cleaned, or emptied so the existing
+        # failover path (tool_history kept) takes over instead of posting it.
+        text = sanitize_reply_text(text)
         if not text:
             refusal = message.get("refusal")
             if refusal:
@@ -2868,6 +2873,10 @@ def call_anthropic(provider, messages, timeout, tools=None, tool_executor=None, 
             working_turns.append({"role": "user", "content": result_blocks})
             continue
 
+        # Degenerate-output guard (see reply_sanitize.py): a reply that is mostly
+        # zero-width/NBSP/ellipsis noise is cleaned, or emptied so the existing
+        # failover path (tool_history kept) takes over instead of posting it.
+        text = sanitize_reply_text(text)
         if not text:
             return AIResult(False, error="empty response content", tool_history=_history())
         return AIResult(True, text=text, usage=get_usage_summary(), cut=cut)
@@ -3388,6 +3397,10 @@ def call_gemini(provider, messages, timeout, tools=None, tool_executor=None, rou
                 working_contents.append({"role": "user", "parts": response_parts})
                 continue
 
+            # Degenerate-output guard (see reply_sanitize.py): a reply that is mostly
+            # zero-width/NBSP/ellipsis noise is cleaned, or emptied so the existing
+            # failover path (tool_history kept) takes over instead of posting it.
+            text = sanitize_reply_text(text)
             if not text:
                 if finish_reason in ("MALFORMED_FUNCTION_CALL", "UNEXPECTED_TOOL_CALL"):
                     # The model tried to call a tool and garbled it. This used
@@ -3680,6 +3693,10 @@ def call_cohere(provider, messages, timeout, tools=None, tool_executor=None, rou
                 })
             continue
 
+        # Degenerate-output guard (see reply_sanitize.py): a reply that is mostly
+        # zero-width/NBSP/ellipsis noise is cleaned, or emptied so the existing
+        # failover path (tool_history kept) takes over instead of posting it.
+        text = sanitize_reply_text(text)
         if not text:
             return AIResult(False, error="empty response content",
                             tool_history=_openai_messages_to_generic(working_messages) if ran_tools else None)
@@ -3910,6 +3927,10 @@ def call_ollama(provider, messages, timeout, tools=None, tool_executor=None, rou
                 working_messages.append({"role": "tool", "content": result_text})
             continue
 
+        # Degenerate-output guard (see reply_sanitize.py): a reply that is mostly
+        # zero-width/NBSP/ellipsis noise is cleaned, or emptied so the existing
+        # failover path (tool_history kept) takes over instead of posting it.
+        text = sanitize_reply_text(text)
         if not text:
             return AIResult(
                 False,

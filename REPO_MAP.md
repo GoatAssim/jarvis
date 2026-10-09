@@ -71,6 +71,13 @@ jarvis-cli/jarvis/
                           "refused"/"filter" (Sec5); _surface_interim_text()
                           keeps + live-fires text sent alongside a tool call,
                           on all five adapters now. tests/test_finish_signal.py
+    reply_sanitize.py     degenerate-reply guard: a model reply that is mostly
+                          zero-width/NBSP/ellipsis noise is cleaned to its complete
+                          sentences, or emptied so the adapter's "empty response"
+                          failover runs (tool_history kept). Normal replies pass
+                          through unchanged. Called in all five adapters just
+                          before their `if not text:` check.
+                          tests/test_reply_sanitize.py
     ai_config.py          ~/.jarvis/ai_config.json
     tool_router.py        keyword router — which tool GROUP does this need
     tool_registry.py      static: groups, keywords, per-group guidance
@@ -256,8 +263,9 @@ web/
     public/app-icon.js           L.48: browser-tab icon = the skin's logo in the skin's colour; a distinct
                                  "working" icon (turning arc + badge) while a run is in flight
     public/channels-panel.js/.css  Menu -> Channels (L.36 rework): per-person, Test-Checklist-style
-                                 (people list | Profile + Permissions tabs | platform cards and the
-                                 old global allow-lists as a fallback). Every switch POSTs to
+                                 (people list with a pinned "Home" | Profile + Permissions tabs for a
+                                 person, or for Home: Platforms / Servers / Turned away / Global
+                                 lists tabs -- the old right-hand side panel). Every switch POSTs to
                                  /api/channels/people/...; app.js only calls JarvisChannels.open().
                                  L.36-P4/P5: a Quick setups row (preview, then Apply) on the
                                  Permissions tab, and "Select people..." for a bulk editor
@@ -630,7 +638,7 @@ silently never runs.
 | `test_channel_insights.py` | L.36-P1/P2/P3: per-person conversation attribution (DM vs group, rotated files, torn lines), the usage ledger (counts only, failed asks, windows, rotation), and `simulate` (agrees with what `handle_message` really hands the model; writes nothing, calls no model — snapshot of `~/.jarvis` before/after) |
 | `test_channel_pack_p8_p9_p13_p14.py` | L.36-P8/P9/P13/P14: the picture grant (never a way into a conversation, cleaned up by block / forget, owner locked), the platform tools switch (preview then confirm, refused with `"*"`), panel DM (shared limits, owner / chat-origin refused, preview sends nothing), the turned-away list (who-stages only, never message text) |
 | `verify_l36_pack_ui.py` (`python3`) | L.36-P8/P9/P13/P14/P16 panels + the add-person panel in a real browser against real backend output (`_channels_pack_fixture.py`); SKIPs without playwright + Chromium |
-| `verify_l36_guilds_ui.py` (`python3`) | L.36-P17 in a real browser against real backend output: Discord/Instagram status cards stay visible with 40 servers, the status dropdown, and the allowed-servers editor (preview, cancel, confirm, last entry locked); SKIPs without playwright + Chromium |
+| `verify_l36_guilds_ui.py` (`python3`) | L.36-P17 in a real browser against real backend output: Home's Platforms tab shows the status cards, the Servers tab scrolls 40 servers inside its own box, the status dropdown, and the allowed-servers editor (preview, cancel, confirm, last entry locked); SKIPs without playwright + Chromium |
 | `verify_l36_insights_ui.py` (`python3`) | L.36-P1/P2/P3 tabs in a real browser against real backend output (`_channels_fixture.py`); SKIPs without playwright + Chromium |
 | `verify_channels_panel.js` (`node`) | L.36: `channels-panel.js` pure helpers (initials, hue, relative time, list filters and search, tool-scope diffing/grouping, and that only fixed icon strings reach `innerHTML`) |
 | `test_prompt_cache.py` | the static/dynamic prompt split |

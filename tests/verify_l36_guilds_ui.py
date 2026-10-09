@@ -1,4 +1,4 @@
-"""L.36-P17 - allowed servers editor, status dropdown and the squashed status cards, in a real browser.
+"""L.36-P17 - allowed servers editor, status dropdown and the Home status cards, in a real browser.
 
 Loads web/public/index.html with the shipped channels-panel.js / channels.css in
 headless Chromium. Every /api/ answer comes from the REAL backend: the routes below
@@ -7,8 +7,10 @@ throwaway HOME, never the real ~/.jarvis). web/server.js itself is NOT run (it
 needs express); tests/test_allowed_guilds.py pins its route statically.
 
 Covers
-  BUG-A  with a long server list the Discord AND Instagram status cards keep their
-         height and sit above the servers list; the list scrolls inside its own box
+  BUG-A  Home (the old side column, now picked like a person) is pinned above the list
+         but is not one of the people; its Platforms tab shows the Discord AND Instagram
+         status cards at full height, and with a long server list the Servers tab's
+         list scrolls inside its own box
   BUG-B  the status filter is ONE dropdown (not a row of chips) with a count per option,
          and choosing an option filters the people list
   BUG-C  allowed servers: pick -> Allow previews first (names who goes quiet) and
@@ -152,20 +154,23 @@ with sync_playwright() as p:
     pg.wait_for_function("window.JarvisChannels")
     pg.evaluate("JarvisChannels.open()")
     pg.wait_for_selector(".ch-card")
-    pg.wait_for_selector(".ch-server")
 
-    # ---- BUG-A: the status cards survive a long server list
-    side = pg.locator("#ch-side")
-    d_box = pg.locator("#ch-side .ch-plat[data-plat='discord']").bounding_box()
-    i_box = pg.locator("#ch-side .ch-plat[data-plat='instagram']").bounding_box()
-    s_box = pg.locator("#ch-side .ch-servers").first.bounding_box()
+    # ---- BUG-A: Home, its status cards and the long server list
+    check("A: the old side column is gone", pg.locator("#ch-side").count() == 0)
+    check("A: Home is pinned above the list, and is not one of the people",
+          pg.locator("#ch-home .ch-card--home").count() == 1 and pg.locator("#ch-list .ch-card--home").count() == 0)
+    pg.locator("#ch-home .ch-card--home").click()
+    pg.wait_for_selector("#ch-pane-platforms .ch-plat")
+    check("A: Home shows as selected", "is-active" in (pg.locator("#ch-home .ch-card--home").get_attribute("class") or ""))
+    d_box = pg.locator("#ch-pane-platforms .ch-plat[data-plat='discord']").bounding_box()
+    i_box = pg.locator("#ch-pane-platforms .ch-plat[data-plat='instagram']").bounding_box()
     check("A: the Discord status card keeps a real height", d_box and d_box["height"] >= 100)
     check("A: the Instagram status card keeps a real height", i_box and i_box["height"] >= 100)
     check("A: Instagram's status row is readable (not squashed to nothing)",
-          pg.locator("#ch-side .ch-plat[data-plat='instagram'] .ch-kv").first.bounding_box()["height"] >= 15)
-    check("A: Discord is above Instagram, and both are above the servers list",
-          d_box["y"] < i_box["y"] < s_box["y"])
-    check("A: both cards are on screen without scrolling the side column", i_box["y"] + i_box["height"] < 900)
+          pg.locator("#ch-pane-platforms .ch-plat[data-plat='instagram'] .ch-kv").first.bounding_box()["height"] >= 15)
+    check("A: both cards are on screen without scrolling", max(d_box["y"] + d_box["height"], i_box["y"] + i_box["height"]) < 900)
+    pg.locator("#ch-tab-servers").click()
+    pg.wait_for_selector(".ch-server")
     lst = pg.locator(".ch-servers__list")
     dims = lst.evaluate("e => ({ch: e.clientHeight, sh: e.scrollHeight})")
     check("A: the long list scrolls inside its own box", dims["sh"] > dims["ch"] and dims["ch"] <= 421, str(dims))

@@ -200,5 +200,18 @@ check("TIME_LIMITS are whole minutes within 1 minute .. 30 days", T.TIME_LIMITS.
   check("channelPick: typed beats picked, a bad typed id is not replaced", T.channelPick("111", "222") === "111" && T.channelPick("abc", "222") === "" && T.channelPick("", "222") === "222" && T.channelPick("", "") === "");
 }
 
+// Home (the old side panel, picked like a person)
+{
+  check("HOME_KEY can never be a person's key (those always contain a colon)", T.HOME_KEY === "home" && !T.HOME_KEY.includes(":"));
+  const ids = (pl) => T.homeTabs(pl).map((t) => t.id).join();
+  check("homeTabs: with Discord there is a Servers tab", ids({ discord: {}, instagram: {} }) === "platforms,servers,denied,lists", ids({ discord: {}, instagram: {} }));
+  check("homeTabs: without Discord the Servers tab is not offered", ids({ instagram: {} }) === "platforms,denied,lists", ids({ instagram: {} }));
+  check("homeTabs: nothing loaded yet is still a usable tab set, no throw", ids({}) === "platforms,denied,lists" && ids(null) === "platforms,denied,lists");
+  check("homeTabs: every tab has a label and an icon name", T.homeTabs({ discord: {} }).every((t) => t.label && t.ico));
+  check("platformState: no token is bad, whatever 'enabled' says", T.platformState({ token_set: false, enabled: true }).ch === "bad" && T.platformState(null).ch === "bad");
+  check("platformState: a token but switched off is off", T.platformState({ token_set: true, enabled: false }).ch === "off");
+  check("platformState: token and enabled is on", T.platformState({ token_set: true, enabled: true }).ch === "on");
+}
+
 console.log(`${passed} passed, ${failed.length} failed`);
 process.exit(failed.length ? 1 : 0);

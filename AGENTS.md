@@ -308,7 +308,7 @@ actually render Markdown):
     python3 tests/test_channel_timed_and_instruction.py   # L.36-P6 / P12: time-limited tools and the per-person instruction
     python3 tests/test_channel_pack_p8_p9_p13_p14.py      # L.36-P8 / P9 / P13 / P14: picture grant, platform tools switch, panel DM, turned-away list
     python3 tests/test_allowed_guilds.py    # L.36-P17: allowed_guilds editor (preview-first, last entry never removable, real gate, CLI, route pinned statically)
-    python3 tests/verify_l36_guilds_ui.py   # L.36-P17: status cards with 40 servers, status dropdown, allowed-servers editor in a real browser; needs `playwright` (Python) + Chromium, prints SKIP without them
+    python3 tests/verify_l36_guilds_ui.py   # L.36-P17: Home tab (platform cards, 40 servers), status dropdown, allowed-servers editor in a real browser; needs `playwright` (Python) + Chromium, prints SKIP without them
     python3 tests/verify_l36_pack_ui.py     # L.36-P8/P9/P13/P14/P16: those panels + the add-person panel in a real browser; needs `playwright` (Python) + Chromium, prints SKIP without them
     node tests/verify_channels_panel.js     # L.36: the Channels panel's pure helpers (people list, filters, tool-scope diffing); no npm install
     node tests/verify_mcp_servers.js        # L.31: the MCP panel's pure helpers (state labels, search, filters, what a blank secret means); no npm install
