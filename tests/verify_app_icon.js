@@ -66,7 +66,11 @@ const busy0 = P.buildSvg({ brand: DEFAULT_BRAND, palette: pal, busy: true, frame
 const busy3 = P.buildSvg({ brand: DEFAULT_BRAND, palette: pal, busy: true, frame: 3 });
 check("buildSvg: busy is a different picture from idle", busy0 !== idle && busy0.includes("stroke-dasharray=\"26 94\""));
 check("buildSvg: busy still carries the skin's own mark", busy0.includes('r="11"') && busy0.includes("brand-mark__core"));
-check("buildSvg: busy uses the secondary colour", busy0.includes(pal["--accent-secondary"]));
+check("buildSvg: busy follows the skin accent, not a fixed secondary (a blue one on Verity)",
+  busy0.includes('stroke="' + pal["--accent"] + '"') && !busy0.includes(pal["--accent-secondary"]));
+check("buildSvg: no background rectangle -- the tab icon is transparent (it was a black tile)",
+  !/<rect/i.test(idle) && !/<rect/i.test(busy0));
+check("buildSvg: the busy badge has no dark disc behind it", !busy0.includes(pal["--bg"]) && busy0.includes('fill-rule="evenodd"'));
 check("buildSvg: each frame turns the arc", busy0 !== busy3 && busy3.includes("rotate(135 20 20)"), busy3.slice(0, 0));
 check("buildSvg: frames wrap around, negative or huge frames never throw",
   P.buildSvg({ brand: "", palette: pal, busy: true, frame: P.FRAME_COUNT }) === P.buildSvg({ brand: "", palette: pal, busy: true, frame: 0 })

@@ -52,11 +52,12 @@
     "--bg": "#04070d",
   };
 
-  // The logo markup is drawn in the 40x40 box of `.brand-mark`. The tile is a
-  // dark rounded square so the coloured rings read on a light AND a dark tab
-  // strip, and the mark sits slightly inside it so its outer ring isn't clipped.
+  // The logo markup is drawn in the 40x40 box of `.brand-mark`. The icon has NO
+  // background: the tile used to be a dark rounded square (the skin's --bg), which
+  // showed as a black box behind the rings in the tab. The rings are drawn straight
+  // onto the transparent canvas; the mark sits slightly inside it so its outer
+  // ring isn't clipped.
   var TILE = 40;
-  var TILE_RADIUS = 9;
   var MARK_SCALE = 0.84;
   var MARK_OFFSET = (TILE - TILE * MARK_SCALE) / 2;
 
@@ -136,19 +137,25 @@
   }
 
   // The "working" decoration: an arc turning around the outside of the tile and
-  // a badge in the secondary colour, bottom right. `frame` picks the arc's angle.
+  // a badge, bottom right. `frame` picks the arc's angle.
+  //
+  // Colour: the skin's own --accent. It used to be --accent-secondary, which on
+  // some skins is a fixed blue (Verity's is #2ea9d6) -- so the working icon kept
+  // the default blue whatever skin was picked. The badge is a ring with a hole,
+  // drawn as ONE even-odd path, so there is no dark disc behind it (the icon has
+  // no background to match any more).
   function busyDecoration(p, frame) {
     var n = ((Number(frame) || 0) % FRAME_COUNT + FRAME_COUNT) % FRAME_COUNT;
     var angle = n * (360 / FRAME_COUNT);
-    var c = p["--accent-secondary"];
+    var c = p["--accent"];
     return (
       '<g transform="rotate(' + angle + ' 20 20)">' +
         '<circle cx="20" cy="20" r="19" fill="none" stroke="' + c +
         '" stroke-width="2.4" stroke-linecap="round" stroke-dasharray="26 94"/>' +
       "</g>" +
-      '<circle cx="31" cy="31" r="7.2" fill="' + p["--bg"] + '"/>' +
-      '<circle cx="31" cy="31" r="5.6" fill="' + c + '"/>' +
-      '<circle cx="31" cy="31" r="1.9" fill="' + p["--bg"] + '"/>'
+      '<path fill="' + c + '" fill-rule="evenodd" d="' +
+        "M31 24.6a6.4 6.4 0 1 0 0 12.8a6.4 6.4 0 1 0 0-12.8z" +
+        "M31 29.1a1.9 1.9 0 1 1 0 3.8a1.9 1.9 0 1 1 0-3.8z" + '"/>'
     );
   }
 
@@ -165,7 +172,6 @@
       '<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink"' +
       ' viewBox="0 0 ' + TILE + " " + TILE + '" width="64" height="64">' +
       "<style>" + iconStyle(p) + "</style>" +
-      '<rect width="' + TILE + '" height="' + TILE + '" rx="' + TILE_RADIUS + '" fill="' + p["--bg"] + '"/>' +
       '<g transform="translate(' + MARK_OFFSET.toFixed(2) + " " + MARK_OFFSET.toFixed(2) +
       ") scale(" + MARK_SCALE + ')">' + inner + "</g>" +
       (o.busy ? busyDecoration(p, o.frame) : "") +

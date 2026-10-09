@@ -135,7 +135,8 @@ def _scope_detail(msg):
 
 
 def _ask_jarvis(text, conv_id, may_use_tools, on_tool_call=None, platform="",
-                sender_context="", sender_env="", tool_scope=None, tool_log=None):
+                sender_context="", sender_env="", tool_scope=None, tool_log=None,
+                collect_media=False, media_log=None):
     """One ask, with tools allowed or forbidden for this specific sender.
 
     Imported lazily: ai_client pulls in the whole tool catalog, and a
@@ -165,6 +166,12 @@ def _ask_jarvis(text, conv_id, may_use_tools, on_tool_call=None, platform="",
     model calls during this ask, in order, for the Conversation view. It is
     filled from the same callback the stall watchdog already uses, so it adds
     no new hook into ai_client.
+
+    `collect_media` opens jarvis.media_out's collector for this ask (the
+    gateway passes True for the OWNER only); pictures tools made are appended to
+    `media_log` as (path, kind). Opened and closed inside the same lock as the
+    environment above, so one person's screenshot can never be collected into
+    the next person's reply.
     """
     from .. import ai_client, commands_config, logs
 
@@ -241,6 +248,8 @@ def _ask_jarvis(text, conv_id, may_use_tools, on_tool_call=None, platform="",
                       "waiting behind it.")
 
         threading.Thread(target=_watch, name="ask-watchdog", daemon=True).start()
+        from .. import media_out
+        media_out.begin(allow=collect_media)
         try:
             result = ai_client.ask(
                 text,
@@ -252,6 +261,9 @@ def _ask_jarvis(text, conv_id, may_use_tools, on_tool_call=None, platform="",
             )
         finally:
             finished.set()
+            collected = media_out.end()
+            if media_log is not None:
+                media_log.extend(collected)
             # Restore exactly, including the "wasn't set at all" case —
             # leaving an empty string behind would silently disable tools
             # for every later message in this process.
@@ -428,7 +440,8 @@ def addressed_to_us(decision):
     return decision.allowed or decision.stage not in ("reachable", "self", "enabled")
 
 
-def handle_message(platform, msg, send, cfg=None, on_tool_call=None, decision=None):
+def handle_message(platform, msg, send, cfg=None, on_tool_call=None, decision=None,
+                   send_file=None):
     """Run one inbound message all the way through.
 
     `send(text)` is the gateway's own sender, called once per chunk. It
@@ -441,6 +454,11 @@ def handle_message(platform, msg, send, cfg=None, on_tool_call=None, decision=No
     gateway that had to know the verdict early (to decide whether to show
     a read receipt at all) doesn't run the gate twice. Omitting it keeps
     the original behaviour exactly: the gate runs here.
+
+    `send_file(path, name)`, if the gateway can attach files, sends one file to
+    the thread this message came from (never to anyone else). Pictures a tool
+    made during the ask -- a screenshot -- go through it AFTER the text, and only
+    for the owner (channels/media_send.py). Omitted: nothing is attached, as before.
 
     Never raises: an exception anywhere in here is logged and swallowed, on
     the principle that one malformed message must not kill a gateway that
@@ -558,11 +576,14 @@ def handle_message(platform, msg, send, cfg=None, on_tool_call=None, decision=No
 
     ask_ok, ask_error, result = True, "", None
     captured_tools, ask_since = [], _utc_stamp()
+    media_items = []
     try:
         result = _ask_jarvis(msg.text, conv_id, may_use_tools,
                              on_tool_call=on_tool_call, platform=platform,
                              sender_context=sender_ctx, sender_env=sender_env,
-                             tool_scope=tool_scope, tool_log=captured_tools)
+                             tool_scope=tool_scope, tool_log=captured_tools,
+                             collect_media=bool(send_file and is_owner),
+                             media_log=media_items)
         text = (getattr(result, "text", "") or "").strip()
         provider = getattr(result, "provider", "") or ""
         if not text:
@@ -613,7 +634,40 @@ def handle_message(platform, msg, send, cfg=None, on_tool_call=None, decision=No
                                     tool_calls=pending_tools)
             pending_tools = []
 
+    # --- pictures the tools made (L.42.3) --------------------------------------
+    # After the text, owner only, this thread only, nothing arbitrary: see
+    # channels/media_send.py. A failure here must not turn a delivered reply
+    # into an error, so it is logged and the person is told in words.
+    if media_items and send_file and is_owner:
+        _send_media(platform, msg, send, send_file, media_items, cfg, conv_id, provider)
+
     return decision
+
+
+def _send_media(platform, msg, send, send_file, items, cfg, conv_id, provider):
+    """Send collected files to the asking thread; say so for any that were not."""
+    from . import media_send
+    files, notes, temps = media_send.prepare(items, True, cfg, platform=platform,
+                                                  thread_id=msg.thread_id)
+    log_on = cfg.get("log_conversations", True)
+    try:
+        for path, name in files:
+            try:
+                send_file(path, name)
+                if log_on:
+                    transcript.log_outbound(platform, msg.thread_id, "[sent file: %s]" % name,
+                                            conv_id=conv_id, ok=True, provider=provider,
+                                            to_user=msg.user_id)
+            except Exception as exc:  # noqa: BLE001
+                _log("could not send %s: %s" % (name, exc))
+                notes.append("%s could not be sent (%s)." % (name, exc))
+        if notes:
+            try:
+                send(" ".join(notes)[:1900])
+            except Exception as exc:  # noqa: BLE001
+                _log("could not send the file notes: %s" % exc)
+    finally:
+        media_send.cleanup(temps)
 
 
 def enabled_platforms():

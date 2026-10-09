@@ -6,6 +6,8 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
+from . import media_out as _media_out
+
 CREATE_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 
 JARVIS_DIR = Path.home() / ".jarvis"
@@ -173,11 +175,15 @@ def tool_take_screenshot(args=None):
 
     _prune()
     _emit_media(path.name)
+    # A chat ask (Discord) has no web UI to show it: hand the file to the
+    # gateway's collector instead. False/no-op everywhere else (media_out.py).
+    sent_to_chat = _media_out.offer(path, "image")
     size = path.stat().st_size
     return {
         "ok": True,
         "id": fid,
         "file": path.name,
+        "sent_to_chat": sent_to_chat,
         "path": str(path),
         "width": meta.get("width"),
         "height": meta.get("height"),

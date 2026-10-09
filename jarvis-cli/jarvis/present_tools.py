@@ -150,6 +150,12 @@ def present_file(arguments):
             "path": str(path),
             "size_bytes": size_bytes,
         }
+        # In a chat gateway (Discord) a collector is open and a file the model
+        # presented goes to the owner who asked. Folders never do, and which
+        # files and how big is decided by channels/media_send.py, not here.
+        if not is_folder:
+            from . import media_out
+            result["sent_to_chat"] = media_out.offer(path, "file")
         if size_err:
             result["note"] = f"size unavailable: {size_err}"
         return result
