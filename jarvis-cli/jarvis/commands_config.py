@@ -104,4 +104,11 @@ def validate_command_spec(spec):
         val = spec.get(field)
         if val is not None and not isinstance(val, bool):
             return f"'{field}' must be true or false."
+    # L.14: optional owner-chosen labels, the same rules the daemons use
+    # (categories.py). Strict: a name that cannot be kept is refused, not trimmed.
+    if spec.get("categories") is not None:
+        from . import categories as _categories
+        _cats, cat_err = _categories.normalize_list(spec["categories"], strict=True)
+        if cat_err:
+            return f"Categories: {cat_err}."
     return None

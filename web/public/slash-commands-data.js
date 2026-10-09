@@ -697,7 +697,9 @@ window.JARVIS_SLASH_COMMANDS = /*JSON-BEGIN*/
         "daemon-schedule",
         "daemon-add",
         "daemon-edit",
-        "daemon-remove"
+        "daemon-remove",
+        "daemon-window",
+        "daemons-sync"
       ],
       "example": "/daemons",
       "preview": "Open Daemons."
@@ -952,6 +954,10 @@ window.JARVIS_SLASH_COMMANDS = /*JSON-BEGIN*/
     },
     "daemons-tick": {
       "reason": "internal supervisor hook that runs on a timer",
+      "riskTier": "caution"
+    },
+    "daemon-viewer": {
+      "reason": "the live console window's own process; it stays open until the window is closed",
       "riskTier": "caution"
     },
     "sched-daemon": {

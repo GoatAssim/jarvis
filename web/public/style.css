@@ -601,8 +601,12 @@ textarea:focus-visible, select:focus-visible, [tabindex]:focus-visible{
   display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
 }
 .cmd-card__meta{
-  display: flex; gap: 8px; margin-top: 7px;
+  /* L.14: one line. Category chips that do not fit are hidden by app.js
+     (fitCommandChips), never wrapped; the fixed badges never shrink. */
+  display: flex; flex-wrap: nowrap; gap: 8px; margin-top: 7px;
+  min-width: 0; overflow: hidden;
 }
+.cmd-card__meta > .badge{ flex: 0 0 auto; white-space: nowrap; }
 .badge{
   font-family: var(--font-mono);
   font-size: 10px; letter-spacing: 0.04em;
@@ -611,6 +615,10 @@ textarea:focus-visible, select:focus-visible, [tabindex]:focus-visible{
   border-radius: 2px; padding: 1px 6px;
 }
 .badge--cond{ color: var(--accent-secondary); border-color: rgba(var(--accent-secondary-rgb),0.35); }
+/* L.14: a command's category chip is drawn exactly like the "conditional" badge. */
+.badge--cat{ color: var(--accent-secondary); border-color: rgba(var(--accent-secondary-rgb),0.35); }
+.field__hint{ display: block; font-size: 11px; color: var(--text-dimmer); margin-top: 4px; }
+.detail__cats{ display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
 
 .empty-hint{ color: var(--text-dimmer); font-size: 13px; padding: 14px; text-align: center; }
 

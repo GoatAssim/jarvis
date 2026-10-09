@@ -92,6 +92,7 @@ RESERVED_NAMES = {
     "daemons", "daemon-start", "daemon-stop", "daemon-restart", "daemon-status",
     "daemon-console", "daemon-input", "daemon-schedule", "daemon-add",
     "daemon-edit", "daemon-remove", "daemon-run", "daemons-tick",
+    "daemon-window", "daemon-viewer", "daemons-sync",
     "logs-files", "logs-tail", "logs-sets",
     "backlog", "backlog-add", "backlog-done", "backlog-update",
     "backlog-remove", "backlog-board",

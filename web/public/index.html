@@ -159,6 +159,7 @@
           <div>
             <h2 id="detail-name">&mdash;</h2>
             <p id="detail-desc" class="detail__desc"></p>
+            <div id="detail-cats" class="detail__cats" hidden aria-label="Categories"></div>
           </div>
           <div class="detail__actions">
             <button class="btn btn--icon" id="btn-edit" type="button" title="Edit command">EDIT</button>
@@ -1171,6 +1172,12 @@
           <input type="text" id="f-desc" placeholder="What this command does" autocomplete="off">
         </label>
 
+        <div class="field" style="margin-bottom:18px;">
+          <label class="field__label" for="f-categories-input">Categories</label>
+          <div id="f-categories"></div>
+          <span class="field__hint">Optional. Label it your own way &mdash; &ldquo;deploy&rdquo;, &ldquo;git&rdquo; &mdash; and they show on the command&rsquo;s card. Up to 8, 24 characters each.</span>
+        </div>
+
         <div class="builder-section__head" style="margin-bottom:18px;">
           <label class="safety-toggle">
             <input type="checkbox" id="f-confirm-required" class="safety-toggle__input">
@@ -1858,6 +1865,10 @@
 <script src="ui-kit.js"></script>
 <script src="rich-text.js"></script>
 <script src="app-icon.js"></script>
+<!-- category-input.js BEFORE app.js and daemons.js: the Commands editor and
+     cards (L.14) and the Daemons panel (L.11) both build their category
+     chips from JarvisCategories. -->
+<script src="category-input.js"></script>
 <script src="app.js"></script>
 <script src="notifications.js"></script>
 <script src="mcp-servers.js"></script>
@@ -1870,9 +1881,6 @@
 <script src="test-checklist-data.js"></script>
 <script src="test-checklist.js"></script>
 <script src="channels-panel.js"></script>
-<!-- category-input.js BEFORE daemons.js: the Daemons panel builds its category
-     filter and editor field from JarvisCategories (L.11). -->
-<script src="category-input.js"></script>
 <script src="daemons.js"></script>
 <script src="backlog.js"></script>
 <script src="log-conversation.js"></script>

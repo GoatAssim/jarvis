@@ -21,6 +21,11 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+// L.14: the ONE JS copy of the category-name rules (the Daemons panel and the
+// Commands editor use it in the browser). Loaded for its side effect - it
+// sets globalThis.JarvisCategories when there is no window - so the server
+// validates a command's categories with exactly the rules the editor shows.
+import "./public/category-input.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PORT = Number(process.env.PORT) || 4173;
@@ -244,6 +249,19 @@ function validateSpec(spec) {
     if (spec[field] !== undefined && typeof spec[field] !== "boolean") {
       return `'${field}' must be true or false.`;
     }
+  }
+  // L.14: optional owner-chosen labels. Checked strictly (a name that cannot be
+  // kept is an error, not a silent trim) and stored in their cleaned form;
+  // an empty list is not stored at all, so a command with none stays exactly
+  // as compact as before.
+  if (spec.categories !== undefined) {
+    const cats = globalThis.JarvisCategories.normalizeList(spec.categories, true);
+    if (cats.error) {
+      const msg = String(cats.error);
+      return `Categories: ${msg.charAt(0).toLowerCase()}${msg.slice(1)}.`;
+    }
+    if (cats.list.length) spec.categories = cats.list;
+    else delete spec.categories;
   }
   return null;
 }
@@ -1867,7 +1885,8 @@ app.get("/api/daemons", requireJarvis, async (req, res) => {
 
 // Fixed verb list, same reasoning as SCHED_ACTIONS: a request body must
 // never be able to name an arbitrary `daemon-*` argv.
-const DAEMON_ACTIONS = new Set(["start", "stop", "restart", "status"]);
+// L.10: "window" opens the daemon's live console window (daemon-window).
+const DAEMON_ACTIONS = new Set(["start", "stop", "restart", "status", "window"]);
 
 app.post("/api/daemons/:id/:action", requireJarvis, async (req, res) => {
   const { id, action } = req.params;
@@ -1957,6 +1976,9 @@ app.post("/api/daemons", requireJarvis, async (req, res) => {
   if (req.body?.stdin) args.push("--stdin");
   if (req.body?.shell) args.push("--shell");
   if (req.body?.autostart) args.push("--autostart");
+  // L.10: the live console window switches (both off unless asked for).
+  if (req.body?.consoleWindowAuto === true) args.push("--console-window-auto");
+  if (req.body?.consoleWindowStopOnClose === true) args.push("--console-window-stop-on-close");
   if (req.body?.notes) args.push("--notes", String(req.body.notes));
   if (req.body?.restart !== undefined) {
     const restart = String(req.body.restart);
@@ -2004,6 +2026,11 @@ app.patch("/api/daemons/:id", requireJarvis, async (req, res) => {
     if (typeof req.body?.[key] === "boolean") {
       args.push(`--${key}`, req.body[key] ? "true" : "false");
     }
+  }
+  // L.10: camelCase on the wire, kebab-case flags on the CLI.
+  const WINDOW_FLAGS = { consoleWindowAuto: "--console-window-auto", consoleWindowStopOnClose: "--console-window-stop-on-close" };
+  for (const [key, flag] of Object.entries(WINDOW_FLAGS)) {
+    if (typeof req.body?.[key] === "boolean") args.push(flag, req.body[key] ? "true" : "false");
   }
   if (req.body?.restart !== undefined) {
     const restart = String(req.body.restart);

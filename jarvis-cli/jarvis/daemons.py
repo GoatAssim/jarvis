@@ -203,6 +203,14 @@ BUILTINS = {
     },
 }
 
+# L.10: two per-daemon display preferences. Both default off, so a daemon that
+# never had them behaves exactly as it always did (supervisor and child stay
+# hidden, H.1.1). They are not locked on a built-in: they change how the
+# owner WATCHES a service, not what runs.
+for _b in BUILTINS.values():
+    _b.setdefault("console_window_auto", False)
+    _b.setdefault("console_window_stop_on_close", False)
+
 # Legacy PID files the three built-ins write for themselves. Read (never
 # written) so a daemon someone started the old way — `jarvis sched-daemon`
 # in a terminal, a Task Scheduler entry, NSSM — still shows as running
@@ -262,6 +270,11 @@ def _load_registry():
         # is "no category" (shown as Undefined), not an error and not a
         # migration to run.
         entry["categories"] = _clean_categories(entry.get("categories"))
+        # L.10: a daemon saved before the console window existed has neither
+        # key. Absent means off.
+        entry["console_window_auto"] = bool(entry.get("console_window_auto"))
+        entry["console_window_stop_on_close"] = bool(
+            entry.get("console_window_stop_on_close"))
         merged[did] = entry
     return merged
 
@@ -495,7 +508,8 @@ def add(daemon_id, command, name="", cwd="", env=None, supports_stdin=False,
         description="", autostart=False, shell=False,
         restart=RESTART_NEVER, restart_delay=DEFAULT_RESTART_DELAY,
         max_restarts=DEFAULT_MAX_RESTARTS, stop_signal="TERM",
-        stop_timeout=DEFAULT_STOP_TIMEOUT, notes="", categories=None):
+        stop_timeout=DEFAULT_STOP_TIMEOUT, notes="", categories=None,
+        console_window_auto=False, console_window_stop_on_close=False):
     """Register a user-defined daemon.
 
     `command` may be a list (used verbatim — the safe form) or a string,
@@ -567,6 +581,10 @@ def add(daemon_id, command, name="", cwd="", env=None, supports_stdin=False,
         "stop_signal": stop_signal if stop_signal in STOP_SIGNALS else "TERM",
         "stop_timeout": max(1, int(stop_timeout or DEFAULT_STOP_TIMEOUT)),
         "notes": notes or "",
+        # L.10: show a live console window when it starts / stop the daemon
+        # when that window is closed. Both off unless asked for.
+        "console_window_auto": bool(console_window_auto),
+        "console_window_stop_on_close": bool(console_window_stop_on_close),
     }
     _save_registry(merged)
     return True, ""
@@ -575,13 +593,22 @@ def add(daemon_id, command, name="", cwd="", env=None, supports_stdin=False,
 _EDITABLE = ("name", "argv", "cwd", "env", "supports_stdin", "description",
              "enabled", "autostart", "next_start", "notes", "shell",
              "restart", "restart_delay", "max_restarts", "stop_signal",
-             "stop_timeout", "categories")
+             "stop_timeout", "categories",
+             "console_window_auto", "console_window_stop_on_close")
 
 # Fields a built-in refuses to change. All three decide what actually gets
 # executed or how: rewriting them would turn "start the scheduler" into
 # running something else, which is a privilege escalation wearing a config
 # edit's clothes.
 _BUILTIN_LOCKED = ("argv", "supports_stdin", "shell")
+
+# L.12: a daemon a TOOL supplies (entry["owner"] is the tool's name) is run
+# from the tool's own declaration, so what it runs, where and with what
+# environment belongs to the tool, not to a form. Same reasoning as
+# _BUILTIN_LOCKED, with cwd/env/description added because the tool's sync
+# re-applies them. Everything else - name, enabled, autostart, categories,
+# restart policy, notes, schedule, console window - stays the owner's.
+_OWNER_LOCKED = ("argv", "supports_stdin", "shell", "cwd", "env", "description")
 
 # Coercions for edit(), so `daemon-edit web --restart-delay 2` stores an int
 # and not the string "2" — which would compare fine and then fail at
@@ -594,6 +621,8 @@ _EDIT_COERCE = {
     "enabled": lambda v: bool(v),
     "autostart": lambda v: bool(v),
     "supports_stdin": lambda v: bool(v),
+    "console_window_auto": lambda v: bool(v),
+    "console_window_stop_on_close": lambda v: bool(v),
 }
 
 
@@ -619,6 +648,9 @@ def edit(daemon_id, **fields):
         # a config edit.
         if builtin and key in _BUILTIN_LOCKED:
             return False, f"'{key}' can't be changed on a built-in daemon"
+        if entry.get("owner") and key in _OWNER_LOCKED:
+            return False, (f"'{key}' is set by the tool '{entry['owner']}' "
+                           "and can't be changed here")
         if key == "argv" and isinstance(value, str):
             # Same shell rule as add(): a shell command is kept verbatim.
             # `fields` is a dict so `shell` may or may not be in this same
@@ -662,6 +694,22 @@ def remove(daemon_id):
     merged = _load_registry()
     if did not in merged:
         return False, f"no daemon '{did}'"
+    if merged[did].get("owner"):
+        return False, (f"'{did}' is supplied by the tool "
+                       f"'{merged[did]['owner']}' - uninstall that tool, or "
+                       "switch this daemon off (enabled) instead")
+    del merged[did]
+    _save_registry(merged)
+    return True, ""
+
+
+def remove_owned(daemon_id):
+    """Remove a tool-supplied daemon. Only tool_daemons.sync() calls this: a
+    person removing one by hand would just see it come back on the next sync."""
+    did = normalize_id(daemon_id)
+    merged = _load_registry()
+    if did not in merged or not merged[did].get("owner"):
+        return False, f"'{did}' is not a tool-supplied daemon"
     del merged[did]
     _save_registry(merged)
     return True, ""
@@ -930,6 +978,10 @@ def describe(entry):
     out["id"] = did
     out["builtin"] = bool(entry.get("builtin"))
     out["command"] = " ".join(_display_argv(entry.get("argv") or []))
+    out["console_window_auto"] = bool(entry.get("console_window_auto"))
+    out["console_window_stop_on_close"] = bool(
+        entry.get("console_window_stop_on_close"))
+    out["console_window_open"] = _console_window_pid(did) is not None
     return out
 
 
@@ -1044,7 +1096,91 @@ def start(daemon_id):
     # every tick from now until the end of time.
     if entry.get("next_start"):
         edit(did, next_start="")
-    return True, f"starting '{did}' (supervisor pid {proc.pid})"
+    message = f"starting '{did}' (supervisor pid {proc.pid})"
+    # L.10: the owner asked to watch this one. A failure to open the window
+    # never fails the start - the daemon is up either way - it is just said.
+    if entry.get("console_window_auto"):
+        opened, why = open_console_window(did)
+        if not opened:
+            message += f" (console window not opened: {why})"
+    return True, message
+
+
+
+# ---------------------------------------------------------------------------
+# L.10: the live console window
+#
+# A SEPARATE process - `jarvis daemon-viewer <id>` (daemon_viewer.py) - in its
+# own console window, tailing console.log and relaying typed lines to the
+# daemon's stdin. The supervisor and the child stay windowless exactly as
+# H.1.1 made them: closing the window never kills the daemon by itself, and
+# a daemon with both switches off never shows one.
+# ---------------------------------------------------------------------------
+
+CREATE_NEW_CONSOLE = getattr(subprocess, "CREATE_NEW_CONSOLE", 0x00000010)
+
+
+def _console_window_pid(daemon_id):
+    """Pid of the viewer window if one is genuinely open, else None."""
+    pid = _read_status(daemon_id).get("console_window_pid")
+    try:
+        pid = int(pid)
+    except (TypeError, ValueError):
+        return None
+    if pid <= 0 or pid == os.getpid() or not pid_alive(pid):
+        return None
+    return pid
+
+
+def note_console_window(daemon_id, pid):
+    """The viewer records itself (pid=None clears it) so a second open finds
+    it instead of stacking another window on top."""
+    _write_status(daemon_id, console_window_pid=pid)
+
+
+def open_console_window(daemon_id):
+    """Open the live console window for a daemon. Returns (ok, message).
+
+    Windows only - it is a real console window. Already open counts as
+    success (nothing to do), and says so.
+    """
+    did = normalize_id(daemon_id)
+    if not _load_registry().get(did):
+        return False, f"no daemon '{did}'"
+    if not _on_windows():
+        return False, "the console window is Windows-only"
+    if _console_window_pid(did):
+        return True, f"the console window for '{did}' is already open"
+    argv = _jarvis_argv() + ["daemon-viewer", did]
+    try:
+        # No stdio redirection and close_fds: the new console supplies its
+        # own handles, and nothing of THIS process's (the web server's pipes
+        # when the request came from the panel) leaks into the window.
+        subprocess.Popen(argv, creationflags=CREATE_NEW_CONSOLE,
+                         close_fds=True)
+    except OSError as exc:
+        return False, f"could not open a console window: {exc}"
+    return True, f"opening the console window for '{did}'"
+
+
+def request_stop(daemon_id):
+    """Ask a daemon to stop WITHOUT waiting for it. Used by the viewer window
+    on close, where Windows gives the process only a few seconds: the
+    supervisor sees the flag and shuts the child down on its own schedule
+    (its own stop_timeout), which is gentler than a force-kill at our
+    deadline."""
+    did = normalize_id(daemon_id)
+    if not _load_registry().get(did):
+        return False, f"no daemon '{did}'"
+    if not status(did).get("supervisor_pid") and not status(did).get("running"):
+        return True, f"'{did}' is not running"
+    try:
+        daemon_dir(did).mkdir(parents=True, exist_ok=True)
+        stop_flag_path(did).write_text(str(time.time()), encoding=ENCODING)
+    except OSError as exc:
+        return False, f"could not request stop: {exc}"
+    _write_status(did, stop_requested=True)
+    return True, f"stop requested for '{did}'"
 
 
 def _reap(pid):
@@ -1323,6 +1459,14 @@ def autostart_all():
     instead of the daemon silently staying down.
     """
     results = []
+    # L.12: make sure the daemons installed tools declare are registered
+    # before deciding what to start, so a tool's autostart preset applies on
+    # the first startup after it was installed. Never fatal.
+    try:
+        from . import tool_daemons
+        tool_daemons.sync_if_stale()
+    except Exception:  # noqa: BLE001 - a broken tool must not stop autostart
+        pass
     for entry in _load_registry().values():
         if not entry.get("autostart") or not entry.get("enabled", True):
             continue

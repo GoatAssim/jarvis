@@ -19,7 +19,7 @@ COMMANDS = (
     "daemons", "daemon-start", "daemon-stop", "daemon-restart",
     "daemon-status", "daemon-console", "daemon-input", "daemon-schedule",
     "daemon-add", "daemon-edit", "daemon-remove", "daemon-run",
-    "daemons-tick",
+    "daemons-tick", "daemon-window", "daemon-viewer", "daemons-sync",
     "logs-files", "logs-tail", "logs-sets",
     "backlog", "backlog-add", "backlog-done", "backlog-update",
     "backlog-remove", "backlog-board",
@@ -43,6 +43,7 @@ USAGE = """workspace commands:
                      [--stop-signal TERM|INT|KILL] [--stop-timeout S]
                      [--autostart] [--description D]
                      [--category NAME ...]   # repeatable; up to 8, 24 chars each
+                     [--console-window-auto] [--console-window-stop-on-close]
   daemon-edit   <id> [--name N] [--description D] [--cwd D] [--enabled true|false]
                      [--autostart true|false] [--command C] [--shell true|false]
                      [--restart P] [--restart-delay S] [--max-restarts N]
@@ -50,9 +51,14 @@ USAGE = """workspace commands:
                      [--env-replace]   # env becomes exactly the given --env pairs
                      [--category NAME ...]   # the whole set is replaced, not merged
                      [--clear-categories]    # remove them all (shown as "Undefined")
+                     [--console-window-auto true|false]
+                     [--console-window-stop-on-close true|false]
   daemon-remove <id>
   daemon-run    <id>                   THE SUPERVISOR — runs in the foreground
   daemons-tick                         start whatever is scheduled and due
+  daemon-window <id>                   open its live console window (Windows)
+  daemon-viewer <id>                   THE WINDOW'S OWN PROCESS - stays open
+  daemons-sync [--force]               register/remove the daemons tools supply
 
   logs-files <query> [--mode words|phrase|regex] [--set S] [--path P]
                      [--context N] [--limit N]
@@ -140,6 +146,14 @@ def handle(argv):
 
     # --- daemons -----------------------------------------------------------
     if cmd == "daemons":
+        # L.12: pick up tools that were installed, changed or removed since
+        # the last look. A cheap fingerprint check; a failure never hides the
+        # list itself.
+        try:
+            from . import tool_daemons
+            tool_daemons.sync_if_stale()
+        except Exception:  # noqa: BLE001
+            pass
         # `--no-usage` skips the CPU / memory sampling (about a third of a
         # second); the web panel wants it, a script that only reads states may not.
         if "no-usage" in flags:
@@ -234,6 +248,8 @@ def handle(argv):
                                   daemons.DEFAULT_STOP_TIMEOUT),
                 notes=_one(flags, "notes", ""),
                 categories=cats,
+                console_window_auto="console-window-auto" in flags,
+                console_window_stop_on_close="console-window-stop-on-close" in flags,
             )
         except (TypeError, ValueError) as exc:
             _fail(f"bad value: {exc}")
@@ -260,6 +276,11 @@ def handle(argv):
             fields["supports_stdin"] = _bool(_one(flags, "stdin"), True)
         if "notes" in flags:
             fields["notes"] = _one(flags, "notes")
+        if "console-window-auto" in flags:
+            fields["console_window_auto"] = _bool(_one(flags, "console-window-auto"), True)
+        if "console-window-stop-on-close" in flags:
+            fields["console_window_stop_on_close"] = _bool(
+                _one(flags, "console-window-stop-on-close"), True)
         if "shell" in flags:
             fields["shell"] = _bool(_one(flags, "shell"), True)
         if "restart" in flags:
@@ -330,6 +351,27 @@ def handle(argv):
 
     if cmd == "daemons-tick":
         _emit({"ok": True, "started": daemons.tick()})
+        return
+
+    if cmd == "daemon-window":
+        if not positional:
+            _fail("usage: daemon-window <id>")
+        ok, message = daemons.open_console_window(positional[0])
+        _emit({"ok": ok, "id": positional[0], "message": message}, 0 if ok else 1)
+        return
+
+    if cmd == "daemon-viewer":
+        # The process that lives in the console window. Like daemon-run it
+        # blocks until it is closed, and it prints for a human, not JSON.
+        if not positional:
+            _fail("usage: daemon-viewer <id>")
+        from . import daemon_viewer
+        sys.exit(daemon_viewer.run_viewer(positional[0]))
+
+    if cmd == "daemons-sync":
+        from . import tool_daemons
+        result = tool_daemons.sync_if_stale(force="force" in flags)
+        _emit({"ok": True, "changed": result is not None, "result": result})
         return
 
     # --- raw log search ----------------------------------------------------

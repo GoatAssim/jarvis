@@ -408,6 +408,7 @@
       e.max_restarts, e.last_error, e.exit_code, e.next_start, e.enabled, e.autostart,
       e.supports_stdin, e.command, e.cwd, e.description, e.notes, e.shell, e.restart,
       e.restart_delay, e.stop_signal, e.stop_timeout, e.started_at, e.env, e.categories,
+      e.console_window_auto, e.console_window_stop_on_close, e.console_window_open, e.owner, e.dormant,
     ]);
   }
 
@@ -622,6 +623,8 @@
       enabled: e.enabled !== false,
       notes: e.notes || "",
       categories: categoriesOf(e),
+      consoleWindowAuto: Boolean(e.console_window_auto),
+      consoleWindowStopOnClose: Boolean(e.console_window_stop_on_close),
     };
   }
 
@@ -629,6 +632,7 @@
     return draftFromEntry({
       id: "", name: "", description: "", command: "", shell: false, cwd: "", env: {},
       supports_stdin: false, autostart: false, enabled: true, notes: "", categories: [],
+      console_window_auto: false, console_window_stop_on_close: false,
     });
   }
 
@@ -707,6 +711,8 @@
     if (String(draft.cwd).trim()) body.cwd = String(draft.cwd).trim();
     if (String(draft.notes).trim()) body.notes = String(draft.notes).trim();
     if ((draft.categories || []).length) body.categories = draft.categories.slice();
+    if (draft.consoleWindowAuto) body.consoleWindowAuto = true;
+    if (draft.consoleWindowStopOnClose) body.consoleWindowStopOnClose = true;
     return body;
   }
 
@@ -716,10 +722,14 @@
   // whole save.
   function buildEditPayload(draft, initial, opts) {
     const builtin = Boolean(opts && opts.builtin);
+    // L.12: a daemon a tool supplies. What it runs (command, shell, stdin, working
+    // directory, environment, description) belongs to the tool and daemons.edit()
+    // refuses all of it, even unchanged - so none of it is sent.
+    const owned = Boolean(opts && opts.owned);
     const body = {};
     const str = (key) => { if (String(draft[key]).trim() !== String(initial[key]).trim()) body[key] = String(draft[key]).trim(); };
-    ["name", "description", "cwd", "notes"].forEach(str);
-    if (!builtin) {
+    (owned ? ["name", "notes"] : ["name", "description", "cwd", "notes"]).forEach(str);
+    if (!builtin && !owned) {
       if (String(draft.command).trim() !== String(initial.command).trim()) body.command = String(draft.command).trim();
       if (Boolean(draft.shell) !== Boolean(initial.shell)) body.shell = Boolean(draft.shell);
       if (Boolean(draft.stdin) !== Boolean(initial.stdin)) body.stdin = Boolean(draft.stdin);
@@ -738,9 +748,13 @@
     if (JSON.stringify(draft.categories || []) !== JSON.stringify(initial.categories || [])) {
       body.categories = (draft.categories || []).slice();
     }
+    // L.10: the live console window switches (a display preference, so they apply to
+    // built-ins and tool-supplied daemons too).
+    if (Boolean(draft.consoleWindowAuto) !== Boolean(initial.consoleWindowAuto)) body.consoleWindowAuto = Boolean(draft.consoleWindowAuto);
+    if (Boolean(draft.consoleWindowStopOnClose) !== Boolean(initial.consoleWindowStopOnClose)) body.consoleWindowStopOnClose = Boolean(draft.consoleWindowStopOnClose);
     const a = JSON.stringify(envPairs(draft.env));
     const b = JSON.stringify(envPairs(initial.env));
-    if (a !== b) { body.env = envPairs(draft.env); body.envReplace = true; }
+    if (!owned && a !== b) { body.env = envPairs(draft.env); body.envReplace = true; }
     return body;
   }
 
@@ -1239,6 +1253,8 @@
     const tags = [
       crashBadge(entry),
       entry.adopted ? el("span", { class: "dmn-tag dmn-tag--info", title: "Started outside Jarvis; Jarvis can see it but didn't launch it." }, "Outside Jarvis") : null,
+      entry.owner ? el("span", { class: "dmn-tag dmn-tag--info", title: `Supplied by the tool \u201C${entry.owner}\u201D.` }, `Tool: ${entry.owner}`) : null,
+      entry.dormant ? el("span", { class: "dmn-tag", title: "Its tool is switched off or not loading, so this is off too. It comes back when the tool does." }, "Tool off") : null,
       next && b !== "running" ? el("span", { class: "dmn-tag dmn-tag--info", title: `Scheduled start ${next.label}` }, `\u25D4 ${next.label.slice(5)}`) : null,
     ].filter(Boolean);
     return el("button", {
@@ -1690,6 +1706,8 @@
         entry.description ? el("div", { class: "dmn-does" }, entry.description) : null,
         el("div", { class: "dmn-badges" }, [
           entry.adopted ? badge("Started outside Jarvis", "info", "Jarvis can see this process but didn't launch it, so its output isn't captured here.") : null,
+          entry.owner ? badge(`Tool: ${entry.owner}`, "info", "Supplied by an installed tool. What it runs is the tool\u2019s; you can still rename it, switch it off, and change its categories and restart policy.") : null,
+          entry.dormant ? badge("Tool off", "warn", "Its tool is switched off or not loading, so this is off too. It comes back when the tool does.") : null,
           entry.supports_stdin ? badge("Reads stdin") : null,
           entry.shell ? badge("Via shell") : null,
           badge(restartSummary(entry), e.restart === "never" ? null : "info"),
@@ -1768,12 +1786,20 @@
         onclick: () => runAction(entry.id, "restart"),
       }),
       act("edit", "\u270E", "Edit", "E", { onclick: () => openEditor("edit", entry.id) }),
+      // L.10: a live console window (Windows). Opens the viewer; the service
+      // itself stays hidden. Works whether or not it is running.
+      act("window", "\u29C9", entry.console_window_open ? "Console open" : "Console window", "", {
+        title: "Open a live console window for this service (Windows). Closing it leaves the service running unless you turned on \u201CStop it when the window closes\u201D.",
+        onclick: () => openConsoleWindow(entry.id),
+      }),
       act("favorite", isFavorite(entry.id) ? "\u2605" : "\u2606", isFavorite(entry.id) ? "Favorited" : "Favorite", "*", {
         title: isFavorite(entry.id) ? "Remove from favorites" : "Add to favorites",
         onclick: () => toggleFavorite(entry.id),
       }),
     ];
-    if (!entry.builtin) {
+    // A tool-supplied daemon is removed by uninstalling its tool (L.12): removing
+    // it here would just bring it back on the next sync.
+    if (!entry.builtin && !entry.owner) {
       buttons.push(act("remove", "\u2715", busy === "remove" ? verb.remove : "Remove", "", {
         danger: true, onclick: () => runAction(entry.id, "remove"),
       }));
@@ -2131,6 +2157,7 @@
       kv("Working directory", entry.cwd ? entry.cwd : el("span", { class: "dmn-dim" }, "Jarvis\u2019s own folder"), { mono: true }),
       kv("Run via shell", entry.shell ? "Yes" : "No"),
       kv("Reads stdin", entry.supports_stdin ? "Yes" : "No"),
+      entry.owner ? kv("Supplied by", `The tool \u201C${entry.owner}\u201D`) : null,
       kv("Restart policy", restartSummary(entry)),
       kv("When stopped", stopSummary(entry)),
       kv("Environment", envNode, { wide: true }),
@@ -2148,6 +2175,10 @@
     det.quick.appendChild(el("div", { class: "dmn-switches" }, [
       switchNode(e.enabled, "Enabled", "A disabled service can\u2019t be started or scheduled.", (on, input) => quickPatch(entry.id, { enabled: on }, on ? "Enabled" : "Disabled", input)),
       switchNode(Boolean(entry.autostart), "Autostart", "Starts it each time Jarvis starts (the web console or the scheduler coming up). One you stopped by hand stays stopped until then.", (on, input) => quickPatch(entry.id, { autostart: on }, on ? "Autostart on" : "Autostart off", input)),
+      // L.10: the live console window (Windows). Display preferences, so they are
+      // never locked - not on a built-in, not on a tool-supplied daemon.
+      switchNode(Boolean(entry.console_window_auto), "Console window on start", "Opens a live console window each time it starts (Windows). The service itself stays hidden; the window only follows its output.", (on, input) => quickPatch(entry.id, { consoleWindowAuto: on }, on ? "Console window on start: on" : "Console window on start: off", input)),
+      switchNode(Boolean(entry.console_window_stop_on_close), "Stop it when the window closes", "Closing that window \u2014 or pressing Ctrl+C in it \u2014 asks the service to stop. Off: closing it just closes the window.", (on, input) => quickPatch(entry.id, { consoleWindowStopOnClose: on }, on ? "Closing the window now stops it" : "Closing the window leaves it running", input)),
     ]));
     det.quick.appendChild(el("div", { class: "dmn-note" }, "For anything else \u2014 command, restart policy, environment \u2014 use Edit. Changes apply the next time it starts."));
     if (focusedSwitch >= 0) {
@@ -2194,7 +2225,8 @@
     if (mode === "edit" && !entry) { toast("Pick a service to edit first.", "warn"); return; }
     const initial = mode === "edit" ? draftFromEntry(entry) : blankDraft();
     state.editor = {
-      mode, id: entry ? entry.id : "", builtin: Boolean(entry && entry.builtin), entry,
+      mode, id: entry ? entry.id : "", builtin: Boolean(entry && entry.builtin),
+      owned: Boolean(entry && entry.owner), entry,
       initial, draft: JSON.parse(JSON.stringify(initial)),
       touched: new Set(), attempted: false, saving: false, showEnv: false, error: "", validation: null,
     };
@@ -2348,6 +2380,7 @@
     const ed = state.editor;
     const d = ed.draft;
     const builtin = ed.builtin;
+    const owned = Boolean(ed.owned);
     const title = ed.mode === "add" ? "Add a daemon" : `Edit \u2014 ${displayName(ed.entry)}`;
 
     const form = el("div", { class: "dmn-form", "data-role": "editor" });
@@ -2374,29 +2407,42 @@
         })(),
         field("name", "Display name", textInput("name", { attrs: { placeholder: ed.mode === "add" ? "optional \u2014 defaults to the id" : "" } }), null),
       ]),
-      field("description", "Description", textInput("description", { area: true, rows: 2, attrs: { placeholder: "optional \u2014 shown under the name" } }), null, true),
+      owned
+        ? el("div", { class: "dmn-field dmn-field--wide" }, [
+          el("div", { class: "dmn-field__label" }, "Description"),
+          el("div", { class: "dmn-notes" }, ed.entry.description || "\u2014"),
+          lockedNote(`Set by the tool \u201C${ed.entry.owner}\u201D.`),
+        ])
+        : field("description", "Description", textInput("description", { area: true, rows: 2, attrs: { placeholder: "optional \u2014 shown under the name" } }), null, true),
       categoryField(),
     ]);
 
     // command
     const commandSec = el("section", { class: "dmn-fsec" }, [
       el("h4", { class: "dmn-section-title" }, "Command"),
-      builtin
+      (builtin || owned)
         ? el("div", { class: "dmn-field dmn-field--wide" }, [
           el("div", { class: "dmn-field__label" }, "Command"),
           el("code", { class: "dmn-cmd dmn-cmd--block" }, ed.entry.command),
-          lockedNote("Owned by Jarvis \u2014 a built-in\u2019s command, shell mode and stdin can\u2019t be changed."),
+          lockedNote(owned
+            ? `Set by the tool \u201C${ed.entry.owner}\u201D \u2014 what it runs, where, and with which environment belongs to the tool. Switch the service off, or uninstall the tool, to stop it.`
+            : "Owned by Jarvis \u2014 a built-in\u2019s command, shell mode and stdin can\u2019t be changed."),
         ])
         : field("command", "Command", textInput("command", { mono: true, attrs: { placeholder: "node server.js --port 3000" } }),
           ed.mode === "edit"
             ? "Shown as stored \u2014 quote any argument that contains spaces. Runs without a shell unless you tick the box below."
             : "Runs without a shell: arguments split on spaces, quote paths that contain spaces. Tick \u201Crun via shell\u201D for pipes and redirects.", true),
       el("div", { class: "dmn-grid" }, [
-        field("cwd", "Working directory", textInput("cwd", { mono: true, attrs: { placeholder: "optional \u2014 blank uses Jarvis\u2019s own folder" } }),
-          "Must already exist, or it crashes immediately."),
+        owned
+          ? el("div", { class: "dmn-field" }, [
+            el("div", { class: "dmn-field__label" }, "Working directory"),
+            el("code", { class: "dmn-cmd" }, ed.entry.cwd || "\u2014"),
+          ])
+          : field("cwd", "Working directory", textInput("cwd", { mono: true, attrs: { placeholder: "optional \u2014 blank uses Jarvis\u2019s own folder" } }),
+            "Must already exist, or it crashes immediately."),
         el("div", { class: "dmn-field" }, [
-          checkInput("shell", "Run via shell", "cmd.exe / sh interprets the command, so pipes and redirects work.", builtin),
-          checkInput("stdin", "Reads stdin", "Lets you type lines into it from the Console.", builtin),
+          checkInput("shell", "Run via shell", "cmd.exe / sh interprets the command, so pipes and redirects work.", builtin || owned),
+          checkInput("stdin", "Reads stdin", "Lets you type lines into it from the Console.", builtin || owned),
         ]),
       ]),
     ]);
@@ -2405,7 +2451,12 @@
     ed.envList = el("div", { class: "dmn-env-list" });
     const showToggle = el("button", { class: "dmn-link", type: "button" }, "Show values");
     showToggle.addEventListener("click", () => { ed.showEnv = !ed.showEnv; showToggle.textContent = ed.showEnv ? "Hide values" : "Show values"; renderEnvRows(); revalidate(); });
-    const envSec = el("section", { class: "dmn-fsec" }, [
+    const envSec = owned
+      ? el("section", { class: "dmn-fsec" }, [
+        el("h4", { class: "dmn-section-title" }, "Environment variables"),
+        lockedNote(`Set by the tool \u201C${ed.entry.owner}\u201D (${Object.keys(ed.entry.env || {}).length} variable${Object.keys(ed.entry.env || {}).length === 1 ? "" : "s"}). They are shown, masked, under Details.`),
+      ])
+      : el("section", { class: "dmn-fsec" }, [
       el("h4", { class: "dmn-section-title" }, "Environment variables"),
       ed.envList,
       el("div", { class: "dmn-row" }, [
@@ -2464,6 +2515,8 @@
       el("h4", { class: "dmn-section-title" }, "Options"),
       checkInput("autostart", "Autostart", "Starts it each time Jarvis starts (the web console or the scheduler coming up). One you stopped by hand stays stopped until then."),
       ed.mode === "edit" ? checkInput("enabled", "Enabled", "A disabled service can\u2019t be started or scheduled.") : null,
+      checkInput("consoleWindowAuto", "Open a console window when it starts", "Windows. A live console window follows its output (and takes what you type, if it reads stdin). The service itself stays hidden."),
+      checkInput("consoleWindowStopOnClose", "Stop it when that window is closed", "Closing the window, or pressing Ctrl+C in it, asks the service to stop. Off: closing it only closes the window."),
       field("notes", "Notes", textInput("notes", { area: true, rows: 3, attrs: { placeholder: "anything worth remembering about this service" } }), null, true),
     ]);
 
@@ -2512,7 +2565,7 @@
 
     let body;
     if (ed.mode === "edit") {
-      body = buildEditPayload(ed.draft, ed.initial, { builtin: ed.builtin });
+      body = buildEditPayload(ed.draft, ed.initial, { builtin: ed.builtin, owned: ed.owned });
       if (!Object.keys(body).length) { toast("Nothing has changed.", "info"); return; }
     } else {
       body = buildAddPayload(ed.draft);
@@ -2746,6 +2799,18 @@
       setTimeout(() => { if (isOpen()) refreshAll(); }, 1200);
       setTimeout(() => { if (isOpen()) refreshAll(); }, 3500);
     }
+  }
+
+  async function openConsoleWindow(id) {
+    const entry = entryById(id);
+    if (!entry) return;
+    try {
+      const data = await Api.post(`/api/daemons/${enc(id)}/window`);
+      toast(data && data.message ? data.message : "Opening the console window\u2026", "info");
+    } catch (err) {
+      toast(err.message || "Couldn\u2019t open the console window.", "error");
+    }
+    setTimeout(() => { if (isOpen()) refreshAll(); }, 1500);
   }
 
   async function quickPatch(id, fields, label, input) {
