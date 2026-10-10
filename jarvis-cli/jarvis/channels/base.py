@@ -722,6 +722,17 @@ def handle_message(platform, msg, send, cfg=None, on_tool_call=None, decision=No
         except Exception as exc:  # noqa: BLE001
             _log(f"reply watch failed: {exc}")
 
+    # --- summaries of this person's finished conversations (L.21 P4) -------
+    # Also AFTER the answer, and in a background thread: it may read the
+    # person's old logs and make one small model call, and the reply must not
+    # wait for either. It writes `proposed` records only (see episodes.py).
+    if not is_owner and cfg.get("log_conversations", True):
+        try:
+            from . import episodes
+            episodes.run_in_background(platform, msg.user_id)
+        except Exception as exc:  # noqa: BLE001
+            _log(f"episode summaries failed: {exc}")
+
     return decision
 
 

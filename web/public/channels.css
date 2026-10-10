@@ -427,6 +427,9 @@
 .ch-notes--edit li > .ch-confirm, .ch-notes--edit li > .ch-name-edit{ flex: 1; margin-top: 0; }
 .ch-note__text{ flex: 1; min-width: 0; overflow-wrap: anywhere; }
 .ch-note__btns{ display: flex; gap: 2px; flex-shrink: 0; }
+/* Memory tab (L.21 P6): the meta line sits under the text; buttons may wrap on a phone. */
+.ch-note__text > .ch-row__hint{ margin-top: 2px; }
+#ch-pane-memory .ch-note__btns{ gap: 6px; flex-wrap: wrap; justify-content: flex-end; align-items: center; }
 .ch-iconbtn--danger:hover, .ch-iconbtn--danger:focus-visible{ color: var(--red); }
 .ch-confirm--col{ flex-direction: column; align-items: stretch; gap: 10px; }
 .ch-forget__list{ margin: 0; padding-left: 18px; display: flex; flex-direction: column; gap: 3px; font-size: 12px; color: var(--text-dim); line-height: 1.5; }

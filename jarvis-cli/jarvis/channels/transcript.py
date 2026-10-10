@@ -499,6 +499,117 @@ def purge_person(platform, user_id):
             "left_in_groups": in_groups}
 
 
+# ---------------------------------------------------------------------------
+# One person's conversations, cut into episodes  (L.21 P4)
+# ---------------------------------------------------------------------------
+# An EPISODE is a run of one person's messages in one thread with no gap longer
+# than `gap_seconds`. channels/episodes.py summarizes the finished ones. This
+# is the same attribution rule as `person_records` above (their inbound lines;
+# replies with their `to_user`; a reply with no `to_user` only in a thread that
+# is theirs alone) -- restated here because it also has to remember WHERE each
+# line sits in its file, which `person_records` does not. A parity test in
+# tests/test_episodes.py keeps the two from drifting.
+#
+# Two kinds of line are left out: a message the gate turned away (nobody
+# answered it, and the person was not accepted), and a reply that failed to
+# send. Read-only: nothing here writes, rotates or creates a file.
+
+EPISODE_GAP_SECONDS = 6 * 3600
+
+
+def _epoch(at):
+    try:
+        return datetime.fromisoformat(str(at)).timestamp()
+    except (TypeError, ValueError):
+        return None
+
+
+def person_episodes(platform, user_id, gap_seconds=EPISODE_GAP_SECONDS):
+    """Every episode this person has, oldest first.
+
+    Each is {thread, conv_id, file, line_range, from, to, from_ts, to_ts,
+    inbound, outbound, messages}. `messages` is [(who, text)] with who
+    "person" or "jarvis", oldest first. `from`/`to` are the log's own
+    timestamps (the stable pointer); `file` and `line_range` locate the
+    segment's lines in the first file it touches (a rotated log can split one
+    segment across two files, in which case `line_range` stops at the end of
+    the first)."""
+    uid = str(user_id or "").strip()
+    out = []
+    if not uid or platform not in PLATFORMS:
+        return out
+    for thread, paths in _thread_groups(platform).items():
+        rows = []                  # (record, file name, line number)
+        for path in paths:
+            try:
+                text = path.read_text(encoding=ENCODING)
+            except (OSError, UnicodeDecodeError):
+                continue
+            for number, line in enumerate(text.splitlines(), 1):
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    record = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if isinstance(record, dict):
+                    rows.append((record, path.name, number))
+        inbound = [r for r, _f, _n in rows if r.get("dir") == "in"]
+        senders = {str(r.get("user_id") or "") for r in inbound}
+        if uid not in senders and not any(
+                str(r.get("to_user") or "") == uid for r, _f, _n in rows):
+            continue
+        solo = (senders == {uid}
+                and all(r.get("context") == "dm" for r in inbound))
+        mine = []
+        for record, fname, number in rows:
+            text = str(record.get("text") or "").strip()
+            when = _epoch(record.get("at"))
+            if not text or when is None:
+                continue
+            if record.get("dir") == "in":
+                if (str(record.get("user_id") or "") == uid
+                        and record.get("allowed") is not False):
+                    mine.append(("person", record, fname, number, when))
+            elif record.get("dir") == "out" and record.get("ok") is not False:
+                to = str(record.get("to_user") or "")
+                if (to and to == uid) or (not to and solo):
+                    mine.append(("jarvis", record, fname, number, when))
+        mine.sort(key=lambda item: item[4])
+        segment = []
+        for item in mine:
+            if segment and item[4] - segment[-1][4] > gap_seconds:
+                out.append(_episode(thread, segment))
+                segment = []
+            segment.append(item)
+        if segment:
+            out.append(_episode(thread, segment))
+    out.sort(key=lambda ep: ep["from_ts"])
+    return out
+
+
+def _episode(thread, segment):
+    first = segment[0]
+    same_file = [n for _w, _r, f, n, _t in segment if f == first[2]]
+    conv = next((str(r["conv_id"]) for _w, r, _f, _n, _t in segment
+                 if r.get("conv_id")), "")
+    return {
+        "thread": thread,
+        "conv_id": conv,
+        "file": first[2],
+        "line_range": [min(same_file), max(same_file)],
+        "from": str(first[1].get("at") or ""),
+        "to": str(segment[-1][1].get("at") or ""),
+        "from_ts": first[4],
+        "to_ts": segment[-1][4],
+        "inbound": sum(1 for w, *_ in segment if w == "person"),
+        "outbound": sum(1 for w, *_ in segment if w == "jarvis"),
+        "messages": [(w, str(r.get("text") or "").strip())
+                     for w, r, _f, _n, _t in segment],
+    }
+
+
 def _clip(text):
     text = "" if text is None else str(text)
     if len(text) > MAX_TEXT_CHARS:

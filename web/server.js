@@ -1534,8 +1534,9 @@ app.post("/api/channels/people/:platform/:id/instruction", requireJarvis, async 
 // Thinking switch (L.44) and what Jarvis keeps about one person (L.21). Both
 // proxy the CLI like every route above, so the terminal and the panel cannot
 // disagree. The switch takes {value: "on"|"off"|"default", lock: boolean};
-// the memory route is read-only (writing goes through the owner's own tools or
-// `jarvis channels-memory`). No panel control uses either yet.
+// the memory routes read what is kept (GET) and let the owner add, approve,
+// retire and forget records and ask for summaries of past conversations
+// (POST, below). The switch has no panel control yet.
 app.post("/api/channels/people/:platform/:id/thinking", requireJarvis, async (req, res) => {
   const who = channelPersonArgs(req, res);
   if (!who) return;
@@ -1553,6 +1554,61 @@ app.get("/api/channels/people/:platform/:id/memory", requireJarvis, async (req, 
   if (!who) return;
   sendChannelResult(await runJarvisOnce(
     ["channels-memory", who.platform, who.id, "list"], 10000), res);
+});
+
+// People view (L.21 P6). Same proxy rules as every route above: argv arrays
+// only, every value validated first, the CLI does the work. A record id is the
+// 8 hex characters the store makes; a fact is one line of up to 300 characters
+// that cannot start with "-" (the CLI would read it as a flag). Owner-side only:
+// nothing here is reachable from a chat. `approve` is what lets a summary of a
+// guest's conversation reach the model (see channels/episodes.py), so it is the
+// owner's click and nothing else.
+const CHANNEL_MEMORY_ID = /^[a-f0-9]{8}$/;
+const CHANNEL_MEMORY_OK = (v) => typeof v === "string" && v.trim().length > 0 && v.length <= 300 && !/[\x00-\x1f\x7f]/.test(v) && !v.trim().startsWith("-");
+app.get("/api/channels/people/:platform/:id/memory/episodes", requireJarvis, async (req, res) => {
+  const who = channelPersonArgs(req, res);
+  if (!who) return;
+  sendChannelResult(await runJarvisOnce(
+    ["channels-memory", who.platform, who.id, "episodes"], 15000), res);
+});
+
+app.post("/api/channels/people/:platform/:id/memory", requireJarvis, async (req, res) => {
+  const who = channelPersonArgs(req, res);
+  if (!who) return;
+  const action = req.body?.action;
+  if (!["add", "approve", "retire", "forget", "summarize"].includes(action)) {
+    return res.status(400).json({ error: "action must be add, approve, retire, forget or summarize." });
+  }
+  const args = ["channels-memory", who.platform, who.id, action];
+  let timeout = 10000;
+  if (action === "add") {
+    if (!CHANNEL_MEMORY_OK(req.body?.text)) {
+      return res.status(400).json({ error: "A fact is one line, up to 300 characters, and can't start with a dash." });
+    }
+    args.push(req.body.text.trim());
+  } else if (action === "summarize") {
+    const count = req.body?.count === undefined ? 3 : req.body.count;
+    if (!Number.isInteger(count) || count < 1 || count > 10) {
+      return res.status(400).json({ error: "count must be a whole number from 1 to 10." });
+    }
+    args.push(String(count));
+    timeout = 120000; // up to ten small model calls, one after another
+  } else {
+    const record = req.body?.record;
+    if (typeof record !== "string" || !CHANNEL_MEMORY_ID.test(record)) {
+      return res.status(400).json({ error: "Invalid record." });
+    }
+    args.push(record);
+  }
+  sendChannelResult(await runJarvisOnce(args, timeout), res);
+});
+
+// The one global setting for summaries: whether Jarvis writes them by itself
+// after a guest's message has been answered. Off = only when asked for above.
+app.post("/api/channels/episodes/auto", requireJarvis, async (req, res) => {
+  if (typeof req.body?.on !== "boolean") return res.status(400).json({ error: "on must be true or false." });
+  sendChannelResult(await runJarvisOnce(
+    ["channels-memory", "episodes", "auto", req.body.on ? "on" : "off"], 10000), res);
 });
 
 app.get("/api/channels/people/:platform/:id/usage", requireJarvis, async (req, res) => {

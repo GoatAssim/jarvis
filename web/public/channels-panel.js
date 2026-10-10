@@ -117,6 +117,7 @@
     clock: P('<circle cx="12" cy="12" r="9"/><path d="M12 7v5l3.2 2"/>'),
     server: P('<rect x="4" y="4" width="16" height="6" rx="1.5"/><rect x="4" y="14" width="16" height="6" rx="1.5"/><path d="M8 7h.01M8 17h.01"/>'),
     home: P('<path d="M3.5 11.2 12 4l8.5 7.2"/><path d="M5.5 10v9.5h13V10"/><path d="M10 19.5v-5h4v5"/>'),
+    memory: P('<path d="M6 4h12v16l-6-4-6 4V4Z"/><path d="M9.5 8.5h5M9.5 11.5h3"/>'),
     people: P('<circle cx="9" cy="8.5" r="3.2"/><path d="M3 19.5a6 6 0 0 1 12 0"/><path d="M16 5.6a3.2 3.2 0 0 1 0 5.8M18 14.2a6 6 0 0 1 3 5.3"/>'),
   };
   function icon(name) {
@@ -438,6 +439,9 @@
     usage: new Map(),  // { status, data, error, days, req }
     sim: new Map(),    // { context, mentioned, status, result, error, req }
     hist: new Map(),   // { status, data, error, limit, req }  (change log, L.36-P15)
+    mem: new Map(),    // { status, data, eps, error, req, acting, adding }  (People view, L.21 P6)
+    memConfirm: null,  // { key, id } a remembered item awaiting its Remove confirmation
+    memDraft: new Map(), // person key -> the fact being typed, kept across redraws
     editingHandle: null, // person key whose handle is being retyped (L.36-P10)
     scrollEnd: false,  // after the next render, show the newest message
     hideTools: false,  // Conversation tab: collapse the "used these tools" rows away
@@ -959,6 +963,7 @@
       { id: "profile", label: "Profile", ico: "user" },
       { id: "perms", label: "Permissions", ico: "shield" },
       { id: "conv", label: "Conversation", ico: "chat" },
+      { id: "memory", label: "Memory", ico: "memory", title: "What Jarvis keeps about this person" },
       { id: "usage", label: "Usage", ico: "chart" },
       { id: "test", label: "Test", ico: "flask", title: "Test as this person" },
       { id: "history", label: "History", ico: "clock", title: "Changes to this person's access" },
@@ -1294,7 +1299,7 @@
     try {
       const out = await personPost(p, "forget", { history: !!f.history, confirm: true });
       const k = pkey(p);
-      state.conv.delete(k); state.usage.delete(k); state.sim.delete(k); state.hist.delete(k); state.drafts.delete(k);
+      state.conv.delete(k); state.usage.delete(k); state.sim.delete(k); state.hist.delete(k); state.mem.delete(k); state.memDraft.delete(k); state.drafts.delete(k);
       state.forget = null;
       toast(`${displayName(p)} forgotten.`, "success");
       if (out && out.report && out.report.history_purged && out.report.history && out.report.history.left_in_groups) {
@@ -2144,10 +2149,10 @@
     dom.detail.appendChild(hero(p));
     const tabBar = tabs(p);
     dom.detail.appendChild(tabBar);
-    // Six tabs don't fit a phone: scroll the bar so the active one is visible.
+    // Seven tabs don't fit a phone: scroll the bar so the active one is visible.
     const activeTab = tabBar.querySelector('.ch-tab[aria-selected="true"]');
     if (activeTab && activeTab.offsetLeft + activeTab.offsetWidth > tabBar.clientWidth) tabBar.scrollLeft = activeTab.offsetLeft - 16;
-    const pane = { profile: renderProfile, conv: renderConv, usage: renderUsage, test: renderTest, history: renderHistory }[state.tab] || renderPerms;
+    const pane = { profile: renderProfile, conv: renderConv, memory: renderMemory, usage: renderUsage, test: renderTest, history: renderHistory }[state.tab] || renderPerms;
     dom.detail.appendChild(pane(p));
     const bar = state.tab === "perms" ? savebar(p) : null;
     if (bar) dom.detail.appendChild(bar);
@@ -2253,6 +2258,7 @@
     if (!p) return;
     if (state.tab === "perms") ensureTools();
     else if (state.tab === "conv") ensureConv(p);
+    else if (state.tab === "memory") ensureMem(p);
     else if (state.tab === "usage") ensureUsage(p);
     else if (state.tab === "test") runSim(p);
     else if (state.tab === "history") ensureHistory(p);
@@ -2442,6 +2448,180 @@
       g.entries.forEach((e) => col.appendChild(historyRow(e)));
       pane.appendChild(col);
     }
+    return pane;
+  }
+
+  // ---- Memory: what Jarvis keeps about this person  (L.21 P6) -----------------
+  // The panel face of channels/person_memory.py. Every control goes through
+  // POST .../memory, which proxies `jarvis channels-memory`, so the terminal
+  // and the panel cannot disagree. Three groups:
+  //   * "Waiting for your OK" -- `proposed` records: what the person said about
+  //     themselves (remember_sender) and summaries of their past conversations
+  //     (channels/episodes.py). NONE of these reaches the model until Approve.
+  //   * "Jarvis uses" -- `active` facts and conversation summaries.
+  //   * "Standing rules" -- read-only here; they are made with the person_instruct
+  //     tool or `jarvis channels-memory <platform> <id> rule ...`.
+  // Retired records are not listed (they are kept in the file, never shown to the model).
+  const memSlot = (p) => slot(state.mem, p, () => ({ status: "idle", data: null, eps: null, error: "", req: 0, acting: false }));
+  const MEM_HOW = {
+    owner_stated: "you told Jarvis",
+    person_stated: "they said it",
+    observed: "from the conversation log",
+    inferred: "a guess, never stated as fact",
+  };
+  const memDay = (sec) => { try { return sec ? new Date(sec * 1000).toLocaleDateString(undefined, { dateStyle: "medium" }) : "—"; } catch (_) { return "—"; } };
+
+  async function ensureMem(p) {
+    if (p.owner) return;
+    const s = memSlot(p);
+    if (s.status === "ok" || s.status === "loading") return;
+    const req = ++s.req;
+    s.status = "loading"; s.error = "";
+    if (showing(p, "memory")) renderDetail();
+    try {
+      const [list, eps] = await Promise.all([
+        api("GET", personUrl(p, "memory")),
+        api("GET", personUrl(p, "memory/episodes")).catch(() => null),
+      ]);
+      if (s.req !== req) return;
+      s.data = Array.isArray(list.items) ? list.items : []; s.eps = eps; s.status = "ok";
+    } catch (err) {
+      if (s.req !== req) return;
+      s.status = "error"; s.error = err.message || "Couldn't read what Jarvis keeps about them.";
+    }
+    if (showing(p, "memory")) renderDetail();
+  }
+
+  async function memAct(p, body, okMsg) {
+    const s = memSlot(p);
+    s.acting = true;
+    if (showing(p, "memory")) renderDetail();
+    try {
+      const out = await personPost(p, "memory", body);
+      toast(typeof okMsg === "function" ? okMsg(out) : okMsg, "success");
+      if (body.action === "add") state.memDraft.delete(pkey(p));
+    } catch (err) {
+      toast(err.message || "Couldn't change that.", "error");
+    }
+    s.acting = false; state.memConfirm = null; s.status = "idle";
+    ensureMem(p);
+  }
+
+  function summarizeToast(out) {
+    const n = (out.written || []).length;
+    if (n) return `Wrote ${n} summar${n === 1 ? "y" : "ies"} — they're under “Waiting for your OK”.${out.left ? ` ${out.left} more waiting.` : ""}`;
+    if (out.note) return out.note.charAt(0).toUpperCase() + out.note.slice(1) + ".";
+    if (out.handled) return "Nothing in those conversations was worth keeping.";
+    return "No finished conversations are waiting.";
+  }
+
+  function memItem(p, rec, waiting) {
+    const k = pkey(p);
+    const isEp = rec.kind === "episode";
+    const asking = state.memConfirm && state.memConfirm.key === k && state.memConfirm.id === rec.id;
+    const span = isEp && rec.source && Array.isArray(rec.source.ts) ? rec.source.ts : null;
+    const when = span ? dateOnly(span[0]) : memDay(rec.created);
+    const where = isEp && rec.source && rec.source.thread
+      ? ` · ${rec.source.thread}${rec.source.line_range ? `, lines ${rec.source.line_range[0]}–${rec.source.line_range[1]}` : ""}`
+      : "";
+    const meta = el("div", { class: "ch-row__hint" }, `${isEp ? "Conversation" : "Fact"} · ${when} · ${MEM_HOW[rec.provenance] || rec.provenance || "—"}${where}`);
+    if (asking) {
+      return el("li", { class: "ch-note" }, [el("div", { class: "ch-confirm", role: "alertdialog", "aria-label": "Confirm removing this" }, [
+        el("div", { class: "ch-confirm__text" }, `Remove “${rec.text}”? It's deleted for good.`),
+        el("div", { class: "ch-confirm__btns" }, [
+          el("button", { type: "button", class: "btn btn--danger btn--sm", onclick: () => memAct(p, { action: "forget", record: rec.id }, "Removed.") }, "Remove"),
+          el("button", { type: "button", class: "btn btn--ghost btn--sm", onclick: () => { state.memConfirm = null; renderDetail(); } }, "Keep"),
+        ]),
+      ])]);
+    }
+    const busy = memSlot(p).acting;
+    const btns = [];
+    if (waiting) {
+      btns.push(el("button", { type: "button", class: "btn btn--primary btn--sm", disabled: busy, title: "Let Jarvis use this when it fits what they say", onclick: () => memAct(p, { action: "approve", record: rec.id }, "Approved. Jarvis can use it now.") }, "Approve"));
+      btns.push(el("button", { type: "button", class: "btn btn--ghost btn--sm", disabled: busy, title: "Never use this; it won't be written again", onclick: () => memAct(p, { action: "retire", record: rec.id }, "Set aside. Jarvis will never use it.") }, "Set aside"));
+    } else {
+      btns.push(el("button", { type: "button", class: "btn btn--ghost btn--sm", disabled: busy, title: "Stop using this but keep it on file", onclick: () => memAct(p, { action: "retire", record: rec.id }, "Retired. Jarvis no longer uses it.") }, "Retire"));
+    }
+    btns.push(el("button", { type: "button", class: "ch-iconbtn ch-iconbtn--danger", title: "Delete this", "aria-label": "Delete this", onclick: () => { state.memConfirm = { key: k, id: rec.id }; renderDetail(); } }, [icon("trash")]));
+    return el("li", { class: "ch-note" }, [
+      el("span", { class: "ch-note__text" }, [el("span", null, rec.text), meta]),
+      el("span", { class: "ch-note__btns" }, btns),
+    ]);
+  }
+
+  function memSection(p, title, aside, items, waiting, empty) {
+    const sec = el("div", null, [el("div", { class: "ch-section-title" }, [title, el("span", { class: "ch-section-title__aside" }, aside)])]);
+    if (items.length) sec.appendChild(el("ul", { class: "ch-notes ch-notes--edit" }, items.map((r) => memItem(p, r, waiting))));
+    else sec.appendChild(el("div", { class: "ch-row__hint" }, empty));
+    return sec;
+  }
+
+  function renderMemory(p) {
+    const pane = el("div", { class: "ch-tabpane", id: "ch-pane-memory", role: "tabpanel", "aria-labelledby": "ch-tab-memory" });
+    if (p.owner) {
+      pane.appendChild(el("div", { class: "ch-row__note ch-row__note--info" }, [icon("info"),
+        el("span", null, "This is you. Jarvis keeps what it knows about you in its own memory (the Memory settings), not in a per-person file.")]));
+      return pane;
+    }
+    const s = memSlot(p);
+    if (s.status === "idle" || (s.status === "loading" && !s.data)) { pane.appendChild(loadingBlock("Reading what Jarvis keeps…")); return pane; }
+    if (s.status === "error" && !s.data) { pane.appendChild(errorBlock(s.error, () => { s.status = "idle"; ensureMem(p); })); return pane; }
+    const all = s.data || [];
+    const waiting = all.filter((r) => r.status === "proposed" && r.kind !== "instruction");
+    const active = all.filter((r) => r.status === "active" && r.kind !== "instruction");
+    const rules = all.filter((r) => r.status === "active" && r.kind === "instruction");
+    const eps = s.eps || null;
+    const k = pkey(p);
+
+    pane.appendChild(el("div", { class: "ch-conv__head" }, [
+      el("div", { class: "ch-row__hint" }, `What Jarvis keeps about ${displayName(p)} beyond the short notes on their Profile. Only “Jarvis uses” reaches the model, and only when it fits what they say.`),
+      el("button", { type: "button", class: "btn btn--ghost btn--sm", disabled: s.status === "loading" || s.acting, onclick: () => { s.status = "idle"; ensureMem(p); } }, [icon("refresh"), "Refresh"]),
+    ]));
+
+    pane.appendChild(memSection(p, "Waiting for your OK", String(waiting.length), waiting, true,
+      "Nothing waiting. Things they say about themselves, and summaries of their finished conversations, land here first — Jarvis can't use them until you approve."));
+    pane.appendChild(memSection(p, "Jarvis uses", String(active.length), active, false,
+      "Nothing yet. Add a fact below, or approve something above."));
+
+    // Add a fact
+    const max = 300;
+    const draft = state.memDraft.get(k) || "";
+    const input = el("input", { type: "text", class: "ch-name-input ch-instr-input", maxlength: String(max), autocomplete: "off", "aria-label": "Add a fact about them", placeholder: "e.g. Prefers short answers; works nights.", disabled: s.acting });
+    input.value = draft;
+    const add = el("button", { type: "button", class: "btn btn--primary btn--sm", disabled: s.acting || !draft.trim(), onclick: () => memAct(p, { action: "add", text: input.value.trim() }, "Saved. Jarvis can use it right away.") }, s.acting ? "Working…" : "Add");
+    input.addEventListener("input", () => { state.memDraft.set(k, input.value); add.disabled = s.acting || !input.value.trim(); });
+    input.addEventListener("keydown", (e) => { if (e.key === "Enter" && !add.disabled) { e.preventDefault(); add.click(); } });
+    pane.appendChild(el("div", null, [
+      el("div", { class: "ch-section-title" }, "Add a fact"),
+      el("div", { class: "ch-name-edit" }, [input, add]),
+      el("div", { class: "ch-row__hint" }, "One line. It's marked as coming from you and used when it fits what they say. It never enters your own memory."),
+    ]));
+
+    // Summaries of past conversations (P4)
+    if (eps) {
+      const n = eps.pending || 0;
+      const run = el("button", { type: "button", class: "btn btn--ghost btn--sm", disabled: s.acting || !n, onclick: () => memAct(p, { action: "summarize", count: 3 }, summarizeToast) },
+        s.acting ? "Working…" : n ? `Summarize ${Math.min(n, 3)} conversation${Math.min(n, 3) === 1 ? "" : "s"}` : "Nothing to summarize");
+      const auto = el("input", { type: "checkbox", id: "ch-mem-auto", checked: eps.auto ? "" : null, onchange: async (e) => {
+        const on = e.target.checked;
+        try { await api("POST", "/api/channels/episodes/auto", { on }); toast(on ? "Jarvis will summarize finished conversations by itself." : "Automatic summaries are off.", "success"); }
+        catch (err) { toast(err.message || "Couldn't change that.", "error"); }
+        s.status = "idle"; ensureMem(p);
+      } });
+      pane.appendChild(el("div", null, [
+        el("div", { class: "ch-section-title" }, ["Past conversations", el("span", { class: "ch-section-title__aside" }, `${n} waiting`)]),
+        el("div", { class: "ch-name-edit" }, [run]),
+        el("label", { class: "ch-row__hint", for: "ch-mem-auto", style: "display:flex;gap:8px;align-items:center;margin-top:8px" }, [auto, `Summarize by itself after they write (at most ${eps.daily_cap} a day, ${eps.calls_today} used today)`]),
+        el("div", { class: "ch-row__hint" }, `A conversation is “finished” after ${eps.gap_hours} hours of quiet, and needs at least ${eps.min_messages} messages from them. Each summary is one small model call and always waits for your OK, because it's written from what they said.`),
+      ]));
+    }
+
+    // Standing rules, read-only
+    pane.appendChild(el("div", null, [
+      el("div", { class: "ch-section-title" }, ["Standing rules", el("span", { class: "ch-section-title__aside" }, String(rules.length))]),
+      rules.length ? el("ul", { class: "ch-notes" }, rules.map((r) => el("li", null, r.text))) : el("div", { class: "ch-row__hint" }, "None. Rules like “don't discuss X with them” are made by telling Jarvis, or with jarvis channels-memory."),
+      rules.length ? el("div", { class: "ch-row__hint" }, "Jarvis follows these without telling them they exist. To change one, tell Jarvis or use jarvis channels-memory.") : null,
+    ]));
     return pane;
   }
 
@@ -3334,7 +3514,7 @@
     dom.search.addEventListener("input", () => { state.search = dom.search.value; renderChips(); renderList(); });
     dom.refresh.addEventListener("click", () => {
       state.tools = null; state.toolsState = "idle";
-      state.conv.clear(); state.usage.clear(); state.sim.clear(); state.hist.clear();
+      state.conv.clear(); state.usage.clear(); state.sim.clear(); state.hist.clear(); state.mem.clear();
       load(true).then(runTabLoader);
     });
     if (dom.addBtn) dom.addBtn.addEventListener("click", openAdd);
@@ -3366,7 +3546,7 @@
     if (!dom || dom.overlay.hidden) return;
     if (state.drafts.size && !global.confirm("You have unsaved tool changes. Close anyway?")) return;
     state.drafts.clear();
-    state.conv.clear(); state.usage.clear(); state.sim.clear(); state.hist.clear();   // don't keep their messages around while it's closed
+    state.conv.clear(); state.usage.clear(); state.sim.clear(); state.hist.clear(); state.mem.clear(); state.memDraft.clear();   // don't keep their messages around while it's closed
     state.adding = false; state.editingName = null; state.confirmRemove = null;
     state.editingNote = null; state.confirmNote = null; state.forget = null;
     state.selectMode = false; state.picked.clear(); state.bulkOpen = false; state.bulk = newBulk();

@@ -32,7 +32,9 @@ inferred. `inferred` is shown to the model as "possibly", never as a fact.
 `proposed` records are candidates (what a guest said about themselves) and are
 NEVER shown to the model until the owner approves them. An `episode` is a short
 summary that points at the transcript lines it came from; the transcript stays
-the source of truth. (Nothing writes episodes automatically yet -- L.21 P4.)
+the source of truth. channels/episodes.py writes them (L.21 P4), always as
+`proposed`: a summary is a model's reading of what a guest wrote, so it reaches
+the model only after the owner approves it.
 
 INSTRUCTIONS (L.22)
 -------------------
@@ -270,6 +272,11 @@ def delete_person(person_key):
     try:
         if path.exists():
             path.unlink()
+        # L.21 P4: the list of conversations already summarized lives beside
+        # the records and goes with them, or "forget" would leave a trace.
+        ledger = path.parent / "episodes_done.json"
+        if ledger.exists():
+            ledger.unlink()
         parent = path.parent
         if parent.exists() and not any(parent.iterdir()):
             parent.rmdir()
@@ -365,8 +372,21 @@ def asks_about_past(message):
     return bool(_PAST.search(str(message or "")))
 
 
+def _when(rec):
+    """The date shown for a record. An episode shows the day the conversation
+    happened (its source's first timestamp), not the day it was summarized --
+    "last Tuesday we talked about..." must name the right Tuesday."""
+    if rec.get("kind") == "episode":
+        span = (rec.get("source") or {}).get("ts")
+        if isinstance(span, (list, tuple)) and span:
+            day = str(span[0])[:10]
+            if re.fullmatch(r"\d{4}-\d{2}-\d{2}", day):
+                return day
+    return time.strftime("%Y-%m-%d", time.localtime(rec.get("created") or 0))
+
+
 def _line(rec):
-    when = time.strftime("%Y-%m-%d", time.localtime(rec.get("created") or 0))
+    when = _when(rec)
     how = rec.get("provenance") or ""
     prefix = "possibly: " if how == "inferred" else ""
     return f"[{rec.get('id')}] ({when}, {how}) {prefix}{rec.get('text')}"

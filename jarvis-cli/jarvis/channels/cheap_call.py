@@ -37,15 +37,19 @@ TIMEOUT_SECONDS = 15
 MAX_PROMPT_CHARS = 1800
 
 
-def _complete(prompt):
-    """The text of one cheap completion, or None. Replaced in tests."""
+def _complete(prompt, max_chars=None):
+    """The text of one cheap completion, or None. Replaced in tests.
+
+    `max_chars` raises the prompt cap for the one caller that has to show the
+    model a short conversation (channels/episodes.py); everyone else keeps
+    MAX_PROMPT_CHARS."""
     try:
         from .. import ai_client, ai_config, ai_providers
         cfg = ai_config.load_ai_config()
         providers = ai_client._eligible_providers(cfg["providers"], cfg["defaults"])
     except Exception:  # noqa: BLE001 -- no config / no provider: no answer
         return None
-    messages = [{"role": "user", "content": prompt[:MAX_PROMPT_CHARS]}]
+    messages = [{"role": "user", "content": prompt[:max_chars or MAX_PROMPT_CHARS]}]
     for provider in providers[:2]:
         adapter = ai_providers.ADAPTERS.get(provider.get("type"))
         if adapter is None:
@@ -68,11 +72,14 @@ def _complete(prompt):
 _OBJECT = re.compile(r"\{.*\}", re.S)
 
 
-def ask_json(prompt):
+def ask_json(prompt, max_chars=None):
     """The JSON object the model answered with, or None. Tolerates a code
-    fence or a sentence around the object; a non-object answer is None."""
+    fence or a sentence around the object; a non-object answer is None.
+
+    `max_chars` is passed on only when given, so a replacement `_complete`
+    written for the one-argument form (the existing tests') keeps working."""
     try:
-        raw = _complete(prompt)
+        raw = _complete(prompt) if max_chars is None else _complete(prompt, max_chars)
     except Exception:  # noqa: BLE001
         return None
     if not raw:

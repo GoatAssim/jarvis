@@ -102,13 +102,18 @@ USAGE = """channel commands:
                                         `default` clears both. Refused for the owner
   channels-memory <platform> <id|@handle> list | add <text ...> | forget <rec-id> |
                                         approve <rec-id> | retire <rec-id> | export |
-                                        rule <directive> [topic ...] | rules
+                                        rule <directive> [topic ...] | rules |
+                                        summarize [N] | episodes
                                         what Jarvis keeps about one person (L.21/L.22).
                                         directive: don_t_discuss, only_discuss, ask_owner_first,
                                         notify_owner, tone, custom. Use `anyone` as the platform
                                         for `rules`/`rule` that apply to everyone:
                                         channels-memory anyone rule don_t_discuss <topic ...>
                                         channels-memory applied   which rules fired (no message text)
+                                        `summarize [N]` writes summaries of up to N (default 3,
+                                        max 10) finished conversations, as `proposed` records the
+                                        owner approves; `episodes` says how many are waiting.
+                                        channels-memory episodes status | auto on|off
   channels-awaiting list | watch <platform> <id|@handle> [about ...] | stop <platform> <id|@handle> |
                     feedback useful|too_noisy | quiet <HH:MM-HH:MM|none> | auto on|off | log
                                         replies the owner is waiting on and when to be told (L.23)
@@ -223,10 +228,22 @@ def _channels_memory(rest):
     from .channels import person_memory
     usage = ("usage: channels-memory <platform> <id|@handle> list | add <text ...> | "
              "forget <rec-id> | approve <rec-id> | retire <rec-id> | export | "
-             "rule <directive> [topic ...] | rules   (or: channels-memory applied)")
+             "rule <directive> [topic ...] | rules | summarize [N] | episodes   "
+             "(or: channels-memory applied | episodes status | episodes auto on|off)")
     if rest and rest[0] == "applied":
         print(json.dumps({"ok": True, "applied": person_memory.read_applied()}, indent=2))
         return
+    if rest and rest[0] == "episodes":
+        from .channels import episodes
+        sub = [w.lower() for w in rest[1:]]
+        if sub in ([], ["status"]):
+            print(json.dumps({"ok": True, **episodes.status()}, indent=2))
+            return
+        if len(sub) == 2 and sub[0] == "auto" and sub[1] in ("on", "off"):
+            on = episodes.set_auto(sub[1] == "on")
+            print(json.dumps({"ok": True, "auto": on}, indent=2))
+            return
+        _fail(usage)
     if len(rest) < 2:
         _fail(usage)
     if rest[0] == person_memory.ANYONE:
@@ -251,6 +268,17 @@ def _channels_memory(rest):
     elif action == "add" and tail:
         rec, err = person_memory.add(key, "fact", " ".join(tail))
         result.update(ok=not err, error=err, record=rec)
+    elif action in ("summarize", "episodes") and key != person_memory.ANYONE:
+        from .channels import episodes
+        if action == "episodes":
+            result.update(pending=len(episodes.pending(platform, uid)),
+                          **episodes.status())
+        else:
+            try:
+                count = int(tail[0]) if tail else 3
+            except ValueError:
+                _fail(usage)
+            result = episodes.run(platform, uid, limit=count)
     elif action in ("forget", "approve", "retire") and len(tail) == 1:
         if action == "forget":
             gone = person_memory.forget(key, tail[0])

@@ -183,6 +183,9 @@ jarvis-cli/jarvis/
                           channels/people/<key>/memory.jsonl; relevance-ranked, budgeted,
                           one file per person (isolation is the file); `proposed` items never
                           reach the model until approved
+        episodes.py       L.21 P4: summaries of a person's FINISHED conversations (6 h quiet),
+                          written as `proposed` episode records that point at the transcript;
+                          one small model call each, 20/day cap, background after a reply
         sender_gate.py    D-I10: the free pre-filter + one tiny yes/no call in front of
                           remember_sender; also decides which tools-off turns are offered it
         awaiting.py       L.23: threads the owner is waiting on; gates -> one classifier call ->
@@ -355,6 +358,8 @@ Everything is under `~/.jarvis/`:
 | `channels/directory.json` | channels/directory.py | @handle → id |
 | `channels/people.json` | channels/people.py | who each person is (name, notes, follow state, avatar URL) |
 | `channels/user_perms.json` | channels/user_perms.py | per-person tool scope + "Jarvis may DM them" + `tools_until` (L.36-P6 deadline, epoch seconds); only non-default values stored; unreadable = fail closed |
+| `channels/people/<key>/episodes_done.json` | channels/episodes.py | L.21 P4: which conversations were already summarized (thread + first timestamp, no text); deleted with the person |
+| `channels/episodes.json` | channels/episodes.py | L.21 P4: automatic on/off and today's summary-call count |
 | `channels/people/<key>/memory.jsonl` | channels/person_memory.py | L.21/L.22: facts, episodes and rules about ONE person (+ `_anyone` rules); `instructions_applied.jsonl` logs which rule fired (ids only) |
 | `channels/awaiting.json`, `awaiting_log.jsonl` | channels/awaiting.py | L.23: who the owner is waiting on, the notify bar, quiet hours, decision log (verdicts, not message text) |
 | `channels/thinking_threads.json` | channels/thinking.py | L.44: a person's own `/thinking` choice per thread |
