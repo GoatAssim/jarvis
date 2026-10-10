@@ -2361,6 +2361,48 @@ window.JARVIS_TEST_CHECKLIST = /*JSON-BEGIN*/ {
     "Subscribed feeds are read-only — this never writes to Google or Outlook."
    ]
   },
+  "calendar_update_event": {
+   "group": "calendar",
+   "does": "Changes an event on Jarvis's own calendar: title, day or time, length, location or description.",
+   "steps": [
+    {
+     "ask": "Add 'Dentist' to my calendar tomorrow at 3pm. Then move it to 4pm.",
+     "expect": "Looks the event up with calendar_events, then calendar_update_event; the new time shows in calendar_events and in Menu > Calendars, and the length is unchanged."
+    },
+    {
+     "ask": "Rename that event to 'Dentist - check-up' and make it 30 minutes.",
+     "expect": "Title and length change; the start time stays."
+    },
+    {
+     "ask": "Move my Google calendar meeting to 5pm.",
+     "expect": "Says an event from a linked calendar is read-only and can't be changed. Nothing is written."
+    }
+   ],
+   "needs": [
+    "At least one event on Jarvis's own calendar (calendar_add_event or Menu > Calendars)"
+   ],
+   "watch": [
+    "Only events with source \"local\" have an id. A linked (Google/Outlook/Apple) event can never be changed from here."
+   ]
+  },
+  "calendar_delete_event": {
+   "group": "calendar",
+   "does": "Deletes an event from Jarvis's own calendar, after asking you to confirm.",
+   "steps": [
+    {
+     "ask": "Delete the 'Dentist' event from my calendar.",
+     "expect": "A confirmation prompt first. Approve it and the event is gone from calendar_events and Menu > Calendars. Decline it and nothing changes."
+    },
+    {
+     "ask": "Delete my Google calendar meeting.",
+     "expect": "Says an event from a linked calendar can't be deleted here. No confirmation, nothing removed."
+    }
+   ],
+   "needs": [
+    "At least one event on Jarvis's own calendar"
+   ],
+   "care": "There is no undo. Deleting is the one calendar step that asks first."
+  },
   "calendar_events": {
    "group": "calendar",
    "does": "Lists upcoming events from subscribed calendars and Jarvis's own.",

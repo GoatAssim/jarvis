@@ -255,6 +255,18 @@ things that were already fixed once.
   and don't let this open the OUTBOUND collector (`media_out`), which stays owner-only. Instagram is not built (it drops a message with no text).
   `tests/test_channel_media_in.py` pins this.
 
+- **Calendars: linking and managing a calendar is human-only; a model tool may only touch Jarvis's OWN events (L.54).**
+  Every rule lives in `jarvis/actions/calendar_tools.py`; `admin()` (`jarvis calendar-admin`, called only by
+  web/server.js `/api/calendar/*`) is what the Calendars panel uses. No model tool and no chat path may call
+  `admin`, `link_feed`, `remove_feed`, `set_feed_enabled` or `check_feed`: a feed is a URL Jarvis fetches and reads
+  on every calendar question, and the model is the part most exposed to text other people wrote
+  (`tests/test_l54_calendar.py` greps for it). A linked (ICS) calendar is read-only: its events are never written,
+  edited or deleted by anything. A feed's real address goes to the browser only as `mask_url()` and errors are run
+  through `_scrub()`. **Every write loads `calendar.json` with `load_config_strict()`**, so a file that cannot be
+  read is refused rather than overwritten with an empty calendar (`tests/test_l54_calendar_hardening.py`). Old
+  Jarvis-calendar events (`keep_days`, default 60, and the 500 cap) are only removed when an event is added, and
+  the add says how many went.
+
 - **Settings > Advanced is owner-only and UI-only; every rule lives in `jarvis/settings_admin.py` (L.43).**
   The Settings modal (`web/public/settings.js`) reaches files and tunables only through
   `/api/settings/*` -> `jarvis settings-admin`. Keep it that way: no model tool, no slash passthrough and no

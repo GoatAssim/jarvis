@@ -67,6 +67,7 @@ DEFAULT_LOOKAHEAD_DAYS = 7
 # Jarvis's own events are kept for this long after they end, and at most this many
 # (the panel states both, because deleting old events silently would surprise).
 LOCAL_RETENTION_DAYS = 60
+LOCAL_RETENTION_MAX_DAYS = 3650
 LOCAL_MAX_EVENTS = 500
 # Calendars panel limits.
 MAX_FEEDS = 12
@@ -78,6 +79,10 @@ DEFAULT_CONFIG = {
     "feeds": [],          # [{"name": "work", "url": "https://...ics", "enabled": true}]
     "local_events": [],
     "default_reminder_minutes": 60,
+    # How long Jarvis's own events are kept after they end (1..3650). The default is
+    # LOCAL_RETENTION_DAYS; a number outside the range is ignored. Edited in
+    # Settings > Advanced (the panel only states it).
+    "keep_days": LOCAL_RETENTION_DAYS,
 }
 
 
@@ -107,6 +112,47 @@ def save_config(cfg):
     from .. import atomic_io
     ensure_config()
     return atomic_io.write_json(CONFIG_FILE, cfg)
+
+
+def load_config_strict():
+    """(cfg, None), or (None, reason) when calendar.json exists but cannot be read.
+
+    ``load_config()`` answers "the defaults" for a file it cannot parse, which is right
+    for a READ and wrong for a WRITE: saving those defaults back would replace the
+    owner's linked calendars and events with an empty calendar. Every writer (the
+    panel's and the model tool's) loads through this instead. A missing or empty file
+    is a fresh install, not a problem.
+    """
+    try:
+        text = CONFIG_FILE.read_text(encoding=ENCODING)
+    except FileNotFoundError:
+        return load_config(), None
+    except OSError as exc:
+        return None, "calendar.json can't be read (%s), so nothing was changed." % str(exc)[:100]
+    if not text.strip():
+        return load_config(), None
+    try:
+        data = json.loads(text)
+    except ValueError:
+        return None, ("calendar.json isn't valid JSON, so nothing was changed. Fix it in "
+                      "Settings > Advanced, or restore calendar.json.bak next to it.")
+    if not isinstance(data, dict):
+        return None, "calendar.json isn't a JSON object, so nothing was changed."
+    cfg = json.loads(json.dumps(DEFAULT_CONFIG))
+    cfg.update({k: v for k, v in data.items() if k in cfg or k.startswith("_")})
+    return cfg, None
+
+
+def retention_days(cfg=None):
+    """Days Jarvis's own events are kept after they end: ``keep_days`` from calendar.json
+    when it is a whole number from 1 to 3650, else LOCAL_RETENTION_DAYS."""
+    cfg = cfg if cfg is not None else load_config()
+    value = cfg.get("keep_days", LOCAL_RETENTION_DAYS)
+    if isinstance(value, bool) or not isinstance(value, int):
+        return LOCAL_RETENTION_DAYS
+    if 1 <= value <= LOCAL_RETENTION_MAX_DAYS:
+        return value
+    return LOCAL_RETENTION_DAYS
 
 
 # ---------------------------------------------------------------------------
@@ -167,7 +213,7 @@ def _finish_event(raw, window_start, window_end):
         # A date-only DTSTART with no DTEND is an all-day event: one day long
         # (RFC 5545 section 3.6.1). Anything else defaults to an hour, as before.
         dtstart_value, dtstart_params = raw.get("DTSTART", ("", ""))
-        all_day = "VALUE=DATE" in (dtstart_params or "") or len((dtstart_value or "").strip()) == 8
+        all_day = _is_date_value(dtstart_value, dtstart_params)
         end = start + (timedelta(days=1) if all_day else timedelta(hours=1))
     if (raw.get("STATUS") or "").upper() == "CANCELLED":
         return []
@@ -282,6 +328,12 @@ def _expand_rrule(start, end, rrule, window_start, window_end):
     return out or [(start, end)]
 
 
+def _is_date_value(value, params):
+    """True for a date-only stamp (``DTSTART;VALUE=DATE:20261012``). ``VALUE=DATE-TIME``
+    is NOT one: a plain substring test on ``VALUE=DATE`` matched it and dropped the time."""
+    return bool(re.search(r"VALUE=DATE(?!-)", params or "")) or len((value or "").strip()) == 8
+
+
 def _parse_ics_dt(value, params):
     """ICS timestamp -> naive local datetime.
 
@@ -297,7 +349,7 @@ def _parse_ics_dt(value, params):
         if value.endswith("Z"):
             dt = datetime.strptime(value, "%Y%m%dT%H%M%SZ")
             return dt.replace(tzinfo=timezone.utc).astimezone().replace(tzinfo=None)
-        if "VALUE=DATE" in (params or "") or len(value) == 8:
+        if _is_date_value(value, params):
             return datetime.strptime(value[:8], "%Y%m%d")
         return datetime.strptime(value[:15], "%Y%m%dT%H%M%S")
     except ValueError:
@@ -421,7 +473,7 @@ def collect_events(days=DEFAULT_LOOKAHEAD_DAYS, force=False, now=None):
 
 def _serialize(event, now):
     start, end = event["start"], event["end"]
-    return {
+    out = {
         "title": event["title"],
         "start": start.replace(microsecond=0).isoformat(),
         "end": end.replace(microsecond=0).isoformat(),
@@ -434,6 +486,11 @@ def _serialize(event, now):
         "starts_in_seconds": int((start - now).total_seconds()),
         "in_progress": start <= now <= end,
     }
+    if event.get("local") and event.get("uid"):
+        # Only Jarvis's own events can be changed, and this id is how
+        # calendar_update_event / calendar_delete_event name one.
+        out["id"] = event["uid"]
+    return out
 
 
 def _friendly(dt, now):
@@ -455,7 +512,8 @@ def _friendly(dt, now):
 # ``admin()`` (``jarvis calendar-admin <op>``). None of it is a model tool, and
 # none of it is added to TOOLS / TOOL_SCHEMAS: a feed link is a secret and an
 # event written here is the owner's own, so a chat guest or a fetched page must
-# not be able to steer it. The model keeps exactly the two tools it already had.
+# not be able to steer it. The model's calendar tools are add, read, change and delete
+# events on JARVIS'S OWN calendar -- none of them can link, switch or remove a feed.
 # ---------------------------------------------------------------------------
 
 _UNATTENDED_MESSAGE = ("The Calendars panel can only be used from the web page or your own "
@@ -568,7 +626,7 @@ def feeds_view():
         "max_feeds": MAX_FEEDS,
         "local_event_count": len([e for e in cfg.get("local_events") or [] if isinstance(e, dict)]),
         "default_reminder_minutes": max(1, min(lead, 10080)),
-        "retention_days": LOCAL_RETENTION_DAYS,
+        "retention_days": retention_days(cfg),
         "retention_max": LOCAL_MAX_EVENTS,
         "cache_minutes": CACHE_TTL_SECONDS // 60,
     }
@@ -626,7 +684,9 @@ def link_feed(name, url):
     name = _clean_name(name)
     if not name:
         return {"ok": False, "error": "Give the calendar a name."}
-    cfg = load_config()
+    cfg, problem = load_config_strict()
+    if cfg is None:
+        return {"ok": False, "error": problem}
     feeds = [f for f in (cfg.get("feeds") or []) if isinstance(f, dict)]
     if len(feeds) >= MAX_FEEDS:
         return {"ok": False, "error": "You already have %d linked calendars, the most the panel keeps. "
@@ -650,7 +710,9 @@ def link_feed(name, url):
 
 
 def set_feed_enabled(name, enabled):
-    cfg = load_config()
+    cfg, problem = load_config_strict()
+    if cfg is None:
+        return {"ok": False, "error": problem}
     hit = 0
     for feed in cfg.get("feeds") or []:
         if isinstance(feed, dict) and (feed.get("name") or "") == name:
@@ -666,7 +728,9 @@ def set_feed_enabled(name, enabled):
 def remove_feed(name):
     """Unlink a calendar (every linked calendar with that name) and drop its cached copy.
     Jarvis's own events are not touched."""
-    cfg = load_config()
+    cfg, problem = load_config_strict()
+    if cfg is None:
+        return {"ok": False, "error": problem}
     keep, gone = [], []
     for feed in cfg.get("feeds") or []:
         if isinstance(feed, dict) and (feed.get("name") or "") == name:
@@ -774,9 +838,9 @@ def window_view(start_text, end_text, force=False):
 
 
 def _prune_local(cfg):
-    """Drop events that ended more than LOCAL_RETENTION_DAYS ago and keep the newest
+    """Drop events that ended more than ``retention_days(cfg)`` ago and keep the newest
     LOCAL_MAX_EVENTS. Shared by the model tool and the panel."""
-    cutoff = (datetime.now() - timedelta(days=LOCAL_RETENTION_DAYS)).isoformat()
+    cutoff = (datetime.now() - timedelta(days=retention_days(cfg))).isoformat()
     cfg["local_events"] = [e for e in cfg.get("local_events") or []
                            if (e.get("end") or e.get("start") or "") >= cutoff][-LOCAL_MAX_EVENTS:]
     return cfg
@@ -843,9 +907,10 @@ def _event_from_fields(fields, base=None):
 
     location = str(fields["location"] if "location" in fields else base.get("location") or "")[:200]
     description = str(fields["description"] if "description" in fields else base.get("description") or "")[:500]
-    if end < datetime.now() - timedelta(days=LOCAL_RETENTION_DAYS):
+    keep = retention_days()
+    if end < datetime.now() - timedelta(days=keep):
         return None, ("Events older than %d days are removed automatically, so this one "
-                      "wouldn't be kept." % LOCAL_RETENTION_DAYS)
+                      "wouldn't be kept." % keep)
     return {
         "title": title[:200],
         "start": start.replace(microsecond=0).isoformat(),
@@ -868,7 +933,9 @@ def add_local_event(fields):
     entry, error = _event_from_fields(fields)
     if error:
         return {"ok": False, "error": error}
-    cfg = load_config()
+    cfg, problem = load_config_strict()
+    if cfg is None:
+        return {"ok": False, "error": problem}
     existing = [e for e in cfg.get("local_events") or [] if isinstance(e, dict)]
     if len(existing) >= LOCAL_MAX_EVENTS:
         return {"ok": False, "error": "Jarvis's calendar already holds %d events, the most it keeps. "
@@ -879,14 +946,22 @@ def add_local_event(fields):
         new_id = "ev_" + secrets.token_hex(4)
     entry["id"] = new_id
     cfg.setdefault("local_events", []).append(entry)
+    held = len(cfg["local_events"])
     _prune_local(cfg)
+    pruned = held - len(cfg["local_events"])
     if not save_config(cfg):
         return {"ok": False, "error": "Couldn't save calendar.json."}
-    return {"ok": True, "event": _panel_event(_as_event(entry))}
+    out = {"ok": True, "event": _panel_event(_as_event(entry))}
+    if pruned:
+        # Said, not silent: past events leave when a new one is added.
+        out["pruned"] = pruned
+    return out
 
 
 def update_local_event(event_id, fields):
-    cfg = load_config()
+    cfg, problem = load_config_strict()
+    if cfg is None:
+        return {"ok": False, "error": problem}
     index = _event_by_id(cfg, event_id)
     if index is None:
         return {"ok": False, "error": "That event isn't in Jarvis's calendar any more "
@@ -903,7 +978,9 @@ def update_local_event(event_id, fields):
 
 
 def delete_local_event(event_id):
-    cfg = load_config()
+    cfg, problem = load_config_strict()
+    if cfg is None:
+        return {"ok": False, "error": problem}
     index = _event_by_id(cfg, event_id)
     if index is None:
         return {"ok": False, "error": "That event isn't in Jarvis's calendar any more "
@@ -1020,7 +1097,9 @@ def tool_calendar_add_event(args):
         minutes = 60
     end = start + timedelta(minutes=max(5, min(minutes, 1440)))
 
-    cfg = load_config()
+    cfg, problem = load_config_strict()
+    if cfg is None:
+        return {"ok": False, "error": problem}
     entry = {
         "id": "ev_" + secrets.token_hex(4),
         "title": title[:200],
@@ -1032,12 +1111,86 @@ def tool_calendar_add_event(args):
     cfg.setdefault("local_events", []).append(entry)
     # Keep the local store bounded; past events are pruned rather than kept
     # forever, since this is a calendar, not an archive.
+    held = len(cfg["local_events"])
     _prune_local(cfg)
-    save_config(cfg)
+    pruned = held - len(cfg["local_events"])
+    if not save_config(cfg):
+        return {"ok": False, "error": "Couldn't save calendar.json."}
 
-    return {"ok": True, "id": entry["id"], "title": title,
-            "start": entry["start"], "when": _friendly(start, datetime.now()),
-            "note": "Saved to Jarvis's own calendar. Subscribed feeds are read-only."}
+    out = {"ok": True, "id": entry["id"], "title": title,
+           "start": entry["start"], "when": _friendly(start, datetime.now()),
+           "note": "Saved to Jarvis's own calendar. Subscribed feeds are read-only."}
+    if pruned:
+        out["pruned"] = pruned
+        out["note"] += " %d older event(s) past the keep limit were removed." % pruned
+    return out
+
+
+def tool_calendar_update_event(args):
+    """Change an event on Jarvis's own calendar, through the same function the panel uses."""
+    args = args or {}
+    event_id = (args.get("id") or "").strip()
+    if not event_id:
+        return {"needs_clarification": True,
+                "message": "Which event? Call calendar_events first: events on Jarvis's own "
+                           "calendar carry an id."}
+    fields = {}
+    for key in ("title", "location", "description"):
+        if args.get(key) is not None:
+            fields[key] = str(args[key])
+    if args.get("duration_minutes") not in (None, ""):
+        fields["duration_minutes"] = args["duration_minutes"]
+    when = args.get("when") if args.get("when") is not None else args.get("start")
+    if when is not None and str(when).strip():
+        from .. import timespec
+        try:
+            start = timespec.parse_when(str(when).strip())
+        except timespec.TimeSpecError as exc:
+            return {"needs_clarification": True, "message": str(exc)}
+        fields["date"] = start.strftime("%Y-%m-%d")
+        fields["time"] = start.strftime("%H:%M")
+        # An all-day event moved to another day stays all-day; giving a length makes
+        # it a timed event at that time. (parse_when has no "no time" answer.)
+        cfg = load_config()
+        index = _event_by_id(cfg, event_id)
+        if index is not None:
+            old = cfg["local_events"][index]
+            try:
+                was_all_day = _is_all_day(datetime.fromisoformat(old["start"]),
+                                          datetime.fromisoformat(old["end"]))
+            except (KeyError, ValueError, TypeError):
+                was_all_day = False
+            if was_all_day:
+                if "duration_minutes" in fields:
+                    fields["all_day"] = False
+                else:
+                    fields.pop("time")
+    if not fields:
+        return {"needs_clarification": True, "message": "What should change about it?"}
+    result = update_local_event(event_id, fields)
+    if not result.get("ok"):
+        return {"ok": False, "error": result.get("error") or "Couldn't change the event."}
+    event = result["event"]
+    out = {"ok": True, "id": event["id"], "title": event["title"], "start": event["start"],
+           "when": _friendly(datetime.fromisoformat(event["start"]), datetime.now())}
+    if event.get("all_day"):
+        out["all_day"] = True
+    return out
+
+
+def tool_calendar_delete_event(args):
+    """Delete an event from Jarvis's own calendar (the user is asked first: see
+    TOOL_CONFIRM_REQUIRED)."""
+    args = args or {}
+    event_id = (args.get("id") or "").strip()
+    if not event_id:
+        return {"needs_clarification": True,
+                "message": "Which event? Call calendar_events first: events on Jarvis's own "
+                           "calendar carry an id."}
+    result = delete_local_event(event_id)
+    if not result.get("ok"):
+        return {"ok": False, "error": result.get("error") or "Couldn't delete the event."}
+    return {"ok": True, "deleted": result.get("title") or "", "id": result.get("removed")}
 
 
 TOOL_SCHEMAS = [
@@ -1048,7 +1201,8 @@ TOOL_SCHEMAS = [
             "and Jarvis's own. Use for 'what's on today', 'when is my next "
             "meeting', 'am I free Thursday'. Each event includes "
             "starts_in_seconds, so to set a reminder before one, call this "
-            "first and then schedule_task with the computed time."
+            "first and then schedule_task with the computed time. Events on "
+            "Jarvis's own calendar (source \"local\") also carry an id."
         ),
         "parameters": {
             "type": "object",
@@ -1081,12 +1235,58 @@ TOOL_SCHEMAS = [
             "required": ["title", "when"],
         },
     },
+    {
+        "name": "calendar_update_event",
+        "description": (
+            "Change an event on Jarvis's own calendar: its title, day or time, length, "
+            "location or description. Needs the event's id from calendar_events (only "
+            "events with source \"local\" have one). Send only what changes; moving an "
+            "event keeps its length unless duration_minutes is given, and an all-day event "
+            "moved to another day stays all-day (give duration_minutes to make it timed). "
+            "Events from a subscribed calendar (Google/Outlook/Apple) are read-only and "
+            "cannot be changed -- say so instead of trying."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "id": {"type": "string", "description": "The event's id from calendar_events."},
+                "title": {"type": "string"},
+                "when": {"type": "string", "description": "New start, plain language: 'friday 09:00', 'tomorrow at 3pm'."},
+                "duration_minutes": {"type": "number"},
+                "location": {"type": "string", "description": "Empty string clears it."},
+                "description": {"type": "string", "description": "Empty string clears it."},
+            },
+            "required": ["id"],
+        },
+    },
+    {
+        "name": "calendar_delete_event",
+        "description": (
+            "Delete an event from Jarvis's own calendar, by the id calendar_events gave it. "
+            "Cannot delete an event from a subscribed calendar. The user is asked to confirm "
+            "before it runs."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "id": {"type": "string", "description": "The event's id from calendar_events."},
+            },
+            "required": ["id"],
+        },
+    },
 ]
 
 TOOLS = {
     "calendar_events": tool_calendar_events,
     "calendar_add_event": tool_calendar_add_event,
+    "calendar_update_event": tool_calendar_update_event,
+    "calendar_delete_event": tool_calendar_delete_event,
 }
+
+# Deleting is the one step with no undo, so it goes through the ordinary confirmation
+# prompt (declared here, not in tool_safety.py -- see tool_loader.py). Adding and changing
+# an event on Jarvis's own calendar are easy to put back.
+TOOL_CONFIRM_REQUIRED = {"calendar_delete_event"}
 
 TOOL_GROUP = "calendar"
 
@@ -1100,6 +1300,15 @@ TOOL_KEYWORDS = {
         "add to my calendar": 10, "put in my calendar": 10,
         "schedule a meeting": 9, "book": 6, "new event": 9,
     },
+    "calendar_update_event": {
+        "reschedule": 9, "move my meeting": 10, "move the meeting": 10,
+        "change my appointment": 10, "change the event": 9, "rename the event": 9,
+        "update my calendar": 10, "move my appointment": 10,
+    },
+    "calendar_delete_event": {
+        "delete the event": 10, "remove from my calendar": 10, "delete from my calendar": 10,
+        "cancel my appointment": 9, "cancel the meeting": 8, "take it off my calendar": 9,
+    },
 }
 
 TOOL_PACK_INSTRUCTION = (
@@ -1107,5 +1316,8 @@ TOOL_PACK_INSTRUCTION = (
     "Jarvis's own. For 'remind me N before my next meeting', call calendar_events "
     "with next_only first, then schedule_task using that event's start time minus N "
     "— don't guess a time. Subscribed feeds cache for 15 minutes; pass refresh only "
-    "if the user says something just changed."
+    "if the user says something just changed. To change or delete an event, call "
+    "calendar_events (use query for the title) to get its id, then calendar_update_event "
+    "/ calendar_delete_event. Only events with source \"local\" have an id; an event on a "
+    "subscribed calendar can't be changed or deleted, so say that."
 )

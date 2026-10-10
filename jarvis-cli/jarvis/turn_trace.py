@@ -97,6 +97,8 @@ _VERBS = {
     "run_diagnostics": "ran a self-check",
     "calendar_events": "looked at your calendar",
     "calendar_add_event": "added a calendar event",
+    "calendar_update_event": "changed a calendar event",
+    "calendar_delete_event": "removed a calendar event",
 }
 
 # How a router group reads in a sentence.

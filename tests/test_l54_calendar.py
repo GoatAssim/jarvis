@@ -21,7 +21,8 @@ than it was. Pinned here:
      keeps the id and merges only the fields sent, an old event is refused instead of being
      silently pruned, the 500 cap is refused instead of silently dropping, a linked or
      invalid id can never be edited or deleted;
-  7. the model keeps exactly its two calendar tools, and nothing but cli.py reaches admin();
+  7. the model's calendar tools are exactly add / read / change / delete (never a feed), and
+     nothing but cli.py reaches admin();
   8. a chat / scheduled / task process is refused outright, and the CLI verb prints one
      JSON object;
   9. an all-day event with no DTEND lasts one day (the panel's month view depends on it);
@@ -424,11 +425,12 @@ def test_model_tool_behaviour_is_unchanged():
 
 # ---- 7. the model cannot reach the panel back end ---------------------------------------------------------
 def test_model_cannot_reach_admin():
-    check("exactly the two original calendar tools", sorted(cal.TOOLS) == ["calendar_add_event", "calendar_events"], sorted(cal.TOOLS))
-    check("and exactly the two original schemas", sorted(s["name"] for s in cal.TOOL_SCHEMAS) == ["calendar_add_event", "calendar_events"])
+    four = ["calendar_add_event", "calendar_delete_event", "calendar_events", "calendar_update_event"]
+    check("exactly the four calendar tools (add, read, change, delete)", sorted(cal.TOOLS) == four, sorted(cal.TOOLS))
+    check("and exactly those four schemas", sorted(s["name"] for s in cal.TOOL_SCHEMAS) == four)
     from jarvis import tools
     names = [n.lower() for n in tools.TOOLS if "calendar" in n.lower()]
-    check("no other model tool is about calendars", sorted(names) == ["calendar_add_event", "calendar_events"], names)
+    check("no other model tool is about calendars (none can link or remove a feed)", sorted(names) == four, names)
     offenders = []
     for path in sorted((_JARVIS_CLI / "jarvis").rglob("*.py")):
         if path.name in ("calendar_tools.py", "cli.py"):
