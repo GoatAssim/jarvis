@@ -473,8 +473,12 @@ def _validate_commands(doc, problems):
 _VALIDATORS = {"ai_config.json": _validate_ai_config, "commands.json": _validate_commands}
 
 
-def validate(name, new_doc, old_doc):
-    """Every reason `new_doc` must not be written, as a list of strings (empty = fine)."""
+def validate(name, new_doc, old_doc, check_types=True):
+    """Every reason `new_doc` must not be written, as a list of strings (empty = fine).
+
+    `check_types=False` is for putting a value back to its built-in default: a value of the
+    wrong kind (a number typed as text) is exactly what that is meant to repair, so the
+    \"keeps its type\" rule is skipped for it. The file's own structural checks still run."""
     problems = []
     if old_doc is not None and type(old_doc) is not type(new_doc):
         problems.append("The top level must stay %s." % ("an object" if isinstance(old_doc, dict) else "a list"))
@@ -482,7 +486,7 @@ def validate(name, new_doc, old_doc):
     if old_doc is None and not isinstance(new_doc, (dict, list)):
         problems.append("The top level must be an object or a list.")
         return problems
-    if old_doc is not None:
+    if old_doc is not None and check_types:
         _stability(old_doc, new_doc, (), problems)
     check = _VALIDATORS.get(name)
     if check and isinstance(new_doc, dict):
@@ -758,7 +762,7 @@ def _set_at(doc, path, value):
     return new, None
 
 
-def set_value(name, path, value, base_version, confirm_guarded=False):
+def set_value(name, path, value, base_version, confirm_guarded=False, _action="set"):
     """Change ONE value (the Settings sections use this): same gate and checks as write()."""
     info, fpath, refusal = _gate(name, confirm_guarded)
     if refusal:
@@ -776,13 +780,13 @@ def set_value(name, path, value, base_version, confirm_guarded=False):
     if serr:
         return {"ok": False, "code": "bad_path", "error": serr}
     changes = diff(old_doc, new_doc, name)
-    problems = validate(name, new_doc, old_doc)
+    problems = validate(name, new_doc, old_doc, check_types=(_action != "reset"))
     if problems:
         return {"ok": False, "code": "invalid", "problems": problems,
                 "error": "Not saved: " + " ".join(problems)}
     if new_doc == old_doc:
         return {"ok": True, "changed": False, "version": version_of(old_text), "changes": 0}
-    return _commit(name, fpath, new_doc, old_text, "set", changes)
+    return _commit(name, fpath, new_doc, old_text, _action, changes)
 
 
 def restore(name, backup_id, base_version, confirm_guarded=False):
@@ -822,6 +826,131 @@ def restore(name, backup_id, base_version, confirm_guarded=False):
     if result.get("ok"):
         result["restored"] = backup_id
     return result
+
+
+# --- defaults and per-value reset ------------------------------------------------------
+# Some files have a built-in default document in code (the one Jarvis writes or merges
+# in when the file is missing). For those, the Files tree can show which values differ
+# from it and put ONE value back. A file with no recorded default simply has no reset:
+# inventing a default would be worse than offering none.
+_DEFAULT_SOURCES = {
+    "ai_config.json": ("ai_config", "DEFAULT_AI_CONFIG"),
+    "notify_config.json": ("notifier", "DEFAULT_CONFIG"),
+    "digest_config.json": ("digest", "DEFAULT_CONFIG"),
+    "ambient.json": ("ambient", "DEFAULT_CONFIG"),
+    "everything.json": ("everything_config", "DEFAULT_CONFIG"),
+    "calendar.json": ("actions.calendar_tools", "DEFAULT_CONFIG"),
+    "mcp_config.json": ("mcp_client", "DEFAULT_CONFIG"),
+    "policy.json": ("policy", "DEFAULT_POLICY"),
+}
+
+
+def default_doc(name):
+    """A private copy of the built-in default document for `name`, or None when none is
+    recorded (or its module can't be imported: a missing default is never an error)."""
+    source = _DEFAULT_SOURCES.get(name)
+    if not source:
+        return None
+    module, attr = source
+    try:
+        import importlib
+        value = getattr(importlib.import_module("." + module, __package__), attr)
+    except Exception:  # noqa: BLE001 -- the tree just has no reset for this file
+        return None
+    return copy.deepcopy(value) if isinstance(value, (dict, list)) else None
+
+
+def _get_at(doc, path):
+    """(found, value) for doc[path...]; the path is a list of keys and positions."""
+    node = doc
+    for step in path:
+        if isinstance(node, dict) and isinstance(step, str) and step in node:
+            node = node[step]
+        elif isinstance(node, list) and isinstance(step, int) and not isinstance(step, bool) \
+                and 0 <= step < len(node):
+            node = node[step]
+        else:
+            return False, None
+    return True, node
+
+
+def _deviations(default, current, name):
+    """Where `current` differs from `default`: [{path, path_text, state, current, default,
+    resettable}]. state is "changed" (both have it, values differ), "missing" (the default
+    has it, the file does not) or "extra" (the file has it, the default does not: a value
+    the owner added, so there is nothing to reset it to). A list is compared as one value,
+    since positions in a list do not mean the same thing from one document to the next.
+    Secret values are shown as the mask."""
+    out = []
+
+    def add(path, state, cur, dflt):
+        if len(out) >= MAX_DIFF_ENTRIES:
+            return
+        hidden = _path_hidden(path, name)
+        out.append({
+            "path": list(path), "path_text": _fmt_path(path), "state": state,
+            "current": None if state == "missing" else (MASK if hidden and cur not in ("", None) else _short(cur)),
+            "default": None if state == "extra" else (MASK if hidden and dflt not in ("", None) else _short(dflt)),
+            "resettable": state != "extra",
+        })
+
+    def walk(d, c, p):
+        if isinstance(d, dict) and isinstance(c, dict):
+            for k in d:
+                if k not in c:
+                    add(p + (k,), "missing", None, d[k])
+                else:
+                    walk(d[k], c[k], p + (k,))
+            for k in c:
+                if k not in d:
+                    add(p + (k,), "extra", c[k], None)
+            return
+        if d != c or type(d) is not type(c):
+            add(p, "changed", c, d)
+
+    walk(default, current, ())
+    return out
+
+
+def defaults_report(name):
+    """What the Files tree needs to mark values that differ from the built-in default."""
+    path = _path_for(name)
+    if path is None:
+        return {"ok": False, "error": "That is not a file this screen can open."}
+    info = meta_for(name)
+    default = default_doc(name)
+    if default is None:
+        return {"ok": True, "name": name, "has_defaults": False, "exists": None, "deviations": [],
+                "truncated": False, "meta": info}
+    text, err = _raw(path)
+    if err:
+        return {"ok": False, "error": err}
+    if text is None:
+        return {"ok": True, "name": name, "has_defaults": True, "exists": False, "deviations": [],
+                "truncated": False, "version": version_of(None), "meta": info}
+    doc, perr = _parse(text)
+    if perr:
+        return {"ok": False, "error": perr}
+    devs = _deviations(default, doc, name)
+    return {"ok": True, "name": name, "has_defaults": True, "exists": True, "deviations": devs,
+            "truncated": len(devs) >= MAX_DIFF_ENTRIES, "version": version_of(text), "meta": info}
+
+
+def reset_value(name, path, base_version, confirm_guarded=False):
+    """Put ONE value back to the built-in default: same gate, stale check, validation,
+    backup and change log as set_value (it IS set_value, with the default as the value)."""
+    default = default_doc(name)
+    if default is None:
+        return {"ok": False, "code": "no_defaults",
+                "error": "Jarvis has no built-in defaults recorded for %s, so there is nothing to reset to." % name}
+    if not isinstance(path, list) or not path:
+        return {"ok": False, "code": "bad_path", "error": "A setting path is a list of keys and positions."}
+    found, value = _get_at(default, path)
+    if not found:
+        return {"ok": False, "code": "no_default",
+                "error": "There is no built-in default for %s: it is a value that was added, so there "
+                         "is nothing to reset it to." % _fmt_path(tuple(path))}
+    return set_value(name, path, copy.deepcopy(value), base_version, confirm_guarded, _action="reset")
 
 
 # --- tunables (layer 2) ----------------------------------------------------------------

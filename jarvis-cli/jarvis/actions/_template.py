@@ -24,7 +24,9 @@ CONTENTS
     8. TEST_CHECKLIST        the Menu -> Test Checklist entry for your tools
     9. TOOL_UI               a screen of your own: a button or a Menu entry that
                              opens a page you wrote (tool.html / tool.js / tool.css)
-   10. CHECKING YOUR FILE    how to know it actually loaded
+   10. DAEMONS              background services your tool supplies (it appears in
+                             the Daemons panel, owned by your file)
+   11. CHECKING YOUR FILE    how to know it actually loaded
 
 WHAT MAKES A FILE DISCOVERABLE
 -------------------------------
@@ -1080,7 +1082,89 @@ TEST_CHECKLIST_GROUP = {
 # ---------------------------------------------------------------------------
 
 # ---------------------------------------------------------------------------
-# 10. CHECKING YOUR FILE — how to know it actually loaded
+# 10. DAEMONS — optional. A background service your tool brings with it.
+#
+#    A tool sometimes needs something that keeps running: a watcher, a small
+#    local server, a poller. Declare it here and it appears in the Daemons
+#    panel (Menu -> Daemons) next to the built-in ones, tagged "Tool: <your
+#    file name>". Nothing else to register; the daemon follows your file.
+#
+#    The example below is COMMENTED OUT on purpose: this template is never
+#    loaded, but a copy of it is, and a copy must not start a process by
+#    accident. Uncomment it in YOUR file and change it.
+#
+#    DAEMONS = [
+#        {
+#            "id": "worker",                  # required. The daemon's id becomes
+#                                             # "<your file name>-worker".
+#            "name": "My worker",             # optional label (the owner may rename it)
+#            "description": "Does X.",        # optional; shown in the panel
+#            "command": ["{python}", "{tool_dir}/worker.py"],   # required
+#            "cwd": "",                       # default: the folder your file is in
+#            "env": {"MODE": "fast"},         # optional, text -> text
+#            "supports_stdin": False,         # True if it reads lines from stdin
+#            "shell": False,                  # True = `command` is one shell string
+#            "autostart": False,              # the PRESET (see "what you control")
+#            "restart": "on-failure",         # never | on-failure | always
+#            "restart_delay": 5, "max_restarts": 5,
+#            "stop_signal": "TERM", "stop_timeout": 10,
+#            "categories": ["My tool"],       # SUGGESTED; the owner's edits win
+#            "notes": "",
+#        },
+#    ]
+#
+#    THE RULES
+#      * `command` is a list (used exactly as written) or a string (split the way
+#        `jarvis daemon-add` splits it, or kept whole when `shell` is True).
+#        `{python}` is the Python Jarvis itself runs under and `{tool_dir}` is
+#        the folder your file lives in; both work in `command` and `cwd`. A
+#        relative `cwd` is taken from that folder.
+#      * Up to 8 entries per file. The id plus your file name can be 40
+#        characters at most. Unknown keys, wrong types and a missing command
+#        drop THAT entry only: it is logged as "[tool-daemons] ..." and your
+#        tools still load.
+#      * Categories follow the same rules as everywhere (24 characters, 8 per
+#        daemon, case-insensitive).
+#
+#    WHAT YOU CONTROL AND WHAT THE OWNER KEEPS
+#      You control WHAT RUNS: command, cwd, env, stdin, shell and description.
+#      They are re-applied whenever your file changes and are locked in the
+#      panel's editor. Everything else is a starting point the owner then
+#      owns: the autostart preset, suggested categories, restart policy and
+#      notes are written ONCE, when the daemon is first registered, and are
+#      never overwritten, so an edit made in the panel survives an update of
+#      your file. Name, enabled, schedule and the console window are always the
+#      owner's. A daemon you declare with "autostart": True starts with
+#      Jarvis, with no extra warning: declare it only if that is what the
+#      tool needs.
+#
+#    LIFECYCLE
+#      file installed / loaded      -> the daemon is registered
+#      file deleted                 -> stopped and removed
+#      entry removed from DAEMONS   -> stopped and removed
+#      file present but not loading -> switched off, and switched back on as it
+#        (renamed .py.disabled,        was when the tool loads again
+#         broken, switched off)
+#      The owner cannot Remove a tool-supplied daemon (it would only come back
+#      on the next sync); uninstall the tool instead.
+#      Switching a tool off in the Tool Manager does NOT switch its daemons
+#      off yet (a separate, open decision); the daemon shows a "Tool off" tag.
+#
+#    A daemon is not a tool: the MODEL cannot create one or edit one (there is
+#    deliberately no daemon_add tool; AGENTS.md says why). Only the tool's
+#    author can, by writing this block, and only the owner can change what the
+#    panel leaves editable.
+#
+#    CHECKING IT
+#      jarvis daemons-sync --force   re-read every tool folder now
+#      jarvis daemons                your daemon is listed with owner = your file
+#      Menu -> Daemons               it shows a "Tool: <file>" tag
+#      Menu -> Test Checklist        "Daemons a tool supplies" walks through all
+#                                    of this by hand.
+# ---------------------------------------------------------------------------
+
+# ---------------------------------------------------------------------------
+# 11. CHECKING YOUR FILE — how to know it actually loaded
 #
 # A rejected file is logged once and is otherwise invisible, so check:
 #
@@ -1091,6 +1175,7 @@ TEST_CHECKLIST_GROUP = {
 #     jarvis tools-list        your tool names are in the catalogue.
 #     jarvis personas-list     your personas, if you registered any.
 #     jarvis tool-ui list      your TOOL_UI screens, if you declared any.
+#     jarvis daemons           your DAEMONS, if you declared any (owner = your file).
 #
 # For a tool in ~/.jarvis/tools/, the Custom Tools editor's Check button runs
 # the same validation, including the TEST_CHECKLIST entry.

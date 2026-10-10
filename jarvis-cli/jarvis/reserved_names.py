@@ -60,7 +60,7 @@ RESERVED_NAMES = {
     "subagent-keys", "subagents", "subagent-spawn", "subagent-run",
     "subagent-status", "subagent-cancel",
     "think",
-    "_internal_retitle",
+    "_internal_retitle", "_internal_bridge",
     # doctor/version/browser-setup/browser-daemon: terminal-only, no web
     # route, but still real dispatch — a saved command with these names
     # was previously shadowed with no warning at all.
@@ -96,7 +96,7 @@ RESERVED_NAMES = {
     "daemons", "daemon-start", "daemon-stop", "daemon-restart", "daemon-status",
     "daemon-console", "daemon-input", "daemon-schedule", "daemon-add",
     "daemon-edit", "daemon-remove", "daemon-run", "daemons-tick",
-    "daemon-window", "daemon-viewer", "daemons-sync",
+    "daemon-window", "daemon-viewer", "daemons-sync", "daemon-category",
     "logs-files", "logs-tail", "logs-sets",
     "backlog", "backlog-add", "backlog-done", "backlog-update",
     "backlog-remove", "backlog-board", "backlog-move",

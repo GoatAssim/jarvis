@@ -108,3 +108,65 @@ def normalize_list(items, strict=False):
             return [], f"at most {MAX_PER_ITEM} categories per item"
         out = out[:MAX_PER_ITEM]
     return out, ""
+
+
+# --- rename / merge / delete (L.12 follow-up) ----------------------------------
+# A category has no record of its own anywhere: it is just a name that appears in
+# the `categories` list of zero or more items (daemons or commands). So "rename",
+# "merge" and "delete" are edits to those lists, and these two pure helpers are the
+# whole of the rule. The registries (daemons.py, and server.js for commands via the
+# JavaScript twin in category-input.js) call them once per item.
+#
+# Matching is by key (case-insensitive), the same identity the rest of this module
+# uses, so `Utility` and `utility` are one category and renaming either renames
+# both. Merge is not a separate operation: renaming to a name that already exists
+# is a merge, and an item that ends up holding the name twice keeps it once.
+
+def rename_in_list(items, old, new):
+    """(new_list, changed): `old` replaced by `new` in one item's category list.
+
+    `new` is used exactly as given (already cleaned by the caller; a strict caller
+    refuses an over-long one before getting here). If the item already holds `new`
+    under another spelling, the two become one and the item's existing spelling is
+    kept. An item that does not hold `old` comes back as its lenient clean form,
+    unchanged. A list that was already as it is reports changed=False."""
+    current, _ = normalize_list(items)
+    old_key, new_name = key_of(old), normalize_name(new)
+    if not old_key or not new_name:
+        return current, False
+    if not any(key_of(c) == old_key for c in current):
+        return current, False
+    new_key = new_name.lower()
+    already = next((c for c in current if key_of(c) == new_key and new_key != old_key), None)
+    out = []
+    for c in current:
+        if key_of(c) == old_key:
+            if already is None:
+                out.append(new_name)
+            # else: dropped, the existing `already` entry stands in for it
+        else:
+            out.append(c)
+    out, _ = normalize_list(out)
+    return out, out != current
+
+
+def remove_from_list(items, name):
+    """(new_list, changed): `name` taken out of one item's category list."""
+    current, _ = normalize_list(items)
+    key = key_of(name)
+    if not key:
+        return current, False
+    out = [c for c in current if key_of(c) != key]
+    return out, out != current
+
+
+def check_new_name(value):
+    """(clean_name, error) for the target of a rename: strict, like a write."""
+    if not isinstance(value, str):
+        return "", "category name must be text"
+    full = normalize_name(value, truncate=False)
+    if not full:
+        return "", "give the category a name"
+    if len(full) > MAX_NAME_LEN:
+        return "", f"category '{full[:MAX_NAME_LEN]}...' is longer than {MAX_NAME_LEN} characters"
+    return full, ""

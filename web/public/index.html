@@ -131,6 +131,7 @@
         <h2>Commands</h2>
         <div class="panel__head-actions">
           <button class="btn btn--ghost" id="btn-settings" type="button" title="Edit commands, AI, Playnite, Spotify, and other jarvis configs">Config</button>
+          <button class="btn btn--ghost" id="btn-command-categories" type="button" title="Rename, merge or delete a category on every command at once">Categories</button>
           <button class="btn btn--ghost" id="btn-new-command" type="button">+ New</button>
         </div>
       </div>
@@ -1621,6 +1622,7 @@
         </div>
         <div style="padding:8px 12px 10px;">
           <button class="btn btn--primary btn--sm btn--wide" id="btn-daemon-add-open" type="button">+ Add daemon</button>
+          <button class="btn btn--ghost btn--sm btn--wide" id="btn-daemon-categories" type="button" title="Rename, merge or delete a category on every service at once" style="margin-top:6px">Manage categories</button>
         </div>
       </section>
 
@@ -1936,6 +1938,7 @@
      cards (L.14) and the Daemons panel (L.11) both build their category
      chips from JarvisCategories. -->
 <script src="category-input.js"></script>
+<script src="category-manager.js"></script>
 <script src="ask-images.js"></script>
 <script src="app.js"></script>
 <script src="notifications.js"></script>

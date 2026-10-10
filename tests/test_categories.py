@@ -69,6 +69,16 @@ LISTS = [
     ["x" * 25], ["x" * 24 + "a", "x" * 24 + "b"], ["a", 1, "b"], "solo", None, {"a": 1}, ["\u0130", "i\u0307"],
 ] + [[w] for w in CORPUS]
 
+# (list, old, new) for rename; (list, name) is the first two for remove.
+EDITS = [
+    (["a", "Utility", "b"], "utility", "Tools"), (["UTILITY"], "utility", "x"), (["a"], "zzz", "x"),
+    (["Utility", "tools"], "Utility", "Tools"), (["utility"], "utility", "Utility"), (["a"], "a", "a"),
+    (["a"], "", "x"), (["a"], "a", "  "), (None, "a", "b"), ("solo", "solo", "x"), (["\u0130stanbul"], "\u0130stanbul", "x"),
+    (["caf\u00e9"], "CAF\u00c9", "Caf\u00e9s"), (["a", "b", "c"], "b", "c"), ([str(i) for i in range(8)], "3", "9"),
+    (["x" * 24], "x" * 24, "y" * 30), (["a", "a "], "a", "b"), (["Ok", "oK"], "ok", "OK"),
+]
+NEWS = ["  Web   stuff ", "", "   ", 5, None, "x" * 24, "x" * 25, "\U0001F600" * 24, "\U0001F600" * 25, "a\tb", "--flag"]
+
 NODE = r"""
 const vm = require('vm'), fs = require('fs');
 const ctx = vm.createContext({ window: {}, console });
@@ -79,6 +89,9 @@ const out = {
   names: input.names.map((s) => [C.normalizeName(s), C.normalizeName(s, false), C.keyOf(s)]),
   lists: input.lists.map((l) => { const a = C.normalizeList(l, false), b = C.normalizeList(l, true); return [a.list, a.error, b.list, b.error]; }),
   limits: [C.MAX_NAME_LEN, C.MAX_PER_ITEM],
+  rename: (input.edits || []).map(([l, o, n]) => { const r = C.renameInList(l, o, n); return [r.list, r.changed]; }),
+  remove: (input.edits || []).map(([l, o]) => { const r = C.removeFromList(l, o); return [r.list, r.changed]; }),
+  checkNew: (input.news || []).map((v) => { const r = C.checkNewName(v); return [r.name, r.error]; }),
 };
 process.stdout.write(JSON.stringify(out));
 """
@@ -90,7 +103,8 @@ def test_python_and_javascript_agree():
         print("SKIP    python/javascript parity (node not installed)")
         return
     proc = subprocess.run([node, "-e", NODE, str(ROOT / "web" / "public" / "category-input.js")],
-                          input=json.dumps({"names": CORPUS, "lists": LISTS}), capture_output=True, text=True, timeout=60)
+                          input=json.dumps({"names": CORPUS, "lists": LISTS, "edits": EDITS, "news": NEWS}),
+                          capture_output=True, text=True, timeout=60)
     check("node ran the shared corpus", proc.returncode == 0 and proc.stdout.strip() != "")
     if proc.returncode != 0:
         print(proc.stderr)
@@ -113,6 +127,19 @@ def test_python_and_javascript_agree():
         if [a, ae, b, be] != got:
             badl.append((l, [a, ae, b, be], got))
     check("every list normalises identically, lenient and strict, errors included", not badl)
+    bade = []
+    for (l, o, n), gr, gd in zip(EDITS, js["rename"], js["remove"]):
+        r = C.rename_in_list(l, o, n)
+        d = C.remove_from_list(l, o)
+        if [list(r[0]), r[1]] != gr or [list(d[0]), d[1]] != gd:
+            bade.append((l, o, n, r, d, gr, gd))
+    check("rename and remove edit a list identically in both", not bade)
+    for b in bade[:5]:
+        print("   ", b)
+    badn = [(v, C.check_new_name(v), g) for v, g in zip(NEWS, js["checkNew"]) if list(C.check_new_name(v)) != g]
+    check("the strict check of a new name agrees in both (message included)", not badn)
+    for b in badn[:5]:
+        print("   ", b)
     for b in badl[:5]:
         print("   ", b)
 

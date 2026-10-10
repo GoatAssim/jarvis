@@ -23,6 +23,9 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseAskImages, stageAskImages, ASK_IMAGE_PLACEHOLDER } from "./ask-images.js";
+// The direct channel to jarvis (see bridge.js). Optional: every use below falls back to
+// starting a `jarvis` process per request, which is what this server always did.
+import { createBridge, bridgeSettingsFromEnv } from "./bridge.js";
 // L.14: the ONE JS copy of the category-name rules (the Daemons panel and the
 // Commands editor use it in the browser). Loaded for its side effect - it
 // sets globalThis.JarvisCategories when there is no window - so the server
@@ -117,6 +120,15 @@ function tryInvoker({ cmd, args }, timeoutMs = 4000) {
 }
 
 let JARVIS = null; // { cmd, args, configPath }
+
+// Warm `jarvis _internal_bridge` workers. JARVIS_BRIDGE=0 turns them off entirely (every
+// request then starts its own process, as before); JARVIS_BRIDGE_MAX caps how many.
+const bridge = createBridge({
+  ...bridgeSettingsFromEnv(),
+  getInvoker: () => JARVIS,
+  log: (msg) => console.log(`  ${msg}`),
+});
+process.on("exit", () => bridge.shutdown());
 
 async function resolveJarvis() {
   for (const candidate of CANDIDATES) {
@@ -579,15 +591,67 @@ app.delete("/api/commands/:name", requireJarvis, async (req, res) => {
 // backslashes, and there is no argv escaping that survives both cmd.exe and
 // sh intact. stdin has no such problem and no length limit worth caring
 // about. Omitted (the default) keeps the exact previous behavior.
+//
+// A warm bridge worker runs it when one is free (bridge.js); the process below is the
+// fallback and is exactly what ran before. A request the bridge cannot take -- no idle
+// worker, a stale one, a command that needs a process of its own -- resolves to null
+// there and falls straight through.
 function runJarvisOnce(args, timeoutMs = 10000, extraEnv = {}, stdinText = null) {
+  const bridged = bridgeOnce(args, timeoutMs, { ...panelEnv(args), ...extraEnv }, stdinText);
+  if (!bridged) return spawnJarvisOnce(args, timeoutMs, extraEnv, stdinText);
+  return bridged.then((result) => result || spawnJarvisOnce(args, timeoutMs, extraEnv, stdinText));
+}
+
+// Every `channels-*` command run from here is a change made through the web panel; the
+// permission change log (channels/changelog.py, L.36-P15) reads this to tell panel changes
+// from terminal ones. A caller's own extraEnv still wins.
+function panelEnv(args) {
+  return typeof args[0] === "string" && args[0].startsWith("channels-")
+    ? { JARVIS_CHANGE_SOURCE: "panel" } : {};
+}
+
+// The bridge half of runJarvisOnce. null = not taken (use a process); otherwise a promise
+// of the same { ok, code, stdout, stderr } | { ok: false, error } a process would give,
+// or of null when the worker handed the request back before running it.
+function bridgeOnce(args, timeoutMs, env, stdinText) {
+  const out = [];
+  const err = [];
+  let settled = false;
+  let timer = null;
+  let resolveResult;
+  const promise = new Promise((resolve) => { resolveResult = resolve; });
+  const done = (value) => {
+    if (settled) return;
+    settled = true;
+    clearTimeout(timer);
+    resolveResult(value);
+  };
+  const handle = bridge.request({
+    argv: args, env, stdin: stdinText, interactive: false, kind: "once",
+    onEvent: (ev) => {
+      if (ev.t === "out") out.push(ev.line);
+      else if (ev.t === "err") err.push(ev.line);
+      else if (typeof ev.raw === "string") out.push(ev.raw);   // a marker line, as a process would have printed it
+    },
+    onFinish: (info) => {
+      if (info.fallback) return done(null);
+      if (info.killed) return done({ ok: false, error: "timed out" });
+      done({ ok: info.code === 0, code: info.code, stdout: out.join("\n").trim(), stderr: err.join("\n").trim() });
+    },
+  });
+  if (!handle) return null;
+  timer = setTimeout(() => {
+    handle.kill();
+    done({ ok: false, error: "timed out" });
+  }, timeoutMs);
+  return promise;
+}
+
+function spawnJarvisOnce(args, timeoutMs = 10000, extraEnv = {}, stdinText = null) {
   return new Promise((resolve) => {
     let child;
     try {
-      // Every `channels-*` command run from here is a change made through the
-      // web panel; the permission change log (channels/changelog.py, L.36-P15)
-      // reads this to tell panel changes from terminal ones. extraEnv still wins.
-      const fromPanel = typeof args[0] === "string" && args[0].startsWith("channels-")
-        ? { JARVIS_CHANGE_SOURCE: "panel" } : {};
+      const fromPanel = panelEnv(args);
       child = spawn(JARVIS.cmd, [...JARVIS.args, ...args], {
         windowsHide: true,
         env: { ...process.env, ...fromPanel, ...extraEnv },
@@ -692,6 +756,9 @@ app.get("/api/ai/providers", requireJarvis, async (req, res) => {
 // mode-set`, same pattern as everything else here: the actual state lives
 // in ~/.jarvis/ai_config.json on the machine running jarvis-cli, this just
 // shells out and relays the JSON.
+// The warm-worker pool, for checking by hand that the direct channel is in use.
+app.get("/api/bridge", (req, res) => res.json(bridge.status()));
+
 app.get("/api/mode", requireJarvis, async (req, res) => {
   const result = await runJarvisOnce(["mode"], 10000);
   if (!result.ok) {
@@ -2196,6 +2263,118 @@ app.delete("/api/daemons/:id", requireJarvis, async (req, res) => {
   return parseJarvisJSON(result, res, "Couldn't remove that daemon.");
 });
 
+// ---------------------------------------------------------------------------
+// Managing categories as a whole: list / rename (a name already in use merges the
+// two) / delete. A category is only a name inside items' `categories` lists, so
+// these edit those lists. Daemons and commands keep SEPARATE vocabularies (owner
+// decision Q5), so each has its own pair of routes and one never touches the other.
+// The path is /api/daemon-categories (a separate prefix from the per-daemon routes), so it can never
+// be mistaken for a daemon whose id is "categories".
+// ---------------------------------------------------------------------------
+
+// The CLI's flag parser reads any "--word" argument as a flag, so a name like that
+// must be refused here (same reason as daemonCategoryArgs above).
+function categoryNameArg(value, what) {
+  if (typeof value !== "string" || !value.trim()) return { error: `${what} is required.` };
+  if (value.trim().startsWith("--")) return { error: "A category name can't start with two dashes." };
+  return { name: value.trim() };
+}
+
+app.get("/api/daemon-categories", requireJarvis, async (req, res) => {
+  const result = await runJarvisOnce(["daemon-category", "list"], 15000);
+  return parseJarvisJSON(result, res, "Couldn't list daemon categories.");
+});
+
+app.post("/api/daemon-categories/rename", requireJarvis, async (req, res) => {
+  const from = categoryNameArg(req.body?.from, "The category to rename");
+  if (from.error) return res.status(400).json({ error: from.error });
+  const to = categoryNameArg(req.body?.to, "The new name");
+  if (to.error) return res.status(400).json({ error: to.error });
+  const result = await runJarvisOnce(["daemon-category", "rename", from.name, to.name], 15000);
+  return parseJarvisJSON(result, res, "Couldn't rename that category.");
+});
+
+app.post("/api/daemon-categories/delete", requireJarvis, async (req, res) => {
+  const name = categoryNameArg(req.body?.name, "The category to delete");
+  if (name.error) return res.status(400).json({ error: name.error });
+  const result = await runJarvisOnce(["daemon-category", "delete", name.name], 15000);
+  return parseJarvisJSON(result, res, "Couldn't delete that category.");
+});
+
+// Commands: commands.json is read and written here (not through the CLI), using
+// the one JavaScript copy of the category rules (category-input.js, imported at the
+// top of this file) - the same helpers the panel uses, and categories.py's twin.
+function commandCategoryUsage(commands) {
+  const C = globalThis.JarvisCategories;
+  return C.vocabulary(Object.values(commands || {}).map((spec) => (spec && spec.categories) || []))
+    .map((v) => ({ name: v.name, key: v.key, count: v.count }));
+}
+
+app.get("/api/command-categories", requireJarvis, async (req, res) => {
+  try {
+    const data = await readConfig();
+    res.json({ ok: true, categories: commandCategoryUsage(data.commands) });
+  } catch (e) {
+    res.status(500).json({ error: `Couldn't read commands.json: ${e.message}` });
+  }
+});
+
+// Applies `edit(list) -> {list, changed}` to every command that has categories and
+// saves once, only if something changed. A command left with none loses the key
+// (an empty list is never stored - validateSpec's rule).
+async function editCommandCategories(res, edit, failure) {
+  try {
+    const data = await readConfig();
+    let changed = 0;
+    for (const spec of Object.values(data.commands)) {
+      if (!spec || typeof spec !== "object" || spec.categories === undefined) continue;
+      const out = edit(spec.categories);
+      if (!out.changed) continue;
+      if (out.list.length) spec.categories = out.list;
+      else delete spec.categories;
+      changed += 1;
+    }
+    if (changed) await writeConfig(data);
+    return { changed };
+  } catch (e) {
+    res.status(500).json({ error: `${failure} ${e.message}` });
+    return null;
+  }
+}
+
+app.post("/api/command-categories/rename", requireJarvis, async (req, res) => {
+  const C = globalThis.JarvisCategories;
+  const from = categoryNameArg(req.body?.from, "The category to rename");
+  if (from.error) return res.status(400).json({ error: from.error });
+  const checked = C.checkNewName(req.body?.to);
+  if (checked.error) {
+    const msg = String(checked.error);
+    return res.status(400).json({ error: msg.charAt(0).toUpperCase() + msg.slice(1) + "." });
+  }
+  try {
+    const data = await readConfig();
+    const inUse = commandCategoryUsage(data.commands);
+    if (!inUse.some((c) => c.key === C.keyOf(from.name))) {
+      return res.status(400).json({ error: `No command has the category '${from.name}'.` });
+    }
+    const merged = C.keyOf(checked.name) !== C.keyOf(from.name) && inUse.some((c) => c.key === C.keyOf(checked.name));
+    const out = await editCommandCategories(res, (list) => C.renameInList(list, from.name, checked.name), "Couldn't rename that category.");
+    if (out) res.json({ ok: true, changed: out.changed, merged });
+  } catch (e) {
+    res.status(500).json({ error: `Couldn't rename that category. ${e.message}` });
+  }
+});
+
+app.post("/api/command-categories/delete", requireJarvis, async (req, res) => {
+  const C = globalThis.JarvisCategories;
+  const name = categoryNameArg(req.body?.name, "The category to delete");
+  if (name.error) return res.status(400).json({ error: name.error });
+  const out = await editCommandCategories(res, (list) => C.removeFromList(list, name.name), "Couldn't delete that category.");
+  if (!out) return;
+  if (!out.changed) return res.status(400).json({ error: `No command has the category '${name.name}'.` });
+  res.json({ ok: true, changed: out.changed });
+});
+
 // Raw log-FILE search. Distinct from /api/logs-search above, which searches
 // parsed conversation entries — see log_files.py's module docstring.
 app.get("/api/log-files/search", requireJarvis, async (req, res) => {
@@ -3135,6 +3314,21 @@ app.post("/api/settings/file/set", requireSettingsOrigin, requireJarvis, (req, r
   });
 });
 
+app.post("/api/settings/file/defaults", requireSettingsOrigin, requireJarvis, (req, res) => {
+  const name = settingsName(req, res);
+  if (name) settingsAdmin(res, "defaults", { name });
+});
+
+app.post("/api/settings/file/reset", requireSettingsOrigin, requireJarvis, (req, res) => {
+  const name = settingsName(req, res);
+  if (!name) return;
+  if (!Array.isArray(req.body.path) || !req.body.path.length) return res.status(400).json({ error: "Missing 'path'." });
+  settingsAdmin(res, "reset", {
+    name, path: req.body.path, base_version: req.body.base_version ?? null,
+    confirm_guarded: req.body.confirm_guarded === true,
+  });
+});
+
 app.post("/api/settings/file/backups", requireSettingsOrigin, requireJarvis, (req, res) => {
   const name = settingsName(req, res);
   if (name) settingsAdmin(res, "backups", { name });
@@ -3364,6 +3558,13 @@ function buildArgv(segments) {
 
 function killTree(child) {
   if (!child || child.killed) return;
+  // A bridge request (see streamViaBridge): stopping it means stopping its worker, the
+  // same thing killing the process meant before; the pool starts another.
+  if (child.__bridge) {
+    child.killed = true;
+    child.__bridge.kill();
+    return;
+  }
   if (process.platform === "win32") {
     try {
       spawn("taskkill", ["/pid", String(child.pid), "/T", "/F"], { windowsHide: true });
@@ -3420,6 +3621,95 @@ const MAX_ASK_LENGTH = 4000;
 // "JARVIS_CONFIRM_REQUEST {...}" lines (see cli.py's on_confirm_request)
 // and turn them into ask-confirm-request instead of chat-bubble text.
 function spawnAndStream(ws, kind, fullArgs, types, extraEnv = {}, onStdoutLine = null, onLine = null, onExit = null) {
+  const viaProcess = () => spawnProcessAndStream(ws, kind, fullArgs, types, extraEnv, onStdoutLine, onLine, onExit);
+  if (!streamViaBridge(ws, kind, fullArgs, types, extraEnv, onStdoutLine, onLine, onExit, viaProcess)) viaProcess();
+}
+
+// Runs the request on a warm bridge worker instead of a new process and relays its typed
+// events as the very same WebSocket messages the process path produces (plus, additively,
+// `cat` on a stderr line and an `ask-reply` message that older browsers ignore). Returns
+// false, having sent nothing, when no worker is free -- the caller then starts a process.
+// `fallback` is also used if the worker hands the request back before running it.
+function streamViaBridge(ws, kind, fullArgs, types, extraEnv, onStdoutLine, onLine, onExit, fallback) {
+  if (!JARVIS) return false;
+  const handle = bridge.request({
+    argv: fullArgs.slice(JARVIS.args.length), env: extraEnv, interactive: true, kind,
+    onEvent: (ev) => relayBridgeEvent(ws, kind, types, ev, onStdoutLine, onLine),
+    onFinish: (info) => {
+      ws.activeChild = null;
+      ws.activeKind = null;
+      if (info.fallback) return fallback();
+      if (info.crashed) send(ws, { type: types.stderr, line: "(jarvis worker exited unexpectedly)" });
+      send(ws, { type: types.exit, code: info.signal ? null : info.code, signal: info.signal || null });
+      if (onExit) onExit(info.code, info.signal);
+    },
+  });
+  if (!handle) return false;
+  // Just enough of a child process for the code that writes answers to it and stops it.
+  const shim = {
+    pid: handle.pid, killed: false, __bridge: handle,
+    stdin: { write: (text) => handle.write(String(text).replace(/\r?\n$/, "")) },
+  };
+  ws.activeChild = shim;
+  ws.activeKind = kind;
+  return true;
+}
+
+function relayBridgeEvent(ws, kind, types, ev, onStdoutLine, onLine) {
+  const asLine = (line) => {
+    if (onLine) onLine("out", line);
+    if (onStdoutLine && onStdoutLine(line)) return;
+    send(ws, { type: types.stdout, line });
+  };
+  switch (ev.t) {
+    case "out":
+      return asLine(String(ev.line ?? "").replace(/\r$/, ""));
+    case "err": {
+      const line = String(ev.line ?? "").replace(/\r$/, "");
+      if (onLine) onLine("err", line);
+      const message = { type: types.stderr, line };
+      if (typeof ev.cat === "string") message.cat = ev.cat;
+      return send(ws, message);
+    }
+    case "stream": {
+      if (kind !== "ask") return;
+      const shaped = shapeStreamEvent(ev.ev);
+      if (shaped) send(ws, { type: "ask-stream", ev: shaped });
+      return;
+    }
+    case "usage":
+      if (kind !== "ask") return asLine(String(ev.raw ?? ""));
+      return send(ws, { type: "ask-usage", usage: ev.usage });
+    case "confirm":
+      if (onLine) onLine("out", String(ev.raw ?? ""));
+      return send(ws, {
+        type: kind === "ask" ? "ask-confirm-request" : "confirm-request",
+        tool: ev.tool, arguments: ev.arguments || {}, risk_note: ev.risk_note || null,
+      });
+    case "ui":
+      // Only a directly run command ever relayed these; in an ask the marker line was
+      // always plain output, and still is.
+      if (kind !== "run") return asLine(String(ev.raw ?? ""));
+      if (onLine) onLine("out", String(ev.raw ?? ""));
+      return send(ws, { type: "ui-request", request: ev.request });
+    case "reply":
+      if (kind === "ask") send(ws, { type: "ask-reply", name: ev.name, text: ev.text, ok: !!ev.ok });
+      return;
+    default:
+  }
+}
+
+// The browser only ever sees these five kinds, whichever path the event came by.
+function shapeStreamEvent(ev) {
+  if (!ev || typeof ev !== "object" || !STREAM_KINDS.has(ev.k)) return null;
+  const out = { k: ev.k };
+  if (ev.k === "text" || ev.k === "thinking") out.d = typeof ev.d === "string" ? ev.d : "";
+  if (ev.k === "tool") out.name = typeof ev.name === "string" ? ev.name : "";
+  if (ev.k === "round_end") out.finish = ev.finish === "tool" ? "tool" : "done";
+  return out;
+}
+
+function spawnProcessAndStream(ws, kind, fullArgs, types, extraEnv = {}, onStdoutLine = null, onLine = null, onExit = null) {
   let child;
   try {
     child = spawn(JARVIS.cmd, fullArgs, {
@@ -4065,11 +4355,8 @@ wss.on("connection", (ws) => {
           }
           // Whitelist the shape instead of relaying whatever the child
           // printed: the browser only ever sees these five kinds.
-          if (!ev || typeof ev !== "object" || !STREAM_KINDS.has(ev.k)) return false;
-          const out = { k: ev.k };
-          if (ev.k === "text" || ev.k === "thinking") out.d = typeof ev.d === "string" ? ev.d : "";
-          if (ev.k === "tool") out.name = typeof ev.name === "string" ? ev.name : "";
-          if (ev.k === "round_end") out.finish = ev.finish === "tool" ? "tool" : "done";
+          const out = shapeStreamEvent(ev);
+          if (!out) return false;
           send(ws, { type: "ask-stream", ev: out });
           return true;
         }
@@ -4150,6 +4437,7 @@ wss.on("connection", (ws) => {
 
 resolveJarvis().then((result) => {
   JARVIS = result;
+  if (JARVIS) bridge.warm();
   startConfigWatcher();
   server.listen(PORT, HOST, () => {
     console.log(`\n  J A R V I S  web UI running at http://${HOST}:${PORT}\n`);

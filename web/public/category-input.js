@@ -331,9 +331,62 @@
     return list.length - fixed;
   }
 
+  /* ---- rename / merge / delete (the twin of categories.py's helpers) ------ */
+
+  // A category has no record of its own: it is a name inside items' lists, so
+  // rename, merge and delete are edits to those lists. Renaming to a name that
+  // already exists is a merge. Matching is by key (case-insensitive).
+  //
+  // renameInList(items, old, new) -> { list, changed }
+  //   `new` is used as given (cleaned). An item already holding `new` under
+  //   another spelling keeps its own spelling and simply loses `old`.
+  function renameInList(items, oldName, newName) {
+    const current = normalizeList(items).list;
+    const oldKey = keyOf(oldName);
+    const next = normalizeName(newName);
+    if (!oldKey || !next) return { list: current, changed: false };
+    if (!current.some((c) => keyOf(c) === oldKey)) return { list: current, changed: false };
+    const newKey = next.toLowerCase();
+    const already = current.find((c) => keyOf(c) === newKey && newKey !== oldKey);
+    const out = [];
+    current.forEach((c) => {
+      if (keyOf(c) === oldKey) {
+        if (already === undefined) out.push(next);
+      } else {
+        out.push(c);
+      }
+    });
+    const list = normalizeList(out).list;
+    return { list, changed: JSON.stringify(list) !== JSON.stringify(current) };
+  }
+
+  // removeFromList(items, name) -> { list, changed }
+  function removeFromList(items, name) {
+    const current = normalizeList(items).list;
+    const key = keyOf(name);
+    if (!key) return { list: current, changed: false };
+    const list = current.filter((c) => keyOf(c) !== key);
+    return { list, changed: list.length !== current.length };
+  }
+
+  // The target of a rename, checked strictly like a write: { name, error }.
+  function checkNewName(value) {
+    if (typeof value !== "string") return { name: "", error: "category name must be text" };
+    const full = normalizeName(value, false);
+    if (!full) return { name: "", error: "give the category a name" };
+    const chars = Array.from(full);
+    if (chars.length > MAX_NAME_LEN) {
+      return { name: "", error: "category '" + chars.slice(0, MAX_NAME_LEN).join("") + "...' is longer than " + MAX_NAME_LEN + " characters" };
+    }
+    return { name: full, error: "" };
+  }
+
+  // A key that is not a valid category at all (blank) never matches anything.
+
   global.JarvisCategories = {
     MAX_NAME_LEN, MAX_PER_ITEM,
     normalizeName, keyOf, normalizeList, vocabulary, suggest, canonical,
+    renameInList, removeFromList, checkNewName,
     createInput, fitCount,
   };
 })(typeof window !== "undefined" ? window : globalThis);

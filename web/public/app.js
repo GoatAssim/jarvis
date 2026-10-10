@@ -1106,6 +1106,7 @@
   }
 
   function showSettingsModal(section) {
+    // `section` is a section id, or { section, tab, file } for a deep link.
     if (window.JarvisSettings) window.JarvisSettings.show(section);
     else qs("#prefs-backdrop").hidden = false;
   }
@@ -1114,16 +1115,28 @@
   // otherwise flash stale values); any other section is shown at once and the Skin
   // fields fill in behind it, so opening Advanced never waits on ai_config.json.
   async function openSettingsModal(section) {
+    const want = section && typeof section === "object" ? section : { section };
     const last = window.JarvisSettings && window.JarvisSettings.lastSection ? window.JarvisSettings.lastSection() : "skin";
-    const target = section || last || "skin";
+    const target = want.section || last || "skin";
     if (target === "skin") {
       await seedSkinModal();
       showSettingsModal("skin");
     } else {
-      showSettingsModal(target);
+      showSettingsModal(Object.assign({}, want, { section: target }));
       seedSkinModal();
     }
   }
+
+  // Deep link: #settings, #settings/advanced, #settings/advanced/files/ai_config.json.
+  // Read on load and whenever the hash changes; the link is parsed (and anything
+  // unknown dropped) by settings.js, which loads after this file, hence "load".
+  function openSettingsFromHash() {
+    const api = window.JarvisSettings;
+    const want = api && api.parseHash ? api.parseHash(window.location.hash) : null;
+    if (want) openSettingsModal(want);
+  }
+  window.addEventListener("hashchange", openSettingsFromHash);
+  window.addEventListener("load", openSettingsFromHash);
 
   function openSkinModal() { return openSettingsModal("skin"); }
 
@@ -8210,6 +8223,13 @@
   }
 
   qs("#btn-settings").addEventListener("click", () => openSettings("commands.json"));
+  // Rename / merge / delete a command category as a whole (category-manager.js). The
+  // server saves commands.json and pushes the change to every open tab, so the list
+  // and the editor's suggestions follow without a reload here.
+  qs("#btn-command-categories").addEventListener("click", () => {
+    if (!window.JarvisCategoryManager) { toast("category-manager.js didn\u2019t load, so categories can\u2019t be managed.", "error"); return; }
+    window.JarvisCategoryManager.open({ kind: "command" });
+  });
   qs("#settings-close").addEventListener("click", closeSettings);
   qs("#btn-settings-cancel").addEventListener("click", closeSettings);
   settingsBackdrop.addEventListener("click", (e) => { if (e.target === settingsBackdrop) closeSettings(); });
@@ -10114,7 +10134,10 @@
         subagents: openSubagents,
         notifications: openNotifications,
         logs: openLogs,
-        config: () => openSettings(),
+        // /config lands on Settings > Advanced > Files, where every file the old Config
+        // modal reached is (and in Focus, where that modal's button is hidden, still
+        // reachable). The old modal stays behind the Commands panel's Config button.
+        config: () => openSettingsModal({ section: "advanced", tab: "files" }),
         skin: openSkinModal,
       };
       const fn = openers[id];

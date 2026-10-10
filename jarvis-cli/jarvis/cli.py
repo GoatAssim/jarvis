@@ -10,7 +10,7 @@ import sys
 import threading
 from pathlib import Path
 
-from . import conditions, stats, token_usage
+from . import conditions, stats, token_usage, wire
 from .palette import Palette
 from .persona_name import current_cli_name, current_display_name, banner_letters
 from .reserved_names import RESERVED_NAMES, CHAIN_SEP, PARALLEL_SEP
@@ -803,7 +803,12 @@ def handle_ai_prompt(text, commands, provider_override=None, think_override=None
         finally:
             sys.exit(130)
 
-    for _sig in (getattr(signal, "SIGTERM", None), getattr(signal, "SIGINT", None)):
+    # A bridge worker (bridge.py) is a long-lived process hosting many requests: it
+    # installs its own SIGTERM/SIGINT handler once, one that records the turn as
+    # interrupted and then exits the whole worker. This per-ask handler would
+    # replace it with one that only unwinds the current request.
+    for _sig in (() if wire.active() else
+                 (getattr(signal, "SIGTERM", None), getattr(signal, "SIGINT", None))):
         if _sig is None:
             continue
         try:
@@ -815,7 +820,7 @@ def handle_ai_prompt(text, commands, provider_override=None, think_override=None
             pass
 
     def on_attempt(label):
-        print(f"{ERR.DIM}\u21b3 asking {label}\u2026{ERR.RESET}", file=sys.stderr, flush=True)
+        wire.trace(f"{ERR.DIM}\u21b3 asking {label}\u2026{ERR.RESET}", "provider")
 
     def on_route(route):
         # Phase 10 of the enhancements doc: trace the router's activation
@@ -831,7 +836,7 @@ def handle_ai_prompt(text, commands, provider_override=None, think_override=None
             if group in first_by_group else group
             for group in route.groups
         )
-        print(f"{ERR.DIM}$ routed: {bits}{ERR.RESET}", file=sys.stderr, flush=True)
+        wire.trace(f"{ERR.DIM}$ routed: {bits}{ERR.RESET}", "discovery")
 
     def on_tool_call(name, arguments=None):
         labels = {
@@ -883,16 +888,16 @@ def handle_ai_prompt(text, commands, provider_override=None, think_override=None
                 detail = "  " + " ".join(bits)
                 if len(detail) > 180:
                     detail = detail[:177] + "..."
-        print(f"{ERR.DIM}  $ {friendly}{detail}{ERR.RESET}", file=sys.stderr, flush=True)
+        wire.trace(f"{ERR.DIM}  $ {friendly}{detail}{ERR.RESET}", "tool-call")
 
     def on_tool_result(name, input_tokens, output_tokens):
         # Fires once the tool call is done and BOTH halves of the (~estimated)
         # token count are known — see ai_providers._call_tool_safely. Printed
         # right under that call's "$ ..." line above, same stderr trace.
-        print(
+        wire.trace(
             f"{ERR.DIM}    tokens: in={input_tokens} out={output_tokens} "
             f"total={input_tokens + output_tokens}{ERR.RESET}",
-            file=sys.stderr, flush=True,
+            "tokens",
         )
 
     tty_stream_active = [False]
@@ -912,7 +917,7 @@ def handle_ai_prompt(text, commands, provider_override=None, think_override=None
         # it mid-word hid most of what the model said (plan §0.5 item 4b).
         if len(text) > 600:
             text = text[:597] + "..."
-        print(f"{ERR.DIM}  \u00bb {text}{ERR.RESET}", file=sys.stderr, flush=True)
+        wire.trace(f"{ERR.DIM}  \u00bb {text}{ERR.RESET}", "narration")
 
     # Gate for anything tool_safety.json flags confirm_required for (see
     # ai_client._make_tool_executor) — delegates to the same
@@ -1016,26 +1021,28 @@ def handle_ai_prompt(text, commands, provider_override=None, think_override=None
             stream_sink.close()
 
     for label, err in result.attempts:
-        print(f"{ERR.DIM}  \u2717 {label} \u2014 {err}{ERR.RESET}", file=sys.stderr, flush=True)
+        wire.trace(f"{ERR.DIM}  \u2717 {label} \u2014 {err}{ERR.RESET}", "error")
 
     prefix = f"{OUT.CYAN}{OUT.BOLD}{result.assistant_name}:{OUT.RESET} "
 
     if not result.ok:
         address = result.address_user_as
         if not result.attempts:
-            print(
-                f"{prefix}I don't have any AI providers configured yet, {address}. Run "
+            failure = (
+                f"I don't have any AI providers configured yet, {address}. Run "
                 f"'{OUT.CYAN}jarvis ai-config{OUT.RESET}' to find the file, then add an API key for "
                 f"one of them \u2014 OpenAI, Anthropic, Gemini, xAI, Mistral, Groq, DeepSeek, "
                 f"OpenRouter, or Cohere \u2014 or install Ollama locally, which needs no key at all."
             )
         else:
-            print(
-                f"{prefix}I tried every AI provider you've got configured and couldn't get a "
+            failure = (
+                f"I tried every AI provider you've got configured and couldn't get a "
                 f"response from any of them, {address}. The details are in the trace above \u2014 "
                 f"it's usually a bad or missing API key, or a spending limit. "
                 f"'{OUT.CYAN}jarvis ai-config{OUT.RESET}' shows you where to fix it."
             )
+        print(f"{prefix}{failure}")
+        wire.reply(result.assistant_name, failure, False)
         return 1
 
     # Phase 0 (new_plan.md): baseline token/tool/round measurement for this
@@ -1048,18 +1055,18 @@ def handle_ai_prompt(text, commands, provider_override=None, think_override=None
     if usage:
         rounds = usage.get("rounds") or []
         tool_calls = usage.get("tool_calls") or []
-        print(
+        wire.trace(
             f"{ERR.DIM}  tokens: in={usage.get('input_tokens', 0)} "
             f"out={usage.get('output_tokens', 0)} "
             f"total={usage.get('total_tokens', 0)}  "
             f"rounds={len(rounds)} tools={len(tool_calls)}{ERR.RESET}",
-            file=sys.stderr, flush=True,
+            "tokens",
         )
         # L.24 T6: what the whole ask cost across every attempt, thinking
         # included. The line above is only the attempt that answered.
         ask_line = token_usage.format_ask_total(usage.get("ask_total"))
         if ask_line:
-            print(f"{ERR.DIM}  {ask_line}{ERR.RESET}", file=sys.stderr, flush=True)
+            wire.trace(f"{ERR.DIM}  {ask_line}{ERR.RESET}", "tokens")
         print("JARVIS_USAGE " + json.dumps(usage, default=str, ensure_ascii=False),
               flush=True)
 
@@ -1087,6 +1094,7 @@ def handle_ai_prompt(text, commands, provider_override=None, think_override=None
         pass  # already on screen, token by token; the sink closed the line
     else:
         print(f"{prefix}{result.text}")
+    wire.reply(result.assistant_name, result.text, True)
     ending = getattr(result, "ending", None)
     note = {
         "forced": "the step limit was reached, so the text above is a summary of what ran, not a "
@@ -1102,7 +1110,7 @@ def handle_ai_prompt(text, commands, provider_override=None, think_override=None
         note = ("every provider failed while composing this reply; the text above is a mechanical "
                 "summary of completed tool calls, not a model-written answer")
     if note:
-        print(f"{ERR.DIM}  (note: {note}){ERR.RESET}", file=sys.stderr, flush=True)
+        wire.trace(f"{ERR.DIM}  (note: {note}){ERR.RESET}", "status")
 
     # Phase 0 (new_plan.md): baseline token/tool/round measurement for this
     # ask. Two lines: a human-readable one on stderr (visible in a plain CLI
@@ -1114,18 +1122,18 @@ def handle_ai_prompt(text, commands, provider_override=None, think_override=None
     if usage:
         rounds = usage.get("rounds") or []
         tool_calls = usage.get("tool_calls") or []
-        print(
+        wire.trace(
             f"{ERR.DIM}  tokens: in={usage.get('input_tokens', 0)} "
             f"out={usage.get('output_tokens', 0)} "
             f"total={usage.get('total_tokens', 0)}  "
             f"rounds={len(rounds)} tools={len(tool_calls)}{ERR.RESET}",
-            file=sys.stderr, flush=True,
+            "tokens",
         )
         # L.24 T6: what the whole ask cost across every attempt, thinking
         # included. The line above is only the attempt that answered.
         ask_line = token_usage.format_ask_total(usage.get("ask_total"))
         if ask_line:
-            print(f"{ERR.DIM}  {ask_line}{ERR.RESET}", file=sys.stderr, flush=True)
+            wire.trace(f"{ERR.DIM}  {ask_line}{ERR.RESET}", "tokens")
         print("JARVIS_USAGE " + json.dumps(usage, default=str, ensure_ascii=False),
               flush=True)
 
@@ -1651,6 +1659,14 @@ def main():
     if argv[0] == "config":
         print(CONFIG_FILE)
         return
+
+    if argv[0] == "_internal_bridge":
+        # Hidden entry point: one warm process that the web server talks to over
+        # a typed channel instead of starting a new `jarvis` per request (see
+        # bridge.py's docstring). Nothing in the CLI needs it; imported lazily so
+        # a plain `jarvis ...` never loads it.
+        from . import bridge
+        sys.exit(bridge.serve())
 
     if argv[0] in ("version", "--version", "-v"):
         # Deliberately at the very top of dispatch, same tier as -h/--help
@@ -2965,7 +2981,7 @@ def main():
 
     if argv[0] == "settings-admin":
         # jarvis settings-admin catalog | changes
-        # jarvis settings-admin read|preview|write|set|restore|backups|tunable-set|tunable-reset
+        # jarvis settings-admin read|preview|write|set|reset|defaults|restore|backups|tunable-set|tunable-reset
         #     (the request is one JSON object on stdin)
         # The back end of Settings > Advanced (L.43; settings_admin.py owns every rule).
         # Not a command to type: it needs a JSON document on stdin, and the Settings screen
@@ -3006,13 +3022,18 @@ def main():
                                             confirm_guarded=request.get("confirm_guarded") is True)
         elif sub == "backups":
             result = settings_admin.list_backups(name)
+        elif sub == "defaults":
+            result = settings_admin.defaults_report(name)
+        elif sub == "reset":
+            result = settings_admin.reset_value(name, request.get("path"), request.get("base_version"),
+                                                confirm_guarded=request.get("confirm_guarded") is True)
         elif sub == "tunable-set":
             result = settings_admin.tunable_set(name, request.get("value"))
         elif sub == "tunable-reset":
             result = settings_admin.tunable_reset(name)
         else:
             result = {"ok": False, "error": "usage: jarvis settings-admin catalog|changes|read|preview|write|set|"
-                                            "restore|backups|tunable-set|tunable-reset"}
+                                            "restore|backups|defaults|reset|tunable-set|tunable-reset"}
         print(json.dumps(result, ensure_ascii=False))
         return
 

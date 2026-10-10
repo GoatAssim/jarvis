@@ -253,3 +253,29 @@
   .adv-files{ flex-direction: column; }
   .adv-list{ flex: 0 0 150px; border-right: 0; border-bottom: 1px solid var(--border); }
 }
+
+/* ---- Advanced > Files: Text / Tree view, and the tree itself (L.43 follow-up) ---- */
+.adv-view{ display: inline-flex; gap: 2px; margin-right: 6px; }
+.adv-treewrap{ flex: 1 1 auto; min-height: 160px; display: flex; flex-direction: column; gap: 8px; overflow: hidden; }
+.adv-tree__tools{ display: flex; flex-wrap: wrap; gap: 10px; align-items: center; }
+.adv-tree__search{ width: 240px; }
+.adv-tree{
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: auto;
+  padding: 4px 0;
+  background: var(--bg-1);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  font-size: 12.5px;
+}
+.adv-tree__row{ display: flex; flex-wrap: wrap; gap: 8px; align-items: center; padding: 3px 8px 3px 6px; border-bottom: 1px solid transparent; }
+.adv-tree__row:hover{ background: var(--bg-2, rgba(255,255,255,0.03)); }
+.adv-tree__row.is-missing{ opacity: 0.85; }
+.adv-tree__key{ min-width: 120px; color: var(--text); }
+.adv-tree__branch .adv-tree__key{ min-width: 0; font-weight: 600; }
+.adv-tree__value{ color: var(--text-dim); overflow-wrap: anywhere; }
+.adv-tree__input{ width: 220px; }
+.adv-tree__area{ width: min(420px, 100%); font-family: var(--font-mono); font-size: 12px; }
+.adv-tree__toggle{ width: 20px; padding: 0; background: none; border: none; color: var(--text-dim); cursor: pointer; font-size: 12px; }
+.adv-tree__toggle:focus-visible{ outline: 1px solid var(--accent); }

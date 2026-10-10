@@ -716,6 +716,86 @@ def remove_owned(daemon_id):
 
 
 # ---------------------------------------------------------------------------
+# category management (rename / merge / delete)
+# ---------------------------------------------------------------------------
+# A category is only a name inside daemons' `categories` lists, so these rewrite
+# those lists in one registry save. They touch every daemon, built-ins and
+# tool-supplied ones included: `categories` is a label and is not among the fields
+# either of those locks (_BUILTIN_LOCKED / _OWNER_LOCKED). Nothing else on a daemon
+# changes, and nothing is started or stopped.
+
+def category_usage():
+    """[{name, key, count}] for every category in use on a daemon, most used
+    first (ties alphabetical) - the list the Manage categories dialog shows."""
+    counts = {}
+    spellings = {}
+    for entry in _load_registry().values():
+        seen = set()
+        for name in entry.get("categories") or []:
+            key = _categories.key_of(name)
+            if not key or key in seen:
+                continue
+            seen.add(key)
+            counts[key] = counts.get(key, 0) + 1
+            spellings.setdefault(key, {})
+            spellings[key][name] = spellings[key].get(name, 0) + 1
+    rows = []
+    for key, n in counts.items():
+        best = max(spellings[key].items(), key=lambda kv: kv[1])[0]
+        rows.append({"name": best, "key": key, "count": n})
+    rows.sort(key=lambda r: (-r["count"], r["key"]))
+    return rows
+
+
+def rename_category(old, new):
+    """Rename `old` to `new` on every daemon that has it. Renaming to a name that
+    already exists merges the two. Returns (ok, info_or_error); info is
+    {"changed": n_daemons, "merged": bool}. Nothing is written when `old` is not
+    in use (that is an error, not a silent no-op, so a stale dialog says so)."""
+    new_name, err = _categories.check_new_name(new)
+    if err:
+        return False, err
+    old_key = _categories.key_of(old)
+    if not old_key:
+        return False, "say which category to rename"
+    merged_reg = _load_registry()
+    existing_keys = {_categories.key_of(c) for e in merged_reg.values()
+                     for c in (e.get("categories") or [])}
+    if old_key not in existing_keys:
+        return False, f"no daemon has the category '{old}'"
+    merged = new_name.lower() in existing_keys and new_name.lower() != old_key
+    changed = 0
+    for did, entry in merged_reg.items():
+        cats, did_change = _categories.rename_in_list(entry.get("categories"), old, new_name)
+        if did_change:
+            entry["categories"] = cats
+            changed += 1
+    if not changed:
+        return True, {"changed": 0, "merged": merged}
+    _save_registry(merged_reg)
+    return True, {"changed": changed, "merged": merged}
+
+
+def delete_category(name):
+    """Take `name` off every daemon that has it. The daemons stay; one left with
+    no category is shown as Undefined. Returns (ok, {"changed": n} or error)."""
+    key = _categories.key_of(name)
+    if not key:
+        return False, "say which category to delete"
+    merged_reg = _load_registry()
+    changed = 0
+    for did, entry in merged_reg.items():
+        cats, did_change = _categories.remove_from_list(entry.get("categories"), name)
+        if did_change:
+            entry["categories"] = cats
+            changed += 1
+    if not changed:
+        return False, f"no daemon has the category '{name}'"
+    _save_registry(merged_reg)
+    return True, {"changed": changed}
+
+
+# ---------------------------------------------------------------------------
 # per-daemon paths
 # ---------------------------------------------------------------------------
 

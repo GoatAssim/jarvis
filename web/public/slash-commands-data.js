@@ -718,7 +718,8 @@ window.JARVIS_SLASH_COMMANDS = /*JSON-BEGIN*/
         "daemon-edit",
         "daemon-remove",
         "daemon-window",
-        "daemons-sync"
+        "daemons-sync",
+        "daemon-category"
       ],
       "example": "/daemons",
       "preview": "Open Daemons."
@@ -844,7 +845,7 @@ window.JARVIS_SLASH_COMMANDS = /*JSON-BEGIN*/
       "verb": "config",
       "aliases": [],
       "group": "view",
-      "summary": "Open Config",
+      "summary": "Open Settings (Advanced > Files)",
       "riskTier": "safe",
       "instant": true,
       "whileReplying": true,
@@ -860,7 +861,7 @@ window.JARVIS_SLASH_COMMANDS = /*JSON-BEGIN*/
         "voice-config"
       ],
       "example": "/config",
-      "preview": "Open Config."
+      "preview": "Open Settings on Advanced > Files, where every config file can be edited."
     },
     {
       "verb": "skin",
@@ -1011,6 +1012,10 @@ window.JARVIS_SLASH_COMMANDS = /*JSON-BEGIN*/
     },
     "_internal_retitle": {
       "reason": "internal plumbing, not a user-facing command",
+      "riskTier": "safe"
+    },
+    "_internal_bridge": {
+      "reason": "internal plumbing: the long-lived process the web server talks to, not a user-facing command",
       "riskTier": "safe"
     },
     "skills-loaded": {

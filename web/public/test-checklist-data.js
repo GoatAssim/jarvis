@@ -215,6 +215,18 @@ window.JARVIS_TEST_CHECKLIST = /*JSON-BEGIN*/ {
    "label": "Tool Manager",
    "kind": "feature",
    "blurb": "Menu → Tool Manager: the on/off switches and what they take with them. A feature of the console, not a tool: do these by hand in the page."
+  },
+  {
+   "id": "tool_daemons",
+   "label": "Tool daemons & categories",
+   "kind": "feature",
+   "blurb": "Daemons a tool file supplies (DAEMONS) and renaming, merging and deleting categories as a whole. Features of the Daemons and Commands panels, not tools: do these by hand in the page."
+  },
+  {
+   "id": "settings",
+   "label": "Settings",
+   "kind": "feature",
+   "blurb": "The Settings modal (top bar) and its Advanced tab. A feature of the console, not a tool: do these by hand in the page."
   }
  ],
  "tools": {
@@ -3991,6 +4003,298 @@ window.JARVIS_TEST_CHECKLIST = /*JSON-BEGIN*/ {
     "expect": "The badge is gone."
    }
   ]
+  },
+  "tool_daemons_declare": {
+   "group": "tool_daemons",
+   "does": "A tool file that declares DAEMONS gets those services registered in the Daemons panel, owned by that file and tagged with its name.",
+   "steps": [
+    {
+     "do": "Copy a small test tool to ~/.jarvis/tools/dtest.py with one tool (see actions/_template.py sections 1-3) and, uncommented from section 10, DAEMONS = [{\"id\": \"hello\", \"command\": [\"{python}\", \"-c\", \"import time; print('hi', flush=True); time.sleep(600)\"], \"categories\": [\"Demo\"]}]. Then run `jarvis daemons-sync --force` in a terminal.",
+     "expect": "The command prints a result that reports a change, and `jarvis daemons` lists a daemon with id dtest-hello and owner dtest."
+    },
+    {
+     "do": "Open Menu -> Daemons.",
+     "expect": "A service \"dtest-hello\" is there with a \"Tool: dtest\" tag and the category Demo. It is not running (autostart was left off)."
+    },
+    {
+     "do": "Start it, open its Console.",
+     "expect": "It runs and the console shows the line hi."
+    },
+    {
+     "do": "Open its editor (Edit).",
+     "expect": "The command, working folder, environment, stdin, shell and description fields are locked with a note that the tool sets them. Name, categories, restart policy and notes can be changed."
+    },
+    {
+     "do": "Add a second entry to DAEMONS with the same id, and a third with a key that does not exist (for example \"colour\": 1). Save the file and run `jarvis daemons-sync --force`.",
+     "expect": "The panel still shows only dtest-hello; the bad entries are logged as [tool-daemons] ... dropped, and the tool's own tools still load."
+    }
+   ],
+   "needs": [
+    "A scratch tool file you can delete afterwards"
+   ],
+   "care": "The test daemon runs a real process on this PC. Stop it and delete the tool file when done.",
+   "watch": [
+    "This is the first time the whole path (file -> sync -> panel) is walked by hand; say which step differs from what is written here."
+   ]
+  },
+  "tool_daemons_owner_rules": {
+   "group": "tool_daemons",
+   "does": "What the tool controls (what runs) and what the owner keeps (name, schedule, switches, categories, restart policy) behave as documented.",
+   "steps": [
+    {
+     "do": "In the Daemons panel rename dtest-hello, change its categories to Demo and Mine, turn restart to always and save. Then change the tool file's DAEMONS command (for example sleep 601 instead of 600) and run `jarvis daemons-sync --force`.",
+     "expect": "The new command is in effect (the details show it), while the name, categories and restart policy you set are unchanged."
+    },
+    {
+     "do": "Try Remove on dtest-hello (and `jarvis daemon-remove dtest-hello` in a terminal).",
+     "expect": "The panel has no Remove for it and the command refuses, naming the tool that supplies it."
+    },
+    {
+     "do": "Delete the tool file (the daemon goes with it), then put it back with \"autostart\": True in its DAEMONS entry, and run `jarvis daemons-sync --force` followed by `jarvis daemons-tick`.",
+     "expect": "A daemon registered fresh with autostart declared starts on its own, with no extra warning (owner decision). Changing the preset in the file later does not override a choice you made in the panel."
+    },
+    {
+     "do": "Turn the tool off in Menu -> Tool Manager.",
+     "expect": "The daemon shows a \"Tool off\" tag but is NOT switched off: the cascade is not built yet (master plan Q-L46m). Note what you see."
+    }
+   ],
+   "watch": [
+    "The autostart step depends on how your install runs the supervisor; if it does not start, say so rather than counting it as a pass."
+   ]
+  },
+  "tool_daemons_lifecycle": {
+   "group": "tool_daemons",
+   "does": "A tool-supplied daemon follows its file: removed with it, switched off while the file does not load, restored when it loads again.",
+   "steps": [
+    {
+     "do": "Rename ~/.jarvis/tools/dtest.py to dtest.py.disabled and run `jarvis daemons-sync --force`.",
+     "expect": "dtest-hello is stopped and switched off (enabled off) but still listed."
+    },
+    {
+     "do": "Rename it back and run `jarvis daemons-sync --force`.",
+     "expect": "The daemon is switched back on as it was before, with your edits intact."
+    },
+    {
+     "do": "Remove the DAEMONS entry from the file, sync, then delete the file and sync again.",
+     "expect": "The daemon is stopped and removed from the panel after the entry is dropped; nothing is left behind after the file is deleted."
+    }
+   ],
+   "care": "Deletes the scratch tool file at the end."
+  },
+  "daemon_categories_manage": {
+   "group": "tool_daemons",
+   "does": "Menu -> Daemons -> Manage categories renames, merges and deletes a category on every service at once.",
+   "steps": [
+    {
+     "do": "Give two services the category Utility and one service the category utility, and one service Tools (Edit -> Categories). Open Daemons and press Manage categories.",
+     "expect": "A list shows each category once (Utility is one entry, three services) with how many services have it."
+    },
+    {
+     "do": "Pick Utility, choose Rename or merge, type Helpers, confirm.",
+     "expect": "A toast says it was renamed on three services; the filter dropdown and the cards now show Helpers and no Utility."
+    },
+    {
+     "do": "Open the manager again, rename Helpers to Tools.",
+     "expect": "It asks first to merge into Tools, and after confirming every service that had Helpers has Tools; a service that had both has it once."
+    },
+    {
+     "do": "Pick Tools and Delete, confirm.",
+     "expect": "The label disappears from every service; the services remain, none is started or stopped, and those with no category appear under Undefined."
+    },
+    {
+     "do": "Open it when no service has a category, and also try renaming to a name longer than 24 characters.",
+     "expect": "The first says no category exists yet; the second is refused with the length reason and nothing changes."
+    }
+   ],
+   "watch": [
+    "Built-in daemons can carry categories too: a rename or delete changes them as well (the label only; nothing they run).",
+    "Commands have their own separate categories; none of these steps should change a command."
+   ]
+  },
+  "command_categories_manage": {
+   "group": "tool_daemons",
+   "does": "The Commands panel's Categories button renames, merges and deletes a command category as a whole, without touching daemon categories.",
+   "steps": [
+    {
+     "do": "Give a few saved commands categories (for example two with Media, one with media, one with Work) and press Categories in the Commands panel header.",
+     "expect": "Each category appears once with how many commands carry it; no daemon-only category is listed."
+    },
+    {
+     "do": "Rename Media to Work.",
+     "expect": "After confirming the merge every command that had Media has Work; the card chips and the editor suggestions follow without a reload."
+    },
+    {
+     "do": "Delete Work.",
+     "expect": "The chips disappear from those cards; the commands themselves still run; commands.json shows no empty categories list."
+    },
+    {
+     "do": "Look at Menu -> Daemons categories afterwards.",
+     "expect": "Unchanged: a command category rename never touches a daemon's."
+    }
+   ],
+   "watch": [
+    "Editing commands.json by hand while the panel is open is picked up by the live sync; a rename done in two tabs at once is last-write-wins."
+   ]
+  },
+  "settings_open_sections": {
+   "group": "settings",
+   "does": "The top-bar Settings button (it replaces Skin) opens one modal with a section rail: Skin, AI, Layout, Notifications, Tools & safety, Integrations, Memory & storage, About and Advanced.",
+   "steps": [
+    {
+     "do": "Click Settings in the top bar in the Classic layout, then switch to Focus (/layout focus) and click it again.",
+     "expect": "The same modal opens in both layouts, above Ask and any open panel; there is no separate Skin button."
+    },
+    {
+     "do": "Open Skin, change the accent, Save, reload the page.",
+     "expect": "The accent persists (per browser); persona fields still save to ai_config.json as before."
+    },
+    {
+     "do": "Visit each section and change one setting in AI and one in Notifications.",
+     "expect": "Each shows an \"applies\" note; the value is saved, and a backup appears under Advanced -> Files -> Backups for the file it changed."
+    },
+    {
+     "do": "Type a word like timeout in the search box.",
+     "expect": "Matching sections, tunables and files are listed; clicking one opens it."
+    },
+    {
+     "do": "Press Esc, and also click outside the modal.",
+     "expect": "Both close it (an unsaved Advanced text edit asks before it is dropped)."
+    }
+   ],
+   "watch": [
+    "The old Config modal (Commands panel -> Config) still says Settings in its title: two things share the name until Q-L43h is decided."
+   ]
+  },
+  "settings_advanced_files": {
+   "group": "settings",
+   "does": "Settings -> Advanced -> Files edits the JSON files under ~/.jarvis as text with a diff, backup, undo and masked secrets.",
+   "steps": [
+    {
+     "do": "Open Settings -> Advanced -> Files -> notify_config.json, in the Text view, change one value and press Preview changes, then Save.",
+     "expect": "The preview lists the one change; Save reports it and the file on disk has it. Backups lists a new entry."
+    },
+    {
+     "do": "Break the JSON (delete a quote) and press Save.",
+     "expect": "Refused with the line and column; nothing is written."
+    },
+    {
+     "do": "Change a number to text and save.",
+     "expect": "Refused: the value must keep its type."
+    },
+    {
+     "do": "Open ai_config.json.",
+     "expect": "API keys show as bullets. Save without touching them: keys are unchanged. Reveal secrets asks first and shows them; closing Settings hides them again."
+    },
+    {
+     "do": "Open tool_safety.json, change a value and save without ticking the confirmation box; then tick it and save; then press Undo last change.",
+     "expect": "The first save is refused until the box is ticked; the second saves; Undo restores the previous contents."
+    },
+    {
+     "do": "Open scheduled.json and a state file such as key_health.json.",
+     "expect": "Both are shown read-only with a note saying why."
+    },
+    {
+     "do": "Open the file in another editor, change it, then Save in Settings without reloading.",
+     "expect": "Refused as stale; Reload then shows the outside change."
+    }
+   ],
+   "care": "Edits real configuration; use notify_config.json for the experiments and Undo afterwards.",
+   "watch": [
+    "From a terminal run `jarvis settings-admin catalog` with JARVIS_SCHEDULED=1 set, and a write call: the write must be refused."
+   ]
+  },
+  "settings_advanced_tree": {
+   "group": "settings",
+   "does": "The Tree view of Advanced -> Files shows one value per row, marks values that differ from the built-in default, and resets one value to its default.",
+   "steps": [
+    {
+     "do": "Open Settings -> Advanced -> Files -> ai_config.json and press Tree.",
+     "expect": "The file appears as expandable rows; values you changed from the shipped default show a \"changed from default\" tag and the default beside them; secrets show as hidden."
+    },
+    {
+     "do": "Tick Only changed from default.",
+     "expect": "Only changed values (and their parents) remain, expanded; the line beside it counts how many differ."
+    },
+    {
+     "do": "Type a word from a setting name, then a word from a value, in the search box.",
+     "expect": "Both narrow the tree; clearing the box brings everything back."
+    },
+    {
+     "do": "Edit a number or on/off value in the tree.",
+     "expect": "It saves at once (toast), the row now reads as changed from default, and a backup is made."
+    },
+    {
+     "do": "Press Reset on a changed value and confirm.",
+     "expect": "It goes back to the default, the tag disappears, and Undo last change brings your value back."
+    },
+    {
+     "do": "Delete a key in the Text view, save, then in Tree press Set to default on the \"not in the file\" row.",
+     "expect": "The key returns with its default value."
+    },
+    {
+     "do": "Open commands.json in Tree.",
+     "expect": "It shows the tree but says there are no built-in defaults on record, and Reset is not offered."
+    },
+    {
+     "do": "Open policy.json in Tree, edit a value without ticking the confirmation box.",
+     "expect": "Refused with \"Tick the confirmation box first\"; tick it and the edit saves."
+    }
+   ],
+   "watch": [
+    "A list (for example safe_roots) is compared and reset as a whole, not item by item.",
+    "A value you added that the default does not have is tagged \"added by you\" and has no Reset.",
+    "A hidden (masked) value cannot be edited in the Tree: use Reveal secrets, then edit."
+   ]
+  },
+  "settings_tunables": {
+   "group": "settings",
+   "does": "Advanced -> Tunables lists the registered numbers and switches with type, range, default and where each applies.",
+   "steps": [
+    {
+     "do": "Open Settings -> Advanced -> Tunables, change FETCH_TIMEOUT to a valid number, then to an out-of-range one.",
+     "expect": "The valid one saves and is tagged as an override; the other is refused with the range."
+    },
+    {
+     "do": "Press Reset to default on the one you changed.",
+     "expect": "The override tag disappears and the default shows again."
+    },
+    {
+     "do": "Set the matching environment variable (where one exists) and reopen Tunables.",
+     "expect": "The row says the environment variable wins."
+    }
+   ],
+   "watch": [
+    "MAX_TOOL_ROUNDS must not be in the list."
+   ]
+  },
+  "settings_deep_links": {
+   "group": "settings",
+   "does": "/config and the URL hash open Settings directly on Advanced -> Files, or on any file or section.",
+   "steps": [
+    {
+     "do": "In Ask type /config and press Enter, in both layouts.",
+     "expect": "Settings opens on Advanced -> Files (in Focus too); the old Config modal does not open."
+    },
+    {
+     "do": "In the address bar append #settings/advanced/files/ai_config.json and press Enter (or open a new tab with it).",
+     "expect": "Settings opens on Advanced -> Files with ai_config.json selected."
+    },
+    {
+     "do": "Try #settings/ai, #settings/advanced/tunables and #settings/nonsense.",
+     "expect": "The first two open those places; the last just opens Settings where it was last. Nothing breaks."
+    },
+    {
+     "do": "Click Config in the Commands panel header.",
+     "expect": "The old Config modal still opens, as before."
+    },
+    {
+     "do": "/skin and /settings.",
+     "expect": "Both still open Settings on Skin."
+    }
+   ],
+   "watch": [
+    "/config changed from opening the old Config modal to opening Settings (answer to Q-L43i, mine): check that matches what you want."
+   ]
  }
  }
 } /*JSON-END*/;

@@ -70,7 +70,7 @@
     section: loadLast(),
     catalog: null,
     renderToken: 0,
-    adv: { tab: "files", file: null, dirty: false, reveal: false, version: null, meta: null },
+    adv: { tab: "files", file: null, dirty: false, reveal: false, version: null, meta: null, view: "text", tree: freshTree() },
   };
 
   function loadLast() {
@@ -289,6 +289,122 @@
     S.adv.tab = "files";
     S.adv.file = name;
     select("advanced");
+  }
+
+  // ---- tree view helpers ------------------------------------------------------------------
+  // Pure (no DOM, no network), exposed as JarvisSettings._pure and run under node by
+  // tests/verify_settings_tree.js. The tree is another way to look at the same file the
+  // text editor shows: it is built from the text the server returned (secrets already
+  // masked) and every edit goes back through /api/settings/file/set, so it has no rules
+  // of its own.
+  const TREE_MASK = "\u2022".repeat(8);
+  const TREE_MAX_DEPTH = 12;
+  const TREE_MAX_CHILDREN = 400;
+
+  function freshTree() { return { needle: "", onlyChanged: false, open: new Set() }; }
+  const pathKey = (path) => JSON.stringify(path);
+  function fmtPath(path) {
+    let out = "";
+    for (const part of path) out += typeof part === "number" ? "[" + part + "]" : (out ? "." : "") + part;
+    return out || "(top level)";
+  }
+  function kindOf(v) {
+    if (v === null || v === undefined) return "null";
+    if (Array.isArray(v)) return "list";
+    return typeof v === "object" ? "object" : typeof v;   // string | number | boolean | object
+  }
+  function buildTree(value, path, depth) {
+    const kind = kindOf(value);
+    const node = { path, key: path.length ? path[path.length - 1] : "", kind, children: [], more: 0 };
+    if (kind === "object" || kind === "list") {
+      const entries = kind === "list" ? value.map((v, i) => [i, v]) : Object.entries(value);
+      if (depth >= TREE_MAX_DEPTH) { node.more = entries.length; return node; }
+      node.children = entries.slice(0, TREE_MAX_CHILDREN).map(([k, v]) => buildTree(v, path.concat([k]), depth + 1));
+      node.more = Math.max(0, entries.length - TREE_MAX_CHILDREN);
+    } else {
+      node.value = value;
+    }
+    return node;
+  }
+  const isPrefix = (a, b) => a.length <= b.length && a.every((part, i) => part === b[i]);
+  const related = (a, b) => isPrefix(a, b) || isPrefix(b, a);
+  function indexDeviations(devs) {
+    const m = new Map();
+    (Array.isArray(devs) ? devs : []).forEach((d) => m.set(pathKey(d.path), d));
+    return m;
+  }
+  function deviationsUnder(devs, path) {
+    return (Array.isArray(devs) ? devs : []).filter((d) => isPrefix(path, d.path));
+  }
+  function nodeText(n) {
+    const own = n.children.length || n.kind === "object" || n.kind === "list" ? "" : " " + String(n.value);
+    return (fmtPath(n.path) + own).toLowerCase();
+  }
+  // A pruned copy of the tree: only what matches the words typed and, with
+  // `onlyChanged`, only what differs from the built-in default. A node that has a
+  // match below it stays, so a match is always shown with its parents.
+  function filterTree(root, opts) {
+    const words = String((opts && opts.needle) || "").toLowerCase().split(/\s+/).filter(Boolean);
+    const only = !!(opts && opts.onlyChanged);
+    const devs = (opts && opts.devs) || [];
+    const walk = (n) => {
+      const kids = n.children.map(walk).filter(Boolean);
+      if (kids.length) return Object.assign({}, n, { children: kids });
+      const hay = nodeText(n);
+      const textOk = !words.length || words.every((w) => hay.includes(w));
+      const changed = devs.some((d) => related(n.path, d.path));
+      if (n.children.length) {
+        // A container with nothing kept below it stays only to show a default that
+        // is missing from the file (it has no node of its own to show it on).
+        return only && textOk && deviationsUnder(devs, n.path).length ? Object.assign({}, n, { children: [] }) : null;
+      }
+      return textOk && (!only || changed) ? n : null;
+    };
+    return walk(root) || Object.assign({}, root, { children: [] });
+  }
+  // The default a "missing" deviation (in the built-in default, absent from the file)
+  // belongs under: its parent container.
+  function missingUnder(devs, path) {
+    return (Array.isArray(devs) ? devs : []).filter((d) => d.state === "missing" && d.path.length === path.length + 1 && isPrefix(path, d.path));
+  }
+  // What a typed value means for a leaf of this kind: {ok, value} or {ok:false, error}.
+  function parseLeafInput(kind, raw) {
+    if (kind === "boolean") return { ok: true, value: !!raw };
+    if (kind === "number") {
+      const text = String(raw === null || raw === undefined ? "" : raw).trim();
+      if (!text) return { ok: false, error: "Enter a number." };
+      const n = Number(text);
+      if (!Number.isFinite(n)) return { ok: false, error: "That is not a number." };
+      return { ok: true, value: n };
+    }
+    if (kind === "string") return { ok: true, value: String(raw === null || raw === undefined ? "" : raw) };
+    return { ok: false, error: "Edit this value in the Text view." };
+  }
+
+  // ---- deep links --------------------------------------------------------------------------
+  // #settings                          open Settings where it was last
+  // #settings/advanced/files/ai_config.json   Advanced, Files, that file
+  // Anything that is not a known section, tab or file name is ignored, so a hand-typed
+  // or stale link opens Settings rather than nothing.
+  const ADV_TABS = ["files", "tunables", "plumbing", "history"];
+  const FILE_NAME_RE = /^(?:channels\/)?[A-Za-z0-9][A-Za-z0-9_.\-]{0,80}\.json$/;
+  function parseHash(hash) {
+    const m = /^#\/?settings(?:\/(.*))?$/i.exec(String(hash || ""));
+    if (!m) return null;
+    const parts = (m[1] || "").split("/").filter((x) => x !== "");
+    const out = {};
+    const section = (parts[0] || "").toLowerCase();
+    if (section && BY_ID[section]) out.section = section;
+    if (out.section === "advanced") {
+      const tab = (parts[1] || "").toLowerCase();
+      if (ADV_TABS.includes(tab)) out.tab = tab;
+      if (out.tab === "files" && parts.length > 2) {
+        let file = parts.slice(2).join("/");
+        try { file = decodeURIComponent(file); } catch (_) { /* leave as typed */ }
+        if (FILE_NAME_RE.test(file)) out.file = file;
+      }
+    }
+    return out;
   }
 
   // ---- sections -------------------------------------------------------------------------
@@ -611,6 +727,7 @@
 
     async function openFile(name, force) {
       if (!force && A.dirty && A.file !== name && !(await confirmDialog({ title: "Discard unsaved edits?", body: "You have edits to " + A.file + " that are not saved.", confirmLabel: "Discard", level: "danger", focusCancel: true }))) return;
+      if (A.file !== name) A.tree = freshTree();
       A.file = name; A.dirty = false; A.reveal = false;
       drawList();
       editor.replaceChildren(h("div", { class: "prefs-loading", text: "Loading…" }));
@@ -735,11 +852,191 @@
       if (A.reveal) notes.push(h("div", { class: "prefs-note prefs-note--warn", text: "Secrets are visible. They are hidden again when you switch file or close Settings." }));
       if (r.parse_ok === false) notes.push(h("div", { class: "prefs-note prefs-note--warn", text: "This file is not valid JSON right now (" + r.parse_error + "). Fix it here and save." }));
 
+      const treeMode = A.view === "tree";
+      const viewBtns = h("span", { class: "adv-view", role: "group", "aria-label": "How to show the file" }, [["text", "Text"], ["tree", "Tree"]].map(([id, label]) =>
+        h("button", { class: "btn btn--sm " + (A.view === id ? "btn--primary" : "btn--ghost"), type: "button", text: label, "aria-pressed": A.view === id ? "true" : "false",
+          onclick: async () => {
+            if (A.view === id) return;
+            if (A.dirty && !(await confirmDialog({ title: "Discard unsaved edits?", body: "Switching view reloads the file and drops edits you have not saved.", confirmLabel: "Discard", level: "danger", focusCancel: true }))) return;
+            A.view = id; A.dirty = false;
+            openFile(r.name, true);
+          } })));
+      const treeBox = h("div", { class: "adv-treewrap" });
       const bar = h("div", { class: "adv-editor__bar" }, [
-        previewBtn, saveBtn, formatBtn, undoBtn, backupsBtn, reloadBtn, r.masked || A.reveal ? revealBtn : (hasSecretsLikely(r.name) ? revealBtn : null), guard,
+        viewBtns,
+        treeMode ? null : previewBtn, treeMode ? null : saveBtn, treeMode ? null : formatBtn,
+        undoBtn, backupsBtn, reloadBtn, r.masked || A.reveal ? revealBtn : (hasSecretsLikely(r.name) ? revealBtn : null), guard,
       ]);
-      editor.replaceChildren(head, ...notes, bar, ta, hint, report, backups);
-      if (meta.editable) localCheck(); else hint.textContent = "";
+      if (treeMode) {
+        editor.replaceChildren(head, ...notes, bar, treeBox, hint, backups);
+        hint.textContent = ""; hint.className = "adv-hint";
+        renderTree(treeBox, r, meta, guardBox, hint);
+      } else {
+        editor.replaceChildren(head, ...notes, bar, ta, hint, report, backups);
+        if (meta.editable) localCheck(); else hint.textContent = "";
+      }
+    }
+
+    // The tree view: the same file, one value per row. Every change is saved on its own
+    // through /api/settings/file/set (same checks, backup and log as a text save), and
+    // "Reset" puts one value back to the built-in default where Jarvis has one on record.
+    async function renderTree(box, r, meta, guardBox, hint) {
+      let doc;
+      try { doc = JSON.parse(r.text); } catch (_) { doc = undefined; }
+      if (doc === undefined || doc === null || typeof doc !== "object") {
+        box.replaceChildren(h("div", { class: "prefs-note prefs-note--warn", text: "This file is not an object or list Settings can show as a tree. Use the Text view." }));
+        return;
+      }
+      box.replaceChildren(h("div", { class: "prefs-loading", text: "Loading…" }));
+      let report = { has_defaults: false, deviations: [], truncated: false };
+      try { report = await api("POST", "/api/settings/file/defaults", { name: r.name }); }
+      catch (_) { /* no defaults to compare with: the tree still works */ }
+      const devs = report.deviations || [];
+      const devIndex = indexDeviations(devs);
+      const T = A.tree;
+
+      const search = h("input", { type: "search", class: "prefs-input adv-tree__search", placeholder: "Find a setting or value…", "aria-label": "Find in this file", spellcheck: "false", value: T.needle });
+      const onlyBox = h("input", { type: "checkbox", disabled: !report.has_defaults });
+      onlyBox.checked = !!T.onlyChanged && !!report.has_defaults;
+      const summary = h("span", { class: "prefs-unit" });
+      const tools = h("div", { class: "adv-tree__tools" }, [
+        search,
+        h("label", { class: "check", title: report.has_defaults ? "" : "Jarvis has no built-in defaults on record for this file." },
+          [onlyBox, h("span", { text: "Only changed from default" })]),
+        summary,
+      ]);
+      const body = h("div", { class: "adv-tree", role: "tree" });
+      box.replaceChildren(tools, body);
+
+      const guardOk = () => {
+        if (meta.guarded && !guardBox.checked) {
+          hint.textContent = "Tick the confirmation box first."; hint.className = "adv-hint is-err";
+          return false;
+        }
+        return true;
+      };
+      async function save(path, value, status) {
+        if (!guardOk()) return false;
+        try {
+          const res = await api("POST", "/api/settings/file/set", { name: r.name, path, value, base_version: A.version, confirm_guarded: meta.guarded && guardBox.checked });
+          A.version = res.version;
+          toast(res.changed === false ? "No change." : "Saved " + fmtPath(path) + ". Applies: " + (meta.applies || "when it next runs").replace(/\.$/, "") + ".", "info");
+          await openFile(r.name, true);
+          return true;
+        } catch (err) {
+          flash(status, err.message, "err");
+          if (err.data && err.data.code === "stale") { hint.textContent = "The file changed on disk. Reload it, then try again."; hint.className = "adv-hint is-err"; }
+          return false;
+        }
+      }
+      async function reset(dev) {
+        if (!guardOk()) return;
+        if (!(await confirmDialog({ title: "Reset to the default?", body: fmtPath(dev.path) + " goes back to " + (dev.default === null ? "its default" : dev.default) + ". The file as it is now is backed up first.", confirmLabel: "Reset" }))) return;
+        try {
+          const res = await api("POST", "/api/settings/file/reset", { name: r.name, path: dev.path, base_version: A.version, confirm_guarded: meta.guarded && guardBox.checked });
+          A.version = res.version;
+          toast("Reset " + fmtPath(dev.path) + ".", "info");
+          await openFile(r.name, true);
+        } catch (err) { toast(err.message); }
+      }
+
+      function badges(dev) {
+        if (!dev) return [];
+        const out = [];
+        out.push(h("span", { class: "prefs-tag is-override", title: dev.default === null ? "" : "Default: " + dev.default,
+          text: dev.state === "missing" ? "not set (default applies)" : dev.state === "extra" ? "added by you" : "changed from default" }));
+        if (dev.state === "changed" && dev.default !== null) out.push(h("span", { class: "prefs-unit", text: "default " + dev.default }));
+        return out;
+      }
+
+      function leafControl(n, status) {
+        const editable = meta.editable;
+        const masked = n.kind === "string" && n.value === TREE_MASK;
+        if (!editable || masked || (n.kind !== "string" && n.kind !== "number" && n.kind !== "boolean")) {
+          return h("span", { class: "adv-tree__value mono", title: masked ? "Hidden. Use Reveal secrets to see or change it." : "", text: masked ? TREE_MASK + " (hidden)" : n.kind === "null" ? "null" : JSON.stringify(n.value) });
+        }
+        const commit = async (raw, el) => {
+          const parsed = parseLeafInput(n.kind, raw);
+          if (!parsed.ok) { flash(status, parsed.error, "err"); return; }
+          if (parsed.value === n.value) { flash(status, "", ""); return; }
+          flash(status, "Saving…", "");
+          const ok = await save(n.path, parsed.value, status);
+          if (!ok && el) { if (n.kind === "boolean") el.checked = !!n.value; else el.value = String(n.value); }
+        };
+        if (n.kind === "boolean") {
+          const el = h("input", { type: "checkbox", "aria-label": fmtPath(n.path) });
+          el.checked = !!n.value;
+          el.addEventListener("change", () => commit(el.checked, el));
+          return el;
+        }
+        const multi = n.kind === "string" && (n.value.length > 80 || n.value.includes("\n"));
+        const el = multi
+          ? h("textarea", { class: "prefs-input adv-tree__area", rows: 3, "aria-label": fmtPath(n.path), spellcheck: "false" })
+          : h("input", { class: "prefs-input adv-tree__input", type: n.kind === "number" ? "number" : "text", step: n.kind === "number" ? "any" : null, "aria-label": fmtPath(n.path), spellcheck: "false" });
+        el.value = String(n.value);
+        el.addEventListener("change", () => commit(el.value, el));
+        return el;
+      }
+
+      function leafRow(n, depth) {
+        const dev = devIndex.get(pathKey(n.path)) || devs.find((d) => d.path.length < n.path.length && pathKey(d.path) === pathKey(n.path.slice(0, d.path.length)));
+        const status = h("span", { class: "prefs-row__status", "aria-live": "polite" });
+        const own = dev && pathKey(dev.path) === pathKey(n.path) ? dev : null;
+        const covering = dev && !own ? dev : null;
+        return h("div", { class: "adv-tree__row", role: "treeitem", style: "padding-left:" + (depth * 14 + 6) + "px" }, [
+          h("span", { class: "adv-tree__key mono", title: fmtPath(n.path), text: String(n.key) }),
+          leafControl(n, status),
+          ...badges(own),
+          own && own.resettable && meta.editable ? h("button", { class: "btn btn--ghost btn--sm", type: "button", text: "Reset", onclick: () => reset(own) }) : null,
+          covering && covering.resettable && meta.editable ? h("button", { class: "btn btn--ghost btn--sm", type: "button", title: "This value is part of " + fmtPath(covering.path) + ", which differs from the default as a whole.", text: "Reset " + fmtPath(covering.path), onclick: () => reset(covering) }) : null,
+          status,
+        ]);
+      }
+
+      function missingRow(dev, depth) {
+        return h("div", { class: "adv-tree__row is-missing", role: "treeitem", style: "padding-left:" + (depth * 14 + 6) + "px" }, [
+          h("span", { class: "adv-tree__key mono", text: String(dev.path[dev.path.length - 1]) }),
+          h("span", { class: "adv-tree__value mono", text: "not in the file" }),
+          ...badges(dev),
+          meta.editable ? h("button", { class: "btn btn--ghost btn--sm", type: "button", text: "Set to default", onclick: () => reset(dev) }) : null,
+        ]);
+      }
+
+      function drawNode(n, parent, depth) {
+        if (n.kind !== "object" && n.kind !== "list") { parent.append(leafRow(n, depth)); return; }
+        const key = pathKey(n.path);
+        const forced = !!(T.needle.trim() || T.onlyChanged);
+        const open = depth === 0 || forced || T.open.has(key);
+        const under = deviationsUnder(devs, n.path).length;
+        const count = n.children.length + n.more;
+        if (depth > 0) {
+          parent.append(h("div", { class: "adv-tree__row adv-tree__branch", role: "treeitem", "aria-expanded": open ? "true" : "false", style: "padding-left:" + (depth * 14 + 6) + "px" }, [
+            h("button", { class: "adv-tree__toggle", type: "button", "aria-label": (open ? "Collapse " : "Expand ") + fmtPath(n.path), text: open ? "\u25BE" : "\u25B8",
+              onclick: () => { if (T.open.has(key)) T.open.delete(key); else T.open.add(key); draw(); } }),
+            h("span", { class: "adv-tree__key mono", title: fmtPath(n.path), text: String(n.key) }),
+            h("span", { class: "prefs-unit", text: (n.kind === "list" ? "[" : "{") + count + (n.kind === "list" ? "]" : "}") }),
+            under ? h("span", { class: "prefs-tag is-override", text: under + " differ" + (under === 1 ? "s" : "") + " from default" }) : null,
+          ]));
+        }
+        if (!open) return;
+        n.children.forEach((c) => drawNode(c, parent, depth + 1));
+        missingUnder(devs, n.path).forEach((d) => parent.append(missingRow(d, depth + 1)));
+        if (n.more) parent.append(h("div", { class: "prefs-empty", style: "padding-left:" + ((depth + 1) * 14 + 6) + "px", text: n.more + " more not shown here. Use the Text view for the rest." }));
+      }
+
+      function draw() {
+        body.replaceChildren();
+        const root = filterTree(buildTree(doc, [], 0), { needle: T.needle, onlyChanged: T.onlyChanged, devs });
+        drawNode(root, body, 0);
+        if (!body.childElementCount) body.append(h("div", { class: "prefs-empty", text: T.onlyChanged ? "Nothing here differs from the built-in default." : "Nothing matches." }));
+        const n = devs.length;
+        summary.textContent = report.has_defaults
+          ? (report.exists === false ? "File not created yet: every value is the default." : n + " value" + (n === 1 ? "" : "s") + " differ from the default" + (report.truncated ? " (first " + n + " shown)" : "") + ".")
+          : "No built-in defaults on record for this file.";
+      }
+      search.addEventListener("input", () => { T.needle = search.value; draw(); });
+      onlyBox.addEventListener("change", () => { T.onlyChanged = onlyBox.checked; draw(); });
+      draw();
     }
 
     drawList();
@@ -754,15 +1051,20 @@
   }
 
   // ---- public ---------------------------------------------------------------------------
-  function show(section) {
+  function show(arg) {
+    const want = arg && typeof arg === "object" ? arg : { section: arg };
     const backdrop = $("#prefs-backdrop");
     if (!backdrop) return;
     S.adv.reveal = false;
     S.adv.dirty = false;
+    if (want.section === "advanced") {
+      if (want.tab && ADV_TABS.includes(want.tab)) S.adv.tab = want.tab;
+      if (want.file) { if (S.adv.file !== want.file) S.adv.tree = freshTree(); S.adv.file = want.file; }
+    }
     backdrop.hidden = false;
     buildRail();
     clearSearch();
-    select(section || S.section);
+    select(want.section || S.section);
     loadCatalog().catch(() => { /* search just has fewer entries until a section loads it */ });
   }
 
@@ -819,5 +1121,8 @@
     if (host().closePrefs) host().closePrefs();
   });
 
-  window.JarvisSettings = { show, lastSection: () => S.section };
+  window.JarvisSettings = {
+    show, lastSection: () => S.section, parseHash,
+    _pure: { buildTree, filterTree, indexDeviations, deviationsUnder, missingUnder, parseLeafInput, parseHash, fmtPath, pathKey, kindOf, freshTree },
+  };
 })();

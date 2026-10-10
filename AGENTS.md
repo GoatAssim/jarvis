@@ -218,6 +218,23 @@ things that were already fixed once.
   `history.py`'s docstring). Nothing survives in memory between calls —
   persistence goes through `conversations.py` or `discovery_cache.py` on
   disk, never a module-level global.
+- **The web UI may run a request in a warm `jarvis _internal_bridge` worker
+  instead of a new process (`jarvis/bridge.py`, `web/bridge.js`); jarvis never
+  depends on it.** Code to the rule above anyway -- a worker is a normal
+  process that happens to live longer. Three things are yours to keep true:
+  (1) anything a process used to do when it ended (close a browser, an MCP
+  session, an app jarvis launched) goes in `bridge.Host._end_of_request`, or a
+  warm worker will carry it into the next request; (2) anything read once at
+  import (tool discovery, personas, MCP config) must be covered by
+  `bridge.source_fingerprint`, which is how a worker notices it is stale and
+  asks to be replaced -- do not make it ignore a file just because it changes
+  often; (3) the CLI half must stay inert without a host: `wire.trace()` is a
+  plain stderr print and `wire.reply()` a no-op unless `bridge.serve()` installed
+  itself, and `cli.py` imports `bridge` only to serve `_internal_bridge`. The
+  server side must keep the process path as the fallback (no idle worker, `refuse`,
+  `retire`, a death before `started` all mean "start a process"); a request
+  that has sent `started` is never re-run. `tests/test_bridge.py` and
+  `tests/verify_bridge_client.js` pin this. `JARVIS_BRIDGE=0` turns it off.
 - **There is no debug/verbose flag anywhere in `cli.py`.** All stderr trace
   output (`on_attempt`, `on_tool_call`, `on_tool_result`, `on_route`) is
   always-on, unconditional `print(..., file=sys.stderr)`. Don't assume one
@@ -376,6 +393,10 @@ actually render Markdown):
     python3 tests/verify_l11_daemon_categories.py # L.11: daemon categories in a real browser; needs `playwright` (Python) + Chromium, prints SKIP without them
     python3 tests/verify_l13_favorite_daemons.py  # L.13: favorite daemons in a real browser; needs `playwright` (Python) + Chromium, prints SKIP without them
     node tests/verify_slash_palette.js      # no npm install; runs the real palette
+    python3 tests/test_category_manage.py   # L.12: rename / merge / delete a category as a whole (daemons: registry + CLI + routes pinned; commands share the JS rules)
+    node tests/verify_category_manager.js   # L.12: category-manager.js pure helpers + the whole dialog chain against a fake JarvisUI/fetch; no npm install
+    python3 tests/test_l43_tree.py          # L.43: "changed from default" report + per-value reset (same gate as every Settings write)
+    node tests/verify_settings_tree.js      # L.43: settings.js tree helpers, deep-link parser and wiring; no npm install
     python3 tests/verify_l36_insights_ui.py # L.36-P1/P2/P3: Conversation / Usage / Test tabs in a real browser; needs `playwright` (Python) + Chromium, prints SKIP without them
     python3 tests/test_code_agent_extras.py # L.47b: code_agent runs are saved as replay extras, slimmed (no file content, no listing)
     node tests/verify_agent_panel.js        # L.47: the Focus Agent panel's reducer + tree builder (agent-panel.js); no npm install
@@ -392,6 +413,8 @@ actually render Markdown):
     node tests/verify_mcp_servers.js        # L.31: the MCP panel's pure helpers (state labels, search, filters, what a blank secret means); no npm install
     python3 tests/verify_mcp_servers_ui.py  # L.31: the MCP panel in a real browser against a real stdio MCP server; needs `playwright` (Python) + Chromium, prints SKIP without them
     python3 tests/test_tool_maker.py        # L.53: the Tool Maker conversation: withheld tools (hidden AND refused, fail closed), context, history trimming, conv-new origin
+    python3 tests/test_bridge.py            # the direct channel's CLI half against a real `jarvis _internal_bridge` on a throwaway HOME: protocol, process reuse, env overlay, stdin, confirm round trip, typed reply / trace categories, refuse / retire before started, staleness fingerprint, CLI independence; no network, no API key
+    node tests/verify_bridge_client.js      # web/bridge.js against a fake worker: no blocking or queueing, reuse, fallbacks, crash-not-rerun, kill, breaker, recycling; no npm install
     node tests/verify_ask_embed.js          # L.53: ask-embed.js's reply/stream/size helpers and the Tool Manager's chat-fold + per-tool conversation key; no npm install
     node tests/verify_code_editor.js        # L.33: the Tool Manager editor's tokenizer, edit helpers and completions; no npm install
     python3 tests/verify_l33_code_editor.py # L.33: the editor in a real browser (keys, undo, ghost suggestions, scroll sync); needs `playwright` (Python) + Chromium, prints SKIP without them
@@ -699,6 +722,15 @@ suggestions never come from commands). A name reaches the CLI as `--category NAM
 parser reads any following `--...` token as a flag, so `server.js` refuses names starting with `--`
 (`daemonCategoryArgs`). Writes are strict (refused with a reason, nothing saved); reads of a
 hand-edited registry are lenient. L.14 should reuse both files rather than copy them.
+
+**Renaming, merging and deleting a category as a whole** (L.12 follow-up) edits every item's list; a
+category has no record of its own. The rule is `categories.rename_in_list` / `remove_from_list`, with the
+JS twins `renameInList` / `removeFromList` in `category-input.js` (parity-tested in `test_categories.py`).
+Renaming to a name already in use IS the merge (there is no separate merge operation). Daemons go through
+`daemons.rename_category` / `delete_category` and the `daemon-category` verb; commands are edited in
+`server.js` (`/api/command-categories/*`) with the shared JS rules. The two vocabularies stay separate, so
+neither path may touch the other. The dialog is `public/category-manager.js` (one modal at a time, built
+from `JarvisUI.choose/prompt/confirm`).
 
 ## Patch conventions
 

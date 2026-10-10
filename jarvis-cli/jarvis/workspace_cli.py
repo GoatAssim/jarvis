@@ -20,6 +20,7 @@ COMMANDS = (
     "daemon-status", "daemon-console", "daemon-input", "daemon-schedule",
     "daemon-add", "daemon-edit", "daemon-remove", "daemon-run",
     "daemons-tick", "daemon-window", "daemon-viewer", "daemons-sync",
+    "daemon-category",
     "logs-files", "logs-tail", "logs-sets",
     "backlog", "backlog-add", "backlog-done", "backlog-update",
     "backlog-remove", "backlog-board", "backlog-move",
@@ -56,6 +57,10 @@ USAGE = """workspace commands:
   daemon-remove <id>
   daemon-run    <id>                   THE SUPERVISOR — runs in the foreground
   daemons-tick                         start whatever is scheduled and due
+  daemon-category list                 every category in use, with how many daemons have it
+  daemon-category rename <old> <new>   rename it on every daemon (a name already in
+                                       use merges the two)
+  daemon-category delete <name>        take it off every daemon (they become Undefined)
   daemon-window <id>                   open its live console window (Windows)
   daemon-viewer <id>                   THE WINDOW'S OWN PROCESS - stays open
   daemons-sync [--force]               register/remove the daemons tools supply
@@ -362,6 +367,22 @@ def handle(argv):
 
     if cmd == "daemons-tick":
         _emit({"ok": True, "started": daemons.tick()})
+        return
+
+    if cmd == "daemon-category":
+        action = positional[0] if positional else ""
+        if action == "list":
+            _emit({"ok": True, "categories": daemons.category_usage()})
+            return
+        if action == "rename" and len(positional) == 3:
+            ok, res = daemons.rename_category(positional[1], positional[2])
+        elif action == "delete" and len(positional) == 2:
+            ok, res = daemons.delete_category(positional[1])
+        else:
+            _fail("usage: daemon-category list | rename <old> <new> | delete <name>")
+        out = {"ok": ok}
+        out.update(res if ok else {"error": res})
+        _emit(out, 0 if ok else 1)
         return
 
     if cmd == "daemon-window":

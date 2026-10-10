@@ -42,7 +42,11 @@ Two facts explain most of the design:
 1. **`jarvis` is a brand-new OS process on every CLI invocation.** Nothing
    survives in memory between calls. Every piece of state is a file under
    `~/.jarvis/`. Where you see an on-disk store that looks like it could
-   have been a global, that is why.
+   have been a global, that is why. (One caveat, and only for the web UI:
+   `web/server.js` may run a request in a warm `jarvis _internal_bridge` worker
+   instead of a new process -- see "The direct channel" in section 6. Plain CLI
+   use, the scheduler and the gateways never do, and the rule above is still
+   the one to code to: the worker is replaced when anything it loaded changes.)
 2. **Sending the whole tool catalog on every message cost ~7.9k prompt
    tokens.** The router exists to send only the relevant slice. Everything
    in the "token optimization" family follows from that.
@@ -60,6 +64,15 @@ root**, next to `jarvis-cli/`, not inside it.
 ```
 jarvis-cli/jarvis/
     cli.py                argv parsing, chained commands, the ask entry point
+    bridge.py             `jarvis _internal_bridge` (hidden): ONE warm process that runs
+                          requests through the same `cli.main()` and talks to its caller over
+                          typed line-delimited JSON on its own stdin/stdout. Only web/server.js
+                          starts it; nothing in the CLI needs it. Wire, limits and the
+                          staleness fingerprint are in its docstring. tests/test_bridge.py
+    wire.py               the one-line seam the CLI uses to tell a host what it is printing:
+                          `wire.trace(text, cat)` (stderr line + in-band category when hosted;
+                          a plain stderr print otherwise) and `wire.reply(...)`. Inert without
+                          a host; imports nothing
     __main__.py           `python -m jarvis`
 
     # --- the brain -----------------------------------------------------
@@ -112,7 +125,10 @@ jarvis-cli/jarvis/
     settings_admin.py     L.43: the Settings > Advanced back end -- every rule for editing
                           ~/.jarvis files from the UI (secret masking, type/structure checks,
                           stale-write detection, backup-before-write, undo, guarded and
-                          read-only groups); `jarvis settings-admin ...` (JSON on stdin)
+                          read-only groups); `jarvis settings-admin ...` (JSON on stdin).
+                          Also the built-in defaults table (`_DEFAULT_SOURCES`), the
+                          "changed from default" report (`defaults_report`) and the per-value
+                          `reset_value` the Files tree uses (`defaults`, `reset` verbs)
     tunables.py           L.43: the registry + store of owner-adjustable knobs (12 env
                           switches/constants that used to need a source edit);
                           `tunables.const()` / `get()` are how modules read them
@@ -138,6 +154,7 @@ jarvis-cli/jarvis/
     task_runner.py        one task step per process
     subagents.py          child agents with isolated API keys
     categories.py         L.11/L.14.3 category-name rules (trim, case-insensitive unique, 24 chars, 8 per item)
+                          + rename_in_list / remove_from_list (rename, merge, delete a category as a whole)
     daemons.py            NEW — registry + supervisor for every background
                           service, built-in or user-defined
     backlog.py            NEW — untimed work: idea/todo/doing/blocked/done
@@ -263,6 +280,10 @@ jarvis-cli/jarvis/
 
 web/
     server.js             Express + WS; shells out to `jarvis` for everything
+    bridge.js             the server's end of the direct channel: a small pool of warm
+                          `jarvis _internal_bridge` workers. `request()` never blocks or
+                          queues -- no idle worker means null and server.js starts a process
+                          as it always did. tests/verify_bridge_client.js
     public/index.html     the whole UI
     public/app.js         the whole front-end (also defines window.JarvisHost, the
                           small facade slash-palette.js talks to it through)
@@ -327,6 +348,10 @@ web/
     public/category-input.js/.css  L.11/L.14.3: the ONE category component - name rules (same as
                                  jarvis/categories.py, parity-tested), vocabulary, prefix suggest, chip input.
                                  Loaded before daemons.js; commands (L.14) will reuse it.
+    public/category-manager.js   Manage categories dialog (L.12): rename / merge / delete a daemon or command
+                                 category as a whole, from the Daemons panel and the Commands header. Pure
+                                 helpers in JarvisCategoryManager._pure. Routes: /api/daemon-categories,
+                                 /api/command-categories (list, rename, delete).
     public/daemons.js            Menu -> Daemons (three-pane: services / selected service /
                                  overview; Console + Details tabs; add/edit form). Pure
                                  helpers are exposed as JarvisDaemons._pure for the node test
@@ -552,6 +577,21 @@ jarvis onboard [--json] [--skip]     jarvis ui-mode [classic|focus]
 matching `jarvis` subcommand, so the Python side stays the single source of
 truth and keeps the tests.
 
+**The direct channel (`web/bridge.js` <-> `jarvis/bridge.py`).** The server used to start a
+`jarvis` process for every ask, panel call and scheduler tick. It now keeps up to
+`JARVIS_BRIDGE_MAX` (default 3) warm `jarvis _internal_bridge` workers and hands them
+requests (`runJarvisOnce`, and `spawnAndStream` for asks and direct command runs), one
+at a time per worker. Everything the old path did still exists and is the fallback:
+no idle worker, a worker that is stale (jarvis source, `~/.jarvis/tools` or the MCP config
+changed since it started), a command that needs a process of its own (`bridge.UNHOSTED`),
+or a worker that dies before it runs anything -> the request is started as a process.
+`JARVIS_BRIDGE=0` turns the channel off; `GET /api/bridge` shows the pool. The channel
+carries typed events (`out`, `err` with the CLI's own `cat`egory, `stream`, `usage`,
+`confirm`, `ui`, `reply`, `exit`), which the server turns into the same WebSocket messages as
+before plus, additively, `cat` on `ask-stderr` and an `ask-reply` message that the browser does
+not read yet. The browser's own text classifiers (`splitConsoleDump`, `askConsoleKindOf`)
+are untouched.
+
 Two layouts, switched from the topbar and persisted server-side via
 `jarvis ui-mode`:
 
@@ -707,9 +747,15 @@ silently never runs.
 | `verify_mcp_servers_ui.py` (`python`, not run by `run_tests.py`) | L.31: the real page in headless Chromium against the real CLI verbs and a real stdio MCP server — add/edit/rename/remove, on/off, Trusted confirm, secrets never in the page, search/filters, keyboard, phone width |
 | `verify_notifications.js` (`node`) | L.30: `notifications.js` pure helpers (burst collapsing, day sections, query string, read/ack readers, level badges) |
 | `verify_notifications_ui.py` (`python`, not run by `run_tests.py`) | L.30: the real page in headless Chromium against the real CLI verbs — toast stack, level 5 dialog, panel filters/dismiss/mark-read, re-surfacing on a fake clock. Needs Playwright; skips cleanly without it |
+| `test_category_manage.py` | L.12: rename / merge / delete a category -- list helpers, daemon registry (built-ins and tool-supplied included), the `daemon-category` verb, registration everywhere a verb must be, routes and wiring pinned statically |
+| `verify_category_manager.js` (`node`) | L.12: `category-manager.js` pure helpers and the whole dialog chain (pick, rename, merge confirm, delete, refusals, empty list) against a fake JarvisUI and fetch |
+| `test_l43_tree.py` | L.43: `default_doc`, `defaults_report` (changed / missing / extra, masked secrets), `reset_value` (backup, log, stale, guarded, unattended, wrong-type repair), CLI verbs, routes and wiring |
+| `verify_settings_tree.js` (`node`) | L.43: `settings.js` tree helpers (build, filter, leaf input), the `#settings/...` deep-link parser, and `/config` wiring |
 | `test_slash_coverage.py` | every `reserved_names.py` name is in the `/` palette registry exactly once, with a valid risk tier |
 | `verify_slash_palette.js` (`node`) | the palette engine: parsing, submit routing, near-miss, every verb's handler, confirm gates, keyboard model |
 | `test_allowed_channels.py` | L.36-P18: the `allowed_channels` editor -- preview-first, last entry never removed, real `permissions.decide` gate (thread = parent, DMs untouched, server filter warning), only that key written, change log, CLI, route + panel wiring |
+| `test_bridge.py` | the direct channel's CLI half, against a REAL worker on a throwaway HOME: ready/protocol, one process serving many requests, env overlay applied then restored (grandchild output captured), request stdin, confirm round trip (yes and no), typed `reply` next to the stdout line, `cat` on trace lines, `refuse` / `retire` only before `started`, the staleness fingerprint, and that the CLI never imports or needs the bridge |
+| `verify_bridge_client.js` (`node`) | `web/bridge.js` against a fake worker: never blocks/queues, reuse, confirm round trip, `refuse`/`retire`/death-before-start fall back, death after start is a crash not a re-run, kill, breaker after three failed warm-ups, recycling without cutting off a chained request; no npm install |
 | `verify_app_icon.js` (`node`) | L.48: `app-icon.js` pure helpers and a fake-DOM run (skin/colour change picked up, busy swaps the icon, ticker stops with Animations off) |
 
 
@@ -724,7 +770,14 @@ silently never runs.
   Only what is **sent to the model** is filtered.
 - Per-turn content never enters the cached static prompt prefix.
 - No module-level mutable global as a persistence mechanism — it will be
-  empty on the next invocation.
+  empty on the next invocation. (Under the web UI's warm worker it would NOT
+  be empty, which is a different way to be wrong: see the next item.)
+- **Anything a process used to do at exit must be listed in
+  `bridge.Host._end_of_request`** (today: MCP sessions, the browser a tool
+  opened, an Everything.exe jarvis launched), and anything read once at import
+  must be covered by `bridge.source_fingerprint`, or a warm worker will keep
+  using it after it changed. `_internal_bridge` is a hidden subcommand: a
+  request the worker cannot or should not host is answered `refuse`, never run.
 - There is **no debug/verbose flag**. All stderr trace output is
   unconditional.
 - The model can start, stop and inspect daemons; it cannot create one.

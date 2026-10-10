@@ -2953,6 +2953,13 @@
     dom.live.addEventListener("click", toggleLive);
     $("#btn-daemon-refresh").addEventListener("click", () => refreshAll(true));
     $("#btn-daemon-add-open").addEventListener("click", () => openEditor("add"));
+    const manageCats = $("#btn-daemon-categories");
+    if (manageCats) {
+      manageCats.addEventListener("click", () => {
+        if (!global.JarvisCategoryManager) { toast("category-manager.js didn\u2019t load, so categories can\u2019t be managed.", "error"); return; }
+        global.JarvisCategoryManager.open({ kind: "daemon", onChanged: () => refreshAll(true) });
+      });
+    }
     $("#daemons-close").addEventListener("click", () => close());
     dom.overlay.addEventListener("click", (ev) => { if (ev.target === dom.overlay) close(); });
     document.addEventListener("keydown", onKey);
