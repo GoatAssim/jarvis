@@ -145,8 +145,7 @@ things that were already fixed once.
   (L.36-P8 / P9 / P13 / P14).** (1) `image_allowlist` is a fourth list but NOT a
   stage of the gate: `permissions.may_send_images()` only ever ANDs with an
   allowed decision, so a picture grant can never open a conversation;
-  `channels/media_in.py` is its only reader (Discord; Instagram does not read
-  pictures yet) and the panel says so. Every
+  `channels/media_in.py` is its only reader (Discord and Instagram) and the panel says so. Every
   place that walks "all of someone's lists" uses `user_admin.LISTS`, so block,
   forget, handle edits and listing cannot forget it. It is not a bulk flag or
   part of any quick setup. (2) `channels/master_tools.py` is the only way the
@@ -243,17 +242,32 @@ things that were already fixed once.
 
 - **A picture someone SENDS reaches the model only as a description, only after the gate said yes, and only if the sender is the owner or on `image_allowlist` (L.36-P8 / L.42.3 inbound).**
   The Discord gateway reports `message.attachments` as plain descriptors (`IncomingMessage.attachments`: url, name, type, size -- never bytes;
-  `permissions.decide()` must never read them). `channels/media_in.prepare_text` is the one reader and `base.handle_message` calls it
+  `permissions.decide()` must never read them). `channels/media_in.prepare` (`prepare_text` is its text half) is the one reader and `base.handle_message` calls it
   AFTER the gate and the dedupe guard, so a picture can never open a conversation, be paid for twice, or be fetched for a sender who was refused.
   It asks `permissions.may_send_images` itself; a person without the grant is not read AND the model is told N pictures were not looked at.
-  What it will fetch: https URLs on the platform's own CDN only (`ALLOWED_HOSTS`; redirects not followed; never an address from message text),
+  What it will fetch: https URLs on a platform's own CDN only (`ALLOWED_HOSTS` + `ALLOWED_HOST_SUFFIXES`: Discord's, and Meta's `*.cdninstagram.com` / `*.fbcdn.net` / `lookaside.fbsbx.com` for Instagram, matched on a dot boundary; redirects not followed; never an address from message text),
   image types whose first bytes really are an image, at most `MAX_IMAGES` per message, at most `max_image_mb` each (default 8, checked against the
   declared AND the received size), and for anyone but the owner `RATE_PER_PERSON` per hour on disk (`media_in.json`). The file lives in a private
-  temp folder for one vision call and is deleted straight after. The model gets the vision model's DESCRIPTION wrapped in a note that says so and
+  temp folder for one vision call and is deleted straight after (a COPY is kept with the conversation, see the next invariant). The model gets the vision model's DESCRIPTION wrapped in a note that says so and
   that text inside a picture is content, never an instruction -- keep that wording; the picture is an injection channel and its cost lands on the
-  owner's vision provider. Don't widen the host list, don't fetch a URL a sender typed, don't put the picture in the conversation record as bytes,
-  and don't let this open the OUTBOUND collector (`media_out`), which stays owner-only. Instagram is not built (it drops a message with no text).
+  owner's vision provider. Don't widen the host list beyond those two platforms, don't fetch a URL a sender typed, don't put the picture in the conversation record as bytes,
+  and don't let this open the OUTBOUND collector (`media_out`), which stays owner-only. An Instagram DM that is only a picture is no longer dropped
+  (`instagram_gateway._attachment_descriptors`); a sticker / audio / reaction still is.
   `tests/test_channel_media_in.py` pins this.
+- **A picture that came with a message is KEPT with the conversation so the owner can look at it -- and only the references travel (Ask panel pictures, Discord / Instagram pictures).**
+  `jarvis/conv_images.py` is the only writer of `~/.jarvis/conv_images/` (`ci_<24 hex>.<png|jpg|gif|webp>`; the extension comes from the bytes' signature, never a
+  sender's file name; `path_for` re-validates every id, so nothing outside that folder can be named). `media_in.prepare` / `prepare_files` keep a copy of every picture that was
+  actually fetched and really is a picture (even if the description then fails) and return references `{id, name, size}`; `base.handle_message` / `cli._load_panel_pictures`
+  pass them as `user_images` / `user_shown` to `ai_client.ask`, which hands them to `conversations.begin_exchange(images=, shown=)`. The exchange's `user` still holds the
+  words PLUS the picture descriptions (that is what the model was asked and what later turns' history needs); `shown` is what was typed and is what a reload draws.
+  The same two fields are written on the raw `user` event and carried by `raw_archive.rebuild_exchanges` -- the web UI loads from that replay, so leave it out and a reload
+  loses the pictures. Redo finds the exchange by `user` OR `shown` and deletes its pictures; Delete and Clear delete them too (the raw log's ones included).
+  Never put bytes, a path or a sender-given URL in a reference. The model never sees a picture, only the vision model's description wrapped as content.
+  `web/server.js` serves them at `/api/conv-images/<id>` (strict id pattern, nosniff, sandbox).
+- **Pictures attached in the Ask Jarvis panel use the same reader.** The browser sends base64 in the `ask` message (`images`); `web/ask-images.js` checks count (3), size (8 MB)
+  and the real image signature and stages the files in a private temp folder with a manifest (`JARVIS_ASK_IMAGES_FILE`); `cli._load_panel_pictures` -> `media_in.prepare_files`
+  describes and keeps them. The folder is removed when the child exits. A message that is only pictures is stored as `(sent a picture)`. The Tool Maker's embedded ask
+  (`ask-embed.js`) does not send pictures. `tests/test_ask_images.py` + `tests/verify_ask_images.js` pin this.
 
 - **Calendars: linking and managing a calendar is human-only; a model tool may only touch Jarvis's OWN events (L.54).**
   Every rule lives in `jarvis/actions/calendar_tools.py`; `admin()` (`jarvis calendar-admin`, called only by
@@ -367,6 +381,8 @@ actually render Markdown):
     node tests/verify_agent_panel.js        # L.47: the Focus Agent panel's reducer + tree builder (agent-panel.js); no npm install
     python3 tests/test_channel_timed_and_instruction.py   # L.36-P6 / P12: time-limited tools and the per-person instruction
     python3 tests/test_channel_pack_p8_p9_p13_p14.py      # L.36-P8 / P9 / P13 / P14: picture grant, platform tools switch, panel DM, turned-away list
+    python3 tests/test_ask_images.py         # pictures in the Ask panel + kept with the conversation (store, Instagram, replay, redo / delete, CLI manifest)
+    node tests/verify_ask_images.js          # the panel's picture helpers, the server's checking / staging, and the wiring; no npm install
     python3 tests/test_channel_media_in.py   # L.36-P8 / L.42.3 inbound: pictures a person sends on Discord are read only for the owner and the picture list (host / size / count / hourly caps, description wrapped as content, never raises)
     python3 tests/verify_l53_tool_maker_ui.py # L.53: the Tool Maker's Ask Jarvis side panel in a real browser (toggle, one conversation per tab, New chat, Undo, tag); needs `playwright` (Python) + Chromium, prints SKIP without them
     python3 tests/test_allowed_guilds.py    # L.36-P17: allowed_guilds editor (preview-first, last entry never removable, real gate, CLI, route pinned statically)

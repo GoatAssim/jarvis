@@ -730,6 +730,36 @@ def _tty_streaming_wanted():
         return False
 
 
+def _load_panel_pictures(text):
+    """(text for the model, picture references, typed text) for an ask that came with pictures.
+
+    web/server.js sets JARVIS_ASK_IMAGES_FILE when the Ask Jarvis panel attached pictures: a JSON file
+    {"files": [{"path", "name"}], "shown": "<what was typed>"} pointing at private temp copies it already
+    checked. The pictures go through the SAME reader inbound chat pictures use (channels/media_in.py:
+    a vision call per picture, the description wrapped as content, a copy kept with the conversation),
+    so the model is asked the words plus the descriptions. With no variable, or a file that can't be read,
+    this returns the text untouched -- a picture problem never costs the owner the question. Never raises."""
+    path = os.environ.get("JARVIS_ASK_IMAGES_FILE")
+    if not path:
+        return text, [], None
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            spec = json.load(fh)
+        files = [f for f in (spec.get("files") or []) if isinstance(f, dict)]
+        shown = str(spec.get("shown") or "")
+        if not files:
+            return text, [], None
+        print(f"{ERR.DIM}  \u00bb reading {len(files)} picture{'s' if len(files) != 1 else ''}...{ERR.RESET}",
+              file=sys.stderr, flush=True)
+        from .channels import media_in
+        new_text, refs = media_in.prepare_files(text, files)
+        return new_text, refs, shown
+    except Exception as exc:  # noqa: BLE001
+        print(f"{ERR.DIM}  ! couldn't read the attached pictures ({exc.__class__.__name__}){ERR.RESET}",
+              file=sys.stderr, flush=True)
+        return text, [], None
+
+
 def handle_ai_prompt(text, commands, provider_override=None, think_override=None):
     """Anything typed at jarvis that isn't a known command name lands here
     instead of the "Unknown command" error \u2014 it's treated as a message for
@@ -907,6 +937,12 @@ def handle_ai_prompt(text, commands, provider_override=None, think_override=None
         from . import tool_maker
         tool_maker.stamp_conversation(conv_id)
 
+    # Pictures attached in the Ask Jarvis panel: turned into descriptions here, the same way an
+    # inbound chat picture is, and kept with the conversation. No-op without the variable.
+    text, ask_images, ask_shown = _load_panel_pictures(text)
+    image_kwargs = ({"user_images": ask_images, "user_shown": ask_shown or ""}
+                    if ask_images else {})
+
     # Same idea, one level up: a plain-CLI '--provider NAME' or '--provider
     # NAME1,NAME2,...' is already extracted from argv and passed in
     # directly (see _extract_provider_override / the call site in main()).
@@ -970,7 +1006,7 @@ def handle_ai_prompt(text, commands, provider_override=None, think_override=None
             conversation_id=conv_id, on_confirm_request=on_confirm_request,
             on_route=on_route, provider_override=provider_override,
             think_override=think_override, on_interim_text=on_interim_text,
-            on_stream=stream_sink,
+            on_stream=stream_sink, **image_kwargs,
         )
     finally:
         # Anything still buffered (the last few tokens before the process

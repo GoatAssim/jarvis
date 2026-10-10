@@ -3839,16 +3839,68 @@ window.JARVIS_TEST_CHECKLIST = /*JSON-BEGIN*/ {
     },
     {
      "do": "Menu \u2192 Channels \u2192 that person \u2192 Test tab, with Pictures on, then off.",
-     "expect": "The Pictures card reads on / off to match, and says pictures are read on Discord only."
+     "expect": "The Pictures card reads on / off to match, and says pictures are read on Discord and Instagram."
     }
    ],
-   "care": "Each read picture costs a call to your vision provider. Use throw-away photos; the picture is deleted from the PC right after it is described.",
+   "care": "Each read picture costs a call to your vision provider. Use throw-away photos. A copy of every picture that was read is kept on this PC with the conversation (~/.jarvis/conv_images) until you delete or clear that conversation.",
    "watch": [
-    "Instagram does not read pictures yet; a picture-only Instagram message is still dropped.",
-    "The conversation record holds the description, not the picture.",
+    "A picture-only Instagram message is read like a Discord one (it used to be dropped); Instagram pictures are the part most worth a real-world check.",
+    "The conversation record holds the description for the model AND a kept copy of the picture for you to look at (see the Ask Jarvis pictures entry).",
     "Outbound pictures (screenshots) are a separate feature and stay owner-only."
    ]
   },
+ "ask_panel_pictures": {
+  "group": "chat_pictures",
+  "does": "Attach pictures in the Ask Jarvis panel (button, paste or drop); they are read like a chat picture, and the pictures people send on Discord / Instagram are kept with the conversation so you can see them.",
+  "needs": [
+   "A vision provider set up (the same one the Vision tools use).",
+   "For the channel steps: Discord and/or Instagram connected, and your own account (the owner) to send from."
+  ],
+  "steps": [
+   {
+    "do": "Menu \u2192 Ask Jarvis. Click the paperclip, choose one picture, type \"what is in this?\" and send.",
+    "expect": "A thumbnail appears above the box before sending and in your message after. Jarvis answers about what is really in the picture."
+   },
+   {
+    "do": "Copy a picture (or take a screenshot) and press Ctrl+V in the Ask box. Then drag a picture file onto the Ask box.",
+    "expect": "Each lands as a thumbnail with a small \u00d7. Clicking the \u00d7 removes just that one."
+   },
+   {
+    "do": "Try to attach a fourth picture, a PDF, and a file over 8 MB.",
+    "expect": "Each is refused with a short message saying why; the ones already attached stay."
+   },
+   {
+    "do": "Send a message that is only a picture, with no words.",
+    "expect": "Jarvis still answers about it. Your message shows the picture and no stray text."
+   },
+   {
+    "do": "Reload the page and open that conversation again.",
+    "expect": "Your messages show the same pictures (click one to open it full size) and the words you typed, not a long description block."
+   },
+   {
+    "do": "Ask a follow-up such as \"what colour was the thing in the first picture?\"",
+    "expect": "Jarvis can answer from the earlier description."
+   },
+   {
+    "do": "Click Redo on a message with a picture right after sending it, then reload and try Redo again.",
+    "expect": "The first Redo resends the picture. After the reload it says the pictures can't be sent again and does nothing."
+   },
+   {
+    "do": "From your own Discord account, DM Jarvis a picture. Then do the same from Instagram.",
+    "expect": "Jarvis answers about it. Opening that conversation in the Ask panel shows the picture, from both platforms."
+   },
+   {
+    "do": "Delete one conversation that has a picture, then check ~/.jarvis/conv_images.",
+    "expect": "That conversation's picture files are gone; other conversations' pictures are still there."
+   }
+  ],
+  "care": "Each picture costs a vision call. Use throw-away photos. The pictures are kept on this PC until you delete or clear the conversation.",
+  "watch": [
+   "A picture-only Instagram message used to be dropped; confirm it now gets an answer.",
+   "Stopping an ask in the middle should still leave the picture in the conversation.",
+   "Pictures sent by someone who is not on the picture list are not read and not kept."
+  ]
+ },
  "tool_manager_cascade": {
   "group": "tool_manager",
   "does": "Switching off the LAST tool of a file that is still on also switches off the screens and daemons that same file ships (Q-L46m); switching a tool back on gives them back.",

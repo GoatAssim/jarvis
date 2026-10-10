@@ -416,6 +416,8 @@
         </div>
 
         <div class="ask-quote-bar" id="ask-quote-bar" hidden></div>
+        <!-- Pictures attached to the next ask (ask-images.js / app.js): thumbnails with a remove button. -->
+        <div class="ask-attach-bar" id="ask-attach-bar" hidden></div>
 
         <form class="ask-input-row" id="ask-form">
           <!-- The "/" command palette (slash-palette.js). A child of the
@@ -424,6 +426,12 @@
                the thread around like the old inline skill-suggest box did. -->
           <div class="slash-palette" id="slash-palette" hidden></div>
           <textarea id="ask-input" rows="1" placeholder="Ask Jarvis anything&hellip; type / for commands, or highlight text above to quote it" maxlength="4000"></textarea>
+          <input type="file" id="ask-attach-input" accept="image/png,image/jpeg,image/gif,image/webp" multiple hidden>
+          <button class="btn btn--ghost btn--icon" id="btn-ask-attach" type="button" title="Attach pictures (or paste / drop them) &mdash; up to 3, 8 MB each">
+            <svg class="attach-icon" viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M21 12.5l-8.6 8.6a5.5 5.5 0 0 1-7.8-7.8l9-9a3.7 3.7 0 0 1 5.2 5.2l-9 9a1.8 1.8 0 0 1-2.6-2.6l8.3-8.3" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>
+            </svg>
+          </button>
           <button class="btn btn--ghost btn--icon" id="btn-ask-mic" type="button" title="Record a voice message">
             <svg class="mic-icon" id="mic-icon" viewBox="0 0 24 24" aria-hidden="true">
               <path d="M12 15a3 3 0 0 0 3-3V6a3 3 0 0 0-6 0v6a3 3 0 0 0 3 3z" fill="currentColor"/>
@@ -1928,6 +1936,7 @@
      cards (L.14) and the Daemons panel (L.11) both build their category
      chips from JarvisCategories. -->
 <script src="category-input.js"></script>
+<script src="ask-images.js"></script>
 <script src="app.js"></script>
 <script src="notifications.js"></script>
 <script src="mcp-servers.js"></script>

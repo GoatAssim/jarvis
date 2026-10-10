@@ -330,8 +330,7 @@ def may_send_images(cfg, identities):
     inside a picture is an injection channel, which is why it is a list the
     owner fills in rather than something inherited from `reply`.
 
-    channels/media_in.py is the consumer (Discord pictures; Instagram is not built
-    yet), and the panel switch and the Test tab ask this same function. Never
+    channels/media_in.py is the consumer (Discord and Instagram pictures), and the panel switch and the Test tab ask this same function. Never
     raises: a malformed config answers no.
     """
     cfg = cfg or {}
@@ -379,7 +378,7 @@ def describe(cfg):
         f"dm_allowlist:    {render(PERM_DM)}",
         f"reply_allowlist: {render(PERM_REPLY)}",
         f"tool_allowlist:  {render(PERM_TOOLS)}",
-        f"image_allowlist: {render(PERM_IMAGES)}   (who may send Jarvis pictures; Discord only)",
+        f"image_allowlist: {render(PERM_IMAGES)}   (who may send Jarvis pictures; Discord and Instagram)",
         f"allow_tools:     {bool(cfg.get('allow_tools'))}",
         f"require_mention: {bool(cfg.get('require_mention', True))}",
     ]

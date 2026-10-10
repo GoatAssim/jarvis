@@ -99,6 +99,7 @@ jarvis-cli/jarvis/
     memory_consolidation.py
     conversations.py      on-disk conversation history (a derived view: newest 60 exchanges)
     raw_archive.py        L.38: the raw event log -- what actually happened, uncapped
+    conv_images.py        pictures kept WITH a conversation (~/.jarvis/conv_images): the Ask panel's and the ones people send on Discord / Instagram; ids, caps, delete
                           and unsplit; conversation/console views can be rebuilt from
                           it; `conv-export --raw` and `console-read` read it;
                           `replay_record()` is what the web UI replays
@@ -200,9 +201,10 @@ jarvis-cli/jarvis/
         allowed_guilds.py L.36-P17: add / remove one server on `allowed_guilds` (panel "Allowed servers" /
                           `channels-guilds`); the ONLY writer of that key. Add to an empty list or an unseen
                           id previews until confirmed; removing the last entry is always refused
-        media_in.py       L.36-P8 / L.42.3 inbound: a picture a person sends on Discord -> a vision description for the
-                          model, only for the owner and `image_allowlist`; CDN-host / size / count / hourly caps; the file
-                          is deleted right after the vision call. The only reader of `image_allowlist`
+        media_in.py       L.36-P8 / L.42.3 inbound: a picture a person sends on Discord or Instagram (or the owner attaches in
+                          the Ask panel: `prepare_files`) -> a vision description for the model, only for the owner and
+                          `image_allowlist`; CDN-host / size / count / hourly caps; the download is deleted right after the
+                          vision call and a copy is kept via conv_images. The only reader of `image_allowlist`
         master_tools.py   L.36-P9: the platform-wide `allow_tools` switch for the panel / `channels-master-tools`:
                           view (who it would reach), turn ON only after a preview + confirm, OFF at once,
                           refused while the tool list holds "*"
@@ -267,6 +269,8 @@ web/
     public/style.css      theme + layout, including the classic/focus switch
     public/tool-manager.js (+ .css)  Tool Manager panel (L.25): catalogue, per-tool safeguards, user tools; also lists daemons / tool-registered personas / TOOL_UI screens with an on/off switch, and "Unfinished tools" (draft backups)
     public/tool-ui.js (+ .css)       renders TOOL_UI screens: buttons beside Menu (sandboxed frame) and Menu entries (shadow-root panel), plus the `host` API they talk to; pure helpers in JarvisToolUI._pure
+    public/ask-images.js             pictures in the Ask Jarvis composer (attach / paste / drop, limits, what a saved exchange draws); pure helpers in JarvisAskImages
+    ask-images.js                    (server side) checks and stages the pictures the Ask panel sends: count, size, real image bytes, private temp folder
     public/ask-embed.js (+ .css)     an Ask Jarvis panel to put inside another screen (L.53): the main Ask panel's websocket protocol, one conversation per instance, small / normal layouts by the pane's own width; first host is the Tool Manager's side panel; pure helpers in JarvisAskEmbed
     public/code-editor.js (+ .css)   the Tool Manager's code editor (L.33): Python highlighting, VS Code-style editing, completions, inline Jarvis suggestions; pure helpers in JarvisCodeEditor._pure
     public/agent-panel.js (+ .css)   the Focus layout's Agent side panel: while dev_agent / code_agent runs it shows the codebase root, the file being worked on, a file tree with a status per file, and a short log. Fed by app.js from the existing JARVIS_MEDIA dev_agent events (no server route); reducer + tree builder in JarvisAgentPanel._pure
@@ -681,6 +685,8 @@ silently never runs.
 | `test_channel_timed_and_instruction.py` | L.36-P6 / P12: the `tools_until` deadline (garbage reads as passed, resolver is read-only), grant refusals, `expire_due` + its change-log reason, manual switches / block / forget / `channels-allow|deny` ending a countdown, the gateway sweep, the Test tab's wording, and the instruction (cap, one line, owner refused, prompt framing, not reachable by a guest) |
 | `test_channel_insights.py` | L.36-P1/P2/P3: per-person conversation attribution (DM vs group, rotated files, torn lines), the usage ledger (counts only, failed asks, windows, rotation), and `simulate` (agrees with what `handle_message` really hands the model; writes nothing, calls no model — snapshot of `~/.jarvis` before/after) |
 | `test_channel_media_out.py` | L.42.3 outbound: `media_out` collector (no-op outside a chat ask, owner only, capped), `channels/media_send.prepare` (owner only, extension allow-list, size cap, shrink-or-say), screenshots reach the owner's Discord thread after the text and a guest's never do |
+| `test_ask_images.py` | pictures kept with a conversation and in the Ask panel: `conv_images` store, Instagram hosts + DM parsing, `media_in.prepare` / `prepare_files`, `images` / `shown` through the exchange, raw replay, redo / delete / clear, the CLI manifest, limits agreeing with `web/ask-images.js` |
+| `verify_ask_images.js` (`node`) | the panel's picture helpers (limits, picture URLs, what a reload draws), the server's picture checking + staging, and the app.js / server.js / page wiring |
 | `test_channel_media_in.py` | L.42.3 inbound / L.36-P8: `channels/media_in` (what counts as a picture, CDN-host-only urls, size / count / hourly caps, magic-byte check, description wrapped as content), the picture grant read through `handle_message` (owner and listed guests read, others told, denied senders never fetched), the Discord gateway's descriptors, `vision_call.load_image` reporting the real image type |
 | `verify_l53_tool_maker_ui.py` (`python3`) | L.53: the Tool Maker's Ask Jarvis side panel in a real browser (toggle needs an editor, one conversation per tool tab, New chat asks first, Undo, Tool Maker tag); SKIPs without playwright + Chromium |
 | `test_channel_pack_p8_p9_p13_p14.py` | L.36-P8/P9/P13/P14: the picture grant (never a way into a conversation, cleaned up by block / forget, owner locked), the platform tools switch (preview then confirm, refused with `"*"`), panel DM (shared limits, owner / chat-origin refused, preview sends nothing), the turned-away list (who-stages only, never message text) |

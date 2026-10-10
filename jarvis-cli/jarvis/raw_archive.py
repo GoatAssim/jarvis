@@ -25,6 +25,8 @@ is why event ``data`` is open-schema and each line carries a format version.
 
 EVENTS (each line: ``v``, ``ts``, ``kind``, plus the fields below)
     user          text            exactly what was typed/sent, byte for byte
+                  images, shown   (only when pictures came with it) the kept-picture references
+                                  (conv_images) and the words the person actually typed
     model_reply   text, provider, cut, thinking, interim, trace
                                   the model's output BEFORE any splitting,
                                   the FULL thinking text (not clipped),
@@ -71,7 +73,7 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
-from . import conversations, thread_extras, tunables
+from . import conv_images, conversations, thread_extras, tunables
 
 JARVIS_DIR = Path.home() / ".jarvis"
 ARCHIVE_DIR = JARVIS_DIR / "events"
@@ -222,6 +224,15 @@ def _runs_of(tool_run_events):
     return runs
 
 
+def _picture_fields(event):
+    """The ``images`` / ``shown`` a `user` event carried (pictures that came with the message), as the
+    exchange fields they become. Empty for an ordinary message, so nothing else changes shape."""
+    refs = conv_images.clean_refs(event.get("images"))
+    if not refs:
+        return {}
+    return {"images": refs, "shown": str(event.get("shown") or "")}
+
+
 def rebuild_exchanges(conv_id, derive_extras=False):
     """The conversation's exchanges, rebuilt from events alone -- every one,
     not just the newest 60. Same shape as the conversation file's exchanges
@@ -238,7 +249,7 @@ def rebuild_exchanges(conv_id, derive_extras=False):
     that was interrupted gets the cards for what it did before it stopped.
     """
     exchanges = []
-    open_user = None   # (ts, text) of a `user` event with no `reply` yet
+    open_user = None   # (ts, text, picture fields) of a `user` event with no `reply` yet
     runs = []          # tool_run events since the turn began
     kinds = ("user", "reply", "exchange_removed") + (("tool_run",) if derive_extras else ())
     for e in read(conv_id, kinds=kinds):
@@ -251,13 +262,14 @@ def rebuild_exchanges(conv_id, derive_extras=False):
                 # downgrades it to `interrupted` on the next begin -- same here
                 ex = {"ts": open_user[0], "user": open_user[1], "jarvis": "",
                       "provider": None, "interrupted": "interrupted"}
+                ex.update(open_user[2])
                 if derive_extras and runs:
                     extras = thread_extras.rebuild_turn_extras(
                         _runs_of(runs), None, ts=_epoch(runs[-1].get("ts")))
                     if extras:
                         ex["extras"] = extras
                 exchanges.append(ex)
-            open_user = (e.get("ts"), e.get("text", ""))
+            open_user = (e.get("ts"), e.get("text", ""), _picture_fields(e))
             runs = []
         elif kind == "reply":
             if "user" in e:
@@ -266,9 +278,11 @@ def rebuild_exchanges(conv_id, derive_extras=False):
                 user_text = open_user[1]
             else:
                 user_text = ""
+            pictures = open_user[2] if open_user is not None else {}
             open_user = None
             ex = {"ts": e.get("ts"), "user": user_text, "jarvis": e.get("text", ""),
                   "provider": e.get("provider")}
+            ex.update(pictures)
             if e.get("status") == "interrupted":
                 ex["interrupted"] = e.get("reason") or "interrupted"
             if derive_extras and runs:
@@ -286,8 +300,10 @@ def rebuild_exchanges(conv_id, derive_extras=False):
                 exchanges = exchanges[:-n] if n <= len(exchanges) else []
     if open_user is not None:
         # a turn that began but never resolved: keep what the person said
-        exchanges.append({"ts": open_user[0], "user": open_user[1], "jarvis": "",
-                          "provider": None, "pending": True})
+        ex = {"ts": open_user[0], "user": open_user[1], "jarvis": "",
+              "provider": None, "pending": True}
+        ex.update(open_user[2])
+        exchanges.append(ex)
     return exchanges
 
 

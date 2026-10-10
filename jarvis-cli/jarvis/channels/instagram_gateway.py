@@ -206,6 +206,27 @@ def mentions_bot(text, bot_handle):
     return re.search(r"@" + re.escape(handle) + r"\b", text, re.IGNORECASE) is not None
 
 
+def _attachment_descriptors(message):
+    """Plain descriptors of the pictures a DM carries (never the bytes), capped at 10.
+
+    Meta puts them at ``message.attachments[]`` as ``{"type": "image", "payload": {"url": ...}}``.
+    Only ``image`` entries are reported (a story reply, a reel share, audio or a sticker is not a
+    picture Jarvis can read); media_in.py decides what, if anything, is fetched -- it will only
+    fetch https URLs on Meta's own CDN hosts. Never raises."""
+    out = []
+    try:
+        for i, a in enumerate(list((message or {}).get("attachments") or [])[:10], 1):
+            if not isinstance(a, dict) or str(a.get("type") or "").lower() != "image":
+                continue
+            url = str((a.get("payload") or {}).get("url") or "")
+            if url:
+                out.append({"url": url, "filename": "instagram-%d.jpg" % i,
+                            "content_type": "image/jpeg", "size": 0})
+    except Exception:  # noqa: BLE001
+        pass
+    return out
+
+
 def parse_events(payload, bot_id="", bot_handle=""):
     """Turn one webhook body into IncomingMessages.
 
@@ -234,8 +255,13 @@ def parse_events(payload, bot_id="", bot_handle=""):
             if not sender or (bot_id and sender == str(bot_id)):
                 continue
             text = (message.get("text") or "").strip()
+            attachments = _attachment_descriptors(message)
+            if not text and attachments:
+                # A picture on its own is not nothing: say what it is, so the transcript and the
+                # model see something true (media_in adds the description, if the sender may).
+                text = "(sent a picture)"
             if not text:
-                continue  # an image/sticker with no caption — nothing to answer
+                continue  # a sticker / reaction with no caption — nothing to answer
 
             # Group vs 1:1. Meta marks a group thread with a thread_key on
             # the event (or on the entry); a 1:1 has none and the sender
@@ -266,6 +292,7 @@ def parse_events(payload, bot_id="", bot_handle=""):
                 channel_id=thread_key,
                 thread_id=thread_key or sender,
                 raw=event,
+                attachments=attachments,
             ))
 
         # --- @mentions in comments / stories --------------------------

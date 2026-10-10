@@ -447,6 +447,7 @@ def delete_conversation(conv_id):
     if not is_valid_id(conv_id):
         return False
     path = _conv_path(conv_id)
+    _forget_pictures(conv_id)   # before the files that name them go
     try:
         path.unlink()
     except FileNotFoundError:
@@ -468,6 +469,19 @@ def delete_conversation(conv_id):
     return True
 
 
+def _forget_pictures(conv_id):
+    """Delete the pictures a conversation kept (conv_images): the ones its file names AND the ones
+    only the raw event log still names (older than the file's 60-exchange cap). Never raises."""
+    try:
+        from . import conv_images, raw_archive
+        refs = conv_images.refs_in_exchanges((_load_conv(conv_id) or {}).get("exchanges"))
+        refs += conv_images.refs_in_exchanges(
+            [{"images": e.get("images")} for e in raw_archive.read(conv_id, kinds=("user",))])
+        conv_images.delete_many(refs)
+    except Exception:  # noqa: BLE001 -- cleaning up must never block a delete
+        pass
+
+
 def update_meta(conv_id, title=None, soft_context=None):
     """Sets the AI-generated title and/or one-line gist. Both are
     best-effort cosmetic metadata — a failure here should never break an
@@ -485,7 +499,7 @@ def update_meta(conv_id, title=None, soft_context=None):
     return True
 
 
-def begin_exchange(conv_id, user_text, console_turn=None):
+def begin_exchange(conv_id, user_text, console_turn=None, images=None, shown=None):
     """Write the user's half of a turn to disk BEFORE the model is called.
 
     This is the fix for "I sent a message, aborted it, and the conversation
@@ -508,6 +522,12 @@ def begin_exchange(conv_id, user_text, console_turn=None):
     the turn id is the one thing a brand-new process couldn't otherwise
     recover, since `console_store`'s own bookkeeping is in-process state
     that died with the old process.
+
+    `images`, if given, are references to pictures that came with this message (see
+    conv_images.py) and `shown` is what the person actually typed (``user`` holds the words PLUS
+    the picture descriptions, because that is what the model was asked and what later turns'
+    history needs). Both ride on the exchange so a reload can draw the pictures and the typed
+    words; they are only written when there is a picture.
 
     Returns the index of the pending exchange, or -1 if it couldn't be
     written (a bad id, an unwritable disk) — callers treat that as "carry on
@@ -540,12 +560,21 @@ def begin_exchange(conv_id, user_text, console_turn=None):
     }
     if console_turn:
         exchange["consoleTurn"] = console_turn
+    from . import conv_images
+    kept = conv_images.clean_refs(images)
+    if kept:
+        exchange["images"] = kept
+        exchange["shown"] = str(shown or "")
     record.setdefault("exchanges", []).append(exchange)
     record["exchanges"] = record["exchanges"][-MAX_STORED_EXCHANGES:]
     record["updated_at"] = _now()
     _save_conv(record)
     _upsert_index(record)
-    _raw("user", conv_id, {"text": user_text})   # L.38: exactly what was sent, uncapped
+    raw_user = {"text": user_text}   # L.38: exactly what was sent, uncapped
+    if kept:
+        raw_user["images"] = kept
+        raw_user["shown"] = exchange["shown"]
+    _raw("user", conv_id, raw_user)
     return len(record["exchanges"]) - 1
 
 
@@ -773,11 +802,16 @@ def drop_from_user(conv_id, user_text):
     exchanges = record.get("exchanges") or []
     idx = None
     for i in range(len(exchanges) - 1, -1, -1):
-        if (exchanges[i].get("user") or "").strip() == target:
+        # `shown` is what was typed when the message carried pictures (its `user` also holds
+        # the picture descriptions), so a redo of the bubble the person sees still finds it.
+        if target in ((exchanges[i].get("user") or "").strip(),
+                      (exchanges[i].get("shown") or "").strip()):
             idx = i
             break
     if idx is None:
         return False
+    from . import conv_images
+    conv_images.delete_many(conv_images.refs_in_exchanges(exchanges[idx:]))
     _raw("exchange_removed", conv_id, {"reason": "redo", "exchanges": exchanges[idx:]})
     record["exchanges"] = exchanges[:idx]
     record["updated_at"] = _now()
@@ -793,6 +827,7 @@ def clear(conv_id):
     record = _load_conv(conv_id)
     if not record:
         return False
+    _forget_pictures(conv_id)   # Clear means gone, pictures included
     record["exchanges"] = []
     record["updated_at"] = _now()
     _save_conv(record)

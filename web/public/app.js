@@ -1728,6 +1728,7 @@
     askStream: null,         // live-streaming state for the turn in flight (§8 / K.3.1.5) — see applyAskStreamEvent
     askTraceBubble: null,    // the DOM node for the current turn's console-dump bubble, if any
     askQuotes: [],           // highlighted excerpts attached to the next ask
+    askAttachments: [],      // File objects (pictures) attached to the next ask
     lastTaskLabel: "",       // user request / command name for away notifications
     cmdSearch: "",           // current text in the command-list search field
 
@@ -3491,6 +3492,13 @@
       toast("No prompt to redo.");
       return;
     }
+    // A message with pictures can only be redone while this tab still holds them; after a reload
+    // only the kept copies remain, which are not sent back to the model.
+    const redoImages = (userMsg && userMsg._askImagePayloads) || [];
+    if (userMsg && userMsg.dataset.hasPictures === "1" && !redoImages.length) {
+      toast("The pictures can't be sent again after a reload \u2014 attach them again.");
+      return;
+    }
     let node = userMsg.nextSibling;
     while (node) {
       const next = node.nextSibling;
@@ -3500,24 +3508,43 @@
     ensureNotifPermission();
     state.lastTaskLabel = text;
     state.askConversationId = state.activeConversationId;
-    wsSend({ type: "ask", text, redo: true, conversationId: state.activeConversationId, provider: providerOverrideValue() });
+    wsSend({
+      type: "ask", text, redo: true, conversationId: state.activeConversationId,
+      provider: providerOverrideValue(),
+      images: redoImages.length ? redoImages : undefined,
+    });
   }
 
-  function addUserBubble(text, quotes) {
+  // `pictures` ([{ src, name }]) are the pictures that came with the message: the object URLs of
+  // the files just sent, or the kept copies (/api/conv-images/...) on a reload. A message that is
+  // only pictures draws the pictures and no text bubble, live and after a reload alike.
+  function addUserBubble(text, quotes, pictures) {
     clearAskEmptyHint();
+    quotes = quotes || [];
+    pictures = pictures || [];
     const kids = [el("div", { class: "ask-msg__role" }, "You")];
-    if (quotes && quotes.length) {
+    if (quotes.length) {
       kids.push(el("div", { class: "ask-msg__quotes" }, quotes.map((q) =>
         el("blockquote", { class: "ask-msg__quote" }, q)
       )));
     }
-    const userBubble = el("div", { class: "ask-msg__bubble" }, text || "About the quoted part");
-    // D-I2: a fenced block in your own message renders as a code block; the
-    // prose around it stays plain text. No-op when the text has no fence.
-    if (text && window.JarvisRich) window.JarvisRich.renderUserText(userBubble, text);
-    kids.push(userBubble);
+    if (pictures.length) {
+      kids.push(el("div", { class: "ask-msg__pics" }, pictures.map((p) =>
+        el("a", { href: p.src, target: "_blank", rel: "noopener" }, [
+          el("img", { src: p.src, alt: p.name || "picture", loading: "lazy" }),
+        ])
+      )));
+    }
+    if (text || !pictures.length) {
+      const userBubble = el("div", { class: "ask-msg__bubble" }, text || "About the quoted part");
+      // D-I2: a fenced block in your own message renders as a code block; the
+      // prose around it stays plain text. No-op when the text has no fence.
+      if (text && window.JarvisRich) window.JarvisRich.renderUserText(userBubble, text);
+      kids.push(userBubble);
+    }
     const msg = el("div", { class: "ask-msg ask-msg--user" }, kids);
-    msg.dataset.raw = text || quotes.join("\n\n") || "";
+    msg.dataset.raw = text || quotes.join("\n\n") || (pictures.length ? window.JarvisAskImages.PLACEHOLDER : "");
+    if (pictures.length) msg.dataset.hasPictures = "1";
     addAskMsgActions(msg);
     askThread.appendChild(msg);
     askThreadScrollToEnd();
@@ -5126,6 +5153,94 @@
     pendingSelection = "";
   }
 
+  // ---- pictures attached to the next ask (ask-images.js has the pure rules) ----------------
+  const askAttachBar = qs("#ask-attach-bar");
+  const askAttachInput = qs("#ask-attach-input");
+  const askAttachBtn = qs("#btn-ask-attach");
+  let attachBarUrls = [];
+
+  function fileToPayload(file) {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve({
+        name: file.name || "picture",
+        data: window.JarvisAskImages.base64Of(reader.result),
+      });
+      reader.onerror = () => reject(reader.error || new Error("read failed"));
+      reader.readAsDataURL(file);
+    });
+  }
+
+  function renderAttachBar() {
+    for (const u of attachBarUrls) URL.revokeObjectURL(u);
+    attachBarUrls = [];
+    askAttachBar.innerHTML = "";
+    if (!state.askAttachments.length) {
+      askAttachBar.hidden = true;
+      return;
+    }
+    askAttachBar.hidden = false;
+    state.askAttachments.forEach((file, i) => {
+      const url = URL.createObjectURL(file);
+      attachBarUrls.push(url);
+      askAttachBar.appendChild(el("div", { class: "ask-attach-thumb", title: file.name || "picture" }, [
+        el("img", { src: url, alt: file.name || "picture" }),
+        el("button", {
+          type: "button", class: "ask-attach-thumb__x", "aria-label": "Remove picture",
+          onclick: () => {
+            state.askAttachments = state.askAttachments.filter((_, j) => j !== i);
+            renderAttachBar();
+          },
+        }, "\u00d7"),
+      ]));
+    });
+  }
+
+  function clearAttachments() {
+    state.askAttachments = [];
+    renderAttachBar();
+  }
+
+  function attachFiles(fileList) {
+    const result = window.JarvisAskImages.addFiles(state.askAttachments, fileList);
+    state.askAttachments = result.list;
+    const message = window.JarvisAskImages.rejectedMessage(result.rejected);
+    if (message) toast(message);
+    renderAttachBar();
+  }
+
+  if (!window.JarvisAskImages) {
+    askAttachBtn.hidden = true;   // ask-images.js didn't load: no half-working button
+  } else {
+    askAttachBtn.addEventListener("click", () => askAttachInput.click());
+    askAttachInput.addEventListener("change", () => {
+      attachFiles(askAttachInput.files);
+      askAttachInput.value = "";
+    });
+    // Paste: only when the clipboard really holds a picture file; plain text pastes as always.
+    qs("#ask-input").addEventListener("paste", (e) => {
+      const files = Array.from((e.clipboardData && e.clipboardData.files) || [])
+        .filter((f) => window.JarvisAskImages.isPicture(f));
+      if (!files.length) return;
+      e.preventDefault();
+      attachFiles(files);
+    });
+    const dropRow = qs("#ask-form");
+    const hasFiles = (e) => e.dataTransfer && Array.from(e.dataTransfer.types || []).includes("Files");
+    dropRow.addEventListener("dragover", (e) => {
+      if (!hasFiles(e)) return;
+      e.preventDefault();
+      dropRow.classList.add("is-dragover");
+    });
+    dropRow.addEventListener("dragleave", () => dropRow.classList.remove("is-dragover"));
+    dropRow.addEventListener("drop", (e) => {
+      if (!hasFiles(e)) return;
+      e.preventDefault();
+      dropRow.classList.remove("is-dragover");
+      attachFiles(e.dataTransfer.files);
+    });
+  }
+
   function renderQuoteBar() {
     askQuoteBar.innerHTML = "";
     if (!state.askQuotes.length) {
@@ -5502,13 +5617,14 @@
     }
 
     const text = input.value.trim();
-    if (!text && quotes.length === 0) return;
+    const files = state.askAttachments.slice();
+    if (!text && quotes.length === 0 && files.length === 0) return;
 
     // "/organize-json <path>" is the palette's alias for the same bare
     // "organize-json <path>" form ORGANIZE_JSON_RE has always matched —
     // strip the leading slash before matching so both spellings land here.
     const organizeSource = /^\/organize-json\b/i.test(text) ? text.slice(1) : text;
-    const organizeMatch = quotes.length === 0 ? ORGANIZE_JSON_RE.exec(organizeSource) : null;
+    const organizeMatch = quotes.length === 0 && files.length === 0 ? ORGANIZE_JSON_RE.exec(organizeSource) : null;
     if (organizeMatch) {
       if (!state.activeConversationId) await startNewConversation();
       input.value = "";
@@ -5550,14 +5666,28 @@
     // send this ask under one id but mark askConversationId with another,
     // misattributing every ask-stdout/ask-exit line that follows.
     const conversationId = state.activeConversationId;
+    // Pictures are read into base64 BEFORE anything is cleared, so a file that can't be read
+    // leaves the composer exactly as it was.
+    let payloads = [];
+    if (files.length) {
+      try {
+        payloads = await Promise.all(files.map(fileToPayload));
+      } catch (err) {
+        toast("Couldn't read one of the pictures \u2014 try attaching it again.");
+        return;
+      }
+    }
+    const pictures = files.map((f) => ({ src: URL.createObjectURL(f), name: f.name || "picture" }));
     input.value = "";
     askInputAutoGrow(input);
     state.askQuotes = [];
     renderQuoteBar();
+    clearAttachments();
     hideSelPop();
-    addUserBubble(text, quotes);
+    const sentBubble = addUserBubble(text, quotes, pictures);
+    if (payloads.length) sentBubble._askImagePayloads = payloads;
     ensureNotifPermission();
-    state.lastTaskLabel = text || (quotes[0] || "that");
+    state.lastTaskLabel = text || (quotes[0] || (files.length ? "that picture" : "that"));
     state.askConversationId = conversationId;
     wsSend({
       type: "ask",
@@ -5565,6 +5695,7 @@
       quote: quotes.length ? quotes.join("\n---\n") : undefined,
       conversationId,
       provider: providerOverrideValue(),
+      images: payloads.length ? payloads : undefined,
     });
   });
 
@@ -7542,7 +7673,10 @@
       }
     } else {
       exchanges.forEach((ex, i) => {
-        addUserBubble(ex.user || "");
+        // Pictures that came with the message: draw them, and the words that were typed (`user`
+        // also holds the picture descriptions the model was given -- ask-images.js textOf).
+        const AI = window.JarvisAskImages;
+        addUserBubble(AI ? AI.textOf(ex) : (ex.user || ""), [], AI ? AI.picturesOf(ex) : []);
         // BUG-6: a live turn draws its cards (confirmations, the dev_agent
         // progress card, screenshots...) ABOVE the final reply, because
         // insertIntoAskThread() puts them before the pending reply bubble.

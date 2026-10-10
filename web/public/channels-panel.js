@@ -1682,7 +1682,7 @@
     });
     // L.36-P8: pictures. The owner's are always read; anyone else only when
     // this is switched on. Read by channels/media_in.py (Discord pictures, L.42.3).
-    const imgNotes = [{ kind: "info", text: "On Discord Jarvis reads pictures this person sends (a vision provider describes each, up to 3 per message). Instagram doesn't read pictures yet." }];
+    const imgNotes = [{ kind: "info", text: "On Discord and Instagram Jarvis reads pictures this person sends (a vision provider describes each, up to 3 per message), and keeps a copy with the conversation so you can see it." }];
     if (p.image.on && !p.reply.on) imgNotes.push({ kind: "warn", text: "They aren't in the reply list, so Jarvis never answers them and pictures never come into play." });
     const imagesRow = permRow(p, {
       flag: "image", icon: "image", ch: "on", label: "Pictures",

@@ -22,6 +22,7 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { parseAskImages, stageAskImages, ASK_IMAGE_PLACEHOLDER } from "./ask-images.js";
 // L.14: the ONE JS copy of the category-name rules (the Daemons panel and the
 // Commands editor use it in the browser). Loaded for its side effect - it
 // sets globalThis.JarvisCategories when there is no window - so the server
@@ -3179,6 +3180,39 @@ app.get("/api/screenshots/:name", (req, res) => {
   });
 });
 
+// Pictures kept with a conversation (jarvis-cli/jarvis/conv_images.py): ones attached in the
+// Ask Jarvis panel and ones people sent on Discord / Instagram. One flat folder, ids the CLI
+// minted (ci_<24 hex>.<ext>) -- the pattern below is the whole of what this route accepts, so a
+// request can't name anything else under ~/.jarvis. The type comes from the id's extension, which
+// conv_images.save took from the bytes' own signature; nosniff + sandbox keep a browser from
+// treating the response as anything but a picture.
+const CONV_IMAGE_NAME_RE = /^ci_[0-9a-f]{24}\.(png|jpg|gif|webp)$/;
+const CONV_IMAGE_TYPES = { png: "image/png", jpg: "image/jpeg", gif: "image/gif", webp: "image/webp" };
+
+function convImagesDir() {
+  return path.join(os.homedir(), ".jarvis", "conv_images");
+}
+
+app.get("/api/conv-images/:name", (req, res) => {
+  const name = path.basename(String(req.params.name || ""));
+  if (!CONV_IMAGE_NAME_RE.test(name)) {
+    return res.status(400).json({ error: "Invalid picture name." });
+  }
+  const ext = name.slice(name.lastIndexOf(".") + 1);
+  res.sendFile(path.join(convImagesDir(), name), {
+    headers: {
+      "Content-Type": CONV_IMAGE_TYPES[ext],
+      "X-Content-Type-Options": "nosniff",
+      "Content-Security-Policy": "sandbox",
+      "Cache-Control": "private, max-age=86400, immutable",
+    },
+  }, (err) => {
+    if (err && !res.headersSent) {
+      res.status(404).json({ error: "Picture not found." });
+    }
+  });
+});
+
 // yt-dlp downloads (see jarvis-cli/jarvis/ytdl_tools.py) each land in their
 // own job folder under ~/.jarvis/downloads/<jobId>/<filename> — same
 // basename-only + no-traversal treatment as the screenshots route above,
@@ -3908,7 +3942,13 @@ wss.on("connection", (ws) => {
       }
       const text = typeof msg.text === "string" ? msg.text.trim() : "";
       const quote = typeof msg.quote === "string" ? msg.quote.replace(/\0/g, "").trim() : "";
-      if (!text && !quote) {
+      // Pictures attached in the panel: checked here (count, size, real image bytes) BEFORE
+      // anything else happens, so a bad one never drops a redone exchange or starts a child.
+      const pictures = parseAskImages(msg.images);
+      if (!pictures.ok) {
+        return send(ws, { type: "ask-error", message: pictures.error });
+      }
+      if (!text && !quote && pictures.images.length === 0) {
         return send(ws, { type: "ask-error", message: "Nothing to ask." });
       }
       if (text.length > MAX_ASK_LENGTH) {
@@ -3921,7 +3961,11 @@ wss.on("connection", (ws) => {
       // The wrapper below is mirrored by ai_client._HIGHLIGHT_WRAPPER (Python) so the
       // quoted excerpt doesn't vote in tool routing. If you reword it, update that too:
       // tests/test_highlight_wrapper_drift.py fails when the two disagree.
-      let prompt = text;
+      // What the person typed, as stored with the exchange (`shown`): a message that is only
+      // pictures is "(sent a picture)", the same words a Discord picture-only message gets, so a
+      // redo of that bubble can still find its exchange.
+      const typed = text || (pictures.images.length && !quote ? ASK_IMAGE_PLACEHOLDER : "");
+      let prompt = typed;
       if (quote) {
         const clipped = quote.slice(0, 4000);
         prompt = (
@@ -3936,7 +3980,7 @@ wss.on("connection", (ws) => {
       }
 
       if (msg.redo) {
-        await runJarvisOnce(["ai-drop-from", text], 10000, conversationEnv(msg.conversationId));
+        await runJarvisOnce(["ai-drop-from", typed], 10000, conversationEnv(msg.conversationId));
       }
 
       // A single argv element, exactly like typing `jarvis "<text>"` at a
@@ -3995,6 +4039,22 @@ wss.on("connection", (ws) => {
       if (typeof msg.provider === "string" && /^[A-Za-z0-9_-]{1,64}(,[A-Za-z0-9_-]{1,64}){0,9}$/.test(msg.provider)) {
         extraEnv.JARVIS_PROVIDER_OVERRIDE = msg.provider;
       }
+      // The pictures are staged in a private temp folder; the child reads them through the manifest
+      // (JARVIS_ASK_IMAGES_FILE) and the folder is removed when it exits, whatever the exit.
+      let askImagesDir = "";
+      if (pictures.images.length) {
+        try {
+          const staged = await stageAskImages(pictures.images, typed);
+          askImagesDir = staged.dir;
+          extraEnv.JARVIS_ASK_IMAGES_FILE = staged.manifestPath;
+        } catch (e) {
+          if (toolMakerFile) fs.unlink(toolMakerFile).catch(() => {});
+          return send(ws, { type: "ask-error", message: `Couldn't prepare the pictures for Jarvis: ${e.message}` });
+        }
+      }
+      const askCleanups = [];
+      if (toolMakerFile) askCleanups.push(() => fs.unlink(toolMakerFile).catch(() => {}));
+      if (askImagesDir) askCleanups.push(() => fs.rm(askImagesDir, { recursive: true, force: true }).catch(() => {}));
       const onStdoutLine = (line) => {
         if (line.startsWith(STREAM_MARKER)) {
           let ev;
@@ -4039,9 +4099,9 @@ wss.on("connection", (ws) => {
         return true;
       };
       spawnAndStream(ws, "ask", fullArgs, ASK_TYPES, extraEnv, onStdoutLine, null,
-        toolMakerFile ? () => { fs.unlink(toolMakerFile).catch(() => {}); } : null);
+        askCleanups.length ? () => { for (const f of askCleanups) f(); } : null);
       // A spawn that failed outright never reaches its exit handler: clean up here.
-      if (toolMakerFile && !ws.activeChild) fs.unlink(toolMakerFile).catch(() => {});
+      if (!ws.activeChild) for (const f of askCleanups) f();
       return;
     }
 

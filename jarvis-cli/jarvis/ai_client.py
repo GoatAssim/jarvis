@@ -3101,7 +3101,8 @@ def _allowlist_is_empty():
 
 def _ask_impl(user_text, commands=None, on_attempt=None, on_tool_call=None, on_tool_result=None, conversation_id=None,
         on_confirm_request=None, on_route=None, provider_override=None,
-        think_override=None, on_trace=None, sender_context="", on_interim_text=None, on_stream=None):
+        think_override=None, on_trace=None, sender_context="", on_interim_text=None, on_stream=None,
+        user_images=None, user_shown=None):
     """Ask Jarvis something, trying every configured, enabled provider in
     order until one answers \u2014 and within each provider, every one of its
     configured keys in order before moving on to the next provider. Always
@@ -3155,6 +3156,14 @@ def _ask_impl(user_text, commands=None, on_attempt=None, on_tool_call=None, on_t
     tool call flagged confirm_required in tool_safety.json (see
     _make_tool_executor). Tools requiring confirmation fail closed (never
     run) if this isn't supplied.
+
+    user_images / user_shown, if given, describe pictures that came WITH this message (the Ask
+    Jarvis panel's attach button, or a Discord / Instagram message): `user_images` is the list of
+    references conv_images.save returned, `user_shown` the words the person actually typed.
+    `user_text` already holds the picture DESCRIPTIONS (that is all the model ever sees, see
+    channels/media_in.py); these two only ride on the saved exchange so a reload can show the
+    pictures and the typed words instead of the description note. Nothing about the model call
+    changes.
 
     sender_context, if given, is a short identity block naming who sent
     this message and whether they are the owner (see
@@ -3721,7 +3730,10 @@ def _ask_impl(user_text, commands=None, on_attempt=None, on_tool_call=None, on_t
         # since console_store's own bookkeeping is in-process state that
         # dies with the old process.
         console_turn = console_store.begin_turn(conv_id)
-        conversations.begin_exchange(conv_id, user_text, console_turn=console_turn)
+        _image_kwargs = ({"images": user_images, "shown": user_shown or ""}
+                         if user_images else {})
+        conversations.begin_exchange(conv_id, user_text, console_turn=console_turn,
+                                     **_image_kwargs)
         console_store.log("command", user_text)
 
     # F.7: the tool round-trips of the most recent attempt that got far enough

@@ -83,7 +83,7 @@ _COMMON_DEFAULTS = {
     "tool_allowlist": [],
     # L.36-P8: who besides the owner may send Jarvis pictures. Empty = nobody
     # (the owner is always allowed and need not be listed). Read by
-    # channels/media_in.py through permissions.may_send_images (Discord only).
+    # channels/media_in.py through permissions.may_send_images (Discord and Instagram).
     "image_allowlist": [],
 
     # --- gating ------------------------------------------------------

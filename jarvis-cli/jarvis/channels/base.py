@@ -137,7 +137,7 @@ def _scope_detail(msg):
 def _ask_jarvis(text, conv_id, may_use_tools, on_tool_call=None, platform="",
                 sender_context="", sender_env="", tool_scope=None, tool_log=None,
                 collect_media=False, media_log=None, offer_tools=None,
-                think_override=None):
+                think_override=None, user_images=None, user_shown=None):
     """One ask, with tools allowed or forbidden for this specific sender.
 
     Imported lazily: ai_client pulls in the whole tool catalog, and a
@@ -173,6 +173,11 @@ def _ask_jarvis(text, conv_id, may_use_tools, on_tool_call=None, platform="",
     `media_log` as (path, kind). Opened and closed inside the same lock as the
     environment above, so one person's screenshot can never be collected into
     the next person's reply.
+
+    `user_images` / `user_shown` (only when the sender attached pictures): the references to the
+    copies kept with the conversation (conv_images) and what the sender actually typed, so the
+    exchange records the pictures and the owner can see them next to the words. `text` is what the
+    MODEL is asked (the words plus the picture descriptions).
     """
     from .. import ai_client, commands_config, logs
 
@@ -262,6 +267,10 @@ def _ask_jarvis(text, conv_id, may_use_tools, on_tool_call=None, platform="",
                 # L.44: only passed when there is a setting, so every other
                 # ask is called exactly as it was.
                 extra_kwargs["think_override"] = think_override
+            if user_images:
+                # Same rule: only a message that carried a picture changes the call.
+                extra_kwargs["user_images"] = user_images
+                extra_kwargs["user_shown"] = user_shown if user_shown is not None else ""
             result = ai_client.ask(
                 text,
                 commands=commands,
@@ -637,13 +646,18 @@ def handle_message(platform, msg, send, cfg=None, on_tool_call=None, decision=No
     # can never open a conversation or be paid for twice. media_in checks the
     # picture grant itself and never raises; with no attachment it returns the
     # text untouched, so every other message behaves exactly as before.
+    # A copy of every picture that was really fetched is kept with the conversation so the
+    # owner can look at it later (conv_images); `kept_images` are only the references.
     ask_text = msg.text
+    kept_images = []
     if getattr(msg, "attachments", None):
         try:
             from . import media_in
-            ask_text = media_in.prepare_text(platform, msg, cfg, is_owner=bool(is_owner))
+            ask_text, kept_images = media_in.prepare(platform, msg, cfg, is_owner=bool(is_owner))
         except Exception as exc:  # noqa: BLE001
             _log(f"could not read attached pictures: {exc}")
+    image_kwargs = ({"user_images": kept_images, "user_shown": msg.text}
+                    if kept_images else {})
     try:
         result = _ask_jarvis(ask_text, conv_id, may_use_tools,
                              on_tool_call=on_tool_call, platform=platform,
@@ -651,7 +665,7 @@ def handle_message(platform, msg, send, cfg=None, on_tool_call=None, decision=No
                              tool_scope=tool_scope, tool_log=captured_tools,
                              collect_media=bool(send_file and is_owner),
                              media_log=media_items, offer_tools=offer_tools,
-                             think_override=think_override)
+                             think_override=think_override, **image_kwargs)
         text = (getattr(result, "text", "") or "").strip()
         provider = getattr(result, "provider", "") or ""
         if not text:

@@ -371,10 +371,10 @@ def list_flag_refusal(flag, value, rec, cfg):
 def _image_note(cfg, rec):
     """The heads-up after switching pictures ON for someone. Honest about what the
     switch does and does not do: on Discord Jarvis now reads pictures they send
-    (channels/media_in.py), Instagram does not read them yet, and it opens no
+    (channels/media_in.py), the same on Instagram, and it opens no
     conversation."""
     note = ("recorded \u2014 on Discord Jarvis now reads pictures this person sends "
-            "(a vision provider describes each one); Instagram doesn't read pictures yet")
+            "(a vision provider describes each one); the same on Instagram")
     if not membership(cfg, PERM_REPLY, rec)["on"]:
         note += "; they also need Reply switched on to be answered at all"
     return note
@@ -1120,7 +1120,7 @@ def simulate(platform, user_id, context=permissions.CTX_DM, mentioned=True):
     else:
         images = {"state": "off", "why": "Pictures are off for them (default)."}
     if answered:
-        images["why"] += " Pictures are read on Discord only; Instagram does not read them yet."
+        images["why"] += " Pictures are read on Discord and Instagram."
 
     notes = []
     if int(cfg.get("cooldown_seconds") or 0) > 0:
