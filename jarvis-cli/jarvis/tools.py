@@ -1423,13 +1423,94 @@ for _r in _AUTO_VALID:
 _PERSONA_FILES = {_p["id"]: _seen_persona_ids.get(_p["id"], "") for _p in AUTO_PERSONAS}
 
 
+# ---------------------------------------------------------------------------
+# Q-L46m -- what a file's tools being switched off takes with it.
+#
+# Rule: when EVERY tool a file defines is switched off, the screens (TOOL_UI) and the
+# daemons (DAEMONS) the same file ships go off too; one tool of several off alone
+# changes nothing. Screens follow it LIVE (derived on every read, nothing stored, so
+# the owner's own screen switch is never overwritten and nothing has to be restored);
+# daemons are applied by tool_daemons.sync() on the change, because a daemon's
+# `enabled` flag is stored state other code already reads. A file with no tools has
+# no switch to follow. Tool-registered personas are NOT part of it (they were not
+# asked for, and hiding a persona the owner is wearing is not "switching a tool off").
+# There is nothing for palette commands to follow: a tool cannot contribute any yet.
+# ---------------------------------------------------------------------------
+_FILE_TOOLS = {_r.file: sorted(_r.tools) for _r in _AUTO_VALID if _r.tools}
+_FILE_DAEMONS = {_r.file: [_d["did"] for _d in _r.daemons] for _r in _AUTO_VALID if _r.daemons}
+
+
+def files_with_all_tools_off(off=None):
+    """File names whose tools are all switched off (see the rule above)."""
+    if off is None:
+        off = tool_disable.disabled_tools()
+    return {f for f, names in _FILE_TOOLS.items() if names and all(n in off for n in names)}
+
+
+def ui_ids_off_with_tool(off=None):
+    """Ids of the screens that are off only because their file's tools are all off."""
+    files = files_with_all_tools_off(off)
+    return {u["id"] for u in AUTO_UI if u.get("file") in files} if files else set()
+
+
+def ui_is_off(ui_id):
+    """True when a screen is switched off by the owner OR by its tool being off."""
+    ui_id = (ui_id or "").strip()
+    if not ui_id:
+        return False
+    return tool_disable.is_ui_disabled(ui_id) or ui_id in ui_ids_off_with_tool()
+
+
+def switch_off_cascade(name):
+    """What switching the tool `name` OFF would also take with it.
+
+    {"file": str, "screens": [ids], "daemons": [ids]} -- empty lists unless this
+    switch would leave every tool of its file off. Lists only what is still on
+    (a screen or daemon already off is not news). Used by the Tool Manager's
+    confirmation and by `jarvis disabled-dependents`. Never raises.
+    """
+    out = {"file": "", "screens": [], "daemons": []}
+    try:
+        name = (name or "").strip()
+        if not name or tool_disable.protected_reason(name):
+            return out
+        off = tool_disable.disabled_tools()
+        for fname, names in _FILE_TOOLS.items():
+            if name not in names:
+                continue
+            out["file"] = fname
+            if name in off or not all(n in (off | {name}) for n in names):
+                return out
+            off_ui = tool_disable.disabled_ui()
+            out["screens"] = [u["id"] for u in AUTO_UI if u.get("file") == fname and u["id"] not in off_ui]
+            wanted = _FILE_DAEMONS.get(fname) or []
+            if wanted:
+                try:
+                    from . import daemons as _daemons_mod
+                    registry = _daemons_mod._load_registry()
+                except Exception:  # noqa: BLE001 - best effort: list them all
+                    registry = {}
+                out["daemons"] = [d for d in wanted if (registry.get(d) or {}).get("enabled", True) is not False]
+            return out
+    except Exception:  # noqa: BLE001
+        pass
+    return out
+
+
 def tool_ui_payload(include_disabled=False):
     """What `jarvis tool-ui list` / GET /api/tool-ui return: every UI element a tool
     file shipped, without absolute paths. The browser asks for the default (switched-
     off ones left out) to build its buttons and Menu entries; the Tool Manager asks
-    for `include_disabled=True` so it can list them all with a `disabled` flag."""
+    for `include_disabled=True` so it can list them all with a `disabled` flag.
+    An element whose file's tools are all off is `disabled` too, and says so with
+    `disabled_by_tool` so the Tool Manager can explain it (Q-L46m)."""
     off = tool_disable.disabled_ui()
-    items = [tool_ui_module.public(u, disabled=u["id"] in off) for u in AUTO_UI]
+    by_tool = ui_ids_off_with_tool()
+    items = []
+    for u in AUTO_UI:
+        item = tool_ui_module.public(u, disabled=u["id"] in off or u["id"] in by_tool)
+        item["disabled_by_tool"] = u["id"] in by_tool
+        items.append(item)
     if not include_disabled:
         items = [u for u in items if not u["disabled"]]
     return {"ui": items}
@@ -1443,7 +1524,7 @@ def tool_ui_bundle(ui_id):
     entry = next((u for u in AUTO_UI if u["id"] == ui_id), None)
     if entry is None:
         return {"ok": False, "error": "no UI element called %r" % ui_id}
-    if tool_disable.is_ui_disabled(ui_id):
+    if ui_is_off(ui_id):
         return {"ok": False, "disabled": True, "error": "%s is switched off in the Tool Manager" % ui_id}
     return tool_ui_module.read_bundle(entry)
 

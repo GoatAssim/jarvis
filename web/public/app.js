@@ -6213,6 +6213,13 @@
       return;
     }
     debugDocs.appendChild(el("div", { class: "debug-docs__name" }, tool.name));
+    if (tool.disabled) {
+      // Switched off in the Tool Manager: say so, and say what still works from here.
+      debugDocs.appendChild(el("div", { class: "debug-docs__off", role: "note" }, [
+        el("b", {}, "Switched off in the Tool Manager. "),
+        "Jarvis can't see or use this tool. You can still run it from here, which is how you try it before switching it back on.",
+      ]));
+    }
     debugDocs.appendChild(el("div", { class: "debug-docs__desc" },
       tool.description || "No description provided by this tool."));
 
@@ -6515,11 +6522,14 @@
     }
     for (const tool of tools) {
       const card = el("div", {
-        class: "debug-tool-card" + (tool.name === state.debugSelected ? " is-active" : ""),
+        class: "debug-tool-card" + (tool.name === state.debugSelected ? " is-active" : "") + (tool.disabled ? " is-off" : ""),
         onclick: () => debugSelectTool(tool.name),
       }, [
         el("div", { class: "debug-tool-card__name-row" }, [
           el("div", { class: "debug-tool-card__name" }, tool.name),
+          tool.disabled
+            ? el("span", { class: "debug-tool-card__off", title: "Switched off in the Tool Manager. Jarvis can't see or use it; you can still run it here." }, "off")
+            : null,
           el("span", { class: `debug-tool-card__source debug-tool-card__source--${tool.source || "builtin"}` },
             debugSourceLabel(tool.source)),
         ]),

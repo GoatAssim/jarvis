@@ -209,6 +209,12 @@ window.JARVIS_TEST_CHECKLIST = /*JSON-BEGIN*/ {
    "label": "Pictures in chat",
    "kind": "feature",
    "blurb": "Pictures a person sends Jarvis on Discord (L.42.3 inbound / L.36-P8). Needs the Discord gateway running and a vision-capable provider; do these from a second Discord account."
+  },
+  {
+   "id": "tool_manager",
+   "label": "Tool Manager",
+   "kind": "feature",
+   "blurb": "Menu → Tool Manager: the on/off switches and what they take with them. A feature of the console, not a tool: do these by hand in the page."
   }
  ],
  "tools": {
@@ -3842,6 +3848,97 @@ window.JARVIS_TEST_CHECKLIST = /*JSON-BEGIN*/ {
     "The conversation record holds the description, not the picture.",
     "Outbound pictures (screenshots) are a separate feature and stay owner-only."
    ]
-  }
+  },
+ "tool_manager_cascade": {
+  "group": "tool_manager",
+  "does": "Switching off the LAST tool of a file that is still on also switches off the screens and daemons that same file ships (Q-L46m); switching a tool back on gives them back.",
+  "needs": [
+   "A custom tool file that defines one tool, one daemon (DAEMONS) and one screen (TOOL_UI) - the templates in Menu → Custom Tools have each."
+  ],
+  "steps": [
+   {
+    "do": "Menu → Tool Manager. Find the tool, its daemon and its screen (chips: Daemons, Screens). Note all three are On.",
+    "expect": "The tool, the daemon and the screen each show On."
+   },
+   {
+    "do": "Switch the tool off.",
+    "expect": "A confirmation lists 'screen <id>' and 'daemon <id>' as going off with it. Confirm."
+   },
+   {
+    "do": "Look at the screen row and the daemon row without reloading the page.",
+    "expect": "Both show Off with a note 'Off because its tool is off'. The screen's switch is locked. The screen's button or Menu entry is gone from Jarvis."
+   },
+   {
+    "do": "Open Menu → Daemons and look at the daemon.",
+    "expect": "It is marked 'Tool off'. If it was already running it keeps running; if it was stopped it can't be started by autostart."
+   },
+   {
+    "do": "Switch the tool back on.",
+    "expect": "The screen and daemon return to On, and the screen's button or Menu entry reappears."
+   },
+   {
+    "do": "Switch the daemon off by hand, then the tool off, then the tool on.",
+    "expect": "The daemon stays Off: your own choice is not undone."
+   },
+   {
+    "do": "For a file with TWO tools, switch only one off.",
+    "expect": "No cascade: the screen and daemon stay On and no extra confirmation appears."
+   }
+  ],
+  "watch": [
+   "A protected tool can never be all-off, so its file never cascades.",
+   "Personas the file registers are not part of this."
+  ]
+ },
+ "tool_manager_mcp_server": {
+  "group": "tool_manager",
+  "does": "The Tool Manager lists each MCP server as one row (MCP chip) whose switch is the same whole-server on/off as Menu → MCP Servers.",
+  "needs": [
+   "At least one MCP server configured in Menu → MCP Servers."
+  ],
+  "steps": [
+   {
+    "do": "Menu → Tool Manager → MCP chip. Find your server's row.",
+    "expect": "A row of kind MCP server, On when the server is enabled, with its tool count in the detail."
+   },
+   {
+    "do": "Switch it off.",
+    "expect": "A confirmation names how many tools leave the catalogue. After confirming the row shows Off and the server's tools disappear from the Tools list."
+   },
+   {
+    "do": "Open Menu → MCP Servers.",
+    "expect": "The same server shows as disabled there: one switch, two places."
+   },
+   {
+    "do": "Back in the Tool Manager switch it on.",
+    "expect": "The row returns to On and its tools are listed again after its tool list is read."
+   }
+  ],
+  "watch": [
+   "A server that fails to start shows its error in the row's detail."
+  ]
+ },
+ "tool_manager_debug_marker": {
+  "group": "tool_manager",
+  "does": "Menu → Debug lists tools switched off in the Tool Manager with an 'off' badge instead of unmarked.",
+  "steps": [
+   {
+    "do": "Switch one tool off in the Tool Manager, then open Menu → Debug.",
+    "expect": "Its card shows an 'off' badge and a struck-through name; it is still listed."
+   },
+   {
+    "do": "Select that card.",
+    "expect": "The docs pane starts with 'Switched off in the Tool Manager' and says you can still run it from here."
+   },
+   {
+    "do": "Run it from Debug.",
+    "expect": "It still runs: Debug is for trying a tool before switching it back on."
+   },
+   {
+    "do": "Switch it back on and reopen Debug.",
+    "expect": "The badge is gone."
+   }
+  ]
+ }
  }
 } /*JSON-END*/;

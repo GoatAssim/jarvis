@@ -127,7 +127,7 @@ jarvis-cli/jarvis/
     custom_tools*.py  user Python tools from ~/.jarvis/tools/ (custom_tools_suggest.py = the editor's inline suggestions, `ctools-suggest`; returns text only, never writes a tool). custom_tools_store.py also keeps DRAFTS: ~/.jarvis/tools/_drafts/<key>.json, backups of tools still being written (saved or not); custom_tools_ui_templates.py = the "Button page" / "Menu panel" templates and their starter html/js/css
     tool_ui.py            TOOL_UI: validates a tool file's own screen (a button or Menu entry opening a page built from the tool's tool.html/js/css) and reads its files; paths can't leave the declaring file's directory. `jarvis tool-ui list|bundle|run`
     tool_maker.py        the Tool Maker conversation (L.53): the per-turn context (tool name + whole editor text, from a temp file server.js writes), WITHHELD_TOOLS (write-a-file / run-a-program tools it may not use), history trimming, the origin stamp. Active only while JARVIS_TOOL_MAKER_CONTEXT_FILE is set
-    tool_disable.py       the owner's off switches (~/.jarvis/disabled.json): tools, saved commands, tool-registered personas, TOOL_UI screens. Daemons are NOT here (daemons.json `enabled`)
+    tool_disable.py       the owner's off switches (~/.jarvis/disabled.json): tools, saved commands, tool-registered personas, TOOL_UI screens. Daemons are NOT here (daemons.json `enabled`); a file whose tools are ALL off takes its daemons (tool_daemons.sync) and screens (tools.ui_is_off) with it (Q-L46m)
 
     # --- time, work and supervision --------------------------------------
     scheduler.py          jobs/reminders/watches; tick() is the heartbeat

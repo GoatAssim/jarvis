@@ -2011,6 +2011,18 @@ audio.ask-dl-player{ max-height: none; background: transparent; }
 .debug-tool-card__source--auto{ border-color: var(--accent-soft); color: var(--accent-soft); }
 .debug-tool-card__source--user{ border-color: var(--accent); color: var(--accent); }
 .debug-tool-card__source--mcp{ border-color: var(--gold); color: var(--gold); }
+/* A tool switched off in the Tool Manager (tool_disable.py): the model can't see or use it,
+   the owner still can run it here. Marked, never hidden -- this panel is how you test it. */
+.debug-tool-card.is-off .debug-tool-card__name{ color: var(--text-dim); text-decoration: line-through; text-decoration-color: color-mix(in srgb, var(--red) 55%, transparent); }
+.debug-tool-card__off{
+  flex-shrink: 0; font-size: 9.5px; letter-spacing: 0.07em; text-transform: uppercase;
+  padding: 1px 6px; border-radius: 2px; border: 1px solid var(--red); color: var(--red);
+}
+.debug-docs__off{
+  margin: 0 0 14px; padding: 8px 10px; font-size: 12px; line-height: 1.5; color: var(--text);
+  border: 1px solid var(--red); border-left-width: 3px; border-radius: 2px;
+  background: color-mix(in srgb, var(--red) 8%, transparent);
+}
 
 /* Part E.5/K.2.5.3 — Ask Jarvis "Console" filter. The hidden category ids live
    on <html data-ask-hidden="tokens tool-call ...">; each line carries

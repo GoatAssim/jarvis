@@ -9,7 +9,8 @@ being dropped from the file, switched off - not deleted - while the file is
 disabled/broken and restored as it was); the locks (a tool-supplied daemon's
 command/cwd/env/description cannot be edited and it cannot be removed by hand);
 the autostart preset; sync_if_stale()'s cheap fingerprint check; and the CLI.
-The Tool Manager's own switch is deliberately NOT part of this (Q-L46m).
+The Tool Manager's own switch is NOT part of this; the tool-off cascade (Q-L46m) has
+its own test, tests/test_q_l46m_tool_off_cascade.py.
 """
 import json
 import os

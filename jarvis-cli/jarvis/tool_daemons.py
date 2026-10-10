@@ -49,8 +49,24 @@ Lifecycle (see sync())
     (disabled/broken)    no longer loads. It is switched back on, as it was,
                          when the tool loads again.
 
-Turning the tool's tools off in the Tool Manager does NOT touch its daemons:
-that cascade is a separate, still-open decision (master plan Q-L46m).
+Switching a file's tools off in the Tool Manager (Q-L46m)
+----------------------------------------------------------
+When EVERY tool a file defines is switched off (tool_disable.py), its daemons are
+switched off with them: `enabled` goes False and the entry is marked
+`dormant` with `dormant_reason: "tool-off"` (the Daemons panel shows its "Tool
+off" tag). One tool of several switched off alone does nothing here. Switching a
+tool back on restores the daemon's `enabled` as it was.
+
+  * It is applied on the TRANSITION (the file's tools going from not-all-off to
+    all-off, and back), not as a standing rule, so an owner who switches the
+    daemon on by hand while its tool is off is not overruled on the next sync.
+    The transition is remembered per daemon in `tool_off_seen`.
+  * A daemon that is RUNNING when its tool is switched off keeps running; it
+    just can't be started again. This is the same rule as the Tool Manager's own
+    daemon switch (owner decision 2026-10-05n) and differs from a file that
+    stops loading, which stops its daemons.
+  * A daemon the owner had already switched off stays off when the tool comes
+    back (its `enabled` was False before, and that is what is restored).
 
 The registry is reconciled lazily and cheaply: sync_if_stale() compares a
 fingerprint of the two tool folders and only does any work when it changed.
@@ -88,6 +104,27 @@ def _daemons():
 def owner_of(filename):
     """The owner id for a tool file name: its stem, in daemon-id form."""
     return _daemons().normalize_id(Path(str(filename)).stem)
+
+
+def off_owners(records, off=None):
+    """Owner ids of the tool files whose tools are ALL switched off.
+
+    A file counts only when it defines at least one tool and every one of them
+    is in the owner's off list (tool_disable.disabled_tools(), which never
+    contains a protected tool, so a file that carries one can't be "all off").
+    A file with no tools has no switch to follow and is never in the result.
+    """
+    if off is None:
+        from . import tool_disable
+        off = tool_disable.disabled_tools()
+    out = set()
+    for rec in records or []:
+        if not getattr(rec, "valid", False):
+            continue
+        names = list(getattr(rec, "tools", None) or [])
+        if names and all(n in off for n in names):
+            out.add(owner_of(rec.file))
+    return out
 
 
 def python_executable():
@@ -272,21 +309,60 @@ def _stop_if_up(did):
         pass
 
 
-def sync(records, present_owners):
+def _follow_tool_switch(entry, tool_off):
+    """Apply the tool-off cascade to one registered daemon, in place.
+
+    `tool_off` is whether every tool of the daemon's file is switched off right
+    now. Acts only on a CHANGE of that state (remembered in `tool_off_seen`), so
+    an owner's later, deliberate choice is not undone on the next sync.
+    Returns "off", "on", "override" or None (nothing to do).
+    """
+    was = bool(entry.get("tool_off_seen"))
+    reason = entry.get("dormant_reason")
+    if tool_off and not was:
+        entry["tool_off_seen"] = True
+        if not entry.get("dormant"):
+            entry["enabled_before_dormant"] = bool(entry.get("enabled", True))
+            entry["enabled"] = False
+            entry["dormant"] = True
+        entry["dormant_reason"] = "tool-off"
+        return "off"
+    if was and not tool_off:
+        entry.pop("tool_off_seen", None)
+        if entry.get("dormant") and reason == "tool-off":
+            entry["enabled"] = bool(entry.pop("enabled_before_dormant", True))
+            entry.pop("dormant", None)
+            entry.pop("dormant_reason", None)
+        return "on"
+    if (tool_off and was and entry.get("dormant") and reason == "tool-off"
+            and entry.get("enabled")):
+        # The owner switched it on by hand while its tool is off: theirs to decide.
+        entry.pop("dormant", None)
+        entry.pop("dormant_reason", None)
+        entry.pop("enabled_before_dormant", None)
+        return "override"
+    return None
+
+
+def sync(records, present_owners, tools_off=None):
     """Make the registry's tool-supplied daemons match `records`.
 
     records          ActionModuleRecord list (tool_loader); only valid ones count
     present_owners   owner ids of every tool file that still exists on disk,
                      loaded or not (a `.py.disabled` or a broken file counts)
+    tools_off        owner ids whose tools are all switched off in the Tool
+                     Manager (off_owners()); read from disabled.json when omitted
 
-    Returns {"added", "updated", "removed", "dormant", "woken", "conflicts"},
-    each a list of daemon ids (conflicts: messages). Writes the registry only
-    when something changed.
+    Returns {"added", "updated", "removed", "dormant", "woken", "conflicts",
+    "tool_off", "tool_on"}, each a list of daemon ids (conflicts: messages).
+    Writes the registry only when something changed.
     """
     d = _daemons()
     merged = d._load_registry()
     result = {"added": [], "updated": [], "removed": [], "dormant": [],
-              "woken": [], "conflicts": []}
+              "woken": [], "conflicts": [], "tool_off": [], "tool_on": []}
+    if tools_off is None:
+        tools_off = off_owners(records)
     changed = False
 
     want = {}
@@ -309,6 +385,8 @@ def sync(records, present_owners):
         if current is None:
             merged[did] = _new_entry(spec)
             result["added"].append(did)
+            if spec["owner"] in tools_off and _follow_tool_switch(merged[did], True):
+                result["tool_off"].append(did)
             changed = True
             continue
         if current.get("owner") != spec["owner"]:
@@ -323,10 +401,19 @@ def sync(records, present_owners):
             if current.get(key) != spec[key]:
                 current[key] = spec[key]
                 touched = True
-        if current.get("dormant"):
+        tool_off = spec["owner"] in tools_off
+        if current.get("dormant") and not (current.get("dormant_reason") == "tool-off" and tool_off):
             current["enabled"] = bool(current.pop("enabled_before_dormant", True))
             current.pop("dormant", None)
+            current.pop("dormant_reason", None)
             result["woken"].append(did)
+            touched = True
+        moved = _follow_tool_switch(current, tool_off)
+        if moved == "off":
+            result["tool_off"].append(did)
+        elif moved == "on":
+            result["tool_on"].append(did)
+        if moved:
             touched = True
         if touched:
             merged[did] = current
@@ -398,6 +485,13 @@ def scan_tool_folders():
             owner = _daemons().normalize_id(stem)
             if owner:
                 present.add(owner)
+    # The switches count too: changing which tools are off must re-run the sync,
+    # because a file whose tools are all off takes its daemons with it.
+    try:
+        from . import tool_disable
+        rows.append("off:" + ",".join(sorted(tool_disable.disabled_tools())))
+    except Exception:  # noqa: BLE001 - a broken switch file must not break the scan
+        pass
     return hashlib.sha256("\n".join(rows).encode("utf-8")).hexdigest(), present
 
 

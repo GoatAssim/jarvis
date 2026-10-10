@@ -493,6 +493,14 @@ the other.
   IS `daemons.json`'s `enabled` flag (the Daemons panel edits the same one) — do not
   add a second copy. A new setter in `tool_disable.py` must stay out of anything
   the model can call; `tests/test_tool_disable.py` enforces that.
+- **A file's tools all being off takes its daemons and screens with it** (Q-L46m).
+  Screens are derived on every read (`tools.ui_is_off`, `ui_ids_off_with_tool`;
+  nothing stored); daemons are applied on the CHANGE by `tool_daemons.sync` (marked
+  `dormant` with `dormant_reason: "tool-off"`, remembered in `tool_off_seen`), so a
+  choice the owner makes afterwards is not undone, and a running daemon is never
+  stopped by it. Don't make `sync` a standing rule; `tests/test_q_l46m_tool_off_cascade.py`
+  pins this. A whole MCP server is switched with the MCP panel's own route
+  (`mcp-edit` -> `set_server_flag`), never a second write path to the MCP config.
 - **Drafts** (`custom_tools_store.py`, `~/.jarvis/tools/_drafts/`) are copies, never
   tools: not loaded, not listed as tool files. A refused save stashes its text there
   server-side so it is never only in a browser tab. Keep the draft key validated

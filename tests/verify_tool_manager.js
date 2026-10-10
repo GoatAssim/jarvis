@@ -206,4 +206,34 @@ ok("tool-manager.js never assigns innerHTML / outerHTML / insertAdjacentHTML", !
   ok("untitled numbering: smallest free", P.nextFree([]) === 1 && P.nextFree([1, 2, 4]) === 3 && P.nextFree([2]) === 1);
 }
 
+// --- Q-L46m: MCP server rows, the cascade lines, the "off because its tool is off" copy ---
+{
+  const SERVERS = [
+    { name: "files", slug: "files", enabled: true, state: "ok", tool_count: 3, description: "File tools" },
+    { name: "old", slug: "old", enabled: false, state: "disabled", tool_count: 0 },
+    { name: "", enabled: true }, null,
+  ];
+  const rs = P.buildRows([], [], null, [], { mcpServers: SERVERS });
+  const m = rs.filter((r) => r.kind === "mcp");
+  ok("mcp: one row per usable server (nameless and null ones dropped)", m.length === 2);
+  ok("mcp: id, group and bucket source", m[0].id === "m:files" && m[0].group === "mcp_servers" && m[0].source === "mcp");
+  ok("mcp: enabled -> loaded, disabled -> off", m[0].state === "loaded" && m[1].state === "off");
+  ok("mcp: a server row is not mistaken for a tool row", rs.every((r) => r.kind !== "tool"));
+  ok("mcp: tolerates a missing / non-array server list", P.buildRows([], [], null, [], { mcpServers: "x" }).length === 0 && P.buildRows([], [], null, [], {}).length === 0);
+  ok("mcp: the hint says it is the MCP Servers switch", /MCP Servers/.test(P.availabilityHint(m[0])));
+  ok("mcp: the off outcome says its tools are gone", /gone from Jarvis/.test(P.offOutcome(m[1])));
+  ok("mcp: group label", P.groupLabel("mcp_servers") === "MCP servers");
+
+  const L = P.cascadeLines;
+  ok("cascade: screens then daemons, one line each", JSON.stringify(L({ screens: ["a-page"], daemons: ["a-worker", "a-b"] })) === JSON.stringify(["\u2022 screen a-page", "\u2022 daemon a-worker", "\u2022 daemon a-b"]));
+  ok("cascade: empty or bad input gives no lines", L(null).length === 0 && L({}).length === 0 && L({ screens: "x", daemons: 5 }).length === 0 && L(undefined).length === 0);
+
+  const ui = { id: "u:p", kind: "ui", state: "off", name: "p", extra: { disabled_by_tool: true } };
+  ok("ui: off because its tool is off says how to bring it back", /every tool in its file is switched off/.test(P.offOutcome(ui)) && /returns/.test(P.offOutcome(ui)));
+  ok("ui: a plain off screen keeps the old wording", !/every tool/.test(P.offOutcome({ kind: "ui", state: "off", extra: {} })));
+  const dm = { kind: "daemon", state: "off", extra: { dormant: true, dormant_reason: "tool-off" } };
+  ok("daemon: off because its tool is off says so and that a running one keeps running", /every tool in its file is switched off/.test(P.offOutcome(dm)) && /keeps running/.test(P.offOutcome(dm)));
+  ok("daemon: an ordinary off daemon keeps the old wording", !/every tool/.test(P.offOutcome({ kind: "daemon", state: "off", extra: {} })));
+}
+
 console.log(`\n${n} passed, 0 failed`);

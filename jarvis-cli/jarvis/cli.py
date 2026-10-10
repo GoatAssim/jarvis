@@ -3015,7 +3015,7 @@ def main():
             if entry is None:
                 print(json.dumps({"error": "no UI element called %r" % ui_id}))
                 sys.exit(1)
-            if _td.is_ui_disabled(ui_id):
+            if system_tools.ui_is_off(ui_id):
                 print(json.dumps({"error": "%s is switched off in the Tool Manager" % ui_id}))
                 sys.exit(1)
             if run_tool not in (entry.get("tools") or []):
@@ -3256,6 +3256,9 @@ def main():
                 raise ValueError("--kind must be tool, persona, skin or ui")
             if value and tool_name not in system_tools.TOOLS:
                 raise ValueError("no such tool: %s" % tool_name)
+            # Q-L46m: what this switch will also take (or give back) -- worked out
+            # BEFORE the write, so "last tool of its file" is judged against the old state.
+            cascade = system_tools.switch_off_cascade(tool_name) if value else {"file": "", "screens": [], "daemons": []}
             result = tool_disable.set_tool_disabled(tool_name, value)
         except tool_disable.ProtectedToolError as e:
             print(json.dumps({"error": str(e), "protected": True}))
@@ -3263,7 +3266,20 @@ def main():
         except (ValueError, OSError) as e:
             print(json.dumps({"error": str(e)}))
             sys.exit(1)
-        print(json.dumps({**result, "protected": tool_disable.protected_reason(tool_name) or ""}, indent=2))
+        # Bring the daemons the file ships in line now (screens follow the switch live).
+        # Best effort: the switch itself is already saved, and the Daemons panel and
+        # autostart re-run the same sync whenever the switches change.
+        daemon_sync = {}
+        try:
+            from . import tool_daemons
+            daemon_sync = tool_daemons.sync_if_stale(force=True) or {}
+        except Exception:  # noqa: BLE001
+            daemon_sync = {}
+        print(json.dumps({**result, "protected": tool_disable.protected_reason(tool_name) or "",
+                          "cascade": {"file": cascade.get("file", ""), "screens": cascade.get("screens", []),
+                                      "daemons": cascade.get("daemons", [])},
+                          "daemons_off": daemon_sync.get("tool_off", []),
+                          "daemons_on": daemon_sync.get("tool_on", [])}, indent=2))
         return
 
     if argv[0] == "command-disable-set":
@@ -3303,6 +3319,7 @@ def main():
         # jarvis disabled-list
         # What the owner has switched off, plus the tools that can't be.
         from . import tool_disable
+        from . import tools as system_tools
 
         print(json.dumps({
             "tools": sorted(tool_disable.disabled_tools()),
@@ -3310,6 +3327,8 @@ def main():
             "personas": sorted(tool_disable.disabled_personas()),
             "skins": sorted(tool_disable.disabled_skins()),
             "ui": sorted(tool_disable.disabled_ui()),
+            # Screens that are off only because every tool of their file is (Q-L46m).
+            "ui_by_tool": sorted(system_tools.ui_ids_off_with_tool()),
             "protected": tool_disable.PROTECTED_TOOLS,
         }, indent=2))
         return
@@ -3323,7 +3342,12 @@ def main():
         if len(argv) < 3 or argv[1] not in ("tool", "command"):
             print(json.dumps({"error": "usage: jarvis disabled-dependents <tool|command> <name>"}))
             sys.exit(1)
-        print(json.dumps({"jobs": scheduler.jobs_using(argv[1], argv[2])}, indent=2))
+        out = {"jobs": scheduler.jobs_using(argv[1], argv[2])}
+        if argv[1] == "tool":
+            # Q-L46m: the screens and daemons that go off with the LAST tool of their file.
+            from . import tools as system_tools
+            out["cascade"] = system_tools.switch_off_cascade(argv[2])
+        print(json.dumps(out, indent=2))
         return
 
     if argv[0] == "commands-check-name":
