@@ -81,14 +81,44 @@ def tool_remember_sender(args):
     platform = sender["platform"]
     user_id = sender["user_id"]
 
+    # D-I10: the owner is never gated. Anyone else's name and note go through
+    # channels/sender_gate.py first -- a free pre-filter, then (notes only) one
+    # tiny yes/no call. A refusal says why and stores nothing.
+    blocked = {}
+    mirror_note = False
+    if not sender.get("is_owner"):
+        from ..channels import sender_gate
+        current = people.get(platform, user_id) or {}
+        said = str(sender.get("text") or "")
+        if name:
+            ok, why = sender_gate.name_allowed(current, said)
+            if not ok:
+                blocked["name"] = why
+                name = ""
+        if note:
+            ok, why = sender_gate.note_allowed(current, note, said)
+            if not ok:
+                blocked["note"] = why
+                note = ""
+            else:
+                mirror_note = True
+        if blocked and not name and not note:
+            return {"ok": False, "saved": False, "not_saved": blocked,
+                    "hint": ("Nothing was saved. Don't tell them you will "
+                             "remember it; carry on with the conversation.")}
+
     entry = None
     if name:
         entry = people.set_name(platform, user_id, name)
     if note:
         entry = people.add_note(platform, user_id, note)
+        if mirror_note:
+            _propose_note(platform, user_id, note, sender)
 
     entry = entry or {}
     result_extra = {}
+    if blocked:
+        result_extra["not_saved"] = blocked
     if name and entry.get("name_locked"):
         # The owner typed this person's name in the Channels panel; what the
         # guest says does not replace it. Say so, so the model doesn't
@@ -106,6 +136,20 @@ def tool_remember_sender(args):
         # raw string it sent.
         "saved_for": entry.get("handle") or user_id,
     }
+
+
+def _propose_note(platform, user_id, note, sender):
+    """Mirror a gated note into the long-term per-person store as `proposed`:
+    it is NOT shown to the model until the owner approves it (L.21 P5). Best
+    effort -- the note itself is already saved in people.json."""
+    try:
+        from ..channels import people, person_memory
+        person_memory.add(
+            people.key(platform, user_id), "fact", note,
+            provenance="person_stated", status="proposed",
+            source={"via": "remember_sender"})
+    except Exception:  # noqa: BLE001
+        pass
 
 
 def tool_who_am_i_talking_to(args=None):

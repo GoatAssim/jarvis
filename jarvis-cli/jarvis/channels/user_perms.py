@@ -146,9 +146,15 @@ def _log_change(platform, user_id, kind, **fields):
         pass
 
 
+THINKING_VALUES = ("on", "off")
+
+
 def _defaults():
+    # `thinking` / `thinking_lock` are L.44: None means "no setting" (the person
+    # gets what chat has always given them); "on"/"off" is the owner's choice;
+    # a lock stops the person changing it with /thinking in chat.
     return {"tools": {"mode": TOOLS_INHERIT, "allow": []}, "can_dm": True,
-            "tools_until": 0}
+            "tools_until": 0, "thinking": None, "thinking_lock": False}
 
 
 def normalize(entry):
@@ -176,6 +182,14 @@ def normalize(entry):
                     if _NAME_RE.match(n)][:MAX_TOOLS]
     if entry.get("can_dm") is False:
         out["can_dm"] = False
+    # A hand-edited value that is not on/off counts as "off" and locked: this
+    # is a store of restrictions, so what cannot be read must not read as open.
+    if "thinking" in entry and entry.get("thinking") is not None:
+        out["thinking"] = entry["thinking"] if entry["thinking"] in THINKING_VALUES else "off"
+        if entry["thinking"] not in THINKING_VALUES:
+            out["thinking_lock"] = True
+    if entry.get("thinking_lock") is True:
+        out["thinking_lock"] = True
     if "tools_until" in entry:
         until = entry.get("tools_until")
         if until in (None, 0, False, ""):
@@ -286,6 +300,38 @@ def set_can_dm(platform, user_id, value):
     if entry["can_dm"] != before:
         _log_change(platform, user_id, "send_dm", on=entry["can_dm"])
     return saved
+
+
+def set_thinking(platform, user_id, value, lock=None):
+    """L.44: the owner's thinking setting for one person. `value` is "on",
+    "off" or None (clear it); `lock` True/False, or None to leave it as it is.
+    Clearing the value also clears the lock -- a lock on nothing would make
+    the person's own /thinking fail with no setting behind it."""
+    if value is not None and value not in THINKING_VALUES:
+        raise ValueError("thinking must be 'on', 'off' or cleared")
+    entry = get(platform, user_id)
+    before = (entry["thinking"], entry["thinking_lock"])
+    entry["thinking"] = value
+    if value is None:
+        entry["thinking_lock"] = False
+    elif lock is not None:
+        entry["thinking_lock"] = bool(lock)
+    saved = _put(platform, user_id, entry)
+    if (entry["thinking"], entry["thinking_lock"]) != before:
+        _log_change(platform, user_id, "thinking", value=entry["thinking"] or "default",
+                    lock=entry["thinking_lock"])
+    return saved
+
+
+def thinking_setting(platform, user_id):
+    """(value, locked) for one person, failing CLOSED: a store that cannot be
+    read answers ("off", True), because a limit that cannot be read is treated
+    as present (same rule as dm_allowed)."""
+    try:
+        entry = get(platform, user_id)
+    except PermsUnreadable:
+        return "off", True
+    return entry["thinking"], entry["thinking_lock"]
 
 
 def grant_minutes_ok(minutes):

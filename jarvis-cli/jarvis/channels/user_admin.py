@@ -210,6 +210,10 @@ def person_view(platform, rec, cfg, perms):
         # owner always may, whether or not they are named in the list.
         "image": membership(cfg, PERM_IMAGES, rec),
         "send_dm": bool(perms["can_dm"]),
+        # L.44: the owner's thinking setting for them (None = no setting) and
+        # whether they may change it themselves with /thinking in chat.
+        "thinking": perms.get("thinking"),
+        "thinking_lock": bool(perms.get("thinking_lock")),
         "tools": perms["tools"],
         # L.36-P6: when their tool access ends by itself (epoch seconds, 0 =
         # it doesn't). `tool_expired` is a deadline that has passed but that
@@ -373,6 +377,29 @@ def _image_note(cfg, rec):
     if not membership(cfg, PERM_REPLY, rec)["on"]:
         note += "; they also need Reply switched on to be answered at all"
     return note
+
+
+def set_thinking(platform, user_id, value, lock=None):
+    """L.44: set one person's thinking ("on" / "off" / None to clear) and,
+    optionally, lock it. Returns (ok, error, note). The owner has no stored
+    setting -- they are never limited -- so asking for one is refused rather
+    than silently stored and ignored."""
+    rec, err = _registered(platform, user_id)
+    if rec is None:
+        return False, err, ""
+    cfg = channel_config.platform_config(platform)
+    if permissions.is_owner(cfg, _idents(rec)):
+        return False, "that's the owner; thinking is never limited for them", ""
+    if value not in (None, "on", "off"):
+        return False, "thinking must be on, off, or default (cleared)", ""
+    try:
+        user_perms.set_thinking(platform, str(rec["user_id"]), value, lock)
+    except (OSError, ValueError, user_perms.PermsUnreadable) as exc:
+        return False, str(exc), ""
+    note = ""
+    if value is None:
+        note = "back to the default: no limit from the owner"
+    return True, "", note
 
 
 def set_flag(platform, user_id, flag, value):
@@ -711,6 +738,15 @@ def forget_refusal(platform, rec):
     return ""
 
 
+def _memory_count(platform, uid):
+    """How many saved records (L.21) the forget report should show. Never raises."""
+    try:
+        from . import person_memory
+        return len(person_memory.export(people.key(platform, uid)))
+    except Exception:  # noqa: BLE001
+        return 0
+
+
 def forget_person(platform, user_id, purge_history=False, dry_run=False):
     """Wipe one person. Returns (ok, error, report).
 
@@ -746,6 +782,7 @@ def forget_person(platform, user_id, purge_history=False, dry_run=False):
         "history": transcript.history_summary(platform, uid),
         "history_purged": bool(purge_history),
         "usage_kept": True,
+        "memory_records": _memory_count(platform, uid),
     }
     try:
         report["limits"] = user_perms.normalize(
@@ -765,6 +802,18 @@ def forget_person(platform, user_id, purge_history=False, dry_run=False):
         user_perms.forget(platform, uid)
     except (OSError, user_perms.PermsUnreadable) as exc:
         return False, str(exc), report
+    # 2b. what Jarvis saved about them (L.21/L.22), their reply watch (L.23)
+    # and their /thinking choices (L.44). This is the "forget removes every
+    # trace" rule: none of it is optional, and none of it waits for the
+    # history tick-box.
+    try:
+        from . import awaiting, person_memory, thinking
+        report["memory_records"] = person_memory.delete_person(
+            people.key(platform, uid))
+        awaiting.clear(platform, uid)
+        thinking.forget_person(platform, uid)
+    except Exception as exc:  # noqa: BLE001
+        return False, f"couldn't delete what was saved about them — {exc}", report
     # 3. history, only when asked.
     if purge_history:
         purged = transcript.purge_person(platform, uid)

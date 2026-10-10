@@ -118,6 +118,11 @@ _TOOL_RISK = {
     # the confirm band interactively, becomes `review` from chat (x1.35) and
     # when scheduled (x1.6); the tool itself refuses unattended runs outright.
     "send_dm": 50,
+    # Per-person notes and standing rules (L.21-L.23): local writes the owner
+    # can list and delete, nothing leaves the machine. Rules shape what Jarvis
+    # tells a third party, hence 20 rather than memory_save's 10.
+    "person_remember": 10, "person_forget": 15, "person_instruct": 20,
+    "person_recall": 5, "person_review": 10, "await_reply": 10,
     "spotify_play": 5, "playnite_launch_game": 20,
     "radio_set": 30, "set_capacity_mode": 10,
     # Powers the PC off / restarts / sleeps / locks it (L.16, actions/power_tools.py).

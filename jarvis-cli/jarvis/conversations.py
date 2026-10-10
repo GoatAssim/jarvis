@@ -325,6 +325,37 @@ def new_conversation(title=None, make_current=True, origin="", origin_detail="")
     return conv_id
 
 
+def set_origin(conv_id, origin, origin_detail=""):
+    """Re-tag a conversation's origin detail (L.53: a Tool Maker conversation
+    follows its tool when a new-tool tab is saved under a name). Only fills an
+    EMPTY origin or refreshes the same one -- never rewrites a conversation that
+    came from somewhere else (a chat bot, the scheduler). Updates the index row
+    in place when it has one; an empty conversation has none and must not get
+    one (see _upsert_index). Returns True when the record now carries it."""
+    if not is_valid_id(conv_id):
+        return False
+    record = _load_conv(conv_id)
+    if not record:
+        return False
+    origin = (origin or "").strip()[:32]
+    detail = (origin_detail or "").strip()[:120]
+    current = record.get("origin") or ""
+    if current and current != origin:
+        return False
+    if current == origin and (record.get("origin_detail") or "") == detail:
+        return True
+    record["origin"] = origin
+    record["origin_detail"] = detail
+    _save_conv(record)
+    items = _load_index()
+    for i, it in enumerate(items):
+        if it.get("id") == conv_id:
+            items[i] = dict(it, origin=origin, origin_detail=detail)
+            _save_index(items)
+            break
+    return True
+
+
 # A brand-new conversation's on-disk file (see new_conversation) is only
 # ever indexed once append_exchange gives it a first real message. Most of
 # the time that happens within minutes, one way or another — either the

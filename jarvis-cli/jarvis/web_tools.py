@@ -9,8 +9,10 @@ from html import unescape
 from html.parser import HTMLParser
 from urllib.parse import urlparse
 
-FETCH_TIMEOUT = 15
-FETCH_MAX_CHARS = 4000
+from . import tunables
+
+FETCH_TIMEOUT = tunables.const("FETCH_TIMEOUT", 15)  # L.43: Settings > Advanced
+FETCH_MAX_CHARS = tunables.const("FETCH_MAX_CHARS", 4000)  # L.43: Settings > Advanced
 SEARCH_MAX = 8
 
 _BLOCKED_HOSTS = {

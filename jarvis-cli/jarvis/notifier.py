@@ -46,6 +46,7 @@ from datetime import datetime
 from pathlib import Path
 
 from . import ask_output
+from . import tunables
 
 JARVIS_DIR = Path.home() / ".jarvis"
 INBOX_FILE = JARVIS_DIR / "notifications.json"
@@ -64,9 +65,9 @@ CHANNELS = ("inbox", "stream", "toast", "voice", "playnite",
 # window quietly threw away an unread reminder the moment a clipboard burst
 # pushed it out of the window. Now the oldest READ items go first, and an item
 # that still needs an acknowledgment is the last thing ever dropped.
-MAX_INBOX = 500
+MAX_INBOX = tunables.const("MAX_INBOX", 500)  # L.43: Settings > Advanced
 MAX_MESSAGE_CHARS = 2000
-TOAST_TIMEOUT = 15
+TOAST_TIMEOUT = tunables.const("TOAST_TIMEOUT", 15)  # L.43: Settings > Advanced
 
 CREATE_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 

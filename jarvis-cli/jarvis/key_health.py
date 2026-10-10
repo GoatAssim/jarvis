@@ -40,6 +40,8 @@ import tempfile
 import time
 from pathlib import Path
 
+from . import tunables
+
 JARVIS_DIR = Path.home() / ".jarvis"
 HEALTH_FILE = JARVIS_DIR / "key_health.json"
 
@@ -60,7 +62,7 @@ HOST_REFUSED_COOLDOWN = 60.0           # L.28 #4: a host that refused a connecti
 # tier" (~12s) — that's a per-provider call the owner can make with
 # min_round_interval_seconds, not a default every high-limit provider
 # should eat. 0 disables pacing entirely.
-DEFAULT_MIN_ROUND_INTERVAL = 3.0
+DEFAULT_MIN_ROUND_INTERVAL = tunables.const("DEFAULT_MIN_ROUND_INTERVAL", 3.0)  # L.43: Settings > Advanced
 
 # What providers actually say. Gemini: `"retryDelay": "26s"` and "Please retry in
 # 26.06s"; OpenAI/Groq: "try again in 20s" / "in 2m3.5s"; plus the header.

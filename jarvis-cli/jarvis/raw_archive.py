@@ -71,7 +71,7 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
-from . import conversations, thread_extras
+from . import conversations, thread_extras, tunables
 
 JARVIS_DIR = Path.home() / ".jarvis"
 ARCHIVE_DIR = JARVIS_DIR / "events"
@@ -84,8 +84,11 @@ _OFF_VALUES = {"0", "off", "false", "no"}
 
 
 def enabled():
-    """Writing is on unless JARVIS_RAW_ARCHIVE is 0/off/false/no."""
-    return os.environ.get("JARVIS_RAW_ARCHIVE", "").strip().lower() not in _OFF_VALUES
+    """Writing is on unless JARVIS_RAW_ARCHIVE is 0/off/false/no -- in the environment, or
+    (L.43) as an override saved from Settings > Advanced. The environment wins."""
+    if os.environ.get("JARVIS_RAW_ARCHIVE", "").strip().lower() in _OFF_VALUES:
+        return False
+    return bool(tunables.get("JARVIS_RAW_ARCHIVE", True))
 
 
 def _now_iso():

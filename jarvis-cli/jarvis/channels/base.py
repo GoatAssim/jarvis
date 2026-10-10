@@ -136,7 +136,8 @@ def _scope_detail(msg):
 
 def _ask_jarvis(text, conv_id, may_use_tools, on_tool_call=None, platform="",
                 sender_context="", sender_env="", tool_scope=None, tool_log=None,
-                collect_media=False, media_log=None):
+                collect_media=False, media_log=None, offer_tools=None,
+                think_override=None):
     """One ask, with tools allowed or forbidden for this specific sender.
 
     Imported lazily: ai_client pulls in the whole tool catalog, and a
@@ -215,7 +216,12 @@ def _ask_jarvis(text, conv_id, may_use_tools, on_tool_call=None, platform="",
         if not may_use_tools:
             # Empty string -> empty allowlist -> no tool reaches the model.
             # Note this is NOT the same as unsetting it (None = unrestricted).
-            restrict = ""
+            # D-I10 exception: a turn where sender_gate's free pre-filter says
+            # the person is introducing themselves is offered the identity
+            # tools only (the same set a custom tool list always gets), so a
+            # tools-off person can still be remembered by name. Every other
+            # turn stays exactly as before.
+            restrict = ",".join(sorted(str(t) for t in offer_tools)) if offer_tools else ""
         elif tool_scope is not None:
             restrict = ",".join(sorted(str(t) for t in tool_scope))
         if restrict is not None:
@@ -251,6 +257,11 @@ def _ask_jarvis(text, conv_id, may_use_tools, on_tool_call=None, platform="",
         from .. import media_out
         media_out.begin(allow=collect_media)
         try:
+            extra_kwargs = {}
+            if think_override is not None:
+                # L.44: only passed when there is a setting, so every other
+                # ask is called exactly as it was.
+                extra_kwargs["think_override"] = think_override
             result = ai_client.ask(
                 text,
                 commands=commands,
@@ -258,6 +269,7 @@ def _ask_jarvis(text, conv_id, may_use_tools, on_tool_call=None, platform="",
                 on_attempt=_on_attempt,
                 on_tool_call=_on_tool_call,
                 sender_context=sender_context,
+                **extra_kwargs,
             )
         finally:
             finished.set()
@@ -524,6 +536,8 @@ def handle_message(platform, msg, send, cfg=None, on_tool_call=None, decision=No
     sender_ctx = ""
     sender_env = ""
     is_owner = False
+    entry = {}
+    matched_rules = []
     try:
         is_owner = permissions.is_owner(cfg, msg)
         entry = people.touch(platform, msg.user_id,
@@ -536,6 +550,9 @@ def handle_message(platform, msg, send, cfg=None, on_tool_call=None, decision=No
             "handle": entry.get("handle") or msg.user_handle,
             "name": entry.get("name") or "",
             "is_owner": bool(is_owner),
+            # D-I10: what they just said, so remember_sender's gate can tell
+            # an introduction from small talk and check a note against it.
+            "text": str(msg.text or "")[:400],
         })
         if people.needs_owner_notice(entry):
             if _notify_owner_new_sender(platform, msg, entry):
@@ -545,6 +562,35 @@ def handle_message(platform, msg, send, cfg=None, on_tool_call=None, decision=No
         # for one. A broken people.json degrades to the old behaviour (no
         # identity block) rather than dropping the message.
         _log(f"sender identity unavailable: {exc}")
+
+    # --- per-person memory and standing rules (L.21 / L.22) ---------------
+    # Only for someone who is not the owner: the owner's own memory is
+    # memory.py. Both blocks join the SAME sender_context tail the identity
+    # block rides in, so nothing here touches the cached prompt prefix.
+    if not is_owner:
+        try:
+            extra, matched_rules = _person_context(platform, msg, entry)
+            if extra:
+                sender_ctx = (sender_ctx + "\n\n" + extra).strip()
+        except Exception as exc:  # noqa: BLE001 -- memory is an enhancement
+            _log(f"person memory unavailable: {exc}")
+
+    # --- /thinking (L.44) ---------------------------------------------------
+    # Answered here, without the model, so a locked person pays nothing for
+    # asking and cannot argue their way past the lock.
+    think_override = None
+    try:
+        from . import thinking
+        reply = thinking.handle_command(platform, msg.thread_id, msg.user_id,
+                                        msg.text, is_owner=bool(is_owner))
+        if reply is not None:
+            _send_plain(platform, msg, send, reply, cfg, conv_id)
+            return decision
+        think_override = thinking.override_for(
+            thinking.effective(platform, msg.thread_id, msg.user_id,
+                               is_owner=bool(is_owner)))
+    except Exception as exc:  # noqa: BLE001
+        _log(f"thinking setting unavailable: {exc}")
 
     # --- which tools, exactly? --------------------------------------------
     # The per-person narrowing from the Channels panel. It is looked up only
@@ -574,6 +620,15 @@ def handle_message(platform, msg, send, cfg=None, on_tool_call=None, decision=No
     _log(f"accepted {platform} msg from {msg.user_handle or msg.user_id} "
          f"({'owner' if is_owner else 'guest'}, tools={tools_label})")
 
+    offer_tools = None
+    if not may_use_tools and not is_owner:
+        try:
+            from . import sender_gate
+            if sender_gate.offer_remember_sender(entry, msg.text):
+                offer_tools = frozenset(user_perms.PLUMBING_TOOLS)
+        except Exception as exc:  # noqa: BLE001
+            _log(f"remember_sender gate unavailable: {exc}")
+
     ask_ok, ask_error, result = True, "", None
     captured_tools, ask_since = [], _utc_stamp()
     media_items = []
@@ -583,7 +638,8 @@ def handle_message(platform, msg, send, cfg=None, on_tool_call=None, decision=No
                              sender_context=sender_ctx, sender_env=sender_env,
                              tool_scope=tool_scope, tool_log=captured_tools,
                              collect_media=bool(send_file and is_owner),
-                             media_log=media_items)
+                             media_log=media_items, offer_tools=offer_tools,
+                             think_override=think_override)
         text = (getattr(result, "text", "") or "").strip()
         provider = getattr(result, "provider", "") or ""
         if not text:
@@ -641,7 +697,77 @@ def handle_message(platform, msg, send, cfg=None, on_tool_call=None, decision=No
     if media_items and send_file and is_owner:
         _send_media(platform, msg, send, send_file, media_items, cfg, conv_id, provider)
 
+    # --- a reply the owner is waiting for (L.23) ---------------------------
+    # AFTER the answer went out, so the classifier call never delays it, and
+    # only for someone who is not the owner.
+    if not is_owner:
+        try:
+            from . import awaiting
+            if awaiting.is_awaiting(platform, msg.user_id):
+                awaiting.consider(platform, msg.user_id,
+                                  people.effective_name(entry) or msg.user_handle,
+                                  msg.text)
+        except Exception as exc:  # noqa: BLE001
+            _log(f"reply watch failed: {exc}")
+
     return decision
+
+
+_RULE_NOTICE = {}
+RULE_NOTICE_SECONDS = 1800
+
+
+def _person_context(platform, msg, entry):
+    """(extra prompt text, matched rules) for a non-owner's message.
+
+    Memory for this person (and the linked account's), then the standing
+    rules that fit this message. A rule that asks for it also tells the owner,
+    at most once per person and rule per RULE_NOTICE_SECONDS -- the model is
+    not involved in that decision."""
+    from . import person_memory
+    keys = [people.key(platform, msg.user_id)]
+    other = people.partner(entry) if entry else None
+    if other and other.get("platform") and other.get("user_id"):
+        keys.append(people.key(other["platform"], other["user_id"]))
+    notes = [n for n in ((entry or {}).get("notes") or []) if isinstance(n, str)]
+    mem = person_memory.context_block(keys, msg.text, skip_texts=notes)
+    matched = person_memory.matches(keys[0], msg.text)
+    parts = [mem["block"], person_memory.render_rules(matched)]
+    if matched:
+        person_memory.log_applied(keys[0], matched)
+        for rec in person_memory.action_for(matched):
+            _tell_owner_of_rule(platform, msg, entry, rec)
+    return "\n\n".join(p for p in parts if p), matched
+
+
+def _tell_owner_of_rule(platform, msg, entry, rec):
+    now = time.time()
+    token = (platform, str(msg.user_id), rec.get("id"))
+    if now - _RULE_NOTICE.get(token, 0) < RULE_NOTICE_SECONDS:
+        return
+    _RULE_NOTICE[token] = now
+    try:
+        from . import outbound
+        body = rec["instruction"]
+        who = people.effective_name(entry) or entry.get("handle") or msg.user_id
+        verb = ("asked about" if body.get("directive") == "ask_owner_first"
+                else "brought up")
+        outbound.notify_owner(f"{who} {verb} \"{body.get('topic')}\".")
+    except Exception as exc:  # noqa: BLE001
+        _log(f"could not tell the owner about a rule: {exc}")
+
+
+def _send_plain(platform, msg, send, text, cfg, conv_id):
+    """A short fixed reply the gateway wrote itself (no model, no usage line)."""
+    ok = True
+    try:
+        ok = send(text) is not False
+    except Exception as exc:  # noqa: BLE001
+        _log(f"send failed: {exc}")
+        ok = False
+    if cfg.get("log_conversations", True):
+        transcript.log_outbound(platform, msg.thread_id, text, conv_id=conv_id,
+                                ok=ok, provider="", to_user=msg.user_id)
 
 
 def _send_media(platform, msg, send, send_file, items, cfg, conv_id, provider):

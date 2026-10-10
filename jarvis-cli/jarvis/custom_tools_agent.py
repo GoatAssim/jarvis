@@ -38,14 +38,15 @@ import sys
 
 from . import ai_config
 from . import ai_providers
+from . import tunables
 from .custom_tools_suggest import _pick_provider
 
-AGENT_TIMEOUT = 150
+AGENT_TIMEOUT = tunables.const("AGENT_TIMEOUT", 150)  # L.43: Settings > Advanced
 AGENT_MAX_TOKENS = 8000          # a FLOOR: a larger max_tokens on the provider block wins
 # A whole-file reply that hits the provider's output cap is continued in a fresh
 # call instead of thrown away. Each continuation is one more full call, so it is
 # bounded; a tool that still doesn't fit after this many is genuinely too big.
-MAX_CONTINUATIONS = 3
+MAX_CONTINUATIONS = tunables.const("MAX_CONTINUATIONS", 3)  # L.43: Settings > Advanced
 _OVERLAP_WINDOW = 400
 _CONTINUE_PROMPT = (
     "Your reply was cut off by the output limit. Continue the file from the exact "

@@ -194,8 +194,15 @@ def test_remember_sender_writes_the_current_sender_only():
     from jarvis.actions import channel_people as cp
     people.touch(DISCORD, "1001", handle="current")
     people.touch(DISCORD, "1002", handle="other")
+    # D-I10: a non-owner's note passes the relevance gate (the sender's own
+    # words must introduce them, and one tiny yes/no call must say keep), so
+    # the message text rides in the env and the model call is stubbed.
+    from jarvis.channels import cheap_call
+    original_call = cheap_call._complete
+    cheap_call._complete = lambda prompt: '{"keep": true}'
     os.environ[cp.SENDER_ENV] = json.dumps(
-        {"platform": DISCORD, "user_id": "1001", "handle": "current"})
+        {"platform": DISCORD, "user_id": "1001", "handle": "current",
+         "text": "my name is Robin and I like tea"})
     try:
         out = cp.tool_remember_sender({"name": "Robin", "note": "likes tea"})
         assert out["ok"] is True
@@ -208,6 +215,7 @@ def test_remember_sender_writes_the_current_sender_only():
         assert who["name"] == "Robin"
         assert who["is_owner"] is False
     finally:
+        cheap_call._complete = original_call
         os.environ.pop(cp.SENDER_ENV, None)
 
 

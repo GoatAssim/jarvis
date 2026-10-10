@@ -87,6 +87,7 @@ K_OWNER = "owner"        # became / stopped being the platform's owner
 K_PLATFORM = "platform"  # a platform-wide switch (allow_tools)
 K_HANDLE = "handle"      # the owner edited a hand-added person's handle
 K_FORGOT = "forgot"      # "Forget this person" ran
+K_THINKING = "thinking"  # their thinking setting / lock changed (L.44)
 K_TIMED = "timed"        # tool use switched on until a deadline (L.36-P6)
 
 _LIST_LABEL = {"dm_allowlist": "direct messages", "reply_allowlist": "replies",
@@ -246,6 +247,9 @@ def describe(entry):
         return "Tools no longer limited to a list (the platform's setting applies)"
     if kind == K_SEND_DM:
         return f"Jarvis {'may' if on else 'may not'} DM them for you"
+    if kind == K_THINKING:
+        lock = " (locked)" if entry.get("lock") else ""
+        return f"Thinking set to {entry.get('value') or 'default'}{lock}"
     if kind == K_FOLLOW:
         state = entry.get("state") or "?"
         before = entry.get("old")

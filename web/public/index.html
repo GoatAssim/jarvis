@@ -17,6 +17,7 @@
 <link rel="stylesheet" href="test-checklist.css">
 <link rel="stylesheet" href="code-editor.css">
 <link rel="stylesheet" href="channels.css">
+<link rel="stylesheet" href="ask-embed.css">
 <link rel="stylesheet" href="tool-manager.css">
 <link rel="stylesheet" href="tool-ui.css">
 <link rel="stylesheet" href="category-input.css">
@@ -28,6 +29,7 @@
 <link rel="stylesheet" href="notifications.css">
 <link rel="stylesheet" href="mcp-servers.css">
 <link rel="stylesheet" href="agent-panel.css">
+<link rel="stylesheet" href="settings.css">
 </head>
 <body>
 
@@ -61,7 +63,7 @@
           <div class="topbar__title" id="topbar-title">J.A.R.V.I.S</div>
           <div class="topbar__subtitle">Command Interface</div>
         </div>
-        <button class="btn btn--ghost btn--sm btn--skin" id="btn-skin" type="button" title="Rename Jarvis, change how he addresses you, and pick an accent skin">Skin</button>
+        <button class="btn btn--ghost btn--sm btn--skin" id="btn-prefs" type="button" title="Settings: skin, AI, layout, notifications, tools and safety, memory, and Advanced">Settings</button>
       </div>
 
       <button class="btn btn--ghost btn--mode" id="btn-mode-switch" type="button" data-mode="compact"
@@ -1250,90 +1252,99 @@
   </div>
 </div>
 
-<!-- SKIN — persona (name/how Jarvis addresses you) + accent-color theming.
-     Persona fields round-trip through the same ai_config.json the raw
-     Settings > Config > AI tab edits (persona.assistant_name /
-     persona.address_user_as) — this is just a friendlier, dedicated form
-     for those two fields plus a client-side-only accent color, instead of
-     hand-editing JSON. Accent choice is purely cosmetic and stored in
-     localStorage (per-browser), never sent to the backend. -->
-<div class="modal-backdrop" id="skin-backdrop" hidden>
-  <div class="modal modal--skin" role="dialog" aria-modal="true" aria-labelledby="skin-title">
-    <div class="modal__head">
-      <h2 id="skin-title">Skin</h2>
+<!-- SETTINGS (L.43) — one modal with a section rail. It replaces the old Skin modal: the
+     Skin section below is that modal's body and footer, unchanged (same ids, same JS in
+     app.js and custom-tools.js), so persona fields still round-trip through ai_config.json
+     and theme/accent choices are still per-browser localStorage.
+     The other sections and the Advanced tab are built by settings.js, which owns the rail,
+     the search box and every non-Skin pane; Advanced is the one screen that can edit any
+     file, tunable or limit in the project (rules live in jarvis/settings_admin.py). -->
+<div class="modal-backdrop" id="prefs-backdrop" hidden>
+  <div class="modal modal--prefs" role="dialog" aria-modal="true" aria-labelledby="prefs-title">
+    <div class="modal__head prefs-head">
+      <h2 id="prefs-title">Settings</h2>
+      <input type="search" id="prefs-search" class="prefs-search" placeholder="Search settings&hellip;" aria-label="Search settings" autocomplete="off" spellcheck="false">
       <button class="modal__close" id="skin-close" type="button" aria-label="Close">&times;</button>
     </div>
 
-    <div class="modal__body skin-body" id="skin-body">
-      <section class="skin-section">
-        <h3>Persona</h3>
-        <div class="skin-persona-presets" id="skin-persona-presets"></div>
-        <p class="skin-hint">Sets the name and a hardcoded color palette together, in one click. Everything below can still be fine-tuned afterward.</p>
-        <label class="skin-field">
-          <span>Jarvis's name</span>
-          <input type="text" id="skin-assistant-name" maxlength="60" placeholder="J.A.R.V.I.S">
-        </label>
-        <p class="skin-hint" id="skin-cli-name-preview">Terminal command after rebuild: <code>jarvis</code></p>
-        <label class="skin-field">
-          <span>Addresses you as</span>
-          <input type="text" id="skin-address-as" maxlength="60" placeholder="sir">
-        </label>
-        <label class="skin-field">
-          <span>Attitude</span>
-          <select id="skin-attitude"></select>
-        </label>
-      </section>
+    <div class="prefs-layout">
+      <nav class="prefs-rail" id="prefs-rail" aria-label="Settings sections"></nav>
+      <div class="prefs-main" id="prefs-main">
+        <div class="prefs-pane" id="prefs-pane-skin" data-section="skin">
+          <div class="modal__body skin-body" id="skin-body">
+            <section class="skin-section">
+              <h3>Persona</h3>
+              <div class="skin-persona-presets" id="skin-persona-presets"></div>
+              <p class="skin-hint">Sets the name and a hardcoded color palette together, in one click. Everything below can still be fine-tuned afterward.</p>
+              <label class="skin-field">
+                <span>Jarvis's name</span>
+                <input type="text" id="skin-assistant-name" maxlength="60" placeholder="J.A.R.V.I.S">
+              </label>
+              <p class="skin-hint" id="skin-cli-name-preview">Terminal command after rebuild: <code>jarvis</code></p>
+              <label class="skin-field">
+                <span>Addresses you as</span>
+                <input type="text" id="skin-address-as" maxlength="60" placeholder="sir">
+              </label>
+              <label class="skin-field">
+                <span>Attitude</span>
+                <select id="skin-attitude"></select>
+              </label>
+            </section>
 
-      <section class="skin-section">
-        <h3>Theme</h3>
-        <div id="jui-theme-gallery" class="jui-theme-grid"></div>
-        <p class="skin-hint">A theme is a set of CSS variables. Picking one applies instantly and is remembered per browser.</p>
-        <div class="ctools__bar">
-          <button class="btn btn--ghost" id="btn-theme-import" type="button">Import&hellip;</button>
-          <button class="btn btn--ghost" id="btn-theme-export" type="button">Export current</button>
-          <button class="btn btn--ghost" id="btn-theme-save" type="button" title="Save the current accent/colour tweaks as a new named theme">Save as new</button>
+            <section class="skin-section">
+              <h3>Theme</h3>
+              <div id="jui-theme-gallery" class="jui-theme-grid"></div>
+              <p class="skin-hint">A theme is a set of CSS variables. Picking one applies instantly and is remembered per browser.</p>
+              <div class="ctools__bar">
+                <button class="btn btn--ghost" id="btn-theme-import" type="button">Import&hellip;</button>
+                <button class="btn btn--ghost" id="btn-theme-export" type="button">Export current</button>
+                <button class="btn btn--ghost" id="btn-theme-save" type="button" title="Save the current accent/colour tweaks as a new named theme">Save as new</button>
+              </div>
+            </section>
+
+            <section class="skin-section">
+              <h3>Interface</h3>
+              <label class="skin-field skin-field--inline"><span>Corner rounding</span>
+                <input type="range" id="tune-radius" min="0" max="200" step="10" value="100"></label>
+              <label class="skin-field skin-field--inline"><span>Glow / shadow</span>
+                <input type="range" id="tune-glow" min="0" max="200" step="10" value="100"></label>
+              <label class="skin-field skin-field--inline"><span>Text size</span>
+                <input type="range" id="tune-font" min="80" max="130" step="5" value="100"></label>
+              <label class="check"><input type="checkbox" id="tune-motion" checked> Animations</label>
+              <label class="check"><input type="checkbox" id="tune-scanlines" checked> Grid / scanline overlay</label>
+              <p class="skin-hint">Applies on top of any theme, so you can keep a skin you like and still square the corners or kill the glow.</p>
+            </section>
+
+            <section class="skin-section">
+              <h3>Accent color</h3>
+              <div class="skin-swatches" id="skin-swatches"></div>
+              <label class="skin-field skin-field--inline">
+                <span>Custom</span>
+                <input type="color" id="skin-custom-color" value="#4fd8ff">
+              </label>
+            </section>
+
+            <section class="skin-section">
+              <h3>Saturation</h3>
+              <label class="skin-field skin-field--inline">
+                <span>Saturation</span>
+                <input type="range" id="skin-saturation" min="0" max="150" step="5" value="100">
+              </label>
+              <p class="skin-hint">No effect on the "Classic (hardcoded)" preset.</p>
+            </section>
+
+            <div class="modal__error" id="skin-error"></div>
+          </div>
+
+          <div class="modal__foot">
+            <div class="modal__foot-actions">
+              <button class="btn btn--ghost" id="btn-skin-reset" type="button" title="Reset name, address, attitude, and accent back to defaults">Reset Defaults</button>
+              <button class="btn btn--ghost" id="btn-skin-cancel" type="button">Cancel</button>
+              <button class="btn btn--primary" id="btn-skin-save" type="button">Save</button>
+            </div>
+          </div>
         </div>
-      </section>
-
-      <section class="skin-section">
-        <h3>Interface</h3>
-        <label class="skin-field skin-field--inline"><span>Corner rounding</span>
-          <input type="range" id="tune-radius" min="0" max="200" step="10" value="100"></label>
-        <label class="skin-field skin-field--inline"><span>Glow / shadow</span>
-          <input type="range" id="tune-glow" min="0" max="200" step="10" value="100"></label>
-        <label class="skin-field skin-field--inline"><span>Text size</span>
-          <input type="range" id="tune-font" min="80" max="130" step="5" value="100"></label>
-        <label class="check"><input type="checkbox" id="tune-motion" checked> Animations</label>
-        <label class="check"><input type="checkbox" id="tune-scanlines" checked> Grid / scanline overlay</label>
-        <p class="skin-hint">Applies on top of any theme, so you can keep a skin you like and still square the corners or kill the glow.</p>
-      </section>
-
-      <section class="skin-section">
-        <h3>Accent color</h3>
-        <div class="skin-swatches" id="skin-swatches"></div>
-        <label class="skin-field skin-field--inline">
-          <span>Custom</span>
-          <input type="color" id="skin-custom-color" value="#4fd8ff">
-        </label>
-      </section>
-
-      <section class="skin-section">
-        <h3>Saturation</h3>
-        <label class="skin-field skin-field--inline">
-          <span>Saturation</span>
-          <input type="range" id="skin-saturation" min="0" max="150" step="5" value="100">
-        </label>
-        <p class="skin-hint">No effect on the "Classic (hardcoded)" preset.</p>
-      </section>
-
-      <div class="modal__error" id="skin-error"></div>
-    </div>
-
-    <div class="modal__foot">
-      <div class="modal__foot-actions">
-        <button class="btn btn--ghost" id="btn-skin-reset" type="button" title="Reset name, address, attitude, and accent back to defaults">Reset Defaults</button>
-        <button class="btn btn--ghost" id="btn-skin-cancel" type="button">Cancel</button>
-        <button class="btn btn--primary" id="btn-skin-save" type="button">Save</button>
+        <div class="prefs-results" id="prefs-results" hidden></div>
       </div>
     </div>
   </div>
@@ -1424,6 +1435,8 @@
         <!-- L.44: the two side panes can be hidden so the editor gets the room. -->
         <button class="btn btn--ghost btn--sm tm-pane-toggle" id="btn-tm-toggle-tools" type="button" aria-pressed="true" title="Show or hide the Tools list">Tools</button>
         <button class="btn btn--ghost btn--sm tm-pane-toggle" id="btn-tm-toggle-side" type="button" aria-pressed="true" title="Show or hide the Overview panel">Overview</button>
+        <!-- L.53: Ask Jarvis takes the Overview's slot (toggle it off and the Overview returns). Needs an open editor tab. -->
+        <button class="btn btn--ghost btn--sm tm-pane-toggle" id="btn-tm-toggle-agent" type="button" aria-pressed="false" disabled title="Open a tool in the editor first (Create a tool, or Edit one)">Ask Jarvis</button>
         <button class="btn btn--ghost btn--sm" id="btn-tm-import" type="button" title="Import a .py tool file — you are asked to confirm before anything runs">Import&hellip;</button>
         <button class="btn btn--primary btn--sm" id="btn-tm-create" type="button">Create a tool</button>
         <button class="btn btn--ghost btn--sm" id="btn-tm-refresh" type="button" title="Re-read the tool catalogue and your tool files">Refresh</button>
@@ -1476,11 +1489,22 @@
       </section>
 
       <!-- RIGHT: overview, what needs attention, add a tool / check results -->
-      <section class="debug-pane" aria-label="Overview">
-        <div class="debug-pane__head"><h3>Overview</h3>
+      <section class="debug-pane tm-rightpane" aria-label="Overview and Ask Jarvis">
+        <div class="debug-pane__head"><h3 id="tm-side-title">Overview</h3>
           <button class="tm-pane-close" id="tm-close-side" type="button" aria-label="Hide the Overview panel" title="Hide the Overview panel (bring it back with the Overview button up top)">&times;</button>
         </div>
         <div class="tm-side" id="tm-side"></div>
+        <!-- L.53: the Ask Jarvis panel. ask-embed.js puts the open tab's conversation into #tm-ask-slot. -->
+        <div class="tm-ask" id="tm-ask" hidden>
+          <div class="tm-ask__bar" id="tm-ask-bar">
+            <span class="tm-ask__tool" id="tm-ask-tool" title="The tool this conversation is about"></span>
+            <span class="tm-ask__state" id="tm-ask-state" aria-live="polite"></span>
+            <button class="btn btn--ghost btn--sm" id="tm-ask-undo" type="button" hidden title="Put back the text from before Jarvis&rsquo;s last edit">Undo AI edit</button>
+            <button class="btn btn--ghost btn--sm" id="tm-ask-stop" type="button" hidden title="Stop typing into the editor (keeps what is already there)">Stop</button>
+            <button class="btn btn--ghost btn--sm" id="tm-ask-new" type="button" title="Start a fresh conversation for this tool (the old one stays in Logs)">New chat</button>
+          </div>
+          <div class="tm-ask__slot" id="tm-ask-slot"></div>
+        </div>
         <input type="file" class="tm-file-input" id="tm-file" accept=".py,text/x-python" tabindex="-1" aria-hidden="true">
       </section>
 
@@ -1876,6 +1900,7 @@
 <script src="slash-palette.js"></script>
 <script src="custom-tools.js"></script>
 <script src="code-editor.js"></script>
+<script src="ask-embed.js"></script>
 <script src="tool-manager.js"></script>
 <script src="tool-ui.js"></script>
 <script src="test-checklist-data.js"></script>
@@ -1888,6 +1913,7 @@
 <script src="schedules.js"></script>
 <!-- agent-panel.js: the Focus layout's Agent side panel. app.js feeds it through window.JarvisAgentPanel?.feed (optional chaining), so load order is not load-bearing. -->
 <script src="agent-panel.js"></script>
+<script src="settings.js"></script>
 
 </body>
 </html>

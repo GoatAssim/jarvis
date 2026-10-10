@@ -240,6 +240,23 @@ things that were already fixed once.
   thinking about exfiltration. Instagram has no `send_file` yet, so nothing is attached there.
   `tests/test_channel_media_out.py` pins this.
 
+- **Settings > Advanced is owner-only and UI-only; every rule lives in `jarvis/settings_admin.py` (L.43).**
+  The Settings modal (`web/public/settings.js`) reaches files and tunables only through
+  `/api/settings/*` -> `jarvis settings-admin`. Keep it that way: no model tool, no slash passthrough and no
+  chat path may call `settings_admin` or `tunables.set_override` / `reset_override` (`tests/test_l43_settings.py`
+  greps for it), and `refuse_unattended()` must keep refusing writes when `JARVIS_CHANNEL`,
+  `JARVIS_CHANNEL_SENDER`, `JARVIS_SCHEDULED`, `JARVIS_TASK_ID` or an unattended `JARVIS_CONTEXT` is set. Every
+  write goes through the one gate (parse, keep value types, the file's own checks, `base_version` stale check,
+  `confirm_guarded` for safety files, backup first, atomic write, change log with paths only); don't add a second
+  write path around it, and don't make a state file or a file another panel owns (`scheduled.json`, `daemons.json`,
+  `backlog.json`, `channels/*`) editable here -- that would bypass the owning panel's own rules (L.36's fail-closed
+  permissions). Secrets are masked on read and restored on write; a token reaches the browser only on an explicit
+  reveal, and is forgotten when Settings closes. A knob becomes a tunable only by adding it to
+  `tunables.REGISTRY` (type, range, default, `applies`) and reading it through `tunables.const()` / `get()`.
+  **`MAX_TOOL_ROUNDS`, the confirmation prompts, `tool_safety` behaviour and the risk review are not tunables and must
+  not become ones.** The `/api/settings/*` routes require a loopback Host, a same-origin `Origin` when present and the
+  `X-Jarvis-Settings: 1` header; don't weaken that, and don't point the page at `/api/config/*` for new work.
+
 ## Testing
 
 No framework dependency — plain `assert` throughout (also valid as
@@ -328,6 +345,8 @@ actually render Markdown):
     node tests/verify_channels_panel.js     # L.36: the Channels panel's pure helpers (people list, filters, tool-scope diffing); no npm install
     node tests/verify_mcp_servers.js        # L.31: the MCP panel's pure helpers (state labels, search, filters, what a blank secret means); no npm install
     python3 tests/verify_mcp_servers_ui.py  # L.31: the MCP panel in a real browser against a real stdio MCP server; needs `playwright` (Python) + Chromium, prints SKIP without them
+    python3 tests/test_tool_maker.py        # L.53: the Tool Maker conversation: withheld tools (hidden AND refused, fail closed), context, history trimming, conv-new origin
+    node tests/verify_ask_embed.js          # L.53: ask-embed.js's reply/stream/size helpers and the Tool Manager's chat-fold + per-tool conversation key; no npm install
     node tests/verify_code_editor.js        # L.33: the Tool Manager editor's tokenizer, edit helpers and completions; no npm install
     python3 tests/verify_l33_code_editor.py # L.33: the editor in a real browser (keys, undo, ghost suggestions, scroll sync); needs `playwright` (Python) + Chromium, prints SKIP without them
                                             # against a fake DOM + fake JarvisHost
@@ -383,6 +402,43 @@ so there are technically two sources of per-phrase match detail now. Worth
 collapsing to one (have the inspector just read `route.matches`) next time
 you're touching that file, but it hasn't been done yet — don't assume
 they've been unified just because `route.matches` exists.
+
+## The Tool Maker conversation (L.53) — it may only EDIT
+
+The Tool Manager's **Ask Jarvis** side panel is a normal Jarvis conversation (same ask
+path, providers, tools and saved conversation as the main panel, via `ask-embed.js` and
+the same websocket `ask` message) with two additions, both in `jarvis/tool_maker.py`:
+
+- **Context.** `server.js` writes `{name, source}` (the tool's name and the editor's
+  whole text, unsaved edits included) to a private temp file `jarvis-tm-ctx-*.json` and
+  points `JARVIS_TOOL_MAKER_CONTEXT_FILE` at it for that one `jarvis ask`; the file is
+  deleted when the child exits. It is a file because a 120 000-char module does not fit
+  an env value or argv on Windows. The block goes in the **tail** of the system prompt
+  (`_system_prompt_parts(tool_maker_ctx=...)`), never the cached prefix, and long
+  ` ```python ` blocks in past ASSISTANT turns are collapsed before they go back to the
+  model (the conversation file and the raw log keep the full text).
+- **It may only edit.** Validate executes a file's top level and Save loads it, so a
+  model allowed to do either would run its own code unattended. While the variable is
+  set, `tool_maker.WITHHELD_TOOLS` (write_file, edit_file, run_shell, run_command,
+  run_custom_command, run_chain, create_command, update_command, git_run,
+  git_commit_all, code_agent, dev_agent, spawn_subagent, run_subagents) are hidden from
+  every schema list and search **and refused in `tools.execute_tool`, the owner's own
+  run included**. It is enforced by name in code, not by prompt wording. The set is a
+  deny-list on purpose (this conversation is otherwise a normal one): **when you add a
+  tool that can write a file or run a program, add it to `WITHHELD_TOOLS`.**
+  `tests/test_tool_maker.py` checks every listed name is a real tool.
+- **Fail closed.** `active()` is "the variable is set", not "the file is readable": a
+  missing, corrupt or oversize context file means *no context*, never *no restrictions*.
+- Origin: the conversation is created with origin `tool-maker` and the tool's name as its
+  detail (`POST /api/conversations` accepts only that origin from a browser; `conv-new
+  --origin tool-maker`), is **not** made the "current" conversation, and the detail
+  follows the tool's name on every turn (`stamp_conversation`). Logs shows a "Tool Maker" tag.
+- One conversation per TOOL: the browser keeps `tool name -> conversation id`
+  (`jarvis-tool-maker-chats` in localStorage); a new unsaved tab is keyed by its draft key
+  and moves under the name on first save.
+- `custom_tools_agent.py`, `jarvis ctools-agent` and `/api/ctools/:name/agent` (the L.43
+  dock's back end) are no longer used by the UI. They are left in place until removed on
+  purpose.
 
 ## Tool screens (TOOL_UI), drafts and the Tool Manager's other switches
 

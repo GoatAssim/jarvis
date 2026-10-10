@@ -77,6 +77,8 @@ RESERVED_NAMES = {
     "ctools-suggest", "ctools-agent", "ctools-drafts",
     # tool-ui: the screens a tool file ships through TOOL_UI (list / bundle / run).
     "tool-ui",
+    # settings-admin: the Settings > Advanced screen's back end (L.43).
+    "settings-admin",
     # commands-check-name: added by this same fix (I-B2 item 2) so
     # web/server.js can ask the CLI instead of keeping its own copy.
     "commands-check-name",
@@ -109,6 +111,7 @@ RESERVED_NAMES = {
     "channels-conversation", "channels-usage", "channels-user-test",
     "channels-history", "channels-handle",
     "channels-tools-for", "channels-instruction",
+    "channels-thinking", "channels-memory", "channels-awaiting",
     "channels-presets", "channels-preset", "channels-bulk",
     "channels-servers", "channels-server-set", "channels-guilds", "channels-channels",
     "channels-master-tools", "channels-send", "channels-denied",

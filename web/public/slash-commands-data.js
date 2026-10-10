@@ -844,19 +844,20 @@ window.JARVIS_SLASH_COMMANDS = /*JSON-BEGIN*/
     },
     {
       "verb": "skin",
-      "aliases": [],
+      "aliases": ["settings"],
       "group": "view",
-      "summary": "Open Skin / persona settings",
+      "summary": "Open Settings (Skin section)",
       "riskTier": "safe",
       "instant": true,
       "whileReplying": true,
       "confirm": false,
       "args": [],
       "covers": [
-        "personas-list"
+        "personas-list",
+        "settings-admin"
       ],
-      "example": "/skin",
-      "preview": "Open Skin / persona settings."
+      "example": "/settings",
+      "preview": "Open Settings: skin, AI, layout, notifications, tools and safety, memory, About and Advanced."
     },
     {
       "verb": "layout",

@@ -82,7 +82,7 @@
   };
   // Tools whose handlers refuse anyone but the owner (tools.OWNER_ONLY_TOOLS).
   // They can't be handed to a guest, so the picker shows them locked.
-  const OWNER_ONLY = new Set(["send_dm", "recent_dms"]);
+  const OWNER_ONLY = new Set(["send_dm", "recent_dms", "person_remember", "person_forget", "person_instruct", "person_recall", "person_review", "await_reply"]);
   // Tools the machinery adds for anyone with a custom list (user_perms.
   // PLUMBING_TOOLS) — shown as a footnote so the owner knows what "only
   // these" really means.

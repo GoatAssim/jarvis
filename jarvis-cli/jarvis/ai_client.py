@@ -19,6 +19,7 @@ import time
 
 from . import ai_config, ai_providers, command_tools, conversations, memory, playnite_config, skill_stickiness, skills, tool_safety
 from . import tool_disable
+from . import tool_maker
 from . import console_store
 from . import raw_archive
 from . import thread_extras
@@ -1047,6 +1048,7 @@ def _system_prompt_parts(persona, tools_enabled,
                          memory_ctx="", has_playnite=False, has_spotify=False, other_convos_ctx="",
                          playnite_freq_games=None, precise=False, pack_instructions_ctx="",
                          skills_ctx="", loaded_skills_ctx="", sender_ctx="",
+                         tool_maker_ctx="",
                          offered_names=None):
     """Return (static_prefix, per_request_tail) instead of one joined string.
 
@@ -1188,6 +1190,11 @@ def _system_prompt_parts(persona, tools_enabled,
     # every non-chat ask byte-identical to before this existed.
     if sender_ctx:
         parts.append(sender_ctx)
+    # L.53: the Tool Maker panel's per-turn block (the rules, and the whole file
+    # as it is right now). Tail, never the static prefix -- it differs on every
+    # turn -- and empty for every other ask, which keeps those byte-identical.
+    if tool_maker_ctx:
+        parts.append(tool_maker_ctx)
     # Per-tool workflow guidance for the tools actually on offer this round.
     # Sits with pack_instructions_ctx because it has exactly the same
     # property: derived from the router's per-turn decision, so it must not
@@ -1234,7 +1241,7 @@ def _system_prompt_parts(persona, tools_enabled,
 
 
 def _build_messages(persona, user_text, tools_enabled, profile, conversation_id, route=None,
-                    sender_ctx=""):
+                    sender_ctx="", tool_maker_ctx=""):
     compact = profile.get("compact_tools_blurb", False)
     prior_turns = conversations.conversation_messages(
         conversation_id,
@@ -1243,6 +1250,12 @@ def _build_messages(persona, user_text, tools_enabled, profile, conversation_id,
         recap_exchanges=profile.get("recap_exchanges"),
         recap_budget=profile.get("recap_budget"),
     )
+    if tool_maker_ctx:
+        # L.53: the whole file rides along in THIS turn's context, so an old copy
+        # inside a past reply is stale and doubles the tokens. The saved
+        # conversation and the raw log keep the full text; only what goes back
+        # to the model is collapsed.
+        prior_turns = tool_maker.collapse_code_for_history(prior_turns)
     compact_persona = profile.get("compact_persona", False)
     # tool_schema_style is only "name_only" for the ultra profile today, so
     # it doubles as the ultra flag here rather than adding a new knob just
@@ -1354,6 +1367,7 @@ def _build_messages(persona, user_text, tools_enabled, profile, conversation_id,
         skills_ctx=skills_ctx,
         loaded_skills_ctx=loaded_skills_ctx,
         sender_ctx=sender_ctx,
+        tool_maker_ctx=tool_maker_ctx,
         offered_names=offered_names if tools_enabled else None,
     )
     # Two system messages, not one: index 0 is the cacheable static prefix,
@@ -3799,6 +3813,11 @@ def _ask_impl(user_text, commands=None, on_attempt=None, on_tool_call=None, on_t
         # go last (still tried if nothing else is left).
         keys = key_health.order_keys(_provider_label(provider), keys)
 
+        # L.53: a Tool Maker panel turn carries the tool's name and the whole file
+        # as it is now, in the per-turn tail. Read once per ask, not per attempt.
+        tool_maker_ctx = (tool_maker.prompt_context(tool_maker.load_context())
+                          if tool_maker.active() else "")
+
         for i, key in enumerate(keys, start=1):
             if token_budget.exceeded():
                 # A failover must not start a fresh attempt (and resend the whole
@@ -3811,6 +3830,7 @@ def _ask_impl(user_text, commands=None, on_attempt=None, on_tool_call=None, on_t
                 persona, user_text, tools_enabled, profile, conv_id,
                 route=route if tools_enabled else None,
                 sender_ctx=sender_context,
+                tool_maker_ctx=tool_maker_ctx,
             )
             runs = getattr(tool_executor, "runs", None) if tool_executor else None
             budget = profile.get("tool_result_budget", _MODE_BY_NAME["full"]["tool_result_budget"])

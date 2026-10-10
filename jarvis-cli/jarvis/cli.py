@@ -900,6 +900,12 @@ def handle_ai_prompt(text, commands, provider_override=None, think_override=None
     conv_id = os.environ.get("JARVIS_CONVERSATION_ID")
     if not conversations.is_valid_id(conv_id):
         conv_id = None
+    # L.53: a Tool Maker panel turn (server.js sets JARVIS_TOOL_MAKER_CONTEXT_FILE)
+    # keeps its conversation's origin detail in step with the tool's name. No-op
+    # for every other caller; never raises.
+    if conv_id:
+        from . import tool_maker
+        tool_maker.stamp_conversation(conv_id)
 
     # Same idea, one level up: a plain-CLI '--provider NAME' or '--provider
     # NAME1,NAME2,...' is already extracted from argv and passed in
@@ -1688,9 +1694,26 @@ def main():
         return
 
     if argv[0] == "conv-new":
-        from . import conversations
-        title = " ".join(argv[1:]).strip() or None
-        conv_id = conversations.new_conversation(title=title)
+        from . import conversations, tool_maker
+        # L.53: `conv-new [--origin tool-maker] [--origin-detail <name>] [title...]`.
+        # Only origins a BROWSER panel may stamp are accepted (today: tool-maker)
+        # -- chat bots and the scheduler set theirs in code, never from argv. A
+        # tagged conversation is a side conversation of a panel, so it does NOT
+        # become the "current" one the main Ask panel and the CLI continue.
+        rest, origin, origin_detail = [], "", ""
+        it = iter(argv[1:])
+        for tok in it:
+            if tok == "--origin":
+                origin = next(it, "")
+            elif tok == "--origin-detail":
+                origin_detail = next(it, "")
+            else:
+                rest.append(tok)
+        if origin and origin != tool_maker.ORIGIN:
+            origin, origin_detail = "", ""
+        title = " ".join(rest).strip() or None
+        conv_id = conversations.new_conversation(
+            title=title, make_current=not origin, origin=origin, origin_detail=origin_detail)
         record = conversations.get_conversation(conv_id)
         print(json.dumps({
             "id": record["id"],
@@ -1699,6 +1722,8 @@ def main():
             "created_at": record["created_at"],
             "updated_at": record["updated_at"],
             "exchange_count": 0,
+            "origin": record.get("origin") or "",
+            "origin_detail": record.get("origin_detail") or "",
         }, indent=2))
         return
 
@@ -2877,6 +2902,59 @@ def main():
         # flagged `disabled`; the Skin modal never passes it.
         from . import tools as system_tools
         print(json.dumps(system_tools.personas_list_payload(include_disabled="--all" in argv[1:]), indent=2))
+        return
+
+    if argv[0] == "settings-admin":
+        # jarvis settings-admin catalog | changes
+        # jarvis settings-admin read|preview|write|set|restore|backups|tunable-set|tunable-reset
+        #     (the request is one JSON object on stdin)
+        # The back end of Settings > Advanced (L.43; settings_admin.py owns every rule).
+        # Not a command to type: it needs a JSON document on stdin, and the Settings screen
+        # is the one caller. It always prints one JSON object; {"ok": false, "error": ...}
+        # is a refusal, not a crash. Writes are refused outright when this process is a chat
+        # reply, a scheduled job or a background task (settings_admin.refuse_unattended).
+        from . import settings_admin
+
+        sub = argv[1] if len(argv) > 1 else ""
+        request = {}
+        if sub not in ("catalog", "changes", ""):
+            try:
+                raw_request = sys.stdin.read()
+                request = json.loads(raw_request) if raw_request.strip() else {}
+            except (ValueError, OSError):
+                request = None
+            if not isinstance(request, dict):
+                print(json.dumps({"ok": False, "error": "The request must be one JSON object on stdin."}))
+                return
+        name = request.get("name")
+        if sub == "catalog":
+            result = settings_admin.catalog()
+        elif sub == "changes":
+            result = settings_admin.recent_changes()
+        elif sub == "read":
+            result = settings_admin.read(name, reveal=bool(request.get("reveal")))
+        elif sub == "preview":
+            result = settings_admin.preview(name, request.get("text"), request.get("base_version"))
+        elif sub == "write":
+            result = settings_admin.write(name, request.get("text"), request.get("base_version"),
+                                          confirm_guarded=request.get("confirm_guarded") is True)
+        elif sub == "set":
+            result = settings_admin.set_value(name, request.get("path"), request.get("value"),
+                                              request.get("base_version"),
+                                              confirm_guarded=request.get("confirm_guarded") is True)
+        elif sub == "restore":
+            result = settings_admin.restore(name, request.get("backup_id"), request.get("base_version"),
+                                            confirm_guarded=request.get("confirm_guarded") is True)
+        elif sub == "backups":
+            result = settings_admin.list_backups(name)
+        elif sub == "tunable-set":
+            result = settings_admin.tunable_set(name, request.get("value"))
+        elif sub == "tunable-reset":
+            result = settings_admin.tunable_reset(name)
+        else:
+            result = {"ok": False, "error": "usage: jarvis settings-admin catalog|changes|read|preview|write|set|"
+                                            "restore|backups|tunable-set|tunable-reset"}
+        print(json.dumps(result, ensure_ascii=False))
         return
 
     if argv[0] == "tool-ui":

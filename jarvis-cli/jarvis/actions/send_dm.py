@@ -165,7 +165,7 @@ def _near_misses(people_mod, platforms, needle):
     return [d for _, d in scored[:MAX_NEAR_MISSES]]
 
 
-def _resolve(person, platform_arg):
+def _resolve(person, platform_arg, for_dm=True):
     """(record, None) or (None, error_result). Never guesses.
 
     Matching, in order, stopping at the first tier that finds anyone:
@@ -178,6 +178,10 @@ def _resolve(person, platform_arg):
          have no people.json record)
       4. a bare numeric id typed by the owner, with an explicit platform
     More than one hit in a tier is an error listing them, not a pick.
+
+    `for_dm=False` is for the per-person memory tools (L.21/L.22): the same
+    matching, but a blocked person or one with DMs switched off may still be
+    remembered about -- those two refusals are about MESSAGING them.
     """
     from ..channels import PLATFORMS, directory, people
 
@@ -277,7 +281,7 @@ def _resolve(person, platform_arg):
         return None, {"ok": False,
                       "error": f"{_label(rec)} is the owner's own account",
                       "hint": "Use notify_owner to message the owner."}
-    if (rec.get("follow") or "") == "blocked":
+    if for_dm and (rec.get("follow") or "") == "blocked":
         return None, {"ok": False,
                       "error": f"{_label(rec)} is blocked, so I won't message them",
                       "hint": ("Unblock them first (`jarvis channels-follow`) "
@@ -287,7 +291,7 @@ def _resolve(person, platform_arg):
     # one more reason to say no, so none of the limits above are loosened.
     # An unreadable permissions file answers "no" (user_perms.dm_allowed).
     from ..channels import user_perms
-    if not user_perms.dm_allowed(rec.get("platform") or "", rec.get("user_id") or ""):
+    if for_dm and not user_perms.dm_allowed(rec.get("platform") or "", rec.get("user_id") or ""):
         return None, {"ok": False,
                       "error": f"DMs to {_label(rec)} are switched off, so I won't message them",
                       "hint": ("The owner can switch this on in Menu > Channels > "
@@ -447,6 +451,14 @@ def tool_send_dm(args):
                 "hint": "Check `jarvis channels-status`; nothing was delivered."}
 
     _rate_record(platform, user_id, now)
+    # L.23: from here on a reply from them may be worth telling the owner
+    # about. Best effort -- a failure here must not turn a delivered message
+    # into an error.
+    try:
+        from ..channels import awaiting
+        awaiting.mark(platform, user_id, ask=message, source="send_dm")
+    except Exception:  # noqa: BLE001
+        pass
     return {"ok": True, "sent_to": who, "detail": detail,
             "known_contact": not rec.get("_unknown", False),
             "chars": len(message)}
