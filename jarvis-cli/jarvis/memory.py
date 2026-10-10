@@ -18,16 +18,18 @@ import secrets
 from datetime import datetime, timezone
 from pathlib import Path
 
+from . import tunables
+
 JARVIS_DIR = Path.home() / ".jarvis"
 CONFIG_FILE = JARVIS_DIR / "memory.json"
 ENCODING = "utf-8"
 
-MAX_FACTS = 80
+MAX_FACTS = tunables.const("MAX_FACTS", 80)  # L.43: Settings > Advanced
 MAX_FACT_LEN = 280
 MAX_KEY_LEN = 48
 PROMPT_FULL_BUDGET = 1200
 PROMPT_COMPACT_BUDGET = 450
-MAX_PROMPT_FACTS = 8
+MAX_PROMPT_FACTS = tunables.const("MAX_PROMPT_FACTS", 8)  # L.43: Settings > Advanced
 # Ported from Mark LIII's memory_manager.PROMPT_MAX_PER_CATEGORY: caps how many
 # facts sharing a primary tag may occupy the core block, so one chatty tag
 # (e.g. a dozen "games" facts) can't crowd out everything else that matched.

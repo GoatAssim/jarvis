@@ -2929,6 +2929,7 @@ audio.ask-dl-player{ max-height: none; background: transparent; }
 .origin-badge.is-discord   { color: #8b9dff; }
 .origin-badge.is-instagram { color: #ff8ac4; }
 .origin-badge.is-scheduler { color: var(--gold); }
+.origin-badge.is-tool-maker { color: #7fd1b9; }
 
 /* --- deep log search results --------------------------------------------- */
 .logs-search-summary {
@@ -3129,11 +3130,11 @@ body.layout--focus .topbar{
 body.layout--focus .topbar__subtitle,
 body.layout--focus #clock{ display: none; }
 body.layout--focus .topbar__left > .btn,
-body.layout--focus #btn-skin{ opacity: 0.5; transition: opacity 0.15s; }
+body.layout--focus #btn-prefs{ opacity: 0.5; transition: opacity 0.15s; }
 body.layout--focus .topbar__left > .btn:hover,
-body.layout--focus #btn-skin:hover,
+body.layout--focus #btn-prefs:hover,
 body.layout--focus .topbar__left > .btn:focus-visible,
-body.layout--focus #btn-skin:focus-visible{ opacity: 1; }
+body.layout--focus #btn-prefs:focus-visible{ opacity: 1; }
 
 /* the Ask panel loses its box */
 body.layout--focus .ask-panel{

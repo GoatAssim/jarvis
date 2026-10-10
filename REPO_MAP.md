@@ -108,6 +108,15 @@ jarvis-cli/jarvis/
     history_summarizer.py AI recap of older turns
     conv_search.py        search what was SAID
     prompt_cache.py       the static/dynamic prompt split
+    settings_admin.py     L.43: the Settings > Advanced back end -- every rule for editing
+                          ~/.jarvis files from the UI (secret masking, type/structure checks,
+                          stale-write detection, backup-before-write, undo, guarded and
+                          read-only groups); `jarvis settings-admin ...` (JSON on stdin)
+    tunables.py           L.43: the registry + store of owner-adjustable knobs (12 env
+                          switches/constants that used to need a source edit);
+                          `tunables.const()` / `get()` are how modules read them
+
+
 
     # --- doing things ----------------------------------------------------
     desktop_tools.py  screenshot_tools.py  ocr_tools.py  vision_tools.py
@@ -117,6 +126,7 @@ jarvis-cli/jarvis/
     command_tools.py  commands_config.py   saved user commands
     custom_tools*.py  user Python tools from ~/.jarvis/tools/ (custom_tools_suggest.py = the editor's inline suggestions, `ctools-suggest`; returns text only, never writes a tool). custom_tools_store.py also keeps DRAFTS: ~/.jarvis/tools/_drafts/<key>.json, backups of tools still being written (saved or not); custom_tools_ui_templates.py = the "Button page" / "Menu panel" templates and their starter html/js/css
     tool_ui.py            TOOL_UI: validates a tool file's own screen (a button or Menu entry opening a page built from the tool's tool.html/js/css) and reads its files; paths can't leave the declaring file's directory. `jarvis tool-ui list|bundle|run`
+    tool_maker.py        the Tool Maker conversation (L.53): the per-turn context (tool name + whole editor text, from a temp file server.js writes), WITHHELD_TOOLS (write-a-file / run-a-program tools it may not use), history trimming, the origin stamp. Active only while JARVIS_TOOL_MAKER_CONTEXT_FILE is set
     tool_disable.py       the owner's off switches (~/.jarvis/disabled.json): tools, saved commands, tool-registered personas, TOOL_UI screens. Daemons are NOT here (daemons.json `enabled`)
 
     # --- time, work and supervision --------------------------------------
@@ -169,6 +179,16 @@ jarvis-cli/jarvis/
                           may DM them, plus `tools_until` (L.36-P6: a deadline on a
                           tool grant; past it `resolve_tool_access` says no tools);
                           fails closed (`PermsUnreadable` -> tools off)
+        person_memory.py  L.21/L.22: per-person facts, episodes and standing rules in
+                          channels/people/<key>/memory.jsonl; relevance-ranked, budgeted,
+                          one file per person (isolation is the file); `proposed` items never
+                          reach the model until approved
+        sender_gate.py    D-I10: the free pre-filter + one tiny yes/no call in front of
+                          remember_sender; also decides which tools-off turns are offered it
+        awaiting.py       L.23: threads the owner is waiting on; gates -> one classifier call ->
+                          digest or notify_owner; log + feedback bias in channels/awaiting*.json
+        thinking.py       L.44: /thinking + the per-person on/off(+lock) -> think_override
+        cheap_call.py     the one tiny history-free model call (injectable in tests)
         presets.py        L.36-P4: the quick setups (No access / Chat only / Chat + tell the
                           owner / Trusted) -- pure data, fixed in code, no I/O
         preset_admin.py   L.36-P4/P5: plan (preview) and apply one setup for one person, and
@@ -227,6 +247,8 @@ jarvis-cli/jarvis/
         send_dm.py            NEW (L.20) — DM ONE known person; owner-only, confirm-gated,
                               rate-limited (~/.jarvis/channels/dm_sends.json), refuses unattended
         channel_people.py     NEW — remember_sender / who_am_i_talking_to
+        person_memory_tools.py  L.21-L.23 owner-only: person_remember/forget/instruct/recall/
+                              review + await_reply (own `person_memory` group)
         workspace_tools.py    NEW — daemons, log search, backlog as AI tools
         path_tools.py         NEW — move/copy/rename/make_dir/delete-to-trash
                               (`files` group; confirm-gated via TOOL_CONFIRM_REQUIRED)
@@ -239,9 +261,11 @@ web/
     public/style.css      theme + layout, including the classic/focus switch
     public/tool-manager.js (+ .css)  Tool Manager panel (L.25): catalogue, per-tool safeguards, user tools; also lists daemons / tool-registered personas / TOOL_UI screens with an on/off switch, and "Unfinished tools" (draft backups)
     public/tool-ui.js (+ .css)       renders TOOL_UI screens: buttons beside Menu (sandboxed frame) and Menu entries (shadow-root panel), plus the `host` API they talk to; pure helpers in JarvisToolUI._pure
+    public/ask-embed.js (+ .css)     an Ask Jarvis panel to put inside another screen (L.53): the main Ask panel's websocket protocol, one conversation per instance, small / normal layouts by the pane's own width; first host is the Tool Manager's side panel; pure helpers in JarvisAskEmbed
     public/code-editor.js (+ .css)   the Tool Manager's code editor (L.33): Python highlighting, VS Code-style editing, completions, inline Jarvis suggestions; pure helpers in JarvisCodeEditor._pure
     public/agent-panel.js (+ .css)   the Focus layout's Agent side panel: while dev_agent / code_agent runs it shows the codebase root, the file being worked on, a file tree with a status per file, and a short log. Fed by app.js from the existing JARVIS_MEDIA dev_agent events (no server route); reducer + tree builder in JarvisAgentPanel._pure
     public/custom-tools.js       theme gallery for the Skin modal (the old Custom Tools panel moved to tool-manager.js)
+    public/settings.js (+ .css)      L.43: the Settings modal (replaced the Skin modal): section rail, search, AI / Layout / Notifications / Tools / Integrations / Memory / About panes and the Advanced tab (Files, Tunables, Plumbing, History); talks only to /api/settings/*; the Skin section stays app.js's
     public/test-checklist.js     Menu -> Test Checklist (UI, browser-only results)
     public/test-checklist-data.js  the SHIPPED checklist catalogue: an entry per
                                  tool that ships with jarvis. Edit it whenever you
@@ -316,6 +340,8 @@ Everything is under `~/.jarvis/`:
 |---|---|---|
 | `ai_config.json` | ai_config.py | providers, keys, prompt mode |
 | `memory.json` | memory.py | durable facts |
+| `tunables.json` | tunables.py | owner overrides for the registered tunables (written only by settings_admin) |
+| `settings_backups/<file>/<stamp>.json`, `settings_backups/changes.jsonl` | settings_admin.py | the previous contents before each Settings save (newest 20 per file) and a log of what was changed (paths only, never values) |
 | `conversations/` | conversations.py | chat history |
 | `logs/<conv>.jsonl` | logs.py | model↔backend traffic |
 | `events/<conv>.jsonl` | raw_archive.py | raw event log (user text, unsplit model replies, full thinking, every console line, full tool results); deleted with the conversation or on Clear; `JARVIS_RAW_ARCHIVE=0` stops writing |
@@ -326,6 +352,9 @@ Everything is under `~/.jarvis/`:
 | `channels/directory.json` | channels/directory.py | @handle → id |
 | `channels/people.json` | channels/people.py | who each person is (name, notes, follow state, avatar URL) |
 | `channels/user_perms.json` | channels/user_perms.py | per-person tool scope + "Jarvis may DM them" + `tools_until` (L.36-P6 deadline, epoch seconds); only non-default values stored; unreadable = fail closed |
+| `channels/people/<key>/memory.jsonl` | channels/person_memory.py | L.21/L.22: facts, episodes and rules about ONE person (+ `_anyone` rules); `instructions_applied.jsonl` logs which rule fired (ids only) |
+| `channels/awaiting.json`, `awaiting_log.jsonl` | channels/awaiting.py | L.23: who the owner is waiting on, the notify bar, quiet hours, decision log (verdicts, not message text) |
+| `channels/thinking_threads.json` | channels/thinking.py | L.44: a person's own `/thinking` choice per thread |
 | `channels/servers.json` | channels/servers.py | L.36-P7: `{platform: {guild_id: {name, left, seen, channels}}}` -- names only, a cache; losing it costs labels, not behaviour |
 | `channels/usage.jsonl` | channels/usage.py | L.36-P2: one counts-only line per answered ask (who, when, tokens, tool names); rotated, never deleted |
 | `channels/changes.jsonl` | channels/changelog.py | L.36-P15: one line per permission change (when, whose id/handle, what, `via` panel/terminal, optional `why`); rotated, never deleted |

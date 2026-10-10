@@ -35,6 +35,7 @@ COMMANDS = (
     "channels-presets", "channels-preset", "channels-bulk",
     "channels-servers", "channels-server-set", "channels-guilds", "channels-channels",
     "channels-master-tools", "channels-send", "channels-denied",
+    "channels-thinking", "channels-memory", "channels-awaiting",
     "discord-daemon", "instagram-serve", "logs-search",
 )
 
@@ -95,6 +96,22 @@ USAGE = """channel commands:
   channels-user-test <platform> <id> dm | group [mentioned|unmentioned]
                                         dry run: what the gate would do with a message from them.
                                         Calls no model, sends nothing, saves nothing
+  channels-thinking <platform> <id|@handle> on | off | default [lock | unlock]
+                                        how much Jarvis thinks when answering them (L.44).
+                                        `lock` stops them changing it with /thinking in chat;
+                                        `default` clears both. Refused for the owner
+  channels-memory <platform> <id|@handle> list | add <text ...> | forget <rec-id> |
+                                        approve <rec-id> | retire <rec-id> | export |
+                                        rule <directive> [topic ...] | rules
+                                        what Jarvis keeps about one person (L.21/L.22).
+                                        directive: don_t_discuss, only_discuss, ask_owner_first,
+                                        notify_owner, tone, custom. Use `anyone` as the platform
+                                        for `rules`/`rule` that apply to everyone:
+                                        channels-memory anyone rule don_t_discuss <topic ...>
+                                        channels-memory applied   which rules fired (no message text)
+  channels-awaiting list | watch <platform> <id|@handle> [about ...] | stop <platform> <id|@handle> |
+                    feedback useful|too_noisy | quiet <HH:MM-HH:MM|none> | auto on|off | log
+                                        replies the owner is waiting on and when to be told (L.23)
   channels-presets                      the quick setups (JSON): what each one switches on
   channels-preset <platform> <id|@handle> <setup> [preview]
                                         apply a quick setup to one person; `preview` only shows
@@ -199,6 +216,96 @@ def _person_id(platform, entry):
                            str(rec.get("user_id") or "").lower()):
             return rec.get("user_id")
     return uid
+
+
+def _channels_memory(rest):
+    """channels-memory: per-person memory and rules (L.21 / L.22)."""
+    from .channels import person_memory
+    usage = ("usage: channels-memory <platform> <id|@handle> list | add <text ...> | "
+             "forget <rec-id> | approve <rec-id> | retire <rec-id> | export | "
+             "rule <directive> [topic ...] | rules   (or: channels-memory applied)")
+    if rest and rest[0] == "applied":
+        print(json.dumps({"ok": True, "applied": person_memory.read_applied()}, indent=2))
+        return
+    if len(rest) < 2:
+        _fail(usage)
+    if rest[0] == person_memory.ANYONE:
+        key, platform, uid = person_memory.ANYONE, "", person_memory.ANYONE
+        action, tail = rest[1].lower(), rest[2:]
+    else:
+        if len(rest) < 3:
+            _fail(usage)
+        platform, uid = rest[0], _person_id(rest[0], rest[1])
+        if people.get(platform, uid) is None:
+            _fail(f"{uid} isn't registered on {platform}")
+        key = people.key(platform, uid)
+        action, tail = rest[2].lower(), rest[3:]
+    result = {"ok": True}
+    if action == "list":
+        result["items"] = person_memory.list_records(key, statuses=("active", "proposed"))
+    elif action == "export":
+        result["items"] = person_memory.export(key)
+    elif action == "rules":
+        result["items"] = [r for r in person_memory.list_records(
+            key, kinds=("instruction",), statuses=("active",))]
+    elif action == "add" and tail:
+        rec, err = person_memory.add(key, "fact", " ".join(tail))
+        result.update(ok=not err, error=err, record=rec)
+    elif action in ("forget", "approve", "retire") and len(tail) == 1:
+        if action == "forget":
+            gone = person_memory.forget(key, tail[0])
+            result.update(ok=gone, error="" if gone else f"no record {tail[0]}")
+        else:
+            rec, err = person_memory.set_status(
+                key, tail[0], "active" if action == "approve" else "retired")
+            result.update(ok=not err, error=err, record=rec)
+    elif action == "rule" and tail:
+        directive, topic = tail[0], " ".join(tail[1:])
+        rec, err = person_memory.add_instruction(key, topic, directive,
+                                                 text=topic if directive in ("tone", "custom") else "")
+        result.update(ok=not err, error=err, record=rec)
+    else:
+        _fail(usage)
+    print(json.dumps(result, indent=2, default=str))
+    sys.exit(0 if result.get("ok") else 1)
+
+
+def _channels_awaiting(rest):
+    """channels-awaiting: who the owner is waiting on, and when to be told (L.23)."""
+    from .channels import awaiting
+    usage = ("usage: channels-awaiting list | watch <platform> <id|@handle> [about ...] | "
+             "stop <platform> <id|@handle> | feedback useful|too_noisy | "
+             "quiet <HH:MM-HH:MM|none> | auto on|off | log")
+    if not rest:
+        _fail(usage)
+    action = rest[0].lower()
+    result = {"ok": True}
+    if action == "list":
+        result.update(awaiting.listing())
+    elif action == "log":
+        result["log"] = awaiting.read_log()
+    elif action == "feedback" and len(rest) == 2:
+        level, err = awaiting.feedback(rest[1].lower())
+        result.update(ok=not err, error=err, min_urgency=level)
+    elif action == "quiet" and len(rest) == 2:
+        spec, err = awaiting.set_quiet_hours("" if rest[1].lower() == "none" else rest[1])
+        result.update(ok=not err, error=err, quiet=spec)
+    elif action == "auto" and len(rest) == 2 and rest[1].lower() in ("on", "off"):
+        result["auto_watch"] = awaiting.set_auto_watch(rest[1].lower() == "on")
+    elif action in ("watch", "stop") and len(rest) >= 3:
+        platform, uid = rest[1], _person_id(rest[1], rest[2])
+        if people.get(platform, uid) is None:
+            _fail(f"{uid} isn't registered on {platform}")
+        if action == "stop":
+            result["stopped"] = awaiting.clear(platform, uid)
+        else:
+            about = " ".join(rest[3:])
+            awaiting.mark(platform, uid, ask=about, topic=about, source="owner")
+            result["watching"] = True
+    else:
+        _fail(usage)
+    print(json.dumps(result, indent=2, default=str))
+    sys.exit(0 if result.get("ok") else 1)
 
 
 def handle(argv):
@@ -447,6 +554,32 @@ def handle(argv):
         print(json.dumps({"ok": ok, "error": err, "platform": platform,
                           "user_id": uid, "instruction": text}, indent=2))
         sys.exit(0 if ok else 1)
+
+    if cmd == "channels-thinking":
+        usage = ("usage: channels-thinking <platform> <id|@handle> "
+                 "on | off | default [lock | unlock]")
+        if len(rest) < 3 or rest[2].lower() not in ("on", "off", "default"):
+            _fail(usage)
+        platform, uid, word = rest[0], _person_id(rest[0], rest[1]), rest[2].lower()
+        lock = None
+        if len(rest) > 3:
+            if rest[3].lower() not in ("lock", "unlock") or len(rest) > 4:
+                _fail(usage)
+            lock = rest[3].lower() == "lock"
+        ok, err, note = user_admin.set_thinking(
+            platform, uid, None if word == "default" else word, lock)
+        print(json.dumps({"ok": ok, "error": err, "note": note, "platform": platform,
+                          "user_id": uid, "thinking": None if word == "default" else word,
+                          "locked": bool(lock)}, indent=2))
+        sys.exit(0 if ok else 1)
+
+    if cmd == "channels-memory":
+        _channels_memory(rest)
+        return
+
+    if cmd == "channels-awaiting":
+        _channels_awaiting(rest)
+        return
 
     if cmd == "channels-presets":
         print(json.dumps({"ok": True, "presets": presets.public_view()}, indent=2))

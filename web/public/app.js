@@ -540,7 +540,7 @@
     // If the Skin modal happens to already be open, refresh what it's
     // showing so a newly-discovered persona/attitude appears without the
     // person having to close and reopen it.
-    if (qs("#skin-backdrop") && !qs("#skin-backdrop").hidden) {
+    if (qs("#prefs-backdrop") && !qs("#prefs-backdrop").hidden) {
       renderPersonaPresets(currentPersonaId);
       renderSkinSwatches(currentPresetId);
       if (window.JarvisCustomTools && window.JarvisCustomTools.renderThemeGallery) window.JarvisCustomTools.renderThemeGallery();
@@ -1060,7 +1060,11 @@
     }
   }
 
-  async function openSkinModal() {
+  // L.43: the old Skin modal is now the Skin section of the Settings modal. This seeds
+  // that section's fields from what's saved (it used to be the whole of openSkinModal);
+  // showing the modal is showSettingsModal()'s job, and which section is up is
+  // settings.js's.
+  async function seedSkinModal() {
     qs("#skin-error").textContent = "";
     const prefs = loadSkinPrefs();
     const accent = prefs.accent || SKIN_DEFAULT_ACCENT;
@@ -1099,11 +1103,32 @@
       // backend is offline or ai_config.json is missing/corrupt.
     }
     updateCliNamePreview();
-    qs("#skin-backdrop").hidden = false;
   }
 
+  function showSettingsModal(section) {
+    if (window.JarvisSettings) window.JarvisSettings.show(section);
+    else qs("#prefs-backdrop").hidden = false;
+  }
+
+  // The one way into Settings. Skin is seeded before it is shown (the fields would
+  // otherwise flash stale values); any other section is shown at once and the Skin
+  // fields fill in behind it, so opening Advanced never waits on ai_config.json.
+  async function openSettingsModal(section) {
+    const last = window.JarvisSettings && window.JarvisSettings.lastSection ? window.JarvisSettings.lastSection() : "skin";
+    const target = section || last || "skin";
+    if (target === "skin") {
+      await seedSkinModal();
+      showSettingsModal("skin");
+    } else {
+      showSettingsModal(target);
+      seedSkinModal();
+    }
+  }
+
+  function openSkinModal() { return openSettingsModal("skin"); }
+
   function closeSkinModal() {
-    qs("#skin-backdrop").hidden = true;
+    qs("#prefs-backdrop").hidden = true;
     // Revert any live-preview accent/saturation back to whatever's actually
     // saved, in case the person clicked around swatches or dragged the
     // slider and then hit Cancel. Same fork as applySavedSkinEarly(): if the
@@ -1177,7 +1202,7 @@
       applyPersonaLogo(currentPersonaId);
     }
     applyAssistantNameToChrome(assistantName);
-    qs("#skin-backdrop").hidden = true;
+    qs("#prefs-backdrop").hidden = true;
     toast("Skin saved.", "info");
   }
 
@@ -1201,11 +1226,11 @@
 
   function wireSkinModal() {
     renderAttitudeOptions();
-    qs("#btn-skin").addEventListener("click", openSkinModal);
+    qs("#btn-prefs").addEventListener("click", () => openSettingsModal());
     qs("#skin-close").addEventListener("click", closeSkinModal);
     qs("#btn-skin-cancel").addEventListener("click", closeSkinModal);
-    qs("#skin-backdrop").addEventListener("click", (e) => {
-      if (e.target === qs("#skin-backdrop")) closeSkinModal();
+    qs("#prefs-backdrop").addEventListener("click", (e) => {
+      if (e.target === qs("#prefs-backdrop")) closeSkinModal();
     });
     qs("#btn-skin-save").addEventListener("click", saveSkin);
     qs("#btn-skin-reset").addEventListener("click", resetSkinToDefaults);
@@ -7183,6 +7208,10 @@
     discord: { text: "Discord", cls: "is-discord" },
     instagram: { text: "Instagram", cls: "is-instagram" },
     scheduler: { text: "Scheduled", cls: "is-scheduler" },
+    // L.53: a conversation opened by the Tool Manager's Ask Jarvis panel. The
+    // badge is the tag; the conversation's origin_detail (the tool's name) is
+    // already shown wherever the others show theirs.
+    "tool-maker": { text: "Tool Maker", cls: "is-tool-maker" },
   };
 
   function originBadge(origin) {
@@ -9475,15 +9504,20 @@
     }
   }
 
-  async function toggleLayout() {
-    const next = currentLayout === "focus" ? "classic" : "focus";
+  async function setLayoutMode(next) {
+    if (next !== "focus" && next !== "classic") return;
+    const before = currentLayout;
     applyLayout(next);          // optimistic: the switch must feel instant
     try {
       await Api.post("/api/ui-mode", { mode: next });
     } catch (err) {
-      applyLayout(next === "focus" ? "classic" : "focus");   // roll back
+      applyLayout(before);   // roll back
       toast(err.message || "Couldn't save that layout.");
     }
+  }
+
+  function toggleLayout() {
+    return setLayoutMode(currentLayout === "focus" ? "classic" : "focus");
   }
 
   qs("#btn-layout-switch")?.addEventListener("click", toggleLayout);
@@ -10061,6 +10095,15 @@
   // ===========================================================================
   window.JarvisHost = {
     toast,
+    // L.43: Settings (settings.js) shows its own sections, but the Skin section's open,
+    // seed, revert-on-cancel and save all live in this file, so it asks for them here.
+    // (Named "Prefs" because openPanel("config") is the older per-file Config editor.)
+    openPrefs: (section) => openSettingsModal(section),
+    closePrefs: () => closeSkinModal(),
+    // The Layout section switches Classic/Focus through the same save-and-roll-back path
+    // as the top-bar switch.
+    getLayout: () => currentLayout,
+    setLayout: (mode) => setLayoutMode(mode),
     // The Tool Manager switches a tool-registered persona off/on; the Skin modal reads
     // its list once at startup, so the Tool Manager asks it to read again.
     reloadPersonas: () => loadRegisteredPersonas(),

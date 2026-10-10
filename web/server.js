@@ -17,6 +17,7 @@ import { WebSocketServer } from "ws";
 import { spawn } from "node:child_process";
 import { watch, readFileSync } from "node:fs";
 import { createServer } from "node:http";
+import { randomBytes } from "node:crypto";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -30,6 +31,19 @@ import "./public/category-input.js";
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PORT = Number(process.env.PORT) || 4173;
 const HOST = "127.0.0.1";
+
+// L.43: an override saved from Settings > Advanced for one of the few switches this file
+// reads itself (jarvis/tunables.py is the registry and validates every write; the
+// environment still wins). Read straight from the file because it is two flags at
+// startup/ask time, and a missing or unreadable file means "no override".
+function savedTunable(name) {
+  try {
+    const data = JSON.parse(readFileSync(path.join(os.homedir(), ".jarvis", "tunables.json"), "utf8"));
+    return data && data.values && typeof data.values === "object" ? data.values[name] : undefined;
+  } catch {
+    return undefined;
+  }
+}
 
 // There used to be a hand-copied RESERVED_NAMES Set here, its own
 // re-implementation of a rule cli.py and commands_config.py each kept a
@@ -802,9 +816,23 @@ app.get("/api/conversations", requireJarvis, async (req, res) => {
   }
 });
 
+// L.53: a browser panel may stamp ONE origin on the conversation it opens -- the
+// Tool Manager's "tool-maker" -- plus a detail (the tool's name), so Logs can say
+// where it came from. Chat bots and the scheduler set theirs in code, never from a
+// request. Anything else in `origin` is ignored (the conversation is just a normal one).
+const BROWSER_ORIGINS = new Set(["tool-maker"]);
+
 app.post("/api/conversations", requireJarvis, async (req, res) => {
   const title = typeof req.body?.title === "string" ? req.body.title.trim() : "";
-  const args = title ? ["conv-new", title] : ["conv-new"];
+  const origin = typeof req.body?.origin === "string" && BROWSER_ORIGINS.has(req.body.origin) ? req.body.origin : "";
+  const originDetail = origin && typeof req.body?.originDetail === "string"
+    ? req.body.originDetail.replace(/[\u0000-\u001f\u007f]/g, " ").trim().slice(0, 120) : "";
+  const args = ["conv-new"];
+  if (origin) {
+    args.push("--origin", origin);
+    if (originDetail) args.push("--origin-detail", originDetail);
+  }
+  if (title) args.push(title);
   const result = await runJarvisOnce(args, 10000);
   if (!result.ok) {
     return res.status(500).json({ error: result.error || result.stderr || "Couldn't start a new conversation." });
@@ -1064,7 +1092,7 @@ app.get("/api/logs-search", requireJarvis, async (req, res) => {
     const raw = req.query[param];
     const values = Array.isArray(raw) ? raw : (raw ? [raw] : []);
     for (const value of values) {
-      if (typeof value === "string" && /^[A-Za-z_]{1,24}$/.test(value)) {
+      if (typeof value === "string" && /^[A-Za-z_-]{1,24}$/.test(value)) {
         args.push(flag, value);
       }
     }
@@ -1499,6 +1527,30 @@ app.post("/api/channels/people/:platform/:id/instruction", requireJarvis, async 
   }
   sendChannelResult(await runJarvisOnce(
     ["channels-instruction", who.platform, who.id, "set", text.trim()], 10000), res);
+});
+
+// Thinking switch (L.44) and what Jarvis keeps about one person (L.21). Both
+// proxy the CLI like every route above, so the terminal and the panel cannot
+// disagree. The switch takes {value: "on"|"off"|"default", lock: boolean};
+// the memory route is read-only (writing goes through the owner's own tools or
+// `jarvis channels-memory`). No panel control uses either yet.
+app.post("/api/channels/people/:platform/:id/thinking", requireJarvis, async (req, res) => {
+  const who = channelPersonArgs(req, res);
+  if (!who) return;
+  const value = req.body?.value;
+  if (!["on", "off", "default"].includes(value)) {
+    return res.status(400).json({ error: "value must be on, off or default." });
+  }
+  const args = ["channels-thinking", who.platform, who.id, value];
+  if (value !== "default" && typeof req.body?.lock === "boolean") args.push(req.body.lock ? "lock" : "unlock");
+  sendChannelResult(await runJarvisOnce(args, 10000), res);
+});
+
+app.get("/api/channels/people/:platform/:id/memory", requireJarvis, async (req, res) => {
+  const who = channelPersonArgs(req, res);
+  if (!who) return;
+  sendChannelResult(await runJarvisOnce(
+    ["channels-memory", who.platform, who.id, "list"], 10000), res);
 });
 
 app.get("/api/channels/people/:platform/:id/usage", requireJarvis, async (req, res) => {
@@ -2788,6 +2840,130 @@ app.post("/api/json/organize", requireJarvis, async (req, res) => {
   res.json(payload);
 });
 
+// ---------------------------------------------------------------------------
+// Settings (L.43) -- the Settings modal's Advanced tab and the sections built on it.
+//
+// Every rule lives in jarvis/settings_admin.py; these routes only carry a JSON request to
+// `jarvis settings-admin <verb>` over stdin and carry the JSON answer back (REPO_MAP.md
+// section 6). What they add is the one thing the CLI cannot see: WHO is calling.
+//
+// Unlike /api/config/* (no check at all), a request here must come from this page:
+//   * Host must be the loopback name the server is bound to, which defeats DNS rebinding;
+//   * if the browser sent an Origin it must be this server's own, which defeats a page on
+//     another site making your browser POST to 127.0.0.1;
+//   * a custom header must be present. A cross-site page cannot add one without a CORS
+//     preflight, and this server answers none.
+// A program running as you on this machine can still set all three; that is the same
+// trust boundary the rest of this server has. Reads of secrets are POSTs (never a URL in a
+// log) and only reveal them when the body says reveal.
+// ---------------------------------------------------------------------------
+
+const SETTINGS_NAME_RE = /^(channels\/)?[A-Za-z0-9][A-Za-z0-9_.\-]{0,80}\.json$/;
+const LOOPBACK_HOST_RE = /^(127\.0\.0\.1|localhost|\[::1\])$/i;
+
+function requireSettingsOrigin(req, res, next) {
+  const hostName = String(req.headers.host || "").replace(/:\d+$/, "");
+  if (!LOOPBACK_HOST_RE.test(hostName)) {
+    return res.status(403).json({ error: "Settings can only be reached at the local address." });
+  }
+  const origin = req.headers.origin;
+  if (origin !== undefined) {
+    let ok = false;
+    try {
+      const u = new URL(origin);
+      ok = LOOPBACK_HOST_RE.test(u.hostname) && (u.port || "80") === String(PORT);
+    } catch { ok = false; }
+    if (!ok) return res.status(403).json({ error: "Settings can only be changed from the Jarvis page itself." });
+  }
+  if (req.headers["x-jarvis-settings"] !== "1") {
+    return res.status(403).json({ error: "Settings can only be changed from the Jarvis page itself." });
+  }
+  next();
+}
+
+const SETTINGS_STATUS = { stale: 409, needs_confirm: 403, unattended: 403, read_only: 403, no_backup: 404 };
+
+async function settingsAdmin(res, verb, payload) {
+  // catalog/changes take no body: the CLI never reads stdin for them, so don't open it.
+  const stdin = payload === null ? null : JSON.stringify(payload);
+  const result = await runJarvisOnce(["settings-admin", verb], 20000, {}, stdin);
+  let parsed;
+  try { parsed = JSON.parse(result.stdout); }
+  catch (e) { return res.status(500).json({ error: result.stderr || result.error || e.message }); }
+  if (parsed && parsed.ok === false) return res.status(SETTINGS_STATUS[parsed.code] || 400).json(parsed);
+  return res.json(parsed);
+}
+
+function settingsName(req, res) {
+  const name = req.body && req.body.name;
+  if (typeof name !== "string" || !SETTINGS_NAME_RE.test(name)) {
+    res.status(400).json({ error: "That is not a settings file name." });
+    return null;
+  }
+  return name;
+}
+
+app.get("/api/settings/catalog", requireSettingsOrigin, requireJarvis, (req, res) => settingsAdmin(res, "catalog", null));
+app.get("/api/settings/changes", requireSettingsOrigin, requireJarvis, (req, res) => settingsAdmin(res, "changes", null));
+
+app.post("/api/settings/file/read", requireSettingsOrigin, requireJarvis, (req, res) => {
+  const name = settingsName(req, res);
+  if (name) settingsAdmin(res, "read", { name, reveal: req.body.reveal === true });
+});
+
+app.post("/api/settings/file/preview", requireSettingsOrigin, requireJarvis, (req, res) => {
+  const name = settingsName(req, res);
+  if (!name) return;
+  if (typeof req.body.text !== "string") return res.status(400).json({ error: "Missing 'text'." });
+  settingsAdmin(res, "preview", { name, text: req.body.text, base_version: req.body.base_version ?? null });
+});
+
+app.put("/api/settings/file", requireSettingsOrigin, requireJarvis, (req, res) => {
+  const name = settingsName(req, res);
+  if (!name) return;
+  if (typeof req.body.text !== "string") return res.status(400).json({ error: "Missing 'text'." });
+  settingsAdmin(res, "write", {
+    name, text: req.body.text, base_version: req.body.base_version ?? null,
+    confirm_guarded: req.body.confirm_guarded === true,
+  });
+});
+
+app.post("/api/settings/file/set", requireSettingsOrigin, requireJarvis, (req, res) => {
+  const name = settingsName(req, res);
+  if (!name) return;
+  if (!Array.isArray(req.body.path)) return res.status(400).json({ error: "Missing 'path'." });
+  settingsAdmin(res, "set", {
+    name, path: req.body.path, value: req.body.value, base_version: req.body.base_version ?? null,
+    confirm_guarded: req.body.confirm_guarded === true,
+  });
+});
+
+app.post("/api/settings/file/backups", requireSettingsOrigin, requireJarvis, (req, res) => {
+  const name = settingsName(req, res);
+  if (name) settingsAdmin(res, "backups", { name });
+});
+
+app.post("/api/settings/file/restore", requireSettingsOrigin, requireJarvis, (req, res) => {
+  const name = settingsName(req, res);
+  if (!name) return;
+  settingsAdmin(res, "restore", {
+    name, backup_id: typeof req.body.backup_id === "string" ? req.body.backup_id : null,
+    base_version: req.body.base_version ?? null, confirm_guarded: req.body.confirm_guarded === true,
+  });
+});
+
+app.post("/api/settings/tunable", requireSettingsOrigin, requireJarvis, (req, res) => {
+  const name = req.body && req.body.name;
+  if (typeof name !== "string" || !/^[A-Za-z0-9_]{1,64}$/.test(name)) return res.status(400).json({ error: "Invalid tunable name." });
+  settingsAdmin(res, "tunable-set", { name, value: req.body.value });
+});
+
+app.post("/api/settings/tunable/reset", requireSettingsOrigin, requireJarvis, (req, res) => {
+  const name = req.body && req.body.name;
+  if (typeof name !== "string" || !/^[A-Za-z0-9_]{1,64}$/.test(name)) return res.status(400).json({ error: "Invalid tunable name." });
+  settingsAdmin(res, "tunable-reset", { name });
+});
+
 const SCREENSHOT_NAME_RE = /^ss_[A-Za-z0-9_.-]+\.png$/;
 
 function screenshotsDir() {
@@ -2852,7 +3028,9 @@ app.get("/api/downloads/:jobId/:filename", (req, res) => {
 // once is a no-op rather than a double-fire.
 // ---------------------------------------------------------------------------
 
-const TICK_INTERVAL_MS = Number(process.env.JARVIS_TICK_MS) || 30000;
+const TICK_INTERVAL_MS = Number(process.env.JARVIS_TICK_MS)
+  || (Number.isFinite(Number(savedTunable("JARVIS_TICK_MS"))) && Number(savedTunable("JARVIS_TICK_MS")) > 0
+    ? Number(savedTunable("JARVIS_TICK_MS")) : 30000);
 const TICK_TIMEOUT_MS = 300000; // a scheduled `ask` or command can be slow
 
 let tickTimer = null;
@@ -3064,6 +3242,8 @@ function spawnAndStream(ws, kind, fullArgs, types, extraEnv = {}, onStdoutLine =
 
 const RUN_TYPES = { stdout: "stdout", stderr: "stderr", exit: "exit", error: "error" };
 const ASK_TYPES = { stdout: "ask-stdout", stderr: "ask-stderr", exit: "ask-exit", error: "ask-error" };
+// Mirrors tool_maker.MAX_SOURCE_CHARS (custom_tools_store.MAX_SOURCE_CHARS).
+const TOOL_MAKER_MAX_SOURCE = 120000;
 
 // ---------------------------------------------------------------------------
 // Tool UI (TOOL_UI, jarvis/tool_ui.py): the screens tool files ship -- a button that
@@ -3574,11 +3754,38 @@ wss.on("connection", (ws) => {
       // own environment is the escape hatch back to the blocking transport
       // (a proxy that mangles event streams, or bisecting a regression) —
       // the browser then just gets the finished reply, as before K.3.1.4.
-      if (process.env.JARVIS_WEB_STREAM !== "0") {
+      // L.43: the Settings screen can switch it off too (an environment value still wins).
+      const streamEnv = process.env.JARVIS_WEB_STREAM;
+      const streamOn = streamEnv !== undefined && streamEnv !== ""
+        ? streamEnv !== "0"
+        : savedTunable("JARVIS_WEB_STREAM") !== false;
+      if (streamOn) {
         extraEnv.JARVIS_STREAM_MARKERS = "1";
       }
       if (typeof msg.allowedTools === "string") {
         extraEnv.JARVIS_ALLOWED_TOOLS = msg.allowedTools;
+      }
+      // L.53: the Tool Manager's side panel. The panel sends the tool's name and the
+      // editor's WHOLE text as it is right now; it goes to the child through a private
+      // temp file (an env value or an argv element cannot hold 120 000 characters on
+      // Windows), and the variable's mere presence is what makes jarvis withhold the
+      // tools that write files or run programs for this one ask (tool_maker.py). The
+      // file is removed when the child exits, whatever the exit.
+      let toolMakerFile = "";
+      if (msg.toolMaker && typeof msg.toolMaker === "object") {
+        const tmName = typeof msg.toolMaker.name === "string" && CTOOL_NAME_RE.test(msg.toolMaker.name)
+          ? msg.toolMaker.name : "";
+        const tmSource = typeof msg.toolMaker.source === "string" ? msg.toolMaker.source : "";
+        if (tmSource.length > TOOL_MAKER_MAX_SOURCE) {
+          return send(ws, { type: "ask-error", message: "That file is too large to work on here." });
+        }
+        toolMakerFile = path.join(os.tmpdir(), "jarvis-tm-ctx-" + randomBytes(12).toString("hex") + ".json");
+        try {
+          await fs.writeFile(toolMakerFile, JSON.stringify({ name: tmName, source: tmSource }), { encoding: "utf8", mode: 0o600 });
+        } catch (e) {
+          return send(ws, { type: "ask-error", message: `Couldn't prepare the editor's text for Jarvis: ${e.message}` });
+        }
+        extraEnv.JARVIS_TOOL_MAKER_CONTEXT_FILE = toolMakerFile;
       }
       // Ask panel's provider-override picker (see /api/ai/providers above
       // and cli.py's JARVIS_PROVIDER_OVERRIDE handling) — either a single
@@ -3635,7 +3842,10 @@ wss.on("connection", (ws) => {
         });
         return true;
       };
-      spawnAndStream(ws, "ask", fullArgs, ASK_TYPES, extraEnv, onStdoutLine);
+      spawnAndStream(ws, "ask", fullArgs, ASK_TYPES, extraEnv, onStdoutLine, null,
+        toolMakerFile ? () => { fs.unlink(toolMakerFile).catch(() => {}); } : null);
+      // A spawn that failed outright never reaches its exit handler: clean up here.
+      if (toolMakerFile && !ws.activeChild) fs.unlink(toolMakerFile).catch(() => {});
       return;
     }
 

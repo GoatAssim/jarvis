@@ -1,0 +1,74 @@
+/* ============================================================================
+ * ask-embed.css -- the embeddable Ask Jarvis panel (ask-embed.js, master plan L.53).
+ *
+ * Two layouts, chosen by the panel's OWN width (ask-embed.js adds the class):
+ *   .jae--normal   roomy: 13px text, the Send/Stop buttons beside the box, a key hint
+ *   .jae--small    compact: 12px text, tighter padding, buttons in a row under the box,
+ *                  no hint, no per-message "used:" line
+ * Everything reads the :root tokens, so skins and the ui-kit sliders apply untouched.
+ * ========================================================================= */
+
+.jae{ display: flex; flex-direction: column; min-height: 0; height: 100%; width: 100%; min-width: 0; color: var(--text); }
+.jae [hidden]{ display: none !important; }
+
+.jae__thread{ flex: 1 1 auto; min-height: 0; overflow-y: auto; display: flex; flex-direction: column; gap: 8px; padding: 12px; }
+.jae__empty{ margin: auto 0; padding: 12px; text-align: center; color: var(--text-dimmer); font-size: 12px; line-height: 1.5; }
+
+.jae__msg{ max-width: 96%; font-size: 13px; line-height: 1.5; word-break: break-word; border-radius: 5px; padding: 7px 10px; }
+.jae__msg--user{ align-self: flex-end; white-space: pre-wrap; background: color-mix(in srgb, var(--accent) 14%, transparent); color: var(--text); }
+.jae__msg--ai{ align-self: flex-start; background: var(--bg-1); border: 1px solid var(--border); color: var(--text-dim); }
+.jae__msg--ai .jae__body.jv-md{ white-space: normal; }
+.jae__msg--ai .jae__body > :first-child{ margin-top: 0; }
+.jae__msg--ai .jae__body > :last-child{ margin-bottom: 0; }
+.jae__msg--ai .jae__body pre{ max-width: 100%; overflow-x: auto; }
+.jae__msg--err{ align-self: flex-start; border: 1px solid rgba(255, 92, 108, .45); color: var(--red); background: var(--bg-1); white-space: pre-wrap; }
+.jae__msg.is-pending .jae__body:empty::after{ content: "\25CD"; color: var(--accent); animation: jae-pulse 1s steps(2) infinite; }
+.jae__msg.is-pending .jae__body > :last-child::after{ content: "\25CD"; color: var(--accent); margin-left: 2px; animation: jae-pulse 1s steps(2) infinite; }
+.jae__msg.is-stopped{ opacity: .85; }
+@keyframes jae-pulse{ 50%{ opacity: 0; } }
+
+.jae__chip{ margin-top: 6px; display: inline-block; font-family: var(--font-mono); font-size: 10.5px; padding: 2px 8px; border-radius: 10px;
+  color: var(--accent); background: color-mix(in srgb, var(--accent) 12%, transparent); border: 1px solid var(--accent-dim); }
+.jae__meta{ margin-top: 4px; font-family: var(--font-mono); font-size: 10.5px; color: var(--text-dimmer); }
+
+.jae__status{ flex: 0 0 auto; min-height: 16px; padding: 0 12px 4px; font-family: var(--font-mono); font-size: 10.5px; color: var(--text-dimmer); }
+.jae__status.is-busy{ color: var(--accent); }
+.jae__status:empty{ min-height: 0; padding: 0; }
+
+.jae__compose{ flex: 0 0 auto; display: flex; gap: 8px; align-items: flex-end; padding: 6px 12px 8px; border-top: 1px solid var(--border); }
+.jae__input{
+  flex: 1 1 auto; min-width: 0; resize: vertical; min-height: 56px; max-height: 40vh; box-sizing: border-box;
+  background: var(--bg-1); color: var(--text); border: 1px solid var(--border); border-radius: 4px;
+  padding: 7px 9px; font: inherit; font-size: 13px; line-height: 1.45;
+}
+.jae__input:focus{ outline: none; border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent-dim); }
+.jae__input:disabled{ opacity: .6; }
+.jae__btns{ display: flex; flex-direction: column; gap: 5px; }
+.jae__btn{
+  font: inherit; font-size: 12px; padding: 5px 12px; border-radius: 4px; cursor: pointer;
+  background: transparent; color: var(--text); border: 1px solid var(--border-strong);
+}
+.jae__btn:hover:not(:disabled){ border-color: var(--accent); color: var(--accent); }
+.jae__btn:disabled{ opacity: .5; cursor: default; }
+.jae__btn--send{ border-color: var(--accent-soft); color: var(--accent); }
+.jae__btn--stop{ border-color: rgba(255, 92, 108, .5); color: var(--red); }
+.jae__hint{ flex: 0 0 auto; padding: 0 12px 8px; font-size: 10.5px; color: var(--text-dimmer); }
+
+.jae__msg--confirm{ align-self: stretch; max-width: 100%; padding: 0; background: none; }
+.jae__confirm{ border: 1px solid var(--accent-soft); border-radius: 5px; padding: 8px 10px; background: var(--bg-raised); font-size: 12.5px; }
+.jae__confirm.is-done{ border-color: var(--border); color: var(--text-dimmer); }
+.jae__confirm-title{ color: var(--text); font-weight: 600; }
+.jae__confirm-note{ margin-top: 4px; color: var(--text-dim); }
+.jae__confirm-args{ margin: 6px 0 0; max-height: 120px; overflow: auto; font-family: var(--font-mono); font-size: 11px; color: var(--text-dim); white-space: pre-wrap; }
+.jae__confirm-btns{ display: flex; gap: 8px; margin-top: 8px; }
+
+/* ---- small: a narrow pane ------------------------------------------------ */
+.jae--small .jae__thread{ padding: 8px; gap: 6px; }
+.jae--small .jae__msg{ font-size: 12px; padding: 5px 8px; max-width: 100%; }
+.jae--small .jae__compose{ flex-direction: column; align-items: stretch; gap: 6px; padding: 6px 8px 8px; }
+.jae--small .jae__input{ font-size: 12px; min-height: 44px; }
+.jae--small .jae__btns{ flex-direction: row; justify-content: flex-end; }
+.jae--small .jae__btn{ padding: 4px 10px; font-size: 11.5px; }
+.jae--small .jae__hint,
+.jae--small .jae__meta{ display: none; }
+.jae--small .jae__status{ padding: 0 8px 3px; }

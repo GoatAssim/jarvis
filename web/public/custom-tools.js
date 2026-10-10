@@ -67,7 +67,7 @@
 
     // The Skin modal is opened by app.js; re-render the gallery whenever it
     // becomes visible so a theme saved elsewhere shows up without a reload.
-    const backdrop = qs("#skin-backdrop");
+    const backdrop = qs("#prefs-backdrop");
     if (backdrop && "MutationObserver" in window) {
       new MutationObserver(() => { if (!backdrop.hidden) renderThemeGallery(); })
         .observe(backdrop, { attributes: true, attributeFilter: ["hidden"] });

@@ -28,6 +28,7 @@ from pathlib import Path
 from typing import Callable, Optional
 
 from . import tool_disable
+from . import tool_maker
 from .command_tools import COMMAND_TOOL_SCHEMAS, COMMAND_TOOLS
 from .custom_tools import CUSTOM_TOOL_SCHEMAS, CUSTOM_TOOLS
 from .desktop_tools import DESKTOP_TOOL_SCHEMAS, DESKTOP_TOOLS
@@ -453,6 +454,9 @@ def _one_tool_schema(name):
     if tool_disable.is_tool_disabled(name):
         return tool_disable.refusal_for_tool(name)
 
+    refusal = withheld_refusal(name)
+    if refusal is not None:
+        return {"error": refusal["error"]}
     if name in hidden_from_sender():
         return {"error": f"{name} is owner-only and not available in this chat"}
 
@@ -670,7 +674,13 @@ TOOL_SCHEMAS = [*CORE_TOOL_SCHEMAS, *PLAYNITE_AND_SPOTIFY, *DISCOVERY_TOOL_SCHEM
 # non-owner chat sender. Execution is untouched: the handlers still do their
 # own owner check (that is the real gate, and tests/test_send_dm.py pins it),
 # and TOOLS / tool_safety / confirmation are not involved at all.
-OWNER_ONLY_TOOLS = frozenset({"send_dm", "recent_dms"})
+OWNER_ONLY_TOOLS = frozenset({
+    "send_dm", "recent_dms",
+    # L.21-L.23 (actions/person_memory_tools.py): they manage what is kept
+    # about OTHER people, so a guest is never offered them either.
+    "person_remember", "person_forget", "person_instruct", "person_recall",
+    "person_review", "await_reply",
+})
 
 
 def _chat_sender_is_guest():
@@ -690,8 +700,23 @@ def _chat_sender_is_guest():
 
 
 def hidden_from_sender():
-    """Tool names that must not be offered to / listed for the current sender."""
-    return OWNER_ONLY_TOOLS if _chat_sender_is_guest() else frozenset()
+    """Tool names that must not be offered to / listed for the current sender.
+
+    Two independent reasons a name can be hidden: the sender is a guest in a
+    chat (OWNER_ONLY_TOOLS), or this is a Tool Maker panel turn (L.53), in
+    which the conversation may only EDIT the editor's text, so the tools that
+    write files or run programs are withheld (tool_maker.WITHHELD_TOOLS). The
+    second is enforced at execution too -- see run_tool and withheld_refusal."""
+    base = OWNER_ONLY_TOOLS if _chat_sender_is_guest() else frozenset()
+    return base | tool_maker.withheld_tools()
+
+
+def withheld_refusal(name):
+    """The refusal for a tool the Tool Maker conversation may not use, or None.
+    One place, so the schema lookup and the executor say the same thing."""
+    if name in tool_maker.withheld_tools():
+        return tool_maker.refusal_for(name)
+    return None
 
 
 def allowed_tools_from_env():
@@ -809,6 +834,11 @@ def tool_schemas_for_session():
     off = tool_disable.disabled_tools()
     if off:
         out = [schema for schema in out if schema.get("name") not in off]
+    # L.53: a Tool Maker turn is never offered the tools that write files or run
+    # programs (a no-op for every other caller: withheld_tools() is empty then).
+    withheld = tool_maker.withheld_tools()
+    if withheld:
+        out = [schema for schema in out if schema.get("name") not in withheld]
     return out
 
 
@@ -1514,6 +1544,14 @@ def execute_tool(name, arguments=None, verbosity=None, context=None, owner=False
     allowed = allowed_tools_from_env()
     if allowed is not None and name not in allowed:
         return {"error": "tool not permitted"}
+    # L.53: the Tool Maker conversation may only edit the editor's text. Checked
+    # here -- the one function every caller goes through -- so a schema that
+    # slipped past the filters above still cannot run. Even the owner's direct
+    # run is refused while the variable is set: it is only ever set on a panel
+    # turn, which has no "owner's hands" in it.
+    refusal = withheld_refusal(name)
+    if refusal is not None:
+        return refusal
     # A tool the owner switched off (tool_disable.py) runs for the owner and for
     # nobody else. Default-deny: this is the single function every automatic
     # caller goes through (the model's executor, the scheduler), so a path that

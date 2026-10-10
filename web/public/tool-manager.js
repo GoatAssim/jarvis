@@ -44,18 +44,23 @@
  * browser or a Discard never loses the text. Restore opens a new tab; the backup is
  * removed when that text saves successfully.
  *
- * EDITOR TABS, ASK JARVIS, CLOSABLE PANES (L.43 / L.44)
- * -----------------------------------------------------
+ * EDITOR TABS, ASK JARVIS, CLOSABLE PANES (L.43 / L.44 / L.53)
+ * -----------------------------------------------------------
  * Every tool you open or create is a TAB over the middle pane, like an IDE.
  * Closing the Tool Manager does not close them: the overlay only hides, and the
  * tabs (with unsaved text) are also kept in this browser so a reload brings them
- * back. "Create a tool" opens a NEW tab each time. Under the code of every tab
- * is an "Ask Jarvis" dock: describe the tool, and Jarvis writes the file into
- * that tab's editor while you watch it stream in (/api/ctools/:name/agent).
- * Jarvis only fills the unsaved buffer. It never saves, never runs anything,
- * and "Undo AI edit" puts the previous text back; Save is still yours. The Tools
- * list and the Overview panel each have an x (and a toggle in the header) so the
- * editor can have the whole width.
+ * back. "Create a tool" opens a NEW tab each time.
+ *
+ * ASK JARVIS (L.53) is a side panel, not a dock: the header's "Ask Jarvis" button
+ * swaps it in for the Overview (toggle again and the Overview returns; each pane
+ * also has an x, and both can be hidden). It is a normal saved Jarvis conversation
+ * (ask-embed.js, the main Ask panel's own protocol), one per tool, tagged
+ * "Tool Maker" in Logs. Jarvis writes the file into the tab's editor while you
+ * watch it stream in, but the conversation may only EDIT: jarvis withholds the
+ * tools that write files or run programs for it (tool_maker.py), so Validate,
+ * Save and running a tool stay yours; "Undo AI edit" puts the previous text back.
+ * The Tools list and the side panel each have an x (and a toggle in the header)
+ * so the editor can have the whole width.
  *
  * TALKS TO THE SERVER ONLY THROUGH EXISTING ROUTES
  *   GET  /api/tools                read-only catalogue (+ flags, defaults, group, file, disabled, protected)
@@ -572,7 +577,7 @@
     SAFEGUARDS, KEYS, NAME_RE, STAGES, MAX_SOURCE_CHARS, bucketOf, groupLabel, originOf, buildRows, matchesSearch, matchesSafeguard,
     matchesSource, filterRows, groupRows, coverage, callOutcome, jobOutcome, changedKeys, nameProblem, importNameFromFile,
     importProblem, sourceProblem, parseErrorLine, stageStates, lineCount, formatBytes, parseArgs, paramList,
-    nextFree, splitAgentReply, overwriteView, EXTRA_KINDS, KIND_NOUN, draftTitle, draftAge, newDraftKey, DRAFT_KEY_RE, uiLines,
+    nextFree, splitAgentReply, overwriteView, foldReply, chatKeyFor, EXTRA_KINDS, KIND_NOUN, draftTitle, draftAge, newDraftKey, DRAFT_KEY_RE, uiLines,
   };
 
   /* =======================================================================
@@ -598,8 +603,8 @@
     suggest: true,                      // Jarvis inline suggestions in the editor (L.33); on by default, one click to turn off
     tabs: [],                           // L.43: every open editor, in tab order; state.editor is the active one while view === "editor"
     tabSeq: 0, restored: false, persistOk: true,
-    hideTools: false, hideSide: false,  // L.44: the owner closed that pane
-    agentOpen: true,                    // L.43: the Ask Jarvis dock is expanded
+    hideTools: false,                   // L.44: the owner closed the Tools list
+    sidePane: "overview",               // L.53: the right-hand slot: "overview" | "agent" | "none" (both closed)
   };
   let dom = null;
 
@@ -610,13 +615,14 @@
       if (typeof p.source === "string") state.source = p.source;
       if (typeof p.suggest === "boolean") state.suggest = p.suggest;
       if (typeof p.hideTools === "boolean") state.hideTools = p.hideTools;
-      if (typeof p.hideSide === "boolean") state.hideSide = p.hideSide;
-      if (typeof p.agentOpen === "boolean") state.agentOpen = p.agentOpen;
+      // L.53: the slot opens on the Overview; only "both closed" is remembered (the
+      // L.44 hideSide flag, unchanged). Ask Jarvis stays closed until it is toggled on.
+      if (typeof p.hideSide === "boolean") state.sidePane = p.hideSide ? "none" : "overview";
     } catch (_) { /* private mode / bad JSON: defaults */ }
   }
   function savePrefs() {
     try { global.localStorage.setItem(PREF_KEY, JSON.stringify({ collapsed: Array.from(state.collapsed), source: state.source, suggest: state.suggest,
-      hideTools: state.hideTools, hideSide: state.hideSide, agentOpen: state.agentOpen })); }
+      hideTools: state.hideTools, hideSide: state.sidePane === "none" })); }
     catch (_) { /* nowhere to save: fine */ }
   }
 
@@ -650,7 +656,10 @@
       count: $("#tm-count"), midTitle: $("#tm-mid-title"), detail: $("#tm-detail"), foot: $("#tm-foot"), side: $("#tm-side"),
       file: $("#tm-file"), refresh: $("#btn-tm-refresh"), btnImport: $("#btn-tm-import"), btnCreate: $("#btn-tm-create"),
       tabs: $("#tm-tabs"), toggleTools: $("#btn-tm-toggle-tools"), toggleSide: $("#btn-tm-toggle-side"),
+      toggleAgent: $("#btn-tm-toggle-agent"), sideTitle: $("#tm-side-title"),
       closeTools: $("#tm-close-tools"), closeSide: $("#tm-close-side"),
+      ask: $("#tm-ask"), askBar: $("#tm-ask-bar"), askTool: $("#tm-ask-tool"), askState: $("#tm-ask-state"),
+      askUndo: $("#tm-ask-undo"), askStop: $("#tm-ask-stop"), askNew: $("#tm-ask-new"), askSlot: $("#tm-ask-slot"),
     };
   }
 
@@ -1204,6 +1213,7 @@
 
   function renderSide() {
     if (!dom) return;
+    renderSidePane();
     const side = dom.side;
     const keepTop = side.scrollTop;
     clear(side);
@@ -1407,7 +1417,10 @@
       // The key this tab's backup is stored under (see "UNFINISHED TOOLS"); draftSynced is
       // the text last sent there, so an unchanged tab sends nothing; draftTimer debounces.
       draftKey: DRAFT_KEY_RE.test(opts.draftKey || "") ? opts.draftKey : newDraftKey(), draftSynced: opts.draftSynced || "", draftTimer: 0,
-      chat: { messages: [], history: [], busy: false, abort: null, backup: null, undoable: false },
+      // L.53: the conversation itself lives in ask-embed.js (ed.ask) and on the server; this is
+      // only what the editor side of a turn needs.
+      ask: null,
+      chat: { busy: false, stopped: false, revealing: false, backup: null, undoable: false, w: null },
     };
     if (mode === "new") {
       const used = state.tabs.filter((t) => t.mode === "new").map((t) => t.untitled);
@@ -1455,6 +1468,7 @@
     });
     bar.appendChild(el("button", { class: "tm-tab tm-tab--add", type: "button", "aria-label": "New tool tab", title: "New tool in a new tab",
       onclick: () => enterEditor({ mode: "new" }) }, "+"));
+    if (state.editor) renderAskBar(state.editor);
   }
 
   function showDetails() {
@@ -1482,7 +1496,9 @@
         if (!ok) return false;
       }
     }
-    if (ed.chat.abort) { try { ed.chat.abort.abort(); } catch (_) { /* already finished */ } }
+    // A turn still running stops with the tab (closing its socket makes the server kill it);
+    // the saved conversation stays and reopens with the tool.
+    if (ed.ask) { try { ed.ask.destroy(); } catch (_) { /* already gone */ } ed.ask = null; }
     if (state.tabs.includes(ed)) await finishDraftOnClose(ed, !!(opts && opts.force));
     const idx = state.tabs.indexOf(ed);
     if (idx < 0) return true;                       // closed twice while the confirm was open
@@ -1585,7 +1601,7 @@
     d.appendChild(ed.pane);
     d.style.padding = "0"; d.style.overflow = "hidden"; d.style.display = "flex";
     if (ed.cm && ed.cm.remeasure) ed.cm.remeasure();
-    updateChip(ed); nameHelp(ed); renderAgent(ed);
+    updateChip(ed); nameHelp(ed);
   }
 
   function createEditorPane(ed) {
@@ -1615,7 +1631,7 @@
     ]);
 
     ed.cm = makeCodeEditor(ed);
-    ed.pane = el("div", { class: "tm-editor", "data-tab": ed.id }, [bar, ed.cm.el, buildAgentDock(ed)]);
+    ed.pane = el("div", { class: "tm-editor", "data-tab": ed.id }, [bar, ed.cm.el]);
   }
 
   // The editor itself is code-editor.js. If that script didn't load, a plain
@@ -1705,7 +1721,9 @@
         if (r.scaffolded && r.scaffolded.length) toast("Also created " + r.scaffolded.join(", ") + " in ~/.jarvis/tools.", "success");
         else if (r.scaffold_note) toast(r.scaffold_note, "info");
         loadDraftsSoon();
+        const oldChatKey = chatKey(ed);
         ed.mode = "edit"; ed.origName = ed.name; ed.dirty = false; ed.saved = true;
+        moveChat(oldChatKey, chatKey(ed));              // L.53: its conversation follows the tool's name
         if (state.editor === ed) setText(dom.midTitle, "Editing " + ed.origName);
         // From here on this IS that file. Lock the name (a retyped name in "edit"
         // mode would skip the collision check and could overwrite another tool)
@@ -1903,84 +1921,134 @@
     renderTabs();
   }
 
-  /* ---- Ask Jarvis: the agent dock under the code (L.43) ------------------------ */
+  /* ---- Ask Jarvis: the side panel (L.53; replaces the L.43 dock under the code) ----
+   *
+   * A real Jarvis conversation (ask-embed.js speaks the main Ask panel's own
+   * websocket protocol), opened from the "Ask Jarvis" button in the header into the
+   * Overview's slot. One conversation per TOOL: closing a tab, closing the Tool
+   * Manager or reloading the page reopens the same one. Every turn carries the tool's
+   * name and the editor's whole text as it is right now (server.js -> tool_maker.py),
+   * and the conversation may only EDIT: jarvis withholds the tools that write files or
+   * run programs for it, so Validate, Save and running a tool stay with the owner.
+   * What this file adds on top of the conversation is the typing into the editor,
+   * Stop (the component's), Undo AI edit, and keeping the editor read-only meanwhile. */
 
-  function buildAgentDock(ed) {
-    const caret = el("span", { class: "tm-agent__caret", "aria-hidden": "true" });
-    const stateEl = el("span", { class: "tm-agent__state" });
-    const head = el("div", { class: "tm-agent__head", role: "button", tabindex: "0", "aria-expanded": "true",
-      title: "Describe what you want and Jarvis writes it into this editor",
-      onclick: () => toggleAgent(ed),
-      onkeydown: (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); toggleAgent(ed); } } },
-    [el("span", { class: "tm-agent__title" }, "Ask Jarvis"), stateEl, caret]);
-    const log = el("div", { class: "tm-agent__log", "aria-live": "polite" });
-    const input = el("textarea", { class: "tm-agent__input", rows: "2", maxlength: "4000", spellcheck: "true",
-      "aria-label": "Tell Jarvis what the tool should do",
-      placeholder: ed.mode === "edit" ? "Ask Jarvis to change this tool…  (Enter sends, Shift+Enter adds a line)" : "Describe the tool you want — Jarvis writes it here while you watch…  (Enter sends)" });
-    const send = el("button", { class: "btn btn--primary btn--sm", type: "button", onclick: () => sendAgent(ed) }, "Send");
-    const stop = el("button", { class: "btn btn--ghost btn--sm", type: "button", hidden: true, title: "Stop writing (keeps what is already in the editor)", onclick: () => stopAgent(ed) }, "Stop");
-    const undo = el("button", { class: "btn btn--ghost btn--sm", type: "button", hidden: true, title: "Put back the text from before Jarvis’s last edit", onclick: () => undoAgent(ed) }, "Undo AI edit");
-    input.addEventListener("keydown", (e) => {
-      if (e.key === "Enter" && !e.shiftKey && !e.isComposing) { e.preventDefault(); sendAgent(ed); }
-    });
-    const compose = el("div", { class: "tm-agent__compose" }, [input, el("div", { class: "tm-agent__btns" }, [send, stop, undo])]);
-    const dock = el("div", { class: "tm-agent" }, [head, log, compose]);
-    ed.ui = { dock, head, caret, stateEl, log, compose, input, send, stop, undo };
-    return dock;
+  const CHATS_KEY = "jarvis-tool-maker-chats";     // tool name (or "tab:<draftKey>") -> conversation id
+  const CHATS_MAX = 200;
+
+  function chatKeyFor(mode, origName, draftKey) {
+    return mode === "edit" && origName ? String(origName) : "tab:" + String(draftKey || "");
+  }
+  function chatKey(ed) { return chatKeyFor(ed.mode, ed.origName, ed.draftKey); }
+
+  function readChats() {
+    try {
+      const o = JSON.parse(global.localStorage.getItem(CHATS_KEY) || "{}");
+      return o && typeof o === "object" && !Array.isArray(o) ? o : {};
+    } catch (_) { return {}; }
+  }
+  function writeChats(map) {
+    try {
+      const keys = Object.keys(map);
+      if (keys.length > CHATS_MAX) keys.slice(0, keys.length - CHATS_MAX).forEach((k) => { delete map[k]; });
+      global.localStorage.setItem(CHATS_KEY, JSON.stringify(map));
+    } catch (_) { /* nowhere to save: the conversation just is not resumed next time */ }
+  }
+  function rememberChat(ed, id) {
+    const map = readChats(), key = chatKey(ed);
+    delete map[key];                                   // re-insert last = newest, so pruning drops the oldest
+    if (id) map[key] = id;
+    writeChats(map);
+  }
+  // A new tab's first save makes it a real tool: its conversation follows the name.
+  function moveChat(fromKey, toKey) {
+    if (!fromKey || !toKey || fromKey === toKey) return;
+    const map = readChats();
+    if (!map[fromKey]) return;
+    const id = map[fromKey];
+    delete map[fromKey]; delete map[toKey];
+    map[toKey] = id;
+    writeChats(map);
   }
 
-  function toggleAgent(ed) { state.agentOpen = !state.agentOpen; savePrefs(); renderAgent(ed); }
-
-  // L.45: Jarvis's replies are Markdown (the shared renderer in app.js:
-  // sanitized, no images, links in a new tab). What the owner typed and error
-  // messages stay plain text, as does everything if the renderer isn't there.
-  function paintAgentText(node, m) {
-    const md = global.JarvisMarkdown;
-    const text = m.text || (m.pending ? "Thinking" : "");
-    if (m.role !== "user" && !m.err && m.text && md && md.renderInto) {
-      node.classList.add("jv-md");
-      try { md.renderInto(node, m.text, { streaming: !!m.pending }); return; }
-      catch (_) { node.classList.remove("jv-md"); }
-    }
-    node.textContent = text;
+  // What the chat bubble shows of a reply: the note, and a one-line chip instead of the
+  // file (the file is typed into the editor, not pasted into the thread).
+  function foldReply(text, pending) {
+    const sp = splitAgentReply(text);
+    if (!sp.code) return { text: sp.note, chip: "" };
+    const n = sp.code.replace(/\n$/, "").split("\n").length, lines = n + (n === 1 ? " line" : " lines");
+    if (pending) return { text: sp.note, chip: "writing the file into the editor \u00b7 " + lines };
+    if (sp.complete) return { text: sp.note, chip: "Wrote the file \u00b7 " + lines };
+    return { text: sp.note, chip: "The reply was cut off, so the editor was left alone" };
   }
 
-  function paintAgentLog(ed) {
-    const u = ed.ui; if (!u) return;
-    const nearEnd = u.log.scrollHeight - u.log.scrollTop - u.log.clientHeight < 40;
-    clear(u.log);
-    ed.chat.messages.forEach((m) => {
-      const node = el("div", { class: "tm-agent__msg " + (m.role === "user" ? "tm-agent__msg--user" : "tm-agent__msg--ai") + (m.err ? " tm-agent__msg--err" : "") + (m.pending ? " is-pending" : "") });
-      paintAgentText(node, m);
-      u.log.appendChild(node);
-    });
-    u.log.hidden = !state.agentOpen || !ed.chat.messages.length;
-    if (nearEnd) u.log.scrollTop = u.log.scrollHeight;
-  }
-
-  function renderAgent(ed) {
-    const u = ed && ed.ui; if (!u) return;
-    const busy = ed.chat.busy;
-    u.head.setAttribute("aria-expanded", state.agentOpen ? "true" : "false");
-    u.caret.textContent = state.agentOpen ? "▾" : "▴";
-    u.stateEl.textContent = busy ? "writing into this editor…" : (ed.chat.messages.length ? "" : "describe a tool, or ask for a change");
-    u.stateEl.classList.toggle("is-live", busy);
-    u.compose.hidden = !state.agentOpen;
-    u.input.disabled = busy;
-    u.send.hidden = busy; u.stop.hidden = !busy;
-    u.undo.hidden = busy || !ed.chat.undoable;
-    paintAgentLog(ed);
-  }
-
-  // While tokens stream, only the last bubble's text changes - no rebuild, so
-  // the caret in the input and the scroll position of the log are left alone.
-  function paintAgentLive(ed) {
-    const u = ed.ui; if (!u) return;
-    const last = u.log.lastElementChild, msg = ed.chat.messages[ed.chat.messages.length - 1];
-    if (!last || !msg) { paintAgentLog(ed); return; }
-    last.classList.remove("jv-md");
-    paintAgentText(last, msg);
-    u.log.scrollTop = u.log.scrollHeight;
+  // Everything that puts text into a tab's editor during a turn, so the typing, the
+  // overwrite-in-place view and the "put it back" paths live in one place.
+  function makeEditorWriter(ed, before) {
+    const wasDirty = !!ed.dirty;
+    let wrote = false, raf = 0, pendingCode = null, lastCode = null, tailShown = false;
+    // L.45: paint what has arrived over the old file (see overwriteView). ed.source
+    // holds only the NEW text so far, never the old tail mixed in.
+    const paint = (code) => {
+      if (!ed.cm) return;
+      lastCode = code;
+      if (ed.cm.stream) {
+        const v = overwriteView(code, before);
+        tailShown = v.tail;
+        ed.cm.stream(v.text, v.head);
+      } else { ed.cm.setValue(code, { silent: true }); if (ed.cm.scrollToEnd) ed.cm.scrollToEnd(); }
+      ed.source = code; ed.dirty = true;
+    };
+    const flush = () => {
+      raf = 0;
+      if (pendingCode === null || !ed.cm) return;
+      const code = pendingCode; pendingCode = null;
+      paint(code);
+    };
+    const begin = () => {
+      if (wrote) return;
+      wrote = true; ed.errorLine = null; ed.result = null; updateChip(ed); renderTabs(); if (state.editor === ed) renderSide();
+    };
+    const w = {
+      before,
+      didWrite: () => wrote,
+      live(code) {
+        pendingCode = code;
+        begin();
+        if (!raf) raf = (global.requestAnimationFrame || ((f) => setTimeout(f, 16)))(flush);
+      },
+      // A model/provider that doesn't stream hands over the whole file at the end.
+      // Type it in by lines (about a second and a half at most) so the edit is still
+      // seen happening instead of the file silently swapping.
+      async reveal(full, isStopped) {
+        const lines = full.replace(/\n$/, "").split("\n"), step = Math.max(1, Math.ceil(lines.length / 50));
+        begin();
+        for (let n = step; n < lines.length; n += step) {
+          if (isStopped()) return false;
+          paint(lines.slice(0, n).join("\n") + "\n");
+          await new Promise((r) => setTimeout(r, 30));
+        }
+        return !isStopped();
+      },
+      settle() { if (raf && global.cancelAnimationFrame) global.cancelAnimationFrame(raf); raf = 0; flush(); },
+      commit(text) { tailShown = false; setAgentBuffer(ed, text); },
+      // The editor exactly as it was before this turn touched it.
+      restore() {
+        if (raf && global.cancelAnimationFrame) global.cancelAnimationFrame(raf);
+        raf = 0; pendingCode = null;
+        if (!wrote) return;
+        tailShown = false; wrote = false;
+        setAgentBuffer(ed, before);
+        ed.dirty = wasDirty; updateChip(ed); renderTabs();
+      },
+      // Interrupted (Stop, dropped connection): keep what was written, minus the old
+      // text that was only showing underneath it.
+      keep() {
+        w.settle();
+        if (tailShown && lastCode !== null && ed.cm && ed.cm.stream) { ed.cm.stream(lastCode, -1); tailShown = false; }
+      },
+    };
+    return w;
   }
 
   function setAgentBuffer(ed, text) {
@@ -1995,18 +2063,105 @@
     draftSoon(ed);
   }
 
-  function sendAgent(ed) {
-    const u = ed.ui; if (!u) return;
-    const text = u.input.value.trim();
-    if (!text) { u.input.focus(); return; }
-    u.input.value = "";
-    if (!state.agentOpen) { state.agentOpen = true; savePrefs(); }
-    askAgent(ed, text);
+  // ---- the three turn hooks the component calls -------------------------------
+
+  function beginAiEdit(ed) {
+    const chat = ed.chat;
+    chat.busy = true; chat.stopped = false; chat.revealing = false; chat.undoable = false;
+    chat.backup = ed.cm ? ed.cm.getValue() : ed.source;
+    chat.w = makeEditorWriter(ed, chat.backup);
+    if (ed.cm) { if (ed.cm.setReadOnly) ed.cm.setReadOnly(true); ed.cm.el.classList.add("is-ai-writing"); }
+    renderAskBar(ed); renderTabs();
   }
 
-  function stopAgent(ed) {
-    ed.chat.stopped = true;                             // also ends the typed-in reveal, which has no request to abort
-    if (ed.chat.abort) { try { ed.chat.abort.abort(); } catch (_) { /* done already */ } }
+  // The model's live text for this round. Code in it is typed into the editor; text
+  // that stops containing code (a retry started over, a tool call ended the round) puts
+  // the editor back, because only the FINAL reply decides what stays.
+  function liveAiEdit(ed, roundText) {
+    const w = ed.chat.w;
+    if (!w) return;
+    const sp = splitAgentReply(roundText);
+    if (sp.code) w.live(sp.code);
+    else if (w.didWrite()) w.restore();
+  }
+
+  async function endAiEdit(ed, info) {
+    const chat = ed.chat, w = chat.w;
+    chat.w = null;
+    const say = (t) => { if (ed.ask) ed.ask.setStatus(t, ""); };
+    try {
+      if (!w) return;
+      w.settle();
+      const sp = splitAgentReply(info.text || "");
+      if (info.ok && sp.code && sp.complete) {
+        if (sp.code === w.before) { w.restore(); say("Jarvis had nothing to change."); }
+        else {
+          chat.revealing = true; renderAskBar(ed);
+          const typed = w.didWrite() ? true : await w.reveal(sp.code, () => chat.stopped);
+          chat.revealing = false;
+          if (!typed) { w.keep(); chat.undoable = w.didWrite(); say("Stopped. The editor keeps what was written; Undo AI edit puts the old text back."); return; }
+          w.commit(sp.code);
+          chat.undoable = true;
+          say("The editor is updated. Read it through, then Validate or Save \u2014 Validate runs the file\u2019s top level, so look before you click.");
+        }
+      } else if (info.ok) {
+        w.restore();                                    // no complete file came back (a question, or a cut-off reply)
+        if (sp.code) say("The reply was cut off before the file ended, so the editor was left as it was. Ask again, or ask for a smaller change.");
+      } else if (info.stopped) {
+        w.keep(); chat.undoable = w.didWrite();
+        if (w.didWrite()) say("Stopped. The editor keeps what was written; Undo AI edit puts the old text back.");
+      } else {
+        w.restore();                                    // a failed turn leaves the file as it was
+      }
+    } finally {
+      chat.busy = false; chat.revealing = false;
+      if (ed.cm) { if (ed.cm.setReadOnly) ed.cm.setReadOnly(false); ed.cm.el.classList.remove("is-ai-writing"); }
+      renderAskBar(ed); renderTabs(); updateChip(ed); persistSoon();
+    }
+  }
+
+  function ensureAsk(ed) {
+    if (ed.ask) return ed.ask;
+    const E = global.JarvisAskEmbed;
+    if (!E || !E.create) return null;
+    const toolName = () => (NAME_RE.test(ed.name) ? ed.name : "");
+    ed.ask = E.create({
+      size: "auto",
+      placeholder: ed.mode === "edit" ? "Ask Jarvis to change this tool\u2026" : "Describe the tool you want\u2026",
+      emptyHint: "Describe a tool, or ask for a change. Jarvis types the file into the editor while you watch. " +
+        "It can only edit \u2014 Validate and Save stay yours.",
+      conversationId: readChats()[chatKey(ed)] || "",
+      origin: "tool-maker",
+      originDetail: () => toolName() || "new tool",
+      getAskExtras: () => ({ toolMaker: { name: toolName(), source: ed.cm ? ed.cm.getValue() : ed.source } }),
+      beforeSend: () => (ed.busy ? "Wait for the " + (ed.busy === "save" ? "save" : "check") + " to finish first." : ""),
+      fold: foldReply,
+      onConversation: (id) => rememberChat(ed, id),
+      onTurnStart: () => beginAiEdit(ed),
+      onText: (text) => liveAiEdit(ed, text),
+      onTurnEnd: (info) => { endAiEdit(ed, info); },
+    });
+    const saved = ed.ask.conversationId();
+    if (saved) ed.ask.loadConversation(saved);
+    return ed.ask;
+  }
+
+  function mountAsk(ed) {
+    if (!dom || !dom.askSlot || !ed) return;
+    const emb = ensureAsk(ed);
+    if (!emb) { clear(dom.askSlot); dom.askSlot.appendChild(el("div", { class: "tm-hint", style: "padding:12px" }, "The Ask panel script didn\u2019t load, so Ask Jarvis is unavailable. Reload the page.")); return; }
+    if (dom.askSlot.firstChild !== emb.el) { clear(dom.askSlot); dom.askSlot.appendChild(emb.el); }
+    renderAskBar(ed);
+  }
+
+  function renderAskBar(ed) {
+    if (!dom || !dom.askBar || state.editor !== ed) return;
+    const chat = ed.chat, busy = chat.busy;
+    dom.askTool.textContent = ed.name ? ed.name : "new tool";
+    dom.askState.textContent = chat.revealing ? "typing into the editor\u2026" : (busy ? "working\u2026" : "");
+    dom.askUndo.hidden = busy || !chat.undoable;
+    dom.askStop.hidden = !chat.revealing;
+    dom.askNew.disabled = busy;
   }
 
   function undoAgent(ed) {
@@ -2014,149 +2169,16 @@
     if (chat.busy || chat.backup === null || !chat.undoable) return;
     setAgentBuffer(ed, chat.backup);
     chat.undoable = false;
-    chat.messages.push({ role: "ai", text: "Put back the text from before my last edit." });
-    renderAgent(ed); persistSoon();
+    if (ed.ask) ed.ask.setStatus("Put back the text from before the last AI edit.", "");
+    renderAskBar(ed); persistSoon();
   }
 
-  async function askAgent(ed, instruction) {
-    const chat = ed.chat;
-    if (chat.busy || !ed.cm) return;
-    const name = NAME_RE.test(ed.name) ? ed.name : "draft";
-    const before = ed.cm.getValue();
-    const reply = { role: "ai", text: "", pending: true, err: false };
-    chat.messages.push({ role: "user", text: instruction }, reply);
-    chat.busy = true; chat.backup = before; chat.undoable = false; chat.stopped = false;
-    chat.abort = typeof AbortController !== "undefined" ? new AbortController() : null;
-    if (ed.cm.setReadOnly) ed.cm.setReadOnly(true);
-    ed.cm.el.classList.add("is-ai-writing");
-    renderAgent(ed); renderTabs();
-
-    let acc = "", wrote = false, finished = false, raf = 0, pendingCode = null;
-    let lastCode = null, tailShown = false;
-    // L.45: paint what has arrived over the old file (see overwriteView). ed.source
-    // holds only the NEW text so far, never the old tail mixed in.
-    const paintStream = (code) => {
-      if (!ed.cm) return;
-      lastCode = code;
-      if (ed.cm.stream) {
-        const v = overwriteView(code, before);
-        tailShown = v.tail;
-        ed.cm.stream(v.text, v.head);
-      } else { ed.cm.setValue(code, { silent: true }); if (ed.cm.scrollToEnd) ed.cm.scrollToEnd(); }
-      ed.source = code; ed.dirty = true;
-    };
-    const flush = () => {
-      raf = 0;
-      if (pendingCode === null || !ed.cm) return;
-      const code = pendingCode; pendingCode = null;
-      paintStream(code);
-    };
-    const begin = () => {
-      if (wrote) return;
-      wrote = true; ed.errorLine = null; ed.result = null; updateChip(ed); renderTabs(); if (state.editor === ed) renderSide();
-    };
-    const live = (code) => {
-      pendingCode = code;
-      begin();
-      if (!raf) raf = (global.requestAnimationFrame || ((f) => setTimeout(f, 16)))(flush);
-    };
-    // A model/provider that doesn't stream hands over the whole file at the end.
-    // Type it in by lines (about a second and a half at most) so the edit is
-    // still seen happening instead of the file silently swapping. Stop ends it.
-    const reveal = async (full) => {
-      const lines = full.replace(/\n$/, "").split("\n"), step = Math.max(1, Math.ceil(lines.length / 50));
-      begin();
-      for (let n = step; n < lines.length; n += step) {
-        if (chat.stopped) return false;
-        paintStream(lines.slice(0, n).join("\n") + "\n");
-        await new Promise((r) => setTimeout(r, 30));
-      }
-      return !chat.stopped;
-    };
-    const commit = (text) => { tailShown = false; setAgentBuffer(ed, text); };
-    const settle = () => { if (raf && global.cancelAnimationFrame) global.cancelAnimationFrame(raf); raf = 0; flush(); };
-
-    try {
-      const res = await fetch("/api/ctools/" + encodeURIComponent(name) + "/agent", {
-        method: "POST", headers: { "Content-Type": "application/json" }, signal: chat.abort ? chat.abort.signal : undefined,
-        body: JSON.stringify({ instruction, source: before, history: chat.history }),
-      });
-      if (!res.ok) {
-        let msg = res.statusText || ("HTTP " + res.status);
-        try { const j = await res.json(); msg = j.error || msg; } catch (_) { /* not JSON */ }
-        throw new Error(msg);
-      }
-      const reader = res.body.getReader(), dec = new TextDecoder();
-      let buf = "";
-      for (;;) {
-        const { value, done } = await reader.read();
-        if (done) break;
-        buf += dec.decode(value, { stream: true });
-        let nl;
-        while ((nl = buf.indexOf("\n")) >= 0) {
-          const line = buf.slice(0, nl).trim(); buf = buf.slice(nl + 1);
-          if (!line) continue;
-          let ev; try { ev = JSON.parse(line); } catch (_) { continue; }
-          if (ev.type === "stream") {
-            if (ev.k === "reset") {                    // a key failed mid-reply; the next one starts over
-              acc = ""; reply.text = ""; pendingCode = null;
-              if (wrote) { settle(); commit(before); wrote = false; }
-            } else {
-              acc += ev.d || "";
-              const sp = splitAgentReply(acc);
-              reply.text = sp.note;
-              if (sp.code) live(sp.code);
-            }
-            if (state.editor === ed) paintAgentLive(ed);
-          } else if (ev.type === "done") {
-            finished = true;
-            settle();
-            if (ev.ok) {
-              if (ev.code) {
-                if (!wrote && ev.code !== before && !(await reveal(ev.code))) { const e = new Error("stopped"); e.name = "AbortError"; throw e; }
-                commit(ev.code);
-                chat.undoable = ev.code !== before;
-                reply.text = (ev.note || "Done — the file is updated.") + "\n\nRead it through, then Validate or Save. Validate runs the file’s top level, so look before you click.";
-              } else {
-                if (wrote) commit(before);   // no complete file came back: leave the editor as it was
-                reply.text = ev.note || "Jarvis had nothing to change.";
-              }
-              chat.history.push({ role: "user", content: instruction }, { role: "assistant", content: (ev.note || (ev.code ? "(updated the file)" : "")).slice(0, 600) });
-              if (chat.history.length > 12) chat.history.splice(0, chat.history.length - 12);
-            } else {
-              if (wrote) commit(before);
-              reply.text = ev.error || "Jarvis couldn’t answer.";
-              reply.err = true;
-            }
-          }
-        }
-      }
-      if (!finished) {
-        settle();
-        reply.text = (reply.text ? reply.text + "\n\n" : "") + "The connection ended before Jarvis finished. What was written so far is in the editor; Undo AI edit puts the old text back.";
-        reply.err = true; chat.undoable = wrote;
-      }
-    } catch (e) {
-      settle();
-      if (e && e.name === "AbortError") {
-        reply.text = (reply.text ? reply.text + "\n\n" : "") + "Stopped." + (wrote ? " The editor keeps what was written; Undo AI edit puts the old text back." : "");
-        chat.undoable = wrote;
-      } else {
-        if (wrote) { commit(before); wrote = false; }
-        reply.text = e && e.message ? e.message : "Couldn’t reach Jarvis.";
-        reply.err = true;
-      }
-    } finally {
-      settle();
-      // Interrupted (Stop, dropped connection): keep what was written, minus the
-      // old text that was only showing underneath it.
-      if (tailShown && lastCode !== null && ed.cm && ed.cm.stream) { ed.cm.stream(lastCode, -1); tailShown = false; }
-      reply.pending = false;
-      chat.busy = false; chat.abort = null;
-      if (ed.cm) { if (ed.cm.setReadOnly) ed.cm.setReadOnly(false); ed.cm.el.classList.remove("is-ai-writing"); }
-      renderAgent(ed); renderTabs(); updateChip(ed); persistSoon();
-      if (state.editor === ed && ed.ui) ed.ui.input.focus();
-    }
+  async function newAskChat(ed) {
+    if (!ed || !ed.ask || ed.chat.busy) return;
+    if (!(await UI().confirm({ title: "Start a new conversation for this tool?", level: "warn", confirmLabel: "Start new",
+      body: "The current conversation stays in Logs; this panel just starts a fresh one." }))) return;
+    ed.ask.newConversation();                           // its onConversation("") forgets the saved id
+    renderAskBar(ed);
   }
 
   /* ---- editor side panel: outline, snippets, suggestions, shortcuts (L.33) ---- */
@@ -2415,20 +2437,67 @@
 
   /* ---- L.44: closable side panes ------------------------------------------ */
 
+  // L.53: what the right-hand slot shows right now. "agent" only while an editor tab is
+  // in front (the panel is about THAT tool); elsewhere the slot falls back to the
+  // Overview without forgetting that Ask Jarvis was on.
+  function effectiveSide() {
+    if (state.sidePane === "none") return "none";
+    if (state.sidePane === "agent" && state.view === "editor" && state.editor) return "agent";
+    return "overview";
+  }
+
+  function renderSidePane() {
+    if (!dom) return;
+    const mode = effectiveSide();
+    dom.panel.classList.toggle("tm-hide-side", mode === "none");
+    dom.panel.classList.toggle("tm-agent-on", mode === "agent");
+    dom.side.hidden = mode !== "overview";
+    if (dom.ask) dom.ask.hidden = mode !== "agent";
+    if (dom.sideTitle) dom.sideTitle.textContent = mode === "agent" ? "Ask Jarvis" : "Overview";
+    if (dom.closeSide) {
+      const what = mode === "agent" ? "the Ask Jarvis panel" : "the Overview panel";
+      dom.closeSide.setAttribute("aria-label", "Hide " + what);
+      dom.closeSide.title = "Hide " + what + " (bring it back with its button up top)";
+    }
+    if (dom.toggleSide) dom.toggleSide.setAttribute("aria-pressed", mode === "overview" ? "true" : "false");
+    if (dom.toggleAgent) {
+      const canAsk = state.view === "editor" && !!state.editor;
+      dom.toggleAgent.setAttribute("aria-pressed", mode === "agent" ? "true" : "false");
+      dom.toggleAgent.disabled = !canAsk;
+      dom.toggleAgent.title = canAsk ? "Talk to Jarvis about this tool \u2014 it writes into the editor (it can only edit; Save and Validate stay yours)"
+        : "Open a tool in the editor first (Create a tool, or Edit one)";
+    }
+    if (mode === "agent") mountAsk(state.editor);
+  }
+
   function applyPanes() {
     if (!dom) return;
     dom.panel.classList.toggle("tm-hide-tools", state.hideTools);
-    dom.panel.classList.toggle("tm-hide-side", state.hideSide);
     if (dom.toggleTools) dom.toggleTools.setAttribute("aria-pressed", state.hideTools ? "false" : "true");
-    if (dom.toggleSide) dom.toggleSide.setAttribute("aria-pressed", state.hideSide ? "false" : "true");
+    renderSidePane();
     // The editor's column just changed width; let it re-measure once layout settles.
     const ed = state.view === "editor" ? state.editor : null;
     if (ed && ed.cm && ed.cm.remeasure) (global.requestAnimationFrame || setTimeout)(() => { if (ed.cm) ed.cm.remeasure(); });
   }
 
   function setPane(which, hidden) {
-    if (which === "tools") state.hideTools = !!hidden; else state.hideSide = !!hidden;
+    if (which === "tools") state.hideTools = !!hidden;
+    else state.sidePane = hidden ? "none" : "overview";
     savePrefs(); applyPanes();
+  }
+
+  // The header's two right-hand buttons. Overview: show it, or hide the slot. Ask Jarvis:
+  // swap it in, or (toggled off) bring the Overview back.
+  function toggleSidePane(which) {
+    const mode = effectiveSide();
+    if (which === "agent") {
+      if (!(state.view === "editor" && state.editor)) return;
+      state.sidePane = mode === "agent" ? "overview" : "agent";
+    } else {
+      state.sidePane = mode === "overview" ? "none" : "overview";
+    }
+    savePrefs(); applyPanes();
+    if (state.sidePane === "agent" && state.editor && state.editor.ask) state.editor.ask.focus();
   }
 
   function modalOpen() { return !!document.querySelector("#jui-layer .jui-modal"); }
@@ -2503,7 +2572,11 @@
     dom.closeTools.addEventListener("click", () => setPane("tools", true));
     dom.closeSide.addEventListener("click", () => setPane("side", true));
     dom.toggleTools.addEventListener("click", () => setPane("tools", !state.hideTools));
-    dom.toggleSide.addEventListener("click", () => setPane("side", !state.hideSide));
+    dom.toggleSide.addEventListener("click", () => toggleSidePane("overview"));
+    if (dom.toggleAgent) dom.toggleAgent.addEventListener("click", () => toggleSidePane("agent"));
+    if (dom.askUndo) dom.askUndo.addEventListener("click", () => { if (state.editor) undoAgent(state.editor); });
+    if (dom.askStop) dom.askStop.addEventListener("click", () => { if (state.editor) { state.editor.chat.stopped = true; } });
+    if (dom.askNew) dom.askNew.addEventListener("click", () => newAskChat(state.editor));
     applyPanes();
     // L.43: unsaved tabs are also kept in this browser; only warn about leaving when
     // that could not be done (storage blocked / too big) or Jarvis is mid-write.
