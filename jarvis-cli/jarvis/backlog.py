@@ -32,6 +32,16 @@ item has a `project` string; a project "exists" when something is in it and
 stops existing when nothing is. Everything a hierarchy would buy here is
 available from a group-by.
 
+ORDER INSIDE A COLUMN
+---------------------
+A column is sorted by priority, then most recently touched, until the owner
+drags a card (or presses Shift+Up/Down in the panel). That writes an `order`
+number onto every item in that column, and from then on `order` wins:
+ranked items come first, in rank order, and anything without a rank (a card
+just added, or one that changed state) follows, in the old priority order.
+Changing an item's state clears its rank, so it never carries a position
+from the column it left. `move()` is the only writer of ranks.
+
 STORAGE
 -------
     ~/.jarvis/backlog.json
@@ -203,6 +213,8 @@ def update(query, **fields):
             # "what's blocked" ends up lying to you.
             if new_state != BLOCKED:
                 target["blocked_on"] = ""
+            # A rank only means something inside the column it was set in.
+            target.pop("order", None)
         elif key == "priority":
             target["priority"] = normalize_priority(value)
         elif key == "title":
@@ -222,6 +234,59 @@ def update(query, **fields):
     return target, ""
 
 
+def move(item_id, state=None, before=None):
+    """Put an item at a chosen position, optionally in another column.
+
+    `state` is the column to land in (default: the one it is already in).
+    `before` is the id of the item it should sit directly above in that
+    column; empty/None means the bottom. Ids only — a title match here
+    could silently move the wrong card. Returns (item, error).
+
+    Every item in the destination column is given a fresh rank (1, 2, 3 ...)
+    in the order the owner saw it, so the result is exactly the board they
+    were looking at plus the one move. Cards the panel is hiding behind a
+    search or project filter are in that order too, which is why the anchor
+    is an id rather than an index.
+    """
+    items = _load()
+    target = next((i for i in items
+                   if i.get("id") == str(item_id or "").strip().lower()), None)
+    if target is None:
+        return None, f"nothing in the backlog has the id '{item_id}'"
+
+    old_state = target.get("state") or TODO
+    new_state = normalize_state(state, default=old_state) if state else old_state
+    anchor_id = str(before or "").strip().lower()
+    if anchor_id and anchor_id == target["id"]:
+        return None, "an item can't be placed before itself"
+
+    column = sorted((i for i in items
+                     if (i.get("state") or TODO) == new_state and i is not target),
+                    key=_sort_key)
+    if anchor_id:
+        at = next((n for n, i in enumerate(column) if i.get("id") == anchor_id), None)
+        if at is None:
+            return None, f"'{before}' isn't in the {new_state} column"
+    else:
+        at = len(column)
+
+    if new_state != old_state:
+        # Same bookkeeping update() does for a state change.
+        target["state"] = new_state
+        if new_state == DONE and not target.get("done_at"):
+            target["done_at"] = time.time()
+        if new_state != DONE:
+            target["done_at"] = None
+        if new_state != BLOCKED:
+            target["blocked_on"] = ""
+        target["updated"] = time.time()
+    column.insert(at, target)
+    for rank, item in enumerate(column, start=1):
+        item["order"] = rank
+    _save(items)
+    return target, ""
+
+
 def remove(query):
     item, err = find(query)
     if item is None:
@@ -231,10 +296,21 @@ def remove(query):
     return item, ""
 
 
+def _rank(item):
+    """The manual position of an item inside its column, or None."""
+    value = item.get("order")
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    return value if value == value else None  # NaN from a hand-edited file
+
+
 def _sort_key(item):
     order = {"high": 0, "normal": 1, "low": 2}
     state_order = {DOING: 0, BLOCKED: 1, TODO: 2, IDEA: 3, DONE: 4}
+    rank = _rank(item)
     return (state_order.get(item.get("state"), 9),
+            0 if rank is not None else 1,
+            rank if rank is not None else 0,
             order.get(item.get("priority"), 1),
             -(item.get("updated") or 0))
 

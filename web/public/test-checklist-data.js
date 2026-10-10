@@ -2588,7 +2588,7 @@ window.JARVIS_TEST_CHECKLIST = /*JSON-BEGIN*/ {
     }
    ],
    "watch": [
-    "Try this from the board too, not just by asking: drag a card to a different column (its state should update to match), and use a card's own Block button \u2014 clearing the reason on an already-blocked card should move it back out of Blocked automatically."
+    "Try this from the board too, not just by asking: drag a card to a different column or between two cards (its state and position should stick after a reload), press Shift+\u2191/\u2193 to reorder, Enter to edit a card in place, and B to set what it is waiting on \u2014 clearing that on an already-blocked card should move it back out of Blocked automatically. Ask Jarvis to change the same card while you have it open: your edit must not put the old values back."
    ]
   },
   "list_daemons": {

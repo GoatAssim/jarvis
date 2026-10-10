@@ -2271,10 +2271,10 @@ app.get("/api/backlog", requireJarvis, async (req, res) => {
 app.post("/api/backlog", requireJarvis, async (req, res) => {
   const title = typeof req.body?.title === "string" ? req.body.title.trim() : "";
   if (!title) return res.status(400).json({ error: "A title is required." });
-  const args = ["backlog-add", title];
+  const args = ["backlog-add", `--title=${title}`];
   for (const key of ["project", "state", "priority", "note"]) {
     if (typeof req.body?.[key] === "string" && req.body[key].trim()) {
-      args.push(`--${key}`, req.body[key].trim());
+      args.push(`--${key}=${req.body[key].trim()}`);
     }
   }
   const result = await runJarvisOnce(args, 10000);
@@ -2292,11 +2292,37 @@ app.patch("/api/backlog/:id", requireJarvis, async (req, res) => {
     note: "--note", project: "--project", title: "--title",
   };
   for (const [key, flag] of Object.entries(flags)) {
-    if (typeof req.body?.[key] === "string") args.push(flag, req.body[key]);
+    // --flag=value, not "--flag value": an edited note or title that begins
+    // with "--" (or is empty) would otherwise be read as the next flag.
+    if (typeof req.body?.[key] === "string") args.push(`${flag}=${req.body[key]}`);
   }
   if (args.length === 2) return res.status(400).json({ error: "Nothing to change." });
   const result = await runJarvisOnce(args, 10000);
   return parseJarvisJSON(result, res, "Couldn't update that item.");
+});
+
+// Reorder / move: put an item above another one, in a chosen column. `before`
+// is an item id (or empty for the bottom of the column).
+const BACKLOG_STATES = ["idea", "todo", "doing", "blocked", "done"];
+app.post("/api/backlog/:id/move", requireJarvis, async (req, res) => {
+  const { id } = req.params;
+  const ID = /^b_[a-f0-9]{4,12}$/;
+  if (!ID.test(id)) return res.status(400).json({ error: "Invalid item id." });
+  const args = ["backlog-move", id];
+  const state = req.body?.state;
+  if (state !== undefined && state !== null && state !== "") {
+    if (!BACKLOG_STATES.includes(state)) return res.status(400).json({ error: "Unknown column." });
+    args.push(`--state=${state}`);
+  }
+  const before = req.body?.before;
+  if (before !== undefined && before !== null && before !== "") {
+    if (typeof before !== "string" || !ID.test(before)) {
+      return res.status(400).json({ error: "Invalid item id to place it before." });
+    }
+    args.push(`--before=${before}`);
+  }
+  const result = await runJarvisOnce(args, 10000);
+  return parseJarvisJSON(result, res, "Couldn't move that item.");
 });
 
 app.delete("/api/backlog/:id", requireJarvis, async (req, res) => {

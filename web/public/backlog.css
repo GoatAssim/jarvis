@@ -1,21 +1,15 @@
 /* ============================================================================
  * backlog.css — Menu → Backlog.
  *
- * Part H.1 rework: brings this panel up to the same bar as Test Checklist /
- * Daemons (see test-checklist.css's and daemons.css's own headers for the
- * shared reasoning). Own file, driven off the existing :root tokens, sits
- * inside the shared .debug-overlay/.debug-panel chrome so frame/corners/
- * glow/scroll-lock all still come free from style.css.
+ * Part H.1 rework, then rework 2 (L.55). Own file, driven off the existing
+ * :root tokens, sits inside the shared .debug-overlay/.debug-panel chrome so
+ * frame/corners/glow/scroll-lock all still come free from style.css.
  *
- * .kanban/.kanban__*/.backlog-add stay in style.css — they're the baseline
- * board that already worked and this rework doesn't touch their look.
- * Everything here is new: the toolbar (live search + project filter), the
- * two-column layout that makes room for the Overview pane, and drag-reorder
- * (style.css's own .kanban__card comment has claimed cards were "drag-
- * reorderable" for a while; there was no dragstart/dragover/drop handler
- * anywhere in app.js to back that up — see bk-drag-target below for the
- * actual implementation, added as part of this pass, and backlog.js's own
- * header for the full note).
+ * The cards, columns, editor, drop line and key legend are all built by
+ * backlog.js and styled here (.bk-*). style.css still carries the old
+ * .kanban__card* rules; nothing renders those classes any more, they are
+ * left alone rather than edited in a stylesheet this panel doesn't own.
+ * .kanban / .kanban__col / .backlog-add are still used as the frame.
  * ========================================================================= */
 
 .bk-toolbar{
@@ -44,17 +38,175 @@
 }
 .bk-board-wrap .kanban{ flex: 1; }
 
-/* Drag-and-drop: the actual implementation the old style.css comment on
-   .kanban__card only ever claimed existed. A column under an active drag
-   gets a dashed highlight; the dragged card itself dims so it's clear
-   which one is being moved. */
-.kanban__card[draggable="true"]{ cursor: grab; }
-.kanban__card.bk-dragging{ opacity: 0.4; }
-.kanban__col.bk-drop-target{
-  border-color: var(--accent-soft);
-  background: color-mix(in srgb, var(--accent) 8%, var(--bg-panel-2));
-  outline: 1px dashed var(--accent-soft); outline-offset: -3px;
+/* ---- toolbar extras ------------------------------------------------------- */
+
+.bk-seg{ display: inline-flex; border: 1px solid var(--border); border-radius: 4px; overflow: hidden; }
+.bk-seg__btn{
+  background: var(--bg-panel-2); color: var(--text-dim); border: 0;
+  border-right: 1px solid var(--border); padding: 5px 9px; font: inherit; font-size: 11.5px; cursor: pointer;
 }
+.bk-seg__btn:last-child{ border-right: 0; }
+.bk-seg__btn:hover{ color: var(--text); }
+.bk-seg__btn.is-active{ background: color-mix(in srgb, var(--accent) 16%, var(--bg-panel-2)); color: var(--accent); }
+.bk-seg__btn:focus-visible{ outline: 2px solid var(--accent); outline-offset: -2px; }
+.bk-saving{ font-size: 10.5px; color: var(--accent-secondary); font-family: var(--font-mono); }
+.bk-help-btn{
+  width: 24px; height: 24px; border-radius: 50%; border: 1px solid var(--border-strong);
+  background: transparent; color: var(--text-dim); font: inherit; font-size: 12px; cursor: pointer;
+}
+.bk-help-btn:hover, .bk-help-btn[aria-expanded="true"]{ color: var(--accent); border-color: var(--accent); }
+.bk-help-btn:focus-visible{ outline: 2px solid var(--accent); outline-offset: 2px; }
+.bk-toolbar__count{ margin-left: auto; }
+.bk-sr{
+  position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0; overflow: hidden;
+  clip: rect(0 0 0 0); white-space: nowrap; border: 0;
+}
+
+/* ---- the board --------------------------------------------------------------
+   Five columns that each scroll on their own, so a long Done list never
+   pushes the other columns' cards out of view. */
+
+.bk-col--idea{ --bk-col: var(--text-dimmer); }
+.bk-col--todo{ --bk-col: var(--accent); }
+.bk-col--doing{ --bk-col: var(--accent-secondary); }
+.bk-col--blocked{ --bk-col: var(--orange); }
+.bk-col--done{ --bk-col: var(--green); }
+
+.bk-board-wrap .kanban{
+  align-items: stretch; overflow-y: hidden; gap: 10px; padding: 12px;
+  grid-auto-columns: minmax(220px, 1fr);
+}
+.bk-col{ padding: 0; gap: 0; min-height: 0; overflow: hidden; }
+.bk-col__head{
+  display: flex; align-items: center; gap: 8px; padding: 9px 10px 8px;
+  border-bottom: 1px solid var(--border); flex-shrink: 0;
+}
+.bk-col__dot, .bk-count-row__dot{
+  width: 8px; height: 8px; border-radius: 50%; background: var(--bk-col, var(--accent)); flex-shrink: 0;
+}
+.bk-col__name{
+  font-family: var(--font-display); font-size: 10.5px; letter-spacing: 0.08em;
+  text-transform: uppercase; color: var(--text); flex: 1; min-width: 0;
+}
+.bk-col__count{ font-family: var(--font-mono); font-size: 10.5px; color: var(--text-dimmer); }
+.bk-col__list{
+  flex: 1 1 auto; min-height: 0; overflow-y: auto; padding: 8px;
+  display: flex; flex-direction: column; gap: 8px;
+}
+.bk-col__list:empty{ display: none; }
+.bk-col__empty{ color: var(--text-dimmer); font-size: 11.5px; text-align: center; padding: 18px 10px; }
+.bk-col__more{ color: var(--text-dimmer); font-size: 10.5px; text-align: center; padding: 6px 10px 9px; }
+.bk-col.bk-drop-target{
+  border-color: var(--accent-soft);
+  background: color-mix(in srgb, var(--accent) 7%, var(--bg-panel-2));
+}
+
+.bk-board-msg{
+  grid-column: 1 / -1; align-self: center; justify-self: center; text-align: center;
+  color: var(--text-dim); font-size: 12.5px; padding: 40px 20px; display: flex; flex-direction: column; gap: 10px; align-items: center;
+}
+.bk-board-msg__title{ font-family: var(--font-display); letter-spacing: 0.06em; color: var(--text); font-size: 13px; }
+.bk-board-msg--error{ color: var(--red); }
+
+/* ---- cards ------------------------------------------------------------------- */
+
+.bk-card{
+  position: relative; background: var(--bg-raised);
+  border: 1px solid var(--border); border-left: 3px solid var(--border-strong);
+  border-radius: 4px; padding: 8px 10px; cursor: grab; outline: none;
+  transition: border-color 0.12s, box-shadow 0.12s, background 0.12s;
+}
+.bk-card:hover{ border-color: var(--accent-soft); }
+.bk-card--high{ border-left-color: var(--accent-secondary); }
+.bk-card--low{ border-left-color: var(--text-dimmer); }
+.bk-card--low:not(.is-selected):not(.is-editing) .bk-card__title{ color: var(--text-dim); }
+.bk-card.is-selected{
+  border-color: var(--accent);
+  box-shadow: 0 0 0 1px var(--accent), 0 4px 16px rgba(0,0,0,0.35);
+}
+.bk-card:focus-visible{ outline: 2px solid var(--accent); outline-offset: 2px; }
+.bk-card.is-editing{ cursor: default; }
+.bk-card.bk-dragging{ opacity: 0.4; }
+.bk-card.is-stale:not(.is-selected){ border-color: color-mix(in srgb, var(--orange) 45%, var(--border)); }
+
+.bk-card__head{ display: flex; align-items: flex-start; gap: 6px; }
+.bk-card__title{ flex: 1; min-width: 0; font-size: 12.5px; line-height: 1.4; overflow-wrap: anywhere; }
+.bk-card__meta{ display: flex; align-items: center; gap: 6px; flex-wrap: wrap; margin-top: 5px; }
+.bk-card__age{ font-family: var(--font-mono); font-size: 10px; color: var(--text-dimmer); margin-left: auto; }
+.bk-card__note{
+  margin-top: 5px; font-size: 11px; line-height: 1.4; color: var(--text-dim);
+  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; overflow-wrap: anywhere;
+}
+.bk-card__blocked{ margin-top: 5px; font-size: 11px; color: var(--orange); overflow-wrap: anywhere; }
+
+.bk-chip{
+  display: inline-block; font-size: 9.5px; letter-spacing: 0.06em; text-transform: uppercase;
+  padding: 1px 6px; border-radius: 999px; border: 1px solid var(--border); color: var(--text-dim);
+  white-space: nowrap; max-width: 100%; overflow: hidden; text-overflow: ellipsis;
+}
+.bk-chip--project{ color: var(--accent); border-color: color-mix(in srgb, var(--accent) 35%, var(--border)); }
+.bk-chip--high{ color: var(--accent-secondary); border-color: color-mix(in srgb, var(--accent-secondary) 45%, var(--border)); }
+.bk-chip--low{ color: var(--text-dimmer); }
+.bk-chip--stale{ color: var(--orange); border-color: color-mix(in srgb, var(--orange) 45%, var(--border)); }
+
+/* Dimmed rather than hidden until the card is hovered, selected or has
+   focus inside it: they stay in the layout (nothing shifts when the
+   selection moves) and stay reachable by keyboard. */
+.bk-card__actions{ display: flex; gap: 4px; margin-top: 8px; flex-wrap: wrap; opacity: 0.45; transition: opacity 0.12s; }
+.bk-card:hover .bk-card__actions,
+.bk-card.is-selected .bk-card__actions,
+.bk-card:focus-within .bk-card__actions{ opacity: 1; }
+.bk-act{
+  background: transparent; color: var(--text-dim); border: 1px solid var(--border); border-radius: 3px;
+  padding: 2px 7px; font: inherit; font-size: 10.5px; cursor: pointer;
+}
+.bk-act:hover{ color: var(--text); border-color: var(--accent-soft); }
+.bk-act:focus-visible{ outline: 2px solid var(--accent); outline-offset: 1px; }
+.bk-act--danger:hover{ color: var(--red); border-color: var(--red); }
+
+/* Where a dragged card will land: a line in the gap, not a layout shift. */
+.bk-card.bk-drop-before::before,
+.bk-card.bk-drop-after::after{
+  content: ""; position: absolute; left: 0; right: 0; height: 3px; border-radius: 2px;
+  background: var(--accent); box-shadow: 0 0 8px var(--accent-glow); pointer-events: none;
+}
+.bk-card.bk-drop-before::before{ top: -6px; }
+.bk-card.bk-drop-after::after{ bottom: -6px; }
+
+/* ---- inline editor ------------------------------------------------------------- */
+
+.bk-edit{ display: flex; flex-direction: column; gap: 8px; }
+.bk-edit__row{ display: grid; grid-template-columns: minmax(0, 1fr) 96px; gap: 8px; }
+.bk-edit__field{ display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+.bk-edit__label{ font-size: 9.5px; letter-spacing: 0.1em; text-transform: uppercase; color: var(--text-dimmer); }
+.bk-input{
+  width: 100%; box-sizing: border-box; background: var(--bg-panel-2); color: var(--text);
+  border: 1px solid var(--border); border-radius: 3px; padding: 5px 7px; font: inherit; font-size: 12px;
+}
+.bk-input:focus{ outline: none; border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
+.bk-input:disabled{ opacity: 0.6; }
+.bk-input--note{ resize: vertical; min-height: 52px; }
+.bk-edit__error{ color: var(--red); font-size: 11px; }
+.bk-edit__actions{ display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.bk-edit__hint{ font-size: 10px; color: var(--text-dimmer); margin-left: auto; }
+
+/* ---- keyboard legend ------------------------------------------------------------- */
+
+.bk-keys{
+  border-top: 1px solid var(--border); padding: 6px 14px; flex-shrink: 0;
+  font-size: 10.5px; color: var(--text-dimmer);
+}
+.bk-keys kbd{
+  font-family: var(--font-mono); font-size: 10px; padding: 1px 5px; margin: 0 1px;
+  border: 1px solid var(--border-strong); border-radius: 3px; background: var(--bg-raised); color: var(--text-dim);
+}
+.bk-keys__line{ display: flex; flex-wrap: wrap; gap: 4px 16px; }
+.bk-keys__sheet{
+  display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 6px 20px;
+  margin-top: 8px; padding-top: 8px; border-top: 1px dashed var(--border);
+}
+.bk-keys__row{ display: flex; align-items: center; gap: 8px; color: var(--text-dim); }
+.bk-keys__row kbd{ min-width: 84px; text-align: center; flex-shrink: 0; }
 
 /* ---- right: Overview pane ---------------------------------------------- */
 
@@ -102,6 +254,9 @@
 .bk-project-row__blocked{ font-size: 10px; color: var(--accent-secondary); }
 
 @media (max-width: 900px){
+  /* Columns stack, so the board scrolls as a whole instead of per column. */
+  .bk-board-wrap .kanban{ grid-auto-flow: row; overflow-y: auto; }
+  .bk-col__list{ overflow-y: visible; }
   .bk-body{ grid-template-columns: minmax(0, 1fr); grid-template-rows: minmax(0, 1fr) auto; }
   .bk-board-wrap{ border-right: none; border-bottom: 1px solid var(--border); }
   .bk-side{ max-height: 220px; }

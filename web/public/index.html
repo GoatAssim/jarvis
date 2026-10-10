@@ -1642,7 +1642,10 @@
      header), live search + project filter + an Overview pane added around
      the existing kanban board. Same bigger .debug-overlay/.debug-panel
      chrome as Daemons/Log search/Debug/Logs — a five-column board plus an
-     Overview pane wants the room. -->
+     Overview pane wants the room.
+     Rework 2 (L.55): arrow-key navigation, inline editing and within-column
+     reordering. The board's cards are built by backlog.js; this file only
+     carries the frame, the toolbar, the add row and the key legend. -->
 <div class="debug-overlay" id="backlog-overlay" hidden>
   <div class="debug-panel">
     <div class="panel__corner panel__corner--tl"></div>
@@ -1672,22 +1675,35 @@
       <select id="backlog-project-filter" class="bk-select" aria-label="Filter by project">
         <option value="">All projects</option>
       </select>
+      <div class="bk-seg" id="backlog-priority-filter" role="group" aria-label="Filter by priority"></div>
+      <span class="bk-saving" id="backlog-saving" hidden>Saving&hellip;</span>
       <span class="bk-toolbar__count" id="backlog-toolbar-count"></span>
+      <button class="bk-help-btn" id="backlog-help-btn" type="button"
+              aria-controls="backlog-keys" aria-expanded="false"
+              title="Keyboard shortcuts (?)">?</button>
     </div>
 
     <div class="bk-body">
       <div class="bk-board-wrap">
-        <div class="kanban" id="backlog-board"></div>
+        <div class="kanban" id="backlog-board" role="group" aria-label="Backlog board"></div>
+        <div class="bk-keys" id="backlog-keys" aria-label="Keyboard shortcuts"></div>
         <div class="sched-add backlog-add">
-          <input type="text" id="backlog-new-title" placeholder="what needs doing&hellip;" />
-          <input type="text" id="backlog-new-project" placeholder="project (optional)" />
-          <select id="backlog-new-state">
+          <input type="text" id="backlog-new-title" placeholder="what needs doing&hellip; (n)" aria-label="New item title" maxlength="200" />
+          <input type="text" id="backlog-new-project" list="backlog-project-list" placeholder="project (optional)" aria-label="New item project" maxlength="60" />
+          <datalist id="backlog-project-list"></datalist>
+          <select id="backlog-new-state" aria-label="Column">
             <option value="idea">idea</option>
             <option value="todo" selected>todo</option>
             <option value="doing">doing</option>
           </select>
+          <select id="backlog-new-priority" aria-label="Priority">
+            <option value="low">low</option>
+            <option value="normal" selected>normal</option>
+            <option value="high">high</option>
+          </select>
           <button class="btn btn--primary btn--sm" id="btn-backlog-add" type="button">Add</button>
         </div>
+        <div class="bk-sr" id="backlog-live" role="status" aria-live="polite"></div>
       </div>
       <aside class="debug-pane bk-side" aria-label="Overview">
         <div class="bk-side-content" id="backlog-side"></div>

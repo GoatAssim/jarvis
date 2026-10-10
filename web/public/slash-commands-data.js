@@ -740,7 +740,8 @@ window.JARVIS_SLASH_COMMANDS = /*JSON-BEGIN*/
         "backlog-done",
         "backlog-update",
         "backlog-remove",
-        "backlog-board"
+        "backlog-board",
+        "backlog-move"
       ],
       "example": "/backlog",
       "preview": "Open the Backlog."

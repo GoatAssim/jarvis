@@ -99,7 +99,7 @@ RESERVED_NAMES = {
     "daemon-window", "daemon-viewer", "daemons-sync",
     "logs-files", "logs-tail", "logs-sets",
     "backlog", "backlog-add", "backlog-done", "backlog-update",
-    "backlog-remove", "backlog-board",
+    "backlog-remove", "backlog-board", "backlog-move",
     "ambient", "ambient-tick",
     "onboard", "ui-mode",
     # --- channels_cli.COMMANDS -----------------------------------------------

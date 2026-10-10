@@ -22,7 +22,7 @@ COMMANDS = (
     "daemons-tick", "daemon-window", "daemon-viewer", "daemons-sync",
     "logs-files", "logs-tail", "logs-sets",
     "backlog", "backlog-add", "backlog-done", "backlog-update",
-    "backlog-remove", "backlog-board",
+    "backlog-remove", "backlog-board", "backlog-move",
     "ambient", "ambient-tick",
     "onboard", "ui-mode",
 )
@@ -70,8 +70,12 @@ USAGE = """workspace commands:
   backlog-add <title> [--project P] [--state S] [--priority P] [--note N]
   backlog-done <item>                  item = id or part of the title
   backlog-update <item> [--state S] [--blocked-on X] [--priority P]
+                     [--note N] [--project P] [--title T]
   backlog-remove <item>
   backlog-board                        everything grouped by state
+  backlog-move <id> [--state S] [--before ID]
+                                       reorder: put it above ID in column S
+                                       (no --before = bottom of the column)
 
   ambient                              what Jarvis has noticed
   ambient-tick                         run the checks now
@@ -99,6 +103,13 @@ def _opts(rest):
         token = rest[i]
         if token.startswith("--"):
             key = token[2:]
+            if "=" in key and key.split("=", 1)[0]:
+                # --key=value: the only way to pass a value that itself starts
+                # with "--" (a backlog note or title can), and an empty one.
+                key, value = key.split("=", 1)
+                flags.setdefault(key, []).append(value)
+                i += 1
+                continue
             if i + 1 < len(rest) and not rest[i + 1].startswith("--"):
                 flags.setdefault(key, []).append(rest[i + 1])
                 i += 2
@@ -434,10 +445,14 @@ def handle(argv):
         return
 
     if cmd == "backlog-add":
-        if not positional:
+        # --title=... is how the web panel sends it, so a title that begins
+        # with "--" is not mistaken for a flag.
+        title_flag = _one(flags, "title")
+        title_text = title_flag if isinstance(title_flag, str) else " ".join(positional)
+        if not title_text.strip():
             _fail('usage: backlog-add "<title>" [--project P] [--state S]')
         item, err = backlog.add(
-            " ".join(positional),
+            title_text,
             project=_one(flags, "project", ""),
             state=_one(flags, "state", backlog.TODO),
             priority=_one(flags, "priority", "normal"),
@@ -464,6 +479,19 @@ def handle(argv):
         if not fields:
             _fail("nothing to change")
         item, err = backlog.update(query, **fields)
+        if item is None:
+            _fail(err)
+        _emit({"ok": True, "item": item})
+        return
+
+    if cmd == "backlog-move":
+        if not positional:
+            _fail("usage: backlog-move <id> [--state S] [--before ID]")
+        before = _one(flags, "before")
+        state_arg = _one(flags, "state")
+        if before is True or state_arg is True:
+            _fail("--before and --state each need a value")
+        item, err = backlog.move(positional[0], state=state_arg, before=before)
         if item is None:
             _fail(err)
         _emit({"ok": True, "item": item})
