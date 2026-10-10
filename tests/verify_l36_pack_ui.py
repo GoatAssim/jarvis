@@ -149,7 +149,7 @@ with sync_playwright() as p:
     pg.wait_for_selector("[data-flag='image']")
     img = pg.locator("[data-flag='image']")
     check("P8: Pictures is a row, off by default", img.count() == 1 and img.locator(".ch-switch").get_attribute("aria-checked") == "false")
-    check("P8: it says it changes nothing yet", "doesn't read pictures" in img.inner_text().lower())
+    check("P8: it says Discord reads them and Instagram not yet", "reads pictures" in img.inner_text().lower() and "instagram" in img.inner_text().lower())
     img.locator(".ch-switch").click()
     check("P8: switching it on posts the image flag", settle(lambda: {"flag": "image", "value": True} in mine("/flag")))
     pg.locator(".ch-card", has_text="boss").first.click()

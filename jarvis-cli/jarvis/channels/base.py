@@ -632,8 +632,20 @@ def handle_message(platform, msg, send, cfg=None, on_tool_call=None, decision=No
     ask_ok, ask_error, result = True, "", None
     captured_tools, ask_since = [], _utc_stamp()
     media_items = []
+    # --- pictures the sender attached (L.42.3 inbound / L.36-P8) -------------
+    # Only here, after the gate said yes and the dedupe guard passed, so a picture
+    # can never open a conversation or be paid for twice. media_in checks the
+    # picture grant itself and never raises; with no attachment it returns the
+    # text untouched, so every other message behaves exactly as before.
+    ask_text = msg.text
+    if getattr(msg, "attachments", None):
+        try:
+            from . import media_in
+            ask_text = media_in.prepare_text(platform, msg, cfg, is_owner=bool(is_owner))
+        except Exception as exc:  # noqa: BLE001
+            _log(f"could not read attached pictures: {exc}")
     try:
-        result = _ask_jarvis(msg.text, conv_id, may_use_tools,
+        result = _ask_jarvis(ask_text, conv_id, may_use_tools,
                              on_tool_call=on_tool_call, platform=platform,
                              sender_context=sender_ctx, sender_env=sender_env,
                              tool_scope=tool_scope, tool_log=captured_tools,

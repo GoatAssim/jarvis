@@ -1025,7 +1025,7 @@
     return out;
   }
 
-  const PANEL_VERBS = new Set(["guides", "debug", "checklist", "schedule", "mcp", "ctools", "channels",
+  const PANEL_VERBS = new Set(["guides", "debug", "checklist", "schedule", "calendar", "mcp", "ctools", "channels",
     "daemons", "backlog", "logsearch", "setup", "subagents", "notifications", "logs", "config", "skin"]);
 
   const HANDLERS = {

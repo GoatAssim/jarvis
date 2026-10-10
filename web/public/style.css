@@ -730,7 +730,6 @@ input.is-invalid{ border-color: var(--red) !important; }
 .console-line--sys{ color: var(--accent-soft); }
 .console-line--tool{ color: var(--accent-soft); }
 .console-line--narration{ color: var(--text-dim); font-style: italic; }
-.console-line.is-filtered{ display: none; }
 
 .cursor-blink{
   display: inline-block; width: 7px; height: 13px; background: var(--accent);
@@ -2013,34 +2012,38 @@ audio.ask-dl-player{ max-height: none; background: transparent; }
 .debug-tool-card__source--user{ border-color: var(--accent); color: var(--accent); }
 .debug-tool-card__source--mcp{ border-color: var(--gold); color: var(--gold); }
 
-/* Part E.5/K.2.5.3 — Live Feed's console replay filter, between the panel
-   head and the console output itself: one row of per-kind toggle chips
-   (built at runtime), one row of the errors-only/tool/turn-scope/preset
-   controls, one row for the search box + its mode + the hidden-count
-   chip. */
-.console-filter{ display: flex; flex-direction: column; gap: 6px; padding: 6px 14px; }
-.console-filter__row{ display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
-.console-filter__row--kinds{ gap: 4px; }
-.console-filter__row--kinds:empty{ display: none; }
-.console-filter__search{ flex: 1 1 120px; min-width: 100px; }
-.console-filter__search.is-invalid{ border-color: var(--red); }
-.console-filter__select{
-  background: var(--bg-panel-2); border: 1px solid var(--border); color: var(--text-dim);
-  font-size: 11px; padding: 4px 6px; border-radius: 2px;
-}
-.console-filter__errors-only{
-  display: flex; align-items: center; gap: 5px; font-size: 11px; color: var(--text-dim);
-  cursor: pointer; user-select: none;
-}
-.console-filter__kind-btn{ display: flex; align-items: center; gap: 5px; }
+/* Part E.5/K.2.5.3 — Ask Jarvis "Console" filter. The hidden category ids live
+   on <html data-ask-hidden="tokens tool-call ...">; each line carries
+   data-kind. One rule per category (ids = ASK_CONSOLE_CATEGORIES in app.js),
+   so toggling a category re-renders nothing. Chrome lines ("$ jarvis", the
+   turn separator) have data-kind="chrome" and are never matched. */
+[data-ask-hidden~="tool-call"] .ask-prompt-line[data-kind="tool-call"],
+[data-ask-hidden~="tool-result"] .ask-prompt-line[data-kind="tool-result"],
+[data-ask-hidden~="tokens"] .ask-prompt-line[data-kind="tokens"],
+[data-ask-hidden~="discovery"] .ask-prompt-line[data-kind="discovery"],
+[data-ask-hidden~="provider"] .ask-prompt-line[data-kind="provider"],
+[data-ask-hidden~="narration"] .ask-prompt-line[data-kind="narration"],
+[data-ask-hidden~="status"] .ask-prompt-line[data-kind="status"],
+[data-ask-hidden~="error"] .ask-prompt-line[data-kind="error"],
+[data-ask-hidden~="other"] .ask-prompt-line[data-kind="other"]{ display: none; }
+
+.console-filter__menu{ min-width: 250px; max-height: 70vh; }
+.console-filter__note{ padding: 6px 9px 8px; font-size: 11px; }
+.console-filter__item{ align-items: center; }
+.console-filter__box{ font-size: 14px; line-height: 1; width: 14px; text-align: center; }
 .console-filter__count{
   font-size: 9.5px; opacity: 0.75; background: var(--bg-panel-2);
-  border-radius: 8px; padding: 0 5px; line-height: 1.5;
+  border-radius: 8px; padding: 0 6px; line-height: 1.6; font-family: var(--font-mono);
 }
-.console-filter__hidden-chip{
-  font-size: 10.5px; color: var(--text-dimmer); font-style: italic; white-space: nowrap;
+.console-filter__actions{ display: flex; gap: 4px; margin-top: 4px; padding-top: 4px; border-top: 1px solid var(--border); }
+.console-filter__actions .provider-picker__item{ justify-content: center; text-align: center; }
+#btn-console-filter.is-filtering{ color: var(--accent); border-color: var(--accent); }
+.ask-prompt__hidden-chip{
+  margin-left: auto; margin-right: 8px; background: transparent; border: none; cursor: pointer;
+  font-size: 10.5px; color: var(--text-dimmer); font-style: italic; text-decoration: underline;
+  font-family: var(--font-ui);
 }
-.console-search-hit{ background: var(--accent-glow); color: inherit; border-radius: 2px; }
+.ask-prompt__hidden-chip:hover{ color: var(--accent); }
 
 .debug-response{
   flex: 0 0 auto; max-height: 40%; min-height: 90px;

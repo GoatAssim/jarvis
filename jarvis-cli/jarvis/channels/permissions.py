@@ -136,12 +136,12 @@ class IncomingMessage:
     __slots__ = ("platform", "context", "user_id", "user_handle", "text",
                  "mentioned", "guild_id", "channel_id", "message_id",
                  "thread_id", "timestamp", "raw", "avatar",
-                 "guild_name", "channel_name")
+                 "guild_name", "channel_name", "attachments")
 
     def __init__(self, platform, context, user_id="", user_handle="", text="",
                  mentioned=False, guild_id="", channel_id="", message_id="",
                  thread_id="", timestamp=None, raw=None, avatar="",
-                 guild_name="", channel_name=""):
+                 guild_name="", channel_name="", attachments=None):
         self.platform = platform
         self.context = context
         self.user_id = str(user_id or "")
@@ -165,6 +165,11 @@ class IncomingMessage:
         # Manage Channels.
         self.guild_name = str(guild_name or "")
         self.channel_name = str(channel_name or "")
+        # What the sender attached, as plain descriptors ({url, filename,
+        # content_type, size}) -- never bytes, and no stage of decide() reads
+        # them. channels/media_in.py is the only reader, and only for a message
+        # the gate already allowed (L.36-P8 / L.42.3 inbound).
+        self.attachments = tuple(attachments or ())
 
     def identities(self):
         """Every form of this sender an allowlist entry could name, in the
@@ -325,9 +330,9 @@ def may_send_images(cfg, identities):
     inside a picture is an injection channel, which is why it is a list the
     owner fills in rather than something inherited from `reply`.
 
-    Nothing consumes it yet -- inbound images are L.42, not built. It is here
-    so the grant, the panel switch and the Test tab already say the same thing
-    the feature will later enforce. Never raises: a malformed config answers no.
+    channels/media_in.py is the consumer (Discord pictures; Instagram is not built
+    yet), and the panel switch and the Test tab ask this same function. Never
+    raises: a malformed config answers no.
     """
     cfg = cfg or {}
     try:
@@ -374,7 +379,7 @@ def describe(cfg):
         f"dm_allowlist:    {render(PERM_DM)}",
         f"reply_allowlist: {render(PERM_REPLY)}",
         f"tool_allowlist:  {render(PERM_TOOLS)}",
-        f"image_allowlist: {render(PERM_IMAGES)}   (not used yet: inbound images are not built)",
+        f"image_allowlist: {render(PERM_IMAGES)}   (who may send Jarvis pictures; Discord only)",
         f"allow_tools:     {bool(cfg.get('allow_tools'))}",
         f"require_mention: {bool(cfg.get('require_mention', True))}",
     ]

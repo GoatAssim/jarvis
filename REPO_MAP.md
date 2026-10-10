@@ -197,6 +197,9 @@ jarvis-cli/jarvis/
         allowed_guilds.py L.36-P17: add / remove one server on `allowed_guilds` (panel "Allowed servers" /
                           `channels-guilds`); the ONLY writer of that key. Add to an empty list or an unseen
                           id previews until confirmed; removing the last entry is always refused
+        media_in.py       L.36-P8 / L.42.3 inbound: a picture a person sends on Discord -> a vision description for the
+                          model, only for the owner and `image_allowlist`; CDN-host / size / count / hourly caps; the file
+                          is deleted right after the vision call. The only reader of `image_allowlist`
         master_tools.py   L.36-P9: the platform-wide `allow_tools` switch for the panel / `channels-master-tools`:
                           view (who it would reach), turn ON only after a preview + confirm, OFF at once,
                           refused while the tool list holds "*"
@@ -673,6 +676,8 @@ silently never runs.
 | `test_channel_timed_and_instruction.py` | L.36-P6 / P12: the `tools_until` deadline (garbage reads as passed, resolver is read-only), grant refusals, `expire_due` + its change-log reason, manual switches / block / forget / `channels-allow|deny` ending a countdown, the gateway sweep, the Test tab's wording, and the instruction (cap, one line, owner refused, prompt framing, not reachable by a guest) |
 | `test_channel_insights.py` | L.36-P1/P2/P3: per-person conversation attribution (DM vs group, rotated files, torn lines), the usage ledger (counts only, failed asks, windows, rotation), and `simulate` (agrees with what `handle_message` really hands the model; writes nothing, calls no model — snapshot of `~/.jarvis` before/after) |
 | `test_channel_media_out.py` | L.42.3 outbound: `media_out` collector (no-op outside a chat ask, owner only, capped), `channels/media_send.prepare` (owner only, extension allow-list, size cap, shrink-or-say), screenshots reach the owner's Discord thread after the text and a guest's never do |
+| `test_channel_media_in.py` | L.42.3 inbound / L.36-P8: `channels/media_in` (what counts as a picture, CDN-host-only urls, size / count / hourly caps, magic-byte check, description wrapped as content), the picture grant read through `handle_message` (owner and listed guests read, others told, denied senders never fetched), the Discord gateway's descriptors, `vision_call.load_image` reporting the real image type |
+| `verify_l53_tool_maker_ui.py` (`python3`) | L.53: the Tool Maker's Ask Jarvis side panel in a real browser (toggle needs an editor, one conversation per tool tab, New chat asks first, Undo, Tool Maker tag); SKIPs without playwright + Chromium |
 | `test_channel_pack_p8_p9_p13_p14.py` | L.36-P8/P9/P13/P14: the picture grant (never a way into a conversation, cleaned up by block / forget, owner locked), the platform tools switch (preview then confirm, refused with `"*"`), panel DM (shared limits, owner / chat-origin refused, preview sends nothing), the turned-away list (who-stages only, never message text) |
 | `verify_l36_pack_ui.py` (`python3`) | L.36-P8/P9/P13/P14/P16 panels + the add-person panel in a real browser against real backend output (`_channels_pack_fixture.py`); SKIPs without playwright + Chromium |
 | `verify_l36_guilds_ui.py` (`python3`) | L.36-P17 in a real browser against real backend output: Home's Platforms tab shows the status cards, the Servers tab scrolls 40 servers inside its own box, the status dropdown, and the allowed-servers editor (preview, cancel, confirm, last entry locked); SKIPs without playwright + Chromium |

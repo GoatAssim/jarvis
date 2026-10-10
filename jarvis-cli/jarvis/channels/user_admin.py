@@ -369,11 +369,12 @@ def list_flag_refusal(flag, value, rec, cfg):
 
 
 def _image_note(cfg, rec):
-    """The heads-up after switching pictures ON for someone. Honest about the
-    two things the switch does not do: it changes nothing today (inbound
-    pictures are not built, L.42), and it opens no conversation."""
-    note = ("recorded \u2014 Jarvis doesn't read pictures sent in chat yet, so "
-            "this changes nothing until that feature exists")
+    """The heads-up after switching pictures ON for someone. Honest about what the
+    switch does and does not do: on Discord Jarvis now reads pictures they send
+    (channels/media_in.py), Instagram does not read them yet, and it opens no
+    conversation."""
+    note = ("recorded \u2014 on Discord Jarvis now reads pictures this person sends "
+            "(a vision provider describes each one); Instagram doesn't read pictures yet")
     if not membership(cfg, PERM_REPLY, rec)["on"]:
         note += "; they also need Reply switched on to be answered at all"
     return note
@@ -1108,8 +1109,8 @@ def simulate(platform, user_id, context=permissions.CTX_DM, mentioned=True):
         tools = {"state": "none", "why": why, "allowed": None, "count": None,
                  "plumbing": []}
 
-    # L.36-P8: would their pictures be read? Reads the same function the
-    # feature will call (permissions.may_send_images), after the gate said yes.
+    # L.36-P8: would their pictures be read? Asks the same function
+    # channels/media_in.py calls (permissions.may_send_images), after the gate said yes.
     if not answered:
         images = {"state": "none", "why": "They would not be answered at all."}
     elif permissions.is_owner(cfg, _idents(rec)):
@@ -1119,7 +1120,7 @@ def simulate(platform, user_id, context=permissions.CTX_DM, mentioned=True):
     else:
         images = {"state": "off", "why": "Pictures are off for them (default)."}
     if answered:
-        images["why"] += " Jarvis doesn't read pictures from chat yet, so nothing changes today."
+        images["why"] += " Pictures are read on Discord only; Instagram does not read them yet."
 
     notes = []
     if int(cfg.get("cooldown_seconds") or 0) > 0:

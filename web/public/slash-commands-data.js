@@ -2,7 +2,7 @@
  * slash-commands-data.js — the registry behind the "/" command palette
  * (Menu-free: typed straight into the Ask composer). Master plan Part I.2.
  *
- * THIS FILE IS THE REGISTRY. One entry per typeable verb (35 of them — see
+ * THIS FILE IS THE REGISTRY. One entry per typeable verb (36 of them — see
  * `verbs`), plus a disposition for every OTHER canonical name
  * `jarvis-cli/jarvis/reserved_names.py` reserves (`passthrough` + `notExposed`,
  * 159 total) so the palette can show and risk-tier every CLI subcommand
@@ -67,7 +67,7 @@
  * with a risk tier, rather than a curated subset. Every one of the reserved
  * names (159, counting skills-loaded) therefore lands in EXACTLY ONE of:
  *
- *   verbs[].covers   reached through a typed verb (the 35 in `verbs`) —
+ *   verbs[].covers   reached through a typed verb (the 36 in `verbs`) —
  *                    a panel opener, a picker, or a direct action. Most
  *                    of the 98 names here are the plumbing a panel already
  *                    drives; the verb is how a user gets to them.
@@ -568,6 +568,25 @@ window.JARVIS_SLASH_COMMANDS = /*JSON-BEGIN*/
       ],
       "example": "/schedule",
       "preview": "Open Scheduled tasks & reminders."
+    },
+    {
+      "verb": "calendar",
+      "aliases": [
+        "calendars"
+      ],
+      "group": "panels",
+      "menu": "menu-item-calendar",
+      "summary": "Open Calendars",
+      "riskTier": "safe",
+      "instant": true,
+      "whileReplying": true,
+      "confirm": false,
+      "args": [],
+      "covers": [
+        "calendar-admin"
+      ],
+      "example": "/calendar",
+      "preview": "Open Calendars: your events, link a calendar, add events, set reminders."
     },
     {
       "verb": "mcp",

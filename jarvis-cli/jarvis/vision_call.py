@@ -101,6 +101,19 @@ def vision_providers(providers):
 # ---------------------------------------------------------------------------
 
 
+def _sniff_mime(raw):
+    """The image type the bytes really are (a JPEG sent as image/png is refused by some providers).
+    Unknown bytes keep the old answer, image/png."""
+    head = bytes(raw[:16])
+    if head.startswith(b"\xff\xd8\xff"):
+        return "image/jpeg"
+    if head.startswith((b"GIF87a", b"GIF89a")):
+        return "image/gif"
+    if head[:4] == b"RIFF" and head[8:12] == b"WEBP":
+        return "image/webp"
+    return "image/png"
+
+
 def load_image(path):
     """(bytes, mime, error). Downscales large screens when Pillow is there."""
     try:
@@ -110,7 +123,7 @@ def load_image(path):
         return None, None, "couldn't read the screenshot: %s" % exc
     if not raw:
         return None, None, "the screenshot file is empty"
-    mime = "image/png"
+    mime = _sniff_mime(raw)
     try:
         from PIL import Image  # noqa: PLC0415 — optional
         img = Image.open(io.BytesIO(raw))
@@ -121,6 +134,7 @@ def load_image(path):
             buf = io.BytesIO()
             img.convert("RGB").save(buf, format="PNG", optimize=True)
             raw = buf.getvalue()
+            mime = "image/png"   # re-encoded above
     except ImportError:
         pass
     except Exception:  # noqa: BLE001 — a decode problem shouldn't hide the file; send as-is

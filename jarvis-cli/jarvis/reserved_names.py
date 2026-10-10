@@ -71,6 +71,8 @@ RESERVED_NAMES = {
     "memory-ns", "memory-list", "memory-consolidate", "memory-recall",
     "memory-reindex", "memory-stats",
     "calendar-add", "calendar-list", "calendar-remove", "calendar-events",
+    # calendar-admin: the Menu > Calendars panel's back end (L.54).
+    "calendar-admin",
     "digest-status", "digest-on", "digest-off", "digest-now", "digest-preview",
     "ctools-list", "ctools-show", "ctools-write", "ctools-check",
     "ctools-delete", "ctools-run", "ctools-toggle", "ctools-templates",

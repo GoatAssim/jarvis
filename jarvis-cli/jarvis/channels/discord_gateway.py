@@ -48,7 +48,7 @@ from pathlib import Path
 
 from . import DISCORD
 from . import config as channel_config
-from . import base, permissions, transcript, directory, servers
+from . import base, permissions, transcript, directory, servers, media_in
 
 PID_FILE = Path.home() / ".jarvis" / "discord_daemon.pid"
 
@@ -96,6 +96,22 @@ def strip_mentions(text, bot_id=None):
         text = leading.sub("", text)
     text = _MENTION_RE.sub(lambda m: "@" + m.group(1), text)
     return text.strip()
+
+
+def _attachment_descriptors(message):
+    """Plain descriptors of what a message carries (never the bytes), capped at 10.
+
+    media_in.py decides what, if anything, is read; this only reports. Never raises."""
+    out = []
+    try:
+        for a in list(getattr(message, "attachments", None) or [])[:10]:
+            out.append({"url": str(getattr(a, "url", "") or ""),
+                        "filename": str(getattr(a, "filename", "") or ""),
+                        "content_type": str(getattr(a, "content_type", "") or ""),
+                        "size": int(getattr(a, "size", 0) or 0)})
+    except Exception:  # noqa: BLE001
+        pass
+    return out
 
 
 def _avatar_url(author):
@@ -298,6 +314,7 @@ def build_client(discord, cfg):
             avatar=_avatar_url(message.author),
             guild_name=guild_name,
             channel_name=channel_name,
+            attachments=_attachment_descriptors(message),
         )
         # Teach the registry this channel's name (a cached no-op after the
         # first message). Labels only; runs before the gate on purpose so the
@@ -309,8 +326,10 @@ def build_client(discord, cfg):
         # A message with no text left after stripping the mention is a bare
         # ping ("@jarvis"). Treat it as a greeting rather than asking the
         # model to respond to an empty string.
+        # A message that is only a picture is not a greeting: say what it is, so the
+        # transcript and the model see something true (media_in adds the description).
         if not msg.text and (mentioned or is_dm):
-            msg.text = "Hi"
+            msg.text = "(sent a picture)" if media_in.image_candidates(msg.attachments) else "Hi"
 
         # Discord hands us the username for free on every event, unlike
         # Instagram (see instagram_gateway._fetch_username's docstring for

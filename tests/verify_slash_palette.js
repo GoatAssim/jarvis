@@ -385,11 +385,11 @@ async function main() {
     await flush();
     check("typing / opens the popover", env.palette.hidden === false);
     const rowsAll = env.palette.querySelectorAll(".slash-row").length;
-    check("empty query lists every verb (35) plus the 'show the other commands' toggle", rowsAll === 36, `got ${rowsAll}`);
+    check("empty query lists every verb (36) plus the 'show the other commands' toggle", rowsAll === 37, `got ${rowsAll}`);
     check("headings: the six groups from I.2.5 plus 'More'", env.palette.querySelectorAll(".slash-heading").length === 7
       && ["Chat", "Model", "Skills", "Run", "Panels", "View"].every((g) => env.palette.querySelectorAll(".slash-heading").some((h) => h.textContent === g)));
-    check("every verb row carries a visible risk badge (D-I4)", env.palette.children[0].querySelectorAll(".slash-badge").length === 35);
-    check("the live region announces the count", env.palette.querySelectorAll(".slash-sr")[0].textContent === "35 commands", env.palette.querySelectorAll(".slash-sr")[0].textContent);
+    check("every verb row carries a visible risk badge (D-I4)", env.palette.children[0].querySelectorAll(".slash-badge").length === 36);
+    check("the live region announces the count", env.palette.querySelectorAll(".slash-sr")[0].textContent === "36 commands", env.palette.querySelectorAll(".slash-sr")[0].textContent);
 
     env.input.value = "/ne";
     env.input.dispatchEvent(new Event("input"));

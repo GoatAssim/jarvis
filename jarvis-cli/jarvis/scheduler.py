@@ -1166,7 +1166,43 @@ def clear_ask_log():
         return False
 
 
+def _log_run_event(conv_id, job, phase, **detail):
+    """L.2.4: a start/finish line in the run's own conversation log, so the
+    Logs Conversation view can show when a scheduled run began and how it
+    ended. Written from THIS process (the child that does the work has the
+    task env, we don't), hence the explicit task/source fields. Never raises."""
+    if not conv_id:
+        return
+    try:
+        from . import logs
+        logs.log_event(
+            conv_id, logs.EVENT_TASK,
+            dict({"phase": phase, "kind": "scheduled_job"}, **detail),
+            source="scheduler",
+            task_id=str(job.get("id") or ""),
+            task_label=str(job.get("title") or _default_title(job)),
+        )
+    except Exception:  # noqa: BLE001 — a log line must never break a job
+        pass
+
+
 def _do_ask(job, action):
+    """Run one scheduled prompt and record its start and finish in the log.
+    The work itself is _do_ask_run; this wrapper exists so every one of its
+    return paths gets a finish line without repeating it at each."""
+    result = _do_ask_run(job, action)
+    try:
+        r = result if isinstance(result, dict) else {}
+        status = ("stopped_over_budget" if r.get("over_budget")
+                  else ("ok" if r.get("ok") else "failed"))
+        _log_run_event(r.get("conv_id"), job, "finished", status=status,
+                       error=str(r.get("error") or "")[:300])
+    except Exception:  # noqa: BLE001
+        pass
+    return result
+
+
+def _do_ask_run(job, action):
     """Run a scheduled prompt through a *fresh* `jarvis ask` subprocess.
 
     Deliberately a subprocess rather than an in-process ai_client.ask()
@@ -1211,6 +1247,7 @@ def _do_ask(job, action):
     # task.get("id")/task.get("title").
     env["JARVIS_TASK_ID"] = job.get("id") or ""
     env["JARVIS_TASK_LABEL"] = job.get("title") or _default_title(job)
+    _log_run_event(run_conv_id, job, "started")
     try:
         proc = subprocess.run(
             argv, capture_output=True, text=True, timeout=ASK_TIMEOUT,

@@ -1910,6 +1910,29 @@ def main():
             print(json.dumps(_cal.tool_calendar_events({"days": 7}), indent=2))
             return
 
+    if argv[0] == "calendar-admin":
+        # jarvis calendar-admin feeds | window | check | link | feed-enable | feed-remove
+        #                       | event-add | event-update | event-delete
+        # The back end of Menu > Calendars (L.54; calendar_tools.admin() owns every rule).
+        # Not a command to type: the request is one JSON object on stdin (a calendar link is
+        # a secret, so it never goes in argv where a process list would show it) and the
+        # answer is one JSON object on stdout. {"ok": false, "error": ...} is a refusal, not
+        # a crash. Refused outright inside a chat reply, a scheduled job or a background task.
+        from .actions import calendar_tools as _cal
+        sub = argv[1] if len(argv) > 1 else ""
+        request = {}
+        if sub in _cal.ADMIN_OPS and sub != "feeds":
+            try:
+                raw_request = sys.stdin.read()
+                request = json.loads(raw_request) if raw_request.strip() else {}
+            except (ValueError, OSError):
+                request = None
+            if not isinstance(request, dict):
+                print(json.dumps({"ok": False, "error": "The request must be one JSON object on stdin."}))
+                return
+        print(json.dumps(_cal.admin(sub, request), ensure_ascii=False))
+        return
+
     # --- Policy --------------------------------------------------------------
     if argv[0] in ("policy", "policy-check", "policy-dry-run"):
         from . import policy as _policy

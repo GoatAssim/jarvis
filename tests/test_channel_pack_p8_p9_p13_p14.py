@@ -104,7 +104,8 @@ check("P8: a broken config answers no, never raises", permissions.may_send_image
 
 ok, err, note = user_admin.set_flag(DISCORD, FRIEND, "image", True)
 check("P8: switching pictures on works", ok, err)
-check("P8: ...and says it changes nothing yet", "doesn't read pictures" in note, note)
+check("P8: ...and says what it does now (Discord reads them, Instagram not yet)",
+      "reads pictures" in note and "Discord" in note and "Instagram" in note, note)
 check("P8: ...the person view shows it", person(FRIEND)["image"]["on"] is True and person(FRIEND)["effective"]["images"] == "on")
 check("P8: ...and may_send_images now says yes", permissions.may_send_images(cfg(), ident) is True)
 sim = user_admin.simulate(DISCORD, FRIEND, "dm")

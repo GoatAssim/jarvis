@@ -24,6 +24,17 @@ calendar service at all still gets something useful. Local events live in
 ~/.jarvis/calendar.json and are merged with feed events on every read, sorted
 together — from the model's point of view there is one calendar.
 
+THE CALENDARS PANEL (L.54)
+--------------------------
+Menu -> Calendars reads and edits the same two stores through ``admin()`` at the
+bottom of this file (``jarvis calendar-admin <op>``, one JSON object on stdin, one
+on stdout). It is a human-only path: no model tool reaches ``admin()``, the feed
+links are secrets and are only ever sent back MASKED, and it refuses to run inside
+a chat reply, a scheduled job or a background task (``unattended_reason``).
+Linked (ICS) calendars stay read-only: the panel can link, switch off, refresh and
+remove one, but it never writes an event to one. Editing and deleting is for
+Jarvis's own events only.
+
 PAIRING WITH THE SCHEDULER
 --------------------------
 `calendar_events` returns each event with a `starts_in_seconds`, which is
@@ -31,7 +42,9 @@ what makes "remind me an hour before my next meeting" a single ordinary
 schedule_task call against a real timestamp rather than a new subsystem.
 """
 
+import hashlib
 import json
+import os
 import re
 import secrets
 from datetime import datetime, timedelta, timezone
@@ -50,6 +63,16 @@ FETCH_TIMEOUT = 15
 MAX_ICS_BYTES = 4_000_000
 MAX_EVENTS_RETURNED = 40
 DEFAULT_LOOKAHEAD_DAYS = 7
+
+# Jarvis's own events are kept for this long after they end, and at most this many
+# (the panel states both, because deleting old events silently would surprise).
+LOCAL_RETENTION_DAYS = 60
+LOCAL_MAX_EVENTS = 500
+# Calendars panel limits.
+MAX_FEEDS = 12
+FEED_NAME_MAX = 40
+PANEL_MAX_RANGE_DAYS = 400
+PANEL_MAX_EVENTS = 2000
 
 DEFAULT_CONFIG = {
     "feeds": [],          # [{"name": "work", "url": "https://...ics", "enabled": true}]
@@ -139,7 +162,13 @@ def _finish_event(raw, window_start, window_end):
     start = _parse_ics_dt(*raw.get("DTSTART", ("", "")))
     if not start:
         return []
-    end = _parse_ics_dt(*raw.get("DTEND", ("", ""))) or (start + timedelta(hours=1))
+    end = _parse_ics_dt(*raw.get("DTEND", ("", "")))
+    if not end:
+        # A date-only DTSTART with no DTEND is an all-day event: one day long
+        # (RFC 5545 section 3.6.1). Anything else defaults to an hour, as before.
+        dtstart_value, dtstart_params = raw.get("DTSTART", ("", ""))
+        all_day = "VALUE=DATE" in (dtstart_params or "") or len((dtstart_value or "").strip()) == 8
+        end = start + (timedelta(days=1) if all_day else timedelta(hours=1))
     if (raw.get("STATUS") or "").upper() == "CANCELLED":
         return []
 
@@ -359,7 +388,7 @@ def local_events(cfg=None):
             "location": entry.get("location") or "",
             "description": entry.get("description") or "",
             "uid": entry.get("id") or "",
-            "start": start, "end": end, "source": "local",
+            "start": start, "end": end, "source": "local", "local": True,
         })
     return out
 
@@ -417,6 +446,516 @@ def _friendly(dt, now):
     if 0 < delta_days < 7:
         return dt.strftime("%a ") + clock
     return dt.strftime("%a %d %b ") + clock
+
+
+# ---------------------------------------------------------------------------
+# Calendars panel back end (L.54)
+#
+# Everything below is for the Menu -> Calendars panel, reached only through
+# ``admin()`` (``jarvis calendar-admin <op>``). None of it is a model tool, and
+# none of it is added to TOOLS / TOOL_SCHEMAS: a feed link is a secret and an
+# event written here is the owner's own, so a chat guest or a fetched page must
+# not be able to steer it. The model keeps exactly the two tools it already had.
+# ---------------------------------------------------------------------------
+
+_UNATTENDED_MESSAGE = ("The Calendars panel can only be used from the web page or your own "
+                       "terminal, not from a chat message, a scheduled job or a background task.")
+
+_EVENT_ID_RE = re.compile(r"^ev_[0-9a-f]{4,16}$")
+
+
+def unattended_reason():
+    """A reason string if this process must not touch the calendar admin, else None.
+
+    A chat reply, a scheduled job and a subagent all run the same CLI. Anything the
+    panel can do (link a secret URL, fetch a URL it was handed, write an event) could
+    otherwise be done by whoever can steer that conversation.
+    """
+    for var in ("JARVIS_CHANNEL", "JARVIS_CHANNEL_SENDER", "JARVIS_SCHEDULED", "JARVIS_TASK_ID"):
+        if os.environ.get(var):
+            return _UNATTENDED_MESSAGE
+    if os.environ.get("JARVIS_CONTEXT") in ("scheduled", "unattended"):
+        return _UNATTENDED_MESSAGE
+    return None
+
+
+def mask_url(url):
+    """A feed link with its secret hidden: scheme + host, then the first and last few
+    characters of a long path, never the middle. A short path is hidden entirely
+    (a short secret would otherwise be mostly on show). Userinfo is dropped."""
+    url = (url or "").strip()
+    match = re.match(r"^([A-Za-z][A-Za-z0-9+.\-]*)://([^/?#]*)(.*)$", url)
+    if not match:
+        return "(not a link)" if url else ""
+    scheme, authority, rest = match.groups()
+    host = authority.rsplit("@", 1)[-1]
+    if not rest:
+        tail = ""
+    elif len(rest) <= 24:
+        tail = "/\u2026"
+    else:
+        tail = rest[:5] + "\u2026" + rest[-4:]
+    return "%s://%s%s" % (scheme.lower(), host, tail)
+
+
+def _clean_link(url):
+    """What the owner pasted -> what gets fetched and saved: whitespace, quotes and
+    angle brackets off, the scheme lower-cased, ``webcal://`` rewritten to https."""
+    url = (url or "").strip().strip("\"'<>").strip()
+    match = re.match(r"^([A-Za-z][A-Za-z0-9+.\-]*)://(.*)$", url, re.S)
+    if match:
+        scheme = match.group(1).lower()
+        if scheme == "webcal":
+            scheme = "https"
+        url = scheme + "://" + match.group(2)
+    return url
+
+
+def _fetch_key(url):
+    """The cache key fetch_feed uses for this link."""
+    return (url or "").strip().replace("webcal://", "https://", 1)
+
+
+def _scrub(text, *links):
+    """Take any link out of an error message before it goes to the browser.
+
+    ``requests`` puts the whole address in its errors ("...Max retries exceeded with url:
+    /calendar/ical/<secret>/basic.ics"), and the address IS the secret. The links being
+    fetched are removed by value (whole, and the path/query part alone), then anything
+    that still looks like a link or a ``url: /path``."""
+    text = str(text or "")
+    for link in links:
+        for form in {(link or "").strip(), _fetch_key(link)}:
+            if form:
+                text = text.replace(form, "(link hidden)")
+        match = re.match(r"^[A-Za-z][A-Za-z0-9+.\-]*://[^/?#]*(.*)$", (link or "").strip())
+        tail = match.group(1) if match else ""
+        if len(tail) > 3:
+            text = text.replace(tail, "(hidden)")
+    text = re.sub(r"[A-Za-z][A-Za-z0-9+.\-]*://\S+", "(link hidden)", text)
+    text = re.sub(r"(\burl:?\s*)/\S+", r"\1(hidden)", text, flags=re.I)
+    return text
+
+
+def _is_all_day(start, end):
+    return (start.hour, start.minute, start.second) == (0, 0, 0) \
+        and (end.hour, end.minute, end.second) == (0, 0, 0) and end > start
+
+
+def _feed_view(feed, cache):
+    entry = cache.get(_fetch_key(feed.get("url"))) or {}
+    return {
+        "name": feed.get("name") or "calendar",
+        "url_masked": mask_url(feed.get("url")),
+        "enabled": feed.get("enabled") is not False,
+        "last_fetched": entry.get("at") or None,
+    }
+
+
+def feeds_view():
+    """The Calendars tab: every linked calendar with its link MASKED, plus the limits
+    the panel states. The raw link never leaves this module."""
+    cfg = load_config()
+    cache = _load_cache()
+    feeds = [_feed_view(f, cache) for f in (cfg.get("feeds") or []) if isinstance(f, dict)]
+    try:
+        lead = int(cfg.get("default_reminder_minutes") or 60)
+    except (TypeError, ValueError):
+        lead = 60
+    return {
+        "ok": True,
+        "feeds": feeds,
+        "max_feeds": MAX_FEEDS,
+        "local_event_count": len([e for e in cfg.get("local_events") or [] if isinstance(e, dict)]),
+        "default_reminder_minutes": max(1, min(lead, 10080)),
+        "retention_days": LOCAL_RETENTION_DAYS,
+        "retention_max": LOCAL_MAX_EVENTS,
+        "cache_minutes": CACHE_TTL_SECONDS // 60,
+    }
+
+
+def check_feed(url):
+    """Fetch a link the owner pasted and say what is on the other end, WITHOUT saving it.
+
+    The guide's "check before saving" step. Always fetches fresh (a cached body would
+    make a mistyped-then-fixed link look fine). A page that is not a calendar (a login
+    wall, an HTML error) is reported as such, not as "0 events".
+    """
+    clean = _clean_link(url)
+    if not clean:
+        return {"ok": False, "error": "Paste the calendar link first."}
+    if not clean.startswith(("http://", "https://")):
+        return {"ok": False,
+                "error": "That doesn't look like a web link. It should start with https:// "
+                         "(or webcal://)."}
+    body, err = fetch_feed({"url": clean}, force=True)
+    if err:
+        return {"ok": False, "error": "Couldn't open that link: %s" % _scrub(err, clean)}
+    if not body or not body.strip():
+        return {"ok": False, "error": "The link opened but was empty."}
+    if "BEGIN:VCALENDAR" not in body.upper():
+        return {"ok": False,
+                "error": "That link opened a web page, not a calendar. Use the secret iCal / "
+                         "ICS address (it usually ends in .ics), not the calendar's normal page."}
+    now = datetime.now()
+    found = len(parse_ics(body))
+    upcoming = [e for e in parse_ics(body, now - timedelta(hours=12), now + timedelta(days=366))
+                if e["end"] >= now]
+    upcoming.sort(key=lambda e: e["start"])
+    nxt = upcoming[0] if upcoming else None
+    return {
+        "ok": True,
+        "events_found": found,
+        "upcoming_found": len(upcoming),
+        "next_event": ({"title": nxt["title"], "start": nxt["start"].replace(microsecond=0).isoformat()}
+                       if nxt else None),
+        "insecure": clean.startswith("http://"),
+        "link": clean,
+    }
+
+
+def _clean_name(name):
+    name = re.sub(r"\s+", " ", (name or "").strip())
+    name = "".join(ch for ch in name if ch.isprintable())
+    return name[:FEED_NAME_MAX].strip()
+
+
+def link_feed(name, url):
+    """Check, then save, a new linked calendar. Refuses a duplicate name, a link that is
+    already linked, or a twelfth calendar. Returns the new feed MASKED."""
+    name = _clean_name(name)
+    if not name:
+        return {"ok": False, "error": "Give the calendar a name."}
+    cfg = load_config()
+    feeds = [f for f in (cfg.get("feeds") or []) if isinstance(f, dict)]
+    if len(feeds) >= MAX_FEEDS:
+        return {"ok": False, "error": "You already have %d linked calendars, the most the panel keeps. "
+                                      "Remove one first." % MAX_FEEDS}
+    if any((f.get("name") or "").strip().lower() == name.lower() for f in feeds):
+        return {"ok": False, "error": "There is already a calendar called \"%s\". Pick another name." % name}
+    clean = _clean_link(url)
+    for feed in feeds:
+        if _fetch_key(_clean_link(feed.get("url"))) == _fetch_key(clean):
+            return {"ok": False, "error": "That link is already linked as \"%s\"." % (feed.get("name") or "calendar")}
+    checked = check_feed(clean)
+    if not checked.get("ok"):
+        return checked
+    feeds.append({"name": name, "url": clean, "enabled": True})
+    cfg["feeds"] = feeds
+    if not save_config(cfg):
+        return {"ok": False, "error": "Couldn't save calendar.json."}
+    return {"ok": True, "name": name, "events_found": checked["events_found"],
+            "upcoming_found": checked["upcoming_found"], "next_event": checked["next_event"],
+            "feed": _feed_view(feeds[-1], _load_cache())}
+
+
+def set_feed_enabled(name, enabled):
+    cfg = load_config()
+    hit = 0
+    for feed in cfg.get("feeds") or []:
+        if isinstance(feed, dict) and (feed.get("name") or "") == name:
+            feed["enabled"] = bool(enabled)
+            hit += 1
+    if not hit:
+        return {"ok": False, "error": "There is no linked calendar called \"%s\"." % name}
+    if not save_config(cfg):
+        return {"ok": False, "error": "Couldn't save calendar.json."}
+    return {"ok": True, "name": name, "enabled": bool(enabled)}
+
+
+def remove_feed(name):
+    """Unlink a calendar (every linked calendar with that name) and drop its cached copy.
+    Jarvis's own events are not touched."""
+    cfg = load_config()
+    keep, gone = [], []
+    for feed in cfg.get("feeds") or []:
+        if isinstance(feed, dict) and (feed.get("name") or "") == name:
+            gone.append(feed)
+        else:
+            keep.append(feed)
+    if not gone:
+        return {"ok": False, "error": "There is no linked calendar called \"%s\"." % name}
+    cfg["feeds"] = keep
+    if not save_config(cfg):
+        return {"ok": False, "error": "Couldn't save calendar.json."}
+    still_used = {_fetch_key(f.get("url")) for f in keep if isinstance(f, dict)}
+    cache = _load_cache()
+    changed = False
+    for feed in gone:
+        key = _fetch_key(feed.get("url"))
+        if key in cache and key not in still_used:
+            del cache[key]
+            changed = True
+    if changed:
+        _save_cache(cache)
+    return {"ok": True, "removed": name}
+
+
+def collect_range(start, end, force=False):
+    """Every event overlapping [start, end], from every enabled feed and Jarvis's own
+    store, sorted. Unlike the model tool this has no 40-event cap. Never raises."""
+    cfg = load_config()
+    events, problems = [], []
+    for feed in cfg.get("feeds") or []:
+        if not isinstance(feed, dict) or feed.get("enabled") is False:
+            continue
+        body, err = fetch_feed(feed, force=force)
+        name = feed.get("name") or "calendar"
+        if err:
+            problems.append("%s: %s" % (name, _scrub(err, feed.get("url"))))
+        if not body:
+            continue
+        for event in parse_ics(body, start, end):
+            event["source"] = name
+            events.append(event)
+    events.extend(e for e in local_events(cfg) if e["end"] >= start and e["start"] <= end)
+    events.sort(key=lambda e: (e["start"], e["title"]))
+    return events, problems
+
+
+def _panel_event(ev):
+    start, end = ev["start"], ev["end"]
+    local = bool(ev.get("local"))
+    if local:
+        ident = ev.get("uid") or ""
+    else:
+        seed = "%s|%s|%s" % (ev.get("source") or "", ev.get("uid") or "", start.isoformat())
+        ident = "f_" + hashlib.sha1(seed.encode("utf-8")).hexdigest()[:10]
+    return {
+        "id": ident,
+        "title": ev.get("title") or "(no title)",
+        "start": start.replace(microsecond=0).isoformat(),
+        "end": end.replace(microsecond=0).isoformat(),
+        "all_day": _is_all_day(start, end),
+        "location": ev.get("location") or "",
+        "description": ev.get("description") or "",
+        "source": "Jarvis calendar" if local else (ev.get("source") or "calendar"),
+        "local": local,
+        # Only Jarvis's own events can be edited or deleted: a linked calendar is a
+        # read-only ICS link, and a hand-edited event with no id has nothing to address.
+        "editable": bool(local and _EVENT_ID_RE.match(ident or "")),
+    }
+
+
+def _parse_window_bound(text, label):
+    raw = (text or "").strip()
+    if not raw:
+        raise ValueError("%s is missing." % label)
+    try:
+        return datetime.fromisoformat(re.sub(r"(Z|[+-]\d{2}:?\d{2})$", "", raw) if "T" in raw else raw)
+    except ValueError:
+        raise ValueError("%s is not a date (use YYYY-MM-DD)." % label)
+
+
+def window_view(start_text, end_text, force=False):
+    """The Agenda / Week / Month views: events overlapping the window, serialized."""
+    try:
+        start = _parse_window_bound(start_text, "The start")
+        end = _parse_window_bound(end_text, "The end")
+    except ValueError as exc:
+        return {"ok": False, "error": str(exc)}
+    if end <= start:
+        return {"ok": False, "error": "The end of the window must be after its start."}
+    if (end - start).days > PANEL_MAX_RANGE_DAYS:
+        return {"ok": False, "error": "That is more than %d days; ask for a shorter window." % PANEL_MAX_RANGE_DAYS}
+    events, problems = collect_range(start, end, force=force)
+    truncated = len(events) > PANEL_MAX_EVENTS
+    return {
+        "ok": True,
+        "start": start.replace(microsecond=0).isoformat(),
+        "end": end.replace(microsecond=0).isoformat(),
+        "now": datetime.now().replace(microsecond=0).isoformat(),
+        "events": [_panel_event(e) for e in events[:PANEL_MAX_EVENTS]],
+        "problems": problems,
+        "truncated": truncated,
+        "feed_count": len([f for f in (load_config().get("feeds") or [])
+                           if isinstance(f, dict) and f.get("enabled") is not False]),
+    }
+
+
+def _prune_local(cfg):
+    """Drop events that ended more than LOCAL_RETENTION_DAYS ago and keep the newest
+    LOCAL_MAX_EVENTS. Shared by the model tool and the panel."""
+    cutoff = (datetime.now() - timedelta(days=LOCAL_RETENTION_DAYS)).isoformat()
+    cfg["local_events"] = [e for e in cfg.get("local_events") or []
+                           if (e.get("end") or e.get("start") or "") >= cutoff][-LOCAL_MAX_EVENTS:]
+    return cfg
+
+
+def _event_from_fields(fields, base=None):
+    """Panel fields -> (stored entry without an id, None) or (None, error message).
+
+    ``base`` is the stored entry being edited: a field the request leaves out keeps its
+    old value. A date is YYYY-MM-DD and a time HH:MM; an all-day event is the date at
+    midnight to the next midnight (how a linked calendar writes one)."""
+    fields = fields if isinstance(fields, dict) else {}
+    base = base or {}
+    try:
+        base_start = datetime.fromisoformat(base["start"]) if base.get("start") else None
+        base_end = datetime.fromisoformat(base["end"]) if base.get("end") else None
+    except (ValueError, TypeError):
+        base_start = base_end = None
+
+    title = (fields["title"] if "title" in fields else base.get("title") or "")
+    title = re.sub(r"\s+", " ", str(title or "")).strip()
+    if not title:
+        return None, "Give the event a title."
+
+    if "date" in fields:
+        try:
+            day = datetime.strptime(str(fields["date"]).strip(), "%Y-%m-%d")
+        except ValueError:
+            return None, "Pick a date (YYYY-MM-DD)."
+    elif base_start:
+        day = base_start.replace(hour=0, minute=0, second=0, microsecond=0)
+    else:
+        return None, "Pick a date."
+
+    if "all_day" in fields:
+        all_day = bool(fields["all_day"])
+    else:
+        all_day = bool(base_start and base_end and _is_all_day(base_start, base_end))
+
+    if all_day:
+        start = day
+        end = day + timedelta(days=1)
+    else:
+        if "time" in fields:
+            try:
+                clock = datetime.strptime(str(fields["time"]).strip(), "%H:%M")
+            except ValueError:
+                return None, "Pick a start time (HH:MM)."
+        elif base_start and not (base_end and _is_all_day(base_start, base_end)):
+            clock = base_start
+        else:
+            return None, "Pick a start time, or tick All day."
+        start = day.replace(hour=clock.hour, minute=clock.minute)
+        if "duration_minutes" in fields:
+            try:
+                minutes = int(fields["duration_minutes"])
+            except (TypeError, ValueError):
+                return None, "The duration must be a number of minutes."
+        elif base_start and base_end and not _is_all_day(base_start, base_end):
+            minutes = int((base_end - base_start).total_seconds() // 60)
+        else:
+            minutes = 60
+        end = start + timedelta(minutes=max(5, min(minutes, 1440)))
+
+    location = str(fields["location"] if "location" in fields else base.get("location") or "")[:200]
+    description = str(fields["description"] if "description" in fields else base.get("description") or "")[:500]
+    if end < datetime.now() - timedelta(days=LOCAL_RETENTION_DAYS):
+        return None, ("Events older than %d days are removed automatically, so this one "
+                      "wouldn't be kept." % LOCAL_RETENTION_DAYS)
+    return {
+        "title": title[:200],
+        "start": start.replace(microsecond=0).isoformat(),
+        "end": end.replace(microsecond=0).isoformat(),
+        "location": location.strip(),
+        "description": description.strip(),
+    }, None
+
+
+def _event_by_id(cfg, event_id):
+    if not isinstance(event_id, str) or not _EVENT_ID_RE.match(event_id):
+        return None
+    for index, entry in enumerate(cfg.get("local_events") or []):
+        if isinstance(entry, dict) and entry.get("id") == event_id:
+            return index
+    return None
+
+
+def add_local_event(fields):
+    entry, error = _event_from_fields(fields)
+    if error:
+        return {"ok": False, "error": error}
+    cfg = load_config()
+    existing = [e for e in cfg.get("local_events") or [] if isinstance(e, dict)]
+    if len(existing) >= LOCAL_MAX_EVENTS:
+        return {"ok": False, "error": "Jarvis's calendar already holds %d events, the most it keeps. "
+                                      "Delete some first." % LOCAL_MAX_EVENTS}
+    taken = {e.get("id") for e in existing}
+    new_id = "ev_" + secrets.token_hex(4)
+    while new_id in taken:
+        new_id = "ev_" + secrets.token_hex(4)
+    entry["id"] = new_id
+    cfg.setdefault("local_events", []).append(entry)
+    _prune_local(cfg)
+    if not save_config(cfg):
+        return {"ok": False, "error": "Couldn't save calendar.json."}
+    return {"ok": True, "event": _panel_event(_as_event(entry))}
+
+
+def update_local_event(event_id, fields):
+    cfg = load_config()
+    index = _event_by_id(cfg, event_id)
+    if index is None:
+        return {"ok": False, "error": "That event isn't in Jarvis's calendar any more "
+                                      "(it may have been deleted). Only Jarvis's own events can be edited."}
+    old = cfg["local_events"][index]
+    entry, error = _event_from_fields(fields, base=old)
+    if error:
+        return {"ok": False, "error": error}
+    entry["id"] = old["id"]
+    cfg["local_events"][index] = entry
+    if not save_config(cfg):
+        return {"ok": False, "error": "Couldn't save calendar.json."}
+    return {"ok": True, "event": _panel_event(_as_event(entry))}
+
+
+def delete_local_event(event_id):
+    cfg = load_config()
+    index = _event_by_id(cfg, event_id)
+    if index is None:
+        return {"ok": False, "error": "That event isn't in Jarvis's calendar any more "
+                                      "(it may have been deleted). Only Jarvis's own events can be deleted."}
+    removed = cfg["local_events"].pop(index)
+    if not save_config(cfg):
+        return {"ok": False, "error": "Couldn't save calendar.json."}
+    return {"ok": True, "removed": removed.get("id"), "title": removed.get("title") or ""}
+
+
+def _as_event(entry):
+    """A stored local entry -> the event shape collect_range yields."""
+    start = datetime.fromisoformat(entry["start"])
+    end = datetime.fromisoformat(entry["end"])
+    return {"title": entry.get("title") or "(no title)", "location": entry.get("location") or "",
+            "description": entry.get("description") or "", "uid": entry.get("id") or "",
+            "start": start, "end": end, "source": "local", "local": True}
+
+
+ADMIN_OPS = ("feeds", "window", "check", "link", "feed-enable", "feed-remove",
+             "event-add", "event-update", "event-delete")
+
+
+def admin(op, payload=None):
+    """The one entry point for the Calendars panel. Always returns a dict with ``ok``;
+    a refusal is ``{"ok": False, "error": ...}``, never an exception."""
+    why = unattended_reason()
+    if why:
+        return {"ok": False, "error": why, "code": "unattended"}
+    payload = payload if isinstance(payload, dict) else {}
+    try:
+        if op == "feeds":
+            return feeds_view()
+        if op == "window":
+            return window_view(payload.get("start"), payload.get("end"), force=payload.get("refresh") is True)
+        if op == "check":
+            return check_feed(payload.get("url"))
+        if op == "link":
+            return link_feed(payload.get("name"), payload.get("url"))
+        if op == "feed-enable":
+            return set_feed_enabled(str(payload.get("name") or ""), payload.get("enabled") is True)
+        if op == "feed-remove":
+            return remove_feed(str(payload.get("name") or ""))
+        if op == "event-add":
+            return add_local_event(payload.get("event"))
+        if op == "event-update":
+            return update_local_event(payload.get("id"), payload.get("event"))
+        if op == "event-delete":
+            return delete_local_event(payload.get("id"))
+    except Exception as exc:  # noqa: BLE001 -- a panel call must answer, not crash the page
+        return {"ok": False, "error": "Calendar error: %s" % str(exc)[:160]}
+    return {"ok": False, "error": "usage: jarvis calendar-admin %s (one JSON object on stdin)" % "|".join(ADMIN_OPS)}
 
 
 # ---------------------------------------------------------------------------
@@ -493,9 +1032,7 @@ def tool_calendar_add_event(args):
     cfg.setdefault("local_events", []).append(entry)
     # Keep the local store bounded; past events are pruned rather than kept
     # forever, since this is a calendar, not an archive.
-    cutoff = (datetime.now() - timedelta(days=60)).isoformat()
-    cfg["local_events"] = [e for e in cfg["local_events"]
-                           if (e.get("end") or e.get("start") or "") >= cutoff][-500:]
+    _prune_local(cfg)
     save_config(cfg)
 
     return {"ok": True, "id": entry["id"], "title": title,

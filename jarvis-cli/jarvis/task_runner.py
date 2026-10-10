@@ -127,7 +127,45 @@ def _spawn_ask(task, prompt):
     return True, text, None
 
 
+def _log_task_event(task, phase, **detail):
+    """L.2.4: a start/finish line in the task's own conversation log (only
+    when it has one -- a task with no conv_id has no log to put it in).
+    Written by the supervisor, which does not carry the task env the child
+    ask does, so the task id/label/source are passed explicitly. Never raises."""
+    conv_id = task.get("conv_id")
+    if not conv_id:
+        return
+    try:
+        from . import logs
+        logs.log_event(
+            conv_id, logs.EVENT_TASK,
+            dict({"phase": phase, "kind": "task_step"}, **detail),
+            source="task",
+            task_id=str(task.get("id") or ""),
+            task_label=str(task.get("title") or ""),
+        )
+    except Exception:  # noqa: BLE001 -- a log line must never break a step
+        pass
+
+
 def run_step(task, ask=None):
+    """Advance one task by one step and log where it began and ended (the
+    work is _run_step_impl; this wrapper covers every one of its exits)."""
+    planning = tasks.needs_plan(task)
+    _log_task_event(task, "started", step="plan" if planning else int(task.get("cursor") or 0) + 1,
+                    planning=planning)
+    updated = _run_step_impl(task, ask=ask)
+    try:
+        t = updated if isinstance(updated, dict) else task
+        _log_task_event(t, "finished", planning=planning, status=t.get("status"),
+                        progress=tasks.progress_line(t), error=str(t.get("last_error") or "")[:300],
+                        terminal=t.get("status") in (tasks.TERMINAL_STATUSES + (tasks.STATUS_BLOCKED,)))
+    except Exception:  # noqa: BLE001
+        pass
+    return updated
+
+
+def _run_step_impl(task, ask=None):
     """Advance one task by exactly one step. Returns the updated task.
 
     `ask` is an injectable `(task, prompt) -> (ok, text, error)` so tests can

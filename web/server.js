@@ -1003,53 +1003,55 @@ app.post("/api/console/:id/clear", requireJarvis, async (req, res) => {
 });
 
 // ---------------------------------------------------------------------------
-// K.2.5.3 (Part E.5) — the Live Feed filter's own preference: which kinds
-// are hidden, search text/mode, tool-name filter, turn scope. "Where the
+// K.2.5.3 (Part E.5) — the Ask Jarvis "Console" filter's own preference:
+// which categories of the command-prompt trace are hidden. "Where the
 // preference lives: server-side settings ... not localStorage" (E.5's own
 // design note) — same reasoning and the same tiny-JSON-file-next-to-
 // favorites.json pattern favorites already use above, not a new mechanism.
 // Deliberately NOT gated behind requireJarvis, for the same reason
 // favorites isn't: a UI filter preference has nothing to do with whether
 // the jarvis CLI itself is reachable.
+//
+// The category ids must match ASK_CONSOLE_CATEGORIES in public/app.js
+// (tests/test_ask_console_filter.py checks the two lists agree). This
+// replaces the old /api/console-filter-prefs (Live Feed filter, removed):
+// that file's `hiddenKinds` meant a different vocabulary, so it is NOT
+// migrated — a leftover data/console-filter-prefs.json is simply ignored.
 // ---------------------------------------------------------------------------
 
-const CONSOLE_FILTER_PREFS_PATH = path.join(__dirname, "data", "console-filter-prefs.json");
+const ASK_CONSOLE_FILTER_PATH = path.join(__dirname, "data", "ask-console-filter.json");
+const ASK_CONSOLE_KINDS = [
+  "tool-call", "tool-result", "tokens", "discovery", "provider",
+  "narration", "status", "error", "other",
+];
 
-async function readConsoleFilterPrefs() {
+async function readAskConsoleFilter() {
   try {
-    const text = await fs.readFile(CONSOLE_FILTER_PREFS_PATH, "utf-8");
+    const text = await fs.readFile(ASK_CONSOLE_FILTER_PATH, "utf-8");
     const parsed = JSON.parse(text);
-    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
+    const hidden = parsed && Array.isArray(parsed.hiddenKinds) ? parsed.hiddenKinds : [];
+    return { hiddenKinds: hidden.filter((k) => ASK_CONSOLE_KINDS.includes(k)) };
   } catch (e) {
-    return {}; // missing file (first run) or corrupt JSON: no saved preference yet
+    return { hiddenKinds: [] }; // missing file (first run) or corrupt JSON: show everything
   }
 }
 
-async function writeConsoleFilterPrefs(prefs) {
-  await fs.mkdir(path.dirname(CONSOLE_FILTER_PREFS_PATH), { recursive: true });
-  await fs.writeFile(CONSOLE_FILTER_PREFS_PATH, JSON.stringify(prefs, null, 2) + "\n", "utf-8");
-}
-
-app.get("/api/console-filter-prefs", async (req, res) => {
-  res.json(await readConsoleFilterPrefs());
+app.get("/api/ask-console-filter", async (req, res) => {
+  res.json(await readAskConsoleFilter());
 });
 
-app.post("/api/console-filter-prefs", async (req, res) => {
+app.post("/api/ask-console-filter", async (req, res) => {
   const body = req.body || {};
+  const hidden = Array.isArray(body.hiddenKinds) ? body.hiddenKinds : [];
   const prefs = {
-    hiddenKinds: Array.isArray(body.hiddenKinds)
-      ? body.hiddenKinds.filter((k) => typeof k === "string").slice(0, 64) : [],
-    search: typeof body.search === "string" ? body.search.slice(0, 500) : "",
-    searchMode: body.searchMode === "regex" ? "regex" : "text",
-    errorsOnly: body.errorsOnly === true,
-    tool: typeof body.tool === "string" ? body.tool.slice(0, 200) : "",
-    turnScope: body.turnScope === "turn" ? "turn" : "conversation",
+    hiddenKinds: [...new Set(hidden.filter((k) => ASK_CONSOLE_KINDS.includes(k)))],
   };
   try {
-    await writeConsoleFilterPrefs(prefs);
-    res.json({ ok: true });
+    await fs.mkdir(path.dirname(ASK_CONSOLE_FILTER_PATH), { recursive: true });
+    await fs.writeFile(ASK_CONSOLE_FILTER_PATH, JSON.stringify(prefs, null, 2) + "\n", "utf-8");
+    res.json({ ok: true, hiddenKinds: prefs.hiddenKinds });
   } catch (e) {
-    res.status(500).json({ error: `Couldn't save console filter preferences: ${e.message}` });
+    res.status(500).json({ error: `Couldn't save console filter preference: ${e.message}` });
   }
 });
 
@@ -2248,6 +2250,118 @@ app.delete("/api/backlog/:id", requireJarvis, async (req, res) => {
   }
   const result = await runJarvisOnce(["backlog-remove", id], 10000);
   return parseJarvisJSON(result, res, "Couldn't remove that item.");
+});
+
+// Calendars panel (L.54). Every route goes through `jarvis calendar-admin`, which owns
+// the rules (calendar_tools.admin). The linked-calendar URLs are secrets: they come back
+// MASKED, and they reach the CLI on stdin, never on argv where a process list shows them.
+// Same gate as Settings -- a loopback Host, a same-origin Origin when one is sent, and the
+// X-Jarvis-Calendar header -- so another web page can't make the browser link a calendar
+// or write an event. No model tool reaches these routes.
+function requireCalendarOrigin(req, res, next) {
+  const hostName = String(req.headers.host || "").replace(/:\d+$/, "");
+  if (!LOOPBACK_HOST_RE.test(hostName)) {
+    return res.status(403).json({ error: "Calendars can only be reached at the local address." });
+  }
+  const origin = req.headers.origin;
+  if (origin !== undefined) {
+    let ok = false;
+    try {
+      const u = new URL(origin);
+      ok = LOOPBACK_HOST_RE.test(u.hostname) && (u.port || "80") === String(PORT);
+    } catch { ok = false; }
+    if (!ok) return res.status(403).json({ error: "Calendars can only be changed from the Jarvis page itself." });
+  }
+  if (req.headers["x-jarvis-calendar"] !== "1") {
+    return res.status(403).json({ error: "Calendars can only be changed from the Jarvis page itself." });
+  }
+  next();
+}
+
+const CALENDAR_EVENT_ID_RE = /^ev_[0-9a-f]{4,16}$/;
+const CALENDAR_STATUS = { unattended: 403 };
+
+async function calendarAdmin(res, op, payload, timeoutMs = 30000) {
+  // `feeds` takes no body: the CLI never reads stdin for it, so don't open it.
+  const stdin = payload === null ? null : JSON.stringify(payload);
+  const result = await runJarvisOnce(["calendar-admin", op], timeoutMs, {}, stdin);
+  let parsed;
+  try { parsed = JSON.parse(result.stdout); }
+  catch (e) { return res.status(500).json({ error: result.stderr || result.error || e.message }); }
+  if (parsed && parsed.ok === false) return res.status(CALENDAR_STATUS[parsed.code] || 400).json(parsed);
+  return res.json(parsed);
+}
+
+function calendarText(value, max) {
+  return typeof value === "string" ? value.slice(0, max) : "";
+}
+
+app.get("/api/calendar/feeds", requireCalendarOrigin, requireJarvis, (req, res) => calendarAdmin(res, "feeds", null));
+
+app.get("/api/calendar/window", requireCalendarOrigin, requireJarvis, (req, res) => {
+  const start = calendarText(req.query.start, 40);
+  const end = calendarText(req.query.end, 40);
+  if (!start || !end) return res.status(400).json({ error: "A start and an end date are required." });
+  // A refresh re-downloads every linked calendar, one after another (15 s each at worst).
+  const refresh = req.query.refresh === "1";
+  return calendarAdmin(res, "window", { start, end, refresh }, refresh ? 120000 : 45000);
+});
+
+app.post("/api/calendar/check", requireCalendarOrigin, requireJarvis, (req, res) => {
+  return calendarAdmin(res, "check", { url: calendarText(req.body?.url, 2000) }, 40000);
+});
+
+app.post("/api/calendar/link", requireCalendarOrigin, requireJarvis, (req, res) => {
+  return calendarAdmin(res, "link", {
+    name: calendarText(req.body?.name, 120),
+    url: calendarText(req.body?.url, 2000),
+  }, 40000);
+});
+
+app.post("/api/calendar/feed/enable", requireCalendarOrigin, requireJarvis, (req, res) => {
+  const name = calendarText(req.body?.name, 120);
+  if (!name) return res.status(400).json({ error: "Which calendar?" });
+  return calendarAdmin(res, "feed-enable", { name, enabled: req.body?.enabled === true });
+});
+
+app.post("/api/calendar/feed/remove", requireCalendarOrigin, requireJarvis, (req, res) => {
+  const name = calendarText(req.body?.name, 120);
+  if (!name) return res.status(400).json({ error: "Which calendar?" });
+  return calendarAdmin(res, "feed-remove", { name });
+});
+
+function calendarEventBody(req, res) {
+  const event = req.body?.event;
+  if (!event || typeof event !== "object" || Array.isArray(event)) {
+    res.status(400).json({ error: "An event is required." });
+    return null;
+  }
+  // Only the fields the CLI reads, each bounded; anything else is dropped here.
+  const out = {};
+  for (const key of ["title", "date", "time", "location", "description"]) {
+    if (typeof event[key] === "string") out[key] = event[key].slice(0, 600);
+  }
+  if (event.duration_minutes !== undefined) out.duration_minutes = event.duration_minutes;
+  if (typeof event.all_day === "boolean") out.all_day = event.all_day;
+  return out;
+}
+
+app.post("/api/calendar/event", requireCalendarOrigin, requireJarvis, (req, res) => {
+  const event = calendarEventBody(req, res);
+  if (event) calendarAdmin(res, "event-add", { event });
+});
+
+app.put("/api/calendar/event/:id", requireCalendarOrigin, requireJarvis, (req, res) => {
+  const { id } = req.params;
+  if (!CALENDAR_EVENT_ID_RE.test(id)) return res.status(400).json({ error: "Invalid event id." });
+  const event = calendarEventBody(req, res);
+  if (event) calendarAdmin(res, "event-update", { id, event });
+});
+
+app.delete("/api/calendar/event/:id", requireCalendarOrigin, requireJarvis, (req, res) => {
+  const { id } = req.params;
+  if (!CALENDAR_EVENT_ID_RE.test(id)) return res.status(400).json({ error: "Invalid event id." });
+  return calendarAdmin(res, "event-delete", { id });
 });
 
 // Ambient monitoring.

@@ -1710,6 +1710,20 @@ def _unattended_gate(name, arguments):
     return verdict
 
 
+def _risk_summary(risk_note):
+    """A short, loggable view of a confirmation's risk note: who reviewed it
+    and what they said, clipped. Never the resolved command content (the
+    tool_call line and the popup already carry that)."""
+    if not isinstance(risk_note, dict):
+        return None
+    out = {}
+    if risk_note.get("provider"):
+        out["reviewer"] = str(risk_note["provider"])[:80]
+    if risk_note.get("note"):
+        out["note"] = str(risk_note["note"])[:400]
+    return out or None
+
+
 def _make_tool_executor(on_tool_call, schemas=None, on_confirm_request=None,
                          cfg=None, provider_ref=None, verbosity_ref=None,
                          discover_sink=None, cache_query=None,
@@ -1922,6 +1936,9 @@ def _make_tool_executor(on_tool_call, schemas=None, on_confirm_request=None,
                     "message": f"'{name}' requires user confirmation, but no confirmation "
                                f"channel is available here \u2014 not run.",
                 }
+                if conv_id:
+                    logs.log_event(conv_id, logs.EVENT_CONFIRMATION,
+                                   {"tool": name, "outcome": "no_channel"})
                 cache[key] = result
                 runs.append({"name": name, "arguments": arguments, "result": result})
                 return result
@@ -1983,10 +2000,19 @@ def _make_tool_executor(on_tool_call, schemas=None, on_confirm_request=None,
                 pass
 
             approved = False
+            # L.2.4: written BEFORE asking, so a prompt nobody answered (the
+            # tab closed, the run was killed) still leaves a line saying one
+            # was shown. The outcome is a second line, below.
+            if conv_id:
+                logs.log_event(conv_id, logs.EVENT_CONFIRMATION,
+                               {"tool": name, "outcome": "asked", "risk": _risk_summary(risk_note)})
             try:
                 approved = bool(on_confirm_request(name, arguments, risk_note))
             except TypeError:
                 approved = bool(on_confirm_request(name, arguments))
+            if conv_id:
+                logs.log_event(conv_id, logs.EVENT_CONFIRMATION,
+                               {"tool": name, "outcome": "approved" if approved else "declined"})
             if not approved:
                 result = {"ok": False, "cancelled": True,
                           "message": f"The user declined to run '{name}' \u2014 do not retry it "
@@ -3920,6 +3946,13 @@ def _ask_impl(user_text, commands=None, on_attempt=None, on_tool_call=None, on_t
                     ai_providers.set_stream_sink(on_stream)
                     _reset_stream_if_dirty()
                     ai_providers.set_stream_sink(None)
+                    if conv_id:
+                        logs.log_event(conv_id, logs.EVENT_RETRY_COOLDOWN, {
+                            "wait_s": round(float(wait_s), 1),
+                            "kind": str(result.kind or ""),
+                            "error": str(result.error or "")[:300],
+                            "same_key": True,
+                        }, provider=key_label)
                     if on_attempt:
                         on_attempt(f"{key_label} [rate limited \u2014 waiting {wait_s:.0f}s before retrying]")
                     console_store.log("provider", f"{key_label} [rate limited \u2014 waiting {wait_s:.0f}s before retrying]")
@@ -3940,6 +3973,11 @@ def _ask_impl(user_text, commands=None, on_attempt=None, on_tool_call=None, on_t
                     finally:
                         ai_providers.clear_log_context()
                     ask_usage.add(f"{key_label} (retry)", ai_providers.get_usage_summary(), ok=result.ok)
+                    if conv_id:
+                        logs.log_event(conv_id, logs.EVENT_RETRY_COOLDOWN, {
+                            "phase": "after", "ok": bool(result.ok),
+                            "error": "" if result.ok else str(result.error or "")[:300],
+                        }, provider=key_label)
                     if not result.ok:
                         result.error = f"{result.error} [waited {wait_s:.0f}s for the stated rate limit, still failed]"
                     if on_attempt:
@@ -4030,6 +4068,10 @@ def _ask_impl(user_text, commands=None, on_attempt=None, on_tool_call=None, on_t
                     reply_text = result.text + _CUT_NOTE
                     ending = "truncated"
                     trace.ending = ending
+                    if conv_id:
+                        logs.log_event(conv_id, logs.EVENT_FORCED_ENDING, {
+                            "ending": ending, "reason": "the provider stopped the answer at its output length cap"},
+                            provider=key_label)
                 clean_text, dump_lines = _split_console_dump(reply_text)
                 if dump_lines:
                     extras.append({"type": "console", "data": {"dumpLines": dump_lines}})
@@ -4129,6 +4171,9 @@ def _ask_impl(user_text, commands=None, on_attempt=None, on_tool_call=None, on_t
         trace.degraded = True
         trace.ending = "token_budget"
         trace.tokens = token_budget.summary()
+        if conv_id:
+            logs.log_event(conv_id, logs.EVENT_FORCED_ENDING, {
+                "ending": "token_budget", "reason": "the run went over its token limit"})
         console_store.log("error", reply)
         if conv_id:
             stop_extras = _extras_from_runs(turn_runs)
@@ -4158,6 +4203,14 @@ def _ask_impl(user_text, commands=None, on_attempt=None, on_tool_call=None, on_t
         ending = "cutoff" if is_cutoff else "forced"
         trace.degraded = True
         trace.ending = ending
+        if conv_id:
+            logs.log_event(conv_id, logs.EVENT_FORCED_ENDING, {
+                "ending": ending,
+                "reason": ("the provider cut the run off before it could finish" if is_cutoff
+                           else "the step budget ran out; the reply is a report of what ran"),
+                "error": str(getattr(forced_end, "error", "") or "")[:300],
+                "pending_call": bool(getattr(forced_end, "pending", None)),
+            })
         if conv_id:
             forced_extras = _extras_from_runs(turn_runs)
             declined_extra = _declined_action_extra(turn_runs)
@@ -4207,6 +4260,9 @@ def _ask_impl(user_text, commands=None, on_attempt=None, on_tool_call=None, on_t
         trace.degraded = True
         trace.ending = "no_provider"
         if conv_id:
+            logs.log_event(conv_id, logs.EVENT_FORCED_ENDING, {
+                "ending": "no_provider",
+                "reason": "every provider failed on the closing call; the reply summarises what had already run"})
             extras = _extras_from_runs(turn_runs)
             declined_extra = _declined_action_extra(turn_runs)
             if declined_extra:

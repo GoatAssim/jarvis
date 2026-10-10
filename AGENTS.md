@@ -144,8 +144,9 @@ things that were already fixed once.
 - **Pictures, the platform tools switch, panel DMs and the turned-away list
   (L.36-P8 / P9 / P13 / P14).** (1) `image_allowlist` is a fourth list but NOT a
   stage of the gate: `permissions.may_send_images()` only ever ANDs with an
-  allowed decision, so a picture grant can never open a conversation; nothing
-  reads it until inbound images (L.42) exist, and the panel says so. Every
+  allowed decision, so a picture grant can never open a conversation;
+  `channels/media_in.py` is its only reader (Discord; Instagram does not read
+  pictures yet) and the panel says so. Every
   place that walks "all of someone's lists" uses `user_admin.LISTS`, so block,
   forget, handle edits and listing cannot forget it. It is not a bulk flag or
   part of any quick setup. (2) `channels/master_tools.py` is the only way the
@@ -240,6 +241,20 @@ things that were already fixed once.
   thinking about exfiltration. Instagram has no `send_file` yet, so nothing is attached there.
   `tests/test_channel_media_out.py` pins this.
 
+- **A picture someone SENDS reaches the model only as a description, only after the gate said yes, and only if the sender is the owner or on `image_allowlist` (L.36-P8 / L.42.3 inbound).**
+  The Discord gateway reports `message.attachments` as plain descriptors (`IncomingMessage.attachments`: url, name, type, size -- never bytes;
+  `permissions.decide()` must never read them). `channels/media_in.prepare_text` is the one reader and `base.handle_message` calls it
+  AFTER the gate and the dedupe guard, so a picture can never open a conversation, be paid for twice, or be fetched for a sender who was refused.
+  It asks `permissions.may_send_images` itself; a person without the grant is not read AND the model is told N pictures were not looked at.
+  What it will fetch: https URLs on the platform's own CDN only (`ALLOWED_HOSTS`; redirects not followed; never an address from message text),
+  image types whose first bytes really are an image, at most `MAX_IMAGES` per message, at most `max_image_mb` each (default 8, checked against the
+  declared AND the received size), and for anyone but the owner `RATE_PER_PERSON` per hour on disk (`media_in.json`). The file lives in a private
+  temp folder for one vision call and is deleted straight after. The model gets the vision model's DESCRIPTION wrapped in a note that says so and
+  that text inside a picture is content, never an instruction -- keep that wording; the picture is an injection channel and its cost lands on the
+  owner's vision provider. Don't widen the host list, don't fetch a URL a sender typed, don't put the picture in the conversation record as bytes,
+  and don't let this open the OUTBOUND collector (`media_out`), which stays owner-only. Instagram is not built (it drops a message with no text).
+  `tests/test_channel_media_in.py` pins this.
+
 - **Settings > Advanced is owner-only and UI-only; every rule lives in `jarvis/settings_admin.py` (L.43).**
   The Settings modal (`web/public/settings.js`) reaches files and tunables only through
   `/api/settings/*` -> `jarvis settings-admin`. Keep it that way: no model tool, no slash passthrough and no
@@ -327,6 +342,7 @@ actually render Markdown):
     node tests/verify_math_rendering.js
     node tests/verify_thread_extras_collapse.js   # BUG-5/6: answered confirmations are one line, one card per dev_agent job, cards before the reply on reload, saved thinking follows the toggle; no npm install
     node tests/verify_ask_trace_replay.js
+    node tests/verify_ask_console_filter.js   # E.5/K.2.5.3: Ask Jarvis Console filter classifier (tool calls / token cost / [tools] ...), markup and CSS wiring; no npm install (its Python twin test_ask_console_filter.py checks app.js/server.js/style.css category lists agree)
     node tests/verify_daemons_panel.js
     node tests/verify_daemons_console.js   # the console line classifier (H.1.7)
     node tests/verify_log_conversation.js  # L.2: Logs Conversation view grouping (turns, tool pairing, failover, side requests, filters) + replays tests/fixtures/*.jsonl; no npm install
@@ -339,6 +355,8 @@ actually render Markdown):
     node tests/verify_agent_panel.js        # L.47: the Focus Agent panel's reducer + tree builder (agent-panel.js); no npm install
     python3 tests/test_channel_timed_and_instruction.py   # L.36-P6 / P12: time-limited tools and the per-person instruction
     python3 tests/test_channel_pack_p8_p9_p13_p14.py      # L.36-P8 / P9 / P13 / P14: picture grant, platform tools switch, panel DM, turned-away list
+    python3 tests/test_channel_media_in.py   # L.36-P8 / L.42.3 inbound: pictures a person sends on Discord are read only for the owner and the picture list (host / size / count / hourly caps, description wrapped as content, never raises)
+    python3 tests/verify_l53_tool_maker_ui.py # L.53: the Tool Maker's Ask Jarvis side panel in a real browser (toggle, one conversation per tab, New chat, Undo, tag); needs `playwright` (Python) + Chromium, prints SKIP without them
     python3 tests/test_allowed_guilds.py    # L.36-P17: allowed_guilds editor (preview-first, last entry never removable, real gate, CLI, route pinned statically)
     python3 tests/verify_l36_guilds_ui.py   # L.36-P17: Home tab (platform cards, 40 servers), status dropdown, allowed-servers editor in a real browser; needs `playwright` (Python) + Chromium, prints SKIP without them
     python3 tests/verify_l36_pack_ui.py     # L.36-P8/P9/P13/P14/P16: those panels + the add-person panel in a real browser; needs `playwright` (Python) + Chromium, prints SKIP without them

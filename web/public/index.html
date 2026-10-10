@@ -23,6 +23,7 @@
 <link rel="stylesheet" href="category-input.css">
 <link rel="stylesheet" href="daemons.css">
 <link rel="stylesheet" href="backlog.css">
+<link rel="stylesheet" href="calendar.css">
 <link rel="stylesheet" href="logsearch.css">
 <link rel="stylesheet" href="log-conversation.css">
 <link rel="stylesheet" href="schedules.css">
@@ -213,7 +214,7 @@
           <div class="panel-menu" id="panel-menu">
             <button class="btn btn--ghost" id="btn-panel-menu" type="button"
                     aria-haspopup="true" aria-expanded="false"
-                    title="Debug tools, skills, scheduled tasks and reminders, daemons, backlog, log search and connected MCP servers">
+                    title="Debug tools, skills, scheduled tasks and reminders, calendars, daemons, backlog, log search and connected MCP servers">
               Menu <span class="panel-menu__caret" aria-hidden="true">&#9662;</span>
             </button>
             <div class="panel-menu__list" id="panel-menu-list" role="menu" hidden>
@@ -236,6 +237,10 @@
               <button class="panel-menu__item" id="menu-item-scheduled" type="button" role="menuitem">
                 <span class="panel-menu__item-label">Scheduled</span>
                 <span class="panel-menu__item-hint">Tasks, reminders and notifications</span>
+              </button>
+              <button class="panel-menu__item" id="menu-item-calendar" type="button" role="menuitem">
+                <span class="panel-menu__item-label">Calendars</span>
+                <span class="panel-menu__item-hint">Your events, link a calendar, add events, set reminders</span>
               </button>
               <button class="panel-menu__item" id="menu-item-mcp" type="button" role="menuitem">
                 <span class="panel-menu__item-label">MCP Servers</span>
@@ -268,46 +273,6 @@
             </div>
           </div>
           <button class="btn btn--ghost" id="btn-clear-console" type="button">Clear</button>
-        </div>
-      </div>
-      <!-- Part E.5/K.2.5.3 — filter the persisted console replay (not just
-           this tab's live stream) by kind, tool, turn scope and text.
-           Preference is server-persisted (see /api/console-filter-prefs
-           in server.js), same off-localStorage pattern favorites already
-           use, so it survives a reload instead of resetting to "show
-           everything" (the documented default) every time. The kind
-           checkboxes and tool <select> are built at runtime (see
-           renderConsoleKindFilter/refreshConsoleToolFilterOptions in
-           app.js) — only kinds/tools actually present get a control, so
-           this never shows a permanently-empty checkbox. -->
-      <div class="console-filter" id="console-filter">
-        <div class="console-filter__row console-filter__row--kinds"
-             id="console-filter-kinds" role="group" aria-label="Filter console output by kind"></div>
-        <div class="console-filter__row console-filter__row--controls">
-          <label class="console-filter__errors-only">
-            <input type="checkbox" id="console-filter-errors-only"> Errors only
-          </label>
-          <select id="console-filter-tool" class="console-filter__select" title="Filter by tool name" hidden>
-            <option value="">All tools</option>
-          </select>
-          <select id="console-filter-scope" class="console-filter__select" title="Turn scope">
-            <option value="conversation" selected>This conversation</option>
-            <option value="turn">This turn</option>
-          </select>
-          <select id="console-filter-preset" class="console-filter__select" title="Presets">
-            <option value="" selected>Presets&hellip;</option>
-            <option value="everything">Everything</option>
-            <option value="quiet">Quiet (errors + tool calls)</option>
-          </select>
-        </div>
-        <div class="console-filter__row console-filter__row--search">
-          <input type="search" id="console-search" class="panel__search-input console-filter__search"
-                 placeholder="Filter&hellip;" autocomplete="off">
-          <select id="console-search-mode" class="console-filter__select" title="Search mode">
-            <option value="text" selected>Text</option>
-            <option value="regex">Regex</option>
-          </select>
-          <span class="console-filter__hidden-chip" id="console-filter-hidden-chip" hidden></span>
         </div>
       </div>
       <div class="console" id="console">
@@ -392,6 +357,19 @@
           </button>
           <div class="provider-picker__menu" id="think-picker-menu" hidden></div>
         </div>
+        <!-- Console filter (Part E.5 / K.2.5.3). Moved here from the Live Feed
+             panel: hides whole categories of the PROMPT trace (tool calls,
+             token cost, [tools] discovery, provider requests, ...), each one
+             independently. Display-only. Same button + dropdown shape as the
+             pickers next to it. See "Ask Jarvis Console filter" in app.js. -->
+        <div class="provider-picker" id="console-filter-picker">
+          <button class="btn btn--ghost btn--sm" id="btn-console-filter" type="button"
+                  title="Choose which lines show in the command prompt trace: tool calls, token cost, [tools] discovery, provider requests and more"
+                  aria-haspopup="true" aria-expanded="false">
+            <span id="console-filter-label">Console: all</span>
+          </button>
+          <div class="provider-picker__menu console-filter__menu" id="console-filter-menu" hidden></div>
+        </div>
         <span class="convo-id-tag" id="ask-convo-id-tag" title="Active conversation id"></span>
         <button class="btn btn--ghost btn--sm" id="btn-ask-clear" type="button" title="Clear this conversation">Clear</button>
         <!-- Menu lives next to the Live Feed's Clear button now, but that
@@ -464,6 +442,8 @@
       <aside class="ask-prompt" aria-label="Live command prompt">
         <div class="ask-prompt__head">
           <span class="ask-prompt__title">PROMPT</span>
+          <button class="ask-prompt__hidden-chip" id="ask-console-hidden-chip" type="button" hidden
+                  title="Some trace lines are hidden by the Console filter. Click to show them all."></button>
           <span class="ask-prompt__state" id="ask-prompt-state">idle</span>
         </div>
         <div class="ask-prompt__term" id="ask-prompt-term">
@@ -1716,6 +1696,45 @@
   </div>
 </div>
 
+<!-- CALENDARS — Menu → Calendars (L.54). Own .css/.js (calendar.css/calendar.js, see
+     the latter's header for the rules it keeps: linked calendars are read-only, the
+     links are secrets and only ever shown masked, event text is never put in as HTML).
+     Same .debug-overlay/.debug-panel chrome as Backlog/Daemons. Everything inside
+     #calendar-main, #calendar-side and #calendar-layer is built by calendar.js. -->
+<div class="debug-overlay" id="calendar-overlay" hidden>
+  <div class="debug-panel">
+    <div class="panel__corner panel__corner--tl"></div>
+    <div class="panel__corner panel__corner--br"></div>
+
+    <div class="debug-panel__head">
+      <svg class="brand-mark" viewBox="0 0 40 40" aria-hidden="true">
+        <circle cx="20" cy="20" r="18" class="brand-mark__ring"/>
+        <circle cx="20" cy="20" r="11" class="brand-mark__ring brand-mark__ring--in"/>
+        <circle cx="20" cy="20" r="3" class="brand-mark__core"/>
+      </svg>
+      <div class="debug-panel__titles">
+        <div class="debug-panel__title">CALENDARS</div>
+        <div class="debug-panel__subtitle" id="calendar-status-line">reading calendars&hellip;</div>
+      </div>
+      <button class="modal__close" id="calendar-close" type="button" aria-label="Close">&times;</button>
+    </div>
+
+    <div class="cal-tabs" role="tablist" aria-label="Calendars">
+      <button class="cal-tab is-active" id="calendar-tab-events" type="button" role="tab" aria-selected="true">Events</button>
+      <button class="cal-tab" id="calendar-tab-calendars" type="button" role="tab" aria-selected="false">Calendars</button>
+    </div>
+    <div class="cal-toolbar" id="calendar-toolbar"></div>
+    <div class="cal-problems" id="calendar-problems" hidden></div>
+
+    <div class="cal-body" id="calendar-body">
+      <div class="cal-main" id="calendar-main"></div>
+      <aside class="cal-side" id="calendar-side" aria-label="Details"></aside>
+    </div>
+    <div class="cal-foot">&larr; &rarr; move &middot; t today &middot; a / w / m view &middot; n new event &middot; r refresh &middot; Esc close</div>
+    <div class="cal-layer" id="calendar-layer" hidden></div>
+  </div>
+</div>
+
 <!-- LOG SEARCH — the raw files on disk, line by line. The existing Logs
      viewer shows parsed conversation entries; this one finds the line that
      failed to parse, the traceback in a daemon console, and anything in a
@@ -1908,6 +1927,7 @@
 <script src="channels-panel.js"></script>
 <script src="daemons.js"></script>
 <script src="backlog.js"></script>
+<script src="calendar.js"></script>
 <script src="log-conversation.js"></script>
 <script src="logsearch.js"></script>
 <script src="schedules.js"></script>

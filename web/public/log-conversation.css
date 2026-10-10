@@ -137,6 +137,9 @@
 }
 .lc-sys--error{ border-color: var(--red); }
 .lc-sys--switch{ border-color: var(--gold); }
+.lc-sys--retry, .lc-sys--confirm{ border-color: var(--gold); }
+.lc-sys--forced{ border-color: var(--red); }
+.lc-sys--task{ border-style: solid; border-color: var(--accent-soft); }
 .lc-sys__sum{
   display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
   padding: 4px 10px; cursor: pointer; list-style: none;
@@ -150,6 +153,8 @@
 }
 .lc-sys--error .lc-sys__icon, .lc-sys--error .lc-sys__title{ color: var(--red); }
 .lc-sys--switch .lc-sys__icon{ color: var(--gold); }
+.lc-sys--retry .lc-sys__icon, .lc-sys--confirm .lc-sys__icon{ color: var(--gold); }
+.lc-sys--forced .lc-sys__icon, .lc-sys--forced .lc-sys__title{ color: var(--red); }
 .lc-sys__title{ flex: 1 1 200px; min-width: 0; overflow-wrap: anywhere; }
 .lc-sys__body{ padding: 2px 10px 10px; display: flex; flex-direction: column; gap: 6px; }
 

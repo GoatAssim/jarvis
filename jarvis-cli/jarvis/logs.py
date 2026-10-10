@@ -56,9 +56,15 @@ def _safe_json(obj):
     return obj
 
 
-def log(conv_id, direction, data, provider=None, round_num=None):
+def log(conv_id, direction, data, provider=None, round_num=None,
+        source=None, task_id=None, task_label=None):
     """Append one entry to conv_id's log. Never raises — a logging failure
     must never break an actual ask.
+
+    source / task_id / task_label override the environment-derived values.
+    Only a caller that is NOT the process doing the work needs them: the task
+    supervisor and the scheduler write a start/finish line for a run whose
+    JARVIS_TASK_* variables exist only in the child process they spawn.
 
     direction: one of "request" | "response" | "tool_call" | "tool_result"
                | "error" | "info" — free-form label shown in the UI.
@@ -83,7 +89,8 @@ def log(conv_id, direction, data, provider=None, round_num=None):
         # job runs inside whatever conversation created it, so the same
         # conversation legitimately holds both hand-typed and job-driven
         # entries and labelling the conversation would mislabel half of them.
-        "source": (os.environ.get("JARVIS_LOG_SOURCE") or "").strip()[:32],
+        "source": (source if source is not None
+                   else (os.environ.get("JARVIS_LOG_SOURCE") or "")).strip()[:32],
         # L.3: which task/job (if any) drove this entry. Same reasoning as
         # "source" above — read from the environment rather than threaded
         # through every call site, and entry-level rather than conversation-
@@ -92,8 +99,10 @@ def log(conv_id, direction, data, provider=None, round_num=None):
         # match on; task_label is the human-readable title for display.
         # Bounded defensively like source; left empty (never fabricated) for
         # entries a task/job didn't produce.
-        "task_id": (os.environ.get("JARVIS_TASK_ID") or "").strip()[:64],
-        "task_label": (os.environ.get("JARVIS_TASK_LABEL") or "").strip()[:100],
+        "task_id": (task_id if task_id is not None
+                    else (os.environ.get("JARVIS_TASK_ID") or "")).strip()[:64],
+        "task_label": (task_label if task_label is not None
+                       else (os.environ.get("JARVIS_TASK_LABEL") or "")).strip()[:100],
         "data": _safe_json(data),
     }
     line = json.dumps(entry, ensure_ascii=False)
@@ -104,6 +113,27 @@ def log(conv_id, direction, data, provider=None, round_num=None):
                 f.write(line + "\n")
     except OSError as e:
         print(f"Warning: couldn't write log for {conv_id}: {e}", file=sys.stderr)
+
+
+# L.2.4: execution events the Conversation view draws as timeline rows. Each is
+# an "info" entry whose data carries {"event": <name>, ...}; the viewer keys on
+# that name, so the set below is the contract between the two. Anything the
+# backend does not write here, the viewer does not show (it never infers).
+EVENT_RETRY_COOLDOWN = "retry_cooldown"       # waited out a stated rate limit, same key
+EVENT_FORCED_ENDING = "forced_ending"         # the turn ended some way other than the model finishing
+EVENT_CONFIRMATION = "confirmation"           # a tool needed a yes/no; carries the outcome
+EVENT_TASK = "task"                           # a task/scheduled-job run started or finished
+
+
+def log_event(conv_id, event, detail=None, provider=None, round_num=None, **overrides):
+    """Write one L.2.4 execution event. Never raises, like log()."""
+    try:
+        data = {"event": str(event)}
+        if isinstance(detail, dict):
+            data.update(detail)
+        log(conv_id, "info", data, provider=provider, round_num=round_num, **overrides)
+    except Exception as e:  # noqa: BLE001 — an event line must never break a run
+        print(f"Warning: couldn't write log event {event}: {e}", file=sys.stderr)
 
 
 def has_log(conv_id):

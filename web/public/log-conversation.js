@@ -253,6 +253,19 @@
   //              tokensIn, tokensOut, askTotal, closed, toolCount, errorCount }
   // Event    = { type, ts, provider, round, entries[], ... } where type is one of
   //   user | assistant | tool | attempt | error | side | console | command | empty | info | other
+  //   | retry | forced | confirm | task   (L.2.4: written by the backend as "info" lines whose
+  //     data.event names them; see logs.py EVENT_*. Shown only when such a line exists.)
+
+  // L.2.4: the "info" lines the backend writes for execution events (logs.py).
+  const EXEC_EVENTS = new Set(["retry_cooldown", "forced_ending", "confirmation", "task"]);
+  const EXEC_EVENT_TYPE = { retry_cooldown: "retry", forced_ending: "forced", confirmation: "confirm", task: "task" };
+  const ENDING_TEXT = {
+    forced: "Forced ending \u2014 the step budget ran out",
+    cutoff: "Forced ending \u2014 the provider cut the run off",
+    token_budget: "Stopped \u2014 over the token limit",
+    no_provider: "Ended \u2014 every provider failed on the closing call",
+    truncated: "Cut off \u2014 the answer hit the output length cap",
+  };
 
   function buildTimeline(entries) {
     const list = Array.isArray(entries) ? entries : [];
@@ -319,10 +332,14 @@
       startTurn(entry);
       if (prev && !prev.closed) {
         const moved = [];
-        while (prev.events.length && prev.events[prev.events.length - 1].type === "attempt") {
+        const isLead = (e) => e.type === "attempt" || (e.type === "task" && e.phase === "started");
+        while (prev.events.length && isLead(prev.events[prev.events.length - 1])) {
           moved.unshift(prev.events.pop());
         }
-        for (const ev of moved) { ev.switched = false; ev.from = null; cur.events.push(ev); cur.attemptLabel = ev.provider; }
+        for (const ev of moved) {
+          if (ev.type === "attempt") { ev.switched = false; ev.from = null; cur.attemptLabel = ev.provider; }
+          cur.events.push(ev);
+        }
       }
     }
 
@@ -352,6 +369,16 @@
               touch(entry);
               cur.askTotal = isObj(d.ask_usage) ? d.ask_usage : null;
               cur.closed = true;
+            } else if (isObj(d) && typeof d.event === "string" && EXEC_EVENTS.has(d.event)) {
+              // A task's "started" line opens a run: when the previous turn already
+              // ended, it belongs to the next one. Every other execution event
+              // (including a task's "finished" line) belongs to the turn it follows.
+              if (d.event === "task" && d.phase === "started" && cur && cur.closed) startTurn(entry);
+              touch(entry);
+              const ev = addEvent(EXEC_EVENT_TYPE[d.event], entry, { phase: str(d.phase), detail: d });
+              if (d.event === "forced_ending") cur.forcedEnding = str(d.ending) || "forced";
+              if (d.event === "task" && d.phase === "finished" && str(d.status) === "failed") cur.errorCount++;
+              void ev;
             } else if (isObj(d) && Array.isArray(d.console_dump)) {
               touch(entry);
               addEvent("console", entry, { lines: d.console_dump.map((l) => String(l)) });
@@ -829,6 +856,46 @@
       case "command":
         return sysRow("command", "$", `Command run${ev.exitCode != null ? ` \u00b7 exit ${ev.exitCode}` : ""} \u00b7 ${clip(ev.cmdline, 140)}`, ev,
           [h("pre", "lc-json__pre", ev.lines.map((l) => (isObj(l) ? str(l.text) : String(l))).join("\n"))]);
+      case "retry": {
+        const d = isObj(ev.detail) ? ev.detail : {};
+        if (ev.phase === "after") {
+          return sysRow("retry", "\u21bb", `Retry ${d.ok ? "succeeded" : "failed"}${d.ok ? "" : ` \u00b7 ${clip(str(d.error), 160)}`}`, ev,
+            d.error ? [h("div", "lc-note", str(d.error))] : []);
+        }
+        const wait = Number(d.wait_s);
+        return sysRow("retry", "\u23f3", `Rate limited \u2014 waiting ${Number.isFinite(wait) ? wait + "s" : "a moment"}, then retrying the same key`, ev,
+          d.error ? [h("div", "lc-note", str(d.error))] : []);
+      }
+      case "forced": {
+        const d = isObj(ev.detail) ? ev.detail : {};
+        const kids = [];
+        if (d.reason) kids.push(h("div", "lc-note", str(d.reason)));
+        if (d.error) kids.push(h("div", "lc-note", str(d.error)));
+        return sysRow("forced", "\u26a0", ENDING_TEXT[str(d.ending)] || `Ended early (${str(d.ending) || "unknown"})`, ev, kids);
+      }
+      case "confirm": {
+        const d = isObj(ev.detail) ? ev.detail : {};
+        const tool = str(d.tool) || "a tool";
+        const outcome = str(d.outcome);
+        const title = outcome === "approved" ? `Confirmation: ${tool} \u2014 approved`
+          : outcome === "declined" ? `Confirmation: ${tool} \u2014 declined`
+          : outcome === "no_channel" ? `Confirmation required: ${tool} \u2014 no way to ask, not run`
+          : `Confirmation required: ${tool}`;
+        const kids = [];
+        if (isObj(d.risk)) {
+          if (d.risk.note) kids.push(h("div", "lc-note", `${d.risk.reviewer ? d.risk.reviewer + ": " : ""}${str(d.risk.note)}`));
+        }
+        return sysRow("confirm", "?", title, ev, kids);
+      }
+      case "task": {
+        const d = isObj(ev.detail) ? ev.detail : {};
+        const what = d.kind === "scheduled_job" ? "Scheduled run" : (d.planning ? "Task planning step" : "Task step");
+        const title = ev.phase === "started"
+          ? `${what} started`
+          : `${what} finished${d.status ? ` \u00b7 ${str(d.status)}` : ""}${d.progress ? ` \u00b7 ${str(d.progress)}` : ""}`;
+        const kids = d.error ? [h("div", "lc-note", str(d.error))] : [];
+        return sysRow("task", ev.phase === "started" ? "\u25b7" : "\u25a0", title, ev, kids);
+      }
       case "empty":
         return sysRow("empty", "\u2205", "Model returned an empty response (no text, no tool call)", ev);
       case "info":
@@ -960,7 +1027,7 @@
     _pure: {
       extractUserText, parseResponseBody, summarizeArgs, classifyResult, errorMessage, fmtDuration,
       fmtLocal, hostOf, eventMatches, filterIsActive, planVisibility, findEventForEntry, entryKey,
-      stripNotice, isSyntheticUserText,
+      stripNotice, isSyntheticUserText, renderEvent,
     },
   };
 })(window);

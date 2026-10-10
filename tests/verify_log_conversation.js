@@ -293,6 +293,78 @@ ok("build(undefined) and build([]) are empty timelines", JLC.build(undefined).tu
   ok("focus: an unknown entry resolves to nothing", P.findEventForEntry(t, { ts: "nope", direction: "request" }) === null && P.findEventForEntry(t, null) === null);
 }
 
+// --- L.2.4 execution events (written by the backend as "info" lines with data.event) --------
+{
+  const ev = (event, extra, more) => entry("info", Object.assign({ event }, extra), more);
+  const retry = ev("retry_cooldown", { wait_s: 4, kind: "key", error: "rate limited", same_key: true });
+  const retryDone = ev("retry_cooldown", { phase: "after", ok: true, error: "" });
+  const forced = ev("forced_ending", { ending: "forced", reason: "the step budget ran out" });
+  const askedConf = ev("confirmation", { tool: "run_shell", outcome: "asked", risk: { reviewer: "groq", note: "deletes a file" } });
+  const declined = ev("confirmation", { tool: "run_shell", outcome: "declined" });
+  const taskStart = ev("task", { phase: "started", kind: "task_step", step: 1 }, { source: "task", task_id: "t1", task_label: "Greeter" });
+  const taskEnd = ev("task", { phase: "finished", kind: "task_step", status: "done", progress: "1/1" }, { source: "task", task_id: "t1", task_label: "Greeter" });
+  const unknown = entry("info", { event: "something_new" });
+
+  const log = [
+    taskStart, capacity("gemini (key 1/2)"), gemReq("do it"),
+    gemResp([{ functionCall: { name: "run_shell", args: { command: "del x" } } }]), usage(0, 5, 5),
+    askedConf, declined,
+    retry, capacity("gemini (key 1/2)"), gemReq("do it"), gemResp([{ text: "ok" }]), usage(0, 5, 5),
+    retryDone, forced,
+    entry("info", { ask_usage: { total: 1 } }, { provider: "ask total" }),
+    taskEnd, unknown,
+  ];
+  const t = JLC.build(log);
+  const evs = t.turns.flatMap((x) => x.events);
+  const types = evs.map((e) => e.type);
+  ok("L.2.4: a task's start line stays in the turn it opens (one turn, not two)", t.turns.length === 1, t.turns.map((x) => x.events.length));
+  ok("L.2.4: a task's start line sits right after the user message, before the first attempt", types.slice(0, 3).join() === "user,task,attempt", types.slice(0, 3));
+  ok("L.2.4: retry/cooldown lines become retry rows", types.filter((x) => x === "retry").length === 2);
+  ok("L.2.4: forced ending becomes a forced row carrying its ending", evs.some((e) => e.type === "forced" && e.detail.ending === "forced") && t.turns[0].forcedEnding === "forced");
+  ok("L.2.4: each confirmation line becomes a confirm row", types.filter((x) => x === "confirm").length === 2);
+  ok("L.2.4: task finished after the end-of-ask marker joins the same turn", evs.filter((e) => e.type === "task").map((e) => e.phase).join() === "started,finished");
+  ok("L.2.4: the task label is on the event", evs.filter((e) => e.type === "task").every((e) => e.taskLabel === "Greeter"));
+  ok("L.2.4: a capacity line right after a task start does not make a 'switch'", evs.filter((e) => e.type === "attempt").every((e) => !e.switched || e.from));
+  ok("L.2.4: an unrecognised event name stays a generic info row (nothing invented)", evs[evs.length - 1].type === "info");
+  ok("L.2.4: every new event keeps its raw entry", evs.filter((e) => ["retry", "forced", "confirm", "task"].includes(e.type)).every((e) => e.entries.length === 1));
+  ok("L.2.4: the direction filter finds them as 'info'", evs.filter((e) => e.type === "forced").every((e) => P.eventMatches(e, { direction: "info" })));
+
+  // A second task step in the same conversation: its start line must open turn 2, not trail turn 1.
+  const two = JLC.build([
+    taskStart, capacity("gemini (key 1/2)"), gemReq("step one"), gemResp([{ text: "a" }]),
+    entry("info", { ask_usage: { total: 1 } }, { provider: "ask total" }), taskEnd,
+    ev("task", { phase: "started", kind: "task_step", step: 2 }, { source: "task", task_id: "t1", task_label: "Greeter" }),
+    capacity("gemini (key 1/2)"), gemReq("step two"), gemResp([{ text: "b" }]),
+  ]);
+  ok("L.2.4: the next task step's start line opens the next turn", two.turns.length === 2 && (two.turns[1].events.find((e) => e.type === "task") || {}).phase === "started" && two.turns[1].events.find((e) => e.type === "task").detail.step === 2 && two.turns[0].events.filter((e) => e.type === "task").map((e) => e.phase).join() === "started,finished",
+    two.turns.map((x) => x.events.map((e) => e.type).join(",")));
+
+  // Rendering smoke test against a tiny fake DOM (the real render is checked by hand in a browser).
+  function fakeEl(tag) {
+    return { tag, className: "", children: [], attrs: {}, textContent: "", style: {},
+      setAttribute(k, v) { this.attrs[k] = v; }, appendChild(c) { this.children.push(c); return c; },
+      addEventListener() {}, classList: { add() {}, remove() {}, toggle() {} } };
+  }
+  win.document = { createElement: fakeEl, createTextNode: (t) => ({ text: String(t) }), createDocumentFragment: () => fakeEl("#frag") };
+  ctx.document = win.document;
+  const textOf = (n) => (n == null ? "" : (n.text != null ? n.text : "") + (n.textContent || "") + (n.children || []).map(textOf).join(" "));
+  const classOf = (n) => (n && n.className) || "";
+  const drawn = {};
+  for (const e of evs) {
+    if (!["retry", "forced", "confirm", "task"].includes(e.type)) continue;
+    let node = null, threw = null;
+    try { node = P.renderEvent(e, {}); } catch (err) { threw = err; }
+    drawn[e.type + (e.phase ? ":" + e.phase : "") + (e.detail && e.detail.outcome ? ":" + e.detail.outcome : "")] = { node, threw };
+  }
+  ok("L.2.4: every new row draws without throwing", Object.values(drawn).every((d) => d.node && !d.threw && !/Couldn't draw/.test(textOf(d.node))), Object.keys(drawn).filter((k) => drawn[k].threw));
+  ok("L.2.4: retry row says it waited and will retry the same key", /waiting 4s/.test(textOf(drawn["retry"].node)) && /same key/.test(textOf(drawn["retry"].node)));
+  ok("L.2.4: retry outcome row says it succeeded", /Retry succeeded/.test(textOf(drawn["retry:after"].node)));
+  ok("L.2.4: forced row names the step budget and is styled as forced", /step budget ran out/.test(textOf(drawn["forced"].node)) && /lc-sys--forced/.test(classOf(drawn["forced"].node)));
+  ok("L.2.4: confirm row shows tool, outcome and the reviewer's note", /Confirmation required: run_shell/.test(textOf(drawn["confirm:asked"].node)) && /deletes a file/.test(textOf(drawn["confirm:asked"].node)));
+  ok("L.2.4: declined confirmation says declined", /declined/.test(textOf(drawn["confirm:declined"].node)));
+  ok("L.2.4: task rows say started / finished with status", /started/.test(textOf(drawn["task:started"].node)) && /finished.*done.*1\/1/.test(textOf(drawn["task:finished"].node)));
+}
+
 // --- real fixtures ----------------------------------------------------------------------
 const FIX = path.join(__dirname, "fixtures");
 let fixturesRun = 0;
