@@ -30,3 +30,4 @@ voices
 voice/
 voice
 web/data/
+tests/fixtures
