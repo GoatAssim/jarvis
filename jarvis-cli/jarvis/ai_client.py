@@ -1487,8 +1487,13 @@ def risk_review(tool_name, arguments, cfg, exclude_label=None, mode=None):
             "markdown, just the assessment."
         )
         messages = [{"role": "user", "content": prompt}]
-        result = adapter(resolved, messages, resolved.get("timeout", DEFAULT_TIMEOUT),
-                          tools=None, tool_executor=None)
+        # isolated_call: this runs INSIDE the main turn, on the same thread, so
+        # without it the second provider would share the main attempt's
+        # thinking level/trace and (when streaming) its stream sink -- its
+        # thinking landed in the main bubble. See ai_providers.isolated_call.
+        with ai_providers.isolated_call():
+            result = adapter(resolved, messages, resolved.get("timeout", DEFAULT_TIMEOUT),
+                             tools=None, tool_executor=None)
         if result.ok and result.text:
             return {"provider": _provider_label(provider), "note": result.text.strip()}
         return None

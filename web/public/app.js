@@ -2232,6 +2232,28 @@
     return el("span", { class: "badge badge--cond badge--cat", title: `Category: ${name}` }, name);
   }
 
+  // The category dropdown under the search box (category-menu.js): filters the
+  // list, and renames / merges / deletes a category on every command at once.
+  // Built lazily because renderCommandList() runs before this file's last lines.
+  // It holds the current filter, so renderCommandList() just asks it.
+  let commandCatMenu = null;
+  function categoryMenu() {
+    if (commandCatMenu) return commandCatMenu;
+    const M = window.JarvisCategoryMenu;
+    const mount = qs("#cmd-cat-filter");
+    if (!M || !mount || !window.JarvisCategories) return null;
+    commandCatMenu = M.create({
+      mount,
+      getCommands: () => state.commands,
+      onSelect: () => renderCommandList(),
+      // The server saves commands.json and pushes the change to every open tab;
+      // reloading here makes this tab correct without waiting for the push.
+      onChanged: () => loadCommands({ silent: true }),
+      toast: (message, level) => toast(message, level),
+    });
+    return commandCatMenu;
+  }
+
   // A card's meta row is one line. Show as many category chips as fit beside
   // the step / var / conditional badges and leave out the rest (the info view
   // lists them all). Chips are laid out first, measured, then hidden - a hidden
@@ -2275,6 +2297,8 @@
   function renderCommandList() {
     const list = qs("#cmd-list");
     const allNames = Object.keys(state.commands);
+    const catMenu = categoryMenu();
+    if (catMenu) catMenu.update();
     if (allNames.length === 0) {
       list.innerHTML = "";
       list.appendChild(el("div", { class: "empty-hint" }, "No commands yet. Build your first one."));
@@ -2283,6 +2307,7 @@
     const query = state.cmdSearch.trim().toLowerCase();
     const names = allNames
       .filter((name) => commandMatchesSearch(name, state.commands[name], query))
+      .filter((name) => !catMenu || catMenu.matches(state.commands[name]))
       // Favorited commands float to the top; within each group (favorited
       // / not), relative order is left exactly as it came in — a plain
       // .sort() would be unstable-in-spirit here, so this compares only
@@ -2290,7 +2315,16 @@
       .sort((a, b) => Number(isFavoriteCommand(b)) - Number(isFavoriteCommand(a)));
     list.innerHTML = "";
     if (names.length === 0) {
-      list.appendChild(el("div", { class: "empty-hint" }, `No commands match \u201c${state.cmdSearch.trim()}\u201d.`));
+      const picked = catMenu ? catMenu.describe() : null;
+      const where = picked && picked.filtered ? ` in \u201c${picked.label}\u201d` : "";
+      const said = query ? `No commands match \u201c${state.cmdSearch.trim()}\u201d${where}.` : `No commands${where}.`;
+      const hint = el("div", { class: "empty-hint" }, said);
+      if (picked && picked.filtered) {
+        hint.appendChild(el("div", { style: "margin-top:10px" }, [
+          el("button", { type: "button", class: "btn btn--ghost btn--sm", onclick: () => catMenu.clear() }, "Show all commands"),
+        ]));
+      }
+      list.appendChild(hint);
       return;
     }
     for (const name of names) {
@@ -7972,6 +8006,7 @@
     state.cmdSearch = e.target.value;
     renderCommandList();
   });
+  categoryMenu();
 
   qs("#btn-new-command").addEventListener("click", () => openBuilder("new"));
   qs("#modal-close").addEventListener("click", closeBuilder);
@@ -8223,13 +8258,8 @@
   }
 
   qs("#btn-settings").addEventListener("click", () => openSettings("commands.json"));
-  // Rename / merge / delete a command category as a whole (category-manager.js). The
-  // server saves commands.json and pushes the change to every open tab, so the list
-  // and the editor's suggestions follow without a reload here.
-  qs("#btn-command-categories").addEventListener("click", () => {
-    if (!window.JarvisCategoryManager) { toast("category-manager.js didn\u2019t load, so categories can\u2019t be managed.", "error"); return; }
-    window.JarvisCategoryManager.open({ kind: "command" });
-  });
+  // Category rename / merge / delete for commands lives in the dropdown under the
+  // search box now (category-menu.js, created by categoryMenu() above).
   qs("#settings-close").addEventListener("click", closeSettings);
   qs("#btn-settings-cancel").addEventListener("click", closeSettings);
   settingsBackdrop.addEventListener("click", (e) => { if (e.target === settingsBackdrop) closeSettings(); });
@@ -9637,6 +9667,156 @@
     if (subagentLiveTimer) clearInterval(subagentLiveTimer);
     subagentLiveTimer = null;
     subagentLiveTimerId = null;
+    stopSubagentStreamPoll();
+  }
+
+  // --- K.3.2.4 word-by-word tier -----------------------------------------
+  // The console tail above lands one line per tool call / provider attempt.
+  // This adds what the model is writing and thinking RIGHT NOW. A subagent
+  // step's `jarvis ask` appends the same JARVIS_STREAM events the main Ask
+  // panel streams to ~/.jarvis/tasks/streams/<id>.jsonl (jarvis/task_stream.py)
+  // and GET /api/subagents/:id/stream serves that file by byte offset. We poll
+  // it (~0.5s) while the subagent is selected and active, so words arrive in
+  // small bursts rather than per token. Rendered as plain text (never HTML) in
+  // a block that, like the live pane, outlives renderSubagentDetail's resets.
+  const SUBAGENT_STREAM_POLL_MS = 500;
+  const SUBAGENT_STREAM_TEXT_TAIL = 6000;      // chars of the current round kept on screen
+  const SUBAGENT_STREAM_THINKING_TAIL = 500;
+  const SUBAGENT_STREAM_KEEP_DONE = 6;         // earlier rounds' interim text kept above
+  const subagentStreamDom = {};     // task id -> {root, step, done, thinking, text}
+  const subagentStreamState = {};   // task id -> {text, thinking, tool, step}
+  const subagentStreamOffset = {};  // task id -> byte offset already consumed
+  let subagentStreamTimer = null;
+  let subagentStreamTimerId = null;
+  let subagentStreamBusy = false;
+
+  function getOrCreateSubagentStreamBlock(id) {
+    let b = subagentStreamDom[id];
+    if (b) return b;
+    const root = el("div", { class: "subagent-stream" });
+    root.hidden = true; // nothing streamed yet
+    b = {
+      root,
+      step: el("div", { class: "subagent-stream__step" }),
+      done: el("div", { class: "subagent-stream__done" }),
+      thinking: el("div", { class: "subagent-stream__thinking" }),
+      text: el("div", { class: "subagent-stream__text" }),
+    };
+    [b.step, b.done, b.thinking, b.text].forEach((n) => root.appendChild(n));
+    subagentStreamDom[id] = b;
+    subagentStreamState[id] = { text: "", thinking: "", tool: "", step: "" };
+    return b;
+  }
+
+  function clearSubagentStream(id) {
+    const b = getOrCreateSubagentStreamBlock(id);
+    subagentStreamState[id] = { text: "", thinking: "", tool: "", step: "" };
+    b.step.textContent = "";
+    b.done.textContent = "";
+    b.thinking.textContent = "";
+    b.text.textContent = "";
+    b.root.hidden = true;
+  }
+
+  function applySubagentStreamEvent(id, ev) {
+    const b = getOrCreateSubagentStreamBlock(id);
+    const st = subagentStreamState[id];
+    switch (ev && ev.k) {
+      case "step_start":
+        // A new step: nothing of the previous one is still "now".
+        clearSubagentStream(id);
+        subagentStreamState[id].step = ev.step === "plan" ? "Planning\u2026" : `Step ${ev.step}\u2026`;
+        break;
+      case "thinking":
+        st.thinking += String(ev.d || "");
+        break;
+      case "text":
+        st.text += String(ev.d || "");
+        break;
+      case "tool":
+        st.tool = String(ev.name || "");
+        break;
+      case "round_end":
+        if (ev.finish === "tool") {
+          // Text before a tool call is a real interim message -- keep it above,
+          // as the main Ask panel does, and move on to the next round.
+          const kept = st.text.trim();
+          if (kept) {
+            b.done.appendChild(el("div", { class: "subagent-stream__done-row" }, kept));
+            while (b.done.children.length > SUBAGENT_STREAM_KEEP_DONE) b.done.removeChild(b.done.firstChild);
+          }
+          st.step = st.tool ? `running ${st.tool}\u2026` : "running tool\u2026";
+          st.text = "";
+          st.thinking = "";
+          st.tool = "";
+        }
+        break;
+      case "reset":
+        // Mid-stream failover: the partial output of this attempt is void.
+        st.text = "";
+        st.thinking = "";
+        st.step = "switching provider\u2026";
+        break;
+      case "step_end":
+        st.thinking = "";
+        st.step = ev.ok === false ? "Step failed" : "Step finished";
+        break;
+    }
+  }
+
+  function renderSubagentStreamBlock(id) {
+    const b = subagentStreamDom[id];
+    const st = subagentStreamState[id];
+    if (!b || !st) return;
+    const tail = (str, n) => (str.length > n ? "\u2026" + str.slice(str.length - n) : str);
+    b.step.textContent = st.step;
+    b.thinking.textContent = st.thinking ? "thinking: " + tail(st.thinking, SUBAGENT_STREAM_THINKING_TAIL) : "";
+    b.thinking.hidden = !st.thinking;
+    b.text.textContent = tail(st.text, SUBAGENT_STREAM_TEXT_TAIL);
+    b.text.hidden = !st.text;
+    b.root.hidden = !(st.step || st.text || st.thinking || b.done.children.length);
+    // Follow the newest words, but only while someone is looking at this one.
+    if (selectedSubagent === id) b.root.scrollTop = b.root.scrollHeight;
+  }
+
+  async function pollSubagentStreamOnce(id) {
+    if (subagentStreamBusy) return; // a slow reply must not stack requests
+    subagentStreamBusy = true;
+    try {
+      // A big backlog (attaching mid-step) comes back in slices; drain it now
+      // rather than one slice per tick, but never loop unbounded.
+      for (let slice = 0; slice < 8; slice += 1) {
+        let result;
+        try {
+          result = await Api.get(`/api/subagents/${encodeURIComponent(id)}/stream?since=${subagentStreamOffset[id] || 0}`);
+        } catch {
+          return; // transient -- the next tick tries again
+        }
+        if (!result || typeof result.next !== "number") return;
+        subagentStreamOffset[id] = result.next;
+        if (result.reset) clearSubagentStream(id);
+        const events = Array.isArray(result.events) ? result.events : [];
+        events.forEach((ev) => applySubagentStreamEvent(id, ev));
+        if (events.length || result.reset) renderSubagentStreamBlock(id);
+        if (!result.more) return;
+      }
+    } finally {
+      subagentStreamBusy = false;
+    }
+  }
+
+  function startSubagentStreamPoll(id) {
+    if (subagentStreamTimer && subagentStreamTimerId === id) return; // already tailing this one
+    stopSubagentStreamPoll();
+    subagentStreamTimerId = id;
+    pollSubagentStreamOnce(id);
+    subagentStreamTimer = setInterval(() => pollSubagentStreamOnce(id), SUBAGENT_STREAM_POLL_MS);
+  }
+
+  function stopSubagentStreamPoll() {
+    if (subagentStreamTimer) clearInterval(subagentStreamTimer);
+    subagentStreamTimer = null;
+    subagentStreamTimerId = null;
   }
 
   function subagentStatusClass(status) {
@@ -9725,6 +9905,9 @@
         if (!known.has(id) && id !== selectedSubagent) {
           delete subagentLiveDom[id];
           delete subagentLiveSeq[id];
+          delete subagentStreamDom[id];
+          delete subagentStreamState[id];
+          delete subagentStreamOffset[id];
         }
       });
     }
@@ -9806,6 +9989,9 @@
     // body.innerHTML reset above; pollSubagentLiveOnce appends to it
     // directly and independently of this render cycle.
     body.appendChild(el("div", { class: "skills-pane__head skills-pane__head--sub" }, [el("h3", {}, "Live")]));
+    // K.3.2.4: what the model is writing/thinking right now sits above the
+    // console tail (tool calls, provider attempts); hidden until something streams.
+    body.appendChild(getOrCreateSubagentStreamBlock(detail.id).root);
     body.appendChild(getOrCreateSubagentLivePane(detail.id, detail.conv_id));
   }
 
@@ -9838,6 +10024,15 @@
       // 4s list polls still shows its trailing lines instead of just
       // whatever was already on screen from the last time it was active.
       if (detail.conv_id && !subagentLiveSeq[id]) pollSubagentLiveOnce(id, detail.conv_id);
+    }
+    // K.3.2.4: the stream needs no transcript, so it follows "active" alone. Done
+    // after the block above because stopSubagentLivePoll() also stops the stream.
+    if (SUBAGENT_ACTIVE_STATUSES.has(detail.status)) {
+      startSubagentStreamPoll(id);
+    } else {
+      // One catch-up read (cheap: it resumes from the stored offset) so the words
+      // a step wrote between the last poll and finishing still show.
+      pollSubagentStreamOnce(id);
     }
   }
 
@@ -10089,6 +10284,15 @@
     dialog: (opts) => JarvisUI.dialog(opts),
     refreshChats: () => refreshConvoList(),
     originLabel: (origin) => (ORIGIN_LABELS[origin] && ORIGIN_LABELS[origin].text) || "",
+    // L.14.2 / L.13: the "/" palette stars and sorts saved commands the same way the
+    // Commands list does -- one favourites set (server-persisted via /api/favorites),
+    // two views of it. toggleFavoriteCommand() re-sorts the Commands list and saves.
+    favoriteCommandNames: () => Array.from(favoriteCommands),
+    toggleFavoriteCommand: (name) => {
+      if (!name || !state.commands || !Object.prototype.hasOwnProperty.call(state.commands, name)) return null;
+      toggleFavoriteCommand(name);
+      return isFavoriteCommand(name);
+    },
     copyLastReply() {
       const msgs = askThread.querySelectorAll(".ask-msg--jarvis");
       const last = msgs[msgs.length - 1];

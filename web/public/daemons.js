@@ -2969,7 +2969,42 @@
     return true;
   }
 
-  function open() {
+  // L.14 follow-up / H.1: a deep link into one service's console. Used by Log
+  // search ("Open Daemons (<id>)"). Everything that can hide the service is
+  // undone first -- an active filter, a collapsed group -- because landing on
+  // the panel with the wanted service filtered out of the list would look like
+  // the link did nothing. An id that is not registered any more (a removed
+  // service still has its old console.log on disk) says so instead.
+  // Pure, so it can be tested without a DOM: what showing service `id` needs.
+  function focusPlan(entries, id, filters) {
+    const entry = (entries || []).find((e) => e && e.id === id) || null;
+    if (!entry) return { found: false, clearFilters: false, group: null };
+    return { found: true, clearFilters: !matchesFilters(entry, filters), group: entry.builtin ? "builtin" : "custom" };
+  }
+
+  async function focusService(id, tab) {
+    const plan = focusPlan(state.entries, id, activeFilters());
+    if (!plan.found) {
+      toast(state.loadError
+        ? `Couldn\u2019t load the services, so \u2018${id}\u2019 can\u2019t be shown.`
+        : `\u2018${id}\u2019 isn\u2019t a registered service any more, so there is no console to show.`, "info");
+      return false;
+    }
+    if (plan.clearFilters) clearFilters();
+    state.collapsed.delete(plan.group);
+    if (tab === "console" || tab === "details") state.tab = tab;
+    await select(id, true);
+    if (state.selected !== id) return false;       // an unsaved editor refused to be left
+    applyTab();
+    return true;
+  }
+
+  // open() is also the click handler of the Menu item, so it must tolerate being
+  // handed an Event (or nothing): only a plain {id, tab} object is a deep link.
+  function open(opts) {
+    const target = opts && typeof opts === "object" && !opts.target && typeof opts.id === "string" && opts.id.trim()
+      ? { id: opts.id.trim(), tab: opts.tab === "details" ? "details" : "console" }
+      : null;
     // The category filter and editor field are built from it; failing here, with
     // a reason, beats a half-rendered panel and a TypeError.
     if (!global.JarvisCategories) {
@@ -2991,6 +3026,7 @@
     renderMain();
     loadFavorites();
     loadEntries().then(() => {
+      if (target) { focusService(target.id, target.tab); return; }
       const card = dom.list.querySelector(".dmn-card.is-active");
       if (card && card.scrollIntoView) card.scrollIntoView({ block: "center" });
     });
@@ -3016,12 +3052,14 @@
 
   global.JarvisDaemons = {
     open, close, isOpen,
+    // open({id, tab}) is the deep link; focusService is for tests only.
+    _focusService: focusService,
     // Pure helpers, exposed for tests/verify_daemons_panel.js only.
     _pure: {
       normalizeId, bucketOf, withDefaults, isStoppable, fmtDuration, uptimeSeconds, fmtStamp,
       fmtBytes, fmtCpu, usageText, usageTitle, usageTotalText,
       describeNextStart, restartSummary, stopSummary, attentionOf, searchHaystack, matchesFilters,
-      countEntries, categoriesOf, normalizeKind, reconcileKind, sortFavoritesFirst, toggleFavoriteId, entrySignature, classifyLine, annotateLines, summarizeLines, filterLines,
+      countEntries, categoriesOf, normalizeKind, reconcileKind, sortFavoritesFirst, toggleFavoriteId, focusPlan, entrySignature, classifyLine, annotateLines, summarizeLines, filterLines,
       groupTraces, highlightSegments, draftFromEntry, blankDraft, validateDraft, envPairs,
       buildAddPayload, buildEditPayload, buildReport, STATES, CONSOLE_FILTERS,
     },

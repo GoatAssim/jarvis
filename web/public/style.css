@@ -2700,6 +2700,24 @@ audio.ask-dl-player{ max-height: none; background: transparent; }
 .slash-badge--dangerous { color: var(--red); }
 
 .slash-hl { color: var(--accent); font-weight: 700; }
+
+/* L.14.2 / L.13: saved-command rows carry a favourite star and category chips. */
+.slash-heading--plain { text-transform: none; letter-spacing: 0.02em; font-family: var(--font-mono); }
+.slash-star {
+  flex-shrink: 0; align-self: center; font-size: 0.8rem; line-height: 1; cursor: pointer;
+  color: var(--text-dimmer); opacity: 0; transition: opacity 0.1s;
+}
+.slash-row:hover .slash-star, .slash-row.is-active .slash-star { opacity: 0.7; }
+.slash-star.is-on { color: var(--accent-secondary); opacity: 1; }
+.slash-star.is-static { cursor: default; }
+@media (pointer: coarse) { .slash-star { opacity: 0.5; padding: 0 4px; } .slash-star.is-on { opacity: 1; } }
+.slash-row__cats { display: inline-flex; gap: 4px; flex-shrink: 0; }
+.slash-row__cat {
+  font-family: var(--font-mono); font-size: 0.62rem; letter-spacing: 0.04em;
+  color: var(--accent-secondary); border: 1px solid rgba(var(--accent-secondary-rgb), 0.35);
+  border-radius: 2px; padding: 0 5px; white-space: nowrap;
+}
+@media (max-width: 720px) { .slash-row__cats { display: none; } }
 .slash-row.is-disabled .slash-hl { color: var(--text-dim); }
 
 /* Visually hidden, still announced: the "N commands / no matches" live region. */
@@ -3381,6 +3399,23 @@ body.layout--focus:has(#subagents-overlay.is-docked:not([hidden]):not(.is-collap
 
 .subagent-history{ max-height: 220px; }
 .subagent-live{ max-height: 260px; }
+
+/* K.3.2.4: what the subagent is writing / thinking right now (app.js,
+   getOrCreateSubagentStreamBlock). Plain text only; sits above .subagent-live. */
+.subagent-stream{
+  max-height: 220px; overflow-y: auto; margin: 0 0 8px; padding: 8px 10px;
+  border: 1px solid var(--border); border-radius: 8px;
+  font-size: 13px; line-height: 1.45;
+}
+.subagent-stream[hidden]{ display: none; }
+.subagent-stream__step{ font-size: 11px; color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.04em; }
+.subagent-stream__done-row{
+  margin: 4px 0; padding-left: 8px; border-left: 2px solid var(--border);
+  color: var(--text-dim); white-space: pre-wrap; word-break: break-word;
+}
+.subagent-stream__thinking{ margin: 4px 0; color: var(--text-dimmer); font-style: italic; white-space: pre-wrap; word-break: break-word; }
+.subagent-stream__text{ margin: 4px 0 0; white-space: pre-wrap; word-break: break-word; }
+.subagent-stream__thinking[hidden], .subagent-stream__text[hidden]{ display: none; }
 .subagent-detail-actions{ border-top: 1px solid var(--border); margin-top: 8px; padding-top: 8px; }
 
 /* --- D.1: docked side pane (Focus layout, wide viewport only — see

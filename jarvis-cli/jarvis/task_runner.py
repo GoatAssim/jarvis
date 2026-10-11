@@ -39,6 +39,7 @@ import subprocess
 import sys
 
 from . import ask_output
+from . import task_stream
 from . import tasks
 
 CREATE_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
@@ -60,6 +61,17 @@ def _jarvis_argv():
     if getattr(sys, "frozen", False):
         return [sys.executable]
     return [sys.executable, "-m", "jarvis"]
+
+
+def _step_label(task):
+    """What the stream file calls this step: "plan", or the 1-based step
+    number. Defensive -- _spawn_ask is also called with minimal task dicts."""
+    try:
+        if tasks.needs_plan(task):
+            return "plan"
+        return int(task.get("cursor") or 0) + 1
+    except Exception:  # noqa: BLE001
+        return 0
 
 
 def _spawn_ask(task, prompt):
@@ -111,20 +123,38 @@ def _spawn_ask(task, prompt):
                                "use the main Jarvis key" % task["agent"])
         env.update(keys)
 
-    try:
-        proc = subprocess.run(
-            argv, capture_output=True, text=True, timeout=STEP_TIMEOUT,
-            env=env, creationflags=CREATE_NO_WINDOW,
-        )
-    except subprocess.TimeoutExpired:
-        return False, "", "step timed out after %ds" % STEP_TIMEOUT
-    except (OSError, ValueError) as exc:
-        return False, "", "couldn't run jarvis: %s" % exc
+    # K.3.2.4: let the web UI watch this step word by word. The child writes
+    # its stream events to a per-task file (task_stream.py) instead of stdout,
+    # because stdout is captured here and only returned once the step ends.
+    # A malformed task id or JARVIS_SUBAGENT_STREAM=0 leaves the child exactly
+    # as it was before: no env var, blocking transport.
+    env.pop(task_stream.ENV_FILE, None)
+    stream_path = task_stream.begin_step(task, _step_label(task))
+    if stream_path:
+        env[task_stream.ENV_FILE] = stream_path
 
-    text = ask_output.strip_protocol_lines((proc.stdout or "").strip())
-    if proc.returncode != 0 and not text:
-        return False, "", (proc.stderr or "ask failed").strip()[:500]
-    return True, text, None
+    try:
+        try:
+            proc = subprocess.run(
+                argv, capture_output=True, text=True, timeout=STEP_TIMEOUT,
+                env=env, creationflags=CREATE_NO_WINDOW,
+            )
+        except subprocess.TimeoutExpired:
+            task_stream.end_step(stream_path, False)
+            return False, "", "step timed out after %ds" % STEP_TIMEOUT
+        except (OSError, ValueError) as exc:
+            task_stream.end_step(stream_path, False)
+            return False, "", "couldn't run jarvis: %s" % exc
+
+        text = ask_output.strip_protocol_lines((proc.stdout or "").strip())
+        if proc.returncode != 0 and not text:
+            task_stream.end_step(stream_path, False)
+            return False, "", (proc.stderr or "ask failed").strip()[:500]
+        task_stream.end_step(stream_path, True)
+        return True, text, None
+    except Exception:
+        task_stream.end_step(stream_path, False)
+        raise
 
 
 def _log_task_event(task, phase, **detail):

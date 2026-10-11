@@ -189,10 +189,21 @@ def test_server_and_ui_wiring():
     check("an emptied command list is dropped, never stored", "delete spec.categories" in server)
     html = (ROOT / "web" / "public" / "index.html").read_text(encoding="utf-8")
     check("index.html loads category-manager.js after category-input.js", html.index("category-input.js") < html.index("category-manager.js") < html.index('src="app.js"'))
-    check("both panels have the button", 'id="btn-daemon-categories"' in html and 'id="btn-command-categories"' in html)
-    check("the Daemons panel and the Commands panel open the manager",
+    # The Commands panel no longer has a header button that opens the dialog chain: its
+    # categories are a dropdown under the search box (category-menu.js) that filters and
+    # manages in place, through the same two routes. The Daemons panel keeps the manager.
+    check("the Daemons panel keeps its Manage categories button", 'id="btn-daemon-categories"' in html)
+    check("the Commands panel has the dropdown slot and no dialog-chain button",
+          'id="cmd-cat-filter"' in html and 'id="btn-command-categories"' not in html)
+    check("index.html loads category-menu.js after category-input.js and before app.js",
+          html.index('<script src="category-input.js">') < html.index('<script src="category-menu.js">') < html.index('src="app.js"'))
+    check("the Daemons panel opens the manager; the Commands panel builds the dropdown",
           "JarvisCategoryManager" in (ROOT / "web" / "public" / "daemons.js").read_text(encoding="utf-8")
-          and "JarvisCategoryManager" in (ROOT / "web" / "public" / "app.js").read_text(encoding="utf-8"))
+          and "JarvisCategoryMenu" in (ROOT / "web" / "public" / "app.js").read_text(encoding="utf-8"))
+    menu_js = (ROOT / "web" / "public" / "category-menu.js").read_text(encoding="utf-8")
+    check("the dropdown talks to the same two routes the server already has",
+          "/api/command-categories" in menu_js and '"/rename"' in menu_js and '"/delete"' in menu_js)
+    check("the dropdown never builds markup from a name", ".innerHTML" not in menu_js)
     mgr = (ROOT / "web" / "public" / "category-manager.js").read_text(encoding="utf-8")
     check("the manager never builds markup from a name", ".innerHTML" not in mgr)
 

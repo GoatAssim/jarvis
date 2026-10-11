@@ -348,10 +348,16 @@ web/
     public/category-input.js/.css  L.11/L.14.3: the ONE category component - name rules (same as
                                  jarvis/categories.py, parity-tested), vocabulary, prefix suggest, chip input.
                                  Loaded before daemons.js; commands (L.14) will reuse it.
-    public/category-manager.js   Manage categories dialog (L.12): rename / merge / delete a daemon or command
-                                 category as a whole, from the Daemons panel and the Commands header. Pure
-                                 helpers in JarvisCategoryManager._pure. Routes: /api/daemon-categories,
-                                 /api/command-categories (list, rename, delete).
+    public/category-manager.js   Manage categories dialog (L.12): rename / merge / delete a daemon (or command)
+                                 category as a whole. Only the Daemons panel opens it now; the Commands panel
+                                 moved to category-menu.js. Pure helpers in JarvisCategoryManager._pure.
+                                 Routes: /api/daemon-categories, /api/command-categories (list, rename, delete).
+    public/category-menu.js      Commands panel category dropdown (L.14 UI rework), under the search box: filters
+    public/category-menu.css     the list (All / Uncategorized / one category, remembered in localStorage
+                                 `jarvis.commands.category.v1`) and renames / merges / deletes a category in place
+                                 through the same /api/command-categories routes. Counts come from the commands the
+                                 page already holds. Replaces the old header "Categories" button + dialog chain.
+                                 Pure helpers in JarvisCategoryMenu._pure. Created lazily by categoryMenu() in app.js.
     public/daemons.js            Menu -> Daemons (three-pane: services / selected service /
                                  overview; Console + Details tabs; add/edit form). Pure
                                  helpers are exposed as JarvisDaemons._pure for the node test
@@ -748,6 +754,7 @@ silently never runs.
 | `verify_notifications.js` (`node`) | L.30: `notifications.js` pure helpers (burst collapsing, day sections, query string, read/ack readers, level badges) |
 | `verify_notifications_ui.py` (`python`, not run by `run_tests.py`) | L.30: the real page in headless Chromium against the real CLI verbs — toast stack, level 5 dialog, panel filters/dismiss/mark-read, re-surfacing on a fake clock. Needs Playwright; skips cleanly without it |
 | `test_category_manage.py` | L.12: rename / merge / delete a category -- list helpers, daemon registry (built-ins and tool-supplied included), the `daemon-category` verb, registration everywhere a verb must be, routes and wiring pinned statically |
+| `verify_command_category_menu_ui.py` (`python`, not run by `run_tests.py`) | L.14 UI rework: the Commands category dropdown in headless Chromium against a stateful fake of the routes - header no longer overflowing, filter + search, saved / vanished choice, inline rename / merge / delete and every refusal, server error, keyboard, markup-looking names, Find box, short / narrow / phone layouts. Needs Playwright; skips cleanly without it |
 | `verify_category_manager.js` (`node`) | L.12: `category-manager.js` pure helpers and the whole dialog chain (pick, rename, merge confirm, delete, refusals, empty list) against a fake JarvisUI and fetch |
 | `test_l43_tree.py` | L.43: `default_doc`, `defaults_report` (changed / missing / extra, masked secrets), `reset_value` (backup, log, stale, guarded, unattended, wrong-type repair), CLI verbs, routes and wiring |
 | `verify_settings_tree.js` (`node`) | L.43: `settings.js` tree helpers (build, filter, leaf input), the `#settings/...` deep-link parser, and `/config` wiring |

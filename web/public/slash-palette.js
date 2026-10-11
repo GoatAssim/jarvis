@@ -205,6 +205,63 @@
     return i === -1 ? 1e6 : i;
   }
 
+  // L.14.2 -- search and filter by category, and favourites, in the list of saved
+  // commands (/run's first argument; the same favourites the Commands list stars).
+  //
+  // That argument is ONE whitespace-free token (splitArgs), so a filter and a
+  // search word cannot be separated by a space; a ":" joins them instead.
+  //   *             only favourites
+  //   #util         only commands with a category starting "util"
+  //   #util#backup  ... that have BOTH (prefix match each, case-insensitive)
+  //   *#util:dep    favourites in "util" whose name / description / category match "dep"
+  // Anything that does not start with # or * is plain search text, as before.
+  function parseCommandQuery(raw) {
+    const s = String(raw || "");
+    if (!/^[#*]/.test(s)) return { text: s, cats: [], favOnly: false, filtering: false };
+    const colon = s.indexOf(":");
+    const head = colon === -1 ? s : s.slice(0, colon);
+    let text = colon === -1 ? "" : s.slice(colon + 1);
+    let favOnly = false;
+    const cats = [];
+    for (const part of head.split(/(?=[#*])/)) {
+      if (part[0] === "*") {
+        favOnly = true;
+        if (part.length > 1 && colon === -1) text += part.slice(1);   // "*abc": favourites matching abc
+      } else if (part[0] === "#" && part.length > 1) {
+        cats.push(part.slice(1).toLowerCase());
+      }
+    }
+    return { text, cats, favOnly, filtering: true };
+  }
+
+  // Every wanted prefix must match some category of the command.
+  function catsMatch(have, wanted) {
+    if (!wanted.length) return true;
+    const lc = (have || []).map((c) => String(c).toLowerCase());
+    return wanted.every((w) => lc.some((c) => c.startsWith(w)));
+  }
+
+  // A category is a real match only when it is a name or word prefix of it;
+  // weighted below a name hit so "back" still finds the command called backup first.
+  function catScore(query, cats) {
+    let best = 0;
+    for (const c of cats || []) best = Math.max(best, score(query, c));
+    return best >= 60 ? Math.floor(best / 2) : 0;
+  }
+
+  // [{name, count}] most-used first, keeping the first-seen spelling of a name.
+  function categoryCounts(rows) {
+    const seen = new Map();
+    for (const r of rows) {
+      for (const c of r.cats || []) {
+        const k = String(c).toLowerCase();
+        const e = seen.get(k);
+        if (e) e.count++; else seen.set(k, { name: String(c), count: 1 });
+      }
+    }
+    return Array.from(seen.values()).sort((a, b) => b.count - a.count || a.name.localeCompare(b.name));
+  }
+
   // The characters of `text` that matched `query`, wrapped in .slash-hl.
   // Real DOM nodes, never innerHTML (I.2.5).
   function emphasise(text, query) {
@@ -323,8 +380,13 @@
         }
         case "commands": {
           const cmds = st.commands || {};
+          // The same favourites the Commands list stars; an old app.js without
+          // the hook simply shows none.
+          const favs = new Set((h && h.favoriteCommandNames && h.favoriteCommandNames()) || []);
           rows = Object.keys(cmds).sort().map((name) => {
             const vars = (cmds[name] && cmds[name].vars) || {};
+            const cats = Array.isArray(cmds[name] && cmds[name].categories)
+              ? cmds[name].categories.filter((c) => typeof c === "string" && c) : [];
             // Same rule as app.js's hasRequiredVars(): a var with no
             // {default: ...} must be supplied.
             const names = Object.keys(vars);
@@ -332,6 +394,7 @@
               value: name, label: name,
               detail: names.map((v) => (hasDefault(vars[v]) ? `--${v}=${vars[v].default}` : `--${v} REQUIRED`)).join("  "),
               tag: names.some((v) => !hasDefault(vars[v])) ? "needs args" : "",
+              cats, fav: favs.has(name), favKind: "command",
             };
           });
           break;
@@ -377,8 +440,13 @@
           break;
         }
         case "daemonIds": {
-          const data = await apiGet("/api/daemons");
+          const [data, favIds] = await Promise.all([
+            apiGet("/api/daemons"),
+            apiGet("/api/favorite-daemons").catch(() => []),     // stars are a nicety, never an error
+          ]);
+          const favSet = new Set(Array.isArray(favIds) ? favIds : []);
           rows = (data.daemons || []).map((d) => ({
+            fav: favSet.has(d.id),
             value: d.id, label: d.id,
             detail: d.name && d.name !== d.id ? d.name : "",
             tag: d.running ? "running" : (d.status || "stopped"),
@@ -510,6 +578,11 @@
       if (!rowEl) return;
       e.preventDefault();
       const idx = Number(rowEl.dataset.index);
+      // The star toggles the favourite and never fills the row.
+      if (e.target.closest(".slash-star[data-star]") && Number.isInteger(idx) && ui.rows[idx]) {
+        toggleFavoriteRow(ui.rows[idx]);
+        return;
+      }
       if (Number.isInteger(idx) && ui.rows[idx] && !ui.rows[idx].disabled) {
         ui.active = idx;
         applyActive();
@@ -586,21 +659,60 @@
     return i === -1 ? ui.rows.findIndex((r) => !r.heading) : i;
   }
 
+  // A saved command's star is a button (click or Ctrl+Shift+F); a service's is only
+  // a marker, because its favourites are edited in the Daemons panel.
+  function starNode(r) {
+    if (r.favKind === "command") {
+      return el("span", {
+        class: "slash-star" + (r.fav ? " is-on" : ""), "data-star": "1",
+        title: r.fav ? "Favourite \u2014 click to remove (Ctrl+Shift+F)" : "Click to make a favourite (Ctrl+Shift+F)",
+        "aria-label": r.fav ? "favourite" : "not a favourite", text: r.fav ? "\u2605" : "\u2606",
+      });
+    }
+    return r.fav ? el("span", { class: "slash-star is-on is-static", title: "Favourite", "aria-label": "favourite", text: "\u2605" }) : null;
+  }
+
+  // Up to three category chips, drawn like the card's "conditional" badge. A fourth
+  // is left off the row (the tooltip and the footer list them all) -- same
+  // "omit, don't wrap" rule as the card (L.14.4).
+  function catChips(r) {
+    if (!r.cats || !r.cats.length) return null;
+    const box = el("span", { class: "slash-row__cats" }, r.cats.slice(0, 3).map((c) => el("span", { class: "slash-row__cat", text: c })));
+    return box;
+  }
+
+  async function toggleFavoriteRow(r) {
+    if (!r || r.heading || r.favKind !== "command" || !r.value) return false;
+    const h = host();
+    if (!h || !h.toggleFavoriteCommand) { toast("Favourites aren't available in this build."); return false; }
+    const now = h.toggleFavoriteCommand(r.value);
+    if (now === null) { toast(`No saved command called "${r.value}".`); return false; }
+    delete cache.commands;                                  // the star is part of the cached row
+    info(now ? `\u2605 ${r.value} is a favourite.` : `${r.value} is no longer a favourite.`);
+    await refresh(true);
+    // The row moved (favourites sort first); keep the highlight on the same command.
+    const at = ui.rows.findIndex((x) => x.favKind === "command" && x.value === r.value);
+    if (at !== -1) setActive(at, true);
+    return true;
+  }
+
   function renderRows() {
     ui.list.innerHTML = "";
     ui.rows.forEach((r, i) => {
       if (r.heading) {
-        ui.list.appendChild(el("div", { class: "slash-heading", role: "presentation", text: r.heading }));
+        ui.list.appendChild(el("div", { class: "slash-heading" + (r.plain ? " slash-heading--plain" : ""), role: "presentation", text: r.heading }));
         return;
       }
       const node = el("div", {
         class: "slash-row" + (r.disabled ? " is-disabled" : "") + (r.current ? " is-current" : "") + (r.toggle ? " is-toggle" : ""),
         role: "option", id: `slash-row-${i}`, "data-index": String(i),
         "aria-selected": "false", "aria-disabled": r.disabled ? "true" : null,
-        title: r.title || (r.disabled && r.why ? r.why : null),
+        title: r.title || (r.cats && r.cats.length ? `Categories: ${r.cats.join(", ")}` : null) || (r.disabled && r.why ? r.why : null),
       }, [
         r.dot ? el("span", { class: `slash-dot slash-dot--${r.dot}`, "aria-hidden": "true" }) : null,
+        starNode(r),
         el("span", { class: "slash-row__name" }, r.hl ? emphasise(r.label, r.hl) : [r.label]),
+        catChips(r),
         r.alias ? el("span", { class: "slash-row__alias", text: r.alias }) : null,
         r.detail ? el("span", { class: "slash-row__detail", text: r.detail }) : null,
         r.tag ? el("span", { class: "slash-row__tag", text: r.tag }) : null,
@@ -674,6 +786,10 @@
     } else if (r.detail && !r.toggle) {
       kids.push(el("span", { class: "slash-foot__text", text: r.detail }));
     }
+    if (r.favKind === "command") {
+      if (r.cats && r.cats.length) kids.push(el("span", { class: "slash-foot__note", text: "categories: " + r.cats.join(", ") }));
+      kids.push(el("span", { class: "slash-foot__note", text: "Ctrl+Shift+F favourite \u00b7 #category \u00b7 * favourites" }));
+    }
     const runs = (r.spec && runsOnFirstEnter(r.spec) && ui.mode === "verbs") ? "run" : (r.retrySource ? "retry" : (r.toggle ? "toggle" : "complete"));
     kids.push(el("span", { class: "slash-foot__keys", text: `Enter ${runs} \u00b7 Esc close` }));
     kids.push(el("span", { class: "slash-foot__local", text: "local \u00b7 no tokens" }));
@@ -731,8 +847,30 @@
     };
   }
 
+  // "/#run" lists only the commands of a group (Chat, Run, ...): the verb list's own
+  // categories, filtered with the same "#" a saved command's category uses. A
+  // group matches when its id or its label starts with what follows the "#".
+  function groupFilter(query) {
+    const g = String(query || "").replace(/^#/, "").trim().toLowerCase();
+    return GROUPS.filter((x) => !g || String(x.id).toLowerCase().startsWith(g) || String(x.label).toLowerCase().startsWith(g));
+  }
+
   function verbRows(query) {
     const q = query.toLowerCase();
+    if (q.startsWith("#")) {
+      const running0 = (host() && host().state().running) || false;
+      const out = [];
+      for (const g of groupFilter(q)) {
+        const inGroup = VERBS.filter((sp) => sp.group === g.id);
+        if (!inGroup.length) continue;
+        out.push({ heading: g.label });
+        for (const sp of inGroup) out.push(withRunning(verbRow(sp), sp, running0));
+      }
+      if (!out.length) {
+        out.push({ label: `No command group starts with "${query}"`, detail: "groups: " + GROUPS.map((g) => g.label).join(", "), disabled: true, why: "", empty: true });
+      }
+      return out;
+    }
     const running = (host() && host().state().running) || false;
     const rows = [];
     const passNames = Object.keys(PASSTHROUGH).sort();
@@ -831,22 +969,39 @@
       }];
     }
     const all = override || (await fetchRows(arg.source, false));
-    const q = query.trim();
+    // Saved commands: "#category" / "*" filters (see parseCommandQuery).
+    const cq = arg.source === "commands" ? parseCommandQuery(query) : null;
+    const q = (cq ? cq.text : query).trim();
+    const pool = cq && cq.filtering
+      ? all.filter((r) => r.retrySource || ((!cq.favOnly || r.fav) && catsMatch(r.cats, cq.cats)))
+      : all;
     const mruPrefix = arg.source === "installedSkills" ? "s:" : (arg.source === "commands" ? "c:" : null);
-    const ranked = all
-      .map((r) => ({ r, s: r.retrySource ? 1 : Math.max(score(q, r.label), score(q, r.value), r.id ? score(q, r.id) : 0, (score(q, r.detail || "") >= 40 ? Math.floor(score(q, r.detail || "") / 4) : 0)) }))
+    const ranked = pool
+      .map((r) => ({ r, s: r.retrySource ? 1 : Math.max(score(q, r.label), score(q, r.value), r.id ? score(q, r.id) : 0, (score(q, r.detail || "") >= 40 ? Math.floor(score(q, r.detail || "") / 4) : 0), q ? catScore(q, r.cats) : 0) }))
       .filter((x) => x.s > 0)
-      .sort((a, b) => b.s - a.s || (mruPrefix ? mruRank(mruPrefix + a.r.value) - mruRank(mruPrefix + b.r.value) : 0))
+      // Equal score: favourites first (L.13 / L.14.2), then the most recently used.
+      .sort((a, b) => b.s - a.s || (b.r.fav ? 1 : 0) - (a.r.fav ? 1 : 0) || (mruPrefix ? mruRank(mruPrefix + a.r.value) - mruRank(mruPrefix + b.r.value) : 0))
       .map((x) => ({ ...x.r, prefix, argIndex: active, spec, hl: q }));
     if (!ranked.length) {
-      const empty = [{ label: q ? `Nothing matches "${q}"` : "Nothing to pick from", detail: arg.hint || "", disabled: true, why: arg.hint || "" }];
-      return empty;
+      let label = q ? `Nothing matches "${q}"` : "Nothing to pick from";
+      let detail = arg.hint || "";
+      if (cq && cq.filtering) {
+        if (cq.favOnly && !all.some((r) => r.fav)) { label = "No favourite commands yet"; detail = "star one with Ctrl+Shift+F on a row here, or in the Commands panel"; }
+        else if (cq.cats.length && !categoryCounts(all).length) { label = "No command has a category yet"; detail = "add one in the command's editor"; }
+        else { label = "No command matches that filter"; detail = "try fewer filters, or remove the search text after the colon"; }
+      }
+      return [{ label, detail, disabled: true, why: detail }];
     }
     if (arg.source === "loadedSkills" && ranked.length === 1 && ranked[0].value === "--all" && !q) {
       ranked.unshift({ label: "No skills are loaded", detail: "nothing to unload", disabled: true, why: "nothing to unload" });
     }
     ranked.total = all.length;
     ranked.arg = arg;
+    if (cq && (!q || cq.filtering)) {
+      // What can be typed here, with real numbers: shown while there is no search
+      // text yet (or a filter is in use), not on every keystroke of a name.
+      ranked.filterHint = { cats: categoryCounts(all).slice(0, 6), favs: all.filter((r) => r.fav).length };
+    }
     return ranked;
   }
 
@@ -855,8 +1010,14 @@
     if (!rows.arg) return rows;
     const shown = rows.filter((r) => !r.heading && !r.disabled && !r.retrySource).length;
     if (!shown) return rows;
-    const out = [{ heading: `/${spec.verb} \u203a pick a ${rows.arg.name} \u00b7 ${shown} of ${rows.total}` }].concat(rows);
-    return out;
+    const out = [{ heading: `/${spec.verb} \u203a pick a ${rows.arg.name} \u00b7 ${shown} of ${rows.total}` }];
+    const fh = rows.filterHint;
+    if (fh && (fh.cats.length || fh.favs)) {
+      const bits = fh.cats.map((c) => `#${c.name} ${c.count}`);
+      if (fh.favs) bits.push(`* favourites ${fh.favs}`);
+      out.push({ heading: `Filter: ${bits.join(" \u00b7 ")}`, plain: true });
+    }
+    return out.concat(rows);
   }
 
   // Re-evaluate the popover from the textarea's current value.
@@ -960,6 +1121,12 @@
     // that means app.js's own Enter-to-submit must not fire on it either.
     if (e.isComposing || e.keyCode === 229) return ui.open && e.key === "Enter";
     if (!ui.open) return false;
+    // Ctrl/Cmd+Shift+F: star or unstar the highlighted saved command.
+    if ((e.ctrlKey || e.metaKey) && e.shiftKey && !e.altKey && (e.key === "F" || e.key === "f")) {
+      const r = ui.rows[ui.active];
+      if (r && r.favKind === "command") { e.preventDefault(); toggleFavoriteRow(r); return true; }
+      return false;
+    }
     switch (e.key) {
       case "ArrowDown": e.preventDefault(); move(1); return true;
       case "ArrowUp": e.preventDefault(); move(-1); return true;
@@ -1376,7 +1543,11 @@
     }, true);
   }
 
-  global.JarvisSlash = { handleSubmit, handleComposerKeydown, parse, score, editDistance, isComplete };
+  global.JarvisSlash = {
+    handleSubmit, handleComposerKeydown, parse, score, editDistance, isComplete,
+    // Pure helpers, for tests/verify_slash_palette.js only.
+    _pure: { parseCommandQuery, catsMatch, catScore, categoryCounts, groupFilter },
+  };
   if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", init);
   else init();
 })(window);

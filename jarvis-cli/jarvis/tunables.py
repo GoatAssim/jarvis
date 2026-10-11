@@ -148,6 +148,7 @@ PLUMBING_ENV = (
     ("JARVIS_THINK_OVERRIDE", "The thinking level picked for this one ask."),
     ("JARVIS_TOKEN_BUDGET", "Token limit set for one scheduled run."),
     ("JARVIS_TASK_ID", "The task or subagent this process is running."),
+    ("JARVIS_TASK_STREAM_FILE", "Set for a subagent step; the CLI appends live stream events to this file."),
     ("JARVIS_CHANGE_SOURCE", "Marks a permission change as made from the web panel."),
     ("JARVIS_JOB_APPROVED_KINDS", "Tool kinds a scheduled job was pre-approved for."),
 )

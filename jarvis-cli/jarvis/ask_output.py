@@ -40,7 +40,10 @@ notifications whose `message` this module already cleaned.
 # WebSocket-listening web session to pick up a structured event; a
 # session that isn't listening (a scheduled job's captured subprocess
 # stdout, a task step's stdout) just sees them as literal lines of text.
-PROTOCOL_LINE_PREFIXES = ("JARVIS_USAGE ", "JARVIS_CONFIRM_REQUEST ")
+# JARVIS_STREAM (K.3.2.4): marker lines from stream_markers.py. A process that has
+# JARVIS_STREAM_MARKERS=1 inherited from the web ask that spawned it would otherwise
+# leak them into a captured reply.
+PROTOCOL_LINE_PREFIXES = ("JARVIS_USAGE ", "JARVIS_CONFIRM_REQUEST ", "JARVIS_STREAM ")
 
 DEFAULT_SUMMARY_CHARS = 200
 

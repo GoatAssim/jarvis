@@ -89,12 +89,16 @@ function makeEnv() {
   let slashResponse = { ok: true, code: 0, stdout: "done", stderr: "", error: "" };
   let failDaemons = false;
   let confirmAnswer = true;
+  const favCommands = new Set();      // L.14.2: what the Commands list has starred
+  let daemonFavs = [];                // L.13: ids in /api/favorite-daemons
   const state = {
     activeConversationId: "c1",
     conversations: [{ id: "c1", title: "Weekend trip", updated_at: Math.floor(Date.now() / 1000) - 7200 }, { id: "c2", title: "Taxes", origin: "discord", updated_at: Math.floor(Date.now() / 1000) - 30 }],
     commands: {
-      nightly: { vars: { target: {}, mode: { default: "fast" } } },
-      ping: { vars: {} },
+      nightly: { vars: { target: {}, mode: { default: "fast" } }, categories: ["backup", "ops"] },
+      ping: { vars: {}, categories: ["Utility"] },
+      deploy: { vars: {}, categories: ["ops"] },
+      plain: { vars: {} },
     },
     providerOverride: [],
     aiProviders: [{ name: "anthropic" }, { name: "openai" }],
@@ -121,6 +125,13 @@ function makeEnv() {
     runSegments: (s) => calls.push(["runSegments", JSON.stringify(s)]),
     skillSlash: async (v, a) => calls.push(["skillSlash", v, a]),
     openPanel: (id) => calls.push(["openPanel", id]),
+    favoriteCommandNames: () => Array.from(favCommands),
+    toggleFavoriteCommand: (name) => {
+      if (!Object.prototype.hasOwnProperty.call(state.commands, name)) return null;
+      if (favCommands.has(name)) favCommands.delete(name); else favCommands.add(name);
+      calls.push(["toggleFavoriteCommand", name]);
+      return favCommands.has(name);
+    },
   };
   const fetches = [];
   const fetchStub = async (url, opts) => {
@@ -131,6 +142,7 @@ function makeEnv() {
       failDaemons = false;
       return { ok: false, status: 500, json: async () => ({ error: "boom" }) };
     }
+    if (url === "/api/favorite-daemons") return json(daemonFavs);
     if (url.startsWith("/api/skills/loaded")) return json({ loaded: ["pdf"] });
     if (url.startsWith("/api/skills")) return json({ skills: [{ name: "pdf", valid: true, description: "PDFs" }, { name: "broken", valid: false, error: "bad frontmatter" }] });
     if (url.startsWith("/api/daemons/") ) return json({ message: "ok" });
@@ -161,6 +173,7 @@ function makeEnv() {
     failDaemonsOnce: () => { failDaemons = true; },
     store,
     setConfirm: (v) => { confirmAnswer = v; },
+    favCommands, setDaemonFavs: (v) => { daemonFavs = v; },
     input: els["ask-input"], palette: els["slash-palette"], form: els["ask-form"],
   };
 }
@@ -767,6 +780,130 @@ async function main() {
     const first = env.palette.querySelectorAll(".slash-row")[0].textContent;
     check("among equal matches the recently-used verb ranks first (MRU tie-break)", /\/skills/.test(first) && !/\/skillload/.test(first), first);
     check("MRU never stores chat titles", true);
+  }
+
+  // ---- L.14.2 / L.13: category search, #category and * filters, favourites ------------------------
+  {
+    const env = makeEnv();
+    const P = env.S._pure;
+    const type = async (v) => { env.input.value = v; env.input.dispatchEvent(new Event("input")); await flush(); await flush(); };
+    const rowsText = () => env.palette.querySelectorAll(".slash-row").map((r) => r.textContent);
+    const headings = () => env.palette.querySelectorAll(".slash-heading").map((h) => h.textContent);
+    const jq = (x) => JSON.stringify(x);
+
+    // the filter grammar (pure)
+    const pq = P.parseCommandQuery;
+    check("L.14.2 parse: plain text is not a filter", jq(pq("dep")) === jq({ text: "dep", cats: [], favOnly: false, filtering: false }), jq(pq("dep")));
+    check("L.14.2 parse: empty is not a filter", pq("").filtering === false && pq("").text === "");
+    check("L.14.2 parse: #cat", jq(pq("#Ops")) === jq({ text: "", cats: ["ops"], favOnly: false, filtering: true }), jq(pq("#Ops")));
+    check("L.14.2 parse: * alone is favourites only", pq("*").favOnly === true && pq("*").cats.length === 0 && pq("*").filtering);
+    check("L.14.2 parse: several categories", jq(pq("#a#b").cats) === jq(["a", "b"]));
+    check("L.14.2 parse: filter and search joined by a colon", jq(pq("*#ops:dep")) === jq({ text: "dep", cats: ["ops"], favOnly: true, filtering: true }), jq(pq("*#ops:dep")));
+    check("L.14.2 parse: *abc is favourites matching abc", pq("*abc").favOnly === true && pq("*abc").text === "abc");
+    check("L.14.2 parse: a colon later in plain text is not a filter", pq("a:#b").filtering === false && pq("a:#b").text === "a:#b");
+    check("L.14.2 parse: a bare # filters nothing yet", pq("#").filtering === true && pq("#").cats.length === 0);
+    check("L.14.2 catsMatch: prefix, case-insensitive, every wanted one", P.catsMatch(["Utility", "ops"], ["util", "op"]) && !P.catsMatch(["Utility"], ["util", "op"]) && P.catsMatch([], []));
+    check("L.14.2 catScore: only a name/word prefix counts, and counts for less than a name hit", P.catScore("back", ["backup"]) > 0 && P.catScore("back", ["backup"]) < P.score("back", "backup") && P.catScore("ack", ["backup"]) === 0);
+    const cc = P.categoryCounts([{ cats: ["Ops", "backup"] }, { cats: ["ops"] }, {}]);
+    check("L.14.2 categoryCounts: counts per name, first spelling kept, most used first", jq(cc) === jq([{ name: "Ops", count: 2 }, { name: "backup", count: 1 }]), jq(cc));
+
+    // listing: chips, the hint line, search by category
+    await type("/run ");
+    const all = rowsText();
+    check("L.14.2 /run lists every saved command", all.length === 4, all.join("|"));
+    check("L.14.2 a row shows its category chips", env.palette.querySelectorAll(".slash-row__cat").length === 4 && /nightly/.test(all.find((t) => /nightly/.test(t))) && /backup/.test(all.find((t) => /nightly/.test(t))), all.join("|"));
+    check("L.14.2 the Filter line counts the categories", headings().some((h) => /^Filter: #ops 2/.test(h) && /#backup 1/.test(h) && /#Utility 1/.test(h)), headings().join("|"));
+    check("L.14.2 ...and is not a selectable row", env.palette.querySelectorAll(".slash-row").every((r) => !/^Filter:/.test(r.textContent)));
+    await type("/run back");
+    check("L.14.2 a category prefix finds a command whose name does not contain it", rowsText().length === 1 && /nightly/.test(rowsText()[0]), rowsText().join("|"));
+    check("L.14.2 ...and the Filter line is not shown while a name is being typed", !headings().some((h) => /^Filter:/.test(h)), headings().join("|"));
+
+    // # filter
+    await type("/run #ops");
+    check("L.14.2 #ops lists only commands in that category", rowsText().length === 2 && rowsText().some((t) => /deploy/.test(t)) && rowsText().some((t) => /nightly/.test(t)), rowsText().join("|"));
+    await type("/run #OPS#back");
+    check("L.14.2 two categories need both, case-insensitively", rowsText().length === 1 && /nightly/.test(rowsText()[0]), rowsText().join("|"));
+    await type("/run #ops:dep");
+    check("L.14.2 #ops:dep adds a search word", rowsText().length === 1 && /deploy/.test(rowsText()[0]), rowsText().join("|"));
+    await type("/run #nothing");
+    check("L.14.2 an empty filter result says so, and is not selectable", rowsText().length === 1 && /No command matches that filter/.test(rowsText()[0]) && /is-disabled/.test(env.palette.querySelectorAll(".slash-row")[0].className), rowsText().join("|"));
+    check("L.14.2 isComplete: a filter is not a command name", !env.S.isComplete("/run #ops"));
+
+    // favourites
+    await type("/run *");
+    check("L.13 /run * with nothing starred says so", rowsText().length === 1 && /No favourite commands yet/.test(rowsText()[0]), rowsText().join("|"));
+  }
+  {
+    const env = makeEnv();
+    env.favCommands.add("ping");
+    const P = env.S._pure;
+    const type = async (v) => { env.input.value = v; env.input.dispatchEvent(new Event("input")); await flush(); await flush(); };
+    const key = (k, extra) => {
+      let prevented = false;
+      const handled = env.S.handleComposerKeydown({ key: k, shiftKey: false, isComposing: false, preventDefault() { prevented = true; }, stopPropagation() {}, ...extra }, env.input);
+      return { handled, prevented };
+    };
+    const rowsText = () => env.palette.querySelectorAll(".slash-row").map((r) => r.textContent);
+    const headings = () => env.palette.querySelectorAll(".slash-heading").map((h) => h.textContent);
+    const activeText = () => (env.palette.querySelectorAll(".is-active")[0] || { textContent: "" }).textContent;
+
+    await type("/run ");
+    check("L.13 a starred command sorts first among equal matches", /ping/.test(rowsText()[0]) && /\u2605/.test(rowsText()[0]), rowsText().join("|"));
+    check("L.13 ...and the others keep alphabetical order", /deploy/.test(rowsText()[1]) && /nightly/.test(rowsText()[2]) && /plain/.test(rowsText()[3]), rowsText().join("|"));
+    check("L.13 the Filter line counts the favourites", headings().some((h) => /\* favourites 1/.test(h)), headings().join("|"));
+    await type("/run *");
+    check("L.13 /run * lists only favourites", rowsText().length === 1 && /ping/.test(rowsText()[0]), rowsText().join("|"));
+    await type("/run *#ops");
+    check("L.13 favourites AND category compose (none here)", rowsText().length === 1 && /No command matches that filter/.test(rowsText()[0]), rowsText().join("|"));
+
+    // Ctrl+Shift+F
+    await type("/run ");
+    key("End");                                               // the last row: plain
+    check("L.13 End highlights the last command", /plain/.test(activeText()), activeText());
+    const k = key("F", { ctrlKey: true, shiftKey: true });
+    await flush(); await flush(); await flush();
+    check("L.13 Ctrl+Shift+F is handled and the default is prevented", k.handled && k.prevented);
+    check("L.13 ...it stars the highlighted command through the host", env.favCommands.has("plain") && env.calls.some((c) => c[0] === "toggleFavoriteCommand" && c[1] === "plain"));
+    check("L.13 ...the row moves up and the highlight stays on it", /plain/.test(activeText()) && /plain/.test(rowsText()[1]), rowsText().join("|") + " :: " + activeText());
+    check("L.13 ...and says so", env.toasts.some((t) => t[0] === "info" && /plain/.test(t[1])), JSON.stringify(env.toasts));
+    key("F", { ctrlKey: true, shiftKey: true });
+    await flush(); await flush(); await flush();
+    check("L.13 pressing it again removes the star", !env.favCommands.has("plain") && /plain/.test(rowsText()[3]), rowsText().join("|"));
+    const mac = key("f", { metaKey: true, shiftKey: true });
+    await flush(); await flush(); await flush();
+    check("L.13 Cmd+Shift+F works too", mac.handled && env.favCommands.has("plain"));
+
+    // ping and plain are starred now. "n" starts nightly (a prefix hit) and only appears inside
+    // the two starred names, so the better text match comes first and the stars only break ties.
+    await type("/run n");
+    check("L.13 a better text match still beats a favourite", /nightly/.test(rowsText()[0]) && /ping/.test(rowsText()[1]) && /plain/.test(rowsText()[2]), rowsText().join("|"));
+
+    // not a command row: left alone
+    await type("/");
+    const other = key("F", { ctrlKey: true, shiftKey: true });
+    check("L.13 on a verb row Ctrl+Shift+F is not handled (the browser keeps it)", !other.handled && !other.prevented);
+
+    // services: starred ones first, marker only
+    const env2 = makeEnv();
+    env2.setDaemonFavs(["backup"]);
+    env2.input.value = "/daemon start ";
+    env2.input.dispatchEvent(new Event("input"));
+    await flush(); await flush();
+    const dr = env2.palette.querySelectorAll(".slash-row").map((r) => r.textContent);
+    check("L.13 a favourite service is listed first with a static star", /backup/.test(dr[0]) && /discord/.test(dr[1]) && env2.palette.querySelectorAll(".slash-star").length === 1 && /is-static/.test(env2.palette.querySelectorAll(".slash-star")[0].className), dr.join("|"));
+    const env3 = makeEnv();                                   // a missing favourites route is not an error
+    env3.input.value = "/daemon start ";
+    env3.input.dispatchEvent(new Event("input"));
+    await flush(); await flush();
+    check("L.13 without favourite services the list is unchanged", env3.palette.querySelectorAll(".slash-row").length === 2 && env3.palette.querySelectorAll(".slash-star").length === 0);
+
+    // the verb list: #group
+    await type("/#run");
+    const gv = rowsText();
+    check("L.14.2 /#run lists only the Run group, under its heading", gv.some((t) => /\/run/.test(t)) && gv.some((t) => /\/daemon/.test(t)) && !gv.some((t) => /\/new/.test(t)) && headings()[0] === "Run", gv.join("|") + " :: " + headings().join("|"));
+    await type("/#zzz");
+    check("L.14.2 /#zzz says no group starts with that", rowsText().length === 1 && /No command group starts with/.test(rowsText()[0]), rowsText().join("|"));
+    check("L.14.2 groupFilter matches an id or a label prefix, case-insensitively", P.groupFilter("#RUN").some((g) => g.id === "run") && P.groupFilter("#").length > 1);
   }
 
   // ---- I-B20: stacking order of the surfaces a palette verb can open ----------------------------

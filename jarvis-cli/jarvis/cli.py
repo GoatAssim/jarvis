@@ -974,14 +974,31 @@ def handle_ai_prompt(text, commands, provider_override=None, think_override=None
 
     # Master plan §8 / K.3.1.4: live streaming for the web UI. Opt-in per
     # process via JARVIS_STREAM_MARKERS=1, which only web/server.js's "ask"
-    # handler sets — a plain terminal run, the scheduler, subagent steps and
-    # every other caller of this function are untouched (no on_stream means
-    # ai_client.ask() keeps its blocking transport exactly as before). Each
+    # handler sets — a plain terminal run, the scheduler and every other caller
+    # of this function are untouched (no on_stream means ai_client.ask() keeps
+    # its blocking transport exactly as before). Subagent steps are the one
+    # other opt-in: JARVIS_TASK_STREAM_FILE, handled just below. Each
     # event becomes one `JARVIS_STREAM {json}` stdout line; see
     # stream_markers.py for the wire shape and why deltas are coalesced.
     stream_sink = None
     tty_stream = False
-    if os.environ.get("JARVIS_STREAM_MARKERS") == "1":
+    task_stream_fh = None
+    task_stream_path = os.environ.get("JARVIS_TASK_STREAM_FILE")
+    if task_stream_path:
+        # K.3.2.4: a subagent step. Same marker lines, but into the per-task
+        # stream file task_runner handed us (see task_stream.py) rather than
+        # stdout, which the supervisor captures whole. Wins over
+        # JARVIS_STREAM_MARKERS so a step spawned from inside a web ask never
+        # leaks markers into its captured reply. If the file can't be opened
+        # the step simply runs on the blocking transport, as before.
+        try:
+            from .stream_markers import StreamMarkerSink
+            task_stream_fh = open(task_stream_path, "a", encoding="utf-8", newline="\n")
+            stream_sink = StreamMarkerSink(out=task_stream_fh)
+        except Exception:  # noqa: BLE001 -- the live view is optional
+            stream_sink = None
+            task_stream_fh = None
+    elif os.environ.get("JARVIS_STREAM_MARKERS") == "1":
         from .stream_markers import StreamMarkerSink
         stream_sink = StreamMarkerSink()
     elif _tty_streaming_wanted():
@@ -1019,6 +1036,11 @@ def handle_ai_prompt(text, commands, provider_override=None, think_override=None
         # or the browser would see the final text arrive ahead of its tail.
         if stream_sink is not None:
             stream_sink.close()
+        if task_stream_fh is not None:
+            try:
+                task_stream_fh.close()
+            except Exception:  # noqa: BLE001
+                pass
 
     for label, err in result.attempts:
         wire.trace(f"{ERR.DIM}  \u2717 {label} \u2014 {err}{ERR.RESET}", "error")

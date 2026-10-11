@@ -418,4 +418,23 @@ ok("envPairs: drops rows with no name, keeps the rest as K=V", JSON.stringify(P.
   ok("entrySignature: a categories change re-renders the list", P.entrySignature(web) !== P.entrySignature(Object.assign({}, web, { categories: ["chat"] })));
 }
 
+// --- focusPlan: the Log search deep link ("Open Daemons (<id>)") ----------------
+{
+  const entries = [
+    { id: "web", name: "Web server", builtin: true, status: "running", running: true },
+    { id: "mine", name: "My job", builtin: false, status: "stopped" },
+  ];
+  const plan = (id, f) => P.focusPlan(entries, id, f);
+  ok("focusPlan: an id that is not registered is not found", plan("gone", {}).found === false);
+  ok("focusPlan: no entries at all is not found, not an error", P.focusPlan(undefined, "web", {}).found === false && P.focusPlan([], "web", {}).found === false);
+  ok("focusPlan: a registered id is found", plan("web", {}).found === true);
+  ok("focusPlan: nothing filtered out => nothing to clear", plan("web", { state: "all", kind: "all", search: "" }).clearFilters === false);
+  ok("focusPlan: a search that hides it => clear the filters", plan("mine", { search: "web" }).clearFilters === true);
+  ok("focusPlan: the state chip that hides it => clear", plan("mine", { state: "running" }).clearFilters === true);
+  ok("focusPlan: Favorites-only with it unstarred => clear", plan("web", { favOnly: true, favorites: new Set(["mine"]) }).clearFilters === true);
+  ok("focusPlan: Favorites-only with it starred => keep the filters", plan("mine", { favOnly: true, favorites: new Set(["mine"]) }).clearFilters === false);
+  ok("focusPlan: a built-in service's group is 'builtin', a custom one's is 'custom' (so a collapsed group opens)", plan("web", {}).group === "builtin" && plan("mine", {}).group === "custom");
+  ok("focusPlan: reads no filter object at all as 'no filters'", plan("web", undefined).clearFilters === false);
+}
+
 console.log(`\n${n}/${n} checks passed`);

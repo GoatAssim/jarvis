@@ -33,6 +33,13 @@ What this pins down:
     already tool-item-centric, so a multi-group module needed no JS change,
     only the regression test here that pins that down.
 
+K.2.9 (owner instruction 2026-09-26h, decided 2026-09-26i): inline TEST_CHECKLIST is
+no longer custom-tool-only. A tool that ships with jarvis (jarvis/actions/*.py) may
+supply its entry inline too, exactly as a user's tool can. The invariant this file used
+to state as "only a user-authored tool supplies its entry" is restated as "no tool has
+its entry in BOTH homes" (inline AND web/public/test-checklist-data.js) - the end-to-end
+payload checks and the shipped-catalogue check below.
+
 Run: python3 tests/test_checklist_supplied.py
 """
 
@@ -320,15 +327,87 @@ def _payload_for(user_files):
         shutil.rmtree(home, ignore_errors=True)
 
 
-def test_payload_carries_a_custom_tools_entry_and_only_that_tools():
+def _shipped_data_tool_names():
+    """Tool names with an entry in web/public/test-checklist-data.js."""
+    text = DATA_JS.read_text(encoding="utf-8")
+    body = text.split("/*JSON-BEGIN*/", 1)[1].rsplit("/*JSON-END*/", 1)[0]
+    return set(json.loads(body)["tools"])
+
+
+def _shipped_inline_names():
+    """Tools in jarvis/actions/*.py that supply their entry INLINE (K.2.9 allows
+    it; today none do). HOME is redirected above, so no developer's own custom
+    tools are in tools.AUTO_TEST_CHECKLIST - only what ships."""
+    import contextlib
+    import io
+    with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+        from jarvis import tools
+    return set(tools.AUTO_TEST_CHECKLIST)
+
+
+def _entries_in_both_homes(payload, data_tool_names):
+    """K.2.9's restated invariant, as a function over a `jarvis tools-list`
+    payload: names that carry an inline entry AND have one in the data file.
+    The panel would silently show the data-file one (shipped wins), so a
+    second copy would just rot."""
+    return sorted(
+        t["name"] for t in payload
+        if isinstance(t, dict) and "checklist" in t and t.get("name") in data_tool_names
+    )
+
+
+def test_payload_carries_a_custom_tools_entry_and_nobody_elses_unless_they_ship_one_inline():
     payload, _ = _payload_for({"hi_tool_mod.py": _module(extra='TEST_CHECKLIST_GROUP = {"label": "My things", "blurb": "Mine."}')})
     assert isinstance(payload, list), "the /api/tools payload must stay a plain list"
     by_name = {t["name"]: t for t in payload}
     mine = by_name["hi_tool"]
     assert mine["checklist"]["group"] == "mygroup" and mine["checklist"]["steps"][1]["run"] == {"name": "Ada"}
     assert mine["checklist_group"] == {"label": "My things", "blurb": "Mine."}
-    others = [t for n, t in by_name.items() if n != "hi_tool" and ("checklist" in t or "checklist_group" in t)]
-    assert not others, [t["name"] for t in others]
+    # K.2.9: this used to demand that NO other tool carried an entry. A tool that
+    # ships with jarvis may now supply one inline, so the allowed set is exactly
+    # the shipped inline suppliers - and the custom tool's entry must not have
+    # leaked onto anything else.
+    others = {n for n, t in by_name.items() if n != "hi_tool" and ("checklist" in t or "checklist_group" in t)}
+    assert others == _shipped_inline_names(), (sorted(others), sorted(_shipped_inline_names()))
+
+
+def test_no_tool_carries_its_entry_both_inline_and_in_the_data_file():
+    # K.2.9 / D 2026-09-26i: the replacement for the old custom-tool-only rule.
+    # Over the real payload (the custom tool + everything that ships)...
+    payload, _ = _payload_for({"hi_tool_mod.py": _module()})
+    data_names = _shipped_data_tool_names()
+    assert _entries_in_both_homes(payload, data_names) == [], (
+        "entries in BOTH web/public/test-checklist-data.js and a tool's own module (keep one): "
+        + ", ".join(_entries_in_both_homes(payload, data_names)))
+    # ...and over the shipped modules directly, without a subprocess.
+    both = sorted(_shipped_inline_names() & data_names)
+    assert not both, both
+
+
+def test_the_both_homes_check_can_actually_fire():
+    # A control for the check above: a payload where a data-file tool ALSO
+    # carries an inline entry must be reported, and one that doesn't must not -
+    # otherwise the invariant is a check that can never fail.
+    data_names = _shipped_data_tool_names()
+    some_shipped = sorted(data_names)[0]
+    entry = {"group": "x", "does": "d", "steps": [{"ask": "a", "expect": "b"}]}
+    dup = [{"name": some_shipped, "checklist": entry}, {"name": "hi_tool", "checklist": entry}, {"name": "plain"}]
+    assert _entries_in_both_homes(dup, data_names) == [some_shipped]
+    assert _entries_in_both_homes([{"name": "hi_tool", "checklist": entry}], data_names) == []
+    # a data-file tool with no inline entry is the normal case, not a duplicate
+    assert _entries_in_both_homes([{"name": some_shipped}], data_names) == []
+
+
+def test_a_module_in_a_shipped_actions_position_may_supply_its_entry_inline():
+    # The loader never distinguished shipped from custom (tools.py scans
+    # jarvis/actions/ and ~/.jarvis/tools/ with the same discover_actions and
+    # merges every record's checklist into AUTO_TEST_CHECKLIST), so a directory
+    # standing in for actions/ must yield the entry exactly as it does for a
+    # user's tool. This pins that the loader stays that way.
+    rec, logs = _one(_module())
+    assert rec.valid, rec.error
+    assert "hi_tool" in rec.checklist and rec.checklist["hi_tool"]["group"] == "mygroup"
+    assert not [l for l in logs if "[checklist]" in l], logs
 
 
 def test_payload_carries_a_distinct_checklist_group_per_tool_in_a_multi_group_module():

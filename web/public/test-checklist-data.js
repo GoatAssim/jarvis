@@ -14,7 +14,8 @@
  *    described under FORMAT below (minus "group", which follows TOOL_GROUP).
  *    This is the ONLY place a tool the user wrote themselves (Menu -> Custom
  *    Tools, ~/.jarvis/tools/) can have an entry, because it can't be in a file
- *    that ships with the app. The panel reads it from /api/tools and merges it
+ *    that ships with the app. (A tool that ships with jarvis MAY use this home
+ *    too since K.2.9, but none does today.) The panel reads it from /api/tools and merges it
  *    in; see actions/_template.py section 8. A tool that is in BOTH places
  *    shows the entry from this file, and tests/test_checklist_coverage.py
  *    fails on it: pick one home per tool.
@@ -3893,6 +3894,100 @@ window.JARVIS_TEST_CHECKLIST = /*JSON-BEGIN*/ {
    ],
    "watch": [
     "Add every pair you find broken to L.17's matrix (which pair, which layout)."
+   ]
+  },
+  "palette_saved_command_filters": {
+   "group": "command_palette",
+   "does": "Saved commands in the /run list can be searched by category, filtered with #category and * (favourites), and starred from the palette (L.14.2 / L.13). The verb list takes #group the same way.",
+   "needs": [
+    "At least three saved commands in the Commands panel, two of them sharing a category (for example ops), and one with no category."
+   ],
+   "steps": [
+    {
+     "do": "Type /run and a space.",
+     "expect": "Saved commands are listed; a row shows up to three category chips drawn like the conditional badge, and a faint star appears on the highlighted row. A \"Filter:\" line above the rows names the categories in use with how many commands each has."
+    },
+    {
+     "do": "Type a category's first letters after /run (for example /run ops).",
+     "expect": "Commands in that category are listed even though the letters are not in their names; a command whose own name matches ranks above one that matches only by category."
+    },
+    {
+     "do": "Type /run #ops, then /run #ops#other (two categories).",
+     "expect": "Only commands that have that category (or both) are listed; the match is a prefix and ignores case. A category nothing has says \"No command matches that filter\"."
+    },
+    {
+     "do": "Type /run #ops:dep (a colon joins a filter and a search word).",
+     "expect": "Only commands in ops whose name, description or category match dep are listed."
+    },
+    {
+     "do": "Highlight a command, press Ctrl+Shift+F (Cmd+Shift+F on a Mac).",
+     "expect": "Its star fills and a toast says it is a favourite; the row moves above the others and the highlight stays on it. Press it again to remove. The browser does not open a find or bookmark dialog."
+    },
+    {
+     "do": "Click a row's star with the mouse.",
+     "expect": "It toggles the favourite and the box text does not change (clicking the star never picks the row)."
+    },
+    {
+     "do": "Type /run *.",
+     "expect": "Only favourites are listed. With none starred it says \"No favourite commands yet\"."
+    },
+    {
+     "do": "Open Menu \u2192 Commands.",
+     "expect": "The same commands are starred and sorted first there; what you starred in the palette shows up, and the other way round."
+    },
+    {
+     "do": "Type /#run, then /#zzz.",
+     "expect": "The first lists only the Run group's commands under its heading; the second says no command group starts with that."
+    },
+    {
+     "do": "Type /daemon start with a space after it, with at least one service starred in the Daemons panel.",
+     "expect": "Starred services are listed first and carry a filled star (a marker only; stars on services are changed in the Daemons panel)."
+    }
+   ],
+   "care": "Starring a command writes the shared favourites list (web/data/favorites.json) the Commands panel uses; unstar what you tried.",
+   "watch": [
+    "Nothing in this entry has been seen in a real browser. In particular: whether Ctrl+Shift+F is swallowed by your browser or extension, and how the chips look at narrow widths (they are hidden below 720 px).",
+    "Typing # or * as the first character of a /run argument is the filter syntax; a saved command whose name starts with one of them cannot be searched by name there."
+   ]
+  },
+  "daemons_log_search_link": {
+   "group": "tool_daemons",
+   "does": "A hit in Log search that comes from a service's console opens the Daemons panel with that service already selected, on its Console tab.",
+   "needs": [
+    "At least one registered service that has written to its console log (for example a built-in one that has run)."
+   ],
+   "steps": [
+    {
+     "do": "Open Menu \u2192 Log search, search for a word you know is in a service's console, and click that hit.",
+     "expect": "The detail pane offers \"Open Daemons (<id>)\"."
+    },
+    {
+     "do": "Click \"Open Daemons (<id>)\".",
+     "expect": "The Daemons panel opens with that service selected and scrolled into view, the Console tab showing, and its log loaded. No toast tells you to pick it yourself."
+    },
+    {
+     "do": "Close Daemons, set its search box to something that hides the service (or turn on Favorites with none starred), collapse its group, then repeat the jump.",
+     "expect": "The filters are cleared and the group opens so the service is visible and selected."
+    },
+    {
+     "do": "Make the Details tab the active one in Daemons, close it, and jump from a console hit again.",
+     "expect": "It lands on Console, not Details."
+    },
+    {
+     "do": "Jump from a hit for a service that has since been removed (its console.log is still on disk).",
+     "expect": "The panel opens and a toast says that service is not registered any more; nothing else changes."
+    },
+    {
+     "do": "With the Daemons editor open and unsaved edits, jump to another service.",
+     "expect": "You are asked about discarding the edits first; cancelling stays where you were."
+    },
+    {
+     "do": "Open Daemons from the Menu as before.",
+     "expect": "It opens exactly as it used to, on whatever you had selected last."
+    }
+   ],
+   "watch": [
+    "Log search stays open when the jump is to Daemons (it only closes for a conversation jump). Check that the Daemons panel is drawn above it; if it is not, that is a stacking bug, not a failed jump."
    ]
   },
   "tool_maker_panel": {

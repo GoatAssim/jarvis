@@ -343,6 +343,39 @@ def _openai_style(provider_name, model, base_url=""):
     return "effort" if _REASONING_MODEL_RE.search(model or "") else "none"
 
 
+_GEMINI_MAJOR_RE = re.compile(r"gemini-(\d+)", re.I)
+
+
+def gemini_uses_levels(model):
+    """True for Gemini 3 and later, which take `thinkingLevel` (low / medium /
+    high) rather than the 2.5 series' `thinkingBudget` token count.
+
+    Google's thinking guide recommends thinkingLevel from Gemini 3 on and says
+    thinkingBudget is only accepted for backwards compatibility (and can give
+    unexpected results on the Pro models). An unknown or empty model name keeps
+    the budget form, which is what every earlier release sent.
+    """
+    match = _GEMINI_MAJOR_RE.search(str(model or ""))
+    try:
+        return bool(match) and int(match.group(1)) >= 3
+    except ValueError:
+        return False
+
+
+def _gemini_thinking_config(level, round_num, model, budget, include_trace):
+    """The thinkingConfig for one Gemini round, in the form the model takes.
+    Returns None when this round should send none (a level that steps down to
+    nothing)."""
+    if gemini_uses_levels(model):
+        effort = effort_for_round(level, round_num)
+        if not effort:
+            return None
+        return {"thinkingLevel": effort, "includeThoughts": bool(include_trace)}
+    if budget is None or budget <= 0:
+        return None
+    return {"thinkingBudget": budget, "includeThoughts": bool(include_trace)}
+
+
 def request_patch(provider_type, level, *, provider_name="", model="",
                   base_url="", include_trace=True):
     """The keys to merge into this provider's request payload.
@@ -363,14 +396,8 @@ def request_patch(provider_type, level, *, provider_name="", model="",
         return {"thinking": {"type": "enabled", "budget_tokens": spec["budget"]}}
 
     if provider_type == "gemini":
-        return {
-            "_generationConfig": {
-                "thinkingConfig": {
-                    "thinkingBudget": spec["gemini"],
-                    "includeThoughts": bool(include_trace),
-                }
-            }
-        }
+        cfg = _gemini_thinking_config(level, 0, model, spec["gemini"], include_trace)
+        return {"_generationConfig": {"thinkingConfig": cfg}} if cfg else {}
 
     if provider_type == "ollama":
         return {"think": True}
@@ -455,11 +482,12 @@ def strip_from_payload(payload):
 
 
 _REJECT_RE = re.compile(
-    r"(thinking|reasoning_effort|reasoning|thinkingconfig|thinkingbudget|"
-    r"\bthink\b).{0,60}?(unsupported|not supported|unrecognized|unknown|"
+    r"(thinking|reasoning_effort|reasoning|thinkingconfig|thinkingbudget|thinkinglevel|"
+    r"thinking_level|\bthink\b).{0,60}?(unsupported|not supported|unrecognized|unknown|"
     r"invalid|does not support|isn't supported)"
     r"|(unsupported|unrecognized|unknown|invalid|not supported).{0,60}?"
-    r"(thinking|reasoning_effort|reasoning|thinkingconfig|thinkingbudget)",
+    r"(thinking|reasoning_effort|reasoning|thinkingconfig|thinkingbudget|thinkinglevel|"
+    r"thinking_level)",
     re.I | re.S,
 )
 
@@ -686,21 +714,17 @@ def round_patch(provider_type, level, round_num=0, is_final=False,
 
     level = normalize_level(level)
     budget = budget_for_round(level, round_num, is_final)
-    if budget <= 0 and provider_type in ("anthropic", "gemini"):
+    if budget <= 0 and provider_type == "anthropic":
+        return {}
+    if budget <= 0 and provider_type == "gemini" and not gemini_uses_levels(model):
         return {}
 
     if provider_type == "anthropic":
         return {"thinking": {"type": "enabled", "budget_tokens": budget}}
 
     if provider_type == "gemini":
-        return {
-            "_generationConfig": {
-                "thinkingConfig": {
-                    "thinkingBudget": budget,
-                    "includeThoughts": bool(include_trace),
-                }
-            }
-        }
+        cfg = _gemini_thinking_config(level, round_num, model, budget, include_trace)
+        return {"_generationConfig": {"thinkingConfig": cfg}} if cfg else {}
 
     if provider_type == "ollama":
         return {"think": True}

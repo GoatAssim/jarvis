@@ -32,13 +32,14 @@ optional on every call_* function so nothing about the non-tool path
 changes for a caller that doesn't pass them.
 """
 
+import contextlib
 import json
 import re
 import threading
 
 import requests
 
-from . import key_health, logs, prompt_cache
+from . import key_health, logs, narration_guard, prompt_cache
 from .reply_sanitize import sanitize_reply_text
 from . import token_usage
 
@@ -826,6 +827,57 @@ def clear_log_context():
     _log_local.forced = None
     _log_local.stream_enabled = False
     _log_local.stream_sink = None
+
+
+_MISSING = object()
+
+
+@contextlib.contextmanager
+def isolated_call():
+    """Run a SIDE request (the AI-overview risk note, anything else a tool or a
+    confirmation prompt makes to a second provider in the middle of a turn)
+    without letting it touch the turn that is already running.
+
+    Why this exists: every adapter reports through process-wide state that
+    ai_client.ask() set up for the MAIN attempt -- the thinking level and the
+    trace it accumulates, the interim-text and finish logs, and the thread's
+    stream switch and sink. A side request that simply calls an adapter
+    inherits all of it, so with thinking on it asked the second provider to
+    think, glued ITS reasoning onto the main turn's saved trace, and (when
+    streaming was on) streamed its text and thinking deltas into the main
+    conversation bubble.
+
+    Inside the block: thinking is off, streaming is off with no sink, and the
+    interim/finish logs are the call's own. On exit all of it is put back
+    exactly as it was. Usage is deliberately NOT isolated: the side request's
+    tokens are real spend and still count toward the ask's token ledger.
+    Never raises on its own account."""
+    saved_local = {name: getattr(_log_local, name, _MISSING)
+                   for name in ("on_interim_text", "stream_enabled", "stream_sink")}
+    saved_thinking = dict(_thinking)
+    saved_interim = list(_interim_text["items"])
+    saved_finish = list(_finish_log["items"])
+    _log_local.on_interim_text = None
+    _log_local.stream_enabled = False
+    _log_local.stream_sink = None
+    _thinking.update({"level": "off", "trace": "", "rounds": 0, "requested": 0})
+    _interim_text["items"] = []
+    _finish_log["items"] = []
+    try:
+        yield
+    finally:
+        for name, value in saved_local.items():
+            if value is _MISSING:
+                try:
+                    delattr(_log_local, name)
+                except AttributeError:
+                    pass
+            else:
+                setattr(_log_local, name, value)
+        _thinking.clear()
+        _thinking.update(saved_thinking)
+        _interim_text["items"] = saved_interim
+        _finish_log["items"] = saved_finish
 
 
 def _log_conv_id():
@@ -3184,6 +3236,59 @@ def _stream_gemini_chat(resp, url):
     return data, None
 
 
+def _merge_gemini_extra(gen, extra):
+    """Fold a provider block's `extra_params` into generationConfig.
+
+    A plain dict.update() replaced the WHOLE thinkingConfig jarvis had just
+    built, so a provider block carrying `{"thinkingConfig": {"thinkingBudget":
+    2048}}` (the shape the max_tokens error tells you to add) silently dropped
+    `includeThoughts`, and Gemini then never returned a thought summary. The
+    thinkingConfig is now merged key by key, the provider block winning where
+    it names a key. Budget and level are alternatives (sending both is a 400),
+    so naming one in the block removes the other jarvis chose.
+    """
+    extra = dict(extra)
+    extra_think = extra.pop("thinkingConfig", None)
+    gen.update(extra)
+    if not isinstance(extra_think, dict):
+        if extra_think is not None:
+            gen["thinkingConfig"] = extra_think
+        return
+    merged = dict(gen.get("thinkingConfig") or {})
+    if "thinkingBudget" in extra_think:
+        merged.pop("thinkingLevel", None)
+    if "thinkingLevel" in extra_think:
+        merged.pop("thinkingBudget", None)
+    merged.update(extra_think)
+    gen["thinkingConfig"] = merged
+
+
+def _note_gemini_thought_gap(payload, data):
+    """Say so when Gemini was asked for thought summaries, spent thinking
+    tokens, and returned none. Without this the symptom is just an empty
+    thinking block with nothing to tell \"never asked\" from \"asked, thought,
+    summary withheld\". One info line in the Logs viewer; never raises."""
+    try:
+        conv_id = _log_conv_id()
+        if not conv_id:
+            return
+        cfg = (payload.get("generationConfig") or {}).get("thinkingConfig")
+        if not isinstance(cfg, dict) or not cfg.get("includeThoughts"):
+            return
+        from . import reasoning
+        if reasoning.extract_trace("gemini", data):
+            return
+        spent = int(((data.get("usageMetadata") or {}).get("thoughtsTokenCount")) or 0)
+        logs.log(conv_id, "info", {
+            "thinking": "requested thought summaries; none came back",
+            "sent": {k: cfg.get(k) for k in ("thinkingLevel", "thinkingBudget", "includeThoughts")
+                     if k in cfg},
+            "thoughts_token_count": spent,
+        }, provider=_log_provider())
+    except Exception:  # noqa: BLE001 -- a diagnostic must never touch the turn
+        pass
+
+
 def call_gemini(provider, messages, timeout, tools=None, tool_executor=None, round_budget=None,
                 cfg_defaults=None):
     api_key = provider.get("api_key") or ""
@@ -3312,7 +3417,7 @@ def call_gemini(provider, messages, timeout, tools=None, tool_executor=None, rou
                 # reasoning traces entirely with
                 # "extra_params": {"thinkingConfig": {"thinkingBudget": 0}}
                 # instead of just raising max_tokens to outrun them.
-                payload["generationConfig"].update(extra)
+                _merge_gemini_extra(payload["generationConfig"], extra)
             if cache_name:
                 payload["cachedContent"] = cache_name
             else:
@@ -3352,6 +3457,7 @@ def call_gemini(provider, messages, timeout, tools=None, tool_executor=None, rou
 
             _record_usage("gemini", data, round_num)
             _collect_thinking("gemini", data)
+            _note_gemini_thought_gap(payload, data)
 
             block_reason = (data.get("promptFeedback") or {}).get("blockReason")
             if block_reason:
@@ -3840,6 +3946,7 @@ def call_ollama(provider, messages, timeout, tools=None, tool_executor=None, rou
             for t in tools
         ]
 
+    nudges_sent = 0
     for round_num in range(MAX_TOOL_ROUNDS + 1):
         # Trim tool results from earlier rounds before rebuilding this
         # round's payload — see _compact_prior_tool_results. Without this,
@@ -3946,6 +4053,26 @@ def call_ollama(provider, messages, timeout, tools=None, tool_executor=None, rou
                 args = _decode_arguments(fn.get("arguments"))
                 result_text = _stringify_tool_result(_call_tool_safely(tool_executor, name, args))
                 working_messages.append({"role": "tool", "content": result_text})
+            continue
+
+        # A.1d: a small local model often answers a tool-worthy request with a
+        # sentence of intent ("I will now search for cli.py") and no tool_calls.
+        # That used to be returned as the finished answer, and the user had to
+        # type "go ahead and call it" by hand. Say so to the model, once or
+        # twice, instead. Off with "narration_retry": false in the provider block.
+        if (tools and tool_executor and round_num < MAX_TOOL_ROUNDS
+                and nudges_sent < narration_guard.MAX_NUDGES
+                and provider.get("narration_retry", True) is not False
+                and round_budget.remaining() > 0
+                and narration_guard.looks_like_narrated_call(text, [t.get("name") for t in tools])):
+            nudges_sent += 1
+            _surface_interim_text(round_num, text)
+            working_messages.append({"role": "assistant", "content": text})
+            working_messages.append({"role": "user", "content": narration_guard.NUDGE})
+            conv_id = _log_conv_id()
+            if conv_id:
+                logs.log(conv_id, "info", {"narration_nudge": nudges_sent, "text": text[:200]},
+                         provider=_log_provider())
             continue
 
         # Degenerate-output guard (see reply_sanitize.py): a reply that is mostly

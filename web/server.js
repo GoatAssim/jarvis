@@ -2442,6 +2442,74 @@ app.post("/api/subagents/:id/cancel", requireJarvis, async (req, res) => {
   return parseJarvisJSON(result, res, "Couldn't cancel that subagent.");
 });
 
+// K.3.2.4 -- the word-by-word tier of the subagent live view. A subagent step is
+// its own `jarvis ask` subprocess whose stdout the supervisor captures whole, so
+// it can't reach us the way the main Ask panel's JARVIS_STREAM lines do. Instead
+// the child appends the same marker lines to ~/.jarvis/tasks/streams/<id>.jsonl
+// (jarvis/task_stream.py has the format and why) and this route serves that file
+// by BYTE OFFSET: GET /api/subagents/:id/stream?since=<next from the last reply>.
+// Read straight from disk, no CLI spawn -- the browser polls this a couple of
+// times a second, which a process spawn per poll could not afford.
+//   -> { events: [{k, ...}], next: <offset to ask for next>, size, reset, more }
+// `reset` means the file got shorter than `since` (it was restarted for size, or
+// replaced): the client drops what it has and re-reads from the start.
+const SUBAGENT_STREAM_MARKER = "JARVIS_STREAM ";
+const SUBAGENT_STREAM_KINDS = new Set(["text", "thinking", "tool", "round_end", "reset", "step_start", "step_end"]);
+const SUBAGENT_STREAM_MAX_READ = 128 * 1024;
+
+function shapeSubagentStreamEvent(ev) {
+  if (!ev || typeof ev !== "object" || !SUBAGENT_STREAM_KINDS.has(ev.k)) return null;
+  const out = { k: ev.k };
+  if (ev.k === "text" || ev.k === "thinking") out.d = typeof ev.d === "string" ? ev.d : "";
+  if (ev.k === "tool") out.name = typeof ev.name === "string" ? ev.name : "";
+  if (ev.k === "round_end") out.finish = ev.finish === "tool" ? "tool" : "done";
+  if (ev.k === "step_start") out.step = ev.step === "plan" ? "plan" : (Number.isInteger(ev.step) ? ev.step : 0);
+  if (ev.k === "step_end") out.ok = ev.ok !== false;
+  return out;
+}
+
+app.get("/api/subagents/:id/stream", requireJarvis, async (req, res) => {
+  const { id } = req.params;
+  if (badSubagentId(id, res)) return;
+  const sinceRaw = typeof req.query.since === "string" ? req.query.since.trim() : "";
+  let since = /^\d{1,12}$/.test(sinceRaw) ? Number(sinceRaw) : 0;
+  const file = path.join(os.homedir(), ".jarvis", "tasks", "streams", `${id}.jsonl`);
+  let handle = null;
+  try {
+    handle = await fs.open(file, "r");
+    const { size } = await handle.stat();
+    let reset = false;
+    if (since > size) { since = 0; reset = true; }
+    const want = Math.min(size - since, SUBAGENT_STREAM_MAX_READ);
+    if (want <= 0) return res.json({ events: [], next: since, size, reset, more: false });
+    const buf = Buffer.alloc(want);
+    const { bytesRead } = await handle.read(buf, 0, want, since);
+    const chunk = buf.subarray(0, bytesRead);
+    // Only whole lines: the child may be mid-write of the last one. A chunk with
+    // no newline at all that already fills a whole read is a runaway line -- skip
+    // it rather than stall on it forever.
+    const lastNl = chunk.lastIndexOf(10);
+    let used = lastNl + 1;
+    if (lastNl < 0) used = bytesRead >= SUBAGENT_STREAM_MAX_READ ? bytesRead : 0;
+    const events = [];
+    for (const line of chunk.subarray(0, used).toString("utf8").split("\n")) {
+      if (!line.startsWith(SUBAGENT_STREAM_MARKER)) continue;
+      try {
+        const shaped = shapeSubagentStreamEvent(JSON.parse(line.slice(SUBAGENT_STREAM_MARKER.length)));
+        if (shaped) events.push(shaped);
+      } catch { /* a torn or foreign line is skipped, never fatal */ }
+    }
+    const next = since + used;
+    return res.json({ events, next, size, reset, more: next < size });
+  } catch (e) {
+    // No file yet (task never streamed, or streaming is off) is the normal case.
+    if (e && e.code === "ENOENT") return res.json({ events: [], next: 0, size: 0, reset: false, more: false });
+    return res.status(500).json({ error: "Couldn't read that subagent's stream." });
+  } finally {
+    if (handle) await handle.close().catch(() => {});
+  }
+});
+
 // Backlog.
 app.get("/api/backlog", requireJarvis, async (req, res) => {
   const result = await runJarvisOnce(["backlog-board"], 10000);

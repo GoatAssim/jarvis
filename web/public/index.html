@@ -21,6 +21,7 @@
 <link rel="stylesheet" href="tool-manager.css">
 <link rel="stylesheet" href="tool-ui.css">
 <link rel="stylesheet" href="category-input.css">
+<link rel="stylesheet" href="category-menu.css">
 <link rel="stylesheet" href="daemons.css">
 <link rel="stylesheet" href="backlog.css">
 <link rel="stylesheet" href="calendar.css">
@@ -131,7 +132,6 @@
         <h2>Commands</h2>
         <div class="panel__head-actions">
           <button class="btn btn--ghost" id="btn-settings" type="button" title="Edit commands, AI, Playnite, Spotify, and other jarvis configs">Config</button>
-          <button class="btn btn--ghost" id="btn-command-categories" type="button" title="Rename, merge or delete a category on every command at once">Categories</button>
           <button class="btn btn--ghost" id="btn-new-command" type="button">+ New</button>
         </div>
       </div>
@@ -142,6 +142,8 @@
         </svg>
         <input type="search" id="cmd-search" class="panel__search-input" placeholder="Search commands&hellip;" autocomplete="off">
       </div>
+      <!-- L.14: category filter + manage, one dropdown (category-menu.js). -->
+      <div class="cmenu-bar" id="cmd-cat-filter"></div>
       <div class="cmd-list" id="cmd-list">
         <div class="empty-hint">Loading index&hellip;</div>
       </div>
@@ -1939,6 +1941,7 @@
      chips from JarvisCategories. -->
 <script src="category-input.js"></script>
 <script src="category-manager.js"></script>
+<script src="category-menu.js"></script>
 <script src="ask-images.js"></script>
 <script src="app.js"></script>
 <script src="notifications.js"></script>

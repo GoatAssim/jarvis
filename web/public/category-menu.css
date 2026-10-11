@@ -1,0 +1,156 @@
+/* ============================================================================
+ * category-menu.css - styles for category-menu.js (the Commands panel's
+ * category dropdown).
+ *
+ * Only theme tokens, never a literal colour, so it follows every skin the way
+ * the panels around it do. Class names are `cmenu__*`.
+ *
+ * Nothing in here changes size when the pointer moves or a row is hovered: the
+ * rename / delete icons live in a slot that is always reserved (only their
+ * opacity changes), so a row never reflows under the cursor.
+ * ========================================================================= */
+
+/* The Commands header: a third button used to push "+ New" off the panel. The
+   head now wraps instead of clipping, and its two buttons are a little tighter. */
+.panel--list .panel__head{ flex-wrap: wrap; gap: 8px; row-gap: 6px; }
+.panel--list .panel__head h2{ letter-spacing: 0.16em; }
+.panel--list .panel__head-actions{ gap: 6px; margin-left: auto; }
+.panel--list .panel__head-actions .btn{ padding: 6px 11px; }
+
+/* Search and the category filter read as one block, so the hairline sits under
+   the pair rather than between them. */
+.panel--list .panel__search{ border-bottom: 0; padding-bottom: 8px; }
+.cmenu-bar{
+  flex-shrink: 0; position: relative;
+  padding: 0 16px 10px; border-bottom: 1px solid var(--border);
+}
+
+.cmenu{ position: relative; min-width: 0; }
+.cmenu__bar{ display: flex; align-items: stretch; gap: 6px; }
+
+/* ---- the trigger: looks like the app's selects ---------------------------- */
+.cmenu__trigger{
+  flex: 1 1 auto; min-width: 0;
+  display: flex; align-items: center; gap: 8px;
+  padding: 7px 10px; text-align: left; cursor: pointer;
+  font-family: var(--font-ui); font-size: 13.5px; color: var(--text);
+  background: var(--bg-raised); border: 1px solid var(--border); border-radius: 2px;
+  transition: border-color .15s, background .15s;
+}
+.cmenu__trigger:hover{ border-color: var(--border-strong); }
+.cmenu__trigger[aria-expanded="true"]{ border-color: var(--accent); }
+.cmenu__trigger.is-filtered{
+  color: var(--accent); border-color: var(--accent-dim);
+  background: color-mix(in srgb, var(--accent) 7%, var(--bg-raised));
+}
+.cmenu__trigger.is-empty{ color: var(--text-dimmer); }
+.cmenu__label{ flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cmenu__count{ flex: 0 0 auto; font-family: var(--font-mono); font-size: 11px; color: var(--text-dimmer); }
+.cmenu__trigger.is-filtered .cmenu__count{ color: var(--accent-soft); }
+.cmenu__caret{ flex: 0 0 auto; display: inline-flex; color: var(--text-dim); transition: transform .15s; }
+.cmenu.is-open .cmenu__caret{ transform: rotate(180deg); }
+
+.cmenu__clear{
+  flex: 0 0 auto; width: 32px;
+  display: inline-flex; align-items: center; justify-content: center; cursor: pointer;
+  color: var(--text-dim); background: var(--bg-raised);
+  border: 1px solid var(--border); border-radius: 2px;
+  transition: color .15s, border-color .15s;
+}
+.cmenu__clear:hover{ color: var(--text); border-color: var(--accent); }
+
+/* ---- the menu ------------------------------------------------------------- */
+.cmenu__menu{
+  position: absolute; z-index: 40; left: 0; right: 0; top: calc(100% + 4px);
+  display: flex; flex-direction: column;
+  max-height: min(380px, calc(100vh - 250px)); min-height: 0;
+  background: var(--bg-raised);
+  border: 1px solid var(--border-strong); border-radius: 3px;
+  box-shadow: 0 16px 34px rgba(0, 0, 0, 0.55), 0 0 0 1px rgba(0, 0, 0, 0.25);
+}
+.cmenu__menu--up{ top: auto; bottom: calc(100% + 4px); }
+.cmenu__list{ overflow-y: auto; min-height: 0; padding: 4px 0; }
+
+.cmenu__findwrap{ flex: 0 0 auto; padding: 8px 8px 4px; }
+.cmenu__find{ padding: 6px 9px !important; font-size: 13px !important; }
+
+.cmenu__item{
+  display: flex; align-items: stretch; min-width: 0;
+  box-shadow: inset 2px 0 0 transparent;
+  transition: background .12s, box-shadow .12s;
+}
+.cmenu__item:hover,
+.cmenu__item:focus-within{ background: color-mix(in srgb, var(--accent) 8%, transparent); }
+.cmenu__item.is-active{
+  box-shadow: inset 2px 0 0 var(--accent);
+  background: color-mix(in srgb, var(--accent) 6%, transparent);
+}
+.cmenu__item.is-active:hover{ background: color-mix(in srgb, var(--accent) 11%, transparent); }
+.cmenu__pick{
+  flex: 1 1 auto; min-width: 0;
+  display: flex; align-items: center; gap: 8px;
+  padding: 7px 4px 7px 10px; text-align: left; cursor: pointer;
+  font-family: var(--font-ui); font-size: 14px; color: var(--text);
+  background: transparent; border: 0; border-radius: 0;
+}
+.cmenu__pick:focus-visible{ outline: 2px solid var(--accent); outline-offset: -2px; }
+.cmenu__pick.is-active{ color: var(--accent); }
+.cmenu__tick{ flex: 0 0 14px; width: 14px; display: inline-flex; align-items: center; color: var(--accent); }
+.cmenu__name{ flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cmenu__n{ flex: 0 0 auto; font-family: var(--font-mono); font-size: 11px; color: var(--text-dimmer); }
+.cmenu__pick.is-active .cmenu__n{ color: var(--accent-soft); }
+
+/* The icon slot is always there, so counts line up and nothing shifts on hover. */
+.cmenu__acts{ flex: 0 0 56px; width: 56px; display: flex; align-items: center; justify-content: flex-end; gap: 2px; padding-right: 6px; }
+.cmenu__acts:not(.cmenu__acts--spacer){ opacity: 0; transition: opacity .12s; }
+.cmenu__item:hover .cmenu__acts,
+.cmenu__item:focus-within .cmenu__acts{ opacity: 1; }
+.cmenu__act{
+  width: 24px; height: 24px; padding: 0; cursor: pointer;
+  display: inline-flex; align-items: center; justify-content: center;
+  color: var(--text-dim); background: transparent;
+  border: 1px solid transparent; border-radius: 2px;
+  transition: color .12s, border-color .12s, background .12s;
+}
+.cmenu__act:hover{ color: var(--accent); border-color: var(--border-strong); background: color-mix(in srgb, var(--accent) 10%, transparent); }
+.cmenu__act--danger:hover{ color: var(--red); border-color: rgba(255, 92, 108, 0.45); background: rgba(255, 92, 108, 0.1); }
+@media (hover: none){
+  /* No hover on touch: the icons are simply always there. */
+  .cmenu__acts:not(.cmenu__acts--spacer){ opacity: 1; }
+  .cmenu__act{ width: 30px; height: 30px; }
+  .cmenu__acts{ flex-basis: 68px; width: 68px; }
+}
+
+.cmenu__rule{ height: 1px; margin: 4px 10px; background: var(--border); }
+
+/* ---- inline rename / delete ----------------------------------------------- */
+.cmenu__item--editing, .cmenu__item--editing:hover, .cmenu__item--editing:focus-within{ display: block; padding: 6px 8px; background: color-mix(in srgb, var(--accent) 5%, transparent); }
+.cmenu__edit{ display: flex; flex-direction: column; gap: 6px; }
+.cmenu__editrow{ display: flex; align-items: center; gap: 6px; }
+.cmenu__editrow--end{ justify-content: flex-end; }
+.cmenu__input{ flex: 1 1 auto; min-width: 0; padding: 6px 9px !important; font-size: 13.5px !important; }
+.cmenu__save.is-merge{ color: var(--accent-secondary); border-color: rgba(var(--accent-secondary-rgb), 0.6); }
+.cmenu__ask{ font-size: 13px; color: var(--text); line-height: 1.35; overflow-wrap: anywhere; }
+.cmenu__note{ font-size: 11.5px; line-height: 1.35; color: var(--text-dimmer); overflow-wrap: anywhere; }
+.cmenu__note:empty{ display: none; }
+.cmenu__note.is-warn{ color: var(--accent-secondary); }
+.cmenu__note.is-error{ color: var(--red); }
+
+.cmenu__empty{ padding: 12px 14px; font-size: 12.5px; line-height: 1.4; color: var(--text-dimmer); }
+.cmenu__foot{
+  flex: 0 0 auto; padding: 7px 12px; font-size: 11.5px; color: var(--text-dimmer);
+  border-top: 1px solid var(--border);
+}
+@media (hover: none){ .cmenu__foot{ display: none; } }
+.cmenu__menu--tight .cmenu__foot{ display: none; }
+
+@media (prefers-reduced-motion: reduce){
+  .cmenu__caret, .cmenu__trigger, .cmenu__pick, .cmenu__acts, .cmenu__act{ transition: none; }
+}
+
+/* Stacked (phone) layout: the Commands panel is as tall as its list, which can be
+   shorter than the menu, and the panel clips anything that overflows it. There
+   the menu opens in the flow and pushes the list down instead of floating. */
+@media (max-width: 780px){
+  .panel--list .cmenu__menu{ position: static; margin-top: 4px; max-height: 60vh; box-shadow: none; }
+}

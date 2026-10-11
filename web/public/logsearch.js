@@ -13,12 +13,10 @@
  *     exports for exactly this (see app.js's own comment on it) — a
  *     conversation-log hit can jump straight into that conversation the
  *     same way the Subagents panel's own "transcript" button already does.
- *   - window.JarvisDaemons.open(), already public (app.js has called it
- *     for the menu item since the H.1 daemons rework) — a daemon-console
- *     hit opens the Daemons panel so the person can pick that service's
- *     console. It does NOT reach into daemons.js beyond this one existing
- *     open() call — no new coupling, and nothing in daemons.js/.css is
- *     touched by this patch.
+ *   - window.JarvisDaemons.open({id, tab}), already public (app.js has called
+ *     it for the menu item since the H.1 daemons rework) — a daemon-console
+ *     hit opens the Daemons panel on that service's Console tab. It does NOT
+ *     reach into daemons.js beyond this one open() call — no new coupling.
  *   - window.JarvisSchedules.open(), the sibling module this same patch
  *     adds — a scheduler-ask-log hit opens the Schedules panel.
  *
@@ -188,8 +186,11 @@
     }
     if (target.type === "daemon") {
       if (!global.JarvisDaemons) { toast("Daemons panel isn't available.", "error"); return; }
-      global.JarvisDaemons.open();
-      toast(`Pick "${target.id}" in the list to see this console.`, "info");
+      // Deep link: the panel selects this service and shows its Console tab. An
+      // older daemons.js that ignores the argument just opens the panel, so say
+      // what to do in that case only.
+      global.JarvisDaemons.open({ id: target.id, tab: "console" });
+      if (!global.JarvisDaemons._focusService) toast(`Pick "${target.id}" in the list to see this console.`, "info");
       return;
     }
     if (target.type === "scheduler") {
