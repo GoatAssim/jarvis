@@ -837,11 +837,9 @@ def _tools_blurb(compact, ultra):
                 "Confirm before install/delete/off/eval."
             )
         return (
-            "Tools are listed by name only. Call one when you need it. "
-            "If it needs arguments you don't know, call it with no arguments — "
-            "you will get its schema, then call it again. "
-            "Never invent a tool name — if you don't see one for what you need, "
-            "call search_tools first. "
+            "Tools are listed by name only. If you don't know a tool's arguments, "
+            "call it with none to get its schema, then call again. "
+            "Never invent a tool name \u2014 if none fits, call search_tools first. "
             "Confirm before install/delete/off/eval."
         )
     return (
@@ -1347,7 +1345,7 @@ def _build_messages(persona, user_text, tools_enabled, profile, conversation_id,
     # Wrapped because a skills directory that can't be read must degrade to
     # "no skills" rather than take down every ask.
     try:
-        skills_ctx = skills.catalog_text()
+        skills_ctx = skills.catalog_text(compact=compact, ultra=ultra)
     except Exception:
         skills_ctx = ""
 

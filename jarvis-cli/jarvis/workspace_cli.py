@@ -409,13 +409,17 @@ def handle(argv):
     # --- raw log search ----------------------------------------------------
     if cmd == "logs-files":
         from . import log_files
-        if not positional:
+        # `--query=<text>` carries text that starts with "--" (a flag name in a
+        # log line), which as a bare positional would be read as a flag.
+        query_flag = _one(flags, "query")
+        query_text = query_flag if isinstance(query_flag, str) else " ".join(positional)
+        if not query_text.strip():
             _fail('usage: logs-files <query> [--mode words|phrase|regex] '
                   '[--set daemons] [--path /some/file.log] [--context 2]')
         sets = [s for s in flags.get("set", []) if s is not True] or None
         paths = [p for p in flags.get("path", []) if p is not True] or None
         result = log_files.search(
-            " ".join(positional),
+            query_text,
             mode=_one(flags, "mode", "words"),
             limit=int(_one(flags, "limit", log_files.DEFAULT_LIMIT) or 100),
             sets=sets,

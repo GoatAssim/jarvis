@@ -101,15 +101,23 @@ USAGE = """channel commands:
                                         `lock` stops them changing it with /thinking in chat;
                                         `default` clears both. Refused for the owner
   channels-memory <platform> <id|@handle> list | add <text ...> | forget <rec-id> |
-                                        approve <rec-id> | retire <rec-id> | export |
-                                        rule <directive> [topic ...] | rules |
+                                        approve <rec-id> | retire <rec-id> | export [text] |
+                                        rule <directive> [--hard] [--days N] [topic ...] | rules |
                                         summarize [N] | episodes
                                         what Jarvis keeps about one person (L.21/L.22).
                                         directive: don_t_discuss, only_discuss, ask_owner_first,
                                         notify_owner, tone, custom. Use `anyone` as the platform
                                         for `rules`/`rule` that apply to everyone:
                                         channels-memory anyone rule don_t_discuss <topic ...>
+                                        `export` prints every record as JSON (any status);
+                                        `export text` the same as readable text. `rule --hard`
+                                        (don_t_discuss / ask_owner_first only) checks each drafted
+                                        reply for the topic before it is sent and replaces a leak;
+                                        `--days N` ends the rule after N days. `rules` also lists
+                                        rules that conflict and which one wins.
                                         channels-memory applied   which rules fired (no message text)
+                                        channels-memory recall-audit   replies that claimed a
+                                        memory: counts and ids, never text
                                         `summarize [N]` writes summaries of up to N (default 3,
                                         max 10) finished conversations, as `proposed` records the
                                         owner approves; `episodes` says how many are waiting.
@@ -227,11 +235,17 @@ def _channels_memory(rest):
     """channels-memory: per-person memory and rules (L.21 / L.22)."""
     from .channels import person_memory
     usage = ("usage: channels-memory <platform> <id|@handle> list | add <text ...> | "
-             "forget <rec-id> | approve <rec-id> | retire <rec-id> | export | "
-             "rule <directive> [topic ...] | rules | summarize [N] | episodes   "
-             "(or: channels-memory applied | episodes status | episodes auto on|off)")
+             "forget <rec-id> | approve <rec-id> | retire <rec-id> | export [text] | "
+             "rule <directive> [--hard] [--days N] [topic ...] | rules | "
+             "summarize [N] | episodes   "
+             "(or: channels-memory applied | recall-audit | episodes status | "
+             "episodes auto on|off)")
     if rest and rest[0] == "applied":
         print(json.dumps({"ok": True, "applied": person_memory.read_applied()}, indent=2))
+        return
+    if rest and rest[0] == "recall-audit":
+        from .channels import recall_check
+        print(json.dumps({"ok": True, "audit": recall_check.read_audit()}, indent=2))
         return
     if rest and rest[0] == "episodes":
         from .channels import episodes
@@ -261,10 +275,31 @@ def _channels_memory(rest):
     if action == "list":
         result["items"] = person_memory.list_records(key, statuses=("active", "proposed"))
     elif action == "export":
-        result["items"] = person_memory.export(key)
+        who = {}
+        if platform:
+            entry = people.get(platform, uid) or {}
+            who = {"platform": platform, "user_id": uid,
+                   "name": people.effective_name(entry) or "",
+                   "handle": entry.get("handle") or ""}
+        doc = person_memory.export_document(key, person=who)
+        if tail and tail[0].lower() == "text":
+            stamp = doc["exported_at"][:10]
+            stem = "everyone" if key == person_memory.ANYONE else f"{platform}-{uid}"
+            result.update(text=person_memory.export_text(doc),
+                          filename=f"jarvis-memory-{stem}-{stamp}.txt", count=doc["count"])
+        elif tail:
+            _fail(usage)
+        else:
+            result.update(doc)
     elif action == "rules":
         result["items"] = [r for r in person_memory.list_records(
             key, kinds=("instruction",), statuses=("active",))]
+        result["conflicts"] = person_memory.find_conflicts(key)
+        if key != person_memory.ANYONE:
+            # The rules that apply to everyone, so one call shows the whole
+            # picture (and the panel can manage them from the person's tab).
+            result["everyone"] = person_memory.list_records(
+                person_memory.ANYONE, kinds=("instruction",), statuses=("active",))
     elif action == "add" and tail:
         rec, err = person_memory.add(key, "fact", " ".join(tail))
         result.update(ok=not err, error=err, record=rec)
@@ -288,10 +323,33 @@ def _channels_memory(rest):
                 key, tail[0], "active" if action == "approve" else "retired")
             result.update(ok=not err, error=err, record=rec)
     elif action == "rule" and tail:
-        directive, topic = tail[0], " ".join(tail[1:])
-        rec, err = person_memory.add_instruction(key, topic, directive,
-                                                 text=topic if directive in ("tone", "custom") else "")
+        directive, words = tail[0], list(tail[1:])
+        hard, days = False, None
+        while words and words[0].startswith("--"):
+            flag = words.pop(0)
+            if flag == "--hard":
+                hard = True
+            elif flag == "--days" and words:
+                try:
+                    days = float(words.pop(0))
+                except ValueError:
+                    _fail("--days takes a number")
+                if not 0 < days <= 3650:
+                    _fail("--days must be between 1 and 3650")
+            else:
+                _fail(f"unknown option {flag}; {usage}")
+        topic = " ".join(words)
+        until = time.time() + days * 86400 if days else None
+        # A tone / custom rule is wording, not a topic: it goes in as the rule's
+        # text only (the topic would be capped at 120 characters and the label
+        # at 300, which cut a long rule short).
+        wording = directive in ("tone", "custom")
+        rec, err = person_memory.add_instruction(
+            key, "" if wording else topic, directive, until=until, hard=hard,
+            text=topic if wording else "")
         result.update(ok=not err, error=err, record=rec)
+        if rec:
+            result["conflicts"] = person_memory.conflicts_involving(key, rec["id"])
     else:
         _fail(usage)
     print(json.dumps(result, indent=2, default=str))
@@ -959,6 +1017,16 @@ def handle(argv):
         i = 0
         while i < len(rest):
             token = rest[i]
+            if token.startswith("--") and "=" in token[2:] and token[2:].split("=", 1)[0]:
+                # --key=value: the only way to search for text that itself
+                # starts with "--" (a flag name in a log line).
+                key, value = token[2:].split("=", 1)
+                if key == "query":
+                    query_parts.append(value)
+                else:
+                    opts.setdefault(key, []).append(value)
+                i += 1
+                continue
             if token.startswith("--") and i + 1 < len(rest):
                 opts.setdefault(token[2:], []).append(rest[i + 1])
                 i += 2

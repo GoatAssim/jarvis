@@ -1551,6 +1551,36 @@ def command_off_reason(entry, off=None, own=None):
     return ""
 
 
+def switch_off_commands(name):
+    """Palette commands (TOOL_COMMANDS) that would STOP working if the tool `name`
+    were switched OFF -- the commands the Tool Manager's confirmation lists.
+
+    They follow their tool live (`command_off_reason`: off when the tool is off, or
+    when every tool of its file is), so this is a before/after question asked of
+    that one rule rather than a second copy of it: a command counts when it can run
+    now and `command_off_reason` would refuse it with `name` added to the off list.
+    That covers both ways a command goes off -- it runs this very tool, or this is
+    the last tool of its file that was still on. Commands already off (the owner's
+    own switch, or the tool already off) are not news and are left out; a protected
+    tool can never be switched off, so it lists nothing. Sorted names; never raises
+    (an unreadable switch list gives []).
+    """
+    try:
+        name = (name or "").strip()
+        if not name or tool_disable.protected_reason(name):
+            return []
+        off = set(tool_disable.disabled_tools())
+        if name in off:
+            return []
+        own = tool_disable.disabled_tool_commands()
+        after = off | {name}
+        return sorted(c["name"] for c in AUTO_COMMANDS
+                      if not command_off_reason(c, off, own)
+                      and command_off_reason(c, after, own))
+    except Exception:  # noqa: BLE001 - best effort, like switch_off_cascade
+        return []
+
+
 def tool_commands_payload(include_disabled=False):
     """What `jarvis tool-commands list` / GET /api/tool-commands return: every palette
     command a tool file contributed. The palette asks for the default (commands that

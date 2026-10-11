@@ -10315,6 +10315,31 @@
       if (!last) { toast("Nothing to copy yet."); return; }
       copyAskRaw(last);
     },
+    // The "/" palette's /persona. Same list the Skin picker offers (a persona switched
+    // off in the Tool Manager is left out unless it is the one in use), same effect as
+    // picking it there and pressing Save.
+    personas() {
+      const savedId = loadSkinPrefs().personaId;
+      return allPersonas()
+        .filter((p) => !isPersonaOff(p.id) || p.id === savedId)
+        .map((p) => ({
+          id: p.id, name: p.name, current: p.id === savedId,
+          attitudeLabel: ((allAttitudes().find((a) => a.id === p.attitude) || {}).label) || "",
+        }));
+    },
+    async setPersona(id) {
+      const persona = allPersonas().find((p) => p.id === id);
+      if (!persona) return { ok: false, error: `No persona called "${id}".` };
+      if (isPersonaOff(persona.id)) return { ok: false, error: `${persona.name} is switched off in the Tool Manager.` };
+      // The Skin form is the single save path (saveSkin reads it). Fill it from what is
+      // saved first, or a never-opened form would save a blank address and saturation.
+      await seedSkinModal();
+      applyPersonaPreset(persona);
+      await saveSkin();
+      const err = qs("#skin-error").textContent;
+      if (err) { closeSkinModal(); return { ok: false, error: err }; }
+      return { ok: true };
+    },
     lastReplyRaw() {
       const msgs = askThread.querySelectorAll(".ask-msg--jarvis");
       const last = msgs[msgs.length - 1];

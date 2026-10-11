@@ -39,6 +39,7 @@ isn't the user's patience.
 """
 
 import os
+import json
 import re
 from pathlib import Path
 
@@ -162,6 +163,75 @@ def _label(path):
         return str(path)
 
 
+# Only these separators end a line. str.splitlines() also splits on U+2028,
+# U+2029, \x0b, \x0c, \x1c-\x1e and \x85, and a JSONL log written with
+# ensure_ascii=False can hold a raw U+2028 inside a string: the line was cut in
+# two there and every later line number was off by one.
+_LINE_BREAK_RE = re.compile(r"\r\n|\n|\r")
+MAX_PLAIN_CHARS = 400_000
+
+
+def _split_lines(text):
+    lines = _LINE_BREAK_RE.split(text)
+    if lines and lines[-1] == "":
+        lines.pop()  # the file's own trailing newline is not a line
+    return lines
+
+
+def _plain_text(value, out=None, size=0):
+    """The string VALUES inside a decoded JSON entry, joined by newlines.
+
+    A conversation log line is JSON, so the file holds `C:\\\\Users\\\\me` for the
+    path C:\\Users\\me, `\\"` for a quote and a literal `\\n` for a line break:
+    a search for what the log SHOWS found nothing. Matching this form as well
+    fixes that; keys are left out so a word is not "found" because it is the
+    name of a field.
+    """
+    top = out is None
+    if top:
+        out = []
+    if size >= MAX_PLAIN_CHARS:
+        return "\n".join(out) if top else size
+    if isinstance(value, str):
+        out.append(value)
+        size += len(value)
+    elif isinstance(value, dict):
+        for item in value.values():
+            size = _plain_text(item, out, size)
+    elif isinstance(value, list):
+        for item in value:
+            size = _plain_text(item, out, size)
+    return "\n".join(out) if top else size
+
+
+def _decode_line(line):
+    """The plain-text form of one JSONL line, or "" when it is not JSON or
+    decoding changes nothing (no backslash means the raw line already is the
+    text, so the raw match is enough and the parse is skipped)."""
+    if "\\" not in line:
+        return ""
+    stripped = line.lstrip()
+    if not stripped or stripped[0] not in "{[":
+        return ""
+    try:
+        return _plain_text(json.loads(stripped))
+    except (ValueError, RecursionError):
+        return ""
+
+
+def _window(text, match, limit=MAX_LINE_CHARS):
+    """`text` cut to `limit` characters AROUND the match, so a hit deep inside
+    a long line still shows the part that matched."""
+    text = text.strip()
+    if len(text) <= limit:
+        return text
+    start = 0
+    if match is not None:
+        start = max(0, min(match.start() - limit // 4, len(text) - limit))
+    end = start + limit
+    return ("…" if start > 0 else "") + text[start:end] + ("…" if end < len(text) else "")
+
+
 def search(query, mode="words", limit=DEFAULT_LIMIT, sets=None, paths=None,
            context=0, newest_first=True):
     """Grep the log files. Returns {"ok", "results"|"error", ...}.
@@ -204,7 +274,7 @@ def search(query, mode="words", limit=DEFAULT_LIMIT, sets=None, paths=None,
 
         try:
             with path.open("r", encoding=ENCODING, errors="replace") as fh:
-                lines = fh.read().splitlines()
+                lines = _split_lines(fh.read())
         except OSError as exc:
             skipped.append({"file": _label(path), "why": str(exc)})
             continue
@@ -212,27 +282,44 @@ def search(query, mode="words", limit=DEFAULT_LIMIT, sets=None, paths=None,
         scanned_files += 1
         scanned_lines += len(lines)
         hits = []
+        is_jsonl = path.suffix.lower() == ".jsonl" or ".jsonl." in path.name.lower()
         for number, line in enumerate(lines, start=1):
-            if len(line) > MAX_LINE_CHARS:
-                line = line[:MAX_LINE_CHARS] + "…"
+            # Match the WHOLE line. It used to be cut to MAX_LINE_CHARS first,
+            # so anything past that point in a long log line (a raw provider
+            # response, a big tool result) could never be found. The cut now
+            # only applies to what is shown.
             # "words" is an AND across terms on a SINGLE line — the same
             # meaning logs.search gives it, scoped to a line because that
             # is the unit this search returns.
-            if not all(p.search(line) for p in patterns):
-                continue
+            found = [p.search(line) for p in patterns]
+            shown, decoded = None, False
+            if not all(found):
+                plain = _decode_line(line) if is_jsonl else ""
+                found = [p.search(plain) for p in patterns] if plain else []
+                if not found or not all(found):
+                    continue
+                shown, decoded = plain, True
+            else:
+                shown = line
+            text = _window(shown.replace("\n", " ⏎ ") if decoded else shown,
+                           None if decoded else found[0])
             entry = {
                 "file": _label(path),
                 "path": str(path),
                 "line": number,
-                "text": line.strip(),
+                "text": text,
             }
+            if decoded:
+                entry["decoded"] = True
             if context:
                 lo = max(0, number - 1 - context)
                 hi = min(len(lines), number + context)
-                entry["context"] = [
-                    {"line": lo + i + 1, "text": lines[lo + i][:MAX_LINE_CHARS]}
-                    for i in range(hi - lo)
-                ]
+                ctx = []
+                for i in range(hi - lo):
+                    at = lo + i + 1
+                    ctx.append({"line": at,
+                                "text": text if at == number else lines[lo + i][:MAX_LINE_CHARS]})
+                entry["context"] = ctx
             hits.append(entry)
 
         # Within one file the newest lines are at the end, so a truncated

@@ -1146,8 +1146,18 @@ function cleanQuery(value) {
 
 const SEARCH_MODES = new Set(["words", "phrase", "regex"]);
 
+// Log text starts with "-" all the time ("--stream", "-----", "- error"), so the
+// log searches accept it; it is handed to the CLI as `--query=<text>`, which can
+// never be mistaken for a flag. (cleanQuery above still refuses it for the
+// searches that pass the text as a bare positional argument.)
+function cleanLogQuery(value) {
+  const text = typeof value === "string" ? value.trim() : "";
+  if (!text || text.length > 500 || /[\0\r\n]/.test(text)) return null;
+  return text;
+}
+
 app.get("/api/logs-search", requireJarvis, async (req, res) => {
-  const query = cleanQuery(req.query.q);
+  const query = cleanLogQuery(req.query.q);
   // L.3.4: a task filter (a job's id or part of its title) is itself enough to
   // search on -- "everything this scheduled task logged" has no words to type.
   const taskRaw = typeof req.query.task === "string" ? req.query.task.trim() : "";
@@ -1156,7 +1166,7 @@ app.get("/api/logs-search", requireJarvis, async (req, res) => {
     return res.status(400).json({ error: "Missing or invalid query." });
   }
   const args = ["logs-search"];
-  if (query) args.push(query);
+  if (query) args.push(`--query=${query}`);
   if (task) args.push("--task", task);
   const mode = typeof req.query.mode === "string" ? req.query.mode : "words";
   if (SEARCH_MODES.has(mode)) args.push("--mode", mode);
@@ -1685,6 +1695,85 @@ app.post("/api/channels/episodes/auto", requireJarvis, async (req, res) => {
     ["channels-memory", "episodes", "auto", req.body.on ? "on" : "off"], 10000), res);
 });
 
+// Export (L.21) and standing rules (L.22). Same proxy rules as the memory routes
+// above: argv arrays only, every value validated first, the CLI does the work,
+// owner-side only. Export returns every record for ONE person whatever its
+// status (`?format=text` for a readable version); it is never cached because
+// it holds what guests said. A rule is one line; `hard` (a post-check on each
+// reply) only exists for the two directives that withhold something; `days`
+// ends the rule by itself. The panel's Memory tab manages a person's rules and
+// the ones for everyone from here.
+const CHANNEL_RULE_DIRECTIVES = new Set(["don_t_discuss", "only_discuss", "ask_owner_first", "notify_owner", "tone", "custom"]);
+const CHANNEL_RULE_HARD = new Set(["don_t_discuss", "ask_owner_first"]);
+const CHANNEL_RULE_LINE_OK = (v, max) => typeof v === "string" && v.trim().length > 0 && v.length <= max && !/[\x00-\x1f\x7f]/.test(v) && !v.trim().startsWith("-");
+function channelRuleArgs(prefix, body) {
+  const action = body?.action;
+  if (!["add", "retire", "forget"].includes(action)) return { error: "action must be add, retire or forget." };
+  if (action !== "add") {
+    const record = body?.record;
+    if (typeof record !== "string" || !CHANNEL_MEMORY_ID.test(record)) return { error: "Invalid record." };
+    return { args: [...prefix, action, record] };
+  }
+  const directive = body?.directive;
+  if (!CHANNEL_RULE_DIRECTIVES.has(directive)) return { error: "Unknown directive." };
+  const wording = directive === "tone" || directive === "custom";
+  if (!CHANNEL_RULE_LINE_OK(body?.topic, wording ? 240 : 120)) {
+    return { error: wording
+      ? "Say it in one line, up to 240 characters, not starting with a dash."
+      : "Name the topic in one line, up to 120 characters, not starting with a dash." };
+  }
+  const args = [...prefix, "rule", directive];
+  if (body.hard !== undefined && typeof body.hard !== "boolean") return { error: "hard must be true or false." };
+  if (body.hard) {
+    if (!CHANNEL_RULE_HARD.has(directive)) return { error: "Only \"don't discuss\" and \"ask me first\" rules can be hard." };
+    args.push("--hard");
+  }
+  if (body.days !== undefined && body.days !== null) {
+    if (!Number.isInteger(body.days) || body.days < 1 || body.days > 365) return { error: "days must be a whole number from 1 to 365." };
+    args.push("--days", String(body.days));
+  }
+  args.push(body.topic.trim());
+  return { args };
+}
+
+app.get("/api/channels/people/:platform/:id/memory/export", requireJarvis, async (req, res) => {
+  const who = channelPersonArgs(req, res);
+  if (!who) return;
+  const format = req.query.format === undefined ? "json" : req.query.format;
+  if (format !== "json" && format !== "text") {
+    return res.status(400).json({ error: "format must be json or text." });
+  }
+  const args = ["channels-memory", who.platform, who.id, "export"];
+  if (format === "text") args.push("text");
+  res.set("Cache-Control", "no-store");
+  sendChannelResult(await runJarvisOnce(args, 15000), res);
+});
+
+app.get("/api/channels/people/:platform/:id/rules", requireJarvis, async (req, res) => {
+  const who = channelPersonArgs(req, res);
+  if (!who) return;
+  sendChannelResult(await runJarvisOnce(
+    ["channels-memory", who.platform, who.id, "rules"], 10000), res);
+});
+
+app.post("/api/channels/people/:platform/:id/rules", requireJarvis, async (req, res) => {
+  const who = channelPersonArgs(req, res);
+  if (!who) return;
+  const built = channelRuleArgs(["channels-memory", who.platform, who.id], req.body);
+  if (built.error) return res.status(400).json({ error: built.error });
+  sendChannelResult(await runJarvisOnce(built.args, 10000), res);
+});
+
+app.get("/api/channels/rules/anyone", requireJarvis, async (req, res) => {
+  sendChannelResult(await runJarvisOnce(["channels-memory", "anyone", "rules"], 10000), res);
+});
+
+app.post("/api/channels/rules/anyone", requireJarvis, async (req, res) => {
+  const built = channelRuleArgs(["channels-memory", "anyone"], req.body);
+  if (built.error) return res.status(400).json({ error: built.error });
+  sendChannelResult(await runJarvisOnce(built.args, 10000), res);
+});
+
 app.get("/api/channels/people/:platform/:id/usage", requireJarvis, async (req, res) => {
   const who = channelPersonArgs(req, res);
   if (!who) return;
@@ -2006,7 +2095,7 @@ app.get("/api/scheduled/:id", requireJarvis, async (req, res) => {
 
 // One route for every per-job verb. The action is validated against a fixed
 // list here so a request body can never name an arbitrary `sched-*` argv.
-const SCHED_ACTIONS = new Set(["cancel", "pause", "resume", "approve", "snooze", "budget", "edit"]);
+const SCHED_ACTIONS = new Set(["cancel", "pause", "resume", "approve", "snooze", "budget", "edit", "delete"]);
 // H.2: the fields `sched-edit` accepts (scheduler.EDITABLE_FIELDS). Checked here so
 // a request body can only ever hand the CLI one JSON object of known keys.
 const SCHED_EDIT_FIELDS = new Set(["title", "kind", "when", "message", "prompt", "command", "tool",
@@ -2048,6 +2137,15 @@ app.post("/api/scheduled/:id/:action", requireJarvis, async (req, res) => {
   }
   const result = await runJarvisOnce(args, 15000);
   return parseJarvisJSON(result, res, "Couldn't update that job.");
+});
+
+// "Clear finished" in the Schedules panel's Finished tab: `jarvis sched-clear`, which
+// removes every finished job (done, cancelled, failed, over budget) and never an active
+// one. One path segment, so it cannot be mistaken for the /:id/:action route above;
+// like /tick it takes no arguments, so a request body cannot add any to the argv.
+app.post("/api/scheduled/clear", requireJarvis, async (req, res) => {
+  const result = await runJarvisOnce(["sched-clear"], 15000);
+  return parseJarvisJSON(result, res, "Couldn't clear the finished jobs.");
 });
 
 app.post("/api/scheduled/tick", requireJarvis, async (req, res) => {
@@ -2403,7 +2501,7 @@ app.post("/api/command-categories/delete", requireJarvis, async (req, res) => {
 app.get("/api/log-files/search", requireJarvis, async (req, res) => {
   const query = typeof req.query?.q === "string" ? req.query.q.trim() : "";
   if (!query) return res.status(400).json({ error: "A query is required." });
-  const args = ["logs-files", query];
+  const args = ["logs-files", `--query=${query}`];
   const mode = String(req.query?.mode || "");
   if (["words", "phrase", "regex"].includes(mode)) args.push("--mode", mode);
   const sets = [].concat(req.query?.set || []);

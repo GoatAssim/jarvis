@@ -188,6 +188,51 @@
     renderList();
   }
 
+  /* ---- Finished tab: clearing and deleting (pure text helpers) ---------------- */
+
+  const FINISHED_STATUSES = ["done", "cancelled", "error", "over_budget"];
+  function isFinished(job) { return Boolean(job) && FINISHED_STATUSES.includes(job.status); }
+
+  // How many finished jobs there are: the server's own count (the list in the
+  // overview is capped at the newest 200, the count is not), else the list.
+  function finishedTotal() {
+    return state.counts.finished != null ? state.counts.finished : state.finished.length;
+  }
+
+  // What "Clear finished" is about to remove, for its confirmation: the number and
+  // the split by outcome, from the overview's counts. Plain data in, plain text out.
+  function clearFinishedText(counts, total) {
+    const c = counts && typeof counts === "object" ? counts : {};
+    const n = Number.isFinite(total) ? total : (c.finished || 0);
+    const split = [[c.done, "done"], [c.failed, "failed"], [c.stopped_over_budget, "over budget"], [c.cancelled, "cancelled"]]
+      .filter(([k]) => k > 0).map(([k, label]) => `${k} ${label}`);
+    const what = `${n} finished job${n === 1 ? "" : "s"}`;
+    return {
+      n,
+      label: n === 1 ? "Clear finished (1)" : `Clear finished (${n})`,
+      body: `This permanently removes all ${what}${split.length ? ` (${split.join(", ")})` : ""} from the history, whatever the filters above show.\n\n` +
+        "Jobs that are still scheduled are not touched. The conversations their runs wrote and the logs stay.",
+    };
+  }
+
+  // The confirmation for deleting ONE finished job.
+  function deleteJobText(job) {
+    const name = (job && job.title) || "this job";
+    return `Delete \u201c${name}\u201d from the history? This can\u2019t be undone.\n\n` +
+      "Only the job\u2019s record is removed. The conversation its runs wrote and the logs stay.";
+  }
+
+  // The approval card's capability warning (scheduler.preflight_of, sent by `sched-show` for a
+  // job waiting on approval): the sentences to show, or [] when there is nothing to warn about.
+  // Advice only -- approving is never blocked by it.
+  function preflightLines(job) {
+    const pf = job && job.preflight;
+    if (!job || job.status !== "needs_approval" || !pf || pf.ok !== false) return [];
+    return (Array.isArray(pf.lines) ? pf.lines : []).map((l) => String(l == null ? "" : l).trim()).filter(Boolean);
+  }
+  const PREFLIGHT_NOTE = "You can still approve it. When it is due nothing will run and no model will be called, " +
+    "and you will get a \u201cCouldn\u2019t start\u201d notice; a one-off job then shows as failed, a repeating job tries again next time.";
+
   /* ---- left: chips + list ---------------------------------------------------- */
 
   function renderChips() {
@@ -202,6 +247,12 @@
             onclick: () => setView(id),
           }, [label, el("span", { class: "sch-chip__n" }, String(n))]));
         });
+    }
+    if (dom.clearBar) {
+      // Only on the Finished tab, and only when there is something to clear.
+      const n = finishedTotal();
+      dom.clearBar.hidden = !(state.view === "finished" && n > 0);
+      if (dom.btnClear) dom.btnClear.textContent = clearFinishedText(state.counts, n).label;
     }
     const list = currentList();
     dom.kindChips.textContent = "";
@@ -547,16 +598,70 @@
   // as before.
   async function confirmApprove(job) {
     const lines = riskLines(job);
-    if (!lines.length) return true;
-    const body = lines.join("\n") +
-      "\n\nApproving lets it do this on its own, with nobody there to confirm, " +
-      "every time it runs.";
+    const warn = preflightLines(job);
+    if (!lines.length && !warn.length) return true;
+    const parts = [];
+    if (lines.length) {
+      parts.push(lines.join("\n") +
+        "\n\nApproving lets it do this on its own, with nobody there to confirm, " +
+        "every time it runs.");
+    }
+    // The capability warning (L.16 preflight at approval time): it would not start
+    // right now. Asked about even when nothing risky is in the job, since a plain
+    // one-click approval would otherwise approve a job that is known not to run.
+    if (warn.length) parts.push("It would not start right now:\n" + warn.join("\n") + "\n\n" + PREFLIGHT_NOTE);
+    const body = parts.join("\n\n");
     const UI = global.JarvisUI;
     if (UI && UI.confirm) {
       return UI.confirm({ title: "Approve this job?", body, pre: (job.action || {}).prompt || "",
                           confirmLabel: "Approve", level: "warn", focusCancel: true });
     }
     return global.confirm(body);
+  }
+
+  async function confirmText(title, body, confirmLabel) {
+    const UI = global.JarvisUI;
+    if (UI && UI.confirm) return UI.confirm({ title, body, confirmLabel, level: "warn", focusCancel: true });
+    return global.confirm(body);
+  }
+
+  function deleteButton(job) {
+    const b = el("button", { class: "btn btn--danger btn--sm", type: "button" }, "Delete");
+    b.addEventListener("click", async () => {
+      b.disabled = true;
+      try {
+        if (!(await confirmText("Delete this job?", deleteJobText(job), "Delete"))) { b.disabled = false; return; }
+        await Api.post(`/api/scheduled/${encodeURIComponent(job.id)}/delete`, {});
+        toast("Deleted from the history.", "info");
+        // Nothing to show for it any more: back to the form, then re-read the lists.
+        if (state.selectedId === job.id) newJobMode();
+        refresh();
+      } catch (err) {
+        toast(err.message || "That didn't work.");
+        b.disabled = false;
+      }
+    });
+    return b;
+  }
+
+  async function clearFinished() {
+    const n = finishedTotal();
+    if (!n || !dom || !dom.btnClear) return;
+    const t = clearFinishedText(state.counts, n);
+    dom.btnClear.disabled = true;
+    try {
+      if (!(await confirmText("Clear finished jobs?", t.body, "Clear finished"))) return;
+      const res = await Api.post("/api/scheduled/clear", {});
+      const removed = res && Number.isFinite(res.removed) ? res.removed : 0;
+      toast(removed ? `Removed ${removed} finished job${removed === 1 ? "" : "s"}.` : "Nothing to clear.", "info");
+      // The open job may have just been removed; refresh() drops back to the form
+      // when the selected job is no longer in either list.
+      refresh();
+    } catch (err) {
+      toast(err.message || "That didn't work.");
+    } finally {
+      dom.btnClear.disabled = false;
+    }
   }
 
   function actionButtons(job) {
@@ -583,6 +688,10 @@
     else if (job.status !== "needs_approval" && job.status !== "done" && job.status !== "cancelled") act("Pause", "pause");
     if (job.status !== "done" && job.status !== "cancelled") act("Snooze 10m", "snooze", { delay: "10 minutes" });
     if (job.status !== "cancelled") act("Cancel", "cancel");
+    // Finished history only: an active job is cancelled first (the server refuses to
+    // delete one that can still fire). After a delete there is no job to show, so
+    // this does not go through act(), which re-selects the job it just acted on.
+    if (isFinished(job)) buttons.push(deleteButton(job));
     // H.2: editing changes what the job IS, so it only makes sense while there is
     // still a job to change. Done and cancelled jobs are history.
     if (job.status !== "done" && job.status !== "cancelled") {
@@ -667,6 +776,15 @@
       dom.mid.appendChild(el("div", { class: "sch-detail__risk" },
         [el("strong", null, job.needs_approval ? "Approving this allows:" : "This job:")]
           .concat(risk.map((line) => el("div", null, line)))));
+    }
+    // Capability warning on the approval card (L.16 preflight, asked now instead of only
+    // when the job runs): advice, so it sits beside the risk lines and blocks nothing.
+    const warn = preflightLines(job);
+    if (warn.length) {
+      dom.mid.appendChild(el("div", { class: "sch-detail__preflight" },
+        [el("strong", null, "Heads up \u2014 this would not start right now:")]
+          .concat(warn.map((line) => el("div", null, line)))
+          .concat([el("div", { class: "sch-detail__hint" }, PREFLIGHT_NOTE)])));
     }
     const detail = actionDetail(job);
     if (detail) dom.mid.appendChild(detail);
@@ -996,6 +1114,10 @@
     // Active / Finished tabs (H.2 history), built here so index.html is untouched.
     dom.viewTabs = el("div", { class: "sch-chips sch-viewtabs", role: "group", "aria-label": "Active or finished jobs" });
     dom.kindChips.parentNode.insertBefore(dom.viewTabs, dom.kindChips);
+    // "Clear finished" lives under the tabs and shows only on the Finished tab (renderChips).
+    dom.btnClear = el("button", { class: "btn btn--danger btn--sm", type: "button", onclick: clearFinished }, "Clear finished");
+    dom.clearBar = el("div", { class: "sch-clearbar", hidden: true }, [dom.btnClear]);
+    dom.kindChips.parentNode.insertBefore(dom.clearBar, dom.kindChips);
 
     dom.search.addEventListener("input", () => { state.search = dom.search.value; renderList(); });
     dom.btnNew.addEventListener("click", newJobMode);
@@ -1042,5 +1164,8 @@
 
   function isOpen() { return Boolean(dom && !dom.overlay.hidden); }
 
-  global.JarvisSchedules = { open, close, isOpen, refresh };
+  global.JarvisSchedules = {
+    open, close, isOpen, refresh,
+    _pure: { clearFinishedText, deleteJobText, preflightLines, isFinished, PREFLIGHT_NOTE },
+  };
 })(window);

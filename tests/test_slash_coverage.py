@@ -200,6 +200,7 @@ def test_not_exposed_is_only_for_technical_reasons():
 KNOWN_ARG_SOURCES = {
     "freeText", "chats", "commands", "providers", "installedSkills", "loadedSkills",
     "daemonIds", "daemonActions", "capacityModes", "thinkLevels", "layouts", "helpVerbs",
+    "personas", "exportFormats",
 }
 TOKEN_RE = re.compile(r"^[a-z][a-z0-9-]*$")
 INDEX_HTML = REPO_ROOT / "web" / "public" / "index.html"

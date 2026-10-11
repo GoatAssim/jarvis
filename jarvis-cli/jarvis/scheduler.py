@@ -90,6 +90,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 
 from . import job_risk
+from . import preflight
 from . import timespec
 from .timespec import TimeSpecError
 from . import ask_output as _ask_output
@@ -875,11 +876,48 @@ def update_job(job_id, changes, trusted=False, now=None):
 
 
 def clear_finished():
+    """Remove EVERY finished job (done, cancelled, error, over budget); active
+    jobs are never touched. Returns how many were removed. Raises
+    SchedulerError when the schedule could not be saved, so the Schedules
+    panel's "Clear finished" button never reports a removal that did not
+    happen (save_store reports a failed write by returning False)."""
     store = load_store()
     before = len(store["jobs"])
     store["jobs"] = [j for j in store["jobs"] if j.get("status") in ACTIVE_STATUSES]
-    save_store(store)
+    if not save_store(store):
+        raise SchedulerError("couldn't save the schedule -- nothing was removed")
     return before - len(store["jobs"])
+
+
+def delete_job(job_id):
+    """Remove ONE finished job from the history (the panel's per-job Delete,
+    `jarvis sched-delete <id>`). Returns the job that was removed.
+
+    FINISHED ONLY. A job that can still fire (pending, paused, needs approval)
+    is refused with a pointer to Cancel: deleting it outright would drop a
+    promise the owner was made (a reminder that then never goes off) without
+    the status change that says so. Cancelling first moves it to Finished,
+    where this works. Only the job's record goes; the conversation its runs
+    wrote and its log lines are separate history and are left alone.
+
+    Human-side only, like clear_finished / approve / update_job: no model tool
+    reaches it (a model that could delete jobs could erase the record of what
+    ran unattended). Raises SchedulerError for an unknown id, an active job,
+    or a failed save (in which case nothing was removed)."""
+    key = (job_id or "").strip().lower()
+    store = load_store()
+    for i, job in enumerate(store["jobs"]):
+        if not isinstance(job, dict) or job.get("id") != key:
+            continue
+        if job.get("status") not in FINISHED_STATUSES:
+            raise SchedulerError(
+                "only a finished job can be deleted -- this one is %s; cancel it first"
+                % job.get("status"))
+        del store["jobs"][i]
+        if not save_store(store):
+            raise SchedulerError("couldn't save the schedule -- nothing was removed")
+        return job
+    raise SchedulerError("no scheduled job with id %r" % job_id)
 
 
 # ---------------------------------------------------------------------------
@@ -1854,6 +1892,48 @@ def risk_of(job):
     if isinstance(risk, dict) and isinstance(risk.get("kinds"), list):
         return risk
     return job_risk.assess(job.get("action") or {})
+
+
+def preflight_of(job):
+    """The L.16 capability preflight, asked at APPROVAL time, for the approval card.
+
+    A scheduled `ask` is checked again when it runs (ai_client.ask ->
+    preflight.check on the prompt, unattended runs only) and stops there with
+    "Couldn't start" if the PC lacks something the prompt states it needs. That
+    is too late to be useful as a warning: the owner has already approved it.
+    This asks the same question about the same text (the run passes the job's
+    prompt as the ask, unchanged), so the approval card can say "this would not
+    start right now" while there is still a person to read it.
+
+    Returns None for anything the preflight does not check (notify / command /
+    tool jobs, an empty prompt). Otherwise
+        {"ok": bool, "needs": [...], "blockers": [{"need", "why"}], "lines": [sentence, ...]}
+    where `lines` is empty when ok. It is advice, never a gate: approval is not
+    blocked by it (installing Tesseract later fixes the job with no re-approval,
+    and a recurring job re-checks every time). Fails open like the preflight
+    itself -- an error gives None, never a warning that was not earned.
+
+    Not part of summarize(): that runs for every row on every refresh (and its
+    output goes to the model's list_scheduled), while this routes the prompt and
+    may start the Tesseract binary. It is computed per job, on request."""
+    try:
+        action = (job or {}).get("action") or {}
+        if action.get("type") != "ask":
+            return None
+        prompt = str(action.get("prompt") or "").strip()
+        if not prompt:
+            return None
+        result = preflight.check(prompt)
+        blockers = [b for b in (result.get("blockers") or []) if isinstance(b, dict)]
+        lines = []
+        for b in blockers:
+            why = " ".join(str(b.get("why") or "").split())
+            if why:
+                lines.append(why[0].upper() + why[1:] + ("" if why.endswith(".") else "."))
+        return {"ok": not blockers, "needs": list(result.get("needs") or []),
+                "blockers": blockers, "lines": lines}
+    except Exception:  # noqa: BLE001 -- fail open, see above
+        return None
 
 
 def overview():

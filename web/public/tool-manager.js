@@ -436,6 +436,21 @@
     return lines;
   }
 
+  // The palette (`/`) commands that follow a tool off, as lines for the confirmation:
+  // `disabled-dependents`'s `commands`, a list of command names. They are derived from
+  // their tool live and stored nowhere, so nothing needs restoring when it comes back --
+  // but switching it off is still a change the owner should see before it happens.
+  const MAX_COMMAND_LINES = 12;
+  function commandLines(commands) {
+    const names = [];
+    (Array.isArray(commands) ? commands : []).forEach((n) => {
+      if (typeof n === "string" && n.trim() && !names.includes(n.trim())) names.push(n.trim());
+    });
+    const lines = names.slice(0, MAX_COMMAND_LINES).map((n) => "\u2022 /" + n);
+    if (names.length > MAX_COMMAND_LINES) lines.push("\u2022 \u2026and " + (names.length - MAX_COMMAND_LINES) + " more");
+    return lines;
+  }
+
   // The scheduled jobs a switch-off would break, as lines for a confirmation.
   function dependentLines(jobs) {
     return (Array.isArray(jobs) ? jobs : []).map((j) => {
@@ -630,7 +645,7 @@
   }
 
   const PURE = {
-    availabilityHint, offOutcome, dependentLines, cascadeLines, offSummary, commandSteps, commandVars, needsAttention, isOff, OFF_STATES,
+    availabilityHint, offOutcome, dependentLines, cascadeLines, commandLines, offSummary, commandSteps, commandVars, needsAttention, isOff, OFF_STATES,
     SAFEGUARDS, KEYS, NAME_RE, STAGES, MAX_SOURCE_CHARS, bucketOf, groupLabel, originOf, buildRows, matchesSearch, matchesSafeguard,
     matchesSource, filterRows, groupRows, coverage, callOutcome, jobOutcome, changedKeys, nameProblem, importNameFromFile,
     importProblem, sourceProblem, parseErrorLine, stageStates, lineCount, formatBytes, parseArgs, paramList,
@@ -1352,10 +1367,12 @@
   }
 
   // Switch a tool or saved command off/on for the MODEL. Switching OFF first asks
-  // the server which scheduled jobs name it (they would fail when they fire) and
-  // confirms only if there are some, or if the lookup itself failed — never
-  // silently. Switching back on never asks. Nothing changes until the server
-  // confirms it saved, so the switch never shows a state that wasn't stored.
+  // the server which scheduled jobs name it (they would fail when they fire), and for a
+  // tool also what goes off WITH it (the screens and daemons of its file when it is the
+  // last one on, and the palette commands that run it), and confirms only if there is
+  // anything to list, or if the lookup itself failed — never silently. Switching back
+  // on never asks. Nothing changes until the server confirms it saved, so the switch
+  // never shows a state that wasn't stored.
   async function setAvailable(row, available) {
     const token = row.id + ":enabled";
     if (state.busy.has(token) || row.protectedReason) return;
@@ -1364,17 +1381,20 @@
     const kind = row.kind === "command" ? "command" : EXTRA_KINDS.includes(row.kind) ? row.kind : "tool";
     const what = KIND_NOUN[kind] || "tool";
     if (!available && (kind === "tool" || kind === "command")) {
-      let jobs = [], unknown = false, cascade = null;
+      let jobs = [], unknown = false, cascade = null, commands = [];
       try {
         const res = await api("/api/disabled/dependents?kind=" + kind + "&name=" + encodeURIComponent(row.name));
         jobs = (res && res.jobs) || [];
         cascade = (res && res.cascade) || null;
+        commands = (res && res.commands) || [];
       } catch (_) { unknown = true; }
       const cLines = cascadeLines(cascade);
-      if (jobs.length || unknown || cLines.length) {
+      const mLines = commandLines(commands);
+      if (jobs.length || unknown || cLines.length || mLines.length) {
         const parts = [];
         if (cLines.length) parts.push("This is the last tool of its file that is still on, so these go off with it:\n\n" + cLines.join("\n")
           + "\n\nA daemon that is running right now keeps running; it just can’t be started again.");
+        if (mLines.length) parts.push("These palette commands go off with it. They leave the / palette and are refused until it is switched back on:\n\n" + mLines.join("\n"));
         if (unknown) parts.push("Couldn’t check whether any scheduled jobs use this " + what + ". If one does, it will fail when it next fires.");
         else if (jobs.length) parts.push("These scheduled jobs use this " + what + ". They will fail — with a notification — the next time they fire:\n\n" + dependentLines(jobs).join("\n")
           + "\n\nJobs that ask Jarvis to decide for itself can’t be checked.");

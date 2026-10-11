@@ -186,3 +186,14 @@
 .sch-viewtab{ font-weight: 600; }
 .sch-detail__result{ margin-top: 10px; }
 .sch-detail__result strong{ display: block; margin-bottom: 4px; }
+
+/* Leftovers: the Finished tab's "Clear finished" bar, and the capability warning on the
+   approval card (amber like .sch-detail__note: advice, not an error). */
+.sch-clearbar{ padding: 0 12px 8px; }
+.sch-clearbar[hidden]{ display: none; }
+.sch-detail__preflight{
+  margin-top: 8px; padding: 8px 10px; border-radius: 4px; font-size: 11.5px; line-height: 1.5;
+  border: 1px solid var(--accent-secondary); color: var(--text);
+}
+.sch-detail__preflight strong{ display: block; color: var(--accent-secondary); margin-bottom: 2px; }
+.sch-detail__preflight .sch-detail__hint{ margin-top: 4px; }

@@ -21,7 +21,7 @@ import threading
 from datetime import datetime, timezone
 from pathlib import Path
 
-from . import conversations
+from . import conversations, log_files
 
 JARVIS_DIR = Path.home() / ".jarvis"
 LOG_DIR = JARVIS_DIR / "logs"
@@ -334,7 +334,16 @@ def search(query, mode="words", limit=SEARCH_DEFAULT_LIMIT, conv_id=None,
             # hit somewhere in this entry before it counts as a match.
             hits = [pattern.search(blob) for pattern in patterns]
             if not all(hits):
-                continue
+                # The JSON text escapes backslashes, quotes and line breaks, so
+                # a search for what the log SHOWS (a Windows path, a quoted
+                # phrase, two words on different lines) could never match it.
+                # Try the decoded string values too -- additive: whatever
+                # matched before still does.
+                plain = log_files._plain_text(entry)
+                hits = [pattern.search(plain) for pattern in patterns] if plain else []
+                if not hits or not all(hits):
+                    continue
+                blob = plain
             first = hits[0] if hits else None
             results.append({
                 "conv_id": cid,

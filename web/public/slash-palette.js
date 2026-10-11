@@ -144,6 +144,13 @@
       { value: "classic", detail: "the full multi-panel layout" },
       { value: "focus", detail: "just the chat" },
     ],
+    exportFormats: [
+      { value: "md", detail: "Markdown (the default)" },
+      { value: "html", detail: "a styled page that prints cleanly" },
+      { value: "json", detail: "the raw record" },
+      { value: "pdf", detail: "a PDF (needs a browser on this machine)" },
+      { value: "txt", detail: "plain text" },
+    ],
     daemonActions: [
       { value: "start", detail: "start a stopped service" },
       { value: "stop", detail: "stop it (asks first)" },
@@ -541,8 +548,15 @@
           break;
         case "layouts":
         case "daemonActions":
+        case "exportFormats":
           rows = STATIC_LISTS[source].map((r) => ({ label: r.value, ...r, current: source === "layouts" && r.value === st.layout }));
           break;
+        case "personas": {
+          // Only what the Skin picker would offer: the ones switched off in the Tool Manager are left out.
+          const list = (h && h.personas && h.personas()) || [];
+          rows = list.map((p) => ({ value: p.id, label: p.name, id: p.id, detail: p.attitudeLabel || "", current: Boolean(p.current) }));
+          break;
+        }
         default:
           rows = [];
       }
@@ -1322,6 +1336,66 @@
     return out;
   }
 
+  // ---- /remind, /search, /export, /persona (I.2 deferred verbs) ----------------
+  // /remind: the time phrase is several words ("in 20 minutes"), so the split between it
+  // and the message has to be explicit or recognisable. Order: a "|" always wins; then a
+  // quoted time ("tomorrow 9am" call Sam); then a leading phrase the scheduler's own
+  // grammar (timespec.py) is known to accept. Anything else is refused, never guessed:
+  // a reminder that fires at a time the person did not mean is worse than none.
+  const R_T = String.raw`\d{1,2}(?::\d\d)?(?:\s*(?:am|pm))?`;
+  const R_UNIT = String.raw`(?:milliseconds?|ms|seconds?|secs?|s|minutes?|mins?|m|hours?|hrs?|h|days?|d|weeks?|wks?|w|months?|years?)`;
+  const R_QTY = String.raw`(?:\d+(?:\.\d+)?\s*${R_UNIT}\b|an?\s+(?:minute|hour|day|week)\b)`;
+  const R_DAY = String.raw`(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday)`;
+  const REMIND_TIME_RE = new RegExp(
+    "^(?:" + [
+      String.raw`in\s+${R_QTY}(?:\s+(?:and\s+)?${R_QTY})*`,
+      String.raw`every\s+(?:${R_QTY}|weekday|weekend|day|week|hour|${R_DAY})(?:\s+at\s+${R_T})?`,
+      String.raw`(?:daily|weekly)(?:\s+at\s+${R_T})?`,
+      String.raw`(?:tomorrow|today)(?:\s+at\s+${R_T})?`,
+      String.raw`(?:next\s+)?${R_DAY}(?:\s+at\s+${R_T})?`,
+      String.raw`at\s+${R_T}`,
+      String.raw`tonight|noon|midnight`,
+      String.raw`\d{4}-\d\d-\d\d(?:[T ]\d\d:\d\d)?`,
+      R_QTY,
+    ].join("|") + ")(?![\\w:])", "i");
+
+  function splitReminder(text) {
+    const t = String(text == null ? "" : text).trim();
+    if (!t) return null;
+    let when = "", msg = "";
+    const bar = t.indexOf("|");
+    if (bar >= 0) { when = t.slice(0, bar); msg = t.slice(bar + 1); }
+    else {
+      const q = /^(["'])(.+?)\1\s+([\s\S]+)$/.exec(t);
+      if (q) { when = q[2]; msg = q[3]; }
+      else {
+        const m = REMIND_TIME_RE.exec(t);
+        if (m) { when = m[0]; msg = t.slice(m[0].length); }
+      }
+    }
+    when = when.trim(); msg = msg.trim();
+    return when && msg ? { when, msg } : null;
+  }
+
+  // The same plain-text layout `jarvis conv-search --text` prints, so the dialog reads
+  // like the terminal does. Capped: 20 chats, 5 hits each.
+  function formatSearchResults(results, query) {
+    const list = Array.isArray(results) ? results : [];
+    if (!list.length) return `No conversations matched ${JSON.stringify(query)}.`;
+    const total = list.reduce((n, r) => n + (r.match_count || (r.matches || []).length || 0), 0);
+    const out = [`${total} match${total === 1 ? "" : "es"} across ${list.length} conversation${list.length === 1 ? "" : "s"} for ${JSON.stringify(query)}:`];
+    for (const r of list.slice(0, 20)) {
+      const n = r.match_count || (r.matches || []).length || 0;
+      out.push("", `  ${r.id}  ${r.title || "(untitled)"}  (${n} match${n === 1 ? "" : "es"})`);
+      for (const hit of (r.matches || []).slice(0, 5)) {
+        out.push(`    [${String(hit.ts || "").slice(0, 16).replace("T", " ")}] ${hit.snippet || ""}`);
+      }
+    }
+    if (list.length > 20) out.push("", `\u2026 and ${list.length - 20} more conversations \u2014 narrow the words.`);
+    out.push("", "Open one with /chat <title or id>.");
+    return out.join("\n");
+  }
+
   const PANEL_VERBS = new Set(["guides", "debug", "checklist", "schedule", "calendar", "mcp", "ctools", "channels",
     "daemons", "backlog", "logsearch", "setup", "subagents", "notifications", "logs", "config", "skin"]);
 
@@ -1435,6 +1509,61 @@
         toast(e.message || `Couldn't ${action} ${row.value}.`);
         return false;
       }
+    },
+    async search({ argText }) {
+      const q = argText.trim();
+      if (!q) { toast("Usage: /search <words>"); return false; }
+      let data;
+      try { data = await apiGet(`/api/conversations-search?q=${encodeURIComponent(q)}`); }
+      catch (e) { toast((e && e.message) || "Search failed."); return false; }
+      const results = Array.isArray(data && data.results) ? data.results : [];
+      if (!results.length) { info(`No chat matched "${q}".`); return; }
+      if (results.length === 1) {
+        const r = results[0];
+        const n = r.match_count || (r.matches || []).length || 1;
+        if (r.id === host().state().activeConversationId) { info(`Only this chat matches "${q}" (${n}).`); return; }
+        await host().selectChat(r.id);
+        info(`Opened "${r.title || "(untitled)"}" \u2014 the only chat matching "${q}" (${n}).`);
+        return;
+      }
+      host().dialog({ title: `/search ${q}`, pre: formatSearchResults(results, q), level: "info" });
+    },
+    async export({ argText }) {
+      const fmt = argText.trim().toLowerCase() || "md";
+      if (!STATIC_LISTS.exportFormats.some((r) => r.value === fmt)) { toast("Format must be md, html, json, pdf or txt."); return false; }
+      const id = host().state().activeConversationId;
+      if (!id) { toast("Open a chat first \u2014 there is nothing to export."); return false; }
+      let data;
+      try { data = await apiSend("POST", "/api/slash/run", { name: "conv-export", args: [id, "--format", fmt] }); }
+      catch (e) { toast((e && e.message) || "Export failed."); return false; }
+      let res = null;
+      try { res = JSON.parse(data.stdout || ""); } catch { /* not JSON: fall through to the generic result */ }
+      if (!res || typeof res !== "object") { showResult("export", data, PASSTHROUGH["conv-export"]); return data.ok ? undefined : false; }
+      if (!res.ok) { toast(res.error || "Export failed."); return false; }
+      info(`Exported to ${res.path}` + (res.warning ? ` \u2014 ${res.warning}` : "."));
+    },
+    async remind({ argText }) {
+      const parts = splitReminder(argText);
+      if (!parts) {
+        toast("Usage: /remind <when> | <message> \u2014 e.g. /remind in 20 minutes | call Sam", "warn");
+        return false;
+      }
+      let job;
+      try { job = await apiSend("POST", "/api/scheduled", { when: parts.when, message: parts.msg, kind: "reminder" }); }
+      catch (e) { toast((e && e.message) || `Couldn't set that reminder (is "${parts.when}" a time?).`); return false; }
+      info(`Reminder set: ${job && job.when ? job.when : parts.when}` + (job && job.in ? ` (in ${job.in})` : "") + ".");
+    },
+    async persona({ argText }) {
+      const { rows, row } = await resolveFromList("personas", argText, true);
+      let hit = row;
+      if (!hit) {
+        const partial = rows.filter((r) => score(argText, r.label) >= 60);
+        if (partial.length === 1) hit = partial[0];
+        else if (partial.length > 1) { toast(`"${argText}" matches ${partial.length} personas \u2014 pick one from the list.`); return false; }
+      }
+      if (!hit) { toast(`No persona called "${argText}".`); return false; }
+      const res = await host().setPersona(hit.value);
+      if (res && res.ok === false) { toast(res.error || "Couldn't switch persona."); return false; }
     },
     async layout({ argText }) {
       const mode = argText.trim().toLowerCase();
@@ -1753,7 +1882,7 @@
     handleSubmit, handleComposerKeydown, parse, score, editDistance, isComplete,
     loadToolCommands, toolCmd,                  // I.2.11: tools' own commands (tests/verify_tool_commands_palette.js)
     // Pure helpers, for tests/verify_slash_palette.js only.
-    _pure: { parseCommandQuery, catsMatch, catScore, categoryCounts, groupFilter },
+    _pure: { parseCommandQuery, catsMatch, catScore, categoryCounts, groupFilter, splitReminder, formatSearchResults },
   };
   if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", init);
   else init();

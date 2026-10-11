@@ -398,11 +398,11 @@ async function main() {
     await flush();
     check("typing / opens the popover", env.palette.hidden === false);
     const rowsAll = env.palette.querySelectorAll(".slash-row").length;
-    check("empty query lists every verb (36) plus the 'show the other commands' toggle", rowsAll === 37, `got ${rowsAll}`);
+    check("empty query lists every verb (40) plus the 'show the other commands' toggle", rowsAll === 41, `got ${rowsAll}`);
     check("headings: the six groups from I.2.5 plus 'More'", env.palette.querySelectorAll(".slash-heading").length === 7
       && ["Chat", "Model", "Skills", "Run", "Panels", "View"].every((g) => env.palette.querySelectorAll(".slash-heading").some((h) => h.textContent === g)));
-    check("every verb row carries a visible risk badge (D-I4)", env.palette.children[0].querySelectorAll(".slash-badge").length === 36);
-    check("the live region announces the count", env.palette.querySelectorAll(".slash-sr")[0].textContent === "36 commands", env.palette.querySelectorAll(".slash-sr")[0].textContent);
+    check("every verb row carries a visible risk badge (D-I4)", env.palette.children[0].querySelectorAll(".slash-badge").length === 40);
+    check("the live region announces the count", env.palette.querySelectorAll(".slash-sr")[0].textContent === "40 commands", env.palette.querySelectorAll(".slash-sr")[0].textContent);
 
     env.input.value = "/ne";
     env.input.dispatchEvent(new Event("input"));
@@ -660,12 +660,12 @@ async function main() {
     key("End");
     let k = key("Enter");
     await flush(); await flush();
-    check("the toggle row expands every other command (32 runnable CLI + 30 that can't)", env.palette.querySelectorAll(".slash-row").length === 36 + 32 + 30, env.palette.querySelectorAll(".slash-row").length);
+    check("the toggle row expands every other command (32 runnable CLI + 30 that can't)", env.palette.querySelectorAll(".slash-row").length === 40 + 32 + 30, env.palette.querySelectorAll(".slash-row").length);
     check("...under their own headings", ["CLI commands", "Can't run from chat"].every((h) => env.palette.querySelectorAll(".slash-heading").some((x) => x.textContent === h)));
     check("...and the ones that can't run are disabled", env.palette.querySelectorAll(".slash-row").filter((r) => /is-disabled/.test(r.className)).length === 30);
     key("Escape");
     await type("/");
-    check("closing resets the expansion", env.palette.querySelectorAll(".slash-row").length === 36);
+    check("closing resets the expansion", env.palette.querySelectorAll(".slash-row").length === 40);
 
     // IME
     await type("/gu");

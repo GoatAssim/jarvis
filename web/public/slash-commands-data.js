@@ -2,7 +2,7 @@
  * slash-commands-data.js — the registry behind the "/" command palette
  * (Menu-free: typed straight into the Ask composer). Master plan Part I.2.
  *
- * THIS FILE IS THE REGISTRY. One entry per typeable verb (36 of them — see
+ * THIS FILE IS THE REGISTRY. One entry per typeable verb (40 of them — see
  * `verbs`), plus a disposition for every OTHER canonical name
  * `jarvis-cli/jarvis/reserved_names.py` reserves (`passthrough` + `notExposed`,
  * 159 total) so the palette can show and risk-tier every CLI subcommand
@@ -67,7 +67,7 @@
  * with a risk tier, rather than a curated subset. Every one of the reserved
  * names (159, counting skills-loaded) therefore lands in EXACTLY ONE of:
  *
- *   verbs[].covers   reached through a typed verb (the 36 in `verbs`) —
+ *   verbs[].covers   reached through a typed verb (the 40 in `verbs`) —
  *                    a panel opener, a picker, or a direct action. Most
  *                    of the 98 names here are the plumbing a panel already
  *                    drives; the verb is how a user gets to them.
@@ -243,6 +243,90 @@ window.JARVIS_SLASH_COMMANDS = /*JSON-BEGIN*/
       "covers": [],
       "example": "/copy",
       "preview": "Copies Jarvis's last reply."
+    },
+    {
+      "verb": "search",
+      "aliases": [],
+      "group": "chat",
+      "summary": "Search every past chat for some words",
+      "riskTier": "safe",
+      "instant": false,
+      "whileReplying": true,
+      "confirm": false,
+      "args": [
+        {
+          "name": "words",
+          "source": "freeText",
+          "required": true,
+          "hint": "words to find in your past chats"
+        }
+      ],
+      "covers": [],
+      "example": "/search sourdough starter",
+      "preview": "Searches your chats for {0}."
+    },
+    {
+      "verb": "export",
+      "aliases": [],
+      "group": "chat",
+      "summary": "Export this chat to a file (Markdown by default)",
+      "riskTier": "caution",
+      "instant": false,
+      "whileReplying": true,
+      "confirm": false,
+      "args": [
+        {
+          "name": "format",
+          "source": "exportFormats",
+          "required": false,
+          "hint": "md, html, json, pdf or txt \u2014 default md"
+        }
+      ],
+      "covers": [],
+      "example": "/export html",
+      "preview": "Exports this chat as {0}."
+    },
+    {
+      "verb": "remind",
+      "aliases": [],
+      "group": "run",
+      "summary": "Set a reminder: /remind <when> | <message>",
+      "riskTier": "safe",
+      "instant": false,
+      "whileReplying": true,
+      "confirm": false,
+      "args": [
+        {
+          "name": "when | message",
+          "source": "freeText",
+          "required": true,
+          "hint": "e.g. in 20 minutes | call Sam \u2014 the | splits the time from the message"
+        }
+      ],
+      "covers": [],
+      "example": "/remind tomorrow at 9am | send the invoice",
+      "preview": "Sets a reminder: {0}."
+    },
+    {
+      "verb": "persona",
+      "aliases": [],
+      "group": "view",
+      "summary": "Switch persona (name, palette and attitude together)",
+      "riskTier": "caution",
+      "instant": false,
+      "whileReplying": true,
+      "confirm": false,
+      "args": [
+        {
+          "name": "persona",
+          "source": "personas",
+          "required": true,
+          "hint": "a persona name \u2014 type to search"
+        }
+      ],
+      "covers": [],
+      "example": "/persona Friday",
+      "preview": "Switches to the {0} persona."
     },
     {
       "verb": "provider",
@@ -574,7 +658,8 @@ window.JARVIS_SLASH_COMMANDS = /*JSON-BEGIN*/
         "sched-snooze",
         "sched-approve",
         "sched-budget",
-        "sched-edit"
+        "sched-edit",
+        "sched-delete"
       ],
       "example": "/schedule",
       "preview": "Open Scheduled tasks & reminders."

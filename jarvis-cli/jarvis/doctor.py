@@ -726,8 +726,8 @@ def check_scheduler():
         out.append(Check("sched.failing", "Jobs with errors", WARN,
                          "%d job%s last ran with an error" % (
                              len(failing), "" if len(failing) == 1 else "s"),
-                         "jarvis sched-show <id> to see why; jarvis sched-clear <id> "
-                         "to remove it.", "scheduler",
+                         "jarvis sched-show <id> to see why; jarvis sched-delete <id> "
+                         "to remove it once it has finished.", "scheduler",
                          {"jobs": [j.get("id") for j in failing][:10]}))
     return out
 

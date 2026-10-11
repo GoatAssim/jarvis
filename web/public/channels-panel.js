@@ -119,6 +119,7 @@
     server: P('<rect x="4" y="4" width="16" height="6" rx="1.5"/><rect x="4" y="14" width="16" height="6" rx="1.5"/><path d="M8 7h.01M8 17h.01"/>'),
     home: P('<path d="M3.5 11.2 12 4l8.5 7.2"/><path d="M5.5 10v9.5h13V10"/><path d="M10 19.5v-5h4v5"/>'),
     memory: P('<path d="M6 4h12v16l-6-4-6 4V4Z"/><path d="M9.5 8.5h5M9.5 11.5h3"/>'),
+    download: P('<path d="M12 4v10M8 10.5l4 4 4-4"/><path d="M5 19h14"/>'),
     people: P('<circle cx="9" cy="8.5" r="3.2"/><path d="M3 19.5a6 6 0 0 1 12 0"/><path d="M16 5.6a3.2 3.2 0 0 1 0 5.8M18 14.2a6 6 0 0 1 3 5.3"/>'),
   };
   function icon(name) {
@@ -443,6 +444,7 @@
     mem: new Map(),    // { status, data, eps, error, req, acting, adding }  (People view, L.21 P6)
     memConfirm: null,  // { key, id } a remembered item awaiting its Remove confirmation
     memDraft: new Map(), // person key -> the fact being typed, kept across redraws
+    ruleDraft: new Map(), // person key -> the rule being composed { scope, directive, topic, hard, days } (L.22)
     editingHandle: null, // person key whose handle is being retyped (L.36-P10)
     scrollEnd: false,  // after the next render, show the newest message
     hideTools: false,  // Conversation tab: collapse the "used these tools" rows away
@@ -1319,7 +1321,7 @@
     try {
       const out = await personPost(p, "forget", { history: !!f.history, confirm: true });
       const k = pkey(p);
-      state.conv.delete(k); state.usage.delete(k); state.sim.delete(k); state.hist.delete(k); state.mem.delete(k); state.memDraft.delete(k); state.drafts.delete(k);
+      state.conv.delete(k); state.usage.delete(k); state.sim.delete(k); state.hist.delete(k); state.mem.delete(k); state.memDraft.delete(k); state.ruleDraft.delete(k); state.drafts.delete(k);
       state.forget = null;
       toast(`${displayName(p)} forgotten.`, "success");
       if (out && out.report && out.report.history_purged && out.report.history && out.report.history.left_in_groups) {
@@ -2545,12 +2547,13 @@
     s.status = "loading"; s.error = "";
     if (showing(p, "memory")) renderDetail();
     try {
-      const [list, eps] = await Promise.all([
+      const [list, eps, rules] = await Promise.all([
         api("GET", personUrl(p, "memory")),
         api("GET", personUrl(p, "memory/episodes")).catch(() => null),
+        api("GET", personUrl(p, "rules")).catch(() => null),   // L.22: their rules, the ones for everyone, conflicts
       ]);
       if (s.req !== req) return;
-      s.data = Array.isArray(list.items) ? list.items : []; s.eps = eps; s.status = "ok";
+      s.data = Array.isArray(list.items) ? list.items : []; s.eps = eps; s.rules = rules; s.status = "ok";
     } catch (err) {
       if (s.req !== req) return;
       s.status = "error"; s.error = err.message || "Couldn't read what Jarvis keeps about them.";
@@ -2622,6 +2625,173 @@
     return sec;
   }
 
+  // ---- Export (L.21) -----------------------------------------------------------
+  // Everything saved about ONE person, whatever its status, as a file the owner
+  // keeps. The server returns it (GET .../memory/export, never cached); the
+  // browser only turns it into a download. Nothing is sent anywhere else.
+  function saveFile(name, text, type) {
+    const blob = new Blob([text], { type: `${type};charset=utf-8` });
+    const url = URL.createObjectURL(blob);
+    const a = el("a", { href: url, download: name });
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+  }
+
+  async function exportMem(p, format) {
+    const s = memSlot(p);
+    s.exporting = format;
+    if (showing(p, "memory")) renderDetail();
+    try {
+      const out = await api("GET", personUrl(p, `memory/export?format=${format}`));
+      const stamp = new Date().toISOString().slice(0, 10);
+      const base = `jarvis-memory-${p.platform}-${p.user_id}-${stamp}`;
+      if (format === "text") {
+        saveFile(out.filename || `${base}.txt`, out.text || "", "text/plain");
+      } else {
+        const doc = Object.assign({}, out); delete doc.ok;
+        saveFile(`${base}.json`, JSON.stringify(doc, null, 2), "application/json");
+      }
+      const n = out.count === undefined ? 0 : out.count;
+      toast(n ? `Exported ${n} item${n === 1 ? "" : "s"}.` : "Exported — nothing is saved for them yet.", "success");
+    } catch (err) {
+      toast(err.message || "Couldn't export.", "error");
+    }
+    s.exporting = null;
+    if (showing(p, "memory")) renderDetail();
+  }
+
+  // ---- Standing rules (L.22) ---------------------------------------------------
+  // Made, ended and deleted here as well as by telling Jarvis; both go through
+  // `jarvis channels-memory ... rule`, so the terminal and the panel cannot
+  // disagree. Two scopes: "Just them", and "Everyone" (the shared _anyone file).
+  // Jarvis follows a rule without telling the person it exists. "Hard" (only for
+  // don't-discuss and ask-first) also checks each drafted reply before it is sent.
+  const RULE_LABEL = {
+    don_t_discuss: "Don't discuss", only_discuss: "Only discuss", ask_owner_first: "Ask you first",
+    notify_owner: "Tell you when it comes up", tone: "Tone", custom: "Custom",
+  };
+  const RULE_HARD_OK = new Set(["don_t_discuss", "ask_owner_first"]);
+  const RULE_WORDING = new Set(["tone", "custom"]);
+  const RULE_DAYS = [["", "No end date"], ["1", "1 day"], ["7", "7 days"], ["30", "30 days"], ["90", "90 days"]];
+  const RULE_KIND = { contradiction: "Contradiction", overlap: "Overlap", duplicate: "Duplicate" };
+
+  function ruleLine(rec) {
+    const b = rec.instruction || {};
+    let text = b.topic || "";
+    if (RULE_WORDING.has(b.directive) || !text) {
+      const t = String(rec.text || "");
+      text = t.includes("--") ? t.split("--").slice(1).join("--").trim() : (text || t);
+    }
+    return { what: RULE_LABEL[b.directive] || b.directive || "Rule", text };
+  }
+
+  async function ruleAct(p, scope, body, okMsg) {
+    const s = memSlot(p);
+    s.acting = true;
+    if (showing(p, "memory")) renderDetail();
+    try {
+      const out = scope === "everyone" ? await api("POST", "/api/channels/rules/anyone", body) : await personPost(p, "rules", body);
+      toast(okMsg, "success");
+      if (body.action === "add") { const d = state.ruleDraft.get(pkey(p)); if (d) d.topic = ""; }
+      if (out && out.conflicts && out.conflicts.length) toast("That rule pulls against another one — see “Rules that conflict” below.", "info");
+    } catch (err) {
+      toast(err.message || "Couldn't change that.", "error");
+    }
+    s.acting = false; state.memConfirm = null; s.status = "idle";
+    ensureMem(p);
+  }
+
+  function ruleItem(p, rec, scope) {
+    const k = pkey(p);
+    const b = rec.instruction || {};
+    const busy = memSlot(p).acting;
+    const { what, text } = ruleLine(rec);
+    const asking = state.memConfirm && state.memConfirm.key === `${k}#rule` && state.memConfirm.id === rec.id;
+    if (asking) {
+      return el("li", { class: "ch-note" }, [el("div", { class: "ch-confirm", role: "alertdialog", "aria-label": "Confirm deleting this rule" }, [
+        el("div", { class: "ch-confirm__text" }, `Delete the rule “${what}${text ? " — " + text : ""}”? It stops applying and is removed for good.`),
+        el("div", { class: "ch-confirm__btns" }, [
+          el("button", { type: "button", class: "btn btn--danger btn--sm", onclick: () => ruleAct(p, scope, { action: "forget", record: rec.id }, "Rule deleted.") }, "Delete"),
+          el("button", { type: "button", class: "btn btn--ghost btn--sm", onclick: () => { state.memConfirm = null; renderDetail(); } }, "Keep"),
+        ]),
+      ])]);
+    }
+    const bits = [scope === "everyone" ? "Everyone" : "Just them", `added ${memDay(rec.created)}`];
+    if (b.hard) bits.push("hard — every reply is checked first");
+    const until = b.scope && b.scope.until;
+    if (until) bits.push(`ends ${memDay(until)}`);
+    return el("li", { class: "ch-note" }, [
+      el("span", { class: "ch-note__text" }, [el("span", null, `${what}${text ? " — " + text : ""}`), el("div", { class: "ch-row__hint" }, bits.join(" · "))]),
+      el("span", { class: "ch-note__btns" }, [
+        el("button", { type: "button", class: "btn btn--ghost btn--sm", disabled: busy, title: "Stop applying this rule but keep it on file", onclick: () => ruleAct(p, scope, { action: "retire", record: rec.id }, "Rule ended. Jarvis no longer applies it.") }, "End rule"),
+        el("button", { type: "button", class: "ch-iconbtn ch-iconbtn--danger", title: "Delete this rule", "aria-label": "Delete this rule", disabled: busy, onclick: () => { state.memConfirm = { key: `${k}#rule`, id: rec.id }; renderDetail(); } }, [icon("trash")]),
+      ]),
+    ]);
+  }
+
+  function ruleForm(p) {
+    const k = pkey(p);
+    const s = memSlot(p);
+    let d = state.ruleDraft.get(k);
+    if (!d) { d = { scope: "person", directive: "don_t_discuss", topic: "", hard: false, days: "" }; state.ruleDraft.set(k, d); }
+    const wording = RULE_WORDING.has(d.directive);
+    const max = wording ? 240 : 120;
+    const sel = (label, value, options, onchange) => {
+      const node = el("select", { class: "ch-allowed__select", "aria-label": label, disabled: s.acting },
+        options.map(([v, t]) => el("option", { value: v, selected: v === value }, t)));
+      node.addEventListener("change", () => onchange(node.value));
+      return node;
+    };
+    const scope = sel("Who the rule is for", d.scope, [["person", `Just ${displayName(p)}`], ["everyone", "Everyone"]], (v) => { d.scope = v; renderDetail(); });
+    const directive = sel("What the rule does", d.directive, Object.keys(RULE_LABEL).map((v) => [v, RULE_LABEL[v]]), (v) => { d.directive = v; if (!RULE_HARD_OK.has(v)) d.hard = false; renderDetail(); });
+    const days = sel("How long the rule lasts", d.days, RULE_DAYS, (v) => { d.days = v; });
+    const input = el("input", { type: "text", class: "ch-name-input ch-instr-input", maxlength: String(max), autocomplete: "off", "aria-label": wording ? "What Jarvis should do" : "The topic", placeholder: wording ? "e.g. Keep answers to two lines." : "e.g. the surprise party", disabled: s.acting });
+    input.value = d.topic;
+    const add = el("button", { type: "button", class: "btn btn--primary btn--sm", disabled: s.acting || !d.topic.trim(), onclick: () => {
+      const body = { action: "add", directive: d.directive, topic: d.topic.trim() };
+      if (d.hard && RULE_HARD_OK.has(d.directive)) body.hard = true;
+      if (d.days) body.days = parseInt(d.days, 10);
+      ruleAct(p, d.scope, body, "Rule saved. It applies from their next message.");
+    } }, s.acting ? "Working…" : "Add rule");
+    input.addEventListener("input", () => { d.topic = input.value; add.disabled = s.acting || !input.value.trim(); });
+    input.addEventListener("keydown", (e) => { if (e.key === "Enter" && !add.disabled) { e.preventDefault(); add.click(); } });
+    const hardBox = el("input", { type: "checkbox", id: "ch-rule-hard", checked: d.hard ? "" : null, disabled: s.acting || !RULE_HARD_OK.has(d.directive) });
+    hardBox.addEventListener("change", () => { d.hard = hardBox.checked; });
+    return el("div", null, [
+      el("div", { class: "ch-name-edit" }, [scope, directive]),
+      el("div", { class: "ch-name-edit", style: "margin-top:6px" }, [input]),
+      el("div", { class: "ch-name-edit", style: "margin-top:6px" }, [days, add]),
+      el("label", { class: "ch-row__hint", for: "ch-rule-hard", style: "display:flex;gap:8px;align-items:center;margin-top:8px" }, [hardBox,
+        "Hard: also check each reply for the topic before it's sent, and replace it if it leaks (one small model call per reply that touches the topic). Only for “Don't discuss” and “Ask you first”."]),
+    ]);
+  }
+
+  function renderRules(p, s, all) {
+    const rules = s.rules;
+    const own = rules && Array.isArray(rules.items) ? rules.items : all.filter((r) => r.status === "active" && r.kind === "instruction");
+    const everyone = rules && Array.isArray(rules.everyone) ? rules.everyone : [];
+    const clashes = rules && Array.isArray(rules.conflicts) ? rules.conflicts : [];
+    const box = el("div", null, [el("div", { class: "ch-section-title" }, ["Standing rules", el("span", { class: "ch-section-title__aside" }, String(own.length + everyone.length))])]);
+    if (!rules) box.appendChild(el("div", { class: "ch-row__note ch-row__note--bad" }, [icon("warn"), el("span", null, "Couldn't read the rules just now. Use Refresh to try again; what's listed may be incomplete.")]));
+    box.appendChild(el("div", { class: "ch-row__hint" }, "Jarvis follows these without telling them they exist, and only when a message touches the topic. You can also just tell Jarvis."));
+    if (own.length) box.appendChild(el("ul", { class: "ch-notes ch-notes--edit" }, own.map((r) => ruleItem(p, r, "person"))));
+    else box.appendChild(el("div", { class: "ch-row__hint" }, "None for them yet."));
+    if (everyone.length) {
+      box.appendChild(el("div", { class: "ch-row__hint", style: "margin-top:10px" }, "Rules for everyone (they apply to this person too):"));
+      box.appendChild(el("ul", { class: "ch-notes ch-notes--edit" }, everyone.map((r) => ruleItem(p, r, "everyone"))));
+    }
+    if (clashes.length) {
+      box.appendChild(el("div", { class: "ch-section-title", style: "margin-top:12px" }, ["Rules that conflict", el("span", { class: "ch-section-title__aside" }, String(clashes.length))]));
+      box.appendChild(el("ul", { class: "ch-notes" }, clashes.map((c) => el("li", { class: "ch-note" }, [el("span", { class: "ch-note__text" }, [
+        el("span", null, `“${c.winner_text}” wins over “${c.loser_text}”`),
+        el("div", { class: "ch-row__hint" }, `${RULE_KIND[c.kind] || c.kind} · ${c.reason}${c.cross ? " · one of them is for everyone" : ""}. A person's own rule comes before one for everyone, then the newest. End one to settle it.`),
+      ])]))));
+    }
+    box.appendChild(el("div", { class: "ch-section-title", style: "margin-top:12px" }, "Add a rule"));
+    box.appendChild(ruleForm(p));
+    return box;
+  }
+
   function renderMemory(p) {
     const pane = el("div", { class: "ch-tabpane", id: "ch-pane-memory", role: "tabpanel", "aria-labelledby": "ch-tab-memory" });
     if (p.owner) {
@@ -2635,7 +2805,6 @@
     const all = s.data || [];
     const waiting = all.filter((r) => r.status === "proposed" && r.kind !== "instruction");
     const active = all.filter((r) => r.status === "active" && r.kind !== "instruction");
-    const rules = all.filter((r) => r.status === "active" && r.kind === "instruction");
     const eps = s.eps || null;
     const k = pkey(p);
 
@@ -2682,11 +2851,18 @@
       ]));
     }
 
-    // Standing rules, read-only
+    // Standing rules (L.22): made, ended and deleted here
+    pane.appendChild(renderRules(p, s, all));
+
+    // Export (L.21)
+    const exporting = s.exporting;
     pane.appendChild(el("div", null, [
-      el("div", { class: "ch-section-title" }, ["Standing rules", el("span", { class: "ch-section-title__aside" }, String(rules.length))]),
-      rules.length ? el("ul", { class: "ch-notes" }, rules.map((r) => el("li", null, r.text))) : el("div", { class: "ch-row__hint" }, "None. Rules like “don't discuss X with them” are made by telling Jarvis, or with jarvis channels-memory."),
-      rules.length ? el("div", { class: "ch-row__hint" }, "Jarvis follows these without telling them they exist. To change one, tell Jarvis or use jarvis channels-memory.") : null,
+      el("div", { class: "ch-section-title" }, "Export"),
+      el("div", { class: "ch-name-edit" }, [
+        el("button", { type: "button", class: "btn btn--ghost btn--sm", disabled: !!exporting || s.acting, onclick: () => exportMem(p, "json") }, [icon("download"), exporting === "json" ? "Exporting…" : "Download as JSON"]),
+        el("button", { type: "button", class: "btn btn--ghost btn--sm", disabled: !!exporting || s.acting, onclick: () => exportMem(p, "text") }, [icon("download"), exporting === "text" ? "Exporting…" : "Download as text"]),
+      ]),
+      el("div", { class: "ch-row__hint" }, "Everything saved about them — facts, conversation summaries and rules, including items waiting for your OK and ones you set aside. It contains what they said, so keep the file somewhere private. Nothing is sent anywhere."),
     ]));
     return pane;
   }
@@ -3612,7 +3788,7 @@
     if (!dom || dom.overlay.hidden) return;
     if (state.drafts.size && !global.confirm("You have unsaved tool changes. Close anyway?")) return;
     state.drafts.clear();
-    state.conv.clear(); state.usage.clear(); state.sim.clear(); state.hist.clear(); state.mem.clear(); state.memDraft.clear();   // don't keep their messages around while it's closed
+    state.conv.clear(); state.usage.clear(); state.sim.clear(); state.hist.clear(); state.mem.clear(); state.memDraft.clear(); state.ruleDraft.clear();   // don't keep their messages around while it's closed
     state.adding = false; state.editingName = null; state.confirmRemove = null;
     state.editingNote = null; state.confirmNote = null; state.forget = null;
     state.selectMode = false; state.picked.clear(); state.bulkOpen = false; state.bulk = newBulk();

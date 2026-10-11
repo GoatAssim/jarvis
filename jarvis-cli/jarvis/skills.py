@@ -413,10 +413,24 @@ def ensure_builtin_skills():
     _write_seeded_marker(already)
 
 
-def catalog_text(max_skills=40):
+# L.24 T5: the catalog block rides on every call, so the cheaper modes carry a
+# shorter header and clip descriptions harder. Full mode is unchanged byte for byte.
+DESC_MAX_COMPACT = 100
+DESC_MAX_ULTRA = 70
+CATALOG_HEADER_FULL = (
+    "Skills available (instructions you can load on demand). Call "
+    "load_skill with the name when a task matches one \u2014 the description "
+    "is all you have until you do:"
+)
+CATALOG_HEADER_COMPACT = "Skills (load_skill by name when one fits; the description is all you have until then):"
+CATALOG_HEADER_ULTRA = "Skills (load_skill by name):"
+
+
+def catalog_text(max_skills=40, compact=False, ultra=False):
     """The tier-1 block injected into the system prompt, or "".
 
-    Deliberately terse: one line per skill, description clipped to DESC_MAX.
+    Deliberately terse: one line per skill, description clipped to DESC_MAX
+    (DESC_MAX_COMPACT / DESC_MAX_ULTRA in the cheaper capacity modes, L.24 T5).
     This is the only skills content that is present unconditionally, so it is
     the only part whose cost scales with skills-that-exist rather than
     skills-that-are-used. Everything else is behind load_skill.
@@ -427,18 +441,20 @@ def catalog_text(max_skills=40):
     skills = [s for s in list_skills() if s.get("valid")]
     if not skills:
         return ""
-    lines = [
-        "Skills available (instructions you can load on demand). Call "
-        "load_skill with the name when a task matches one — the description "
-        "is all you have until you do:"
-    ]
+    if ultra:
+        header, desc_max = CATALOG_HEADER_ULTRA, DESC_MAX_ULTRA
+    elif compact:
+        header, desc_max = CATALOG_HEADER_COMPACT, DESC_MAX_COMPACT
+    else:
+        header, desc_max = CATALOG_HEADER_FULL, DESC_MAX
+    lines = [header]
     for skill in skills[:max_skills]:
         desc = skill["description"]
-        if len(desc) > DESC_MAX:
-            desc = desc[:DESC_MAX - 1].rstrip() + "\u2026"
+        if len(desc) > desc_max:
+            desc = desc[:desc_max - 1].rstrip() + "\u2026"
         lines.append(f"- {skill['name']}: {desc}")
     if len(skills) > max_skills:
-        lines.append(f"- (+{len(skills) - max_skills} more — call list_skills to see them)")
+        lines.append(f"- (+{len(skills) - max_skills} more \u2014 call list_skills to see them)")
     return "\n".join(lines)
 
 

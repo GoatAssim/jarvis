@@ -564,6 +564,7 @@ def handle_message(platform, msg, send, cfg=None, on_tool_call=None, decision=No
     is_owner = False
     entry = {}
     matched_rules = []
+    mem_ids, mem_keys = [], []
     try:
         is_owner = permissions.is_owner(cfg, msg)
         entry = people.touch(platform, msg.user_id,
@@ -595,7 +596,7 @@ def handle_message(platform, msg, send, cfg=None, on_tool_call=None, decision=No
     # block rides in, so nothing here touches the cached prompt prefix.
     if not is_owner:
         try:
-            extra, matched_rules = _person_context(platform, msg, entry)
+            extra, matched_rules, mem_ids, mem_keys = _person_context(platform, msg, entry)
             if extra:
                 sender_ctx = (sender_ctx + "\n\n" + extra).strip()
         except Exception as exc:  # noqa: BLE001 -- memory is an enhancement
@@ -737,6 +738,36 @@ def handle_message(platform, msg, send, cfg=None, on_tool_call=None, decision=No
     pending_tools = (_tool_calls_for_log(captured_tools, conv_id, ask_since)
                      if cfg.get("log_conversations", True) else [])
 
+    # --- the post-check on `hard` rules (L.22) -----------------------------
+    # BEFORE anything is sent: a draft that leaks a topic the owner marked hard
+    # is replaced (rule_check.py). Only a real answer is checked -- an error
+    # line has nothing to leak -- and only for someone who is not the owner.
+    # If the check itself breaks, a hard rule fails toward withholding.
+    if not is_owner and ask_ok and matched_rules:
+        try:
+            from . import rule_check
+            checked = rule_check.apply(people.key(platform, msg.user_id),
+                                       matched_rules, text, msg.text)
+            if checked["changed"]:
+                _log(f"hard rule post-check: {checked['outcome']} "
+                     f"({', '.join(str(i) for i in checked['rules'])})")
+                text = checked["text"]
+        except Exception as exc:  # noqa: BLE001
+            _log(f"hard rule post-check failed: {exc}")
+            if any(((rec.get("instruction") or {}).get("hard")) for rec, _how in matched_rules):
+                text = _HARD_RULE_FALLBACK
+
+    # --- recall audit (L.21) -----------------------------------------------
+    # Counts and ids only, never the reply: did it claim to remember something
+    # that is not in the block it was given? Changes nothing that is sent.
+    if not is_owner and ask_ok and text:
+        try:
+            from . import recall_check
+            recall_check.audit(people.key(platform, msg.user_id), mem_keys,
+                               mem_ids, text, msg.text)
+        except Exception as exc:  # noqa: BLE001
+            _log(f"recall audit failed: {exc}")
+
     limit = int(cfg.get("max_reply_chars") or 1900)
     sent_ok = True
     for chunk in chunk_text(text, limit):
@@ -804,10 +835,15 @@ def handle_message(platform, msg, send, cfg=None, on_tool_call=None, decision=No
 
 _RULE_NOTICE = {}
 RULE_NOTICE_SECONDS = 1800
+# Sent when the hard-rule post-check itself breaks (rule_check.py has its own,
+# per-directive wording for the normal path).
+_HARD_RULE_FALLBACK = ("That's not something I can get into, but I'm happy to "
+                       "help with something else.")
 
 
 def _person_context(platform, msg, entry):
-    """(extra prompt text, matched rules) for a non-owner's message.
+    """(extra prompt text, matched rules, ids in the memory block, the person
+    keys the block was read from) for a non-owner's message.
 
     Memory for this person (and the linked account's), then the standing
     rules that fit this message. A rule that asks for it also tells the owner,
@@ -826,7 +862,7 @@ def _person_context(platform, msg, entry):
         person_memory.log_applied(keys[0], matched)
         for rec in person_memory.action_for(matched):
             _tell_owner_of_rule(platform, msg, entry, rec)
-    return "\n\n".join(p for p in parts if p), matched
+    return "\n\n".join(p for p in parts if p), matched, mem["ids"], keys
 
 
 def _tell_owner_of_rule(platform, msg, entry, rec):

@@ -487,7 +487,11 @@ _REJECT_RE = re.compile(
     r"invalid|does not support|isn't supported)"
     r"|(unsupported|unrecognized|unknown|invalid|not supported).{0,60}?"
     r"(thinking|reasoning_effort|reasoning|thinkingconfig|thinkingbudget|thinkinglevel|"
-    r"thinking_level)",
+    r"thinking_level)"
+    # Gemini words some rejections as a range problem rather than "unsupported"
+    # ("thinking_budget ... must be between 128 and 32768", "... out of range").
+    r"|(thinking_?budget|thinking_?level|thinking_?config|thinkingbudget|thinkinglevel)"
+    r".{0,80}?(out of range|must be|not allowed|only supports|between \d)",
     re.I | re.S,
 )
 
@@ -519,6 +523,29 @@ def fit_max_tokens(max_tokens, level):
         current = 0
     # +1024 leaves room for a real answer after the thinking is paid for.
     return max(current, budget + 1024)
+
+
+def gemini_output_floor(level, thinking_config):
+    """The smallest `maxOutputTokens` that still leaves Gemini room to answer
+    after the thinking it was just asked for. 0 when this round asks for none.
+
+    Gemini counts thinking tokens against `maxOutputTokens`. Jarvis's default
+    cap is 3072 while a `medium` budget is 4096 and `high` is 16384, so asking
+    for either left no room: the thinking ate the whole cap, the call came
+    back MAX_TOKENS with no visible output, the turn failed over to another
+    provider, and no thinking was ever shown. Anthropic's budget has had the
+    same guard (`fit_max_tokens`) from the start; Gemini had none.
+
+    A `thinkingBudget` is used as given; a `thinkingLevel` (Gemini 3) has no
+    token number of its own, so the level's budget is the estimate.
+    """
+    cfg = thinking_config if isinstance(thinking_config, dict) else {}
+    budget = cfg.get("thinkingBudget")
+    if not isinstance(budget, int) or isinstance(budget, bool) or budget <= 0:
+        budget = 0
+        if cfg.get("thinkingLevel"):
+            budget = _LEVELS[normalize_level(level)].get("gemini") or 0
+    return budget + 1024 if budget > 0 else 0
 
 
 def extract_trace(provider_type, data):

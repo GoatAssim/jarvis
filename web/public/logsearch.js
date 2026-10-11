@@ -85,8 +85,8 @@
     }
   }
 
-  async function apiGet(url) {
-    const res = await fetch(url);
+  async function apiGet(url, signal) {
+    const res = await fetch(url, signal ? { signal } : undefined);
     let data = null;
     try { data = await res.json(); } catch { /* no body */ }
     if (!res.ok) throw new Error((data && data.error) || `GET ${url} failed (${res.status})`);
@@ -106,6 +106,11 @@
     selected: -1,
     debounce: null,
     prevFocus: null,
+    // Newest search wins. Typing fires a request per pause, and a slow earlier
+    // one used to land AFTER a faster later one and overwrite it ("Log search is
+    // kinda messed up": the list showed the results of an older query).
+    seq: 0,
+    inflight: null,
   };
 
   let dom = null;
@@ -264,7 +269,15 @@
     return on;
   }
 
+  function cancelInflight() {
+    state.seq += 1;
+    if (state.inflight) { try { state.inflight.abort(); } catch (_) { /* done */ } }
+    state.inflight = null;
+  }
+
   async function runSearch() {
+    cancelInflight();
+    const mySeq = state.seq;
     const query = (dom.query.value || "").trim();
     if (!query) {
       state.results = []; state.selected = -1;
@@ -286,8 +299,12 @@
     if (dom.mode.value) params.set("mode", dom.mode.value);
     for (const s of sets) params.append("set", s);
     if (path) params.set("path", path);
+    const controller = typeof AbortController === "function" ? new AbortController() : null;
+    state.inflight = controller;
     try {
-      const data = await apiGet(`/api/log-files/search?${params.toString()}`);
+      const data = await apiGet(`/api/log-files/search?${params.toString()}`, controller && controller.signal);
+      if (mySeq !== state.seq) return; // a newer search started; this answer is stale
+      state.inflight = null;
       state.results = data.results || [];
       state.selected = state.results.length ? 0 : -1;
       dom.summary.textContent =
@@ -298,6 +315,8 @@
       renderResults(matcher);
       renderDetail();
     } catch (err) {
+      if (mySeq !== state.seq || (err && err.name === "AbortError")) return;
+      state.inflight = null;
       dom.summary.textContent = "search failed";
       dom.results.textContent = "";
       dom.results.appendChild(el("div", { class: "skills-empty" }, err.message || "Failed."));
@@ -370,6 +389,7 @@
 
   function close() {
     if (!dom || dom.overlay.hidden) return;
+    cancelInflight();
     dom.overlay.hidden = true;
     const prev = state.prevFocus;
     state.prevFocus = null;

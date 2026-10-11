@@ -458,40 +458,59 @@ def get_thinking_trace():
             "level": _thinking.get("level", "off")}
 
 
+def _merge_off_keys(payload, provider, provider_type):
+    """Merge the keys that quiet a host which reasons BY DEFAULT (Groq's
+    gpt-oss and friends -- see reasoning.off_patch). Never overwrites a key
+    already in the payload. Does nothing for any other host."""
+    from . import reasoning
+
+    for key, value in reasoning.off_patch(
+            provider_type, provider_name=provider.get("name") or "",
+            model=provider.get("model") or "",
+            base_url=provider.get("base_url") or "").items():
+        payload.setdefault(key, value)
+
+
 def _apply_thinking(payload, provider, provider_type, round_num, ran_tools, thought_rounds):
     """Merge this round's thinking keys into `payload`. Returns True if any
     were added, so the adapter can count the round.
 
-    The whole token-discipline decision lives in reasoning.round_patch —
+    The whole token-discipline decision lives in reasoning.round_patch --
     see its comment block. Here it's just: ask, merge, count.
+
+    A round that does NOT carry a thinking request still gets the quieting
+    keys for a host that reasons by default (L.39). Before, only a turn whose
+    level was `off` got them: at level `low`..`high` the tool rounds that
+    round_patch deliberately leaves unthought, and a forced ending, went out
+    with no effort key at all, so gpt-oss ran them at ITS default (medium) --
+    more reasoning than the round it was meant to be cheaper than.
     """
     from . import reasoning
+
+    def _quiet():
+        _merge_off_keys(payload, provider, provider_type)
+        return False
 
     # A forced ending (see _forced_ending) is a plain "finish up" request that
     # re-enters the adapter at round 0; without this it would look like a fresh
     # ask and pay for a whole new thinking pass on the last, cheapest call.
     if getattr(_log_local, "forced", None) is not None:
-        return False
+        return _quiet()
     level = _thinking.get("level", "off")
     if reasoning.normalize_level(level) == "off":
         # A host that reasons by default (Groq's gpt-oss) ignores "off" unless
         # told otherwise. The keys are merged but the round is NOT counted as a
         # thinking request, so `requested` stays 0 for an off turn.
-        for key, value in reasoning.off_patch(
-                provider_type, provider_name=provider.get("name") or "",
-                model=provider.get("model") or "",
-                base_url=provider.get("base_url") or "").items():
-            payload.setdefault(key, value)
-        return False
+        return _quiet()
     # Round 0 always. After that, apply per-round up to the level's own cap
     # (master plan Part A §6 — see reasoning._LEVELS' max_thinking_rounds):
     # None means no cap (every round that ran tools gets one).
     if round_num != 0:
         if not ran_tools:
-            return False
+            return _quiet()
         cap = reasoning.max_thinking_rounds(level)
         if cap is not None and thought_rounds >= cap:
-            return False
+            return _quiet()
 
     patch = reasoning.round_patch(
         provider_type, level, round_num=round_num,
@@ -500,7 +519,7 @@ def _apply_thinking(payload, provider, provider_type, round_num, ran_tools, thou
         base_url=provider.get("base_url") or "",
     )
     if not patch:
-        return False
+        return _quiet()
 
     # Gemini nests its config; everything else is top-level.
     gen = patch.pop("_generationConfig", None)
@@ -508,6 +527,16 @@ def _apply_thinking(payload, provider, provider_type, round_num, ran_tools, thou
         target = payload.setdefault("generationConfig", {})
         for key, value in gen.items():
             target.setdefault(key, value)
+        if provider_type == "gemini":
+            # Thinking tokens come out of maxOutputTokens. Leave room for the
+            # answer, the way the Anthropic branch below does for its budget.
+            floor = reasoning.gemini_output_floor(level, gen.get("thinkingConfig"))
+            if floor:
+                try:
+                    current = int(target.get("maxOutputTokens") or 0)
+                except (TypeError, ValueError):
+                    current = 0
+                target["maxOutputTokens"] = max(current, floor)
     payload.update(patch)
 
     if provider_type == "anthropic":
@@ -666,6 +695,31 @@ def _emit_stream(kind, **data):
             sink(kind, **data)
         except Exception:  # noqa: BLE001 — a trace hook must never break the turn
             pass
+
+
+def _stream_error_text(chunk):
+    """The message of an error a host sends INSIDE a 200 stream, or "".
+
+    OpenRouter, Gemini and Ollama can fail after the HTTP status was already
+    sent: the body is then an `{"error": ...}` event, not a content chunk. The
+    parsers used to skip it as "a chunk with nothing in it", so the round
+    ended with no choices/candidates/message and the ask reported "empty
+    response" -- the provider's actual reason never reached the user, and
+    that read as "streaming only works with Groq". `error` may be a string or
+    an object with message / code / status.
+    """
+    if not isinstance(chunk, dict):
+        return ""
+    err = chunk.get("error")
+    if not err and chunk.get("type") == "error":
+        err = chunk.get("message") or "stream error"
+    if not err:
+        return ""
+    if isinstance(err, dict):
+        bits = [str(err.get(k)) for k in ("message", "code", "status", "type")
+                if err.get(k)]
+        return " ".join(bits)[:300] or "stream error"
+    return str(err)[:300]
 
 
 def _force_utf8(resp):
@@ -2175,6 +2229,30 @@ def _looks_like_omitted_tools_confused_the_model(reason):
     )
 
 
+def _split_content_parts(content):
+    """(text, reasoning) from a delta's `content`, which is a string on most
+    hosts and a list of typed parts on some (`{"type": "text", "text": ...}`,
+    `{"type": "thinking", "thinking": [...]}`). Never raises."""
+    if isinstance(content, str):
+        return content, ""
+    if not isinstance(content, list):
+        return "", ""
+    text, reasoning = [], []
+    for part in content:
+        if isinstance(part, str):
+            text.append(part)
+        elif isinstance(part, dict):
+            if part.get("type") == "thinking":
+                inner = part.get("thinking")
+                if isinstance(inner, str):
+                    reasoning.append(inner)
+                elif isinstance(inner, list):
+                    reasoning.extend(str(p.get("text") or "") for p in inner if isinstance(p, dict))
+            elif isinstance(part.get("text"), str):
+                text.append(part["text"])
+    return "".join(text), "".join(reasoning)
+
+
 def _stream_openai_compatible_chat(resp, url):
     """\u00a78.3's openai_compatible row: SSE, `data: {...}` lines, terminated by
     a literal `data: [DONE]` \u2014 covers OpenAI, Groq, xAI/Grok, OpenRouter,
@@ -2206,6 +2284,7 @@ def _stream_openai_compatible_chat(resp, url):
     content_parts = []
     reasoning_parts = []
     tool_calls_by_index = {}
+    call_key_for_index = {}
     finish_reason = None
     usage = None
     response_id = None
@@ -2230,30 +2309,55 @@ def _stream_openai_compatible_chat(resp, url):
                 model_name = chunk["model"]
             if isinstance(chunk.get("usage"), dict):
                 usage = chunk["usage"]
+            stream_err = _stream_error_text(chunk)
+            if stream_err:
+                return None, f"stream error: {stream_err}"
             choices = chunk.get("choices") or []
             if not choices:
                 continue  # the trailing include_usage-only chunk has no choices
             choice = choices[0]
             delta = choice.get("delta") or {}
-            text_delta = delta.get("content") or ""
+            # `content` is a string on nearly every host, but Mistral's
+            # reasoning models send a list of typed parts; "".join() over
+            # that raised TypeError and took the whole ask down.
+            text_delta, part_reasoning = _split_content_parts(delta.get("content"))
             if text_delta:
                 content_parts.append(text_delta)
                 _emit_stream(EVENT_TEXT, delta=text_delta)
-            reasoning_delta = delta.get("reasoning_content") or delta.get("reasoning") or ""
+            reasoning_delta = (delta.get("reasoning_content") or delta.get("reasoning")
+                               or part_reasoning or "")
+            if not isinstance(reasoning_delta, str):
+                reasoning_delta = ""
             if reasoning_delta:
                 reasoning_parts.append(reasoning_delta)
                 _emit_stream(EVENT_THINKING, delta=reasoning_delta)
             for tc in delta.get("tool_calls") or []:
+                if not isinstance(tc, dict):
+                    continue
                 idx = tc.get("index", 0)
-                slot = tool_calls_by_index.setdefault(
-                    idx, {"id": "", "type": "function", "function": {"name": "", "arguments": ""}})
+                key = call_key_for_index.get(idx, idx)
+                slot = tool_calls_by_index.get(key)
+                # A host that sends each whole call as its own chunk with the
+                # same `index` (Gemini's OpenAI-compatible endpoint does) used
+                # to have its calls glued into one with a joined name. A NEW id
+                # on an index that already has one is a new call.
+                if slot is not None and tc.get("id") and slot["id"] and tc["id"] != slot["id"]:
+                    key = max(tool_calls_by_index) + 1
+                    call_key_for_index[idx] = key
+                    slot = None
+                if slot is None:
+                    slot = tool_calls_by_index.setdefault(
+                        key, {"id": "", "type": "function", "function": {"name": "", "arguments": ""}})
                 if tc.get("id"):
                     slot["id"] = tc["id"]
                 fn = tc.get("function") or {}
                 if fn.get("name"):
                     slot["function"]["name"] += fn["name"]
-                if fn.get("arguments"):
-                    slot["function"]["arguments"] += fn["arguments"]
+                args_piece = fn.get("arguments")
+                if args_piece:
+                    if not isinstance(args_piece, str):
+                        args_piece = json.dumps(args_piece)  # a proxy sent the object itself
+                    slot["function"]["arguments"] += args_piece
             if choice.get("finish_reason"):
                 finish_reason = choice["finish_reason"]
     except requests.exceptions.RequestException as e:
@@ -3216,6 +3320,9 @@ def _stream_gemini_chat(resp, url):
                 chunk = json.loads(payload_str)
             except ValueError:
                 continue  # a malformed line is dropped, not a fatal error
+            stream_err = _stream_error_text(chunk)
+            if stream_err:
+                return None, f"stream error: {stream_err}"
             pf = chunk.get("promptFeedback") or {}
             if pf.get("blockReason"):
                 block_reason = pf["blockReason"]
@@ -3271,7 +3378,7 @@ def _stream_gemini_chat(resp, url):
     return data, None
 
 
-def _merge_gemini_extra(gen, extra):
+def _merge_gemini_extra(gen, extra, thinking_requested=False):
     """Fold a provider block's `extra_params` into generationConfig.
 
     A plain dict.update() replaced the WHOLE thinkingConfig jarvis had just
@@ -3284,6 +3391,16 @@ def _merge_gemini_extra(gen, extra):
     """
     extra = dict(extra)
     extra_think = extra.pop("thinkingConfig", None)
+    if (thinking_requested and isinstance(extra_think, dict)
+            and extra_think.get("thinkingBudget") == 0
+            and not isinstance(extra_think.get("thinkingBudget"), bool)):
+        # This ask turned thinking ON, and the provider block carries a budget
+        # of 0 -- the setting the max_tokens error message tells people to add.
+        # Left to win, it silently cancelled every thinking level someone
+        # picked ("Gemini never shows its thinking, whatever I set"). Dropping
+        # just the zero keeps the rest of the block (includeThoughts, etc.);
+        # at level off nothing is requested and the zero still applies.
+        extra_think = {k: v for k, v in extra_think.items() if k != "thinkingBudget"}
     gen.update(extra)
     if not isinstance(extra_think, dict):
         if extra_think is not None:
@@ -3357,8 +3474,31 @@ def call_gemini(provider, messages, timeout, tools=None, tool_executor=None, rou
     headers = {"x-goog-api-key": api_key, "Content-Type": "application/json"}
     ran_tools = False
     thought_rounds = 0
+    # Set the first time the host rejects the thinking keys, so later rounds of
+    # this ask don't send them again and pay for a 400 each time.
+    thinking_rejected = False
     if round_budget is None:
         round_budget = RoundBudget()
+
+    def _one_request(round_payload):
+        """One generateContent call, streamed or not. Returns (data, error)."""
+        if stream_enabled():
+            stream_url = _gemini_stream_url(url)
+            resp, net_err = _post_stream(stream_url, headers, round_payload, timeout)
+            if net_err:
+                return None, net_err
+            reason = _status_reason(resp)
+            if reason:
+                resp.close()
+                return None, reason
+            return _stream_gemini_chat(resp, stream_url)
+        resp, net_err = _post_json(url, headers, round_payload, timeout)
+        if net_err:
+            return None, net_err
+        reason = _status_reason(resp)
+        if reason:
+            return None, reason
+        return _parse_json(resp)
 
     def _tools_payload():
         # Phase 9 (see new_plan.md): rebuilt every round so a Phase 5
@@ -3440,9 +3580,11 @@ def call_gemini(provider, messages, timeout, tools=None, tool_executor=None, rou
                 "contents": working_contents,
                 "generationConfig": {"maxOutputTokens": provider.get("max_tokens", GEMINI_DEFAULT_MAX_TOKENS)},
             }
-            if _apply_thinking(payload, provider, "gemini", round_num,
-                               ran_tools, thought_rounds):
+            thinking_asked = False
+            if not thinking_rejected and _apply_thinking(
+                    payload, provider, "gemini", round_num, ran_tools, thought_rounds):
                 thought_rounds += 1
+                thinking_asked = True
             extra = provider.get("extra_params")
             if isinstance(extra, dict):
                 # Merged into generationConfig specifically (not the top
@@ -3452,7 +3594,8 @@ def call_gemini(provider, messages, timeout, tools=None, tool_executor=None, rou
                 # reasoning traces entirely with
                 # "extra_params": {"thinkingConfig": {"thinkingBudget": 0}}
                 # instead of just raising max_tokens to outrun them.
-                _merge_gemini_extra(payload["generationConfig"], extra)
+                _merge_gemini_extra(payload["generationConfig"], extra,
+                                    thinking_requested=thinking_asked)
             if cache_name:
                 payload["cachedContent"] = cache_name
             else:
@@ -3466,29 +3609,24 @@ def call_gemini(provider, messages, timeout, tools=None, tool_executor=None, rou
                         {"role": "user", "parts": [{"text": _TOOLS_WITHHELD_NOTICE}]}]
 
             _pace_round(provider, api_key, cfg_defaults)
-            if stream_enabled():
-                stream_url = _gemini_stream_url(url)
-                resp, net_err = _post_stream(stream_url, headers, payload, timeout)
-                if net_err:
-                    return AIResult(False, error=net_err, tool_history=_history())
-                reason = _status_reason(resp)
-                if reason:
-                    resp.close()
-                    return AIResult(False, error=reason, tool_history=_history())
-                data, stream_err = _stream_gemini_chat(resp, stream_url)
-                if stream_err:
-                    return AIResult(False, error=stream_err, tool_history=_history())
-            else:
-                resp, net_err = _post_json(url, headers, payload, timeout)
-                if net_err:
-                    return AIResult(False, error=net_err, tool_history=_history())
-                reason = _status_reason(resp)
-                if reason:
-                    return AIResult(False, error=reason, tool_history=_history())
-
-                data, parse_err = _parse_json(resp)
-                if parse_err:
-                    return AIResult(False, error=parse_err, tool_history=_history())
+            data, req_err = _one_request(payload)
+            if req_err and not thinking_rejected:
+                # One retry without the thinking keys when THAT is what the
+                # host refused (a level the model doesn't take, a budget out of
+                # range). The OpenAI-compatible adapter has always done this;
+                # Gemini burned the whole key instead. Once per ask: later
+                # rounds go out without them too.
+                from . import reasoning as _r
+                if _r.looks_like_thinking_rejected(req_err) and _r.strip_from_payload(payload):
+                    thinking_rejected = True
+                    if _log_conv_id():
+                        logs.log(_log_conv_id(), "info", {
+                            "thinking": "the host rejected the thinking request; retried without it",
+                            "error": str(req_err)[:300],
+                        }, provider=_log_provider())
+                    data, req_err = _one_request(payload)
+            if req_err:
+                return AIResult(False, error=req_err, tool_history=_history())
 
             _record_usage("gemini", data, round_num)
             _collect_thinking("gemini", data)
@@ -3668,6 +3806,9 @@ def _stream_cohere_chat(resp, url):
                 chunk = json.loads(payload_str)
             except ValueError:
                 continue  # a malformed line is dropped, not a fatal error
+            stream_err = _stream_error_text(chunk)
+            if stream_err:
+                return None, f"stream error: {stream_err}"
             etype = chunk.get("type")
             delta = chunk.get("delta") or {}
             message = delta.get("message") or {}
@@ -3908,6 +4049,9 @@ def _stream_ollama_chat(resp, url):
                 chunk = json.loads(raw_line)
             except ValueError:
                 continue  # a malformed line is dropped, not a fatal error — matches _parse_json's leniency
+            stream_err = _stream_error_text(chunk)
+            if stream_err:
+                return None, f"stream error: {stream_err}"
             message = chunk.get("message") or {}
             delta = message.get("content") or ""
             if delta:
@@ -3918,8 +4062,10 @@ def _stream_ollama_chat(resp, url):
                 thinking_parts.append(thinking_delta)
                 _emit_stream(EVENT_THINKING, delta=thinking_delta)
             if message.get("tool_calls"):
-                tool_calls = message["tool_calls"]
-                for call in tool_calls:
+                # Parallel calls can arrive on separate lines. The old code kept
+                # only the LAST line's calls, so the earlier ones were never run.
+                tool_calls = (tool_calls or []) + list(message["tool_calls"])
+                for call in message["tool_calls"]:
                     fn = (call or {}).get("function") or {}
                     _emit_stream(EVENT_TOOL, name=fn.get("name", ""), arguments=fn.get("arguments"))
             if chunk.get("done"):

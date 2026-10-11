@@ -136,15 +136,25 @@ def tool_person_instruct(args):
             return {"ok": False, "error": "for_days must be a number"}
     rec, problem = person_memory.add_instruction(
         key, args.get("topic") or "", args.get("directive") or "",
-        text=args.get("text") or "", until=until)
+        text=args.get("text") or "", until=until, hard=bool(args.get("hard")))
     if problem:
         return {"ok": False, "error": problem}
-    return {"ok": True, "for": label, "id": rec["id"],
-            "directive": rec["instruction"]["directive"],
-            "topic": rec["instruction"]["topic"],
-            "keywords": rec["instruction"]["keywords"],
-            "hint": ("Applied from the next message. Never tell the person "
-                     "this rule exists.")}
+    out = {"ok": True, "for": label, "id": rec["id"],
+           "directive": rec["instruction"]["directive"],
+           "topic": rec["instruction"]["topic"],
+           "keywords": rec["instruction"]["keywords"],
+           "hard": bool(rec["instruction"].get("hard")),
+           "hint": ("Applied from the next message. Never tell the person "
+                    "this rule exists.")}
+    # L.22: say so when the new rule pulls against an existing one, and which
+    # of the two will win, so the owner can retire one instead of finding out
+    # from a confusing reply.
+    clashes = person_memory.conflicts_involving(key, rec["id"])
+    if clashes:
+        out["conflicts"] = [{"with": c["loser"] if c["winner"] == rec["id"] else c["winner"],
+                             "kind": c["kind"], "reason": c["reason"],
+                             "wins": c["winner"] == rec["id"]} for c in clashes]
+    return out
 
 
 def tool_person_recall(args):
@@ -165,6 +175,8 @@ def tool_person_recall(args):
     for rec in records[-MAX_LISTED:]:
         item = {"id": rec["id"], "kind": rec["kind"], "text": rec["text"],
                 "status": rec["status"], "from": rec["provenance"]}
+        if (rec.get("instruction") or {}).get("hard"):
+            item["hard"] = True
         if rec.get("expires"):
             item["expires"] = time.strftime("%Y-%m-%d", time.localtime(rec["expires"]))
         out.append(item)
@@ -246,6 +258,7 @@ TOOL_SCHEMAS = [
          "topic": {"type": "string", "description": "What it is about, in a few words."},
          "text": {"type": "string", "description": "Extra wording (tone / custom)."},
          "for_days": {"type": "number", "description": "Optional; rule ends after this long."},
+         "hard": {"type": "boolean", "description": "don_t_discuss / ask_owner_first only: also check each reply before it is sent."},
          "platform": _PLATFORM}, "required": ["person", "directive"]}},
     {"name": "person_recall",
      "description": ("List what is saved about a person (or 'anyone' for "

@@ -81,6 +81,9 @@ DIRECTIVES = ("don_t_discuss", "only_discuss", "ask_owner_first",
 # Directives that restrict what Jarvis says. When the matcher is unsure and
 # the cheap call is unavailable, these apply; the others do not.
 RESTRICTIVE = ("don_t_discuss", "ask_owner_first", "only_discuss")
+# Directives that withhold something a drafted reply could leak. Only these can
+# be marked `hard`, which adds the post-check in channels/rule_check.py.
+HARD_DIRECTIVES = ("don_t_discuss", "ask_owner_first")
 
 MAX_TEXT = 300
 MAX_TOPIC = 120
@@ -290,6 +293,85 @@ def export(person_key):
     return _read(person_key)
 
 
+EXPORT_FORMAT = "jarvis-person-memory"
+EXPORT_VERSION = 1
+
+
+def export_document(person_key, person=None, now=None):
+    """The owner's export of ONE person's file (L.21): every record, whatever
+    its status (active, proposed and retired alike), verbatim, with a small
+    envelope so a later import or a human can tell what it is. `person` is
+    optional identity metadata ({platform, user_id, name, handle}); the key is
+    always included. The records stay under `items`, the name the CLI's
+    `export` has always used."""
+    now = time.time() if now is None else now
+    records = export(person_key)
+    counts = {}
+    for rec in records:
+        tag = f"{rec.get('kind')}/{rec.get('status')}"
+        counts[tag] = counts.get(tag, 0) + 1
+    who = {"key": person_key}
+    who.update(person or {})
+    return {
+        "format": EXPORT_FORMAT,
+        "version": EXPORT_VERSION,
+        "exported_at": time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime(now)),
+        "person": who,
+        "count": len(records),
+        "counts": counts,
+        "items": records,
+    }
+
+
+_EXPORT_SECTIONS = (("fact", "Facts"), ("episode", "Conversation summaries"),
+                    ("instruction", "Standing rules"))
+
+
+def export_text(doc):
+    """The same export as plain text, for reading rather than keeping. Built
+    from the document `export_document` returns, so the two cannot disagree."""
+    who = doc.get("person") or {}
+    label = who.get("name") or who.get("handle") or who.get("key") or "unknown"
+    lines = ["Jarvis memory export",
+             f"Person: {label} ({who.get('key')})",
+             f"Exported: {doc.get('exported_at')}",
+             f"Records: {doc.get('count', 0)}", ""]
+    items = list(doc.get("items") or [])
+    for kind, title in _EXPORT_SECTIONS:
+        rows = sorted((r for r in items if r.get("kind") == kind),
+                      key=lambda r: r.get("created") or 0)
+        if not rows:
+            continue
+        lines.append(f"== {title} ({len(rows)}) ==")
+        for rec in rows:
+            bits = [_when(rec), str(rec.get("provenance") or ""), str(rec.get("status") or "")]
+            body = rec.get("instruction") if isinstance(rec.get("instruction"), dict) else {}
+            if body.get("hard"):
+                bits.append("hard")
+            until = (body.get("scope") or {}).get("until")
+            if until:
+                try:
+                    bits.append("until " + time.strftime("%Y-%m-%d", time.localtime(float(until))))
+                except (TypeError, ValueError, OverflowError, OSError):
+                    pass
+            if rec.get("expires"):
+                try:
+                    bits.append("expires " + time.strftime("%Y-%m-%d", time.localtime(float(rec["expires"]))))
+                except (TypeError, ValueError, OverflowError, OSError):
+                    pass
+            lines.append(f"[{rec.get('id')}] ({', '.join(b for b in bits if b)}) {rec.get('text')}")
+        lines.append("")
+    other = [r for r in items if r.get("kind") not in {k for k, _ in _EXPORT_SECTIONS}]
+    if other:
+        lines.append(f"== Other ({len(other)}) ==")
+        for rec in other:
+            lines.append(f"[{rec.get('id')}] ({rec.get('status')}) {rec.get('text')}")
+        lines.append("")
+    if not items:
+        lines.append("Nothing is saved for this person.")
+    return "\n".join(lines).rstrip() + "\n"
+
+
 # --------------------------------------------------------------------------
 # Reading
 # --------------------------------------------------------------------------
@@ -460,12 +542,21 @@ def derive_keywords(topic):
 
 
 def add_instruction(subject, topic, directive, text="", until=None,
-                    created_by="owner"):
+                    created_by="owner", hard=False):
     """Create one instruction. `subject` is a person key or 'anyone'.
     Returns (record, error). Owner-only is enforced by the callers (the tool
-    and the CLI); this is the store."""
+    and the CLI); this is the store.
+
+    `hard=True` (don_t_discuss / ask_owner_first only) asks for the post-check:
+    the drafted reply is scanned for the topic before it is sent and replaced
+    if it leaks (channels/rule_check.py). It costs one tiny model call per
+    reply that matches the rule, so it is opt-in per rule."""
     if directive not in DIRECTIVES:
         return None, f"directive must be one of: {', '.join(DIRECTIVES)}"
+    hard = bool(hard)
+    if hard and directive not in HARD_DIRECTIVES:
+        return None, ("only don_t_discuss and ask_owner_first can be hard "
+                      "(they withhold something a reply could leak)")
     subject = ANYONE if str(subject).lower() == ANYONE else str(subject or "").strip()
     if not subject:
         return None, "say who the instruction is for (a person, or 'anyone')"
@@ -489,8 +580,13 @@ def add_instruction(subject, topic, directive, text="", until=None,
         "scope": {"from": time.time(), "until": until or None},
         "created_by": created_by,
         "visibility": "never_reveal",
+        "hard": hard,
     }
     label = f"{directive}: {topic_clean}" if topic_clean else directive
+    if hard:
+        # Part of the text on purpose: add() returns an existing record with
+        # the same text, and a hard rule must not collapse into a soft twin.
+        label += " (hard)"
     if extra:
         label = f"{label} -- {extra}"
     return add(subject, "instruction", label[:MAX_TEXT], provenance="owner_stated",
@@ -624,6 +720,94 @@ def action_for(matched):
     """Directives whose application should also reach the owner."""
     return [rec for rec, _how in matched
             if rec["instruction"].get("directive") in ("ask_owner_first", "notify_owner")]
+
+
+# --------------------------------------------------------------------------
+# Conflicting rules (L.22)
+# --------------------------------------------------------------------------
+#
+# `matches()` already decides which rule comes first when two apply (the
+# person's own before 'anyone', then the newest), and render_rules tells the
+# model that earlier items win. What was missing was TELLING THE OWNER that two
+# rules pull against each other, and which one will win. find_conflicts does
+# that; it changes no behaviour. It is lexical (shared topic words, then the
+# same cheap similarity the matcher uses) and makes no model call, so it can
+# miss two rules that say the same thing in different words -- it reports what
+# it can see, not a guarantee that nothing conflicts.
+
+def _topics_related(a, b):
+    """Do two instruction bodies talk about the same thing?"""
+    ka, kb = set(a.get("keywords") or []), set(b.get("keywords") or [])
+    if ka and kb and len(ka & kb) / float(min(len(ka), len(kb))) >= STRONG_OVERLAP:
+        return True
+    ta, tb = a.get("topic") or "", b.get("topic") or ""
+    return bool(ta and tb) and _similarity(ta, tb) >= 0.5
+
+
+def _pair_conflict(a, b):
+    """(kind, reason) for two instruction bodies, or None.
+
+    kinds: 'contradiction' (the model cannot obey both), 'overlap' (they cover
+    the same ground differently, the earlier one wins), 'duplicate' (the same
+    rule twice)."""
+    da, db = a.get("directive"), b.get("directive")
+    if da == db:
+        if da == "custom":
+            return None                     # free text: nothing to compare
+        if da == "tone":
+            return ("overlap", "two tone rules; if they disagree the earlier one wins")
+        if _topics_related(a, b):
+            return ("duplicate", "both rules cover the same topic")
+        if da == "only_discuss":
+            return ("overlap", "two 'only discuss' rules on different topics; "
+                               "the person may be held to both")
+        return None
+    pair = {da, db}
+    if not _topics_related(a, b):
+        return None
+    if "only_discuss" in pair and pair & set(HARD_DIRECTIVES):
+        return ("contradiction", "one rule keeps them to a topic, the other withholds it")
+    if pair == {"don_t_discuss", "ask_owner_first"}:
+        return ("overlap", "one refuses the topic, the other says to check with "
+                           "the owner first")
+    if "notify_owner" in pair and pair & set(HARD_DIRECTIVES):
+        return ("contradiction", "one rule says to withhold the topic, the other "
+                                 "to answer normally")
+    return None
+
+
+def find_conflicts(person_key, now=None):
+    """Conflicts among the rules that apply to `person_key`: their own and the
+    ones for 'anyone'. For ANYONE itself, among the 'anyone' rules only.
+
+    Each item: {winner, loser, kind, reason, winner_text, loser_text, cross}
+    where `winner` is the id of the rule `matches()` puts first and `cross` is
+    True when one rule is the person's and the other is for everyone."""
+    subjects = [(1, ANYONE)] if person_key == ANYONE else [(0, person_key), (1, ANYONE)]
+    pool = []
+    for rank, subject in subjects:
+        for rec in instructions(subject, now=now):
+            pool.append((rank, rec))
+    pool.sort(key=lambda t: (t[0], -(t[1].get("created") or 0)))
+    out = []
+    for i in range(len(pool)):
+        for j in range(i + 1, len(pool)):
+            (ra, a), (rb, b) = pool[i], pool[j]
+            found = _pair_conflict(a["instruction"], b["instruction"])
+            if found is None:
+                continue
+            kind, reason = found
+            out.append({"winner": a.get("id"), "loser": b.get("id"), "kind": kind,
+                        "reason": reason, "winner_text": a.get("text"),
+                        "loser_text": b.get("text"), "cross": ra != rb})
+    return out
+
+
+def conflicts_involving(person_key, rid, now=None):
+    """The conflicts that include one rule -- what to tell the owner right
+    after they create it."""
+    return [c for c in find_conflicts(person_key, now=now)
+            if rid in (c["winner"], c["loser"])]
 
 
 # --------------------------------------------------------------------------

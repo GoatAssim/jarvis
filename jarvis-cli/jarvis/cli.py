@@ -1265,7 +1265,7 @@ def run_logs_command(argv, commands):
 SCHEDULER_COMMANDS = {
     "sched-list", "sched-tick", "sched-daemon", "sched-ask-log", "sched-add",
     "sched-show", "sched-cancel", "sched-pause", "sched-resume", "sched-snooze", "sched-budget",
-    "sched-edit", "sched-approve", "sched-signal", "sched-clear", "notify-send",
+    "sched-edit", "sched-approve", "sched-signal", "sched-clear", "sched-delete", "notify-send",
     "notify-list", "notify-history", "notify-ack", "notify-clear", "notify-config",
     "notify-summary", "notify-read", "notify-dismiss",
     "conv-search", "mcp-status", "mcp-refresh", "mcp-config", "mcp-call",
@@ -1554,7 +1554,15 @@ def run_scheduler_command(argv):
             # The detail pane renders this as the approval summary; a job
             # created before `risk` was stored gets it derived here so a risky
             # old job never shows up looking empty.
-            return emit(dict(job, risk=scheduler.risk_of(job)))
+            out = dict(job, risk=scheduler.risk_of(job))
+            # The approval card's capability warning (scheduler.preflight_of): only
+            # for a job that is waiting on a decision, and only the key when there
+            # is something to say about it -- an older panel just ignores it.
+            if job.get("status") == scheduler.STATUS_NEEDS_APPROVAL:
+                pf = scheduler.preflight_of(job)
+                if pf is not None:
+                    out["preflight"] = pf
+            return emit(out)
 
         if cmd == "sched-add":
             # jarvis sched-add <when> <message> [kind]
@@ -1583,6 +1591,11 @@ def run_scheduler_command(argv):
                 if pending and pending.get("status") == scheduler.STATUS_NEEDS_APPROVAL:
                     for line in scheduler.risk_of(pending).get("lines") or []:
                         print("approving: %s" % line, file=sys.stderr)
+                    # Advice, not a gate: approval still goes ahead (see preflight_of).
+                    pf = scheduler.preflight_of(pending)
+                    if pf and not pf.get("ok"):
+                        for line in pf.get("lines") or []:
+                            print("warning: it would not start right now: %s" % line, file=sys.stderr)
             return emit(scheduler.summarize(fn(job_id)))
 
         if cmd == "sched-budget":
@@ -1642,6 +1655,16 @@ def run_scheduler_command(argv):
 
         if cmd == "sched-clear":
             return emit({"removed": scheduler.clear_finished()})
+
+        if cmd == "sched-delete":
+            # jarvis sched-delete <id>   (the Schedules panel's per-job Delete)
+            # One FINISHED job's record; an active job is refused (cancel it
+            # first). The HUMAN side, like sched-clear: no model tool reaches it.
+            job_id = need_id()
+            if not job_id:
+                return 1
+            removed = scheduler.delete_job(job_id)
+            return emit({"removed": 1, "id": removed.get("id"), "title": removed.get("title")})
 
         if cmd == "notify-send":
             if len(rest) < 1:
@@ -2717,6 +2740,7 @@ def main():
         # subcommand but with --no-play (see below) so it can stream the
         # raw bytes to the browser instead of touching the host speaker.
         from .voice import config as voice_config, tts as voice_tts
+        from .voice.speech_text import speech_text
 
         if not voice_config.voice_enabled():
             print(json.dumps({"error": "Voice is disabled (voice_config.json: \"enabled\": false)."}))
@@ -2733,7 +2757,12 @@ def main():
             print(json.dumps({"error": "usage: jarvis speak <text> [--no-play] [--out <path>]"}))
             sys.exit(1)
 
-        result = voice_tts.speak(text, play=not no_play, out_path=out_path)
+        # Fenced code is read out symbol by symbol ("backtick backtick backtick,
+        # open brace ..."), so it is replaced by one short spoken marker -- the
+        # same rule the web UI's Speak button applies (I-B11). Idempotent, so the
+        # web path, which already stripped it in the browser, passes through
+        # unchanged. Only what is SPOKEN changes; the text itself is not touched.
+        result = voice_tts.speak(speech_text(text) or text, play=not no_play, out_path=out_path)
         if "error" in result:
             print(json.dumps({"error": result["error"]}))
             sys.exit(1)
@@ -2777,6 +2806,7 @@ def main():
         # in the browser and calls /api/voice/transcribe + /api/voice/speak
         # around a normal "ask" instead (see jarvis-enhancement-plan.md §3a).
         from .voice import audio_io as voice_audio_io, config as voice_config, stt as voice_stt, tts as voice_tts
+        from .voice.speech_text import speech_text
         from . import ai_client, conversations
 
         if not voice_config.voice_enabled():
@@ -2815,7 +2845,9 @@ def main():
             sys.exit(1)
 
         print(f"{prefix}{result.text}")
-        speak_result = voice_tts.speak(result.text)
+        # The reply is PRINTED whole; only what is spoken skips fenced code (see
+        # `speak` above and voice/speech_text.py).
+        speak_result = voice_tts.speak(speech_text(result.text) or result.text)
         if "error" in speak_result:
             print(f"{ERR.DIM}(couldn't speak the reply: {speak_result['error']}){ERR.RESET}",
                   file=sys.stderr)
@@ -3599,7 +3631,9 @@ def main():
     if argv[0] == "disabled-dependents":
         # jarvis disabled-dependents <tool|command> <name>
         # Scheduled jobs that name this tool/command: the Tool Manager lists them
-        # before switching it off, since they would fail when they next fire.
+        # before switching it off, since they would fail when they next fire. For a
+        # TOOL it also carries `cascade` (screens + daemons that go off with the last
+        # tool of their file) and `commands` (palette commands that follow the tool).
         from . import scheduler
 
         if len(argv) < 3 or argv[1] not in ("tool", "command"):
@@ -3610,6 +3644,9 @@ def main():
             # Q-L46m: the screens and daemons that go off with the LAST tool of their file.
             from . import tools as system_tools
             out["cascade"] = system_tools.switch_off_cascade(argv[2])
+            # The palette commands that follow this tool off (they run it, or its
+            # file's tools would all be off): listed in the same confirmation.
+            out["commands"] = system_tools.switch_off_commands(argv[2])
         print(json.dumps(out, indent=2))
         return
 
