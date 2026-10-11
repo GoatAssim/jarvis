@@ -84,14 +84,32 @@ def extract_usage(provider_type, data):
                 entry["cache_read_tokens"] = cached
                 entry["cache_write_tokens"] = 0
         # L.24 T6: reasoning models report how much of completion_tokens was
-        # hidden thinking. It is a COMPONENT of completion_tokens (already in
-        # output_tokens), so it is flagged and never added a second time.
+        # hidden thinking. On OpenAI, Groq, DeepSeek and OpenRouter it is a
+        # COMPONENT of completion_tokens (already in output_tokens), so it is
+        # flagged and never added a second time.
+        #
+        # Not every OpenAI-compatible host does that. xAI reports reasoning_tokens
+        # OUTSIDE completion_tokens and bills them on top, which left the ledger
+        # (and the scheduled-run budget, and the over-budget reply) short by the
+        # whole reasoning spend. The host's own total_tokens tells the two apart:
+        # tokens beyond prompt + completion are billed on top. Only that surplus,
+        # and never more than the reported reasoning_tokens, is added -- so a host
+        # whose total_tokens is odd for another reason can overcount by at most
+        # the reasoning figure it already reported. No total_tokens (or none
+        # beyond prompt + completion) keeps the in-output reading.
         cdetails = usage.get("completion_tokens_details")
         if isinstance(cdetails, dict):
             reasoning = _as_int(cdetails.get("reasoning_tokens"))
-            if reasoning:
-                entry["thinking_tokens"] = reasoning
-                entry["thinking_in_output"] = True
+            if reasoning and reasoning > 0:
+                total = _as_int(usage.get("total_tokens"))
+                surplus = 0
+                if total is not None and inp is not None and out is not None:
+                    surplus = max(0, min(reasoning, total - inp - out))
+                if surplus:
+                    entry["thinking_tokens"] = surplus
+                else:
+                    entry["thinking_tokens"] = reasoning
+                    entry["thinking_in_output"] = True
         return entry
 
     if provider_type == "anthropic":

@@ -1300,6 +1300,14 @@ def _build_messages(persona, user_text, tools_enabled, profile, conversation_id,
     else:
         offered = []
     offered_names = {s["name"] for s in offered}
+    # L.24 T3: an unattended ask is not offered take_screenshot (preflight.
+    # unoffered_tools -- ask() applies the same function to the schemas it sends).
+    # The prompt must not name it either: a tool the request does not carry is a
+    # call the provider rejects. Per-turn, so it stays in the tail like every
+    # other thing derived from the router's decision.
+    unoffered = (preflight.unoffered_tools(user_text, policy.unattended_context_from_env() is not None)
+                 if tools_enabled else frozenset())
+    offered_names = offered_names - unoffered
     # Phase 6 of the token-optimization plan (see new_plan.md): inject
     # TOOL_PACK_INSTRUCTIONS only for the groups the router actually
     # activated this turn, instead of _tools_blurb() baking every
@@ -1312,9 +1320,9 @@ def _build_messages(persona, user_text, tools_enabled, profile, conversation_id,
     if route is not None and route.confident:
         from . import tool_registry
         pack_lines = [
-            tool_registry.pack_instruction(group)
+            tool_registry.pack_instruction(group, unoffered)
             for group in route.groups
-            if tool_registry.pack_instruction(group)
+            if tool_registry.pack_instruction(group, unoffered)
         ]
         pack_instructions_ctx = " ".join(pack_lines)
     elif route is not None and tools_enabled:
@@ -3330,6 +3338,8 @@ def _ask_impl(user_text, commands=None, on_attempt=None, on_tool_call=None, on_t
     # Names currently offered only as a catalog line (L.24 T2); filled by the
     # hybrid catalog tier below, read by _discover_sink's exact promotion.
     _catalog_names = set()
+    # L.24 T3: tools this ask is not OFFERED (unattended + no screenshot asked for).
+    _unoffered = frozenset()
     if tools_enabled and _allowlist_is_empty():
         tools_enabled = False
     full_schemas = []
@@ -3461,6 +3471,19 @@ def _ask_impl(user_text, commands=None, on_attempt=None, on_tool_call=None, on_t
                             full = system_tools.schemas_for_tools([gname])
                             active_schemas.extend(full)
                             trace.cache_seeded.append(gname)
+
+        # L.24 T3 (second half): an unattended run is not offered take_screenshot
+        # unless the job asks for a screenshot. The model never sees its picture
+        # and nobody is watching the UI card, so it only ever served as a way to
+        # "look" that does not work (both token incidents spent rounds on it).
+        # Applied after the router and the discovery-cache seeding so neither can
+        # put it back; the tool executor is built from full_schemas, so a call the
+        # model makes anyway still runs. Interactive asks are untouched.
+        _unoffered = preflight.unoffered_tools(
+            user_text, policy.unattended_context_from_env() is not None)
+        if _unoffered and any(sch.get("name") in _unoffered for sch in active_schemas.to_list()):
+            active_schemas = OrderedSchemaSet(
+                [sch for sch in active_schemas.to_list() if sch.get("name") not in _unoffered])
 
         # Real (description-stripped) argument schemas, not name-only stubs,
         # are the default (full/compact modes) because jarvis is a brand-new
@@ -3605,7 +3628,7 @@ def _ask_impl(user_text, commands=None, on_attempt=None, on_tool_call=None, on_t
             group = tool_registry.group_of(name)
             group_names = tool_registry.tools_in_group(group) if group else [name]
             for gname in group_names:
-                if gname and gname not in active_schemas:
+                if gname and gname not in active_schemas and gname not in _unoffered:
                     to_add.append(gname)
 
         for name in to_add:

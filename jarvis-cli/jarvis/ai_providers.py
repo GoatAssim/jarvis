@@ -1152,6 +1152,13 @@ def _post_json(url, headers, payload, timeout):
     return resp, None
 
 
+def _fmt_delay(delay):
+    """A stated retry delay as the text `[retry in <this>s]` carries it, which
+    key_health.parse_retry_delay must read back unchanged. Plain decimals only:
+    `%g` turns 1,234,567 s into "1.23457e+06", which nothing parses."""
+    return f"{float(delay):.3f}".rstrip("0").rstrip(".") or "0"
+
+
 def _status_reason(resp):
     """None for a 2xx response; otherwise a short human reason."""
     if 200 <= resp.status_code < 300:
@@ -1163,7 +1170,7 @@ def _status_reason(resp):
         # park the key for exactly that long (key_health.parse_retry_delay).
         from . import key_health
         delay = key_health.parse_retry_delay(getattr(resp, "text", "") or "", getattr(resp, "headers", None))
-        hint = f" [retry in {delay:g}s]" if delay is not None else ""
+        hint = f" [retry in {_fmt_delay(delay)}s]" if delay is not None else ""
         return f"rate limited or quota exceeded (HTTP 429){hint}"
     if resp.status_code == 402:
         return "payment required — out of credits (HTTP 402)"
@@ -1174,7 +1181,7 @@ def _status_reason(resp):
         # a fixed 45 s and the same-key retry never saw the hint.
         from . import key_health
         delay = key_health.parse_retry_delay(getattr(resp, "text", "") or "", getattr(resp, "headers", None))
-        hint = f" [retry in {delay:g}s]" if delay is not None else ""
+        hint = f" [retry in {_fmt_delay(delay)}s]" if delay is not None else ""
         return f"provider server error (HTTP {resp.status_code}){hint}"
     snippet = (resp.text or "").strip().replace("\n", " ")[:180]
     return f"HTTP {resp.status_code}{': ' + snippet if snippet else ''}"

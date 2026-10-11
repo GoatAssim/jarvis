@@ -125,6 +125,47 @@ def check(prompt):
         return {"ok": True, "needs": [], "blockers": [], "error": str(exc)}
 
 
+# ---------------------------------------------------------------------------
+# L.24 T3, second half: a tool an unattended ask is not OFFERED
+# ---------------------------------------------------------------------------
+# take_screenshot saves a file and shows the picture in the UI; the model gets back
+# "ok" and a path, never pixels (the main tool loop is text-only -- vision_call is
+# the separate side call). In an unattended run nobody is watching the UI either, so
+# the only reason to call it is a job that asks for the picture itself. Offered
+# anyway, it is the tool a model reaches for to "look" -- 5267d91a8b996d48 and
+# 1a99e1e3f0d3af0e both burned rounds on it. read_screen and look_at_screen are the
+# tools that look, and they stay offered.
+#
+# Interactive asks are deliberately untouched: a person is there, and "show me my
+# screen" with no mention of a screenshot is a fair way to ask for the picture.
+SCREENSHOT_TOOL = "take_screenshot"
+
+# The prompt asks for the PICTURE (a screenshot, a capture of the screen) -- as opposed
+# to asking to LOOK at the screen, which is _SEE_CUE's job.
+_SCREENSHOT_ASK = re.compile(
+    r"\bscreen\s?-?\s?shots?\b|\bprint\s?screen\b"
+    r"|\bscreen\s+(?:capture|grab|image|picture|photo)s?\b"
+    r"|\b(?:capture|grab|snap|photograph)\s+(?:the\s+|my\s+|a\s+|an\s+)?"
+    r"(?:screen|desktop|display|monitor)\b",
+    re.IGNORECASE)
+
+
+def unoffered_tools(prompt, unattended):
+    """Names of tools this ask should not be OFFERED (not blocked: the executor still
+    runs one the model names, and an explicit get_tool_schema still promotes it).
+
+    Pure and deterministic in (prompt, unattended), because ask() and the prompt
+    builder each call it and must agree: a prompt that names a tool the request does
+    not carry is how a provider answers with a 400. Never raises; an error offers
+    everything, exactly as before this existed."""
+    try:
+        if not unattended or _SCREENSHOT_ASK.search(str(prompt or "")):
+            return frozenset()
+        return frozenset({SCREENSHOT_TOOL})
+    except Exception:  # noqa: BLE001 -- a cost optimisation, never a reason to fail
+        return frozenset()
+
+
 def reply(result):
     """The one line an unattended run reports instead of starting."""
     parts = [b["why"] for b in (result or {}).get("blockers") or []]

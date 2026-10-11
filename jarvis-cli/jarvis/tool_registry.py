@@ -558,8 +558,27 @@ def keyword_needs(value):
     return []
 
 
-def pack_instruction(group):
-    """The short workflow instruction for a group, or '' if it has none."""
+# A pack instruction that names a tool, restated for an ask that is not being OFFERED
+# that tool (preflight.unoffered_tools). Keyed (group, tool). Naming a tool the
+# request does not carry invites a call the provider then rejects.
+_PACK_INSTRUCTION_WITHOUT = {
+    ("vision", "take_screenshot"): (
+        "look_at_screen reads the screen text first and only looks at the "
+        "actual pixels when the text can't answer. Use read_screen when you "
+        "just need text. Only pass force_vision=true after a text-tier answer "
+        "was insufficient."
+    ),
+}
+
+
+def pack_instruction(group, unoffered=()):
+    """The short workflow instruction for a group, or '' if it has none.
+    `unoffered` is the set of tool names this ask is not offered; a group whose
+    instruction names one gets its variant without it."""
+    for tool in unoffered or ():
+        variant = _PACK_INSTRUCTION_WITHOUT.get((group, tool))
+        if variant:
+            return variant
     return TOOL_PACK_INSTRUCTIONS.get(group, "")
 
 

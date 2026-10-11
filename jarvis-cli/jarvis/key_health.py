@@ -65,34 +65,78 @@ HOST_REFUSED_COOLDOWN = 60.0           # L.28 #4: a host that refused a connecti
 DEFAULT_MIN_ROUND_INTERVAL = tunables.const("DEFAULT_MIN_ROUND_INTERVAL", 3.0)  # L.43: Settings > Advanced
 
 # What providers actually say. Gemini: `"retryDelay": "26s"` and "Please retry in
-# 26.06s"; OpenAI/Groq: "try again in 20s" / "in 2m3.5s"; plus the header.
-_DELAY_PATTERNS = (
-    re.compile(r'retryDelay"?\s*[:=]\s*"?(\d+(?:\.\d+)?)\s*s', re.I),
-    re.compile(r"retry in (\d+(?:\.\d+)?)\s*s", re.I),
-    re.compile(r"try again in (?:(\d+)\s*m\s*)?(\d+(?:\.\d+)?)\s*s", re.I),
+# 26.06s"; OpenAI/Groq: "try again in 20s" / "in 2m3.5s" / "in 20ms" (OpenAI
+# states sub-second waits in milliseconds) / "in 1h2m3s"; plus the headers
+# `retry-after-ms` and `Retry-After` (seconds, or an HTTP date).
+#
+# One duration grammar for every phrasing: any of h / m / s / ms parts, in that
+# order, each optional. An "ms" is never read as minutes-then-"s" (the lookaheads),
+# and the match must carry at least one part so "retry in soon" states nothing.
+_DURATION = (
+    r"(?:(?P<h>\d+(?:\.\d+)?)\s*h(?:ours?|rs?)?(?![a-z])\s*)?"
+    r"(?:(?P<m>\d+(?:\.\d+)?)\s*m(?:in(?:ute)?s?)?(?![a-z])\s*)?"
+    r"(?:(?P<s>\d+(?:\.\d+)?)\s*s(?:ec(?:ond)?s?)?(?![a-z])\s*)?"
+    r"(?:(?P<ms>\d+(?:\.\d+)?)\s*ms(?![a-z]))?"
 )
+_DELAY_PATTERN = re.compile(
+    r"(?:retry\s*delay\"?\s*[:=]\s*\"?"
+    r"|retry(?:ing)?\s+(?:in|after)\s+"
+    r"|try\s+again\s+(?:in|after)\s+)" + _DURATION,
+    re.I)
 
 
-def parse_retry_delay(text=None, headers=None):
-    """Seconds a provider said to wait, from a Retry-After header or the error
-    body/message; None when it stated nothing."""
+def _header_value(headers, name):
+    """Case-insensitive header lookup that never raises (requests' header dict is
+    already case-insensitive; a plain dict in a test or another client is not)."""
     try:
-        if headers:
-            value = headers.get("Retry-After") or headers.get("retry-after")
-            if value is not None and str(value).strip().replace(".", "", 1).isdigit():
-                return float(value)
-    except Exception:  # noqa: BLE001 — headers may be any mapping-ish thing
-        pass
+        value = headers.get(name)
+        if value is None:
+            lowered = name.lower()
+            for key in headers:
+                if str(key).lower() == lowered:
+                    return headers[key]
+        return value
+    except Exception:  # noqa: BLE001 -- headers may be any mapping-ish thing
+        return None
+
+
+def _as_seconds(value):
+    try:
+        return max(float(str(value).strip()), 0.0)
+    except (TypeError, ValueError):
+        return None
+
+
+def parse_retry_delay(text=None, headers=None, now=None):
+    """Seconds a provider said to wait, from a `retry-after-ms` / `Retry-After`
+    header or the error body/message; None when it stated nothing.
+
+    A header beats the body (it is the structured form). `Retry-After` may be a
+    number of seconds or an HTTP date (RFC 9110); a date in the past is 0.
+    `now` is only for tests."""
+    if headers:
+        ms = _as_seconds(_header_value(headers, "retry-after-ms"))
+        if ms is not None:
+            return ms / 1000.0
+        raw = _header_value(headers, "Retry-After")
+        if raw is not None:
+            secs = _as_seconds(raw)
+            if secs is not None:
+                return secs
+            try:
+                from email.utils import parsedate_to_datetime
+                when = parsedate_to_datetime(str(raw).strip())
+                return max(when.timestamp() - (time.time() if now is None else now), 0.0)
+            except (TypeError, ValueError, OverflowError):
+                pass
     if not text:
         return None
-    t = str(text)
-    m = _DELAY_PATTERNS[2].search(t)
-    if m:
-        return float(m.group(1) or 0) * 60 + float(m.group(2))
-    for pattern in _DELAY_PATTERNS[:2]:
-        m = pattern.search(t)
-        if m:
-            return float(m.group(1))
+    for m in _DELAY_PATTERN.finditer(str(text)):
+        parts = {k: v for k, v in m.groupdict().items() if v is not None}
+        if not parts:
+            continue
+        return (float(parts.get("h", 0)) * 3600 + float(parts.get("m", 0)) * 60
+                + float(parts.get("s", 0)) + float(parts.get("ms", 0)) / 1000.0)
     return None
 
 
