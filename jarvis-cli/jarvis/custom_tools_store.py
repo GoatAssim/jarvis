@@ -500,12 +500,20 @@ def delete_draft(key):
     key = (key or "").strip().lower()
     if not DRAFT_KEY_RE.match(key):
         return {"ok": False, "error": "bad draft key"}
-    try:
-        _draft_path(key).unlink()
-    except FileNotFoundError:
+    path = _draft_path(key)
+    removed = False
+    # atomic_io keeps the previous version as <file>.bak and read_json falls back to it, so a
+    # draft is only gone when the .bak (and any half-written .tmp) is gone too.
+    for candidate in (path, path.with_suffix(path.suffix + ".bak"), path.with_suffix(path.suffix + ".tmp")):
+        try:
+            candidate.unlink()
+            removed = True
+        except FileNotFoundError:
+            continue
+        except OSError as exc:
+            return {"ok": False, "error": str(exc)}
+    if not removed:
         return {"ok": True, "key": key, "note": "already gone"}
-    except OSError as exc:
-        return {"ok": False, "error": str(exc)}
     return {"ok": True, "key": key}
 
 

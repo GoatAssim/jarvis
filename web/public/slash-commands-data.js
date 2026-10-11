@@ -684,6 +684,9 @@ window.JARVIS_SLASH_COMMANDS = /*JSON-BEGIN*/
         "channels-handle",
         "channels-tools-for",
         "channels-instruction",
+        "channels-thinking",
+        "channels-memory",
+        "channels-awaiting",
         "channels-presets",
         "channels-preset",
         "channels-bulk",
@@ -979,7 +982,7 @@ window.JARVIS_SLASH_COMMANDS = /*JSON-BEGIN*/
       "riskTier": "caution"
     },
     "daemon-viewer": {
-      "reason": "the live console window's own process; it stays open until the window is closed",
+      "reason": "the live console window's own internal process (an interactive terminal window); it stays open until the window is closed",
       "riskTier": "caution"
     },
     "sched-daemon": {

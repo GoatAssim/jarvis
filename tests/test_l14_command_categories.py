@@ -95,9 +95,9 @@ eval(fs.readFileSync(process.argv[1], 'utf8'));
 const f = globalThis.JarvisCategories.fitCount;
 console.log(JSON.stringify([
   f([50, 50, 60, 40, 40], 400, 8, 2),        // everything fits
-  f([50, 50, 60, 40, 40], 190, 8, 2),        // two chips: 50+8+50+8+60=176 ok, +8+40=224 no
-  f([50, 50, 60, 40, 40], 176, 8, 2),        // exactly full still fits
-  f([50, 50, 60, 40, 40], 175, 8, 2),        // one pixel short: the chip is left out
+  f([50, 50, 60, 40, 40], 190, 8, 2),        // two fixed badges (50, 50) then chips 60, 40, 40: 50+8+50+8+60=176 fits, +8+40=224 does not
+  f([50, 50, 60, 40, 40], 176, 8, 2),        // exactly full (176) still fits the first chip
+  f([50, 50, 60, 40, 40], 175, 8, 2),        // one pixel short (175): the first chip is left out
   f([50, 50, 60, 40, 40], 10, 8, 2),         // fixed badges alone overflow: no chips, they stay
   f([50, 50], 400, 8, 2),                    // no chips at all
   f([50, 50, 200, 10], 300, 8, 2),           // the wide chip does not fit: later, smaller ones are NOT slipped in
@@ -163,9 +163,9 @@ def test_fit_count():
         print(proc.stderr[:400])
         return
     check("everything fits: all three chips", res[0] == 3)
-    check("two of three fit beside two fixed badges", res[1] == 2)
-    check("a row that is exactly full still fits", res[2] == 2)
-    check("one pixel short leaves the chip out", res[3] == 1)
+    check("one of three chips fits beside two fixed badges", res[1] == 1)
+    check("a row that is exactly full still fits", res[2] == 1)
+    check("one pixel short leaves the chip out", res[3] == 0)
     check("fixed badges that overflow on their own show no chips", res[4] == 0)
     check("no chips to show", res[5] == 0)
     check("a chip that does not fit also ends the row - no smaller one jumps ahead", res[6] == 0)

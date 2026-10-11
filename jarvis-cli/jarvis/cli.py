@@ -1934,29 +1934,65 @@ def main():
     if argv[0] in ("calendar-add", "calendar-list", "calendar-remove", "calendar-events"):
         from .actions import calendar_tools as _cal
         cmd = argv[0]
-        cfg = _cal.load_config()
+        if cmd in ("calendar-add", "calendar-list", "calendar-remove"):
+            # Linking and removing a calendar, and listing the secret links, are the
+            # owner's, at their own terminal: refused inside a chat reply, a scheduled
+            # job or a background task, like the Calendars panel's back end.
+            why = _cal.unattended_reason()
+            if why:
+                print(json.dumps({"ok": False, "error": why, "code": "unattended"}))
+                sys.exit(1)
         if cmd == "calendar-add":
             if len(argv) < 3:
                 print(json.dumps({"error": "usage: jarvis calendar-add <name> <ics-url>"}))
                 sys.exit(1)
-            cfg.setdefault("feeds", []).append(
-                {"name": argv[1], "url": argv[2], "enabled": True})
-            _cal.save_config(cfg)
-            body, err = _cal.fetch_feed({"url": argv[2]}, force=True)
-            print(json.dumps({"ok": True, "name": argv[1],
+            # Strict load: a calendar.json that can't be read is never overwritten with an
+            # empty one (that would drop every linked calendar and event).
+            cfg, problem = _cal.load_config_strict()
+            if cfg is None:
+                print(json.dumps({"ok": False, "error": problem}))
+                sys.exit(1)
+            name = _cal._clean_name(argv[1])
+            link = _cal._clean_link(argv[2])
+            feeds = [f for f in (cfg.get("feeds") or []) if isinstance(f, dict)]
+            if not name:
+                print(json.dumps({"ok": False, "error": "Give the calendar a name."}))
+                sys.exit(1)
+            if not link.startswith(("http://", "https://")):
+                print(json.dumps({"ok": False, "error": "That doesn't look like a web link. It should "
+                                                        "start with https:// (or webcal://)."}))
+                sys.exit(1)
+            if len(feeds) >= _cal.MAX_FEEDS:
+                print(json.dumps({"ok": False, "error": "You already have %d linked calendars, the most "
+                                                        "there is room for. Remove one first." % _cal.MAX_FEEDS}))
+                sys.exit(1)
+            if any((f.get("name") or "").strip().lower() == name.lower() for f in feeds):
+                print(json.dumps({"ok": False, "error": "There is already a calendar called \"%s\"." % name}))
+                sys.exit(1)
+            if any(_cal._fetch_key(_cal._clean_link(f.get("url"))) == _cal._fetch_key(link) for f in feeds):
+                print(json.dumps({"ok": False, "error": "That link is already linked."}))
+                sys.exit(1)
+            cfg["feeds"] = feeds + [{"name": name, "url": link, "enabled": True}]
+            if not _cal.save_config(cfg):
+                print(json.dumps({"ok": False, "error": "Couldn't save calendar.json."}))
+                sys.exit(1)
+            body, err = _cal.fetch_feed({"url": link}, force=True)
+            print(json.dumps({"ok": True, "name": name,
                               "reachable": bool(body) and not err,
-                              "problem": err or None,
+                              "problem": _cal._scrub(err, link) if err else None,
                               "events_seen": len(_cal.parse_ics(body)) if body else 0}, indent=2))
             return
         if cmd == "calendar-list":
+            cfg = _cal.load_config()
             print(json.dumps({"feeds": cfg.get("feeds") or [],
                               "local_events": len(cfg.get("local_events") or [])}, indent=2))
             return
         if cmd == "calendar-remove":
             name = argv[1] if len(argv) > 1 else ""
-            cfg["feeds"] = [f for f in (cfg.get("feeds") or []) if f.get("name") != name]
-            _cal.save_config(cfg)
-            print(json.dumps({"ok": True, "removed": name}))
+            result = _cal.remove_feed(name)
+            print(json.dumps(result if not result.get("ok") else {"ok": True, "removed": name}))
+            if not result.get("ok"):
+                sys.exit(1)
             return
         if cmd == "calendar-events":
             print(json.dumps(_cal.tool_calendar_events({"days": 7}), indent=2))

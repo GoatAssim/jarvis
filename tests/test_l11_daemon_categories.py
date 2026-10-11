@@ -46,8 +46,10 @@ def cats(did):
 
 
 def reset():
-    if REG.exists():
-        REG.unlink()
+    # atomic_io.read_json falls back to <file>.bak, so take that too or the file comes back.
+    for g in (REG, REG.with_suffix(REG.suffix + ".bak")):
+        if g.exists():
+            g.unlink()
 
 
 def cli(*args):

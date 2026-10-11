@@ -47,7 +47,17 @@ def wipe():
     root = Path(_HOME) / ".jarvis"
     if root.exists():
         import shutil
-        shutil.rmtree(root)
+        import time
+        # A background writer can drop a file in while the folder is being removed
+        # ("Directory not empty"); try again rather than fail the test on the race.
+        for attempt in range(5):
+            try:
+                shutil.rmtree(root)
+                break
+            except OSError:
+                if attempt == 4:
+                    raise
+                time.sleep(0.2)
 
 
 def reset(cfg_discord=None):

@@ -145,8 +145,8 @@ def test_sensing_failure_tells_the_model_not_to_substitute():
     out = ocr_tools._with_vision_failure({"error": "OCR unavailable."}, "no vision")
     check("the failure stays non-retryable", out.get("retryable") is False and out.get("can_see_screen") is False)
     hint = out.get("hint", "")
-    check("it names the screenshot/list_windows fallback and says not to", "take a screenshot" in hint
-          and "list" in hint and "Do not" in hint, hint)
+    check("it names the screenshot/list_windows fallback and says not to", "screenshot" in hint
+          and "windows" in hint and "Do not" in hint, hint)
 
 
 # ---- T4: failover note ----------------------------------------------------

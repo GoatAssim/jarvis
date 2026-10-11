@@ -180,8 +180,11 @@ check("same text again is a no-op", cts.save_draft("k1", src).get("unchanged") i
 check("blank text is skipped, the real draft survives", cts.save_draft("k1", "   \n").get("skipped") == "empty" and cts.read_draft("k1")["source"] == src)
 listed = cts.list_drafts()
 check("list_drafts has it, without source", len(listed) == 1 and listed[0]["key"] == "k1" and "source" not in listed[0], listed)
-for bad in ("../x", "a/b", "A", "", "x" * 80, "..\\x"):
+for bad in ("../x", "a/b", "", "x" * 80, "..\\x"):
     check("draft key %r refused" % bad, not cts.save_draft(bad, src)["ok"] and not cts.read_draft(bad)["ok"] and not cts.delete_draft(bad)["ok"])
+# a key is lowercased on the way in (save/read/delete all do it), so "A" is just "a"
+cts.save_draft("A", "case\n")
+check("a draft key is case-insensitive", cts.read_draft("a")["ok"] and cts.delete_draft("A")["ok"] and not cts.read_draft("a")["ok"])
 check("no file escaped the drafts folder", not any(p.name.endswith(".json") for p in cts.TOOLS_DIR.glob("*.json") if p.name != "_meta.json"))
 old_gap = cts.DRAFT_HISTORY_MIN_GAP
 cts.DRAFT_HISTORY_MIN_GAP = 0

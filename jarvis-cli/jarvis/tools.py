@@ -1444,7 +1444,10 @@ def files_with_all_tools_off(off=None):
     """File names whose tools are all switched off (see the rule above)."""
     if off is None:
         off = tool_disable.disabled_tools()
-    return {f for f, names in _FILE_TOOLS.items() if names and all(n in off for n in names)}
+    # A protected tool can never be off, so a file that carries one is never all-off, even
+    # if a stale or hand-edited switch list names it.
+    return {f for f, names in _FILE_TOOLS.items()
+            if names and all(n in off and not tool_disable.protected_reason(n) for n in names)}
 
 
 def ui_ids_off_with_tool(off=None):

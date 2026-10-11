@@ -10,6 +10,7 @@ HOME is redirected to a temp dir BEFORE any jarvis module is imported
 import contextlib
 import io
 import json
+import re
 import os
 import sys
 import tempfile
@@ -47,7 +48,9 @@ def reset(cfg_discord=None):
             except OSError:
                 pass
     for uid, handle, name in ((OWNER, "boss", "Boss"), (FRIEND, "friend", "Friend"), (STRANGER, "rando", "")):
-        people.touch(DISCORD, uid, handle=handle)
+        # is_owner is stored at touch time, so the owner has to be touched as the owner for
+        # the owner's block (and its "no instruction" rule) to be what these tests look at
+        people.touch(DISCORD, uid, handle=handle, is_owner=(uid == OWNER))
     people.set_name(DISCORD, FRIEND, "Friend")
     cfg = channel_config.load_config()
     cfg[DISCORD].update({
@@ -407,7 +410,8 @@ def test_a_guest_cannot_reach_it_and_touch_keeps_it():
     check("touch / rename / note leave it alone", people.get(DISCORD, FRIEND)["instruction"] == "Be formal.")
     from jarvis.actions import channel_people
     src = Path(channel_people.__file__).read_text(encoding="utf-8")
-    check("remember_sender never names the field", "instruction" not in src)
+    # The word may appear in a comment; what must not appear is the field used as a key.
+    check("remember_sender never names the field", not re.search(r"""["']instruction["']""", src))
 
 
 def test_instruction_survives_a_handle_edit_and_adoption():

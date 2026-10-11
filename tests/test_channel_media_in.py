@@ -182,6 +182,10 @@ check("allowance: wanting 0 is 0", media_in.take_allowance(DISCORD, "rate1", 0) 
 Path(media_in._rate_file()).write_text("{ not json", encoding="utf-8")
 check("allowance: an unreadable file reads as empty, not as a lock-out", media_in.take_allowance(DISCORD, "rate3", 1, now=now) == 1)
 Path(media_in._rate_file()).unlink()
+# atomic_io falls back to <file>.bak, so a deleted file comes back unless that goes too
+_bak = Path(str(media_in._rate_file()) + ".bak")
+if _bak.exists():
+    _bak.unlink()
 for i in range(media_in.RATE_PER_PERSON):
     media_in.take_allowance(DISCORD, "9" + str(i), 1)
 t = media_in.prepare_text(DISCORD, mk(FRIEND, atts=[att()]), cfg, False, spy_fetch, describe_ok, now=None)
@@ -265,6 +269,7 @@ vision_calls = []
 vision_call.describe_image = lambda path, prompt, **kw: (vision_calls.append(path) or {"ok": True, "text": "A cat on a sofa."})
 media_in.fetch_bytes = lambda url, cap, timeout=20: (PNG, None)
 Path(media_in._rate_file()).unlink(missing_ok=True)
+Path(str(media_in._rate_file()) + ".bak").unlink(missing_ok=True)  # atomic_io's fallback copy
 (Path(_HOME) / ".jarvis" / "channels").mkdir(parents=True, exist_ok=True)
 
 _mid = [0]

@@ -42,6 +42,7 @@ what makes "remind me an hour before my next meeting" a single ordinary
 schedule_task call against a real timestamp rather than a new subsystem.
 """
 
+import calendar
 import hashlib
 import json
 import os
@@ -167,56 +168,133 @@ def retention_days(cfg=None):
 # ---------------------------------------------------------------------------
 
 _UNFOLD_RE = re.compile(r"\r?\n[ \t]")
-_PROP_RE = re.compile(r"^(?P<name>[A-Z\-]+)(?P<params>;[^:]*)?:(?P<value>.*)$")
+_PROP_RE = re.compile(r"^(?P<name>[A-Za-z\-]+)(?P<params>;[^:]*)?:(?P<value>.*)$")
+
+# Occurrence expansion limits: a malformed or huge rule must not hang a tool call.
+MAX_RRULE_STEPS = 20000
+MAX_OCCURRENCES_PER_SERIES = 1500
+# A zone's offset from the PC's own can reach a day and a bit, so a window is padded by
+# this much when it is applied to a series still in its own zone's wall-clock time.
+_ZONE_PAD = timedelta(days=2)
 
 
 def parse_ics(text, window_start=None, window_end=None):
-    """ICS text -> [event dicts]. Never raises; a malformed block is skipped."""
+    """ICS text -> [event dicts]. Never raises; a malformed block is skipped.
+
+    A repeating event is expanded across the window. An occurrence the calendar crossed
+    out (EXDATE) or replaced (a VEVENT with the same UID and a RECURRENCE-ID) is not shown
+    as well as its replacement."""
     if not text:
         return []
     # Unfold: ICS wraps long lines with a CRLF + single space/tab.
     text = _UNFOLD_RE.sub("", text)
-    events = []
+    raws = []
     current = None
+    alarm_depth = 0
     for line in text.splitlines():
         line = line.strip()
-        if line == "BEGIN:VEVENT":
+        upper = line.upper()
+        if upper == "BEGIN:VEVENT":
             current = {}
+            alarm_depth = 0
             continue
-        if line == "END:VEVENT":
+        if upper == "END:VEVENT":
             if current:
-                parsed = _finish_event(current, window_start, window_end)
-                events.extend(parsed)
+                raws.append(current)
             current = None
+            alarm_depth = 0
             continue
         if current is None:
+            continue
+        # A VALARM inside an event has its own DESCRIPTION (\"Reminder\") that must not
+        # overwrite the event's.
+        if upper == "BEGIN:VALARM":
+            alarm_depth += 1
+            continue
+        if upper == "END:VALARM":
+            alarm_depth = max(0, alarm_depth - 1)
+            continue
+        if alarm_depth:
             continue
         match = _PROP_RE.match(line)
         if not match:
             continue
-        name = match.group("name")
+        name = match.group("name").upper()
         params = match.group("params") or ""
         value = match.group("value")
-        if name in ("DTSTART", "DTEND"):
+        if name in ("DTSTART", "DTEND", "RECURRENCE-ID"):
             current[name] = (value, params)
+        elif name == "EXDATE":
+            current.setdefault("EXDATE", []).append((value, params))
         elif name in ("SUMMARY", "LOCATION", "DESCRIPTION", "UID", "RRULE", "STATUS"):
             current[name] = value
+
+    # Occurrences of a series that another VEVENT (same UID) replaced.
+    replaced = {}
+    for raw in raws:
+        uid = (raw.get("UID") or "").strip()
+        if uid and raw.get("RECURRENCE-ID"):
+            _add_skip(replaced.setdefault(uid, _new_skip()), *raw["RECURRENCE-ID"])
+
+    events = []
+    for raw in raws:
+        skip = _new_skip()
+        for value, params in raw.get("EXDATE") or []:
+            _add_skip(skip, value, params)
+        if raw.get("RRULE") and not raw.get("RECURRENCE-ID"):
+            other = replaced.get((raw.get("UID") or "").strip())
+            if other:
+                skip["datetimes"] |= other["datetimes"]
+                skip["dates"] |= other["dates"]
+        try:
+            events.extend(_finish_event(raw, window_start, window_end, skip))
+        except Exception:  # noqa: BLE001 -- one bad block must not lose the whole calendar
+            continue
     return events
 
 
-def _finish_event(raw, window_start, window_end):
-    start = _parse_ics_dt(*raw.get("DTSTART", ("", "")))
-    if not start:
+def _new_skip():
+    return {"datetimes": set(), "dates": set()}
+
+
+def _add_skip(skip, value, params):
+    """Record the occurrence(s) an EXDATE / RECURRENCE-ID names: a date-only value crosses
+    out that day, a time crosses out that moment (compared as the PC's local time)."""
+    for part in (value or "").split(","):
+        part = part.strip()
+        if not part:
+            continue
+        wall, zone = _parse_ics_dt_wall(part, params)
+        if wall is None:
+            continue
+        if _is_date_value(part, params):
+            skip["dates"].add(wall.date())
+        else:
+            skip["datetimes"].add(_to_local(wall, zone))
+
+
+def _finish_event(raw, window_start, window_end, skip=None):
+    start_wall, zone = _parse_ics_dt_wall(*raw.get("DTSTART", ("", "")))
+    if start_wall is None:
         return []
-    end = _parse_ics_dt(*raw.get("DTEND", ("", "")))
-    if not end:
+    end_wall, end_zone = _parse_ics_dt_wall(*raw.get("DTEND", ("", "")))
+    if end_wall is None:
         # A date-only DTSTART with no DTEND is an all-day event: one day long
         # (RFC 5545 section 3.6.1). Anything else defaults to an hour, as before.
         dtstart_value, dtstart_params = raw.get("DTSTART", ("", ""))
         all_day = _is_date_value(dtstart_value, dtstart_params)
-        end = start + (timedelta(days=1) if all_day else timedelta(hours=1))
+        end_wall = start_wall + (timedelta(days=1) if all_day else timedelta(hours=1))
+        end_zone = zone
     if (raw.get("STATUS") or "").upper() == "CANCELLED":
         return []
+
+    # Length, measured on the PC's clock; a series keeps it for every occurrence.
+    duration = _to_local(end_wall, end_zone) - _to_local(start_wall, zone)
+    if duration < timedelta(0):
+        duration = timedelta(0)
+    wall_duration = end_wall - start_wall if zone == end_zone else duration
+    if wall_duration < timedelta(0):
+        wall_duration = duration
 
     base = {
         "title": _unescape(raw.get("SUMMARY") or "(no title)"),
@@ -225,9 +303,19 @@ def _finish_event(raw, window_start, window_end):
         "uid": raw.get("UID") or "",
     }
 
-    occurrences = _expand_rrule(start, end, raw.get("RRULE"), window_start, window_end)
+    # A series is expanded in its own zone's wall-clock time (a 09:00 meeting in Paris stays
+    # 09:00 in Paris across a clock change) and each occurrence is then put on the PC's clock.
+    pad_start = window_start - _ZONE_PAD if window_start else None
+    pad_end = window_end + _ZONE_PAD if window_end else None
+    occurrences = _expand_rrule(start_wall, start_wall + wall_duration, raw.get("RRULE"),
+                                pad_start, pad_end, zone=zone)
+    skip = skip or _new_skip()
     out = []
-    for occ_start, occ_end in occurrences:
+    for occ_wall_start, _occ_wall_end in occurrences:
+        occ_start = _to_local(occ_wall_start, zone)
+        occ_end = occ_start + duration
+        if occ_start in skip["datetimes"] or occ_start.date() in skip["dates"]:
+            continue
         if window_start and occ_end < window_start:
             continue
         if window_end and occ_start > window_end:
@@ -236,23 +324,125 @@ def _finish_event(raw, window_start, window_end):
     return out
 
 
-def _expand_rrule(start, end, rrule, window_start, window_end):
-    """Expand a simple RRULE across the window. No RRULE -> one occurrence.
+_WEEKDAYS = {"MO": 0, "TU": 1, "WE": 2, "TH": 3, "FR": 4, "SA": 5, "SU": 6}
+_RRULE_KEYS = {"FREQ", "INTERVAL", "COUNT", "UNTIL", "BYDAY", "BYMONTHDAY", "BYMONTH",
+               "BYSETPOS", "WKST"}
+_BYDAY_RE = re.compile(r"^([+-]?\d{1,2})?(MO|TU|WE|TH|FR|SA|SU)$")
 
-    Handles FREQ=DAILY/WEEKLY/MONTHLY/YEARLY with INTERVAL, COUNT and UNTIL,
-    plus BYDAY for weekly. Anything else falls back to the single original
-    occurrence, which is the safe direction to be wrong in: showing one real
-    event beats inventing a series that doesn't exist.
-    """
+
+def _parse_byday(text):
+    """\"MO,1FR,-1SU\" -> [(None, 0), (1, 4), (-1, 6)]; None when any item is not understood."""
+    out = []
+    for item in (text or "").split(","):
+        item = item.strip().upper()
+        if not item:
+            continue
+        match = _BYDAY_RE.match(item)
+        if not match:
+            return None
+        out.append((int(match.group(1)) if match.group(1) else None, _WEEKDAYS[match.group(2)]))
+    return out
+
+
+def _parse_ints(text, low, high):
+    """\"1,15,-1\" -> [1, 15, -1] (each non-zero, within +-high); None when anything is off."""
+    out = []
+    for item in (text or "").split(","):
+        item = item.strip()
+        if not item:
+            continue
+        try:
+            n = int(item)
+        except ValueError:
+            return None
+        if n == 0 or n < low or n > high:
+            return None
+        out.append(n)
+    return out
+
+
+def _month_candidates(year, month, bymonthday, byday, bysetpos, default_day):
+    """The days of one month a MONTHLY / YEARLY rule lands on, ascending."""
+    last = calendar.monthrange(year, month)[1]
+    by_date = None
+    if bymonthday:
+        by_date = set()
+        for n in bymonthday:
+            day = n if n > 0 else last + 1 + n
+            if 1 <= day <= last:
+                by_date.add(day)
+    by_weekday = None
+    if byday:
+        by_weekday = set()
+        for ordinal, weekday in byday:
+            matches = [d for d in range(1, last + 1) if datetime(year, month, d).weekday() == weekday]
+            if ordinal is None:
+                by_weekday.update(matches)
+            else:
+                index = ordinal - 1 if ordinal > 0 else ordinal
+                if -len(matches) <= index < len(matches):
+                    by_weekday.add(matches[index])
+    if by_date is not None and by_weekday is not None:
+        days = by_date & by_weekday
+    elif by_date is not None:
+        days = by_date
+    elif by_weekday is not None:
+        days = by_weekday
+    else:
+        days = {default_day} if default_day <= last else set()
+    days = sorted(days)
+    if bysetpos:
+        picked = []
+        for pos in bysetpos:
+            index = pos - 1 if pos > 0 else pos
+            if -len(days) <= index < len(days):
+                picked.append(days[index])
+        days = sorted(set(picked))
+    return days
+
+
+def _rrule_until(raw, zone):
+    """UNTIL as a wall-clock datetime in the series' own zone, or None. A date-only UNTIL
+    includes that whole day."""
+    raw = (raw or "").strip()
+    if not raw:
+        return None
+    try:
+        if len(raw) == 8:
+            return datetime.strptime(raw, "%Y%m%d") + timedelta(days=1) - timedelta(seconds=1)
+        if raw.endswith("Z"):
+            utc = datetime.strptime(raw, "%Y%m%dT%H%M%SZ").replace(tzinfo=timezone.utc)
+            if zone is not None:
+                return utc.astimezone(zone).replace(tzinfo=None)
+            return utc.astimezone(_local_tz()).replace(tzinfo=None)
+        return datetime.strptime(raw[:15], "%Y%m%dT%H%M%S")
+    except (ValueError, OverflowError, OSError):
+        return None
+
+
+def _expand_rrule(start, end, rrule, window_start, window_end, zone=None):
+    """Expand a repeat rule across the window. No RRULE (or no window) -> the one original
+    occurrence. ``start``/``end``/the window are wall-clock times in the series' own zone.
+
+    Handles FREQ=DAILY/WEEKLY/MONTHLY/YEARLY with INTERVAL, COUNT and UNTIL; BYDAY for
+    daily and weekly; BYMONTHDAY, BYDAY (also \"first Monday\" / \"last Friday\") and BYSETPOS
+    for monthly; BYMONTH for yearly. A months-long step is a real calendar month (a
+    repeat on the 15th stays on the 15th; one on the 31st skips the months without a 31st,
+    as RFC 5545 says). Anything else falls back to the single original occurrence, which is
+    the safe direction to be wrong in: showing one real event beats inventing a series that
+    doesn't exist.
+
+    Only the occurrences overlapping the window are returned, but COUNT is counted from the
+    start of the series, so a series years old still ends where it should."""
     if not rrule or not window_end:
         return [(start, end)]
     parts = {}
     for chunk in rrule.split(";"):
         if "=" in chunk:
             key, _, value = chunk.partition("=")
-            parts[key.upper()] = value
+            parts[key.strip().upper()] = value.strip()
     freq = (parts.get("FREQ") or "").upper()
-    if freq not in ("DAILY", "WEEKLY", "MONTHLY", "YEARLY"):
+    if freq not in ("DAILY", "WEEKLY", "MONTHLY", "YEARLY") or not set(parts) <= _RRULE_KEYS:
         return [(start, end)]
 
     try:
@@ -264,101 +454,233 @@ def _expand_rrule(start, end, rrule, window_start, window_end):
         try:
             count_cap = int(parts["COUNT"])
         except ValueError:
-            count_cap = None
-    until = None
-    if parts.get("UNTIL"):
-        until = _parse_ics_dt(parts["UNTIL"], "")
+            return [(start, end)]
+        if count_cap < 1:
+            return [(start, end)]
+    until = _rrule_until(parts.get("UNTIL"), zone) if parts.get("UNTIL") else None
+    if parts.get("UNTIL") and until is None:
+        return [(start, end)]
 
-    byday = [d.strip()[-2:].upper() for d in (parts.get("BYDAY") or "").split(",") if d.strip()]
-    day_map = {"MO": 0, "TU": 1, "WE": 2, "TH": 3, "FR": 4, "SA": 5, "SU": 6}
-    wanted_days = {day_map[d] for d in byday if d in day_map}
+    byday = _parse_byday(parts["BYDAY"]) if parts.get("BYDAY") else []
+    bymonthday = _parse_ints(parts["BYMONTHDAY"], -31, 31) if parts.get("BYMONTHDAY") else []
+    bymonth = _parse_ints(parts["BYMONTH"], 1, 12) if parts.get("BYMONTH") else []
+    bysetpos = _parse_ints(parts["BYSETPOS"], -366, 366) if parts.get("BYSETPOS") else []
+    if byday is None or bymonthday is None or bymonth is None or bysetpos is None:
+        return [(start, end)]
+    ordinal_days = any(o is not None for o, _ in byday)
+
+    # Which combinations are understood; the rest keep the one original occurrence.
+    if freq in ("DAILY", "WEEKLY"):
+        if ordinal_days or bymonthday or bymonth or bysetpos:
+            return [(start, end)]
+    elif freq == "MONTHLY":
+        if bymonth:
+            return [(start, end)]
+    elif freq == "YEARLY":
+        if (byday or bymonthday) and not bymonth:
+            return [(start, end)]
+        if bysetpos and not (byday or bymonthday):
+            return [(start, end)]
 
     duration = end - start
-    step = {"DAILY": timedelta(days=interval),
-            "WEEKLY": timedelta(weeks=interval),
-            "MONTHLY": timedelta(days=30 * interval),
-            "YEARLY": timedelta(days=365 * interval)}[freq]
+    # Without COUNT a series can be jumped close to the window instead of walked from its
+    # first day (a daily event from years ago must still be found).
+    jump_from = window_start if count_cap is None else None
+
+    def occurrences():
+        if freq == "DAILY":
+            wanted = {w for _, w in byday}
+            k = 0
+            if jump_from and jump_from > start:
+                k = max(0, (jump_from - start).days // interval - 1)
+            while True:
+                occ = start + timedelta(days=k * interval)
+                k += 1
+                if wanted and occ.weekday() not in wanted:
+                    continue
+                yield occ
+        elif freq == "WEEKLY" and byday:
+            wanted = sorted({w for _, w in byday})
+            week0 = start - timedelta(days=start.weekday())
+            k = 0
+            if jump_from and jump_from > start:
+                k = max(0, (jump_from - week0).days // (7 * interval) - 1)
+            while True:
+                base = week0 + timedelta(weeks=k * interval)
+                k += 1
+                for offset in wanted:
+                    occ = base + timedelta(days=offset)
+                    if occ >= start:
+                        yield occ
+        elif freq == "WEEKLY":
+            k = 0
+            if jump_from and jump_from > start:
+                k = max(0, (jump_from - start).days // (7 * interval) - 1)
+            while True:
+                yield start + timedelta(weeks=k * interval)
+                k += 1
+        elif freq == "MONTHLY":
+            k = 0
+            if jump_from and jump_from > start:
+                months = (jump_from.year - start.year) * 12 + jump_from.month - start.month
+                k = max(0, months // interval - 1)
+            while True:
+                total = start.year * 12 + (start.month - 1) + k * interval
+                year, month = divmod(total, 12)
+                month += 1
+                k += 1
+                if year > 9998:
+                    return
+                for day in _month_candidates(year, month, bymonthday, byday, bysetpos, start.day):
+                    occ = start.replace(year=year, month=month, day=day)
+                    if occ >= start:
+                        yield occ
+        else:  # YEARLY
+            months = sorted(set(bymonth)) or [start.month]
+            k = 0
+            if jump_from and jump_from > start:
+                k = max(0, (jump_from.year - start.year) // interval - 1)
+            while True:
+                year = start.year + k * interval
+                k += 1
+                if year > 9998:
+                    return
+                for month in months:
+                    for day in _month_candidates(year, month, bymonthday, byday, bysetpos, start.day):
+                        occ = start.replace(year=year, month=month, day=day)
+                        if occ >= start:
+                            yield occ
 
     out = []
-    guard = 0
-
-    if freq == "WEEKLY" and wanted_days:
-        # Iterate by WEEK, and terminate on the week's start rather than on a
-        # cursor pinned to the series' original weekday. Terminating on the
-        # cursor drops the final week entirely whenever the series started
-        # late in the week: a Mon-Fri standup beginning on a Friday would
-        # emit that one Friday and then stop, because the next cursor (the
-        # following Friday) was already past the window even though Monday
-        # through Thursday of that week were inside it.
-        week = start - timedelta(days=start.weekday())
-        while guard < 400:
-            guard += 1
-            if window_end and week > window_end:
-                break
-            if count_cap is not None and len(out) >= count_cap:
-                break
-            for offset in sorted(wanted_days):
-                occ = (week + timedelta(days=offset)).replace(
-                    hour=start.hour, minute=start.minute, second=0, microsecond=0)
-                if occ < start:
-                    continue
-                if window_end and occ > window_end:
-                    continue
-                if until and occ > until:
-                    continue
-                if count_cap is not None and len(out) >= count_cap:
-                    break
-                out.append((occ, occ + duration))
-            week += timedelta(weeks=interval)
-        return out or [(start, end)]
-
-    cursor = start
-    # Hard iteration cap: a malformed infinite RRULE must not hang a tool
-    # call. 800 covers daily events across any realistic lookahead window.
-    while guard < 800:
-        guard += 1
-        if until and cursor > until:
+    counted = 0
+    for steps, occ in enumerate(occurrences(), 1):
+        if steps > MAX_RRULE_STEPS:
             break
-        if window_end and cursor > window_end:
+        if until and occ > until:
             break
-        if count_cap is not None and len(out) >= count_cap:
+        if occ > window_end:
             break
-        out.append((cursor, cursor + duration))
-        cursor += step
-    return out or [(start, end)]
+        counted += 1
+        if count_cap is not None and counted > count_cap:
+            break
+        occ_end = occ + duration
+        if window_start and occ_end < window_start:
+            continue
+        out.append((occ, occ_end))
+        if len(out) >= MAX_OCCURRENCES_PER_SERIES:
+            break
+    return out
 
 
 def _is_date_value(value, params):
     """True for a date-only stamp (``DTSTART;VALUE=DATE:20261012``). ``VALUE=DATE-TIME``
     is NOT one: a plain substring test on ``VALUE=DATE`` matched it and dropped the time."""
-    return bool(re.search(r"VALUE=DATE(?!-)", params or "")) or len((value or "").strip()) == 8
+    return bool(re.search(r"VALUE=DATE(?!-)", params or "", re.I)) or len((value or "").strip()) == 8
+
+
+# Windows calendars (Outlook) name zones the Windows way; these are the common ones.
+_WINDOWS_ZONES = {
+    "UTC": "UTC", "GMT Standard Time": "Europe/London", "Greenwich Standard Time": "Atlantic/Reykjavik",
+    "W. Europe Standard Time": "Europe/Berlin", "Central Europe Standard Time": "Europe/Budapest",
+    "Central European Standard Time": "Europe/Warsaw", "Romance Standard Time": "Europe/Paris",
+    "E. Europe Standard Time": "Europe/Chisinau", "GTB Standard Time": "Europe/Bucharest",
+    "FLE Standard Time": "Europe/Kiev", "Russian Standard Time": "Europe/Moscow",
+    "Turkey Standard Time": "Europe/Istanbul", "Egypt Standard Time": "Africa/Cairo",
+    "South Africa Standard Time": "Africa/Johannesburg", "W. Central Africa Standard Time": "Africa/Lagos",
+    "Arab Standard Time": "Asia/Riyadh", "Arabian Standard Time": "Asia/Dubai",
+    "Israel Standard Time": "Asia/Jerusalem", "India Standard Time": "Asia/Kolkata",
+    "China Standard Time": "Asia/Shanghai", "Tokyo Standard Time": "Asia/Tokyo",
+    "Singapore Standard Time": "Asia/Singapore", "AUS Eastern Standard Time": "Australia/Sydney",
+    "Pacific Standard Time": "America/Los_Angeles", "Mountain Standard Time": "America/Denver",
+    "Central Standard Time": "America/Chicago", "Eastern Standard Time": "America/New_York",
+    "Atlantic Standard Time": "America/Halifax", "SA Pacific Standard Time": "America/Bogota",
+    "E. South America Standard Time": "America/Sao_Paulo",
+}
+_TZID_RE = re.compile(r'TZID=("[^"]*"|[^;:]*)', re.I)
+_ZONES = {}
+
+
+def _zone_for(params):
+    """The tzinfo a ``TZID=`` parameter names, or None when there is none or this PC cannot
+    resolve it (the time is then taken at face value, as before)."""
+    match = _TZID_RE.search(params or "")
+    if not match:
+        return None
+    name = match.group(1).strip().strip('"').strip()
+    if not name:
+        return None
+    if name in _ZONES:
+        return _ZONES[name]
+    zone = None
+    if name.upper() in ("UTC", "GMT", "Z"):
+        zone = timezone.utc
+    else:
+        try:
+            from zoneinfo import ZoneInfo
+            for candidate in (name, _WINDOWS_ZONES.get(name)):
+                if not candidate:
+                    continue
+                try:
+                    zone = ZoneInfo(candidate)
+                    break
+                except Exception:  # noqa: BLE001 -- unknown name, or no tz database here
+                    continue
+        except ImportError:
+            zone = None
+    _ZONES[name] = zone
+    return zone
+
+
+def _local_tz():
+    """The PC's own zone (None = the system's). A function so a test can pin one."""
+    return None
+
+
+def _to_local(naive, zone):
+    """A wall-clock time in ``zone`` -> naive time on this PC's clock. No zone -> as is."""
+    if zone is None:
+        return naive
+    try:
+        return naive.replace(tzinfo=zone).astimezone(_local_tz()).replace(tzinfo=None)
+    except (ValueError, OverflowError, OSError):
+        return naive
+
+
+def _parse_ics_dt_wall(value, params):
+    """ICS timestamp -> (naive wall-clock time, tzinfo or None), or (None, None).
+
+    A UTC ('Z') stamp is UTC; a ``TZID=`` stamp is in that zone when this PC can resolve
+    it; a floating or date-only stamp has no zone (the calendar owner meant the clock on
+    the wall where they typed it)."""
+    value = (value or "").strip()
+    if not value:
+        return None, None
+    try:
+        if value.endswith("Z"):
+            return datetime.strptime(value, "%Y%m%dT%H%M%SZ"), timezone.utc
+        if _is_date_value(value, params):
+            return datetime.strptime(value[:8], "%Y%m%d"), None
+        return datetime.strptime(value[:15], "%Y%m%dT%H%M%S"), _zone_for(params)
+    except ValueError:
+        return None, None
 
 
 def _parse_ics_dt(value, params):
-    """ICS timestamp -> naive local datetime.
+    """ICS timestamp -> naive local datetime (everything in this project is naive local
+    time on purpose, see timespec.py). UTC and resolvable TZID stamps are converted to
+    this PC's clock; a floating or unresolvable one is taken at face value."""
+    wall, zone = _parse_ics_dt_wall(value, params)
+    if wall is None:
+        return None
+    return _to_local(wall, zone)
 
-    Everything in this project is naive local time on purpose (see
-    timespec.py). A UTC ('Z') stamp is converted; a floating or TZID stamp is
-    taken at face value, which is what the calendar owner meant when they
-    typed it.
-    """
-    value = (value or "").strip()
-    if not value:
-        return None
-    try:
-        if value.endswith("Z"):
-            dt = datetime.strptime(value, "%Y%m%dT%H%M%SZ")
-            return dt.replace(tzinfo=timezone.utc).astimezone().replace(tzinfo=None)
-        if _is_date_value(value, params):
-            return datetime.strptime(value[:8], "%Y%m%d")
-        return datetime.strptime(value[:15], "%Y%m%dT%H%M%S")
-    except ValueError:
-        return None
+
+_UNESCAPE_RE = re.compile(r"\\(.)", re.S)
 
 
 def _unescape(text):
-    return (text or "").replace("\\n", "\n").replace("\\,", ",") \
-                       .replace("\\;", ";").replace("\\\\", "\\").strip()
+    """RFC 5545 TEXT: \\n and \\N are a line break; \\, \\; \\\\ are the plain character."""
+    return _UNESCAPE_RE.sub(lambda m: "\n" if m.group(1) in "nN" else m.group(1), text or "").strip()
 
 
 # ---------------------------------------------------------------------------
@@ -380,6 +702,24 @@ def _save_cache(data):
         CACHE_FILE.write_text(json.dumps(data), encoding=ENCODING)
     except OSError:
         pass  # a cache that can't be written just means refetching
+
+
+def _decode_body(resp):
+    """The reply's text. ``requests`` decodes a ``text/*`` reply that names no charset as
+    Latin-1 (an old HTTP rule), which turns accents and Arabic titles in a calendar into
+    mojibake; an iCalendar file with no charset is UTF-8 (RFC 5545), so decode it that way."""
+    headers = getattr(resp, "headers", None) or {}
+    try:
+        content_type = str(headers.get("Content-Type") or "").lower()
+    except AttributeError:
+        content_type = ""
+    raw = getattr(resp, "content", None)
+    if "charset=" not in content_type and isinstance(raw, (bytes, bytearray)):
+        try:
+            return bytes(raw).decode("utf-8-sig")
+        except UnicodeDecodeError:
+            pass
+    return resp.text
 
 
 def fetch_feed(feed, force=False):
@@ -412,7 +752,7 @@ def fetch_feed(feed, force=False):
             # Serve stale rather than nothing: a calendar from an hour ago is
             # far more useful than an error, and the caller is told it's stale.
             return entry.get("body", ""), "HTTP %d" % resp.status_code
-        body = resp.text[:MAX_ICS_BYTES]
+        body = _decode_body(resp)[:MAX_ICS_BYTES]
     except Exception as exc:  # noqa: BLE001 — a dead feed is a finding, not a crash
         return entry.get("body", ""), str(exc)[:120]
 
@@ -840,10 +1180,16 @@ def window_view(start_text, end_text, force=False):
 def _prune_local(cfg):
     """Drop events that ended more than ``retention_days(cfg)`` ago and keep the newest
     LOCAL_MAX_EVENTS. Shared by the model tool and the panel."""
-    cutoff = (datetime.now() - timedelta(days=retention_days(cfg))).isoformat()
+    cutoff = _retention_cutoff(cfg)
     cfg["local_events"] = [e for e in cfg.get("local_events") or []
-                           if (e.get("end") or e.get("start") or "") >= cutoff][-LOCAL_MAX_EVENTS:]
+                           if isinstance(e, dict)
+                           and str(e.get("end") or e.get("start") or "") >= cutoff][-LOCAL_MAX_EVENTS:]
     return cfg
+
+
+def _retention_cutoff(cfg):
+    """ISO time before which a Jarvis event that has ended is dropped."""
+    return (datetime.now() - timedelta(days=retention_days(cfg))).isoformat()
 
 
 def _event_from_fields(fields, base=None):
@@ -936,8 +1282,12 @@ def add_local_event(fields):
     cfg, problem = load_config_strict()
     if cfg is None:
         return {"ok": False, "error": problem}
+    # Events past their keep time are removed by this very add, so they do not count
+    # towards the limit (otherwise a full calendar of old events refuses a new one).
+    cutoff = _retention_cutoff(cfg)
     existing = [e for e in cfg.get("local_events") or [] if isinstance(e, dict)]
-    if len(existing) >= LOCAL_MAX_EVENTS:
+    live = [e for e in existing if str(e.get("end") or e.get("start") or "") >= cutoff]
+    if len(live) >= LOCAL_MAX_EVENTS:
         return {"ok": False, "error": "Jarvis's calendar already holds %d events, the most it keeps. "
                                       "Delete some first." % LOCAL_MAX_EVENTS}
     taken = {e.get("id") for e in existing}

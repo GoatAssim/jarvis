@@ -558,7 +558,8 @@ def test_js_merge_over_the_real_shipped_catalogue():
     text = DATA_JS.read_text(encoding="utf-8")
     shipped = json.loads(text.split("/*JSON-BEGIN*/", 1)[1].rsplit("/*JSON-END*/", 1)[0])
     out = _node_merge(shipped, [[{"name": "my_own_tool", "checklist": _entry()}]])[0]
-    assert len(out["data"]["tools"]) == len(shipped["tools"]) + 1
+    # the panel lists every shipped tool, every console feature (their own entries), and the one added
+    assert len(out["data"]["tools"]) == len(shipped["tools"]) + len(shipped.get("features") or {}) + 1
     assert len(out["data"]["groups"]) == len(shipped["groups"]), "'custom' is a shipped group, so no extra section"
 
 

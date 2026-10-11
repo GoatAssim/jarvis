@@ -165,8 +165,8 @@ def test_load_context_and_prompt():
 
 def test_context_goes_in_the_tail_not_the_cached_prefix():
     marker = "TOOL-MAKER-MARKER-" + os.urandom(3).hex()
-    base_prefix, base_tail = ai_client._system_prompt_parts("persona", False)
-    prefix, tail = ai_client._system_prompt_parts("persona", False, tool_maker_ctx=marker)
+    base_prefix, base_tail = ai_client._system_prompt_parts({}, False)
+    prefix, tail = ai_client._system_prompt_parts({}, False, tool_maker_ctx=marker)
     check("the static, cacheable prefix is byte-identical with and without it", prefix == base_prefix)
     check("the block is in the per-turn tail", marker in tail and marker not in prefix)
     check("without it nothing of the block leaks into either part", marker not in base_prefix and marker not in base_tail)

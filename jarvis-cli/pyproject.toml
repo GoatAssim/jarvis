@@ -5,6 +5,9 @@ description = "A tuff, JSON-configurable command runner for your own shortcuts"
 requires-python = ">=3.8"
 dependencies = [
     "colorama; platform_system=='Windows'",
+    # Windows ships no time-zone database; the calendar reads TZID= times (zoneinfo) with it.
+    # Without it a named-zone time is shown as typed, as before.
+    "tzdata; platform_system=='Windows'",
     "requests>=2.25",
     "psutil>=5.9",
     "ddgs>=9.0",

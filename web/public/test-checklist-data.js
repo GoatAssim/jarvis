@@ -227,8 +227,13 @@ window.JARVIS_TEST_CHECKLIST = /*JSON-BEGIN*/ {
    "label": "Settings",
    "kind": "feature",
    "blurb": "The Settings modal (top bar) and its Advanced tab. A feature of the console, not a tool: do these by hand in the page."
+  },
+  {
+   "id": "person_memory",
+   "label": "People memory",
+   "blurb": "Per-person facts, standing rules and reply watching (L.21-L.23). Owner-only; none of these appear for a chat guest."
   }
- ],
+  ],
  "tools": {
   "get_datetime": {
    "group": "core",
@@ -3507,6 +3512,152 @@ window.JARVIS_TEST_CHECKLIST = /*JSON-BEGIN*/ {
    "care": "Real deletion (recoverable via the Recycle Bin) — use a scratch file.",
    "watch": [
     "There is no permanent-delete option."
+   ]
+   },
+  "person_remember": {
+   "group": "person_memory",
+   "does": "Saves a fact about one known person so Jarvis still knows it in later chats with them.",
+   "steps": [
+    {
+     "run": {
+      "person": "<a name from channels-people>",
+      "text": "likes short answers"
+     },
+     "expect": "ok: true with an id. `jarvis channels-memory list <platform> <id>` shows it as active, owner_stated."
+    },
+    {
+     "run": {
+      "person": "nobody-by-this-name",
+      "text": "x"
+     },
+     "expect": "ok: false, \"I don't know anyone called ...\" with known_contacts. Never a guess."
+    },
+    {
+     "ask": "<that person> messages the bot: \"what do you know about me?\"",
+     "expect": "Jarvis mentions the saved fact and nothing else; it does not invent anything."
+    }
+   ],
+   "care": "Writes under ~/.jarvis/channels/people/. Does not touch the owner's own memory.",
+   "watch": [
+    "A blocked person, or one with DMs switched off, can still be remembered about."
+   ]
+  },
+  "person_forget": {
+   "group": "person_memory",
+   "does": "Deletes one saved item about a person by id.",
+   "steps": [
+    {
+     "run": {
+      "person": "<a name>",
+      "id": "<an id from person_recall>"
+     },
+     "expect": "ok: true; person_recall no longer lists it."
+    },
+    {
+     "run": {
+      "person": "<a name>",
+      "id": "zzzzzzzz"
+     },
+     "expect": "ok: false, nothing saved with that id."
+    }
+   ]
+  },
+  "person_instruct": {
+   "group": "person_memory",
+   "does": "Gives Jarvis a standing rule for one person (or everyone) such as 'don't discuss X'.",
+   "steps": [
+    {
+     "run": {
+      "person": "<a name>",
+      "directive": "don_t_discuss",
+      "topic": "<something specific>"
+     },
+     "expect": "ok: true with the derived keywords. The person is not told."
+    },
+    {
+     "ask": "<that person> messages the bot about <that topic>",
+     "expect": "Jarvis changes the subject politely and does not say it was told to."
+    },
+    {
+     "ask": "<that person> messages the bot about something unrelated",
+     "expect": "Answered normally - the rule does not apply."
+    },
+    {
+     "run": {
+      "person": "<a name>",
+      "directive": "don_t_discuss",
+      "topic": "the"
+     },
+     "expect": "ok: false - a topic with no usable words is refused."
+    }
+   ],
+   "care": "Only the owner can create or read rules; a chat guest's call is refused.",
+   "watch": [
+    "`jarvis channels-memory applied` lists which rule fired, never the message text."
+   ]
+  },
+  "person_recall": {
+   "group": "person_memory",
+   "does": "Lists what is saved about a person, including items waiting for approval.",
+   "steps": [
+    {
+     "run": {
+      "person": "<a name>"
+     },
+     "expect": "ok: true with ids, kinds, status and where each came from."
+    },
+    {
+     "run": {
+      "person": "anyone"
+     },
+     "expect": "Rules that apply to everyone (may be empty)."
+    }
+   ]
+  },
+  "person_review": {
+   "group": "person_memory",
+   "does": "Approves or retires an item a person's own words proposed.",
+   "steps": [
+    {
+     "run": {
+      "person": "<a name>",
+      "id": "<id of a proposed item>",
+      "decision": "approve"
+     },
+     "expect": "ok: true, now: active. It now appears in that person's chats."
+    }
+   ]
+  },
+  "await_reply": {
+   "group": "person_memory",
+   "does": "Watches for one person's answer and tells the owner when it matters.",
+   "steps": [
+    {
+     "run": {
+      "person": "<a name>",
+      "about": "the lease"
+     },
+     "expect": "ok: true, watching, with an end date about a week out."
+    },
+    {
+     "ask": "<that person> replies with something that answers the question",
+     "expect": "The owner gets one short summary (not the raw message) on a connected channel."
+    },
+    {
+     "ask": "<that person> replies \"thanks\"",
+     "expect": "No interruption; it lands in the quiet notification inbox."
+    },
+    {
+     "run": {
+      "person": "<a name>",
+      "cancel": true
+     },
+     "expect": "ok: true, cancelled: true."
+    }
+   ],
+   "care": "A real notification can go to the owner's Discord/Instagram.",
+   "watch": [
+    "`jarvis channels-awaiting log` shows each decision and why."
    ]
   }
  },

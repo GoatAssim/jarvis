@@ -302,7 +302,9 @@ def test_reset_fires_when_an_attempt_fails_mid_round():
                           on_stream=lambda kind, **d: got.append(kind))
     check("ask() fails over to the second provider and succeeds", r.ok is True, getattr(r, "error", ""))
     check("a reset sits between the failed partial output and the next attempt's output",
-          got == ["thinking", "text", "reset", "text", "round_end"], got)
+          # Thinking is off by default, and ask() keeps an unrequested reasoning delta away
+          # from the sink (it still marks the attempt dirty, which is what the reset is for).
+          got == ["text", "reset", "text", "round_end"], got)
 
 
 def test_reset_does_not_touch_text_committed_before_a_tool_call():

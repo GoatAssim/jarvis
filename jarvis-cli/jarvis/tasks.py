@@ -580,11 +580,18 @@ def clear_finished():
     for task in all_tasks(include_terminal=True):
         if task.get("status") not in TERMINAL_STATUSES:
             continue
+        path = _path(task["id"])
         try:
-            _path(task["id"]).unlink()
+            path.unlink()
             removed += 1
         except OSError:
             continue
+        # atomic_io leaves the previous version as <file>.bak and read_json falls back to
+        # it, so a cleared task would still be found by id without this.
+        try:
+            path.with_suffix(path.suffix + ".bak").unlink()
+        except OSError:
+            pass
     return removed
 
 

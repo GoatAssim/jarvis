@@ -59,9 +59,11 @@ def check(name, cond):
 
 
 def reset():
+    # atomic_io.read_json falls back to <file>.bak, so take that too or the file comes back.
     for f in (REG, STATE):
-        if f.exists():
-            f.unlink()
+        for g in (f, f.with_suffix(f.suffix + ".bak")):
+            if g.exists():
+                g.unlink()
     shutil.rmtree(Path(HOME) / ".jarvis" / "daemons", ignore_errors=True)
 
 
@@ -200,6 +202,7 @@ def test_fingerprint_follows_the_switches():
 # --- 4. tools.py: screens + the preview ---------------------------------------
 
 def test_screens_and_preview():
+    reset()  # an earlier section leaves cas_tool-worker switched off; this one needs it on
     protected = next(iter(tool_disable.PROTECTED_TOOLS))
     saved = (system_tools._FILE_TOOLS, system_tools._FILE_DAEMONS, system_tools.AUTO_UI,
              tool_disable.disabled_tools, tool_disable.disabled_ui)

@@ -64,13 +64,17 @@ def test_move_within_column():
     a, b, c, d = (mk(t) for t in ("a1", "b1", "c1", "d1"))
     base = titles("todo")
     ids = {i["title"]: i["id"] for i in backlog.board()["todo"]}
-    item, err = backlog.move(ids["d1"], before=ids[base[0]])
+    # Items added in the same instant tie on priority and time; which comes first then
+    # depends on the clock's resolution. Move whichever is last to the top, so the test
+    # means the same on every machine.
+    mover = base[-1]
+    item, err = backlog.move(ids[mover], before=ids[base[0]])
     check("move returns the item", item is not None and err == "")
-    check("moved to the top", titles("todo")[0] == "d1")
-    expect = ["d1"] + [t for t in base if t != "d1"]
+    check("moved to the top", titles("todo")[0] == mover)
+    expect = [mover] + [t for t in base if t != mover]
     check("everything else keeps its relative order", titles("todo") == expect)
-    backlog.move(ids["d1"])  # no anchor = bottom
-    check("no anchor means the bottom", titles("todo")[-1] == "d1")
+    backlog.move(ids[mover])  # no anchor = bottom
+    check("no anchor means the bottom", titles("todo")[-1] == mover)
     ranks = [i["order"] for i in backlog.board()["todo"]]
     check("the whole column was renumbered 1..n", ranks == [1, 2, 3, 4])
 

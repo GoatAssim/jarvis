@@ -65,7 +65,7 @@ check("old Live Feed endpoint /api/console-filter-prefs is gone (no routes)",
 check("server drops unknown kinds on read and on write",
       SERVER.count("ASK_CONSOLE_KINDS.includes(k)") >= 2)
 check("preference is a file under web/data (gitignored), not localStorage",
-      '"ask-console-filter.json"' in SERVER and "localStorage" not in APP[APP.index("ASK_CONSOLE_CATEGORIES"):APP.index("function askConsoleCounts")])
+      '"ask-console-filter.json"' in SERVER and "localStorage" not in APP[APP.index("const ASK_CONSOLE_CATEGORIES"):APP.index("function askConsoleCounts")])
 
 # --- the classifier keys off these exact CLI line shapes -------------------
 check("cli.py still prints '↳ asking <label>…' (provider)", "\\u21b3 asking " in CLI)

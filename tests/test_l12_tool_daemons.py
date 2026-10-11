@@ -46,9 +46,12 @@ def check(name, cond):
 
 
 def reset():
+    # atomic_io.read_json falls back to <file>.bak, so a reset has to take that too or the
+    # file it just deleted comes straight back.
     for f in (REG, STATE):
-        if f.exists():
-            f.unlink()
+        for g in (f, f.with_suffix(f.suffix + ".bak")):
+            if g.exists():
+                g.unlink()
     shutil.rmtree(Path(HOME) / ".jarvis" / "daemons", ignore_errors=True)
 
 
