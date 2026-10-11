@@ -429,6 +429,7 @@
           { file: "ai_config.json", path: ["defaults", "compact_prompt"], type: "bool", fallback: true, label: "Compact system prompt", help: "A shorter prompt for providers with small token limits." },
           { file: "ai_config.json", path: ["defaults", "prompt_cache"], type: "bool", fallback: true, label: "Prompt caching", help: "Lets providers that support it reuse the unchanged start of the prompt." },
           { file: "ai_config.json", path: ["defaults", "scheduled_token_budget"], type: "int", min: 0, fallback: 30000, label: "Token limit for one scheduled run", unit: "tokens", help: "Stops a runaway scheduled job. 0 turns the limit off." },
+          { file: "ai_config.json", path: ["defaults", "interactive_token_budget"], type: "int", min: 0, fallback: 0, label: "Token limit for one request you make", unit: "tokens", help: "Ends a request that has spent this many tokens across every provider it tried. 0 (the default) means no limit." },
         ].map((spec) => fileRow(ctx, spec));
         const out = [group("Answers", rows)];
         const providers = getAt(ctx.docs["ai_config.json"].doc, ["providers"]);

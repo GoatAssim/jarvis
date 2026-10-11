@@ -124,6 +124,28 @@
     return out;
   }
 
+  // I-B11: what Speak should read of a reply. Fenced code read aloud is
+  // symbol-by-symbol noise ("backtick backtick backtick", every brace), so each
+  // fenced block becomes one short spoken marker and the prose around it is
+  // kept. Uses splitFences, so it agrees with what renders as a code block
+  // (``` and ~~~, an unclosed fence runs to the end). Inline `code` is left
+  // alone: it is usually a name that reads fine. Returns text with no fence in
+  // it unchanged.
+  const SPOKEN_CODE_MARKER = "Code block omitted.";
+  function speechText(text) {
+    const raw = String(text == null ? "" : text);
+    if (!/(^|\n) {0,3}(`{3,}|~{3,})/.test(raw)) return raw;
+    const parts = [];
+    for (const seg of splitFences(raw)) {
+      if (seg.type === "code") {
+        if (parts[parts.length - 1] !== SPOKEN_CODE_MARKER) parts.push(SPOKEN_CODE_MARKER);
+      } else if (seg.text.trim()) {
+        parts.push(seg.text.trim());
+      }
+    }
+    return parts.join("\n\n");
+  }
+
   // ---- clipboard (I-B9) --------------------------------------------------
   function legacyCopy(text) {
     if (typeof document === "undefined" || !document.body) return false;
@@ -447,6 +469,6 @@
 
   globalThis.JarvisRich = {
     enhanceCodeBlocks, renderUserText, blocksIn, attach,
-    copyText, codeTextForCopy, splitFences, normalizeLang, isShellLang, countLines,
+    copyText, codeTextForCopy, splitFences, normalizeLang, isShellLang, countLines, speechText,
   };
 })();

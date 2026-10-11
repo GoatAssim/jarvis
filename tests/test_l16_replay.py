@@ -48,7 +48,7 @@ os.environ["USERPROFILE"] = _HOME
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "jarvis-cli"))
 
 from jarvis import (ai_client, ai_config, ai_providers, conversations, key_health,  # noqa: E402
-                    ocr_tools, token_usage)
+                    ocr_tools, preflight, token_usage)
 from jarvis import tools as system_tools  # noqa: E402
 
 FIXTURE = Path(__file__).resolve().parent / "fixtures" / "1a99e1e3f0d3af0e.jsonl"
@@ -180,7 +180,7 @@ class Env:
                 os.environ[k] = old
 
 
-def replay(env, real_read_screen):
+def replay(env, real_read_screen, use_preflight=False):
     """Re-ask the incident's user text through ask() and return a dict of what
     the real loop did."""
     # A clean slate every time: the control scenario's 429s must not park keys
@@ -240,7 +240,13 @@ def replay(env, real_read_screen):
         names.append(name)
 
     saved = (ai_providers._post_json, system_tools.execute_tool, time.sleep,
-             ocr_tools.pytesseract, ocr_tools.Image)
+             ocr_tools.pytesseract, ocr_tools.Image, preflight.check)
+    if not use_preflight:
+        # These scenarios test the guards DOWNSTREAM of the capability preflight
+        # (policy, circuit breaker, token budget). With no OCR and no vision the
+        # preflight would stop the run before round 1 -- that is its own test
+        # (tests/test_l16_preflight_authorization.py), not this one.
+        preflight.check = lambda prompt: {"ok": True, "needs": [], "blockers": []}
     ai_providers._post_json = fake_post_json
     system_tools.execute_tool = fake_execute_tool
     time.sleep = lambda s: None                  # the 429's stated wait, and any pacing
@@ -253,7 +259,7 @@ def replay(env, real_read_screen):
                                    on_confirm_request=lambda n, a, risk_note=None: True)
     finally:
         (ai_providers._post_json, system_tools.execute_tool, time.sleep,
-         ocr_tools.pytesseract, ocr_tools.Image) = saved
+         ocr_tools.pytesseract, ocr_tools.Image, preflight.check) = saved
     return {"result": result, "requests": requests_made, "served": served,
             "tool_names": names, "tools_executed": ran, "tools_started": started}
 

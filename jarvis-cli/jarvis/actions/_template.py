@@ -1206,7 +1206,10 @@ TEST_CHECKLIST_GROUP = {
 #    dropped: the built-in wins, so an update can't be shadowed by your tool.
 #    Two files can't share a name either (first one loaded wins). The command
 #    follows its tool: if the tool is switched off in the Tool Manager, so is
-#    the command, and it returns when the tool does. A bad entry is logged as
+#    the command, and it returns when the tool does. It is ALSO a row in Menu ->
+#    Tool Manager (kind "Tool command") with its own switch: off hides that one
+#    command and refuses it, and the tool keeps working. The two never overwrite
+#    each other. A bad entry is logged as
 #    "[tool-commands] ..." and shown by the Custom Tools editor's Check button;
 #    the tools in the file still load. Not available to a file with no tools.
 #

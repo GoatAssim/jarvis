@@ -269,8 +269,20 @@ def _search_snippet(text, match):
     return ("…" if start > 0 else "") + snippet + ("…" if end < len(text) else "")
 
 
+def _task_matches(entry, wanted):
+    """L.3.4: does this entry belong to the task `wanted` names? `wanted` is a
+    lower-cased string: it matches a task_id exactly, or any part of the task
+    label (so "backup" finds "Nightly backup"). Entries with no task never
+    match -- a manual entry is not mislabeled as one."""
+    task_id = str(entry.get("task_id") or "").strip().lower()
+    label = str(entry.get("task_label") or "").strip().lower()
+    if not task_id and not label:
+        return False
+    return wanted == task_id or wanted in label
+
+
 def search(query, mode="words", limit=SEARCH_DEFAULT_LIMIT, conv_id=None,
-           directions=None, origins=None, sources=None):
+           directions=None, origins=None, sources=None, task=None):
     """Search log entries. Returns {"ok", "results"|"error", ...}.
 
     conv_id    restrict to one conversation's log
@@ -278,8 +290,16 @@ def search(query, mode="words", limit=SEARCH_DEFAULT_LIMIT, conv_id=None,
     origins    restrict to conversations from e.g. ["discord"] — this is
                what makes "show me every error the Discord bot hit" a
                single query rather than a manual hunt through the list.
+    task       (L.3.4) only entries that belong to this scheduled job / task,
+               by id or by part of its label. With a task given the query may
+               be empty: "everything this task logged" is a search with no
+               words in it.
     """
-    patterns, err = _compile_search(query, mode)
+    wanted_task = str(task or "").strip().lower()[:100] or None
+    if wanted_task and not (query or "").strip():
+        patterns, err = [], ""
+    else:
+        patterns, err = _compile_search(query, mode)
     if patterns is None:
         return {"ok": False, "error": err, "results": []}
 
@@ -304,6 +324,8 @@ def search(query, mode="words", limit=SEARCH_DEFAULT_LIMIT, conv_id=None,
                 continue
             if wanted_sources is not None and (entry.get("source") or "") not in wanted_sources:
                 continue
+            if wanted_task and not _task_matches(entry, wanted_task):
+                continue
             try:
                 blob = json.dumps(entry, ensure_ascii=False, default=str)
             except (TypeError, ValueError):
@@ -313,7 +335,7 @@ def search(query, mode="words", limit=SEARCH_DEFAULT_LIMIT, conv_id=None,
             hits = [pattern.search(blob) for pattern in patterns]
             if not all(hits):
                 continue
-            first = hits[0]
+            first = hits[0] if hits else None
             results.append({
                 "conv_id": cid,
                 "title": meta.get("title") or "(deleted conversation)",
@@ -330,10 +352,11 @@ def search(query, mode="words", limit=SEARCH_DEFAULT_LIMIT, conv_id=None,
                 "task_label": entry.get("task_label") or "",
                 "provider": entry.get("provider"),
                 "round": entry.get("round"),
-                "snippet": _search_snippet(blob, first),
+                "snippet": (_search_snippet(blob, first) if first is not None
+                            else blob[:SEARCH_SNIPPET_RADIUS * 2].replace("\n", " ").strip()),
             })
             if len(results) >= limit:
                 return {"ok": True, "results": results, "truncated": True,
-                        "scanned": scanned, "query": query, "mode": mode}
+                        "scanned": scanned, "query": query, "mode": mode, "task": wanted_task}
     return {"ok": True, "results": results, "truncated": False,
-            "scanned": scanned, "query": query, "mode": mode}
+            "scanned": scanned, "query": query, "mode": mode, "task": wanted_task}

@@ -271,6 +271,20 @@ things that were already fixed once.
   and don't let this open the OUTBOUND collector (`media_out`), which stays owner-only. An Instagram DM that is only a picture is no longer dropped
   (`instagram_gateway._attachment_descriptors`); a sticker / audio / reaction still is.
   `tests/test_channel_media_in.py` pins this.
+- **A confirm-gated tool can run from chat only through `channels/approvals.py`, only for the OWNER, and every failure is a "no" (L.29 / L.42.1).**
+  `base.handle_message` builds `on_confirm_request` only when the sender is the verified owner AND the gateway passed `ask_approval`; a guest's ask
+  keeps `None`, so `run_shell` / `code_agent` / `edit_file` stay cancelled from a guest turn (the missing channel was the only guard on those, L.29
+  note 1 -- never hand a guest one). Only the owner's id can answer (Discord: the INTERACTION's user; Instagram: the owner's DM, the whole message
+  `y`/`yes`/`n`/`no`, only while a request is pending; any other owner message while one is pending DENIES it). 60 seconds, then denied; a gateway
+  start drops that platform's pending rows (`approvals.cancel_pending`) and a press after that fails closed. The action shown is `ai_client`'s own
+  `arguments` -- nothing is regenerated between prompt and run -- and an action that cannot be shown in full is denied, never asked. The pending store
+  and the transcript hold the tool NAME and the outcome, never the arguments. Don't touch `tool_safety`, `risk_review` or the gate in
+  `_make_tool_executor` to make this work; it only supplies the callback they already call. `send_dm`'s own limits are unchanged and still refuse
+  unattended runs. `tests/test_chat_approvals.py` pins this.
+- **The thinking TRACE in chat goes to the owner only (L.42.2).** `thinking.wants_trace` is true only for the owner and only while their thread is `on`
+  (default off); a guest whose switch is `on` gets the higher LEVEL (L.44) but never the trace, because a trace can quote the memory block, other
+  people's records and tool results (Q-L44h is still open). It is sent as separate message(s) after the reply, never written to the transcript as text,
+  and nothing is sent when the level was `off`. `tests/test_chat_approvals.py` pins this.
 - **A picture that came with a message is KEPT with the conversation so the owner can look at it -- and only the references travel (Ask panel pictures, Discord / Instagram pictures).**
   `jarvis/conv_images.py` is the only writer of `~/.jarvis/conv_images/` (`ci_<24 hex>.<png|jpg|gif|webp>`; the extension comes from the bytes' signature, never a
   sender's file name; `path_for` re-validates every id, so nothing outside that folder can be named). `media_in.prepare` / `prepare_files` keep a copy of every picture that was
@@ -407,6 +421,8 @@ actually render Markdown):
     python3 tests/test_channel_pack_p8_p9_p13_p14.py      # L.36-P8 / P9 / P13 / P14: picture grant, platform tools switch, panel DM, turned-away list
     python3 tests/test_ask_images.py         # pictures in the Ask panel + kept with the conversation (store, Instagram, replay, redo / delete, CLI manifest)
     node tests/verify_ask_images.js          # the panel's picture helpers, the server's checking / staging, and the wiring; no npm install
+    python3 tests/test_chat_approvals.py     # L.29 / L.42.1 + L.42.2: the chat confirmation channel (owner-only, 60 s, restart, Instagram Y / N, Discord buttons) and the owner-only thinking trace
+    node tests/verify_thinking_row.js        # L.44 panel row: the Thinking control in Permissions > Capabilities; no npm install
     python3 tests/test_channel_media_in.py   # L.36-P8 / L.42.3 inbound: pictures a person sends on Discord are read only for the owner and the picture list (host / size / count / hourly caps, description wrapped as content, never raises)
     python3 tests/verify_l53_tool_maker_ui.py # L.53: the Tool Maker's Ask Jarvis side panel in a real browser (toggle, one conversation per tab, New chat, Undo, tag); needs `playwright` (Python) + Chromium, prints SKIP without them
     python3 tests/test_allowed_guilds.py    # L.36-P17: allowed_guilds editor (preview-first, last entry never removable, real gate, CLI, route pinned statically)
@@ -738,14 +754,24 @@ from `GET /api/tool-commands` and are kept by `slash-palette.js` (`TOOLCMDS`).
   already reads the registry) and again in the palette. `server.js` lists nothing if it
   can't read the registry. Do not let a tool command shadow a built-in "because it was
   there first".
-- **It follows its tool, derived live, stored nowhere** (`tools.command_off_reason`): off
-  when the tool is off, or when every tool of its file is (the Q-L46m rule). There is no
-  switch of its own to keep in sync.
+- **Two independent reasons it can be off** (`tools.command_off_reason`). (1) It follows its
+  tool, derived live, stored nowhere: off when the tool is off, or when every tool of its
+  file is (the Q-L46m rule). (2) The owner's own switch for the command, a Tool Manager row
+  of kind "Tool command", stored in `~/.jarvis/disabled.json` under `"tool_commands"`
+  (`tool_disable.set_tool_command_disabled`; `jarvis tool-disable-set <name> <true|false>
+  --kind tool-command`). Neither overwrites the other: clearing the owner's switch on a
+  command whose tool is off leaves it off, and switching the tool back on never clears the
+  owner's. `tool_commands_payload` reports `switched_off` (the owner's) and
+  `disabled_by_tool` (off only for the tool's sake; the Tool Manager locks that row's
+  switch). Like every other switch in `disabled.json` it has no model-facing writer, and
+  deleting the tool file drops its commands' entries (`custom_tools_store.delete_tool`).
+  This is NOT the saved-command switch (`command-disable-set`, commands.json).
 - **Nothing model-facing may create or edit one**, same as `TOOL_UI` and daemons: the author
   of the file is the person who installed it. `tests/test_tool_commands.py` fails if any
   other module names `TOOL_COMMANDS`.
 - `tests/test_tool_commands.py`, `verify_tool_commands_palette.js` and
-  `verify_tool_commands_route.js` pin all of this. `test_slash_coverage.py` still only
+  `verify_tool_commands_route.js` pin all of this; `tests/test_tool_command_switch.py` and
+  `verify_tool_manager_tcmd.js` pin the owner's switch and its Tool Manager row. `test_slash_coverage.py` still only
   covers the CLI's own names: `tool-commands` is claimed by the `ctools` verb's `covers`.
 
 ## Categories (L.11 daemons, L.14 commands)

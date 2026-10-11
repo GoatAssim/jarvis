@@ -216,6 +216,17 @@ Set up: a file in `~/.jarvis/tools/` using the example in `actions/_template.py`
 - [ ] A typo (`/dsik`) is blocked with "did you mean /disk?"; a second Enter sends it as a message
 - [ ] Tool Manager: switch the command's tool off, wait up to 20 s (or reload): the row is gone and a hand-typed
       command answers that it is off. Switch it back on: it returns, nothing else to restore
+- [ ] Tool Manager, the **Tool commands** chip (or search the command's name): every command from your file has a
+      row (id `k:<name>`, source "Tool command", the file named, its risk label shown); the no-tier one says
+      "none declared, so it asks first"
+- [ ] Switch ONE command off in its own row (not its tool): it is gone from `/` within 20 s or after a reload,
+      a hand-typed `/name` answers that it is switched off, the file's other commands and the tool itself
+      (Debug panel, Ask) still work, and the row's status line says Jarvis can't use it
+- [ ] Switch it back on: it returns. Now switch the command's TOOL off instead: the command row turns off, its
+      switch is locked, and it says "off because its tool is off"; switch the tool on and it returns by itself
+- [ ] Switch the command off AND its tool off, then the tool on: the command stays off (your switch was not
+      overwritten). Then switch the command on: it works again
+- [ ] Delete the tool file, add it back with the same command name: the command starts switched ON
 - [ ] Add a second file that declares the same name: only the first loaded is listed, and Check names the clash
 - [ ] Server side: `curl -X POST localhost:<port>/api/tool-commands/doctor/run -H 'content-type: application/json'
       -d '{"args":[]}'` -> the CLI refuses it ("no palette command"), and a name like `Bad_Name` is a **400**
@@ -266,7 +277,10 @@ Set up: a file in `~/.jarvis/tools/` using the example in `actions/_template.py`
 
 ## Not built / known limits (so you don't file these as bugs)
 
-- **Tool commands (I.2.11 / K.6.7) have no switch of their own and no Tool Manager row.** They follow their tool.
+- **Tool commands (I.2.11 / K.6.7) follow their tool AND have a Tool Manager row with a switch of their own.**
+  Switching the row off hides and refuses just that command; the tool keeps working. A command that is off only
+  because its tool is has its switch locked. Switching a tool off does not list its commands in the confirmation
+  dialog (they follow it live; the dialog still lists scheduled jobs, screens and daemons).
   The palette re-reads them at most every 20 s, so a freshly saved tool shows up on the next look, not instantly.
   A command that declares no `riskTier` is `dangerous` by design (K.6.7), not a bug.
 - **Touch long-press for the hover tooltip (D-I4).** Hover shows a browser tooltip and the footer follows the

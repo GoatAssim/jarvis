@@ -158,6 +158,14 @@ class RoundBudget:
         # via defaults.project_discovery_call_budget.
         self.project_discovery_limit = max(0, int(project_discovery_limit or 0))
         self.project_discovery_used = 0
+        # L.24 T2 metric: how many rounds this ask spent ONLY looking for a tool
+        # (search_tools / get_tool_schema / load_skill / a made-up name), however
+        # they were paid for. discovery_used above only moves while the free pool
+        # has room and is zeroed to "full" by the circuit breaker, so it cannot
+        # answer "did this turn go exploring?" -- the 1a99e1e3f0d3af0e incident
+        # spent three such rounds, each re-sending the whole prompt (~15K tokens).
+        # A counter, never a limit: nothing reads it to decide anything.
+        self.discovery_rounds = 0
 
     def remaining(self):
         return max(0, self.limit - self.used)
@@ -198,6 +206,19 @@ class RoundBudget:
         return True
 
     def take(self, names=None):
+        """Charge one round (see _take) and count it when it was a discovery-only
+        round. Counted only when the round was actually granted: a refused round
+        sends no request, so it spent nothing."""
+        taken = self._take(names)
+        if taken and names is not None:
+            try:
+                if self._is_discovery_round(names):
+                    self.discovery_rounds += 1
+            except Exception:  # noqa: BLE001 -- a metric never fails a round
+                pass
+        return taken
+
+    def _take(self, names=None):
         """Charge one round. `names` — the tool name(s) about to be called
         this round — is optional and defaults to None, which reproduces the
         exact pre-D1 behavior (always draw from the main `limit`/`used`
@@ -1146,8 +1167,15 @@ def _status_reason(resp):
         return f"rate limited or quota exceeded (HTTP 429){hint}"
     if resp.status_code == 402:
         return "payment required — out of credits (HTTP 402)"
-    if 500 <= resp.status_code < 600:
-        return f"provider server error (HTTP {resp.status_code})"
+    if 500 <= resp.status_code < 600 or resp.status_code == 529:
+        # L.24 T4: an overloaded provider often says how long to wait (a
+        # Retry-After header; Gemini's retryDelay). The 429 branch above has
+        # always carried it; a 503 dropped it, so key_health parked the model for
+        # a fixed 45 s and the same-key retry never saw the hint.
+        from . import key_health
+        delay = key_health.parse_retry_delay(getattr(resp, "text", "") or "", getattr(resp, "headers", None))
+        hint = f" [retry in {delay:g}s]" if delay is not None else ""
+        return f"provider server error (HTTP {resp.status_code}){hint}"
     snippet = (resp.text or "").strip().replace("\n", " ")[:180]
     return f"HTTP {resp.status_code}{': ' + snippet if snippet else ''}"
 

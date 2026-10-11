@@ -606,17 +606,29 @@
   // Filtering (direction / source / search hits) — pure
   // ---------------------------------------------------------------------------
 
+  // L.3.4: same rule as logs.py's _task_matches -- the task's id exactly, or
+  // any part of its label, case-insensitive. An entry with no task never matches.
+  function taskMatches(entry, wanted) {
+    const w = str(wanted).trim().toLowerCase();
+    if (!w) return true;
+    const id = str(entry.task_id).trim().toLowerCase();
+    const label = str(entry.task_label).trim().toLowerCase();
+    if (!id && !label) return false;
+    return w === id || label.includes(w);
+  }
+
   function eventMatches(ev, f) {
     if (!f) return true;
     const es = Array.isArray(ev.entries) ? ev.entries : [];
     if (f.direction && !es.some((e) => isObj(e) && e.direction === f.direction)) return false;
     if (f.source && !es.some((e) => isObj(e) && str(e.source) === f.source)) return false;
+    if (f.task && !es.some((e) => isObj(e) && taskMatches(e, f.task))) return false;
     if (f.hits && !es.some((e) => f.hits.has(entryKey(e)))) return false;
     return true;
   }
 
   function filterIsActive(f) {
-    return !!(f && (f.direction || f.source || f.hits));
+    return !!(f && (f.direction || f.source || f.task || f.hits));
   }
 
   // Which events to draw. Matches + one neighbour either side stay visible
@@ -935,7 +947,7 @@
 
   // render(container, timeline, deps, opts)
   //   deps  { renderRich(el, md), renderUserText(el, text)?, assistantName }
-  //   opts  { filter: {direction, source, hits:Set, origin, convOrigin}|null,
+  //   opts  { filter: {direction, source, task, hits:Set, origin, convOrigin}|null,
   //           showAll, onShowAll(bool), focus: {ts, direction}|null }
   function render(container, timeline, deps, opts) {
     const o = opts || {};
@@ -958,6 +970,7 @@
       const bits = [];
       if (f.direction) bits.push(`direction = ${f.direction}`);
       if (f.source) bits.push(`source = ${f.source}`);
+      if (f.task) bits.push(`task = ${f.task}`);
       if (f.hits) bits.push("search matches");
       const banner = h("div", "lc-banner", [
         h("span", null, `Filtered by ${bits.join(" \u00b7 ")}: ${matchedEvents} of ${totalEvents} events match. Matches keep their neighbours; the rest are folded.`),
@@ -1027,7 +1040,7 @@
     _pure: {
       extractUserText, parseResponseBody, summarizeArgs, classifyResult, errorMessage, fmtDuration,
       fmtLocal, hostOf, eventMatches, filterIsActive, planVisibility, findEventForEntry, entryKey,
-      stripNotice, isSyntheticUserText, renderEvent,
+      stripNotice, isSyntheticUserText, renderEvent, taskMatches,
     },
   };
 })(window);

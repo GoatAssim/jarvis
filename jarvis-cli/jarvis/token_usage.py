@@ -236,6 +236,14 @@ class AskUsage:
 
     def __init__(self):
         self._attempts = []
+        # L.24 T2 metric: ask() hands over its RoundBudget so the per-ask total
+        # can say how many rounds went on tool discovery. Read at to_dict() time
+        # (the count keeps moving while the ask runs); None = nobody bound one.
+        self._rounds_source = None
+
+    def bind_rounds(self, round_budget):
+        """Report `round_budget.discovery_rounds` in to_dict()."""
+        self._rounds_source = round_budget
 
     def add(self, label, summary, ok=False):
         """Record one attempt. `summary` is ai_providers.get_usage_summary()'s
@@ -279,6 +287,9 @@ class AskUsage:
         cache = sum(x["cache_read_tokens"] for x in a)
         if cache:
             out["cache_read_tokens"] = cache
+        found = _as_int(getattr(self._rounds_source, "discovery_rounds", None))
+        if found is not None:
+            out["discovery_rounds"] = found
         return out
 
 
@@ -293,7 +304,11 @@ def format_ask_total(ask_total):
     if ask_total.get("thinking_in_output_tokens"):
         bits.append("reasoning-inside-out=%d" % ask_total["thinking_in_output_tokens"])
     n = ask_total["attempt_count"]
-    return "ask total=%d (%s) across %d attempt%s, %d round%s" % (
+    line = "ask total=%d (%s) across %d attempt%s, %d round%s" % (
         ask_total.get("total_tokens") or 0, " ".join(bits), n, "" if n == 1 else "s",
         ask_total.get("rounds") or 0, "" if ask_total.get("rounds") == 1 else "s")
+    found = _as_int(ask_total.get("discovery_rounds"))
+    if found:
+        line += ", %d of them looking for a tool" % found
+    return line
 

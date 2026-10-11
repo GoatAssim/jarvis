@@ -10,8 +10,13 @@ It is the `think_override` the gateway passes to `ai_client.ask`:
             "medium" (so choosing "on" always changes something)
     (none)  no setting: exactly what chat gave everyone before this existed
 
-It is NOT a trace: nothing about Jarvis's reasoning is shown to the person.
-(Showing a trace in chat is L.42 and is not built.)
+The level and the trace are two different things. The level is what this module
+has always controlled. The TRACE (L.42.2) is Jarvis's reasoning text shown in chat
+after the reply, and it is shown to the OWNER only, and only while their thread is
+"on" (see `wants_trace`). A guest whose switch is "on" gets the higher level but
+never sees the trace: it can quote the memory block, other people's records, tool
+results and the sender block (Q-L42b), and Q-L44h (may a guest see one at all?) is
+still open, so the safe reading is the one taken.
 
 WHO DECIDES WHAT
 ----------------
@@ -115,6 +120,72 @@ def override_for(state):
         level = _configured_level()
         return level if level not in ("off", "", None) else FALLBACK_LEVEL
     return None
+
+
+def wants_trace(state, is_owner=False):
+    """Should the trace be sent after this person's reply (L.42.2)?
+
+    Owner only, and only while the effective value is "on" (default off, per
+    thread). A guest is never sent one whatever their switch says -- Q-L44h.
+    Nothing is shown when the level is off, because there is nothing real to show
+    (and on Groq the model may think regardless, L.39: the gateway simply does not
+    send it)."""
+    return bool(is_owner) and (state or {}).get("value") == "on"
+
+
+TRACE_MAX_MESSAGES = 3
+SPOILER_LIMIT = 1900
+_TRUNCATED = "(thinking trace truncated)"
+
+
+def format_trace(platform, text, level="", limit=SPOILER_LIMIT, max_messages=TRACE_MAX_MESSAGES):
+    """The trace as the list of messages to send, each its own message AFTER the
+    reply (Q-L42e').
+
+    Discord: the text inside `||spoiler||`, split across at most `max_messages`
+    messages of `limit` characters, with a plain "(thinking trace truncated)" note
+    when there was more. A literal `||` in the trace is broken up so it cannot end
+    the spoiler early. Everywhere else (Instagram has no spoiler syntax) one plain
+    message labelled "Thinking:", cut to `limit` with the same note. Empty text or
+    a non-positive limit -> no messages."""
+    text = str(text or "").strip()
+    if not text or int(limit or 0) <= 0:
+        return []
+    label = "Thinking" + (f" ({level})" if level and level != "off" else "") + ":"
+    if platform == "discord":
+        body = text.replace("||", "| |")
+        room = max(50, int(limit) - 4 - len(label) - 1 - len(_TRUNCATED) - 1)
+        pieces = []
+        rest = body
+        while rest and len(pieces) <= max_messages:
+            if len(rest) <= room:
+                pieces.append(rest)
+                rest = ""
+            else:
+                cut = rest.rfind("\n", 0, room)
+                if cut < room * 0.5:
+                    cut = rest.rfind(" ", 0, room)
+                if cut < room * 0.5:
+                    cut = room
+                pieces.append(rest[:cut].rstrip())
+                rest = rest[cut:].lstrip()
+        truncated = len(pieces) > max_messages or bool(rest)
+        pieces = pieces[:max_messages]
+        out = []
+        for i, piece in enumerate(pieces):
+            head = label + "\n" if i == 0 else ""
+            out.append(f"{head}||{piece}||")
+        if truncated:
+            out[-1] = out[-1] + "\n" + _TRUNCATED
+        return out
+    room = max(50, int(limit) - len(label) - 1 - len(_TRUNCATED) - 5)
+    if len(text) > room:
+        cut = text[:room]
+        space = cut.rfind(" ")
+        if space > room * 0.7:
+            cut = cut[:space]
+        return [f"{label}\n{cut.rstrip()} ... {_TRUNCATED}"]
+    return [f"{label}\n{text}"]
 
 
 def parse_command(text):

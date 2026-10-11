@@ -32,6 +32,12 @@ each the same owner switch:
     tool's own page, or a Menu entry that opens it in a panel): OFF removes the
     button / Menu entry and refuses to serve its files. The tool that goes with it
     keeps working; the owner is only hiding its screen.
+  * a TOOL COMMAND a file contributed (`TOOL_COMMANDS`, tool_commands.py -- a word typed
+    after `/` in the Ask box that runs one of the file's own tools): OFF removes it
+    from the palette and refuses it (`jarvis tool-commands run` / `prepare`). This is
+    the owner's OWN switch for the command; the command also follows its tool (off when
+    that tool is off, tools.command_off_reason), and neither overwrites the other. The
+    tool itself keeps working, for the model and for you: only the typed shortcut goes.
   * a DAEMON is NOT stored here. daemons.json already has an `enabled` flag with
     exactly the right meaning (can't be started by hand, by a schedule, by
     autostart or by the model) and the Daemons panel already edits it, so the Tool
@@ -50,8 +56,8 @@ each the same owner switch:
     uses the same `"personas"` list as a tool-registered one; their ids are exactly
     persona_registry.RESERVED_PERSONA_IDS, so the two can never collide.
 
-Personas, skins and UI elements live in the SAME `disabled.json` as tools and commands
-(`"personas": [...]`, `"skins": [...]`, `"ui": [...]`), for the same two reasons: no model-facing
+Personas, skins, UI elements and tool commands live in the SAME `disabled.json` as tools and
+commands (`"personas": [...]`, `"skins": [...]`, `"ui": [...]`, `"tool_commands": [...]`), for the same two reasons: no model-facing
 writer, and it survives a reinstall. Nothing here is protected: switching either
 off never breaks Jarvis.
 
@@ -127,13 +133,15 @@ _TOOL_NAME_RE = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
 # A persona id may also contain "-" (persona_registry._ID_RE); a UI id is a tool-style name.
 _PERSONA_ID_RE = re.compile(r"^[a-z][a-z0-9_-]{0,48}$")
 _UI_ID_RE = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
+# A tool command is typed as /name (tool_commands._NAME_RE): lower-case words joined by "-".
+_TOOL_COMMAND_RE = re.compile(r"^[a-z][a-z0-9-]{1,31}$")
 # A skin id is "<what>:<id>": `preset:` = an accent swatch, `theme:` = a built-in
 # theme card. Ids come from the browser (SKIN_PRESETS has "rose-gold", BUILTIN_THEMES
 # has "mark_i"), so both separators are allowed.
 _SKIN_ID_RE = re.compile(r"^(preset|theme):[a-z0-9][a-z0-9_-]{0,48}$")
 
 # Every list the file carries. Kept in one place so _read/_empty/_set can't drift.
-_KINDS = ("tools", "commands", "personas", "skins", "ui")
+_KINDS = ("tools", "commands", "personas", "skins", "ui", "tool_commands")
 
 
 class ProtectedToolError(ValueError):
@@ -203,6 +211,13 @@ def disabled_ui():
     return frozenset(_read()["ui"])
 
 
+def disabled_tool_commands():
+    """frozenset of TOOL_COMMANDS names (the `/` palette words a tool file contributed)
+    the owner has switched off. Their OWN switch only: a command is also off when its
+    tool is (tools.command_off_reason)."""
+    return frozenset(_read()["tool_commands"])
+
+
 def is_persona_disabled(persona_id):
     persona_id = (persona_id or "").strip()
     return bool(persona_id) and persona_id in disabled_personas()
@@ -216,6 +231,11 @@ def is_skin_disabled(skin_id):
 def is_ui_disabled(ui_id):
     ui_id = (ui_id or "").strip()
     return bool(ui_id) and ui_id in disabled_ui()
+
+
+def is_tool_command_disabled(name):
+    name = (name or "").strip()
+    return bool(name) and name in disabled_tool_commands()
 
 
 def is_tool_disabled(name):
@@ -328,6 +348,16 @@ def set_ui_disabled(ui_id, disabled):
     return {"id": ui_id, "disabled": _set("ui", ui_id, bool(disabled))}
 
 
+def set_tool_command_disabled(name, disabled):
+    """Switch a tool-contributed palette command off or on. Same contract as
+    set_ui_disabled: ValueError for a malformed name, OSError if the file couldn't be
+    saved. Returns {"name", "disabled"}."""
+    name = (name or "").strip()
+    if not _TOOL_COMMAND_RE.match(name):
+        raise ValueError("not a valid tool command name: %r" % name)
+    return {"name": name, "disabled": _set("tool_commands", name, bool(disabled))}
+
+
 def rename_command(old, new):
     """A renamed saved command keeps its switch. Without this a disabled command
     could be re-enabled just by renaming it in the commands panel: the new name
@@ -380,5 +410,15 @@ def forget_ui(ui_id):
     try:
         if (ui_id or "").strip() in _read()["ui"]:
             _set("ui", ui_id.strip(), False)
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def forget_tool_command(name):
+    """Drop a tool command's entry (its tool file was deleted, so a later command with the
+    same name must not inherit an old switch). Never raises."""
+    try:
+        if (name or "").strip() in _read()["tool_commands"]:
+            _set("tool_commands", name.strip(), False)
     except Exception:  # noqa: BLE001
         pass

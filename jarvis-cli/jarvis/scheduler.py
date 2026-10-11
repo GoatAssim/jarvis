@@ -77,6 +77,7 @@ same way it can't fill in a `confirm: true` parameter for itself. See
 _needs_approval().
 """
 
+import copy
 import json
 import os
 import re
@@ -114,6 +115,14 @@ STATUS_NEEDS_APPROVAL = "needs_approval"
 # from what they do about a failure. Terminal until they resume it.
 STATUS_OVER_BUDGET = "over_budget"
 ACTIVE_STATUSES = (STATUS_PENDING, STATUS_PAUSED, STATUS_NEEDS_APPROVAL)
+# The other half of the same split: a job in any of these will not fire again
+# on its own. They are NOT deleted -- a reminder that has gone off, a task that
+# ran, one that failed or was cancelled all stay in the store as HISTORY, shown
+# in their own "Finished" category in the panel (H.2) instead of vanishing the
+# moment they stop being active. `error` and `over_budget` are in here because
+# nothing will run them again until a person resumes them, but resume() still
+# works on both -- finished here means "not scheduled", not "gone for good".
+FINISHED_STATUSES = (STATUS_DONE, STATUS_CANCELLED, STATUS_ERROR, STATUS_OVER_BUDGET)
 
 # A tick that died mid-run (power cut, kill -9) would otherwise leave its
 # lock behind and wedge the scheduler permanently. Any lock older than this
@@ -130,6 +139,15 @@ TOOL_TIMEOUT = 120
 
 MAX_CATCHUP_RUNS = 5
 MAX_JOBS = 500            # a runaway loop creating jobs shouldn't fill the disk
+# History is kept, but not forever: a finished-job pile that grows without a
+# ceiling would slow every load_store() (it is read on every tick) and make the
+# Finished list unreadable. The OLDEST finished jobs fall off first; active
+# jobs are never pruned. MAX_FINISHED_IN_OVERVIEW is how many of them the
+# dashboard payload carries (the rest are still in the store and `sched-list
+# --text --all`).
+MAX_FINISHED_JOBS = 500
+MAX_FINISHED_IN_OVERVIEW = 200
+SUMMARY_RESULT_CHARS = 160   # last_result as shown on a finished row / in list_scheduled
 
 # Both markers cli.py prints to the stdout of a `jarvis ask` invocation for a
 # LIVE session to pick off — JARVIS_USAGE (token/round telemetry) always,
@@ -475,6 +493,7 @@ def create(kind="reminder", title="", when=None, trigger=None, action=None,
         "risk": job_risk.assess(action),
     }
     store["jobs"].append(job)
+    _prune_finished(store)
     save_store(store)
     return job
 
@@ -516,11 +535,62 @@ def get(job_id):
     return None
 
 
+def _finished_sort_key(job):
+    """When a finished job finished, for newest-first ordering. Jobs that
+    finished before `finished_at` existed fall back to their last run, then
+    their creation time, so old history still sorts sensibly."""
+    return job.get("finished_at") or job.get("last_run") or job.get("created_at") or ""
+
+
+def _sync_finished_stamp(job):
+    """Keep `finished_at` true: stamped the first time a job is in a finished
+    status, cleared when it goes back to being active (resume, snooze, an edit
+    that re-arms it). Called wherever a job's status can change."""
+    if not isinstance(job, dict):
+        return
+    if job.get("status") in FINISHED_STATUSES:
+        if not job.get("finished_at"):
+            job["finished_at"] = timespec.to_iso(datetime.now())
+    else:
+        job.pop("finished_at", None)
+
+
+def _prune_finished(store):
+    """Drop the OLDEST finished jobs beyond MAX_FINISHED_JOBS. Active jobs are
+    never touched. Returns how many were dropped."""
+    jobs = store.get("jobs") or []
+    finished = [j for j in jobs if isinstance(j, dict) and j.get("status") in FINISHED_STATUSES]
+    excess = len(finished) - MAX_FINISHED_JOBS
+    if excess <= 0:
+        return 0
+    finished.sort(key=_finished_sort_key)
+    doomed = set(id(j) for j in finished[:excess])
+    store["jobs"] = [j for j in jobs if id(j) not in doomed]
+    return excess
+
+
+def list_finished(kind=None, status=None):
+    """Finished jobs (done / failed / cancelled / over budget), newest first.
+    The history half of the schedule: list_jobs() is what is still going to
+    happen, this is what already did (or was stopped)."""
+    out = []
+    for job in load_store()["jobs"]:
+        if not isinstance(job, dict) or job.get("status") not in FINISHED_STATUSES:
+            continue
+        if kind and job.get("kind") != kind:
+            continue
+        if status and job.get("status") != status:
+            continue
+        out.append(job)
+    return sorted(out, key=_finished_sort_key, reverse=True)
+
+
 def _mutate(job_id, fn):
     store = load_store()
     for job in store["jobs"]:
         if job.get("id") == (job_id or "").strip().lower():
             result = fn(job)
+            _sync_finished_stamp(job)
             save_store(store)
             return result if result is not None else job
     raise SchedulerError("no scheduled job with id %r" % job_id)
@@ -606,6 +676,201 @@ def snooze(job_id, delay_text="10 minutes"):
         if job["trigger"].get("type") == "at":
             job["trigger"]["at"] = job["next_run"]
     return _mutate(job_id, _snooze)
+
+
+# Fields update_job() will change. `action_type` is deliberately absent: turning
+# a notification into a command is a different job, not an edit, and it is the
+# one change that would sidestep what the approval gate looked at.
+EDITABLE_FIELDS = ("title", "kind", "when", "message", "prompt", "command", "tool",
+                   "args", "report", "channels", "level", "max_runs", "catch_up",
+                   "emit_on_done")
+_MAX_EDIT_CHANNELS = 12
+
+
+def _edit_text(changes, key):
+    value = changes.get(key)
+    return "" if value is None else str(value).strip()
+
+
+def update_job(job_id, changes, trusted=False, now=None):
+    """Edit an existing job's fields in place (H.2). Returns the stored job.
+
+    `changes` is a dict of any of EDITABLE_FIELDS; fields it leaves out are
+    kept. It is all-or-nothing: every field is validated on a copy first, so a
+    bad value in the third field leaves the job exactly as it was.
+
+    What can be edited depends on the job: `message` only on a notification or
+    reminder, `prompt` only on an `ask`, `command` on a saved command, `tool`
+    on a tool action, `args` on a command or tool. A done or cancelled job is
+    finished history and refuses edits. A failed / over-budget one can be
+    edited, but is NOT resumed by it -- a person still presses Resume.
+
+    `when` replaces the trigger the same way create() builds one. Leave it out
+    to keep the schedule.
+
+    APPROVAL. Editing what a job RUNS must not be a way around the approval
+    gate. `trusted=True` is the human path (CLI / web panel), like create():
+    the job keeps its status unless it had been approved for a list of kinds
+    and the edited action now contains one it was not approved for. The default
+    (`trusted=False`, any model-facing caller) parks the job at needs_approval
+    whenever the edited action would need approval at creation. Either way the
+    old approval is dropped when the job goes back to needs_approval.
+    """
+    if not isinstance(changes, dict) or not changes:
+        raise SchedulerError("nothing to change -- give at least one of: %s"
+                             % ", ".join(EDITABLE_FIELDS))
+    unknown = sorted(str(k) for k in changes if k not in EDITABLE_FIELDS)
+    if unknown:
+        raise SchedulerError("can't edit %s (editable: %s)"
+                             % (", ".join(unknown), ", ".join(EDITABLE_FIELDS)))
+    now = now or datetime.now()
+
+    def _edit(job):
+        status = job.get("status")
+        if status in (STATUS_DONE, STATUS_CANCELLED):
+            raise SchedulerError("a %s job is finished history and can't be edited -- create a new one"
+                                 % status)
+        work = copy.deepcopy(job)
+        action = work.get("action") if isinstance(work.get("action"), dict) else {}
+        atype = action.get("type")
+        old_text = str(action.get("message") or action.get("prompt")
+                       or action.get("command") or action.get("tool") or "").strip()[:200]
+        action_changed = False
+
+        def need_type(field, *allowed):
+            if atype not in allowed:
+                raise SchedulerError("%s can only be edited on a %s job; this job's action is %r"
+                                     % (field, "/".join(allowed), atype))
+
+        if "kind" in changes:
+            kind = _edit_text(changes, "kind").lower()
+            if kind not in KINDS:
+                raise SchedulerError("kind must be one of %s" % ", ".join(KINDS))
+            work["kind"] = kind
+
+        text_fields = (("message", "notify"), ("prompt", "ask"),
+                       ("command", "command"), ("tool", "tool"))
+        for field, needed in text_fields:
+            if field not in changes:
+                continue
+            need_type(field, needed)
+            text = _edit_text(changes, field)
+            if not text:
+                raise SchedulerError("%s can't be empty" % field)
+            if text != str(action.get(field) or ""):
+                action[field] = text
+                action_changed = True
+
+        if "args" in changes:
+            need_type("args", "command", "tool")
+            args = changes.get("args")
+            if args is None:
+                args = {}
+            if not isinstance(args, dict):
+                raise SchedulerError("args must be a JSON object")
+            if args != (action.get("args") or {}):
+                action["args"] = args
+                action_changed = True
+
+        if "report" in changes:
+            if atype == "notify":
+                raise SchedulerError("report doesn't apply to a notification")
+            action["report"] = bool(changes["report"])
+
+        if "title" in changes:
+            title = _edit_text(changes, "title")
+            if not title:
+                raise SchedulerError("title can't be empty")
+            work["title"] = title[:200]
+        elif action_changed:
+            # A title that was just the old text (what create() derives when no
+            # title is given) follows the new text; a title someone chose stays.
+            new_text = str(action.get("message") or action.get("prompt")
+                           or action.get("command") or action.get("tool") or "").strip()[:200]
+            if old_text and (work.get("title") or "").strip() == old_text and new_text:
+                work["title"] = new_text
+
+        if "when" in changes:
+            text = _edit_text(changes, "when")
+            if not text:
+                raise SchedulerError("when can't be empty -- leave it out to keep the current schedule")
+            trig = normalize_trigger(when=text, now=now)
+            work["trigger"] = trig
+            work["next_run"] = trig.get("at")
+
+        if "channels" in changes:
+            raw = changes.get("channels")
+            if raw is None or raw == "":
+                work["channels"] = None
+            else:
+                if isinstance(raw, str):
+                    raw = [c for c in raw.split(",")]
+                if not isinstance(raw, (list, tuple)):
+                    raise SchedulerError("channels must be a list of channel names")
+                names = []
+                for item in raw:
+                    name = str(item or "").strip().lower()
+                    if name and name not in names:
+                        names.append(name)
+                if len(names) > _MAX_EDIT_CHANNELS:
+                    raise SchedulerError("too many channels")
+                work["channels"] = names or None
+
+        if "level" in changes:
+            level = changes.get("level")
+            if level is None or level == "":
+                work["level"] = None
+            else:
+                try:
+                    level = int(level)
+                except (TypeError, ValueError):
+                    raise SchedulerError("level must be an integer 1-5")
+                if not (1 <= level <= 5):
+                    raise SchedulerError("level must be between 1 and 5")
+                work["level"] = level
+
+        if "max_runs" in changes:
+            runs = changes.get("max_runs")
+            if runs is None or runs == "" or runs == 0:
+                work["max_runs"] = None
+            else:
+                try:
+                    runs = int(runs)
+                except (TypeError, ValueError):
+                    raise SchedulerError("max_runs must be a whole number")
+                if runs < 1:
+                    raise SchedulerError("max_runs must be at least 1")
+                work["max_runs"] = runs
+
+        if "catch_up" in changes:
+            work["catch_up"] = bool(changes["catch_up"])
+
+        if "emit_on_done" in changes:
+            event = changes.get("emit_on_done")
+            work["emit_on_done"] = normalize_event(event) if event else None
+
+        if action_changed and atype != "notify":
+            work["action"] = action
+            risk = job_risk.assess(action)
+            work["risk"] = risk
+            if not trusted:
+                reapprove = _needs_approval(action)
+            else:
+                approved = work.get("approved_kinds")
+                reapprove = isinstance(approved, list) and any(
+                    k not in approved for k in (risk.get("kinds") or []))
+            if reapprove:
+                work["status"] = STATUS_NEEDS_APPROVAL
+                work.pop("approved_at", None)
+                work.pop("approved_kinds", None)
+        elif action_changed:
+            work["action"] = action
+
+        work["updated_at"] = timespec.to_iso(now)
+        job.clear()
+        job.update(work)
+
+    return _mutate(job_id, _edit)
 
 
 def clear_finished():
@@ -805,6 +1070,7 @@ def tick(now=None, startup=False, limit=25):
                     job["last_conv_id"] = outcome["conv_id"]
 
                 _apply_next_state(job, outcome, now)
+                _sync_finished_stamp(job)
 
                 if outcome and outcome.get("ok") and job.get("emit_on_done"):
                     follow_up_events.append(job["emit_on_done"])
@@ -818,6 +1084,7 @@ def tick(now=None, startup=False, limit=25):
                 store["last_tick"] = timespec.to_iso(datetime.now())
                 if startup:
                     store["last_startup_tick"] = store["last_tick"]
+                _prune_finished(store)
                 save_store(store)
 
                 ran.append({
@@ -836,6 +1103,7 @@ def tick(now=None, startup=False, limit=25):
                     job["status"] = STATUS_ERROR
                     job["last_error"] = _trim(detail)
                     job["last_run"] = timespec.to_iso(datetime.now())
+                    _sync_finished_stamp(job)
                     save_store(store)
                 except Exception:  # noqa: BLE001
                     pass  # a store we can't write is not worth dying over either
@@ -1496,6 +1764,13 @@ def summarize(job):
         "run_count": job.get("run_count", 0),
         "last_run": job.get("last_run"),
         "last_error": job.get("last_error"),
+        "created_at": job.get("created_at"),
+        # History (H.2): when it finished and a one-line result, only for jobs
+        # that have finished -- list_scheduled hands these dicts to the model,
+        # and a live job has no result worth the tokens.
+        "finished_at": (_finished_sort_key(job) or None) if job.get("status") in FINISHED_STATUSES else None,
+        "last_result": (_trim_summary(job.get("last_result"))
+                        if job.get("status") in FINISHED_STATUSES else None),
         "token_budget": job.get("token_budget"),
         "needs_approval": job.get("status") == STATUS_NEEDS_APPROVAL,
         # The approval surface's "what is in this job" (job_risk.assess).
@@ -1503,6 +1778,11 @@ def summarize(job):
         # panel never shows a risky job as having nothing in it.
         "risk": risk_of(job),
     }
+
+
+def _trim_summary(text):
+    text = " ".join(str(text or "").split())
+    return text if len(text) <= SUMMARY_RESULT_CHARS else text[:SUMMARY_RESULT_CHARS] + "\u2026"
 
 
 def risk_of(job):
@@ -1515,9 +1795,18 @@ def risk_of(job):
 def overview():
     """Everything a dashboard needs in one read."""
     jobs = list_jobs()
+    finished = list_finished()
     return {
         "jobs": [summarize(j) for j in jobs],
+        # History (H.2): finished jobs, newest first, in their own list so
+        # `jobs` keeps meaning "still scheduled" for every existing consumer.
+        "finished": [summarize(j) for j in finished[:MAX_FINISHED_IN_OVERVIEW]],
         "counts": {
+            "finished": len(finished),
+            "done": len([j for j in finished if j.get("status") == STATUS_DONE]),
+            "failed": len([j for j in finished if j.get("status") == STATUS_ERROR]),
+            "stopped_over_budget": len([j for j in finished if j.get("status") == STATUS_OVER_BUDGET]),
+            "cancelled": len([j for j in finished if j.get("status") == STATUS_CANCELLED]),
             "total": len(jobs),
             "tasks": len([j for j in jobs if j.get("kind") == "task"]),
             "reminders": len([j for j in jobs if j.get("kind") == "reminder"]),

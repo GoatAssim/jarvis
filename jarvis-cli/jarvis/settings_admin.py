@@ -422,7 +422,7 @@ def _validate_ai_config(doc, problems):
         if not isinstance(defaults, dict):
             problems.append("defaults must be an object.")
         else:
-            for field, lo in (("max_tokens", 1), ("scheduled_token_budget", 0),
+            for field, lo in (("max_tokens", 1), ("scheduled_token_budget", 0), ("interactive_token_budget", 0),
                               ("compact_history_char_budget", 100), ("compact_history_exchanges", 0)):
                 if field in defaults:
                     v = defaults[field]

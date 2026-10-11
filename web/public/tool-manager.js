@@ -74,7 +74,8 @@
  *   /api/ctools/drafts[/:key]      the unfinished-tool backups
  *   GET  /api/daemons, PATCH /api/daemons/:id   daemons and their `enabled` flag
  *   GET  /api/personas?all=1, GET /api/tool-ui?all=1   registered personas / shipped screens (incl. switched-off)
- *   POST /api/tools/disabled {kind}  switch a persona or screen off/on
+ *   GET  /api/tool-commands?all=1  the `/` palette commands tool files ship (incl. switched-off)
+ *   POST /api/tools/disabled {kind}  switch a persona, screen or tool command off/on
  *
  * EVERYTHING IS TEXT, NEVER MARKUP
  * --------------------------------
@@ -100,13 +101,13 @@
   ];
   const KEYS = SAFEGUARDS.map((s) => s.key);
 
-  const SOURCE_BUCKETS = { builtin: "shipped", auto: "shipped", mcp: "mcp", user: "user", command: "command", daemon: "daemon", persona: "persona", skin: "skin", ui: "ui" };
-  const SOURCE_LABELS = { shipped: "Shipped", user: "Yours", mcp: "MCP", command: "Command", daemon: "Daemon", persona: "Persona", skin: "Skin", ui: "Screen" };
+  const SOURCE_BUCKETS = { builtin: "shipped", auto: "shipped", mcp: "mcp", user: "user", command: "command", daemon: "daemon", persona: "persona", skin: "skin", ui: "ui", tcmd: "tcmd" };
+  const SOURCE_LABELS = { shipped: "Shipped", user: "Yours", mcp: "MCP", command: "Command", daemon: "Daemon", persona: "Persona", skin: "Skin", ui: "Screen", tcmd: "Tool command" };
   // Kinds that are not tools: they get the switch and a short detail, nothing else.
-  const EXTRA_KINDS = ["daemon", "persona", "skin", "ui", "mcp"];
-  const KIND_NOUN = { tool: "tool", command: "saved command", daemon: "daemon", persona: "persona", skin: "skin", ui: "screen", mcp: "MCP server" };
+  const EXTRA_KINDS = ["daemon", "persona", "skin", "ui", "mcp", "tcmd"];
+  const KIND_NOUN = { tool: "tool", command: "saved command", daemon: "daemon", persona: "persona", skin: "skin", ui: "screen", mcp: "MCP server", tcmd: "tool command" };
   // Buckets drawn with the "info" colour (everything that is not a plain tool).
-  const INFO_BUCKETS = ["mcp", "command", "daemon", "persona", "skin", "ui"];
+  const INFO_BUCKETS = ["mcp", "command", "daemon", "persona", "skin", "ui", "tcmd"];
   // Row states: loaded | off (switched off by you) | fileoff (its file is switched
   // off) | pending (valid file, not loaded yet) | failed (file rejected).
   const OFF_STATES = ["off", "fileoff"];
@@ -123,6 +124,7 @@
     if (id === "personas") return "Personas";
     if (id === "skins") return "Skins";
     if (id === "ui_elements") return "Screens";
+    if (id === "tool_commands") return "Tool commands";
     if (id === "mcp_servers") return "MCP servers";
     return String(id || "other").replace(/_/g, " ");
   }
@@ -140,6 +142,7 @@
       case "persona": return x.builtin ? "Ships with Jarvis (web/public/app.js)" : (x.file ? "Tool file: " + x.file : "A tool file");
       case "skin": return x.skinKind === "preset" ? "Ships with Jarvis: accent swatch (web/public/app.js)" : "Ships with Jarvis: built-in theme (web/public/ui-kit.js)";
       case "ui": return x.file ? "Tool file: " + x.file : "A tool file";
+      case "tcmd": return x.file ? "Tool file: " + x.file + " (TOOL_COMMANDS)" : "A tool file (TOOL_COMMANDS)";
       case "mcp": return "MCP server (Menu → MCP Servers)";
       case "broken": return row.file ? "Your file: ~/.jarvis/tools/" + row.file : "Your file";
       default:
@@ -258,6 +261,17 @@
         flags: null, defaults: null, parameters: {}, extra: u,
       });
     });
+    // Palette commands tool files ship (TOOL_COMMANDS; the `/` palette words). Off when the
+    // owner switched the command off OR its tool is off (`disabled`); `switched_off` is the
+    // owner's own switch and `disabled_by_tool` marks "off only because its tool is".
+    (Array.isArray(ex.toolCommands) ? ex.toolCommands : []).forEach((c) => {
+      if (!c || typeof c.name !== "string" || !c.name) return;
+      rows.push({
+        id: "k:" + c.name, kind: "tcmd", state: c.disabled ? "off" : "loaded", name: c.name, protectedReason: "",
+        description: c.summary || c.description || "", source: "tcmd", group: "tool_commands", file: c.file || "", userFile: null, error: "",
+        flags: null, defaults: null, parameters: {}, extra: c,
+      });
+    });
     // Whole MCP servers (the same on/off as Menu → MCP Servers). `ex.mcpServers` is the
     // `servers` array of /api/mcp; a server is "off" when it is disabled in the MCP config.
     (Array.isArray(ex.mcpServers) ? ex.mcpServers : []).forEach((m) => {
@@ -326,7 +340,7 @@
     out.off = rows.filter((r) => r.kind === "tool" && isOff(r)).length;
     out.commands = rows.filter((r) => r.kind === "command").length;
     out.commandsOff = rows.filter((r) => r.kind === "command" && isOff(r)).length;
-    out.extraOff = { daemon: 0, persona: 0, skin: 0, ui: 0, mcp: 0 };
+    out.extraOff = { daemon: 0, persona: 0, skin: 0, ui: 0, mcp: 0, tcmd: 0 };
     rows.forEach((r) => { if (EXTRA_KINDS.includes(r.kind) && isOff(r)) out.extraOff[r.kind] += 1; });
     KEYS.forEach((k) => { out[k] = loaded.filter((r) => r.flags[k]).length; });
     out.bySource = { shipped: 0, user: 0, mcp: 0, command: 0 };
@@ -375,6 +389,9 @@
     if (row.kind === "ui") {
       return "Switch off and this button or Menu entry disappears, and its page is no longer served. The tool it belongs to keeps working.";
     }
+    if (row.kind === "tcmd") {
+      return "Switch off and this word no longer works in the / palette, and a request to run it is refused. The tool it runs keeps working for Jarvis and for you.";
+    }
     if (row.kind === "mcp") {
       return "Switch off and this whole server is disabled in your MCP config: every tool it supplies leaves Jarvis’s catalog at once and nothing connects to it. Its definition is kept. This is the same switch as Menu → MCP Servers.";
     }
@@ -396,6 +413,11 @@
       return row.extra && row.extra.disabled_by_tool
         ? "Its button or Menu entry is gone and its page isn’t served, because every tool in its file is switched off. Switch one of those tools on and it returns."
         : "Its button or Menu entry is gone and its page isn’t served.";
+    }
+    if (row && row.kind === "tcmd") {
+      return row.extra && row.extra.disabled_by_tool
+        ? "It is gone from the / palette and a request to run it is refused, because its tool (or every tool in its file) is switched off. Switch the tool on and it returns."
+        : "It is gone from the / palette and a request to run it is refused. The tool it runs is untouched.";
     }
     if (row && row.kind === "mcp") return "Its tools are gone from Jarvis’s catalog and nothing connects to it. Its definition stays in your MCP config; switch it on to read its tool list again.";
     if (row && row.kind === "command") {
@@ -432,6 +454,7 @@
     if (eo.persona) parts.push(eo.persona + (eo.persona === 1 ? " persona" : " personas"));
     if (eo.skin) parts.push(eo.skin + (eo.skin === 1 ? " skin" : " skins"));
     if (eo.ui) parts.push(eo.ui + (eo.ui === 1 ? " screen" : " screens"));
+    if (eo.tcmd) parts.push(eo.tcmd + (eo.tcmd === 1 ? " tool command" : " tool commands"));
     if (eo.mcp) parts.push(eo.mcp + (eo.mcp === 1 ? " MCP server" : " MCP servers"));
     return parts.join(", ");
   }
@@ -628,7 +651,7 @@
     built: false, loading: false, tools: null, files: [], templates: [], rows: [],
     commands: null, disabledCommands: [], toolsError: "", filesError: "", commandsError: "",
     disabledPersonas: [], disabledSkins: [],                      // /api/disabled: persona ids and skin ids switched off
-    daemons: [], personas: [], uiElements: [], mcpServers: [], extrasError: "",   // the non-tool rows: daemons, tool-registered personas, shipped screens
+    daemons: [], personas: [], uiElements: [], toolCommands: [], mcpServers: [], extrasError: "",   // the non-tool rows: daemons, tool-registered personas, shipped screens
     drafts: [], draftsError: "",                                  // backups of tools still being written (see "UNFINISHED TOOLS")
     selected: null, view: "tool",
     search: "", source: "all", group: "all", safeguard: "any",
@@ -730,16 +753,16 @@
   /* ---- list ---------------------------------------------------------------- */
 
   function renderChips() {
-    const counts = { all: state.rows.length, shipped: 0, user: 0, mcp: 0, command: 0, daemon: 0, persona: 0, skin: 0, ui: 0, off: 0, attention: 0 };
+    const counts = { all: state.rows.length, shipped: 0, user: 0, mcp: 0, command: 0, daemon: 0, persona: 0, skin: 0, ui: 0, tcmd: 0, off: 0, attention: 0 };
     state.rows.forEach((r) => {
       counts[bucketOf(r.source)] += 1;
       if (isOff(r)) counts.off += 1;
       if (needsAttention(r)) counts.attention += 1;
     });
-    const defs = [["all", "All"], ["shipped", "Shipped"], ["user", "Yours"], ["mcp", "MCP"], ["command", "Commands"], ["daemon", "Daemons"], ["persona", "Personas"], ["skin", "Skins"], ["ui", "Screens"], ["off", "Off"], ["attention", "Attention"]];
+    const defs = [["all", "All"], ["shipped", "Shipped"], ["user", "Yours"], ["mcp", "MCP"], ["command", "Commands"], ["daemon", "Daemons"], ["persona", "Personas"], ["skin", "Skins"], ["ui", "Screens"], ["tcmd", "Tool commands"], ["off", "Off"], ["attention", "Attention"]];
     clear(dom.chips);
     defs.forEach(([id, label]) => {
-      if (["mcp", "command", "daemon", "persona", "skin", "ui", "off", "attention"].includes(id) && !counts[id] && state.source !== id) return;
+      if (["mcp", "command", "daemon", "persona", "skin", "ui", "tcmd", "off", "attention"].includes(id) && !counts[id] && state.source !== id) return;
       dom.chips.appendChild(el("button", {
         class: "tm-chip" + (id === "attention" ? " tm-chip--bad" : ""), type: "button",
         "aria-pressed": state.source === id ? "true" : "false",
@@ -870,7 +893,7 @@
   function availabilityRow(row) {
     const on = row.state !== "off";
     const eligible = row.state === "loaded" || row.state === "off";
-    const byTool = row.kind === "ui" && !!(row.extra && row.extra.disabled_by_tool);
+    const byTool = (row.kind === "ui" || row.kind === "tcmd") && !!(row.extra && row.extra.disabled_by_tool);
     const locked = !!row.protectedReason || !eligible || byTool;
     const busy = state.busy.has(row.id + ":enabled");
     const hintId = "tm-hint-enabled";
@@ -880,7 +903,9 @@
       el("div", { class: "tm-sw-hint", id: hintId }, availabilityHint(row)),
     ]);
     if (row.protectedReason) body.appendChild(el("div", { class: "tm-sw-note" }, "This one can’t be switched off. " + row.protectedReason));
-    else if (byTool) body.appendChild(el("div", { class: "tm-sw-note" }, "Off because every tool in its file is switched off. Switch one of them on to bring it back."));
+    else if (byTool) body.appendChild(el("div", { class: "tm-sw-note" }, row.kind === "tcmd"
+      ? "Off because its tool is switched off. Switch the tool on to bring it back."
+      : "Off because every tool in its file is switched off. Switch one of them on to bring it back."));
     else if (row.state === "fileoff") body.appendChild(el("div", { class: "tm-sw-note" }, "Its file is switched off, so Jarvis can’t use it either way. Turn the file on below."));
     else if (row.state === "pending") body.appendChild(el("div", { class: "tm-sw-note" }, "Not loaded yet. Refresh to pick it up."));
     return el("div", { class: "tm-sw-row" + (on && eligible ? " is-on" : "") + (locked ? " is-locked" : ""), "data-k": "enabled" }, [
@@ -925,7 +950,7 @@
     const d = dom.detail;
     clear(d);
     setText(dom.midTitle, row.kind === "broken" ? "Rejected file" : row.kind === "command" ? "Saved command"
-      : row.kind === "daemon" ? "Daemon" : row.kind === "persona" ? "Persona" : row.kind === "ui" ? "Screen" : row.kind === "mcp" ? "MCP server" : "Tool");
+      : row.kind === "daemon" ? "Daemon" : row.kind === "persona" ? "Persona" : row.kind === "ui" ? "Screen" : row.kind === "tcmd" ? "Tool command" : row.kind === "mcp" ? "MCP server" : "Tool");
     if (row.kind === "command") { renderCommandDetail(row); return; }
     if (EXTRA_KINDS.includes(row.kind)) { renderExtraDetail(row); return; }
 
@@ -1028,12 +1053,13 @@
       if (x.status) badges.push(tag(String(x.status), x.running ? "info" : ""));
     }
     if (row.kind === "ui") badges.push(tag(x.mode === "menu" ? "Menu entry" : "button"));
+    if (row.kind === "tcmd") badges.push(tag(String(x.riskTier || "dangerous"), x.riskTier === "safe" ? "info" : ""));
     if (row.kind === "mcp") {
       badges.push(tag(String(x.state || (x.enabled ? "on" : "disabled")), x.state === "ok" ? "info" : ""));
       badges.push(tag((x.tool_count || 0) + ((x.tool_count || 0) === 1 ? " tool" : " tools")));
     }
     d.appendChild(el("div", null, [
-      el("div", { class: "tm-title" }, row.kind === "mcp" ? row.name : row.kind === "daemon" ? (x.name || row.name) : (row.kind === "persona" || row.kind === "skin") ? (x.name || row.name) : (x.label || row.name)),
+      el("div", { class: "tm-title" }, row.kind === "mcp" ? row.name : row.kind === "tcmd" ? "/" + row.name : row.kind === "daemon" ? (x.name || row.name) : (row.kind === "persona" || row.kind === "skin") ? (x.name || row.name) : (x.label || row.name)),
       el("div", { class: "tm-origin" }, [el("span", { class: "tm-origin__k" }, "Source"), originOf(row)]),
       el("div", { class: "tm-does" + (row.description ? "" : " is-empty") }, row.description || "No description."),
       el("div", { class: "tm-badges" }, badges),
@@ -1047,6 +1073,9 @@
     }
     if (row.kind === "ui" && x.disabled_by_tool) {
       d.appendChild(el("div", { class: "tm-note" }, [el("b", null, "Off because its tool is off. "), "Every tool in its file is switched off. Switch one of them on to bring this back."]));
+    }
+    if (row.kind === "tcmd" && x.disabled_by_tool) {
+      d.appendChild(el("div", { class: "tm-note" }, [el("b", null, "Off because its tool is off. "), "The command runs " + (x.tool || "its tool") + ", and that tool (or every tool in its file) is switched off. Switch it on to bring this back."]));
     }
     d.appendChild(el("div", null, [
       sectionTitle("What this means"),
@@ -1067,6 +1096,12 @@
         ["Last error", x.error || ""],
       ])]));
       d.appendChild(el("div", { class: "tm-actions" }, [el("button", { class: "btn btn--ghost btn--sm", type: "button", onclick: () => { close(); if (global.JarvisMcp) global.JarvisMcp.open(); } }, "Open MCP Servers")]));
+    } else if (row.kind === "tcmd") {
+      d.appendChild(el("div", null, [sectionTitle("Details"), infoRows([
+        ["Typed as", "/" + row.name + (x.usage ? " " + x.usage : "")], ["Runs the tool", x.tool || ""], ["Declared in", x.file || ""],
+        ["Risk label", (x.riskTier || "dangerous") + (x.declaredTier ? "" : " (none declared, so it asks first)")],
+        ["Example", x.example || ""], ["Why it is off", x.disabled ? (x.disabled_reason || "") : ""],
+      ])]));
     } else if (row.kind === "persona") {
       d.appendChild(el("div", null, [sectionTitle("Details"), infoRows([
         ["Id", row.name], ["Assistant name", x.assistant_name], ["Addresses you as", x.address_user_as], ["Colour", x.hex],
@@ -1325,7 +1360,7 @@
     const token = row.id + ":enabled";
     if (state.busy.has(token) || row.protectedReason) return;
     if (row.state !== "loaded" && row.state !== "off") return;
-    if (row.kind === "ui" && row.extra && row.extra.disabled_by_tool) return;   // follows its tool
+    if ((row.kind === "ui" || row.kind === "tcmd") && row.extra && row.extra.disabled_by_tool) return;   // follows its tool
     const kind = row.kind === "command" ? "command" : EXTRA_KINDS.includes(row.kind) ? row.kind : "tool";
     const what = KIND_NOUN[kind] || "tool";
     if (!available && (kind === "tool" || kind === "command")) {
@@ -1371,18 +1406,31 @@
       } else if (kind === "daemon") {
         // A daemon's own `enabled` flag (the Daemons panel edits the same one), not a second copy.
         await api("/api/daemons/" + encodeURIComponent(row.name), { method: "PATCH", body: JSON.stringify({ enabled: available }) });
-      } else if (kind === "persona" || kind === "skin" || kind === "ui") {
-        await api("/api/tools/disabled", { method: "POST", body: JSON.stringify({ name: row.name, value: !available, kind }) });
+      } else if (kind === "persona" || kind === "skin" || kind === "ui" || kind === "tcmd") {
+        // The server's kind for a palette command is "tool-command" (a saved command is "command").
+        await api("/api/tools/disabled", { method: "POST", body: JSON.stringify({ name: row.name, value: !available, kind: kind === "tcmd" ? "tool-command" : kind }) });
       } else {
         const path = kind === "command" ? "/api/commands/" + encodeURIComponent(row.name) + "/disabled" : "/api/tools/disabled";
         switched = await api(path, { method: "POST", body: JSON.stringify({ name: row.name, value: !available }) });
       }
       row.state = available ? "loaded" : "off";
-      if (row.extra) row.extra = Object.assign({}, row.extra, kind === "daemon" ? { enabled: available } : { disabled: !available });
+      if (row.extra) row.extra = Object.assign({}, row.extra, kind === "daemon" ? { enabled: available } : kind === "tcmd" ? { disabled: !available, switched_off: !available } : { disabled: !available });
       // The rest of the app reads these once; tell it.
       if (kind === "ui" && global.JarvisToolUI) global.JarvisToolUI.refresh();
+      // A palette command: the / palette keeps its own copy of the list, and the command may
+      // still be off for its tool's sake after the owner's switch is cleared, so re-read it.
+      if (kind === "tcmd") {
+        await refreshExtraRows();
+        const fresh = state.rows.find((r) => r.id === row.id);
+        if (fresh) { row.state = fresh.state; row.extra = fresh.extra; }
+        if (global.JarvisSlash && global.JarvisSlash.loadToolCommands) global.JarvisSlash.loadToolCommands(true);
+      }
       // A tool's switch can take its file's screens and daemons with it (or give them back): re-read them.
-      if (kind === "tool") { await refreshExtraRows(); if (global.JarvisToolUI) global.JarvisToolUI.refresh(); }
+      if (kind === "tool") {
+        await refreshExtraRows();
+        if (global.JarvisToolUI) global.JarvisToolUI.refresh();
+        if (global.JarvisSlash && global.JarvisSlash.loadToolCommands) global.JarvisSlash.loadToolCommands(true);   // its commands follow it
+      }
       // A whole server changes the tool catalogue.
       if (kind === "mcp") await loadAll({ quiet: true, keepView: true });
       // Personas (built-in or registered) and skins are drawn by the Skin modal, which reads the off lists once.
@@ -1416,14 +1464,15 @@
 
   function rebuildRows() {
     state.rows = buildRows(state.toolsError ? [] : state.tools, state.files, state.commandsError ? null : state.commands, state.disabledCommands,
-      { daemons: state.daemons, personas: state.personas, ui: state.uiElements, mcpServers: state.mcpServers, ...skinExtras() });
+      { daemons: state.daemons, personas: state.personas, ui: state.uiElements, toolCommands: state.toolCommands, mcpServers: state.mcpServers, ...skinExtras() });
   }
 
   // Re-read the daemon and screen rows only (a tool switch can change both; Q-L46m).
   async function refreshExtraRows() {
-    const [daemons, uiEls] = await Promise.allSettled([api("/api/daemons"), api("/api/tool-ui?all=1")]);
+    const [daemons, uiEls, tcmds] = await Promise.allSettled([api("/api/daemons"), api("/api/tool-ui?all=1"), api("/api/tool-commands?all=1")]);
     if (daemons.status === "fulfilled") state.daemons = (daemons.value && daemons.value.daemons) || [];
     if (uiEls.status === "fulfilled") state.uiElements = (uiEls.value && uiEls.value.ui) || [];
+    if (tcmds.status === "fulfilled") state.toolCommands = (tcmds.value && tcmds.value.commands) || [];
     rebuildRows();
   }
 
@@ -2476,10 +2525,10 @@
     if (!dom) return;
     state.loading = true;
     if (!opts.quiet) { setStatusLine("reading the catalogue…"); dom.refresh.disabled = true; }
-    const [tools, files, templates, commands, disabled, daemons, personas, uiEls, drafts, mcp] = await Promise.allSettled([
+    const [tools, files, templates, commands, disabled, daemons, personas, uiEls, drafts, mcp, tcmds] = await Promise.allSettled([
       api("/api/tools"), ctools(""), state.templates.length ? Promise.resolve(null) : ctools("/templates"),
       api("/api/commands"), api("/api/disabled"),
-      api("/api/daemons"), api("/api/personas?all=1"), api("/api/tool-ui?all=1"), ctools("/drafts"), api("/api/mcp"),
+      api("/api/daemons"), api("/api/personas?all=1"), api("/api/tool-ui?all=1"), ctools("/drafts"), api("/api/mcp"), api("/api/tool-commands?all=1"),
     ]);
     state.loading = false;
     dom.refresh.disabled = false;
@@ -2504,6 +2553,7 @@
     if (daemons.status === "fulfilled") state.daemons = (daemons.value && daemons.value.daemons) || []; else failedExtras.push("daemons");
     if (personas.status === "fulfilled") state.personas = (personas.value && personas.value.personas) || []; else failedExtras.push("personas");
     if (uiEls.status === "fulfilled") state.uiElements = (uiEls.value && uiEls.value.ui) || []; else failedExtras.push("screens");
+    if (tcmds.status === "fulfilled") state.toolCommands = (tcmds.value && tcmds.value.commands) || []; else failedExtras.push("tool commands");
     if (mcp.status === "fulfilled") state.mcpServers = (mcp.value && mcp.value.servers) || []; else failedExtras.push("MCP servers");
     state.extrasError = failedExtras.length ? failedExtras.join(", ") : "";
     state.draftsError = drafts.status === "rejected" ? String(drafts.reason && drafts.reason.message || drafts.reason) : "";

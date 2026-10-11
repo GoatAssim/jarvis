@@ -95,6 +95,7 @@
     dm: P('<rect x="3" y="5" width="18" height="14" rx="2"/><path d="m3.5 7 8.5 6 8.5-6"/>'),
     reply: P('<path d="M21 12a8 8 0 0 1-11.6 7.1L4 20.5l1.5-4.7A8 8 0 1 1 21 12Z"/><path d="M8.5 11h7M8.5 14h4"/>'),
     tool: P('<path d="M14.7 6.3a4 4 0 0 0-5.4 5.2L3.5 17.3a1.9 1.9 0 0 0 2.7 2.7l5.8-5.8a4 4 0 0 0 5.2-5.4l-2.5 2.5-2.4-.6-.6-2.4 2.5-2.5Z"/>'),
+    thinking: P('<path d="M12 3a6 6 0 0 0-3.6 10.8V16h7.2v-2.2A6 6 0 0 0 12 3Z"/><path d="M9.5 19h5M10.5 21.5h3"/>'),
     send_dm: P('<path d="m21 3-9.5 9.5"/><path d="M21 3 14.5 21l-3-8.5L3 9.5 21 3Z"/>'),
     owner: P('<path d="M3 8l4.5 4L12 5l4.5 7L21 8l-2 11H5L3 8Z"/><path d="M5 19h14"/>'),
     blocked: P('<circle cx="12" cy="12" r="9"/><path d="m5.7 5.7 12.6 12.6"/>'),
@@ -641,6 +642,25 @@
       state.busy.delete(bkey);
       renderDetail();
       return;
+    }
+    state.busy.delete(bkey);
+    await load(true);
+  }
+
+  // The owner's thinking setting for one person (L.44). `value` is "on", "off" or
+  // "default" (clears it); `lock` stops the person changing it with /thinking in
+  // chat. The server refuses the owner's own account; the CLI does the work.
+  async function saveThinking(p, value, lock) {
+    const bkey = `${pkey(p)}|thinking`;
+    state.busy.add(bkey);
+    renderDetail();
+    try {
+      const out = await personPost(p, "thinking", value === "default" ? { value } : { value, lock: !!lock });
+      toast(value === "default" ? "Thinking is back to the default for them."
+        : `Thinking is ${value}${lock ? " and locked" : ""} for ${displayName(p)}.`, "success");
+      if (out && out.note) toast(out.note, "info");
+    } catch (err) {
+      toast(err.message || "Couldn't save the thinking setting.", "error");
     }
     state.busy.delete(bkey);
     await load(true);
@@ -1691,7 +1711,7 @@
       locked: p.owner ? "This is the owner — your own pictures are always read." : lockFor(p.image, "picture"),
       notes: p.owner ? [] : imgNotes,
     });
-    pane.appendChild(el("div", null, [el("div", { class: "ch-section-title" }, "Capabilities"), el("div", { class: "ch-rows" }, [toolsRow, imagesRow])]));
+    pane.appendChild(el("div", null, [el("div", { class: "ch-section-title" }, "Capabilities"), el("div", { class: "ch-rows" }, [toolsRow, imagesRow, thinkingRow(p)])]));
 
     // --- Authority
     const sendLocked = p.owner ? "This is the owner's own account — Jarvis reaches you with notifications, not DMs." : blockedLock;
@@ -1716,6 +1736,52 @@
       ]),
     ]));
     return pane;
+  }
+
+  // L.44: how much Jarvis reasons when it answers this person, and whether they
+  // may change it themselves with /thinking in chat. This is the LEVEL only: no
+  // one but the owner is ever shown Jarvis's reasoning (L.42.2 sends the trace to
+  // the owner's own chat when they type /thinking on). Not a permission grant: it
+  // can only change how much a reply costs. The owner has no setting here.
+  function thinkingRow(p) {
+    const value = p.thinking === "on" || p.thinking === "off" ? p.thinking : "default";
+    const lock = !!p.thinking_lock;
+    const busy = state.busy.has(`${pkey(p)}|thinking`);
+    const disabled = !!p.owner || busy;
+    const row = el("div", {
+      class: "ch-row ch-row--tools" + (value === "on" ? " is-on" : "") + (busy ? " is-busy" : ""),
+      "data-ch": value === "on" ? "limited" : "off", "data-flag": "thinking",
+    });
+    row.appendChild(el("div", { class: "ch-row__icon" }, [icon("thinking")]));
+    const tags = [];
+    if (!p.owner && value !== "default") tags.push(tag(lock ? `${value}, locked` : value, value === "on" ? "limited" : "off"));
+    const body = el("div", null, [
+      el("div", { class: "ch-row__label" }, ["Thinking", ...tags]),
+      el("div", { class: "ch-row__hint" }, "How much Jarvis reasons when it answers this person. Default leaves chat as it was; On asks for reasoning (costs more tokens); Off asks for none. They are never shown Jarvis's reasoning \u2014 only you can see that, with /thinking on in your own chat."),
+    ]);
+    if (p.owner) {
+      body.appendChild(noteLine("This is the owner \u2014 never limited. Type /thinking on in this chat to see Jarvis's reasoning after each reply.", "info"));
+    } else {
+      const pick = (v, label) => el("button", {
+        type: "button", role: "radio", "aria-checked": value === v ? "true" : "false",
+        disabled: disabled ? "" : null,
+        onclick: () => { if (v !== value) saveThinking(p, v, v === "default" ? false : lock); },
+      }, label);
+      const lockBox = el("input", {
+        type: "checkbox", id: `ch-think-lock-${pkey(p)}`, checked: lock ? "checked" : null,
+        disabled: disabled || value === "default" ? "" : null,
+        onchange: (ev) => saveThinking(p, value, ev.target.checked),
+      });
+      lockBox.checked = lock;
+      body.appendChild(el("div", { class: "ch-thinking" }, [
+        el("div", { class: "ch-seg", role: "radiogroup", "aria-label": "Thinking for this person" },
+          [pick("default", "Default"), pick("on", "On"), pick("off", "Off")]),
+        el("label", { class: "ch-thinking__lock", for: `ch-think-lock-${pkey(p)}` },
+          [lockBox, el("span", null, "They can't change it with /thinking")]),
+      ]));
+    }
+    row.appendChild(body);
+    return row;
   }
 
   function savebar(p) {
@@ -3560,7 +3626,7 @@
   // _pure: the logic with no DOM, for tests/verify_channels_panel.js.
   global.JarvisChannels = {
     open, close,
-    _pure: { initials, hueFor, relTime, filterPeople, postureOf, sameScope, scopeOf, groupTools, displayName, STATE_FILTERS,
+    _pure: { initials, hueFor, relTime, filterPeople, postureOf, sameScope, scopeOf, groupTools, displayName, STATE_FILTERS, thinkingRow,
              dayOf, clockOf, localDay, dayLabel, groupByDay, fmtTokens, barModel, convNote, summaryText,
              toolCallsLabel, untilLeft, TIME_LIMITS,
              stateFilterOptions, guildIdOk, guildName, guildChoices, guildPick,

@@ -5603,6 +5603,13 @@
       setSpeakingButton(null);
       return;
     }
+    // I-B11: both Speak paths (the button, and the speak-back after a mic turn)
+    // arrive here with the raw markdown, so this is the one place fenced code
+    // is dropped (spoken as "Code block omitted."). Degrades to the raw text if
+    // rich-text.js didn't load.
+    if (window.JarvisRich && typeof window.JarvisRich.speechText === "function") {
+      text = window.JarvisRich.speechText(text);
+    }
     if (!text || !text.trim()) {
       toast("Nothing to speak.");
       return;
@@ -7301,10 +7308,11 @@
     const direction = (qs("#logs-filter-direction")?.value || "").trim();
     const origin = (qs("#logs-filter-origin")?.value || "").trim();
     const source = (qs("#logs-filter-source")?.value || "").trim();
+    const task = (qs("#logs-filter-task")?.value || "").trim();
     const hits = state.logsHits && state.logsHits.convId === state.logsSelected ? state.logsHits.keys : null;
-    if (!direction && !origin && !source && !hits) return null;
+    if (!direction && !origin && !source && !task && !hits) return null;
     const convo = state.logsConvos.find((c) => c.id === state.logsSelected);
-    return { direction, origin, source, hits, convOrigin: (convo && convo.origin) || "" };
+    return { direction, origin, source, task, hits, convOrigin: (convo && convo.origin) || "" };
   }
 
   // ---- Logs overlay's Settings pane: per-API-key breakdown -----------------
@@ -7500,13 +7508,17 @@
     list.appendChild(el("div", { class: "debug-empty" }, "Searching…"));
     let data;
     try {
-      const params = new URLSearchParams({ q: query, mode: state.logsSearchMode || "words" });
+      const params = new URLSearchParams({ mode: state.logsSearchMode || "words" });
+      if (query) params.set("q", query);
       const direction = qs("#logs-filter-direction")?.value;
       if (direction) params.append("direction", direction);
       const origin = (qs("#logs-filter-origin")?.value || "").trim();
       if (origin) params.append("origin", origin);
       const source = (qs("#logs-filter-source")?.value || "").trim();
       if (source) params.append("source", source);
+      // L.3.4: only entries that belong to this scheduled task.
+      const task = (qs("#logs-filter-task")?.value || "").trim();
+      if (task) params.append("task", task);
       const res = await fetch(`/api/logs-search?${params}`);
       data = await res.json();
       if (!res.ok || data.error) throw new Error(data.error || "search failed");
@@ -7519,8 +7531,10 @@
     const results = data.results || [];
     state.logsHits = null;
     if (!results.length) {
+      const taskNow = (qs("#logs-filter-task")?.value || "").trim();
       list.appendChild(el("div", { class: "debug-empty" },
-        `No log entries match "${query}".`));
+        query ? `No log entries match "${query}"${taskNow ? ` for task "${taskNow}"` : ""}.`
+              : `No log entries belong to a task matching "${taskNow}".`));
       return;
     }
     list.appendChild(el("div", { class: "logs-search-summary" },
@@ -7558,7 +7572,9 @@
   logsSearchInput.addEventListener("keydown", (e) => {
     if (e.key !== "Enter") return;
     const query = e.target.value.trim();
-    if (query) runDeepLogSearch(query);
+    // L.3.4: an empty box with a task filter set is still a search ("everything
+    // this task logged"); empty with no task clears the search as before.
+    if (query || (qs("#logs-filter-task")?.value || "").trim()) runDeepLogSearch(query);
     else { state.logsHits = null; renderLogsConvoList(); if (state.logsSelected) renderLogsEntries(); }
   });
 
@@ -7570,10 +7586,10 @@
   // Changing a filter re-runs the deep search immediately if one is active
   // (the search box holds a query, not just the instant local title
   // filter) — matching a change of "mode" doing the same elsewhere.
-  for (const id of ["logs-filter-direction", "logs-filter-origin", "logs-filter-source"]) {
+  for (const id of ["logs-filter-direction", "logs-filter-origin", "logs-filter-source", "logs-filter-task"]) {
     qs(`#${id}`)?.addEventListener("change", () => {
       const query = logsSearchInput.value.trim();
-      if (query) runDeepLogSearch(query);
+      if (query || (id === "logs-filter-task" && (qs("#logs-filter-task")?.value || "").trim())) runDeepLogSearch(query);
     });
     // L.2.7: the Conversation view applies the same direction/source filters
     // to the conversation that's open, live — no search needed.

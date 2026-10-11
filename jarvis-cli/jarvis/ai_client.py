@@ -1612,6 +1612,15 @@ _REPEAT_FAILURE_DETECTORS = [
 SCHEDULED_TOKEN_BUDGET_DEFAULT = 30000
 TOKEN_BUDGET_ENV = "JARVIS_TOKEN_BUDGET"
 
+# L.24 T4 (the interactive half): the same per-ask ledger, for an ask with a
+# person watching. OFF by default -- and that is a decision, not an omission: an
+# interactive ask legitimately costs anything from 1K to the 56K measured on
+# 81b52bb561796954, a dev_agent turn can cost more, and I have no number of the
+# owner's to anchor a default to. It exists so a limit can be set
+# (defaults.interactive_token_budget, Settings > Advanced) once the owner has
+# picked one; until then nothing changes for an interactive ask.
+INTERACTIVE_TOKEN_BUDGET_DEFAULT = 0
+
 
 def _token_budget_limit(defaults):
     """Tokens one ask() may spend, or None for no limit. Only an UNATTENDED run
@@ -1620,7 +1629,7 @@ def _token_budget_limit(defaults):
     is never cut off. An unreadable setting falls back to the default rather
     than to "no limit": a typo must not switch the protection off."""
     if policy.unattended_context_from_env() is None:
-        return None
+        return _interactive_token_limit(defaults)
     raw = os.environ.get(TOKEN_BUDGET_ENV)
     if raw is None or not str(raw).strip():
         raw = (defaults or {}).get("scheduled_token_budget", SCHEDULED_TOKEN_BUDGET_DEFAULT)
@@ -1631,7 +1640,23 @@ def _token_budget_limit(defaults):
     return value if value > 0 else None
 
 
-def _token_budget_reply(budget, runs):
+def _interactive_token_limit(defaults):
+    """Tokens one INTERACTIVE ask() may spend (defaults.interactive_token_budget),
+    or None. Unlike the scheduled limit an unreadable value means "no limit":
+    this one's default is off, so a typo returns it to its default.
+    JARVIS_TOKEN_BUDGET is deliberately not read here -- it is the per-run knob
+    the scheduler sets for a job."""
+    raw = (defaults or {}).get("interactive_token_budget", INTERACTIVE_TOKEN_BUDGET_DEFAULT)
+    if isinstance(raw, bool):
+        return None
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        return None
+    return value if value > 0 else None
+
+
+def _token_budget_reply(budget, runs, interactive=False):
     """The one-paragraph report for a run stopped over its token limit. It is
     what the scheduler's notification carries, so it says what happened, what
     ran, and which setting to change -- and never offers to "go ahead"."""
@@ -1640,14 +1665,16 @@ def _token_budget_reply(budget, runs):
         name = r.get("name") or ""
         if name and name not in _DISCOVERY_ONLY_TOOLS and name not in ran:
             ran.append(name)
-    line = ("Stopped: this scheduled run used %s tokens, over its limit of %s, so it was "
-            "ended before it finished." % (format(budget.used, ","), format(budget.limit or 0, ",")))
+    what = "request" if interactive else "scheduled run"
+    line = ("Stopped: this %s used %s tokens, over its limit of %s, so it was "
+            "ended before it finished." % (what, format(budget.used, ","), format(budget.limit or 0, ",")))
     if ran:
         line += " It had run: %s." % ", ".join(ran[:6])
     else:
         line += " Nothing had run yet."
-    line += (" To allow more, raise defaults.scheduled_token_budget in the AI config "
-             "(0 turns the limit off).")
+    line += (" To allow more, raise defaults.%s in the AI config "
+             "(0 turns the limit off)." % ("interactive_token_budget" if interactive
+                                           else "scheduled_token_budget"))
     return line
 
 
@@ -3680,6 +3707,8 @@ def _ask_impl(user_text, commands=None, on_attempt=None, on_tool_call=None, on_t
     # ledger on the way out.
     token_budget = ai_providers.TokenBudget(_token_budget_limit(_defaults))
     ai_providers.set_token_budget(token_budget)
+    # L.24 T2 metric: the per-ask total reports how many rounds went on discovery.
+    ask_usage.bind_rounds(round_budget)
 
     tool_executor = _make_tool_executor(
         on_tool_call, full_schemas, on_confirm_request=on_confirm_request,
@@ -4184,7 +4213,8 @@ def _ask_impl(user_text, commands=None, on_attempt=None, on_tool_call=None, on_t
         # an unattended run has no one to say it, and the next message in this
         # conversation must not resume a run that was stopped on purpose.
         turn_runs = getattr(tool_executor, "runs", None) if tool_executor else None
-        reply = _token_budget_reply(token_budget, turn_runs)
+        reply = _token_budget_reply(token_budget, turn_runs,
+                                    interactive=policy.unattended_context_from_env() is None)
         trace.degraded = True
         trace.ending = "token_budget"
         trace.tokens = token_budget.summary()

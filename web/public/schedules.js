@@ -111,7 +111,13 @@
     ["3", "3 \u00b7 Persistent"], ["4", "4 \u00b7 Broadcast"], ["5", "5 \u00b7 Confirm"],
   ];
   const KIND_CHIPS = [["all", "All"], ["reminder", "Reminder"], ["notify", "Notify"], ["task", "Task"]];
-  const STATUS_CHIPS = [["all", "All statuses"], ["needs_approval", "Needs approval"], ["paused", "Paused"], ["error", "Failed"], ["over_budget", "Over budget"]];
+  // Active view: what is still going to happen. Finished view (H.2 history):
+  // what already did, or was stopped. "Failed" and "Over budget" live in the
+  // Finished view because that is where those jobs are -- the active list never
+  // contains them (scheduler.ACTIVE_STATUSES), so chips for them there could
+  // only ever read 0.
+  const STATUS_CHIPS = [["all", "All statuses"], ["needs_approval", "Needs approval"], ["paused", "Paused"]];
+  const FINISHED_STATUS_CHIPS = [["all", "All finished"], ["done", "Done"], ["error", "Failed"], ["over_budget", "Over budget"], ["cancelled", "Cancelled"]];
   // Cosmetic only, not a real scheduler.py kind — see the module comment
   // above and tool_schedule_watch's own docstring ("mechanically also
   // schedule_task with action={type: ask}"). A hand-authored ask job that
@@ -121,9 +127,11 @@
 
   const state = {
     built: false,
-    jobs: [], counts: {}, events: [], lastTick: null,
+    jobs: [], finished: [], counts: {}, events: [], lastTick: null,
+    view: "active",         // "active" | "finished"
     search: "", kindFilter: "all", statusFilter: "all",
-    mode: "new",            // "new" | "detail"
+    mode: "new",            // "new" | "detail" | "edit"
+    editJob: null,          // the full job being edited (mode "edit")
     selectedId: null,
     newKind: "reminder",    // reminder | notify | task | watch
     taskDo: "ask",          // ask | command | tool
@@ -141,6 +149,7 @@
       statusLine: $("#sched-status-line"),
       search: $("#sch-search"),
       kindChips: $("#sch-kind-chips"),
+      viewTabs: null,   // built in ensureBuilt()
       statusChips: $("#sch-status-chips"),
       count: $("#sch-count"),
       list: $("#sch-list"),
@@ -155,40 +164,59 @@
 
   /* ---- filtering ------------------------------------------------------------ */
 
+  // The list the left pane is showing: still-scheduled jobs, or finished history.
+  function currentList() { return state.view === "finished" ? state.finished : state.jobs; }
+  function findJob(id) {
+    return state.jobs.find((j) => j.id === id) || state.finished.find((j) => j.id === id) || null;
+  }
+
   function matches(job) {
     if (state.kindFilter !== "all" && job.kind !== state.kindFilter) return false;
-    if (state.statusFilter === "needs_approval" && !job.needs_approval) return false;
-    if (state.statusFilter === "paused" && job.status !== "paused") return false;
-    if (state.statusFilter === "error" && job.status !== "error") return false;
-    if (state.statusFilter === "over_budget" && job.status !== "over_budget") return false;
+    if (state.statusFilter === "needs_approval") { if (!job.needs_approval) return false; }
+    else if (state.statusFilter !== "all" && job.status !== state.statusFilter) return false;
     const q = state.search.trim().toLowerCase();
     if (!q) return true;
-    return [job.title, job.kind, job.when, job.action].filter(Boolean).join("\n").toLowerCase().includes(q);
+    return [job.title, job.kind, job.when, job.action, job.last_result].filter(Boolean).join("\n").toLowerCase().includes(q);
   }
-  function visibleJobs() { return state.jobs.filter(matches); }
+  function visibleJobs() { return currentList().filter(matches); }
+
+  function setView(view) {
+    if (state.view === view) return;
+    state.view = view;
+    state.statusFilter = "all";
+    renderChips();
+    renderList();
+  }
 
   /* ---- left: chips + list ---------------------------------------------------- */
 
   function renderChips() {
     if (!dom) return;
+    if (dom.viewTabs) {
+      dom.viewTabs.textContent = "";
+      [["active", "Active", state.jobs.length], ["finished", "Finished", state.counts.finished != null ? state.counts.finished : state.finished.length]]
+        .forEach(([id, label, n]) => {
+          dom.viewTabs.appendChild(el("button", {
+            class: "sch-chip sch-viewtab" + (state.view === id ? " is-active" : ""), type: "button",
+            "aria-pressed": state.view === id ? "true" : "false",
+            onclick: () => setView(id),
+          }, [label, el("span", { class: "sch-chip__n" }, String(n))]));
+        });
+    }
+    const list = currentList();
     dom.kindChips.textContent = "";
     KIND_CHIPS.forEach(([id, label]) => {
-      const n = id === "all" ? state.jobs.length
-        : id === "task" ? (state.counts.tasks || 0)
-        : id === "reminder" ? (state.counts.reminders || 0)
-        : (state.counts.notifications || 0);
+      const n = id === "all" ? list.length : list.filter((j) => j.kind === id).length;
       dom.kindChips.appendChild(el("button", {
         class: "sch-chip" + (state.kindFilter === id ? " is-active" : ""), type: "button",
         onclick: () => { state.kindFilter = id; renderChips(); renderList(); },
       }, [label, el("span", { class: "sch-chip__n" }, String(n))]));
     });
     dom.statusChips.textContent = "";
-    STATUS_CHIPS.forEach(([id, label]) => {
-      const n = id === "all" ? state.jobs.length
-        : id === "needs_approval" ? (state.counts.needs_approval || 0)
-        : id === "paused" ? state.jobs.filter((j) => j.status === "paused").length
-        : id === "over_budget" ? state.jobs.filter((j) => j.status === "over_budget").length
-        : state.jobs.filter((j) => j.status === "error").length;
+    (state.view === "finished" ? FINISHED_STATUS_CHIPS : STATUS_CHIPS).forEach(([id, label]) => {
+      const n = id === "all" ? list.length
+        : id === "needs_approval" ? list.filter((j) => j.needs_approval).length
+        : list.filter((j) => j.status === id).length;
       dom.statusChips.appendChild(el("button", {
         class: "sch-chip" + (state.statusFilter === id ? " is-active" : ""), type: "button",
         onclick: () => { state.statusFilter = id; renderChips(); renderList(); },
@@ -222,6 +250,7 @@
         rowTag(job),
         job.when ? el("span", null, job.when) : null,
         job.in ? el("span", null, `in ${job.in}`) : null,
+        state.view === "finished" && job.finished_at ? el("span", { title: job.finished_at }, `finished ${timeAgo(job.finished_at)}`) : null,
         job.status === "over_budget" ? el("span", { class: "sch-tag sch-tag--bad" }, "stopped: over budget")
           : job.last_error ? el("span", { class: "sch-tag sch-tag--bad" }, "error") : null,
       ].filter(Boolean)),
@@ -231,11 +260,14 @@
   function renderList() {
     if (!dom) return;
     const rows = visibleJobs();
+    const total = currentList().length;
     dom.count.textContent = (state.search.trim() || state.kindFilter !== "all" || state.statusFilter !== "all")
-      ? `${rows.length} of ${state.jobs.length}` : String(state.jobs.length);
+      ? `${rows.length} of ${total}` : String(total);
     dom.list.textContent = "";
     if (!rows.length) {
-      dom.list.appendChild(el("div", { class: "skills-empty" }, state.jobs.length ? "Nothing matches these filters." : "Nothing scheduled yet."));
+      dom.list.appendChild(el("div", { class: "skills-empty" }, total ? "Nothing matches these filters."
+        : state.view === "finished" ? "Nothing has finished yet. Reminders and tasks that have gone off, failed or been cancelled are kept here."
+        : "Nothing scheduled yet."));
       return;
     }
     rows.forEach((job) => dom.list.appendChild(renderRow(job)));
@@ -551,6 +583,11 @@
     else if (job.status !== "needs_approval" && job.status !== "done" && job.status !== "cancelled") act("Pause", "pause");
     if (job.status !== "done" && job.status !== "cancelled") act("Snooze 10m", "snooze", { delay: "10 minutes" });
     if (job.status !== "cancelled") act("Cancel", "cancel");
+    // H.2: editing changes what the job IS, so it only makes sense while there is
+    // still a job to change. Done and cancelled jobs are history.
+    if (job.status !== "done" && job.status !== "cancelled") {
+      buttons.unshift(el("button", { class: "btn btn--primary btn--sm", type: "button", onclick: () => startEdit(job) }, "Edit"));
+    }
     return buttons;
   }
 
@@ -621,6 +658,7 @@
     row("Emits on done", job.emit_on_done);
     row("Created", job.created_at);
     row("Last run", job.last_run);
+    row("Finished", ["done", "cancelled", "error", "over_budget"].includes(job.status) ? (job.finished_at || job.last_run) : null);
 
     dom.mid.textContent = "";
     dom.mid.appendChild(dl);
@@ -639,6 +677,12 @@
     } else if (job.last_error) {
       dom.mid.appendChild(el("div", { class: "sch-detail__error" }, `Last error: ${job.last_error}`));
     }
+    if (job.last_result && ["done", "cancelled", "error", "over_budget"].includes(job.status)) {
+      dom.mid.appendChild(el("div", { class: "sch-detail__result" }, [
+        el("strong", null, "Last result"),
+        el("div", { class: "sch-detail__prompt" }, String(job.last_result)),
+      ]));
+    }
     const budgetControl = tokenLimitControl(job);
     if (budgetControl) dom.mid.appendChild(budgetControl);
     if (job.conv_id && global.JarvisAsk) {
@@ -651,6 +695,7 @@
 
   async function selectJob(id) {
     state.mode = "detail";
+    state.editJob = null;
     state.selectedId = id;
     renderList();
     dom.midTitle.textContent = "Loading\u2026";
@@ -667,16 +712,155 @@
   function newJobMode() {
     state.mode = "new";
     state.selectedId = null;
+    state.editJob = null;
     renderList();
     renderMid();
   }
 
   function renderMid() {
+    if (state.mode === "edit" && state.editJob) { renderEditForm(state.editJob); return; }
     if (state.mode === "detail" && state.selectedId) {
-      const job = state.jobs.find((j) => j.id === state.selectedId);
-      if (job) { selectJob(state.selectedId); return; }
+      if (findJob(state.selectedId)) { selectJob(state.selectedId); return; }
     }
     renderNewForm();
+  }
+
+  /* ---- middle: edit an existing job (H.2) ----------------------------------- */
+
+  function startEdit(job) {
+    state.mode = "edit";
+    state.selectedId = job.id;
+    state.editJob = job;
+    renderList();
+    renderEditForm(job);
+  }
+
+  function sameJson(a, b) { return JSON.stringify(a == null ? null : a) === JSON.stringify(b == null ? null : b); }
+
+  function renderEditForm(job) {
+    const a = job.action || {};
+    const summary = findJob(job.id) || {};
+    dom.midTitle.textContent = `Edit: ${job.title || "(untitled)"}`;
+    const wrap = el("div", { class: "sch-form" });
+    const field = (label, id, control) => el("div", { class: "sch-field" }, [
+      el("label", { class: "sch-field__label", for: id }, label), control]);
+
+    wrap.appendChild(field("Title", "sch-e-title", el("input", { type: "text", id: "sch-e-title", value: job.title || "" })));
+    wrap.appendChild(field(`When \u2014 leave blank to keep the current schedule${summary.when ? ` (${summary.when})` : ""}`,
+      "sch-e-when", el("input", { type: "text", id: "sch-e-when", placeholder: "tomorrow at 9am, every weekday at 08:30, in 20 minutes\u2026" })));
+
+    if (a.type === "notify") {
+      wrap.appendChild(field("Message", "sch-e-message", el("input", { type: "text", id: "sch-e-message", value: a.message || "" })));
+    } else if (a.type === "ask") {
+      const ta = el("textarea", { id: "sch-e-prompt" });
+      ta.value = a.prompt || "";
+      wrap.appendChild(field("Prompt \u2014 what should Jarvis do?", "sch-e-prompt", ta));
+    } else if (a.type === "command") {
+      wrap.appendChild(field("Saved command name", "sch-e-command", el("input", { type: "text", id: "sch-e-command", value: a.command || "" })));
+    } else if (a.type === "tool") {
+      wrap.appendChild(field("Tool name", "sch-e-tool", el("input", { type: "text", id: "sch-e-tool", value: a.tool || "" })));
+    }
+    if (a.type === "command" || a.type === "tool") {
+      const ta = el("textarea", { id: "sch-e-args", placeholder: "{}" });
+      ta.value = Object.keys(a.args || {}).length ? JSON.stringify(a.args, null, 2) : "";
+      wrap.appendChild(field("Arguments (JSON object, optional)", "sch-e-args", ta));
+    }
+    if (a.type && a.type !== "notify") {
+      wrap.appendChild(el("div", { class: "sch-detail__hint" },
+        "Changing what this job runs may send it back to \u201cneeds approval\u201d: it won\u2019t run again until you approve what it now does."));
+    }
+
+    const advanced = el("details", { class: "sch-advanced" }, [el("summary", null, "More options")]);
+    const kindSel = el("select", { id: "sch-e-kind" }, ["reminder", "notify", "task"].map((k) =>
+      el("option", { value: k }, k.charAt(0).toUpperCase() + k.slice(1))));
+    kindSel.value = job.kind || "task";
+    advanced.appendChild(field("Kind (a label: which list it shows in, and its defaults)", "sch-e-kind", kindSel));
+    const chans = channelsField("sch-e");
+    advanced.appendChild(chans);
+    const levelWrap = levelField("sch-e");
+    advanced.appendChild(levelWrap);
+    advanced.appendChild(field("Repeat this many times (blank = no limit)", "sch-e-times",
+      el("input", { type: "number", id: "sch-e-times", min: "1", value: job.max_runs || "" })));
+    advanced.appendChild(el("label", { class: "sch-check-toggle" }, [
+      el("input", { type: "checkbox", id: "sch-e-catchup", checked: job.catch_up ? true : null }),
+      "Catch up on missed runs instead of skipping them"]));
+    if (a.type && a.type !== "notify") {
+      advanced.appendChild(el("label", { class: "sch-check-toggle" }, [
+        el("input", { type: "checkbox", id: "sch-e-report", checked: a.report === false ? null : true }),
+        "Report back when it's done"]));
+    }
+    advanced.appendChild(field("Announce this event when done (optional)", "sch-e-emit",
+      el("input", { type: "text", id: "sch-e-emit", value: job.emit_on_done || "" })));
+    wrap.appendChild(advanced);
+    // Prefill AFTER the controls exist (channels are checkboxes, level a select).
+    (job.channels || []).forEach((c) => { const box = $(`#sch-e-ch-${c}`, chans); if (box) box.checked = true; });
+    const levelSel = $("#sch-e-level", levelWrap);
+    if (levelSel) levelSel.value = job.level != null ? String(job.level) : "";
+
+    wrap.appendChild(el("div", { class: "sch-submit-row" }, [
+      el("button", { class: "btn btn--primary btn--sm", type: "button", onclick: () => submitEdit(job) }, "Save changes"),
+      el("button", { class: "btn btn--ghost btn--sm", type: "button", onclick: () => { state.mode = "detail"; state.editJob = null; selectJob(job.id); } }, "Cancel"),
+    ]));
+    dom.mid.textContent = "";
+    dom.mid.appendChild(wrap);
+  }
+
+  // Send ONLY what differs from the job as loaded, so saving an untouched form
+  // changes nothing (and a field the form can't represent is never clobbered).
+  async function submitEdit(job) {
+    const a = job.action || {};
+    const val = (id) => ($(`#${id}`)?.value || "").trim();
+    const changes = {};
+    if (val("sch-e-title") !== (job.title || "")) {
+      if (!val("sch-e-title")) return toast("The title can't be empty.");
+      changes.title = val("sch-e-title");
+    }
+    if (val("sch-e-when")) changes.when = val("sch-e-when");
+    for (const [field, id, current] of [["message", "sch-e-message", a.message], ["prompt", "sch-e-prompt", a.prompt],
+                                        ["command", "sch-e-command", a.command], ["tool", "sch-e-tool", a.tool]]) {
+      if (!$(`#${id}`)) continue;
+      if (!val(id)) return toast(`The ${field} can't be empty.`);
+      if (val(id) !== (current || "").trim()) changes[field] = val(id);
+    }
+    if ($("#sch-e-args")) {
+      const raw = val("sch-e-args");
+      let parsed = {};
+      if (raw) {
+        try { parsed = JSON.parse(raw); } catch (_) { return toast("Arguments must be a valid JSON object."); }
+        if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return toast("Arguments must be a valid JSON object.");
+      }
+      if (!sameJson(parsed, a.args || {})) changes.args = parsed;
+    }
+    const kind = val("sch-e-kind");
+    if (kind && kind !== job.kind) changes.kind = kind;
+    const channels = CHANNELS.map(([id]) => id).filter((id) => $(`#sch-e-ch-${id}`)?.checked);
+    const oldChannels = (job.channels || []).slice().sort();
+    if (!sameJson(channels.slice().sort(), oldChannels)) changes.channels = channels.length ? channels : null;
+    const level = val("sch-e-level");
+    if ((level === "" ? null : parseInt(level, 10)) !== (job.level == null ? null : job.level)) changes.level = level === "" ? null : parseInt(level, 10);
+    const times = val("sch-e-times");
+    const timesNow = times === "" ? null : parseInt(times, 10);
+    if (times !== "" && !(timesNow >= 1)) return toast("Repeat count must be a whole number of 1 or more.");
+    if (timesNow !== (job.max_runs || null)) changes.max_runs = timesNow;
+    const catchUp = Boolean($("#sch-e-catchup")?.checked);
+    if (catchUp !== Boolean(job.catch_up)) changes.catch_up = catchUp;
+    if ($("#sch-e-report")) {
+      const report = Boolean($("#sch-e-report").checked);
+      if (report !== (a.report !== false)) changes.report = report;
+    }
+    if (val("sch-e-emit") !== (job.emit_on_done || "")) changes.emit_on_done = val("sch-e-emit") || null;
+
+    if (!Object.keys(changes).length) return toast("Nothing changed.", "info");
+    try {
+      const data = await Api.post(`/api/scheduled/${encodeURIComponent(job.id)}/edit`, { changes });
+      toast((data && data.note) || "Saved.", "info");
+      state.mode = "detail";
+      state.editJob = null;
+      await refresh();
+      selectJob(job.id);
+    } catch (err) {
+      toast(err.message || "Couldn't save that.");
+    }
   }
 
   /* ---- right: Overview pane ------------------------------------------------- */
@@ -695,13 +879,22 @@
     ]));
 
     const paused = state.jobs.filter((j) => j.status === "paused").length;
-    const failed = state.jobs.filter((j) => j.status === "error").length;
-    const overBudget = state.jobs.filter((j) => j.status === "over_budget").length;
+    const failed = c.failed != null ? c.failed : state.finished.filter((j) => j.status === "error").length;
+    const overBudget = c.stopped_over_budget != null ? c.stopped_over_budget : state.finished.filter((j) => j.status === "over_budget").length;
     dom.side.appendChild(el("div", null, [
       el("h4", null, "Needs attention"),
       el("div", { class: "sch-side-counts" }, [
         ["Needs approval", c.needs_approval || 0], ["Paused", paused], ["Failed", failed], ["Over budget", overBudget],
       ].map(([label, n]) => el("div", { class: "sch-side-count-row" + (n ? " is-flag" : "") }, [
+        el("span", { class: "sch-side-count-row__label" }, label), el("span", { class: "sch-side-count-row__n" }, String(n)),
+      ]))),
+    ]));
+
+    dom.side.appendChild(el("div", null, [
+      el("h4", null, "History"),
+      el("div", { class: "sch-side-counts" }, [
+        ["Finished", c.finished || 0], ["Done", c.done || 0], ["Cancelled", c.cancelled || 0],
+      ].map(([label, n]) => el("div", { class: "sch-side-count-row" }, [
         el("span", { class: "sch-side-count-row__label" }, label), el("span", { class: "sch-side-count-row__n" }, String(n)),
       ]))),
     ]));
@@ -739,21 +932,27 @@
     try {
       const data = await Api.get("/api/scheduled");
       state.jobs = data.jobs || [];
+      state.finished = data.finished || [];
       state.counts = data.counts || {};
       state.events = data.events || [];
       state.lastTick = data.last_tick || null;
-      dom.statusLine.textContent = state.jobs.length
+      const finishedN = state.counts.finished != null ? state.counts.finished : state.finished.length;
+      dom.statusLine.textContent = (state.jobs.length
         ? `${state.jobs.length} active \u2014 ${state.counts.reminders || 0} reminder(s), ${state.counts.tasks || 0} task(s)` +
           (state.counts.needs_approval ? `, ${state.counts.needs_approval} awaiting approval` : "")
-        : "nothing scheduled";
+        : "nothing scheduled") + (finishedN ? ` \u00b7 ${finishedN} finished` : "");
       renderChips();
       renderList();
       renderSide();
+      // An open edit form is left alone: a tick-driven refresh must not wipe
+      // what someone is in the middle of typing.
       if (state.mode === "detail" && state.selectedId) {
         // Re-pull the open job's own detail too, so an action taken
         // elsewhere (e.g. the websocket-driven tick refresh) doesn't leave
         // a stale status/next_run showing in an already-open detail pane.
-        if (state.jobs.some((j) => j.id === state.selectedId)) selectJob(state.selectedId);
+        // A job that just finished moves lists; follow it to the other tab's
+        // data rather than dropping back to the form.
+        if (findJob(state.selectedId)) selectJob(state.selectedId);
         else newJobMode();
       }
     } catch (err) {
@@ -793,6 +992,10 @@
     if (state.built) return true;
     dom = grabDom();
     if (!dom) return false;
+
+    // Active / Finished tabs (H.2 history), built here so index.html is untouched.
+    dom.viewTabs = el("div", { class: "sch-chips sch-viewtabs", role: "group", "aria-label": "Active or finished jobs" });
+    dom.kindChips.parentNode.insertBefore(dom.viewTabs, dom.kindChips);
 
     dom.search.addEventListener("input", () => { state.search = dom.search.value; renderList(); });
     dom.btnNew.addEventListener("click", newJobMode);

@@ -154,7 +154,7 @@ USAGE = """channel commands:
                                         reason -- never what they wrote (JSON, read-only)
   discord-daemon                        run the Discord bot (foreground)
   instagram-serve                       run the Instagram webhook (foreground)
-  logs-search <query> [--mode m] [--origin o] [--source s] [--direction d]
+  logs-search <query> [--mode m] [--origin o] [--source s] [--direction d] [--task t]
 
   <set> is one of: dm, reply, tool, image
   <platform> is one of: discord, instagram"""
@@ -953,7 +953,8 @@ def handle(argv):
         from . import logs as logs_mod
         if not rest:
             _fail("usage: logs-search <query> [--mode words|phrase|regex] "
-                  "[--origin discord] [--source scheduler] [--direction error]")
+                  "[--origin discord] [--source scheduler] [--direction error] "
+                  "[--task <job id or part of its title>]")
         query_parts, opts = [], {}
         i = 0
         while i < len(rest):
@@ -972,6 +973,7 @@ def handle(argv):
             directions=opts.get("direction"),
             origins=opts.get("origin"),
             sources=opts.get("source"),
+            task=(opts.get("task") or [None])[0],
         )
         print(json.dumps(result, indent=2))
         sys.exit(0 if result.get("ok") else 1)

@@ -137,7 +137,8 @@ def _scope_detail(msg):
 def _ask_jarvis(text, conv_id, may_use_tools, on_tool_call=None, platform="",
                 sender_context="", sender_env="", tool_scope=None, tool_log=None,
                 collect_media=False, media_log=None, offer_tools=None,
-                think_override=None, user_images=None, user_shown=None):
+                think_override=None, user_images=None, user_shown=None,
+                on_confirm_request=None, on_trace=None):
     """One ask, with tools allowed or forbidden for this specific sender.
 
     Imported lazily: ai_client pulls in the whole tool catalog, and a
@@ -178,6 +179,11 @@ def _ask_jarvis(text, conv_id, may_use_tools, on_tool_call=None, platform="",
     copies kept with the conversation (conv_images) and what the sender actually typed, so the
     exchange records the pictures and the owner can see them next to the words. `text` is what the
     MODEL is asked (the words plus the picture descriptions).
+
+    `on_confirm_request` (L.29 / L.42.1) is passed to ai_client.ask ONLY when the caller
+    built one, and handle_message builds one only for the verified owner, so every
+    other ask keeps `None` and a confirm-gated tool stays cancelled exactly as before.
+    `on_trace` (L.42.2) likewise: only passed when the owner turned the trace on.
     """
     from .. import ai_client, commands_config, logs
 
@@ -267,6 +273,10 @@ def _ask_jarvis(text, conv_id, may_use_tools, on_tool_call=None, platform="",
                 # L.44: only passed when there is a setting, so every other
                 # ask is called exactly as it was.
                 extra_kwargs["think_override"] = think_override
+            if on_confirm_request is not None:
+                extra_kwargs["on_confirm_request"] = on_confirm_request
+            if on_trace is not None:
+                extra_kwargs["on_trace"] = on_trace
             if user_images:
                 # Same rule: only a message that carried a picture changes the call.
                 extra_kwargs["user_images"] = user_images
@@ -462,7 +472,7 @@ def addressed_to_us(decision):
 
 
 def handle_message(platform, msg, send, cfg=None, on_tool_call=None, decision=None,
-                   send_file=None):
+                   send_file=None, ask_approval=None, approval_by_text=False):
     """Run one inbound message all the way through.
 
     `send(text)` is the gateway's own sender, called once per chunk. It
@@ -480,6 +490,13 @@ def handle_message(platform, msg, send, cfg=None, on_tool_call=None, decision=No
     the thread this message came from (never to anyone else). Pictures a tool
     made during the ask -- a screenshot -- go through it AFTER the text, and only
     for the owner (channels/media_send.py). Omitted: nothing is attached, as before.
+
+    `ask_approval(request_id, text, seconds)`, if the gateway can put an Approve / Deny
+    prompt to the owner (Discord buttons, Instagram text), is what lets a confirm-gated
+    tool run from chat (L.29 / L.42.1). It is used ONLY when the sender is the verified
+    owner; a guest's ask never gets a confirmation channel. `approval_by_text` says the
+    answer comes back as a whole-message Y / N (Instagram) rather than a button. Omitted:
+    chat behaves exactly as before and a confirm-gated tool is cancelled.
 
     Never raises: an exception anywhere in here is logged and swallowed, on
     the principle that one malformed message must not kill a gateway that
@@ -584,10 +601,27 @@ def handle_message(platform, msg, send, cfg=None, on_tool_call=None, decision=No
         except Exception as exc:  # noqa: BLE001 -- memory is an enhancement
             _log(f"person memory unavailable: {exc}")
 
+    # --- an answer to an approval prompt (L.29 / L.42.1, Instagram's Y / N) -------
+    # Before anything that costs tokens. Only the owner, only from a DM, only while a
+    # request is pending and only as the whole message; any other message from the
+    # owner while one is pending denies it and carries on as a normal message.
+    if is_owner and approval_by_text:
+        try:
+            from . import approvals
+            answer = approvals.answer_text(platform, msg.user_id, msg.text,
+                                           is_dm=(msg.context == permissions.CTX_DM),
+                                           is_owner=True)
+            if answer is not None:
+                _send_plain(platform, msg, send, answer, cfg, conv_id)
+                return decision
+        except Exception as exc:  # noqa: BLE001
+            _log(f"approval answer failed: {exc}")
+
     # --- /thinking (L.44) ---------------------------------------------------
     # Answered here, without the model, so a locked person pays nothing for
     # asking and cannot argue their way past the lock.
     think_override = None
+    trace_wanted = False
     try:
         from . import thinking
         reply = thinking.handle_command(platform, msg.thread_id, msg.user_id,
@@ -595,9 +629,11 @@ def handle_message(platform, msg, send, cfg=None, on_tool_call=None, decision=No
         if reply is not None:
             _send_plain(platform, msg, send, reply, cfg, conv_id)
             return decision
-        think_override = thinking.override_for(
-            thinking.effective(platform, msg.thread_id, msg.user_id,
-                               is_owner=bool(is_owner)))
+        think_state = thinking.effective(platform, msg.thread_id, msg.user_id,
+                                         is_owner=bool(is_owner))
+        think_override = thinking.override_for(think_state)
+        # L.42.2: the trace itself, owner only and only while "on" for this thread.
+        trace_wanted = thinking.wants_trace(think_state, is_owner=bool(is_owner))
     except Exception as exc:  # noqa: BLE001
         _log(f"thinking setting unavailable: {exc}")
 
@@ -658,6 +694,13 @@ def handle_message(platform, msg, send, cfg=None, on_tool_call=None, decision=No
             _log(f"could not read attached pictures: {exc}")
     image_kwargs = ({"user_images": kept_images, "user_shown": msg.text}
                     if kept_images else {})
+    # The confirmation channel (L.29 / L.42.1): built ONLY for the verified owner, so a
+    # guest's turn still has none and run_shell / code_agent / edit_file stay cancelled
+    # from it. The trace collector (L.42.2) likewise only when it is wanted.
+    confirm_cb = (_make_confirm(platform, msg, cfg, conv_id, ask_approval, approval_by_text)
+                  if (is_owner and ask_approval is not None) else None)
+    trace_box = []
+    trace_cb = ((lambda _trace, thought: trace_box.append(thought)) if trace_wanted else None)
     try:
         result = _ask_jarvis(ask_text, conv_id, may_use_tools,
                              on_tool_call=on_tool_call, platform=platform,
@@ -665,7 +708,9 @@ def handle_message(platform, msg, send, cfg=None, on_tool_call=None, decision=No
                              tool_scope=tool_scope, tool_log=captured_tools,
                              collect_media=bool(send_file and is_owner),
                              media_log=media_items, offer_tools=offer_tools,
-                             think_override=think_override, **image_kwargs)
+                             think_override=think_override,
+                             on_confirm_request=confirm_cb, on_trace=trace_cb,
+                             **image_kwargs)
         text = (getattr(result, "text", "") or "").strip()
         provider = getattr(result, "provider", "") or ""
         if not text:
@@ -722,6 +767,13 @@ def handle_message(platform, msg, send, cfg=None, on_tool_call=None, decision=No
     # into an error, so it is logged and the person is told in words.
     if media_items and send_file and is_owner:
         _send_media(platform, msg, send, send_file, media_items, cfg, conv_id, provider)
+
+    # --- the thinking trace (L.42.2) ---------------------------------------------
+    # A separate message after the reply (and after any pictures), owner only. Never
+    # written to the transcript as text: only that one was sent, so a trace that quotes
+    # private context does not land on disk a second time.
+    if trace_wanted and trace_box and sent_ok:
+        _send_trace(platform, msg, send, trace_box[-1], cfg, conv_id, provider)
 
     # --- a reply the owner is waiting for (L.23) ---------------------------
     # AFTER the answer went out, so the classifier call never delays it, and
@@ -805,6 +857,53 @@ def _send_plain(platform, msg, send, text, cfg, conv_id):
     if cfg.get("log_conversations", True):
         transcript.log_outbound(platform, msg.thread_id, text, conv_id=conv_id,
                                 ok=ok, provider="", to_user=msg.user_id)
+
+
+def _make_confirm(platform, msg, cfg, conv_id, ask_approval, by_text):
+    """The `on_confirm_request` for an ask the OWNER started (L.29 / L.42.1).
+
+    Called by ai_client with the exact (name, arguments, risk_note) it will run on
+    approval; blocks this worker thread (never the gateway's event loop) until the
+    owner answers or 60 seconds pass. Every outcome is written to the transcript as a
+    line naming the tool and the result, never the arguments."""
+    from . import approvals
+    limit = min(int(cfg.get("max_reply_chars") or 1900), 1900)
+    log_on = cfg.get("log_conversations", True)
+
+    def on_confirm_request(name, arguments, risk_note=None):
+        def log(decision, reason):
+            _log(f"approval for {name} from {msg.user_handle or msg.user_id}: "
+                 f"{decision} ({reason})")
+            if log_on:
+                transcript.log_outbound(platform, msg.thread_id,
+                                        f"[approval: {name} - {decision}]",
+                                        conv_id=conv_id, ok=True, to_user=msg.user_id)
+        return approvals.ask_owner(platform, msg.user_id, name, arguments, risk_note,
+                                   ask_approval, accept_text=by_text,
+                                   limit=max(200, limit - 160), log=log)
+    return on_confirm_request
+
+
+def _send_trace(platform, msg, send, thought, cfg, conv_id, provider):
+    """Send the reasoning text as separate message(s) after the reply. Never raises."""
+    try:
+        from . import thinking
+        text = (thought or {}).get("text") if isinstance(thought, dict) else ""
+        level = (thought or {}).get("level") if isinstance(thought, dict) else ""
+        if level == "off":
+            return  # nothing real to show when the level was off (L.39)
+        parts = thinking.format_trace(
+            platform, text, level=level or "",
+            limit=int(cfg.get("max_reply_chars") or 1900))
+        for part in parts:
+            send(part)
+        if parts and cfg.get("log_conversations", True):
+            transcript.log_outbound(platform, msg.thread_id,
+                                    f"[thinking trace sent: {len(parts)} message(s)]",
+                                    conv_id=conv_id, ok=True, provider=provider,
+                                    to_user=msg.user_id)
+    except Exception as exc:  # noqa: BLE001 -- the reply already went out
+        _log(f"could not send the thinking trace: {exc}")
 
 
 def _send_media(platform, msg, send, send_file, items, cfg, conv_id, provider):

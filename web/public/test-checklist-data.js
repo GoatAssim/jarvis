@@ -4015,6 +4015,14 @@ window.JARVIS_TEST_CHECKLIST = /*JSON-BEGIN*/ {
      "expect": "The command disappears from the list, and sending it by hand says it is off. Switching the tool back on brings it back with nothing else to restore."
     },
     {
+     "do": "Still in the Tool Manager, open the 'Tool commands' filter, select the safe command's own row and switch it off (not its tool). Then type / again (wait up to 20 seconds or reload) and try sending it by hand.",
+     "expect": "The row says 'switched off'; the command is gone from the list and sending it by hand says it is switched off. The tool it runs still works from Debug, and the file's other commands are untouched. Switching the row back on brings it back."
+    },
+    {
+     "do": "Switch the safe command's TOOL off in the Tool Manager and look at the command's row again.",
+     "expect": "The command's row is off with its switch locked, and says it is off because its tool is. Switching the tool back on returns the command without touching its own switch."
+    },
+    {
      "do": "Make a typo of a tool command's name, e.g. /dsik, and press Enter.",
      "expect": "Blocked with 'did you mean /disk?'; a second Enter sends it as a message."
     }

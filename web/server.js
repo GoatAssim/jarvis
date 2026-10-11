@@ -1148,10 +1148,16 @@ const SEARCH_MODES = new Set(["words", "phrase", "regex"]);
 
 app.get("/api/logs-search", requireJarvis, async (req, res) => {
   const query = cleanQuery(req.query.q);
-  if (!query) {
+  // L.3.4: a task filter (a job's id or part of its title) is itself enough to
+  // search on -- "everything this scheduled task logged" has no words to type.
+  const taskRaw = typeof req.query.task === "string" ? req.query.task.trim() : "";
+  const task = taskRaw && taskRaw.length <= 100 && !taskRaw.startsWith("-") && !/[\0\r\n]/.test(taskRaw) ? taskRaw : "";
+  if (!query && !task) {
     return res.status(400).json({ error: "Missing or invalid query." });
   }
-  const args = ["logs-search", query];
+  const args = ["logs-search"];
+  if (query) args.push(query);
+  if (task) args.push("--task", task);
   const mode = typeof req.query.mode === "string" ? req.query.mode : "words";
   if (SEARCH_MODES.has(mode)) args.push("--mode", mode);
 
@@ -1604,7 +1610,7 @@ app.post("/api/channels/people/:platform/:id/instruction", requireJarvis, async 
 // disagree. The switch takes {value: "on"|"off"|"default", lock: boolean};
 // the memory routes read what is kept (GET) and let the owner add, approve,
 // retire and forget records and ask for summaries of past conversations
-// (POST, below). The switch has no panel control yet.
+// (POST, below). The Channels panel's Permissions tab has the control (L.44).
 app.post("/api/channels/people/:platform/:id/thinking", requireJarvis, async (req, res) => {
   const who = channelPersonArgs(req, res);
   if (!who) return;
@@ -2000,7 +2006,11 @@ app.get("/api/scheduled/:id", requireJarvis, async (req, res) => {
 
 // One route for every per-job verb. The action is validated against a fixed
 // list here so a request body can never name an arbitrary `sched-*` argv.
-const SCHED_ACTIONS = new Set(["cancel", "pause", "resume", "approve", "snooze", "budget"]);
+const SCHED_ACTIONS = new Set(["cancel", "pause", "resume", "approve", "snooze", "budget", "edit"]);
+// H.2: the fields `sched-edit` accepts (scheduler.EDITABLE_FIELDS). Checked here so
+// a request body can only ever hand the CLI one JSON object of known keys.
+const SCHED_EDIT_FIELDS = new Set(["title", "kind", "when", "message", "prompt", "command", "tool",
+  "args", "report", "channels", "level", "max_runs", "catch_up", "emit_on_done"]);
 
 app.post("/api/scheduled/:id/:action", requireJarvis, async (req, res) => {
   const { id, action } = req.params;
@@ -2022,6 +2032,19 @@ app.post("/api/scheduled/:id/:action", requireJarvis, async (req, res) => {
       return res.status(400).json({ error: "limit must be 'default', 'off' or a number." });
     }
     args.push(raw);
+  }
+  if (action === "edit") {
+    const changes = req.body?.changes;
+    if (!changes || typeof changes !== "object" || Array.isArray(changes)) {
+      return res.status(400).json({ error: "Send the fields to change as { changes: {...} }." });
+    }
+    const keys = Object.keys(changes);
+    if (!keys.length) return res.status(400).json({ error: "Nothing to change." });
+    const bad = keys.find((k) => !SCHED_EDIT_FIELDS.has(k));
+    if (bad) return res.status(400).json({ error: `Can't edit "${String(bad).slice(0, 40)}".` });
+    const json = JSON.stringify(changes);
+    if (json.length > 20000) return res.status(400).json({ error: "That edit is too large." });
+    args.push(json);
   }
   const result = await runJarvisOnce(args, 15000);
   return parseJarvisJSON(result, res, "Couldn't update that job.");
@@ -3067,17 +3090,18 @@ async function relayJarvisJson(res, args, fallback) {
   });
 }
 
-// `kind` ("tool" by default, "persona", "skin" or "ui") is how the Tool Manager switches
-// personas (built-in and tool-registered), Skin-modal swatches / themes and the TOOL_UI
-// elements a tool file registered; a fixed list, never forwarded as-is, so a request
-// body can't smuggle another flag into the argv.
-const DISABLE_KINDS = new Set(["tool", "persona", "skin", "ui"]);
+// `kind` ("tool" by default, "persona", "skin", "ui" or "tool-command") is how the Tool
+// Manager switches personas (built-in and tool-registered), Skin-modal swatches / themes,
+// the TOOL_UI elements a tool file registered and the TOOL_COMMANDS palette words it
+// registered; a fixed list, never forwarded as-is, so a request body can't smuggle
+// another flag into the argv.
+const DISABLE_KINDS = new Set(["tool", "persona", "skin", "ui", "tool-command"]);
 
 app.post("/api/tools/disabled", requireJarvis, async (req, res) => {
   const name = typeof req.body?.name === "string" ? req.body.name.trim() : "";
   if (!name) return res.status(400).json({ error: "Missing tool name." });
   const kind = typeof req.body?.kind === "string" ? req.body.kind : "tool";
-  if (!DISABLE_KINDS.has(kind)) return res.status(400).json({ error: "kind must be tool, persona, skin or ui." });
+  if (!DISABLE_KINDS.has(kind)) return res.status(400).json({ error: "kind must be tool, persona, skin, ui or tool-command." });
   const argv = ["tool-disable-set", name, req.body?.value ? "true" : "false"];
   if (kind !== "tool") argv.push("--kind", kind);
   await relayJarvisJson(res, argv, "Couldn't switch it.");

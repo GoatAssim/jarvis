@@ -333,8 +333,9 @@ def delete_tool(name):
         checked = validate_source(_read(path), name)
         provided = list(checked.get("tools") or [])
         provided_ui = [u["id"] for u in checked.get("ui", [])]
+        provided_commands = [c["name"] for c in checked.get("commands", [])]
     except Exception:  # noqa: BLE001 -- a file that won't import has nothing to forget
-        provided, provided_ui = [], []
+        provided, provided_ui, provided_commands = [], [], []
     try:
         path.unlink()
     except OSError as exc:
@@ -347,6 +348,8 @@ def delete_tool(name):
         tool_disable.forget_tool(tool_name)
     for ui_id in provided_ui:
         tool_disable.forget_ui(ui_id)
+    for command_name in provided_commands:
+        tool_disable.forget_tool_command(command_name)
     return {"ok": True, "name": name}
 
 

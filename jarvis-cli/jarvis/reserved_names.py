@@ -90,7 +90,7 @@ RESERVED_NAMES = {
     # --- cli.py's SCHEDULER_COMMANDS ----------------------------------------
     "sched-list", "sched-tick", "sched-daemon", "sched-ask-log", "sched-add",
     "sched-show", "sched-cancel", "sched-pause", "sched-resume", "sched-snooze",
-    "sched-approve", "sched-signal", "sched-clear", "sched-budget",
+    "sched-approve", "sched-signal", "sched-clear", "sched-budget", "sched-edit",
     "notify-send", "notify-list", "notify-history", "notify-ack",
     "notify-clear", "notify-config", "notify-summary", "notify-read", "notify-dismiss",
     "conv-search", "mcp-status", "mcp-refresh", "mcp-config", "mcp-call", "mcp-tools",

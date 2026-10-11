@@ -57,7 +57,7 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 
 from . import INSTAGRAM
 from . import config as channel_config
-from . import base, permissions, transcript, directory
+from . import base, permissions, transcript, directory, approvals
 
 GRAPH_HOST = "https://graph.instagram.com"
 # Meta's own docs say a webhook must be acknowledged quickly; 5s is the
@@ -512,7 +512,21 @@ def _process_payload(payload, cfg):
                 raise RuntimeError(err)
             return True
 
-        base.handle_message(INSTAGRAM, msg, send, cfg=cfg)
+        def ask_approval(request_id, text, seconds, _user=msg.user_id):
+            """Post the exact action and ask for a whole-message Y or N (L.29 / L.42.1).
+
+            Always to the owner's own DM (never into a group thread). The 24-hour
+            window applies: when it is closed send_message refuses, and raising here
+            is a denial that says why."""
+            body = (text + "\n\nReply Y to run it or N to cancel. Only a reply of just Y or N "
+                    "counts; %d seconds, then it is denied." % int(seconds))
+            ok, err = send_message(_user, body, cfg=cfg)
+            if not ok:
+                raise RuntimeError(err)
+            return None
+
+        base.handle_message(INSTAGRAM, msg, send, cfg=cfg,
+                            ask_approval=ask_approval, approval_by_text=True)
 
 
 def run():
@@ -531,6 +545,14 @@ def run():
               + f"\nEdit {channel_config.CONFIG_FILE}, or open the web UI's "
                 "Guides panel for the full setup walkthrough.", file=sys.stderr)
         return 1
+
+    # A restart cancels every pending approval (Q-L42h).
+    try:
+        dropped = approvals.cancel_pending(INSTAGRAM)
+        if dropped:
+            base._log(f"cancelled {dropped} pending approval(s) left from before the restart")
+    except Exception as exc:  # noqa: BLE001
+        base._log(f"could not clear pending approvals: {exc}")
 
     host = cfg.get("webhook_host") or "127.0.0.1"
     port = int(cfg.get("webhook_port") or 19824)

@@ -239,7 +239,13 @@ def record_failure(provider_name, model, key, kind, error, retry_after=None, now
     err = str(error or "").lower()
     state = _load()
     if kind == "overload":
-        state["models"][f"{provider_name}|{model}"] = {"cooldown_until": now + OVERLOAD_MODEL_COOLDOWN}
+        # L.24 T4: park the model for the time the provider STATED (a Retry-After
+        # header, or the "[retry in Ns]" ai_providers._status_reason carries over),
+        # not a fixed 45 s: waiting less hammers an overloaded host, waiting more
+        # shuts out a model that was ready again. Unstated -> the old fixed window.
+        delay = retry_after if retry_after is not None else parse_retry_delay(error)
+        delay = OVERLOAD_MODEL_COOLDOWN if delay is None else min(max(delay, 5.0), MAX_COOLDOWN)
+        state["models"][f"{provider_name}|{model}"] = {"cooldown_until": now + delay}
     elif kind == "key" and key is not None:
         if "rate limited" in err or "quota" in err:
             delay = retry_after if retry_after is not None else parse_retry_delay(error)

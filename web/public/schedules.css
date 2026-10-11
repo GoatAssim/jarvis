@@ -179,3 +179,10 @@
   .sch-body > .debug-pane:first-child{ overflow: hidden; }
   .sch-mid, .sch-side{ flex: none; overflow: visible; }
 }
+
+/* H.2 history: the Active / Finished tabs above the kind chips, and the
+   "Last result" block in a finished job's detail. */
+.sch-viewtabs{ padding-top: 2px; }
+.sch-viewtab{ font-weight: 600; }
+.sch-detail__result{ margin-top: 10px; }
+.sch-detail__result strong{ display: block; margin-bottom: 4px; }

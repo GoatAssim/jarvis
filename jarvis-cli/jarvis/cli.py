@@ -1264,7 +1264,7 @@ def run_logs_command(argv, commands):
 SCHEDULER_COMMANDS = {
     "sched-list", "sched-tick", "sched-daemon", "sched-ask-log", "sched-add",
     "sched-show", "sched-cancel", "sched-pause", "sched-resume", "sched-snooze", "sched-budget",
-    "sched-approve", "sched-signal", "sched-clear", "notify-send",
+    "sched-edit", "sched-approve", "sched-signal", "sched-clear", "notify-send",
     "notify-list", "notify-history", "notify-ack", "notify-clear", "notify-config",
     "notify-summary", "notify-read", "notify-dismiss",
     "conv-search", "mcp-status", "mcp-refresh", "mcp-config", "mcp-call",
@@ -1391,6 +1391,63 @@ def run_search_or_mcp_command(argv):
         return emit(result)
 
     return emit({"error": "unknown command %r" % cmd}, 1)
+
+
+_EDIT_BOOL_FIELDS = ("report", "catch_up")
+_EDIT_NULLABLE_FIELDS = ("channels", "level", "max_runs", "emit_on_done")
+
+
+def parse_sched_edit_args(tokens):
+    """`jarvis sched-edit <id> ...` after the id: either ONE JSON object
+    (what web/server.js sends) or `--field value` pairs for typing at a prompt:
+    --title, --when, --message, --prompt, --command, --tool, --kind, --level,
+    --max-runs, --emit-on-done, --channels a,b, --args '{"k":"v"}',
+    --catch-up/--no-catch-up, --report/--no-report. `none` clears a nullable
+    field (level, channels, max-runs, emit-on-done). Returns (changes, error)."""
+    tokens = [t for t in tokens]
+    if not tokens:
+        return None, "give a JSON object or --field value pairs"
+    if tokens[0].lstrip().startswith("{"):
+        try:
+            data = json.loads(" ".join(tokens))
+        except ValueError as exc:
+            return None, "the changes aren't valid JSON (%s)" % exc
+        if not isinstance(data, dict):
+            return None, "the changes must be a JSON object"
+        return data, None
+    changes = {}
+    i = 0
+    while i < len(tokens):
+        tok = tokens[i]
+        if not tok.startswith("--") or len(tok) < 3:
+            return None, "unexpected %r -- use --field value" % tok
+        field = tok[2:].replace("-", "_")
+        if field.startswith("no_") and field[3:] in _EDIT_BOOL_FIELDS:
+            changes[field[3:]] = False
+            i += 1
+            continue
+        if field in _EDIT_BOOL_FIELDS and (i + 1 >= len(tokens) or tokens[i + 1].startswith("--")):
+            changes[field] = True
+            i += 1
+            continue
+        if i + 1 >= len(tokens):
+            return None, "%s needs a value" % tok
+        value = tokens[i + 1]
+        i += 2
+        if field in _EDIT_NULLABLE_FIELDS and value.strip().lower() in ("none", "null", "off", ""):
+            changes[field] = None
+        elif field == "args":
+            try:
+                changes[field] = json.loads(value)
+            except ValueError as exc:
+                return None, "--args must be a JSON object (%s)" % exc
+        elif field in _EDIT_BOOL_FIELDS:
+            changes[field] = value.strip().lower() in ("1", "true", "yes", "on")
+        elif field == "channels":
+            changes[field] = [c.strip() for c in value.split(",") if c.strip()]
+        else:
+            changes[field] = value
+    return changes, None
 
 
 def run_scheduler_command(argv):
@@ -1546,6 +1603,28 @@ def run_scheduler_command(argv):
                 return emit(scheduler.summarize(scheduler.set_token_budget(job_id, tokens)))
             except scheduler.SchedulerError as e:
                 return emit({"error": str(e)}, 1)
+
+        if cmd == "sched-edit":
+            # jarvis sched-edit <id> <json-object | --field value ...>   (H.2)
+            # The HUMAN side: trusted=True, like sched-add. The model has no
+            # tool for this on purpose -- see scheduler.update_job's APPROVAL
+            # note. A change to what the job runs may send it back to
+            # needs_approval; the summary says so.
+            job_id = need_id()
+            if not job_id:
+                return 1
+            changes, problem = parse_sched_edit_args(rest[1:])
+            if problem:
+                return emit({"error": "usage: jarvis sched-edit <id> <json | --field value ...>: %s" % problem}, 1)
+            try:
+                before = scheduler.get(job_id) or {}
+                job = scheduler.update_job(job_id, changes, trusted=True)
+            except scheduler.SchedulerError as e:
+                return emit({"error": str(e)}, 1)
+            out = scheduler.summarize(job)
+            if before.get("status") != scheduler.STATUS_NEEDS_APPROVAL and job.get("status") == scheduler.STATUS_NEEDS_APPROVAL:
+                out["note"] = "this change adds something the job wasn't approved for -- it needs approval again before it runs"
+            return emit(out)
 
         if cmd == "sched-snooze":
             job_id = need_id()
@@ -3400,13 +3479,14 @@ def main():
         from . import tools as system_tools
 
         if len(argv) < 3:
-            print(json.dumps({"error": "usage: jarvis tool-disable-set <name> <true|false> [--kind tool|persona|skin|ui]"}))
+            print(json.dumps({"error": "usage: jarvis tool-disable-set <name> <true|false> [--kind tool|persona|skin|ui|tool-command]"}))
             sys.exit(1)
         tool_name = argv[1].strip()
         value = argv[2].strip().lower() in ("1", "true", "yes", "y", "on")
-        # --kind: the Tool Manager also lists the personas and UI elements a tool file
-        # registered (tool_disable.py's PERSONAS AND UI ELEMENTS). Same file, same
-        # contract; a tool by default.
+        # --kind: the Tool Manager also lists the personas, UI elements and palette
+        # commands a tool file registered (tool_disable.py's PERSONAS AND UI ELEMENTS).
+        # Same file, same contract; a tool by default. `tool-command` is a TOOL_COMMANDS
+        # entry (the `/` palette word), NOT a saved command (that is command-disable-set).
         kind = argv[argv.index("--kind") + 1].strip().lower() if "--kind" in argv and len(argv) > argv.index("--kind") + 1 else "tool"
         try:
             if kind == "persona":
@@ -3426,8 +3506,13 @@ def main():
                     raise ValueError("no such UI element: %s" % tool_name)
                 print(json.dumps(tool_disable.set_ui_disabled(tool_name, value), indent=2))
                 return
+            if kind == "tool-command":
+                if value and tool_name not in {c["name"] for c in system_tools.AUTO_COMMANDS}:
+                    raise ValueError("no such tool command: %s" % tool_name)
+                print(json.dumps(tool_disable.set_tool_command_disabled(tool_name, value), indent=2))
+                return
             if kind != "tool":
-                raise ValueError("--kind must be tool, persona, skin or ui")
+                raise ValueError("--kind must be tool, persona, skin, ui or tool-command")
             if value and tool_name not in system_tools.TOOLS:
                 raise ValueError("no such tool: %s" % tool_name)
             # Q-L46m: what this switch will also take (or give back) -- worked out
@@ -3503,6 +3588,9 @@ def main():
             "ui": sorted(tool_disable.disabled_ui()),
             # Screens that are off only because every tool of their file is (Q-L46m).
             "ui_by_tool": sorted(system_tools.ui_ids_off_with_tool()),
+            # Palette commands (TOOL_COMMANDS) the owner switched off themselves; a command
+            # that is off only because its tool is shows in `jarvis tool-commands list --all`.
+            "tool_commands": sorted(tool_disable.disabled_tool_commands()),
             "protected": tool_disable.PROTECTED_TOOLS,
         }, indent=2))
         return

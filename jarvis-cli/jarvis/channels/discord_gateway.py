@@ -48,7 +48,7 @@ from pathlib import Path
 
 from . import DISCORD
 from . import config as channel_config
-from . import base, permissions, transcript, directory, servers, media_in
+from . import base, permissions, transcript, directory, servers, media_in, approvals
 
 PID_FILE = Path.home() / ".jarvis" / "discord_daemon.pid"
 
@@ -212,6 +212,53 @@ def _where(discord, message):
             channel_id = str(parent_id)
             name = getattr(getattr(channel, "parent", None), "name", "") or name
     return guild_name, channel_id, thread_id, name
+
+
+def make_approval_view(discord, request_id, owner_id, seconds):
+    """The Approve / Deny buttons for one approval prompt (L.29 / L.42.1).
+
+    Only the verified owner's id can press (the INTERACTION's user, not the thread):
+    anyone else gets a private "only the owner" reply and nothing is settled. A press
+    is handed to approvals.resolve(), which checks the request is still open and still
+    this owner's, so a late press after a restart (the view is gone with the process,
+    and the pending store was cleared) or after the 60 seconds fails closed. The
+    prompt message itself is tidied by the hook ask_owner registers, not here."""
+    owner_id = str(owner_id)
+
+    class ApprovalView(discord.ui.View):
+        def __init__(self):
+            super().__init__(timeout=float(seconds) + 5)
+
+        async def interaction_check(self, interaction):
+            if str(interaction.user.id) == owner_id:
+                return True
+            try:
+                await interaction.response.send_message(
+                    "Only the owner can answer this.", ephemeral=True)
+            except Exception:  # noqa: BLE001
+                pass
+            return False
+
+        async def _answer(self, interaction, approve):
+            ok, message = approvals.resolve(request_id, str(interaction.user.id), approve,
+                                            platform=DISCORD)
+            try:
+                if ok:
+                    await interaction.response.defer()
+                else:
+                    await interaction.response.send_message(message, ephemeral=True)
+            except Exception:  # noqa: BLE001
+                pass
+
+        @discord.ui.button(label="Approve", style=discord.ButtonStyle.success)
+        async def approve_button(self, interaction, button):  # noqa: ARG002
+            await self._answer(interaction, True)
+
+        @discord.ui.button(label="Deny", style=discord.ButtonStyle.danger)
+        async def deny_button(self, interaction, button):  # noqa: ARG002
+            await self._answer(interaction, False)
+
+    return ApprovalView()
 
 
 def build_client(discord, cfg):
@@ -408,6 +455,39 @@ def build_client(discord, cfg):
             sent_any["ok"] = True
             return True
 
+        def ask_approval(request_id, text, seconds):
+            """Worker thread: post the exact action with Approve / Deny buttons and
+            return the hook that tidies the message when it settles (L.29 / L.42.1).
+
+            In a DM the prompt goes to that DM; for an ask started in a server channel
+            it goes to the owner's own DMs, so the recipient and text of a message to
+            someone else are not shown to the whole room. Raising (DMs closed, no
+            permission) is a denial with that cause."""
+            is_dm_ctx = isinstance(message.channel, discord.DMChannel)
+            target = message.channel if is_dm_ctx else message.author
+            body = (text + "\n\nApprove or deny within %d seconds; no answer counts as "
+                    "denied. Only you can press these." % int(seconds))
+
+            async def _post():
+                view = make_approval_view(discord, request_id, msg.user_id, seconds)
+                return await target.send(body, view=view)
+
+            posted = asyncio.run_coroutine_threadsafe(_post(), loop).result(timeout=30)
+
+            def settled(decision, reason):
+                label = {"approved": "Approved", "denied": "Denied",
+                         "expired": "Expired - denied"}.get(decision, decision)
+
+                async def _tidy():
+                    await posted.edit(content=body.split("\n\nApprove or deny")[0]
+                                      + "\n\n%s." % label, view=None)
+                try:
+                    # Fire and forget: this may run on the event loop itself.
+                    asyncio.run_coroutine_threadsafe(_tidy(), loop)
+                except Exception:  # noqa: BLE001
+                    pass
+            return settled
+
         # handle_message still runs on the denied path — it owns the denial
         # log line and the optional notify_on_denied reply, and `send` hops
         # back to this loop via run_coroutine_threadsafe().result(), which
@@ -415,7 +495,8 @@ def build_client(discord, cfg):
         # goes to the executor; only the *visible* parts are conditional.
         def _run():
             return base.handle_message(DISCORD, msg, send, cfg=cfg,
-                                       decision=decision, send_file=send_file)
+                                       decision=decision, send_file=send_file,
+                                       ask_approval=ask_approval)
 
         if not answering:
             # Silent by default. react_when_denied is the opt-in for people
@@ -539,6 +620,15 @@ def run():
             signal.signal(sig, _handle_stop)
         except (ValueError, OSError):
             pass  # not always settable (non-main thread, odd platforms)
+
+    # A restart cancels every pending approval (Q-L42h): nothing that was waiting
+    # for an answer before this process started can be approved now.
+    try:
+        dropped = approvals.cancel_pending(DISCORD)
+        if dropped:
+            base._log(f"cancelled {dropped} pending approval(s) left from before the restart")
+    except Exception as exc:  # noqa: BLE001
+        base._log(f"could not clear pending approvals: {exc}")
 
     client = build_client(discord, cfg)
     try:
