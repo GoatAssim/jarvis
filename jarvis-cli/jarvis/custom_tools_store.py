@@ -38,6 +38,9 @@ WHAT THIS ADDS ON TOP
    folder, and never overwrites a folder that already exists.
 5. **Drafts** — an unfinished tool is backed up on disk as you type, saved or
    not (see DRAFTS below).
+6. **A tool's web files** — the html/js/css folders its `TOOL_UI` declares can
+   be edited next to the .py, imported together with it (several files, a
+   folder or a .zip), and removed with it on uninstall (see WEB FILES below).
 
 DRAFTS: UNFINISHED WORK IS BACKED UP WHETHER OR NOT YOU SAVED
 -------------------------------------------------------------
@@ -54,6 +57,28 @@ manages. It is removed when the same text is saved successfully, kept when a tab
 is closed with "Discard", and pruned after DRAFT_MAX_AGE_DAYS or past MAX_DRAFTS.
 Each draft also keeps a few older snapshots (MAX_DRAFT_HISTORY), so an edit that
 made things worse can be undone from the Tool Manager's "Unfinished tools" list.
+
+WEB FILES: A TOOL'S SCREENS ARE EDITED, IMPORTED AND REMOVED WITH IT
+--------------------------------------------------------------------
+A tool that declares `TOOL_UI` owns folders of html/js/css (tool_ui.py). Three
+things used to stop at the .py: the editor only opened that one file, import took
+one file, and Delete left the folder behind. They now go through ONE rule: the
+files a tool may touch are the ones its own saved `TOOL_UI` resolves to (or would
+resolve to -- a `tool.css` it names but hasn't got yet), found by
+`web_footprint()`. A caller never builds a path: it names a path, which must be in
+that list, and the target is re-resolved inside ~/.jarvis/tools before anything is
+read or written.
+  * `read_web_file` / `write_web_file` -- the editor's extra tabs. One `.bak` of the
+    previous text is kept, as for the .py; nothing here runs the file.
+  * `import_bundle` -- a .py plus its folders, from several files, a folder or a
+    .zip. A plan (no execution) first; `write=True` then checks the .py against the
+    staged files exactly as a normal save would, writes only files a declared
+    screen uses, never over an existing file, and rolls back if the .py is refused.
+  * `delete_tool(name, remove_folders=True)` -- removes the files a screen serves
+    (.html .htm .js .css and their .bak) and then the folder, if that leaves it empty.
+    Anything else in the folder, a folder another tool also declares and a link are
+    left alone and reported.
+Like the .py itself, none of this has a model-facing entry point.
 
 THE SAFETY POSITION
 -------------------
@@ -188,6 +213,7 @@ def list_tools(include_source=False):
         entry["tools"] = check.get("tools", [])
         entry["group"] = check.get("group", "")
         entry["ui"] = [u["id"] for u in check.get("ui", [])]
+        entry["web_folders"] = web_footprint(check.get("ui"))["folders"]
         if include_source:
             entry["source"] = _read(path)
         out.append(entry)
@@ -225,6 +251,7 @@ def read_tool(name):
             "valid": check["ok"], "error": check.get("error", ""),
             "tools": check.get("tools", []), "group": check.get("group", ""),
             "ui": check.get("ui", []), "ui_problems": check.get("ui_problems", []),
+            "web": web_footprint(check.get("ui")),
             "commands": check.get("commands", []), "command_problems": check.get("command_problems", [])}
 
 
@@ -322,7 +349,10 @@ def _write_tool(name, source, description=""):
                     "to pick it up — tools are discovered at process start."}
 
 
-def delete_tool(name):
+def delete_tool(name, remove_folders=False):
+    """Remove a tool file. With `remove_folders`, also the screen files (and their
+    folders) its TOOL_UI declared -- see WEB FILES in the module docstring for what
+    is and isn't removed. Without it the folders stay, as they always did."""
     path, _enabled = _resolve(name)
     if not path:
         return {"ok": False, "error": "no custom tool named %r" % name}
@@ -334,8 +364,10 @@ def delete_tool(name):
         provided = list(checked.get("tools") or [])
         provided_ui = [u["id"] for u in checked.get("ui", [])]
         provided_commands = [c["name"] for c in checked.get("commands", [])]
+        ui_entries = list(checked.get("ui") or [])
     except Exception:  # noqa: BLE001 -- a file that won't import has nothing to forget
-        provided, provided_ui, provided_commands = [], [], []
+        provided, provided_ui, provided_commands, ui_entries = [], [], [], []
+    plan = web_removal_plan(name, ui_entries) if remove_folders else []
     try:
         path.unlink()
     except OSError as exc:
@@ -350,7 +382,10 @@ def delete_tool(name):
         tool_disable.forget_ui(ui_id)
     for command_name in provided_commands:
         tool_disable.forget_tool_command(command_name)
-    return {"ok": True, "name": name}
+    result = {"ok": True, "name": name}
+    if remove_folders:
+        result.update(_apply_removal_plan(plan))
+    return result
 
 
 def set_enabled(name, enabled):
@@ -581,11 +616,537 @@ def scaffold_template(template_id, source):
 
 
 # ---------------------------------------------------------------------------
+# A tool's web files: edit them, import a whole folder, remove them with the tool
+# ---------------------------------------------------------------------------
+
+WEB_EXTENSIONS = (".html", ".htm", ".js", ".css")
+IMPORT_MAX_ENTRIES = 300              # files looked at in one import (a zip can hold anything)
+IMPORT_MAX_BYTES = 8 * 1024 * 1024    # the whole bundle, uncompressed
+IMPORT_MAX_WEB_FILES = 36             # 12 screens x html/js/css
+_IMPORT_JUNK = {"thumbs.db", "desktop.ini"}
+
+
+def web_footprint(ui_entries):
+    """The screen files a tool owns, from its validated TOOL_UI entries (the public
+    form `validate_source` returns).
+
+        {"files":   [{"rel", "kind", "exists", "element", "label"}],   # rel is under ~/.jarvis/tools
+         "folders": ["dice_page", ...]}
+
+    Files a screen names (or defaults to) but doesn't have yet are listed with
+    `exists: False` -- that is how the editor offers to create one. Never raises.
+    """
+    from . import tool_ui
+    files, folders, seen = [], [], set()
+    for entry in ui_entries or []:
+        try:
+            folder = tool_ui._clean_parts(entry.get("path"))
+            if folder is None:
+                continue
+            joined = "/".join(folder)
+            if joined not in folders:
+                folders.append(joined)
+            for item in tool_ui.element_files(entry, TOOLS_DIR):
+                if item["rel"] in seen:
+                    continue
+                seen.add(item["rel"])
+                item["element"] = entry.get("id", "")
+                item["label"] = entry.get("label", "")
+                files.append(item)
+        except Exception:  # noqa: BLE001 -- a malformed entry must not break listing
+            continue
+    return {"files": files, "folders": folders}
+
+
+def _web_ref(name, rel):
+    """({"rel", "target", "kind", "exists"}, "") for one of the tool's OWN screen
+    files, or (None, reason). The list comes from the tool's saved file on disk, so
+    the browser names a path and this decides whether it is allowed."""
+    from . import tool_ui
+    name = (name or "").strip().lower()
+    path, _enabled = _resolve(name)
+    if not path:
+        return None, "no custom tool named %r" % name
+    check = validate_source(_read(path), name)
+    if not check["ok"]:
+        return None, "the saved file doesn't load, so its screen files can't be located: %s" % check["error"]
+    parts = tool_ui._clean_parts(rel)
+    if parts is None:
+        return None, "%r is not a relative path inside the tools folder" % (rel,)
+    clean = "/".join(parts)
+    match = next((f for f in web_footprint(check.get("ui"))["files"] if f["rel"] == clean), None)
+    if match is None:
+        return None, "%s is not one of this tool's screen files" % clean
+    target = tool_ui._resolve_inside(TOOLS_DIR, parts)
+    if target is None:
+        return None, "%s leaves the tools folder" % clean
+    return {"rel": clean, "target": target, "kind": match["kind"], "exists": target.is_file()}, ""
+
+
+def read_web_file(name, rel):
+    """The text of one of a tool's screen files (the editor's extra tabs)."""
+    from . import tool_ui
+    ref, error = _web_ref(name, rel)
+    if ref is None:
+        return {"ok": False, "error": error}
+    out = {"ok": True, "rel": ref["rel"], "kind": ref["kind"], "exists": ref["exists"], "text": "", "size": 0}
+    if not ref["exists"]:
+        return out
+    try:
+        size = ref["target"].stat().st_size
+        if size > tool_ui.MAX_FILE_BYTES:
+            return {"ok": False, "error": "%s is over %d KB, which is more than a screen can serve"
+                                          % (ref["rel"], tool_ui.MAX_FILE_BYTES // 1024)}
+        out["text"] = ref["target"].read_text(encoding=ENCODING)
+        out["size"] = size
+    except UnicodeDecodeError:
+        return {"ok": False, "error": "%s isn't a UTF-8 text file" % ref["rel"]}
+    except OSError as exc:
+        return {"ok": False, "error": "couldn't read %s: %s" % (ref["rel"], exc)}
+    return out
+
+
+def _atomic_text(target, text):
+    """Write beside the target and swap it in, so a crash never leaves half a file."""
+    import os
+    import tempfile
+    fd, tmp = tempfile.mkstemp(prefix=".%s." % target.name, suffix=".tmp", dir=str(target.parent))
+    try:
+        with os.fdopen(fd, "w", encoding=ENCODING) as handle:
+            handle.write(text)
+        os.replace(tmp, str(target))
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
+def write_web_file(name, rel, text):
+    """Save one of a tool's screen files. Creates it if the screen names it but it
+    doesn't exist yet; keeps one `.bak` of what it replaces. Nothing is run."""
+    from . import tool_ui
+    ref, error = _web_ref(name, rel)
+    if ref is None:
+        return {"ok": False, "error": error}
+    text = text if isinstance(text, str) else ""
+    if "\x00" in text:
+        return {"ok": False, "error": "that doesn't look like a text file"}
+    if len(text.encode(ENCODING)) > tool_ui.MAX_FILE_BYTES:
+        return {"ok": False, "error": "%s would be over %d KB, which is more than a screen can serve"
+                                      % (ref["rel"], tool_ui.MAX_FILE_BYTES // 1024)}
+    target = ref["target"]
+    try:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        if ref["exists"]:
+            shutil.copyfile(target, target.with_name(target.name + ".bak"))
+        _atomic_text(target, text)
+    except OSError as exc:
+        return {"ok": False, "error": "couldn't write %s: %s" % (ref["rel"], exc)}
+    return {"ok": True, "rel": ref["rel"], "kind": ref["kind"], "created": not ref["exists"],
+            "size": len(text.encode(ENCODING))}
+
+
+# ---- removal (uninstall) ----------------------------------------------------
+
+
+def _is_web_name(filename):
+    low = filename.lower()
+    if low.endswith(".bak"):
+        low = low[:-4]
+    return low.endswith(WEB_EXTENSIONS)
+
+
+def web_removal_plan(name, ui_entries):
+    """What uninstalling `name` WITH its folders would remove and what it would leave.
+
+    One dict per folder the tool's TOOL_UI declares and that still exists:
+      {"path", "remove": [rel...], "keep": [rel...], "blocked": "reason" | ""}
+    A folder is `blocked` (nothing in it is touched) when it is a link or sits under
+    one, is reserved (a name starting with "_"), or another tool also uses it --
+    judged by the elements other tools actually loaded AND by their source text, so a
+    disabled or broken file that names the folder still protects it. Inside a folder
+    only the files a screen serves (.html .htm .js .css and their .bak) are removed;
+    anything else is `keep`, and the folder stays if anything is. Never raises.
+    """
+    import os
+    from . import tool_ui
+    plan = []
+    try:
+        root = TOOLS_DIR.resolve()
+    except OSError:
+        return plan
+    mine = "%s.py" % name
+    others_text = []
+    try:
+        for other in sorted(TOOLS_DIR.glob("*.py")) + sorted(TOOLS_DIR.glob("*.py" + DISABLED_SUFFIX)):
+            if other.name.startswith("_") or other.name in (mine, mine + DISABLED_SUFFIX):
+                continue
+            others_text.append(_read(other).replace("\\", "/"))
+    except OSError:
+        pass
+    loaded = []
+    try:
+        from . import tools as system_tools
+        for u in getattr(system_tools, "AUTO_UI", []) or []:
+            if u.get("file") != mine and u.get("_dir"):
+                for fname in (u.get("files") or {}).values():
+                    if fname:
+                        loaded.append(Path(u["_dir"]) / fname)
+    except Exception:  # noqa: BLE001 -- during partial init, rely on the text check
+        pass
+
+    seen = set()
+    for entry in ui_entries or []:
+        parts = tool_ui._clean_parts((entry or {}).get("path"))
+        if parts is None or "/".join(parts) in seen:
+            continue
+        rel = "/".join(parts)
+        seen.add(rel)
+        folder = tool_ui._resolve_inside(root, parts)
+        item = {"path": rel, "remove": [], "keep": [], "blocked": ""}
+        if folder is None:
+            item["blocked"] = "it is outside the tools folder"
+        elif folder == root or parts[0].startswith("_"):
+            item["blocked"] = "it is a reserved folder"
+        elif any((root.joinpath(*parts[:i])).is_symlink() for i in range(1, len(parts) + 1)):
+            item["blocked"] = "it is a link, so it was left alone"
+        elif not folder.is_dir():
+            continue                                     # already gone: nothing to do
+        else:
+            # The folder as a quoted path ("ui", './ui/disk', "ui/disk/tool.js"), not as a
+            # substring: "ui" is inside half the words in any Python file.
+            named = re.compile(r"""["'](?:\./)?%s(?:/[^"']*)?["']""" % re.escape(rel), re.I)
+            if any(named.search(text) for text in others_text):
+                item["blocked"] = "another tool file also names it"
+            else:
+                for path in loaded:
+                    try:
+                        path.resolve().relative_to(folder)
+                    except (OSError, ValueError, RuntimeError):
+                        continue
+                    item["blocked"] = "another tool's screen uses files in it"
+                    break
+        if not item["blocked"]:
+            for dirpath, dirnames, filenames in os.walk(str(folder), followlinks=False):
+                base = Path(dirpath)
+                for d in list(dirnames):
+                    if (base / d).is_symlink():
+                        item["keep"].append("%s/%s" % (base.relative_to(root).as_posix(), d))
+                        dirnames.remove(d)
+                for fname in filenames:
+                    full = base / fname
+                    shown = full.relative_to(root).as_posix()
+                    if full.is_symlink() or not _is_web_name(fname):
+                        item["keep"].append(shown)
+                    else:
+                        item["remove"].append(shown)
+        plan.append(item)
+    return plan
+
+
+def _apply_removal_plan(plan):
+    """Carry out web_removal_plan. Returns what happened, for the caller to show:
+    {"files_removed": [...], "folders_removed": [...], "folders_kept": [{"path", "why"}]}."""
+    import os
+    result = {"files_removed": [], "folders_removed": [], "folders_kept": []}
+    try:
+        root = TOOLS_DIR.resolve()
+    except OSError:
+        return result
+    for item in plan:
+        if item["blocked"]:
+            result["folders_kept"].append({"path": item["path"], "why": item["blocked"]})
+            continue
+        for rel in item["remove"]:
+            try:
+                (root / rel).unlink()
+                result["files_removed"].append(rel)
+            except OSError:
+                item["keep"].append(rel)
+        folder = root.joinpath(*item["path"].split("/"))
+        # Deepest first: a folder only goes if what was in it did.
+        for dirpath, _dirs, _files in os.walk(str(folder), topdown=False, followlinks=False):
+            try:
+                os.rmdir(dirpath)
+            except OSError:
+                pass
+        if folder.exists():
+            result["folders_kept"].append({
+                "path": item["path"],
+                "why": "other files are still in it (%d)" % max(1, len(item["keep"]))})
+        else:
+            result["folders_removed"].append(item["path"])
+    return result
+
+
+def removal_preview(name):
+    """`web_removal_plan` for a saved tool, for the confirmation before an uninstall."""
+    path, _enabled = _resolve(name)
+    if not path:
+        return {"ok": False, "error": "no custom tool named %r" % name}
+    check = validate_source(_read(path), name)
+    return {"ok": True, "name": name, "folders": web_removal_plan(name, check.get("ui") if check["ok"] else [])}
+
+
+# ---- import: a .py with its folders ----------------------------------------
+
+
+def name_from_filename(filename):
+    """"My Tool-v2.py" -> "my_tool_v2"; "" when nothing usable is left. The same
+    rule as the Tool Manager's importNameFromFile."""
+    base = re.sub(r"^.*[\\/]", "", str(filename or ""))
+    base = re.sub(r"\.py(\.disabled)?$", "", base, flags=re.I)
+    base = re.sub(r"[^a-z0-9_]+", "_", base.lower())
+    base = re.sub(r"_+", "_", base).strip("_")
+    if base and not re.match(r"[a-z]", base):
+        base = "tool_" + base
+    return base[:49]
+
+
+def read_zip_bundle(zip_path):
+    """[(path, bytes)] from a .zip. Raises ValueError with a sentence for the person.
+
+    Sizes are checked from the headers first and again while reading (a header can
+    lie), encrypted archives and link members are refused or skipped, and nothing is
+    ever extracted to disk here: the members stay in memory until import_bundle has
+    judged every path.
+    """
+    import stat
+    import zipfile
+    try:
+        archive = zipfile.ZipFile(str(zip_path))
+    except (zipfile.BadZipFile, OSError) as exc:
+        raise ValueError("that isn't a readable .zip file (%s)" % exc)
+    items, total = [], 0
+    with archive:
+        infos = [i for i in archive.infolist() if not i.is_dir()]
+        if len(infos) > IMPORT_MAX_ENTRIES:
+            raise ValueError("the zip holds %d files; at most %d are read" % (len(infos), IMPORT_MAX_ENTRIES))
+        if sum(i.file_size for i in infos) > IMPORT_MAX_BYTES:
+            raise ValueError("the zip is over %d MB uncompressed" % (IMPORT_MAX_BYTES // (1024 * 1024)))
+        for info in infos:
+            if info.flag_bits & 0x1:
+                raise ValueError("the zip is password-protected")
+            if stat.S_ISLNK((info.external_attr >> 16) & 0xFFFF):
+                continue
+            try:
+                with archive.open(info) as handle:
+                    data = handle.read(IMPORT_MAX_BYTES + 1)
+            except (RuntimeError, zipfile.BadZipFile, OSError) as exc:
+                raise ValueError("couldn't read %s from the zip (%s)" % (info.filename, exc))
+            total += len(data)
+            if total > IMPORT_MAX_BYTES:
+                raise ValueError("the zip is over %d MB uncompressed" % (IMPORT_MAX_BYTES // (1024 * 1024)))
+            items.append((info.filename, data))
+    return items
+
+
+def _bundle_files(items):
+    """Judge every path in a bundle. Returns (files, skipped, error):
+    files = {"x.py": text, "ui/tool.html": text, ...} (one root folder stripped),
+    skipped = [{"path", "why"}], error = "" or a sentence (an unsafe path refuses the
+    whole bundle -- nothing partial is better than a half-trusted archive)."""
+    from . import tool_ui
+    cleaned, skipped = [], []
+    for raw, data in items:
+        text_path = str(raw if raw is not None else "").replace("\\", "/")
+        parts = tool_ui._clean_parts(text_path)
+        if parts is None:
+            return {}, skipped, "unsafe path in the bundle: %r (no absolute paths, drive letters or '..')" % (raw,)
+        cleaned.append((parts, data))
+    if len(cleaned) > IMPORT_MAX_ENTRIES:
+        return {}, skipped, "the bundle holds %d files; at most %d are read" % (len(cleaned), IMPORT_MAX_ENTRIES)
+    # Hidden files and macOS/Python droppings are never part of a tool.
+    kept = []
+    for parts, data in cleaned:
+        if any(p.startswith(".") or p.lower() in ("__macosx", "__pycache__") for p in parts) or parts[-1].lower() in _IMPORT_JUNK:
+            continue
+        kept.append((parts, data))
+    # One wrapping folder (a picked folder, or a zip made from one) is not part of the layout.
+    if kept and all(len(parts) > 1 for parts, _ in kept) and len({parts[0] for parts, _ in kept}) == 1:
+        kept = [(parts[1:], data) for parts, data in kept]
+    files = {}
+    for parts, data in kept:
+        rel = "/".join(parts)
+        low = rel.lower()
+        is_py = len(parts) == 1 and low.endswith(".py")
+        if not (is_py or low.endswith(WEB_EXTENSIONS)):
+            skipped.append({"path": rel, "why": "a tool doesn't use this kind of file"})
+            continue
+        if parts[0].startswith("_") and not is_py:
+            skipped.append({"path": rel, "why": "folders starting with _ are reserved"})
+            continue
+        if isinstance(data, bytes):
+            try:
+                text = data.decode("utf-8-sig")
+            except UnicodeDecodeError:
+                skipped.append({"path": rel, "why": "not a UTF-8 text file"})
+                continue
+        else:
+            text = str(data)
+        if "\x00" in text:
+            skipped.append({"path": rel, "why": "not a text file"})
+            continue
+        if not is_py and len(text.encode(ENCODING)) > tool_ui.MAX_FILE_BYTES:
+            skipped.append({"path": rel, "why": "over %d KB" % (tool_ui.MAX_FILE_BYTES // 1024)})
+            continue
+        files[rel] = text
+    return files, skipped, ""
+
+
+def plan_import(items, name=""):
+    """What importing this bundle would do, WITHOUT running anything.
+
+    {"ok": True, "name", "name_problem", "py_file", "py_size", "py_lines", "py_head",
+     "web": [{"path","size","kind"}], "skipped": [{"path","why"}], "problems": [str]}
+    `name_problem` (the name is invalid or taken) and `problems` (a screen file that
+    would overwrite one, one that is empty or too large, ...) are the blockers; the
+    name is kept apart because the person can change it and nothing else. Or
+    {"ok": False, "error": ...} when the bundle can't be read at all."""
+    from . import tool_ui
+    files, skipped, error = _bundle_files(items)
+    if error:
+        return {"ok": False, "error": error}
+    pys = sorted(rel for rel in files if "/" not in rel and rel.lower().endswith(".py"))
+    helpers = [rel for rel in pys if rel.startswith("_")]
+    for rel in helpers:
+        skipped.append({"path": rel, "why": "helper modules (starting with _) aren't imported"})
+    pys = [rel for rel in pys if rel not in helpers]
+    for rel in helpers:
+        files.pop(rel, None)
+    if not pys:
+        return {"ok": False, "error": "no .py tool file at the top of the folder or zip"
+                                      " (a screen's files go in folders beside it)"}
+    if len(pys) > 1:
+        return {"ok": False, "error": "found %d .py files (%s); import one tool at a time" % (len(pys), ", ".join(pys))}
+    py_file = pys[0]
+    web = sorted(rel for rel in files if rel != py_file)
+    if len(web) > IMPORT_MAX_WEB_FILES:
+        return {"ok": False, "error": "%d screen files; at most %d are read" % (len(web), IMPORT_MAX_WEB_FILES)}
+    source = files[py_file]
+    final = (name or "").strip().lower() or name_from_filename(py_file)
+    problems, name_problem = [], ""
+    if not valid_name(final):
+        name_problem = "%r isn't a usable tool name (lower_snake_case, start with a letter, 49 characters at most)" % final
+    elif _resolve(final)[0]:
+        name_problem = "a tool file called %s already exists" % final
+    if not source.strip():
+        problems.append("%s is empty" % py_file)
+    elif len(source) > MAX_SOURCE_CHARS:
+        problems.append("%s is too large (max %d characters)" % (py_file, MAX_SOURCE_CHARS))
+    for rel in web:
+        parts = tool_ui._clean_parts(rel)
+        target = tool_ui._resolve_inside(TOOLS_DIR, parts) if parts else None
+        if target is None:
+            problems.append("%s would land outside the tools folder" % rel)
+        elif target.exists() or target.is_symlink():
+            problems.append("%s already exists, so importing would overwrite it" % rel)
+    return {"ok": True, "name": final, "name_problem": name_problem, "py_file": py_file,
+            "py_size": len(source.encode(ENCODING)), "py_lines": source.count("\n") + 1,
+            "py_head": "\n".join(source.split("\n")[:80]),
+            "web": [{"path": rel, "size": len(files[rel].encode(ENCODING)),
+                     "kind": "html" if rel.lower().endswith((".html", ".htm")) else rel.rsplit(".", 1)[-1].lower()}
+                    for rel in web],
+            "skipped": skipped, "problems": problems,
+            "_files": files}
+
+
+def import_bundle(items, name="", write=False, description=""):
+    """Import a tool made of a .py and screen folders: preview, or write it.
+
+    `items` is [(path, text-or-bytes)]. With `write=False` this is `plan_import`
+    (minus the internal text). With `write=True` it:
+      1. refuses on any blocker in the plan,
+      2. checks the .py exactly as a normal save does, against a staging folder that
+         holds the bundle's screen files (so what it declares is judged with its files),
+      3. keeps only the screen files a declared screen actually uses,
+      4. writes them (never over anything that exists), then the .py through the
+         ordinary `_write_tool`, and
+      5. removes everything it wrote if the .py is refused.
+    """
+    import tempfile
+    from . import tool_ui
+    plan = plan_import(items, name)
+    files = plan.pop("_files", {})
+    if not plan.get("ok"):
+        return plan
+    if not write:
+        return plan
+    blockers = ([plan["name_problem"]] if plan.get("name_problem") else []) + list(plan["problems"])
+    if blockers:
+        return dict(plan, ok=False, stage="import", error="; ".join(blockers))
+    final, py_file = plan["name"], plan["py_file"]
+    source = files[py_file]
+    web = {rel: files[rel] for rel in files if rel != py_file}
+
+    with tempfile.TemporaryDirectory(prefix="jarvis_import_") as stage_dir:
+        stage = Path(stage_dir)
+        for rel, text in web.items():
+            target = stage.joinpath(*rel.split("/"))
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(text, encoding=ENCODING)
+        check = validate_source(source, final, base_dir=stage)
+        if not check["ok"]:
+            return {"ok": False, "stage": check.get("stage", "validate"), "error": check["error"],
+                    "hint": check.get("hint", ""), "name": final, "web": plan["web"], "skipped": plan["skipped"]}
+        used = set()
+        for entry in check.get("ui", []):
+            for item in tool_ui.element_files(entry, stage):
+                if item["exists"]:
+                    used.add(item["rel"])
+    skipped = list(plan["skipped"])
+    for rel in sorted(set(web) - used):
+        skipped.append({"path": rel, "why": "no screen this tool declares uses it"})
+    to_write = {rel: web[rel] for rel in sorted(web) if rel in used}
+
+    created_files, created_dirs = [], []
+
+    def roll_back():
+        for path in reversed(created_files):
+            try:
+                path.unlink()
+            except OSError:
+                pass
+        for path in reversed(created_dirs):
+            try:
+                path.rmdir()
+            except OSError:
+                pass
+
+    ensure_dir()
+    try:
+        for rel, text in to_write.items():
+            target = TOOLS_DIR.joinpath(*rel.split("/"))
+            missing, cur = [], target.parent
+            while not cur.exists() and cur != TOOLS_DIR:
+                missing.append(cur)
+                cur = cur.parent
+            target.parent.mkdir(parents=True, exist_ok=True)
+            created_dirs.extend(reversed(missing))
+            with open(str(target), "x", encoding=ENCODING) as handle:     # "x": never over an existing file
+                handle.write(text)
+            created_files.append(target)
+    except OSError as exc:
+        roll_back()
+        return {"ok": False, "stage": "import", "error": "couldn't write %s: %s" % (rel, exc),
+                "name": final, "rolled_back": True}
+    result = _write_tool(final, source, description)
+    if not result.get("ok"):
+        roll_back()
+        return dict(result, name=final, rolled_back=True)
+    result["imported"] = ["%s.py" % final] + list(to_write)
+    result["skipped"] = skipped
+    return result
+
+
+# ---------------------------------------------------------------------------
 # Validation
 # ---------------------------------------------------------------------------
 
 
-def validate_source(source, name="custom_tool"):
+def validate_source(source, name="custom_tool", base_dir=None):
     """Compile and inspect without registering anything.
 
     Three stages, each reporting separately, because "syntax error on line
@@ -596,6 +1157,11 @@ def validate_source(source, name="custom_tool"):
     value, so there is no way to read it without running the top level. That
     is the same exposure tool_loader already accepts for actions/, and the
     person whose file it is is the person who asked to save it.
+
+    `base_dir` is where a TOOL_UI `path` is resolved from (default: ~/.jarvis/tools,
+    where the file will live). An import checks a bundle against a staging folder
+    that already holds its screen files, so "the folder isn't there yet" doesn't
+    hide what the tool declares.
     """
     source = source or ""
     if not source.strip():
@@ -722,7 +1288,7 @@ def validate_source(source, name="custom_tool"):
     if getattr(module, "TOOL_UI", None) is not None:
         from . import tool_ui
         ui_entries, ui_problems = tool_ui.validate_ui(
-            getattr(module, "TOOL_UI", None), "%s.py" % name, TOOLS_DIR, set(names))
+            getattr(module, "TOOL_UI", None), "%s.py" % name, base_dir or TOOLS_DIR, set(names))
         ui_problems = list(ui_problems) + _ui_clashes(ui_entries, name)
 
     # TOOL_COMMANDS (tool_commands.py, I.2.11): same rule again -- the loader drops a

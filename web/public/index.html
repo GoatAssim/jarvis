@@ -1429,7 +1429,8 @@
         <button class="btn btn--ghost btn--sm tm-pane-toggle" id="btn-tm-toggle-side" type="button" aria-pressed="true" title="Show or hide the Overview panel">Overview</button>
         <!-- L.53: Ask Jarvis takes the Overview's slot (toggle it off and the Overview returns). Needs an open editor tab. -->
         <button class="btn btn--ghost btn--sm tm-pane-toggle" id="btn-tm-toggle-agent" type="button" aria-pressed="false" disabled title="Open a tool in the editor first (Create a tool, or Edit one)">Ask Jarvis</button>
-        <button class="btn btn--ghost btn--sm" id="btn-tm-import" type="button" title="Import a .py tool file — you are asked to confirm before anything runs">Import&hellip;</button>
+        <button class="btn btn--ghost btn--sm" id="btn-tm-import" type="button" title="Import a .py tool file, several files, or a .zip — you are asked to confirm before anything runs">Import&hellip;</button>
+        <button class="btn btn--ghost btn--sm" id="btn-tm-import-folder" type="button" title="Import a tool together with its screen folders — you are asked to confirm before anything runs">Import folder&hellip;</button>
         <button class="btn btn--primary btn--sm" id="btn-tm-create" type="button">Create a tool</button>
         <button class="btn btn--ghost btn--sm" id="btn-tm-refresh" type="button" title="Re-read the tool catalogue and your tool files">Refresh</button>
       </div>
@@ -1497,7 +1498,8 @@
           </div>
           <div class="tm-ask__slot" id="tm-ask-slot"></div>
         </div>
-        <input type="file" class="tm-file-input" id="tm-file" accept=".py,text/x-python" tabindex="-1" aria-hidden="true">
+        <input type="file" class="tm-file-input" id="tm-file" accept=".py,.zip,.html,.htm,.js,.css,text/x-python,application/zip" multiple tabindex="-1" aria-hidden="true">
+        <input type="file" class="tm-file-input" id="tm-folder" webkitdirectory tabindex="-1" aria-hidden="true">
       </section>
 
     </div>

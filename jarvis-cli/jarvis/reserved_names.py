@@ -77,6 +77,9 @@ RESERVED_NAMES = {
     "ctools-list", "ctools-show", "ctools-write", "ctools-check",
     "ctools-delete", "ctools-run", "ctools-toggle", "ctools-templates",
     "ctools-suggest", "ctools-agent", "ctools-drafts",
+    # ctools-files / ctools-import: a tool's screen files (edit tabs, uninstall preview)
+    # and importing a tool together with its folders (several files, a folder or a .zip).
+    "ctools-files", "ctools-import",
     # tool-ui: the screens a tool file ships through TOOL_UI (list / bundle / run).
     "tool-ui",
     # tool-commands: the palette commands a tool file ships through TOOL_COMMANDS

@@ -24,6 +24,11 @@
  *     Ctrl+Right takes one word, Esc dismisses, Alt+\ asks right now. Typing
  *     the suggested characters keeps the rest on screen, like VS Code.
  *
+ * `language: "text"` (the Tool Manager's html / js / css tabs) keeps the editing but
+ * drops everything that is Python: no colours, no completion popup, no Ctrl+/ comment,
+ * no smart indent after ':' and no auto-closing quotes. The text is still escaped, never
+ * markup, and there are no Jarvis suggestions unless `suggest` is passed.
+ *
  * What it does not do: it never talks to the network itself. `opts.suggest`
  * is supplied by the caller (the Tool Manager posts to /api/ctools/:name/
  * suggest). A suggestion is only text on screen until it is accepted, and the
@@ -222,6 +227,13 @@
       next = indent.slice(0, indent.length - IND.length);
     }
     const ins = "\n" + next;
+    return { start: s, end: e, insert: ins, selStart: s + ins.length, selEnd: s + ins.length };
+  }
+
+  // Enter in a "text" editor: a new line with the same indent, nothing language-aware.
+  function keepIndentEnter(text, s, e) {
+    const indent = /^[ \t]*/.exec(text.slice(lineStartOf(text, s), s))[0];
+    const ins = "\n" + indent;
     return { start: s, end: e, insert: ins, selStart: s + ins.length, selEnd: s + ins.length };
   }
 
@@ -501,7 +513,7 @@
 
   const _pure = {
     IND, tokenize, renderHTML, posToLineCol, visualCol, lineStartOf, lineEndOf, applyEdit,
-    smartEnter, indentLines, toggleComment, moveLines, duplicateLines, typeChar, backspaceEdit,
+    smartEnter, keepIndentEnter, indentLines, toggleComment, moveLines, duplicateLines, typeChar, backspaceEdit,
     matchBracket, completionsFor, expandSnippet, outline, hashText, suggestionWanted, nextWordChunk,
     SNIPPETS,
   };
@@ -527,13 +539,14 @@
   }
 
   /*
-   * opts: { value, placeholder, label,
+   * opts: { value, placeholder, label, language ("python" default | "text"), languageLabel,
    *         onChange(value), onSave(), onValidate(),
    *         suggest({source, cursor, signal}) -> Promise<string>   (optional),
    *         suggestEnabled (bool), onSuggestToggle(bool) }
    */
   function create(opts) {
     opts = opts || {};
+    const plain = opts.language === "text";
     const st = {
       value: String(opts.value || ""), tokens: [], marks: [], errorLine: 0, lines: 0,
       cw: 0, lh: 0, padL: 14, padT: 12,
@@ -568,7 +581,7 @@
     const lenEl = h("span", { class: "ce__stat ce__stat--dim" });
     const sugBtn = h("button", { class: "ce__sug", type: "button", onclick: () => setSuggestEnabled(!st.suggestOn) });
     const status = h("div", { class: "ce__status" }, [
-      posEl, h("span", { class: "ce__stat ce__stat--dim" }, ["Spaces: 4"]), h("span", { class: "ce__stat ce__stat--dim" }, ["Python"]), lenEl,
+      posEl, h("span", { class: "ce__stat ce__stat--dim" }, ["Spaces: 4"]), h("span", { class: "ce__stat ce__stat--dim" }, [opts.languageLabel || (plain ? "Text" : "Python")]), lenEl,
       h("span", { class: "ce__spacer" }), sugBtn,
     ]);
     const root = h("div", { class: "ce" }, [h("div", { class: "ce__main" }, [gutter, stage]), status]);
@@ -618,7 +631,7 @@
     }
 
     function paintCode() {
-      st.tokens = tokenize(st.value);
+      st.tokens = plain ? [] : tokenize(st.value);
       code.innerHTML = renderHTML(st.value, st.tokens, st.marks);
     }
 
@@ -751,6 +764,7 @@
       const typed = !ev || /^insert|^delete/.test(ev.inputType || "");
       if (!typed || st.composing) return;
       const s = ta.selectionStart;
+      if (plain) { scheduleSuggest(); return; }
       if (ev && ev.inputType === "insertText" && /[A-Za-z0-9_]/.test(ev.data || "") && ta.selectionEnd === s) {
         const c = completionsFor(st.value, s, false);
         if (c) { openPop(c); return; }
@@ -895,11 +909,11 @@
         if (k === "Escape") { e.preventDefault(); e.stopPropagation(); clearGhost(); return; }
       }
 
-      if (mod && k === " ") { e.preventDefault(); const c = completionsFor(st.value, s, true); if (c) openPop(c); return; }
+      if (mod && k === " ") { e.preventDefault(); if (plain) return; const c = completionsFor(st.value, s, true); if (c) openPop(c); return; }
       if (e.altKey && (k === "\\" || e.code === "Backslash") && !mod) { e.preventDefault(); requestSuggest(true); return; }
       if (mod && !e.altKey && k.toLowerCase() === "s") { e.preventDefault(); if (opts.onSave) opts.onSave(); return; }
       if (mod && k === "Enter") { e.preventDefault(); if (opts.onValidate) opts.onValidate(); return; }
-      if (mod && !e.shiftKey && !e.altKey && k === "/") { e.preventDefault(); const ed = toggleComment(st.value, s, en); if (ed) replace(ed); return; }
+      if (mod && !e.shiftKey && !e.altKey && k === "/") { e.preventDefault(); if (plain) return; const ed = toggleComment(st.value, s, en); if (ed) replace(ed); return; }
       if (e.altKey && !mod && (k === "ArrowUp" || k === "ArrowDown")) {
         e.preventDefault();
         const ed = e.shiftKey ? duplicateLines(st.value, s, en, k === "ArrowDown" ? 1 : -1) : moveLines(st.value, s, en, k === "ArrowDown" ? 1 : -1);
@@ -915,9 +929,9 @@
         }
         return;
       }
-      if (k === "Enter" && !mod && !e.shiftKey && !e.altKey) { e.preventDefault(); replace(smartEnter(st.value, s, en)); return; }
+      if (k === "Enter" && !mod && !e.shiftKey && !e.altKey) { e.preventDefault(); replace(plain ? keepIndentEnter(st.value, s, en) : smartEnter(st.value, s, en)); return; }
       if (k === "Backspace" && !mod && !e.altKey) { const ed = backspaceEdit(st.value, s, en); if (ed) { e.preventDefault(); replace(ed); } return; }
-      if (k.length === 1 && !mod && !e.altKey) {
+      if (k.length === 1 && !mod && !e.altKey && !plain) {
         const r = typeChar(st.value, s, en, k);
         if (r && r.skip != null) { e.preventDefault(); ta.setSelectionRange(r.skip, r.skip); cursorMoved(); return; }
         if (r) { e.preventDefault(); replace(r); return; }

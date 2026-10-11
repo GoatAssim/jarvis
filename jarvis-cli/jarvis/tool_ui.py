@@ -190,6 +190,7 @@ def validate_ui(raw, filename, base_dir, tool_names=None):
         tool = tool or ""
 
         files, missing, bad = {}, [], False
+        planned = {}          # kind -> the file name this element would use (exists or not)
         for kind in KINDS:
             declared = item.get(kind)
             if declared is None:
@@ -214,6 +215,7 @@ def validate_ui(raw, filename, base_dir, tool_names=None):
                 errors.append("%s: %s file %r leaves the folder" % (where, kind, name))
                 bad = True
                 break
+            planned[kind] = "/".join(sub)
             if target.is_file():
                 files[kind] = "/".join(sub)
             else:
@@ -240,6 +242,7 @@ def validate_ui(raw, filename, base_dir, tool_names=None):
             "icon": _text(item.get("icon"), MAX_ICON),
             "path": "/".join(parts),
             "files": files,
+            "planned": planned,
             "tool": tool,
             "tools": sorted(tool_names),
             "file": filename,
@@ -253,6 +256,35 @@ def public(entry, disabled=False):
     """The shape the browser and `jarvis tool-ui list` see: no absolute paths."""
     out = {k: v for k, v in entry.items() if not k.startswith("_")}
     out["disabled"] = bool(disabled)
+    return out
+
+
+def element_files(entry, base_dir):
+    """Every file an element reads, or would read if it existed, for the Tool Manager's
+    editor tabs: [{"kind", "rel", "exists"}], html then js then css.
+
+    `entry` is a public element (validate_ui's output without the `_` keys, as
+    `public()` gives it); `rel` is relative to `base_dir` (the declaring file's
+    directory) with forward slashes, and is what the editor hands back to name a
+    file. Each one is re-resolved here and dropped if it no longer lands inside
+    `base_dir`, so a list built from this can never name a path outside it.
+    A kind the author set to "" ("none") is not listed: it is not part of the screen.
+    Never raises.
+    """
+    out = []
+    folder = _clean_parts((entry or {}).get("path"))
+    if folder is None:
+        return out
+    planned = (entry or {}).get("planned") or {}
+    for kind in KINDS:
+        name = planned.get(kind) or ((entry or {}).get("files") or {}).get(kind) or ""
+        sub = _clean_parts(name) if name else None
+        if sub is None:
+            continue
+        target = _resolve_inside(base_dir, folder + sub)
+        if target is None:
+            continue
+        out.append({"kind": kind, "rel": "/".join(folder + sub), "exists": target.is_file()})
     return out
 
 

@@ -62,6 +62,22 @@
  * The Tools list and the side panel each have an x (and a toggle in the header)
  * so the editor can have the whole width.
  *
+ * A TOOL'S SCREEN FILES: EDIT, IMPORT, UNINSTALL
+ * ----------------------------------------------
+ * A tool that declares TOOL_UI owns folders of html / js / css. Three things follow them:
+ *   Editor tabs   under the tool's name bar a strip of files appears: tool.py plus each
+ *                 screen file the saved tool names (a missing one is offered as "new" and
+ *                 created by Save). Each is its own editor, so undo, caret and scroll
+ *                 survive switching. Save (Ctrl+S) saves the file you are looking at;
+ *                 "Save all" saves every changed one. Unsaved screen text is kept in this
+ *                 browser like unsaved Python; only the .py is backed up on the server.
+ *   Import        Import... takes a .py (as before), several files, a picked folder or a
+ *                 .zip. The review lists what would be written; the .py is only run after
+ *                 you confirm, and only screen files a declared screen uses are kept.
+ *   Delete        asks whether the tool's folder goes with it. Only the files a screen
+ *                 serves are removed; a folder another tool names, a link, or anything
+ *                 else inside it is left alone and listed.
+ *
  * TALKS TO THE SERVER ONLY THROUGH EXISTING ROUTES
  *   GET  /api/tools                read-only catalogue (+ flags, defaults, group, file, disabled, protected)
  *   POST /api/tools/safety         flip one safeguard
@@ -72,6 +88,8 @@
  *   GET  /api/disabled/dependents  scheduled jobs that name a tool/command
  *   /api/ctools[...]               list / show / check / write / run / enabled / delete / draft / templates
  *   /api/ctools/drafts[/:key]      the unfinished-tool backups
+ *   /api/ctools/:name/files|file|removal   a tool's screen files (list / read+write one / what Delete would remove)
+ *   POST /api/ctools/import[/zip]  preview or write a tool with its folders (?mode=preview|write&name=)
  *   GET  /api/daemons, PATCH /api/daemons/:id   daemons and their `enabled` flag
  *   GET  /api/personas?all=1, GET /api/tool-ui?all=1   registered personas / shipped screens (incl. switched-off)
  *   GET  /api/tool-commands?all=1  the `/` palette commands tool files ship (incl. switched-off)
@@ -644,7 +662,59 @@
     });
   }
 
+  /* ---- a tool's screen files (editor tabs, import, uninstall) ---------------------- */
+
+  const WEB_KIND_LABEL = { html: "HTML", js: "JavaScript", css: "CSS" };
+  const IMPORT_TEXT_EXT = /\.(py|html?|js|css)$/i;
+  const IMPORT_MAX_READ = 1500000;                    // a file bigger than this is not read into the browser
+
+  // Tab labels for a tool's files: the file name, or folder/name when two share a name.
+  function webTabLabels(rels) {
+    const list = (rels || []).map(String);
+    const count = {};
+    list.forEach((r) => { const b = r.split("/").pop(); count[b] = (count[b] || 0) + 1; });
+    const out = {};
+    list.forEach((r) => { const parts = r.split("/"); out[r] = count[parts[parts.length - 1]] > 1 && parts.length > 1 ? parts.slice(-2).join("/") : parts[parts.length - 1]; });
+    return out;
+  }
+
+  function webDirty(ed) { return Object.keys((ed && ed.webFiles) || {}).map((k) => ed.webFiles[k]).filter((f) => f && f.dirty); }
+  function isDirty(ed) { return !!(ed && (ed.dirty || webDirty(ed).length)); }
+  function dirtyNames(ed) {
+    const names = [];
+    if (ed && ed.dirty) names.push("tool.py");
+    webDirty(ed).forEach((f) => names.push(f.rel.split("/").pop()));
+    return names;
+  }
+
+  // What the picked / dropped files are, so the right import path runs. `files` is
+  // [{name, path}]; path is the folder-relative path when there is one.
+  function importKind(files) {
+    const list = files || [];
+    if (!list.length) return "none";
+    const zips = list.filter((f) => /\.zip$/i.test(f.name || ""));
+    if (list.length === 1 && /\.py$/i.test(list[0].name || "")) return "py";
+    if (list.length === 1 && zips.length === 1) return "zip";
+    if (zips.length) return "mixed";
+    return "bundle";
+  }
+
+  // From a removal preview ({folders: [{path, remove, keep, blocked}]}): what the Delete
+  // dialog says. `removable` folders go with the tool; `blocked` ones are named and left.
+  function removalSummary(folders) {
+    const out = { removable: [], blocked: [], kept: 0 };
+    (folders || []).forEach((f) => {
+      if (f.blocked) { out.blocked.push({ path: f.path, why: f.blocked }); return; }
+      out.removable.push({ path: f.path, count: (f.remove || []).length, keep: (f.keep || []).length });
+      out.kept += (f.keep || []).length;
+    });
+    return out;
+  }
+
+  function plural(n, one, many) { return n + " " + (n === 1 ? one : many || one + "s"); }
+
   const PURE = {
+    webTabLabels, webDirty, isDirty, dirtyNames, importKind, removalSummary, WEB_KIND_LABEL, IMPORT_TEXT_EXT, plural,
     availabilityHint, offOutcome, dependentLines, cascadeLines, commandLines, offSummary, commandSteps, commandVars, needsAttention, isOff, OFF_STATES,
     SAFEGUARDS, KEYS, NAME_RE, STAGES, MAX_SOURCE_CHARS, bucketOf, groupLabel, originOf, buildRows, matchesSearch, matchesSafeguard,
     matchesSource, filterRows, groupRows, coverage, callOutcome, jobOutcome, changedKeys, nameProblem, importNameFromFile,
@@ -726,7 +796,7 @@
       overlay, panel: $(".tm-panel", overlay), statusLine: $("#tm-status-line"), search: $("#tm-search"),
       chips: $("#tm-chips"), groupSel: $("#tm-group-filter"), safeSel: $("#tm-safeguard-filter"), list: $("#tm-list"),
       count: $("#tm-count"), midTitle: $("#tm-mid-title"), detail: $("#tm-detail"), foot: $("#tm-foot"), side: $("#tm-side"),
-      file: $("#tm-file"), refresh: $("#btn-tm-refresh"), btnImport: $("#btn-tm-import"), btnCreate: $("#btn-tm-create"),
+      file: $("#tm-file"), folder: $("#tm-folder"), btnImportFolder: $("#btn-tm-import-folder"), refresh: $("#btn-tm-refresh"), btnImport: $("#btn-tm-import"), btnCreate: $("#btn-tm-create"),
       tabs: $("#tm-tabs"), toggleTools: $("#btn-tm-toggle-tools"), toggleSide: $("#btn-tm-toggle-side"),
       toggleAgent: $("#btn-tm-toggle-agent"), sideTitle: $("#tm-side-title"),
       closeTools: $("#tm-close-tools"), closeSide: $("#tm-close-side"),
@@ -1519,22 +1589,54 @@
   }
 
   async function deleteFile(fileName) {
-    const ok = await UI().confirm({
-      title: "Delete " + fileName + "?", level: "error", focusCancel: true, confirmLabel: "Delete",
-      body: "The file is removed from ~/.jarvis/tools. A .bak copy from the last save is left behind.",
-    });
-    if (!ok) return;
+    const entry = (state.files || []).find((x) => x.name === fileName);
+    const folders = (entry && entry.web_folders) || [];
+    let withFolders = false;
+    if (folders.length) {
+      // The tool ships screen files. Ask the server what removing them would do (it knows
+      // which are shared, linked or hold other files), then let the owner choose.
+      let preview = null;
+      try { preview = await ctools("/" + encodeURIComponent(fileName) + "/removal"); } catch (_) { /* fall back to naming the folders */ }
+      const sum = removalSummary(preview && preview.folders);
+      const lines = ["The file is removed from ~/.jarvis/tools. A .bak copy from the last save is left behind."];
+      const options = [];
+      if (sum.removable.length) {
+        const n = sum.removable.reduce((a, f) => a + f.count, 0);
+        options.push({ label: "Delete the tool and its folder" + (sum.removable.length > 1 ? "s" : ""), value: "folders",
+          hint: "Also removes " + sum.removable.map((f) => f.path + "/").join(", ") + " (" + plural(n, "screen file") + "). Other files in a folder are kept." });
+      } else if (!preview) {
+        lines.push("It ships screen files in " + folders.map((f) => f + "/").join(", ") + "; they can’t be checked right now, so they would stay.");
+      }
+      sum.blocked.forEach((b) => lines.push(b.path + "/ is left alone: " + b.why + "."));
+      options.push({ label: "Delete the tool only", value: "tool", hint: sum.removable.length ? "Its folder stays where it is." : "Its folder is left as it is." });
+      const choice = await UI().choose({ title: "Delete " + fileName + "?", level: "error", body: lines.join(" "), options });
+      if (choice == null) return;
+      withFolders = choice === "folders";
+    } else {
+      const ok = await UI().confirm({
+        title: "Delete " + fileName + "?", level: "error", focusCancel: true, confirmLabel: "Delete",
+        body: "The file is removed from ~/.jarvis/tools. A .bak copy from the last save is left behind.",
+      });
+      if (!ok) return;
+    }
     try {
-      const r = await ctools("/" + encodeURIComponent(fileName), { method: "DELETE" });
+      const r = await ctools("/" + encodeURIComponent(fileName) + (withFolders ? "?folders=1" : ""), { method: "DELETE" });
       if (r && r.ok === false) throw new Error(r.error || "Couldn’t delete.");
       // The file is gone, so its tab (if open) goes too, no questions asked.
       const openTab = state.tabs.find((t) => t.mode === "edit" && t.origName === fileName);
       if (openTab) await closeTab(openTab, { force: true });
       state.selected = null; state.run = null;
       await loadAll({ quiet: true });
-      toast("Deleted " + fileName + ".", "success");
+      let note = "";
+      if (withFolders) {
+        const gone = (r.folders_removed || []).map((f) => f + "/");
+        const kept = (r.folders_kept || []).map((f) => f.path + "/ (" + f.why + ")");
+        note = (gone.length ? " Removed " + gone.join(", ") + "." : "") + (kept.length ? " Left " + kept.join("; ") + "." : "");
+      }
+      toast("Deleted " + fileName + "." + note, deleteToastLevel(note));
     } catch (e) { toast(e.message, "error"); }
   }
+  const deleteToastLevel = (note) => (/ Left /.test(note) ? "info" : "success");
 
   function openInDebug(name) {
     const item = $("#menu-item-debug");
@@ -1575,6 +1677,10 @@
       source: opts.source || "", template: opts.template || "minimal", dirty: !!opts.dirty, saved: mode === "edit",
       result: null, errorLine: null, busy: "", nameTouched: false, untitled: 0,
       pane: null, cm: null, ui: null, sourceBeforeAi: null,
+      // A tool's screen files (its TOOL_UI folders), one editor each: rel -> {rel, kind, exists, text,
+      // loaded, dirty, saved, cm, error, busy}. `activeFile` is "py" or one of those rels.
+      webFiles: {}, webOrder: [], webLoaded: false, webLoading: false, webError: "", activeFile: "py",
+      webRestore: opts.web && typeof opts.web === "object" ? opts.web : null, cmHost: null, filebar: null,
       // The key this tab's backup is stored under (see "UNFINISHED TOOLS"); draftSynced is
       // the text last sent there, so an unchanged tab sends nothing; draftTimer debounces.
       draftKey: DRAFT_KEY_RE.test(opts.draftKey || "") ? opts.draftKey : newDraftKey(), draftSynced: opts.draftSynced || "", draftTimer: 0,
@@ -1612,9 +1718,9 @@
       const label = tabLabel(ed);
       const close = (e) => { if (e) { e.stopPropagation(); e.preventDefault(); } closeTab(ed); };
       bar.appendChild(el("div", {
-        class: "tm-tab" + (active ? " is-active" : "") + (ed.dirty ? " is-dirty" : "") + (ed.chat.busy ? " is-ai" : ""),
+        class: "tm-tab" + (active ? " is-active" : "") + (isDirty(ed) ? " is-dirty" : "") + (ed.chat.busy ? " is-ai" : ""),
         role: "tab", tabindex: "0", "aria-selected": active ? "true" : "false",
-        title: label + (ed.dirty ? " — unsaved changes" : "") + (ed.chat.busy ? " — Jarvis is writing" : ""),
+        title: label + (isDirty(ed) ? " — unsaved changes" : "") + (ed.chat.busy ? " — Jarvis is writing" : ""),
         onclick: () => { if (!active) showEditor(ed); },
         onauxclick: (e) => { if (e.button === 1) close(e); },
         onkeydown: (e) => {
@@ -1651,9 +1757,10 @@
     if (!ed || !state.tabs.includes(ed)) return true;
     if (!(opts && opts.force)) {
       const note = ed.chat.busy ? " Jarvis is still writing into it." : "";
-      if (ed.dirty || ed.chat.busy) {
+      if (isDirty(ed) || ed.chat.busy) {
+        const names = dirtyNames(ed);
         const ok = await UI().confirm({ title: "Close " + tabLabel(ed) + " without saving?", level: "warn", focusCancel: true, confirmLabel: "Discard",
-          body: ed.dirty ? "You’ve edited " + tabLabel(ed) + " without saving." + note : "Jarvis is still writing into it." });
+          body: isDirty(ed) ? "You’ve edited " + (names.length > 1 || names[0] !== "tool.py" ? names.join(", ") : tabLabel(ed)) + " without saving." + note : "Jarvis is still writing into it." });
         if (!ok) return false;
       }
     }
@@ -1666,8 +1773,9 @@
     const wasActive = state.view === "editor" && state.editor === ed;
     state.tabs.splice(idx, 1);
     if (ed.cm) { try { ed.cm.dispose(); } catch (_) { /* already gone */ } ed.cm = null; }
+    Object.keys(ed.webFiles || {}).forEach((rel) => { const f = ed.webFiles[rel]; if (f && f.cm) { try { f.cm.dispose(); } catch (_) { /* already gone */ } f.cm = null; } });
     if (ed.pane && ed.pane.parentNode) ed.pane.parentNode.removeChild(ed.pane);
-    ed.pane = null; ed.ui = null;
+    ed.pane = null; ed.ui = null; ed.cmHost = null; ed.filebar = null;
     if (state.editor === ed) state.editor = null;
     if (wasActive) {
       const next = state.tabs[Math.min(idx, state.tabs.length - 1)];   // the tab that slid into its place, else the one before
@@ -1724,8 +1832,10 @@
     ed = ed || state.editor;
     const chip = inPane(ed, "#tm-ed-chip");
     if (!chip) return;
-    chip.className = "tm-state-chip" + (ed.dirty ? " is-dirty" : ed.saved ? " is-saved" : "");
-    chip.textContent = ed.dirty ? "Unsaved changes" : ed.saved ? "Saved" : "Not saved yet";
+    const dirty = isDirty(ed);
+    chip.className = "tm-state-chip" + (dirty ? " is-dirty" : ed.saved ? " is-saved" : "");
+    chip.textContent = dirty ? "Unsaved changes" : ed.saved ? "Saved" : "Not saved yet";
+    chip.title = dirty ? "Changed: " + dirtyNames(ed).join(", ") : "";
   }
 
   // What choosing a template will also create. The two TOOL_UI templates ship a folder.
@@ -1780,7 +1890,8 @@
     tpl.addEventListener("change", () => { const h = inPane(ed, "#tm-ed-template-help"); if (h) h.textContent = templateHelpText(tpl.value); });
 
     const actions = el("div", { class: "tm-editor__actions" }, [
-      el("button", { class: "btn btn--primary", type: "button", id: "tm-ed-save", onclick: saveEditor, title: "Save (Ctrl+S)" }, "Save"),
+      el("button", { class: "btn btn--primary", type: "button", id: "tm-ed-save", onclick: () => saveEditor(), title: "Save the file you are looking at (Ctrl+S)" }, "Save"),
+      el("button", { class: "btn btn--ghost", type: "button", id: "tm-ed-saveall", hidden: true, onclick: () => saveAll(ed), title: "Save every changed file of this tool" }, "Save all"),
       el("button", { class: "btn btn--ghost", type: "button", id: "tm-ed-check", onclick: validateEditor, title: "Checks the file without saving it (Ctrl+Enter)" }, "Validate"),
       el("button", { class: "btn btn--ghost", type: "button", onclick: () => closeTab(ed), title: "Close this tab" }, "Close"),
     ]);
@@ -1792,7 +1903,114 @@
     ]);
 
     ed.cm = makeCodeEditor(ed);
-    ed.pane = el("div", { class: "tm-editor", "data-tab": ed.id }, [bar, ed.cm.el]);
+    ed.cmHost = el("div", { class: "tm-editor__code" }, [ed.cm.el]);
+    ed.filebar = el("div", { class: "tm-files", role: "tablist", "aria-label": "Files of this tool", hidden: true });
+    ed.pane = el("div", { class: "tm-editor", "data-tab": ed.id }, [bar, ed.filebar, ed.cmHost]);
+    renderFileBar(ed);
+    if (ed.mode === "edit") loadWeb(ed);
+  }
+
+  /* ---- a tool's screen files: the strip under the name bar -------------------------- */
+
+  // Ask which screen files the SAVED tool declares (a new tool has none until its first save),
+  // and keep any text already typed for them. A file that dropped out of the declaration but
+  // has unsaved text stays, so an edit is never lost to a rename in the .py.
+  async function loadWeb(ed) {
+    if (!ed || ed.mode !== "edit" || ed.webLoading) return;
+    ed.webLoading = true;
+    try {
+      const r = await ctools("/" + encodeURIComponent(ed.origName) + "/files");
+      const list = (r && r.web && r.web.files) || [];
+      const next = {};
+      list.forEach((f) => {
+        const old = ed.webFiles[f.rel];
+        if (old) { old.exists = f.exists; old.kind = f.kind; old.elLabel = f.label; next[f.rel] = old; return; }
+        next[f.rel] = { rel: f.rel, kind: f.kind, exists: !!f.exists, elLabel: f.label, text: "", loaded: !f.exists, dirty: false, saved: !!f.exists, cm: null, error: "", busy: false };
+      });
+      Object.keys(ed.webFiles).forEach((rel) => { if (!next[rel] && ed.webFiles[rel].dirty) next[rel] = ed.webFiles[rel]; });
+      if (ed.webRestore) {
+        Object.keys(ed.webRestore).forEach((rel) => {
+          const f = next[rel];
+          if (f && typeof ed.webRestore[rel] === "string") { f.text = ed.webRestore[rel]; f.loaded = true; f.dirty = true; f.saved = false; }
+        });
+        ed.webRestore = null;
+      }
+      ed.webFiles = next;
+      ed.webOrder = list.map((f) => f.rel).concat(Object.keys(next).filter((rel) => !list.some((f) => f.rel === rel)));
+      ed.webError = "";
+    } catch (e) { ed.webError = e.message || "Couldn’t list this tool’s screen files."; }
+    ed.webLoading = false; ed.webLoaded = true;
+    renderFileBar(ed); updateChip(ed); renderTabs();
+  }
+
+  function renderFileBar(ed) {
+    if (!ed || !ed.filebar) return;
+    const bar = ed.filebar;
+    clear(bar);
+    const rels = ed.webOrder || [];
+    const folder = ed.mode === "new" ? templateFolderOf(ed.template) : "";
+    if (!rels.length && !folder && !ed.webError) { bar.hidden = true; return; }
+    bar.hidden = false;
+    const mk = (id, label, title, f) => {
+      const active = ed.activeFile === id;
+      return el("button", { class: "tm-ftab" + (active ? " is-active" : "") + (f && f.dirty ? " is-dirty" : "") + (f && !f.exists && !f.dirty ? " is-new" : ""),
+        type: "button", role: "tab", "aria-selected": active ? "true" : "false", title: title,
+        onclick: () => showFile(ed, id) }, [
+        el("span", { class: "tm-tab__dot", "aria-hidden": "true" }),
+        el("span", { class: "tm-ftab__label" }, label),
+        f && !f.exists ? el("span", { class: "tm-ftab__new" }, "new") : null,
+      ]);
+    };
+    if (rels.length || folder) bar.appendChild(mk("py", "tool.py", "The tool’s Python file", { dirty: ed.dirty, exists: true }));
+    const labels = webTabLabels(rels);
+    rels.forEach((rel) => {
+      const f = ed.webFiles[rel];
+      if (f) bar.appendChild(mk(rel, labels[rel], "~/.jarvis/tools/" + rel + (f.elLabel ? " — screen “" + f.elLabel + "”" : "") + (f.exists ? "" : " (not created yet; Save creates it)"), f));
+    });
+    if (!rels.length && folder) bar.appendChild(el("span", { class: "tm-files__hint" }, "Save once and the starter files in " + folder + "/ appear here as tabs."));
+    if (ed.webError) bar.appendChild(el("span", { class: "tm-files__hint tm-files__hint--bad", title: ed.webError }, "Screen files unavailable: " + ed.webError));
+    const all = ed.pane && ed.pane.querySelector("#tm-ed-saveall");
+    if (all) all.hidden = (webDirty(ed).length + (ed.dirty ? 1 : 0)) < 2;
+  }
+
+  function makeWebEditor(ed, f) {
+    const common = {
+      value: f.text, label: f.rel, language: "text", languageLabel: WEB_KIND_LABEL[f.kind] || "Text",
+      placeholder: f.exists ? "" : "This file doesn’t exist yet. Type here and Save to create it.",
+      onChange: (v) => { f.text = v; f.dirty = true; f.saved = false; updateChip(ed); renderTabs(); renderFileBar(ed); persistSoon(); },
+      onSave: () => saveEditor(), onValidate: validateEditor,
+    };
+    if (global.JarvisCodeEditor) return global.JarvisCodeEditor.create(common);
+    const ta = el("textarea", { class: "tm-textarea", spellcheck: "false", "aria-label": f.rel });
+    ta.value = f.text;
+    ta.addEventListener("input", () => common.onChange(ta.value));
+    ta.addEventListener("keydown", (e) => { if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "s") { e.preventDefault(); saveEditor(); } });
+    return { el: el("div", { class: "tm-code" }, [ta]), getValue: () => ta.value, focus: () => ta.focus(), dispose() {}, remeasure() {}, setValue(t) { ta.value = t; } };
+  }
+
+  async function showFile(ed, which) {
+    if (!ed || !ed.pane) return;
+    let target = which;
+    if (target !== "py") {
+      const f = ed.webFiles[target];
+      if (!f) target = "py";
+      else {
+        if (!f.loaded) {
+          try {
+            const r = await ctools("/" + encodeURIComponent(ed.origName) + "/file?path=" + encodeURIComponent(f.rel));
+            f.text = (r && r.text) || ""; f.exists = !(r && r.exists === false); f.loaded = true; f.error = "";
+          } catch (e) { f.error = e.message; toast("Couldn’t open " + f.rel + ": " + e.message, "error"); target = "py"; }
+        }
+        if (target !== "py" && !f.cm) { f.cm = makeWebEditor(ed, f); ed.cmHost.appendChild(f.cm.el); }
+      }
+    }
+    ed.activeFile = target;
+    if (ed.cm && ed.cm.el) ed.cm.el.style.display = target === "py" ? "" : "none";
+    Object.keys(ed.webFiles).forEach((rel) => { const f = ed.webFiles[rel]; if (f.cm) f.cm.el.style.display = rel === target ? "" : "none"; });
+    renderFileBar(ed);
+    const cur = target === "py" ? ed.cm : ed.webFiles[target].cm;
+    if (cur && cur.remeasure) cur.remeasure();
+    if (cur && cur.focus && state.editor === ed) cur.focus();
   }
 
   // The editor itself is code-editor.js. If that script didn't load, a plain
@@ -1862,10 +2080,13 @@
     ed.busy = ""; if (state.editor === ed) renderSide();
   }
 
-  async function saveEditor() {
+  // Saves the file being looked at: the .py, or one of the tool's screen files. `forcePy`
+  // is only for Save all, which has already dealt with the screen files.
+  async function saveEditor(forcePy) {
     const ed = state.editor;
     if (!ed || ed.busy) return;
     if (ed.chat.busy) { toast("Jarvis is still writing — stop it or wait for it to finish before saving.", "info"); return; }
+    if (forcePy !== true && ed.activeFile !== "py" && ed.webFiles[ed.activeFile]) { await saveWebFile(ed, ed.webFiles[ed.activeFile]); return; }
     ed.nameTouched = true; nameHelp(ed);
     const problem = nameProblem(ed.name, userFileNames(), ed.mode);
     if (problem) { const n = inPane(ed, "#tm-ed-name"); if (n) n.focus(); return; }
@@ -1896,6 +2117,9 @@
         toast("Saved " + ed.name + ". " + (r.note || ""), "success");
         await loadAll({ quiet: true, keepView: true });
         nameHelp(ed); renderTabs(); persistSoon();
+        // The save may have created the template's starter files, or changed which files the
+        // tool declares: list them again so they appear as tabs.
+        loadWeb(ed).then(() => renderFileBar(ed));
       }
     } catch (e) {
       applyResult(e.data && e.data.error ? Object.assign({ ok: false }, e.data) : { ok: false, stage: "error", error: e.message }, ed);
@@ -1903,6 +2127,35 @@
       if (e.data && e.data.draft_saved) { ed.draftSynced = ed.source; loadDraftsSoon(); }
     }
     ed.busy = ""; updateChip(ed); if (state.editor === ed) renderSide();
+  }
+
+  async function saveWebFile(ed, f) {
+    if (!ed || !f || f.busy) return false;
+    if (ed.mode !== "edit") { toast("Save the tool first — its screen files are created with it.", "info"); return false; }
+    const sent = f.cm ? f.cm.getValue() : f.text;
+    f.busy = true; renderFileBar(ed);
+    try {
+      const r = await ctools("/" + encodeURIComponent(ed.origName) + "/file", { method: "PUT", body: JSON.stringify({ path: f.rel, text: sent }) });
+      if (r && r.ok === false) throw new Error(r.error || "Couldn’t save.");
+      f.exists = true; f.saved = true; f.text = sent;
+      f.dirty = (f.cm ? f.cm.getValue() : f.text) !== sent;            // typed again while it was saving
+      toast("Saved " + f.rel + (r && r.created ? " (new file)." : ". Reopen the screen to see it."), "success");
+    } catch (e) {
+      f.busy = false; renderFileBar(ed);
+      toast("Couldn’t save " + f.rel + ": " + e.message, "error");
+      return false;
+    }
+    f.busy = false;
+    updateChip(ed); renderTabs(); renderFileBar(ed); persistSoon();
+    return true;
+  }
+
+  // Every changed file of this tool: the screen files first (they don't depend on the .py),
+  // then the .py through the normal path, which may still refuse it.
+  async function saveAll(ed) {
+    if (!ed || ed.busy) return;
+    for (const f of webDirty(ed)) { if (!(await saveWebFile(ed, f))) return; }
+    if (ed.dirty) { state.editor = state.editor || ed; await saveEditor(true); }
   }
 
   /* ---- unfinished-tool backups ------------------------------------------------------ */
@@ -2048,6 +2301,8 @@
         mode: ed.mode, name: ed.name, origName: ed.origName, dirty: !!ed.dirty, untitled: ed.untitled, template: ed.template, draftKey: ed.draftKey,
         // A clean saved file is re-read from disk on restore; anything else needs its text kept.
         source: ed.dirty || ed.mode === "new" ? ed.source : "",
+        // Unsaved screen-file text (a saved file is re-read from disk on restore).
+        web: webDirty(ed).reduce((acc, f) => { acc[f.rel] = f.cm ? f.cm.getValue() : f.text; return acc; }, {}),
       }));
       const payload = JSON.stringify({ v: 1, tabs: items });
       if (payload.length > TABS_MAX_CHARS) { state.persistOk = false; return; }
@@ -2072,7 +2327,8 @@
         if (!(t.dirty && text)) {
           try { initial = await ctools("/" + encodeURIComponent(t.origName)); source = (initial && initial.source) || ""; } catch (_) { continue; }
         }
-        state.tabs.push(newEditorState({ mode: "edit", name: t.origName, source, initial, dirty: !!(t.dirty && text), draftKey: t.draftKey }));
+        state.tabs.push(newEditorState({ mode: "edit", name: t.origName, source, initial, dirty: !!(t.dirty && text), draftKey: t.draftKey,
+          web: t.web && typeof t.web === "object" ? t.web : null }));
       } else if (t.mode === "new") {
         const ed = newEditorState({ mode: "new", name: NAME_RE.test(t.name || "") ? t.name : "", source: text, dirty: !!t.dirty,
           template: typeof t.template === "string" ? t.template : "minimal", untitled: Number(t.untitled) || 0, draftKey: t.draftKey });
@@ -2477,6 +2733,7 @@
   }
 
   function renderImportReview() {
+    if (state.draft && state.draft.plan) { renderBundleReview(); return; }          // a tool with its folders
     const dr = state.draft, d = dom.detail;
     clear(d);
     setText(dom.midTitle, "Import review");
@@ -2504,6 +2761,158 @@
   }
 
   function cancelImport() { state.draft = null; state.view = "tool"; renderMain(); }
+
+  /* ---- a tool with its folders: several files, a picked folder, or a .zip ------------ */
+
+  // What was picked or dropped, as [{file, path}] (path is folder-relative when there is one).
+  function startImportSelection(entries) {
+    const list = entries || [];
+    const kind = importKind(list.map((e) => ({ name: e.file.name, path: e.path })));
+    if (kind === "none") return;
+    if (kind === "py") { startImport(list[0].file); return; }                       // one .py: the original path, unchanged
+    if (kind === "mixed") { toast("Pick a .zip on its own, or the folder it was made from.", "warn"); return; }
+    startBundleImport(kind === "zip" ? { zip: list[0].file } : { entries: list });
+  }
+
+  // A dropped directory has to be walked through the entry API; this runs its first lines
+  // synchronously (the drop's item list is gone after the first await).
+  async function collectDropped(dt) {
+    const entries = Array.from(dt.items || []).map((i) => (i.webkitGetAsEntry ? i.webkitGetAsEntry() : null));
+    const flat = Array.from(dt.files || []).map((file) => ({ file, path: file.name }));
+    if (!entries.length || !entries.every(Boolean)) return flat;
+    const out = [];
+    const walk = async (entry, prefix) => {
+      if (out.length > 400) return;
+      if (entry.isFile) {
+        const file = await new Promise((resolve, reject) => entry.file(resolve, reject));
+        out.push({ file, path: prefix + entry.name });
+      } else if (entry.isDirectory) {
+        const reader = entry.createReader();
+        let batch;
+        do {
+          batch = await new Promise((resolve, reject) => reader.readEntries(resolve, reject));
+          for (const child of batch) await walk(child, prefix + entry.name + "/");
+        } while (batch.length);
+      }
+    };
+    try { for (const e of entries) await walk(e, ""); } catch (_) { return flat; }
+    return out;
+  }
+
+  function readText(file) {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onerror = () => reject(new Error("Couldn’t read " + file.name + "."));
+      reader.onload = () => resolve(String(reader.result || ""));
+      reader.readAsText(file);
+    });
+  }
+
+  const importUrl = (mode, name, zip) => "/api/ctools/import" + (zip ? "/zip" : "") + "?mode=" + mode + (name ? "&name=" + encodeURIComponent(name) : "");
+  function postBundle(dr, mode) {
+    const name = mode === "write" ? dr.name : "";
+    if (dr.zip) return api(importUrl(mode, name, true), { method: "POST", headers: { "Content-Type": "application/zip" }, body: dr.zip });
+    return api(importUrl(mode, name, false), { method: "POST", body: JSON.stringify({ files: dr.files }) });
+  }
+
+  async function startBundleImport(sel) {
+    const dr = { zip: sel.zip || null, files: null, fileName: "", size: 0, plan: null, name: "", source: "", result: null, busy: false, nameTouched: true, ignored: 0, unread: [] };
+    try {
+      if (dr.zip) { dr.fileName = dr.zip.name; dr.size = dr.zip.size; }
+      else {
+        const items = [];
+        for (const e of sel.entries) {
+          if (!IMPORT_TEXT_EXT.test(e.file.name)) { dr.ignored += 1; continue; }
+          if (e.file.size > IMPORT_MAX_READ) { dr.unread.push(e.path); continue; }
+          items.push({ path: e.path, text: await readText(e.file) });
+          dr.size += e.file.size;
+        }
+        if (!items.length) { toast("Nothing in that selection is a tool file (.py, .html, .js or .css).", "warn"); return; }
+        const first = sel.entries[0].path.split("/");
+        dr.files = items;
+        dr.fileName = (first.length > 1 ? first[0] + "/ — " : "") + plural(items.length, "file");
+      }
+      toast("Reading " + dr.fileName + "…", "info");
+      dr.plan = await postBundle(dr, "preview");
+    } catch (e) { toast((dr.fileName ? dr.fileName + ": " : "") + e.message, "warn"); return; }
+    dr.name = dr.plan.name || ""; dr.source = dr.plan.py_head || "";
+    state.editor = null; restoreDetailBox();
+    state.draft = dr; state.view = "import"; state.run = null;
+    renderMain();
+    const n = $("#tm-imp-name"); if (n) { n.focus(); n.select(); }
+  }
+
+  function renderBundleReview() {
+    const dr = state.draft, plan = dr.plan, d = dom.detail;
+    clear(d);
+    setText(dom.midTitle, "Import review");
+    const nameErr = () => nameProblem(dr.name, userFileNames(), "new");
+    const help = el("span", { class: "tm-field__help", id: "tm-imp-help" });
+    const input = el("input", { class: "tm-input", id: "tm-imp-name", type: "text", value: dr.name, autocomplete: "off", spellcheck: "false", style: "width:240px", "aria-describedby": "tm-imp-help" });
+    const blocked = (plan.problems || []).length > 0;
+    const go = el("button", { class: "btn btn--primary", type: "button", disabled: dr.busy || null, onclick: confirmBundleImport }, dr.busy ? "Checking…" : "Import…");
+    const paint = () => { const p = nameErr(); input.classList.toggle("is-invalid", !!p); help.className = "tm-field__help" + (p ? " is-bad" : ""); help.textContent = p || "Saved as ~/.jarvis/tools/" + dr.name + ".py"; go.disabled = !!p || dr.busy || blocked; };
+    input.addEventListener("input", () => { dr.name = input.value.trim().toLowerCase(); paint(); });
+
+    d.appendChild(el("div", null, [el("div", { class: "tm-title" }, dr.fileName),
+      el("div", { class: "tm-does" }, "Review before importing. Nothing has been run or written yet — only the file names and sizes were read."),
+      el("div", { class: "tm-badges" }, [tag(formatBytes(dr.size)), tag(plural(plan.py_lines, "line") + " of Python"), tag(plural((plan.web || []).length, "screen file")), tag("not loaded yet", "warn")])]));
+    d.appendChild(el("div", { class: "tm-note" }, [el("b", null, "This is Python that runs as you. "),
+      "Importing means Jarvis will execute " + plan.py_file + " — first to check it, then every time it starts."
+      + ((plan.web || []).length ? " Its screen files run in your browser, and a Menu panel shares the page with Jarvis itself. Only import tools you trust or have read." : " Only import tools you trust or have read.")]));
+    d.appendChild(el("div", { class: "tm-field" }, [el("label", { class: "tm-field__label", for: "tm-imp-name" }, "Save as"), input, help]));
+    if (blocked) d.appendChild(el("div", null, [sectionTitle("Can’t import yet"), el("div", { class: "tm-errbox" }, plan.problems.join("\n"))]));
+    if (dr.result && !dr.result.ok) {
+      d.appendChild(el("div", null, [sectionTitle("Refused — nothing was written"), el("div", { class: "tm-errbox" }, (dr.result.stage ? "[" + dr.result.stage + "] " : "") + (dr.result.error || "Unknown error")),
+        dr.result.hint ? el("div", { class: "tm-note", style: "margin-top:8px" }, dr.result.hint) : null]));
+    }
+    const rows = [[plan.py_file + "  →  " + (dr.name || "…") + ".py", formatBytes(plan.py_size) + " · the tool itself"]]
+      .concat((plan.web || []).map((f) => [f.path, formatBytes(f.size) + " · " + (WEB_KIND_LABEL[f.kind] || f.kind)]));
+    d.appendChild(el("div", null, [sectionTitle("Will be written", String(rows.length)), infoRows(rows),
+      el("div", { class: "tm-hint", style: "margin-top:6px" }, "Only screen files that one of the tool’s own screens uses are kept, and nothing is written over a file that already exists.")]));
+    const skipped = (plan.skipped || []).map((f) => [f.path, f.why]);
+    if (dr.ignored) skipped.push([plural(dr.ignored, "other file"), "not a kind of file a tool uses"]);
+    (dr.unread || []).forEach((path) => skipped.push([path, "too large to read here"]));
+    if (skipped.length) d.appendChild(el("div", null, [sectionTitle("Ignored", String(skipped.length)), infoRows(skipped)]));
+    const lines = (plan.py_head || "").split("\n");
+    d.appendChild(el("div", null, [sectionTitle(plan.py_file, "first " + Math.min(80, plan.py_lines) + " lines"),
+      el("pre", { class: "tm-pre tm-preview", tabindex: "0", "aria-label": "Python source preview" }, lines.join("\n") + (plan.py_lines > 80 ? "\n… " + (plan.py_lines - 80) + " more lines" : ""))]));
+    d.appendChild(el("div", { style: "display:flex;gap:8px" }, [go, el("button", { class: "btn btn--ghost", type: "button", onclick: cancelImport }, "Cancel")]));
+    paint();
+  }
+
+  async function confirmBundleImport() {
+    const dr = state.draft;
+    if (!dr || dr.busy || !dr.plan) return;
+    const plan = dr.plan, screens = (plan.web || []).length;
+    const ok = await UI().confirm({
+      title: "Import " + dr.name + ".py" + (screens ? " and " + plural(screens, "screen file") : "") + "?", level: "warn", focusCancel: true, confirmLabel: "Import",
+      body: "Jarvis will run the Python file to check it, and again at every start. It runs as you, with your access."
+        + (screens ? " Its screen files (HTML, JavaScript, CSS) run in your browser, and a Menu panel shares the page with Jarvis itself." : "") + " Only continue if you trust it.",
+      pre: (plan.py_head || "").split("\n").slice(0, 40).join("\n") + (plan.py_lines > 40 ? "\n…" : ""),
+    });
+    if (!ok) return;                                     // declining writes nothing and runs nothing
+    dr.busy = true; dr.result = null; renderImportReview();
+    try {
+      const fresh = await ctools("");                    // never overwrite: re-read the folder first
+      state.files = fresh.tools || state.files;
+      if (nameProblem(dr.name, userFileNames(), "new")) { dr.busy = false; renderImportReview(); return; }
+      const res = await postBundle(dr, "write");
+      if (!res.ok) { dr.result = res; dr.busy = false; renderImportReview(); return; }
+      const first = (res.tools || [])[0];
+      state.draft = null; state.view = "tool";
+      await loadAll({ quiet: true });
+      const row = first && rowByName(first);
+      state.selected = row ? row.id : null;
+      renderMain();
+      const left = (res.skipped || []).length;
+      toast("Imported " + dr.name + " — " + (res.tools || []).join(", ") + ". " + plural(Math.max(0, (res.imported || []).length - 1), "screen file") + " written"
+        + (left ? "; " + plural(left, "file") + " ignored." : "."), "success");
+    } catch (e) {
+      dr.busy = false; dr.result = Object.assign({ ok: false }, e.data && e.data.error ? e.data : { error: e.message });
+      renderImportReview();
+    }
+  }
 
   async function confirmImport() {
     const dr = state.draft;
@@ -2711,9 +3120,7 @@
     dom.panel.addEventListener("drop", (e) => {
       if (!hasFiles(e)) return;
       e.preventDefault(); depth = 0; dom.panel.classList.remove("is-dragging");
-      const files = Array.from(e.dataTransfer.files || []);
-      if (files.length > 1) toast("One file at a time — importing " + files[0].name + ".", "info");
-      if (files[0]) startImport(files[0]);
+      collectDropped(e.dataTransfer).then(startImportSelection, () => toast("Couldn’t read what was dropped.", "error"));
     });
   }
 
@@ -2728,7 +3135,12 @@
     dom.refresh.addEventListener("click", () => loadAll());
     dom.btnImport.addEventListener("click", () => dom.file.click());
     dom.btnCreate.addEventListener("click", () => enterEditor({ mode: "new" }));
-    dom.file.addEventListener("change", () => { const f = dom.file.files && dom.file.files[0]; dom.file.value = ""; if (f) startImport(f); });
+    const picked = (input) => Array.from(input.files || []).map((f) => ({ file: f, path: f.webkitRelativePath || f.name }));
+    dom.file.addEventListener("change", () => { const list = picked(dom.file); dom.file.value = ""; startImportSelection(list); });
+    if (dom.btnImportFolder && dom.folder) {
+      dom.btnImportFolder.addEventListener("click", () => dom.folder.click());
+      dom.folder.addEventListener("change", () => { const list = picked(dom.folder); dom.folder.value = ""; startImportSelection(list); });
+    }
     $("#tm-close").addEventListener("click", close);
     // L.44: hide / show the two side panes (remembered between visits).
     dom.closeTools.addEventListener("click", () => setPane("tools", true));
@@ -2743,7 +3155,7 @@
     // L.43: unsaved tabs are also kept in this browser; only warn about leaving when
     // that could not be done (storage blocked / too big) or Jarvis is mid-write.
     global.addEventListener("beforeunload", (e) => {
-      const risky = state.tabs.some((t) => t.chat.busy || (t.dirty && !state.persistOk));
+      const risky = state.tabs.some((t) => t.chat.busy || (isDirty(t) && !state.persistOk));
       if (risky) { e.preventDefault(); e.returnValue = ""; }
     });
     dom.overlay.addEventListener("click", (e) => { if (e.target === dom.overlay) close(); });

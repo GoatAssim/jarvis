@@ -2217,6 +2217,73 @@ def main():
         print(json.dumps({"ok": False, "error": "usage: jarvis ctools-drafts list|show <key>|delete <key>|save <key> --stdin"}))
         sys.exit(1)
 
+    # --- A custom tool's screen files (its TOOL_UI folders) -------------------
+    # jarvis ctools-files list <name>
+    # jarvis ctools-files read <name> <path>
+    # jarvis ctools-files write <name> <path> --stdin
+    # jarvis ctools-files removal <name>
+    # The html/js/css a tool's TOOL_UI declares, for the Tool Manager's extra editor
+    # tabs and its uninstall confirmation. <path> is relative to ~/.jarvis/tools and is
+    # only honoured if it is one of THIS tool's own screen files (the list comes from
+    # the saved file, not from the caller). Text arrives on STDIN. Nothing here runs
+    # the files, and no model tool reaches it.
+    if argv[0] == "ctools-files":
+        from . import custom_tools_store as ctools
+
+        sub = argv[1] if len(argv) > 1 else ""
+        tool = argv[2].strip().lower() if len(argv) > 2 else ""
+        if sub in ("list", "removal") and tool:
+            if sub == "removal":
+                result = ctools.removal_preview(tool)
+            else:
+                shown = ctools.read_tool(tool)
+                result = ({"ok": True, "name": tool, "web": shown.get("web", {"files": [], "folders": []})}
+                          if shown.get("ok") else shown)
+        elif sub in ("read", "write") and tool and len(argv) > 3:
+            if sub == "read":
+                result = ctools.read_web_file(tool, argv[3])
+            else:
+                result = ctools.write_web_file(tool, argv[3], sys.stdin.read() if "--stdin" in argv else "")
+        else:
+            print(json.dumps({"ok": False, "error": "usage: jarvis ctools-files list|removal <name> | read <name> <path> | write <name> <path> --stdin"}))
+            sys.exit(1)
+        print(json.dumps(result, indent=2))
+        if not result.get("ok"):
+            sys.exit(1)
+        return
+
+    # --- Import a tool with its screen folders ---------------------------------
+    # jarvis ctools-import --stdin [--write] [--name N]    stdin: {"files": [{"path", "text"}]}
+    # jarvis ctools-import --zip <file.zip> [--write] [--name N]
+    # Without --write: what importing would do, from the file NAMES and sizes only --
+    # nothing is run and nothing is written. With --write: the .py is checked exactly as a
+    # normal save checks it, only screen files a declared screen uses are written (never
+    # over an existing file), and everything is removed again if the .py is refused. The
+    # caller (the Tool Manager) has already shown the "this runs as you" confirmation.
+    if argv[0] == "ctools-import":
+        from . import custom_tools_store as ctools
+
+        def _iflag(flag):
+            return argv[argv.index(flag) + 1] if flag in argv and len(argv) > argv.index(flag) + 1 else ""
+
+        try:
+            if "--zip" in argv:
+                items = ctools.read_zip_bundle(_iflag("--zip"))
+            else:
+                payload = json.loads(sys.stdin.read() or "{}")
+                listed = payload.get("files") if isinstance(payload, dict) else None
+                if not isinstance(listed, list):
+                    raise ValueError("expected {\"files\": [{\"path\", \"text\"}, ...]} on stdin")
+                items = [(f.get("path"), f.get("text") if isinstance(f.get("text"), str) else "")
+                         for f in listed if isinstance(f, dict)]
+            result = ctools.import_bundle(items, name=_iflag("--name"), write="--write" in argv)
+        except ValueError as exc:
+            result = {"ok": False, "error": str(exc)}
+        print(json.dumps(result, indent=2))
+        if not result.get("ok"):
+            sys.exit(1)
+        return
+
     # --- Custom tools (~/.jarvis/tools) ------------------------------------
     # Source arrives on STDIN for write/check, never argv: a tool file is
     # multi-line Python with quotes and backslashes in it, and argv escaping
@@ -2328,7 +2395,9 @@ def main():
             return
 
         if cmd == "ctools-delete":
-            result = ctools.delete_tool(name)
+            # --folders: also remove the screen files its TOOL_UI declared (and their folders,
+            # when that leaves them empty). Without it the folders stay, as they always did.
+            result = ctools.delete_tool(name, remove_folders="--folders" in argv)
             print(json.dumps(result, indent=2))
             if not result.get("ok"):
                 sys.exit(1)

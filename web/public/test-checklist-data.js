@@ -4246,6 +4246,115 @@ window.JARVIS_TEST_CHECKLIST = /*JSON-BEGIN*/ {
    "Personas the file registers are not part of this."
   ]
  },
+ "tool_manager_screen_tabs": {
+  "group": "tool_manager",
+  "does": "A tool that ships screen files (TOOL_UI) shows them as extra tabs under its name bar, next to tool.py, and each is saved on its own.",
+  "needs": [
+   "A saved tool made from the Button page or Menu panel template (Create a tool → Template)."
+  ],
+  "steps": [
+   {
+    "do": "Menu → Tool Manager → Create a tool → Template 'Button page' → give it a name → Save. Look under the name bar.",
+    "expect": "A strip appears with tool.py, tool.html, tool.js and tool.css. Before the first save it only said the starter files would appear."
+   },
+   {
+    "do": "Open the tool.js tab and change something. Do not save. Switch to tool.py and back.",
+    "expect": "tool.js has a dot, the tab at the top and the chip say Unsaved changes, and your text and caret are exactly where you left them."
+   },
+   {
+    "do": "Press Ctrl+S while on tool.js.",
+    "expect": "Only tool.js is saved (toast names it). The dot goes away. tool.py was not touched."
+   },
+   {
+    "do": "Change tool.py and tool.css, then press Save all.",
+    "expect": "Both are saved; tool.css first. If tool.py has a mistake the .py is refused with the usual error and the css stays saved."
+   },
+   {
+    "do": "Edit tool.js without saving, reload the page and reopen the Tool Manager.",
+    "expect": "The tab comes back with your unsaved JavaScript still in it."
+   },
+   {
+    "do": "In tool.py give the screen a \"css\": \"extra.css\" that does not exist, Save, and look at the strip.",
+    "expect": "extra.css appears marked 'new'. Typing in it and saving creates the file."
+   }
+  ],
+  "care": "Screen files run in your browser. A Menu panel shares the page with Jarvis, so read its JavaScript before trusting someone else's.",
+  "watch": [
+   "Ctrl+Enter (Validate) always checks tool.py, whichever tab is showing.",
+   "Only tool.py is backed up on the server as an unfinished tool; screen text is kept in this browser."
+  ]
+ },
+ "tool_manager_folder_import": {
+  "group": "tool_manager",
+  "does": "Import takes a tool together with its screen folders: several files, a picked folder, or a .zip. The tool's Python only runs after you confirm.",
+  "needs": [
+   "A folder containing one .py tool that declares TOOL_UI and the folder it points to (for example a copy of a Button page tool's .py and its folder), or a .zip of it."
+  ],
+  "steps": [
+   {
+    "do": "Press Import folder… and pick that folder.",
+    "expect": "A review lists the .py and each screen file with sizes, an 'Ignored' list for anything else, and says nothing has been run or written yet."
+   },
+   {
+    "do": "Change 'Save as' to a name that already exists.",
+    "expect": "The name is flagged and Import is disabled."
+   },
+   {
+    "do": "Fix the name and press Import…, then Cancel in the confirmation.",
+    "expect": "Nothing is written: ~/.jarvis/tools has no new .py and no new folder."
+   },
+   {
+    "do": "Import again and confirm.",
+    "expect": "The tool appears in the list; its folder exists under ~/.jarvis/tools with the screen files; its button or Menu entry works."
+   },
+   {
+    "do": "Import the same folder again under another name.",
+    "expect": "Refused: the screen files already exist and would be overwritten. Nothing is written."
+   },
+   {
+    "do": "Drag the .zip of the same tool onto the Tool Manager (after deleting the first copy with its folder).",
+    "expect": "The same review appears and the import works the same way."
+   },
+   {
+    "do": "Drop a .py on its own.",
+    "expect": "The original single-file review, exactly as before."
+   }
+  ],
+  "care": "Importing runs the .py as you. Use a tool you wrote or have read.",
+  "watch": [
+   "A .py with a mistake is refused and no screen files are left behind.",
+   "Screen files no declared screen uses, other file types and hidden files are ignored and listed."
+  ]
+ },
+ "tool_manager_uninstall_folder": {
+  "group": "tool_manager",
+  "does": "Deleting a tool that ships screen files asks whether its folder goes too, and only removes the files a screen serves.",
+  "needs": [
+   "A saved Button page tool (its folder is created beside the .py)."
+  ],
+  "steps": [
+   {
+    "do": "Put a file called notes.txt inside the tool's folder. Select the tool in the Tool Manager and press Delete.",
+    "expect": "Two choices: 'Delete the tool and its folder' (naming the folder and how many screen files) and 'Delete the tool only'."
+   },
+   {
+    "do": "Choose 'Delete the tool and its folder'.",
+    "expect": "The toast says the folder was left because other files are still in it. tool.html, tool.js and tool.css are gone; notes.txt is still there."
+   },
+   {
+    "do": "Make another tool, then give a second tool file the same folder name in its TOOL_UI and Delete the first.",
+    "expect": "The dialog says the folder is left alone because another tool names it, and offers only 'Delete the tool only'."
+   },
+   {
+    "do": "Delete a tool that ships a folder and choose 'Delete the tool only'.",
+    "expect": "The folder and its files are still on disk."
+   }
+  ],
+  "watch": [
+   "A folder that is a link, or whose name starts with _, is never touched.",
+   "A .bak of the .py stays behind, as before."
+  ]
+ },
  "tool_manager_mcp_server": {
   "group": "tool_manager",
   "does": "The Tool Manager lists each MCP server as one row (MCP chip) whose switch is the same whole-server on/off as Menu → MCP Servers.",

@@ -4310,12 +4310,103 @@ app.post("/api/ctools/:name/enabled", requireJarvis, async (req, res) => {
   catch (e) { res.status(500).json({ error: result.stderr || e.message }); }
 });
 
+// ?folders=1 also removes the screen files (and folders) its TOOL_UI declared; the CLI
+// decides which of them are safe to remove (see custom_tools_store.web_removal_plan).
 app.delete("/api/ctools/:name", requireJarvis, async (req, res) => {
   if (!CTOOL_NAME_RE.test(req.params.name)) return res.status(400).json({ error: "Invalid tool name." });
-  const result = await runJarvisOnce(["ctools-delete", req.params.name], 10000);
+  const argv = ["ctools-delete", req.params.name];
+  if (req.query.folders === "1") argv.push("--folders");
+  const result = await runJarvisOnce(argv, 15000);
   try { res.json(JSON.parse(result.stdout)); }
   catch (e) { res.status(500).json({ error: result.stderr || e.message }); }
 });
+
+// A tool's screen files (its TOOL_UI folders): the Tool Manager's extra editor tabs and
+// the uninstall confirmation. The browser names a path; `jarvis ctools-files` only honours
+// one that is a screen file of THAT tool, so this server never builds a path itself. The
+// text goes over stdin, like the .py.
+const CTOOL_FILE_RE = /^[^\u0000]{1,300}$/;
+
+function sendCtoolsFiles(res, result, failStatus) {
+  try {
+    const parsed = JSON.parse(result.stdout);
+    return parsed.ok === false ? res.status(failStatus).json(parsed) : res.json(parsed);
+  } catch (e) {
+    return res.status(500).json({ error: result.stderr || e.message });
+  }
+}
+
+app.get("/api/ctools/:name/files", requireJarvis, async (req, res) => {
+  if (!CTOOL_NAME_RE.test(req.params.name)) return res.status(400).json({ error: "Invalid tool name." });
+  sendCtoolsFiles(res, await runJarvisOnce(["ctools-files", "list", req.params.name], 15000), 404);
+});
+
+app.get("/api/ctools/:name/removal", requireJarvis, async (req, res) => {
+  if (!CTOOL_NAME_RE.test(req.params.name)) return res.status(400).json({ error: "Invalid tool name." });
+  sendCtoolsFiles(res, await runJarvisOnce(["ctools-files", "removal", req.params.name], 15000), 404);
+});
+
+app.get("/api/ctools/:name/file", requireJarvis, async (req, res) => {
+  if (!CTOOL_NAME_RE.test(req.params.name)) return res.status(400).json({ error: "Invalid tool name." });
+  const rel = typeof req.query.path === "string" ? req.query.path : "";
+  if (!CTOOL_FILE_RE.test(rel)) return res.status(400).json({ error: "Missing or invalid file path." });
+  sendCtoolsFiles(res, await runJarvisOnce(["ctools-files", "read", req.params.name, rel], 15000), 400);
+});
+
+app.put("/api/ctools/:name/file", requireJarvis, async (req, res) => {
+  if (!CTOOL_NAME_RE.test(req.params.name)) return res.status(400).json({ error: "Invalid tool name." });
+  const rel = typeof req.body?.path === "string" ? req.body.path : "";
+  if (!CTOOL_FILE_RE.test(rel)) return res.status(400).json({ error: "Missing or invalid file path." });
+  const text = typeof req.body?.text === "string" ? req.body.text : "";
+  sendCtoolsFiles(res, await runJarvisOnce(["ctools-files", "write", req.params.name, rel, "--stdin"], 20000, {}, text), 400);
+});
+
+// Import a tool together with its screen folders. `mode` is "preview" (names and sizes
+// only -- nothing is run or written) or "write" (the .py is checked as a normal save
+// checks it; only screen files a declared screen uses are written; undone if refused).
+// Several files / a picked folder arrive as JSON ({files: [{path, text}]}); a .zip, which
+// may not fit a JSON body, gets its own raw upload like /api/skills/upload.
+function importArgs(req, extra) {
+  const argv = ["ctools-import", ...extra];
+  if (req.query.mode === "write") argv.push("--write");
+  const name = typeof req.query.name === "string" ? req.query.name.trim().toLowerCase() : "";
+  if (name) {
+    if (!CTOOL_NAME_RE.test(name)) return null;
+    argv.push("--name", name);
+  }
+  return argv;
+}
+
+app.post("/api/ctools/import", requireJarvis, async (req, res) => {
+  const files = Array.isArray(req.body?.files) ? req.body.files : null;
+  if (!files || !files.length || files.length > 300) return res.status(400).json({ error: "Expected a list of files." });
+  const clean = files
+    .filter((f) => f && typeof f.path === "string" && typeof f.text === "string")
+    .map((f) => ({ path: f.path.slice(0, 400), text: f.text }));
+  const argv = importArgs(req, ["--stdin"]);
+  if (!argv) return res.status(400).json({ error: "Invalid tool name." });
+  const result = await runJarvisOnce(argv, 30000, {}, JSON.stringify({ files: clean }));
+  sendCtoolsFiles(res, result, 400);
+});
+
+app.post(
+  "/api/ctools/import/zip",
+  requireJarvis,
+  express.raw({ type: "application/zip", limit: "25mb" }),
+  async (req, res) => {
+    if (!Buffer.isBuffer(req.body) || req.body.length === 0) {
+      return res.status(400).json({ error: "expected a raw .zip body (Content-Type: application/zip)" });
+    }
+    const tmpPath = path.join(os.tmpdir(), `jarvis_web_toolzip_${Date.now()}_${Math.random().toString(36).slice(2)}.zip`);
+    try { await fs.writeFile(tmpPath, req.body); }
+    catch (e) { return res.status(500).json({ error: `couldn't save upload: ${e.message}` }); }
+    const argv = importArgs(req, ["--zip", tmpPath]);
+    if (!argv) { await fs.unlink(tmpPath).catch(() => {}); return res.status(400).json({ error: "Invalid tool name." }); }
+    const result = await runJarvisOnce(argv, 30000);
+    await fs.unlink(tmpPath).catch(() => {});
+    sendCtoolsFiles(res, result, 400);
+  },
+);
 
 const CONFIRM_MARKER = "JARVIS_CONFIRM_REQUEST ";
 // Phase 0 (new_plan.md): cli.py prints one of these per successful ask —

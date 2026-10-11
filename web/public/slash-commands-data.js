@@ -729,6 +729,8 @@ window.JARVIS_SLASH_COMMANDS = /*JSON-BEGIN*/
         "ctools-suggest",
         "ctools-agent",
         "ctools-drafts",
+        "ctools-files",
+        "ctools-import",
         "tool-ui",
         "tool-commands",
         "tool-disable-set",

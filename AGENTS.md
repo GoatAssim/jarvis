@@ -436,6 +436,8 @@ actually render Markdown):
     node tests/verify_bridge_client.js      # web/bridge.js against a fake worker: no blocking or queueing, reuse, fallbacks, crash-not-rerun, kill, breaker, recycling; no npm install
     node tests/verify_ask_embed.js          # L.53: ask-embed.js's reply/stream/size helpers and the Tool Manager's chat-fold + per-tool conversation key; no npm install
     node tests/verify_code_editor.js        # L.33: the Tool Manager editor's tokenizer, edit helpers and completions; no npm install
+    python3 tests/test_tool_folders.py      # L.46.3: a tool's screen files - editor tabs' back end, import with folders / zip, uninstall that removes the folder
+    node tests/verify_tool_folders_ui.js    # L.46.3: the Tool Manager's pure helpers for those (tab labels, dirty tracking, import kind, Delete dialog) + the text editor's Enter; no npm install
     python3 tests/verify_l33_code_editor.py # L.33: the editor in a real browser (keys, undo, ghost suggestions, scroll sync); needs `playwright` (Python) + Chromium, prints SKIP without them
                                             # against a fake DOM + fake JarvisHost
     node tests/verify_panel_open_guard.js   # I-B18(c): openScriptPanel() says so when a panel's script didn't load; no npm install
@@ -559,6 +561,19 @@ the other.
   stopped by it. Don't make `sync` a standing rule; `tests/test_q_l46m_tool_off_cascade.py`
   pins this. A whole MCP server is switched with the MCP panel's own route
   (`mcp-edit` -> `set_server_flag`), never a second write path to the MCP config.
+- **A tool's screen files go through ONE rule: only what its own saved `TOOL_UI` resolves
+  to** (`custom_tools_store.web_footprint`). The editor's extra tabs (`jarvis ctools-files
+  list|read|write`), import with folders (`jarvis ctools-import`, several files / a folder /
+  a .zip) and uninstall that removes the folder (`ctools-delete --folders`) all use it. The
+  browser names a path; the CLI checks it is in that list and re-resolves it inside
+  `~/.jarvis/tools` -- `server.js` never builds one. Import: a plan first (names and sizes,
+  nothing run), then `--write` checks the .py exactly as a save does against a staging
+  folder, keeps only files a declared screen uses, never writes over an existing file and
+  rolls back if the .py is refused; any `..` / absolute / drive path refuses the WHOLE
+  bundle. Uninstall removes only served files (`.html .htm .js .css` and their `.bak`) and
+  the folder if that empties it; a folder another tool names (quoted path in its source) or
+  uses, a link, and a `_` folder are never touched. None of it has a model-facing entry
+  point. `tests/test_tool_folders.py` pins this.
 - **Drafts** (`custom_tools_store.py`, `~/.jarvis/tools/_drafts/`) are copies, never
   tools: not loaded, not listed as tool files. A refused save stashes its text there
   server-side so it is never only in a browser tab. Keep the draft key validated
