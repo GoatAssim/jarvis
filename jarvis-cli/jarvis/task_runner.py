@@ -83,6 +83,7 @@ def _spawn_ask(task, prompt):
     # Lets any tool notice there is no human watching this particular ask,
     # the same signal scheduler._do_ask sets.
     env["JARVIS_SCHEDULED"] = "1"
+    env["JARVIS_JOB_ACTION"] = "task"   # never "tool" (send_dm's one exception), never inherited
     # A task step carries no job approval of its own, so it is approved for
     # nothing risky. Drop anything inherited from an outer approved run (a task
     # started from inside a scheduled job's tool call) rather than let that

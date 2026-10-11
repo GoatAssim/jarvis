@@ -77,6 +77,7 @@ same way it can't fill in a `confirm: true` parameter for itself. See
 _needs_approval().
 """
 
+import contextlib
 import copy
 import json
 import os
@@ -1489,6 +1490,9 @@ def _do_ask_run(job, action):
     # empty included, so a value inherited from an outer approved run (a tick
     # fired from inside another job's tool call) can never leak into this one.
     env["JARVIS_JOB_APPROVED_KINDS"] = ",".join(job_risk.authorized_kinds(job))
+    # Which launcher this is (see _unattended_tool_env): never "tool" here, and
+    # never inherited from an outer tool job.
+    env["JARVIS_JOB_ACTION"] = "ask"
     # L.16 item 8: this job's own token limit. ALWAYS set or cleared, like the
     # line above, so one inherited from an outer run can never leak in. Unset =
     # the config default; "0" = no limit (the job is never stopped for cost).
@@ -1543,6 +1547,21 @@ def _do_ask_run(job, action):
     # person, via the notification below and the summary this returns.
     _log_scheduled_ask(job, prompt, ok=True, reply=raw_reply, conv_id=run_conv_id)
 
+    if _ask_not_started(raw_reply):
+        # L.16 item 2: nothing ran and no model was called. ALWAYS reported (a job
+        # that quietly never starts is the worst kind), and a failure -- not
+        # "ok" -- so the job list shows it. A recurring job stays pending and
+        # re-checks next time: installing Tesseract fixes it with no re-approval.
+        from . import notifier
+        note = notifier.notify(
+            title="Couldn't start \u2014 " + (job.get("title") or "Scheduled task"),
+            message=reply or "(no output)",
+            channels=job.get("channels"), level=job.get("level"),
+            kind="task", job_id=job.get("id"), conv_id=run_conv_id,
+        )
+        return {"ok": False, "not_started": True, "summary": reply, "notification": note,
+                "error": "not started: a capability this job needs is missing",
+                "conv_id": run_conv_id}
     over_budget = _ask_stopped_over_budget(raw_reply)
     note = None
     if _should_report(job) or over_budget:
@@ -1563,11 +1582,10 @@ def _do_ask_run(job, action):
             "conv_id": run_conv_id}
 
 
-def _ask_stopped_over_budget(raw_reply):
-    """True when the ask's own JARVIS_USAGE line says the token budget ended it
-    (cli.py prints that line for every ask; ai_client.ask() puts ending and the
-    whole-ask ledger on it). Reads the machine-readable marker, never the reply
-    text, so a reply that merely mentions tokens can't trip it."""
+def _ask_ending(raw_reply):
+    """The `ending` the ask's own JARVIS_USAGE line reports ("token_budget",
+    "preflight", ...), or None. Reads the machine-readable marker, never the
+    reply text, so a reply that merely mentions tokens can't trip it."""
     for ln in (raw_reply or "").split("\n"):
         if not ln.startswith("JARVIS_USAGE "):
             continue
@@ -1575,9 +1593,22 @@ def _ask_stopped_over_budget(raw_reply):
             usage = json.loads(ln[len("JARVIS_USAGE "):])
         except ValueError:
             continue
-        if isinstance(usage, dict) and usage.get("ending") == "token_budget":
-            return True
-    return False
+        if isinstance(usage, dict) and usage.get("ending"):
+            return usage.get("ending")
+    return None
+
+
+def _ask_stopped_over_budget(raw_reply):
+    """True when the ask's own JARVIS_USAGE line says the token budget ended it
+    (cli.py prints that line for every ask; ai_client.ask() puts ending and the
+    whole-ask ledger on it)."""
+    return _ask_ending(raw_reply) == "token_budget"
+
+
+def _ask_not_started(raw_reply):
+    """True when the ask refused to start because the PC lacks a capability the
+    job states it needs (L.16 item 2, jarvis/preflight.py)."""
+    return _ask_ending(raw_reply) == "preflight"
 
 
 def _do_command(job, action):
@@ -1610,6 +1641,7 @@ def _do_command(job, action):
         args_text += " --%s %s" % (key, value)
     env = dict(os.environ)
     env["JARVIS_SCHEDULED"] = "1"
+    env["JARVIS_JOB_ACTION"] = "command"   # never "tool", never inherited (see _unattended_tool_env)
     try:
         proc = subprocess.run(
             argv, capture_output=True, text=True, timeout=COMMAND_TIMEOUT,
@@ -1667,6 +1699,37 @@ def jobs_using(kind, name):
     return out
 
 
+@contextlib.contextmanager
+def _unattended_tool_env(job):
+    """Run one in-process tool call as what it is: an unattended scheduled run.
+
+    Until this existed a `tool` job ran with NO unattended signal at all (only
+    the subprocess launchers set JARVIS_SCHEDULED), so a tool that refuses
+    unattended runs -- send_dm, the person-memory writers -- did not know it was
+    one: an approved scheduled send_dm went straight past its own refusal. The
+    three variables are set for the duration of the call and put back exactly as
+    they were (absent stays absent), so a tick fired from inside an interactive
+    ask's tool handler cannot leave that ask looking unattended afterwards.
+
+        JARVIS_SCHEDULED          the signal send_dm / policy read
+        JARVIS_JOB_APPROVED_KINDS what this job's approval covers (job_risk)
+        JARVIS_JOB_ACTION         "tool": the only value send_dm accepts
+    """
+    wanted = {"JARVIS_SCHEDULED": "1",
+              "JARVIS_JOB_APPROVED_KINDS": ",".join(job_risk.authorized_kinds(job)),
+              "JARVIS_JOB_ACTION": "tool"}
+    saved = {k: os.environ.get(k) for k in wanted}
+    os.environ.update(wanted)
+    try:
+        yield
+    finally:
+        for key, old in saved.items():
+            if old is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = old
+
+
 def _do_tool(job, action):
     """Call one AI tool directly, in-process.
 
@@ -1679,7 +1742,8 @@ def _do_tool(job, action):
     args = action.get("args") or {}
     if name not in getattr(tools_mod, "TOOLS", {}):
         return {"ok": False, "error": "no such tool: %s" % name, "summary": ""}
-    result = tools_mod.execute_tool(name, args)
+    with _unattended_tool_env(job):
+        result = tools_mod.execute_tool(name, args)
     failed = isinstance(result, dict) and bool(result.get("error"))
     summary = json.dumps(result, default=str)[:MAX_RESULT_CHARS]
     # D.6: same reasoning as _do_command above — a tool action never

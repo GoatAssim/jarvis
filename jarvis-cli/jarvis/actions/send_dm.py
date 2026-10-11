@@ -28,11 +28,14 @@ that:
   4. RATE LIMITED per recipient and overall, persisted on disk (every
      `jarvis` call is a fresh process, so an in-memory counter would reset
      on every call and limit nothing).
-  5. NEVER UNATTENDED. Refuses under JARVIS_SCHEDULED / an unattended
-     context outright. The plan's item 8 ("unless the job carries an
-     explicit authorization") needs a new kind in job_risk.py's approval
-     summary; none exists, so the safe floor is a flat refusal until one is
-     built.
+  5. NEVER UNATTENDED -- with exactly one exception. Refuses under
+     JARVIS_SCHEDULED / an unattended context outright, EXCEPT for a scheduled
+     `tool` job (scheduler._do_tool sets JARVIS_JOB_ACTION=tool) whose approval
+     included job_risk.KIND_MESSAGE -- the approval line names the recipient and
+     the exact text, and the run may only go to a KNOWN contact. An `ask` job,
+     a saved command, a task step and a shell the model started can never
+     qualify (they set or clear JARVIS_JOB_ACTION, and an ask job's predicted
+     tool list is never given the kind). The plan's L.20 item 8.
   6. LOGGED. Every attempt, delivered or not, is appended to the person's
      channels/transcript.py thread as an outbound `owner_dm` record, so
      `recent_dms` and the audit log show what Jarvis said on the owner's
@@ -85,6 +88,20 @@ def _current_sender():
     if not data.get("platform") or not data.get("user_id"):
         return None
     return data
+
+
+def _job_authorizes_message():
+    """True only for a scheduled `tool` job whose approval included the
+    "message" kind (job_risk.KIND_MESSAGE). scheduler._do_tool is the only
+    caller that sets JARVIS_JOB_ACTION=tool; every other launcher sets or clears
+    it, so an ask job -- or a shell the model started -- can never reach this."""
+    if os.environ.get("JARVIS_JOB_ACTION") != "tool":
+        return False
+    try:
+        from .. import policy
+        return "message" in policy.approved_kinds_from_env()
+    except Exception:  # noqa: BLE001 -- fail closed
+        return False
 
 
 def _is_unattended():
@@ -398,7 +415,8 @@ def tool_send_dm(args):
                      "-- this isn't available to whoever is messaging you "
                      "over chat right now."),
         }
-    if _is_unattended():
+    unattended = _is_unattended()
+    if unattended and not _job_authorizes_message():
         return {
             "ok": False,
             "error": "send_dm does not run unattended",
@@ -430,6 +448,11 @@ def tool_send_dm(args):
     rec, err = _resolve(person, platform_arg)
     if err:
         return err
+    if unattended and rec.get("_unknown"):
+        # An approved job names someone Jarvis knows. A bare numeric id is the
+        # "owner typed it just now" path; nobody is typing at 3am.
+        return {"ok": False, "error": "a scheduled message can only go to a known contact",
+                "hint": "Have them DM the bot once, then schedule it again."}
     platform, user_id = rec["platform"], str(rec["user_id"])
     who = _describe(rec)
 

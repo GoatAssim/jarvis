@@ -49,6 +49,13 @@ KIND_POWER = "power"
 KIND_DESKTOP = "desktop"
 KIND_FILES = "files"
 KIND_SHELL = "shell"
+# L.20 item 8 / L.16 job authorization: a scheduled `tool` job whose tool is
+# send_dm. send_dm refuses every unattended run (AGENTS.md); this is the one way
+# to relax that, and ONLY for an action that names the recipient and the text
+# (certain, see assess): the person approving saw exactly who gets exactly what.
+# An `ask` job never gets it -- a model choosing its own recipient at run time
+# from text it may have read on the web is the case the refusal exists for.
+KIND_MESSAGE = "message"
 # Tools the owner switched ON for the approval summary in the Tool Manager that
 # job_risk has no built-in kind for (a custom tool, an MCP tool, ...). One
 # shared kind on purpose: the summary names the tools, and approving it covers
@@ -56,7 +63,7 @@ KIND_SHELL = "shell"
 KIND_MARKED = "marked"
 
 # Most consequential first: this is the order the approval summary lists them.
-KINDS = (KIND_POWER, KIND_DESKTOP, KIND_FILES, KIND_SHELL, KIND_MARKED)
+KINDS = (KIND_POWER, KIND_DESKTOP, KIND_FILES, KIND_SHELL, KIND_MESSAGE, KIND_MARKED)
 
 # Which tools count, by name. Explicit rather than "everything in group X":
 # the desktop group also holds read-only probes (list_windows, read_screen,
@@ -82,6 +89,8 @@ _TOOL_KIND = {
     "run_shell": KIND_SHELL, "run_custom_command": KIND_SHELL,
     "run_command": KIND_SHELL, "run_chain": KIND_SHELL,
     "dev_agent": KIND_SHELL, "code_agent": KIND_SHELL,
+
+    "send_dm": KIND_MESSAGE,
 }
 
 _PHRASE = {
@@ -90,6 +99,7 @@ _PHRASE = {
                   "whatever window is focused)",
     KIND_FILES: "delete or overwrite files",
     KIND_SHELL: "run shell commands",
+    KIND_MESSAGE: "send a direct message to someone you know, as you",
     KIND_MARKED: "use tools you marked for review",
 }
 
@@ -233,6 +243,9 @@ def assess(action):
                           "read its prompt carefully before approving." % exc]}
 
     kinds = kinds_of_tools(tools)
+    if not certain:
+        # See KIND_MESSAGE: a predicted tool list never authorizes a message.
+        kinds = [k for k in kinds if k != KIND_MESSAGE]
     by_kind = {k: [t for t in tools if kind_of(t) == k] for k in kinds}
     lead = "This job will" if certain else "This job can"
     lines = []
@@ -240,6 +253,15 @@ def assess(action):
         text = _PHRASE[kind]
         if kind == KIND_MARKED:
             text = "%s (%s)" % (text, ", ".join(by_kind.get(kind) or []))
+        if kind == KIND_MESSAGE and certain:
+            # Say WHO and WHAT: approving this line is the whole authorization.
+            args = (action or {}).get("args") or {}
+            who = str(args.get("person") or "").strip()
+            body = " ".join(str(args.get("message") or "").split())
+            if who and body:
+                if len(body) > 160:
+                    body = body[:157] + "..."
+                text = 'send a direct message to %s: "%s"' % (who, body)
         if kind == KIND_POWER and certain:
             verb = _POWER_VERBS.get(str(((action or {}).get("args") or {})
                                         .get("action") or "").strip().lower())

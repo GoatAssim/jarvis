@@ -29,6 +29,7 @@ from . import key_health
 from . import logs
 from . import policy
 from . import job_risk
+from . import preflight
 from . import tool_diagnosis
 from . import token_usage
 from . import tool_result_shaping
@@ -1654,6 +1655,36 @@ def _interactive_token_limit(defaults):
     except (TypeError, ValueError):
         return None
     return value if value > 0 else None
+
+
+def _preflight_stop(pf, conv_id, user_text, assistant_name, address, trace):
+    """End an unattended ask before its first model call (L.16 item 2).
+
+    ok=True / degraded / ending="preflight" like the token-budget stop: the CLI
+    exits 0 and prints the one line, and the scheduler reads `ending` off the
+    JARVIS_USAGE line (scheduler._ask_not_started) to report a failure rather
+    than a success. `usage` is all zeros on purpose: nothing was spent."""
+    reply = preflight.reply(pf)
+    trace.degraded = True
+    trace.ending = "preflight"
+    if conv_id:
+        logs.log_event(conv_id, logs.EVENT_FORCED_ENDING, {
+            "ending": "preflight", "reason": "the PC lacks a capability this job states it needs",
+            "needs": [b.get("need") for b in pf.get("blockers") or []]})
+    console_store.log("error", reply)
+    if conv_id:
+        extras = [{"type": "trace", "data": trace.to_dict()}]
+        pointer = console_store.end_turn("status", "not started \u2014 missing capability")
+        if pointer:
+            extras.append({"type": "consoleRef", "data": pointer})
+        exchange_count = conversations.complete_exchange(
+            conv_id, user_text, reply, "(not started \u2014 missing capability)", extras=extras)
+        _spawn_title_update(conv_id, exchange_count)
+    _pending_turn[0] = None
+    usage = {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0, "rounds": [], "tool_calls": [],
+             "ending": "preflight", "preflight": [b.get("need") for b in pf.get("blockers") or []]}
+    return AskResult(True, text=reply, provider=None, attempts=[], assistant_name=assistant_name,
+                     address_user_as=address, usage=usage, degraded=True, ending="preflight")
 
 
 def _token_budget_reply(budget, runs, interactive=False):
@@ -3769,6 +3800,16 @@ def _ask_impl(user_text, commands=None, on_attempt=None, on_tool_call=None, on_t
         conversations.begin_exchange(conv_id, user_text, console_turn=console_turn,
                                      **_image_kwargs)
         console_store.log("command", user_text)
+
+    # L.16 item 2: an unattended ask whose job states a need this PC cannot meet
+    # (read the screen with neither OCR nor vision; power off with no power tool)
+    # stops HERE -- after the person's message is saved, before any provider is
+    # contacted. Zero model calls. Interactive asks are never checked: someone is
+    # there to be told, and a tool's own one-shot failure already says it.
+    if policy.unattended_context_from_env() is not None:
+        _pf = preflight.check(user_text)
+        if not _pf["ok"]:
+            return _preflight_stop(_pf, conv_id, user_text, assistant_name, address, trace)
 
     # F.7: the tool round-trips of the most recent attempt that got far enough
     # to have any. The next key/provider continues from them instead of being

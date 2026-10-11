@@ -1126,6 +1126,7 @@ def handle_ai_prompt(text, commands, provider_override=None, think_override=None
         "truncated": "the model's reply hit its output limit and was cut off",
         "token_budget": "this scheduled run went over its token limit and was stopped, so the text "
                         "above is a report of what ran, not a model-written answer",
+        "preflight": "this job needs something this PC doesn't have, so it was not started and no model was called",
         "pending_action": "you said go ahead, so the step proposed last turn was run directly",
     }.get(ending)
     if note is None and getattr(result, "degraded", False):
