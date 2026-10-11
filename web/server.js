@@ -3884,6 +3884,88 @@ app.post("/api/tool-ui/:id/run", requireJarvis, async (req, res) => {
 });
 
 // ---------------------------------------------------------------------------
+// Tool commands (TOOL_COMMANDS, jarvis/tool_commands.py; master plan I.2.11 / K.6.7):
+// the `/` palette commands a tool file contributes. Thin proxy over
+// `jarvis tool-commands`. The browser names a COMMAND and sends the words typed after
+// it; which tool that is, which argument keys the words may fill, and whether the
+// command is switched off are all decided by the CLI from the file's own declaration,
+// so nothing here (or in the browser) can pick a different tool or add a key.
+//
+// GET drops any command whose name is one of the palette's own words (a verb, an alias,
+// a passthrough or a not-exposed CLI name). The built-in always wins, and the registry
+// that knows those words is a browser-side file this server already reads for
+// /api/slash/run. If it can't be read nothing is listed: fail closed.
+// ---------------------------------------------------------------------------
+
+const TOOL_COMMAND_NAME_RE = /^[a-z][a-z0-9-]{1,31}$/;
+
+const SLASH_BUILTIN_WORDS = (() => {
+  try {
+    const text = readFileSync(path.join(__dirname, "public", "slash-commands-data.js"), "utf8");
+    const m = /\/\*JSON-BEGIN\*\/([\s\S]*)\/\*JSON-END\*\//.exec(text);
+    const reg = JSON.parse(m[1]);
+    const words = new Set([...Object.keys(reg.passthrough || {}), ...Object.keys(reg.notExposed || {})]);
+    for (const v of reg.verbs || []) { words.add(v.verb); for (const a of v.aliases || []) words.add(a); }
+    return words;
+  } catch (e) {
+    console.warn("tool-command collision list unavailable:", e.message);
+    return null;       // unknown => list nothing
+  }
+})();
+
+app.get("/api/tool-commands", requireJarvis, async (req, res) => {
+  if (!SLASH_BUILTIN_WORDS) return res.json({ commands: [], dropped: [] });
+  const result = await runJarvisOnce(req.query.all === "1" ? ["tool-commands", "list", "--all"] : ["tool-commands", "list"], 15000);
+  if (!result.ok) return res.status(500).json({ error: result.error || result.stderr || "Couldn't list tool commands." });
+  let parsed;
+  try { parsed = JSON.parse(result.stdout); }
+  catch (e) { return res.status(500).json({ error: `Couldn't parse tool-commands list: ${e.message}` }); }
+  const commands = [], dropped = [];
+  for (const c of Array.isArray(parsed?.commands) ? parsed.commands : []) {
+    if (!c || typeof c.name !== "string" || !TOOL_COMMAND_NAME_RE.test(c.name)) continue;
+    if (SLASH_BUILTIN_WORDS.has(c.name)) dropped.push({ name: c.name, reason: "that is a built-in palette command" });
+    else commands.push(c);
+  }
+  res.json({ commands, dropped });
+});
+
+// What a tool command WOULD run -- the tool, the arguments built from the typed words,
+// its risk tier -- without running anything. The palette calls this, then
+// /api/tools/preview on the result (the Debug panel's confirmation gate), then `run`.
+app.post("/api/tool-commands/:name/prepare", requireJarvis, async (req, res) => {
+  if (!TOOL_COMMAND_NAME_RE.test(req.params.name)) return res.status(400).json({ error: "Invalid command name." });
+  const args = req.body?.args === undefined ? [] : req.body.args;
+  if (!Array.isArray(args) || args.length > 24
+      || args.some((a) => typeof a !== "string" || a.length > 2000 || a.includes("\0"))) {
+    return res.status(400).json({ error: "Arguments must be up to 24 short strings." });
+  }
+  const result = await runJarvisOnce(["tool-commands", "prepare", req.params.name, JSON.stringify(args)], 15000);
+  let parsed;
+  try { parsed = JSON.parse(result.stdout); } catch { /* not JSON */ }
+  if (parsed === undefined) return res.status(500).json({ error: result.error || result.stderr || "Couldn't prepare that command." });
+  res.status(parsed.error ? 400 : 200).json(parsed);
+});
+
+// Run one tool command with the words typed after it. `jarvis tool-commands run`
+// refuses an unknown command and one whose tool is switched off, builds the tool's
+// arguments from the declared `args` only, then runs the tool by the same path as the
+// Debug panel. The confirmation (a dangerous tier, or a tool that asks first) is the
+// browser's job, via /api/tools/preview, exactly as tool-ui's runTool does it.
+app.post("/api/tool-commands/:name/run", requireJarvis, async (req, res) => {
+  if (!TOOL_COMMAND_NAME_RE.test(req.params.name)) return res.status(400).json({ error: "Invalid command name." });
+  const args = req.body?.args === undefined ? [] : req.body.args;
+  if (!Array.isArray(args) || args.length > 24
+      || args.some((a) => typeof a !== "string" || a.length > 2000 || a.includes("\0"))) {
+    return res.status(400).json({ error: "Arguments must be up to 24 short strings." });
+  }
+  const result = await runJarvisOnce(["tool-commands", "run", req.params.name, JSON.stringify(args)], 30000, { JARVIS_UI: "web" });
+  let parsed;
+  try { parsed = JSON.parse(result.stdout); } catch { /* not JSON */ }
+  if (parsed !== undefined) return res.json({ ok: result.ok, result: parsed });
+  res.status(500).json({ error: result.error || result.stderr || "Tool command failed." });
+});
+
+// ---------------------------------------------------------------------------
 // Custom tools — thin proxy over `jarvis ctools-*`, same pattern as
 // /api/skills and /api/conversations: the web server never touches
 // ~/.jarvis/tools itself, it shells out to the CLI so validation, naming

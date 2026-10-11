@@ -224,7 +224,8 @@ def read_tool(name):
     return {"ok": True, "name": name, "enabled": enabled, "source": source,
             "valid": check["ok"], "error": check.get("error", ""),
             "tools": check.get("tools", []), "group": check.get("group", ""),
-            "ui": check.get("ui", []), "ui_problems": check.get("ui_problems", [])}
+            "ui": check.get("ui", []), "ui_problems": check.get("ui_problems", []),
+            "commands": check.get("commands", []), "command_problems": check.get("command_problems", [])}
 
 
 def write_tool(name, source, description="", draft_key="", scaffold=""):
@@ -315,6 +316,8 @@ def _write_tool(name, source, description=""):
             "checklist_problems": check.get("checklist_problems", []),
             "ui": check.get("ui", []),
             "ui_problems": check.get("ui_problems", []),
+            "commands": check.get("commands", []),
+            "command_problems": check.get("command_problems", []),
             "note": "Restart any running daemon (or just run the next command) "
                     "to pick it up — tools are discovered at process start."}
 
@@ -719,13 +722,26 @@ def validate_source(source, name="custom_tool"):
             getattr(module, "TOOL_UI", None), "%s.py" % name, TOOLS_DIR, set(names))
         ui_problems = list(ui_problems) + _ui_clashes(ui_entries, name)
 
+    # TOOL_COMMANDS (tool_commands.py, I.2.11): same rule again -- the loader drops a
+    # bad entry and the tools still load, and this is the only place the author hears
+    # about it (including "you declared no riskTier, so it asks first").
+    command_entries, command_problems = [], []
+    if getattr(module, "TOOL_COMMANDS", None) is not None:
+        from . import tool_commands
+        by_tool = {sch.get("name"): sch for sch in schemas if isinstance(sch, dict)}
+        command_entries, command_problems = tool_commands.validate_commands(
+            getattr(module, "TOOL_COMMANDS", None), "%s.py" % name, set(names), by_tool)
+        command_problems = list(command_problems) + _command_clashes(command_entries, name)
+
     return {"ok": True, "tools": names, "group": group.strip(),
             "keywords": getattr(module, "TOOL_KEYWORDS", {}) or {},
             "checklist": sorted(entries),
             "checklist_missing": [n for n in names if n not in entries],
             "checklist_problems": checklist_problems,
             "ui": [tool_ui_public(u) for u in ui_entries],
-            "ui_problems": ui_problems}
+            "ui_problems": ui_problems,
+            "commands": [tool_commands.public(c) for c in command_entries] if command_entries else [],
+            "command_problems": command_problems}
 
 
 def tool_ui_public(entry):
@@ -746,6 +762,20 @@ def _ui_clashes(entries, name):
     mine = "%s.py" % name
     return ["UI element id %r is already used by %s -- this one will be ignored" % (u["id"], taken[u["id"]])
             for u in entries if taken.get(u["id"]) not in (None, "", mine)]
+
+
+def _command_clashes(entries, name):
+    """Palette command names already taken by ANOTHER file (I.2.11). Same rule as tool
+    names and UI ids: first registration wins and shipped files are scanned before
+    yours, so a clash means this command will be dropped at the next start."""
+    try:
+        from . import tools as system_tools
+        taken = {c["name"]: c.get("file", "") for c in getattr(system_tools, "AUTO_COMMANDS", []) or []}
+    except Exception:  # noqa: BLE001 -- during partial init, skip the check
+        return []
+    mine = "%s.py" % name
+    return ["palette command %r is already used by %s -- this one will be ignored" % (c["name"], taken[c["name"]])
+            for c in entries if taken.get(c["name"]) not in (None, "", mine)]
 
 
 def _builtin_clash(names):

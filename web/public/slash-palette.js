@@ -57,6 +57,71 @@
   }
   const ALL_TOKENS = Array.from(BY_TOKEN.keys()).concat(Object.keys(PASSTHROUGH));
 
+  // -------------------------------------------------------------------------
+  // Tool commands (master plan I.2.11 / K.6.7)
+  //
+  // Commands a custom tool contributes through its TOOL_COMMANDS list. Unlike every
+  // entry above they are NOT in the static registry: they depend on which tool files
+  // are installed, so they are fetched from GET /api/tool-commands and kept here.
+  // They get the same risk badge, hover text and "asks first" treatment as the CLI
+  // passthrough commands, from the command's own declaration (no second UI).
+  //
+  // Three rules this file enforces again even though the server and the CLI already
+  // did: a built-in word always wins (a tool command named like a verb, an alias or a
+  // CLI name is ignored); a tier that isn't one of the three is `dangerous`; and a
+  // command with no tool to run is ignored. The browser never decides WHICH tool runs
+  // or builds its arguments -- /api/tool-commands/:name/prepare does, from the file's
+  // own declaration.
+  // -------------------------------------------------------------------------
+  const TOOLCMDS = Object.create(null);          // name -> cleaned entry
+  const TOOL_TIERS = ["safe", "caution", "dangerous"];
+  const TOOLCMD_STALE_MS = 20000;
+  let toolCmdsAt = 0;
+  let toolCmdsLoading = null;
+
+  function toolCmd(tokenLc) {
+    if (!tokenLc || BY_TOKEN.has(tokenLc) || PASSTHROUGH[tokenLc] || NOT_EXPOSED[tokenLc]) return null;
+    return TOOLCMDS[tokenLc] || null;
+  }
+
+  function cleanToolCmd(c) {
+    if (!c || typeof c.name !== "string" || !/^[a-z][a-z0-9-]{1,31}$/.test(c.name)) return null;
+    if (c.disabled || typeof c.tool !== "string" || !c.tool) return null;
+    if (BY_TOKEN.has(c.name) || PASSTHROUGH[c.name] || NOT_EXPOSED[c.name]) return null;
+    const args = (Array.isArray(c.args) ? c.args : []).filter((a) => a && typeof a.name === "string").map((a) => ({
+      name: a.name, required: Boolean(a.required), hint: typeof a.hint === "string" ? a.hint : "",
+    }));
+    return {
+      name: c.name,
+      tool: c.tool,
+      summary: String(c.summary || ""),
+      description: String(c.description || ""),
+      example: String(c.example || ""),
+      usage: String(c.usage || ""),
+      file: String(c.file || ""),
+      args,
+      riskTier: TOOL_TIERS.includes(c.riskTier) ? c.riskTier : "dangerous",   // fail closed
+    };
+  }
+
+  // Fetch (at most every 20 s unless forced) and replace the table. Never throws: if the
+  // route is missing or the CLI is older, there are simply no tool commands.
+  function loadToolCommands(force) {
+    if (toolCmdsLoading) return toolCmdsLoading;
+    if (!force && Date.now() - toolCmdsAt < TOOLCMD_STALE_MS) return Promise.resolve(false);
+    toolCmdsAt = Date.now();
+    toolCmdsLoading = (async () => {
+      let data;
+      try { data = await apiGet("/api/tool-commands"); } catch { return false; }
+      const next = (data && Array.isArray(data.commands) ? data.commands : []).map(cleanToolCmd).filter(Boolean);
+      const before = Object.keys(TOOLCMDS).sort().join(",");
+      for (const k of Object.keys(TOOLCMDS)) delete TOOLCMDS[k];
+      for (const c of next) if (!TOOLCMDS[c.name]) TOOLCMDS[c.name] = c;
+      return Object.keys(TOOLCMDS).sort().join(",") !== before;
+    })().finally(() => { toolCmdsLoading = null; });
+    return toolCmdsLoading;
+  }
+
   // The first Enter only COMPLETES (a second Enter runs) for the chat group
   // and for anything that isn't plain "safe", so a half-typed "/s" can never
   // fire /stop and "/cl" can never wipe a conversation. Everything else that
@@ -177,7 +242,7 @@
     const saved = savedNames();
     if (saved.includes(token)) return null;
     let best = null, bestD = 3;
-    for (const t of ALL_TOKENS.concat(saved)) {
+    for (const t of ALL_TOKENS.concat(Object.keys(TOOLCMDS), saved)) {
       const d = editDistance(token, t);
       if (d < bestD) { bestD = d; best = t; }
     }
@@ -515,7 +580,15 @@
     const p = parse(raw);
     if (!p) return false;
     const spec = BY_TOKEN.get(p.tokenLc);
-    if (!spec) return Boolean(PASSTHROUGH[p.tokenLc]);   // free-text args, none required
+    if (!spec) {
+      if (PASSTHROUGH[p.tokenLc]) return true;            // free-text args, none required
+      const tool = toolCmd(p.tokenLc);
+      if (!tool) return false;
+      // A tool command with required arguments is finished only once they are typed,
+      // so the first Enter on "/name" completes it and a second runs it.
+      const need = tool.args.reduce((n, a, i) => (a.required ? i + 1 : n), 0);
+      return need === 0 || (p.hasSpace && shellSplit(p.rest).length >= need);
+    }
     const required = spec.args.filter((a) => a.required);
     if (!required.length) return true;
     if (!p.hasSpace) return false;
@@ -734,6 +807,12 @@
   function previewFor(r) {
     if (!r || r.heading) return "";
     const p = parse(ui.input.value);
+    if (r.toolcmd) {
+      const e = TOOLCMDS[r.toolcmd];
+      const typed = p && p.tokenLc === r.toolcmd ? p.rest.trim() : "";
+      return `Runs the ${e.tool} tool${typed ? " with " + typed : ""} and shows what it returns.` +
+        (e.riskTier === "dangerous" ? " Asks first." : "");
+    }
     if (r.pass) {
       const typed = p && p.tokenLc === r.pass ? p.rest.trim() : "";
       const e = PASSTHROUGH[r.pass];
@@ -772,6 +851,12 @@
       if (r.spec.covers && r.spec.covers.length) {
         kids.push(el("span", { class: "slash-foot__note", text: "covers: " + r.spec.covers.slice(0, 6).join(", ") + (r.spec.covers.length > 6 ? ` +${r.spec.covers.length - 6}` : "") }));
       }
+    } else if (r.toolcmd) {
+      const e = TOOLCMDS[r.toolcmd];
+      kids.push(el("span", { class: "slash-foot__text" }, [el("strong", { text: "/" + r.toolcmd }), " \u2014 " + e.summary]));
+      kids.push(riskBadge(e.riskTier));
+      kids.push(el("code", { class: "slash-foot__example", text: e.example || (e.usage ? `/${r.toolcmd} ${e.usage}` : `/${r.toolcmd}`) }));
+      if (e.description) kids.push(el("span", { class: "slash-foot__note", text: e.description }));
     } else if (r.pass) {
       const e = PASSTHROUGH[r.pass];
       kids.push(el("span", { class: "slash-foot__text" }, [el("strong", { text: "/" + r.pass }), " \u2014 " + e.summary]));
@@ -840,6 +925,23 @@
     };
   }
 
+  // A tool command's row: same shape as a CLI one, tagged "tool" so it is clear it
+  // comes from a custom tool and not from jarvis itself, with the file it came from in
+  // the hover text. The tier is the command's own declaration (default: dangerous).
+  function toolRow(name, query) {
+    const e = TOOLCMDS[name];
+    return {
+      label: "/" + name, toolcmd: name, tier: e.riskTier, tag: "tool", hl: query || "",
+      detail: e.summary,
+      title: toolCmdHover(e),
+    };
+  }
+
+  function toolCmdHover(e) {
+    return [e.summary, e.description, e.usage ? "args: " + e.usage : "no arguments",
+      e.file ? "from " + e.file : ""].filter(Boolean).join("\n");
+  }
+
   function blockedRow(name, query) {
     return {
       label: name, notExposedName: name, tier: NOT_EXPOSED[name].riskTier, disabled: true, hl: query || "",
@@ -882,6 +984,11 @@
         rows.push({ heading: g.label });
         for (const sp of inGroup) rows.push(withRunning(verbRow(sp), sp, running));
       }
+      const toolNames = Object.keys(TOOLCMDS).sort();
+      if (toolNames.length) {
+        rows.push({ heading: "Tool commands" });
+        for (const n of toolNames) rows.push(toolRow(n));
+      }
       const others = passNames.length + blockedNames.length;
       rows.push({ heading: "More" });
       rows.push({
@@ -918,6 +1025,17 @@
       || VERBS.indexOf(a.sp) - VERBS.indexOf(b.sp));
     for (const { sp, via } of scored) rows.push(withRunning(verbRow(sp, via, q), sp, running));
 
+    // Tool commands (I.2.11): the owner's own, so a summary match counts too (like a
+    // verb's), and they sit above the CLI plumbing.
+    const toolHits = Object.keys(TOOLCMDS).map((n) => {
+      let sc = score(q, n);
+      if (sc < 40) { const d = score(q, TOOLCMDS[n].summary); sc = Math.max(sc, d >= 40 ? Math.floor(d / 4) : 0); }
+      return { n, sc };
+    }).filter((x) => x.sc >= 10).sort((a, b) => b.sc - a.sc || a.n.localeCompare(b.n)).slice(0, 8);
+    if (toolHits.length) {
+      rows.push({ heading: "Tool commands" });
+      for (const { n } of toolHits) rows.push(toolRow(n, q));
+    }
     // CLI passthrough: a real name match only (not a description match), so a
     // short query doesn't drown the verbs in plumbing.
     const passHits = passNames.map((n) => ({ n, sc: score(q, n) })).filter((x) => x.sc >= 40)
@@ -1030,10 +1148,21 @@
     const id = ++ui.requestId;
     const spec = BY_TOKEN.get(p.tokenLc);
     const pass = spec ? null : PASSTHROUGH[p.tokenLc];
+    const tool = (spec || pass) ? null : toolCmd(p.tokenLc);
+    // Pick up tools installed since the last look (throttled); redraw only if the set
+    // changed and the box still holds what we were asked about.
+    loadToolCommands().then((changed) => { if (changed && ui.open && ui.input.value === raw) refresh(true); });
 
-    if ((!spec && !pass) || !p.hasSpace) {
+    if ((!spec && !pass && !tool) || !p.hasSpace) {
       // Level 1 — the verb is still being typed (or isn't a verb).
       show(verbRows(p.token), "verbs", keepActive);
+      return;
+    }
+    if (tool) {
+      show([{
+        label: tool.summary, detail: tool.usage ? "args: " + tool.usage : "no arguments",
+        toolcmd: p.tokenLc, tier: tool.riskTier, noFill: true, title: toolCmdHover(tool),
+      }], "args");
       return;
     }
     if (pass) {
@@ -1080,6 +1209,7 @@
       return true;
     }
     if (r.pass && ui.mode === "verbs") { setInputValue("/" + r.pass + " "); return true; }
+    if (r.toolcmd && ui.mode === "verbs") { setInputValue("/" + r.toolcmd + " "); return true; }
     if (r.spec && ui.mode === "verbs") {
       const spec = r.spec;
       // "Instant" = nothing REQUIRED to fill in. /help has one optional
@@ -1419,6 +1549,69 @@
     return true;
   }
 
+  // ---- Tool commands (I.2.11) ------------------------------------------------
+  // `/disk C:` -> prepare (the server builds the tool's arguments from the command's own
+  // declaration: this file never does) -> the Debug panel's confirmation gate on those
+  // real arguments -> run. Dangerous-tier commands, and any whose tool asks first or is
+  // AI-reviewed, are confirmed before anything runs; a failed check is a refusal, never
+  // a silent run. Returns false when it did not run (the caller gives the text back).
+  function toolPreviewNote(preview) {
+    const n = preview && preview.risk_note;
+    if (!n) return "";
+    return typeof n === "string" ? n : String(n.note || n.summary || "");
+  }
+
+  function showToolResult(name, data) {
+    const result = data ? data.result : null;
+    const failed = !data || data.ok === false || (result && typeof result === "object" && "error" in result && !("ok" in result && result.ok));
+    const text = result == null ? "" : (typeof result === "string" ? result : JSON.stringify(result, null, 2));
+    const msg = result && typeof result === "object" && typeof result.error === "string" ? result.error
+      : (result && typeof result === "object" && typeof result.message === "string" && Object.keys(result).length <= 2 ? result.message : "");
+    if (msg && msg.length <= 120 && !msg.includes("\n")) { toast(msg, failed ? "error" : "info"); return; }
+    if (!text) { info(failed ? `/${name} failed.` : `/${name} done.`); return; }
+    if (!failed && text.length <= 120 && !text.includes("\n")) { toast(text, "info"); return; }
+    const h = host();
+    const body = text.length > 20000 ? text.slice(0, 20000) + "\n\u2026 (truncated)" : text;
+    if (h && h.dialog) h.dialog({ title: `/${name}` + (failed ? " \u2014 failed" : ""), pre: body, level: failed ? "error" : "info" });
+    else toast(body.slice(0, 300), failed ? "error" : "info");
+  }
+
+  async function runToolCommand(name, entry, argText) {
+    const h = host();
+    const words = shellSplit(argText);
+    const missing = entry.args.findIndex((a, i) => a.required && !(words[i] || "").trim());
+    if (missing >= 0) {
+      const a = entry.args[missing];
+      toast(`/${name} needs ${a.hint || "<" + a.name + ">"}.`, "warn");
+      return false;
+    }
+    let prep;
+    try { prep = await apiSend("POST", `/api/tool-commands/${encodeURIComponent(name)}/prepare`, { args: words }); }
+    catch (e) { toast(e && e.message ? e.message : `/${name} can't run.`, "warn"); return false; }
+    if (!prep || prep.ok !== true || typeof prep.tool !== "string") { toast(`/${name} can't run.`, "warn"); return false; }
+
+    let preview;
+    try { preview = await apiSend("POST", "/api/tools/preview", { name: prep.tool, arguments: prep.arguments || {} }); }
+    catch (e) { toast(`Couldn't check whether ${prep.tool} needs confirmation, so /${name} did not run: ${e && e.message ? e.message : e}`, "error"); return false; }
+    // The tier that governs is the stricter of what the registry-side said and what
+    // the declaration did: an unknown tier from the server is already `dangerous`.
+    const tier = TOOL_TIERS.includes(prep.riskTier) ? prep.riskTier : "dangerous";
+    const gated = Boolean(preview && (preview.confirm_required || preview.ai_review));
+    if (tier === "dangerous" || gated) {
+      const note = toolPreviewNote(preview);
+      const ok = await h.confirm({
+        title: `Run /${name}?`,
+        body: `${entry.summary}\n\n` + (tier === "dangerous" ? "This is a dangerous-tier command (a command that declares no risk level counts as dangerous)." : "The tool asks for confirmation.") + (note ? "\n\n" + note : ""),
+        pre: `${prep.tool} ${JSON.stringify(prep.arguments || {}, null, 2).slice(0, 1200)}`,
+        confirmLabel: "Run", level: tier === "dangerous" ? "error" : "warn", focusCancel: true,
+      });
+      if (!ok) return false;
+    }
+    const data = await apiSend("POST", `/api/tool-commands/${encodeURIComponent(name)}/run`, { args: words });
+    showToolResult(name, data);
+    return true;
+  }
+
   async function handleSubmit(input, quotes) {
     if (!ensureDom()) return PASS;
     const raw = input.value;
@@ -1432,8 +1625,9 @@
     if (!p) return PASS;
     const spec = BY_TOKEN.get(p.tokenLc);
     const pass = spec ? null : PASSTHROUGH[p.tokenLc];
+    const tool = (spec || pass) ? null : toolCmd(p.tokenLc);
 
-    if (!spec && !pass) {
+    if (!spec && !pass && !tool) {
       const trimmed = raw.trim();
       const known = NOT_EXPOSED[p.tokenLc];
       const near = known ? null : nearestVerb(p.tokenLc);
@@ -1460,6 +1654,17 @@
     }
     ui.lastNearMiss = null;
     const h = host();
+
+    if (tool) {
+      setOpen(false);
+      input.value = "";
+      let ran;
+      try { ran = await runToolCommand(p.tokenLc, tool, p.rest.trim()); }
+      catch (e) { toast(e && e.message ? e.message : `/${p.tokenLc} failed.`); ran = false; }
+      if (ran === false) { input.value = raw; refresh(); return BLOCKED; }
+      mruBump("v:" + p.tokenLc);
+      return HANDLED;
+    }
 
     if (pass) {
       setOpen(false);
@@ -1517,6 +1722,7 @@
   // -------------------------------------------------------------------------
   function init() {
     if (!ensureDom()) return;
+    loadToolCommands(true);                                  // I.2.11: tools' own commands
     ui.input.setAttribute("role", "combobox");
     ui.input.setAttribute("aria-autocomplete", "list");
     ui.input.setAttribute("aria-controls", "slash-palette-list");
@@ -1545,6 +1751,7 @@
 
   global.JarvisSlash = {
     handleSubmit, handleComposerKeydown, parse, score, editDistance, isComplete,
+    loadToolCommands, toolCmd,                  // I.2.11: tools' own commands (tests/verify_tool_commands_palette.js)
     // Pure helpers, for tests/verify_slash_palette.js only.
     _pure: { parseCommandQuery, catsMatch, catScore, categoryCounts, groupFilter },
   };

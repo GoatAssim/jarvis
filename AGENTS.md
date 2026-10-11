@@ -393,6 +393,9 @@ actually render Markdown):
     python3 tests/verify_l11_daemon_categories.py # L.11: daemon categories in a real browser; needs `playwright` (Python) + Chromium, prints SKIP without them
     python3 tests/verify_l13_favorite_daemons.py  # L.13: favorite daemons in a real browser; needs `playwright` (Python) + Chromium, prints SKIP without them
     node tests/verify_slash_palette.js      # no npm install; runs the real palette
+    python3 tests/test_tool_commands.py     # I.2.11: TOOL_COMMANDS contract, loader, follow-the-tool rule, `jarvis tool-commands`
+    node tests/verify_tool_commands_palette.js  # I.2.11: tool commands in the palette (list, built-in wins, fail-closed tier, prepare -> preview -> run); no npm install
+    node tests/verify_tool_commands_route.js    # I.2.11: /api/tool-commands routes' guards against the real server.js source; no npm install
     python3 tests/test_category_manage.py   # L.12: rename / merge / delete a category as a whole (daemons: registry + CLI + routes pinned; commands share the JS rules)
     node tests/verify_category_manager.js   # L.12: category-manager.js pure helpers + the whole dialog chain against a fake JarvisUI/fetch; no npm install
     python3 tests/test_l43_tree.py          # L.43: "changed from default" report + per-value reset (same gate as every Settings write)
@@ -714,6 +717,36 @@ every `menu-item-*` is claimed by exactly one verb.
 
 The parser lives in one place. Do not add another `/`-prefix regex to the ask-form
 submit handler in `app.js`: register a verb instead.
+
+### Commands a tool contributes (`TOOL_COMMANDS`, I.2.11 / K.6.7)
+
+A tool file can put commands in the palette itself (`jarvis/tool_commands.py`,
+`actions/_template.py` section 12). They are NOT in the static registry above: they come
+from `GET /api/tool-commands` and are kept by `slash-palette.js` (`TOOLCMDS`).
+
+- **A command is a typed twin of one tool of its own file.** The tool is whatever the
+  declaration names; typed words can only fill the declared `args`. `jarvis tool-commands
+  prepare|run` builds the arguments (`tool_commands.build_arguments`) -- the browser never
+  has its own copy of those rules and must not grow one. Words reach the CLI as ONE JSON
+  array, never as separate argv items (a word starting `--` would read as a flag).
+- **Fail closed.** No `riskTier`, or an unknown one, is `dangerous` -- in Python AND again
+  in `cleanToolCmd`. The palette confirms a dangerous command, and any whose tool is
+  `confirm_required` / `ai_review`, through `/api/tools/preview` on the real arguments; if
+  that check itself fails, nothing runs.
+- **The built-in always wins.** A name in `reserved_names.py` is dropped in Python; a name
+  that is a verb, alias, passthrough or not-exposed word is dropped in `server.js` (which
+  already reads the registry) and again in the palette. `server.js` lists nothing if it
+  can't read the registry. Do not let a tool command shadow a built-in "because it was
+  there first".
+- **It follows its tool, derived live, stored nowhere** (`tools.command_off_reason`): off
+  when the tool is off, or when every tool of its file is (the Q-L46m rule). There is no
+  switch of its own to keep in sync.
+- **Nothing model-facing may create or edit one**, same as `TOOL_UI` and daemons: the author
+  of the file is the person who installed it. `tests/test_tool_commands.py` fails if any
+  other module names `TOOL_COMMANDS`.
+- `tests/test_tool_commands.py`, `verify_tool_commands_palette.js` and
+  `verify_tool_commands_route.js` pin all of this. `test_slash_coverage.py` still only
+  covers the CLI's own names: `tool-commands` is claimed by the `ctools` verb's `covers`.
 
 ## Categories (L.11 daemons, L.14 commands)
 

@@ -196,6 +196,30 @@ With the palette open:
       -d '{"name":"daemon-run","args":[]}'` -> **400** ("isn't a command the palette can run"); so is a name
       not in the table, and more than 24 arguments
 
+## 9b. Commands a custom tool contributes (`TOOL_COMMANDS`, I.2.11 / K.6.7)
+
+Set up: a file in `~/.jarvis/tools/` using the example in `actions/_template.py` section 12, with one
+`safe` command, one with **no** `riskTier`, and one named `doctor`. Save it in Menu > Custom Tools and press Check.
+
+- [ ] Check passes and lists, as "Ignored (the tool still loads)", that the no-tier command is treated as
+      dangerous and that `doctor` is a jarvis command name
+- [ ] After a page reload, `/` shows a **Tool commands** section above More; each row has a `tool` tag and a
+      risk badge (safe; **dangerous** for the no-tier one); `doctor` is not in it and `/doctor` is still the CLI one
+- [ ] Hover a row: summary, description, `args: ...` and `from <file>.py`. The footer shows the tier, the example
+      and the description
+- [ ] Safe command with an argument: Tab fills `/name `, Enter runs it; the result is a toast, or a dialog if long.
+      A required argument left off is refused with its hint and **nothing** is sent (Network tab: no request)
+- [ ] The no-tier command asks first, showing the tool and the exact arguments; Cancel runs nothing and leaves the
+      text in the box; Run runs it. A tool that itself asks for confirmation is confirmed even if the command is `safe`
+- [ ] Words after the name are literal: `/name $(whoami) ; echo hi` passes that text as an argument and runs nothing else.
+      A word starting `--` is a value, not a flag
+- [ ] A typo (`/dsik`) is blocked with "did you mean /disk?"; a second Enter sends it as a message
+- [ ] Tool Manager: switch the command's tool off, wait up to 20 s (or reload): the row is gone and a hand-typed
+      command answers that it is off. Switch it back on: it returns, nothing else to restore
+- [ ] Add a second file that declares the same name: only the first loaded is listed, and Check names the clash
+- [ ] Server side: `curl -X POST localhost:<port>/api/tool-commands/doctor/run -H 'content-type: application/json'
+      -d '{"args":[]}'` -> the CLI refuses it ("no palette command"), and a name like `Bad_Name` is a **400**
+
 ## 10. While Jarvis is replying
 
 - [ ] Start a long reply, then type `/`: `/clear`, `/redo`, `/run` are **greyed** with "can't run while
@@ -242,9 +266,9 @@ With the palette open:
 
 ## Not built / known limits (so you don't file these as bugs)
 
-- **Commands contributed by custom tools (I.2.11 / K.6.7)** - not built. The plan says its contract is TBD and it
-  should get its own tracking id. The registry format leaves room for it; the K.6.7 acceptance line
-  ("an unregistered custom action shows as dangerous") is untestable until it exists.
+- **Tool commands (I.2.11 / K.6.7) have no switch of their own and no Tool Manager row.** They follow their tool.
+  The palette re-reads them at most every 20 s, so a freshly saved tool shows up on the next look, not instantly.
+  A command that declares no `riskTier` is `dangerous` by design (K.6.7), not a bug.
 - **Touch long-press for the hover tooltip (D-I4).** Hover shows a browser tooltip and the footer follows the
   highlighted row, but on a touchscreen there is no hover to move it, and a tap fills the row.
 - **`/copy` copies the whole last reply only**; `/copy 2` (one code block) waits on Part I.1.

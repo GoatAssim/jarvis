@@ -3990,6 +3990,44 @@ window.JARVIS_TEST_CHECKLIST = /*JSON-BEGIN*/ {
     "Log search stays open when the jump is to Daemons (it only closes for a conversation jump). Check that the Daemons panel is drawn above it; if it is not, that is a stacking bug, not a failed jump."
    ]
   },
+  "palette_tool_commands": {
+   "group": "command_palette",
+   "does": "A tool file can put commands of its own in the palette (TOOL_COMMANDS, master plan I.2.11): each is a typed twin of one of the file's tools, with a risk badge and hover text like the built-ins.",
+   "steps": [
+    {
+     "do": "In Menu \u2192 Custom Tools, create a tool from the example in actions/_template.py section 12, declaring one command with riskTier safe, one with no riskTier, and one named like a built-in such as doctor. Save, then press Check.",
+     "expect": "Check says the file is valid and lists, under 'Ignored (the tool still loads)', that the command with no riskTier is treated as dangerous and that the one named doctor is a jarvis command name. The tool is in the catalogue."
+    },
+    {
+     "do": "Reload the page, open Ask, type / and look for the 'Tool commands' section. Hover each row.",
+     "expect": "The two good commands are listed with a 'tool' tag and a risk badge (safe, and dangerous for the one with no tier); the doctor one is absent. Hover shows its summary, args and the file it came from."
+    },
+    {
+     "do": "Type / and the first letters of the safe command's name, press Tab, add its argument and press Enter.",
+     "expect": "It runs the tool with those arguments and shows the result as a toast (or a dialog if long). No confirmation unless the tool itself asks first."
+    },
+    {
+     "do": "Run the dangerous command, first declining, then approving.",
+     "expect": "A confirmation names the tool and the exact arguments. Declining runs nothing and leaves the text in the box; approving runs it."
+    },
+    {
+     "do": "In Menu \u2192 Tool Manager switch the safe command's tool off, then type / again (wait up to 20 seconds or reload).",
+     "expect": "The command disappears from the list, and sending it by hand says it is off. Switching the tool back on brings it back with nothing else to restore."
+    },
+    {
+     "do": "Make a typo of a tool command's name, e.g. /dsik, and press Enter.",
+     "expect": "Blocked with 'did you mean /disk?'; a second Enter sends it as a message."
+    }
+   ],
+   "needs": [
+    "Ask panel open",
+    "A custom tool with TOOL_COMMANDS"
+   ],
+   "watch": [
+    "A command that ran something other than the tool its declaration names, or a typed word that became an argument the declaration doesn't list.",
+    "Full manual pass: DOCUMENTATION/COMMAND_PALETTE_TESTING.md section 9b."
+   ]
+  },
   "tool_maker_panel": {
    "group": "tool_maker",
    "does": "In the Tool Manager, Ask Jarvis takes the Overview's slot beside the editor: a normal Jarvis conversation per tool that uses the tool's name and the editor's text, and may only edit.",

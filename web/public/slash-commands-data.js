@@ -92,6 +92,15 @@
  * Each `passthrough` entry: {summary, riskTier, usage}. `usage` is shown on
  * hover/in the footer as the arguments it takes ("" = none).
  *
+ * NOT IN THIS FILE: TOOL COMMANDS (I.2.11 / K.6.7)
+ * ------------------------------------------------
+ * A custom tool can contribute commands of its own (TOOL_COMMANDS in its file;
+ * jarvis/tool_commands.py). They depend on which tool files are installed, so they are
+ * fetched at run time from GET /api/tool-commands and kept by slash-palette.js, not listed
+ * here. A name in this file (a verb, an alias, a passthrough or a notExposed name) always
+ * beats a tool command of the same name. The only thing this file says about them is
+ * that the CLI name `tool-commands` (their back end) is covered by the `ctools` verb.
+ *
  * WHO EDITS IT
  * ------------
  * Whoever adds, renames, or removes a `jarvis-cli` subcommand. Forgetting a
@@ -635,6 +644,7 @@ window.JARVIS_SLASH_COMMANDS = /*JSON-BEGIN*/
         "ctools-agent",
         "ctools-drafts",
         "tool-ui",
+        "tool-commands",
         "tool-disable-set",
         "command-disable-set",
         "disabled-list",

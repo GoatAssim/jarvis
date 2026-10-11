@@ -577,6 +577,7 @@
       if (isNew && templateFolder && /no tool\.html|nothing to show/.test(p) && p.indexOf(templateFolder) >= 0) return;
       lines.push("Ignored (the tool still loads): " + p);
     });
+    (result && result.command_problems || []).forEach((p) => lines.push("Ignored (the tool still loads): " + p));
     if (isNew && templateFolder) lines.push("Saving also creates ~/.jarvis/tools/" + templateFolder + "/ with a starter tool.html, tool.js and tool.css (never over a folder that already exists).");
     return lines;
   }

@@ -50,6 +50,18 @@ actions/_template.py section 9 for worked examples of both modes. A bad entry is
 logged and dropped; the tools still load. (It is deliberately not available to a
 file that defines no tools: the screen is for driving the file's own tools.)
 
+A file that defines tools can also contribute commands to the Ask box's `/` palette
+(master plan I.2.11 / K.6.7), each a typed twin of one of its own tools:
+
+    TOOL_COMMANDS = [ {"name": "disk", "tool": "disk_report", "summary": "...",
+                       "riskTier": "safe" | "caution" | "dangerous", "args": [...]}, ... ]
+
+...with the same risk label and hover info the built-in commands carry. A command
+that declares no riskTier is `dangerous` (fail closed). See tool_commands.py for the
+contract and actions/_template.py section 12 for a worked example. A bad entry is
+logged and dropped; the tools still load. (Not available to a file that defines no
+tools, for the same reason as TOOL_UI.)
+
 A file that defines tools can also supply background services of its own:
 
     DAEMONS = [ {"id": ..., "command": [...], ...}, ... ]
@@ -243,6 +255,9 @@ class ActionModuleRecord:
     # DAEMONS entries, already validated and normalised by
     # tool_daemons.validate_daemons (L.12). [] when the module declared none.
     daemons: list = field(default_factory=list)
+    # TOOL_COMMANDS entries (I.2.11), already validated and normalised by
+    # tool_commands.validate_commands. [] when the module declared none.
+    commands: list = field(default_factory=list)
 
 
 def _validate(module, filename, logger):
@@ -402,6 +417,20 @@ def _validate(module, filename, logger):
         for problem in ui_errors:
             logger(f"[tool-ui] {problem}")
 
+    # TOOL_COMMANDS (I.2.11): palette commands, each a typed twin of one of this
+    # file's tools. Same rule as the others: a bad entry is logged and dropped, the
+    # tools load regardless. The schemas let it check that a typed/fixed key is a real
+    # parameter of the tool it names.
+    command_entries = []
+    raw_commands = getattr(module, "TOOL_COMMANDS", None)
+    if raw_commands is not None:
+        from . import tool_commands
+        by_tool = {s.get("name"): s for s in schemas if isinstance(s, dict)}
+        command_entries, command_errors = tool_commands.validate_commands(
+            raw_commands, filename, names, by_tool)
+        for problem in command_errors:
+            logger(f"[tool-commands] {problem}")
+
     # DAEMONS (L.12): background services the tool supplies. Same rule as the
     # others - a bad entry is logged and dropped, the tools load regardless.
     # The file's own folder resolves `{tool_dir}` and a relative `cwd`.
@@ -420,7 +449,7 @@ def _validate(module, filename, logger):
         keywords=keywords, pack_instruction=pack_instruction,
         confirm_required=confirm_required, ai_review=ai_review, result_specs=result_specs,
         personas=personas, checklist=checklist, checklist_group=checklist_group, ui=ui,
-        daemons=daemon_decls,
+        daemons=daemon_decls, commands=command_entries,
     )
 
 

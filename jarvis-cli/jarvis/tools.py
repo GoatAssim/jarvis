@@ -1182,6 +1182,7 @@ TOOLS = {
 import sys  # noqa: E402  (deliberately after TOOLS is built, see below)
 from . import tool_loader  # noqa: E402  (deliberately after TOOLS is built)
 from . import tool_ui as tool_ui_module  # noqa: E402  (import-light; used by tool_ui_payload below)
+from . import tool_commands as tool_commands_module  # noqa: E402  (import-light; used by tool_commands_payload below)
 
 # logger=print (the default) would write auto-discovery log lines to
 # stdout. That's fine for most invocations, but `jarvis tools-list`
@@ -1419,6 +1420,27 @@ for _r in _AUTO_VALID:
         _seen_ui_ids[_u["id"]] = _r.file
         AUTO_UI.append(_u)
 
+# ---------------------------------------------------------------------------
+# Auto-discovered TOOL_COMMANDS -- palette commands a tool file contributes
+# (master plan I.2.11 / K.6.7; see tool_commands.py). Same two directories and the same
+# _AUTO_RECORDS as everything above. First registration of a name wins (shipped
+# actions/ is scanned before ~/.jarvis/tools/, so a user's file can't shadow a shipped
+# command); a later duplicate is logged and dropped.
+# ---------------------------------------------------------------------------
+AUTO_COMMANDS = []
+_seen_command_names = {}
+for _r in _AUTO_VALID:
+    for _c in _r.commands:
+        if _c["name"] in _seen_command_names:
+            print(
+                f"[tool-commands] Duplicate palette command {_c['name']!r} in {_r.file} -- "
+                f"already registered by {_seen_command_names[_c['name']]}, skipped.",
+                file=sys.stderr,
+            )
+            continue
+        _seen_command_names[_c["name"]] = _r.file
+        AUTO_COMMANDS.append(_c)
+
 # persona id -> the file that registered it, for the Tool Manager's "where does this come from".
 _PERSONA_FILES = {_p["id"]: _seen_persona_ids.get(_p["id"], "") for _p in AUTO_PERSONAS}
 
@@ -1434,7 +1456,8 @@ _PERSONA_FILES = {_p["id"]: _seen_persona_ids.get(_p["id"], "") for _p in AUTO_P
 # `enabled` flag is stored state other code already reads. A file with no tools has
 # no switch to follow. Tool-registered personas are NOT part of it (they were not
 # asked for, and hiding a persona the owner is wearing is not "switching a tool off").
-# There is nothing for palette commands to follow: a tool cannot contribute any yet.
+# Palette commands (I.2.11) follow the TOOL they run, live and stored nowhere: see
+# `command_off_reason` below. They have no switch of their own.
 # ---------------------------------------------------------------------------
 _FILE_TOOLS = {_r.file: sorted(_r.tools) for _r in _AUTO_VALID if _r.tools}
 _FILE_DAEMONS = {_r.file: [_d["did"] for _d in _r.daemons] for _r in _AUTO_VALID if _r.daemons}
@@ -1498,6 +1521,62 @@ def switch_off_cascade(name):
     except Exception:  # noqa: BLE001
         pass
     return out
+
+
+def command_off_reason(entry, off=None):
+    """Why a palette command can't run right now, or "" when it can.
+
+    A command is the typed twin of ONE tool, so it follows that tool: off when the
+    tool itself is switched off in the Tool Manager, or when every tool of its file is
+    (the same Q-L46m rule the file's screens follow). Derived on every read; nothing is
+    stored, so switching the tool back on brings the command back with no step to
+    forget. A protected tool can never be off (tool_disable.protected_reason).
+    """
+    if off is None:
+        off = tool_disable.disabled_tools()
+    tool = entry.get("tool") or ""
+    if tool in off and not tool_disable.protected_reason(tool):
+        return "its tool %s is switched off in the Tool Manager" % tool
+    if entry.get("file") in files_with_all_tools_off(off):
+        return "every tool in %s is switched off in the Tool Manager" % entry.get("file")
+    return ""
+
+
+def tool_commands_payload(include_disabled=False):
+    """What `jarvis tool-commands list` / GET /api/tool-commands return: every palette
+    command a tool file contributed. The palette asks for the default (commands that
+    can't run left out); `include_disabled=True` keeps them with `disabled` and
+    `disabled_reason` set, for the Tool Manager."""
+    off = tool_disable.disabled_tools()
+    items = []
+    for c in AUTO_COMMANDS:
+        reason = command_off_reason(c, off)
+        items.append(tool_commands_module.public(c, disabled=bool(reason), reason=reason))
+    if not include_disabled:
+        items = [c for c in items if not c["disabled"]]
+    return {"commands": items}
+
+
+def tool_command_prepare(name, typed):
+    """Resolve one palette command to the tool call it stands for.
+
+    Returns (entry, tool, arguments, error); on error the first three are None. The
+    ONLY inputs are the command's name and the typed words: the tool is whatever the
+    declaration named, the argument keys are the declared ones (tool_commands.
+    build_arguments), and a command that is off or unknown is refused here -- not just
+    hidden in the browser -- so a hand-made request gets the same answer.
+    """
+    name = (name or "").strip()
+    entry = next((c for c in AUTO_COMMANDS if c["name"] == name), None)
+    if entry is None:
+        return None, None, None, "no palette command called %r" % name
+    reason = command_off_reason(entry)
+    if reason:
+        return None, None, None, "/%s is off: %s" % (name, reason)
+    arguments, error = tool_commands_module.build_arguments(entry, typed)
+    if error:
+        return None, None, None, error
+    return entry, entry["tool"], arguments, None
 
 
 def tool_ui_payload(include_disabled=False):

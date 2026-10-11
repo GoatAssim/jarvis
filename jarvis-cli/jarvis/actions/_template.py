@@ -1164,6 +1164,57 @@ TEST_CHECKLIST_GROUP = {
 # ---------------------------------------------------------------------------
 
 # ---------------------------------------------------------------------------
+# 12. TOOL_COMMANDS — optional. Commands of your own in the Ask box's "/" palette.
+#
+#    A command is a typed twin of ONE tool in this file: "/disk C:" runs
+#    your disk_report tool with {"drive": "C:"}. It gets the same risk badge
+#    and hover text the built-in palette commands have.
+#
+#        TOOL_COMMANDS = [
+#            {
+#                "name": "disk",                        # typed as /disk; a-z 0-9 and "-", 2-32 chars
+#                "tool": "disk_report",                 # one of THIS file's tools
+#                "summary": "How full is each drive",   # one line, shown in the list
+#                "riskTier": "safe",                    # "safe" | "caution" | "dangerous"
+#                "args": [                              # optional: typed words -> tool arguments
+#                    {"name": "drive", "hint": "e.g. C:"},                  # -> {"drive": "C:"}
+#                    {"name": "count", "type": "integer"},                  # "3" -> 3
+#                ],
+#                "fixed": {"verbose": False},           # optional: always sent, never typed
+#                "description": "Longer hover text.",   # optional
+#                "example": "/disk C: 3",               # optional
+#            },
+#        ]
+#
+#    Choose riskTier honestly: safe = read-only or trivially reversible,
+#    caution = changes state but scoped and recoverable, dangerous = bulk-
+#    destructive, irreversible or wide in effect. LEAVE IT OUT, or misspell it,
+#    and the command is treated as "dangerous": the palette asks before running
+#    it, because an unreviewed command is an unknown quantity. A tool that
+#    asks for confirmation (section 4) is confirmed from the palette too, on
+#    the real arguments, whatever tier you declare.
+#
+#    Each arg is {"name", "arg" (the tool's parameter, default = name),
+#    "type" ("string" default | "integer" | "number" | "boolean"), "required",
+#    "hint", "rest"}. Typed words fill the args in order; "rest": true on the
+#    LAST arg takes everything left as one string. At most 6 args. Nothing the
+#    person types can add an argument you didn't declare, name a different tool,
+#    or override a "fixed" one. Every arg / fixed key must be a real parameter
+#    of the tool's schema, or the command is dropped.
+#
+#    A name that jarvis already uses (a CLI command or a palette verb) is
+#    dropped: the built-in wins, so an update can't be shadowed by your tool.
+#    Two files can't share a name either (first one loaded wins). The command
+#    follows its tool: if the tool is switched off in the Tool Manager, so is
+#    the command, and it returns when the tool does. A bad entry is logged as
+#    "[tool-commands] ..." and shown by the Custom Tools editor's Check button;
+#    the tools in the file still load. Not available to a file with no tools.
+#
+#    See: jarvis tool-commands list      your commands, as the palette sees them
+#         Menu -> Test Checklist         Command palette > "palette_tool_commands"
+# ---------------------------------------------------------------------------
+
+# ---------------------------------------------------------------------------
 # 11. CHECKING YOUR FILE — how to know it actually loaded
 #
 # A rejected file is logged once and is otherwise invisible, so check:
@@ -1176,6 +1227,7 @@ TEST_CHECKLIST_GROUP = {
 #     jarvis personas-list     your personas, if you registered any.
 #     jarvis tool-ui list      your TOOL_UI screens, if you declared any.
 #     jarvis daemons           your DAEMONS, if you declared any (owner = your file).
+#     jarvis tool-commands list  your TOOL_COMMANDS (section 12), if you declared any.
 #
 # For a tool in ~/.jarvis/tools/, the Custom Tools editor's Check button runs
 # the same validation, including the TEST_CHECKLIST entry.

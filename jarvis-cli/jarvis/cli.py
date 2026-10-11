@@ -3143,6 +3143,65 @@ def main():
             print(json.dumps({"error": "usage: jarvis tool-ui list|bundle|run ..."}))
             sys.exit(1)
 
+    if argv[0] == "tool-commands":
+        # jarvis tool-commands list [--all]
+        # jarvis tool-commands prepare <name> [json-array-of-words]
+        # jarvis tool-commands run <name> [json-array-of-words]
+        # The palette commands tool files contribute through TOOL_COMMANDS
+        # (tool_commands.py, master plan I.2.11). `list` is what the `/` palette builds
+        # its rows from (a command whose tool is switched off is left out unless --all).
+        # `run` resolves the command to the ONE tool it declared and the arguments it
+        # declared, then hands over to `tool-run` below -- the owner's own hands, the
+        # same path the Debug panel and `tool-ui run` use. The typed words arrive as ONE
+        # JSON array (never as separate argv items: a word starting with `--` would be
+        # read as a flag), and nothing typed can name a different tool.
+        from . import tools as system_tools
+
+        sub = argv[1] if len(argv) > 1 else ""
+        if sub == "list":
+            print(json.dumps(system_tools.tool_commands_payload(include_disabled="--all" in argv[2:]), indent=2))
+            return
+        if sub == "prepare":
+            # What `run` WOULD call, without calling it: the tool, the arguments built
+            # from the typed words, and the risk tier. The palette asks this first so it
+            # can run the Debug panel's confirmation gate (/api/tools/preview) on the
+            # real arguments -- built here, once, so the browser never has its own copy
+            # of the argument rules.
+            if len(argv) < 3 or not argv[2].strip():
+                print(json.dumps({"error": "usage: jarvis tool-commands prepare <name> [json-array-of-words]"}))
+                sys.exit(1)
+            try:
+                typed = json.loads(argv[3]) if len(argv) > 3 and argv[3].strip() else []
+            except json.JSONDecodeError as e:
+                print(json.dumps({"error": "the words must be a JSON array of strings: %s" % e}))
+                sys.exit(1)
+            prep_entry, prep_tool, prep_arguments, problem = system_tools.tool_command_prepare(argv[2], typed)
+            if problem:
+                print(json.dumps({"error": problem}))
+                sys.exit(1)
+            print(json.dumps({"ok": True, "name": prep_entry["name"], "tool": prep_tool,
+                              "arguments": prep_arguments, "riskTier": prep_entry["riskTier"]},
+                             ensure_ascii=False, default=str))
+            return
+        if sub == "run":
+            if len(argv) < 3 or not argv[2].strip():
+                print(json.dumps({"error": "usage: jarvis tool-commands run <name> [json-array-of-words]"}))
+                sys.exit(1)
+            try:
+                typed = json.loads(argv[3]) if len(argv) > 3 and argv[3].strip() else []
+            except json.JSONDecodeError as e:
+                print(json.dumps({"error": "the words must be a JSON array of strings: %s" % e}))
+                sys.exit(1)
+            _entry, run_tool, run_arguments, problem = system_tools.tool_command_prepare(argv[2], typed)
+            if problem:
+                print(json.dumps({"error": problem}))
+                sys.exit(1)
+            # Hand over to the tool-run branch below with the checked tool and arguments.
+            argv = ["tool-run", run_tool, json.dumps(run_arguments)]
+        else:
+            print(json.dumps({"error": "usage: jarvis tool-commands list|prepare|run ..."}))
+            sys.exit(1)
+
     if argv[0] == "tool-run":
         # jarvis tool-run <name> [json-arguments] [mode]
         # Runs one AI tool directly (bypassing the model) and prints its
