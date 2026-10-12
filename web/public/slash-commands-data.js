@@ -234,15 +234,22 @@ window.JARVIS_SLASH_COMMANDS = /*JSON-BEGIN*/
       "verb": "copy",
       "aliases": [],
       "group": "chat",
-      "summary": "Copy Jarvis's last reply",
+      "summary": "Copy Jarvis's last reply, or one code block of it (/copy 2)",
       "riskTier": "safe",
       "instant": true,
       "whileReplying": true,
       "confirm": false,
-      "args": [],
+      "args": [
+        {
+          "name": "block",
+          "source": "freeText",
+          "required": false,
+          "hint": "optional: a code block's number in the last reply, 1 = the first"
+        }
+      ],
       "covers": [],
-      "example": "/copy",
-      "preview": "Copies Jarvis's last reply."
+      "example": "/copy 2",
+      "preview": "Copies Jarvis's last reply, or just code block N when you give a number."
     },
     {
       "verb": "search",
@@ -830,12 +837,19 @@ window.JARVIS_SLASH_COMMANDS = /*JSON-BEGIN*/
       "aliases": [],
       "group": "panels",
       "menu": "menu-item-backlog",
-      "summary": "Open the Backlog",
+      "summary": "Open the Backlog, or add an item: /backlog add <title>",
       "riskTier": "safe",
       "instant": true,
       "whileReplying": true,
       "confirm": false,
-      "args": [],
+      "args": [
+        {
+          "name": "add <title>",
+          "source": "freeText",
+          "required": false,
+          "hint": "optional: add <title> puts a new item in the Backlog without opening it"
+        }
+      ],
       "covers": [
         "backlog",
         "backlog-add",
@@ -845,8 +859,8 @@ window.JARVIS_SLASH_COMMANDS = /*JSON-BEGIN*/
         "backlog-board",
         "backlog-move"
       ],
-      "example": "/backlog",
-      "preview": "Open the Backlog."
+      "example": "/backlog add renew the passport",
+      "preview": "Opens the Backlog; /backlog add <title> adds an item instead."
     },
     {
       "verb": "logsearch",

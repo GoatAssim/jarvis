@@ -435,7 +435,7 @@ def set_log_context(conv_id, provider=None, on_tool_usage=None, base_url=None, o
 # that signature would break every one of them for a field most don't care
 # about. Cleared in the same finally: block as the log context.
 # ---------------------------------------------------------------------------
-_thinking = {"level": "off", "trace": "", "rounds": 0, "requested": 0}
+_thinking = {"level": "off", "trace": "", "rounds": 0, "requested": 0, "floor_noted": False}
 
 
 def set_thinking(level="off"):
@@ -443,6 +443,7 @@ def set_thinking(level="off"):
     _thinking["trace"] = ""
     _thinking["rounds"] = 0
     _thinking["requested"] = 0
+    _thinking["floor_noted"] = False
     _interim_text["items"] = []
     _finish_log["items"] = []
 
@@ -458,17 +459,61 @@ def get_thinking_trace():
             "level": _thinking.get("level", "off")}
 
 
-def _merge_off_keys(payload, provider, provider_type):
-    """Merge the keys that quiet a host which reasons BY DEFAULT (Groq's
-    gpt-oss and friends -- see reasoning.off_patch). Never overwrites a key
-    already in the payload. Does nothing for any other host."""
+def _merge_off_keys(payload, provider, provider_type, level_off=True):
+    """Merge the keys that quiet a host which thinks BY DEFAULT.
+
+    Groq's gpt-oss and friends (reasoning.off_patch): merged on every round
+    that carries no thinking request, at any level. Never overwrites a key
+    already in the payload. A provider block's `off_reasoning_effort` replaces
+    gpt-oss's "low" at Off only (see off_patch for the catch).
+
+    Gemini 2.5 Flash / Flash-Lite (reasoning.gemini_off_patch): `thinkingBudget:
+    0`, and ONLY when the level really is off (`level_off`). The unthought tool
+    rounds of a turn that is thinking at low..high are left as they were: a
+    Gemini model that thinks on its own between tool calls is not what this
+    change was about, and zeroing it there could cost tool-call quality. A
+    provider block's `gemini_off_budget` (false / a whole number) overrides it.
+
+    Does nothing for any other host.
+    """
     from . import reasoning
 
     for key, value in reasoning.off_patch(
             provider_type, provider_name=provider.get("name") or "",
             model=provider.get("model") or "",
-            base_url=provider.get("base_url") or "").items():
+            base_url=provider.get("base_url") or "",
+            off_effort=provider.get("off_reasoning_effort") if level_off else None).items():
         payload.setdefault(key, value)
+
+    if provider_type == "gemini" and level_off:
+        patch = reasoning.gemini_off_patch(provider.get("model") or "",
+                                           provider.get("gemini_off_budget"))
+        gen = patch.get("_generationConfig")
+        if gen:
+            target = payload.setdefault("generationConfig", {})
+            for key, value in gen.items():
+                target.setdefault(key, value)
+
+
+def _note_off_floor(provider, provider_type):
+    """Say once per ask, in the Logs viewer, that "Thinking: Off" cannot mean
+    fully off on this host (gpt-oss on Groq). Never raises, never touches the
+    turn."""
+    try:
+        if _thinking.get("floor_noted"):
+            return
+        from . import reasoning
+        note = reasoning.host_off_floor_note(
+            provider_type, provider_name=provider.get("name") or "",
+            model=provider.get("model") or "", base_url=provider.get("base_url") or "")
+        if not note:
+            return
+        _thinking["floor_noted"] = True
+        conv_id = _log_conv_id()
+        if conv_id:
+            logs.log(conv_id, "info", {"thinking": note}, provider=_log_provider())
+    except Exception:  # noqa: BLE001 -- a diagnostic must never touch the turn
+        pass
 
 
 def _apply_thinking(payload, provider, provider_type, round_num, ran_tools, thought_rounds):
@@ -487,8 +532,13 @@ def _apply_thinking(payload, provider, provider_type, round_num, ran_tools, thou
     """
     from . import reasoning
 
+    level = _thinking.get("level", "off")
+    level_off = reasoning.normalize_level(level) == "off"
+
     def _quiet():
-        _merge_off_keys(payload, provider, provider_type)
+        _merge_off_keys(payload, provider, provider_type, level_off=level_off)
+        if level_off:
+            _note_off_floor(provider, provider_type)
         return False
 
     # A forced ending (see _forced_ending) is a plain "finish up" request that
@@ -496,10 +546,10 @@ def _apply_thinking(payload, provider, provider_type, round_num, ran_tools, thou
     # ask and pay for a whole new thinking pass on the last, cheapest call.
     if getattr(_log_local, "forced", None) is not None:
         return _quiet()
-    level = _thinking.get("level", "off")
-    if reasoning.normalize_level(level) == "off":
+    if level_off:
         # A host that reasons by default (Groq's gpt-oss) ignores "off" unless
-        # told otherwise. The keys are merged but the round is NOT counted as a
+        # told otherwise, and Gemini 2.5 Flash thinks on its own with no
+        # thinkingConfig. The keys are merged but the round is NOT counted as a
         # thinking request, so `requested` stays 0 for an off turn.
         return _quiet()
     # Round 0 always. After that, apply per-round up to the level's own cap

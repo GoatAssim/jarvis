@@ -2815,6 +2815,19 @@ app.delete("/api/calendar/event/:id", requireCalendarOrigin, requireJarvis, (req
   return calendarAdmin(res, "event-delete", { id });
 });
 
+// The two settings the panel owns (calendar_tools.set_settings): how long Jarvis's own events
+// are kept after they end, and the day a week starts on. Only those keys are passed on.
+app.post("/api/calendar/settings", requireCalendarOrigin, requireJarvis, (req, res) => {
+  const body = req.body || {};
+  const settings = {};
+  if (body.keep_days !== undefined) {
+    settings.keep_days = (typeof body.keep_days === "number" || typeof body.keep_days === "string") ? body.keep_days : null;
+  }
+  if (body.week_start !== undefined) settings.week_start = typeof body.week_start === "string" ? body.week_start.slice(0, 8) : null;
+  if (!Object.keys(settings).length) return res.status(400).json({ error: "Nothing to change." });
+  return calendarAdmin(res, "settings", { settings });
+});
+
 // Ambient monitoring.
 app.get("/api/ambient", requireJarvis, async (req, res) => {
   const result = await runJarvisOnce(["ambient"], 10000);
@@ -3424,7 +3437,10 @@ app.post("/api/json/organize", requireJarvis, async (req, res) => {
 // log) and only reveal them when the body says reveal.
 // ---------------------------------------------------------------------------
 
-const SETTINGS_NAME_RE = /^(channels\/)?[A-Za-z0-9][A-Za-z0-9_.\-]{0,80}\.json$/;
+const SETTINGS_NAME_RE = /^((channels|web-data)\/)?[A-Za-z0-9][A-Za-z0-9_.\-]{0,80}\.json$/;
+// web-data/<name>.json is this server's own data folder (favorites, console filter, ...). The CLI
+// cannot know where an installed jarvis.exe's web server lives, so every settings call tells it.
+const SETTINGS_WEB_DATA_DIR = path.join(__dirname, "data");
 const LOOPBACK_HOST_RE = /^(127\.0\.0\.1|localhost|\[::1\])$/i;
 
 function requireSettingsOrigin(req, res, next) {
@@ -3452,7 +3468,7 @@ const SETTINGS_STATUS = { stale: 409, needs_confirm: 403, unattended: 403, read_
 async function settingsAdmin(res, verb, payload) {
   // catalog/changes take no body: the CLI never reads stdin for them, so don't open it.
   const stdin = payload === null ? null : JSON.stringify(payload);
-  const result = await runJarvisOnce(["settings-admin", verb], 20000, {}, stdin);
+  const result = await runJarvisOnce(["settings-admin", verb], 20000, { JARVIS_WEB_DATA: SETTINGS_WEB_DATA_DIR }, stdin);
   let parsed;
   try { parsed = JSON.parse(result.stdout); }
   catch (e) { return res.status(500).json({ error: result.stderr || result.error || e.message }); }
@@ -4137,11 +4153,23 @@ app.put("/api/ctools/drafts/:key", requireJarvis, async (req, res) => {
   const b = req.body || {};
   const source = typeof b.source === "string" ? b.source : "";
   const argv = ["ctools-drafts", "save", req.params.key, "--stdin"];
+  // `web`: the tab's unsaved screen files ({"folder/tool.js": "text"}), backed up with the
+  // .py. Left out, the draft keeps the screens it already holds. Sent to the CLI as a JSON
+  // envelope on stdin because stdin is where the source goes; the CLI validates every path.
+  let stdin = source;
+  if (b.web !== undefined) {
+    if (!b.web || typeof b.web !== "object" || Array.isArray(b.web)
+        || Object.values(b.web).some((t) => typeof t !== "string")) {
+      return res.status(400).json({ error: "web must be an object of path -> text." });
+    }
+    argv.push("--json");
+    stdin = JSON.stringify({ source, web: b.web });
+  }
   if (typeof b.name === "string" && CTOOL_NAME_RE.test(b.name)) argv.push("--name", b.name);
   if (b.mode === "edit" || b.mode === "new") argv.push("--mode", b.mode);
   if (typeof b.origName === "string" && CTOOL_NAME_RE.test(b.origName)) argv.push("--orig", b.origName);
   if (typeof b.template === "string" && /^[a-z_]{1,32}$/.test(b.template)) argv.push("--template", b.template);
-  const result = await runJarvisOnce(argv, 20000, {}, source);
+  const result = await runJarvisOnce(argv, 20000, {}, stdin);
   try {
     const parsed = JSON.parse(result.stdout);
     return parsed.ok === false ? res.status(400).json(parsed) : res.json(parsed);
@@ -4369,10 +4397,24 @@ app.put("/api/ctools/:name/file", requireJarvis, async (req, res) => {
 function importArgs(req, extra) {
   const argv = ["ctools-import", ...extra];
   if (req.query.mode === "write") argv.push("--write");
+  // overwrite=1: a tool or screen file that already exists may be replaced (each keeps a .bak).
+  if (req.query.overwrite === "1") argv.push("--overwrite");
   const name = typeof req.query.name === "string" ? req.query.name.trim().toLowerCase() : "";
   if (name) {
     if (!CTOOL_NAME_RE.test(name)) return null;
     argv.push("--name", name);
+  }
+  // names: JSON {"x.py": "name"} -- the name each tool of a several-tool bundle is saved as.
+  if (typeof req.query.names === "string" && req.query.names) {
+    let parsed = null;
+    try { parsed = JSON.parse(req.query.names); } catch (e) { return null; }
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return null;
+    const keys = Object.keys(parsed);
+    if (keys.length > 12) return null;
+    for (const k of keys) {
+      if (!/^[A-Za-z0-9_.-]{1,80}\.py$/.test(k) || typeof parsed[k] !== "string" || !CTOOL_NAME_RE.test(parsed[k])) return null;
+    }
+    argv.push("--names", JSON.stringify(parsed));
   }
   return argv;
 }
@@ -4384,7 +4426,7 @@ app.post("/api/ctools/import", requireJarvis, async (req, res) => {
     .filter((f) => f && typeof f.path === "string" && typeof f.text === "string")
     .map((f) => ({ path: f.path.slice(0, 400), text: f.text }));
   const argv = importArgs(req, ["--stdin"]);
-  if (!argv) return res.status(400).json({ error: "Invalid tool name." });
+  if (!argv) return res.status(400).json({ error: "Invalid tool name (or names list)." });
   const result = await runJarvisOnce(argv, 30000, {}, JSON.stringify({ files: clean }));
   sendCtoolsFiles(res, result, 400);
 });
@@ -4401,7 +4443,7 @@ app.post(
     try { await fs.writeFile(tmpPath, req.body); }
     catch (e) { return res.status(500).json({ error: `couldn't save upload: ${e.message}` }); }
     const argv = importArgs(req, ["--zip", tmpPath]);
-    if (!argv) { await fs.unlink(tmpPath).catch(() => {}); return res.status(400).json({ error: "Invalid tool name." }); }
+    if (!argv) { await fs.unlink(tmpPath).catch(() => {}); return res.status(400).json({ error: "Invalid tool name (or names list)." }); }
     const result = await runJarvisOnce(argv, 30000);
     await fs.unlink(tmpPath).catch(() => {});
     sendCtoolsFiles(res, result, 400);

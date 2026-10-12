@@ -1,5 +1,6 @@
 // Verifies the four "/" verbs added for the deferred I.2 list -- /search, /export,
-// /remind and /persona -- against the REAL registry and engine, with the same fake DOM
+// /remind and /persona -- plus the two argument forms added after them, `/copy N` and
+// `/backlog add <title>`, against the REAL registry and engine, with the same fake DOM
 // and fake JarvisHost as verify_slash_palette.js (the harness below is copied from it,
 // as the other verify_*.js files do).
 //
@@ -185,6 +186,10 @@ const last = (env) => env.calls[env.calls.length - 1];
 const called = (env, name) => env.calls.some((c) => c[0] === name);
 const flush = () => new Promise((r) => setTimeout(r, 0));
 
+
+// The registry itself (the engine doesn't export it): the same file the page loads.
+const REGISTRY = (() => { const w = {}; vm.runInNewContext(fs.readFileSync(path.join(PUBLIC, "slash-commands-data.js"), "utf8"), { window: w }); return w.JARVIS_SLASH_COMMANDS; })();
+const verbSpec = (name) => (REGISTRY.verbs || REGISTRY.commands || []).find((v) => v.verb === name);
 
 const json = (o, status = 200) => ({ ok: status < 400, status, json: async () => o });
 
@@ -393,6 +398,74 @@ async function main() {
     await flush();
     const fr = env.palette.querySelectorAll(".slash-row");
     check("typing '/export ' lists the five formats", fr.length === 5, `got ${fr.length}`);
+  }
+
+  // ---- /copy N -------------------------------------------------------------
+  {
+    const env = makeEnv();
+    await submit(env, "/copy");
+    check("/copy alone still copies the whole reply", last(env) && last(env)[0] === "copyLastReply" && last(env).length === 1, JSON.stringify(last(env)));
+    await submit(env, "/copy 2");
+    check("/copy 2 asks for the second code block", last(env) && last(env)[0] === "copyLastReply" && last(env)[1] === 2, JSON.stringify(last(env)));
+    const n = env.calls.length;
+    for (const bad of ["/copy 0", "/copy two", "/copy -1", "/copy 1.5", "/copy 2 3", "/copy 1000"]) {
+      env.toasts.length = 0;
+      const r = await submit(env, bad);
+      check(`${bad} copies nothing and shows the usage`, env.calls.length === n && env.toasts.some(([, m]) => /Usage: \/copy/.test(m)), JSON.stringify(env.toasts));
+      check(`...and ${bad} gives the text back to edit`, env.input.value === bad, env.input.value);
+    }
+    const spec = verbSpec("copy");
+    check("the copy verb takes one optional free-text argument", spec.args.length === 1 && spec.args[0].required === false && spec.args[0].source === "freeText", JSON.stringify(spec.args));
+    check("...so '/copy' is complete and runs on the first Enter", env.S.isComplete("/copy") && env.S.isComplete("/copy 2"));
+  }
+  {
+    // The host says it couldn't (no such block): the typed text stays.
+    const env = makeEnv();
+    const real = env.calls;
+    check("/copy N is still allowed while Jarvis is replying", (() => { env.setRunning(true); return true; })());
+    await submit(env, "/copy 3");
+    check("...and reaches the host", real.some((c) => c[0] === "copyLastReply" && c[1] === 3));
+  }
+
+  // ---- /backlog add --------------------------------------------------------
+  {
+    const env = makeEnv();
+    await submit(env, "/backlog");
+    check("/backlog alone still opens the panel", last(env) && last(env)[0] === "openPanel" && last(env)[1] === "backlog", JSON.stringify(last(env)));
+    check("...and sends nothing to the server", !env.fetches.some((f) => f[1] === "/api/backlog"));
+  }
+  {
+    const env = makeEnv();
+    env.setExtraFetch((url, opts) => (url === "/api/backlog" && opts.method === "POST") ? json({ ok: true, item: { id: "b_1234" } }) : null);
+    const r = await submit(env, "/backlog add renew the passport");
+    const post = env.fetches.find((f) => f[1] === "/api/backlog");
+    check("/backlog add POSTs the title to /api/backlog", !!post && post[0] === "POST" && JSON.parse(post[2]).title === "renew the passport", JSON.stringify(post));
+    check("...is handled without opening the panel or asking the model", r && r.status === "handled" && !env.calls.some((c) => c[0] === "openPanel"), JSON.stringify(r));
+    check("...and says what it added", env.toasts.some(([k, m]) => k === "info" && /Added to the Backlog: renew the passport/.test(m)), JSON.stringify(env.toasts));
+    await submit(env, "/backlog ADD   keep   spacing  ");
+    const second = env.fetches.filter((f) => f[1] === "/api/backlog")[1];
+    check("'add' is case-insensitive and the title is trimmed", second && JSON.parse(second[2]).title === "keep   spacing", JSON.stringify(second));
+  }
+  {
+    const env = makeEnv();
+    for (const bad of ["/backlog add", "/backlog add   ", "/backlog buy milk", "/backlog adding things"]) {
+      env.toasts.length = 0;
+      await submit(env, bad);
+      check(`${bad.trim()} sends nothing and shows the usage`, !env.fetches.some((f) => f[1] === "/api/backlog") && env.toasts.some(([, m]) => /Usage: \/backlog add/.test(m)), JSON.stringify(env.toasts));
+      check(`...and ${JSON.stringify(bad)} stays in the box`, env.input.value === bad, env.input.value);
+    }
+    await submit(env, "/backlog add " + "x".repeat(201));
+    check("a title over 200 characters is refused before it is sent", !env.fetches.some((f) => f[1] === "/api/backlog") && env.toasts.some(([, m]) => /200 characters/.test(m)), JSON.stringify(env.toasts));
+  }
+  {
+    const env = makeEnv();
+    env.setExtraFetch((url) => url === "/api/backlog" ? json({ error: "give the item a title" }, 400) : null);
+    await submit(env, "/backlog add x1");
+    check("a server refusal is shown, not swallowed", env.toasts.some(([k, m]) => k === "warn" && /title/.test(m)), JSON.stringify(env.toasts));
+    check("...and the text comes back", env.input.value === "/backlog add x1", env.input.value);
+    const spec = verbSpec("backlog");
+    check("the backlog verb takes one optional free-text argument and still covers the CLI names",
+      spec.args.length === 1 && spec.args[0].required === false && spec.covers.includes("backlog-add"), JSON.stringify(spec));
   }
 
   console.log(`\n${pass} passed, ${fail} failed`);

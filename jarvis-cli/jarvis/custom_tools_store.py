@@ -73,7 +73,10 @@ read or written.
   * `import_bundle` -- a .py plus its folders, from several files, a folder or a
     .zip. A plan (no execution) first; `write=True` then checks the .py against the
     staged files exactly as a normal save would, writes only files a declared
-    screen uses, never over an existing file, and rolls back if the .py is refused.
+    screen uses, never over an existing file unless `overwrite` is set (each replaced
+    file then keeps a .bak), and rolls back if any .py is refused. A bundle may hold
+    several top-level .py files: each is its own tool, all or none are written.
+  * Drafts may carry the tab's unsaved screen-file text (`save_draft(..., web=...)`).
   * `delete_tool(name, remove_folders=True)` -- removes the files a screen serves
     (.html .htm .js .css and their .bak) and then the folder, if that leaves it empty.
     Anything else in the folder, a folder another tool also declares and a link are
@@ -425,7 +428,30 @@ def _read_draft_file(path):
     return data
 
 
-def save_draft(key, source, name="", mode="new", orig_name="", template="", reason=""):
+def _clean_draft_web(web):
+    """The screen-file text a draft carries: {relative path: text}, or (None, error).
+
+    Only text for paths a tool screen could use (.html .htm .js .css, a safe relative path),
+    each at most tool_ui.MAX_FILE_BYTES, at most IMPORT_MAX_WEB_FILES of them. This is a COPY
+    kept in the drafts folder: nothing here is ever written under the tools folder or run.
+    """
+    from . import tool_ui
+    if not isinstance(web, dict):
+        return None, "screen files must be an object of path -> text"
+    if len(web) > IMPORT_MAX_WEB_FILES:
+        return None, "at most %d screen files can be backed up" % IMPORT_MAX_WEB_FILES
+    out = {}
+    for raw, text in web.items():
+        parts = tool_ui._clean_parts(raw)
+        if parts is None or not isinstance(text, str) or not parts[-1].lower().endswith(WEB_EXTENSIONS):
+            return None, "%r is not a screen file path" % (raw,)
+        if "\x00" in text or len(text.encode(ENCODING)) > tool_ui.MAX_FILE_BYTES:
+            return None, "%s is not text, or is over %d KB" % ("/".join(parts), tool_ui.MAX_FILE_BYTES // 1024)
+        out["/".join(parts)] = text
+    return out, ""
+
+
+def save_draft(key, source, name="", mode="new", orig_name="", template="", reason="", web=None):
     """Back up the text of an editor tab. Never raises; returns {"ok": ...}.
 
     Blank text is skipped (a draft of nothing is noise, and must not replace a real
@@ -433,6 +459,11 @@ def save_draft(key, source, name="", mode="new", orig_name="", template="", reas
     re-sends on every keystroke costs one comparison. The previous text goes onto a
     short history when it is at least DRAFT_HISTORY_MIN_GAP old, so the newest few
     versions survive a bad edit.
+
+    `web` is the tab's unsaved screen-file text ({path: text}, see `_clean_draft_web`). Left
+    out (None) it keeps whatever the draft already holds -- a refused save stashes only the
+    .py and must not wipe the screens; an empty dict clears them. A draft with screen text
+    is still only a copy; restoring it puts that text back in the editor's tabs, unsaved.
     """
     key = (key or "").strip().lower()
     if not DRAFT_KEY_RE.match(key):
@@ -445,9 +476,16 @@ def save_draft(key, source, name="", mode="new", orig_name="", template="", reas
     from . import atomic_io
     now = time.time()
     existing = _read_draft_file(_draft_path(key))
+    if web is None:
+        kept = (existing or {}).get("web")
+        web_clean = dict(kept) if isinstance(kept, dict) else {}
+    else:
+        web_clean, web_error = _clean_draft_web(web)
+        if web_clean is None:
+            return {"ok": False, "error": web_error}
     history = []
     if existing:
-        if existing.get("source") == source:
+        if existing.get("source") == source and (existing.get("web") or {}) == web_clean:
             return {"ok": True, "unchanged": True, "key": key}
         history = [h for h in (existing.get("history") or [])
                    if isinstance(h, dict) and isinstance(h.get("source"), str)]
@@ -464,6 +502,7 @@ def save_draft(key, source, name="", mode="new", orig_name="", template="", reas
         "template": (template or "").strip()[:32],
         "reason": (reason or "")[:200],
         "source": source,
+        "web": web_clean,
         "saved": datetime.now().replace(microsecond=0).isoformat(),
         "saved_epoch": now,
         "history": history,
@@ -478,8 +517,21 @@ def save_draft(key, source, name="", mode="new", orig_name="", template="", reas
     return {"ok": True, "key": key, "saved": record["saved"]}
 
 
+def _draft_web_newer(web, saved_epoch):
+    """True when a screen file the draft holds text for was saved on disk after the draft."""
+    from . import tool_ui
+    for rel in web or {}:
+        parts = tool_ui._clean_parts(rel)
+        target = tool_ui._resolve_inside(TOOLS_DIR, parts) if parts else None
+        if target is not None and _mtime_epoch(target) > float(saved_epoch or 0) + 1:
+            return True
+    return False
+
+
 def _draft_summary(data, include_source=False):
     source = data.get("source", "")
+    web = data.get("web") if isinstance(data.get("web"), dict) else {}
+    web = {k: v for k, v in web.items() if isinstance(k, str) and isinstance(v, str)}
     name = data.get("orig_name") or data.get("name") or ""
     on_disk, _enabled = _resolve(name) if name and valid_name(name) else (None, False)
     summary = {
@@ -495,11 +547,14 @@ def _draft_summary(data, include_source=False):
         "preview": next((ln.strip() for ln in source.splitlines() if ln.strip()), "")[:120],
         "versions": len(data.get("history") or []),
         # The file this draft was taken from has been saved since: restoring would
-        # replace newer text, so the panel says so before it does.
-        "file_newer": bool(on_disk and _mtime_epoch(on_disk) > float(data.get("saved_epoch") or 0) + 1),
+        # replace newer text, so the panel says so before it does. Its screen files count too.
+        "file_newer": bool(on_disk and _mtime_epoch(on_disk) > float(data.get("saved_epoch") or 0) + 1)
+                      or _draft_web_newer(web, data.get("saved_epoch")),
+        "web_files": sorted(web),
     }
     if include_source:
         summary["source"] = source
+        summary["web"] = web
         summary["history"] = [{"saved": h.get("saved", ""), "source": h.get("source", "")}
                               for h in (data.get("history") or []) if isinstance(h, dict)]
     return summary
@@ -623,6 +678,9 @@ WEB_EXTENSIONS = (".html", ".htm", ".js", ".css")
 IMPORT_MAX_ENTRIES = 300              # files looked at in one import (a zip can hold anything)
 IMPORT_MAX_BYTES = 8 * 1024 * 1024    # the whole bundle, uncompressed
 IMPORT_MAX_WEB_FILES = 36             # 12 screens x html/js/css
+IMPORT_MAX_TOOLS = 12                 # .py files (tools) in one import
+IMPORT_READ_LINES = 200               # lines of each screen script the import review shows
+IMPORT_READ_CHARS = 24000
 _IMPORT_JUNK = {"thumbs.db", "desktop.ini"}
 
 
@@ -996,15 +1054,51 @@ def _bundle_files(items):
     return files, skipped, ""
 
 
-def plan_import(items, name=""):
+def _web_kind(rel):
+    return "html" if rel.lower().endswith((".html", ".htm")) else rel.rsplit(".", 1)[-1].lower()
+
+
+def _names_for(pys, name, names):
+    """{py_file: final name}. `names` ({py_file: name}) wins; a lone `name` applies only
+    when the bundle holds exactly one tool; everything else is named from its file."""
+    given = {}
+    if isinstance(names, dict):
+        for key, value in names.items():
+            if isinstance(key, str) and isinstance(value, str) and value.strip():
+                given[key] = value.strip().lower()
+    out = {}
+    for rel in pys:
+        if rel in given:
+            out[rel] = given[rel]
+        elif len(pys) == 1 and (name or "").strip():
+            out[rel] = name.strip().lower()
+        else:
+            out[rel] = name_from_filename(rel)
+    return out
+
+
+def plan_import(items, name="", names=None, overwrite=False):
     """What importing this bundle would do, WITHOUT running anything.
 
-    {"ok": True, "name", "name_problem", "py_file", "py_size", "py_lines", "py_head",
-     "web": [{"path","size","kind"}], "skipped": [{"path","why"}], "problems": [str]}
-    `name_problem` (the name is invalid or taken) and `problems` (a screen file that
-    would overwrite one, one that is empty or too large, ...) are the blockers; the
-    name is kept apart because the person can change it and nothing else. Or
-    {"ok": False, "error": ...} when the bundle can't be read at all."""
+    {"ok": True, "tools": [{"py_file", "name", "name_problem", "exists", "py_size", "py_lines",
+                            "py_head"}],
+     "name", "name_problem", "py_file", "py_size", "py_lines", "py_head",   # the first tool
+     "web": [{"path", "size", "kind", "exists", ("lines", "head" for .js/.html)}], "skipped": [{"path", "why"}],
+     "problems": [str], "collisions": {"tools": [name], "files": [path]},
+     "overwrite": bool, "replaces": {"tools": [name], "files": [path]}}
+
+    A bundle may hold several top-level .py files: each is its own tool, and the screen
+    folders are shared. `name_problem` (a name that is invalid, taken or used twice) and
+    `problems` (a screen file that is empty, too large, outside the tools folder, a link, or
+    that already exists) are the blockers; names are kept apart because the person can change
+    them and nothing else.
+
+    `collisions` is what already exists and would be replaced. Without `overwrite` each one is
+    also a blocker (as it always was). With `overwrite=True` they are not: they are listed in
+    `replaces` instead, and import_bundle keeps one `.bak` of each file it replaces. A link or
+    a folder at a screen file's path is a blocker either way -- nothing is written through one.
+
+    Or {"ok": False, "error": ...} when the bundle can't be read at all."""
     from . import tool_ui
     files, skipped, error = _bundle_files(items)
     if error:
@@ -1019,91 +1113,181 @@ def plan_import(items, name=""):
     if not pys:
         return {"ok": False, "error": "no .py tool file at the top of the folder or zip"
                                       " (a screen's files go in folders beside it)"}
-    if len(pys) > 1:
-        return {"ok": False, "error": "found %d .py files (%s); import one tool at a time" % (len(pys), ", ".join(pys))}
-    py_file = pys[0]
-    web = sorted(rel for rel in files if rel != py_file)
+    if len(pys) > IMPORT_MAX_TOOLS:
+        return {"ok": False, "error": "found %d .py files (%s); at most %d tools are imported at once"
+                                      % (len(pys), ", ".join(pys), IMPORT_MAX_TOOLS)}
+    web = sorted(rel for rel in files if rel not in pys)
     if len(web) > IMPORT_MAX_WEB_FILES:
         return {"ok": False, "error": "%d screen files; at most %d are read" % (len(web), IMPORT_MAX_WEB_FILES)}
-    source = files[py_file]
-    final = (name or "").strip().lower() or name_from_filename(py_file)
-    problems, name_problem = [], ""
-    if not valid_name(final):
-        name_problem = "%r isn't a usable tool name (lower_snake_case, start with a letter, 49 characters at most)" % final
-    elif _resolve(final)[0]:
-        name_problem = "a tool file called %s already exists" % final
-    if not source.strip():
-        problems.append("%s is empty" % py_file)
-    elif len(source) > MAX_SOURCE_CHARS:
-        problems.append("%s is too large (max %d characters)" % (py_file, MAX_SOURCE_CHARS))
+    overwrite = bool(overwrite)
+    finals = _names_for(pys, name, names)
+    problems, tools, collide_tools, collide_files = [], [], [], []
+    seen_names = {}
+    for py_file in pys:
+        source = files[py_file]
+        final = finals[py_file]
+        problem, exists = "", False
+        if not valid_name(final):
+            problem = "%r isn't a usable tool name (lower_snake_case, start with a letter, 49 characters at most)" % final
+        elif final in seen_names:
+            problem = "%s and %s would both be saved as %s" % (seen_names[final], py_file, final)
+        else:
+            exists = bool(_resolve(final)[0])
+            if exists:
+                collide_tools.append(final)
+                if not overwrite:
+                    problem = "a tool file called %s already exists" % final
+        if valid_name(final):
+            seen_names.setdefault(final, py_file)
+        if not source.strip():
+            problems.append("%s is empty" % py_file)
+        elif len(source) > MAX_SOURCE_CHARS:
+            problems.append("%s is too large (max %d characters)" % (py_file, MAX_SOURCE_CHARS))
+        tools.append({"py_file": py_file, "name": final, "name_problem": problem, "exists": exists,
+                      "py_size": len(source.encode(ENCODING)), "py_lines": source.count("\n") + 1,
+                      "py_head": "\n".join(source.split("\n")[:80])})
+    web_rows = []
     for rel in web:
         parts = tool_ui._clean_parts(rel)
         target = tool_ui._resolve_inside(TOOLS_DIR, parts) if parts else None
+        exists = False
         if target is None:
             problems.append("%s would land outside the tools folder" % rel)
-        elif target.exists() or target.is_symlink():
-            problems.append("%s already exists, so importing would overwrite it" % rel)
-    return {"ok": True, "name": final, "name_problem": name_problem, "py_file": py_file,
-            "py_size": len(source.encode(ENCODING)), "py_lines": source.count("\n") + 1,
-            "py_head": "\n".join(source.split("\n")[:80]),
-            "web": [{"path": rel, "size": len(files[rel].encode(ENCODING)),
-                     "kind": "html" if rel.lower().endswith((".html", ".htm")) else rel.rsplit(".", 1)[-1].lower()}
-                    for rel in web],
-            "skipped": skipped, "problems": problems,
+        elif target.is_symlink():
+            exists = True
+            problems.append("%s is a link in the tools folder, and importing never writes through a link" % rel)
+        elif target.is_dir():
+            exists = True
+            problems.append("%s is a folder in the tools folder, so a file can't be written there" % rel)
+        elif target.exists():
+            exists = True
+            collide_files.append(rel)
+            if not overwrite:
+                problems.append("%s already exists, so importing would overwrite it" % rel)
+        kind = _web_kind(rel)
+        row = {"path": rel, "size": len(files[rel].encode(ENCODING)), "kind": kind, "exists": exists}
+        if kind in ("js", "html"):
+            # Script a screen runs in the page: the review shows it so it can be read first.
+            lines = files[rel].split("\n")
+            row["lines"] = len(lines)
+            row["head"] = "\n".join(lines[:IMPORT_READ_LINES])[:IMPORT_READ_CHARS]
+        web_rows.append(row)
+    first = tools[0]
+    return {"ok": True, "tools": tools,
+            "name": first["name"], "name_problem": next((t["name_problem"] for t in tools if t["name_problem"]), ""),
+            "py_file": first["py_file"], "py_size": first["py_size"], "py_lines": first["py_lines"],
+            "py_head": first["py_head"],
+            "web": web_rows, "skipped": skipped, "problems": problems,
+            "collisions": {"tools": collide_tools, "files": collide_files},
+            "overwrite": overwrite,
+            "replaces": {"tools": collide_tools if overwrite else [], "files": collide_files if overwrite else []},
             "_files": files}
 
 
-def import_bundle(items, name="", write=False, description=""):
-    """Import a tool made of a .py and screen folders: preview, or write it.
+def _snapshot_tool(name):
+    """What a tool file looked like before an import replaced it, so a failed import can put
+    it back: None when there was no such tool."""
+    path, enabled = _resolve(name)
+    if not path:
+        return None
+    return {"path": path, "text": _read(path), "enabled": enabled, "meta": _meta().get(name)}
+
+
+def _undo_tool(name, snap):
+    """Reverse one tool write made by import_bundle. Best effort, never raises."""
+    try:
+        if snap is None:
+            for path in (_path_for(name), _path_for(name, disabled=True)):
+                try:
+                    path.unlink()
+                except FileNotFoundError:
+                    pass
+        else:
+            snap["path"].write_text(snap["text"], encoding=ENCODING)
+        meta = _meta()
+        if snap is None or snap.get("meta") is None:
+            meta.pop(name, None)
+        else:
+            meta[name] = snap["meta"]
+        _save_meta(meta)
+    except OSError:
+        pass
+
+
+def import_bundle(items, name="", write=False, description="", names=None, overwrite=False):
+    """Import one or more tools, each a .py plus the screen folders it declares: preview, or write.
 
     `items` is [(path, text-or-bytes)]. With `write=False` this is `plan_import`
     (minus the internal text). With `write=True` it:
       1. refuses on any blocker in the plan,
-      2. checks the .py exactly as a normal save does, against a staging folder that
-         holds the bundle's screen files (so what it declares is judged with its files),
+      2. checks every .py exactly as a normal save does, against a staging folder
+         that holds the bundle's screen files (so what each declares is judged with its
+         files), and refuses the whole bundle if any one is refused or two of them declare
+         the same tool, screen or command name,
       3. keeps only the screen files a declared screen actually uses,
-      4. writes them (never over anything that exists), then the .py through the
-         ordinary `_write_tool`, and
-      5. removes everything it wrote if the .py is refused.
+      4. writes them -- never over an existing file, unless `overwrite` is set, in which
+         case each replaced file keeps one `.bak` -- then each .py through the ordinary
+         `_write_tool` (which also keeps a `.bak`), and
+      5. puts everything back as it was if any of that fails: nothing is half-imported.
+    A screen file of an older version that the new bundle doesn't have is left alone.
     """
     import tempfile
     from . import tool_ui
-    plan = plan_import(items, name)
+    plan = plan_import(items, name, names=names, overwrite=overwrite)
     files = plan.pop("_files", {})
     if not plan.get("ok"):
         return plan
     if not write:
         return plan
-    blockers = ([plan["name_problem"]] if plan.get("name_problem") else []) + list(plan["problems"])
+    blockers = [t["name_problem"] for t in plan["tools"] if t["name_problem"]] + list(plan["problems"])
     if blockers:
         return dict(plan, ok=False, stage="import", error="; ".join(blockers))
-    final, py_file = plan["name"], plan["py_file"]
-    source = files[py_file]
-    web = {rel: files[rel] for rel in files if rel != py_file}
+    entries = [(t["py_file"], t["name"], files[t["py_file"]]) for t in plan["tools"]]
+    web = {rel: files[rel] for rel in files if rel not in {e[0] for e in entries}}
 
+    checks = {}
     with tempfile.TemporaryDirectory(prefix="jarvis_import_") as stage_dir:
         stage = Path(stage_dir)
         for rel, text in web.items():
             target = stage.joinpath(*rel.split("/"))
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_text(text, encoding=ENCODING)
-        check = validate_source(source, final, base_dir=stage)
-        if not check["ok"]:
-            return {"ok": False, "stage": check.get("stage", "validate"), "error": check["error"],
-                    "hint": check.get("hint", ""), "name": final, "web": plan["web"], "skipped": plan["skipped"]}
         used = set()
-        for entry in check.get("ui", []):
-            for item in tool_ui.element_files(entry, stage):
-                if item["exists"]:
-                    used.add(item["rel"])
+        for py_file, final, source in entries:
+            check = validate_source(source, final, base_dir=stage)
+            if not check["ok"]:
+                return {"ok": False, "stage": check.get("stage", "validate"), "error": check["error"],
+                        "hint": check.get("hint", ""), "name": final, "py_file": py_file,
+                        "web": plan["web"], "skipped": plan["skipped"]}
+            checks[final] = check
+            for entry in check.get("ui", []):
+                for item in tool_ui.element_files(entry, stage):
+                    if item["exists"]:
+                        used.add(item["rel"])
+    clash = _bundle_clashes(entries, checks)
+    if clash:
+        return {"ok": False, "stage": "import", "error": clash, "web": plan["web"], "skipped": plan["skipped"]}
     skipped = list(plan["skipped"])
     for rel in sorted(set(web) - used):
         skipped.append({"path": rel, "why": "no screen this tool declares uses it"})
     to_write = {rel: web[rel] for rel in sorted(web) if rel in used}
 
-    created_files, created_dirs = [], []
+    created_files, created_dirs, replaced_files = [], [], []     # replaced: (target, bytes, bak-bytes-or-None)
+    written_tools = []                                           # (name, snapshot)
 
     def roll_back():
+        for tool_name, snap in reversed(written_tools):
+            _undo_tool(tool_name, snap)
+        for target, original, bak in reversed(replaced_files):
+            bak_path = target.with_name(target.name + ".bak")
+            try:
+                target.write_bytes(original)
+                if bak is None:
+                    bak_path.unlink()
+                else:
+                    bak_path.write_bytes(bak)
+            except OSError:
+                pass
         for path in reversed(created_files):
             try:
                 path.unlink()
@@ -1116,29 +1300,73 @@ def import_bundle(items, name="", write=False, description=""):
                 pass
 
     ensure_dir()
+    rel = ""
     try:
         for rel, text in to_write.items():
             target = TOOLS_DIR.joinpath(*rel.split("/"))
+            if target.is_file() and not target.is_symlink():
+                if not plan["overwrite"]:
+                    raise OSError("%s appeared while importing and was not replaced" % rel)
+                bak_path = target.with_name(target.name + ".bak")
+                original = target.read_bytes()
+                bak = bak_path.read_bytes() if bak_path.is_file() else None
+                shutil.copyfile(target, bak_path)
+                replaced_files.append((target, original, bak))
+                _atomic_text(target, text)
+                continue
             missing, cur = [], target.parent
             while not cur.exists() and cur != TOOLS_DIR:
                 missing.append(cur)
                 cur = cur.parent
             target.parent.mkdir(parents=True, exist_ok=True)
             created_dirs.extend(reversed(missing))
-            with open(str(target), "x", encoding=ENCODING) as handle:     # "x": never over an existing file
+            with open(str(target), "x", encoding=ENCODING) as handle:     # "x": never over a file that isn't there to replace
                 handle.write(text)
             created_files.append(target)
     except OSError as exc:
         roll_back()
         return {"ok": False, "stage": "import", "error": "couldn't write %s: %s" % (rel, exc),
-                "name": final, "rolled_back": True}
-    result = _write_tool(final, source, description)
-    if not result.get("ok"):
-        roll_back()
-        return dict(result, name=final, rolled_back=True)
-    result["imported"] = ["%s.py" % final] + list(to_write)
-    result["skipped"] = skipped
-    return result
+                "name": entries[0][1], "rolled_back": True}
+    results = []
+    for py_file, final, source in entries:
+        snap = _snapshot_tool(final)
+        result = _write_tool(final, source, description)
+        if not result.get("ok"):
+            roll_back()
+            return dict(result, name=final, py_file=py_file, rolled_back=True)
+        written_tools.append((final, snap))
+        results.append(result)
+    out = dict(results[0])
+    out["name"] = results[0]["name"]
+    out["names"] = [r["name"] for r in results]
+    if len(results) > 1:
+        out["tools"] = [t for r in results for t in (r.get("tools") or [])]
+        out["results"] = results
+    out["imported"] = ["%s.py" % r["name"] for r in results] + list(to_write)
+    out["skipped"] = skipped
+    out["replaced"] = {"tools": [n for n, snap in written_tools if snap is not None],
+                       "files": [t.relative_to(TOOLS_DIR).as_posix() for t, _o, _b in replaced_files]}
+    return out
+
+
+def _bundle_clashes(entries, checks):
+    """A sentence when two tools of one bundle declare the same tool function, screen id or
+    palette command -- the loader keeps the first and drops the second, and the single-file
+    checks can't see it because each ran alone. '' when there is no clash."""
+    kinds = (("tool", lambda c: list(c.get("tools") or [])),
+             ("screen id", lambda c: [u.get("id") for u in c.get("ui") or []]),
+             ("palette command", lambda c: [x.get("name") for x in c.get("commands") or []]))
+    for label, pick in kinds:
+        owner = {}
+        for _py, final, _src in entries:
+            for key in pick(checks[final]):
+                if not key:
+                    continue
+                if key in owner and owner[key] != final:
+                    return "%s and %s both declare the %s %r; the loader would keep one and drop the other" % (
+                        owner[key], final, label, key)
+                owner.setdefault(key, final)
+    return ""
 
 
 # ---------------------------------------------------------------------------

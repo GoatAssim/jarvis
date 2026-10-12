@@ -715,7 +715,7 @@
 
   const PURE = {
     webTabLabels, webDirty, isDirty, dirtyNames, importKind, removalSummary, WEB_KIND_LABEL, IMPORT_TEXT_EXT, plural,
-    availabilityHint, offOutcome, dependentLines, cascadeLines, commandLines, offSummary, commandSteps, commandVars, needsAttention, isOff, OFF_STATES,
+    availabilityHint, offOutcome, dependentLines, cascadeLines, commandLines, commandsOfFile, draftWebKey, bundleNameProblems, unreadScripts, offSummary, commandSteps, commandVars, needsAttention, isOff, OFF_STATES,
     SAFEGUARDS, KEYS, NAME_RE, STAGES, MAX_SOURCE_CHARS, bucketOf, groupLabel, originOf, buildRows, matchesSearch, matchesSafeguard,
     matchesSource, filterRows, groupRows, coverage, callOutcome, jobOutcome, changedKeys, nameProblem, importNameFromFile,
     importProblem, sourceProblem, parseErrorLine, stageStates, lineCount, formatBytes, parseArgs, paramList,
@@ -1114,6 +1114,8 @@
 
     const screens = screensSection(row);
     if (screens) d.appendChild(screens);
+    const cmds = row.kind === "tcmd" ? null : commandsSection(row);
+    if (cmds) d.appendChild(cmds);
     if (row.userFile) d.appendChild(fileSection(row));
     else if (row.source === "mcp") {
       d.appendChild(el("div", { class: "tm-note tm-note--info" }, [el("b", null, "MCP tool. "), "Its server is managed in Menu → MCP Servers. Switching this one tool off leaves the rest of the server alone."]));
@@ -1212,6 +1214,24 @@
   }
 
   // The screens a tool file ships, listed on the detail of any tool from that file.
+  // The tool commands (palette "/" entries) a tool file declares -- the same file match as
+  // "Screens from this file". Pure, so the test can feed it rows.
+  function commandsOfFile(rows, file) {
+    if (!file) return [];
+    return (rows || []).filter((r) => r && r.kind === "tcmd" && r.file === file);
+  }
+
+  function commandsSection(row) {
+    const file = row.file || (row.userFile && row.userFile.file) || "";
+    const mine = commandsOfFile(state.rows, file);
+    if (!mine.length) return null;
+    return el("div", null, [sectionTitle("Commands from this file", String(mine.length)),
+      el("div", { class: "tm-attn" }, mine.map((r) => el("button", { class: "tm-attn__item", type: "button", "data-tm-state": r.state, onclick: () => select(r.id) }, [
+        el("div", { class: "tm-attn__name" }, "/" + r.name),
+        el("div", { class: "tm-attn__why" }, (r.description || "Palette command") + (r.state === "off" ? " · switched off" : "")),
+      ])))]);
+  }
+
   function screensSection(row) {
     const file = row.file || (row.userFile && row.userFile.file) || "";
     if (!file) return null;
@@ -1683,7 +1703,7 @@
       webRestore: opts.web && typeof opts.web === "object" ? opts.web : null, cmHost: null, filebar: null,
       // The key this tab's backup is stored under (see "UNFINISHED TOOLS"); draftSynced is
       // the text last sent there, so an unchanged tab sends nothing; draftTimer debounces.
-      draftKey: DRAFT_KEY_RE.test(opts.draftKey || "") ? opts.draftKey : newDraftKey(), draftSynced: opts.draftSynced || "", draftTimer: 0,
+      draftKey: DRAFT_KEY_RE.test(opts.draftKey || "") ? opts.draftKey : newDraftKey(), draftSynced: opts.draftSynced || "", draftWebSynced: opts.draftWebSynced || "", draftTimer: 0,
       // L.53: the conversation itself lives in ask-embed.js (ed.ask) and on the server; this is
       // only what the editor side of a turn needs.
       ask: null,
@@ -1977,7 +1997,7 @@
     const common = {
       value: f.text, label: f.rel, language: "text", languageLabel: WEB_KIND_LABEL[f.kind] || "Text",
       placeholder: f.exists ? "" : "This file doesn’t exist yet. Type here and Save to create it.",
-      onChange: (v) => { f.text = v; f.dirty = true; f.saved = false; updateChip(ed); renderTabs(); renderFileBar(ed); persistSoon(); },
+      onChange: (v) => { f.text = v; f.dirty = true; f.saved = false; updateChip(ed); renderTabs(); renderFileBar(ed); persistSoon(); draftSoon(ed); },
       onSave: () => saveEditor(), onValidate: validateEditor,
     };
     if (global.JarvisCodeEditor) return global.JarvisCodeEditor.create(common);
@@ -2105,6 +2125,8 @@
         loadDraftsSoon();
         const oldChatKey = chatKey(ed);
         ed.mode = "edit"; ed.origName = ed.name; ed.dirty = false; ed.saved = true;
+        ed.draftWebSynced = "";                          // the save removed the whole backup: screens still unsaved go back in it
+        draftSoon(ed);
         moveChat(oldChatKey, chatKey(ed));              // L.53: its conversation follows the tool's name
         if (state.editor === ed) setText(dom.midTitle, "Editing " + ed.origName);
         // From here on this IS that file. Lock the name (a retyped name in "edit"
@@ -2146,7 +2168,7 @@
       return false;
     }
     f.busy = false;
-    updateChip(ed); renderTabs(); renderFileBar(ed); persistSoon();
+    updateChip(ed); renderTabs(); renderFileBar(ed); persistSoon(); draftSoon(ed);
     return true;
   }
 
@@ -2164,18 +2186,49 @@
   // Failure is silent: the tab is still kept in this browser (persistTabs); this is the
   // second copy that survives a cleared browser, a Discard and a refused save.
   function draftSoon(ed) {
-    if (!ed || !ed.dirty) return;
+    if (!ed) return;
+    // Also runs when nothing is unfinished any more but a backup exists (the last change was
+    // saved): syncDraft then removes it.
+    if (!isDirty(ed) && !ed.draftSynced && !ed.draftWebSynced) return;
     if (ed.draftTimer) clearTimeout(ed.draftTimer);
     ed.draftTimer = setTimeout(() => { ed.draftTimer = 0; syncDraft(ed); }, 2500);
   }
 
+  // The tab's unsaved screen-file text, {path: text}: what a backup keeps beside the .py.
+  // Only a tool that is already saved has screen files to back up.
+  function draftWebTexts(ed) {
+    const out = {};
+    if (!ed || ed.mode !== "edit") return out;
+    webDirty(ed).forEach((f) => { out[f.rel] = f.cm ? f.cm.getValue() : f.text; });
+    return out;
+  }
+  // Same screens and text -> same key whatever order the tabs were opened in; "" for none.
+  function draftWebKey(web) {
+    const keys = Object.keys(web || {}).sort();
+    return keys.length ? JSON.stringify(keys.map((k) => [k, web[k]])) : "";
+  }
+
   async function syncDraft(ed) {
-    if (!ed || !ed.dirty || !String(ed.source || "").trim() || ed.source === ed.draftSynced) return;
+    if (!ed || !String(ed.source || "").trim()) return;
+    // A restored tab's screen files are still being listed: until they are loaded the tab can't
+    // say what screen text it holds, and sending "none" would wipe the backup's copy.
+    if (ed.mode === "edit" && ed.draftWebSynced && (ed.webLoading || (!ed.webLoaded && !ed.webError))) { draftSoon(ed); return; }
+    const web = draftWebTexts(ed), webKey = draftWebKey(web);
+    const sourceChanged = ed.dirty && ed.source !== ed.draftSynced;
+    const webChanged = webKey !== (ed.draftWebSynced || "");
+    if (!ed.dirty && !webKey) {                            // everything was saved: nothing is unfinished any more
+      if (!ed.draftSynced && !ed.draftWebSynced) return;
+      try { await api("/api/ctools/drafts/" + encodeURIComponent(ed.draftKey), { method: "DELETE" }); ed.draftSynced = ""; ed.draftWebSynced = ""; loadDraftsSoon(); }
+      catch (_) { /* best effort */ }
+      return;
+    }
+    if (!sourceChanged && !webChanged) return;
     const text = ed.source;
     try {
-      await api("/api/ctools/drafts/" + encodeURIComponent(ed.draftKey), { method: "PUT", body: JSON.stringify({
-        source: text, name: ed.name, mode: ed.mode, origName: ed.origName, template: ed.template }) });
-      ed.draftSynced = text;
+      const body = { source: text, name: ed.name, mode: ed.mode, origName: ed.origName, template: ed.template };
+      if (ed.mode === "edit") body.web = web;              // {} clears screen text that has since been saved
+      await api("/api/ctools/drafts/" + encodeURIComponent(ed.draftKey), { method: "PUT", body: JSON.stringify(body) });
+      ed.draftSynced = text; ed.draftWebSynced = webKey;
       loadDraftsSoon();
     } catch (_) { /* kept in the browser regardless */ }
   }
@@ -2197,12 +2250,12 @@
   async function finishDraftOnClose(ed, force) {
     if (ed.draftTimer) { clearTimeout(ed.draftTimer); ed.draftTimer = 0; }
     try {
-      if (!force && ed.dirty && String(ed.source || "").trim()) {
+      if (!force && isDirty(ed) && String(ed.source || "").trim()) {
         await syncDraft(ed);
-        if (ed.draftSynced === ed.source) toast(tabLabel(ed) + " closed — its unsaved text is kept under Unfinished tools.", "info");
-      } else if (ed.draftSynced) {
+        if (ed.draftSynced === ed.source && ed.draftWebSynced === draftWebKey(draftWebTexts(ed))) toast(tabLabel(ed) + " closed — its unsaved text" + (draftWebKey(draftWebTexts(ed)) ? " and screen files are" : " is") + " kept under Unfinished tools.", "info");
+      } else if (ed.draftSynced || ed.draftWebSynced) {
         await api("/api/ctools/drafts/" + encodeURIComponent(ed.draftKey), { method: "DELETE" });
-        ed.draftSynced = "";
+        ed.draftSynced = ""; ed.draftWebSynced = "";
       }
     } catch (_) { /* best effort */ }
     loadDrafts();
@@ -2226,7 +2279,11 @@
     if (asEdit) {
       const same = state.tabs.find((t) => t.mode === "edit" && t.origName === d.orig_name);
       if (same) { toast(d.orig_name + " is already open in a tab — close it first to restore into a new one.", "info"); showEditor(same); return; }
-      await enterEditor({ mode: "edit", name: d.orig_name, source, dirty: true, draftKey: key, draftSynced: latest ? source : "", keepSource: true });
+      // The screen text kept with the draft goes back into the screen tabs, unsaved (only the
+      // latest backup has it; an earlier version is the .py alone).
+      const web = latest && d.web && typeof d.web === "object" ? d.web : null;
+      await enterEditor({ mode: "edit", name: d.orig_name, source, dirty: true, draftKey: key, draftSynced: latest ? source : "",
+        web, draftWebSynced: web ? draftWebKey(web) : "", keepSource: true });
     } else {
       await enterEditor({ mode: "new", name: NAME_RE.test(d.name || "") ? d.name : "", source, dirty: true,
         template: d.template || "minimal", draftKey: key, draftSynced: latest ? source : "", keepSource: true });
@@ -2267,6 +2324,7 @@
     state.drafts.slice(0, 12).forEach((d) => {
       const isOpen = openKeys.has(d.key);
       const why = (d.reason ? d.reason + " · " : "") + draftAge(d.saved) + " · " + d.lines + (d.lines === 1 ? " line" : " lines")
+        + ((d.web_files || []).length ? " · + " + plural(d.web_files.length, "screen file") : "")
         + (d.file_newer ? " · the saved file is newer" : "") + (isOpen ? " · open in a tab" : "");
       list.appendChild(el("div", { class: "tm-draft", "data-key": d.key }, [
         el("div", { class: "tm-attn__name" }, draftTitle(d)),
@@ -2808,15 +2866,38 @@
     });
   }
 
-  const importUrl = (mode, name, zip) => "/api/ctools/import" + (zip ? "/zip" : "") + "?mode=" + mode + (name ? "&name=" + encodeURIComponent(name) : "");
+  // names: {"x.py": "save_as_name"} for the tools of the bundle; overwrite: let what already
+  // exists be replaced (the server keeps a .bak of each file it replaces).
+  const importUrl = (mode, names, zip, overwrite) => "/api/ctools/import" + (zip ? "/zip" : "") + "?mode=" + mode
+    + (overwrite ? "&overwrite=1" : "")
+    + (names && Object.keys(names).length ? "&names=" + encodeURIComponent(JSON.stringify(names)) : "");
   function postBundle(dr, mode) {
-    const name = mode === "write" ? dr.name : "";
-    if (dr.zip) return api(importUrl(mode, name, true), { method: "POST", headers: { "Content-Type": "application/zip" }, body: dr.zip });
-    return api(importUrl(mode, name, false), { method: "POST", body: JSON.stringify({ files: dr.files }) });
+    const names = dr.names || {};
+    if (dr.zip) return api(importUrl(mode, names, true, dr.overwrite), { method: "POST", headers: { "Content-Type": "application/zip" }, body: dr.zip });
+    return api(importUrl(mode, names, false, dr.overwrite), { method: "POST", body: JSON.stringify({ files: dr.files }) });
+  }
+
+  // Which names the review would block: invalid, taken (unless replacing is allowed), or used
+  // twice in the one bundle. Pure so the test can drive it.
+  function bundleNameProblems(tools, names, existing, overwrite) {
+    const out = {};
+    (tools || []).forEach((t) => {
+      const nm = (names || {})[t.py_file];
+      let p = nameProblem(nm, overwrite ? [] : existing, "new");
+      if (!p && (tools || []).some((o) => o !== t && (names || {})[o.py_file] === nm)) p = "Two tools in this import can’t both be saved as “" + nm + "”.";
+      out[t.py_file] = p;
+    });
+    return out;
+  }
+
+  // Screen files that run code in the page (.js, and .html that carries script) must each be
+  // opened in the review before Import turns on. Pure.
+  function unreadScripts(web, opened) {
+    return (web || []).filter((f) => typeof f.head === "string" && !(opened || {})[f.path]);
   }
 
   async function startBundleImport(sel) {
-    const dr = { zip: sel.zip || null, files: null, fileName: "", size: 0, plan: null, name: "", source: "", result: null, busy: false, nameTouched: true, ignored: 0, unread: [] };
+    const dr = { zip: sel.zip || null, files: null, fileName: "", size: 0, plan: null, name: "", names: {}, overwrite: false, opened: {}, source: "", result: null, busy: false, nameTouched: true, ignored: 0, unread: [] };
     try {
       if (dr.zip) { dr.fileName = dr.zip.name; dr.size = dr.zip.size; }
       else {
@@ -2835,6 +2916,7 @@
       toast("Reading " + dr.fileName + "…", "info");
       dr.plan = await postBundle(dr, "preview");
     } catch (e) { toast((dr.fileName ? dr.fileName + ": " : "") + e.message, "warn"); return; }
+    (dr.plan.tools || []).forEach((t) => { dr.names[t.py_file] = t.name; });
     dr.name = dr.plan.name || ""; dr.source = dr.plan.py_head || "";
     state.editor = null; restoreDetailBox();
     state.draft = dr; state.view = "import"; state.run = null;
@@ -2842,61 +2924,118 @@
     const n = $("#tm-imp-name"); if (n) { n.focus(); n.select(); }
   }
 
+  // Ticking "Replace what already exists" asks the server again: what blocks the import, and
+  // what it lists as replaced, both depend on it.
+  async function setBundleOverwrite(on) {
+    const dr = state.draft;
+    if (!dr || dr.busy) return;
+    dr.overwrite = !!on; dr.busy = true; renderImportReview();
+    try { dr.plan = await postBundle(dr, "preview"); }
+    catch (e) { dr.overwrite = !on; toast(e.message, "warn"); }
+    dr.busy = false;
+    if (state.draft === dr) renderImportReview();
+  }
+
   function renderBundleReview() {
     const dr = state.draft, plan = dr.plan, d = dom.detail;
     clear(d);
     setText(dom.midTitle, "Import review");
-    const nameErr = () => nameProblem(dr.name, userFileNames(), "new");
-    const help = el("span", { class: "tm-field__help", id: "tm-imp-help" });
-    const input = el("input", { class: "tm-input", id: "tm-imp-name", type: "text", value: dr.name, autocomplete: "off", spellcheck: "false", style: "width:240px", "aria-describedby": "tm-imp-help" });
+    const tools = plan.tools || [{ py_file: plan.py_file, name: plan.name }];
+    const multi = tools.length > 1;
+    const collisions = plan.collisions || { tools: [], files: [] };
+    const canReplace = !!(collisions.tools.length || collisions.files.length || dr.overwrite);
     const blocked = (plan.problems || []).length > 0;
     const go = el("button", { class: "btn btn--primary", type: "button", disabled: dr.busy || null, onclick: confirmBundleImport }, dr.busy ? "Checking…" : "Import…");
-    const paint = () => { const p = nameErr(); input.classList.toggle("is-invalid", !!p); help.className = "tm-field__help" + (p ? " is-bad" : ""); help.textContent = p || "Saved as ~/.jarvis/tools/" + dr.name + ".py"; go.disabled = !!p || dr.busy || blocked; };
-    input.addEventListener("input", () => { dr.name = input.value.trim().toLowerCase(); paint(); });
+    const readHint = el("span", { class: "tm-field__help", id: "tm-imp-read-hint" });
+    const fields = tools.map((t, i) => {
+      const help = el("span", { class: "tm-field__help", id: "tm-imp-help" + (i ? "-" + i : "") });
+      const input = el("input", { class: "tm-input", id: "tm-imp-name" + (i ? "-" + i : ""), type: "text", value: dr.names[t.py_file] || "", autocomplete: "off", spellcheck: "false", style: "width:240px", "aria-describedby": help.id });
+      input.addEventListener("input", () => { dr.names[t.py_file] = input.value.trim().toLowerCase(); if (!i) dr.name = dr.names[t.py_file]; paint(); });
+      return { t, help, input, node: el("div", { class: "tm-field" }, [el("label", { class: "tm-field__label", for: input.id }, multi ? "Save " + t.py_file + " as" : "Save as"), input, help]) };
+    });
+    const paint = () => {
+      const probs = bundleNameProblems(tools, dr.names, userFileNames(), dr.overwrite);
+      let any = false;
+      fields.forEach((f) => {
+        const p = probs[f.t.py_file]; any = any || !!p;
+        const nm = dr.names[f.t.py_file];
+        f.input.classList.toggle("is-invalid", !!p);
+        f.help.className = "tm-field__help" + (p ? " is-bad" : "");
+        f.help.textContent = p || (collisions.tools.includes(nm) && dr.overwrite ? "Replaces ~/.jarvis/tools/" + nm + ".py (a .bak copy is kept)" : "Saved as ~/.jarvis/tools/" + nm + ".py");
+      });
+      const unread = unreadScripts(plan.web, dr.opened);
+      readHint.textContent = unread.length ? "Open " + plural(unread.length, "screen script") + " below to read " + (unread.length === 1 ? "it" : "them") + " first; Import turns on after that." : "";
+      go.disabled = any || dr.busy || blocked || unread.length > 0;
+    };
 
     d.appendChild(el("div", null, [el("div", { class: "tm-title" }, dr.fileName),
       el("div", { class: "tm-does" }, "Review before importing. Nothing has been run or written yet — only the file names and sizes were read."),
-      el("div", { class: "tm-badges" }, [tag(formatBytes(dr.size)), tag(plural(plan.py_lines, "line") + " of Python"), tag(plural((plan.web || []).length, "screen file")), tag("not loaded yet", "warn")])]));
+      el("div", { class: "tm-badges" }, [tag(formatBytes(dr.size)), tag(multi ? plural(tools.length, "tool") : plural(plan.py_lines, "line") + " of Python"), tag(plural((plan.web || []).length, "screen file")), tag("not loaded yet", "warn")])]));
     d.appendChild(el("div", { class: "tm-note" }, [el("b", null, "This is Python that runs as you. "),
-      "Importing means Jarvis will execute " + plan.py_file + " — first to check it, then every time it starts."
-      + ((plan.web || []).length ? " Its screen files run in your browser, and a Menu panel shares the page with Jarvis itself. Only import tools you trust or have read." : " Only import tools you trust or have read.")]));
-    d.appendChild(el("div", { class: "tm-field" }, [el("label", { class: "tm-field__label", for: "tm-imp-name" }, "Save as"), input, help]));
+      "Importing means Jarvis will execute " + tools.map((t) => t.py_file).join(", ") + " — first to check " + (multi ? "them" : "it") + ", then every time it starts."
+      + ((plan.web || []).length ? " Its screen files run in your browser, and a Menu panel’s JavaScript shares the page with Jarvis itself, so each screen script is shown below and has to be opened before Import turns on. Only import tools you trust or have read." : " Only import tools you trust or have read.")]));
+    fields.forEach((f) => d.appendChild(f.node));
+    if (canReplace) {
+      const box = el("input", { type: "checkbox", id: "tm-imp-overwrite", checked: dr.overwrite || null, disabled: dr.busy || null });
+      box.addEventListener("change", () => setBundleOverwrite(box.checked));
+      const what = []
+        .concat(collisions.tools.map((n) => n + ".py"), collisions.files);
+      d.appendChild(el("div", { class: "tm-field" }, [
+        el("label", { class: "tm-field__label", for: "tm-imp-overwrite", style: "display:flex;gap:8px;align-items:center" }, [box, "Replace what already exists"]),
+        el("span", { class: "tm-field__help" }, (what.length ? what.join(", ") + (dr.overwrite ? " will be replaced" : " already exist" + (what.length === 1 ? "s" : "")) + ". " : "")
+          + "A .bak copy of each replaced file is kept next to it. A link or folder in the way is never written through."),
+      ]));
+    }
     if (blocked) d.appendChild(el("div", null, [sectionTitle("Can’t import yet"), el("div", { class: "tm-errbox" }, plan.problems.join("\n"))]));
     if (dr.result && !dr.result.ok) {
       d.appendChild(el("div", null, [sectionTitle("Refused — nothing was written"), el("div", { class: "tm-errbox" }, (dr.result.stage ? "[" + dr.result.stage + "] " : "") + (dr.result.error || "Unknown error")),
         dr.result.hint ? el("div", { class: "tm-note", style: "margin-top:8px" }, dr.result.hint) : null]));
     }
-    const rows = [[plan.py_file + "  →  " + (dr.name || "…") + ".py", formatBytes(plan.py_size) + " · the tool itself"]]
-      .concat((plan.web || []).map((f) => [f.path, formatBytes(f.size) + " · " + (WEB_KIND_LABEL[f.kind] || f.kind)]));
+    const replacing = (n) => dr.overwrite && collisions.tools.includes(n) ? " · replaces the existing tool" : "";
+    const rows = tools.map((t) => [t.py_file + "  →  " + (dr.names[t.py_file] || "…") + ".py", (t.py_size != null ? formatBytes(t.py_size) + " · " : "") + "the tool itself" + replacing(dr.names[t.py_file])])
+      .concat((plan.web || []).map((f) => [f.path, formatBytes(f.size) + " · " + (WEB_KIND_LABEL[f.kind] || f.kind) + (dr.overwrite && f.exists ? " · replaces the existing file" : "")]));
     d.appendChild(el("div", null, [sectionTitle("Will be written", String(rows.length)), infoRows(rows),
-      el("div", { class: "tm-hint", style: "margin-top:6px" }, "Only screen files that one of the tool’s own screens uses are kept, and nothing is written over a file that already exists.")]));
+      el("div", { class: "tm-hint", style: "margin-top:6px" }, "Only screen files that one of the tool’s own screens uses are kept." + (dr.overwrite ? " Files that exist are replaced, each with a .bak copy." : " Nothing is written over a file that already exists."))]));
     const skipped = (plan.skipped || []).map((f) => [f.path, f.why]);
     if (dr.ignored) skipped.push([plural(dr.ignored, "other file"), "not a kind of file a tool uses"]);
     (dr.unread || []).forEach((path) => skipped.push([path, "too large to read here"]));
     if (skipped.length) d.appendChild(el("div", null, [sectionTitle("Ignored", String(skipped.length)), infoRows(skipped)]));
-    const lines = (plan.py_head || "").split("\n");
-    d.appendChild(el("div", null, [sectionTitle(plan.py_file, "first " + Math.min(80, plan.py_lines) + " lines"),
-      el("pre", { class: "tm-pre tm-preview", tabindex: "0", "aria-label": "Python source preview" }, lines.join("\n") + (plan.py_lines > 80 ? "\n… " + (plan.py_lines - 80) + " more lines" : ""))]));
-    d.appendChild(el("div", { style: "display:flex;gap:8px" }, [go, el("button", { class: "btn btn--ghost", type: "button", onclick: cancelImport }, "Cancel")]));
+    const scripts = (plan.web || []).filter((f) => typeof f.head === "string");
+    if (scripts.length) {
+      d.appendChild(el("div", null, [sectionTitle("Screen scripts", "open each to read it"),
+        el("div", { class: "tm-tc-read" }, scripts.map((f) => el("details", { class: "tm-read", "data-tm-read": f.path, ontoggle: (ev) => { if (ev.target.open) { dr.opened[f.path] = true; paint(); } } }, [
+          el("summary", null, f.path + " · " + plural(f.lines || 0, "line") + (dr.opened[f.path] ? " · read" : "")),
+          el("pre", { class: "tm-pre tm-preview", tabindex: "0", "aria-label": f.path + " source preview" }, f.head + ((f.lines || 0) > f.head.split("\n").length ? "\n… " + (f.lines - f.head.split("\n").length) + " more lines" : "")),
+        ])))]));
+    }
+    (plan.tools || []).forEach((t) => {
+      const lines = (t.py_head || "").split("\n");
+      d.appendChild(el("div", null, [sectionTitle(t.py_file, "first " + Math.min(80, t.py_lines) + " lines"),
+        el("pre", { class: "tm-pre tm-preview", tabindex: "0", "aria-label": "Python source preview" }, lines.join("\n") + (t.py_lines > 80 ? "\n… " + (t.py_lines - 80) + " more lines" : ""))]));
+    });
+    d.appendChild(el("div", { style: "display:flex;gap:8px;align-items:center;flex-wrap:wrap" }, [go, el("button", { class: "btn btn--ghost", type: "button", onclick: cancelImport }, "Cancel"), readHint]));
     paint();
   }
 
   async function confirmBundleImport() {
     const dr = state.draft;
     if (!dr || dr.busy || !dr.plan) return;
-    const plan = dr.plan, screens = (plan.web || []).length;
+    const plan = dr.plan, screens = (plan.web || []).length, tools = plan.tools || [];
+    const names = tools.map((t) => (dr.names[t.py_file] || t.name) + ".py");
+    const replaced = (plan.replaces && plan.replaces.tools.length + plan.replaces.files.length) || 0;
     const ok = await UI().confirm({
-      title: "Import " + dr.name + ".py" + (screens ? " and " + plural(screens, "screen file") : "") + "?", level: "warn", focusCancel: true, confirmLabel: "Import",
-      body: "Jarvis will run the Python file to check it, and again at every start. It runs as you, with your access."
-        + (screens ? " Its screen files (HTML, JavaScript, CSS) run in your browser, and a Menu panel shares the page with Jarvis itself." : "") + " Only continue if you trust it.",
+      title: "Import " + (names.length > 1 ? plural(names.length, "tool") : names[0]) + (screens ? " and " + plural(screens, "screen file") : "") + "?", level: "warn", focusCancel: true, confirmLabel: "Import",
+      body: "Jarvis will run the Python " + (names.length > 1 ? "files" : "file") + " to check " + (names.length > 1 ? "them" : "it") + ", and again at every start. It runs as you, with your access."
+        + (screens ? " Its screen files (HTML, JavaScript, CSS) run in your browser, and a Menu panel shares the page with Jarvis itself." : "")
+        + (replaced ? " " + plural(replaced, "existing file") + " will be replaced (a .bak copy of each is kept)." : "") + " Only continue if you trust it.",
       pre: (plan.py_head || "").split("\n").slice(0, 40).join("\n") + (plan.py_lines > 40 ? "\n…" : ""),
     });
     if (!ok) return;                                     // declining writes nothing and runs nothing
     dr.busy = true; dr.result = null; renderImportReview();
     try {
-      const fresh = await ctools("");                    // never overwrite: re-read the folder first
+      const fresh = await ctools("");                    // re-read the folder first, so the names are checked against what is there now
       state.files = fresh.tools || state.files;
-      if (nameProblem(dr.name, userFileNames(), "new")) { dr.busy = false; renderImportReview(); return; }
+      if (Object.values(bundleNameProblems(tools, dr.names, userFileNames(), dr.overwrite)).some(Boolean)) { dr.busy = false; renderImportReview(); return; }
       const res = await postBundle(dr, "write");
       if (!res.ok) { dr.result = res; dr.busy = false; renderImportReview(); return; }
       const first = (res.tools || [])[0];
@@ -2906,7 +3045,9 @@
       state.selected = row ? row.id : null;
       renderMain();
       const left = (res.skipped || []).length;
-      toast("Imported " + dr.name + " — " + (res.tools || []).join(", ") + ". " + plural(Math.max(0, (res.imported || []).length - 1), "screen file") + " written"
+      const swapped = res.replaced ? res.replaced.tools.length + res.replaced.files.length : 0;
+      toast("Imported " + ((res.names || [dr.name]).join(", ")) + " — " + (res.tools || []).join(", ") + ". " + plural(Math.max(0, (res.imported || []).length - (res.names || [1]).length), "screen file") + " written"
+        + (swapped ? "; " + plural(swapped, "file") + " replaced (.bak kept)" : "")
         + (left ? "; " + plural(left, "file") + " ignored." : "."), "success");
     } catch (e) {
       dr.busy = false; dr.result = Object.assign({ ok: false }, e.data && e.data.error ? e.data : { error: e.message });

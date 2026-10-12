@@ -8,7 +8,7 @@
   * "Gemini never shows its thinking trace": Gemini only returns thought
     summaries when the request carries a thinkingConfig, which Jarvis sends
     only when the level is not off. These tests pin that contract (off sends
-    nothing to Gemini, on sends includeThoughts) so the asymmetry is explicit.
+    a zero budget to Gemini 2.5 Flash, on sends includeThoughts) so the asymmetry is explicit.
 
 Run: python3 tests/test_thinking_off_groq.py
 """
@@ -93,7 +93,12 @@ check("a key already in the payload is never overwritten", pl["reasoning_effort"
 
 pl = {"generationConfig": {"maxOutputTokens": 100}}
 ret = ai_providers._apply_thinking(pl, GEMINI, "gemini", 0, False, 0)
-check("off + gemini: the request is left exactly as it was (no thinkingConfig, so no thoughts come back)",
+check("off + gemini 2.5 flash: thinkingBudget 0 and no includeThoughts, so nothing is thought and no thoughts come back",
+      ret is False and pl == {"generationConfig": {"maxOutputTokens": 100,
+                                                   "thinkingConfig": {"thinkingBudget": 0}}}, pl)
+pl = {"generationConfig": {"maxOutputTokens": 100}}
+ret = ai_providers._apply_thinking(pl, {"name": "gemini", "model": "gemini-2.5-pro"}, "gemini", 0, False, 0)
+check("off + gemini 2.5 pro (cannot be switched off): the request is left exactly as it was",
       ret is False and pl == {"generationConfig": {"maxOutputTokens": 100}}, pl)
 
 ai_providers.set_thinking("medium")

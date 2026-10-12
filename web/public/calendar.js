@@ -99,20 +99,31 @@
     out.setDate(out.getDate() + n);
     return out;
   }
-  function startOfWeek(d) {
+  /* The day a week starts on is a setting (calendar.json "week_start": mon / sun / sat).
+   * Functions below take it as a JS weekday number (0 = Sunday ... 6 = Saturday) and
+   * default to Monday, which is what the panel did before it was a setting. */
+  const WEEK_START_DAYS = { mon: 1, sun: 0, sat: 6 };
+  const weekStartIndex = (code) => (Object.prototype.hasOwnProperty.call(WEEK_START_DAYS, code) ? WEEK_START_DAYS[code] : 1);
+  function startOfWeek(d, ws) {
+    const first = ws === undefined ? 1 : ws;
     const day = startOfDay(d);
-    return addDays(day, -((day.getDay() + 6) % 7)); // Monday
+    return addDays(day, -((day.getDay() - first + 7) % 7));
+  }
+  /* The seven weekday names, the week's first day first. */
+  function dowNames(ws) {
+    const first = ws === undefined ? 1 : ws;
+    return Array.from({ length: 7 }, (_, i) => DAY_NAMES[(first + i) % 7]);
   }
   function monthStart(d) { return new Date(d.getFullYear(), d.getMonth(), 1); }
 
   /* The window of days each view asks the server for. */
-  function windowFor(view, anchor) {
+  function windowFor(view, anchor, ws) {
     if (view === "week") {
-      const start = startOfWeek(anchor);
+      const start = startOfWeek(anchor, ws);
       return { start, end: addDays(start, 7) };
     }
     if (view === "month") {
-      const start = startOfWeek(monthStart(anchor));
+      const start = startOfWeek(monthStart(anchor), ws);
       return { start, end: addDays(start, 42) };
     }
     const start = startOfDay(anchor);
@@ -123,18 +134,18 @@
     if (view === "month") return new Date(anchor.getFullYear(), anchor.getMonth() + dir, 1);
     return addDays(anchor, AGENDA_DAYS * dir);
   }
-  function rangeLabel(view, anchor) {
+  function rangeLabel(view, anchor, ws) {
     if (view === "month") return `${MONTH_LONG[anchor.getMonth()]} ${anchor.getFullYear()}`;
-    const { start, end } = windowFor(view, anchor);
+    const { start, end } = windowFor(view, anchor, ws);
     const last = addDays(end, -1);
     const a = `${start.getDate()} ${MONTH_NAMES[start.getMonth()]}`;
     const b = `${last.getDate()} ${MONTH_NAMES[last.getMonth()]} ${last.getFullYear()}`;
     return `${a} – ${b}`;
   }
-  /* Six Monday-first weeks covering the anchor's month. */
-  function monthGrid(anchor) {
+  /* Six whole weeks (Monday-first unless told otherwise) covering the anchor's month. */
+  function monthGrid(anchor, ws) {
     const first = monthStart(anchor);
-    const start = startOfWeek(first);
+    const start = startOfWeek(first, ws);
     const cells = [];
     for (let i = 0; i < 42; i++) {
       const date = addDays(start, i);
@@ -343,7 +354,7 @@
 
   const pure = {
     pad, ymd, hhmm, parseLocal, toLocalIso, startOfDay, addDays, startOfWeek, monthStart,
-    windowFor, stepAnchor, rangeLabel, monthGrid, eventDayKeys, sortEvents, groupByDay,
+    weekStartIndex, dowNames, windowFor, stepAnchor, rangeLabel, monthGrid, eventDayKeys, sortEvents, groupByDay,
     dayLabel, timeLabel, whenLabel, leadLabel, agoLabel, reminderPlan, eventPayload,
     formFromEvent, sourceClass, PROVIDERS, LEAD_CHOICES, AGENDA_DAYS,
   };
@@ -396,6 +407,8 @@
   }
 
   const eventById = (id) => state.events.find((e) => e.id === id) || null;
+  /* The week start the owner chose (Calendars tab), as a JS weekday number. */
+  const weekIdx = () => weekStartIndex(state.meta && state.meta.week_start);
 
   /* ---- data ---------------------------------------------------------------- */
 
@@ -414,7 +427,7 @@
 
   async function loadEvents(refresh) {
     const mine = ++state.reqId;
-    const { start, end } = windowFor(state.view, state.anchor);
+    const { start, end } = windowFor(state.view, state.anchor, weekIdx());
     state.loading = true;
     state.loadError = "";
     renderStatus();
@@ -438,7 +451,9 @@
   }
 
   async function refreshAll(refresh) {
-    await Promise.all([loadFeeds(), loadEvents(refresh)]);
+    // Settings first: the window a Week / Month view asks for depends on the week start.
+    await loadFeeds();
+    await loadEvents(refresh);
     renderAll();
   }
 
@@ -481,7 +496,7 @@
     ]);
     dom.toolbar.append(
       seg, nav,
-      el("span", { class: "cal-range" }, rangeLabel(state.view, state.anchor)),
+      el("span", { class: "cal-range" }, rangeLabel(state.view, state.anchor, weekIdx())),
       el("span", { class: "cal-toolbar__spacer" }),
       el("button", { type: "button", class: "btn btn--ghost btn--sm", title: "Read the linked calendars again (r)", onclick: () => refreshAll(true) }, "Refresh"),
       el("button", { type: "button", class: "btn btn--primary btn--sm", title: "Add an event to Jarvis's calendar (n)", onclick: () => openForm(null) }, "+ Add event"),
@@ -603,7 +618,7 @@
   }
 
   function buildWeek() {
-    const { start } = windowFor("week", state.anchor);
+    const { start } = windowFor("week", state.anchor, weekIdx());
     const groups = groupByDay(state.events);
     const now = new Date();
     const grid = el("div", { class: "cal-week" });
@@ -627,11 +642,11 @@
   }
 
   function buildMonth() {
-    const cells = monthGrid(state.anchor);
+    const cells = monthGrid(state.anchor, weekIdx());
     const groups = groupByDay(state.events);
     const now = new Date();
     const grid = el("div", { class: "cal-month" });
-    ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"].forEach((d) => grid.append(el("div", { class: "cal-month__dow" }, d)));
+    dowNames(weekIdx()).forEach((d) => grid.append(el("div", { class: "cal-month__dow" }, d)));
     cells.forEach((cell) => {
       const list = groups[cell.key] || [];
       const shown = list.slice(0, 3);
@@ -692,6 +707,7 @@
       el("button", { type: "button", class: "cal-pane__back", onclick: () => selectEvent(null) }, "‹ Back to the day"),
       el("h3", { class: "cal-pane__title cal-pane__title--event" }, ev.title),
       el("div", { class: "cal-pane__when" }, whenLabel(ev)),
+      ev.tz_note ? el("div", { class: "cal-pane__warn" }, ev.tz_note) : null,
       ev.location ? el("div", { class: "cal-pane__row" }, [el("span", { class: "cal-pane__k" }, "Where"), el("span", {}, ev.location)]) : null,
       el("div", { class: "cal-pane__row" }, [
         el("span", { class: "cal-pane__k" }, "Calendar"),
@@ -753,12 +769,59 @@
         el("strong", {}, "How fresh is this? "),
         `A linked calendar is a copy the provider refreshes every few hours, and Jarvis re-reads each one at most every ${meta.cache_minutes || 15} minutes. Refresh re-reads now, but it can't make the provider publish sooner.`,
       ]),
-      el("div", { class: "cal-note" }, [
-        el("strong", {}, "Jarvis's own calendar. "),
-        `${meta.local_event_count || 0} event${meta.local_event_count === 1 ? "" : "s"} saved. `,
-        `Events that ended more than ${meta.retention_days || 60} days ago are removed automatically, and at most ${meta.retention_max || 500} are kept.`,
-      ]),
+      buildSettings(meta),
     ]);
+  }
+
+  /* Jarvis's own calendar: how long its events are kept, and the day weeks start on. */
+  function buildSettings(meta) {
+    const keep = meta.retention_days || 60;
+    const limit = meta.retention_days_max || 3650;
+    const dueNow = meta.expiring_count || 0;
+    const days = el("input", {
+      type: "number", class: "cal-input cal-input--short", id: "cal-set-keep", min: "1", max: String(limit), step: "1",
+      value: String(keep), "aria-label": "Days to keep an event after it ends",
+      onkeydown: (e) => { if (e.key === "Enter") { e.preventDefault(); saveSettings(); } },
+    });
+    const week = el("select", { class: "cal-select", id: "cal-set-week", "aria-label": "First day of the week" },
+      [["mon", "Monday"], ["sun", "Sunday"], ["sat", "Saturday"]].map(([id, label]) =>
+        el("option", { value: id, selected: id === (meta.week_start || "mon") ? true : null }, label)));
+    return el("div", { class: "cal-note cal-settings" }, [
+      el("strong", {}, "Jarvis's own calendar. "),
+      `${meta.local_event_count || 0} event${meta.local_event_count === 1 ? "" : "s"} saved, at most ${meta.retention_max || 500} (a full calendar refuses a new event; it never drops one).`,
+      el("div", { class: "cal-settings__row" }, [
+        el("label", { class: "cal-settings__field" }, [el("span", { class: "cal-label" }, "Keep an event for"), el("span", { class: "cal-input-row" }, [days, el("span", {}, "days after it ends")])]),
+        el("label", { class: "cal-settings__field" }, [el("span", { class: "cal-label" }, "Weeks start on"), week]),
+        el("button", { type: "button", class: "btn btn--primary btn--sm", id: "cal-set-save", onclick: saveSettings }, "Save"),
+      ]),
+      el("div", { class: "cal-hint", id: "cal-set-hint" },
+        `Older events are removed only when a new event is added, and the add says how many went. ${dueNow ? `${dueNow} saved event${dueNow === 1 ? "" : "s"} ended more than ${keep} days ago and will go the next time one is added.` : "None is past that now."}`),
+    ]);
+  }
+
+  async function saveSettings() {
+    const days = $("#cal-set-keep");
+    const week = $("#cal-set-week");
+    const btn = $("#cal-set-save");
+    if (!days || !week) return;
+    const keep = Number(days.value);
+    if (!Number.isInteger(keep) || keep < 1 || keep > ((state.meta && state.meta.retention_days_max) || 3650)) {
+      toast(`Keep events for a whole number of days from 1 to ${(state.meta && state.meta.retention_days_max) || 3650}.`, "warn");
+      return;
+    }
+    if (btn) btn.disabled = true;
+    try {
+      const before = weekIdx();
+      await Api.post("/api/calendar/settings", { keep_days: keep, week_start: week.value });
+      await loadFeeds();
+      toast("Calendar settings saved.", "info");
+      // A different first day moves the Week / Month window, so read it again.
+      if (weekIdx() !== before) await loadEvents(false);
+      renderAll();
+    } catch (err) {
+      toast(err.message || "Couldn't save the settings.", "error");
+      if (btn) btn.disabled = false;
+    }
   }
 
   function buildFeedCard(feed) {

@@ -10309,11 +10309,34 @@
       toggleFavoriteCommand(name);
       return isFavoriteCommand(name);
     },
-    copyLastReply() {
+    // copyLastReply() copies the whole reply. copyLastReply(n) copies only its nth fenced
+    // code block (1 = the first), the same text the block's own Copy button gives (a
+    // "$ " prompt on every line is dropped). Returns false when it couldn't, so the palette
+    // keeps what was typed.
+    async copyLastReply(n) {
       const msgs = askThread.querySelectorAll(".ask-msg--jarvis");
       const last = msgs[msgs.length - 1];
-      if (!last) { toast("Nothing to copy yet."); return; }
-      copyAskRaw(last);
+      if (!last) { toast("Nothing to copy yet."); return n == null ? undefined : false; }
+      if (n == null) { copyAskRaw(last); return undefined; }
+      // A block count of a reply that is still arriving would be a count of half a reply, so
+      // /copy N looks at the last FINISHED reply while one is streaming.
+      const pending = state.running ? state.askPendingBubble : null;
+      const done = Array.from(msgs).filter((m) => !pending || !(m === pending || m.contains(pending) || pending.contains(m)));
+      const target = done[done.length - 1];
+      if (!target) { toast("Nothing to copy yet."); return false; }
+      const rich = window.JarvisRich;
+      if (!rich) { toast("Code blocks can't be copied on this page."); return false; }
+      const blocks = rich.splitFences(target.dataset.raw || "").filter((seg) => seg.type === "code");
+      if (!blocks.length) { toast("That reply has no code blocks.", "info"); return false; }
+      if (n < 1 || n > blocks.length) {
+        toast(`That reply has ${blocks.length} code block${blocks.length === 1 ? "" : "s"}, not ${n}.`, "info");
+        return false;
+      }
+      const block = blocks[n - 1];
+      const res = rich.codeTextForCopy(block.text, block.lang);
+      if (await copyToClipboard(res.text)) toast(`Copied code block ${n} of ${blocks.length}.`, "info");
+      else { toast("Couldn't copy to clipboard."); return false; }
+      return undefined;
     },
     // The "/" palette's /persona. Same list the Skin picker offers (a persona switched
     // off in the Tool Manager is left out unless it is the one in use), same effect as

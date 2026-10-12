@@ -157,10 +157,15 @@ def test_nth_weekday_rules():
 
 def test_rules_it_cannot_follow_fall_back_to_the_one_event():
     ws, we = datetime(2026, 1, 1), datetime(2026, 12, 31)
-    for label, rule in (("BYWEEKNO", "FREQ=YEARLY;BYWEEKNO=20"), ("BYHOUR", "FREQ=DAILY;BYHOUR=9,17"),
-                        ("HOURLY", "FREQ=HOURLY"), ("a bad BYDAY", "FREQ=WEEKLY;BYDAY=XX"),
+    # BYWEEKNO / BYHOUR / HOURLY used to be on this list; they are understood now
+    # (tests/test_l54_calendar_limits.py). What is left is a rule that is malformed or that
+    # RFC 5545 forbids, and a part this does not support at all (RSCALE, an X- part).
+    for label, rule in (("a bad BYDAY", "FREQ=WEEKLY;BYDAY=XX"),
                         ("COUNT=0", "FREQ=DAILY;COUNT=0"), ("a bad UNTIL", "FREQ=DAILY;UNTIL=soon"),
-                        ("an ordinal on a weekly rule", "FREQ=WEEKLY;BYDAY=1MO")):
+                        ("an ordinal on a weekly rule", "FREQ=WEEKLY;BYDAY=1MO"),
+                        ("BYWEEKNO on a monthly rule", "FREQ=MONTHLY;BYWEEKNO=20"),
+                        ("a BYHOUR out of range", "FREQ=DAILY;BYHOUR=25"),
+                        ("RSCALE", "RSCALE=HEBREW;FREQ=YEARLY"), ("FREQ=FORTNIGHTLY", "FREQ=FORTNIGHTLY")):
         got = parse(ics("UID:z\r\nSUMMARY:Odd\r\nDTSTART:20260310T090000\r\nDTEND:20260310T100000\r\nRRULE:%s\r\n" % rule), ws, we)
         check("%s: one real event, not an invented series" % label, days(got) == ["2026-03-10"], days(got))
     check("a runaway window does not hang or flood (series output is capped)",

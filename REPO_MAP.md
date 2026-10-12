@@ -129,6 +129,9 @@ jarvis-cli/jarvis/
                           Also the built-in defaults table (`_DEFAULT_SOURCES`), the
                           "changed from default" report (`defaults_report`) and the per-value
                           `reset_value` the Files tree uses (`defaults`, `reset` verbs)
+                          Also covers the web console's `web/data/*.json` as `web-data/<name>.json`
+                          (`_WEB_DATA_FILES` allow-list: three preference files editable, the rest
+                          read-only; folder from `JARVIS_WEB_DATA`, else beside the checkout)
     tunables.py           L.43: the registry + store of owner-adjustable knobs (12 env
                           switches/constants that used to need a source edit);
                           `tunables.const()` / `get()` are how modules read them
@@ -392,6 +395,7 @@ Everything is under `~/.jarvis/`:
 | `memory.json` | memory.py | durable facts |
 | `tunables.json` | tunables.py | owner overrides for the registered tunables (written only by settings_admin) |
 | `settings_backups/<file>/<stamp>.json`, `settings_backups/changes.jsonl` | settings_admin.py | the previous contents before each Settings save (newest 20 per file) and a log of what was changed (paths only, never values) |
+| `<repo>/web/data/favorites.json`, `favorite-daemons.json`, `ask-console-filter.json` (gitignored; not under `~/.jarvis`) | web/server.js | starred commands, starred daemons, hidden Ask-trace kinds. Also editable from Settings > Advanced > Files as `web-data/<name>.json` (settings_admin.py repeats the server's rules; backups still go to `settings_backups/web-data__<name>/`). `reboot.json` in the same folder is shown read-only; nothing in this tree writes it |
 | `conversations/` | conversations.py | chat history |
 | `logs/<conv>.jsonl` | logs.py | model↔backend traffic |
 | `events/<conv>.jsonl` | raw_archive.py | raw event log (user text, unsplit model replies, full thinking, every console line, full tool results); deleted with the conversation or on Clear; `JARVIS_RAW_ARCHIVE=0` stops writing |
@@ -760,7 +764,8 @@ silently never runs.
 | `test_l16_caps_and_budget.py` / `test_l16_scheduler_budget.py` / `test_l16_replay.py` | L.16 items 7, 8, 10: `list_windows` cap, per-ask token ledger and budget, per-job limit + "over budget" status, and the incident `1a99e1e3f0d3af0e` replayed through the real `ask()` (fixture: `tests/fixtures/1a99e1e3f0d3af0e.jsonl`) |
 | `test_l24_fixes.py` | L.24 T2/T3/T4/T7: the catalog tier's net-saving gate, `get_tool_schema` list form and exact promotion (`OrderedSchemaSet.replace`), Gemini dict-result compaction, the interactive sensing-failure hint, and the failover note's "do not run them again" line |
 | `test_l24_t5_static_text.py` | L.24 T5: the skills catalog's compact/ultra header and description clip (full mode unchanged), the shorter compact tools blurb, and that the desktop workflow note appears only when the desktop group is active |
-| `test_l24_discovery_retry_cap.py` | L.24 round 2: the discovery-round metric (`RoundBudget.discovery_rounds` -> the per-ask total), the provider's retry hint on a 5xx (`[retry in Ns]`) and `key_health` parking an overloaded model for the STATED delay, and the interactive token limit (`defaults.interactive_token_budget`, off by default); also pins that D5's same-key wait stays 429-only |
+| `test_l24_discovery_retry_cap.py` | L.24 round 2: the discovery-round metric (`RoundBudget.discovery_rounds` -> the per-ask total), the provider's retry hint on a 5xx (`[retry in Ns]`) and `key_health` parking an overloaded model for the STATED delay, and the interactive token limit (`defaults.interactive_token_budget`, 150,000 unless set; 0 turns it off); also pins that D5's same-key wait stays 429-only |
+| `test_thinking_off_and_interactive_cap.py` | Thinking at Off and the interactive cap's default: `reasoning.gemini_off_patch` (a zero `thinkingBudget` for Gemini 2.5 Flash / Flash-Lite only; provider key `gemini_off_budget`), gpt-oss's Off effort override (`off_reasoning_effort`) and the once-per-ask floor note in the Logs viewer, and the 150,000 interactive default |
 | `test_l24_5267_replay.py` | L.24 T1 regression: the real "has anyone texted you on discord" incident (`5267d91a8b996d48`, 5 rounds / 10,649 input tokens) from the scrubbed `fixtures/5267d91a8b996d48.jsonl`: asserts what the recording says, then runs the same words through the real `ask()` with a SYNTHETIC model reply and checks the current tool offering keeps the ask to 2 requests and an ESTIMATED 2,500 input tokens or less (it cannot test that the model picks `recent_dms`) |
 | `test_l16_preflight_authorization.py` | L.16 round 2: `preflight.py` (an unattended ask that states a need the PC can't meet stops before any model call; fails open), the scheduler reporting that as a failure, the `message` kind in `job_risk`, `scheduler._unattended_tool_env` (a tool job now runs as unattended), and `send_dm`'s one exception to "never unattended" |
 | `test_notification_inbox.py` | L.30: owner read/acknowledge state vs delivery (`seen_by`), mark read/all, dismiss, clear read, `summary()`, history filters, state-aware pruning (read first, unacknowledged last), the inbox lock, the `notify-*` verbs |
@@ -773,6 +778,8 @@ silently never runs.
 | `verify_command_category_menu_ui.py` (`python`, not run by `run_tests.py`) | L.14 UI rework: the Commands category dropdown in headless Chromium against a stateful fake of the routes - header no longer overflowing, filter + search, saved / vanished choice, inline rename / merge / delete and every refusal, server error, keyboard, markup-looking names, Find box, short / narrow / phone layouts. Needs Playwright; skips cleanly without it |
 | `verify_category_manager.js` (`node`) | L.12: `category-manager.js` pure helpers and the whole dialog chain (pick, rename, merge confirm, delete, refusals, empty list) against a fake JarvisUI and fetch |
 | `test_l43_tree.py` | L.43: `default_doc`, `defaults_report` (changed / missing / extra, masked secrets), `reset_value` (backup, log, stale, guarded, unattended, wrong-type repair), CLI verbs, routes and wiring |
+| `test_l43_web_data.py` | L.43: Settings > Advanced > Files covers `web/data` -- name/path rules, folder lookup (`JARVIS_WEB_DATA`), allow-list and read-only files, the server's rules repeated and pinned against `web/server.js`, backups/stale/unattended gate, CLI end to end |
+| `test_l22_measure_home.py` | L.22: `measure_l22_paraphrase.py` -- `--live` gets the provider config in its sandbox HOME (only `ai_config.json`, deleted at exit), missing-fixture message, answered-call count and the no-answer warning |
 | `verify_settings_tree.js` (`node`) | L.43: `settings.js` tree helpers (build, filter, leaf input), the `#settings/...` deep-link parser, and `/config` wiring |
 | `test_slash_coverage.py` | every `reserved_names.py` name is in the `/` palette registry exactly once, with a valid risk tier |
 | `verify_slash_palette.js` (`node`) | the palette engine: parsing, submit routing, near-miss, every verb's handler, confirm gates, keyboard model |

@@ -45,6 +45,14 @@ let node = P.buildTree(deep, [], 0), depth = 0;
 while (node.children.length) { node = node.children[0]; depth++; }
 check("a very deep document stops at a depth limit instead of recursing forever", depth === 12 && node.more === 1, [depth, node.more]);
 
+// A file whose top level is a list (web-data/favorites.json) builds a tree of its entries, and an
+// entry's path is its position, which is what the one-value edit sends back to the server.
+{
+  const t = P.buildTree(["spotify", "tts_bot"], [], 0);
+  check("a list at the top builds one child per entry, keyed by position", t.kind === "list" && t.children.length === 2 && t.children[1].path.length === 1 && t.children[1].path[0] === 1 && t.children[1].value === "tts_bot", t);
+  check("an entry of such a list can be edited as text", P.parseLeafInput("string", "other").ok === true);
+}
+
 // ---- deviations --------------------------------------------------------------------------
 const DEVS = [
   { path: ["levels", "notify"], path_text: "levels.notify", state: "changed", current: "5", default: "2", resettable: true },
@@ -103,6 +111,8 @@ const leaves = (n) => (n.children.length ? n.children.flatMap(leaves) : [P.fmtPa
   check("advanced with a tab", JSON.stringify(h("#settings/advanced/tunables")) === JSON.stringify({ section: "advanced", tab: "tunables" }));
   check("advanced, files, a file", JSON.stringify(h("#settings/advanced/files/ai_config.json")) === JSON.stringify({ section: "advanced", tab: "files", file: "ai_config.json" }));
   check("a channels file keeps its folder", h("#settings/advanced/files/channels/people.json").file === "channels/people.json");
+  check("a web-data file keeps its folder", h("#settings/advanced/files/web-data/favorites.json").file === "web-data/favorites.json");
+  check("a folder that is not ours, or a nested one, is dropped", h("#settings/advanced/files/other/favorites.json").file === undefined && h("#settings/advanced/files/web-data/a/b.json").file === undefined && h("#settings/advanced/files/web-data/x.txt").file === undefined);
   check("an encoded name is decoded", h("#settings/advanced/files/ai%5Fconfig.json").file === "ai_config.json");
   check("a file name that could not be one is dropped", h("#settings/advanced/files/..%2Fsecret.json").file === undefined && h("#settings/advanced/files/x.txt").file === undefined && h("#settings/advanced/files/a b.json").file === undefined);
   check("a file is only read under Advanced > Files", h("#settings/ai/files/ai_config.json").file === undefined && h("#settings/advanced/history/ai_config.json").file === undefined);

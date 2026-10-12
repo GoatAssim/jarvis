@@ -7,7 +7,7 @@ l24-token-cost-fixes.patch (2026-10-09g).
                                and key_health parks an overloaded model for the
                                delay the provider STATED (not a fixed 45 s)
   T4  INTERACTIVE CAP          defaults.interactive_token_budget: the per-ask ledger
-                               limit for an ask with a person watching (off by default)
+                               limit for an ask with a person watching (150,000 unless set; 0 = off)
 
 What this file does NOT change, and pins so nobody "fixes" it by accident: the
 same-key wait before rotating (D5, test_short_429_wait.py) is for a 429 only.
@@ -185,18 +185,20 @@ _fresh()
 # ---------------------------------------------------------------------------
 lim = ai_client._token_budget_limit
 with Env(**CLEAN):
-    check("interactive: no setting means no limit (the shipped default)", lim({}) is None)
+    check("interactive: no setting means the shipped default, 150,000 tokens",
+          lim({}) == 150000 and ai_client.INTERACTIVE_TOKEN_BUDGET_DEFAULT == 150000, lim({}))
     check("interactive: defaults.interactive_token_budget sets it", lim({"interactive_token_budget": 8000}) == 8000)
-    check("interactive: 0 means off", lim({"interactive_token_budget": 0}) is None)
-    check("interactive: a garbled value means off (its default), not some other number",
-          lim({"interactive_token_budget": "lots"}) is None and lim({"interactive_token_budget": None}) is None
-          and lim({"interactive_token_budget": -5}) is None)
-    check("interactive: a bare true is not a limit of 1 token", lim({"interactive_token_budget": True}) is None)
+    check("interactive: an explicit 0 is the only way to switch it off", lim({"interactive_token_budget": 0}) is None)
+    check("interactive: a garbled value means the default, never 'no limit'",
+          lim({"interactive_token_budget": "lots"}) == 150000 and lim({"interactive_token_budget": None}) == 150000
+          and lim({"interactive_token_budget": -5}) == 150000)
+    check("interactive: a bare true or false is not a limit of 1 token (or of 0)",
+          lim({"interactive_token_budget": True}) == 150000 and lim({"interactive_token_budget": False}) == 150000)
     check("interactive: the scheduled setting does not leak into an interactive ask",
-          lim({"scheduled_token_budget": 5}) is None)
+          lim({"scheduled_token_budget": 5}) == 150000)
 with Env(**{**CLEAN, "JARVIS_TOKEN_BUDGET": "777"}):
     check("interactive: JARVIS_TOKEN_BUDGET is the scheduler's per-run knob and is not read here",
-          lim({}) is None and lim({"interactive_token_budget": 500}) == 500)
+          lim({}) == 150000 and lim({"interactive_token_budget": 500}) == 500)
 with Env(**{**CLEAN, "JARVIS_SCHEDULED": "1"}):
     check("scheduled: the interactive setting does not change a scheduled run (still 30,000)",
           lim({"interactive_token_budget": 500}) == 30000)
@@ -283,9 +285,22 @@ except OSError:
 calls = []
 with Env(**CLEAN), _env(_spend_then_fail(calls, 6000), [_prov("p", ["k1", "k2"])]) as conv:
     r = ai_client.ask("hello", commands=[], conversation_id=conv)
-check("no setting: exactly the old behaviour -- the failover goes on and answers",
+check("no setting: an ordinary ask is far under the default limit -- the failover goes on and answers",
       calls == ["k1", "k2"] and r.ok and r.text == "fine" and r.ending != "token_budget", (calls, r.ending, r.text))
-check("...and the ledger carries no limit", (r.usage_total or {}).get("limit") is None, r.usage_total)
+check("...and the ledger carries the default limit, not exceeded",
+      (r.usage_total or {}).get("limit") == 150000 and not (r.usage_total or {}).get("exceeded"), r.usage_total)
+
+try:
+    key_health.HEALTH_FILE.unlink()
+except OSError:
+    pass
+calls = []
+with Env(**CLEAN), _env(_spend_then_fail(calls, 6000), [_prov("p", ["k1", "k2"])],
+                        {"interactive_token_budget": 0}) as conv:
+    r = ai_client.ask("hello", commands=[], conversation_id=conv)
+check("an explicit 0: no limit at all, as before the default existed",
+      calls == ["k1", "k2"] and r.ok and r.ending != "token_budget" and (r.usage_total or {}).get("limit") is None,
+      (calls, r.ending, r.usage_total))
 check("...and the per-ask total counts both attempts' spend",
       ((r.usage or {}).get("ask_total") or {}).get("input_tokens") == 12000, r.usage)
 

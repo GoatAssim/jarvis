@@ -8,7 +8,7 @@ that it floats instead of shoving things around, real focus and key behaviour, a
 that each verb does the real thing in the real UI.
 
 This is the palette half of master plan **I.5 (Acceptance checklist)**, expanded.
-The code-block/copy half (I.1) is not built - see the last section.
+The code-block/copy half (I.1) is built in source but has had no browser pass - see section 8b and the last section.
 
 Test in **both** layouts (classic and focus) where noted, and once at phone width.
 
@@ -149,6 +149,7 @@ With the palette open:
 - [ ] `/stop` during a reply stops it; with nothing running -> "Nothing is running."
 - [ ] `/redo` re-runs your last prompt (refused while a reply streams)
 - [ ] `/copy` copies Jarvis's last reply (raw markdown); on an empty chat -> "Nothing to copy yet."
+- [ ] `/copy 2` copies only the second code block of the last reply (see 8b for the details)
 
 **Model**
 - [ ] `/provider openai` updates the picker label and the next ask uses it; `a,b` shows the order; `auto`
@@ -174,9 +175,39 @@ With the palette open:
 **Panels** (each opens the right one, also mid-reply)
 - [ ] `/guides` `/debug` (`/tools`) `/checklist` (`/tests`) `/schedule` (`/sched`) `/mcp` `/ctools` (`/toolmanager`) `/channels`
       `/daemons` `/backlog` `/logsearch` `/setup` `/subagents` `/notifications` `/logs`
-- [ ] `/config` opens Config; `/skin` opens Skin
+- [ ] `/config` opens the old Config modal (its title is the word "Settings", so two things are called
+      Settings; this is known); `/skin` and its alias `/settings` open Settings on the Skin section
+- [ ] `/backlog` opens the Backlog panel; `/backlog add <title>` adds an item without opening it (see 8b)
 - [ ] `/layout classic|focus` switches and persists across a reload
 - [ ] `/help` lists everything; `/help run` shows just that one; `/help nope` says so
+
+## 8b. `/copy N` and `/backlog add`
+
+**`/copy N`** (needs a reply that has code blocks; ask Jarvis for "two short shell snippets and one Python
+function" to get one):
+- [ ] `/copy` then Enter twice (chat-group verbs are two-step) copies the whole reply as raw markdown, as before
+- [ ] `/copy 2` copies the **second** code block only, and the toast says "Copied code block 2 of 3."
+- [ ] Paste it: no fence lines; a shell block whose every line starts with `$ ` is pasted without the `$ `,
+      the same as that block's own Copy button gives
+- [ ] `/copy 9` on a reply with 3 blocks says so ("... has 3 code blocks, not 9") and leaves `/copy 9` in the box
+- [ ] `/copy 1` on a reply with no code blocks says "no code blocks"; on an empty chat -> "Nothing to copy yet."
+- [ ] `/copy 0`, `/copy two`, `/copy -1`, `/copy 2 3` each show "Usage: /copy [block number]" and keep the text
+- [ ] Typing `/copy ` shows the hint "optional: a code block's number ..." on the argument row
+- [ ] `/copy 2` while Jarvis is replying works on the last finished reply (or says "Nothing to copy yet." if
+      there is none); it never counts the blocks of the half-written reply that is still streaming
+
+**`/backlog add <title>`**:
+- [ ] `/backlog` alone opens the Backlog panel, as before
+- [ ] `/backlog add renew the passport` adds the item, shows "Added to the Backlog: renew the passport", clears
+      the box and does **not** open the panel; open the Backlog afterwards: the item is there
+- [ ] `/backlog ADD  spaced   title ` adds "spaced   title" (the word `add` is case-insensitive, ends trimmed)
+- [ ] `/backlog add`, `/backlog add   ` and `/backlog buy milk` show "Usage: /backlog add <title>" and add nothing
+- [ ] A title over 200 characters is refused with a message before anything is sent
+- [ ] With the server stopped (or the route blocked in dev tools), `/backlog add x1` shows the error and keeps
+      `/backlog add x1` in the box
+- [ ] Works mid-reply (it only adds an item)
+
+---
 
 ## 9. CLI passthrough (`/<cli-name> [args]`)
 
@@ -257,6 +288,19 @@ Set up: a file in `~/.jarvis/tools/` using the example in `actions/_template.py`
       Backlog, Log Search, Setup)
 - [ ] With `slash-palette.js` blocked (dev tools -> block request URL) the composer still sends messages
 
+**Popover and modal layering (I-B19 / I-B20, built, never run in a browser)** - test once in classic and once
+in focus layout:
+- [ ] Open the palette and press **"Show the other N commands"**: it stays open and the list expands and collapses
+- [ ] Press a heading, the footer and the gaps, and drag the scrollbar: it stays open and the caret stays in the
+      composer
+- [ ] Click outside (message list, a panel button): it closes; click back into the composer with `/...` still
+      typed: it reopens
+- [ ] Classic layout with Ask open: `/skin` and `/config` open **above** Ask; so does the command builder
+- [ ] Open Settings or Skin from inside a menu panel and from Debug: the modal is on top
+- [ ] A confirm dialog or a toast raised from inside a modal still appears above it
+- [ ] Side effect to watch: `.modal-backdrop` (z-index 96) is now above the Debug/Logs overlays (95); check that
+      nothing opens Debug or Logs while one of those modals is open
+
 ## 13. Accessibility
 
 - [ ] `#ask-input` has `role="combobox"`, `aria-controls="slash-palette-list"`, `aria-autocomplete="list"`, and
@@ -285,13 +329,17 @@ Set up: a file in `~/.jarvis/tools/` using the example in `actions/_template.py`
   A command that declares no `riskTier` is `dangerous` by design (K.6.7), not a bug.
 - **Touch long-press for the hover tooltip (D-I4).** Hover shows a browser tooltip and the footer follows the
   highlighted row, but on a touchscreen there is no hover to move it, and a tap fills the row.
-- **`/copy` copies the whole last reply only**; `/copy 2` (one code block) waits on Part I.1.
-- **No inline backlog quick-add** (D-I5 deferred) - `/backlog` opens the panel.
+- **`/copy N` counts fenced blocks in the reply's raw text** (the way the Copy buttons on the blocks do), so a
+  fence inside a longer fence or a block the model never closed is counted as the renderer counts it. There is
+  no `/copy last`, `/copy all` or range.
+- **`/backlog add` takes a title only.** Project, state, priority and notes are set in the Backlog panel
+  afterwards; there is no `|` note syntax.
 - **`/skillunload` doesn't distinguish "this chat" from "all chats"**; it shows the merged set. The CLI's own
   habit of reporting success for a name that isn't loaded is unchanged (I-B3 at the CLI level); the palette just never
   offers or accepts one.
 - **The popover only opens above the composer**; there is no flip-below.
 - **Near-miss detection compares verbs, aliases and CLI names**, not saved-command names.
 - The native `confirm()` used for chat deletion and daemon *remove* was left alone.
-- **Code blocks with one-click copy (Part I.1) are a separate, unbuilt feature.** The whole "Code blocks"
-  half of I.5 stays unticked.
+- **Code blocks with one-click copy (Part I.1) are built in source (`rich-text.js`) but have had no browser
+  pass.** The whole "Code blocks" half of I.5 stays unticked until someone clicks through it; section 8b only
+  covers the `/copy N` side of it.

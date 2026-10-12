@@ -387,7 +387,7 @@
   // Anything that is not a known section, tab or file name is ignored, so a hand-typed
   // or stale link opens Settings rather than nothing.
   const ADV_TABS = ["files", "tunables", "plumbing", "history"];
-  const FILE_NAME_RE = /^(?:channels\/)?[A-Za-z0-9][A-Za-z0-9_.\-]{0,80}\.json$/;
+  const FILE_NAME_RE = /^(?:(?:channels|web-data)\/)?[A-Za-z0-9][A-Za-z0-9_.\-]{0,80}\.json$/;
   function parseHash(hash) {
     const m = /^#\/?settings(?:\/(.*))?$/i.exec(String(hash || ""));
     if (!m) return null;
@@ -429,7 +429,7 @@
           { file: "ai_config.json", path: ["defaults", "compact_prompt"], type: "bool", fallback: true, label: "Compact system prompt", help: "A shorter prompt for providers with small token limits." },
           { file: "ai_config.json", path: ["defaults", "prompt_cache"], type: "bool", fallback: true, label: "Prompt caching", help: "Lets providers that support it reuse the unchanged start of the prompt." },
           { file: "ai_config.json", path: ["defaults", "scheduled_token_budget"], type: "int", min: 0, fallback: 30000, label: "Token limit for one scheduled run", unit: "tokens", help: "Stops a runaway scheduled job. 0 turns the limit off." },
-          { file: "ai_config.json", path: ["defaults", "interactive_token_budget"], type: "int", min: 0, fallback: 0, label: "Token limit for one request you make", unit: "tokens", help: "Ends a request that has spent this many tokens across every provider it tried. 0 (the default) means no limit." },
+          { file: "ai_config.json", path: ["defaults", "interactive_token_budget"], type: "int", min: 0, fallback: 150000, label: "Token limit for one request you make", unit: "tokens", help: "Ends a request that has spent this many tokens across every provider it tried, hidden thinking included. The default is 150,000, about three times the largest single request measured. 0 turns the limit off." },
         ].map((spec) => fileRow(ctx, spec));
         const out = [group("Answers", rows)];
         const providers = getAt(ctx.docs["ai_config.json"].doc, ["providers"]);
@@ -536,6 +536,7 @@
         try { status = await fetch("/api/status").then((r) => r.json()); } catch { status = null; }
         const kv = (k, v) => h("tr", {}, [h("td", { text: k }), h("td", { class: "mono", text: v || "unknown" })]);
         const rows = [kv("Version", ctx.catalog.version), kv("Settings folder", ctx.catalog.jarvis_dir), kv("Saved tunables", ctx.catalog.tunables_file)];
+        if (ctx.catalog.web_data_dir) rows.push(kv("Web console data", ctx.catalog.web_data_dir));
         if (status && status.invocation) rows.push(kv("Command", Array.isArray(status.invocation) ? status.invocation.join(" ") : String(status.invocation)));
         let changes = [];
         try { changes = (await api("GET", "/api/settings/changes")).changes.slice(0, 10); } catch { changes = []; }
@@ -1042,7 +1043,7 @@
 
     drawList();
     if (A.file && cat.files.some((f) => f.name === A.file)) openFile(A.file, true);
-    else editor.replaceChildren(h("div", { class: "prefs-note", text: "Pick a file on the left. Every save is checked, backed up first and can be undone. Files another panel manages, and state Jarvis rewrites on its own, are shown read-only." }));
+    else editor.replaceChildren(h("div", { class: "prefs-note", text: "Pick a file on the left. Every save is checked, backed up first and can be undone. Files another panel manages, and state Jarvis rewrites on its own, are shown read-only. Files named web-data/… are the web console's own (starred commands and daemons, the Ask console filter)." }));
   }
 
   // The Reveal button also appears on files that are known to hold keys even when nothing is

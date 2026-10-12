@@ -15,9 +15,9 @@ Covers:
      emptied folder; other files are kept and the folder with them; a folder another tool
      names (quoted path) or uses is left alone; "_" folders and links are never touched;
      a mere substring ("ui" inside other words) does NOT block removal.
-  5. Import: plan (one wrapping folder stripped, junk and helper modules skipped, two or
-     no .py refused, unsafe path refuses the whole bundle, name taken / file would be
-     overwritten reported); write (files a screen uses are written, unused ones skipped,
+  5. Import: plan (one wrapping folder stripped, junk and helper modules skipped, no .py
+     refused, several .py planned as several tools, unsafe path refuses the
+     whole bundle, name taken / file would be overwritten reported); write (files a screen uses are written, unused ones skipped,
      never over an existing file, rolled back when the .py is refused, check runs against
      the staged folder); the same from a .zip (zip-slip refused, too many entries refused).
   6. CLI: ctools-files list/read/write/removal, ctools-import --stdin / --zip, and
@@ -231,8 +231,9 @@ check("plan: no blockers", plan["problems"] == [] and plan["name_problem"] == ""
 check("plan: the first lines of the .py are returned for the review", "def tool_imp_tool_a" in plan.get("py_head", ""), plan)
 
 check("plan: no .py is refused", not cts.import_bundle([("a/tool.html", "x")]).get("ok"))
-check("plan: two .py files are refused",
-      "found 2" in cts.import_bundle([("a.py", GOOD_PY), ("b.py", GOOD_PY)]).get("error", ""))
+two = cts.import_bundle([("a.py", GOOD_PY), ("b.py", GOOD_PY)])
+check("plan: two .py files are two tools (see test_tool_import_multi.py for the write)",
+      two.get("ok") and [t["name"] for t in two["tools"]] == ["a", "b"], two)
 check("plan: a .. path refuses the whole bundle",
       "unsafe path" in cts.import_bundle([("a.py", GOOD_PY), ("../evil.js", "x")]).get("error", ""))
 check("plan: an absolute path refuses the whole bundle", not cts.import_bundle([("/etc/x.py", GOOD_PY)]).get("ok"))

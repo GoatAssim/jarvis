@@ -2071,36 +2071,13 @@ def main():
             if len(argv) < 3:
                 print(json.dumps({"error": "usage: jarvis calendar-add <name> <ics-url>"}))
                 sys.exit(1)
-            # Strict load: a calendar.json that can't be read is never overwritten with an
-            # empty one (that would drop every linked calendar and event).
-            cfg, problem = _cal.load_config_strict()
-            if cfg is None:
-                print(json.dumps({"ok": False, "error": problem}))
+            # One function owns the refusals (an unreadable calendar.json is never overwritten,
+            # the 12-calendar limit, duplicates) and takes the calendar.json lock, like the panel.
+            added = _cal.add_feed_unverified(argv[1], argv[2])
+            if not added.get("ok"):
+                print(json.dumps(added))
                 sys.exit(1)
-            name = _cal._clean_name(argv[1])
-            link = _cal._clean_link(argv[2])
-            feeds = [f for f in (cfg.get("feeds") or []) if isinstance(f, dict)]
-            if not name:
-                print(json.dumps({"ok": False, "error": "Give the calendar a name."}))
-                sys.exit(1)
-            if not link.startswith(("http://", "https://")):
-                print(json.dumps({"ok": False, "error": "That doesn't look like a web link. It should "
-                                                        "start with https:// (or webcal://)."}))
-                sys.exit(1)
-            if len(feeds) >= _cal.MAX_FEEDS:
-                print(json.dumps({"ok": False, "error": "You already have %d linked calendars, the most "
-                                                        "there is room for. Remove one first." % _cal.MAX_FEEDS}))
-                sys.exit(1)
-            if any((f.get("name") or "").strip().lower() == name.lower() for f in feeds):
-                print(json.dumps({"ok": False, "error": "There is already a calendar called \"%s\"." % name}))
-                sys.exit(1)
-            if any(_cal._fetch_key(_cal._clean_link(f.get("url"))) == _cal._fetch_key(link) for f in feeds):
-                print(json.dumps({"ok": False, "error": "That link is already linked."}))
-                sys.exit(1)
-            cfg["feeds"] = feeds + [{"name": name, "url": link, "enabled": True}]
-            if not _cal.save_config(cfg):
-                print(json.dumps({"ok": False, "error": "Couldn't save calendar.json."}))
-                sys.exit(1)
+            name, link = added["name"], added["link"]
             body, err = _cal.fetch_feed({"url": link}, force=True)
             print(json.dumps({"ok": True, "name": name,
                               "reachable": bool(body) and not err,
@@ -2125,7 +2102,7 @@ def main():
 
     if argv[0] == "calendar-admin":
         # jarvis calendar-admin feeds | window | check | link | feed-enable | feed-remove
-        #                       | event-add | event-update | event-delete
+        #                       | event-add | event-update | event-delete | settings
         # The back end of Menu > Calendars (L.54; calendar_tools.admin() owns every rule).
         # Not a command to type: the request is one JSON object on stdin (a calendar link is
         # a secret, so it never goes in argv where a process list would show it) and the
@@ -2184,10 +2161,13 @@ def main():
     # jarvis ctools-drafts list
     # jarvis ctools-drafts show <key>
     # jarvis ctools-drafts delete <key>
-    # jarvis ctools-drafts save <key> --stdin [--name N] [--mode new|edit] [--orig N] [--template T]
+    # jarvis ctools-drafts save <key> --stdin [--json] [--name N] [--mode new|edit] [--orig N] [--template T]
     # Backups of tools that were still being written, saved or not (see
     # custom_tools_store.py's DRAFTS section). Source arrives on STDIN, like
-    # ctools-write. A draft is a copy, never a tool: nothing here loads or runs it.
+    # ctools-write; with --json stdin is {"source": "...", "web": {"dir/tool.js": "..."}}
+    # instead, so the tab's unsaved screen files are backed up with it ("web" left out keeps
+    # what the draft already holds). A draft is a copy, never a tool: nothing here loads
+    # or runs it.
     if argv[0] == "ctools-drafts":
         from . import custom_tools_store as ctools
 
@@ -2206,10 +2186,22 @@ def main():
             elif sub == "delete":
                 result = ctools.delete_draft(key)
             else:
+                raw = sys.stdin.read() if "--stdin" in argv else ""
+                draft_source, draft_web = raw, None
+                if "--json" in argv:
+                    try:
+                        body = json.loads(raw or "{}")
+                    except ValueError:
+                        body = None
+                    if not isinstance(body, dict):
+                        print(json.dumps({"ok": False, "error": "--json expects {\"source\": ..., \"web\": {...}} on stdin"}))
+                        sys.exit(1)
+                    draft_source = body.get("source") if isinstance(body.get("source"), str) else ""
+                    draft_web = body.get("web") if "web" in body else None
                 result = ctools.save_draft(
-                    key, sys.stdin.read() if "--stdin" in argv else "",
+                    key, draft_source,
                     name=_flag("--name"), mode=_flag("--mode", "new"),
-                    orig_name=_flag("--orig"), template=_flag("--template"))
+                    orig_name=_flag("--orig"), template=_flag("--template"), web=draft_web)
             print(json.dumps(result, indent=2))
             if not result.get("ok"):
                 sys.exit(1)
@@ -2253,13 +2245,17 @@ def main():
         return
 
     # --- Import a tool with its screen folders ---------------------------------
-    # jarvis ctools-import --stdin [--write] [--name N]    stdin: {"files": [{"path", "text"}]}
-    # jarvis ctools-import --zip <file.zip> [--write] [--name N]
+    # jarvis ctools-import --stdin [--write] [--name N] [--names JSON] [--overwrite]
+    #                                                       stdin: {"files": [{"path", "text"}]}
+    # jarvis ctools-import --zip <file.zip> [--write] [--name N] [--names JSON] [--overwrite]
     # Without --write: what importing would do, from the file NAMES and sizes only --
-    # nothing is run and nothing is written. With --write: the .py is checked exactly as a
-    # normal save checks it, only screen files a declared screen uses are written (never
-    # over an existing file), and everything is removed again if the .py is refused. The
-    # caller (the Tool Manager) has already shown the "this runs as you" confirmation.
+    # nothing is run and nothing is written. With --write: every .py (a bundle may hold
+    # several tools) is checked exactly as a normal save checks it, only screen files a
+    # declared screen uses are written, and everything is put back if any .py is refused.
+    # Nothing is written over an existing file unless --overwrite is given, and then each
+    # replaced file keeps a .bak. --name names a lone tool; --names is a JSON object
+    # {"x.py": "name"} for any of them. The caller (the Tool Manager) has already shown the
+    # "this runs as you" confirmation.
     if argv[0] == "ctools-import":
         from . import custom_tools_store as ctools
 
@@ -2276,7 +2272,16 @@ def main():
                     raise ValueError("expected {\"files\": [{\"path\", \"text\"}, ...]} on stdin")
                 items = [(f.get("path"), f.get("text") if isinstance(f.get("text"), str) else "")
                          for f in listed if isinstance(f, dict)]
-            result = ctools.import_bundle(items, name=_iflag("--name"), write="--write" in argv)
+            names = None
+            if "--names" in argv:
+                try:
+                    names = json.loads(_iflag("--names") or "{}")
+                except ValueError:
+                    raise ValueError("--names expects a JSON object like {\"x.py\": \"x_tool\"}")
+                if not isinstance(names, dict):
+                    raise ValueError("--names expects a JSON object like {\"x.py\": \"x_tool\"}")
+            result = ctools.import_bundle(items, name=_iflag("--name"), write="--write" in argv,
+                                          names=names, overwrite="--overwrite" in argv)
         except ValueError as exc:
             result = {"ok": False, "error": str(exc)}
         print(json.dumps(result, indent=2))

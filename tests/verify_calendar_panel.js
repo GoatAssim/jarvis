@@ -83,6 +83,23 @@ const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
   check("cells are consecutive days", grid.every((c, i) => i === 0 || (c.date - grid[i - 1].date) >= 82800000));
 }
 
+// ---- the week start is a setting (mon / sun / sat), Monday when nothing is said -------------------
+{
+  check("weekStartIndex maps the three settings and falls back to Monday", C.weekStartIndex("mon") === 1 && C.weekStartIndex("sun") === 0 && C.weekStartIndex("sat") === 6 && C.weekStartIndex(undefined) === 1 && C.weekStartIndex("friday") === 1 && C.weekStartIndex("__proto__") === 1);
+  check("Sunday-first: a Wednesday's week starts on the Sunday before", C.ymd(C.startOfWeek(d(2026, 10, 14), 0)) === "2026-10-11");
+  check("Sunday-first: a Sunday starts its own week and a Saturday belongs to it", C.ymd(C.startOfWeek(d(2026, 10, 11), 0)) === "2026-10-11" && C.ymd(C.startOfWeek(d(2026, 10, 17), 0)) === "2026-10-11");
+  check("Saturday-first: a Wednesday's week starts on the Saturday before", C.ymd(C.startOfWeek(d(2026, 10, 14), 6)) === "2026-10-10");
+  const week = C.windowFor("week", d(2026, 10, 14, 15), 0);
+  check("the Sunday-first week window is Sunday to the next Sunday", C.ymd(week.start) === "2026-10-11" && C.ymd(week.end) === "2026-10-18");
+  const month = C.windowFor("month", d(2026, 10, 14), 0);
+  check("the Sunday-first month window starts on the Sunday on or before the 1st (still 42 days)", C.ymd(month.start) === "2026-09-27" && C.ymd(month.end) === "2026-11-08");
+  const grid = C.monthGrid(d(2026, 10, 14), 0);
+  check("the Sunday-first month grid starts on a Sunday and has 42 cells", grid.length === 42 && grid[0].date.getDay() === 0 && grid[0].key === "2026-09-27");
+  check("the week label follows the week start", C.rangeLabel("week", d(2026, 10, 14), 0) === "11 Oct – 17 Oct 2026", C.rangeLabel("week", d(2026, 10, 14), 0));
+  check("dowNames starts at the week's first day (Monday by default)", C.dowNames().join() === "Mon,Tue,Wed,Thu,Fri,Sat,Sun" && C.dowNames(0).join() === "Sun,Mon,Tue,Wed,Thu,Fri,Sat" && C.dowNames(6).join() === "Sat,Sun,Mon,Tue,Wed,Thu,Fri");
+  check("calling the helpers with no week start is exactly the Monday behaviour (same results as before)", C.ymd(C.startOfWeek(d(2026, 10, 14))) === "2026-10-12" && C.ymd(C.windowFor("month", d(2026, 10, 14)).start) === "2026-09-28");
+}
+
 // ---- which days an event touches ---------------------------------------------------------------
 {
   const timed = { start: "2026-10-12T14:00:00", end: "2026-10-12T15:00:00", all_day: false };

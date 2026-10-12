@@ -303,14 +303,25 @@ things that were already fixed once.
 - **Calendars: linking and managing a calendar is human-only; a model tool may only touch Jarvis's OWN events (L.54).**
   Every rule lives in `jarvis/actions/calendar_tools.py`; `admin()` (`jarvis calendar-admin`, called only by
   web/server.js `/api/calendar/*`) is what the Calendars panel uses. No model tool and no chat path may call
-  `admin`, `link_feed`, `remove_feed`, `set_feed_enabled` or `check_feed`: a feed is a URL Jarvis fetches and reads
+  `admin`, `link_feed`, `add_feed_unverified`, `set_settings`, `remove_feed`, `set_feed_enabled` or `check_feed`: a feed is a URL Jarvis fetches and reads
   on every calendar question, and the model is the part most exposed to text other people wrote
   (`tests/test_l54_calendar.py` greps for it). A linked (ICS) calendar is read-only: its events are never written,
   edited or deleted by anything. A feed's real address goes to the browser only as `mask_url()` and errors are run
   through `_scrub()`. **Every write loads `calendar.json` with `load_config_strict()`**, so a file that cannot be
   read is refused rather than overwritten with an empty calendar (`tests/test_l54_calendar_hardening.py`). Old
-  Jarvis-calendar events (`keep_days`, default 60, and the 500 cap) are only removed when an event is added, and
-  the add says how many went.
+  Jarvis-calendar events (`keep_days`, default 60, set from the Calendars tab) are only removed when an event is
+  added, and the add says how many went. **The 500-event limit is a refusal, never a drop**: `_save_new_event` is the
+  one place a new event is stored (the panel and the chat tool `calendar_add_event` both use it) and at 500 live
+  events it refuses, naming the number; `_prune_local` removes only events past their keep time and never drops
+  one that is still within it (it used to cut to the newest 500 by list position, silently). **Every writer of
+  `calendar.json` takes `_config_lock()`** (an `O_EXCL` lockfile, like `notifier.py`; the panel's link / enable /
+  remove / event / settings writes, the chat tool and `calendar-add` via `add_feed_unverified`) around its whole
+  load-change-save, so two processes cannot lose each other's change; a write that cannot get the lock refuses and
+  changes nothing. Never nest a second lock on the same file; the cache has its own (`calendar_cache.json.lock`).
+  A probe must leave nothing behind: `check_feed` fetches with `"_no_store": True` (a link that is only checked is
+  never cached) and `link_feed` fills the cache only after the calendar is saved. `keep_days` and `week_start`
+  (mon / sun / sat) are the only settings the panel writes (`set_settings`, `POST /api/calendar/settings`,
+  `calendar-admin settings`); like the rest of `admin()` it is human-only and no model tool reaches it.
 
 - **Settings > Advanced is owner-only and UI-only; every rule lives in `jarvis/settings_admin.py` (L.43).**
   The Settings modal (`web/public/settings.js`) reaches files and tunables only through
@@ -322,7 +333,13 @@ things that were already fixed once.
   `confirm_guarded` for safety files, backup first, atomic write, change log with paths only); don't add a second
   write path around it, and don't make a state file or a file another panel owns (`scheduled.json`, `daemons.json`,
   `backlog.json`, `channels/*`) editable here -- that would bypass the owning panel's own rules (L.36's fail-closed
-  permissions). Secrets are masked on read and restored on write; a token reaches the browser only on an explicit
+  permissions). **The one exception is the web console's own preference files in `web/data`** (addressed as
+  `web-data/<name>.json`): `favorites.json`, `favorite-daemons.json` and `ask-console-filter.json` are editable
+  because `settings_admin.py` repeats the web server's own rules for each (the daemon-id pattern, the 500 cap, the
+  console kinds) and `tests/test_l43_web_data.py` pins those copies against `web/server.js`. `reboot.json` and any
+  other file in that folder stay read-only; a new `web/data` file is read-only until it is added to
+  `_WEB_DATA_FILES` together with its rules. The web server tells the CLI where the folder is on every settings
+  call (`JARVIS_WEB_DATA`, absolute paths only). Secrets are masked on read and restored on write; a token reaches the browser only on an explicit
   reveal, and is forgotten when Settings closes. A knob becomes a tunable only by adding it to
   `tunables.REGISTRY` (type, range, default, `applies`) and reading it through `tunables.const()` / `get()`.
   **`MAX_TOOL_ROUNDS`, the confirmation prompts, `tool_safety` behaviour and the risk review are not tunables and must
@@ -437,6 +454,9 @@ actually render Markdown):
     node tests/verify_ask_embed.js          # L.53: ask-embed.js's reply/stream/size helpers and the Tool Manager's chat-fold + per-tool conversation key; no npm install
     node tests/verify_code_editor.js        # L.33: the Tool Manager editor's tokenizer, edit helpers and completions; no npm install
     python3 tests/test_tool_folders.py      # L.46.3: a tool's screen files - editor tabs' back end, import with folders / zip, uninstall that removes the folder
+    python3 tests/test_tool_import_multi.py # import: overwrite choice, several tools per bundle, screen text in drafts, screen scripts in the plan, CLI flags
+    node tests/verify_tool_folders_choices.js # the Tool Manager's pure helpers for those + "Commands from this file" + the draft key; no npm install
+    python3 tests/verify_tool_folders_tabs_ui.py # the screen-file tabs and their server-side backup in a real browser; needs `playwright` (Python) + Chromium, prints SKIP without them
     node tests/verify_tool_folders_ui.js    # L.46.3: the Tool Manager's pure helpers for those (tab labels, dirty tracking, import kind, Delete dialog) + the text editor's Enter; no npm install
     python3 tests/verify_l33_code_editor.py # L.33: the editor in a real browser (keys, undo, ghost suggestions, scroll sync); needs `playwright` (Python) + Chromium, prints SKIP without them
                                             # against a fake DOM + fake JarvisHost
@@ -568,16 +588,25 @@ the other.
   browser names a path; the CLI checks it is in that list and re-resolves it inside
   `~/.jarvis/tools` -- `server.js` never builds one. Import: a plan first (names and sizes,
   nothing run), then `--write` checks the .py exactly as a save does against a staging
-  folder, keeps only files a declared screen uses, never writes over an existing file and
-  rolls back if the .py is refused; any `..` / absolute / drive path refuses the WHOLE
-  bundle. Uninstall removes only served files (`.html .htm .js .css` and their `.bak`) and
+  folder, keeps only files a declared screen uses and rolls back if any .py is refused;
+  any `..` / absolute / drive path refuses the WHOLE bundle. A bundle may hold several
+  top-level .py files (up to `IMPORT_MAX_TOOLS`): each is its own tool, all or none are
+  written, and two declaring the same tool / screen id / palette command refuse the lot.
+  Nothing is written over an existing tool or screen file unless `overwrite` is passed
+  (`--overwrite`, `?overwrite=1`); then each replaced file keeps a `.bak` and a failed import
+  restores it. A link or a folder at a screen file's path is never written through, overwrite
+  or not. The plan carries the text of each `.js` / `.html` screen file so the review can
+  make the person open it before Import turns on (a Menu panel's JavaScript runs in the page
+  with Jarvis). Uninstall removes only served files (`.html .htm .js .css` and their `.bak`) and
   the folder if that empties it; a folder another tool names (quoted path in its source) or
   uses, a link, and a `_` folder are never touched. None of it has a model-facing entry
   point. `tests/test_tool_folders.py` pins this.
 - **Drafts** (`custom_tools_store.py`, `~/.jarvis/tools/_drafts/`) are copies, never
   tools: not loaded, not listed as tool files. A refused save stashes its text there
-  server-side so it is never only in a browser tab. Keep the draft key validated
-  (`DRAFT_KEY_RE`) before it touches a path.
+  server-side so it is never only in a browser tab. A draft may also carry the tab's unsaved
+  screen-file text (`web`, cleaned by `_clean_draft_web`): `save_draft(..., web=None)` keeps
+  what it holds, `{}` clears it, and it is never written under the tools folder. Keep the
+  draft key validated (`DRAFT_KEY_RE`) before it touches a path.
 - A new template that ships a folder goes in `custom_tools_ui_templates.py`; the
   starter files are embedded as strings because the package has no `package-data`
   (html/js/css next to the .py would not reach an installed copy).

@@ -418,7 +418,7 @@ def request_patch(provider_type, level, *, provider_name="", model="",
     return {}
 
 
-def off_patch(provider_type, *, provider_name="", model="", base_url=""):
+def off_patch(provider_type, *, provider_name="", model="", base_url="", off_effort=None):
     """Keys that tell a host which reasons BY DEFAULT to stop (or at least
     hide it) when the thinking level is `off`.
 
@@ -439,6 +439,15 @@ def off_patch(provider_type, *, provider_name="", model="", base_url=""):
     Anything else returns {}: an unknown model gets exactly the request it got
     before. A rejected key costs nothing, because the adapter's one-shot retry
     already strips every key in _PATCH_KEYS when the host names it in a 400.
+
+    `off_effort` is the provider block's own `off_reasoning_effort`: the value
+    to send for gpt-oss at Off instead of "low". gpt-oss is documented (per
+    memory of Groq's docs, not checked live here) to take only low / medium /
+    high, so "low" stays the default; this is the way to try a lower value the
+    host may accept later without a code change. It only applies at Off, never
+    at a level someone chose. If the host rejects it, the adapter's one-shot
+    retry strips every thinking key and gpt-oss runs at ITS default (medium) --
+    more than "low" -- so remove the key again if that happens.
     """
     if provider_type != "openai_compatible":
         return {}
@@ -447,12 +456,74 @@ def off_patch(provider_type, *, provider_name="", model="", base_url=""):
         return {}
     m = (model or "").lower()
     if "gpt-oss" in m:
-        return {"reasoning_effort": "low", "include_reasoning": False}
+        effort = off_effort.strip() if isinstance(off_effort, str) and off_effort.strip() else "low"
+        return {"reasoning_effort": effort, "include_reasoning": False}
     if "qwen3" in m or "qwen-3" in m:
         return {"reasoning_effort": "none"}
     if "deepseek-r1" in m or "r1-distill" in m:
         return {"reasoning_format": "hidden"}
     return {}
+
+
+# Gemini 2.5 Flash and Flash-Lite are the models documented (per memory of
+# Google's thinking guide, not checked live here) to accept `thinkingBudget: 0`
+# -- thinking off. 2.5 Pro cannot be switched off (its smallest budget is 128)
+# and answers 0 with a 400, Gemini 3 takes `thinkingLevel` instead, and 2.0
+# models have no thinking at all, so none of those match. Image / audio / TTS
+# variants do not match either. An alias such as `gemini-flash-latest` is not
+# matched because which generation it points at changes; a provider block can
+# name a budget for it with `gemini_off_budget`.
+_GEMINI_OFF_ZERO_RE = re.compile(
+    r"^(?:models/)?gemini-2\.5-flash(?:-lite)?(?:-preview[-\w.]*|-\d{3})?$", re.I)
+
+
+def gemini_off_patch(model, setting=None):
+    """Keys for a Gemini request made while the thinking level is `off`.
+
+    Before, `off` sent nothing, and a Gemini 2.5 model with no thinkingConfig
+    thinks on its own (dynamic budget) and bills it as output -- so "Thinking:
+    Off" still paid for thinking on every Gemini turn (the Groq side was fixed
+    in L.39; this is the Gemini half). Now a model known to accept it gets
+    `thinkingBudget: 0`.
+
+    `setting` is the provider block's `gemini_off_budget`:
+      absent / None   automatic: 0 for 2.5 Flash and Flash-Lite, nothing else
+      false           send nothing (the old behaviour) for this provider
+      a whole number  send that budget at Off for any model that takes a budget
+                      (for example 128 for 2.5 Pro, whose floor is not 0)
+    Anything unreadable is treated as absent. Gemini 3 (thinkingLevel) models
+    get nothing either way: their lowest level is not "off". `includeThoughts`
+    is never sent here, so no summary is asked for at Off.
+
+    Returns the same shape request_patch() uses ({"_generationConfig": ...}) or {}.
+    """
+    if setting is False:
+        return {}
+    if gemini_uses_levels(model):
+        return {}
+    budget = None
+    if isinstance(setting, int) and not isinstance(setting, bool) and setting >= 0:
+        budget = setting
+    elif _GEMINI_OFF_ZERO_RE.match(str(model or "").strip()):
+        budget = 0
+    if budget is None:
+        return {}
+    return {"_generationConfig": {"thinkingConfig": {"thinkingBudget": budget}}}
+
+
+def host_off_floor_note(provider_type, *, provider_name="", model="", base_url=""):
+    """One plain sentence when "Thinking: Off" cannot mean fully off on this
+    host, else "". Today that is only Groq's gpt-oss, which reasons on every
+    request (per memory of Groq's docs, not checked live): Jarvis sends the
+    lowest effort and asks for the text to be hidden, but some reasoning is
+    still spent and billed. Shown in the Logs viewer once per ask so a person
+    looking at the token count is not left guessing."""
+    keys = off_patch(provider_type, provider_name=provider_name, model=model, base_url=base_url)
+    if "gpt-oss" in (model or "").lower() and keys.get("reasoning_effort"):
+        return ("thinking is off, but gpt-oss on Groq cannot be switched fully off: it still "
+                "reasons at its lowest effort and the text is hidden, so some thinking tokens "
+                "are spent")
+    return ""
 
 
 # Every key any request_patch() above can introduce. The retry-without-
@@ -491,7 +562,11 @@ _REJECT_RE = re.compile(
     # Gemini words some rejections as a range problem rather than "unsupported"
     # ("thinking_budget ... must be between 128 and 32768", "... out of range").
     r"|(thinking_?budget|thinking_?level|thinking_?config|thinkingbudget|thinkinglevel)"
-    r".{0,80}?(out of range|must be|not allowed|only supports|between \d)",
+    r".{0,80}?(out of range|must be|not allowed|only supports|between \d)"
+    # Gemini 2.5 Pro answers a budget of 0 with "Budget 0 is invalid. This model
+    # only works in thinking mode." -- no "thinking" before "invalid", so the
+    # alternatives above miss it.
+    r"|budget\s*\d*\s*is invalid|only works in thinking mode",
     re.I | re.S,
 )
 

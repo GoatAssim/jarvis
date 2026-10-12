@@ -122,7 +122,8 @@ ret, pl = _apply(GEM25, "gemini", "high", payload=G(60000))
 check("a cap that is already larger is never lowered",
       pl["generationConfig"]["maxOutputTokens"] == 60000, pl)
 ret, pl = _apply(GEM25, "gemini", "off", payload=G(3072))
-check("level off leaves the cap alone", pl == G(3072), pl)
+check("level off leaves the cap alone (and, on 2.5 Flash, only adds a zero thinking budget)",
+      pl == {"generationConfig": {"maxOutputTokens": 3072, "thinkingConfig": {"thinkingBudget": 0}}}, pl)
 ret, pl = _apply(GEM3, "gemini", "high", payload=G(3072))
 tc = pl["generationConfig"].get("thinkingConfig") or {}
 check("Gemini 3 (thinkingLevel) also gets room: level's budget + 1024",

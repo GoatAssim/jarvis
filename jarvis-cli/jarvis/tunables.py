@@ -151,6 +151,7 @@ PLUMBING_ENV = (
     ("JARVIS_TASK_STREAM_FILE", "Set for a subagent step; the CLI appends live stream events to this file."),
     ("JARVIS_CHANGE_SOURCE", "Marks a permission change as made from the web panel."),
     ("JARVIS_JOB_APPROVED_KINDS", "Tool kinds a scheduled job was pre-approved for."),
+    ("JARVIS_WEB_DATA", "Set by the web server to its own web/data folder, so Settings can open the files in it."),
 )
 
 

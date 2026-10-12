@@ -4,7 +4,9 @@ Advanced lets the owner change any setting in the project from the web UI. Three
 layers, one module that owns every rule so the CLI and the web server cannot disagree
 (REPO_MAP.md section 6: a web route shells out, it never reimplements a rule):
 
-  1. **Files**: the JSON files under ~/.jarvis, edited as a document.
+  1. **Files**: the JSON files under ~/.jarvis, edited as a document, plus the web console's
+     own small data files (``web/data/*.json``, addressed as ``web-data/<name>.json``;
+     only an allow-list of them is editable, see ``_WEB_DATA_FILES``).
   2. **Tunables**: a short, curated list of numbers and switches that used to need a
      source edit (``tunables.py`` is the registry and the store).
   3. **Plumbing**: the ``JARVIS_*`` variables Jarvis sets for itself, shown read-only.
@@ -116,8 +118,41 @@ GROUP_LABELS = {
     GROUP_STATE: "State (read-only here)",
 }
 
+# The web console's data files (web/data/*.json). Only the files named here are editable, and each
+# gets the rules the web server applies when ITS OWN routes write the file, repeated below and
+# pinned against server.js by tests/test_l43_web_data.py, so this screen is never a way around
+# them. Anything else found in that folder is listed read-only: a file this screen knows nothing
+# about may be in a shape only its writer understands.
+A_RELOAD = "Next time the page loads (reload the tab)."
+MAX_FAVORITE_DAEMONS = 500
+DAEMON_ID_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,39}$")
+# Must match ASK_CONSOLE_KINDS in web/server.js (and the categories in public/app.js).
+ASK_CONSOLE_KINDS = ("tool-call", "tool-result", "tokens", "discovery", "provider",
+                     "narration", "status", "error", "other")
+
+# leaf name -> (group, title, applies, note)
+_WEB_DATA_FILES = {
+    "favorites.json": (GROUP_SETTINGS, "Starred commands", A_RELOAD,
+                       "A list of command names. The Commands panel writes this same file when you star one."),
+    "favorite-daemons.json": (GROUP_SETTINGS, "Starred daemons", A_RELOAD,
+                              "A list of daemon ids (lowercase letters, digits, - and _; at most %d). "
+                              "The Daemons panel writes this same file when you star one." % MAX_FAVORITE_DAEMONS),
+    "ask-console-filter.json": (GROUP_SETTINGS, "Ask console filter", A_RELOAD,
+                                "hiddenKinds lists the kinds of line the Ask panel's command-prompt trace hides."),
+    "reboot.json": (GROUP_STATE, "Restart marker", A_UNKNOWN,
+                    "Kept next to the web console's other data. Shown so you can look; not editable here."),
+}
+
 _NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.\-]{0,80}\.json$")
 _SUBDIR = "channels"
+_WEB_SUBDIR = "web-data"   # web/data/*.json in the repo, next to the web server (gitignored)
+
+# Where the web console keeps those files. The web server sets JARVIS_WEB_DATA to its own data
+# folder on every settings call, so an installed jarvis.exe finds the right one; run from a
+# checkout in a terminal the folder is found next to jarvis-cli/. WEB_DATA_DIR overrides both
+# (tests). None = this process cannot tell, and the web-data/ files are then not offered.
+WEB_DATA_ENV = "JARVIS_WEB_DATA"
+WEB_DATA_DIR = None
 _BACKUP_ID_RE = re.compile(r"^[0-9]{8}T[0-9]{6}_[0-9]{6}$")
 
 _SECRET_KEY_RE = re.compile(
@@ -152,12 +187,13 @@ def _dir():
 
 def _split_name(name):
     """('channels', 'people.json') or ('', 'ai_config.json'); None when the name is not one
-    we will touch. Only top-level files and the channels/ folder are reachable."""
+    we will touch. Only top-level files, the channels/ folder and web-data/ (the web
+    console's web/data folder) are reachable."""
     if not isinstance(name, str):
         return None
     if "/" in name:
         head, _, tail = name.partition("/")
-        if head != _SUBDIR or not _NAME_RE.match(tail):
+        if head not in (_SUBDIR, _WEB_SUBDIR) or not _NAME_RE.match(tail):
             return None
         return head, tail
     if not _NAME_RE.match(name):
@@ -165,12 +201,44 @@ def _split_name(name):
     return "", name
 
 
+def _web_data_dir():
+    """The folder holding the web console's data files, or None when this process cannot tell.
+
+    Order: WEB_DATA_DIR (tests), then JARVIS_WEB_DATA (must be an absolute path: a relative
+    one would mean "relative to whatever directory this process happens to be in", so it is
+    ignored), then web/data beside this checkout, when the web server's file is there."""
+    if WEB_DATA_DIR is not None:
+        return Path(WEB_DATA_DIR)
+    raw = os.environ.get(WEB_DATA_ENV, "").strip()
+    if raw:
+        candidate = Path(raw)
+        if candidate.is_absolute():
+            return candidate
+    try:
+        web = Path(__file__).resolve().parents[2] / "web"
+    except (IndexError, OSError):
+        return None
+    return (web / "data") if (web / "server.js").is_file() else None
+
+
 def _path_for(name):
     parts = _split_name(name)
     if parts is None:
         return None
     sub, leaf = parts
+    if sub == _WEB_SUBDIR:
+        base = _web_data_dir()
+        return (base / leaf) if base is not None else None
     return (_dir() / sub / leaf) if sub else (_dir() / leaf)
+
+
+def _no_path(name, verb):
+    """The refusal text for a name _path_for could not turn into a path."""
+    parts = _split_name(name)
+    if parts is not None and parts[0] == _WEB_SUBDIR:
+        return ("Jarvis can't tell where the web console keeps its data files from here. Open Settings from "
+                "the web console, or set %s to the full path of its web/data folder." % WEB_DATA_ENV)
+    return "That is not a file this screen can %s." % verb
 
 
 def meta_for(name):
@@ -181,6 +249,10 @@ def meta_for(name):
         group, title, applies, note = (
             GROUP_MANAGED, "Chat-platform data", A_FEATURE,
             "Written by the Channels panel under its own permission rules, so it is read-only here.")
+    elif sub == _WEB_SUBDIR:
+        group, title, applies, note = _WEB_DATA_FILES.get(parts[1], (
+            GROUP_STATE, "", A_UNKNOWN,
+            "Not one of the web console data files this screen edits, so it is shown read-only."))
     elif name in _FILES:
         group, title, applies, note = _FILES[name]
     else:
@@ -470,7 +542,64 @@ def _validate_commands(doc, problems):
             problems.append("commands.%s: %s" % (cmd_name, msg))
 
 
-_VALIDATORS = {"ai_config.json": _validate_ai_config, "commands.json": _validate_commands}
+def _text_list_problems(items, problems, what, pattern=None, bad_form=""):
+    """Shared by the two starred-lists: every entry is non-empty text (matching `pattern` when
+    given), and none is listed twice (a starred list is a set, which is why the web server
+    de-duplicates what it writes)."""
+    seen = set()
+    for i, item in enumerate(items):
+        where = _fmt_path((i,))
+        if not isinstance(item, str) or not item.strip():
+            problems.append("%s must be a non-empty name (%s)." % (where, what))
+        elif pattern is not None and not pattern.match(item):
+            problems.append("%s: %r is not a valid %s%s." % (where, item, what, bad_form))
+        elif item in seen:
+            problems.append("%s: %r is listed twice." % (where, item))
+        else:
+            seen.add(item)
+
+
+def _validate_favorites(doc, problems):
+    _text_list_problems(doc, problems, "command name")
+
+
+def _validate_favorite_daemons(doc, problems):
+    _text_list_problems(doc, problems, "daemon id", DAEMON_ID_RE,
+                        ": lowercase letters, digits, - and _, starting with a letter or digit, at most 40 long")
+    if len(doc) > MAX_FAVORITE_DAEMONS:
+        problems.append("At most %d starred daemons (this has %d)." % (MAX_FAVORITE_DAEMONS, len(doc)))
+
+
+def _validate_console_filter(doc, problems):
+    for key in doc:
+        if key != "hiddenKinds":
+            problems.append("%s is not a setting of the Ask console filter (only hiddenKinds is)." % key)
+    if "hiddenKinds" not in doc:
+        return
+    kinds = doc["hiddenKinds"]
+    if not isinstance(kinds, list):
+        problems.append("hiddenKinds must be a list of kinds.")
+        return
+    seen = set()
+    for i, kind in enumerate(kinds):
+        where = _fmt_path(("hiddenKinds", i))
+        if kind not in ASK_CONSOLE_KINDS:
+            problems.append("%s: %r is not a kind of line (use: %s)." % (where, kind, ", ".join(ASK_CONSOLE_KINDS)))
+        elif kind in seen:
+            problems.append("%s: %r is listed twice." % (where, kind))
+        else:
+            seen.add(kind)
+
+
+_VALIDATORS = {"ai_config.json": _validate_ai_config, "commands.json": _validate_commands,
+               "web-data/ask-console-filter.json": _validate_console_filter}
+# Files whose top level is a list. Kept apart because the validators above all expect an object.
+_LIST_VALIDATORS = {"web-data/favorites.json": _validate_favorites,
+                    "web-data/favorite-daemons.json": _validate_favorite_daemons}
+# The top level a file must have, whatever it held before (so a file that does not exist yet
+# cannot be created in the wrong shape).
+_ROOT_TYPE = {"web-data/favorites.json": list, "web-data/favorite-daemons.json": list,
+              "web-data/ask-console-filter.json": dict}
 
 
 def validate(name, new_doc, old_doc, check_types=True):
@@ -480,17 +609,27 @@ def validate(name, new_doc, old_doc, check_types=True):
     wrong kind (a number typed as text) is exactly what that is meant to repair, so the
     \"keeps its type\" rule is skipped for it. The file's own structural checks still run."""
     problems = []
-    if old_doc is not None and type(old_doc) is not type(new_doc):
+    want = _ROOT_TYPE.get(name)
+    if want is not None:
+        # A file with one fixed shape: the shape is the rule, whatever the file holds now, so a
+        # wrong-shaped file can be repaired and a missing one cannot be created in the wrong shape.
+        if not isinstance(new_doc, want):
+            problems.append("The top level of %s must be %s." % (name, "a list" if want is list else "an object"))
+            return problems
+    elif old_doc is not None and type(old_doc) is not type(new_doc):
         problems.append("The top level must stay %s." % ("an object" if isinstance(old_doc, dict) else "a list"))
         return problems
     if old_doc is None and not isinstance(new_doc, (dict, list)):
         problems.append("The top level must be an object or a list.")
         return problems
-    if old_doc is not None and check_types:
+    if old_doc is not None and check_types and type(old_doc) is type(new_doc):
         _stability(old_doc, new_doc, (), problems)
     check = _VALIDATORS.get(name)
     if check and isinstance(new_doc, dict):
         check(new_doc, problems)
+    list_check = _LIST_VALIDATORS.get(name)
+    if list_check and isinstance(new_doc, list):
+        list_check(new_doc, problems)
     return problems
 
 
@@ -581,6 +720,15 @@ def _known_names():
                 names.add(_SUBDIR + "/" + p.name)
     except OSError:
         pass
+    web = _web_data_dir()
+    if web is not None:
+        try:
+            for p in web.glob("*.json"):
+                if _NAME_RE.match(p.name):
+                    names.add(_WEB_SUBDIR + "/" + p.name)
+        except OSError:
+            pass
+        names.update(_WEB_SUBDIR + "/" + n for n, v in _WEB_DATA_FILES.items() if v[0] in EDITABLE_GROUPS)
     # Files Jarvis knows by name are listed even before they exist, so a setting file that
     # has not been created yet can still be created from here.
     names.update(n for n, v in _FILES.items() if v[0] in EDITABLE_GROUPS)
@@ -610,6 +758,7 @@ def catalog():
         "ok": True,
         "version": version,
         "jarvis_dir": str(_dir()),
+        "web_data_dir": str(_web_data_dir()) if _web_data_dir() is not None else None,
         "files": files,
         "groups": [{"id": g, "label": GROUP_LABELS[g]} for g in order],
         "tunables": tunables.snapshot(),
@@ -622,7 +771,7 @@ def catalog():
 def read(name, reveal=False):
     path = _path_for(name)
     if path is None:
-        return {"ok": False, "error": "That is not a file this screen can open."}
+        return {"ok": False, "error": _no_path(name, "open")}
     info = meta_for(name)
     text, err = _raw(path)
     if err:
@@ -651,7 +800,7 @@ def _gate(name, confirm_guarded):
         return None, None, {"ok": False, "error": why, "code": "unattended"}
     path = _path_for(name)
     if path is None:
-        return None, None, {"ok": False, "error": "That is not a file this screen can write.", "code": "bad_name"}
+        return None, None, {"ok": False, "error": _no_path(name, "write"), "code": "bad_name"}
     info = meta_for(name)
     if not info["editable"]:
         return None, None, {"ok": False, "code": "read_only",
@@ -683,7 +832,7 @@ def preview(name, text, base_version=None):
     """What a save WOULD do. Writes nothing; refuses nothing but bad input."""
     path = _path_for(name)
     if path is None:
-        return {"ok": False, "error": "That is not a file this screen can open."}
+        return {"ok": False, "error": _no_path(name, "open")}
     info = meta_for(name)
     old_text, err = _raw(path)
     if err:
@@ -916,7 +1065,7 @@ def defaults_report(name):
     """What the Files tree needs to mark values that differ from the built-in default."""
     path = _path_for(name)
     if path is None:
-        return {"ok": False, "error": "That is not a file this screen can open."}
+        return {"ok": False, "error": _no_path(name, "open")}
     info = meta_for(name)
     default = default_doc(name)
     if default is None:

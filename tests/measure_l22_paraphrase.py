@@ -22,17 +22,45 @@ MODES
              to the matcher itself
   live       (--live) the real cheap_call. Costs tokens.
 
-HOME is redirected to a temp dir first; nothing real is touched.
+HOME is redirected to a temp dir first, so the rules this script stores never touch your real
+~/.jarvis. With --live ONLY ~/.jarvis/ai_config.json (the providers and their keys) is copied
+into that temp dir, because the real model call finds its providers there; without the copy
+every live answer would be "no answer" and the live row would silently equal model-down. The
+temp dir, copy included, is deleted when the script exits. Nothing is ever written back.
+
+The fixture lives in tests/fixtures/, which .gitignore excludes: a fresh clone or a zip made
+from git does not have it, and the script says so instead of failing with a traceback.
 """
 
 import argparse
+import atexit
 import json
 import os
+import shutil
 import sys
 import tempfile
 from pathlib import Path
 
+
+def prepare_home(real_home, temp_home, live):
+    """Copy the one file a live run needs into the sandbox HOME. Returns True when it did.
+    Only ai_config.json, and only for --live: no memory, conversations or channel data."""
+    if not live:
+        return False
+    source = Path(real_home) / ".jarvis" / "ai_config.json"
+    if not source.is_file():
+        return False
+    target = Path(temp_home) / ".jarvis"
+    target.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(str(source), str(target / "ai_config.json"))
+    return True
+
+
+_LIVE = "--live" in sys.argv[1:]
+_REAL_HOME = os.path.expanduser("~")          # read BEFORE HOME is redirected below
 _HOME = tempfile.mkdtemp(prefix="jarvis-l22-bench-")
+_CONFIG_COPIED = prepare_home(_REAL_HOME, _HOME, _LIVE)
+atexit.register(shutil.rmtree, _HOME, True)   # the copied keys must not outlive the run
 os.environ["HOME"] = _HOME
 os.environ["USERPROFILE"] = _HOME
 REPO = Path(__file__).resolve().parent.parent
@@ -45,6 +73,11 @@ CLASSES = ("lexical", "paraphrase", "negative")
 
 def load_cases():
     path = REPO / "tests" / "fixtures" / "l22_paraphrase_cases.json"
+    if not path.is_file():
+        sys.exit(f"The fixture is not in this checkout: {path}\n"
+                 "tests/fixtures/ is in .gitignore, so a fresh clone or a zip made from git does not have it. "
+                 "Restore l22_paraphrase_cases.json (it came with the L.22 patch, "
+                 "jarvis-l21-l22-export-postcheck-conflicts.patch) and run again.")
     return json.loads(path.read_text(encoding="utf-8"))["cases"]
 
 
@@ -55,6 +88,7 @@ def run_mode(cases, mode):
             for msg in case[cls]:
                 labels[msg] = cls
     calls = [0]
+    answered = [0]
 
     def classify(topic, message):
         calls[0] += 1
@@ -62,6 +96,11 @@ def run_mode(cases, mode):
             return False
         if mode == "model-down":
             return None
+        if mode == "live":
+            verdict = person_memory._classify_topic(topic, message)   # the real cheap call
+            if verdict is not None:
+                answered[0] += 1
+            return verdict
         return labels.get(message) in ("lexical", "paraphrase")      # oracle
 
     rows = {cls: {"n": 0, "matched": 0, "by": {}, "missed": []} for cls in CLASSES}
@@ -70,8 +109,7 @@ def run_mode(cases, mode):
         person_memory.add_instruction(person, case["topic"], case["directive"])
         for cls in CLASSES:
             for msg in case[cls]:
-                got = person_memory.matches(person, msg,
-                                            classify=None if mode == "live" else classify)
+                got = person_memory.matches(person, msg, classify=classify)
                 row = rows[cls]
                 row["n"] += 1
                 if got:
@@ -81,14 +119,19 @@ def run_mode(cases, mode):
                 else:
                     row["missed"].append(f"[{case['topic']}] {msg}")
     total = sum(r["n"] for r in rows.values())
-    return {"mode": mode, "classifier_calls": calls[0] if mode != "live" else None,
+    return {"mode": mode, "classifier_calls": calls[0],
+            "classifier_answered": answered[0] if mode == "live" else None,
             "messages": total, "classes": rows}
 
 
 def show(result):
     print(f"\n== {result['mode']} ==")
-    if result["classifier_calls"] is not None:
-        print(f"classifier calls: {result['classifier_calls']} for {result['messages']} messages")
+    print(f"classifier calls: {result['classifier_calls']} for {result['messages']} messages")
+    if result["classifier_answered"] is not None:
+        print(f"classifier answered: {result['classifier_answered']} of {result['classifier_calls']}")
+        if result["classifier_calls"] and not result["classifier_answered"]:
+            print("WARNING: no provider answered, so this row is the same as model-down and is not a "
+                  "live number. Check that ~/.jarvis/ai_config.json has an enabled provider with a key.")
     for cls in CLASSES:
         r = result["classes"][cls]
         rate = r["matched"] / float(r["n"]) if r["n"] else 0.0
@@ -107,6 +150,8 @@ def main():
     ap.add_argument("--out", help="write the numbers to this JSON file")
     args = ap.parse_args()
     cases = load_cases()
+    if args.live and not _CONFIG_COPIED:
+        print("NOTE: no ~/.jarvis/ai_config.json was found, so the live model has no provider to ask.")
     modes = ["no-model", "model-down", "oracle"] + (["live"] if args.live else [])
     results = []
     for mode in modes:

@@ -1620,21 +1620,25 @@ SCHEDULED_TOKEN_BUDGET_DEFAULT = 30000
 TOKEN_BUDGET_ENV = "JARVIS_TOKEN_BUDGET"
 
 # L.24 T4 (the interactive half): the same per-ask ledger, for an ask with a
-# person watching. OFF by default -- and that is a decision, not an omission: an
-# interactive ask legitimately costs anything from 1K to the 56K measured on
-# 81b52bb561796954, a dev_agent turn can cost more, and I have no number of the
-# owner's to anchor a default to. It exists so a limit can be set
-# (defaults.interactive_token_budget, Settings > Advanced) once the owner has
-# picked one; until then nothing changes for an interactive ask.
-INTERACTIVE_TOKEN_BUDGET_DEFAULT = 0
+# person watching. It used to be OFF by default, because an interactive ask
+# legitimately costs anything from 1K to the 56K measured on 81b52bb561796954,
+# a dev_agent turn can cost more, and there was no number of the owner's to
+# anchor a default to. It is now ON at 150,000 tokens: a judgement call, not a
+# measurement -- about 2.7x the largest single ask measured, so an ordinary ask
+# never meets it, while a runaway (a tool loop, or a failover chain that keeps
+# spending on every key) is ended with a plain report instead of running on.
+# The stop reply names the setting and says that 0 turns the limit off:
+# defaults.interactive_token_budget, Settings > Advanced.
+INTERACTIVE_TOKEN_BUDGET_DEFAULT = 150000
 
 
 def _token_budget_limit(defaults):
-    """Tokens one ask() may spend, or None for no limit. Only an UNATTENDED run
+    """Tokens one ask() may spend, or None for no limit. An UNATTENDED run
     (policy.unattended_context_from_env: JARVIS_SCHEDULED / an unattended
-    JARVIS_CONTEXT) is limited -- an interactive ask has a person watching and
-    is never cut off. An unreadable setting falls back to the default rather
-    than to "no limit": a typo must not switch the protection off."""
+    JARVIS_CONTEXT) gets the scheduled limit; any other ask gets the
+    interactive limit (_interactive_token_limit: 150,000 unless set, 0 = none).
+    An unreadable setting falls back to the default rather than to "no limit":
+    a typo must not switch the protection off."""
     if policy.unattended_context_from_env() is None:
         return _interactive_token_limit(defaults)
     raw = os.environ.get(TOKEN_BUDGET_ENV)
@@ -1649,18 +1653,21 @@ def _token_budget_limit(defaults):
 
 def _interactive_token_limit(defaults):
     """Tokens one INTERACTIVE ask() may spend (defaults.interactive_token_budget),
-    or None. Unlike the scheduled limit an unreadable value means "no limit":
-    this one's default is off, so a typo returns it to its default.
-    JARVIS_TOKEN_BUDGET is deliberately not read here -- it is the per-run knob
-    the scheduler sets for a job."""
+    or None when the owner set 0. Like the scheduled limit, an unreadable value
+    (text, null, a negative number, a bare true/false) falls back to the
+    default rather than to "no limit": a typo must not switch the protection
+    off -- only an explicit 0 does. JARVIS_TOKEN_BUDGET is deliberately not
+    read here -- it is the per-run knob the scheduler sets for a job."""
     raw = (defaults or {}).get("interactive_token_budget", INTERACTIVE_TOKEN_BUDGET_DEFAULT)
     if isinstance(raw, bool):
-        return None
+        return INTERACTIVE_TOKEN_BUDGET_DEFAULT
     try:
         value = int(raw)
     except (TypeError, ValueError):
+        return INTERACTIVE_TOKEN_BUDGET_DEFAULT
+    if value == 0:
         return None
-    return value if value > 0 else None
+    return value if value > 0 else INTERACTIVE_TOKEN_BUDGET_DEFAULT
 
 
 def _preflight_stop(pf, conv_id, user_text, assistant_name, address, trace):
@@ -3754,8 +3761,9 @@ def _ask_impl(user_text, commands=None, on_attempt=None, on_tool_call=None, on_t
     ask_usage = token_usage.AskUsage()  # L.24 T6: every attempt's spend
 
     # L.16 item 8: the ask-level token ledger. One per ask(), spanning every
-    # provider/key attempt; it always counts, and it only has a limit (and so
-    # only stops anything) in an unattended run. ask() restores the previous
+    # provider/key attempt; it always counts, and it stops an ask that goes over
+    # its limit: the scheduled limit in an unattended run, the interactive limit
+    # (150,000 unless set; 0 = none) otherwise. ask() restores the previous
     # ledger on the way out.
     token_budget = ai_providers.TokenBudget(_token_budget_limit(_defaults))
     ai_providers.set_token_budget(token_budget)

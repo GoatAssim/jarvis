@@ -1397,7 +1397,7 @@
   }
 
   const PANEL_VERBS = new Set(["guides", "debug", "checklist", "schedule", "calendar", "mcp", "ctools", "channels",
-    "daemons", "backlog", "logsearch", "setup", "subagents", "notifications", "logs", "config", "skin"]);
+    "daemons", "logsearch", "setup", "subagents", "notifications", "logs", "config", "skin"]);
 
   const HANDLERS = {
     async new() { await host().newChat(); },
@@ -1418,7 +1418,32 @@
       host().stop();
     },
     redo() { host().redo(); },
-    copy() { host().copyLastReply(); },
+    copy({ argText }) {
+      // /copy = the whole last reply; /copy 2 = only its 2nd code block (counted the way the
+      // Copy buttons on the blocks are: 1 is the first).
+      const raw = (argText || "").trim();
+      if (!raw) { host().copyLastReply(); return; }
+      if (!/^[1-9]\d{0,2}$/.test(raw)) {
+        toast("Usage: /copy [block number] \u2014 e.g. /copy 2 copies the second code block.", "warn");
+        return false;
+      }
+      return host().copyLastReply(Number(raw));
+    },
+    async backlog({ argText }) {
+      // /backlog opens the panel; /backlog add <title> adds an item and leaves the chat alone.
+      const raw = (argText || "").trim();
+      if (!raw) { host().openPanel("backlog"); return; }
+      const m = /^add(?:\s+([\s\S]*))?$/i.exec(raw);
+      const title = m ? (m[1] || "").trim() : "";
+      if (!title) {
+        toast("Usage: /backlog add <title> \u2014 or just /backlog to open it.", "warn");
+        return false;
+      }
+      if (title.length > 200) { toast("A backlog title is 200 characters at most.", "warn"); return false; }
+      try { await apiSend("POST", "/api/backlog", { title }); }
+      catch (e) { toast((e && e.message) || "Couldn't add that item.", "warn"); return false; }
+      info(`Added to the Backlog: ${title}`);
+    },
     async provider({ argText }) {
       const { rows } = await resolveFromList("providers", "", true);
       const names = argText.split(",").map((s) => s.trim()).filter(Boolean);

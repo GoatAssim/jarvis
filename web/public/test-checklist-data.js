@@ -2382,7 +2382,8 @@ window.JARVIS_TEST_CHECKLIST = /*JSON-BEGIN*/ {
     }
    ],
    "watch": [
-    "Subscribed feeds are read-only — this never writes to Google or Outlook."
+    "Subscribed feeds are read-only — this never writes to Google or Outlook.",
+    "With 500 events still within their keep time it refuses and says the number; it never removes one to make room (Menu > Calendars has Delete). An event that ended before the keep time (60 days by default) is refused, not saved and then dropped."
    ]
   },
   "calendar_update_event": {
@@ -4645,6 +4646,45 @@ window.JARVIS_TEST_CHECKLIST = /*JSON-BEGIN*/ {
     "A list (for example safe_roots) is compared and reset as a whole, not item by item.",
     "A value you added that the default does not have is tagged \"added by you\" and has no Reset.",
     "A hidden (masked) value cannot be edited in the Tree: use Reveal secrets, then edit."
+   ]
+  },
+  "settings_web_data": {
+   "group": "settings",
+   "does": "Advanced -> Files also opens the web console's own data files (web/data), listed as web-data/<name>.json: starred commands, starred daemons and the Ask console filter are editable; anything else there is read-only.",
+   "steps": [
+    {
+     "do": "Open Settings -> Advanced -> Files and look for the entries starting with web-data/ (use the filter box: type web-data).",
+     "expect": "web-data/favorites.json, web-data/favorite-daemons.json and web-data/ask-console-filter.json are listed (greyed if not created yet); web-data/reboot.json appears once it exists and is marked read-only. About lists the Web console data folder."
+    },
+    {
+     "do": "Star one command in the Commands panel, then open web-data/favorites.json.",
+     "expect": "The command's name is in the list. Add a second name in the Text view, Preview changes, Save, reload the page: that command is now starred."
+    },
+    {
+     "do": "Add the same name twice and Save.",
+     "expect": "Refused: the name is listed twice; nothing is written."
+    },
+    {
+     "do": "Open web-data/favorite-daemons.json and add the id \"My Daemon\" (capitals and a space).",
+     "expect": "Refused with the rule for a valid daemon id; a lower-case id such as \"my-daemon\" is accepted."
+    },
+    {
+     "do": "Open web-data/ask-console-filter.json, set hiddenKinds to [\"tokens\"], Save, reload the page and open the Ask panel's console filter.",
+     "expect": "Token-cost lines are hidden. A kind that does not exist (\"bogus\"), or a misspelt key, is refused with the list of real kinds."
+    },
+    {
+     "do": "Open web-data/reboot.json.",
+     "expect": "It shows its contents read-only with a note saying why; Save is disabled."
+    },
+    {
+     "do": "Press Undo last change on web-data/favorites.json, and open its Backups.",
+     "expect": "The previous list comes back; Backups lists a copy made before each save (kept under ~/.jarvis/settings_backups, not in web/data)."
+    }
+   ],
+   "care": "These are real files: your stars change. Note your starred commands first or Undo afterwards.",
+   "watch": [
+    "Starring something in the panel while the file is open here makes your next Save here refuse as stale; Reload shows the new list.",
+    "If Settings was opened from a jarvis you run in a terminal rather than from the web console, the web-data files are only offered when jarvis can find web/data (set JARVIS_WEB_DATA to its full path otherwise)."
    ]
   },
   "settings_tunables": {

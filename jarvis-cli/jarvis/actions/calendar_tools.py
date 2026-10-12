@@ -48,7 +48,9 @@ import json
 import os
 import re
 import secrets
-from datetime import datetime, timedelta, timezone
+import time
+from contextlib import contextmanager
+from datetime import date as _date, datetime, timedelta, timezone, tzinfo
 from pathlib import Path
 
 JARVIS_DIR = Path.home() / ".jarvis"
@@ -70,6 +72,15 @@ DEFAULT_LOOKAHEAD_DAYS = 7
 LOCAL_RETENTION_DAYS = 60
 LOCAL_RETENTION_MAX_DAYS = 3650
 LOCAL_MAX_EVENTS = 500
+# The day a week starts on in the panel's Week / Month views (and in a repeat rule that
+# names none): Monday (the default), Sunday or Saturday.
+WEEK_STARTS = ("mon", "sun", "sat")
+DEFAULT_WEEK_START = "mon"
+# Two Jarvis processes (the web panel, a chat reply, the terminal) can write calendar.json
+# at the same moment; a write waits this long for the other to finish, and a lock older than
+# LOCK_STALE_SECONDS belongs to a process that died, so it is taken over.
+LOCK_WAIT_SECONDS = 5.0
+LOCK_STALE_SECONDS = 30.0
 # Calendars panel limits.
 MAX_FEEDS = 12
 FEED_NAME_MAX = 40
@@ -81,9 +92,11 @@ DEFAULT_CONFIG = {
     "local_events": [],
     "default_reminder_minutes": 60,
     # How long Jarvis's own events are kept after they end (1..3650). The default is
-    # LOCAL_RETENTION_DAYS; a number outside the range is ignored. Edited in
-    # Settings > Advanced (the panel only states it).
+    # LOCAL_RETENTION_DAYS; a number outside the range is ignored. Set in the Calendars
+    # panel (Calendars tab) or here.
     "keep_days": LOCAL_RETENTION_DAYS,
+    # The day weeks start on in the panel: "mon", "sun" or "sat".
+    "week_start": DEFAULT_WEEK_START,
 }
 
 
@@ -156,15 +169,80 @@ def retention_days(cfg=None):
     return LOCAL_RETENTION_DAYS
 
 
+def week_start(cfg=None):
+    """The day the panel's weeks start on: ``week_start`` from calendar.json when it is one
+    of WEEK_STARTS, else Monday."""
+    cfg = cfg if cfg is not None else load_config()
+    value = cfg.get("week_start")
+    value = value.strip().lower() if isinstance(value, str) else ""
+    return value if value in WEEK_STARTS else DEFAULT_WEEK_START
+
+
+_BUSY_MESSAGE = ("Another Jarvis window or process is changing the calendar right now, so nothing "
+                 "was changed. Try again in a moment.")
+
+
+@contextmanager
+def _file_lock(target):
+    """A lock between Jarvis PROCESSES around one read-change-write of ``target``.
+
+    calendar.json is written by the Calendars panel (one process per request), by a chat
+    reply adding an event and by ``jarvis calendar-add`` (the Advanced editor has its own
+    stale-version check). Each used to read the file, change it and write the whole thing
+    back, so two overlapping ones
+    silently lost the later change (and shared one ``.tmp`` file). Same O_CREAT|O_EXCL
+    lockfile as notifier.py / scheduler.py (no fcntl / msvcrt, so identical on Windows and
+    POSIX). Yields True when the lock is held, False when another process kept it past
+    LOCK_WAIT_SECONDS -- the caller refuses (a calendar write that waits on a stuck lock is
+    better than one that overwrites someone else's). If no lock can be made at all (a
+    read-only folder), it yields True: the write itself will then fail and say so.
+    Never nest two locks on the same file."""
+    lock_path = str(target) + ".lock"
+    state = "busy"
+    try:
+        JARVIS_DIR.mkdir(parents=True, exist_ok=True)
+        deadline = time.time() + LOCK_WAIT_SECONDS
+        while True:
+            try:
+                fd = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+                os.close(fd)
+                state = "held"
+                break
+            except FileExistsError:
+                try:
+                    if time.time() - os.path.getmtime(lock_path) > LOCK_STALE_SECONDS:
+                        os.remove(lock_path)
+                        continue
+                except OSError:
+                    pass
+                if time.time() >= deadline:
+                    break
+                time.sleep(0.03)
+    except OSError:
+        state = "unlockable"
+    try:
+        yield state != "busy"
+    finally:
+        if state == "held":
+            try:
+                os.remove(lock_path)
+            except OSError:
+                pass
+
+
+def _config_lock():
+    return _file_lock(CONFIG_FILE)
+
+
 # ---------------------------------------------------------------------------
 # ICS parsing
 #
 # A deliberately small subset: VEVENT, SUMMARY, DTSTART, DTEND, LOCATION,
-# DESCRIPTION, plus enough RRULE to expand a simple daily/weekly repeat inside
-# the window being asked about. Full RFC 5545 (RDATE, EXDATE, BYSETPOS,
-# VTIMEZONE with custom offsets) is a library's job; this handles what a
-# personal calendar actually contains and ignores the rest rather than
-# failing on it.
+# DESCRIPTION, EXDATE, RDATE, RRULE (every FREQ from SECONDLY to YEARLY with the BYxxx
+# parts of RFC 5545) expanded inside the window being asked about, and the file's own
+# VTIMEZONE blocks for zones this PC's tz database lacks. Anything beyond that (RSCALE,
+# EXRULE, a rule that contradicts itself) is left alone: the event shows once rather than
+# an invented series.
 # ---------------------------------------------------------------------------
 
 _UNFOLD_RE = re.compile(r"\r?\n[ \t]")
@@ -184,10 +262,24 @@ def parse_ics(text, window_start=None, window_end=None):
     A repeating event is expanded across the window. An occurrence the calendar crossed
     out (EXDATE) or replaced (a VEVENT with the same UID and a RECURRENCE-ID) is not shown
     as well as its replacement."""
+    global _ICS_ZONES
     if not text:
         return []
     # Unfold: ICS wraps long lines with a CRLF + single space/tab.
     text = _UNFOLD_RE.sub("", text)
+    # The zones this file defines for itself (VTIMEZONE) are only in force while it is read.
+    outer = _ICS_ZONES
+    try:
+        _ICS_ZONES = _read_vtimezones(text)
+    except Exception:  # noqa: BLE001 -- a bad zone block must not lose the whole calendar
+        _ICS_ZONES = {}
+    try:
+        return _parse_events(text, window_start, window_end)
+    finally:
+        _ICS_ZONES = outer
+
+
+def _parse_events(text, window_start, window_end):
     raws = []
     current = None
     alarm_depth = 0
@@ -226,6 +318,8 @@ def parse_ics(text, window_start=None, window_end=None):
             current[name] = (value, params)
         elif name == "EXDATE":
             current.setdefault("EXDATE", []).append((value, params))
+        elif name == "RDATE":
+            current.setdefault("RDATE", []).append((value, params))
         elif name in ("SUMMARY", "LOCATION", "DESCRIPTION", "UID", "RRULE", "STATUS"):
             current[name] = value
 
@@ -274,14 +368,14 @@ def _add_skip(skip, value, params):
 
 
 def _finish_event(raw, window_start, window_end, skip=None):
-    start_wall, zone = _parse_ics_dt_wall(*raw.get("DTSTART", ("", "")))
+    dtstart_value, dtstart_params = raw.get("DTSTART", ("", ""))
+    start_wall, zone = _parse_ics_dt_wall(dtstart_value, dtstart_params)
     if start_wall is None:
         return []
     end_wall, end_zone = _parse_ics_dt_wall(*raw.get("DTEND", ("", "")))
     if end_wall is None:
         # A date-only DTSTART with no DTEND is an all-day event: one day long
         # (RFC 5545 section 3.6.1). Anything else defaults to an hour, as before.
-        dtstart_value, dtstart_params = raw.get("DTSTART", ("", ""))
         all_day = _is_date_value(dtstart_value, dtstart_params)
         end_wall = start_wall + (timedelta(days=1) if all_day else timedelta(hours=1))
         end_zone = zone
@@ -302,18 +396,32 @@ def _finish_event(raw, window_start, window_end, skip=None):
         "description": _unescape(raw.get("DESCRIPTION") or "")[:400],
         "uid": raw.get("UID") or "",
     }
+    # A time written in a zone this PC cannot resolve (not in the tz database, not an
+    # Outlook name we know, not defined by the file) is shown as written. Say so on the
+    # event, so the panel can tell the owner instead of passing it off as converted.
+    if zone is None and not _is_date_value(dtstart_value, dtstart_params):
+        unresolved = _tzid_name(dtstart_params)
+        if unresolved:
+            base["tz_unresolved"] = _clean_zone_name(unresolved)
 
     # A series is expanded in its own zone's wall-clock time (a 09:00 meeting in Paris stays
     # 09:00 in Paris across a clock change) and each occurrence is then put on the PC's clock.
     pad_start = window_start - _ZONE_PAD if window_start else None
     pad_end = window_end + _ZONE_PAD if window_end else None
-    occurrences = _expand_rrule(start_wall, start_wall + wall_duration, raw.get("RRULE"),
-                                pad_start, pad_end, zone=zone)
+    series = [(wall, zone, None)
+              for wall, _occ_wall_end in _expand_rrule(start_wall, start_wall + wall_duration,
+                                                       raw.get("RRULE"), pad_start, pad_end, zone=zone)]
+    if window_end:
+        series.extend(_rdate_occurrences(raw.get("RDATE"), zone, wall_duration, pad_start, pad_end))
     skip = skip or _new_skip()
     out = []
-    for occ_wall_start, _occ_wall_end in occurrences:
-        occ_start = _to_local(occ_wall_start, zone)
-        occ_end = occ_start + duration
+    seen = set()
+    for occ_wall_start, occ_zone, explicit in series:
+        occ_start = _to_local(occ_wall_start, occ_zone)
+        if occ_start in seen:  # the same moment named by the rule and by an RDATE
+            continue
+        seen.add(occ_start)
+        occ_end = occ_start + (explicit if explicit is not None else duration)
         if occ_start in skip["datetimes"] or occ_start.date() in skip["dates"]:
             continue
         if window_start and occ_end < window_start:
@@ -324,9 +432,64 @@ def _finish_event(raw, window_start, window_end, skip=None):
     return out
 
 
+_DURATION_RE = re.compile(r"^([+-])?P(?:(\d+)W)?(?:(\d+)D)?(?:T(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?)?$")
+
+
+def _parse_ics_duration(text):
+    """An iCalendar DURATION (``PT1H30M``, ``P1D``, ``-PT15M``) -> timedelta, or None."""
+    match = _DURATION_RE.match((text or "").strip().upper())
+    if not match or not any(match.group(i) for i in range(2, 7)):
+        return None
+    weeks, days, hours, minutes, seconds = (int(g or 0) for g in match.groups()[1:])
+    span = timedelta(weeks=weeks, days=days, hours=hours, minutes=minutes, seconds=seconds)
+    return -span if match.group(1) == "-" else span
+
+
+def _rdate_occurrences(rdates, zone, wall_duration, pad_start, pad_end):
+    """The extra dates an RDATE adds to a series, as (wall start, zone, own length or None).
+
+    ``VALUE=DATE``, a date-time (floating, UTC or ``TZID=``) and ``VALUE=PERIOD`` (a start and
+    an end or a length -- that length belongs to that date alone) are read; one this cannot
+    read is skipped. A floating date on a series that has a zone is in the series' zone."""
+    out = []
+    for value, params in rdates or []:
+        for item in (value or "").split(","):
+            item = item.strip()
+            if not item:
+                continue
+            end_text = ""
+            if "/" in item:
+                item, _, end_text = item.partition("/")
+            wall, occ_zone = _parse_ics_dt_wall(item, params)
+            if wall is None:
+                continue
+            if occ_zone is None and not _tzid_name(params) and not _is_date_value(item, params):
+                occ_zone = zone
+            explicit = None
+            if end_text:
+                length = _parse_ics_duration(end_text)
+                if length is None:
+                    end_wall, end_zone = _parse_ics_dt_wall(end_text, params)
+                    if end_wall is None:
+                        continue
+                    if end_zone is None and not _tzid_name(params):
+                        end_zone = occ_zone
+                    length = _to_local(end_wall, end_zone) - _to_local(wall, occ_zone)
+                explicit = max(length, timedelta(0))
+            if pad_end is not None and wall > pad_end:
+                continue
+            if pad_start is not None and wall + (explicit if explicit is not None else wall_duration) < pad_start:
+                continue
+            out.append((wall, occ_zone, explicit))
+    return out
+
+
 _WEEKDAYS = {"MO": 0, "TU": 1, "WE": 2, "TH": 3, "FR": 4, "SA": 5, "SU": 6}
 _RRULE_KEYS = {"FREQ", "INTERVAL", "COUNT", "UNTIL", "BYDAY", "BYMONTHDAY", "BYMONTH",
-               "BYSETPOS", "WKST"}
+               "BYSETPOS", "WKST", "BYWEEKNO", "BYYEARDAY", "BYHOUR", "BYMINUTE", "BYSECOND"}
+# The frequencies finer than a day: one period is one hour / minute / second.
+_SUBDAILY_STEPS = {"HOURLY": timedelta(hours=1), "MINUTELY": timedelta(minutes=1),
+                   "SECONDLY": timedelta(seconds=1)}
 _BYDAY_RE = re.compile(r"^([+-]?\d{1,2})?(MO|TU|WE|TH|FR|SA|SU)$")
 
 
@@ -344,8 +507,9 @@ def _parse_byday(text):
     return out
 
 
-def _parse_ints(text, low, high):
-    """\"1,15,-1\" -> [1, 15, -1] (each non-zero, within +-high); None when anything is off."""
+def _parse_ints(text, low, high, allow_zero=False):
+    """\"1,15,-1\" -> [1, 15, -1] (each non-zero unless ``allow_zero``, within low..high);
+    None when anything is off."""
     out = []
     for item in (text or "").split(","):
         item = item.strip()
@@ -355,7 +519,7 @@ def _parse_ints(text, low, high):
             n = int(item)
         except ValueError:
             return None
-        if n == 0 or n < low or n > high:
+        if (n == 0 and not allow_zero) or n < low or n > high:
             return None
         out.append(n)
     return out
@@ -420,17 +584,211 @@ def _rrule_until(raw, zone):
         return None
 
 
+def _week1_start(year, wkst):
+    """The first day of week 1 of ``year`` when weeks start on ``wkst`` (0 = Monday): the week
+    that holds 4 January, which is the first week with at least four days in the year."""
+    jan4 = _date(year, 1, 4)
+    return jan4 - timedelta(days=(jan4.weekday() - wkst) % 7)
+
+
+def _week_of(day, wkst):
+    """(week-year, week number) of a date. The first days of January can belong to the last
+    week of the year before, and the last of December to week 1 of the next."""
+    first = day - timedelta(days=(day.weekday() - wkst) % 7)
+    year = (first + timedelta(days=3)).year
+    return year, (first - _week1_start(year, wkst)).days // 7 + 1
+
+
+def _weeks_in_year(year, wkst):
+    after = _week1_start(year + 1, wkst) if year < 9999 else _week1_start(year, wkst) + timedelta(weeks=52)
+    return (after - _week1_start(year, wkst)).days // 7
+
+
+def _general_supported(freq, byday, byweekno, byyearday, bymonthday):
+    """RFC 5545 forbids some combinations (a numbered weekday outside MONTHLY / YEARLY,
+    BYWEEKNO on anything but YEARLY, ...); a rule that does is not guessed at."""
+    ordinal = any(o is not None for o, _ in byday)
+    if ordinal and (freq not in ("MONTHLY", "YEARLY") or byweekno):
+        return False
+    if byweekno and freq != "YEARLY":
+        return False
+    if byyearday and freq in ("DAILY", "WEEKLY", "MONTHLY"):
+        return False
+    if bymonthday and freq == "WEEKLY":
+        return False
+    return True
+
+
+def _general_occurrences(start, freq, interval, wkst, byday, bymonthday, bymonth, bysetpos,
+                         byweekno, byyearday, byhour, byminute, bysecond, jump_from):
+    """Occurrences, ascending and never before ``start``, of a rule the simple walkers in
+    ``_expand_rrule`` do not cover: HOURLY / MINUTELY / SECONDLY, BYWEEKNO, BYYEARDAY, BYHOUR,
+    BYMINUTE, BYSECOND, and the DAILY / WEEKLY / MONTHLY / YEARLY combinations they refuse.
+
+    One PERIOD at a time (a year, month, week, day, hour, minute or second, ``interval`` of
+    them apart): the period's candidate moments are the days it covers that pass every date
+    rule (a limit, which is also what RFC 5545's \\"expand\\" comes to when it starts from every
+    day of the period), times from BYHOUR / BYMINUTE / BYSECOND (the start's own when the rule
+    names none), then BYSETPOS picks among them. What the rule leaves out is the start's:
+    ``FREQ=YEARLY`` alone is the start's month and day, ``MONTHLY`` its day, ``WEEKLY`` its
+    weekday. Without COUNT the walk jumps to just before ``jump_from`` (the window)."""
+    if not (byweekno or byyearday or bymonthday or byday):
+        if freq == "YEARLY":
+            bymonth = bymonth or [start.month]
+            bymonthday = [start.day]
+        elif freq == "MONTHLY":
+            bymonthday = [start.day]
+        elif freq == "WEEKLY":
+            byday = [(None, start.weekday())]
+    elif byweekno and not (byday or byyearday or bymonthday):
+        byday = [(None, start.weekday())]  # the start's weekday, in the weeks asked for
+    # A numbered weekday counts within the month for MONTHLY (or YEARLY with BYMONTH), else the year.
+    scope = "month" if (freq == "MONTHLY" or (freq == "YEARLY" and bymonth)) else "year"
+    hours = sorted(set(byhour))
+    minutes = sorted(set(byminute))
+    seconds = sorted(set(bysecond))
+    subdaily = freq in _SUBDAILY_STEPS
+    step = _SUBDAILY_STEPS[freq] * interval if subdaily else None
+
+    def weekday_hit(day, ordinal, weekday):
+        if day.weekday() != weekday:
+            return False
+        if ordinal is None:
+            return True
+        if scope == "month":
+            last = calendar.monthrange(day.year, day.month)[1]
+            from_start, from_end = (day.day - 1) // 7 + 1, (last - day.day) // 7 + 1
+        else:
+            doy = day.timetuple().tm_yday
+            length = 366 if calendar.isleap(day.year) else 365
+            from_start, from_end = (doy - 1) // 7 + 1, (length - doy) // 7 + 1
+        return from_start == ordinal if ordinal > 0 else from_end == -ordinal
+
+    def date_ok(day):
+        if bymonth and day.month not in bymonth:
+            return False
+        if bymonthday:
+            last = calendar.monthrange(day.year, day.month)[1]
+            if not any((n if n > 0 else last + 1 + n) == day.day for n in bymonthday):
+                return False
+        if byyearday:
+            length = 366 if calendar.isleap(day.year) else 365
+            doy = day.timetuple().tm_yday
+            if not any((n if n > 0 else length + 1 + n) == doy for n in byyearday):
+                return False
+        if byday and not any(weekday_hit(day, o, w) for o, w in byday):
+            return False
+        return True
+
+    def period_days(k):
+        """The calendar days period number k covers; None once past the end of time."""
+        if freq == "YEARLY":
+            year = start.year + k * interval
+            if year > 9998:
+                return None
+            first = _date(year, 1, 1)
+            span = 366 if calendar.isleap(year) else 365
+            if byweekno:  # a week of the year can begin in the December before and end in the January after
+                first -= timedelta(days=6)
+                span += 12
+            return [first + timedelta(days=i) for i in range(span)]
+        if freq == "MONTHLY":
+            year, month0 = divmod(start.year * 12 + (start.month - 1) + k * interval, 12)
+            if year > 9998:
+                return None
+            return [_date(year, month0 + 1, d) for d in range(1, calendar.monthrange(year, month0 + 1)[1] + 1)]
+        base = _date(start.year, start.month, start.day)
+        if freq == "WEEKLY":
+            base = base - timedelta(days=(base.weekday() - wkst) % 7) + timedelta(weeks=k * interval)
+            return [base + timedelta(days=i) for i in range(7)]
+        return [base + timedelta(days=k * interval)]  # DAILY
+
+    def pick(candidates):
+        candidates = sorted(set(candidates))
+        if bysetpos:
+            picked = []
+            for pos in bysetpos:
+                index = pos - 1 if pos > 0 else pos
+                if -len(candidates) <= index < len(candidates):
+                    picked.append(candidates[index])
+            candidates = sorted(set(picked))
+        return candidates
+
+    k0 = 0
+    if jump_from and jump_from > start:
+        if subdaily:
+            k0 = max(0, (jump_from - start) // step - 1)
+        elif freq == "DAILY":
+            k0 = max(0, (jump_from - start).days // interval - 1)
+        elif freq == "WEEKLY":
+            week0 = _date(start.year, start.month, start.day) - timedelta(days=(start.weekday() - wkst) % 7)
+            k0 = max(0, (_date(jump_from.year, jump_from.month, jump_from.day) - week0).days // (7 * interval) - 1)
+        elif freq == "MONTHLY":
+            months = (jump_from.year - start.year) * 12 + jump_from.month - start.month
+            k0 = max(0, months // interval - 1)
+        else:
+            k0 = max(0, (jump_from.year - start.year) // interval - 1)
+
+    try:
+        for k in range(k0, k0 + MAX_RRULE_STEPS):
+            candidates = []
+            if subdaily:
+                moment = start + step * k
+                if not date_ok(moment.date()):
+                    continue
+                if freq == "HOURLY":
+                    if byhour and moment.hour not in byhour:
+                        continue
+                    candidates = [moment.replace(minute=m, second=s)
+                                  for m in (minutes or [moment.minute]) for s in (seconds or [moment.second])]
+                elif freq == "MINUTELY":
+                    if (byhour and moment.hour not in byhour) or (byminute and moment.minute not in byminute):
+                        continue
+                    candidates = [moment.replace(second=s) for s in (seconds or [moment.second])]
+                else:
+                    if ((byhour and moment.hour not in byhour) or (byminute and moment.minute not in byminute)
+                            or (bysecond and moment.second not in bysecond)):
+                        continue
+                    candidates = [moment]
+            else:
+                days = period_days(k)
+                if days is None:
+                    return
+                period_year = start.year + k * interval
+                for day in days:
+                    if byweekno:
+                        week_year, week = _week_of(day, wkst)
+                        total = _weeks_in_year(week_year, wkst)
+                        if week_year != period_year or not any((n if n > 0 else total + 1 + n) == week for n in byweekno):
+                            continue
+                    if not date_ok(day):
+                        continue
+                    for h in (hours or [start.hour]):
+                        for m in (minutes or [start.minute]):
+                            for s in (seconds or [start.second]):
+                                candidates.append(datetime(day.year, day.month, day.day, h, m, s))
+            for occ in pick(candidates):
+                if occ >= start:
+                    yield occ
+    except (OverflowError, ValueError):
+        return
+
+
 def _expand_rrule(start, end, rrule, window_start, window_end, zone=None):
     """Expand a repeat rule across the window. No RRULE (or no window) -> the one original
     occurrence. ``start``/``end``/the window are wall-clock times in the series' own zone.
 
-    Handles FREQ=DAILY/WEEKLY/MONTHLY/YEARLY with INTERVAL, COUNT and UNTIL; BYDAY for
-    daily and weekly; BYMONTHDAY, BYDAY (also \"first Monday\" / \"last Friday\") and BYSETPOS
-    for monthly; BYMONTH for yearly. A months-long step is a real calendar month (a
-    repeat on the 15th stays on the 15th; one on the 31st skips the months without a 31st,
-    as RFC 5545 says). Anything else falls back to the single original occurrence, which is
-    the safe direction to be wrong in: showing one real event beats inventing a series that
-    doesn't exist.
+    Every FREQ of RFC 5545 is understood, from SECONDLY to YEARLY, with INTERVAL, COUNT, UNTIL,
+    WKST and the BY parts BYSECOND, BYMINUTE, BYHOUR, BYDAY (also \\"first Monday\\" / \\"last
+    Friday\\"), BYMONTHDAY, BYYEARDAY, BYWEEKNO, BYMONTH and BYSETPOS. The common daily /
+    weekly / monthly / yearly shapes run through the original walkers below (unchanged); anything
+    else -- an hourly or finer rule, BYWEEKNO / BYYEARDAY / BYHOUR / BYMINUTE / BYSECOND, or a
+    combination those walkers refuse -- goes through ``_general_occurrences``. A months-long step
+    is a real calendar month (a repeat on the 15th stays on the 15th; one on the 31st skips the
+    months without a 31st, as RFC 5545 says). A rule that is malformed, forbidden by the RFC,
+    or uses something not supported here (RSCALE, an X- part) falls back to the single original
+    occurrence, which is the safe direction to be wrong in: showing one real event beats
+    inventing a series that doesn't exist.
 
     Only the occurrences overlapping the window are returned, but COUNT is counted from the
     start of the series, so a series years old still ends where it should."""
@@ -442,7 +800,8 @@ def _expand_rrule(start, end, rrule, window_start, window_end, zone=None):
             key, _, value = chunk.partition("=")
             parts[key.strip().upper()] = value.strip()
     freq = (parts.get("FREQ") or "").upper()
-    if freq not in ("DAILY", "WEEKLY", "MONTHLY", "YEARLY") or not set(parts) <= _RRULE_KEYS:
+    if (freq not in ("DAILY", "WEEKLY", "MONTHLY", "YEARLY") and freq not in _SUBDAILY_STEPS) \
+            or not set(parts) <= _RRULE_KEYS:
         return [(start, end)]
 
     try:
@@ -465,22 +824,34 @@ def _expand_rrule(start, end, rrule, window_start, window_end, zone=None):
     bymonthday = _parse_ints(parts["BYMONTHDAY"], -31, 31) if parts.get("BYMONTHDAY") else []
     bymonth = _parse_ints(parts["BYMONTH"], 1, 12) if parts.get("BYMONTH") else []
     bysetpos = _parse_ints(parts["BYSETPOS"], -366, 366) if parts.get("BYSETPOS") else []
-    if byday is None or bymonthday is None or bymonth is None or bysetpos is None:
+    byweekno = _parse_ints(parts["BYWEEKNO"], -53, 53) if parts.get("BYWEEKNO") else []
+    byyearday = _parse_ints(parts["BYYEARDAY"], -366, 366) if parts.get("BYYEARDAY") else []
+    byhour = _parse_ints(parts["BYHOUR"], 0, 23, allow_zero=True) if parts.get("BYHOUR") else []
+    byminute = _parse_ints(parts["BYMINUTE"], 0, 59, allow_zero=True) if parts.get("BYMINUTE") else []
+    bysecond = _parse_ints(parts["BYSECOND"], 0, 59, allow_zero=True) if parts.get("BYSECOND") else []
+    if any(value is None for value in (byday, bymonthday, bymonth, bysetpos, byweekno, byyearday,
+                                       byhour, byminute, bysecond)):
         return [(start, end)]
+    # The day a week starts on (MO by default; a name this does not know is ignored, as before).
+    wkst = _WEEKDAYS.get((parts.get("WKST") or "MO").upper(), 0)
     ordinal_days = any(o is not None for o, _ in byday)
 
-    # Which combinations are understood; the rest keep the one original occurrence.
-    if freq in ("DAILY", "WEEKLY"):
-        if ordinal_days or bymonthday or bymonth or bysetpos:
-            return [(start, end)]
-    elif freq == "MONTHLY":
-        if bymonth:
-            return [(start, end)]
-    elif freq == "YEARLY":
-        if (byday or bymonthday) and not bymonth:
-            return [(start, end)]
-        if bysetpos and not (byday or bymonthday):
-            return [(start, end)]
+    # Which combinations the original walkers understand; the rest go to the general expander.
+    general = freq in _SUBDAILY_STEPS or bool(byweekno or byyearday or byhour or byminute or bysecond)
+    if not general:
+        if freq in ("DAILY", "WEEKLY"):
+            if ordinal_days or bymonthday or bymonth or bysetpos:
+                general = True
+        elif freq == "MONTHLY":
+            if bymonth:
+                general = True
+        elif freq == "YEARLY":
+            if (byday or bymonthday) and not bymonth:
+                general = True
+            if bysetpos and not (byday or bymonthday):
+                general = True
+    if general and not _general_supported(freq, byday, byweekno, byyearday, bymonthday):
+        return [(start, end)]
 
     duration = end - start
     # Without COUNT a series can be jumped close to the window instead of walked from its
@@ -500,8 +871,10 @@ def _expand_rrule(start, end, rrule, window_start, window_end, zone=None):
                     continue
                 yield occ
         elif freq == "WEEKLY" and byday:
-            wanted = sorted({w for _, w in byday})
-            week0 = start - timedelta(days=start.weekday())
+            # Days are counted from the week's first day (WKST), so BYDAY=SU,MO with WKST=SU
+            # and an every-other-week INTERVAL pair the right Sunday with the right Monday.
+            wanted = sorted({(w - wkst) % 7 for _, w in byday})
+            week0 = start - timedelta(days=(start.weekday() - wkst) % 7)
             k = 0
             if jump_from and jump_from > start:
                 k = max(0, (jump_from - week0).days // (7 * interval) - 1)
@@ -551,9 +924,12 @@ def _expand_rrule(start, end, rrule, window_start, window_end, zone=None):
                         if occ >= start:
                             yield occ
 
+    source = (_general_occurrences(start, freq, interval, wkst, byday, bymonthday, bymonth, bysetpos,
+                                   byweekno, byyearday, byhour, byminute, bysecond, jump_from)
+              if general else occurrences())
     out = []
     counted = 0
-    for steps, occ in enumerate(occurrences(), 1):
+    for steps, occ in enumerate(source, 1):
         if steps > MAX_RRULE_STEPS:
             break
         if until and occ > until:
@@ -596,39 +972,264 @@ _WINDOWS_ZONES = {
     "Atlantic Standard Time": "America/Halifax", "SA Pacific Standard Time": "America/Bogota",
     "E. South America Standard Time": "America/Sao_Paulo",
 }
+# The rest of Windows' own list (Outlook writes these). The names above win where both have one.
+_MORE_WINDOWS_ZONES = {
+    "Dateline Standard Time": "Etc/GMT+12", "UTC-11": "Etc/GMT+11", "Aleutian Standard Time": "America/Adak",
+    "Hawaiian Standard Time": "Pacific/Honolulu", "Marquesas Standard Time": "Pacific/Marquesas",
+    "Alaskan Standard Time": "America/Anchorage", "UTC-09": "Etc/GMT+9",
+    "Pacific Standard Time (Mexico)": "America/Tijuana", "UTC-08": "Etc/GMT+8",
+    "US Mountain Standard Time": "America/Phoenix", "Mountain Standard Time (Mexico)": "America/Mazatlan",
+    "Yukon Standard Time": "America/Whitehorse", "Central America Standard Time": "America/Guatemala",
+    "Easter Island Standard Time": "Pacific/Easter", "Central Standard Time (Mexico)": "America/Mexico_City",
+    "Canada Central Standard Time": "America/Regina", "Eastern Standard Time (Mexico)": "America/Cancun",
+    "Haiti Standard Time": "America/Port-au-Prince", "Cuba Standard Time": "America/Havana",
+    "US Eastern Standard Time": "America/Indianapolis", "Turks And Caicos Standard Time": "America/Grand_Turk",
+    "Paraguay Standard Time": "America/Asuncion", "Venezuela Standard Time": "America/Caracas",
+    "Central Brazilian Standard Time": "America/Cuiaba", "SA Western Standard Time": "America/La_Paz",
+    "Pacific SA Standard Time": "America/Santiago", "Newfoundland Standard Time": "America/St_Johns",
+    "Tocantins Standard Time": "America/Araguaina", "SA Eastern Standard Time": "America/Cayenne",
+    "Argentina Standard Time": "America/Buenos_Aires", "Greenland Standard Time": "America/Godthab",
+    "Montevideo Standard Time": "America/Montevideo", "Magallanes Standard Time": "America/Punta_Arenas",
+    "Saint Pierre Standard Time": "America/Miquelon", "Bahia Standard Time": "America/Bahia",
+    "UTC-02": "Etc/GMT+2", "Azores Standard Time": "Atlantic/Azores", "Cape Verde Standard Time": "Atlantic/Cape_Verde",
+    "Sao Tome Standard Time": "Africa/Sao_Tome", "Morocco Standard Time": "Africa/Casablanca",
+    "Jordan Standard Time": "Asia/Amman", "Middle East Standard Time": "Asia/Beirut",
+    "Syria Standard Time": "Asia/Damascus", "West Bank Standard Time": "Asia/Hebron",
+    "South Sudan Standard Time": "Africa/Juba", "Kaliningrad Standard Time": "Europe/Kaliningrad",
+    "Sudan Standard Time": "Africa/Khartoum", "Libya Standard Time": "Africa/Tripoli",
+    "Namibia Standard Time": "Africa/Windhoek", "Arabic Standard Time": "Asia/Baghdad",
+    "Belarus Standard Time": "Europe/Minsk", "E. Africa Standard Time": "Africa/Nairobi",
+    "Iran Standard Time": "Asia/Tehran", "Astrakhan Standard Time": "Europe/Astrakhan",
+    "Azerbaijan Standard Time": "Asia/Baku", "Russia Time Zone 3": "Europe/Samara",
+    "Mauritius Standard Time": "Indian/Mauritius", "Saratov Standard Time": "Europe/Saratov",
+    "Georgian Standard Time": "Asia/Tbilisi", "Volgograd Standard Time": "Europe/Volgograd",
+    "Caucasus Standard Time": "Asia/Yerevan", "Afghanistan Standard Time": "Asia/Kabul",
+    "West Asia Standard Time": "Asia/Tashkent", "Ekaterinburg Standard Time": "Asia/Yekaterinburg",
+    "Pakistan Standard Time": "Asia/Karachi", "Qyzylorda Standard Time": "Asia/Qyzylorda",
+    "Sri Lanka Standard Time": "Asia/Colombo", "Nepal Standard Time": "Asia/Katmandu",
+    "Central Asia Standard Time": "Asia/Almaty", "Bangladesh Standard Time": "Asia/Dhaka",
+    "Omsk Standard Time": "Asia/Omsk", "Myanmar Standard Time": "Asia/Rangoon",
+    "SE Asia Standard Time": "Asia/Bangkok", "Altai Standard Time": "Asia/Barnaul",
+    "W. Mongolia Standard Time": "Asia/Hovd", "North Asia Standard Time": "Asia/Krasnoyarsk",
+    "N. Central Asia Standard Time": "Asia/Novosibirsk", "Tomsk Standard Time": "Asia/Tomsk",
+    "North Asia East Standard Time": "Asia/Irkutsk", "W. Australia Standard Time": "Australia/Perth",
+    "Taipei Standard Time": "Asia/Taipei", "Ulaanbaatar Standard Time": "Asia/Ulaanbaatar",
+    "Aus Central W. Standard Time": "Australia/Eucla", "Transbaikal Standard Time": "Asia/Chita",
+    "North Korea Standard Time": "Asia/Pyongyang", "Korea Standard Time": "Asia/Seoul",
+    "Yakutsk Standard Time": "Asia/Yakutsk", "Cen. Australia Standard Time": "Australia/Adelaide",
+    "AUS Central Standard Time": "Australia/Darwin", "E. Australia Standard Time": "Australia/Brisbane",
+    "West Pacific Standard Time": "Pacific/Port_Moresby", "Tasmania Standard Time": "Australia/Hobart",
+    "Vladivostok Standard Time": "Asia/Vladivostok", "Lord Howe Standard Time": "Australia/Lord_Howe",
+    "Bougainville Standard Time": "Pacific/Bougainville", "Russia Time Zone 10": "Asia/Srednekolymsk",
+    "Magadan Standard Time": "Asia/Magadan", "Norfolk Standard Time": "Pacific/Norfolk",
+    "Sakhalin Standard Time": "Asia/Sakhalin", "Central Pacific Standard Time": "Pacific/Guadalcanal",
+    "Russia Time Zone 11": "Asia/Kamchatka", "New Zealand Standard Time": "Pacific/Auckland",
+    "UTC+12": "Etc/GMT-12", "Fiji Standard Time": "Pacific/Fiji", "Chatham Islands Standard Time": "Pacific/Chatham",
+    "UTC+13": "Etc/GMT-13", "Tonga Standard Time": "Pacific/Tongatapu", "Samoa Standard Time": "Pacific/Apia",
+    "Line Islands Standard Time": "Pacific/Kiritimati",
+}
+_WINDOWS_BY_LOWER = {k.lower(): v for k, v in {**_MORE_WINDOWS_ZONES, **_WINDOWS_ZONES}.items()}
 _TZID_RE = re.compile(r'TZID=("[^"]*"|[^;:]*)', re.I)
-_ZONES = {}
+_ZONES = {}       # tz-database lookups by name (a miss is remembered as None)
+_ICS_ZONES = {}   # the VTIMEZONE zones of the file being read right now (see parse_ics)
 
 
-def _zone_for(params):
-    """The tzinfo a ``TZID=`` parameter names, or None when there is none or this PC cannot
-    resolve it (the time is then taken at face value, as before)."""
+def _tzid_name(params):
+    """The zone name a ``TZID=`` parameter gives (quotes off), or \"\" when there is none."""
     match = _TZID_RE.search(params or "")
-    if not match:
-        return None
-    name = match.group(1).strip().strip('"').strip()
+    return match.group(1).strip().strip('"').strip() if match else ""
+
+
+def _clean_zone_name(name):
+    """A zone name from a calendar file, safe to show: printable, short."""
+    return "".join(ch for ch in str(name or "") if ch.isprintable())[:60].strip()
+
+
+def _db_candidates(name):
+    yield name
+    # Some calendars write a path-style id: /mozilla.org/20050126_1/Europe/Paris
+    parts = [p for p in name.strip("/").split("/") if p]
+    for first in range(1, len(parts)):
+        yield "/".join(parts[first:])
+
+
+def _db_zone(name):
+    """The tz database's zone for a name, or None (this PC has no such zone, or no database)."""
     if not name:
         return None
     if name in _ZONES:
         return _ZONES[name]
     zone = None
-    if name.upper() in ("UTC", "GMT", "Z"):
-        zone = timezone.utc
-    else:
-        try:
-            from zoneinfo import ZoneInfo
-            for candidate in (name, _WINDOWS_ZONES.get(name)):
-                if not candidate:
-                    continue
-                try:
-                    zone = ZoneInfo(candidate)
-                    break
-                except Exception:  # noqa: BLE001 -- unknown name, or no tz database here
-                    continue
-        except ImportError:
-            zone = None
+    try:
+        from zoneinfo import ZoneInfo
+    except ImportError:
+        ZoneInfo = None
+    if ZoneInfo is not None:
+        for candidate in _db_candidates(name):
+            try:
+                zone = ZoneInfo(candidate)
+                break
+            except Exception:  # noqa: BLE001 -- unknown name, a bad key, or no tz database here
+                continue
     _ZONES[name] = zone
     return zone
+
+
+def _zone_for(params):
+    """The tzinfo a ``TZID=`` parameter names, or None when there is none or nothing can
+    resolve it (the time is then taken at face value and the event says so).
+
+    Tried in order: UTC, the tz database by that name (also a path-style name), the zone the
+    calendar file itself defines in a VTIMEZONE block (this is what makes an Outlook name
+    like \"(UTC+01:00) Brussels, Copenhagen, Madrid, Paris\" work), Windows' own zone names."""
+    name = _tzid_name(params)
+    if not name:
+        return None
+    if name.upper() in ("UTC", "GMT", "Z"):
+        return timezone.utc
+    zone = _db_zone(name)
+    if zone is None:
+        zone = _ICS_ZONES.get(name)
+    if zone is None:
+        zone = _db_zone(_WINDOWS_BY_LOWER.get(name.lower()))
+    return zone
+
+
+def _parse_utc_offset(text):
+    """\"+0100\" / \"-0430\" / \"+010000\" -> timedelta, or None."""
+    match = re.fullmatch(r"([+-])(\d{2})(\d{2})(\d{2})?", (text or "").strip())
+    if not match:
+        return None
+    seconds = int(match.group(2)) * 3600 + int(match.group(3)) * 60 + int(match.group(4) or 0)
+    if seconds >= 86400:
+        return None
+    return timedelta(seconds=seconds if match.group(1) == "+" else -seconds)
+
+
+class _IcsZone(tzinfo):
+    """A time zone built from a VTIMEZONE block in the calendar file itself.
+
+    Each STANDARD / DAYLIGHT block says: from this moment (DTSTART, a wall-clock time, as
+    read in the offset before the change) the offset is TZOFFSETTO; repeated by an RRULE
+    (usually yearly) or listed in RDATEs. The offset at a wall-clock time is the one of the
+    latest change on or before it. Only used when the tz database does not know the name."""
+
+    def __init__(self, name, observances):
+        self.name = name
+        self._obs = []
+        self._rows = {}
+        for raw in observances:
+            first = _parse_ics_dt_wall(raw.get("DTSTART"), "")[0]
+            offset_to = _parse_utc_offset(raw.get("TZOFFSETTO"))
+            if first is None or offset_to is None:
+                continue
+            offset_from = _parse_utc_offset(raw.get("TZOFFSETFROM"))
+            rdates = []
+            for item in raw.get("RDATE") or []:
+                wall = _parse_ics_dt_wall(item, "")[0]
+                if wall is not None:
+                    rdates.append(wall)
+            self._obs.append({
+                "start": first, "to": offset_to, "from": offset_from if offset_from is not None else offset_to,
+                "rrule": raw.get("RRULE") or "", "rdates": rdates,
+                "dst": raw.get("_kind") == "DAYLIGHT", "label": raw.get("TZNAME") or "",
+            })
+        self.usable = bool(self._obs)
+        standard = [o["to"] for o in self._obs if not o["dst"]]
+        every = [o["to"] for o in self._obs]
+        self._base = min(standard) if standard else (min(every) if every else timedelta(0))
+
+    def _transitions(self, year):
+        rows = self._rows.get(year)
+        if rows is not None:
+            return rows
+        low = datetime(max(year - 2, 1), 1, 1)
+        high = datetime(min(year + 1, 9998), 12, 31)
+        rows = []
+        for ob in self._obs:
+            onsets = [ob["start"]] + ob["rdates"]
+            if ob["rrule"]:
+                try:
+                    onsets.extend(s for s, _e in _expand_rrule(
+                        ob["start"], ob["start"] + timedelta(seconds=1), ob["rrule"], low, high,
+                        zone=timezone(ob["from"])))
+                except Exception:  # noqa: BLE001 -- a rule it cannot read leaves just the first change
+                    pass
+            rows.extend((onset, ob) for onset in onsets)
+        rows.sort(key=lambda row: row[0])
+        self._rows[year] = rows
+        return rows
+
+    def _lookup(self, wall):
+        """(offset, is daylight time, name) in force at a wall-clock time."""
+        for onset, ob in reversed(self._transitions(wall.year)):
+            if onset <= wall:
+                return ob["to"], ob["dst"], ob["label"]
+        first = min(self._obs, key=lambda ob: ob["start"])
+        return first["from"], False, first["label"]
+
+    def utcoffset(self, dt):
+        return self._base if dt is None else self._lookup(dt.replace(tzinfo=None))[0]
+
+    def dst(self, dt):
+        if dt is None:
+            return timedelta(0)
+        offset, is_dst, _label = self._lookup(dt.replace(tzinfo=None))
+        return offset - self._base if is_dst else timedelta(0)
+
+    def tzname(self, dt):
+        if dt is None:
+            return self.name
+        return self._lookup(dt.replace(tzinfo=None))[2] or self.name
+
+    def fromutc(self, dt):
+        utc = dt.replace(tzinfo=None)
+        wall = utc + self._lookup(utc + self._base)[0]
+        wall = utc + self._lookup(wall)[0]
+        return wall.replace(tzinfo=self)
+
+
+def _read_vtimezones(text):
+    """{TZID: _IcsZone} for every VTIMEZONE block in an (unfolded) calendar file."""
+    zones = {}
+    zone = None
+    obs = None
+    for line in text.splitlines():
+        line = line.strip()
+        upper = line.upper()
+        if upper == "BEGIN:VTIMEZONE":
+            zone, obs = {"id": "", "obs": []}, None
+            continue
+        if zone is None:
+            continue
+        if upper == "END:VTIMEZONE":
+            if zone["id"] and zone["obs"]:
+                built = _IcsZone(zone["id"], zone["obs"])
+                if built.usable:
+                    zones[zone["id"]] = built
+            zone = obs = None
+            continue
+        if upper in ("BEGIN:STANDARD", "BEGIN:DAYLIGHT"):
+            obs = {"_kind": upper.split(":", 1)[1]}
+            continue
+        if upper in ("END:STANDARD", "END:DAYLIGHT"):
+            if obs is not None:
+                zone["obs"].append(obs)
+            obs = None
+            continue
+        match = _PROP_RE.match(line)
+        if not match:
+            continue
+        name = match.group("name").upper()
+        value = match.group("value").strip()
+        if obs is not None:
+            if name in ("DTSTART", "TZOFFSETFROM", "TZOFFSETTO", "RRULE", "TZNAME"):
+                obs[name] = value
+            elif name == "RDATE":
+                obs.setdefault("RDATE", []).extend(v.strip() for v in value.split(",") if v.strip())
+        elif name == "TZID":
+            zone["id"] = value.strip('"').strip()
+    return zones
 
 
 def _local_tz():
@@ -642,7 +1243,7 @@ def _to_local(naive, zone):
         return naive
     try:
         return naive.replace(tzinfo=zone).astimezone(_local_tz()).replace(tzinfo=None)
-    except (ValueError, OverflowError, OSError):
+    except Exception:  # noqa: BLE001 -- a zone that cannot answer leaves the time as written
         return naive
 
 
@@ -722,15 +1323,50 @@ def _decode_body(resp):
     return resp.text
 
 
+def _store_cache(key, body):
+    """Put one feed's copy in the cache. The cache is re-read under a lock first, so a copy
+    another process stored for a different feed in the meantime is not lost."""
+    with _file_lock(CACHE_FILE) as held:
+        if not held:
+            return  # a cache that can't be written just means refetching
+        cache = _load_cache()
+        cache[key] = {"body": body, "at": datetime.now().replace(microsecond=0).isoformat()}
+        _save_cache(cache)
+
+
+def _prune_cache(add=None):
+    """Keep only the cached copies of calendars that are linked right now (and ``add`` =
+    (key, body), a copy just fetched for one that was just saved). Also clears a copy an
+    older version left behind for a link that was checked but never saved."""
+    with _file_lock(CACHE_FILE) as held:
+        if not held:
+            return
+        wanted = {_fetch_key(f.get("url")) for f in (load_config().get("feeds") or []) if isinstance(f, dict)}
+        cache = _load_cache()
+        changed = False
+        for key in list(cache):
+            if key not in wanted:
+                del cache[key]
+                changed = True
+        if add and add[0] in wanted:
+            cache[add[0]] = {"body": add[1], "at": datetime.now().replace(microsecond=0).isoformat()}
+            changed = True
+        if changed:
+            _save_cache(cache)
+
+
 def fetch_feed(feed, force=False):
-    """Raw ICS for one feed, from cache when fresh. ("", reason) on failure."""
+    """Raw ICS for one feed, from cache when fresh. ("", reason) on failure.
+
+    A feed dict with ``"_no_store": True`` is a probe (check_feed): its copy is neither read
+    from nor written to the cache, so a link that is never saved leaves nothing behind."""
     url = (feed.get("url") or "").strip()
     if not url.startswith(("http://", "https://", "webcal://")):
         return "", "not an http(s) URL"
     url = url.replace("webcal://", "https://", 1)
 
-    cache = _load_cache()
-    entry = cache.get(url) or {}
+    store = feed.get("_no_store") is not True
+    entry = (_load_cache().get(url) or {}) if store else {}
     age = None
     if entry.get("at"):
         try:
@@ -756,8 +1392,8 @@ def fetch_feed(feed, force=False):
     except Exception as exc:  # noqa: BLE001 — a dead feed is a finding, not a crash
         return entry.get("body", ""), str(exc)[:120]
 
-    cache[url] = {"body": body, "at": datetime.now().replace(microsecond=0).isoformat()}
-    _save_cache(cache)
+    if store:
+        _store_cache(url, body)
     return body, ""
 
 
@@ -830,7 +1466,14 @@ def _serialize(event, now):
         # Only Jarvis's own events can be changed, and this id is how
         # calendar_update_event / calendar_delete_event name one.
         out["id"] = event["uid"]
+    if event.get("tz_unresolved"):
+        out["timezone_note"] = _zone_note(event["tz_unresolved"])
     return out
+
+
+def _zone_note(name):
+    return ("The calendar gives this time in the zone \"%s\", which this computer can't convert, "
+            "so it is shown as written there." % name)
 
 
 def _friendly(dt, now):
@@ -967,7 +1610,11 @@ def feeds_view():
         "local_event_count": len([e for e in cfg.get("local_events") or [] if isinstance(e, dict)]),
         "default_reminder_minutes": max(1, min(lead, 10080)),
         "retention_days": retention_days(cfg),
+        "retention_days_max": LOCAL_RETENTION_MAX_DAYS,
         "retention_max": LOCAL_MAX_EVENTS,
+        # Events that ended more than the keep time ago: they go the next time one is added.
+        "expiring_count": _expiring_count(cfg),
+        "week_start": week_start(cfg),
         "cache_minutes": CACHE_TTL_SECONDS // 60,
     }
 
@@ -977,24 +1624,31 @@ def check_feed(url):
 
     The guide's "check before saving" step. Always fetches fresh (a cached body would
     make a mistyped-then-fixed link look fine). A page that is not a calendar (a login
-    wall, an HTML error) is reported as such, not as "0 events".
+    wall, an HTML error) is reported as such, not as "0 events". Nothing is cached: the
+    copy would otherwise stay in calendar_cache.json for a link that was never saved.
     """
+    return _probe_feed(url)[0]
+
+
+def _probe_feed(url):
+    """(check result, the fetched text) for a pasted link; the text is "" on any failure.
+    link_feed uses the text to fill the cache once the link IS saved."""
     clean = _clean_link(url)
     if not clean:
-        return {"ok": False, "error": "Paste the calendar link first."}
+        return {"ok": False, "error": "Paste the calendar link first."}, ""
     if not clean.startswith(("http://", "https://")):
         return {"ok": False,
                 "error": "That doesn't look like a web link. It should start with https:// "
-                         "(or webcal://)."}
-    body, err = fetch_feed({"url": clean}, force=True)
+                         "(or webcal://)."}, ""
+    body, err = fetch_feed({"url": clean, "_no_store": True}, force=True)
     if err:
-        return {"ok": False, "error": "Couldn't open that link: %s" % _scrub(err, clean)}
+        return {"ok": False, "error": "Couldn't open that link: %s" % _scrub(err, clean)}, ""
     if not body or not body.strip():
-        return {"ok": False, "error": "The link opened but was empty."}
+        return {"ok": False, "error": "The link opened but was empty."}, ""
     if "BEGIN:VCALENDAR" not in body.upper():
         return {"ok": False,
                 "error": "That link opened a web page, not a calendar. Use the secret iCal / "
-                         "ICS address (it usually ends in .ics), not the calendar's normal page."}
+                         "ICS address (it usually ends in .ics), not the calendar's normal page."}, ""
     now = datetime.now()
     found = len(parse_ics(body))
     upcoming = [e for e in parse_ics(body, now - timedelta(hours=12), now + timedelta(days=366))
@@ -1009,7 +1663,7 @@ def check_feed(url):
                        if nxt else None),
         "insecure": clean.startswith("http://"),
         "link": clean,
-    }
+    }, body
 
 
 def _clean_name(name):
@@ -1018,80 +1672,134 @@ def _clean_name(name):
     return name[:FEED_NAME_MAX].strip()
 
 
-def link_feed(name, url):
-    """Check, then save, a new linked calendar. Refuses a duplicate name, a link that is
-    already linked, or a twelfth calendar. Returns the new feed MASKED."""
-    name = _clean_name(name)
-    if not name:
-        return {"ok": False, "error": "Give the calendar a name."}
-    cfg, problem = load_config_strict()
-    if cfg is None:
-        return {"ok": False, "error": problem}
+def _link_refusal(cfg, name, clean):
+    """The plain-language refusal (as a result dict) for linking ``clean`` as ``name``, or None."""
     feeds = [f for f in (cfg.get("feeds") or []) if isinstance(f, dict)]
     if len(feeds) >= MAX_FEEDS:
         return {"ok": False, "error": "You already have %d linked calendars, the most the panel keeps. "
                                       "Remove one first." % MAX_FEEDS}
     if any((f.get("name") or "").strip().lower() == name.lower() for f in feeds):
         return {"ok": False, "error": "There is already a calendar called \"%s\". Pick another name." % name}
-    clean = _clean_link(url)
     for feed in feeds:
         if _fetch_key(_clean_link(feed.get("url"))) == _fetch_key(clean):
             return {"ok": False, "error": "That link is already linked as \"%s\"." % (feed.get("name") or "calendar")}
-    checked = check_feed(clean)
+    return None
+
+
+def link_feed(name, url):
+    """Check, then save, a new linked calendar. Refuses a duplicate name, a link that is
+    already linked, or a twelfth calendar. Returns the new feed MASKED.
+
+    The refusals are checked first (so a duplicate is said before a 15-second download) and
+    again under the file lock after the check, because another process may have linked
+    something while the link was being fetched."""
+    name = _clean_name(name)
+    if not name:
+        return {"ok": False, "error": "Give the calendar a name."}
+    cfg, problem = load_config_strict()
+    if cfg is None:
+        return {"ok": False, "error": problem}
+    clean = _clean_link(url)
+    refused = _link_refusal(cfg, name, clean)
+    if refused:
+        return refused
+    checked, body = _probe_feed(clean)
     if not checked.get("ok"):
         return checked
-    feeds.append({"name": name, "url": clean, "enabled": True})
-    cfg["feeds"] = feeds
-    if not save_config(cfg):
-        return {"ok": False, "error": "Couldn't save calendar.json."}
+    with _config_lock() as held:
+        if not held:
+            return {"ok": False, "error": _BUSY_MESSAGE}
+        cfg, problem = load_config_strict()
+        if cfg is None:
+            return {"ok": False, "error": problem}
+        refused = _link_refusal(cfg, name, clean)
+        if refused:
+            return refused
+        feeds = [f for f in (cfg.get("feeds") or []) if isinstance(f, dict)]
+        feeds.append({"name": name, "url": clean, "enabled": True})
+        cfg["feeds"] = feeds
+        if not save_config(cfg):
+            return {"ok": False, "error": "Couldn't save calendar.json."}
+    # Now that it is saved, the fetched copy is its cache (and strays are cleared).
+    _prune_cache(add=(_fetch_key(clean), body))
     return {"ok": True, "name": name, "events_found": checked["events_found"],
             "upcoming_found": checked["upcoming_found"], "next_event": checked["next_event"],
             "feed": _feed_view(feeds[-1], _load_cache())}
 
 
+def add_feed_unverified(name, url):
+    """What ``jarvis calendar-add`` does: save the link WITHOUT checking it first (the command
+    then fetches it and says whether it was reachable). Same refusals and the same file lock
+    as the panel's link. Returns {"ok": True, "name", "link"} or a refusal."""
+    with _config_lock() as held:
+        if not held:
+            return {"ok": False, "error": _BUSY_MESSAGE}
+        # Strict load: a calendar.json that can't be read is never overwritten with an
+        # empty one (that would drop every linked calendar and event).
+        cfg, problem = load_config_strict()
+        if cfg is None:
+            return {"ok": False, "error": problem}
+        name = _clean_name(name)
+        link = _clean_link(url)
+        feeds = [f for f in (cfg.get("feeds") or []) if isinstance(f, dict)]
+        if not name:
+            return {"ok": False, "error": "Give the calendar a name."}
+        if not link.startswith(("http://", "https://")):
+            return {"ok": False, "error": "That doesn't look like a web link. It should "
+                                          "start with https:// (or webcal://)."}
+        if len(feeds) >= MAX_FEEDS:
+            return {"ok": False, "error": "You already have %d linked calendars, the most "
+                                          "there is room for. Remove one first." % MAX_FEEDS}
+        if any((f.get("name") or "").strip().lower() == name.lower() for f in feeds):
+            return {"ok": False, "error": "There is already a calendar called \"%s\"." % name}
+        if any(_fetch_key(_clean_link(f.get("url"))) == _fetch_key(link) for f in feeds):
+            return {"ok": False, "error": "That link is already linked."}
+        cfg["feeds"] = feeds + [{"name": name, "url": link, "enabled": True}]
+        if not save_config(cfg):
+            return {"ok": False, "error": "Couldn't save calendar.json."}
+    return {"ok": True, "name": name, "link": link}
+
+
 def set_feed_enabled(name, enabled):
-    cfg, problem = load_config_strict()
-    if cfg is None:
-        return {"ok": False, "error": problem}
-    hit = 0
-    for feed in cfg.get("feeds") or []:
-        if isinstance(feed, dict) and (feed.get("name") or "") == name:
-            feed["enabled"] = bool(enabled)
-            hit += 1
-    if not hit:
-        return {"ok": False, "error": "There is no linked calendar called \"%s\"." % name}
-    if not save_config(cfg):
-        return {"ok": False, "error": "Couldn't save calendar.json."}
+    with _config_lock() as held:
+        if not held:
+            return {"ok": False, "error": _BUSY_MESSAGE}
+        cfg, problem = load_config_strict()
+        if cfg is None:
+            return {"ok": False, "error": problem}
+        hit = 0
+        for feed in cfg.get("feeds") or []:
+            if isinstance(feed, dict) and (feed.get("name") or "") == name:
+                feed["enabled"] = bool(enabled)
+                hit += 1
+        if not hit:
+            return {"ok": False, "error": "There is no linked calendar called \"%s\"." % name}
+        if not save_config(cfg):
+            return {"ok": False, "error": "Couldn't save calendar.json."}
     return {"ok": True, "name": name, "enabled": bool(enabled)}
 
 
 def remove_feed(name):
     """Unlink a calendar (every linked calendar with that name) and drop its cached copy.
     Jarvis's own events are not touched."""
-    cfg, problem = load_config_strict()
-    if cfg is None:
-        return {"ok": False, "error": problem}
-    keep, gone = [], []
-    for feed in cfg.get("feeds") or []:
-        if isinstance(feed, dict) and (feed.get("name") or "") == name:
-            gone.append(feed)
-        else:
-            keep.append(feed)
-    if not gone:
-        return {"ok": False, "error": "There is no linked calendar called \"%s\"." % name}
-    cfg["feeds"] = keep
-    if not save_config(cfg):
-        return {"ok": False, "error": "Couldn't save calendar.json."}
-    still_used = {_fetch_key(f.get("url")) for f in keep if isinstance(f, dict)}
-    cache = _load_cache()
-    changed = False
-    for feed in gone:
-        key = _fetch_key(feed.get("url"))
-        if key in cache and key not in still_used:
-            del cache[key]
-            changed = True
-    if changed:
-        _save_cache(cache)
+    with _config_lock() as held:
+        if not held:
+            return {"ok": False, "error": _BUSY_MESSAGE}
+        cfg, problem = load_config_strict()
+        if cfg is None:
+            return {"ok": False, "error": problem}
+        keep, gone = [], []
+        for feed in cfg.get("feeds") or []:
+            if isinstance(feed, dict) and (feed.get("name") or "") == name:
+                gone.append(feed)
+            else:
+                keep.append(feed)
+        if not gone:
+            return {"ok": False, "error": "There is no linked calendar called \"%s\"." % name}
+        cfg["feeds"] = keep
+        if not save_config(cfg):
+            return {"ok": False, "error": "Couldn't save calendar.json."}
+    _prune_cache()  # the cache keeps only calendars that are still linked
     return {"ok": True, "removed": name}
 
 
@@ -1125,7 +1833,7 @@ def _panel_event(ev):
     else:
         seed = "%s|%s|%s" % (ev.get("source") or "", ev.get("uid") or "", start.isoformat())
         ident = "f_" + hashlib.sha1(seed.encode("utf-8")).hexdigest()[:10]
-    return {
+    out = {
         "id": ident,
         "title": ev.get("title") or "(no title)",
         "start": start.replace(microsecond=0).isoformat(),
@@ -1139,6 +1847,10 @@ def _panel_event(ev):
         # read-only ICS link, and a hand-edited event with no id has nothing to address.
         "editable": bool(local and _EVENT_ID_RE.match(ident or "")),
     }
+    if ev.get("tz_unresolved"):
+        out["tz_unresolved"] = ev["tz_unresolved"]
+        out["tz_note"] = _zone_note(ev["tz_unresolved"])
+    return out
 
 
 def _parse_window_bound(text, label):
@@ -1178,13 +1890,23 @@ def window_view(start_text, end_text, force=False):
 
 
 def _prune_local(cfg):
-    """Drop events that ended more than ``retention_days(cfg)`` ago and keep the newest
-    LOCAL_MAX_EVENTS. Shared by the model tool and the panel."""
+    """Drop events that ended more than ``retention_days(cfg)`` ago (and entries that are not
+    events at all). Shared by the model tool and the panel. It never drops an event that is
+    still within its keep time: the LOCAL_MAX_EVENTS limit is a refusal in ``_save_new_event``,
+    so a full calendar says so instead of quietly losing the oldest-added event."""
     cutoff = _retention_cutoff(cfg)
     cfg["local_events"] = [e for e in cfg.get("local_events") or []
                            if isinstance(e, dict)
-                           and str(e.get("end") or e.get("start") or "") >= cutoff][-LOCAL_MAX_EVENTS:]
+                           and str(e.get("end") or e.get("start") or "") >= cutoff]
     return cfg
+
+
+def _expiring_count(cfg):
+    """How many of Jarvis's own events ended more than the keep time ago; they are removed
+    the next time an event is added."""
+    cutoff = _retention_cutoff(cfg)
+    return len([e for e in cfg.get("local_events") or []
+                if isinstance(e, dict) and str(e.get("end") or e.get("start") or "") < cutoff])
 
 
 def _retention_cutoff(cfg):
@@ -1275,33 +1997,52 @@ def _event_by_id(cfg, event_id):
     return None
 
 
+def _save_new_event(entry):
+    """The one place a NEW event on Jarvis's own calendar is stored, for the panel and the chat
+    tool alike: (saved entry with its id, how many old events were removed, None) or
+    (None, 0, the plain reason it was not saved).
+
+    Under the file lock, so two adds at once both land. Events past their keep time leave in
+    this very save (and are counted in the second value), so they do not count towards the
+    limit; at LOCAL_MAX_EVENTS live events it REFUSES, naming the number -- it never drops a
+    live event to make room, and never keeps one that would be removed straight away."""
+    with _config_lock() as held:
+        if not held:
+            return None, 0, _BUSY_MESSAGE
+        cfg, problem = load_config_strict()
+        if cfg is None:
+            return None, 0, problem
+        cutoff = _retention_cutoff(cfg)
+        if str(entry.get("end") or entry.get("start") or "") < cutoff:
+            return None, 0, ("Events older than %d days are removed automatically, so this one "
+                             "wouldn't be kept." % retention_days(cfg))
+        existing = [e for e in cfg.get("local_events") or [] if isinstance(e, dict)]
+        live = [e for e in existing if str(e.get("end") or e.get("start") or "") >= cutoff]
+        if len(live) >= LOCAL_MAX_EVENTS:
+            return None, 0, ("Jarvis's calendar already holds %d events, the most it keeps. "
+                             "Delete some first." % LOCAL_MAX_EVENTS)
+        taken = {e.get("id") for e in existing}
+        new_id = "ev_" + secrets.token_hex(4)
+        while new_id in taken:
+            new_id = "ev_" + secrets.token_hex(4)
+        saved = dict(entry, id=new_id)
+        cfg.setdefault("local_events", []).append(saved)
+        held_count = len(cfg["local_events"])
+        _prune_local(cfg)
+        pruned = held_count - len(cfg["local_events"])
+        if not save_config(cfg):
+            return None, 0, "Couldn't save calendar.json."
+        return saved, pruned, None
+
+
 def add_local_event(fields):
     entry, error = _event_from_fields(fields)
     if error:
         return {"ok": False, "error": error}
-    cfg, problem = load_config_strict()
-    if cfg is None:
-        return {"ok": False, "error": problem}
-    # Events past their keep time are removed by this very add, so they do not count
-    # towards the limit (otherwise a full calendar of old events refuses a new one).
-    cutoff = _retention_cutoff(cfg)
-    existing = [e for e in cfg.get("local_events") or [] if isinstance(e, dict)]
-    live = [e for e in existing if str(e.get("end") or e.get("start") or "") >= cutoff]
-    if len(live) >= LOCAL_MAX_EVENTS:
-        return {"ok": False, "error": "Jarvis's calendar already holds %d events, the most it keeps. "
-                                      "Delete some first." % LOCAL_MAX_EVENTS}
-    taken = {e.get("id") for e in existing}
-    new_id = "ev_" + secrets.token_hex(4)
-    while new_id in taken:
-        new_id = "ev_" + secrets.token_hex(4)
-    entry["id"] = new_id
-    cfg.setdefault("local_events", []).append(entry)
-    held = len(cfg["local_events"])
-    _prune_local(cfg)
-    pruned = held - len(cfg["local_events"])
-    if not save_config(cfg):
-        return {"ok": False, "error": "Couldn't save calendar.json."}
-    out = {"ok": True, "event": _panel_event(_as_event(entry))}
+    saved, pruned, error = _save_new_event(entry)
+    if error:
+        return {"ok": False, "error": error}
+    out = {"ok": True, "event": _panel_event(_as_event(saved))}
     if pruned:
         # Said, not silent: past events leave when a new one is added.
         out["pruned"] = pruned
@@ -1309,36 +2050,88 @@ def add_local_event(fields):
 
 
 def update_local_event(event_id, fields):
-    cfg, problem = load_config_strict()
-    if cfg is None:
-        return {"ok": False, "error": problem}
-    index = _event_by_id(cfg, event_id)
-    if index is None:
-        return {"ok": False, "error": "That event isn't in Jarvis's calendar any more "
-                                      "(it may have been deleted). Only Jarvis's own events can be edited."}
-    old = cfg["local_events"][index]
-    entry, error = _event_from_fields(fields, base=old)
-    if error:
-        return {"ok": False, "error": error}
-    entry["id"] = old["id"]
-    cfg["local_events"][index] = entry
-    if not save_config(cfg):
-        return {"ok": False, "error": "Couldn't save calendar.json."}
+    with _config_lock() as held:
+        if not held:
+            return {"ok": False, "error": _BUSY_MESSAGE}
+        cfg, problem = load_config_strict()
+        if cfg is None:
+            return {"ok": False, "error": problem}
+        index = _event_by_id(cfg, event_id)
+        if index is None:
+            return {"ok": False, "error": "That event isn't in Jarvis's calendar any more "
+                                          "(it may have been deleted). Only Jarvis's own events can be edited."}
+        old = cfg["local_events"][index]
+        entry, error = _event_from_fields(fields, base=old)
+        if error:
+            return {"ok": False, "error": error}
+        entry["id"] = old["id"]
+        cfg["local_events"][index] = entry
+        if not save_config(cfg):
+            return {"ok": False, "error": "Couldn't save calendar.json."}
     return {"ok": True, "event": _panel_event(_as_event(entry))}
 
 
 def delete_local_event(event_id):
-    cfg, problem = load_config_strict()
-    if cfg is None:
-        return {"ok": False, "error": problem}
-    index = _event_by_id(cfg, event_id)
-    if index is None:
-        return {"ok": False, "error": "That event isn't in Jarvis's calendar any more "
-                                      "(it may have been deleted). Only Jarvis's own events can be deleted."}
-    removed = cfg["local_events"].pop(index)
-    if not save_config(cfg):
-        return {"ok": False, "error": "Couldn't save calendar.json."}
+    with _config_lock() as held:
+        if not held:
+            return {"ok": False, "error": _BUSY_MESSAGE}
+        cfg, problem = load_config_strict()
+        if cfg is None:
+            return {"ok": False, "error": problem}
+        index = _event_by_id(cfg, event_id)
+        if index is None:
+            return {"ok": False, "error": "That event isn't in Jarvis's calendar any more "
+                                          "(it may have been deleted). Only Jarvis's own events can be deleted."}
+        removed = cfg["local_events"].pop(index)
+        if not save_config(cfg):
+            return {"ok": False, "error": "Couldn't save calendar.json."}
     return {"ok": True, "removed": removed.get("id"), "title": removed.get("title") or ""}
+
+
+def _whole_number(value):
+    """An int, or a string / float that is exactly a whole number -> int; anything else None."""
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        return int(value) if value.is_integer() else None
+    if isinstance(value, str) and re.fullmatch(r"[+-]?\d+", value.strip()):
+        return int(value.strip())
+    return None
+
+
+def set_settings(fields):
+    """The two settings the Calendars panel owns: ``keep_days`` (how long Jarvis's own events
+    are kept after they end, 1..3650) and ``week_start`` (mon / sun / sat). Nothing else in
+    calendar.json is reachable from here. Changing keep_days deletes nothing by itself: old
+    events still go only when an event is added, and the answer says how many that will be."""
+    fields = fields if isinstance(fields, dict) else {}
+    changes = {}
+    if "keep_days" in fields:
+        days = _whole_number(fields["keep_days"])
+        if days is None or not 1 <= days <= LOCAL_RETENTION_MAX_DAYS:
+            return {"ok": False, "error": "Keep events for a whole number of days from 1 to %d."
+                                          % LOCAL_RETENTION_MAX_DAYS}
+        changes["keep_days"] = days
+    if "week_start" in fields:
+        day = str(fields["week_start"] or "").strip().lower()
+        if day not in WEEK_STARTS:
+            return {"ok": False, "error": "Weeks can start on Monday, Sunday or Saturday."}
+        changes["week_start"] = day
+    if not changes:
+        return {"ok": False, "error": "Nothing to change."}
+    with _config_lock() as held:
+        if not held:
+            return {"ok": False, "error": _BUSY_MESSAGE}
+        cfg, problem = load_config_strict()
+        if cfg is None:
+            return {"ok": False, "error": problem}
+        cfg.update(changes)
+        if not save_config(cfg):
+            return {"ok": False, "error": "Couldn't save calendar.json."}
+    return {"ok": True, "retention_days": retention_days(cfg), "week_start": week_start(cfg),
+            "expiring_count": _expiring_count(cfg)}
 
 
 def _as_event(entry):
@@ -1351,7 +2144,7 @@ def _as_event(entry):
 
 
 ADMIN_OPS = ("feeds", "window", "check", "link", "feed-enable", "feed-remove",
-             "event-add", "event-update", "event-delete")
+             "event-add", "event-update", "event-delete", "settings")
 
 
 def admin(op, payload=None):
@@ -1380,6 +2173,8 @@ def admin(op, payload=None):
             return update_local_event(payload.get("id"), payload.get("event"))
         if op == "event-delete":
             return delete_local_event(payload.get("id"))
+        if op == "settings":
+            return set_settings(payload.get("settings"))
     except Exception as exc:  # noqa: BLE001 -- a panel call must answer, not crash the page
         return {"ok": False, "error": "Calendar error: %s" % str(exc)[:160]}
     return {"ok": False, "error": "usage: jarvis calendar-admin %s (one JSON object on stdin)" % "|".join(ADMIN_OPS)}
@@ -1447,25 +2242,20 @@ def tool_calendar_add_event(args):
         minutes = 60
     end = start + timedelta(minutes=max(5, min(minutes, 1440)))
 
-    cfg, problem = load_config_strict()
-    if cfg is None:
-        return {"ok": False, "error": problem}
     entry = {
-        "id": "ev_" + secrets.token_hex(4),
         "title": title[:200],
         "start": start.replace(microsecond=0).isoformat(),
         "end": end.replace(microsecond=0).isoformat(),
         "location": (args.get("location") or "")[:200],
         "description": (args.get("description") or "")[:500],
     }
-    cfg.setdefault("local_events", []).append(entry)
-    # Keep the local store bounded; past events are pruned rather than kept
-    # forever, since this is a calendar, not an archive.
-    held = len(cfg["local_events"])
-    _prune_local(cfg)
-    pruned = held - len(cfg["local_events"])
-    if not save_config(cfg):
-        return {"ok": False, "error": "Couldn't save calendar.json."}
+    # The same save the panel uses: under the file lock, and a full calendar (or an event so
+    # old it would be removed at once) is REFUSED -- it never drops a live event to make room.
+    # Past events are pruned rather than kept forever, since this is a calendar, not an archive.
+    saved, pruned, error = _save_new_event(entry)
+    if error:
+        return {"ok": False, "error": error}
+    entry = saved
 
     out = {"ok": True, "id": entry["id"], "title": title,
            "start": entry["start"], "when": _friendly(start, datetime.now()),
