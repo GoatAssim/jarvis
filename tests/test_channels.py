@@ -416,6 +416,58 @@ def test_transcript():
             transcript.reset_cooldowns()
 
 
+def test_transcript_readers_are_rotation_aware():
+    """S1.2: a rotated copy is part of its thread, not a thread of its own."""
+    with tempfile.TemporaryDirectory() as tmp:
+        original = transcript.CHANNELS_DIR
+        transcript.CHANNELS_DIR = Path(tmp)
+        try:
+            folder = Path(tmp) / DISCORD
+            folder.mkdir(parents=True)
+
+            def put(name, texts):
+                (folder / name).write_text(
+                    "".join(json.dumps({"dir": "in", "text": t}) + "\n" for t in texts),
+                    encoding="utf-8")
+
+            put("c1.20261001-101010.jsonl", ["a1", "a2", "a3"])
+            put("c1.20261002-101010.jsonl", ["b1", "b2"])
+            put("c1.jsonl", ["c1", "c2"])
+            put("c2.jsonl", ["other"])
+            (folder / "c1.jsonl").open("a").write("{torn line")   # crash mid-write
+
+            threads = transcript.list_threads(platform=DISCORD)
+            ids = sorted(t["thread_id"] for t in threads)
+            check("rotated copies are not listed as threads", ids == ["c1", "c2"], str(ids))
+            row = next(t for t in threads if t["thread_id"] == "c1")
+            total = sum(p.stat().st_size for p in folder.glob("c1*.jsonl"))
+            check("thread size covers every file", row["bytes"] == total)
+            check("listing keeps its shape",
+                  set(row) == {"platform", "thread_id", "bytes", "modified"})
+
+            texts = [r["text"] for r in transcript.read_thread(DISCORD, "c1")]
+            check("read spans the rotation, oldest first",
+                  texts == ["a1", "a2", "a3", "b1", "b2", "c1", "c2"], str(texts))
+            texts = [r["text"] for r in transcript.read_thread(DISCORD, "c1", limit=4)]
+            check("limit counts records across files, newest kept",
+                  texts == ["b1", "b2", "c1", "c2"], str(texts))
+            texts = [r["text"] for r in transcript.read_thread(DISCORD, "c1", limit=2)]
+            check("a full live file needs no rotated one", texts == ["c1", "c2"], str(texts))
+            check("another thread is not mixed in",
+                  [r["text"] for r in transcript.read_thread(DISCORD, "c2")] == ["other"])
+            check("a torn line is skipped, not fatal",
+                  all(isinstance(r, dict) for r in transcript.read_thread(DISCORD, "c1")))
+
+            # just rotated, nothing appended yet: the history is not gone
+            (folder / "c1.jsonl").unlink()
+            texts = [r["text"] for r in transcript.read_thread(DISCORD, "c1")]
+            check("no live file yet still reads the rotated copies",
+                  texts == ["a1", "a2", "a3", "b1", "b2"], str(texts))
+            check("unknown thread reads empty", transcript.read_thread(DISCORD, "nope") == [])
+        finally:
+            transcript.CHANNELS_DIR = original
+
+
 # ---------------------------------------------------------------------------
 # the round-loop token fix
 # ---------------------------------------------------------------------------

@@ -31,6 +31,7 @@ legal in a filename (and, on Windows, names that are reserved outright), so
 they are sanitized — see _safe_name.
 """
 
+import glob
 import json
 import os
 import re
@@ -95,6 +96,43 @@ def append(platform, thread_id, entry):
         return False
 
 
+def _room_fields(msg):
+    """The optional room-context fields of an inbound line, each present ONLY
+    when set, so every older line and every DM line keeps exactly its old
+    shape: `space` (the kind, rooms only -- a DM is already `context: dm`),
+    `author_name`, `thread_name`, `reply_to` and `attachments` (a count).
+    Display data only: nothing in the gate reads any of it. Never raises: a
+    field that cannot be built is left out, the line is still written."""
+    out = {}
+    try:
+        from . import space
+        kind = space.kind_of(msg)
+        if kind != space.KIND_DM:
+            out["space"] = kind
+        author = space._clean(getattr(msg, "author_name", ""), space.MAX_NAME_CHARS)
+        if author:
+            out["author_name"] = author
+        thread_name = space._clean(getattr(msg, "thread_name", ""), 100)
+        if thread_name:
+            out["thread_name"] = thread_name
+        reply = getattr(msg, "reply_to", None)
+        if isinstance(reply, dict):
+            clipped = {
+                "message_id": space._clean(reply.get("message_id"), space.MAX_ID_CHARS),
+                "user_id": space._clean(reply.get("user_id"), space.MAX_ID_CHARS),
+                "user_name": space._clean(reply.get("user_name"), space.MAX_NAME_CHARS),
+                "snippet": space._clean(reply.get("snippet"), 120),
+            }
+            if any(clipped.values()):
+                out["reply_to"] = clipped
+        count = len(getattr(msg, "attachments", None) or ())
+        if count:
+            out["attachments"] = count
+    except Exception:  # noqa: BLE001
+        pass
+    return out
+
+
 def log_inbound(platform, msg, decision, conv_id=None):
     """Record a received message and what the gate decided about it.
 
@@ -114,6 +152,7 @@ def log_inbound(platform, msg, decision, conv_id=None):
         "message_id": msg.message_id,
         **({"guild_name": msg.guild_name} if getattr(msg, "guild_name", "") else {}),
         **({"channel_name": msg.channel_name} if getattr(msg, "channel_name", "") else {}),
+        **_room_fields(msg),
         # `is not None`, NOT a truthiness test: Decision.__bool__ returns
         # .allowed, so a DENIED decision is falsy and `if decision` would
         # silently record it as "no decision at all" — dropping precisely
@@ -258,45 +297,91 @@ def clean_tool_calls(calls):
     return out
 
 
-def read_thread(platform, thread_id, limit=200):
-    """Most recent `limit` records for one thread, oldest first."""
-    path = thread_path(platform, thread_id)
-    try:
-        lines = path.read_text(encoding=ENCODING).splitlines()
-    except (OSError, UnicodeDecodeError):
-        return []
+def _parse_lines(lines):
     out = []
-    for line in lines[-limit:]:
+    for line in lines:
         line = line.strip()
         if not line:
             continue
         try:
-            out.append(json.loads(line))
+            record = json.loads(line)
         except json.JSONDecodeError:
             continue  # a torn final line from a crash — skip, don't fail
+        if isinstance(record, dict):
+            out.append(record)
+    return out
+
+
+def _thread_files(platform, thread_id):
+    """[rotated copies oldest first, live file last] for ONE thread, only
+    the ones that exist. Same grouping rule as _thread_groups, but without
+    listing the whole platform folder."""
+    safe = _safe_name(thread_id)
+    folder = CHANNELS_DIR / platform
+    rotated = []
+    try:
+        for path in folder.glob(f"{glob.escape(safe)}.*.jsonl"):
+            match = _ROTATED.match(path.stem)
+            if match and match.group("base") == safe:
+                rotated.append((match.group("stamp"), path))
+    except OSError:
+        pass
+    files = [path for _, path in sorted(rotated, key=lambda it: it[0])]
+    live = folder / f"{safe}.jsonl"
+    if live.exists():
+        files.append(live)
+    return files
+
+
+def read_thread(platform, thread_id, limit=200):
+    """Most recent `limit` records for one thread, oldest first.
+
+    Rotation-aware: a busy room rolls its log over at MAX_BYTES, and the
+    rotated copy is still part of the same thread. The live file is read
+    first; only when it holds fewer than `limit` records are the newest
+    rotated files used to top it up."""
+    files = _thread_files(platform, thread_id)
+    out = []
+    for path in reversed(files):
+        need = limit - len(out)
+        if need <= 0:
+            break
+        try:
+            lines = path.read_text(encoding=ENCODING).splitlines()
+        except (OSError, UnicodeDecodeError):
+            continue
+        out = _parse_lines(lines)[-need:] + out
     return out
 
 
 def list_threads(platform=None):
-    """Every thread we have a log for, newest activity first."""
+    """Every thread we have a log for, newest activity first.
+
+    One entry per thread: a rotated copy (`name.20260101-120000.jsonl`) is
+    part of `name`, not a thread of its own. `bytes` is the whole thread,
+    `modified` its newest file."""
     platforms = [platform] if platform else list(PLATFORMS)
     out = []
     for name in platforms:
-        folder = CHANNELS_DIR / name
-        if not folder.is_dir():
-            continue
-        for path in folder.glob("*.jsonl"):
-            try:
-                stat = path.stat()
-            except OSError:
+        for base, paths in _thread_groups(name).items():
+            size, newest = 0, None
+            for path in paths:
+                try:
+                    stat = path.stat()
+                except OSError:
+                    continue
+                size += stat.st_size
+                if newest is None or stat.st_mtime > newest:
+                    newest = stat.st_mtime
+            if newest is None:
                 continue
             out.append({
                 "platform": name,
-                "thread_id": path.stem,
-                "bytes": stat.st_size,
-                "modified": datetime.fromtimestamp(stat.st_mtime)
+                "thread_id": base,
+                "bytes": size,
+                "modified": datetime.fromtimestamp(newest)
                                     .replace(microsecond=0).isoformat(),
-                "_mtime": stat.st_mtime,
+                "_mtime": newest,
             })
     out.sort(key=lambda item: item["_mtime"], reverse=True)
     for item in out:

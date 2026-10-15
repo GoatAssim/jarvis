@@ -260,6 +260,34 @@ def test_success_is_logged_in_the_persons_existing_thread():
     assert recs[-1]["ok"] is True and recs[-1]["text"] == "running late"
 
 
+def test_audit_line_never_lands_in_a_server_channel_thread():
+    """S1.1: a room thread holding the target's message is not their DM."""
+    _reset()
+    _person("discord", "222", name="Sam")
+    from jarvis.channels import permissions
+    room = permissions.IncomingMessage(
+        platform="discord", context=permissions.CTX_GROUP, user_id="222",
+        user_handle="sam", text="hello room", thread_id="chan-900",
+        message_id="r1", guild_id="g1", channel_id="chan-900")
+    transcript.log_inbound("discord", room,
+                           permissions.Decision(True, "allowed", "", may_use_tools=True))
+    assert sd._thread_for("discord", "222") == "dm-222"
+    assert _run_tool(person="Sam", message="psst")["ok"] is True
+    assert not any(r.get("kind") == "owner_dm"
+                   for r in transcript.read_thread("discord", "chan-900"))
+    assert transcript.read_thread("discord", "dm-222")[-1]["kind"] == "owner_dm"
+    # a real DM thread for the same person is still found, even though the
+    # room thread is newer
+    dm = permissions.IncomingMessage(
+        platform="discord", context=permissions.CTX_DM, user_id="222",
+        user_handle="sam", text="hi", thread_id="chan-55", message_id="d1")
+    transcript.log_inbound("discord", dm,
+                           permissions.Decision(True, "allowed", "", may_use_tools=True))
+    transcript.log_inbound("discord", room,
+                           permissions.Decision(True, "allowed", "", may_use_tools=True))
+    assert sd._thread_for("discord", "222") == "chan-55"
+
+
 # --- outbound.dm_person (real function, config stubbed) ----------------
 
 def test_dm_person_rejects_bad_input_without_raising():

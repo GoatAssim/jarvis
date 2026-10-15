@@ -40,7 +40,7 @@ import traceback
 
 from . import PLATFORMS
 from . import config as channel_config
-from . import dedupe, people, permissions, transcript, usage, user_perms
+from . import dedupe, people, permissions, space, spaces, transcript, usage, user_perms
 
 # Serializes ask() calls so the JARVIS_ALLOWED_TOOLS mutation below is safe.
 _ASK_LOCK = threading.Lock()
@@ -111,6 +111,20 @@ def chunk_text(text, limit):
     if remaining:
         chunks.append(remaining)
     return [c for c in chunks if c]
+
+
+def _note_space(platform, msg, conv_id):
+    """Register the room an ADDRESSED message came from and, when one of its
+    names changed, refresh its conversation's origin label (the title it was
+    created with is only ever the first name). Rooms only: a DM is not
+    registered. Never raises: a label is not worth a reply."""
+    try:
+        seen = spaces.note(platform, msg, is_owner=False)
+        if seen and seen.get("renamed") and conv_id:
+            from .. import conversations
+            conversations.set_origin(conv_id, platform, _scope_detail(msg))
+    except Exception as exc:  # noqa: BLE001
+        _log(f"could not register room: {exc}")
 
 
 def _scope_detail(msg):
@@ -350,8 +364,11 @@ def _tool_calls_for_log(captured, conv_id, since):
         return []
 
 
-def _conv_id_for(platform, thread_id, detail=""):
-    """Stable conversation per chat thread, created on first contact."""
+def _conv_id_for(platform, thread_id, detail="", title=""):
+    """Stable conversation per chat thread, created on first contact.
+
+    `title` names a ROOM's conversation (`#general · My Server`); empty keeps
+    the original `platform:thread_id`, which is what every DM still gets."""
     from .. import conversations
 
     def create():
@@ -362,7 +379,7 @@ def _conv_id_for(platform, thread_id, detail=""):
             # Discord thread's history. A gateway always addresses its
             # conversation by id, so it never needs to be current.
             record = conversations.new_conversation(
-                title=f"{platform}:{thread_id}"[:60], make_current=False,
+                title=(title or f"{platform}:{thread_id}")[:60], make_current=False,
                 # Labels this whole conversation in the Logs viewer. Unlike
                 # the scheduler — which runs inside a conversation the user
                 # already owns — a chat thread's conversation is created by
@@ -514,8 +531,10 @@ def handle_message(platform, msg, send, cfg=None, on_tool_call=None, decision=No
     conv_id = None
     if addressed and cfg.get("log_conversations", True):
         conv_id = _conv_id_for(platform, msg.thread_id,
-                               detail=_scope_detail(msg)) if decision.allowed else None
+                               detail=_scope_detail(msg),
+                               title=space.title_for(msg)) if decision.allowed else None
         transcript.log_inbound(platform, msg, decision, conv_id=conv_id)
+        _note_space(platform, msg, conv_id)
 
     if not decision.allowed:
         # Register anyone who actually addressed us (a DM or an @mention) even

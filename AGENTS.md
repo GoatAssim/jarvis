@@ -452,6 +452,7 @@ actually render Markdown):
     python3 tests/test_tool_maker.py        # L.53: the Tool Maker conversation: withheld tools (hidden AND refused, fail closed), context, history trimming, conv-new origin
     python3 tests/test_bridge.py            # the direct channel's CLI half against a real `jarvis _internal_bridge` on a throwaway HOME: protocol, process reuse, env overlay, stdin, confirm round trip, typed reply / trace categories, refuse / retire before started, staleness fingerprint, CLI independence; no network, no API key
     python3 tests/test_skillunload_unknown.py  # I-B3: `jarvis skillunload <name>` errors (exit 1, "unloaded": false) for a skill that was not loaded in that scope; a loaded one still unloads; --all and usage unchanged
+    python3 tests/test_c29b_desktop_deps.py  # C29b: desktop tools load without pygetwindow/pyautogui; doctor lists pygetwindow (Windows-only note); every desktop tool has a diagnosis dependency entry
     node tests/verify_bridge_client.js      # web/bridge.js against a fake worker: no blocking or queueing, reuse, fallbacks, crash-not-rerun, kill, breaker, recycling; no npm install
     node tests/verify_ask_embed.js          # L.53: ask-embed.js's reply/stream/size helpers and the Tool Manager's chat-fold + per-tool conversation key; no npm install
     node tests/verify_code_editor.js        # L.33: the Tool Manager editor's tokenizer, edit helpers and completions; no npm install

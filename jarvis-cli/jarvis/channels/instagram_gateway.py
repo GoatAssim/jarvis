@@ -312,10 +312,33 @@ def parse_events(payload, bot_id="", bot_handle=""):
                 text=text,
                 mentioned=True,
                 message_id=str(value.get("comment_id") or value.get("media_id") or ""),
-                thread_id=sender,
+                # Its own thread: a comment/story mention used to share the
+                # sender's DM transcript file and conversation. Only the
+                # STORAGE key changes -- see _window_and_target for where
+                # the reply goes.
+                thread_id=MENTION_THREAD_PREFIX + sender,
                 raw=change,
             ))
     return out
+
+
+MENTION_THREAD_PREFIX = "mention-"
+
+
+def _window_and_target(msg):
+    """(24h-window key, thread_key to send into) for one parsed message.
+
+    A DM is keyed on the person and sent by id (no thread_key). A group is
+    keyed and sent by its thread. A comment/story mention is `context=group`
+    with a storage-only thread id (`mention-<sender>`, no channel id); its
+    window and send target are exactly what they were before that id
+    existed: the sender. Keeping this in one place is what stops the storage
+    key from leaking into what actually gets posted."""
+    if msg.context != permissions.CTX_GROUP:
+        return msg.user_id, ""
+    if not msg.channel_id and str(msg.thread_id).startswith(MENTION_THREAD_PREFIX):
+        return msg.user_id, msg.user_id
+    return msg.thread_id, msg.thread_id
 
 
 # ---------------------------------------------------------------------------
@@ -503,10 +526,10 @@ def _process_payload(payload, cfg):
         # denied sender who is later allowlisted should not have lost it.
         # The window is keyed on the conversation, not the person: in a
         # group thread any participant's message reopens it for the thread.
-        is_group = msg.context == permissions.CTX_GROUP
-        note_inbound(msg.thread_id if is_group else msg.user_id)
+        window_key, send_thread = _window_and_target(msg)
+        note_inbound(window_key)
 
-        def send(text, _user=msg.user_id, _thread=(msg.thread_id if is_group else "")):
+        def send(text, _user=msg.user_id, _thread=send_thread):
             ok, err = send_message(_user, text, cfg=cfg, thread_key=_thread)
             if not ok:
                 raise RuntimeError(err)

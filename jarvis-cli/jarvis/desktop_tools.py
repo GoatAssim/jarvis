@@ -14,15 +14,21 @@ JSON-serializable dict — either the real result or {"error": "..."}.
 
 import platform
 
+# `except Exception`, not `except ImportError`: pygetwindow raises
+# NotImplementedError on import on macOS / Linux, and pyautogui can raise
+# something else on a machine with no display. Either one used to stop this
+# whole module (every desktop tool) from loading, instead of leaving only
+# the tools that need that package answering with their "not installed"
+# error. `jarvis doctor` (packages) says which one is missing.
 try:
     import pyautogui
     pyautogui.FAILSAFE = True
-except ImportError:
+except Exception:  # noqa: BLE001 — see comment above
     pyautogui = None
 
 try:
     import pygetwindow as gw
-except ImportError:
+except Exception:  # noqa: BLE001 — see comment above
     gw = None
 
 

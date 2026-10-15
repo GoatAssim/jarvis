@@ -126,6 +126,10 @@ _PY_PACKAGES = {
     "psutil": {"pip": "psutil", "feature": "battery/memory/disk tools", "required": True},
     "ddgs": {"pip": "ddgs", "feature": "web_search", "required": True},
     "pyautogui": {"pip": "pyautogui", "feature": "desktop control (click/type/hotkey)", "extra": "desktop"},
+    # Installed by pyautogui, so the `desktop` extra fixes it too. Windows
+    # only: on macOS / Linux the import itself raises NotImplementedError.
+    "pygetwindow": {"pip": "PyGetWindow", "feature": "window tools (list_windows, focus_window, get_active_window, get_window_size, get_window_info)",
+                    "extra": "desktop", "windows_only": True},
     "pytesseract": {"pip": "pytesseract", "feature": "click_on_text", "extra": "ocr"},
     "PIL": {"pip": "Pillow", "feature": "screenshots and OCR preprocessing", "extra": "ocr"},
     "yt_dlp": {"pip": "yt-dlp", "feature": "youtube_download", "extra": "ytdl"},
@@ -272,6 +276,13 @@ def check_python_packages():
         if installed:
             out.append(Check("py.%s" % import_name, entry["pip"], OK,
                              "installed", group="packages"))
+            continue
+        if entry.get("windows_only") and platform.system() != "Windows":
+            # Not a fault of this machine's setup, and nothing to install:
+            # say so instead of handing out a pip command that cannot help.
+            out.append(Check("py.%s" % import_name, entry["pip"], SKIP,
+                             "only works on Windows — %s are unavailable here"
+                             % entry["feature"], "", "packages"))
             continue
         if entry.get("required"):
             out.append(Check("py.%s" % import_name, entry["pip"], FAIL,

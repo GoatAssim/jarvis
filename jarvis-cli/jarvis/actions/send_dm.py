@@ -378,10 +378,14 @@ def _thread_for(platform, user_id):
     if platform != "discord":
         return str(user_id)
     try:
-        from ..channels import transcript
+        from ..channels import permissions, transcript
         for cand in transcript.list_threads(platform=platform)[:60]:
             recs = transcript.read_thread(platform, cand["thread_id"], limit=20)
+            # DM threads only: this person's message in a server channel or a
+            # group is also an inbound record from them, and the owner's DM
+            # audit line must never land in a room other people can read.
             if any(r.get("dir") == "in" and str(r.get("user_id")) == str(user_id)
+                   and r.get("context") == permissions.CTX_DM
                    for r in recs):
                 return cand["thread_id"]
     except Exception:  # noqa: BLE001 -- a log lookup must never block a send

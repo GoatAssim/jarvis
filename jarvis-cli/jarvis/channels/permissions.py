@@ -136,12 +136,14 @@ class IncomingMessage:
     __slots__ = ("platform", "context", "user_id", "user_handle", "text",
                  "mentioned", "guild_id", "channel_id", "message_id",
                  "thread_id", "timestamp", "raw", "avatar",
-                 "guild_name", "channel_name", "attachments")
+                 "guild_name", "channel_name", "attachments",
+                 "author_name", "thread_name", "reply_to")
 
     def __init__(self, platform, context, user_id="", user_handle="", text="",
                  mentioned=False, guild_id="", channel_id="", message_id="",
                  thread_id="", timestamp=None, raw=None, avatar="",
-                 guild_name="", channel_name="", attachments=None):
+                 guild_name="", channel_name="", attachments=None,
+                 author_name="", thread_name="", reply_to=None):
         self.platform = platform
         self.context = context
         self.user_id = str(user_id or "")
@@ -170,6 +172,13 @@ class IncomingMessage:
         # them. channels/media_in.py is the only reader, and only for a message
         # the gate already allowed (L.36-P8 / L.42.3 inbound).
         self.attachments = tuple(attachments or ())
+        # Display-only room context (a Discord display name, the name of the
+        # thread this was written in, and what it replied to as
+        # {message_id, user_id, user_name, snippet}). Like the labels above,
+        # NO stage of decide() reads them.
+        self.author_name = str(author_name or "")
+        self.thread_name = str(thread_name or "")
+        self.reply_to = reply_to if isinstance(reply_to, dict) else None
 
     def identities(self):
         """Every form of this sender an allowlist entry could name, in the
