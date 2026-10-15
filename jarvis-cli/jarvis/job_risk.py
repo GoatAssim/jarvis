@@ -256,7 +256,11 @@ def assess(action):
         if kind == KIND_MESSAGE and certain:
             # Say WHO and WHAT: approving this line is the whole authorization.
             args = (action or {}).get("args") or {}
-            who = str(args.get("person") or "").strip()
+            who_raw = args.get("person")
+            if isinstance(who_raw, (list, tuple)):    # send_dm to several people
+                who = ", ".join(str(w).strip() for w in who_raw if str(w).strip())
+            else:
+                who = str(who_raw or "").strip()
             body = " ".join(str(args.get("message") or "").split())
             if who and body:
                 if len(body) > 160:

@@ -413,6 +413,210 @@ def test_approved_scheduled_job_still_delivers_to_the_known_contact():
     assert SENT == [("discord", "111", "happy birthday")], SENT
 
 
+# --- several recipients (`person` as a list) ----------------------------
+
+def _three_people():
+    _person("discord", "111", name="Maryem")
+    _person("discord", "222", name="Sam")
+    _person("instagram", "333", handle="leila_i", name="Leila")
+
+
+def test_list_sends_to_every_known_person_once_each():
+    _reset()
+    _three_people()
+    out = _run_tool(person=["maryem", "sam", "@leila_i"], message="Among Us in 30")
+    assert out["ok"] is True and out["sent_count"] == 3 and out["failed_count"] == 0, out
+    assert sorted(SENT) == [("discord", "111", "Among Us in 30"),
+                            ("discord", "222", "Among Us in 30"),
+                            ("instagram", "333", "Among Us in 30")], SENT
+    assert [w["name"] for w in out["sent_to"]] == ["Maryem", "Sam", "Leila"], out
+    # Each person is counted, logged and rate limited on their own.
+    sends = sd._load_sends(time.time())
+    assert len(sends["discord:111"]) == len(sends["discord:222"]) == 1, sends
+    assert len(sends["_all"]) == 3, sends
+
+
+def test_single_string_and_one_item_list_keep_the_original_shape():
+    _reset()
+    _three_people()
+    for person in ("maryem", ["maryem"], '["maryem"]'):
+        SENT.clear()
+        sd._rate_file().unlink(missing_ok=True)
+        out = _run_tool(person=person, message="hi")
+        assert out["ok"] is True and out["sent_to"]["name"] == "Maryem", (person, out)
+        assert "sent_count" not in out and len(SENT) == 1, (person, out)
+
+
+def test_json_encoded_list_in_a_string_is_unpacked():
+    _reset()
+    _three_people()
+    out = _run_tool(person='["maryem", "sam"]', message="hi")
+    assert out["ok"] is True and out["sent_count"] == 2, out
+
+
+def test_one_bad_name_fails_alone_and_the_rest_still_send():
+    _reset()
+    _three_people()
+    out = _run_tool(person=["maryem", "nobody-by-this-name", "sam"], message="hi")
+    assert out["ok"] is False and out["sent_count"] == 2 and out["failed_count"] == 1, out
+    assert sorted(p for _, p, _ in SENT) == ["111", "222"], SENT
+    bad = out["failed"][0]
+    assert bad["person"] == "nobody-by-this-name" and "don't know" in bad["error"], out
+    assert "known_contacts" in bad and "Do NOT resend" in out["hint"], out
+
+
+def test_blocked_and_ambiguous_recipients_are_skipped_never_guessed():
+    _reset()
+    _person("discord", "111", name="Maryem")
+    _person("discord", "222", name="Sam Ali", follow="blocked")
+    _person("discord", "333", name="Alex One")
+    _person("discord", "444", name="Alex Two")
+    out = _run_tool(person=["maryem", "sam", "alex"], message="hi")
+    assert out["sent_count"] == 1 and out["failed_count"] == 2, out
+    assert SENT == [("discord", "111", "hi")], SENT
+    errors = {f["person"]: f["error"] for f in out["failed"]}
+    assert "blocked" in errors["sam"] and "more than one person" in errors["alex"], errors
+
+
+def test_two_spellings_of_one_person_get_it_once():
+    _reset()
+    _three_people()
+    out = _run_tool(person=["maryem", "discord:111", "MARYEM", "sam"], message="hi")
+    assert out["ok"] is True and out["sent_count"] == 2, out
+    assert sorted(p for _, p, _ in SENT) == ["111", "222"], SENT
+    assert out["skipped"][0]["person"] == "discord:111", out
+
+
+def test_rate_limit_stops_only_the_recipient_who_hit_it():
+    _reset()
+    _three_people()
+    for _ in range(sd.MAX_PER_RECIPIENT):
+        assert _run_tool(person="maryem", message="x")["ok"] is True
+    SENT.clear()
+    out = _run_tool(person=["maryem", "sam"], message="y")
+    assert out["sent_count"] == 1 and out["failed_count"] == 1, out
+    assert SENT == [("discord", "222", "y")], SENT
+    assert "rate limit" in out["failed"][0]["error"], out
+
+
+def test_delivery_failure_for_one_person_is_reported_and_not_counted():
+    _reset()
+    _three_people()
+
+    def fake(platform, person_id, text):
+        SENT.append((platform, str(person_id), text))
+        return (False, "DMs closed") if str(person_id) == "222" else (True, "sent")
+    outbound.dm_person = fake
+    out = _run_tool(person=["maryem", "sam"], message="hi")
+    assert out["sent_count"] == 1 and "DMs closed" in out["failed"][0]["error"], out
+    sends = sd._load_sends(time.time())
+    assert "discord:222" not in sends and len(sends["discord:111"]) == 1, sends
+
+
+def test_too_many_recipients_or_a_bad_entry_sends_nothing():
+    _reset()
+    _three_people()
+    many = [f"discord:{900 + i}" for i in range(sd.MAX_RECIPIENTS + 1)]
+    out = _run_tool(person=many, message="hi")
+    assert out["ok"] is False and "limit" in out["error"], out
+    out = _run_tool(person=["maryem", {"name": "sam"}], message="hi")
+    assert out["ok"] is False and "each entry" in out["error"], out
+    assert _run_tool(person=[], message="hi")["error"] == "person is required"
+    assert _run_tool(person=["", None], message="hi")["error"] == "person is required"
+    assert not SENT, SENT
+
+
+def test_list_is_still_owner_only_and_never_unattended():
+    _reset()
+    _three_people()
+    os.environ["JARVIS_CHANNEL_SENDER"] = json.dumps(
+        {"platform": "discord", "user_id": "999", "is_owner": False})
+    assert _run_tool(person=["maryem", "sam"], message="x")["ok"] is False
+    os.environ.pop("JARVIS_CHANNEL_SENDER")
+    os.environ["JARVIS_SCHEDULED"] = "1"
+    assert _run_tool(person=["maryem", "sam"], message="x")["ok"] is False
+    os.environ.pop("JARVIS_SCHEDULED")
+    assert not SENT, SENT
+
+
+def test_dry_run_with_a_list_resolves_everyone_and_sends_nothing():
+    _reset()
+    _three_people()
+    out = _run_tool(person=["maryem", "sam"], message="x", dry_run=True)
+    assert out["ok"] and out["dry_run"] and not SENT, out
+    assert [w["user_id"] for w in out["would_send_to"]] == ["111", "222"], out
+    out = _run_tool(person=["maryem", "ghost"], message="x", dry_run=True)
+    assert out["ok"] is False and out["problems"][0]["person"] == "ghost", out
+    assert [w["user_id"] for w in out["would_send_to"]] == ["111"] and not SENT, out
+    assert not sd._rate_file().exists(), "a dry run must not count against the limit"
+
+
+def test_when_with_a_list_makes_one_parked_job_naming_everyone():
+    _reset()
+    scheduler = _sched_reset()
+    _three_people()
+    out = _run_tool(person=["maryem", "sam"], message="game night", when="in 2 hours")
+    assert out["ok"] is True and out["scheduled"] is True and not SENT, out
+    assert [w["user_id"] for w in out["to"]] == ["111", "222"], out
+    jobs = scheduler.list_jobs()
+    assert len(jobs) == 1, jobs
+    job = scheduler.get(out["id"])
+    assert job["action"]["args"]["person"] == ["discord:111", "discord:222"], job
+    assert "platform" not in job["action"]["args"], job
+    assert out["status"] == scheduler.STATUS_NEEDS_APPROVAL, out
+    lines = " ".join((job["risk"] or {}).get("lines", []))
+    assert "discord:111" in lines and "discord:222" in lines and "game night" in lines, lines
+
+
+def test_approved_list_job_delivers_to_everyone_when_it_fires():
+    _reset()
+    scheduler = _sched_reset()
+    _three_people()
+    out = _run_tool(person=["maryem", "sam", "leila_i"], message="game night",
+                    when="in 1 hour")
+    scheduler.approve(out["id"])
+    store = scheduler.load_store()
+    for j in store["jobs"]:
+        j["next_run"] = "2000-01-01T00:00:00"
+        j["trigger"]["at"] = "2000-01-01T00:00:00"
+    scheduler.save_store(store)
+    scheduler.tick()
+    assert sorted(SENT) == [("discord", "111", "game night"),
+                            ("discord", "222", "game night"),
+                            ("instagram", "333", "game night")], SENT
+
+
+def test_when_with_a_list_is_all_or_nothing():
+    _reset()
+    scheduler = _sched_reset()
+    _three_people()
+    out = _run_tool(person=["maryem", "ghost"], message="x", when="in 1 hour")
+    assert out["ok"] is False and out["scheduled"] is False, out
+    assert out["problems"][0]["person"] == "ghost", out
+    out = _run_tool(person=["maryem", "555"], platform="discord", message="x", when="in 1 hour")
+    assert out["ok"] is False and out["scheduled"] is False, out
+    assert not scheduler.list_jobs() and not SENT
+
+
+def test_dry_run_plus_when_with_a_list_creates_no_job():
+    _reset()
+    scheduler = _sched_reset()
+    _three_people()
+    out = _run_tool(person=["maryem", "sam"], message="x", when="in 1 hour", dry_run=True)
+    assert out["ok"] and out["can_schedule"] is True, out
+    assert not scheduler.list_jobs() and not SENT
+
+
+def test_policy_summary_and_schema_understand_a_list():
+    from jarvis import policy
+    d = policy.dry_run("send_dm", {"person": ["Maryem", "Sam"], "message": "hi"})
+    assert "Maryem" in d["would"] and "Sam" in d["would"], d
+    schema = sd.TOOL_SCHEMAS[0]["parameters"]["properties"]["person"]
+    kinds = [alt["type"] for alt in schema["anyOf"]]
+    assert kinds == ["string", "array"], schema
+    assert sd.TOOL_SCHEMAS[0]["parameters"]["required"] == ["person", "message"]
+
+
 def _run():
     tests = [v for k, v in sorted(globals().items())
              if k.startswith("test_") and callable(v)]

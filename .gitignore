@@ -25,9 +25,9 @@ benchmark*
 *.venv
 venv
 jarvis/venv
+# voice model downloads (anchored so the jarvis/voice/ Python package is NOT ignored)
 voices/
-voices
-voice/
-voice
+/voice/
+/jarvis-cli/voice/
 web/data/
 tests/fixtures

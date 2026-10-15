@@ -215,6 +215,11 @@ jarvis-cli/jarvis/
                           one small model call each, 20/day cap, background after a reply
         sender_gate.py    D-I10: the free pre-filter + one tiny yes/no call in front of
                           remember_sender; also decides which tools-off turns are offered it
+        rule_check.py     L.22: post-check for `hard` standing rules (only `don_t_discuss` / `ask_owner_first`):
+                          the DRAFT reply is checked before sending (one tiny yes/no call per matched
+                          rule) and replaced if it leaks the topic
+        recall_check.py   L.21: does an "I remember..." / "you told me..." sentence trace back to a saved
+                          item (or to what the person just said)? Log-only so far; no rewrite
         awaiting.py       L.23: threads the owner is waiting on; gates -> one classifier call ->
                           digest or notify_owner; log + feedback bias in channels/awaiting*.json
         thinking.py       L.44: /thinking + the per-person on/off(+lock) -> think_override; L.42.2: wants_trace() (owner only,
@@ -275,10 +280,17 @@ jarvis-cli/jarvis/
     key_health.py         NEW — ~/.jarvis/key_health.json: per-key 429 cooldowns, per-model
                           503 cooldowns, last-good key (ai_client.ask reorders, never removes)
 
+    voice/                speech in/out. `speech_text.py` (I-B11): pure; drops fenced code from what is
+                          spoken (`jarvis speak` / `listen`), mirrored by `JarvisRich.speechText` in
+                          web/public/rich-text.js. NOTE: was hidden by a bare `voice` .gitignore line
+                          until patch d1; `git add` it if it is untracked
+
     actions/              auto-discovered tool files (see _template.py)
         _template.py      the contract, commented field by field
         dev_agent.py      plan -> write -> install -> run -> fix, sandboxed
         code_agent.py  calendar_tools.py  mcp_tools.py  scheduler_tools.py
+                              calendar_tools.py = L.54: chat tools + `admin()` (the back end of
+                              `jarvis calendar-admin`, one JSON in / one JSON out; owns every rule)
         conv_search_tools.py  notify_owner.py
         recent_dms.py         read-only, owner-only: who DMed the owner
         send_dm.py            NEW (L.20) — DM ONE known person; owner-only, confirm-gated,
@@ -320,6 +332,10 @@ web/
     public/backlog.js/.css       Menu -> Backlog (Part H.1 rework: search,
                                  project filter, Overview pane, drag-and-drop
                                  between kanban columns)
+    public/calendar.js/.css      Menu -> Calendars (L.54): Agenda / Week / Month, link-a-calendar guide, Jarvis's
+                                 own events, "Remind me". Standalone like backlog.js; everything via
+                                 /api/calendar/* (server.js -> `jarvis calendar-admin`). A linked calendar is
+                                 read-only and its link is a secret (only ever shown masked)
     public/logsearch.js/.css     Menu -> Log Search (Part H.1 rework: live
                                  search, query highlighting, results/detail
                                  two-pane layout, jump-to-Ask/Daemons/Schedules)
@@ -781,6 +797,11 @@ silently never runs.
 | `test_l43_tree.py` | L.43: `default_doc`, `defaults_report` (changed / missing / extra, masked secrets), `reset_value` (backup, log, stale, guarded, unattended, wrong-type repair), CLI verbs, routes and wiring |
 | `test_l43_web_data.py` | L.43: Settings > Advanced > Files covers `web/data` -- name/path rules, folder lookup (`JARVIS_WEB_DATA`), allow-list and read-only files, the server's rules repeated and pinned against `web/server.js`, backups/stale/unattended gate, CLI end to end |
 | `test_l22_measure_home.py` | L.22: `measure_l22_paraphrase.py` -- `--live` gets the provider config in its sandbox HOME (only `ai_config.json`, deleted at exit), missing-fixture message, answered-call count and the no-answer warning |
+| `test_l54_calendar.py` / `test_l54_calendar_chat_tools.py` / `test_l54_calendar_hardening.py` / `test_l54_calendar_limits.py` / `test_l54_calendar_recurrence.py` | L.54: `calendar_tools.admin` (the panel back end), chat edit/delete of Jarvis's own events, hardening, the seven limits, repeating events and time zones in a linked feed |
+| `verify_calendar_panel.js` (`node`) | L.54: `calendar.js` pure helpers (Monday-first weeks, 42-day month grid, all-day events, "Remind me", event form, link guide) |
+| `test_l22_hard_conflicts.py` / `test_l22_paraphrase_fixture.py` | L.22: the `hard` post-check (`rule_check.py`), rule conflicts, the rules panel's route; the paraphrase fixture and matcher guarantees. `measure_l22_paraphrase.py` is a measurement, not a test, and `run_tests.py` skips it |
+| `test_l21_export_recall.py` | L.21: memory export, `recall_check.py` ("recalled statements carry an id"), the "no hallucinated history" golden fixtures, the 1,000-record budget |
+| `test_cli_speech_text.py` | I-B11: `voice/speech_text.py` rules, Python == JS corpus, `jarvis speak` hands the speaker the stripped text |
 | `verify_settings_tree.js` (`node`) | L.43: `settings.js` tree helpers (build, filter, leaf input), the `#settings/...` deep-link parser, and `/config` wiring |
 | `test_slash_coverage.py` | every `reserved_names.py` name is in the `/` palette registry exactly once, with a valid risk tier |
 | `verify_slash_palette.js` (`node`) | the palette engine: parsing, submit routing, near-miss, every verb's handler, confirm gates, keyboard model |

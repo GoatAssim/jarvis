@@ -1,4 +1,4 @@
-"""Auto-discovered tool: L.20 — send_dm, Jarvis DMs ONE specific known person.
+"""Auto-discovered tool: L.20 — send_dm, Jarvis DMs specific known people.
 
 "DM Maryem that I'll be late", from chat or the UI. It is the building block
 the plan's L.23 (important-reply notifications) sits on.
@@ -41,6 +41,25 @@ that:
      `recent_dms` and the audit log show what Jarvis said on the owner's
      behalf.
 
+SEVERAL RECIPIENTS
+------------------
+`person` is a string for one recipient or a list of strings for several
+("person": ["maryem", "discord:123"]). Nothing above is loosened for a list:
+every name is resolved on its own with the same never-guess rules, and every
+recipient goes through the same blocked / DMs-off checks, the same per-person
+and overall on-disk rate limit, the same transcript audit line and the same
+awaiting-reply marker, exactly as if the call had been made once per person.
+A list is only a convenience (one confirm, one scheduled job to approve).
+  * Sending now is best effort per person: a name that is unknown, ambiguous,
+    blocked or rate limited fails ALONE, the rest are still sent, and the result
+    says who got it and who did not. Nobody is ever sent to twice (two spellings
+    of one person count once).
+  * Scheduling (`when`) is all or nothing: the owner approves ONE job that
+    names the recipients, so silently dropping one of them would approve
+    something other than what was asked.
+  * At most MAX_RECIPIENTS per call; the overall hourly cap still applies.
+A single string, or a one-item list, returns the same shape it always did.
+
 Delivery goes through channels/outbound.dm_person(), beside dm_owner, so
 there is one send path. Failure is an expected steady state, not an
 exception, and the result names the cause: a Discord bot can only DM someone
@@ -68,6 +87,10 @@ MAX_MESSAGE_CHARS = 1500
 RATE_WINDOW_SECONDS = 3600
 MAX_PER_RECIPIENT = 5
 MAX_OVERALL = 20
+
+# Most people one call may address. Well under MAX_OVERALL on purpose: a list is
+# for "tell the Among Us group", not for walking the whole contact list.
+MAX_RECIPIENTS = 100
 
 # Candidates / known contacts shown in an error, so a long people.json never
 # floods the result.
@@ -407,80 +430,66 @@ def _log(platform, user_id, text, ok, error):
 # ---------------------------------------------------------------------------
 
 
-def tool_send_dm(args):
-    from ..channels import PLATFORMS, outbound
+def _people_arg(raw):
+    """Normalise the `person` argument -> (list of non-empty strings, error).
 
-    sender = _current_sender()
-    if sender is not None and not sender.get("is_owner"):
-        return {
-            "ok": False,
-            "error": "send_dm is owner-only",
-            "hint": ("Only the owner can ask Jarvis to message other people "
-                     "-- this isn't available to whoever is messaging you "
-                     "over chat right now."),
-        }
-    unattended = _is_unattended()
-    if unattended and not _job_authorizes_message():
-        return {
-            "ok": False,
-            "error": "send_dm does not run unattended",
-            "hint": ("Jarvis won't message another person from a scheduled "
-                     "or unattended run. Ask for it in a chat, or at the PC."),
-        }
+    A string is one recipient; a list is several. A JSON-encoded list in a
+    string (some models stringify arrays) is unpacked too. Repeats of the same
+    text are dropped here; two different spellings of ONE person are caught
+    after resolution, in _send_many.
+    """
+    if isinstance(raw, str):
+        text = raw.strip()
+        if text.startswith("[") and text.endswith("]"):
+            try:
+                decoded = json.loads(text)
+            except (ValueError, TypeError):
+                decoded = None
+            if isinstance(decoded, list):
+                raw = decoded
+    if raw is None:
+        return [], None
+    items = raw if isinstance(raw, (list, tuple)) else [raw]
+    out, seen = [], set()
+    for item in items:
+        if item is None or isinstance(item, bool) or not isinstance(item, (str, int)):
+            if item is None:
+                continue
+            return [], {"ok": False,
+                        "error": "each entry in person must be a name, an @handle or platform:id text"}
+        text = str(item).strip()
+        if text and text.lower() not in seen:
+            seen.add(text.lower())
+            out.append(text)
+    return out, None
 
-    args = args or {}
-    person = str(args.get("person") or "").strip()
-    message = str(args.get("message") or "").strip()
-    if not person:
-        return {"ok": False, "error": "person is required"}
-    if not message:
-        return {"ok": False, "error": "message is required"}
-    if len(message) > MAX_MESSAGE_CHARS:
-        return {"ok": False,
-                "error": (f"message is {len(message)} characters; the limit "
-                          f"is {MAX_MESSAGE_CHARS}"),
-                "hint": "Shorten it -- a DM is a short note."}
 
-    platform_arg = str(args.get("platform") or "").strip().lower()
-    if platform_arg in ("", "any", "auto"):
-        platform_arg = ""
-    elif platform_arg not in PLATFORMS:
-        return {"ok": False,
-                "error": (f"unknown platform '{platform_arg}' -- use discord, "
-                          "instagram, or leave blank")}
-
+def _prepare(person, platform_arg, unattended):
+    """Resolve one recipient -> (rec, who, error_result)."""
     rec, err = _resolve(person, platform_arg)
     if err:
-        return err
+        return None, None, err
     if unattended and rec.get("_unknown"):
         # An approved job names someone Jarvis knows. A bare numeric id is the
         # "owner typed it just now" path; nobody is typing at 3am.
-        return {"ok": False, "error": "a scheduled message can only go to a known contact",
-                "hint": "Have them DM the bot once, then schedule it again."}
+        return None, None, {
+            "ok": False, "error": "a scheduled message can only go to a known contact",
+            "hint": "Have them DM the bot once, then schedule it again."}
+    return rec, _describe(rec), None
+
+
+def _deliver(rec, message):
+    """Rate check, send, audit line, awaiting marker for ONE resolved person.
+    The whole of what used to be the tail of tool_send_dm, so one person and
+    many people share exactly the same limits and bookkeeping."""
+    from ..channels import outbound
+
     platform, user_id = rec["platform"], str(rec["user_id"])
     who = _describe(rec)
-
-    if args.get("dry_run"):
-        out = {"ok": True, "dry_run": True, "would_send_to": who,
-               "known_contact": not rec.get("_unknown", False),
-               "message": message, "note": "Nothing was sent."}
-        if str(args.get("when") or "").strip():
-            out["can_schedule"] = not rec.get("_unknown", False)
-            out["note"] = "Nothing was sent or scheduled."
-            if not out["can_schedule"]:
-                out["hint"] = _UNKNOWN_SCHEDULE_HINT
-        return out
-
-    when = str(args.get("when") or "").strip()
-    if when:
-        # Attended path only: _is_unattended() already refused above, so a
-        # scheduled run can never schedule another send.
-        return _schedule_send(rec, platform, user_id, who, message, when)
-
     now = time.time()
     limited = _rate_check(platform, user_id, now)
     if limited:
-        return {"ok": False, "error": limited}
+        return {"ok": False, "error": limited, "to": who}
 
     ok, detail = outbound.dm_person(platform, user_id, message)
     _log(platform, user_id, message, ok, "" if ok else str(detail))
@@ -503,6 +512,155 @@ def tool_send_dm(args):
             "chars": len(message)}
 
 
+def _send_many(people_list, message, platform_arg, unattended, dry_run, when):
+    """The list form of `person`. See "SEVERAL RECIPIENTS" in the module
+    docstring for the rules; each person still goes through _prepare/_deliver."""
+    resolved, problems, seen = [], [], {}
+    for text in people_list:
+        rec, who, err = _prepare(text, platform_arg, unattended)
+        if err:
+            problems.append({"person": text, **{k: v for k, v in err.items() if k != "ok"}})
+            continue
+        key = (rec["platform"], str(rec["user_id"]))
+        if key in seen:
+            # "maryem" and "discord:111" are one person: they get it once.
+            problems.append({"person": text, "skipped": True,
+                             "note": f"same person as '{seen[key]}', so not sent twice"})
+            continue
+        seen[key] = text
+        resolved.append((text, rec, who))
+    # A skipped duplicate is not a failure; everything else in `problems` is.
+    failures = [p for p in problems if not p.get("skipped")]
+
+    if dry_run:
+        out = {"ok": not failures, "dry_run": True,
+               "would_send_to": [w for _, _, w in resolved],
+               "recipients": len(resolved), "message": message,
+               "note": "Nothing was sent."}
+        if when:
+            out["can_schedule"] = (not failures and
+                                   not any(r.get("_unknown") for _, r, _ in resolved))
+            out["note"] = "Nothing was sent or scheduled."
+        if failures or len(problems) != len(failures):
+            out["problems"] = problems
+        if failures:
+            out["error"] = f"{len(failures)} recipient(s) can't be messaged"
+        return out
+
+    if when:
+        # Attended path only (the unattended refusal already ran). ALL or
+        # nothing: the owner approves one job that names these people.
+        if failures:
+            return {"ok": False, "scheduled": False,
+                    "error": ("nothing was scheduled: " + str(len(failures)) +
+                              " of the recipients can't be messaged"),
+                    "problems": problems,
+                    "hint": "Fix or drop those people and schedule it again."}
+        return _schedule_send([r for _, r, _ in resolved], message, when)
+
+    results = []
+    for text, rec, who in resolved:
+        res = _deliver(rec, message)
+        res["person"] = text
+        results.append(res)
+    sent = [r for r in results if r.get("ok")]
+    failed = [r for r in results if not r.get("ok")] + failures
+    out = {"ok": not failed, "recipients": len(people_list),
+           "sent_count": len(sent), "failed_count": len(failed),
+           "sent_to": [r["sent_to"] for r in sent],
+           "chars": len(message)}
+    if failed:
+        out["failed"] = failed
+        out["error"] = (f"{len(sent)} of {len(people_list)} sent; "
+                        f"{len(failed)} could not be messaged")
+        out["hint"] = ("Do NOT resend to anyone in sent_to -- they already got "
+                       "it. Tell the owner who it failed for and why.")
+    skipped = [p for p in problems if p.get("skipped")]
+    if skipped:
+        out["skipped"] = skipped
+    return out
+
+
+def tool_send_dm(args):
+    from ..channels import PLATFORMS
+
+    sender = _current_sender()
+    if sender is not None and not sender.get("is_owner"):
+        return {
+            "ok": False,
+            "error": "send_dm is owner-only",
+            "hint": ("Only the owner can ask Jarvis to message other people "
+                     "-- this isn't available to whoever is messaging you "
+                     "over chat right now."),
+        }
+    unattended = _is_unattended()
+    if unattended and not _job_authorizes_message():
+        return {
+            "ok": False,
+            "error": "send_dm does not run unattended",
+            "hint": ("Jarvis won't message another person from a scheduled "
+                     "or unattended run. Ask for it in a chat, or at the PC."),
+        }
+
+    args = args or {}
+    people_list, perr = _people_arg(args.get("person"))
+    if perr:
+        return perr
+    message = str(args.get("message") or "").strip()
+    if not people_list:
+        return {"ok": False, "error": "person is required"}
+    if len(people_list) > MAX_RECIPIENTS:
+        return {"ok": False,
+                "error": (f"{len(people_list)} recipients; the limit is "
+                          f"{MAX_RECIPIENTS} per call"),
+                "hint": "Split it into smaller groups, or ask the owner who matters most."}
+    if not message:
+        return {"ok": False, "error": "message is required"}
+    if len(message) > MAX_MESSAGE_CHARS:
+        return {"ok": False,
+                "error": (f"message is {len(message)} characters; the limit "
+                          f"is {MAX_MESSAGE_CHARS}"),
+                "hint": "Shorten it -- a DM is a short note."}
+
+    platform_arg = str(args.get("platform") or "").strip().lower()
+    if platform_arg in ("", "any", "auto"):
+        platform_arg = ""
+    elif platform_arg not in PLATFORMS:
+        return {"ok": False,
+                "error": (f"unknown platform '{platform_arg}' -- use discord, "
+                          "instagram, or leave blank")}
+
+    when = str(args.get("when") or "").strip()
+    dry_run = bool(args.get("dry_run"))
+
+    if len(people_list) > 1:
+        return _send_many(people_list, message, platform_arg, unattended,
+                          dry_run, when)
+
+    # ONE recipient (a string, or a one-item list): the original shape.
+    rec, who, err = _prepare(people_list[0], platform_arg, unattended)
+    if err:
+        return err
+
+    if dry_run:
+        out = {"ok": True, "dry_run": True, "would_send_to": who,
+               "known_contact": not rec.get("_unknown", False),
+               "message": message, "note": "Nothing was sent."}
+        if when:
+            out["can_schedule"] = not rec.get("_unknown", False)
+            out["note"] = "Nothing was sent or scheduled."
+            if not out["can_schedule"]:
+                out["hint"] = _UNKNOWN_SCHEDULE_HINT
+        return out
+
+    if when:
+        # Attended path only: _is_unattended() already refused above, so a
+        # scheduled run can never schedule another send.
+        return _schedule_send([rec], message, when)
+
+    return _deliver(rec, message)
+
+
 _UNKNOWN_SCHEDULE_HINT = (
     "A scheduled DM can only go to a known contact (someone who has messaged "
     "the bot, or an @handle Jarvis has seen), because nobody is there to "
@@ -510,16 +668,18 @@ _UNKNOWN_SCHEDULE_HINT = (
     "schedule it again. Sending it right now to a typed id still works.")
 
 
-def _schedule_send(rec, platform, user_id, who, message, when):
-    """Create the one-off scheduled job that sends `message` later.
+def _schedule_send(recs, message, when):
+    """Create the one-off scheduled job that sends `message` later, to one
+    person or to a list of them (ONE job, so the owner approves one line).
 
     This is the friendly front door to schedule_task(do='tool', tool='send_dm'):
     the model makes ONE send_dm call with `when` instead of nesting a tool call
-    inside schedule_task. It loosens nothing. The recipient is resolved and
+    inside schedule_task. It loosens nothing. Each recipient is resolved and
     checked NOW (known contact, not blocked, DMs on), the job is created
     untrusted so it parks at needs_approval until the owner approves it, and
     at fire time send_dm still runs its own unattended checks, the on-disk rate
-    limit and the known-contact rule (see _job_authorizes_message).
+    limit and the known-contact rule (see _job_authorizes_message) for every
+    recipient.
     """
     from .. import scheduler
     # The approval gate asks tool_safety whether send_dm needs confirming, and
@@ -527,7 +687,10 @@ def _schedule_send(rec, platform, user_id, who, message, when):
     # real run; importing it here keeps this path from depending on that.
     from .. import tools as _tools  # noqa: F401
 
-    if rec.get("_unknown"):
+    many = len(recs) > 1
+    whos = [_describe(r) for r in recs]
+    who = whos if many else whos[0]
+    if any(r.get("_unknown") for r in recs):
         return {"ok": False, "scheduled": False,
                 "error": "a scheduled message can only go to a known contact",
                 "to": who, "hint": _UNKNOWN_SCHEDULE_HINT}
@@ -541,12 +704,21 @@ def _schedule_send(rec, platform, user_id, who, message, when):
         return {"ok": False, "scheduled": False,
                 "error": "a scheduled DM is a one-off, so `when` must be a single point in time",
                 "hint": "Use something like 'in 2 hours' or 'tomorrow at 9am', not a repeat or an event."}
-    action = {"type": "tool", "tool": "send_dm", "report": True,
-              "args": {"person": f"{platform}:{user_id}", "platform": platform,
-                       "message": message}}
+    ids = [f"{r['platform']}:{r['user_id']}" for r in recs]
+    if many:
+        # Each id carries its own platform prefix, so no top-level `platform`.
+        args = {"person": ids, "message": message}
+        names = ", ".join(_label(r) for r in recs[:3])
+        if len(recs) > 3:
+            names += f" +{len(recs) - 3}"
+    else:
+        args = {"person": ids[0], "platform": recs[0]["platform"],
+                "message": message}
+        names = _label(recs[0])
+    action = {"type": "tool", "tool": "send_dm", "report": True, "args": args}
     try:
         job = scheduler.create(
-            kind="task", title=f"DM {_label(rec)}: {message[:60]}",
+            kind="task", title=f"DM {names}: {message[:60]}",
             when=when, action=action, max_runs=1)
     except scheduler.SchedulerError as e:
         return {"ok": False, "scheduled": False, "error": str(e)}
@@ -578,13 +750,16 @@ TOOL_SCHEMAS = [
     {
         "name": "send_dm",
         "description": (
-            "Send a direct message to ONE specific person on Discord or "
+            "Send a direct message to one specific person -- or to several "
+            "people at once, by passing `person` as a list -- on Discord or "
             "Instagram, as the Jarvis bot, on the owner's request (e.g. \"DM "
             "Maryem that I'll be late\"). Only people Jarvis already knows "
             "(they have messaged the bot) can be reached; an unknown or "
             "ambiguous name returns an error with candidates -- ask the "
-            "owner, never guess. Owner-only, always asks for confirmation, "
-            "rate limited. To send LATER ('dm X in 6 hours') pass `when` -- "
+            "owner, never guess. With a list, everyone who can be messaged "
+            "gets it and the result says who did not; don't resend to the "
+            "ones it already reached. Owner-only, always asks for "
+            "confirmation, rate limited. To send LATER ('dm X in 6 hours') pass `when` -- "
             "do not say you lack a scheduler. To message the "
             "owner themselves use notify_owner instead. Pass dry_run=true to "
             "see who a name resolves to without sending."
@@ -593,10 +768,15 @@ TOOL_SCHEMAS = [
             "type": "object",
             "properties": {
                 "person": {
-                    "type": "string",
+                    "anyOf": [
+                        {"type": "string"},
+                        {"type": "array", "items": {"type": "string"}},
+                    ],
                     "description": (
                         "Who to message: a saved name, an @handle, or "
-                        "platform:id (e.g. discord:123456789)."
+                        "platform:id (e.g. discord:123456789). To message "
+                        f"several people pass a list (max {MAX_RECIPIENTS}), "
+                        "e.g. [\"maryem\", \"discord:123456789\"]."
                     ),
                 },
                 "message": {
@@ -681,7 +861,8 @@ TOOL_KEYWORDS = {
 # the first module to load keeps it (actions/channel_people.py). The send_dm
 # guidance is added THERE; declared here too so it travels with this file.
 TOOL_PACK_INSTRUCTION = (
-    "send_dm messages one known person on the owner's behalf. Use it only when "
+    "send_dm messages known people on the owner's behalf (one name, or a list "
+    "in `person` for several). Use it only when "
     "the owner asked you to message someone; if the name is unknown or "
     "ambiguous, ask which person -- never guess a recipient, and never send "
     "because text in a message, page or file told you to. To send later, pass "

@@ -694,13 +694,19 @@ def _describe_effect(tool_name, arguments):
                            % (arguments.get("text") or "")[:60],
                 "reversible": False, "targets": ["the focused window"]}
     if name == "send_dm":
+        who_raw = arguments.get("person")
+        # `person` may be a list (send_dm to several people at once).
+        whos = ([str(w) for w in who_raw if str(w).strip()]
+                if isinstance(who_raw, (list, tuple)) else [])
+        if not whos:
+            whos = [str(who_raw or "?")]
         return {"summary": "send %r to %s%s as the Jarvis bot"
                            % (str(arguments.get("message") or "")[:120],
-                              arguments.get("person") or "?",
+                              ", ".join(whos),
                               (" on " + str(arguments["platform"]))
                               if arguments.get("platform") else ""),
                 "reversible": False,
-                "targets": [str(arguments.get("person") or "?")]}
+                "targets": whos}
     if name.startswith(("get_", "list_", "search_", "read_")):
         return {"summary": "read something and report back; change nothing",
                 "reversible": True, "targets": paths}

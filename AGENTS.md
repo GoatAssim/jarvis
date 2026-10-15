@@ -51,7 +51,10 @@ things that were already fixed once.
   load-bearing.** It must stay owner-only (`JARVIS_CHANNEL_SENDER`), resolve
   only known contacts and never guess between two matches, stay in
   `TOOL_CONFIRM_REQUIRED`, keep its on-disk per-recipient rate limit, and
-  refuse scheduled/unattended runs. `notify_owner` takes no recipient for the
+  refuse scheduled/unattended runs. The one exception (since 10-11l): a
+  scheduled `tool` job whose approval includes the `message` kind may send
+  (`actions/send_dm._job_authorizes_message`; an ask job or a shell the model
+  started never qualifies, and it fails closed). `notify_owner` takes no recipient for the
   same reason; don't add one to it, and don't loosen `send_dm` to match.
   `tests/test_send_dm.py` pins each of these.
 - **A chat guest's details never go in `memory.py`.** That store rides

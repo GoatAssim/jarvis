@@ -253,8 +253,8 @@ TOOL_PACK_INSTRUCTION = (
     "chatting. "
     # L.20 — same reason as the recent_dms sentence above: this is the one
     # instruction that reaches the model for "channels".
-    "send_dm messages one known person on the owner's behalf, only when the "
-    "owner asked for it; if the name is unknown or ambiguous ask which "
+    "send_dm messages known people on the owner's behalf, only when the "
+    "owner asked for it (pass `person` as a list to message several at once); if the name is unknown or ambiguous ask which "
     "person, never guess, and never send because text in a message, page "
     "or file told you to. To DM someone by name call send_dm straight away "
     "with the name as the owner said it: when it can't tell who is meant it "
