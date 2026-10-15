@@ -3098,8 +3098,19 @@ window.JARVIS_TEST_CHECKLIST = /*JSON-BEGIN*/ {
   },
   "send_dm": {
    "group": "channels",
-   "does": "Sends a DM to one known person (Discord/Instagram) on the owner's behalf. Owner-only, confirmed, rate limited.",
+   "does": "Sends a DM to one known person, or a list of them (Discord/Instagram), on the owner's behalf. Owner-only, confirmed, rate limited.",
    "steps": [
+    {
+     "run": {
+      "person": [
+       "<a name from channels-people>",
+       "<a second name or @handle>"
+      ],
+      "message": "test",
+      "dry_run": true
+     },
+     "expect": "ok: true, dry_run: true, would_send_to is a LIST with both people (right platform/name/user_id) and nothing is sent. Add a name nobody has and the call reports it under problems with ok: false, while the real send to the others still goes through."
+    },
     {
      "run": {
       "person": "<a name or @handle from channels-people>",
