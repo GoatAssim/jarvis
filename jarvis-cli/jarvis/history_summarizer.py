@@ -78,6 +78,17 @@ def _hash_for(conv_id, raw_text):
     return h.hexdigest()
 
 
+def _who(ex):
+    """`User` for every exchange that has no speaker (all of them outside a
+    shared room, so their text and cache key are unchanged); the speaker's
+    label in a room, so the recap keeps who said what."""
+    try:
+        from . import conversations
+        return conversations.speaker_label_for(ex) or "User"
+    except Exception:  # noqa: BLE001
+        return "User"
+
+
 def _raw_text_for(older_src):
     lines = []
     for ex in older_src:
@@ -85,7 +96,7 @@ def _raw_text_for(older_src):
         assistant_text = (ex.get("jarvis") or "").strip()
         if not user_text:
             continue
-        lines.append(f"User: {user_text}\nAssistant: {assistant_text}")
+        lines.append(f"{_who(ex)}: {user_text}\nAssistant: {assistant_text}")
     return "\n\n".join(lines)
 
 

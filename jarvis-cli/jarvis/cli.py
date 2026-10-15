@@ -1379,6 +1379,45 @@ _EDIT_BOOL_FIELDS = ("report", "catch_up")
 _EDIT_NULLABLE_FIELDS = ("channels", "level", "max_runs", "emit_on_done")
 
 
+def parse_notify_send_args(tokens):
+    """`jarvis notify-send <message> [title] [channels,csv] [--position P] [--level N]`.
+
+    The three positional words keep their old meaning; `--position P` (or
+    `--position=P`) and `--level N` (or `--level=N`) may sit anywhere. Returns
+    (positional, position, level, error). A position that is not one of
+    notifier.POSITIONS is an error here -- a person typing at a prompt wants to
+    hear about a typo -- while notifier.notify() itself quietly falls back to
+    the next default for a bad value from a config file or another caller.
+    """
+    from . import notifier
+    positional, position, level = [], None, None
+    toks = [t for t in tokens]
+    i = 0
+    while i < len(toks):
+        tok = toks[i]
+        name, eq, inline = tok.partition("=")
+        if name in ("--position", "--level"):
+            if eq:
+                value = inline
+            elif i + 1 < len(toks):
+                i += 1
+                value = toks[i]
+            else:
+                return None, None, None, f"{name} needs a value"
+            if name == "--position":
+                canon = notifier._canon_position(value)
+                if not canon:
+                    return None, None, None, (
+                        f"--position must be one of: {', '.join(notifier.POSITIONS)}")
+                position = canon
+            else:
+                level = value
+        else:
+            positional.append(tok)
+        i += 1
+    return positional, position, level, None
+
+
 def parse_sched_edit_args(tokens):
     """`jarvis sched-edit <id> ...` after the id: either ONE JSON object
     (what web/server.js sends) or `--field value` pairs for typing at a prompt:
@@ -1648,12 +1687,18 @@ def run_scheduler_command(argv):
             return emit({"removed": 1, "id": removed.get("id"), "title": removed.get("title")})
 
         if cmd == "notify-send":
-            if len(rest) < 1:
-                return emit({"error": "usage: jarvis notify-send <message> [title] [channels,csv]"}, 1)
-            channels = [c.strip() for c in rest[2].split(",")] if len(rest) > 2 else None
+            usage = ("usage: jarvis notify-send <message> [title] [channels,csv] "
+                     "[--position P] [--level N]")
+            words, position, level, bad = parse_notify_send_args(rest)
+            if bad:
+                return emit({"error": bad}, 1)
+            if len(words) < 1:
+                return emit({"error": usage}, 1)
+            channels = [c.strip() for c in words[2].split(",")] if len(words) > 2 else None
             record = notifier.notify(
-                title=rest[1] if len(rest) > 1 else "Jarvis",
-                message=rest[0], channels=channels, kind="notify")
+                title=words[1] if len(words) > 1 else "Jarvis",
+                message=words[0], channels=channels, kind="notify",
+                position=position, level=level)
             return emit(record)
 
         if cmd == "notify-list":

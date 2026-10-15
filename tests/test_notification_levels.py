@@ -81,10 +81,10 @@ def test_custom_tool_source_can_declare_its_own_default():
 def test_channels_for_level_are_cumulative():
     check("level 1 is inbox only", cw.__name__ and notifier._channels_for_level(1) == ["inbox"])
     lvl2 = notifier._channels_for_level(2)
-    check("level 2 adds stream+toast", "stream" in lvl2 and "toast" in lvl2 and "inbox" in lvl2)
+    check("level 2 adds stream+desktop", "stream" in lvl2 and "desktop" in lvl2 and "inbox" in lvl2)
     lvl4 = notifier._channels_for_level(4)
     check("level 4 adds cross-channel broadcast",
-          "discord" in lvl4 and "instagram" in lvl4 and "toast" in lvl4)
+          "discord" in lvl4 and "instagram" in lvl4 and "desktop" in lvl4)
 
 
 def test_notify_sets_level_flags_on_the_record():

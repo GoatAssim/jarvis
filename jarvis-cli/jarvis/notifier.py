@@ -19,7 +19,7 @@ So delivery is split in two:
     consumer acknowledges what it consumed. A notification raised while
     nothing was running is still waiting the next time anything is.
 
-  * LIVE channels (toast/stream/voice/playnite) are best-effort extras on
+  * LIVE channels (stream/desktop/voice/playnite) are best-effort extras on
     top. Each is wrapped so an unavailable one (no Playnite running, no TTS
     installed, no notify-send on this distro) degrades to "not delivered
     that way" and never takes down the tick that raised it.
@@ -53,8 +53,40 @@ INBOX_FILE = JARVIS_DIR / "notifications.json"
 CONFIG_FILE = JARVIS_DIR / "notify_config.json"
 ENCODING = "utf-8"
 
-CHANNELS = ("inbox", "stream", "toast", "voice", "playnite",
+# E2 / D-10: the native OS notification is called `desktop`. Its old name,
+# `toast`, now belongs to the in-app toast (which the web page draws from the
+# `stream` record, at the record's `position`). Everything already stored under
+# the old name -- notify_config.json, a scheduled job's `channels`, a model's
+# `channels` argument -- is read as `desktop`, so nothing changes for it.
+CHANNELS = ("inbox", "stream", "desktop", "voice", "playnite",
             "discord", "instagram")
+LEGACY_CHANNEL_ALIASES = {"toast": "desktop"}
+
+
+def canonical_channel(name):
+    """One channel name as notify() understands it: trimmed, lower-cased, the
+    legacy alias resolved. Returns None for anything that is not a channel."""
+    text = str(name or "").strip().lower()
+    text = LEGACY_CHANNEL_ALIASES.get(text, text)
+    return text if text in CHANNELS else None
+
+
+def canonical_channels(names):
+    """canonical_channel() over a list, dropping unknowns and duplicates,
+    keeping order."""
+    out = []
+    for name in (names or []):
+        canon = canonical_channel(name)
+        if canon and canon not in out:
+            out.append(canon)
+    return out
+
+
+# E2 / D-11: where an in-app toast appears. Eight places: four sides and four
+# corners. D-12: bottom-right unless something says otherwise.
+POSITIONS = ("top", "bottom", "left", "right",
+             "top-left", "top-right", "bottom-left", "bottom-right")
+DEFAULT_POSITION = "bottom-right"
 
 # Cap on retained notifications. The inbox is a queue — unacknowledged items
 # are kept, but a consumer that never acknowledges (a browser nobody opens
@@ -79,8 +111,8 @@ DEFAULT_CONFIG = {
     # kept, unchanged, as the explicit-`channels`-override path notify()
     # still honors, so nothing that already passes channels= breaks.
     "channels": {
-        "reminder": ["inbox", "stream", "toast"],
-        "notify": ["inbox", "stream", "toast"],
+        "reminder": ["inbox", "stream", "desktop"],
+        "notify": ["inbox", "stream", "desktop"],
         "task": ["inbox", "stream"],
     },
     # D.2.1 — per-kind (or per custom-tool `source`) importance level
@@ -105,6 +137,13 @@ DEFAULT_CONFIG = {
         # kind so it can be tuned (or silenced to 1) in Settings > Notifications.
         "daemon": 2,
     },
+    # E2 -- where an in-app toast appears (see POSITIONS). "position" is the
+    # global default; "positions" overrides it per kind (or per custom
+    # tool/action `source`), the same shape as "levels". An explicit
+    # `position=` on notify() beats both. A value that is not one of
+    # POSITIONS is ignored and the next layer down is used.
+    "position": DEFAULT_POSITION,
+    "positions": {},
     # Windows toasts go through PowerShell's BurntToast module when it's
     # installed (much nicer looking), falling back to a plain balloon via
     # .NET's NotifyIcon, which needs nothing installed at all.
@@ -182,12 +221,47 @@ def normalize_level(value, kind=None, source=None, config=None):
     return DEFAULT_LEVEL
 
 
+def normalize_position(value, kind=None, source=None, config=None):
+    """Resolve where an in-app toast goes.
+
+    Lookup order (same shape as normalize_level):
+      1. `value` itself, if it is one of POSITIONS.
+      2. `config["positions"][source]`.
+      3. `config["positions"][kind]`.
+      4. `config["position"]`, the global default.
+      5. DEFAULT_POSITION (bottom-right).
+    A value that is not a position is skipped, never an error.
+    """
+    canon = _canon_position(value)
+    if canon:
+        return canon
+    config = config if config is not None else _load_config()
+    positions = config.get("positions") or {}
+    if isinstance(positions, dict):
+        for candidate_key in (source, kind):
+            if not candidate_key:
+                continue
+            canon = _canon_position(positions.get(candidate_key))
+            if canon:
+                return canon
+    return _canon_position(config.get("position")) or DEFAULT_POSITION
+
+
+def _canon_position(value):
+    """'Bottom Right', 'bottom_right' and 'BOTTOM-RIGHT' are all bottom-right;
+    anything else that is not in POSITIONS gives None."""
+    if not isinstance(value, str):
+        return None
+    text = "-".join(value.lower().replace("_", " ").replace("-", " ").split())
+    return text if text in POSITIONS else None
+
+
 def _channels_for_level(level):
     """The channel set implied by a bare level, before any explicit
     `channels` override (which still wins outright — see notify())."""
     chans = ["inbox"]
     if level >= 2:
-        chans += ["stream", "toast"]
+        chans += ["stream", "desktop"]
     if level >= 4:
         chans += ["discord", "instagram"]
     return chans
@@ -201,10 +275,18 @@ def _load_config():
     config = json.loads(json.dumps(DEFAULT_CONFIG))  # deep copy
     if isinstance(data, dict):
         for key, value in data.items():
-            if key in ("channels", "levels") and isinstance(value, dict):
+            if key in ("channels", "levels", "positions") and isinstance(value, dict):
                 config[key].update(value)
             else:
                 config[key] = value
+    # E2 / D-10: a config file written before the rename says "toast" for the
+    # native notification. Read it as "desktop" so behaviour is unchanged.
+    channels = config.get("channels")
+    if isinstance(channels, dict):
+        for kind_name, names in list(channels.items()):
+            if isinstance(names, list):
+                channels[kind_name] = [
+                    LEGACY_CHANNEL_ALIASES.get(str(n).strip().lower(), n) for n in names]
     return config
 
 
@@ -574,7 +656,8 @@ def clear_read():
 
 
 def notify(title, message, channels=None, kind="notify", job_id=None,
-           conv_id=None, failed=False, actions=None, level=None, source=None):
+           conv_id=None, failed=False, actions=None, level=None, source=None,
+           position=None):
     """Deliver one notification across every resolved channel.
 
     Never raises. Returns the notification record, with a `delivered` list
@@ -605,6 +688,12 @@ def notify(title, message, channels=None, kind="notify", job_id=None,
     tool/action's own name, K.2.7.1a) and can also carry its own configured
     default level the same way a built-in `kind` does.
 
+    `position` (E2) is where the in-app toast is drawn: one of POSITIONS.
+    It resolves via normalize_position() -- an explicit value here, else
+    `source`'s or `kind`'s configured position, else the global default,
+    else bottom-right -- and rides on the record as `record["position"]`,
+    which the web page reads. It changes nothing about delivery.
+
     An explicit `channels` list still wins outright over whatever the
     resolved level implies — this is the same "explicit beats default"
     contract the old channels-only model already had, just with the level
@@ -618,6 +707,7 @@ def notify(title, message, channels=None, kind="notify", job_id=None,
     """
     config = _load_config()
     resolved_level = normalize_level(level, kind=kind, source=source, config=config)
+    resolved_position = normalize_position(position, kind=kind, source=source, config=config)
     clean_message = ask_output.strip_protocol_lines((message or "").strip()) or ""
     summarized = ask_output.summarize(clean_message)
     record = {
@@ -637,6 +727,7 @@ def notify(title, message, channels=None, kind="notify", job_id=None,
         "failed_channels": [],
         "level": resolved_level,
         "level_name": LEVEL_NAMES.get(resolved_level, "standard"),
+        "position": resolved_position,
         "persistent": resolved_level >= 3,
         "confirm_required": resolved_level >= 5,
         # L.30 — the owner's read/acknowledge state, stamped later by
@@ -653,7 +744,7 @@ def notify(title, message, channels=None, kind="notify", job_id=None,
         return record
 
     if channels:
-        wanted = [c for c in channels if c in CHANNELS]
+        wanted = canonical_channels(channels)
         if "inbox" not in wanted:
             wanted = ["inbox"] + wanted
     else:
@@ -726,10 +817,11 @@ def _deliver_stream(record, config):
     return True
 
 
-def _deliver_toast(record, config):
-    """Native OS notification. Best-effort by design — there is no portable
-    way to do this, so each platform gets its own attempt and a failure just
-    means the inbox carries the notification instead."""
+def _deliver_desktop(record, config):
+    """Native OS notification (called `toast` before E2). Best-effort by
+    design — there is no portable way to do this, so each platform gets its
+    own attempt and a failure just means the inbox carries the notification
+    instead."""
     text = (record.get("summary") or record["message"]).replace("\r", " ").replace("\n", " ")[:250]
     title = record["title"][:64]
     if sys.platform.startswith("win"):
@@ -882,7 +974,7 @@ def _deliver_instagram(record, config):
 _DELIVERERS = {
     "inbox": _deliver_inbox,
     "stream": _deliver_stream,
-    "toast": _deliver_toast,
+    "desktop": _deliver_desktop,
     "voice": _deliver_voice,
     "playnite": _deliver_playnite,
     "discord": _deliver_discord,

@@ -747,6 +747,49 @@ def partner(entry):
     return other if isinstance(other, dict) else None
 
 
+def group_block(msg, is_owner, labels=True):
+    """The "you are in a room" paragraph for one message, or "" for a DM.
+
+    Said in the per-turn tail (the same channel the identity block uses), never
+    in the cached static prefix. It tells the model three things it otherwise
+    cannot know (channel spaces F2): where it is, that several people write there
+    and the reply is posted for all of them, and (`labels`) that earlier messages
+    in the history are labelled `[Name]`. For the owner it also warns that others
+    can read the reply (D3): the identity block says "treat it exactly like a
+    message at the PC", which is wrong in a room.
+
+    `labels` is False when `group_speaker_labels` is off: the sentence about
+    `[Name]` labels would then be untrue, so it is left out. Every name that
+    reaches the text is cleaned of brackets and line breaks first.
+    """
+    from . import space
+    kind = space.kind_of(msg)
+    if kind == space.KIND_DM:
+        return ""
+    guild = space._clean(getattr(msg, "guild_name", ""), 60)
+    channel = space._channel_part(msg)
+    on_server = f" on server {guild}" if guild else ""
+    if kind == space.KIND_CHANNEL:
+        where = ("server channel " + channel + on_server).strip()
+    elif kind == space.KIND_THREAD:
+        name = space._clean(getattr(msg, "thread_name", ""), 60)
+        where = ("thread" + (f" '{name}'" if name else "")
+                 + (f" in {channel}" if channel else "") + on_server)
+    else:
+        name = space._clean(getattr(msg, "thread_name", "") or getattr(msg, "channel_name", ""), 60)
+        where = "group chat" + (f" '{name}'" if name else "")
+    parts = [f"WHERE: this is a shared {where}. Several different people write here."]
+    if labels:
+        parts.append("Earlier messages in the history are labelled [Name], and so is the "
+                     "latest one.")
+    parts.append("Your reply is posted for everyone in the room. Answer whoever wrote the "
+                 "latest message and don't attribute one person's words to another.")
+    if is_owner:
+        parts.append("Others can read your reply: don't post private memory, file contents "
+                     "or secrets here unless the owner clearly asks.")
+    return " ".join(parts)
+
+
 def effective_name(entry):
     """Their own name, else the linked account's, else ''."""
     if not isinstance(entry, dict):

@@ -433,6 +433,7 @@ actually render Markdown):
     python3 tests/test_category_manage.py   # L.12: rename / merge / delete a category as a whole (daemons: registry + CLI + routes pinned; commands share the JS rules)
     node tests/verify_category_manager.js   # L.12: category-manager.js pure helpers + the whole dialog chain against a fake JarvisUI/fetch; no npm install
     python3 tests/test_l27c_autostart_notice.py  # L.27 follow-up: a failed daemon autostart raises ONE `daemon` notification per pass (text, cap, never raises, real inbox record, Settings row)
+    python3 tests/test_e2_toast_position.py  # E2: toast position (8 places, default bottom-right), native OS notification renamed `desktop` (`toast` still read as `desktop`)
     python3 tests/test_l43_tree.py          # L.43: "changed from default" report + per-value reset (same gate as every Settings write)
     node tests/verify_settings_tree.js      # L.43: settings.js tree helpers, deep-link parser and wiring; no npm install
     python3 tests/verify_l36_insights_ui.py # L.36-P1/P2/P3: Conversation / Usage / Test tabs in a real browser; needs `playwright` (Python) + Chromium, prints SKIP without them

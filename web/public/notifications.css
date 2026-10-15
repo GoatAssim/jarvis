@@ -2,8 +2,10 @@
  * notifications.css — L.30 notification rework.
  *
  * Two surfaces, both new:
- *   .ntf-*   the toast stack that notifications appear in (top centre, where
- *            the old single #toast was, so nobody has to relearn where to look)
+ *   .ntf-*   the toast stacks that notifications appear in. E2: one stack per
+ *            position (top, bottom, left, right and the four corners); the
+ *            notification record says which, and bottom-right is the default
+ *            (D-11 / D-12)
  *   .nt-*    the inbox panel inside #notifications-overlay
  *
  * Colour never carries the only signal: a failed or unacknowledged item also
@@ -15,17 +17,70 @@
 /* --- toast stack ---------------------------------------------------------- */
 
 .ntf-stack{
-  position: fixed; top: 14px; left: 50%; transform: translateX(-50%);
+  position: fixed;
   z-index: 9200;
   width: min(460px, calc(100vw - 24px));
   display: flex; flex-direction: column; gap: 8px;
   pointer-events: none;                 /* the gaps never eat a click */
+  --ntf-from: translateY(-8px);         /* where a card slides in from */
+  --ntf-edge: 14px;
 }
 
-/* The generic error toast (#toast) sits in the same spot. When one is showing,
-   the stack steps down below it instead of hiding behind it. */
-.ntf-stack{ transition: top 160ms ease; }
-body:has(#toast:not([hidden])) .ntf-stack{ top: 74px; }
+/* One rule per position. The edge offsets add the phone safe areas, and the
+   bottom ones step clear of what already lives there. Those offsets are a
+   stopgap until E3 makes this the only toast renderer. */
+.ntf-stack--top{
+  top: calc(var(--ntf-edge) + env(safe-area-inset-top, 0px));
+  left: 50%; transform: translateX(-50%);
+}
+.ntf-stack--bottom{
+  bottom: 70px;                         /* above the online pill */
+  left: 50%; transform: translateX(-50%);
+  --ntf-from: translateY(8px);
+}
+.ntf-stack--left, .ntf-stack--right{
+  top: 50%; transform: translateY(-50%);
+  width: min(360px, calc(100vw - 24px));
+}
+.ntf-stack--left{ left: calc(var(--ntf-edge) + env(safe-area-inset-left, 0px)); --ntf-from: translateX(-8px); }
+.ntf-stack--right{ right: calc(var(--ntf-edge) + env(safe-area-inset-right, 0px)); --ntf-from: translateX(8px); }
+.ntf-stack--top-left{
+  top: calc(var(--ntf-edge) + env(safe-area-inset-top, 0px));
+  left: calc(var(--ntf-edge) + env(safe-area-inset-left, 0px));
+  width: min(360px, calc(100vw - 24px));
+}
+.ntf-stack--top-right{
+  top: calc(var(--ntf-edge) + env(safe-area-inset-top, 0px));
+  right: calc(var(--ntf-edge) + env(safe-area-inset-right, 0px));
+  width: min(360px, calc(100vw - 24px));
+}
+.ntf-stack--bottom-left{
+  bottom: calc(18px + env(safe-area-inset-bottom, 0px));
+  left: calc(var(--ntf-edge) + env(safe-area-inset-left, 0px));
+  width: min(360px, calc(100vw - 24px));
+  --ntf-from: translateY(8px);
+}
+.ntf-stack--bottom-right{
+  bottom: 134px;                        /* above the Logs and Notifications buttons */
+  right: calc(var(--ntf-edge) + env(safe-area-inset-right, 0px));
+  width: min(360px, calc(100vw - 24px));
+  --ntf-from: translateY(8px);
+}
+
+/* The sequence bar owns the bottom edge while one is queued (L.9). */
+body.has-sequence .ntf-stack--bottom{ bottom: calc(var(--seq-clear, 90px) + 56px); }
+body.has-sequence .ntf-stack--bottom-left{ bottom: calc(var(--seq-clear, 90px) + 8px); }
+body.has-sequence .ntf-stack--bottom-right{ bottom: calc(var(--seq-clear, 90px) + 112px); }
+
+/* Stopgap: the run-confirm popup (bottom-left) and the ui-kit toasts
+   (bottom-right) are separate systems until E3; step over them. */
+body:has(.run-confirm-popup:not([hidden])) .ntf-stack--bottom-left{ bottom: 270px; }
+body:has(.jui-toasts .jui-toast) .ntf-stack--bottom-right{ bottom: 214px; }
+
+/* The generic error toast (#toast) sits top centre. When one is showing, the
+   top-centre stack steps down below it instead of hiding behind it. */
+.ntf-stack--top{ transition: top 160ms ease; }
+body:has(#toast:not([hidden])) .ntf-stack--top{ top: 74px; }
 
 .ntf{
   pointer-events: auto;
@@ -38,7 +93,7 @@ body:has(#toast:not([hidden])) .ntf-stack{ top: 74px; }
   color: var(--text);
   box-shadow: 0 8px 28px rgba(0,0,0,0.5), 0 0 22px var(--accent-glow);
   cursor: pointer;
-  opacity: 0; transform: translateY(-8px);
+  opacity: 0; transform: var(--ntf-from, translateY(-8px));
   transition: opacity 180ms ease, transform 180ms ease;
 }
 .ntf.is-in{ opacity: 1; transform: none; }
@@ -234,7 +289,7 @@ body:has(#toast:not([hidden])) .ntf-stack{ top: 74px; }
 }
 
 @media (max-width: 700px){
-  .ntf-stack{ top: 8px; }
+  .ntf-stack--top{ top: calc(8px + env(safe-area-inset-top, 0px)); }
   .nt-btn--quiet{ margin-left: 0; }
   .nt-hint{ display: none; }
 }

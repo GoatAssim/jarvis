@@ -101,6 +101,12 @@ _COMMON_DEFAULTS = {
 
     # --- behaviour ---------------------------------------------------
     "log_conversations": True,
+    # In a shared room (a server channel or thread, a group chat) the saved
+    # history and the model's view of it say WHO wrote each line, and the
+    # prompt tells the model it is in a room. This is the kill switch: off
+    # gives back the old, speaker-blind behaviour with no revert. DMs are
+    # never affected either way.
+    "group_speaker_labels": True,
     # Platform hard caps: Discord 2000 chars/message, Instagram 1000 BYTES.
     # Overridden per platform below; the value here is just a floor.
     "max_reply_chars": 1900,

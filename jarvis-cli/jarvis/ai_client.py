@@ -1240,7 +1240,7 @@ def _system_prompt_parts(persona, tools_enabled,
 
 
 def _build_messages(persona, user_text, tools_enabled, profile, conversation_id, route=None,
-                    sender_ctx="", tool_maker_ctx=""):
+                    sender_ctx="", tool_maker_ctx="", speaker_label=""):
     compact = profile.get("compact_tools_blurb", False)
     prior_turns = conversations.conversation_messages(
         conversation_id,
@@ -1388,7 +1388,12 @@ def _build_messages(persona, user_text, tools_enabled, profile, conversation_id,
     if dynamic_system:
         messages.append({"role": "system", "content": dynamic_system})
     messages.extend(prior_turns)
-    messages.append({"role": "user", "content": user_text})
+    # A shared room only (channels S4): the history above is labelled `[Name]:`,
+    # so the current message must be too, or it would read as unattributed.
+    # Applied here and nowhere else: routing, preflight, memory search and the
+    # saved exchange all keep the plain `user_text`.
+    messages.append({"role": "user",
+                     "content": f"[{speaker_label}]: {user_text}" if speaker_label else user_text})
     return messages
 
 
@@ -3178,7 +3183,7 @@ def _allowlist_is_empty():
 def _ask_impl(user_text, commands=None, on_attempt=None, on_tool_call=None, on_tool_result=None, conversation_id=None,
         on_confirm_request=None, on_route=None, provider_override=None,
         think_override=None, on_trace=None, sender_context="", on_interim_text=None, on_stream=None,
-        user_images=None, user_shown=None):
+        user_images=None, user_shown=None, speaker=None, msg_id=None):
     """Ask Jarvis something, trying every configured, enabled provider in
     order until one answers \u2014 and within each provider, every one of its
     configured keys in order before moving on to the next provider. Always
@@ -3240,6 +3245,10 @@ def _ask_impl(user_text, commands=None, on_attempt=None, on_tool_call=None, on_t
     channels/media_in.py); these two only ride on the saved exchange so a reload can show the
     pictures and the typed words instead of the description note. Nothing about the model call
     changes.
+
+    speaker / msg_id, if given (a message from a shared room only; see channels/space.speaker_record),
+    say who wrote this message: they are saved on the exchange and the current message is
+    shown to the model as `[Label]: text`. Omitted (every DM, the CLI, the web UI): nothing changes.
 
     sender_context, if given, is a short identity block naming who sent
     this message and whether they are the owner (see
@@ -3826,6 +3835,10 @@ def _ask_impl(user_text, commands=None, on_attempt=None, on_tool_call=None, on_t
         console_turn = console_store.begin_turn(conv_id)
         _image_kwargs = ({"images": user_images, "shown": user_shown or ""}
                          if user_images else {})
+        if speaker:
+            _image_kwargs["speaker"] = speaker
+        if msg_id:
+            _image_kwargs["msg_id"] = msg_id
         conversations.begin_exchange(conv_id, user_text, console_turn=console_turn,
                                      **_image_kwargs)
         console_store.log("command", user_text)
@@ -3959,6 +3972,17 @@ def _ask_impl(user_text, commands=None, on_attempt=None, on_tool_call=None, on_t
         # as it is now, in the per-turn tail. Read once per ask, not per attempt.
         tool_maker_ctx = (tool_maker.prompt_context(tool_maker.load_context())
                           if tool_maker.active() else "")
+        # Channels S4: the label the model sees on this turn's message in a shared
+        # room. Empty (so the call is exactly as before) for everything else.
+        _speaker_kwargs = {}
+        if speaker:
+            try:
+                from .channels import space as _space
+                _label = _space.speaker_label(speaker)
+            except Exception:  # noqa: BLE001 -- a label is never worth a failed ask
+                _label = ""
+            if _label:
+                _speaker_kwargs["speaker_label"] = _label
 
         for i, key in enumerate(keys, start=1):
             if token_budget.exceeded():
@@ -3973,6 +3997,7 @@ def _ask_impl(user_text, commands=None, on_attempt=None, on_tool_call=None, on_t
                 route=route if tools_enabled else None,
                 sender_ctx=sender_context,
                 tool_maker_ctx=tool_maker_ctx,
+                **_speaker_kwargs,
             )
             runs = getattr(tool_executor, "runs", None) if tool_executor else None
             budget = profile.get("tool_result_budget", _MODE_BY_NAME["full"]["tool_result_budget"])

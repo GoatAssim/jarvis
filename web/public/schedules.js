@@ -103,9 +103,11 @@
   }
 
   const CHANNELS = [
-    ["inbox", "Inbox"], ["stream", "Stream"], ["toast", "Toast"], ["voice", "Voice"],
+    ["inbox", "Inbox"], ["stream", "Stream"], ["desktop", "Desktop"], ["voice", "Voice"],
     ["playnite", "Playnite"], ["discord", "Discord"], ["instagram", "Instagram"],
   ];
+  // E2 / D-10: the native OS notification is `desktop`; jobs saved earlier say `toast`.
+  const legacyChannel = (c) => (c === "toast" ? "desktop" : c);
   const LEVELS = [
     ["", "Default"], ["1", "1 \u00b7 Silent"], ["2", "2 \u00b7 Standard"],
     ["3", "3 \u00b7 Persistent"], ["4", "4 \u00b7 Broadcast"], ["5", "5 \u00b7 Confirm"],
@@ -911,7 +913,7 @@
       el("input", { type: "text", id: "sch-e-emit", value: job.emit_on_done || "" })));
     wrap.appendChild(advanced);
     // Prefill AFTER the controls exist (channels are checkboxes, level a select).
-    (job.channels || []).forEach((c) => { const box = $(`#sch-e-ch-${c}`, chans); if (box) box.checked = true; });
+    (job.channels || []).forEach((c) => { const box = $(`#sch-e-ch-${legacyChannel(c)}`, chans); if (box) box.checked = true; });
     const levelSel = $("#sch-e-level", levelWrap);
     if (levelSel) levelSel.value = job.level != null ? String(job.level) : "";
 
@@ -952,7 +954,7 @@
     const kind = val("sch-e-kind");
     if (kind && kind !== job.kind) changes.kind = kind;
     const channels = CHANNELS.map(([id]) => id).filter((id) => $(`#sch-e-ch-${id}`)?.checked);
-    const oldChannels = (job.channels || []).slice().sort();
+    const oldChannels = (job.channels || []).map(legacyChannel).sort();
     if (!sameJson(channels.slice().sort(), oldChannels)) changes.channels = channels.length ? channels : null;
     const level = val("sch-e-level");
     if ((level === "" ? null : parseInt(level, 10)) !== (job.level == null ? null : job.level)) changes.level = level === "" ? null : parseInt(level, 10);

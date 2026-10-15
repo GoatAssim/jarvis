@@ -152,7 +152,7 @@ def _ask_jarvis(text, conv_id, may_use_tools, on_tool_call=None, platform="",
                 sender_context="", sender_env="", tool_scope=None, tool_log=None,
                 collect_media=False, media_log=None, offer_tools=None,
                 think_override=None, user_images=None, user_shown=None,
-                on_confirm_request=None, on_trace=None):
+                on_confirm_request=None, on_trace=None, speaker=None, msg_id=None):
     """One ask, with tools allowed or forbidden for this specific sender.
 
     Imported lazily: ai_client pulls in the whole tool catalog, and a
@@ -198,6 +198,10 @@ def _ask_jarvis(text, conv_id, may_use_tools, on_tool_call=None, platform="",
     built one, and handle_message builds one only for the verified owner, so every
     other ask keeps `None` and a confirm-gated tool stays cancelled exactly as before.
     `on_trace` (L.42.2) likewise: only passed when the owner turned the trace on.
+
+    `speaker` / `msg_id` (channel spaces S4) are given ONLY for a message from a shared room
+    (never a DM): who wrote it, so the saved exchange and the model's view of the history say
+    so. Forwarded to ai_client.ask only when set, so a DM's call is exactly what it was.
     """
     from .. import ai_client, commands_config, logs
 
@@ -291,6 +295,10 @@ def _ask_jarvis(text, conv_id, may_use_tools, on_tool_call=None, platform="",
                 extra_kwargs["on_confirm_request"] = on_confirm_request
             if on_trace is not None:
                 extra_kwargs["on_trace"] = on_trace
+            if speaker:
+                extra_kwargs["speaker"] = speaker
+                if msg_id:
+                    extra_kwargs["msg_id"] = msg_id
             if user_images:
                 # Same rule: only a message that carried a picture changes the call.
                 extra_kwargs["user_images"] = user_images
@@ -621,6 +629,26 @@ def handle_message(platform, msg, send, cfg=None, on_tool_call=None, decision=No
         except Exception as exc:  # noqa: BLE001 -- memory is an enhancement
             _log(f"person memory unavailable: {exc}")
 
+    # --- a shared room (channel spaces S4 / S5) ----------------------------------------
+    # Only for a server channel / thread or a group chat, never a DM, so every DM
+    # prompt and every DM exchange stays exactly what it was. `group_speaker_labels`
+    # (default on) is the kill switch for both halves: off gives the old behaviour.
+    # The block goes in the same per-turn tail as the identity block, never the cached
+    # static prefix.
+    speaker = None
+    try:
+        if space.is_room(msg):
+            if cfg.get("group_speaker_labels", True):
+                speaker = space.speaker_record(entry, msg, is_owner)
+            block = people.group_block(msg, bool(is_owner), labels=speaker is not None)
+            if block:
+                sender_ctx = (sender_ctx + "\n\n" + block).strip()
+    except Exception as exc:  # noqa: BLE001 -- framing is an enhancement, never a precondition
+        speaker = None
+        _log(f"room framing unavailable: {exc}")
+    speaker_kwargs = ({"speaker": speaker, "msg_id": str(msg.message_id or "")}
+                      if speaker else {})
+
     # --- an answer to an approval prompt (L.29 / L.42.1, Instagram's Y / N) -------
     # Before anything that costs tokens. Only the owner, only from a DM, only while a
     # request is pending and only as the whole message; any other message from the
@@ -730,7 +758,7 @@ def handle_message(platform, msg, send, cfg=None, on_tool_call=None, decision=No
                              media_log=media_items, offer_tools=offer_tools,
                              think_override=think_override,
                              on_confirm_request=confirm_cb, on_trace=trace_cb,
-                             **image_kwargs)
+                             **image_kwargs, **speaker_kwargs)
         text = (getattr(result, "text", "") or "").strip()
         provider = getattr(result, "provider", "") or ""
         if not text:

@@ -65,6 +65,12 @@
   const AUTO_HIDE_ACK_MS = 12000;        // a card that still needs acknowledging
   const AFTER_HOVER_MS = 3000;           // grace period once the pointer leaves a card
   const MAX_VISIBLE = 4;                 // cards on screen at once; the rest live in the panel
+  // E2 / D-11 / D-12: where a toast is drawn. Mirrors notifier.POSITIONS; the
+  // record carries `position`, and anything else (an older record, a bad
+  // value) lands in the default, bottom-right.
+  const POSITIONS = ["top", "bottom", "left", "right",
+    "top-left", "top-right", "bottom-left", "bottom-right"];
+  const DEFAULT_POSITION = "bottom-right";
   const BURST_WINDOW_MS = 10 * 60 * 1000;
   // D-N1 (owner-decided 2026-09-26i): level 3+ re-surfaces on an interval
   // until acknowledged. The interval and cap were not owner-specified.
@@ -103,6 +109,12 @@
     if (!n) return false;
     if (typeof n.unread === "boolean") return n.unread;
     return !n.read_at;
+  }
+
+  function positionOf(n) {
+    const raw = n && typeof n.position === "string" ? n.position : "";
+    const p = raw.toLowerCase().replace(/[_\s]+/g, "-").trim();
+    return POSITIONS.includes(p) ? p : DEFAULT_POSITION;
   }
 
   function levelOf(n) {
@@ -225,10 +237,10 @@
   const PURE = {
     parseTime, groupKey, needsAckOf, isUnreadOf, levelOf, levelBadge, relTime, clockTime,
     fullTime, dayLabel, collapseBursts, sectionByDay, historyQuery, filtersActive, bodyOf,
-    statusLine,
+    statusLine, positionOf,
     constants: {
       AUTO_HIDE_MS, AUTO_HIDE_ACK_MS, MAX_VISIBLE, BURST_WINDOW_MS, RESURFACE_INTERVAL_MS,
-      RESURFACE_MAX, PANEL_LIMIT,
+      RESURFACE_MAX, PANEL_LIMIT, POSITIONS, DEFAULT_POSITION,
     },
   };
 
@@ -352,15 +364,22 @@
 
   const cards = new Map();        // groupKey -> card record
   const resurface = new Map();    // notification id -> { n, timer }
-  let stackHost = null;
+  const stackHosts = new Map();   // position -> its stack element
 
-  function ensureStack() {
-    if (stackHost && document.body.contains(stackHost)) return stackHost;
-    stackHost = h("div", {
-      id: "ntf-stack", class: "ntf-stack", role: "region", "aria-label": "Notifications",
+  /** The stack for one position, created on first use. The default one keeps
+   *  the id `ntf-stack` the page always had. */
+  function ensureStack(position) {
+    const pos = POSITIONS.includes(position) ? position : DEFAULT_POSITION;
+    let host = stackHosts.get(pos);
+    if (host && document.body.contains(host)) return host;
+    host = h("div", {
+      class: "ntf-stack ntf-stack--" + pos, role: "region", "aria-label": "Notifications",
+      "data-position": pos,
     });
-    document.body.appendChild(stackHost);
-    return stackHost;
+    if (pos === DEFAULT_POSITION) host.id = "ntf-stack";
+    document.body.appendChild(host);
+    stackHosts.set(pos, host);
+    return host;
   }
 
   function targetOf(n) {
@@ -446,7 +465,7 @@
 
   /** Show (or merge into) the card for one notification. */
   function toastFor(n) {
-    const host = ensureStack();
+    const host = ensureStack(positionOf(n));
     const key = groupKey(n);
     const ack = needsAckOf(n);
     let card = cards.get(key);
@@ -1002,7 +1021,7 @@
   }
 
   function init() {
-    ensureStack();
+    ensureStack(DEFAULT_POSITION);
     bind("btn-notifications-fab", "click", () => openPanel());
     bind("btn-notifications-refresh", "click", () => loadPanel());
     bind("btn-notifications-markall", "click", () => markAllRead());

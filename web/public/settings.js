@@ -408,6 +408,10 @@
   }
 
   // ---- sections -------------------------------------------------------------------------
+  // E2 / D-11: the eight places an in-app toast can appear (notifier.POSITIONS).
+  const TOAST_POSITIONS = [["bottom-right", "Bottom right"], ["bottom-left", "Bottom left"],
+    ["top-right", "Top right"], ["top-left", "Top left"], ["top", "Top"], ["bottom", "Bottom"],
+    ["left", "Left"], ["right", "Right"]];
   const LEVELS = [[1, "1 · Silent"], [2, "2 · Standard"], [3, "3 · Persistent"], [4, "4 · Broadcast"], [5, "5 · Confirm"]];
 
   function tunableRows(ctx, key) {
@@ -472,7 +476,7 @@
     { id: "notifications", label: "Notifications", title: "Notifications",
       lede: "How loudly each kind of notification is delivered. Inbox contents and per-item controls are in the Notifications panel.",
       files: ["notify_config.json"],
-      terms: "notification level toast inbox silent standard persistent broadcast confirm reminder task clipboard ambient daemon autostart",
+      terms: "notification level toast position corner side top bottom left right inbox silent standard persistent broadcast confirm reminder task clipboard ambient daemon autostart",
       build: async (ctx) => {
         const rows = [
           ["reminder", "Reminders", 2], ["notify", "Messages from Jarvis", 2], ["task", "Finished tasks", 2],
@@ -480,7 +484,9 @@
           ["daemon", "Daemon problems", 2],
         ].map(([key, label, fb]) => fileRow(ctx, { file: "notify_config.json", path: ["levels", key], type: "choice", choices: LEVELS, fallback: fb, label,
           help: "Default importance when nothing sets one. Silent = inbox only; Confirm = stays until you acknowledge it." }));
-        const out = [group("Default level by kind", rows)];
+        const where = fileRow(ctx, { file: "notify_config.json", path: ["position"], type: "choice", choices: TOAST_POSITIONS, fallback: "bottom-right", label: "Where toasts appear",
+          help: "The side or corner of the page an in-app notification slides in from, unless the notification or its kind says otherwise." });
+        const out = [group("Default level by kind", rows), group("Position", [where])];
         const t = tunableRows(ctx, "notifications");
         if (t.length) out.push(group("Limits", t));
         out.push(group("Elsewhere", [linkRow({ label: "Notifications panel", help: "Read, acknowledge and filter the inbox.", button: "Open", run: () => openPanel("notifications") })]));

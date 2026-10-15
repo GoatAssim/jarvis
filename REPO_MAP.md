@@ -367,7 +367,10 @@ web/
                                  filter chips. Talks to /api/mcp and the
                                  /api/mcp/server routes; app.js only opens it.
                                  Pure helpers in JarvisMcp._pure.
-    public/notifications.js/.css Notifications (L.30 rework): the toast stack, the
+    public/notifications.js/.css Notifications (L.30 rework; E2: one toast stack
+                                 per position -- top, bottom, left, right, the four
+                                 corners, default bottom-right -- chosen by the
+                                 record's `position`): the toast stack, the
                                  inbox panel (read/unread, filters, search, burst
                                  collapsing, dismiss), the unread badge and the
                                  acknowledgment rules for levels 3-5. app.js only
@@ -784,6 +787,7 @@ silently never runs.
 | `test_thinking_off_and_interactive_cap.py` | Thinking at Off and the interactive cap's default: `reasoning.gemini_off_patch` (a zero `thinkingBudget` for Gemini 2.5 Flash / Flash-Lite only; provider key `gemini_off_budget`), gpt-oss's Off effort override (`off_reasoning_effort`) and the once-per-ask floor note in the Logs viewer, and the 150,000 interactive default |
 | `test_l24_5267_replay.py` | L.24 T1 regression: the real "has anyone texted you on discord" incident (`5267d91a8b996d48`, 5 rounds / 10,649 input tokens) from the scrubbed `fixtures/5267d91a8b996d48.jsonl`: asserts what the recording says, then runs the same words through the real `ask()` with a SYNTHETIC model reply and checks the current tool offering keeps the ask to 2 requests and an ESTIMATED 2,500 input tokens or less (it cannot test that the model picks `recent_dms`) |
 | `test_l16_preflight_authorization.py` | L.16 round 2: `preflight.py` (an unattended ask that states a need the PC can't meet stops before any model call; fails open), the scheduler reporting that as a failure, the `message` kind in `job_risk`, `scheduler._unattended_tool_env` (a tool job now runs as unattended), and `send_dm`'s one exception to "never unattended" |
+| `test_e2_toast_position.py` | E2: toast position (`normalize_position`, config `position` / `positions`, `notify(position=)`, `notify-send --position`), the native OS notification renamed `desktop` with `toast` kept as an alias (code, old config files, scheduler tools), Settings row and one stack per position (static) |
 | `test_notification_inbox.py` | L.30: owner read/acknowledge state vs delivery (`seen_by`), mark read/all, dismiss, clear read, `summary()`, history filters, state-aware pruning (read first, unacknowledged last), the inbox lock, the `notify-*` verbs |
 | `test_mcp_edit.py` | L.31: editing `mcp_config.json` (`save_server` / `set_server_flag` / `remove_server`), validation, secrets kept on edit, a malformed config is never overwritten, the extra `status()` fields and states, the `mcp-edit` CLI verb, and that no model tool can reach the edit functions |
 | `verify_mcp_servers.js` (`node`) | L.31: `mcp-servers.js` pure helpers (state labels, search by tool name, filter chips, `buildSpec` and what a blank secret means) |

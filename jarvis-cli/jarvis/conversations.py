@@ -499,7 +499,8 @@ def update_meta(conv_id, title=None, soft_context=None):
     return True
 
 
-def begin_exchange(conv_id, user_text, console_turn=None, images=None, shown=None):
+def begin_exchange(conv_id, user_text, console_turn=None, images=None, shown=None,
+                   speaker=None, msg_id=None):
     """Write the user's half of a turn to disk BEFORE the model is called.
 
     This is the fix for "I sent a message, aborted it, and the conversation
@@ -532,6 +533,12 @@ def begin_exchange(conv_id, user_text, console_turn=None, images=None, shown=Non
     Returns the index of the pending exchange, or -1 if it couldn't be
     written (a bad id, an unwritable disk) — callers treat that as "carry on
     without persistence", never as a reason to fail the ask.
+
+    `speaker` / `msg_id` (channel rooms only): who wrote this message and its
+    platform message id. `speaker` is `{id, name, handle, owner}` as built by
+    channels/space.speaker_record; it is kept only in cleaned, clipped form and
+    only when given, so a DM's exchange (and every exchange written by the
+    CLI or the web UI) keeps exactly its old shape. See `_with_speaker`.
     """
     if not is_valid_id(conv_id):
         return -1
@@ -565,6 +572,11 @@ def begin_exchange(conv_id, user_text, console_turn=None, images=None, shown=Non
     if kept:
         exchange["images"] = kept
         exchange["shown"] = str(shown or "")
+    who = _clean_speaker(speaker)
+    if who:
+        exchange["speaker"] = who
+    if msg_id:
+        exchange["msg_id"] = str(msg_id).strip()[:80]
     record.setdefault("exchanges", []).append(exchange)
     record["exchanges"] = record["exchanges"][-MAX_STORED_EXCHANGES:]
     record["updated_at"] = _now()
@@ -839,6 +851,51 @@ def clear(conv_id):
     return True
 
 
+# ---- speakers in shared rooms (channel spaces S4) ----------------------------
+# A Discord server channel / thread or a group chat is ONE conversation shared by
+# several people, so an exchange written there records who wrote it. Replayed
+# history then reads `[Alice]: ...` instead of an unlabeled line that the model
+# would take as coming from whoever is asking now. Only exchanges that carry a
+# `speaker` are ever labelled; everything else is byte-identical to before.
+
+def _clean_speaker(speaker):
+    """`{id, name, handle, owner}` clipped, or {} when there is nothing usable
+    (not a dict, or none of id / name / handle)."""
+    if not isinstance(speaker, dict):
+        return {}
+    out = {}
+    for key in ("id", "name", "handle"):
+        value = " ".join(str(speaker.get(key) or "").split())[:40]
+        if value:
+            out[key] = value
+    if not out:
+        return {}
+    out["owner"] = bool(speaker.get("owner"))
+    return out
+
+
+def speaker_label_for(exchange):
+    """The label (`Alice`, `Alice (owner)`, `@alice`, `user...1234`) of the
+    person who wrote this exchange, or "" when it has no speaker. Never raises:
+    a label is not worth losing a prompt."""
+    speaker = (exchange or {}).get("speaker")
+    if not isinstance(speaker, dict) or not speaker:
+        return ""
+    try:
+        from .channels import space
+        return space.speaker_label(speaker)
+    except Exception:  # noqa: BLE001
+        return ""
+
+
+def _with_speaker(exchange, text):
+    """`text` prefixed `[Label]: ` when the exchange has a speaker, else the
+    very same string. Call it AFTER truncating the text, so the label is
+    never what gets cut off."""
+    label = speaker_label_for(exchange)
+    return f"[{label}]: {text}" if label and text else text
+
+
 # ---- prompt-facing helpers ---------------------------------------------------
 
 def _truncate(text, max_len):
@@ -996,7 +1053,7 @@ def conversation_messages(
             assistant_text = _truncate((ex.get("jarvis") or "").strip(), 110)
             if not user_text:
                 continue
-            line = f"- User: {user_text} \u2192 You: {assistant_text}"
+            line = f"- {speaker_label_for(ex) or 'User'}: {user_text} \u2192 You: {assistant_text}"
             line += _extras_recap_fragment(ex.get("extras"))
             if used_r + len(line) > recap_lim:
                 break
@@ -1024,6 +1081,7 @@ def conversation_messages(
         assistant_text = _truncate((ex.get("jarvis") or "").strip(), MAX_ASSISTANT_CHARS)
         if not user_text or not assistant_text:
             continue
+        user_text = _with_speaker(ex, user_text)   # rooms only; a DM is unchanged
         pair_len = len(user_text) + len(assistant_text)
         if used + pair_len > recent_budget:
             remaining = recent_budget - used

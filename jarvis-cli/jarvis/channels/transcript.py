@@ -354,14 +354,24 @@ def read_thread(platform, thread_id, limit=200):
     return out
 
 
-def list_threads(platform=None):
+def list_threads(platform=None, details=False):
     """Every thread we have a log for, newest activity first.
 
     One entry per thread: a rotated copy (`name.20260101-120000.jsonl`) is
     part of `name`, not a thread of its own. `bytes` is the whole thread,
-    `modified` its newest file."""
+    `modified` its newest file.
+
+    `details=True` adds `space` (the kind: dm / server_channel /
+    server_thread / group, "" when the thread has no inbound line) and
+    `title` (a room's name, "" for a DM) to every entry. It is opt-in so the
+    callers that only need the four keys above (recent_dms, denied,
+    send_dm, channels-log) keep their exact shape and do no extra reading."""
     platforms = [platform] if platform else list(PLATFORMS)
     out = []
+    registry = {}
+    if details:
+        for name in platforms:
+            registry[name] = _registry_by_file_name(name)
     for name in platforms:
         for base, paths in _thread_groups(name).items():
             size, newest = 0, None
@@ -375,18 +385,224 @@ def list_threads(platform=None):
                     newest = stat.st_mtime
             if newest is None:
                 continue
-            out.append({
+            item = {
                 "platform": name,
                 "thread_id": base,
                 "bytes": size,
                 "modified": datetime.fromtimestamp(newest)
                                     .replace(microsecond=0).isoformat(),
                 "_mtime": newest,
-            })
+            }
+            if details:
+                item["space"], item["title"] = _room_info(
+                    name, base, registry.get(name, {}).get(_safe_name(base)), paths)
+            out.append(item)
     out.sort(key=lambda item: item["_mtime"], reverse=True)
     for item in out:
         item.pop("_mtime", None)
     return out
+
+
+# ---------------------------------------------------------------------------
+# Rooms: what a thread is called and who is in it  (channel-spaces S3.2 / S3.3)
+# ---------------------------------------------------------------------------
+# Read-only. A room's kind and title come from spaces.json when the room is
+# registered there, else from the newest inbound line of its own log, so a
+# lost or never-written registry costs nothing here (it is a cache).
+
+_TAIL_BYTES = 65536
+
+
+def _registry_by_file_name(platform):
+    """{sanitised thread name: spaces.json record} for one platform. Keyed the
+    way the transcript files are named, because that is what a listing has.
+    {} when there is no registry. Never raises."""
+    try:
+        from . import spaces
+        return {_safe_name(key): rec for key, rec in spaces.read(platform).items()
+                if isinstance(rec, dict)}
+    except Exception:  # noqa: BLE001 -- labels are a cache
+        return {}
+
+
+def _newest_inbound(paths):
+    """The newest inbound record of a thread, read from the END of its newest
+    file(s) only (a busy room's log can be 2 MB). None when there is none."""
+    for path in reversed(paths):
+        try:
+            with path.open("rb") as handle:
+                handle.seek(0, os.SEEK_END)
+                size = handle.tell()
+                handle.seek(max(0, size - _TAIL_BYTES))
+                chunk = handle.read().decode(ENCODING, "ignore")
+        except OSError:
+            continue
+        lines = chunk.splitlines()
+        if size > _TAIL_BYTES:
+            lines = lines[1:]          # the first line is probably cut in half
+        for record in reversed(_parse_lines(lines)):
+            if record.get("dir") == "in":
+                return record
+    return None
+
+
+def _room_info(platform, base, registered, paths, newest=None):
+    """(kind, title) of one thread: ("dm", "") for a DM, ("", "") when the
+    thread has no inbound line and no registry entry. `registered` is the
+    thread's spaces.json record, or None."""
+    try:
+        from . import permissions, space
+        rec = registered
+        if isinstance(rec, dict) and rec.get("kind") in space.KINDS:
+            return rec["kind"], str(rec.get("title") or "")
+        newest = newest if newest is not None else _newest_inbound(paths)
+        if newest is None:
+            return "", ""
+        if newest.get("context") == permissions.CTX_DM:
+            return space.KIND_DM, ""
+        stand_in = permissions.IncomingMessage(
+            platform=platform,
+            context=newest.get("context") or permissions.CTX_GROUP,
+            user_id=newest.get("user_id") or "",
+            user_handle=newest.get("user_handle") or "",
+            guild_id=newest.get("guild_id") or "",
+            channel_id=newest.get("channel_id") or "",
+            thread_id=base,
+            guild_name=newest.get("guild_name") or "",
+            channel_name=newest.get("channel_name") or "",
+            thread_name=newest.get("thread_name") or "")
+        logged = newest.get("space")
+        kind = logged if logged in space.KINDS else space.kind_of(stand_in)
+        return kind, space.title_for(stand_in) if kind != space.KIND_DM else ""
+    except Exception:  # noqa: BLE001
+        return "", ""
+
+
+MAX_PARTICIPANTS = 100
+
+
+def _reply_to_view(value):
+    """A stored `reply_to` as a viewer gets it: only the four known fields,
+    each clipped. None when it is absent or not a dict."""
+    if not isinstance(value, dict):
+        return None
+    out = {"message_id": str(value.get("message_id") or "")[:40],
+           "user_id": str(value.get("user_id") or "")[:40],
+           "user_name": str(value.get("user_name") or "")[:40],
+           "snippet": str(value.get("snippet") or "")[:120]}
+    return out if any(out.values()) else None
+
+
+def _room_entry(record, thread_id):
+    text, clipped = _clip(record.get("text"))
+    entry = {
+        "at": record.get("at") or "",
+        "dir": record.get("dir"),
+        "thread_id": thread_id,
+        "text": text,
+        "clipped": clipped,
+    }
+    if record.get("dir") == "in":
+        entry.update({
+            "context": record.get("context") or "",
+            "user_id": str(record.get("user_id") or ""),
+            "user_handle": str(record.get("user_handle") or "")[:60],
+            "author_name": str(record.get("author_name") or "")[:60],
+            "mentioned": bool(record.get("mentioned")),
+            "allowed": record.get("allowed"),
+            "stage": record.get("stage"),
+            "reason": record.get("reason"),
+            "may_use_tools": record.get("may_use_tools"),
+            "message_id": str(record.get("message_id") or ""),
+            "attachments": int(record.get("attachments") or 0)
+                           if str(record.get("attachments") or "0").isdigit() else 0,
+        })
+        reply = _reply_to_view(record.get("reply_to"))
+        if reply:
+            entry["reply_to"] = reply
+    else:
+        entry.update({
+            "kind": record.get("kind") or "reply",
+            "ok": record.get("ok") is not False,
+            "error": record.get("error") or "",
+            "provider": record.get("provider") or "",
+            "to_user": str(record.get("to_user") or ""),
+            "tool_calls": clean_tool_calls(record.get("tool_calls")),
+        })
+    return entry
+
+
+def read_space(platform, thread_id, limit=100):
+    """One room's log, shaped for a viewer. Read-only: nothing here writes,
+    rotates, creates a file or calls a model.
+
+    Rotation-aware (the rotated copies are part of the room), oldest first,
+    the newest `limit` messages (1..500). Returns:
+
+      entries               inbound AND outbound lines, each with its tool calls
+                            (clean_tool_calls) on a reply
+      total / shown         how many lines exist / how many are in `entries`
+      kind / title          from spaces.json, else the newest inbound line
+      participants          [{user_id, handle, name, messages, last_at}], most
+                            recent first. Built from the WHOLE history, not
+                            only the shown part. A message the gate turned
+                            away is not a participant message (and a person
+                            with only denied messages is not listed): it is
+                            counted in `denied` and still shown in `entries`
+                            with allowed=false so "why no answer" can be seen
+      denied                how many inbound lines were turned away
+      unattributed_replies  outbound lines with no `to_user`. In a room they
+                            are NOT guessed to belong to anyone (the rule
+                            person_records applies to group threads too)
+    """
+    try:
+        limit = max(1, min(int(limit), 500))
+    except (TypeError, ValueError):
+        limit = 100
+    thread = str(thread_id or "")
+    result = {"platform": platform, "thread_id": thread, "kind": "", "title": "",
+              "entries": [], "total": 0, "shown": 0, "participants": [],
+              "denied": 0, "unattributed_replies": 0}
+    if platform not in PLATFORMS or not thread:
+        return result
+    paths = _thread_files(platform, thread)
+    records = [r for r in _read_records(paths) if r.get("dir") in ("in", "out")]
+    if not records:
+        return result
+    inbound = [r for r in records if r.get("dir") == "in"]
+    try:
+        from . import spaces
+        registered = spaces.get(platform, thread)
+    except Exception:  # noqa: BLE001
+        registered = None
+    result["kind"], result["title"] = _room_info(
+        platform, thread, registered, paths, newest=inbound[-1] if inbound else None)
+
+    seen = {}
+    for record in inbound:
+        if record.get("allowed") is False:
+            result["denied"] += 1
+            continue
+        uid = str(record.get("user_id") or "")
+        if not uid:
+            continue
+        who = seen.setdefault(uid, {"user_id": uid, "handle": "", "name": "",
+                                    "messages": 0, "last_at": ""})
+        who["messages"] += 1
+        if record.get("user_handle"):
+            who["handle"] = str(record["user_handle"])[:60]
+        if record.get("author_name"):
+            who["name"] = str(record["author_name"])[:60]
+        who["last_at"] = max(who["last_at"], str(record.get("at") or ""))
+    result["participants"] = sorted(
+        seen.values(), key=lambda p: p["last_at"], reverse=True)[:MAX_PARTICIPANTS]
+    result["unattributed_replies"] = sum(
+        1 for r in records if r.get("dir") == "out" and not r.get("to_user"))
+    shown = records[-limit:]
+    result["entries"] = [_room_entry(r, thread) for r in shown]
+    result["total"] = len(records)
+    result["shown"] = len(shown)
+    return result
 
 
 # ---------------------------------------------------------------------------

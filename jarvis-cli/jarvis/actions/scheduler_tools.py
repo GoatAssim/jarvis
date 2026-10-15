@@ -51,7 +51,8 @@ from ..scheduler import SchedulerError
 _CHANNEL_HELP = (
     "Where to deliver it: 'inbox' (always on — the durable queue the web "
     "console and terminal both drain), 'stream' (live in an open web chat), "
-    "'toast' (native OS notification), 'voice' (spoken aloud), 'playnite'. "
+    "'desktop' (native OS notification; the old name 'toast' still works), "
+    "'voice' (spoken aloud), 'playnite'. "
     "Omit to use the user's configured defaults, which is almost always right."
 )
 
@@ -218,7 +219,10 @@ def _announce_created(job, args, context=None):
 
 def scheduler_channels():
     from .. import notifier
-    return notifier.CHANNELS
+    # E2: the native notification is `desktop` now; the old name `toast` is
+    # still accepted (and passed through unchanged) so a model or a stored
+    # request that says `toast` keeps working. notify() resolves the alias.
+    return tuple(notifier.CHANNELS) + tuple(notifier.LEGACY_CHANNEL_ALIASES)
 
 
 # ---------------------------------------------------------------------------

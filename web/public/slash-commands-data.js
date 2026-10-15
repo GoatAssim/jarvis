@@ -1339,7 +1339,7 @@ window.JARVIS_SLASH_COMMANDS = /*JSON-BEGIN*/
     "notify-send": {
       "summary": "Send a message to every configured channel.",
       "riskTier": "dangerous",
-      "usage": "<message> [title] [channels,csv]"
+      "usage": "<message> [title] [channels,csv] [--position P] [--level N]"
     },
     "mcp-call": {
       "summary": "Run an arbitrary MCP tool by name.",

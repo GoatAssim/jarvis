@@ -145,5 +145,18 @@ ok("D-N1 re-surfacing is still every 10 minutes, at most 6 times",
 ok("the panel asks for as many as the inbox keeps", P.constants.PANEL_LIMIT === 500);
 ok("no more than four toast cards at once", P.constants.MAX_VISIBLE === 4);
 
+// --- E2: toast position -----------------------------------------------------------------------------------
+const EIGHT = ["top", "bottom", "left", "right", "top-left", "top-right", "bottom-left", "bottom-right"];
+ok("the eight positions are the ones the backend accepts",
+   JSON.stringify(P.constants.POSITIONS) === JSON.stringify(EIGHT));
+ok("default position is bottom-right (D-12)", P.constants.DEFAULT_POSITION === "bottom-right");
+EIGHT.forEach((pos) => ok(`positionOf keeps ${pos}`, P.positionOf({ position: pos }) === pos));
+ok("positionOf: a record from before E2 has no position -> default", P.positionOf({ id: "a" }) === "bottom-right");
+ok("positionOf: a bad value -> default", P.positionOf({ position: "middle" }) === "bottom-right");
+ok("positionOf: not a string -> default", P.positionOf({ position: 7 }) === "bottom-right");
+ok("positionOf: null record -> default", P.positionOf(null) === "bottom-right");
+ok("positionOf: 'Top Left' and 'top_left' read as top-left",
+   P.positionOf({ position: "Top Left" }) === "top-left" && P.positionOf({ position: "top_left" }) === "top-left");
+
 console.log(`\n${n - failed}/${n} checks passed`);
 process.exit(failed ? 1 : 0);
