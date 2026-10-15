@@ -1151,7 +1151,13 @@ def plan_import(items, name="", names=None, overwrite=False):
         parts = tool_ui._clean_parts(rel)
         target = tool_ui._resolve_inside(TOOLS_DIR, parts) if parts else None
         exists = False
-        if target is None:
+        # A link anywhere on the way is named as a link FIRST: _resolve_inside follows it, so a link
+        # that points out of the tools folder would otherwise read as a plain "outside the folder" path.
+        linked = bool(parts) and any(TOOLS_DIR.joinpath(*parts[:i]).is_symlink() for i in range(1, len(parts) + 1))
+        if linked:
+            exists = True
+            problems.append("%s is a link in the tools folder, and importing never writes through a link" % rel)
+        elif target is None:
             problems.append("%s would land outside the tools folder" % rel)
         elif target.is_symlink():
             exists = True

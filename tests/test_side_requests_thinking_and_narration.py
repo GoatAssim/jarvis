@@ -71,7 +71,8 @@ def test_isolated_call_restores_everything():
 
     check("a delta emitted inside never reached the main sink", events == [], events)
     check("after: the main thinking state is back", ap._thinking == {
-        "level": "medium", "trace": "main reasoning", "rounds": 1, "requested": 1}, ap._thinking)
+        "level": "medium", "trace": "main reasoning", "rounds": 1, "requested": 1,
+        "floor_noted": False}, ap._thinking)   # floor_noted: the once-per-ask Groq "Off is the floor" note (10-11t)
     check("after: streaming and the sink are back", ap.stream_enabled() is True and ap._stream_sink() is not None)
     check("after: main interim text is back, the second's is gone",
           [it["text"] for it in ap.get_interim_text()] == ["main narration"], ap.get_interim_text())

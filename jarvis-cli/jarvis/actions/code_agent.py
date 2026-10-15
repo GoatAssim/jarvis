@@ -354,14 +354,71 @@ def _windows_argv_split(command):
     """
     import ctypes
 
+    shell32 = ctypes.windll.shell32
+    kernel32 = ctypes.windll.kernel32
+    # Declare the types. Without them ctypes assumes every return value is a 32-bit C int,
+    # which cuts the 64-bit pointer CommandLineToArgvW returns on a 64-bit Python: the next
+    # line then dies with an access violation, _shlex_split's `except` swallowed it, and the
+    # command was split on blanks -- the very mis-split this function exists to prevent.
+    shell32.CommandLineToArgvW.argtypes = [ctypes.c_wchar_p, ctypes.POINTER(ctypes.c_int)]
+    shell32.CommandLineToArgvW.restype = ctypes.POINTER(ctypes.c_wchar_p)
+    kernel32.LocalFree.argtypes = [ctypes.c_void_p]
+    kernel32.LocalFree.restype = ctypes.c_void_p
+
     argc = ctypes.c_int(0)
-    argv_p = ctypes.windll.shell32.CommandLineToArgvW(
-        ctypes.c_wchar_p(command), ctypes.byref(argc)
-    )
+    argv_p = shell32.CommandLineToArgvW(command, ctypes.byref(argc))
+    if not argv_p:
+        raise ctypes.WinError()
     try:
         return [argv_p[i] for i in range(argc.value)]
     finally:
-        ctypes.windll.kernel32.LocalFree(argv_p)
+        kernel32.LocalFree(argv_p)
+
+
+def _windows_argv_split_py(command):
+    """Pure-Python version of the Windows (MSVC runtime) command-line rules, used when the
+    WinAPI call fails: double quotes group, a quote inside quotes written as two is one
+    literal quote, backslashes are literal unless they sit right before a quote. Quoted
+    spans are stripped of their quotes -- never the old `posix=False` behaviour."""
+    args, i, n = [], 0, len(command)
+    while True:
+        while i < n and command[i] in " \t":
+            i += 1
+        if i >= n:
+            break
+        cur, in_quotes = [], False
+        while i < n:
+            c = command[i]
+            if c == "\\":
+                j = i
+                while j < n and command[j] == "\\":
+                    j += 1
+                slashes = j - i
+                if j < n and command[j] == '"':
+                    cur.append("\\" * (slashes // 2))
+                    if slashes % 2:
+                        cur.append('"')
+                        i = j + 1
+                    else:
+                        i = j
+                else:
+                    cur.append("\\" * slashes)
+                    i = j
+                continue
+            if c == '"':
+                if in_quotes and i + 1 < n and command[i + 1] == '"':
+                    cur.append('"')
+                    i += 2
+                    continue
+                in_quotes = not in_quotes
+                i += 1
+                continue
+            if c in " \t" and not in_quotes:
+                break
+            cur.append(c)
+            i += 1
+        args.append("".join(cur))
+    return args
 
 
 def _shlex_split(command):
@@ -370,10 +427,11 @@ def _shlex_split(command):
         try:
             return _windows_argv_split(command)
         except Exception:
-            # WinAPI call itself failed for some reason — fall back to a
-            # naive split rather than the old posix=False behavior, which
-            # silently mis-splits quoted arguments (see docstring above).
-            return command.split()
+            # WinAPI call itself failed for some reason — fall back to the same
+            # rules in plain Python rather than the old posix=False behavior (or
+            # a blank split), which silently mis-split quoted arguments (see
+            # the docstring above).
+            return _windows_argv_split_py(command)
     try:
         return shlex.split(command, posix=True)
     except ValueError:

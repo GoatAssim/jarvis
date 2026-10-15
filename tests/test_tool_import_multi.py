@@ -179,14 +179,15 @@ check("... it is a copy: nothing was written under the tools folder", not (TOOLS
 r = cts.save_draft("d_mo1", SRC + "\n# edited", name="mo_draft_tool", mode="edit", orig_name="mo_draft_tool")
 check("a save that leaves `web` out keeps the screen text",
       r.get("ok") and cts.read_draft("d_mo1")["web"].get("mo_page_a/tool.js") == "// wip", r)
+# `web` is the WHOLE screen text of the tab (a smaller dict replaces it), so "the same" means both files
 r = cts.save_draft("d_mo1", SRC + "\n# edited", name="mo_draft_tool", mode="edit", orig_name="mo_draft_tool",
-                   web={"mo_page_a/tool.js": "// wip"})
+                   web={"mo_page_a/tool.html": "<p>unsaved</p>", "mo_page_a/tool.js": "// wip"})
 check("the same source and screen text again is 'unchanged'", r.get("unchanged"), r)
 r = cts.save_draft("d_mo1", SRC + "\n# edited", name="mo_draft_tool", mode="edit", orig_name="mo_draft_tool", web={})
 check("an empty `web` clears it", r.get("ok") and cts.read_draft("d_mo1")["web"] == {}, r)
 for label, bad_web in (("a traversal path", {"../x.js": "1"}), ("a path that isn't a screen file", {"a/b.txt": "1"}),
                        ("non-text", {"a/b.js": 5}), ("a NUL byte", {"a/b.js": "x\x00y"}),
-                       ("over the size limit", {"a/b.js": "x" * (300 * 1024)}), ("a list instead of an object", ["a"])):
+                       ("over the size limit (400 KB a file)", {"a/b.js": "x" * (400 * 1024 + 1)}), ("a list instead of an object", ["a"])):
     r = cts.save_draft("d_mo2", SRC, name="mo_draft_tool", mode="edit", orig_name="mo_draft_tool", web=bad_web)
     check("a draft with %s is refused" % label, r.get("ok") is False, r)
 check("... and nothing was stored for it", cts.read_draft("d_mo2").get("ok") is False)

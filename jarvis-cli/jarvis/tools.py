@@ -1457,7 +1457,7 @@ _PERSONA_FILES = {_p["id"]: _seen_persona_ids.get(_p["id"], "") for _p in AUTO_P
 # no switch to follow. Tool-registered personas are NOT part of it (they were not
 # asked for, and hiding a persona the owner is wearing is not "switching a tool off").
 # Palette commands (I.2.11) follow the TOOL they run, live and stored nowhere, AND carry
-# a switch of their own (the owner's, in disabled.json "tool_commands"): see
+# a switch of their own (the owner's, in the tool-disable file's "tool_commands" list): see
 # `command_off_reason` below. The two never overwrite each other.
 # ---------------------------------------------------------------------------
 _FILE_TOOLS = {_r.file: sorted(_r.tools) for _r in _AUTO_VALID if _r.tools}
@@ -1528,7 +1528,7 @@ def command_off_reason(entry, off=None, own=None):
     """Why a palette command can't run right now, or "" when it can.
 
     Two independent reasons. The owner's own switch for the command (Tool Manager,
-    disabled.json "tool_commands"), checked first. And the command is the typed twin of
+    the tool-disable file's "tool_commands" list), checked first. And the command is the typed twin of
     ONE tool, so it follows that tool: off when the tool itself is switched off in the
     Tool Manager, or when every tool of its file is (the same Q-L46m rule the file's
     screens follow). The second is derived on every read and stored nowhere, so

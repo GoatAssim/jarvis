@@ -77,7 +77,7 @@ const fs = require('fs');
 const path = require('path');
 // category-input.js sets globalThis.JarvisCategories when there is no window
 eval(fs.readFileSync(process.argv[1], 'utf8'));
-const src = fs.readFileSync(process.argv[2], 'utf8');
+const src = fs.readFileSync(process.argv[2], 'utf8').replace(/\r\n/g, '\n');   // a Windows checkout has CRLF
 const m = src.match(/function validateSpec\(spec\) \{[\s\S]*?\n\}\n/);
 if (!m) { console.log(JSON.stringify({ missing: true })); process.exit(0); }
 const validateSpec = eval('(' + m[0].replace(/^function validateSpec/, 'function') + ')');
@@ -129,7 +129,7 @@ def test_server_validate_spec():
         {"categories": ["a"]},
     ]
     proc = subprocess.run([node(), "-e", NODE_SERVER, str(ROOT / "web" / "public" / "category-input.js"), str(ROOT / "web" / "server.js")],
-                          input=json.dumps(cases), capture_output=True, text=True, timeout=30)
+                          input=json.dumps(cases), capture_output=True, encoding="utf-8", errors="replace", timeout=30)
     res = json.loads(proc.stdout) if proc.returncode == 0 and proc.stdout.strip() else None
     check("validateSpec can be lifted out of server.js and run", isinstance(res, list))
     if not isinstance(res, list):
@@ -156,7 +156,7 @@ def test_fit_count():
     if not node():
         print("SKIP    fitCount (node not installed)")
         return
-    proc = subprocess.run([node(), "-e", NODE_FIT, str(ROOT / "web" / "public" / "category-input.js")], capture_output=True, text=True, timeout=30)
+    proc = subprocess.run([node(), "-e", NODE_FIT, str(ROOT / "web" / "public" / "category-input.js")], capture_output=True, encoding="utf-8", errors="replace", timeout=30)
     res = json.loads(proc.stdout) if proc.returncode == 0 and proc.stdout.strip() else None
     check("fitCount runs in Node (it needs no browser)", isinstance(res, list))
     if not isinstance(res, list):

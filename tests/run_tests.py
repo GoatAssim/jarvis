@@ -31,6 +31,7 @@ a filter matched nothing.
 """
 
 import argparse
+import os
 import re
 import subprocess
 import sys
@@ -71,7 +72,11 @@ def run_one(path, timeout):
             [sys.executable, str(path)],
             cwd=str(REPO_ROOT),
             capture_output=True,
-            text=True,
+            # UTF-8 both ways: a child on Windows would otherwise print through the ANSI code page
+            # (cp1252) and die on the first arrow or emoji in a check name (UnicodeEncodeError).
+            encoding="utf-8",
+            errors="replace",
+            env={**os.environ, "PYTHONIOENCODING": "utf-8"},
             timeout=timeout,
             # No test should ever need input; inheriting the runner's stdin
             # risks a silent hang (e.g. an accidental input()) that looks

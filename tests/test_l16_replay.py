@@ -306,8 +306,11 @@ check("C: ...the unguarded run reaches the click on the taskbar row",
 check("C: ...and used all of the original tool steps",
       c["tool_names"][:2] == ["read_screen", "take_screenshot"] and "list_windows" in c["tool_names"],
       c["tool_names"])
-check("C: an interactive ask is never limited (the ledger counts, with no limit)",
-      (c["result"].usage_total or {}).get("limit") is None
+# 2026-10-11t: an interactive ask now carries the interactive limit (150,000 unless set). This recording
+# (~36K) is far under it, so the control run is still never stopped -- it just isn't limitless any more.
+check("C: an interactive ask carries the 150,000 interactive limit and this run stays under it",
+      (c["result"].usage_total or {}).get("limit") == 150000
+      and (c["result"].usage_total or {}).get("exceeded") is False
       and (c["result"].usage_total or {}).get("total_tokens", 0) > 20000,
       c["result"].usage_total)
 # The measured total of the recording, thinking included (RC5: ~36.3K)

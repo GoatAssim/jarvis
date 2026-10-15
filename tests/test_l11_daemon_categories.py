@@ -147,7 +147,7 @@ def test_cli():
 
 NODE_HELPER = r"""
 const fs = require('fs');
-const src = fs.readFileSync(process.argv[1], 'utf8');
+const src = fs.readFileSync(process.argv[1], 'utf8').replace(/\r\n/g, '\n');   // a Windows checkout has CRLF
 const m = src.match(/function daemonCategoryArgs\(value\) \{[\s\S]*?\n\}\n/);
 if (!m) { console.log(JSON.stringify({ missing: true })); process.exit(0); }
 const f = eval('(' + m[0].replace(/^function daemonCategoryArgs/, 'function') + ')');
@@ -162,7 +162,7 @@ def test_server_helper():
         print("SKIP    server.js daemonCategoryArgs (node not installed)")
         return
     cases = ["__undefined__", [], ["a", "b"], ["  a  ", "", "  "], ["--shell"], [" --x"], ["-ok"], "oops", [1], list("a" * 51)]
-    proc = subprocess.run([node, "-e", NODE_HELPER, str(ROOT / "web" / "server.js")], input=json.dumps(cases), capture_output=True, text=True, timeout=30)
+    proc = subprocess.run([node, "-e", NODE_HELPER, str(ROOT / "web" / "server.js")], input=json.dumps(cases), capture_output=True, encoding="utf-8", errors="replace", timeout=30)
     res = json.loads(proc.stdout) if proc.returncode == 0 else None
     check("the helper can be lifted out of server.js", res is not None and not (isinstance(res, dict) and res.get("missing")))
     if not isinstance(res, list):

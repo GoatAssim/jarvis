@@ -297,6 +297,94 @@ def test_router_routes_send_phrases_but_not_inbox_or_owner_phrases():
         assert "send_dm" not in names, (text, names)
 
 
+# --- scheduling a DM for later (`when`) ---------------------------------
+
+def _sched_reset():
+    from jarvis import scheduler
+    for f in (scheduler.STORE_FILE,):
+        for suffix in ("", ".bak", ".tmp"):
+            try:
+                Path(str(f) + suffix).unlink()
+            except OSError:
+                pass
+    return scheduler
+
+
+def test_when_schedules_a_parked_one_off_job_and_sends_nothing_now():
+    _reset()
+    scheduler = _sched_reset()
+    _person("discord", "111", name="Maryem")
+    out = _run_tool(person="maryem", message="happy birthday", when="in 6 hours 30 minutes")
+    assert out["ok"] is True and out["scheduled"] is True, out
+    assert not SENT, SENT                      # nothing delivered at schedule time
+    assert out["needs_approval"] is True and out["status"] == scheduler.STATUS_NEEDS_APPROVAL, out
+    job = scheduler.get(out["id"])
+    assert job["action"]["tool"] == "send_dm" and job["max_runs"] == 1, job
+    assert job["action"]["args"]["person"] == "discord:111", job
+    assert "message" in (job["risk"] or {}).get("kinds", []), job["risk"]
+
+
+def test_when_refuses_an_unknown_numeric_id_and_creates_no_job():
+    _reset()
+    scheduler = _sched_reset()
+    out = _run_tool(person="987654321", platform="discord", message="hi", when="in 2 hours")
+    assert out["ok"] is False and "known contact" in out["error"], out
+    assert not SENT and not scheduler.list_jobs()
+    # Sending right now to that typed id is unchanged.
+    assert _run_tool(person="987654321", platform="discord", message="hi")["ok"] is True
+
+
+def test_when_must_be_a_single_point_in_time_and_parseable():
+    _reset()
+    scheduler = _sched_reset()
+    _person("discord", "111", name="Maryem")
+    for bad in ("every day at 9am", "on startup", "when backup_done", "whenever"):
+        out = _run_tool(person="maryem", message="x", when=bad)
+        assert out["ok"] is False, (bad, out)
+    assert not scheduler.list_jobs() and not SENT
+
+
+def test_when_is_still_owner_only_and_never_from_an_unattended_run():
+    _reset()
+    scheduler = _sched_reset()
+    _person("discord", "111", name="Maryem")
+    os.environ["JARVIS_CHANNEL_SENDER"] = json.dumps(
+        {"platform": "discord", "user_id": "999", "is_owner": False})
+    assert _run_tool(person="maryem", message="x", when="in 1 hour")["ok"] is False
+    os.environ.pop("JARVIS_CHANNEL_SENDER")
+    os.environ["JARVIS_SCHEDULED"] = "1"       # a scheduled run may not schedule more sends
+    assert _run_tool(person="maryem", message="x", when="in 1 hour")["ok"] is False
+    os.environ.pop("JARVIS_SCHEDULED")
+    assert not scheduler.list_jobs() and not SENT
+
+
+def test_when_dry_run_reports_schedulability_without_creating_anything():
+    _reset()
+    scheduler = _sched_reset()
+    _person("discord", "111", name="Maryem")
+    out = _run_tool(person="maryem", message="x", when="in 1 hour", dry_run=True)
+    assert out["ok"] and out["can_schedule"] is True and not scheduler.list_jobs(), out
+    out = _run_tool(person="555", platform="discord", message="x", when="in 1 hour", dry_run=True)
+    assert out["can_schedule"] is False and "hint" in out, out
+    assert not SENT
+
+
+def test_approved_scheduled_job_still_delivers_to_the_known_contact():
+    """End to end: schedule, approve, make it due, tick -> one DM goes out."""
+    _reset()
+    scheduler = _sched_reset()
+    _person("discord", "111", name="Maryem")
+    out = _run_tool(person="maryem", message="happy birthday", when="in 1 hour")
+    scheduler.approve(out["id"])
+    store = scheduler.load_store()
+    for j in store["jobs"]:
+        j["next_run"] = "2000-01-01T00:00:00"
+        j["trigger"]["at"] = "2000-01-01T00:00:00"
+    scheduler.save_store(store)
+    scheduler.tick()
+    assert SENT == [("discord", "111", "happy birthday")], SENT
+
+
 def _run():
     tests = [v for k, v in sorted(globals().items())
              if k.startswith("test_") and callable(v)]

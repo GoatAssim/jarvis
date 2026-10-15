@@ -136,7 +136,9 @@ def test_task_runner_sets_task_label():
     captured = {}
 
     def fake_run(argv, **kwargs):
-        captured["env"] = kwargs.get("env") or {}
+        # keep the ASK's env: a later subprocess.run with no env (the Windows toast goes out through
+        # PowerShell, via this same patched function) must not overwrite it with {}
+        captured["env"] = kwargs.get("env") or captured.get("env", {})
         return FakeCompleted(stdout="done\n")
 
     task_runner.subprocess.run = fake_run
@@ -160,7 +162,9 @@ def test_task_runner_label_empty_when_untitled():
             self.stdout, self.stderr, self.returncode = stdout, stderr, returncode
 
     def fake_run(argv, **kwargs):
-        captured["env"] = kwargs.get("env") or {}
+        # keep the ASK's env: a later subprocess.run with no env (the Windows toast goes out through
+        # PowerShell, via this same patched function) must not overwrite it with {}
+        captured["env"] = kwargs.get("env") or captured.get("env", {})
         return FakeCompleted(stdout="done\n")
 
     task_runner.subprocess.run = fake_run
@@ -183,7 +187,9 @@ def test_scheduler_do_ask_sets_task_fields():
             self.stdout, self.stderr, self.returncode = stdout, stderr, returncode
 
     def fake_run(argv, **kwargs):
-        captured["env"] = kwargs.get("env") or {}
+        # keep the ASK's env: a later subprocess.run with no env (the Windows toast goes out through
+        # PowerShell, via this same patched function) must not overwrite it with {}
+        captured["env"] = kwargs.get("env") or captured.get("env", {})
         return FakeCompleted(stdout="Jarvis: done.\n")
 
     scheduler.subprocess.run = fake_run
@@ -214,7 +220,9 @@ def test_scheduler_do_ask_label_falls_back_to_default_title():
             self.stdout, self.stderr, self.returncode = stdout, stderr, returncode
 
     def fake_run(argv, **kwargs):
-        captured["env"] = kwargs.get("env") or {}
+        # keep the ASK's env: a later subprocess.run with no env (the Windows toast goes out through
+        # PowerShell, via this same patched function) must not overwrite it with {}
+        captured["env"] = kwargs.get("env") or captured.get("env", {})
         return FakeCompleted(stdout="Jarvis: done.\n")
 
     scheduler.subprocess.run = fake_run

@@ -40,7 +40,9 @@ def _wrapper_literals():
     """The string literals server.js concatenates around `quote`/`text`, in
     order, decoded. None if the block can't be found."""
     src = (_ROOT / "web" / "server.js").read_text(encoding="utf-8")
-    m = re.search(r"let prompt = text;(.*?)if \(prompt\.length", src, re.S)
+    # `let prompt = typed;` since the redo work (typed = the person's words, or the picture placeholder);
+    # it was `text` before -- accept both so a rename of that variable doesn't read as drift of the wording.
+    m = re.search(r"let prompt = (?:typed|text);(.*?)if \(prompt\.length", src, re.S)
     if not m:
         return None
     lits = []

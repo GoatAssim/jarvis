@@ -140,6 +140,9 @@ def test_open_window():
         check("an open window is reported, not duplicated", ok and "already open" in msg and not FakePopen.calls)
         check("describe() says a window is open", daemons.describe(daemons.get("web"))["console_window_open"] is True)
         daemons.pid_alive = daemons.pid_alive_real
+        if os.name != "nt":
+            # _on_windows is faked above, so the real probe would call kernel32 on this box
+            daemons.pid_alive = lambda pid: False
         ok, msg = daemons.open_console_window("web")
         check("a recorded pid that is dead no longer counts", ok and len(FakePopen.calls) == 1)
 
@@ -370,8 +373,11 @@ def test_cli():
     check("daemon-edit turns one off", code == 0 and e["console_window_auto"] is False and e["console_window_stop_on_close"] is True)
     code, out = cli("daemon-edit", "w", "--console-window-stop-on-close", "false")
     check("daemon-edit turns the other off", code == 0 and daemons.get("w")["console_window_stop_on_close"] is False)
-    code, out = cli("daemon-window", "w")
-    check("daemon-window refuses off Windows with a JSON error", (os.name == "nt") or (code != 0 and out.get("ok") is False and "Windows" in out.get("message", "")))
+    if os.name != "nt":
+        # On Windows this command is real: it opens (and leaves open) a viewer window for "w", which then
+        # makes the open-flag check below read True. So it is only run where it must refuse.
+        code, out = cli("daemon-window", "w")
+        check("daemon-window refuses off Windows with a JSON error", code != 0 and out.get("ok") is False and "Windows" in out.get("message", ""))
     code, out = cli("daemon-window")
     check("daemon-window needs an id", code != 0)
     code, out = cli("daemons")

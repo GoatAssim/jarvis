@@ -473,8 +473,12 @@ def off_patch(provider_type, *, provider_name="", model="", base_url="", off_eff
 # variants do not match either. An alias such as `gemini-flash-latest` is not
 # matched because which generation it points at changes; a provider block can
 # name a budget for it with `gemini_off_budget`.
+# The preview suffix is a DATE (-preview-09-2025, -preview-06-17); a bare `-preview[-\w.]*` also took
+# `gemini-2.5-flash-preview-tts`, a speech model that has no thinking to switch off, and the lookahead
+# keeps tts / image / audio / live variants out whatever suffix they carry.
 _GEMINI_OFF_ZERO_RE = re.compile(
-    r"^(?:models/)?gemini-2\.5-flash(?:-lite)?(?:-preview[-\w.]*|-\d{3})?$", re.I)
+    r"^(?:models/)?(?!.*(?:tts|image|audio|live))gemini-2\.5-flash(?:-lite)?"
+    r"(?:-preview-\d{2}-\d{2,4}|-\d{3})?$", re.I)
 
 
 def gemini_off_patch(model, setting=None):
@@ -785,6 +789,21 @@ def budget_for_round(level, round_num=0, is_final=False):
     return reduced if reduced >= MIN_USEFUL_BUDGET else 0
 
 
+def gemini_budget_for_round(level, round_num=0, is_final=False):
+    """budget_for_round() for Gemini: the same discipline, but on the level's OWN Gemini
+    figure (_LEVELS[...]["gemini"]: 1024 / 4096 / 16384). The per-round path used the
+    generic `budget` (high = 12288), so a real round-0 request at High sent 12288 while
+    request_patch() and the output-cap floor (gemini_output_floor) both assumed 16384."""
+    level = normalize_level(level)
+    if level == "off":
+        return 0
+    full = _LEVELS[level].get("gemini") or _LEVELS[level]["budget"]
+    if round_num == 0:
+        return full
+    reduced = int(full * FINAL_ROUND_FRACTION)
+    return reduced if reduced >= MIN_USEFUL_BUDGET else 0
+
+
 def effort_for_round(level, round_num=0):
     """Effort string for the hosts that take one instead of a budget.
 
@@ -815,7 +834,8 @@ def round_patch(provider_type, level, round_num=0, is_final=False,
         return {}
 
     level = normalize_level(level)
-    budget = budget_for_round(level, round_num, is_final)
+    budget = (gemini_budget_for_round(level, round_num, is_final) if provider_type == "gemini"
+              else budget_for_round(level, round_num, is_final))
     if budget <= 0 and provider_type == "anthropic":
         return {}
     if budget <= 0 and provider_type == "gemini" and not gemini_uses_levels(model):

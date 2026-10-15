@@ -12,6 +12,13 @@ import copy
 import sys
 from pathlib import Path
 
+# cp1252 consoles (Windows) cannot print the emoji in these check names (UnicodeEncodeError)
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:  # noqa: BLE001
+        pass
+
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "jarvis-cli"))
 
 from jarvis import ai_providers  # noqa: E402

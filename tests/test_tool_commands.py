@@ -381,8 +381,9 @@ check("tool-commands is a reserved CLI name", "tool-commands" in reserved_names.
 src = (CLI_DIR / "jarvis")
 writers = []
 for path in src.rglob("*.py"):
-    if path.name in ("tool_commands.py", "tool_loader.py", "custom_tools_store.py", "tools.py", "cli.py", "_template.py", "reserved_names.py"):
-        continue
+    if path.name in ("tool_commands.py", "tool_loader.py", "custom_tools_store.py", "tools.py", "cli.py", "_template.py", "reserved_names.py",
+                     "tool_disable.py"):    # tool_disable.py: the owner-only switch store (2026-10-11j) -- it names the
+        continue                            # list but has no model-facing tool; test_tool_disable.py pins that
     if "TOOL_COMMANDS" in path.read_text(encoding="utf-8", errors="replace"):
         writers.append(path.name)
 check("no other module so much as names TOOL_COMMANDS (nothing model-facing writes one)", not writers, writers)

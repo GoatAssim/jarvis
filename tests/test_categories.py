@@ -104,8 +104,10 @@ def test_python_and_javascript_agree():
         return
     proc = subprocess.run([node, "-e", NODE, str(ROOT / "web" / "public" / "category-input.js")],
                           input=json.dumps({"names": CORPUS, "lists": LISTS, "edits": EDITS, "news": NEWS}),
-                          capture_output=True, text=True, timeout=60)
-    check("node ran the shared corpus", proc.returncode == 0 and proc.stdout.strip() != "")
+                          capture_output=True, encoding="utf-8", errors="replace", timeout=60)
+    # utf-8 both ways: the corpus holds non-ASCII names and node speaks UTF-8; text=True would use the
+    # Windows ANSI code page, whose decode error kills the reader thread and leaves proc.stdout None.
+    check("node ran the shared corpus", proc.returncode == 0 and (proc.stdout or "").strip() != "")
     if proc.returncode != 0:
         print(proc.stderr)
         return

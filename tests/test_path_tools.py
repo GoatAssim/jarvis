@@ -229,8 +229,14 @@ def test_rename_windows_name_rules():
         sys.platform = orig
     check("windows: '?' rejected", r.get("reason") == "bad_name", r)
     check("windows: trailing dot rejected", r2.get("reason") == "bad_name", r2)
-    check("windows rule not applied on other platforms",
-          pt.tool_rename_path({"path": str(src), "new_name": "what?.txt"}).get("ok") is True)
+    if sys.platform == "win32":
+        # On a real Windows box the rule IS the platform's: '?' can't be in a file name there, so the
+        # "other platforms" half can't be shown (the unpatched call is rightly refused, not renamed).
+        check("windows rule applies on a real Windows host",
+              pt.tool_rename_path({"path": str(src), "new_name": "what?.txt"}).get("reason") == "bad_name")
+    else:
+        check("windows rule not applied on other platforms",
+              pt.tool_rename_path({"path": str(src), "new_name": "what?.txt"}).get("ok") is True)
 
 
 # ---------------------------------------------------------------------------

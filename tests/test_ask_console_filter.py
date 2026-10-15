@@ -19,6 +19,13 @@ import re
 import sys
 from pathlib import Path
 
+# cp1252 consoles (Windows) cannot print the arrows / emoji in these check names (UnicodeEncodeError)
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:  # noqa: BLE001
+        pass
+
 ROOT = Path(__file__).resolve().parent.parent
 APP = (ROOT / "web" / "public" / "app.js").read_text(encoding="utf-8")
 SERVER = (ROOT / "web" / "server.js").read_text(encoding="utf-8")

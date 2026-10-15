@@ -194,8 +194,9 @@ def test_wiring():
     hits = []
     for path in sorted((CLI_DIR / "jarvis").rglob("*.py")):
         # scheduler.py / cli.py are the two owners; doctor.py only NAMES the command in a hint;
-        # tasks.py has its own, unrelated clear_finished() for the Tasks panel.
-        if path.name in ("scheduler.py", "cli.py", "doctor.py", "tasks.py"):
+        # tasks.py has its own, unrelated clear_finished() for the Tasks panel; reserved_names.py only
+        # lists "sched-delete" / "sched-clear" as taken CLI words (this test asserts that just above).
+        if path.name in ("scheduler.py", "cli.py", "doctor.py", "tasks.py", "reserved_names.py"):
             continue
         text = path.read_text(encoding="utf-8", errors="ignore")
         if re.search(r"\bdelete_job\b|\bclear_finished\b|sched-delete|sched-clear", text):

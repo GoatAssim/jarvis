@@ -190,8 +190,13 @@ ai_providers.set_token_budget(None)
 lim = ai_client._token_budget_limit
 clean = dict(JARVIS_SCHEDULED=None, JARVIS_CONTEXT=None, JARVIS_TOKEN_BUDGET=None)
 with Env(**clean):
-    check("an interactive ask has no limit, whatever the config says",
-          lim({}) is None and lim({"scheduled_token_budget": 5}) is None)
+    # 2026-10-11t: an interactive ask used to be unlimited; it now has defaults.interactive_token_budget
+    # (150,000 unless set, 0 = off). The scheduled knob still never touches it.
+    check("an interactive ask gets the interactive limit (150,000), whatever the SCHEDULED config says",
+          lim({}) == ai_client.INTERACTIVE_TOKEN_BUDGET_DEFAULT == 150000
+          and lim({"scheduled_token_budget": 5}) == 150000)
+    check("an interactive ask: its own setting wins, and 0 switches it off",
+          lim({"interactive_token_budget": 40000}) == 40000 and lim({"interactive_token_budget": 0}) is None)
 with Env(**{**clean, "JARVIS_SCHEDULED": "1"}):
     check("a scheduled run defaults to 30,000", lim({}) == ai_client.SCHEDULED_TOKEN_BUDGET_DEFAULT == 30000)
     check("defaults.scheduled_token_budget sets it", lim({"scheduled_token_budget": 12345}) == 12345)
