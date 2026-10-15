@@ -69,6 +69,13 @@ REGISTRY = (
      "help": "Every message, reply and tool run is appended to ~/.jarvis/events. Turning "
              "this off stops NEW lines being written (replay-from-log and exports of "
              "later turns lose their raw copy). The log is unbounded by design."},
+    {"name": "RAW_ARCHIVE_WARN_MB", "kind": "const", "type": "int", "default": 500,
+     "min": 0, "max": 1000000, "unit": "MB",
+     "section": "memory", "file": "raw_archive.py", "applies": APPLIES_NEXT_ASK,
+     "label": "Warn when the raw event logs pass this size",
+     "help": "jarvis doctor shows a warning once ~/.jarvis/events is bigger than this. "
+             "Nothing is deleted for you: delete a conversation (or press Clear) to free "
+             "its log. 0 turns the warning off."},
     {"name": "JARVIS_WEB_STREAM", "kind": "env", "type": "bool", "default": True,
      "section": "web", "file": "web/server.js", "applies": APPLIES_NEXT_ASK,
      "label": "Stream replies into the web chat as they are written",

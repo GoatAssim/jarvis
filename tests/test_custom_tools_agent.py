@@ -183,6 +183,18 @@ for cfg_max, want in ((None, cta.AGENT_MAX_TOKENS), (700, cta.AGENT_MAX_TOKENS),
     run({"instruction": "x", "source": ""}, fake, [prov("p", **kw)])
     check("cap: provider max_tokens=%s -> %d" % (cfg_max, want), fake.calls[0]["provider"]["max_tokens"] == want)
 
+# --- L.45 / D-3: agent_max_tokens on the provider block wins, exactly as set ----
+for kw, want, why in (({"agent_max_tokens": 20000}, 20000, "above the floor"),
+                      ({"agent_max_tokens": 4000}, 4000, "below the floor is honoured"),
+                      ({"agent_max_tokens": 4000, "max_tokens": 32000}, 4000, "beats max_tokens"),
+                      ({"agent_max_tokens": 0}, cta.AGENT_MAX_TOKENS, "0 is ignored"),
+                      ({"agent_max_tokens": "abc"}, cta.AGENT_MAX_TOKENS, "text is ignored"),
+                      ({"agent_max_tokens": True}, cta.AGENT_MAX_TOKENS, "a bool is ignored"),
+                      ({"agent_max_tokens": -5, "max_tokens": 32000}, 32000, "negative falls back to max_tokens")):
+    fake = Fake([ok(REPLY)])
+    run({"instruction": "x", "source": ""}, fake, [prov("p", **kw)])
+    check("agent_max_tokens %r -> %d (%s)" % (kw, want, why), fake.calls[0]["provider"]["max_tokens"] == want)
+
 # reserved so a saved command can't shadow it
 from jarvis import reserved_names  # noqa: E402
 names = getattr(reserved_names, "RESERVED_COMMAND_NAMES", None) or getattr(reserved_names, "RESERVED", None)

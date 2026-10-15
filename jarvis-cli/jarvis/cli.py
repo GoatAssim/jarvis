@@ -760,6 +760,35 @@ def _load_panel_pictures(text):
         return text, [], None
 
 
+def _emit_usage(result):
+    """Phase 0 (new_plan.md): baseline token/tool/round measurement for one ask.
+    Two lines: a human-readable one on stderr (a plain CLI trace and the web
+    console's stderr stream), and a machine-readable "JARVIS_USAGE <json>"
+    marker line (same protocol shape as JARVIS_CONFIRM_REQUEST) that server.js
+    picks off and forwards to the browser as a structured ws message for the
+    debug menu. Called exactly once per ask (K.3.1.6: it used to be pasted twice,
+    so every ask printed the tokens line and the marker twice)."""
+    usage = result.usage
+    if not usage:
+        return
+    rounds = usage.get("rounds") or []
+    tool_calls = usage.get("tool_calls") or []
+    wire.trace(
+        f"{ERR.DIM}  tokens: in={usage.get('input_tokens', 0)} "
+        f"out={usage.get('output_tokens', 0)} "
+        f"total={usage.get('total_tokens', 0)}  "
+        f"rounds={len(rounds)} tools={len(tool_calls)}{ERR.RESET}",
+        "tokens",
+    )
+    # L.24 T6: what the whole ask cost across every attempt, thinking
+    # included. The line above is only the attempt that answered.
+    ask_line = token_usage.format_ask_total(usage.get("ask_total"))
+    if ask_line:
+        wire.trace(f"{ERR.DIM}  {ask_line}{ERR.RESET}", "tokens")
+    print("JARVIS_USAGE " + json.dumps(usage, default=str, ensure_ascii=False),
+          flush=True)
+
+
 def handle_ai_prompt(text, commands, provider_override=None, think_override=None):
     """Anything typed at jarvis that isn't a known command name lands here
     instead of the "Unknown command" error \u2014 it's treated as a message for
@@ -1067,31 +1096,6 @@ def handle_ai_prompt(text, commands, provider_override=None, think_override=None
         wire.reply(result.assistant_name, failure, False)
         return 1
 
-    # Phase 0 (new_plan.md): baseline token/tool/round measurement for this
-    # ask. Two lines: a human-readable one on stderr (visible in a plain CLI
-    # trace and in the web console's stderr stream), and a machine-readable
-    # "JARVIS_USAGE <json>" marker line (same protocol shape as
-    # JARVIS_CONFIRM_REQUEST above) that server.js picks off and forwards to
-    # the browser as a structured ws message for the debug menu.
-    usage = result.usage
-    if usage:
-        rounds = usage.get("rounds") or []
-        tool_calls = usage.get("tool_calls") or []
-        wire.trace(
-            f"{ERR.DIM}  tokens: in={usage.get('input_tokens', 0)} "
-            f"out={usage.get('output_tokens', 0)} "
-            f"total={usage.get('total_tokens', 0)}  "
-            f"rounds={len(rounds)} tools={len(tool_calls)}{ERR.RESET}",
-            "tokens",
-        )
-        # L.24 T6: what the whole ask cost across every attempt, thinking
-        # included. The line above is only the attempt that answered.
-        ask_line = token_usage.format_ask_total(usage.get("ask_total"))
-        if ask_line:
-            wire.trace(f"{ERR.DIM}  {ask_line}{ERR.RESET}", "tokens")
-        print("JARVIS_USAGE " + json.dumps(usage, default=str, ensure_ascii=False),
-              flush=True)
-
     # Notifications raised while nothing was listening (a reminder that fired
     # from Task Scheduler, a scheduled task that finished overnight) are
     # surfaced here, immediately above the reply. This is the CLI's half of
@@ -1135,30 +1139,7 @@ def handle_ai_prompt(text, commands, provider_override=None, think_override=None
     if note:
         wire.trace(f"{ERR.DIM}  (note: {note}){ERR.RESET}", "status")
 
-    # Phase 0 (new_plan.md): baseline token/tool/round measurement for this
-    # ask. Two lines: a human-readable one on stderr (visible in a plain CLI
-    # trace and in the web console's stderr stream), and a machine-readable
-    # "JARVIS_USAGE <json>" marker line (same protocol shape as
-    # JARVIS_CONFIRM_REQUEST above) that server.js picks off and forwards to
-    # the browser as a structured ws message for the debug menu.
-    usage = result.usage
-    if usage:
-        rounds = usage.get("rounds") or []
-        tool_calls = usage.get("tool_calls") or []
-        wire.trace(
-            f"{ERR.DIM}  tokens: in={usage.get('input_tokens', 0)} "
-            f"out={usage.get('output_tokens', 0)} "
-            f"total={usage.get('total_tokens', 0)}  "
-            f"rounds={len(rounds)} tools={len(tool_calls)}{ERR.RESET}",
-            "tokens",
-        )
-        # L.24 T6: what the whole ask cost across every attempt, thinking
-        # included. The line above is only the attempt that answered.
-        ask_line = token_usage.format_ask_total(usage.get("ask_total"))
-        if ask_line:
-            wire.trace(f"{ERR.DIM}  {ask_line}{ERR.RESET}", "tokens")
-        print("JARVIS_USAGE " + json.dumps(usage, default=str, ensure_ascii=False),
-              flush=True)
+    _emit_usage(result)
 
     return 0
 

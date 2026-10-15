@@ -370,6 +370,11 @@ same as `commands.json`, so there's no reload step:
 (The full starter file lists all ten providers from the table below —
 trimmed here for space.)
 
+Optional per-provider field: `"agent_max_tokens": 16000` sets the output limit for the
+Tool Manager's *Ask Jarvis* agent only (it writes whole tool files, which need far more
+room than a chat reply). Chat keeps using `max_tokens`. Left out, the agent uses the
+larger of 8,000 and that provider's `max_tokens`.
+
 `api_keys` is a list, so a provider can hold more than one key — jarvis
 tries them in order before giving up on that provider (see Failover,
 below). Most people only ever need one; just leave the list at a single

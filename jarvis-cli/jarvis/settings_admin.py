@@ -489,6 +489,10 @@ def _validate_ai_config(doc, problems):
                 keys = p.get("api_keys")
                 if keys is not None and (not isinstance(keys, list) or not all(isinstance(k, str) for k in keys)):
                     problems.append("%s.api_keys must be a list of text." % where)
+                if "agent_max_tokens" in p:
+                    v = p["agent_max_tokens"]
+                    if isinstance(v, bool) or not isinstance(v, int) or v < 1:
+                        problems.append("%s.agent_max_tokens must be a whole number, 1 or more." % where)
     defaults = doc.get("defaults")
     if defaults is not None:
         if not isinstance(defaults, dict):

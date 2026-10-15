@@ -893,6 +893,34 @@ def check_conversations():
                          "%s of conversations, %s of logs"
                          % (_human_bytes(total), _human_bytes(log_bytes)),
                          group="conversations"))
+
+    # L.38 / D-6: the raw event logs are unbounded by design, so say when they get big.
+    try:
+        from . import raw_archive
+        warning = raw_archive.size_warning()
+        if warning:
+            largest = warning.get("largest") or {}
+            out.append(Check(
+                "conv.events", "Raw event log size", WARN,
+                "%d event log%s take %s (warning at %s)%s"
+                % (warning["files"], "" if warning["files"] == 1 else "s",
+                   _human_bytes(warning["bytes"]), _human_bytes(warning["limit_bytes"]),
+                   "; largest is %s at %s" % (largest["conv_id"], _human_bytes(largest["bytes"]))
+                   if largest else ""),
+                "Nothing is deleted automatically. Delete conversations you no longer need "
+                "(or press Clear in the web UI) -- that removes their event log. Raise or "
+                "turn off this warning with RAW_ARCHIVE_WARN_MB in Settings > Advanced.",
+                "conversations"))
+        else:
+            info = raw_archive.total_size()
+            if info["files"]:
+                out.append(Check("conv.events", "Raw event log size", OK,
+                                 "%d event log%s, %s" % (info["files"],
+                                                         "" if info["files"] == 1 else "s",
+                                                         _human_bytes(info["bytes"])),
+                                 group="conversations"))
+    except Exception:  # noqa: BLE001 -- a size check must never break doctor
+        pass
     return out
 
 

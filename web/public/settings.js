@@ -442,6 +442,9 @@
               label: name + ": enabled", help: (p.model ? "Model " + p.model + ". " : "") + keys + " API key" + (keys === 1 ? "" : "s") + " set (hidden)." }));
             prow.push(fileRow(ctx, { file: "ai_config.json", path: ["providers", i, "model"], type: "text", fallback: "",
               label: name + ": model", help: "The model name sent to this provider." }));
+            prow.push(fileRow(ctx, { file: "ai_config.json", path: ["providers", i, "agent_max_tokens"], type: "int", min: 1, fallback: 8000,
+              label: name + ": Tool Manager agent, longest reply", unit: "tokens",
+              help: "Output limit for the Tool Manager's Ask Jarvis agent only; the chat keeps using the normal Longest reply. Not set = the larger of 8,000 and this provider's max_tokens. Raise it if a big tool keeps getting cut off." }));
           });
           out.push(group("Providers", prow));
         }

@@ -42,7 +42,10 @@ from . import tunables
 from .custom_tools_suggest import _pick_provider
 
 AGENT_TIMEOUT = tunables.const("AGENT_TIMEOUT", 150)  # L.43: Settings > Advanced
-AGENT_MAX_TOKENS = 8000          # a FLOOR: a larger max_tokens on the provider block wins
+AGENT_MAX_TOKENS = 8000          # the default FLOOR: a larger max_tokens on the provider block wins
+# L.45 / D-3: a provider block can set its own "agent_max_tokens" -- the output cap for this
+# agent ONLY (the chat keeps using "max_tokens"). When set it is used exactly as written, even
+# below the floor; when absent or not a whole number above 0 the old floor rule applies.
 # A whole-file reply that hits the provider's output cap is continued in a fresh
 # call instead of thrown away. Each continuation is one more full call, so it is
 # bounded; a tool that still doesn't fit after this many is genuinely too big.
@@ -149,10 +152,29 @@ def _done(payload):
         pass
 
 
+def _agent_cap(provider):
+    """The provider block's own ``agent_max_tokens`` as a positive int, or None when it is
+    missing or unusable (a bool, text that isn't a number, zero, a negative)."""
+    value = provider.get("agent_max_tokens")
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        cap = int(value)
+    except (TypeError, ValueError):
+        return None
+    return cap if cap > 0 else None
+
+
 def _output_cap(provider):
-    """The provider's own max_tokens if it set a bigger one than our floor.
-    Overwriting it with a flat 8000 meant raising max_tokens in the AI config
-    did nothing for this feature."""
+    """How many output tokens one call of this agent may use.
+
+    1. The provider block's ``agent_max_tokens`` when it has one (L.45 / D-3), exactly as set.
+    2. Otherwise the provider's own max_tokens if it set a bigger one than our floor.
+       Overwriting it with a flat 8000 meant raising max_tokens in the AI config
+       did nothing for this feature."""
+    own = _agent_cap(provider)
+    if own is not None:
+        return own
     try:
         configured = int(provider.get("max_tokens") or 0)
     except (TypeError, ValueError):
@@ -264,7 +286,7 @@ def run(payload, cfg=None, out=None):
             if code and not complete:
                 if cut == ai_providers.CUT_LENGTH:
                     why = ("(The reply was cut off at the output limit (max_tokens %d) "
-                           "before the file ended -- not applied. Raise max_tokens on "
+                           "before the file ended -- not applied. Raise agent_max_tokens on "
                            "the %s provider, or ask for a smaller tool.)"
                            % (attempt.get("max_tokens") or 0, label or "AI"))
                 else:

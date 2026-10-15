@@ -63,8 +63,11 @@ the owner asking for a conversation to go away must not leave a hidden copy.
 Clearing the Logs viewer or the Live Feed never touches it. Every public
 function swallows OSError and returns a harmless value -- logging must never
 break an ask (same contract as logs.log and console_store.append).
-``JARVIS_RAW_ARCHIVE=0`` turns writing off. The log is unbounded by design;
-``stats()`` reports its size.
+``JARVIS_RAW_ARCHIVE=0`` turns writing off. The log is unbounded by design and is never
+pruned automatically; ``stats()`` reports one conversation's size and ``size_warning()``
+(shown by ``jarvis doctor``) says when all the logs together pass ``RAW_ARCHIVE_WARN_MB``
+(default 500 MB, 0 = never warn; Settings > Advanced). Deleting a conversation, or the
+web UI's Clear, is the way to reclaim the space.
 """
 
 import json
@@ -81,6 +84,9 @@ ENCODING = "utf-8"
 FORMAT_VERSION = 2
 
 KINDS = ("user", "model_reply", "console", "tool_run", "reply", "exchange_removed")
+
+# L.38 / D-6: the size above which `jarvis doctor` warns. Advisory only -- nothing is pruned.
+WARN_MB_DEFAULT = 500
 
 _OFF_VALUES = {"0", "off", "false", "no"}
 
@@ -166,6 +172,50 @@ def stats(conv_id):
     except OSError:
         return {"entries": 0, "bytes": 0}
     return {"entries": len(read(conv_id)), "bytes": size}
+
+
+def total_size():
+    """{"files": int, "bytes": int, "largest": {"conv_id", "bytes"} | None} for every
+    event log on disk. Stats only (no file is opened); zeros when there is none. Never raises."""
+    out = {"files": 0, "bytes": 0, "largest": None}
+    try:
+        if not ARCHIVE_DIR.is_dir():
+            return out
+        for f in ARCHIVE_DIR.glob("*.jsonl"):
+            try:
+                size = f.stat().st_size
+            except OSError:
+                continue
+            out["files"] += 1
+            out["bytes"] += size
+            if out["largest"] is None or size > out["largest"]["bytes"]:
+                out["largest"] = {"conv_id": f.stem, "bytes": size}
+    except OSError:
+        pass
+    return out
+
+
+def warn_limit_bytes():
+    """The size above which size_warning() fires, in bytes. 0 means never warn."""
+    try:
+        mb = int(tunables.const("RAW_ARCHIVE_WARN_MB", WARN_MB_DEFAULT))
+    except (TypeError, ValueError):
+        mb = WARN_MB_DEFAULT
+    return max(mb, 0) * 1024 * 1024
+
+
+def size_warning():
+    """None while the event logs are under the warning size (or the warning is off);
+    otherwise {"bytes", "limit_bytes", "files", "largest"} -- the same fields as
+    total_size() plus the limit. Advisory: nothing is pruned or stopped."""
+    limit = warn_limit_bytes()
+    if not limit:
+        return None
+    info = total_size()
+    if info["bytes"] <= limit:
+        return None
+    info["limit_bytes"] = limit
+    return info
 
 
 def delete(conv_id):
