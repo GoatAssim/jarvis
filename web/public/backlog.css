@@ -6,10 +6,9 @@
  * frame/corners/glow/scroll-lock all still come free from style.css.
  *
  * The cards, columns, editor, drop line and key legend are all built by
- * backlog.js and styled here (.bk-*). style.css still carries the old
- * .kanban__card* rules; nothing renders those classes any more, they are
- * left alone rather than edited in a stylesheet this panel doesn't own.
- * .kanban / .kanban__col / .backlog-add are still used as the frame.
+ * backlog.js and styled here (.bk-*). The old .kanban__card* rules (and the
+ * other .kanban__* children) were removed from style.css after L.55; only
+ * .kanban / .kanban__col / .backlog-add remain there, as the frame.
  * ========================================================================= */
 
 .bk-toolbar{

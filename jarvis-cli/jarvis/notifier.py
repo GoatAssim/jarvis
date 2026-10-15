@@ -101,6 +101,9 @@ DEFAULT_CONFIG = {
         # tool sends at creation time. Its own kind so it can be turned down
         # to 1 (inbox only) without touching the reminder that fires later.
         "scheduled": 2,
+        # L.27 follow-up — a daemon that failed to autostart at startup. Its own
+        # kind so it can be tuned (or silenced to 1) in Settings > Notifications.
+        "daemon": 2,
     },
     # Windows toasts go through PowerShell's BurntToast module when it's
     # installed (much nicer looking), falling back to a plain balloon via

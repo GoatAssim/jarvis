@@ -675,7 +675,7 @@ jarvis daemon-add web "node server.js --port 3000" \
 | `--stop-signal TERM\|INT\|KILL` | what a stop sends first (POSIX) |
 | `--stop-timeout S` | how long to wait before forcing it |
 | `--stdin` | this process reads stdin, so you can type into its console |
-| `--autostart` | bring it up automatically |
+| `--autostart` | bring it up automatically when Jarvis starts; if it cannot be started you get one `daemon` notification (level tunable in Settings > Notifications) and the reason shows on the Daemons panel |
 | `--name`, `--description` | how it reads in the list and the UI |
 
 `jarvis daemon-edit <id>` changes any of these afterwards. The console is

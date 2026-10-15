@@ -3023,7 +3023,17 @@ def main():
             real_name = (meta.get("name") or info["slug"]).strip()
         # Unload by whatever name was given even if the skill itself no
         # longer exists — that's exactly the case where cleanup matters.
-        skill_stickiness.unload(conv_id or None, real_name)
+        # I-B3: but a name that was never loaded in this scope is not "unloaded";
+        # say so (and exit 1, like the other validation errors) instead of
+        # reporting a success that did nothing.
+        scope_label = conv_id or "global (every conversation)"
+        if not skill_stickiness.unload(conv_id or None, real_name):
+            msg = f"'{real_name}' isn't loaded for {scope_label}, so there is nothing to unload."
+            if conv_id and skill_stickiness.is_loaded(None, real_name):
+                msg += " It is loaded for every conversation; run it without a conversation id to unload it there."
+            print(json.dumps({"error": msg, "unloaded": False, "name": real_name,
+                              "scope": scope_label}))
+            sys.exit(1)
         print(json.dumps({
             "unloaded": True, "name": real_name,
             "scope": conv_id or "global (every conversation)",

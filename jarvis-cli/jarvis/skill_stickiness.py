@@ -72,19 +72,35 @@ def load(conv_id, name):
     _save(data)
 
 
+def is_loaded(conv_id, name):
+    """True if `name` is loaded in exactly this scope (a conversation, or global
+    when conv_id is falsy). Unlike get_loaded() it does not merge in the global
+    scope, because unload() only ever touches the one scope it is given."""
+    name = (name or "").strip()
+    return bool(name) and name in (_load().get(_scope_key(conv_id)) or [])
+
+
 def unload(conv_id, name):
-    """Drop one skill from one scope. No-op if it wasn't loaded there."""
+    """Drop one skill from one scope. No-op if it wasn't loaded there.
+
+    Returns True if something was removed, False for the no-op (so a caller can
+    say "that wasn't loaded" instead of claiming success). Existing callers
+    ignore the value."""
     name = (name or "").strip()
     if not name:
-        return
+        return False
     scope = _scope_key(conv_id)
     data = _load()
-    names = [n for n in (data.get(scope) or []) if n != name]
+    before = data.get(scope) or []
+    names = [n for n in before if n != name]
     if names:
         data[scope] = names
     else:
         data.pop(scope, None)
+    if len(names) == len(before):
+        return False
     _save(data)
+    return True
 
 
 def unload_all(conv_id):

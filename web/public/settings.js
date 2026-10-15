@@ -472,11 +472,12 @@
     { id: "notifications", label: "Notifications", title: "Notifications",
       lede: "How loudly each kind of notification is delivered. Inbox contents and per-item controls are in the Notifications panel.",
       files: ["notify_config.json"],
-      terms: "notification level toast inbox silent standard persistent broadcast confirm reminder task clipboard ambient",
+      terms: "notification level toast inbox silent standard persistent broadcast confirm reminder task clipboard ambient daemon autostart",
       build: async (ctx) => {
         const rows = [
           ["reminder", "Reminders", 2], ["notify", "Messages from Jarvis", 2], ["task", "Finished tasks", 2],
           ["clipboard_watch", "Clipboard watcher", 2], ["ambient", "Ambient suggestions", 1],
+          ["daemon", "Daemon problems", 2],
         ].map(([key, label, fb]) => fileRow(ctx, { file: "notify_config.json", path: ["levels", key], type: "choice", choices: LEVELS, fallback: fb, label,
           help: "Default importance when nothing sets one. Silent = inbox only; Confirm = stays until you acknowledge it." }));
         const out = [group("Default level by kind", rows)];

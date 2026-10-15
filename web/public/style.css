@@ -3482,44 +3482,6 @@ body.layout--focus:has(#subagents-overlay.is-docked:not([hidden]):not(.is-collap
   padding: 10px;
   min-height: 120px;
 }
-.kanban__colhead{
-  font-family: "Orbitron", sans-serif;
-  font-size: 10.5px;
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
-  color: var(--accent);
-}
-/* Was a static block with no hover/transition at all — every other
-   clickable card in the app (.debug-tool-card, .daemon-row, .skill-row)
-   responds to a hover; this one just sat there, which is what made it read
-   as unfinished next to the rest. Cards here are drag-reorderable (see the
-   drag handlers in app.js), so a lift-on-hover also doubles as a "yes, you
-   can pick this up" cue. */
-.kanban__card{
-  background: var(--bg-raised);
-  border: 1px solid var(--border);
-  border-left: 3px solid var(--border-strong);
-  border-radius: 4px;
-  padding: 8px 10px;
-  cursor: grab;
-  transition: border-color 0.15s, background 0.15s, transform 0.15s, box-shadow 0.15s;
-}
-.kanban__card:hover{
-  border-color: var(--accent-soft);
-  box-shadow: 0 4px 14px rgba(0,0,0,0.35);
-  transform: translateY(-1px);
-}
-.kanban__card--high{ border-left-color: var(--accent-secondary); }
-.kanban__card--low{ opacity: 0.72; }
-.kanban__title{ font-size: 12.5px; line-height: 1.4; }
-.kanban__project{
-  font-size: 10.5px; color: var(--accent); margin-top: 3px;
-  text-transform: uppercase; letter-spacing: 0.05em;
-}
-.kanban__blocked{ font-size: 11px; color: var(--accent-secondary); margin-top: 4px; }
-.kanban__actions{ display: flex; gap: 4px; margin-top: 8px; flex-wrap: wrap; }
-.kanban__actions .btn{ padding: 2px 7px; font-size: 10.5px; }
-.kanban__empty{ color: var(--text-dimmer); font-size: 11px; text-align: center; padding: 6px; }
 .backlog-add{ flex-direction: row; flex-wrap: wrap; align-items: center; }
 .backlog-add input{ flex: 1 1 180px; width: auto; }
 

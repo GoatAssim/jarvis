@@ -1536,7 +1536,8 @@ def autostart_all():
     start() would refuse the latter with the H.1.3 guard, and "already being
     brought up" is not a failure worth reporting. A real failure is recorded
     on the daemon's own status (last_error) so the Daemons panel shows it
-    instead of the daemon silently staying down.
+    instead of the daemon silently staying down, and the owner gets ONE `daemon`
+    notification for the whole pass (see _notify_autostart_failures).
     """
     results = []
     # L.12: make sure the daemons installed tools declare are registered
@@ -1547,6 +1548,7 @@ def autostart_all():
         tool_daemons.sync_if_stale()
     except Exception:  # noqa: BLE001 - a broken tool must not stop autostart
         pass
+    failures = []
     for entry in _load_registry().values():
         if not entry.get("autostart") or not entry.get("enabled", True):
             continue
@@ -1557,8 +1559,54 @@ def autostart_all():
         if not ok:
             _write_status(entry["id"], status=STATUS_STOPPED,
                           last_error=f"autostart failed: {msg}")
+            failures.append({"id": entry["id"],
+                             "name": entry.get("name") or entry["id"],
+                             "message": msg})
         results.append({"id": entry["id"], "ok": ok, "message": msg})
+    _notify_autostart_failures(failures)
     return results
+
+
+# L.27 follow-up (C5): a daemon that could not be brought up at startup used to be
+# visible only on the Daemons panel (last_error), which nobody is looking at while
+# Jarvis boots. One notification per autostart pass, however many daemons failed, so
+# a bad registry does not turn into a toast storm.
+AUTOSTART_NOTICE_MAX_LINES = 8
+
+
+def _autostart_failure_text(failures):
+    """(title, body) for one autostart pass. `failures` is a non-empty list of
+    {"id", "name", "message"}."""
+    count = len(failures)
+    title = ("A daemon did not start" if count == 1
+             else f"{count} daemons did not start")
+    lines = []
+    for item in failures[:AUTOSTART_NOTICE_MAX_LINES]:
+        name, did = item.get("name") or item["id"], item["id"]
+        label = name if name == did else f"{name} ({did})"
+        lines.append(f"- {label}: {item.get('message') or 'no reason given'}")
+    if count > AUTOSTART_NOTICE_MAX_LINES:
+        lines.append(f"- and {count - AUTOSTART_NOTICE_MAX_LINES} more")
+    body = ("Autostart failed at startup:\n" + "\n".join(lines)
+            + "\nOpen the Daemons panel to read the reason and start it by hand.")
+    return title, body
+
+
+def _notify_autostart_failures(failures):
+    """Tell the owner about failed autostarts through the one notifier.
+
+    Kind `daemon` (its level is tunable in Settings > Notifications, default 2). Never
+    raises and never changes what autostart_all() returns: a notification that cannot
+    be delivered must not cost the other daemons their start.
+    """
+    if not failures:
+        return None
+    try:
+        from . import notifier
+        title, body = _autostart_failure_text(failures)
+        return notifier.notify(title, body, kind="daemon", failed=True)
+    except Exception:  # noqa: BLE001 - advice, not a reason to fail the tick
+        return None
 
 
 # ---------------------------------------------------------------------------

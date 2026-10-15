@@ -429,6 +429,7 @@ actually render Markdown):
     node tests/verify_tool_commands_route.js    # I.2.11: /api/tool-commands routes' guards against the real server.js source; no npm install
     python3 tests/test_category_manage.py   # L.12: rename / merge / delete a category as a whole (daemons: registry + CLI + routes pinned; commands share the JS rules)
     node tests/verify_category_manager.js   # L.12: category-manager.js pure helpers + the whole dialog chain against a fake JarvisUI/fetch; no npm install
+    python3 tests/test_l27c_autostart_notice.py  # L.27 follow-up: a failed daemon autostart raises ONE `daemon` notification per pass (text, cap, never raises, real inbox record, Settings row)
     python3 tests/test_l43_tree.py          # L.43: "changed from default" report + per-value reset (same gate as every Settings write)
     node tests/verify_settings_tree.js      # L.43: settings.js tree helpers, deep-link parser and wiring; no npm install
     python3 tests/verify_l36_insights_ui.py # L.36-P1/P2/P3: Conversation / Usage / Test tabs in a real browser; needs `playwright` (Python) + Chromium, prints SKIP without them
@@ -450,6 +451,7 @@ actually render Markdown):
     python3 tests/verify_mcp_servers_ui.py  # L.31: the MCP panel in a real browser against a real stdio MCP server; needs `playwright` (Python) + Chromium, prints SKIP without them
     python3 tests/test_tool_maker.py        # L.53: the Tool Maker conversation: withheld tools (hidden AND refused, fail closed), context, history trimming, conv-new origin
     python3 tests/test_bridge.py            # the direct channel's CLI half against a real `jarvis _internal_bridge` on a throwaway HOME: protocol, process reuse, env overlay, stdin, confirm round trip, typed reply / trace categories, refuse / retire before started, staleness fingerprint, CLI independence; no network, no API key
+    python3 tests/test_skillunload_unknown.py  # I-B3: `jarvis skillunload <name>` errors (exit 1, "unloaded": false) for a skill that was not loaded in that scope; a loaded one still unloads; --all and usage unchanged
     node tests/verify_bridge_client.js      # web/bridge.js against a fake worker: no blocking or queueing, reuse, fallbacks, crash-not-rerun, kill, breaker, recycling; no npm install
     node tests/verify_ask_embed.js          # L.53: ask-embed.js's reply/stream/size helpers and the Tool Manager's chat-fold + per-tool conversation key; no npm install
     node tests/verify_code_editor.js        # L.33: the Tool Manager editor's tokenizer, edit helpers and completions; no npm install
