@@ -14,9 +14,10 @@ addAskPromptTrace's existing `line.split("\t")` / `parts[1] === "..."`
 dispatch pattern already expects, and puts the entire event as one
 JSON blob in the third field.
 
-Emits to stderr, flush=True, same as every other JARVIS_MEDIA producer,
-so web/server.js's line-buffered stdio forwarding (spawnAndStream's
-onErr) delivers each event to the browser the instant it's printed —
+Emits through wire.media(), same as every other JARVIS_MEDIA producer:
+a flushed stderr line (tagged in-band when a bridge worker hosts the
+process), so web/server.js delivers each event to the browser the instant
+it's printed —
 this is what makes it "real time" rather than a batch dumped at
 tool-return time.
 
@@ -31,6 +32,8 @@ care whether anything is listening.
 
 import json
 import sys
+
+from . import wire
 
 _cli_hook = None  # optional Callable[[dict], None], registered by cli.py
 
@@ -57,7 +60,7 @@ def emit(job_id, seq, phase, status, **fields):
     """
     event = {"job_id": job_id, "seq": seq, "phase": phase, "status": status, **fields}
     try:
-        line = "JARVIS_MEDIA\tdev_agent\t" + json.dumps(event, default=str, ensure_ascii=False)
+        payload = json.dumps(event, default=str, ensure_ascii=False)
     except Exception as e:  # noqa: BLE001 — see docstring; this must not raise
         # Deliberately Exception and not (TypeError, ValueError). `default=str`
         # means json.dumps falls back to str() on anything it can't encode, so
@@ -73,16 +76,16 @@ def emit(job_id, seq, phase, status, **fields):
         event = {"job_id": job_id, "seq": seq, "phase": phase, "status": status,
                  "error": f"event serialization failed: {detail}"}
         try:
-            line = "JARVIS_MEDIA\tdev_agent\t" + json.dumps(event)
+            payload = json.dumps(event)
         except Exception:  # noqa: BLE001
             # Even the fallback can fail if job_id/phase/status are themselves
             # exotic objects, since this dumps() has no default=. Last resort:
             # a valid three-field envelope with everything coerced.
             event = {"job_id": repr(job_id)[:120], "seq": -1, "phase": "unknown",
                      "status": "error", "error": "event serialization failed"}
-            line = "JARVIS_MEDIA\tdev_agent\t" + json.dumps(event)
+            payload = json.dumps(event)
     try:
-        print(line, file=sys.stderr, flush=True)
+        wire.media("dev_agent", payload)
     except Exception:
         pass
     if _cli_hook is not None:

@@ -528,6 +528,14 @@ def handle_message(platform, msg, send, cfg=None, on_tool_call=None, decision=No
     is holding a WebSocket open for everyone else.
     """
     cfg = cfg or channel_config.platform_config(platform)
+    # S7: a room (server, channel, thread or group chat) switched to "don't save".
+    # Every write below reads `cfg.get("log_conversations", True)`, so this one
+    # override of ONE key makes all nine of them agree and leaves every other key
+    # of `cfg` exactly as it was. No conversation id is created for such a room, so
+    # Jarvis also has no earlier-message memory there (the platform-level
+    # behaviour when saving is off, unchanged).
+    if cfg.get("log_conversations", True) and not permissions.saving_on(cfg, msg):
+        cfg = dict(cfg, log_conversations=False)
 
     if decision is None:
         decision = gate(platform, msg, cfg)

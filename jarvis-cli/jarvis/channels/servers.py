@@ -35,6 +35,10 @@ SWITCHES CAN ONLY TAKE ACCESS AWAY (like channels/user_perms.py)
     ambient   off  -> `"ambient": false` (Jarvis does not read that room's messages
                       that don't mention it; channels/ambient.py). on -> inherit,
                       never written as true.
+    log       off  -> `"log_conversations": false` (nothing from that room is saved: no
+                      transcript, no conversation, no summaries; channel spaces S7). on ->
+                      inherit, never written as true. Only a literal false counts when read
+                      (permissions.resolve_scope).
 
 `allowed_guilds` / `allowed_channels` are NOT written here. They are
 "empty = unrestricted", so removing the last entry would silently open every
@@ -57,7 +61,7 @@ from . import transcript
 ENCODING = "utf-8"
 SUPPORTED = (DISCORD,)           # Instagram groups have thread ids, no servers
 KINDS = ("guild", "channel")
-SWITCHES = ("enabled", "tools", "mention", "ambient")
+SWITCHES = ("enabled", "tools", "mention", "ambient", "log")
 VALUES = ("on", "off", "inherit")
 MAX_GUILDS = 500                 # a registry bound, not a policy
 MAX_CHANNELS_PER_GUILD = 1000
@@ -69,7 +73,8 @@ _cache = {}                      # (guild_id, channel_id) -> (guild_name, channe
 _FIELD = {"enabled": ("enabled", False),
           "tools": ("allow_tools", False),
           "mention": ("require_mention", True),
-          "ambient": ("ambient", False)}
+          "ambient": ("ambient", False),
+          "log": ("log_conversations", False)}
 
 
 def registry_file():
@@ -249,6 +254,13 @@ def set_switch(platform, kind, ident, switch, value):
     ident = str(ident or "").strip()
     if not _ID.match(ident):
         return False, "that isn't a Discord id (digits only)", {}
+    return _apply_switch(platform, f"{kind}:{ident}", switch, value)
+
+
+def _apply_switch(platform, key, switch, value):
+    """The write half of set_switch, shared with spaces.set_switch (any platform's
+    room, by thread id). `key` is the scope key (`guild:<id>`, `channel:<id>`,
+    `thread:<id>`) the caller already validated. Returns (ok, error, detail)."""
     if switch not in SWITCHES:
         return False, "switch must be one of: " + ", ".join(SWITCHES), {}
     value = str(value or "").strip().lower()
@@ -264,7 +276,6 @@ def set_switch(platform, kind, ident, switch, value):
         write = True if value == "on" else None
     else:
         write = False if value == "off" else None       # on == inherit
-    key = f"{kind}:{ident}"
     cfg = channel_config.load_config()
     block = cfg[platform]
     scopes = dict(_scopes(block))
@@ -283,11 +294,11 @@ def set_switch(platform, kind, ident, switch, value):
     block["scopes"] = scopes
     if not channel_config.save_config(cfg):
         return False, "could not write config", {}
-    if switch == "ambient" and was_off != (write is False):
-        # Reading a room's other messages is a privacy switch: say when it moves.
+    if switch in ("ambient", "log") and was_off != (write is False):
+        # Reading or saving a room is a privacy switch: say when it moves.
         try:
             from . import changelog
-            changelog.record(platform, changelog.K_SCOPE, key, switch="ambient",
+            changelog.record(platform, changelog.K_SCOPE, key, switch=switch,
                              on=False if write is False else True)
         except Exception:  # noqa: BLE001 -- the log never blocks a switch
             pass
@@ -330,6 +341,7 @@ def view(platform=DISCORD):
     plat_tools = bool(cfg.get("allow_tools"))
     plat_mention = bool(cfg.get("require_mention", True))
     plat_ambient = channel_config.ambient_limits(cfg)[0]
+    plat_saving = bool(cfg.get("log_conversations", True))
 
     guild_ids = list(reg)
     for key in scopes:
@@ -348,6 +360,8 @@ def view(platform=DISCORD):
         c_mention = _override(scopes, "channel", cid, "require_mention") if cid else None
         g_ambient = _override(scopes, "guild", gid, "ambient")
         c_ambient = _override(scopes, "channel", cid, "ambient") if cid else None
+        g_log = _override(scopes, "guild", gid, "log_conversations")
+        c_log = _override(scopes, "channel", cid, "log_conversations") if cid else None
         why = []
         answering = plat_on
         if not plat_on:
@@ -367,13 +381,16 @@ def view(platform=DISCORD):
         # value leaves it on; anything else at either level turns it off.
         ambient_on = (plat_ambient > 0
                       and all(v is None or v is True for v in (g_ambient, c_ambient)))
+        # Same reading as permissions.resolve_scope: only a literal false turns saving off.
+        saving = plat_saving and g_log is not False and c_log is not False
         return {"answering": answering, "why_not": why, "tools": tools,
-                "mention": mention, "ambient": ambient_on,
+                "mention": mention, "ambient": ambient_on, "saving": saving,
                 "override": {"enabled": "off" if (c_enabled if cid else g_enabled) is False else "inherit",
                              "tools": "off" if (c_tools if cid else g_tools) is False else "inherit",
                              "mention": "on" if (c_mention if cid else g_mention) is True else "inherit",
                              "ambient": ("inherit" if (c_ambient if cid else g_ambient) in (None, True)
-                                         else "off")}}
+                                         else "off"),
+                             "log": "off" if (c_log if cid else g_log) is False else "inherit"}}
 
     servers, seen_channels = [], set()
     for gid in guild_ids:

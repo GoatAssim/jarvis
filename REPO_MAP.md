@@ -185,6 +185,15 @@ jarvis-cli/jarvis/
         base.py           the pipeline every gateway runs
         discord_gateway.py     wire adapter (the only file importing discord.py)
         instagram_gateway.py   wire adapter (webhook server)
+        space.py          channel spaces S2: the vocabulary for a place (dm / channel / thread /
+                          group / mention), `kind_of(msg)`, `is_room(msg)`, the speaker record
+                          and its short label (`Name`, `Name (owner)`), titles. Pure
+        spaces.py         channel spaces S2: `channels/spaces.json`, a REBUILDABLE label cache of
+                          the rooms Jarvis was addressed in (kind, title, names, speakers); only
+                          addressed messages register a room, nothing reads it for a decision.
+                          `set_switch(platform, thread_id, switch, value, kind)` (S7) sets one
+                          room's switches (enabled / tools / mention / ambient / log) on any
+                          platform
         transcript.py     per-thread logs + cooldown state. L.36-P1: outbound lines carry
                           `to_user`, and `read_person()` assembles one person's slice of the
                           thread files (a rotated copy counts as its thread; an older group
@@ -204,6 +213,11 @@ jarvis-cli/jarvis/
                           switches can only take access away. `view()` is the read model.
                           `_ids()` delegates to `config.normalize_entries` (a bare id where a
                           list belongs must never crash it)
+        (channel spaces S7: `permissions.saving_on` + one key override in base.handle_message
+         make a room's "don't save" switch cover every write; `spaces.set_switch` sets any
+         room's switches by thread id; S8 enriches discord_gateway.py with readable mentions,
+         author / thread names and reply-to; S9a moves Instagram group detection into
+         `instagram_gateway._group_info`, documented as experimental.)
         ambient.py        channel spaces S6a / D5: messages in an allowed room that did NOT
                           mention Jarvis, kept IN MEMORY ONLY (bounded per room, expire after
                           `ambient_minutes`, text clipped) and shown on the next mention as an
@@ -437,6 +451,7 @@ Everything is under `~/.jarvis/`:
 | `tasks/` | tasks.py | one file per long-running task |
 | `channels.json` | channels/config.py | both platforms, all allowlists |
 | `channels/directory.json` | channels/directory.py | @handle → id |
+| `channels/spaces.json` | channels/spaces.py | channel spaces S2: a label cache of the server channels / threads / group chats Jarvis was addressed in (kind, title, names, speaker ids). Rebuildable from the transcripts (`spaces.rebuild`); grants and gates nothing |
 | `channels/people.json` | channels/people.py | who each person is (name, notes, follow state, avatar URL) |
 | `channels/user_perms.json` | channels/user_perms.py | per-person tool scope + "Jarvis may DM them" + `tools_until` (L.36-P6 deadline, epoch seconds); only non-default values stored; unreadable = fail closed |
 | `channels/people/<key>/episodes_done.json` | channels/episodes.py | L.21 P4: which conversations were already summarized (thread + first timestamp, no text); deleted with the person |
@@ -529,7 +544,8 @@ from a model and are validated against a package-name pattern before they
 reach `pip`/`npm` — a leading-dash entry is a *flag*, not a package.
 
 Both `dev_agent` and `code_agent` print their progress as one
-`JARVIS_MEDIA\tdev_agent\t<json>` line per step (`dev_agent_events.py`). The
+`JARVIS_MEDIA\tdev_agent\t<json>` line per step (`dev_agent_events.py`, through
+`wire.media()` -- see the card protocol below). The
 Focus layout's Agent panel (`web/public/agent-panel.js`) is built purely from
 those events: dev_agent's `plan:start` carries `project_dir`, code_agent's
 carries `root`, and a code_agent `list_dir` result carries a capped `listing`
@@ -640,11 +656,33 @@ changed since it started), a command that needs a process of its own (`bridge.UN
 or a worker that dies before it runs anything -> the request is started as a process.
 `JARVIS_BRIDGE=0` turns the channel off; `GET /api/bridge` shows the pool. The channel
 carries typed events (`out`, `err` with the CLI's own `cat`egory, `stream`, `usage`,
-`confirm`, `ui`, `reply`, `exit`), which the server turns into the same WebSocket messages as
-before plus, additively, `cat` on `ask-stderr` and an `ask-reply` message that the browser does
-not read yet. The browser's own text classifiers (`splitConsoleDump`, `askConsoleKindOf`)
-are untouched.
+`confirm`, `ui`, `media`, `reply`, `exit`), which the server turns into the same WebSocket
+messages as before plus, additively, `cat` on `ask-stderr` and an `ask-reply` message that the
+browser does not read yet. The browser's own text classifiers (`splitConsoleDump`,
+`askConsoleKindOf`) are untouched.
 
+**Media cards (screenshot, download, present_file, notification, ui, dev_agent,
+organize_json) have one door: `wire.media(kind, *fields)`** (`wire.py`). Every producer calls
+it; none prints a `JARVIS_MEDIA` line itself. Not hosted (plain terminal, spawn fallback,
+scheduler daemon) it prints the legacy `JARVIS_MEDIA<TAB>kind<TAB>field...` stderr line,
+byte-for-byte. Hosted, the same line carries an in-band tag with a per-request nonce
+(`bridge.Host.media_tag()`, never put in the environment), and the worker emits a typed
+`media` event (`kind`, `fields`, and the legacy line as `raw`). `server.js` turns both paths
+into ONE browser message, `ask-media {kind, fields}` (`shapeMediaEvent` is the whitelist;
+`mediaFromLegacyLine` parses the line when no bridge is running), and `app.js`
+`handleAskMedia` draws the card. A line a command or tool merely echoes -- bare, or with a
+guessed tag -- is only ever stderr text. Fields must not contain a tab or newline. A custom
+tool should call `wire.media`, not print the line. `tests/test_bridge.py` and
+`tests/verify_wire_media.js` pin this.
+
+The four stdout markers follow the same rule: `wire.stream(ev)`, `wire.usage(u)`,
+`wire.confirm(payload)` and `wire.ui_request(req)` print the legacy `JARVIS_STREAM` /
+`JARVIS_USAGE` / `JARVIS_CONFIRM_REQUEST` / `JARVIS_UI_REQUEST` line when not hosted, and a
+`marker:<nonce>`-tagged line when hosted, which the worker turns into the same typed events as
+before. An UNtagged line is a plain `out` line however it starts -- the reply is model output
+printed on the same stdout, so a reply containing a line that begins `JARVIS_CONFIRM_REQUEST `
+can no longer raise a fake confirmation. Do not print these lines by hand. The no-bridge spawn
+fallback in `server.js` still recognises the bare prefixes (see step 8 of the plan, if applied).
 Two layouts, switched from the topbar and persisted server-side via
 `jarvis ui-mode`:
 
@@ -776,6 +814,9 @@ silently never runs.
 | `test_channel_servers.py` | L.36-P7 + tool calls in the Conversation view: the server registry, switches that only take access away (checked against the REAL `permissions.decide`), `servers.view`, thread -> parent-channel routing, tool-call scrubbing/clipping and attribution to the first reply chunk, the CLI; and (S3) a bare-id `allowed_guilds` / `allowed_channels` no longer crashes `view` or the gate |
 | `test_group_recall_toggles.py` | channel spaces S6 / D2: saved notes and remembered facts in shared-room replies -- the `group_recall` master (default off), per-note / per-fact on / off / inherit (off wins, on wins over a master that is off), DMs byte-identical, name / style note / standing rules never gated, linked-account notes, flag pruning and reset on edit, the notes-echoing tools follow the same gate, owner-only, change log without text, `channels-note|memory groups`, `channels-set` validation |
 | `test_channel_ambient.py` | channel spaces S6a / D5: `permissions.ambient_ok` truth table (the gate verdict itself is untouched), the in-memory buffer (caps, expiry, clipping, dedupe, room cap), nothing written anywhere, the Discord hook, the untrusted tail block on the next mention (not in a DM / other room / when switched off), the `ambient` switch, the `ambient_*` settings, the change log |
+| `test_channel_save_switch.py` | channel spaces S7 / D4: the per-room "don't save" switch (`log` on `channels-server-set`, `channels-space-set` / `spaces.set_switch` by thread id on any platform) -- nothing saved for a muted server / channel / thread / Instagram group and only there, still answered, usage counts kept, only a literal false counts when read, never writes true, never touches access, gate verdict unchanged, read model + change log, CLI, the web route |
+| `test_discord_enrichment.py` | channel spaces S8: Discord adapter enrichment with fake objects -- readable mention tokens (`@Name`, `@role`, `#channel`; unknown ids keep `@id`; names cannot forge a label), author / thread names, reply-to from the already-resolved original (never fetched), attachment count, none of it read by the gate, approvals still go to the owner's DM |
+| `test_instagram_group_info.py` | channel spaces S9a: `_group_info` accepts exactly the old group shapes and falls back to a DM for anything else, one log line for the first group payload, group window keyed on the thread, docstring makes no live-delivery claim |
 | `test_allowed_guilds.py` | L.36-P17: `allowed_guilds` editor -- add (preview-first when it turns the filter on or the id is unseen), remove (the LAST entry is refused even with confirm), checked against the REAL `permissions.decide`, one-key-only writes, change log, `channels-guilds`, and a static check of the `server.js` route |
 | `test_channel_timed_and_instruction.py` | L.36-P6 / P12: the `tools_until` deadline (garbage reads as passed, resolver is read-only), grant refusals, `expire_due` + its change-log reason, manual switches / block / forget / `channels-allow|deny` ending a countdown, the gateway sweep, the Test tab's wording, and the instruction (cap, one line, owner refused, prompt framing, not reachable by a guest) |
 | `test_channel_insights.py` | L.36-P1/P2/P3: per-person conversation attribution (DM vs group, rotated files, torn lines), the usage ledger (counts only, failed asks, windows, rotation), and `simulate` (agrees with what `handle_message` really hands the model; writes nothing, calls no model — snapshot of `~/.jarvis` before/after) |

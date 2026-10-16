@@ -30,6 +30,8 @@ import json
 import sys
 import threading
 
+from . import wire
+
 MARKER = "JARVIS_STREAM "
 
 # How long a delta may sit in the buffer before it's flushed anyway. Short
@@ -58,8 +60,7 @@ class StreamMarkerSink:
 
     def _write(self, payload):
         try:
-            self._out.write(MARKER + json.dumps(payload, ensure_ascii=False) + "\n")
-            self._out.flush()
+            wire.stream(payload, self._out)
         except Exception:  # noqa: BLE001 — a stream hook must never break the turn
             pass
 

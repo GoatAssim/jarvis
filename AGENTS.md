@@ -134,6 +134,37 @@ things that were already fixed once.
   normalizer. Names (`guild_name`, `channel_name`) are display only; no stage of
   `decide()` reads them. `tests/test_channel_servers.py` and
   `tests/test_allowed_guilds.py` pin all of this.
+- **Shared rooms (server channels, threads, group chats) are a different place from a DM, and
+  the difference is enforced in six ways (channel spaces, L.57).** (1) Speaker labels
+  (`[Name]: ` on saved turns, the group paragraph in the prompt tail) and every room field in
+  the transcript exist ONLY for rooms; a DM's exchange, history and prompt stay byte-identical
+  (`group_speaker_labels` off restores the old room behaviour too). (2) `channels/spaces.json`
+  is a label cache that records only ADDRESSED messages; nothing reads it for a decision, and
+  it is rebuildable from the transcripts. (3) The per-room `log` (saving) and `ambient`
+  (reading) switches only take access away: off -> a literal `false` in `scopes`, on -> the
+  key is removed, never written `true`, and only a literal `false` counts when read
+  (`permissions.resolve_scope`, `permissions.ambient_room_on`), so a hand-typed `"false"` neither
+  mutes nor un-mutes a room, and a scope can never turn saving back on over a platform that has
+  it off. `servers._apply_switch` is the one writer (`spaces.set_switch` reaches it for any
+  platform, by thread id). A room with saving off gets no conversation id at all: `handle_message`
+  overrides the ONE key `log_conversations` in `cfg` so all of its writes agree. (4) Recalled
+  per-person items reach the prompt in a room only under the S6 rules: the platform's
+  `group_recall` (default OFF, literal `true` only) or the item's own `on`; `off` always wins; the
+  name, the owner's style note and standing rules are never gated. The flags (`people.note_groups`,
+  person_memory `groups`) are set by the owner only (`user_admin.set_note_groups` /
+  `set_memory_groups`, the CLI and panel routes); NO model tool reads or writes them, and the
+  tools that echo notes (`who_am_i_talking_to`, `remember_sender`) apply the same gate through
+  `room_recall` in the sender env. (5) Messages that did NOT mention Jarvis may be read only by
+  `channels/ambient.py`: in process memory, bounded per room, short-lived, admitted by
+  `permissions.ambient_ok` (owner and reply list by default), framed as untrusted text in the
+  per-turn tail, never in a DM, and never written anywhere: no transcript, usage, people, spaces,
+  log or exchange. The hook (`discord_gateway._keep_room_context`) runs AFTER the gate verdict
+  and changes nothing about it: no reply, reaction or typing indicator. (6) The Discord adapter's
+  new display data (author / thread names, reply-to, readable mentions) is never read by
+  `decide()`, and reply-to comes only from the message discord.py already resolved (no fetch).
+  `tests/test_channel_spaces.py`, `test_channel_group_history.py`, `test_group_recall_toggles.py`,
+  `test_channel_ambient.py`, `test_channel_save_switch.py` and `test_discord_enrichment.py` pin
+  all of this.
 - **A time limit on tool access is a ceiling, enforced at read time, and it only
   ever means less access (L.36-P6).** The grant is the ordinary `tool_allowlist`
   entry; `user_perms.tools_until` only says when it ends.
@@ -232,12 +263,29 @@ things that were already fixed once.
   `bridge.source_fingerprint`, which is how a worker notices it is stale and
   asks to be replaced -- do not make it ignore a file just because it changes
   often; (3) the CLI half must stay inert without a host: `wire.trace()` is a
-  plain stderr print and `wire.reply()` a no-op unless `bridge.serve()` installed
-  itself, and `cli.py` imports `bridge` only to serve `_internal_bridge`. The
+  plain stderr print, `wire.media()` prints exactly the legacy `JARVIS_MEDIA` line, and
+  `wire.reply()` a no-op unless `bridge.serve()` installed itself, and `cli.py` imports `bridge` only to serve `_internal_bridge`. The
   server side must keep the process path as the fallback (no idle worker, `refuse`,
   `retire`, a death before `started` all mean "start a process"); a request
   that has sent `started` is never re-run. `tests/test_bridge.py` and
   `tests/verify_bridge_client.js` pin this. `JARVIS_BRIDGE=0` turns it off.
+- **Cards and markers for the front end go through `wire`, and nothing trusts a bare line.**
+  The stdout markers (`JARVIS_STREAM`, `JARVIS_USAGE`, `JARVIS_CONFIRM_REQUEST`,
+  `JARVIS_UI_REQUEST`) are printed with `wire.stream/usage/confirm/ui_request`, never by
+  hand: a hosted worker only believes the tagged line, because the reply is printed on the
+  same stdout and is model output. Cards: screenshot, download, present_file, notification,
+  ui, dev_agent and organize_json cards are announced with
+  `wire.media(kind, *fields)` -- never a hand-written
+  `print("JARVIS_MEDIA...", file=sys.stderr)` (a new producer, including a custom
+  tool, uses the same call). Hosted, the line is tagged with a per-request nonce that
+  only `bridge.Host` knows (`media_tag()`); keep it out of the environment, the
+  event stream and every log, because anything a shell command or subprocess can
+  learn it can use to forge a card. A line with no tag, a wrong tag or a malformed
+  body must stay an ordinary stderr line. `server.js` sends the browser one
+  `ask-media` message for both the bridge and the spawn fallback, behind the
+  `shapeMediaEvent` whitelist (don't widen it to "whatever the child printed"). Fields
+  carry no tab or newline. `tests/test_bridge.py` and `tests/verify_wire_media.js` pin
+  this.
 - **There is no debug/verbose flag anywhere in `cli.py`.** All stderr trace
   output (`on_attempt`, `on_tool_call`, `on_tool_result`, `on_route`) is
   always-on, unconditional `print(..., file=sys.stderr)`. Don't assume one

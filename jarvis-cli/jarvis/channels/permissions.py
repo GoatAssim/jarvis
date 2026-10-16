@@ -36,8 +36,14 @@ WHY "reachable" COMES BEFORE "reply"
 So that a message we were never addressed in is dropped without ever
 consulting an allowlist, and — more importantly — without being logged. A
 bot sitting in a busy server should not be quietly writing a transcript of
-every message in every channel to the owner's disk. If it wasn't for us, we
-never saw it.
+every message in every channel to the owner's disk. If it wasn't for us, it
+is never written down.
+
+The one thing that changed (channel spaces S6a): a message that did not mention
+us may still be READ, in memory only, as context for the next time we are
+mentioned (`ambient_ok` below, `channels/ambient.py`). That is a second, separate
+question. It never touches `decide()`, so the verdict for such a message is still
+`reachable` and nothing is sent, logged, counted or registered for it.
 """
 
 import time
@@ -116,12 +122,29 @@ def resolve_scope(cfg, msg):
         if merged is None:
             merged = dict(cfg)
         for field, value in override.items():
+            if field == "log_conversations" and value is not False:
+                # S7: a room's "don't save" switch can only ever turn saving OFF, and
+                # only a literal false counts. A hand-typed "false", 0 or true is
+                # ignored (the platform value stands) rather than silently disabling
+                # or re-enabling the log for one room.
+                continue
             if field in PERM_SETS or field in config.LOCATION_SETS:
                 value = config.normalize_entries(value)
             elif field == "owner":
                 value = config.normalize_entry(value)
             merged[field] = value
     return merged if merged is not None else cfg
+
+
+def saving_on(cfg, msg):
+    """May this message's room be saved (transcript, conversation, summaries)?
+    The platform's `log_conversations` (default on) unless the room, its channel or
+    its server carries a literal `log_conversations: false` in `scopes` (channel
+    spaces S7). Pure; never raises; an unreadable config answers the platform value."""
+    try:
+        return bool(resolve_scope(cfg or {}, msg).get("log_conversations", True))
+    except Exception:  # noqa: BLE001
+        return bool((cfg or {}).get("log_conversations", True))
 
 
 class IncomingMessage:

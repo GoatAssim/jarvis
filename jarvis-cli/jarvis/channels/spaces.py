@@ -14,17 +14,24 @@ PRIVACY RULES (the reason this file is small and boring)
   after the gate, for a message that was actually addressed to Jarvis and only
   while conversations are being saved. It is NEVER called from a gateway's
   pre-gate hook (unlike `servers.note_channel`, which only learns channel
-  names): a message that did not mention Jarvis was never seen, and that
-  includes registering its room or its author.
+  names): a message that did not mention Jarvis never registers its room or its
+  author. (Since channel spaces S6a such a message may still be KEPT as read-only
+  context by channels/ambient.py, in memory only; that module never calls this one.)
 * DMs are not registered. A DM is one person; its label lives in people.json.
 * IT GRANTS NOTHING. Nothing reads this file to decide who may talk to Jarvis.
 * IT IS A CACHE. `rebuild()` reproduces it from the transcripts; losing or
   corrupting the file costs labels, never behaviour (same contract as
   servers.json). A corrupt file reads as empty.
+
+Switches for a room live in channels.json `scopes`, not here: `set_switch` below
+writes them by thread id for ANY platform (servers.set_switch is Discord-only and
+works by server / channel id), through the same validation and the same rule that a
+switch can only take access away.
 """
 
 import json
 import os
+import re
 import threading
 import time
 from datetime import datetime
@@ -255,3 +262,37 @@ def rebuild(platform):
         return dict(fresh)
     except Exception:  # noqa: BLE001
         return {}
+
+
+# ---------------------------------------------------------------------------
+# switches (channel spaces S7)
+# ---------------------------------------------------------------------------
+
+_THREAD_ID = re.compile(r"^[A-Za-z0-9_.:=\-]{1,120}$")
+SPACE_KINDS = ("channel", "thread")
+
+
+def set_switch(platform, thread_id, switch, value, kind="channel"):
+    """Flip one switch on one room, by thread id, on any platform. Returns
+    (ok, error, detail). Switches: enabled, tools, mention, ambient, log (see
+    servers.py for what each writes; none can widen access, and `on` removes the
+    override instead of writing true).
+
+    The scope key is `channel:<id>` for an Instagram group (its channel id IS its
+    thread id) and for a Discord channel, `thread:<id>` for a Discord thread
+    (kind="thread"). Validated before the config is read, so a bad request cannot
+    half-write. `detail["known"]` says whether this room is in the registry: an
+    unknown id is accepted (the owner may switch a room before its first message) but
+    flagged, because a typo here silently does nothing."""
+    from . import servers
+    if platform not in PLATFORMS:
+        return False, f"unknown platform '{platform}'", {}
+    if kind not in SPACE_KINDS:
+        return False, "kind must be channel or thread", {}
+    thread_id = str(thread_id or "").strip()
+    if not _THREAD_ID.match(thread_id):
+        return False, "that isn't a room id (letters, digits and . _ : = - only)", {}
+    ok, error, detail = servers._apply_switch(platform, f"{kind}:{thread_id}", switch, value)
+    if ok:
+        detail = dict(detail, known=get(platform, thread_id) is not None)
+    return ok, error, detail

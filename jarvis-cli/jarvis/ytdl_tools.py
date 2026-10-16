@@ -45,6 +45,8 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
+from . import wire
+
 JARVIS_DIR = Path.home() / ".jarvis"
 DOWNLOAD_DIR = JARVIS_DIR / "downloads"
 ARCHIVE_FILE = DOWNLOAD_DIR / ".archive.txt"
@@ -122,10 +124,10 @@ def _resolve_output_dir(raw):
 
 
 def _emit_media(kind, job_id, filename, title=None):
-    """Machine line for the web UI — see app.js's addAskPromptTrace, which
-    watches for JARVIS_MEDIA the same way it already does for screenshots."""
+    """Machine line for the web UI — announced through wire.media(), which
+    app.js's handleAskMedia turns into the download card."""
     label = (title or filename or "").replace("\t", " ").replace("\n", " ")
-    print(f"JARVIS_MEDIA\t{kind}\t{job_id}\t{filename}\t{label}", file=sys.stderr, flush=True)
+    wire.media(kind, job_id, filename, label)
 
 
 def _fmt_duration(seconds):

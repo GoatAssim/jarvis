@@ -19,7 +19,7 @@ from .channels import PLATFORMS, PERM_SETS
 from .channels import config as channel_config
 from .channels import directory, outbound, people, permissions, transcript
 from .channels import allowed_channels, allowed_guilds, denied, master_tools, panel_dm
-from .channels import preset_admin, presets, servers, user_admin
+from .channels import preset_admin, presets, servers, spaces, user_admin
 
 COMMANDS = (
     "channels-config", "channels-status", "channels-set", "channels-allow",
@@ -33,7 +33,8 @@ COMMANDS = (
     "channels-history", "channels-handle",
     "channels-tools-for", "channels-instruction",
     "channels-presets", "channels-preset", "channels-bulk",
-    "channels-servers", "channels-server-set", "channels-guilds", "channels-channels",
+    "channels-servers", "channels-server-set", "channels-space-set", "channels-guilds",
+    "channels-channels",
     "channels-master-tools", "channels-send", "channels-denied",
     "channels-thinking", "channels-memory", "channels-awaiting",
     "discord-daemon", "instagram-serve", "logs-search",
@@ -148,7 +149,13 @@ USAGE = """channel commands:
   channels-servers [platform]           Discord servers + channels Jarvis knows, with their switches (JSON)
   channels-server-set <platform> guild|channel <id> <switch> <on|off|inherit>
                                         switch: enabled, tools, mention, ambient (reading that
-                                        room's messages that don't mention Jarvis)
+                                        room's messages that don't mention Jarvis), log (saving that
+                                        room's conversations; off = nothing from it is saved, and
+                                        Jarvis has no earlier-message memory there)
+  channels-space-set <platform> <thread_id> <switch> <on|off|inherit> [--thread]
+                                        the same switches for ONE room by its thread id, on any
+                                        platform (an Instagram group, a Discord channel; --thread
+                                        for a Discord thread). Switches only take access away
   channels-guilds <platform> [add|remove <id>] [--yes]
                                         the allowed_guilds filter ("only these servers"). No action = show it.
                                         add to an EMPTY list, or an id Jarvis hasn't seen, only PREVIEWS unless
@@ -1006,11 +1013,24 @@ def handle(argv):
     if cmd == "channels-server-set":
         if len(rest) < 5:
             _fail("usage: channels-server-set <platform> guild|channel <id> "
-                  "<enabled|tools|mention|ambient> <on|off|inherit>")
+                  "<enabled|tools|mention|ambient|log> <on|off|inherit>")
         platform, kind, ident, switch, value = rest[:5]
         ok, err, detail = servers.set_switch(platform, kind, ident, switch, value)
         print(json.dumps({"ok": ok, "error": err, "platform": platform,
                           "kind": kind, "id": ident, **detail}, indent=2))
+        sys.exit(0 if ok else 1)
+
+    if cmd == "channels-space-set":
+        thread_flag = "--thread" in rest
+        args5 = [r for r in rest if r != "--thread"]
+        if len(args5) < 4:
+            _fail("usage: channels-space-set <platform> <thread_id> "
+                  "<enabled|tools|mention|ambient|log> <on|off|inherit> [--thread]")
+        platform, thread_id, switch, value = args5[:4]
+        ok, err, detail = spaces.set_switch(platform, thread_id, switch, value,
+                                            kind="thread" if thread_flag else "channel")
+        print(json.dumps({"ok": ok, "error": err, "platform": platform,
+                          "thread_id": thread_id, **detail}, indent=2))
         sys.exit(0 if ok else 1)
 
     if cmd == "channels-log":

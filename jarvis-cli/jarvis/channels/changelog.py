@@ -285,7 +285,8 @@ def describe(entry):
                      else "the owner and people on the reply list"))
         return f"{key} switched {'on' if on else 'off'}"
     if kind == K_SCOPE:
-        what = {"ambient": "Reading this room's other messages"}.get(
+        what = {"ambient": "Reading this room's other messages",
+                "log": "Saving this room's conversations"}.get(
             entry.get("switch"), str(entry.get("switch") or "A switch"))
         return f"{what} switched {'off' if on is False else 'back to the default'} for {entry.get('ident') or 'a room'}"
     if kind == K_RECALL:

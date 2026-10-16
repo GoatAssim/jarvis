@@ -83,19 +83,123 @@ def import_discord():
         )
 
 
-def strip_mentions(text, bot_id=None):
+def _tidy_name(value, limit=40):
+    """A display name made safe to put inside a sentence: one line, no control
+    characters, no angle brackets, clipped. Empty when there is nothing usable."""
+    text = re.sub(r"[\x00-\x1f\x7f<>]", " ", str(value or ""))
+    return " ".join(text.split())[:limit].strip()
+
+
+def _name_map(objects, *fields):
+    """{str(id): tidy name} from the objects discord.py already put on the message
+    (`mentions`, `role_mentions`, `channel_mentions`). `fields` are tried in order, so
+    a user is `display_name`, then `global_name`, then `name`. Never raises."""
+    out = {}
+    try:
+        for obj in list(objects or [])[:50]:
+            ident = str(getattr(obj, "id", "") or "")
+            if not ident:
+                continue
+            for field in fields:
+                name = _tidy_name(getattr(obj, field, ""))
+                if name:
+                    out[ident] = name
+                    break
+    except Exception:  # noqa: BLE001
+        pass
+    return out
+
+
+_TOKEN_RE = re.compile(r"<(@[!&]?|#)(\d+)>")
+
+
+def strip_mentions(text, bot_id=None, mentions=None, role_mentions=None,
+                   channel_mentions=None):
     """Remove mention tokens, and the bot's own leading mention especially.
 
     Only the *leading* address is removed wholesale; mentions of other
     people mid-sentence become @id so the model can still tell someone was
     referred to, without carrying Discord's angle-bracket syntax.
+
+    Channel spaces S8: in a room the model reads a speaker-labelled transcript, and
+    "@123456789012345678" tells it nothing about who was meant. When the caller passes
+    the objects discord.py already put on the message (`message.mentions`,
+    `.role_mentions`, `.channel_mentions`; no network, no lookup), `<@id>` becomes
+    `@Name`, `<@&id>` becomes `@role-name` and `<#id>` becomes `#channel-name`. An id
+    that is not among them keeps today's `@<id>` (a channel token is left alone).
+    With all three None this is exactly the old function.
     """
     text = (text or "").strip()
     if bot_id:
         leading = re.compile(r"^\s*<@[!&]?%s>\s*" % re.escape(str(bot_id)))
         text = leading.sub("", text)
-    text = _MENTION_RE.sub(lambda m: "@" + m.group(1), text)
-    return text.strip()
+    if mentions is None and role_mentions is None and channel_mentions is None:
+        text = _MENTION_RE.sub(lambda m: "@" + m.group(1), text)
+        return text.strip()
+    users = _name_map(mentions, "display_name", "global_name", "name")
+    roles = _name_map(role_mentions, "name")
+    channels = _name_map(channel_mentions, "name")
+
+    def replace(match):
+        kind, ident = match.group(1), match.group(2)
+        if kind == "#":
+            name = channels.get(ident)
+            return "#" + name if name else match.group(0)
+        if kind == "@&":
+            name = roles.get(ident)
+            return "@" + (name or ident)
+        name = users.get(ident)
+        return "@" + (name or ident)
+    return _TOKEN_RE.sub(replace, text).strip()
+
+
+def _author_name(author):
+    """What the sender is called in the server: display name, then global name, then
+    account name. Display data for the room transcript only; the gate matches on the
+    id. Never raises."""
+    for field in ("display_name", "global_name", "name"):
+        name = _tidy_name(getattr(author, field, ""), 60)
+        if name:
+            return name
+    return ""
+
+
+def _thread_name(discord, message):
+    """The thread's own name when the message is in a thread, else \"\". Never raises."""
+    try:
+        thread_cls = getattr(discord, "Thread", None)
+        channel = message.channel
+        if thread_cls is not None and isinstance(channel, thread_cls):
+            return _tidy_name(getattr(channel, "name", ""), 100)
+    except Exception:  # noqa: BLE001
+        pass
+    return ""
+
+
+def _reply_info(message):
+    """What this message is a reply to, from the copy discord.py already resolved on
+    `message.reference`: `{message_id, user_id, user_name, snippet}`, or None.
+
+    NO network fetch: when the original is not cached, was deleted, or is only a
+    reference, there is no reply info (a deleted original has no author). The snippet
+    is the original's text, one line, clipped, with its mentions made readable. Never
+    raises."""
+    try:
+        reference = getattr(message, "reference", None)
+        resolved = getattr(reference, "resolved", None) if reference is not None else None
+        author = getattr(resolved, "author", None)
+        if resolved is None or author is None or not getattr(resolved, "id", None):
+            return None
+        snippet = strip_mentions(getattr(resolved, "content", "") or "",
+                                 mentions=getattr(resolved, "mentions", None) or [],
+                                 role_mentions=getattr(resolved, "role_mentions", None) or [],
+                                 channel_mentions=getattr(resolved, "channel_mentions", None) or [])
+        snippet = " ".join(snippet.split())[:120]
+        info = {"message_id": str(resolved.id), "user_id": str(getattr(author, "id", "") or ""),
+                "user_name": _author_name(author), "snippet": snippet}
+        return info if any(info.values()) else None
+    except Exception:  # noqa: BLE001
+        return None
 
 
 def _attachment_descriptors(message):
@@ -371,7 +475,10 @@ def build_client(discord, cfg):
             context=permissions.CTX_DM if is_dm else permissions.CTX_GROUP,
             user_id=str(message.author.id),
             user_handle=getattr(message.author, "name", "") or "",
-            text=strip_mentions(message.content, client.user.id if client.user else None),
+            text=strip_mentions(message.content, client.user.id if client.user else None,
+                                mentions=getattr(message, "mentions", None),
+                                role_mentions=getattr(message, "role_mentions", None),
+                                channel_mentions=getattr(message, "channel_mentions", None)),
             mentioned=mentioned or is_dm,
             guild_id=str(message.guild.id) if message.guild else "",
             channel_id=channel_id,
@@ -382,6 +489,9 @@ def build_client(discord, cfg):
             guild_name=guild_name,
             channel_name=channel_name,
             attachments=_attachment_descriptors(message),
+            author_name=_author_name(message.author),
+            thread_name=_thread_name(discord, message),
+            reply_to=_reply_info(message),
         )
         # Teach the registry this channel's name (a cached no-op after the
         # first message). Labels only; runs before the gate on purpose so the

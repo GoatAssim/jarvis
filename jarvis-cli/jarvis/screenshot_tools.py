@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from . import media_out as _media_out
+from . import wire
 
 CREATE_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 
@@ -32,7 +33,7 @@ def _prune():
 
 def _emit_media(filename):
     """Machine line for the web UI — not for the model."""
-    print(f"JARVIS_MEDIA\tscreenshot\t{filename}", file=sys.stderr, flush=True)
+    wire.media("screenshot", filename)
 
 
 def _capture_windows(path):

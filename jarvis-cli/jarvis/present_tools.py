@@ -54,6 +54,8 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
+from . import wire
+
 JARVIS_DIR = Path.home() / ".jarvis"
 # Same directory (and job-id prefix) ytdl_tools.py's download jobs use —
 # web/server.js's /api/downloads/:jobId/:filename route doesn't care which
@@ -104,14 +106,13 @@ def _dir_size(path):
 
 
 def _emit_media(job_id, filename, name, ftype, size_bytes, path_str):
-    """Machine line for the web UI — see screenshot_tools.py's docstring
-    for the general pattern app.js's addAskPromptTrace watches for."""
+    """Machine line for the web UI — announced through wire.media(), the one
+    seam every card goes through (see wire.py)."""
     clean = lambda s: str(s or "").replace("\t", " ").replace("\n", " ")
     size_field = str(size_bytes) if isinstance(size_bytes, int) else "-"
-    print(
-        "JARVIS_MEDIA\tpresent_file\t"
-        f"{job_id or '-'}\t{filename or '-'}\t{clean(name)}\t{ftype}\t{size_field}\t{clean(path_str)}",
-        file=sys.stderr, flush=True,
+    wire.media(
+        "present_file",
+        job_id or "-", filename or "-", clean(name), ftype, size_field, clean(path_str),
     )
 
 

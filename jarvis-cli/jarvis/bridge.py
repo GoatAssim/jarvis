@@ -52,6 +52,9 @@ protocol is ever written to the real channel.
     {"id":"r1","t":"usage","usage":{...},"raw":"..."}     (was JARVIS_USAGE)
     {"id":"r1","t":"confirm","tool":..,"arguments":..,"risk_note":..,"raw":"..."}
     {"id":"r1","t":"ui","request":{...},"raw":"..."}      (was JARVIS_UI_REQUEST)
+    {"id":"r1","t":"media","kind":"screenshot","fields":["a.png"],"raw":"..."}
+                                               a card for the front end (was a
+                                               bare JARVIS_MEDIA stderr line)
     {"id":"r1","t":"reply","name":"Jarvis","text":"...","ok":true}   the bubble
     {"id":"r1","t":"exit","code":0,"ms":123}   always last for a started request
     {"id":"r1","t":"refuse","why":"..."}       not run: use a normal process
@@ -64,9 +67,26 @@ twice. Once `started` has been sent the request is the worker's.
 
 The marker lines the CLI has always printed for a web front-end
 (JARVIS_STREAM / JARVIS_USAGE / JARVIS_CONFIRM_REQUEST / JARVIS_UI_REQUEST) are
-turned into the typed events above, in order, by the stdout reader below -- the
-code that prints them is untouched. A malformed marker stays an ordinary `out`
-line, exactly as the server treated it before.
+turned into the typed events above, in order, by the stdout reader below. The
+CLI prints them through wire.stream / usage / confirm / ui_request (unhosted:
+the same legacy line as ever). A malformed marker stays an ordinary `out` line,
+exactly as the server treated it before.
+
+Stdout markers are only believed when the CLI wrote them through
+`wire.stream/usage/confirm/ui_request`: hosted, those lines carry an in-band tag
+with the per-request nonce (`Host.marker_tag()`), and `Host.on_line` turns a tagged
+line into the event above and an UNtagged one into a plain `out` line. The reply is
+model output printed on the same stdout, so this is what stops a reply (or a
+command's output) from raising a fake confirmation or injecting stream text.
+
+Media cards are the stderr-side version of the same idea. Code calls
+`wire.media(kind, *fields)`; while this host is running a request that prints the
+legacy `JARVIS_MEDIA<TAB>kind<TAB>...` line behind an in-band tag that carries a
+per-request nonce (`Host.media_tag()`, see wire.py), and `Host.on_line` turns it
+into the `media` event above, in stderr order. A line with no tag, a wrong nonce
+or a malformed body is an ordinary `err` line, so nothing a command or a tool
+echoes can draw a card; `raw` is the legacy line for callers that treat the
+event as text (a panel refresh, a direct run).
 
 HONEST LIMITS
 -------------
@@ -91,6 +111,7 @@ import io
 import json
 import os
 import queue
+import secrets
 import signal
 import sys
 import threading
@@ -348,6 +369,7 @@ class Host:
         self.chan = channel
         self._diag_fd = diag_fd
         self.current = None            # {"id", "kind"} while a request runs
+        self._media_nonce = None       # per request; never leaves this process (see media_tag)
         self.boot_err = []             # stderr lines printed while warming up
         self.jobs = queue.Queue()
         self.eor_token = b""
@@ -380,13 +402,63 @@ class Host:
                 if end > 0:
                     tag = text[1:end]
                     text = text[end + 1:]
+                    if tag == self.media_tag():
+                        media = self._media_event(rid, text)
+                        if media is not None:
+                            self.chan.send(media)
+                            return
                     cat = tag if tag in wire.CATEGORIES else None
             ev = {"id": rid, "t": "err", "line": text}
             if cat:
                 ev["cat"] = cat
             self.chan.send(ev)
         else:
-            self.chan.send(self._translate_out(rid, text))
+            # Only a line the CLI itself wrote with wire.stream/usage/confirm/ui_request is
+            # a marker. Everything else -- including a model reply or a command's output
+            # that happens to start with a marker prefix -- is an ordinary `out` line.
+            trusted = False
+            if text.startswith(wire.CAT_OPEN):
+                end = text.find(wire.CAT_CLOSE, 1)
+                if end > 0:
+                    trusted = text[1:end] == self.marker_tag()
+                    text = text[end + 1:]
+            if trusted:
+                self.chan.send(self._translate_out(rid, text))
+            else:
+                self.chan.send({"id": rid, "t": "out", "line": text})
+
+    def marker_tag(self):
+        """The in-band tag a `wire.stream/usage/confirm/ui_request` line is written with.
+
+        `marker:<nonce>`, the same per-request nonce as `media_tag()` and kept just as
+        private (see there); None between requests.
+        """
+        nonce = self._media_nonce
+        return None if nonce is None else wire.MARKER_TAG + ":" + nonce
+
+    def media_tag(self):
+        """The in-band tag a `wire.media()` line is written with, or None.
+
+        `media:<nonce>`, where the nonce is made up when a request starts and
+        lives only in this object: it is not in the environment, so a command or
+        subprocess a tool starts cannot learn it and cannot write a line this
+        host will take for a card. None between requests (nothing is listening
+        for a card then, and a line written with no tag is plain stderr).
+        """
+        nonce = self._media_nonce
+        return None if nonce is None else wire.MEDIA_TAG + ":" + nonce
+
+    @staticmethod
+    def _media_event(rid, text):
+        """`JARVIS_MEDIA<TAB>kind<TAB>field...` as a `media` event, else None.
+
+        None means malformed (wrong prefix, no kind): the caller then reports the
+        line as an ordinary stderr line, the same policy as the stdout markers.
+        """
+        parts = text.split("\t")
+        if len(parts) < 2 or parts[0] != wire.MEDIA_PREFIX or not parts[1]:
+            return None
+        return {"id": rid, "t": "media", "kind": parts[1], "fields": parts[2:], "raw": text}
 
     @staticmethod
     def _translate_out(rid, line):
@@ -495,6 +567,7 @@ class Host:
             overlay[str(key)] = None if value is None else str(value)
 
         self.current = {"id": rid, "kind": kind}
+        self._media_nonce = secrets.token_hex(8)
         began = time.monotonic()
         self.chan.send({"id": rid, "t": "started", "pid": os.getpid()})
         if kind == "ask":
@@ -551,6 +624,7 @@ class Host:
             self.chan.send({"id": rid, "t": "exit", "code": code,
                             "ms": int((time.monotonic() - began) * 1000)})
             self.current = None
+            self._media_nonce = None
         return None
 
     def answer(self, msg):
@@ -680,4 +754,5 @@ def serve():
             if host.current is not None:
                 chan.send({"id": host.current["id"], "t": "exit", "code": 1, "ms": 0})
                 host.current = None
+                host._media_nonce = None
     host.hard_exit(0)

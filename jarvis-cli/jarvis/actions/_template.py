@@ -114,7 +114,8 @@ handful of modules that import back from tools.py.
 #     each time, don't cache the result, since it changes as the turn
 #     progresses.
 #   - context.emit_event(job_id, seq, phase, status, **fields) — writes
-#     one JARVIS_MEDIA progress line (see dev_agent_events.py) for a
+#     one progress card (a JARVIS_MEDIA line, announced through
+#     wire.media -- see dev_agent_events.py) for a
 #     handler that runs long enough to want live sub-step visibility
 #     instead of a single return value at the end. Most tools don't need
 #     this.

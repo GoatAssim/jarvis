@@ -510,7 +510,7 @@ def confirm_tool_call(name, arguments, risk_note=None):
             answer = ""
         return answer.strip().lower().startswith("y")
 
-    print("JARVIS_CONFIRM_REQUEST " + json.dumps(payload, default=str), flush=True)
+    wire.confirm(payload)
     try:
         line = sys.stdin.readline()
     except Exception:
@@ -785,8 +785,7 @@ def _emit_usage(result):
     ask_line = token_usage.format_ask_total(usage.get("ask_total"))
     if ask_line:
         wire.trace(f"{ERR.DIM}  {ask_line}{ERR.RESET}", "tokens")
-    print("JARVIS_USAGE " + json.dumps(usage, default=str, ensure_ascii=False),
-          flush=True)
+    wire.usage(usage)
 
 
 def handle_ai_prompt(text, commands, provider_override=None, think_override=None):

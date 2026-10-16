@@ -69,6 +69,7 @@ process.stdin.on("data", (d) => {
       send({ id, t: "started", pid: process.pid });
       if (a[0] === "die-mid") process.exit(7);
       if (a[0] === "hang") continue;
+      if (a[0] === "media") { send({ id, t: "media", kind: "screenshot", fields: ["a.png"], raw: "JARVIS_MEDIA\\tscreenshot\\ta.png" }); send({ id, t: "exit", code: 0, ms: 1 }); continue; }
       if (a[0] === "confirm") { send({ id, t: "confirm", tool: "x", arguments: {}, raw: "JARVIS_CONFIRM_REQUEST {}" }); waiting = { id }; continue; }
       send({ id, t: "err", line: "trace", cat: "tool-call" });
       send({ id, t: "out", line: "argv=" + a.join(" ") + " env=" + (m.env.K || "") });
@@ -119,6 +120,11 @@ async function main() {
     const r2 = ask(bridge, ["again"]);
     await until(() => r2.finish);
     check("the same worker served the next request", r2.handle.pid === pid1);
+    const rm = ask(bridge, ["media"]);
+    await until(() => rm.finish);
+    check("an event type the pool does not know (`media`) reaches onEvent untouched",
+      rm.events.length === 1 && rm.events[0].t === "media" && rm.events[0].kind === "screenshot"
+      && rm.events[0].fields[0] === "a.png" && rm.events[0].raw === "JARVIS_MEDIA\tscreenshot\ta.png", rm.events);
     const r3 = ask(bridge, ["fail"]);
     await until(() => r3.finish);
     check("a non-zero exit is reported as such, not as a fallback", r3.finish.code === 2 && !r3.finish.fallback);

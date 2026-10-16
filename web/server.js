@@ -631,6 +631,7 @@ function bridgeOnce(args, timeoutMs, env, stdinText) {
     onEvent: (ev) => {
       if (ev.t === "out") out.push(ev.line);
       else if (ev.t === "err") err.push(ev.line);
+      else if (ev.t === "media" && typeof ev.raw === "string") err.push(ev.raw);   // a card line is stderr, as a process printed it
       else if (typeof ev.raw === "string") out.push(ev.raw);   // a marker line, as a process would have printed it
     },
     onFinish: (info) => {
@@ -1553,7 +1554,7 @@ app.get("/api/channels/denied", requireJarvis, async (req, res) => {
 // snowflake, and "-x" must never reach the CLI's flag parser.
 const CHANNEL_SNOWFLAKE = /^[0-9]{1,25}$/;
 const SERVER_KINDS = new Set(["guild", "channel"]);
-const SERVER_SWITCHES = new Set(["enabled", "tools", "mention", "ambient"]);
+const SERVER_SWITCHES = new Set(["enabled", "tools", "mention", "ambient", "log"]);
 const SERVER_VALUES = new Set(["on", "off", "inherit"]);
 
 app.get("/api/channels/servers", requireJarvis, async (req, res) => {
@@ -1572,6 +1573,23 @@ app.post("/api/channels/servers/:platform/:kind/:id", requireJarvis, async (req,
   if (typeof value !== "string" || !SERVER_VALUES.has(value)) return res.status(400).json({ error: "value must be on, off or inherit." });
   sendChannelResult(await runJarvisOnce(
     ["channels-server-set", platform, kind, id, sw, value], 10000), res);
+});
+
+// One room by its thread id on any platform (an Instagram group, a Discord channel
+// or thread): the same switches, only ever taking access away (channel spaces S7).
+// The id is a conservative character class so "-x" can never reach the CLI's flag parser.
+const CHANNEL_SPACE_ID = /^[A-Za-z0-9_.:=][A-Za-z0-9_.:=\-]{0,119}$/;
+app.post("/api/channels/spaces/:platform/:threadId", requireJarvis, async (req, res) => {
+  const { platform, threadId } = req.params;
+  if (!CHANNEL_PLATFORMS.has(platform)) return res.status(400).json({ error: "Unknown platform." });
+  if (!CHANNEL_SPACE_ID.test(threadId)) return res.status(400).json({ error: "Invalid room id." });
+  const sw = req.body?.switch, value = req.body?.value;
+  if (typeof sw !== "string" || !SERVER_SWITCHES.has(sw)) return res.status(400).json({ error: "Unknown switch." });
+  if (typeof value !== "string" || !SERVER_VALUES.has(value)) return res.status(400).json({ error: "value must be on, off or inherit." });
+  if (req.body?.thread !== undefined && typeof req.body.thread !== "boolean") return res.status(400).json({ error: "thread must be true or false." });
+  const args = ["channels-space-set", platform, threadId, sw, value];
+  if (req.body?.thread === true) args.push("--thread");
+  sendChannelResult(await runJarvisOnce(args, 10000), res);
 });
 
 // allowed_guilds ("only these servers"): add / remove one entry (L.36-P17).
@@ -3983,8 +4001,54 @@ function relayBridgeEvent(ws, kind, types, ev, onStdoutLine, onLine) {
     case "reply":
       if (kind === "ask") send(ws, { type: "ask-reply", name: ev.name, text: ev.text, ok: !!ev.ok });
       return;
+    case "media": {
+      // A card for the front end (jarvis/wire.py media()). `raw` is the legacy stderr line.
+      const raw = String(ev.raw ?? "");
+      if (onLine) onLine("err", raw);                                           // run logs keep the line
+      if (kind !== "ask") return send(ws, { type: types.stderr, line: raw });   // direct runs: unchanged
+      const media = shapeMediaEvent(ev);
+      // Outside the whitelist (odd kind, too many or too big fields): show it as the plain
+      // line it would have been, never as a card.
+      if (!media) return send(ws, { type: types.stderr, line: raw });
+      return send(ws, { type: "ask-media", ...media });
+    }
     default:
   }
+}
+
+// Media cards (screenshot, download, present_file, notification, ui, dev_agent, ...) reach
+// the browser as ONE message, `ask-media` {kind, fields}, whichever path they came by:
+// the bridge's typed `media` event, or -- for a request run as a plain process -- the legacy
+// `JARVIS_MEDIA<TAB>kind<TAB>field...` stderr line parsed below. Like shapeStreamEvent this is
+// a whitelist: the browser is only ever handed a short lowercase kind and a few strings.
+// The size cap is generous on purpose (a code_agent step carries a tool's arguments); an
+// event over it is shown as a plain line, so nothing valid is truncated into broken JSON.
+const MEDIA_LINE_PREFIX = "JARVIS_MEDIA\t";
+const MEDIA_KIND_RE = /^[a-z_]{1,40}$/;
+const MEDIA_MAX_FIELDS = 8;
+const MEDIA_MAX_FIELD_CHARS = 1024 * 1024;
+
+function shapeMediaEvent(ev) {
+  if (!ev || typeof ev !== "object") return null;
+  if (typeof ev.kind !== "string" || !MEDIA_KIND_RE.test(ev.kind)) return null;
+  if (!Array.isArray(ev.fields) || ev.fields.length > MEDIA_MAX_FIELDS) return null;
+  for (const f of ev.fields) {
+    if (typeof f !== "string" || f.length > MEDIA_MAX_FIELD_CHARS) return null;
+  }
+  return { kind: ev.kind, fields: ev.fields.slice() };
+}
+
+// The no-bridge path: the same card out of a raw stderr line. Same tolerance the browser
+// used to have (strip terminal escapes, trim, then the literal prefix), so a request run as
+// a plain process behaves as before. null = not a (valid) card line.
+function mediaFromLegacyLine(line) {
+  const text = String(line ?? "")
+    .replace(/\u001b\[[0-9;]*[A-Za-z]/g, "")
+    .replace(/\u001b\][^\u0007]*\u0007/g, "")
+    .trim();
+  if (!text.startsWith(MEDIA_LINE_PREFIX)) return null;
+  const parts = text.split("\t");
+  return shapeMediaEvent({ kind: parts[1], fields: parts.slice(2) });
 }
 
 // The browser only ever sees these five kinds, whichever path the event came by.
@@ -4029,6 +4093,12 @@ function spawnProcessAndStream(ws, kind, fullArgs, types, extraEnv = {}, onStdou
   });
   const onErr = makeLineBuffer((line) => {
     if (onLine) onLine("err", line);
+    if (kind === "ask") {
+      // No bridge, so no typed event: read the legacy card line ourselves and send the same
+      // `ask-media` message the bridge path does. (Anything else stays a plain stderr line.)
+      const media = mediaFromLegacyLine(line);
+      if (media) return send(ws, { type: "ask-media", ...media });
+    }
     send(ws, { type: types.stderr, line });
   });
   child.stdout.on("data", onOut);

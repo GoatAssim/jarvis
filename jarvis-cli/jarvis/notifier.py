@@ -47,6 +47,7 @@ from pathlib import Path
 
 from . import ask_output
 from . import tunables
+from . import wire
 
 JARVIS_DIR = Path.home() / ".jarvis"
 INBOX_FILE = JARVIS_DIR / "notifications.json"
@@ -791,13 +792,14 @@ def _deliver_inbox(record, config):
 
 
 def _deliver_stream(record, config):
-    """Emit a JARVIS_MEDIA line so a web console watching this process's
-    stderr renders the notification immediately.
+    """Announce the notification as a `notification` media card
+    (wire.media) so a web console watching this process renders it
+    immediately.
 
     Same envelope every other producer uses (see present_tools.py /
-    dev_agent_events.py): three tab-separated fields, with the whole payload
-    as JSON in the third — app.js's existing line.split("\\t") dispatch
-    picks it up with one new branch and no change to the convention.
+    dev_agent_events.py): the whole payload as one JSON field. This may run
+    in a daemon or a plain terminal with no host, where wire.media prints
+    the legacy `JARVIS_MEDIA` line exactly as this function always did.
     """
     # seen_by/delivered/failed_channels are deliberately excluded: this runs
     # *during* the delivery loop, so those three are a half-filled snapshot
@@ -805,13 +807,13 @@ def _deliver_stream(record, config):
     # on a notification that also toasted). The UI doesn't need them.
     skip = ("seen_by", "delivered", "failed_channels")
     try:
-        line = "JARVIS_MEDIA\tnotification\t" + json.dumps(
+        payload = json.dumps(
             {k: v for k, v in record.items() if k not in skip},
             default=str, ensure_ascii=False)
     except (TypeError, ValueError):
         return False
     try:
-        print(line, file=sys.stderr, flush=True)
+        wire.media("notification", payload)
     except Exception:  # noqa: BLE001
         return False
     return True

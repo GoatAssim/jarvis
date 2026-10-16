@@ -18,6 +18,8 @@ import json
 import sys
 from pathlib import Path
 
+from . import wire
+
 
 def resolve_path(raw):
     """Relative paths resolve against the home dir, same convention as
@@ -147,7 +149,7 @@ def render_tree(data):
 # ---------------------------------------------------------------------------
 # AI-callable tool. Mirrors screenshot_tools.py's pattern: the heavy/visual
 # part (here, the actual JSON) is shown to the user directly in the web UI
-# via a `JARVIS_MEDIA` stderr line, never round-tripped through the model —
+# via a `wire.media` card (a `JARVIS_MEDIA` stderr line), never round-tripped through the model —
 # the AI only ever sees a tiny ok/type/count summary, so a person can say
 # "organize my config.json" in plain English and the AI can act on it
 # without spending a single extra token on the file's contents, no matter
@@ -156,7 +158,7 @@ def render_tree(data):
 
 def _emit_media(kind, payload):
     """Machine line for the web UI — not for the model."""
-    print(f"JARVIS_MEDIA\t{kind}\t{payload}", file=sys.stderr, flush=True)
+    wire.media(kind, payload)
 
 
 def tool_organize_json(arguments=None):

@@ -26,8 +26,8 @@ Python — can call:
 TWO DIRECTIONS, TWO CHANNELS
 ----------------------------
 **Fire-and-forget** (toast/bubble/dialog/progress) goes out as
-`JARVIS_MEDIA\\tui\\t<json>` on **stderr**, exactly like present_tools.py
-and dev_agent_events.py. The web server already forwards the child's stderr
+`JARVIS_MEDIA\\tui\\t<json>` on **stderr** (through `wire.media("ui", json)`),
+exactly like present_tools.py and dev_agent_events.py. The web server already forwards the child's stderr
 line-by-line, so these appear the instant they're printed — no new transport,
 no new server route.
 
@@ -68,6 +68,8 @@ import json
 import os
 import sys
 import time
+
+from . import wire
 
 # Levels a surface can style differently. Ordered by severity so a renderer
 # can map them onto whatever it has (colors, icons, sounds).
@@ -149,13 +151,13 @@ def emit(kind, **fields):
     """
     event = {"kind": kind, "id": fields.pop("id", None) or _next_id(), **fields}
     try:
-        line = "JARVIS_MEDIA\tui\t" + json.dumps(event, default=str, ensure_ascii=False)
+        payload = json.dumps(event, default=str, ensure_ascii=False)
     except (TypeError, ValueError) as exc:
         event = {"kind": "toast", "id": event["id"], "level": "error",
                  "message": "a tool tried to show something unserializable: %s" % exc}
-        line = "JARVIS_MEDIA\tui\t" + json.dumps(event)
+        payload = json.dumps(event)
     try:
-        print(line, file=sys.stderr, flush=True)
+        wire.media("ui", payload)
     except Exception:  # noqa: BLE001
         pass
     if _cli_hook is not None:
@@ -280,7 +282,7 @@ def _ask(kind, payload, default, timeout=None):
         return _ask_cli(kind, payload, default)
 
     try:
-        print("JARVIS_UI_REQUEST " + json.dumps(payload, default=str), flush=True)
+        wire.ui_request(payload)
     except Exception:  # noqa: BLE001
         return default, "emit-failed"
 

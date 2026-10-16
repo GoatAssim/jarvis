@@ -3001,6 +3001,14 @@
       case "ask-stderr":
         addAskPromptTrace(msg.line);
         break;
+      case "ask-media":
+        // A card for the chat (screenshot, download, present_file, notification, ui,
+        // dev_agent, organize_json): one typed message whichever way the server got it
+        // (jarvis/wire.py media(), or the legacy stderr line when no bridge is running).
+        if (!handleAskMedia(msg.kind, msg.fields)) {
+          askPromptLine(`$ ${String(msg.kind || "media")}`, "tool");
+        }
+        break;
       case "ask-usage":
         // Phase 0 (new_plan.md) baseline: {input_tokens, output_tokens,
         // total_tokens, rounds: [{round, input_tokens, output_tokens, source}],
@@ -3918,99 +3926,109 @@
     }
   }
 
+  // One media card, announced by the CLI through wire.media(kind, ...fields) and relayed by
+  // the server as {type: "ask-media", kind, fields}. Returns true when the kind was one it
+  // draws (so the caller adds no trace line of its own), false for a kind it does not know.
+  // The body is the old JARVIS_MEDIA branch of addAskPromptTrace moved here unchanged: it
+  // still reads `parts[1]`, `parts[2]`... exactly as it did when it split the stderr line.
+  function handleAskMedia(kind, fields) {
+    const parts = ["JARVIS_MEDIA", String(kind || ""), ...(Array.isArray(fields) ? fields.map(String) : [])];
+    if (parts[1] === "screenshot" && parts[2]) {
+      showAskScreenshot(parts[2].trim());
+      askPromptLine(`$ screenshot  ${parts[2].trim()}`, "tool");
+      return true;
+    }
+    if (parts[1] === "download" && parts[2] && parts[3]) {
+      const jobId = parts[2].trim();
+      const filename = parts[3].trim();
+      const title = (parts[4] || filename).trim();
+      showAskDownload(jobId, filename, title);
+      askPromptLine(`$ download  ${title}`, "tool");
+      return true;
+    }
+    if (parts[1] === "organize_json" && parts[2]) {
+      showAskOrganizeJson(parts[2].trim());
+      askPromptLine(`$ organize_json  ${parts[2].trim()}`, "tool");
+      return true;
+    }
+    if (parts[1] === "present_file" && parts[6] !== undefined) {
+      const jobId = (parts[2] || "-").trim();
+      const filename = (parts[3] || "-").trim();
+      const name = (parts[4] || "").trim();
+      const ftype = (parts[5] || "file").trim();
+      const sizeBytes = parts[6] && parts[6] !== "-" ? Number(parts[6]) : null;
+      const fullPath = (parts[7] || "").trim();
+      const presentInfo = {
+        jobId: jobId === "-" ? null : jobId,
+        filename: filename === "-" ? null : filename,
+        name, type: ftype, sizeBytes, path: fullPath,
+      };
+      showAskPresentFile(presentInfo);
+      // Recorded like the other cards, so it is part of what the turn drew.
+      pushThreadExtra(state.askConversationId, "presentFile", presentInfo);
+      askPromptLine(`$ present  ${name || fullPath}`, "tool");
+      return true;
+    }
+    if (parts[1] === "notification" && parts[2]) {
+      // A scheduled job / reminder firing inside THIS ask's process (see
+      // jarvis/notifier.py's "stream" channel). Same three-field envelope
+      // and JSON-payload shape dev_agent uses, so it needs no change to
+      // the split("\t") dispatch around it.
+      let note;
+      try { note = JSON.parse(parts[2]); } catch { return true; }
+      showNotification(note);
+      askPromptLine(`$ notify  ${note.title || ""}`, "tool");
+      return true;
+    }
+    if (parts[1] === "ui" && parts[2]) {
+      // Generic UI event from any tool (jarvis/ui_bridge.py). Same
+      // three-field envelope dev_agent uses, dispatched to the shared
+      // popup layer instead of a per-feature renderer — this is the
+      // branch that means a NEW kind of popup needs no change here.
+      let event;
+      try { event = JSON.parse(parts[2]); } catch { return true; }
+      JarvisUI.handleEvent(event);
+      const label = event.title || event.message || event.label || event.kind;
+      askPromptLine(`$ ui  ${event.kind}  ${String(label).slice(0, 60)}`, "tool");
+      return true;
+    }
+    if (parts[1] === "dev_agent" && parts[2]) {
+      // dev_agent's progress events (see jarvis-cli/jarvis/dev_agent_events.py)
+      // don't fit present_file's fixed positional fields — the whole event
+      // is one JSON blob in parts[2] instead. Still exactly 3 tab-separated
+      // parts overall, so this still fits the plain line.split("\t") dispatch
+      // every other JARVIS_MEDIA branch above uses.
+      let event;
+      try { event = JSON.parse(parts[2]); } catch { return true; }
+      // Focus layout's Agent side panel (agent-panel.js): the same event,
+      // fed live. A NEW job opens the panel there; Classic ignores it. The
+      // try/catch is deliberate -- a bug in a side panel must never stop
+      // the chat card below from updating.
+      try { window.JarvisAgentPanel?.feed(event); } catch { /* panel is optional */ }
+      const item = upsertDevAgentCard(event);
+      if (item && isViewingAskThread()) {
+        clearAskEmptyHint();
+        if (!item.dom) {
+          item.dom = renderDevAgentCard(item);
+          insertIntoAskThread(item.dom);
+        } else {
+          updateDevAgentCard(item);
+        }
+        askThreadScrollToEnd();
+      }
+      const detail = event.path || event.command || "";
+      askPromptLine(`$ dev_agent  ${event.phase}:${event.status}` + (detail ? `  ${detail}` : ""), "tool");
+      return true;
+    }
+    return false;
+  }
+
   function addAskPromptTrace(raw) {
     const line = stripAnsi(raw).trim();
     if (!line) return;
-    if (line.startsWith("JARVIS_MEDIA\t")) {
-      const parts = line.split("\t");
-      if (parts[1] === "screenshot" && parts[2]) {
-        showAskScreenshot(parts[2].trim());
-        askPromptLine(`$ screenshot  ${parts[2].trim()}`, "tool");
-        return;
-      }
-      if (parts[1] === "download" && parts[2] && parts[3]) {
-        const jobId = parts[2].trim();
-        const filename = parts[3].trim();
-        const title = (parts[4] || filename).trim();
-        showAskDownload(jobId, filename, title);
-        askPromptLine(`$ download  ${title}`, "tool");
-        return;
-      }
-      if (parts[1] === "organize_json" && parts[2]) {
-        showAskOrganizeJson(parts[2].trim());
-        askPromptLine(`$ organize_json  ${parts[2].trim()}`, "tool");
-        return;
-      }
-      if (parts[1] === "present_file" && parts[6] !== undefined) {
-        const jobId = (parts[2] || "-").trim();
-        const filename = (parts[3] || "-").trim();
-        const name = (parts[4] || "").trim();
-        const ftype = (parts[5] || "file").trim();
-        const sizeBytes = parts[6] && parts[6] !== "-" ? Number(parts[6]) : null;
-        const fullPath = (parts[7] || "").trim();
-        const presentInfo = {
-          jobId: jobId === "-" ? null : jobId,
-          filename: filename === "-" ? null : filename,
-          name, type: ftype, sizeBytes, path: fullPath,
-        };
-        showAskPresentFile(presentInfo);
-        // Recorded like the other cards, so it is part of what the turn drew.
-        pushThreadExtra(state.askConversationId, "presentFile", presentInfo);
-        askPromptLine(`$ present  ${name || fullPath}`, "tool");
-        return;
-      }
-      if (parts[1] === "notification" && parts[2]) {
-        // A scheduled job / reminder firing inside THIS ask's process (see
-        // jarvis/notifier.py's "stream" channel). Same three-field envelope
-        // and JSON-payload shape dev_agent uses, so it needs no change to
-        // the split("\t") dispatch around it.
-        let note;
-        try { note = JSON.parse(parts[2]); } catch { return; }
-        showNotification(note);
-        askPromptLine(`$ notify  ${note.title || ""}`, "tool");
-        return;
-      }
-      if (parts[1] === "ui" && parts[2]) {
-        // Generic UI event from any tool (jarvis/ui_bridge.py). Same
-        // three-field envelope dev_agent uses, dispatched to the shared
-        // popup layer instead of a per-feature renderer — this is the
-        // branch that means a NEW kind of popup needs no change here.
-        let event;
-        try { event = JSON.parse(parts[2]); } catch { return; }
-        JarvisUI.handleEvent(event);
-        const label = event.title || event.message || event.label || event.kind;
-        askPromptLine(`$ ui  ${event.kind}  ${String(label).slice(0, 60)}`, "tool");
-        return;
-      }
-      if (parts[1] === "dev_agent" && parts[2]) {
-        // dev_agent's progress events (see jarvis-cli/jarvis/dev_agent_events.py)
-        // don't fit present_file's fixed positional fields — the whole event
-        // is one JSON blob in parts[2] instead. Still exactly 3 tab-separated
-        // parts overall, so this still fits the plain line.split("\t") dispatch
-        // every other JARVIS_MEDIA branch above uses.
-        let event;
-        try { event = JSON.parse(parts[2]); } catch { return; }
-        // Focus layout's Agent side panel (agent-panel.js): the same event,
-        // fed live. A NEW job opens the panel there; Classic ignores it. The
-        // try/catch is deliberate -- a bug in a side panel must never stop
-        // the chat card below from updating.
-        try { window.JarvisAgentPanel?.feed(event); } catch { /* panel is optional */ }
-        const item = upsertDevAgentCard(event);
-        if (item && isViewingAskThread()) {
-          clearAskEmptyHint();
-          if (!item.dom) {
-            item.dom = renderDevAgentCard(item);
-            insertIntoAskThread(item.dom);
-          } else {
-            updateDevAgentCard(item);
-          }
-          askThreadScrollToEnd();
-        }
-        const detail = event.path || event.command || "";
-        askPromptLine(`$ dev_agent  ${event.phase}:${event.status}` + (detail ? `  ${detail}` : ""), "tool");
-        return;
-      }
-    }
+    // A card is never drawn from a stderr line: the server sends cards as `ask-media`
+    // (see handleAskMedia), so a line that merely looks like one -- from a command's output
+    // or a page a tool echoed -- is just a line of the trace.
     let cls = "sys";
     if (line.includes("\u2717")) cls = "fail";
     else if (line.includes("$")) cls = "tool";

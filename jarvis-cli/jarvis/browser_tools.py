@@ -503,10 +503,11 @@ def _local_tool_browser_screenshot(args=None):
     except Exception as e:
         return {"ok": False, "error": f"Screenshot failed: {e}"}
     _prune_browser_screenshots()
-    # Same machine line screenshot_tools._emit_media prints — matched
-    # literally (not imported) so the web UI's existing "screenshot" extras
-    # case picks this up with zero web UI changes. See module docstring.
-    print(f"JARVIS_MEDIA\tscreenshot\t{path.name}", file=sys.stderr, flush=True)
+    # Same card screenshot_tools._emit_media announces, through the same
+    # seam (wire.media), so the web UI's existing "screenshot" extras case
+    # picks this up with zero web UI changes. See module docstring.
+    from . import wire
+    wire.media("screenshot", path.name)
     # Chat (Discord) has no web UI: hand the file to the gateway's collector.
     # A no-op (False) everywhere else -- see media_out.py.
     from . import media_out

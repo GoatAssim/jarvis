@@ -39,6 +39,7 @@ import sys
 from . import ai_config
 from . import ai_providers
 from . import tunables
+from . import wire
 from .custom_tools_suggest import _pick_provider
 
 AGENT_TIMEOUT = tunables.const("AGENT_TIMEOUT", 150)  # L.43: Settings > Advanced
@@ -302,8 +303,7 @@ def run(payload, cfg=None, out=None):
         if i + 1 < len(keys):
             # Tell the browser to throw away the partial text before the next key writes.
             try:
-                (out or sys.stdout).write('JARVIS_STREAM {"k":"reset"}\n')
-                (out or sys.stdout).flush()
+                wire.stream({"k": "reset"}, out)
             except Exception:  # noqa: BLE001
                 pass
     return _done({"ok": False, "error": last_error})

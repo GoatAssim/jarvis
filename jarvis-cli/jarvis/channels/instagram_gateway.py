@@ -34,6 +34,19 @@ WHAT THIS MEANS PRACTICALLY
       two days ago -> it cannot. Use Discord for outbound, or DM the bot
       to reopen the window. `outbound.py` does this fallback for you.
 
+GROUP CHATS (EXPERIMENTAL, NOT PROMISED)
+----------------------------------------
+Meta documents the Instagram messaging API as one-to-one only: group threads are not a
+supported surface. `_group_info` below still accepts a `thread_key` on an event if one
+ever arrives (the shapes this code has always accepted, and nothing more), and such a
+message is treated as a group space: the mention rule applies, speaker labels and the
+room switches (`channels-space-set`) work, and the 24-hour window is keyed on the
+thread. Whether live group events are ever delivered to a webhook is NOT verified, and
+nothing here or in the docs claims they are. The reliable way to get a group chat into
+Jarvis is an offline importer from Instagram's own data export (planned, S9b; not
+in this module yet). An unofficial live transport is a separate, opt-in design (plan
+S9c) and is not part of this module either.
+
 TRANSPORT
 ---------
 A stdlib http.server, deliberately: this project's only hard dependency is
@@ -227,6 +240,41 @@ def _attachment_descriptors(message):
     return out
 
 
+_GROUP_NOTED = False
+
+
+def _group_info(event, entry, sender):
+    """(thread_key, is_group) for one `messaging` event.
+
+    Meta marks a group thread with a thread_key on the event, on a `thread` object, or
+    on the entry; a 1:1 has none and the sender alone identifies the conversation. The
+    shapes accepted are exactly the ones the inline code accepted before it was moved
+    here, and nothing new. A missing key, or a key equal to the sender, degrades to "treat
+    it as a DM", the safe direction: DMs are gated by dm_allowlist, so an unexpected shape
+    fails closed rather than skipping the mention rule.
+
+    The first group event this process sees writes ONE log line saying so: Meta documents
+    group messaging as unsupported, so a group payload is news worth noticing."""
+    global _GROUP_NOTED
+    event = event if isinstance(event, dict) else {}
+    entry = entry if isinstance(entry, dict) else {}
+    thread = event.get("thread")
+    thread_key = str(
+        event.get("thread_key")
+        or (thread.get("id") if isinstance(thread, dict) else "")
+        or entry.get("thread_key")
+        or "")
+    is_group = bool(thread_key) and thread_key != str(sender or "")
+    if is_group and not _GROUP_NOTED:
+        _GROUP_NOTED = True
+        try:
+            base._log("instagram group payload received; Meta documents group "
+                      "messaging as unsupported, treating as experimental")
+        except Exception:  # noqa: BLE001 -- a log line is never worth a failure
+            pass
+    return thread_key, is_group
+
+
 def parse_events(payload, bot_id="", bot_handle=""):
     """Turn one webhook body into IncomingMessages.
 
@@ -263,20 +311,8 @@ def parse_events(payload, bot_id="", bot_handle=""):
             if not text:
                 continue  # a sticker / reaction with no caption — nothing to answer
 
-            # Group vs 1:1. Meta marks a group thread with a thread_key on
-            # the event (or on the entry); a 1:1 has none and the sender
-            # alone identifies the conversation. Checked defensively across
-            # both spots because the payload shape for IG group threads is
-            # less consistently documented than the 1:1 one — a missing
-            # key degrades to "treat it as a DM", which is the safe
-            # direction: DMs are gated by dm_allowlist, so an unexpected
-            # shape fails closed rather than skipping the mention rule.
-            thread_key = str(
-                event.get("thread_key")
-                or (event.get("thread") or {}).get("id")
-                or entry.get("thread_key")
-                or "")
-            is_group = bool(thread_key) and thread_key != sender
+            # Group vs 1:1: see _group_info (experimental; fails closed to a DM).
+            thread_key, is_group = _group_info(event, entry, sender)
 
             out.append(permissions.IncomingMessage(
                 platform=INSTAGRAM,
