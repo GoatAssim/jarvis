@@ -3,7 +3,7 @@
 WHY THIS EXISTS (L.42.3, outbound half)
 ---------------------------------------
 Tools that make an image (`take_screenshot`, `browser_screenshot`, `present_file`)
-announce it with a `JARVIS_MEDIA` line on stderr. The web server reads that line;
+announce it with `wire.media(...)` (a `JARVIS_MEDIA` card). The web server draws that card;
 a gateway process (Discord) never did, so the picture was made and nobody got it.
 
 This module is the in-process equivalent: `begin()` opens a collector for ONE ask,

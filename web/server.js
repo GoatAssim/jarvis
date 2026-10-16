@@ -4030,12 +4030,15 @@ function relayBridgeEvent(ws, kind, types, ev, onStdoutLine, onLine) {
 // the bridge's typed `media` event, or -- for a request run as a plain process -- the legacy
 // `JARVIS_MEDIA<TAB>kind<TAB>field...` stderr line parsed below. Like shapeStreamEvent this is
 // a whitelist: the browser is only ever handed a short lowercase kind and a few strings.
-// The size cap is generous on purpose (a code_agent step carries a tool's arguments); an
-// event over it is shown as a plain line, so nothing valid is truncated into broken JSON.
+// The size cap is generous on purpose (a code_agent step carries a tool's arguments, which
+// can be a whole file the model is writing): it equals bridge.py's MAX_PARTIAL_LINE, the
+// longest line the worker can deliver at all, so the server never refuses a card the pipe
+// could carry. An event over it is shown as a plain line, so nothing valid is truncated
+// into broken JSON.
 const MEDIA_LINE_PREFIX = "JARVIS_MEDIA\t";
 const MEDIA_KIND_RE = /^[a-z_]{1,40}$/;
 const MEDIA_MAX_FIELDS = 8;
-const MEDIA_MAX_FIELD_CHARS = 1024 * 1024;
+const MEDIA_MAX_FIELD_CHARS = 8 * 1024 * 1024;
 
 function shapeMediaEvent(ev) {
   if (!ev || typeof ev !== "object") return null;

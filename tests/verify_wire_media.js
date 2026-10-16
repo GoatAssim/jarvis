@@ -92,7 +92,7 @@ const ws = { activeChild: null, activeKind: null };
   check("eight fields pass, nine do not",
     shape({ kind: "ui", fields: Array(8).fill("a") }) !== null && shape({ kind: "ui", fields: Array(9).fill("a") }) === null);
   check("every field must be a string", shape({ kind: "ui", fields: ["a", 3] }) === null);
-  const big = "x".repeat(1024 * 1024);
+  const big = "x".repeat(8 * 1024 * 1024);   // = bridge.py MAX_PARTIAL_LINE
   check("a field at the cap passes; one over it is refused (not truncated)",
     shape({ kind: "ui", fields: [big] }) !== null && shape({ kind: "ui", fields: [big + "x"] }) === null);
   check("nothing else is carried through", show(shape({ kind: "ui", fields: ["a"], raw: "r", id: "1", extra: 1 })) ===
