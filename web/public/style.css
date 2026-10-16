@@ -3645,3 +3645,13 @@ html.jui-light .menu-panel{
   display: block; max-width: min(220px, 60vw); max-height: 200px;
   border: 1px solid var(--border); border-radius: 2px; background: var(--bg-panel-2);
 }
+
+/* Raw / Summary switch in the PROMPT header (console only). */
+.ask-prompt__view{
+  margin-right: auto;
+  font-family: var(--font-mono); font-size: 10px; line-height: 1; letter-spacing: 0.1em; text-transform: uppercase;
+  padding: 3px 8px; border-radius: 999px; cursor: pointer;
+  color: var(--accent); background: transparent; border: 1px solid var(--accent-soft);
+}
+.ask-prompt__view:hover{ background: var(--accent-dim); }
+.ask-prompt__view[aria-pressed="true"]{ color: var(--text-dim); border-color: var(--text-dimmer); }

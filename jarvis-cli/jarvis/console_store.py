@@ -90,6 +90,11 @@ MAX_LINE_CHARS = 4000
 MAX_FILE_BYTES = 2_000_000
 KEEP_LINES_ON_TRIM = 3000
 
+# One flush from the browser can carry at most this many trace lines; the
+# browser flushes every second or two, so a normal ask is a few dozen. The cap
+# exists so one malformed request cannot write without bound.
+MAX_TRACE_LINES_PER_CALL = 2000
+
 # The known kinds (E.5). Not a hard enum — an unrecognized kind is still
 # written and still replayed, just shown as "other" by a filter UI that
 # doesn't know it — but this is the vocabulary the writers in this
@@ -103,7 +108,17 @@ KEEP_LINES_ON_TRIM = 3000
 KINDS = (
     "stdout", "stderr", "command", "tool-call", "tool-result", "provider",
     "tokens", "thinking", "narration", "notification", "status", "error",
+    "trace",
 )
+
+# "trace" is the odd one out, on purpose. Every other kind is something a
+# writer in this codebase DESCRIBED about a turn (a provider attempt, a tool
+# call, a status). A "trace" line is the Ask panel's console line EXACTLY as it
+# was painted: same text, same colour class (``cls``), same order, including
+# lines no other kind covers ([tools] auto-discovery, the "asking groq"
+# request lines, the token-cost lines). The two are two views of one turn:
+# the described kinds are the Summary view, "trace" is the Raw view
+# (web/public/app.js, askConsoleView). Nothing reads one to build the other.
 
 _CLEAR_TEXT = "cleared"
 
@@ -142,7 +157,7 @@ def _next_tick():
 # ---------------------------------------------------------------------------
 
 def append(conv_id, kind, text, *, surface="ask", turn=None, tool=None,
-           provider=None, stream=None):
+           provider=None, stream=None, cls=None):
     """Append one event. Never raises \u2014 a console-logging failure must
     never break the ask/run it's trying to record (same contract as
     logs.log). Returns the written line's seq, or None if nothing was
@@ -161,13 +176,18 @@ def append(conv_id, kind, text, *, surface="ask", turn=None, tool=None,
         "stream": stream,
         "text": _clip(text),
     }
+    if cls is not None:
+        # Only a "trace" line carries one (its colour class as painted);
+        # every other line keeps exactly the shape it always had.
+        line["cls"] = str(cls)[:24]
     # L.38: the store clips its own copy (it serves the UI); the event log
     # keeps the line at full length, tied to this one by seq.
     from . import raw_archive
     raw_archive.record(conv_id, "console", {
         "seq": line["seq"], "console_ts": line["ts"], "turn": turn, "surface": surface,
         "console_kind": kind, "tool": tool, "provider": provider, "stream": stream,
-        "text": "" if text is None else str(text)})
+        "text": "" if text is None else str(text),
+        **({"cls": str(cls)[:24]} if cls is not None else {})})
     try:
         CONSOLE_DIR.mkdir(parents=True, exist_ok=True)
         path = _path(conv_id)
@@ -182,6 +202,34 @@ def append(conv_id, kind, text, *, surface="ask", turn=None, tool=None,
         print(f"Warning: couldn't write console line for {conv_id}: {e}", file=sys.stderr)
         return None
     return line["seq"]
+
+
+def append_trace(conv_id, turn, lines):
+    """Save the Ask panel's console lines exactly as they were painted.
+
+    ``lines`` is a list of ``{"text": str, "cls": str}`` (a bare string is
+    taken as a plain line). Written through ``append`` so each one also lands,
+    at full length, in the raw event log -- the store's own copy is clipped at
+    MAX_LINE_CHARS, ``read(full=True)`` puts the whole line back. Order is the
+    order given; every line gets its own ``seq``. Returns how many were
+    written. Never raises, same contract as ``append``.
+    """
+    if not conversations.is_valid_id(conv_id) or not isinstance(lines, list):
+        return 0
+    turn = str(turn or "").strip()[:64] or None
+    written = 0
+    for item in lines[:MAX_TRACE_LINES_PER_CALL]:
+        if isinstance(item, dict):
+            text, cls = item.get("text"), item.get("cls")
+        else:
+            text, cls = item, None
+        if text is None:
+            continue
+        seq = append(conv_id, "trace", str(text), surface="ask", turn=turn,
+                     cls=cls if isinstance(cls, str) and cls else "sys")
+        if seq is not None:
+            written += 1
+    return written
 
 
 def _read_raw_lines(conv_id):

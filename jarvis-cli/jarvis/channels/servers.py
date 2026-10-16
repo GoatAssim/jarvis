@@ -32,6 +32,10 @@ SWITCHES CAN ONLY TAKE ACCESS AWAY (like channels/user_perms.py)
                       the message-content intent off, would receive empty text
                       anyway. Change that for the whole platform by hand.
 
+    ambient   off  -> `"ambient": false` (Jarvis does not read that room's messages
+                      that don't mention it; channels/ambient.py). on -> inherit,
+                      never written as true.
+
 `allowed_guilds` / `allowed_channels` are NOT written here. They are
 "empty = unrestricted", so removing the last entry would silently open every
 server -- the exact inversion this module exists to avoid. They are read and
@@ -53,7 +57,7 @@ from . import transcript
 ENCODING = "utf-8"
 SUPPORTED = (DISCORD,)           # Instagram groups have thread ids, no servers
 KINDS = ("guild", "channel")
-SWITCHES = ("enabled", "tools", "mention")
+SWITCHES = ("enabled", "tools", "mention", "ambient")
 VALUES = ("on", "off", "inherit")
 MAX_GUILDS = 500                 # a registry bound, not a policy
 MAX_CHANNELS_PER_GUILD = 1000
@@ -64,7 +68,8 @@ _cache = {}                      # (guild_id, channel_id) -> (guild_name, channe
 # switch -> the scope field it writes, and the ONE value it may set
 _FIELD = {"enabled": ("enabled", False),
           "tools": ("allow_tools", False),
-          "mention": ("require_mention", True)}
+          "mention": ("require_mention", True),
+          "ambient": ("ambient", False)}
 
 
 def registry_file():
@@ -264,6 +269,7 @@ def set_switch(platform, kind, ident, switch, value):
     block = cfg[platform]
     scopes = dict(_scopes(block))
     entry = dict(scopes.get(key) or {}) if isinstance(scopes.get(key), dict) else {}
+    was_off = entry.get(field) is False
     if write is None:
         entry.pop(field, None)
     else:
@@ -277,6 +283,14 @@ def set_switch(platform, kind, ident, switch, value):
     block["scopes"] = scopes
     if not channel_config.save_config(cfg):
         return False, "could not write config", {}
+    if switch == "ambient" and was_off != (write is False):
+        # Reading a room's other messages is a privacy switch: say when it moves.
+        try:
+            from . import changelog
+            changelog.record(platform, changelog.K_SCOPE, key, switch="ambient",
+                             on=False if write is False else True)
+        except Exception:  # noqa: BLE001 -- the log never blocks a switch
+            pass
     return True, "", {"scope": key, "switch": switch, "value": value,
                       "override": entry.get(field)}
 
@@ -315,6 +329,7 @@ def view(platform=DISCORD):
     plat_on = bool(cfg.get("enabled"))
     plat_tools = bool(cfg.get("allow_tools"))
     plat_mention = bool(cfg.get("require_mention", True))
+    plat_ambient = channel_config.ambient_limits(cfg)[0]
 
     guild_ids = list(reg)
     for key in scopes:
@@ -331,6 +346,8 @@ def view(platform=DISCORD):
         c_enabled = _override(scopes, "channel", cid, "enabled") if cid else None
         c_tools = _override(scopes, "channel", cid, "allow_tools") if cid else None
         c_mention = _override(scopes, "channel", cid, "require_mention") if cid else None
+        g_ambient = _override(scopes, "guild", gid, "ambient")
+        c_ambient = _override(scopes, "channel", cid, "ambient") if cid else None
         why = []
         answering = plat_on
         if not plat_on:
@@ -346,11 +363,17 @@ def view(platform=DISCORD):
             why.append("not in allowed_channels")
         tools = plat_tools and g_tools is not False and c_tools is not False
         mention = plat_mention or g_mention is True or c_mention is True
+        # Same reading as permissions.ambient_ok: only an absent or literal true
+        # value leaves it on; anything else at either level turns it off.
+        ambient_on = (plat_ambient > 0
+                      and all(v is None or v is True for v in (g_ambient, c_ambient)))
         return {"answering": answering, "why_not": why, "tools": tools,
-                "mention": mention,
+                "mention": mention, "ambient": ambient_on,
                 "override": {"enabled": "off" if (c_enabled if cid else g_enabled) is False else "inherit",
                              "tools": "off" if (c_tools if cid else g_tools) is False else "inherit",
-                             "mention": "on" if (c_mention if cid else g_mention) is True else "inherit"}}
+                             "mention": "on" if (c_mention if cid else g_mention) is True else "inherit",
+                             "ambient": ("inherit" if (c_ambient if cid else g_ambient) in (None, True)
+                                         else "off")}}
 
     servers, seen_channels = [], set()
     for gid in guild_ids:

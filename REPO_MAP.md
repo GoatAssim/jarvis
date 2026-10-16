@@ -118,6 +118,13 @@ jarvis-cli/jarvis/
                           `replay_record()` is what the web UI replays
     thread_extras.py      the saved screenshot/download/... cards derived from a turn's
                           tool runs; used at write time and when rebuilt from the log
+    (saved as shown)      Two things are kept exactly as the web UI showed them, not
+                          rebuilt from records of what happened: the Ask console's lines
+                          (console_store kind "trace", written by `console-append-trace`;
+                          the PROMPT panel's Raw view, vs Summary = the described events)
+                          and each turn's cards/embeds (`display` on the exchange, written
+                          by `conv-save-display`, conversations.save_display). The page
+                          sends both (app.js queueAskTraceLine / saveDisplayForTurn).
     history.py            (module docstring explains the process model)
     history_summarizer.py AI recap of older turns
     conv_search.py        search what was SAID
@@ -197,6 +204,13 @@ jarvis-cli/jarvis/
                           switches can only take access away. `view()` is the read model.
                           `_ids()` delegates to `config.normalize_entries` (a bare id where a
                           list belongs must never crash it)
+        ambient.py        channel spaces S6a / D5: messages in an allowed room that did NOT
+                          mention Jarvis, kept IN MEMORY ONLY (bounded per room, expire after
+                          `ambient_minutes`, text clipped) and shown on the next mention as an
+                          untrusted block in the per-turn tail. Never replied to, never written to
+                          disk, never stored in an exchange or transcript. Admission is
+                          `permissions.ambient_ok` (owner + reply list by default; `ambient`
+                          scope switch; Discord needs `message_content_intent`)
         allowed_channels.py  L.36-P18: add/remove one entry on allowed_channels (panel + `channels-channels`); preview-first, never empties the list
         directory.py      @handle -> id, learned from real messages
         people.py         NEW — WHO a person is: name, notes, follow state, and (L.36) a
@@ -760,6 +774,8 @@ silently never runs.
 | `test_channel_manual_people.py` | L.36b: people named in an allow-list get a row, hand-added people, handle-only placeholder adopted on first message (tool limits migrated), locked names vs `remember_sender`, linked accounts (by id / handle / name, ambiguity, owner never inherited), remove, `send_dm` skips a handle-only person, the `channels-*` commands |
 | `test_user_admin.py` | L.36: `user_perms` store (fails closed), `user_admin` switches (registered only, wildcard refusal, owner moves, block removes from all lists), the `base._ask_jarvis` enforcement point, the `send_dm` refusal, avatar validation in `people.py` |
 | `test_channel_servers.py` | L.36-P7 + tool calls in the Conversation view: the server registry, switches that only take access away (checked against the REAL `permissions.decide`), `servers.view`, thread -> parent-channel routing, tool-call scrubbing/clipping and attribution to the first reply chunk, the CLI; and (S3) a bare-id `allowed_guilds` / `allowed_channels` no longer crashes `view` or the gate |
+| `test_group_recall_toggles.py` | channel spaces S6 / D2: saved notes and remembered facts in shared-room replies -- the `group_recall` master (default off), per-note / per-fact on / off / inherit (off wins, on wins over a master that is off), DMs byte-identical, name / style note / standing rules never gated, linked-account notes, flag pruning and reset on edit, the notes-echoing tools follow the same gate, owner-only, change log without text, `channels-note|memory groups`, `channels-set` validation |
+| `test_channel_ambient.py` | channel spaces S6a / D5: `permissions.ambient_ok` truth table (the gate verdict itself is untouched), the in-memory buffer (caps, expiry, clipping, dedupe, room cap), nothing written anywhere, the Discord hook, the untrusted tail block on the next mention (not in a DM / other room / when switched off), the `ambient` switch, the `ambient_*` settings, the change log |
 | `test_allowed_guilds.py` | L.36-P17: `allowed_guilds` editor -- add (preview-first when it turns the filter on or the id is unseen), remove (the LAST entry is refused even with confirm), checked against the REAL `permissions.decide`, one-key-only writes, change log, `channels-guilds`, and a static check of the `server.js` route |
 | `test_channel_timed_and_instruction.py` | L.36-P6 / P12: the `tools_until` deadline (garbage reads as passed, resolver is read-only), grant refusals, `expire_due` + its change-log reason, manual switches / block / forget / `channels-allow|deny` ending a countdown, the gateway sweep, the Test tab's wording, and the instruction (cap, one line, owner refused, prompt framing, not reachable by a guest) |
 | `test_channel_insights.py` | L.36-P1/P2/P3: per-person conversation attribution (DM vs group, rotated files, torn lines), the usage ledger (counts only, failed asks, windows, rotation), and `simulate` (agrees with what `handle_message` really hands the model; writes nothing, calls no model — snapshot of `~/.jarvis` before/after) |

@@ -17,9 +17,9 @@ Safe to commit. Safe to delete -- bump_build_version.py recreates it from
 scratch (starting at build 1) if it's missing.
 """
 
-BUILD_NUMBER = 88
-SOURCE_HASH = "286edb99d08f03ad0f79ac06e398b7d537388f136b2e5ffa64b7cc35aec5e52b"
-BUILT_AT = "2026-10-15 14:58:02"
+BUILD_NUMBER = 89
+SOURCE_HASH = "8b1d9202964cdc270b6dd8e1fd6c9a7f3ed9706dbb32ad262de6660ddbd90bfd"
+BUILT_AT = "2026-10-16 06:56:55"
 
 
 def version_string():

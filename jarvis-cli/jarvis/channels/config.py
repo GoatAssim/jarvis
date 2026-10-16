@@ -107,6 +107,22 @@ _COMMON_DEFAULTS = {
     # gives back the old, speaker-blind behaviour with no revert. DMs are
     # never affected either way.
     "group_speaker_labels": True,
+    # D2: may Jarvis use saved notes and remembered facts about a person in a
+    # reply that is posted into a shared room? Default NO. Each note and each
+    # remembered item can override this one way or the other (people.note_groups,
+    # person_memory `groups`); the name, the owner's style note and the standing
+    # rules always apply. Only the literal value true turns it on.
+    "group_recall": False,
+    # D5: Jarvis may READ messages in an allowed room that did not mention it, as
+    # context for the next time it is mentioned. It never replies to them, and they
+    # are held in memory only (channels/ambient.py), never written anywhere.
+    # ambient_messages is how many are kept per room (0 = off), ambient_minutes how
+    # long each is kept, ambient_senders whose messages are read: "approved" is the
+    # owner and people on the reply list, "anyone" is everyone in an allowed room.
+    # On Discord this only sees text while message_content_intent is on.
+    "ambient_messages": 20,
+    "ambient_minutes": 30,
+    "ambient_senders": "approved",
     # Platform hard caps: Discord 2000 chars/message, Instagram 1000 BYTES.
     # Overridden per platform below; the value here is just a floor.
     "max_reply_chars": 1900,
@@ -397,8 +413,9 @@ def _log_change(platform, kind, ident, **fields):
         pass
 
 
-# Only these two config keys are logged, and only as a switch or an id: every
-# other key (tokens, URLs, secrets) must never reach the log.
+# Only `owner`, `allow_tools` and the group-recall / ambient behaviour keys are
+# logged, and only as a switch, an id or a small number or mode: every other key
+# (tokens, URLs, secrets) must never reach the log.
 def _log_value_change(platform, key, before, after):
     if key == "owner":
         was, now = _normalize_entry(before), _normalize_entry(after)
@@ -411,12 +428,84 @@ def _log_value_change(platform, key, before, after):
     elif key == "allow_tools":
         if bool(before) != bool(after):
             _log_change(platform, "platform", "", key="allow_tools", on=bool(after))
+    elif key == "group_recall":
+        if (before is True) != (after is True):
+            _log_change(platform, "platform", "", key="group_recall", on=after is True)
+    elif key in ("ambient_messages", "ambient_minutes", "ambient_senders"):
+        if before != after:
+            _log_change(platform, "platform", "", key=key, value=after)
+
+
+# Behaviour keys that are checked when they are written, so a typo in the terminal
+# or a panel request cannot leave a value the readers would have to guess about.
+# Every other key is stored as given (the long-standing behaviour of set_value).
+AMBIENT_MAX_MESSAGES = 100
+AMBIENT_MAX_MINUTES = 24 * 60
+AMBIENT_SENDER_MODES = ("approved", "anyone")
+SETTING_KEYS = ("group_recall", "ambient_messages", "ambient_minutes", "ambient_senders")
+
+
+def coerce_setting(key, value):
+    """(ok, clean value, error) for one of SETTING_KEYS; any other key passes
+    through unchanged. Accepts what the CLI and the web routes hand over (a real
+    bool or int, or the words on/off/true/false and digits)."""
+    if key not in SETTING_KEYS:
+        return True, value, ""
+    if key == "group_recall":
+        if isinstance(value, bool):
+            return True, value, ""
+        low = str(value).strip().lower()
+        if low in ("on", "true", "yes"):
+            return True, True, ""
+        if low in ("off", "false", "no"):
+            return True, False, ""
+        return False, value, "group_recall must be on or off"
+    if key == "ambient_senders":
+        low = str(value).strip().lower()
+        if low in AMBIENT_SENDER_MODES:
+            return True, low, ""
+        return False, value, "ambient_senders must be approved or anyone"
+    top, low_bound = ((AMBIENT_MAX_MESSAGES, 0) if key == "ambient_messages"
+                      else (AMBIENT_MAX_MINUTES, 1))
+    if isinstance(value, bool):
+        return False, value, f"{key} must be a whole number"
+    try:
+        number = int(str(value).strip())
+    except (TypeError, ValueError):
+        return False, value, f"{key} must be a whole number"
+    if number < low_bound or number > top:
+        return False, value, f"{key} must be from {low_bound} to {top}"
+    return True, number, ""
+
+
+def ambient_limits(cfg):
+    """(max messages kept per room, minutes each is kept, senders mode) read
+    tolerantly from one platform block. A hand-edited bad value falls back to the
+    default, except that anything unreadable in `ambient_senders` is the narrower
+    \"approved\"."""
+    cfg = cfg or {}
+
+    def whole(name, default, low, high):
+        raw = cfg.get(name, default)
+        if isinstance(raw, bool):
+            return default
+        try:
+            return max(low, min(high, int(raw)))
+        except (TypeError, ValueError):
+            return default
+    count = whole("ambient_messages", 20, 0, AMBIENT_MAX_MESSAGES)
+    minutes = whole("ambient_minutes", 30, 1, AMBIENT_MAX_MINUTES)
+    senders = str(cfg.get("ambient_senders") or "approved").strip().lower()
+    return count, minutes, senders if senders in AMBIENT_SENDER_MODES else "approved"
 
 
 def set_value(platform, key, value):
     """Set one key on one platform. Returns (ok, error)."""
     if platform not in PLATFORMS:
         return False, f"unknown platform '{platform}'"
+    ok, value, err = coerce_setting(key, value)
+    if not ok:
+        return False, err
     cfg = load_config()
     before = cfg[platform].get(key)
     cfg[platform][key] = value

@@ -41,6 +41,12 @@ EVENTS (each line: ``v``, ``ts``, ``kind``, plus the fields below)
                                   saved exchange (status answered/interrupted)
     exchange_removed  reason, exchanges
                                   what a redo took out of the conversation
+    display       user, items     the thread items (cards, embeds, UI components)
+                                  the web UI actually DREW for that turn, exactly
+                                  as it drew them -- `{type, data}` each. The
+                                  other events say what happened; this one says
+                                  what was shown. A replay prefers it over cards
+                                  re-derived from `tool_run` events
 
 The conversation file and the console store keep serving the web UI exactly
 as before (60-exchange cap, 4,000-char console clip, shaped model context),
@@ -83,7 +89,7 @@ ARCHIVE_DIR = JARVIS_DIR / "events"
 ENCODING = "utf-8"
 FORMAT_VERSION = 2
 
-KINDS = ("user", "model_reply", "console", "tool_run", "reply", "exchange_removed")
+KINDS = ("user", "model_reply", "console", "tool_run", "reply", "exchange_removed", "display")
 
 # L.38 / D-6: the size above which `jarvis doctor` warns. Advisory only -- nothing is pruned.
 WARN_MB_DEFAULT = 500
@@ -250,6 +256,7 @@ def rebuild_console(conv_id):
             "kind": e.get("console_kind"), "tool": e.get("tool"),
             "provider": e.get("provider"), "stream": e.get("stream"),
             "text": e.get("text", ""),
+            **({"cls": e["cls"]} if e.get("cls") is not None else {}),
         })
     return lines
 
@@ -301,7 +308,7 @@ def rebuild_exchanges(conv_id, derive_extras=False):
     exchanges = []
     open_user = None   # (ts, text, picture fields) of a `user` event with no `reply` yet
     runs = []          # tool_run events since the turn began
-    kinds = ("user", "reply", "exchange_removed") + (("tool_run",) if derive_extras else ())
+    kinds = ("user", "reply", "exchange_removed", "display") + (("tool_run",) if derive_extras else ())
     for e in read(conv_id, kinds=kinds):
         kind = e["kind"]
         if kind == "tool_run":
@@ -344,6 +351,18 @@ def rebuild_exchanges(conv_id, derive_extras=False):
                 ex["extras"] = extras
             runs = []
             exchanges.append(ex)
+        elif kind == "display":
+            # What the UI drew for a finished turn: it belongs to the newest
+            # exchange with the same user text (the same matching the
+            # conversation file's own late patch uses -- see
+            # conversations.save_display). Later wins.
+            items = e.get("items")
+            want = (e.get("user") or "").strip()
+            if isinstance(items, list):
+                for ex in reversed(exchanges):
+                    if (ex.get("user") or "").strip() == want:
+                        ex["display"] = items
+                        break
         elif kind == "exchange_removed":
             n = len(e.get("exchanges") or [])
             if n:

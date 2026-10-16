@@ -136,16 +136,36 @@ function fakeRes() {
   }
 
   {
-    const code = slice(app, "async function loadAskTraceForConv(convId) {", "// Maps a console_store {kind, text} line", "loadAskTraceForConv");
+    const code = slice(app, "async function loadAskTraceForConv(convId, { force = false } = {}) {", "// Maps a console_store {kind, text} line", "loadAskTraceForConv");
     const seen = [];
-    const state = { askTraceByConv: {}, activeConversationId: "c1" };
+    const state = { askTraceByConv: {}, askSummaryByConv: {}, askConsoleView: "raw", activeConversationId: "c1" };
     const Api = { getConsole: async (id, opts) => { seen.push(opts); return { lines: [{ kind: "tool-call", text: "x", turn: "t" }] }; } };
-    const askLineFromStoredEntry = (l) => ({ text: l.text, cls: "k" });
-    const fn = new Function("state", "Api", "askLineFromStoredEntry", code + "; return loadAskTraceForConv;")(state, Api, askLineFromStoredEntry);
+    // The loader hands the stored lines to buildAskTraceViews (tested in verify_ask_trace_replay.js);
+    // here it is a stub, so this stays a test of WHAT the loader asks for and where it files the result.
+    const buildAskTraceViews = (stored) => { const v = stored.map((l) => ({ text: l.text, cls: "k" })); return { raw: v, summary: v }; };
+    const fn = new Function("state", "Api", "buildAskTraceViews", code + "; return loadAskTraceForConv;")(state, Api, buildAskTraceViews);
     await fn("c1");
     check("loadAskTraceForConv: asks for the full history from the event log",
       seen.length === 1 && seen[0].full === true && seen[0].surface === "ask" && seen[0].afterLastClear === true, seen);
     check("loadAskTraceForConv: still hydrates the trace", state.askTraceByConv.c1 && state.askTraceByConv.c1.length === 1, state.askTraceByConv);
+
+    // A live trace this session recorded is never overwritten, and Raw view needs no summary fetch.
+    const live = [{ text: "live", cls: "sys" }];
+    state.askTraceByConv.c2 = live; state.activeConversationId = "c2"; seen.length = 0;
+    await fn("c2");
+    check("loadAskTraceForConv: a live raw trace is left alone, and with nothing else needed it does not even fetch",
+      state.askTraceByConv.c2 === live && seen.length === 0, { seen, trace: state.askTraceByConv.c2 });
+    // Summary view with a live raw trace: fetch for the summary only; the raw list stays.
+    state.askConsoleView = "summary";
+    await fn("c2");
+    check("loadAskTraceForConv: Summary view fetches the summary and still leaves the live raw trace alone",
+      state.askTraceByConv.c2 === live && state.askSummaryByConv.c2 && state.askSummaryByConv.c2.length === 1, state);
+    // {force:true} refreshes a summary that already exists (right after an ask finishes).
+    state.askSummaryByConv.c2 = [{ text: "stale", cls: "k" }]; seen.length = 0;
+    await fn("c2", { force: true });
+    check("loadAskTraceForConv: force refreshes an existing summary",
+      seen.length === 1 && state.askSummaryByConv.c2[0].text === "x", { seen, summary: state.askSummaryByConv.c2 });
+    state.askConsoleView = "raw"; state.activeConversationId = "c1";
   }
 
   check("the Live output history load asks for full too",

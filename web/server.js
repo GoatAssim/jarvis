@@ -1070,6 +1070,58 @@ app.post("/api/console/:id/clear", requireJarvis, async (req, res) => {
   }
 });
 
+// The Ask panel's console lines EXACTLY as the page painted them (Raw view). The
+// page sends them in small batches while an ask runs and once more when it ends;
+// they are saved by `jarvis console-append-trace` as kind "trace" in the same
+// per-conversation store the summary events live in (console_store.append_trace).
+// Bounded here as well as in the CLI (express.json already refuses a body over 1 MB).
+app.post("/api/console/:id/trace", requireJarvis, async (req, res) => {
+  if (!isValidConversationId(req.params.id)) {
+    return res.status(400).json({ error: "Invalid conversation id." });
+  }
+  const lines = Array.isArray(req.body?.lines) ? req.body.lines : null;
+  if (!lines) return res.status(400).json({ error: "lines must be a list." });
+  const payload = JSON.stringify({
+    turn: typeof req.body.turn === "string" ? req.body.turn.slice(0, 64) : "",
+    lines: lines.slice(0, 2000).map((l) => ({
+      text: typeof l?.text === "string" ? l.text : "",
+      cls: typeof l?.cls === "string" ? l.cls.slice(0, 24) : "sys",
+    })),
+  });
+  if (payload.length > 1_000_000) return res.status(413).json({ error: "Too much console text in one request." });
+  const result = await runJarvisOnce(["console-append-trace", req.params.id], 10000, {}, payload);
+  try {
+    const parsed = JSON.parse(result.stdout);
+    if (parsed.error) return res.status(400).json(parsed);
+    return res.json(parsed);
+  } catch (e) {
+    res.status(500).json({ error: result.error || result.stderr || `Couldn't save console lines: ${e.message}` });
+  }
+});
+
+// What the page actually DREW for a finished turn (cards, embeds, UI components),
+// saved on that exchange as drawn -- `jarvis conv-save-display`, conversations.save_display.
+app.post("/api/conversations/:id/display", requireJarvis, async (req, res) => {
+  if (!isValidConversationId(req.params.id)) {
+    return res.status(400).json({ error: "Invalid conversation id." });
+  }
+  const items = Array.isArray(req.body?.items) ? req.body.items : null;
+  if (!items) return res.status(400).json({ error: "items must be a list." });
+  const payload = JSON.stringify({
+    user: typeof req.body.user === "string" ? req.body.user : null,
+    items,
+  });
+  if (payload.length > 1_000_000) return res.status(413).json({ error: "Too much to keep for one turn." });
+  const result = await runJarvisOnce(["conv-save-display", req.params.id], 10000, {}, payload);
+  try {
+    const parsed = JSON.parse(result.stdout);
+    if (parsed.error) return res.status(400).json(parsed);
+    return res.json(parsed);
+  } catch (e) {
+    res.status(500).json({ error: result.error || result.stderr || `Couldn't save the thread: ${e.message}` });
+  }
+});
+
 // ---------------------------------------------------------------------------
 // K.2.5.3 (Part E.5) — the Ask Jarvis "Console" filter's own preference:
 // which categories of the command-prompt trace are hidden. "Where the
@@ -1357,6 +1409,8 @@ app.post("/api/channels/people/:platform/:id/remove", requireJarvis, async (req,
 // --yes for the same reason), and "preview" runs the same code with nothing
 // written. Both are human-only paths - no model tool reaches them.
 const CHANNEL_NOTE_ID = /^[a-f0-9]{8}$/;
+// A saved note or remembered fact may be allowed or barred in shared-room replies.
+const CHANNEL_GROUP_FLAGS = new Set(["on", "off", "inherit"]);
 const CHANNEL_NOTE_OK = (v) => typeof v === "string" && v.trim().length > 0 && v.length <= 160 && !/[\x00-\x1f\x7f]/.test(v) && !v.trim().startsWith("-");
 
 app.post("/api/channels/people/:platform/:id/note", requireJarvis, async (req, res) => {
@@ -1365,9 +1419,14 @@ app.post("/api/channels/people/:platform/:id/note", requireJarvis, async (req, r
   if (!CHANNEL_USER_ID.test(id)) return res.status(400).json({ error: "Invalid user id." });
   const action = req.body?.action;
   const note = req.body?.note;
-  if (action !== "edit" && action !== "delete") return res.status(400).json({ error: "action must be edit or delete." });
+  if (action !== "edit" && action !== "delete" && action !== "groups") return res.status(400).json({ error: "action must be edit, delete or groups." });
   if (typeof note !== "string" || !CHANNEL_NOTE_ID.test(note)) return res.status(400).json({ error: "Invalid note." });
   const args = ["channels-note", platform, id, action, note];
+  if (action === "groups") {
+    // May this note be used in a reply posted to a shared room (channel spaces S6).
+    if (!CHANNEL_GROUP_FLAGS.has(req.body?.value)) return res.status(400).json({ error: "value must be on, off or inherit." });
+    args.push(req.body.value);
+  }
   if (action === "edit") {
     if (!CHANNEL_NOTE_OK(req.body?.text)) return res.status(400).json({ error: "A note is one line, up to 160 characters." });
     args.push(req.body.text.trim());
@@ -1438,6 +1497,25 @@ app.post("/api/channels/platform/:platform/master-tools", requireJarvis, async (
   sendChannelResult(await runJarvisOnce(args, 10000), res);
 });
 
+// Shared-room behaviour (channel spaces S6 / S6a): whether saved notes and memories
+// are used in group replies, and how much of a room's other chatter Jarvis reads.
+// Only these four keys, each validated again by `channels-set`; no token crosses it.
+const ROOM_SETTINGS = {
+  group_recall: (v) => typeof v === "boolean" ? (v ? "on" : "off") : null,
+  ambient_messages: (v) => Number.isInteger(v) && v >= 0 && v <= 100 ? String(v) : null,
+  ambient_minutes: (v) => Number.isInteger(v) && v >= 1 && v <= 1440 ? String(v) : null,
+  ambient_senders: (v) => v === "approved" || v === "anyone" ? v : null,
+};
+app.post("/api/channels/platform/:platform/room-setting", requireJarvis, async (req, res) => {
+  const { platform } = req.params;
+  if (!CHANNEL_PLATFORMS.has(platform)) return res.status(400).json({ error: "Unknown platform." });
+  const key = req.body?.key;
+  if (typeof key !== "string" || !Object.prototype.hasOwnProperty.call(ROOM_SETTINGS, key)) return res.status(400).json({ error: "Unknown setting." });
+  const value = ROOM_SETTINGS[key](req.body?.value);
+  if (value === null) return res.status(400).json({ error: "Invalid value for " + key + "." });
+  sendChannelResult(await runJarvisOnce(["channels-set", platform, key, value], 10000), res);
+});
+
 app.get("/api/channels/platform/:platform/master-tools", requireJarvis, async (req, res) => {
   const { platform } = req.params;
   if (!CHANNEL_PLATFORMS.has(platform)) return res.status(400).json({ error: "Unknown platform." });
@@ -1475,7 +1553,7 @@ app.get("/api/channels/denied", requireJarvis, async (req, res) => {
 // snowflake, and "-x" must never reach the CLI's flag parser.
 const CHANNEL_SNOWFLAKE = /^[0-9]{1,25}$/;
 const SERVER_KINDS = new Set(["guild", "channel"]);
-const SERVER_SWITCHES = new Set(["enabled", "tools", "mention"]);
+const SERVER_SWITCHES = new Set(["enabled", "tools", "mention", "ambient"]);
 const SERVER_VALUES = new Set(["on", "off", "inherit"]);
 
 app.get("/api/channels/servers", requireJarvis, async (req, res) => {
@@ -1660,8 +1738,8 @@ app.post("/api/channels/people/:platform/:id/memory", requireJarvis, async (req,
   const who = channelPersonArgs(req, res);
   if (!who) return;
   const action = req.body?.action;
-  if (!["add", "approve", "retire", "forget", "summarize"].includes(action)) {
-    return res.status(400).json({ error: "action must be add, approve, retire, forget or summarize." });
+  if (!["add", "approve", "retire", "forget", "summarize", "groups"].includes(action)) {
+    return res.status(400).json({ error: "action must be add, approve, retire, forget, summarize or groups." });
   }
   const args = ["channels-memory", who.platform, who.id, action];
   let timeout = 10000;
@@ -1683,6 +1761,10 @@ app.post("/api/channels/people/:platform/:id/memory", requireJarvis, async (req,
       return res.status(400).json({ error: "Invalid record." });
     }
     args.push(record);
+    if (action === "groups") {
+      if (!CHANNEL_GROUP_FLAGS.has(req.body?.value)) return res.status(400).json({ error: "value must be on, off or inherit." });
+      args.push(req.body.value);
+    }
   }
   sendChannelResult(await runJarvisOnce(args, timeout), res);
 });

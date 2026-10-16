@@ -719,6 +719,48 @@ def delete_note(platform, user_id, note_id):
     return people.delete_note(platform, rec["user_id"], note_id)
 
 
+def _flag_before(rec, note_id):
+    for item in people.list_notes(rec):
+        if item["id"] == str(note_id or ""):
+            return item["groups"]
+    return None
+
+
+def set_note_groups(platform, user_id, note_id, value):
+    """May this note be used in group replies? on / off / inherit. Returns
+    (ok, error, notes). Owner-side only (panel / CLI): no model tool reaches it, and
+    the change log gets the note's id and the new value, never its text. Editing a
+    note's text resets it to inherit (the id is a hash of the text)."""
+    rec, err = _registered(platform, user_id)
+    if rec is None:
+        return False, err, []
+    before = _flag_before(rec, note_id)
+    ok, error, notes = people.set_note_groups(platform, rec["user_id"], note_id, value)
+    if ok and before != str(value).strip().lower():
+        changelog.record(platform, changelog.K_RECALL, rec["user_id"], item="note",
+                         ref=note_id, value=str(value).strip().lower())
+    return ok, error, notes
+
+
+def set_memory_groups(platform, user_id, record_id, value):
+    """May this remembered fact or summary be used in group replies? on / off /
+    inherit. Returns (ok, error, record). Same rules as `set_note_groups`."""
+    from . import person_memory
+    rec, err = _registered(platform, user_id)
+    if rec is None:
+        return False, err, None
+    key = people.key(platform, rec["user_id"])
+    before = person_memory.group_flag(person_memory.get(key, record_id) or {})
+    out, error = person_memory.set_groups(key, record_id, value)
+    if out is None:
+        return False, error, None
+    after = person_memory.group_flag(out)
+    if before != after:
+        changelog.record(platform, changelog.K_RECALL, rec["user_id"], item="memory",
+                         ref=record_id, value=after)
+    return True, "", out
+
+
 def forget_refusal(platform, rec):
     """Why this person cannot be forgotten, or "" when they can. One place, so
     the preview and the real thing cannot disagree."""

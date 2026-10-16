@@ -36,6 +36,17 @@ the source of truth. channels/episodes.py writes them (L.21 P4), always as
 `proposed`: a summary is a model's reading of what a guest wrote, so it reaches
 the model only after the owner approves it.
 
+IN A SHARED ROOM (channel spaces S6 / D2)
+-----------------------------------------
+A reply in a server channel or a group chat is posted for everyone there. Facts and
+episodes (never rules) are therefore left out of the block in a room unless allowed:
+a record's optional `groups` field is "on" or "off", and a record without it is
+"inherit" and follows the platform's `group_recall` switch (default off). "off"
+always wins, "on" wins over a switch that is off. Old records need no migration and
+anything the model or a guest creates starts as inherit. Only the owner sets the
+field (`set_groups`, through the CLI / panel routes); no model tool reads or writes it.
+Standing rules are never gated: they only ever narrow what Jarvis says.
+
 INSTRUCTIONS (L.22)
 -------------------
 An instruction is a record with `kind: instruction` and an `instruction`
@@ -437,6 +448,50 @@ def _tokens(text):
 
 NO_HISTORY = ("No earlier conversation or saved facts about this person. "
               "Do not claim to remember anything about them.")
+# Said instead of NO_HISTORY when saved items exist but a shared room keeps them out.
+# It must not say they exist: it only tells the model not to claim a memory here.
+ROOM_NO_RECALL = ("You are in a shared room, where you do not recall saved details "
+                  "about people. Do not claim to remember anything about this "
+                  "person here.")
+GROUP_VALUES = ("on", "off", "inherit")
+
+
+def group_flag(rec):
+    """"on" / "off" / "inherit" for one record; anything else is inherit."""
+    value = rec.get("groups") if isinstance(rec, dict) else None
+    return value if value in ("on", "off") else "inherit"
+
+
+def room_allows(rec, master):
+    """May this record be used in a shared room? `master` is group_recall."""
+    flag = group_flag(rec)
+    if flag == "off":
+        return False
+    if flag == "on":
+        return True
+    return master is True
+
+
+def set_groups(person_key, rid, value):
+    """Set one record's room flag: on / off / inherit (inherit removes the field).
+    Returns (record, error). Owner-side only: nothing the model can call reaches it."""
+    value = str(value or "").strip().lower()
+    if value not in GROUP_VALUES:
+        return None, "value must be on, off or inherit"
+    records = _read(person_key)
+    for rec in records:
+        if rec.get("id") == str(rid):
+            if rec.get("kind") == "instruction":
+                return None, ("standing rules always apply, in a room too; "
+                              "there is nothing to switch")
+            if value == "inherit":
+                rec.pop("groups", None)
+            else:
+                rec["groups"] = value
+            if not _write(person_key, records):
+                return None, "could not write the memory file"
+            return rec, ""
+    return None, f"no record {rid} for that person"
 HEADER = ("WHAT YOU HAVE SAVED ABOUT THIS PERSON (these items only -- anything "
           "not listed here you do not remember: say so instead of guessing; "
           "'possibly' items are unconfirmed):")
@@ -475,7 +530,7 @@ def _line(rec):
 
 
 def context_block(person_keys, message, budget_tokens=DEFAULT_BUDGET_TOKENS,
-                  now=None, skip_texts=()):
+                  now=None, skip_texts=(), room_recall=None):
     """What to tell the model about this person for THIS message.
 
     `person_keys` is the person's own key, plus the linked account's when there
@@ -483,6 +538,11 @@ def context_block(person_keys, message, budget_tokens=DEFAULT_BUDGET_TOKENS,
     unexpired facts and episodes qualify; they are ranked against the message
     and cut to `budget_tokens`. `skip_texts` are note texts already in the
     identity block, so an approved copy of a note is not said twice.
+
+    `room_recall` is None everywhere but a shared room (behaviour unchanged). In a
+    room it is the group_recall switch and each record is used only if
+    `room_allows` says so; `withheld` in the result counts the ones kept out, and
+    `ids` only ever lists records that were actually put in the block.
 
     No records at all AND a message that reaches for the past ("do you
     remember...", "last time...") -> the NO_HISTORY sentence, so the model has
@@ -504,11 +564,23 @@ def context_block(person_keys, message, budget_tokens=DEFAULT_BUDGET_TOKENS,
                 pool.append(rec)
     skip = {str(t).lower() for t in skip_texts if t}
     pool = [r for r in pool if str(r.get("text") or "").lower() not in skip]
+    withheld = 0
+    if room_recall is not None:
+        allowed = [r for r in pool if room_allows(r, room_recall)]
+        withheld = len(pool) - len(allowed)
+        pool = allowed
     if not any_record:
         if not asks_about_past(message):
-            return {"block": "", "ids": [], "tokens": 0, "empty": True}
+            return {"block": "", "ids": [], "tokens": 0, "empty": True, "withheld": 0}
         return {"block": NO_HISTORY, "ids": [], "tokens": _tokens(NO_HISTORY),
-                "empty": True}
+                "empty": True, "withheld": 0}
+    if withheld and not pool:
+        # Something is saved but this room keeps it out. Say nothing unless the
+        # message reaches for the past; then tell the model not to invent a memory.
+        if asks_about_past(message):
+            return {"block": ROOM_NO_RECALL, "ids": [], "tokens": _tokens(ROOM_NO_RECALL),
+                    "empty": False, "withheld": withheld}
+        return {"block": "", "ids": [], "tokens": 0, "empty": False, "withheld": withheld}
     scored = []
     for rec in pool:
         sim = _similarity(message, rec.get("text"))
@@ -526,9 +598,9 @@ def context_block(person_keys, message, budget_tokens=DEFAULT_BUDGET_TOKENS,
         ids.append(rec.get("id"))
         used += cost
     if not lines:
-        return {"block": "", "ids": [], "tokens": 0, "empty": False}
+        return {"block": "", "ids": [], "tokens": 0, "empty": False, "withheld": withheld}
     return {"block": HEADER + "\n" + "\n".join(lines), "ids": ids,
-            "tokens": used, "empty": False}
+            "tokens": used, "empty": False, "withheld": withheld}
 
 
 # --------------------------------------------------------------------------

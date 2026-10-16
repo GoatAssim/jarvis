@@ -1780,8 +1780,12 @@
     activeConversationId: null,  // which one the open thread + next ask belong to
     askConversationId: null,     // which conversation the in-flight ask/redo actually belongs to
     convoSearch: "",
-    askTraceByConv: {},          // convId -> [{text, cls}] recorded "commands Jarvis runs" lines,
-                                  // so switching away and back doesn't lose them (see askPromptLine)
+    askTraceByConv: {},          // convId -> [{text, cls}] the RAW console: every line exactly as painted,
+                                  // so switching away and back doesn't lose them (see askPromptLine).
+                                  // Also what gets saved (see queueAskTraceLine) and reloaded.
+    askSummaryByConv: {},        // convId -> [{text, cls}] the SUMMARY view, rebuilt from the console
+                                  // store's event lines ("$ trying groq", "answered"); never live-written
+    askConsoleView: "raw",       // "raw" | "summary" -- console only; the thread is always shown as saved
 
     // Provider-override picker — list of {name, model, type} from
     // /api/ai/providers (already-eligible-and-priority-ordered, see that
@@ -1911,6 +1915,10 @@
       return api("GET", `/api/console/${encodeURIComponent(id)}${qs_ ? `?${qs_}` : ""}`);
     },
     clearConsole: (id) => api("POST", `/api/console/${encodeURIComponent(id)}/clear`),
+    // The Ask console's lines exactly as painted (Raw view) and the thread items a
+    // finished turn actually drew (cards, embeds, UI components), both saved as-is.
+    appendAskTrace: (id, body) => api("POST", `/api/console/${encodeURIComponent(id)}/trace`, body),
+    saveThreadDisplay: (id, body) => api("POST", `/api/conversations/${encodeURIComponent(id)}/display`, body),
     // K.2.5.3 — the Live Feed filter's own preference (kinds/search/tool/
     // turn scope), server-persisted the same way favorites are, so it
     // survives a reload instead of resetting to "show everything" (E.5's
@@ -2696,42 +2704,101 @@
     return null; // "narration" and anything not yet mapped
   }
 
-  // Hydrates state.askTraceByConv[convId] from the persisted console store
-  // (Part E / K.2.5.1) the first time this tab sees this conversation, so a
-  // genuine reload, a second tab, or a different browser can still show the
-  // Ask panel's right-side trace — not just "switching away and back within
-  // the same running tab", which already worked off in-memory state alone.
-  // Guarded the same way seedThreadExtrasFromRecord() is: if this session
-  // already recorded (or began recording) a live trace for this
-  // conversation, that's kept as-is and this never overwrites it.
-  async function loadAskTraceForConv(convId) {
-    if (convId == null || state.askTraceByConv[convId]) return;
+  // The Ask console has two views of the same saved history:
+  //   RAW     -- the lines exactly as they were painted ("trace" lines: the [tools]
+  //              auto-discovery, "asking groq (key 1/4)...", the token-cost lines...).
+  //   SUMMARY -- the event lines the console store has always kept ("$ jarvis",
+  //              "$ trying  groq (key 1/4)", "answered"), via askLineFromStoredEntry.
+  // Pure: takes the stored lines (any mix of kinds, oldest first) and returns both.
+  //
+  // A turn saved before raw lines existed (or one whose page closed before its lines
+  // were sent) has only summary lines. Raw view still shows it -- as its summary,
+  // with a note saying so -- rather than silently skipping it. A summary turn counts
+  // as "covered by raw" when a raw line was saved between its first line and the
+  // first line of the next summary turn.
+  const ASK_TRACE_SEPARATOR = "\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500";
+  const ASK_SUMMARY_LIVE_HINT = "(live \u2014 switch to Raw to watch this ask's console; the summary fills in when it finishes)";
+  const ASK_TRACE_SUMMARY_ONLY_NOTE = "(summary only \u2014 the raw console wasn't saved for this turn)";
+  function buildAskTraceViews(stored) {
+    const lines = Array.isArray(stored) ? stored : [];
+    const summary = [];
+    {
+      let lastTurn;
+      let sawFirstTurn = false;
+      for (const line of lines) {
+        if (line.kind === "trace") continue;
+        const mapped = askLineFromStoredEntry(line);
+        if (!mapped) continue;
+        if (sawFirstTurn && line.turn !== lastTurn) summary.push({ text: ASK_TRACE_SEPARATOR, cls: "sys" });
+        lastTurn = line.turn;
+        sawFirstTurn = true;
+        summary.push(mapped);
+      }
+    }
+    const firstSeqOfTurn = [];
+    const seenTurns = new Set();
+    for (const line of lines) {
+      if (line.kind === "trace" || seenTurns.has(line.turn)) continue;
+      seenTurns.add(line.turn);
+      firstSeqOfTurn.push({ turn: line.turn, seq: line.seq });
+    }
+    const traceSeqs = lines.filter((l) => l.kind === "trace").map((l) => l.seq);
+    const covered = new Set();
+    firstSeqOfTurn.forEach((t, i) => {
+      const end = i + 1 < firstSeqOfTurn.length ? firstSeqOfTurn[i + 1].seq : Infinity;
+      if (traceSeqs.some((q) => q >= t.seq && q < end)) covered.add(t.turn);
+    });
+    const raw = [];
+    let currentBlock = null;
+    for (const line of lines) {
+      let mapped;
+      let block;
+      if (line.kind === "trace") {
+        mapped = { text: line.text || "", cls: line.cls || "sys" };
+        block = "t:" + line.turn;
+      } else if (!covered.has(line.turn)) {
+        mapped = askLineFromStoredEntry(line);
+        if (!mapped) continue;
+        block = "p:" + line.turn;
+      } else {
+        continue;
+      }
+      if (block !== currentBlock) {
+        if (currentBlock !== null) raw.push({ text: ASK_TRACE_SEPARATOR, cls: "sys" });
+        if (block.startsWith("p:")) raw.push({ text: ASK_TRACE_SUMMARY_ONLY_NOTE, cls: "sys" });
+        currentBlock = block;
+      }
+      raw.push(mapped);
+    }
+    return { raw, summary };
+  }
+
+  // Hydrates the Ask console from the persisted console store (Part E / K.2.5.1)
+  // the first time this tab sees this conversation, so a genuine reload, a second
+  // tab, or a different browser can still show the Ask panel's right-side trace --
+  // not just "switching away and back within the same running tab".
+  // A live trace this session already recorded is never overwritten: the raw list
+  // is only filled when absent. The summary list is filled when absent too, or
+  // refreshed with {force:true} (right after an ask finishes, when it has changed).
+  async function loadAskTraceForConv(convId, { force = false } = {}) {
+    if (convId == null) return;
+    const needRaw = !state.askTraceByConv[convId];
+    const needSummary = force || (state.askConsoleView === "summary" && !state.askSummaryByConv[convId]);
+    if (!needRaw && !needSummary) return;
     let result = null;
     try {
-      result = await Api.getConsole(convId, { surface: "ask", afterLastClear: true, limit: 2000, full: true });
+      result = await Api.getConsole(convId, { surface: "ask", afterLastClear: true, limit: 5000, full: true });
     } catch {
-      result = null; // no ask history yet for this conversation — that's fine
+      result = null; // no ask history yet for this conversation -- that's fine
     }
-    // The conversation may have been switched again while this was in
-    // flight, or a live run for it may have started and already begun
-    // writing its own trace — either way, don't clobber.
-    if (convId !== state.activeConversationId || state.askTraceByConv[convId]) return;
+    // The conversation may have been switched again while this was in flight, or a
+    // live run for it may have started and already begun writing its own trace.
+    if (convId !== state.activeConversationId) return;
     const stored = (result && result.lines) || [];
     if (!stored.length) return;
-    const lines = [];
-    let lastTurn;
-    let sawFirstTurn = false;
-    stored.forEach((line) => {
-      const mapped = askLineFromStoredEntry(line);
-      if (!mapped) return;
-      if (sawFirstTurn && line.turn !== lastTurn) {
-        lines.push({ text: "\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500", cls: "sys" });
-      }
-      lastTurn = line.turn;
-      sawFirstTurn = true;
-      lines.push(mapped);
-    });
-    state.askTraceByConv[convId] = lines;
+    const views = buildAskTraceViews(stored);
+    if (!state.askTraceByConv[convId] && views.raw.length) state.askTraceByConv[convId] = views.raw;
+    if (views.summary.length && (force || !state.askSummaryByConv[convId])) state.askSummaryByConv[convId] = views.summary;
   }
 
   // Maps a console_store {kind, text} line to the same {cls, kind} shape
@@ -2996,7 +3063,20 @@
         // dumps, etc.) get filed after it rather than merged into this one.
         if (msg.code === 0 && state.askConversationId != null) {
           const convId = state.askConversationId;
+          // Save what this turn actually DREW (cards, embeds, UI components) as drawn,
+          // before the bucket counter moves on to the next turn.
+          saveDisplayForTurn(convId, state.exchangeCountByConv[convId] || 0);
           state.exchangeCountByConv[convId] = (state.exchangeCountByConv[convId] || 0) + 1;
+        }
+        if (state.askConversationId != null) {
+          // The summary changed with this turn: drop the stale copy, and if that is the
+          // view on screen, load the fresh one now.
+          const doneConv = state.askConversationId;
+          delete state.askSummaryByConv[doneConv];
+          if (state.askConsoleView === "summary" && doneConv === state.activeConversationId) {
+            flushAskTrace().then(() => loadAskTraceForConv(doneConv, { force: true }))
+              .then(() => { if (doneConv === state.activeConversationId) renderAskTraceForConv(doneConv); });
+          }
         }
         state.askConversationId = null;
         break;
@@ -3011,6 +3091,7 @@
         askPromptEnd(1, null, msg.message);
         setAskStatus("error", "error");
         notifyTaskDone(msg.message, true);
+        if (state.askConversationId != null) delete state.askSummaryByConv[state.askConversationId];
         state.askConversationId = null;
         break;
     }
@@ -3622,7 +3703,11 @@
     insertIntoAskThread(card);
     // Recorded as a thread extra so a page reload replays it, exactly like
     // a screenshot or a download card.
-    pushThreadExtra({ type: "uiBubble", data: { title: event.title, body: event.body, level: lvl } });
+    // (This used to pass one object to a (convId, type, data) function, so the bubble was
+    // filed under the key "[object Object]" and never saved. The running ask's conversation
+    // owns it; with nothing running, the open one does.)
+    pushThreadExtra(state.askConversationId ?? state.activeConversationId, "uiBubble",
+      { title: event.title, body: event.body, level: lvl });
     askThreadScrollToEnd();
   });
 
@@ -3863,11 +3948,14 @@
         const ftype = (parts[5] || "file").trim();
         const sizeBytes = parts[6] && parts[6] !== "-" ? Number(parts[6]) : null;
         const fullPath = (parts[7] || "").trim();
-        showAskPresentFile({
+        const presentInfo = {
           jobId: jobId === "-" ? null : jobId,
           filename: filename === "-" ? null : filename,
           name, type: ftype, sizeBytes, path: fullPath,
-        });
+        };
+        showAskPresentFile(presentInfo);
+        // Recorded like the other cards, so it is part of what the turn drew.
+        pushThreadExtra(state.askConversationId, "presentFile", presentInfo);
         askPromptLine(`$ present  ${name || fullPath}`, "tool");
         return;
       }
@@ -4355,13 +4443,20 @@
   // and only touches the actual DOM if that conversation happens to be the
   // one on screen right now, so a background ask can never paint into (or
   // clobber) an unrelated, currently-visible conversation's panel.
+  //
+  // Every line is ALSO queued to be saved exactly as painted (queueAskTraceLine), so a
+  // reload shows the console that was on screen, not a rebuilt summary of it.
   function askPromptLine(text, cls) {
     const convId = state.askConversationId;
     if (convId != null) {
       if (!state.askTraceByConv[convId]) state.askTraceByConv[convId] = [];
       state.askTraceByConv[convId].push({ text, cls });
+      queueAskTraceLine(convId, text, cls);
     }
     if (!isViewingAskThread()) return;
+    // Summary view never paints the live stream (it has no summary line to show for it
+    // yet); the line above is still recorded and saved, and renderAskTraceForConv says so.
+    if (state.askConsoleView !== "raw") return;
     const term = askPromptTerm();
     askPromptClearIdle();
     const cur = qs(".ask-prompt__cursor", term);
@@ -4373,10 +4468,83 @@
     scheduleAskConsoleUi();
   }
 
+  // --- saving the console as painted ---------------------------------------------
+  // Lines wait in askTraceQueue and are sent in small batches (every ~1.5 s while an ask
+  // runs, and once more when it ends) to POST /api/console/:id/trace. One chain, so batches
+  // reach disk in order; a failed batch stays queued and is retried a few times, then
+  // dropped -- a failed save must never get in the way of the ask itself.
+  const askTraceQueue = [];   // [{convId, turn, text, cls, tries}]
+  const askTraceTurnByConv = {};
+  let askTraceTimer = null;
+  let askTraceChain = Promise.resolve();
+  const ASK_TRACE_MAX_QUEUE = 10000;
+  const ASK_TRACE_MAX_TRIES = 3;
+
+  function queueAskTraceLine(convId, text, cls) {
+    if (typeof convId !== "string" || !convId) return;
+    if (!askTraceTurnByConv[convId]) askTraceTurnByConv[convId] = `b${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`;
+    askTraceQueue.push({ convId, turn: askTraceTurnByConv[convId], text: String(text), cls: String(cls || "sys"), tries: 0 });
+    if (askTraceQueue.length > ASK_TRACE_MAX_QUEUE) askTraceQueue.splice(0, askTraceQueue.length - ASK_TRACE_MAX_QUEUE);
+    if (!askTraceTimer) askTraceTimer = setTimeout(() => { askTraceTimer = null; flushAskTrace(); }, 1500);
+  }
+
+  function flushAskTrace() {
+    clearTimeout(askTraceTimer);
+    askTraceTimer = null;
+    askTraceChain = askTraceChain.then(async () => {
+      while (askTraceQueue.length) {
+        const head = askTraceQueue[0];
+        let n = 0;
+        while (n < askTraceQueue.length && n < 1000
+               && askTraceQueue[n].convId === head.convId && askTraceQueue[n].turn === head.turn) n++;
+        try {
+          await Api.appendAskTrace(head.convId, {
+            turn: head.turn,
+            lines: askTraceQueue.slice(0, n).map(({ text, cls }) => ({ text, cls })),
+          });
+          askTraceQueue.splice(0, n);
+        } catch {
+          head.tries += 1;
+          if (head.tries >= ASK_TRACE_MAX_TRIES) askTraceQueue.splice(0, n);
+          else askTraceTimer = askTraceTimer || setTimeout(() => { askTraceTimer = null; flushAskTrace(); }, 5000);
+          return;
+        }
+      }
+    });
+    return askTraceChain;
+  }
+
+  // Page closing mid-ask: send what is left without waiting for the chain.
+  window.addEventListener("pagehide", () => {
+    if (!askTraceQueue.length || !navigator.sendBeacon) return;
+    const groups = new Map();
+    for (const it of askTraceQueue) {
+      const key = `${it.convId}\u0000${it.turn}`;
+      if (!groups.has(key)) groups.set(key, { convId: it.convId, turn: it.turn, lines: [] });
+      groups.get(key).lines.push({ text: it.text, cls: it.cls });
+    }
+    for (const g of groups.values()) {
+      try {
+        navigator.sendBeacon(`/api/console/${encodeURIComponent(g.convId)}/trace`,
+          new Blob([JSON.stringify({ turn: g.turn, lines: g.lines })], { type: "application/json" }));
+      } catch { /* best effort */ }
+    }
+    askTraceQueue.length = 0;
+  });
+
   function askPromptBegin() {
-    if (state.askConversationId != null) state.askTraceByConv[state.askConversationId] = [];
+    if (state.askConversationId != null) {
+      state.askTraceByConv[state.askConversationId] = [];
+      // A new ask is a new turn in the saved console: its lines get their own turn id.
+      askTraceTurnByConv[state.askConversationId] = null;
+    }
     setAskPromptState("live", true);
     askPromptLine("$ jarvis", "cmd");
+    if (state.askConsoleView === "summary" && isViewingAskThread()) {
+      const term = askPromptTerm();
+      askPromptClearIdle();
+      term.appendChild(el("div", { class: "ask-prompt-line ask-prompt-line--sys" }, ASK_SUMMARY_LIVE_HINT));
+    }
     askPromptCursor(true);
   }
 
@@ -4387,6 +4555,7 @@
     else askPromptLine(`exit ${code}`, "fail");
     askPromptCursor(false);
     setAskPromptState("idle", false);
+    flushAskTrace();
   }
 
   function askPromptReset() {
@@ -4402,7 +4571,12 @@
   // right". If that conversation's ask is still actively running, restores
   // the live cursor/state too.
   function renderAskTraceForConv(convId) {
-    const lines = state.askTraceByConv[convId];
+    const summaryView = state.askConsoleView === "summary";
+    const stillRunningNow = state.running && state.askConversationId === convId;
+    let lines = summaryView ? state.askSummaryByConv[convId] : state.askTraceByConv[convId];
+    if (summaryView && stillRunningNow) {
+      lines = (lines || []).concat([{ text: ASK_SUMMARY_LIVE_HINT, cls: "sys" }]);
+    }
     const term = askPromptTerm();
     if (!lines || !lines.length) {
       askPromptReset();
@@ -4614,6 +4788,42 @@
     if (e.key === "Escape" && consoleFilterMenu && !consoleFilterMenu.hidden) closeAskConsoleMenu();
   });
   qs("#ask-console-hidden-chip")?.addEventListener("click", () => setAskHiddenKinds([]));
+
+  // Raw / Summary: which saved view of the console the PROMPT panel shows. Console only --
+  // the conversation thread has no such switch, it is always shown as it was saved.
+  // The choice is remembered in this browser (localStorage), unlike the category filter
+  // above: it is a reading preference, and keeping it out of web/data keeps that file's
+  // settings contract (settings_admin) untouched.
+  const ASK_CONSOLE_VIEW_KEY = "jarvis.askConsoleView";
+  try {
+    if (localStorage.getItem(ASK_CONSOLE_VIEW_KEY) === "summary") state.askConsoleView = "summary";
+  } catch { /* storage blocked -- stays raw */ }
+
+  function paintAskConsoleViewButton() {
+    const btn = qs("#btn-ask-console-view");
+    if (!btn) return;
+    const summaryView = state.askConsoleView === "summary";
+    btn.textContent = summaryView ? "Summary" : "Raw";
+    btn.title = summaryView
+      ? "Showing the readable summary of the console. Click for the raw console exactly as it was printed."
+      : "Showing the raw console exactly as it was printed. Click for the readable summary.";
+    btn.setAttribute("aria-pressed", summaryView ? "true" : "false");
+  }
+
+  async function setAskConsoleView(view) {
+    state.askConsoleView = view === "summary" ? "summary" : "raw";
+    try { localStorage.setItem(ASK_CONSOLE_VIEW_KEY, state.askConsoleView); } catch { /* best effort */ }
+    paintAskConsoleViewButton();
+    const convId = state.activeConversationId;
+    if (convId == null) return;
+    await loadAskTraceForConv(convId);
+    if (convId === state.activeConversationId) renderAskTraceForConv(convId);
+  }
+
+  qs("#btn-ask-console-view")?.addEventListener("click", () => {
+    setAskConsoleView(state.askConsoleView === "raw" ? "summary" : "raw");
+  });
+  paintAskConsoleViewButton();
 
   // Jarvis's own CLI output is plain text like "J.A.R.V.I.S: <reply>" (see
   // cli.py: handle_ai_prompt, which does `print(f"{prefix}{result.text}")`).
@@ -7714,11 +7924,66 @@
     if (convId == null || state.threadExtrasByConv[convId]) return;
     const extras = [];
     (record.exchanges || []).forEach((ex, bucket) => {
-      for (const e of ex.extras || []) {
+      // `display` is what the page itself drew for the turn, saved as drawn; the
+      // server-derived `extras` fill in whatever kinds of card the page doesn't record.
+      const list = Array.isArray(ex.display) ? mergeDisplayWithExtras(ex.display, ex.extras) : (ex.extras || []);
+      for (const e of list) {
         if (e && e.type) extras.push({ bucket, type: e.type, data: e.data || {} });
       }
     });
     state.threadExtrasByConv[convId] = extras;
+  }
+
+  // Pure. `display` = the items the page drew for a turn ({type, data}, in order);
+  // `extras` = the ones the server derived from the turn's tool runs. For every type
+  // the page drew, ITS items are used and the derived ones of that type are dropped (they
+  // are the same cards, re-derived). Types only the server derives (thinking blocks,
+  // interim text, ...) are kept where they were; types only the page drew are appended.
+  function mergeDisplayWithExtras(display, extras) {
+    const drawn = new Map();
+    for (const d of display || []) {
+      if (!d || !d.type) continue;
+      if (!drawn.has(d.type)) drawn.set(d.type, []);
+      drawn.get(d.type).push({ type: d.type, data: d.data || {} });
+    }
+    const out = [];
+    const placed = new Set();
+    for (const e of extras || []) {
+      if (!e || !e.type) continue;
+      if (drawn.has(e.type)) {
+        if (!placed.has(e.type)) { out.push(...drawn.get(e.type)); placed.add(e.type); }
+        continue;
+      }
+      out.push({ type: e.type, data: e.data || {} });
+    }
+    for (const [type, items] of drawn) if (!placed.has(type)) out.push(...items);
+    return out;
+  }
+
+  // The thread items one finished turn drew, in plain JSON (the page's own bookkeeping --
+  // DOM references, functions -- left out), sent to be saved on that exchange as drawn.
+  function plainThreadItems(items) {
+    const out = [];
+    for (const it of items || []) {
+      if (!it || !it.type) continue;
+      try {
+        out.push(JSON.parse(JSON.stringify({ type: it.type, data: it.data || {} }, (key, value) => {
+          if (key === "dom" || typeof value === "function") return undefined;
+          if (typeof Node !== "undefined" && value instanceof Node) return undefined;
+          return value;
+        })));
+      } catch { /* an item that can't be serialised is skipped, not fatal */ }
+    }
+    return out;
+  }
+
+  function saveDisplayForTurn(convId, bucket) {
+    if (typeof convId !== "string" || !convId) return;
+    const items = plainThreadItems((state.threadExtrasByConv[convId] || []).filter((it) => it.bucket === bucket));
+    if (!items.length) return;
+    Api.saveThreadDisplay(convId, { items }).catch(() => {
+      // Best-effort: a failed save only means this turn reloads from its derived cards.
+    });
   }
 
   function loadConversationIntoThread(record, convId) {
@@ -7946,6 +8211,7 @@
       return;
     }
     delete state.askTraceByConv[id];
+    delete state.askSummaryByConv[id];
     delete state.pendingConfirmByConv[id];
     delete state.threadExtrasByConv[id];
     delete state.exchangeCountByConv[id];

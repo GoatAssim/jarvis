@@ -261,6 +261,26 @@ def make_approval_view(discord, request_id, owner_id, seconds):
     return ApprovalView()
 
 
+def _keep_room_context(cfg, msg):
+    """Hand one unaddressed message to channels/ambient.py if permissions.ambient_ok
+    admits it. Reads people.json (to skip a blocked sender and name the speaker) and
+    writes NOTHING: no people.touch, no directory, no spaces, no transcript, no usage.
+    Never raises."""
+    try:
+        from . import ambient, people, space
+        if not permissions.ambient_ok(cfg, msg):      # cheap, pure: most messages stop here
+            return
+        entry = people.get(DISCORD, msg.user_id)
+        blocked = bool(entry and (entry.get("follow") or "") == people.FOLLOW_BLOCKED)
+        if not permissions.ambient_ok(cfg, msg, blocked=blocked):
+            return
+        scoped = permissions.resolve_scope(cfg, msg)
+        owner = permissions.is_owner(scoped, msg)
+        ambient.add(DISCORD, msg, space.speaker_record(entry, msg, owner), cfg)
+    except Exception:  # noqa: BLE001 -- context is never worth a failure
+        pass
+
+
 def build_client(discord, cfg):
     """Construct the discord.py client with the right intents and handlers.
 
@@ -407,6 +427,15 @@ def build_client(discord, cfg):
         # the gate is still only ever evaluated once per message.
         decision = base.gate(DISCORD, msg, cfg)
         answering = decision.allowed
+
+        # --- room context (channel spaces S6a / D5) ---------------------------
+        # A message that did not address us may still be KEPT, in memory only, as
+        # context for the next time we are mentioned. It gets no reply, no reaction
+        # and no typing indicator: the verdict above is untouched and everything
+        # below runs exactly as before. One guarded call; a failure here cannot
+        # reach the denial path.
+        if not base.addressed_to_us(decision):
+            _keep_room_context(cfg, msg)
 
         # --- read receipt -------------------------------------------------
         # Added the moment the message is accepted, before any provider is

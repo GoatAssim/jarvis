@@ -1121,6 +1121,14 @@ window.JARVIS_SLASH_COMMANDS = /*JSON-BEGIN*/
       "reason": "the server's own console-store hook",
       "riskTier": "safe"
     },
+    "console-append-trace": {
+      "reason": "the server's own hook that saves the Ask console lines exactly as painted",
+      "riskTier": "safe"
+    },
+    "conv-save-display": {
+      "reason": "the server's own hook that saves the cards a finished turn drew, as drawn",
+      "riskTier": "safe"
+    },
     "commands-check-name": {
       "reason": "internal name-validation check used when saving a command",
       "riskTier": "safe"

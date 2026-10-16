@@ -802,6 +802,100 @@ def append_exchange(conv_id, user_text, jarvis_text, provider, extras=None):
     return len(record["exchanges"])
 
 
+# The thread items the web UI drew for one turn ("display", see save_display)
+# are kept whole, but a runaway one must not be able to bloat the conversation
+# file every other call reads. Over this and the display is simply not saved:
+# the exchange keeps the extras it already has, which is what it showed before
+# this existed.
+MAX_DISPLAY_BYTES = 100_000
+MAX_DISPLAY_ITEMS = 100
+_DISPLAY_TYPE_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_-]{0,39}$")
+
+
+def clean_display_items(items):
+    """The thread items as they will be stored: a list of ``{"type", "data"}``.
+
+    Anything that is not plain JSON data (a DOM node reference, a function) or
+    that is not a well-formed item is dropped; ``bucket`` and ``dom`` are
+    bookkeeping of the page that drew the item, not part of what was drawn.
+    An organize-json payload is re-fetched from the file it describes, so it is
+    left out (the path is what identifies it). Returns None for input that is
+    not a list at all.
+    """
+    if not isinstance(items, list):
+        return None
+    out = []
+    for item in items[:MAX_DISPLAY_ITEMS]:
+        if not isinstance(item, dict):
+            continue
+        kind = item.get("type")
+        if not isinstance(kind, str) or not _DISPLAY_TYPE_RE.match(kind):
+            continue
+        data = item.get("data")
+        data = dict(data) if isinstance(data, dict) else {}
+        data.pop("dom", None)
+        if kind == "organizeJson":
+            data.pop("payload", None)
+        try:
+            json.dumps(data)
+        except (TypeError, ValueError):
+            continue
+        out.append({"type": kind, "data": data})
+    return out
+
+
+def save_display(conv_id, user_text, items):
+    """Store what the web UI actually DREW for a finished turn, as drawn.
+
+    Everything else saved about a turn is a record of what HAPPENED (tool runs,
+    the reply text) from which the UI later re-derives its cards. This is the
+    other direction: the cards and embeds the page really showed -- a resolved
+    confirmation, a dev_agent progress card with its steps, a tool's own popup
+    bubble, a screenshot -- saved verbatim on that exchange as ``display`` so a
+    reload shows the turn the way it looked, not the way a re-derivation
+    guesses it looked.
+
+    ``user_text=None`` means "the newest finished exchange" -- what the page
+    sends, right after the turn it just watched finish (the typed text can
+    differ from the stored one once pictures or quotes are attached). A string
+    is matched exactly against the newest finished exchange with that user
+    text, like ``_finish_pending``. The write happens after the ask process has
+    exited, so it never races the turn's own writes. Returns
+    ``{"ok": True, "items": n}`` or ``{"ok": False, "reason": ...}``; never
+    raises.
+    """
+    if not is_valid_id(conv_id):
+        return {"ok": False, "reason": "invalid conversation id"}
+    cleaned = clean_display_items(items)
+    if cleaned is None:
+        return {"ok": False, "reason": "items must be a list"}
+    try:
+        size = len(json.dumps(cleaned, ensure_ascii=False))
+    except (TypeError, ValueError):
+        return {"ok": False, "reason": "items are not JSON data"}
+    if size > MAX_DISPLAY_BYTES:
+        return {"ok": False, "reason": f"too large to keep ({size} bytes)"}
+    record = _load_conv(conv_id)
+    if not record:
+        return {"ok": False, "reason": "no such conversation"}
+    target = None if user_text is None else str(user_text).strip()
+    exchanges = record.get("exchanges") or []
+    for i in range(len(exchanges) - 1, -1, -1):
+        ex = exchanges[i]
+        if ex.get("pending"):
+            continue
+        if target is not None and (ex.get("user") or "").strip() != target:
+            continue
+        if cleaned:
+            ex["display"] = cleaned
+        else:
+            ex.pop("display", None)
+        _save_conv(record)
+        _raw("display", conv_id, {"user": ex.get("user") or "", "items": cleaned})
+        return {"ok": True, "items": len(cleaned)}
+    return {"ok": False, "reason": "no finished exchange to attach it to"}
+
+
 def drop_from_user(conv_id, user_text):
     """Remove the last exchange matching user_text and everything after it
     — used when the web UI redoes a prompt, same as history.py's version."""

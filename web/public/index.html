@@ -453,6 +453,11 @@
       <aside class="ask-prompt" aria-label="Live command prompt">
         <div class="ask-prompt__head">
           <span class="ask-prompt__title">PROMPT</span>
+          <!-- Raw / Summary: the console exactly as it was printed, or the readable summary
+               of it. Console only -- the conversation itself has no such switch. -->
+          <button class="ask-prompt__view" id="btn-ask-console-view" type="button"
+                  title="Showing the raw console exactly as it was printed. Click for the readable summary."
+                  aria-pressed="false">Raw</button>
           <button class="ask-prompt__hidden-chip" id="ask-console-hidden-chip" type="button" hidden
                   title="Some trace lines are hidden by the Console filter. Click to show them all."></button>
           <span class="ask-prompt__state" id="ask-prompt-state">idle</span>

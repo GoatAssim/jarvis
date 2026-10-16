@@ -326,6 +326,69 @@ def decide(cfg, msg, last_seen_at=None, now=None):
                     may_use_tools=may_use_tools)
 
 
+def ambient_room_on(cfg, msg):
+    """May Jarvis read the messages in this room that do not mention it, at all?
+    (channel spaces S6a / D5.) Pure, like decide().
+
+    Every part must hold: ambient_messages above 0; the platform (and the server /
+    channel the message is in) switched on; a group context; the room passes the same
+    `where` filters decide() applies; and the room's `ambient` switch is not off.
+    A scope's `ambient` value counts as on only when it is absent or literally true,
+    so a hand-typed "false" or a typo reads as OFF: this is the one place in the
+    gate where the stricter reading is the narrower one, and reading is what it
+    controls. Never raises; a malformed config answers no."""
+    try:
+        cfg = cfg or {}
+        scoped = resolve_scope(cfg, msg)
+        count, _minutes, _senders = config.ambient_limits(scoped)
+        if count <= 0 or not scoped.get("enabled"):
+            return False
+        if msg.context != CTX_GROUP:
+            return False
+        value = scoped.get("ambient", True)
+        if value is not True:
+            return False
+        guilds = config.normalize_entries(scoped.get("allowed_guilds"))
+        if guilds and msg.guild_id and str(msg.guild_id) not in guilds:
+            return False
+        channels = config.normalize_entries(scoped.get("allowed_channels"))
+        if channels and msg.channel_id and str(msg.channel_id) not in channels:
+            return False
+        return True
+    except Exception:  # noqa: BLE001 -- fail toward not reading
+        return False
+
+
+def ambient_ok(cfg, msg, blocked=False):
+    """May THIS message be kept as room context? It is NOT a way to be answered:
+    it does not touch decide(), so an unmentioned message still gets the same
+    `reachable` denial, no reply, no reaction and no typing indicator.
+
+    On top of `ambient_room_on`: the message did not address us (it did not mention
+    us and the room really requires a mention), is not our own, has text (never an
+    attachment's content or a picture description), the sender is not `blocked`
+    (the caller looks that up; this module reads nothing), and, with
+    `ambient_senders` = "approved" (the default), the sender is the owner or on the
+    reply list. A bot's message is filtered by the gateway before one of these is
+    built. Never raises."""
+    try:
+        cfg = cfg or {}
+        if blocked or not ambient_room_on(cfg, msg):
+            return False
+        scoped = resolve_scope(cfg, msg)
+        if msg.mentioned or not scoped.get("require_mention", True):
+            return False        # addressed (or everything is): the normal path owns it
+        if _is_self(scoped, msg) or not str(msg.text or "").strip():
+            return False
+        _count, _minutes, senders = config.ambient_limits(scoped)
+        if senders == "anyone":
+            return True
+        identities = msg.identities()
+        return is_owner(scoped, identities) or matches(scoped.get(PERM_REPLY), identities)
+    except Exception:  # noqa: BLE001
+        return False
+
+
 def may_send_images(cfg, identities):
     """May this sender's PICTURES be read? (L.36-P8 / L.42, Q-L42g.)
 

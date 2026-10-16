@@ -2792,6 +2792,56 @@ def main():
         print(json.dumps({"ok": True, "cleared_through_seq": seq}))
         return
 
+    if argv[0] == "console-append-trace":
+        # POST /api/console/:id/trace's backend. The Ask panel's console lines
+        # exactly as the page painted them (text + colour class), sent in small
+        # batches while an ask runs and once more when it ends. JSON on stdin:
+        #   {"turn": "<opaque id the page minted for this ask>",
+        #    "lines": [{"text": "...", "cls": "sys"}, ...]}
+        # Stateless like console-append-run (every call is its own process);
+        # console_store.append_trace explains where the lines end up.
+        from . import console_store
+        from . import conversations
+        conv_id = argv[1].strip() if len(argv) > 1 else ""
+        if not conversations.is_valid_id(conv_id):
+            print(json.dumps({"error": "invalid conversation id"}))
+            sys.exit(1)
+        try:
+            payload = json.loads(sys.stdin.read() or "{}")
+        except (json.JSONDecodeError, ValueError):
+            print(json.dumps({"error": "malformed payload"}))
+            sys.exit(1)
+        if not isinstance(payload, dict):
+            print(json.dumps({"error": "malformed payload"}))
+            sys.exit(1)
+        written = console_store.append_trace(conv_id, payload.get("turn"), payload.get("lines"))
+        print(json.dumps({"ok": True, "written": written}))
+        return
+
+    if argv[0] == "conv-save-display":
+        # POST /api/conversations/:id/display's backend: the thread items the
+        # page actually drew for a finished turn, kept as drawn. JSON on stdin:
+        #   {"items": [{"type", "data"}, ...], "user": "<optional: match this turn>"}
+        # With no "user" it attaches to the newest finished exchange.
+        # See conversations.save_display.
+        from . import conversations
+        conv_id = argv[1].strip() if len(argv) > 1 else ""
+        if not conversations.is_valid_id(conv_id):
+            print(json.dumps({"error": "invalid conversation id"}))
+            sys.exit(1)
+        try:
+            payload = json.loads(sys.stdin.read() or "{}")
+        except (json.JSONDecodeError, ValueError):
+            print(json.dumps({"error": "malformed payload"}))
+            sys.exit(1)
+        if not isinstance(payload, dict):
+            print(json.dumps({"error": "malformed payload"}))
+            sys.exit(1)
+        user = payload.get("user")
+        result = conversations.save_display(conv_id, user if isinstance(user, str) else None, payload.get("items"))
+        print(json.dumps(result))
+        return
+
     if argv[0] == "playnite-config":
         from . import playnite_config
         playnite_config.ensure_config()

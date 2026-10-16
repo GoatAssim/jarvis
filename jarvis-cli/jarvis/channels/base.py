@@ -592,13 +592,22 @@ def handle_message(platform, msg, send, cfg=None, on_tool_call=None, decision=No
     entry = {}
     matched_rules = []
     mem_ids, mem_keys = [], []
+    # Channel spaces S6 / D2: in a shared room a reply is posted for everyone, so
+    # saved notes and remembered facts are used only where allowed (the platform's
+    # group_recall switch, overridden per item). None = not a room: nothing changes.
+    room_recall = None
+    try:
+        if space.is_room(msg):
+            room_recall = cfg.get("group_recall") is True
+    except Exception:  # noqa: BLE001 -- unreadable means the stricter reading
+        room_recall = False
     try:
         is_owner = permissions.is_owner(cfg, msg)
         entry = people.touch(platform, msg.user_id,
                              handle=msg.user_handle, is_owner=is_owner,
                              avatar=getattr(msg, "avatar", ""))
-        sender_ctx = people.prompt_block(entry, platform)
-        sender_env = json.dumps({
+        sender_ctx = people.prompt_block(entry, platform, room_recall=room_recall)
+        env = {
             "platform": platform,
             "user_id": entry.get("user_id") or msg.user_id,
             "handle": entry.get("handle") or msg.user_handle,
@@ -607,7 +616,12 @@ def handle_message(platform, msg, send, cfg=None, on_tool_call=None, decision=No
             # D-I10: what they just said, so remember_sender's gate can tell
             # an introduction from small talk and check a note against it.
             "text": str(msg.text or "")[:400],
-        })
+        }
+        if room_recall is not None:
+            # Only in a room: lets the tools that echo a person's notes back apply the
+            # same gate as the prompt does (actions/channel_people.py).
+            env["room_recall"] = room_recall
+        sender_env = json.dumps(env)
         if people.needs_owner_notice(entry):
             if _notify_owner_new_sender(platform, msg, entry):
                 people.mark_notified(platform, msg.user_id)
@@ -623,7 +637,8 @@ def handle_message(platform, msg, send, cfg=None, on_tool_call=None, decision=No
     # block rides in, so nothing here touches the cached prompt prefix.
     if not is_owner:
         try:
-            extra, matched_rules, mem_ids, mem_keys = _person_context(platform, msg, entry)
+            extra, matched_rules, mem_ids, mem_keys = _person_context(
+                platform, msg, entry, room_recall=room_recall)
             if extra:
                 sender_ctx = (sender_ctx + "\n\n" + extra).strip()
         except Exception as exc:  # noqa: BLE001 -- memory is an enhancement
@@ -640,9 +655,20 @@ def handle_message(platform, msg, send, cfg=None, on_tool_call=None, decision=No
         if space.is_room(msg):
             if cfg.get("group_speaker_labels", True):
                 speaker = space.speaker_record(entry, msg, is_owner)
-            block = people.group_block(msg, bool(is_owner), labels=speaker is not None)
+            # S6a: messages in this room that did not mention us, kept in memory only
+            # by the gateway. Tail only; never stored in the exchange or transcript.
+            room_ctx = ""
+            try:
+                from . import ambient
+                room_ctx = ambient.block_for(platform, msg, cfg)
+            except Exception as exc:  # noqa: BLE001 -- context is an enhancement
+                _log(f"room context unavailable: {exc}")
+            block = people.group_block(msg, bool(is_owner), labels=speaker is not None,
+                                       ambient=bool(room_ctx))
             if block:
                 sender_ctx = (sender_ctx + "\n\n" + block).strip()
+            if room_ctx:
+                sender_ctx = (sender_ctx + "\n\n" + room_ctx).strip()
     except Exception as exc:  # noqa: BLE001 -- framing is an enhancement, never a precondition
         speaker = None
         _log(f"room framing unavailable: {exc}")
@@ -888,21 +914,26 @@ _HARD_RULE_FALLBACK = ("That's not something I can get into, but I'm happy to "
                        "help with something else.")
 
 
-def _person_context(platform, msg, entry):
+def _person_context(platform, msg, entry, room_recall=None):
     """(extra prompt text, matched rules, ids in the memory block, the person
     keys the block was read from) for a non-owner's message.
 
     Memory for this person (and the linked account's), then the standing
     rules that fit this message. A rule that asks for it also tells the owner,
     at most once per person and rule per RULE_NOTICE_SECONDS -- the model is
-    not involved in that decision."""
+    not involved in that decision.
+
+    `room_recall` is None outside a shared room. In a room (S6 / D2) saved facts
+    and episodes are used only where allowed, and `skip_texts` lists only the notes
+    the identity block actually shows. The rules are never gated: they only narrow."""
     from . import person_memory
     keys = [people.key(platform, msg.user_id)]
     other = people.partner(entry) if entry else None
     if other and other.get("platform") and other.get("user_id"):
         keys.append(people.key(other["platform"], other["user_id"]))
-    notes = [n for n in ((entry or {}).get("notes") or []) if isinstance(n, str)]
-    mem = person_memory.context_block(keys, msg.text, skip_texts=notes)
+    notes = people.visible_notes(entry, room_recall)
+    mem = person_memory.context_block(keys, msg.text, skip_texts=notes,
+                                      room_recall=room_recall)
     matched = person_memory.matches(keys[0], msg.text)
     parts = [mem["block"], person_memory.render_rules(matched)]
     if matched:

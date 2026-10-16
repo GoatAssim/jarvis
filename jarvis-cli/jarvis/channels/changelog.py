@@ -16,7 +16,13 @@ The lines are written by the writers themselves, so a change is recorded
 whichever way it was made:
 
     config.add_to_set / remove_from_set   dm / reply / tool lists ("list")
-    config.set_value                       `owner` and `allow_tools` only
+    config.set_value                       `owner`, `allow_tools` and the
+                                           group_recall / ambient_* keys only
+    servers.set_switch                     the `ambient` switch of a server or
+                                           channel (kind scope)
+    user_admin.set_note_groups / set_memory_groups
+                                           one note / memory item's group-reply
+                                           flag (kind recall; the id, never the text)
     user_perms.set_tools / set_can_dm      tool scope, "Jarvis may DM them"
     people.set_follow                      approved / blocked / unknown
     user_admin.set_handle / forget_person  a handle edit, a wipe
@@ -89,6 +95,8 @@ K_HANDLE = "handle"      # the owner edited a hand-added person's handle
 K_FORGOT = "forgot"      # "Forget this person" ran
 K_THINKING = "thinking"  # their thinking setting / lock changed (L.44)
 K_TIMED = "timed"        # tool use switched on until a deadline (L.36-P6)
+K_SCOPE = "scope"        # a per-server / channel / room switch (ambient reading)
+K_RECALL = "recall"      # one saved note / memory item allowed or barred in groups (D2)
 
 _LIST_LABEL = {"dm_allowlist": "direct messages", "reply_allowlist": "replies",
                "tool_allowlist": "tool use", "image_allowlist": "pictures",
@@ -262,7 +270,31 @@ def describe(entry):
         if key == "allow_tools":
             return ("Tool use for everyone the lists allow switched "
                     + ("on" if on else "off"))
+        if key == "group_recall":
+            return ("Using saved notes and memories in group replies (unless an item "
+                    "says otherwise) switched " + ("on" if on else "off"))
+        if key == "ambient_messages":
+            return ("Reading other messages in rooms switched off"
+                    if str(entry.get("value")) == "0"
+                    else f"Messages kept per room for context set to {entry.get('value')}")
+        if key == "ambient_minutes":
+            return f"Minutes a room message is kept as context set to {entry.get('value')}"
+        if key == "ambient_senders":
+            return ("Messages read as room context: " +
+                    ("everyone in an allowed room" if entry.get("value") == "anyone"
+                     else "the owner and people on the reply list"))
         return f"{key} switched {'on' if on else 'off'}"
+    if kind == K_SCOPE:
+        what = {"ambient": "Reading this room's other messages"}.get(
+            entry.get("switch"), str(entry.get("switch") or "A switch"))
+        return f"{what} switched {'off' if on is False else 'back to the default'} for {entry.get('ident') or 'a room'}"
+    if kind == K_RECALL:
+        item = "A saved note" if entry.get("item") == "note" else "A remembered item"
+        value = entry.get("value") or "inherit"
+        meaning = {"on": "may be used in group replies",
+                   "off": "is never used in group replies",
+                   "inherit": "follows the group-recall setting"}.get(value, value)
+        return f"{item} {meaning}"
     if kind == K_HANDLE:
         if entry.get("old"):
             return f"Handle changed from @{entry['old']} to @{entry.get('ident') or '?'}"

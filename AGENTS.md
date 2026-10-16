@@ -418,7 +418,8 @@ actually render Markdown):
 
     node tests/verify_math_rendering.js
     node tests/verify_thread_extras_collapse.js   # BUG-5/6: answered confirmations are one line, one card per dev_agent job, cards before the reply on reload, saved thinking follows the toggle; no npm install
-    node tests/verify_ask_trace_replay.js
+    node tests/verify_ask_trace_replay.js   # also: the Raw/Summary console views (buildAskTraceViews) and the saved-as-drawn card merge (mergeDisplayWithExtras)
+    node tests/verify_saved_as_shown_routes.js   # POST /api/console/:id/trace and POST /api/conversations/:id/display (validation, stdin payload, size caps)
     node tests/verify_ask_console_filter.js   # E.5/K.2.5.3: Ask Jarvis Console filter classifier (tool calls / token cost / [tools] ...), markup and CSS wiring; no npm install (its Python twin test_ask_console_filter.py checks app.js/server.js/style.css category lists agree)
     node tests/verify_daemons_panel.js
     node tests/verify_daemons_console.js   # the console line classifier (H.1.7)
@@ -442,6 +443,7 @@ actually render Markdown):
     python3 tests/test_channel_timed_and_instruction.py   # L.36-P6 / P12: time-limited tools and the per-person instruction
     python3 tests/test_channel_pack_p8_p9_p13_p14.py      # L.36-P8 / P9 / P13 / P14: picture grant, platform tools switch, panel DM, turned-away list
     python3 tests/test_ask_images.py         # pictures in the Ask panel + kept with the conversation (store, Instagram, replay, redo / delete, CLI manifest)
+    python3 tests/test_raw_console_and_display.py   # the Ask console lines and each turn's cards are saved AS SHOWN: raw trace lines (text, colour, order, full length), `console-append-trace`, `save_display` / `conv-save-display`, replay carries them
     node tests/verify_ask_images.js          # the panel's picture helpers, the server's checking / staging, and the wiring; no npm install
     python3 tests/test_chat_approvals.py     # L.29 / L.42.1 + L.42.2: the chat confirmation channel (owner-only, 60 s, restart, Instagram Y / N, Discord buttons) and the owner-only thinking trace
     node tests/verify_thinking_row.js        # L.44 panel row: the Thinking control in Permissions > Capabilities; no npm install

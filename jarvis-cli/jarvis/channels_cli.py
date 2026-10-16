@@ -42,7 +42,11 @@ COMMANDS = (
 USAGE = """channel commands:
   channels-config                       print the config file path
   channels-status                       show permissions + readiness (JSON)
-  channels-set <platform> <key> <value> set one config key
+  channels-set <platform> <key> <value> set one config key. Checked keys: group_recall on|off
+                                        (saved notes/memories in shared-room replies, default off),
+                                        ambient_messages 0-100 (0 = off), ambient_minutes 1-1440,
+                                        ambient_senders approved|anyone (Jarvis reading room
+                                        messages that don't mention it; needs message_content_intent)
   channels-allow <platform> <set> <id>  add to dm|reply|tool|image allowlist
   channels-deny  <platform> <set> <id>  remove from an allowlist
   channels-test  [platform] [message]   send a test DM to the owner
@@ -72,8 +76,12 @@ USAGE = """channel commands:
                                         set what they're called; no name clears it
   channels-remove-person <platform> <id|@handle>
                                         delete a hand-added person who never messaged
-  channels-note <platform> <id|@handle> list | edit <note-id> <text ...> | delete <note-id>
-                                        what Jarvis remembers about them; ids come from `list`
+  channels-note <platform> <id|@handle> list | edit <note-id> <text ...> | delete <note-id> |
+                                        groups <note-id> on|off|inherit
+                                        what Jarvis remembers about them; ids come from `list`.
+                                        `groups`: may the note be used in a reply posted to a
+                                        shared room (default inherit = follows group_recall).
+                                        Editing a note's text resets it to inherit
   channels-forget <platform> <id|@handle> [--history] [--yes]
                                         wipe someone: off every list, limits, record
                                         (--history also their DM logs). Without --yes it
@@ -101,7 +109,8 @@ USAGE = """channel commands:
                                         `lock` stops them changing it with /thinking in chat;
                                         `default` clears both. Refused for the owner
   channels-memory <platform> <id|@handle> list | add <text ...> | forget <rec-id> |
-                                        approve <rec-id> | retire <rec-id> | export [text] |
+                                        approve <rec-id> | retire <rec-id> | groups <rec-id> on|off|inherit |
+                                        export [text] |
                                         rule <directive> [--hard] [--days N] [topic ...] | rules |
                                         summarize [N] | episodes
                                         what Jarvis keeps about one person (L.21/L.22).
@@ -138,6 +147,8 @@ USAGE = """channel commands:
                                         a quick setup for several people / what it would change
   channels-servers [platform]           Discord servers + channels Jarvis knows, with their switches (JSON)
   channels-server-set <platform> guild|channel <id> <switch> <on|off|inherit>
+                                        switch: enabled, tools, mention, ambient (reading that
+                                        room's messages that don't mention Jarvis)
   channels-guilds <platform> [add|remove <id>] [--yes]
                                         the allowed_guilds filter ("only these servers"). No action = show it.
                                         add to an EMPTY list, or an id Jarvis hasn't seen, only PREVIEWS unless
@@ -235,7 +246,8 @@ def _channels_memory(rest):
     """channels-memory: per-person memory and rules (L.21 / L.22)."""
     from .channels import person_memory
     usage = ("usage: channels-memory <platform> <id|@handle> list | add <text ...> | "
-             "forget <rec-id> | approve <rec-id> | retire <rec-id> | export [text] | "
+             "forget <rec-id> | approve <rec-id> | retire <rec-id> | "
+             "groups <rec-id> on|off|inherit | export [text] | "
              "rule <directive> [--hard] [--days N] [topic ...] | rules | "
              "summarize [N] | episodes   "
              "(or: channels-memory applied | recall-audit | episodes status | "
@@ -314,6 +326,13 @@ def _channels_memory(rest):
             except ValueError:
                 _fail(usage)
             result = episodes.run(platform, uid, limit=count)
+    elif action == "groups" and len(tail) == 2 and platform:
+        ok, err, rec = user_admin.set_memory_groups(platform, uid, tail[0], tail[1])
+        result.update(ok=ok, error=err, record=rec)
+        if ok:
+            result["note"] = ("owner-set: whether this item may be used in a reply "
+                              "posted to a shared room (on = yes, off = never, inherit "
+                              "= follows `channels-set %s group_recall`)" % platform)
     elif action in ("forget", "approve", "retire") and len(tail) == 1:
         if action == "forget":
             gone = person_memory.forget(key, tail[0])
@@ -808,7 +827,8 @@ def handle(argv):
 
     if cmd == "channels-note":
         usage = ("usage: channels-note <platform> <id|@handle> "
-                 "list | edit <note-id> <text ...> | delete <note-id>")
+                 "list | edit <note-id> <text ...> | delete <note-id> | "
+                 "groups <note-id> on|off|inherit")
         if len(rest) < 3:
             _fail(usage)
         platform = rest[0]
@@ -826,6 +846,8 @@ def handle(argv):
                 platform, uid, rest[3], " ".join(rest[4:]))
         elif action == "delete" and len(rest) == 4:
             ok, err, notes = user_admin.delete_note(platform, uid, rest[3])
+        elif action == "groups" and len(rest) == 5:
+            ok, err, notes = user_admin.set_note_groups(platform, uid, rest[3], rest[4])
         else:
             _fail(usage)
         print(json.dumps({"ok": ok, "error": err, "platform": platform,
@@ -984,7 +1006,7 @@ def handle(argv):
     if cmd == "channels-server-set":
         if len(rest) < 5:
             _fail("usage: channels-server-set <platform> guild|channel <id> "
-                  "<enabled|tools|mention> <on|off|inherit>")
+                  "<enabled|tools|mention|ambient> <on|off|inherit>")
         platform, kind, ident, switch, value = rest[:5]
         ok, err, detail = servers.set_switch(platform, kind, ident, switch, value)
         print(json.dumps({"ok": ok, "error": err, "platform": platform,

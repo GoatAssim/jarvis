@@ -62,6 +62,18 @@ def _current_sender():
     return data
 
 
+def _shown_notes(entry, sender):
+    """The sender's notes the model may be told about right now. Outside a room every
+    note; in a shared room (the gateway sets `room_recall` in the sender env) only
+    those the group-recall rules allow, the same filter the prompt uses, so asking
+    the tool cannot surface what the prompt kept out (channel spaces S6 / D2)."""
+    from ..channels import people
+    room = sender.get("room_recall") if isinstance(sender, dict) else None
+    if room is not None and not isinstance(room, bool):
+        room = False
+    return people.visible_notes(entry, room)
+
+
 def tool_remember_sender(args):
     from ..channels import people
 
@@ -130,7 +142,7 @@ def tool_remember_sender(args):
         **result_extra,
         "ok": True,
         "name": entry.get("name") or "",
-        "notes": entry.get("notes") or [],
+        "notes": _shown_notes(entry, sender),
         # Echoed back so the model can say "I'll remember that, Sam" with
         # the name that was actually stored after cleaning, rather than the
         # raw string it sent.
@@ -165,7 +177,7 @@ def tool_who_am_i_talking_to(args=None):
         "handle": entry.get("handle") or sender.get("handle") or "",
         "name": entry.get("name") or "",
         "is_owner": bool(entry.get("is_owner") or sender.get("is_owner")),
-        "notes": entry.get("notes") or [],
+        "notes": _shown_notes(entry, sender),
         "messages": entry.get("messages") or 0,
     }
 
