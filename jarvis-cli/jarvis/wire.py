@@ -77,6 +77,17 @@ worker now only believes a tagged line; an untagged one is an ordinary `out`
 line, whatever it says. The tag is only written when the line really goes to the
 process's own stdout (not to a stream a caller passed in).
 
+THE SPAWN FALLBACK
+------------------
+A request web/server.js runs as a plain process (no idle worker, JARVIS_BRIDGE=0, a
+command that needs a process of its own) has no host, but the server still has to tell
+a real card or marker from text that merely looks like one. So the server puts a
+per-process nonce in JARVIS_WIRE_NONCE; this module reads it ONCE at import and removes
+it from os.environ, so a shell command or child process started afterwards cannot
+inherit it. While it is set, media() and the stdout markers carry the same
+`media:<nonce>` / `marker:<nonce>` tag a host would give them, and the server believes
+only tagged lines. A plain terminal never has the variable, so nothing changes there.
+
 Categories are the ids of the Ask panel's Console filter
 (web/public/app.js, ASK_CONSOLE_CATEGORIES): tool-call, tool-result, tokens,
 discovery, provider, narration, status, error. A line printed without a
@@ -85,6 +96,7 @@ their text, exactly as before.
 """
 
 import json
+import os
 import sys
 
 CAT_OPEN = "\x1e"
@@ -112,7 +124,26 @@ MARKER_PREFIXES = {
     "ui": "JARVIS_UI_REQUEST ",
 }
 
+# Read once and removed (see THE SPAWN FALLBACK): children started later never see it.
+_ENV_NONCE = os.environ.pop("JARVIS_WIRE_NONCE", "") or None
+
 _host = None  # the object bridge.serve() installs while it is hosting requests
+
+
+def _tag(name, host_method):
+    """The in-band tag for a `media` / `marker` line, or None for the plain legacy line.
+
+    A hosted process asks its host (which may have none to give: nothing running, or a
+    stub); a process the server spawned uses the nonce it was handed; a plain terminal
+    has neither.
+    """
+    host = _host
+    if host is not None:
+        try:
+            return getattr(host, host_method)() or None
+        except Exception:  # noqa: BLE001 -- a host with no tag to give: plain line
+            return None
+    return name + ":" + _ENV_NONCE if _ENV_NONCE else None
 
 
 def install(host):
@@ -173,15 +204,9 @@ def media(kind, *fields):
     was with the bare `print`.
     """
     line = "\t".join([MEDIA_PREFIX, str(kind), *(str(f) for f in fields)])
-    host = _host
-    if host is not None:
-        tag = None
-        try:
-            tag = host.media_tag()
-        except Exception:  # noqa: BLE001 -- a host with no tag to give: plain line
-            tag = None
-        if tag:
-            line = CAT_OPEN + tag + CAT_CLOSE + line
+    tag = _tag(MEDIA_TAG, "media_tag")
+    if tag:
+        line = CAT_OPEN + tag + CAT_CLOSE + line
     print(line, file=sys.stderr, flush=True)
 
 
@@ -196,15 +221,9 @@ def _marker(kind, obj, out=None, *, ensure_ascii=True, default=str):
     """
     body = MARKER_PREFIXES[kind] + json.dumps(obj, default=default, ensure_ascii=ensure_ascii)
     target = sys.stdout if out is None else out
-    host = _host
-    if host is not None and target is sys.stdout:
-        tag = None
-        try:
-            tag = host.marker_tag()
-        except Exception:  # noqa: BLE001 -- a host with no tag to give: plain line
-            tag = None
-        if tag:
-            body = CAT_OPEN + tag + CAT_CLOSE + body
+    tag = _tag(MARKER_TAG, "marker_tag") if target is sys.stdout else None
+    if tag:
+        body = CAT_OPEN + tag + CAT_CLOSE + body
     target.write(body + "\n")
     target.flush()
 

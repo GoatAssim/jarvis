@@ -12,7 +12,7 @@ build_info.py and both are shown by `jarvis version` -- the number for
 quick comparison, the hash for an exact one (and for verify_exe.py, which
 only ever compares hashes, never numbers).
 
-Run by script.bat, from jarvis-cli/, BEFORE `pip install .` (so whatever
+Run by install.py (launched via script.bat), from jarvis-cli/, BEFORE `pip install .` (so whatever
 this writes is what gets baked into the wheel installed this run):
 
     python build_tools\\bump_build_version.py

@@ -2,7 +2,7 @@
 current persona's CLI name, across the two places a Windows/non-venv `pip
 install` can put it.
 
-Run by script.bat, from jarvis-cli/, AFTER `pip install .`:
+Run by install.py (launched via script.bat), from jarvis-cli/, AFTER `pip install .`:
 
     python build_tools\\find_cli_exe.py <cli_name>
 
@@ -43,6 +43,9 @@ import os
 import sys
 import sysconfig
 
+# ".exe" on Windows, nothing on POSIX (console scripts have no suffix there).
+EXE_SUFFIX = ".exe" if os.name == "nt" else ""
+
 
 def candidate_paths(cli_name):
     """Every location `pip install .` might realistically have put
@@ -51,14 +54,14 @@ def candidate_paths(cli_name):
     paths = []
 
     try:
-        paths.append(os.path.join(sysconfig.get_path("scripts"), cli_name + ".exe"))
+        paths.append(os.path.join(sysconfig.get_path("scripts"), cli_name + EXE_SUFFIX))
     except Exception:
         pass
 
     user_scheme = "nt_user" if os.name == "nt" else "posix_user"
     try:
         paths.append(
-            os.path.join(sysconfig.get_path("scripts", scheme=user_scheme), cli_name + ".exe")
+            os.path.join(sysconfig.get_path("scripts", scheme=user_scheme), cli_name + EXE_SUFFIX)
         )
     except Exception:
         pass
@@ -85,7 +88,7 @@ def main():
 
     exe_path = find_cli_exe(sys.argv[1])
     if exe_path is None:
-        print(f"ERROR: no {sys.argv[1]}.exe found in any known scripts dir.", file=sys.stderr)
+        print(f"ERROR: no {sys.argv[1]}{EXE_SUFFIX} found in any known scripts dir.", file=sys.stderr)
         sys.exit(1)
 
     # Deliberately only the path on stdout — mirrors sync_entry_point.py

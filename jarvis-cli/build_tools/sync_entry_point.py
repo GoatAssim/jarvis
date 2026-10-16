@@ -2,7 +2,7 @@
 console-script/exe that `pip install .` generates is named after whatever
 persona is currently equipped, instead of always being "jarvis".
 
-Run by script.bat, from jarvis-cli/, BEFORE `pip install .`:
+Run by install.py (launched via script.bat), from jarvis-cli/, BEFORE `pip install .`:
 
     python build_tools\\sync_entry_point.py
 

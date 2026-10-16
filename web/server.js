@@ -3962,14 +3962,23 @@ function streamViaBridge(ws, kind, fullArgs, types, extraEnv, onStdoutLine, onLi
 }
 
 function relayBridgeEvent(ws, kind, types, ev, onStdoutLine, onLine) {
+  // A marker line the worker already recognised and typed (usage/ui for a kind that does not
+  // use them as events): `raw` is the legacy line, handed to onStdoutLine like a process's.
   const asLine = (line) => {
     if (onLine) onLine("out", line);
     if (onStdoutLine && onStdoutLine(line)) return;
     send(ws, { type: types.stdout, line });
   };
   switch (ev.t) {
-    case "out":
-      return asLine(String(ev.line ?? "").replace(/\r$/, ""));
+    case "out": {
+      // PLAIN output. The worker only types a marker it wrote itself (jarvis/wire.py), so a
+      // line that merely STARTS with a marker prefix -- a model reply, a command's output --
+      // arrives here, and must NOT go through onStdoutLine, which parses those prefixes and
+      // would turn it into a confirm dialog or stream text. It is shown as the text it is.
+      const line = String(ev.line ?? "").replace(/\r$/, "");
+      if (onLine) onLine("out", line);
+      return send(ws, { type: types.stdout, line });
+    }
     case "err": {
       const line = String(ev.line ?? "").replace(/\r$/, "");
       if (onLine) onLine("err", line);
@@ -4061,8 +4070,26 @@ function shapeStreamEvent(ev) {
   return out;
 }
 
+// The tag jarvis/wire.py puts in front of a card or marker line it wrote itself. A process
+// this server starts is handed a one-time nonce in JARVIS_WIRE_NONCE (the CLI reads it once
+// and removes it from its environment, so nothing it starts later can learn it), and only a
+// line tagged `<name>:<nonce>` is believed. `name` is "media" for stderr, "marker" for stdout.
+// Anything else -- bare, or tagged with a guess -- is returned as the plain text it is, with
+// the tag removed.
+const WIRE_TAG_OPEN = "\u001e";
+const WIRE_TAG_CLOSE = "\u001f";
+
+function untagWireLine(line, name, nonce) {
+  const text = String(line ?? "");
+  if (!text.startsWith(WIRE_TAG_OPEN)) return { line: text, trusted: false };
+  const end = text.indexOf(WIRE_TAG_CLOSE, 1);
+  if (end < 0) return { line: text, trusted: false };
+  return { line: text.slice(end + 1), trusted: text.slice(1, end) === `${name}:${nonce}` };
+}
+
 function spawnProcessAndStream(ws, kind, fullArgs, types, extraEnv = {}, onStdoutLine = null, onLine = null, onExit = null) {
   let child;
+  const wireNonce = randomBytes(8).toString("hex");
   try {
     child = spawn(JARVIS.cmd, fullArgs, {
       windowsHide: true,
@@ -4072,6 +4099,7 @@ function spawnProcessAndStream(ws, kind, fullArgs, types, extraEnv = {}, onStdou
         PYTHONUNBUFFERED: "1",
         PYTHONIOENCODING: "utf-8",
         ...extraEnv,
+        JARVIS_WIRE_NONCE: wireNonce,   // last, so a caller's extraEnv cannot replace it
       },
     });
   } catch (e) {
@@ -4086,16 +4114,21 @@ function spawnProcessAndStream(ws, kind, fullArgs, types, extraEnv = {}, onStdou
   // used by the "run" handler below to build the buffer it persists once
   // the run finishes (see logs-append-run in cli.py). Purely an observer:
   // it never affects what gets sent to the browser.
-  const onOut = makeLineBuffer((line) => {
+  const onOut = makeLineBuffer((raw) => {
+    // Only a marker the CLI tagged (wire.stream/usage/confirm/ui_request) is offered to
+    // onStdoutLine; a reply or command output that merely starts like one is plain text.
+    const { line, trusted } = untagWireLine(raw, "marker", wireNonce);
     if (onLine) onLine("out", line);
-    if (onStdoutLine && onStdoutLine(line)) return;
+    if (trusted && onStdoutLine && onStdoutLine(line)) return;
     send(ws, { type: types.stdout, line });
   });
-  const onErr = makeLineBuffer((line) => {
+  const onErr = makeLineBuffer((raw) => {
+    const { line, trusted } = untagWireLine(raw, "media", wireNonce);
     if (onLine) onLine("err", line);
-    if (kind === "ask") {
-      // No bridge, so no typed event: read the legacy card line ourselves and send the same
-      // `ask-media` message the bridge path does. (Anything else stays a plain stderr line.)
+    if (kind === "ask" && trusted) {
+      // No bridge, so no typed event: read the card line the CLI tagged ourselves and send
+      // the same `ask-media` message the bridge path does. (Anything else stays a plain
+      // stderr line.)
       const media = mediaFromLegacyLine(line);
       if (media) return send(ws, { type: "ask-media", ...media });
     }

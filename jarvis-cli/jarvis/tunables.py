@@ -151,6 +151,7 @@ PLUMBING_ENV = (
     ("JARVIS_ALLOWED_TOOLS", "The tool allow-list for the person being answered."),
     ("JARVIS_UI", "Set to 'web' by the web server so the CLI knows who is watching."),
     ("JARVIS_STREAM_MARKERS", "Set to 1 by the web server; the CLI then prints stream markers."),
+    ("JARVIS_WIRE_NONCE", "A one-time tag the web server gives a process it starts, so it can tell real cards and markers from lookalike text. Read once and removed."),
     ("JARVIS_PROVIDER_OVERRIDE", "The provider order picked for this one ask."),
     ("JARVIS_THINK_OVERRIDE", "The thinking level picked for this one ask."),
     ("JARVIS_TOKEN_BUDGET", "Token limit set for one scheduled run."),

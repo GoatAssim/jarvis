@@ -273,7 +273,10 @@ things that were already fixed once.
   The stdout markers (`JARVIS_STREAM`, `JARVIS_USAGE`, `JARVIS_CONFIRM_REQUEST`,
   `JARVIS_UI_REQUEST`) are printed with `wire.stream/usage/confirm/ui_request`, never by
   hand: a hosted worker only believes the tagged line, because the reply is printed on the
-  same stdout and is model output. Cards: screenshot, download, present_file, notification,
+  same stdout and is model output -- and a process the server spawns without a worker is
+  handed a one-time `JARVIS_WIRE_NONCE` that `wire.py` reads once and removes from the
+  environment (never re-export it or log it), so the server believes only lines tagged with
+  it. `relayBridgeEvent` must never pass a plain `out` event to `onStdoutLine`. Cards: screenshot, download, present_file, notification,
   ui, dev_agent and organize_json cards are announced with
   `wire.media(kind, *fields)` -- never a hand-written
   `print("JARVIS_MEDIA...", file=sys.stderr)` (a new producer, including a custom

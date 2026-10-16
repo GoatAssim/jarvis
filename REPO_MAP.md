@@ -61,6 +61,15 @@ chat gateways — plus anything registered in `daemons.py`.
 Package root is `jarvis-cli/jarvis/`. Tests live in `tests/` at the **repo
 root**, next to `jarvis-cli/`, not inside it.
 
+**Build / install / launch** is `install.py` at the repo root (stdlib-only Python;
+`script.bat` is just a launcher for it, so it can go in the startup apps). It
+builds with `jarvis-cli/.venv`, then a root `.venv`, then whatever Python runs it
+(`--venv PATH` / `--no-venv` override), and drives `jarvis-cli/build_tools/*`
+(persona -> exe name, build bump, exe lookup, PATH-vs-source check). The
+web server runs in its own console window, re-entering `install.py --serve-window`.
+`--serve-only` skips the build. `~/.jarvis/cli_name.txt` is the only file it keeps
+in the config dir. There is no `start-server.bat` / `launch-web.ps1` any more.
+
 ```
 jarvis-cli/jarvis/
     cli.py                argv parsing, chained commands, the ask entry point
@@ -681,8 +690,15 @@ The four stdout markers follow the same rule: `wire.stream(ev)`, `wire.usage(u)`
 `marker:<nonce>`-tagged line when hosted, which the worker turns into the same typed events as
 before. An UNtagged line is a plain `out` line however it starts -- the reply is model output
 printed on the same stdout, so a reply containing a line that begins `JARVIS_CONFIRM_REQUEST `
-can no longer raise a fake confirmation. Do not print these lines by hand. The no-bridge spawn
-fallback in `server.js` still recognises the bare prefixes (see step 8 of the plan, if applied).
+can no longer raise a fake confirmation. Do not print these lines by hand.
+
+The no-bridge spawn fallback follows the same rule without a worker: `spawnProcessAndStream`
+(`server.js`) gives each process a one-time `JARVIS_WIRE_NONCE`; `wire.py` reads it once at
+import and removes it from `os.environ` (so a shell command or child process started later
+cannot inherit it) and tags its cards and markers `media:<nonce>` / `marker:<nonce>`; the
+server's `untagWireLine` believes only those, and shows everything else (bare, or tagged with
+a guess) as plain text with any tag removed. In the bridge path `relayBridgeEvent` never offers
+a plain `out` event to `onStdoutLine` (the marker parser) for the same reason.
 Two layouts, switched from the topbar and persisted server-side via
 `jarvis ui-mode`:
 
@@ -809,6 +825,7 @@ silently never runs.
 | `test_workspace.py` | daemons, log_files, backlog, ambient, diagnosis, onboarding |
 | `test_channel_people.py` | identity, the gate split, dedupe, remember_sender |
 | `test_channels.py` | the permission gate, config, transcripts |
+| `test_install_script.py` | `install.py` + `script.bat`: .venv vs plain python choice, exe copy / stale-persona cleanup / never copying onto itself, PATH search that skips the destination, how the elevation commands are built, `script.bat` stays a thin launcher (no network, no admin, no Windows needed) |
 | `test_channel_manual_people.py` | L.36b: people named in an allow-list get a row, hand-added people, handle-only placeholder adopted on first message (tool limits migrated), locked names vs `remember_sender`, linked accounts (by id / handle / name, ambiguity, owner never inherited), remove, `send_dm` skips a handle-only person, the `channels-*` commands |
 | `test_user_admin.py` | L.36: `user_perms` store (fails closed), `user_admin` switches (registered only, wildcard refusal, owner moves, block removes from all lists), the `base._ask_jarvis` enforcement point, the `send_dm` refusal, avatar validation in `people.py` |
 | `test_channel_servers.py` | L.36-P7 + tool calls in the Conversation view: the server registry, switches that only take access away (checked against the REAL `permissions.decide`), `servers.view`, thread -> parent-channel routing, tool-call scrubbing/clipping and attribution to the first reply chunk, the CLI; and (S3) a bare-id `allowed_guilds` / `allowed_channels` no longer crashes `view` or the gate |

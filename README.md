@@ -57,6 +57,24 @@ instead — same result, but changes to `jarvis/cli.py` take effect
 immediately without reinstalling. (You won't need this just to edit
 commands — the config file below is separate from the code.)
 
+### Windows: build everything and start the web UI
+
+`script.bat` (or `python install.py`, same thing) does the whole job: installs
+the CLI under the equipped persona's command name, copies the exe to
+`Program Files (x86)\Utils\bin` (one UAC prompt, for that copy only), runs
+`npm install` and opens the web UI.
+
+It builds with `jarvis-cli\.venv` if you have one, then a root `.venv`, and
+plain Python if you have neither. Flags (pass them to either one):
+
+| Flag | What it does |
+|---|---|
+| `--serve-only` | skip the build, just start the web server (use this in startup apps) |
+| `--no-browser` | don't open the browser |
+| `--no-venv` / `--venv PATH` | ignore any `.venv` / use a specific venv |
+| `--with-deps` | also install the dependencies (done automatically on a first install) |
+| `--install-dir DIR` | where the exe is copied; `""` skips the copy |
+
 ## Adding commands
 
 Your commands live in `~/.jarvis/commands.json` (created automatically on

@@ -30,6 +30,9 @@ What is pinned:
      byte-for-byte; hosted they are tagged and become typed events. An UNtagged
      line that merely starts with a marker prefix (a model reply, a command's
      output) is an ordinary `out` line and can never raise a fake confirmation.
+  9. A request the server runs as a plain process (no worker) is handed a one-time
+     JARVIS_WIRE_NONCE: `wire` reads it once, removes it from the environment so
+     nothing it starts can learn it, and tags its cards and markers with it.
   6. The CLI never depends on any of this: importing `jarvis.cli` does not load
      the bridge, `wire` with no host is a plain stderr print and a no-op, and the
      plain `jarvis config` still works with no worker anywhere.
@@ -641,6 +644,36 @@ def test_a_real_worker_does_not_take_forged_markers_for_events():
     check("the guessed tag is stripped and its text arrives as plain stdout too",
           'JARVIS_STREAM {"k":"reset"}' in out, out)
     check("it exited 0", exit_code(ev) == 0, exit_code(ev))
+
+
+def test_a_server_spawned_process_tags_its_lines_and_hides_the_nonce():
+    code = ("import subprocess, sys\n"
+            "from jarvis import wire\n"
+            "wire.media('screenshot', 'a.png')\n"
+            "wire.usage({'n': 1})\n"
+            "child = ('import os; print(os.environ.get(' + repr('JARVIS_WIRE_NONCE') + '))')\n"
+            "print(subprocess.run([sys.executable, '-c', child], capture_output=True, text=True).stdout.strip())\n")
+
+    def go(env_extra):
+        env = dict(os.environ)
+        env.pop("JARVIS_WIRE_NONCE", None)
+        env.update(env_extra)
+        env["PYTHONPATH"] = str(_JARVIS_CLI)
+        env["PYTHONIOENCODING"] = "utf-8"
+        p = subprocess.run([sys.executable, "-c", code], capture_output=True, env=env)
+        return (p.stdout.decode("utf-8", "replace").split("\n"),
+                p.stderr.decode("utf-8", "replace").split("\n"))
+
+    out, err = go({"JARVIS_WIRE_NONCE": "n0nce"})
+    check("the marker line carries the server's nonce in its tag",
+          out[0] == '\x1emarker:n0nce\x1fJARVIS_USAGE {"n": 1}', out)
+    check("the card line carries it too",
+          err[0] == "\x1emedia:n0nce\x1fJARVIS_MEDIA\tscreenshot\ta.png", err)
+    check("a process that process started cannot see the nonce", out[1] == "None", out)
+    out, err = go({})
+    check("with no nonce (a plain terminal) the lines are the legacy ones, no control bytes",
+          out[0] == 'JARVIS_USAGE {"n": 1}' and err[0] == "JARVIS_MEDIA\tscreenshot\ta.png"
+          and "\x1e" not in "".join(out + err), (out, err))
 
 
 _TESTS = [obj for name, obj in list(globals().items()) if name.startswith("test_")]
