@@ -477,15 +477,137 @@
   // collide with one.
   const HOME_KEY = "home";
 
-  // Tabs on Home. Servers is Discord-only, so it isn't offered without Discord.
-  function homeTabs(platforms, extra) {
-    const defs = [{ id: "platforms", label: "Platforms", ico: "chat", title: "Is each platform on, and who may run tools from it" }];
-    if (platforms && platforms.discord) defs.push({ id: "servers", label: "Servers", ico: "server", title: "Discord servers and channels" });
-    // Channel spaces S11: shown once anything has been saved from a shared room.
-    if (extra && extra.rooms > 0) defs.push({ id: "rooms", label: "Rooms", ico: "people", title: "What was saved from server channels and group chats" });
-    defs.push({ id: "denied", label: "Turned away", ico: "blocked", title: "Who the gate refused lately" });
-    defs.push({ id: "lists", label: "Global lists", ico: "people", title: "The raw allow-lists" });
-    return defs;
+  // Everything on the left that is not a person. A person's key is "<platform>:<user id>", so
+  // none of these can be one (no platform is called "platform", "server" or "group").
+  //   platform:discord          a platform's own page (token, tools master switch, room settings)
+  //   server:<guild id>         one Discord server: Overview, Permissions, Conversation
+  //   group:<platform>:<id>     one group chat (an Instagram thread): the same three tabs
+  const PLAT_PREFIX = "platform:", SERVER_PREFIX = "server:", GROUP_PREFIX = "group:";
+  const UNSORTED = "unsorted";   // rooms saved with no server we can name
+  const platKey = (id) => PLAT_PREFIX + id;
+  const serverKey = (id) => SERVER_PREFIX + id;
+  const groupKey = (platform, id) => `${GROUP_PREFIX}${platform}:${id}`;
+  function entryKind(k) {
+    const s = String(k || "");
+    if (!s) return "";
+    if (s === HOME_KEY) return "home";
+    if (s.startsWith(PLAT_PREFIX)) return "platform";
+    if (s.startsWith(SERVER_PREFIX)) return "server";
+    if (s.startsWith(GROUP_PREFIX)) return "group";
+    return "person";
+  }
+  // A thread id may itself contain ":", so only the first colon after the prefix splits.
+  function groupParts(k) {
+    const rest = String(k || "").slice(GROUP_PREFIX.length), i = rest.indexOf(":");
+    return String(k || "").startsWith(GROUP_PREFIX) && i > 0 ? { platform: rest.slice(0, i), id: rest.slice(i + 1) } : null;
+  }
+
+  // The tabs of a server or a group. Both have the same three.
+  const SPACE_TABS = [
+    { id: "overview", label: "Overview", ico: "info", title: "What it is and how it is doing" },
+    { id: "perms", label: "Permissions", ico: "shield", title: "What Jarvis may do here" },
+    { id: "conv", label: "Conversation", ico: "chat", title: "What was saved from it" },
+  ];
+
+  // Tabs on Home. Home is only what belongs to no platform: who was turned away, and the raw
+  // lists. Platforms, servers and groups are entries of their own on the left.
+  function homeTabs() {
+    return [
+      { id: "denied", label: "Turned away", ico: "blocked", title: "Who the gate refused lately" },
+      { id: "lists", label: "Global lists", ico: "people", title: "The raw allow-lists" },
+    ];
+  }
+
+  // ---- servers and groups as entries (pure) ----------------------------------------------
+  // A room row's channel: its own id for a channel, the parent channel for a thread.
+  const roomChannelId = (r) => r.channel_id || (r.kind === "server_channel" ? r.thread_id : "");
+  // Room times are local, zone-less ISO strings ("2026-10-01T10:05:00"); the helpers above take
+  // epoch seconds.
+  function isoToSec(iso) {
+    if (typeof iso !== "string" || !iso) return 0;
+    const t = Date.parse(iso);
+    return Number.isFinite(t) ? t / 1000 : 0;
+  }
+  // The Discord servers to list: every one in the registry view, plus any server a saved room
+  // names that the registry lacks, plus (only if needed) one bucket for rooms with no server.
+  // Each is { id, name, left, known, view (the /api/channels/servers row or null), rooms }.
+  function serverEntries(view, rows) {
+    const byId = new Map(), channelOwner = new Map();
+    for (const s of (view && view.servers) || []) {
+      byId.set(s.id, { id: s.id, name: s.name || "", left: !!s.left, known: !!s.known, view: s, rooms: [] });
+      for (const c of s.channels || []) channelOwner.set(c.id, s.id);
+    }
+    for (const r of rows || []) {
+      if (r.platform !== "discord" || !roomIsServer(r)) continue;
+      const gid = r.guild_id || channelOwner.get(roomChannelId(r)) || UNSORTED;
+      let e = byId.get(gid);
+      if (!e) {
+        e = { id: gid, name: gid === UNSORTED ? "Unplaced channels" : "", left: false, known: false, view: null, rooms: [] };
+        byId.set(gid, e);
+      }
+      if (!e.name && r.guild_name) e.name = r.guild_name;
+      e.rooms.push(r);
+    }
+    const label = (e) => (e.name || "~").toLowerCase();
+    return [...byId.values()].sort((a, b) => ((a.id === UNSORTED) - (b.id === UNSORTED)) || (a.left - b.left) || label(a).localeCompare(label(b)));
+  }
+  // The group chats to list (an Instagram thread, live or imported), newest first.
+  function groupEntries(rows) {
+    return (rows || []).filter((r) => r.kind === "group").sort((a, b) => String(b.modified || "").localeCompare(String(a.modified || "")));
+  }
+  // The channels of one server for the Conversation tab: every channel the registry knows plus any
+  // channel a saved room names, each with its own room (if anything was saved) and its threads.
+  function serverChannels(entry) {
+    const out = new Map();
+    const slot = (id, name) => {
+      if (!out.has(id)) out.set(id, { id, name: name || "", room: null, threads: [] });
+      const c = out.get(id);
+      if (!c.name && name) c.name = name;
+      return c;
+    };
+    for (const c of (entry.view && entry.view.channels) || []) slot(c.id, c.name);
+    for (const r of entry.rooms || []) {
+      const cid = roomChannelId(r);
+      if (r.kind === "server_channel") slot(r.thread_id, r.channel_name).room = r;
+      else slot(cid, r.channel_name).threads.push(r);
+    }
+    const rows = [...out.values()];
+    for (const c of rows) c.threads.sort((a, b) => String(b.modified || "").localeCompare(String(a.modified || "")));
+    return rows.sort((a, b) => ((a.id === "") - (b.id === "")) || (a.name || "~").toLowerCase().localeCompare((b.name || "~").toLowerCase()));
+  }
+  // Sum one count over rooms. A room whose log was too big to count says null; the sum then reads "n+".
+  function sumCount(rows, field) {
+    let n = 0, unknown = false;
+    for (const r of rows || []) { if (typeof r[field] === "number") n += r[field]; else unknown = true; }
+    return { n, unknown };
+  }
+  const countText = (c) => (c.unknown ? `${c.n}+` : String(c.n));
+  const newestOf = (rows) => (rows || []).reduce((m, r) => (String(r.modified || "") > m ? String(r.modified) : m), "");
+  // Is a group answering, as far as the panel can tell: the platform is on and the room has not
+  // switched itself off. (Who may be answered is still the person's own switch.)
+  function groupAnswering(row, platforms) {
+    const pl = platforms && platforms[row.platform];
+    return !!(pl && pl.enabled) && !(row.switches && row.switches.enabled === "off") && !row.imported;
+  }
+  // The three switches a room has besides Saving and Reading, as { on, lock } for the switch row.
+  // `lock` is why it can't be changed here ("" when it can). A room is only ever switched OFF
+  // (mention: ON); the platform's own setting is shown but never written from a room.
+  function roomAnswerState(row, sw, config, platforms) {
+    const label = (PLATFORMS[row.platform] || {}).label || row.platform;
+    const own = (row.switches && row.switches[sw]) || "inherit";
+    if (sw === "enabled") {
+      const pl = platforms && platforms[row.platform];
+      if (!pl || !pl.enabled) return { on: false, lock: `${label} is switched off.` };
+      return { on: own !== "off", lock: "" };
+    }
+    if (sw === "tools") {
+      const pl = platforms && platforms[row.platform];
+      if (!pl || !pl.allow_tools) return { on: false, lock: `Tools are off for all of ${label}.` };
+      return { on: own !== "off", lock: "" };
+    }
+    const required = !(config && config[row.platform] && config[row.platform].require_mention === false);
+    if (required && own !== "on") return { on: true, lock: `${label} requires a mention everywhere.` };
+    return { on: own === "on", lock: "" };
   }
 
   // One word for how a platform is doing: red = can't work yet (no token),
@@ -507,7 +629,9 @@
     permsError: "",
     selected: null,
     tab: "perms",
-    homeTab: "platforms", // the tab showing while Home is selected
+    homeTab: "denied", // the tab showing while Home is selected
+    spaceTab: "overview", // the tab showing while a server or a group is selected
+    chanPick: new Map(),  // server id -> roomKey of the channel or thread open in its Conversation tab
     search: "",
     platformFilter: "all",
     stateFilter: "all",
@@ -544,7 +668,6 @@
     // Discord servers (the registry + switches from /api/channels/servers).
     servers: null,     // the server's view, or null while unknown / unavailable
     serversError: "",
-    serverOpen: new Set(), // server ids whose card is expanded
     serverBusy: new Set(), // "<kind>:<id>|<switch>" while a write is in flight
     // allowed_guilds editor: what is typed / picked survives a re-render; `preview`
     // is the server's "this needs a second click" answer for the add in question.
@@ -564,8 +687,6 @@
     denied: { status: "idle", data: null, error: "", req: 0 },
     // Shared rooms (channel spaces S11): the saved-room list, the open room and what is in flight.
     spaces: { status: "idle", data: null, error: "" },
-    roomSel: null,                 // roomKey of the open room
-    roomFilter: { kind: "all", search: "" },
     roomConv: new Map(),           // roomKey -> { status, data, error, limit, req, scrollEnd }
     roomBusy: new Set(),           // "<roomKey>|<switch>" while a write is in flight
     settingBusy: new Set(),        // "<platform>|<key>" for the platform's room settings
@@ -584,6 +705,24 @@
 
   const personByKey = (k) => state.people.find((p) => pkey(p) === k) || null;
   const current = () => personByKey(state.selected);
+
+  // Is this key still something the left list can show? (After a reload a server may be gone.)
+  function entryExists(k) {
+    switch (entryKind(k)) {
+      case "home": return true;
+      case "platform": return !!state.platforms[String(k).slice(PLAT_PREFIX.length)] && !!PLATFORMS[String(k).slice(PLAT_PREFIX.length)];
+      case "server": return !!serverEntryOf(k);
+      case "group": return !!groupRowOf(k);
+      case "person": return !!personByKey(k);
+      default: return false;
+    }
+  }
+  const allRooms = () => roomsOf(state.spaces.data);
+  const serverEntryOf = (k) => serverEntries(state.servers, allRooms()).find((e) => serverKey(e.id) === k) || null;
+  function groupRowOf(k) {
+    const g = groupParts(k);
+    return g ? groupEntries(allRooms()).find((r) => r.platform === g.platform && r.thread_id === g.id) || null : null;
+  }
 
   // ------------------------------------------------------------------- data
   async function load(keepSelection) {
@@ -619,11 +758,11 @@
         const p = personByKey(k);
         if (!p || sameScope(d, scopeOf(p))) state.drafts.delete(k);
       }
-      if (!keepSelection || (state.selected !== HOME_KEY && !personByKey(state.selected))) {
-        // With nobody registered yet Home is the page that has something to show
-        // (the tokens still to set), so it is the fallback rather than an empty pane.
+      if (!keepSelection || !entryExists(state.selected)) {
+        // With nobody registered yet a platform's own page is the one that has something to
+        // show (the token still to set), so it is the fallback rather than an empty pane.
         const first = visiblePeople()[0] || state.people[0];
-        state.selected = first ? pkey(first) : HOME_KEY;
+        state.selected = first ? pkey(first) : platformIds().length ? platKey(platformIds()[0]) : HOME_KEY;
       }
     } catch (err) {
       state.error = err.message || "Couldn't read channels.";
@@ -977,6 +1116,7 @@
     }
     const rows = visiblePeople();
     dom.count.textContent = rows.length === state.people.length ? `${rows.length}` : `${rows.length} / ${state.people.length}`;
+    appendSpaceEntries(list);
     if (!state.people.length) {
       list.appendChild(el("div", { class: "ch-empty" }, [
         el("b", null, "Nobody is on the list yet."), el("br"),
@@ -992,7 +1132,7 @@
     for (const p of rows) {
       if (state.platformFilter === "all" && p.platform !== lastPlat) {
         lastPlat = p.platform;
-        list.appendChild(el("div", { class: "ch-group-label" }, PLATFORMS[p.platform] ? PLATFORMS[p.platform].label : p.platform));
+        list.appendChild(el("div", { class: "ch-group-label" }, `${PLATFORMS[p.platform] ? PLATFORMS[p.platform].label : p.platform} people`));
       }
       const k = pkey(p);
       const badges = [];
@@ -1024,6 +1164,78 @@
       ]);
       list.appendChild(card);
     }
+  }
+
+  // ---- servers and groups in the list ------------------------------------------------------
+  // One card shape for everything that is not a person: a platform, a server, a group.
+  function entryCard(o) {
+    const active = o.key === state.selected && !state.selectMode;
+    return el("button", {
+      type: "button", class: "ch-card" + (active ? " is-active" : ""), role: "option", "aria-selected": active ? "true" : "false",
+      "data-key": o.key, "data-ch": o.ch || null, "data-entry": entryKind(o.key),
+      onclick: () => select(o.key),
+    }, [
+      el("span", { class: "ch-avatar-wrap", "data-plat": o.plat || null }, [
+        el("span", { class: "ch-avatar ch-avatar--entry", style: `--hue: hsl(${hueFor(o.key)} 70% 58%)`, "aria-hidden": "true" }, [icon(o.ico)]),
+        o.plat ? el("span", { class: "ch-avatar__plat" }, [icon(o.plat)]) : null,
+      ]),
+      el("div", { style: "min-width:0" }, [
+        el("div", { class: "ch-card__name" }, o.name),
+        el("div", { class: "ch-card__sub" }, o.sub),
+        o.badges && o.badges.length ? el("div", { class: "ch-card__badges" }, o.badges) : null,
+      ]),
+      o.when ? el("div", { class: "ch-card__when", title: o.whenTitle || null }, o.when) : null,
+    ]);
+  }
+
+  function serverStatus(e) {
+    if (e.left) return { text: "Left", ch: "off", ico: "blocked" };
+    if (!e.view) return { text: "Not in the registry", ch: "off", ico: "info" };
+    return e.view.answering ? { text: "Answering", ch: "on", ico: "chat" } : { text: "Not answering", ch: "off", ico: "blocked" };
+  }
+
+  function serverListCard(e) {
+    const st = serverStatus(e), last = newestOf(e.rooms), chans = serverChannels(e).filter((c) => c.id).length;
+    const msgs = sumCount(e.rooms, "messages_in");
+    return entryCard({
+      key: serverKey(e.id), ico: "server", plat: "discord", ch: st.ch === "on" ? "on" : "off",
+      name: e.name || (e.id === UNSORTED ? "Unplaced channels" : "Unnamed server"),
+      sub: [e.id === UNSORTED ? "" : e.id, `${chans} channel${chans === 1 ? "" : "s"}`, e.rooms.length ? `${countText(msgs)} in` : ""].filter(Boolean).join(" · "),
+      badges: [tag(st.text, st.ch, st.ico)],
+      when: last ? relTime(isoToSec(last)) : "", whenTitle: last ? dateText(isoToSec(last)) : "",
+    });
+  }
+
+  function groupListCard(r) {
+    const answering = groupAnswering(r, state.platforms);
+    const badges = [r.imported ? tag("Imported", "limited", "download") : answering ? tag("Answering", "on", "chat") : tag("Not answering", "off", "blocked")];
+    if (!r.imported && !r.saved) badges.push(tag("No log", "off"));
+    return entryCard({
+      key: groupKey(r.platform, r.thread_id), ico: "people", plat: r.platform, ch: answering ? "on" : "off",
+      name: roomTitle(r),
+      sub: [(PLATFORMS[r.platform] || {}).label || r.platform, typeof r.messages_in === "number" ? `${r.messages_in} in` : ""].filter(Boolean).join(" · "),
+      badges, when: r.modified ? relTime(isoToSec(r.modified)) : "", whenTitle: r.modified ? dateText(isoToSec(r.modified)) : "",
+    });
+  }
+
+  // Servers and groups above the people. The status filter is about people, so it hides these
+  // (and so does ticking people for a bulk edit); the platform chips and the search narrow both.
+  function appendSpaceEntries(list) {
+    if (state.selectMode || state.stateFilter !== "all") return 0;
+    const q = state.search.trim().toLowerCase();
+    const hit = (text) => !q || String(text || "").toLowerCase().includes(q);
+    const pf = state.platformFilter, rows = allRooms();
+    const servers = pf === "all" || pf === "discord" ? serverEntries(state.servers, rows).filter((e) => hit(`${e.name} ${e.id}`)) : [];
+    const groups = groupEntries(rows).filter((r) => (pf === "all" || pf === r.platform) && hit(`${roomTitle(r)} ${r.thread_id}`));
+    if (servers.length) {
+      list.appendChild(el("div", { class: "ch-group-label" }, "Discord servers"));
+      servers.forEach((e) => list.appendChild(serverListCard(e)));
+    }
+    if (groups.length) {
+      list.appendChild(el("div", { class: "ch-group-label" }, pf === "all" ? "Group chats" : `${(PLATFORMS[pf] || {}).label || pf} groups`));
+      groups.forEach((r) => list.appendChild(groupListCard(r)));
+    }
+    return servers.length + groups.length;
   }
 
   // The grey line under a name. A handle-only person has no id yet, so say so
@@ -2320,11 +2532,19 @@
       dom.detail.scrollTop = keepTop;
       return;
     }
-    if (state.selected === HOME_KEY) {
-      dom.detail.appendChild(homeView());
-      dom.detail.scrollTop = keepTop;
-      if (focusId) { const again = document.getElementById(focusId); if (again) again.focus({ preventScroll: true }); }
-      return;
+    const kind = entryKind(state.selected);
+    if (kind !== "person") {
+      let view = null;
+      if (kind === "home") view = homeView();
+      else if (kind === "platform" && entryExists(state.selected)) view = platformView(state.selected.slice(PLAT_PREFIX.length));
+      else if (kind === "server" && serverEntryOf(state.selected)) view = serverView(serverEntryOf(state.selected));
+      else if (kind === "group" && groupRowOf(state.selected)) view = groupView(groupRowOf(state.selected));
+      if (view) {
+        dom.detail.appendChild(view);
+        dom.detail.scrollTop = keepTop;
+        if (focusId) { const again = document.getElementById(focusId); if (again) again.focus({ preventScroll: true }); }
+        return;
+      }
     }
     const p = current();
     if (!p) {
@@ -3193,19 +3413,9 @@
     return wrap;
   }
 
-  function serverCard(s, v) {
-    const open = state.serverOpen.has(s.id);
-    const status = s.left ? tag("Left", "off", "blocked") : s.answering ? tag("Answering", "on", "chat") : tag("Not answering", "off", "blocked");
-    const det = el("details", { class: "ch-server" + (s.left ? " is-left" : ""), "data-server": s.id });
-    if (open) det.setAttribute("open", "");
-    det.addEventListener("toggle", () => { if (det.open) state.serverOpen.add(s.id); else state.serverOpen.delete(s.id); });
-    det.appendChild(el("summary", null, [
-      el("div", { class: "ch-server__t" }, [
-        el("div", { class: "ch-server__name" }, s.name || "Unnamed server"),
-        el("div", { class: "ch-server__id" }, s.id + (s.channels.length ? ` · ${s.channels.length} channel${s.channels.length === 1 ? "" : "s"}` : "")),
-      ]),
-      status,
-    ]));
+  // The switches of one server (a server entry's Permissions tab): answer, tools, mention,
+  // reading, saving, then its channels. `s` is a row of /api/channels/servers, `v` the whole view.
+  function serverSwitchRows(s, v) {
     const body = el("div", { class: "ch-server__body" });
     if (!s.known) body.appendChild(el("div", { class: "ch-row__note ch-row__note--info" }, [icon("info"),
       el("span", null, "Jarvis hasn't seen this server yet. It appears in the list because the config mentions it; its name shows up once the bot connects.")]));
@@ -3225,8 +3435,7 @@
     } else if (s.known) {
       body.appendChild(el("div", { class: "ch-row__hint" }, "No text channels recorded yet. They're read when the bot connects."));
     }
-    det.appendChild(body);
-    return det;
+    return body;
   }
 
   // "Allowed servers": the allowed_guilds filter, editable. Only narrows access --
@@ -3365,10 +3574,12 @@
     return box;
   }
 
-  function serversSection() {
+  // The two filters that decide which servers and channels get answers at all, on the Discord
+  // page. (Each server's own switches are on its own entry.)
+  function allowedFiltersSection() {
     const v = state.servers;
     const box = el("div", { class: "ch-servers" });
-    box.appendChild(el("div", { class: "ch-plat__head" }, [icon("server"), el("div", { class: "ch-plat__name" }, "Discord servers"),
+    box.appendChild(el("div", { class: "ch-plat__head" }, [icon("server"), el("div", { class: "ch-plat__name" }, "Which servers and channels get answers"),
       el("button", { type: "button", class: "btn btn--ghost btn--sm", title: "Reload the server list", onclick: loadServers }, [icon("refresh")])]));
     const inner = el("div", { class: "ch-servers__body" });
     if (!v) {
@@ -3376,16 +3587,12 @@
     } else {
       inner.appendChild(allowedGuildsBlock(v));
       inner.appendChild(allowedChannelsBlock(v));
-      if (!v.servers.length) inner.appendChild(el("div", { class: "ch-row__hint" }, "No servers recorded yet. Start the bot (jarvis discord-daemon) and invite it to a server; it shows up here once connected."));
-      // A long server list scrolls inside its own box, so the tab itself never grows without bound.
-      const list = el("div", { class: "ch-servers__list" });
-      v.servers.forEach((s) => list.appendChild(serverCard(s, v)));
-      if (v.servers.length) inner.appendChild(list);
+      if (!v.servers.length) inner.appendChild(el("div", { class: "ch-row__hint" }, "No servers recorded yet. Start the bot (jarvis discord-daemon) and invite it to a server; it shows up on the left once connected."));
       const notes = [];
       if (v.allowed_channels.length) notes.push(`allowed_channels is set (${v.allowed_channels.length}): any channel not on it is ignored.`);
       if (v.orphans.length) notes.push(`${v.orphans.length} channel${v.orphans.length === 1 ? "" : "s"} in the config aren't in any server Jarvis has seen.`);
       for (const n of notes) inner.appendChild(el("div", { class: "ch-row__hint" }, n));
-      inner.appendChild(el("div", { class: "ch-row__hint" }, "These switches only take access away. To let more people in, use the Global lists tab or a person's Permissions tab. The two Allowed filters above only narrow too."));
+      inner.appendChild(el("div", { class: "ch-row__hint" }, "These two filters only narrow who is answered. A server's own switches (on its entry) only take access away too. To let more people in, use Home's Global lists or a person's Permissions tab."));
     }
     box.appendChild(inner);
     return box;
@@ -3510,26 +3717,27 @@
   // middle pane with a hero and tabs like a person's. Nothing here is new
   // behaviour: every control below is the one the side panel had.
   //
-  // Anything that changes what Home shows calls renderHome(), which redraws the
-  // middle pane only while Home is the thing selected.
+  // Anything that changes what Home, a platform, a server or a group shows calls renderHome(), which redraws the
+  // middle pane while one of those is selected, and the left list too (a server's badge and a
+  // group's counts come from the same data the switches change).
   function renderHome() {
-    if (!dom || state.selected !== HOME_KEY) return;
+    if (!dom || entryKind(state.selected) === "person" || !entryKind(state.selected)) return;
+    renderList();
     if (state.bulkOpen && state.selectMode && state.picked.size) return; // the bulk editor owns the pane
     renderDetail();
   }
 
   function platformIds() { return Object.keys(PLATFORMS).filter((id) => state.platforms[id]); }
 
-  // The pinned "Home" row above the people. It is not a person: no filters apply
-  // to it, it can't be ticked (so it is hidden while selecting), and it lives
-  // outside #ch-list so the list's own counts stay people-only.
+  // The pinned rows above the list: Home, then one page per platform. They are not people: no
+  // filters apply to them, they can't be ticked (so they are hidden while selecting), and they
+  // live outside #ch-list so the list's own counts stay people-only.
   function renderHomeCard() {
     const slot = dom && dom.home;
     if (!slot) return;
     slot.textContent = "";
     if (state.selectMode) return;
     const active = state.selected === HOME_KEY;
-    const badges = platformIds().map((id) => { const st = platformState(state.platforms[id]); return tag(`${PLATFORMS[id].label} ${st.text.toLowerCase()}`, st.ch, id); });
     slot.appendChild(el("button", {
       type: "button", class: "ch-card ch-card--home" + (active ? " is-active" : ""), id: "ch-home-card",
       "aria-current": active ? "true" : null, "data-key": HOME_KEY,
@@ -3538,36 +3746,42 @@
       el("span", { class: "ch-avatar-wrap" }, [el("span", { class: "ch-avatar ch-avatar--home", "aria-hidden": "true" }, [icon("home")])]),
       el("div", { style: "min-width:0" }, [
         el("div", { class: "ch-card__name" }, "Home"),
-        el("div", { class: "ch-card__sub" }, "Platforms, servers, global lists"),
-        badges.length ? el("div", { class: "ch-card__badges" }, badges) : null,
+        el("div", { class: "ch-card__sub" }, "Turned away, global lists"),
       ]),
     ]));
+    for (const id of platformIds()) {
+      const st = platformState(state.platforms[id]);
+      slot.appendChild(entryCard({
+        key: platKey(id), ico: id, ch: st.ch === "on" ? "on" : st.ch === "bad" ? "bad" : "off",
+        name: PLATFORMS[id].label, sub: "Bot, tools, room settings", badges: [tag(st.text, st.ch)],
+      }));
+    }
   }
 
   function homeHero() {
-    const tags = platformIds().map((id) => { const st = platformState(state.platforms[id]); return tag(`${PLATFORMS[id].label} · ${st.text.toLowerCase()}`, st.ch, id); });
     return el("div", { class: "ch-hero" }, [
       el("span", { class: "ch-avatar-wrap" }, [el("span", { class: "ch-avatar ch-avatar--lg ch-avatar--home", "aria-hidden": "true" }, [icon("home")])]),
       el("div", { class: "ch-hero__main" }, [
         el("div", { class: "ch-hero__nameline" }, [el("div", { class: "ch-hero__name" }, "Home")]),
-        el("div", { class: "ch-hero__handle" }, "Platforms, servers and global lists"),
-        tags.length ? el("div", { class: "ch-hero__ids" }, tags) : null,
+        el("div", { class: "ch-hero__handle" }, "Who was turned away, and the raw lists. Each platform, server and group chat has its own entry on the left."),
       ]),
     ]);
   }
 
-  function homeTabBar(defs, active) {
-    const bar = el("div", { class: "ch-tabs", role: "tablist", "aria-label": "Home" });
+  // The tab bar of Home, a server or a group: `onPick(id)` switches the tab, `label` names the bar.
+  function homeTabBar(defs, active, onPick, label) {
+    const pick = onPick || activateHomeTab;
+    const bar = el("div", { class: "ch-tabs", role: "tablist", "aria-label": label || "Home" });
     defs.forEach((d, i) => {
       bar.appendChild(el("button", {
         type: "button", class: "ch-tab", role: "tab", id: `ch-tab-${d.id}`, "aria-selected": active === d.id ? "true" : "false",
         "aria-controls": `ch-pane-${d.id}`, tabindex: active === d.id ? "0" : "-1", title: d.title || null,
-        onclick: () => activateHomeTab(d.id),
+        onclick: () => pick(d.id),
         onkeydown: (e) => {
           if (e.key !== "ArrowRight" && e.key !== "ArrowLeft") return;
           e.preventDefault();
           const next = defs[(i + (e.key === "ArrowRight" ? 1 : defs.length - 1)) % defs.length];
-          activateHomeTab(next.id); const nb = $(`#ch-tab-${next.id}`); if (nb) nb.focus();
+          pick(next.id); const nb = $(`#ch-tab-${next.id}`); if (nb) nb.focus();
         },
       }, [icon(d.ico), d.label]));
     });
@@ -3611,13 +3825,6 @@
     return card;
   }
 
-  function platformsPane() {
-    const ids = platformIds();
-    if (!ids.length) return homePane("platforms", [el("div", { class: "ch-row__hint" }, "No platform is configured yet.")]);
-    // Cards sit side by side when the pane is wide and stack when it isn't.
-    return homePane("platforms", [el("div", { class: "ch-home__cards" }, ids.map(platformCard))]);
-  }
-
   function listsPane() {
     const blocks = [el("div", { class: "ch-globals__note" }, "The raw allow-lists that the switches on each person's Permissions tab read and write. Use these to add someone who hasn't messaged yet, or to manage \"*\" entries.")];
     for (const id of Object.keys(PLATFORMS)) {
@@ -3633,22 +3840,237 @@
   function homeView() {
     const frag = document.createDocumentFragment();
     frag.appendChild(homeHero());
-    if (state.loading && !platformIds().length) {
-      frag.appendChild(loadingBlock("Reading platforms…"));
-      return frag;
-    }
-    const defs = homeTabs(state.platforms, { rooms: roomsOf(state.spaces.data).length });
+    const defs = homeTabs();
     const active = (defs.find((d) => d.id === state.homeTab) || defs[0]).id;
     frag.appendChild(homeTabBar(defs, active));
-    const pane = {
-      platforms: platformsPane,
-      servers: () => homePane("servers", [serversSection()]),
-      rooms: roomsPane,
+    frag.appendChild({
       denied: () => homePane("denied", [deniedSection()]),
       lists: listsPane,
-    }[active];
-    frag.appendChild(pane());
+    }[active]());
     return frag;
+  }
+
+  // ======================================================================
+  // Platform, server and group entries (the Channels tab, left list -> middle pane)
+  //
+  // Each is picked exactly like a person and has the same shape: a hero, then tabs. A server and
+  // a group have Overview (what it is, how it is doing), Permissions (the switches) and
+  // Conversation (what was saved: a Discord server shows its known channels to pick from, an
+  // Instagram group is just the one conversation). A platform is one page: the bot's state, the
+  // tools master switch, room settings and, for Discord, the two allow filters.
+  // Nothing is decided here: every switch is the same POST the old Servers and Rooms tabs made.
+  // ======================================================================
+  function entryHero(o) {
+    const hue = `hsl(${hueFor(o.key)} 70% 58%)`;
+    const ids = el("div", { class: "ch-hero__ids" }, [
+      o.id ? el("span", { class: "ch-id" }, [o.id, el("button", { type: "button", onclick: async () => toast((await copyText(o.id)) ? "ID copied" : "Couldn't copy", "info") }, "copy")]) : null,
+      ...(o.tags || []),
+    ]);
+    return el("div", { class: "ch-hero", style: `--hue: ${hue}` }, [
+      el("span", { class: "ch-avatar-wrap", "data-plat": o.plat || null }, [
+        el("span", { class: "ch-avatar ch-avatar--lg ch-avatar--entry", style: `--hue: ${hue}`, "aria-hidden": "true" }, [icon(o.ico)]),
+        o.plat ? el("span", { class: "ch-avatar__plat" }, [icon(o.plat)]) : null,
+      ]),
+      el("div", { class: "ch-hero__main" }, [
+        el("div", { class: "ch-hero__nameline" }, [el("div", { class: "ch-hero__name" }, o.name)]),
+        o.sub ? el("div", { class: "ch-hero__handle" }, o.sub) : null,
+        ids,
+      ]),
+    ]);
+  }
+
+  function spacePane(id, children) {
+    return el("div", { class: "ch-tabpane", id: `ch-pane-${id}`, role: "tabpanel", "aria-labelledby": `ch-tab-${id}` }, children);
+  }
+  function activateSpaceTab(id) { state.spaceTab = id; renderDetail(true); }
+  const spaceTabBar = (label) => homeTabBar(SPACE_TABS, SPACE_TABS.some((t) => t.id === state.spaceTab) ? state.spaceTab : "overview", activateSpaceTab, label);
+  const spaceTabId = () => (SPACE_TABS.some((t) => t.id === state.spaceTab) ? state.spaceTab : "overview");
+
+  // ---- a platform's page
+  function platformView(id) {
+    const frag = document.createDocumentFragment();
+    const st = platformState(state.platforms[id]);
+    frag.appendChild(entryHero({ key: platKey(id), ico: id, name: PLATFORMS[id].label, sub: "The bot, the tools master switch and how it treats shared rooms", tags: [tag(st.text, st.ch)] }));
+    const body = el("div", { class: "ch-tabpane", id: "ch-pane-platform" }, [platformCard(id)]);
+    if (id === "discord") body.appendChild(allowedFiltersSection());
+    frag.appendChild(body);
+    return frag;
+  }
+
+  // ---- a Discord server
+  function serverView(entry) {
+    const frag = document.createDocumentFragment();
+    const st = serverStatus(entry);
+    frag.appendChild(entryHero({
+      key: serverKey(entry.id), ico: "server", plat: "discord", name: entry.name || (entry.id === UNSORTED ? "Unplaced channels" : "Unnamed server"),
+      sub: entry.id === UNSORTED ? "Saved channels whose server Jarvis could not tell" : "Discord server",
+      id: entry.id === UNSORTED ? "" : entry.id, tags: [tag("Discord", null, "discord"), tag(st.text, st.ch, st.ico)],
+    }));
+    frag.appendChild(spaceTabBar("Server"));
+    const pane = { perms: serverPerms, conv: serverConv }[spaceTabId()] || serverOverview;
+    frag.appendChild(pane(entry));
+    return frag;
+  }
+
+  function serverOverview(entry) {
+    const v = entry.view, rooms = entry.rooms, chans = serverChannels(entry).filter((c) => c.id);
+    const inn = sumCount(rooms, "messages_in"), out = sumCount(rooms, "messages_out");
+    const last = newestOf(rooms), pane = spacePane("overview", []);
+    const stats = [];
+    if (!v) stats.push(statCard("Replies", "Unknown", "It isn't in the server registry, so its switches can't be read.", "off"));
+    else if (entry.left) stats.push(statCard("Replies", "Left", "Jarvis is no longer in this server.", "off"));
+    else if (v.answering) stats.push(statCard("Replies", "Answering", v.mention ? "When mentioned." : "To every message in answered channels.", "on"));
+    else stats.push(statCard("Replies", "Not answering", v.why_not.length ? v.why_not.join("; ") + "." : "Switched off here.", "off"));
+    stats.push(v ? (v.tools ? statCard("Tools", "Allowed", "People here may make Jarvis run tools.", "limited") : statCard("Tools", "Off", "Answers only, touches nothing.", "off")) : statCard("Tools", "—", "Not known.", "off"));
+    stats.push(v ? statCard("Saving and reading", v.saving ? "Saved" : "Not saved", v.ambient ? "Other messages are read, in memory only." : "Other messages are not read.", v.saving ? "on" : "off") : statCard("Saving and reading", "—", "Not known.", "off"));
+    pane.appendChild(el("div", null, [el("div", { class: "ch-section-title" }, "Right now"), el("div", { class: "ch-summary" }, stats)]));
+    pane.appendChild(el("div", null, [
+      el("div", { class: "ch-section-title" }, "Details"),
+      el("dl", { class: "ch-facts" }, [
+        el("div", null, [el("dt", null, "Channels"), el("dd", null, String(chans.length))]),
+        el("div", null, [el("dt", null, "Saved rooms"), el("dd", null, `${rooms.filter((r) => r.saved).length} of ${rooms.length}`)]),
+        el("div", null, [el("dt", null, "Messages in"), el("dd", null, countText(inn))]),
+        el("div", null, [el("dt", null, "Replies from Jarvis"), el("dd", null, countText(out))]),
+        el("div", null, [el("dt", null, "Last activity"), el("dd", null, last ? dateText(isoToSec(last)) : "—")]),
+        v && v.seen ? el("div", null, [el("dt", null, "First seen"), el("dd", null, String(v.seen).replace("T", " ").slice(0, 16))]) : null,
+      ]),
+    ]));
+    const list = el("div", { class: "ch-chan-list" });
+    for (const c of chans) {
+      const rs = [c.room, ...c.threads].filter(Boolean);
+      const row = c.room || rs[0] || null;
+      const vc = v && v.channels.find((x) => x.id === c.id);
+      list.appendChild(el("button", {
+        type: "button", class: "ch-room ch-room--chan" + (rs.length ? "" : " is-empty"), "data-channel": c.id, disabled: !rs.length,
+        title: rs.length ? "Read what was saved from this channel" : "Nothing saved from this channel yet",
+        onclick: () => openRoom("discord", (row || {}).thread_id),
+      }, [
+        el("span", { class: "ch-room__ico", "aria-hidden": "true" }, [icon("chat")]),
+        el("span", { class: "ch-room__t" }, [
+          el("span", { class: "ch-room__name" }, "#" + (c.name || c.id)),
+          el("span", { class: "ch-room__sub" }, rs.length ? `${countText(sumCount(rs, "messages_in"))} in · ${countText(sumCount(rs, "messages_out"))} out${c.threads.length ? ` · ${c.threads.length} thread${c.threads.length === 1 ? "" : "s"}` : ""}` : "nothing saved yet"),
+        ]),
+        vc ? (vc.answering ? tag("Answering", "on") : tag("Not answering", "off")) : null,
+      ]));
+    }
+    pane.appendChild(el("div", null, [el("div", { class: "ch-section-title" }, "Channels"),
+      chans.length ? list : el("div", { class: "ch-row__hint" }, "No channel recorded yet. They appear once the bot connects or someone is answered in one.")]));
+    return pane;
+  }
+
+  function serverPerms(entry) {
+    const pane = spacePane("perms", []);
+    const v = state.servers;
+    if (!entry.view || !v) {
+      pane.appendChild(el("div", { class: "ch-row__note ch-row__note--info" }, [icon("info"), el("span", null, entry.id === UNSORTED
+        ? "These channels have no server Jarvis could name, so there is nothing to switch for the server. Their own switches are in the Conversation tab's room settings once they are placed."
+        : "Jarvis has no record of this server (it was only found in a saved room), so its switches can't be shown. They appear once the bot connects to it.")]));
+      return pane;
+    }
+    pane.appendChild(el("div", { class: "ch-globals__note" }, "These switches only take access away; turning one back on removes the override. A server or channel that is off because something wider is off says so and stays locked."));
+    pane.appendChild(serverSwitchRows(entry.view, v));
+    return pane;
+  }
+
+  // The Conversation tab of a server: its known channels (and threads) to pick from, and the open one.
+  function serverConv(entry) {
+    const pane = spacePane("conv", []);
+    const chans = serverChannels(entry), rooms = entry.rooms;
+    if (!rooms.length) {
+      pane.appendChild(el("div", { class: "ch-empty" }, [el("b", null, "Nothing saved from this server yet. "), "A channel's conversation appears once someone is answered there while saving is on."]));
+      if (chans.some((c) => c.id)) pane.appendChild(el("div", { class: "ch-row__hint" }, `Known channels: ${chans.filter((c) => c.id).map((c) => "#" + (c.name || c.id)).join(", ")}.`));
+      return pane;
+    }
+    const wanted = state.chanPick.get(entry.id);
+    const newest = [...rooms].sort((a, b) => String(b.modified || "").localeCompare(String(a.modified || "")))[0];
+    const open = rooms.find((r) => roomKey(r) === wanted) || newest;
+    const listBox = el("div", { class: "ch-rooms__list", role: "list" });
+    const pick = (r) => () => { state.chanPick.set(entry.id, roomKey(r)); renderDetail(); };
+    for (const c of chans) {
+      const rs = [c.room, ...c.threads].filter(Boolean);
+      if (c.room) listBox.appendChild(roomCard(c.room, roomKey(c.room) === roomKey(open), pick(c.room), { title: "#" + (c.name || c.id) }));
+      else if (c.id) listBox.appendChild(el("div", { class: "ch-room is-empty", "aria-disabled": "true" }, [
+        el("span", { class: "ch-room__ico", "aria-hidden": "true" }, [icon("chat")]),
+        el("span", { class: "ch-room__t" }, [el("span", { class: "ch-room__name" }, "#" + (c.name || c.id)), el("span", { class: "ch-room__sub" }, rs.length ? "only threads were saved" : "nothing saved yet")]),
+      ]));
+      for (const t of c.threads) {
+        const card = roomCard(t, roomKey(t) === roomKey(open), pick(t));
+        card.classList.add("ch-room--thread");
+        listBox.appendChild(card);
+      }
+    }
+    pane.appendChild(el("div", { class: "ch-rooms" }, [listBox, el("div", { class: "ch-rooms__view" }, [roomViewer(open, { switches: false })])]));
+    return pane;
+  }
+
+  // ---- a group chat (an Instagram thread)
+  function groupView(row) {
+    const frag = document.createDocumentFragment();
+    const answering = groupAnswering(row, state.platforms);
+    frag.appendChild(entryHero({
+      key: groupKey(row.platform, row.thread_id), ico: "people", plat: row.platform, name: roomTitle(row),
+      sub: `${(PLATFORMS[row.platform] || {}).label || row.platform} · ${roomKindLabel(row.kind)}`, id: row.thread_id,
+      tags: [row.imported ? tag("Imported", "limited", "download") : answering ? tag("Answering", "on", "chat") : tag("Not answering", "off", "blocked")],
+    }));
+    frag.appendChild(spaceTabBar("Group chat"));
+    const pane = { perms: groupPerms, conv: groupConv }[spaceTabId()] || groupOverview;
+    frag.appendChild(pane(row));
+    return frag;
+  }
+
+  function groupOverview(row) {
+    const pane = spacePane("overview", []);
+    const pl = state.platforms[row.platform], label = (PLATFORMS[row.platform] || {}).label || row.platform;
+    const ans = roomAnswerState(row, "enabled", state.config, state.platforms), tools = roomAnswerState(row, "tools", state.config, state.platforms);
+    const sv = roomSwitchState(row, "log", state.config, state.servers), rd = roomSwitchState(row, "ambient", state.config, state.servers);
+    const stats = [];
+    if (row.imported) stats.push(statCard("Replies", "Read-only", "Imported from a data export; nothing here is live.", "off"));
+    else stats.push(ans.on ? statCard("Replies", "Answering", roomAnswerState(row, "mention", state.config, state.platforms).on ? "When mentioned." : "To every message.", "on") : statCard("Replies", "Not answering", ans.lock || "Switched off for this group.", "off"));
+    stats.push(row.imported ? statCard("Tools", "—", "Not applicable.", "off") : tools.on ? statCard("Tools", "Allowed", "People here may make Jarvis run tools.", "limited") : statCard("Tools", "Off", tools.lock || "Answers only, touches nothing.", "off"));
+    stats.push(row.imported ? statCard("Saving and reading", "Saved", "A fixed history.", "on") : statCard("Saving and reading", sv.on ? "Saved" : "Not saved", rd.on ? "Other messages are read, in memory only." : "Other messages are not read.", sv.on ? "on" : "off"));
+    pane.appendChild(el("div", null, [el("div", { class: "ch-section-title" }, "Right now"), el("div", { class: "ch-summary" }, stats)]));
+    pane.appendChild(el("div", null, [
+      el("div", { class: "ch-section-title" }, "Details"),
+      el("dl", { class: "ch-facts" }, [
+        el("div", null, [el("dt", null, "Platform"), el("dd", null, label + (pl && !pl.enabled ? " (switched off)" : ""))]),
+        el("div", null, [el("dt", null, "People seen"), el("dd", null, typeof row.speakers === "number" ? String(row.speakers) : "—")]),
+        el("div", null, [el("dt", null, "Messages in"), el("dd", null, typeof row.messages_in === "number" ? String(row.messages_in) : "too many to count here")]),
+        el("div", null, [el("dt", null, "Replies from Jarvis"), el("dd", null, typeof row.messages_out === "number" ? String(row.messages_out) : "too many to count here")]),
+        el("div", null, [el("dt", null, "Last activity"), el("dd", null, row.modified ? dateText(isoToSec(row.modified)) : "—")]),
+        row.saved ? null : el("div", null, [el("dt", null, "Log"), el("dd", null, "nothing saved")]),
+      ]),
+    ]));
+    return pane;
+  }
+
+  const GROUP_SWITCHES = [
+    { sw: "enabled", label: "Answer here", hint: "Jarvis replies when it's addressed in this group.", on: "inherit", off: "off", okOff: "Jarvis stops answering in this group.", okOn: "Jarvis answers in this group again." },
+    { sw: "tools", label: "Allow tools", hint: "Whether people here can make Jarvis run tools.", on: "inherit", off: "off", okOff: "People in this group can no longer make Jarvis run tools.", okOn: "People in this group follow the platform's tool setting again." },
+    { sw: "mention", label: "Needs an @mention", hint: "Only reply to messages that mention Jarvis.", on: "on", off: "inherit", okOff: "This group follows the platform's mention setting again.", okOn: "Jarvis only answers when mentioned in this group." },
+  ];
+
+  function groupPerms(row) {
+    const pane = spacePane("perms", []);
+    if (row.imported) {
+      pane.appendChild(el("div", { class: "ch-row__note ch-row__note--info" }, [icon("info"), el("span", null, "Imported from a data export: a read-only history. Nothing here is live, so there is nothing to switch.")]));
+      return pane;
+    }
+    pane.appendChild(el("div", { class: "ch-globals__note" }, "These switches only take access away (the mention switch only ever asks for more care); turning one back removes the override. One that is locked is set for the whole platform."));
+    const box = el("div", { class: "ch-room__switches" });
+    for (const d of GROUP_SWITCHES) {
+      const st = roomAnswerState(row, d.sw, state.config, state.platforms);
+      box.appendChild(srvRow(d.label, d.hint, st.on, st.lock, state.roomBusy.has(`${roomKey(row)}|${d.sw}`), (turnOn) => roomSwitch(row, d.sw, turnOn ? d.on : d.off)));
+    }
+    for (const [sw, label, hint] of [["ambient", "Read other messages", "Jarvis sees what's said here without being mentioned (memory only)."], ["log", "Save conversation", "Keep what's said here in this group's log."]]) {
+      const st = roomSwitchState(row, sw, state.config, state.servers);
+      box.appendChild(srvRow(label, hint, st.on, st.lock, state.roomBusy.has(`${roomKey(row)}|${sw}`), (turnOn) => roomSwitch(row, sw, turnOn ? "inherit" : "off")));
+    }
+    pane.appendChild(box);
+    return pane;
+  }
+
+  function groupConv(row) {
+    return spacePane("conv", [roomViewer(row, { head: false, switches: false })]);
   }
 
   function renderStatusLine() {
@@ -3866,24 +4288,31 @@
     if (typing) return;
     if (e.key === "/") { e.preventDefault(); dom.search.focus(); return; }
     if (state.bulkOpen) return; // the bulk editor has no tabs, and the arrows must not move the person behind it
-    if (state.selected === HOME_KEY && /^[1-9]$/.test(e.key)) {   // Home has its own, shorter set of tabs
-      const t = homeTabs(state.platforms)[Number(e.key) - 1];
+    const kind = entryKind(state.selected);
+    if (kind === "home" && /^[1-9]$/.test(e.key)) {   // Home has its own, shorter set of tabs
+      const t = homeTabs()[Number(e.key) - 1];
       if (t) activateHomeTab(t.id);
       return;
     }
-    const byKey = state.selected === HOME_KEY ? null : { 1: "profile", 2: "perms", 3: "conv", 4: "usage", 5: "test", 6: "history" }[e.key];
+    if ((kind === "server" || kind === "group") && /^[1-9]$/.test(e.key)) {   // a server or a group: Overview, Permissions, Conversation
+      const t = SPACE_TABS[Number(e.key) - 1];
+      if (t) activateSpaceTab(t.id);
+      return;
+    }
+    const byKey = kind === "person" ? { 1: "profile", 2: "perms", 3: "conv", 4: "usage", 5: "test", 6: "history" }[e.key] : null;
     if (byKey) { activateTab(byKey); return; }
     if (e.key === "ArrowDown" || e.key === "ArrowUp") {
-      // Home is the first stop, then the people the filters show. While ticking
-      // people it isn't shown, so it isn't a stop either.
+      // Home is the first stop, then the platforms, then the servers and groups the filters show,
+      // then the people. While ticking people only they are shown, so only they are stops.
       const rows = visiblePeople().map(pkey);
-      const order = state.selectMode ? rows : [HOME_KEY, ...rows];
+      const spaces = Array.from(dom.list.querySelectorAll('.ch-card[data-entry="server"], .ch-card[data-entry="group"]')).map((c) => c.getAttribute("data-key"));
+      const order = state.selectMode ? rows : [HOME_KEY, ...platformIds().map(platKey), ...spaces, ...rows];
       if (!order.length) return;
       e.preventDefault();
       const i = order.indexOf(state.selected);
       const next = i < 0 ? order[Math.min(1, order.length - 1)] : order[Math.min(order.length - 1, Math.max(0, i + (e.key === "ArrowDown" ? 1 : -1)))];
       select(next);
-      const card = (next === HOME_KEY ? dom.home : dom.list).querySelector(".ch-card.is-active"); if (card && card.scrollIntoView) card.scrollIntoView({ block: "nearest" });
+      const card = (dom.home.querySelector(".ch-card.is-active") || dom.list.querySelector(".ch-card.is-active")); if (card && card.scrollIntoView) card.scrollIntoView({ block: "nearest" });
     }
   }
 
@@ -3894,7 +4323,7 @@
     dom.search.addEventListener("input", () => { state.search = dom.search.value; renderChips(); renderList(); });
     dom.refresh.addEventListener("click", () => {
       state.tools = null; state.toolsState = "idle";
-      state.conv.clear(); state.usage.clear(); state.sim.clear(); state.hist.clear(); state.mem.clear();
+      state.conv.clear(); state.usage.clear(); state.sim.clear(); state.hist.clear(); state.mem.clear(); state.roomConv.clear();
       load(true).then(runTabLoader);
     });
     if (dom.addBtn) dom.addBtn.addEventListener("click", openAdd);
@@ -3968,7 +4397,8 @@
     state.roomBusy.add(k); renderHome();
     try {
       await api("POST", `/api/channels/spaces/${enc(row.platform)}/${enc(row.thread_id)}`, { switch: sw, value, thread: row.kind === "server_thread" });
-      toast(sw === "log" ? (value === "off" ? "This room is no longer saved." : "This room is saved again.") : (value === "off" ? "Jarvis stops reading this room's other messages." : "Jarvis reads this room's other messages again."), "success");
+      const g = GROUP_SWITCHES.find((d) => d.sw === sw);
+      toast(g ? (value === g.off ? g.okOff : g.okOn) : sw === "log" ? (value === "off" ? "This room is no longer saved." : "This room is saved again.") : (value === "off" ? "Jarvis stops reading this room's other messages." : "Jarvis reads this room's other messages again."), "success");
     } catch (err) { toast(err.message || "Couldn't save that.", "error"); }
     state.roomBusy.delete(k);
     await load(true);
@@ -4124,11 +4554,21 @@
     });
   }
 
+  // Jump to a saved room: the Conversation tab of the server it belongs to (with that channel or
+  // thread open), or of the group. A room the list can't place stays where it is.
   function openRoom(platform, id) {
-    state.roomSel = `${platform}|${id}`;
-    state.homeTab = "rooms";
-    state.roomFilter = { kind: "all", search: "" };
-    renderDetail(true);
+    const row = allRooms().find((r) => r.platform === platform && r.thread_id === String(id));
+    if (!row) return;
+    let key = "";
+    if (row.kind === "group") key = groupKey(row.platform, row.thread_id);
+    else {
+      const e = serverEntries(state.servers, allRooms()).find((x) => x.rooms.some((r) => roomKey(r) === roomKey(row)));
+      if (e) { key = serverKey(e.id); state.chanPick.set(e.id, roomKey(row)); }
+    }
+    if (!key) return;
+    state.spaceTab = "conv";
+    if (state.selected === key) { renderDetail(true); return; }
+    select(key);
   }
 
   // ---- Rooms tab ---------------------------------------------------------------
@@ -4141,7 +4581,7 @@
     else if (s.status === "ok" || s.status === "loading") return;
     const req = ++s.req;
     s.status = "loading"; s.error = "";
-    renderRoomsIfShowing();
+    renderHome();
     try {
       const data = await api("GET", `/api/channels/spaces/${enc(row.platform)}/${enc(row.thread_id)}/conversation?limit=${s.limit}`);
       if (s.req !== req) return;
@@ -4150,9 +4590,8 @@
       if (s.req !== req) return;
       s.status = "error"; s.error = err.message || "Couldn't read the room.";
     }
-    renderRoomsIfShowing();
+    renderHome();
   }
-  const renderRoomsIfShowing = () => { if (dom && state.selected === HOME_KEY && state.homeTab === "rooms") renderHome(); };
 
   async function loadSpaces() {
     try { const d = await api("GET", "/api/channels/spaces"); state.spaces.data = d; state.spaces.error = ""; state.spaces.status = "ok"; }
@@ -4161,12 +4600,12 @@
     renderHome();
   }
 
-  function roomCard(row, active, onPick) {
+  function roomCard(row, active, onPick, opts) {
     const open = el("button", { type: "button", class: "ch-room" + (active ? " is-active" : ""), "data-room": roomKey(row), "aria-current": active ? "true" : null, onclick: onPick }, [
       el("span", { class: "ch-room__ico", "aria-hidden": "true" }, [icon(row.platform === "instagram" ? "instagram" : "server")]),
       el("span", { class: "ch-room__t" }, [
-        el("span", { class: "ch-room__name" }, roomTitle(row)),
-        el("span", { class: "ch-room__sub" }, [`${(PLATFORMS[row.platform] || {}).label || row.platform} · ${roomKindLabel(row.kind)}`, row.modified ? ` · ${dayLabel(dayOf(row.modified), localDay())}` : ""].join("")),
+        el("span", { class: "ch-room__name" }, (opts && opts.title) || roomTitle(row)),
+        el("span", { class: "ch-room__sub" }, [roomKindLabel(row.kind), typeof row.messages_in === "number" ? ` · ${row.messages_in} in` : "", typeof row.messages_out === "number" && row.messages_out ? ` · ${row.messages_out} out` : "", row.modified ? ` · ${dayLabel(dayOf(row.modified), localDay())}` : ""].join("")),
       ]),
       row.imported ? el("span", { class: "ch-room__tag" }, "imported") : (!row.saved ? el("span", { class: "ch-room__tag" }, "no log") : null),
     ]);
@@ -4183,16 +4622,19 @@
     return box;
   }
 
-  function roomViewer(row) {
+  // opts.head = false drops the title line (an entry's hero already names the room);
+  // opts.switches = false drops the Saving / Reading rows (the entry's Permissions tab has them).
+  function roomViewer(row, opts) {
+    const o = opts || {};
     const s = roomConvSlot(row);
     const box = el("div", { class: "ch-room-view", "data-room": roomKey(row) });
     if (s.status === "idle") setTimeout(() => ensureRoomConv(row), 0);
     const d = s.data;
-    box.appendChild(el("div", { class: "ch-room-view__head" }, [
+    if (o.head !== false) box.appendChild(el("div", { class: "ch-room-view__head" }, [
       el("div", { class: "ch-room-view__title" }, roomTitle(row)),
       el("div", { class: "ch-room-view__tags" }, [tag((PLATFORMS[row.platform] || {}).label || row.platform, null, row.platform), tag(roomKindLabel(row.kind), null, null), row.imported ? tag("Imported", "limited", "download") : null]),
     ]));
-    box.appendChild(roomHeadSwitches(row));
+    if (o.switches !== false) box.appendChild(roomHeadSwitches(row));
     if (s.status === "idle" || (s.status === "loading" && !d)) { box.appendChild(loadingBlock("Reading the room…")); return box; }
     if (s.status === "error" && !d) { box.appendChild(errorBlock(s.error, () => { s.status = "idle"; ensureRoomConv(row); })); return box; }
     const info = d || { entries: [], total: 0, shown: 0, participants: [], denied: 0 };
@@ -4219,39 +4661,6 @@
     if (s.scrollEnd) { s.scrollEnd = false; requestAnimationFrame(() => { list.scrollTop = list.scrollHeight; }); }
     return box;
   }
-
-  function roomsPane() {
-    const rows = roomsOf(state.spaces.data);
-    const f = state.roomFilter;
-    const pane = homePane("rooms", []);
-    const listBox = el("div", { class: "ch-rooms__list", role: "list" });
-    const shown = () => filterRooms(rows, f);
-    const open = () => { const list = shown(); return list.find((r) => roomKey(r) === state.roomSel) || list[0] || null; };
-    const viewBox = el("div", { class: "ch-rooms__view" });
-    function fill() {
-      listBox.textContent = "";
-      const list = shown(), cur = open();
-      if (!list.length) listBox.appendChild(el("div", { class: "ch-empty" }, rows.length ? "No room matches." : "No rooms yet."));
-      list.forEach((r) => listBox.appendChild(roomCard(r, !!cur && roomKey(r) === roomKey(cur), () => { state.roomSel = roomKey(r); renderHome(); })));
-    }
-    const kindBtn = (value, text) => el("button", { type: "button", role: "radio", "aria-checked": f.kind === value ? "true" : "false", id: `ch-rooms-kind-${value}`, onclick: () => { f.kind = value; renderHome(); } }, text);
-    const search = el("input", { type: "search", class: "ch-name-input ch-rooms__search", id: "ch-rooms-search", placeholder: "Search rooms", autocomplete: "off", spellcheck: "false", "aria-label": "Search rooms", value: f.search });
-    search.value = f.search;
-    search.addEventListener("input", () => { f.search = search.value; fill(); const cur = open(); viewBox.textContent = ""; viewBox.appendChild(cur ? roomViewer(cur) : emptyRoomView(rows)); });
-    pane.appendChild(el("div", { class: "ch-globals__note" }, "Everything Jarvis has saved from shared rooms: Discord server channels and threads, and Instagram group chats (live or imported). Read-only here; the switches change what is saved or read from now on."));
-    pane.appendChild(el("div", { class: "ch-rooms__bar" }, [
-      search,
-      el("div", { class: "ch-seg", role: "radiogroup", "aria-label": "Kind of room" }, [kindBtn("all", "All"), kindBtn("server", "Servers"), kindBtn("group", "Groups")]),
-      el("button", { type: "button", class: "btn btn--ghost btn--sm", title: "Reload the rooms", onclick: loadSpaces }, [icon("refresh")]),
-    ]));
-    if (state.spaces.status === "error" && !rows.length) { pane.appendChild(errorBlock(state.spaces.error, loadSpaces)); return pane; }
-    fill();
-    const cur = open();
-    viewBox.appendChild(cur ? roomViewer(cur) : emptyRoomView(rows));
-    pane.appendChild(el("div", { class: "ch-rooms" }, [listBox, viewBox]));
-    return pane;
-  }
-  const emptyRoomView = (rows) => el("div", { class: "ch-empty" }, rows.length ? "Pick a room to read it." : "Nothing is saved from a shared room yet. Rooms show up once someone writes in a server channel Jarvis is in, or after you import an Instagram export.");
 
   // _pure: the logic with no DOM, for tests/verify_channels_panel.js.
   global.JarvisChannels = {

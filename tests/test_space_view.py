@@ -261,29 +261,91 @@ def test_registration_and_web_routes():
           and "app.post(\"/api/channels/spaces/:platform/:threadId/conversation" not in server)
 
 
+DEFAULT_SWITCHES = {"log": "inherit", "ambient": "inherit", "enabled": "inherit", "tools": "inherit",
+                    "mention": "inherit"}
+
+
+def test_every_room_switch_is_reported():
+    """Answer here, tools and mention are reported per room too (an Instagram group's whole
+    Permissions tab reads them): off / off / on, each only in the direction it may be written."""
+    build()
+    for sw, value in (("enabled", "off"), ("tools", "off"), ("mention", "on")):
+        ok, err, _ = spaces.set_switch(INSTAGRAM, "ig-live", sw, value)
+        check(f"{sw} {value} was written", ok, err)
+    row = {r["thread_id"]: r for r in space_view.list_spaces()["spaces"]}["ig-live"]
+    check("the room reports all three", row["switches"] == dict(DEFAULT_SWITCHES, enabled="off", tools="off", mention="on"),
+          str(row["switches"]))
+    for sw in ("enabled", "tools", "mention"):
+        spaces.set_switch(INSTAGRAM, "ig-live", sw, "on" if sw != "mention" else "inherit")
+    row = {r["thread_id"]: r for r in space_view.list_spaces()["spaces"]}["ig-live"]
+    check("turning them back removes the overrides", row["switches"] == DEFAULT_SWITCHES, str(row["switches"]))
+
+
 def test_room_switches_in_the_listing():
     """Channel spaces S11: each row reports the room's OWN Saving / Reading override so the panel
     can draw the switches truthfully. `off` only when that room's override is a literal false."""
     build()
     rows = {r["thread_id"]: r for r in space_view.list_spaces()["spaces"]}
     check("every row has switches, inherit by default",
-          rows and all(r.get("switches") == {"log": "inherit", "ambient": "inherit"} for r in rows.values()),
+          rows and all(r.get("switches") == DEFAULT_SWITCHES for r in rows.values()),
           str({k: v.get("switches") for k, v in rows.items()}))
     ok1, err1, _ = spaces.set_switch(DISCORD, "C1", "log", "off")
     ok2, err2, _ = spaces.set_switch(INSTAGRAM, "ig-live", "ambient", "off")
     check("the switches were written", ok1 and ok2, f"{err1} {err2}")
     rows = {r["thread_id"]: r for r in space_view.list_spaces()["spaces"]}
     check("a room switched off for saving shows it, and only that one",
-          rows["C1"]["switches"] == {"log": "off", "ambient": "inherit"}, str(rows["C1"]["switches"]))
+          rows["C1"]["switches"] == dict(DEFAULT_SWITCHES, log="off"), str(rows["C1"]["switches"]))
     check("a group switched off for reading shows it",
-          rows["ig-live"]["switches"] == {"log": "inherit", "ambient": "off"}, str(rows["ig-live"]["switches"]))
-    check("other rooms are untouched", rows["import-aaaa1111"]["switches"] == {"log": "inherit", "ambient": "inherit"})
+          rows["ig-live"]["switches"] == dict(DEFAULT_SWITCHES, ambient="off"), str(rows["ig-live"]["switches"]))
+    check("other rooms are untouched", rows["import-aaaa1111"]["switches"] == DEFAULT_SWITCHES)
     ok3, err3, _ = spaces.set_switch(DISCORD, "C1", "log", "on")
     rows = {r["thread_id"]: r for r in space_view.list_spaces()["spaces"]}
     check("turning it back on removes the override", ok3 and rows["C1"]["switches"]["log"] == "inherit", err3)
     check("a thread-keyed switch shows too",
           spaces.set_switch(DISCORD, "C1", "ambient", "off", kind="thread")[0]
           and {r["thread_id"]: r for r in space_view.list_spaces()["spaces"]}["C1"]["switches"]["ambient"] == "off")
+
+
+def test_places_and_counts():
+    """Rows say which server a room belongs to (for the panel's per-server entries) and how many
+    lines were saved each way. The place comes from the registry, else from the room's own log."""
+    build()
+    rows = {r["thread_id"]: r for r in space_view.list_spaces()["spaces"]}
+    chan = rows["C1"]
+    check("an unregistered channel takes its server and channel from its own log",
+          (chan["guild_id"], chan["guild_name"], chan["channel_id"], chan["channel_name"])
+          == ("G1", "Guild", "C1", "general"), str(chan))
+    check("counts are lines per direction", (chan["messages_in"], chan["messages_out"]) == (2, 0),
+          str((chan["messages_in"], chan["messages_out"])))
+    live = rows["ig-live"]
+    check("an Instagram group has no server", (live["guild_id"], live["guild_name"], live["channel_name"]) == ("", "", "")
+          and (live["messages_in"], live["messages_out"]) == (1, 0), str(live))
+    check("a room with no log counts zero, not unknown",
+          (rows["import-nolog00"]["messages_in"], rows["import-nolog00"]["messages_out"]) == (0, 0))
+    line(DISCORD, "C1", dir="out", text="a reply", to_user="u1", at="2026-10-01T10:06:00")
+    line(DISCORD, "C1", text='he typed "dir": "in" and "dir": "out" in a message', at="2026-10-01T10:07:00")
+    row = {r["thread_id"]: r for r in space_view.list_spaces()["spaces"]}["C1"]
+    check("a reply counts as out, and quoted key text inside a message counts for nothing",
+          (row["messages_in"], row["messages_out"]) == (3, 1), str((row["messages_in"], row["messages_out"])))
+    from jarvis.channels import permissions
+    spaces.note(DISCORD, permissions.IncomingMessage(
+        platform=DISCORD, context=permissions.CTX_GROUP, user_id="u1", user_handle="ann",
+        guild_id="G2", channel_id="C2", thread_id="C2", guild_name="Registry Guild", channel_name="lounge"))
+    line(DISCORD, "C2", guild_id="G9", guild_name="Log Guild", channel_id="C2", channel_name="old-name")
+    reg = {r["thread_id"]: r for r in space_view.list_spaces()["spaces"]}["C2"]
+    check("the registry's place beats the log's",
+          (reg["guild_id"], reg["guild_name"], reg["channel_name"]) == ("G2", "Registry Guild", "lounge"), str(reg))
+    kept = space_view.MAX_COUNT_BYTES
+    space_view.MAX_COUNT_BYTES = 10
+    try:
+        big = {r["thread_id"]: r for r in space_view.list_spaces()["spaces"]}["C1"]
+    finally:
+        space_view.MAX_COUNT_BYTES = kept
+    check("a log too big to count cheaply says so instead of guessing",
+          big["messages_in"] is None and big["messages_out"] is None, str(big))
+    rotated = transcript._thread_files(DISCORD, "C1")[0]
+    check("the listing still carries no message text", "a reply" not in json.dumps(space_view.list_spaces())
+          and rotated.exists())
 
 
 def main():
