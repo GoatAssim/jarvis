@@ -41,6 +41,15 @@ things that were already fixed once.
   `pack_instructions_ctx`, once by the tools blurb's playnite/spotify
   flags — and both times the symptom was silent: the prompt still worked,
   the cache just never hit. `tests/test_prompt_cache.py` guards it.
+- **Download Hub (`jarvis/hub/`, `actions/download_hub.py`).** An engine only returns an
+  `Outcome`; the retry / stall / restart policy lives in `daemon._finish` and nowhere else. Every row
+  write goes through `Store._update` (so it is sanitised and state changes are checked); a provider
+  writes only `<provider>:<id>` rows, through `Store.upsert_provider_row`. Nothing is written, opened
+  or deleted outside the library root (`dl_add`'s `dest` is a sub-folder, `dl_open` takes an id never a
+  path, cancel deletes only a recorded `.part`). The HTTP engine's SSRF guard (`netguard`) runs on the
+  first request and every redirect; `allow_private_hosts` is editable only through the confirm-gated
+  `dl_settings`. `hub_client` never raises. The panel renders download text with `textContent` only
+  (`tests/verify_hub_panel.js` greps for markup assignment). The model cannot create a provider.
 - **The model may start, stop and inspect daemons; it may not create one.**
   Registering a daemon stores an argv Jarvis later runs unattended, and
   the model is the component most exposed to text written by other people
@@ -176,6 +185,19 @@ things that were already fixed once.
   and is never an instruction. The panel (S11) only adds controls on routes that already existed
   and renders room text with `textContent` (never markup); anything that WIDENS what is said or
   read in a room (group recall on, one item set to "on", reading anyone) asks for a second click.
+  (8) The UNOFFICIAL Instagram group transport (`channels/instagram_private.py`,
+  `instagram-group-login`, `instagram-group-serve`, plan S9c) is the ONLY file allowed to import a
+  private-API client library, imports none at module level, and is imported by nothing except those
+  two commands (`jarvis.channels` never loads it). It is OFF by default (`group_transport`, Instagram
+  only, the literal `true`), re-reads that switch every cycle and drops a reply in flight when it is off.
+  It polls ONLY `pt-<id>` entries of `allowed_channels` (an empty list polls nothing, unlike the gate),
+  starts from "now", and feeds the same `base.gate` / `base.handle_message` as every message: there is
+  no second permission path. Its ids (`pt-` threads, `pk-` people) are never merged with the webhook's,
+  and it never writes the handle -> id directory. On any login check it stops, tells the owner once and
+  writes a halt marker; it never retries by itself. The password is asked only at the terminal prompt,
+  never stored, logged, put in `channels.json` or sent through the web UI; only the client's session is
+  kept (`~/.jarvis/instagram_private_session.json`, on the sensitive-path list). The panel only flips the
+  switch, behind a second click that states the risk.
   `tests/test_instagram_import.py`, `tests/test_space_view.py`, `tests/test_recent_spaces.py` and
   `tests/verify_channels_rooms.js` pin it.
   `tests/test_channel_spaces.py`, `test_channel_group_history.py`, `test_group_recall_toggles.py`,
@@ -484,6 +506,7 @@ line classifier). `npm install marked` inside
 actually render Markdown):
 
     node tests/verify_math_rendering.js
+    node tests/verify_hub_panel.js                # Download Hub panel: pure helpers + "never builds markup from data" greps
     node tests/verify_thread_extras_collapse.js   # BUG-5/6: answered confirmations are one line, one card per dev_agent job, cards before the reply on reload, saved thinking follows the toggle; no npm install
     node tests/verify_ask_trace_replay.js   # also: the Raw/Summary console views (buildAskTraceViews) and the saved-as-drawn card merge (mergeDisplayWithExtras)
     node tests/verify_saved_as_shown_routes.js   # POST /api/console/:id/trace and POST /api/conversations/:id/display (validation, stdin payload, size caps)

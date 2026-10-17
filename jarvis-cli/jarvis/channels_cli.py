@@ -38,6 +38,7 @@ COMMANDS = (
     "channels-master-tools", "channels-send", "channels-denied",
     "channels-thinking", "channels-memory", "channels-awaiting",
     "discord-daemon", "instagram-serve", "logs-search",
+    "instagram-group-serve", "instagram-group-login",
 )
 
 USAGE = """channel commands:
@@ -47,7 +48,10 @@ USAGE = """channel commands:
                                         (saved notes/memories in shared-room replies, default off),
                                         ambient_messages 0-100 (0 = off), ambient_minutes 1-1440,
                                         ambient_senders approved|anyone (Jarvis reading room
-                                        messages that don't mention it; needs message_content_intent)
+                                        messages that don't mention it; needs message_content_intent),
+                                        group_transport on|off (Instagram only, default off: the UNOFFICIAL
+                                        group-chat transport), group_poll_seconds 15-600,
+                                        group_send_gap_seconds 3-600
   channels-allow <platform> <set> <id>  add to dm|reply|tool|image allowlist
   channels-deny  <platform> <set> <id>  remove from an allowlist
   channels-test  [platform] [message]   send a test DM to the owner
@@ -192,6 +196,12 @@ USAGE = """channel commands:
                                         reason -- never what they wrote (JSON, read-only)
   discord-daemon                        run the Discord bot (foreground)
   instagram-serve                       run the Instagram webhook (foreground)
+  instagram-group-login                 UNOFFICIAL (outside Meta's API and Instagram's terms; the account can be
+                                        banned): sign a DEDICATED account in for group chats. Asks for the
+                                        password at the prompt and keeps only the session, never the password
+  instagram-group-serve                 UNOFFICIAL: poll the group threads listed as pt-<id> in allowed_channels
+                                        and answer when mentioned (foreground; off until
+                                        `channels-set instagram group_transport on`; that switch stops it)
   logs-search <query> [--mode m] [--origin o] [--source s] [--direction d] [--task t]
 
   <set> is one of: dm, reply, tool, image
@@ -1108,6 +1118,15 @@ def handle(argv):
     if cmd == "instagram-serve":
         from .channels import instagram_gateway
         sys.exit(instagram_gateway.run())
+
+    if cmd == "instagram-group-serve":
+        # The unofficial transport is imported ONLY here, on demand (plan S9c).
+        from .channels import instagram_private
+        sys.exit(instagram_private.run())
+
+    if cmd == "instagram-group-login":
+        from .channels import instagram_private
+        sys.exit(instagram_private.login_cli())
 
     if cmd == "logs-search":
         from . import logs as logs_mod

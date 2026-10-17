@@ -195,6 +195,7 @@ _SENSITIVE_PATHS = [
     ("~/.ssh", 55, "your SSH keys"),
     ("~/.aws", 50, "your AWS credentials"),
     ("~/.jarvis/ai_config.json", 45, "Jarvis's own API keys"),
+    ("~/.jarvis/instagram_private_session.json", 50, "your Instagram login session"),
     ("~/.jarvis/tool_safety.json", 60, "Jarvis's own safety settings"),
     ("~/.jarvis/policy.json", 60, "this policy file itself"),
     ("~/.gnupg", 55, "your GPG keys"),

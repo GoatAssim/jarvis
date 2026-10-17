@@ -1077,6 +1077,14 @@ window.JARVIS_SLASH_COMMANDS = /*JSON-BEGIN*/
       "reason": "a long-running supervisor; start it with /daemon or /daemons",
       "riskTier": "caution"
     },
+    "instagram-group-serve": {
+      "reason": "a long-running, UNOFFICIAL transport (outside Meta's API and Instagram's terms); the owner starts it from a terminal on purpose",
+      "riskTier": "caution"
+    },
+    "instagram-group-login": {
+      "reason": "an interactive sign-in that asks for a password at a terminal prompt",
+      "riskTier": "caution"
+    },
     "clipboard-watch": {
       "reason": "a long-running supervisor; start it with /daemon or /daemons",
       "riskTier": "caution"

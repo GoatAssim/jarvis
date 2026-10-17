@@ -306,6 +306,8 @@
   const GROUP_FLAGS = ["inherit", "on", "off"];
   const groupFlagOf = (item) => (item && GROUP_FLAGS.includes(item.groups) ? item.groups : "inherit");
   const recallOn = (config, id) => !!(config && config[id] && config[id].group_recall === true);
+  // S9c: only the literal true counts, and only Instagram has the switch.
+  const transportOn = (config, id) => id === "instagram" && !!(config && config[id] && config[id].group_transport === true);
   function usedInRooms(flag, master) {
     if (flag === "off") return false;
     if (flag === "on") return true;
@@ -567,6 +569,7 @@
     roomConv: new Map(),           // roomKey -> { status, data, error, limit, req, scrollEnd }
     roomBusy: new Set(),           // "<roomKey>|<switch>" while a write is in flight
     settingBusy: new Set(),        // "<platform>|<key>" for the platform's room settings
+    transportAsk: false,           // the Instagram group transport's turn-on awaits its second click
     recallAsk: null,               // platform id whose group-recall turn-on awaits its second click
     ambientDraft: new Map(),       // platform id -> { messages, minutes, senders } being edited
     ambientAsk: null,              // platform id whose "read anyone" choice awaits its second click
@@ -4020,6 +4023,19 @@
       box.appendChild(confirmBox("Confirm group recall", `Turn on saved notes and memories in ${label} rooms? Everyone in a room can read what Jarvis says there, so a fact about one person could be repeated to the others. Items you set to "off" stay out.`,
         `ch-recall-confirm-${id}`, "Turn it on", () => { state.recallAsk = null; roomSetting(id, "group_recall", true, "Room replies can now use saved notes and memories that follow this switch."); }, () => { state.recallAsk = null; renderHome(); }));
     }
+    // 1b. Instagram only: the UNOFFICIAL live group transport's kill switch (S9c).
+    if (id === "instagram") {
+      const live = transportOn(state.config, id);
+      box.appendChild(srvRow("Live group chats (unofficial)",
+        live ? "On: if `jarvis instagram-group-serve` is running, it reads the group threads listed as pt-<id> and answers when mentioned. Turn this off and it stops within one cycle."
+          : "Off: nothing reads or answers Instagram group chats. Meta's official API does not support them.",
+        live, "", state.settingBusy.has(`${id}|group_transport`),
+        (turnOn) => { if (turnOn) { state.transportAsk = true; renderHome(); } else { state.transportAsk = false; roomSetting(id, "group_transport", false, "The unofficial group transport is off. A running one stops within a cycle."); } }));
+      if (state.transportAsk && !live) {
+        box.appendChild(confirmBox("Confirm the unofficial group transport", "This goes outside Meta's official API and Instagram's terms of use. The account it signs in as can be challenged, rate-limited or banned, and it can stop working without notice. Use a dedicated account, never your main one. This only flips the switch: signing in and starting it happen in a terminal (jarvis instagram-group-login, then jarvis instagram-group-serve), and nothing is read until you list a thread.",
+          "ch-transport-confirm-" + id, "Turn it on", () => { state.transportAsk = false; roomSetting(id, "group_transport", true, "The unofficial group transport is on. Start it from a terminal."); }, () => { state.transportAsk = false; renderHome(); }));
+      }
+    }
     // 2. reading other messages
     const a = ambientOf(state.config, id), d = ambientDraftOf(id);
     const busy = state.settingBusy.has(`${id}|ambient`);
@@ -4246,7 +4262,7 @@
              stateFilterOptions, guildIdOk, guildName, guildChoices, guildPick,
              channelIdOk, channelInfo, channelLabel, channelChoices, channelPick,
              homeTabs, platformState, HOME_KEY,
-             GROUP_FLAGS, groupFlagOf, recallOn, usedInRooms, groupUseText, AMBIENT_DEFAULTS, ambientOf, ambientText, savingOn,
+             GROUP_FLAGS, groupFlagOf, recallOn, transportOn, usedInRooms, groupUseText, AMBIENT_DEFAULTS, ambientOf, ambientText, savingOn,
              ROOM_KIND_LABEL, roomKindLabel, roomsOf, roomKey, roomTitle, filterRooms, roomForChannel, roomSwitchOf, serverSwitchOff,
              roomSwitchState, roomSpeaker },
   };

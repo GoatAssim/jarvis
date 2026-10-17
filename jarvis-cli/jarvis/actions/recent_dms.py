@@ -269,19 +269,11 @@ TOOL_KEYWORDS = {
     },
 }
 
-# TOOL_PACK_INSTRUCTION is a no-op here in practice: "channels" is an
-# existing group and tool_registry.TOOL_PACK_INSTRUCTIONS.setdefault()
-# means whichever actions/ file for this group loads first keeps its
-# instruction (currently actions/channel_people.py, which this repo's
-# discovery order reaches before this file alphabetically) — see that
-# module's own TOOL_PACK_INSTRUCTION and the note added to it for recent_dms.
-# Declared anyway so the guidance travels with this file if that ever
-# changes, per _template.py's own advice not to rely on it either way.
-TOOL_PACK_INSTRUCTION = (
-    "recent_dms is read-only and owner-only — call it to answer questions "
-    "about who has DMed the owner, never to look someone up on behalf of "
-    "whoever is currently chatting."
-)
+# No TOOL_PACK_INSTRUCTION here on purpose (it used to be declared "so it travels with
+# the file", which was worse than useless: "channels" is shared and the last discovered
+# file's text wins, so a copy here could replace the group's real instruction). The
+# recent_dms guidance is in actions/channel_people.py, the one instruction for the group;
+# tests/test_channels_pack_instruction.py guards it.
 
 # Read-only, and privacy-gated in the handler itself (owner-only check
 # above) rather than through the destructive-action confirm mechanism —

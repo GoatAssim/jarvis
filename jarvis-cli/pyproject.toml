@@ -66,3 +66,9 @@ build-backend = "setuptools.build_meta"
 # A hand-maintained list means every future subpackage is one forgotten
 # edit away from the same multi-hour debugging session. find: cannot forget.
 include = ["jarvis*"]
+
+[tool.setuptools.package-data]
+# The Download Hub panel (actions/hub_ui) is HTML/JS/CSS that sits next to a .py file. Setuptools
+# only copies non-Python files that are declared; without this a real install (script.bat) would
+# have the tool but an empty Menu > Downloads, and a source checkout would hide the problem.
+"jarvis.actions" = ["hub_ui/*.html", "hub_ui/*.js", "hub_ui/*.css"]

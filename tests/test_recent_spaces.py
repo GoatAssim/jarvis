@@ -93,6 +93,11 @@ def build():
     """A Discord server channel (two people), a Discord DM, a live Instagram group, an
     imported Instagram group, and a registered room that has no log (saving was off)."""
     shutil.rmtree(STATE, ignore_errors=True)
+    # channels.json always exists on a real install (the first load creates it); start
+    # from that state so the 'reads write nothing' checks measure the viewer, not the
+    # first-run default file.
+    from jarvis.channels import config as _cfg
+    _cfg.ensure_config()
     line(DISCORD, "C1", guild_id="G1", guild_name="Guild", channel_id="C1", channel_name="general",
          text="first", at="2026-10-01T10:00:00")
     line(DISCORD, "C1", guild_id="G1", guild_name="Guild", channel_id="C1", channel_name="general",

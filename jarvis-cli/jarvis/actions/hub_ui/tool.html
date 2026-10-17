@@ -1,0 +1,30 @@
+<div class="hub" id="hub">
+  <header class="bar">
+    <form class="add" id="addForm" autocomplete="off">
+      <input id="addInput" type="text" spellcheck="false" aria-label="Link to download"
+             placeholder="Paste a link to download (or drop links here)">
+      <button type="submit" id="addBtn">Add</button>
+    </form>
+    <div class="hint" id="addHint" aria-live="polite"></div>
+  </header>
+  <div class="body">
+    <nav class="side" id="side" aria-label="Views and sources"></nav>
+    <main class="main">
+      <div class="tools">
+        <input id="search" type="search" spellcheck="false" aria-label="Search downloads" placeholder="Search">
+        <label class="grp">Group by
+          <select id="groupBy" aria-label="Group by">
+            <option value="none">Nothing</option>
+            <option value="source">Source</option>
+            <option value="group">Batch</option>
+          </select>
+        </label>
+        <button type="button" id="refresh" title="Refresh now">Refresh</button>
+      </div>
+      <div class="banner" id="banner" role="status" hidden></div>
+      <div class="list" id="list" role="listbox" tabindex="0" aria-label="Downloads"></div>
+    </main>
+    <aside class="detail" id="detail" aria-label="Details"></aside>
+  </div>
+  <footer class="status" id="status" role="status"></footer>
+</div>

@@ -1296,7 +1296,19 @@ for _r in _AUTO_VALID:
 # group -> instruction; tool_registry.py only fills in groups that don't
 # already have a curated instruction, so an action file joining an
 # existing group can never silently override its established guidance.
-AUTO_TOOL_PACK_INSTRUCTIONS = {r.group: r.pack_instruction for r in _AUTO_VALID if r.pack_instruction}
+# A group several files join ("channels" has five) keeps EVERY distinct instruction, in
+# discovery order and joined by a space. It used to be a plain dict comprehension, so the
+# LAST file's text silently replaced the others' (the recent_dms, remember_sender,
+# send_dm and recent_spaces guidance never reached the model).
+AUTO_TOOL_PACK_INSTRUCTIONS = {}
+for _r in _AUTO_VALID:
+    if not _r.pack_instruction:
+        continue
+    _have = AUTO_TOOL_PACK_INSTRUCTIONS.get(_r.group)
+    if _have is None:
+        AUTO_TOOL_PACK_INSTRUCTIONS[_r.group] = _r.pack_instruction
+    elif _r.pack_instruction not in _have:
+        AUTO_TOOL_PACK_INSTRUCTIONS[_r.group] = _have + " " + _r.pack_instruction
 
 # Test Checklist entries tool modules supplied themselves (TEST_CHECKLIST /
 # TEST_CHECKLIST_GROUP — master plan G.1, extended by G.2, see tool_loader.py

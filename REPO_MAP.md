@@ -194,6 +194,9 @@ jarvis-cli/jarvis/
         base.py           the pipeline every gateway runs
         discord_gateway.py     wire adapter (the only file importing discord.py)
         instagram_gateway.py   wire adapter (webhook server)
+        instagram_private.py   channels spaces S9c: UNOFFICIAL live Instagram GROUP transport
+                               (polls `pt-<id>` threads, same gate; off by default; no client
+                               library bundled; imported only by instagram-group-serve / -login)
         space.py          channel spaces S2: the vocabulary for a place (dm / channel / thread /
                           group / mention), `kind_of(msg)`, `is_room(msg)`, the speaker record
                           and its short label (`Name`, `Name (owner)`), titles. Pure
@@ -351,6 +354,21 @@ jarvis-cli/jarvis/
         send_dm.py            NEW (L.20) — DM ONE known person; owner-only, confirm-gated,
                               rate-limited (~/.jarvis/channels/dm_sends.json), refuses unattended
         channel_people.py     NEW — remember_sender / who_am_i_talking_to
+        download_hub.py       Download Hub (JARVIS_DOWNLOAD_HUB.md phases 1-2): dl_add / dl_list / dl_status /
+                              dl_pause / dl_resume / dl_cancel / dl_retry / dl_open / dl_settings, hub_doctor,
+                              hub_demo_provider. Thin: every rule is in hub/service.py. Declares the Menu >
+                              Downloads panel (hub_ui/, shipped as package data) and the `hub` daemon
+        _hub_daemon.py        the runner DAEMONS launches (underscore = not a tool)
+        hub_ui/               tool.html / tool.js / tool.css: the Downloads panel (renders data with textContent only)
+
+    hub/                  Download Hub core (import-light; see hub/__init__.py for the module map and where
+                          later phases plug in): store.py (sqlite, WAL), states.py (what a row may say),
+                          netguard.py (SSRF guard), naming.py, router.py, service.py, daemon.py (scheduler,
+                          workers, THE retry policy), demo.py, doctor.py, settings.py, engines/ (one module
+                          per engine, discovered; http.py today). hub_client.py (next to this folder) is the
+                          never-raising client a tool uses to report its own downloads.
+                          Tests: test_hub_core / test_hub_http_engine / test_hub_daemon /
+                          test_hub_service_tools / test_hub_daemon_process + verify_hub_panel.js
         person_memory_tools.py  L.21-L.23 owner-only: person_remember/forget/instruct/recall/
                               review + await_reply (own `person_memory` group)
         workspace_tools.py    NEW — daemons, log search, backlog as AI tools
@@ -871,6 +889,8 @@ silently never runs.
 | `test_instagram_import.py` | channel spaces S9b: the export importer -- double-encoded text repaired, ids, preview writes nothing, only group chats (3+ people) and never a DM, record shape (no gate fields), only the thread logs + spaces.json appear, config files byte-identical, idempotent and gap-filling, real-time listing order, log rotation loses nothing, spaces.rebuild keeps the imported mark, bad input reported, CLI |
 | `test_recent_spaces.py` | channel spaces S10c: the `recent_spaces` tool -- rooms only and never a DM (also when the listing wrongly offers one), owner-only and refused for a guest / a scheduled run, not offered to a guest, bounded and one-line text, turned-away lines left out, the title filter and limits, routing, reading changes no file |
 | `test_space_view.py` | channel spaces S10a/b: `list_spaces` / `view` -- rooms only by default, kind and platform filters, unsaved rooms, `rooms_only` refuses a DM, reading changes no file (hashes + mtimes), CLI arguments, the two read-only GET routes (static check) |
+| `test_channels_pack_instruction.py` | the shared `channels` tool group keeps every file's pack instruction (they are joined, not last-wins): remember_sender, recent_dms, send_dm (incl. the `when` and "don't call recent_dms first" rules), recent_spaces and notify_owner all reach the model once each; only `channel_people.py` and `notify_owner.py` declare one; a guest's text names no owner-only tool |
+| `test_instagram_private_transport.py` | channel spaces S9c: the unofficial group transport with a fake client -- not imported by default and no library, off by default and Instagram-only keys, only `pt-<id>` threads polled (empty = nothing), id prefixes, same gate / ambient / speaker pipeline, no history replay or repeats after a restart, kill switch, halt + one notice on a login check, error budget and backoff, send gap, password never stored or logged |
 | `test_instagram_group_info.py` | channel spaces S9a: `_group_info` accepts exactly the old group shapes and falls back to a DM for anything else, one log line for the first group payload, group window keyed on the thread, docstring makes no live-delivery claim |
 | `test_allowed_guilds.py` | L.36-P17: `allowed_guilds` editor -- add (preview-first when it turns the filter on or the id is unseen), remove (the LAST entry is refused even with confirm), checked against the REAL `permissions.decide`, one-key-only writes, change log, `channels-guilds`, and a static check of the `server.js` route |
 | `test_channel_timed_and_instruction.py` | L.36-P6 / P12: the `tools_until` deadline (garbage reads as passed, resolver is read-only), grant refusals, `expire_due` + its change-log reason, manual switches / block / forget / `channels-allow|deny` ending a countdown, the gateway sweep, the Test tab's wording, and the instruction (cap, one line, owner refused, prompt framing, not reachable by a guest) |

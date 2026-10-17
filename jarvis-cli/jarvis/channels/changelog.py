@@ -273,6 +273,9 @@ def describe(entry):
         if key == "group_recall":
             return ("Using saved notes and memories in group replies (unless an item "
                     "says otherwise) switched " + ("on" if on else "off"))
+        if key == "group_transport":
+            return ("The unofficial Instagram group transport switched "
+                    + ("on (outside Meta's official API; the account can be banned)" if on else "off"))
         if key == "ambient_messages":
             return ("Reading other messages in rooms switched off"
                     if str(entry.get("value")) == "0"

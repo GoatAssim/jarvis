@@ -119,12 +119,20 @@ check("it posts room switches to the spaces route", routeUsed("/api/channels/spa
 check("it reads the room list and a room's conversation from the S10b routes", routeUsed('"/api/channels/spaces"') && routeUsed("/conversation?limit=") && server.includes('"/api/channels/spaces"') && server.includes("/api/channels/spaces/:platform/:threadId/conversation"));
 check("it sets a note's / memory item's room flag through the existing 'groups' actions", routeUsed('action: "groups", note: item.id') && routeUsed('action: "groups", record: item.id')
   && server.includes('action !== "groups"') && server.includes('"groups"].includes(action)'));
-check("only the four keys the route allows are used", ["group_recall", "ambient_messages", "ambient_minutes", "ambient_senders"].every((k) => panelSrc.includes(`"${k}"`)) && !/room-setting[^;]*bot_token/.test(panelSrc));
+check("only the five keys the route allows are used", ["group_recall", "ambient_messages", "ambient_minutes", "ambient_senders", "group_transport"].every((k) => panelSrc.includes(`"${k}"`)) && !/room-setting[^;]*bot_token/.test(panelSrc));
 const inner = panelSrc.split("\n").filter((l) => /\.innerHTML\b/.test(l));
 check("the only innerHTML is still the fixed icon template", inner.length === 1 && /t\.innerHTML = ICON\[name\]/.test(inner[0]), inner.join(" | "));
 check("no outerHTML / insertAdjacentHTML / document.write", !/outerHTML|insertAdjacentHTML|document\.write/.test(panelSrc) && !/innerHTML|outerHTML/.test(chipSrc.replace(/never markup/g, "")));
 check("no browser storage and no token", !/localStorage|sessionStorage/.test(panelSrc + chipSrc) && !/access_token|bot_token\s*[:=]/.test(chipSrc));
 check("an 'on' that widens asks for a second click", /state\.recallAsk = id/.test(panelSrc) && /state\.ambientAsk = id/.test(panelSrc) && /state\.groupAsk = \{ key: k, kind, id: item\.id \}/.test(panelSrc));
+check("transportOn reads only the literal true, and only for Instagram", T.transportOn({ instagram: { group_transport: true } }, "instagram") === true
+  && T.transportOn({ instagram: { group_transport: "true" } }, "instagram") === false && T.transportOn({ discord: { group_transport: true } }, "discord") === false
+  && T.transportOn({ instagram: {} }, "instagram") === false && T.transportOn(null, "instagram") === false);
+check("the transport row exists only inside the Instagram branch", /if \(id === "instagram"\) \{\s*const live = transportOn/.test(panelSrc));
+check("turning the unofficial transport ON asks for a second click, with the risk in plain words", /state\.transportAsk = true/.test(panelSrc) && /outside Meta's official API and Instagram's terms/.test(panelSrc) && /dedicated account/.test(panelSrc));
+check("turning it OFF does not ask", /roomSetting\(id, "group_transport", false/.test(panelSrc));
+check("the route refuses it for other platforms and takes a boolean only", /key === "group_transport" && platform !== "instagram"/.test(server) && /group_transport: \(v\) => typeof v === "boolean"/.test(server));
+check("no credential field exists in the panel for it", !/instagram-group[^\n]*password/i.test(panelSrc.replace(/jarvis instagram-group-login/g, "")));
 check("turning group recall OFF does not ask", /roomSetting\(id, "group_recall", false/.test(panelSrc));
 check("room lines are shown by who wrote them, as text", /roomSpeaker\(e\)/.test(panelSrc) && /messageNode\(e, \{ room: true \}\)/.test(panelSrc));
 check("the Servers tab links a channel to its room and has the two new rows", /openRoom\("discord", c\.id\)/.test(panelSrc) && /readingSavingRows\(c, "channel"/.test(panelSrc) && /readingSavingRows\(s, "guild"/.test(panelSrc));

@@ -123,6 +123,13 @@ _COMMON_DEFAULTS = {
     "ambient_messages": 20,
     "ambient_minutes": 30,
     "ambient_senders": "approved",
+    # S9c: the UNOFFICIAL live transport for Instagram group chats
+    # (channels/instagram_private.py). OFF by default and Instagram-only; the
+    # process re-reads this every cycle, so turning it off stops it. Poll interval
+    # and the minimum gap between posts in one thread are in seconds.
+    "group_transport": False,
+    "group_poll_seconds": 45,
+    "group_send_gap_seconds": 10,
     # Platform hard caps: Discord 2000 chars/message, Instagram 1000 BYTES.
     # Overridden per platform below; the value here is just a floor.
     "max_reply_chars": 1900,
@@ -434,6 +441,9 @@ def _log_value_change(platform, key, before, after):
     elif key in ("ambient_messages", "ambient_minutes", "ambient_senders"):
         if before != after:
             _log_change(platform, "platform", "", key=key, value=after)
+    elif key == "group_transport":
+        if (before is True) != (after is True):
+            _log_change(platform, "platform", "", key="group_transport", on=after is True)
 
 
 # Behaviour keys that are checked when they are written, so a typo in the terminal
@@ -442,7 +452,9 @@ def _log_value_change(platform, key, before, after):
 AMBIENT_MAX_MESSAGES = 100
 AMBIENT_MAX_MINUTES = 24 * 60
 AMBIENT_SENDER_MODES = ("approved", "anyone")
-SETTING_KEYS = ("group_recall", "ambient_messages", "ambient_minutes", "ambient_senders")
+TRANSPORT_LIMITS = {"group_poll_seconds": (15, 600), "group_send_gap_seconds": (3, 600)}
+TRANSPORT_KEYS = ("group_transport",) + tuple(TRANSPORT_LIMITS)
+SETTING_KEYS = ("group_recall", "ambient_messages", "ambient_minutes", "ambient_senders") + TRANSPORT_KEYS
 
 
 def coerce_setting(key, value):
@@ -451,7 +463,7 @@ def coerce_setting(key, value):
     bool or int, or the words on/off/true/false and digits)."""
     if key not in SETTING_KEYS:
         return True, value, ""
-    if key == "group_recall":
+    if key in ("group_recall", "group_transport"):
         if isinstance(value, bool):
             return True, value, ""
         low = str(value).strip().lower()
@@ -459,7 +471,18 @@ def coerce_setting(key, value):
             return True, True, ""
         if low in ("off", "false", "no"):
             return True, False, ""
-        return False, value, "group_recall must be on or off"
+        return False, value, f"{key} must be on or off"
+    if key in TRANSPORT_LIMITS:
+        low_bound, top = TRANSPORT_LIMITS[key]
+        if isinstance(value, bool):
+            return False, value, f"{key} must be a whole number"
+        try:
+            number = int(str(value).strip())
+        except (TypeError, ValueError):
+            return False, value, f"{key} must be a whole number"
+        if number < low_bound or number > top:
+            return False, value, f"{key} must be from {low_bound} to {top}"
+        return True, number, ""
     if key == "ambient_senders":
         low = str(value).strip().lower()
         if low in AMBIENT_SENDER_MODES:
@@ -503,6 +526,8 @@ def set_value(platform, key, value):
     """Set one key on one platform. Returns (ok, error)."""
     if platform not in PLATFORMS:
         return False, f"unknown platform '{platform}'"
+    if key in TRANSPORT_KEYS and platform != "instagram":
+        return False, f"{key} is only for the instagram platform"
     ok, value, err = coerce_setting(key, value)
     if not ok:
         return False, err

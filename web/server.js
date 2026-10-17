@@ -1500,18 +1500,23 @@ app.post("/api/channels/platform/:platform/master-tools", requireJarvis, async (
 
 // Shared-room behaviour (channel spaces S6 / S6a): whether saved notes and memories
 // are used in group replies, and how much of a room's other chatter Jarvis reads.
-// Only these four keys, each validated again by `channels-set`; no token crosses it.
+// Only these five keys, each validated again by `channels-set`; no token crosses it.
 const ROOM_SETTINGS = {
   group_recall: (v) => typeof v === "boolean" ? (v ? "on" : "off") : null,
   ambient_messages: (v) => Number.isInteger(v) && v >= 0 && v <= 100 ? String(v) : null,
   ambient_minutes: (v) => Number.isInteger(v) && v >= 1 && v <= 1440 ? String(v) : null,
   ambient_senders: (v) => v === "approved" || v === "anyone" ? v : null,
+  // S9c: the unofficial Instagram group transport's kill switch. Instagram only
+  // (checked below and again by `channels-set`); it only flips the switch, the
+  // process is started from a terminal and credentials never cross this route.
+  group_transport: (v) => typeof v === "boolean" ? (v ? "on" : "off") : null,
 };
 app.post("/api/channels/platform/:platform/room-setting", requireJarvis, async (req, res) => {
   const { platform } = req.params;
   if (!CHANNEL_PLATFORMS.has(platform)) return res.status(400).json({ error: "Unknown platform." });
   const key = req.body?.key;
   if (typeof key !== "string" || !Object.prototype.hasOwnProperty.call(ROOM_SETTINGS, key)) return res.status(400).json({ error: "Unknown setting." });
+  if (key === "group_transport" && platform !== "instagram") return res.status(400).json({ error: "group_transport is only for Instagram." });
   const value = ROOM_SETTINGS[key](req.body?.value);
   if (value === null) return res.status(400).json({ error: "Invalid value for " + key + "." });
   sendChannelResult(await runJarvisOnce(["channels-set", platform, key, value], 10000), res);

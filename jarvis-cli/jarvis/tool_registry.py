@@ -561,7 +561,23 @@ def keyword_needs(value):
 # A pack instruction that names a tool, restated for an ask that is not being OFFERED
 # that tool (preflight.unoffered_tools). Keyed (group, tool). Naming a tool the
 # request does not carry invites a call the provider then rejects.
+_CHANNELS_GUEST_INSTRUCTION = (
+    "remember_sender saves the name of whoever is messaging you over chat. "
+    "If the identity block says you don't know them yet, ask what to call "
+    "them and save it the moment they answer — don't ask twice, and don't "
+    "guess a name from their handle. "
+    "notify_owner DMs the owner on a chat app. Call it when the user asked to be told once "
+    "something finishes, or when you finish a long task they asked for and they may have "
+    "walked away. Don't call it for an answer you are already giving them in this reply — "
+    "they are reading it right now."
+)
 _PACK_INSTRUCTION_WITHOUT = {
+    # A guest is offered none of the owner-only channels tools, so it gets only the
+    # remember_sender and notify_owner sentences (tests/test_channels_pack_instruction.py
+    # pins that both are verbatim parts of the full text).
+    ("channels", "recent_dms"): _CHANNELS_GUEST_INSTRUCTION,
+    ("channels", "send_dm"): _CHANNELS_GUEST_INSTRUCTION,
+    ("channels", "recent_spaces"): _CHANNELS_GUEST_INSTRUCTION,
     ("vision", "take_screenshot"): (
         "look_at_screen reads the screen text first and only looks at the "
         "actual pixels when the text can't answer. Use read_screen when you "

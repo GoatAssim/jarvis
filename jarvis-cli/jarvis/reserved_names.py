@@ -126,6 +126,7 @@ RESERVED_NAMES = {
     "channels-channels", "channels-master-tools", "channels-send", "channels-denied",
     "channels-spaces", "channels-space", "channels-import-instagram",
     "discord-daemon", "instagram-serve", "logs-search",
+    "instagram-group-serve", "instagram-group-login",
     # --- clipboard_cli.COMMANDS ----------------------------------------------
     "clipboard-watch", "clipboard-watch-config",
     # --- separators + argparse's own reserved flags -------------------------
