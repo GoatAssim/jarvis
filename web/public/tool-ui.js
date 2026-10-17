@@ -74,6 +74,7 @@
       out.push({
         id: u.id, mode: u.mode, label: label.slice(0, 40), title: String(u.title || label).slice(0, 80),
         hint: String(u.hint || "").slice(0, 140), icon: String(u.icon || "").slice(0, 4),
+        size: u.size === "wide" ? "wide" : "normal",
         tool: typeof u.tool === "string" ? u.tool : "", tools: Array.isArray(u.tools) ? u.tools.filter((t) => typeof t === "string") : [],
       });
     });
@@ -266,7 +267,8 @@
     titleEl.textContent = String(bundle.title || item.title).toUpperCase();
     const closeBtn = el("button", { class: "modal__close", type: "button", "aria-label": "Close" }, "\u00d7");
     const body = el("div", { class: "tool-ui-body" });
-    const panel = el("div", { class: "menu-panel menu-panel--tool-ui", role: "dialog", "aria-modal": "true", "aria-label": item.title }, [
+    const wide = item.size === "wide" && item.mode === "menu";
+    const panel = el("div", { class: "menu-panel menu-panel--tool-ui" + (wide ? " menu-panel--tool-ui-wide" : ""), role: "dialog", "aria-modal": "true", "aria-label": item.title }, [
       el("div", { class: "panel__corner panel__corner--tl" }), el("div", { class: "panel__corner panel__corner--br" }),
       el("div", { class: "menu-panel__head" }, [el("div", { class: "menu-panel__titles" }, [titleEl]), closeBtn]),
       body,

@@ -17,6 +17,12 @@ dependencies = [
 ytdl = ["yt-dlp>=2024.1"]
 desktop = ["pyautogui>=0.9.54"]
 ocr = ["pytesseract>=0.3.10", "Pillow>=9.0"]
+# channels/instagram_private.py (UNOFFICIAL Instagram group transport, plan S9c): the one
+# private-API client, pinned to an EXACT version on purpose (it ships ~weekly and breaks
+# on Instagram changes; update deliberately). Not installed by default. Outside Meta's
+# official API and Instagram's terms: read the module docstring first. Keep this pin in
+# step with INSTAGRAPI_PIN in that module.
+instagram-private = ["instagrapi==3.0.25"]
 # actions/path_tools.py — delete_path sends to the Recycle Bin/Trash and refuses
 # (deleting nothing) when this isn't installed; there is no permanent delete.
 trash = ["send2trash>=1.8"]

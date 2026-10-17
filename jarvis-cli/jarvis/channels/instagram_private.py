@@ -51,9 +51,11 @@ What it does, and what it does not
 
 THE CLIENT
 ----------
-No client library has been verified (that needs network access, which this build did
-not have), so none is bundled and `_default_client_factory()` raises
-TransportUnavailable. A client is any object with:
+The client is `instagrapi` (MIT, synchronous), an OPTIONAL extra pinned to one exact
+version: `pip install "jarvis-cli[instagram-private]"` (see pyproject.toml). It is
+imported lazily, inside `_default_client_factory()`, and only when one of the commands
+below runs; without it `make_client()` raises TransportUnavailable with the install
+line. `InstagrapiClient` (below) is the adapter. A client is any object with:
 
     own_user_id: str            own_username: str
     resume(session: dict) -> None          # raises CheckpointRequired / TransportError
@@ -63,11 +65,16 @@ TransportUnavailable. A client is any object with:
         # {"message_id", "user_id", "username", "name", "text", "ts_ms", "own": bool}
     send(thread_id: str, text: str) -> None
     thread_title(thread_id: str) -> str    # optional
+    list_threads(amount: int) -> list[dict]   # optional, `instagram-group-threads` only
 
-Wire a real one in `_default_client_factory()` (the only place a library may be
-imported) after checking its licence, upkeep, group-thread support, 2FA / checkpoint
-handling and that it needs no more than the above. Tests use a fake client through
-`set_client_factory`.
+What the adapter does NOT settle (nothing here has run against real Instagram): how a
+group `@mention` looks in a message, how long a saved session lives, the ban / lock
+rate at any poll interval, the exact exception raised in each login situation (every
+unknown error that looks like a login check is treated as one and STOPS the transport;
+every other error counts against the error budget), and whether `DirectThread.users`
+lists everyone who has spoken (a message from someone not listed has an empty handle,
+so that person can only be allowed by their `pk-<id>`). Test by hand with a throwaway
+account in a small group everyone knows about, before any real use.
 """
 
 import getpass
@@ -91,6 +98,8 @@ HALT_FILE = transcript.JARVIS_DIR / "instagram_private_halt.json"
 CURSOR_FILE = transcript.CHANNELS_DIR / "instagram_private_cursors.json"
 
 MAX_TEXT_CHARS = 2000
+INSTAGRAPI_PIN = "3.0.25"   # exact version of the optional client; keep in step with pyproject.toml
+FETCH_MESSAGES = 20         # newest messages read per poll of one thread
 MAX_FAILURES = 5            # consecutive transport errors before it stops and tells the owner
 BACKOFF_CAP_SECONDS = 900
 JITTER = 0.3                # poll interval is stretched by up to 30%
@@ -106,7 +115,7 @@ class CheckpointRequired(TransportError):
 
 
 class TransportUnavailable(TransportError):
-    """No client library is wired in."""
+    """The optional client library is not installed."""
 
 
 # ---------------------------------------------------------------------------
@@ -123,13 +132,244 @@ def set_client_factory(factory):
 
 
 def _default_client_factory():
-    raise TransportUnavailable(
-        "no Instagram private-API client is wired in. None has been verified, so none "
-        "is bundled: see the 'THE CLIENT' section of channels/instagram_private.py")
+    """The ONE place the private-API library is imported (lazily, never at module level)."""
+    try:
+        import instagrapi  # noqa: PLC0415 -- deliberate lazy import, see the module docstring
+    except ImportError as exc:
+        raise TransportUnavailable(
+            "no Instagram private-API client is installed. Install the optional one "
+            f"(pinned, unofficial): pip install \"instagrapi=={INSTAGRAPI_PIN}\"  "
+            "(or: pip install \"jarvis-cli[instagram-private]\")") from exc
+    return InstagrapiClient(instagrapi)
 
 
 def make_client():
     return (_client_factory or _default_client_factory)()
+
+
+# ---------------------------------------------------------------------------
+# The instagrapi adapter
+# ---------------------------------------------------------------------------
+
+# Rate-style errors: slow down (backoff + error budget), do not stop at once.
+_RATE_WORDS = ("pleasewait", "throttl", "ratelimit", "toomany")
+# Login-style errors: STOP. Matched on the exception class name (lower-cased), so a
+# library that renames or adds a class still lands on the safe side when the name says
+# what it is. `forbidden` / `blocked` are included on purpose: a 403 or a blocked
+# address is Instagram saying no, not something to retry in a loop.
+_CHECKPOINT_WORDS = ("challenge", "checkpoint", "loginrequired", "twofactor", "badpassword",
+                     "relogin", "feedbackrequired", "recaptcha", "selectcontactpoint",
+                     "consent", "forbidden", "blocked", "suspend")
+# The same situations as Instagram names them in a reply body.
+_CHECKPOINT_TEXT = ("login_required", "challenge_required", "checkpoint_required",
+                    "feedback_required", "two_factor_required")
+
+
+def classify_error(exc, secret=""):
+    """Map anything the client library raised to CheckpointRequired (stop) or
+    TransportError (counts against the error budget). Never includes `secret` in the
+    text, and never more than the class name and a short flattened message."""
+    name = type(exc).__name__
+    text = " ".join(str(exc).split())
+    if secret:
+        text = text.replace(secret, "***")
+    text = text[:160]
+    label = f"{name}: {text}" if text else name
+    low_name = name.lower()
+    low_text = text.lower()
+    if any(word in low_name for word in _RATE_WORDS):
+        return TransportError(label)
+    if any(word in low_name for word in _CHECKPOINT_WORDS) \
+            or any(word in low_text for word in _CHECKPOINT_TEXT):
+        return CheckpointRequired(label)
+    return TransportError(label)
+
+
+def to_ms(value):
+    """A timestamp -> integer milliseconds since the epoch, 0 when it cannot be read.
+
+    instagrapi gives a `datetime` (`.timestamp()` is right for both a naive local time
+    and an aware one); a bare number is taken as microseconds, milliseconds or seconds
+    by its size."""
+    try:
+        if value is None or isinstance(value, bool):
+            return 0
+        if hasattr(value, "timestamp"):
+            return int(value.timestamp() * 1000)
+        number = float(value)
+    except (TypeError, ValueError, OverflowError, OSError):
+        return 0
+    if number >= 1e14:      # microseconds
+        return int(number / 1000)
+    if number >= 1e11:      # milliseconds
+        return int(number)
+    return int(number * 1000)   # seconds
+
+
+def _numeric_thread(thread_id):
+    raw = str(thread_id or "").strip()
+    if not raw.isdigit():
+        raise TransportError("an Instagram thread id is a number; got something else")
+    return int(raw)
+
+
+class InstagrapiClient:
+    """Adapter from `instagrapi` to the small client interface in the module docstring.
+
+    Built from the imported package so a test can hand in a stand-in. Every call into the
+    library goes through `classify_error`; a library error never escapes unmapped."""
+
+    def __init__(self, module):
+        self._mod = module
+        self._cl = None
+        self.own_user_id = ""
+        self.own_username = ""
+        self._users = {}     # user id (str) -> (username, full name)
+        self._titles = {}    # thread id (str) -> title
+
+    # -- the library object ----------------------------------------------
+    def _new(self):
+        client = self._mod.Client()
+        try:
+            client.delay_range = [2, 5]    # the library pauses 2-5 s between its calls
+        except Exception:  # noqa: BLE001 -- cosmetic safety margin only
+            pass
+        return client
+
+    def _need(self):
+        if self._cl is None:
+            raise TransportError("not signed in")
+        return self._cl
+
+    @staticmethod
+    def _forget_password(client):
+        """The library keeps the password on the client for its own relogin. This
+        transport never relogs in by itself, so drop it."""
+        for attr in ("password",):
+            try:
+                if getattr(client, attr, None):
+                    setattr(client, attr, "")
+            except Exception:  # noqa: BLE001
+                pass
+
+    # -- session ----------------------------------------------------------
+    def resume(self, session):
+        client = self._new()
+        try:
+            client.set_settings(dict(session))
+            info = client.account_info()    # one cheap authenticated call: is the session alive?
+        except Exception as exc:  # noqa: BLE001
+            raise classify_error(exc) from exc
+        self._cl = client
+        self.own_user_id = str(getattr(info, "pk", "") or getattr(client, "user_id", "") or "")
+        self.own_username = str(getattr(info, "username", "") or "")
+        if not self.own_user_id:
+            self._cl = None
+            raise TransportError("the session did not say which account it is")
+
+    def login(self, username, password, code=""):
+        client = self._new()
+        try:
+            if code:
+                client.login(username, password, verification_code=code)
+            else:
+                client.login(username, password)
+        except Exception as exc:  # noqa: BLE001
+            raise classify_error(exc, secret=password) from exc
+        finally:
+            self._forget_password(client)
+        try:
+            session = json.loads(json.dumps(client.get_settings(), default=str))
+        except (TypeError, ValueError) as exc:
+            raise TransportError("the client's session could not be read") from exc
+        if not isinstance(session, dict) or not session:
+            raise TransportError("the client returned no session")
+        # The session file is the one place a credential must never land. If this
+        # version of the library ever stores the password in its settings, save nothing.
+        if password and len(password) >= 6 and password in json.dumps(session):
+            raise TransportError("the client put your password in its session; nothing was saved")
+        self._cl = client
+        self.own_user_id = str(getattr(client, "user_id", "") or "")
+        self.own_username = str(username or "").lstrip("@")
+        return session
+
+    # -- reading ----------------------------------------------------------
+    def _learn(self, thread):
+        title = str(getattr(thread, "thread_title", "") or "")
+        tid = str(getattr(thread, "id", "") or getattr(thread, "pk", "") or "")
+        if tid and title:
+            self._titles[tid] = title
+        for user in getattr(thread, "users", None) or []:
+            pk = str(getattr(user, "pk", "") or "")
+            if pk:
+                self._users[pk] = (str(getattr(user, "username", "") or ""),
+                                   str(getattr(user, "full_name", "") or ""))
+        return title
+
+    def fetch_new(self, thread_id, after_ms):
+        client = self._need()
+        numeric = _numeric_thread(thread_id)
+        try:
+            # One call returns the newest messages AND the thread's people and title.
+            thread = client.direct_thread(numeric, amount=FETCH_MESSAGES)
+        except Exception as exc:  # noqa: BLE001
+            raise classify_error(exc) from exc
+        title = self._learn(thread)
+        if title:
+            self._titles[str(thread_id)] = title
+        out = []
+        for item in getattr(thread, "messages", None) or []:
+            stamp = to_ms(getattr(item, "timestamp", None))
+            if stamp <= int(after_ms or 0):
+                continue
+            uid = str(getattr(item, "user_id", "") or "")
+            handle, name = self._users.get(uid, ("", ""))
+            out.append({
+                "message_id": str(getattr(item, "id", "") or ""),
+                "user_id": uid,
+                "username": handle,
+                "name": name,
+                "text": str(getattr(item, "text", "") or ""),
+                "ts_ms": stamp,
+                "own": bool(uid and uid == self.own_user_id),
+            })
+        return out
+
+    def thread_title(self, thread_id):
+        return self._titles.get(str(thread_id), "")
+
+    # -- writing ----------------------------------------------------------
+    def send(self, thread_id, text):
+        client = self._need()
+        numeric = _numeric_thread(thread_id)
+        try:
+            # thread_ids only: the library wants exactly one of user_ids / thread_ids.
+            client.direct_send(str(text), thread_ids=[numeric])
+        except Exception as exc:  # noqa: BLE001
+            raise classify_error(exc) from exc
+
+    # -- `instagram-group-threads` ---------------------------------------
+    def list_threads(self, amount=20):
+        """[{id, title, people:[handle...], is_group}] for the newest inbox threads.
+        Carries no message text."""
+        client = self._need()
+        try:
+            threads = client.direct_threads(amount=int(amount))
+        except Exception as exc:  # noqa: BLE001
+            raise classify_error(exc) from exc
+        rows = []
+        for thread in threads or []:
+            tid = str(getattr(thread, "id", "") or "")
+            if not tid.isdigit():
+                continue
+            people = [str(getattr(u, "username", "") or getattr(u, "pk", "") or "")
+                      for u in (getattr(thread, "users", None) or [])]
+            flag = getattr(thread, "is_group", None)
+            rows.append({"id": tid,
+                         "title": str(getattr(thread, "thread_title", "") or "")[:80],
+                         "people": [p for p in people if p][:12],
+                         "is_group": flag if isinstance(flag, bool) else None})
+        return rows
 
 
 # ---------------------------------------------------------------------------
@@ -579,4 +819,67 @@ def login_cli():
           "Next: jarvis channels-set instagram group_transport on, list a thread with "
           "`channels-channels instagram add pt-<thread id> --yes`, then "
           "jarvis instagram-group-serve")
+    return 0
+
+
+def _looks_like_group(row):
+    """is_group when the library says so; otherwise two or more other people (you plus
+    them makes three). A guess: `--all` shows every thread."""
+    if row.get("is_group") is not None:
+        return bool(row["is_group"])
+    return len(row.get("people") or []) >= 2
+
+
+def threads_cli(argv=None):
+    """`jarvis instagram-group-threads [--all] [--amount N]`: print the ids of your
+    newest inbox threads so you can list one as `pt-<id>`. One read of the inbox list,
+    run by you at a terminal; it prints thread ids, titles and handles, NEVER message
+    text, and writes nothing. It refuses after a login check (the halt marker). The
+    transport itself still never reads anything that is not on allowed_channels."""
+    args = list(argv or [])
+    show_all = "--all" in args
+    amount = 20
+    if "--amount" in args:
+        try:
+            amount = max(1, min(50, int(args[args.index("--amount") + 1])))
+        except (IndexError, ValueError):
+            print("--amount takes a number from 1 to 50", file=sys.stderr)
+            return 1
+    halt = read_halt()
+    if halt:
+        print("stopped earlier: " + str(halt.get("reason") or "login check") + "\n"
+              "Run `jarvis instagram-group-login` first.", file=sys.stderr)
+        return 2
+    session = load_session()
+    if not session:
+        print("no saved session. Run `jarvis instagram-group-login` first.", file=sys.stderr)
+        return 1
+    try:
+        client = make_client()
+        client.resume(session)
+        lister = getattr(client, "list_threads", None)
+        if not callable(lister):
+            print("this client cannot list threads.", file=sys.stderr)
+            return 1
+        rows = lister(amount)
+    except CheckpointRequired as exc:
+        write_halt(f"Instagram asked for a login check while listing threads ({exc})")
+        print(f"Instagram asked for a login check: {exc}\n"
+              "Nothing more was tried. Run `jarvis instagram-group-login`.", file=sys.stderr)
+        return 2
+    except TransportError as exc:
+        print(f"could not list threads: {exc}", file=sys.stderr)
+        return 1
+    print(_WARNING, file=sys.stderr)
+    shown = [r for r in rows if show_all or _looks_like_group(r)]
+    if not shown:
+        print("no group thread found among the newest " + str(amount) + ". "
+              "Try --all (the group check is a guess) or --amount 50.")
+        return 0
+    for row in shown:
+        title = row["title"] or "(no title)"
+        people = ", ".join("@" + p for p in row["people"]) or "(people not listed)"
+        print(f"{THREAD_PREFIX}{row['id']}  {title}\n    with: {people}")
+    print("\nList one for polling (nothing is read until you do):\n"
+          "  jarvis channels-channels instagram add pt-<thread id> --yes")
     return 0

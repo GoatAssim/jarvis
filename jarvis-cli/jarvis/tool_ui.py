@@ -24,6 +24,7 @@ edit to index.html, app.js and style.css.
             "title": "Disk usage",           # optional, heading of the page / panel
             "hint": "How full is each drive", # optional, Menu entries only
             "icon": "D",                     # optional, 1-4 characters, buttons only
+            "size": "wide",                  # optional, menu panels only: "normal" (default) or "wide"
             "tool": "disk_report",           # optional, the tool of this file it belongs to
         },
     ]
@@ -76,6 +77,7 @@ import re
 from pathlib import Path
 
 MODES = ("button", "menu")
+SIZES = ("normal", "wide")     # "wide" = the big panel the Scheduled / Daemons / Backlog panels use
 KINDS = ("html", "js", "css")
 DEFAULT_FILES = {"html": "tool.html", "js": "tool.js", "css": "tool.css"}
 _EXTENSIONS = {"html": (".html", ".htm"), "js": (".js",), "css": (".css",)}
@@ -182,6 +184,14 @@ def validate_ui(raw, filename, base_dir, tool_names=None):
             errors.append("%s: path %r leaves this file's directory" % (where, item.get("path")))
             continue
 
+        size = item.get("size")
+        if size in (None, ""):
+            size = "normal"
+        elif size not in SIZES:
+            errors.append("%s: size must be one of %s, got %r (using \"normal\")"
+                          % (where, " / ".join(SIZES), size))
+            size = "normal"
+
         tool = item.get("tool")
         if tool not in (None, ""):
             if not isinstance(tool, str) or (tool_names and tool not in tool_names):
@@ -240,6 +250,7 @@ def validate_ui(raw, filename, base_dir, tool_names=None):
             "title": _text(item.get("title"), MAX_TITLE) or label,
             "hint": _text(item.get("hint"), MAX_HINT),
             "icon": _text(item.get("icon"), MAX_ICON),
+            "size": size,
             "path": "/".join(parts),
             "files": files,
             "planned": planned,

@@ -1085,6 +1085,10 @@ window.JARVIS_SLASH_COMMANDS = /*JSON-BEGIN*/
       "reason": "an interactive sign-in that asks for a password at a terminal prompt",
       "riskTier": "caution"
     },
+    "instagram-group-threads": {
+      "reason": "reads your Instagram inbox through the UNOFFICIAL client; the owner runs it from a terminal on purpose",
+      "riskTier": "caution"
+    },
     "clipboard-watch": {
       "reason": "a long-running supervisor; start it with /daemon or /daemons",
       "riskTier": "caution"

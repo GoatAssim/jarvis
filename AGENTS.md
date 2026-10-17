@@ -186,9 +186,13 @@ things that were already fixed once.
   and renders room text with `textContent` (never markup); anything that WIDENS what is said or
   read in a room (group recall on, one item set to "on", reading anyone) asks for a second click.
   (8) The UNOFFICIAL Instagram group transport (`channels/instagram_private.py`,
-  `instagram-group-login`, `instagram-group-serve`, plan S9c) is the ONLY file allowed to import a
-  private-API client library, imports none at module level, and is imported by nothing except those
-  two commands (`jarvis.channels` never loads it). It is OFF by default (`group_transport`, Instagram
+  `instagram-group-login`, `instagram-group-serve`, `instagram-group-threads`, plan S9c) is the ONLY
+  file allowed to import a private-API client library (the optional, exactly-pinned `instagrapi`,
+  extra `instagram-private`, imported inside `_default_client_factory()` and nowhere else), imports
+  none at module level, and is imported by nothing except those three commands (`jarvis.channels`
+  never loads it). `instagram-group-threads` is owner-run, prints thread ids / titles / handles and
+  never message text, and refuses after a login check. The adapter maps every login-style error to a
+  STOP and refuses to save a session that contains the password; it never relogs in by itself. It is OFF by default (`group_transport`, Instagram
   only, the literal `true`), re-reads that switch every cycle and drops a reply in flight when it is off.
   It polls ONLY `pt-<id>` entries of `allowed_channels` (an empty list polls nothing, unlike the gate),
   starts from "now", and feeds the same `base.gate` / `base.handle_message` as every message: there is

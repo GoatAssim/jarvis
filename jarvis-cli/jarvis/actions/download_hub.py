@@ -421,6 +421,7 @@ TOOL_UI = [
         "id": "downloads_panel",
         "label": "Downloads",
         "mode": "menu",
+        "size": "wide",
         "path": "hub_ui",
         "title": "Downloads",
         "hint": "Everything downloading, queued, failed or finished",

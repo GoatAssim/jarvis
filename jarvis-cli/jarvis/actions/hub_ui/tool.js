@@ -1,5 +1,5 @@
 "use strict";
-// Menu > Downloads (plan section 11).  `host` is provided by Jarvis; this file is run as the body
+// Menu > Downloads (plan section 11, rework 17.1: the Scheduled panel's three panes).  `host` is provided by Jarvis; this file is run as the body
 // of an async function, so a top-level `return` is legal.  host.root is a shadow root: query it,
 // never `document`.  Only tools of download_hub.py can be run (host.runTool is checked server-side).
 //
@@ -29,8 +29,8 @@ const DOT = " \u00B7 ";
 const VIEWS = [
   { id: "all", label: "All" },
   { id: "active", label: "Active" },
-  { id: "waiting", label: "Queued & paused" },
-  { id: "failed", label: "Failed & cancelled" },
+  { id: "waiting", label: "Waiting" },
+  { id: "failed", label: "Failed" },
   { id: "done", label: "Finished" },
   { id: "stale", label: "Not reporting" },
 ];
@@ -280,10 +280,66 @@ function hintFromDecisions(decisions) {
   return ["\u2192 " + list.length + " links, queued as one batch", false];
 }
 
+// ---- helpers added for the three-pane layout (rework 17.1); pure, like everything above
+
+// The one word that picks a row's colour (the dot and the left edge).  A silent provider row
+// is "stale", whatever state it last reported.
+function toneOf(row) {
+  if (isStale(row)) return "stale";
+  switch (row.state) {
+    case "downloading": case "probing": case "connecting": case "postprocessing": return "active";
+    case "queued": return "queued";
+    case "paused": return "paused";
+    case "stalled": return "stalled";
+    case "failed": return "failed";
+    case "done": return "done";
+    case "cancelled": return "cancelled";
+    default: return "unknown";
+  }
+}
+
+// Counts for the Overview pane, by tone.
+function overviewStats(rows) {
+  const out = { total: rows.length, active: 0, queued: 0, paused: 0, stalled: 0, failed: 0, done: 0, cancelled: 0, stale: 0, unknown: 0 };
+  rows.forEach((r) => { const t = toneOf(r); if (out[t] !== undefined) out[t]++; });
+  return out;
+}
+
+// What needs a look: failed, stalled and silent rows, worst first.
+function needsAttention(rows, limit) {
+  const bad = rows.filter((r) => { const t = toneOf(r); return t === "failed" || t === "stalled" || t === "stale"; });
+  return sortRows(bad).slice(0, limit || 6);
+}
+
+function runningNow(rows, limit) {
+  return sortRows(rows.filter((r) => toneOf(r) === "active")).slice(0, limit || 5);
+}
+
+// The line at the top of the panel (the Scheduled panel's subtitle).  tone: "" | "ok" | "error"
+function sublineText(sum, err) {
+  if (err) return { text: "Can't reach the download hub", tone: "error" };
+  if (!sum) return { text: "reading downloads\u2026", tone: "" };
+  const c = sum.counts || {};
+  const speed = (c.speed_hub_bps || 0) + (c.speed_other_bps || 0);
+  const parts = [(c.active || 0) + " active", (c.queued || 0) + " queued"];
+  if (c.failed) parts.push(c.failed + " failed");
+  if (c.stale) parts.push(c.stale + " not reporting");
+  parts.push("\u2193 " + (fmtSpeed(speed) || "idle"));
+  const alive = !!(sum.daemon && sum.daemon.alive);
+  parts.push(alive ? "hub running" : "hub NOT running");
+  return { text: parts.join(DOT), tone: !alive ? "error" : (c.active ? "ok" : "") };
+}
+
+// "3 of 12" when a filter hides some, else "12".
+function countText(shown, total) {
+  return shown === total ? String(total) : shown + " of " + total;
+}
+
 const pure = {
   ACTIVE, FINAL, VIEWS, KIND_ICON, fmtBytes, fmtSpeed, fmtEta, fmtAgo, percentText, speedText, etaText,
   sizeText, statusText, barLook, rowActions, sourceKey, sourceLabel, viewMatches, viewCounts, sourceList,
   filterRows, sortRows, groupRows, moveSelection, extractInputs, hintFromDecisions, isStale,
+  toneOf, overviewStats, needsAttention, runningNow, sublineText, countText,
 };
 if (host && host.__hubPureOnly) return pure;
 
@@ -295,7 +351,8 @@ const $ = (sel) => root.querySelector(sel);
 
 const S = {
   rows: [], summary: null, selected: null, view: "all", source: "", search: "", groupBy: "none",
-  detail: null, busy: false, timer: 0, closed: false, lastError: "", hold: 0,
+  detail: null, busy: false, timer: 0, closed: false, lastError: "", hold: 0, holdTimer: 0,
+  pendingSelect: "", sig: {},
 };
 let hintTimer = 0;
 let hintSeq = 0;
@@ -320,6 +377,15 @@ function message(err) {
   return String((err && err.message) || err || "something went wrong");
 }
 
+// Rebuild a part of the panel only when what it shows has changed: no flicker, and a button
+// the pointer is on doesn't vanish under it on every poll.
+function changed(key, value) {
+  const v = typeof value === "string" ? value : JSON.stringify(value);
+  if (S.sig[key] === v) return false;
+  S.sig[key] = v;
+  return true;
+}
+
 function savePrefs() {
   try {
     host.storage.set("prefs", JSON.stringify({ view: S.view, source: S.source, groupBy: S.groupBy })).catch(() => {});
@@ -336,174 +402,24 @@ async function loadPrefs() {
   } catch (e) { /* defaults */ }
 }
 
-// ---- rendering
-
-function navButton(label, count, current, onClick) {
-  return el("button", {
-    cls: "nav", attrs: { type: "button", "aria-current": current ? "true" : "false" }, on: { click: onClick },
-  }, [el("span", { text: label }), el("span", { cls: "n", text: count })]);
-}
-
-function renderSide() {
-  const side = $("#side");
-  side.textContent = "";
-  side.appendChild(el("h4", { text: "Show" }));
-  const counts = viewCounts(S.rows);
-  VIEWS.forEach((v) => {
-    side.appendChild(navButton(v.label, counts[v.id], S.view === v.id, () => { S.view = v.id; savePrefs(); render(); }));
-  });
-  const sources = sourceList(S.rows);
-  if (sources.length) {
-    side.appendChild(el("h4", { text: "Sources" }));
-    sources.forEach((src) => {
-      side.appendChild(navButton(src.label, src.count, S.source === src.key, () => {
-        S.source = S.source === src.key ? "" : src.key;
-        savePrefs();
-        render();
-      }));
-    });
-  }
-}
-
-function renderBar(row) {
-  const look = barLook(row);
-  const fill = el("div", { cls: "bar-fill" });
-  fill.style.width = look.pct + "%";
-  return el("div", { cls: "bar-track " + look.kind, attrs: { "aria-hidden": "true" } }, [fill]);
-}
-
-function renderRow(row) {
-  const selected = row.id === S.selected;
-  const badges = [el("span", { cls: "badge", text: sourceLabel(row) })];
-  if (row.read_only) badges.push(el("span", { cls: "badge ro", text: "read-only", title: "This tool reports its progress but can't be controlled from here" }));
-  const sub = row.error || row.message || row.subtitle || "";
-  const actions = rowActions(row);
-  const kids = [
-    el("div", { cls: "kind", text: KIND_ICON[row.kind] || KIND_ICON.other, attrs: { "aria-hidden": "true" } }),
-    el("div", {}, [
-      el("div", { cls: "title" }, [el("b", { text: row.title || row.id, title: row.title || row.id })].concat(badges)),
-      el("div", { cls: "sub" + (row.error ? " bad" : ""), text: sub }),
-    ]),
-    el("div", { cls: "stat" }, [el("div", { text: statusText(row) }), el("div", { cls: "l2", text: sizeText(row) })]),
-    renderBar(row),
-  ];
-  if (actions.length) {
-    kids.push(el("div", { cls: "acts" }, actions.map((a) => el("button", {
-      cls: a.danger ? "danger" : "", text: a.label, attrs: { type: "button" },
-      on: { click: (ev) => { ev.stopPropagation(); runAction(row, a); } },
-    }))));
-  }
-  const node = el("div", {
-    cls: "row state-" + row.state, attrs: { role: "option", "aria-selected": selected ? "true" : "false", "data-id": row.id },
-    on: { click: () => select(row.id) },
-  }, kids);
-  return node;
+function selectedRow() {
+  return S.rows.find((r) => r.id === S.selected) || null;
 }
 
 function visibleRows() {
   return sortRows(filterRows(S.rows, { view: S.view, source: S.source, search: S.search }));
 }
 
-function renderList() {
-  const list = $("#list");
-  const scroll = list.scrollTop;
-  list.textContent = "";
-  const rows = visibleRows();
-  if (!rows.length) {
-    list.appendChild(el("div", {
-      cls: "empty",
-      text: S.rows.length ? "Nothing matches this view." : "No downloads yet. Paste a link above, or ask Jarvis to download a file.",
-    }));
-    return;
-  }
-  groupRows(rows, S.groupBy).forEach((section) => {
-    if (section.title) list.appendChild(el("div", { cls: "section", text: section.title + (section.meta ? DOT + section.meta : "") }));
-    section.rows.forEach((r) => list.appendChild(renderRow(r)));
-  });
-  list.scrollTop = scroll;
-}
+// ---- top strip
 
-function pair(dl, label, value) {
-  if (value === null || value === undefined || value === "") return;
-  dl.appendChild(el("dt", { text: label }));
-  dl.appendChild(el("dd", { text: value }));
-}
-
-function clock(ts) {
-  return ts ? new Date(ts * 1000).toLocaleString() : "";
-}
-
-function renderDetail() {
-  const box = $("#detail");
-  box.textContent = "";
-  const row = S.rows.find((r) => r.id === S.selected);
-  if (!row) { box.appendChild(el("div", { cls: "none", text: "Select a download to see its details." })); return; }
-  const full = S.detail && S.detail.id === row.id ? S.detail.item : null;
-  box.appendChild(el("h3", { text: row.title || row.id }));
-  box.appendChild(el("div", { cls: "sub", text: statusText(row) }));
-  const dl = el("dl");
-  pair(dl, "Source", sourceLabel(row));
-  pair(dl, "From", row.source);
-  pair(dl, "Saved to", row.dest);
-  pair(dl, "Size", sizeText(row));
-  pair(dl, "Speed", speedText(row));
-  pair(dl, "ETA", etaText(row).replace(/^ETA /, "").replace(APPROX + "ETA ", APPROX));
-  pair(dl, "Tries", row.attempts ? row.attempts : "");
-  pair(dl, "Added", clock(row.created_at));
-  pair(dl, "Finished", clock(row.finished_at));
-  pair(dl, "Error", row.error);
-  pair(dl, "Note", row.message);
-  (full && full.detail ? full.detail : []).forEach((d) => pair(dl, d.label, d.value));
-  box.appendChild(dl);
-
-  const links = row.links || [];
-  if (links.length) {
-    const wrap = el("div", { cls: "links" });
-    links.forEach((l) => {
-      if (l.kind === "url") {
-        wrap.appendChild(el("a", { text: l.label, attrs: { href: l.target, target: "_blank", rel: "noopener noreferrer" } }));
-      }
-      // kind "tool" links are not rendered yet: a provider's own control tools live in ITS file,
-      // which this panel may not run, and a provider's text must never choose which of the hub's
-      // tools a click triggers.  Phase 5 wires them through the hub's own tools.
-    });
-    box.appendChild(wrap);
-  }
-  const children = full && full.children ? full.children : [];
-  if (children.length) {
-    box.appendChild(el("h5", { text: "Files (" + children.length + ")" }));
-    children.slice(0, 40).forEach((c) => {
-      const bits = [c.name];
-      if (typeof c.percent === "number") bits.push(Math.round(c.percent) + "%");
-      if (c.state) bits.push(c.state);
-      box.appendChild(el("div", { cls: "ev", text: bits.join(DOT) }));
-    });
-  }
-  const events = full && full.events ? full.events : [];
-  if (events.length) {
-    box.appendChild(el("h5", { text: "Recent events" }));
-    events.slice(-12).reverse().forEach((ev) => {
-      box.appendChild(el("div", { cls: "ev " + (ev.level === "error" ? "error" : ""), text: new Date(ev.ts * 1000).toLocaleTimeString() + "  " + ev.message }));
-    });
-  }
-}
-
-function renderStatus() {
-  const bar = $("#status");
-  bar.textContent = "";
-  const sum = S.summary;
-  if (!sum) { bar.appendChild(el("span", { text: S.lastError ? "" : "Loading\u2026" })); return; }
-  const c = sum.counts || {};
-  const speed = (c.speed_hub_bps || 0) + (c.speed_other_bps || 0);
-  bar.appendChild(el("span", { text: "\u2193 " + (fmtSpeed(speed) || "idle") }));
-  bar.appendChild(el("span", { text: (c.active || 0) + " active" + DOT + (c.queued || 0) + " queued" + DOT + (c.done || 0) + " done" }));
-  if (c.failed) bar.appendChild(el("span", { cls: "bad", text: c.failed + " failed" }));
-  if (c.stale) bar.appendChild(el("span", { cls: "warn", text: c.stale + " not reporting" }));
-  if (sum.free_bytes !== null && sum.free_bytes !== undefined) {
-    bar.appendChild(el("span", { text: fmtBytes(sum.free_bytes) + " free", title: sum.library_root || "" }));
-  }
-  const alive = sum.daemon && sum.daemon.alive;
-  bar.appendChild(el("span", { cls: alive ? "" : "bad", text: alive ? "hub running" : "hub NOT running" }));
+function renderTop() {
+  const line = sublineText(S.summary, S.lastError);
+  const n = $("#subline");
+  n.textContent = line.text;
+  n.className = "top__line" + (line.tone ? " is-" + line.tone : "");
+  const st = overviewStats(S.rows);
+  $("#pauseAll").disabled = !(st.active + st.queued + st.stalled);
+  $("#resumeAll").disabled = !st.paused;
 }
 
 function renderBanner() {
@@ -522,15 +438,301 @@ function renderBanner() {
   }
 }
 
+// ---- left pane
+
+function chip(label, n, active, flag, onClick) {
+  return el("button", {
+    cls: "chip" + (active ? " is-active" : "") + (flag && n ? " chip--flag" : ""),
+    attrs: { type: "button", "aria-pressed": active ? "true" : "false" }, on: { click: onClick },
+  }, [el("span", { text: label }), el("span", { cls: "chip__n", text: n })]);
+}
+
+function renderChips() {
+  const counts = viewCounts(S.rows);
+  const sources = sourceList(S.rows);
+  if (!changed("chips", [counts, sources, S.view, S.source])) return;
+  const vbox = $("#viewChips");
+  vbox.textContent = "";
+  VIEWS.forEach((v) => {
+    vbox.appendChild(chip(v.label, counts[v.id], S.view === v.id, v.id === "failed" || v.id === "stale", () => {
+      S.view = v.id; savePrefs(); render();
+    }));
+  });
+  const sbox = $("#sourceChips");
+  sbox.textContent = "";
+  if (sources.length > 1) {
+    sources.forEach((src) => {
+      sbox.appendChild(chip(src.label, src.count, S.source === src.key, false, () => {
+        S.source = S.source === src.key ? "" : src.key;
+        savePrefs();
+        render();
+      }));
+    });
+  }
+}
+
+function renderBar(row, big) {
+  const look = barLook(row);
+  const fill = el("div", { cls: "bar-fill" });
+  fill.style.width = look.pct + "%";
+  return el("div", { cls: "bar-track " + look.kind + (big ? " big" : ""), attrs: { "aria-hidden": "true" } }, [fill]);
+}
+
+function renderRow(row) {
+  const tone = toneOf(row);
+  const meta = [el("span", { cls: "tag", text: sourceLabel(row) })];
+  if (row.read_only) meta.push(el("span", { cls: "tag tag--ro", text: "read-only", title: "This tool reports its progress but can't be controlled from here" }));
+  meta.push(el("span", { cls: "st" + (row.error ? " bad" : ""), text: statusText(row) }));
+  const size = sizeText(row);
+  if (size) meta.push(el("span", { text: size }));
+  return el("div", {
+    cls: "row tone-" + tone + " state-" + row.state,
+    attrs: { role: "option", "aria-selected": row.id === S.selected ? "true" : "false", "data-id": row.id },
+    on: { click: () => select(row.id) },
+  }, [
+    el("div", { cls: "row__top" }, [
+      el("span", { cls: "dot tone-" + tone, attrs: { "aria-hidden": "true" } }),
+      el("span", { cls: "row__title", text: row.title || row.id, title: row.title || row.id }),
+      el("span", { cls: "row__kind", text: KIND_ICON[row.kind] || KIND_ICON.other, attrs: { "aria-hidden": "true" } }),
+    ]),
+    renderBar(row, false),
+    el("div", { cls: "row__meta" }, meta),
+  ]);
+}
+
+function sectionHeader(section) {
+  const kids = [el("span", { cls: "section__t", text: section.title + (section.meta ? DOT + section.meta : "") })];
+  // Batch headers get the group-wide controls: the same tools, aimed at the whole batch.
+  if (S.groupBy === "group" && /^g:/.test(section.key)) {
+    const gid = section.key.slice(2);
+    const acts = el("span", { cls: "section__acts" });
+    [["pause", "Pause"], ["resume", "Resume"], ["retry", "Retry"]].forEach((a) => {
+      acts.appendChild(el("button", { cls: "btn", text: a[1], attrs: { type: "button" }, on: { click: () => groupAction(gid, a[0], a[1]) } }));
+    });
+    kids.push(acts);
+  }
+  return el("div", { cls: "section" }, kids);
+}
+
+function renderList() {
+  const rows = visibleRows();
+  $("#count").textContent = countText(rows.length, S.rows.length);
+  if (!changed("list", [rows, S.selected, S.groupBy])) return;
+  const list = $("#list");
+  const scroll = list.scrollTop;
+  list.textContent = "";
+  if (!rows.length) {
+    list.appendChild(el("div", {
+      cls: "empty",
+      text: S.rows.length ? "Nothing matches this filter." : "No downloads yet. Paste a link in the form, or ask Jarvis to download a file.",
+    }));
+    return;
+  }
+  groupRows(rows, S.groupBy).forEach((section) => {
+    if (section.title) list.appendChild(sectionHeader(section));
+    section.rows.forEach((r) => list.appendChild(renderRow(r)));
+  });
+  list.scrollTop = scroll;
+}
+
+// ---- middle pane
+
+function pair(dl, label, value) {
+  if (value === null || value === undefined || value === "") return;
+  dl.appendChild(el("div", { cls: "drow" }, [el("dt", { text: label }), el("dd", { text: value })]));
+}
+
+function clock(ts) {
+  return ts ? new Date(ts * 1000).toLocaleString() : "";
+}
+
+function note(kind, title, text) {
+  return el("div", { cls: "note" + (kind ? " note--" + kind : "") }, [el("strong", { text: title }), el("span", { text: text })]);
+}
+
+function buildDetail(row, full) {
+  const box = $("#detail");
+  box.textContent = "";
+  const tone = toneOf(row);
+
+  box.appendChild(el("div", { cls: "detail__title", text: row.title || row.id }));
+  const badges = [el("span", { cls: "dot tone-" + tone, attrs: { "aria-hidden": "true" } }), el("span", { text: statusText(row) }), el("span", { cls: "tag", text: sourceLabel(row) })];
+  if (row.read_only) badges.push(el("span", { cls: "tag tag--ro", text: "read-only" }));
+  box.appendChild(el("div", { cls: "detail__status" }, badges));
+
+  const bar = renderBar(row, true);
+  bar.classList.add("detail__bar");
+  box.appendChild(bar);
+  const right = [speedText(row), etaText(row)].filter(Boolean).join(DOT);
+  box.appendChild(el("div", { cls: "detail__nums" }, [
+    el("span", { text: [percentText(row), sizeText(row)].filter(Boolean).join(DOT) }),
+    el("span", { text: right }),
+  ]));
+
+  const actions = rowActions(row);
+  if (actions.length) {
+    box.appendChild(el("div", { cls: "detail__actions" }, actions.map((a) => el("button", {
+      cls: "btn btn--sm" + (a.danger ? " btn--danger" : ""), text: a.label, attrs: { type: "button" },
+      on: { click: () => runAction(row, a) },
+    }))));
+  }
+
+  if (row.error) box.appendChild(note("bad", "It failed", row.error));
+  if (isStale(row)) box.appendChild(note("warn", "Not reporting", "Nothing has been heard from this download " + fmtAgo(row.age_s) + ". It may have stopped, or the tool that runs it may be closed. It is not marked failed."));
+  if (row.read_only) box.appendChild(note("", "Read-only", "This tool reports its progress but can't be paused or cancelled from here."));
+  if (row.pending) box.appendChild(note("", "Waiting for the hub", "\u201C" + row.pending + "\u201D has been requested and will be applied in a moment."));
+
+  const dl = el("dl", { cls: "detail__rows" });
+  pair(dl, "Source", sourceLabel(row));
+  pair(dl, "From", row.source);
+  pair(dl, "Saved to", row.dest);
+  pair(dl, "Size", sizeText(row));
+  pair(dl, "Speed", speedText(row));
+  pair(dl, "ETA", etaText(row).replace(/^ETA /, "").replace(APPROX + "ETA ", APPROX));
+  pair(dl, "Peers", row.peers);
+  pair(dl, "Tries", row.attempts ? row.attempts : "");
+  pair(dl, "Added", clock(row.created_at));
+  pair(dl, "Finished", clock(row.finished_at));
+  pair(dl, "Batch", row.group_title);
+  pair(dl, "Note", row.error ? "" : row.message);
+  (full && full.detail ? full.detail : []).forEach((d) => pair(dl, d.label, d.value));
+  box.appendChild(dl);
+
+  const links = row.links || [];
+  const urls = links.filter((l) => l.kind === "url");
+  if (urls.length) {
+    const wrap = el("div", { cls: "links" });
+    urls.forEach((l) => {
+      wrap.appendChild(el("a", { text: l.label, attrs: { href: l.target, target: "_blank", rel: "noopener noreferrer" } }));
+    });
+    box.appendChild(wrap);
+  }
+  // kind "tool" links are not rendered: a provider's own control tools live in ITS file, which
+  // this panel may not run, and a provider's text must never choose which of the hub's tools a
+  // click triggers.  Phase 5 wires them through the hub's own tools.
+
+  const children = full && full.children ? full.children : [];
+  if (children.length) {
+    box.appendChild(el("div", { cls: "h5", text: "Files (" + children.length + ")" }));
+    children.slice(0, 40).forEach((c) => {
+      const bits = [c.name];
+      if (typeof c.percent === "number") bits.push(Math.round(c.percent) + "%");
+      if (c.state) bits.push(c.state);
+      box.appendChild(el("div", { cls: "ev", text: bits.join(DOT) }));
+    });
+  }
+  const events = full && full.events ? full.events : [];
+  if (events.length) {
+    box.appendChild(el("div", { cls: "h5", text: "Recent events" }));
+    events.slice(-12).reverse().forEach((ev) => {
+      box.appendChild(el("div", { cls: "ev " + (ev.level === "error" ? "error" : ""), text: new Date(ev.ts * 1000).toLocaleTimeString() + "  " + ev.message }));
+    });
+  }
+}
+
+function renderMid() {
+  const row = selectedRow();
+  $("#addForm").hidden = !!row;
+  $("#detail").hidden = !row;
+  $("#midTitle").textContent = row ? "Download" : "Add a download";
+  if (!row) { S.sig.detail = ""; return; }
+  const full = S.detail && S.detail.id === row.id ? S.detail.item : null;
+  if (!changed("detail", [row, full && full.events, full && full.children, full && full.detail])) return;
+  buildDetail(row, full);
+}
+
+// ---- right pane
+
+function countRow(label, n, flag) {
+  return el("div", { cls: "crow" + (flag ? " is-" + flag : "") }, [
+    el("span", { cls: "crow__l", text: label }), el("span", { cls: "crow__n", text: n }),
+  ]);
+}
+
+function pickRow(row, withBar) {
+  const kids = [
+    el("div", { cls: "pick-row__t", text: row.title || row.id }),
+    el("div", { cls: "pick-row__s", text: statusText(row) }),
+  ];
+  if (withBar) kids.push(renderBar(row, false));
+  return el("button", { cls: "pick-row", attrs: { type: "button", "data-id": row.id }, on: { click: () => select(row.id) } }, kids);
+}
+
+function renderSide() {
+  const st = overviewStats(S.rows);
+  const attention = needsAttention(S.rows);
+  const running = runningNow(S.rows);
+  if (!changed("side", [st, attention, running, S.summary, S.lastError])) return;
+  const box = $("#side");
+  box.textContent = "";
+  const sum = S.summary || {};
+  const c = sum.counts || {};
+
+  const counts = el("div", { cls: "counts" });
+  counts.appendChild(countRow("Active", st.active));
+  counts.appendChild(countRow("Queued", st.queued));
+  counts.appendChild(countRow("Paused", st.paused));
+  counts.appendChild(countRow("Stalled", st.stalled, st.stalled ? "flag" : ""));
+  counts.appendChild(countRow("Failed", st.failed, st.failed ? "bad" : ""));
+  counts.appendChild(countRow("Finished", st.done));
+  counts.appendChild(countRow("Not reporting", st.stale, st.stale ? "flag" : ""));
+  box.appendChild(el("div", {}, [el("h4", { text: "Right now" }), counts]));
+
+  const hubSpeed = c.speed_hub_bps || 0;
+  const otherSpeed = c.speed_other_bps || 0;
+  const speedBox = el("div", {}, [
+    el("h4", { text: "Speed" }),
+    el("div", { cls: "big-speed", text: "\u2193 " + (fmtSpeed(hubSpeed + otherSpeed) || "idle") }),
+  ]);
+  if (otherSpeed > 0) speedBox.appendChild(el("div", { cls: "small", text: "hub " + (fmtSpeed(hubSpeed) || "0") + DOT + "other tools " + fmtSpeed(otherSpeed) + " (not under hub control)" }));
+  box.appendChild(speedBox);
+
+  const free = sum.free_bytes;
+  const storage = el("div", {}, [el("h4", { text: "Storage" })]);
+  storage.appendChild(el("div", { text: free === null || free === undefined ? "free space unknown" : fmtBytes(free) + " free" }));
+  if (sum.library_root) storage.appendChild(el("div", { cls: "small", text: sum.library_root }));
+  box.appendChild(storage);
+
+  const alive = !!(sum.daemon && sum.daemon.alive);
+  const hubBox = el("div", {}, [el("h4", { text: "Hub" })]);
+  hubBox.appendChild(el("div", { cls: "detail__status" }, [
+    el("span", { cls: "dot tone-" + (S.lastError || !alive ? "failed" : "done"), attrs: { "aria-hidden": "true" } }),
+    el("span", { text: S.lastError ? "not reachable" : (alive ? "daemon running" : "daemon not running") }),
+  ]));
+  if (!S.lastError && !alive) hubBox.appendChild(el("div", { cls: "small", text: "Start \u201CDownload hub\u201D in Menu \u203A Daemons so queued downloads can begin." }));
+  box.appendChild(hubBox);
+
+  const attn = el("div", {}, [el("h4", { text: "Needs attention" })]);
+  if (attention.length) attention.forEach((r) => attn.appendChild(pickRow(r, false)));
+  else attn.appendChild(el("div", { cls: "side-empty", text: "Nothing needs a look." }));
+  box.appendChild(attn);
+
+  const now = el("div", {}, [el("h4", { text: "Running now" })]);
+  if (running.length) running.forEach((r) => now.appendChild(pickRow(r, true)));
+  else now.appendChild(el("div", { cls: "side-empty", text: "Nothing is downloading." }));
+  box.appendChild(now);
+
+  const demo = el("div", {}, [
+    el("h4", { text: "Try the panel" }),
+    el("div", { cls: "small", text: "Fake downloads that show every look: climbing, no percent, stalled, failed, a silent source." }),
+    el("div", { cls: "demo" }, [
+      el("button", { cls: "btn btn--sm", text: "Start demo", attrs: { type: "button" }, on: { click: () => demoAction("start") } }),
+      el("button", { cls: "btn btn--sm", text: "Clear demo", attrs: { type: "button" }, on: { click: () => demoAction("clear") } }),
+    ]),
+  ]);
+  box.appendChild(demo);
+}
+
 function render() {
-  if (S.hold && Date.now() < S.hold) { setTimeout(render, 250); return; }   // don't rebuild under a click
+  if (S.hold && Date.now() < S.hold) { clearTimeout(S.holdTimer); S.holdTimer = setTimeout(render, 250); return; }   // don't rebuild under a click
   S.hold = 0;
   if (S.closed) return;
-  renderSide();
-  renderList();
-  renderDetail();
-  renderStatus();
+  renderTop();
   renderBanner();
+  renderChips();
+  renderList();
+  renderMid();
+  renderSide();
 }
 
 // ---- actions
@@ -544,12 +746,45 @@ async function callTool(name, args) {
   }
 }
 
+// One place that turns a control tool's answer into a corner message.
+function reportControl(r, label) {
+  if (r.declined) { toast("Cancelled", "info"); return; }
+  if (r.ok === false) { toast(r.error || "That didn't work", "warn"); return; }
+  const n = ((r.changed && r.changed.length) || 0) + ((r.pending && r.pending.length) || 0);
+  toast(n > 1 ? label + ": " + n + " downloads" : label + "\u2026", "info");
+}
+
 async function runAction(row, action) {
   const args = action.tool === "dl_open" ? { id: row.id, action: action.verb } : { id: row.id };
   const r = await callTool(action.tool, args);
   if (r.declined) toast("Cancelled", "info");
   else if (r.ok === false) toast(r.error || "That didn't work", "warn");
   else if (r.pending && r.pending.length) toast(action.label + "\u2026", "info");
+  schedule(300);
+}
+
+async function groupAction(gid, verb, label) {
+  const r = verb === "pause" ? await callTool("dl_pause", { group: gid })
+    : verb === "resume" ? await callTool("dl_resume", { group: gid })
+      : await callTool("dl_retry", { group: gid });
+  reportControl(r, label);
+  schedule(300);
+}
+
+async function allAction(verb) {
+  const btn = $(verb === "pause" ? "#pauseAll" : "#resumeAll");
+  btn.disabled = true;
+  const r = verb === "pause" ? await callTool("dl_pause", { all: true }) : await callTool("dl_resume", { all: true });
+  reportControl(r, verb === "pause" ? "Pausing" : "Resuming");
+  schedule(300);
+}
+
+async function demoAction(action) {
+  const r = await callTool("hub_demo_provider", { action: action });
+  if (r.declined) { toast("Cancelled", "info"); return; }
+  if (r.ok === false) { toast(r.error || "That didn't work", "warn"); return; }
+  if (r.note) toast(r.note, "warn");
+  else toast(action === "start" ? "Demo downloads started" : "Demo downloads cleared", "success");
   schedule(300);
 }
 
@@ -560,13 +795,20 @@ function select(id) {
   loadDetail();
 }
 
+function newDownload() {
+  S.selected = null;
+  S.detail = null;
+  render();
+  $("#addInput").focus();
+}
+
 async function loadDetail() {
   const id = S.selected;
   if (!id) return;
   const r = await callTool("dl_status", { id: id });
   if (r.ok && r.item && id === S.selected) {
     S.detail = { id: id, item: r.item, at: Date.now(), state: r.item.state };
-    renderDetail();
+    renderMid();
   }
 }
 
@@ -587,6 +829,8 @@ async function poll() {
     S.rows = Array.isArray(r.items) ? r.items : [];
     if (r.summary) S.summary = r.summary;
     S.lastError = "";
+    if (S.pendingSelect && S.rows.some((x) => x.id === S.pendingSelect)) { S.selected = S.pendingSelect; S.detail = null; }
+    S.pendingSelect = "";
     if (S.selected && !S.rows.some((x) => x.id === S.selected)) { S.selected = null; S.detail = null; }
   } catch (err) {
     S.lastError = message(err);
@@ -594,14 +838,14 @@ async function poll() {
     S.busy = false;
   }
   render();
-  const row = S.rows.find((x) => x.id === S.selected);
+  const row = selectedRow();
   if (row && (!S.detail || S.detail.id !== row.id || S.detail.state !== row.state || Date.now() - S.detail.at > 8000)) {
     loadDetail();
   }
   schedule();
 }
 
-// ---- the add box
+// ---- the add form
 
 function setHint(text, bad) {
   const h = $("#addHint");
@@ -623,16 +867,24 @@ async function submitAdd(ev) {
   const input = $("#addInput");
   const urls = extractInputs(input.value);
   if (!urls.length) { setHint("Paste a link that starts with http:// or https://", true); return; }
+  const args = { urls: urls };
+  const dest = $("#addDest").value.trim();
+  const group = $("#addGroup").value.trim();
+  if (dest) args.dest = dest;
+  if (group) args.group = group;
+  if ($("#addPaused").checked) args.start_paused = true;
   const btn = $("#addBtn");
   btn.disabled = true;
   try {
-    const r = await callTool("dl_add", { urls: urls });
+    const r = await callTool("dl_add", args);
     if (r.declined) { setHint("Cancelled", false); return; }
     if (r.ok) {
-      const dup = (r.added || []).filter((a) => a.duplicate).length;
+      const added = r.added || [];
+      const dup = added.filter((a) => a.duplicate).length;
       toast("Queued " + r.count + (dup ? " (" + dup + " already in the list)" : ""), "success");
       if (r.note) toast(r.note, "warn");
       if (r.skipped && r.skipped.length) toast(r.skipped[0].problem, "warn");
+      if (added.length === 1) S.pendingSelect = added[0].id;       // show the one you just added
       input.value = "";
       setHint("", false);
       schedule(200);
@@ -653,16 +905,25 @@ $("#addInput").addEventListener("input", () => {
   if (!urls.length) { hintSeq++; setHint("", false); return; }
   hintTimer = setTimeout(() => previewHint(urls), 400);
 });
+$("#addInput").addEventListener("keydown", (e) => {
+  if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) { e.preventDefault(); $("#addForm").requestSubmit(); }
+});
 $("#search").addEventListener("input", (e) => { S.search = e.target.value; render(); });
 $("#groupBy").addEventListener("change", (e) => { S.groupBy = e.target.value; savePrefs(); render(); });
 $("#refresh").addEventListener("click", () => { S.lastError = ""; schedule(10); });
+$("#newBtn").addEventListener("click", newDownload);
+$("#pauseAll").addEventListener("click", () => allAction("pause"));
+$("#resumeAll").addEventListener("click", () => allAction("resume"));
 
 const list = $("#list");
-// A poll must not rebuild the rows between pressing and releasing a button (the click would
+// A poll must not rebuild the panes between pressing and releasing a button (the click would
 // land on a node that no longer exists), so renders wait while a pointer is down.
-list.addEventListener("pointerdown", () => { S.hold = Date.now() + 1500; });
-list.addEventListener("pointerup", () => { S.hold = 0; });
-list.addEventListener("pointercancel", () => { S.hold = 0; });
+["list", "mid", "side"].forEach((id) => {
+  const pane = $("#" + id);
+  pane.addEventListener("pointerdown", () => { S.hold = Date.now() + 1500; });
+  pane.addEventListener("pointerup", () => { S.hold = 0; });
+  pane.addEventListener("pointercancel", () => { S.hold = 0; });
+});
 list.addEventListener("keydown", (e) => {
   const rows = visibleRows();
   const ids = rows.map((r) => r.id);
@@ -693,7 +954,7 @@ root.addEventListener("keydown", (e) => {
   if (e.key === "/" && tag !== "INPUT" && tag !== "SELECT" && tag !== "TEXTAREA") { e.preventDefault(); $("#search").focus(); }
 });
 
-// Dropping links onto the panel fills the add box (the person still presses Add).
+// Dropping links onto the panel fills the form (the person still presses Add).
 const hub = $("#hub");
 hub.addEventListener("dragover", (e) => { e.preventDefault(); });
 hub.addEventListener("drop", (e) => {
@@ -701,12 +962,15 @@ hub.addEventListener("drop", (e) => {
   const dt = e.dataTransfer;
   const text = dt ? (dt.getData("text/uri-list") || dt.getData("text/plain")) : "";
   const urls = extractInputs(text);
-  if (!urls.length) { setHint("That isn't a link I can download", true); return; }
-  $("#addInput").value = urls.join(" ");
+  if (!urls.length) { toast("That isn't a link I can download", "warn"); return; }
+  S.selected = null;
+  S.detail = null;
+  render();
+  $("#addInput").value = urls.join("\n");
   previewHint(urls);
 });
 
-host.onClose(() => { S.closed = true; clearTimeout(S.timer); clearTimeout(hintTimer); });
+host.onClose(() => { S.closed = true; clearTimeout(S.timer); clearTimeout(S.holdTimer); clearTimeout(hintTimer); });
 
 (async function start() {
   await loadPrefs();

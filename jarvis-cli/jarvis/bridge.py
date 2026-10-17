@@ -129,6 +129,7 @@ PROTO = 1
 UNHOSTED = frozenset({
     "_internal_bridge", "sched-daemon", "browser-daemon", "daemon-run",
     "discord-daemon", "instagram-serve", "instagram-group-serve", "instagram-group-login",
+    "instagram-group-threads",
     "clipboard-watch", "ambient",
     "listen", "speak", "transcribe", "spotify-login", "browser-setup",
 })

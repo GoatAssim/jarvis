@@ -17,6 +17,12 @@
 /* A tool's window: smaller than the big panels, because a tool's page is usually a
    small control surface, not a dashboard. */
 .menu-panel--tool-ui{ width: min(760px, 100%); height: min(600px, 90vh); }
+/* `size: "wide"` (menu mode): the same footprint as .debug-panel, for a tool whose panel is a
+   real list / detail / overview screen (the Downloads panel). */
+.menu-panel--tool-ui-wide{ width: min(1320px, 100%); height: min(860px, 92vh); }
+/* The body becomes a column so the tool's own markup can fill it (and scroll its panes itself). */
+.menu-panel--tool-ui-wide .tool-ui-body{ display: flex; flex-direction: column; overflow: hidden; }
+.menu-panel--tool-ui-wide .tool-ui-host{ flex: 1; min-height: 0; display: flex; flex-direction: column; }
 .tool-ui-body{ position: relative; flex: 1; min-height: 0; overflow: auto; }
 
 /* Button mode: the sandboxed frame fills the body edge to edge. */
@@ -27,4 +33,7 @@
 
 @media (max-width: 640px){
   .menu-panel--tool-ui{ height: 92vh; }
+}
+@media (max-width: 900px){
+  .menu-panel--tool-ui-wide{ width: 100%; height: 100%; border-radius: 0; }
 }

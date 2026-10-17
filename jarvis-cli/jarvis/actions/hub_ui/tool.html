@@ -1,30 +1,91 @@
 <div class="hub" id="hub">
-  <header class="bar">
-    <form class="add" id="addForm" autocomplete="off">
-      <input id="addInput" type="text" spellcheck="false" aria-label="Link to download"
-             placeholder="Paste a link to download (or drop links here)">
-      <button type="submit" id="addBtn">Add</button>
-    </form>
-    <div class="hint" id="addHint" aria-live="polite"></div>
+
+  <!-- top strip: one status line + the few things that act on the whole list -->
+  <header class="top">
+    <div class="top__line" id="subline" role="status" aria-live="polite">reading downloads&hellip;</div>
+    <div class="top__actions">
+      <button type="button" class="btn" id="pauseAll" title="Pause every download that can be paused">Pause all</button>
+      <button type="button" class="btn" id="resumeAll" title="Resume every paused download">Resume all</button>
+      <button type="button" class="btn" id="refresh" title="Read the list again now">Refresh</button>
+    </div>
   </header>
+  <div class="banner" id="banner" role="status" hidden></div>
+
   <div class="body">
-    <nav class="side" id="side" aria-label="Views and sources"></nav>
-    <main class="main">
-      <div class="tools">
-        <input id="search" type="search" spellcheck="false" aria-label="Search downloads" placeholder="Search">
-        <label class="grp">Group by
-          <select id="groupBy" aria-label="Group by">
-            <option value="none">Nothing</option>
-            <option value="source">Source</option>
-            <option value="group">Batch</option>
-          </select>
-        </label>
-        <button type="button" id="refresh" title="Refresh now">Refresh</button>
+
+    <!-- LEFT: search, status and source filters, the list -->
+    <section class="pane" aria-label="Downloads">
+      <div class="pane__head">
+        <h3>Downloads</h3>
+        <span class="count" id="count"></span>
       </div>
-      <div class="banner" id="banner" role="status" hidden></div>
+      <div class="search">
+        <svg class="search__icon" viewBox="0 0 20 20" aria-hidden="true">
+          <circle cx="8.7" cy="8.7" r="6" fill="none" stroke="currentColor" stroke-width="1.6"/>
+          <line x1="13.2" y1="13.2" x2="17.5" y2="17.5" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/>
+        </svg>
+        <input type="search" id="search" class="search__input" spellcheck="false" autocomplete="off"
+               aria-label="Search downloads" placeholder="Search downloads&hellip;">
+      </div>
+      <div class="chips" id="viewChips" role="group" aria-label="Filter by status"></div>
+      <div class="chips" id="sourceChips" role="group" aria-label="Filter by source"></div>
+      <div class="listbar">
+        <label for="groupBy">Group by</label>
+        <select id="groupBy" aria-label="Group by">
+          <option value="none">Nothing</option>
+          <option value="source">Source</option>
+          <option value="group">Batch</option>
+        </select>
+      </div>
       <div class="list" id="list" role="listbox" tabindex="0" aria-label="Downloads"></div>
-    </main>
-    <aside class="detail" id="detail" aria-label="Details"></aside>
+    </section>
+
+    <!-- MIDDLE: the add form, or the selected download -->
+    <section class="pane" aria-label="Download">
+      <div class="pane__head">
+        <h3 id="midTitle">Add a download</h3>
+        <button type="button" class="btn btn--sm" id="newBtn">+ New</button>
+      </div>
+      <div class="mid" id="mid">
+
+        <form class="add" id="addForm" autocomplete="off">
+          <div class="field">
+            <label class="field__label" for="addInput">Links</label>
+            <textarea id="addInput" spellcheck="false" rows="5"
+                      placeholder="Paste one or more links, one per line&#10;https://example.com/file.zip"></textarea>
+            <div class="hint" id="addHint" aria-live="polite"></div>
+            <div class="field__help">Direct file links (http or https). Several links are queued together as one batch.
+              You can also drop links anywhere on this panel.</div>
+          </div>
+
+          <details class="advanced">
+            <summary>Options</summary>
+            <div class="field">
+              <label class="field__label" for="addDest">Save in folder</label>
+              <input type="text" id="addDest" spellcheck="false" placeholder="e.g. Manuals (optional)">
+              <div class="field__help">A folder inside your downloads library. Leave empty for the default place.</div>
+            </div>
+            <div class="field">
+              <label class="field__label" for="addGroup">Batch name</label>
+              <input type="text" id="addGroup" spellcheck="false" placeholder="Name for this batch (optional)">
+            </div>
+            <label class="check"><input type="checkbox" id="addPaused"> Add it paused, I will start it myself</label>
+          </details>
+
+          <div class="submit">
+            <button type="submit" class="btn btn--primary" id="addBtn">Add to downloads</button>
+          </div>
+        </form>
+
+        <div class="detail" id="detail" hidden></div>
+      </div>
+    </section>
+
+    <!-- RIGHT: counts, speed, disk, hub health, what needs a look -->
+    <section class="pane pane--last" aria-label="Overview">
+      <div class="pane__head"><h3>Overview</h3></div>
+      <div class="side" id="side"></div>
+    </section>
+
   </div>
-  <footer class="status" id="status" role="status"></footer>
 </div>

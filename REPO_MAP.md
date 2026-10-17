@@ -167,7 +167,7 @@ jarvis-cli/jarvis/
     command_tools.py  commands_config.py   saved user commands
     custom_tools*.py  user Python tools from ~/.jarvis/tools/ (custom_tools_suggest.py = the editor's inline suggestions, `ctools-suggest`; returns text only, never writes a tool). custom_tools_store.py also keeps DRAFTS: ~/.jarvis/tools/_drafts/<key>.json, backups of tools still being written (saved or not); custom_tools_ui_templates.py = the "Button page" / "Menu panel" templates and their starter html/js/css. custom_tools_store.py also owns a tool's WEB FILES (the folders its TOOL_UI declares): `web_footprint`, `read_web_file` / `write_web_file` (`ctools-files`, the editor's extra tabs), `import_bundle` / `read_zip_bundle` (`ctools-import`: several files, a folder or a .zip), `web_removal_plan` (`ctools-delete --folders`, `ctools-files removal`)
     tool_commands.py      TOOL_COMMANDS (I.2.11): validates the palette commands a tool file contributes (a typed twin of one of its own tools; no riskTier = dangerous) and builds the tool's arguments from typed words. `jarvis tool-commands list|prepare|run`; routes `/api/tool-commands*`. A command is off when the owner switches it off (Tool Manager) or when its tool is (`tools.command_off_reason`)
-    tool_ui.py            TOOL_UI: validates a tool file's own screen (a button or Menu entry opening a page built from the tool's tool.html/js/css) and reads its files; paths can't leave the declaring file's directory. `jarvis tool-ui list|bundle|run`
+    tool_ui.py            TOOL_UI: validates a tool file's own screen (a button or Menu entry opening a page built from the tool's tool.html/js/css) and reads its files; paths can't leave the declaring file's directory; optional `size` ("normal" | "wide", menu panels) picks the window size. `jarvis tool-ui list|bundle|run`
     tool_maker.py        the Tool Maker conversation (L.53): the per-turn context (tool name + whole editor text, from a temp file server.js writes), WITHHELD_TOOLS (write-a-file / run-a-program tools it may not use), history trimming, the origin stamp. Active only while JARVIS_TOOL_MAKER_CONTEXT_FILE is set
     tool_disable.py       the owner's off switches (~/.jarvis/disabled.json): tools, saved commands, tool-registered personas, TOOL_UI screens, TOOL_COMMANDS palette words (`jarvis tool-disable-set <name> <true|false> --kind tool-command`). Daemons are NOT here (daemons.json `enabled`); a file whose tools are ALL off takes its daemons (tool_daemons.sync) and screens (tools.ui_is_off) with it (Q-L46m)
 
@@ -195,8 +195,11 @@ jarvis-cli/jarvis/
         discord_gateway.py     wire adapter (the only file importing discord.py)
         instagram_gateway.py   wire adapter (webhook server)
         instagram_private.py   channels spaces S9c: UNOFFICIAL live Instagram GROUP transport
-                               (polls `pt-<id>` threads, same gate; off by default; no client
-                               library bundled; imported only by instagram-group-serve / -login)
+                               (polls `pt-<id>` threads, same gate; off by default; the optional
+                               pinned `instagrapi` extra `instagram-private` is imported lazily in
+                               ONE place, `_default_client_factory()`, via `InstagrapiClient`;
+                               imported only by instagram-group-serve / -login / -threads;
+                               NOT yet run against real Instagram)
         space.py          channel spaces S2: the vocabulary for a place (dm / channel / thread /
                           group / mention), `kind_of(msg)`, `is_room(msg)`, the speaker record
                           and its short label (`Name`, `Name (owner)`), titles. Pure
@@ -359,7 +362,10 @@ jarvis-cli/jarvis/
                               hub_demo_provider. Thin: every rule is in hub/service.py. Declares the Menu >
                               Downloads panel (hub_ui/, shipped as package data) and the `hub` daemon
         _hub_daemon.py        the runner DAEMONS launches (underscore = not a tool)
-        hub_ui/               tool.html / tool.js / tool.css: the Downloads panel (renders data with textContent only)
+        hub_ui/               tool.html / tool.js / tool.css: the Downloads panel (renders data with textContent only).
+                              Laid out like the Scheduled panel (JARVIS_DOWNLOAD_HUB.md 17.1): left = search, status
+                              and source chips, the list; middle = add form or the selected download; right = overview.
+                              Declared `"size": "wide"` so it opens in the big panel size
 
     hub/                  Download Hub core (import-light; see hub/__init__.py for the module map and where
                           later phases plug in): store.py (sqlite, WAL), states.py (what a row may say),
@@ -891,6 +897,7 @@ silently never runs.
 | `test_space_view.py` | channel spaces S10a/b: `list_spaces` / `view` -- rooms only by default, kind and platform filters, unsaved rooms, `rooms_only` refuses a DM, reading changes no file (hashes + mtimes), CLI arguments, the two read-only GET routes (static check) |
 | `test_channels_pack_instruction.py` | the shared `channels` tool group keeps every file's pack instruction (they are joined, not last-wins): remember_sender, recent_dms, send_dm (incl. the `when` and "don't call recent_dms first" rules), recent_spaces and notify_owner all reach the model once each; only `channel_people.py` and `notify_owner.py` declare one; a guest's text names no owner-only tool |
 | `test_instagram_private_transport.py` | channel spaces S9c: the unofficial group transport with a fake client -- not imported by default and no library, off by default and Instagram-only keys, only `pt-<id>` threads polled (empty = nothing), id prefixes, same gate / ambient / speaker pipeline, no history replay or repeats after a restart, kill switch, halt + one notice on a login check, error budget and backoff, send gap, password never stored or logged |
+| `test_instagram_private_client.py` | channel spaces S9c: the `instagrapi` adapter (`InstagrapiClient`) against a STAND-IN library shaped after its documentation -- lazy import and the pinned install line (pin equals `pyproject.toml`), login-style errors STOP and rate-style ones back off (never the password in a message), timestamps to milliseconds, 2FA code, password dropped from the client and refused if it ever appears in the session, `resume` makes one authenticated call, `fetch_new` is one `direct_thread` call with a strictly-newer filter, `send` uses `thread_ids` only, `instagram-group-threads` lists ids / titles / handles and no text, end to end through the real gate with only the listed thread read, the library imported in exactly one place. Proves the adapter's mapping, NOT the real library's behaviour |
 | `test_instagram_group_info.py` | channel spaces S9a: `_group_info` accepts exactly the old group shapes and falls back to a DM for anything else, one log line for the first group payload, group window keyed on the thread, docstring makes no live-delivery claim |
 | `test_allowed_guilds.py` | L.36-P17: `allowed_guilds` editor -- add (preview-first when it turns the filter on or the id is unseen), remove (the LAST entry is refused even with confirm), checked against the REAL `permissions.decide`, one-key-only writes, change log, `channels-guilds`, and a static check of the `server.js` route |
 | `test_channel_timed_and_instruction.py` | L.36-P6 / P12: the `tools_until` deadline (garbage reads as passed, resolver is read-only), grant refusals, `expire_due` + its change-log reason, manual switches / block / forget / `channels-allow|deny` ending a countdown, the gateway sweep, the Test tab's wording, and the instruction (cap, one line, owner refused, prompt framing, not reachable by a guest) |

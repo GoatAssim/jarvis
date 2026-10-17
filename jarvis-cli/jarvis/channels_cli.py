@@ -38,7 +38,7 @@ COMMANDS = (
     "channels-master-tools", "channels-send", "channels-denied",
     "channels-thinking", "channels-memory", "channels-awaiting",
     "discord-daemon", "instagram-serve", "logs-search",
-    "instagram-group-serve", "instagram-group-login",
+    "instagram-group-serve", "instagram-group-login", "instagram-group-threads",
 )
 
 USAGE = """channel commands:
@@ -199,6 +199,10 @@ USAGE = """channel commands:
   instagram-group-login                 UNOFFICIAL (outside Meta's API and Instagram's terms; the account can be
                                         banned): sign a DEDICATED account in for group chats. Asks for the
                                         password at the prompt and keeps only the session, never the password
+  instagram-group-threads [--all] [--amount N]
+                                        UNOFFICIAL: list your newest group threads as pt-<id> (ids, titles and
+                                        handles only, never message text) so you can add one with
+                                        `channels-channels instagram add pt-<id> --yes`
   instagram-group-serve                 UNOFFICIAL: poll the group threads listed as pt-<id> in allowed_channels
                                         and answer when mentioned (foreground; off until
                                         `channels-set instagram group_transport on`; that switch stops it)
@@ -1127,6 +1131,10 @@ def handle(argv):
     if cmd == "instagram-group-login":
         from .channels import instagram_private
         sys.exit(instagram_private.login_cli())
+
+    if cmd == "instagram-group-threads":
+        from .channels import instagram_private
+        sys.exit(instagram_private.threads_cli(rest))
 
     if cmd == "logs-search":
         from . import logs as logs_mod
