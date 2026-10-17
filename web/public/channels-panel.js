@@ -298,6 +298,85 @@
   }
   // What the user typed beats what they picked; "" when neither is a valid id.
   const channelPick = guildPick;
+  // The per-channel "Allowed channel" switch (on a server's Permissions tab): is this channel on
+  // allowed_channels, and can that be changed from here? Nothing is decided here -- the server
+  // (channels/allowed_channels.py) still previews an add that turns the filter on and refuses to
+  // remove the last entry; this only keeps the switch from offering what it would refuse.
+  //   on      the channel is on the list      locked  why the switch can't be used ("" = usable)
+  //   hint    the line under the label        filter  the list is not empty (the filter is on)
+  function channelAllowedRow(v, s, c) {
+    const list = (v && Array.isArray(v.allowed_channels)) ? v.allowed_channels : [];
+    const id = c && c.id;
+    const on = list.includes(id);
+    let locked = "";
+    if (!on && s && s.left) locked = "Jarvis is no longer in this server.";
+    else if (on && list.length === 1) locked = "This is the only channel on the list. Removing it would open every channel; to clear the filter on purpose, use a terminal (jarvis channels-set discord allowed_channels []).";
+    let hint;
+    if (on) hint = "On the allowed list.";
+    else if (!list.length) hint = "Not on the list. No filter is set, so Jarvis still answers here. Turning this on limits Jarvis to the channels that are on.";
+    else hint = "Not on the list, so Jarvis ignores this channel.";
+    return { on, locked, hint, filter: list.length > 0 };
+  }
+
+  // ---- hiding the pinned cards (Home, Discord, Instagram) while the list scrolls down ----
+  // Pure: `st` is { hidden, anchor } (anchor = the scroll position of the last decision), `top`
+  // the list's scrollTop and `room` how far it could still scroll once the cards are gone. Down
+  // by PIN_DELTA hides them -- only if hiding would not make the browser clamp the position (that
+  // moves the list back up, which would show them again and flicker); up by PIN_DELTA, or being
+  // at the top, shows them. Smaller moves add up against the anchor.
+  const PIN_TOP = 24, PIN_DELTA = 10, PIN_LOCK_MS = 350;
+  function pinnedNext(st, top, room) {
+    const hidden = !!(st && st.hidden), anchor = Number.isFinite(st && st.anchor) ? st.anchor : 0;
+    if (!(top > PIN_TOP)) return { hidden: false, anchor: top };
+    const moved = top - anchor;
+    if (moved >= PIN_DELTA) return { hidden: hidden || room >= 0, anchor: top };
+    if (moved <= -PIN_DELTA) return { hidden: false, anchor: top };
+    return { hidden, anchor };
+  }
+
+  // ---- Global lists: pure helpers (the four allow-lists of a platform, shown with names) ----
+  // An entry in a list is an id or a handle (or "*" for everyone). These only read what the panel
+  // already has; nothing here decides access.
+  const listNorm = (x) => String(x == null ? "" : x).trim().replace(/^@+/, "").toLowerCase();
+  function listPerson(people, platform, entry) {
+    const e = listNorm(entry);
+    if (!e || e === "*") return null;
+    return (people || []).find((p) => p.platform === platform && (listNorm(p.user_id) === e || (p.handle && listNorm(p.handle) === e))) || null;
+  }
+  // One chip per entry: "*" first, then people the panel knows (by name), then bare ids; `query`
+  // keeps the ones whose entry, name or handle contains it.
+  function listChips(people, platform, entries, query) {
+    const q = String(query || "").trim().toLowerCase();
+    const rows = (Array.isArray(entries) ? entries : []).map((entry) => {
+      const wildcard = entry === "*", person = wildcard ? null : listPerson(people, platform, entry);
+      return { entry, wildcard, person, name: person ? displayName(person) : "", owner: !!(person && person.owner) };
+    }).filter((r) => !q || `${r.entry} ${r.name} ${r.person && r.person.handle ? r.person.handle : ""}`.toLowerCase().includes(q));
+    const rank = (r) => (r.wildcard ? 0 : r.person ? 1 : 2);
+    rows.sort((a, b) => rank(a) - rank(b) || String(a.name || a.entry).toLowerCase().localeCompare(String(b.name || b.entry).toLowerCase()));
+    return rows;
+  }
+  // People the panel knows on this platform who are not on the list yet (the owner and blocked
+  // people are left out: a list can't change what they may do), as { value, label } for a dropdown.
+  function listSuggestions(people, platform, entries) {
+    const on = new Set((Array.isArray(entries) ? entries : []).map(listNorm));
+    const out = [];
+    for (const p of people || []) {
+      if (p.platform !== platform || p.owner || p.blocked) continue;
+      const value = (!p.placeholder && p.user_id) ? String(p.user_id) : (p.handle ? String(p.handle) : "");
+      if (!value || on.has(listNorm(p.user_id)) || on.has(listNorm(p.handle)) || on.has(listNorm(value))) continue;
+      out.push({ value, label: `${displayName(p)}${p.handle && nameOf(p) ? " (@" + p.handle + ")" : ""}` });
+    }
+    out.sort((a, b) => a.label.toLowerCase().localeCompare(b.label.toLowerCase()));
+    return out.slice(0, 200);
+  }
+  // Several entries typed or pasted at once: split on spaces, commas, semicolons, new lines; no repeats.
+  const splitEntries = (text) => Array.from(new Set(String(text || "").split(/[\s,;]+/).map((x) => x.trim()).filter(Boolean)));
+  const LIST_DEFS = [
+    { key: "dm_allowlist", short: "dm", label: "DM list", hint: "May open a DM with Jarvis.", everyone: "Anyone at all could open a DM." },
+    { key: "reply_allowlist", short: "reply", label: "Reply list", hint: "Gets an answer when they write to Jarvis.", everyone: "Anyone who reaches the bot would get an answer." },
+    { key: "tool_allowlist", short: "tool", label: "Tool list", hint: "May make Jarvis run tools (only while tool use is on for the platform).", everyone: "Anyone who reaches the bot could run tools on this PC while tool use is on." },
+    { key: "image_allowlist", short: "image", label: "Picture list", hint: "May send Jarvis pictures to look at (Discord and Instagram). Never opens a conversation by itself.", everyone: "Anyone Jarvis already answers could send pictures, which are paid for by your vision provider." },
+  ];
 
   // ---- shared rooms: pure helpers (channel spaces S11; no DOM, tested in verify_channels_rooms.js) ----
   // "Use in rooms" per saved note / memory item: inherit (follows the platform's group_recall
@@ -630,6 +709,11 @@
     selected: null,
     tab: "perms",
     homeTab: "denied", // the tab showing while Home is selected
+    listsPlat: "",       // Global lists: the platform whose lists are showing ("" = the first one)
+    listsQuery: "",      // Global lists: filter typed above the cards
+    listWild: null,      // Global lists: "<platform>|<short>" whose "everyone (*)" add awaits its second click
+    listBusy: new Set(), // Global lists: "<platform>|<short>" with a save under way
+    listErr: new Map(),  // Global lists: "<platform>|<short>" -> the last error text
     spaceTab: "overview", // the tab showing while a server or a group is selected
     chanPick: new Map(),  // server id -> roomKey of the channel or thread open in its Conversation tab
     search: "",
@@ -1045,6 +1129,32 @@
     }
   }
 
+  // Add several entries to one list (a paste of ids). One request per entry -- the same route the
+  // single add uses, so the server's own checks apply to each -- then one reload. Failures are kept
+  // in state so they are still on screen after the reload redraws the cards.
+  async function listAdd(platform, short, entries) {
+    const k = `${platform}|${short}`;
+    if (state.listBusy.has(k) || !entries.length) return;
+    state.listBusy.add(k); state.listErr.delete(k); state.listWild = null; renderHome();
+    const failed = [];
+    for (const entry of entries) {
+      try { await api("POST", `/api/channels/${encodeURIComponent(platform)}/${encodeURIComponent(short)}`, { entry, remove: false }); }
+      catch (err) { failed.push(`${entry}: ${err.message || "couldn't add"}`); }
+    }
+    if (failed.length) state.listErr.set(k, `${failed.length === entries.length ? "Nothing was added" : "Some weren't added"} \u2014 ${failed.join("; ")}`);
+    state.listBusy.delete(k);
+    await load(true);
+  }
+  async function listRemove(platform, short, entry) {
+    const k = `${platform}|${short}`;
+    if (state.listBusy.has(k)) return;
+    state.listBusy.add(k); state.listErr.delete(k); renderHome();
+    try { await api("POST", `/api/channels/${encodeURIComponent(platform)}/${encodeURIComponent(short)}`, { entry, remove: true }); }
+    catch (err) { state.listErr.set(k, err.message || "Couldn't remove that."); }
+    state.listBusy.delete(k);
+    await load(true);
+  }
+
   async function copyText(text) {
     try { await navigator.clipboard.writeText(text); return true; } catch (_) {
       try {
@@ -1088,7 +1198,7 @@
     for (const id of ["all", ...Object.keys(PLATFORMS)]) {
       dom.platChips.appendChild(el("button", {
         type: "button", class: "ch-chip" + (state.platformFilter === id ? " is-active" : ""), "aria-pressed": state.platformFilter === id ? "true" : "false",
-        onclick: () => { state.platformFilter = id; renderList(); renderChips(); },
+        onclick: () => { state.platformFilter = id; renderList(true); renderChips(); },
       }, [id === "all" ? "All platforms" : PLATFORMS[id].label, el("span", { class: "ch-chip__n" }, String(counts[id] || 0))]));
     }
     // Status filter: one dropdown (All / Owner / Tools / Answered / Not answered / Blocked),
@@ -1099,14 +1209,24 @@
     const sel = el("select", { class: "ch-filter__select", id: "ch-state-select", "aria-label": "Filter by status", "data-ch": cur.ch || null },
       opts.map((o) => el("option", { value: o.id, selected: o.id === cur.id }, `${o.label} (${o.n})`)));
     sel.addEventListener("change", () => {
-      state.stateFilter = sel.value; renderList(); renderChips();
+      state.stateFilter = sel.value; renderList(true); renderChips();
       const again = dom.stateChips.querySelector("select");   // renderChips rebuilt it: keep the keyboard on it
       if (again) again.focus();
     });
     dom.stateChips.appendChild(sel);
   }
 
-  function renderList() {
+  // Rebuilds the list. Its scroll position is kept, so selecting a card or flipping a switch does
+  // not throw it back to the top (which would also bring the pinned cards back); a new filter or
+  // search starts from the top.
+  function renderList(toTop) {
+    const list = dom && dom.list;
+    const keep = list && !toTop ? list.scrollTop : 0;
+    renderListBody();
+    if (list) { list.scrollTop = keep; syncPinned(); }
+  }
+
+  function renderListBody() {
     renderHomeCard();
     const list = dom.list;
     list.textContent = "";
@@ -1248,6 +1368,7 @@
   function select(k) {
     if (state.selected === k) return;
     state.selected = k;
+    if (pin.hidden && (k === HOME_KEY || entryKind(k) === "platform")) { pin.lockUntil = Date.now() + PIN_LOCK_MS; setPinned(false); }
     state.confirm = null;
     state.editingName = null; state.editingHandle = null;
     state.confirmRemove = null;
@@ -3348,33 +3469,74 @@
     return el("div", { class: "ch-kv", "data-ch": ch || null }, [el("span", { class: "ch-kv__k" }, k), el("span", { class: "ch-kv__v" }, [ch ? el("i") : null, v])]);
   }
 
-  function globalSets(platform) {
-    const block = state.config[platform] || {};
-    const SETS = [
-      { key: "dm_allowlist", short: "dm", label: "DM list", hint: "may open a DM" },
-      { key: "reply_allowlist", short: "reply", label: "Reply list", hint: "gets an answer" },
-      { key: "tool_allowlist", short: "tool", label: "Tool list", hint: "may run tools" },
-      { key: "image_allowlist", short: "image", label: "Picture list", hint: "may send Jarvis pictures (Discord)" },
-    ];
-    return SETS.map((set) => {
-      const entries = Array.isArray(block[set.key]) ? block[set.key] : [];
-      const chips = el("div", { class: "ch-gset__chips" });
-      if (!entries.length) chips.appendChild(el("span", { class: "ch-row__hint" }, "nobody"));
-      for (const entry of entries) {
-        chips.appendChild(el("span", { class: "channels-chip" + (entry === "*" ? " channels-chip--wildcard" : "") }, [
-          entry === "*" ? "everyone (*)" : entry,
-          el("button", { type: "button", class: "channels-chip__remove", title: `Remove ${entry}`, onclick: () => globalMutate(platform, set.short, entry, true, err) }, "\u00d7"),
+  // One card per allow-list: what it lets people do, the entries as chips (named when the panel
+  // knows the person), and a way to add: pick someone Jarvis knows, or type / paste ids and
+  // @handles. "Everyone (*)" is its own button with a second click, since it is the one entry that
+  // widens access. Removing only ever narrows, so it is one click.
+  function listCard(platform, def, fillers) {
+    const k = `${platform}|${def.short}`, pl = state.platforms[platform] || {};
+    const entries = Array.isArray((state.config[platform] || {})[def.key]) ? state.config[platform][def.key] : [];
+    const busy = state.listBusy.has(k), hasAll = entries.includes("*");
+    const chips = el("div", { class: "ch-gset__chips ch-lcard__chips" });
+    const count = el("span", { class: "ch-lcard__n", title: `${entries.length} on this list` }, hasAll ? "everyone" : String(entries.length));
+    const fill = () => {
+      chips.textContent = "";
+      const rows = listChips(state.people, platform, entries, state.listsQuery);
+      if (!entries.length) chips.appendChild(el("span", { class: "ch-row__hint" }, "Nobody yet."));
+      else if (!rows.length) chips.appendChild(el("span", { class: "ch-row__hint" }, "Nothing here matches the filter."));
+      for (const r of rows) {
+        chips.appendChild(el("span", { class: "channels-chip" + (r.wildcard ? " channels-chip--wildcard" : ""), "data-entry": r.entry, title: r.person ? `${r.name} \u00b7 ${r.entry}` : r.wildcard ? "Everyone" : "Not someone the panel has seen" }, [
+          r.wildcard ? "everyone (*)" : r.name || r.entry,
+          r.name && !r.wildcard ? el("span", { class: "ch-lchip__sub" }, r.entry) : null,
+          r.owner ? el("span", { class: "ch-lchip__sub" }, "owner") : null,
+          el("button", { type: "button", class: "channels-chip__remove", disabled: busy, title: `Remove ${r.wildcard ? "everyone (*)" : r.name || r.entry}`, "aria-label": `Remove ${r.wildcard ? "everyone" : r.name || r.entry} from the ${def.label}`, onclick: () => listRemove(platform, def.short, r.entry) }, "\u00d7"),
         ]));
       }
-      const input = el("input", { type: "text", placeholder: "id, handle or *", autocomplete: "off", "aria-label": `Add to ${set.label}` });
-      const err = el("div", { class: "ch-gset__err" });
-      const add = () => { const v = input.value.trim(); if (!v) return; input.value = ""; globalMutate(platform, set.short, v, false, err); };
-      input.addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); add(); } });
-      return el("div", { class: "ch-gset" }, [
-        el("div", { class: "ch-gset__label" }, [set.label + " ", el("span", null, "— " + set.hint)]), chips,
-        el("div", { class: "ch-gset__add" }, [input, el("button", { type: "button", class: "btn btn--ghost btn--sm", onclick: add }, "Add")]), err,
-      ]);
-    });
+    };
+    fill(); fillers.push(fill);
+
+    const sugg = listSuggestions(state.people, platform, entries);
+    const pick = el("select", { class: "ch-allowed__select", "aria-label": `Pick someone to add to the ${def.label}`, disabled: busy || !sugg.length },
+      [el("option", { value: "" }, sugg.length ? "Pick someone Jarvis knows\u2026" : "Nobody else to pick")].concat(sugg.map((x) => el("option", { value: x.value }, x.label))));
+    const input = el("input", { type: "text", class: "ch-allowed__id", autocomplete: "off", spellcheck: "false", placeholder: "or type ids / @handles", "aria-label": `Add to the ${def.label}`, disabled: busy });
+    pick.addEventListener("change", () => { if (pick.value) input.value = ""; });
+    input.addEventListener("input", () => { if (input.value.trim()) pick.value = ""; });
+    const add = () => {
+      const typed = splitEntries(input.value);
+      const list = typed.length ? typed : (pick.value ? [pick.value] : []);
+      if (!list.length) { state.listErr.set(k, "Pick someone, or type an id or @handle."); renderHome(); return; }
+      if (list.includes("*")) {
+        if (list.length > 1) { state.listErr.set(k, "Add \"*\" on its own, with the Everyone button."); renderHome(); return; }
+        state.listWild = k; state.listErr.delete(k); renderHome(); return;
+      }
+      const fresh = list.filter((x) => !entries.map(listNorm).includes(listNorm(x)));
+      if (!fresh.length) { state.listErr.set(k, list.length === 1 ? "That one is already on the list." : "They are all on the list already."); renderHome(); return; }
+      listAdd(platform, def.short, fresh);
+    };
+    input.addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); add(); } });
+    const addRow = el("div", { class: "ch-lcard__add" }, [pick, input,
+      el("button", { type: "button", class: "btn btn--ghost btn--sm", disabled: busy, onclick: add }, busy ? "Adding\u2026" : "Add"),
+      hasAll ? null : el("button", { type: "button", class: "btn btn--ghost btn--sm ch-lcard__all", disabled: busy, title: "Put everyone on this list", onclick: () => { state.listWild = k; state.listErr.delete(k); renderHome(); } }, "Everyone (*)")]);
+
+    const card = el("div", { class: "ch-lcard" + (hasAll ? " ch-lcard--wild" : ""), "data-list": def.short }, [
+      el("div", { class: "ch-lcard__head" }, [el("div", { class: "ch-lcard__title" }, def.label), count]),
+      el("div", { class: "ch-lcard__hint" }, def.hint),
+      hasAll ? el("div", { class: "ch-plat__warn" }, `"*" is on this list: ${def.everyone} Remove it to go back to named people.`) : null,
+      chips, addRow,
+    ]);
+    if (state.listWild === k && !hasAll) {
+      card.appendChild(confirmBox(`Confirm everyone on the ${def.label}`, `Put everyone (*) on the ${def.label} for ${(PLATFORMS[platform] || {}).label || platform}? ${def.everyone} Named people stay on the list.`,
+        `ch-list-wild-${platform}-${def.short}`, "Add everyone", () => listAdd(platform, def.short, ["*"]), () => { state.listWild = null; renderHome(); }));
+    }
+    const err = state.listErr.get(k);
+    card.appendChild(el("div", { class: "ch-gset__err", role: "alert" }, err || ""));
+    // The tool list is gated by the platform's master switch, so that switch sits with it.
+    if (def.short === "tool" && pl.token_set) {
+      card.appendChild(el("div", { class: "ch-lcard__foot" }, [
+        el("div", { class: "ch-lcard__hint" }, pl.allow_tools ? "Tool use is ON for this platform: people on this list can run tools." : "Tool use is OFF for this platform: nobody can run tools from it, whatever this list says."),
+        masterControl(platform, pl)]));
+    }
+    return card;
   }
 
   // ---- Servers (Discord) --------------------------------------------------
@@ -3406,6 +3568,14 @@
     row.classList.add("ch-srow--chan");
     // Channel spaces S11: Reading / Saving for this channel, and a way into its saved conversation.
     const wrap = el("div", { class: "ch-chanx" }, [row]);
+    // Allowed channel: this channel on allowed_channels, so it needn't be added in the config by hand.
+    const al = channelAllowedRow(state.servers, s, c);
+    const allowRow = srvRow("Allowed channel", al.hint, al.on, al.locked, state.chanAdd.busy,
+      (turnOn) => chanMutate(c.id, !turnOn, false));
+    allowRow.classList.add("ch-srow--chan", "ch-srow--sub");
+    allowRow.dataset.sw = "allowed";
+    wrap.appendChild(allowRow);
+    if (state.chanAdd.preview && state.chanAdd.preview.id === c.id) wrap.appendChild(chanConfirmNode(state.chanAdd));
     readingSavingRows(c, "channel", c.id, s).forEach((r) => { r.classList.add("ch-srow--chan", "ch-srow--sub"); wrap.appendChild(r); });
     if (roomForChannel(roomsOf(state.spaces.data), "discord", c.id)) {
       wrap.appendChild(el("div", { class: "ch-chanx__btns" }, [el("button", { type: "button", class: "btn btn--ghost btn--sm", "data-open-room": c.id, title: "Read what was saved from this channel", onclick: () => openRoom("discord", c.id) }, [icon("chat"), "Conversation"])]));
@@ -3507,6 +3677,29 @@
   // "Allowed channels": the allowed_channels filter, editable (L.36-P18). Only
   // narrows access -- the server refuses to remove the last entry (an empty list
   // = every channel). Sits beside "Allowed servers"; both filters must pass.
+  // The "allow this channel?" confirmation: what an add that turns the filter on (or names a channel
+  // the bot hasn't seen) would do, with the two buttons. Shown on the Discord page and, for the
+  // channel whose switch was clicked, right under that switch.
+  function chanConfirmNode(g) {
+    const p = g.preview;
+    const ids = (state.servers && state.servers.allowed_channels) || [];   // empty = the filter is off right now
+    const stop = p.would_stop || [];
+    const total = p.would_stop_total || stop.length;
+    const lines = [];
+    if (total) lines.push(`${total} other channel${total === 1 ? "" : "s"} would stop answering: ${stop.map((x) => `#${x.name || x.id}${x.guild_name ? ` (${x.guild_name})` : ""}`).join(", ")}${total > stop.length ? ` and ${total - stop.length} more` : ""}.`);
+    else if (!ids.length) lines.push("This turns the filter on: any channel not on the list will be ignored.");
+    if (p.unknown) lines.push("Jarvis hasn't seen this channel. If the id is wrong (or it is a thread: list the channel it belongs to), Jarvis will stay silent everywhere.");
+    return el("div", { class: "ch-allowed__confirm", role: "alert" }, [
+      el("div", { class: "ch-allowed__confirm-t" }, `Allow ${p.channel_name ? `#${p.channel_name}${p.guild_name ? ` in ${p.guild_name}` : ""}` : p.id}?`),
+      ...lines.map((t) => el("div", { class: "ch-row__hint" }, t)),
+      p.guild_blocked ? el("div", { class: "ch-row__hint" }, "Its server isn't on the allowed servers, so it would stay silent until that server is allowed too.") : null,
+      el("div", { class: "ch-allowed__confirm-btns" }, [
+        el("button", { type: "button", class: "btn btn--primary btn--sm", disabled: g.busy, onclick: () => chanMutate(p.id, false, true) }, "Yes, allow it"),
+        el("button", { type: "button", class: "btn btn--ghost btn--sm", disabled: g.busy, onclick: () => { g.preview = null; renderHome(); } }, "Cancel"),
+      ]),
+    ]);
+  }
+
   function allowedChannelsBlock(v) {
     const g = state.chanAdd;
     const ids = v.allowed_channels || [];
@@ -3552,24 +3745,7 @@
     input.addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); submit(); } });
     box.appendChild(el("div", { class: "ch-allowed__add" }, [select, input,
       el("button", { type: "button", class: "btn btn--ghost btn--sm ch-allowed__btn", disabled: g.busy, onclick: submit }, "Allow")]));
-    if (g.preview) {
-      const p = g.preview;
-      const stop = p.would_stop || [];
-      const total = p.would_stop_total || stop.length;
-      const lines = [];
-      if (total) lines.push(`${total} other channel${total === 1 ? "" : "s"} would stop answering: ${stop.map((x) => `#${x.name || x.id}${x.guild_name ? ` (${x.guild_name})` : ""}`).join(", ")}${total > stop.length ? ` and ${total - stop.length} more` : ""}.`);
-      else if (!ids.length) lines.push("This turns the filter on: any channel not on the list will be ignored.");
-      if (p.unknown) lines.push("Jarvis hasn't seen this channel. If the id is wrong (or it is a thread: list the channel it belongs to), Jarvis will stay silent everywhere.");
-      box.appendChild(el("div", { class: "ch-allowed__confirm", role: "alert" }, [
-        el("div", { class: "ch-allowed__confirm-t" }, `Allow ${p.channel_name ? `#${p.channel_name}${p.guild_name ? ` in ${p.guild_name}` : ""}` : p.id}?`),
-        ...lines.map((t) => el("div", { class: "ch-row__hint" }, t)),
-        p.guild_blocked ? el("div", { class: "ch-row__hint" }, "Its server isn't on the allowed servers, so it would stay silent until that server is allowed too.") : null,
-        el("div", { class: "ch-allowed__confirm-btns" }, [
-          el("button", { type: "button", class: "btn btn--primary btn--sm", disabled: g.busy, onclick: () => chanMutate(p.id, false, true) }, "Yes, allow it"),
-          el("button", { type: "button", class: "btn btn--ghost btn--sm", disabled: g.busy, onclick: () => { g.preview = null; renderHome(); } }, "Cancel"),
-        ]),
-      ]));
-    }
+    if (g.preview) box.appendChild(chanConfirmNode(g));
     box.appendChild(el("div", { class: "ch-gset__err", role: "alert" }, g.error || ""));
     return box;
   }
@@ -3756,6 +3932,34 @@
         name: PLATFORMS[id].label, sub: "Bot, tools, room settings", badges: [tag(st.text, st.ch)],
       }));
     }
+    slot.style.setProperty("--ch-home-h", (slot.scrollHeight + 8) + "px");   // the height it collapses from
+  }
+
+  // The pinned cards fold away while the list scrolls down and come back on the way up (or at the
+  // top). `inert` takes them out of the tab order while they are hidden. pinnedNext decides; this
+  // only applies it. After a change the scroll events of the layout settling are ignored for a moment.
+  const pin = { hidden: false, anchor: 0, lockUntil: 0 };
+  function setPinned(hidden) {
+    pin.hidden = !!hidden;
+    const slot = dom && dom.home;
+    if (!slot) return;
+    slot.classList.toggle("is-collapsed", pin.hidden);
+    slot.toggleAttribute("inert", pin.hidden);
+  }
+  function syncPinned() {
+    if (!dom || !dom.list || !dom.home) return;
+    const list = dom.list;
+    pin.anchor = list.scrollTop;
+    if (pin.hidden && (list.scrollTop <= PIN_TOP || list.scrollHeight <= list.clientHeight || !dom.home.firstChild)) setPinned(false);
+  }
+  function onListScroll() {
+    if (!dom || !dom.home || !dom.home.firstChild) return;
+    const list = dom.list, top = list.scrollTop, now = Date.now();
+    if (now < pin.lockUntil) { pin.anchor = top; return; }
+    const room = (list.scrollHeight - list.clientHeight) - (pin.hidden ? 0 : dom.home.offsetHeight) - top;
+    const next = pinnedNext({ hidden: pin.hidden, anchor: pin.anchor }, top, room);
+    pin.anchor = next.anchor;
+    if (next.hidden !== pin.hidden) { pin.lockUntil = now + PIN_LOCK_MS; setPinned(next.hidden); }
   }
 
   function homeHero() {
@@ -3826,14 +4030,28 @@
   }
 
   function listsPane() {
-    const blocks = [el("div", { class: "ch-globals__note" }, "The raw allow-lists that the switches on each person's Permissions tab read and write. Use these to add someone who hasn't messaged yet, or to manage \"*\" entries.")];
-    for (const id of Object.keys(PLATFORMS)) {
-      if (!state.config[id]) continue;
-      blocks.push(el("div", { class: "ch-home__lists" }, [
-        el("div", { class: "ch-section-title" }, PLATFORMS[id].label),
-        el("div", { class: "ch-globals__body" }, globalSets(id)),
-      ]));
-    }
+    const ids = Object.keys(PLATFORMS).filter((id) => state.config[id]);
+    if (!ids.length) return homePane("lists", [el("div", { class: "ch-globals__note" }, "No platform is set up yet, so there are no lists to edit.")]);
+    const cur = ids.includes(state.listsPlat) ? state.listsPlat : ids[0], pl = state.platforms[cur] || {};
+    const fillers = [];
+    const seg = el("div", { class: "ch-seg", role: "radiogroup", "aria-label": "Platform" }, ids.map((id) => el("button", {
+      type: "button", role: "radio", "aria-checked": id === cur ? "true" : "false", "data-plat-pick": id,
+      onclick: () => { state.listsPlat = id; state.listWild = null; renderHome(); },
+    }, PLATFORMS[id].label)));
+    const q = el("input", { type: "search", class: "ch-allowed__id ch-lists__q", id: "ch-lists-q", placeholder: "Filter entries by name or id\u2026", autocomplete: "off", "aria-label": "Filter the entries of every list", value: state.listsQuery || null });
+    q.addEventListener("input", () => { state.listsQuery = q.value; fillers.forEach((f) => f()); });
+    const st = platformState(pl);
+    const blocks = [
+      el("div", { class: "ch-globals__note" }, "Who the gate lets in, per platform. These are the same lists the switches on each person's Permissions tab read and write, so use them to add someone who hasn't messaged yet or to manage \"*\". Removing an entry only ever takes access away."),
+      el("div", { class: "ch-lists__bar" }, [seg, tag(st.text, st.ch), q]),
+    ];
+    const warns = [];
+    if (pl.wildcard && pl.wildcard.reply) warns.push("\"*\" is in the reply list \u2014 anyone who reaches the bot gets an answer.");
+    if (pl.wildcard && pl.wildcard.tool && pl.allow_tools) warns.push("\"*\" is in the tool list with tool use on \u2014 anyone who reaches the bot can run tools.");
+    warns.forEach((w) => blocks.push(el("div", { class: "ch-plat__warn ch-lists__warn" }, w)));
+    blocks.push(el("div", { class: "ch-lcards" }, LIST_DEFS.map((d) => listCard(cur, d, fillers))));
+    // Discord also filters by place, not only by person: the two lists of servers and channels.
+    if (cur === "discord") blocks.push(allowedFiltersSection());
     return homePane("lists", blocks);
   }
 
@@ -4320,7 +4538,8 @@
     if (state.built) return true;
     dom = grabDom();
     if (!dom) return false;
-    dom.search.addEventListener("input", () => { state.search = dom.search.value; renderChips(); renderList(); });
+    dom.search.addEventListener("input", () => { state.search = dom.search.value; renderChips(); renderList(true); });
+    dom.list.addEventListener("scroll", onListScroll, { passive: true });
     dom.refresh.addEventListener("click", () => {
       state.tools = null; state.toolsState = "idle";
       state.conv.clear(); state.usage.clear(); state.sim.clear(); state.hist.clear(); state.mem.clear(); state.roomConv.clear();
@@ -4669,7 +4888,9 @@
              dayOf, clockOf, localDay, dayLabel, groupByDay, fmtTokens, barModel, convNote, summaryText,
              toolCallsLabel, untilLeft, TIME_LIMITS,
              stateFilterOptions, guildIdOk, guildName, guildChoices, guildPick,
-             channelIdOk, channelInfo, channelLabel, channelChoices, channelPick,
+             channelIdOk, channelInfo, channelLabel, channelChoices, channelPick, channelAllowedRow,
+             pinnedNext, PIN_TOP, PIN_DELTA,
+             listNorm, listPerson, listChips, listSuggestions, splitEntries, LIST_DEFS,
              homeTabs, platformState, HOME_KEY,
              GROUP_FLAGS, groupFlagOf, recallOn, transportOn, usedInRooms, groupUseText, AMBIENT_DEFAULTS, ambientOf, ambientText, savingOn,
              ROOM_KIND_LABEL, roomKindLabel, roomsOf, roomKey, roomTitle, filterRooms, roomForChannel, roomSwitchOf, serverSwitchOff,

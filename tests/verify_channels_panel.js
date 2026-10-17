@@ -213,5 +213,70 @@ check("TIME_LIMITS are whole minutes within 1 minute .. 30 days", T.TIME_LIMITS.
   check("platformState: token and enabled is on", T.platformState({ token_set: true, enabled: true }).ch === "on");
 }
 
+// The per-channel "Allowed channel" switch (a server's Permissions tab) and the pinned cards
+// (Home / Discord / Instagram) folding away while the list scrolls down.
+{
+  const srv = { id: "9", left: false }, c = { id: "800000000000000001" };
+  const row = (list, s) => T.channelAllowedRow({ allowed_channels: list }, s || srv, c);
+  const none = row([]);
+  check("channelAllowedRow: no filter -> off, usable, and says the filter is off",
+    none.on === false && none.locked === "" && none.filter === false && /No filter is set/.test(none.hint), JSON.stringify(none));
+  const listed = row([c.id, "800000000000000002"]);
+  check("channelAllowedRow: on the list with others -> on and usable", listed.on === true && listed.locked === "" && listed.filter === true && /On the allowed list/.test(listed.hint), JSON.stringify(listed));
+  const only = row([c.id]);
+  check("channelAllowedRow: the only entry is locked (removing it would open every channel)", only.on === true && /only channel on the list/.test(only.locked), JSON.stringify(only));
+  const out = row(["800000000000000002"]);
+  check("channelAllowedRow: a filter that leaves it out says it is ignored, and it can be turned on", out.on === false && out.locked === "" && /ignores this channel/.test(out.hint), JSON.stringify(out));
+  check("channelAllowedRow: a server Jarvis left can't be switched on, but a listed channel there can be switched off",
+    row([], { left: true }).locked !== "" && row([c.id, "5"], { left: true }).locked === "");
+  check("channelAllowedRow: a missing view or channel is an empty filter, no throw",
+    T.channelAllowedRow(null, null, c).on === false && T.channelAllowedRow(undefined, undefined, {}).on === false && T.channelAllowedRow({ allowed_channels: "x" }, srv, c).on === false);
+
+  const P = T.pinnedNext, D = T.PIN_DELTA;
+  check("pinnedNext: at the top the cards are shown, whatever came before", P({ hidden: true, anchor: 300 }, 0, 500).hidden === false && P({ hidden: true, anchor: 300 }, T.PIN_TOP, 500).hidden === false && P(null, 5, 100).hidden === false);
+  check("pinnedNext: scrolling down by the threshold hides them, and moves the anchor", (() => { const r = P({ hidden: false, anchor: 40 }, 40 + D, 100); return r.hidden === true && r.anchor === 40 + D; })());
+  check("pinnedNext: ...but not when hiding would make the browser clamp the position (no room)", P({ hidden: false, anchor: 40 }, 40 + D, -1).hidden === false);
+  check("pinnedNext: once hidden they stay hidden while the list keeps going down, even with no room", P({ hidden: true, anchor: 40 }, 40 + D, -1).hidden === true);
+  check("pinnedNext: scrolling up by the threshold shows them", P({ hidden: true, anchor: 200 }, 200 - D, 100).hidden === false);
+  check("pinnedNext: small moves change nothing and keep the anchor, so they add up",
+    (() => { const a = P({ hidden: false, anchor: 100 }, 105, 100), b = P({ hidden: true, anchor: 100 }, 95, 100); return a.hidden === false && a.anchor === 100 && b.hidden === true && b.anchor === 100; })());
+  check("pinnedNext: small steps in one direction eventually cross the threshold", (() => { let st = { hidden: false, anchor: 100 }; for (let t = 103; t <= 130; t += 3) st = P(st, t, 100); return st.hidden === true; })());
+
+  const css = fs.readFileSync(path.join(__dirname, "..", "web", "public", "channels.css"), "utf8");
+  check("the pinned slot folds with a transition and respects reduced motion", /\.ch-home-slot\.is-collapsed\s*\{/.test(css) && /prefers-reduced-motion[^{]*\{[^}]*\.ch-home-slot/.test(css));
+  check("a folded slot is out of the tab order (inert) and the panel listens to the list's scroll", /toggleAttribute\("inert"/.test(src) && /dom\.list\.addEventListener\("scroll", onListScroll/.test(src));
+  check("the per-channel switch goes through the same allowed-channels door as the Discord page (preview first)", /chanMutate\(c\.id, !turnOn, false\)/.test(src) && /chanConfirmNode\(state\.chanAdd\)/.test(src));
+}
+
+// Home > Global lists: names for the entries, who can still be picked, several ids at once.
+{
+  const people = [
+    mk({ platform: "discord", user_id: "111", handle: "ann", name: "Ann" }),
+    mk({ platform: "discord", user_id: "222", handle: "bob", name: "Bob" }),
+    mk({ platform: "discord", user_id: "333", handle: "own", name: "Owner", owner: true }),
+    mk({ platform: "discord", user_id: "444", handle: "bad", name: "Bad", blocked: true }),
+    mk({ platform: "instagram", user_id: "111", handle: "ann_ig", name: "Ann IG" }),
+    mk({ platform: "discord", user_id: "", handle: "later", name: "Later", placeholder: true }),
+  ];
+  check("listPerson: an id or a handle (any case, with or without @) finds the person on THAT platform",
+    T.listPerson(people, "discord", "111").name === "Ann" && T.listPerson(people, "discord", "@ANN").user_id === "111" && T.listPerson(people, "instagram", "111").name === "Ann IG");
+  check("listPerson: a handle-only person is found by handle", T.listPerson(people, "discord", "later").name === "Later");
+  check("listPerson: * , an empty entry, a stranger and no people are all nobody, no throw",
+    T.listPerson(people, "discord", "*") === null && T.listPerson(people, "discord", "") === null && T.listPerson(people, "discord", "999") === null && T.listPerson(null, "discord", "1") === null);
+  const order = (entries, q) => T.listChips(people, "discord", entries, q).map((c) => c.entry).join();
+  check("listChips: * first, then people the panel knows by name, then bare ids", order(["999", "222", "*", "111"], "") === "*,111,222,999", order(["999", "222", "*", "111"], ""));
+  check("listChips: the filter matches entry, name and handle", order(["111", "222", "999"], "bob") === "222" && order(["111", "222", "999"], "ANN") === "111" && order(["111", "222", "999"], "99") === "999" && order(["111"], "zzz") === "");
+  check("listChips: a wildcard is flagged, the owner is flagged, a list that isn't an array is empty",
+    T.listChips(people, "discord", ["*"], "")[0].wildcard === true && T.listChips(people, "discord", ["333"], "")[0].owner === true && T.listChips(people, "discord", null, "").length === 0);
+  const sug = (entries) => T.listSuggestions(people, "discord", entries).map((x) => x.value).join();
+  check("listSuggestions: known people not on the list, by name; never the owner, a blocked person or another platform", sug(["111"]) === "222,later", sug(["111"]));
+  check("listSuggestions: someone listed by handle (or with @) is not offered again", sug(["@bob"]) === "111,later" && sug(["111", "222", "later"]) === "");
+  check("listSuggestions: a handle-only person is offered by handle, with their name", T.listSuggestions(people, "discord", [])[2].value === "later" && /Later/.test(T.listSuggestions(people, "discord", [])[2].label));
+  check("splitEntries: spaces, commas, semicolons and new lines separate; repeats and blanks go", JSON.stringify(T.splitEntries("1, 2;3\n 2  @x,,")) === JSON.stringify(["1", "2", "3", "@x"]) && T.splitEntries("").length === 0 && T.splitEntries(null).length === 0);
+  check("LIST_DEFS: the four lists, with the config key each one edits",
+    T.LIST_DEFS.map((d) => d.short + ":" + d.key).join() === "dm:dm_allowlist,reply:reply_allowlist,tool:tool_allowlist,image:image_allowlist" && T.LIST_DEFS.every((d) => d.label && d.hint && d.everyone));
+  check("the only way \"*\" is added is behind the second click", (src.match(/listAdd\(platform, def\.short, \["\*"\]\)/g) || []).length === 1 && /confirmBox\(`Confirm everyone on the/.test(src));
+}
+
 console.log(`${passed} passed, ${failed.length} failed`);
 process.exit(failed.length ? 1 : 0);

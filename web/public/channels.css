@@ -333,8 +333,18 @@
  * What used to be the right-hand side column. Home is picked like a person, so it
  * shows in the middle pane under a hero and tabs; these are its pieces. */
 
-.ch-home-slot{ padding: 2px 8px 0; flex-shrink: 0; }
+.ch-home-slot{
+  padding: 2px 8px 0; flex-shrink: 0; overflow: hidden;
+  max-height: var(--ch-home-h, 480px); /* set from the content by renderHomeCard, so it collapses smoothly */
+  transition: max-height .22s ease, opacity .18s ease, padding .22s ease, visibility 0s linear 0s;
+}
 .ch-home-slot:empty{ display: none; }
+/* Folded away while the list scrolls down (channels-panel.js onListScroll); back on the way up. */
+.ch-home-slot.is-collapsed{
+  max-height: 0; opacity: 0; padding-top: 0; visibility: hidden;
+  transition: max-height .22s ease, opacity .18s ease, padding .22s ease, visibility 0s linear .22s;
+}
+@media (prefers-reduced-motion: reduce){ .ch-home-slot, .ch-home-slot.is-collapsed{ transition: none; } }
 .ch-card--home{ --ch-c: var(--accent); margin-top: 4px; }
 .ch-avatar--home{ color: var(--accent); }
 .ch-avatar--home svg{ width: 52%; height: 52%; display: block; }
@@ -369,6 +379,29 @@
 .ch-gset__add input{ flex: 1; min-width: 0; padding: 5px 8px; background: var(--bg-1); color: var(--text); border: 1px solid var(--border); border-radius: var(--ch-radius); font: inherit; font-size: 12px; }
 .ch-gset__add input:focus{ outline: none; border-color: var(--accent); }
 .ch-gset__err{ font-size: 11px; color: var(--red); margin-top: 4px; min-height: 0; }
+.ch-lcard .ch-gset__err:empty{ display: none; }
+
+/* Home > Global lists: a platform picker, then one card per allow-list. */
+.ch-lists__bar{ display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin: 12px 0 4px; }
+.ch-lists__q{ flex: 1 1 200px; min-width: 0; }
+.ch-lists__warn{ margin: 8px 0 0; }
+.ch-lcards{ display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 12px; margin-top: 10px; align-items: start; }
+.ch-lcard{ display: flex; flex-direction: column; gap: 8px; padding: 12px; border: 1px solid var(--border); border-radius: var(--ch-radius); background: var(--bg-panel-2); min-width: 0; }
+.ch-lcard--wild{ border-color: var(--accent-secondary); }
+.ch-lcard__head{ display: flex; align-items: center; gap: 8px; }
+.ch-lcard__title{ flex: 1; font-size: 13px; font-weight: 600; color: var(--text); }
+.ch-lcard__n{ font-family: var(--font-mono); font-size: 10.5px; color: var(--text-dim); border: 1px solid var(--border); border-radius: 10px; padding: 0 7px; line-height: 17px; }
+.ch-lcard--wild .ch-lcard__n{ color: var(--accent-secondary); border-color: var(--accent-secondary); }
+.ch-lcard__hint{ font-size: 11.5px; line-height: 1.45; color: var(--text-dimmer); }
+.ch-lcard__chips{ max-height: 190px; overflow-y: auto; padding: 2px 0; }
+.ch-lcard__chips .channels-chip{ max-width: 100%; overflow-wrap: anywhere; }
+.ch-lchip__sub{ font-size: 10px; color: var(--text-dimmer); }
+.ch-lcard__add{ display: flex; flex-wrap: wrap; gap: 6px; }
+.ch-lcard__add .ch-allowed__select{ flex: 1 1 100%; }
+.ch-lcard__add .ch-allowed__id{ flex: 1 1 120px; min-width: 0; }
+.ch-lcard__all{ margin-left: auto; color: var(--accent-secondary); }
+.ch-lcard__foot{ border-top: 1px dashed var(--border); padding-top: 8px; display: flex; flex-direction: column; gap: 6px; }
+.ch-lcard__foot .ch-master{ padding: 0; }
 
 /* ------------------------------------------------------------- states */
 
