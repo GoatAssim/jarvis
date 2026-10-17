@@ -3654,6 +3654,53 @@ app.post("/api/settings/file/set", requireSettingsOrigin, requireJarvis, (req, r
   });
 });
 
+// Settings a tool file supplies for itself (TOOL_SETTINGS, jarvis/tool_settings.py): listed,
+// set and reset through `jarvis tool-settings`. The browser names a FILE and a KEY; whether that
+// pair was declared, and what value it may hold, is decided by the CLI against the declaration
+// (this server never validates a value or builds a path). Same origin/header guard as every other
+// Settings write. Nothing the model can reach writes here.
+const TOOL_SETTING_FILE_RE = /^[A-Za-z0-9][A-Za-z0-9_.\-]{0,80}$/;
+const TOOL_SETTING_KEY_RE = /^[a-z][a-z0-9_]{0,39}$/;
+
+app.get("/api/settings/tools", requireSettingsOrigin, requireJarvis, async (req, res) => {
+  const result = await runJarvisOnce(["tool-settings", "list"], 15000);
+  if (!result.ok) return res.status(500).json({ error: result.error || result.stderr || "Couldn't list tool settings." });
+  try { res.json(JSON.parse(result.stdout)); }
+  catch (e) { res.status(500).json({ error: `Couldn't parse tool-settings list: ${e.message}` }); }
+});
+
+function toolSettingTarget(req, res) {
+  const file = req.body && req.body.file, key = req.body && req.body.key;
+  if (typeof file !== "string" || !TOOL_SETTING_FILE_RE.test(file)) { res.status(400).json({ ok: false, error: "That is not a tool file name." }); return null; }
+  if (typeof key !== "string" || !TOOL_SETTING_KEY_RE.test(key)) { res.status(400).json({ ok: false, error: "That is not a setting key." }); return null; }
+  return { file, key };
+}
+
+async function toolSettingsCli(res, args) {
+  const result = await runJarvisOnce(args, 15000);
+  let parsed = null;
+  try { parsed = JSON.parse(result.stdout); } catch { parsed = null; }
+  if (parsed && parsed.ok === true) return res.json(parsed);
+  const why = (parsed && parsed.error) || result.stderr || result.error || "Couldn't save that setting.";
+  return res.status(400).json({ ok: false, error: String(why).slice(0, 400) });
+}
+
+app.post("/api/settings/tools/set", requireSettingsOrigin, requireJarvis, (req, res) => {
+  const target = toolSettingTarget(req, res);
+  if (!target) return;
+  const value = req.body.value;
+  if (!(typeof value === "boolean" || typeof value === "number" || typeof value === "string")) {
+    return res.status(400).json({ ok: false, error: "A setting is a switch, a number or text." });
+  }
+  toolSettingsCli(res, ["tool-settings", "set", target.file, target.key, JSON.stringify({ value })]);
+});
+
+app.post("/api/settings/tools/reset", requireSettingsOrigin, requireJarvis, (req, res) => {
+  const target = toolSettingTarget(req, res);
+  if (!target) return;
+  toolSettingsCli(res, ["tool-settings", "reset", target.file, target.key]);
+});
+
 app.post("/api/settings/file/defaults", requireSettingsOrigin, requireJarvis, (req, res) => {
   const name = settingsName(req, res);
   if (name) settingsAdmin(res, "defaults", { name });

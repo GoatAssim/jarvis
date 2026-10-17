@@ -86,6 +86,8 @@ RESERVED_NAMES = {
     # tool-commands: the palette commands a tool file ships through TOOL_COMMANDS
     # (list / run) -- the `/` palette's back end for I.2.11.
     "tool-commands",
+    # tool-settings: the settings a tool file ships through TOOL_SETTINGS (list / set / reset).
+    "tool-settings",
     # settings-admin: the Settings > Advanced screen's back end (L.43).
     "settings-admin",
     # commands-check-name: added by this same fix (I-B2 item 2) so

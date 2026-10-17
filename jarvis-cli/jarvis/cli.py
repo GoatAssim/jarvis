@@ -3473,6 +3473,56 @@ def main():
             print(json.dumps({"error": "usage: jarvis tool-commands list|prepare|run ..."}))
             sys.exit(1)
 
+    if argv[0] == "tool-settings":
+        # jarvis tool-settings list
+        # jarvis tool-settings set <file> <key> <json-value>
+        # jarvis tool-settings reset <file> <key>
+        # The settings tool files supply through TOOL_SETTINGS (tool_settings.py). `list`
+        # is what Settings > Tool settings draws; `set` / `reset` are the owner's only
+        # way to change one -- there is no model tool for it. The value arrives as ONE
+        # JSON value (so `false`, `12` and `"text"` keep their types); text that is not
+        # JSON is taken as a plain string. Only a setting a loaded tool file DECLARED can
+        # be set, and the value is checked against that declaration before it is written.
+        from . import tools as system_tools
+        from . import tool_settings as _ts
+
+        sub = argv[1] if len(argv) > 1 else ""
+        if sub == "list":
+            print(json.dumps(system_tools.tool_settings_payload(), indent=2, ensure_ascii=False))
+            return
+        if sub in ("set", "reset"):
+            need = 5 if sub == "set" else 4
+            if len(argv) < need:
+                print(json.dumps({"ok": False, "error": "usage: jarvis tool-settings set <file> <key> <json-value> | reset <file> <key>"}))
+                sys.exit(1)
+            entry = system_tools.tool_setting_find(argv[2], argv[3])
+            if entry is None:
+                print(json.dumps({"ok": False, "error": "no tool file %r declares a setting %r" % (argv[2], argv[3])}))
+                sys.exit(1)
+            if sub == "reset":
+                ok, why = _ts.reset_value(entry, entry["file"])
+                print(json.dumps({"ok": ok, **({} if ok else {"error": why})}))
+                if not ok:
+                    sys.exit(1)
+                return
+            raw = argv[4]
+            try:
+                value = json.loads(raw)
+            except json.JSONDecodeError:
+                value = raw
+            # The web server wraps the value as {"value": ...}: a bare `-5` would be read
+            # as a flag, and no setting is ever a dict, so the wrapper is unambiguous.
+            if isinstance(value, dict) and "value" in value:
+                value = value["value"]
+            ok, clean, why = _ts.set_value(entry, entry["file"], value)
+            if not ok:
+                print(json.dumps({"ok": False, "error": why}, ensure_ascii=False))
+                sys.exit(1)
+            print(json.dumps({"ok": True, "value": clean}, ensure_ascii=False))
+            return
+        print(json.dumps({"ok": False, "error": "usage: jarvis tool-settings list|set|reset ..."}))
+        sys.exit(1)
+
     if argv[0] == "tool-run":
         # jarvis tool-run <name> [json-arguments] [mode]
         # Runs one AI tool directly (bypassing the model) and prints its

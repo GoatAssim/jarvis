@@ -62,6 +62,17 @@ contract and actions/_template.py section 12 for a worked example. A bad entry i
 logged and dropped; the tools still load. (Not available to a file that defines no
 tools, for the same reason as TOOL_UI.)
 
+A file that defines tools can also supply settings of its own, shown in the ordinary
+Settings window (Settings > Tool settings):
+
+    TOOL_SETTINGS = [ {"key": "max_notes", "label": "Most notes kept", "type": "integer",
+                       "default": 200, "min": 1, "max": 5000, "help": "..."}, ... ]
+
+...and read back with `tool_settings.get(__file__, "max_notes")`. See tool_settings.py
+for the contract (types, ranges, who may change one). A bad entry is logged and dropped;
+the tools still load. (Not available to a file that defines no tools, for the same
+reason as TOOL_UI.)
+
 A file that defines tools can also supply background services of its own:
 
     DAEMONS = [ {"id": ..., "command": [...], ...}, ... ]
@@ -258,6 +269,9 @@ class ActionModuleRecord:
     # TOOL_COMMANDS entries (I.2.11), already validated and normalised by
     # tool_commands.validate_commands. [] when the module declared none.
     commands: list = field(default_factory=list)
+    # TOOL_SETTINGS entries, already validated and normalised by
+    # tool_settings.validate_settings. [] when the module declared none.
+    settings: list = field(default_factory=list)
 
 
 def _validate(module, filename, logger):
@@ -431,6 +445,16 @@ def _validate(module, filename, logger):
         for problem in command_errors:
             logger(f"[tool-commands] {problem}")
 
+    # TOOL_SETTINGS: settings the owner can change in Settings > Tool settings. Same rule
+    # as the others: a bad entry is logged and dropped, the tools load regardless.
+    setting_entries = []
+    raw_settings = getattr(module, "TOOL_SETTINGS", None)
+    if raw_settings is not None:
+        from . import tool_settings
+        setting_entries, setting_errors = tool_settings.validate_settings(raw_settings, filename)
+        for problem in setting_errors:
+            logger(f"[tool-settings] {problem}")
+
     # DAEMONS (L.12): background services the tool supplies. Same rule as the
     # others - a bad entry is logged and dropped, the tools load regardless.
     # The file's own folder resolves `{tool_dir}` and a relative `cwd`.
@@ -449,7 +473,7 @@ def _validate(module, filename, logger):
         keywords=keywords, pack_instruction=pack_instruction,
         confirm_required=confirm_required, ai_review=ai_review, result_specs=result_specs,
         personas=personas, checklist=checklist, checklist_group=checklist_group, ui=ui,
-        daemons=daemon_decls, commands=command_entries,
+        daemons=daemon_decls, commands=command_entries, settings=setting_entries,
     )
 
 

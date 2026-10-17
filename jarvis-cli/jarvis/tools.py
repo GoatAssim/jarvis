@@ -1186,6 +1186,7 @@ import sys  # noqa: E402  (deliberately after TOOLS is built, see below)
 from . import tool_loader  # noqa: E402  (deliberately after TOOLS is built)
 from . import tool_ui as tool_ui_module  # noqa: E402  (import-light; used by tool_ui_payload below)
 from . import tool_commands as tool_commands_module  # noqa: E402  (import-light; used by tool_commands_payload below)
+from . import tool_settings as tool_settings_module  # noqa: E402  (import-light; used by AUTO_SETTINGS and tool_settings_payload below)
 
 # logger=print (the default) would write auto-discovery log lines to
 # stdout. That's fine for most invocations, but `jarvis tools-list`
@@ -1456,6 +1457,31 @@ for _r in _AUTO_VALID:
         _seen_command_names[_c["name"]] = _r.file
         AUTO_COMMANDS.append(_c)
 
+# ---------------------------------------------------------------------------
+# Auto-discovered TOOL_SETTINGS -- settings a tool file supplies for Settings > Tool
+# settings (see tool_settings.py). Same two directories and the same _AUTO_RECORDS as
+# everything above. Settings are namespaced by FILE (a key only has to be unique inside
+# its own file), so there is no cross-file clash to resolve; two files with the same
+# stem (a shipped one and a user's) would share one block in tool_settings.json, so the
+# later one is logged and dropped.
+# ---------------------------------------------------------------------------
+AUTO_SETTINGS = []
+_seen_settings_stems = {}
+for _r in _AUTO_VALID:
+    if not _r.settings:
+        continue
+    _stem = tool_settings_module.stem_of(_r.file)
+    if _stem in _seen_settings_stems:
+        print(
+            f"[tool-settings] {_r.file} has the same name as {_seen_settings_stems[_stem]} -- "
+            "its TOOL_SETTINGS were skipped (settings are stored per file name).",
+            file=sys.stderr,
+        )
+        continue
+    _seen_settings_stems[_stem] = _r.file
+    for _s in _r.settings:
+        AUTO_SETTINGS.append({**_s, "file": _r.file, "file_stem": _stem, "group": _r.group})
+
 # persona id -> the file that registered it, for the Tool Manager's "where does this come from".
 _PERSONA_FILES = {_p["id"]: _seen_persona_ids.get(_p["id"], "") for _p in AUTO_PERSONAS}
 
@@ -1615,6 +1641,43 @@ def tool_commands_payload(include_disabled=False):
     if not include_disabled:
         items = [c for c in items if not c["disabled"]]
     return {"commands": items}
+
+
+def tool_settings_payload():
+    """What `jarvis tool-settings list` / GET /api/tool-settings return: every setting a
+    tool file declared, grouped by file, with the owner's value (or the default).
+
+    {"files": [{"file", "stem", "group", "tools_off", "settings": [public entry, ...]}]}
+    `tools_off` is true when every tool the file defines is switched off in the Tool
+    Manager (the settings stay editable; the page says nothing will read them for now)."""
+    off = tool_disable.disabled_tools()
+    by_file = {}
+    for entry in AUTO_SETTINGS:
+        by_file.setdefault(entry["file"], []).append(entry)
+    files = []
+    for fname, entries in sorted(by_file.items(), key=lambda kv: kv[0].lower()):
+        store = tool_settings_module.stored(fname)
+        names = _tool_names_of_file(fname)
+        files.append({
+            "file": fname, "stem": entries[0]["file_stem"], "group": entries[0].get("group") or "",
+            "tools_off": bool(names) and all(n in off for n in names),
+            "settings": [tool_settings_module.public(e, fname, store) for e in entries],
+        })
+    return {"files": files}
+
+
+def _tool_names_of_file(fname):
+    """The tool names one file defines (empty when it can't be told)."""
+    try:
+        return [r_name for r in _AUTO_VALID if r.file == fname for r_name in (r.tools or {})]
+    except Exception:  # noqa: BLE001
+        return []
+
+
+def tool_setting_find(file, key):
+    """The declared entry for one (file, key), or None. `file` may be the file name or its stem."""
+    stem = tool_settings_module.stem_of(file)
+    return next((e for e in AUTO_SETTINGS if e["file_stem"] == stem and e["key"] == key), None)
 
 
 def tool_command_prepare(name, typed):

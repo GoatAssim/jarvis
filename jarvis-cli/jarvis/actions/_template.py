@@ -27,6 +27,7 @@ CONTENTS
    10. DAEMONS              background services your tool supplies (it appears in
                              the Daemons panel, owned by your file)
    11. CHECKING YOUR FILE    how to know it actually loaded
+   13. TOOL_SETTINGS        options of your own, shown in Settings > Tool settings
 
 WHAT MAKES A FILE DISCOVERABLE
 -------------------------------
@@ -1219,6 +1220,36 @@ TEST_CHECKLIST_GROUP = {
 # ---------------------------------------------------------------------------
 
 # ---------------------------------------------------------------------------
+# 13. TOOL_SETTINGS — optional. Options of your own, shown in the ordinary Settings
+#     window (Settings > Tool settings) -- not in a menu of yours. Declare them at
+#     module level and read them when the tool runs:
+#
+#        TOOL_SETTINGS = [
+#            {
+#                "key": "max_notes",          # required. lower_snake_case, unique in this file
+#                "label": "Most notes kept",  # required. Shown beside the control
+#                "type": "integer",           # "boolean" | "string" | "number" | "integer" | "choice"
+#                "default": 200,              # optional (the type's own default if left out)
+#                "min": 1, "max": 5000,       # optional, number / integer
+#                "unit": "notes",             # optional, number / integer
+#                "help": "Older notes are dropped.",   # optional
+#                "section": "Limits",         # optional heading to group rows under
+#            },
+#            {"key": "mode", "label": "Mode", "type": "choice",
+#             "choices": ["compact", ["full", "Full detail"]], "default": "compact"},
+#        ]
+#
+#        def tool_save_note(args):
+#            from jarvis import tool_settings          # lazy import, like ui_bridge
+#            limit = tool_settings.get(__file__, "max_notes")
+#
+#     The value is already the declared type and inside the declared range (a bad
+#     hand edit reads as the default). Only the OWNER changes one -- from Settings or
+#     `jarvis tool-settings` -- never the model, so don't put anything in a setting
+#     that you would not let the owner pick. Not for secrets: the file is plain JSON.
+#     A bad entry is logged as "[tool-settings] ..." and dropped; the tools still load.
+#
+# ---------------------------------------------------------------------------
 # 11. CHECKING YOUR FILE — how to know it actually loaded
 #
 # A rejected file is logged once and is otherwise invisible, so check:
@@ -1232,6 +1263,7 @@ TEST_CHECKLIST_GROUP = {
 #     jarvis tool-ui list      your TOOL_UI screens, if you declared any.
 #     jarvis daemons           your DAEMONS, if you declared any (owner = your file).
 #     jarvis tool-commands list  your TOOL_COMMANDS (section 12), if you declared any.
+#     jarvis tool-settings list  your TOOL_SETTINGS (section 13), if you declared any.
 #
 # For a tool in ~/.jarvis/tools/, the Custom Tools editor's Check button runs
 # the same validation, including the TEST_CHECKLIST entry.

@@ -273,6 +273,80 @@
     return holder;
   }
 
+  // ---- settings a tool file supplies (TOOL_SETTINGS, jarvis/tool_settings.py) ------------
+  // One row per declared setting. The server holds every rule (which file/key exist, the type
+  // and range of the value); this only draws what came back and relays a refusal. Saved with
+  // /api/settings/tools/set, so a change is validated against the tool's own declaration.
+  function toolSettingSpec(s) {
+    const spec = { label: s.label };
+    if (s.type === "boolean") spec.type = "bool";
+    else if (s.type === "integer") spec.type = "int";
+    else if (s.type === "number") spec.type = "float";
+    else if (s.type === "choice") { spec.type = "choice"; spec.choices = (s.choices || []).map((c) => [c[0], c[1]]); }
+    else spec.type = "text";
+    if (s.min !== undefined && s.min !== null) spec.min = s.min;
+    if (s.max !== undefined && s.max !== null) spec.max = s.max;
+    if (s.unit) spec.unit = s.unit;
+    return spec;
+  }
+
+  function toolSettingRow(fileEntry, s) {
+    const status = h("span", { class: "prefs-row__status" });
+    const holder = h("div", { class: "prefs-row" });
+    const render = () => {
+      const ctl = makeControl(toolSettingSpec(s), s.value, async (value) => {
+        const r = await api("POST", "/api/settings/tools/set", { file: fileEntry.file, key: s.key, value });
+        s.value = r.value;
+        s.is_default = false;
+        render();
+        flash(status, "Saved.", "ok");
+        return r;
+      }, status);
+      const reset = s.is_default ? null : h("button", { class: "btn btn--ghost btn--sm", type: "button", text: "Reset to default", onclick: async () => {
+        try {
+          await api("POST", "/api/settings/tools/reset", { file: fileEntry.file, key: s.key });
+          s.value = s.default;
+          s.is_default = true;
+          render();
+          flash(status, "Back to the default.", "ok");
+        } catch (err) { flash(status, err.message, "err"); }
+      } });
+      const bits = [h("span", { class: "prefs-tag" + (s.is_default ? "" : " is-override"), text: s.is_default ? "default" : "your value" })];
+      const fresh = rowShell(s.label, s.help, h("span", { class: "prefs-inline" }, [ctl.el, reset]), status, bits);
+      holder.replaceChildren(...Array.from(fresh.childNodes));
+      holder.dataset.search = fresh.dataset.search;
+    };
+    render();
+    return holder;
+  }
+
+  function toolSettingsBlocks(payload) {
+    const files = payload && Array.isArray(payload.files) ? payload.files : [];
+    if (!files.length) {
+      return [h("div", { class: "prefs-empty", text: "No tool has supplied settings yet. A tool file adds some by declaring TOOL_SETTINGS; they appear here the next time Jarvis loads it." })];
+    }
+    const out = [];
+    for (const f of files) {
+      // A file may group its rows under headings of its own (`section`); no heading = one block.
+      const bySection = new Map();
+      for (const s of f.settings || []) {
+        const key = s.section || "";
+        if (!bySection.has(key)) bySection.set(key, []);
+        bySection.get(key).push(s);
+      }
+      const title = (f.stem || f.file) + (f.group ? " · " + f.group : "");
+      let first = true;
+      for (const [section, list] of bySection) {
+        const heading = section ? title + " — " + section : title;
+        const g = group(heading, list.map((s) => toolSettingRow(f, s)));
+        if (first && f.tools_off) g.append(h("div", { class: "prefs-note", text: "Every tool in this file is switched off in the Tool Manager, so nothing reads these settings for now." }));
+        first = false;
+        out.push(g);
+      }
+    }
+    return out;
+  }
+
   function linkRow(spec) {
     return rowShell(spec.label, spec.help, h("button", { class: "btn btn--ghost btn--sm", type: "button", text: spec.button || "Open", onclick: spec.run }), h("span", { class: "prefs-row__status" }));
   }
@@ -501,11 +575,20 @@
         const t = tunableRows(ctx, "tools");
         if (t.length) out.push(group("Limits", t));
         out.push(group("Elsewhere", [
+          linkRow({ label: "Tool settings", help: "Options that individual tools supply for themselves.", button: "Open", run: () => select("toolsettings") }),
           linkRow({ label: "Tool Manager", help: "Turn tools on or off and set how each one confirms.", button: "Open", run: () => openPanel("ctools") }),
           linkRow({ label: "Tool safety file", help: "Which tool calls ask before they run.", button: "Open in Advanced", run: () => openAdvancedFile("tool_safety.json") }),
           linkRow({ label: "Unattended-run policy", help: "What a scheduled or chat-triggered run may do.", button: "Open in Advanced", run: () => openAdvancedFile("policy.json") }),
         ]));
         return out;
+      } },
+    { id: "toolsettings", label: "Tool settings", title: "Tool settings",
+      lede: "Settings that individual tools supply for themselves. Each row belongs to one tool file; changing it takes effect the next time that tool runs.",
+      files: [],
+      terms: "tool settings custom tool supplied options notes folder limit toggle",
+      build: async () => {
+        const payload = await api("GET", "/api/settings/tools");
+        return toolSettingsBlocks(payload);
       } },
     { id: "integrations", label: "Integrations", title: "Integrations",
       lede: "Connected services. Each opens its own panel or its settings file.",
