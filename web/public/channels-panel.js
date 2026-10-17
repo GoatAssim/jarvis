@@ -82,7 +82,7 @@
   };
   // Tools whose handlers refuse anyone but the owner (tools.OWNER_ONLY_TOOLS).
   // They can't be handed to a guest, so the picker shows them locked.
-  const OWNER_ONLY = new Set(["send_dm", "recent_dms", "person_remember", "person_forget", "person_instruct", "person_recall", "person_review", "await_reply"]);
+  const OWNER_ONLY = new Set(["send_dm", "recent_dms", "recent_spaces", "person_remember", "person_forget", "person_instruct", "person_recall", "person_review", "await_reply"]);
   // Tools the machinery adds for anyone with a custom list (user_perms.
   // PLUMBING_TOOLS) — shown as a footnote so the owner knows what "only
   // these" really means.
@@ -299,6 +299,95 @@
   // What the user typed beats what they picked; "" when neither is a valid id.
   const channelPick = guildPick;
 
+  // ---- shared rooms: pure helpers (channel spaces S11; no DOM, tested in verify_channels_rooms.js) ----
+  // "Use in rooms" per saved note / memory item: inherit (follows the platform's group_recall
+  // master), on, off. Same rule as channels/people.recall_allowed and person_memory.room_allows:
+  // off always wins, on wins over a master that is off, inherit follows the master.
+  const GROUP_FLAGS = ["inherit", "on", "off"];
+  const groupFlagOf = (item) => (item && GROUP_FLAGS.includes(item.groups) ? item.groups : "inherit");
+  const recallOn = (config, id) => !!(config && config[id] && config[id].group_recall === true);
+  function usedInRooms(flag, master) {
+    if (flag === "off") return false;
+    if (flag === "on") return true;
+    return master === true;
+  }
+  function groupUseText(flag, master) {
+    if (flag === "on") return "Used in room replies, whatever the master switch says.";
+    if (flag === "off") return "Never used in room replies.";
+    return master === true ? "Follows the master switch, which is on: used in room replies."
+      : "Follows the master switch, which is off: not used in room replies.";
+  }
+
+  // Reading other messages in a room (channels/ambient.py): how many are kept per room (0 = off),
+  // for how long, and whose. Held in memory only. Unreadable values read as the defaults, and an
+  // unreadable `ambient_senders` as the narrower "approved", exactly as config.ambient_limits does.
+  const AMBIENT_DEFAULTS = { messages: 20, minutes: 30, senders: "approved" };
+  function ambientOf(config, id) {
+    const c = (config && config[id]) || {};
+    const whole = (v, d, lo, hi) => (Number.isInteger(v) && v >= lo && v <= hi ? v : d);
+    return {
+      messages: whole(c.ambient_messages, AMBIENT_DEFAULTS.messages, 0, 100),
+      minutes: whole(c.ambient_minutes, AMBIENT_DEFAULTS.minutes, 1, 1440),
+      senders: String(c.ambient_senders || "").toLowerCase() === "anyone" ? "anyone" : "approved",
+    };
+  }
+  function ambientText(a) {
+    if (!a.messages) return "Off: Jarvis only reads messages that are addressed to it.";
+    return `Keeps the last ${a.messages} message${a.messages === 1 ? "" : "s"} of each room for ${a.minutes} min, from ${a.senders === "anyone" ? "anyone in the room" : "people you've approved"}. Held in memory only, never saved.`;
+  }
+  // Platform-wide saving (log_conversations): on unless the config says otherwise.
+  const savingOn = (config, id) => { const c = (config && config[id]) || {}; return c.log_conversations === undefined ? true : !!c.log_conversations; };
+
+  // The saved rooms (GET /api/channels/spaces rows).
+  const ROOM_KIND_LABEL = { server_channel: "Channel", server_thread: "Thread", group: "Group chat", dm: "Direct message" };
+  const roomKindLabel = (kind) => ROOM_KIND_LABEL[kind] || "Room";
+  const roomsOf = (data) => (data && Array.isArray(data.spaces) ? data.spaces : []);
+  const roomKey = (r) => `${r.platform}|${r.thread_id}`;
+  const roomTitle = (r) => r.title || r.thread_id || "Room";
+  const roomIsServer = (r) => r.kind === "server_channel" || r.kind === "server_thread";
+  function filterRooms(rows, opts) {
+    const o = opts || {};
+    const q = String(o.search || "").trim().toLowerCase();
+    return (rows || []).filter((r) => {
+      if (o.platform && o.platform !== "all" && r.platform !== o.platform) return false;
+      if (o.kind === "server" && !roomIsServer(r)) return false;
+      if (o.kind === "group" && r.kind !== "group") return false;
+      if (!q) return true;
+      return [r.title, r.thread_id].some((v) => String(v || "").toLowerCase().includes(q));
+    });
+  }
+  // The saved room behind a Discord channel row, if it has one (a channel's thread id is its id).
+  const roomForChannel = (rows, platform, id) => (rows || []).find((r) => r.platform === platform && r.thread_id === String(id)) || null;
+  const roomSwitchOf = (row, sw) => (row && row.switches && row.switches[sw] === "off" ? "off" : "inherit");
+  // Is the Discord server around this channel switched off for `sw` ("log" or "ambient")?
+  function serverSwitchOff(view, channelId, sw) {
+    for (const s of (view && view.servers) || []) {
+      if ((s.channels || []).some((c) => c.id === channelId)) return !!(s.override && s.override[sw === "log" ? "log" : "ambient"] === "off");
+    }
+    return false;
+  }
+  // Is this room's Saving ("log") or Reading ("ambient") switch on, and if not, is it the
+  // room's own switch (can be turned back on here) or something wider (`lock` says what)?
+  function roomSwitchState(row, sw, config, serversView) {
+    const label = (PLATFORMS[row.platform] || {}).label || row.platform;
+    if (sw === "log") {
+      if (!savingOn(config, row.platform)) return { on: false, lock: `Saving is off for all of ${label} (log_conversations).` };
+    } else if (!ambientOf(config, row.platform).messages) {
+      return { on: false, lock: `Reading is off for all of ${label} (ambient_messages is 0).` };
+    }
+    if (roomSwitchOf(row, sw) === "off") return { on: false, lock: "" };
+    if (serverSwitchOff(serversView, row.thread_id, sw)) return { on: false, lock: "The whole server has this off. Turn it on in the Servers tab first." };
+    return { on: true, lock: "" };
+  }
+  // Who wrote a room line, as a label: their name, else @handle, else user…<last4>.
+  function roomSpeaker(e) {
+    if (!e || e.dir !== "in") return "Jarvis";
+    const name = String(e.author_name || "").trim();
+    const handle = String(e.user_handle || "").replace(/^@+/, "").trim();
+    const uid = String(e.user_id || "").trim();
+    return name || (handle ? "@" + handle : "") || (uid ? "user\u2026" + uid.slice(-4) : "someone");
+  }
+
   // ---- helpers for the Conversation / Usage / Test tabs (pure, no DOM) ----
   // The transcript stamps local, zone-less ISO times ("2026-10-01T10:00:05").
   const dayOf = (at) => (typeof at === "string" && /^\d{4}-\d{2}-\d{2}/.test(at)) ? at.slice(0, 10) : "";
@@ -387,9 +476,11 @@
   const HOME_KEY = "home";
 
   // Tabs on Home. Servers is Discord-only, so it isn't offered without Discord.
-  function homeTabs(platforms) {
+  function homeTabs(platforms, extra) {
     const defs = [{ id: "platforms", label: "Platforms", ico: "chat", title: "Is each platform on, and who may run tools from it" }];
     if (platforms && platforms.discord) defs.push({ id: "servers", label: "Servers", ico: "server", title: "Discord servers and channels" });
+    // Channel spaces S11: shown once anything has been saved from a shared room.
+    if (extra && extra.rooms > 0) defs.push({ id: "rooms", label: "Rooms", ico: "people", title: "What was saved from server channels and group chats" });
     defs.push({ id: "denied", label: "Turned away", ico: "blocked", title: "Who the gate refused lately" });
     defs.push({ id: "lists", label: "Global lists", ico: "people", title: "The raw allow-lists" });
     return defs;
@@ -469,6 +560,17 @@
     dm: new Map(),
     // Recently turned-away senders (P14): { status: idle|loading|ready|error, data, error, req }.
     denied: { status: "idle", data: null, error: "", req: 0 },
+    // Shared rooms (channel spaces S11): the saved-room list, the open room and what is in flight.
+    spaces: { status: "idle", data: null, error: "" },
+    roomSel: null,                 // roomKey of the open room
+    roomFilter: { kind: "all", search: "" },
+    roomConv: new Map(),           // roomKey -> { status, data, error, limit, req, scrollEnd }
+    roomBusy: new Set(),           // "<roomKey>|<switch>" while a write is in flight
+    settingBusy: new Set(),        // "<platform>|<key>" for the platform's room settings
+    recallAsk: null,               // platform id whose group-recall turn-on awaits its second click
+    ambientDraft: new Map(),       // platform id -> { messages, minutes, senders } being edited
+    ambientAsk: null,              // platform id whose "read anyone" choice awaits its second click
+    groupAsk: null,                // { key, kind: "note"|"mem", id } an item whose "use in rooms: on" awaits it
     // Bulk edit (P5).
     selectMode: false,
     picked: new Set(), // person keys
@@ -488,11 +590,15 @@
     state.error = "";
     renderAll();
     try {
-      const [ppl, cfg, srv] = await Promise.all([
+      const [ppl, cfg, srv, spc] = await Promise.all([
         api("GET", "/api/channels/people"),
         api("GET", "/api/channels").catch(() => null),
         api("GET", "/api/channels/servers?platform=discord").catch((e) => ({ _error: e.message || "Couldn't read servers." })),
+        api("GET", "/api/channels/spaces").catch((e) => ({ _error: e.message || "Couldn't read the rooms." })),
       ]);
+      state.spaces.data = spc && !spc._error ? spc : state.spaces.data;
+      state.spaces.error = spc && spc._error ? spc._error : "";
+      state.spaces.status = spc && spc._error ? "error" : "ok";
       state.servers = srv && !srv._error ? srv : null;
       state.serversError = srv && srv._error ? srv._error : "";
       state.platforms = ppl.platforms || {};
@@ -1143,7 +1249,7 @@
     await load(true);
   }
 
-  function noteItem(p, n) {
+  function noteItemBase(p, n) {
     const k = pkey(p);
     const editing = state.editingNote && state.editingNote.key === k && state.editingNote.id === n.id;
     const asking = state.confirmNote && state.confirmNote.key === k && state.confirmNote.id === n.id;
@@ -1178,6 +1284,15 @@
         el("button", { type: "button", class: "ch-iconbtn ch-iconbtn--danger", title: "Delete this note", "aria-label": "Delete this note", onclick: () => { state.editingNote = null; state.confirmNote = { key: k, id: n.id }; renderDetail(); } }, [icon("trash")]),
       ]),
     ]);
+  }
+
+  // The note row, plus (when it isn't being edited or deleted) its "In rooms" setting (S11).
+  function noteItem(p, n) {
+    const li = noteItemBase(p, n);
+    const k = pkey(p);
+    const busy = [state.editingNote, state.confirmNote].some((x) => x && x.key === k && x.id === n.id);
+    if (!busy) { li.classList.add("ch-note--groups"); li.appendChild(groupsControl(p, "note", n)); }
+    return li;
   }
 
   function notesSection(p) {
@@ -2383,16 +2498,18 @@
     return box;
   }
 
-  function messageNode(e) {
+  function messageNode(e, opts) {
+    const room = !!(opts && opts.room);   // S11: a line in a shared room, shown by who wrote it
     const mine = e.dir === "in";
     const wrap = el("div", { class: "ch-msg " + (mine ? "ch-msg--in" : "ch-msg--out"), "data-ch": mine && e.allowed === false ? "bad" : null });
     const meta = el("div", { class: "ch-msg__meta" }, [
-      el("span", null, mine ? "They wrote" : "Jarvis"),
+      room && mine ? el("span", { class: "speaker-chip" }, roomSpeaker(e)) : el("span", null, mine ? "They wrote" : "Jarvis"),
       clockOf(e.at) ? el("span", { class: "ch-msg__time" }, clockOf(e.at)) : null,
     ]);
     if (mine) {
-      meta.appendChild(tag(e.context === "group" ? "group" : "DM", null, null));
-      if (e.context === "group" && (e.channel_name || e.guild_name)) {
+      if (!room) meta.appendChild(tag(e.context === "group" ? "group" : "DM", null, null));
+      if (room && e.imported) meta.appendChild(tag("imported", null, null));
+      if (!room && e.context === "group" && (e.channel_name || e.guild_name)) {
         meta.appendChild(el("span", { class: "ch-msg__where", title: [e.guild_name, e.channel_name && "#" + e.channel_name].filter(Boolean).join(" / ") },
           [e.channel_name ? "#" + e.channel_name : "", e.channel_name && e.guild_name ? " · " : "", e.guild_name || ""].join("")));
       }
@@ -2584,7 +2701,7 @@
     return "No finished conversations are waiting.";
   }
 
-  function memItem(p, rec, waiting) {
+  function memItemBase(p, rec, waiting) {
     const k = pkey(p);
     const isEp = rec.kind === "episode";
     const asking = state.memConfirm && state.memConfirm.key === k && state.memConfirm.id === rec.id;
@@ -2616,6 +2733,15 @@
       el("span", { class: "ch-note__text" }, [el("span", null, rec.text), meta]),
       el("span", { class: "ch-note__btns" }, btns),
     ]);
+  }
+
+  // The memory row, plus its "In rooms" setting for what Jarvis already uses (S11). Things
+  // still waiting for your OK aren't used anywhere yet, and rules are never gated.
+  function memItem(p, rec, waiting) {
+    const li = memItemBase(p, rec, waiting);
+    const asking = state.memConfirm && state.memConfirm.key === pkey(p) && state.memConfirm.id === rec.id;
+    if (!waiting && !asking && rec.kind !== "instruction") { li.classList.add("ch-note--groups"); li.appendChild(groupsControl(p, "mem", rec)); }
+    return li;
   }
 
   function memSection(p, title, aside, items, waiting, empty) {
@@ -3055,7 +3181,13 @@
     const row = srvRow("#" + (c.name || c.id), c.name ? c.id : "Name not seen yet", c.answering && !offHere, locked, srvBusy("channel", c.id, "enabled"),
       (turnOn) => serverSwitch("channel", c.id, "enabled", turnOn ? "inherit" : "off"));
     row.classList.add("ch-srow--chan");
-    return row;
+    // Channel spaces S11: Reading / Saving for this channel, and a way into its saved conversation.
+    const wrap = el("div", { class: "ch-chanx" }, [row]);
+    readingSavingRows(c, "channel", c.id, s).forEach((r) => { r.classList.add("ch-srow--chan", "ch-srow--sub"); wrap.appendChild(r); });
+    if (roomForChannel(roomsOf(state.spaces.data), "discord", c.id)) {
+      wrap.appendChild(el("div", { class: "ch-chanx__btns" }, [el("button", { type: "button", class: "btn btn--ghost btn--sm", "data-open-room": c.id, title: "Read what was saved from this channel", onclick: () => openRoom("discord", c.id) }, [icon("chat"), "Conversation"])]));
+    }
+    return wrap;
   }
 
   function serverCard(s, v) {
@@ -3081,6 +3213,7 @@
       (turnOn) => serverSwitch("guild", s.id, "tools", turnOn ? "inherit" : "off")));
     body.appendChild(srvRow("Needs an @mention", "Only reply to messages that mention Jarvis.", s.mention, v.platform_mention && s.override.mention !== "on" ? "Discord requires a mention everywhere." : "", srvBusy("guild", s.id, "mention"),
       (turnOn) => serverSwitch("guild", s.id, "mention", turnOn ? "on" : "inherit")));
+    readingSavingRows(s, "guild", s.id, null).forEach((r) => body.appendChild(r));
     if (s.channels.length) {
       body.appendChild(el("div", { class: "ch-section-title" }, "Channels"));
       const list = el("div", { class: "ch-chans" });
@@ -3471,6 +3604,7 @@
     if (!pl.owner) hints.push(["Pick an owner: ", `jarvis channels-set ${id} owner YOUR_USER_ID`]);
     for (const [lead, cmd] of hints) card.appendChild(el("div", { class: "ch-plat__hint" }, [lead, el("code", null, cmd)]));
     if (pl.token_set) card.appendChild(masterControl(id, pl));
+    if (pl.token_set && state.config[id]) card.appendChild(roomSettingsBlock(id));
     return card;
   }
 
@@ -3500,12 +3634,13 @@
       frag.appendChild(loadingBlock("Reading platforms…"));
       return frag;
     }
-    const defs = homeTabs(state.platforms);
+    const defs = homeTabs(state.platforms, { rooms: roomsOf(state.spaces.data).length });
     const active = (defs.find((d) => d.id === state.homeTab) || defs[0]).id;
     frag.appendChild(homeTabBar(defs, active));
     const pane = {
       platforms: platformsPane,
       servers: () => homePane("servers", [serversSection()]),
+      rooms: roomsPane,
       denied: () => homePane("denied", [deniedSection()]),
       lists: listsPane,
     }[active];
@@ -3799,6 +3934,309 @@
     if (prev && prev.focus && document.contains(prev)) { try { prev.focus(); } catch (_) { /* gone */ } }
   }
 
+  // ======================================================================
+  // Shared rooms (channel spaces S11): the controls and the room viewer.
+  //
+  // Nothing is decided here either. Every switch POSTs to a route that runs the same CLI a
+  // terminal runs (`channels-set`, `channels-server-set`, `channels-space-set`,
+  // `channels-note ... groups`, `channels-memory ... groups`), then the list is re-read. The
+  // routes only ever take access away, except the three things below that widen what is said
+  // or read in a room (group recall on, "use in rooms: on" for one item, reading messages from
+  // anyone): those ask for a second click first. Names and messages are strangers' text and go
+  // in with textContent only. No token is read or sent.
+  // ======================================================================
+  const enc = encodeURIComponent;
+
+  async function roomSetting(id, key, value, okMsg) {
+    const k = `${id}|${key}`;
+    if (state.settingBusy.has(k)) return;
+    state.settingBusy.add(k); renderHome();
+    try {
+      await api("POST", `/api/channels/platform/${enc(id)}/room-setting`, { key, value });
+      if (okMsg) toast(okMsg, "success");
+    } catch (err) { toast(err.message || "Couldn't save that.", "error"); }
+    state.settingBusy.delete(k);
+    await load(true);
+  }
+
+  async function roomSwitch(row, sw, value) {
+    const k = `${roomKey(row)}|${sw}`;
+    if (state.roomBusy.has(k)) return;
+    state.roomBusy.add(k); renderHome();
+    try {
+      await api("POST", `/api/channels/spaces/${enc(row.platform)}/${enc(row.thread_id)}`, { switch: sw, value, thread: row.kind === "server_thread" });
+      toast(sw === "log" ? (value === "off" ? "This room is no longer saved." : "This room is saved again.") : (value === "off" ? "Jarvis stops reading this room's other messages." : "Jarvis reads this room's other messages again."), "success");
+    } catch (err) { toast(err.message || "Couldn't save that.", "error"); }
+    state.roomBusy.delete(k);
+    await load(true);
+  }
+
+  // ---- Platforms tab: the room settings of one platform ----------------------
+  function confirmBox(label, text, okId, okLabel, onOk, onCancel) {
+    return el("div", { class: "ch-confirm", role: "alertdialog", "aria-label": label }, [
+      el("div", { class: "ch-confirm__text" }, text),
+      el("div", { class: "ch-confirm__btns" }, [
+        el("button", { type: "button", class: "btn btn--danger btn--sm", id: okId, onclick: onOk }, okLabel),
+        el("button", { type: "button", class: "btn btn--ghost btn--sm", onclick: onCancel }, "Cancel"),
+      ]),
+    ]);
+  }
+
+  function ambientDraftOf(id) {
+    if (!state.ambientDraft.has(id)) state.ambientDraft.set(id, { ...ambientOf(state.config, id) });
+    return state.ambientDraft.get(id);
+  }
+  async function saveAmbient(id, confirmed) {
+    const saved = ambientOf(state.config, id), d = ambientDraftOf(id);
+    if (!Number.isInteger(d.messages) || d.messages < 0 || d.messages > 100) { toast("Messages kept: a whole number from 0 to 100.", "error"); return; }
+    if (!Number.isInteger(d.minutes) || d.minutes < 1 || d.minutes > 1440) { toast("Minutes kept: a whole number from 1 to 1440.", "error"); return; }
+    if (d.senders === "anyone" && saved.senders !== "anyone" && !confirmed) { state.ambientAsk = id; renderHome(); return; }
+    state.ambientAsk = null;
+    const changes = [["ambient_messages", d.messages, saved.messages], ["ambient_minutes", d.minutes, saved.minutes], ["ambient_senders", d.senders, saved.senders]].filter((c) => c[1] !== c[2]);
+    if (!changes.length) return;
+    const k = `${id}|ambient`;
+    state.settingBusy.add(k); renderHome();
+    try {
+      for (const [key, value] of changes) await api("POST", `/api/channels/platform/${enc(id)}/room-setting`, { key, value });
+      state.ambientDraft.delete(id);
+      toast("Reading settings saved.", "success");
+    } catch (err) { toast(err.message || "Couldn't save that.", "error"); }
+    state.settingBusy.delete(k);
+    await load(true);
+  }
+
+  function roomSettingsBlock(id) {
+    const label = PLATFORMS[id].label;
+    const box = el("div", { class: "ch-rs", "data-plat": id });
+    box.appendChild(el("div", { class: "ch-rs__title" }, "Shared rooms"));
+    // 1. group recall: the master switch for what Jarvis may repeat about someone in a room.
+    const recall = recallOn(state.config, id);
+    box.appendChild(srvRow("Use saved notes and memories in rooms",
+      recall ? "On: a note or fact that follows this switch can be used in a room reply. Each one has its own setting on the person's page."
+        : "Off: room replies never use what Jarvis has saved about someone, unless that one item is set to on.",
+      recall, "", state.settingBusy.has(`${id}|group_recall`),
+      (turnOn) => { if (turnOn) { state.recallAsk = id; renderHome(); } else { state.recallAsk = null; roomSetting(id, "group_recall", false, "Room replies stop using saved notes and memories (unless an item is set to on)."); } }));
+    if (state.recallAsk === id && !recall) {
+      box.appendChild(confirmBox("Confirm group recall", `Turn on saved notes and memories in ${label} rooms? Everyone in a room can read what Jarvis says there, so a fact about one person could be repeated to the others. Items you set to "off" stay out.`,
+        `ch-recall-confirm-${id}`, "Turn it on", () => { state.recallAsk = null; roomSetting(id, "group_recall", true, "Room replies can now use saved notes and memories that follow this switch."); }, () => { state.recallAsk = null; renderHome(); }));
+    }
+    // 2. reading other messages
+    const a = ambientOf(state.config, id), d = ambientDraftOf(id);
+    const busy = state.settingBusy.has(`${id}|ambient`);
+    const changed = d.messages !== a.messages || d.minutes !== a.minutes || d.senders !== a.senders;
+    const num = (field, min, max, labelText) => {
+      const input = el("input", { type: "number", class: "ch-num", id: `ch-amb-${field}-${id}`, min: String(min), max: String(max), step: "1", value: String(d[field]), "aria-label": labelText, disabled: busy });
+      input.value = String(d[field]);
+      input.addEventListener("change", () => { const v = Number(input.value); d[field] = input.value.trim() === "" ? NaN : v; renderHome(); });
+      return el("label", { class: "ch-rs__field" }, [el("span", null, labelText), input]);
+    };
+    const senderBtn = (value, text) => el("button", { type: "button", role: "radio", "aria-checked": d.senders === value ? "true" : "false", id: `ch-amb-senders-${value}-${id}`, disabled: busy, onclick: () => { d.senders = value; renderHome(); } }, text);
+    box.appendChild(el("div", { class: "ch-rs__block" }, [
+      el("div", { class: "ch-srow__label" }, "Reading other messages in a room"),
+      el("div", { class: "ch-srow__hint" }, ambientText(a)),
+      el("div", { class: "ch-rs__fields" }, [
+        num("messages", 0, 100, "Messages kept (0 = off)"),
+        num("minutes", 1, 1440, "Minutes kept"),
+        el("div", { class: "ch-rs__field" }, [el("span", null, "Whose messages"),
+          el("div", { class: "ch-seg", role: "radiogroup", "aria-label": "Whose messages" }, [senderBtn("approved", "Approved"), senderBtn("anyone", "Anyone")])]),
+      ]),
+      el("div", { class: "ch-rs__btns" }, [
+        el("button", { type: "button", class: "btn btn--primary btn--sm", id: `ch-amb-save-${id}`, disabled: busy || !changed, onclick: () => saveAmbient(id, false) }, busy ? "Saving…" : "Save"),
+        changed ? el("button", { type: "button", class: "btn btn--ghost btn--sm", onclick: () => { state.ambientDraft.delete(id); state.ambientAsk = null; renderHome(); } }, "Reset") : null,
+      ]),
+      state.ambientAsk === id ? confirmBox("Confirm reading everyone", `Let Jarvis read the messages of anyone in a ${label} room, not only people you've approved? They aren't saved, but Jarvis can see what strangers write there while it answers.`,
+        `ch-amb-confirm-${id}`, "Read anyone", () => saveAmbient(id, true), () => { state.ambientAsk = null; renderHome(); }) : null,
+      id === "discord" ? el("div", { class: "ch-srow__hint" }, "Discord only sends these messages when the bot has the Message Content intent (message_content_intent).") : null,
+    ]));
+    // 3. saving: platform-wide, changed from the terminal; per room it is on each room.
+    const saving = savingOn(state.config, id);
+    box.appendChild(srvRow("Save room conversations", "",
+      saving, `Each room's messages are kept in its own log, which the Rooms tab shows. ${saving ? "On" : "Off"} for every room; change that from a terminal: jarvis channels-set ${id} log_conversations ${saving ? "false" : "true"}. One room can be switched off in the Rooms tab${id === "discord" ? ", or per server and channel in the Servers tab" : ""}.`, false, () => {}));
+    return box;
+  }
+
+  // ---- "Use in rooms" on one note or memory item ------------------------------
+  function groupsControl(p, kind, item) {
+    const k = pkey(p), flag = groupFlagOf(item), master = recallOn(state.config, p.platform);
+    const asking = state.groupAsk && state.groupAsk.key === k && state.groupAsk.kind === kind && state.groupAsk.id === item.id;
+    const apply = (value, msg) => {
+      state.groupAsk = null;
+      if (kind === "note") noteAction(p, { action: "groups", note: item.id, value }, msg);
+      else memAct(p, { action: "groups", record: item.id, value }, msg);
+    };
+    const pick = (value) => {
+      if (value === flag) return;
+      if (value === "on") { state.groupAsk = { key: k, kind, id: item.id }; renderDetail(); return; }
+      apply(value, value === "off" ? "Won't be used in room replies." : "Follows the master switch again.");
+    };
+    const btn = (value) => el("button", { type: "button", role: "radio", "aria-checked": flag === value ? "true" : "false", "data-flag": value, title: groupUseText(value, master), onclick: () => pick(value) }, value);
+    const box = el("div", { class: "ch-groups" }, [
+      el("div", { class: "ch-groups__row" }, [
+        el("span", { class: "ch-groups__label" }, "In rooms"),
+        el("div", { class: "ch-seg ch-seg--sm", role: "radiogroup", "aria-label": "Use this in shared rooms" }, GROUP_FLAGS.map(btn)),
+        el("span", { class: "ch-groups__hint" }, groupUseText(flag, master)),
+      ]),
+    ]);
+    if (asking) {
+      box.appendChild(confirmBox("Confirm using this in rooms", `Let Jarvis use this in shared rooms, even with the master switch off? Everyone in the room can read what it says there.`,
+        `ch-groups-confirm-${item.id}`, "Use in rooms", () => apply("on", "Can be used in room replies."), () => { state.groupAsk = null; renderDetail(); }));
+    }
+    return box;
+  }
+
+  // ---- Servers tab: Reading / Saving per server and channel, and a way into the room ----
+  // `scope` is a server or a channel row of the /api/channels/servers view; `serverScope` is
+  // the server around a channel (null for a server). Like "Answer here": a room is only ever
+  // switched OFF here (turning on removes the override), so a switch that is off because
+  // something WIDER is off says so and stays locked.
+  function readingSavingRows(scope, kind, id, serverScope) {
+    const defs = [
+      { sw: "ambient", label: "Read other messages", hint: "Jarvis sees what's said here without being mentioned, in memory only.", on: scope.ambient,
+        platformOff: ambientOf(state.config, "discord").messages === 0, platformLock: "Reading is off for all of Discord (ambient_messages is 0)." },
+      { sw: "log", label: "Save conversation", hint: "Keep what's said here in this room's log.", on: scope.saving,
+        platformOff: !savingOn(state.config, "discord"), platformLock: "Saving is off for all of Discord (log_conversations)." },
+    ];
+    return defs.map((d) => {
+      const offHere = scope.override[d.sw] === "off";
+      const serverOff = !!(serverScope && serverScope.override[d.sw] === "off");
+      let locked = "";
+      if (d.platformOff && !offHere) locked = d.platformLock;
+      else if (serverOff && (offHere || !d.on)) locked = "The whole server has this off. Turn the server on first.";
+      const row = srvRow(d.label, d.hint, !!d.on && !offHere, locked, srvBusy(kind, id, d.sw), (turnOn) => serverSwitch(kind, id, d.sw, turnOn ? "inherit" : "off"));
+      row.dataset.sw = d.sw;
+      return row;
+    });
+  }
+
+  function openRoom(platform, id) {
+    state.roomSel = `${platform}|${id}`;
+    state.homeTab = "rooms";
+    state.roomFilter = { kind: "all", search: "" };
+    renderDetail(true);
+  }
+
+  // ---- Rooms tab ---------------------------------------------------------------
+  const ROOM_STEP = 100, ROOM_MAX = 500;
+  const roomConvSlot = (row) => { const k = roomKey(row); if (!state.roomConv.has(k)) state.roomConv.set(k, { status: "idle", data: null, error: "", limit: ROOM_STEP, req: 0, scrollEnd: false }); return state.roomConv.get(k); };
+
+  async function ensureRoomConv(row, more) {
+    const s = roomConvSlot(row);
+    if (more) s.limit = Math.min(ROOM_MAX, s.limit + ROOM_STEP * 2);
+    else if (s.status === "ok" || s.status === "loading") return;
+    const req = ++s.req;
+    s.status = "loading"; s.error = "";
+    renderRoomsIfShowing();
+    try {
+      const data = await api("GET", `/api/channels/spaces/${enc(row.platform)}/${enc(row.thread_id)}/conversation?limit=${s.limit}`);
+      if (s.req !== req) return;
+      s.data = data; s.status = "ok"; if (!more) s.scrollEnd = true;
+    } catch (err) {
+      if (s.req !== req) return;
+      s.status = "error"; s.error = err.message || "Couldn't read the room.";
+    }
+    renderRoomsIfShowing();
+  }
+  const renderRoomsIfShowing = () => { if (dom && state.selected === HOME_KEY && state.homeTab === "rooms") renderHome(); };
+
+  async function loadSpaces() {
+    try { const d = await api("GET", "/api/channels/spaces"); state.spaces.data = d; state.spaces.error = ""; state.spaces.status = "ok"; }
+    catch (err) { state.spaces.error = err.message || "Couldn't read the rooms."; state.spaces.status = "error"; }
+    state.roomConv.clear();
+    renderHome();
+  }
+
+  function roomCard(row, active, onPick) {
+    const open = el("button", { type: "button", class: "ch-room" + (active ? " is-active" : ""), "data-room": roomKey(row), "aria-current": active ? "true" : null, onclick: onPick }, [
+      el("span", { class: "ch-room__ico", "aria-hidden": "true" }, [icon(row.platform === "instagram" ? "instagram" : "server")]),
+      el("span", { class: "ch-room__t" }, [
+        el("span", { class: "ch-room__name" }, roomTitle(row)),
+        el("span", { class: "ch-room__sub" }, [`${(PLATFORMS[row.platform] || {}).label || row.platform} · ${roomKindLabel(row.kind)}`, row.modified ? ` · ${dayLabel(dayOf(row.modified), localDay())}` : ""].join("")),
+      ]),
+      row.imported ? el("span", { class: "ch-room__tag" }, "imported") : (!row.saved ? el("span", { class: "ch-room__tag" }, "no log") : null),
+    ]);
+    return open;
+  }
+
+  function roomHeadSwitches(row) {
+    if (row.imported) return el("div", { class: "ch-row__note ch-row__note--info" }, [icon("info"), el("span", null, "Imported from a data export: a read-only history. Nothing here is live, so there is nothing to switch.")]);
+    const box = el("div", { class: "ch-room__switches" });
+    for (const [sw, label, hint] of [["log", "Saving", "Keep what's said here in this room's log."], ["ambient", "Reading other messages", "Jarvis sees what's said here without being mentioned (memory only)."]]) {
+      const st = roomSwitchState(row, sw, state.config, state.servers);
+      box.appendChild(srvRow(label, hint, st.on, st.lock, state.roomBusy.has(`${roomKey(row)}|${sw}`), (turnOn) => roomSwitch(row, sw, turnOn ? "inherit" : "off")));
+    }
+    return box;
+  }
+
+  function roomViewer(row) {
+    const s = roomConvSlot(row);
+    const box = el("div", { class: "ch-room-view", "data-room": roomKey(row) });
+    if (s.status === "idle") setTimeout(() => ensureRoomConv(row), 0);
+    const d = s.data;
+    box.appendChild(el("div", { class: "ch-room-view__head" }, [
+      el("div", { class: "ch-room-view__title" }, roomTitle(row)),
+      el("div", { class: "ch-room-view__tags" }, [tag((PLATFORMS[row.platform] || {}).label || row.platform, null, row.platform), tag(roomKindLabel(row.kind), null, null), row.imported ? tag("Imported", "limited", "download") : null]),
+    ]));
+    box.appendChild(roomHeadSwitches(row));
+    if (s.status === "idle" || (s.status === "loading" && !d)) { box.appendChild(loadingBlock("Reading the room…")); return box; }
+    if (s.status === "error" && !d) { box.appendChild(errorBlock(s.error, () => { s.status = "idle"; ensureRoomConv(row); })); return box; }
+    const info = d || { entries: [], total: 0, shown: 0, participants: [], denied: 0 };
+    box.appendChild(el("div", { class: "ch-conv__head" }, [
+      el("div", { class: "ch-row__hint" }, [convNote(info).replace("for them", "in this room"), info.denied ? ` ${info.denied} line${info.denied === 1 ? " was" : "s were"} turned away.` : ""]),
+      el("div", { class: "ch-conv__btns" }, [el("button", { type: "button", class: "btn btn--ghost btn--sm", disabled: s.status === "loading", onclick: () => { s.status = "idle"; ensureRoomConv(row); } }, [icon("refresh"), "Refresh"])]),
+    ]));
+    if ((info.participants || []).length) {
+      box.appendChild(el("div", { class: "ch-room-view__people", "aria-label": "People in this room" },
+        info.participants.slice(0, 12).map((who) => el("span", { class: "speaker-chip", title: `${who.messages || 0} message${who.messages === 1 ? "" : "s"}` }, who.name || (who.handle ? "@" + String(who.handle).replace(/^@+/, "") : "user\u2026" + String(who.user_id || "").slice(-4))))));
+    }
+    if (info.total > info.shown && s.limit < ROOM_MAX) box.appendChild(el("button", { type: "button", class: "btn btn--ghost btn--sm ch-conv__older", disabled: s.status === "loading", onclick: () => ensureRoomConv(row, true) }, "Show older messages"));
+    else if (info.total > info.shown) box.appendChild(el("div", { class: "ch-row__hint" }, `That's the most the panel shows (${ROOM_MAX}). The whole log is in the room's file: jarvis channels-space ${row.platform} ${row.thread_id}.`));
+    if (!(info.entries || []).length) { box.appendChild(el("div", { class: "ch-empty" }, [el("b", null, "Nothing saved here yet. "), "Messages appear once someone writes in this room while saving is on."])); return box; }
+    const list = el("div", { class: "ch-room-view__msgs" });
+    const today = localDay();
+    for (const g of groupByDay(info.entries)) {
+      list.appendChild(el("div", { class: "ch-day" }, dayLabel(g.day, today)));
+      const col = el("div", { class: "ch-conv" });
+      g.entries.forEach((e) => col.appendChild(messageNode(e, { room: true })));
+      list.appendChild(col);
+    }
+    box.appendChild(list);
+    if (s.scrollEnd) { s.scrollEnd = false; requestAnimationFrame(() => { list.scrollTop = list.scrollHeight; }); }
+    return box;
+  }
+
+  function roomsPane() {
+    const rows = roomsOf(state.spaces.data);
+    const f = state.roomFilter;
+    const pane = homePane("rooms", []);
+    const listBox = el("div", { class: "ch-rooms__list", role: "list" });
+    const shown = () => filterRooms(rows, f);
+    const open = () => { const list = shown(); return list.find((r) => roomKey(r) === state.roomSel) || list[0] || null; };
+    const viewBox = el("div", { class: "ch-rooms__view" });
+    function fill() {
+      listBox.textContent = "";
+      const list = shown(), cur = open();
+      if (!list.length) listBox.appendChild(el("div", { class: "ch-empty" }, rows.length ? "No room matches." : "No rooms yet."));
+      list.forEach((r) => listBox.appendChild(roomCard(r, !!cur && roomKey(r) === roomKey(cur), () => { state.roomSel = roomKey(r); renderHome(); })));
+    }
+    const kindBtn = (value, text) => el("button", { type: "button", role: "radio", "aria-checked": f.kind === value ? "true" : "false", id: `ch-rooms-kind-${value}`, onclick: () => { f.kind = value; renderHome(); } }, text);
+    const search = el("input", { type: "search", class: "ch-name-input ch-rooms__search", id: "ch-rooms-search", placeholder: "Search rooms", autocomplete: "off", spellcheck: "false", "aria-label": "Search rooms", value: f.search });
+    search.value = f.search;
+    search.addEventListener("input", () => { f.search = search.value; fill(); const cur = open(); viewBox.textContent = ""; viewBox.appendChild(cur ? roomViewer(cur) : emptyRoomView(rows)); });
+    pane.appendChild(el("div", { class: "ch-globals__note" }, "Everything Jarvis has saved from shared rooms: Discord server channels and threads, and Instagram group chats (live or imported). Read-only here; the switches change what is saved or read from now on."));
+    pane.appendChild(el("div", { class: "ch-rooms__bar" }, [
+      search,
+      el("div", { class: "ch-seg", role: "radiogroup", "aria-label": "Kind of room" }, [kindBtn("all", "All"), kindBtn("server", "Servers"), kindBtn("group", "Groups")]),
+      el("button", { type: "button", class: "btn btn--ghost btn--sm", title: "Reload the rooms", onclick: loadSpaces }, [icon("refresh")]),
+    ]));
+    if (state.spaces.status === "error" && !rows.length) { pane.appendChild(errorBlock(state.spaces.error, loadSpaces)); return pane; }
+    fill();
+    const cur = open();
+    viewBox.appendChild(cur ? roomViewer(cur) : emptyRoomView(rows));
+    pane.appendChild(el("div", { class: "ch-rooms" }, [listBox, viewBox]));
+    return pane;
+  }
+  const emptyRoomView = (rows) => el("div", { class: "ch-empty" }, rows.length ? "Pick a room to read it." : "Nothing is saved from a shared room yet. Rooms show up once someone writes in a server channel Jarvis is in, or after you import an Instagram export.");
+
   // _pure: the logic with no DOM, for tests/verify_channels_panel.js.
   global.JarvisChannels = {
     open, close,
@@ -3807,6 +4245,9 @@
              toolCallsLabel, untilLeft, TIME_LIMITS,
              stateFilterOptions, guildIdOk, guildName, guildChoices, guildPick,
              channelIdOk, channelInfo, channelLabel, channelChoices, channelPick,
-             homeTabs, platformState, HOME_KEY },
+             homeTabs, platformState, HOME_KEY,
+             GROUP_FLAGS, groupFlagOf, recallOn, usedInRooms, groupUseText, AMBIENT_DEFAULTS, ambientOf, ambientText, savingOn,
+             ROOM_KIND_LABEL, roomKindLabel, roomsOf, roomKey, roomTitle, filterRooms, roomForChannel, roomSwitchOf, serverSwitchOff,
+             roomSwitchState, roomSpeaker },
   };
 })(window);

@@ -256,6 +256,31 @@ def test_registration_and_web_routes():
           and "app.post(\"/api/channels/spaces/:platform/:threadId/conversation" not in server)
 
 
+def test_room_switches_in_the_listing():
+    """Channel spaces S11: each row reports the room's OWN Saving / Reading override so the panel
+    can draw the switches truthfully. `off` only when that room's override is a literal false."""
+    build()
+    rows = {r["thread_id"]: r for r in space_view.list_spaces()["spaces"]}
+    check("every row has switches, inherit by default",
+          rows and all(r.get("switches") == {"log": "inherit", "ambient": "inherit"} for r in rows.values()),
+          str({k: v.get("switches") for k, v in rows.items()}))
+    ok1, err1, _ = spaces.set_switch(DISCORD, "C1", "log", "off")
+    ok2, err2, _ = spaces.set_switch(INSTAGRAM, "ig-live", "ambient", "off")
+    check("the switches were written", ok1 and ok2, f"{err1} {err2}")
+    rows = {r["thread_id"]: r for r in space_view.list_spaces()["spaces"]}
+    check("a room switched off for saving shows it, and only that one",
+          rows["C1"]["switches"] == {"log": "off", "ambient": "inherit"}, str(rows["C1"]["switches"]))
+    check("a group switched off for reading shows it",
+          rows["ig-live"]["switches"] == {"log": "inherit", "ambient": "off"}, str(rows["ig-live"]["switches"]))
+    check("other rooms are untouched", rows["import-aaaa1111"]["switches"] == {"log": "inherit", "ambient": "inherit"})
+    ok3, err3, _ = spaces.set_switch(DISCORD, "C1", "log", "on")
+    rows = {r["thread_id"]: r for r in space_view.list_spaces()["spaces"]}
+    check("turning it back on removes the override", ok3 and rows["C1"]["switches"]["log"] == "inherit", err3)
+    check("a thread-keyed switch shows too",
+          spaces.set_switch(DISCORD, "C1", "ambient", "off", kind="thread")[0]
+          and {r["thread_id"]: r for r in space_view.list_spaces()["spaces"]}["C1"]["switches"]["ambient"] == "off")
+
+
 def main():
     for fn in [v for k, v in sorted(globals().items()) if k.startswith("test_")]:
         try:

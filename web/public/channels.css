@@ -828,3 +828,80 @@
 .ch-thinking{ display:flex; flex-wrap:wrap; align-items:center; gap:10px 16px; margin-top:8px; }
 .ch-thinking__lock{ display:flex; align-items:center; gap:6px; font-size:12px; color:var(--text-dim); cursor:pointer; }
 .ch-thinking__lock input{ accent-color: var(--accent); }
+
+/* ============================================================================
+ * Shared rooms (channel spaces S11): room settings on the platform cards, "In rooms" on a
+ * note / memory item, Reading + Saving rows on the Servers tab, and the Rooms tab.
+ * Tokens only, like the rest of this file, so every skin applies.
+ * ========================================================================= */
+
+/* Platform card: the room settings block */
+.ch-rs{ border-top: 1px solid var(--border); margin: 4px 12px 12px; padding-top: 10px; display: flex; flex-direction: column; gap: 4px; }
+.ch-rs__title{ font-size: 10.5px; letter-spacing: .14em; text-transform: uppercase; color: var(--text-dimmer); margin-bottom: 2px; }
+.ch-rs__block{ display: flex; flex-direction: column; gap: 6px; padding: 8px 0 2px; border-top: 1px dashed var(--border); margin-top: 4px; }
+.ch-rs__fields{ display: flex; flex-wrap: wrap; gap: 10px 14px; align-items: flex-end; }
+.ch-rs__field{ display: flex; flex-direction: column; gap: 4px; font-size: 11px; color: var(--text-dim); }
+.ch-rs__btns{ display: flex; gap: 8px; align-items: center; }
+.ch-num{
+  width: 92px; background: var(--bg-raised); color: var(--text); border: 1px solid var(--border-strong);
+  border-radius: var(--ch-radius); padding: 6px 8px; font: inherit; font-family: var(--font-mono); font-size: 12.5px;
+}
+.ch-num:focus{ outline: none; border-color: var(--accent); }
+.ch-num:disabled{ opacity: .55; }
+.ch-rs .ch-confirm{ margin-top: 4px; }
+
+/* "In rooms" on one note / memory item */
+.ch-notes--edit li.ch-note--groups{ flex-wrap: wrap; }
+.ch-groups{ flex: 1 0 100%; padding-left: 0; }
+.ch-groups__row{ display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; }
+.ch-groups__label{ font-size: 10.5px; letter-spacing: .12em; text-transform: uppercase; color: var(--text-dimmer); }
+.ch-groups__hint{ font-size: 11px; color: var(--text-dimmer); line-height: 1.4; flex: 1 1 200px; min-width: 0; }
+.ch-seg--sm button{ padding: 3px 10px; font-size: 10px; }
+.ch-groups .ch-confirm{ margin-top: 6px; }
+
+/* Servers tab: Reading / Saving under each channel, and the way into its conversation */
+.ch-chanx{ border-bottom: 1px dashed var(--border); padding-bottom: 4px; }
+.ch-chanx:last-child{ border-bottom: 0; }
+.ch-chanx .ch-srow--chan{ border-bottom: 0; }
+.ch-srow--sub{ padding-left: 14px; }
+.ch-srow--sub .ch-srow__label{ font-family: inherit; font-size: 11.5px; color: var(--text-dim); }
+.ch-chanx__btns{ padding: 2px 0 4px 14px; }
+
+/* Rooms tab */
+.ch-rooms__bar{ display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin: 10px 0 12px; }
+.ch-rooms__search{ flex: 1 1 180px; min-width: 0; font-family: var(--font-body, inherit); font-size: 13px; letter-spacing: 0; }
+.ch-rooms{ display: grid; grid-template-columns: minmax(220px, 300px) minmax(0, 1fr); gap: 14px; align-items: start; }
+.ch-rooms__list{ display: flex; flex-direction: column; gap: 6px; max-height: 70vh; overflow-y: auto; padding-right: 2px; }
+.ch-room{
+  --ch-c: var(--accent);
+  display: flex; align-items: center; gap: 10px; width: 100%; text-align: left; cursor: pointer; font: inherit; color: var(--text);
+  background: var(--bg-raised); border: 1px solid var(--border); border-left: 3px solid transparent; border-radius: var(--ch-radius); padding: 9px 10px;
+  transition: border-color .15s, background .15s;
+}
+.ch-room:hover{ border-color: var(--border-strong); }
+.ch-room.is-active{ border-left-color: var(--ch-c); background: color-mix(in srgb, var(--ch-c) 9%, var(--bg-raised)); }
+.ch-room:focus-visible{ outline: 2px solid var(--accent); outline-offset: 1px; }
+.ch-room__ico{ display: grid; place-items: center; width: 30px; height: 30px; flex-shrink: 0; border-radius: 50%; color: var(--ch-c); background: color-mix(in srgb, var(--ch-c) 12%, var(--bg-1)); }
+.ch-room__ico svg{ width: 16px; height: 16px; }
+.ch-room__t{ min-width: 0; flex: 1; display: flex; flex-direction: column; }
+.ch-room__name{ font-size: 13px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ch-room__sub{ font-size: 11px; color: var(--text-dimmer); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ch-room__tag{ font-size: 9.5px; letter-spacing: .1em; text-transform: uppercase; color: var(--text-dim); border: 1px solid var(--border-strong); border-radius: 999px; padding: 1px 7px; flex-shrink: 0; }
+.ch-room-view{ min-width: 0; display: flex; flex-direction: column; gap: 10px; }
+.ch-room-view__head{ display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; }
+.ch-room-view__title{ font-family: var(--font-display); font-size: 17px; letter-spacing: .03em; color: var(--text); min-width: 0; overflow-wrap: anywhere; }
+.ch-room-view__tags{ display: flex; flex-wrap: wrap; gap: 6px; }
+.ch-room__switches{ border: 1px solid var(--border); border-radius: var(--ch-radius); padding: 2px 12px; background: var(--bg-raised); }
+.ch-room__switches .ch-srow + .ch-srow{ border-top: 1px dashed var(--border); }
+.ch-room-view__people{ display: flex; flex-wrap: wrap; gap: 6px; }
+.ch-room-view__msgs{ max-height: 62vh; overflow-y: auto; padding-right: 4px; scroll-behavior: auto; }
+.ch-msg__meta .speaker-chip{ font-weight: 600; }
+
+@media (max-width: 900px){
+  .ch-rooms{ grid-template-columns: minmax(0, 1fr); }
+  .ch-rooms__list{ max-height: 34vh; }
+  .ch-room-view__msgs{ max-height: none; }
+}
+@media (prefers-reduced-motion: reduce){
+  .ch-room{ transition: none; }
+}

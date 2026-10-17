@@ -676,6 +676,9 @@ TOOL_SCHEMAS = [*CORE_TOOL_SCHEMAS, *PLAYNITE_AND_SPOTIFY, *DISCOVERY_TOOL_SCHEM
 # and TOOLS / tool_safety / confirmation are not involved at all.
 OWNER_ONLY_TOOLS = frozenset({
     "send_dm", "recent_dms",
+    # Channel spaces S10c (actions/recent_spaces.py): reads what OTHER people said in
+    # shared rooms (never a DM), so a guest is never offered it either.
+    "recent_spaces",
     # L.21-L.23 (actions/person_memory_tools.py): they manage what is kept
     # about OTHER people, so a guest is never offered them either.
     "person_remember", "person_forget", "person_instruct", "person_recall",

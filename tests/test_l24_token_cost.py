@@ -297,8 +297,9 @@ def test_discord_question_no_longer_offers_desktop():
     # Was 4. L.20 added send_dm to the channels group (notify_owner, recent_dms,
     # remember_sender, who_am_i_talking_to, send_dm). The point of this check is
     # "the channels group, not the 22-tool desktop group"; keep it exact so
-    # unplanned growth of the group is still noticed.
-    check("5267 prompt offers 5 tools, not 22", len(r.tools) == 5, (len(r.tools), r.tools))
+    # unplanned growth of the group is still noticed. Now 6: channel spaces S10c added
+    # recent_spaces (read the saved rooms; owner-only, never a DM).
+    check("5267 prompt offers 6 tools, not 22", len(r.tools) == 6, (len(r.tools), r.tools))
     check("no desktop tool is offered", not any(t in r.tools for t in ("click", "read_screen", "take_screenshot", "focus_window")), r.tools)
 
     full = system_tools.compact_schemas_for_prompt(system_tools.schemas_for_tools(r.tools))

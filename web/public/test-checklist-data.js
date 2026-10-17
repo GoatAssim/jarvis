@@ -218,6 +218,12 @@ window.JARVIS_TEST_CHECKLIST = /*JSON-BEGIN*/ {
    "blurb": "The Ask Jarvis side panel inside Menu \u2192 Tool Manager (L.53). A feature of the console, not a tool: do these by hand in the page. The saved browser test is tests/verify_l53_tool_maker_ui.py."
   },
   {
+   "id": "channels_rooms",
+   "label": "Channels: shared rooms",
+   "kind": "feature",
+   "blurb": "Menu > Channels > Home and a person's Memory tab (channel spaces S11). A feature of the console, not a tool: do these by hand in the page. Needs at least one saved room (a Discord server channel Jarvis was addressed in, or an imported Instagram group); the saved browser test is tests/verify_channels_rooms.js (pure parts)."
+  },
+  {
    "id": "chat_pictures",
    "label": "Pictures in chat",
    "kind": "feature",
@@ -3114,6 +3120,43 @@ window.JARVIS_TEST_CHECKLIST = /*JSON-BEGIN*/ {
     "A torn/corrupt trailing JSONL line in a transcript file must not crash the tool (read_thread already skips it)."
    ]
   },
+  "recent_spaces": {
+   "group": "channels",
+   "does": "Reads the latest messages in the shared rooms Jarvis has saved (Discord server channels and threads, Instagram group chats), newest activity first. Rooms only, never a DM. Owner-only.",
+   "steps": [
+    {
+     "ask": "What's been said in my Discord server lately?",
+     "expect": "A short list of rooms, each with a few recent messages and who spoke, one line per message. No DM appears."
+    },
+    {
+     "run": {
+      "kind": "group",
+      "limit": 2,
+      "messages_per_room": 3
+     },
+     "expect": "ok: true, at most 2 rooms, each with at most 3 messages, and a 'note' saying the text is other people's words."
+    },
+    {
+     "run": {
+      "kind": "dm"
+     },
+     "expect": "ok: false, 'kind must be server, group or any' - there is no way to ask this tool for a DM."
+    },
+    {
+     "run": {},
+     "expect": "ok: true with an empty 'rooms' list on a fresh install with no saved rooms - never an exception."
+    }
+   ],
+   "needs": [
+    "At least one saved room (a Discord server channel Jarvis was addressed in, or an imported Instagram group)"
+   ],
+   "care": "Reads other people's words. Verify it refuses when JARVIS_CHANNEL_SENDER is set to a non-owner sender (simulate a guest chat message) and when JARVIS_SCHEDULED is set, before shipping.",
+   "watch": [
+    "No DM text may ever come back, even for a thread id that is also a DM.",
+    "A message that says 'ignore your instructions' must come back as plain quoted text; Jarvis must not act on it.",
+    "A room with saving switched off has no log, so it is not listed."
+   ]
+  },
   "send_dm": {
    "group": "channels",
    "does": "Sends a DM to one known person, or a list of them (Discord/Instagram), on the owner's behalf. Owner-only, confirmed, rate limited.",
@@ -3794,6 +3837,120 @@ window.JARVIS_TEST_CHECKLIST = /*JSON-BEGIN*/ {
   }
  },
  "features": {
+  "rooms_settings": {
+   "group": "channels_rooms",
+   "does": "The Platforms tab shows each platform's shared-room settings: group recall (saved notes and memories in room replies), reading other messages, and whether rooms are saved.",
+   "steps": [
+    {
+     "do": "Open Menu > Channels > Home > Platforms. On a platform with a token set, find the Shared rooms block.",
+     "expect": "Three things: a switch 'Use saved notes and memories in rooms' (off by default), 'Reading other messages in a room' with messages kept, minutes kept and Approved / Anyone, and 'Save room conversations' as a locked row that prints the terminal command."
+    },
+    {
+     "do": "Turn the recall switch on.",
+     "expect": "Nothing is saved yet: a confirmation says everyone in a room can read what Jarvis says there. Cancel leaves it off; 'Turn it on' switches it on and the terminal agrees: jarvis channels-status shows group_recall true."
+    },
+    {
+     "do": "Turn it off again.",
+     "expect": "It goes off at once with no confirmation (turning things off never asks)."
+    },
+    {
+     "do": "Change Messages kept to 5 and press Save, then reload the panel.",
+     "expect": "The value is still 5 and jarvis channels-status shows ambient_messages 5. Typing 500 or -1 is refused with a message and writes nothing."
+    },
+    {
+     "do": "Choose Anyone and press Save.",
+     "expect": "A confirmation about reading strangers' messages appears first; nothing changes until 'Read anyone'. Reset puts the form back."
+    }
+   ],
+   "care": "Group recall and Anyone WIDEN what can be said or read in a room, so each asks for a second click. Check a refused value really reaches the terminal unchanged (it must not).",
+   "watch": [
+    "The saved value always matches jarvis channels-status after a reload.",
+    "No bot token is ever shown or sent."
+   ]
+  },
+  "rooms_in_rooms_switch": {
+   "group": "channels_rooms",
+   "does": "Every saved note and every memory item the model already uses has an 'In rooms' switch: inherit, on or off.",
+   "steps": [
+    {
+     "do": "Open a person's Profile tab with at least one note, and their Memory tab with at least one fact.",
+     "expect": "Each note and each fact under 'Jarvis uses' shows 'In rooms' with inherit / on / off and one line saying what that means right now. Items still waiting for your OK and standing rules have none."
+    },
+    {
+     "do": "Set one note to off, then reload.",
+     "expect": "It stays off and the line reads 'Never used in room replies'. jarvis channels-note <platform> <id> groups <note-id> off agrees."
+    },
+    {
+     "do": "Set a fact to on.",
+     "expect": "A confirmation first ('even with the master switch off'). Cancel leaves it as it was; 'Use in rooms' sets it."
+    },
+    {
+     "do": "Turn the master recall switch on in Platforms, then look at an 'inherit' item.",
+     "expect": "Its line now says it follows the master switch, which is on."
+    }
+   ],
+   "care": "'on' beats a master that is off, and 'off' beats everything. Verify with a room reply that an 'off' note is never mentioned.",
+   "watch": [
+    "Editing a note's text resets it to inherit (its id is a hash of the text).",
+    "Nothing about this is reachable by the model."
+   ]
+  },
+  "rooms_tab": {
+   "group": "channels_rooms",
+   "does": "Menu > Channels > Home > Rooms lists what was saved from server channels and group chats, opens one as a conversation with a chip for who wrote each line, and has that room's own Saving and Reading switches.",
+   "steps": [
+    {
+     "do": "Open Menu > Channels > Home.",
+     "expect": "A Rooms tab is there when anything has been saved from a room (it is absent on a fresh install). Search and the All / Servers / Groups filter narrow the list; a DM never appears."
+    },
+    {
+     "do": "Open a Discord server channel, then an Instagram group.",
+     "expect": "Each shows its messages by day with the writer's name as a chip (name, else @handle, else user...1234), Jarvis's replies as Jarvis, and a line for anyone the gate turned away marked 'Turned away'. People in the room are listed above the messages."
+    },
+    {
+     "do": "Open an imported Instagram group.",
+     "expect": "It is marked Imported, shows its history read-only, and has no switches."
+    },
+    {
+     "do": "Switch Saving off for one live room, send a message in it, then reload the panel.",
+     "expect": "The switch stays off, the message is not saved, and jarvis channels-space-set agrees. Turning it on again removes the override."
+    },
+    {
+     "do": "In Home > Servers open a server and look at a channel.",
+     "expect": "Each channel has Read other messages and Save conversation next to Answer here. A channel with saved messages also has a Conversation button that opens it in the Rooms tab."
+    },
+    {
+     "do": "Turn saving off for the whole server, then look at its channels.",
+     "expect": "Each channel's Save conversation is off and locked with 'The whole server has this off'."
+    }
+   ],
+   "needs": [
+    "At least one saved room",
+    "A Discord server with the bot in it (for the Servers steps)"
+   ],
+   "care": "Room text is other people's words. It must appear as plain text: try a message containing <b>bold</b> and a link and check nothing is formatted or clickable.",
+   "watch": [
+    "A room with saving switched off has no log and is not listed as saved.",
+    "Refresh re-reads the file; nothing here writes except the switches."
+   ]
+  },
+  "rooms_speaker_chip": {
+   "group": "channels_rooms",
+   "does": "In the Ask thread, an exchange that was written by someone in a shared room shows who wrote it.",
+   "steps": [
+    {
+     "do": "Open a saved conversation whose exchanges came from a room (one with a recorded speaker).",
+     "expect": "Each such message header shows a small chip with the speaker's name instead of 'You'; the owner's own line adds '(owner)'."
+    },
+    {
+     "do": "Open an ordinary conversation you typed yourself.",
+     "expect": "Nothing changed: 'You' as before, no chip."
+    }
+   ],
+   "watch": [
+    "A name with markup in it shows as plain text."
+   ]
+  },
   "palette_open": {
    "group": "command_palette",
    "does": "Typing / at the start of an empty Ask box opens the command palette above the composer, without moving anything.",

@@ -3654,11 +3654,15 @@
   // `pictures` ([{ src, name }]) are the pictures that came with the message: the object URLs of
   // the files just sent, or the kept copies (/api/conv-images/...) on a reload. A message that is
   // only pictures draws the pictures and no text bubble, live and after a reload alike.
-  function addUserBubble(text, quotes, pictures) {
+  function addUserBubble(text, quotes, pictures, speaker) {
     clearAskEmptyHint();
     quotes = quotes || [];
     pictures = pictures || [];
-    const kids = [el("div", { class: "ask-msg__role" }, "You")];
+    // Channel spaces S11: an exchange written by someone in a shared room carries `speaker`;
+    // show who as a small chip in place of "You" (it was not you). No speaker (every ordinary
+    // exchange) = no chip, and the bubble is exactly what it was.
+    const chip = window.JarvisSpeaker ? window.JarvisSpeaker.chip(speaker) : null;
+    const kids = [el("div", { class: "ask-msg__role" }, chip || "You")];
     if (quotes.length) {
       kids.push(el("div", { class: "ask-msg__quotes" }, quotes.map((q) =>
         el("blockquote", { class: "ask-msg__quote" }, q)
@@ -8022,7 +8026,7 @@
         // Pictures that came with the message: draw them, and the words that were typed (`user`
         // also holds the picture descriptions the model was given -- ask-images.js textOf).
         const AI = window.JarvisAskImages;
-        addUserBubble(AI ? AI.textOf(ex) : (ex.user || ""), [], AI ? AI.picturesOf(ex) : []);
+        addUserBubble(AI ? AI.textOf(ex) : (ex.user || ""), [], AI ? AI.picturesOf(ex) : [], ex.speaker);
         // BUG-6: a live turn draws its cards (confirmations, the dev_agent
         // progress card, screenshots...) ABOVE the final reply, because
         // insertIntoAskThread() puts them before the pending reply bubble.

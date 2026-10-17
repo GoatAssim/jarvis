@@ -1318,6 +1318,16 @@ body.has-sequence .jui-toasts{ bottom: var(--seq-clear, 90px); } /* "Added to se
 }
 .ask-msg--jarvis .ask-msg__role{ color: var(--accent-soft); }
 
+/* Channel spaces S11: who wrote a line in a shared room (speaker-chip.js). */
+.speaker-chip{
+  display: inline-flex; align-items: center; max-width: 100%; padding: 1px 9px; border-radius: 999px;
+  border: 1px solid color-mix(in srgb, var(--accent) 40%, var(--border));
+  background: color-mix(in srgb, var(--accent) 10%, var(--bg-raised));
+  color: var(--text); font-size: 11px; letter-spacing: .02em; text-transform: none; line-height: 1.6;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.speaker-chip--owner{ border-color: var(--accent); color: var(--accent); }
+
 .ask-msg__bubble{
   padding: 10px 13px; border-radius: 2px; font-size: 14px; line-height: 1.55;
   word-break: break-word;

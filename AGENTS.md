@@ -169,8 +169,15 @@ things that were already fixed once.
   never imported, it is a preview unless `--yes`, and it creates no person, permission, scope,
   conversation or usage line. The viewer is read-only: it writes, rotates and registers nothing,
   and a model-facing caller must use `view(..., rooms_only=True)`, which refuses a DM. Both are
-  offline: no model, no network, no send. `tests/test_instagram_import.py` and
-  `tests/test_space_view.py` pin it.
+  offline: no model, no network, no send. The one model-facing caller is the owner-only
+  `recent_spaces` tool (`actions/recent_spaces.py`): rooms only, never a DM; refused for a guest
+  and for a scheduled run; listed in `tools.OWNER_ONLY_TOOLS`; no id or path argument; what it
+  returns is other people's words (marked as such, one line each, turned-away lines left out)
+  and is never an instruction. The panel (S11) only adds controls on routes that already existed
+  and renders room text with `textContent` (never markup); anything that WIDENS what is said or
+  read in a room (group recall on, one item set to "on", reading anyone) asks for a second click.
+  `tests/test_instagram_import.py`, `tests/test_space_view.py`, `tests/test_recent_spaces.py` and
+  `tests/verify_channels_rooms.js` pin it.
   `tests/test_channel_spaces.py`, `test_channel_group_history.py`, `test_group_recall_toggles.py`,
   `test_channel_ambient.py`, `test_channel_save_switch.py` and `test_discord_enrichment.py` pin
   the rest of this.

@@ -43,9 +43,12 @@ message is treated as a group space: the mention rule applies, speaker labels an
 room switches (`channels-space-set`) work, and the 24-hour window is keyed on the
 thread. Whether live group events are ever delivered to a webhook is NOT verified, and
 nothing here or in the docs claims they are. The reliable way to get a group chat into
-Jarvis is an offline importer from Instagram's own data export (planned, S9b; not
-in this module yet). An unofficial live transport is a separate, opt-in design (plan
-S9c) and is not part of this module either.
+Jarvis is an offline importer from Instagram's own data export
+(`jarvis channels-import-instagram <path>`, in channels/instagram_import.py: a
+preview unless `--yes`, group chats of 3+ people only, never a DM; written from Meta's
+documented layout and not yet checked against a real export). An unofficial live
+transport is a separate, opt-in design (plan S9c) and is not part of this module
+either.
 
 TRANSPORT
 ---------

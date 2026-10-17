@@ -47,11 +47,32 @@ def _fail(message, **extra):
     return {"ok": False, "error": message, **extra}
 
 
+def _room_switches(scopes, row_kind, thread_id):
+    """The room's own Saving / Reading overrides, `inherit` or `off` (a room can only be
+    switched OFF; `on` removes the override), read from the same `scopes` block the gate
+    reads. A Discord thread is keyed `thread:<id>`, every other room `channel:<id>`; both
+    are checked so a switch written either way shows. Read-only, never raises (channel
+    spaces S11: the panel needs the state to draw the switch truthfully)."""
+    out = {"log": "inherit", "ambient": "inherit"}
+    try:
+        from . import servers
+        for scope_kind in ("channel", "thread"):
+            if servers._override(scopes, scope_kind, thread_id, "log_conversations") is False:
+                out["log"] = "off"
+            if servers._override(scopes, scope_kind, thread_id, "ambient") is False:
+                out["ambient"] = "off"
+    except Exception:  # noqa: BLE001 - a broken config must not break the list
+        pass
+    return out
+
+
 def list_spaces(platform=None, kind=None):
     """`{ok, platform, kind, count, truncated, spaces: [row]}`, newest activity first.
 
     Row: platform, thread_id, kind, title, imported, speakers (how many the registry has
-    seen, None when unregistered), bytes (the whole log), modified, saved.
+    seen, None when unregistered), bytes (the whole log), modified, saved, switches
+    (`{log, ambient}`: `off` when that room's own Saving / Reading switch is off, else
+    `inherit`; the panel draws its switches from this).
     `kind` narrows the list: `server` (channels and threads), `group`, `dm`,
     `server_channel` or `server_thread`; with none, every room and no DM."""
     if platform and platform not in PLATFORMS:
@@ -64,6 +85,12 @@ def list_spaces(platform=None, kind=None):
                          spaces=[], count=0)
     rows = []
     for name in ([platform] if platform else list(PLATFORMS)):
+        try:
+            from . import config as channel_config
+            scopes = channel_config.platform_config(name).get("scopes")
+            scopes = scopes if isinstance(scopes, dict) else {}
+        except Exception:  # noqa: BLE001
+            scopes = {}
         registry = {transcript._safe_name(key): (key, rec)
                     for key, rec in spaces.read(name).items() if isinstance(rec, dict)}
         listed = set()
@@ -79,7 +106,8 @@ def list_spaces(platform=None, kind=None):
                 "imported": bool(rec and rec.get("imported")),
                 "speakers": len(rec.get("speakers") or []) if rec else None,
                 "bytes": item.get("bytes") or 0, "modified": item.get("modified") or "",
-                "saved": True})
+                "saved": True,
+                "switches": _room_switches(scopes, item.get("space") or "", raw)})
         for base, (raw, rec) in registry.items():
             if base in listed or rec.get("kind") not in wanted:
                 continue
@@ -87,7 +115,8 @@ def list_spaces(platform=None, kind=None):
                 "platform": name, "thread_id": raw, "kind": rec.get("kind") or "",
                 "title": str(rec.get("title") or ""), "imported": bool(rec.get("imported")),
                 "speakers": len(rec.get("speakers") or []), "bytes": 0,
-                "modified": str(rec.get("last_seen") or ""), "saved": False})
+                "modified": str(rec.get("last_seen") or ""), "saved": False,
+                "switches": _room_switches(scopes, rec.get("kind") or "", raw)})
     rows.sort(key=lambda r: r["modified"], reverse=True)
     return {"ok": True, "platform": platform or "", "kind": kind or "",
             "count": min(len(rows), MAX_ROWS), "truncated": len(rows) > MAX_ROWS,

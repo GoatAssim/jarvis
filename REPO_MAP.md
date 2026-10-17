@@ -207,7 +207,10 @@ jarvis-cli/jarvis/
         space_view.py     channel spaces S10a: READ-ONLY `list_spaces(platform, kind)` and
                           `view(platform, thread_id, limit, rooms_only)` over the transcripts +
                           spaces.json; behind `channels-spaces` / `channels-space` and the two
-                          GET routes. `rooms_only=True` refuses a DM (for a model-facing tool)
+                          GET routes. `rooms_only=True` refuses a DM (for a model-facing tool).
+                          S11: each listing row also carries `switches` = {log, ambient}, `off` when
+                          that room's own override is a literal false (read from the config's
+                          `scopes`, never written), so the panel draws the room switches truthfully
         instagram_import.py  channel spaces S9b: offline importer for an Instagram "Download your
                           information" export; GROUP chats (3+ people) only, preview unless
                           `--yes`, idempotent, grants nothing (`channels-import-instagram`).
@@ -339,6 +342,12 @@ jarvis-cli/jarvis/
                               `jarvis calendar-admin`, one JSON in / one JSON out; owns every rule)
         conv_search_tools.py  notify_owner.py
         recent_dms.py         read-only, owner-only: who DMed the owner
+        recent_spaces.py      channel spaces S10c: read-only, owner-only, not while unattended:
+                              what was said lately in the saved ROOMS (server channels, group
+                              chats), never a DM. Reads only through
+                              `space_view.view(..., rooms_only=True)`; no id argument; clipped
+                              one-line text, refused lines left out, result marked as other
+                              people's words
         send_dm.py            NEW (L.20) — DM ONE known person; owner-only, confirm-gated,
                               rate-limited (~/.jarvis/channels/dm_sends.json), refuses unattended
         channel_people.py     NEW — remember_sender / who_am_i_talking_to
@@ -400,6 +409,10 @@ web/
     public/app-icon.js           L.48: browser-tab icon = the skin's logo in the skin's colour; a distinct
                                  "working" icon (turning arc + badge, in the skin's accent) while a run is in flight;
                                  transparent background (no tile)
+    public/speaker-chip.js       channel spaces S11: `JarvisSpeaker.label/chip` -- the label the model reads for a
+                                 room line (name, else @handle, else user...last4, "(owner)" suffix; same rules as
+                                 channels/space.py speaker_label) as a small chip; used by the Ask thread replay
+                                 (app.js `addUserBubble(..., speaker)`) when an exchange has `speaker`. Text only.
     public/channels-panel.js/.css  Menu -> Channels (L.36 rework): per-person, Test-Checklist-style
                                  (people list with a pinned "Home" | Profile + Permissions tabs for a
                                  person, or for Home: Platforms / Servers / Turned away / Global
@@ -408,6 +421,17 @@ web/
                                  L.36-P4/P5: a Quick setups row (preview, then Apply) on the
                                  Permissions tab, and "Select people..." for a bulk editor
                                  (/api/channels/bulk, /api/channels/people/:p/:id/preset).
+                                 Channel spaces S11 (shared rooms, all on routes that already
+                                 existed; the panel only adds controls): Platforms tab -> a "Shared
+                                 rooms" block (group recall master, reading other messages, saving
+                                 shown read-only with its terminal command); every note and every
+                                 memory item Jarvis uses -> an "In rooms" inherit/on/off control;
+                                 Servers tab -> Read other messages + Save conversation per server and
+                                 channel and a Conversation button; a Rooms tab (only once a room has
+                                 been saved) listing server channels, threads and Instagram groups
+                                 (live or imported) with search, kind filter, a speaker chip per line
+                                 and each room's own Saving / Reading switches. "On" choices that
+                                 WIDEN (recall, one item, reading anyone) ask for a second click.
                                  Pure helpers in JarvisChannels._pure. Tokens never pass through it.
     public/mcp-servers.js/.css   Menu -> MCP Servers (L.31 rework): server cards with
                                  on/off + Trusted switches, per-server Refresh,
@@ -845,6 +869,7 @@ silently never runs.
 | `test_channel_save_switch.py` | channel spaces S7 / D4: the per-room "don't save" switch (`log` on `channels-server-set`, `channels-space-set` / `spaces.set_switch` by thread id on any platform) -- nothing saved for a muted server / channel / thread / Instagram group and only there, still answered, usage counts kept, only a literal false counts when read, never writes true, never touches access, gate verdict unchanged, read model + change log, CLI, the web route |
 | `test_discord_enrichment.py` | channel spaces S8: Discord adapter enrichment with fake objects -- readable mention tokens (`@Name`, `@role`, `#channel`; unknown ids keep `@id`; names cannot forge a label), author / thread names, reply-to from the already-resolved original (never fetched), attachment count, none of it read by the gate, approvals still go to the owner's DM |
 | `test_instagram_import.py` | channel spaces S9b: the export importer -- double-encoded text repaired, ids, preview writes nothing, only group chats (3+ people) and never a DM, record shape (no gate fields), only the thread logs + spaces.json appear, config files byte-identical, idempotent and gap-filling, real-time listing order, log rotation loses nothing, spaces.rebuild keeps the imported mark, bad input reported, CLI |
+| `test_recent_spaces.py` | channel spaces S10c: the `recent_spaces` tool -- rooms only and never a DM (also when the listing wrongly offers one), owner-only and refused for a guest / a scheduled run, not offered to a guest, bounded and one-line text, turned-away lines left out, the title filter and limits, routing, reading changes no file |
 | `test_space_view.py` | channel spaces S10a/b: `list_spaces` / `view` -- rooms only by default, kind and platform filters, unsaved rooms, `rooms_only` refuses a DM, reading changes no file (hashes + mtimes), CLI arguments, the two read-only GET routes (static check) |
 | `test_instagram_group_info.py` | channel spaces S9a: `_group_info` accepts exactly the old group shapes and falls back to a DM for anything else, one log line for the first group payload, group window keyed on the thread, docstring makes no live-delivery claim |
 | `test_allowed_guilds.py` | L.36-P17: `allowed_guilds` editor -- add (preview-first when it turns the filter on or the id is unseen), remove (the LAST entry is refused even with confirm), checked against the REAL `permissions.decide`, one-key-only writes, change log, `channels-guilds`, and a static check of the `server.js` route |
@@ -861,6 +886,7 @@ silently never runs.
 | `verify_l36_pack_ui.py` (`python3`) | L.36-P8/P9/P13/P14/P16 panels + the add-person panel in a real browser against real backend output (`_channels_pack_fixture.py`); SKIPs without playwright + Chromium |
 | `verify_l36_guilds_ui.py` (`python3`) | L.36-P17 in a real browser against real backend output: Home's Platforms tab shows the status cards, the Servers tab scrolls 40 servers inside its own box, the status dropdown, and the allowed-servers editor (preview, cancel, confirm, last entry locked); SKIPs without playwright + Chromium |
 | `verify_l36_insights_ui.py` (`python3`) | L.36-P1/P2/P3 tabs in a real browser against real backend output (`_channels_fixture.py`); SKIPs without playwright + Chromium |
+| `verify_channels_rooms.js` (`node`) | channel spaces S11: the shared-room helpers in `channels-panel.js` ("In rooms" rule = `recall_allowed`, reading settings = `ambient_limits`, room filter, which room switch is locked and why, who wrote a line, the Rooms tab) and `speaker-chip.js` (same label rules as `space.speaker_label`), plus static checks that the panel only calls routes `server.js` has, adds no markup from text and loads the chip before `app.js` |
 | `verify_channels_panel.js` (`node`) | L.36: `channels-panel.js` pure helpers (initials, hue, relative time, list filters and search, tool-scope diffing/grouping, and that only fixed icon strings reach `innerHTML`) |
 | `test_prompt_cache.py` | the static/dynamic prompt split |
 | `test_schemas_for_tools.py` | router ↔ catalog consistency |
