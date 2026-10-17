@@ -36,7 +36,7 @@ import json
 import os
 import re
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
 from . import PLATFORMS
@@ -74,8 +74,15 @@ def thread_path(platform, thread_id):
 def _rotate_if_needed(path):
     try:
         if path.exists() and path.stat().st_size > MAX_BYTES:
-            stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-            path.rename(path.with_suffix(f".{stamp}.jsonl"))
+            when = datetime.now()
+            target = path.with_suffix(f".{when:%Y%m%d-%H%M%S}.jsonl")
+            # A bulk writer (instagram_import.py) can fill a log twice inside one second.
+            # rename() onto an existing file would overwrite it on POSIX (losing a whole
+            # rotated log) and fail on Windows (never rotating), so take the next free second.
+            while target.exists():
+                when += timedelta(seconds=1)
+                target = path.with_suffix(f".{when:%Y%m%d-%H%M%S}.jsonl")
+            path.rename(target)
     except OSError:
         pass  # a failed rotate must not stop the append
 
@@ -517,6 +524,10 @@ def _room_entry(record, thread_id):
             "attachments": int(record.get("attachments") or 0)
                            if str(record.get("attachments") or "0").isdigit() else 0,
         })
+        if record.get("imported") is True:
+            # Written by an importer (instagram_import.py), not received live: there
+            # was no gate decision, so `allowed` / `stage` above are None.
+            entry["imported"] = True
         reply = _reply_to_view(record.get("reply_to"))
         if reply:
             entry["reply_to"] = reply
@@ -569,6 +580,11 @@ def read_space(platform, thread_id, limit=100):
     records = [r for r in _read_records(paths) if r.get("dir") in ("in", "out")]
     if not records:
         return result
+    if any(r.get("imported") is True for r in records):
+        # An importer can fill a gap on a later run, so for these rooms file order is not
+        # time order. (Stable: equal times keep their order. Live rooms are never sorted:
+        # their lines are appended as they happen, and a clock change must not reorder them.)
+        records.sort(key=lambda r: str(r.get("at") or ""))
     inbound = [r for r in records if r.get("dir") == "in"]
     try:
         from . import spaces

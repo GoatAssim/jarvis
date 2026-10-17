@@ -105,7 +105,7 @@ jarvis-cli/jarvis/
     tool_registry.py      static: groups, keywords, per-group guidance
     tools.py              the full schema catalog + search_tools
     tool_loader.py        auto-discovery of actions/ and ~/.jarvis/tools/
-    checklist_schema.py   shape + validator for a Test Checklist entry (shipped file and module-supplied alike)
+    checklist_schema.py   shape + validator for a Test Checklist entry (shipped file and module-supplied alike); also validate_panels() for the shipped "panels" map and the shipped-only "open" step
     tool_safety.py        which tools need confirmation  (DO NOT drive-by edit)
     tool_result_shaping.py  trims a tool result before it goes back to the model
     tool_diagnosis.py     NEW — explains a FAILED tool call and names the fix.
@@ -202,7 +202,16 @@ jarvis-cli/jarvis/
                           addressed messages register a room, nothing reads it for a decision.
                           `set_switch(platform, thread_id, switch, value, kind)` (S7) sets one
                           room's switches (enabled / tools / mention / ambient / log) on any
-                          platform
+                          platform; `register_imported(...)` (S9b) registers a room an
+                          importer wrote lines for (`imported: true`, merges on a re-import)
+        space_view.py     channel spaces S10a: READ-ONLY `list_spaces(platform, kind)` and
+                          `view(platform, thread_id, limit, rooms_only)` over the transcripts +
+                          spaces.json; behind `channels-spaces` / `channels-space` and the two
+                          GET routes. `rooms_only=True` refuses a DM (for a model-facing tool)
+        instagram_import.py  channel spaces S9b: offline importer for an Instagram "Download your
+                          information" export; GROUP chats (3+ people) only, preview unless
+                          `--yes`, idempotent, grants nothing (`channels-import-instagram`).
+                          Written from Meta's documented layout, not checked against a real export
         transcript.py     per-thread logs + cooldown state. L.36-P1: outbound lines carry
                           `to_user`, and `read_person()` assembles one person's slice of the
                           thread files (a rotated copy counts as its thread; an older group
@@ -362,7 +371,9 @@ web/
     public/test-checklist-data.js  the SHIPPED checklist catalogue: an entry per
                                  tool that ships with jarvis. Edit it whenever you
                                  add/rename/remove one. A tool module can carry its
-                                 own entry instead (TEST_CHECKLIST) - see checklist_schema.py
+                                 own entry instead (TEST_CHECKLIST) - see checklist_schema.py.
+                                 Also holds "features" (not tools) and "panels" (Menu /
+                                 Settings targets an {"open": id} step jumps to)
     public/test-checklist.css    its styling (reuses the debug-* panel chrome)
     public/daemons.js/.css       Menu -> Daemons (Part H.1 rework: own file,
                                  same debug-*/menu-* chrome as Test Checklist)
@@ -460,7 +471,7 @@ Everything is under `~/.jarvis/`:
 | `tasks/` | tasks.py | one file per long-running task |
 | `channels.json` | channels/config.py | both platforms, all allowlists |
 | `channels/directory.json` | channels/directory.py | @handle → id |
-| `channels/spaces.json` | channels/spaces.py | channel spaces S2: a label cache of the server channels / threads / group chats Jarvis was addressed in (kind, title, names, speaker ids). Rebuildable from the transcripts (`spaces.rebuild`); grants and gates nothing |
+| `channels/spaces.json` | channels/spaces.py | channel spaces S2: a label cache of the server channels / threads / group chats Jarvis was addressed in (kind, title, names, speaker ids). Rebuildable from the transcripts (`spaces.rebuild`); grants and gates nothing. S9b: `instagram_import.py` also registers imported group chats here (`imported: true`) |
 | `channels/people.json` | channels/people.py | who each person is (name, notes, follow state, avatar URL) |
 | `channels/user_perms.json` | channels/user_perms.py | per-person tool scope + "Jarvis may DM them" + `tools_until` (L.36-P6 deadline, epoch seconds); only non-default values stored; unreadable = fail closed |
 | `channels/people/<key>/episodes_done.json` | channels/episodes.py | L.21 P4: which conversations were already summarized (thread + first timestamp, no text); deleted with the person |
@@ -833,6 +844,8 @@ silently never runs.
 | `test_channel_ambient.py` | channel spaces S6a / D5: `permissions.ambient_ok` truth table (the gate verdict itself is untouched), the in-memory buffer (caps, expiry, clipping, dedupe, room cap), nothing written anywhere, the Discord hook, the untrusted tail block on the next mention (not in a DM / other room / when switched off), the `ambient` switch, the `ambient_*` settings, the change log |
 | `test_channel_save_switch.py` | channel spaces S7 / D4: the per-room "don't save" switch (`log` on `channels-server-set`, `channels-space-set` / `spaces.set_switch` by thread id on any platform) -- nothing saved for a muted server / channel / thread / Instagram group and only there, still answered, usage counts kept, only a literal false counts when read, never writes true, never touches access, gate verdict unchanged, read model + change log, CLI, the web route |
 | `test_discord_enrichment.py` | channel spaces S8: Discord adapter enrichment with fake objects -- readable mention tokens (`@Name`, `@role`, `#channel`; unknown ids keep `@id`; names cannot forge a label), author / thread names, reply-to from the already-resolved original (never fetched), attachment count, none of it read by the gate, approvals still go to the owner's DM |
+| `test_instagram_import.py` | channel spaces S9b: the export importer -- double-encoded text repaired, ids, preview writes nothing, only group chats (3+ people) and never a DM, record shape (no gate fields), only the thread logs + spaces.json appear, config files byte-identical, idempotent and gap-filling, real-time listing order, log rotation loses nothing, spaces.rebuild keeps the imported mark, bad input reported, CLI |
+| `test_space_view.py` | channel spaces S10a/b: `list_spaces` / `view` -- rooms only by default, kind and platform filters, unsaved rooms, `rooms_only` refuses a DM, reading changes no file (hashes + mtimes), CLI arguments, the two read-only GET routes (static check) |
 | `test_instagram_group_info.py` | channel spaces S9a: `_group_info` accepts exactly the old group shapes and falls back to a DM for anything else, one log line for the first group payload, group window keyed on the thread, docstring makes no live-delivery claim |
 | `test_allowed_guilds.py` | L.36-P17: `allowed_guilds` editor -- add (preview-first when it turns the filter on or the id is unseen), remove (the LAST entry is refused even with confirm), checked against the REAL `permissions.decide`, one-key-only writes, change log, `channels-guilds`, and a static check of the `server.js` route |
 | `test_channel_timed_and_instruction.py` | L.36-P6 / P12: the `tools_until` deadline (garbage reads as passed, resolver is read-only), grant refusals, `expire_due` + its change-log reason, manual switches / block / forget / `channels-allow|deny` ending a countdown, the gateway sweep, the Test tab's wording, and the instruction (cap, one line, owner refused, prompt framing, not reachable by a guest) |

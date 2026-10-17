@@ -62,16 +62,30 @@ in addition to ask / run. `do` is for features only; a tool's own TEST_CHECKLIST
 (extract_supplied below) never allows it. Features are not tools: the
 tool-coverage tests ignore them, and nothing fakes a tool to hold one.
 
+PANEL STEPS (Menu / Settings targets)
+-----------------------------------
+The shipped file's top-level "panels" maps an id to a Menu item or a Settings
+section. A step {"open": "<panel id>", "expect": ...} in a SHIPPED entry (tool or
+feature) opens it from the checklist. validate_entry(allow_open=True, panels=...)
+accepts these; a tool module's TEST_CHECKLIST never does. validate_panels() checks
+the map itself.
+
 Pure functions, no I/O, no imports from the rest of jarvis: safe to import from
 tool_loader at discovery time (see actions/_template.py > SAFE IMPORTS).
 """
 
 import json
+import re
 
 ENTRY_KEYS = {"group", "does", "steps", "needs", "os", "care", "watch"}
 STEP_KEYS = {"ask", "run", "expect"}
 FEATURE_STEP_KEYS = STEP_KEYS | {"do"}      # L.19: features only
 GROUP_META_KEYS = {"label", "blurb"}
+# Panel targets (the shipped file's top-level "panels"): a step {"open": "<panel id>"}
+# opens a Menu panel or a Settings section. Shipped data only -- a tool module never gets one.
+PANEL_KEYS = {"label", "menu", "settings", "tab"}
+PANEL_ID_RE = re.compile(r"^[a-z][a-z0-9-]{0,39}$")
+MAX_OPEN_ID = 60
 
 # Generous ceilings — the shipped catalogue's longest fields are a fraction of
 # these. They exist so one runaway module can't turn every GET /api/tools (which
@@ -91,15 +105,18 @@ def _text(v, limit):
     return isinstance(v, str) and bool(v.strip()) and len(v) <= limit
 
 
-def validate_entry(name, entry, allow_do=False):
+def validate_entry(name, entry, allow_do=False, allow_open=False, panels=None):
     """Problems with one entry, as a list of human-readable strings (empty =
     fine). Does NOT judge `group` — whether a group id exists is a question
-    for the caller (the shipped file checks its own "groups" list; a module's
+    for the caller (the shipped file checks its own \"groups\" list; a module's
     group is its TOOL_GROUP by construction).
 
-    allow_do=True (L.19, the shipped file's "features" only) additionally
-    accepts {"do": "<manual instruction>", "expect": ...} steps; a step then
-    needs exactly one of ask / run / do."""
+    allow_do=True (L.19, the shipped file's \"features\" only) additionally
+    accepts {\"do\": \"<manual instruction>\", \"expect\": ...} steps.
+    allow_open=True (shipped file only) additionally accepts
+    {\"open\": \"<panel id>\", \"expect\": ...} steps. If `panels` (the file's
+    \"panels\" object) is given, an open step must name one of its keys.
+    A step then needs exactly one of its action keys (ask / run / do / open)."""
     problems = []
     if not isinstance(entry, dict):
         return [f"{name}: entry must be an object, not {type(entry).__name__}"]
@@ -118,27 +135,41 @@ def validate_entry(name, entry, allow_do=False):
     elif len(steps) > MAX_STEPS:
         problems.append(f"{name}: too many steps ({len(steps)} > {MAX_STEPS})")
 
+    allowed_keys = set(STEP_KEYS)
+    if allow_do:
+        allowed_keys.add("do")
+    if allow_open:
+        allowed_keys.add("open")
+    known_panels = panels if isinstance(panels, dict) else None
+
     seen = set()
     for i, s in enumerate(steps[:MAX_STEPS], 1):
         if not isinstance(s, dict):
             problems.append(f"{name} step {i}: must be an object")
             continue
-        allowed_keys = FEATURE_STEP_KEYS if allow_do else STEP_KEYS
         bad = sorted(set(s) - allowed_keys)
         if bad:
             problems.append(f"{name} step {i}: unknown key(s) {bad} (allowed: {', '.join(sorted(allowed_keys))})")
         has_ask = isinstance(s.get("ask"), str) and bool(s["ask"].strip())
         has_run = isinstance(s.get("run"), dict)
         has_do = allow_do and isinstance(s.get("do"), str) and bool(s["do"].strip())
-        if (has_ask + has_run + has_do) != 1:
+        has_open = allow_open and isinstance(s.get("open"), str) and bool(s["open"].strip())
+        count = has_ask + has_run + has_do + has_open
+        if count != 1:
             problems.append(
                 f"{name} step {i}: needs exactly one of 'ask' (text), 'run' (object)"
                 + (" or 'do' (text)" if allow_do else "")
+                + (" or 'open' (a panel id)" if allow_open else "")
             )
         if has_ask and len(s["ask"]) > MAX_STEP_TEXT:
             problems.append(f"{name} step {i}: 'ask' is longer than {MAX_STEP_TEXT} characters")
         if has_do and len(s["do"]) > MAX_STEP_TEXT:
             problems.append(f"{name} step {i}: 'do' is longer than {MAX_STEP_TEXT} characters")
+        if has_open:
+            if len(s["open"]) > MAX_OPEN_ID:
+                problems.append(f"{name} step {i}: 'open' is longer than {MAX_OPEN_ID} characters")
+            elif known_panels is not None and s["open"] not in known_panels:
+                problems.append(f"{name} step {i}: 'open' names {s['open']!r}, which is not a panel in the file's \"panels\"")
         if has_run:
             try:
                 run_json = json.dumps(s["run"], sort_keys=True)
@@ -150,8 +181,15 @@ def validate_entry(name, entry, allow_do=False):
         if not _text(s.get("expect"), MAX_STEP_TEXT):
             problems.append(f"{name} step {i}: missing 'expect' (a non-empty string of at most {MAX_STEP_TEXT} characters)")
         # Ticks are keyed by the step's text, so two identical steps would tick together.
-        if (has_ask + has_run + has_do) == 1:
-            key = s["ask"] if has_ask else s["do"] if has_do else json.dumps(s.get("run"), sort_keys=True, default=str)
+        if count == 1:
+            if has_ask:
+                key = s["ask"]
+            elif has_do:
+                key = s["do"]
+            elif has_open:
+                key = "open:" + s["open"]
+            else:
+                key = json.dumps(s.get("run"), sort_keys=True, default=str)
             if key in seen:
                 problems.append(f"{name}: duplicate step {key!r}")
             seen.add(key)
@@ -172,6 +210,55 @@ def validate_entry(name, entry, allow_do=False):
     if "group" in entry and not (isinstance(entry["group"], str) and entry["group"].strip()):
         problems.append(f"{name}: 'group' must be a non-empty string")
 
+    return problems
+
+
+def validate_panels(panels, menu_ids=None, settings_sections=None, advanced_tabs=None):
+    """Problems with the shipped file's top-level \"panels\" object: panel id ->
+    {\"label\": ..., \"menu\": <Menu item DOM id>}  or  {\"label\": ...,
+    \"settings\": <Settings section id>, \"tab\": <Advanced tab, optional>}.
+
+    Exactly one of \"menu\" / \"settings\". If menu_ids / settings_sections /
+    advanced_tabs are given, the target must be one of them (the caller reads
+    index.html and settings.js for those, so this module stays pure)."""
+    if not isinstance(panels, dict) or not panels:
+        return ["'panels' must be a non-empty object of panel id -> target"]
+    problems = []
+    for pid, p in panels.items():
+        if not isinstance(pid, str) or not PANEL_ID_RE.match(pid):
+            problems.append(f"panel {pid!r}: id must be lowercase letters, digits and dashes, starting with a letter")
+            continue
+        if not isinstance(p, dict):
+            problems.append(f"panel {pid!r}: must be an object, not {type(p).__name__}")
+            continue
+        unknown = sorted(set(p) - PANEL_KEYS)
+        if unknown:
+            problems.append(f"panel {pid!r}: unknown key(s) {unknown} (allowed: {sorted(PANEL_KEYS)})")
+        if not _text(p.get("label"), MAX_LABEL):
+            problems.append(f"panel {pid!r}: 'label' must be a non-empty string of at most {MAX_LABEL} characters")
+        has_menu, has_settings = "menu" in p, "settings" in p
+        if has_menu == has_settings:
+            problems.append(f"panel {pid!r}: needs exactly one of 'menu' (a Menu item id) or 'settings' (a Settings section id)")
+            continue
+        if has_menu:
+            if not _text(p["menu"], 80):
+                problems.append(f"panel {pid!r}: 'menu' must be a non-empty string")
+            elif menu_ids is not None and p["menu"] not in menu_ids:
+                problems.append(f"panel {pid!r}: no Menu item with id {p['menu']!r} in index.html")
+            if "tab" in p:
+                problems.append(f"panel {pid!r}: 'tab' only goes with 'settings'")
+        else:
+            if not _text(p["settings"], 40):
+                problems.append(f"panel {pid!r}: 'settings' must be a non-empty string")
+            elif settings_sections is not None and p["settings"] not in settings_sections:
+                problems.append(f"panel {pid!r}: no Settings section {p['settings']!r}")
+            if "tab" in p:
+                if p["settings"] != "advanced":
+                    problems.append(f"panel {pid!r}: 'tab' only applies to the 'advanced' Settings section")
+                elif not _text(p["tab"], 40):
+                    problems.append(f"panel {pid!r}: 'tab' must be a non-empty string")
+                elif advanced_tabs is not None and p["tab"] not in advanced_tabs:
+                    problems.append(f"panel {pid!r}: no Advanced tab {p['tab']!r}")
     return problems
 
 

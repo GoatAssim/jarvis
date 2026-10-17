@@ -52,6 +52,18 @@
  * tests/test_checklist_coverage.py ignores them when it checks tool coverage and
  * checks them separately. Do not fake a tool to hold one.
  *
+ * PANELS AND "open" STEPS
+ * -----------------------
+ * A third top-level object, "panels", maps a panel id to somewhere in the console:
+ *   {"label": "Calendars", "menu": "menu-item-calendar"}        a Menu item's DOM id
+ *   {"label": "Settings -> Advanced -> Files", "settings": "advanced", "tab": "files"}
+ * A step in a SHIPPED entry (tool or feature) may be {"open": "<panel id>",
+ * "expect": "..."}: the panel shows an Open button that closes the checklist and
+ * opens that screen. It never types or clicks anything else. A tool module's own
+ * TEST_CHECKLIST cannot use "open". tests/test_checklist_panels.py checks every
+ * target against index.html and settings.js, so a renamed Menu item fails a test
+ * instead of a tester's button. Group "panels" holds the entries for whole panels.
+ *
  *   group   one of the ids in "groups"
  *   does    one line: what the tool is for
  *   steps   ordered tests. {"ask": "<prompt to type in Ask>", "expect": "..."}
@@ -66,7 +78,7 @@
 
 window.JARVIS_TEST_CHECKLIST = /*JSON-BEGIN*/ {
  "schema": 1,
- "updated": "2026-10-10",
+ "updated": "2026-10-17",
  "groups": [
   {
    "id": "core",
@@ -233,6 +245,12 @@ window.JARVIS_TEST_CHECKLIST = /*JSON-BEGIN*/ {
    "id": "person_memory",
    "label": "People memory",
    "blurb": "Per-person facts, standing rules and reply watching (L.21-L.23). Owner-only; none of these appear for a chat guest."
+  },
+  {
+   "id": "panels",
+   "label": "Panels & menus",
+   "kind": "feature",
+   "blurb": "Whole panels in the console, and the Menu or Settings screens an OPEN step can take you to. Features, not tools: do these by hand in the page."
   }
   ],
  "tools": {
@@ -3172,34 +3190,35 @@ window.JARVIS_TEST_CHECKLIST = /*JSON-BEGIN*/ {
   },
   "clipboard_get": {
    "group": "clipboard",
-   "does": "Reads the current text clipboard.",
+   "does": "Reads the current text on the system clipboard.",
    "steps": [
     {
-     "ask": "What's on my clipboard?",
-     "expect": "Returns the text you last copied."
+     "ask": "What's on my clipboard right now?",
+     "expect": "Returns the text you last copied, or says there is no text. A copied password is not repeated back word for word unless you ask for it."
     },
     {
      "run": {},
-     "expect": "Returns the clipboard text; empty clipboard gives an empty string, not an error."
+     "expect": "Returns ok true and the text (an empty string when there is none). An error only if the clipboard can't be read, never a crash."
     }
    ],
    "watch": [
-    "Jarvis shouldn't restate a copied password back verbatim in chat unless asked."
+    "Jarvis shouldn't restate a copied password back verbatim in chat unless asked.",
+    "Long text is cut at the clipboard limit and the result says truncated: true."
    ]
   },
   "clipboard_set": {
    "group": "clipboard",
-   "does": "Puts text on the clipboard.",
+   "does": "Puts text on the clipboard, replacing whatever was copied.",
    "steps": [
     {
-     "ask": "Copy 'hello jarvis' to my clipboard.",
-     "expect": "Confirms; pasting anywhere gives 'hello jarvis'."
+     "ask": "Copy this to my clipboard: hello world",
+     "expect": "Confirms. Pasting into any app gives exactly hello world, with no extra spaces or line break."
     },
     {
      "run": {
       "text": "test 123"
      },
-     "expect": "Clipboard now holds 'test 123'."
+     "expect": "Returns ok true. clipboard_get afterwards returns exactly test 123."
     }
    ],
    "care": "Overwrites whatever you currently have copied."
@@ -3209,34 +3228,34 @@ window.JARVIS_TEST_CHECKLIST = /*JSON-BEGIN*/ {
    "does": "Empties the clipboard.",
    "steps": [
     {
-     "ask": "Clear my clipboard.",
-     "expect": "Confirms; pasting gives nothing."
+     "ask": "Clear my clipboard",
+     "expect": "Confirms. Pasting into any app gives nothing."
     },
     {
      "run": {},
-     "expect": "clipboard_get afterwards returns empty text."
+     "expect": "Returns ok true. clipboard_get afterwards returns empty text."
     }
    ],
    "care": "Discards whatever you currently have copied."
   },
   "clipboard_wait_for_change": {
    "group": "clipboard",
-   "does": "Blocks until you copy something new, then returns it.",
+   "does": "Waits until you copy something new, then returns it.",
    "steps": [
     {
-     "ask": "Tell me when I copy something, then say what it was.",
-     "expect": "Waits; after you copy new text it returns that text."
+     "ask": "Watch my clipboard and tell me when I copy something new",
+     "expect": "Jarvis waits. Copy new text while it waits and the reply gives that text back (ok true)."
     },
     {
      "run": {
       "timeout_seconds": 5
      },
-     "expect": "With no copy in 5 s it returns timed_out=true."
+     "expect": "Nothing copied: returns ok false and timed_out true after about 5 seconds. Not an error."
     }
    ],
    "watch": [
-    "timeout_seconds is clamped (default ~20, max 120).",
-    "Copying the same text again may not count as a change."
+    "timeout_seconds defaults to 20 and is clamped to 1 to 120 seconds.",
+    "Copying the same text again is not a change."
    ]
   },
   "clipboard_watch_get_pattern": {
@@ -3283,14 +3302,14 @@ window.JARVIS_TEST_CHECKLIST = /*JSON-BEGIN*/ {
    "does": "Opens a URL in a persistent, logged-in browser session.",
    "steps": [
     {
-     "ask": "Open github.com in the browser.",
-     "expect": "Session starts; result gives the final URL and page title."
+     "ask": "Open example.com in the browser.",
+     "expect": "The session starts; the reply gives the final URL and the page title."
     },
     {
      "run": {
       "url": "file:///C:/Windows/win.ini"
      },
-     "expect": "Refused — file:, javascript: and data: URLs are blocked."
+     "expect": "Refused with an error: file://, javascript: and data: addresses are blocked, so nothing is opened."
     }
    ],
    "needs": [
@@ -3307,13 +3326,13 @@ window.JARVIS_TEST_CHECKLIST = /*JSON-BEGIN*/ {
    "steps": [
     {
      "ask": "Open example.com and tell me what the page says.",
-     "expect": "Returns the page text."
+     "expect": "The reply gives the page's visible text, cut off at about 4000 characters."
     },
     {
      "run": {
       "description": "the main heading"
      },
-     "expect": "Only that element's text."
+     "expect": "Only that element's text, not the whole page."
     }
    ],
    "needs": [
@@ -3328,14 +3347,14 @@ window.JARVIS_TEST_CHECKLIST = /*JSON-BEGIN*/ {
    "does": "Clicks an element described in plain English.",
    "steps": [
     {
-     "ask": "On example.com, click the 'More information' link.",
-     "expect": "Asks for confirmation, clicks, and reports the new page."
+     "ask": "On example.com, click the link on the page.",
+     "expect": "Asks you to confirm first. Yes clicks it and the reply names the new page; No clicks nothing."
     },
     {
      "run": {
       "description": "a button that does not exist"
      },
-     "expect": "Clear 'could not find' error, not a crash."
+     "expect": "A clear error that it couldn't find the element, with the places it tried. Not a crash."
     }
    ],
    "needs": [
@@ -3343,7 +3362,8 @@ window.JARVIS_TEST_CHECKLIST = /*JSON-BEGIN*/ {
    ],
    "care": "Can submit forms or change settings on a real logged-in session — confirmation is required.",
    "watch": [
-    "The model must describe the element, never supply a CSS selector."
+    "The model must describe the element, never supply a CSS selector.",
+    "A Debug run asks first too, unless the confirm toggle in Debug is off."
    ]
   },
   "browser_fill": {
@@ -3352,14 +3372,14 @@ window.JARVIS_TEST_CHECKLIST = /*JSON-BEGIN*/ {
    "steps": [
     {
      "ask": "On a search page, type 'jarvis' into the search box.",
-     "expect": "Asks for confirmation, then the field contains 'jarvis'."
+     "expect": "Asks you to confirm first. Yes puts exactly jarvis in the field; No leaves the field as it was."
     },
     {
      "run": {
       "description": "the search field",
       "text": "hello"
      },
-     "expect": "Field filled with 'hello'."
+     "expect": "After you confirm, the field holds hello."
     }
    ],
    "needs": [
@@ -3372,18 +3392,22 @@ window.JARVIS_TEST_CHECKLIST = /*JSON-BEGIN*/ {
    "does": "Waits for an element to appear on the page.",
    "steps": [
     {
+     "ask": "On example.com, wait until the link on the page appears, then tell me what it says.",
+     "expect": "Waits (10 seconds by default) and answers only once the link is visible, naming its text. It does not read a half-loaded page."
+    },
+    {
      "run": {
       "description": "the main heading",
       "timeout_seconds": 5
      },
-     "expect": "Returns once the element is visible."
+     "expect": "Returns once the heading is visible."
     },
     {
      "run": {
       "description": "a banner that never appears",
       "timeout_seconds": 3
      },
-     "expect": "Times out after ~3 s with a clear message."
+     "expect": "Times out after about 3 seconds with a clear message, not a hang."
     }
    ],
    "needs": [
@@ -3399,12 +3423,12 @@ window.JARVIS_TEST_CHECKLIST = /*JSON-BEGIN*/ {
    "does": "Screenshots the open page and shows it in the Jarvis UI.",
    "steps": [
     {
-     "ask": "Take a screenshot of the page.",
-     "expect": "The image appears in the UI; the model itself doesn't receive it."
+     "ask": "Take a screenshot of this page.",
+     "expect": "The picture appears in the Jarvis UI and the reply gives the saved file path. The model is not sent the image."
     },
     {
      "run": {},
-     "expect": "Result reports success and the image shows up in the console."
+     "expect": "Returns ok true with the saved path, and the image shows in the console."
     }
    ],
    "needs": [
@@ -3416,8 +3440,8 @@ window.JARVIS_TEST_CHECKLIST = /*JSON-BEGIN*/ {
    "does": "Closes the browser session early.",
    "steps": [
     {
-     "ask": "Close the browser.",
-     "expect": "Session closes; the next browser_goto starts a fresh one."
+     "ask": "Close the browser now.",
+     "expect": "The session ends before this ask would have closed it; the next browser_goto starts a fresh one."
     },
     {
      "run": {},
@@ -3430,38 +3454,55 @@ window.JARVIS_TEST_CHECKLIST = /*JSON-BEGIN*/ {
    "does": "Creates a folder (and missing parents).",
    "steps": [
     {
-     "ask": "Make a folder called jarvis-test on my Desktop.",
-     "expect": "Asks for confirmation, then the folder exists."
+     "ask": "Create a folder called Invoices inside Documents",
+     "expect": "Asks you to confirm first. After Yes the folder exists; any missing parent folders are created too."
     },
     {
      "run": {
       "path": "<existing folder>"
      },
-     "expect": "Succeeds quietly — already existing is not an error."
+     "expect": "Succeeds quietly with a note that the folder already exists. Not an error."
+    },
+    {
+     "run": {
+      "path": "<existing file>"
+     },
+     "expect": "Refused: a file already exists at that path."
     }
    ],
-   "care": "Creates real folders — use a scratch location."
+   "care": "Creates real folders — use a scratch location.",
+   "watch": [
+    "Missing parent folders are always created; there is no 'parents only' option."
+   ]
   },
   "copy_path": {
    "group": "files",
    "does": "Copies a file or folder, leaving the original.",
    "steps": [
     {
-     "ask": "Copy jarvis-test.txt on my Desktop into the jarvis-test folder.",
-     "expect": "Asks for confirmation; both original and copy exist."
+     "ask": "Copy report.pdf to the Desktop, don't move it",
+     "expect": "Asks you to confirm first. After Yes the original and the copy both exist."
     },
     {
      "run": {
-      "src": "<file>",
+      "src": "<scratch file>",
       "dest": "<existing file>"
      },
-     "expect": "Refuses to overwrite without overwrite=true."
+     "expect": "Refused: the destination already exists. The original and the existing file are both untouched."
+    },
+    {
+     "run": {
+      "src": "<scratch file>",
+      "dest": "<existing file>",
+      "overwrite": true
+     },
+     "expect": "Replaces the existing file with the copy; the original stays. A folder at the destination is never replaced."
     }
    ],
    "care": "Writes real files — use scratch files.",
    "watch": [
-    "Folders are never overwritten.",
-    "dest may be an existing folder (keeps its name) or a full new path."
+    "dest may be an existing folder (the copy keeps its name) or a full new path.",
+    "Refused outright, even after Yes: as the destination, a drive or filesystem root, your home folder itself, an OS folder or ~/.jarvis. As the source only ~/.jarvis is refused (reading from the others is allowed)."
    ]
   },
   "move_path": {
@@ -3469,21 +3510,30 @@ window.JARVIS_TEST_CHECKLIST = /*JSON-BEGIN*/ {
    "does": "Moves a file or folder to another folder or new path.",
    "steps": [
     {
-     "ask": "Move jarvis-test.txt on my Desktop into the jarvis-test folder.",
-     "expect": "Asks for confirmation; file is only in the new location."
+     "ask": "Move report.pdf to my Desktop",
+     "expect": "Asks you to confirm first. After Yes the file is only at the new place and the old place is empty."
     },
     {
      "run": {
-      "src": "<file>",
+      "src": "<scratch file>",
       "dest": "<existing file>"
      },
-     "expect": "Refuses to overwrite without overwrite=true."
+     "expect": "Refused: the destination already exists. Nothing moves."
+    },
+    {
+     "run": {
+      "src": "<scratch file>",
+      "dest": "<existing file>",
+      "overwrite": true
+     },
+     "expect": "Replaces the existing file. A folder at the destination is never replaced. The scratch file has moved, so put it back before repeating."
     }
    ],
    "care": "Moves real files — use scratch files.",
    "watch": [
-    "Uses src/dest argument names.",
-    "Result is verified after the move."
+    "src is the item; dest is an existing folder (the item keeps its name) or a full new path.",
+    "Refused outright, even after Yes: a drive or filesystem root, your home folder itself, OS folders, and ~/.jarvis.",
+    "The result is checked after the move: the new place exists and the old one is gone."
    ]
   },
   "rename_path": {
@@ -3491,42 +3541,51 @@ window.JARVIS_TEST_CHECKLIST = /*JSON-BEGIN*/ {
    "does": "Renames a file or folder in place.",
    "steps": [
     {
-     "ask": "Rename jarvis-test.txt on my Desktop to jarvis-final.txt.",
-     "expect": "Asks for confirmation; only the name changes."
+     "ask": "Rename draft.txt to final.txt",
+     "expect": "Asks you to confirm first. After Yes the file has the new name and stays in the same folder."
     },
     {
      "run": {
       "path": "<file>",
       "new_name": "sub/x.txt"
      },
-     "expect": "Rejected — new_name must be a bare name with no folder part."
+     "expect": "Rejected: the new name must be a bare name with no folder in it. Nothing changes."
+    },
+    {
+     "run": {
+      "path": "<file>",
+      "new_name": "<a name already in that folder>"
+     },
+     "expect": "Refused: something with that name already exists. Nothing is overwritten."
     }
    ],
    "care": "Renames real files — use a scratch file.",
    "watch": [
-    "Never overwrites an existing name."
+    "Never overwrites an existing name.",
+    "To change folders, use move_path."
    ]
   },
   "delete_path": {
    "group": "files",
-   "does": "Sends a file or folder to the Recycle Bin/Trash.",
+   "does": "Sends a file or folder to the Recycle Bin / Trash.",
    "steps": [
     {
-     "ask": "Delete jarvis-final.txt from my Desktop.",
-     "expect": "Asks for confirmation; the file lands in the Recycle Bin and can be restored."
+     "ask": "Delete old-notes.txt",
+     "expect": "Asks you to confirm first. After Yes the file is gone from its folder and is in the Recycle Bin or Trash, where it can be restored."
     },
     {
      "run": {
       "path": "<nonexistent path>"
      },
-     "expect": "Clear 'not found' error."
+     "expect": "A clear 'does not exist' error. Nothing is deleted."
     }
    ],
    "care": "Real deletion (recoverable via the Recycle Bin) — use a scratch file.",
    "watch": [
-    "There is no permanent-delete option."
+    "There is no permanent-delete option.",
+    "If the optional send2trash package is missing, the tool refuses; it never unlinks the file instead."
    ]
-   },
+  },
   "person_remember": {
    "group": "person_memory",
    "does": "Saves a fact about one known person so Jarvis still knows it in later chats with them.",
@@ -3672,6 +3731,66 @@ window.JARVIS_TEST_CHECKLIST = /*JSON-BEGIN*/ {
    "watch": [
     "`jarvis channels-awaiting log` shows each decision and why."
    ]
+  }
+ },
+ "panels": {
+  "debug": {
+   "label": "Debug",
+   "menu": "menu-item-debug"
+  },
+  "tool-manager": {
+   "label": "Tool Manager",
+   "menu": "menu-item-ctools"
+  },
+  "mcp": {
+   "label": "MCP Servers",
+   "menu": "menu-item-mcp"
+  },
+  "calendar": {
+   "label": "Calendars",
+   "menu": "menu-item-calendar"
+  },
+  "daemons": {
+   "label": "Daemons",
+   "menu": "menu-item-daemons"
+  },
+  "backlog": {
+   "label": "Backlog",
+   "menu": "menu-item-backlog"
+  },
+  "log-search": {
+   "label": "Log search",
+   "menu": "menu-item-logsearch"
+  },
+  "schedules": {
+   "label": "Scheduled",
+   "menu": "menu-item-scheduled"
+  },
+  "skills": {
+   "label": "Skills",
+   "menu": "menu-item-skills"
+  },
+  "setup": {
+   "label": "Setup",
+   "menu": "menu-item-setup"
+  },
+  "settings-tools": {
+   "label": "Settings → Tools & safety",
+   "settings": "tools"
+  },
+  "settings-advanced": {
+   "label": "Settings → Advanced",
+   "settings": "advanced"
+  },
+  "settings-advanced-files": {
+   "label": "Settings → Advanced → Files",
+   "settings": "advanced",
+   "tab": "files"
+  },
+  "settings-advanced-tunables": {
+   "label": "Settings → Advanced → Tunables",
+   "settings": "advanced",
+   "tab": "tunables"
   }
  },
  "features": {
@@ -4225,6 +4344,10 @@ window.JARVIS_TEST_CHECKLIST = /*JSON-BEGIN*/ {
   ],
   "steps": [
    {
+    "open": "tool-manager",
+    "expect": "Tool Manager opens from the Menu or Settings, as described."
+   },
+   {
     "do": "Menu → Tool Manager. Find the tool, its daemon and its screen (chips: Daemons, Screens). Note all three are On.",
     "expect": "The tool, the daemon and the screen each show On."
    },
@@ -4266,6 +4389,10 @@ window.JARVIS_TEST_CHECKLIST = /*JSON-BEGIN*/ {
   ],
   "steps": [
    {
+    "open": "tool-manager",
+    "expect": "Tool Manager opens from the Menu or Settings, as described."
+   },
+   {
     "do": "Menu → Tool Manager → Create a tool → Template 'Button page' → give it a name → Save. Look under the name bar.",
     "expect": "A strip appears with tool.py, tool.html, tool.js and tool.css. Before the first save it only said the starter files would appear."
    },
@@ -4303,6 +4430,10 @@ window.JARVIS_TEST_CHECKLIST = /*JSON-BEGIN*/ {
    "A folder containing one .py tool that declares TOOL_UI and the folder it points to (for example a copy of a Button page tool's .py and its folder), or a .zip of it."
   ],
   "steps": [
+   {
+    "open": "tool-manager",
+    "expect": "Tool Manager opens from the Menu or Settings, as described."
+   },
    {
     "do": "Press Import folder… and pick that folder.",
     "expect": "A review lists the .py and each screen file with sizes, an 'Ignored' list for anything else, and says nothing has been run or written yet."
@@ -4346,6 +4477,10 @@ window.JARVIS_TEST_CHECKLIST = /*JSON-BEGIN*/ {
   ],
   "steps": [
    {
+    "open": "tool-manager",
+    "expect": "Tool Manager opens from the Menu or Settings, as described."
+   },
+   {
     "do": "Put a file called notes.txt inside the tool's folder. Select the tool in the Tool Manager and press Delete.",
     "expect": "Two choices: 'Delete the tool and its folder' (naming the folder and how many screen files) and 'Delete the tool only'."
    },
@@ -4375,6 +4510,10 @@ window.JARVIS_TEST_CHECKLIST = /*JSON-BEGIN*/ {
   ],
   "steps": [
    {
+    "open": "tool-manager",
+    "expect": "Tool Manager opens from the Menu or Settings, as described."
+   },
+   {
     "do": "Menu → Tool Manager → MCP chip. Find your server's row.",
     "expect": "A row of kind MCP server, On when the server is enabled, with its tool count in the detail."
    },
@@ -4400,6 +4539,10 @@ window.JARVIS_TEST_CHECKLIST = /*JSON-BEGIN*/ {
   "does": "Menu → Debug lists tools switched off in the Tool Manager with an 'off' badge instead of unmarked.",
   "steps": [
    {
+    "open": "tool-manager",
+    "expect": "Tool Manager opens from the Menu or Settings, as described."
+   },
+   {
     "do": "Switch one tool off in the Tool Manager, then open Menu → Debug.",
     "expect": "Its card shows an 'off' badge and a struck-through name; it is still listed."
    },
@@ -4416,7 +4559,7 @@ window.JARVIS_TEST_CHECKLIST = /*JSON-BEGIN*/ {
     "expect": "The badge is gone."
    }
   ]
-  },
+ },
   "tool_daemons_declare": {
    "group": "tool_daemons",
    "does": "A tool file that declares DAEMONS gets those services registered in the Daemons panel, owned by that file and tagged with its name.",
@@ -4454,6 +4597,10 @@ window.JARVIS_TEST_CHECKLIST = /*JSON-BEGIN*/ {
    "group": "tool_daemons",
    "does": "What the tool controls (what runs) and what the owner keeps (name, schedule, switches, categories, restart policy) behave as documented.",
    "steps": [
+    {
+     "open": "daemons",
+     "expect": "Daemons opens from the Menu or Settings, as described."
+    },
     {
      "do": "In the Daemons panel rename dtest-hello, change its categories to Demo and Mine, turn restart to always and save. Then change the tool file's DAEMONS command (for example sleep 601 instead of 600) and run `jarvis daemons-sync --force`.",
      "expect": "The new command is in effect (the details show it), while the name, categories and restart policy you set are unchanged."
@@ -4498,6 +4645,10 @@ window.JARVIS_TEST_CHECKLIST = /*JSON-BEGIN*/ {
    "group": "tool_daemons",
    "does": "Menu -> Daemons -> Manage categories renames, merges and deletes a category on every service at once.",
    "steps": [
+    {
+     "open": "daemons",
+     "expect": "Daemons opens from the Menu or Settings, as described."
+    },
     {
      "do": "Give two services the category Utility and one service the category utility, and one service Tools (Edit -> Categories). Open Daemons and press Manage categories.",
      "expect": "A list shows each category once (Utility is one entry, three services) with how many services have it."
@@ -4583,6 +4734,10 @@ window.JARVIS_TEST_CHECKLIST = /*JSON-BEGIN*/ {
    "does": "Settings -> Advanced -> Files edits the JSON files under ~/.jarvis as text with a diff, backup, undo and masked secrets.",
    "steps": [
     {
+     "open": "settings-advanced-files",
+     "expect": "Settings → Advanced → Files opens from the Menu or Settings, as described."
+    },
+    {
      "do": "Open Settings -> Advanced -> Files -> notify_config.json, in the Text view, change one value and press Preview changes, then Save.",
      "expect": "The preview lists the one change; Save reports it and the file on disk has it. Backups lists a new entry."
     },
@@ -4620,6 +4775,10 @@ window.JARVIS_TEST_CHECKLIST = /*JSON-BEGIN*/ {
    "group": "settings",
    "does": "The Tree view of Advanced -> Files shows one value per row, marks values that differ from the built-in default, and resets one value to its default.",
    "steps": [
+    {
+     "open": "settings-advanced-files",
+     "expect": "Settings → Advanced → Files opens from the Menu or Settings, as described."
+    },
     {
      "do": "Open Settings -> Advanced -> Files -> ai_config.json and press Tree.",
      "expect": "The file appears as expandable rows; values you changed from the shipped default show a \"changed from default\" tag and the default beside them; secrets show as hidden."
@@ -4664,6 +4823,10 @@ window.JARVIS_TEST_CHECKLIST = /*JSON-BEGIN*/ {
    "does": "Advanced -> Files also opens the web console's own data files (web/data), listed as web-data/<name>.json: starred commands, starred daemons and the Ask console filter are editable; anything else there is read-only.",
    "steps": [
     {
+     "open": "settings-advanced-files",
+     "expect": "Settings → Advanced → Files opens from the Menu or Settings, as described."
+    },
+    {
      "do": "Open Settings -> Advanced -> Files and look for the entries starting with web-data/ (use the filter box: type web-data).",
      "expect": "web-data/favorites.json, web-data/favorite-daemons.json and web-data/ask-console-filter.json are listed (greyed if not created yet); web-data/reboot.json appears once it exists and is marked read-only. About lists the Web console data folder."
     },
@@ -4702,6 +4865,10 @@ window.JARVIS_TEST_CHECKLIST = /*JSON-BEGIN*/ {
    "group": "settings",
    "does": "Advanced -> Tunables lists the registered numbers and switches with type, range, default and where each applies.",
    "steps": [
+    {
+     "open": "settings-advanced-tunables",
+     "expect": "Settings → Advanced → Tunables opens from the Menu or Settings, as described."
+    },
     {
      "do": "Open Settings -> Advanced -> Tunables, change FETCH_TIMEOUT to a valid number, then to an out-of-range one.",
      "expect": "The valid one saves and is tagged as an override; the other is refused with the range."
@@ -4747,6 +4914,48 @@ window.JARVIS_TEST_CHECKLIST = /*JSON-BEGIN*/ {
    "watch": [
     "/config changed from opening the old Config modal to opening Settings (answer to Q-L43i, mine): check that matches what you want."
    ]
- }
+ },
+  "panel_calendar": {
+   "group": "panels",
+   "does": "The Calendars panel (Menu → Calendars): an Events tab with Jarvis's own calendar, and a Calendars tab where you link read-only calendar feeds.",
+   "steps": [
+    {
+     "open": "calendar",
+     "expect": "The Calendars panel opens over the console on the Events tab, with the Agenda / Week / Month switch, the ‹ Today › buttons, Refresh and + Add event."
+    },
+    {
+     "do": "On the Events tab press Today, then ‹ and ›, then switch between Agenda, Week and Month.",
+     "expect": "Today jumps back to the current period; ‹ and › move one period; each view redraws without an error and the range label above the list follows."
+    },
+    {
+     "do": "Press Refresh.",
+     "expect": "Linked calendars are read again. With none linked it finishes with no error and the page does not jump."
+    },
+    {
+     "do": "Open the Calendars tab and press + Link a calendar. Look at the choices (Google, Outlook, Apple / iCloud, Fastmail, Any other calendar), then press Cancel.",
+     "expect": "A guide asks Which calendar do you want to link? and lists those choices. Cancel closes it; nothing is added to Linked calendars (with none linked it still says No calendar linked yet)."
+    }
+   ],
+   "care": "A linked calendar's link is a secret. Only part of it is shown after saving; check the full link is not displayed anywhere. Do not complete the guide with a real link unless you mean to link it."
+  },
+  "panel_mcp": {
+   "group": "panels",
+   "does": "The MCP Servers panel (Menu → MCP Servers): the external tool servers Jarvis can connect to, their status, and adding one.",
+   "steps": [
+    {
+     "open": "mcp",
+     "expect": "The MCP Servers panel opens. It shows a card per server with a status word such as Ready, Not connected yet or Needs fixing, or No MCP servers yet. + Add server and Refresh all are in the header."
+    },
+    {
+     "do": "Press + Add server, look at the form, then press Cancel.",
+     "expect": "An Add an MCP server form appears with Name, Type, the command or URL fields, Description, Switched on and Trusted, plus a warning that a server runs on this computer with your permissions. Cancel closes it and saves nothing."
+    },
+    {
+     "do": "With at least one server listed, press Refresh all.",
+     "expect": "Every switched-on server is reconnected and its tool list read again; the status words update and no server is removed or switched off."
+    }
+   ],
+   "care": "Refresh all reconnects to every switched-on server, which can start that server's program."
+  }
  }
 } /*JSON-END*/;

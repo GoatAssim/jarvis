@@ -62,7 +62,8 @@ def test_features_exist_and_are_well_formed():
             problems.append(f"{name}: unknown group {e.get('group')!r}")
         elif g.get("kind") != "feature":
             problems.append(f"{name}: group {e['group']!r} is not a feature group (kind != 'feature')")
-        problems.extend(checklist_schema.validate_entry(name, e, allow_do=True))
+        problems.extend(checklist_schema.validate_entry(name, e, allow_do=True, allow_open=True,
+                                                        panels=data.get("panels")))
     assert not problems, "\n".join(problems)
 
 
@@ -103,7 +104,7 @@ def test_steps_are_not_duplicated_within_a_feature():
     for name, e in _load()["features"].items():
         seen = set()
         for s in e["steps"]:
-            k = s.get("do") or s.get("ask") or json.dumps(s.get("run"), sort_keys=True)
+            k = s.get("do") or s.get("ask") or ("open:" + s["open"] if "open" in s else json.dumps(s.get("run"), sort_keys=True))
             if k in seen:
                 dupes.append(f"{name}: duplicate step {k!r}")
             seen.add(k)

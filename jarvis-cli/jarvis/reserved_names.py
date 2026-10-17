@@ -124,6 +124,7 @@ RESERVED_NAMES = {
     "channels-presets", "channels-preset", "channels-bulk",
     "channels-servers", "channels-server-set", "channels-space-set", "channels-guilds",
     "channels-channels", "channels-master-tools", "channels-send", "channels-denied",
+    "channels-spaces", "channels-space", "channels-import-instagram",
     "discord-daemon", "instagram-serve", "logs-search",
     # --- clipboard_cli.COMMANDS ----------------------------------------------
     "clipboard-watch", "clipboard-watch-config",

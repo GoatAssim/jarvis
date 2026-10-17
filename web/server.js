@@ -1592,6 +1592,35 @@ app.post("/api/channels/spaces/:platform/:threadId", requireJarvis, async (req, 
   sendChannelResult(await runJarvisOnce(args, 10000), res);
 });
 
+// The READ side of those rooms (channel spaces S10b). Both routes only run read-only CLI
+// commands (`channels-spaces`, `channels-space`), so nothing here can change a switch, a file
+// or anyone's access. Platform and kind are checked against fixed sets, the room id against
+// the same character class as the route above (so "-x" cannot reach the CLI's flag parser),
+// and the limit is a bounded integer. They report what was saved; they do not read anything
+// from the platforms and send nothing.
+const SPACE_KIND_FILTERS = new Set(["server", "group", "dm", "server_channel", "server_thread"]);
+
+app.get("/api/channels/spaces", requireJarvis, async (req, res) => {
+  const args = ["channels-spaces"];
+  if (req.query.platform !== undefined) {
+    if (typeof req.query.platform !== "string" || !CHANNEL_PLATFORMS.has(req.query.platform)) return res.status(400).json({ error: "Unknown platform." });
+    args.push(req.query.platform);
+  }
+  if (req.query.kind !== undefined) {
+    if (typeof req.query.kind !== "string" || !SPACE_KIND_FILTERS.has(req.query.kind)) return res.status(400).json({ error: "Unknown kind." });
+    args.push("--kind", req.query.kind);
+  }
+  sendChannelResult(await runJarvisOnce(args, 15000), res);
+});
+
+app.get("/api/channels/spaces/:platform/:threadId/conversation", requireJarvis, async (req, res) => {
+  const { platform, threadId } = req.params;
+  if (!CHANNEL_PLATFORMS.has(platform)) return res.status(400).json({ error: "Unknown platform." });
+  if (!CHANNEL_SPACE_ID.test(threadId)) return res.status(400).json({ error: "Invalid room id." });
+  const limit = String(channelInt(req.query.limit, 100, 1, 500));
+  sendChannelResult(await runJarvisOnce(["channels-space", platform, threadId, limit], 15000), res);
+});
+
 // allowed_guilds ("only these servers"): add / remove one entry (L.36-P17).
 // GET reads the filter. POST { id, remove?, confirm? } -- without `confirm` an
 // add that would turn the filter on (or names a server Jarvis hasn't seen) only

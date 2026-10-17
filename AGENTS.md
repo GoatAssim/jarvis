@@ -135,7 +135,7 @@ things that were already fixed once.
   `decide()` reads them. `tests/test_channel_servers.py` and
   `tests/test_allowed_guilds.py` pin all of this.
 - **Shared rooms (server channels, threads, group chats) are a different place from a DM, and
-  the difference is enforced in six ways (channel spaces, L.57).** (1) Speaker labels
+  the difference is enforced in seven ways (channel spaces, L.57).** (1) Speaker labels
   (`[Name]: ` on saved turns, the group paragraph in the prompt tail) and every room field in
   the transcript exist ONLY for rooms; a DM's exchange, history and prompt stay byte-identical
   (`group_speaker_labels` off restores the old room behaviour too). (2) `channels/spaces.json`
@@ -162,9 +162,18 @@ things that were already fixed once.
   and changes nothing about it: no reply, reaction or typing indicator. (6) The Discord adapter's
   new display data (author / thread names, reply-to, readable mentions) is never read by
   `decide()`, and reply-to comes only from the message discord.py already resolved (no fetch).
+  (7) The Instagram export importer (`channels/instagram_import.py`, `channels-import-instagram`)
+  and the room viewer (`channels/space_view.py`, `channels-spaces`, `channels-space`, the two
+  GET routes) grant and change nothing. The importer writes ONLY group-chat transcript lines
+  (3+ people, `imported: true`, no gate decision on them) and their `spaces.json` entries; a DM is
+  never imported, it is a preview unless `--yes`, and it creates no person, permission, scope,
+  conversation or usage line. The viewer is read-only: it writes, rotates and registers nothing,
+  and a model-facing caller must use `view(..., rooms_only=True)`, which refuses a DM. Both are
+  offline: no model, no network, no send. `tests/test_instagram_import.py` and
+  `tests/test_space_view.py` pin it.
   `tests/test_channel_spaces.py`, `test_channel_group_history.py`, `test_group_recall_toggles.py`,
   `test_channel_ambient.py`, `test_channel_save_switch.py` and `test_discord_enrichment.py` pin
-  all of this.
+  the rest of this.
 - **A time limit on tool access is a ceiling, enforced at read time, and it only
   ever means less access (L.36-P6).** The grant is the ordinary `tool_allowlist`
   entry; `user_perms.tools_until` only says when it ends.
@@ -772,6 +781,16 @@ tool-coverage tests ignore them, and `tests/test_checklist_features.py` checks t
 on their own. Do not fake a tool to hold a feature entry. If you change the palette's
 behaviour, update its entries there **and** `DOCUMENTATION/COMMAND_PALETTE_TESTING.md`
 (the long manual pass the checklist entries point at rather than copy).
+
+**A step can open a panel.** The shipped data file also has a top-level `"panels"`
+object (panel id -> `{"label", "menu": <Menu item DOM id>}` or `{"label",
+"settings": <section>, "tab": <Advanced tab>}`), and a step in a shipped entry may be
+`{"open": "<panel id>", "expect": "..."}`: the checklist shows an **Open** button that
+closes itself and opens that Menu panel or Settings section. Use it as the first step
+of a feature entry that starts "Menu -> X". `open` is shipped-only (a tool module's own
+`TEST_CHECKLIST` never gets it, and `checklist_schema.extract_supplied` drops it). If you
+rename a Menu item's id in `index.html` or a Settings section / Advanced tab, update
+`"panels"`; `tests/test_checklist_panels.py` fails until you do.
 
 ## The Debug panel's source filter (§3, L.18)
 

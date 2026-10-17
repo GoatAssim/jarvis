@@ -802,7 +802,10 @@ window.JARVIS_SLASH_COMMANDS = /*JSON-BEGIN*/
         "channels-channels",
         "channels-master-tools",
         "channels-send",
-        "channels-denied"
+        "channels-denied",
+        "channels-spaces",
+        "channels-space",
+        "channels-import-instagram"
       ],
       "example": "/channels",
       "preview": "Open Channels."

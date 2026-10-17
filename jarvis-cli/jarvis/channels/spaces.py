@@ -205,9 +205,10 @@ def rebuild(platform):
 
     A transcript only ever holds addressed messages, so rebuilding cannot
     register anything note() would not have. Threads that are DMs (any inbound
-    line in DM context) are skipped. Entries marked `imported` (written by an
-    importer, which has no live transcript to rebuild from) are kept as they
-    are. Never raises."""
+    line in DM context) are skipped. Entries marked `imported` are kept as they
+    are when they have no transcript; a room whose lines were written by an
+    importer (instagram_import.py) is rebuilt from them and stays marked
+    `imported`. Never raises."""
     try:
         if platform not in PLATFORMS:
             return {}
@@ -249,6 +250,8 @@ def rebuild(platform):
                 "last_seen": str(newest.get("at") or ""),
                 "speakers": speakers[-MAX_SPEAKERS:],
             }
+            if any(r.get("imported") for r in recs):
+                fresh[base]["imported"] = True
         with _LOCK:
             data = _load()
             old = _block(data, platform)
@@ -262,6 +265,55 @@ def rebuild(platform):
         return dict(fresh)
     except Exception:  # noqa: BLE001
         return {}
+
+
+def register_imported(platform, thread_id, title, first_seen, last_seen, speakers):
+    """Register (or refresh) a room an importer wrote transcript lines for, marked
+    `imported: true`. Returns True when the file on disk now holds the room.
+
+    Unlike note(), this is not live gating: it is called by instagram_import.py after it
+    has written a group chat from a data export, and it records names and times only (the
+    same labels-only rule as the rest of this file). A re-import MERGES: the earliest
+    `first_seen`, the latest `last_seen` and the union of speakers win, so running it
+    twice, or on an export that filled a gap, never shrinks a room. It grants nothing.
+    Never raises."""
+    try:
+        if platform not in PLATFORMS:
+            return False
+        thread_id = str(thread_id or "").strip()[:120]
+        if not thread_id:
+            return False
+        with _LOCK:
+            data = _load()
+            block = data.get(platform)
+            if not isinstance(block, dict):
+                block = data[platform] = {}
+            existing = block.get(thread_id)
+            if not isinstance(existing, dict) and len(block) >= MAX_SPACES:
+                return False
+            rec = dict(existing) if isinstance(existing, dict) else {
+                "guild_id": "", "guild_name": "", "channel_id": "", "channel_name": ""}
+            name = space._clean(title, 100) or str(rec.get("thread_name") or "")
+            rec["kind"] = space.KIND_GROUP
+            rec["thread_name"] = name
+            rec["title"] = space.title_for(permissions.IncomingMessage(
+                platform=platform, context=permissions.CTX_GROUP,
+                thread_id=thread_id, thread_name=name))
+            firsts = [str(v) for v in (rec.get("first_seen"), first_seen) if v]
+            lasts = [str(v) for v in (rec.get("last_seen"), last_seen) if v]
+            rec["first_seen"] = min(firsts) if firsts else _now()
+            rec["last_seen"] = max(lasts) if lasts else rec["first_seen"]
+            merged = [s for s in (rec.get("speakers") or []) if isinstance(s, str)]
+            for sid in speakers or ():
+                sid = str(sid or "").strip()[:space.MAX_ID_CHARS]
+                if sid and sid not in merged:
+                    merged.append(sid)
+            rec["speakers"] = merged[-MAX_SPEAKERS:]
+            rec["imported"] = True
+            block[thread_id] = rec
+            return _save(data)
+    except Exception:  # noqa: BLE001 -- a label cache must never break an import
+        return False
 
 
 # ---------------------------------------------------------------------------

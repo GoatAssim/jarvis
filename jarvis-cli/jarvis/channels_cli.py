@@ -34,7 +34,7 @@ COMMANDS = (
     "channels-tools-for", "channels-instruction",
     "channels-presets", "channels-preset", "channels-bulk",
     "channels-servers", "channels-server-set", "channels-space-set", "channels-guilds",
-    "channels-channels",
+    "channels-channels", "channels-spaces", "channels-space", "channels-import-instagram",
     "channels-master-tools", "channels-send", "channels-denied",
     "channels-thinking", "channels-memory", "channels-awaiting",
     "discord-daemon", "instagram-serve", "logs-search",
@@ -156,6 +156,18 @@ USAGE = """channel commands:
                                         the same switches for ONE room by its thread id, on any
                                         platform (an Instagram group, a Discord channel; --thread
                                         for a Discord thread). Switches only take access away
+  channels-spaces [platform] [--kind server|group|dm]
+                                        the rooms Jarvis has saved, newest first (JSON, read-only):
+                                        server channels / threads and group chats. No --kind = every
+                                        room and no DM; --kind narrows it (dm lists DM threads)
+  channels-space <platform> <thread_id> [limit]
+                                        one room's conversation: the newest <limit> lines (default 100,
+                                        max 500) with who spoke, and its participants (JSON, read-only)
+  channels-import-instagram <path> [--yes]
+                                        read an Instagram "Download your information" messages export
+                                        (its folder, or one message_N.json) and save its GROUP chats
+                                        (3+ people) as rooms Jarvis can show. A preview unless --yes;
+                                        DMs are never imported; grants nothing; safe to run twice
   channels-guilds <platform> [add|remove <id>] [--yes]
                                         the allowed_guilds filter ("only these servers"). No action = show it.
                                         add to an EMPTY list, or an id Jarvis hasn't seen, only PREVIEWS unless
@@ -1032,6 +1044,54 @@ def handle(argv):
         print(json.dumps({"ok": ok, "error": err, "platform": platform,
                           "thread_id": thread_id, **detail}, indent=2))
         sys.exit(0 if ok else 1)
+
+    if cmd == "channels-spaces":
+        # Channel spaces S10b. Read-only: the rooms Jarvis has saved (channels/space_view.py).
+        usage = "usage: channels-spaces [platform] [--kind server|group|dm]"
+        kind, words, i = None, [], 0
+        while i < len(rest):
+            arg = rest[i]
+            if arg == "--kind" and i + 1 < len(rest):
+                kind, i = rest[i + 1], i + 2
+            elif arg.startswith("--kind="):
+                kind, i = arg.split("=", 1)[1], i + 1
+            elif arg.startswith("--"):
+                _fail(usage)
+            else:
+                words.append(arg)
+                i += 1
+        if len(words) > 1 or (words and words[0] not in PLATFORMS):
+            _fail(usage)
+        from .channels import space_view
+        result = space_view.list_spaces(words[0] if words else None, kind)
+        print(json.dumps(result, indent=2))
+        sys.exit(0 if result.get("ok") else 1)
+
+    if cmd == "channels-space":
+        # Channel spaces S10b. Read-only: one room's conversation (channels/space_view.py).
+        usage = "usage: channels-space <platform> <thread_id> [limit]"
+        if len(rest) not in (2, 3) or rest[0] not in PLATFORMS or rest[1].startswith("-") \
+                or (len(rest) == 3 and not rest[2].isdigit()):
+            _fail(usage)
+        from .channels import space_view
+        result = space_view.view(rest[0], rest[1], int(rest[2]) if len(rest) == 3 else 100)
+        print(json.dumps(result, indent=2))
+        sys.exit(0 if result.get("ok") else 1)
+
+    if cmd == "channels-import-instagram":
+        # Channel spaces S9b. Offline: reads an Instagram data export, writes transcript
+        # lines and spaces.json for its group chats, and nothing else (instagram_import.py).
+        usage = "usage: channels-import-instagram <path> [--yes]"
+        flags = [a for a in rest if a.startswith("--")]
+        words = [a for a in rest if not a.startswith("--")]
+        if len(words) != 1 or not set(flags) <= {"--yes"}:
+            _fail(usage)
+        from .channels import instagram_import
+        result = instagram_import.run(words[0], confirm="--yes" in flags)
+        if result.get("ok") and result.get("mode") == "preview":
+            result["hint"] = "nothing was written \u2014 add --yes to import these chats"
+        print(json.dumps(result, indent=2))
+        sys.exit(0 if result.get("ok") else 1)
 
     if cmd == "channels-log":
         if len(rest) < 2:

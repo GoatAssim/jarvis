@@ -45,6 +45,13 @@
  * Same rule as ui-kit.js: catalogue strings, notes and live tool descriptions
  * are inserted with textContent, never innerHTML.
  *
+ * OPEN STEPS
+ * ----------
+ * A step {"open": "<panel id>"} (shipped entries only) has an Open button that
+ * takes you to a Menu panel or a Settings section and closes this checklist.
+ * The panel's Menu item id or Settings section is looked up in the shipped
+ * file's top-level "panels" object; nothing is typed into the step itself.
+ *
  * Deliberately standalone, like custom-tools.js: app.js only needs the one
  * line that calls window.JarvisTestChecklist.open() from the Menu item.
  * ========================================================================= */
@@ -105,12 +112,13 @@
   function stepText(step) {
     if (typeof step.ask === "string") return step.ask;
     if (typeof step.do === "string") return step.do; // L.19: a manual instruction (features only)
+    if (typeof step.open === "string") return "open " + step.open; // a Menu panel or Settings section
     return JSON.stringify(step.run === undefined ? {} : step.run);
   }
   // Keyed by the step's own text, not its position: reordering steps keeps
   // ticks, and editing a step's text clears its tick — a changed test has not
   // been run yet.
-  const stepKey = (step) => (typeof step.ask === "string" ? "a" : typeof step.do === "string" ? "d" : "r") + hash(stepText(step));
+  const stepKey = (step) => (typeof step.ask === "string" ? "a" : typeof step.do === "string" ? "d" : typeof step.open === "string" ? "o" : "r") + hash(stepText(step));
 
   function fmtWhen(ts) {
     if (!ts) return "never";
@@ -556,10 +564,40 @@
     ]);
   }
 
+  // ---- OPEN steps: a Menu panel or a Settings section (the shipped "panels") --
+
+  const panelDef = (id) => ((DATA && DATA.panels) || (SHIPPED && SHIPPED.panels) || {})[id] || null;
+
+  // What the step shows: "Menu \u2192 Calendars", or the Settings label as written.
+  function panelPath(id) {
+    const p = panelDef(id);
+    if (!p) return String(id);
+    return p.menu ? "Menu \u2192 " + p.label : p.label;
+  }
+
+  // Same two routes the rest of the console uses: a Menu item's own click
+  // handler (openInDebug does this too), or the Settings modal's public opener.
+  function openPanel(id) {
+    const p = panelDef(id);
+    if (!p) { toast(`No panel called "${id}" in the checklist data.`, "warn"); return; }
+    close();
+    if (p.menu) {
+      const item = $("#" + p.menu);
+      if (!item) { toast(`Couldn't find ${p.label} in the Menu.`, "warn"); return; }
+      item.click(); // the Menu item closes its dropdown and opens its panel
+    } else {
+      const host = global.JarvisHost;
+      if (!host || !host.openPrefs) { toast("Settings isn't ready yet.", "warn"); return; }
+      host.openPrefs(p.tab ? { section: p.settings, tab: p.tab } : p.settings);
+    }
+    toast(`${p.label} opened. Reopen Test Checklist from the Menu to record the result.`, "info");
+  }
+
   function renderStep(row, step, i) {
     const key = stepKey(step);
     const isAsk = typeof step.ask === "string";
     const isDo = typeof step.do === "string"; // L.19: a manual instruction, not a prompt or a Debug run
+    const isOpen = typeof step.open === "string"; // opens a Menu panel or a Settings section
     const text = stepText(step);
     const ticked = !!((rec(row.name) || {}).c || {})[key];
     const box = el("button", {
@@ -575,16 +613,18 @@
         refreshDerived();
       },
     });
-    return el("div", { class: "tc-step" + (ticked ? " is-done" : ""), "data-step": key }, [
-      box,
-      el("div", null, [
-        el("div", { class: "tc-step__head" }, [
-          el("span", { class: "tc-step__kind" + (isAsk || isDo ? "" : " tc-step__kind--run") }, isDo ? "DO" : isAsk ? "ASK" : "RUN"),
-          el("span", { class: "tc-step__where" }, isDo ? `Step ${i + 1} \u2014 do this by hand in the console` : isAsk ? `Step ${i + 1} \u2014 type this in Ask Jarvis` : `Step ${i + 1} \u2014 Debug \u2192 fill in these arguments \u2192 RUN (skips the model)`),
-        ]),
-        el("pre", { class: "tc-step__code" }, isAsk || isDo ? withPlaceholders(text) : withPlaceholders(text === "{}" ? "{}   (no arguments)" : text)),
-        step.expect ? el("div", { class: "tc-step__expect" }, [el("b", null, "Pass"), step.expect]) : null,
-        el("div", { class: "tc-step__actions" }, [
+    const kindLabel = isOpen ? "OPEN" : isDo ? "DO" : isAsk ? "ASK" : "RUN";
+    const where = isOpen ? `Step ${i + 1} \u2014 open it from the console (reopen this checklist afterwards to record the result)`
+      : isDo ? `Step ${i + 1} \u2014 do this by hand in the console`
+      : isAsk ? `Step ${i + 1} \u2014 type this in Ask Jarvis`
+      : `Step ${i + 1} \u2014 Debug \u2192 fill in these arguments \u2192 RUN (skips the model)`;
+    const code = isOpen ? [panelPath(step.open)]
+      : isAsk || isDo ? withPlaceholders(text)
+      : withPlaceholders(text === "{}" ? "{}   (no arguments)" : text);
+    const actions = isOpen
+      ? [el("button", { class: "btn btn--outline btn--sm", type: "button", onclick: () => openPanel(step.open) },
+          "Open " + ((panelDef(step.open) || {}).label || step.open))]
+      : [
           el("button", { class: "btn btn--ghost btn--sm", type: "button",
             onclick: async () => toast((await copyText(text)) ? (isDo ? "Instruction copied" : isAsk ? "Prompt copied" : "Arguments copied") : "Couldn't copy", "info") }, isDo ? "Copy" : isAsk ? "Copy prompt" : "Copy args"),
           isDo
@@ -592,7 +632,17 @@
             : isAsk
               ? el("button", { class: "btn btn--outline btn--sm", type: "button", onclick: () => sendToAsk(text) }, "Send to Ask")
               : el("button", { class: "btn btn--outline btn--sm", type: "button", onclick: () => openInDebug(row.name) }, "Open in Debug"),
+        ];
+    return el("div", { class: "tc-step" + (ticked ? " is-done" : ""), "data-step": key }, [
+      box,
+      el("div", null, [
+        el("div", { class: "tc-step__head" }, [
+          el("span", { class: "tc-step__kind" + (isAsk || isDo || isOpen ? "" : " tc-step__kind--run") }, kindLabel),
+          el("span", { class: "tc-step__where" }, where),
         ]),
+        el("pre", { class: "tc-step__code" }, code),
+        step.expect ? el("div", { class: "tc-step__expect" }, [el("b", null, "Pass"), step.expect]) : null,
+        el("div", { class: "tc-step__actions" }, actions),
       ]),
     ]);
   }
@@ -887,6 +937,7 @@
         p(el("b", null, "Tool never called? "), "The router only sends the model the tools it thinks are relevant to the message. Check the request in Logs to see whether it was offered; the model can also find it with search_tools."),
         p(el("b", null, "Confirmations. "), "\u201CConfirms first\u201D tools pause for Yes/No before running. That is expected \u2014 unless you switched the toggle off in Debug. Decline anything you didn't mean to run."),
         p(el("b", null, "Verdicts. "), "Working: exactly right. Partial: works but flaky or incomplete. Not as intended: runs, wrong behaviour. Bug: errors or wrong results. Blocked: can't test yet (setup, account, hardware)."),
+        p(el("b", null, "Open. "), "An OPEN step's button takes you to a panel in the Menu or to a Settings section, and closes this checklist. Reopen the Test Checklist from the Menu afterwards to record the result."),
         p(el("b", null, "Keys. "), "Up/Down move between tools, 0\u20135 set the verdict, / searches, Esc closes."),
       ]),
     ]);
