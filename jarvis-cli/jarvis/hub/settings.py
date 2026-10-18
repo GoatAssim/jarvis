@@ -53,9 +53,10 @@ DEFAULTS = {
     "after_download": {"open": "off"},
     # Notifications.  Delivery is the existing notifier (jarvis/notifier.py): the inbox, the
     # in-app toast, the desktop notification, voice and the phone DM, chosen by the notifier's own
-    # importance LEVEL (1 silent .. 5 confirm) and positions in Settings > Notifications /
+    # importance LEVEL (silent .. confirm, whatever the notifier defines) and positions in Settings > Notifications /
     # notify_config.json.  The hub only decides WHICH events fire.  `level` None = follow the
-    # notifier's own default for kind "download"; 1-5 overrides it for that event.
+    # notifier's own default for kind "download"; a level number overrides it for that event
+    # (the valid numbers come from notifier.py, never from a list kept here).
     # `min_seconds`: a finished download that took less is not announced.  `coalesce_s`:
     # finishes within this many seconds fold into one message.  `providers`: also announce
     # tool-supplied rows (Steam, ...).
@@ -171,11 +172,28 @@ def _bool(label):
     return check
 
 
+def _notifier_levels():
+    """(lowest, highest, {name: number}) as the notifier defines them right now.  Read live, so a
+    level added to jarvis/notifier.py is accepted here with no change to the hub.  Falls back to
+    1-5 only if the notifier can't be imported at all."""
+    try:
+        from .. import notifier
+        names = {str(n).lower(): int(k) for k, n in notifier.LEVEL_NAMES.items()}
+        return int(notifier.MIN_LEVEL), int(notifier.MAX_LEVEL), names
+    except Exception:  # noqa: BLE001 - the validator must keep working without the notifier
+        return 1, 5, {}
+
+
 def _check_level(value):
-    """A notifier importance level 1-5, or None / "default" to follow the notifier's own."""
+    """A notifier importance level (by number or by its name), or None / "default" to follow the
+    notifier's own."""
     if value is None or str(value).strip().lower() in ("", "default", "auto", "none"):
         return None, None
-    return _int_in(value, 1, 5, "level")
+    low, high, names = _notifier_levels()
+    named = names.get(str(value).strip().lower())
+    if named is not None and low <= named <= high:
+        return named, None
+    return _int_in(value, low, high, "level")
 
 
 def _check_open_mode(value):

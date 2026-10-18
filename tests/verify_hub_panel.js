@@ -168,7 +168,7 @@ const eq = (a, b) => JSON.stringify(a) === JSON.stringify(b);
   check("view: done", eq(f({ view: "done" }), ["d"]));
   check("view: not reporting is the stale provider row", eq(f({ view: "stale" }), ["e"]));
   check("view: all", f({ view: "all" }).length === rows.length);
-  check("counts per view", eq(pure.viewCounts(rows), { all: 8, active: 1, waiting: 3, failed: 2, done: 1, stale: 1 }));
+  check("counts per view", eq(pure.viewCounts(rows), { all: 8, active: 1, waiting: 3, scheduled: 0, failed: 2, done: 1, stale: 1 }));
   check("source filter: hub engine / provider", eq(f({ source: "provider:demo" }), ["e"]) && f({ source: "hub:http" }).length === 7);
   check("the sources list is labelled and counted", eq(pure.sourceList(rows).map((s) => [s.label, s.count]), [["Demo provider", 1], ["HTTP", 7]]));
   check("search looks in title, subtitle, message and error", eq(f({ search: "alpha" }), ["a"]) && eq(f({ search: "CHECKSUM" }), ["c"]) && f({ search: "zzz" }).length === 0);
@@ -203,6 +203,29 @@ const eq = (a, b) => JSON.stringify(a) === JSON.stringify(b);
   check("hint: a problem wins and is flagged", eq(pure.hintFromDecisions([{ ok: true, engine: "http", reason: "x" }, { ok: false, problem: "private address" }]), ["private address", true]));
   check("hint: several good ones", eq(pure.hintFromDecisions([{ ok: true, engine: "http", reason: "a" }, { ok: true, engine: "http", reason: "b" }]), ["\u2192 2 links, queued as one batch", false]));
   check("hint: nothing", eq(pure.hintFromDecisions([]), ["", false]) && eq(pure.hintFromDecisions(undefined), ["", false]));
+
+  // ---- card buttons, timed starts, live notifier options
+  const caps = (state, list, extra) => row(Object.assign({ state: state, capabilities: list }, extra || {}));
+  check("a card offers pause and cancel for a running download", eq(pure.cardActions(caps("downloading", ["pause", "cancel"])).map((a) => a.verb), ["pause", "cancel"]));
+  check("a paused card offers resume and cancel", eq(pure.cardActions(caps("paused", ["resume", "cancel"])).map((a) => a.verb), ["resume", "cancel"]));
+  check("open / reveal never appear on a card", eq(pure.cardActions(caps("done", ["open", "reveal"])), []));
+  check("a read-only row has no card buttons", eq(pure.cardActions(caps("downloading", [])), []));
+  const sched = caps("paused", ["resume", "cancel"], { scheduled_at: 1900000000, can_schedule: true });
+  check("a scheduled download says so and when", /^Scheduled · starts /.test(pure.statusText(sched)));
+  check("a scheduled download has its own tone", pure.toneOf(sched) === "scheduled" && pure.toneOf(caps("paused", [])) === "paused");
+  check("the Scheduled view only holds scheduled rows", pure.viewMatches("scheduled", sched) && !pure.viewMatches("scheduled", caps("paused", [])));
+  check("fmtWhen: today / tomorrow", pure.fmtWhen(Date.UTC(2026, 5, 10, 12) / 1000, Date.UTC(2026, 5, 10, 8)).length > 0 && /^tomorrow /.test(pure.fmtWhen(new Date(2026, 5, 11, 3, 0).getTime() / 1000, new Date(2026, 5, 10, 20, 0).getTime())) && /^today /.test(pure.fmtWhen(new Date(2026, 5, 10, 23, 0).getTime() / 1000, new Date(2026, 5, 10, 20, 0).getTime())));
+  check("the add form's start time becomes start_at; 'now' sends nothing", eq(pure.addOptionsFromForm({ start: " tomorrow 3am " }).args, { start_at: "tomorrow 3am" }) && eq(pure.addOptionsFromForm({ start: "now" }).args, {}));
+  const savedCh = pure.NOTIFY_CHANNELS.map((c) => Object.assign({}, c));
+  const savedLv = Object.assign({}, pure.LEVEL_NAMES);
+  check("a channel and a level the notifier gains are offered with no change here",
+    pure.applyNotifyOptions({ channels: [{ id: "discord", label: "Discord" }, { id: "telegram", label: "Telegram" }], levels: [{ value: 1, name: "silent" }, { value: 6, name: "panic" }] })
+    && pure.NOTIFY_CHANNELS.some((c) => c.id === "telegram") && pure.levelMenu().some((o) => o.value === "6" && /Panic/.test(o.label)) && !pure.levelMenu().some((o) => o.value === "3"));
+  check("an empty or missing answer changes nothing", !pure.applyNotifyOptions(null) && !pure.applyNotifyOptions({ channels: [], levels: [] }));
+  pure.NOTIFY_CHANNELS.length = 0; savedCh.forEach((c) => pure.NOTIFY_CHANNELS.push(c));
+  Object.keys(pure.LEVEL_NAMES).forEach((k) => delete pure.LEVEL_NAMES[k]); Object.assign(pure.LEVEL_NAMES, savedLv);
+  check("card buttons don't also select the card", /e\.stopPropagation\(\); e\.preventDefault\(\)/.test(source));
+  check("the panel never keeps its own copy of the level range", !/\[1, 2, 3, 4, 5\]/.test(source));
 
   // ---- static wiring: nothing from a download is ever turned into markup
   check("the panel never assigns HTML", !/innerHTML|outerHTML|insertAdjacentHTML|document\.write|eval\(|new Function/.test(source));

@@ -66,7 +66,7 @@ things that were already fixed once.
   started never qualifies, and it fails closed). `notify_owner` takes no recipient for the
   same reason; don't add one to it, and don't loosen `send_dm` to match.
   `tests/test_send_dm.py` pins each of these.
-- **One notification system (Phase E / E5).** Everything shown to the person -- a toast,
+- **One notification system (Phase E / E5).** The Download Hub is part of it: its daemon and its panel (`host.notify`, kind `download`) both raise `notifier.notify()` records; the panel never calls `host.toast`. Everything shown to the person -- a toast,
   a browser or OS notification, a DM to the owner -- is meant to be a `notifier.notify()`
   record drawn by the one toast renderer; no module adds its own. The page calls the
   browser's `new Notification(...)` in ONE place (`JarvisNotifications.osNotice` /
@@ -551,6 +551,7 @@ actually render Markdown):
     python3 tests/test_notify_registry.py   # E0: notify_registry tables (kinds, actions, levels, positions) agree with notifier.py
     python3 tests/test_e4_notify_owner_record.py  # E4: the `notify_owner` tool writes ONE silent `owner_dm` inbox record per call (failed only if nobody was reached); result dict unchanged; never re-DMs
     python3 tests/test_one_notification_system.py  # E5: static ratchet -- no second browser Notification / toast host / toast() helper / native confirm / OS toast / owner DM / unregistered kind
+    python3 tests/test_hub_universal_notifications.py  # Download Hub on the one notification system: `download` kind, notify-send --kind/--source/--failed, POST /api/notifications/send, host.notify, hub panel has no toast of its own
     python3 tests/test_l43_tree.py          # L.43: "changed from default" report + per-value reset (same gate as every Settings write)
     node tests/verify_settings_tree.js      # L.43: settings.js tree helpers, deep-link parser and wiring; no npm install
     python3 tests/verify_l36_insights_ui.py # L.36-P1/P2/P3: Conversation / Usage / Test tabs in a real browser; needs `playwright` (Python) + Chromium, prints SKIP without them

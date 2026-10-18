@@ -1417,6 +1417,52 @@ def parse_notify_send_args(tokens):
     return positional, position, level, None
 
 
+_NOTIFY_SOURCE_RE = re.compile(r"^[A-Za-z0-9_.:-]{1,100}$")
+
+
+def parse_notify_send_extras(tokens):
+    """Peel `--kind K`, `--source S` and `--failed` off a `notify-send` argument list.
+
+    Returns (remaining_tokens, kind, source, failed, error). What is left goes to
+    parse_notify_send_args() unchanged, so the three positional words and --position /
+    --level keep their meaning. `--kind` must be a row of notify_registry.KINDS (a typo is
+    an error, not a silent fallback: this is how a panel says what a message is about, and
+    the kind is what gives it a Settings row and a default level). `--source` is a short
+    name for who raised it (a tool or panel), letters / digits / `_.:-` only.
+    """
+    from . import notify_registry
+    rest, kind, source, failed = [], None, None, False
+    toks = list(tokens)
+    i = 0
+    while i < len(toks):
+        tok = toks[i]
+        name, eq, inline = tok.partition("=")
+        if name in ("--kind", "--source"):
+            if eq:
+                value = inline
+            elif i + 1 < len(toks):
+                i += 1
+                value = toks[i]
+            else:
+                return None, None, None, False, f"{name} needs a value"
+            if name == "--kind":
+                known = [k["id"] for k in notify_registry.KINDS]
+                if value not in known:
+                    return None, None, None, False, f"--kind must be one of: {', '.join(known)}"
+                kind = value
+            else:
+                if not _NOTIFY_SOURCE_RE.match(value):
+                    return None, None, None, False, (
+                        "--source is a short name: letters, digits and _ . : - only")
+                source = value
+        elif tok == "--failed":
+            failed = True
+        else:
+            rest.append(tok)
+        i += 1
+    return rest, kind, source, failed, None
+
+
 def parse_sched_edit_args(tokens):
     """`jarvis sched-edit <id> ...` after the id: either ONE JSON object
     (what web/server.js sends) or `--field value` pairs for typing at a prompt:
@@ -1687,17 +1733,23 @@ def run_scheduler_command(argv):
 
         if cmd == "notify-send":
             usage = ("usage: jarvis notify-send <message> [title] [channels,csv] "
-                     "[--position P] [--level N]")
+                     "[--position P] [--level N] [--kind K] [--source S] [--failed]")
+            rest, kind, source, failed, bad = parse_notify_send_extras(rest)
+            if bad:
+                return emit({"error": bad}, 1)
             words, position, level, bad = parse_notify_send_args(rest)
             if bad:
                 return emit({"error": bad}, 1)
             if len(words) < 1:
                 return emit({"error": usage}, 1)
             channels = [c.strip() for c in words[2].split(",")] if len(words) > 2 else None
+            # `--kind` / `--source` / `--failed` are how a web panel (the Download Hub's, for
+            # one) says what its message is about, so it is filed, levelled and styled like every
+            # other notification instead of being a toast of its own.
             record = notifier.notify(
                 title=words[1] if len(words) > 1 else "Jarvis",
-                message=words[0], channels=channels, kind="notify",
-                position=position, level=level)
+                message=words[0], channels=channels, kind=kind or "notify",
+                position=position, level=level, source=source, failed=failed)
             return emit(record)
 
         if cmd == "notify-list":

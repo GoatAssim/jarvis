@@ -70,7 +70,7 @@ def fresh_store(clock=None):
 
 
 TOOL_NAMES = ["dl_add", "dl_list", "dl_status", "dl_pause", "dl_resume", "dl_cancel", "dl_retry",
-              "dl_open", "dl_settings", "dl_prefs", "hub_doctor", "hub_demo_provider"]
+              "dl_schedule", "dl_open", "dl_settings", "dl_prefs", "hub_doctor", "hub_demo_provider"]
 
 
 # ---------------------------------------------------------------- the tool file, through the real loader
@@ -81,7 +81,7 @@ def test_tool_file():
     check("the loader finds download_hub.py", len(mine) == 1)
     rec = mine[0]
     check("it is valid (no load error)", rec.valid and not rec.error)
-    check("it defines exactly the 12 tools", sorted(rec.tools) == sorted(TOOL_NAMES) and sorted(s["name"] for s in rec.schemas) == sorted(TOOL_NAMES))
+    check("it defines exactly the 13 tools", sorted(rec.tools) == sorted(TOOL_NAMES) and sorted(s["name"] for s in rec.schemas) == sorted(TOOL_NAMES))
     check("in the new `downloads` group", rec.group == "downloads")
     check("no tool name collides with another file's", all(set(rec.tools).isdisjoint(set(o.tools)) for o in records if o is not rec and o.valid))
     check("cancel, settings and the demo are confirm-gated by name",

@@ -62,6 +62,7 @@
     catalog: "/api/notifications/catalog",
     read: "/api/notifications/read",
     dismiss: "/api/notifications/dismiss",
+    send: "/api/notifications/send",
   };
 
   const AUTO_HIDE_MS = 8000;             // a standard (level 2) card
@@ -697,6 +698,32 @@
     return raiseOs(osNoticeSpec(o), o && o.onclick);
   }
 
+  /** Raise a notification FROM the page, e.g. a tool panel's one-line answer to a click
+   *  ("Demo downloads started"). It is handed to the notifier like any other (the server's
+   *  /api/notifications/send runs `jarvis notify-send`), so it is an inbox record with a kind,
+   *  a source, a level and a position, and it comes back to this page through the same push as
+   *  every other notification: show() draws it, once. Nothing is drawn here, which is the
+   *  point: there is no second toast path to keep in step. Takes
+   *  { message, title?, kind?, source?, level?, failed?, channels? }; `channels` defaults to
+   *  ["stream"] (the in-page toast + the inbox), so a click never raises a desktop or phone
+   *  notification. Resolves to the notifier's record, or null when it could not be sent. */
+  async function send(o) {
+    const x = o || {};
+    const message = String(x.message == null ? "" : x.message).trim();
+    if (!message) return null;
+    const body = { message, title: x.title ? String(x.title) : undefined };
+    if (x.kind) body.kind = String(x.kind);
+    if (x.source) body.source = String(x.source);
+    if (Number.isInteger(x.level)) body.level = x.level;
+    if (x.failed) body.failed = true;
+    body.channels = Array.isArray(x.channels) && x.channels.length ? x.channels : ["stream"];
+    try {
+      return await api("POST", API.send, body);
+    } catch {
+      return null;
+    }
+  }
+
   /** Ask the browser for notification permission once (a no-op after that). */
   function requestPermission() {
     if (!("Notification" in global)) return;
@@ -1144,7 +1171,7 @@
   global.JarvisNotifications = {
     show, open: openPanel, close: closePanel, isOpen: panelOpen,
     refresh: () => (panelOpen() ? loadPanel() : syncSummary(false)),
-    markRead, _pure: PURE,
+    markRead, send, _pure: PURE,
     // E3: the page's one browser-notification path (see raiseOs).
     osNotice, requestPermission,
     // E0: the catalog the notifier served (null until loaded); Settings reads it.

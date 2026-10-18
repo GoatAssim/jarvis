@@ -196,6 +196,7 @@ class HubDaemon:
         self._reap()
         self._apply_controls()
         if not self.shutdown.is_set():
+            self._wake_scheduled()
             self._schedule()
         self._finish_pass()
         now = time.monotonic()
@@ -253,6 +254,14 @@ class HubDaemon:
             item = self.store.get_item(request["id"])
             if item is not None:
                 service.apply_control_directly(self.store, item)
+
+    def _wake_scheduled(self):
+        """Downloads the owner gave a start time: queue the ones whose time has come."""
+        try:
+            for item_id in service.wake_scheduled(self.store, self._clock()):
+                log.info("start time reached for %s", item_id)
+        except Exception:  # noqa: BLE001 - a bad row must not stop the other downloads
+            log.exception("waking scheduled downloads failed")
 
     def _schedule(self):
         caps, total = self._caps()

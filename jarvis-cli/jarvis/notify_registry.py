@@ -151,6 +151,11 @@ KINDS = (
     # urgent one is recorded as `owner_dm` at the standard level instead.
     {"id": "reply_digest", "label": "Replies from people you are waiting on", "level": 1,
      "settings": False},
+    # The Download Hub: what the hub daemon announces (started / finished / failed /
+    # stalled) AND the one-line answers its panel gives to a click ("Demo downloads
+    # started", "Scheduled", "That didn't work"). One kind, so the owner turns the
+    # whole hub up or down in one Settings row.
+    {"id": "download", "label": "Downloads", "level": 2, "settings": True},
 )
 
 # ---------------------------------------------------------------------------

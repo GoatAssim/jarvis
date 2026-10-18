@@ -87,6 +87,11 @@
               <div class="field__help" id="addDestHelp">A folder inside your downloads library, or a full path (you'll be asked to confirm one outside the library). Leave empty to use the folder for its file type.</div>
             </div>
             <div class="field">
+              <label class="field__label" for="addStart">Start at</label>
+              <input type="text" id="addStart" spellcheck="false" autocomplete="off" placeholder="Now, or e.g. tomorrow at 3am, in 2 hours">
+              <div class="field__help">Hold these until a time you choose (one time, not a repeat). They wait paused and start by themselves, as long as the hub daemon is running then. Leave empty to start straight away.</div>
+            </div>
+            <div class="field">
               <label class="field__label" for="addLimit">Speed limit for these downloads</label>
               <div class="inline">
                 <input type="text" id="addLimit" inputmode="decimal" spellcheck="false" placeholder="No limit of their own">

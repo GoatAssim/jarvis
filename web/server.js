@@ -3087,6 +3087,41 @@ app.post("/api/notifications/dismiss", requireJarvis, async (req, res) => {
   return parseJarvisJSON(result, res, "Couldn't dismiss notifications.");
 });
 
+// E3 follow-up — a web panel (the Download Hub's, through `host.notify`) raising a notification.
+// It goes through the SAME notifier every other notification does (`jarvis notify-send`, which
+// calls notifier.notify): the durable inbox record, the level rules, the toast position, the
+// owner's per-kind settings. The panel never draws a toast of its own. The page can only ask
+// for a registered `kind` (the CLI checks), a short `source` name, an optional level 1-5 and the
+// in-page channels (`stream` = the toast, `inbox`); the louder channels (desktop, voice, phone)
+// stay the notifier's own decision, so a button click can never DM the owner.
+const NOTIFY_SEND_CHANNELS = new Set(["inbox", "stream"]);
+function cleanNoticeText(value, max) {
+  // No control characters (spawn refuses NUL), and never a leading "--": the CLI would read
+  // it as one of its own flags.
+  const text = String(value ?? "").replace(/[\u0000-\u0008\u000b-\u001f\u007f]/g, " ").trim().slice(0, max);
+  return text.startsWith("--") ? " " + text : text;
+}
+app.post("/api/notifications/send", requireJarvis, async (req, res) => {
+  const body = req.body || {};
+  const message = cleanNoticeText(body.message, 2000);
+  if (!message.trim()) return res.status(400).json({ error: "A notification needs a message." });
+  const title = cleanNoticeText(body.title, 120) || "Jarvis";
+  const args = ["notify-send", message, title];
+  const wanted = Array.isArray(body.channels)
+    ? body.channels.filter((c) => typeof c === "string" && NOTIFY_SEND_CHANNELS.has(c)) : [];
+  if (wanted.length) args.push([...new Set(wanted)].join(","));
+  if (typeof body.kind === "string" && /^[a-z][a-z0-9_]{0,40}$/.test(body.kind)) args.push("--kind", body.kind);
+  if (typeof body.source === "string" && /^[A-Za-z0-9_.:-]{1,100}$/.test(body.source)) args.push("--source", body.source);
+  const level = Number(body.level);
+  if (Number.isInteger(level) && level >= 1 && level <= 5) args.push("--level", String(level));
+  if (body.failed === true) args.push("--failed");
+  const result = await runJarvisOnce(args, 10000);
+  // Show it now instead of at the next tick: the page gets it through the same push every
+  // notification takes (the inbox record, listed and acknowledged as the "web" consumer).
+  if (result.stdout) pushNotifications().catch(() => {});
+  return parseJarvisJSON(result, res, "Couldn't send the notification.");
+});
+
 app.post("/api/notifications/ack", requireJarvis, async (req, res) => {
   const ids = Array.isArray(req.body?.ids) ? req.body.ids.filter((i) => typeof i === "string") : [];
   if (!ids.length) return res.json({ acknowledged: 0 });

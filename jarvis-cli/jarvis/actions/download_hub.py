@@ -10,6 +10,8 @@ What is in it
   dl_add / dl_list / dl_status                 queue and look
   dl_pause / dl_resume / dl_cancel / dl_retry  control (hub downloads; provider rows are
                                                read-only until phase 5)
+  dl_schedule                                  start a download later ("tomorrow 3am"), or clear
+                                               that; dl_add takes the same `start_at`
   dl_open                                      open or reveal a FINISHED file, open its folder,
                                                or open the download folder (path from the
                                                database / settings, only inside the library root)
@@ -130,7 +132,7 @@ def tool_dl_add(args):
                              open_when_done=open_when_done, notify_me=args.get("notify"),
                              notify_channels=args.get("notify_channels"),
                              notify_events=args.get("notify_events"),
-                             allow_absolute_dest=allow_abs)
+                             allow_absolute_dest=allow_abs, start_at=args.get("start_at"))
     except Exception as exc:  # noqa: BLE001 - a tool never raises
         return _fail("dl_add", exc)
 
@@ -183,6 +185,20 @@ def tool_dl_cancel(args):
 
 def tool_dl_retry(args):
     return _control("retry", args)
+
+
+def tool_dl_schedule(args):
+    """Start downloads later: `when` in plain words, the same grammar as scheduling a daemon."""
+    try:
+        args = args or {}
+        when = args.get("when")
+        if when is None:
+            return {"needs_clarification": True,
+                    "message": "When should it start? (for example 'tomorrow at 3am' or 'in 2 hours'; "
+                               "'now' starts it at once, 'clear' removes the start time)"}
+        return _svc().schedule_items(str(when), **_selector(args))
+    except Exception as exc:  # noqa: BLE001
+        return _fail("dl_schedule", exc)
 
 
 def tool_dl_open(args):
@@ -301,10 +317,11 @@ TOOL_SCHEMAS = [
                 "dest": {"type": "string", "description": "Where THIS download is saved, overriding the per-extension and per-type folders: a sub-folder of the library root (e.g. 'Manuals') or a full path like 'D:/Games' (the person is asked to confirm a full path)."},
                 "group": {"type": "string", "description": "A name for this batch."},
                 "start_paused": {"type": "boolean", "description": "Queue it paused instead of starting it."},
+                "start_at": {"type": "string", "description": "Hold it until a time, in the person's own words: 'tomorrow at 3am', 'in 2 hours', 'tonight', '2026-11-02 01:30'. One time, not a repeat. The hub daemon starts it then (or as soon as it is running again). Wins over start_paused."},
                 "speed_limit_kbps": {"type": "integer", "description": "A speed cap for just this download, in KB/s (0 or missing = only the global limit applies)."},
                 "open_when_done": {"type": "string", "enum": ["default", "off", "reveal", "folder", "open"], "description": "What to do when it finishes: nothing, show the file in its folder, open the folder, or open the file (asks the person first; programs and scripts are never opened). Default = the person's own setting."},
                 "notify": {"type": "string", "enum": ["default", "on", "off"], "description": "Tell the person when this one finishes or fails (on), never (off), or follow their notification settings (default)."},
-                "notify_channels": {"type": "array", "items": {"type": "string", "enum": ["inbox", "stream", "desktop", "voice", "playnite", "discord", "instagram"]}, "description": "Where to announce THIS download, instead of the person's usual channels, e.g. [\"discord\"] for Discord only (the notification inbox keeps its record either way). Omit to follow the person's own settings."},
+                "notify_channels": {"type": "array", "items": {"type": "string"}, "description": "Where to announce THIS download, instead of the person's usual channels, e.g. [\"discord\"] for Discord only (the notification inbox keeps its record either way). Any channel the notifier has; dl_prefs with no arguments lists them (notify_options.channels). Omit to follow the person's own settings."},
                 "notify_events": {"type": "array", "items": {"type": "string", "enum": ["started", "done", "failed", "stalled"]}, "description": "Which events announce THIS download, e.g. [\"done\", \"failed\"]. Omit to follow the person's own settings. A download with its own choices is announced even if notifications are off globally."},
                 "dry_run": {"type": "boolean", "description": "Only say which engine would take each link; queue nothing."},
             },
@@ -363,6 +380,21 @@ TOOL_SCHEMAS = [
         "parameters": {"type": "object", "properties": dict(_SELECTOR_PROPS)},
     },
     {
+        "name": "dl_schedule",
+        "description": (
+            "Start a download later, or change/clear when it starts. `when` is the person's own words "
+            "('tomorrow at 3am', 'in 2 hours', 'tonight', '2026-11-02 01:30'); 'now' starts it at once and "
+            "'clear' removes the start time (it then stays paused). Pick the download with an id, a group, an "
+            "engine or all=true. One time only, not a repeat. The hub daemon does the starting, so it has to be "
+            "running (Menu > Daemons). To add a download that starts later in one step use dl_add with start_at."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": dict(_SELECTOR_PROPS, when={"type": "string", "description": "When to start: plain words, 'now', or 'clear'."}),
+            "required": ["when"],
+        },
+    },
+    {
         "name": "dl_open",
         "description": "Open a finished download with its default program, reveal it in the file manager, or open its folder; or open the whole download folder (target=library). Only inside the library folder.",
         "parameters": {
@@ -400,7 +432,9 @@ TOOL_SCHEMAS = [
             "an empty value removes one; it wins over the per-kind folder), what happens when a download finishes "
             "(after_download.open: off, reveal, folder, open), which notifications are on (notify.done.enabled, "
             "notify.failed.enabled, notify.started, notify.stalled, notify.group_done, notify.queue_empty, each "
-            "with an optional .level 1-5 for the notifier), and connections (concurrency.*, http.*). With `id`, "
+            "with an optional .level: a notifier importance level by number or name, see notify_options.levels when you "
+            "read the settings), the most downloads running at once (concurrency.total; concurrency.http / "
+            ".ytdlp / .stremio per engine), and connections (http.*). With `id`, "
             "changes one download's own limit_kbps / open / notify, where it is announced (notify_channels, e.g. "
             "[\"discord\"]), which events announce it (notify_events) and the folder it saves to (folder, until it "
             "has started; a full path asks the person first). test_notification=<type> sends a sample "
@@ -442,6 +476,7 @@ TOOLS = {
     "dl_resume": tool_dl_resume,
     "dl_cancel": tool_dl_cancel,
     "dl_retry": tool_dl_retry,
+    "dl_schedule": tool_dl_schedule,
     "dl_open": tool_dl_open,
     "dl_settings": tool_dl_settings,
     "dl_prefs": tool_dl_prefs,
@@ -482,10 +517,15 @@ TOOL_KEYWORDS = {
     "dl_resume": {"resume downloads": 10, "resume the download": 10},
     "dl_cancel": {"cancel the download": 10, "cancel downloads": 10},
     "dl_retry": {"retry the download": 10, "retry downloads": 10, "retry failed downloads": 10},
+    "dl_schedule": {"schedule a download": 10, "schedule the download": 10, "schedule downloads": 10,
+                    "start the download at": 10, "download it later": 9, "download later": 9,
+                    "start downloading at": 9, "download tonight": 9, "download at night": 9},
     "dl_open": {"open the download": 9, "reveal the download": 9, "open the download folder": 10},
     "dl_settings": {"download settings": 9, "download folder": {"weight": 8, "not_with": ["open"]}},
     "dl_prefs": {"download speed limit": 10, "limit download speed": 10, "limit the download speed": 10,
                  "download notifications": 10, "notify me when downloads": 10,
+                 "max concurrent downloads": 10, "downloads at once": 10, "simultaneous downloads": 10,
+                 "how many downloads at once": 10, "concurrent downloads": 9,
                  "notify when the download": 10, "open when done": 9, "open when the download": 9},
     "hub_doctor": {"hub doctor": 10, "downloads aren't starting": 10, "downloads not starting": 10},
     "hub_demo_provider": {"demo downloads": 10, "downloads demo": 10},
@@ -493,8 +533,9 @@ TOOL_KEYWORDS = {
 
 TOOL_PACK_INSTRUCTION = (
     "dl_add queues and returns at once; the hub daemon does the transfer, so report progress "
-    "with dl_list / dl_status instead of waiting. YouTube pages -> ytdl_download; magnet links "
-    "are not supported by dl_add yet."
+    "with dl_list / dl_status instead of waiting. 'Download it tomorrow night' = dl_add with "
+    "start_at (or dl_schedule for one already queued). YouTube pages -> ytdl_download; magnet "
+    "links are not supported by dl_add yet."
 )
 
 # ---------------------------------------------------------------------------
@@ -583,6 +624,10 @@ TEST_CHECKLIST = {
              "expect": "ok: false: dest must be a sub-folder of the library root."},
             {"run": {"url": "magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567"},
              "expect": "ok: false, says magnet links need the stremio engine which isn't installed yet."},
+            {"run": {"url": "https://<a real, small file link>", "start_at": "in 2 minutes"},
+             "expect": "ok: true, the item is paused with start_at set; Menu > Downloads shows 'Scheduled' and about two minutes later it starts by itself (daemon running)."},
+            {"run": {"url": "https://<a real, small file link>", "start_at": "yesterday at 9am"},
+             "expect": "ok: false, says that time has already passed."},
             {"ask": "Download this file: https://<a real, small file link>",
              "expect": "Calls dl_add (not ytdl_download) and says it was queued."},
         ],
@@ -648,6 +693,27 @@ TEST_CHECKLIST = {
             {"run": {"id": "<a failed id>"}, "expect": "ok: true, the row goes to queued and starts again."},
             {"run": {"id": "<a downloading id>"}, "expect": "ok: false, 'nothing to retry'."},
         ],
+    },
+    "dl_schedule": {
+        "does": "Starts a download later (plain words like 'tomorrow at 3am'), changes that time, or clears it; the same time grammar as scheduling a daemon.",
+        "steps": [
+            {"run": {"id": "<a queued or paused id>", "when": "in 2 minutes"},
+             "expect": "ok: true, start_at is the time two minutes ahead; the row shows 'Scheduled' (paused) and starts by itself at that time."},
+            {"run": {"id": "<the same id>", "when": "clear"},
+             "expect": "ok: true, 'start time cleared'; the row stays paused until you resume it."},
+            {"run": {"id": "<the same id>", "when": "now"},
+             "expect": "ok: true; the row goes to queued and starts at once."},
+            {"run": {"id": "<a downloading id>", "when": "tomorrow at 3am"},
+             "expect": "ok: false: it is already downloading, pause it first."},
+            {"run": {"id": "<any id>", "when": "every night"},
+             "expect": "ok: false: a download starts once; give a single time."},
+            {"run": {"id": "<any id>", "when": "last week"},
+             "expect": "ok: false: couldn't understand it, or that time has passed."},
+            {"ask": "Download that file tomorrow at 3am", "expect": "Calls dl_add with start_at (or dl_schedule) and says when it will start."},
+        ],
+        "needs": ["The 'Download hub' daemon running (Menu > Daemons) at the start time"],
+        "watch": ["Stop the daemon, wait past the start time, start it again: the download starts right away.",
+                  "Pressing Resume on a scheduled download starts it now and drops the schedule."],
     },
     "dl_open": {
         "does": "Opens a finished download, or reveals it in the file manager; only inside the library folder.",

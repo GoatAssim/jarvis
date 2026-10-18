@@ -30,6 +30,7 @@ const VIEWS = [
   { id: "all", label: "All" },
   { id: "active", label: "Active" },
   { id: "waiting", label: "Waiting" },
+  { id: "scheduled", label: "Scheduled" },
   { id: "failed", label: "Failed" },
   { id: "done", label: "Finished" },
   { id: "stale", label: "Not reporting" },
@@ -44,6 +45,34 @@ const ACTION_DEFS = {
   cancel: { label: "Cancel", tool: "dl_cancel", danger: true },
 };
 const ACTION_ORDER = ["pause", "resume", "retry", "open", "reveal", "cancel"];
+
+// The buttons on every list card: the everyday controls (Open / Show in folder stay in the detail pane).
+// Each is offered only when the row's own capabilities allow it, so a read-only provider row has none.
+const CARD_VERBS = ["pause", "resume", "retry", "cancel"];
+const CARD_TITLES = {
+  pause: "Stop it for now and keep what is already downloaded; Resume carries on",
+  resume: "Carry on from where it stopped (a download waiting for its start time starts now)",
+  retry: "Try it again",
+  cancel: "Stop it and throw away the partly downloaded file",
+};
+function cardActions(row) {
+  return rowActions(row).filter((a) => CARD_VERBS.indexOf(a.verb) !== -1);
+}
+
+// "today 3:00 AM", "tomorrow 3:00 AM", "Tue 3:00 AM", "Nov 2 3:00 AM" for a start time (epoch seconds).
+function fmtWhen(sec, nowMs) {
+  const s = num(sec);
+  if (s === null) return "";
+  const d = new Date(s * 1000);
+  const now = new Date(nowMs === undefined || nowMs === null ? Date.now() : nowMs);
+  const day = (x) => new Date(x.getFullYear(), x.getMonth(), x.getDate()).getTime();
+  const diff = Math.round((day(d) - day(now)) / 86400000);
+  const time = d.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+  if (diff === 0) return "today " + time;
+  if (diff === 1) return "tomorrow " + time;
+  if (diff > 1 && diff < 7) return d.toLocaleDateString([], { weekday: "short" }) + " " + time;
+  return d.toLocaleDateString([], { month: "short", day: "numeric" }) + " " + time;
+}
 
 function num(v) {
   return typeof v === "number" && isFinite(v) ? v : null;
@@ -135,7 +164,9 @@ function statusText(row) {
       const idx = row.phase_index && row.phase_count ? " (" + row.phase_index + "/" + row.phase_count + ")" : "";
       return label.charAt(0).toUpperCase() + label.slice(1) + idx;
     }
-    case "paused": return "Paused" + (percentText(row) ? " at " + percentText(row) : "");
+    case "paused":
+      if (row.scheduled_at) return "Scheduled" + DOT + "starts " + fmtWhen(row.scheduled_at);
+      return "Paused" + (percentText(row) ? " at " + percentText(row) : "");
     case "stalled": return "Stalled" + (row.retry_in_s ? " \u2014 retry in " + row.retry_in_s + " s" : "");
     case "failed": return "Failed" + (percentText(row) ? " at " + percentText(row) : "");
     case "cancelled": return "Cancelled";
@@ -182,6 +213,7 @@ function viewMatches(view, row) {
     case "all": return true;
     case "active": return ACTIVE.has(row.state) && !stale;
     case "waiting": return (row.state === "queued" || row.state === "paused" || row.state === "stalled") && !stale;
+    case "scheduled": return !!row.scheduled_at && !stale;
     case "failed": return row.state === "failed" || row.state === "cancelled";
     case "done": return row.state === "done";
     case "stale": return stale;
@@ -289,7 +321,7 @@ function toneOf(row) {
   switch (row.state) {
     case "downloading": case "probing": case "connecting": case "postprocessing": return "active";
     case "queued": return "queued";
-    case "paused": return "paused";
+    case "paused": return row.scheduled_at ? "scheduled" : "paused";
     case "stalled": return "stalled";
     case "failed": return "failed";
     case "done": return "done";
@@ -300,7 +332,7 @@ function toneOf(row) {
 
 // Counts for the Overview pane, by tone.
 function overviewStats(rows) {
-  const out = { total: rows.length, active: 0, queued: 0, paused: 0, stalled: 0, failed: 0, done: 0, cancelled: 0, stale: 0, unknown: 0 };
+  const out = { total: rows.length, active: 0, queued: 0, paused: 0, scheduled: 0, stalled: 0, failed: 0, done: 0, cancelled: 0, stale: 0, unknown: 0 };
   rows.forEach((r) => { const t = toneOf(r); if (out[t] !== undefined) out[t]++; });
   return out;
 }
@@ -404,12 +436,16 @@ function openMenu(globalMode) {
     .concat(OPEN_CHOICES.map((c) => ({ value: c.id, label: c.label })));
 }
 
-// The notifier's own importance levels (jarvis/notifier.py LEVEL_NAMES).
+// The notifier's own importance levels.  These are only a first guess for the instant before the
+// hub answers: applyNotifyOptions() below replaces them with what jarvis/notifier.py defines right
+// now (the hub sends it with every poll), so a level the notifier gains later is offered here with
+// no change to this file.
 const LEVEL_NAMES = { 1: "Silent", 2: "Standard", 3: "Persistent", 4: "Broadcast", 5: "Confirm" };
 
 function levelMenu() {
   return [{ value: "default", label: "Notifier's default" }]
-    .concat([1, 2, 3, 4, 5].map((n) => ({ value: String(n), label: n + " \u00B7 " + LEVEL_NAMES[n] })));
+    .concat(Object.keys(LEVEL_NAMES).map(Number).sort((a, b) => a - b)
+      .map((n) => ({ value: String(n), label: n + " \u00B7 " + LEVEL_NAMES[n] })));
 }
 
 // Every kind of download notification, in the order they are shown.
@@ -431,8 +467,40 @@ const NOTIFY_CHANNELS = [
   { id: "voice", label: "Voice" },
   { id: "instagram", label: "Instagram" },
   { id: "playnite", label: "Playnite" },
-  { id: "inbox", label: "Inbox only (silent)" },
+  { id: "inbox", label: "Inbox (silent)" },
 ];
+
+// Replace the channel list and the level names with what the notifier says it has right now
+// (summary.notify_options, from notifier.describe_options()).  Changed in place, because the
+// helpers above hold these same objects.  A missing or empty answer keeps what we have.
+function applyNotifyOptions(opts) {
+  if (!opts || typeof opts !== "object") return false;
+  let touched = false;
+  if (Array.isArray(opts.channels) && opts.channels.length) {
+    const next = opts.channels.filter((c) => c && typeof c.id === "string")
+      .map((c) => ({ id: c.id, label: String(c.label || c.id) }));
+    if (next.length && JSON.stringify(next) !== JSON.stringify(NOTIFY_CHANNELS)) {
+      NOTIFY_CHANNELS.length = 0;
+      next.forEach((c) => NOTIFY_CHANNELS.push(c));
+      touched = true;
+    }
+  }
+  if (Array.isArray(opts.levels) && opts.levels.length) {
+    const next = {};
+    opts.levels.forEach((l) => {
+      const n = num(l && l.value);
+      if (n === null) return;
+      const name = String(l.name || "level " + n);
+      next[n] = name.charAt(0).toUpperCase() + name.slice(1);
+    });
+    if (Object.keys(next).length && JSON.stringify(next) !== JSON.stringify(LEVEL_NAMES)) {
+      Object.keys(LEVEL_NAMES).forEach((k) => { delete LEVEL_NAMES[k]; });
+      Object.keys(next).forEach((k) => { LEVEL_NAMES[k] = next[k]; });
+      touched = true;
+    }
+  }
+  return touched;
+}
 const ITEM_EVENTS = [
   { id: "started", label: "Starts" },
   { id: "done", label: "Finishes" },
@@ -560,6 +628,8 @@ function addOptionsFromForm(f) {
   if (f.notify && f.notify !== "default") out.notify = f.notify;
   if (f.channels && f.channels.length) out.notify_channels = f.channels.slice();
   if (f.events && f.events.length) out.notify_events = f.events.slice();
+  const start = String(f.start || "").trim();
+  if (start && ["now", "right now", "immediately"].indexOf(start.toLowerCase()) === -1) out.start_at = start;
   return { args: out };
 }
 
@@ -597,7 +667,7 @@ const pure = {
   limitSummary, quickSpeedOptions, openLabel, openMenu, levelMenu, daysChoice, daysFromChoice,
   blankWindow, prefsFromSettings, prefsDiff, notifySummary, addOptionsFromForm, itemPrefsText,
   NOTIFY_CHANNELS, ITEM_EVENTS, channelLabel, isFullPath, cleanExt, extFolderRows,
-  testResultText,
+  testResultText, CARD_VERBS, cardActions, fmtWhen, applyNotifyOptions,
 };
 if (host && host.__hubPureOnly) return pure;
 
@@ -629,8 +699,15 @@ function el(tag, opts, kids) {
   return n;
 }
 
+// Every one-line answer this panel gives ("Demo downloads started", "Scheduled", "That didn't work")
+// is a Jarvis NOTIFICATION, not a toast of its own: host.notify hands it to the notifier under the
+// `download` kind, the same kind and source the hub daemon's "finished" messages use, so it is
+// recorded in the Notifications inbox, follows the owner's Downloads notification settings and is
+// drawn by the one toast renderer.  This panel has no other way of telling the person anything.
 function toast(msg, level) {
-  try { host.toast(String(msg), level || "info"); } catch (e) { /* the host may already be closing */ }
+  try {
+    host.notify(String(msg), level || "info", { kind: "download", source: "download_hub", title: "Download Hub" });
+  } catch (e) { /* the host may already be closing */ }
 }
 
 function message(err) {
@@ -760,6 +837,11 @@ function renderRow(row) {
   meta.push(el("span", { cls: "st" + (row.error ? " bad" : ""), text: statusText(row) }));
   const size = sizeText(row);
   if (size) meta.push(el("span", { text: size }));
+  const buttons = cardActions(row).map((a) => el("button", {
+    cls: "rbtn" + (a.danger ? " rbtn--danger" : ""), text: a.label, title: CARD_TITLES[a.verb] || a.label,
+    attrs: { type: "button", "aria-label": a.label + ": " + (row.title || row.id) },
+    on: { click: (e) => { e.stopPropagation(); e.preventDefault(); e.currentTarget.disabled = true; runAction(row, a); } },
+  }));
   return el("div", {
     cls: "row tone-" + tone + " state-" + row.state,
     attrs: { role: "option", "aria-selected": row.id === S.selected ? "true" : "false", "data-id": row.id },
@@ -772,6 +854,7 @@ function renderRow(row) {
     ]),
     renderBar(row, false),
     el("div", { cls: "row__meta" }, meta),
+    buttons.length ? el("div", { cls: "row__acts" }, buttons) : null,
   ]);
 }
 
@@ -956,11 +1039,30 @@ function renderSide() {
   counts.appendChild(countRow("Active", st.active));
   counts.appendChild(countRow("Queued", st.queued));
   counts.appendChild(countRow("Paused", st.paused));
+  counts.appendChild(countRow("Scheduled", st.scheduled));
   counts.appendChild(countRow("Stalled", st.stalled, st.stalled ? "flag" : ""));
   counts.appendChild(countRow("Failed", st.failed, st.failed ? "bad" : ""));
   counts.appendChild(countRow("Finished", st.done));
   counts.appendChild(countRow("Not reporting", st.stale, st.stale ? "flag" : ""));
   box.appendChild(el("div", {}, [el("h4", { text: "Right now" }), counts]));
+
+  const cc = sum.concurrency || null;
+  if (cc && cc.total) {
+    const once = el("div", {}, [el("h4", { text: "Downloads at once" })]);
+    once.appendChild(el("div", { cls: "big-speed", text: (cc.running || 0) + " of " + cc.total }));
+    once.appendChild(el("div", { cls: "small", text: "The most the hub runs at the same time; the rest wait their turn. Other tools' downloads aren't counted." }));
+    once.appendChild(el("div", { cls: "demo" }, [
+      el("button", { cls: "btn btn--sm", text: "\u2212 Fewer", attrs: { type: "button", "aria-label": "Allow one download fewer at once" }, on: { click: () => setConcurrency(cc.total - 1) } }),
+      el("button", { cls: "btn btn--sm", text: "+ More", attrs: { type: "button", "aria-label": "Allow one more download at once" }, on: { click: () => setConcurrency(cc.total + 1) } }),
+    ]));
+    box.appendChild(once);
+  }
+  const sch = sum.scheduled || null;
+  if (sch && sch.count) {
+    box.appendChild(el("div", {}, [el("h4", { text: "Scheduled" }),
+      el("div", { text: sch.count + (sch.count === 1 ? " download waits" : " downloads wait") + " for a start time" }),
+      el("div", { cls: "small", text: "Next: " + fmtWhen(sch.next_at) })]));
+  }
 
   const hubSpeed = c.speed_hub_bps || 0;
   const otherSpeed = c.speed_other_bps || 0;
@@ -1129,7 +1231,10 @@ async function poll() {
     const r = await host.runTool("dl_list", { limit: 500, summary: true });
     if (r && r.ok === false) throw new Error(r.error || "the hub didn't answer");
     S.rows = Array.isArray(r.items) ? r.items : [];
-    if (r.summary) S.summary = r.summary;
+    if (r.summary) {
+      S.summary = r.summary;
+      if (applyNotifyOptions(r.summary.notify_options)) { S.sig.addextras = ""; S.sig.dprefs = ""; }
+    }
     S.lastError = "";
     if (S.pendingSelect && S.rows.some((x) => x.id === S.pendingSelect)) { S.selected = S.pendingSelect; S.detail = null; }
     S.pendingSelect = "";
@@ -1176,7 +1281,7 @@ async function submitAdd(ev) {
   if (group) args.group = group;
   if ($("#addPaused").checked) args.start_paused = true;
   const extra = addOptionsFromForm({ limit: $("#addLimit").value, unit: $("#addLimitUnit").value, open: $("#addOpen").value, notify: $("#addNotify").value,
-    channels: ticked($("#addChannels")), events: ticked($("#addEvents")) });
+    channels: ticked($("#addChannels")), events: ticked($("#addEvents")), start: $("#addStart").value });
   if (extra.error) { setHint(extra.error, true); return; }
   Object.assign(args, extra.args);
   const btn = $("#addBtn");
@@ -1187,12 +1292,14 @@ async function submitAdd(ev) {
     if (r.ok) {
       const added = r.added || [];
       const dup = added.filter((a) => a.duplicate).length;
-      toast("Queued " + r.count + (dup ? " (" + dup + " already in the list)" : ""), "success");
+      const when = added.length && added[0].start_at ? added[0].start_at : "";
+      toast((when ? "Scheduled " : "Queued ") + r.count + (dup ? " (" + dup + " already in the list)" : "") + (when ? ", starts " + when.replace("T", " ") : ""), "success");
       if (r.note) toast(r.note, "warn");
       if (r.skipped && r.skipped.length) toast(r.skipped[0].problem, "warn");
       if (added.length === 1) S.pendingSelect = added[0].id;       // show the one you just added
       input.value = "";
       $("#addLimit").value = "";                  // one-off choices don't stick to the next add
+      $("#addStart").value = "";
       $("#addOpen").value = "default";
       $("#addNotify").value = "default";
       untick($("#addChannels"));
@@ -1220,9 +1327,14 @@ function fillSelect(sel, options, value) {
 
 // A group of plain checkboxes in `box`; the ticked ids are read back with ticked().
 function buildChecks(box, items) {
-  if (box.childNodes.length) return;
+  const sig = items.map((it) => it.id + "=" + it.label).join("|");
+  if (box.childNodes.length && box.getAttribute("data-sig") === sig) return;
+  const keep = ticked(box);                         // a list that changed keeps what was already ticked
+  box.textContent = "";
+  box.setAttribute("data-sig", sig);
   items.forEach((it) => {
     const input = el("input", { attrs: { type: "checkbox", value: it.id } });
+    if (keep.indexOf(it.id) !== -1) input.checked = true;
     box.appendChild(el("label", { cls: "check" }, [input, el("span", { text: " " + it.label })]));
   });
 }
@@ -1251,6 +1363,32 @@ function renderAddExtras() {
   }
 }
 
+async function setStartTime(row, text) {
+  const r = await callTool("dl_schedule", { id: row.id, when: text });
+  if (r.declined || r.cancelled) toast("Not changed", "info");
+  else if (r.ok === false) toast(r.error || "That didn't work", "warn");
+  else {
+    const low = String(text).toLowerCase();
+    toast(low === "now" ? "Starting now" : low === "clear" ? "Start time cleared" : "Scheduled" + (r.start_at ? ": starts " + r.start_at.replace("T", " ") : ""), "success");
+    if (r.note) toast(r.note, "warn");
+  }
+  S.sig.dprefs = "";
+  S.sig.detail = "";
+  schedule(150);
+}
+
+async function setConcurrency(n) {
+  const total = Math.max(1, Math.min(16, Math.round(n)));
+  const r = await callTool("dl_prefs", { set: { "concurrency.total": total } });
+  if (r.ok === false) { toast(r.error || "That didn't work", "warn"); return; }
+  if (S.summary) S.summary.concurrency = Object.assign({}, S.summary.concurrency || {}, { total: total });
+  if (r.settings) { S.hubPrefs = r.settings; if (!isDirty()) resetForm(); }
+  toast("Up to " + total + " download" + (total === 1 ? "" : "s") + " at once", "success");
+  S.sig.side = "";
+  renderSide();
+  schedule(150);
+}
+
 async function setItemPref(row, set, after) {
   const r = await callTool("dl_prefs", { id: row.id, set: set });
   if (r.declined || r.cancelled) toast("Not changed", "info");
@@ -1269,10 +1407,30 @@ function renderDetailPrefs() {
   if (!show) { S.sig.dprefs = ""; return; }
   if (box.contains(root.activeElement)) return;                    // never rebuild under the cursor
   const global = S.summary && S.summary.after_download;
-  if (!changed("dprefs", [row.id, row.prefs || {}, global])) return;
+  if (!changed("dprefs", [row.id, row.prefs || {}, global, row.scheduled_at || 0, row.can_schedule, NOTIFY_CHANNELS, LEVEL_NAMES])) return;
   box.textContent = "";
   const prefs = row.prefs || {};
   box.appendChild(el("div", { cls: "h5", text: "For this download" }));
+
+  // Start it later (the same plain words as scheduling a daemon: "tomorrow at 3am", "in 2 hours").
+  if (row.can_schedule) {
+    const when = el("input", { attrs: { type: "text", spellcheck: "false", autocomplete: "off", placeholder: "e.g. tomorrow at 3am, in 2 hours", "aria-label": "Start this download at" } });
+    const setWhen = (text) => setStartTime(row, text);
+    when.addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); if (when.value.trim()) setWhen(when.value.trim()); } });
+    const btns = [el("button", { cls: "btn btn--sm", text: row.scheduled_at ? "Change" : "Schedule", attrs: { type: "button" },
+      on: { click: () => { if (when.value.trim()) setWhen(when.value.trim()); else toast("Type when it should start, like tomorrow at 3am", "warn"); } } })];
+    if (row.scheduled_at) {
+      btns.push(el("button", { cls: "btn btn--sm", text: "Start now", attrs: { type: "button" }, on: { click: () => setWhen("now") } }));
+      btns.push(el("button", { cls: "btn btn--sm", text: "Clear", attrs: { type: "button", title: "Remove the start time; it stays paused until you resume it" }, on: { click: () => setWhen("clear") } }));
+    }
+    box.appendChild(el("div", { cls: "field" }, [
+      el("label", { cls: "field__label", text: "Start at" }),
+      el("div", { cls: "inline" }, [when].concat(btns)),
+      el("div", { cls: "field__help", text: row.scheduled_at
+        ? "Starts " + fmtWhen(row.scheduled_at) + ". It only starts if the hub daemon is running; if it was down at that time it starts as soon as it is back."
+        : "Hold it until a time you choose. It waits paused and starts by itself; the hub daemon has to be running then." }),
+    ]));
+  }
   const current = itemPrefsText(prefs);
   box.appendChild(el("div", { cls: "small", text: current || "It follows your overall settings." }));
 
@@ -1365,7 +1523,7 @@ function resetForm() {
 
 async function loadHubPrefs() {
   const r = await callTool("dl_prefs", {});
-  if (r.ok && r.settings) { S.hubPrefs = r.settings; return true; }
+  if (r.ok && r.settings) { S.hubPrefs = r.settings; applyNotifyOptions(r.settings.notify_options); return true; }
   S.formError = r.error || "Couldn't read the settings from the hub.";
   return false;
 }
@@ -1746,6 +1904,7 @@ list.addEventListener("keydown", (e) => {
     return;
   }
   if (!current) return;
+  if (e.target && e.target.closest && e.target.closest("button")) return;      // a card's own button handles its keys
   const actions = rowActions(current);
   const find = (v) => actions.find((a) => a.verb === v);
   if (e.key === " ") {

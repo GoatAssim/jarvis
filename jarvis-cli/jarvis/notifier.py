@@ -66,6 +66,19 @@ ENCODING = "utf-8"
 CHANNELS = registry.channel_ids()
 LEGACY_CHANNEL_ALIASES = {"toast": "desktop"}
 
+# Friendly names for CHANNELS, used by every panel that lets the owner pick one
+# (describe_options() below). Optional: a channel added to CHANNELS without an
+# entry here is still offered, under its own name made readable.
+CHANNEL_LABELS = {
+    "inbox": "Inbox (silent)",
+    "stream": "In-app toast",
+    "desktop": "Desktop notification",
+    "voice": "Voice",
+    "playnite": "Playnite",
+    "discord": "Discord",
+    "instagram": "Instagram",
+}
+
 
 def canonical_channel(name):
     """One channel name as notify() understands it: trimmed, lower-cased, the
@@ -214,6 +227,33 @@ def normalize_level(value, kind=None, source=None, config=None):
         except (KeyError, TypeError, ValueError):
             continue
     return DEFAULT_LEVEL
+
+
+def describe_options():
+    """Everything a screen needs to offer the notifier's choices, read live from this module.
+
+    This is how other parts of Jarvis (the Download Hub's panel and tools) stay wired to the
+    notifier instead of keeping their own copy of "the levels are 1-5, the channels are
+    discord, desktop, ...". Add a level (raise MAX_LEVEL, give it a LEVEL_NAMES entry), a channel
+    (CHANNELS + a _DELIVERERS entry, optionally a CHANNEL_LABELS entry) or a position (POSITIONS)
+    and every consumer of this function offers it with no change of its own.
+
+    Pure: reads only this module's constants, no file, so it is cheap enough to call on every
+    poll.
+    """
+    levels = []
+    for number in range(MIN_LEVEL, MAX_LEVEL + 1):
+        name = LEVEL_NAMES.get(number) or ("level %d" % number)
+        levels.append({"value": number, "name": name,
+                       "label": "%d \u00b7 %s" % (number, name[:1].upper() + name[1:])})
+    channels = []
+    for channel in CHANNELS:
+        label = CHANNEL_LABELS.get(channel) or str(channel).replace("_", " ").replace("-", " ").strip().capitalize()
+        channels.append({"id": channel, "label": label})
+    return {
+        "levels": levels, "min_level": MIN_LEVEL, "max_level": MAX_LEVEL, "default_level": DEFAULT_LEVEL,
+        "channels": channels, "positions": list(POSITIONS), "default_position": DEFAULT_POSITION,
+    }
 
 
 def normalize_position(value, kind=None, source=None, config=None):

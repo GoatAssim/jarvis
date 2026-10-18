@@ -23,8 +23,10 @@ off, so the web counts are zero and the only direct DMs left are the ones that a
 with the new number to write here, so the baseline tightens as debt is paid and nobody can
 quietly put it back.
 
-Does not touch the Download Hub (jarvis/hub/, actions/download_hub.py, actions/hub_ui/): those
-files are skipped, not scanned.
+The Download Hub (jarvis/hub/, actions/download_hub.py, actions/hub_ui/) is scanned like
+everything else. Its daemon announces through `notifier.notify()` (kind `download`) and its panel
+answers a click with `host.notify(...)`, which is a `notifier.notify()` record of the same kind;
+it has no toast, dialog, OS call or DM of its own (see test_the_download_hub_panel_has_no_notification_system_of_its_own).
 
 Run: python3 tests/test_one_notification_system.py
 """
@@ -146,16 +148,10 @@ def _js_files():
         yield p.name, p.read_text(encoding="utf-8")
 
 
-def _skip_hub(rel):
-    return (rel.startswith("hub/") or rel == "hub_client.py"
-            or rel.startswith("actions/download_hub") or rel.startswith("actions/hub_ui"))
-
-
 def _py_files():
+    # Every module of the package, the Download Hub's included (it used to be skipped).
     for p in sorted(PKG.rglob("*.py")):
-        rel = p.relative_to(PKG).as_posix()
-        if not _skip_hub(rel):
-            yield rel, p.read_text(encoding="utf-8")
+        yield p.relative_to(PKG).as_posix(), p.read_text(encoding="utf-8")
 
 
 def count_by_file(pattern, files, exempt=()):
@@ -373,6 +369,40 @@ def test_every_notify_kind_is_registered():
           not (KNOWN_UNREGISTERED_KINDS & registered)
           and KNOWN_UNREGISTERED_KINDS <= set(used),
           f"registered now or unused: {sorted(KNOWN_UNREGISTERED_KINDS - set(used)) or sorted(KNOWN_UNREGISTERED_KINDS & registered)}")
+
+
+def test_the_download_hub_panel_has_no_notification_system_of_its_own():
+    hub_ui = PKG / "actions" / "hub_ui"
+    js = (hub_ui / "tool.js").read_text(encoding="utf-8")
+    html = (hub_ui / "tool.html").read_text(encoding="utf-8")
+    css = (hub_ui / "tool.css").read_text(encoding="utf-8")
+    check("the hub kind is registered (notify_registry.KINDS)",
+          "download" in {k["id"] for k in reg.KINDS})
+    check("hub panel: never calls host.toast (host.notify is its only way to say something)",
+          "host.toast(" not in js and "host.notify(" in js)
+    m = TOAST_DEF.search(js)
+    check("hub panel: its toast() helper hands off to host.notify with the `download` kind",
+          bool(m) and "host.notify(" in js[m.start():m.start() + 400]
+          and 'kind: "download"' in js[m.start():m.start() + 400], js[m.start():m.start() + 200] if m else "no helper")
+    check("hub panel: no native confirm() / alert() / prompt()",
+          not re.search(r"(?<![\w.])(?:window\.)?(?:confirm|alert|prompt)\(", js))
+    check("hub panel: no browser Notification",
+          "new Notification" not in js and "Notification.requestPermission" not in js)
+    check("hub panel: no toast host or stack element of its own",
+          not any(tok in blob for blob in (js, html, css)
+                  for tok in ("jui-toasts", "ntf-stack", 'id="toast"', "run-confirm-popup")))
+    # (`.banner` is not one of these: it is the panel's standing status line -- "the hub daemon
+    # isn't running" -- which shows a state and goes away by itself, it is not a message to dismiss.)
+    check("hub panel: no `.toast` / `.snack` / `.flash` stack in its CSS",
+          not re.search(r"(?m)^\s*\.(?:toast|snack|snackbar|flash)\b", css))
+
+
+def test_the_hub_daemon_announces_through_the_notifier_under_its_kind():
+    src = (PKG / "hub" / "notify.py").read_text(encoding="utf-8")
+    check("hub/notify.py calls notifier.notify(..., kind=\"download\", source=\"download_hub\")",
+          'kind="download"' in src and 'source="download_hub"' in src and "notifier.notify(" in src)
+    check("and still opens no channel of its own",
+          not OS_TOAST.search(src) and "outbound" not in src)
 
 
 if __name__ == "__main__":

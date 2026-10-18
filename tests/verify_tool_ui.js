@@ -64,7 +64,7 @@ ok("srcdoc: a </style> in the tool's css doesn't end its style block", !doc.incl
 ok("srcdoc: tool names are embedded as escaped JSON", !doc.includes('"</script>"') && doc.includes("\\u003c/script>"));
 ok("srcdoc without js has no module script", !U.buildSrcdoc({ html: "x" }, {}, { id: "a", tools: [] }).includes("type=\"module\""));
 ok("the frame shim is syntactically valid JavaScript", (() => { try { new Function("HOST_INFO", "parent", U.FRAME_SHIM); return true; } catch (e) { console.log(e.message); return false; } })());
-ok("the shim gives pages the documented host API", ["runTool", "toast", "setTitle", "close", "onClose", "storage", "root"].every((k) => U.FRAME_SHIM.includes(k + ":")));
+ok("the shim gives pages the documented host API", ["runTool", "toast", "notify", "setTitle", "close", "onClose", "storage", "root"].every((k) => U.FRAME_SHIM.includes(k + ":")));
 ok("the frame has no way to name a different tool than its own list (host.tools is passed through)", U.FRAME_SHIM.includes("tools:HOST_INFO.tools"));
 
 // ---- tool-manager.js ----------------------------------------------------------------------

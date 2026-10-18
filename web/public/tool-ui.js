@@ -26,6 +26,13 @@
  *                                    A tool that asks first still asks first (the same
  *                                    confirmation as the Debug panel); declining rejects.
  *   host.toast(message, level)       a corner message ("info" | "success" | "warn" | "error")
+ *   host.notify(message, level, o)   the same one-liner raised as a real Jarvis NOTIFICATION:
+ *                                    sent to the notifier (an inbox record with a kind, a source
+ *                                    and a level, drawn by the one toast renderer like every
+ *                                    other notification). o = { kind, source, title }; `kind`
+ *                                    must be a row of notify_registry.KINDS. A panel that is
+ *                                    part of a feature with its own notification kind (the
+ *                                    Download Hub: "download") uses this instead of host.toast.
  *   host.setTitle(text)              the window / panel heading
  *   host.close()                     close it
  *   host.storage.get/set/remove      small per-element values kept in this browser (Promise)
@@ -138,6 +145,7 @@
     "window.host={id:HOST_INFO.id,mode:'button',tools:HOST_INFO.tools,root:document,",
     "runTool:function(n,a){return call('runTool',{tool:n,args:a||{}});},",
     "toast:function(m,l){parent.postMessage({jv:1,id:0,op:'toast',message:String(m),level:l||'info'},'*');},",
+    "notify:function(m,l,o){parent.postMessage({jv:1,id:0,op:'notify',message:String(m),level:l||'info',opts:o||{}},'*');},",
     "setTitle:function(t){parent.postMessage({jv:1,id:0,op:'title',text:String(t)},'*');},",
     "close:function(){parent.postMessage({jv:1,id:0,op:'close'},'*');},",
     "onClose:function(f){if(typeof f==='function')closers.push(f);},",
@@ -175,6 +183,30 @@
 
   const UI = () => global.JarvisUI;
   const toast = (message, level) => { try { UI().toast({ message: String(message), level: level || "info" }); } catch (_) { /* ui-kit missing */ } };
+  const LEVELS = ["info", "success", "warn", "error"];
+
+  // host.notify: one line from a panel, raised as a notification (see the header). `info` and
+  // `success` follow the owner's own level for that kind; `warn` and `error` are marked failed
+  // and never quieter than the standard level, so "That didn't work" is not silenced by a kind
+  // turned down to inbox-only. If the notifier can't be reached the line is shown as a plain
+  // toast instead (the page's one error popup), so a message is never lost.
+  async function notify(item, message, level, opts) {
+    const lvl = LEVELS.includes(level) ? level : "info";
+    const o = opts || {};
+    const bad = lvl === "warn" || lvl === "error";
+    const N = global.JarvisNotifications;
+    let sent = null;
+    try {
+      if (N && typeof N.send === "function") {
+        sent = await N.send({
+          message: String(message), title: o.title ? String(o.title) : (item && item.label) || "Jarvis",
+          kind: o.kind, source: o.source || (item && item.id) || undefined,
+          failed: bad, level: bad ? 2 : undefined,
+        });
+      }
+    } catch (_) { sent = null; }
+    if (!sent) toast(message, lvl);
+  }
 
   const state = { items: [], loaded: false, open: new Map() };   // id -> { close() }
 
@@ -336,6 +368,7 @@
       const reply = (ok, payload) => { try { frame.contentWindow.postMessage(Object.assign({ jv: 1, reply: m.id, ok }, ok ? { value: payload } : { error: String(payload) }), "*"); } catch (_) { /* frame gone */ } };
       try {
         if (m.op === "toast") toast(m.message, ["info", "success", "warn", "error"].includes(m.level) ? m.level : "info");
+        else if (m.op === "notify") notify(item, m.message, m.level, m.opts);
         else if (m.op === "title") win.titleEl.textContent = String(m.text || item.title).slice(0, 80).toUpperCase();
         else if (m.op === "close") close();
         else if (m.op === "runTool") reply(true, await runTool(item, m.tool, m.args));
@@ -379,6 +412,7 @@
       id: item.id, mode: "menu", tools: item.tools.slice(), root,
       runTool: (name, args) => runTool(item, name, args),
       toast: (m, l) => toast(m, ["info", "success", "warn", "error"].includes(l) ? l : "info"),
+      notify: (m, l, o) => notify(item, m, l, o),
       setTitle: (t) => { win.titleEl.textContent = String(t || item.title).slice(0, 80).toUpperCase(); },
       close: () => close(),
       onClose: (fn) => { if (typeof fn === "function") closers.push(fn); },

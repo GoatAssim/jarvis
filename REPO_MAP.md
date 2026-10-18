@@ -365,7 +365,7 @@ jarvis-cli/jarvis/
                               rate-limited (~/.jarvis/channels/dm_sends.json), refuses unattended
         channel_people.py     NEW — remember_sender / who_am_i_talking_to
         download_hub.py       Download Hub (JARVIS_DOWNLOAD_HUB.md phases 1-2): dl_add / dl_list / dl_status /
-                              dl_pause / dl_resume / dl_cancel / dl_retry / dl_open / dl_settings, hub_doctor,
+                              dl_pause / dl_resume / dl_cancel / dl_retry / dl_schedule / dl_open / dl_settings, hub_doctor,
                               hub_demo_provider. Thin: every rule is in hub/service.py. Declares the Menu >
                               Downloads panel (hub_ui/, shipped as package data) and the `hub` daemon
         _hub_daemon.py        the runner DAEMONS launches (underscore = not a tool)

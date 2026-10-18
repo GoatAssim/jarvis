@@ -55,7 +55,7 @@ OLD_LEVELS = {1: "silent", 2: "standard", 3: "persistent", 4: "broadcast", 5: "c
 # "owner_dm" (silent, no Settings row) was added by E4 for the notify_owner tool's inbox record;
 # "reply_digest" (silent, no Settings row) by E4b for channels/awaiting.py's records.
 OLD_KIND_LEVELS = {"reminder": 2, "notify": 2, "task": 2, "clipboard_watch": 2, "ambient": 1,
-                   "scheduled": 2, "daemon": 2, "owner_dm": 1, "reply_digest": 1}
+                   "scheduled": 2, "daemon": 2, "owner_dm": 1, "reply_digest": 1, "download": 2}
 
 
 def check(name, cond, detail=""):
@@ -153,7 +153,7 @@ def test_values_the_rest_of_jarvis_imports_are_unchanged():
     check("POSITIONS is the same eight, same order", tuple(notifier.POSITIONS) == EIGHT, notifier.POSITIONS)
     check("DEFAULT_POSITION is bottom-right", notifier.DEFAULT_POSITION == "bottom-right")
     check("the legacy `toast` alias still maps to desktop", notifier.canonical_channel("toast") == "desktop")
-    check("default per-kind levels are the same (plus the silent `owner_dm` and `reply_digest`)", notifier.DEFAULT_CONFIG["levels"] == OLD_KIND_LEVELS,
+    check("default per-kind levels are the same (plus the silent `owner_dm` and `reply_digest`, and `download` at standard)", notifier.DEFAULT_CONFIG["levels"] == OLD_KIND_LEVELS,
           notifier.DEFAULT_CONFIG["levels"])
     check("DEFAULT_CONFIG per-kind channels are untouched",
           notifier.DEFAULT_CONFIG["channels"]["task"] == ["inbox", "stream"])
@@ -215,9 +215,9 @@ def test_catalog_shape():
     check("positions are in picker order, bottom-right first",
           [p["id"] for p in cat["positions"]][0] == "bottom-right"
           and sorted(p["id"] for p in cat["positions"]) == sorted(EIGHT), cat["positions"])
-    check("settings kinds are the six that had rows; `scheduled` has none",
+    check("settings kinds are the six that had rows plus `download`; `scheduled` has none",
           [k["id"] for k in cat["kinds"] if k["settings"]]
-          == ["reminder", "notify", "task", "clipboard_watch", "ambient", "daemon"], cat["kinds"])
+          == ["reminder", "notify", "task", "clipboard_watch", "ambient", "daemon", "download"], cat["kinds"])
     check("a version string", isinstance(cat["version"], str) and len(cat["version"]) == 12)
 
 
@@ -226,7 +226,7 @@ def test_catalog_version_follows_the_table_not_the_config():
     v1 = notifier.catalog()["version"]
     _write_config({"levels": {"reminder": 4}, "position": "top"})
     check("changing the owner's config does not change the version", notifier.catalog()["version"] == v1)
-    with _swapped(KINDS=reg.KINDS + ({"id": "download", "label": "Downloads", "level": 2, "settings": True},)):
+    with _swapped(KINDS=reg.KINDS + ({"id": "example_kind", "label": "Example", "level": 2, "settings": True},)):
         v2 = reg.catalog()["version"]
     check("changing the table does", v1 != v2, (v1, v2))
     _reset()
@@ -284,10 +284,10 @@ def test_tool_help_comes_from_the_table():
 # --- adding a new kind / level / action actually works -------------------------------------------------
 
 def test_adding_a_kind_reaches_the_derived_values():
-    with _swapped(KINDS=reg.KINDS + ({"id": "download", "label": "Downloads", "level": 3, "settings": True},)):
-        check("default_levels has the new kind", reg.default_levels().get("download") == 3)
+    with _swapped(KINDS=reg.KINDS + ({"id": "example_kind", "label": "Example", "level": 3, "settings": True},)):
+        check("default_levels has the new kind", reg.default_levels().get("example_kind") == 3)
         cat = reg.catalog()
-        check("the catalog lists it with a Settings row", any(k["id"] == "download" and k["settings"] for k in cat["kinds"]))
+        check("the catalog lists it with a Settings row", any(k["id"] == "example_kind" and k["settings"] for k in cat["kinds"]))
         check("the table is still consistent", reg.problems(notifier._DELIVERERS.keys()) == [], reg.problems())
 
 

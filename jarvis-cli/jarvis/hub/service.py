@@ -14,6 +14,7 @@ Control requests (pause / cancel):
     next tick (<= ~1 s) stops the worker and performs the change.
 """
 
+import datetime
 import os
 import shutil
 import subprocess
@@ -152,6 +153,60 @@ def normalize_events(value):
     return out, None
 
 
+# --------------------------------------------------------------------------- timed starts
+#
+# A download can be told to start later, the way a daemon can be given a `next_start`
+# (daemons.schedule): the same plain-language grammar (jarvis/timespec.py), the same one-shot
+# meaning.  It is stored as a PAUSED hub row carrying `options.start_at` (the owner's wording
+# resolved to an ISO time) and `next_attempt_at` (the same moment as epoch seconds); the daemon
+# moves it to `queued` when the time comes, or on its next start if it was down at the time.
+# Resuming it by hand starts it at once and drops the schedule.
+
+MAX_SCHEDULE_DAYS = 366
+START_NOW_WORDS = ("now", "right now", "immediately", "asap", "start now")
+CLEAR_SCHEDULE_WORDS = ("", "clear", "none", "off", "remove", "unschedule", "cancel")
+
+
+def parse_start(text, now=None):
+    """What the owner typed ("tomorrow 3am", "in 2 hours", "2026-11-02 01:30") -> ({iso, epoch}, error).
+
+    Always a time in the future, within about a year; a recurring phrase ("every night") is
+    refused because a download starts once."""
+    from .. import timespec
+    raw = str(text or "").strip()
+    now_dt = now or datetime.datetime.now()
+    if raw.lower().startswith(("every ", "each ", "daily", "hourly", "weekly", "monthly", "nightly")):
+        return None, "a download starts once; give a single time like 'tomorrow at 3am' or 'in 2 hours'"
+    try:
+        when = timespec.parse_when(raw, now=now_dt)
+    except timespec.TimeSpecError as exc:
+        return None, "couldn't understand %r as a start time: %s" % (raw[:60], exc)
+    if when <= now_dt:
+        return None, "%s has already passed; give a time in the future" % timespec.to_iso(when)
+    if when > now_dt + datetime.timedelta(days=MAX_SCHEDULE_DAYS):
+        return None, "a start time more than a year away isn't allowed"
+    return {"iso": timespec.to_iso(when), "epoch": when.timestamp()}, None
+
+
+def _options_without_schedule(item):
+    options = dict(item.get("options") or {})
+    options.pop("start_at", None)
+    return options
+
+
+def scheduled_at(item):
+    """Epoch seconds a download is waiting for, or None (it isn't a scheduled one)."""
+    if item.get("owner") != "hub" or item.get("state") != "paused":
+        return None
+    if not (item.get("options") or {}).get("start_at") or not item.get("next_attempt_at"):
+        return None
+    return float(item["next_attempt_at"])
+
+
+def can_schedule(item):
+    return item.get("owner") == "hub" and item.get("state") in ("queued", "paused", "stalled")
+
+
 def normalize_item_options(limit_kbps=None, open_when_done=None, notify_me=None,
                            notify_channels=None, notify_events=None):
     """The per-download extras -> ({options}, error).  A value of None leaves that option unset;
@@ -216,8 +271,12 @@ def split_dest(dest, root, allow_absolute=False):
 
 def add_items(inputs, *, engine=None, dest=None, group=None, start_paused=False,
               speed_limit_kbps=None, open_when_done=None, notify_me=None,
-              notify_channels=None, notify_events=None, allow_absolute_dest=False, store=None):
-    """Queue one or more downloads.  Returns {ok, added, skipped, group, note}."""
+              notify_channels=None, notify_events=None, allow_absolute_dest=False, start_at=None,
+              store=None):
+    """Queue one or more downloads.  Returns {ok, added, skipped, group, note}.
+
+    `start_at` ("tomorrow 3am", "in 2 hours") holds them until then (see "timed starts" above);
+    it wins over `start_paused`."""
     try:
         store = _store(store)
         if isinstance(inputs, str):
@@ -247,6 +306,11 @@ def add_items(inputs, *, engine=None, dest=None, group=None, start_paused=False,
         if problem:
             return _err(problem)
         extras = {k: v for k, v in extras.items() if v is not None}
+        timed = None
+        if str(start_at or "").strip() and str(start_at).strip().lower() not in START_NOW_WORDS:
+            timed, problem = parse_start(start_at)
+            if problem:
+                return _err(problem)
 
         plan, skipped = [], []
         for text in wanted:
@@ -262,15 +326,22 @@ def add_items(inputs, *, engine=None, dest=None, group=None, start_paused=False,
         for text, decision in plan:
             options = dict(where)
             options.update(extras)            # extras never reach the dedupe key (options_hash)
+            if timed:
+                options["start_at"] = timed["iso"]
             title = _initial_title(decision["source"]) if decision["source"].lower().startswith(SOURCE_RE_PREFIXES) \
                 else states.clean_text(text, 80)
             item, created = store.add_item(
                 engine=decision["engine"], source_url=decision["source"], title=title,
                 kind=naming.kind_for(title) if decision["kind"] == "file" else decision["kind"],
-                options=options, group_id=group_id, state="paused" if start_paused else "queued",
+                options=options, group_id=group_id, state="paused" if (start_paused or timed) else "queued",
                 dedupe_key=router.dedupe_key(decision["engine"], router.canonical_url(decision["source"]), options))
+            if timed and created:
+                store.update_item(item["id"], {"next_attempt_at": timed["epoch"]}, touch=False,
+                                  event="scheduled to start at %s" % timed["iso"])
+                item = store.get_item(item["id"]) or item
             added.append({"id": item["id"], "title": item["title"], "engine": item["engine"],
-                          "reason": decision["reason"], "state": item["state"], "duplicate": not created})
+                          "reason": decision["reason"], "state": item["state"], "duplicate": not created,
+                          "start_at": timed["iso"] if (timed and created) else None})
         out = {"ok": bool(added), "added": added, "skipped": skipped, "group": group_id,
                "count": len(added), "library_root": str(root)}
         if not added:
@@ -348,7 +419,9 @@ def present_item(item, providers, now):
         "message": item["message"], "error": item["error"], "stale": item["stale"],
         "age_s": None if not last else max(0, int(now - last)),
         "attempts": item["attempts"], "created_at": item["created_at"], "finished_at": item["finished_at"],
-        "retry_in_s": (max(0, int(item["next_attempt_at"] - now)) if item.get("next_attempt_at") else None),
+        "retry_in_s": (max(0, int(item["next_attempt_at"] - now))
+                       if item.get("next_attempt_at") and item["state"] != "paused" else None),
+        "scheduled_at": scheduled_at(item), "can_schedule": can_schedule(item),
         "capabilities": effective_capabilities(item, provider),
         "read_only": bool(item["owner"] == "provider" and not (provider or {}).get("capabilities")),
         "links": item.get("links") or [], "pending": item.get("control") or "",
@@ -402,7 +475,12 @@ def summary(store, full=False):
            # shows it without needing the whole settings object on every poll
            "speed_limit": {"kbps": kbps, "source": source},
            "after_download": settings["after_download"]["open"],
-           "notifications_on": bool(settings["notify"]["enabled"])}
+           "notifications_on": bool(settings["notify"]["enabled"]),
+           # the global "downloads at once" ceiling and how much of it is in use (hub downloads only)
+           "concurrency": {"total": int(settings["concurrency"]["total"]), "running": store.running_hub()},
+           "notify_options": notify_options()}
+    sched = store.list_scheduled()
+    out["scheduled"] = {"count": len(sched), "next_at": sched[0][1] if sched else None}
     if full:
         out["engines"] = engines.availability()
         out["engine_load_errors"] = dict(engines.LOAD_ERRORS)
@@ -454,6 +532,21 @@ def library_info(settings):
                                                           for k in settings_mod.FOLDER_KINDS}}
 
 
+def notify_options():
+    """The notifier's levels, channels and positions, read live from jarvis/notifier.py, plus the
+    download events the hub itself can announce.  The panel and the tools offer exactly this, so
+    a level or channel added to the notifier shows up here with no change to the hub."""
+    try:
+        from .. import notifier
+        out = notifier.describe_options()
+    except Exception:  # noqa: BLE001 - never break the panel over a notifier problem
+        out = {"levels": [], "channels": [], "positions": [], "min_level": 1, "max_level": 5,
+               "default_level": 2, "default_position": "bottom-right"}
+    out["events"] = list(settings_mod.EVENTS)
+    out["item_events"] = list(ITEM_NOTIFY_EVENTS)
+    return out
+
+
 def settings_view(settings):
     kbps, source = settings_mod.effective_rate_limit_kbps(settings)
     return {"library_root": str(settings_mod.library_root(settings)),
@@ -464,7 +557,8 @@ def settings_view(settings):
             "rate_limit_now": {"kbps": kbps, "source": source},
             "folders": settings["folders"], "ext_folders": settings.get("ext_folders") or {},
             "after_download": settings["after_download"],
-            "notify": settings["notify"], "library": library_info(settings)}
+            "notify": settings["notify"], "notify_options": notify_options(),
+            "library": library_info(settings)}
 
 
 def get_settings(store=None):
@@ -609,7 +703,7 @@ def control_provider_row(item, verb, provider):
     return "controls for tool-supplied downloads arrive with phase 5"
 
 
-def _apply(store, verb, item, daemon_alive, providers):
+def _apply(store, verb, item, daemon_alive, providers, bulk=False):
     """One item, one verb.  Returns ("changed" | "pending" | "skipped", detail)."""
     state = item["state"]
     if item["owner"] != "hub":
@@ -633,7 +727,13 @@ def _apply(store, verb, item, daemon_alive, providers):
     if verb == "resume":
         if state != "paused":
             return "skipped", "not paused"
-        ok = store.transition(item["id"], "queued", expect="paused", next_attempt_at=None, message=None)
+        was_timed = scheduled_at(item) is not None
+        if was_timed and bulk:
+            # "Resume all" must not undo the owner's start times; resume that one by itself to start it now.
+            return "skipped", "waiting for its start time (resume it on its own to start it now)"
+        ok = store.transition(item["id"], "queued", expect="paused", next_attempt_at=None, message=None,
+                              options=_options_without_schedule(item),
+                              event="started now, ahead of its start time" if was_timed else None)
         return ("changed", "queued") if ok else ("skipped", "its state just changed")
 
     if verb == "cancel":
@@ -652,7 +752,8 @@ def _apply(store, verb, item, daemon_alive, providers):
         if state not in ("failed", "cancelled", "stalled"):
             return "skipped", "nothing to retry (state: %s)" % state
         ok = store.transition(item["id"], "queued", expect=state, error=None, message=None,
-                              attempts=0, next_attempt_at=None, finished_at=None)
+                              attempts=0, next_attempt_at=None, finished_at=None,
+                              options=_options_without_schedule(item))
         return ("changed", "queued again") if ok else ("skipped", "its state just changed")
     return "skipped", "unknown action"
 
@@ -670,7 +771,7 @@ def control(verb, *, id=None, group=None, engine=None, provider=None, all=False,
         providers = _provider_map(store)
         out = {"ok": True, "changed": [], "pending": [], "skipped": []}
         for item in items:
-            result, detail = _apply(store, verb, item, alive, providers)
+            result, detail = _apply(store, verb, item, alive, providers, bulk=not id)
             if result == "changed":
                 out["changed"].append(item["id"])
             elif result == "pending":
@@ -684,6 +785,87 @@ def control(verb, *, id=None, group=None, engine=None, provider=None, all=False,
         return out
     except Exception as exc:  # noqa: BLE001
         return _err("%s failed: %s" % (verb, exc))
+
+
+def _schedule_one(store, item, timed):
+    """Give one download a start time (`timed` = parse_start's result) or, with None, take its
+    schedule away.  Returns ("changed" | "skipped", detail)."""
+    if item["owner"] != "hub":
+        return "skipped", "that row belongs to %s; only its own tool can start it later" % (item["provider"] or "another tool")
+    state = item["state"]
+    if state in states.ACTIVE_STATES:
+        return "skipped", "it is already downloading; pause it first, then give it a start time"
+    if state in states.FINAL_STATES:
+        return "skipped", "already %s" % state
+    if timed is None:
+        if scheduled_at(item) is None:
+            return "skipped", "it has no start time"
+        ok = store.update_item(item["id"], {"next_attempt_at": None, "options": _options_without_schedule(item)},
+                               expect="paused", touch=False, event="start time cleared; still paused")
+        return ("changed", "start time cleared (it stays paused until you resume it)") if ok else ("skipped", "its state just changed")
+    options = _options_without_schedule(item)
+    options["start_at"] = timed["iso"]
+    event = "scheduled to start at %s" % timed["iso"]
+    if state == "paused":
+        ok = store.update_item(item["id"], {"next_attempt_at": timed["epoch"], "options": options},
+                               expect="paused", touch=False, event=event)
+    else:
+        ok = store.transition(item["id"], "paused", expect=state, next_attempt_at=timed["epoch"],
+                              options=options, message=None, event=event)
+    return ("changed", "starts at %s" % timed["iso"]) if ok else ("skipped", "its state just changed")
+
+
+def schedule_items(when, *, id=None, group=None, engine=None, provider=None, all=False, store=None):
+    """Start downloads later (or take a start time away).
+
+    `when` is the owner's own wording ("tomorrow 3am", "in 2 hours", "2026-11-02 01:30").  "now"
+    starts them at once; an empty value or "clear" removes the start time (they stay paused).
+    Works on one download, a group, an engine or all of them, like pause and resume."""
+    try:
+        store = _store(store)
+        items = select(store, id=id, group=group, engine=engine, provider=provider, all=all)
+        if items is None:
+            return _err("say which download: an id, a group, an engine, or all=true")
+        if not items:
+            return _err("no such download")
+        text = str(when or "").strip()
+        if text.lower() in START_NOW_WORDS:
+            return control("resume", id=id, group=group, engine=engine, provider=provider, all=all, store=store)
+        timed = None
+        if text.lower() not in CLEAR_SCHEDULE_WORDS:
+            timed, problem = parse_start(text)
+            if problem:
+                return _err(problem)
+        out = {"changed": [], "skipped": [], "start_at": timed["iso"] if timed else None}
+        for item in items:
+            result, detail = _schedule_one(store, item, timed)
+            if result == "changed":
+                out["changed"].append(item["id"])
+            else:
+                out["skipped"].append({"id": item["id"], "reason": detail})
+        if not out["changed"]:
+            return _err(out["skipped"][0]["reason"] if out["skipped"] else "nothing changed", **out)
+        out["ok"] = True
+        if timed and not daemon_view(store)["alive"]:
+            out["note"] = ("The download hub daemon isn't running, so nothing starts at that time until it is "
+                           "(Menu > Daemons > Download hub); anything overdue starts as soon as it comes up.")
+        return out
+    except Exception as exc:  # noqa: BLE001
+        return _err("scheduling failed: %s" % exc)
+
+
+def wake_scheduled(store, now=None):
+    """The daemon, once a tick: move every download whose start time has come to `queued`.
+    Returns the ids started.  A row the owner resumed or cancelled meanwhile is left alone."""
+    started = []
+    for item_id in store.due_scheduled(now):
+        item = store.get_item(item_id)
+        if item is None or scheduled_at(item) is None:
+            continue
+        if store.transition(item_id, "queued", expect="paused", next_attempt_at=None, message=None,
+                            options=_options_without_schedule(item), event="start time reached"):
+            started.append(item_id)
+    return started
 
 
 def apply_control_directly(store, item):

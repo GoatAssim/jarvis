@@ -855,6 +855,32 @@ class Store:
                 "SELECT COUNT(*) FROM items WHERE owner='hub' AND state IN (%s)" % marks,
                 states.ACTIVE_STATES + ("queued", "stalled")).fetchone()[0]
 
+    def running_hub(self):
+        """How many hub downloads a worker is holding right now (what `concurrency.total` limits)."""
+        marks = ",".join("?" * len(states.ACTIVE_STATES))
+        with self._read() as conn:
+            return conn.execute("SELECT COUNT(*) FROM items WHERE owner='hub' AND state IN (%s)" % marks,
+                                states.ACTIVE_STATES).fetchone()[0]
+
+    def list_scheduled(self):
+        """Hub downloads waiting for a start time the owner set (paused, with `options.start_at`),
+        soonest first, as [(item_id, start_epoch)].  A paused row that merely carries a retry
+        time is not a scheduled one: the marker is the option, never the column alone."""
+        with self._read() as conn:
+            rows = conn.execute(
+                "SELECT id, next_attempt_at, options_json FROM items WHERE owner='hub' AND state='paused' "
+                "AND next_attempt_at IS NOT NULL ORDER BY next_attempt_at, id").fetchall()
+        out = []
+        for row in rows:
+            if (_loads(row["options_json"], {}) or {}).get("start_at"):
+                out.append((row["id"], float(row["next_attempt_at"])))
+        return out
+
+    def due_scheduled(self, now=None):
+        """The scheduled downloads whose time has come (or passed while the daemon was down)."""
+        now = self.now() if now is None else now
+        return [item_id for item_id, when in self.list_scheduled() if when <= now]
+
     def forget_notices(self, item_ids):
         ids = [i for i in item_ids if i]
         if ids:
