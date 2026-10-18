@@ -286,10 +286,24 @@
     return base;
   }
 
+  /** E3: what a browser (OS) notification raised by this page looks like, with
+   *  the limits applied. A notifier record (`osNotify`) and a line the page
+   *  wrote itself (`osNotice`, e.g. "your task is done") both build theirs
+   *  here, so the title / body limits live in one place. */
+  function osNoticeSpec(o) {
+    const x = o || {};
+    return {
+      title: String(x.title || "Jarvis").slice(0, 88),
+      body: String(x.body || "").slice(0, 160),
+      tag: String(x.tag || "jarvis-notice"),
+      silent: x.silent === true,
+    };
+  }
+
   const PURE = {
     parseTime, groupKey, needsAckOf, isUnreadOf, levelOf, levelBadge, relTime, clockTime,
     fullTime, dayLabel, collapseBursts, sectionByDay, historyQuery, filtersActive, bodyOf,
-    statusLine, positionOf, setCatalog, showsToast, needsConfirm,
+    statusLine, positionOf, setCatalog, showsToast, needsConfirm, osNoticeSpec,
     constants: {
       AUTO_HIDE_MS, AUTO_HIDE_ACK_MS, MAX_VISIBLE, BURST_WINDOW_MS, RESURFACE_INTERVAL_MS,
       RESURFACE_MAX, PANEL_LIMIT, POSITIONS, DEFAULT_POSITION,
@@ -655,17 +669,45 @@
     }
   }
 
-  function osNotify(n) {
-    if (document.visibilityState === "visible") return;
-    if (!("Notification" in global) || global.Notification.permission !== "granted") return;
+  /** The ONE place this page builds a browser notification object (E3 / E5; the static
+   *  test tests/test_one_notification_system.py keeps it that way). Raised only
+   *  when the tab is hidden and permission is granted. Returns whether one was
+   *  raised. `onclick` runs after the window is focused and the notice closed. */
+  function raiseOs(spec, onclick) {
+    if (document.visibilityState === "visible") return false;
+    if (!("Notification" in global) || global.Notification.permission !== "granted") return false;
     try {
-      // Tagged per id so two reminders in one tick don't collapse into one.
-      const os = new global.Notification(String(n.title || "Jarvis").slice(0, 88), {
-        body: bodyOf(n, 160),
-        tag: `jarvis-note-${n.id || Date.now()}`,
+      const os = new global.Notification(spec.title, {
+        body: spec.body, tag: spec.tag, silent: spec.silent,
       });
-      os.onclick = () => { global.focus(); os.close(); openPanel({ focusId: n.id }); };
-    } catch { /* private mode / unsupported */ }
+      os.onclick = () => { global.focus(); os.close(); if (typeof onclick === "function") onclick(); };
+      return true;
+    } catch { return false; /* private mode / unsupported */ }
+  }
+
+  /** A notifier record, raised as a browser notification while the tab is hidden. */
+  function osNotify(n) {
+    // Tagged per id so two reminders in one tick don't collapse into one.
+    raiseOs(osNoticeSpec({ title: n.title, body: bodyOf(n, 160), tag: `jarvis-note-${n.id || Date.now()}` }),
+            () => openPanel({ focusId: n.id }));
+  }
+
+  /** A line the page wrote itself ("your task is done"), raised as a browser
+   *  notification while the tab is hidden. Deliberately NOT a notifier record:
+   *  every finished chat reply would otherwise land in the inbox. Takes
+   *  { title, body, tag?, silent?, onclick? }. */
+  function osNotice(o) {
+    return raiseOs(osNoticeSpec(o), o && o.onclick);
+  }
+
+  /** Ask the browser for notification permission once (a no-op after that). */
+  function requestPermission() {
+    if (!("Notification" in global)) return;
+    if (global.Notification.permission !== "default") return;
+    try {
+      const asked = global.Notification.requestPermission();
+      if (asked && typeof asked.catch === "function") asked.catch(() => {});
+    } catch { /* an older browser that wants a callback: nothing to do */ }
   }
 
   /** The single entry point app.js calls for every notification, whichever
@@ -1106,6 +1148,8 @@
     show, open: openPanel, close: closePanel, isOpen: panelOpen,
     refresh: () => (panelOpen() ? loadPanel() : syncSummary(false)),
     markRead, _pure: PURE,
+    // E3: the page's one browser-notification path (see raiseOs).
+    osNotice, requestPermission,
     // E0: the catalog the notifier served (null until loaded); Settings reads it.
     catalog: () => catalog, loadCatalog,
   };

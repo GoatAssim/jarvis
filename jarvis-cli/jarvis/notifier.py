@@ -789,6 +789,43 @@ def notify(title, message, channels=None, kind="notify", job_id=None,
     return record
 
 
+def record_owner_dm(message, results, source="notify_owner"):
+    """E4: write the inbox record of a DM Jarvis sent (or tried to send) to the owner.
+
+    The DM itself goes out through channels/outbound -- that is transport, and
+    it keeps its own "first platform that works" rule and per-platform reasons,
+    which the notifier's level 4 (every connected channel) does not have. This
+    adds what the DM never had: a notifier record, so the owner sees at the PC
+    what was sent, and an undelivered one is never a lost one.
+
+    `results` is outbound.notify_owner()'s list of {platform, ok, detail}.
+    Kind `owner_dm`, level 1 (inbox only) unless the owner configured another
+    in notify_config.json -- so by default nothing toasts, and a stranger who
+    gets the model to call notify_owner cannot make the owner's screen pop. A
+    higher configured level adds the live channels, but never a DM (the DM
+    already went out, and sending it again from here would loop). Channels are
+    passed explicitly, so the digest never re-batches these records. A failure
+    is marked `failed` (red in the Notifications panel, counted in the badge).
+
+    Never raises; returns the record, or None when nothing could be written.
+    """
+    try:
+        level = normalize_level(None, kind="owner_dm", source=source)
+        channels = [c for c in _channels_for_level(level) if c not in _DM_CHANNELS]
+        rows = [r for r in (results or []) if isinstance(r, dict)]
+        sent = [str(r.get("platform")) for r in rows if r.get("ok")]
+        missed = ["%s: %s" % (r.get("platform"), r.get("detail")) for r in rows if not r.get("ok")]
+        body = (message or "").strip()
+        if missed:
+            body = (body + "\n\nNot delivered -- " + "; ".join(missed)).strip()
+        title = ("Sent to your phone (%s)" % ", ".join(sent)) if sent \
+            else "Couldn't reach you on any channel"
+        return notify(title, body, channels=channels, kind="owner_dm", level=level,
+                      failed=not sent, source=source)
+    except Exception:  # noqa: BLE001 -- the record is advice, never a reason to fail the DM
+        return None
+
+
 # ---------------------------------------------------------------------------
 # Channels
 # ---------------------------------------------------------------------------
@@ -982,6 +1019,9 @@ def _deliver_discord(record, config):
 def _deliver_instagram(record, config):
     return _deliver_chat(record, config, "instagram")
 
+
+# The channels that DM the owner. record_owner_dm() leaves them out of its record.
+_DM_CHANNELS = ("discord", "instagram")
 
 _DELIVERERS = {
     "inbox": _deliver_inbox,

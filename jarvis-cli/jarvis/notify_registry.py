@@ -141,6 +141,11 @@ KINDS = (
      "settings": False},
     # L.27 follow-up: a daemon that failed to autostart.
     {"id": "daemon", "label": "Daemon problems", "level": 2, "settings": True},
+    # E4: the inbox record of a DM Jarvis sent to the owner (the notify_owner
+    # tool). Silent by default: the person was already told, on their phone;
+    # this is the record of it. No Settings row (file-only, like `scheduled`).
+    {"id": "owner_dm", "label": "Messages Jarvis sent to your phone", "level": 1,
+     "settings": False},
 )
 
 # ---------------------------------------------------------------------------

@@ -66,6 +66,18 @@ things that were already fixed once.
   started never qualifies, and it fails closed). `notify_owner` takes no recipient for the
   same reason; don't add one to it, and don't loosen `send_dm` to match.
   `tests/test_send_dm.py` pins each of these.
+- **One notification system (Phase E / E5).** Everything shown to the person -- a toast,
+  a browser or OS notification, a DM to the owner -- is meant to be a `notifier.notify()`
+  record drawn by the one toast renderer; no module adds its own. The page calls the
+  browser's `new Notification(...)` in ONE place (`JarvisNotifications.osNotice` /
+  `osNotify` in `notifications.js`), never from `app.js` or a panel. A new kind of
+  notification is one row in `notify_registry.KINDS`, not a new string typed at a call
+  site. The `notify_owner` TOOL leaves a silent `owner_dm` inbox record
+  (`notifier.record_owner_dm`); that kind has no Settings row on purpose, so a chat guest
+  who can call the tool cannot make the screen pop. NOT yet true everywhere: the old
+  `#toast`, the run-confirm popup, native `confirm()` and some owner DMs (E4b) are
+  counted debt. `tests/test_one_notification_system.py` pins today's numbers: adding one
+  fails it, and removing one fails it until you lower the number in the same patch.
 - **A chat guest's details never go in `memory.py`.** That store rides
   along in the owner's own prompts. Guest facts belong in
   `channels/people.py`, which is capped, keyed by platform id, and only
@@ -529,6 +541,9 @@ actually render Markdown):
     node tests/verify_category_manager.js   # L.12: category-manager.js pure helpers + the whole dialog chain against a fake JarvisUI/fetch; no npm install
     python3 tests/test_l27c_autostart_notice.py  # L.27 follow-up: a failed daemon autostart raises ONE `daemon` notification per pass (text, cap, never raises, real inbox record, Settings row)
     python3 tests/test_e2_toast_position.py  # E2: toast position (8 places, default bottom-right), native OS notification renamed `desktop` (`toast` still read as `desktop`)
+    python3 tests/test_notify_registry.py   # E0: notify_registry tables (kinds, actions, levels, positions) agree with notifier.py
+    python3 tests/test_e4_notify_owner_record.py  # E4: the `notify_owner` tool writes ONE silent `owner_dm` inbox record per call (failed only if nobody was reached); result dict unchanged; never re-DMs
+    python3 tests/test_one_notification_system.py  # E5: static ratchet -- no second browser Notification / toast host / toast() helper / native confirm / OS toast / owner DM / unregistered kind
     python3 tests/test_l43_tree.py          # L.43: "changed from default" report + per-value reset (same gate as every Settings write)
     node tests/verify_settings_tree.js      # L.43: settings.js tree helpers, deep-link parser and wiring; no npm install
     python3 tests/verify_l36_insights_ui.py # L.36-P1/P2/P3: Conversation / Usage / Test tabs in a real browser; needs `playwright` (Python) + Chromium, prints SKIP without them

@@ -189,5 +189,20 @@ ok("with the catalog gone the built-in rules are back",
    P.levelOf({ level: 6 }) === 2 && P.showsToast(1) === false && P.showsToast(2) === true
    && P.needsConfirm(5) === true && P.needsConfirm(4) === false && P.positionOf({ position: "left" }) === "left");
 
+// --- E3: the page's one browser-notification path --------------------------------
+ok("osNoticeSpec: title / body / tag / silent with defaults",
+   eq(P.osNoticeSpec({}), { title: "Jarvis", body: "", tag: "jarvis-notice", silent: false })
+   && eq(P.osNoticeSpec(null), { title: "Jarvis", body: "", tag: "jarvis-notice", silent: false }));
+ok("osNoticeSpec: the title is cut at 88 and the body at 160",
+   P.osNoticeSpec({ title: "t".repeat(200), body: "b".repeat(500) }).title.length === 88
+   && P.osNoticeSpec({ title: "t", body: "b".repeat(500) }).body.length === 160);
+ok("osNoticeSpec: only `silent: true` is silent, and the tag is kept",
+   P.osNoticeSpec({ silent: true, tag: "jarvis-task" }).silent === true
+   && P.osNoticeSpec({ silent: "yes" }).silent === false
+   && P.osNoticeSpec({ tag: "jarvis-task" }).tag === "jarvis-task");
+ok("the bare (no-DOM) context exposes the spec builder but not the browser calls",
+   typeof P.osNoticeSpec === "function" && win.JarvisNotifications.osNotice === undefined
+   && win.JarvisNotifications.requestPermission === undefined);
+
 console.log(`\n${n - failed}/${n} checks passed`);
 process.exit(failed ? 1 : 0);

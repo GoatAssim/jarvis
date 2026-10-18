@@ -14,9 +14,12 @@ much worse outcome than the tool simply not existing.
 
 Delivery is best-effort by design, and the result says why when it isn't:
 Instagram in particular can only be reached inside a 24-hour window the
-owner has to open themselves (see channels/instagram_gateway.py). The
-notifier inbox still records everything, so an undeliverable notification
-is never a lost one.
+owner has to open themselves (see channels/instagram_gateway.py). Every call
+is also written to the notifier inbox (kind `owner_dm`, via
+notifier.record_owner_dm -- E4), failed ones marked as failed, so an
+undeliverable message is never a lost one. The DM transport stays here and in
+channels/outbound: it needs the "first platform that works" rule and the
+per-platform reasons, which the notifier's level-4 broadcast does not have.
 """
 
 
@@ -45,6 +48,14 @@ def tool_notify_owner(args):
 
     outcome = outbound.notify_owner(message, platforms=wanted,
                                     first_success_only=first_only)
+
+    # E4: the inbox record. Lazy import (see the note at the top of this
+    # function); a notifier that fails must never change what the model is told.
+    try:
+        from .. import notifier
+        notifier.record_owner_dm(message, outcome["results"])
+    except Exception:  # noqa: BLE001
+        pass
 
     delivered = [r["platform"] for r in outcome["results"] if r["ok"]]
     failed = [f"{r['platform']}: {r['detail']}"

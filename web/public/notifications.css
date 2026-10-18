@@ -77,11 +77,6 @@ body.has-sequence .ntf-stack--bottom-right{ bottom: calc(var(--seq-clear, 90px) 
 body:has(.run-confirm-popup:not([hidden])) .ntf-stack--bottom-left{ bottom: 270px; }
 body:has(.jui-toasts .jui-toast) .ntf-stack--bottom-right{ bottom: 214px; }
 
-/* The generic error toast (#toast) sits top centre. When one is showing, the
-   top-centre stack steps down below it instead of hiding behind it. */
-.ntf-stack--top{ transition: top 160ms ease; }
-body:has(#toast:not([hidden])) .ntf-stack--top{ top: 74px; }
-
 .ntf{
   pointer-events: auto;
   position: relative;

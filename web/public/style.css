@@ -1165,29 +1165,9 @@ body.has-sequence .jui-toasts{ bottom: var(--seq-clear, 90px); } /* "Added to se
 .modal__foot-actions{ display: flex; gap: 10px; }
 
 /* =========================================================================
-   Toast
-   ========================================================================= */
-
-.toast{
-  position: fixed; top: 18px; left: 50%; transform: translateX(-50%);
-  /* Above the notification stack (notifications.css, z 9200), which sits in
-     the same place: an error must never be hidden behind a notification card. */
-  z-index: 9300;
-  background: var(--bg-raised);
-  border: 1px solid var(--red);
-  color: var(--text);
-  padding: 10px 18px;
-  border-radius: 2px;
-  font-size: 13px;
-  box-shadow: 0 0 24px rgba(255,92,108,0.25);
-  max-width: min(560px, 90vw);
-}
-.toast.is-info{ border-color: var(--accent); box-shadow: 0 0 24px var(--accent-glow); }
-
-/* =========================================================================
    Run-confirm popup (direct command run, gated by its own confirm_required/
    ai_review flags — see server.js's "confirm-request" message and cli.py's
-   confirm_direct_command). Bottom-left, separate from the top-center toast
+   confirm_direct_command). Bottom-left, separate from the toast host
    and from the Ask-thread confirm bubble, since a directly-run command has
    no chat thread to render into.
    ========================================================================= */

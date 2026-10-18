@@ -185,6 +185,10 @@ jarvis-cli/jarvis/
     backlog.py            NEW — untimed work: idea/todo/doing/blocked/done
     ambient.py            NEW — notices problems without being asked
     digest.py  notifier.py  stats.py
+    notify_registry.py    E0: the ONE table of what a notification can be and do -- ACTIONS (channels +
+                          behaviours), PRESETS (levels 1-5), KINDS (reminder, task, daemon... and the
+                          silent `owner_dm`, E4), POSITIONS. notifier, the CLI, the scheduler tool help and
+                          Settings read it; add a kind here, not at a call site. Tests: test_notify_registry.py
 
     # --- reachability -----------------------------------------------------
     channels/
@@ -472,6 +476,9 @@ web/
                                  acknowledgment rules for levels 3-5. app.js only
                                  calls JarvisNotifications.show()/open(). Pure
                                  helpers exported as JarvisNotifications._pure.
+                                 E3: the page's ONE browser `new Notification(...)` call lives here
+                                 (`osNotice` for a line the page wrote, `osNotify` for a record,
+                                 `requestPermission`); app.js no longer has its own.
     public/category-input.js/.css  L.11/L.14.3: the ONE category component - name rules (same as
                                  jarvis/categories.py, parity-tested), vocabulary, prefix suggest, chip input.
                                  Loaded before daemons.js; commands (L.14) will reuse it.
@@ -927,12 +934,15 @@ silently never runs.
 | `test_thinking_off_and_interactive_cap.py` | Thinking at Off and the interactive cap's default: `reasoning.gemini_off_patch` (a zero `thinkingBudget` for Gemini 2.5 Flash / Flash-Lite only; provider key `gemini_off_budget`), gpt-oss's Off effort override (`off_reasoning_effort`) and the once-per-ask floor note in the Logs viewer, and the 150,000 interactive default |
 | `test_l24_5267_replay.py` | L.24 T1 regression: the real "has anyone texted you on discord" incident (`5267d91a8b996d48`, 5 rounds / 10,649 input tokens) from the scrubbed `fixtures/5267d91a8b996d48.jsonl`: asserts what the recording says, then runs the same words through the real `ask()` with a SYNTHETIC model reply and checks the current tool offering keeps the ask to 2 requests and an ESTIMATED 2,500 input tokens or less (it cannot test that the model picks `recent_dms`) |
 | `test_l16_preflight_authorization.py` | L.16 round 2: `preflight.py` (an unattended ask that states a need the PC can't meet stops before any model call; fails open), the scheduler reporting that as a failure, the `message` kind in `job_risk`, `scheduler._unattended_tool_env` (a tool job now runs as unattended), and `send_dm`'s one exception to "never unattended" |
+| `test_notify_registry.py` | E0: the `notify_registry` tables (kinds, actions, presets, positions) and the notifier agree; old `notify_config.json` files still get every kind's default |
+| `test_e4_notify_owner_record.py` | E4: the `notify_owner` tool writes one silent `owner_dm` record per call via `notifier.record_owner_dm` (failed only if no platform was reached, with each platform's reason); the tool's result dict is unchanged; a raising notifier changes nothing; a higher level never adds a DM channel, so no double send; the digest does not re-batch these records |
+| `test_one_notification_system.py` | E5: static ratchet (reads source, runs nothing) -- exact counts of browser `Notification`, native `confirm()`, `#toast`, local `toast()` helpers, OS-toast calls and direct owner DMs; fails on one added AND on one removed (lower the baseline); every `kind=` is in `KINDS`; skips the Download Hub files |
 | `test_e2_toast_position.py` | E2: toast position (`normalize_position`, config `position` / `positions`, `notify(position=)`, `notify-send --position`), the native OS notification renamed `desktop` with `toast` kept as an alias (code, old config files, scheduler tools), Settings row and one stack per position (static) |
 | `test_notification_inbox.py` | L.30: owner read/acknowledge state vs delivery (`seen_by`), mark read/all, dismiss, clear read, `summary()`, history filters, state-aware pruning (read first, unacknowledged last), the inbox lock, the `notify-*` verbs |
 | `test_mcp_edit.py` | L.31: editing `mcp_config.json` (`save_server` / `set_server_flag` / `remove_server`), validation, secrets kept on edit, a malformed config is never overwritten, the extra `status()` fields and states, the `mcp-edit` CLI verb, and that no model tool can reach the edit functions |
 | `verify_mcp_servers.js` (`node`) | L.31: `mcp-servers.js` pure helpers (state labels, search by tool name, filter chips, `buildSpec` and what a blank secret means) |
 | `verify_mcp_servers_ui.py` (`python`, not run by `run_tests.py`) | L.31: the real page in headless Chromium against the real CLI verbs and a real stdio MCP server — add/edit/rename/remove, on/off, Trusted confirm, secrets never in the page, search/filters, keyboard, phone width |
-| `verify_notifications.js` (`node`) | L.30: `notifications.js` pure helpers (burst collapsing, day sections, query string, read/ack readers, level badges) |
+| `verify_notifications.js` (`node`) | L.30 (+ E3: `osNoticeSpec`): `notifications.js` pure helpers (burst collapsing, day sections, query string, read/ack readers, level badges) |
 | `verify_notifications_ui.py` (`python`, not run by `run_tests.py`) | L.30: the real page in headless Chromium against the real CLI verbs — toast stack, level 5 dialog, panel filters/dismiss/mark-read, re-surfacing on a fake clock. Needs Playwright; skips cleanly without it |
 | `test_category_manage.py` | L.12: rename / merge / delete a category -- list helpers, daemon registry (built-ins and tool-supplied included), the `daemon-category` verb, registration everywhere a verb must be, routes and wiring pinned statically |
 | `verify_command_category_menu_ui.py` (`python`, not run by `run_tests.py`) | L.14 UI rework: the Commands category dropdown in headless Chromium against a stateful fake of the routes - header no longer overflowing, filter + search, saved / vanished choice, inline rename / merge / delete and every refusal, server error, keyboard, markup-looking names, Find box, short / narrow / phone layouts. Needs Playwright; skips cleanly without it |

@@ -1590,18 +1590,21 @@
     if (tag) tag.textContent = id || "";
   }
 
-  let toastTimer = null;
   // The generic one-line toast: errors and short confirmations ("Copied").
-  // Notifications no longer go through it — they have their own stack in
-  // notifications.js (L.30), including the D-N1 re-surfacing rule that used to
-  // be wired in here with one shared timer for the whole page.
+  // E3: there is no `#toast` element any more. This hands off to the page's one
+  // toast host (JarvisUI.toast, ui-kit.js). It passes the old 4.2 s timeout on
+  // purpose: JarvisUI keeps an "error" toast on screen until it is dismissed
+  // unless a timeout is given, and these ~95 callers were written for a toast
+  // that goes away by itself. Anything that must stay belongs in the notifier.
+  // Notifications have their own stack in notifications.js (L.30).
   function toast(message, kind = "error") {
-    const t = qs("#toast");
-    t.textContent = message;
-    t.className = "toast" + (kind === "info" ? " is-info" : "");
-    t.hidden = false;
-    clearTimeout(toastTimer);
-    toastTimer = setTimeout(() => { t.hidden = true; }, 4200);
+    const k = String(kind || "error").toLowerCase();
+    const level = k === "info" || k === "success" || k === "warn" ? k : "error";
+    if (window.JarvisUI && typeof window.JarvisUI.toast === "function") {
+      window.JarvisUI.toast({ message: String(message == null ? "" : message), level, timeout: 4200 });
+    } else {
+      console.warn("[jarvis] toast (no ui-kit):", message);
+    }
   }
 
   // Bottom-left popup for a directly-run saved command that's paused on
@@ -1655,15 +1658,13 @@
     noBtn.addEventListener("click", () => resolve(false));
   }
 
-  function jarvisTabVisible() {
-    return document.visibilityState === "visible";
-  }
-
+  // E3: this page no longer calls the browser Notification API itself. The one
+  // place that does is notifications.js (JarvisNotifications.osNotice /
+  // .requestPermission), which also covers notifier records. Both are a no-op
+  // if that file did not load.
   function ensureNotifPermission() {
-    if (!("Notification" in window)) return;
-    if (Notification.permission === "default") {
-      Notification.requestPermission().catch(() => {});
-    }
+    const N = window.JarvisNotifications;
+    if (N && typeof N.requestPermission === "function") N.requestPermission();
   }
 
   function summarizeText(text) {
@@ -1676,22 +1677,12 @@
     return sentence.slice(0, 120);
   }
 
+  // "Your task is done" while the tab is hidden. A line the page wrote itself,
+  // not a notifier record (see JarvisNotifications.osNotice).
   function notifyIfAway(title, body) {
-    if (jarvisTabVisible()) return;
-    if (!("Notification" in window) || Notification.permission !== "granted") return;
-    try {
-      const n = new Notification(title.slice(0, 88), {
-        body: (body || "").slice(0, 140),
-        tag: "jarvis-task",
-        silent: true,
-      });
-      n.onclick = () => {
-        window.focus();
-        n.close();
-      };
-    } catch {
-      /* private mode / unsupported */
-    }
+    const N = window.JarvisNotifications;
+    if (!N || typeof N.osNotice !== "function") return;
+    N.osNotice({ title, body: (body || "").slice(0, 140), tag: "jarvis-task", silent: true });
   }
 
   // One place every notification enters the UI, whichever path it arrived by
@@ -1700,7 +1691,7 @@
   // L.30: the display logic moved to notifications.js (JarvisNotifications) —
   // a real toast stack, the unread badge, the acknowledgment rules for levels
   // 3-5 and the OS notification when the tab is hidden. This used to push
-  // every notification through the single shared #toast element, so two
+  // every notification through one shared toast element, so two
   // arriving together overwrote each other and any error toast wiped a
   // reminder. Only a last-resort fallback stays here, for the case where
   // notifications.js failed to load, so a notification is never silently lost.

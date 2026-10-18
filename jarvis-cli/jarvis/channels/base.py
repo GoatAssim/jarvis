@@ -419,9 +419,10 @@ def _notify_owner_new_sender(platform, msg, entry):
 
     Best-effort in the strongest sense: it is wrapped whole, and a failure
     is logged and dropped. The owner not receiving a courtesy ping must
-    never be the reason a message goes unanswered. notify_owner() also
-    records to the local notifier inbox, so an undelivered ping is still
-    visible in `jarvis notify-list`.
+    never be the reason a message goes unanswered. Note that
+    outbound.notify_owner() is transport only: it writes no notifier inbox
+    record (only the notify_owner TOOL does, E4), so an undelivered ping is
+    logged, not queued. Listed as E4b in the audit.
 
     Returns True if the owner was pinged (or at least attempted), so the
     caller knows whether to mark the person as notified.

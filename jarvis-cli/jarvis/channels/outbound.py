@@ -22,9 +22,12 @@ The two platforms fail in completely different, completely normal ways:
 So a failure here is an expected steady state, not an exception. Every
 function returns (ok, detail) with a human-readable reason, and
 notify_owner() tries platforms in order and reports each one's outcome
-rather than collapsing to a single bool. The notifier's durable inbox is
-always written regardless, so a notification that couldn't be DMed is
-never a notification that vanished.
+rather than collapsing to a single bool. When the DM comes from a notifier
+level-4 record, the durable inbox is written first, so a notification that
+couldn't be DMed never vanishes. Calling notify_owner() directly is transport
+only and writes no inbox record: the notify_owner TOOL adds its own
+(notifier.record_owner_dm, E4); the other direct callers are listed in the
+audit as E4b.
 """
 
 import asyncio
