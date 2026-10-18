@@ -96,7 +96,12 @@
    * `jui-toasts`. Which of the eight positions a notification wants is the
    * notifier's decision (notify_registry.POSITIONS); this only draws them, so an
    * unknown name falls back to the default rather than inventing a stack no CSS
-   * rule styles. */
+   * rule styles.
+   *
+   * Two looks draw here. The CARD is notifications.js's own element (source, time,
+   * buttons); the COMPACT look is this file's toast() below, called from
+   * notifications.js with the record's tone. Which one a notification gets is the
+   * record's `look` (notifier.resolve_delivery()), not a guess from its level. */
   const DEFAULT_TOAST_POSITION = "bottom-right";
   const POSITION_SHAPE = /^(?:(?:top|bottom)(?:-(?:left|right))?|left|right)$/;
   const toastStacks = new Map();

@@ -11,21 +11,34 @@ Now they all read THIS table. It is plain data with no imports from the rest of
 Jarvis, so anything (the notifier, a tool, the CLI, the web page through
 `jarvis notify-config --catalog`) can load it without a circular import.
 
-THE FOUR TABLES
----------------
+THE TABLES
+----------
 ACTIONS   Everything a notification can DO. Two types:
-            channel    a place it is delivered (inbox, in-app toast, desktop,
-                       voice, Playnite, Discord DM, Instagram DM). Each needs a
-                       deliverer in notifier._DELIVERERS under the same id.
+            channel    a place it is delivered (inbox, notification card, small
+                       toast, desktop, voice, Playnite, Discord DM, Instagram
+                       DM). Each needs a deliverer in notifier._DELIVERERS under
+                       the same id. A channel row can also carry:
+                         look     it draws on the open web page ("card" or
+                                  "compact"; see LOOKS)
+                         page_ok  a click on the web page may use it (the page
+                                  must never reach desktop, voice or a DM)
+                         dm       it messages the owner's phone
+                       The row's `label` is the ONE name every screen shows.
             behaviour  a change in how it behaves on screen (stay until
                        acknowledged, blocking confirm). It becomes a flag on
                        the record (`persistent`, `confirm_required`).
-PRESETS   The importance levels, 1-5. Each one lists what it ADDS; a level
+PRESETS   The importance levels (MIN_LEVEL..MAX_LEVEL). Each one lists what it ADDS; a level
           includes everything below it, so level 4 is levels 1-3 plus its own.
 KINDS     What a notification is about (reminder, task, daemon...). A kind has a
           label and a default level; Settings > Notifications builds its rows
           from this.
 POSITIONS The eight places an in-app toast can appear.
+LOOKS     How a notification is DRAWN on the open web page: a full `card`, a
+          one-line `compact` toast (the same small toast the rest of the
+          interface uses, e.g. "Autostart on") or `none`. Each look that draws
+          is carried by exactly one action row (`stream`, `small_toast`).
+TONES     The mark and colour of the compact toast (`info`, `success`). Not the
+          importance level and not the toast's severity.
 
 TO ADD ...
 ----------
@@ -36,6 +49,14 @@ a new ACTION       one row in ACTIONS plus a `_deliver_<id>` function in
                    include it, add its id to that preset's `adds`.
 a new PRESET/level one row in PRESETS (levels must stay 1..N with no gaps).
                    The tool help, CLI limits, Settings rows and badge text follow.
+a new POSITION     one row in POSITIONS.
+a new LOOK         one row in LOOKS, plus the ACTIONS row that carries it (and
+                   its `_deliver_<id>`). The page needs a draw branch for it.
+a new TONE         one name in TONES (the page maps it to a mark and colour).
+
+Nothing else keeps its own list: no web page, no tool and no panel types out a
+level name, a channel id or a position. They read this table (through
+`catalog()`), and tests/test_no_hardcoded_notify_lists.py fails if one does.
 tests/test_notify_registry.py fails when the table and the notifier disagree.
 """
 
@@ -57,13 +78,23 @@ ACTIONS = (
     {"id": "inbox", "type": CHANNEL, "label": "Inbox",
      "description": "The durable queue. Always written; it is the only action that "
                     "survives nothing being open.",
-     "always": True,
+     "always": True, "page_ok": True,
      "model_hint": "'inbox' (always on \u2014 the durable queue the web console and "
                    "terminal both drain)"},
-    {"id": "stream", "type": CHANNEL, "label": "In-app toast",
-     "description": "A small notice inside the open web page, drawn at the "
-                    "notification's position.",
+    # The id `stream` never changes (stored configs, scheduled jobs and tests use it);
+    # only the label does, so two rows are not both called "toast".
+    {"id": "stream", "type": CHANNEL, "label": "Notification card",
+     "description": "A full notification card in the open web page: source, time, "
+                    "buttons.",
+     "page_ok": True, "look": "card",
      "model_hint": "'stream' (live in an open web chat)"},
+    {"id": "small_toast", "type": CHANNEL, "label": "Small toast",
+     "description": "A one-line notice in the corner of the open web page, the same "
+                    "small toast the rest of the interface uses (for example "
+                    "\"Autostart on\"). Never used for failures or anything that "
+                    "needs acknowledging.",
+     "page_ok": True, "look": "compact",
+     "model_hint": "'small_toast' (a one-line notice in the open web page)"},
     {"id": "desktop", "type": CHANNEL, "label": "Desktop notification",
      "description": "The operating system's own notification (called `toast` "
                     "before E2; the old name still works).",
@@ -74,10 +105,10 @@ ACTIONS = (
     {"id": "playnite", "type": CHANNEL, "label": "Playnite",
      "description": "A message inside Playnite, for when a game is full-screen.",
      "model_hint": "'playnite'"},
-    {"id": "discord", "type": CHANNEL, "label": "Discord DM",
+    {"id": "discord", "type": CHANNEL, "label": "Discord DM", "dm": True,
      "description": "A direct message to the owner on Discord.",
      "model_hint": None},
-    {"id": "instagram", "type": CHANNEL, "label": "Instagram DM",
+    {"id": "instagram", "type": CHANNEL, "label": "Instagram DM", "dm": True,
      "description": "A direct message to the owner on Instagram (only reachable "
                     "inside the 24-hour window the owner opens).",
      "model_hint": None},
@@ -102,7 +133,8 @@ PRESETS = (
      "help": "inbox only",
      "adds": (), "digest_eligible": True},
     {"level": 2, "id": "standard", "name": "Standard",
-     "description": "Adds the in-app toast and a desktop notification. The default.",
+     "description": "Adds a notice in the open web page, small or card depending on "
+                    "the notification, and a desktop notification. The default.",
      "help": "adds a native toast \u2014 the default",
      "adds": ("stream", "desktop"), "digest_eligible": True},
     {"level": 3, "id": "persistent", "name": "Persistent",
@@ -125,8 +157,10 @@ DEFAULT_LEVEL = 2
 # KINDS
 # ---------------------------------------------------------------------------
 
-# `level` is the default importance when nothing else sets one. `settings` says
-# whether Settings > Notifications shows a row for it. A kind that is not listed
+# `level` is the default importance when nothing else sets one. `look` / `tone`
+# (both optional) are how it draws on the open page when the caller does not say
+# (see LOOKS / TONES). `settings` says whether Settings > Notifications shows a
+# row for it. A kind that is not listed
 # here still works (it falls back to DEFAULT_LEVEL); listing it is what gives it
 # a label, a default and a Settings row.
 KINDS = (
@@ -137,8 +171,10 @@ KINDS = (
     {"id": "ambient", "label": "Ambient suggestions", "level": 1, "settings": True},
     # H.3: the "reminder set / task scheduled" confirmation. Its own kind so it
     # can be turned down without touching the reminder that fires later.
+    # Draws as the small toast (look "compact", tone "success"): it is only a
+    # confirmation. At a level that needs acknowledging it still becomes a card.
     {"id": "scheduled", "label": "Reminder set / task scheduled", "level": 2,
-     "settings": False},
+     "settings": False, "look": "compact", "tone": "success"},
     # L.27 follow-up: a daemon that failed to autostart.
     {"id": "daemon", "label": "Daemon problems", "level": 2, "settings": True},
     # E4: the inbox record of a DM Jarvis sent to the owner (the notify_owner
@@ -177,6 +213,29 @@ POSITIONS = (
 DEFAULT_POSITION = "bottom-right"
 
 # ---------------------------------------------------------------------------
+# LOOKS and TONES
+# ---------------------------------------------------------------------------
+
+# How a notification is drawn on the open web page. `action` is the channel row that
+# carries the look (that row's own `look` names it back; problems() checks they agree).
+# `none` has no action: nothing is drawn, the record is still in the inbox.
+LOOKS = (
+    {"id": "card", "label": "Card", "action": "stream",
+     "description": "A full notification card: source, time, title, body, buttons."},
+    {"id": "compact", "label": "Small toast", "action": "small_toast",
+     "description": "One line in the same small toast the rest of the interface uses."},
+    {"id": "none", "label": "Nothing on the page", "action": None,
+     "description": "Not drawn on the page. Still in the inbox."},
+)
+DEFAULT_LOOK = "card"
+LOOK_NONE = "none"
+
+# The mark and colour of the compact toast. `info` is the accent "i"; `success` is the
+# green tick. Not the importance level (a number, see PRESETS) and not a severity.
+TONES = ("info", "success")
+DEFAULT_TONE = "info"
+
+# ---------------------------------------------------------------------------
 # Lookups (pure; the notifier and every other consumer use these)
 # ---------------------------------------------------------------------------
 
@@ -203,6 +262,68 @@ def channel_ids():
 
 def behaviour_ids():
     return tuple(a["id"] for a in ACTIONS if a["type"] == BEHAVIOUR)
+
+
+def page_ok_ids():
+    """The actions a click on the web page may use. server.js allows exactly these."""
+    return tuple(a["id"] for a in ACTIONS if a.get("page_ok"))
+
+
+def dm_channel_ids():
+    """The channels that message the owner's phone. notifier._DM_CHANNELS is this."""
+    return tuple(a["id"] for a in ACTIONS if a["type"] == CHANNEL and a.get("dm"))
+
+
+def label_for(action_id):
+    """The one name for an action, or None if it is not in the table."""
+    item = action(action_id)
+    return item["label"] if item else None
+
+
+def look_ids():
+    return tuple(l["id"] for l in LOOKS)
+
+
+def look(look_id):
+    for item in LOOKS:
+        if item["id"] == look_id:
+            return item
+    return None
+
+
+def look_for_action(action_id):
+    """The look an action draws, or None for an action that draws nothing."""
+    item = action(action_id)
+    return item.get("look") if item else None
+
+
+def action_for_look(look_id):
+    """The channel action id that draws a look, or None (`none` has no action)."""
+    item = look(look_id)
+    return item.get("action") if item else None
+
+
+def look_action_ids():
+    """Every action that draws on the page, in table order."""
+    return tuple(a["id"] for a in ACTIONS if a.get("look"))
+
+
+def look_actions_for_level(level):
+    """The on-page actions a bare level delivers (level 2 -> ["stream"]; level 1 -> [])."""
+    on = set(look_action_ids())
+    return [i for i in channels_for_level(level) if i in on]
+
+
+def level_look(level):
+    """The look a level implies when nothing else asks: the first on-page action its
+    preset delivers, else `none`."""
+    for action_id in look_actions_for_level(level):
+        return look_for_action(action_id)
+    return LOOK_NONE
+
+
+def tone_ids():
+    return tuple(TONES)
 
 
 def presets():
@@ -326,6 +447,10 @@ def catalog(config=None):
                          flags=flags_for_level(p["level"]))
                     for p in PRESETS],
         "kinds": [dict(k) for k in KINDS],
+        "looks": [dict(l) for l in LOOKS],
+        "tones": list(TONES),
+        "default_look": DEFAULT_LOOK,
+        "default_tone": DEFAULT_TONE,
         "positions": [dict(p) for p in positions_menu()],
         "min_level": MIN_LEVEL,
         "max_level": MAX_LEVEL,
@@ -372,6 +497,39 @@ def problems(deliverer_ids=None):
             out.append("kind %r default level %r is not a preset" % (k["id"], k["level"]))
     if DEFAULT_POSITION not in position_ids():
         out.append("DEFAULT_POSITION %r is not a position" % DEFAULT_POSITION)
+    look_list = [l["id"] for l in LOOKS]
+    for dup in sorted({i for i in look_list if look_list.count(i) > 1}):
+        out.append("look id %r appears more than once" % dup)
+    if DEFAULT_LOOK not in look_list:
+        out.append("DEFAULT_LOOK %r is not a look" % DEFAULT_LOOK)
+    if LOOK_NONE not in look_list:
+        out.append("there must be a %r look" % LOOK_NONE)
+    if DEFAULT_TONE not in TONES:
+        out.append("DEFAULT_TONE %r is not a tone" % DEFAULT_TONE)
+    for l in LOOKS:
+        if l.get("action") is None:
+            continue
+        carrier = action(l["action"])
+        if carrier is None:
+            out.append("look %r names the unknown action %r" % (l["id"], l["action"]))
+        elif carrier.get("look") != l["id"]:
+            out.append("look %r names action %r, but that action's look is %r"
+                       % (l["id"], l["action"], carrier.get("look")))
+    for a in ACTIONS:
+        if a.get("look") is None:
+            continue
+        if a["type"] != CHANNEL:
+            out.append("action %r has a look but is not a channel" % a["id"])
+        if a["look"] not in look_list:
+            out.append("action %r has the unknown look %r" % (a["id"], a["look"]))
+        elif (look(a["look"]) or {}).get("action") != a["id"]:
+            out.append("look %r is carried by more than one action (%r is one)"
+                       % (a["look"], a["id"]))
+    for k in KINDS:
+        if k.get("look") is not None and k["look"] not in look_list:
+            out.append("kind %r has the unknown look %r" % (k["id"], k["look"]))
+        if k.get("tone") is not None and k["tone"] not in TONES:
+            out.append("kind %r has the unknown tone %r" % (k["id"], k["tone"]))
     if deliverer_ids is not None:
         have = set(deliverer_ids)
         for cid in channel_ids():

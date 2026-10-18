@@ -13,7 +13,7 @@ Now both are `notifier.notify()` records of kind `download`.  This test pins the
   2. `jarvis notify-send` takes --kind / --source / --failed (checked, so a typo is an error), and a
      real run files an inbox record with that kind and source and only the channels asked for;
   3. the web server has ONE endpoint for a page to raise a notification, which can only ask for the
-     in-page channels (no desktop / voice / phone), a registered kind, a short source and a level 1-5,
+     in-page channels (no desktop / voice / phone), a registered kind, a short source and a level from the catalog's range,
      and which never lets a message be read as a CLI flag;
   4. `JarvisNotifications.send` and `host.notify` (menu panels AND sandboxed frames) lead there, with a
      plain toast only as the fallback when the notifier can't be reached;
@@ -132,14 +132,18 @@ def test_the_server_endpoint():
     src = (ROOT / "web" / "server.js").read_text(encoding="utf-8")
     start = src.find('app.post("/api/notifications/send"')
     check("server.js has POST /api/notifications/send", start > 0)
-    block = src[start:start + 2400]
+    block = src[start:start + 4200]
     check("it runs notify-send through the notifier (no delivery of its own)",
           '"notify-send"' in block and "runJarvisOnce(" in block)
-    check("only the in-page channels can be asked for",
-          'NOTIFY_SEND_CHANNELS = new Set(["inbox", "stream"])' in src and "NOTIFY_SEND_CHANNELS.has(c)" in block)
+    check("only the channels the catalog marks page_ok can be asked for (no list typed in server.js)",
+          "NOTIFY_SEND_CHANNELS" not in src and "a.page_ok" in block and "pageOk.has(c)" in block
+          and "loadNotifyCatalog(" in block)
+    check("a tone is passed through only when the catalog lists it",
+          'catalog.tones.includes(body.tone)' in block and '"--tone"' in block)
     check("kind and source are checked before they become arguments",
           "a-z0-9_]{0,40}$/.test(body.kind)" in block and "A-Za-z0-9_.:-]{1,100}$/.test(body.source)" in block)
-    check("the level is a whole number 1-5", "level >= 1 && level <= 5" in block)
+    check("the level is a whole number inside the catalog's range",
+          "level >= catalog.min_level && level <= catalog.max_level" in block)
     check("the page is pushed the new record at once (the same push every notification takes)",
           "pushNotifications()" in block)
     check("an empty message is refused", "needs a message" in block)
@@ -176,7 +180,12 @@ def test_the_page_side_leads_to_the_notifier():
     check("sandboxed frames get host.notify too (same host in both modes)",
           "notify:function(m,l,o)" in tui and 'else if (m.op === "notify") notify(item, m.message, m.level, m.opts);' in tui)
     check("host.notify sends through JarvisNotifications.send", "N.send({" in tui)
-    check("a problem line is marked failed and never quieter than standard", "failed: bad, level: bad ? 2 : undefined" in tui)
+    check("a problem line is marked failed and never quieter than the catalog's default level",
+          "failed: bad, level: bad && cat ? cat.default_level : undefined" in tui)
+    check("host.notify asks for the small toast, with the line's own tone for info / success",
+          'channels: ["small_toast"], tone: bad ? undefined : lvl' in tui)
+    check("a warn / error line is a failure, which the notifier always draws as a card",
+          "failed: bad" in tui and "failed=True" not in tui)
     check("the plain toast is only the fallback when the notifier can't be reached", "if (!sent) toast(message, lvl);" in tui)
     check("the documented host API lists it", "host.notify(message, level, o)" in tui)
 

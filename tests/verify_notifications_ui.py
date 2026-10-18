@@ -110,6 +110,10 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             return self._raw(jarvis_cli(*args))
         if url.path == "/api/notifications/summary":
             return self._raw(jarvis_cli("notify-summary"))
+        if url.path == "/api/notifications/catalog":
+            # The real server serves `jarvis notify-config --catalog`; the page keeps no list of
+            # levels or positions of its own, so the test page needs one.
+            return self._json(notifier.catalog())
         if url.path.startswith("/api/"):
             return self._json({})
         return super().do_GET()
@@ -139,7 +143,9 @@ class Server(socketserver.ThreadingMixIn, http.server.HTTPServer):
 
 def seed():
     def send(title, msg="", **kw):
-        kw.setdefault("channels", ["inbox"])
+        # `stream` as well as the inbox: since L.30 a record is drawn on the page only if its channels
+        # include an on-page action (the card), and a level-1 record is muted whatever it lists.
+        kw.setdefault("channels", ["inbox", "stream"])
         return notifier.notify(title, msg, **kw)
 
     older = send("Weekly report generated", "The weekly report is ready in Documents.", kind="task", level=2)
@@ -199,6 +205,7 @@ def main():
         page.add_init_script("localStorage.setItem('jarvis.onboarding.dismissed','1');")
         page.goto(base)
         page.wait_for_function("!!(window.JarvisNotifications && window.JarvisNotifications.open)")
+        page.wait_for_function("!!window.JarvisNotifications.catalog()")   # levels / positions come from it
 
         # ---- on load: the badge is the DURABLE unread count --------------------
         page.wait_for_function("document.getElementById('notifications-fab-badge') && !document.getElementById('notifications-fab-badge').hidden")
@@ -270,6 +277,26 @@ def main():
         page.evaluate("document.querySelectorAll('.ntf').forEach(n => n.remove())")
         page.evaluate("window.JarvisNotifications.show({id:'silent-1', title:'Quiet', message:'q', kind:'notify', level:1})")
         check("a level-1 (silent) notification raises no card", page.locator(".ntf").count() == 0)
+
+        # ---- L.30: the compact look is the page's ordinary one-line toast, not a card ---------
+        page.evaluate("document.querySelectorAll('.ntf, .jui-toast').forEach(n => n.remove())")
+        page.evaluate("window.JarvisNotifications.show({id:'c-1', title:'Jarvis', message:'Autostart on', kind:'scheduled', level:2, look:'compact', tone:'success'})")
+        page.wait_for_selector(".jui-toast")
+        check("a compact record draws a .jui-toast and no .ntf card",
+              page.locator(".jui-toast").count() == 1 and page.locator(".ntf").count() == 0)
+        check("the compact toast says the message", "Autostart on" in page.inner_text(".jui-toast"), page.inner_text(".jui-toast"))
+        check("the generic title 'Jarvis' is left off the compact toast", "Jarvis" not in page.inner_text(".jui-toast"))
+        page.evaluate("document.querySelectorAll('.ntf, .jui-toast').forEach(n => n.remove())")
+        page.evaluate("window.JarvisNotifications.show({id:'c-2', title:'Backup', message:'Failed', kind:'task', level:2, look:'compact', failed:true})")
+        page.wait_for_selector(".ntf")
+        check("a compact record that failed is drawn as a card", page.locator(".ntf").count() == 1)
+        page.evaluate("document.querySelectorAll('.ntf, .jui-toast').forEach(n => n.remove())")
+        page.evaluate("window.JarvisNotifications.show({id:'c-3', title:'Old record', message:'no look', kind:'notify', level:2})")
+        page.wait_for_selector(".ntf")
+        check("a record with no look still draws (a card at Standard)", page.locator(".ntf").count() == 1)
+        page.evaluate("document.querySelectorAll('.ntf, .jui-toast').forEach(n => n.remove())")
+        page.evaluate("window.JarvisNotifications.show({id:'c-4', title:'Muted', message:'q', kind:'notify', level:1, look:'none'})")
+        check("a record with look none draws neither", page.locator(".ntf").count() == 0 and page.locator(".jui-toast").count() == 0)
 
         # ---- a toast card can be dismissed without losing the notification -----------
         page.evaluate("window.JarvisNotifications.show({id:'x-1', title:'Dismiss me', message:'m', kind:'notify', level:2})")

@@ -484,25 +484,17 @@
   }
 
   // ---- sections -------------------------------------------------------------------------
-  // E2 / D-11: the eight places an in-app toast can appear (notifier.POSITIONS).
-  const TOAST_POSITIONS = [["bottom-right", "Bottom right"], ["bottom-left", "Bottom left"],
-    ["top-right", "Top right"], ["top-left", "Top left"], ["top", "Top"], ["bottom", "Bottom"],
-    ["left", "Left"], ["right", "Right"]];
-  const LEVELS = [[1, "1 · Silent"], [2, "2 · Standard"], [3, "3 · Persistent"], [4, "4 · Broadcast"], [5, "5 · Confirm"]];
-  // E0: the three lists above (and the kind rows below) are the FALLBACK. The real
-  // ones come from the notifier's catalog (JarvisNotifications.catalog(), served at
-  // /api/notifications/catalog), so a new level, position or kind added in
-  // jarvis/notify_registry.py shows up here with no edit to this file.
-  const NOTIFY_KINDS = [
-    ["reminder", "Reminders", 2], ["notify", "Messages from Jarvis", 2], ["task", "Finished tasks", 2],
-    ["clipboard_watch", "Clipboard watcher", 2], ["ambient", "Ambient suggestions", 1],
-    ["daemon", "Daemon problems", 2],
-  ];
+  // The notification levels, the kinds and the eight toast positions are NOT listed in this
+  // file: they come from the notification module's catalog (notify_registry.py, served at
+  // /api/notifications/catalog) through JarvisNotifications' pickerLevels() / pickerKinds() /
+  // pickerPositions(). A new level, kind or position shows up here with no edit to this file;
+  // when the catalog cannot be read the section says so instead of offering a stale list.
 
+  // Refetched each time the section opens (no timer), so a changed table shows without a reload.
   async function notifyCatalog() {
     const N = window.JarvisNotifications;
-    if (!N || typeof N.catalog !== "function") return null;
-    return N.catalog() || (await N.loadCatalog()) || null;
+    if (!N || typeof N.loadCatalog !== "function") return null;
+    return (await N.loadCatalog()) || (typeof N.catalog === "function" ? N.catalog() : null) || null;
   }
 
   function tunableRows(ctx, key) {
@@ -569,13 +561,21 @@
       files: ["notify_config.json"],
       terms: "notification level toast position corner side top bottom left right inbox silent standard persistent broadcast confirm reminder task clipboard ambient daemon autostart",
       build: async (ctx) => {
-        const cat = await notifyCatalog();   // null when it cannot be read: the built-in lists apply
-        const levelChoices = cat ? cat.presets.map((p) => [p.level, `${p.level} · ${p.name}`]) : LEVELS;
-        const positionChoices = cat ? cat.positions.map((p) => [p.id, p.label]) : TOAST_POSITIONS;
-        const kindRows = cat ? cat.kinds.filter((k) => k.settings).map((k) => [k.id, k.label, k.level]) : NOTIFY_KINDS;
-        const rows = kindRows.map(([key, label, fb]) => fileRow(ctx, { file: "notify_config.json", path: ["levels", key], type: "choice", choices: levelChoices, fallback: fb, label,
-          help: "Default importance when nothing sets one. Silent = inbox only; Confirm = stays until you acknowledge it." }));
-        const where = fileRow(ctx, { file: "notify_config.json", path: ["position"], type: "choice", choices: positionChoices, fallback: cat ? cat.default_position : "bottom-right", label: "Where toasts appear",
+        const cat = await notifyCatalog();   // null when it cannot be read: say so, offer no stale list
+        const N = window.JarvisNotifications;
+        const levels = N ? N.pickerLevels() : { items: [], message: "" };
+        const kinds = N ? N.pickerKinds() : { items: [] };
+        const positions = N ? N.pickerPositions() : { items: [] };
+        if (!cat || !levels.items.length || !positions.items.length) {
+          return [h("div", { class: "prefs-note", text: (levels && levels.message) || "The notification options could not be loaded. Reload the page to try again." })];
+        }
+        const levelChoices = levels.items.map((l) => [l.level, l.label]);
+        const positionChoices = positions.items.map((p) => [p.id, p.label]);
+        // The help sentence is each level's own description, from the catalog.
+        const levelHelp = "Default importance when nothing sets one. " + levels.items.map((l) => `${l.name}: ${l.description}`).join(" ");
+        const rows = kinds.items.filter((k) => k.settings).map((k) => fileRow(ctx, { file: "notify_config.json", path: ["levels", k.id], type: "choice", choices: levelChoices, fallback: k.level, label: k.label,
+          help: levelHelp }));
+        const where = fileRow(ctx, { file: "notify_config.json", path: ["position"], type: "choice", choices: positionChoices, fallback: cat.default_position, label: "Where notifications appear",
           help: "The side or corner of the page an in-app notification slides in from, unless the notification or its kind says otherwise." });
         const out = [group("Default level by kind", rows), group("Position", [where])];
         const t = tunableRows(ctx, "notifications");

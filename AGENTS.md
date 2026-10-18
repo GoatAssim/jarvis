@@ -85,6 +85,20 @@ things that were already fixed once.
   is no separate run-confirm popup. `tests/test_one_notification_system.py` pins today's
   numbers (zero for all of the above): adding one fails it, and removing one fails it
   until you lower the number in the same patch.
+  **The rule for the whole notification module (L.30): a new action (notification type), level,
+  kind, position, look or tone is ONE row in `notify_registry`; no page, tool or panel keeps its
+  own list.** Everything else reads it through `notifier.describe_options()` /
+  `jarvis notify-config --catalog` / `/api/notifications/catalog` (the pickers in Schedules,
+  Settings, the Download Hub and the notification test tool all do), and
+  `tests/test_no_hardcoded_notify_lists.py` fails if one types out level names, three or more
+  type ids or the old 1-5 range. How a notification is DRAWN is the record's `look`
+  (`card` = a full card, `compact` = the one-line `JarvisUI.toast` called from
+  `notifications.js`, `none`), set by `notifier.resolve_delivery()`: explicit channels beat
+  `look=`, a level whose preset has no on-page action mutes it, and a failure or anything that
+  needs acknowledging is always a card. There is no second toast path. A page click may only
+  use the actions marked `page_ok` (inbox, card, small toast): never desktop, voice or a DM, and
+  the test tool (`notification_test`, Menu > Notification test) never takes a recipient and
+  leaves the phone channels out even at Broadcast.
 - **A chat guest's details never go in `memory.py`.** That store rides
   along in the owner's own prompts. Guest facts belong in
   `channels/people.py`, which is capped, keyed by platform id, and only
@@ -548,7 +562,9 @@ actually render Markdown):
     node tests/verify_category_manager.js   # L.12: category-manager.js pure helpers + the whole dialog chain against a fake JarvisUI/fetch; no npm install
     python3 tests/test_l27c_autostart_notice.py  # L.27 follow-up: a failed daemon autostart raises ONE `daemon` notification per pass (text, cap, never raises, real inbox record, Settings row)
     python3 tests/test_e2_toast_position.py  # E2: toast position (8 places, default bottom-right), native OS notification renamed `desktop` (`toast` still read as `desktop`)
-    python3 tests/test_notify_registry.py   # E0: notify_registry tables (kinds, actions, levels, positions) agree with notifier.py
+    python3 tests/test_notify_registry.py   # E0: notify_registry tables (kinds, actions, levels, positions, looks, tones) agree with notifier.py
+    python3 tests/test_no_hardcoded_notify_lists.py  # L.30: static -- no page / panel / server keeps its own list of levels, notification types or the 1-5 range (reads them from the registry)
+    python3 tests/test_notification_test_tool.py  # L.30: the `notification_test` tool and its Menu panel (goes through notify() only, preview == record, no phone channel, lists read from the registry)
     python3 tests/test_e4_notify_owner_record.py  # E4: the `notify_owner` tool writes ONE silent `owner_dm` inbox record per call (failed only if nobody was reached); result dict unchanged; never re-DMs
     python3 tests/test_one_notification_system.py  # E5: static ratchet -- no second browser Notification / toast host / toast() helper / native confirm / OS toast / owner DM / unregistered kind
     python3 tests/test_hub_universal_notifications.py  # Download Hub on the one notification system: `download` kind, notify-send --kind/--source/--failed, POST /api/notifications/send, host.notify, hub panel has no toast of its own

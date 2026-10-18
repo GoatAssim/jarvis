@@ -436,16 +436,19 @@ function openMenu(globalMode) {
     .concat(OPEN_CHOICES.map((c) => ({ value: c.id, label: c.label })));
 }
 
-// The notifier's own importance levels.  These are only a first guess for the instant before the
-// hub answers: applyNotifyOptions() below replaces them with what jarvis/notifier.py defines right
-// now (the hub sends it with every poll), so a level the notifier gains later is offered here with
-// no change to this file.
-const LEVEL_NAMES = { 1: "Silent", 2: "Standard", 3: "Persistent", 4: "Broadcast", 5: "Confirm" };
+// The notification options (the levels and the notification types), exactly as the notification
+// catalog lists them right now.  There is NO copy of them in this file: the hub sends them with
+// every poll (summary.notify_options, from notifier.describe_options(), which reads
+// jarvis/notify_registry.py), applyNotifyOptions() below stores what arrived, and every menu and
+// tick list is built from it.  A level or a type added to the notification module is offered here
+// with no change to this file; until the first answer arrives the lists are empty and the panel
+// says so.  `version` is the catalog's hash: when it changes the panel rebuilds its pickers.
+const NOTIFY_OPTIONS = { actions: [], levels: [], version: "" };
+const NOTIFY_OPTIONS_WAIT = "Loading the notification options\u2026";
 
 function levelMenu() {
   return [{ value: "default", label: "Notifier's default" }]
-    .concat(Object.keys(LEVEL_NAMES).map(Number).sort((a, b) => a - b)
-      .map((n) => ({ value: String(n), label: n + " \u00B7 " + LEVEL_NAMES[n] })));
+    .concat(NOTIFY_OPTIONS.levels.map((l) => ({ value: String(l.value), label: l.label })));
 }
 
 // Every kind of download notification, in the order they are shown.
@@ -458,48 +461,32 @@ const NOTIFY_EVENTS = [
   { id: "started", label: "A download starts", help: "Off by default: it is noisy for a big batch." },
 ];
 
-// Where ONE download can be announced (the notifier's channels, jarvis/notifier.py CHANNELS) and which
-// events can announce it.  Empty = follow the overall notification settings.
-const NOTIFY_CHANNELS = [
-  { id: "discord", label: "Discord" },
-  { id: "desktop", label: "Desktop notification" },
-  { id: "stream", label: "In-app toast" },
-  { id: "voice", label: "Voice" },
-  { id: "instagram", label: "Instagram" },
-  { id: "playnite", label: "Playnite" },
-  { id: "inbox", label: "Inbox (silent)" },
-];
-
-// Replace the channel list and the level names with what the notifier says it has right now
-// (summary.notify_options, from notifier.describe_options()).  Changed in place, because the
-// helpers above hold these same objects.  A missing or empty answer keeps what we have.
+// Store the notification options the hub just sent (see NOTIFY_OPTIONS above).  Returns true when
+// something changed, so the caller rebuilds its pickers.  A missing or empty answer keeps what we
+// have: a momentary failure must not blank the lists.  Every type in the catalog is offered for
+// ONE download (the channels and the behaviours); the events that can announce it are the hub's
+// own (ITEM_EVENTS below).  Empty = follow the overall notification settings.
 function applyNotifyOptions(opts) {
   if (!opts || typeof opts !== "object") return false;
-  let touched = false;
-  if (Array.isArray(opts.channels) && opts.channels.length) {
-    const next = opts.channels.filter((c) => c && typeof c.id === "string")
-      .map((c) => ({ id: c.id, label: String(c.label || c.id) }));
-    if (next.length && JSON.stringify(next) !== JSON.stringify(NOTIFY_CHANNELS)) {
-      NOTIFY_CHANNELS.length = 0;
-      next.forEach((c) => NOTIFY_CHANNELS.push(c));
-      touched = true;
-    }
-  }
-  if (Array.isArray(opts.levels) && opts.levels.length) {
-    const next = {};
-    opts.levels.forEach((l) => {
-      const n = num(l && l.value);
-      if (n === null) return;
-      const name = String(l.name || "level " + n);
-      next[n] = name.charAt(0).toUpperCase() + name.slice(1);
-    });
-    if (Object.keys(next).length && JSON.stringify(next) !== JSON.stringify(LEVEL_NAMES)) {
-      Object.keys(LEVEL_NAMES).forEach((k) => { delete LEVEL_NAMES[k]; });
-      Object.keys(next).forEach((k) => { LEVEL_NAMES[k] = next[k]; });
-      touched = true;
-    }
-  }
-  return touched;
+  const source = Array.isArray(opts.actions) && opts.actions.length ? opts.actions : (opts.channels || []);
+  const actions = (Array.isArray(source) ? source : [])
+    .filter((a) => a && typeof a.id === "string")
+    .map((a) => ({ id: a.id, label: String(a.label || a.id), description: String(a.description || ""), dm: !!a.dm }));
+  const levels = [];
+  (Array.isArray(opts.levels) ? opts.levels : []).forEach((l) => {
+    const n = num(l && l.value);
+    if (n === null) return;
+    const name = String((l && l.name) || "level " + n);
+    levels.push({ value: n, label: String((l && l.label) || (n + " \u00B7 " + name.charAt(0).toUpperCase() + name.slice(1))),
+      description: String((l && l.description) || "") });
+  });
+  if (!actions.length && !levels.length) return false;
+  const next = { actions, levels, version: String(opts.version || "") };
+  if (JSON.stringify(next) === JSON.stringify(NOTIFY_OPTIONS)) return false;
+  NOTIFY_OPTIONS.actions = next.actions;
+  NOTIFY_OPTIONS.levels = next.levels;
+  NOTIFY_OPTIONS.version = next.version;
+  return true;
 }
 const ITEM_EVENTS = [
   { id: "started", label: "Starts" },
@@ -509,7 +496,7 @@ const ITEM_EVENTS = [
 ];
 
 function channelLabel(id) {
-  const c = NOTIFY_CHANNELS.find((x) => x.id === id);
+  const c = NOTIFY_OPTIONS.actions.find((x) => x.id === id);
   return c ? c.label : String(id);
 }
 
@@ -663,10 +650,10 @@ const pure = {
   sizeText, statusText, barLook, rowActions, sourceKey, sourceLabel, viewMatches, viewCounts, sourceList,
   filterRows, sortRows, groupRows, moveSelection, extractInputs, hintFromDecisions, isStale,
   toneOf, overviewStats, needsAttention, runningNow, sublineText, countText,
-  LIMIT_PRESETS, OPEN_CHOICES, NOTIFY_EVENTS, LEVEL_NAMES, DAYS, fmtLimit, parseLimit, limitFields,
+  LIMIT_PRESETS, OPEN_CHOICES, NOTIFY_EVENTS, NOTIFY_OPTIONS, NOTIFY_OPTIONS_WAIT, DAYS, fmtLimit, parseLimit, limitFields,
   limitSummary, quickSpeedOptions, openLabel, openMenu, levelMenu, daysChoice, daysFromChoice,
   blankWindow, prefsFromSettings, prefsDiff, notifySummary, addOptionsFromForm, itemPrefsText,
-  NOTIFY_CHANNELS, ITEM_EVENTS, channelLabel, isFullPath, cleanExt, extFolderRows,
+  ITEM_EVENTS, channelLabel, isFullPath, cleanExt, extFolderRows,
   testResultText, CARD_VERBS, cardActions, fmtWhen, applyNotifyOptions,
 };
 if (host && host.__hubPureOnly) return pure;
@@ -1326,7 +1313,14 @@ function fillSelect(sel, options, value) {
 }
 
 // A group of plain checkboxes in `box`; the ticked ids are read back with ticked().
-function buildChecks(box, items) {
+function buildChecks(box, items, waiting) {
+  if (!items.length) {                              // nothing to offer yet: say so instead of an empty box
+    if (box.getAttribute("data-sig") === "" && box.childNodes.length) return;
+    box.textContent = "";
+    box.setAttribute("data-sig", "");
+    box.appendChild(el("div", { cls: "field__help", text: waiting || NOTIFY_OPTIONS_WAIT }));
+    return;
+  }
   const sig = items.map((it) => it.id + "=" + it.label).join("|");
   if (box.childNodes.length && box.getAttribute("data-sig") === sig) return;
   const keep = ticked(box);                         // a list that changed keeps what was already ticked
@@ -1350,7 +1344,7 @@ function untick(box) {
 
 function renderAddExtras() {
   const sum = S.summary || {};
-  buildChecks($("#addChannels"), NOTIFY_CHANNELS);
+  buildChecks($("#addChannels"), NOTIFY_OPTIONS.actions);
   buildChecks($("#addEvents"), ITEM_EVENTS);
   const openSel = $("#addOpen");
   if (root.activeElement !== openSel && changed("addopen", [sum.after_download])) {
@@ -1407,7 +1401,7 @@ function renderDetailPrefs() {
   if (!show) { S.sig.dprefs = ""; return; }
   if (box.contains(root.activeElement)) return;                    // never rebuild under the cursor
   const global = S.summary && S.summary.after_download;
-  if (!changed("dprefs", [row.id, row.prefs || {}, global, row.scheduled_at || 0, row.can_schedule, NOTIFY_CHANNELS, LEVEL_NAMES])) return;
+  if (!changed("dprefs", [row.id, row.prefs || {}, global, row.scheduled_at || 0, row.can_schedule, NOTIFY_OPTIONS])) return;
   box.textContent = "";
   const prefs = row.prefs || {};
   box.appendChild(el("div", { cls: "h5", text: "For this download" }));
@@ -1466,7 +1460,7 @@ function renderDetailPrefs() {
 
   // Where and when THIS download is announced, instead of the overall notification settings.
   const chans = el("div", { cls: "checks", attrs: { role: "group", "aria-label": "Notification channels for this download" } });
-  buildChecks(chans, NOTIFY_CHANNELS);
+  buildChecks(chans, NOTIFY_OPTIONS.actions);
   (prefs.notify_channels || []).forEach((id) => { const i = chans.querySelector("input[value=" + id + "]"); if (i) i.checked = true; });
   const evs = el("div", { cls: "checks", attrs: { role: "group", "aria-label": "Which events notify for this download" } });
   buildChecks(evs, ITEM_EVENTS);

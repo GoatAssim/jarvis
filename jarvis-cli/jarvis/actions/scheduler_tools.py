@@ -213,7 +213,10 @@ def scheduler_channels():
     # E2: the native notification is `desktop` now; the old name `toast` is
     # still accepted (and passed through unchanged) so a model or a stored
     # request that says `toast` keeps working. notify() resolves the alias.
-    return tuple(notifier.CHANNELS) + tuple(notifier.LEGACY_CHANNEL_ALIASES)
+    # D2: a behaviour (`persistent`, `confirm`) is an action too, so it is accepted in the
+    # same list; notifier.notify() splits them with canonical_actions().
+    return (tuple(notifier.CHANNELS) + tuple(notify_registry.behaviour_ids())
+            + tuple(notifier.LEGACY_CHANNEL_ALIASES))
 
 
 # ---------------------------------------------------------------------------

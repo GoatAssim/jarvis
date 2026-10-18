@@ -89,8 +89,10 @@ class Sink:
     def __init__(self):
         self.sent = []
 
-    def __call__(self, title, message, *, level=None, failed=False):
-        self.sent.append({"title": title, "message": message, "level": level, "failed": failed})
+    def __call__(self, title, message, *, level=None, failed=False, look=None, tone=None):
+        # `look` / `tone` are only passed for the three small-toast events (hub/notify.EVENT_LOOKS).
+        self.sent.append({"title": title, "message": message, "level": level, "failed": failed,
+                          "look": look, "tone": tone})
         return {"delivered": ["inbox", "desktop"], "failed_channels": []}
 
 

@@ -83,8 +83,9 @@ class Sink:
     def __init__(self):
         self.sent = []
 
-    def __call__(self, title, message, *, level=None, failed=False, channels=None):
-        self.sent.append({"title": title, "message": message, "level": level, "failed": failed, "channels": channels})
+    def __call__(self, title, message, *, level=None, failed=False, channels=None, look=None, tone=None):
+        self.sent.append({"title": title, "message": message, "level": level, "failed": failed, "channels": channels,
+                          "look": look, "tone": tone})
         return {"delivered": ["inbox"], "failed_channels": []}
 
 

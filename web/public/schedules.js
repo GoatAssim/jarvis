@@ -102,16 +102,24 @@
     return `${Math.round(s / 86400)}d ago`;
   }
 
-  const CHANNELS = [
-    ["inbox", "Inbox"], ["stream", "Stream"], ["desktop", "Desktop"], ["voice", "Voice"],
-    ["playnite", "Playnite"], ["discord", "Discord"], ["instagram", "Instagram"],
-  ];
+  // The notification types and importance levels are NOT listed here: they are the
+  // notification module's (notify_registry.py), read through JarvisNotifications'
+  // pickerActions() / pickerLevels() (the catalog at /api/notifications/catalog). A type or
+  // level added there appears in these forms with no edit to this file. With no catalog the
+  // pickers disable themselves and say so.
+  //
   // E2 / D-10: the native OS notification is `desktop`; jobs saved earlier say `toast`.
   const legacyChannel = (c) => (c === "toast" ? "desktop" : c);
-  const LEVELS = [
-    ["", "Default"], ["1", "1 \u00b7 Silent"], ["2", "2 \u00b7 Standard"],
-    ["3", "3 \u00b7 Persistent"], ["4", "4 \u00b7 Broadcast"], ["5", "5 \u00b7 Confirm"],
-  ];
+  const notifications = () => window.JarvisNotifications || null;
+  const pickerOf = (name) => {
+    const N = notifications();
+    return N && typeof N[name] === "function" ? N[name]() : { items: [], message: "The notification options could not be loaded. Reload the page to try again." };
+  };
+  // What a stored type id is called on screen (the catalog's own label; the id if unknown).
+  const channelLabel = (id) => {
+    const hit = pickerOf("pickerActions").items.find((a) => a.id === legacyChannel(id));
+    return hit ? hit.label : String(id);
+  };
   const KIND_CHIPS = [["all", "All"], ["reminder", "Reminder"], ["notify", "Notify"], ["task", "Task"]];
   // Active view: what is still going to happen. Finished view (H.2 history):
   // what already did, or was stopped. "Failed" and "Over budget" live in the
@@ -344,30 +352,84 @@
     }
   }
 
-  function channelsField(idPrefix) {
+  // The notification-type ticks. Built from the catalog and rebuilt when it changes
+  // (`jarvis:notify-catalog`), keeping what is ticked. `initial` (an edit form) is what the
+  // job already has; it is applied the first time the boxes exist, which may be a moment
+  // after the form opens if the catalog is still loading.
+  function channelsField(idPrefix, initial) {
+    const box = el("div", { class: "sch-channels", id: `${idPrefix}-channels` });
+    const hint = el("div", { class: "sch-field__help" });
+    let want = new Set((initial || []).map(legacyChannel));
+    let built = false;
+    const fill = () => {
+      if (!box.isConnected && built) { window.removeEventListener("jarvis:notify-catalog", fill); return; }
+      if (built) want = new Set(Array.from(box.querySelectorAll("input[data-channel]")).filter((i) => i.checked).map((i) => i.dataset.channel));
+      const { items, message } = pickerOf("pickerActions");
+      box.textContent = "";
+      built = false;
+      if (!items.length) {
+        box.appendChild(el("div", { class: "sch-field__help", "data-disabled": "1" }, message));
+        hint.textContent = "";
+        return;
+      }
+      items.forEach((a) => {
+        box.appendChild(el("label", { class: "sch-channel-toggle", title: a.description || null }, [
+          el("input", { type: "checkbox", id: `${idPrefix}-ch-${a.id}`, "data-channel": a.id,
+                        checked: want.has(a.id) ? true : null }),
+          a.label,
+        ]));
+      });
+      built = true;
+    };
+    const N = notifications();
+    const setHint = () => { hint.textContent = N && typeof N.pickerHint === "function" ? N.pickerHint() : ""; };
+    const fillAll = () => { fill(); setHint(); };
+    window.addEventListener("jarvis:notify-catalog", fillAll);
+    fillAll();
     return el("div", { class: "sch-field" }, [
-      el("label", { class: "sch-field__label" }, "Channels (leave all unchecked to use your configured defaults)"),
-      el("div", { class: "sch-channels" }, CHANNELS.map(([id, label]) =>
-        el("label", { class: "sch-channel-toggle" }, [
-          el("input", { type: "checkbox", id: `${idPrefix}-ch-${id}`, "data-channel": id }),
-          label,
-        ]))),
+      el("label", { class: "sch-field__label" }, "Notify through (leave all unchecked to use your configured defaults)"),
+      box, hint,
     ]);
   }
 
+  // The ticked type ids, or undefined for none. `null` means the picker could not be read
+  // (no boxes), which a caller must treat as "leave the job's channels alone", not "clear".
   function collectChannels(idPrefix) {
-    const on = CHANNELS.map(([id]) => id).filter((id) => $(`#${idPrefix}-ch-${id}`)?.checked);
+    const box = $(`#${idPrefix}-channels`);
+    if (!box || !box.querySelector("input[data-channel]")) return null;
+    const on = Array.from(box.querySelectorAll("input[data-channel]")).filter((i) => i.checked).map((i) => i.dataset.channel);
     return on.length ? on : undefined;
   }
 
-  function levelField(idPrefix) {
+  // The importance select: "Default" plus every level in the catalog. `current` (an edit form)
+  // is the job's level; applied whenever the options are (re)built.
+  function levelField(idPrefix, current) {
+    const sel = el("select", { id: `${idPrefix}-level` });
+    const msg = el("div", { class: "sch-field__help" });
+    let chosen = current != null ? String(current) : "";
+    const fill = () => {
+      if (!sel.isConnected && sel.options.length) { window.removeEventListener("jarvis:notify-catalog", fill); return; }
+      if (sel.options.length > 1) chosen = sel.value;
+      const { items, message } = pickerOf("pickerLevels");
+      sel.textContent = "";
+      sel.appendChild(el("option", { value: "" }, "Default"));
+      items.forEach((l) => sel.appendChild(el("option", { value: String(l.level), title: l.description || null }, l.label)));
+      sel.disabled = !items.length;
+      sel.dataset.ready = items.length ? "1" : "";
+      sel.value = items.some((l) => String(l.level) === chosen) ? chosen : "";
+      msg.textContent = items.length ? "" : message;
+    };
+    window.addEventListener("jarvis:notify-catalog", fill);
+    fill();
     return el("div", { class: "sch-field" }, [
-      el("label", { class: "sch-field__label", for: `${idPrefix}-level` }, "Importance"),
-      el("select", { id: `${idPrefix}-level` }, LEVELS.map(([v, label]) => el("option", { value: v }, label))),
+      el("label", { class: "sch-field__label", for: `${idPrefix}-level` }, "Importance"), sel, msg,
     ]);
   }
 
   function renderNewForm() {
+    // Refetch the notification catalog each time the form opens (no timer): if the table
+    // changed since the page loaded, the pickers redraw through `jarvis:notify-catalog`.
+    if (notifications() && notifications().loadCatalog) notifications().loadCatalog();
     dom.midTitle.textContent = "New job";
     const wrap = el("div", { class: "sch-form" });
 
@@ -762,7 +824,7 @@
       : job.status + (job.needs_approval ? " \u2014 needs approval" : ""));
     row("Next run", job.next_run ? `${job.next_run}${job.in ? ` (in ${job.in})` : ""}` : "\u2014");
     row("Action", (job.action || {}).type);
-    row("Channels", (job.channels || []).join(", ") || "(configured defaults)");
+    row("Channels", (job.channels || []).map(channelLabel).join(", ") || "(configured defaults)");
     row("Level", job.level != null ? job.level : "(configured default)");
     row("Repeat", job.max_runs ? `${job.run_count || 0} / ${job.max_runs}` : (job.run_count ? `${job.run_count} run(s)` : "not yet run"));
     row("Catch up", job.catch_up ? "yes" : null);
@@ -858,6 +920,7 @@
   function sameJson(a, b) { return JSON.stringify(a == null ? null : a) === JSON.stringify(b == null ? null : b); }
 
   function renderEditForm(job) {
+    if (notifications() && notifications().loadCatalog) notifications().loadCatalog();
     const a = job.action || {};
     const summary = findJob(job.id) || {};
     dom.midTitle.textContent = `Edit: ${job.title || "(untitled)"}`;
@@ -895,10 +958,9 @@
       el("option", { value: k }, k.charAt(0).toUpperCase() + k.slice(1))));
     kindSel.value = job.kind || "task";
     advanced.appendChild(field("Kind (a label: which list it shows in, and its defaults)", "sch-e-kind", kindSel));
-    const chans = channelsField("sch-e");
-    advanced.appendChild(chans);
-    const levelWrap = levelField("sch-e");
-    advanced.appendChild(levelWrap);
+    // Built from the catalog; the job's own channels / level are applied as the options exist.
+    advanced.appendChild(channelsField("sch-e", job.channels));
+    advanced.appendChild(levelField("sch-e", job.level));
     advanced.appendChild(field("Repeat this many times (blank = no limit)", "sch-e-times",
       el("input", { type: "number", id: "sch-e-times", min: "1", value: job.max_runs || "" })));
     advanced.appendChild(el("label", { class: "sch-check-toggle" }, [
@@ -912,10 +974,6 @@
     advanced.appendChild(field("Announce this event when done (optional)", "sch-e-emit",
       el("input", { type: "text", id: "sch-e-emit", value: job.emit_on_done || "" })));
     wrap.appendChild(advanced);
-    // Prefill AFTER the controls exist (channels are checkboxes, level a select).
-    (job.channels || []).forEach((c) => { const box = $(`#sch-e-ch-${legacyChannel(c)}`, chans); if (box) box.checked = true; });
-    const levelSel = $("#sch-e-level", levelWrap);
-    if (levelSel) levelSel.value = job.level != null ? String(job.level) : "";
 
     wrap.appendChild(el("div", { class: "sch-submit-row" }, [
       el("button", { class: "btn btn--primary btn--sm", type: "button", onclick: () => submitEdit(job) }, "Save changes"),
@@ -953,11 +1011,18 @@
     }
     const kind = val("sch-e-kind");
     if (kind && kind !== job.kind) changes.kind = kind;
-    const channels = CHANNELS.map(([id]) => id).filter((id) => $(`#sch-e-ch-${id}`)?.checked);
-    const oldChannels = (job.channels || []).map(legacyChannel).sort();
-    if (!sameJson(channels.slice().sort(), oldChannels)) changes.channels = channels.length ? channels : null;
-    const level = val("sch-e-level");
-    if ((level === "" ? null : parseInt(level, 10)) !== (job.level == null ? null : job.level)) changes.level = level === "" ? null : parseInt(level, 10);
+    // If the catalog could not be read the pickers are disabled: leave the job's channels and
+    // level exactly as they are rather than clearing them.
+    const picked = collectChannels("sch-e");          // null = picker unreadable
+    if (picked !== null) {
+      const channels = picked || [];
+      const oldChannels = (job.channels || []).map(legacyChannel).sort();
+      if (!sameJson(channels.slice().sort(), oldChannels)) changes.channels = channels.length ? channels : null;
+    }
+    if ($("#sch-e-level")?.dataset.ready) {
+      const level = val("sch-e-level");
+      if ((level === "" ? null : parseInt(level, 10)) !== (job.level == null ? null : job.level)) changes.level = level === "" ? null : parseInt(level, 10);
+    }
     const times = val("sch-e-times");
     const timesNow = times === "" ? null : parseInt(times, 10);
     if (times !== "" && !(timesNow >= 1)) return toast("Repeat count must be a whole number of 1 or more.");

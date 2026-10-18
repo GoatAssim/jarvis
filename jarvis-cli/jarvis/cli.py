@@ -1420,6 +1420,44 @@ def parse_notify_send_args(tokens):
 _NOTIFY_SOURCE_RE = re.compile(r"^[A-Za-z0-9_.:-]{1,100}$")
 
 
+def parse_notify_look_args(tokens):
+    """Peel `--look L` and `--tone T` off a `notify-send` argument list.
+
+    Returns (remaining_tokens, look, tone, error). `--look` must be a look in
+    notify_registry.LOOKS (`card`, `compact`, `none`) and `--tone` a tone in
+    notify_registry.TONES; a typo is an error, the same as `--kind`, because the lists
+    come from the registry and a person typing at a prompt wants to hear about it. What
+    is left goes on to parse_notify_send_extras() unchanged.
+    """
+    from . import notify_registry
+    rest, look, tone = [], None, None
+    toks = list(tokens)
+    i = 0
+    while i < len(toks):
+        tok = toks[i]
+        name, eq, inline = tok.partition("=")
+        if name in ("--look", "--tone"):
+            if eq:
+                value = inline
+            elif i + 1 < len(toks):
+                i += 1
+                value = toks[i]
+            else:
+                return None, None, None, f"{name} needs a value"
+            value = value.strip().lower()
+            known = notify_registry.look_ids() if name == "--look" else notify_registry.tone_ids()
+            if value not in known:
+                return None, None, None, f"{name} must be one of: {', '.join(known)}"
+            if name == "--look":
+                look = value
+            else:
+                tone = value
+        else:
+            rest.append(tok)
+        i += 1
+    return rest, look, tone, None
+
+
 def parse_notify_send_extras(tokens):
     """Peel `--kind K`, `--source S` and `--failed` off a `notify-send` argument list.
 
@@ -1733,7 +1771,11 @@ def run_scheduler_command(argv):
 
         if cmd == "notify-send":
             usage = ("usage: jarvis notify-send <message> [title] [channels,csv] "
-                     "[--position P] [--level N] [--kind K] [--source S] [--failed]")
+                     "[--position P] [--level N] [--kind K] [--source S] [--failed] "
+                     "[--look L] [--tone T]")
+            rest, look, tone, bad = parse_notify_look_args(rest)
+            if bad:
+                return emit({"error": bad}, 1)
             rest, kind, source, failed, bad = parse_notify_send_extras(rest)
             if bad:
                 return emit({"error": bad}, 1)
@@ -1749,7 +1791,8 @@ def run_scheduler_command(argv):
             record = notifier.notify(
                 title=words[1] if len(words) > 1 else "Jarvis",
                 message=words[0], channels=channels, kind=kind or "notify",
-                position=position, level=level, source=source, failed=failed)
+                position=position, level=level, source=source, failed=failed,
+                look=look, tone=tone)
             return emit(record)
 
         if cmd == "notify-list":

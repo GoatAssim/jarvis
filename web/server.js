@@ -3048,13 +3048,35 @@ app.get("/api/notifications/summary", requireJarvis, async (req, res) => {
 });
 
 // E0 — the notification catalog: every action (channel / behaviour), level preset,
-// kind and position, plus the owner's configured defaults. Read-only. The toast
-// renderer and Settings take their level / position / kind lists from this instead
-// of keeping their own copies; a failed read just leaves them on their built-in
-// fallback lists.
-app.get("/api/notifications/catalog", requireJarvis, async (req, res) => {
+// kind, position, look and tone, plus the owner's configured defaults. Read-only. Every
+// picker, the toast renderer and Settings take their lists from this instead of keeping
+// their own copies. There is NO built-in fallback list: when it cannot be read the pickers
+// disable themselves (the notifications themselves still draw, because each record carries
+// its own `look`).
+//
+// Each request starts a fresh CLI process, so the catalog always reflects the code on disk
+// even while node keeps running. The last good copy is kept in memory: it is served when a
+// later read fails, and it is what /api/notifications/send checks against (the table only
+// changes when the code on disk does, so a copy a few minutes old is fine for that).
+let lastGoodNotifyCatalog = null;
+
+async function loadNotifyCatalog({ fresh = true } = {}) {
+  if (!fresh && lastGoodNotifyCatalog) return lastGoodNotifyCatalog;
   const result = await runJarvisOnce(["notify-config", "--catalog"], 10000);
-  return parseJarvisJSON(result, res, "Couldn't read the notification catalog.");
+  try {
+    const parsed = JSON.parse(result.stdout || "");
+    if (parsed && Array.isArray(parsed.actions) && Array.isArray(parsed.presets)) {
+      lastGoodNotifyCatalog = parsed;
+      return parsed;
+    }
+  } catch (e) { /* fall through to the last good copy */ }
+  return lastGoodNotifyCatalog;
+}
+
+app.get("/api/notifications/catalog", requireJarvis, async (req, res) => {
+  const catalog = await loadNotifyCatalog({ fresh: true });
+  if (!catalog) return res.status(500).json({ error: "Couldn't read the notification catalog." });
+  return res.json(catalog);
 });
 
 // L.30 — the owner read (and, for a persistent / confirm-level one,
@@ -3091,10 +3113,11 @@ app.post("/api/notifications/dismiss", requireJarvis, async (req, res) => {
 // It goes through the SAME notifier every other notification does (`jarvis notify-send`, which
 // calls notifier.notify): the durable inbox record, the level rules, the toast position, the
 // owner's per-kind settings. The panel never draws a toast of its own. The page can only ask
-// for a registered `kind` (the CLI checks), a short `source` name, an optional level 1-5 and the
-// in-page channels (`stream` = the toast, `inbox`); the louder channels (desktop, voice, phone)
-// stay the notifier's own decision, so a button click can never DM the owner.
-const NOTIFY_SEND_CHANNELS = new Set(["inbox", "stream"]);
+// for a registered `kind` (the CLI checks), a short `source` name, an optional level from the
+// catalog's range, an optional tone from the catalog's tones and the channels the catalog marks
+// `page_ok` (the inbox and the two on-page looks: the notification card and the small toast);
+// the louder channels (desktop, voice, phone) stay the notifier's own decision, so a button click
+// can never DM the owner. The allow-list is read from the catalog, not typed out here.
 function cleanNoticeText(value, max) {
   // No control characters (spawn refuses NUL), and never a leading "--": the CLI would read
   // it as one of its own flags.
@@ -3106,14 +3129,18 @@ app.post("/api/notifications/send", requireJarvis, async (req, res) => {
   const message = cleanNoticeText(body.message, 2000);
   if (!message.trim()) return res.status(400).json({ error: "A notification needs a message." });
   const title = cleanNoticeText(body.title, 120) || "Jarvis";
+  const catalog = await loadNotifyCatalog({ fresh: false });
+  if (!catalog) return res.status(503).json({ error: "The notification catalog could not be read, so nothing was sent." });
+  const pageOk = new Set(catalog.actions.filter((a) => a && a.page_ok).map((a) => a.id));
   const args = ["notify-send", message, title];
   const wanted = Array.isArray(body.channels)
-    ? body.channels.filter((c) => typeof c === "string" && NOTIFY_SEND_CHANNELS.has(c)) : [];
+    ? body.channels.filter((c) => typeof c === "string" && pageOk.has(c)) : [];
   if (wanted.length) args.push([...new Set(wanted)].join(","));
   if (typeof body.kind === "string" && /^[a-z][a-z0-9_]{0,40}$/.test(body.kind)) args.push("--kind", body.kind);
   if (typeof body.source === "string" && /^[A-Za-z0-9_.:-]{1,100}$/.test(body.source)) args.push("--source", body.source);
   const level = Number(body.level);
-  if (Number.isInteger(level) && level >= 1 && level <= 5) args.push("--level", String(level));
+  if (Number.isInteger(level) && level >= catalog.min_level && level <= catalog.max_level) args.push("--level", String(level));
+  if (typeof body.tone === "string" && Array.isArray(catalog.tones) && catalog.tones.includes(body.tone)) args.push("--tone", body.tone);
   if (body.failed === true) args.push("--failed");
   const result = await runJarvisOnce(args, 10000);
   // Show it now instead of at the next tick: the page gets it through the same push every

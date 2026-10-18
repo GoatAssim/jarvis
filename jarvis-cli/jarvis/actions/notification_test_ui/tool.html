@@ -1,0 +1,65 @@
+<div class="nt" id="nt">
+  <header class="nt__top">
+    <div class="nt__line" id="ntLine" role="status" aria-live="polite">reading the notification options&hellip;</div>
+  </header>
+
+  <div class="nt__body">
+    <section class="nt__form" aria-label="Test notification">
+      <div class="nt__field">
+        <label for="ntLevel">Importance level</label>
+        <select id="ntLevel"></select>
+        <div class="nt__help" id="ntLevelHelp"></div>
+      </div>
+
+      <fieldset class="nt__field">
+        <legend>Deliver through (leave all unticked to use whatever the level delivers)</legend>
+        <div class="nt__ticks" id="ntTypes"></div>
+        <div class="nt__help" id="ntTypesHelp"></div>
+      </fieldset>
+
+      <fieldset class="nt__field">
+        <legend>Flags</legend>
+        <div class="nt__ticks" id="ntFlags"></div>
+      </fieldset>
+
+      <div class="nt__row">
+        <div class="nt__field">
+          <label for="ntKind">Kind</label>
+          <select id="ntKind"></select>
+        </div>
+        <div class="nt__field">
+          <label for="ntPosition">Position</label>
+          <select id="ntPosition"></select>
+        </div>
+        <div class="nt__field nt__field--narrow">
+          <label for="ntCount">Copies</label>
+          <input type="number" id="ntCount" min="1" max="5" value="1">
+        </div>
+      </div>
+
+      <div class="nt__field">
+        <label for="ntTitle">Title (optional)</label>
+        <input type="text" id="ntTitle" autocomplete="off" placeholder="Notification test">
+      </div>
+      <div class="nt__field">
+        <label for="ntMessage">Message (optional; the default says what was requested)</label>
+        <input type="text" id="ntMessage" autocomplete="off">
+      </div>
+
+      <div class="nt__actions">
+        <button type="button" class="btn btn--primary" id="ntSend" disabled>Send test</button>
+        <span class="nt__msg" id="ntSendMsg" role="status" aria-live="polite"></span>
+      </div>
+    </section>
+
+    <section class="nt__side" aria-label="Preview and results">
+      <h3>What will happen</h3>
+      <div class="nt__preview" id="ntPreview">Choose options to see the preview.</div>
+      <div class="nt__resulthead">
+        <h3>Results</h3>
+        <button type="button" class="btn btn--sm" id="ntClear" disabled>Dismiss all</button>
+      </div>
+      <div class="nt__results" id="ntResults"></div>
+    </section>
+  </div>
+</div>

@@ -90,6 +90,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 
 from . import job_risk
+from . import notify_registry  # plain data, no imports of its own: safe at module level
 from . import preflight
 from . import timespec
 from .timespec import TimeSpecError
@@ -176,6 +177,15 @@ CREATE_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 
 _ID_RE = re.compile(r"^[a-f0-9]{8,32}$")
 _EVENT_RE = re.compile(r"^[a-z0-9][a-z0-9_.:-]{0,63}$")
+
+
+def _level_type_message():
+    """The "not a number" message, with the bounds read from the notification registry."""
+    return "level must be an integer %d-%d" % (notify_registry.MIN_LEVEL, notify_registry.MAX_LEVEL)
+
+
+def _level_range_message():
+    return "level must be between %d and %d" % (notify_registry.MIN_LEVEL, notify_registry.MAX_LEVEL)
 
 
 class SchedulerError(Exception):
@@ -421,7 +431,7 @@ def create(kind="reminder", title="", when=None, trigger=None, action=None,
     panel (a human is literally typing the command), never by a model-facing
     tool handler.
 
-    `level` (1-5, K.2.7.1b) is stored raw/unresolved and resolved by
+    `level` (a preset number from notify_registry, K.2.7.1b) is stored raw/unresolved and resolved by
     notifier.normalize_level() at FIRE time, not here — so a job created
     with no explicit level picks up whatever the kind's configured default
     is at the moment it actually fires, not whatever it happened to be when
@@ -435,9 +445,9 @@ def create(kind="reminder", title="", when=None, trigger=None, action=None,
         try:
             level = int(level)
         except (TypeError, ValueError):
-            raise SchedulerError("level must be an integer 1-5")
-        if not (1 <= level <= 5):
-            raise SchedulerError("level must be between 1 and 5")
+            raise SchedulerError(_level_type_message())
+        if not (notify_registry.MIN_LEVEL <= level <= notify_registry.MAX_LEVEL):
+            raise SchedulerError(_level_range_message())
 
     action = dict(action or {})
     if not action.get("type"):
@@ -826,9 +836,9 @@ def update_job(job_id, changes, trusted=False, now=None):
                 try:
                     level = int(level)
                 except (TypeError, ValueError):
-                    raise SchedulerError("level must be an integer 1-5")
-                if not (1 <= level <= 5):
-                    raise SchedulerError("level must be between 1 and 5")
+                    raise SchedulerError(_level_type_message())
+                if not (notify_registry.MIN_LEVEL <= level <= notify_registry.MAX_LEVEL):
+                    raise SchedulerError(_level_range_message())
                 work["level"] = level
 
         if "max_runs" in changes:

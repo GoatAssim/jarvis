@@ -71,7 +71,17 @@ const eq = (a, b) => JSON.stringify(a) === JSON.stringify(b);
 
   check("four 'when it finishes' choices; the dangerous one says what it won't do", eq(pure.OPEN_CHOICES.map((c) => c.id), ["off", "reveal", "folder", "open"]) && /never opened/.test(pure.OPEN_CHOICES[3].help));
   check("the per-download menu starts with 'use my default' and names it", pure.openMenu("reveal")[0].value === "default" && /show the file in its folder/.test(pure.openMenu("reveal")[0].label) && pure.openMenu("off").length === 5);
+  // The panel keeps no list of levels or notification types: until the hub's answer arrives the menu holds
+  // only "default", the tick lists are empty and the panel says it is loading.
+  check("before the first answer there are no levels, no types, and a loading line",
+    pure.levelMenu().length === 1 && pure.NOTIFY_OPTIONS.actions.length === 0 && /Loading/.test(pure.NOTIFY_OPTIONS_WAIT || "Loading"));
+  const FIVE = ["silent", "standard", "persistent", "broadcast", "confirm"].map((n, i) => ({ value: i + 1, name: n }));
+  check("the first answer is applied and reported as a change",
+    pure.applyNotifyOptions({ version: "v1", levels: FIVE, actions: [{ id: "inbox", label: "Inbox" }, { id: "small_toast", label: "Small toast" }, { id: "discord", label: "Discord DM", dm: true }] }) === true);
   check("the level menu uses the notifier's own names", pure.levelMenu()[0].value === "default" && pure.levelMenu().length === 6 && /Persistent/.test(pure.levelMenu()[3].label));
+  check("the same answer again changes nothing (no redraw)", pure.applyNotifyOptions({ version: "v1", levels: FIVE, actions: [{ id: "inbox", label: "Inbox" }, { id: "small_toast", label: "Small toast" }, { id: "discord", label: "Discord DM", dm: true }] }) === false);
+  check("every action of the catalog is offered for one download, labelled by the catalog",
+    pure.NOTIFY_OPTIONS.actions.length === 3 && pure.channelLabel("small_toast") === "Small toast" && pure.channelLabel("nope") === "nope");
   check("every notification type is listed, in order", eq(pure.NOTIFY_EVENTS.map((e) => e.id), ["done", "failed", "group_done", "queue_empty", "stalled", "started"]));
 
   check("days: presets and a single day round-trip", pure.daysChoice(pure.DAYS) === "all" && pure.daysChoice(["mon", "tue", "wed", "thu", "fri"]) === "weekdays" && pure.daysChoice(["sat", "sun"]) === "weekends" && pure.daysChoice(["wed"]) === "wed" && pure.daysChoice(["mon", "wed"]) === "custom");
@@ -216,14 +226,13 @@ const eq = (a, b) => JSON.stringify(a) === JSON.stringify(b);
   check("the Scheduled view only holds scheduled rows", pure.viewMatches("scheduled", sched) && !pure.viewMatches("scheduled", caps("paused", [])));
   check("fmtWhen: today / tomorrow", pure.fmtWhen(Date.UTC(2026, 5, 10, 12) / 1000, Date.UTC(2026, 5, 10, 8)).length > 0 && /^tomorrow /.test(pure.fmtWhen(new Date(2026, 5, 11, 3, 0).getTime() / 1000, new Date(2026, 5, 10, 20, 0).getTime())) && /^today /.test(pure.fmtWhen(new Date(2026, 5, 10, 23, 0).getTime() / 1000, new Date(2026, 5, 10, 20, 0).getTime())));
   check("the add form's start time becomes start_at; 'now' sends nothing", eq(pure.addOptionsFromForm({ start: " tomorrow 3am " }).args, { start_at: "tomorrow 3am" }) && eq(pure.addOptionsFromForm({ start: "now" }).args, {}));
-  const savedCh = pure.NOTIFY_CHANNELS.map((c) => Object.assign({}, c));
-  const savedLv = Object.assign({}, pure.LEVEL_NAMES);
-  check("a channel and a level the notifier gains are offered with no change here",
-    pure.applyNotifyOptions({ channels: [{ id: "discord", label: "Discord" }, { id: "telegram", label: "Telegram" }], levels: [{ value: 1, name: "silent" }, { value: 6, name: "panic" }] })
-    && pure.NOTIFY_CHANNELS.some((c) => c.id === "telegram") && pure.levelMenu().some((o) => o.value === "6" && /Panic/.test(o.label)) && !pure.levelMenu().some((o) => o.value === "3"));
-  check("an empty or missing answer changes nothing", !pure.applyNotifyOptions(null) && !pure.applyNotifyOptions({ channels: [], levels: [] }));
-  pure.NOTIFY_CHANNELS.length = 0; savedCh.forEach((c) => pure.NOTIFY_CHANNELS.push(c));
-  Object.keys(pure.LEVEL_NAMES).forEach((k) => delete pure.LEVEL_NAMES[k]); Object.assign(pure.LEVEL_NAMES, savedLv);
+  check("a type and a level the notifier gains are offered with no change here, and a new `version` redraws",
+    pure.applyNotifyOptions({ version: "v2", actions: [{ id: "discord", label: "Discord" }, { id: "telegram", label: "Telegram" }], levels: [{ value: 1, name: "silent" }, { value: 6, name: "panic" }] })
+    && pure.NOTIFY_OPTIONS.actions.some((c) => c.id === "telegram") && pure.levelMenu().some((o) => o.value === "6" && /Panic/.test(o.label)) && !pure.levelMenu().some((o) => o.value === "3")
+    && pure.NOTIFY_OPTIONS.version === "v2");
+  check("an older server that sends only `channels` still works", pure.applyNotifyOptions({ levels: FIVE, channels: [{ id: "inbox", label: "Inbox" }] }) === true && pure.NOTIFY_OPTIONS.actions.length === 1);
+  check("an empty or missing answer changes nothing (the lists are kept)", !pure.applyNotifyOptions(null) && !pure.applyNotifyOptions({ channels: [], levels: [], actions: [] }) && pure.NOTIFY_OPTIONS.actions.length === 1);
+  check("the panel has no LEVEL_NAMES or NOTIFY_CHANNELS of its own any more", !/\bLEVEL_NAMES\b|\bNOTIFY_CHANNELS\b/.test(source));
   check("card buttons don't also select the card", /e\.stopPropagation\(\); e\.preventDefault\(\)/.test(source));
   check("the panel never keeps its own copy of the level range", !/\[1, 2, 3, 4, 5\]/.test(source));
 

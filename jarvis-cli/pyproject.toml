@@ -77,4 +77,4 @@ include = ["jarvis*"]
 # The Download Hub panel (actions/hub_ui) is HTML/JS/CSS that sits next to a .py file. Setuptools
 # only copies non-Python files that are declared; without this a real install (script.bat) would
 # have the tool but an empty Menu > Downloads, and a source checkout would hide the problem.
-"jarvis.actions" = ["hub_ui/*.html", "hub_ui/*.js", "hub_ui/*.css"]
+"jarvis.actions" = ["hub_ui/*.html", "hub_ui/*.js", "hub_ui/*.css", "notification_test_ui/*.html", "notification_test_ui/*.js", "notification_test_ui/*.css"]

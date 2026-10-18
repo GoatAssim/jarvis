@@ -13,6 +13,7 @@ that's what steers correct tool selection, per every provider's own
 tool-use guidance.
 """
 
+import copy
 import inspect
 import json
 import os
@@ -27,6 +28,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Callable, Optional
 
+from . import notify_registry
 from . import tool_disable
 from . import tool_maker
 from .command_tools import COMMAND_TOOL_SCHEMAS, COMMAND_TOOLS
@@ -813,6 +815,39 @@ def compact_schemas_for_prompt(schemas):
     return out
 
 
+def _notify_help_now():
+    return notify_registry.channel_help(), notify_registry.level_help()
+
+
+# What actions/scheduler_tools.py froze into its four schemas at import. When the
+# notification registry's table changes in this process (a test adds a channel or a level),
+# _refresh_notify_help() swaps the fresh text in at request time, so the model is never
+# shown a stale list. Equal => nothing to do and the cached schemas are returned untouched.
+_NOTIFY_HELP_FROZEN = _notify_help_now()
+
+
+def _refresh_notify_help(schemas):
+    """Return `schemas` with the notification channel/level help rebuilt from the registry.
+
+    Done after the schema lookup (never inside _tool_index(), which is built once), and only
+    copying the schemas that carry the old text. Note this follows the registry IN MEMORY: a
+    long-lived gateway daemon still needs a restart to pick up an edited notify_registry.py."""
+    fresh = _notify_help_now()
+    if fresh == _NOTIFY_HELP_FROZEN:
+        return schemas
+    swap = {_NOTIFY_HELP_FROZEN[0]: fresh[0], _NOTIFY_HELP_FROZEN[1]: fresh[1]}
+    out = []
+    for schema in schemas:
+        props = ((schema.get("parameters") or {}).get("properties") or {}) if isinstance(schema, dict) else {}
+        if any(isinstance(v, dict) and v.get("description") in swap for v in props.values()):
+            schema = copy.deepcopy(schema)
+            for v in schema["parameters"]["properties"].values():
+                if isinstance(v, dict) and v.get("description") in swap:
+                    v["description"] = swap[v["description"]]
+        out.append(schema)
+    return out
+
+
 def tool_schemas_for_session():
     """Playnite tools only when configured. Spotify is always offered so the
     model can search/play or get a login prompt — advertising spotify_* in
@@ -842,7 +877,7 @@ def tool_schemas_for_session():
     withheld = tool_maker.withheld_tools()
     if withheld:
         out = [schema for schema in out if schema.get("name") not in withheld]
-    return out
+    return _refresh_notify_help(out)
 
 
 _TOOL_INDEX = None
@@ -889,7 +924,7 @@ def schemas_for_tools(names):
         if schema is not None:
             out.append(schema)
             seen.add(name)
-    return out
+    return _refresh_notify_help(out)
 
 
 def _tool_group(name):

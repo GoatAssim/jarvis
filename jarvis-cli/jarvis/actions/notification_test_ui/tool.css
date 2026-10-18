@@ -1,0 +1,58 @@
+/* Menu > Notification test.  Lives in a shadow root, so it borrows the LOOK of the other panels
+   (the same tokens, with fallbacks for a missing theme) instead of Jarvis's global classes. */
+:host { display: flex; flex-direction: column; height: 100%; min-height: 0; }
+.tool-ui-content { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+* { box-sizing: border-box; }
+
+.nt {
+  --n-panel: var(--bg-panel, #121820);
+  --n-line: var(--border, #26303b);
+  --n-text: var(--text, #dde3e8);
+  --n-dim: var(--text-dim, #9aa4ad);
+  --n-acc: var(--accent, #38bdf8);
+  --n-green: var(--green, #4ade80);
+  --n-orange: var(--orange, #fb923c);
+  --n-red: var(--red, #f87171);
+  --n-mono: var(--font-mono, ui-monospace, monospace);
+  display: flex; flex-direction: column; flex: 1; min-height: 0; height: 100%;
+  color: var(--n-text); font-family: var(--font-ui, inherit); font-size: 13px;
+}
+button, input, select { font: inherit; color: inherit; }
+.btn {
+  font-weight: 600; font-size: 11px; letter-spacing: 0.1em; text-transform: uppercase;
+  border: 1px solid var(--n-line); border-radius: 2px; background: transparent; color: var(--n-dim);
+  padding: 7px 14px; cursor: pointer;
+}
+.btn:hover:not(:disabled) { color: var(--n-text); border-color: var(--n-acc); }
+.btn:disabled { opacity: 0.45; cursor: default; }
+.btn--primary { color: var(--n-acc); border-color: var(--n-acc); }
+.btn--sm { padding: 4px 10px; }
+
+.nt__top { padding: 10px 16px; border-bottom: 1px solid var(--n-line); }
+.nt__line { color: var(--n-dim); }
+.nt__body { display: flex; gap: 16px; flex: 1; min-height: 0; padding: 14px 16px; overflow: auto; }
+.nt__form { flex: 1 1 55%; min-width: 0; display: flex; flex-direction: column; gap: 12px; }
+.nt__side { flex: 1 1 45%; min-width: 0; display: flex; flex-direction: column; gap: 8px; }
+.nt h3 { margin: 0; font-size: 11px; letter-spacing: 0.14em; text-transform: uppercase; color: var(--n-dim); }
+.nt__field { display: flex; flex-direction: column; gap: 4px; border: 0; padding: 0; margin: 0; min-width: 0; }
+.nt__field--narrow { max-width: 90px; }
+.nt__field label, .nt__field legend { font-size: 11px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--n-dim); padding: 0; }
+.nt__row { display: flex; gap: 12px; flex-wrap: wrap; }
+.nt__row .nt__field { flex: 1 1 140px; }
+.nt select, .nt input[type="text"], .nt input[type="number"] {
+  background: var(--n-panel); border: 1px solid var(--n-line); border-radius: 2px; padding: 6px 8px; width: 100%;
+}
+.nt__ticks { display: flex; flex-wrap: wrap; gap: 6px 16px; }
+.nt__tick { display: inline-flex; align-items: center; gap: 6px; cursor: pointer; }
+.nt__tick[data-disabled="1"] { opacity: 0.5; cursor: not-allowed; }
+.nt__help, .nt__msg { color: var(--n-dim); font-size: 12px; }
+.nt__actions { display: flex; align-items: center; gap: 12px; }
+.nt__preview { border: 1px solid var(--n-line); background: var(--n-panel); border-radius: 2px; padding: 10px 12px; line-height: 1.5; }
+.nt__preview b { color: var(--n-text); }
+.nt__preview .nt__warn { color: var(--n-orange); }
+.nt__preview .nt__bad { color: var(--n-red); }
+.nt__resulthead { display: flex; align-items: center; justify-content: space-between; margin-top: 8px; }
+.nt__results { display: flex; flex-direction: column; gap: 6px; }
+.nt__result { border: 1px solid var(--n-line); border-left: 3px solid var(--n-green); border-radius: 2px; padding: 6px 10px; display: flex; justify-content: space-between; gap: 10px; align-items: center; }
+.nt__result-text { font-family: var(--n-mono); font-size: 12px; overflow-wrap: anywhere; }
+.nt__empty { color: var(--n-dim); }

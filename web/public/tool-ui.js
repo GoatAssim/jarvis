@@ -33,6 +33,10 @@
  *                                    must be a row of notify_registry.KINDS. A panel that is
  *                                    part of a feature with its own notification kind (the
  *                                    Download Hub: "download") uses this instead of host.toast.
+ *                                    "info" / "success" are asked for as the notifier's SMALL
+ *                                    TOAST (the same one-liner as "Autostart on"), in that tone;
+ *                                    "warn" / "error" are failures, which the notifier always
+ *                                    draws as a full card.
  *   host.setTitle(text)              the window / panel heading
  *   host.close()                     close it
  *   host.storage.get/set/remove      small per-element values kept in this browser (Promise)
@@ -185,11 +189,14 @@
   const toast = (message, level) => { try { UI().toast({ message: String(message), level: level || "info" }); } catch (_) { /* ui-kit missing */ } };
   const LEVELS = ["info", "success", "warn", "error"];
 
-  // host.notify: one line from a panel, raised as a notification (see the header). `info` and
-  // `success` follow the owner's own level for that kind; `warn` and `error` are marked failed
-  // and never quieter than the standard level, so "That didn't work" is not silenced by a kind
-  // turned down to inbox-only. If the notifier can't be reached the line is shown as a plain
-  // toast instead (the page's one error popup), so a message is never lost.
+  // host.notify: one line from a panel, raised as a notification (see the header). It asks for
+  // the notifier's small toast (`small_toast`, with the line's own tone for `info` / `success`).
+  // `info` and `success` follow the owner's own level for that kind (Silent draws nothing; a
+  // level that needs acknowledging draws a card); `warn` and `error` are marked failed, so the
+  // notifier draws them as a full card, and they are never quieter than the catalog's default
+  // level, so "That didn't work" is not silenced by a kind turned down to inbox-only. If the
+  // notifier can't be reached the line is shown as a plain toast instead (the page's one
+  // error popup), so a message is never lost.
   async function notify(item, message, level, opts) {
     const lvl = LEVELS.includes(level) ? level : "info";
     const o = opts || {};
@@ -198,10 +205,12 @@
     let sent = null;
     try {
       if (N && typeof N.send === "function") {
+        const cat = typeof N.catalog === "function" ? N.catalog() : null;
         sent = await N.send({
           message: String(message), title: o.title ? String(o.title) : (item && item.label) || "Jarvis",
           kind: o.kind, source: o.source || (item && item.id) || undefined,
-          failed: bad, level: bad ? 2 : undefined,
+          failed: bad, level: bad && cat ? cat.default_level : undefined,
+          channels: ["small_toast"], tone: bad ? undefined : lvl,
         });
       }
     } catch (_) { sent = null; }

@@ -6,10 +6,20 @@
  *   1. THE TOAST. Notifications were shown through the one shared `#toast`
  *      element — the same one every error message uses — so two notifications
  *      in the same tick overwrote each other, and any error toast wiped a
- *      reminder off the screen. Now each notification is its own card in the
- *      page's one toast stack (ui-kit.js JarvisUI.toastStack, E3: shared with
- *      the one-line JarvisUI toasts), with source, time, a coalesced "x3" count
- *      for bursts, and real actions (Acknowledge, Open chat / schedule).
+ *      reminder off the screen. Now each notification is drawn in the page's one
+ *      toast stack (ui-kit.js JarvisUI.toastStack, E3: shared with the one-line
+ *      JarvisUI toasts), in the LOOK its record carries (`record.look`, set by
+ *      notifier.resolve_delivery(); the page no longer guesses from the level):
+ *        card     its own card: source, time, a coalesced "x3" count for bursts,
+ *                 and real actions (Acknowledge, Open chat / schedule);
+ *        compact  the small one-line JarvisUI.toast the rest of the interface
+ *                 uses (the same one as the Daemons panel's "Autostart on"), in
+ *                 the record's `tone` (info / success). Never a failure and never
+ *                 anything that needs acknowledging: those are drawn as cards
+ *                 whatever the look says, as a safety net behind the notifier;
+ *        none     not drawn (the level mutes it). It is still counted, still in
+ *                 the inbox and still in the panel.
+ *      Compact and card draw into the SAME host; there is no second one.
  *
  *   2. THE PANEL. A flat read-only list with a browser-side unread counter
  *      that reset to zero on every page load. Now it is an inbox backed by
@@ -22,9 +32,11 @@
  * -----------------------
  *  - Delivery. Which channel a notification takes (inbox, stream, OS toast,
  *    voice, Playnite, Discord, Instagram) is still notifier.py's decision.
- *  - The level rules (D.2.1). 1 = inbox only; 2 = + toast; 3 = + re-surfaces
- *    until acknowledged (D-N1, owner-decided: every 10 minutes, at most 6
- *    times); 4 = + broadcast; 5 = + a blocking Acknowledge dialog.
+ *  - The level rules (D.2.1). Which levels exist and what each adds is the
+ *    notifier's table (notify_registry.PRESETS, read through the catalog); this
+ *    file keeps no list of them. A persistent record re-surfaces until
+ *    acknowledged (D-N1, owner-decided: every 10 minutes, at most 6 times); a
+ *    confirm record gets a blocking Acknowledge dialog.
  *  - app.js's generic toast() for errors and "copied" messages (it hands off to
  *    JarvisUI.toast, which draws in the same stack as these cards).
  *
@@ -47,6 +59,16 @@
  *   2. pure helpers       5. panel
  *      (JarvisNotifications._pure, tested by tests/verify_notifications.js)
  *   3. server access      6. wiring
+ *
+ * NO HARD-CODED LISTS
+ * -------------------
+ *  Levels, notification types (channels / behaviours), kinds and positions all
+ *  come from the catalog (`jarvis notify-config --catalog`, served at
+ *  /api/notifications/catalog). pickerActions() / pickerLevels() / pickerKinds()
+ *  / pickerPositions() are how every form, panel and Settings row reads them.
+ *  With no catalog they return an empty list and a message, and the picker
+ *  disables itself; the notifications themselves still draw, because each record
+ *  carries its own look.
  * ========================================================================= */
 
 (function (global) {
@@ -69,12 +91,16 @@
   const AUTO_HIDE_ACK_MS = 12000;        // a card that still needs acknowledging
   const AFTER_HOVER_MS = 3000;           // grace period once the pointer leaves a card
   const MAX_VISIBLE = 4;                 // cards on screen at once; the rest live in the panel
-  // E2 / D-11 / D-12: where a toast is drawn. Mirrors notifier.POSITIONS; the
-  // record carries `position`, and anything else (an older record, a bad
-  // value) lands in the default, bottom-right.
-  const POSITIONS = ["top", "bottom", "left", "right",
-    "top-left", "top-right", "bottom-left", "bottom-right"];
+  // E2 / D-11 / D-12: where a toast is drawn. The list of places is the catalog's
+  // (notify_registry.POSITIONS); this one constant only keeps a notification drawable
+  // when the catalog has not loaded. The record carries `position`; anything else
+  // (an older record, a bad value, no catalog) lands here.
   const DEFAULT_POSITION = "bottom-right";
+  // The title the notifier gives a notification that has none. A compact toast leaves
+  // it out: "Jarvis" above a one-line message says nothing.
+  const GENERIC_TITLE = "Jarvis";
+  // What a picker says when the catalog could not be read.
+  const PICKER_UNAVAILABLE = "The notification options could not be loaded. Reload the page to try again.";
   const BURST_WINDOW_MS = 10 * 60 * 1000;
   // D-N1 (owner-decided 2026-09-26i): level 3+ re-surfaces on an interval
   // until acknowledged. The interval and cap were not owner-specified.
@@ -116,15 +142,19 @@
   }
 
   // E0: the catalog (jarvis notify-config --catalog, served at /api/notifications/
-  // catalog): the positions, level presets and kinds the notifier knows. null until
-  // it loads, and again if the read fails; every helper below then uses the
-  // built-in values above, so a missing catalog never breaks a toast.
+  // catalog): every action, level preset, kind, position, look and tone the notifier
+  // knows. null until it loads. There is NO built-in copy of any of it: with no catalog
+  // the pickers are empty (and say so), and a notification is drawn from its own record.
   let catalog = null;
 
+  /** Accept a catalog only if it has what the page needs; keep the last good one
+   *  otherwise (a failed refresh must not blank the pickers). Returns true if accepted. */
   function setCatalog(next) {
     const ok = next && Array.isArray(next.presets) && next.presets.length
-      && Array.isArray(next.positions) && next.positions.length;
-    catalog = ok ? next : null;
+      && Array.isArray(next.positions) && next.positions.length
+      && Array.isArray(next.actions) && next.actions.length;
+    if (ok) catalog = next;
+    else if (next === null) catalog = null;
     return Boolean(ok);
   }
 
@@ -133,32 +163,12 @@
   }
 
   function positionIds() {
-    return catalog ? catalog.positions.map((p) => p.id) : POSITIONS;
+    return catalog ? catalog.positions.map((p) => p.id) : [];
   }
 
   function defaultPosition() {
     return catalog && positionIds().includes(catalog.default_position)
       ? catalog.default_position : DEFAULT_POSITION;
-  }
-
-  function levelRange() {
-    return catalog ? [catalog.min_level, catalog.max_level] : [1, 5];
-  }
-
-  function defaultLevel() {
-    return catalog ? catalog.default_level : 2;
-  }
-
-  /** Does this level draw an in-app toast? (Level 2 and up today.) */
-  function showsToast(level) {
-    const p = preset(level);
-    return p ? p.channels.includes("stream") : level >= 2;
-  }
-
-  /** Does this level need a blocking acknowledge dialog? (Level 5 today.) */
-  function needsConfirm(level) {
-    const p = preset(level);
-    return p ? Boolean(p.flags && p.flags.confirm_required) : level >= 5;
   }
 
   function positionOf(n) {
@@ -167,23 +177,122 @@
     return positionIds().includes(p) ? p : defaultPosition();
   }
 
+  /** The record's level as a number, or null when it is not one this catalog knows
+   *  (or when there is no catalog: the range is the catalog's). */
   function levelOf(n) {
     const lv = Number(n && n.level);
-    const [lo, hi] = levelRange();
-    return Number.isFinite(lv) && lv >= lo && lv <= hi ? lv : defaultLevel();   // old records: Standard
+    if (!Number.isFinite(lv)) return null;
+    if (!catalog) return lv;
+    return lv >= catalog.min_level && lv <= catalog.max_level ? lv : null;
   }
 
   function levelBadge(n) {
     const lv = levelOf(n);
-    if (catalog) {
-      const p = preset(lv);
-      return p && lv !== catalog.default_level ? p.id : "";
+    if (!catalog || lv === null) return "";
+    const p = preset(lv);
+    return p && lv !== catalog.default_level ? p.id : "";
+  }
+
+  /** The action id that draws a look (the card's, the small toast's), from the catalog. */
+  function lookAction(lookId) {
+    const row = catalog && Array.isArray(catalog.looks)
+      ? catalog.looks.find((l) => l.id === lookId) : null;
+    return row ? row.action : null;
+  }
+
+  /** How a record is drawn: "card", "compact" or "none".
+   *
+   *  The record says (`look`, set by notifier.resolve_delivery()). Two things sit on top:
+   *   - a record from before the upgrade has no look: derive it once from the catalog (a
+   *     card when its level's preset delivers the card action, else nothing); with no
+   *     catalog, a card, which is what the page always drew;
+   *   - the safety net: a compact record that is a failure, persistent or needs a
+   *     confirmation is a card whatever it says. The notifier already does this; this
+   *     is the second lock. It never turns "none" into a card, because "none" is how a
+   *     level mutes a notification. */
+  function lookOf(n) {
+    const raw = n && typeof n.look === "string" ? n.look.trim().toLowerCase() : "";
+    let look = raw;
+    if (!look) {
+      const cardAction = lookAction("card");
+      const p = catalog ? preset(levelOf(n)) : null;
+      look = !catalog ? "card" : (p && cardAction && p.channels.includes(cardAction) ? "card" : "none");
     }
-    if (lv === 1) return "silent";
-    if (lv === 3) return "persistent";
-    if (lv === 4) return "broadcast";
-    if (lv >= 5) return "confirm";
-    return "";
+    if (look !== "card" && look !== "compact" && look !== "none") look = "card";
+    if (look === "compact" && n && (n.failed || n.persistent || n.confirm_required || needsAckOf(n))) {
+      look = "card";
+    }
+    return look;
+  }
+
+  /** Does this record need the blocking acknowledge dialog? The record's own flag; for a
+   *  record that predates the flag, the catalog's preset for its level. */
+  function needsConfirmOf(n) {
+    if (!n) return false;
+    if (n.confirm_required === true) return true;
+    if (typeof n.confirm_required === "boolean") return false;
+    const p = catalog ? preset(levelOf(n)) : null;
+    return Boolean(p && p.flags && p.flags.confirm_required);
+  }
+
+  /** The compact toast's tone (its mark and colour), as JarvisUI.toast's `level`. The record
+   *  carries it; an unknown one is left undefined so JarvisUI.toast uses its own default. */
+  function toneOf(n) {
+    const t = n && typeof n.tone === "string" ? n.tone : "";
+    if (catalog && Array.isArray(catalog.tones)) {
+      if (catalog.tones.includes(t)) return t;
+      return catalog.default_tone || undefined;
+    }
+    return t || undefined;
+  }
+
+  /* ---- what the pickers read -------------------------------------------------
+   * Every place that lets the owner tick a notification type, pick a level, a kind
+   * or a position builds its rows from these, so adding one is a row in the
+   * notification module and nothing else. Each returns { items, message }: `items`
+   * is empty and `message` says why when there is no catalog (the picker disables
+   * itself); `message` is "" otherwise. */
+
+  function pickerResult(items) {
+    return catalog ? { items, message: "" } : { items: [], message: PICKER_UNAVAILABLE };
+  }
+
+  function pickerActions() {
+    return pickerResult((catalog ? catalog.actions : []).map((a) => ({
+      id: a.id, label: a.label || a.id, type: a.type, description: a.description || "",
+      dm: Boolean(a.dm), page_ok: Boolean(a.page_ok), look: a.look || null,
+      always: Boolean(a.always),
+    })));
+  }
+
+  function pickerLevels() {
+    return pickerResult((catalog ? catalog.presets : []).map((p) => ({
+      level: p.level, id: p.id, name: p.name, label: `${p.level} \u00b7 ${p.name}`,
+      description: p.description || "", help: p.help || "", isDefault: p.level === catalog.default_level,
+    })));
+  }
+
+  function pickerKinds() {
+    return pickerResult((catalog ? catalog.kinds : []).map((k) => ({
+      id: k.id, label: k.label || k.id, level: k.level, settings: k.settings !== false,
+    })));
+  }
+
+  function pickerPositions() {
+    return pickerResult((catalog ? catalog.positions : []).map((p) => ({
+      id: p.id, label: p.label || p.id, menu: p.menu,
+    })));
+  }
+
+  /** The one-line note under a picker that offers both on-page looks: ticking both draws
+   *  the card once. Built from the catalog's own labels; "" when there are fewer than two. */
+  function pickerHint() {
+    const card = lookAction("card");
+    const compact = lookAction("compact");
+    const rows = catalog ? catalog.actions : [];
+    const a = rows.find((x) => x.id === card);
+    const b = rows.find((x) => x.id === compact);
+    return a && b ? `Tick both "${a.label}" and "${b.label}" and the ${a.label.toLowerCase()} is shown (never twice).` : "";
   }
 
   function relTime(iso, now) {
@@ -306,10 +415,11 @@
   const PURE = {
     parseTime, groupKey, needsAckOf, isUnreadOf, levelOf, levelBadge, relTime, clockTime,
     fullTime, dayLabel, collapseBursts, sectionByDay, historyQuery, filtersActive, bodyOf,
-    statusLine, positionOf, setCatalog, showsToast, needsConfirm, osNoticeSpec,
+    statusLine, positionOf, setCatalog, lookOf, needsConfirmOf, toneOf, osNoticeSpec,
+    pickerActions, pickerLevels, pickerKinds, pickerPositions, pickerHint,
     constants: {
       AUTO_HIDE_MS, AUTO_HIDE_ACK_MS, MAX_VISIBLE, BURST_WINDOW_MS, RESURFACE_INTERVAL_MS,
-      RESURFACE_MAX, PANEL_LIMIT, POSITIONS, DEFAULT_POSITION,
+      RESURFACE_MAX, PANEL_LIMIT, DEFAULT_POSITION, GENERIC_TITLE, PICKER_UNAVAILABLE,
     },
   };
 
@@ -359,13 +469,21 @@
     else console.error(message);
   }
 
-  /** Fetch the catalog once and keep it. Never throws: on any failure the page
-   *  keeps using the built-in lists. Resolves to the catalog (or null). */
+  /** Fetch the catalog and keep it. Never throws: on a failure the last good copy stays
+   *  (or none, and the pickers say so). Fires `jarvis:notify-catalog` on the first load
+   *  and whenever its `version` (a hash of the notification table) differs from the copy
+   *  held, so every open picker redraws; a refetch that changes nothing is silent. Forms
+   *  and Settings call this each time they open, so a changed table shows up without a
+   *  page reload and with no timer (every fetch starts a CLI process on the server).
+   *  Resolves to the catalog (or null). */
   async function loadCatalog() {
+    const before = catalog ? catalog.version || "" : null;
     try {
       const data = await api("GET", API.catalog);
-      if (setCatalog(data)) global.dispatchEvent(new CustomEvent("jarvis:notify-catalog", { detail: data }));
-    } catch { /* keep the built-in lists */ }
+      if (setCatalog(data) && (before === null || (catalog.version || "") !== before)) {
+        global.dispatchEvent(new CustomEvent("jarvis:notify-catalog", { detail: catalog }));
+      }
+    } catch { /* keep the last good copy */ }
     return catalog;
   }
 
@@ -453,6 +571,19 @@
     const pos = positionIds().includes(position) ? position : defaultPosition();
     const UI = global.JarvisUI;
     return UI && typeof UI.toastStack === "function" ? UI.toastStack(pos) : null;
+  }
+
+  /** The compact look: the page's ordinary one-line JarvisUI.toast, so it is the same
+   *  toast as "Autostart on" in the Daemons panel and stacks with the cards in the same
+   *  corner. Not a new element and not a new host. The record's tone picks the mark and
+   *  colour; the title is shown only when the notification has one of its own. Repeats
+   *  simply stack (no id is passed: JarvisUI.toast keeps one map entry per id, so a
+   *  repeated id would let the first node's timer remove the second). */
+  function toastCompact(n) {
+    const UI = global.JarvisUI;
+    if (!UI || typeof UI.toast !== "function") return;
+    const title = n.title && String(n.title).trim() !== GENERIC_TITLE ? String(n.title) : undefined;
+    UI.toast({ title, message: bodyOf(n, 160), level: toneOf(n), position: positionOf(n) });
   }
 
   function targetOf(n) {
@@ -704,9 +835,10 @@
    *  a source, a level and a position, and it comes back to this page through the same push as
    *  every other notification: show() draws it, once. Nothing is drawn here, which is the
    *  point: there is no second toast path to keep in step. Takes
-   *  { message, title?, kind?, source?, level?, failed?, channels? }; `channels` defaults to
-   *  ["stream"] (the in-page toast + the inbox), so a click never raises a desktop or phone
-   *  notification. Resolves to the notifier's record, or null when it could not be sent. */
+   *  { message, title?, kind?, source?, level?, failed?, channels?, tone? }; `channels` defaults to
+   *  ["stream"] (the notification card + the inbox); pass ["small_toast"] for the one-line
+   *  toast (and `tone`, "info" or "success", for its mark). Either way a click never raises a
+   *  desktop or phone notification. Resolves to the notifier's record, or null when it could not be sent. */
   async function send(o) {
     const x = o || {};
     const message = String(x.message == null ? "" : x.message).trim();
@@ -716,6 +848,7 @@
     if (x.source) body.source = String(x.source);
     if (Number.isInteger(x.level)) body.level = x.level;
     if (x.failed) body.failed = true;
+    if (x.tone) body.tone = String(x.tone);
     body.channels = Array.isArray(x.channels) && x.channels.length ? x.channels : ["stream"];
     try {
       return await api("POST", API.send, body);
@@ -751,13 +884,17 @@
     updateBadge();
     scheduleSync();
 
-    const level = levelOf(n);
-    if (showsToast(level)) {
+    // Draw it the way the record says (see lookOf). A hidden tab still gets the browser
+    // notification for a card; a small toast is "small and quiet", so it does not.
+    const look = lookOf(n);
+    if (look === "card") {
       toastFor(n);
       osNotify(n);
+    } else if (look === "compact") {
+      toastCompact(n);
     }
     if (needsAckOf(n)) trackResurface(n);
-    if (needsConfirm(level) || n.confirm_required) {
+    if (needsConfirmOf(n)) {
       confirmQueue.push(n);
       pumpConfirms();
     }
@@ -1176,6 +1313,8 @@
     osNotice, requestPermission,
     // E0: the catalog the notifier served (null until loaded); Settings reads it.
     catalog: () => catalog, loadCatalog,
+    // The shared reader every picker uses (see "NO HARD-CODED LISTS" above).
+    pickerActions, pickerLevels, pickerKinds, pickerPositions, pickerHint,
   };
 
   if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", init);

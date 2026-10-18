@@ -187,8 +187,10 @@ jarvis-cli/jarvis/
     digest.py  notifier.py  stats.py
     notify_registry.py    E0: the ONE table of what a notification can be and do -- ACTIONS (channels +
                           behaviours), PRESETS (levels 1-5), KINDS (reminder, task, daemon... and the
-                          silent `owner_dm`, E4, and `reply_digest`, E4b), POSITIONS. notifier, the CLI, the scheduler tool help and
-                          Settings read it; add a kind here, not at a call site. Tests: test_notify_registry.py
+                          silent `owner_dm`, E4, and `reply_digest`, E4b), POSITIONS, LOOKS (card / compact / none, L.30)
+                          and TONES. notifier, the CLI, the scheduler tool help, Settings, Schedules and the Download Hub
+                          read it; a new action, level, kind, position, look or tone is ONE row here and no page keeps its
+                          own list. Tests: test_notify_registry.py, test_no_hardcoded_notify_lists.py
 
     # --- reachability -----------------------------------------------------
     channels/
@@ -369,6 +371,10 @@ jarvis-cli/jarvis/
                               hub_demo_provider. Thin: every rule is in hub/service.py. Declares the Menu >
                               Downloads panel (hub_ui/, shipped as package data) and the `hub` daemon
         _hub_daemon.py        the runner DAEMONS launches (underscore = not a tool)
+        notification_test.py  L.30: the `notification_test` tool + Menu > Notification test (notification_test_ui/, also
+                              package data): send a test notification through the real notifier at any level, through any
+                              type, with any flag, with a preview from `notifier.resolve_delivery()`; never a recipient.
+                              Every list it offers is read from the registry.
         hub_ui/               tool.html / tool.js / tool.css: the Downloads panel (renders data with textContent only).
                               Laid out like the Scheduled panel (JARVIS_DOWNLOAD_HUB.md 17.1): left = search, status
                               and source chips, the list; middle = add form or the selected download; right = overview.
@@ -942,6 +948,8 @@ silently never runs.
 | `test_l16_preflight_authorization.py` | L.16 round 2: `preflight.py` (an unattended ask that states a need the PC can't meet stops before any model call; fails open), the scheduler reporting that as a failure, the `message` kind in `job_risk`, `scheduler._unattended_tool_env` (a tool job now runs as unattended), and `send_dm`'s one exception to "never unattended" |
 | `test_notify_registry.py` | E0: the `notify_registry` tables (kinds, actions, presets, positions) and the notifier agree; old `notify_config.json` files still get every kind's default |
 | `test_e4_notify_owner_record.py` | E4: the `notify_owner` tool writes one silent `owner_dm` record per call via `notifier.record_owner_dm` (failed only if no platform was reached, with each platform's reason); the tool's result dict is unchanged; a raising notifier changes nothing; a higher level never adds a DM channel, so no double send; the digest does not re-batch these records |
+| `test_no_hardcoded_notify_lists.py` | L.30 static ratchet: no file under `web/public/`, a tool's `*_ui/` folder or `web/server.js` spells out level labels, lists three or more notification type ids, or writes the 1-5 level range; the notification Python has no `range(1, 6)` / `1 <= level <= 5`; opt-outs (`registry-ok:`) counted against a baseline of 0 |
+| `test_notification_test_tool.py` | L.30: `actions/notification_test.py` (Menu > Notification test): goes through `notifier.notify()` only, preview matches the record, phone channels never delivered, lists read from the registry, reachable (TOOL_UI, keywords, checklist), panel keeps no lists |
 | `test_one_notification_system.py` | E5 (+ E3, E4b done): static ratchet (reads source, runs nothing) -- exact counts of browser `Notification`, native `confirm()` (zero), `#toast` (zero), local `toast()` helpers, OS-toast calls and direct owner DMs; ONE toast host (`jui-toasts`, no `ntf-stack`, no run-confirm popup); the recorded DMs (`notify_owner_recorded`); fails on one added AND on one removed (lower the baseline); every `kind=` is in `KINDS`; skips the Download Hub files |
 | `test_e4b_owner_dm_records.py` | E4b: `reply_digest` kind; `record_owner_dm(level=, title=)`; `outbound.notify_owner_recorded` (same outcome + `recorded`, failed DM = failed record, raising notifier changes nothing); new-sender ping, rule notice, Instagram transport notice and `channels-test` leave silent records; an urgent awaiting reply is ONE standard-level record (no second `reply_digest`), a non-urgent one silent |
 | `test_e2_toast_position.py` | E2: toast position (`normalize_position`, config `position` / `positions`, `notify(position=)`, `notify-send --position`), the native OS notification renamed `desktop` with `toast` kept as an alias (code, old config files, scheduler tools), Settings row and one stack per position (static) |

@@ -66,18 +66,9 @@ ENCODING = "utf-8"
 CHANNELS = registry.channel_ids()
 LEGACY_CHANNEL_ALIASES = {"toast": "desktop"}
 
-# Friendly names for CHANNELS, used by every panel that lets the owner pick one
-# (describe_options() below). Optional: a channel added to CHANNELS without an
-# entry here is still offered, under its own name made readable.
-CHANNEL_LABELS = {
-    "inbox": "Inbox (silent)",
-    "stream": "In-app toast",
-    "desktop": "Desktop notification",
-    "voice": "Voice",
-    "playnite": "Playnite",
-    "discord": "Discord",
-    "instagram": "Instagram",
-}
+# The one name for each action is `label` on its notify_registry.ACTIONS row (a channel
+# added to CHANNELS without a row is still offered, under its own name made readable --
+# see describe_options()). There is no second label table here any more.
 
 
 def canonical_channel(name):
@@ -90,13 +81,38 @@ def canonical_channel(name):
 
 def canonical_channels(names):
     """canonical_channel() over a list, dropping unknowns and duplicates,
-    keeping order."""
+    keeping order. Behaviour ids (`persistent`, `confirm`) are not channels and are
+    dropped here; canonical_actions() keeps them."""
     out = []
     for name in (names or []):
         canon = canonical_channel(name)
         if canon and canon not in out:
             out.append(canon)
     return out
+
+
+def canonical_behaviour(name):
+    """One behaviour id (`persistent`, `confirm`) as written, trimmed and lower-cased,
+    or None for anything that is not a behaviour row in notify_registry.ACTIONS."""
+    text = str(name or "").strip().lower()
+    return text if text in registry.behaviour_ids() else None
+
+
+def canonical_actions(names):
+    """Split a mixed list of action ids into (channels, behaviours).
+
+    `channels` may now name a behaviour as well as a place (D2): a model, a job or a
+    picker that ticks "Stay until acknowledged" puts `persistent` in the same list as
+    `desktop`. The channels come back as canonical_channels() would return them (legacy
+    `toast` resolved, unknowns dropped); the behaviours come back as their ids, in order,
+    without duplicates. notify() ORs the behaviours onto the flags the level implies."""
+    channels = canonical_channels(names)
+    behaviours = []
+    for name in (names or []):
+        canon = canonical_behaviour(name)
+        if canon and canon not in behaviours:
+            behaviours.append(canon)
+    return channels, behaviours
 
 
 # E2 / D-11: where an in-app toast appears. Eight places: four sides and four
@@ -133,7 +149,7 @@ DEFAULT_CONFIG = {
         "task": ["inbox", "stream"],
     },
     # D.2.1 — per-kind (or per custom-tool `source`) importance level
-    # default, 1-5, looked up when a caller doesn't pass an explicit
+    # default (a preset number), looked up when a caller doesn't pass an explicit
     # `level`. See normalize_level()'s docstring for the full lookup order
     # and LEVEL_NAMES for what each number means. clipboard_watch defaults
     # to 2 (Standard) — a deliberate choice, not a carry-over from the old
@@ -181,22 +197,26 @@ DEFAULT_LEVEL = registry.DEFAULT_LEVEL
 
 # Accepted for backward/forward compatibility: anything still speaking the
 # old three-tier digest.py vocabulary (low/normal/high), or a plain English
-# importance word, maps onto the new 1-5 scale. Never the primary interface
+# importance word, maps onto the preset scale. Never the primary interface
 # going forward — normalize_level()'s numeric/per-kind paths are — but a
 # caller that passes a familiar word instead of memorizing "3" still works.
-_LEVEL_ALIASES = {
-    "silent": 1, "standard": 2, "persistent": 3, "broadcast": 4, "confirm": 5,
+#
+# The preset names (`silent`, `standard`, ...) come from notify_registry.PRESETS, so a new
+# level is accepted by name with no change here. The words below them are a deliberate
+# legacy block and stay typed out.
+_LEGACY_LEVEL_WORDS = {
     "low": 1, "normal": 2, "high": 3,
     "routine": 1, "quiet": 1, "batch": 1, "digest": 1, "fyi": 1, "info": 1,
     "urgent": 3, "important": 3, "critical": 3, "now": 3,
 }
+_LEVEL_ALIASES = {**{p["id"]: p["level"] for p in registry.PRESETS}, **_LEGACY_LEVEL_WORDS}
 
 
 def normalize_level(value, kind=None, source=None, config=None):
-    """Resolve an explicit level to an int 1-5.
+    """Resolve an explicit level to an int in MIN_LEVEL..MAX_LEVEL.
 
     Lookup order:
-      1. `value` itself, if it's a valid level (1-5, or one of
+      1. `value` itself, if it's a valid level (a preset number, or one of
          _LEVEL_ALIASES's legacy words/priorities).
       2. `config["levels"][source]` — lets a custom tool/action (K.2.7.1a)
          declare its own default the same way a built-in kind does, keyed
@@ -233,26 +253,42 @@ def describe_options():
     """Everything a screen needs to offer the notifier's choices, read live from this module.
 
     This is how other parts of Jarvis (the Download Hub's panel and tools) stay wired to the
-    notifier instead of keeping their own copy of "the levels are 1-5, the channels are
-    discord, desktop, ...". Add a level (raise MAX_LEVEL, give it a LEVEL_NAMES entry), a channel
-    (CHANNELS + a _DELIVERERS entry, optionally a CHANNEL_LABELS entry) or a position (POSITIONS)
-    and every consumer of this function offers it with no change of its own.
+    notifier instead of keeping their own copy of "the levels are N to M, the channels are
+    discord, desktop, ...". Add a level (a row in notify_registry.PRESETS), a channel (a row
+    in notify_registry.ACTIONS plus its _deliverer) or a position (a row in POSITIONS) and
+    every consumer of this function offers it with no change of its own.
 
-    Pure: reads only this module's constants, no file, so it is cheap enough to call on every
-    poll.
+    The old keys (`levels`, `channels`, `positions`, `min_level`, ...) are unchanged. Labels
+    now come from the registry row (the one label source); a channel with no row is still
+    offered under its own name made readable. Added from the registry: `actions` (every
+    channel AND behaviour, with type, description, look, page_ok, dm), `presets`, `looks`,
+    `tones`, `kinds` and `version`, so a picker can offer everything the notification
+    catalog lists and notice when it changes.
+
+    Pure: reads only this module and the registry, no file, so it is cheap enough to call on
+    every poll.
     """
     levels = []
     for number in range(MIN_LEVEL, MAX_LEVEL + 1):
         name = LEVEL_NAMES.get(number) or ("level %d" % number)
-        levels.append({"value": number, "name": name,
-                       "label": "%d \u00b7 %s" % (number, name[:1].upper() + name[1:])})
+        entry = {"value": number, "name": name,
+                 "label": "%d \u00b7 %s" % (number, name[:1].upper() + name[1:])}
+        row = registry.preset(number)
+        if row:
+            entry["description"] = row.get("description", "")
+            entry["help"] = row.get("help", "")
+        levels.append(entry)
     channels = []
     for channel in CHANNELS:
-        label = CHANNEL_LABELS.get(channel) or str(channel).replace("_", " ").replace("-", " ").strip().capitalize()
+        label = registry.label_for(channel) or str(channel).replace("_", " ").replace("-", " ").strip().capitalize()
         channels.append({"id": channel, "label": label})
+    cat = registry.catalog()
     return {
         "levels": levels, "min_level": MIN_LEVEL, "max_level": MAX_LEVEL, "default_level": DEFAULT_LEVEL,
         "channels": channels, "positions": list(POSITIONS), "default_position": DEFAULT_POSITION,
+        "actions": cat["actions"], "presets": cat["presets"], "looks": cat["looks"],
+        "tones": cat["tones"], "kinds": cat["kinds"], "default_look": cat["default_look"],
+        "default_tone": cat["default_tone"], "version": cat["version"],
     }
 
 
@@ -700,13 +736,155 @@ def clear_read():
 
 
 # ---------------------------------------------------------------------------
+# How a notification is drawn on the open page (the "look")
+# ---------------------------------------------------------------------------
+
+
+def _norm_look(value):
+    text = str(value or "").strip().lower()
+    return text if text in registry.look_ids() else None
+
+
+def _norm_tone(value):
+    text = str(value or "").strip().lower()
+    return text if text in registry.tone_ids() else None
+
+
+def resolve_delivery(level, channels=None, kind=None, failed=False, look=None,
+                     behaviours=None, tone=None, config=None):
+    """Decide what a notification does, and how it is drawn on the open page.
+
+    One pure function (no file, no delivery). notify() calls it, and so does the
+    notification test tool's preview, so what the preview shows is what a real
+    notification does. `level` is a resolved number; `channels` is the explicit list the
+    caller gave (channel ids only; pass None for "use the level"); `behaviours` are the
+    explicit behaviour ids (`persistent`, `confirm`); `look` / `tone` are what the caller
+    asked for. Returns:
+
+      channels      the delivery list, `inbox` first, with the on-page rows aligned to the look
+      look          card | compact | none
+      tone          info | success (only the compact toast uses it)
+      flags         {"persistent": bool, "confirm_required": bool}, level OR explicit
+      forced_card   True when a small toast was asked for but the record has to be a card
+      forced_reasons the sentences saying why
+      muted         True when the level draws nothing on the page
+      asked         the look that was asked for before the rules below changed it
+      explicit      True when the caller named channels
+      disabled      True when notifications are turned off in notify_config.json
+
+    Rules, in order:
+      1. What was asked for: an explicit channel list (card if it lists `stream`, else
+         compact if it lists `small_toast`, else none; both means card, never twice), else
+         the `look=` argument, else the kind's default look, else what the level implies.
+      2. The level still mutes: a level whose preset has no on-page action (level 1) draws
+         nothing, whatever was asked.
+      3. A small toast is never a failure or something that needs acknowledging: a failed,
+         persistent or confirm record is a card.
+      4. The on-page rows of the channel list follow the look.
+    """
+    config = config if isinstance(config, dict) else {}
+    try:
+        level = int(level)
+    except (TypeError, ValueError):
+        level = DEFAULT_LEVEL
+    explicit_channels = canonical_channels(channels) if channels else []
+    explicit = bool(explicit_channels)
+    flags = dict(registry.flags_for_level(level))
+    for behaviour_id in (behaviours or []):
+        row = registry.action(behaviour_id)
+        if row and row.get("record_flag"):
+            flags[row["record_flag"]] = True
+
+    kind_row = registry.kind(kind) or {}
+    card_id = registry.action_for_look("card")
+    compact_id = registry.action_for_look("compact")
+
+    # 1. what was asked for
+    if explicit:
+        if card_id in explicit_channels:
+            asked = "card"
+        elif compact_id in explicit_channels:
+            asked = "compact"
+        else:
+            asked = registry.LOOK_NONE
+    else:
+        asked = (_norm_look(look) or _norm_look(kind_row.get("look"))
+                 or registry.level_look(level))
+    if asked not in registry.look_ids():
+        asked = registry.DEFAULT_LOOK
+    chosen = asked
+    reasons = []
+    muted = False
+
+    # 2. the level still mutes
+    if not registry.look_actions_for_level(level):
+        if chosen != registry.LOOK_NONE:
+            reasons.append("level %d draws nothing on the page" % level)
+        chosen = registry.LOOK_NONE
+        muted = True
+
+    # 3. a failure or anything that needs acknowledging can never be small
+    forced = False
+    if chosen == "compact":
+        why = []
+        if failed:
+            why.append("it is a failure")
+        if flags.get("persistent"):
+            why.append("it stays until acknowledged")
+        if flags.get("confirm_required"):
+            why.append("it needs a blocking confirmation")
+        if why:
+            chosen = "card"
+            forced = True
+            reasons.append("shown as a card because " + " and ".join(why))
+
+    # 4. align the on-page rows of the channel list with the look
+    on_page = set(registry.look_action_ids())
+    wanted_row = registry.action_for_look(chosen)
+    if explicit:
+        out = ["inbox"] + [c for c in explicit_channels if c != "inbox"]
+        base = out
+    else:
+        out = list(registry.channels_for_level(level))
+        base = out
+    result = []
+    placed = False
+    for channel in base:
+        if channel in on_page:
+            if wanted_row and not placed:
+                result.append(wanted_row)
+                placed = True
+            continue
+        result.append(channel)
+    if wanted_row and not placed:
+        result.append(wanted_row)
+    if "inbox" not in result:
+        result.insert(0, "inbox")
+
+    chosen_tone = (_norm_tone(tone) or _norm_tone(kind_row.get("tone"))
+                   or registry.DEFAULT_TONE)
+    return {
+        "channels": list(dict.fromkeys(result)),
+        "look": chosen,
+        "tone": chosen_tone,
+        "flags": flags,
+        "forced_card": forced,
+        "forced_reasons": reasons,
+        "muted": muted,
+        "asked": asked,
+        "explicit": explicit,
+        "disabled": config.get("enabled", True) is False,
+    }
+
+
+# ---------------------------------------------------------------------------
 # The one public entry point
 # ---------------------------------------------------------------------------
 
 
 def notify(title, message, channels=None, kind="notify", job_id=None,
            conv_id=None, failed=False, actions=None, level=None, source=None,
-           position=None):
+           position=None, look=None, tone=None):
     """Deliver one notification across every resolved channel.
 
     Never raises. Returns the notification record, with a `delivered` list
@@ -731,7 +909,7 @@ def notify(title, message, channels=None, kind="notify", job_id=None,
     an entire reply — including, for a task/command notification, output
     that can run to paragraphs — into every entry in the list.
 
-    `level` (1-5, D.2.1/K.2.7) resolves via normalize_level() — an explicit
+    `level` (a preset number, D.2.1/K.2.7) resolves via normalize_level() — an explicit
     value here, else `source`'s or `kind`'s configured default, else
     DEFAULT_LEVEL. `source`, if given, tags where this came from (a custom
     tool/action's own name, K.2.7.1a) and can also carry its own configured
@@ -742,6 +920,17 @@ def notify(title, message, channels=None, kind="notify", job_id=None,
     `source`'s or `kind`'s configured position, else the global default,
     else bottom-right -- and rides on the record as `record["position"]`,
     which the web page reads. It changes nothing about delivery.
+
+    `look` and `tone` say how it is drawn on the open page (resolve_delivery() holds the
+    rules): look is `card`, `compact` (the one-line small toast) or `none`; tone is the
+    small toast's mark and colour (`info`, `success`). Both are optional. A kind can
+    carry a default look/tone in notify_registry.KINDS; an explicit `channels` list that
+    names `stream` or `small_toast` beats the `look=` argument; and a failure or anything
+    that needs acknowledging is always a card. They ride on the record as
+    `record["look"]` and `record["tone"]`, which is what the page draws from.
+
+    `channels` may also name a behaviour (`persistent`, `confirm`); those set the record's
+    flags on top of the level's and are not delivery channels.
 
     An explicit `channels` list still wins outright over whatever the
     resolved level implies — this is the same "explicit beats default"
@@ -757,6 +946,10 @@ def notify(title, message, channels=None, kind="notify", job_id=None,
     config = _load_config()
     resolved_level = normalize_level(level, kind=kind, source=source, config=config)
     resolved_position = normalize_position(position, kind=kind, source=source, config=config)
+    explicit_channels, explicit_behaviours = canonical_actions(channels)
+    plan = resolve_delivery(resolved_level, explicit_channels or None, kind=kind,
+                            failed=failed, look=look, behaviours=explicit_behaviours,
+                            tone=tone, config=config)
     clean_message = ask_output.strip_protocol_lines((message or "").strip()) or ""
     summarized = ask_output.summarize(clean_message)
     record = {
@@ -777,9 +970,14 @@ def notify(title, message, channels=None, kind="notify", job_id=None,
         "level": resolved_level,
         "level_name": LEVEL_NAMES.get(resolved_level, "standard"),
         "position": resolved_position,
+        # How the open page draws it (resolve_delivery()). The page follows this, not a
+        # guess from the level; `tone` only matters for the compact look.
+        "look": plan["look"],
+        "tone": plan["tone"],
         # E0: `persistent` and `confirm_required`, one key per behaviour action in
-        # notify_registry.ACTIONS, set by what the level's preset includes.
-        **registry.flags_for_level(resolved_level),
+        # notify_registry.ACTIONS, set by what the level's preset includes, plus any
+        # behaviour the caller named in `channels`.
+        **plan["flags"],
         # L.30 — the owner's read/acknowledge state, stamped later by
         # mark_read()/mark_all_read(). Absent == not read yet.
         "read_at": None,
@@ -793,19 +991,15 @@ def notify(title, message, channels=None, kind="notify", job_id=None,
         record["failed_channels"] = ["disabled"]
         return record
 
-    if channels:
-        wanted = canonical_channels(channels)
-        if "inbox" not in wanted:
-            wanted = ["inbox"] + wanted
-    else:
-        wanted = _channels_for_level(resolved_level)
+    explicit = plan["explicit"]
+    wanted = plan["channels"]
 
     # K.2.7 digest interaction: levels 1-2 defer their non-inbox delivery to
     # the batched summary when digest is on, exactly like the old low/normal
     # priorities did — just keyed off the new resolved level, the single
     # source of truth digest.py now reads too (see digest.should_batch_level).
     from . import digest as digest_mod
-    if (not channels and registry.digest_eligible(resolved_level)
+    if (not explicit and registry.digest_eligible(resolved_level)
             and digest_mod.should_batch_level(resolved_level)):
         try:
             ok = _deliver_inbox(record, config)
@@ -847,7 +1041,7 @@ def record_owner_dm(message, results, source="notify_owner", level=None, title=N
     passed explicitly, so the digest never re-batches these records. A failure
     is marked `failed` (red in the Notifications panel, counted in the badge).
 
-    E4b: `level` (1-5) overrides the configured level for this one record -- the
+    E4b: `level` (a preset number) overrides the configured level for this one record -- the
     urgent reply DM passes 2 so it also toasts and raises a desktop notification
     -- and `title` replaces the default "Sent to your phone (...)" heading when
     something was sent (a failure always says "Couldn't reach you on any channel",
@@ -888,6 +1082,18 @@ def _deliver_inbox(record, config):
 
 
 def _deliver_stream(record, config):
+    """The notification card: announce the record to the open web page (the page draws
+    it from `record["look"]`, which resolve_delivery() set to `card` for this row)."""
+    return _announce_to_page(record)
+
+
+def _deliver_small_toast(record, config):
+    """The small toast: the same announcement, drawn by the page as the one-line
+    JarvisUI.toast. A separate row from `stream` so `delivered` shows which one ran."""
+    return _announce_to_page(record)
+
+
+def _announce_to_page(record):
     """Announce the notification as a `notification` media card
     (wire.media) so a web console watching this process renders it
     immediately.
@@ -1069,12 +1275,14 @@ def _deliver_instagram(record, config):
     return _deliver_chat(record, config, "instagram")
 
 
-# The channels that DM the owner. record_owner_dm() leaves them out of its record.
-_DM_CHANNELS = ("discord", "instagram")
+# The channels that DM the owner (the `dm` rows of notify_registry.ACTIONS).
+# record_owner_dm() leaves them out of its record.
+_DM_CHANNELS = registry.dm_channel_ids()
 
 _DELIVERERS = {
     "inbox": _deliver_inbox,
     "stream": _deliver_stream,
+    "small_toast": _deliver_small_toast,
     "desktop": _deliver_desktop,
     "voice": _deliver_voice,
     "playnite": _deliver_playnite,

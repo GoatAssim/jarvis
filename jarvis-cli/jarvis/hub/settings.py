@@ -174,14 +174,21 @@ def _bool(label):
 
 def _notifier_levels():
     """(lowest, highest, {name: number}) as the notifier defines them right now.  Read live, so a
-    level added to jarvis/notifier.py is accepted here with no change to the hub.  Falls back to
-    1-5 only if the notifier can't be imported at all."""
+    level added to jarvis/notifier.py (a row in notify_registry.PRESETS) is accepted here with no
+    change to the hub.  If the notifier can't be imported at all the bounds come from the
+    registry module directly (plain data, no other imports); only if even that fails is a level
+    refused."""
     try:
         from .. import notifier
         names = {str(n).lower(): int(k) for k, n in notifier.LEVEL_NAMES.items()}
         return int(notifier.MIN_LEVEL), int(notifier.MAX_LEVEL), names
     except Exception:  # noqa: BLE001 - the validator must keep working without the notifier
-        return 1, 5, {}
+        try:
+            from .. import notify_registry
+            return (int(notify_registry.MIN_LEVEL), int(notify_registry.MAX_LEVEL),
+                    {str(p["id"]).lower(): int(p["level"]) for p in notify_registry.PRESETS})
+        except Exception:  # noqa: BLE001
+            return 0, -1, {}
 
 
 def _check_level(value):

@@ -40,6 +40,15 @@ inside the handlers, so a `jarvis` command that never touches downloads pays not
 # ---------------------------------------------------------------------------
 
 
+def _notify_types_help():
+    """The notification types a download may be announced through, as one sentence built from
+    notify_registry (plain data, safe at module level) so a new type reaches the model with no
+    edit here. Built when the tool list is read."""
+    from .. import notify_registry
+    hints = [a["model_hint"] for a in notify_registry.actions(notify_registry.CHANNEL) if a.get("model_hint")]
+    return "Any notification type: %s." % ", ".join(hints)
+
+
 def _svc():
     from ..hub import service     # lazy: see the module docstring
     return service
@@ -363,7 +372,7 @@ TOOL_SCHEMAS = [
                 "speed_limit_kbps": {"type": "integer", "description": "A speed cap for just this download, in KB/s (0 or missing = only the global limit applies)."},
                 "open_when_done": {"type": "string", "enum": ["default", "off", "reveal", "folder", "open"], "description": "What to do when it finishes: nothing, show the file in its folder, open the folder, or open the file (asks the person first; programs and scripts are never opened). Default = the person's own setting."},
                 "notify": {"type": "string", "enum": ["default", "on", "off"], "description": "Tell the person when this one finishes or fails (on), never (off), or follow their notification settings (default)."},
-                "notify_channels": {"type": "array", "items": {"type": "string"}, "description": "Where to announce THIS download, instead of the person's usual channels, e.g. [\"discord\"] for Discord only (the notification inbox keeps its record either way). Any channel the notifier has; dl_prefs with no arguments lists them (notify_options.channels). Omit to follow the person's own settings."},
+                "notify_channels": {"type": "array", "items": {"type": "string"}, "description": "Where to announce THIS download, instead of the person's usual channels, e.g. [\"discord\"] for Discord only (the notification inbox keeps its record either way). " + _notify_types_help() + " dl_prefs with no arguments lists every type (notify_options.actions). Omit to follow the person's own settings."},
                 "notify_events": {"type": "array", "items": {"type": "string", "enum": ["started", "done", "failed", "stalled"]}, "description": "Which events announce THIS download, e.g. [\"done\", \"failed\"]. Omit to follow the person's own settings. A download with its own choices is announced even if notifications are off globally."},
                 "dry_run": {"type": "boolean", "description": "Only say which engine would take each link; queue nothing."},
                 "mode": {"type": "string", "enum": ["video", "audio"], "description": "Video pages only: video (default) or audio only."},

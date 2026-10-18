@@ -38,10 +38,28 @@ EVENT_LABELS = {
 }
 # Events that are held for `coalesce_s` and merged; the other two go out at once (after flushing).
 _COALESCED = ("started", "done", "failed", "stalled")
+# How each event is DRAWN on the open web page. The notifier's small toast (look "compact", the
+# same one-liner as "Autostart on" in the Daemons panel) for the three quiet ones, in the tone
+# the toast shows as its mark: `started` is information, the other two are good news.
+# `done`, `failed` and `stalled` are not listed, so they stay full cards. A download that chose
+# its own channels still gets exactly those (explicit channels beat a look), and the notifier
+# draws a failure, anything persistent and anything needing acknowledgment as a card whatever
+# is asked for here. The ids are notify_registry.LOOKS / TONES (the notifier ignores an
+# unknown one).
+EVENT_LOOKS = {
+    "started": ("compact", "info"),
+    "group_done": ("compact", "success"),
+    "queue_empty": ("compact", "success"),
+}
+
+
+def _look_kwargs(event):
+    look = EVENT_LOOKS.get(event)
+    return {"look": look[0], "tone": look[1]} if look else {}
 _SHOW_TITLES = 3
 
 
-def default_deliver(title, message, *, level=None, failed=False, channels=None):
+def default_deliver(title, message, *, level=None, failed=False, channels=None, look=None, tone=None):
     """Hand one message to the existing notifier.  Never raises; returns the notifier's record.
 
     JARVIS_HUB_NO_DELIVER=1 (set by the test-suite) turns this into a no-op, so a test that runs
@@ -54,6 +72,10 @@ def default_deliver(title, message, *, level=None, failed=False, channels=None):
         kwargs = {"level": level} if level else {}
         if channels:
             kwargs["channels"] = list(channels)
+        if look:
+            kwargs["look"] = look
+        if tone:
+            kwargs["tone"] = tone
         return notifier.notify(title, message, kind="download", source="download_hub",
                                failed=bool(failed), **kwargs)
     except Exception as exc:                          # a notification must never break the daemon
@@ -236,12 +258,13 @@ class Dispatcher:
 
     def _send(self, event, entries, level, extra=None, channels=None):
         title, message = compose(event, entries, extra)
+        look = _look_kwargs(event)          # only the three small-toast events pass anything
         if channels:
             # Only passed when this download chose its own channels, so a plain deliver(title,
             # message, level=, failed=) keeps working everywhere else.
-            self.deliver(title, message, level=level, failed=(event == "failed"), channels=list(channels))
+            self.deliver(title, message, level=level, failed=(event == "failed"), channels=list(channels), **look)
         else:
-            self.deliver(title, message, level=level, failed=(event == "failed"))
+            self.deliver(title, message, level=level, failed=(event == "failed"), **look)
         return 1
 
     def _flush(self, cfg, force):
@@ -297,5 +320,5 @@ class Dispatcher:
                   "error": "the server closed the connection"}
         title, message = compose(event, [sample], {"title": "Example batch", "done": 3, "failed": 0})
         record = self.deliver("Test: " + title, message + " (this is only a test)",
-                              level=level, failed=(event == "failed"))
+                              level=level, failed=(event == "failed"), **_look_kwargs(event))
         return record or {}

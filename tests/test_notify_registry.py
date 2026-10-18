@@ -50,7 +50,8 @@ notifier.CONFIG_FILE = notifier.JARVIS_DIR / "notify_config.json"
 PASS, FAIL = [], []
 
 EIGHT = ("top", "bottom", "left", "right", "top-left", "top-right", "bottom-left", "bottom-right")
-OLD_CHANNELS = ("inbox", "stream", "desktop", "voice", "playnite", "discord", "instagram")
+# The notification rework (L.30) added `small_toast`, right after `stream`; nothing else moved.
+OLD_CHANNELS = ("inbox", "stream", "small_toast", "desktop", "voice", "playnite", "discord", "instagram")
 OLD_LEVELS = {1: "silent", 2: "standard", 3: "persistent", 4: "broadcast", 5: "confirm"}
 # "owner_dm" (silent, no Settings row) was added by E4 for the notify_owner tool's inbox record;
 # "reply_digest" (silent, no Settings row) by E4b for channels/awaiting.py's records.
@@ -147,7 +148,7 @@ def test_problems_catches_mistakes():
 # --- nothing the notifier did before has changed ------------------------------------------------------
 
 def test_values_the_rest_of_jarvis_imports_are_unchanged():
-    check("CHANNELS is the same seven, same order", tuple(notifier.CHANNELS) == OLD_CHANNELS, notifier.CHANNELS)
+    check("CHANNELS is the old seven in the same order, plus small_toast after stream", tuple(notifier.CHANNELS) == OLD_CHANNELS, notifier.CHANNELS)
     check("LEVEL_NAMES is the same", dict(notifier.LEVEL_NAMES) == OLD_LEVELS, notifier.LEVEL_NAMES)
     check("MIN/MAX/DEFAULT level", (notifier.MIN_LEVEL, notifier.MAX_LEVEL, notifier.DEFAULT_LEVEL) == (1, 5, 2))
     check("POSITIONS is the same eight, same order", tuple(notifier.POSITIONS) == EIGHT, notifier.POSITIONS)
@@ -201,8 +202,8 @@ def test_catalog_shape():
     for key in ("actions", "presets", "kinds", "positions", "min_level", "max_level",
                 "default_level", "default_position", "version", "configured"):
         check(f"catalog has {key}", key in cat, list(cat))
-    check("nine actions: seven channels and two behaviours",
-          [a["type"] for a in cat["actions"]].count("channel") == 7
+    check("ten actions: eight channels and two behaviours",
+          [a["type"] for a in cat["actions"]].count("channel") == 8
           and [a["type"] for a in cat["actions"]].count("behaviour") == 2, cat["actions"])
     check("five presets, 1..5", [p["level"] for p in cat["presets"]] == [1, 2, 3, 4, 5])
     p4 = [p for p in cat["presets"] if p["level"] == 4][0]
@@ -348,6 +349,54 @@ def test_doctor_reports_a_registry_mismatch():
         notifier._DELIVERERS.clear()
         notifier._DELIVERERS.update(saved)
     _reset()
+
+
+# --- looks, tones and the small toast (L.30) ----------------------------------------------------------
+
+def test_small_toast_looks_and_tones_are_in_the_table():
+    check("small_toast is a channel row with a look and page_ok",
+          (reg.action("small_toast") or {}).get("look") == "compact" and reg.action("small_toast").get("page_ok") is True)
+    check("stream keeps its id, is now labelled Notification card and carries the card look",
+          (reg.action("stream") or {}).get("label") == "Notification card" and reg.action("stream").get("look") == "card")
+    check("the looks are card, compact, none", reg.look_ids() == ("card", "compact", "none"), reg.look_ids())
+    check("each look that draws names the one action that carries it",
+          reg.action_for_look("card") == "stream" and reg.action_for_look("compact") == "small_toast"
+          and reg.action_for_look("none") is None)
+    check("the tones are info and success", tuple(reg.TONES) == ("info", "success") and reg.DEFAULT_TONE == "info")
+    check("page_ok is exactly the inbox, the card and the small toast",
+          set(reg.page_ok_ids()) == {"inbox", "stream", "small_toast"}, reg.page_ok_ids())
+    check("dm is exactly discord and instagram", set(reg.dm_channel_ids()) == {"discord", "instagram"})
+    check("notifier._DM_CHANNELS is derived from the table", tuple(notifier._DM_CHANNELS) == tuple(reg.dm_channel_ids()))
+    check("a scheduled confirmation defaults to the small toast in the success tone",
+          reg.kind("scheduled").get("look") == "compact" and reg.kind("scheduled").get("tone") == "success")
+    check("level 2 implies the card look, level 1 nothing", reg.level_look(2) == "card" and reg.level_look(1) == "none")
+    check("each action has one label (no In-app toast any more)", all(a["label"] != "In-app toast" for a in reg.ACTIONS))
+    check("the catalog carries looks, tones and the defaults",
+          reg.catalog()["tones"] == list(reg.TONES) and [l["id"] for l in reg.catalog()["looks"]] == list(reg.look_ids())
+          and reg.catalog()["default_look"] == "card")
+
+
+def test_problems_catches_look_and_tone_mistakes():
+    bad_look = reg.KINDS + ({"id": "odd", "label": "Odd", "level": 2, "settings": False, "look": "huge"},)
+    with _swapped(KINDS=bad_look):
+        check("a kind with an unknown look is reported", any("unknown look" in p for p in reg.problems()), reg.problems())
+    bad_tone = reg.KINDS + ({"id": "odd", "label": "Odd", "level": 2, "settings": False, "tone": "loud"},)
+    with _swapped(KINDS=bad_tone):
+        check("a kind with an unknown tone is reported", any("unknown tone" in p for p in reg.problems()), reg.problems())
+    two = reg.ACTIONS + ({"id": "twin", "type": "channel", "label": "Twin", "look": "card"},)
+    with _swapped(ACTIONS=two):
+        check("two actions carrying one look is reported", any("more than one action" in p for p in reg.problems()), reg.problems())
+    wrong = tuple(dict(l, action="desktop") if l["id"] == "compact" else l for l in reg.LOOKS)
+    with _swapped(LOOKS=wrong):
+        check("a look naming an action whose own look differs is reported", any("compact" in p for p in reg.problems()), reg.problems())
+
+
+def test_catalog_version_changes_when_a_look_changes():
+    v1 = reg.catalog()["version"]
+    changed = tuple(dict(l, label=l["label"] + "!") if l["id"] == "compact" else l for l in reg.LOOKS)
+    with _swapped(LOOKS=changed):
+        v2 = reg.catalog()["version"]
+    check("the catalog version follows the looks", v1 != v2 and reg.catalog()["version"] == v1, (v1, v2))
 
 
 if __name__ == "__main__":

@@ -286,6 +286,96 @@ def test_explicit_channels_bypass_digest_deferral():
         digest.save_config({"enabled": False})
 
 
+# --- L.30: how a notification is drawn on the open page (resolve_delivery) ---------------
+
+def test_resolve_delivery_explicit_channels_beat_the_look_argument():
+    r = notifier.resolve_delivery(2, ["small_toast"], look="card")
+    check("explicit small_toast beats look='card'", r["look"] == "compact" and r["channels"] == ["inbox", "small_toast"], r)
+    r = notifier.resolve_delivery(2, ["stream"], look="compact")
+    check("explicit stream beats look='compact'", r["look"] == "card" and r["channels"] == ["inbox", "stream"], r)
+    r = notifier.resolve_delivery(2, ["stream", "small_toast"])
+    check("both listed gives one card, never twice", r["look"] == "card" and r["channels"].count("stream") == 1
+          and "small_toast" not in r["channels"], r)
+    r = notifier.resolve_delivery(2, ["desktop"])
+    check("explicit channels that name no on-page action draw nothing on the page (the old level guess is gone)",
+          r["look"] == "none" and r["channels"] == ["inbox", "desktop"], r)
+
+
+def test_resolve_delivery_level_one_mutes_whatever_was_asked():
+    for asked in ({"look": "card"}, {"look": "compact"}):
+        r = notifier.resolve_delivery(1, None, **asked)
+        check(f"level 1 with {asked}: nothing on the page", r["look"] == "none" and r["muted"] is True, r)
+    r = notifier.resolve_delivery(1, None, kind="scheduled")
+    check("a level-1 scheduled record draws nothing", r["look"] == "none" and r["channels"] == ["inbox"], r)
+
+
+def test_resolve_delivery_failures_and_acknowledgments_are_never_small():
+    r = notifier.resolve_delivery(2, ["small_toast"], failed=True)
+    check("a failed record asking for small_toast comes back as stream with look card",
+          r["look"] == "card" and "stream" in r["channels"] and "small_toast" not in r["channels"]
+          and r["forced_card"] is True and r["forced_reasons"], r)
+    r = notifier.resolve_delivery(2, ["small_toast"], behaviours=["persistent"])
+    check("a persistent record is a card", r["look"] == "card" and r["forced_card"] is True, r)
+    r = notifier.resolve_delivery(2, ["small_toast"], behaviours=["confirm"])
+    check("a confirm record is a card", r["look"] == "card" and r["flags"]["confirm_required"] is True, r)
+    r = notifier.resolve_delivery(3, None, look="compact")
+    check("a level-3 record asking for compact is a card", r["look"] == "card" and r["forced_card"] is True, r)
+
+
+def test_resolve_delivery_kind_defaults():
+    r = notifier.resolve_delivery(2, None, kind="scheduled")
+    check("a Standard-level scheduled record is compact in the success tone",
+          r["look"] == "compact" and r["tone"] == "success" and r["channels"] == ["inbox", "small_toast", "desktop"], r)
+    r = notifier.resolve_delivery(3, None, kind="scheduled")
+    check("a level-3 scheduled record is a card", r["look"] == "card" and r["forced_card"] is True, r)
+    r = notifier.resolve_delivery(2, None, kind="reminder")
+    check("a kind with no look follows its level (a card at Standard)", r["look"] == "card", r)
+    r = notifier.resolve_delivery(2, None, look="compact", tone="success")
+    check("look= and tone= are honoured when nothing else decides", r["look"] == "compact" and r["tone"] == "success", r)
+    r = notifier.resolve_delivery(2, None, look="banana", tone="loud")
+    check("an unknown look or tone is ignored", r["look"] == "card" and r["tone"] == "info", r)
+
+
+def test_resolve_delivery_reads_the_disabled_switch():
+    r = notifier.resolve_delivery(2, None, config={"enabled": False})
+    check("notifications turned off are reported", r["disabled"] is True, r)
+    check("and the default is not disabled", notifier.resolve_delivery(2, None)["disabled"] is False)
+
+
+def test_notify_puts_the_look_and_tone_on_the_record():
+    saved = dict(notifier._DELIVERERS)
+    try:
+        for name in list(notifier._DELIVERERS):
+            if name != "inbox":
+                notifier._DELIVERERS[name] = lambda record, config: True
+        r = notifier.notify("t", "m", kind="scheduled", level=2)
+        check("a scheduled record carries look compact and tone success, and was sent through small_toast",
+              r["look"] == "compact" and r["tone"] == "success" and "small_toast" in r["delivered"]
+              and "stream" not in r["delivered"], r)
+        r = notifier.notify("t", "m", kind="scheduled", level=2, failed=True)
+        check("a failed scheduled record is a card", r["look"] == "card" and "stream" in r["delivered"], r)
+        r = notifier.notify("t", "m", level=2, channels=["small_toast", "persistent"])
+        check("a behaviour in channels sets the record flag and forces the card",
+              r["persistent"] is True and r["look"] == "card", r)
+        r = notifier.notify("t", "m", level=1)
+        check("a level-1 record has look none", r["look"] == "none", r)
+    finally:
+        notifier._DELIVERERS.clear()
+        notifier._DELIVERERS.update(saved)
+
+
+def test_canonical_actions_splits_channels_from_behaviours():
+    chans, behaviours = notifier.canonical_actions(["toast", "persistent", "small_toast", "nonsense", "confirm"])
+    check("channels come back canonical, behaviours separately",
+          chans == ["desktop", "small_toast"] and behaviours == ["persistent", "confirm"], (chans, behaviours))
+    check("canonical_channels still drops behaviours", notifier.canonical_channels(["persistent", "desktop"]) == ["desktop"])
+
+
+def test_the_level_bounds_in_messages_come_from_the_table():
+    check("the scheduler's range message names the registry's bounds",
+          scheduler._level_range_message() == "level must be between %d and %d" % (notifier.MIN_LEVEL, notifier.MAX_LEVEL))
+
+
 _TESTS = [obj for name, obj in list(globals().items()) if name.startswith("test_")]
 
 

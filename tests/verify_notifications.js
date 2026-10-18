@@ -53,11 +53,40 @@ ok("unread flag wins", P.isUnreadOf({ unread: false, read_at: null }) === false)
 ok("without the flag: no read_at is unread", P.isUnreadOf({}) === true);
 ok("without the flag: read_at means read", P.isUnreadOf({ read_at: "2026-10-04T10:00:00" }) === false);
 
-// --- levels --------------------------------------------------------------------------
-ok("a record with no level is Standard (2)", P.levelOf({}) === 2);
-ok("a junk level is Standard (2)", P.levelOf({ level: "banana" }) === 2 && P.levelOf({ level: 9 }) === 2 && P.levelOf({ level: 0 }) === 2);
+// --- levels (read from the catalog: the page keeps no list of them) -----------------------------------------
+const NAMES = ["silent", "standard", "persistent", "broadcast", "confirm"];
+const EIGHT = ["top", "bottom", "left", "right", "top-left", "top-right", "bottom-left", "bottom-right"];
+const FLAGS = (n) => ({ persistent: n >= 3, confirm_required: n >= 5 });
+function realCatalog(extra) {
+  const cat = {
+    min_level: 1, max_level: 5, default_level: 2, default_position: "bottom-right", default_look: "card",
+    default_tone: "info", tones: ["info", "success"], version: "v1",
+    looks: [{ id: "card", label: "Card", action: "stream" }, { id: "compact", label: "Small toast", action: "small_toast" },
+            { id: "none", label: "Nothing on the page", action: null }],
+    positions: EIGHT.map((id) => ({ id, label: id })),
+    actions: [
+      { id: "inbox", type: "channel", label: "Inbox", always: true, page_ok: true },
+      { id: "stream", type: "channel", label: "Notification card", look: "card", page_ok: true },
+      { id: "small_toast", type: "channel", label: "Small toast", look: "compact", page_ok: true },
+      { id: "desktop", type: "channel", label: "Desktop notification" },
+      { id: "discord", type: "channel", label: "Discord DM", dm: true },
+      { id: "persistent", type: "behaviour", label: "Stay until acknowledged" },
+    ],
+    kinds: [{ id: "reminder", label: "Reminders", level: 2, settings: true }, { id: "scheduled", label: "Scheduled", level: 2, settings: false }],
+    presets: NAMES.map((id, i) => ({
+      level: i + 1, id, name: id.charAt(0).toUpperCase() + id.slice(1), description: id + " description",
+      channels: i === 0 ? ["inbox"] : ["inbox", "stream", "desktop"], flags: FLAGS(i + 1),
+    })),
+  };
+  return Object.assign(cat, extra || {});
+}
+ok("with no catalog a level is only known as a number (the range is the catalog's)",
+   P.levelOf({}) === null && P.levelOf({ level: 4 }) === 4 && P.levelBadge({ level: 3 }) === "");
+ok("setCatalog accepts a real catalog", P.setCatalog(realCatalog()) === true);
+ok("a record with no level has no known level", P.levelOf({}) === null);
+ok("a junk or out-of-range level is not a level", P.levelOf({ level: "banana" }) === null && P.levelOf({ level: 9 }) === null && P.levelOf({ level: 0 }) === null);
 ok("level 4 stays 4", P.levelOf({ level: 4 }) === 4);
-ok("badges: 1 silent, 2 none, 3 persistent, 4 broadcast, 5 confirm",
+ok("badges come from the preset ids; the default level has none",
    eq([1, 2, 3, 4, 5].map((level) => P.levelBadge({ level })), ["silent", "", "persistent", "broadcast", "confirm"]));
 
 // --- collapseBursts ------------------------------------------------------------------------
@@ -146,10 +175,9 @@ ok("the panel asks for as many as the inbox keeps", P.constants.PANEL_LIMIT === 
 ok("no more than four toast cards at once", P.constants.MAX_VISIBLE === 4);
 
 // --- E2: toast position -----------------------------------------------------------------------------------
-const EIGHT = ["top", "bottom", "left", "right", "top-left", "top-right", "bottom-left", "bottom-right"];
-ok("the eight positions are the ones the backend accepts",
-   JSON.stringify(P.constants.POSITIONS) === JSON.stringify(EIGHT));
-ok("default position is bottom-right (D-12)", P.constants.DEFAULT_POSITION === "bottom-right");
+ok("the catalog lists the eight positions the backend accepts",
+   JSON.stringify(P.pickerPositions().items.map((p) => p.id)) === JSON.stringify(EIGHT));
+ok("the one default-position constant is bottom-right (D-12)", P.constants.DEFAULT_POSITION === "bottom-right");
 EIGHT.forEach((pos) => ok(`positionOf keeps ${pos}`, P.positionOf({ position: pos }) === pos));
 ok("positionOf: a record from before E2 has no position -> default", P.positionOf({ id: "a" }) === "bottom-right");
 ok("positionOf: a bad value -> default", P.positionOf({ position: "middle" }) === "bottom-right");
@@ -159,35 +187,65 @@ ok("positionOf: 'Top Left' and 'top_left' read as top-left",
    P.positionOf({ position: "Top Left" }) === "top-left" && P.positionOf({ position: "top_left" }) === "top-left");
 
 // --- E0: the catalog ---------------------------------------------------------------------------------------
-// Without one every helper above used the built-in lists (those checks already passed). With one, the
-// helpers follow it, so a level or position added in notify_registry.py works without editing this file.
-ok("setCatalog rejects nothing / junk / an empty catalog",
-   P.setCatalog(null) === false && P.setCatalog({}) === false && P.setCatalog({ presets: [], positions: [] }) === false);
-const fakeCatalog = {
-  min_level: 1, max_level: 6, default_level: 2, default_position: "top",
-  positions: [{ id: "top" }, { id: "bottom" }],
-  presets: [
-    { level: 1, id: "silent", channels: ["inbox"], flags: { persistent: false, confirm_required: false } },
-    { level: 2, id: "standard", channels: ["inbox", "stream"], flags: { persistent: false, confirm_required: false } },
-    { level: 3, id: "persistent", channels: ["inbox", "stream"], flags: { persistent: true, confirm_required: false } },
-    { level: 4, id: "urgent", channels: ["inbox", "stream"], flags: { persistent: true, confirm_required: false } },
-    { level: 5, id: "ack", channels: ["inbox", "stream"], flags: { persistent: true, confirm_required: false } },
-    { level: 6, id: "confirm", channels: ["inbox", "stream"], flags: { persistent: true, confirm_required: true } },
-  ],
-};
-ok("setCatalog accepts a real catalog", P.setCatalog(fakeCatalog) === true);
+// With a catalog the helpers follow it, so a level or position added in notify_registry.py works without
+// editing this file. With none, nothing is offered (and the page says so) but a record still draws.
+ok("setCatalog rejects nothing / junk / an empty catalog, and keeps the last good one",
+   P.setCatalog(undefined) === false && P.setCatalog({}) === false
+   && P.setCatalog({ presets: [], positions: [], actions: [] }) === false && P.levelOf({ level: 4 }) === 4);
+const fakeCatalog = realCatalog({
+  min_level: 1, max_level: 6, default_position: "top", positions: [{ id: "top" }, { id: "bottom" }],
+  presets: [1, 2, 3, 4, 5, 6].map((level) => ({
+    level, id: ["silent", "standard", "persistent", "urgent", "ack", "confirm"][level - 1], name: "L" + level,
+    channels: level === 1 ? ["inbox"] : ["inbox", "stream"], flags: { persistent: level >= 3, confirm_required: level === 6 },
+  })),
+});
+ok("setCatalog accepts a catalog with a sixth level", P.setCatalog(fakeCatalog) === true);
 ok("a level above the old 1-5 range is kept when the catalog allows it", P.levelOf({ level: 6 }) === 6);
-ok("a junk level falls to the catalog's default level", P.levelOf({ level: "banana" }) === 2);
 ok("badges come from the preset ids; the default level has none",
    JSON.stringify([1, 2, 3, 4, 5, 6].map((level) => P.levelBadge({ level }))) === JSON.stringify(["silent", "", "persistent", "urgent", "ack", "confirm"]));
-ok("showsToast follows the preset's channels", P.showsToast(1) === false && P.showsToast(2) === true && P.showsToast(6) === true);
-ok("needsConfirm follows the preset's flags, not a hard-coded 5", P.needsConfirm(5) === false && P.needsConfirm(6) === true);
+ok("needsConfirmOf follows the preset's flags (for a record with no flag of its own), not a hard-coded 5",
+   P.needsConfirmOf({ level: 5 }) === false && P.needsConfirmOf({ level: 6 }) === true
+   && P.needsConfirmOf({ level: 2, confirm_required: true }) === true && P.needsConfirmOf({ level: 6, confirm_required: false }) === false);
 ok("positionOf keeps a position the catalog lists", P.positionOf({ position: "bottom" }) === "bottom");
 ok("positionOf: one the catalog does not list falls to the catalog's default", P.positionOf({ position: "left" }) === "top");
+ok("the pickers list the catalog's levels, kinds, positions and actions",
+   P.pickerLevels().items.length === 6 && P.pickerLevels().items[5].label === "6 \u00b7 L6"
+   && P.pickerKinds().items.length === 2 && P.pickerPositions().items.length === 2 && P.pickerActions().items.length === 6
+   && P.pickerLevels().message === "");
+ok("a picker row carries the dm / page_ok / look flags", (() => {
+  const a = P.pickerActions().items;
+  return a.find((x) => x.id === "discord").dm === true && a.find((x) => x.id === "small_toast").look === "compact"
+    && a.find((x) => x.id === "stream").page_ok === true;
+})());
+ok("pickerHint names both on-page looks from the catalog's own labels",
+   /Notification card/.test(P.pickerHint()) && /Small toast/.test(P.pickerHint()));
 P.setCatalog(null);
-ok("with the catalog gone the built-in rules are back",
-   P.levelOf({ level: 6 }) === 2 && P.showsToast(1) === false && P.showsToast(2) === true
-   && P.needsConfirm(5) === true && P.needsConfirm(4) === false && P.positionOf({ position: "left" }) === "left");
+ok("with the catalog gone every picker is empty and says why",
+   P.pickerLevels().items.length === 0 && /could not be loaded/.test(P.pickerLevels().message)
+   && P.pickerActions().items.length === 0 && P.pickerPositions().message !== "" && P.pickerHint() === "");
+ok("and a record still draws: it falls back to the one default-position constant and a card",
+   P.positionOf({ position: "left" }) === "bottom-right" && P.lookOf({ level: 2 }) === "card");
+P.setCatalog(realCatalog());
+
+// --- L.30: how a record is drawn (its own look) -----------------------------------------------------------
+ok("a card record is a card", P.lookOf({ look: "card" }) === "card");
+ok("a compact record is compact", P.lookOf({ look: "compact" }) === "compact");
+ok("a record with look none draws nothing", P.lookOf({ look: "none" }) === "none");
+ok("a compact record that failed is a card (the second lock behind the notifier)",
+   P.lookOf({ look: "compact", failed: true }) === "card");
+ok("a compact record that is persistent, needs acknowledging or confirming is a card",
+   P.lookOf({ look: "compact", persistent: true }) === "card" && P.lookOf({ look: "compact", confirm_required: true }) === "card"
+   && P.lookOf({ look: "compact", persistent: true, acked_at: null }) === "card");
+ok("the safety net never turns none into a card (a muted level stays muted)", P.lookOf({ look: "none", failed: true }) === "none");
+ok("a record from before the upgrade (no look) is derived from the catalog: a card at Standard, nothing at Silent",
+   P.lookOf({ level: 2 }) === "card" && P.lookOf({ level: 1 }) === "none");
+ok("an unknown look is a card, so a notification is never lost", P.lookOf({ look: "banana" }) === "card");
+ok("toneOf uses the record's tone when the catalog lists it, else the catalog's default",
+   P.toneOf({ tone: "success" }) === "success" && P.toneOf({ tone: "loud" }) === "info" && P.toneOf({}) === "info");
+P.setCatalog(null);
+ok("with no catalog a record with no look is still a card", P.lookOf({}) === "card");
+ok("with no catalog the tone is whatever the record says", P.toneOf({ tone: "success" }) === "success" && P.toneOf({}) === undefined);
+P.setCatalog(realCatalog());
 
 // --- E3: the page's one browser-notification path --------------------------------
 ok("osNoticeSpec: title / body / tag / silent with defaults",

@@ -117,14 +117,20 @@ def normalize_channels(value):
     notifier = _channel_names()
     out, bad = [], []
     for raw in value:
-        name = notifier.canonical_channel(raw)
-        if name is None:
+        # D2: every action in the notification catalog is allowed for a download, a behaviour
+        # (`persistent`, `confirm`) as well as a place (`desktop`, `small_toast`, ...).
+        chans, behaviours = notifier.canonical_actions([raw])
+        names = chans + behaviours
+        if not names:
             bad.append(str(raw)[:30])
-        elif name not in out:
-            out.append(name)
+        for name in names:
+            if name not in out:
+                out.append(name)
     if bad:
-        return None, "unknown notification channel %s; the channels are: %s" % (
-            ", ".join(repr(b) for b in bad), ", ".join(notifier.CHANNELS))
+        from .. import notify_registry
+        known = [a["id"] for a in notify_registry.actions()]
+        return None, "unknown notification type %s; the types are: %s" % (
+            ", ".join(repr(b) for b in bad), ", ".join(known))
     return out, None
 
 
@@ -624,15 +630,24 @@ def library_info(settings):
 
 
 def notify_options():
-    """The notifier's levels, channels and positions, read live from jarvis/notifier.py, plus the
+    """The notification catalog (every notification type, level, kind, look and tone, and a
+    `version` that changes when the table does), read live from jarvis/notifier.py, plus the
     download events the hub itself can announce.  The panel and the tools offer exactly this, so
-    a level or channel added to the notifier shows up here with no change to the hub."""
+    a level, type or position added to the notification module shows up here with no change to
+    the hub, and the panel redraws its pickers when `version` changes.
+
+    If the notifier cannot be read this returns EMPTY lists: no copy of the levels or channels
+    is kept here, so the panel disables its pickers instead of offering stale ones."""
     try:
         from .. import notifier
         out = notifier.describe_options()
     except Exception:  # noqa: BLE001 - never break the panel over a notifier problem
-        out = {"levels": [], "channels": [], "positions": [], "min_level": 1, "max_level": 5,
-               "default_level": 2, "default_position": "bottom-right"}
+        out = {"levels": [], "channels": [], "actions": [], "positions": [], "min_level": None,
+               "max_level": None, "default_level": None, "default_position": None, "version": ""}
+    # The panel polls this with every summary; it reads the levels, the types and `version`, not
+    # the preset / kind / look tables, so those stay out of the payload.
+    for heavy in ("presets", "kinds", "looks", "tones", "default_look", "default_tone"):
+        out.pop(heavy, None)
     out["events"] = list(settings_mod.EVENTS)
     out["item_events"] = list(ITEM_NOTIFY_EVENTS)
     return out
