@@ -21,6 +21,10 @@ resumes it (HTTP `Range` / yt-dlp `.part`); a stop (SIGTERM / SIGINT / SIGBREAK)
 workers to hand their items back the same way.  Provider rows are not touched by any of
 this: they are somebody else's transfer, so they simply go stale when nobody reports.
 
+Provider poll mode (phase 5): each tick also asks `providers.PollRunner` which providers are
+due (a `poll_tool` of a TOOL_DOWNLOADS tool, or the built-in Steam / Playnite watchers) and applies
+their answers; the declared providers are (re)registered at start and every minute, on a thread.
+
 Run as `python <tool dir>/_hub_daemon.py` (what DAEMONS declares) or `python -m jarvis.hub.daemon`.
 """
 
@@ -33,7 +37,7 @@ import sys
 import threading
 import time
 
-from . import engines, notify, paths, service, settings as settings_mod, states
+from . import engines, notify, paths, providers, service, settings as settings_mod, states
 from .engines.base import EngineContext, Outcome
 from .store import Store
 
@@ -44,6 +48,7 @@ TICK_IDLE = 1.0
 HOUSEKEEPING_EVERY = 5.0
 DEMO_EVERY = 1.0
 SETTINGS_TTL = 2.0
+PROVIDER_SYNC_EVERY = 60.0
 EXIT_ALREADY_RUNNING = 3
 
 
@@ -111,6 +116,10 @@ class HubDaemon:
         self._recent_opens = collections.deque()
         self._rates, self._rates_key, self._rates_at = {}, None, 0.0
         self._rates_lock = threading.Lock()
+        self._poller = providers.PollRunner(self.store, clock=clock)
+        self._last_provider_sync = 0.0
+        self._provider_sync_running = False
+        self.declared_providers = None       # tests: a list instead of reading the tool files
 
     # ------------------------------------------------------------------ settings
 
@@ -191,6 +200,7 @@ class HubDaemon:
             log.info("engine %-8s %s", name, "ready" if info["available"] else "NOT ready: " + info["reason"])
         for name, why in engines.LOAD_ERRORS.items():
             log.error("engine module %s failed to load: %s", name, why)
+        self._sync_providers()
 
     def tick(self):
         self._reap()
@@ -206,6 +216,7 @@ class HubDaemon:
         if now - self._last_demo >= DEMO_EVERY:
             self._last_demo = now
             self._demo()
+        self._poll_providers(now)
 
     def run(self, max_ticks=None):
         self.start_up()
@@ -228,6 +239,7 @@ class HubDaemon:
         for worker in list(self.workers.values()):
             worker.join(max(0.1, deadline - time.monotonic()))
         self._reap()
+        self._poller.close()
         try:
             self._finish_pass()                              # whatever finished while stopping
             self._notifier.flush_now(self.settings())        # and anything still being held back
@@ -297,6 +309,39 @@ class HubDaemon:
         flagged = self.store.mark_stale(stale_after=float(limits["stale_after_s"]))
         if flagged["stale"] or flagged["unknown"]:
             log.info("provider rows: %d went stale, %d became unknown", flagged["stale"], flagged["unknown"])
+
+    def _sync_providers(self, wait=False):
+        """Register the providers tool files declared (TOOL_DOWNLOADS) and the built-in ones this
+        PC has (Steam).  Reading the tool files imports the whole tool registry, so it runs on a
+        thread: downloads never wait for it."""
+        if self._provider_sync_running:
+            return None
+        self._provider_sync_running = True
+        self._last_provider_sync = time.monotonic()
+
+        def work():
+            try:
+                done = providers.sync_declared(self.store, declared=self.declared_providers)
+                if done:
+                    log.info("providers registered: %s", ", ".join(done))
+            except Exception:  # noqa: BLE001
+                log.exception("registering providers failed")
+            finally:
+                self._provider_sync_running = False
+
+        thread = threading.Thread(target=work, name="hub-provider-sync", daemon=True)
+        thread.start()
+        if wait:
+            thread.join(30)
+        return thread
+
+    def _poll_providers(self, now):
+        if now - self._last_provider_sync >= PROVIDER_SYNC_EVERY:
+            self._sync_providers()
+        try:
+            self._poller.tick()
+        except Exception:  # noqa: BLE001 - a provider can never stop the downloads
+            log.exception("polling providers failed")
 
     def _demo(self):
         if not self.settings().get("demo", {}).get("enabled"):

@@ -57,7 +57,9 @@ def canonical_url(url):
 
 
 def options_hash(options):
-    keep = {k: (options or {}).get(k) for k in ("subdir", "dest_abs", "filename") if (options or {}).get(k)}
+    # The yt-dlp choices count too: the same video as audio and as 1080p video are two downloads.
+    keys = ("subdir", "dest_abs", "filename", "mode", "quality", "container", "video_codec", "audio_format")
+    keep = {k: (options or {}).get(k) for k in keys if (options or {}).get(k)}
     return hashlib.sha1(json.dumps(keep, sort_keys=True).encode("utf-8")).hexdigest()[:12]
 
 
@@ -114,7 +116,8 @@ def route(text, engine=None, settings=None):
             return _finish(rule.engine, hit, text)
 
     return _result(False, problem="that doesn't look like something I can download: expected an "
-                                  "http(s) link (magnet links and YouTube pages arrive with later phases)")
+                                  "http(s) link to a file or to a page of a site yt-dlp supports (magnet links "
+                                  "arrive with a later phase)")
 
 
 def _safe_match(rule, text, settings):

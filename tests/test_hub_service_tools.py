@@ -70,7 +70,8 @@ def fresh_store(clock=None):
 
 
 TOOL_NAMES = ["dl_add", "dl_list", "dl_status", "dl_pause", "dl_resume", "dl_cancel", "dl_retry",
-              "dl_schedule", "dl_open", "dl_settings", "dl_prefs", "hub_doctor", "hub_demo_provider"]
+              "dl_schedule", "dl_open", "dl_settings", "dl_prefs", "hub_doctor", "hub_demo_provider",
+              "dl_import_legacy", "dl_providers", "dl_provider_prefs"]
 
 
 # ---------------------------------------------------------------- the tool file, through the real loader
@@ -81,11 +82,11 @@ def test_tool_file():
     check("the loader finds download_hub.py", len(mine) == 1)
     rec = mine[0]
     check("it is valid (no load error)", rec.valid and not rec.error)
-    check("it defines exactly the 13 tools", sorted(rec.tools) == sorted(TOOL_NAMES) and sorted(s["name"] for s in rec.schemas) == sorted(TOOL_NAMES))
+    check("it defines exactly the 16 tools", sorted(rec.tools) == sorted(TOOL_NAMES) and sorted(s["name"] for s in rec.schemas) == sorted(TOOL_NAMES))
     check("in the new `downloads` group", rec.group == "downloads")
     check("no tool name collides with another file's", all(set(rec.tools).isdisjoint(set(o.tools)) for o in records if o is not rec and o.valid))
-    check("cancel, settings and the demo are confirm-gated by name",
-          rec.confirm_required == {"dl_cancel", "dl_settings", "hub_demo_provider"})
+    check("cancel, settings, provider settings and the demo are confirm-gated by name",
+          rec.confirm_required == {"dl_cancel", "dl_settings", "dl_provider_prefs", "hub_demo_provider"})
     check("every tool has a checklist entry", sorted(rec.checklist) == sorted(TOOL_NAMES))
     check("and the group has a label for the checklist", rec.checklist_group and list(rec.checklist_group.values())[0]["label"])
     check("a result spec exists for the two big list results", {"dl_list", "dl_status"} <= set(rec.result_specs))
@@ -156,7 +157,8 @@ def test_add_items():
     magnet = service.add_items(["magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567"], store=store)
     check("a magnet link says the stremio engine isn't installed", magnet["ok"] is False and "stremio" in magnet["error"])
     yt = service.add_items(["https://www.youtube.com/watch?v=abc"], store=store)
-    check("a YouTube page is not queued as a file", yt["ok"] is False and "ytdlp" in yt["error"])
+    check("a YouTube page is not queued as a file (yt-dlp takes it, or says it isn't ready)",
+          (yt["ok"] and yt["added"][0]["engine"] == "ytdlp") or (yt["ok"] is False and "ytdlp" in yt["error"]))
     check("nothing but the good links were queued", len(store.list_items(limit=100)) == 5)
 
     check("empty input is a clear error", service.add_items([], store=store)["error"].startswith("give me a link"))

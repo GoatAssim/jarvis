@@ -1504,6 +1504,10 @@ _PERSONA_FILES = {_p["id"]: _seen_persona_ids.get(_p["id"], "") for _p in AUTO_P
 _FILE_TOOLS = {_r.file: sorted(_r.tools) for _r in _AUTO_VALID if _r.tools}
 _FILE_DAEMONS = {_r.file: [_d["did"] for _d in _r.daemons] for _r in _AUTO_VALID if _r.daemons}
 
+# Download Hub providers the tool files declared (TOOL_DOWNLOADS), validated by the loader.
+# hub/providers.py registers them in the hub store; nothing else reads this.
+AUTO_DOWNLOADS = [dict(_d) for _r in _AUTO_VALID for _d in _r.downloads]
+
 
 def files_with_all_tools_off(off=None):
     """File names whose tools are all switched off (see the rule above)."""

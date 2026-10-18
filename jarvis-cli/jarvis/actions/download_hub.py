@@ -7,7 +7,11 @@ drift apart.  See jarvis/hub/__init__.py for the module map and where later phas
 
 What is in it
 -------------
-  dl_add / dl_list / dl_status                 queue and look
+  dl_add / dl_list / dl_status                 queue and look (file links and, since phase 3,
+                                               video pages through the yt-dlp engine)
+  dl_import_legacy                             index the old ytdl_download folders (read-only)
+  dl_providers / dl_provider_prefs             the watched sources (Steam, Playnite, tools with
+                                               their own downloads): health, on / off, settings
   dl_pause / dl_resume / dl_cancel / dl_retry  control (hub downloads; provider rows are
                                                read-only until phase 5)
   dl_schedule                                  start a download later ("tomorrow 3am"), or clear
@@ -39,6 +43,12 @@ inside the handlers, so a `jarvis` command that never touches downloads pays not
 def _svc():
     from ..hub import service     # lazy: see the module docstring
     return service
+
+
+# dl_add's video options (handed to the yt-dlp engine; ignored for a plain file link)
+_VIDEO_ARGS = ("mode", "quality", "container", "video_codec", "audio_format", "audio_quality",
+               "embed_thumbnail", "embed_metadata", "embed_chapters", "write_subs", "embed_subs",
+               "sub_langs", "sponsorblock_remove", "skip_if_downloaded")
 
 
 def _fail(label, exc):
@@ -132,9 +142,38 @@ def tool_dl_add(args):
                              open_when_done=open_when_done, notify_me=args.get("notify"),
                              notify_channels=args.get("notify_channels"),
                              notify_events=args.get("notify_events"),
-                             allow_absolute_dest=allow_abs, start_at=args.get("start_at"))
+                             allow_absolute_dest=allow_abs, start_at=args.get("start_at"),
+                             engine_options={k: args.get(k) for k in _VIDEO_ARGS if args.get(k) is not None})
     except Exception as exc:  # noqa: BLE001 - a tool never raises
         return _fail("dl_add", exc)
+
+
+def tool_dl_import_legacy(args):
+    """Index the old ytdl_download folders as read-only history rows (nothing is moved or deleted)."""
+    try:
+        from ..hub import legacy
+        from ..hub.store import Store
+        return legacy.import_legacy(Store())
+    except Exception as exc:  # noqa: BLE001
+        return _fail("dl_import_legacy", exc)
+
+
+def tool_dl_providers(args):
+    """Every provider (tools with their own downloads, Steam, Playnite) with health and counts."""
+    try:
+        return _svc().list_providers()
+    except Exception as exc:  # noqa: BLE001
+        return _fail("dl_providers", exc)
+
+
+def tool_dl_provider_prefs(args):
+    """The owner's choices for one provider: on / off, poll interval, its settings."""
+    try:
+        args = args or {}
+        return _svc().update_provider((args.get("id") or "").strip(), enabled=args.get("enabled"),
+                                      interval_s=args.get("interval_s"), settings=args.get("settings"))
+    except Exception as exc:  # noqa: BLE001
+        return _fail("dl_provider_prefs", exc)
 
 
 def tool_dl_list(args):
@@ -304,8 +343,10 @@ TOOL_SCHEMAS = [
         "name": "dl_add",
         "description": (
             "Queue a download in the Download Hub and return at once; the hub's background daemon does "
-            "the transfer and shows it in Menu > Downloads. Use for a direct file link (http/https). "
-            "Not for YouTube pages (use ytdl_download) and magnet links are not supported yet. "
+            "the transfer and shows it in Menu > Downloads. Takes a direct file link (http/https) and also a "
+            "YouTube page or a page of any other site yt-dlp supports (the yt-dlp engine; one video per link, "
+            "mode / quality / container choose the result). For a video the person wants to watch in chat "
+            "right now, ytdl_download stays the better tool. Magnet links are not supported yet. "
             "Set dry_run to see which engine would take a link without queueing it."
         ),
         "parameters": {
@@ -324,7 +365,59 @@ TOOL_SCHEMAS = [
                 "notify_channels": {"type": "array", "items": {"type": "string"}, "description": "Where to announce THIS download, instead of the person's usual channels, e.g. [\"discord\"] for Discord only (the notification inbox keeps its record either way). Any channel the notifier has; dl_prefs with no arguments lists them (notify_options.channels). Omit to follow the person's own settings."},
                 "notify_events": {"type": "array", "items": {"type": "string", "enum": ["started", "done", "failed", "stalled"]}, "description": "Which events announce THIS download, e.g. [\"done\", \"failed\"]. Omit to follow the person's own settings. A download with its own choices is announced even if notifications are off globally."},
                 "dry_run": {"type": "boolean", "description": "Only say which engine would take each link; queue nothing."},
+                "mode": {"type": "string", "enum": ["video", "audio"], "description": "Video pages only: video (default) or audio only."},
+                "quality": {"type": "string", "description": "Video pages only: best (default), 2160p, 1440p, 1080p, 720p, 480p, 360p, or an exact 'id:<format_id>' from ytdl_formats."},
+                "container": {"type": "string", "enum": ["mp4", "mkv", "webm"], "description": "Video pages only: the file type to merge into (default mp4)."},
+                "video_codec": {"type": "string", "enum": ["h264", "vp9", "av1"], "description": "Video pages only: prefer this codec when there is a choice."},
+                "audio_format": {"type": "string", "enum": ["mp3", "m4a", "opus", "wav", "flac", "aac", "vorbis", "alac"], "description": "Video pages, mode=audio: the audio file type (default mp3)."},
+                "audio_quality": {"type": "string", "description": "Video pages, mode=audio: '0' (best) to '10', or a bitrate like '192K' (default)."},
+                "embed_thumbnail": {"type": "boolean", "description": "Video pages only: embed the thumbnail as cover art."},
+                "embed_metadata": {"type": "boolean", "description": "Video pages only: embed title / uploader."},
+                "embed_chapters": {"type": "boolean", "description": "Video pages only: embed chapter markers."},
+                "write_subs": {"type": "boolean", "description": "Video pages only: also save subtitles as separate files."},
+                "embed_subs": {"type": "boolean", "description": "Video pages only: embed subtitles in the video file."},
+                "sub_langs": {"type": "string", "description": "Video pages only: subtitle languages, e.g. 'en' or 'en,es'."},
+                "sponsorblock_remove": {"type": "string", "description": "Video pages only (YouTube): SponsorBlock categories to cut, e.g. 'sponsor,selfpromo'."},
+                "skip_if_downloaded": {"type": "boolean", "description": "Video pages only: skip a video yt-dlp's archive says was already fetched."},
             },
+        },
+    },
+    {
+        "name": "dl_import_legacy",
+        "description": (
+            "Index the videos the older ytdl_download tool already saved (in ~/.jarvis/downloads) as read-only "
+            "history rows in the Download Hub, so they show up in Menu > Downloads with an Open button. "
+            "Nothing is moved, renamed or deleted; running it again adds nothing twice."
+        ),
+        "parameters": {"type": "object", "properties": {}},
+    },
+    {
+        "name": "dl_providers",
+        "description": (
+            "List the sources of downloads the hub only watches (not its own engines): Steam installs and "
+            "updates, Playnite installs, and any tool that reports its own downloads. Shows each one's mode, "
+            "whether it is on, when it last reported, any error, how many rows are live or not updating, and "
+            "whether it is read-only. Use for 'is the Steam download still going?' style health questions; "
+            "dl_list(provider=...) has the rows themselves."
+        ),
+        "parameters": {"type": "object", "properties": {}},
+    },
+    {
+        "name": "dl_provider_prefs",
+        "description": (
+            "Change one provider's own choices: switch it on or off (off hides its rows and stops polling it; "
+            "nothing it downloaded is touched), how often it is polled (interval_s), or its settings "
+            "(e.g. {\"root\": \"D:/Steam\"} to tell the Steam provider where Steam is). The person is asked to confirm."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "id": {"type": "string", "description": "The provider id from dl_providers (steam, playnite, ...)."},
+                "enabled": {"type": "boolean", "description": "On (true) or off (false)."},
+                "interval_s": {"type": "number", "description": "Seconds between polls, 0.5 to 3600."},
+                "settings": {"type": "object", "description": "Settings to set, merged key by key."},
+            },
+            "required": ["id"],
         },
     },
     {
@@ -471,6 +564,9 @@ TOOL_SCHEMAS = [
 TOOLS = {
     "dl_add": tool_dl_add,
     "dl_list": tool_dl_list,
+    "dl_import_legacy": tool_dl_import_legacy,
+    "dl_providers": tool_dl_providers,
+    "dl_provider_prefs": tool_dl_provider_prefs,
     "dl_status": tool_dl_status,
     "dl_pause": tool_dl_pause,
     "dl_resume": tool_dl_resume,
@@ -512,6 +608,12 @@ TOOL_KEYWORDS = {
         "downloads": {"weight": 6, "not_with": _NOT_MEDIA},
         "how far along": {"weight": 6, "needs_any": ["download", "downloads", "downloading"]},
     },
+    "dl_import_legacy": {"import old downloads": 10, "import legacy downloads": 10, "index old downloads": 10,
+                         "earlier video downloads": 9},
+    "dl_providers": {"download providers": 10, "steam download": 9, "steam downloads": 9, "install progress": 9,
+                     "game downloads": 8, "game install progress": 9},
+    "dl_provider_prefs": {"provider settings": 9, "steam folder": 8, "turn off steam downloads": 10,
+                          "poll interval": 8},
     "dl_status": {"download status": 10, "download hub": 10, "downloads menu": 9},
     "dl_pause": {"pause downloads": 10, "pause the download": 10, "pause all downloads": 10},
     "dl_resume": {"resume downloads": 10, "resume the download": 10},
@@ -534,8 +636,9 @@ TOOL_KEYWORDS = {
 TOOL_PACK_INSTRUCTION = (
     "dl_add queues and returns at once; the hub daemon does the transfer, so report progress "
     "with dl_list / dl_status instead of waiting. 'Download it tomorrow night' = dl_add with "
-    "start_at (or dl_schedule for one already queued). YouTube pages -> ytdl_download; magnet "
-    "links are not supported by dl_add yet."
+    "start_at (or dl_schedule for one already queued). It takes file links and video pages "
+    "(YouTube and other yt-dlp sites, one video per link); ytdl_download is still the tool for "
+    "'download this video now'. Magnet links are not supported by dl_add yet."
 )
 
 # ---------------------------------------------------------------------------
@@ -547,7 +650,7 @@ TOOL_PACK_INSTRUCTION = (
 # inside the handler (default=False).  dl_prefs is NOT listed: it only holds the everyday keys
 # (speed, notifications, folder names inside the library), and the one choice that runs
 # something unseen (open-the-file when done) asks inside the handler, default=False.
-TOOL_CONFIRM_REQUIRED = {"dl_cancel", "dl_settings", "hub_demo_provider"}
+TOOL_CONFIRM_REQUIRED = {"dl_cancel", "dl_settings", "dl_provider_prefs", "hub_demo_provider"}
 TOOL_AI_REVIEW = set()
 
 TOOL_RESULT_SPECS = {
@@ -563,6 +666,12 @@ TOOL_RESULT_SPECS = {
     },
     "dl_status": {
         "drop_fields": {"medium": ["engine_load_errors"], "low": ["engine_load_errors", "settings", "engines"]},
+    },
+    "dl_providers": {
+        "list_item_drop": {"providers": {
+            "medium": ["icon", "source", "poll_tool", "last_ok_age_s"],
+            "low": ["icon", "source", "poll_tool", "last_ok_age_s", "controls", "capabilities", "interval_s", "kind"]}},
+        "list_item_truncate": {"providers": {"last_error": {"medium": 160, "low": 80}}},
     },
 }
 
@@ -628,14 +737,50 @@ TEST_CHECKLIST = {
              "expect": "ok: true, the item is paused with start_at set; Menu > Downloads shows 'Scheduled' and about two minutes later it starts by itself (daemon running)."},
             {"run": {"url": "https://<a real, small file link>", "start_at": "yesterday at 9am"},
              "expect": "ok: false, says that time has already passed."},
+            {"run": {"url": "https://www.youtube.com/watch?v=<a short video id>", "dry_run": True},
+             "expect": "ok: true, one decision: engine ytdlp, reason 'YouTube page'. (Without yt-dlp / ffmpeg: ok false, the problem names what is missing.)"},
+            {"run": {"url": "https://www.youtube.com/watch?v=<a short video id>", "mode": "audio", "audio_format": "mp3"},
+             "expect": "ok: true, one item (engine ytdlp, kind audio); it shows an indeterminate bar with growing size, then lands as an .mp3 in the Audio folder."},
+            {"run": {"url": "https://www.youtube.com/watch?v=<a short video id>", "quality": "1080p", "container": "gif"},
+             "expect": "ok: false: container must be one of mp4, mkv, webm (nothing is queued)."},
             {"ask": "Download this file: https://<a real, small file link>",
              "expect": "Calls dl_add (not ytdl_download) and says it was queued."},
         ],
-        "needs": ["The 'Download hub' daemon running (Menu > Daemons)", "Internet access for the real-link steps"],
+        "needs": ["The 'Download hub' daemon running (Menu > Daemons)", "Internet access for the real-link steps",
+                  "yt-dlp and ffmpeg installed for the video steps"],
         "care": "Writes the file under the library root (default ~/Downloads/Jarvis/Files). A local test server needs allow_private_hosts set first.",
         "watch": ["Adding the same link twice returns the existing item (duplicate: true), not a second download.",
                   "More than 5 links in one call asks for confirmation first.",
                   "Kill the daemon mid-file (Menu > Daemons > Stop), start it again: the row goes back to queued and the file resumes, not restarts (needs a server that supports Range)."],
+    },
+    "dl_import_legacy": {
+        "does": "Indexes the videos the older ytdl_download tool saved as read-only rows (provider 'Earlier video downloads'); nothing is moved or deleted.",
+        "steps": [
+            {"run": {}, "expect": "ok: true with found / imported / already counts (found 0 and a note when ~/.jarvis/downloads has no dl_* folders)."},
+            {"ask": "Import my old video downloads into the hub", "expect": "Calls dl_import_legacy and reports how many it found; asking again imports 0 and says they were already there (nothing is added twice)."},
+        ],
+        "watch": ["Each row is done, has Open / Reveal only, and no pause / cancel / retry button.",
+                  "The old ytdl_download tool still prunes its own folders; a pruned file's row says the file is gone when opened."],
+    },
+    "dl_providers": {
+        "does": "Lists the watched sources (Steam, Playnite, tools with their own downloads): mode, on / off, last report, last error, live and not-updating rows, read-only or not.",
+        "steps": [
+            {"run": {}, "expect": "ok: true with a providers list; with Steam installed there is a 'steam' entry (mode poll, read_only true); after playnite_install_game a 'playnite' one."},
+            {"ask": "Is my Steam download still going?", "expect": "Calls dl_providers or dl_list(provider=steam) and answers from the rows' percent / state."},
+        ],
+        "needs": ["The Download hub daemon running: it polls Steam and registers providers"],
+        "watch": ["Steam closed: the steam entry shows an error ('Steam isn't running ...') and its rows go grey (stale), never red.",
+                  "A provider switched off disappears from dl_list until switched back on."],
+    },
+    "dl_provider_prefs": {
+        "does": "Switches a provider on or off, changes how often it is polled, or sets its settings (for Steam, where Steam is installed).",
+        "steps": [
+            {"run": {"id": "steam", "settings": {"root": "D:/Steam"}}, "expect": "Asks to confirm, then ok: true; the next poll uses that folder."},
+            {"run": {"id": "steam", "enabled": False}, "expect": "Asks to confirm, then ok: true; Steam rows vanish from dl_list and Menu > Downloads."},
+            {"run": {"id": "nope", "enabled": True}, "expect": "ok: false: no provider called 'nope'."},
+            {"run": {"id": "steam", "interval_s": 0}, "expect": "ok: false: interval_s must be 0.5 to 3600."},
+        ],
+        "care": "Switching a provider off hides its rows and stops polling it; it never touches what the provider downloaded.",
     },
     "dl_list": {
         "does": "Lists downloads with state, percent, speed, ETA, size, destination; filter by state, engine, provider, kind, group or text.",

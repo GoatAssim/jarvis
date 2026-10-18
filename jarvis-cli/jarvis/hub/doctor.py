@@ -106,6 +106,14 @@ def run(store=None):
             checks.append(_check(label, "ok", "%s mode, %s" % (
                 provider["mode"], "no reports yet" if not provider.get("last_report_at") else "reporting")))
 
+    # --- Steam (read from its own files; "no manifests found" instead of an empty list)
+    try:
+        from . import steam
+        for row in steam.doctor(store):
+            checks.append(_check(row["name"], row["status"], row["detail"]))
+    except Exception as exc:  # noqa: BLE001
+        checks.append(_check("steam", "warn", "its own checks failed: %s" % exc))
+
     # --- spooled reports nobody applied
     try:
         spooled = len(list(paths.inbox_dir().glob("*.json"))) if paths.inbox_dir().is_dir() else 0

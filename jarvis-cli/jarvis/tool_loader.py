@@ -77,6 +77,12 @@ A file that defines tools can also supply background services of its own:
 
     DAEMONS = [ {"id": ..., "command": [...], ...}, ... ]
 
+A file can also declare downloads of its own for Menu > Downloads:
+
+    TOOL_DOWNLOADS = [ {"id": ..., "label": ..., "mode": "push" | "poll" | "both", ...}, ... ]
+
+...see tool_downloads.py for the fields. Registered by the hub daemon; a bad entry is dropped.
+
 ...registered in the Daemons panel when the tool is installed and removed when
 it is uninstalled. See tool_daemons.py for the contract, what the tool controls
 and what stays the owner's. A bad entry is logged and dropped; the tools load.
@@ -272,6 +278,9 @@ class ActionModuleRecord:
     # TOOL_SETTINGS entries, already validated and normalised by
     # tool_settings.validate_settings. [] when the module declared none.
     settings: list = field(default_factory=list)
+    # TOOL_DOWNLOADS entries (Download Hub providers), already validated and normalised by
+    # tool_downloads.validate_downloads. [] when the module declared none.
+    downloads: list = field(default_factory=list)
 
 
 def _validate(module, filename, logger):
@@ -468,12 +477,24 @@ def _validate(module, filename, logger):
         for problem in daemon_errors:
             logger(f"[tool-daemons] {problem}")
 
+    # TOOL_DOWNLOADS: downloads the tool supplies itself, shown in Menu > Downloads (hub plan
+    # 5.2). Same rule as the others: a bad entry is logged and dropped, the tools load.
+    download_entries = []
+    raw_downloads = getattr(module, "TOOL_DOWNLOADS", None)
+    if raw_downloads is not None:
+        from . import tool_downloads
+        download_entries, download_errors = tool_downloads.validate_downloads(
+            raw_downloads, filename, names, confirm_required)
+        for problem in download_errors:
+            logger(f"[tool-downloads] {problem}")
+
     return ActionModuleRecord(
         file=filename, valid=True, group=group, schemas=schemas, tools=tools,
         keywords=keywords, pack_instruction=pack_instruction,
         confirm_required=confirm_required, ai_review=ai_review, result_specs=result_specs,
         personas=personas, checklist=checklist, checklist_group=checklist_group, ui=ui,
         daemons=daemon_decls, commands=command_entries, settings=setting_entries,
+        downloads=download_entries,
     )
 
 

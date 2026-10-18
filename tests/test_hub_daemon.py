@@ -312,7 +312,8 @@ def test_controls_without_a_worker():
     store.register_provider("capable", label="Capable", capabilities=["pause"], controls={"pause": "cap_pause"})
     store.upsert_provider_row("capable", "r1", {"state": "downloading"})
     res = service.control("pause", id="capable:r1", store=store)
-    check("a provider that declares pause isn't wired until phase 5, and says so", res["ok"] is False and "phase 5" in res["error"])
+    check("a provider that declares pause runs its control tool (phase 5); a missing tool is reported, not hidden",
+          res["ok"] is False and "cap_pause" in res["error"])
     check("bulk calls never touch provider rows' state", store.get_item("demo:r1")["state"] == "downloading"
           and service.control("cancel", all=True, store=store)["ok"] and store.get_item("demo:r1")["state"] == "downloading")
 

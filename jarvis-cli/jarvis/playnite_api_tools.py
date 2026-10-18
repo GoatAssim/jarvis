@@ -81,7 +81,15 @@ def tool_playnite_install_game(args):
     game_id, err = _game_id(args)
     if err:
         return err
-    return _api("POST", f"/api/games/{game_id}/install")
+    result = _api("POST", f"/api/games/{game_id}/install")
+    if isinstance(result, dict) and not result.get("error"):
+        # Show the install in Menu > Downloads (hub plan 6.2). Never lets the tool fail.
+        try:
+            from .hub import playnite_provider
+            playnite_provider.track_install(game_id)
+        except Exception:  # noqa: BLE001
+            pass
+    return result
 
 
 def tool_playnite_uninstall_game(args):

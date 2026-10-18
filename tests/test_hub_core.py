@@ -547,7 +547,8 @@ def test_router():
           not m["ok"] and m["engine"] == "stremio" and "stremio" in m["problem"] and "phase 4" in m["problem"])
     check("a bare infohash is recognised as a torrent", not router.route("0123456789abcdef0123456789abcdef01234567")["ok"])
     y = router.route("https://www.youtube.com/watch?v=abc")
-    check("a YouTube page is never fed to the HTTP engine", not y["ok"] and y["engine"] == "ytdlp" and "phase 3" in y["problem"])
+    check("a YouTube page is never fed to the HTTP engine (it goes to yt-dlp, or says yt-dlp isn't ready)",
+          y["engine"] == "ytdlp" and (y["ok"] or "ytdlp" in (y["problem"] or "")))
     check("garbage gets a plain problem", not router.route("hello world")["ok"] and router.route("hello world")["problem"])
     check("empty input is a problem", not router.route("")["ok"] and not router.route(None)["ok"])
     check("an absurdly long input is refused", not router.route("https://e.com/" + "a" * 5000)["ok"])

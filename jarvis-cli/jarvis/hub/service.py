@@ -21,6 +21,7 @@ import subprocess
 import sys
 import time
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from . import engines, naming, netguard, notify, router, settings as settings_mod, states
 from .store import Store
@@ -272,11 +273,14 @@ def split_dest(dest, root, allow_absolute=False):
 def add_items(inputs, *, engine=None, dest=None, group=None, start_paused=False,
               speed_limit_kbps=None, open_when_done=None, notify_me=None,
               notify_channels=None, notify_events=None, allow_absolute_dest=False, start_at=None,
-              store=None):
+              engine_options=None, store=None):
     """Queue one or more downloads.  Returns {ok, added, skipped, group, note}.
 
     `start_at` ("tomorrow 3am", "in 2 hours") holds them until then (see "timed starts" above);
-    it wins over `start_paused`."""
+    it wins over `start_paused`.
+
+    `engine_options`: yt-dlp's own choices (mode, quality, container, audio_format ...).  They
+    are checked once, here, and only stored on rows the yt-dlp engine takes."""
     try:
         store = _store(store)
         if isinstance(inputs, str):
@@ -312,6 +316,12 @@ def add_items(inputs, *, engine=None, dest=None, group=None, start_paused=False,
             if problem:
                 return _err(problem)
 
+        video_opts, problem = {}, None
+        if engine_options:
+            from .engines import ytdlp as ytdlp_engine
+            video_opts, problem = ytdlp_engine.normalize_options(engine_options)
+            if problem:
+                return _err(problem)
         plan, skipped = [], []
         for text in wanted:
             decision = preview(text, engine=engine, store=store)
@@ -323,16 +333,32 @@ def add_items(inputs, *, engine=None, dest=None, group=None, start_paused=False,
         group_id = None
         if plan and (group or len(plan) > 1):
             group_id = store.ensure_group(group or "Batch of %d" % len(plan), kind="batch")
+        ignored = False
         for text, decision in plan:
             options = dict(where)
             options.update(extras)            # extras never reach the dedupe key (options_hash)
             if timed:
                 options["start_at"] = timed["iso"]
-            title = _initial_title(decision["source"]) if decision["source"].lower().startswith(SOURCE_RE_PREFIXES) \
-                else states.clean_text(text, 80)
+            if decision["engine"] == "ytdlp":
+                options.update(video_opts)
+            elif video_opts:
+                ignored = True
+            if decision["engine"] == "ytdlp":
+                try:
+                    host = urlsplit(decision["source"]).hostname or "the web"
+                except ValueError:
+                    host = "the web"
+                title = "Video from %s" % host
+            elif decision["source"].lower().startswith(SOURCE_RE_PREFIXES):
+                title = _initial_title(decision["source"])
+            else:
+                title = states.clean_text(text, 80)
+            kind = decision["kind"]
+            if decision["engine"] == "ytdlp" and options.get("mode") == "audio":
+                kind = "audio"
             item, created = store.add_item(
                 engine=decision["engine"], source_url=decision["source"], title=title,
-                kind=naming.kind_for(title) if decision["kind"] == "file" else decision["kind"],
+                kind=naming.kind_for(title) if kind == "file" else kind,
                 options=options, group_id=group_id, state="paused" if (start_paused or timed) else "queued",
                 dedupe_key=router.dedupe_key(decision["engine"], router.canonical_url(decision["source"]), options))
             if timed and created:
@@ -346,9 +372,15 @@ def add_items(inputs, *, engine=None, dest=None, group=None, start_paused=False,
                "count": len(added), "library_root": str(root)}
         if not added:
             out["error"] = skipped[0]["problem"] if skipped else "nothing was queued"
+        notes = []
         if added and not daemon_view(store)["alive"]:
-            out["note"] = ("The download hub daemon isn't running, so nothing will start until it is "
-                           "(Menu > Daemons > Download hub).")
+            notes.append("The download hub daemon isn't running, so nothing will start until it is "
+                         "(Menu > Daemons > Download hub).")
+        if ignored:
+            notes.append("mode / quality / container / audio_format only apply to video pages (the yt-dlp "
+                         "engine); they were ignored for the other links.")
+        if notes:
+            out["note"] = " ".join(notes)
         return out
     except Exception as exc:  # noqa: BLE001 - tools never raise
         return _err("couldn't queue that: %s" % exc)
@@ -518,6 +550,65 @@ def status(store=None, item_id=None):
         return _err("couldn't read the hub status: %s" % exc)
 
 
+# --------------------------------------------------------------------------- providers
+
+def list_providers(store=None):
+    """Every provider with its health and row counts (`dl_providers`; the Providers tab later)."""
+    try:
+        store = _store(store)
+        now = store.now()
+        out = []
+        for p in store.list_providers():
+            rows = store.list_items(provider=p["id"], limit=2000, include_disabled=True)
+            live = [r for r in rows if r["state"] not in states.FINAL_STATES and r["state"] != "unknown"]
+            last = p.get("last_report_at")
+            out.append({
+                "id": p["id"], "label": p["label"], "mode": p["mode"], "kind": p["kind"], "icon": p["icon"],
+                "enabled": p["enabled"], "interval_s": p["interval_s"], "capabilities": p["capabilities"],
+                "controls": sorted(p["controls"]), "poll_tool": p.get("poll_tool"), "source": p.get("source_file") or "",
+                "last_report_age_s": None if not last else max(0, int(now - last)),
+                "last_ok_age_s": None if not p.get("last_ok_at") else max(0, int(now - p["last_ok_at"])),
+                "last_error": p.get("last_error"), "rows": len(rows), "live": len(live),
+                "stale": sum(1 for r in live if r["stale"]),
+                "read_only": not p["capabilities"],
+            })
+        return {"ok": True, "providers": out, "count": len(out)}
+    except Exception as exc:  # noqa: BLE001
+        return _err("couldn't read the providers: %s" % exc)
+
+
+def update_provider(provider_id, *, enabled=None, interval_s=None, settings=None, store=None):
+    """The owner's choices for one provider: switch it on / off, how often it is polled, and its
+    settings (e.g. {\"root\": \"D:/Steam\"} for Steam).  Switching off hides its rows and stops its
+    polling; nothing the provider downloaded is touched."""
+    try:
+        store = _store(store)
+        pid = str(provider_id or "").strip()
+        provider = store.get_provider(pid)
+        if provider is None:
+            return _err("no provider called %r (see dl_providers)" % pid[:30])
+        if enabled is None and interval_s is None and settings is None:
+            return _err("say what to change: enabled, interval_s or settings")
+        interval = None
+        if interval_s is not None:
+            interval = states.clean_number(interval_s, 0.5, 3600)
+            if interval is None:
+                return _err("interval_s must be a number of seconds from 0.5 to 3600")
+        if settings is not None:
+            if not isinstance(settings, dict) or any(not isinstance(k, str) for k in settings):
+                return _err("settings must be an object like {\"root\": \"D:/Steam\"}")
+            import json
+            if len(json.dumps(settings, default=str)) > 2048:
+                return _err("those settings are too large")
+        if enabled is not None:
+            store.set_provider_enabled(pid, bool(enabled))
+        if interval is not None or settings is not None:
+            store.update_provider(pid, interval_s=interval, settings=settings)
+        return {"ok": True, "provider": pid, "providers": list_providers(store)["providers"]}
+    except Exception as exc:  # noqa: BLE001
+        return _err("couldn't change that provider: %s" % exc)
+
+
 # --------------------------------------------------------------------------- settings
 
 def library_info(settings):
@@ -679,13 +770,21 @@ def select(store, *, id=None, group=None, engine=None, provider=None, all=False)
 
 
 def _discard_part(store, item):
-    """Delete the `.part` of a cancelled hub download -- only that file, only inside the
-    library root.  The finished file is never touched."""
+    """Delete the leftovers of a cancelled hub download: the `.part` file (HTTP) or the private
+    work folder (yt-dlp) -- only those, only inside the library root.  A finished file is never
+    touched."""
     ref = item.get("source_ref") or {}
+    roots = settings_mod.write_roots(store.get_settings(), item.get("options"))
+    work = ref.get("work_dir")
+    if work:
+        try:
+            from .engines import ytdlp as ytdlp_engine
+            ytdlp_engine.remove_work_dir(work, roots)
+        except Exception:  # noqa: BLE001 - cleanup is best effort
+            pass
     part = ref.get("part")
     if not part:
         return
-    roots = settings_mod.write_roots(store.get_settings(), item.get("options"))
     if naming.under_any(roots, part) and str(part).endswith(".part"):
         try:
             if os.path.exists(part):
@@ -694,20 +793,27 @@ def _discard_part(store, item):
             pass
 
 
-def control_provider_row(item, verb, provider):
-    """Phase 5 plugs in here: run the provider's own control tool for `verb`.  Until then a
-    provider row can't be controlled, and the answer says why."""
+def control_provider_row(item, verb, provider, executor=None, confirm=None):
+    """A provider row's pause / resume / cancel / retry: run the provider's own control tool for
+    that verb.  Returns the same ("pending" | "skipped", detail) pair `_apply` uses.
+
+    No capability, no action: a read-only provider answers "read-only" and nothing runs.  The
+    answer is "pending" (not "changed") because the row only changes when the provider next
+    reports; the hub never edits a provider's row itself."""
+    from . import providers as providers_mod
     caps = effective_capabilities(item, provider)
+    label = (provider or {}).get("label") or item["provider"]
     if verb not in caps:
-        return "read-only: %s doesn't offer %s" % ((provider or {}).get("label") or item["provider"], verb)
-    return "controls for tool-supplied downloads arrive with phase 5"
+        return "skipped", "read-only: %s doesn't offer %s" % (label, verb)
+    ok, detail = providers_mod.run_control(item, verb, provider, executor=executor, confirm=confirm)
+    return ("pending", detail) if ok else ("skipped", detail)
 
 
 def _apply(store, verb, item, daemon_alive, providers, bulk=False):
     """One item, one verb.  Returns ("changed" | "pending" | "skipped", detail)."""
     state = item["state"]
     if item["owner"] != "hub":
-        return "skipped", control_provider_row(item, verb, providers.get(item["provider"]))
+        return control_provider_row(item, verb, providers.get(item["provider"]))
     engine = engines.get(item["engine"])
     held = state in states.ACTIVE_STATES and daemon_alive
 
@@ -779,7 +885,8 @@ def control(verb, *, id=None, group=None, engine=None, provider=None, all=False,
             else:
                 out["skipped"].append({"id": item["id"], "reason": detail})
         if id and not (out["changed"] or out["pending"]):
-            return _err(out["skipped"][0]["reason"] if out["skipped"] else "nothing changed", **out)
+            detail = {k: v for k, v in out.items() if k != "ok"}     # `ok` must stay False here
+            return _err(out["skipped"][0]["reason"] if out["skipped"] else "nothing changed", **detail)
         # A "skipped" row is the normal answer for a bulk call (everything already paused);
         # only a single named download reports it as an error.
         return out

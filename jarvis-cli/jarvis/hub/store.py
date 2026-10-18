@@ -381,6 +381,21 @@ class Store:
             cur = conn.execute("UPDATE providers SET enabled=? WHERE id=?", (1 if enabled else 0, provider_id))
             return cur.rowcount > 0
 
+    def update_provider(self, provider_id, *, interval_s=None, settings=None):
+        """The owner's own choices for a provider (never the tool's): the polling interval and
+        its settings block (merged key by key).  Returns the provider or None."""
+        with self._write() as conn:
+            row = conn.execute("SELECT * FROM providers WHERE id=?", (provider_id,)).fetchone()
+            if row is None:
+                return None
+            if interval_s is not None:
+                conn.execute("UPDATE providers SET interval_s=? WHERE id=?", (interval_s, provider_id))
+            if settings is not None:
+                merged = dict(_loads(row["settings_json"], {}) or {})
+                merged.update(settings)
+                conn.execute("UPDATE providers SET settings_json=? WHERE id=?", (_dumps(merged), provider_id))
+            return _row_to_provider(conn.execute("SELECT * FROM providers WHERE id=?", (provider_id,)).fetchone())
+
     def note_provider_health(self, provider_id, ok=True, error=None):
         now = self.now()
         with self._write() as conn:
