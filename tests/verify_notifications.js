@@ -158,5 +158,36 @@ ok("positionOf: null record -> default", P.positionOf(null) === "bottom-right");
 ok("positionOf: 'Top Left' and 'top_left' read as top-left",
    P.positionOf({ position: "Top Left" }) === "top-left" && P.positionOf({ position: "top_left" }) === "top-left");
 
+// --- E0: the catalog ---------------------------------------------------------------------------------------
+// Without one every helper above used the built-in lists (those checks already passed). With one, the
+// helpers follow it, so a level or position added in notify_registry.py works without editing this file.
+ok("setCatalog rejects nothing / junk / an empty catalog",
+   P.setCatalog(null) === false && P.setCatalog({}) === false && P.setCatalog({ presets: [], positions: [] }) === false);
+const fakeCatalog = {
+  min_level: 1, max_level: 6, default_level: 2, default_position: "top",
+  positions: [{ id: "top" }, { id: "bottom" }],
+  presets: [
+    { level: 1, id: "silent", channels: ["inbox"], flags: { persistent: false, confirm_required: false } },
+    { level: 2, id: "standard", channels: ["inbox", "stream"], flags: { persistent: false, confirm_required: false } },
+    { level: 3, id: "persistent", channels: ["inbox", "stream"], flags: { persistent: true, confirm_required: false } },
+    { level: 4, id: "urgent", channels: ["inbox", "stream"], flags: { persistent: true, confirm_required: false } },
+    { level: 5, id: "ack", channels: ["inbox", "stream"], flags: { persistent: true, confirm_required: false } },
+    { level: 6, id: "confirm", channels: ["inbox", "stream"], flags: { persistent: true, confirm_required: true } },
+  ],
+};
+ok("setCatalog accepts a real catalog", P.setCatalog(fakeCatalog) === true);
+ok("a level above the old 1-5 range is kept when the catalog allows it", P.levelOf({ level: 6 }) === 6);
+ok("a junk level falls to the catalog's default level", P.levelOf({ level: "banana" }) === 2);
+ok("badges come from the preset ids; the default level has none",
+   JSON.stringify([1, 2, 3, 4, 5, 6].map((level) => P.levelBadge({ level }))) === JSON.stringify(["silent", "", "persistent", "urgent", "ack", "confirm"]));
+ok("showsToast follows the preset's channels", P.showsToast(1) === false && P.showsToast(2) === true && P.showsToast(6) === true);
+ok("needsConfirm follows the preset's flags, not a hard-coded 5", P.needsConfirm(5) === false && P.needsConfirm(6) === true);
+ok("positionOf keeps a position the catalog lists", P.positionOf({ position: "bottom" }) === "bottom");
+ok("positionOf: one the catalog does not list falls to the catalog's default", P.positionOf({ position: "left" }) === "top");
+P.setCatalog(null);
+ok("with the catalog gone the built-in rules are back",
+   P.levelOf({ level: 6 }) === 2 && P.showsToast(1) === false && P.showsToast(2) === true
+   && P.needsConfirm(5) === true && P.needsConfirm(4) === false && P.positionOf({ position: "left" }) === "left");
+
 console.log(`\n${n - failed}/${n} checks passed`);
 process.exit(failed ? 1 : 0);

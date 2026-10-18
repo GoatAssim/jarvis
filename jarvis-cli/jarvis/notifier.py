@@ -46,6 +46,7 @@ from datetime import datetime
 from pathlib import Path
 
 from . import ask_output
+from . import notify_registry as registry
 from . import tunables
 from . import wire
 
@@ -59,8 +60,10 @@ ENCODING = "utf-8"
 # `stream` record, at the record's `position`). Everything already stored under
 # the old name -- notify_config.json, a scheduled job's `channels`, a model's
 # `channels` argument -- is read as `desktop`, so nothing changes for it.
-CHANNELS = ("inbox", "stream", "desktop", "voice", "playnite",
-            "discord", "instagram")
+#
+# E0: the channel list is the `channel` rows of notify_registry.ACTIONS -- add a
+# channel there (and its `_deliver_<id>` + `_DELIVERERS` entry below), not here.
+CHANNELS = registry.channel_ids()
 LEGACY_CHANNEL_ALIASES = {"toast": "desktop"}
 
 
@@ -85,9 +88,9 @@ def canonical_channels(names):
 
 # E2 / D-11: where an in-app toast appears. Eight places: four sides and four
 # corners. D-12: bottom-right unless something says otherwise.
-POSITIONS = ("top", "bottom", "left", "right",
-             "top-left", "top-right", "bottom-left", "bottom-right")
-DEFAULT_POSITION = "bottom-right"
+# E0: from notify_registry.POSITIONS (same order as before).
+POSITIONS = registry.position_ids()
+DEFAULT_POSITION = registry.DEFAULT_POSITION
 
 # Cap on retained notifications. The inbox is a queue — unacknowledged items
 # are kept, but a consumer that never acknowledges (a browser nobody opens
@@ -124,20 +127,10 @@ DEFAULT_CONFIG = {
     # channels default above: it keeps the previous toast-on-change
     # behavior while making flood control (K.2.7.2) apply to it by default
     # instead of every burst toasting individually.
-    "levels": {
-        "reminder": 2,
-        "notify": 2,
-        "task": 2,
-        "clipboard_watch": 2,
-        "ambient": 1,
-        # H.3 — the "reminder set / task scheduled" confirmation a creating
-        # tool sends at creation time. Its own kind so it can be turned down
-        # to 1 (inbox only) without touching the reminder that fires later.
-        "scheduled": 2,
-        # L.27 follow-up — a daemon that failed to autostart at startup. Its own
-        # kind so it can be tuned (or silenced to 1) in Settings > Notifications.
-        "daemon": 2,
-    },
+    # E0: the per-kind defaults live in notify_registry.KINDS (one row per kind,
+    # with its label and default level). notify_config.json's own "levels" still
+    # overrides them, key by key, exactly as before.
+    "levels": registry.default_levels(),
     # E2 -- where an in-app toast appears (see POSITIONS). "position" is the
     # global default; "positions" overrides it per kind (or per custom
     # tool/action `source`), the same shape as "levels". An explicit
@@ -168,9 +161,10 @@ DEFAULT_CONFIG = {
 #                  acknowledgment, not an ambient toast — record
 #                  ["confirm_required"], again a frontend behavior flag
 #                  rather than a channel.
-LEVEL_NAMES = {1: "silent", 2: "standard", 3: "persistent", 4: "broadcast", 5: "confirm"}
-MIN_LEVEL, MAX_LEVEL = 1, 5
-DEFAULT_LEVEL = 2
+# E0: the levels are notify_registry.PRESETS; these three names stay for callers.
+LEVEL_NAMES = registry.level_names()
+MIN_LEVEL, MAX_LEVEL = registry.MIN_LEVEL, registry.MAX_LEVEL
+DEFAULT_LEVEL = registry.DEFAULT_LEVEL
 
 # Accepted for backward/forward compatibility: anything still speaking the
 # old three-tier digest.py vocabulary (low/normal/high), or a plain English
@@ -260,12 +254,7 @@ def _canon_position(value):
 def _channels_for_level(level):
     """The channel set implied by a bare level, before any explicit
     `channels` override (which still wins outright — see notify())."""
-    chans = ["inbox"]
-    if level >= 2:
-        chans += ["stream", "desktop"]
-    if level >= 4:
-        chans += ["discord", "instagram"]
-    return chans
+    return registry.channels_for_level(level)
 
 
 def _load_config():
@@ -308,6 +297,25 @@ def ensure_config():
 # ---------------------------------------------------------------------------
 # Inbox
 # ---------------------------------------------------------------------------
+
+
+def catalog():
+    """E0: everything a notification can be and do, as one JSON-able dict --
+    the actions (channels and behaviours), the level presets, the kinds, the
+    positions, and (under `configured`) this owner's current defaults. The
+    single list that `jarvis notify-config --catalog`, /api/notifications/catalog, the
+    Settings screen, the toast renderer and the tool help all read. See
+    notify_registry.py for how to add a new kind, action or level."""
+    return registry.catalog(_load_config())
+
+
+def registry_problems():
+    """Sentences describing any mismatch between notify_registry's table and
+    this module's deliverers (empty list = consistent). Never raises."""
+    try:
+        return registry.problems(_DELIVERERS.keys())
+    except Exception as exc:  # noqa: BLE001
+        return ["could not check the notification registry: %s" % exc]
 
 
 def _load_inbox():
@@ -729,8 +737,9 @@ def notify(title, message, channels=None, kind="notify", job_id=None,
         "level": resolved_level,
         "level_name": LEVEL_NAMES.get(resolved_level, "standard"),
         "position": resolved_position,
-        "persistent": resolved_level >= 3,
-        "confirm_required": resolved_level >= 5,
+        # E0: `persistent` and `confirm_required`, one key per behaviour action in
+        # notify_registry.ACTIONS, set by what the level's preset includes.
+        **registry.flags_for_level(resolved_level),
         # L.30 — the owner's read/acknowledge state, stamped later by
         # mark_read()/mark_all_read(). Absent == not read yet.
         "read_at": None,
@@ -756,7 +765,8 @@ def notify(title, message, channels=None, kind="notify", job_id=None,
     # priorities did — just keyed off the new resolved level, the single
     # source of truth digest.py now reads too (see digest.should_batch_level).
     from . import digest as digest_mod
-    if not channels and resolved_level <= 2 and digest_mod.should_batch_level(resolved_level):
+    if (not channels and registry.digest_eligible(resolved_level)
+            and digest_mod.should_batch_level(resolved_level)):
         try:
             ok = _deliver_inbox(record, config)
         except Exception:  # noqa: BLE001

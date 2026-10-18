@@ -53,6 +53,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 
 from . import atomic_io
+from . import notify_registry
 
 JARVIS_DIR = Path.home() / ".jarvis"
 CONFIG_FILE = JARVIS_DIR / "digest_config.json"
@@ -175,7 +176,8 @@ def should_batch_level(level, cfg=None):
         lvl = int(level)
     except (TypeError, ValueError):
         return False
-    return bool(cfg.get("enabled")) and lvl <= 2
+    # E0: which levels batch is a column in notify_registry.PRESETS (1-2 today).
+    return bool(cfg.get("enabled")) and notify_registry.digest_eligible(lvl)
 
 
 # ---------------------------------------------------------------------------

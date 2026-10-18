@@ -487,6 +487,21 @@
     ["top-right", "Top right"], ["top-left", "Top left"], ["top", "Top"], ["bottom", "Bottom"],
     ["left", "Left"], ["right", "Right"]];
   const LEVELS = [[1, "1 · Silent"], [2, "2 · Standard"], [3, "3 · Persistent"], [4, "4 · Broadcast"], [5, "5 · Confirm"]];
+  // E0: the three lists above (and the kind rows below) are the FALLBACK. The real
+  // ones come from the notifier's catalog (JarvisNotifications.catalog(), served at
+  // /api/notifications/catalog), so a new level, position or kind added in
+  // jarvis/notify_registry.py shows up here with no edit to this file.
+  const NOTIFY_KINDS = [
+    ["reminder", "Reminders", 2], ["notify", "Messages from Jarvis", 2], ["task", "Finished tasks", 2],
+    ["clipboard_watch", "Clipboard watcher", 2], ["ambient", "Ambient suggestions", 1],
+    ["daemon", "Daemon problems", 2],
+  ];
+
+  async function notifyCatalog() {
+    const N = window.JarvisNotifications;
+    if (!N || typeof N.catalog !== "function") return null;
+    return N.catalog() || (await N.loadCatalog()) || null;
+  }
 
   function tunableRows(ctx, key) {
     return ctx.catalog.tunables.filter((t) => t.section === key).map((t) => tunableRow(ctx, t));
@@ -552,13 +567,13 @@
       files: ["notify_config.json"],
       terms: "notification level toast position corner side top bottom left right inbox silent standard persistent broadcast confirm reminder task clipboard ambient daemon autostart",
       build: async (ctx) => {
-        const rows = [
-          ["reminder", "Reminders", 2], ["notify", "Messages from Jarvis", 2], ["task", "Finished tasks", 2],
-          ["clipboard_watch", "Clipboard watcher", 2], ["ambient", "Ambient suggestions", 1],
-          ["daemon", "Daemon problems", 2],
-        ].map(([key, label, fb]) => fileRow(ctx, { file: "notify_config.json", path: ["levels", key], type: "choice", choices: LEVELS, fallback: fb, label,
+        const cat = await notifyCatalog();   // null when it cannot be read: the built-in lists apply
+        const levelChoices = cat ? cat.presets.map((p) => [p.level, `${p.level} · ${p.name}`]) : LEVELS;
+        const positionChoices = cat ? cat.positions.map((p) => [p.id, p.label]) : TOAST_POSITIONS;
+        const kindRows = cat ? cat.kinds.filter((k) => k.settings).map((k) => [k.id, k.label, k.level]) : NOTIFY_KINDS;
+        const rows = kindRows.map(([key, label, fb]) => fileRow(ctx, { file: "notify_config.json", path: ["levels", key], type: "choice", choices: levelChoices, fallback: fb, label,
           help: "Default importance when nothing sets one. Silent = inbox only; Confirm = stays until you acknowledge it." }));
-        const where = fileRow(ctx, { file: "notify_config.json", path: ["position"], type: "choice", choices: TOAST_POSITIONS, fallback: "bottom-right", label: "Where toasts appear",
+        const where = fileRow(ctx, { file: "notify_config.json", path: ["position"], type: "choice", choices: positionChoices, fallback: cat ? cat.default_position : "bottom-right", label: "Where toasts appear",
           help: "The side or corner of the page an in-app notification slides in from, unless the notification or its kind says otherwise." });
         const out = [group("Default level by kind", rows), group("Position", [where])];
         const t = tunableRows(ctx, "notifications");

@@ -3047,6 +3047,16 @@ app.get("/api/notifications/summary", requireJarvis, async (req, res) => {
   return parseJarvisJSON(result, res, "Couldn't read the notification summary.");
 });
 
+// E0 — the notification catalog: every action (channel / behaviour), level preset,
+// kind and position, plus the owner's configured defaults. Read-only. The toast
+// renderer and Settings take their level / position / kind lists from this instead
+// of keeping their own copies; a failed read just leaves them on their built-in
+// fallback lists.
+app.get("/api/notifications/catalog", requireJarvis, async (req, res) => {
+  const result = await runJarvisOnce(["notify-config", "--catalog"], 10000);
+  return parseJarvisJSON(result, res, "Couldn't read the notification catalog.");
+});
+
 // L.30 — the owner read (and, for a persistent / confirm-level one,
 // acknowledged) these. `ids` is a list of notification ids, or `all: true`.
 // Distinct from /ack above, which only records delivery to this consumer.

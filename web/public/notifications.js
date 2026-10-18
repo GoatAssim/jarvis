@@ -57,6 +57,7 @@
   const API = {
     history: "/api/notifications/history",
     summary: "/api/notifications/summary",
+    catalog: "/api/notifications/catalog",
     read: "/api/notifications/read",
     dismiss: "/api/notifications/dismiss",
   };
@@ -111,19 +112,70 @@
     return !n.read_at;
   }
 
+  // E0: the catalog (jarvis notify-config --catalog, served at /api/notifications/
+  // catalog): the positions, level presets and kinds the notifier knows. null until
+  // it loads, and again if the read fails; every helper below then uses the
+  // built-in values above, so a missing catalog never breaks a toast.
+  let catalog = null;
+
+  function setCatalog(next) {
+    const ok = next && Array.isArray(next.presets) && next.presets.length
+      && Array.isArray(next.positions) && next.positions.length;
+    catalog = ok ? next : null;
+    return Boolean(ok);
+  }
+
+  function preset(level) {
+    return catalog ? catalog.presets.find((p) => p.level === level) || null : null;
+  }
+
+  function positionIds() {
+    return catalog ? catalog.positions.map((p) => p.id) : POSITIONS;
+  }
+
+  function defaultPosition() {
+    return catalog && positionIds().includes(catalog.default_position)
+      ? catalog.default_position : DEFAULT_POSITION;
+  }
+
+  function levelRange() {
+    return catalog ? [catalog.min_level, catalog.max_level] : [1, 5];
+  }
+
+  function defaultLevel() {
+    return catalog ? catalog.default_level : 2;
+  }
+
+  /** Does this level draw an in-app toast? (Level 2 and up today.) */
+  function showsToast(level) {
+    const p = preset(level);
+    return p ? p.channels.includes("stream") : level >= 2;
+  }
+
+  /** Does this level need a blocking acknowledge dialog? (Level 5 today.) */
+  function needsConfirm(level) {
+    const p = preset(level);
+    return p ? Boolean(p.flags && p.flags.confirm_required) : level >= 5;
+  }
+
   function positionOf(n) {
     const raw = n && typeof n.position === "string" ? n.position : "";
     const p = raw.toLowerCase().replace(/[_\s]+/g, "-").trim();
-    return POSITIONS.includes(p) ? p : DEFAULT_POSITION;
+    return positionIds().includes(p) ? p : defaultPosition();
   }
 
   function levelOf(n) {
     const lv = Number(n && n.level);
-    return Number.isFinite(lv) && lv >= 1 && lv <= 5 ? lv : 2;   // old records: Standard
+    const [lo, hi] = levelRange();
+    return Number.isFinite(lv) && lv >= lo && lv <= hi ? lv : defaultLevel();   // old records: Standard
   }
 
   function levelBadge(n) {
     const lv = levelOf(n);
+    if (catalog) {
+      const p = preset(lv);
+      return p && lv !== catalog.default_level ? p.id : "";
+    }
     if (lv === 1) return "silent";
     if (lv === 3) return "persistent";
     if (lv === 4) return "broadcast";
@@ -237,7 +289,7 @@
   const PURE = {
     parseTime, groupKey, needsAckOf, isUnreadOf, levelOf, levelBadge, relTime, clockTime,
     fullTime, dayLabel, collapseBursts, sectionByDay, historyQuery, filtersActive, bodyOf,
-    statusLine, positionOf,
+    statusLine, positionOf, setCatalog, showsToast, needsConfirm,
     constants: {
       AUTO_HIDE_MS, AUTO_HIDE_ACK_MS, MAX_VISIBLE, BURST_WINDOW_MS, RESURFACE_INTERVAL_MS,
       RESURFACE_MAX, PANEL_LIMIT, POSITIONS, DEFAULT_POSITION,
@@ -288,6 +340,16 @@
     const UI = global.JarvisUI;
     if (UI && UI.toast) UI.toast({ message, level: level || "info" });
     else console.error(message);
+  }
+
+  /** Fetch the catalog once and keep it. Never throws: on any failure the page
+   *  keeps using the built-in lists. Resolves to the catalog (or null). */
+  async function loadCatalog() {
+    try {
+      const data = await api("GET", API.catalog);
+      if (setCatalog(data)) global.dispatchEvent(new CustomEvent("jarvis:notify-catalog", { detail: data }));
+    } catch { /* keep the built-in lists */ }
+    return catalog;
   }
 
   const counts = { unread: 0, failedUnread: 0, total: 0 };
@@ -369,7 +431,7 @@
   /** The stack for one position, created on first use. The default one keeps
    *  the id `ntf-stack` the page always had. */
   function ensureStack(position) {
-    const pos = POSITIONS.includes(position) ? position : DEFAULT_POSITION;
+    const pos = positionIds().includes(position) ? position : defaultPosition();
     let host = stackHosts.get(pos);
     if (host && document.body.contains(host)) return host;
     host = h("div", {
@@ -624,12 +686,12 @@
     scheduleSync();
 
     const level = levelOf(n);
-    if (level >= 2) {
+    if (showsToast(level)) {
       toastFor(n);
       osNotify(n);
     }
     if (needsAckOf(n)) trackResurface(n);
-    if (level >= 5 || n.confirm_required) {
+    if (needsConfirm(level) || n.confirm_required) {
       confirmQueue.push(n);
       pumpConfirms();
     }
@@ -1022,6 +1084,7 @@
 
   function init() {
     ensureStack(DEFAULT_POSITION);
+    loadCatalog();
     bind("btn-notifications-fab", "click", () => openPanel());
     bind("btn-notifications-refresh", "click", () => loadPanel());
     bind("btn-notifications-markall", "click", () => markAllRead());
@@ -1043,6 +1106,8 @@
     show, open: openPanel, close: closePanel, isOpen: panelOpen,
     refresh: () => (panelOpen() ? loadPanel() : syncSummary(false)),
     markRead, _pure: PURE,
+    // E0: the catalog the notifier served (null until loaded); Settings reads it.
+    catalog: () => catalog, loadCatalog,
   };
 
   if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", init);

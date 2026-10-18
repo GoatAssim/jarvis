@@ -783,6 +783,16 @@ def check_notifications():
                          "Set \"enabled\": true in ~/.jarvis/notify_config.json",
                          "notify"))
 
+    # E0: the registry table and the notifier's deliverers must describe the same
+    # channels; a mismatch means a channel that is listed but cannot deliver (or
+    # the reverse).
+    mismatch = notifier.registry_problems()
+    if mismatch:
+        out.append(Check("notify.registry", "Notification registry", WARN,
+                         "; ".join(mismatch),
+                         "Fix jarvis/notify_registry.py or jarvis/notifier.py so they agree",
+                         "notify"))
+
     # A channel named in config that isn't a real channel is a typo that
     # silently drops that delivery route.
     for kind, channels in (cfg.get("channels") or {}).items():

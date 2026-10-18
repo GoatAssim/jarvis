@@ -42,19 +42,16 @@ participates in the partially-initialized-jarvis.tools cycle that silently
 drops an action from the catalog.
 """
 
+from .. import notify_registry  # E0: plain data, safe at module level
 from .. import scheduler
 from ..scheduler import SchedulerError
 
 # Channel names accepted on any of the three creating tools. Kept in one
 # place so a typo'd channel produces a clear error listing the real ones
 # rather than being silently dropped at delivery time.
-_CHANNEL_HELP = (
-    "Where to deliver it: 'inbox' (always on — the durable queue the web "
-    "console and terminal both drain), 'stream' (live in an open web chat), "
-    "'desktop' (native OS notification; the old name 'toast' still works), "
-    "'voice' (spoken aloud), 'playnite'. "
-    "Omit to use the user's configured defaults, which is almost always right."
-)
+# E0: both help strings are built from notify_registry's table, so a new
+# channel or level reaches the model's tool descriptions without editing this file.
+_CHANNEL_HELP = notify_registry.channel_help()
 
 _WHEN_HELP = (
     "When it should happen, in the user's own words — 'in 20 minutes', "
@@ -116,13 +113,7 @@ def _channels(args):
     return channels or None
 
 
-_LEVEL_HELP = (
-    "How important this is, 1-5 (K.2.7): 1 silent (inbox only), "
-    "2 standard (adds a native toast — the default), 3 persistent (the "
-    "toast stays until acknowledged), 4 broadcast (also DMs the owner on "
-    "every connected channel), 5 confirm (requires an explicit "
-    "acknowledgment, not just a toast). Omit to use the configured default."
-)
+_LEVEL_HELP = notify_registry.level_help()
 
 
 def _level(args):
@@ -133,7 +124,7 @@ def _level(args):
         lvl = int(raw)
     except (TypeError, ValueError):
         return None
-    return lvl if 1 <= lvl <= 5 else None
+    return lvl if notify_registry.MIN_LEVEL <= lvl <= notify_registry.MAX_LEVEL else None
 
 
 # ---------------------------------------------------------------------------
