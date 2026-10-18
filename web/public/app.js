@@ -1590,6 +1590,18 @@
     if (tag) tag.textContent = id || "";
   }
 
+  // E3: the one yes/no question for "delete this?" -- JarvisUI.confirm (ui-kit.js)
+  // instead of the browser's native confirm dialog. Resolves true only on an explicit
+  // yes; Escape, a click outside and the close button are all no, the focus
+  // starts on Cancel, and if ui-kit.js did not load the answer is no (a delete
+  // that cannot ask first does not happen).
+  async function confirmDelete(title, body, confirmLabel) {
+    if (!window.JarvisUI || typeof window.JarvisUI.confirm !== "function") return false;
+    return (await window.JarvisUI.confirm({
+      title, body, confirmLabel: confirmLabel || "Delete", level: "danger", focusCancel: true,
+    })) === true;
+  }
+
   // The generic one-line toast: errors and short confirmations ("Copied").
   // E3: there is no `#toast` element any more. This hands off to the page's one
   // toast host (JarvisUI.toast, ui-kit.js). It passes the old 4.2 s timeout on
@@ -1607,55 +1619,66 @@
     }
   }
 
-  // Bottom-left popup for a directly-run saved command that's paused on
-  // its own confirm_required/ai_review flags (see server.js's
-  // "confirm-request" message, fired from cli.py's confirm_direct_command
-  // — completely separate from the in-thread ask-confirm bubble, since a
-  // direct run has no chat thread to render into). Shows the actual
-  // command content (risk_note.command_run) alongside any AI risk note
-  // and the command's own safety flags, so the user has real information
-  // before approving — not just the bare tool name and typed args.
-  function showRunConfirmPopup(tool, args, riskNote) {
-    const popup = qs("#run-confirm-popup");
-    popup.innerHTML = "";
-    popup.hidden = false;
+  // A directly-run saved command that is paused on its own
+  // confirm_required / ai_review flags (see server.js's "confirm-request" message,
+  // fired from cli.py's confirm_direct_command -- completely separate from the
+  // in-thread ask-confirm bubble, since a direct run has no chat thread to render
+  // into). E3: this used to be its own bottom-left popup element; it is now the
+  // page's one modal (JarvisUI.confirm), so there is one confirm dialog to style,
+  // focus-trap and test. It still shows the actual command content
+  // (risk_note.command_run) alongside any AI risk note and the command's own
+  // safety flags, so the user has real information before approving -- not just
+  // the bare tool name and typed args. Escape, a click outside and the close
+  // button all mean NO (JarvisUI.confirm never treats dismissal as yes), and the
+  // focus starts on "No, cancel".
+  //
+  // The child process is BLOCKED until a confirm-response arrives, so exactly one
+  // is sent per request -- except when the run ends first ("exit" / "error"):
+  // then the dialog is closed from here and nothing is sent, as before.
+  let runConfirmOpen = null;
 
-    popup.appendChild(el("div", { class: "run-confirm-popup__title" }, [
-      "\u26a0 Run ", el("span", { class: "run-confirm-popup__tool" }, tool || "(unknown command)"), "?",
-    ]));
-
-    popup.appendChild(confirmValuePre(args || {}, "run-confirm-popup__args"));
-
+  async function showRunConfirmPopup(tool, args, riskNote) {
+    const asText = (v) => (typeof v === "string" ? v : JSON.stringify(v, null, 2));
+    const pre = ["Arguments", asText(args || {})];
     if (riskNote && riskNote.command_run !== undefined && riskNote.command_run !== null) {
-      popup.appendChild(el("div", { class: "run-confirm-popup__risk-label" }, "Command:"));
-      popup.appendChild(confirmValuePre(riskNote.command_run, "run-confirm-popup__args"));
+      pre.push("", "Command", asText(riskNote.command_run));
     }
-
+    const body = [];
     if (riskNote && riskNote.note) {
-      const label = riskNote.provider ? `AI review \u2014 ${riskNote.provider}` : "AI review";
-      popup.appendChild(el("div", { class: "run-confirm-popup__risk" }, [
-        el("div", { class: "run-confirm-popup__risk-label" }, label),
-        el("div", { class: "run-confirm-popup__risk-note" }, riskNote.note),
-      ]));
+      body.push((riskNote.provider ? `AI review \u2014 ${riskNote.provider}` : "AI review") + ": " + riskNote.note);
     }
-
     if (riskNote && riskNote.command_flags) {
       const cf = riskNote.command_flags;
-      popup.appendChild(el("div", { class: "run-confirm-popup__flags" },
-        `Flags: confirm_required=${!!cf.confirm_required}, ai_review=${!!cf.ai_review}`));
+      body.push(`Flags: confirm_required=${!!cf.confirm_required}, ai_review=${!!cf.ai_review}`);
     }
 
-    const yesBtn = el("button", { class: "btn btn--primary", type: "button" }, "Yes, run it");
-    const noBtn = el("button", { class: "btn btn--ghost", type: "button" }, "No, cancel");
-    popup.appendChild(el("div", { class: "run-confirm-popup__actions" }, [noBtn, yesBtn]));
-
-    function resolve(approved) {
-      popup.hidden = true;
-      popup.innerHTML = "";
-      wsSend({ type: "confirm-response", approved });
+    const mine = { ended: false };
+    runConfirmOpen = mine;
+    let approved = false;
+    try {
+      approved = (await JarvisUI.confirm({
+        title: `Run ${tool || "(unknown command)"}?`,
+        body: body.join("\n\n"),
+        pre: pre.join("\n"),
+        level: "warn",
+        confirmLabel: "Yes, run it",
+        cancelLabel: "No, cancel",
+        focusCancel: true,
+      })) === true;
+    } catch (_) {
+      approved = false;
     }
-    yesBtn.addEventListener("click", () => resolve(true));
-    noBtn.addEventListener("click", () => resolve(false));
+    if (runConfirmOpen === mine) runConfirmOpen = null;
+    if (mine.ended) return;
+    wsSend({ type: "confirm-response", approved });
+  }
+
+  // The run finished or failed while the dialog was open: close it, send nothing.
+  function dismissRunConfirm() {
+    if (!runConfirmOpen) return;
+    runConfirmOpen.ended = true;
+    runConfirmOpen = null;
+    if (window.JarvisUI && typeof window.JarvisUI.close === "function") window.JarvisUI.close(false);
   }
 
   // E3: this page no longer calls the browser Notification API itself. The one
@@ -2533,7 +2556,7 @@
   qs("#btn-delete").addEventListener("click", async () => {
     if (!state.selected) return;
     const name = state.selected;
-    if (!confirm(`Delete "${name}" from commands.json? This can't be undone.`)) return;
+    if (!(await confirmDelete(`Delete "${name}"?`, "It is removed from commands.json. This can't be undone."))) return;
     try {
       await Api.deleteCommand(name);
       state.selected = null;
@@ -2918,7 +2941,7 @@
         break;
       case "exit":
         setRunning(false);
-        qs("#run-confirm-popup").hidden = true;
+        dismissRunConfirm();
         if (msg.signal) {
           consoleAppend(`\u25a0 stopped (${msg.signal})`, "exit-bad");
           notifyTaskDone(`Stopped (${msg.signal}).`, true);
@@ -2932,7 +2955,7 @@
         break;
       case "error":
         setRunning(false);
-        qs("#run-confirm-popup").hidden = true;
+        dismissRunConfirm();
         consoleAppend(`\u26a0 ${msg.message}`, "exit-bad");
         toast(msg.message);
         notifyTaskDone(msg.message, true);
@@ -7239,7 +7262,7 @@
 
   qs("#btn-skill-delete").addEventListener("click", async () => {
     if (!selectedSkill) return;
-    if (!window.confirm(`Delete "${selectedSkill}" and everything in its folder? This can't be undone.`)) return;
+    if (!(await confirmDelete(`Delete the skill "${selectedSkill}"?`, "Everything in its folder goes with it. This can't be undone."))) return;
     try {
       await api("DELETE", `/api/skills/${encodeURIComponent(selectedSkill)}`);
       toast("Skill removed.", "info");
@@ -7828,7 +7851,7 @@
   btnLogsClear.addEventListener("click", async () => {
     if (!state.logsSelected) return;
     const id = state.logsSelected;
-    if (!confirm(`Clear the log for "${logsEntriesTitle.textContent}"? This can't be undone.`)) return;
+    if (!(await confirmDelete(`Clear the log for "${logsEntriesTitle.textContent}"?`, "This can't be undone.", "Clear"))) return;
     btnLogsClear.disabled = true;
     try {
       await Api.clearLog(id);
@@ -8216,7 +8239,7 @@
   }
 
   async function deleteConversationConfirm(id) {
-    if (!confirm("Delete this conversation? This can't be undone.")) return;
+    if (!(await confirmDelete("Delete this conversation?", "This can't be undone."))) return;
     try {
       await Api.deleteConversation(id);
     } catch (e) {

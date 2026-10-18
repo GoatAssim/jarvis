@@ -56,17 +56,65 @@ html.jui-no-scanlines .console::before{ display: none !important; }
 .jui-layer > *{ pointer-events: auto; }
 
 /* ---------------------------------------------------------------------------
- * Toasts — bottom-right stack. Bottom rather than top because the top-right
- * of this app is where the panel menu opens, and a toast landing on top of a
- * menu the user just opened is a toast that eats the click.
+ * Toasts — the page's ONE toast host (E3). A stack per position (top, bottom,
+ * left, right and the four corners), made by JarvisUI.toastStack(). The
+ * one-line `.jui-toast` messages and the notifier's `.ntf` cards (notifications.css)
+ * are both children of it, so they stack together. Bottom-right is the default:
+ * the top-right of this app is where the panel menu opens, and a toast landing
+ * on top of a menu the user just opened is a toast that eats the click.
+ *
+ * Edge offsets add the phone safe areas. A page steps a stack clear of its own
+ * chrome (the Logs / Notifications buttons, the sequence bar) in ITS stylesheet;
+ * the numbers here are only the generic edge.
  * ------------------------------------------------------------------------ */
 
 .jui-toasts{
   position: fixed;
-  right: 18px; bottom: 18px;
+  z-index: 9300;                        /* above the modal backdrop (9200) in the layer */
+  width: min(460px, calc(100vw - 24px));
   display: flex; flex-direction: column; gap: 8px;
-  max-width: min(420px, calc(100vw - 36px));
-  z-index: 9100;
+  pointer-events: none;                 /* the gaps never eat a click */
+  --ntf-from: translateY(-8px);         /* where a card slides in from */
+  --ntf-edge: 14px;
+}
+.jui-toasts > *{ pointer-events: auto; }
+
+.jui-toasts--top{
+  top: calc(var(--ntf-edge) + env(safe-area-inset-top, 0px));
+  left: 50%; transform: translateX(-50%);
+}
+.jui-toasts--bottom{
+  bottom: calc(18px + env(safe-area-inset-bottom, 0px));
+  left: 50%; transform: translateX(-50%);
+  --ntf-from: translateY(8px);
+}
+.jui-toasts--left, .jui-toasts--right{
+  top: 50%; transform: translateY(-50%);
+  width: min(360px, calc(100vw - 24px));
+}
+.jui-toasts--left{ left: calc(var(--ntf-edge) + env(safe-area-inset-left, 0px)); --ntf-from: translateX(-8px); }
+.jui-toasts--right{ right: calc(var(--ntf-edge) + env(safe-area-inset-right, 0px)); --ntf-from: translateX(8px); }
+.jui-toasts--top-left{
+  top: calc(var(--ntf-edge) + env(safe-area-inset-top, 0px));
+  left: calc(var(--ntf-edge) + env(safe-area-inset-left, 0px));
+  width: min(360px, calc(100vw - 24px));
+}
+.jui-toasts--top-right{
+  top: calc(var(--ntf-edge) + env(safe-area-inset-top, 0px));
+  right: calc(var(--ntf-edge) + env(safe-area-inset-right, 0px));
+  width: min(360px, calc(100vw - 24px));
+}
+.jui-toasts--bottom-left{
+  bottom: calc(18px + env(safe-area-inset-bottom, 0px));
+  left: calc(var(--ntf-edge) + env(safe-area-inset-left, 0px));
+  width: min(360px, calc(100vw - 24px));
+  --ntf-from: translateY(8px);
+}
+.jui-toasts--bottom-right{
+  bottom: calc(18px + env(safe-area-inset-bottom, 0px));
+  right: calc(var(--ntf-edge) + env(safe-area-inset-right, 0px));
+  width: min(360px, calc(100vw - 24px));
+  --ntf-from: translateY(8px);
 }
 
 .jui-toast{
@@ -79,7 +127,7 @@ html.jui-no-scanlines .console::before{ display: none !important; }
   color: var(--text);
   box-shadow: 0 8px 28px rgba(0, 0, 0, calc(0.45 * var(--jui-glow-scale)));
   font-size: 0.86rem; line-height: 1.45;
-  opacity: 0; transform: translateY(8px);
+  opacity: 0; transform: var(--ntf-from, translateY(8px));
   transition: opacity 180ms ease, transform 180ms ease;
 }
 .jui-toast.is-in{ opacity: 1; transform: none; }

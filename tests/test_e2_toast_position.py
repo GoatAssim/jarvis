@@ -219,10 +219,13 @@ def test_web_side_is_wired():
     for pos in EIGHT:
         check(f"Settings offers {pos}", f'["{pos}", ' in settings)
     js = (web / "notifications.js").read_text(encoding="utf-8")
-    check("the toast host makes a stack per position", "ensureStack(positionOf(n))" in js and "stackHosts" in js)
-    css = (web / "notifications.css").read_text(encoding="utf-8")
+    # E3: the stacks are the page's one toast host, made by ui-kit.js (JarvisUI.toastStack);
+    # notifications.js asks it for the stack of a notification's position.
+    check("the toast host makes a stack per position",
+          "ensureStack(positionOf(n))" in js and "UI.toastStack(pos)" in js)
+    css = (web / "ui-kit.css").read_text(encoding="utf-8")
     for pos in EIGHT:
-        check(f"CSS has a stack for {pos}", f".ntf-stack--{pos}" in css)
+        check(f"CSS has a stack for {pos}", f".jui-toasts--{pos}" in css)
     sched = (web / "schedules.js").read_text(encoding="utf-8")
     check("Schedules offers desktop, not toast", '["desktop", "Desktop"]' in sched and '["toast", "Toast"]' not in sched)
     check("Schedules maps an old stored `toast` to desktop", "legacyChannel" in sched)

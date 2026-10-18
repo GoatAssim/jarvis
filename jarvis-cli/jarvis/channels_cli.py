@@ -523,9 +523,10 @@ def handle(argv):
         platform = rest[0] if rest and rest[0] in PLATFORMS else None
         offset = 1 if platform else 0
         message = " ".join(rest[offset:]) or "Test message from Jarvis."
-        result = outbound.notify_owner(
+        result = outbound.notify_owner_recorded(
             message, platforms=[platform] if platform else None,
-            first_success_only=False)
+            first_success_only=False, source="channels-test",
+            title="Test message from channels-test")
         print(json.dumps(result, indent=2))
         sys.exit(0 if result["ok"] else 1)
 

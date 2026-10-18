@@ -195,7 +195,7 @@ function ok(name, cond, detail) {
   // ---- 5. toasts don't land on top of Run Sequence ---------------------------
   {
     const page = await open(1500, 900);
-    await page.evaluate(() => { const h = document.createElement("div"); h.id = "jui-toasts"; h.className = "jui-toasts"; const t = document.createElement("div"); t.className = "jui-toast is-in"; t.textContent = 'Added "x" to sequence.'; h.appendChild(t); document.body.appendChild(h); window.__setBar(2); });
+    await page.evaluate(() => { const h = document.createElement("div"); h.id = "jui-toasts"; h.className = "jui-toasts jui-toasts--bottom-right"; const t = document.createElement("div"); t.className = "jui-toast is-in"; t.textContent = 'Added "x" to sequence.'; h.appendChild(t); document.body.appendChild(h); window.__setBar(2); });
     const r = await page.evaluate(() => ({ bar: document.getElementById("sequence-bar").getBoundingClientRect().top, toast: document.querySelector(".jui-toasts").getBoundingClientRect().bottom }));
     ok("toast stack sits above the bar, not over Run Sequence", r.toast <= r.bar, `toast.bottom=${r.toast} bar.top=${r.bar}`);
     await page.close();

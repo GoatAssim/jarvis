@@ -33,10 +33,12 @@ alarm, never silence about a thread the owner asked to watch.
 WHAT THE OWNER IS TOLD
 ----------------------
 A one-line summary the classifier wrote -- never the raw thread. Urgency 1
-goes out through `outbound.notify_owner` (a DM to the owner's own account);
-urgency 2 goes to every channel. Both also leave a record in the notification
-inbox through `notifier`. The decision log (`awaiting_log.jsonl`) stores the
-verdict and why, not what the person wrote.
+goes out through `outbound.notify_owner_recorded` (a DM to the owner's own
+account, first platform that works); urgency 2 goes to every channel. Both also
+leave ONE record in the notification inbox (E4b): silent for urgency 1, and for
+urgency 2 a normal notification (toast + desktop) too. An unimportant reply is a
+silent `reply_digest` record only. The decision log (`awaiting_log.jsonl`)
+stores the verdict and why, not what the person wrote.
 
 FEEDBACK
 --------
@@ -293,12 +295,23 @@ def _digest(name, summary, platform):
 
 
 def _deliver(name, summary, urgency):
-    """Returns the delivery summary dict. urgency 2 -> every channel."""
+    """Returns the delivery summary dict. urgency 2 -> every channel.
+
+    E4b: the DM also leaves its inbox record (outbound.notify_owner_recorded):
+    silent for an ordinary important reply, and for an URGENT one (urgency 2)
+    the standard level -- the in-app toast and a desktop notification as well,
+    never a second DM. The result carries `recorded` so _consider() does not add
+    a second, digest record for the same reply.
+    """
     from . import outbound
-    prefix = "URGENT — " if urgency >= 2 else ""
+    urgent = urgency >= 2
+    prefix = "URGENT — " if urgent else ""
     text = f"{prefix}{name}: {summary}"
     try:
-        return outbound.notify_owner(text, first_success_only=(urgency < 2))
+        return outbound.notify_owner_recorded(
+            text, first_success_only=(not urgent), source="awaiting",
+            level=2 if urgent else None,
+            title=f"{'Urgent reply' if urgent else 'Reply'} from {name}")
     except Exception as exc:  # noqa: BLE001
         return {"ok": False, "error": str(exc)}
 
@@ -378,7 +391,10 @@ def _consider(platform, user_id, name, text, now, classifier, deliver):
     # One important reply answers the wait.
     data["threads"].pop(person, None)
     _save(data)
-    _digest(shown, summary, platform)      # the inbox keeps a record either way
+    # The inbox keeps a record either way. The real _deliver() already wrote one
+    # (with the DM's outcome, E4b); a stand-in deliver() did not, so add the digest line.
+    if not (result or {}).get("recorded"):
+        _digest(shown, summary, platform)
     _log(person, "delivered", "notified", urgency=urgency,
          ok=bool((result or {}).get("ok", True)))
     return {"decision": "notified", "stage": "delivered", "urgency": urgency,

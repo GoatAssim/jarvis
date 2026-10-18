@@ -187,7 +187,7 @@ jarvis-cli/jarvis/
     digest.py  notifier.py  stats.py
     notify_registry.py    E0: the ONE table of what a notification can be and do -- ACTIONS (channels +
                           behaviours), PRESETS (levels 1-5), KINDS (reminder, task, daemon... and the
-                          silent `owner_dm`, E4), POSITIONS. notifier, the CLI, the scheduler tool help and
+                          silent `owner_dm`, E4, and `reply_digest`, E4b), POSITIONS. notifier, the CLI, the scheduler tool help and
                           Settings read it; add a kind here, not at a call site. Tests: test_notify_registry.py
 
     # --- reachability -----------------------------------------------------
@@ -280,7 +280,8 @@ jarvis-cli/jarvis/
         recall_check.py   L.21: does an "I remember..." / "you told me..." sentence trace back to a saved
                           item (or to what the person just said)? Log-only so far; no rewrite
         awaiting.py       L.23: threads the owner is waiting on; gates -> one classifier call ->
-                          digest or notify_owner; log + feedback bias in channels/awaiting*.json
+                          digest or notify_owner_recorded (E4b: urgent = a normal notification);
+                          log + feedback bias in channels/awaiting*.json
         thinking.py       L.44: /thinking + the per-person on/off(+lock) -> think_override; L.42.2: wants_trace() (owner only,
                           while "on") and format_trace() (Discord ||spoiler|| messages, Instagram one plain "Thinking:" message)
         approvals.py      L.29 / L.42.1: the chat confirmation channel -- owner-only Approve / Deny (Discord buttons, Instagram
@@ -322,7 +323,9 @@ jarvis-cli/jarvis/
                           calls permissions.decide + user_perms.resolve_tool_access, the
                           same functions a real message uses; writes nothing)
         dedupe.py         NEW — has this message id already been handled
-        outbound.py       DM the owner (dm_owner) or one known person (dm_person, L.20)
+        outbound.py       DM the owner (dm_owner) or one known person (dm_person, L.20);
+                          E4b: notify_owner_recorded() = notify_owner() + one silent inbox record
+                          (urgent: standard level) -- what every owner notice calls
 
     # --- observability ----------------------------------------------------
     logs.py               structured conversation log entries + search
@@ -470,7 +473,10 @@ web/
     public/notifications.js/.css Notifications (L.30 rework; E2: one toast stack
                                  per position -- top, bottom, left, right, the four
                                  corners, default bottom-right -- chosen by the
-                                 record's `position`): the toast stack, the
+                                 record's `position`; E3: the stacks are ui-kit.js's
+                                 JarvisUI.toastStack, the page's ONE toast host,
+                                 shared with JarvisUI.toast; the .css keeps only this
+                                 page's clearances): the toast cards, the
                                  inbox panel (read/unread, filters, search, burst
                                  collapsing, dismiss), the unread badge and the
                                  acknowledgment rules for levels 3-5. app.js only
@@ -936,7 +942,8 @@ silently never runs.
 | `test_l16_preflight_authorization.py` | L.16 round 2: `preflight.py` (an unattended ask that states a need the PC can't meet stops before any model call; fails open), the scheduler reporting that as a failure, the `message` kind in `job_risk`, `scheduler._unattended_tool_env` (a tool job now runs as unattended), and `send_dm`'s one exception to "never unattended" |
 | `test_notify_registry.py` | E0: the `notify_registry` tables (kinds, actions, presets, positions) and the notifier agree; old `notify_config.json` files still get every kind's default |
 | `test_e4_notify_owner_record.py` | E4: the `notify_owner` tool writes one silent `owner_dm` record per call via `notifier.record_owner_dm` (failed only if no platform was reached, with each platform's reason); the tool's result dict is unchanged; a raising notifier changes nothing; a higher level never adds a DM channel, so no double send; the digest does not re-batch these records |
-| `test_one_notification_system.py` | E5: static ratchet (reads source, runs nothing) -- exact counts of browser `Notification`, native `confirm()`, `#toast`, local `toast()` helpers, OS-toast calls and direct owner DMs; fails on one added AND on one removed (lower the baseline); every `kind=` is in `KINDS`; skips the Download Hub files |
+| `test_one_notification_system.py` | E5 (+ E3, E4b done): static ratchet (reads source, runs nothing) -- exact counts of browser `Notification`, native `confirm()` (zero), `#toast` (zero), local `toast()` helpers, OS-toast calls and direct owner DMs; ONE toast host (`jui-toasts`, no `ntf-stack`, no run-confirm popup); the recorded DMs (`notify_owner_recorded`); fails on one added AND on one removed (lower the baseline); every `kind=` is in `KINDS`; skips the Download Hub files |
+| `test_e4b_owner_dm_records.py` | E4b: `reply_digest` kind; `record_owner_dm(level=, title=)`; `outbound.notify_owner_recorded` (same outcome + `recorded`, failed DM = failed record, raising notifier changes nothing); new-sender ping, rule notice, Instagram transport notice and `channels-test` leave silent records; an urgent awaiting reply is ONE standard-level record (no second `reply_digest`), a non-urgent one silent |
 | `test_e2_toast_position.py` | E2: toast position (`normalize_position`, config `position` / `positions`, `notify(position=)`, `notify-send --position`), the native OS notification renamed `desktop` with `toast` kept as an alias (code, old config files, scheduler tools), Settings row and one stack per position (static) |
 | `test_notification_inbox.py` | L.30: owner read/acknowledge state vs delivery (`seen_by`), mark read/all, dismiss, clear read, `summary()`, history filters, state-aware pruning (read first, unacknowledged last), the inbox lock, the `notify-*` verbs |
 | `test_mcp_edit.py` | L.31: editing `mcp_config.json` (`save_server` / `set_server_flag` / `remove_server`), validation, secrets kept on edit, a malformed config is never overwritten, the extra `status()` fields and states, the `mcp-edit` CLI verb, and that no model tool can reach the edit functions |

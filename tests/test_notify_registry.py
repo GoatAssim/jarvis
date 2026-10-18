@@ -52,9 +52,10 @@ PASS, FAIL = [], []
 EIGHT = ("top", "bottom", "left", "right", "top-left", "top-right", "bottom-left", "bottom-right")
 OLD_CHANNELS = ("inbox", "stream", "desktop", "voice", "playnite", "discord", "instagram")
 OLD_LEVELS = {1: "silent", 2: "standard", 3: "persistent", 4: "broadcast", 5: "confirm"}
-# "owner_dm" (silent, no Settings row) was added by E4 for the notify_owner tool's inbox record.
+# "owner_dm" (silent, no Settings row) was added by E4 for the notify_owner tool's inbox record;
+# "reply_digest" (silent, no Settings row) by E4b for channels/awaiting.py's records.
 OLD_KIND_LEVELS = {"reminder": 2, "notify": 2, "task": 2, "clipboard_watch": 2, "ambient": 1,
-                   "scheduled": 2, "daemon": 2, "owner_dm": 1}
+                   "scheduled": 2, "daemon": 2, "owner_dm": 1, "reply_digest": 1}
 
 
 def check(name, cond, detail=""):
@@ -152,7 +153,7 @@ def test_values_the_rest_of_jarvis_imports_are_unchanged():
     check("POSITIONS is the same eight, same order", tuple(notifier.POSITIONS) == EIGHT, notifier.POSITIONS)
     check("DEFAULT_POSITION is bottom-right", notifier.DEFAULT_POSITION == "bottom-right")
     check("the legacy `toast` alias still maps to desktop", notifier.canonical_channel("toast") == "desktop")
-    check("default per-kind levels are the same (plus E4's silent `owner_dm`)", notifier.DEFAULT_CONFIG["levels"] == OLD_KIND_LEVELS,
+    check("default per-kind levels are the same (plus the silent `owner_dm` and `reply_digest`)", notifier.DEFAULT_CONFIG["levels"] == OLD_KIND_LEVELS,
           notifier.DEFAULT_CONFIG["levels"])
     check("DEFAULT_CONFIG per-kind channels are untouched",
           notifier.DEFAULT_CONFIG["channels"]["task"] == ["inbox", "stream"])

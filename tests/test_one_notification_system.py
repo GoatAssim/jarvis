@@ -7,20 +7,21 @@ The rule (AGENTS.md): every message shown to the person goes through
 to tell the person something:
 
   * a second place that calls the browser's `new Notification(...)` or asks for its permission;
-  * a second toast host element (`jui-toasts`, `ntf-stack`) or a revival of the old `#toast`;
+  * a second toast host element (the one host is `jui-toasts`, drawn by ui-kit.js; the old
+    `ntf-stack` and `#toast` must not come back);
   * a new file that defines its own `toast()` helper, or a helper that does not hand off to
     `JarvisUI.toast` / the host;
   * a new native `confirm()` / `alert()` / `prompt()`;
-  * another use of the run-confirm popup element;
+  * the run-confirm popup element (gone: that question is JarvisUI.confirm now);
   * a native OS notification (PowerShell toast, osascript, notify-send) outside notifier.py;
   * a new direct DM to the owner (`outbound.dm_owner / notify_owner / dm_person`);
   * a `kind=` passed to `notifier.notify()` that is not in notify_registry.KINDS.
 
-It is a RATCHET, not a wish: the numbers below are what the code has TODAY, including the debt
-that E3 / E4b will remove. A count that goes UP fails ("you added one"). A count that goes DOWN
-also fails, with the new number to write here, so the baseline tightens as the debt is paid and
-nobody can quietly put it back. When an E3 or E4b patch removes one of these, lower the number
-in the same patch.
+It is a RATCHET, not a wish: the numbers below are what the code has TODAY. E3 and E4b are paid
+off, so the web counts are zero and the only direct DMs left are the ones that are not notices
+(see DM_CALLS). A count that goes UP fails ("you added one"). A count that goes DOWN also fails,
+with the new number to write here, so the baseline tightens as debt is paid and nobody can
+quietly put it back.
 
 Does not touch the Download Hub (jarvis/hub/, actions/download_hub.py, actions/hub_ui/): those
 files are skipped, not scanned.
@@ -74,19 +75,22 @@ JS_COUNTS = {
     "the old #toast element": (
         r"qs\(\"#toast\"\)|getElementById\(\"toast\"\)|querySelector\(\"#toast\"\)",
         {}),
-    # C10 debt: native confirm() on deleting a command / skill / log / conversation, and the
-    # settings.js fallback used when JarvisUI is missing. ui-kit.js defines JarvisUI.confirm.
+    # E3 (done): no native confirm() / alert() / prompt() anywhere. Deleting a command / skill /
+    # log / conversation asks with JarvisUI.confirm (app.js confirmDelete), and settings.js
+    # answers "no" instead of falling back to the browser's dialog. ui-kit.js defines them.
     "native confirm / alert / prompt": (
         r"(?<![\w.])(?:window\.)?(?:confirm|alert|prompt)\(",
-        {"app.js": 4, "settings.js": 1}),
+        {}),
 }
 JS_COUNT_EXEMPT = {"native confirm / alert / prompt": {"ui-kit.js"}}
 
-# Web: a token that may appear in these files ONLY.
+# Web: a token that may appear in these files ONLY (an empty set: nowhere).
 JS_FILES_ONLY = {
-    "the JarvisUI toast host (jui-toasts)": ("jui-toasts", {"ui-kit.js"}),
-    "the notifier toast stack (ntf-stack)": ("ntf-stack", {"notifications.js"}),
-    "the run-confirm popup (E3 debt)": ("run-confirm-popup", {"app.js"}),
+    # E3 (done): the ONE toast host. ui-kit.js draws a stack per position; notifications.js and
+    # app.js hand their messages to it (JarvisUI.toastStack / JarvisUI.toast).
+    "the one toast host (jui-toasts)": ("jui-toasts", {"ui-kit.js"}),
+    "the old notifier stack (ntf-stack)": ("ntf-stack", set()),
+    "the old run-confirm popup": ("run-confirm-popup", set()),
 }
 
 # Web: the files that define a `toast()` helper. Every one except the two exempt ones must hand
@@ -105,23 +109,30 @@ TOAST_DEF = re.compile(r"(?m)^[ \t]*(?:function\s+toast\s*\(|const\s+toast\s*=)"
 OS_TOAST = re.compile(r"BurntToast|ToastNotification|display notification|NotifyIcon|\[\"notify-send\"")
 OS_TOAST_FILES = {"notifier.py"}
 
-# Direct DMs to a person: file -> calls. E4b debt except the notifier's own transport and
-# send_dm (a different thing: the owner telling Jarvis to message a contact). Lower a number
-# when a caller moves onto notifier.record_owner_dm() / notifier.notify().
+# Direct DMs to a person: file -> calls. What is left is not a notice that needs a record: the
+# notifier's own transport, send_dm (the owner telling Jarvis to message a contact), and two
+# callers whose record is written next to them. Every other DM to the owner goes through
+# outbound.notify_owner_recorded() (RECORDED_DM_CALLS below).
 DM_CALLS = {
     "actions/notify_owner.py": ["notify_owner"],      # records via notifier.record_owner_dm (E4)
     "actions/send_dm.py": ["dm_person"],              # owner-approved DM to a contact, not a notice
     "ambient.py": ["notify_owner"],                   # paired with a notifier.notify() just above
-    "channels/awaiting.py": ["notify_owner"],         # E4b: urgent reply DM has no inbox record
-    "channels/base.py": ["notify_owner", "notify_owner"],   # E4b: new-sender ping, rule notice
-    "channels/instagram_private.py": ["notify_owner"],      # E4b: default notifier hook
-    "channels_cli.py": ["notify_owner"],              # `jarvis channels-test`: a diagnostic
     "digest.py": ["notify_owner"],                    # the digest summary of records already in the inbox
     "notifier.py": ["dm_owner"],                      # level 4 transport
 }
 
-# A `kind=` string passed to notifier.notify() that is not a registered kind yet (E4b).
-KNOWN_UNREGISTERED_KINDS = {"reply_digest"}
+# E4b (done): the DMs to the owner that leave a silent inbox record, through
+# outbound.notify_owner_recorded(). file -> number of calls.
+RECORDED_DM_CALLS = {
+    "channels/awaiting.py": 1,           # the reply DM (urgent: a normal notification)
+    "channels/base.py": 2,               # new-sender ping, rule notice
+    "channels/instagram_private.py": 1,  # the group-transport notice (default hook)
+    "channels_cli.py": 1,                # `jarvis channels-test`
+}
+
+# A `kind=` string passed to notifier.notify() that is not a registered kind yet. E4b registered
+# `reply_digest`; this stays so a future one can be listed on purpose, never by accident.
+KNOWN_UNREGISTERED_KINDS = set()
 
 
 # ---------------------------------------------------------------------------
@@ -246,8 +257,31 @@ def test_the_old_toast_element_is_gone():
           len(re.findall(r'id="toast"', html)) == 0)
     css = (WEB / "style.css").read_text(encoding="utf-8")
     check("style.css has no `.toast{` rule for it either", not re.search(r"(?m)^\.toast\s*\{", css))
-    check("index.html has exactly one run-confirm popup element (E3 debt)",
-          len(re.findall(r'id="run-confirm-popup"', html)) == 1)
+    check("index.html has no run-confirm popup element (E3: it is JarvisUI.confirm now)",
+          "run-confirm-popup" not in html)
+    check("style.css has no .run-confirm-popup rules either", "run-confirm-popup" not in css)
+    app = (WEB / "app.js").read_text(encoding="utf-8")
+    check("app.js asks the run-confirm question with JarvisUI.confirm",
+          "async function showRunConfirmPopup" in app and "JarvisUI.confirm({" in app
+          and "dismissRunConfirm" in app)
+
+
+def test_there_is_one_toast_host():
+    ui = (WEB / "ui-kit.js").read_text(encoding="utf-8")
+    notif = (WEB / "notifications.js").read_text(encoding="utf-8")
+    check("ui-kit.js draws the stacks (JarvisUI.toastStack, one per position)",
+          "function toastStack(" in ui and "toastStack, bubble" in ui and "jui-toasts--" in ui)
+    check("JarvisUI.toast puts its message in that stack",
+          "toastStack(o.position).appendChild(node)" in ui)
+    check("notifications.js draws its cards into that same stack",
+          "UI.toastStack(pos)" in notif and "appendChild(host)" not in notif
+          and 'class: "ntf-stack' not in notif)
+    css = (WEB / "ui-kit.css").read_text(encoding="utf-8")
+    ncss = (WEB / "notifications.css").read_text(encoding="utf-8")
+    check("every position has a rule on the one host",
+          all(f".jui-toasts--{pos}" in css for pos in reg.position_ids()),
+          [p for p in reg.position_ids() if f".jui-toasts--{p}" not in css])
+    check("notifications.css has no stack of its own any more", "ntf-stack" not in ncss)
 
 
 def test_app_js_no_longer_calls_the_browser_api():
@@ -293,6 +327,22 @@ def test_direct_owner_dms_match_the_baseline():
     kinds = {rel: sorted(calls) for rel, calls in seen.items()}
     check("python: each known file makes the same kind of call",
           all(kinds.get(rel) == sorted(calls) for rel, calls in DM_CALLS.items()), kinds)
+
+
+def test_the_other_owner_dms_are_recorded():
+    seen = {}
+    for rel, text in _py_files():
+        for node in ast.walk(_ast_calls(text, rel)):
+            if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                    and isinstance(node.func.value, ast.Name) and node.func.value.id == "outbound"
+                    and node.func.attr == "notify_owner_recorded"):
+                seen[rel] = seen.get(rel, 0) + 1
+    problems = compare_counts(seen, RECORDED_DM_CALLS)
+    check("python: the DMs that leave an inbox record (E4b) are the known ones",
+          not problems, "; ".join(problems))
+    out = (PKG / "channels" / "outbound.py").read_text(encoding="utf-8")
+    check("outbound.notify_owner_recorded writes the record through notifier.record_owner_dm",
+          "def notify_owner_recorded(" in out and "record_owner_dm(" in out)
 
 
 def test_the_notify_owner_tool_records_in_the_notifier():

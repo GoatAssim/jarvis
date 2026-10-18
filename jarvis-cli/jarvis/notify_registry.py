@@ -146,6 +146,11 @@ KINDS = (
     # this is the record of it. No Settings row (file-only, like `scheduled`).
     {"id": "owner_dm", "label": "Messages Jarvis sent to your phone", "level": 1,
      "settings": False},
+    # E4b: a reply from someone you are waiting on that was not urgent enough to
+    # DM you (channels/awaiting.py). Silent: it is the record, not the alert. An
+    # urgent one is recorded as `owner_dm` at the standard level instead.
+    {"id": "reply_digest", "label": "Replies from people you are waiting on", "level": 1,
+     "settings": False},
 )
 
 # ---------------------------------------------------------------------------

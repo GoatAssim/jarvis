@@ -789,7 +789,7 @@ def notify(title, message, channels=None, kind="notify", job_id=None,
     return record
 
 
-def record_owner_dm(message, results, source="notify_owner"):
+def record_owner_dm(message, results, source="notify_owner", level=None, title=None):
     """E4: write the inbox record of a DM Jarvis sent (or tried to send) to the owner.
 
     The DM itself goes out through channels/outbound -- that is transport, and
@@ -807,10 +807,16 @@ def record_owner_dm(message, results, source="notify_owner"):
     passed explicitly, so the digest never re-batches these records. A failure
     is marked `failed` (red in the Notifications panel, counted in the badge).
 
+    E4b: `level` (1-5) overrides the configured level for this one record -- the
+    urgent reply DM passes 2 so it also toasts and raises a desktop notification
+    -- and `title` replaces the default "Sent to your phone (...)" heading when
+    something was sent (a failure always says "Couldn't reach you on any channel",
+    whatever `title` is). Both default to None, which is the E4 behaviour.
+
     Never raises; returns the record, or None when nothing could be written.
     """
     try:
-        level = normalize_level(None, kind="owner_dm", source=source)
+        level = normalize_level(level, kind="owner_dm", source=source)
         channels = [c for c in _channels_for_level(level) if c not in _DM_CHANNELS]
         rows = [r for r in (results or []) if isinstance(r, dict)]
         sent = [str(r.get("platform")) for r in rows if r.get("ok")]
@@ -818,9 +824,12 @@ def record_owner_dm(message, results, source="notify_owner"):
         body = (message or "").strip()
         if missed:
             body = (body + "\n\nNot delivered -- " + "; ".join(missed)).strip()
-        title = ("Sent to your phone (%s)" % ", ".join(sent)) if sent \
-            else "Couldn't reach you on any channel"
-        return notify(title, body, channels=channels, kind="owner_dm", level=level,
+        if sent:
+            head = (str(title).strip()[:120] if title and str(title).strip()
+                    else "Sent to your phone (%s)" % ", ".join(sent))
+        else:
+            head = "Couldn't reach you on any channel"
+        return notify(head, body, channels=channels, kind="owner_dm", level=level,
                       failed=not sent, source=source)
     except Exception:  # noqa: BLE001 -- the record is advice, never a reason to fail the DM
         return None

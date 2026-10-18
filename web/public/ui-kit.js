@@ -88,13 +88,29 @@
     return root;
   }
 
-  function toastHost() {
-    let host = document.getElementById("jui-toasts");
-    if (!host) {
-      host = el("div", { id: "jui-toasts", class: "jui-toasts", role: "status",
-                         "aria-live": "polite" });
-      layer().appendChild(host);
-    }
+  /* E3: the page's ONE toast host. Everything that pops up in the corner of
+   * the screen -- the one-line messages from JarvisUI.toast() AND the notifier's
+   * cards (notifications.js) -- is a child of the stack for its position, so they
+   * stack together instead of two hosts drawing over each other. There is one
+   * stack per position, made on first use. The default position keeps the id
+   * `jui-toasts`. Which of the eight positions a notification wants is the
+   * notifier's decision (notify_registry.POSITIONS); this only draws them, so an
+   * unknown name falls back to the default rather than inventing a stack no CSS
+   * rule styles. */
+  const DEFAULT_TOAST_POSITION = "bottom-right";
+  const POSITION_SHAPE = /^(?:(?:top|bottom)(?:-(?:left|right))?|left|right)$/;
+  const toastStacks = new Map();
+
+  function toastStack(position) {
+    const pos = POSITION_SHAPE.test(String(position || "")) ? String(position) : DEFAULT_TOAST_POSITION;
+    let host = toastStacks.get(pos);
+    if (host && document.body.contains(host)) return host;
+    host = el("div", { class: "jui-toasts jui-toasts--" + pos, role: "region",
+                       "aria-label": "Notifications", "aria-live": "polite",
+                       "data-position": pos });
+    if (pos === DEFAULT_TOAST_POSITION) host.id = "jui-toasts";
+    layer().appendChild(host);
+    toastStacks.set(pos, host);
     return host;
   }
 
@@ -121,7 +137,7 @@
                      onclick: () => dropToast(id) }, "\u00d7"),
     ]);
 
-    toastHost().appendChild(node);
+    toastStack(o.position).appendChild(node);
     requestAnimationFrame(() => node.classList.add("is-in"));
 
     // An error stays until dismissed. Auto-hiding the one message that says
@@ -743,7 +759,7 @@
   }
 
   global.JarvisUI = {
-    toast, bubble: (o) => handleEvent(Object.assign({ kind: "bubble" }, o)),
+    toast, toastStack, bubble: (o) => handleEvent(Object.assign({ kind: "bubble" }, o)),
     dialog, confirm, choose, prompt, form, progress, dismiss,
     handleEvent, close: closeModal,
     themes: {

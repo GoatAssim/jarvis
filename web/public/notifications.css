@@ -2,7 +2,8 @@
  * notifications.css — L.30 notification rework.
  *
  * Two surfaces, both new:
- *   .ntf-*   the toast stacks that notifications appear in. E2: one stack per
+ *   .ntf-*   the notification cards. They are drawn into the page's one toast
+ *            host (`.jui-toasts--<position>`, ui-kit.css; E3). E2: one stack per
  *            position (top, bottom, left, right and the four corners); the
  *            notification record says which, and bottom-right is the default
  *            (D-11 / D-12)
@@ -14,68 +15,19 @@
  * theme the ui-kit offers restyles these too.
  * ========================================================================= */
 
-/* --- toast stack ---------------------------------------------------------- */
-
-.ntf-stack{
-  position: fixed;
-  z-index: 9200;
-  width: min(460px, calc(100vw - 24px));
-  display: flex; flex-direction: column; gap: 8px;
-  pointer-events: none;                 /* the gaps never eat a click */
-  --ntf-from: translateY(-8px);         /* where a card slides in from */
-  --ntf-edge: 14px;
-}
-
-/* One rule per position. The edge offsets add the phone safe areas, and the
-   bottom ones step clear of what already lives there. Those offsets are a
-   stopgap until E3 makes this the only toast renderer. */
-.ntf-stack--top{
-  top: calc(var(--ntf-edge) + env(safe-area-inset-top, 0px));
-  left: 50%; transform: translateX(-50%);
-}
-.ntf-stack--bottom{
-  bottom: 70px;                         /* above the online pill */
-  left: 50%; transform: translateX(-50%);
-  --ntf-from: translateY(8px);
-}
-.ntf-stack--left, .ntf-stack--right{
-  top: 50%; transform: translateY(-50%);
-  width: min(360px, calc(100vw - 24px));
-}
-.ntf-stack--left{ left: calc(var(--ntf-edge) + env(safe-area-inset-left, 0px)); --ntf-from: translateX(-8px); }
-.ntf-stack--right{ right: calc(var(--ntf-edge) + env(safe-area-inset-right, 0px)); --ntf-from: translateX(8px); }
-.ntf-stack--top-left{
-  top: calc(var(--ntf-edge) + env(safe-area-inset-top, 0px));
-  left: calc(var(--ntf-edge) + env(safe-area-inset-left, 0px));
-  width: min(360px, calc(100vw - 24px));
-}
-.ntf-stack--top-right{
-  top: calc(var(--ntf-edge) + env(safe-area-inset-top, 0px));
-  right: calc(var(--ntf-edge) + env(safe-area-inset-right, 0px));
-  width: min(360px, calc(100vw - 24px));
-}
-.ntf-stack--bottom-left{
-  bottom: calc(18px + env(safe-area-inset-bottom, 0px));
-  left: calc(var(--ntf-edge) + env(safe-area-inset-left, 0px));
-  width: min(360px, calc(100vw - 24px));
-  --ntf-from: translateY(8px);
-}
-.ntf-stack--bottom-right{
-  bottom: 134px;                        /* above the Logs and Notifications buttons */
-  right: calc(var(--ntf-edge) + env(safe-area-inset-right, 0px));
-  width: min(360px, calc(100vw - 24px));
-  --ntf-from: translateY(8px);
-}
-
-/* The sequence bar owns the bottom edge while one is queued (L.9). */
-body.has-sequence .ntf-stack--bottom{ bottom: calc(var(--seq-clear, 90px) + 56px); }
-body.has-sequence .ntf-stack--bottom-left{ bottom: calc(var(--seq-clear, 90px) + 8px); }
-body.has-sequence .ntf-stack--bottom-right{ bottom: calc(var(--seq-clear, 90px) + 112px); }
-
-/* Stopgap: the run-confirm popup (bottom-left) and the ui-kit toasts
-   (bottom-right) are separate systems until E3; step over them. */
-body:has(.run-confirm-popup:not([hidden])) .ntf-stack--bottom-left{ bottom: 270px; }
-body:has(.jui-toasts .jui-toast) .ntf-stack--bottom-right{ bottom: 214px; }
+/* --- toast stack: this page's clearances ----------------------------------
+ * The stacks themselves -- one per position (E2), and the page's ONE toast host
+ * since E3 -- are `.jui-toasts--<position>` in ui-kit.css, drawn by
+ * JarvisUI.toastStack() and shared with the one-line JarvisUI toasts. What stays
+ * here is only what this page knows about its own chrome: the bottom stacks step
+ * clear of the online pill, the Logs / Notifications buttons and the sequence
+ * bar (L.9, which owns the bottom edge while one is queued). Measured offsets,
+ * not guesses about another toast system, since there is only one now. */
+.jui-toasts--bottom{ bottom: 70px; }                    /* above the online pill */
+.jui-toasts--bottom-right{ bottom: 134px; }             /* above the Logs and Notifications buttons */
+body.has-sequence .jui-toasts--bottom{ bottom: calc(var(--seq-clear, 90px) + 56px); }
+body.has-sequence .jui-toasts--bottom-left{ bottom: calc(var(--seq-clear, 90px) + 8px); }
+body.has-sequence .jui-toasts--bottom-right{ bottom: calc(var(--seq-clear, 90px) + 112px); }
 
 .ntf{
   pointer-events: auto;
@@ -284,7 +236,7 @@ body:has(.jui-toasts .jui-toast) .ntf-stack--bottom-right{ bottom: 214px; }
 }
 
 @media (max-width: 700px){
-  .ntf-stack--top{ top: calc(8px + env(safe-area-inset-top, 0px)); }
+  .jui-toasts--top{ top: calc(8px + env(safe-area-inset-top, 0px)); }
   .nt-btn--quiet{ margin-left: 0; }
   .nt-hint{ display: none; }
 }

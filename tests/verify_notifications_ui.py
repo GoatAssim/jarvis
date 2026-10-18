@@ -231,10 +231,18 @@ def main():
         page.evaluate("window.JarvisHost && window.JarvisHost.toast('An error elsewhere', 'error')")
         check("an unrelated error toast no longer wipes them", page.locator(".ntf").count() == 3)
         page.wait_for_timeout(350)          # the stack's step-down transition
-        geo = page.evaluate("""() => ({toastBottom: document.getElementById('toast').getBoundingClientRect().bottom,
-                                         stackTop: document.getElementById('ntf-stack').getBoundingClientRect().top})""")
-        check("the cards step down below a visible error toast instead of hiding behind it",
-              geo["stackTop"] >= geo["toastBottom"], geo)
+        # E3: the error toast and the cards are children of the SAME stack (one toast host), so
+        # they stack in order and neither can hide behind the other.
+        geo = page.evaluate("""() => { const host = document.getElementById('jui-toasts');
+                                        const err = host.querySelector('.jui-toast');
+                                        const cards = host.querySelectorAll('.ntf');
+                                        return {hosts: document.querySelectorAll('.jui-toasts--bottom-right').length,
+                                                errInHost: !!err, cards: cards.length,
+                                                overlap: err && cards.length ? (() => { const a = err.getBoundingClientRect(),
+                                                  b = cards[0].getBoundingClientRect();
+                                                  return a.top < b.bottom && b.top < a.bottom; })() : null}; }""")
+        check("the cards and an error toast share ONE stack and do not overlap",
+              geo["hosts"] == 1 and geo["errInHost"] and geo["cards"] == 3 and geo["overlap"] is False, geo)
         check("a failed one is marked as failed", page.locator(".ntf--failed").count() == 1)
         shot(page, "02-three-cards")
 

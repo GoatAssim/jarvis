@@ -41,7 +41,9 @@
     if (window.JarvisUI && typeof window.JarvisUI.confirm === "function") {
       return window.JarvisUI.confirm(opts);
     }
-    return window.confirm((opts.title || "") + "\n\n" + (opts.body || ""));
+    // E3: no native-dialog fallback. Without the UI kit the page cannot ask, and
+    // every caller here guards something that is hard to undo, so the answer is no.
+    return false;
   }
 
   // ---- API ------------------------------------------------------------------------------

@@ -419,10 +419,10 @@ def _notify_owner_new_sender(platform, msg, entry):
 
     Best-effort in the strongest sense: it is wrapped whole, and a failure
     is logged and dropped. The owner not receiving a courtesy ping must
-    never be the reason a message goes unanswered. Note that
-    outbound.notify_owner() is transport only: it writes no notifier inbox
-    record (only the notify_owner TOOL does, E4), so an undelivered ping is
-    logged, not queued. Listed as E4b in the audit.
+    never be the reason a message goes unanswered. E4b: the ping also leaves a
+    silent inbox record (outbound.notify_owner_recorded), so one that could not
+    be delivered is marked failed in the Notifications panel instead of only
+    being logged.
 
     Returns True if the owner was pinged (or at least attempted), so the
     caller knows whether to mark the person as notified.
@@ -444,8 +444,9 @@ def _notify_owner_new_sender(platform, msg, entry):
             f"{platform} {entry.get('user_id')}   /   ignore with:  jarvis "
             f"channels-block {platform} {entry.get('user_id')}"
         )
-        outbound.notify_owner("\n".join(lines), platforms=None,
-                              first_success_only=True)
+        outbound.notify_owner_recorded(
+            "\n".join(lines), platforms=None, first_success_only=True,
+            source=f"channel:{platform}", title=f"New person on {platform}")
         return True
     except Exception as exc:  # noqa: BLE001
         _log(f"could not notify owner about new {platform} sender: {exc}")
@@ -964,7 +965,9 @@ def _tell_owner_of_rule(platform, msg, entry, rec):
         who = people.effective_name(entry) or entry.get("handle") or msg.user_id
         verb = ("asked about" if body.get("directive") == "ask_owner_first"
                 else "brought up")
-        outbound.notify_owner(f"{who} {verb} \"{body.get('topic')}\".")
+        outbound.notify_owner_recorded(
+            f"{who} {verb} \"{body.get('topic')}\".",
+            source=f"channel:{platform}", title="A rule you set came up")
     except Exception as exc:  # noqa: BLE001
         _log(f"could not tell the owner about a rule: {exc}")
 

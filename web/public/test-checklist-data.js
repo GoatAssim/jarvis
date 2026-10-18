@@ -78,7 +78,7 @@
 
 window.JARVIS_TEST_CHECKLIST = /*JSON-BEGIN*/ {
  "schema": 1,
- "updated": "2026-10-17",
+ "updated": "2026-10-18",
  "groups": [
   {
    "id": "core",
@@ -251,6 +251,12 @@ window.JARVIS_TEST_CHECKLIST = /*JSON-BEGIN*/ {
    "id": "person_memory",
    "label": "People memory",
    "blurb": "Per-person facts, standing rules and reply watching (L.21-L.23). Owner-only; none of these appear for a chat guest."
+  },
+  {
+   "id": "notifications",
+   "label": "Notifications",
+   "kind": "feature",
+   "blurb": "How Jarvis tells you things: the inbox, the one toast stack, the dialogs, and the DMs to your phone (Phase E)."
   },
   {
    "id": "panels",
@@ -5113,6 +5119,53 @@ window.JARVIS_TEST_CHECKLIST = /*JSON-BEGIN*/ {
     }
    ],
    "care": "Refresh all reconnects to every switched-on server, which can start that server's program."
+  },
+  "notifications_system": {
+   "group": "notifications",
+   "does": "The notification system (Phase E): one inbox, one toast stack with eight positions, one confirm dialog, and a silent inbox record for every DM Jarvis sends you.",
+   "steps": [
+    {
+     "do": "In a terminal run: jarvis notify-send \"Checklist silent\" --level=1",
+     "expect": "No toast and no desktop notification. The bell's unread count goes up by one, and Checklist silent is in the Notifications panel."
+    },
+    {
+     "do": "Run: jarvis notify-send \"Checklist standard\" --level=2",
+     "expect": "A card appears in the bottom-right corner (above the Logs and Notifications buttons) and the operating system raises its own notification. The inbox has it too."
+    },
+    {
+     "do": "Run: jarvis notify-send \"Checklist corner\" --level=2 --position=top-left",
+     "expect": "The card appears in the top-left corner instead. Try top, left and bottom as well: each has its own place and none sits off screen."
+    },
+    {
+     "do": "While a card is still on screen, make the page show a one-line message (for example copy an Ask reply, or try something that fails).",
+     "expect": "The one-line message and the card are in the SAME stack, one above the other. Neither covers the other, and there is only one place in the page where toasts appear."
+    },
+    {
+     "do": "Delete a saved command, a skill, a log and a conversation, one at a time (press Cancel each time).",
+     "expect": "Every one asks with Jarvis's own dialog, never the browser's. The focus starts on Cancel, Escape and a click outside both mean No, and nothing is deleted."
+    },
+    {
+     "do": "Run a saved command that is set to confirm_required (or ai_review) straight from the Commands panel.",
+     "expect": "A dialog titled Run <command>? shows the arguments, the real command and any AI review note. Escape or No, cancel stops it; Yes, run it runs it. If the run ends first the dialog closes by itself."
+    },
+    {
+     "do": "Run: jarvis channels-test",
+     "expect": "The message arrives on your phone (where the platform allows it) AND the Notifications panel has a silent entry titled Test message from channels-test. If no platform could be reached the entry is marked failed and says why."
+    },
+    {
+     "do": "From a second account, message the bot for the first time.",
+     "expect": "You get the new-sender DM as before, and the Notifications panel has a silent New person on <platform> entry with the same text. Nothing pops on screen."
+    },
+    {
+     "do": "Ask Jarvis to message you (the notify_owner tool), then look in the Notifications panel.",
+     "expect": "A silent entry titled Sent to your phone (<platform>) holds what was sent."
+    }
+   ],
+   "care": "channels-test and the new-sender step send real messages to your own account.",
+   "watch": [
+    "An URGENT reply from someone you are waiting on (urgency 2) should leave a normal notification (card + desktop notification), not a silent one. It is hard to trigger on purpose, so check Notifications after the next real one. A less urgent important reply leaves a silent entry.",
+    "One-line messages from the page used to sit at the bottom edge; they now share the bottom-right stack, 134 px up, so they clear the Logs and Notifications buttons."
+   ]
   }
  }
 } /*JSON-END*/;

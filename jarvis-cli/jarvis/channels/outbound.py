@@ -25,9 +25,11 @@ notify_owner() tries platforms in order and reports each one's outcome
 rather than collapsing to a single bool. When the DM comes from a notifier
 level-4 record, the durable inbox is written first, so a notification that
 couldn't be DMed never vanishes. Calling notify_owner() directly is transport
-only and writes no inbox record: the notify_owner TOOL adds its own
-(notifier.record_owner_dm, E4); the other direct callers are listed in the
-audit as E4b.
+only and writes no inbox record. Anything that DMs the owner on Jarvis's own
+initiative should call notify_owner_recorded() instead: it is notify_owner()
+plus one inbox record (notifier.record_owner_dm, E4 / E4b), silent unless the
+caller asks for a level. The notify_owner TOOL does the same in its own file.
+tests/test_one_notification_system.py counts the direct callers that are left.
 """
 
 import asyncio
@@ -232,6 +234,39 @@ def notify_owner(text, platforms=None, first_success_only=True):
             print(f"[channels] owner DM via {item['platform']} failed: "
                   f"{item['detail']}", file=sys.stderr, flush=True)
     return {"ok": any_ok, "results": results}
+
+
+def notify_owner_recorded(text, platforms=None, first_success_only=True, *,
+                          source="channels", level=None, title=None):
+    """notify_owner() plus the inbox record of it (E4b).
+
+    The DM goes out exactly as notify_owner() sends it and the same outcome comes
+    back, so a caller can swap this in without changing what it does with the
+    result. After it, ONE record is written through notifier.record_owner_dm:
+
+      * default: kind `owner_dm`, silent (inbox only). The owner sees at the PC
+        what was sent to the phone; a DM that could not be delivered is marked
+        failed instead of being lost.
+      * `level=2` (what the urgent reply DM passes): also the in-app toast and a
+        desktop notification, but never a second DM.
+      * `title` replaces the default "Sent to your phone (...)" heading.
+
+    `source` says who sent it (`channel:discord`, `awaiting`, ...). The result
+    gains `recorded` (True when a record was written) so a caller that would
+    otherwise add its own record can skip it and not double up. A notifier that
+    fails never changes the DM or its outcome.
+    """
+    outcome = notify_owner(text, platforms=platforms,
+                           first_success_only=first_success_only)
+    recorded = False
+    try:
+        from .. import notifier
+        recorded = notifier.record_owner_dm(
+            text, outcome.get("results"), source=source, level=level, title=title) is not None
+    except Exception:  # noqa: BLE001 -- the record is advice, never a reason to fail the DM
+        recorded = False
+    outcome["recorded"] = recorded
+    return outcome
 
 
 def status():

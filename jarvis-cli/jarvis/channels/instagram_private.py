@@ -528,8 +528,11 @@ def _keep_room_context(cfg, msg):
 
 
 def _default_notify(text):
+    # E4b: silent inbox record too, so "the transport stopped" is still in the
+    # Notifications panel when the DM could not be delivered.
     from . import outbound
-    return outbound.notify_owner(text)
+    return outbound.notify_owner_recorded(
+        text, source="channel:instagram", title="Instagram group transport")
 
 
 # ---------------------------------------------------------------------------

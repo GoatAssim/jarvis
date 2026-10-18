@@ -6,9 +6,10 @@
  *   1. THE TOAST. Notifications were shown through the one shared `#toast`
  *      element — the same one every error message uses — so two notifications
  *      in the same tick overwrote each other, and any error toast wiped a
- *      reminder off the screen. Now each notification is its own card in a
- *      stack (`#ntf-stack`), with source, time, a coalesced "x3" count for
- *      bursts, and real actions (Acknowledge, Open chat / schedule).
+ *      reminder off the screen. Now each notification is its own card in the
+ *      page's one toast stack (ui-kit.js JarvisUI.toastStack, E3: shared with
+ *      the one-line JarvisUI toasts), with source, time, a coalesced "x3" count
+ *      for bursts, and real actions (Acknowledge, Open chat / schedule).
  *
  *   2. THE PANEL. A flat read-only list with a browser-side unread counter
  *      that reset to zero on every page load. Now it is an inbox backed by
@@ -24,7 +25,8 @@
  *  - The level rules (D.2.1). 1 = inbox only; 2 = + toast; 3 = + re-surfaces
  *    until acknowledged (D-N1, owner-decided: every 10 minutes, at most 6
  *    times); 4 = + broadcast; 5 = + a blocking Acknowledge dialog.
- *  - app.js's generic toast() for errors and "copied" messages.
+ *  - app.js's generic toast() for errors and "copied" messages (it hands off to
+ *    JarvisUI.toast, which draws in the same stack as these cards).
  *
  * TWO KINDS OF "SEEN" — DON'T CONFLATE THEM
  * -----------------------------------------
@@ -440,22 +442,16 @@
 
   const cards = new Map();        // groupKey -> card record
   const resurface = new Map();    // notification id -> { n, timer }
-  const stackHosts = new Map();   // position -> its stack element
 
-  /** The stack for one position, created on first use. The default one keeps
-   *  the id `ntf-stack` the page always had. */
+  /** E3: the cards are drawn into the page's one toast host, the per-position
+   *  stack that ui-kit.js owns (JarvisUI.toastStack), so they stack with the
+   *  one-line JarvisUI toasts instead of beside them. Returns null when ui-kit.js
+   *  did not load: a card is then not drawn, but the notification is already in
+   *  the inbox (the badge and the panel still show it). */
   function ensureStack(position) {
     const pos = positionIds().includes(position) ? position : defaultPosition();
-    let host = stackHosts.get(pos);
-    if (host && document.body.contains(host)) return host;
-    host = h("div", {
-      class: "ntf-stack ntf-stack--" + pos, role: "region", "aria-label": "Notifications",
-      "data-position": pos,
-    });
-    if (pos === DEFAULT_POSITION) host.id = "ntf-stack";
-    document.body.appendChild(host);
-    stackHosts.set(pos, host);
-    return host;
+    const UI = global.JarvisUI;
+    return UI && typeof UI.toastStack === "function" ? UI.toastStack(pos) : null;
   }
 
   function targetOf(n) {
@@ -542,6 +538,7 @@
   /** Show (or merge into) the card for one notification. */
   function toastFor(n) {
     const host = ensureStack(positionOf(n));
+    if (!host) return null;                // no ui-kit.js: nowhere to draw (the inbox has it)
     const key = groupKey(n);
     const ack = needsAckOf(n);
     let card = cards.get(key);

@@ -72,12 +72,19 @@ things that were already fixed once.
   browser's `new Notification(...)` in ONE place (`JarvisNotifications.osNotice` /
   `osNotify` in `notifications.js`), never from `app.js` or a panel. A new kind of
   notification is one row in `notify_registry.KINDS`, not a new string typed at a call
-  site. The `notify_owner` TOOL leaves a silent `owner_dm` inbox record
-  (`notifier.record_owner_dm`); that kind has no Settings row on purpose, so a chat guest
-  who can call the tool cannot make the screen pop. NOT yet true everywhere: the old
-  `#toast`, the run-confirm popup, native `confirm()` and some owner DMs (E4b) are
-  counted debt. `tests/test_one_notification_system.py` pins today's numbers: adding one
-  fails it, and removing one fails it until you lower the number in the same patch.
+  site. Every DM Jarvis sends the owner on its own initiative leaves a silent `owner_dm`
+  inbox record: the `notify_owner` TOOL via `notifier.record_owner_dm`, every other caller
+  (new-sender ping, rule notice, awaiting-reply DM, the Instagram group-transport notice,
+  `jarvis channels-test`) via `outbound.notify_owner_recorded()` -- call that, never the
+  bare `outbound.notify_owner()`. An URGENT awaiting reply is recorded at the standard
+  level (toast + desktop notification), never a second DM. That kind has no Settings row
+  on purpose, so a chat guest who can call the tool cannot make the screen pop. On the
+  page there is ONE toast host: `JarvisUI.toastStack(position)` in `ui-kit.js`; the
+  one-line `JarvisUI.toast` messages and the notifier's cards are both its children. Ask
+  yes/no questions with `JarvisUI.confirm`, never the browser's native dialogs, and there
+  is no separate run-confirm popup. `tests/test_one_notification_system.py` pins today's
+  numbers (zero for all of the above): adding one fails it, and removing one fails it
+  until you lower the number in the same patch.
 - **A chat guest's details never go in `memory.py`.** That store rides
   along in the owner's own prompts. Guest facts belong in
   `channels/people.py`, which is capped, keyed by platform id, and only
