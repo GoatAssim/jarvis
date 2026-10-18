@@ -581,11 +581,13 @@ def _code_agent_system_prompt(round_limit):
         "the relevant code to actually understand it BEFORE changing anything — "
         "don't guess a fix from the task description alone. Prefer search_code "
         "to locate where something lives over guessing file paths. To change a "
-        "file, read it, then write the COMPLETE updated file with write_file "
-        "(it creates the file or replaces the existing one) — one whole-file "
-        "write each time, not a series of small patches. Keep every part of the "
-        "file that still works. Use edit_file only for a trivial one-line "
-        "change where a whole-file write would be wasteful. When the change "
+        "file, read it, then change just the part that needs changing with "
+        "edit_file: a small old_str/new_str replacement of that segment (copy "
+        "old_str exactly from what you read, with a few surrounding lines so it "
+        "matches only once). Make one edit per segment — NEVER resend or rewrite "
+        "a whole existing file to change part of it; everything you do not touch "
+        "stays exactly as it was. Use write_file only to create a NEW file "
+        "(it refuses a path that already exists). When the change "
         "can be run, tested, or syntax-checked, use run_shell to actually verify "
         "it before declaring success; don't assume an edit worked. "
         "list_dir also names top-level dotfiles like .env under \"hidden\" — "
@@ -607,7 +609,7 @@ def _code_agent_system_prompt(round_limit):
 # reachable tool in its own right.
 _INTERNAL_WRITE_FILE_SCHEMA = {
     "name": "write_file",
-    "description": "Write a file within the code_agent root: creates it, or replaces it if it already exists. Always send the COMPLETE new content of the file, never a fragment or a diff.",
+    "description": "Create a NEW file within the code_agent root with its complete content. Refuses a path that already exists: change an existing file with edit_file (small old_str/new_str replacements), never by rewriting it whole.",
     "parameters": {
         "type": "object",
         "properties": {
@@ -793,8 +795,7 @@ def _step_outcome(name, result, err):
         if name == "edit_file":
             return f"edited, {result.get('bytes_written', '?')} bytes written"
         if name == "write_file":
-            verb = "rewrote" if result.get("overwrote") else "created"
-            return f"{verb}, {result.get('bytes_written', '?')} bytes written"
+            return f"created, {result.get('bytes_written', '?')} bytes written"
         if name == "run_shell":
             return _run_shell_outcome(result)
         return "done"
@@ -870,14 +871,16 @@ def tool_code_agent(arguments, context=None):
                 path = dev_agent_sandbox.resolve_within(root, tool_args.get("path") or "")
                 if path.exists() and not path.is_file():
                     result, err = None, f"{path} exists and is not a regular file"
+                elif path.exists():
+                    # Existing files are changed in segments, never replaced whole.
+                    result, err = None, (f"{path} already exists — change it with edit_file "
+                                         f"(small old_str/new_str replacements of just the part that changes); "
+                                         f"write_file only creates new files")
                 else:
-                    existed = path.exists()
                     content = tool_args.get("content") if isinstance(tool_args.get("content"), str) else ""
                     path.parent.mkdir(parents=True, exist_ok=True)
                     path.write_text(content, encoding="utf-8")
                     result, err = {"path": str(path), "bytes_written": len(content.encode("utf-8"))}, None
-                    if existed:
-                        result["overwrote"] = True
             elif name == "run_shell":
                 result, err = _run_shell_impl(tool_args.get("command") or "", root)
             else:
@@ -1016,11 +1019,11 @@ TOOL_SCHEMAS = [
     {
         "name": "edit_file",
         "description": (
-            "Make a targeted edit to an EXISTING file: old_str must match the file's "
-            "current content exactly once (add surrounding context to disambiguate) and "
-            "is replaced with new_str. Always read_file first if you haven't already seen "
-            "the current content — never guess at old_str. Far cheaper than rewriting a "
-            "whole file for a small change. Always confirmed with the user first."
+            "Change an EXISTING file by replacing one segment of it: old_str must match the "
+            "file's current content exactly once (add surrounding context to disambiguate) and "
+            "is replaced with new_str. This is how existing files are changed (one edit per "
+            "segment, never a whole-file rewrite). Always read_file first if you haven't already "
+            "seen the current content — never guess at old_str. Always confirmed with the user first."
         ),
         "parameters": {
             "type": "object",

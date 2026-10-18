@@ -10685,7 +10685,8 @@
         channels: openChannels,
         daemons: () => window.JarvisDaemons?.open(),
         backlog: () => window.JarvisBacklog?.open(),
-        logsearch: () => window.JarvisLogSearch?.open(),
+        // Log search is switched off for the person using the UI (jarvis-plan.md 4): the
+        // panel, its routes and its tests still exist, there is just no way in from here.
         setup: openSetup,
         subagents: openSubagents,
         notifications: openNotifications,
@@ -10764,7 +10765,7 @@
   qs("#menu-item-daemons")?.addEventListener("click", () => { closePanelMenu(); window.JarvisDaemons?.open(); });
   qs("#menu-item-backlog")?.addEventListener("click", () => { closePanelMenu(); window.JarvisBacklog?.open(); });
   qs("#menu-item-calendar")?.addEventListener("click", () => { closePanelMenu(); window.JarvisCalendar?.open(); });
-  qs("#menu-item-logsearch")?.addEventListener("click", () => { closePanelMenu(); window.JarvisLogSearch?.open(); });
+  // (no click handler for #menu-item-logsearch: the item is hidden in index.html, see jarvis-plan.md 4)
   qs("#menu-item-setup")?.addEventListener("click", () => { closePanelMenu(); openSetup(); });
 
   // Escape closes whichever of these is on top, matching the existing panels.

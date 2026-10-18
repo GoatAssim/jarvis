@@ -1447,21 +1447,28 @@
     ]));
 
     // needs attention
+    // One row per SERVICE (not per alert): a service that crashed AND hit its restart limit
+    // used to be listed twice and made this count disagree with the header's "N need attention".
     const attn = [];
-    list.forEach((e) => attentionOf(e).forEach((a) => attn.push({ e, a })));
+    list.forEach((e) => {
+      const items = attentionOf(e);
+      if (!items.length) return;
+      const worst = items.find((x) => x.level === "bad") || items[0];
+      attn.push({ e, a: { level: worst.level, label: worst.label, note: worst.note }, items });
+    });
     attn.sort((x, y) => (x.a.level === y.a.level ? 0 : x.a.level === "bad" ? -1 : 1));
     const attnBlock = el("div", null, [
       el("h4", { class: "dmn-section-title" }, ["Needs attention", el("span", { class: "dmn-section-title__aside" }, String(attn.length))]),
     ]);
     if (attn.length) {
-      attnBlock.appendChild(el("div", { class: "dmn-attn" }, attn.slice(0, 8).map(({ e, a }) =>
+      attnBlock.appendChild(el("div", { class: "dmn-attn" }, attn.slice(0, 8).map(({ e, a, items }) =>
         el("button", {
           class: "dmn-attn__row", type: "button", "data-state": a.level === "bad" ? "crashed" : "starting",
           onclick: () => select(e.id, true),
         }, [
           el("span", { class: "dmn-attn__glyph", "aria-hidden": "true" }, a.level === "bad" ? "\u2717" : "\u21BB"),
           el("span", { class: "dmn-attn__name" }, displayName(e)),
-          el("span", { class: "dmn-attn__note" }, `${a.label}: ${a.note}`),
+          el("span", { class: "dmn-attn__note" }, items.map((x) => `${x.label}: ${x.note}`).join(" \u00B7 ")),
         ]))));
       if (attn.length > 8) attnBlock.appendChild(el("div", { class: "dmn-more" }, `+ ${attn.length - 8} more \u2014 use the Attention filter`));
     } else {

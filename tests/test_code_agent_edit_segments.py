@@ -1,13 +1,12 @@
-"""code_agent writes whole files (jarvis-plan.md, item 3 "Edit style").
+"""code_agent changes existing files in segments, never by rewriting them whole
+(jarvis-plan.md, item 3 "Edit style" -- the second round; the first round had made
+write_file replace whole files, which is what the owner saw in his own tests).
 
-Before: the inner `write_file` refused an existing path ("already exists -- use
-edit_file") and the system prompt told the model to patch with small
-edit_file old_str/new_str replacements. Now `write_file` creates OR replaces a
-file with its complete content, the prompt and schema say so, and the outcome
-line says "rewrote" when it replaced something ("created" is unchanged for a
-new file).
+Now: `write_file` only CREATES a new file and refuses a path that already exists;
+an existing file is changed with `edit_file` (old_str/new_str); the prompt and both
+schemas say so.
 
-Run: python3 tests/test_code_agent_write_overwrite.py
+Run: python3 tests/test_code_agent_edit_segments.py
 """
 
 import os
@@ -25,7 +24,7 @@ for _stream in (sys.stdout, sys.stderr):
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "jarvis-cli"))
 
 # jarvis.tools scans ~/.jarvis/tools at import time: redirect HOME first (AGENTS.md).
-_TMP_HOME = tempfile.mkdtemp(prefix="jarvis-codeagent-overwrite-test-")
+_TMP_HOME = tempfile.mkdtemp(prefix="jarvis-codeagent-segments-test-")
 os.environ["HOME"] = _TMP_HOME
 os.environ["USERPROFILE"] = _TMP_HOME
 Path(_TMP_HOME, ".jarvis").mkdir(parents=True, exist_ok=True)
@@ -43,7 +42,7 @@ def check(name, cond, detail=""):
 
 def _run_with(files, calls):
     """Run `calls` [(tool, args)] through the REAL executor via a fake loop."""
-    d = Path(tempfile.mkdtemp(prefix="ca-ow-"))
+    d = Path(tempfile.mkdtemp(prefix="ca-seg-"))
     for rel, text in files.items():
         (d / rel).write_text(text, encoding="utf-8")
     orig = code_agent._run_agent_loop
@@ -63,27 +62,35 @@ def _run_with(files, calls):
     return result, contents
 
 
-def test_overwrites_existing_file():
-    new = "print('new')\nprint('whole file')\n"
+def test_write_file_refuses_an_existing_file():
+    original = "print('old')\nprint('keep me')\n"
     result, files = _run_with(
-        {"main.py": "print('old')\n"},
-        [("write_file", {"path": "main.py", "content": new})])
-    check("ok", result.get("ok") is True, result)
-    check("existing file now holds the full new content", files.get("main.py") == new, files)
-    n = len(new.encode("utf-8"))
-    check("log says rewrote", result.get("log") == [f"write_file → rewrote, {n} bytes written"], result.get("log"))
+        {"main.py": original},
+        [("write_file", {"path": "main.py", "content": "print('whole new file')\n"})])
+    check("existing file is untouched", files.get("main.py") == original, files)
     fails = [s for s in result["steps"] if s.get("status") == "fail"]
-    check("no failed step", not fails, fails)
+    check("the step failed", len(fails) == 1, result["steps"])
+    err = str(fails[0].get("error")) if fails else ""
+    check("the error points at edit_file", "already exists" in err and "edit_file" in err, err)
 
 
-def test_new_file_still_says_created():
+def test_edit_file_changes_only_the_segment():
+    original = "a = 1\nb = 2\nc = 3\n"
+    result, files = _run_with(
+        {"main.py": original},
+        [("edit_file", {"path": "main.py", "old_str": "b = 2", "new_str": "b = 20"})])
+    check("only the segment changed", files.get("main.py") == "a = 1\nb = 20\nc = 3\n", files)
+    check("log says edited", str(result.get("log")).startswith("['edit_file → edited"), result.get("log"))
+
+
+def test_new_file_is_still_created():
     result, files = _run_with({}, [("write_file", {"path": "a.py", "content": "x = 1\n"})])
     check("file created", files.get("a.py") == "x = 1\n", files)
     check("log says created", result.get("log") == ["write_file → created, 6 bytes written"], result.get("log"))
 
 
 def test_directory_target_is_refused():
-    d = Path(tempfile.mkdtemp(prefix="ca-ow-"))
+    d = Path(tempfile.mkdtemp(prefix="ca-seg-"))
     (d / "sub").mkdir()
     orig = code_agent._run_agent_loop
 
@@ -104,22 +111,25 @@ def test_directory_target_is_refused():
           result["steps"])
 
 
-def test_prompt_and_schema_say_whole_file():
+def test_prompt_and_schemas_say_segments():
     prompt = code_agent._code_agent_system_prompt(5)
-    check("prompt asks for the complete file via write_file",
-          "COMPLETE updated file with write_file" in prompt, prompt[:400])
-    check("prompt no longer says write_file is only for new files",
-          "genuinely new file" not in prompt)
+    check("prompt tells the model to change files with edit_file", "with edit_file" in prompt, prompt[:600])
+    check("prompt forbids rewriting a whole existing file", "NEVER resend or rewrite" in prompt)
+    check("prompt limits write_file to new files", "only to create a NEW file" in prompt)
+    check("prompt no longer asks for whole-file writes", "COMPLETE updated file" not in prompt)
     desc = code_agent._INTERNAL_WRITE_FILE_SCHEMA["description"]
-    check("schema says it replaces an existing file", "replaces it if it already exists" in desc, desc)
+    check("write_file schema says new files only", "NEW file" in desc and "Refuses a path that already exists" in desc, desc)
+    edit = next(s for s in code_agent.TOOL_SCHEMAS if s["name"] == "edit_file")
+    check("edit_file schema says it is how existing files change", "never a whole-file rewrite" in edit["description"], edit["description"])
 
 
 if __name__ == "__main__":
     try:
-        test_overwrites_existing_file()
-        test_new_file_still_says_created()
+        test_write_file_refuses_an_existing_file()
+        test_edit_file_changes_only_the_segment()
+        test_new_file_is_still_created()
         test_directory_target_is_refused()
-        test_prompt_and_schema_say_whole_file()
+        test_prompt_and_schemas_say_segments()
     finally:
         shutil.rmtree(_TMP_HOME, ignore_errors=True)
     print(f"\n{len(PASS)} passed, {len(FAIL)} failed")

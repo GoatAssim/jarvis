@@ -82,6 +82,10 @@
 }
 
 .dmn-list{ flex: 1; min-height: 0; overflow-y: auto; padding: 6px 8px 12px; }
+/* Add daemon / Manage categories under the list: full-width, evenly spaced (was two inline-styled
+   buttons that only ever took their text width). */
+.dmn-list-foot{ display: grid; grid-template-columns: 1fr; gap: 6px; padding: 8px 12px 10px; border-top: 1px solid var(--border); flex-shrink: 0; }
+.dmn-list-foot .btn{ width: 100%; justify-content: center; }
 .dmn-group{ margin-top: 6px; }
 .dmn-group__head{
   width: 100%; display: grid; grid-template-columns: 14px 1fr auto; align-items: center; gap: 6px;
@@ -296,6 +300,9 @@ button.dmn-tag--btn:focus-visible{ outline: 1px solid var(--accent); outline-off
   padding: 8px 18px; border-bottom: 1px solid var(--border); flex-shrink: 0;
 }
 .dmn-cbar--2{ padding-top: 6px; }
+/* style.css gives every <select> width:100%, which put each of these two on a row of its own
+   (a 3-4 row toolbar that left the console ~10 lines tall). Size them to their content. */
+.dmn-cbar select{ width: auto; flex: 0 1 auto; max-width: 100%; padding: 4px 8px; font-size: 11.5px; }
 .dmn-cchips{ display: flex; gap: 5px; flex-wrap: wrap; }
 .dmn-cchip{
   display: inline-flex; align-items: center; gap: 5px;
@@ -524,8 +531,8 @@ textarea.dmn-input{ resize: vertical; min-height: 54px; line-height: 1.5; }
 /* ---------------------------------------------------------------- foot */
 
 .dmn-foot{
-  display: flex; align-items: center; gap: 10px; flex-wrap: wrap; justify-content: flex-end;
-  padding: 9px 14px; border-top: 1px solid var(--border); flex-shrink: 0;
+  display: flex; align-items: center; gap: 4px 10px; flex-wrap: wrap; justify-content: flex-end;
+  padding: 7px 14px; border-top: 1px solid var(--border); flex-shrink: 0;
   font-family: var(--font-mono); font-size: 10.5px; color: var(--text-dimmer);
 }
 .dmn-kbd{ display: inline-block; border: 1px solid var(--border-strong); border-bottom-width: 2px; border-radius: 3px; padding: 0 5px; margin: 0 2px; color: var(--text-dim); }
@@ -574,7 +581,7 @@ textarea.dmn-input{ resize: vertical; min-height: 54px; line-height: 1.5; }
 .dmn-attn__row:hover{ border-color: var(--accent-soft); border-left-color: var(--dmn-c); }
 .dmn-attn__glyph{ color: var(--dmn-c); text-align: center; font-size: 11px; }
 .dmn-attn__name{ font-family: var(--font-mono); font-size: 11.5px; color: var(--text); word-break: break-word; }
-.dmn-attn__note{ grid-column: 2; font-size: 11px; color: var(--text-dimmer); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dmn-attn__note{ grid-column: 2; font-size: 11px; color: var(--text-dimmer); overflow-wrap: anywhere; }
 .dmn-more{ font-size: 11px; color: var(--text-dimmer); padding: 2px 7px; }
 
 .dmn-mini{ display: flex; flex-direction: column; gap: 8px; }
@@ -621,7 +628,7 @@ textarea.dmn-input{ resize: vertical; min-height: 54px; line-height: 1.5; }
   /* style.css turns .debug-body into a scrolling one-column stack here; see
      test-checklist.css's own comment for the same reasoning — the list keeps
      its own fixed-height scroll, the rest of the panel just grows. */
-  .dmn-body{ grid-template-columns: 1fr; grid-template-rows: 420px max-content max-content; overflow-y: auto; }
+  .dmn-body{ grid-template-columns: 1fr; grid-template-rows: clamp(420px, 70vh, 640px) max-content max-content; overflow-y: auto; }
   .dmn-body > .debug-pane{ border-left: none !important; border-right: none; border-bottom: 1px solid var(--border); overflow: visible; }
   .dmn-body > .debug-pane:first-child{ overflow: hidden; order: 0; }
   .dmn-body > .debug-pane:not(:first-child){ min-height: max-content; }

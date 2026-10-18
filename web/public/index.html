@@ -261,7 +261,7 @@
                 <span class="panel-menu__item-label">Backlog</span>
                 <span class="panel-menu__item-hint">Open-ended work with no due date &mdash; what&rsquo;s in progress, what&rsquo;s blocked</span>
               </button>
-              <button class="panel-menu__item" id="menu-item-logsearch" type="button" role="menuitem">
+              <button class="panel-menu__item" id="menu-item-logsearch" type="button" role="menuitem" hidden aria-hidden="true" tabindex="-1">
                 <span class="panel-menu__item-label">Log search</span>
                 <span class="panel-menu__item-hint">Grep the raw log files on disk, including daemon consoles</span>
               </button>
@@ -1630,9 +1630,9 @@
         <div class="dmn-list" id="daemons-list">
           <div class="debug-empty">Loading&hellip;</div>
         </div>
-        <div style="padding:8px 12px 10px;">
-          <button class="btn btn--primary btn--sm btn--wide" id="btn-daemon-add-open" type="button">+ Add daemon</button>
-          <button class="btn btn--ghost btn--sm btn--wide" id="btn-daemon-categories" type="button" title="Rename, merge or delete a category on every service at once" style="margin-top:6px">Manage categories</button>
+        <div class="dmn-list-foot">
+          <button class="btn btn--primary btn--sm" id="btn-daemon-add-open" type="button">+ Add daemon</button>
+          <button class="btn btn--ghost btn--sm" id="btn-daemon-categories" type="button" title="Rename, merge or delete a category on every service at once">Manage categories</button>
         </div>
       </section>
 

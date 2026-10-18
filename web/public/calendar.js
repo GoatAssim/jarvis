@@ -77,6 +77,7 @@
   const MONTH_LONG = ["January", "February", "March", "April", "May", "June", "July", "August",
     "September", "October", "November", "December"];
   const AGENDA_DAYS = 14;
+  const POLL_MS = 60 * 1000;   // how often an open panel quietly re-reads (see pollEvents)
   const LEAD_CHOICES = [5, 10, 15, 30, 60, 120, 1440];
   const ALL_DAY_REMINDER_HOUR = 9;
 
@@ -381,6 +382,8 @@
     form: null,               // the open event form, or null
     wizard: null,             // the open "link a calendar" guide, or null
     prevFocus: null,
+    openedOn: ymd(new Date()), // the calendar day the window above was last aligned to (see rollDay)
+    pollTimer: null,           // background re-read while the panel is open (see startPolling)
   };
 
   try {
@@ -448,6 +451,57 @@
     }
     state.loading = false;
     renderAll();
+  }
+
+  /* ---- keeping an open panel current ---------------------------------------------
+   * The fetch path was never the problem (Refresh and the r key force a re-download and
+   * work). What was missing was anything that ASKED again: the panel read once when it
+   * opened and then never again, and `anchor` / `selectedDay` were fixed when the page
+   * loaded, so a browser tab left open overnight opened on yesterday's agenda. */
+
+  // Move "today" forward when the calendar day has changed since the window was last aligned.
+  // Only a view that was sitting on today follows it; one the person paged away from stays.
+  function rollDay() {
+    const today = ymd(new Date());
+    if (state.openedOn === today) return false;
+    const was = state.openedOn;
+    state.openedOn = today;
+    if (ymd(state.anchor) === was) state.anchor = startOfDay(new Date());
+    if (state.selectedDay === was) state.selectedDay = today;
+    return true;
+  }
+
+  // A quiet re-read (cached on the server, so it only re-downloads a calendar whose copy is
+  // older than the cache time). It repaints only when something changed, so it never resets
+  // a scroll position or an open event, and it never touches a form or the link guide.
+  async function pollEvents() {
+    if (!isOpen() || (typeof document !== "undefined" && document.hidden)) return;
+    if (state.form || state.wizard || state.loading || state.tab !== "events") return;
+    if (rollDay()) { loadEvents(false); return; }
+    const mine = ++state.reqId;
+    const { start, end } = windowFor(state.view, state.anchor, weekIdx());
+    try {
+      const data = await Api.get(`/api/calendar/window?start=${encodeURIComponent(ymd(start))}&end=${encodeURIComponent(ymd(end))}`);
+      if (mine !== state.reqId || state.form || state.wizard || state.loading) return;
+      const events = data.events || [];
+      const problems = data.problems || [];
+      const truncated = Boolean(data.truncated);
+      if (JSON.stringify([events, problems, truncated]) === JSON.stringify([state.events, state.problems, state.truncated])) return;
+      state.events = events;
+      state.problems = problems;
+      state.truncated = truncated;
+      state.loadError = "";
+      if (state.selectedId && !eventById(state.selectedId)) state.selectedId = null;
+      renderAll();
+    } catch (_) { /* a failed background read keeps what is on screen; the next one retries */ }
+  }
+
+  function startPolling() {
+    stopPolling();
+    state.pollTimer = setInterval(pollEvents, POLL_MS);
+  }
+  function stopPolling() {
+    if (state.pollTimer) { clearInterval(state.pollTimer); state.pollTimer = null; }
   }
 
   async function refreshAll(refresh) {
@@ -1243,6 +1297,9 @@
     if (state.built) return true;
     dom = grabDom();
     if (!dom) return false;
+    // Coming back to the tab (or the window) is the moment a panel left open went stale.
+    document.addEventListener("visibilitychange", () => { if (!document.hidden) pollEvents(); });
+    window.addEventListener("focus", () => { pollEvents(); });
     dom.tabEvents.addEventListener("click", () => setTab("events"));
     dom.tabCalendars.addEventListener("click", () => setTab("calendars"));
     $("#calendar-close")?.addEventListener("click", close);
@@ -1260,13 +1317,16 @@
     state.prevFocus = document.activeElement;
     dom.overlay.hidden = false;
     state.selectedDay = state.selectedDay || ymd(new Date());
+    rollDay();
     renderAll();
     refreshAll(false);
+    startPolling();
   }
 
   function close() {
     if (!dom || dom.overlay.hidden) return;
     dom.overlay.hidden = true;
+    stopPolling();
     state.form = null;
     state.wizard = null; // never leave a pasted link sitting in a closed panel
     const prev = state.prevFocus;

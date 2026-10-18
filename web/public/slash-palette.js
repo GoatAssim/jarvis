@@ -46,7 +46,10 @@
   // -------------------------------------------------------------------------
   // Registry index
   // -------------------------------------------------------------------------
-  const VERBS = REG.verbs;
+  // Verbs the person cannot reach from the palette. Log search is hidden from the UI (jarvis-plan.md 4);
+  // its registry entry, routes and panel stay, so this is the one switch to flip back.
+  const HIDDEN_VERBS = new Set(["logsearch"]);
+  const VERBS = REG.verbs.filter((v) => !HIDDEN_VERBS.has(v.verb));
   const GROUPS = REG.groups;
   const NOT_EXPOSED = REG.notExposed || {};
   const PASSTHROUGH = REG.passthrough || {};   // runnable as /<cli-name> [args]
