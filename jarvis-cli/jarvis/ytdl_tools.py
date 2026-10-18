@@ -264,11 +264,60 @@ def ytdl_formats(arguments):
     }
 
 
+# Options `background` hands to the Download Hub's yt-dlp engine (the same names as above).
+_HUB_PASS = ("mode", "quality", "container", "video_codec", "audio_format", "audio_quality",
+             "embed_thumbnail", "embed_metadata", "embed_chapters", "write_subs", "embed_subs",
+             "sub_langs", "sponsorblock_remove", "skip_if_downloaded")
+
+
+def _ytdl_download_background(arguments):
+    """`background: true`: queue the download in the Download Hub and return at once.
+
+    The hub's yt-dlp engine does the transfer (queue, pause / resume / cancel, retries, history in
+    Menu > Downloads), so nothing here waits.  The default stays the blocking download below: this
+    only runs when the caller asks.  What background does NOT do: playlists (one video per link),
+    a custom output_dir (a hub download goes to the hub library folders) and the inline playable
+    card the blocking download makes -- each is refused with a message instead of being ignored.
+    """
+    url = arguments.get("url")
+    if arguments.get("playlist"):
+        return {"error": "background downloads are one video per link; for a playlist leave background off"}
+    if arguments.get("output_dir"):
+        return {"error": "background downloads save into the Download Hub library folders; "
+                         "leave output_dir out, or leave background off to save in a custom folder"}
+    try:
+        from .hub import service
+        options = {k: arguments.get(k) for k in _HUB_PASS if arguments.get(k) is not None}
+        res = service.add_items([url], engine="ytdlp", engine_options=options,
+                                speed_limit_kbps=arguments.get("rate_limit_kbps"))
+    except Exception as exc:  # noqa: BLE001 - a tool never raises
+        return {"error": f"couldn't queue it in the Download Hub: {exc}"}
+    if not res.get("ok"):
+        why = res.get("error") or "the hub refused it"
+        return {"error": f"couldn't queue it in the Download Hub: {why}. Leave background off to download it now."}
+    added = (res.get("added") or [{}])[0]
+    out = {
+        "ok": True,
+        "queued": True,
+        "background": True,
+        "id": added.get("id"),
+        "duplicate": bool(added.get("duplicate")),
+        "message": ("Already in the Download Hub." if added.get("duplicate")
+                    else "Queued in the Download Hub; it downloads in the background (Menu > Downloads). "
+                         "Use dl_status or dl_list to check on it."),
+    }
+    if res.get("note"):
+        out["note"] = res["note"]
+    return out
+
+
 def ytdl_download(arguments):
     arguments = arguments or {}
     url = arguments.get("url")
     if not url or not isinstance(url, str):
         return {"error": "url is required"}
+    if arguments.get("background"):
+        return _ytdl_download_background(arguments)
 
     mode = (arguments.get("mode") or "video").strip().lower()
     if mode not in ("video", "audio"):
@@ -553,6 +602,15 @@ YTDL_TOOL_SCHEMAS = [
                     "description": "Only used when playlist=true. yt-dlp item-spec, e.g. '1-5' or '1,3,5'. Defaults to the first items up to the cap.",
                 },
                 "skip_if_downloaded": {"type": "boolean", "description": "Skip (rather than re-download) URLs already fetched before, tracked in a persistent archive file. Default false."},
+                "background": {
+                    "type": "boolean",
+                    "description": (
+                        "true: don't wait. Queue it in the Download Hub and return at once; the hub downloads "
+                        "it in the background (pause / retry / history in Menu > Downloads; check with dl_status). "
+                        "Use for long or large downloads, or when the person doesn't need the file right now. "
+                        "Not with playlist or output_dir. Default false: download now and offer the file."
+                    ),
+                },
             },
             "required": ["url"],
         },

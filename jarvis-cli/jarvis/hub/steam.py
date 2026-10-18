@@ -21,7 +21,12 @@ the report so the hub derives them from successive byte counts (shown with "≈"
   bits seen: 2 UpdateRequired, 4 FullyInstalled, 256 UpdateRunning, 512 UpdatePaused,
              1024 UpdateStarted, 1048576 Downloading, 2097152 Staging, 4194304 Committing
 
-  paused        512 set
+  paused        512 set and something is actually in flight (bytes known).  Steam also sets 512 on
+                a pending update it has queued and not started, with every Bytes* field 0 or absent
+                (seen on a real PC 2026-10-18: two Linux runtimes sat at 518 for minutes, then ran
+                and finished with 0 bytes).  That is not a download: it is not listed, exactly like
+                a bare 2, instead of a row stuck on "paused" with no percent that later "finishes"
+                100% of nothing.  A download that was already listed and is then paused stays.
   installing    staging / committing set (a phase, not a download: the bar shows stage bytes)
   downloading   256 / 1024 / 1048576 set and the byte count moved since the last look
   stalled       ... and it did not move for 3 looks in a row
@@ -152,6 +157,9 @@ def classify(manifest, memory=None):
     row["subtitle"] = "update" if memory.get("update") else "install"
 
     if flags & FLAG_UPDATE_PAUSED:
+        if to_dl <= 0 and got <= 0 and to_stage <= 0 and staged <= 0 and not memory.get("active"):
+            memory["active"] = False         # a queued background update, not a download (see the module docstring)
+            return None
         row.update(state="paused", message="paused in Steam")
     elif flags & _STAGING:
         row.update(state="postprocessing", phase="installing", percent=_pct(staged, to_stage, 99.0))
@@ -209,6 +217,11 @@ def default_roots():
     return out
 
 
+def _path_key(path):
+    """Two spellings of one folder compare equal (case on Windows, `..`, a trailing slash)."""
+    return os.path.normcase(os.path.normpath(str(path)))
+
+
 def find_libraries(root=None, candidates=None):
     """(steam root or None, [library paths]).  Every library in libraryfolders.vdf that exists,
     plus the Steam folder itself."""
@@ -224,8 +237,19 @@ def find_libraries(root=None, candidates=None):
             text = (apps / "libraryfolders.vdf").read_text(encoding="utf-8", errors="replace")[:MAX_FILE_BYTES]
             for extra in parse_libraries(text):
                 path = Path(extra.replace("\\\\", "\\"))
-                if (path / "steamapps").is_dir() and str(path) not in libs:
+                if not (path / "steamapps").is_dir():
+                    continue
+                # Windows paths are case-blind and the registry says `c:/program files (x86)/steam`
+                # while libraryfolders.vdf says `C:\Program Files (x86)\Steam`: one library, not two
+                # (a real PC showed "3 libraries" for 2, scanned the Steam folder twice and listed
+                # two open roots).  The first entry is the Steam folder itself: keep Steam's own
+                # spelling of it from the vdf, so the paths shown in rows read properly.
+                key = _path_key(path)
+                same = [i for i, lib in enumerate(libs) if _path_key(lib) == key]
+                if not same:
                     libs.append(str(path))
+                elif same[0] == 0:
+                    libs[0] = str(path)
         except OSError:
             pass
         return str(steam), libs

@@ -346,7 +346,8 @@ TOOL_SCHEMAS = [
             "the transfer and shows it in Menu > Downloads. Takes a direct file link (http/https) and also a "
             "YouTube page or a page of any other site yt-dlp supports (the yt-dlp engine; one video per link, "
             "mode / quality / container choose the result). For a video the person wants to watch in chat "
-            "right now, ytdl_download stays the better tool. Magnet links are not supported yet. "
+            "right now, ytdl_download (blocking) is the better tool; ytdl_download with background=true "
+            "queues here exactly like dl_add. Magnet links are not supported yet. "
             "Set dry_run to see which engine would take a link without queueing it."
         ),
         "parameters": {
@@ -638,7 +639,7 @@ TOOL_PACK_INSTRUCTION = (
     "with dl_list / dl_status instead of waiting. 'Download it tomorrow night' = dl_add with "
     "start_at (or dl_schedule for one already queued). It takes file links and video pages "
     "(YouTube and other yt-dlp sites, one video per link); ytdl_download is still the tool for "
-    "'download this video now'. Magnet links are not supported by dl_add yet."
+    "'download this video now' (and with background=true it queues here too). Magnet links are not supported by dl_add yet."
 )
 
 # ---------------------------------------------------------------------------

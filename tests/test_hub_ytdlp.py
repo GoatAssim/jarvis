@@ -464,9 +464,44 @@ def test_legacy():
     check("re-importing after a prune doesn't remove history", old["ok"] and len(store.list_items(provider="ytdl_legacy", limit=50)) == 3)
 
 
+def test_background():
+    """ytdl_download(background=True) queues in the hub instead of downloading and waiting."""
+    from jarvis import ytdl_tools
+    hub = Store()                                   # the default store under the test HOME
+    before = len(hub.list_items(limit=2000))
+    res = ytdl_tools.ytdl_download({"url": "https://www.youtube.com/watch?v=bgtest1", "background": True,
+                                    "mode": "audio", "audio_format": "opus", "rate_limit_kbps": 500})
+    check("background=true queues at once and says so", res.get("ok") and res["queued"] and res["background"] and res["id"])
+    row = hub.get_item(res["id"])
+    check("it is a hub yt-dlp row carrying the options", row["engine"] == "ytdlp" and row["options"]["mode"] == "audio"
+          and row["options"]["audio_format"] == "opus" and row["kind"] == "audio")
+    check("the speed cap came along", row["options"].get("limit_kbps") == 500)
+    check("the answer tells the model how to follow it", "dl_status" in res["message"])
+    again = ytdl_tools.ytdl_download({"url": "https://www.youtube.com/watch?v=bgtest1", "background": True,
+                                      "mode": "audio", "audio_format": "opus", "rate_limit_kbps": 500})
+    check("the same request again is reported as already there", again.get("duplicate") is True and again["id"] == res["id"]
+          and len(hub.list_items(limit=2000)) == before + 1)
+    pl = ytdl_tools.ytdl_download({"url": "https://www.youtube.com/playlist?list=x", "background": True, "playlist": True})
+    check("a playlist with background is refused, not silently shrunk", "error" in pl and "playlist" in pl["error"])
+    od = ytdl_tools.ytdl_download({"url": "https://www.youtube.com/watch?v=bgtest2", "background": True, "output_dir": "Somewhere"})
+    check("a custom output_dir with background is refused", "error" in od and "output_dir" in od["error"])
+    bad = ytdl_tools.ytdl_download({"url": "https://www.youtube.com/watch?v=bgtest3", "background": True, "container": "gif"})
+    check("a bad option is reported and nothing is queued", "error" in bad and "container" in bad["error"])
+    nope = ytdl_tools.ytdl_download({"url": "https://nothing-claims-this.example/page", "background": True})
+    check("a page yt-dlp can't take says so and suggests leaving background off", "error" in nope and "background off" in nope["error"])
+    check("none of the refusals queued anything", len(hub.list_items(limit=2000)) == before + 1)
+    plain = ytdl_tools.ytdl_download({"url": "https://www.youtube.com/watch?v=x", "mode": "movie"})
+    check("without background the old blocking path is untouched", "error" in plain and "unknown mode" in plain["error"]
+          and len(hub.list_items(limit=2000)) == before + 1)
+    schema = next(t for t in ytdl_tools.YTDL_TOOL_SCHEMAS if t["name"] == "ytdl_download") \
+        if hasattr(ytdl_tools, "YTDL_TOOL_SCHEMAS") else None
+    if schema is not None:
+        check("the schema offers background as a boolean", schema["parameters"]["properties"]["background"]["type"] == "boolean")
+
+
 def main():
     for fn in (test_routing, test_options, test_engine_success, test_engine_errors, test_pause_resume_cancel,
-               test_daemon, test_service, test_control_reports_failure, test_legacy):
+               test_daemon, test_service, test_control_reports_failure, test_legacy, test_background):
         try:
             fn()
         except Exception as exc:  # noqa: BLE001

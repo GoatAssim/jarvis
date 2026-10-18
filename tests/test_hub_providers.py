@@ -477,6 +477,18 @@ def test_steam_classify():
     check("staging is the 'installing' phase with its own percent, below 100", row["state"] == "postprocessing"
           and row["phase"] == "installing" and row["percent"] == 25.0)
     check("a pending update alone (bit 2) is not a download", steam.classify(steam.parse_vdf(acf(105, "Pending", 6, to_dl=500)), {}) is None)
+    # Seen on a real PC (2026-10-18): Steam parks a queued background update at 518 (2+4+512) with
+    # every Bytes* field 0; it later runs and ends at 4 having moved nothing.
+    mem_bg = {}
+    check("a paused-flag update with no bytes anywhere is a queued background update, not listed",
+          steam.classify(steam.parse_vdf(acf(111, "Runtime", 518)), mem_bg) is None)
+    check("...nor is it reported 'done' when Steam later finishes it at 4",
+          steam.classify(steam.parse_vdf(acf(111, "Runtime", 4, size=100)), mem_bg) is None)
+    check("a pause with no bytes still counts once the app was listed (queued, then paused by the owner)",
+          steam.classify(steam.parse_vdf(acf(112, "Queued", 1030)), mem_bg2 := {}) is not None
+          and steam.classify(steam.parse_vdf(acf(112, "Queued", 1030 | 512)), mem_bg2)["state"] == "paused")
+    check("a pause with bytes fetched is a paused download, listed",
+          steam.classify(steam.parse_vdf(acf(113, "Half", 518, to_dl=500, got=100)), {})["state"] == "paused")
     check("a normal installed game is not listed", steam.classify(steam.parse_vdf(acf(106, "Done", 4, size=100)), {}) is None)
     check("a manifest without an app id is ignored", steam.classify({"AppState": {"name": "x"}}, {}) is None)
     check("a hostile app id is ignored", steam.classify(steam.parse_vdf(acf("../x", "x", 1026, to_dl=5)), {}) is None)
@@ -508,6 +520,23 @@ def test_steam_provider():
     check("find_libraries reads libraryfolders.vdf and keeps only libraries that exist", found == str(steam_dir)
           and libs == [str(steam_dir), str(lib2)])
     check("a folder that isn't Steam is not found", steam.find_libraries(str(base / "nope")) == (None, []))
+    # The registry spells the Steam folder one way and libraryfolders.vdf another (case on Windows);
+    # it must be ONE library, not two.  `..` and a trailing slash exercise the same rule on any OS.
+    twice = Path(base) / "SteamTwice"
+    (twice / "steamapps" / "common").mkdir(parents=True)
+    (twice / "x").mkdir()                     # so `x/..` resolves on every OS
+    other_spelling = str(twice / "x" / "..") + os.sep
+    (twice / "steamapps" / "libraryfolders.vdf").write_text(
+        '"libraryfolders" { "0" { "path" "%s" } "1" { "path" "%s" } }' % (
+            other_spelling.replace("\\", "\\\\"), other_spelling.replace("\\", "\\\\")))
+    _root_twice, libs_twice = steam.find_libraries(str(twice))
+    check("the Steam folder named again in libraryfolders.vdf under another spelling is one library", len(libs_twice) == 1)
+    if os.name == "nt":
+        upper = Path(base) / "SteamCase"
+        (upper / "steamapps").mkdir(parents=True)
+        (upper / "steamapps" / "libraryfolders.vdf").write_text(
+            '"libraryfolders" { "0" { "path" "%s" } }' % str(upper).upper().replace("\\", "\\\\"))
+        check("Windows: the same folder in another case is one library", len(steam.find_libraries(str(upper).lower())[1]) == 1)
     check("candidates are tried in order", steam.find_libraries(None, candidates=["", str(base / "x"), str(steam_dir)])[0] == str(steam_dir))
 
     (steam_dir / "steamapps" / "appmanifest_100.acf").write_text(acf(100, "Fresh Install", 1026, to_dl=1000, got=200))
