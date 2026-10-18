@@ -67,6 +67,13 @@ _SCHEMA = (
     )""",
     "CREATE INDEX IF NOT EXISTS events_item ON events(item_id, id)",
     "CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY, value TEXT)",
+    # Once-only bookkeeping: "this row already got its <kind> notification / auto-open".
+    # `stamp` tells one occurrence from the next (a retried download finishes again with a
+    # new finished_at, so it is announced again; a restart of the daemon is not).
+    """CREATE TABLE IF NOT EXISTS notices(
+        item_id TEXT NOT NULL, kind TEXT NOT NULL, stamp REAL NOT NULL DEFAULT 0, at REAL NOT NULL,
+        PRIMARY KEY(item_id, kind, stamp)
+    )""",
 )
 
 ITEM_COLUMNS = frozenset((
@@ -104,6 +111,8 @@ _PROVIDER_JSON = {"capabilities": "capabilities_json", "controls": "controls_jso
                   "open_roots": "open_roots_json", "settings": "settings_json"}
 
 EVENT_KEEP_PER_ITEM = 100
+# Rows of the settings table that are runtime state kept next to the settings, not settings.
+RUNTIME_KEYS = ("daemon", "notify_state")
 
 
 def _dumps(value):
@@ -234,7 +243,7 @@ class Store:
             rows = conn.execute("SELECT key, value FROM settings").fetchall()
         out = {}
         for row in rows:
-            if row["key"] in ("daemon",):       # runtime state, not a setting
+            if row["key"] in RUNTIME_KEYS:      # runtime state, not a setting
                 continue
             out[row["key"]] = _loads(row["value"], None)
         return out
@@ -247,7 +256,7 @@ class Store:
         """The merged settings, read inside a transaction that is already open."""
         stored = {}
         for row in conn.execute("SELECT key, value FROM settings"):
-            if row["key"] != "daemon":
+            if row["key"] not in RUNTIME_KEYS:
                 stored[row["key"]] = _loads(row["value"], None)
         return settings_mod.merged(stored)
 
@@ -271,6 +280,12 @@ class Store:
         with self._write() as conn:
             conn.execute("INSERT INTO settings(key, value) VALUES(?,?) "
                          "ON CONFLICT(key) DO UPDATE SET value=excluded.value", (key, _dumps(value)))
+
+    def get_raw_setting(self, key):
+        """One internal runtime value (see RUNTIME_KEYS), or None."""
+        with self._read() as conn:
+            row = conn.execute("SELECT value FROM settings WHERE key=?", (key,)).fetchone()
+        return _loads(row["value"], None) if row else None
 
     # ------------------------------------------------------------------ daemon heartbeat
 
@@ -660,6 +675,7 @@ class Store:
         with self._write() as conn:
             marks = ",".join("?" * len(ids))
             conn.execute("DELETE FROM events WHERE item_id IN (%s)" % marks, ids)
+            conn.execute("DELETE FROM notices WHERE item_id IN (%s)" % marks, ids)
             return conn.execute("DELETE FROM items WHERE id IN (%s)" % marks, ids).rowcount
 
     def mark_stale(self, now=None, stale_after=30.0, unknown_after=86400.0):
@@ -785,6 +801,65 @@ class Store:
     @staticmethod
     def _provider_error(conn, pid, message):
         conn.execute("UPDATE providers SET last_error=? WHERE id=?", (states.clean_text(message, 200), pid))
+
+    # ------------------------------------------------------------------ notices (notify.py)
+
+    def claim_notice(self, item_id, kind, stamp=0.0):
+        """Record that (item, kind, stamp) has been handled.  True the first time only, so two
+        daemon passes can never announce the same finish twice."""
+        with self._write() as conn:
+            cur = conn.execute("INSERT OR IGNORE INTO notices(item_id, kind, stamp, at) VALUES(?,?,?,?)",
+                               (item_id, kind, float(stamp or 0), self.now()))
+            return cur.rowcount > 0
+
+    def unclaimed(self, kind, state_names, *, since, stamp_column):
+        """Rows in one of `state_names` that have no `kind` notice for their current
+        `stamp_column` value and that changed at or after `since` (so switching the feature on
+        never announces the history).  `stamp_column`: finished_at, started_at or attempts
+        (a retry count; `updated_at` is what `since` is compared with then)."""
+        if stamp_column not in ("finished_at", "started_at", "attempts"):
+            raise ValueError("bad stamp column")
+        names = (state_names,) if isinstance(state_names, str) else tuple(state_names)
+        when = "updated_at" if stamp_column == "attempts" else stamp_column
+        sql = ("SELECT i.*, p.label AS provider_label, g.title AS group_title FROM items i "
+               "LEFT JOIN providers p ON p.id = i.provider LEFT JOIN groups g ON g.id = i.group_id "
+               "LEFT JOIN notices n ON n.item_id = i.id AND n.kind = ? AND n.stamp = COALESCE(i.%s, 0) "
+               "WHERE i.state IN (%s) AND n.item_id IS NULL AND COALESCE(i.%s, 0) >= ? "
+               "AND (p.id IS NULL OR p.enabled = 1) ORDER BY COALESCE(i.%s, 0), i.id LIMIT 200"
+               % (stamp_column, ",".join("?" * len(names)), when, when))
+        with self._read() as conn:
+            rows = conn.execute(sql, (kind,) + names + (float(since),)).fetchall()
+        return [row_to_item(r) for r in rows]
+
+    def group_progress(self, group_id):
+        """{total, final, failed, done, cancelled, last_finished} for the rows of a group
+        (batch / season / playlist)."""
+        with self._read() as conn:
+            rows = conn.execute("SELECT state, finished_at FROM items WHERE group_id = ?", (group_id,)).fetchall()
+            title = conn.execute("SELECT title FROM groups WHERE id = ?", (group_id,)).fetchone()
+        out = {"total": len(rows), "final": 0, "failed": 0, "done": 0, "cancelled": 0, "last_finished": 0.0,
+               "title": title["title"] if title else ""}
+        for r in rows:
+            if r["state"] in states.FINAL_STATES:
+                out["final"] += 1
+                out[r["state"]] += 1
+                out["last_finished"] = max(out["last_finished"], r["finished_at"] or 0.0)
+        return out
+
+    def waiting_work(self):
+        """How many rows the hub itself still has to run (queued, running, stalled), not counting
+        paused ones: zero means \"the queue is empty\"."""
+        marks = ",".join("?" * (len(states.ACTIVE_STATES) + 2))
+        with self._read() as conn:
+            return conn.execute(
+                "SELECT COUNT(*) FROM items WHERE owner='hub' AND state IN (%s)" % marks,
+                states.ACTIVE_STATES + ("queued", "stalled")).fetchone()[0]
+
+    def forget_notices(self, item_ids):
+        ids = [i for i in item_ids if i]
+        if ids:
+            with self._write() as conn:
+                conn.execute("DELETE FROM notices WHERE item_id IN (%s)" % ",".join("?" * len(ids)), ids)
 
     # ------------------------------------------------------------------ diagnostics
 

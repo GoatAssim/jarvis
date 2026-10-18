@@ -172,7 +172,7 @@ def stream_to_file(ctx, item, url, headers=None, resolver=None, session=None):
                 name += naming.ext_from_content_type(hdr.get("Content-Type"))
             kind = naming.kind_for(name, hdr.get("Content-Type"))
             subdir = opts.get("subdir")
-            dest_dir = naming.safe_subdir(root, subdir) if subdir else Path(root) / naming.kind_folder(kind)
+            dest_dir = naming.safe_subdir(root, subdir) if subdir else Path(root) / naming.kind_folder(kind, ctx.settings.get("folders"))
             if dest_dir is None:
                 return Outcome.failed("the destination folder isn't allowed (it must sit inside the library root)")
             try:

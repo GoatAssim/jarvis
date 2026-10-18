@@ -15,7 +15,10 @@ tool_registry or tools, so an action file can import this package at module leve
     store.py        the sqlite store (WAL, busy timeout): items, groups, providers,
                     events, settings.  Every write path (engine, provider, tool, daemon)
                     goes through it, so every row is sanitised the same way.
-    settings.py     defaults + validation for the hub settings (dl_settings, the panel)
+    settings.py     defaults + validation for the hub settings (dl_settings, dl_prefs, the
+                    panel), the speed-schedule maths, and which keys each tool may write
+    notify.py       "tell me when it's done": the notification events, their channels, the
+                    message wording, burst coalescing, and the once-only bookkeeping
     netguard.py     the SSRF guard (loopback / private / link-local refused, allow-list)
     naming.py       filename + destination safety (nothing is written outside library_root)
     router.py       "what engine takes this input?" -> {engine, reason, ...}
@@ -70,5 +73,7 @@ Deliberate differences from the plan text (so the next agent doesn't "fix" them)
   (section 14: force every write under library_root).
 """
 
-SCHEMA_VERSION = 1
-HUB_VERSION = "1.0-phase2"
+# 2: the `notices` table (which notification / auto-open each row has already had).
+#    A version-1 database upgrades itself on first open: the only change is a new table.
+SCHEMA_VERSION = 2
+HUB_VERSION = "1.1-prefs"

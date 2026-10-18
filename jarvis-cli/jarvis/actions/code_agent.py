@@ -580,10 +580,12 @@ def _code_agent_system_prompt(round_limit):
         "Work the way a careful engineer would: look around and read enough of "
         "the relevant code to actually understand it BEFORE changing anything — "
         "don't guess a fix from the task description alone. Prefer search_code "
-        "to locate where something lives over guessing file paths. Make the "
-        "smallest edit that correctly does the job, using edit_file's exact "
-        "old_str/new_str match (never rewrite a whole file just to change a few "
-        "lines) — write_file is only for a genuinely new file. When the change "
+        "to locate where something lives over guessing file paths. To change a "
+        "file, read it, then write the COMPLETE updated file with write_file "
+        "(it creates the file or replaces the existing one) — one whole-file "
+        "write each time, not a series of small patches. Keep every part of the "
+        "file that still works. Use edit_file only for a trivial one-line "
+        "change where a whole-file write would be wasteful. When the change "
         "can be run, tested, or syntax-checked, use run_shell to actually verify "
         "it before declaring success; don't assume an edit worked. "
         "list_dir also names top-level dotfiles like .env under \"hidden\" — "
@@ -605,7 +607,7 @@ def _code_agent_system_prompt(round_limit):
 # reachable tool in its own right.
 _INTERNAL_WRITE_FILE_SCHEMA = {
     "name": "write_file",
-    "description": "Create a NEW file (fails if used on an existing one that should be edited instead — use edit_file for that) within the code_agent root.",
+    "description": "Write a file within the code_agent root: creates it, or replaces it if it already exists. Always send the COMPLETE new content of the file, never a fragment or a diff.",
     "parameters": {
         "type": "object",
         "properties": {
@@ -791,7 +793,8 @@ def _step_outcome(name, result, err):
         if name == "edit_file":
             return f"edited, {result.get('bytes_written', '?')} bytes written"
         if name == "write_file":
-            return f"created, {result.get('bytes_written', '?')} bytes written"
+            verb = "rewrote" if result.get("overwrote") else "created"
+            return f"{verb}, {result.get('bytes_written', '?')} bytes written"
         if name == "run_shell":
             return _run_shell_outcome(result)
         return "done"
@@ -865,13 +868,16 @@ def tool_code_agent(arguments, context=None):
                 result, err = _edit_file_impl(path, tool_args.get("old_str"), tool_args.get("new_str"))
             elif name == "write_file":
                 path = dev_agent_sandbox.resolve_within(root, tool_args.get("path") or "")
-                if path.exists():
-                    result, err = None, f"{path} already exists — use edit_file to change it"
+                if path.exists() and not path.is_file():
+                    result, err = None, f"{path} exists and is not a regular file"
                 else:
+                    existed = path.exists()
                     content = tool_args.get("content") if isinstance(tool_args.get("content"), str) else ""
                     path.parent.mkdir(parents=True, exist_ok=True)
                     path.write_text(content, encoding="utf-8")
                     result, err = {"path": str(path), "bytes_written": len(content.encode("utf-8"))}, None
+                    if existed:
+                        result["overwrote"] = True
             elif name == "run_shell":
                 result, err = _run_shell_impl(tool_args.get("command") or "", root)
             else:

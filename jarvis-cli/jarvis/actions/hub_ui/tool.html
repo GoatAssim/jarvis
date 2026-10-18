@@ -6,12 +6,33 @@
     <div class="top__actions">
       <button type="button" class="btn" id="pauseAll" title="Pause every download that can be paused">Pause all</button>
       <button type="button" class="btn" id="resumeAll" title="Resume every paused download">Resume all</button>
+      <label class="speedq" title="Limit the total download speed">
+        <span class="speedq__l">Speed</span>
+        <select id="speedQuick" aria-label="Speed limit for all downloads"></select>
+      </label>
+      <button type="button" class="btn" id="openFolder" title="Open the folder your downloads are saved in">Open folder</button>
+      <button type="button" class="btn" id="settingsBtn" title="Where files are saved, speed limit, notifications, what happens when a download finishes">Settings</button>
       <button type="button" class="btn" id="refresh" title="Read the list again now">Refresh</button>
     </div>
   </header>
   <div class="banner" id="banner" role="status" hidden></div>
 
-  <div class="body">
+  <!-- SETTINGS: replaces the three panes while open; built by tool.js -->
+  <section class="settings" id="settings" aria-label="Download settings">
+    <div class="settings__bar">
+      <button type="button" class="btn btn--sm" id="settingsBack">&larr; Back to downloads</button>
+      <h3 class="settings__title">Download settings</h3>
+      <span class="settings__dirty" id="settingsDirty" role="status" aria-live="polite"></span>
+      <button type="button" class="btn btn--sm" id="settingsRevert" disabled>Undo changes</button>
+      <button type="button" class="btn btn--primary btn--sm" id="settingsSave" disabled>Save</button>
+    </div>
+    <div class="settings__main">
+      <nav class="settings__nav" id="settingsNav" aria-label="Settings sections"></nav>
+      <div class="settings__page" id="settingsPage"></div>
+    </div>
+  </section>
+
+  <div class="body" id="body">
 
     <!-- LEFT: search, status and source filters, the list -->
     <section class="pane" aria-label="Downloads">
@@ -63,7 +84,27 @@
             <div class="field">
               <label class="field__label" for="addDest">Save in folder</label>
               <input type="text" id="addDest" spellcheck="false" placeholder="e.g. Manuals (optional)">
-              <div class="field__help">A folder inside your downloads library. Leave empty for the default place.</div>
+              <div class="field__help" id="addDestHelp">A folder inside your downloads library. Leave empty for the default place.</div>
+            </div>
+            <div class="field">
+              <label class="field__label" for="addLimit">Speed limit for these downloads</label>
+              <div class="inline">
+                <input type="text" id="addLimit" inputmode="decimal" spellcheck="false" placeholder="No limit of their own">
+                <select id="addLimitUnit" aria-label="Unit"><option value="kb">KB/s</option><option value="mb">MB/s</option></select>
+              </div>
+              <div class="field__help">Each of these will stay under this speed. The overall limit in the top strip still applies.</div>
+            </div>
+            <div class="field">
+              <label class="field__label" for="addOpen">When it finishes</label>
+              <select id="addOpen" aria-label="When it finishes"></select>
+            </div>
+            <div class="field">
+              <label class="field__label" for="addNotify">Tell me when it finishes</label>
+              <select id="addNotify" aria-label="Notify me">
+                <option value="default">Follow my notification settings</option>
+                <option value="on">Always, for these</option>
+                <option value="off">Never, for these</option>
+              </select>
             </div>
             <div class="field">
               <label class="field__label" for="addGroup">Batch name</label>
@@ -78,6 +119,7 @@
         </form>
 
         <div class="detail" id="detail" hidden></div>
+        <div class="prefsbox" id="detailPrefs" hidden></div>
       </div>
     </section>
 

@@ -21,6 +21,7 @@ import types
 from pathlib import Path
 
 HOME = tempfile.mkdtemp(prefix="jarvis-hub-http-")
+os.environ["JARVIS_HUB_NO_DELIVER"] = "1"      # tests never fire real notifications
 os.environ["HOME"] = HOME
 os.environ["USERPROFILE"] = HOME
 

@@ -106,8 +106,19 @@ def kind_for(name, content_type=None):
     return "file"
 
 
-def kind_folder(kind):
-    return {"video": "Video", "audio": "Audio"}.get(kind, "Files")
+DEFAULT_KIND_FOLDERS = {"video": "Video", "audio": "Audio", "file": "Files"}
+
+
+def kind_folder(kind, folders=None):
+    """The sub-folder (inside the library root) a finished file of this kind goes to.
+
+    `folders` is the owner's `folders` setting ({"video": "Movies", ...}); a missing or
+    unusable entry falls back to the built-in name, so a bad value can never stop a download.
+    """
+    key = kind if kind in ("video", "audio") else "file"
+    mine = folders.get(key) if isinstance(folders, dict) else None
+    cleaned = clean_relative(mine) if mine else None
+    return cleaned or DEFAULT_KIND_FOLDERS[key]
 
 
 def under(root, path):
@@ -117,6 +128,21 @@ def under(root, path):
         return True
     except (OSError, ValueError, RuntimeError):
         return False
+
+
+def clean_relative(text):
+    """A plain relative sub-folder as one normalised string ("Movies/Kids"), or None.
+
+    The same rules as `safe_subdir` (no absolute path, drive letter, `..`, or deep nesting),
+    but without needing a root: used to validate the `folders` setting when it is written.
+    """
+    raw = str(text or "").strip().replace("\\", "/")
+    if not raw or raw.startswith("/") or re.match(r"^[A-Za-z]:", raw) or "\x00" in raw:
+        return None
+    parts = [p for p in raw.split("/") if p not in ("", ".")]
+    if not parts or len(parts) > MAX_SUBDIR_DEPTH or any(p == ".." for p in parts):
+        return None
+    return "/".join(sanitize_filename(p, default="_", max_len=60) for p in parts)
 
 
 def safe_subdir(root, subdir):

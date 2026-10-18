@@ -20,6 +20,7 @@ import time
 from pathlib import Path
 
 HOME = tempfile.mkdtemp(prefix="jarvis-hub-core-")
+os.environ["JARVIS_HUB_NO_DELIVER"] = "1"      # tests never fire real notifications
 os.environ["HOME"] = HOME
 os.environ["USERPROFILE"] = HOME
 
@@ -286,7 +287,7 @@ def test_settings():
     check("valid updates are cleaned", clean == {"concurrency.http": 2, "rate_limit_kbps": 100} and not errors)
     clean, errors = hub_settings.validate_update({"nonsense": 1})
     check("an unknown key is an error, never silently ignored", errors and not clean)
-    clean, errors = hub_settings.validate_update({"schedule": []})
+    clean, errors = hub_settings.validate_update({"provider_limits.stale_after_s": 5})
     check("a setting no phase has opened yet is an error too", errors and not clean)
     check("concurrency out of range is refused", hub_settings.validate_update({"concurrency.total": 99})[1])
     check("a boolean is not a whole number", hub_settings.validate_update({"concurrency.total": True})[1])
@@ -312,7 +313,7 @@ def test_settings():
 
 def test_store_basics():
     store = fresh_store()
-    check("a new store is at the current schema", store.schema_version() == 1)
+    check("a new store is at the current schema", store.schema_version() == 2)
     check("and runs in WAL mode", str(store.journal_mode()).lower() == "wal")
     check("and passes its integrity check", store.quick_check() == "ok")
     item, created = store.add_item(engine="http", source_url="https://e.com/a.bin", title="a.bin", dedupe_key="k1")

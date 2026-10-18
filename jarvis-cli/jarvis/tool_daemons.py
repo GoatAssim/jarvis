@@ -140,6 +140,34 @@ def _is_int(value):
     return isinstance(value, int) and not isinstance(value, bool)
 
 
+_PACKAGE_DIR = Path(__file__).resolve().parent   # .../site-packages/jarvis (or the checkout)
+
+
+def _default_cwd(tool_dir):
+    """The working directory for a daemon whose entry names none.
+
+    A tool's own folder, EXCEPT for a tool that ships inside the jarvis package. A process
+    keeps its working directory open, and on Windows that stops the folder being deleted or
+    replaced: a daemon started from `...\\site-packages\\jarvis\\actions` (restart "always")
+    made `pip install . --force-reinstall` -- the rebuild -- fail, and respawned whenever it
+    was killed. Shipped daemons locate their own files from `__file__` / `{tool_dir}`, so
+    they get the config folder instead and never pin the install.
+    """
+    try:
+        inside = Path(tool_dir).resolve().is_relative_to(_PACKAGE_DIR) \
+            if hasattr(Path, "is_relative_to") else str(Path(tool_dir).resolve()).startswith(str(_PACKAGE_DIR))
+    except Exception:  # noqa: BLE001 - an odd path: keep the old default
+        inside = False
+    if inside:
+        try:
+            home = _daemons().JARVIS_DIR
+            home.mkdir(parents=True, exist_ok=True)
+            return str(home)
+        except Exception:  # noqa: BLE001
+            pass
+    return str(tool_dir)
+
+
 def _fill(text, tool_dir):
     return (str(text)
             .replace("{python}", python_executable())
@@ -260,7 +288,7 @@ def validate_daemons(raw, filename, base_dir):
 
         cwd = _fill(item.get("cwd") or "", tool_dir).strip()
         if not cwd:
-            cwd = str(tool_dir)
+            cwd = _default_cwd(tool_dir)
         elif not Path(cwd).is_absolute():
             cwd = str((tool_dir / cwd))
 

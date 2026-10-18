@@ -335,11 +335,215 @@ function countText(shown, total) {
   return shown === total ? String(total) : shown + " of " + total;
 }
 
+// ---- preferences: speed limit, notifications, when it finishes, folders (all pure)
+
+const LIMIT_PRESETS = [0, 256, 512, 1024, 2048, 5120, 10240];     // KB/s, 0 = no limit
+const MAX_LIMIT_KBPS = 10000000;                                  // what the hub accepts
+
+function fmtLimit(kbps) {
+  const n = Math.round(Number(kbps) || 0);
+  if (n <= 0) return "Unlimited";
+  if (n < 1024) return n + " KB/s";
+  return (Math.round((n / 1024) * 10) / 10) + " MB/s";
+}
+
+// A typed speed ("500", "2.5" with a unit) -> {kbps} or {error}.  Empty means no limit.
+function parseLimit(value, unit) {
+  const text = String(value === undefined || value === null ? "" : value).trim().replace(",", ".");
+  if (text === "") return { kbps: 0 };
+  const n = Number(text);
+  if (!isFinite(n) || n < 0) return { error: "Enter a speed like 500 (KB/s) or 2 (MB/s), or leave it empty for no limit." };
+  const kbps = Math.round(unit === "mb" ? n * 1024 : n);
+  if (kbps > MAX_LIMIT_KBPS) return { error: "That speed is higher than the hub accepts." };
+  return { kbps };
+}
+
+// The reverse, for filling the two boxes from a stored number.
+function limitFields(kbps) {
+  const n = Math.round(Number(kbps) || 0);
+  if (n <= 0) return { value: "", unit: "kb" };
+  if (n % 1024 === 0) return { value: String(n / 1024), unit: "mb" };
+  return { value: String(n), unit: "kb" };
+}
+
+// "Limit 1 MB/s", "Unlimited (scheduled)": the limit in force right now, from summary.speed_limit.
+function limitSummary(sl) {
+  const kbps = Math.round(Number(sl && sl.kbps) || 0);
+  const scheduled = !!(sl && sl.source === "schedule");
+  if (scheduled) return (kbps > 0 ? "Limit " + fmtLimit(kbps) : "Unlimited") + " (scheduled)";
+  return kbps > 0 ? "Limit " + fmtLimit(kbps) : "No speed limit";
+}
+
+// The options of the quick speed menu: the presets, the current value if it isn't one, and a way
+// into the full settings.  `value` is KB/s as text, or "custom".
+function quickSpeedOptions(sl) {
+  const cur = Math.round(Number(sl && sl.kbps) || 0);
+  const scheduled = !!(sl && sl.source === "schedule");
+  const list = LIMIT_PRESETS.map((k) => ({ value: String(k), label: k === 0 ? "No limit" : fmtLimit(k), selected: k === cur }));
+  if (LIMIT_PRESETS.indexOf(cur) === -1) list.push({ value: String(cur), label: fmtLimit(cur), selected: true });
+  if (scheduled) list.forEach((o) => { if (o.selected) o.label += " (scheduled)"; });
+  list.push({ value: "custom", label: "Custom or by time of day\u2026", selected: false });
+  return list;
+}
+
+const OPEN_CHOICES = [
+  { id: "off", label: "Do nothing", help: "The download just appears in the list." },
+  { id: "reveal", label: "Show the file in its folder", help: "Opens the folder with the file selected." },
+  { id: "folder", label: "Open its folder", help: "Opens the folder the file was saved in." },
+  { id: "open", label: "Open the file", help: "Opens it with its usual program. Programs and scripts (.exe, .bat, .ps1, .js, .lnk and the like) are never opened this way; they are only shown in their folder." },
+];
+
+function openLabel(mode) {
+  const c = OPEN_CHOICES.find((x) => x.id === mode);
+  return c ? c.label : "Do nothing";
+}
+
+// Options of a "when it finishes" menu: first entry = follow the global choice.
+function openMenu(globalMode) {
+  return [{ value: "default", label: "Use my default (" + openLabel(globalMode || "off").toLowerCase() + ")" }]
+    .concat(OPEN_CHOICES.map((c) => ({ value: c.id, label: c.label })));
+}
+
+// The notifier's own importance levels (jarvis/notifier.py LEVEL_NAMES).
+const LEVEL_NAMES = { 1: "Silent", 2: "Standard", 3: "Persistent", 4: "Broadcast", 5: "Confirm" };
+
+function levelMenu() {
+  return [{ value: "default", label: "Notifier's default" }]
+    .concat([1, 2, 3, 4, 5].map((n) => ({ value: String(n), label: n + " \u00B7 " + LEVEL_NAMES[n] })));
+}
+
+// Every kind of download notification, in the order they are shown.
+const NOTIFY_EVENTS = [
+  { id: "done", label: "A download finishes", help: "One message per file, or one for a burst of finishes." },
+  { id: "failed", label: "A download fails", help: "It couldn't finish, with the reason." },
+  { id: "group_done", label: "A batch is finished", help: "The last file of a batch or playlist is done." },
+  { id: "queue_empty", label: "Everything is finished", help: "Nothing is waiting or running any more." },
+  { id: "stalled", label: "A download stalls", help: "It stopped receiving data and will be retried." },
+  { id: "started", label: "A download starts", help: "Off by default: it is noisy for a big batch." },
+];
+
+const DAYS = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"];
+const DAY_LABELS = { mon: "Monday", tue: "Tuesday", wed: "Wednesday", thu: "Thursday", fri: "Friday", sat: "Saturday", sun: "Sunday" };
+
+function daysChoice(days) {
+  const key = DAYS.filter((d) => (days || []).indexOf(d) !== -1).join(",");
+  if (key === DAYS.join(",")) return "all";
+  if (key === "mon,tue,wed,thu,fri") return "weekdays";
+  if (key === "sat,sun") return "weekends";
+  if (DAYS.indexOf(key) !== -1) return key;
+  return "custom";
+}
+
+function daysFromChoice(choice, previous) {
+  if (choice === "all") return DAYS.slice();
+  if (choice === "weekdays") return DAYS.slice(0, 5);
+  if (choice === "weekends") return DAYS.slice(5);
+  if (DAYS.indexOf(choice) !== -1) return [choice];
+  return (previous && previous.length ? previous : DAYS).slice();
+}
+
+function blankWindow() {
+  return { days: DAYS.slice(), from: "01:00", to: "07:00", rate_limit_kbps: 0 };
+}
+
+function numOr(v, d) {
+  if (v === null || v === undefined || v === "") return d;
+  const x = Number(v);
+  return isFinite(x) ? x : d;
+}
+
+// The settings screen edits a plain copy of what the hub reports ("the form model").
+function prefsFromSettings(s) {
+  const n = (s && s.notify) || {};
+  const events = {};
+  NOTIFY_EVENTS.forEach((e) => {
+    const b = n[e.id] || {};
+    events[e.id] = { enabled: !!b.enabled, level: b.level === undefined || b.level === null ? null : Number(b.level) };
+  });
+  const f = (s && s.folders) || {};
+  const c = (s && s.concurrency) || {};
+  const h = (s && s.http) || {};
+  return {
+    rate_limit_kbps: Math.round(numOr(s && s.rate_limit_kbps, 0)),
+    schedule: JSON.parse(JSON.stringify((s && s.schedule) || [])),
+    after_open: (s && s.after_download && s.after_download.open) || "off",
+    notify: {
+      enabled: n.enabled !== false, min_seconds: numOr(n.min_seconds, 0), coalesce_s: numOr(n.coalesce_s, 8),
+      providers: n.providers !== false, events: events,
+    },
+    folders: { video: f.video || "Video", audio: f.audio || "Audio", file: f.file || "Files" },
+    concurrency: { total: numOr(c.total, 4), http: numOr(c.http, 2) },
+    http: { stall_seconds: numOr(h.stall_seconds, 60), max_retries: numOr(h.max_retries, 4) },
+  };
+}
+
+// What changed between two form models, as the dotted keys `dl_prefs` takes.  Nothing changed -> {}.
+function prefsDiff(base, cur) {
+  const u = {};
+  if (cur.rate_limit_kbps !== base.rate_limit_kbps) u.rate_limit_kbps = cur.rate_limit_kbps;
+  if (JSON.stringify(cur.schedule) !== JSON.stringify(base.schedule)) u.schedule = cur.schedule;
+  if (cur.after_open !== base.after_open) u["after_download.open"] = cur.after_open;
+  ["enabled", "min_seconds", "coalesce_s", "providers"].forEach((k) => {
+    if (cur.notify[k] !== base.notify[k]) u["notify." + k] = cur.notify[k];
+  });
+  NOTIFY_EVENTS.forEach((e) => {
+    const a = base.notify.events[e.id];
+    const b = cur.notify.events[e.id];
+    if (a.enabled !== b.enabled) u["notify." + e.id + ".enabled"] = b.enabled;
+    if (a.level !== b.level) u["notify." + e.id + ".level"] = b.level === null ? "default" : b.level;
+  });
+  ["video", "audio", "file"].forEach((k) => { if (cur.folders[k] !== base.folders[k]) u["folders." + k] = cur.folders[k]; });
+  ["total", "http"].forEach((k) => { if (cur.concurrency[k] !== base.concurrency[k]) u["concurrency." + k] = cur.concurrency[k]; });
+  ["stall_seconds", "max_retries"].forEach((k) => { if (cur.http[k] !== base.http[k]) u["http." + k] = cur.http[k]; });
+  return u;
+}
+
+// "3 of 6 types on" for the overview; "off" when the master switch is off.
+function notifySummary(model) {
+  if (!model || !model.notify.enabled) return "Notifications are off";
+  const on = NOTIFY_EVENTS.filter((e) => model.notify.events[e.id].enabled).length;
+  return on === 0 ? "No notification types are on" : on + " of " + NOTIFY_EVENTS.length + " notification types on";
+}
+
+// The add form's three extras -> the dl_add arguments, or an error to show.
+function addOptionsFromForm(f) {
+  const out = {};
+  const lim = parseLimit(f.limit, f.unit);
+  if (lim.error) return { error: lim.error };
+  if (lim.kbps > 0) out.speed_limit_kbps = lim.kbps;
+  if (f.open && f.open !== "default") out.open_when_done = f.open;
+  if (f.notify && f.notify !== "default") out.notify = f.notify;
+  return { args: out };
+}
+
+// One download's own choices, in words (row.prefs from the hub).
+function itemPrefsText(prefs) {
+  const p = prefs || {};
+  const parts = [];
+  if (p.limit_kbps) parts.push("limit " + fmtLimit(p.limit_kbps));
+  if (p.open) parts.push("then: " + openLabel(p.open).toLowerCase());
+  if (p.notify === "on") parts.push("always notify");
+  if (p.notify === "off") parts.push("never notify");
+  return parts.join(DOT);
+}
+
+// What "Send test" tells the person.
+function testResultText(r) {
+  if (!r || r.ok === false) return (r && r.error) || "The test didn't go through.";
+  const got = (r.delivered || []).join(", ");
+  const miss = (r.failed_channels || []).join(", ");
+  return "Test sent" + (got ? ": " + got : "") + (miss ? ". Couldn't reach: " + miss : "") + ".";
+}
+
 const pure = {
   ACTIVE, FINAL, VIEWS, KIND_ICON, fmtBytes, fmtSpeed, fmtEta, fmtAgo, percentText, speedText, etaText,
   sizeText, statusText, barLook, rowActions, sourceKey, sourceLabel, viewMatches, viewCounts, sourceList,
   filterRows, sortRows, groupRows, moveSelection, extractInputs, hintFromDecisions, isStale,
   toneOf, overviewStats, needsAttention, runningNow, sublineText, countText,
+  LIMIT_PRESETS, OPEN_CHOICES, NOTIFY_EVENTS, LEVEL_NAMES, DAYS, fmtLimit, parseLimit, limitFields,
+  limitSummary, quickSpeedOptions, openLabel, openMenu, levelMenu, daysChoice, daysFromChoice,
+  blankWindow, prefsFromSettings, prefsDiff, notifySummary, addOptionsFromForm, itemPrefsText,
+  testResultText,
 };
 if (host && host.__hubPureOnly) return pure;
 
@@ -353,6 +557,8 @@ const S = {
   rows: [], summary: null, selected: null, view: "all", source: "", search: "", groupBy: "none",
   detail: null, busy: false, timer: 0, closed: false, lastError: "", hold: 0, holdTimer: 0,
   pendingSelect: "", sig: {},
+  settingsOpen: false, page: "location", hubPrefs: null, base: null, model: null, formError: "", customSpeed: false,
+  saving: false,
 };
 let hintTimer = 0;
 let hintSeq = 0;
@@ -412,7 +618,22 @@ function visibleRows() {
 
 // ---- top strip
 
+function renderSpeedQuick() {
+  const sel = $("#speedQuick");
+  const sl = S.summary && S.summary.speed_limit;
+  if (!S.summary || root.activeElement === sel) return;         // not yet known, or the menu is open
+  if (!changed("speedq", sl || {})) return;
+  sel.textContent = "";
+  quickSpeedOptions(sl).forEach((o) => {
+    const opt = el("option", { text: o.label, attrs: { value: o.value } });
+    if (o.selected) opt.selected = true;
+    sel.appendChild(opt);
+  });
+  sel.title = limitSummary(sl) + ". Change it here, or set limits for certain times of day in Settings.";
+}
+
 function renderTop() {
+  renderSpeedQuick();
   const line = sublineText(S.summary, S.lastError);
   const n = $("#subline");
   n.textContent = line.text;
@@ -571,10 +792,17 @@ function buildDetail(row, full) {
 
   const actions = rowActions(row);
   if (actions.length) {
-    box.appendChild(el("div", { cls: "detail__actions" }, actions.map((a) => el("button", {
+    const buttons = actions.map((a) => el("button", {
       cls: "btn btn--sm" + (a.danger ? " btn--danger" : ""), text: a.label, attrs: { type: "button" },
       on: { click: () => runAction(row, a) },
-    }))));
+    }));
+    if (actions.some((a) => a.verb === "open")) {          // a finished file: its folder is one click too
+      buttons.splice(actions.findIndex((a) => a.verb === "reveal") + 1 || buttons.length, 0, el("button", {
+        cls: "btn btn--sm", text: "Open folder", attrs: { type: "button" },
+        on: { click: async () => { const r = await callTool("dl_open", { id: row.id, action: "folder" }); if (r.ok === false) toast(r.error || "That didn't work", "warn"); } },
+      }));
+    }
+    box.appendChild(el("div", { cls: "detail__actions" }, buttons));
   }
 
   if (row.error) box.appendChild(note("bad", "It failed", row.error));
@@ -635,6 +863,8 @@ function renderMid() {
   $("#addForm").hidden = !!row;
   $("#detail").hidden = !row;
   $("#midTitle").textContent = row ? "Download" : "Add a download";
+  renderAddExtras();
+  renderDetailPrefs();
   if (!row) { S.sig.detail = ""; return; }
   const full = S.detail && S.detail.id === row.id ? S.detail.item : null;
   if (!changed("detail", [row, full && full.events, full && full.children, full && full.detail])) return;
@@ -685,13 +915,30 @@ function renderSide() {
     el("div", { cls: "big-speed", text: "\u2193 " + (fmtSpeed(hubSpeed + otherSpeed) || "idle") }),
   ]);
   if (otherSpeed > 0) speedBox.appendChild(el("div", { cls: "small", text: "hub " + (fmtSpeed(hubSpeed) || "0") + DOT + "other tools " + fmtSpeed(otherSpeed) + " (not under hub control)" }));
+  speedBox.appendChild(el("div", { cls: "small", text: limitSummary(sum.speed_limit) }));
+  speedBox.appendChild(el("div", { cls: "demo" }, [
+    el("button", { cls: "btn btn--sm", text: "Change limit", attrs: { type: "button" }, on: { click: () => openSettings("speed") } }),
+  ]));
   box.appendChild(speedBox);
 
   const free = sum.free_bytes;
   const storage = el("div", {}, [el("h4", { text: "Storage" })]);
   storage.appendChild(el("div", { text: free === null || free === undefined ? "free space unknown" : fmtBytes(free) + " free" }));
   if (sum.library_root) storage.appendChild(el("div", { cls: "small", text: sum.library_root }));
+  storage.appendChild(el("div", { cls: "demo" }, [
+    el("button", { cls: "btn btn--sm", text: "Open folder", attrs: { type: "button" }, on: { click: openLibrary } }),
+    el("button", { cls: "btn btn--sm", text: "Change\u2026", attrs: { type: "button" }, on: { click: () => openSettings("location") } }),
+  ]));
   box.appendChild(storage);
+
+  const after = el("div", {}, [el("h4", { text: "When it finishes" })]);
+  after.appendChild(el("div", { cls: "small", text: openLabel(sum.after_download) }));
+  after.appendChild(el("div", { cls: "small", text: sum.notifications_on === false ? "Notifications are off" : "Notifications are on" }));
+  after.appendChild(el("div", { cls: "demo" }, [
+    el("button", { cls: "btn btn--sm", text: "Notifications", attrs: { type: "button" }, on: { click: () => openSettings("notifications") } }),
+    el("button", { cls: "btn btn--sm", text: "After download", attrs: { type: "button" }, on: { click: () => openSettings("finished") } }),
+  ]));
+  box.appendChild(after);
 
   const alive = !!(sum.daemon && sum.daemon.alive);
   const hubBox = el("div", {}, [el("h4", { text: "Hub" })]);
@@ -727,6 +974,7 @@ function render() {
   if (S.hold && Date.now() < S.hold) { clearTimeout(S.holdTimer); S.holdTimer = setTimeout(render, 250); return; }   // don't rebuild under a click
   S.hold = 0;
   if (S.closed) return;
+  $("#hub").classList.toggle("is-settings", S.settingsOpen);
   renderTop();
   renderBanner();
   renderChips();
@@ -873,6 +1121,9 @@ async function submitAdd(ev) {
   if (dest) args.dest = dest;
   if (group) args.group = group;
   if ($("#addPaused").checked) args.start_paused = true;
+  const extra = addOptionsFromForm({ limit: $("#addLimit").value, unit: $("#addLimitUnit").value, open: $("#addOpen").value, notify: $("#addNotify").value });
+  if (extra.error) { setHint(extra.error, true); return; }
+  Object.assign(args, extra.args);
   const btn = $("#addBtn");
   btn.disabled = true;
   try {
@@ -886,6 +1137,9 @@ async function submitAdd(ev) {
       if (r.skipped && r.skipped.length) toast(r.skipped[0].problem, "warn");
       if (added.length === 1) S.pendingSelect = added[0].id;       // show the one you just added
       input.value = "";
+      $("#addLimit").value = "";                  // one-off choices don't stick to the next add
+      $("#addOpen").value = "default";
+      $("#addNotify").value = "default";
       setHint("", false);
       schedule(200);
     } else {
@@ -894,6 +1148,394 @@ async function submitAdd(ev) {
   } finally {
     btn.disabled = false;
   }
+}
+
+// ---- the add form's extras and one download's own options
+
+function fillSelect(sel, options, value) {
+  sel.textContent = "";
+  options.forEach((o) => {
+    const opt = el("option", { text: o.label, attrs: { value: o.value } });
+    if (String(o.value) === String(value)) opt.selected = true;
+    sel.appendChild(opt);
+  });
+}
+
+function renderAddExtras() {
+  const sum = S.summary || {};
+  const openSel = $("#addOpen");
+  if (root.activeElement !== openSel && changed("addopen", [sum.after_download])) {
+    fillSelect(openSel, openMenu(sum.after_download), openSel.value || "default");
+  }
+  if (changed("adddest", [sum.library_root])) {
+    $("#addDestHelp").textContent = sum.library_root
+      ? "A folder inside your downloads library (" + sum.library_root + "). Leave empty for the default place."
+      : "A folder inside your downloads library. Leave empty for the default place.";
+  }
+}
+
+async function setItemPref(row, set, after) {
+  const r = await callTool("dl_prefs", { id: row.id, set: set });
+  if (r.declined || r.cancelled) toast("Not changed", "info");
+  else if (r.ok === false) toast(r.error || "That didn't work", "warn");
+  else toast("Saved for this download", "success");
+  S.sig.dprefs = "";
+  if (after) after();
+  schedule(150);
+}
+
+function renderDetailPrefs() {
+  const box = $("#detailPrefs");
+  const row = selectedRow();
+  const show = !!row && row.owner === "hub" && !FINAL.has(row.state);
+  box.hidden = !show;
+  if (!show) { S.sig.dprefs = ""; return; }
+  if (box.contains(root.activeElement)) return;                    // never rebuild under the cursor
+  const global = S.summary && S.summary.after_download;
+  if (!changed("dprefs", [row.id, row.prefs || {}, global])) return;
+  box.textContent = "";
+  const prefs = row.prefs || {};
+  box.appendChild(el("div", { cls: "h5", text: "For this download" }));
+  const current = itemPrefsText(prefs);
+  box.appendChild(el("div", { cls: "small", text: current || "It follows your overall settings." }));
+
+  const f = limitFields(prefs.limit_kbps);
+  const input = el("input", { attrs: { type: "text", inputmode: "decimal", spellcheck: "false", placeholder: "No limit of its own", "aria-label": "Speed limit for this download", value: f.value } });
+  input.value = f.value;
+  const unit = el("select", { attrs: { "aria-label": "Unit" } }, [
+    el("option", { text: "KB/s", attrs: { value: "kb" } }), el("option", { text: "MB/s", attrs: { value: "mb" } }),
+  ]);
+  unit.value = f.unit;
+  const apply = () => {
+    const lim = parseLimit(input.value, unit.value);
+    if (lim.error) { toast(lim.error, "warn"); return; }
+    setItemPref(row, { limit_kbps: lim.kbps });                    // 0 clears it
+  };
+  input.addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); apply(); } });
+  box.appendChild(el("div", { cls: "field" }, [
+    el("label", { cls: "field__label", text: "Speed limit" }),
+    el("div", { cls: "inline" }, [input, unit, el("button", { cls: "btn btn--sm", text: "Set", attrs: { type: "button" }, on: { click: apply } })]),
+  ]));
+
+  const openSel = el("select", { attrs: { "aria-label": "When this download finishes" } });
+  fillSelect(openSel, openMenu(global), prefs.open || "default");
+  openSel.addEventListener("change", () => setItemPref(row, { open: openSel.value }, () => { openSel.blur(); renderDetailPrefs(); }));
+  box.appendChild(el("div", { cls: "field" }, [el("label", { cls: "field__label", text: "When it finishes" }), openSel]));
+
+  const notifySel = el("select", { attrs: { "aria-label": "Notify me about this download" } });
+  fillSelect(notifySel, [
+    { value: "default", label: "Follow my notification settings" }, { value: "on", label: "Always tell me" }, { value: "off", label: "Never tell me" },
+  ], prefs.notify || "default");
+  notifySel.addEventListener("change", () => setItemPref(row, { notify: notifySel.value }));
+  box.appendChild(el("div", { cls: "field" }, [el("label", { cls: "field__label", text: "Tell me when it finishes" }), notifySel]));
+}
+
+async function openLibrary() {
+  const r = await callTool("dl_open", { target: "library" });
+  if (r.ok === false) toast(r.error || "Couldn't open the folder", "warn");
+}
+
+// ---- the Settings screen: location, speed, notifications, when it finishes, connections
+
+const PAGES = [
+  { id: "location", label: "Download location" },
+  { id: "speed", label: "Speed limit" },
+  { id: "notifications", label: "Notifications" },
+  { id: "finished", label: "When it finishes" },
+  { id: "connections", label: "Connections" },
+];
+
+function isDirty() {
+  return !!(S.base && S.model && Object.keys(prefsDiff(S.base, S.model)).length);
+}
+
+function resetForm() {
+  S.base = prefsFromSettings(S.hubPrefs);
+  S.model = prefsFromSettings(S.hubPrefs);
+  S.formError = "";
+  S.customSpeed = false;
+}
+
+async function loadHubPrefs() {
+  const r = await callTool("dl_prefs", {});
+  if (r.ok && r.settings) { S.hubPrefs = r.settings; return true; }
+  S.formError = r.error || "Couldn't read the settings from the hub.";
+  return false;
+}
+
+async function openSettings(page) {
+  S.settingsOpen = true;
+  if (page) S.page = page;
+  render();
+  if (!S.model || !isDirty()) {
+    const ok = await loadHubPrefs();
+    if (ok) resetForm();
+  }
+  renderSettings();
+}
+
+function closeSettings() {
+  S.settingsOpen = false;
+  render();
+}
+
+function updateFooter() {
+  const dirty = isDirty();
+  $("#settingsDirty").textContent = S.formError ? S.formError : (dirty ? "Unsaved changes" : "");
+  $("#settingsDirty").className = "settings__dirty" + (S.formError ? " is-bad" : "");
+  $("#settingsSave").disabled = !dirty || S.saving;
+  $("#settingsRevert").disabled = !dirty || S.saving;
+}
+
+// small builders -----------------------------------------------------------------------------
+
+function setRow(label, control, help) {
+  return el("div", { cls: "field" }, [el("label", { cls: "field__label", text: label }), control, help ? el("div", { cls: "field__help", text: help }) : null]);
+}
+
+function menu(options, value, onChange, label) {
+  const sel = el("select", { attrs: { "aria-label": label || "" } });
+  fillSelect(sel, options, value);
+  sel.addEventListener("change", () => onChange(sel.value));
+  return sel;
+}
+
+function numberBox(value, onInput, attrs) {
+  const box = el("input", { attrs: Object.assign({ type: "number", inputmode: "numeric" }, attrs || {}) });
+  box.value = String(value);
+  box.addEventListener("input", () => { const n = Number(box.value); if (box.value !== "" && isFinite(n)) onInput(Math.round(n)); updateFooter(); });
+  return box;
+}
+
+function checkBox(label, checked, onChange) {
+  const box = el("input", { attrs: { type: "checkbox" } });
+  box.checked = !!checked;
+  box.addEventListener("change", () => { onChange(box.checked); updateFooter(); });
+  return el("label", { cls: "check" }, [box, el("span", { text: " " + label })]);
+}
+
+function pageHead(title, text) {
+  return [el("h4", { cls: "sp__h", text: title }), text ? el("div", { cls: "field__help sp__lead", text: text }) : null];
+}
+
+// pages ---------------------------------------------------------------------------------------
+
+function pageLocation(box) {
+  const lib = (S.hubPrefs && S.hubPrefs.library) || {};
+  pageHead("Where downloads are saved", "Every download is saved inside this folder.").forEach((n) => n && box.appendChild(n));
+  box.appendChild(el("div", { cls: "pathbox", text: lib.path || (S.hubPrefs && S.hubPrefs.library_root) || "" }));
+  const bits = [];
+  bits.push(lib.exists === false ? "The folder doesn't exist yet; it is created with the first download." : "The folder exists.");
+  if (lib.writable === false) bits.push("It can't be written to: pick another folder.");
+  if (lib.free_bytes !== null && lib.free_bytes !== undefined) bits.push(fmtBytes(lib.free_bytes) + " free.");
+  box.appendChild(el("div", { cls: "small" + (lib.writable === false ? " bad" : ""), text: bits.join(" ") }));
+  box.appendChild(el("div", { cls: "demo sp__gap" }, [el("button", { cls: "btn btn--sm", text: "Open folder", attrs: { type: "button" }, on: { click: openLibrary } })]));
+
+  const path = el("input", { attrs: { type: "text", spellcheck: "false", placeholder: "Full path, e.g. D:\\Downloads\\Jarvis", "aria-label": "New download folder" } });
+  const change = async () => {
+    const value = path.value.trim();
+    if (!value) { toast("Type the full path of the folder first", "warn"); return; }
+    const r = await callTool("dl_settings", { set: { library_root: value } });
+    if (r.declined || r.cancelled) { toast("Not changed", "info"); return; }
+    if (r.ok === false) { S.formError = r.error || "That folder can't be used."; updateFooter(); return; }
+    S.formError = "";
+    if (r.settings) S.hubPrefs = r.settings;
+    toast("Downloads will now be saved in " + (r.settings && r.settings.library_root), "success");
+    schedule(100);
+    renderSettings();
+  };
+  path.addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); change(); } });
+  box.appendChild(el("h4", { cls: "sp__h", text: "Use a different folder" }));
+  box.appendChild(setRow("New download folder", el("div", { cls: "inline" }, [path, el("button", { cls: "btn btn--sm", text: "Change", attrs: { type: "button" }, on: { click: change } })]),
+    "You'll be asked to confirm. Only new downloads go there; files already saved stay where they are."));
+
+  box.appendChild(el("h4", { cls: "sp__h", text: "Folders by kind of file" }));
+  box.appendChild(el("div", { cls: "field__help sp__lead", text: "When you don't choose a folder while adding, a file goes into the folder for its kind, inside the download folder." }));
+  [["video", "Videos"], ["audio", "Audio"], ["file", "Everything else"]].forEach((pair2) => {
+    const input = el("input", { attrs: { type: "text", spellcheck: "false", "aria-label": pair2[1] + " folder" } });
+    input.value = S.model.folders[pair2[0]];
+    input.addEventListener("input", () => { S.model.folders[pair2[0]] = input.value.trim(); updateFooter(); });
+    box.appendChild(setRow(pair2[1], input));
+  });
+}
+
+function pageSpeed(box) {
+  const m = S.model;
+  pageHead("Overall speed limit", "The most all your downloads together may use. It is shared between the downloads that are running.").forEach((n) => n && box.appendChild(n));
+  box.appendChild(el("div", { cls: "small", text: "In force right now: " + limitSummary(S.summary && S.summary.speed_limit) }));
+
+  const isPreset = LIMIT_PRESETS.indexOf(m.rate_limit_kbps) !== -1 && !S.customSpeed;
+  const options = LIMIT_PRESETS.map((k) => ({ value: String(k), label: k === 0 ? "No limit" : fmtLimit(k) })).concat([{ value: "custom", label: "Custom\u2026" }]);
+  box.appendChild(setRow("Limit", menu(options, isPreset ? String(m.rate_limit_kbps) : "custom", (v) => {
+    if (v === "custom") { S.customSpeed = true; if (!m.rate_limit_kbps) m.rate_limit_kbps = 1024; }
+    else { S.customSpeed = false; m.rate_limit_kbps = Number(v); }
+    renderSettings();
+  }, "Overall speed limit")));
+  if (!isPreset) {
+    const f = limitFields(m.rate_limit_kbps);
+    const input = el("input", { attrs: { type: "text", inputmode: "decimal", spellcheck: "false", "aria-label": "Custom speed limit" } });
+    input.value = f.value;
+    const unit = el("select", { attrs: { "aria-label": "Unit" } }, [el("option", { text: "KB/s", attrs: { value: "kb" } }), el("option", { text: "MB/s", attrs: { value: "mb" } })]);
+    unit.value = f.unit;
+    const hint = el("div", { cls: "field__help" });
+    const apply = () => {
+      const lim = parseLimit(input.value, unit.value);
+      if (lim.error) { hint.textContent = lim.error; hint.className = "field__help bad"; return; }
+      hint.textContent = lim.kbps ? "= " + fmtLimit(lim.kbps) : "No limit";
+      hint.className = "field__help";
+      m.rate_limit_kbps = lim.kbps;
+      updateFooter();
+    };
+    input.addEventListener("input", apply);
+    unit.addEventListener("change", apply);
+    box.appendChild(setRow("Custom speed", el("div", { cls: "inline" }, [input, unit]), null));
+    box.appendChild(hint);
+  }
+
+  box.appendChild(el("h4", { cls: "sp__h", text: "By time of day" }));
+  box.appendChild(el("div", { cls: "field__help sp__lead", text: "For example: slow down while you work, no limit overnight. Inside a window its speed replaces the overall limit above (empty = no limit). A window that ends earlier than it starts runs overnight." }));
+  const dayOptions = [{ value: "all", label: "Every day" }, { value: "weekdays", label: "Weekdays" }, { value: "weekends", label: "Weekends" }]
+    .concat(S.model.schedule.some((w) => daysChoice(w.days) === "custom") ? [{ value: "custom", label: "Chosen days" }] : [])
+    .concat(["mon", "tue", "wed", "thu", "fri", "sat", "sun"].map((d) => ({ value: d, label: { mon: "Monday", tue: "Tuesday", wed: "Wednesday", thu: "Thursday", fri: "Friday", sat: "Saturday", sun: "Sunday" }[d] })));
+  m.schedule.forEach((w, i) => {
+    const days = menu(dayOptions, daysChoice(w.days), (v) => { w.days = daysFromChoice(v, w.days); updateFooter(); }, "Days");
+    const from = el("input", { attrs: { type: "time", "aria-label": "From" } }); from.value = w.from;
+    const to = el("input", { attrs: { type: "time", "aria-label": "Until" } }); to.value = w.to;
+    from.addEventListener("input", () => { w.from = from.value; updateFooter(); });
+    to.addEventListener("input", () => { w.to = to.value; updateFooter(); });
+    const f = limitFields(w.rate_limit_kbps);
+    const lim = el("input", { attrs: { type: "text", inputmode: "decimal", spellcheck: "false", placeholder: "No limit", "aria-label": "Speed in this window" } }); lim.value = f.value;
+    const unit = el("select", { attrs: { "aria-label": "Unit" } }, [el("option", { text: "KB/s", attrs: { value: "kb" } }), el("option", { text: "MB/s", attrs: { value: "mb" } })]); unit.value = f.unit;
+    const hint = el("div", { cls: "field__help" });
+    const apply = () => {
+      const parsed = parseLimit(lim.value, unit.value);
+      if (parsed.error) { hint.textContent = parsed.error; hint.className = "field__help bad"; return; }
+      hint.textContent = ""; w.rate_limit_kbps = parsed.kbps; updateFooter();
+    };
+    lim.addEventListener("input", apply); unit.addEventListener("change", apply);
+    box.appendChild(el("div", { cls: "win" }, [
+      el("div", { cls: "inline" }, [days, from, el("span", { cls: "small", text: "to" }), to]),
+      el("div", { cls: "inline" }, [el("span", { cls: "small", text: "Speed" }), lim, unit,
+        el("button", { cls: "btn btn--sm btn--danger", text: "Remove", attrs: { type: "button" }, on: { click: () => { m.schedule.splice(i, 1); renderSettings(); } } })]),
+      hint,
+    ]));
+  });
+  box.appendChild(el("div", { cls: "demo sp__gap" }, [el("button", {
+    cls: "btn btn--sm", text: "+ Add a time window", attrs: { type: "button", disabled: m.schedule.length >= 10 ? "disabled" : null },
+    on: { click: () => { if (m.schedule.length < 10) { m.schedule.push(blankWindow()); renderSettings(); } } },
+  })]));
+  box.appendChild(el("div", { cls: "field__help sp__lead", text: "A single download can also have its own limit: in Options when you add it, or in its details while it is waiting or running." }));
+}
+
+async function sendTest(id, button) {
+  button.disabled = true;
+  const r = await callTool("dl_prefs", { test_notification: id });
+  button.disabled = false;
+  toast(testResultText(r), r.ok === false ? "warn" : "success");
+}
+
+function pageNotifications(box) {
+  const m = S.model;
+  pageHead("Notifications", "Messages go through Jarvis's normal notifications, so where they appear (in the app, on the desktop, by voice, on your phone) follows your notification settings. The level changes how loudly; \u201CNotifier's default\u201D leaves that to those settings.").forEach((n) => n && box.appendChild(n));
+  box.appendChild(checkBox("Tell me about downloads", m.notify.enabled, (v) => { m.notify.enabled = v; renderSettings(); }));
+  const table = el("div", { cls: "ntable" + (m.notify.enabled ? "" : " is-off") });
+  NOTIFY_EVENTS.forEach((e) => {
+    const ev = m.notify.events[e.id];
+    const test = el("button", { cls: "btn btn--sm", text: "Send test", attrs: { type: "button", title: "Sends a sample through the notifier, using the saved settings" } });
+    test.addEventListener("click", () => sendTest(e.id, test));
+    table.appendChild(el("div", { cls: "nrow" }, [
+      el("div", { cls: "nrow__main" }, [
+        checkBox(e.label, ev.enabled, (v) => { ev.enabled = v; }),
+        el("div", { cls: "field__help", text: e.help }),
+      ]),
+      menu(levelMenu(), ev.level === null ? "default" : String(ev.level), (v) => { ev.level = v === "default" ? null : Number(v); updateFooter(); }, "Level for: " + e.label),
+      test,
+    ]));
+  });
+  box.appendChild(table);
+  box.appendChild(el("h4", { cls: "sp__h", text: "Fewer messages" }));
+  box.appendChild(setRow("Only tell me about downloads that took at least (seconds)", numberBox(m.notify.min_seconds, (n) => { m.notify.min_seconds = Math.max(0, n); }, { min: "0", max: "86400" }), "0 = every download. Failures are always reported."));
+  box.appendChild(setRow("Group finishes that come within (seconds)", numberBox(m.notify.coalesce_s, (n) => { m.notify.coalesce_s = Math.max(0, n); }, { min: "0", max: "600" }), "Several downloads finishing together become one message. 0 = one message each."));
+  box.appendChild(checkBox("Also tell me about downloads other tools run (Steam and the like)", m.notify.providers, (v) => { m.notify.providers = v; }));
+}
+
+function pageFinished(box) {
+  const m = S.model;
+  pageHead("When a download finishes", "What Jarvis does by itself the moment a file is complete. A single download can choose differently in Options when you add it.").forEach((n) => n && box.appendChild(n));
+  OPEN_CHOICES.forEach((c) => {
+    const input = el("input", { attrs: { type: "radio", name: "openmode", value: c.id } });
+    input.checked = m.after_open === c.id;
+    input.addEventListener("change", () => { if (input.checked) { m.after_open = c.id; renderSettings(); } });
+    box.appendChild(el("label", { cls: "choice" + (m.after_open === c.id ? " is-on" : "") }, [
+      input, el("span", { cls: "choice__t", text: c.label }), el("span", { cls: "choice__h", text: c.help }),
+    ]));
+  });
+  if (m.after_open === "open") {
+    box.appendChild(el("div", { cls: "note note--warn" }, [el("strong", { text: "You'll be asked to confirm" }),
+      doc.createTextNode("Opening files by itself is the one choice here that runs something you haven't looked at yet. At most a few files are opened per minute, so a big batch can't flood the screen.")]));
+  }
+}
+
+function pageConnections(box) {
+  const m = S.model;
+  pageHead("Connections", "How many downloads run at once and when a stuck one is given up on.").forEach((n) => n && box.appendChild(n));
+  box.appendChild(setRow("Downloads at once (all together)", numberBox(m.concurrency.total, (n) => { m.concurrency.total = n; }, { min: "1", max: "16" })));
+  box.appendChild(setRow("Direct-link downloads at once", numberBox(m.concurrency.http, (n) => { m.concurrency.http = n; }, { min: "1", max: "16" })));
+  box.appendChild(setRow("Call a download stalled after (seconds without data)", numberBox(m.http.stall_seconds, (n) => { m.http.stall_seconds = n; }, { min: "10", max: "3600" })));
+  box.appendChild(setRow("Retry a failed download up to (times)", numberBox(m.http.max_retries, (n) => { m.http.max_retries = n; }, { min: "0", max: "10" })));
+}
+
+const PAGE_BUILDERS = { location: pageLocation, speed: pageSpeed, notifications: pageNotifications, finished: pageFinished, connections: pageConnections };
+
+function renderSettings() {
+  if (!S.settingsOpen) return;
+  const nav = $("#settingsNav");
+  nav.textContent = "";
+  PAGES.forEach((pg) => {
+    nav.appendChild(el("button", {
+      cls: "snav" + (pg.id === S.page ? " is-on" : ""), text: pg.label,
+      attrs: { type: "button", "aria-current": pg.id === S.page ? "page" : "false" },
+      on: { click: () => { S.page = pg.id; renderSettings(); } },
+    }));
+  });
+  const page = $("#settingsPage");
+  page.textContent = "";
+  if (!S.model) {
+    page.appendChild(el("div", { cls: "empty", text: S.formError || "Reading the settings\u2026" }));
+    updateFooter();
+    return;
+  }
+  const box = el("div", { cls: "sp" });
+  (PAGE_BUILDERS[S.page] || pageLocation)(box);
+  page.appendChild(box);
+  updateFooter();
+}
+
+async function saveSettings() {
+  const updates = prefsDiff(S.base, S.model);
+  if (!Object.keys(updates).length) return;
+  S.saving = true;
+  updateFooter();
+  const r = await callTool("dl_prefs", { set: updates });
+  S.saving = false;
+  if (r.declined || r.cancelled) {
+    S.formError = "Not saved: opening files by itself needs your OK.";
+  } else if (r.ok === false) {
+    S.formError = r.error || "That didn't work.";
+  } else {
+    S.hubPrefs = r.settings;
+    resetForm();
+    toast("Settings saved", "success");
+    if (S.summary && r.settings) S.summary.speed_limit = r.settings.rate_limit_now;
+    S.sig.speedq = "";
+    schedule(100);
+  }
+  renderSettings();
+}
+
+function revertSettings() {
+  if (S.hubPrefs) resetForm();
+  renderSettings();
 }
 
 // ---- wiring
@@ -912,6 +1554,29 @@ $("#search").addEventListener("input", (e) => { S.search = e.target.value; rende
 $("#groupBy").addEventListener("change", (e) => { S.groupBy = e.target.value; savePrefs(); render(); });
 $("#refresh").addEventListener("click", () => { S.lastError = ""; schedule(10); });
 $("#newBtn").addEventListener("click", newDownload);
+$("#openFolder").addEventListener("click", openLibrary);
+$("#settingsBtn").addEventListener("click", () => (S.settingsOpen ? closeSettings() : openSettings()));
+$("#settingsBack").addEventListener("click", closeSettings);
+$("#settingsSave").addEventListener("click", saveSettings);
+$("#settingsRevert").addEventListener("click", revertSettings);
+$("#speedQuick").addEventListener("change", async (e) => {
+  const menuEl = e.target;                 // e.target is cleared once an event inside a shadow root has been dispatched
+  const v = menuEl.value;
+  if (v === "custom") { S.sig.speedq = ""; renderSpeedQuick(); openSettings("speed"); return; }
+  const kbps = Number(v);
+  const r = await callTool("dl_prefs", { set: { rate_limit_kbps: kbps } });
+  if (r.ok === false) { toast(r.error || "That didn't work", "warn"); }
+  else {
+    const now = r.settings && r.settings.rate_limit_now;
+    if (S.summary && now) S.summary.speed_limit = now;
+    toast(kbps > 0 ? "Speed limit: " + fmtLimit(kbps) + (now && now.source === "schedule" ? " (a time window is overriding it right now)" : "") : "Speed limit removed", "success");
+    if (r.settings) { S.hubPrefs = r.settings; if (!isDirty()) resetForm(); }
+  }
+  S.sig.speedq = "";
+  menuEl.blur();
+  renderSpeedQuick();
+  schedule(150);
+});
 $("#pauseAll").addEventListener("click", () => allAction("pause"));
 $("#resumeAll").addEventListener("click", () => allAction("resume"));
 
@@ -950,6 +1615,7 @@ list.addEventListener("keydown", (e) => {
   }
 });
 root.addEventListener("keydown", (e) => {
+  if (e.key === "Escape" && S.settingsOpen) { e.preventDefault(); closeSettings(); return; }
   const tag = e.target && e.target.tagName;
   if (e.key === "/" && tag !== "INPUT" && tag !== "SELECT" && tag !== "TEXTAREA") { e.preventDefault(); $("#search").focus(); }
 });

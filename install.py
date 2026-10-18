@@ -31,6 +31,8 @@ lands in the venv and a plain build lands in your normal Python, exactly as befo
 THE STEPS ARE THE SAME AS script.bat's, in the same order:
     [1]   persona -> CLI command name (build_tools/sync_entry_point.py)
     [1.5] bump the build number, only if the source changed
+    [1.9] stop Jarvis's running background services (they run from the installed
+          copy and keep its files / folders open, which makes the reinstall fail)
     [2]   pip install . --force-reinstall --no-deps
     [3]   find the freshly built exe
     [4]   copy it to Program Files (one UAC prompt, for that copy only)
@@ -330,6 +332,43 @@ def _is_installed(py):
         capture_output=True,
     )
     return r.returncode == 0
+
+
+def step_stop_services(py):
+    """[1.9/5] Stop every running Jarvis daemon before pip replaces the install.
+
+    The daemons run FROM the installed copy (site-packages\\jarvis, Scripts\\jarvis.exe). On
+    Windows a running process keeps its exe and its working folder open, so pip's
+    uninstall-then-install can't remove them and the rebuild fails -- and a daemon with a
+    restart policy comes straight back if it is only killed. `daemon-stop` is the supported
+    way down: a service stopped by hand stays stopped until Jarvis next starts, and the
+    autostart ones come back up with the new build when the server launches below.
+    Best effort: any problem here is reported and the build carries on.
+    """
+    if not _is_installed(py):
+        return
+    try:
+        out = subprocess.run(
+            [str(py), "-m", "jarvis", "daemons", "--no-usage"],
+            capture_output=True, text=True, timeout=90, env=_child_env(),
+        )
+        rows = json.loads(out.stdout.strip().splitlines()[-1]).get("daemons", [])
+    except Exception as e:  # noqa: BLE001
+        say("Couldn't list the background services (%s); continuing." % e)
+        return
+    up = [r.get("id") for r in rows if r.get("id") and (r.get("running") or r.get("supervisor_pid"))]
+    if not up:
+        say("No background services running.")
+        return
+    for did in up:
+        say("Stopping %s..." % did)
+        try:
+            subprocess.run(
+                [str(py), "-m", "jarvis", "daemon-stop", str(did)],
+                capture_output=True, text=True, timeout=90, env=_child_env(),
+            )
+        except Exception as e:  # noqa: BLE001
+            say("  couldn't stop %s (%s); continuing." % (did, e))
 
 
 def step_pip(py, with_deps):
@@ -700,6 +739,10 @@ def run(argv):
 
     say("[1.5/5] Bumping build number...")
     step_bump(py)
+    say()
+
+    say("[1.9/5] Stopping background services...")
+    step_stop_services(py)
     say()
 
     say('[2/5] Installing CLI as "%s"...' % cli_name)

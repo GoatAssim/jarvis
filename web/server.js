@@ -2316,22 +2316,6 @@ app.get("/api/daemons", requireJarvis, async (req, res) => {
   return parseJarvisJSON(result, res, "Couldn't list daemons.");
 });
 
-// Fixed verb list, same reasoning as SCHED_ACTIONS: a request body must
-// never be able to name an arbitrary `daemon-*` argv.
-// L.10: "window" opens the daemon's live console window (daemon-window).
-const DAEMON_ACTIONS = new Set(["start", "stop", "restart", "status", "window"]);
-
-app.post("/api/daemons/:id/:action", requireJarvis, async (req, res) => {
-  const { id, action } = req.params;
-  if (badDaemonId(id, res)) return;
-  if (!DAEMON_ACTIONS.has(action)) {
-    return res.status(400).json({ error: "Unknown action." });
-  }
-  // stop() waits on the process, so it needs more headroom than a query.
-  const result = await runJarvisOnce([`daemon-${action}`, id], 30000);
-  return parseJarvisJSON(result, res, "Couldn't update that daemon.");
-});
-
 app.get("/api/daemons/:id/console", requireJarvis, async (req, res) => {
   const { id } = req.params;
   if (badDaemonId(id, res)) return;
@@ -2359,6 +2343,25 @@ app.post("/api/daemons/:id/schedule", requireJarvis, async (req, res) => {
   const when = typeof req.body?.when === "string" ? req.body.when.trim() : "";
   const result = await runJarvisOnce(["daemon-schedule", id, when], 10000);
   return parseJarvisJSON(result, res, "Couldn't schedule that daemon.");
+});
+
+// Registered AFTER /input and /schedule on purpose: Express matches routes in
+// registration order, and `/:id/:action` also matches those two paths, so it
+// used to answer every schedule / send-input request with "Unknown action."
+// Fixed verb list, same reasoning as SCHED_ACTIONS: a request body must
+// never be able to name an arbitrary `daemon-*` argv.
+// L.10: "window" opens the daemon's live console window (daemon-window).
+const DAEMON_ACTIONS = new Set(["start", "stop", "restart", "status", "window"]);
+
+app.post("/api/daemons/:id/:action", requireJarvis, async (req, res) => {
+  const { id, action } = req.params;
+  if (badDaemonId(id, res)) return;
+  if (!DAEMON_ACTIONS.has(action)) {
+    return res.status(400).json({ error: "Unknown action." });
+  }
+  // stop() waits on the process, so it needs more headroom than a query.
+  const result = await runJarvisOnce([`daemon-${action}`, id], 30000);
+  return parseJarvisJSON(result, res, "Couldn't update that daemon.");
 });
 
 // H.1.4 (owner feedback, 2026-09-27): daemon-add on the CLI has always

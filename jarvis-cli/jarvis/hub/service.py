@@ -18,9 +18,10 @@ import os
 import shutil
 import subprocess
 import sys
+import time
 from pathlib import Path
 
-from . import engines, naming, netguard, router, settings as settings_mod, states
+from . import engines, naming, netguard, notify, router, settings as settings_mod, states
 from .store import Store
 
 SOURCE_RE_PREFIXES = ("http://", "https://")
@@ -85,7 +86,39 @@ def preview(text, engine=None, store=None):
     return decision
 
 
-def add_items(inputs, *, engine=None, dest=None, group=None, start_paused=False, store=None):
+ITEM_OPEN_VALUES = ("default",) + settings_mod.OPEN_MODES
+ITEM_NOTIFY_VALUES = ("default", "on", "off")
+
+
+def normalize_item_options(limit_kbps=None, open_when_done=None, notify_me=None):
+    """The per-download extras -> ({options}, error).  A value of None leaves that option unset;
+    "default" (or 0 for the speed) clears it so the global setting applies again."""
+    out = {}
+    if limit_kbps not in (None, ""):
+        try:
+            kbps = int(float(limit_kbps))
+        except (TypeError, ValueError):
+            return {}, "speed limit must be a number of KB/s (0 for no limit of its own)"
+        if kbps < 0 or kbps > 10_000_000:
+            return {}, "speed limit must be between 0 and 10,000,000 KB/s"
+        out["limit_kbps"] = kbps or None
+    if open_when_done not in (None, ""):
+        text = str(open_when_done).strip().lower()
+        text = "off" if text in ("none", "nothing", "no") else text
+        if text not in ITEM_OPEN_VALUES:
+            return {}, "open_when_done must be one of: %s" % ", ".join(ITEM_OPEN_VALUES)
+        out["open"] = None if text == "default" else text
+    if notify_me not in (None, ""):
+        text = str(notify_me).strip().lower()
+        text = {"true": "on", "yes": "on", "always": "on", "false": "off", "no": "off", "never": "off"}.get(text, text)
+        if text not in ITEM_NOTIFY_VALUES:
+            return {}, "notify must be one of: %s" % ", ".join(ITEM_NOTIFY_VALUES)
+        out["notify"] = None if text == "default" else text
+    return out, None
+
+
+def add_items(inputs, *, engine=None, dest=None, group=None, start_paused=False,
+              speed_limit_kbps=None, open_when_done=None, notify_me=None, store=None):
     """Queue one or more downloads.  Returns {ok, added, skipped, group, note}."""
     try:
         store = _store(store)
@@ -111,6 +144,11 @@ def add_items(inputs, *, engine=None, dest=None, group=None, start_paused=False,
                             "Change the library root with dl_settings if you want files elsewhere." % root)
             subdir = str(dest).strip()
 
+        extras, problem = normalize_item_options(speed_limit_kbps, open_when_done, notify_me)
+        if problem:
+            return _err(problem)
+        extras = {k: v for k, v in extras.items() if v is not None}
+
         plan, skipped = [], []
         for text in wanted:
             decision = preview(text, engine=engine, store=store)
@@ -124,6 +162,7 @@ def add_items(inputs, *, engine=None, dest=None, group=None, start_paused=False,
             group_id = store.ensure_group(group or "Batch of %d" % len(plan), kind="batch")
         for text, decision in plan:
             options = {"subdir": subdir} if subdir else {}
+            options.update(extras)            # extras never reach the dedupe key (options_hash)
             title = _initial_title(decision["source"]) if decision["source"].lower().startswith(SOURCE_RE_PREFIXES) \
                 else states.clean_text(text, 80)
             item, created = store.add_item(
@@ -214,6 +253,9 @@ def present_item(item, providers, now):
         "capabilities": effective_capabilities(item, provider),
         "read_only": bool(item["owner"] == "provider" and not (provider or {}).get("capabilities")),
         "links": item.get("links") or [], "pending": item.get("control") or "",
+        # this download's own choices (hub rows only): speed cap KB/s, when-done action, notify
+        "prefs": ({k: (item.get("options") or {}).get(k) for k in ("limit_kbps", "open", "notify")
+                   if (item.get("options") or {}).get(k) is not None} if item["owner"] == "hub" else {}),
     }
 
 
@@ -253,8 +295,14 @@ def list_items(*, state=None, engine=None, provider=None, kind=None, group=None,
 def summary(store, full=False):
     settings = store.get_settings()
     root = settings_mod.library_root(settings)
+    kbps, source = settings_mod.effective_rate_limit_kbps(settings)
     out = {"counts": store.counts(), "daemon": daemon_view(store), "library_root": str(root),
-           "free_bytes": _free_bytes(root)}
+           "free_bytes": _free_bytes(root),
+           # the speed limit in force right now (the owner's, or a schedule window's); the panel
+           # shows it without needing the whole settings object on every poll
+           "speed_limit": {"kbps": kbps, "source": source},
+           "after_download": settings["after_download"]["open"],
+           "notifications_on": bool(settings["notify"]["enabled"])}
     if full:
         out["engines"] = engines.availability()
         out["engine_load_errors"] = dict(engines.LOAD_ERRORS)
@@ -294,11 +342,28 @@ def status(store=None, item_id=None):
 
 # --------------------------------------------------------------------------- settings
 
+def library_info(settings):
+    """The download folder as the panel shows it: path, whether it exists / is writable, free space."""
+    root = settings_mod.library_root(settings)
+    exists = root.is_dir()
+    probe = root
+    while not probe.exists() and probe != probe.parent:
+        probe = probe.parent
+    return {"path": str(root), "exists": exists, "writable": os.access(str(probe), os.W_OK),
+            "free_bytes": _free_bytes(probe), "folders": {k: naming.kind_folder(k, settings.get("folders"))
+                                                          for k in settings_mod.FOLDER_KINDS}}
+
+
 def settings_view(settings):
+    kbps, source = settings_mod.effective_rate_limit_kbps(settings)
     return {"library_root": str(settings_mod.library_root(settings)),
             "concurrency": settings["concurrency"], "rate_limit_kbps": settings["rate_limit_kbps"],
             "allow_private_hosts": settings["allow_private_hosts"], "http": settings["http"],
-            "limits": settings["limits"]}
+            "limits": settings["limits"],
+            "schedule": settings.get("schedule") or [],
+            "rate_limit_now": {"kbps": kbps, "source": source},
+            "folders": settings["folders"], "after_download": settings["after_download"],
+            "notify": settings["notify"], "library": library_info(settings)}
 
 
 def get_settings(store=None):
@@ -319,6 +384,65 @@ def update_settings(updates, store=None):
         return {"ok": True, "changed": changed, "settings": settings_view(store.get_settings())}
     except Exception as exc:  # noqa: BLE001
         return _err("couldn't change the settings: %s" % exc)
+
+
+def update_prefs(updates, *, id=None, store=None):
+    """The everyday preferences, without the "are you sure" that `dl_settings` carries.
+
+    No `id`: global preferences (speed limit, schedule, folders, notifications, open-when-done,
+    connections).  The two keys that decide where files are written and which private hosts the
+    hub may fetch from are refused here; they need `dl_settings`.
+    With `id`: that one download's own speed limit / open-when-done / notify choice.
+    """
+    try:
+        store = _store(store)
+        if id:
+            item = store.get_item(str(id))
+            if not item:
+                return _err("no such download")
+            if item["owner"] != "hub":
+                return _err("that row belongs to %s; its own tool decides how it runs" % (item["provider"] or "another tool"))
+            if item["state"] in states.FINAL_STATES:
+                return _err("that download has already finished")
+            mapping = {"limit_kbps": "limit_kbps", "speed_limit_kbps": "limit_kbps",
+                       "open": "open", "open_when_done": "open", "notify": "notify"}
+            unknown = [k for k in (updates or {}) if k not in mapping]
+            if unknown or not updates:
+                return _err("for one download you can set limit_kbps, open and notify")
+            raw = {mapping[k]: v for k, v in updates.items()}
+            extras, problem = normalize_item_options(raw.get("limit_kbps"), raw.get("open"), raw.get("notify"))
+            if problem:
+                return _err(problem)
+            options = dict(item.get("options") or {})
+            for key, value in extras.items():
+                if value is None:
+                    options.pop(key, None)
+                else:
+                    options[key] = value
+            fresh = store.update_item(item["id"], {"options": options}, touch=False)
+            return {"ok": True, "id": item["id"], "options": (fresh or item).get("options") or options}
+        clean, errors = settings_mod.validate_update(updates, allowed=settings_mod.PREFS_WRITABLE)
+        if errors:
+            return _err("; ".join(errors), errors=errors)
+        changed = store.set_settings(clean)
+        return {"ok": True, "changed": changed, "settings": settings_view(store.get_settings())}
+    except Exception as exc:  # noqa: BLE001
+        return _err("couldn't change the preferences: %s" % exc)
+
+
+def send_test_notification(event="done", *, store=None, deliver=None):
+    """A sample of one notification type through the real notifier (the panel's "Send test")."""
+    try:
+        store = _store(store)
+        if event not in notify.EVENT_LABELS:
+            return _err("event must be one of: %s" % ", ".join(notify.EVENT_LABELS))
+        record = notify.Dispatcher(store, deliver=deliver).send_test(event, store.get_settings())
+        delivered = list(record.get("delivered") or [])
+        return {"ok": True, "event": event, "delivered": delivered,
+                "failed_channels": list(record.get("failed_channels") or []),
+                "note": ("Sent through the notifier: %s." % (", ".join(delivered) or "inbox only"))}
+    except Exception as exc:  # noqa: BLE001
+        return _err("couldn't send the test: %s" % exc)
 
 
 # --------------------------------------------------------------------------- controls
@@ -479,8 +603,8 @@ def open_item(item_id, action="open", store=None):
     """
     try:
         store = _store(store)
-        if action not in ("open", "reveal"):
-            return _err("action must be open or reveal")
+        if action not in ("open", "reveal", "folder"):
+            return _err("action must be open, reveal or folder")
         item = store.get_item(str(item_id or ""))
         if not item:
             return _err("no such download")
@@ -495,8 +619,80 @@ def open_item(item_id, action="open", store=None):
             return _err("that file isn't inside a folder the hub may open")
         if not os.path.exists(path):
             return _err("the file is no longer there: %s" % path)
-        if not LAUNCH(path, action):
+        target = os.path.dirname(str(path)) if action == "folder" else path
+        if not LAUNCH(target, "open" if action == "folder" else action):
             return _err("couldn't open it on this system")
-        return {"ok": True, "action": action, "path": str(path)}
+        return {"ok": True, "action": action, "path": str(target)}
     except Exception as exc:  # noqa: BLE001
         return _err("couldn't open that: %s" % exc)
+
+
+def open_library(store=None):
+    """Open the download folder itself.  The path is the library root from the settings."""
+    try:
+        store = _store(store)
+        root = settings_mod.library_root(store.get_settings())
+        root.mkdir(parents=True, exist_ok=True)
+        if not LAUNCH(root, "open"):
+            return _err("couldn't open the folder on this system")
+        return {"ok": True, "action": "folder", "path": str(root)}
+    except Exception as exc:  # noqa: BLE001
+        return _err("couldn't open the download folder: %s" % exc)
+
+
+# Never opened by "open when done": opening these RUNS them (or runs a script inside them).
+# They are shown in their folder instead.  A manual Open click is the owner's own decision and
+# is not restricted here.
+RISKY_EXTENSIONS = frozenset((
+    ".exe", ".msi", ".msp", ".bat", ".cmd", ".com", ".scr", ".pif", ".cpl", ".msc", ".dll", ".sys",
+    ".ps1", ".psm1", ".vbs", ".vbe", ".js", ".jse", ".wsf", ".wsh", ".hta", ".jar", ".lnk", ".url",
+    ".reg", ".inf", ".scf", ".gadget", ".application", ".appx", ".msix", ".appxbundle",
+    ".sh", ".command", ".app", ".apk", ".appimage", ".py", ".pyw", ".pl", ".rb",
+    ".docm", ".xlsm", ".pptm", ".xlam", ".dotm", ".html", ".htm", ".xhtml", ".mht", ".svg",
+))
+AUTO_OPEN_MAX = 3            # at most this many automatic opens ...
+AUTO_OPEN_WINDOW_S = 60      # ... per this many seconds, so a 30-file batch can't open 30 windows
+
+
+def is_risky_to_open(path):
+    return os.path.splitext(str(path))[1].lower() in RISKY_EXTENSIONS
+
+
+def run_auto_open(store, settings, since, recent, now=None):
+    """Do the "when it finishes" action for downloads that just finished.  Once per finish.
+
+    `recent`: a deque of the times of recent automatic opens (the daemon keeps one).  Hub rows
+    only; the file must be inside the library root (open_item enforces that again).  Returns the
+    list of (item id, what happened) for the tests and the daemon's log.
+    """
+    now = time.time() if now is None else now
+    out = []
+    default_mode = (settings.get("after_download") or {}).get("open", "off")
+    for item in store.unclaimed("open", "done", since=since, stamp_column="finished_at"):
+        if item["owner"] != "hub":
+            continue
+        if not store.claim_notice(item["id"], "open", item.get("finished_at") or 0):
+            continue
+        mode = (item.get("options") or {}).get("open")
+        mode = mode if mode in settings_mod.OPEN_MODES else default_mode
+        if mode == "off" or not item.get("dest_file"):
+            continue
+        while recent and now - recent[0] > AUTO_OPEN_WINDOW_S:
+            recent.popleft()
+        if len(recent) >= AUTO_OPEN_MAX:
+            store.add_event(item["id"], "info", "not opened automatically: too many downloads finished at once")
+            out.append((item["id"], "skipped"))
+            continue
+        note = {"open": "opened automatically", "reveal": "shown in its folder automatically",
+                "folder": "its folder was opened automatically"}[mode]
+        if mode == "open" and is_risky_to_open(item["dest_file"]):
+            mode, note = "reveal", "shown in its folder instead of opened: programs and scripts are never opened automatically"
+        result = open_item(item["id"], mode, store=store)
+        recent.append(now)
+        if result.get("ok"):
+            store.add_event(item["id"], "info", note)
+            out.append((item["id"], mode))
+        else:
+            store.add_event(item["id"], "warn", "couldn't open it automatically: %s" % result.get("error"))
+            out.append((item["id"], "failed"))
+    return out

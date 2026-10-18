@@ -2233,7 +2233,7 @@
     renderMain();
     revalidate();
     const first = mode === "add" ? $("#dmn-f-id") : $("#dmn-f-name");
-    if (first) first.focus();
+    if (first) first.focus({ preventScroll: true });
   }
 
   async function cancelEditor() {
@@ -2624,9 +2624,7 @@
     savePrefs();
     renderList(true);
     renderMain();
-    if (reveal && dom.list.querySelector(".dmn-card.is-active")) {
-      dom.list.querySelector(".dmn-card.is-active").scrollIntoView({ block: "nearest" });
-    }
+    if (reveal) revealActiveCard("nearest");
     loadConsole({ force: true });
   }
 
@@ -2822,6 +2820,25 @@
       if (input) input.checked = !input.checked;
     }
     await loadEntries();
+  }
+
+  // Scroll ONLY the service list so the selected card is visible. Element.scrollIntoView()
+  // scrolls every scrollable ancestor, and the panel's own containers are overflow:hidden:
+  // they still scroll programmatically, which slid the whole panel's heads (title, search,
+  // tabs, overview) out of view and left dead space at the bottom. Do the one scroll we want.
+  function revealActiveCard(block) {
+    const list = dom && dom.list;
+    const card = list && list.querySelector(".dmn-card.is-active");
+    if (!card) return;
+    const lr = list.getBoundingClientRect();
+    const cr = card.getBoundingClientRect();
+    if (block === "center") {
+      list.scrollTop += (cr.top - lr.top) - (list.clientHeight - card.offsetHeight) / 2;
+    } else if (cr.top < lr.top) {
+      list.scrollTop += cr.top - lr.top;
+    } else if (cr.bottom > lr.bottom) {
+      list.scrollTop += cr.bottom - lr.bottom;
+    }
   }
 
   async function scheduleStart(id, when) {
@@ -3027,8 +3044,7 @@
     loadFavorites();
     loadEntries().then(() => {
       if (target) { focusService(target.id, target.tab); return; }
-      const card = dom.list.querySelector(".dmn-card.is-active");
-      if (card && card.scrollIntoView) card.scrollIntoView({ block: "center" });
+      revealActiveCard("center");
     });
     if (state.tickTimer) clearInterval(state.tickTimer);
     state.tickTimer = setInterval(tickUptimes, 1000);

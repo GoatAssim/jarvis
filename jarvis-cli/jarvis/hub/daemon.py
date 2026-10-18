@@ -8,7 +8,9 @@ call.  This process is where downloads actually happen:
                 1. reap finished worker threads
                 2. apply control requests (pause / cancel) written by tool calls
                 3. start workers for waiting items, within the concurrency limits
-                4. every ~5 s: heartbeat, apply spooled hub_client reports, flag silent
+                4. announce what just finished / failed (notify.py, through the existing
+                   notifier) and do each download's "when it finishes" action (service.py)
+                5. every ~5 s: heartbeat, apply spooled hub_client reports, flag silent
                    provider rows stale, advance the demo provider
 
   worker      one thread per running item: runs the engine, then turns its Outcome into
@@ -22,6 +24,7 @@ this: they are somebody else's transfer, so they simply go stale when nobody rep
 Run as `python <tool dir>/_hub_daemon.py` (what DAEMONS declares) or `python -m jarvis.hub.daemon`.
 """
 
+import collections
 import logging
 import logging.handlers
 import os
@@ -30,7 +33,7 @@ import sys
 import threading
 import time
 
-from . import engines, paths, service, settings as settings_mod, states
+from . import engines, notify, paths, service, settings as settings_mod, states
 from .engines.base import EngineContext, Outcome
 from .store import Store
 
@@ -77,6 +80,7 @@ class Worker(threading.Thread):
         self.hub = daemon
         self.item_id = item["id"]
         self.engine_name = item["engine"]
+        self.limit_kbps = settings_mod.item_limit_kbps(item)    # this download's own cap, KB/s
         self.stop_reason = None
 
     def reason(self):
@@ -92,7 +96,7 @@ class Worker(threading.Thread):
 
 
 class HubDaemon:
-    def __init__(self, store=None, clock=time.time):
+    def __init__(self, store=None, clock=time.time, deliver=None):
         self.store = store or Store()
         self._clock = clock
         self.workers = {}
@@ -103,6 +107,10 @@ class HubDaemon:
         self._settings_at = 0.0
         self._last_housekeeping = 0.0
         self._last_demo = 0.0
+        self._notifier = notify.Dispatcher(self.store, deliver=deliver, clock=clock)
+        self._recent_opens = collections.deque()
+        self._rates, self._rates_key, self._rates_at = {}, None, 0.0
+        self._rates_lock = threading.Lock()
 
     # ------------------------------------------------------------------ settings
 
@@ -119,13 +127,57 @@ class HubDaemon:
         conc["default"] = 2
         return conc, total
 
-    def _rate_share(self, engine_name):
-        """Global rate limit / running transfers of this engine, as bytes per second."""
-        kbps = int(self.settings().get("rate_limit_kbps") or 0)
-        if kbps <= 0:
+    def _global_bps(self):
+        """The speed limit in force right now (the owner's, or a schedule window's), bytes/s; 0 = none."""
+        kbps, _source = settings_mod.effective_rate_limit_kbps(self.settings())
+        return max(0, int(kbps)) * 1024
+
+    def _rate_share(self, engine_name=None):
+        """The global limit split evenly over every running transfer, bytes per second."""
+        bps = self._global_bps()
+        if bps <= 0:
             return 0
-        running = sum(1 for w in list(self.workers.values()) if w.engine_name == engine_name and w.is_alive())
-        return int(kbps * 1024 / max(1, running))
+        running = sum(1 for w in list(self.workers.values()) if w.is_alive())
+        return int(bps / max(1, running))
+
+    def _rate_for(self, worker):
+        """What one running download may use, bytes/s (0 = unlimited).
+
+        The global limit is shared out fairly, but a download with a cap of its own never takes
+        more than that, and what it leaves unused goes to the others (so one capped download
+        doesn't waste the rest of the bandwidth the owner allowed).
+        """
+        with self._rates_lock:
+            now = time.monotonic()
+            live = sorted(w.item_id for w in list(self.workers.values()) if w.is_alive())
+            key = (tuple(live), self._global_bps())
+            if key != self._rates_key or now - self._rates_at >= 1.0:
+                self._rates_key, self._rates_at = key, now
+                self._rates = self._compute_rates(live, key[1])
+            return self._rates.get(worker.item_id, 0)
+
+    def _compute_rates(self, live, global_bps):
+        caps = {}
+        for item_id in live:
+            worker = self.workers.get(item_id)
+            if worker is None:
+                continue
+            try:                                  # an edit made while it runs takes effect within a second
+                fresh = self.store.get_item(item_id)
+                worker.limit_kbps = settings_mod.item_limit_kbps(fresh) if fresh else worker.limit_kbps
+            except Exception:  # noqa: BLE001
+                pass
+            caps[item_id] = worker.limit_kbps * 1024
+        if global_bps <= 0:
+            return dict(caps)                     # no global limit: just each one's own cap (0 = none)
+        rates, remaining = {}, float(global_bps)
+        ordered = sorted(caps, key=lambda i: (caps[i] == 0, caps[i]))     # smallest caps first, uncapped last
+        for position, item_id in enumerate(ordered):
+            share = remaining / (len(ordered) - position)
+            give = min(caps[item_id], share) if caps[item_id] else share
+            rates[item_id] = int(give)
+            remaining -= give
+        return rates
 
     # ------------------------------------------------------------------ the loop
 
@@ -145,6 +197,7 @@ class HubDaemon:
         self._apply_controls()
         if not self.shutdown.is_set():
             self._schedule()
+        self._finish_pass()
         now = time.monotonic()
         if now - self._last_housekeeping >= HOUSEKEEPING_EVERY:
             self._last_housekeeping = now
@@ -174,6 +227,11 @@ class HubDaemon:
         for worker in list(self.workers.values()):
             worker.join(max(0.1, deadline - time.monotonic()))
         self._reap()
+        try:
+            self._finish_pass()                              # whatever finished while stopping
+            self._notifier.flush_now(self.settings())        # and anything still being held back
+        except Exception:  # noqa: BLE001
+            log.exception("final notification flush failed")
         try:
             self.store.set_setting_raw("daemon", {"pid": self.pid, "started_at": self.started_at, "beat_at": 0})
         except Exception:  # noqa: BLE001
@@ -205,6 +263,17 @@ class HubDaemon:
             worker = Worker(self, item)
             self.workers[item["id"]] = worker
             worker.start()
+
+    def _finish_pass(self):
+        """Announce what just finished, then run each finished download's open-when-done action."""
+        try:
+            cfg = self.settings()
+            self._notifier.scan(cfg)
+            for item_id, what in service.run_auto_open(self.store, cfg, self._notifier.since(),
+                                                       self._recent_opens, now=self._clock()):
+                log.info("after-download action on %s: %s", item_id, what)
+        except Exception:  # noqa: BLE001 - never let a notification stop the downloads
+            log.exception("the finish pass failed")
 
     def _housekeeping(self):
         self.store.daemon_beat(self.pid, self.started_at)
@@ -244,7 +313,7 @@ class HubDaemon:
                 outcome = Outcome.failed("the %s engine isn't ready: %s" % (engine.name, why or "unavailable"))
             else:
                 ctx = EngineContext(self.store, item, self.settings(), stop_reason=worker.reason,
-                                    rate_limit_bps=lambda: self._rate_share(worker.engine_name))
+                                    rate_limit_bps=lambda: self._rate_for(worker))
                 try:
                     outcome = engine.run(item, ctx)
                 except Exception as exc:  # noqa: BLE001

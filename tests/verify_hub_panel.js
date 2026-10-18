@@ -53,6 +53,56 @@ const eq = (a, b) => JSON.stringify(a) === JSON.stringify(b);
     pure.statusText(row({ owner: "provider", state: "downloading", stale: true, age_s: 600 })) === "No update 10 min ago");
   check("sizes", pure.sizeText(row({ bytes_done: 1048576, bytes_total: 2097152 })) === "1.0 MB / 2.0 MB" && pure.sizeText(row({ bytes_total: 2048 })) === "2.0 KB" && pure.sizeText(row({})) === "");
 
+
+  // ---- preferences: speed limit, notifications, when it finishes, folders
+  check("limit text", pure.fmtLimit(0) === "Unlimited" && pure.fmtLimit(500) === "500 KB/s" && pure.fmtLimit(1024) === "1 MB/s" && pure.fmtLimit(2560) === "2.5 MB/s" && pure.fmtLimit(null) === "Unlimited");
+  check("a typed speed becomes KB/s", eq(pure.parseLimit("500", "kb"), { kbps: 500 }) && eq(pure.parseLimit("2", "mb"), { kbps: 2048 }) && eq(pure.parseLimit("1,5", "mb"), { kbps: 1536 }));
+  check("an empty speed means no limit", eq(pure.parseLimit("", "kb"), { kbps: 0 }) && eq(pure.parseLimit("  ", "mb"), { kbps: 0 }));
+  check("a bad speed is an error, not a number", !!pure.parseLimit("fast", "kb").error && !!pure.parseLimit("-5", "kb").error && !!pure.parseLimit("99999999", "mb").error);
+  check("a stored limit fills the two boxes", eq(pure.limitFields(2048), { value: "2", unit: "mb" }) && eq(pure.limitFields(300), { value: "300", unit: "kb" }) && eq(pure.limitFields(0), { value: "", unit: "kb" }) && eq(pure.limitFields(1536), { value: "1536", unit: "kb" }));
+  check("the limit in force reads in words", pure.limitSummary({ kbps: 0, source: "none" }) === "No speed limit" && pure.limitSummary({ kbps: 1024, source: "manual" }) === "Limit 1 MB/s"
+    && pure.limitSummary({ kbps: 256, source: "schedule" }) === "Limit 256 KB/s (scheduled)" && pure.limitSummary({ kbps: 0, source: "schedule" }) === "Unlimited (scheduled)" && pure.limitSummary(null) === "No speed limit");
+  const q1 = pure.quickSpeedOptions({ kbps: 1024, source: "manual" });
+  check("the quick menu: presets, the current one selected, a way into the full settings",
+    q1.length === pure.LIMIT_PRESETS.length + 1 && q1.filter((o) => o.selected).length === 1 && q1.find((o) => o.selected).value === "1024" && q1[q1.length - 1].value === "custom" && q1[0].label === "No limit");
+  const q2 = pure.quickSpeedOptions({ kbps: 777, source: "manual" });
+  check("a limit that isn't a preset still shows up, selected", q2.find((o) => o.selected).value === "777" && q2.find((o) => o.selected).label === "777 KB/s");
+  check("a scheduled limit is marked in the menu", pure.quickSpeedOptions({ kbps: 256, source: "schedule" }).find((o) => o.selected).label.includes("(scheduled)"));
+
+  check("four 'when it finishes' choices; the dangerous one says what it won't do", eq(pure.OPEN_CHOICES.map((c) => c.id), ["off", "reveal", "folder", "open"]) && /never opened/.test(pure.OPEN_CHOICES[3].help));
+  check("the per-download menu starts with 'use my default' and names it", pure.openMenu("reveal")[0].value === "default" && /show the file in its folder/.test(pure.openMenu("reveal")[0].label) && pure.openMenu("off").length === 5);
+  check("the level menu uses the notifier's own names", pure.levelMenu()[0].value === "default" && pure.levelMenu().length === 6 && /Persistent/.test(pure.levelMenu()[3].label));
+  check("every notification type is listed, in order", eq(pure.NOTIFY_EVENTS.map((e) => e.id), ["done", "failed", "group_done", "queue_empty", "stalled", "started"]));
+
+  check("days: presets and a single day round-trip", pure.daysChoice(pure.DAYS) === "all" && pure.daysChoice(["mon", "tue", "wed", "thu", "fri"]) === "weekdays" && pure.daysChoice(["sat", "sun"]) === "weekends" && pure.daysChoice(["wed"]) === "wed" && pure.daysChoice(["mon", "wed"]) === "custom");
+  check("days: a custom set is kept when nothing is chosen", eq(pure.daysFromChoice("custom", ["mon", "wed"]), ["mon", "wed"]) && eq(pure.daysFromChoice("weekdays"), ["mon", "tue", "wed", "thu", "fri"]) && eq(pure.daysFromChoice("fri"), ["fri"]));
+  check("a new time window starts overnight, unlimited", eq(pure.blankWindow(), { days: pure.DAYS, from: "01:00", to: "07:00", rate_limit_kbps: 0 }));
+
+  const hubSettings = {
+    rate_limit_kbps: 0, schedule: [], after_download: { open: "off" }, concurrency: { total: 4, http: 2 }, http: { stall_seconds: 60, max_retries: 4 },
+    folders: { video: "Video", audio: "Audio", file: "Files" },
+    notify: { enabled: true, min_seconds: 0, coalesce_s: 8, providers: true, started: { enabled: false, level: null }, done: { enabled: true, level: null }, failed: { enabled: true, level: null }, stalled: { enabled: false, level: null }, group_done: { enabled: true, level: null }, queue_empty: { enabled: true, level: null } },
+  };
+  const base = pure.prefsFromSettings(hubSettings);
+  const copy = () => JSON.parse(JSON.stringify(base));
+  check("the form model reads the hub's settings (an unset level stays unset)", base.notify.events.done.enabled === true && base.notify.events.done.level === null && base.notify.events.started.enabled === false && base.after_open === "off" && base.folders.file === "Files");
+  check("nothing edited, nothing to save", eq(pure.prefsDiff(base, copy()), {}));
+  const edited = copy();
+  edited.rate_limit_kbps = 2048; edited.after_open = "reveal"; edited.notify.events.done.enabled = false; edited.notify.events.failed.level = 4; edited.notify.events.stalled.level = null;
+  edited.notify.coalesce_s = 0; edited.folders.video = "Movies"; edited.concurrency.total = 6; edited.http.max_retries = 0; edited.schedule = [pure.blankWindow()];
+  const diff = pure.prefsDiff(base, edited);
+  check("only what changed is sent, under the keys dl_prefs takes", eq(Object.keys(diff).sort(), ["after_download.open", "concurrency.total", "folders.video", "http.max_retries", "notify.coalesce_s", "notify.done.enabled", "notify.failed.level", "rate_limit_kbps", "schedule"]));
+  check("values keep their types (a level is a number, 0 retries is 0)", diff["notify.failed.level"] === 4 && diff["http.max_retries"] === 0 && diff.rate_limit_kbps === 2048 && diff["notify.done.enabled"] === false);
+  const back = copy(); back.notify.events.done.level = 3; const base3 = pure.prefsFromSettings(Object.assign({}, hubSettings, { notify: Object.assign({}, hubSettings.notify, { done: { enabled: true, level: 3 } }) }));
+  check("going back to the notifier's default is sent as 'default'", pure.prefsDiff(base3, copy()).hasOwnProperty("notify.done.level") && pure.prefsDiff(base3, copy())["notify.done.level"] === "default" && pure.prefsDiff(base, back)["notify.done.level"] === 3);
+  check("the overview summarises notifications", pure.notifySummary(base) === "4 of 6 notification types on" && pure.notifySummary(Object.assign(copy(), { notify: Object.assign(copy().notify, { enabled: false }) })) === "Notifications are off");
+
+  check("the add form: no extras -> no extra arguments", eq(pure.addOptionsFromForm({ limit: "", unit: "kb", open: "default", notify: "default" }), { args: {} }));
+  check("the add form: extras become dl_add arguments", eq(pure.addOptionsFromForm({ limit: "2", unit: "mb", open: "reveal", notify: "on" }), { args: { speed_limit_kbps: 2048, open_when_done: "reveal", notify: "on" } }));
+  check("the add form: a bad speed is an error", !!pure.addOptionsFromForm({ limit: "x", unit: "kb", open: "default", notify: "default" }).error);
+  check("one download's own choices in words", pure.itemPrefsText({}) === "" && pure.itemPrefsText({ limit_kbps: 300, open: "reveal", notify: "off" }) === "limit 300 KB/s \u00B7 then: show the file in its folder \u00B7 never notify");
+  check("the test result names the channels that delivered", pure.testResultText({ ok: true, delivered: ["inbox", "desktop"], failed_channels: [] }) === "Test sent: inbox, desktop." && /Couldn't reach: voice/.test(pure.testResultText({ ok: true, delivered: ["inbox"], failed_channels: ["voice"] })) && pure.testResultText({ ok: false, error: "nope" }) === "nope");
+
   // ---- the bar (plan 11.4)
   const look = (o) => pure.barLook(row(o));
   check("determinate", eq(look({ state: "downloading", percent: 40 }), { kind: "determinate", pct: 40 }));
@@ -146,10 +196,16 @@ const eq = (a, b) => JSON.stringify(a) === JSON.stringify(b);
   check("the panel only runs tools that download_hub.py defines", used.size > 0 && [...used].every((t) => known.has(t)));
   check("a provider's text never chooses which tool runs (no tool-kind links, no dynamic names from rows)",
     !/callTool\(\s*l\./.test(source) && !/runTool\(\s*(row|r|l)\./.test(source));
+  const html2 = fs.readFileSync(path.join(ui, "tool.html"), "utf8");
+  check("the settings screen and its buttons exist in tool.html", ["settings", "settingsNav", "settingsPage", "settingsSave", "settingsRevert", "settingsBack", "speedQuick", "openFolder", "settingsBtn", "detailPrefs", "addLimit", "addOpen", "addNotify"].every((id) => html2.includes('id="' + id + '"')));
+  check("the panel can open the Settings screen with Escape and close it", /Escape/.test(source) && /closeSettings/.test(source));
+  check("the settings are saved with dl_prefs; only the folder change goes through the confirm-gated dl_settings", /callTool\("dl_prefs"/.test(source) && /callTool\("dl_settings", \{ set: \{ library_root/.test(source) && (source.match(/callTool\("dl_settings"/g) || []).length === 1);
+  check("an event's target isn't read after an await (it is cleared inside a shadow root)", !/await[^\n]*\n[^\n]*e\.target/.test(source.slice(source.indexOf("speedQuick\").addEventListener"), source.indexOf("speedQuick\").addEventListener") + 1200)));
   const css = fs.readFileSync(path.join(ui, "tool.css"), "utf8");
   check("the stylesheet defines a look for every bar kind", ["determinate", "indeterminate", "striped", "queued", "done", "failed", "stalled", "paused", "stale", "cancelled", "unknown"]
     .every((k) => k === "determinate" || css.includes(".bar-track." + k) || css.includes("." + k)));
   check("motion respects prefers-reduced-motion", css.includes("prefers-reduced-motion"));
+  check("the stylesheet styles the settings screen", [".settings", ".snav", ".ntable", ".choice", ".prefsbox", ".speedq"].every((c) => css.includes(c)));
 
   console.log("\n" + passed + " passed, " + failed + " failed");
   process.exit(failed ? 1 : 0);

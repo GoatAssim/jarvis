@@ -10,10 +10,15 @@ What is in it
   dl_add / dl_list / dl_status                 queue and look
   dl_pause / dl_resume / dl_cancel / dl_retry  control (hub downloads; provider rows are
                                                read-only until phase 5)
-  dl_open                                      open or reveal a FINISHED file (path from the
-                                               database, only inside the library root)
+  dl_open                                      open or reveal a FINISHED file, open its folder,
+                                               or open the download folder (path from the
+                                               database / settings, only inside the library root)
   dl_settings                                  library root, concurrency, rate limit, the
                                                private-host allow-list (confirm-gated)
+  dl_prefs                                     the everyday preferences, no confirmation: speed
+                                               limit + timed windows, folder names, open-when-
+                                               done, which notifications fire (delivered by the
+                                               normal notifier), and one download's own options
   hub_doctor                                   is it healthy?
   hub_demo_provider                            fake rows to check the panel by hand
   TOOL_UI                                      the Menu > Downloads panel (hub_ui/)
@@ -47,6 +52,18 @@ def _selector(args):
         "provider": (args.get("provider") or "").strip() or None,
         "all": bool(args.get("all")),
     }
+
+
+def _confirm_open(count=1):
+    """Opening a downloaded FILE by itself is the one 'when done' choice that runs something the
+    owner hasn't looked at, so choosing it from here asks first (default=False)."""
+    from .. import ui_bridge as ui
+    return ui.confirm("Open downloaded files automatically?",
+                      body=("When %s finish%s, Jarvis will open %s with its default program. Programs and "
+                            "scripts are never opened this way; they are only shown in their folder."
+                            % ("these downloads" if count > 1 else "this download", "" if count > 1 else "es",
+                               "each file" if count > 1 else "the file")),
+                      level="warn", confirm_label="Open them", cancel_label="Don't", default=False)
 
 
 # ---------------------------------------------------------------------------
@@ -88,8 +105,13 @@ def tool_dl_add(args):
                               body="\n".join(u[:100] for u in urls[:8]) + ("\n..." if len(urls) > 8 else ""),
                               level="warn", confirm_label="Queue them", cancel_label="Cancel", default=False):
                 return {"ok": False, "cancelled": True, "error": "not confirmed: nothing was queued"}
+        open_when_done = args.get("open_when_done")
+        if str(open_when_done or "").strip().lower() == "open" and not _confirm_open(len(urls)):
+            return {"ok": False, "cancelled": True, "error": "not confirmed: nothing was queued"}
         return svc.add_items(urls, engine=engine, dest=args.get("dest"), group=args.get("group"),
-                             start_paused=bool(args.get("start_paused")))
+                             start_paused=bool(args.get("start_paused")),
+                             speed_limit_kbps=args.get("speed_limit_kbps"),
+                             open_when_done=open_when_done, notify_me=args.get("notify"))
     except Exception as exc:  # noqa: BLE001 - a tool never raises
         return _fail("dl_add", exc)
 
@@ -147,6 +169,8 @@ def tool_dl_retry(args):
 def tool_dl_open(args):
     try:
         args = args or {}
+        if str(args.get("target") or "").strip().lower() in ("library", "download_folder", "folder_root"):
+            return _svc().open_library()
         return _svc().open_item((args.get("id") or "").strip(), action=(args.get("action") or "open").strip())
     except Exception as exc:  # noqa: BLE001
         return _fail("dl_open", exc)
@@ -163,6 +187,31 @@ def tool_dl_settings(args):
         return _svc().update_settings(changes)
     except Exception as exc:  # noqa: BLE001
         return _fail("dl_settings", exc)
+
+
+def tool_dl_prefs(args):
+    """Everyday preferences and one download's own options, without the dl_settings question."""
+    try:
+        args = args or {}
+        svc = _svc()
+        event = (args.get("test_notification") or "").strip()
+        if event:
+            return svc.send_test_notification(event)
+        changes = args.get("set")
+        item_id = (args.get("id") or "").strip() or None
+        if changes is None or changes == {}:
+            if item_id:
+                return {"ok": False, "error": "say what to change for that download: {\"limit_kbps\": 500}"}
+            return svc.get_settings()
+        if not isinstance(changes, dict):
+            return {"ok": False, "error": "`set` must be an object like {\"rate_limit_kbps\": 2048}"}
+        wants_open = (changes.get("after_download.open") if not item_id
+                      else (changes.get("open") or changes.get("open_when_done")))
+        if str(wants_open or "").strip().lower() == "open" and not _confirm_open():
+            return {"ok": False, "cancelled": True, "error": "not confirmed: nothing was changed"}
+        return svc.update_prefs(changes, id=item_id)
+    except Exception as exc:  # noqa: BLE001
+        return _fail("dl_prefs", exc)
 
 
 def tool_hub_doctor(args):
@@ -226,6 +275,9 @@ TOOL_SCHEMAS = [
                 "dest": {"type": "string", "description": "A sub-folder INSIDE the library root, e.g. 'Manuals'. Never a full path."},
                 "group": {"type": "string", "description": "A name for this batch."},
                 "start_paused": {"type": "boolean", "description": "Queue it paused instead of starting it."},
+                "speed_limit_kbps": {"type": "integer", "description": "A speed cap for just this download, in KB/s (0 or missing = only the global limit applies)."},
+                "open_when_done": {"type": "string", "enum": ["default", "off", "reveal", "folder", "open"], "description": "What to do when it finishes: nothing, show the file in its folder, open the folder, or open the file (asks the person first; programs and scripts are never opened). Default = the person's own setting."},
+                "notify": {"type": "string", "enum": ["default", "on", "off"], "description": "Tell the person when this one finishes or fails (on), never (off), or follow their notification settings (default)."},
                 "dry_run": {"type": "boolean", "description": "Only say which engine would take each link; queue nothing."},
             },
         },
@@ -284,14 +336,14 @@ TOOL_SCHEMAS = [
     },
     {
         "name": "dl_open",
-        "description": "Open a finished download with its default program, or reveal it in the file manager. Only files inside the library folder.",
+        "description": "Open a finished download with its default program, reveal it in the file manager, or open its folder; or open the whole download folder (target=library). Only inside the library folder.",
         "parameters": {
             "type": "object",
             "properties": {
                 "id": {"type": "string", "description": "The download's id, from dl_list."},
-                "action": {"type": "string", "enum": ["open", "reveal"], "description": "open (default) or reveal in the folder."},
+                "action": {"type": "string", "enum": ["open", "reveal", "folder"], "description": "open (default), reveal in the folder, or open the folder it is in."},
+                "target": {"type": "string", "enum": ["library"], "description": "Open the download folder itself (no id needed)."},
             },
-            "required": ["id"],
         },
     },
     {
@@ -306,6 +358,28 @@ TOOL_SCHEMAS = [
             "type": "object",
             "properties": {
                 "set": {"type": "object", "description": "Settings to change, e.g. {\"concurrency.http\": 2, \"library_root\": \"D:/Downloads/Jarvis\"}."},
+            },
+        },
+    },
+    {
+        "name": "dl_prefs",
+        "description": (
+            "Read or change the everyday Download Hub preferences without a confirmation: the speed limit "
+            "(rate_limit_kbps, 0 = unlimited) and timed speed windows (schedule), the folder name for each "
+            "kind of file (folders.video / folders.audio / folders.file), what happens when a download finishes "
+            "(after_download.open: off, reveal, folder, open), which notifications are on (notify.done.enabled, "
+            "notify.failed.enabled, notify.started, notify.stalled, notify.group_done, notify.queue_empty, each "
+            "with an optional .level 1-5 for the notifier), and connections (concurrency.*, http.*). With `id`, "
+            "changes one download's own limit_kbps / open / notify. test_notification=<type> sends a sample "
+            "notification. Where files are saved (library_root) and allow_private_hosts need dl_settings. "
+            "Call with no arguments to read."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "set": {"type": "object", "description": "Preferences to change, e.g. {\"rate_limit_kbps\": 2048, \"notify.done.enabled\": true, \"after_download.open\": \"reveal\"}; with id: {\"limit_kbps\": 500}."},
+                "id": {"type": "string", "description": "One download's id: change just its own speed limit / open-when-done / notify."},
+                "test_notification": {"type": "string", "enum": ["started", "done", "failed", "stalled", "group_done", "queue_empty"], "description": "Send a sample of this notification type."},
             },
         },
     },
@@ -337,6 +411,7 @@ TOOLS = {
     "dl_retry": tool_dl_retry,
     "dl_open": tool_dl_open,
     "dl_settings": tool_dl_settings,
+    "dl_prefs": tool_dl_prefs,
     "hub_doctor": tool_hub_doctor,
     "hub_demo_provider": tool_hub_demo_provider,
 }
@@ -374,8 +449,11 @@ TOOL_KEYWORDS = {
     "dl_resume": {"resume downloads": 10, "resume the download": 10},
     "dl_cancel": {"cancel the download": 10, "cancel downloads": 10},
     "dl_retry": {"retry the download": 10, "retry downloads": 10, "retry failed downloads": 10},
-    "dl_open": {"open the download": 9, "reveal the download": 9},
+    "dl_open": {"open the download": 9, "reveal the download": 9, "open the download folder": 10},
     "dl_settings": {"download settings": 9, "download folder": {"weight": 8, "not_with": ["open"]}},
+    "dl_prefs": {"download speed limit": 10, "limit download speed": 10, "limit the download speed": 10,
+                 "download notifications": 10, "notify me when downloads": 10,
+                 "notify when the download": 10, "open when done": 9, "open when the download": 9},
     "hub_doctor": {"hub doctor": 10, "downloads aren't starting": 10, "downloads not starting": 10},
     "hub_demo_provider": {"demo downloads": 10, "downloads demo": 10},
 }
@@ -392,7 +470,9 @@ TOOL_PACK_INSTRUCTION = (
 
 # cancel deletes partial files; settings can move where files go and open the private-network
 # allow-list; the demo fills the owner's list with fake rows. dl_add's bulk question is asked
-# inside the handler (default=False).
+# inside the handler (default=False).  dl_prefs is NOT listed: it only holds the everyday keys
+# (speed, notifications, folder names inside the library), and the one choice that runs
+# something unseen (open-the-file when done) asks inside the handler, default=False.
 TOOL_CONFIRM_REQUIRED = {"dl_cancel", "dl_settings", "hub_demo_provider"}
 TOOL_AI_REVIEW = set()
 
@@ -430,7 +510,9 @@ TOOL_UI = [
 ]
 
 # The runner script adds the package's folder to sys.path itself, so it works the same from a
-# source checkout and from an installed copy (the daemon's cwd is this folder).
+# source checkout and from an installed copy. It deliberately declares no `cwd`: a shipped daemon
+# defaults to the config folder (tool_daemons._default_cwd), because a process running with its
+# cwd inside the installed package blocks the rebuild's `pip install --force-reinstall`.
 DAEMONS = [
     {
         "id": "hub",
@@ -553,6 +635,24 @@ TEST_CHECKLIST = {
             {"run": {"set": {"library_root": "relative/path"}}, "expect": "ok: false: must be an absolute path."},
         ],
         "care": "library_root decides where new files are written; allow_private_hosts lets the hub fetch from your local network.",
+    },
+    "dl_prefs": {
+        "does": "Everyday preferences without a confirmation: speed limit and timed windows, folder names per file type, what happens when a download finishes, which notifications fire (they are delivered by the normal notifier), and one download's own speed / open / notify choice.",
+        "steps": [
+            {"run": {}, "expect": "ok: true with the settings, including notify (six events), after_download, folders, schedule and rate_limit_now."},
+            {"run": {"set": {"rate_limit_kbps": 512}}, "expect": "ok: true, rate_limit_now.kbps 512 (source manual); a running download slows to about 512 KB/s within a couple of seconds. Set 0 to lift it."},
+            {"run": {"set": {"schedule": [{"days": "all", "from": "00:00", "to": "23:59", "rate_limit_kbps": 256}]}}, "expect": "ok: true, rate_limit_now.kbps 256 with source schedule. Clear it again with {\"schedule\": []}."},
+            {"run": {"test_notification": "done"}, "expect": "ok: true; a sample notification appears the way any Jarvis notification does (inbox, toast, desktop per your notification settings) and the note lists the channels that delivered."},
+            {"run": {"set": {"notify.done.enabled": False}}, "expect": "ok: true; the next finished download makes no notification. Turn it back on afterwards."},
+            {"run": {"set": {"after_download.open": "reveal"}}, "expect": "ok: true; the next finished download is shown in its folder by itself."},
+            {"run": {"set": {"after_download.open": "open"}}, "expect": "Asks first (Open them / Don't). Don't: ok: false, cancelled, nothing changed."},
+            {"run": {"set": {"library_root": "D:/x"}}, "expect": "ok: false: it needs dl_settings (which asks you first)."},
+            {"run": {"id": "<a queued or downloading id>", "set": {"limit_kbps": 300}}, "expect": "ok: true with options.limit_kbps 300; that download is capped at about 300 KB/s while others are not."},
+            {"ask": "Limit my downloads to 1 MB/s", "expect": "Calls dl_prefs with rate_limit_kbps 1024 and confirms the new limit."},
+        ],
+        "care": "Opening finished files automatically is off by default. Programs and scripts (.exe, .bat, .ps1, .js, .lnk, ...) are only ever shown in their folder, never opened.",
+        "watch": ["A burst of finishes inside the 'group within N seconds' window arrives as one notification ('3 downloads finished').",
+                  "A batch of many files never opens more than a few windows at once."],
     },
     "hub_doctor": {
         "does": "Checks the store, the daemon, the library folder and disk, each engine and provider, and any spooled reports.",

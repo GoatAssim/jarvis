@@ -23,6 +23,7 @@ import time
 from pathlib import Path
 
 HOME = tempfile.mkdtemp(prefix="jarvis-hub-svc-")
+os.environ["JARVIS_HUB_NO_DELIVER"] = "1"      # tests never fire real notifications
 os.environ["HOME"] = HOME
 os.environ["USERPROFILE"] = HOME
 for _var in ("JARVIS_SCHEDULED", "JARVIS_CONTEXT", "JARVIS_ALLOWED_TOOLS"):
@@ -69,7 +70,7 @@ def fresh_store(clock=None):
 
 
 TOOL_NAMES = ["dl_add", "dl_list", "dl_status", "dl_pause", "dl_resume", "dl_cancel", "dl_retry",
-              "dl_open", "dl_settings", "hub_doctor", "hub_demo_provider"]
+              "dl_open", "dl_settings", "dl_prefs", "hub_doctor", "hub_demo_provider"]
 
 
 # ---------------------------------------------------------------- the tool file, through the real loader
@@ -80,7 +81,7 @@ def test_tool_file():
     check("the loader finds download_hub.py", len(mine) == 1)
     rec = mine[0]
     check("it is valid (no load error)", rec.valid and not rec.error)
-    check("it defines exactly the 11 tools", sorted(rec.tools) == sorted(TOOL_NAMES) and sorted(s["name"] for s in rec.schemas) == sorted(TOOL_NAMES))
+    check("it defines exactly the 12 tools", sorted(rec.tools) == sorted(TOOL_NAMES) and sorted(s["name"] for s in rec.schemas) == sorted(TOOL_NAMES))
     check("in the new `downloads` group", rec.group == "downloads")
     check("no tool name collides with another file's", all(set(rec.tools).isdisjoint(set(o.tools)) for o in records if o is not rec and o.valid))
     check("cancel, settings and the demo are confirm-gated by name",
@@ -123,7 +124,7 @@ def test_tool_file():
 
     schema = {s["name"]: s for s in rec.schemas}
     check("dl_add tells the model where its limits are", "ytdl_download" in schema["dl_add"]["description"] and "dry_run" in schema["dl_add"]["parameters"]["properties"])
-    check("dl_open takes an id, never a path", list(schema["dl_open"]["parameters"]["properties"]) == ["id", "action"] and "path" not in json.dumps(schema["dl_open"]))
+    check("dl_open takes an id, never a path", list(schema["dl_open"]["parameters"]["properties"]) == ["id", "action", "target"] and "path" not in json.dumps(schema["dl_open"]))
     check("dl_add's dest says sub-folder, not a path", "sub-folder" in schema["dl_add"]["parameters"]["properties"]["dest"]["description"])
 
 
