@@ -26,6 +26,7 @@ from pathlib import Path
 from urllib.parse import urljoin, urlsplit
 
 from .. import naming, netguard, states
+from .. import settings as settings_mod
 from .base import Engine, Outcome, RouteRule
 
 CHUNK = 256 * 1024
@@ -108,10 +109,10 @@ def stream_to_file(ctx, item, url, headers=None, resolver=None, session=None):
     stall = int(ctx.setting("http", "stall_seconds", default=60))
     connect_timeout = float(ctx.setting("http", "connect_timeout", default=15))
     allow = ctx.setting("allow_private_hosts", default=[])
-    root = ctx.library_root()
+    roots = settings_mod.write_roots(ctx.settings, opts)
     ref = dict(item.get("source_ref") or {})
     part, final = ref.get("part"), ref.get("final")
-    if part and not (naming.under(root, part) and naming.under(root, final or part)):
+    if part and not (naming.under_any(roots, part) and naming.under_any(roots, final or part)):
         part = final = None                      # a recorded path outside the root is never trusted
         ref = {}
     offset = os.path.getsize(part) if part and os.path.exists(part) else 0
@@ -171,10 +172,9 @@ def stream_to_file(ctx, item, url, headers=None, resolver=None, session=None):
             if not os.path.splitext(name)[1]:
                 name += naming.ext_from_content_type(hdr.get("Content-Type"))
             kind = naming.kind_for(name, hdr.get("Content-Type"))
-            subdir = opts.get("subdir")
-            dest_dir = naming.safe_subdir(root, subdir) if subdir else Path(root) / naming.kind_folder(kind, ctx.settings.get("folders"))
+            dest_dir, _source = settings_mod.resolve_dest_dir(ctx.settings, name, kind, opts)
             if dest_dir is None:
-                return Outcome.failed("the destination folder isn't allowed (it must sit inside the library root)")
+                return Outcome.failed("the destination folder isn't allowed (a sub-folder of the library root, or a full path you approved)")
             try:
                 dest_dir.mkdir(parents=True, exist_ok=True)
             except OSError as exc:

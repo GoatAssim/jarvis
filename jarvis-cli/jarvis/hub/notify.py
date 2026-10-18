@@ -11,7 +11,13 @@ What it does own:
   * telling one occurrence from the next, so a daemon restart or a second scan can never
     announce the same finish twice (the `notices` table);
   * folding a burst of finishes into one message (`notify.coalesce_s`);
-  * the wording, and the per-download override (`options.notify`: "on" / "off").
+  * the wording, and the per-download overrides, which beat the global settings for that one row:
+      options.notify           "on" / "off"
+      options.notify_channels  where THIS download is announced (e.g. ["discord"]); the notifier
+                               still keeps its inbox record, the other channels stay quiet
+      options.notify_events    which of started / done / failed / stalled fire for it
+    A download with its own choices is announced even when the global switch is off, and is never
+    merged into another download's message (it can be going somewhere else).
 
 The daemon calls `Dispatcher.scan()` once a tick; everything else is plain functions so the
 tests can drive it with a fake clock and a fake `deliver`.
@@ -35,7 +41,7 @@ _COALESCED = ("started", "done", "failed", "stalled")
 _SHOW_TITLES = 3
 
 
-def default_deliver(title, message, *, level=None, failed=False):
+def default_deliver(title, message, *, level=None, failed=False, channels=None):
     """Hand one message to the existing notifier.  Never raises; returns the notifier's record.
 
     JARVIS_HUB_NO_DELIVER=1 (set by the test-suite) turns this into a no-op, so a test that runs
@@ -46,6 +52,8 @@ def default_deliver(title, message, *, level=None, failed=False):
     try:
         from .. import notifier
         kwargs = {"level": level} if level else {}
+        if channels:
+            kwargs["channels"] = list(channels)
         return notifier.notify(title, message, kind="download", source="download_hub",
                                failed=bool(failed), **kwargs)
     except Exception as exc:                          # a notification must never break the daemon
@@ -95,6 +103,22 @@ def compose(event, entries, extra=None):
     return (plural, ", ".join(names) + (" and %d more" % more if more > 0 else ""))
 
 
+def _channels_of(item):
+    """This row's own notification channels (a list), or None to follow the global setting."""
+    value = (item.get("options") or {}).get("notify_channels")
+    return list(value) if isinstance(value, (list, tuple)) and value else None
+
+
+def _events_of(item):
+    value = (item.get("options") or {}).get("notify_events")
+    return list(value) if isinstance(value, (list, tuple)) and value else None
+
+
+def _has_own_choice(item):
+    """Did the owner pick notification settings for this one download?"""
+    return (item.get("options") or {}).get("notify") == "on" or bool(_channels_of(item) or _events_of(item))
+
+
 class Dispatcher:
     """One per daemon.  `deliver(title, message, level=, failed=)` defaults to the notifier."""
 
@@ -102,7 +126,7 @@ class Dispatcher:
         self.store = store
         self.deliver = deliver or default_deliver
         self.clock = clock or time.time
-        self._pending = {}                  # event -> {"first": ts, "entries": [...], "failed": bool}
+        self._pending = {}                  # (event, channels) -> {"first": ts, "entries": [...], "level": n, "channels": [...]}
         self._was_busy = False
         self._burst = {"done": 0, "failed": 0}   # finishes since the queue last went idle
         self._since = None
@@ -132,10 +156,7 @@ class Dispatcher:
         """Look for new finishes / failures / stalls / starts and announce what is due.
         Returns how many messages were handed to the notifier."""
         cfg = settings.get("notify") or {}
-        if not cfg.get("enabled", True):
-            self._pending.clear()
-            self._was_busy = self.store.waiting_work() > 0
-            return 0
+        master = bool(cfg.get("enabled", True))
         since = self.since()
         sent = 0
         queued_group_checks = []
@@ -144,19 +165,26 @@ class Dispatcher:
             for item in self.store.unclaimed(event, state_name, since=since, stamp_column=column):
                 if not self.store.claim_notice(item["id"], event, item.get(column) or 0):
                     continue
-                self._burst[event] += 1
-                self._consider(event, item, cfg, settings)
+                if not _channels_of(item):               # a download announced elsewhere isn't part of the queue's tally
+                    self._burst[event] += 1
+                self._consider(event, item, cfg, settings, master)
                 if item.get("group_id"):
                     queued_group_checks.append(item)
         for item in self.store.unclaimed("stalled", "stalled", since=since, stamp_column="attempts"):
             if self.store.claim_notice(item["id"], "stalled", item.get("attempts") or 0) and item["owner"] == "hub":
-                self._consider("stalled", item, cfg, settings)
+                self._consider("stalled", item, cfg, settings, master)
         for item in self.store.unclaimed("started", states.ACTIVE_STATES, since=since, stamp_column="started_at"):
             if self.store.claim_notice(item["id"], "started", item.get("started_at") or 0) and item["owner"] == "hub":
-                self._consider("started", item, cfg, settings)
+                self._consider("started", item, cfg, settings, master)
 
         sent += self._flush(cfg, force=False)
 
+        if not master:
+            # The global switch is off: only downloads with their own choices spoke (above).  No batch
+            # or "all done" messages, and nothing is held for later.
+            self._was_busy = self.store.waiting_work() > 0
+            self._burst = {"done": 0, "failed": 0}
+            return sent
         for item in queued_group_checks:
             sent += self._group_done(item, cfg)
         sent += self._queue_empty(cfg)
@@ -164,15 +192,27 @@ class Dispatcher:
 
     # ------------------------------------------------------------ per-row decision
 
-    def _consider(self, event, item, cfg, settings):
+    def _consider(self, event, item, cfg, settings, master=True):
         mine = item["owner"] == "hub"
         if not mine and (event not in ("done", "failed") or not cfg.get("providers", True)):
             return
-        override = (item.get("options") or {}).get("notify")
+        options = item.get("options") or {}
+        override = options.get("notify")
         if override == "off":
             return
+        own_events, channels = _events_of(item), _channels_of(item)
+        if not master and not (mine and _has_own_choice(item)):
+            return                                       # global switch off, nothing asked for this one
         enabled, level = self._event_cfg(settings, event)
-        forced = override == "on" and event in ("done", "failed")
+        if own_events is not None:
+            # This download's own list of types replaces the global on/off for it.
+            enabled = forced = event in own_events
+        else:
+            # While the global switch is off nothing can say which types this one wants, so a download
+            # that picked channels (or "on") is announced when it finishes or fails.
+            forced = (override == "on" or (bool(channels) and not master)) and event in ("done", "failed")
+            if not master:
+                enabled = False
         if not enabled and not forced:
             return
         if event == "done" and not forced:
@@ -182,29 +222,36 @@ class Dispatcher:
         entry = {"name": _name(item), "size": item.get("bytes_done") or item.get("bytes_total") or 0,
                  "folder": os.path.basename(item.get("dest_dir") or "") if item.get("dest_dir") else "",
                  "error": (item.get("error") or "")[:160]}
-        if forced and not enabled:
-            self._send(event, [entry], level or 2)        # asked for this one: say so now, plainly
+        if forced and not self._event_cfg(settings, event)[0]:
+            self._send(event, [entry], level or 2, channels=channels)    # asked for this one: say so now, plainly
             return
-        bucket = self._pending.setdefault(event, {"first": self.clock(), "entries": [], "level": level})
+        key = (event, tuple(channels) if channels else None)
+        bucket = self._pending.setdefault(key, {"first": self.clock(), "entries": [], "level": level,
+                                                "channels": channels})
         bucket["entries"].append(entry)
         if not cfg.get("coalesce_s", 0):
             self._flush(cfg, force=True)
 
     # ------------------------------------------------------------ sending
 
-    def _send(self, event, entries, level, extra=None):
+    def _send(self, event, entries, level, extra=None, channels=None):
         title, message = compose(event, entries, extra)
-        self.deliver(title, message, level=level, failed=(event == "failed"))
+        if channels:
+            # Only passed when this download chose its own channels, so a plain deliver(title,
+            # message, level=, failed=) keeps working everywhere else.
+            self.deliver(title, message, level=level, failed=(event == "failed"), channels=list(channels))
+        else:
+            self.deliver(title, message, level=level, failed=(event == "failed"))
         return 1
 
     def _flush(self, cfg, force):
         wait = cfg.get("coalesce_s", 0)
         sent = 0
-        for event in [e for e in _COALESCED if e in self._pending]:
-            bucket = self._pending[event]
+        for key in [k for k in list(self._pending) if k[0] in _COALESCED]:
+            bucket = self._pending[key]
             if force or self.clock() - bucket["first"] >= wait:
-                del self._pending[event]
-                sent += self._send(event, bucket["entries"], bucket["level"])
+                del self._pending[key]
+                sent += self._send(key[0], bucket["entries"], bucket["level"], channels=bucket.get("channels"))
         return sent
 
     def flush_now(self, settings):
@@ -222,7 +269,7 @@ class Dispatcher:
         if not enabled or item["owner"] != "hub":
             return 0
         sent = self._flush(cfg, force=True)             # the per-file lines go first
-        return sent + self._send("group_done", [], level, prog)
+        return sent + self._send("group_done", [], level, prog, channels=_channels_of(item))
 
     def _queue_empty(self, cfg):
         busy = self.store.waiting_work() > 0

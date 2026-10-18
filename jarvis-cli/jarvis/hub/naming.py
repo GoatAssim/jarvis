@@ -130,6 +130,11 @@ def under(root, path):
         return False
 
 
+def under_any(roots, path):
+    """Does `path` sit inside at least one of `roots`?"""
+    return any(under(r, path) for r in roots)
+
+
 def clean_relative(text):
     """A plain relative sub-folder as one normalised string ("Movies/Kids"), or None.
 

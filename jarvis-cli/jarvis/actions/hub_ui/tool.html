@@ -83,8 +83,8 @@
             <summary>Options</summary>
             <div class="field">
               <label class="field__label" for="addDest">Save in folder</label>
-              <input type="text" id="addDest" spellcheck="false" placeholder="e.g. Manuals (optional)">
-              <div class="field__help" id="addDestHelp">A folder inside your downloads library. Leave empty for the default place.</div>
+              <input type="text" id="addDest" spellcheck="false" placeholder="e.g. Manuals, or D:\Games (optional)">
+              <div class="field__help" id="addDestHelp">A folder inside your downloads library, or a full path (you'll be asked to confirm one outside the library). Leave empty to use the folder for its file type.</div>
             </div>
             <div class="field">
               <label class="field__label" for="addLimit">Speed limit for these downloads</label>
@@ -105,6 +105,16 @@
                 <option value="on">Always, for these</option>
                 <option value="off">Never, for these</option>
               </select>
+            </div>
+            <div class="field">
+              <span class="field__label">Tell me through (just for these)</span>
+              <div class="checks" id="addChannels" role="group" aria-label="Notification channels for these downloads"></div>
+              <div class="field__help">Leave all unticked to use your notification settings. Tick, say, only Discord to be told there and nowhere else. The Notifications inbox always keeps a record.</div>
+            </div>
+            <div class="field">
+              <span class="field__label">Tell me when it (just for these)</span>
+              <div class="checks" id="addEvents" role="group" aria-label="Which events notify for these downloads"></div>
+              <div class="field__help">Leave all unticked to use your settings. These work even if notifications are off overall.</div>
             </div>
             <div class="field">
               <label class="field__label" for="addGroup">Batch name</label>

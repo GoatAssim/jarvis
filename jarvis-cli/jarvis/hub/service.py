@@ -88,11 +88,78 @@ def preview(text, engine=None, store=None):
 
 ITEM_OPEN_VALUES = ("default",) + settings_mod.OPEN_MODES
 ITEM_NOTIFY_VALUES = ("default", "on", "off")
+ITEM_NOTIFY_EVENTS = ("started", "done", "failed", "stalled")      # the per-row events (not batch / queue)
 
 
-def normalize_item_options(limit_kbps=None, open_when_done=None, notify_me=None):
+def _channel_names():
+    """The notifier's channel names.  Imported on demand: the notifier pulls in a lot."""
+    from .. import notifier
+    return notifier
+
+
+def normalize_channels(value):
+    """A list or comma-separated string of notifier channels -> ([canonical names] or None, error).
+
+    None means 'follow the owner's notification settings' ("default", "", an empty list)."""
+    if value is None:
+        return None, None
+    if isinstance(value, str):
+        text = value.strip().lower()
+        if text in ("", "default", "auto", "none"):
+            return None, None
+        value = [p for p in text.replace(";", ",").replace(" ", ",").split(",") if p]
+    if not isinstance(value, (list, tuple)):
+        return None, "notify_channels must be a list like [\"discord\"]"
+    if not value:
+        return None, None
+    notifier = _channel_names()
+    out, bad = [], []
+    for raw in value:
+        name = notifier.canonical_channel(raw)
+        if name is None:
+            bad.append(str(raw)[:30])
+        elif name not in out:
+            out.append(name)
+    if bad:
+        return None, "unknown notification channel %s; the channels are: %s" % (
+            ", ".join(repr(b) for b in bad), ", ".join(notifier.CHANNELS))
+    return out, None
+
+
+def normalize_events(value):
+    """A list or comma-separated string of started/done/failed/stalled -> ([names] or None, error)."""
+    if value is None:
+        return None, None
+    if isinstance(value, str):
+        text = value.strip().lower()
+        if text in ("", "default", "auto"):
+            return None, None
+        value = [p for p in text.replace(";", ",").replace(" ", ",").split(",") if p]
+    if not isinstance(value, (list, tuple)):
+        return None, "notify_events must be a list like [\"done\", \"failed\"]"
+    if not value:
+        return None, None
+    out, bad = [], []
+    for raw in value:
+        name = str(raw).strip().lower()
+        if name not in ITEM_NOTIFY_EVENTS:
+            bad.append(str(raw)[:30])
+        elif name not in out:
+            out.append(name)
+    if bad:
+        return None, "unknown notification type %s; choose from: %s" % (
+            ", ".join(repr(b) for b in bad), ", ".join(ITEM_NOTIFY_EVENTS))
+    return out, None
+
+
+def normalize_item_options(limit_kbps=None, open_when_done=None, notify_me=None,
+                           notify_channels=None, notify_events=None):
     """The per-download extras -> ({options}, error).  A value of None leaves that option unset;
-    "default" (or 0 for the speed) clears it so the global setting applies again."""
+    "default" (or 0 for the speed) clears it so the global setting applies again.
+
+    `notify_channels` / `notify_events` are the per-download notification choices: WHERE this one
+    is announced (any of the notifier's channels, e.g. just discord) and WHICH events fire for it
+    (started / done / failed / stalled).  Left unset, the owner's global notification settings apply."""
     out = {}
     if limit_kbps not in (None, ""):
         try:
@@ -114,11 +181,42 @@ def normalize_item_options(limit_kbps=None, open_when_done=None, notify_me=None)
         if text not in ITEM_NOTIFY_VALUES:
             return {}, "notify must be one of: %s" % ", ".join(ITEM_NOTIFY_VALUES)
         out["notify"] = None if text == "default" else text
+    if notify_channels is not None:
+        channels, problem = normalize_channels(notify_channels)
+        if problem:
+            return {}, problem
+        out["notify_channels"] = channels
+    if notify_events is not None:
+        events, problem = normalize_events(notify_events)
+        if problem:
+            return {}, problem
+        out["notify_events"] = events
     return out, None
 
 
+def split_dest(dest, root, allow_absolute=False):
+    """A folder the owner typed for one download -> ({"subdir": ...} or {"dest_abs": ...}, error).
+
+    A sub-folder of the library root always works.  A full path (outside the library) is only taken
+    when `allow_absolute` is true -- the caller sets that once the owner has said yes."""
+    if dest in (None, ""):
+        return {}, None
+    if settings_mod.is_absolute_spec(dest):
+        if not allow_absolute:
+            return {}, "needs_absolute"
+        full = settings_mod.abs_folder(dest)
+        if full is None:
+            return {}, "that isn't a usable full path (no drive roots, no '..')"
+        return {"dest_abs": full}, None
+    if naming.safe_subdir(root, dest) is None:
+        return {}, ("dest must be a sub-folder of the library root (%s) or a full path, not '..' "
+                    "or something too deeply nested" % root)
+    return {"subdir": str(dest).strip()}, None
+
+
 def add_items(inputs, *, engine=None, dest=None, group=None, start_paused=False,
-              speed_limit_kbps=None, open_when_done=None, notify_me=None, store=None):
+              speed_limit_kbps=None, open_when_done=None, notify_me=None,
+              notify_channels=None, notify_events=None, allow_absolute_dest=False, store=None):
     """Queue one or more downloads.  Returns {ok, added, skipped, group, note}."""
     try:
         store = _store(store)
@@ -137,14 +235,15 @@ def add_items(inputs, *, engine=None, dest=None, group=None, start_paused=False,
             return _err("that is %d links; the limit is %d per call" % (len(wanted), cap))
 
         root = settings_mod.library_root(settings)
-        subdir = None
-        if dest not in (None, ""):
-            if naming.safe_subdir(root, dest) is None:
-                return _err("dest must be a sub-folder of the library root (%s), not a full path or '..'. "
-                            "Change the library root with dl_settings if you want files elsewhere." % root)
-            subdir = str(dest).strip()
+        where, problem = split_dest(dest, root, allow_absolute=allow_absolute_dest)
+        if problem == "needs_absolute":
+            return _err("a full path writes outside the library root (%s), so it has to be approved first; "
+                        "until then dest must be a sub-folder of the library" % root)
+        if problem:
+            return _err(problem)
 
-        extras, problem = normalize_item_options(speed_limit_kbps, open_when_done, notify_me)
+        extras, problem = normalize_item_options(speed_limit_kbps, open_when_done, notify_me,
+                                                 notify_channels, notify_events)
         if problem:
             return _err(problem)
         extras = {k: v for k, v in extras.items() if v is not None}
@@ -161,7 +260,7 @@ def add_items(inputs, *, engine=None, dest=None, group=None, start_paused=False,
         if plan and (group or len(plan) > 1):
             group_id = store.ensure_group(group or "Batch of %d" % len(plan), kind="batch")
         for text, decision in plan:
-            options = {"subdir": subdir} if subdir else {}
+            options = dict(where)
             options.update(extras)            # extras never reach the dedupe key (options_hash)
             title = _initial_title(decision["source"]) if decision["source"].lower().startswith(SOURCE_RE_PREFIXES) \
                 else states.clean_text(text, 80)
@@ -254,7 +353,8 @@ def present_item(item, providers, now):
         "read_only": bool(item["owner"] == "provider" and not (provider or {}).get("capabilities")),
         "links": item.get("links") or [], "pending": item.get("control") or "",
         # this download's own choices (hub rows only): speed cap KB/s, when-done action, notify
-        "prefs": ({k: (item.get("options") or {}).get(k) for k in ("limit_kbps", "open", "notify")
+        "prefs": ({k: (item.get("options") or {}).get(k) for k in ("limit_kbps", "open", "notify", "notify_channels",
+                                                             "notify_events", "subdir", "dest_abs")
                    if (item.get("options") or {}).get(k) is not None} if item["owner"] == "hub" else {}),
     }
 
@@ -362,7 +462,8 @@ def settings_view(settings):
             "limits": settings["limits"],
             "schedule": settings.get("schedule") or [],
             "rate_limit_now": {"kbps": kbps, "source": source},
-            "folders": settings["folders"], "after_download": settings["after_download"],
+            "folders": settings["folders"], "ext_folders": settings.get("ext_folders") or {},
+            "after_download": settings["after_download"],
             "notify": settings["notify"], "library": library_info(settings)}
 
 
@@ -386,13 +487,16 @@ def update_settings(updates, store=None):
         return _err("couldn't change the settings: %s" % exc)
 
 
-def update_prefs(updates, *, id=None, store=None):
+def update_prefs(updates, *, id=None, allow_absolute_dest=False, store=None):
     """The everyday preferences, without the "are you sure" that `dl_settings` carries.
 
-    No `id`: global preferences (speed limit, schedule, folders, notifications, open-when-done,
-    connections).  The two keys that decide where files are written and which private hosts the
-    hub may fetch from are refused here; they need `dl_settings`.
-    With `id`: that one download's own speed limit / open-when-done / notify choice.
+    No `id`: global preferences (speed limit, schedule, folders, extension folders, notifications,
+    open-when-done, connections).  The two keys that decide where files are written and which
+    private hosts the hub may fetch from are refused here; they need `dl_settings`.
+    With `id`: that one download's own speed limit / open-when-done / notify choice, where its
+    notifications go (`notify_channels`) and which ones fire (`notify_events`), and the folder it
+    saves to (`folder`, only until it has started writing).  `allow_absolute_dest` is set by the
+    caller once the owner approved a full path.
     """
     try:
         store = _store(store)
@@ -405,15 +509,38 @@ def update_prefs(updates, *, id=None, store=None):
             if item["state"] in states.FINAL_STATES:
                 return _err("that download has already finished")
             mapping = {"limit_kbps": "limit_kbps", "speed_limit_kbps": "limit_kbps",
-                       "open": "open", "open_when_done": "open", "notify": "notify"}
+                       "open": "open", "open_when_done": "open", "notify": "notify",
+                       "notify_channels": "notify_channels", "channels": "notify_channels",
+                       "notify_events": "notify_events", "events": "notify_events",
+                       "folder": "folder", "dest": "folder"}
             unknown = [k for k in (updates or {}) if k not in mapping]
             if unknown or not updates:
-                return _err("for one download you can set limit_kbps, open and notify")
+                return _err("for one download you can set limit_kbps, open, notify, notify_channels, "
+                            "notify_events and folder")
             raw = {mapping[k]: v for k, v in updates.items()}
-            extras, problem = normalize_item_options(raw.get("limit_kbps"), raw.get("open"), raw.get("notify"))
+            extras, problem = normalize_item_options(raw.get("limit_kbps"), raw.get("open"), raw.get("notify"),
+                                                     raw.get("notify_channels"), raw.get("notify_events"))
             if problem:
                 return _err(problem)
             options = dict(item.get("options") or {})
+            clear_keys, where = set(), {}
+            if "folder" in raw:
+                if item.get("dest_file") or item.get("dest_dir"):
+                    return _err("that download has already started writing its file, so its folder can't "
+                                "change any more (cancel it and add it again to put it somewhere else)")
+                where, problem = split_dest(raw["folder"], settings_mod.library_root(store.get_settings()),
+                                            allow_absolute=allow_absolute_dest)
+                if problem == "needs_absolute":
+                    return _err("a full path writes outside the library root, so it has to be approved first; "
+                                "until then the folder must be a sub-folder of the library")
+                if problem:
+                    return _err(problem)
+                clear_keys |= {"subdir", "dest_abs"}      # a new choice (or "back to default") replaces the old
+                for key, value in where.items():
+                    options[key] = value
+            for key in clear_keys:
+                if key not in where:
+                    options.pop(key, None)
             for key, value in extras.items():
                 if value is None:
                     options.pop(key, None)
@@ -464,8 +591,8 @@ def _discard_part(store, item):
     part = ref.get("part")
     if not part:
         return
-    root = settings_mod.library_root(store.get_settings())
-    if naming.under(root, part) and str(part).endswith(".part"):
+    roots = settings_mod.write_roots(store.get_settings(), item.get("options"))
+    if naming.under_any(roots, part) and str(part).endswith(".part"):
         try:
             if os.path.exists(part):
                 os.remove(part)
@@ -599,7 +726,7 @@ def open_item(item_id, action="open", store=None):
     """Open a finished file or reveal it in the file manager.
 
     The path is read from the database, never from the caller, and must sit inside the
-    library root (hub rows) or one of the provider's `open_roots`.
+    library root or a folder the owner chose (hub rows) or one of the provider's `open_roots`.
     """
     try:
         store = _store(store)
@@ -612,7 +739,7 @@ def open_item(item_id, action="open", store=None):
         if not path:
             return _err("that download has no file yet")
         if item["owner"] == "hub":
-            roots = [settings_mod.library_root(store.get_settings())]
+            roots = settings_mod.write_roots(store.get_settings(), item.get("options"))
         else:
             roots = [Path(r) for r in ((store.get_provider(item["provider"]) or {}).get("open_roots") or [])]
         if not roots or not any(naming.under(r, path) for r in roots):

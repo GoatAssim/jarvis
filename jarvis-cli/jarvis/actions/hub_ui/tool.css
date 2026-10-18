@@ -293,3 +293,10 @@ input[type=time], input[type=number] { width: auto; }
   .settings__nav { flex-direction: row; flex-wrap: wrap; border-right: none; border-bottom: 1px solid var(--h-line); }
   .nrow { grid-template-columns: 1fr; }
 }
+
+/* checkbox groups (per-download notification channels / events) and the file-type folder table */
+.checks { display: flex; flex-wrap: wrap; gap: 4px 14px; margin: 4px 0; }
+.checks .check { margin: 0; }
+.extrow { display: grid; grid-template-columns: 90px 1fr auto; gap: 8px; align-items: center; margin: 6px 0; }
+.extrow input { min-width: 0; }
+.extrow .ext { font-family: var(--h-mono, monospace); }

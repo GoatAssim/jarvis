@@ -101,6 +101,27 @@ const eq = (a, b) => JSON.stringify(a) === JSON.stringify(b);
   check("the add form: extras become dl_add arguments", eq(pure.addOptionsFromForm({ limit: "2", unit: "mb", open: "reveal", notify: "on" }), { args: { speed_limit_kbps: 2048, open_when_done: "reveal", notify: "on" } }));
   check("the add form: a bad speed is an error", !!pure.addOptionsFromForm({ limit: "x", unit: "kb", open: "default", notify: "default" }).error);
   check("one download's own choices in words", pure.itemPrefsText({}) === "" && pure.itemPrefsText({ limit_kbps: 300, open: "reveal", notify: "off" }) === "limit 300 KB/s \u00B7 then: show the file in its folder \u00B7 never notify");
+  check("the add form: channels and events become dl_add arguments", eq(pure.addOptionsFromForm({ limit: "", unit: "kb", open: "default", notify: "default", channels: ["discord"], events: ["done", "failed"] }), { args: { notify_channels: ["discord"], notify_events: ["done", "failed"] } }));
+  check("the add form: nothing ticked sends no notification choices", eq(pure.addOptionsFromForm({ limit: "", unit: "kb", open: "default", notify: "default", channels: [], events: [] }), { args: {} }));
+  check("a download's own channels, events and folder in words", pure.itemPrefsText({ notify_channels: ["discord"], notify_events: ["done"], subdir: "Y" }) === "notify via Discord \u00B7 notify when it finishes \u00B7 saves in Y");
+  check("a download's own full path in words", pure.itemPrefsText({ dest_abs: "D:\\Games" }) === "saves in D:\\Games");
+  check("cleanExt", pure.cleanExt("ISO") === ".iso" && pure.cleanExt(".tar.gz") === ".tar.gz" && pure.cleanExt("a/b") === "" && pure.cleanExt("") === "");
+  check("isFullPath", pure.isFullPath("D:\\x") && pure.isFullPath("/mnt/x") && pure.isFullPath("~/x") && !pure.isFullPath("Movies/Kids") && !pure.isFullPath(""));
+  check("extFolderRows sorts by extension", eq(pure.extFolderRows({ ".pdf": "Docs", ".iso": "ISOs" }), [[".iso", "ISOs"], [".pdf", "Docs"]]));
+  {
+    const base = pure.prefsFromSettings({ ext_folders: { ".iso": "ISOs" } });
+    const cur = pure.prefsFromSettings({ ext_folders: { ".iso": "ISOs" } });
+    check("file-type folders unchanged -> no update", eq(pure.prefsDiff(base, cur), {}));
+    cur.ext_folders[".pdf"] = "Docs";
+    check("a new file-type folder sends the whole map", eq(pure.prefsDiff(base, cur), { ext_folders: { ".iso": "ISOs", ".pdf": "Docs" } }));
+    delete cur.ext_folders[".iso"];
+    delete cur.ext_folders[".pdf"];
+    check("removing the last one sends an empty map", eq(pure.prefsDiff(base, cur), { ext_folders: {} }));
+  }
+  {
+    const html3 = fs.readFileSync(path.join(ui, "tool.html"), "utf8");
+    check("the add form has the per-download notification pickers", html3.includes('id="addChannels"') && html3.includes('id="addEvents"'));
+  }
   check("the test result names the channels that delivered", pure.testResultText({ ok: true, delivered: ["inbox", "desktop"], failed_channels: [] }) === "Test sent: inbox, desktop." && /Couldn't reach: voice/.test(pure.testResultText({ ok: true, delivered: ["inbox"], failed_channels: ["voice"] })) && pure.testResultText({ ok: false, error: "nope" }) === "nope");
 
   // ---- the bar (plan 11.4)
@@ -199,7 +220,7 @@ const eq = (a, b) => JSON.stringify(a) === JSON.stringify(b);
   const html2 = fs.readFileSync(path.join(ui, "tool.html"), "utf8");
   check("the settings screen and its buttons exist in tool.html", ["settings", "settingsNav", "settingsPage", "settingsSave", "settingsRevert", "settingsBack", "speedQuick", "openFolder", "settingsBtn", "detailPrefs", "addLimit", "addOpen", "addNotify"].every((id) => html2.includes('id="' + id + '"')));
   check("the panel can open the Settings screen with Escape and close it", /Escape/.test(source) && /closeSettings/.test(source));
-  check("the settings are saved with dl_prefs; only the folder change goes through the confirm-gated dl_settings", /callTool\("dl_prefs"/.test(source) && /callTool\("dl_settings", \{ set: \{ library_root/.test(source) && (source.match(/callTool\("dl_settings"/g) || []).length === 1);
+  check("the settings are saved with dl_prefs; only the library folder and a full-path file-type folder go through the confirm-gated dl_settings", /callTool\("dl_prefs"/.test(source) && /callTool\("dl_settings", \{ set: \{ library_root/.test(source) && /callTool\("dl_settings", \{ set: \{ ext_folders/.test(source) && (source.match(/callTool\("dl_settings"/g) || []).length === 2);
   check("an event's target isn't read after an await (it is cleared inside a shadow root)", !/await[^\n]*\n[^\n]*e\.target/.test(source.slice(source.indexOf("speedQuick\").addEventListener"), source.indexOf("speedQuick\").addEventListener") + 1200)));
   const css = fs.readFileSync(path.join(ui, "tool.css"), "utf8");
   check("the stylesheet defines a look for every bar kind", ["determinate", "indeterminate", "striped", "queued", "done", "failed", "stalled", "paused", "stale", "cancelled", "unknown"]

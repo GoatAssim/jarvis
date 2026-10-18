@@ -422,6 +422,46 @@ const NOTIFY_EVENTS = [
   { id: "started", label: "A download starts", help: "Off by default: it is noisy for a big batch." },
 ];
 
+// Where ONE download can be announced (the notifier's channels, jarvis/notifier.py CHANNELS) and which
+// events can announce it.  Empty = follow the overall notification settings.
+const NOTIFY_CHANNELS = [
+  { id: "discord", label: "Discord" },
+  { id: "desktop", label: "Desktop notification" },
+  { id: "stream", label: "In-app toast" },
+  { id: "voice", label: "Voice" },
+  { id: "instagram", label: "Instagram" },
+  { id: "playnite", label: "Playnite" },
+  { id: "inbox", label: "Inbox only (silent)" },
+];
+const ITEM_EVENTS = [
+  { id: "started", label: "Starts" },
+  { id: "done", label: "Finishes" },
+  { id: "failed", label: "Fails" },
+  { id: "stalled", label: "Stalls" },
+];
+
+function channelLabel(id) {
+  const c = NOTIFY_CHANNELS.find((x) => x.id === id);
+  return c ? c.label : String(id);
+}
+
+// "D:\\x", "/mnt/x" and "~/x" are full paths; "Movies/Kids" is a folder inside the library.
+function isFullPath(text) {
+  return /^([A-Za-z]:|[\\/]|~)/.test(String(text || "").trim());
+}
+
+// ".ISO" / "iso" -> ".iso"; "" when it isn't a plain extension.
+function cleanExt(text) {
+  let t = String(text || "").trim().toLowerCase();
+  if (t && t[0] !== ".") t = "." + t;
+  return /^\.[a-z0-9_+-]{1,12}(\.[a-z0-9_+-]{1,12}){0,2}$/.test(t) ? t : "";
+}
+
+// {".iso": "ISOs"} as sorted [ext, folder] pairs for the settings table.
+function extFolderRows(map) {
+  return Object.keys(map || {}).sort().map((k) => [k, map[k]]);
+}
+
 const DAYS = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"];
 const DAY_LABELS = { mon: "Monday", tue: "Tuesday", wed: "Wednesday", thu: "Thursday", fri: "Friday", sat: "Saturday", sun: "Sunday" };
 
@@ -472,6 +512,7 @@ function prefsFromSettings(s) {
       providers: n.providers !== false, events: events,
     },
     folders: { video: f.video || "Video", audio: f.audio || "Audio", file: f.file || "Files" },
+    ext_folders: Object.assign({}, (s && s.ext_folders) || {}),
     concurrency: { total: numOr(c.total, 4), http: numOr(c.http, 2) },
     http: { stall_seconds: numOr(h.stall_seconds, 60), max_retries: numOr(h.max_retries, 4) },
   };
@@ -493,6 +534,10 @@ function prefsDiff(base, cur) {
     if (a.level !== b.level) u["notify." + e.id + ".level"] = b.level === null ? "default" : b.level;
   });
   ["video", "audio", "file"].forEach((k) => { if (cur.folders[k] !== base.folders[k]) u["folders." + k] = cur.folders[k]; });
+  if (JSON.stringify(extFolderRows(cur.ext_folders)) !== JSON.stringify(extFolderRows(base.ext_folders))) {
+    // The whole map is sent; a removed type is simply missing from it.
+    u.ext_folders = Object.assign({}, cur.ext_folders);
+  }
   ["total", "http"].forEach((k) => { if (cur.concurrency[k] !== base.concurrency[k]) u["concurrency." + k] = cur.concurrency[k]; });
   ["stall_seconds", "max_retries"].forEach((k) => { if (cur.http[k] !== base.http[k]) u["http." + k] = cur.http[k]; });
   return u;
@@ -513,6 +558,8 @@ function addOptionsFromForm(f) {
   if (lim.kbps > 0) out.speed_limit_kbps = lim.kbps;
   if (f.open && f.open !== "default") out.open_when_done = f.open;
   if (f.notify && f.notify !== "default") out.notify = f.notify;
+  if (f.channels && f.channels.length) out.notify_channels = f.channels.slice();
+  if (f.events && f.events.length) out.notify_events = f.events.slice();
   return { args: out };
 }
 
@@ -524,6 +571,12 @@ function itemPrefsText(prefs) {
   if (p.open) parts.push("then: " + openLabel(p.open).toLowerCase());
   if (p.notify === "on") parts.push("always notify");
   if (p.notify === "off") parts.push("never notify");
+  if (p.notify_channels && p.notify_channels.length) parts.push("notify via " + p.notify_channels.map(channelLabel).join(", "));
+  if (p.notify_events && p.notify_events.length) {
+    parts.push("notify when it " + p.notify_events.map((e) => (ITEM_EVENTS.find((x) => x.id === e) || { label: e }).label.toLowerCase()).join(" / "));
+  }
+  if (p.dest_abs) parts.push("saves in " + p.dest_abs);
+  else if (p.subdir) parts.push("saves in " + p.subdir);
   return parts.join(DOT);
 }
 
@@ -543,6 +596,7 @@ const pure = {
   LIMIT_PRESETS, OPEN_CHOICES, NOTIFY_EVENTS, LEVEL_NAMES, DAYS, fmtLimit, parseLimit, limitFields,
   limitSummary, quickSpeedOptions, openLabel, openMenu, levelMenu, daysChoice, daysFromChoice,
   blankWindow, prefsFromSettings, prefsDiff, notifySummary, addOptionsFromForm, itemPrefsText,
+  NOTIFY_CHANNELS, ITEM_EVENTS, channelLabel, isFullPath, cleanExt, extFolderRows,
   testResultText,
 };
 if (host && host.__hubPureOnly) return pure;
@@ -1121,7 +1175,8 @@ async function submitAdd(ev) {
   if (dest) args.dest = dest;
   if (group) args.group = group;
   if ($("#addPaused").checked) args.start_paused = true;
-  const extra = addOptionsFromForm({ limit: $("#addLimit").value, unit: $("#addLimitUnit").value, open: $("#addOpen").value, notify: $("#addNotify").value });
+  const extra = addOptionsFromForm({ limit: $("#addLimit").value, unit: $("#addLimitUnit").value, open: $("#addOpen").value, notify: $("#addNotify").value,
+    channels: ticked($("#addChannels")), events: ticked($("#addEvents")) });
   if (extra.error) { setHint(extra.error, true); return; }
   Object.assign(args, extra.args);
   const btn = $("#addBtn");
@@ -1140,6 +1195,8 @@ async function submitAdd(ev) {
       $("#addLimit").value = "";                  // one-off choices don't stick to the next add
       $("#addOpen").value = "default";
       $("#addNotify").value = "default";
+      untick($("#addChannels"));
+      untick($("#addEvents"));
       setHint("", false);
       schedule(200);
     } else {
@@ -1161,16 +1218,36 @@ function fillSelect(sel, options, value) {
   });
 }
 
+// A group of plain checkboxes in `box`; the ticked ids are read back with ticked().
+function buildChecks(box, items) {
+  if (box.childNodes.length) return;
+  items.forEach((it) => {
+    const input = el("input", { attrs: { type: "checkbox", value: it.id } });
+    box.appendChild(el("label", { cls: "check" }, [input, el("span", { text: " " + it.label })]));
+  });
+}
+
+function ticked(box) {
+  return Array.prototype.slice.call(box.querySelectorAll("input[type=checkbox]"))
+    .filter((i) => i.checked).map((i) => i.value);
+}
+
+function untick(box) {
+  Array.prototype.forEach.call(box.querySelectorAll("input[type=checkbox]"), (i) => { i.checked = false; });
+}
+
 function renderAddExtras() {
   const sum = S.summary || {};
+  buildChecks($("#addChannels"), NOTIFY_CHANNELS);
+  buildChecks($("#addEvents"), ITEM_EVENTS);
   const openSel = $("#addOpen");
   if (root.activeElement !== openSel && changed("addopen", [sum.after_download])) {
     fillSelect(openSel, openMenu(sum.after_download), openSel.value || "default");
   }
   if (changed("adddest", [sum.library_root])) {
     $("#addDestHelp").textContent = sum.library_root
-      ? "A folder inside your downloads library (" + sum.library_root + "). Leave empty for the default place."
-      : "A folder inside your downloads library. Leave empty for the default place.";
+      ? "A folder inside your downloads library (" + sum.library_root + "), or a full path (you'll be asked to confirm one outside the library). Leave empty to use the folder for its file type."
+      : "A folder inside your downloads library, or a full path (you'll be asked to confirm one outside the library). Leave empty to use the folder for its file type.";
   }
 }
 
@@ -1228,6 +1305,36 @@ function renderDetailPrefs() {
   ], prefs.notify || "default");
   notifySel.addEventListener("change", () => setItemPref(row, { notify: notifySel.value }));
   box.appendChild(el("div", { cls: "field" }, [el("label", { cls: "field__label", text: "Tell me when it finishes" }), notifySel]));
+
+  // Where and when THIS download is announced, instead of the overall notification settings.
+  const chans = el("div", { cls: "checks", attrs: { role: "group", "aria-label": "Notification channels for this download" } });
+  buildChecks(chans, NOTIFY_CHANNELS);
+  (prefs.notify_channels || []).forEach((id) => { const i = chans.querySelector("input[value=" + id + "]"); if (i) i.checked = true; });
+  const evs = el("div", { cls: "checks", attrs: { role: "group", "aria-label": "Which events notify for this download" } });
+  buildChecks(evs, ITEM_EVENTS);
+  (prefs.notify_events || []).forEach((id) => { const i = evs.querySelector("input[value=" + id + "]"); if (i) i.checked = true; });
+  const applyNotify = () => setItemPref(row, { notify_channels: ticked(chans), notify_events: ticked(evs) });
+  box.appendChild(el("div", { cls: "field" }, [
+    el("label", { cls: "field__label", text: "Tell me through" }), chans,
+    el("label", { cls: "field__label", text: "Tell me when it" }), evs,
+    el("div", { cls: "inline" }, [
+      el("button", { cls: "btn btn--sm", text: "Save notification choices", attrs: { type: "button" }, on: { click: applyNotify } }),
+    ]),
+    el("div", { cls: "field__help", text: "Nothing ticked = follow your notification settings. Ticking only Discord tells you there and nowhere else (the inbox still keeps a record)." }),
+  ]));
+
+  // Its own folder, until it has started writing the file.
+  if (!row.dest) {
+    const folder = el("input", { attrs: { type: "text", spellcheck: "false", placeholder: "Default for its file type", "aria-label": "Folder for this download" } });
+    folder.value = prefs.dest_abs || prefs.subdir || "";
+    const applyFolder = () => setItemPref(row, { folder: folder.value.trim() });
+    folder.addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); applyFolder(); } });
+    box.appendChild(el("div", { cls: "field" }, [
+      el("label", { cls: "field__label", text: "Save in folder" }),
+      el("div", { cls: "inline" }, [folder, el("button", { cls: "btn btn--sm", text: "Set", attrs: { type: "button" }, on: { click: applyFolder } })]),
+      el("div", { cls: "field__help", text: "A folder in the library, or a full path (you'll be asked to confirm one outside it). Empty = the folder for its file type." }),
+    ]));
+  }
 }
 
 async function openLibrary() {
@@ -1357,6 +1464,33 @@ function pageLocation(box) {
     input.addEventListener("input", () => { S.model.folders[pair2[0]] = input.value.trim(); updateFooter(); });
     box.appendChild(setRow(pair2[1], input));
   });
+
+  box.appendChild(el("h4", { cls: "sp__h", text: "Folders by file type" }));
+  box.appendChild(el("div", { cls: "field__help sp__lead", text: "A folder for one file extension, like .iso or .pdf. It beats the kind-of-file folders above, and a folder you pick while adding beats it. Use a folder inside the library (ISOs) or a full path (D:\\\\ISOs); a full path asks you to confirm when you save. The longer extension wins (.tar.gz over .gz)." }));
+  const map = S.model.ext_folders;
+  extFolderRows(map).forEach((pair2) => {
+    const folder = el("input", { attrs: { type: "text", spellcheck: "false", "aria-label": "Folder for " + pair2[0] } });
+    folder.value = pair2[1];
+    folder.addEventListener("input", () => { map[pair2[0]] = folder.value.trim(); updateFooter(); });
+    folder.addEventListener("change", () => { if (!map[pair2[0]]) { delete map[pair2[0]]; renderSettings(); } });
+    box.appendChild(el("div", { cls: "extrow" }, [
+      el("span", { cls: "ext", text: pair2[0] }), folder,
+      el("button", { cls: "btn btn--sm", text: "Remove", attrs: { type: "button", "aria-label": "Remove the folder for " + pair2[0] },
+        on: { click: () => { delete map[pair2[0]]; renderSettings(); } } }),
+    ]));
+  });
+  const newExt = el("input", { attrs: { type: "text", spellcheck: "false", placeholder: ".iso", "aria-label": "File extension" } });
+  const newFolder = el("input", { attrs: { type: "text", spellcheck: "false", placeholder: "Folder, e.g. ISOs or D:\\\\ISOs", "aria-label": "Folder for that extension" } });
+  const addExt = () => {
+    const ext = cleanExt(newExt.value);
+    const target = newFolder.value.trim();
+    if (!ext) { toast("Type an extension like .iso or .tar.gz", "warn"); return; }
+    if (!target) { toast("Type the folder for " + ext, "warn"); return; }
+    map[ext] = target;
+    renderSettings();
+  };
+  newFolder.addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); addExt(); } });
+  box.appendChild(el("div", { cls: "extrow" }, [newExt, newFolder, el("button", { cls: "btn btn--sm", text: "Add", attrs: { type: "button" }, on: { click: addExt } })]));
 }
 
 function pageSpeed(box) {
@@ -1516,10 +1650,22 @@ async function saveSettings() {
   if (!Object.keys(updates).length) return;
   S.saving = true;
   updateFooter();
-  const r = await callTool("dl_prefs", { set: updates });
+  let r;
+  const needsOk = updates.ext_folders && Object.keys(updates.ext_folders).some((k) => isFullPath(updates.ext_folders[k]));
+  if (needsOk) {
+    // A folder outside the library is saved through dl_settings, which asks you first.
+    const first = await callTool("dl_settings", { set: { ext_folders: updates.ext_folders } });
+    delete updates.ext_folders;
+    r = first;
+    if (first.ok !== false && !first.declined && !first.cancelled && Object.keys(updates).length) {
+      r = await callTool("dl_prefs", { set: updates });
+    }
+  } else {
+    r = await callTool("dl_prefs", { set: updates });
+  }
   S.saving = false;
   if (r.declined || r.cancelled) {
-    S.formError = "Not saved: opening files by itself needs your OK.";
+    S.formError = needsOk ? "Not saved: a folder outside the library needs your OK." : "Not saved: opening files by itself needs your OK.";
   } else if (r.ok === false) {
     S.formError = r.error || "That didn't work.";
   } else {

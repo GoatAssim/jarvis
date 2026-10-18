@@ -57,7 +57,7 @@ def canonical_url(url):
 
 
 def options_hash(options):
-    keep = {k: (options or {}).get(k) for k in ("subdir", "filename") if (options or {}).get(k)}
+    keep = {k: (options or {}).get(k) for k in ("subdir", "dest_abs", "filename") if (options or {}).get(k)}
     return hashlib.sha1(json.dumps(keep, sort_keys=True).encode("utf-8")).hexdigest()[:12]
 
 

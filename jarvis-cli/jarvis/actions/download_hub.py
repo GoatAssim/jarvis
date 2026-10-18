@@ -66,6 +66,16 @@ def _confirm_open(count=1):
                       level="warn", confirm_label="Open them", cancel_label="Don't", default=False)
 
 
+def _confirm_outside(path, count=1):
+    """A full-path folder writes outside the library root, so choosing one from here asks first
+    (default=False: an unattended run saves nothing outside the library)."""
+    from .. import ui_bridge as ui
+    return ui.confirm("Save outside the downloads library?",
+                      body=("%s will be saved in:\n%s\n\nThat folder is outside your downloads library." %
+                            ("These downloads" if count > 1 else "This download", str(path)[:200])),
+                      level="warn", confirm_label="Save there", cancel_label="Don't", default=False)
+
+
 # ---------------------------------------------------------------------------
 # handlers: queue and look
 # ---------------------------------------------------------------------------
@@ -108,10 +118,19 @@ def tool_dl_add(args):
         open_when_done = args.get("open_when_done")
         if str(open_when_done or "").strip().lower() == "open" and not _confirm_open(len(urls)):
             return {"ok": False, "cancelled": True, "error": "not confirmed: nothing was queued"}
-        return svc.add_items(urls, engine=engine, dest=args.get("dest"), group=args.get("group"),
+        dest = args.get("dest")
+        allow_abs = False
+        if dest and svc.settings_mod.is_absolute_spec(dest):
+            if not _confirm_outside(dest, len(urls)):
+                return {"ok": False, "cancelled": True, "error": "not confirmed: nothing was queued"}
+            allow_abs = True
+        return svc.add_items(urls, engine=engine, dest=dest, group=args.get("group"),
                              start_paused=bool(args.get("start_paused")),
                              speed_limit_kbps=args.get("speed_limit_kbps"),
-                             open_when_done=open_when_done, notify_me=args.get("notify"))
+                             open_when_done=open_when_done, notify_me=args.get("notify"),
+                             notify_channels=args.get("notify_channels"),
+                             notify_events=args.get("notify_events"),
+                             allow_absolute_dest=allow_abs)
     except Exception as exc:  # noqa: BLE001 - a tool never raises
         return _fail("dl_add", exc)
 
@@ -209,7 +228,14 @@ def tool_dl_prefs(args):
                       else (changes.get("open") or changes.get("open_when_done")))
         if str(wants_open or "").strip().lower() == "open" and not _confirm_open():
             return {"ok": False, "cancelled": True, "error": "not confirmed: nothing was changed"}
-        return svc.update_prefs(changes, id=item_id)
+        allow_abs = False
+        if item_id:
+            folder = changes.get("folder") if "folder" in changes else changes.get("dest")
+            if folder and svc.settings_mod.is_absolute_spec(folder):
+                if not _confirm_outside(folder):
+                    return {"ok": False, "cancelled": True, "error": "not confirmed: nothing was changed"}
+                allow_abs = True
+        return svc.update_prefs(changes, id=item_id, allow_absolute_dest=allow_abs)
     except Exception as exc:  # noqa: BLE001
         return _fail("dl_prefs", exc)
 
@@ -272,12 +298,14 @@ TOOL_SCHEMAS = [
                 "url": {"type": "string", "description": "The link to download."},
                 "urls": {"type": "array", "items": {"type": "string"}, "description": "Several links at once (queued as one group)."},
                 "engine": {"type": "string", "description": "Force an engine (e.g. http) instead of letting the router choose."},
-                "dest": {"type": "string", "description": "A sub-folder INSIDE the library root, e.g. 'Manuals'. Never a full path."},
+                "dest": {"type": "string", "description": "Where THIS download is saved, overriding the per-extension and per-type folders: a sub-folder of the library root (e.g. 'Manuals') or a full path like 'D:/Games' (the person is asked to confirm a full path)."},
                 "group": {"type": "string", "description": "A name for this batch."},
                 "start_paused": {"type": "boolean", "description": "Queue it paused instead of starting it."},
                 "speed_limit_kbps": {"type": "integer", "description": "A speed cap for just this download, in KB/s (0 or missing = only the global limit applies)."},
                 "open_when_done": {"type": "string", "enum": ["default", "off", "reveal", "folder", "open"], "description": "What to do when it finishes: nothing, show the file in its folder, open the folder, or open the file (asks the person first; programs and scripts are never opened). Default = the person's own setting."},
                 "notify": {"type": "string", "enum": ["default", "on", "off"], "description": "Tell the person when this one finishes or fails (on), never (off), or follow their notification settings (default)."},
+                "notify_channels": {"type": "array", "items": {"type": "string", "enum": ["inbox", "stream", "desktop", "voice", "playnite", "discord", "instagram"]}, "description": "Where to announce THIS download, instead of the person's usual channels, e.g. [\"discord\"] for Discord only (the notification inbox keeps its record either way). Omit to follow the person's own settings."},
+                "notify_events": {"type": "array", "items": {"type": "string", "enum": ["started", "done", "failed", "stalled"]}, "description": "Which events announce THIS download, e.g. [\"done\", \"failed\"]. Omit to follow the person's own settings. A download with its own choices is announced even if notifications are off globally."},
                 "dry_run": {"type": "boolean", "description": "Only say which engine would take each link; queue nothing."},
             },
         },
@@ -351,7 +379,8 @@ TOOL_SCHEMAS = [
         "description": (
             "Read or change the Download Hub settings: library_root (where files go), concurrency.total / "
             "concurrency.http, rate_limit_kbps (0 = unlimited), http.stall_seconds, http.max_retries, "
-            "allow_private_hosts (hosts the hub may fetch even though they are on the local network). "
+            "allow_private_hosts (hosts the hub may fetch even though they are on the local network), and "
+            "ext_folders when it uses a full path ({\".iso\": \"D:/ISOs\"}). "
             "Call with no `set` to read. The person is asked to confirm."
         ),
         "parameters": {
@@ -366,11 +395,15 @@ TOOL_SCHEMAS = [
         "description": (
             "Read or change the everyday Download Hub preferences without a confirmation: the speed limit "
             "(rate_limit_kbps, 0 = unlimited) and timed speed windows (schedule), the folder name for each "
-            "kind of file (folders.video / folders.audio / folders.file), what happens when a download finishes "
+            "kind of file (folders.video / folders.audio / folders.file), a folder for each file extension "
+            "(ext_folders, the whole map, e.g. {\".iso\": \"ISOs\", \".pdf\": \"Docs\"}: a sub-folder of the library; "
+            "an empty value removes one; it wins over the per-kind folder), what happens when a download finishes "
             "(after_download.open: off, reveal, folder, open), which notifications are on (notify.done.enabled, "
             "notify.failed.enabled, notify.started, notify.stalled, notify.group_done, notify.queue_empty, each "
             "with an optional .level 1-5 for the notifier), and connections (concurrency.*, http.*). With `id`, "
-            "changes one download's own limit_kbps / open / notify. test_notification=<type> sends a sample "
+            "changes one download's own limit_kbps / open / notify, where it is announced (notify_channels, e.g. "
+            "[\"discord\"]), which events announce it (notify_events) and the folder it saves to (folder, until it "
+            "has started; a full path asks the person first). test_notification=<type> sends a sample "
             "notification. Where files are saved (library_root) and allow_private_hosts need dl_settings. "
             "Call with no arguments to read."
         ),
@@ -378,7 +411,7 @@ TOOL_SCHEMAS = [
             "type": "object",
             "properties": {
                 "set": {"type": "object", "description": "Preferences to change, e.g. {\"rate_limit_kbps\": 2048, \"notify.done.enabled\": true, \"after_download.open\": \"reveal\"}; with id: {\"limit_kbps\": 500}."},
-                "id": {"type": "string", "description": "One download's id: change just its own speed limit / open-when-done / notify."},
+                "id": {"type": "string", "description": "One download's id: change just its own speed limit / open-when-done / notify / notify_channels / notify_events / folder."},
                 "test_notification": {"type": "string", "enum": ["started", "done", "failed", "stalled", "group_done", "queue_empty"], "description": "Send a sample of this notification type."},
             },
         },

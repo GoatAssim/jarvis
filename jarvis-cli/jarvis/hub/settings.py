@@ -14,10 +14,13 @@ Two tiers of writable keys:
                     schedule, connections, per-type folders, notifications, open-when-done.
                     Left out on purpose: `library_root` and `allow_private_hosts`, which decide
                     where files are written and which private hosts the hub may fetch from.
+                    `ext_folders` is in the everyday tier only for sub-folders of the library
+                    root; a full path in it (a folder outside the library) needs `dl_settings`.
 """
 
 import copy
 import datetime
+import re
 from pathlib import Path
 
 from . import naming, paths
@@ -39,6 +42,11 @@ DEFAULTS = {
     "allowed_link_schemes": ["steam", "https"],
     # Where finished files go, inside the library root, by kind of file.
     "folders": {"video": "Video", "audio": "Audio", "file": "Files"},
+    # A folder per file extension, which wins over `folders`: {".iso": "ISOs", ".pdf": "D:/Docs"}.
+    # A value is a sub-folder of the library root, or (dl_settings only) a full path.  A longer
+    # extension wins over a shorter one (".tar.gz" over ".gz").  A single download's own folder
+    # (item option `subdir` / `dest_abs`) wins over this.
+    "ext_folders": {},
     # What the hub does the moment a download finishes.  off | reveal (show the file in its
     # folder) | folder (open the folder) | open (open the file; never a program or script).
     # A single download can override it (item options `open`).
@@ -76,6 +84,7 @@ PREFS_WRITABLE = {
     "http.stall_seconds", "http.max_retries",
     "after_download.open",
     "notify.enabled", "notify.min_seconds", "notify.coalesce_s", "notify.providers",
+    "ext_folders",
 } | {"folders." + k for k in FOLDER_KINDS} \
   | {"notify.%s.%s" % (e, f) for e in EVENTS for f in ("enabled", "level")}
 
@@ -188,6 +197,69 @@ def _check_kind_folder(label):
     return check
 
 
+MAX_EXT_FOLDERS = 50
+
+
+def clean_ext(text):
+    """'.ISO' / 'iso' -> '.iso'; '.tar.gz' stays; None if it isn't a plain extension."""
+    raw = str(text or "").strip().lower()
+    if raw and not raw.startswith("."):
+        raw = "." + raw
+    if not re.match(r"^\.[a-z0-9_+\-]{1,12}(\.[a-z0-9_+\-]{1,12}){0,2}$", raw):
+        return None
+    return raw
+
+
+def abs_folder(text):
+    """A full-path folder as a normalised string, or None when it isn't one (or is unusable)."""
+    raw = str(text or "").strip()
+    if not raw or "\x00" in raw:
+        return None
+    path = Path(raw).expanduser()
+    if not path.is_absolute() or len(path.parts) <= 1:
+        return None                                  # relative, or a drive / filesystem root
+    if ".." in path.parts:
+        return None
+    return str(path)
+
+
+def is_absolute_spec(text):
+    """Does this folder spec look like a full path (rather than a sub-folder of the library)?"""
+    raw = str(text or "").strip().replace("\\", "/")
+    return bool(raw) and (raw.startswith("/") or raw.startswith("~") or bool(re.match(r"^[A-Za-z]:", raw)))
+
+
+def _check_ext_folders(value, allow_abs=False):
+    if value in (None, ""):
+        return {}, None
+    if not isinstance(value, dict):
+        return None, "ext_folders must be an object like {\".iso\": \"ISOs\", \".pdf\": \"Documents\"}"
+    if len(value) > MAX_EXT_FOLDERS:
+        return None, "at most %d extension folders" % MAX_EXT_FOLDERS
+    out = {}
+    for raw_ext, raw_folder in value.items():
+        ext = clean_ext(raw_ext)
+        if ext is None:
+            return None, "bad extension %r: use something like .iso or .tar.gz" % str(raw_ext)[:30]
+        if raw_folder in (None, ""):
+            continue                                  # an empty folder removes that extension
+        if is_absolute_spec(raw_folder):
+            if not allow_abs:
+                return None, ("%s: a full path like %s writes outside the library, so it needs "
+                              "dl_settings (which asks you first)" % (ext, str(raw_folder)[:60]))
+            full = abs_folder(raw_folder)
+            if full is None:
+                return None, "%s: %r isn't a usable full path (no drive roots, no '..')" % (ext, str(raw_folder)[:60])
+            out[ext] = full
+        else:
+            cleaned = naming.clean_relative(raw_folder)
+            if cleaned is None:
+                return None, ("%s: the folder must be a plain sub-folder like Movies or Media/ISOs "
+                              "(or a full path via dl_settings), not '..'" % ext)
+            out[ext] = cleaned
+    return out, None
+
+
 _DAY_NAMES = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
 _DAY_SETS = {"all": _DAY_NAMES, "every day": _DAY_NAMES, "daily": _DAY_NAMES,
              "weekdays": _DAY_NAMES[:5], "weekend": _DAY_NAMES[5:], "weekends": _DAY_NAMES[5:]}
@@ -242,6 +314,7 @@ def _check_schedule(value):
 
 _CHECKS = {
     "library_root": _check_root,
+    "ext_folders": _check_ext_folders,
     "rate_limit_kbps": lambda v: _int_in(v, 0, 10_000_000, "rate_limit_kbps"),
     "allow_private_hosts": _check_hosts,
     "concurrency.total": lambda v: _int_in(v, 1, 16, "concurrency.total"),
@@ -282,7 +355,12 @@ def validate_update(updates, allowed=None):
             else:
                 errors.append("%r can't be changed here" % str(key)[:60])
             continue
-        checked, err = _CHECKS[key](value)
+        if key == "ext_folders":
+            # A full path is only accepted from the confirm-gated tier (the one that may also
+            # change library_root).
+            checked, err = _check_ext_folders(value, allow_abs="library_root" in allowed)
+        else:
+            checked, err = _CHECKS[key](value)
         if err:
             errors.append(err)
         else:
@@ -362,3 +440,64 @@ def item_limit_kbps(item):
     except (TypeError, ValueError):
         return 0
     return max(0, value)
+
+
+# --------------------------------------------------------------------------- where files go
+
+def ext_folder_spec(settings, name):
+    """The owner's folder for this file name's extension (longest extension first), or None."""
+    table = (settings or {}).get("ext_folders") or {}
+    if not table:
+        return None
+    suffixes = [x.lower() for x in Path(str(name or "")).suffixes][-3:]
+    for start in range(len(suffixes)):
+        key = "".join(suffixes[start:])
+        if table.get(key):
+            return table[key]
+    return None
+
+
+def write_roots(settings, options=None):
+    """Every folder the hub may write finished files into: the library root, plus any full-path
+    folder the owner chose (an extension folder, or this download's own folder).  Everything that
+    checks 'is this path ours?' asks this one question."""
+    roots = [library_root(settings)]
+    for spec in ((settings or {}).get("ext_folders") or {}).values():
+        if is_absolute_spec(spec):
+            full = abs_folder(spec)
+            if full:
+                roots.append(Path(full))
+    extra = (options or {}).get("dest_abs")
+    if extra and abs_folder(extra):
+        roots.append(Path(abs_folder(extra)))
+    return roots
+
+
+def resolve_dest_dir(settings, name, kind, options=None):
+    """(folder as a Path or None, source) for a download that is about to start writing.
+
+    Order, first one that applies wins:
+      1. this download's own folder   options `dest_abs` (a full path) or `subdir` (inside the library)
+      2. the extension's folder       settings `ext_folders`
+      3. the kind's folder            settings `folders` (Video / Audio / Files)
+    A bad extension entry never stops a download: it is skipped and the next rule applies.  A bad
+    folder on the download itself is an error (None), because the owner asked for that place.
+    """
+    options = options or {}
+    root = library_root(settings)
+    if options.get("dest_abs"):
+        full = abs_folder(options["dest_abs"])
+        return (Path(full), "download") if full else (None, "download")
+    if options.get("subdir"):
+        return naming.safe_subdir(root, options["subdir"]), "download"
+    spec = ext_folder_spec(settings, name)
+    if spec:
+        if is_absolute_spec(spec):
+            full = abs_folder(spec)
+            if full:
+                return Path(full), "extension"
+        else:
+            target = naming.safe_subdir(root, spec)
+            if target is not None:
+                return target, "extension"
+    return Path(root) / naming.kind_folder(kind, settings.get("folders")), "kind"
