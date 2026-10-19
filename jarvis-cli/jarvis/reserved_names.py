@@ -74,6 +74,8 @@ RESERVED_NAMES = {
     "calendar-add", "calendar-list", "calendar-remove", "calendar-events",
     # calendar-admin: the Menu > Calendars panel's back end (L.54).
     "calendar-admin",
+    # hub-admin: the Download Hub's web back end (status card, panel push stream, History, queue order).
+    "hub-admin",
     "digest-status", "digest-on", "digest-off", "digest-now", "digest-preview",
     "ctools-list", "ctools-show", "ctools-write", "ctools-check",
     "ctools-delete", "ctools-run", "ctools-toggle", "ctools-templates",

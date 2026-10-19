@@ -257,6 +257,10 @@ function sortRows(rows) {
     const ra = isStale(a) ? 1 : (STATE_RANK[a.state] === undefined ? 9 : STATE_RANK[a.state]);
     const rb = isStale(b) ? 1 : (STATE_RANK[b.state] === undefined ? 9 : STATE_RANK[b.state]);
     if (ra !== rb) return ra - rb;
+    if (a.state === "queued" && b.state === "queued" && num(a.priority) !== null && num(b.priority) !== null && a.owner === "hub" && b.owner === "hub") {
+      // the order the hub will actually start them in (shown by the live stream, which carries `priority`)
+      return (b.priority - a.priority) || ((a.created_at || 0) - (b.created_at || 0));
+    }
     return (b.created_at || 0) - (a.created_at || 0);
   });
 }
@@ -446,11 +450,6 @@ function openMenu(globalMode) {
 const NOTIFY_OPTIONS = { actions: [], levels: [], version: "" };
 const NOTIFY_OPTIONS_WAIT = "Loading the notification options\u2026";
 
-function levelMenu() {
-  return [{ value: "default", label: "Notifier's default" }]
-    .concat(NOTIFY_OPTIONS.levels.map((l) => ({ value: String(l.value), label: l.label })));
-}
-
 // Every kind of download notification, in the order they are shown.
 const NOTIFY_EVENTS = [
   { id: "done", label: "A download finishes", help: "One message per file, or one for a burst of finishes." },
@@ -500,109 +499,13 @@ function channelLabel(id) {
   return c ? c.label : String(id);
 }
 
-// "D:\\x", "/mnt/x" and "~/x" are full paths; "Movies/Kids" is a folder inside the library.
-function isFullPath(text) {
-  return /^([A-Za-z]:|[\\/]|~)/.test(String(text || "").trim());
-}
-
-// ".ISO" / "iso" -> ".iso"; "" when it isn't a plain extension.
-function cleanExt(text) {
-  let t = String(text || "").trim().toLowerCase();
-  if (t && t[0] !== ".") t = "." + t;
-  return /^\.[a-z0-9_+-]{1,12}(\.[a-z0-9_+-]{1,12}){0,2}$/.test(t) ? t : "";
-}
-
-// {".iso": "ISOs"} as sorted [ext, folder] pairs for the settings table.
-function extFolderRows(map) {
-  return Object.keys(map || {}).sort().map((k) => [k, map[k]]);
-}
-
 const DAYS = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"];
 const DAY_LABELS = { mon: "Monday", tue: "Tuesday", wed: "Wednesday", thu: "Thursday", fri: "Friday", sat: "Saturday", sun: "Sunday" };
-
-function daysChoice(days) {
-  const key = DAYS.filter((d) => (days || []).indexOf(d) !== -1).join(",");
-  if (key === DAYS.join(",")) return "all";
-  if (key === "mon,tue,wed,thu,fri") return "weekdays";
-  if (key === "sat,sun") return "weekends";
-  if (DAYS.indexOf(key) !== -1) return key;
-  return "custom";
-}
-
-function daysFromChoice(choice, previous) {
-  if (choice === "all") return DAYS.slice();
-  if (choice === "weekdays") return DAYS.slice(0, 5);
-  if (choice === "weekends") return DAYS.slice(5);
-  if (DAYS.indexOf(choice) !== -1) return [choice];
-  return (previous && previous.length ? previous : DAYS).slice();
-}
-
-function blankWindow() {
-  return { days: DAYS.slice(), from: "01:00", to: "07:00", rate_limit_kbps: 0 };
-}
 
 function numOr(v, d) {
   if (v === null || v === undefined || v === "") return d;
   const x = Number(v);
   return isFinite(x) ? x : d;
-}
-
-// The settings screen edits a plain copy of what the hub reports ("the form model").
-function prefsFromSettings(s) {
-  const n = (s && s.notify) || {};
-  const events = {};
-  NOTIFY_EVENTS.forEach((e) => {
-    const b = n[e.id] || {};
-    events[e.id] = { enabled: !!b.enabled, level: b.level === undefined || b.level === null ? null : Number(b.level) };
-  });
-  const f = (s && s.folders) || {};
-  const c = (s && s.concurrency) || {};
-  const h = (s && s.http) || {};
-  return {
-    rate_limit_kbps: Math.round(numOr(s && s.rate_limit_kbps, 0)),
-    schedule: JSON.parse(JSON.stringify((s && s.schedule) || [])),
-    after_open: (s && s.after_download && s.after_download.open) || "off",
-    notify: {
-      enabled: n.enabled !== false, min_seconds: numOr(n.min_seconds, 0), coalesce_s: numOr(n.coalesce_s, 8),
-      providers: n.providers !== false, events: events,
-    },
-    folders: { video: f.video || "Video", audio: f.audio || "Audio", file: f.file || "Files" },
-    ext_folders: Object.assign({}, (s && s.ext_folders) || {}),
-    concurrency: { total: numOr(c.total, 4), http: numOr(c.http, 2) },
-    http: { stall_seconds: numOr(h.stall_seconds, 60), max_retries: numOr(h.max_retries, 4) },
-  };
-}
-
-// What changed between two form models, as the dotted keys `dl_prefs` takes.  Nothing changed -> {}.
-function prefsDiff(base, cur) {
-  const u = {};
-  if (cur.rate_limit_kbps !== base.rate_limit_kbps) u.rate_limit_kbps = cur.rate_limit_kbps;
-  if (JSON.stringify(cur.schedule) !== JSON.stringify(base.schedule)) u.schedule = cur.schedule;
-  if (cur.after_open !== base.after_open) u["after_download.open"] = cur.after_open;
-  ["enabled", "min_seconds", "coalesce_s", "providers"].forEach((k) => {
-    if (cur.notify[k] !== base.notify[k]) u["notify." + k] = cur.notify[k];
-  });
-  NOTIFY_EVENTS.forEach((e) => {
-    const a = base.notify.events[e.id];
-    const b = cur.notify.events[e.id];
-    if (a.enabled !== b.enabled) u["notify." + e.id + ".enabled"] = b.enabled;
-    if (a.level !== b.level) u["notify." + e.id + ".level"] = b.level === null ? "default" : b.level;
-  });
-  ["video", "audio", "file"].forEach((k) => { if (cur.folders[k] !== base.folders[k]) u["folders." + k] = cur.folders[k]; });
-  if (JSON.stringify(extFolderRows(cur.ext_folders)) !== JSON.stringify(extFolderRows(base.ext_folders))) {
-    // The whole map is sent; a removed type is simply missing from it.
-    u.ext_folders = Object.assign({}, cur.ext_folders);
-  }
-  ["total", "http"].forEach((k) => { if (cur.concurrency[k] !== base.concurrency[k]) u["concurrency." + k] = cur.concurrency[k]; });
-  ["stall_seconds", "max_retries"].forEach((k) => { if (cur.http[k] !== base.http[k]) u["http." + k] = cur.http[k]; });
-  return u;
-}
-
-// "3 of 6 types on" for the overview; "off" when the master switch is off.
-function notifySummary(model) {
-  if (!model || !model.notify.enabled) return "Notifications are off";
-  const on = NOTIFY_EVENTS.filter((e) => model.notify.events[e.id].enabled).length;
-  return on === 0 ? "No notification types are on" : on + " of " + NOTIFY_EVENTS.length + " notification types on";
 }
 
 // The add form's three extras -> the dl_add arguments, or an error to show.
@@ -637,12 +540,110 @@ function itemPrefsText(prefs) {
   return parts.join(DOT);
 }
 
-// What "Send test" tells the person.
-function testResultText(r) {
-  if (!r || r.ok === false) return (r && r.error) || "The test didn't go through.";
-  const got = (r.delivered || []).join(", ");
-  const miss = (r.failed_channels || []).join(", ");
-  return "Test sent" + (got ? ": " + got : "") + (miss ? ". Couldn't reach: " + miss : "") + ".";
+// ---- History, Providers and the queue order (phase 8 + phase 9 option B)
+
+const HISTORY_STATES = ["done", "failed", "cancelled"];
+
+// What the History tab lists: finished rows only, narrowed by state, source and a title search.
+function historyFilter(rows, f) {
+  const o = f || {};
+  const q = String(o.search || "").trim().toLowerCase();
+  return (rows || []).filter((r) => {
+    if (HISTORY_STATES.indexOf(r.state) === -1) return false;
+    if (o.state && o.state !== "all" && r.state !== o.state) return false;
+    if (o.source && sourceKey(r) !== o.source) return false;
+    if (q && String(r.title || r.id).toLowerCase().indexOf(q) === -1) return false;
+    return true;
+  }).sort((a, b) => (b.finished_at || b.created_at || 0) - (a.finished_at || a.created_at || 0));
+}
+
+// One spreadsheet cell.  A cell that starts like a formula is prefixed with ' so a title the web sent
+// can't run anything when the file is opened in a spreadsheet.
+function csvCell(v) {
+  let t = v === null || v === undefined ? "" : String(v);
+  if (/^[=+\-@\t\r]/.test(t)) t = "'" + t;
+  return /[",\r\n]/.test(t) ? '"' + t.replace(/"/g, '""') + '"' : t;
+}
+
+const EXPORT_COLUMNS = [
+  ["Title", (r) => r.title || r.id], ["State", (r) => r.state], ["Source", (r) => sourceLabel(r)],
+  ["Kind", (r) => r.kind || ""], ["Size (bytes)", (r) => num(r.bytes_total) === null ? (num(r.bytes_done) === null ? "" : r.bytes_done) : r.bytes_total],
+  ["Finished", (r) => (num(r.finished_at) === null ? "" : new Date(r.finished_at * 1000).toISOString())],
+  ["Error", (r) => r.error || ""],
+];
+function historyCsv(rows) {
+  const lines = [EXPORT_COLUMNS.map((c) => csvCell(c[0])).join(",")];
+  (rows || []).forEach((r) => lines.push(EXPORT_COLUMNS.map((c) => csvCell(c[1](r))).join(",")));
+  return lines.join("\r\n") + "\r\n";
+}
+function historyJson(rows) {
+  return JSON.stringify((rows || []).map((r) => {
+    const o = {};
+    EXPORT_COLUMNS.forEach((c) => { o[c[0]] = c[1](r); });
+    return o;
+  }), null, 2);
+}
+
+// One History row's second line.
+function historyMeta(row, nowMs) {
+  const parts = [sourceLabel(row)];
+  const size = num(row.bytes_total) !== null ? fmtBytes(row.bytes_total) : "";
+  if (size) parts.push(size);
+  const when = fmtWhen(row.finished_at, nowMs);
+  if (when) parts.push(row.state === "done" ? when : row.state === "failed" ? "failed " + when : "cancelled " + when);
+  if (row.state === "failed" && row.error) parts.push(String(row.error).slice(0, 140));
+  return parts.join(DOT);
+}
+
+// How a provider looks on the Providers tab: off / bad (it reported an error) / quiet (every live row of
+// it has stopped reporting) / ok.
+function providerTone(p) {
+  if (!p.enabled) return "off";
+  if (p.last_error) return "bad";
+  if (num(p.live) > 0 && num(p.stale) === num(p.live)) return "quiet";
+  return "ok";
+}
+function providerFacts(p) {
+  const facts = [];
+  facts.push(["Downloads", String(num(p.rows) || 0) + (num(p.live) ? " (" + p.live + " active)" : "")]);
+  facts.push(["Last report", num(p.last_report_age_s) === null ? "none yet" : fmtAgo(p.last_report_age_s)]);
+  if (p.mode === "poll" || num(p.interval_s) !== null) {
+    facts.push(["Checks every", num(p.interval_s) === null ? "\u2014" : p.interval_s + " s"]);
+    facts.push(["Last good check", num(p.last_ok_age_s) === null ? "none yet" : fmtAgo(p.last_ok_age_s)]);
+  }
+  facts.push(["Can be controlled", p.read_only ? "No: it only reports" : (p.controls || []).join(", ") || "Yes"]);
+  return facts;
+}
+function providerBadge(p) {
+  return !p.enabled ? "Off" : p.read_only ? "Read-only" : p.mode === "poll" ? "Polled" : "Reports";
+}
+
+// The waiting hub queue in the order it will RUN (priority first, then oldest first).
+function queueOrder(rows) {
+  return (rows || []).filter((r) => r.owner === "hub" && r.state === "queued")
+    .sort((a, b) => (num(b.priority) || 0) - (num(a.priority) || 0) || (a.created_at || 0) - (b.created_at || 0))
+    .map((r) => r.id);
+}
+// `ids` with `id` moved next to `targetId` (before it, or after when `after`).  Pure, never mutates.
+function moveInOrder(ids, id, targetId, after) {
+  const list = (ids || []).filter((x) => x !== id);
+  const at = list.indexOf(targetId);
+  if (at === -1 || ids.indexOf(id) === -1) return (ids || []).slice();
+  list.splice(after ? at + 1 : at, 0, id);
+  return list;
+}
+// One step up (-1) or down (+1) in the queue, or null at the end.
+function stepInOrder(ids, id, delta) {
+  const i = (ids || []).indexOf(id);
+  const j = i + delta;
+  if (i === -1 || j < 0 || j >= ids.length) return null;
+  const out = ids.slice();
+  out.splice(j, 0, out.splice(i, 1)[0]);
+  return out;
+}
+// A row may be dragged only when the live stream is giving us the queue's real order.
+function canReorder(row, live) {
+  return !!live && row.owner === "hub" && row.state === "queued" && num(row.priority) !== null;
 }
 
 const pure = {
@@ -651,10 +652,12 @@ const pure = {
   filterRows, sortRows, groupRows, moveSelection, extractInputs, hintFromDecisions, isStale,
   toneOf, overviewStats, needsAttention, runningNow, sublineText, countText,
   LIMIT_PRESETS, OPEN_CHOICES, NOTIFY_EVENTS, NOTIFY_OPTIONS, NOTIFY_OPTIONS_WAIT, DAYS, fmtLimit, parseLimit, limitFields,
-  limitSummary, quickSpeedOptions, openLabel, openMenu, levelMenu, daysChoice, daysFromChoice,
-  blankWindow, prefsFromSettings, prefsDiff, notifySummary, addOptionsFromForm, itemPrefsText,
-  ITEM_EVENTS, channelLabel, isFullPath, cleanExt, extFolderRows,
-  testResultText, CARD_VERBS, cardActions, fmtWhen, applyNotifyOptions,
+  limitSummary, quickSpeedOptions, openLabel, openMenu,
+  addOptionsFromForm, itemPrefsText,
+  ITEM_EVENTS, channelLabel,
+  CARD_VERBS, cardActions, fmtWhen, applyNotifyOptions,
+  HISTORY_STATES, historyFilter, csvCell, historyCsv, historyJson, historyMeta, providerTone, providerFacts, providerBadge,
+  queueOrder, moveInOrder, stepInOrder, canReorder,
 };
 if (host && host.__hubPureOnly) return pure;
 
@@ -668,8 +671,11 @@ const S = {
   rows: [], summary: null, selected: null, view: "all", source: "", search: "", groupBy: "none",
   detail: null, busy: false, timer: 0, closed: false, lastError: "", hold: 0, holdTimer: 0,
   pendingSelect: "", sig: {},
-  settingsOpen: false, page: "location", hubPrefs: null, base: null, model: null, formError: "", customSpeed: false,
+  hubPrefs: null,
   saving: false,
+  tab: "downloads", live: false, liveAt: 0, es: null, liveTimer: 0, dragId: "",
+  providers: [], provTimer: 0, provLoaded: false,
+  hist: { rows: [], more: false, loaded: false, busy: false, state: "all", source: "", search: "", error: "" },
 };
 let hintTimer = 0;
 let hintSeq = 0;
@@ -829,12 +835,27 @@ function renderRow(row) {
     attrs: { type: "button", "aria-label": a.label + ": " + (row.title || row.id) },
     on: { click: (e) => { e.stopPropagation(); e.preventDefault(); e.currentTarget.disabled = true; runAction(row, a); } },
   }));
-  return el("div", {
+  const draggable = canReorder(row, S.live);
+  if (draggable) {
+    const order = queueOrder(S.rows);
+    const at = order.indexOf(row.id);
+    [["\u2191", -1, "Move up in the queue"], ["\u2193", 1, "Move down in the queue"]].forEach((m) => {
+      const attrs = { type: "button", "aria-label": m[2] + ": " + (row.title || row.id) };
+      if (at + m[1] < 0 || at + m[1] >= order.length) attrs.disabled = "disabled";
+      buttons.push(el("button", {
+        cls: "rbtn", text: m[0], title: m[2],
+        attrs: attrs,
+        on: { click: (e) => { e.stopPropagation(); e.preventDefault(); moveQueued(row.id, m[1]); } },
+      }));
+    });
+  }
+  const rowEl = el("div", {
     cls: "row tone-" + tone + " state-" + row.state,
-    attrs: { role: "option", "aria-selected": row.id === S.selected ? "true" : "false", "data-id": row.id },
+    attrs: { role: "option", "aria-selected": row.id === S.selected ? "true" : "false", "data-id": row.id, draggable: draggable ? "true" : "false" },
     on: { click: () => select(row.id) },
   }, [
     el("div", { cls: "row__top" }, [
+      draggable ? el("span", { cls: "row__grip", text: "\u22EE\u22EE", title: "Drag to change the order downloads start in", attrs: { "aria-hidden": "true" } }) : null,
       el("span", { cls: "dot tone-" + tone, attrs: { "aria-hidden": "true" } }),
       el("span", { cls: "row__title", text: row.title || row.id, title: row.title || row.id }),
       el("span", { cls: "row__kind", text: KIND_ICON[row.kind] || KIND_ICON.other, attrs: { "aria-hidden": "true" } }),
@@ -843,6 +864,8 @@ function renderRow(row) {
     el("div", { cls: "row__meta" }, meta),
     buttons.length ? el("div", { cls: "row__acts" }, buttons) : null,
   ]);
+  if (draggable) wireDrag(rowEl, row);
+  return rowEl;
 }
 
 function sectionHeader(section) {
@@ -862,7 +885,7 @@ function sectionHeader(section) {
 function renderList() {
   const rows = visibleRows();
   $("#count").textContent = countText(rows.length, S.rows.length);
-  if (!changed("list", [rows, S.selected, S.groupBy])) return;
+  if (!changed("list", [rows, S.selected, S.groupBy, S.live])) return;
   const list = $("#list");
   const scroll = list.scrollTop;
   list.textContent = "";
@@ -1060,7 +1083,7 @@ function renderSide() {
   if (otherSpeed > 0) speedBox.appendChild(el("div", { cls: "small", text: "hub " + (fmtSpeed(hubSpeed) || "0") + DOT + "other tools " + fmtSpeed(otherSpeed) + " (not under hub control)" }));
   speedBox.appendChild(el("div", { cls: "small", text: limitSummary(sum.speed_limit) }));
   speedBox.appendChild(el("div", { cls: "demo" }, [
-    el("button", { cls: "btn btn--sm", text: "Change limit", attrs: { type: "button" }, on: { click: () => openSettings("speed") } }),
+    el("button", { cls: "btn btn--sm", text: "Change limit", attrs: { type: "button" }, on: { click: () => openSettings() } }),
   ]));
   box.appendChild(speedBox);
 
@@ -1070,7 +1093,7 @@ function renderSide() {
   if (sum.library_root) storage.appendChild(el("div", { cls: "small", text: sum.library_root }));
   storage.appendChild(el("div", { cls: "demo" }, [
     el("button", { cls: "btn btn--sm", text: "Open folder", attrs: { type: "button" }, on: { click: openLibrary } }),
-    el("button", { cls: "btn btn--sm", text: "Change\u2026", attrs: { type: "button" }, on: { click: () => openSettings("location") } }),
+    el("button", { cls: "btn btn--sm", text: "Change\u2026", attrs: { type: "button" }, on: { click: () => openSettings() } }),
   ]));
   box.appendChild(storage);
 
@@ -1078,8 +1101,8 @@ function renderSide() {
   after.appendChild(el("div", { cls: "small", text: openLabel(sum.after_download) }));
   after.appendChild(el("div", { cls: "small", text: sum.notifications_on === false ? "Notifications are off" : "Notifications are on" }));
   after.appendChild(el("div", { cls: "demo" }, [
-    el("button", { cls: "btn btn--sm", text: "Notifications", attrs: { type: "button" }, on: { click: () => openSettings("notifications") } }),
-    el("button", { cls: "btn btn--sm", text: "After download", attrs: { type: "button" }, on: { click: () => openSettings("finished") } }),
+    el("button", { cls: "btn btn--sm", text: "Notifications", attrs: { type: "button" }, on: { click: () => openSettings() } }),
+    el("button", { cls: "btn btn--sm", text: "After download", attrs: { type: "button" }, on: { click: () => openSettings() } }),
   ]));
   box.appendChild(after);
 
@@ -1117,7 +1140,6 @@ function render() {
   if (S.hold && Date.now() < S.hold) { clearTimeout(S.holdTimer); S.holdTimer = setTimeout(render, 250); return; }   // don't rebuild under a click
   S.hold = 0;
   if (S.closed) return;
-  $("#hub").classList.toggle("is-settings", S.settingsOpen);
   renderTop();
   renderBanner();
   renderChips();
@@ -1208,16 +1230,19 @@ async function loadDetail() {
 function schedule(delay) {
   clearTimeout(S.timer);
   if (S.closed) return;
-  S.timer = setTimeout(poll, delay || (doc.hidden ? 8000 : 2500));
+  S.timer = setTimeout(poll, delay || (S.live ? 30000 : doc.hidden ? 8000 : 2500));
 }
 
 async function poll() {
   if (S.closed || S.busy) return;
   S.busy = true;
   try {
-    const r = await host.runTool("dl_list", { limit: 500, summary: true });
+    // While the live stream is up it owns the rows; this slower poll only refreshes the summary (the
+    // notification choices the stream leaves out) and doubles as a check that the hub still answers.
+    const streaming = S.live;
+    const r = await host.runTool("dl_list", streaming ? { limit: 1, summary: true } : { limit: 500, summary: true });
     if (r && r.ok === false) throw new Error(r.error || "the hub didn't answer");
-    S.rows = Array.isArray(r.items) ? r.items : [];
+    if (!streaming) S.rows = Array.isArray(r.items) ? r.items : [];
     if (r.summary) {
       S.summary = r.summary;
       if (applyNotifyOptions(r.summary.notify_options)) { S.sig.addextras = ""; S.sig.dprefs = ""; }
@@ -1376,7 +1401,7 @@ async function setConcurrency(n) {
   const r = await callTool("dl_prefs", { set: { "concurrency.total": total } });
   if (r.ok === false) { toast(r.error || "That didn't work", "warn"); return; }
   if (S.summary) S.summary.concurrency = Object.assign({}, S.summary.concurrency || {}, { total: total });
-  if (r.settings) { S.hubPrefs = r.settings; if (!isDirty()) resetForm(); }
+  if (r.settings) S.hubPrefs = r.settings;
   toast("Up to " + total + " download" + (total === 1 ? "" : "s") + " at once", "success");
   S.sig.side = "";
   renderSide();
@@ -1494,346 +1519,14 @@ async function openLibrary() {
   if (r.ok === false) toast(r.error || "Couldn't open the folder", "warn");
 }
 
-// ---- the Settings screen: location, speed, notifications, when it finishes, connections
+// ---- Settings: they live in Settings > Downloads (web/public/downloads-settings.js), the one place to change them.
+// This panel keeps two shortcuts (the speed menu and the Fewer / More buttons) that write through the same
+// dl_prefs tool; everything else about the hub's settings is edited there, not here.
 
-const PAGES = [
-  { id: "location", label: "Download location" },
-  { id: "speed", label: "Speed limit" },
-  { id: "notifications", label: "Notifications" },
-  { id: "finished", label: "When it finishes" },
-  { id: "connections", label: "Connections" },
-];
-
-function isDirty() {
-  return !!(S.base && S.model && Object.keys(prefsDiff(S.base, S.model)).length);
-}
-
-function resetForm() {
-  S.base = prefsFromSettings(S.hubPrefs);
-  S.model = prefsFromSettings(S.hubPrefs);
-  S.formError = "";
-  S.customSpeed = false;
-}
-
-async function loadHubPrefs() {
-  const r = await callTool("dl_prefs", {});
-  if (r.ok && r.settings) { S.hubPrefs = r.settings; applyNotifyOptions(r.settings.notify_options); return true; }
-  S.formError = r.error || "Couldn't read the settings from the hub.";
-  return false;
-}
-
-async function openSettings(page) {
-  S.settingsOpen = true;
-  if (page) S.page = page;
-  render();
-  if (!S.model || !isDirty()) {
-    const ok = await loadHubPrefs();
-    if (ok) resetForm();
-  }
-  renderSettings();
-}
-
-function closeSettings() {
-  S.settingsOpen = false;
-  render();
-}
-
-function updateFooter() {
-  const dirty = isDirty();
-  $("#settingsDirty").textContent = S.formError ? S.formError : (dirty ? "Unsaved changes" : "");
-  $("#settingsDirty").className = "settings__dirty" + (S.formError ? " is-bad" : "");
-  $("#settingsSave").disabled = !dirty || S.saving;
-  $("#settingsRevert").disabled = !dirty || S.saving;
-}
-
-// small builders -----------------------------------------------------------------------------
-
-function setRow(label, control, help) {
-  return el("div", { cls: "field" }, [el("label", { cls: "field__label", text: label }), control, help ? el("div", { cls: "field__help", text: help }) : null]);
-}
-
-function menu(options, value, onChange, label) {
-  const sel = el("select", { attrs: { "aria-label": label || "" } });
-  fillSelect(sel, options, value);
-  sel.addEventListener("change", () => onChange(sel.value));
-  return sel;
-}
-
-function numberBox(value, onInput, attrs) {
-  const box = el("input", { attrs: Object.assign({ type: "number", inputmode: "numeric" }, attrs || {}) });
-  box.value = String(value);
-  box.addEventListener("input", () => { const n = Number(box.value); if (box.value !== "" && isFinite(n)) onInput(Math.round(n)); updateFooter(); });
-  return box;
-}
-
-function checkBox(label, checked, onChange) {
-  const box = el("input", { attrs: { type: "checkbox" } });
-  box.checked = !!checked;
-  box.addEventListener("change", () => { onChange(box.checked); updateFooter(); });
-  return el("label", { cls: "check" }, [box, el("span", { text: " " + label })]);
-}
-
-function pageHead(title, text) {
-  return [el("h4", { cls: "sp__h", text: title }), text ? el("div", { cls: "field__help sp__lead", text: text }) : null];
-}
-
-// pages ---------------------------------------------------------------------------------------
-
-function pageLocation(box) {
-  const lib = (S.hubPrefs && S.hubPrefs.library) || {};
-  pageHead("Where downloads are saved", "Every download is saved inside this folder.").forEach((n) => n && box.appendChild(n));
-  box.appendChild(el("div", { cls: "pathbox", text: lib.path || (S.hubPrefs && S.hubPrefs.library_root) || "" }));
-  const bits = [];
-  bits.push(lib.exists === false ? "The folder doesn't exist yet; it is created with the first download." : "The folder exists.");
-  if (lib.writable === false) bits.push("It can't be written to: pick another folder.");
-  if (lib.free_bytes !== null && lib.free_bytes !== undefined) bits.push(fmtBytes(lib.free_bytes) + " free.");
-  box.appendChild(el("div", { cls: "small" + (lib.writable === false ? " bad" : ""), text: bits.join(" ") }));
-  box.appendChild(el("div", { cls: "demo sp__gap" }, [el("button", { cls: "btn btn--sm", text: "Open folder", attrs: { type: "button" }, on: { click: openLibrary } })]));
-
-  const path = el("input", { attrs: { type: "text", spellcheck: "false", placeholder: "Full path, e.g. D:\\Downloads\\Jarvis", "aria-label": "New download folder" } });
-  const change = async () => {
-    const value = path.value.trim();
-    if (!value) { toast("Type the full path of the folder first", "warn"); return; }
-    const r = await callTool("dl_settings", { set: { library_root: value } });
-    if (r.declined || r.cancelled) { toast("Not changed", "info"); return; }
-    if (r.ok === false) { S.formError = r.error || "That folder can't be used."; updateFooter(); return; }
-    S.formError = "";
-    if (r.settings) S.hubPrefs = r.settings;
-    toast("Downloads will now be saved in " + (r.settings && r.settings.library_root), "success");
-    schedule(100);
-    renderSettings();
-  };
-  path.addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); change(); } });
-  box.appendChild(el("h4", { cls: "sp__h", text: "Use a different folder" }));
-  box.appendChild(setRow("New download folder", el("div", { cls: "inline" }, [path, el("button", { cls: "btn btn--sm", text: "Change", attrs: { type: "button" }, on: { click: change } })]),
-    "You'll be asked to confirm. Only new downloads go there; files already saved stay where they are."));
-
-  box.appendChild(el("h4", { cls: "sp__h", text: "Folders by kind of file" }));
-  box.appendChild(el("div", { cls: "field__help sp__lead", text: "When you don't choose a folder while adding, a file goes into the folder for its kind, inside the download folder." }));
-  [["video", "Videos"], ["audio", "Audio"], ["file", "Everything else"]].forEach((pair2) => {
-    const input = el("input", { attrs: { type: "text", spellcheck: "false", "aria-label": pair2[1] + " folder" } });
-    input.value = S.model.folders[pair2[0]];
-    input.addEventListener("input", () => { S.model.folders[pair2[0]] = input.value.trim(); updateFooter(); });
-    box.appendChild(setRow(pair2[1], input));
-  });
-
-  box.appendChild(el("h4", { cls: "sp__h", text: "Folders by file type" }));
-  box.appendChild(el("div", { cls: "field__help sp__lead", text: "A folder for one file extension, like .iso or .pdf. It beats the kind-of-file folders above, and a folder you pick while adding beats it. Use a folder inside the library (ISOs) or a full path (D:\\\\ISOs); a full path asks you to confirm when you save. The longer extension wins (.tar.gz over .gz)." }));
-  const map = S.model.ext_folders;
-  extFolderRows(map).forEach((pair2) => {
-    const folder = el("input", { attrs: { type: "text", spellcheck: "false", "aria-label": "Folder for " + pair2[0] } });
-    folder.value = pair2[1];
-    folder.addEventListener("input", () => { map[pair2[0]] = folder.value.trim(); updateFooter(); });
-    folder.addEventListener("change", () => { if (!map[pair2[0]]) { delete map[pair2[0]]; renderSettings(); } });
-    box.appendChild(el("div", { cls: "extrow" }, [
-      el("span", { cls: "ext", text: pair2[0] }), folder,
-      el("button", { cls: "btn btn--sm", text: "Remove", attrs: { type: "button", "aria-label": "Remove the folder for " + pair2[0] },
-        on: { click: () => { delete map[pair2[0]]; renderSettings(); } } }),
-    ]));
-  });
-  const newExt = el("input", { attrs: { type: "text", spellcheck: "false", placeholder: ".iso", "aria-label": "File extension" } });
-  const newFolder = el("input", { attrs: { type: "text", spellcheck: "false", placeholder: "Folder, e.g. ISOs or D:\\\\ISOs", "aria-label": "Folder for that extension" } });
-  const addExt = () => {
-    const ext = cleanExt(newExt.value);
-    const target = newFolder.value.trim();
-    if (!ext) { toast("Type an extension like .iso or .tar.gz", "warn"); return; }
-    if (!target) { toast("Type the folder for " + ext, "warn"); return; }
-    map[ext] = target;
-    renderSettings();
-  };
-  newFolder.addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); addExt(); } });
-  box.appendChild(el("div", { cls: "extrow" }, [newExt, newFolder, el("button", { cls: "btn btn--sm", text: "Add", attrs: { type: "button" }, on: { click: addExt } })]));
-}
-
-function pageSpeed(box) {
-  const m = S.model;
-  pageHead("Overall speed limit", "The most all your downloads together may use. It is shared between the downloads that are running.").forEach((n) => n && box.appendChild(n));
-  box.appendChild(el("div", { cls: "small", text: "In force right now: " + limitSummary(S.summary && S.summary.speed_limit) }));
-
-  const isPreset = LIMIT_PRESETS.indexOf(m.rate_limit_kbps) !== -1 && !S.customSpeed;
-  const options = LIMIT_PRESETS.map((k) => ({ value: String(k), label: k === 0 ? "No limit" : fmtLimit(k) })).concat([{ value: "custom", label: "Custom\u2026" }]);
-  box.appendChild(setRow("Limit", menu(options, isPreset ? String(m.rate_limit_kbps) : "custom", (v) => {
-    if (v === "custom") { S.customSpeed = true; if (!m.rate_limit_kbps) m.rate_limit_kbps = 1024; }
-    else { S.customSpeed = false; m.rate_limit_kbps = Number(v); }
-    renderSettings();
-  }, "Overall speed limit")));
-  if (!isPreset) {
-    const f = limitFields(m.rate_limit_kbps);
-    const input = el("input", { attrs: { type: "text", inputmode: "decimal", spellcheck: "false", "aria-label": "Custom speed limit" } });
-    input.value = f.value;
-    const unit = el("select", { attrs: { "aria-label": "Unit" } }, [el("option", { text: "KB/s", attrs: { value: "kb" } }), el("option", { text: "MB/s", attrs: { value: "mb" } })]);
-    unit.value = f.unit;
-    const hint = el("div", { cls: "field__help" });
-    const apply = () => {
-      const lim = parseLimit(input.value, unit.value);
-      if (lim.error) { hint.textContent = lim.error; hint.className = "field__help bad"; return; }
-      hint.textContent = lim.kbps ? "= " + fmtLimit(lim.kbps) : "No limit";
-      hint.className = "field__help";
-      m.rate_limit_kbps = lim.kbps;
-      updateFooter();
-    };
-    input.addEventListener("input", apply);
-    unit.addEventListener("change", apply);
-    box.appendChild(setRow("Custom speed", el("div", { cls: "inline" }, [input, unit]), null));
-    box.appendChild(hint);
-  }
-
-  box.appendChild(el("h4", { cls: "sp__h", text: "By time of day" }));
-  box.appendChild(el("div", { cls: "field__help sp__lead", text: "For example: slow down while you work, no limit overnight. Inside a window its speed replaces the overall limit above (empty = no limit). A window that ends earlier than it starts runs overnight." }));
-  const dayOptions = [{ value: "all", label: "Every day" }, { value: "weekdays", label: "Weekdays" }, { value: "weekends", label: "Weekends" }]
-    .concat(S.model.schedule.some((w) => daysChoice(w.days) === "custom") ? [{ value: "custom", label: "Chosen days" }] : [])
-    .concat(["mon", "tue", "wed", "thu", "fri", "sat", "sun"].map((d) => ({ value: d, label: { mon: "Monday", tue: "Tuesday", wed: "Wednesday", thu: "Thursday", fri: "Friday", sat: "Saturday", sun: "Sunday" }[d] })));
-  m.schedule.forEach((w, i) => {
-    const days = menu(dayOptions, daysChoice(w.days), (v) => { w.days = daysFromChoice(v, w.days); updateFooter(); }, "Days");
-    const from = el("input", { attrs: { type: "time", "aria-label": "From" } }); from.value = w.from;
-    const to = el("input", { attrs: { type: "time", "aria-label": "Until" } }); to.value = w.to;
-    from.addEventListener("input", () => { w.from = from.value; updateFooter(); });
-    to.addEventListener("input", () => { w.to = to.value; updateFooter(); });
-    const f = limitFields(w.rate_limit_kbps);
-    const lim = el("input", { attrs: { type: "text", inputmode: "decimal", spellcheck: "false", placeholder: "No limit", "aria-label": "Speed in this window" } }); lim.value = f.value;
-    const unit = el("select", { attrs: { "aria-label": "Unit" } }, [el("option", { text: "KB/s", attrs: { value: "kb" } }), el("option", { text: "MB/s", attrs: { value: "mb" } })]); unit.value = f.unit;
-    const hint = el("div", { cls: "field__help" });
-    const apply = () => {
-      const parsed = parseLimit(lim.value, unit.value);
-      if (parsed.error) { hint.textContent = parsed.error; hint.className = "field__help bad"; return; }
-      hint.textContent = ""; w.rate_limit_kbps = parsed.kbps; updateFooter();
-    };
-    lim.addEventListener("input", apply); unit.addEventListener("change", apply);
-    box.appendChild(el("div", { cls: "win" }, [
-      el("div", { cls: "inline" }, [days, from, el("span", { cls: "small", text: "to" }), to]),
-      el("div", { cls: "inline" }, [el("span", { cls: "small", text: "Speed" }), lim, unit,
-        el("button", { cls: "btn btn--sm btn--danger", text: "Remove", attrs: { type: "button" }, on: { click: () => { m.schedule.splice(i, 1); renderSettings(); } } })]),
-      hint,
-    ]));
-  });
-  box.appendChild(el("div", { cls: "demo sp__gap" }, [el("button", {
-    cls: "btn btn--sm", text: "+ Add a time window", attrs: { type: "button", disabled: m.schedule.length >= 10 ? "disabled" : null },
-    on: { click: () => { if (m.schedule.length < 10) { m.schedule.push(blankWindow()); renderSettings(); } } },
-  })]));
-  box.appendChild(el("div", { cls: "field__help sp__lead", text: "A single download can also have its own limit: in Options when you add it, or in its details while it is waiting or running." }));
-}
-
-async function sendTest(id, button) {
-  button.disabled = true;
-  const r = await callTool("dl_prefs", { test_notification: id });
-  button.disabled = false;
-  toast(testResultText(r), r.ok === false ? "warn" : "success");
-}
-
-function pageNotifications(box) {
-  const m = S.model;
-  pageHead("Notifications", "Messages go through Jarvis's normal notifications, so where they appear (in the app, on the desktop, by voice, on your phone) follows your notification settings. The level changes how loudly; \u201CNotifier's default\u201D leaves that to those settings.").forEach((n) => n && box.appendChild(n));
-  box.appendChild(checkBox("Tell me about downloads", m.notify.enabled, (v) => { m.notify.enabled = v; renderSettings(); }));
-  const table = el("div", { cls: "ntable" + (m.notify.enabled ? "" : " is-off") });
-  NOTIFY_EVENTS.forEach((e) => {
-    const ev = m.notify.events[e.id];
-    const test = el("button", { cls: "btn btn--sm", text: "Send test", attrs: { type: "button", title: "Sends a sample through the notifier, using the saved settings" } });
-    test.addEventListener("click", () => sendTest(e.id, test));
-    table.appendChild(el("div", { cls: "nrow" }, [
-      el("div", { cls: "nrow__main" }, [
-        checkBox(e.label, ev.enabled, (v) => { ev.enabled = v; }),
-        el("div", { cls: "field__help", text: e.help }),
-      ]),
-      menu(levelMenu(), ev.level === null ? "default" : String(ev.level), (v) => { ev.level = v === "default" ? null : Number(v); updateFooter(); }, "Level for: " + e.label),
-      test,
-    ]));
-  });
-  box.appendChild(table);
-  box.appendChild(el("h4", { cls: "sp__h", text: "Fewer messages" }));
-  box.appendChild(setRow("Only tell me about downloads that took at least (seconds)", numberBox(m.notify.min_seconds, (n) => { m.notify.min_seconds = Math.max(0, n); }, { min: "0", max: "86400" }), "0 = every download. Failures are always reported."));
-  box.appendChild(setRow("Group finishes that come within (seconds)", numberBox(m.notify.coalesce_s, (n) => { m.notify.coalesce_s = Math.max(0, n); }, { min: "0", max: "600" }), "Several downloads finishing together become one message. 0 = one message each."));
-  box.appendChild(checkBox("Also tell me about downloads other tools run (Steam and the like)", m.notify.providers, (v) => { m.notify.providers = v; }));
-}
-
-function pageFinished(box) {
-  const m = S.model;
-  pageHead("When a download finishes", "What Jarvis does by itself the moment a file is complete. A single download can choose differently in Options when you add it.").forEach((n) => n && box.appendChild(n));
-  OPEN_CHOICES.forEach((c) => {
-    const input = el("input", { attrs: { type: "radio", name: "openmode", value: c.id } });
-    input.checked = m.after_open === c.id;
-    input.addEventListener("change", () => { if (input.checked) { m.after_open = c.id; renderSettings(); } });
-    box.appendChild(el("label", { cls: "choice" + (m.after_open === c.id ? " is-on" : "") }, [
-      input, el("span", { cls: "choice__t", text: c.label }), el("span", { cls: "choice__h", text: c.help }),
-    ]));
-  });
-  if (m.after_open === "open") {
-    box.appendChild(el("div", { cls: "note note--warn" }, [el("strong", { text: "You'll be asked to confirm" }),
-      doc.createTextNode("Opening files by itself is the one choice here that runs something you haven't looked at yet. At most a few files are opened per minute, so a big batch can't flood the screen.")]));
-  }
-}
-
-function pageConnections(box) {
-  const m = S.model;
-  pageHead("Connections", "How many downloads run at once and when a stuck one is given up on.").forEach((n) => n && box.appendChild(n));
-  box.appendChild(setRow("Downloads at once (all together)", numberBox(m.concurrency.total, (n) => { m.concurrency.total = n; }, { min: "1", max: "16" })));
-  box.appendChild(setRow("Direct-link downloads at once", numberBox(m.concurrency.http, (n) => { m.concurrency.http = n; }, { min: "1", max: "16" })));
-  box.appendChild(setRow("Call a download stalled after (seconds without data)", numberBox(m.http.stall_seconds, (n) => { m.http.stall_seconds = n; }, { min: "10", max: "3600" })));
-  box.appendChild(setRow("Retry a failed download up to (times)", numberBox(m.http.max_retries, (n) => { m.http.max_retries = n; }, { min: "0", max: "10" })));
-}
-
-const PAGE_BUILDERS = { location: pageLocation, speed: pageSpeed, notifications: pageNotifications, finished: pageFinished, connections: pageConnections };
-
-function renderSettings() {
-  if (!S.settingsOpen) return;
-  const nav = $("#settingsNav");
-  nav.textContent = "";
-  PAGES.forEach((pg) => {
-    nav.appendChild(el("button", {
-      cls: "snav" + (pg.id === S.page ? " is-on" : ""), text: pg.label,
-      attrs: { type: "button", "aria-current": pg.id === S.page ? "page" : "false" },
-      on: { click: () => { S.page = pg.id; renderSettings(); } },
-    }));
-  });
-  const page = $("#settingsPage");
-  page.textContent = "";
-  if (!S.model) {
-    page.appendChild(el("div", { cls: "empty", text: S.formError || "Reading the settings\u2026" }));
-    updateFooter();
-    return;
-  }
-  const box = el("div", { cls: "sp" });
-  (PAGE_BUILDERS[S.page] || pageLocation)(box);
-  page.appendChild(box);
-  updateFooter();
-}
-
-async function saveSettings() {
-  const updates = prefsDiff(S.base, S.model);
-  if (!Object.keys(updates).length) return;
-  S.saving = true;
-  updateFooter();
-  let r;
-  const needsOk = updates.ext_folders && Object.keys(updates.ext_folders).some((k) => isFullPath(updates.ext_folders[k]));
-  if (needsOk) {
-    // A folder outside the library is saved through dl_settings, which asks you first.
-    const first = await callTool("dl_settings", { set: { ext_folders: updates.ext_folders } });
-    delete updates.ext_folders;
-    r = first;
-    if (first.ok !== false && !first.declined && !first.cancelled && Object.keys(updates).length) {
-      r = await callTool("dl_prefs", { set: updates });
-    }
-  } else {
-    r = await callTool("dl_prefs", { set: updates });
-  }
-  S.saving = false;
-  if (r.declined || r.cancelled) {
-    S.formError = needsOk ? "Not saved: a folder outside the library needs your OK." : "Not saved: opening files by itself needs your OK.";
-  } else if (r.ok === false) {
-    S.formError = r.error || "That didn't work.";
-  } else {
-    S.hubPrefs = r.settings;
-    resetForm();
-    toast("Settings saved", "success");
-    if (S.summary && r.settings) S.summary.speed_limit = r.settings.rate_limit_now;
-    S.sig.speedq = "";
-    schedule(100);
-  }
-  renderSettings();
-}
-
-function revertSettings() {
-  if (S.hubPrefs) resetForm();
-  renderSettings();
+function openSettings() {
+  const s = window.JarvisSettings;
+  if (s && typeof s.show === "function") s.show({ section: "downloads" });
+  else toast("Settings can't be opened from here", "warn");
 }
 
 // ---- wiring
@@ -1853,14 +1546,11 @@ $("#groupBy").addEventListener("change", (e) => { S.groupBy = e.target.value; sa
 $("#refresh").addEventListener("click", () => { S.lastError = ""; schedule(10); });
 $("#newBtn").addEventListener("click", newDownload);
 $("#openFolder").addEventListener("click", openLibrary);
-$("#settingsBtn").addEventListener("click", () => (S.settingsOpen ? closeSettings() : openSettings()));
-$("#settingsBack").addEventListener("click", closeSettings);
-$("#settingsSave").addEventListener("click", saveSettings);
-$("#settingsRevert").addEventListener("click", revertSettings);
+$("#settingsBtn").addEventListener("click", openSettings);
 $("#speedQuick").addEventListener("change", async (e) => {
   const menuEl = e.target;                 // e.target is cleared once an event inside a shadow root has been dispatched
   const v = menuEl.value;
-  if (v === "custom") { S.sig.speedq = ""; renderSpeedQuick(); openSettings("speed"); return; }
+  if (v === "custom") { S.sig.speedq = ""; renderSpeedQuick(); openSettings(); return; }
   const kbps = Number(v);
   const r = await callTool("dl_prefs", { set: { rate_limit_kbps: kbps } });
   if (r.ok === false) { toast(r.error || "That didn't work", "warn"); }
@@ -1868,7 +1558,7 @@ $("#speedQuick").addEventListener("change", async (e) => {
     const now = r.settings && r.settings.rate_limit_now;
     if (S.summary && now) S.summary.speed_limit = now;
     toast(kbps > 0 ? "Speed limit: " + fmtLimit(kbps) + (now && now.source === "schedule" ? " (a time window is overriding it right now)" : "") : "Speed limit removed", "success");
-    if (r.settings) { S.hubPrefs = r.settings; if (!isDirty()) resetForm(); }
+    if (r.settings) S.hubPrefs = r.settings;
   }
   S.sig.speedq = "";
   menuEl.blur();
@@ -1914,7 +1604,6 @@ list.addEventListener("keydown", (e) => {
   }
 });
 root.addEventListener("keydown", (e) => {
-  if (e.key === "Escape" && S.settingsOpen) { e.preventDefault(); closeSettings(); return; }
   const tag = e.target && e.target.tagName;
   if (e.key === "/" && tag !== "INPUT" && tag !== "SELECT" && tag !== "TEXTAREA") { e.preventDefault(); $("#search").focus(); }
 });
@@ -1924,6 +1613,7 @@ const hub = $("#hub");
 hub.addEventListener("dragover", (e) => { e.preventDefault(); });
 hub.addEventListener("drop", (e) => {
   e.preventDefault();
+  if (S.dragId) return;                         // a queued row being reordered, not links being dropped
   const dt = e.dataTransfer;
   const text = dt ? (dt.getData("text/uri-list") || dt.getData("text/plain")) : "";
   const urls = extractInputs(text);
@@ -1935,11 +1625,383 @@ hub.addEventListener("drop", (e) => {
   previewHint(urls);
 });
 
-host.onClose(() => { S.closed = true; clearTimeout(S.timer); clearTimeout(S.holdTimer); clearTimeout(hintTimer); });
+
+// ============================================================================== tabs, live stream, Providers, History, queue order
+
+// One call to the hub's own web routes (jarvis/hub_admin.py through /api/hub/*).  Reads need nothing more; the
+// writes send the header the server insists on so another page can't make the browser change anything.
+async function hubFetch(path, body) {
+  const opt = body === undefined ? {} : {
+    method: "POST", headers: { "Content-Type": "application/json", "X-Jarvis-Hub": "1" }, body: JSON.stringify(body),
+  };
+  const res = await fetch(path, opt);
+  let data = null;
+  try { data = await res.json(); } catch (e) { /* not JSON */ }
+  if (!res.ok || !data || data.ok === false) throw new Error((data && (data.error || data.message)) || ("HTTP " + res.status));
+  return data;
+}
+
+// A confirmation for the few things that remove list entries.  The page's own dialog; with none, nothing runs.
+async function askFirst(title, body, label) {
+  const ui = window.JarvisUI;
+  if (!ui || typeof ui.confirm !== "function") return false;
+  try { return !!(await ui.confirm({ title: title, body: body, level: "warn", focusCancel: true, confirmLabel: label })); }
+  catch (e) { return false; }
+}
+
+// ---- tabs
+
+function setTab(name, focus) {
+  if (["downloads", "providers", "history"].indexOf(name) === -1) return;
+  S.tab = name;
+  $("#hub").dataset.tab = name;
+  ["downloads", "providers", "history"].forEach((t) => {
+    const btn = $("#tab" + t.charAt(0).toUpperCase() + t.slice(1));
+    const on = t === name;
+    btn.setAttribute("aria-selected", on ? "true" : "false");
+    btn.tabIndex = on ? 0 : -1;
+    if (on && focus) btn.focus();
+  });
+  $("#body").hidden = name !== "downloads";
+  $("#providersPane").hidden = name !== "providers";
+  $("#historyPane").hidden = name !== "history";
+  clearInterval(S.provTimer);
+  if (name === "providers") {
+    loadProviders();
+    S.provTimer = setInterval(() => { if (!doc.hidden) loadProviders(); }, 5000);
+  } else if (name === "history") {
+    loadHistory();
+  }
+}
+$("#tabs").addEventListener("click", (e) => {
+  const b = e.target && e.target.closest ? e.target.closest("[data-tab]") : null;
+  if (b) setTab(b.getAttribute("data-tab"), false);
+});
+$("#tabs").addEventListener("keydown", (e) => {
+  const order = ["downloads", "providers", "history"];
+  const at = order.indexOf(S.tab);
+  let to = -1;
+  if (e.key === "ArrowRight") to = (at + 1) % order.length;
+  else if (e.key === "ArrowLeft") to = (at + order.length - 1) % order.length;
+  else if (e.key === "Home") to = 0;
+  else if (e.key === "End") to = order.length - 1;
+  if (to >= 0) { e.preventDefault(); setTab(order[to], true); }
+});
+
+// ---- the live stream (one `jarvis hub-admin watch` process behind /api/hub/stream feeds every open view)
+
+function setLiveTag() {
+  const t = $("#liveTag");
+  t.textContent = S.live ? "\u25CF Live" : "";
+  t.classList.toggle("is-live", S.live);
+  t.title = S.live ? "Updates arrive as they happen" : "";
+}
+
+function afterRowsChanged() {
+  if (S.pendingSelect && S.rows.some((x) => x.id === S.pendingSelect)) { S.selected = S.pendingSelect; S.detail = null; }
+  S.pendingSelect = "";
+  if (S.selected && !S.rows.some((x) => x.id === S.selected)) { S.selected = null; S.detail = null; }
+  S.lastError = "";
+  render();
+  const row = selectedRow();
+  if (row && (!S.detail || S.detail.id !== row.id || S.detail.state !== row.state || Date.now() - S.detail.at > 8000)) loadDetail();
+}
+
+function liveDown() {
+  if (!S.live) return;
+  S.live = false;
+  setLiveTag();
+  schedule(300);                                  // back to polling at once
+}
+
+function startLive() {
+  if (S.closed || S.es || typeof EventSource !== "function") return;
+  let es;
+  try { es = new EventSource("/api/hub/stream"); } catch (e) { return; }
+  S.es = es;
+  const parse = (ev) => { try { return JSON.parse(ev.data); } catch (e) { return null; } };
+  es.addEventListener("snapshot", (ev) => {
+    const m = parse(ev);
+    if (!m || !Array.isArray(m.items)) return;
+    S.live = true; S.liveAt = Date.now();
+    S.rows = m.items;
+    if (m.summary) S.summary = Object.assign({}, S.summary || {}, m.summary);
+    setLiveTag();
+    afterRowsChanged();
+  });
+  es.addEventListener("delta", (ev) => {
+    const m = parse(ev);
+    if (!m || !S.live) return;
+    S.liveAt = Date.now();
+    const byId = new Map(S.rows.map((r) => [r.id, r]));
+    (m.upsert || []).forEach((r) => byId.set(r.id, r));
+    (m.remove || []).forEach((id) => byId.delete(id));
+    S.rows = Array.from(byId.values());
+    if (m.summary) S.summary = Object.assign({}, S.summary || {}, m.summary);
+    afterRowsChanged();
+  });
+  es.addEventListener("beat", () => { S.liveAt = Date.now(); });
+  es.addEventListener("down", liveDown);
+  es.onerror = liveDown;                          // EventSource reconnects by itself; polling covers the gap
+  clearInterval(S.liveTimer);
+  S.liveTimer = setInterval(() => { if (S.live && Date.now() - S.liveAt > 45000) liveDown(); }, 10000);
+}
+
+// ---- Providers
+
+async function loadProviders() {
+  const r = await callTool("dl_providers", {});
+  if (S.closed) return;
+  if (r.ok === false) {
+    if (!S.provLoaded) $("#provSummary").textContent = r.error || "The providers couldn't be read.";
+    return;
+  }
+  S.providers = Array.isArray(r.providers) ? r.providers : [];
+  S.provLoaded = true;
+  renderProviders();
+}
+
+function renderProviders() {
+  const list = S.providers;
+  $("#provCount").textContent = list.length ? String(list.length) : "";
+  const bad = list.filter((p) => providerTone(p) === "bad").length;
+  const quiet = list.filter((p) => providerTone(p) === "quiet").length;
+  $("#provSummary").textContent = !list.length ? "No other tools report downloads here yet."
+    : list.length + (list.length === 1 ? " provider" : " providers") + (bad ? " \u00B7 " + bad + " with an error" : "") + (quiet ? " \u00B7 " + quiet + " gone quiet" : "");
+  if (!changed("providers", list)) return;
+  const box = $("#provList");
+  box.textContent = "";
+  if (!list.length) {
+    box.appendChild(el("div", { cls: "hist__empty", text: "Game installs and other tools that report into the hub appear here." }));
+    return;
+  }
+  list.forEach((p) => {
+    const tone = providerTone(p);
+    const toggle = el("button", {
+      cls: "btn btn--sm", text: p.enabled ? "Turn off" : "Turn on",
+      attrs: { type: "button", "aria-label": (p.enabled ? "Turn off " : "Turn on ") + (p.label || p.id) },
+      on: { click: async (e) => {
+        e.currentTarget.disabled = true;
+        const r = await callTool("dl_provider_prefs", { id: p.id, enabled: !p.enabled });
+        if (r.declined) toast("Cancelled", "info");
+        else if (r.ok === false) toast(r.error || "That didn't work", "warn");
+        loadProviders();
+      } },
+    });
+    const grid = el("div", { cls: "prov__grid" }, providerFacts(p).map((f) => el("div", { cls: "prov__kv" }, [
+      el("span", { text: f[0] + ": " }), el("b", { text: f[1] }),
+    ])));
+    box.appendChild(el("div", { cls: "prov is-" + tone, attrs: { "data-id": p.id } }, [
+      el("div", { cls: "prov__head" }, [
+        el("span", { cls: "prov__name", text: p.label || p.id }),
+        el("span", { cls: "prov__badge", text: providerBadge(p) }),
+        tone === "quiet" ? el("span", { cls: "prov__badge", text: "Not reporting" }) : null,
+        el("span", { cls: "prov__actions" }, [
+          toggle,
+          el("button", { cls: "btn btn--sm", text: "Settings\u2026", attrs: { type: "button" }, on: { click: openSettings } }),
+        ]),
+      ]),
+      grid,
+      p.last_error ? el("div", { cls: "prov__err", text: "Last error: " + String(p.last_error).slice(0, 240) }) : null,
+    ]));
+  });
+}
+$("#provRefresh").addEventListener("click", loadProviders);
+
+// ---- History
+
+let histTimer = 0;
+
+async function loadHistory() {
+  const h = S.hist;
+  if (h.busy) return;
+  h.busy = true;
+  try {
+    const r = await hubFetch("/api/hub/history?limit=500");
+    h.rows = Array.isArray(r.items) ? r.items : [];
+    h.more = !!r.more;
+    h.error = "";
+    h.loaded = true;
+  } catch (err) {
+    h.error = message(err);
+  } finally {
+    h.busy = false;
+  }
+  renderHistory();
+}
+
+function historyRows() {
+  return historyFilter(S.hist.rows, { state: S.hist.state, source: S.hist.source, search: S.hist.search });
+}
+
+function renderHistory() {
+  const h = S.hist;
+  const rows = historyRows();
+  // sources present in what is loaded
+  const sel = $("#histSource");
+  const keys = sourceList(h.rows);
+  if (changed("histsrc", keys)) {
+    sel.textContent = "";
+    sel.appendChild(el("option", { text: "Every source", attrs: { value: "" } }));
+    keys.forEach((k) => { const o = el("option", { text: k.label, attrs: { value: k.key } }); sel.appendChild(o); });
+    sel.value = h.source;
+  }
+  $("#histCount").textContent = !h.loaded ? (h.error ? "" : "reading\u2026")
+    : rows.length + (rows.length === 1 ? " entry" : " entries") + (h.more ? " (the newest " + h.rows.length + " loaded)" : "");
+  $("#histCsv").disabled = !rows.length;
+  $("#histJson").disabled = !rows.length;
+  const box = $("#histList");
+  if (!changed("hist", [rows, h.error, h.loaded])) return;
+  box.textContent = "";
+  if (h.error) { box.appendChild(el("div", { cls: "hist__empty", text: "The history couldn't be read: " + h.error })); return; }
+  if (!h.loaded) return;
+  if (!rows.length) {
+    box.appendChild(el("div", { cls: "hist__empty", text: h.rows.length ? "Nothing matches this filter." : "Nothing has finished yet." }));
+    return;
+  }
+  rows.forEach((r) => box.appendChild(historyRow(r)));
+}
+
+function historyRow(r) {
+  const tone = r.state === "done" ? "ok" : r.state;
+  const thumb = r.has_thumb
+    ? el("img", { cls: "hist__thumb", attrs: { src: "/api/hub/thumb/" + encodeURIComponent(r.id), alt: "", loading: "lazy" } })
+    : el("span", { cls: "hist__thumb", text: KIND_ICON[r.kind] || KIND_ICON.other, attrs: { "aria-hidden": "true" } });
+  const acts = [];
+  rowActions(r).filter((a) => ["open", "reveal", "retry"].indexOf(a.verb) !== -1).forEach((a) => {
+    acts.push(el("button", {
+      cls: "rbtn", text: a.label, attrs: { type: "button", "aria-label": a.label + ": " + (r.title || r.id) },
+      on: { click: async (e) => { e.currentTarget.disabled = true; await runAction(r, a); loadHistory(); } },
+    }));
+  });
+  if (r.owner === "hub" && r.state === "done") {
+    acts.push(el("a", {
+      cls: "rbtn", text: "Save a copy", title: "Download this file through the browser",
+      attrs: { href: "/api/hub/file/" + encodeURIComponent(r.id), download: "", "aria-label": "Save a copy of " + (r.title || r.id) },
+    }));
+  }
+  if (r.owner === "hub") {
+    if (r.state !== "failed" || !acts.some((x) => x.textContent === "Retry")) {
+      acts.push(el("button", {
+        cls: "rbtn", text: "Download again", attrs: { type: "button", "aria-label": "Download again: " + (r.title || r.id) },
+        on: { click: async (e) => {
+          e.currentTarget.disabled = true;
+          try { await hubFetch("/api/hub/redownload", { id: r.id }); toast("Queued again", "info"); schedule(300); }
+          catch (err) { toast(message(err), "warn"); }
+          e.currentTarget.disabled = false;
+        } },
+      }));
+    }
+    acts.push(el("button", {
+      cls: "rbtn rbtn--danger", text: "Remove", title: "Remove from the list. The file is not deleted.",
+      attrs: { type: "button", "aria-label": "Remove from history: " + (r.title || r.id) },
+      on: { click: async () => {
+        if (!(await askFirst("Remove from the history?", (r.title || r.id) + "\n\nOnly the list entry goes. The downloaded file is not touched.", "Remove"))) return;
+        try { await hubFetch("/api/hub/history/remove", { ids: [r.id] }); toast("Removed from the history", "info"); }
+        catch (err) { toast(message(err), "warn"); }
+        loadHistory();
+      } },
+    }));
+  }
+  return el("div", { cls: "hist__row state-" + r.state + " tone-" + tone, attrs: { role: "listitem", "data-id": r.id } }, [
+    thumb,
+    el("div", { cls: "hist__main" }, [
+      el("div", { cls: "hist__title", text: r.title || r.id, title: r.title || r.id }),
+      el("div", { cls: "hist__meta", text: historyMeta(r), title: historyMeta(r) }),
+    ]),
+    el("div", { cls: "hist__actions" }, acts),
+  ]);
+}
+
+function saveFile(name, mime, text) {
+  const url = URL.createObjectURL(new Blob([text], { type: mime }));
+  const a = doc.createElement("a");
+  a.href = url; a.download = name;
+  doc.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 2000);
+}
+$("#histCsv").addEventListener("click", () => saveFile("download-history.csv", "text/csv;charset=utf-8", historyCsv(historyRows())));
+$("#histJson").addEventListener("click", () => saveFile("download-history.json", "application/json", historyJson(historyRows())));
+$("#histState").addEventListener("change", (e) => { S.hist.state = e.target.value; renderHistory(); });
+$("#histSource").addEventListener("change", (e) => { S.hist.source = e.target.value; renderHistory(); });
+$("#histSearch").addEventListener("input", (e) => {
+  clearTimeout(histTimer);
+  const v = e.target.value;
+  histTimer = setTimeout(() => { S.hist.search = v; renderHistory(); }, 150);
+});
+$("#histClear").addEventListener("click", async () => {
+  const days = Number.parseInt($("#histDays").value, 10);
+  if (!Number.isFinite(days) || days < 1 || days > 3650) { toast("Enter a number of days from 1 to 3650", "warn"); return; }
+  try {
+    const dry = await hubFetch("/api/hub/history/clear", { days: days, dry_run: true });
+    if (!dry.would_remove) { toast("Nothing is older than " + days + " days", "info"); return; }
+    if (!(await askFirst("Clear old history?", "Remove " + dry.would_remove + " list " + (dry.would_remove === 1 ? "entry" : "entries")
+      + " older than " + days + " days?\n\nOnly the list entries go. Downloaded files are not touched.", "Clear"))) return;
+    const r = await hubFetch("/api/hub/history/clear", { days: days });
+    toast("Removed " + r.removed + " from the history", "info");
+  } catch (err) { toast(message(err), "warn"); }
+  loadHistory();
+});
+
+// ---- the waiting queue: drag a row, or use its arrows (phase 9 option B)
+
+async function sendOrder(ids) {
+  try { await hubFetch("/api/hub/reorder", { ids: ids }); schedule(300); }
+  catch (err) { toast(message(err), "warn"); }
+}
+
+function moveQueued(id, delta) {
+  const next = stepInOrder(queueOrder(S.rows), id, delta);
+  if (next) sendOrder(next);
+}
+
+function wireDrag(rowEl, row) {
+  rowEl.addEventListener("dragstart", (e) => {
+    S.dragId = row.id;
+    S.hold = Date.now() + 60000;                  // don't rebuild the list under the drag
+    try { e.dataTransfer.setData("application/x-jarvis-hub-row", row.id); e.dataTransfer.effectAllowed = "move"; } catch (err) { /* old browser */ }
+    rowEl.classList.add("is-dragging");
+  });
+  rowEl.addEventListener("dragend", () => {
+    S.dragId = "";
+    S.hold = 0;
+    rowEl.classList.remove("is-dragging");
+    $("#list").querySelectorAll(".drop-before,.drop-after").forEach((n) => n.classList.remove("drop-before", "drop-after"));
+    render();
+  });
+  rowEl.addEventListener("dragover", (e) => {
+    if (!S.dragId || S.dragId === row.id) return;
+    e.preventDefault();
+    const box = rowEl.getBoundingClientRect();
+    const after = e.clientY > box.top + box.height / 2;
+    rowEl.classList.toggle("drop-after", after);
+    rowEl.classList.toggle("drop-before", !after);
+  });
+  rowEl.addEventListener("dragleave", () => rowEl.classList.remove("drop-before", "drop-after"));
+  rowEl.addEventListener("drop", (e) => {
+    if (!S.dragId || S.dragId === row.id) return;
+    e.preventDefault();
+    e.stopPropagation();
+    const after = rowEl.classList.contains("drop-after");
+    const next = moveInOrder(queueOrder(S.rows), S.dragId, row.id, after);
+    S.dragId = "";
+    S.hold = 0;
+    sendOrder(next);
+  });
+}
+
+host.onClose(() => {
+  S.closed = true; clearTimeout(S.timer); clearTimeout(S.holdTimer); clearTimeout(hintTimer);
+  clearInterval(S.liveTimer); clearInterval(S.provTimer); clearTimeout(histTimer);
+  if (S.es) { S.es.close(); S.es = null; }
+});
 
 (async function start() {
   await loadPrefs();
   $("#groupBy").value = S.groupBy;
   render();
   poll();
+  startLive();
 })();

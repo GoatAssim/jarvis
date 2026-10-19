@@ -27,6 +27,9 @@ tool_registry or tools, so an action file can import this package at module leve
     daemon.py       the long-lived process: scheduler, workers, retries, housekeeping
     demo.py         the fake-progress demo provider (a pure function of elapsed time)
     doctor.py       hub_doctor's checks
+    stremio/        phases 4 and 7: config (~/.jarvis/stremio.json, loopback only), links (magnets,
+                    streams, file picking, deep links), server (the streaming server's API), player
+                    (mpv / VLC).  The engine itself is engines/stremio.py.
     ../hub_client.py  the small client a tool / provider process uses to REPORT progress
 
 Who writes what (plan section 4.2)

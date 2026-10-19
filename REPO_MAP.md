@@ -370,7 +370,18 @@ jarvis-cli/jarvis/
                               dl_pause / dl_resume / dl_cancel / dl_retry / dl_schedule / dl_open / dl_settings, hub_doctor,
                               hub_demo_provider. Thin: every rule is in hub/service.py. Declares the Menu >
                               Downloads panel (hub_ui/, shipped as package data) and the `hub` daemon
+                              download_status_card.py  Download Hub phase 8 (17.3-4): `present_download_status` -- one live card in the web chat
+                              (read-only; prints a `download_status` media line, the page follows the download itself)
         _hub_daemon.py        the runner DAEMONS launches (underscore = not a tool)
+        stremio_stack.py      Download Hub phase 4 (group `stremio`): stack_status / stack_start / stack_stop /
+                              stack_doctor, stremio_prepare (confirm-gated), server_cache, server_cache_clear
+                              (confirm-gated); DAEMONS `server` and `web`; the /stack command. An already-open
+                              Stremio app reads "already up", never a duplicate start
+        _stremio_server.py    runners the two Stremio DAEMONS launch (read ~/.jarvis/stremio.json at launch)
+        _stremio_web.py
+        stremio_open.py       phase 7: stremio_open (a stremio-web screen / episode stream list in the browser)
+        play_media.py         phase 7: play_episode (tier 3 mpv/VLC on a finished file or the server's link; tier 2
+                              stremio-web player link; tier 1 episode stream list), play_local; the /play command
         notification_test.py  L.30: the `notification_test` tool + Menu > Notification test (notification_test_ui/, also
                               package data): send a test notification through the real notifier at any level, through any
                               type, with any flag, with a preview from `notifier.resolve_delivery()`; never a recipient.
@@ -379,15 +390,26 @@ jarvis-cli/jarvis/
                               Laid out like the Scheduled panel (JARVIS_DOWNLOAD_HUB.md 17.1): left = search, status
                               and source chips, the list; middle = add form or the selected download; right = overview.
                               Declared `"size": "wide"` so it opens in the big panel size
-
+                              Phase 8: Downloads / Providers / History tabs, live updates over /api/hub/stream (polling is the
+                              fallback), drag-to-reorder of the waiting queue; its settings live in Settings > Downloads
+ 
+    hub_admin.py          Download Hub web back end behind `jarvis hub-admin <op>` (JSON on stdin / stdout; `watch` = JSON lines):
+                          the chat status card, the panel's push stream, thumbnails and files by id, History, queue order,
+                          the Settings read. Reads and four row-only writes (refused when unattended); no model tool
+                          reaches it.
+                          Tests: test_hub_admin.py, test_download_status_card.py
     hub/                  Download Hub core (import-light; see hub/__init__.py for the module map and where
                           later phases plug in): store.py (sqlite, WAL), states.py (what a row may say),
                           netguard.py (SSRF guard), naming.py, router.py, service.py, daemon.py (scheduler,
                           workers, THE retry policy), demo.py, doctor.py, settings.py, engines/ (one module
-                          per engine, discovered; http.py today). hub_client.py (next to this folder) is the
+                          per engine, discovered; http.py, ytdlp.py, stremio.py). stremio/ (phases 4 and 7:
+                          config.py ~/.jarvis/stremio.json, loopback only; links.py magnets / streams / file
+                          picking / deep links; server.py the streaming server's HTTP API; player.py mpv / VLC).
+                          hub_client.py (next to this folder) is the
                           never-raising client a tool uses to report its own downloads.
                           Tests: test_hub_core / test_hub_http_engine / test_hub_daemon /
-                          test_hub_service_tools / test_hub_daemon_process + verify_hub_panel.js
+                          test_hub_service_tools / test_hub_daemon_process + verify_hub_panel.js;
+                          Stremio: test_hub_stremio_links / _engine / _tools (tests/_hub_fake_stremio.py is a fake server)
         person_memory_tools.py  L.21-L.23 owner-only: person_remember/forget/instruct/recall/
                               review + await_reply (own `person_memory` group)
         workspace_tools.py    NEW — daemons, log search, backlog as AI tools
@@ -412,6 +434,8 @@ web/
     public/code-editor.js (+ .css)   the Tool Manager's code editor (L.33): Python highlighting, VS Code-style editing, completions, inline Jarvis suggestions; pure helpers in JarvisCodeEditor._pure
     public/agent-panel.js (+ .css)   the Focus layout's Agent side panel: while dev_agent / code_agent runs it shows the codebase root, the file being worked on, a file tree with a status per file, and a short log. Fed by app.js from the existing JARVIS_MEDIA dev_agent events (no server route); reducer + tree builder in JarvisAgentPanel._pure
     public/custom-tools.js       theme gallery for the Skin modal (the old Custom Tools panel moved to tool-manager.js)
+    public/download-status-card.js/.css  Download Hub (phase 8): the live in-chat download card (render / restore); follows /api/hub/stream, falls back to /api/hub/card; its formatting half is a copy of the panel's (tests/verify_hub_panel.js checks they agree)
+    public/downloads-settings.js     Download Hub (phase 8): Settings > Downloads, registered through window.JarvisSettingsSections; rows come from /api/hub/settings (what is writable), writes go through dl_prefs / dl_settings
     public/settings.js (+ .css)      L.43: the Settings modal (replaced the Skin modal): section rail, search, AI / Layout / Notifications / Tools / Integrations / Memory / About panes and the Advanced tab (Files, Tunables, Plumbing, History); talks only to /api/settings/*; the Skin section stays app.js's
     public/test-checklist.js     Menu -> Test Checklist (UI, browser-only results)
     public/test-checklist-data.js  the SHIPPED checklist catalogue: an entry per

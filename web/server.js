@@ -2840,6 +2840,245 @@ app.delete("/api/backlog/:id", requireJarvis, async (req, res) => {
   return parseJarvisJSON(result, res, "Couldn't remove that item.");
 });
 
+// Download Hub web back end (phase 8 item 17.3 + phase 9 option B). Every route goes through
+// `jarvis hub-admin` (jarvis/hub_admin.py owns the rules). The reads (card, stream, thumbnail, file) need
+// a loopback Host and, when the browser says so, a same-origin request -- they must work from an <img>, an
+// EventSource and a plain link, which cannot send a header. The writes (history, re-download, queue order)
+// also need the X-Jarvis-Hub header, like Settings and Calendars, so another web page can't make the browser
+// change them. A thumbnail or a file is looked up by download id; the browser never sends a path. No model
+// tool reaches these routes.
+function hubOriginOk(req, res) {
+  const hostName = String(req.headers.host || "").replace(/:\d+$/, "");
+  if (!LOOPBACK_HOST_RE.test(hostName)) {
+    res.status(403).json({ error: "The Download Hub can only be reached at the local address." });
+    return false;
+  }
+  const origin = req.headers.origin;
+  if (origin !== undefined) {
+    let ok = false;
+    try {
+      const u = new URL(origin);
+      ok = LOOPBACK_HOST_RE.test(u.hostname) && (u.port || "80") === String(PORT);
+    } catch { ok = false; }
+    if (!ok) {
+      res.status(403).json({ error: "The Download Hub can only be used from the Jarvis page itself." });
+      return false;
+    }
+  }
+  const site = req.headers["sec-fetch-site"];
+  if (site !== undefined && site !== "same-origin" && site !== "none") {
+    res.status(403).json({ error: "The Download Hub can only be used from the Jarvis page itself." });
+    return false;
+  }
+  return true;
+}
+function requireHubRead(req, res, next) { if (hubOriginOk(req, res)) next(); }
+function requireHubWrite(req, res, next) {
+  if (!hubOriginOk(req, res)) return;
+  if (req.headers["x-jarvis-hub"] !== "1") {
+    return res.status(403).json({ error: "The Download Hub can only be changed from the Jarvis page itself." });
+  }
+  next();
+}
+
+const HUB_ID_RE = /^[A-Za-z0-9_.:\-]{1,120}$/;
+const HUB_STATUS = { unattended: 403 };
+
+async function hubAdminRaw(op, payload, timeoutMs = 20000) {
+  const result = await runJarvisOnce(["hub-admin", op], timeoutMs, {}, JSON.stringify(payload || {}));
+  let parsed;
+  try { parsed = JSON.parse(result.stdout); }
+  catch (e) { return { status: 500, body: { ok: false, error: result.stderr || result.error || e.message } }; }
+  if (parsed && parsed.ok === false) return { status: HUB_STATUS[parsed.code] || 400, body: parsed };
+  return { status: 200, body: parsed };
+}
+async function hubAdmin(res, op, payload, timeoutMs) {
+  const { status, body } = await hubAdminRaw(op, payload, timeoutMs);
+  return res.status(status).json(body);
+}
+function hubIds(value, max = 200) {
+  const raw = Array.isArray(value) ? value : String(value || "").split(",");
+  const out = [];
+  for (const v of raw) {
+    const t = String(v || "").trim();
+    if (HUB_ID_RE.test(t) && !out.includes(t)) out.push(t);
+    if (out.length >= max) break;
+  }
+  return out;
+}
+function hubText(value, max) { return typeof value === "string" ? value.slice(0, max) : ""; }
+
+app.get("/api/hub/card", requireHubRead, requireJarvis, (req, res) => {
+  const group = HUB_ID_RE.test(String(req.query.group || "")) ? String(req.query.group) : "";
+  return hubAdmin(res, "card", { ids: hubIds(req.query.ids, 8), group, query: hubText(req.query.query, 80) });
+});
+app.get("/api/hub/list", requireHubRead, requireJarvis, (req, res) => hubAdmin(res, "list", { limit: 500 }));
+app.get("/api/hub/settings", requireHubRead, requireJarvis, (req, res) => hubAdmin(res, "settings", {}));
+app.get("/api/hub/history", requireHubRead, requireJarvis, (req, res) => {
+  const states = hubText(req.query.states, 80).split(",").filter(Boolean);
+  const limit = Number.parseInt(String(req.query.limit || ""), 10);
+  const offset = Number.parseInt(String(req.query.offset || ""), 10);
+  return hubAdmin(res, "history", {
+    states, kind: hubText(req.query.kind, 20), provider: hubText(req.query.provider, 60),
+    search: hubText(req.query.search, 80),
+    limit: Number.isFinite(limit) ? limit : 300, offset: Number.isFinite(offset) ? offset : 0,
+  });
+});
+
+app.get("/api/hub/thumb/:id", requireHubRead, requireJarvis, async (req, res) => {
+  if (!HUB_ID_RE.test(req.params.id)) return res.status(400).end();
+  const { status, body } = await hubAdminRaw("thumb", { id: req.params.id });
+  if (status !== 200 || !body.ok) return res.status(404).end();
+  const buf = Buffer.from(String(body.data || ""), "base64");
+  res.set({
+    "Content-Type": body.mime,
+    "Content-Length": String(buf.length),
+    "Cache-Control": "private, max-age=300",
+    "X-Content-Type-Options": "nosniff",
+    "Content-Security-Policy": "default-src 'none'; sandbox",
+  });
+  return res.end(buf);
+});
+
+app.get("/api/hub/file/:id", requireHubRead, requireJarvis, async (req, res) => {
+  if (!HUB_ID_RE.test(req.params.id)) return res.status(400).json({ error: "That isn't a download id." });
+  const { status, body } = await hubAdminRaw("file", { id: req.params.id });
+  if (status !== 200 || !body.ok) return res.status(status === 200 ? 404 : status).json(body);
+  res.set("X-Content-Type-Options", "nosniff");
+  return res.download(body.path, body.name, (err) => {
+    if (err && !res.headersSent) res.status(404).json({ error: "The file couldn't be sent." });
+  });
+});
+
+app.post("/api/hub/history/remove", requireHubWrite, requireJarvis, (req, res) => hubAdmin(res, "history_remove", { ids: hubIds(req.body?.ids) }));
+app.post("/api/hub/history/clear", requireHubWrite, requireJarvis, (req, res) => {
+  const days = Number.parseInt(String(req.body?.days ?? ""), 10);
+  return hubAdmin(res, "history_clear", { days: Number.isFinite(days) ? days : null, dry_run: req.body?.dry_run === true });
+});
+app.post("/api/hub/redownload", requireHubWrite, requireJarvis, (req, res) => hubAdmin(res, "redownload", { id: hubText(req.body?.id, 120) }, 30000));
+app.post("/api/hub/reorder", requireHubWrite, requireJarvis, (req, res) => hubAdmin(res, "reorder", { ids: hubIds(req.body?.ids) }));
+
+// The push stream: ONE `jarvis hub-admin watch` process feeds every open panel and chat card. It starts
+// with the first subscriber and stops ten seconds after the last one leaves. A subscriber may follow only
+// some downloads (?ids=a,b or ?group=g, what a chat card does); without a filter it gets everything.
+const hubWatch = { child: null, clients: new Set(), items: new Map(), summary: null, ready: false, buf: "", stopTimer: null, restarts: 0, restartTimer: null };
+const HUB_MAX_CLIENTS = 24;
+
+function hubSse(client, event, data) {
+  try { client.res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`); } catch { /* closed; its close handler removes it */ }
+}
+function hubWants(client, row) {
+  if (!client.filtered) return true;
+  return client.ids.has(row.id) || (row.group_id && client.groups.has(row.group_id));
+}
+function hubBroadcast(message) {
+  for (const client of hubWatch.clients) {
+    if (message.type === "snapshot") {
+      const items = [...hubWatch.items.values()].filter((r) => hubWants(client, r));
+      client.known = new Set(items.map((r) => r.id));
+      hubSse(client, "snapshot", { items, summary: client.filtered ? undefined : hubWatch.summary, at: message.at });
+    } else if (message.type === "delta") {
+      const upsert = (message.upsert || []).filter((r) => hubWants(client, r));
+      for (const r of upsert) client.known.add(r.id);
+      const remove = (message.remove || []).filter((id) => client.known.delete(id));
+      if (upsert.length || remove.length || (message.summary && !client.filtered)) {
+        hubSse(client, "delta", { upsert, remove, summary: client.filtered ? undefined : message.summary, at: message.at });
+      }
+    } else if (message.type === "beat") {
+      hubSse(client, "beat", { at: message.at });
+    }
+  }
+}
+function hubWatchLine(line) {
+  let msg;
+  try { msg = JSON.parse(line); } catch { return; }
+  if (!msg || typeof msg !== "object") return;
+  if (msg.type === "snapshot") {
+    hubWatch.items = new Map((msg.items || []).map((r) => [r.id, r]));
+    hubWatch.summary = msg.summary || null;
+    hubWatch.ready = true;
+    hubWatch.restarts = 0;
+  } else if (msg.type === "delta") {
+    for (const r of msg.upsert || []) hubWatch.items.set(r.id, r);
+    for (const id of msg.remove || []) hubWatch.items.delete(id);
+    if (msg.summary) hubWatch.summary = msg.summary;
+  } else if (msg.type !== "beat") {
+    return;
+  }
+  hubBroadcast(msg);
+}
+function hubWatchStart() {
+  if (hubWatch.child || hubWatch.clients.size === 0) return;
+  clearTimeout(hubWatch.stopTimer);
+  let child;
+  try {
+    child = spawn(JARVIS.cmd, [...JARVIS.args, "hub-admin", "watch"], {
+      windowsHide: true, env: { ...process.env, PYTHONUNBUFFERED: "1", PYTHONIOENCODING: "utf-8" },
+    });
+  } catch { return; }
+  hubWatch.child = child;
+  hubWatch.buf = "";
+  child.stdout?.on("data", (d) => {
+    hubWatch.buf += d.toString();
+    let i;
+    while ((i = hubWatch.buf.indexOf("\n")) >= 0) {
+      const line = hubWatch.buf.slice(0, i).trim();
+      hubWatch.buf = hubWatch.buf.slice(i + 1);
+      if (line) hubWatchLine(line);
+    }
+    if (hubWatch.buf.length > 8 * 1024 * 1024) hubWatch.buf = "";
+  });
+  child.stderr?.on("data", () => { /* diagnostics are not for the page */ });
+  const ended = () => {
+    if (hubWatch.child !== child) return;
+    hubWatch.child = null;
+    hubWatch.ready = false;
+    if (hubWatch.clients.size === 0) return;
+    // Tell the subscribers the stream broke (the panel falls back to polling) and try again, slowly.
+    for (const client of hubWatch.clients) hubSse(client, "down", { at: Date.now() / 1000 });
+    hubWatch.restarts += 1;
+    if (hubWatch.restarts > 5) return;
+    clearTimeout(hubWatch.restartTimer);
+    hubWatch.restartTimer = setTimeout(hubWatchStart, Math.min(30000, 2000 * hubWatch.restarts));
+  };
+  child.on("error", ended);
+  child.on("exit", ended);
+}
+function hubWatchStopSoon() {
+  clearTimeout(hubWatch.stopTimer);
+  hubWatch.stopTimer = setTimeout(() => {
+    if (hubWatch.clients.size > 0) return;
+    clearTimeout(hubWatch.restartTimer);
+    const child = hubWatch.child;
+    hubWatch.child = null;
+    hubWatch.ready = false;
+    hubWatch.items = new Map();
+    if (child) { try { child.kill(); } catch { /* already gone */ } }
+  }, 10000);
+}
+
+app.get("/api/hub/stream", requireHubRead, requireJarvis, (req, res) => {
+  if (hubWatch.clients.size >= HUB_MAX_CLIENTS) return res.status(429).json({ error: "Too many open Download Hub views." });
+  const ids = hubIds(req.query.ids, 16);
+  const groups = hubIds(req.query.group, 4);
+  const client = { res, filtered: ids.length > 0 || groups.length > 0, ids: new Set(ids), groups: new Set(groups), known: new Set() };
+  res.set({ "Content-Type": "text/event-stream", "Cache-Control": "no-cache, no-transform", Connection: "keep-alive", "X-Accel-Buffering": "no" });
+  res.flushHeaders?.();
+  res.write("retry: 3000\n\n");
+  hubWatch.clients.add(client);
+  req.on("close", () => {
+    hubWatch.clients.delete(client);
+    if (hubWatch.clients.size === 0) hubWatchStopSoon();
+  });
+  if (hubWatch.ready) hubBroadcastTo(client);
+  hubWatchStart();
+});
+function hubBroadcastTo(client) {
+  const items = [...hubWatch.items.values()].filter((r) => hubWants(client, r));
+  client.known = new Set(items.map((r) => r.id));
+  hubSse(client, "snapshot", { items, summary: client.filtered ? undefined : hubWatch.summary, at: Date.now() / 1000 });
+}
+
 // Calendars panel (L.54). Every route goes through `jarvis calendar-admin`, which owns
 // the rules (calendar_tools.admin). The linked-calendar URLs are secrets: they come back
 // MASKED, and they reach the CLI on stdin, never on argv where a process list shows them.

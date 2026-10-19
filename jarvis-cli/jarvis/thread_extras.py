@@ -22,7 +22,7 @@ import time
 # action, ...) comes from somewhere other than the runs, so a rebuild keeps
 # the saved copy of those and only re-derives these.
 TOOL_DERIVED_TYPES = frozenset({
-    "confirm", "screenshot", "organizeJson", "download", "presentFile",
+    "confirm", "screenshot", "organizeJson", "download", "presentFile", "downloadStatus",
     "devAgent", "declinedAction",
 })
 
@@ -125,6 +125,11 @@ def extras_from_runs(runs):
                     "path": result.get("path"),
                 },
             })
+        elif name == "present_download_status" and result.get("ok") and isinstance(result.get("card"), dict):
+            # The live Download Hub status card: the tool's own result carries the ids to follow and the
+            # last known status (download_status_card.card_line_payload), which is exactly what
+            # download-status-card.js's restore() takes. After a reload it draws from this, then resumes live.
+            extras.append({"type": "downloadStatus", "data": result["card"]})
         elif name == "dev_agent" and isinstance(result.get("steps"), list):
             # §3.6 plan §6. `result` here is run["result"] — the FULL,
             # pre-shaping copy (see the ordering fix in _executor above) —

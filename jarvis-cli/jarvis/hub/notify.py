@@ -18,6 +18,10 @@ What it does own:
       options.notify_events    which of started / done / failed / stalled fire for it
     A download with its own choices is announced even when the global switch is off, and is never
     merged into another download's message (it can be going somewhere else).
+  * the one provider rule: a STEAM UPDATE is announced only when it is big enough.  The owner's
+    threshold is the Steam provider's own setting `notify_min_update_gb` (settings.py: default
+    1 GB, 0 = every update, changed with `dl_provider_prefs`).  Installs of new games are not
+    subject to it and follow the normal `notify.done` rules.  Steam failures are never held back.
 
 The daemon calls `Dispatcher.scan()` once a tick; everything else is plain functions so the
 tests can drive it with a fake clock and a fake `deliver`.
@@ -26,7 +30,7 @@ tests can drive it with a fake clock and a fake `deliver`.
 import os
 import time
 
-from . import states
+from . import settings as settings_mod, states
 
 EVENT_LABELS = {
     "started": "Download started",
@@ -57,6 +61,33 @@ def _look_kwargs(event):
     look = EVENT_LOOKS.get(event)
     return {"look": look[0], "tone": look[1]} if look else {}
 _SHOW_TITLES = 3
+_GAME_ACTIONS = {"install": "installing", "update": "updating"}
+
+
+def game_action(item):
+    """'install' / 'update' for a game row a provider reports (Steam says which in `subtitle`),
+    else ''.  Only provider-owned game rows: a hub download is never called an install."""
+    if item.get("owner") == "hub" or item.get("kind") != "game":
+        return ""
+    word = str(item.get("subtitle") or "").strip().lower()
+    return word if word in _GAME_ACTIONS else ""
+
+
+def item_bytes(item):
+    """How big the row is: the larger of what was fetched and what was announced to fetch."""
+    return max(int(item.get("bytes_total") or 0), int(item.get("bytes_done") or 0))
+
+
+def below_update_threshold(item, provider_settings):
+    """True when this is a Steam UPDATE smaller than the owner's `notify_min_update_gb`.
+
+    A size of 0 (Steam sometimes runs a queued background update with nothing to fetch) is below
+    any threshold above 0, so it stays quiet unless the owner asked for every update.  Anything
+    that is not a Steam update (an install, another provider, a hub download) is never below it.
+    """
+    if item.get("provider") != "steam" or game_action(item) != "update":
+        return False
+    return item_bytes(item) < settings_mod.steam_min_update_bytes(provider_settings)
 
 
 def default_deliver(title, message, *, level=None, failed=False, channels=None, look=None, tone=None):
@@ -111,6 +142,9 @@ def compose(event, entries, extra=None):
         e = entries[0]
         if event == "done":
             tail = " (%s)" % _human_bytes(e["size"]) if e.get("size") else ""
+            if e.get("action") in _GAME_ACTIONS:       # "Hades II finished installing."
+                return ("Game %s" % ("installed" if e["action"] == "install" else "updated"),
+                        "%s finished %s%s." % (e["name"], _GAME_ACTIONS[e["action"]], tail))
             where = (" Saved in %s." % e["folder"]) if e.get("folder") else ""
             return (label, "%s%s.%s" % (e["name"], tail, where))
         if event == "failed":
@@ -152,6 +186,7 @@ class Dispatcher:
         self._was_busy = False
         self._burst = {"done": 0, "failed": 0}   # finishes since the queue last went idle
         self._since = None
+        self._provider_cache = {}           # provider id -> its settings block, for one pass
 
     # ------------------------------------------------------------ baseline
 
@@ -164,6 +199,20 @@ class Dispatcher:
                 self.store.set_setting_raw("notify_state", state)
             self._since = float(state["since"])
         return self._since
+
+    def _provider_settings(self, provider_id):
+        """A provider's own settings block (the owner's choices), read once per pass."""
+        if provider_id not in self._provider_cache:
+            try:
+                self._provider_cache[provider_id] = (self.store.get_provider(provider_id) or {}).get("settings") or {}
+            except Exception:  # noqa: BLE001 - a notification must never break the daemon
+                self._provider_cache[provider_id] = {}
+        return self._provider_cache[provider_id]
+
+    def _quiet_update(self, event, item):
+        """Is this a finished Steam update that is too small to announce?"""
+        return (event == "done" and item.get("owner") != "hub"
+                and below_update_threshold(item, self._provider_settings(item.get("provider"))))
 
     # ------------------------------------------------------------ settings helpers
 
@@ -179,6 +228,7 @@ class Dispatcher:
         Returns how many messages were handed to the notifier."""
         cfg = settings.get("notify") or {}
         master = bool(cfg.get("enabled", True))
+        self._provider_cache = {}                         # the owner may have changed a threshold since the last pass
         since = self.since()
         sent = 0
         queued_group_checks = []
@@ -187,7 +237,9 @@ class Dispatcher:
             for item in self.store.unclaimed(event, state_name, since=since, stamp_column=column):
                 if not self.store.claim_notice(item["id"], event, item.get(column) or 0):
                     continue
-                if not _channels_of(item):               # a download announced elsewhere isn't part of the queue's tally
+                if not _channels_of(item) and not self._quiet_update(event, item):
+                    # a download announced elsewhere, or a small Steam update nobody is told about,
+                    # isn't part of the queue's tally
                     self._burst[event] += 1
                 self._consider(event, item, cfg, settings, master)
                 if item.get("group_id"):
@@ -218,6 +270,8 @@ class Dispatcher:
         mine = item["owner"] == "hub"
         if not mine and (event not in ("done", "failed") or not cfg.get("providers", True)):
             return
+        if self._quiet_update(event, item):
+            return                                       # a Steam update under the owner's size threshold
         options = item.get("options") or {}
         override = options.get("notify")
         if override == "off":
@@ -241,7 +295,8 @@ class Dispatcher:
             took = (item.get("finished_at") or 0) - (item.get("started_at") or item.get("created_at") or 0)
             if cfg.get("min_seconds", 0) and took < cfg["min_seconds"]:
                 return
-        entry = {"name": _name(item), "size": item.get("bytes_done") or item.get("bytes_total") or 0,
+        entry = {"name": _name(item), "size": item_bytes(item),
+                 "action": game_action(item),
                  "folder": os.path.basename(item.get("dest_dir") or "") if item.get("dest_dir") else "",
                  "error": (item.get("error") or "")[:160]}
         if forced and not self._event_cfg(settings, event)[0]:

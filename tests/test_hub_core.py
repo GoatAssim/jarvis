@@ -22,6 +22,8 @@ from pathlib import Path
 HOME = tempfile.mkdtemp(prefix="jarvis-hub-core-")
 os.environ["JARVIS_HUB_NO_DELIVER"] = "1"      # tests never fire real notifications
 os.environ["HOME"] = HOME
+# These tests assume no Stremio server is running (the owner's own may be): point the engine at a closed port.
+os.environ["JARVIS_STREMIO_SERVER_URL"] = "http://127.0.0.1:9"
 os.environ["USERPROFILE"] = HOME
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -543,8 +545,8 @@ def test_router():
     check("a direct link goes to the HTTP engine", r["ok"] and r["engine"] == "http" and "direct link" in r["reason"])
     check("surrounding whitespace is tolerated", router.route("  https://example.com/a  ")["ok"])
     m = router.route("magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567")
-    check("a magnet link says which engine it needs and that it isn't installed",
-          not m["ok"] and m["engine"] == "stremio" and "stremio" in m["problem"] and "phase 4" in m["problem"])
+    check("a magnet link goes to the stremio engine and, with its server down, says how to start it",
+          not m["ok"] and m["engine"] == "stremio" and "isn't ready" in m["problem"] and "stack_start" in m["problem"])
     check("a bare infohash is recognised as a torrent", not router.route("0123456789abcdef0123456789abcdef01234567")["ok"])
     y = router.route("https://www.youtube.com/watch?v=abc")
     check("a YouTube page is never fed to the HTTP engine (it goes to yt-dlp, or says yt-dlp isn't ready)",

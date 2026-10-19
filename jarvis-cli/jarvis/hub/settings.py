@@ -34,9 +34,12 @@ DEFAULTS = {
     "schedule": [],
     "retention": {"keep_history_days": 90, "auto_delete_files": False},
     "allow_private_hosts": [],   # the SSRF allow-list ("host" or "host:port")
-    "http": {"stall_seconds": 60, "max_retries": 3, "connect_timeout": 15},
-    "stremio": {"mode": "save", "stall_seconds": 90, "max_retries": 3},   # phase 4
-    "providers": {},             # phase 5: per-provider blocks
+    # segments: parallel connections per file (1 = off, the default); only used for a file at least
+    # segment_min_bytes big whose server supports Range.  A download can override it (options.segments).
+    "http": {"stall_seconds": 60, "max_retries": 3, "connect_timeout": 15,
+             "segments": 1, "segment_min_bytes": 32 * 1024 * 1024},
+    "stremio": {"mode": "save", "stall_seconds": 90, "max_retries": 3,   # phase 4 
+    "metadata_timeout": 90},      # seconds to wait for a torrent's file list (no peers = no list)    "providers": {},             # phase 5: per-provider blocks
     "provider_limits": {"max_rows": 500, "max_report_kb": 64, "max_reports_per_s": 20,
                         "stale_after_s": 30},
     "allowed_link_schemes": ["steam", "https"],
@@ -79,10 +82,22 @@ OPEN_MODES = ("off", "reveal", "folder", "open")
 FOLDER_KINDS = ("video", "audio", "file")
 MAX_WINDOWS = 10
 
+# Settings the hub itself understands inside a PROVIDER's own settings block (the owner's choices,
+# stored on the provider row and changed with `dl_provider_prefs`, never by the provider).  A key
+# the hub doesn't know here (Steam's `root`, a tool's own) is passed through untouched, as before.
+#   steam.notify_min_update_gb   a Steam UPDATE is announced only when it is at least this many GB
+#                                (1 GB = 1024^3 bytes, the same unit the panel shows).  0 = every
+#                                update.  Installs of new games are not subject to it: they follow
+#                                the normal `notify.done` rules.  Missing from the stored block
+#                                (every provider row made before this key existed) = the default.
+STEAM_MIN_UPDATE_GB_DEFAULT = 1.0
+MAX_MIN_UPDATE_GB = 10_000.0
+
 PREFS_WRITABLE = {
     "rate_limit_kbps", "schedule",
     "concurrency.total", "concurrency.http", "concurrency.ytdlp", "concurrency.stremio",
-    "http.stall_seconds", "http.max_retries",
+    "http.stall_seconds", "http.max_retries", "http.segments", "http.segment_min_bytes",
+    "stremio.stall_seconds", "stremio.max_retries", "stremio.metadata_timeout",
     "after_download.open",
     "notify.enabled", "notify.min_seconds", "notify.coalesce_s", "notify.providers",
     "ext_folders",
@@ -337,6 +352,78 @@ def _check_schedule(value):
     return out, None
 
 
+def _check_gb(label):
+    """A size in gigabytes: a finite number from 0 to MAX_MIN_UPDATE_GB, kept to 3 decimals."""
+    def check(value):
+        if isinstance(value, bool) or value is None:
+            return None, "%s must be a number of GB (0 = every update)" % label
+        try:
+            num = float(str(value).strip())
+        except (TypeError, ValueError):
+            return None, "%s must be a number of GB (0 = every update)" % label
+        if num != num or num in (float("inf"), float("-inf")):
+            return None, "%s must be a finite number of GB" % label
+        if num < 0 or num > MAX_MIN_UPDATE_GB:
+            return None, "%s must be between 0 and %d GB" % (label, int(MAX_MIN_UPDATE_GB))
+        return round(num, 3), None
+    return check
+
+
+# provider id -> {key: (default, checker)}
+PROVIDER_SETTINGS = {
+    "steam": {"notify_min_update_gb": (STEAM_MIN_UPDATE_GB_DEFAULT, _check_gb("notify_min_update_gb"))},
+}
+
+
+def validate_provider_settings(provider_id, settings):
+    """{\"notify_min_update_gb\": \"2.5\"} -> (clean, errors) for one provider's settings block.
+
+    Keys the hub knows for THIS provider are range-checked and normalised.  A key that belongs to
+    another provider is an error (a setting that silently does nothing looks like success).  Any
+    other key is passed through unchanged, which keeps Steam's `root` and tool-defined keys working.
+    """
+    known = PROVIDER_SETTINGS.get(str(provider_id or ""), {})
+    foreign = {k: pid for pid, block in PROVIDER_SETTINGS.items() if pid != provider_id for k in block}
+    clean, errors = {}, []
+    for key, value in (settings or {}).items():
+        if key in known:
+            checked, err = known[key][1](value)
+            if err:
+                errors.append(err)
+            else:
+                clean[key] = checked
+        elif key in foreign:
+            errors.append("%s is a %s setting; provider %r doesn't have it" % (key, foreign[key], str(provider_id)[:30]))
+        else:
+            clean[key] = value
+    return clean, errors
+
+
+def provider_setting(provider_id, stored, key):
+    """The effective value of a hub-known provider setting: the stored one when it is valid, else
+    the default.  A stored value that no longer validates never breaks a notification."""
+    entry = PROVIDER_SETTINGS.get(str(provider_id or ""), {}).get(key)
+    if entry is None:
+        return None
+    default, check = entry
+    if isinstance(stored, dict) and key in stored:
+        value, err = check(stored[key])
+        if not err:
+            return value
+    return default
+
+
+def owner_provider_settings(provider_id, stored):
+    """The owner-facing settings the hub understands for a provider, with defaults filled in
+    (what dl_providers and the Providers tab show).  Deliberately NOT the whole stored block."""
+    return {key: provider_setting(provider_id, stored, key) for key in PROVIDER_SETTINGS.get(str(provider_id or ""), {})}
+
+
+def steam_min_update_bytes(stored):
+    """The Steam update-size threshold as bytes (0 = announce every update)."""
+    return int(provider_setting("steam", stored, "notify_min_update_gb") * 1024 ** 3)
+
+
 _CHECKS = {
     "library_root": _check_root,
     "ext_folders": _check_ext_folders,
@@ -348,6 +435,11 @@ _CHECKS = {
     "concurrency.stremio": lambda v: _int_in(v, 1, 16, "concurrency.stremio"),
     "http.stall_seconds": lambda v: _int_in(v, 10, 3600, "http.stall_seconds"),
     "http.max_retries": lambda v: _int_in(v, 0, 10, "http.max_retries"),
+    "stremio.stall_seconds": lambda v: _int_in(v, 10, 3600, "stremio.stall_seconds"),
+    "stremio.max_retries": lambda v: _int_in(v, 0, 10, "stremio.max_retries"),
+    "stremio.metadata_timeout": lambda v: _int_in(v, 10, 600, "stremio.metadata_timeout"),
+    "http.segments": lambda v: _int_in(v, 1, 16, "http.segments"),
+    "http.segment_min_bytes": lambda v: _int_in(v, 1024 * 1024, 1 << 40, "http.segment_min_bytes"),
     "schedule": _check_schedule,
     "after_download.open": _check_open_mode,
     "notify.enabled": _bool("notify.enabled"),

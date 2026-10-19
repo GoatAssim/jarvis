@@ -501,6 +501,10 @@
     return ctx.catalog.tunables.filter((t) => t.section === key).map((t) => tunableRow(ctx, t));
   }
 
+  // Sections other files add (downloads-settings.js): { id, label, title, lede, terms, build(ctx) }. Each is
+  // placed before Advanced and gets the same row helpers this file's own sections use as ctx.ui.
+  const EXTRA_SECTIONS = (Array.isArray(window.JarvisSettingsSections) ? window.JarvisSettingsSections : [])
+    .filter((x) => x && typeof x.id === "string" && typeof x.build === "function" && typeof x.label === "string");
   const SECTIONS = [
     { id: "skin", label: "Skin", static: true,
       terms: "persona name how jarvis addresses you attitude theme accent colour color interface saturation motion scanlines appearance" },
@@ -655,6 +659,7 @@
           group("Last changes made in Settings", changes.length ? [changeTable(changes)] : [h("div", { class: "prefs-empty", text: "Nothing has been changed from Settings yet." })]),
         ];
       } },
+    ...EXTRA_SECTIONS,
     { id: "advanced", label: "Advanced", advanced: true,
       terms: "advanced json file edit tunables environment plumbing backup undo reveal secrets raw" },
   ];
@@ -718,7 +723,7 @@
       const docs = {};
       for (const f of def.files || []) docs[f] = await readDoc(f);
       if (token !== S.renderToken) return;
-      const ctx = { catalog, docs };
+      const ctx = { catalog, docs, ui: { h, group, rowShell, makeControl, flash, linkRow } };
       const blocks = await def.build(ctx);
       if (token !== S.renderToken) return;
       pane.replaceChildren(

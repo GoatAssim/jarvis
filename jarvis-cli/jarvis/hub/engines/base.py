@@ -108,6 +108,42 @@ class EngineContext:
         Returns False if the row has gone away (deleted while running)."""
         return self.store.update_item(self.item_id, fields) is not None
 
+    def progress(self, bytes_done=None, bytes_total=None, speed_bps=None, eta_s=None,
+                 estimated=False, **more):
+        """Report transfer progress by the plan-5.4 rules in one call (additive helper; the
+        plain `update` keeps working exactly as before).
+
+        What an argument left as None means: "I don't know it, let the hub work it out".  The
+        hub then derives it from the bytes and marks it "≈" in the panel, so a number the engine
+        measured and a number the hub guessed never look the same.
+
+          * `bytes_total` known and exact: the percent is reported as exact (no "≈").
+          * `estimated=True`: the total is itself a guess (a stream whose size is only an
+            estimate, a plan of several streams).  Percent and ETA are then left for the hub to
+            derive from the bytes, so they show "≈".
+          * no `bytes_total`: an indeterminate bar (`percent` = None) with the bytes so far.
+
+        Anything else (`phase`, `phase_index`, `message`, `title` ...) goes in `more`.
+        Returns False if the row has gone away, like `update`.
+        """
+        fields = dict(more)
+        done = None
+        if bytes_done is not None:
+            done = max(0, int(bytes_done))
+            fields["bytes_done"] = done
+        if bytes_total:
+            total = max(int(bytes_total), done or 0)
+            fields["bytes_total"] = total
+            if not estimated and done is not None:
+                fields["percent"] = min(100.0, done * 100.0 / total) if total else None
+        else:
+            fields["percent"] = None
+        if speed_bps is not None:
+            fields["speed_bps"] = speed_bps
+        if eta_s is not None and not estimated:
+            fields["eta_s"] = eta_s
+        return self.update(**fields)
+
     def set_state(self, state, **fields):
         """Move between the active states (probing / connecting / downloading /
         postprocessing).  Returns False if that move isn't allowed right now."""

@@ -1,0 +1,41 @@
+/* The live Download Hub status card in the chat (download-status-card.js).  Same bar looks and the same state
+   colours as Menu > Downloads (accent = running, green = done, orange = stalled, red = failed, grey = paused /
+   queued / cancelled, violet = not reporting); every state also has words, never colour alone. */
+.dlc { --dlc-acc: var(--accent, #38bdf8); --dlc-green: var(--green, #4ade80); --dlc-orange: var(--orange, #fb923c);
+  --dlc-red: var(--red, #f87171); --dlc-dim: var(--text-dim, #94a3b8); --dlc-line: var(--border, rgba(148,163,184,.3));
+  display: flex; flex-direction: column; gap: 8px; min-width: min(360px, 100%); max-width: 520px; }
+.dlc__item { display: flex; gap: 10px; padding: 10px 12px; border: 1px solid var(--dlc-line); border-left: 3px solid var(--dlc-acc);
+  border-radius: 6px; background: var(--bg-panel, transparent); }
+.dlc__item[data-state="done"] { border-left-color: var(--dlc-green); }
+.dlc__item[data-state="failed"] { border-left-color: var(--dlc-red); }
+.dlc__item[data-state="stalled"] { border-left-color: var(--dlc-orange); }
+.dlc__item[data-state="paused"], .dlc__item[data-state="queued"], .dlc__item[data-state="cancelled"] { border-left-color: var(--dlc-dim); }
+.dlc__thumb { width: 56px; height: 56px; object-fit: cover; border-radius: 4px; flex: none; background: var(--bg, #0b1220); }
+.dlc__body { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 4px; }
+.dlc__title { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dlc__meta, .dlc__status { font-size: 12px; color: var(--dlc-dim); }
+.dlc__status { color: var(--text, inherit); }
+.dlc__actions { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 2px; }
+.dlc__actions button { font: inherit; font-size: 12px; padding: 2px 10px; cursor: pointer; border-radius: 4px;
+  border: 1px solid var(--dlc-line); background: transparent; color: inherit; }
+.dlc__actions button:hover:not(:disabled) { border-color: var(--dlc-acc); }
+.dlc__actions button.is-danger:hover:not(:disabled) { border-color: var(--dlc-red); }
+.dlc__actions button:disabled { opacity: .5; cursor: default; }
+.dlc__note { font-size: 11px; color: var(--dlc-dim); }
+.dlc-bar { height: 6px; border: 1px solid var(--dlc-line); border-radius: 3px; overflow: hidden; position: relative; }
+.dlc-bar__fill { height: 100%; background: var(--dlc-acc); transition: width .4s ease; }
+.dlc-bar.queued .dlc-bar__fill { width: 0 !important; }
+.dlc-bar.done .dlc-bar__fill { background: var(--dlc-green); }
+.dlc-bar.failed .dlc-bar__fill { background: var(--dlc-red); }
+.dlc-bar.stalled .dlc-bar__fill { background: var(--dlc-orange); }
+.dlc-bar.paused .dlc-bar__fill, .dlc-bar.unknown .dlc-bar__fill { background: var(--dlc-dim); }
+.dlc-bar.cancelled { border-style: dashed; }
+.dlc-bar.cancelled .dlc-bar__fill { width: 0 !important; }
+.dlc-bar.striped .dlc-bar__fill, .dlc-bar.stale .dlc-bar__fill {
+  background-image: repeating-linear-gradient(45deg, rgba(255,255,255,.28) 0 6px, transparent 6px 12px); background-color: var(--dlc-acc); }
+.dlc-bar.stale .dlc-bar__fill { background-color: var(--accent-secondary, #a78bfa); opacity: .7; }
+.dlc-bar.striped .dlc-bar__fill { animation: dlc-slide 1s linear infinite; background-size: 17px 17px; }
+.dlc-bar.indeterminate .dlc-bar__fill { position: absolute; width: 35%; animation: dlc-sweep 1.3s ease-in-out infinite; }
+@keyframes dlc-slide { from { background-position: 0 0; } to { background-position: 17px 0; } }
+@keyframes dlc-sweep { from { left: -35%; } to { left: 100%; } }
+@media (prefers-reduced-motion: reduce) { .dlc-bar__fill { animation: none !important; transition: none; } }

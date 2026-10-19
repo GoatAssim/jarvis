@@ -50,6 +50,26 @@ things that were already fixed once.
   first request and every redirect; `allow_private_hosts` is editable only through the confirm-gated
   `dl_settings`. `hub_client` never raises. The panel renders download text with `textContent` only
   (`tests/verify_hub_panel.js` greps for markup assignment). The model cannot create a provider.
+- **The Stremio half of the hub (`hub/engines/stremio.py`, `hub/stremio/`, `actions/stremio_stack.py`,
+  `stremio_open.py`, `play_media.py`).** The engine is the HTTP engine's `stream_to_file` plus
+  registration (`POST /<hash>/create`, then poll `stats.json`: a torrent with no peers never answers
+  `create`) and a stats watchdog; storage mode is `save` only. A Stremio source is stored as ONE
+  canonical magnet (`links.canonical_source`) and deduped on infohash + file index
+  (`router.canonical_url`), never on trackers. The streaming server is **loopback only**:
+  `hub/stremio/config.py` ignores a non-loopback `server.url` on read, because the engine adds that
+  host:port to the SSRF allow-list for its OWN calls (through `_EngineCtx`; the owner's
+  `allow_private_hosts` is never edited and no other loopback port opens). Detection of "is it up" is
+  by ANSWERING on the port, never by daemon state: a server the Stremio app started reads "already
+  up" and is never duplicated or killed (`stack_stop` / `server_cache_clear` only act on a server
+  Jarvis started). `stremio_prepare` and `server_cache_clear` are confirm-gated by name;
+  `server_cache_clear` deletes only inside `<cacheRoot>/stremio-cache`, never through a link, never
+  while the server runs or a Stremio download is active. The players (`player.check_target`) play
+  only video/audio files under the downloads folders and the server's own `/<hash>/<n>` link; no tool
+  argument is a path or URL, and a command line is always an argv list. The account key in
+  `~/.jarvis/stremio.json` is never read by this code or printed (`config.public_view` blanks it).
+  Tests: `test_hub_stremio_links.py`, `_engine.py`, `_tools.py` (a fake server in
+  `tests/_hub_fake_stremio.py`); the older hub tests set `JARVIS_STREMIO_SERVER_URL` to a closed port
+  so a real Stremio on the dev machine can't change their answers.
 - **The model may start, stop and inspect daemons; it may not create one.**
   Registering a daemon stores an argv Jarvis later runs unattended, and
   the model is the component most exposed to text written by other people

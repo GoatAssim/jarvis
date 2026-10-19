@@ -3911,6 +3911,9 @@
       case "confirm":
         if (item.data.resolved !== null) renderResolvedConfirmBubble(item.data);
         break;
+      case "downloadStatus":
+        renderDownloadStatusBubble(item.data);
+        break;
       case "presentFile":
         // The replay half of the present_file fix. The live path reaches
         // showAskPresentFile() from the JARVIS_MEDIA branch in
@@ -3967,6 +3970,15 @@
     if (parts[1] === "organize_json" && parts[2]) {
       showAskOrganizeJson(parts[2].trim());
       askPromptLine(`$ organize_json  ${parts[2].trim()}`, "tool");
+      return true;
+    }
+    if (parts[1] === "download_status" && parts[2]) {
+      // The live Download Hub card (present_download_status -> download-status-card.js). One JSON field:
+      // the ids / groups to follow and the last known status.
+      let statusPayload;
+      try { statusPayload = JSON.parse(parts[2]); } catch { return true; }
+      showAskDownloadStatus(statusPayload);
+      askPromptLine("$ download status", "tool");
       return true;
     }
     if (parts[1] === "present_file" && parts[6] !== undefined) {
@@ -4200,6 +4212,28 @@
     pushThreadExtra(state.askConversationId, "download", { jobId, filename, title });
     if (!isViewingAskThread()) return;
     renderDownloadBubble(jobId, filename, title);
+  }
+
+  // A present_download_status call: ONE live card that follows the download(s) by itself
+  // (web/public/download-status-card.js). Recorded like the other cards so a reload draws it again
+  // from the saved status (thread_extras.py rebuilds the same payload from the tool's result).
+  function showAskDownloadStatus(payload) {
+    if (!payload || typeof payload !== "object") return;
+    pushThreadExtra(state.askConversationId, "downloadStatus", payload);
+    if (!isViewingAskThread()) return;
+    renderDownloadStatusBubble(payload);
+  }
+
+  function renderDownloadStatusBubble(payload) {
+    const cardApi = window.JarvisDownloadCard;
+    if (!cardApi || typeof cardApi.render !== "function") return;
+    clearAskEmptyHint();
+    const msg = el("div", { class: "ask-msg ask-msg--jarvis ask-msg--media" }, [
+      el("div", { class: "ask-msg__role" }, currentAssistantName()),
+      el("div", { class: "ask-msg__bubble ask-msg__bubble--media" }, [cardApi.render(payload)]),
+    ]);
+    insertIntoAskThread(msg);
+    askThreadScrollToEnd();
   }
 
   // A present_file call (see jarvis-cli/jarvis/present_tools.py) — a card

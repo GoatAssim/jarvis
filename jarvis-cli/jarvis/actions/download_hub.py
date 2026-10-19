@@ -356,7 +356,8 @@ TOOL_SCHEMAS = [
             "YouTube page or a page of any other site yt-dlp supports (the yt-dlp engine; one video per link, "
             "mode / quality / container choose the result). For a video the person wants to watch in chat "
             "right now, ytdl_download (blocking) is the better tool; ytdl_download with background=true "
-            "queues here exactly like dl_add. Magnet links are not supported yet. "
+            "queues here exactly like dl_add. Also takes a magnet link, a 40-character infohash, a Stremio stream or a .torrent link "
+            "(the Stremio engine: needs Stremio's streaming server, see stack_status / stack_start). "
             "Set dry_run to see which engine would take a link without queueing it."
         ),
         "parameters": {
@@ -417,7 +418,9 @@ TOOL_SCHEMAS = [
         "description": (
             "Change one provider's own choices: switch it on or off (off hides its rows and stops polling it; "
             "nothing it downloaded is touched), how often it is polled (interval_s), or its settings "
-            "(e.g. {\"root\": \"D:/Steam\"} to tell the Steam provider where Steam is). The person is asked to confirm."
+            "(e.g. {\"root\": \"D:/Steam\"} to tell the Steam provider where Steam is; "
+            "{\"notify_min_update_gb\": 2} so a Steam update is announced only when it is at least 2 GB, "
+            "0 = every update, default 1). The person is asked to confirm."
         ),
         "parameters": {
             "type": "object",
@@ -623,7 +626,7 @@ TOOL_KEYWORDS = {
     "dl_providers": {"download providers": 10, "steam download": 9, "steam downloads": 9, "install progress": 9,
                      "game downloads": 8, "game install progress": 9},
     "dl_provider_prefs": {"provider settings": 9, "steam folder": 8, "turn off steam downloads": 10,
-                          "poll interval": 8},
+                          "poll interval": 8, "steam update notification": 9, "steam update size": 9},
     "dl_status": {"download status": 10, "download hub": 10, "downloads menu": 9},
     "dl_pause": {"pause downloads": 10, "pause the download": 10, "pause all downloads": 10},
     "dl_resume": {"resume downloads": 10, "resume the download": 10},
@@ -648,7 +651,8 @@ TOOL_PACK_INSTRUCTION = (
     "with dl_list / dl_status instead of waiting. 'Download it tomorrow night' = dl_add with "
     "start_at (or dl_schedule for one already queued). It takes file links and video pages "
     "(YouTube and other yt-dlp sites, one video per link); ytdl_download is still the tool for "
-    "'download this video now' (and with background=true it queues here too). Magnet links are not supported by dl_add yet."
+    "'download this video now' (and with background=true it queues here too). Magnet links, infohashes and Stremio streams "
+    "go through the Stremio server (stack_status says whether it is up; stremio_prepare sets it up the first time)."
 )
 
 # ---------------------------------------------------------------------------
@@ -661,6 +665,14 @@ TOOL_PACK_INSTRUCTION = (
 # (speed, notifications, folder names inside the library), and the one choice that runs
 # something unseen (open-the-file when done) asks inside the handler, default=False.
 TOOL_CONFIRM_REQUIRED = {"dl_cancel", "dl_settings", "dl_provider_prefs", "hub_demo_provider"}
+
+# The Ask box's "/" palette commands (/dl, /dls, /dlpause ...): typed twins of the tools above.  They
+# live in download_hub_commands.py (data only) to keep this file readable; if that module ever fails
+# to import the tools still load, just without the commands.
+try:
+    from .download_hub_commands import HUB_COMMANDS as TOOL_COMMANDS
+except Exception:  # noqa: BLE001
+    TOOL_COMMANDS = []
 TOOL_AI_REVIEW = set()
 
 TOOL_RESULT_SPECS = {
@@ -741,8 +753,8 @@ TEST_CHECKLIST = {
              "expect": "ok: false, problem says it points at a private or local address (refused by the SSRF guard)."},
             {"run": {"url": "https://<a real file link>", "dest": "../../etc"},
              "expect": "ok: false: dest must be a sub-folder of the library root."},
-            {"run": {"url": "magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567"},
-             "expect": "ok: false, says magnet links need the stremio engine which isn't installed yet."},
+            {"run": {"url": "magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567", "dry_run": True},
+             "expect": "ok: true, one decision: engine stremio, reason 'magnet link (Stremio engine)' with Stremio's server running; with it stopped, the decision's problem says the stremio engine isn't ready and how to start it (stack_start). Nothing queued either way."},
             {"run": {"url": "https://<a real, small file link>", "start_at": "in 2 minutes"},
              "expect": "ok: true, the item is paused with start_at set; Menu > Downloads shows 'Scheduled' and about two minutes later it starts by itself (daemon running)."},
             {"run": {"url": "https://<a real, small file link>", "start_at": "yesterday at 9am"},
@@ -755,12 +767,20 @@ TEST_CHECKLIST = {
              "expect": "ok: false: container must be one of mp4, mkv, webm (nothing is queued)."},
             {"ask": "Download this file: https://<a real, small file link>",
              "expect": "Calls dl_add (not ytdl_download) and says it was queued."},
+            {"ask": "/dl https://<a real, small file link>",
+             "expect": "The palette command: shows 'dl' with the link filled in, asks to confirm (caution), then queues it exactly like the tool call; it appears in Menu > Downloads."},
+            {"ask": "/dl",
+             "expect": "Refuses before running anything: it needs a link."},
+            {"run": {"url": _LOCAL},
+             "expect": "With the local test server running but allow_private_hosts not set yet: ok: false, refused as a private address. After dl_settings sets allow_private_hosts to ['127.0.0.1:<port>'] (see dl_settings) the same call queues and downloads it."},
         ],
         "needs": ["The 'Download hub' daemon running (Menu > Daemons)", "Internet access for the real-link steps",
-                  "yt-dlp and ffmpeg installed for the video steps"],
-        "care": "Writes the file under the library root (default ~/Downloads/Jarvis/Files). A local test server needs allow_private_hosts set first.",
+                  "yt-dlp and ffmpeg installed for the video steps",
+                  "For the local-server step: a folder with a file in it and `python -m http.server <port>` running there; <port> and <file> in the step are that port and file name"],
+        "care": "Writes the file under the library root (default ~/Downloads/Jarvis/Files). A local test server needs allow_private_hosts set first (dl_settings).",
         "watch": ["Adding the same link twice returns the existing item (duplicate: true), not a second download.",
                   "More than 5 links in one call asks for confirmation first.",
+                  "From a remote chat guest (Discord / Instagram) dl_list answers but dl_add is refused: adding downloads is the owner's.",
                   "Kill the daemon mid-file (Menu > Daemons > Stop), start it again: the row goes back to queued and the file resumes, not restarts (needs a server that supports Range)."],
     },
     "dl_import_legacy": {
@@ -777,6 +797,8 @@ TEST_CHECKLIST = {
         "steps": [
             {"run": {}, "expect": "ok: true with a providers list; with Steam installed there is a 'steam' entry (mode poll, read_only true); after playnite_install_game a 'playnite' one."},
             {"ask": "Is my Steam download still going?", "expect": "Calls dl_providers or dl_list(provider=steam) and answers from the rows' percent / state."},
+            {"ask": "/dlproviders",
+             "expect": "The palette command: runs at once (safe, no confirmation) and lists the same providers. The steam entry carries settings {notify_min_update_gb: 1.0} on a fresh install, and never Steam's folder."},
         ],
         "needs": ["The Download hub daemon running: it polls Steam and registers providers"],
         "watch": ["Steam closed: the steam entry shows an error ('Steam isn't running ...') and its rows go grey (stale), never red.",
@@ -789,8 +811,25 @@ TEST_CHECKLIST = {
             {"run": {"id": "steam", "enabled": False}, "expect": "Asks to confirm, then ok: true; Steam rows vanish from dl_list and Menu > Downloads."},
             {"run": {"id": "nope", "enabled": True}, "expect": "ok: false: no provider called 'nope'."},
             {"run": {"id": "steam", "interval_s": 0}, "expect": "ok: false: interval_s must be 0.5 to 3600."},
+            {"run": {"id": "steam", "settings": {"notify_min_update_gb": 2}},
+             "expect": "Asks to confirm, then ok: true; dl_providers shows steam settings notify_min_update_gb 2.0 and Steam's folder setting is untouched. From now a Steam update under 2 GB finishes silently."},
+            {"run": {"id": "steam", "settings": {"notify_min_update_gb": 0}},
+             "expect": "ok: true; every Steam update is announced from now on, however small."},
+            {"run": {"id": "steam", "settings": {"notify_min_update_gb": -1}},
+             "expect": "ok: false: notify_min_update_gb must be between 0 and 10000 GB; nothing in the call was applied."},
+            {"run": {"id": "steam", "settings": {"notify_min_update_gb": "lots"}},
+             "expect": "ok: false: notify_min_update_gb must be a number of GB."},
+            {"run": {"id": "playnite", "settings": {"notify_min_update_gb": 1}},
+             "expect": "ok: false: that is a steam setting; playnite doesn't have it (never a silent no-op)."},
         ],
+        "needs": ["The Download hub daemon running",
+                  "For the notification steps without a real Steam update: Steam running, and a sample library. Make a folder S with a sub-folder steamapps containing appmanifest_1001.acf: \"AppState\" { \"appid\" \"1001\" \"name\" \"Sample Big Update\" \"installdir\" \"SampleBig\" \"StateFlags\" \"258\" \"LastUpdated\" \"1700000000\" \"SizeOnDisk\" \"5000000000\" \"BytesToDownload\" \"3221225472\" \"BytesDownloaded\" \"1073741824\" } (one pair per line), then set the steam provider's root to S."],
         "care": "Switching a provider off hides its rows and stops polling it; it never touches what the provider downloaded.",
+        "watch": ["Sample update (3 GB, default threshold 1): within a poll the row shows in Menu > Downloads as an update. Change StateFlags to \"4\" in the .acf: the next poll marks it done and one 'Game updated: Sample Big Update finished updating (3.0 GB)' arrives, once, also after restarting the daemon.",
+                  "Same sample with notify_min_update_gb set to 5: finishing it sends nothing, and the 'all downloads finished' summary doesn't count it.",
+                  "Edit the sample to \"BytesToDownload\" \"209715200\" (200 MB) at the default: finishing it is silent. Set the threshold to 0 and repeat with appid 1002: announced.",
+                  "A new game install (a manifest with no LastUpdated and SizeOnDisk 0) finishes with 'finished installing', however small, and follows the Notifications panel's 'download finished' switch, not the threshold.",
+                  "With Notifications > 'download finished' off, not even a big Steam update is announced."],
     },
     "dl_list": {
         "does": "Lists downloads with state, percent, speed, ETA, size, destination; filter by state, engine, provider, kind, group or text.",
@@ -812,6 +851,8 @@ TEST_CHECKLIST = {
             {"run": {}, "expect": "ok: true with counts, daemon {alive, pid}, library_root, free_bytes, engines (http ready)."},
             {"run": {"id": "<a download id>"}, "expect": "ok: true with that download's item including events (recent state changes), detail and children."},
             {"ask": "Is the download hub running?", "expect": "Says whether the daemon is alive."},
+            {"ask": "/dls",
+             "expect": "The palette command: runs at once (safe) and shows the same totals as the tool call. '/dls <id>' shows that one download."},
         ],
     },
     "dl_pause": {
@@ -823,6 +864,12 @@ TEST_CHECKLIST = {
              "expect": "ok: false, 'already done'."},
             {"run": {},
              "expect": "ok: false asking which download (an id, a group, an engine, a provider, or all=true)."},
+            {"ask": "/dlpause <a downloading id>",
+             "expect": "The palette command: asks to confirm (caution), then pauses just that one."},
+            {"ask": "/dlpause",
+             "expect": "Refuses before running anything: it needs an id, so a bare /dlpause can never pause the whole queue."},
+            {"ask": "/dlpauseall",
+             "expect": "Asks to confirm, then pauses every running download (the same as dl_pause with all=true)."},
         ],
         "watch": ["Pausing a row from a read-only provider (the demo rows) says it is read-only, never fails silently."],
     },
@@ -831,6 +878,8 @@ TEST_CHECKLIST = {
         "steps": [
             {"run": {"id": "<a paused id>"}, "expect": "ok: true, the row goes to queued and then downloads again from its byte offset."},
             {"run": {"all": True}, "expect": "ok: true; rows that weren't paused are listed under skipped, not an error."},
+            {"ask": "/dlresume <a paused id>", "expect": "The palette command: asks to confirm, then resumes just that one."},
+            {"ask": "/dlresumeall", "expect": "Asks to confirm, then resumes every paused download."},
         ],
     },
     "dl_cancel": {
@@ -887,6 +936,8 @@ TEST_CHECKLIST = {
             {"run": {"set": {"concurrency.http": 2}}, "expect": "Asks to confirm, then ok: true with concurrency.http 2."},
             {"run": {"set": {"nonsense": 1}}, "expect": "ok: false: that setting can't be changed here (typos are never silently ignored)."},
             {"run": {"set": {"library_root": "relative/path"}}, "expect": "ok: false: must be an absolute path."},
+            {"run": {"set": {"allow_private_hosts": ["127.0.0.1:<port>"]}},
+             "expect": "Asks to confirm, then ok: true; the dl_add local-server step now works against that port only, and a neighbouring port is still refused."},
         ],
         "care": "library_root decides where new files are written; allow_private_hosts lets the hub fetch from your local network.",
     },

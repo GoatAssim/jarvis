@@ -572,6 +572,7 @@ def list_providers(store=None):
                 "id": p["id"], "label": p["label"], "mode": p["mode"], "kind": p["kind"], "icon": p["icon"],
                 "enabled": p["enabled"], "interval_s": p["interval_s"], "capabilities": p["capabilities"],
                 "controls": sorted(p["controls"]), "poll_tool": p.get("poll_tool"), "source": p.get("source_file") or "",
+                "settings": settings_mod.owner_provider_settings(p["id"], p.get("settings")),
                 "last_report_age_s": None if not last else max(0, int(now - last)),
                 "last_ok_age_s": None if not p.get("last_ok_at") else max(0, int(now - p["last_ok_at"])),
                 "last_error": p.get("last_error"), "rows": len(rows), "live": len(live),
@@ -606,6 +607,9 @@ def update_provider(provider_id, *, enabled=None, interval_s=None, settings=None
             import json
             if len(json.dumps(settings, default=str)) > 2048:
                 return _err("those settings are too large")
+            settings, problems = settings_mod.validate_provider_settings(pid, settings)
+            if problems:
+                return _err("; ".join(problems))
         if enabled is not None:
             store.set_provider_enabled(pid, bool(enabled))
         if interval is not None or settings is not None:

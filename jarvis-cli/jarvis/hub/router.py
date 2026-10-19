@@ -41,7 +41,16 @@ _PLANNED = (
 
 
 def canonical_url(url):
-    """Lower-case scheme and host, default port and fragment dropped.  Used for dedupe."""
+    """Lower-case scheme and host, default port and fragment dropped.  Used for dedupe.
+
+    A magnet link is reduced to its infohash (+ file index): the same torrent pasted with
+    different trackers or a different display name is ONE download (plan 9.3: the idempotency
+    key of a Stremio item is infohash + fileIdx)."""
+    if str(url).lstrip()[:8].lower() == "magnet:?":
+        from .stremio import links as stremio_links
+        reduced = stremio_links.identity_magnet(str(url).strip())
+        if reduced:
+            return reduced
     try:
         parts = urlsplit(str(url).strip())
         host = (parts.hostname or "").lower()

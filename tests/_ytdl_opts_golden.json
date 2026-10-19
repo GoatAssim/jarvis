@@ -1,0 +1,1173 @@
+{
+ "cases": [
+  {},
+  {
+   "url": 5
+  },
+  {
+   "url": "https://video.example/watch?v=abc"
+  },
+  {
+   "mode": "audio",
+   "url": "https://video.example/watch?v=abc"
+  },
+  {
+   "mode": " AUDIO ",
+   "url": "https://video.example/watch?v=abc"
+  },
+  {
+   "mode": "movie",
+   "url": "https://video.example/watch?v=abc"
+  },
+  {
+   "quality": "720p",
+   "url": "https://video.example/watch?v=abc"
+  },
+  {
+   "quality": "id:137",
+   "url": "https://video.example/watch?v=abc"
+  },
+  {
+   "quality": "bv*[height<=900]+ba",
+   "url": "https://video.example/watch?v=abc"
+  },
+  {
+   "quality": "weird-name",
+   "url": "https://video.example/watch?v=abc"
+  },
+  {
+   "container": "mkv",
+   "url": "https://video.example/watch?v=abc"
+  },
+  {
+   "container": "GIF",
+   "url": "https://video.example/watch?v=abc"
+  },
+  {
+   "url": "https://video.example/watch?v=abc",
+   "video_codec": "av1"
+  },
+  {
+   "url": "https://video.example/watch?v=abc",
+   "video_codec": "x265"
+  },
+  {
+   "audio_format": "flac",
+   "audio_quality": "0",
+   "mode": "audio",
+   "url": "https://video.example/watch?v=abc"
+  },
+  {
+   "audio_format": "wma",
+   "mode": "audio",
+   "url": "https://video.example/watch?v=abc"
+  },
+  {
+   "audio_quality": "320K",
+   "url": "https://video.example/watch?v=abc"
+  },
+  {
+   "embed_chapters": true,
+   "embed_metadata": true,
+   "embed_thumbnail": true,
+   "url": "https://video.example/watch?v=abc"
+  },
+  {
+   "sub_langs": "en, es",
+   "url": "https://video.example/watch?v=abc",
+   "write_subs": true
+  },
+  {
+   "embed_subs": true,
+   "url": "https://video.example/watch?v=abc",
+   "write_subs": true
+  },
+  {
+   "embed_subs": true,
+   "mode": "audio",
+   "url": "https://video.example/watch?v=abc"
+  },
+  {
+   "sponsorblock_remove": "sponsor, selfpromo",
+   "url": "https://video.example/watch?v=abc"
+  },
+  {
+   "sponsorblock_remove": " , ",
+   "url": "https://video.example/watch?v=abc"
+  },
+  {
+   "rate_limit_kbps": 500,
+   "url": "https://video.example/watch?v=abc"
+  },
+  {
+   "rate_limit_kbps": "250",
+   "url": "https://video.example/watch?v=abc"
+  },
+  {
+   "rate_limit_kbps": "fast",
+   "url": "https://video.example/watch?v=abc"
+  },
+  {
+   "rate_limit_kbps": 0,
+   "url": "https://video.example/watch?v=abc"
+  },
+  {
+   "playlist": true,
+   "url": "https://video.example/watch?v=abc"
+  },
+  {
+   "playlist": true,
+   "playlist_items": "2-4",
+   "url": "https://video.example/watch?v=abc"
+  },
+  {
+   "skip_if_downloaded": true,
+   "url": "https://video.example/watch?v=abc"
+  },
+  {
+   "output_dir": "some/where",
+   "url": "https://video.example/watch?v=abc"
+  },
+  {
+   "audio_format": "opus",
+   "container": "webm",
+   "embed_metadata": true,
+   "mode": "audio",
+   "playlist": true,
+   "playlist_items": "1,3,5",
+   "quality": "480p",
+   "rate_limit_kbps": 100,
+   "skip_if_downloaded": true,
+   "sponsorblock_remove": "sponsor",
+   "url": "https://video.example/watch?v=abc",
+   "video_codec": "vp9"
+  }
+ ],
+ "expected": [
+  {
+   "opts": null,
+   "result": {
+    "error": "url is required"
+   }
+  },
+  {
+   "opts": null,
+   "result": {
+    "error": "url is required"
+   }
+  },
+  {
+   "opts": {
+    "addchapters": false,
+    "addmetadata": false,
+    "embedsubtitles": false,
+    "embedthumbnail": false,
+    "format": "bv*+ba/b",
+    "ignoreconfig": true,
+    "merge_output_format": "mp4",
+    "no_warnings": true,
+    "noplaylist": true,
+    "outtmpl": "<JOB>/%(title).150B [%(id)s].%(ext)s",
+    "quiet": true,
+    "restrictfilenames": true,
+    "socket_timeout": 30,
+    "writeautomaticsub": false,
+    "writesubtitles": false,
+    "writethumbnail": false
+   },
+   "result": {
+    "count": 1,
+    "duration": 61,
+    "duration_str": "1:01",
+    "files": [
+     {
+      "bytes": 10,
+      "file": "Fake Title [abc].mp4",
+      "title": "Fake Title"
+     }
+    ],
+    "job_id": "<ID>",
+    "mode": "video",
+    "note": "File(s) saved on disk and offered to the user for playback/download in the UI. Do NOT invent details about the content, and do NOT say more than a short one-sentence confirmation that it's ready.",
+    "ok": true,
+    "output_dir": null
+   }
+  },
+  {
+   "opts": {
+    "addchapters": false,
+    "addmetadata": false,
+    "embedsubtitles": false,
+    "embedthumbnail": false,
+    "format": "bestaudio/best",
+    "ignoreconfig": true,
+    "no_warnings": true,
+    "noplaylist": true,
+    "outtmpl": "<JOB>/%(title).150B [%(id)s].%(ext)s",
+    "postprocessors": [
+     {
+      "key": "FFmpegExtractAudio",
+      "preferredcodec": "mp3",
+      "preferredquality": "192K"
+     }
+    ],
+    "quiet": true,
+    "restrictfilenames": true,
+    "socket_timeout": 30,
+    "writeautomaticsub": false,
+    "writesubtitles": false,
+    "writethumbnail": false
+   },
+   "result": {
+    "count": 1,
+    "duration": 61,
+    "duration_str": "1:01",
+    "files": [
+     {
+      "bytes": 10,
+      "file": "Fake Title [abc].mp4",
+      "title": "Fake Title"
+     }
+    ],
+    "job_id": "<ID>",
+    "mode": "audio",
+    "note": "File(s) saved on disk and offered to the user for playback/download in the UI. Do NOT invent details about the content, and do NOT say more than a short one-sentence confirmation that it's ready.",
+    "ok": true,
+    "output_dir": null
+   }
+  },
+  {
+   "opts": {
+    "addchapters": false,
+    "addmetadata": false,
+    "embedsubtitles": false,
+    "embedthumbnail": false,
+    "format": "bestaudio/best",
+    "ignoreconfig": true,
+    "no_warnings": true,
+    "noplaylist": true,
+    "outtmpl": "<JOB>/%(title).150B [%(id)s].%(ext)s",
+    "postprocessors": [
+     {
+      "key": "FFmpegExtractAudio",
+      "preferredcodec": "mp3",
+      "preferredquality": "192K"
+     }
+    ],
+    "quiet": true,
+    "restrictfilenames": true,
+    "socket_timeout": 30,
+    "writeautomaticsub": false,
+    "writesubtitles": false,
+    "writethumbnail": false
+   },
+   "result": {
+    "count": 1,
+    "duration": 61,
+    "duration_str": "1:01",
+    "files": [
+     {
+      "bytes": 10,
+      "file": "Fake Title [abc].mp4",
+      "title": "Fake Title"
+     }
+    ],
+    "job_id": "<ID>",
+    "mode": "audio",
+    "note": "File(s) saved on disk and offered to the user for playback/download in the UI. Do NOT invent details about the content, and do NOT say more than a short one-sentence confirmation that it's ready.",
+    "ok": true,
+    "output_dir": null
+   }
+  },
+  {
+   "opts": null,
+   "result": {
+    "error": "unknown mode: 'movie' (expected 'video' or 'audio')"
+   }
+  },
+  {
+   "opts": {
+    "addchapters": false,
+    "addmetadata": false,
+    "embedsubtitles": false,
+    "embedthumbnail": false,
+    "format": "bv*[height<=720]+ba/b[height<=720]",
+    "ignoreconfig": true,
+    "merge_output_format": "mp4",
+    "no_warnings": true,
+    "noplaylist": true,
+    "outtmpl": "<JOB>/%(title).150B [%(id)s].%(ext)s",
+    "quiet": true,
+    "restrictfilenames": true,
+    "socket_timeout": 30,
+    "writeautomaticsub": false,
+    "writesubtitles": false,
+    "writethumbnail": false
+   },
+   "result": {
+    "count": 1,
+    "duration": 61,
+    "duration_str": "1:01",
+    "files": [
+     {
+      "bytes": 10,
+      "file": "Fake Title [abc].mp4",
+      "title": "Fake Title"
+     }
+    ],
+    "job_id": "<ID>",
+    "mode": "video",
+    "note": "File(s) saved on disk and offered to the user for playback/download in the UI. Do NOT invent details about the content, and do NOT say more than a short one-sentence confirmation that it's ready.",
+    "ok": true,
+    "output_dir": null
+   }
+  },
+  {
+   "opts": {
+    "addchapters": false,
+    "addmetadata": false,
+    "embedsubtitles": false,
+    "embedthumbnail": false,
+    "format": "137+bestaudio/137/best",
+    "ignoreconfig": true,
+    "merge_output_format": "mp4",
+    "no_warnings": true,
+    "noplaylist": true,
+    "outtmpl": "<JOB>/%(title).150B [%(id)s].%(ext)s",
+    "quiet": true,
+    "restrictfilenames": true,
+    "socket_timeout": 30,
+    "writeautomaticsub": false,
+    "writesubtitles": false,
+    "writethumbnail": false
+   },
+   "result": {
+    "count": 1,
+    "duration": 61,
+    "duration_str": "1:01",
+    "files": [
+     {
+      "bytes": 10,
+      "file": "Fake Title [abc].mp4",
+      "title": "Fake Title"
+     }
+    ],
+    "job_id": "<ID>",
+    "mode": "video",
+    "note": "File(s) saved on disk and offered to the user for playback/download in the UI. Do NOT invent details about the content, and do NOT say more than a short one-sentence confirmation that it's ready.",
+    "ok": true,
+    "output_dir": null
+   }
+  },
+  {
+   "opts": {
+    "addchapters": false,
+    "addmetadata": false,
+    "embedsubtitles": false,
+    "embedthumbnail": false,
+    "format": "bv*[height<=900]+ba",
+    "ignoreconfig": true,
+    "merge_output_format": "mp4",
+    "no_warnings": true,
+    "noplaylist": true,
+    "outtmpl": "<JOB>/%(title).150B [%(id)s].%(ext)s",
+    "quiet": true,
+    "restrictfilenames": true,
+    "socket_timeout": 30,
+    "writeautomaticsub": false,
+    "writesubtitles": false,
+    "writethumbnail": false
+   },
+   "result": {
+    "count": 1,
+    "duration": 61,
+    "duration_str": "1:01",
+    "files": [
+     {
+      "bytes": 10,
+      "file": "Fake Title [abc].mp4",
+      "title": "Fake Title"
+     }
+    ],
+    "job_id": "<ID>",
+    "mode": "video",
+    "note": "File(s) saved on disk and offered to the user for playback/download in the UI. Do NOT invent details about the content, and do NOT say more than a short one-sentence confirmation that it's ready.",
+    "ok": true,
+    "output_dir": null
+   }
+  },
+  {
+   "opts": {
+    "addchapters": false,
+    "addmetadata": false,
+    "embedsubtitles": false,
+    "embedthumbnail": false,
+    "format": "weird-name",
+    "ignoreconfig": true,
+    "merge_output_format": "mp4",
+    "no_warnings": true,
+    "noplaylist": true,
+    "outtmpl": "<JOB>/%(title).150B [%(id)s].%(ext)s",
+    "quiet": true,
+    "restrictfilenames": true,
+    "socket_timeout": 30,
+    "writeautomaticsub": false,
+    "writesubtitles": false,
+    "writethumbnail": false
+   },
+   "result": {
+    "count": 1,
+    "duration": 61,
+    "duration_str": "1:01",
+    "files": [
+     {
+      "bytes": 10,
+      "file": "Fake Title [abc].mp4",
+      "title": "Fake Title"
+     }
+    ],
+    "job_id": "<ID>",
+    "mode": "video",
+    "note": "File(s) saved on disk and offered to the user for playback/download in the UI. Do NOT invent details about the content, and do NOT say more than a short one-sentence confirmation that it's ready.",
+    "ok": true,
+    "output_dir": null
+   }
+  },
+  {
+   "opts": {
+    "addchapters": false,
+    "addmetadata": false,
+    "embedsubtitles": false,
+    "embedthumbnail": false,
+    "format": "bv*+ba/b",
+    "ignoreconfig": true,
+    "merge_output_format": "mkv",
+    "no_warnings": true,
+    "noplaylist": true,
+    "outtmpl": "<JOB>/%(title).150B [%(id)s].%(ext)s",
+    "quiet": true,
+    "restrictfilenames": true,
+    "socket_timeout": 30,
+    "writeautomaticsub": false,
+    "writesubtitles": false,
+    "writethumbnail": false
+   },
+   "result": {
+    "count": 1,
+    "duration": 61,
+    "duration_str": "1:01",
+    "files": [
+     {
+      "bytes": 10,
+      "file": "Fake Title [abc].mp4",
+      "title": "Fake Title"
+     }
+    ],
+    "job_id": "<ID>",
+    "mode": "video",
+    "note": "File(s) saved on disk and offered to the user for playback/download in the UI. Do NOT invent details about the content, and do NOT say more than a short one-sentence confirmation that it's ready.",
+    "ok": true,
+    "output_dir": null
+   }
+  },
+  {
+   "opts": null,
+   "result": {
+    "error": "unknown container: 'gif' (expected one of mp4, mkv, webm)"
+   }
+  },
+  {
+   "opts": {
+    "addchapters": false,
+    "addmetadata": false,
+    "embedsubtitles": false,
+    "embedthumbnail": false,
+    "format": "bv*+ba/b",
+    "format_sort": [
+     "vcodec:av1"
+    ],
+    "ignoreconfig": true,
+    "merge_output_format": "mp4",
+    "no_warnings": true,
+    "noplaylist": true,
+    "outtmpl": "<JOB>/%(title).150B [%(id)s].%(ext)s",
+    "quiet": true,
+    "restrictfilenames": true,
+    "socket_timeout": 30,
+    "writeautomaticsub": false,
+    "writesubtitles": false,
+    "writethumbnail": false
+   },
+   "result": {
+    "count": 1,
+    "duration": 61,
+    "duration_str": "1:01",
+    "files": [
+     {
+      "bytes": 10,
+      "file": "Fake Title [abc].mp4",
+      "title": "Fake Title"
+     }
+    ],
+    "job_id": "<ID>",
+    "mode": "video",
+    "note": "File(s) saved on disk and offered to the user for playback/download in the UI. Do NOT invent details about the content, and do NOT say more than a short one-sentence confirmation that it's ready.",
+    "ok": true,
+    "output_dir": null
+   }
+  },
+  {
+   "opts": null,
+   "result": {
+    "error": "unknown video_codec: 'x265' (expected one of h264, vp9, av1)"
+   }
+  },
+  {
+   "opts": {
+    "addchapters": false,
+    "addmetadata": false,
+    "embedsubtitles": false,
+    "embedthumbnail": false,
+    "format": "bestaudio/best",
+    "ignoreconfig": true,
+    "no_warnings": true,
+    "noplaylist": true,
+    "outtmpl": "<JOB>/%(title).150B [%(id)s].%(ext)s",
+    "postprocessors": [
+     {
+      "key": "FFmpegExtractAudio",
+      "preferredcodec": "flac",
+      "preferredquality": "0"
+     }
+    ],
+    "quiet": true,
+    "restrictfilenames": true,
+    "socket_timeout": 30,
+    "writeautomaticsub": false,
+    "writesubtitles": false,
+    "writethumbnail": false
+   },
+   "result": {
+    "count": 1,
+    "duration": 61,
+    "duration_str": "1:01",
+    "files": [
+     {
+      "bytes": 10,
+      "file": "Fake Title [abc].mp4",
+      "title": "Fake Title"
+     }
+    ],
+    "job_id": "<ID>",
+    "mode": "audio",
+    "note": "File(s) saved on disk and offered to the user for playback/download in the UI. Do NOT invent details about the content, and do NOT say more than a short one-sentence confirmation that it's ready.",
+    "ok": true,
+    "output_dir": null
+   }
+  },
+  {
+   "opts": null,
+   "result": {
+    "error": "unknown audio_format: 'wma' (expected one of mp3, m4a, opus, wav, flac, aac, vorbis, alac)"
+   }
+  },
+  {
+   "opts": {
+    "addchapters": false,
+    "addmetadata": false,
+    "embedsubtitles": false,
+    "embedthumbnail": false,
+    "format": "bv*+ba/b",
+    "ignoreconfig": true,
+    "merge_output_format": "mp4",
+    "no_warnings": true,
+    "noplaylist": true,
+    "outtmpl": "<JOB>/%(title).150B [%(id)s].%(ext)s",
+    "quiet": true,
+    "restrictfilenames": true,
+    "socket_timeout": 30,
+    "writeautomaticsub": false,
+    "writesubtitles": false,
+    "writethumbnail": false
+   },
+   "result": {
+    "count": 1,
+    "duration": 61,
+    "duration_str": "1:01",
+    "files": [
+     {
+      "bytes": 10,
+      "file": "Fake Title [abc].mp4",
+      "title": "Fake Title"
+     }
+    ],
+    "job_id": "<ID>",
+    "mode": "video",
+    "note": "File(s) saved on disk and offered to the user for playback/download in the UI. Do NOT invent details about the content, and do NOT say more than a short one-sentence confirmation that it's ready.",
+    "ok": true,
+    "output_dir": null
+   }
+  },
+  {
+   "opts": {
+    "addchapters": true,
+    "addmetadata": true,
+    "embedsubtitles": false,
+    "embedthumbnail": true,
+    "format": "bv*+ba/b",
+    "ignoreconfig": true,
+    "merge_output_format": "mp4",
+    "no_warnings": true,
+    "noplaylist": true,
+    "outtmpl": "<JOB>/%(title).150B [%(id)s].%(ext)s",
+    "quiet": true,
+    "restrictfilenames": true,
+    "socket_timeout": 30,
+    "writeautomaticsub": false,
+    "writesubtitles": false,
+    "writethumbnail": true
+   },
+   "result": {
+    "count": 1,
+    "duration": 61,
+    "duration_str": "1:01",
+    "files": [
+     {
+      "bytes": 10,
+      "file": "Fake Title [abc].mp4",
+      "title": "Fake Title"
+     }
+    ],
+    "job_id": "<ID>",
+    "mode": "video",
+    "note": "File(s) saved on disk and offered to the user for playback/download in the UI. Do NOT invent details about the content, and do NOT say more than a short one-sentence confirmation that it's ready.",
+    "ok": true,
+    "output_dir": null
+   }
+  },
+  {
+   "opts": {
+    "addchapters": false,
+    "addmetadata": false,
+    "embedsubtitles": false,
+    "embedthumbnail": false,
+    "format": "bv*+ba/b",
+    "ignoreconfig": true,
+    "merge_output_format": "mp4",
+    "no_warnings": true,
+    "noplaylist": true,
+    "outtmpl": "<JOB>/%(title).150B [%(id)s].%(ext)s",
+    "quiet": true,
+    "restrictfilenames": true,
+    "socket_timeout": 30,
+    "subtitleslangs": [
+     "en",
+     "es"
+    ],
+    "writeautomaticsub": true,
+    "writesubtitles": true,
+    "writethumbnail": false
+   },
+   "result": {
+    "count": 1,
+    "duration": 61,
+    "duration_str": "1:01",
+    "files": [
+     {
+      "bytes": 10,
+      "file": "Fake Title [abc].mp4",
+      "title": "Fake Title"
+     }
+    ],
+    "job_id": "<ID>",
+    "mode": "video",
+    "note": "File(s) saved on disk and offered to the user for playback/download in the UI. Do NOT invent details about the content, and do NOT say more than a short one-sentence confirmation that it's ready.",
+    "ok": true,
+    "output_dir": null
+   }
+  },
+  {
+   "opts": {
+    "addchapters": false,
+    "addmetadata": false,
+    "embedsubtitles": true,
+    "embedthumbnail": false,
+    "format": "bv*+ba/b",
+    "ignoreconfig": true,
+    "merge_output_format": "mp4",
+    "no_warnings": true,
+    "noplaylist": true,
+    "outtmpl": "<JOB>/%(title).150B [%(id)s].%(ext)s",
+    "quiet": true,
+    "restrictfilenames": true,
+    "socket_timeout": 30,
+    "subtitleslangs": [
+     "en"
+    ],
+    "writeautomaticsub": true,
+    "writesubtitles": true,
+    "writethumbnail": false
+   },
+   "result": {
+    "count": 1,
+    "duration": 61,
+    "duration_str": "1:01",
+    "files": [
+     {
+      "bytes": 10,
+      "file": "Fake Title [abc].mp4",
+      "title": "Fake Title"
+     }
+    ],
+    "job_id": "<ID>",
+    "mode": "video",
+    "note": "File(s) saved on disk and offered to the user for playback/download in the UI. Do NOT invent details about the content, and do NOT say more than a short one-sentence confirmation that it's ready.",
+    "ok": true,
+    "output_dir": null
+   }
+  },
+  {
+   "opts": {
+    "addchapters": false,
+    "addmetadata": false,
+    "embedsubtitles": false,
+    "embedthumbnail": false,
+    "format": "bestaudio/best",
+    "ignoreconfig": true,
+    "no_warnings": true,
+    "noplaylist": true,
+    "outtmpl": "<JOB>/%(title).150B [%(id)s].%(ext)s",
+    "postprocessors": [
+     {
+      "key": "FFmpegExtractAudio",
+      "preferredcodec": "mp3",
+      "preferredquality": "192K"
+     }
+    ],
+    "quiet": true,
+    "restrictfilenames": true,
+    "socket_timeout": 30,
+    "writeautomaticsub": false,
+    "writesubtitles": false,
+    "writethumbnail": false
+   },
+   "result": {
+    "count": 1,
+    "duration": 61,
+    "duration_str": "1:01",
+    "files": [
+     {
+      "bytes": 10,
+      "file": "Fake Title [abc].mp4",
+      "title": "Fake Title"
+     }
+    ],
+    "job_id": "<ID>",
+    "mode": "audio",
+    "note": "File(s) saved on disk and offered to the user for playback/download in the UI. Do NOT invent details about the content, and do NOT say more than a short one-sentence confirmation that it's ready.",
+    "ok": true,
+    "output_dir": null
+   }
+  },
+  {
+   "opts": {
+    "addchapters": false,
+    "addmetadata": false,
+    "embedsubtitles": false,
+    "embedthumbnail": false,
+    "format": "bv*+ba/b",
+    "ignoreconfig": true,
+    "merge_output_format": "mp4",
+    "no_warnings": true,
+    "noplaylist": true,
+    "outtmpl": "<JOB>/%(title).150B [%(id)s].%(ext)s",
+    "quiet": true,
+    "restrictfilenames": true,
+    "socket_timeout": 30,
+    "sponsorblock_remove": [
+     "sponsor",
+     "selfpromo"
+    ],
+    "writeautomaticsub": false,
+    "writesubtitles": false,
+    "writethumbnail": false
+   },
+   "result": {
+    "count": 1,
+    "duration": 61,
+    "duration_str": "1:01",
+    "files": [
+     {
+      "bytes": 10,
+      "file": "Fake Title [abc].mp4",
+      "title": "Fake Title"
+     }
+    ],
+    "job_id": "<ID>",
+    "mode": "video",
+    "note": "File(s) saved on disk and offered to the user for playback/download in the UI. Do NOT invent details about the content, and do NOT say more than a short one-sentence confirmation that it's ready.",
+    "ok": true,
+    "output_dir": null
+   }
+  },
+  {
+   "opts": {
+    "addchapters": false,
+    "addmetadata": false,
+    "embedsubtitles": false,
+    "embedthumbnail": false,
+    "format": "bv*+ba/b",
+    "ignoreconfig": true,
+    "merge_output_format": "mp4",
+    "no_warnings": true,
+    "noplaylist": true,
+    "outtmpl": "<JOB>/%(title).150B [%(id)s].%(ext)s",
+    "quiet": true,
+    "restrictfilenames": true,
+    "socket_timeout": 30,
+    "writeautomaticsub": false,
+    "writesubtitles": false,
+    "writethumbnail": false
+   },
+   "result": {
+    "count": 1,
+    "duration": 61,
+    "duration_str": "1:01",
+    "files": [
+     {
+      "bytes": 10,
+      "file": "Fake Title [abc].mp4",
+      "title": "Fake Title"
+     }
+    ],
+    "job_id": "<ID>",
+    "mode": "video",
+    "note": "File(s) saved on disk and offered to the user for playback/download in the UI. Do NOT invent details about the content, and do NOT say more than a short one-sentence confirmation that it's ready.",
+    "ok": true,
+    "output_dir": null
+   }
+  },
+  {
+   "opts": {
+    "addchapters": false,
+    "addmetadata": false,
+    "embedsubtitles": false,
+    "embedthumbnail": false,
+    "format": "bv*+ba/b",
+    "ignoreconfig": true,
+    "merge_output_format": "mp4",
+    "no_warnings": true,
+    "noplaylist": true,
+    "outtmpl": "<JOB>/%(title).150B [%(id)s].%(ext)s",
+    "quiet": true,
+    "ratelimit": 512000,
+    "restrictfilenames": true,
+    "socket_timeout": 30,
+    "writeautomaticsub": false,
+    "writesubtitles": false,
+    "writethumbnail": false
+   },
+   "result": {
+    "count": 1,
+    "duration": 61,
+    "duration_str": "1:01",
+    "files": [
+     {
+      "bytes": 10,
+      "file": "Fake Title [abc].mp4",
+      "title": "Fake Title"
+     }
+    ],
+    "job_id": "<ID>",
+    "mode": "video",
+    "note": "File(s) saved on disk and offered to the user for playback/download in the UI. Do NOT invent details about the content, and do NOT say more than a short one-sentence confirmation that it's ready.",
+    "ok": true,
+    "output_dir": null
+   }
+  },
+  {
+   "opts": {
+    "addchapters": false,
+    "addmetadata": false,
+    "embedsubtitles": false,
+    "embedthumbnail": false,
+    "format": "bv*+ba/b",
+    "ignoreconfig": true,
+    "merge_output_format": "mp4",
+    "no_warnings": true,
+    "noplaylist": true,
+    "outtmpl": "<JOB>/%(title).150B [%(id)s].%(ext)s",
+    "quiet": true,
+    "ratelimit": 256000,
+    "restrictfilenames": true,
+    "socket_timeout": 30,
+    "writeautomaticsub": false,
+    "writesubtitles": false,
+    "writethumbnail": false
+   },
+   "result": {
+    "count": 1,
+    "duration": 61,
+    "duration_str": "1:01",
+    "files": [
+     {
+      "bytes": 10,
+      "file": "Fake Title [abc].mp4",
+      "title": "Fake Title"
+     }
+    ],
+    "job_id": "<ID>",
+    "mode": "video",
+    "note": "File(s) saved on disk and offered to the user for playback/download in the UI. Do NOT invent details about the content, and do NOT say more than a short one-sentence confirmation that it's ready.",
+    "ok": true,
+    "output_dir": null
+   }
+  },
+  {
+   "opts": null,
+   "result": {
+    "error": "rate_limit_kbps must be a number"
+   }
+  },
+  {
+   "opts": {
+    "addchapters": false,
+    "addmetadata": false,
+    "embedsubtitles": false,
+    "embedthumbnail": false,
+    "format": "bv*+ba/b",
+    "ignoreconfig": true,
+    "merge_output_format": "mp4",
+    "no_warnings": true,
+    "noplaylist": true,
+    "outtmpl": "<JOB>/%(title).150B [%(id)s].%(ext)s",
+    "quiet": true,
+    "restrictfilenames": true,
+    "socket_timeout": 30,
+    "writeautomaticsub": false,
+    "writesubtitles": false,
+    "writethumbnail": false
+   },
+   "result": {
+    "count": 1,
+    "duration": 61,
+    "duration_str": "1:01",
+    "files": [
+     {
+      "bytes": 10,
+      "file": "Fake Title [abc].mp4",
+      "title": "Fake Title"
+     }
+    ],
+    "job_id": "<ID>",
+    "mode": "video",
+    "note": "File(s) saved on disk and offered to the user for playback/download in the UI. Do NOT invent details about the content, and do NOT say more than a short one-sentence confirmation that it's ready.",
+    "ok": true,
+    "output_dir": null
+   }
+  },
+  {
+   "opts": {
+    "addchapters": false,
+    "addmetadata": false,
+    "embedsubtitles": false,
+    "embedthumbnail": false,
+    "format": "bv*+ba/b",
+    "ignoreconfig": true,
+    "max_downloads": 10,
+    "merge_output_format": "mp4",
+    "no_warnings": true,
+    "noplaylist": false,
+    "outtmpl": "<JOB>/%(title).150B [%(id)s].%(ext)s",
+    "playlist_items": "1:10",
+    "quiet": true,
+    "restrictfilenames": true,
+    "socket_timeout": 30,
+    "writeautomaticsub": false,
+    "writesubtitles": false,
+    "writethumbnail": false
+   },
+   "result": {
+    "count": 1,
+    "duration": 61,
+    "duration_str": "1:01",
+    "files": [
+     {
+      "bytes": 10,
+      "file": "Fake Title [abc].mp4",
+      "title": "Fake Title"
+     }
+    ],
+    "job_id": "<ID>",
+    "mode": "video",
+    "note": "File(s) saved on disk and offered to the user for playback/download in the UI. Do NOT invent details about the content, and do NOT say more than a short one-sentence confirmation that it's ready.",
+    "ok": true,
+    "output_dir": null
+   }
+  },
+  {
+   "opts": {
+    "addchapters": false,
+    "addmetadata": false,
+    "embedsubtitles": false,
+    "embedthumbnail": false,
+    "format": "bv*+ba/b",
+    "ignoreconfig": true,
+    "max_downloads": 10,
+    "merge_output_format": "mp4",
+    "no_warnings": true,
+    "noplaylist": false,
+    "outtmpl": "<JOB>/%(title).150B [%(id)s].%(ext)s",
+    "playlist_items": "2-4",
+    "quiet": true,
+    "restrictfilenames": true,
+    "socket_timeout": 30,
+    "writeautomaticsub": false,
+    "writesubtitles": false,
+    "writethumbnail": false
+   },
+   "result": {
+    "count": 1,
+    "duration": 61,
+    "duration_str": "1:01",
+    "files": [
+     {
+      "bytes": 10,
+      "file": "Fake Title [abc].mp4",
+      "title": "Fake Title"
+     }
+    ],
+    "job_id": "<ID>",
+    "mode": "video",
+    "note": "File(s) saved on disk and offered to the user for playback/download in the UI. Do NOT invent details about the content, and do NOT say more than a short one-sentence confirmation that it's ready.",
+    "ok": true,
+    "output_dir": null
+   }
+  },
+  {
+   "opts": {
+    "addchapters": false,
+    "addmetadata": false,
+    "download_archive": "<DLDIR>/.archive.txt",
+    "embedsubtitles": false,
+    "embedthumbnail": false,
+    "format": "bv*+ba/b",
+    "ignoreconfig": true,
+    "merge_output_format": "mp4",
+    "no_warnings": true,
+    "noplaylist": true,
+    "outtmpl": "<JOB>/%(title).150B [%(id)s].%(ext)s",
+    "quiet": true,
+    "restrictfilenames": true,
+    "socket_timeout": 30,
+    "writeautomaticsub": false,
+    "writesubtitles": false,
+    "writethumbnail": false
+   },
+   "result": {
+    "count": 1,
+    "duration": 61,
+    "duration_str": "1:01",
+    "files": [
+     {
+      "bytes": 10,
+      "file": "Fake Title [abc].mp4",
+      "title": "Fake Title"
+     }
+    ],
+    "job_id": "<ID>",
+    "mode": "video",
+    "note": "File(s) saved on disk and offered to the user for playback/download in the UI. Do NOT invent details about the content, and do NOT say more than a short one-sentence confirmation that it's ready.",
+    "ok": true,
+    "output_dir": null
+   }
+  },
+  {
+   "opts": {
+    "addchapters": false,
+    "addmetadata": false,
+    "embedsubtitles": false,
+    "embedthumbnail": false,
+    "format": "bv*+ba/b",
+    "ignoreconfig": true,
+    "merge_output_format": "mp4",
+    "no_warnings": true,
+    "noplaylist": true,
+    "outtmpl": "<JOB>/%(title).150B [%(id)s].%(ext)s",
+    "quiet": true,
+    "restrictfilenames": true,
+    "socket_timeout": 30,
+    "writeautomaticsub": false,
+    "writesubtitles": false,
+    "writethumbnail": false
+   },
+   "result": {
+    "count": 1,
+    "duration": 61,
+    "duration_str": "1:01",
+    "files": [
+     {
+      "bytes": 10,
+      "file": "Fake Title [abc].mp4",
+      "title": "Fake Title"
+     }
+    ],
+    "job_id": null,
+    "mode": "video",
+    "note": "File(s) saved to <JOB> (custom output_dir \u2014 no inline UI card, path is the real location). Do NOT invent details about the content, and do NOT say more than a short one-sentence confirmation that it's ready.",
+    "ok": true,
+    "output_dir": "<JOB>"
+   }
+  },
+  {
+   "opts": {
+    "addchapters": false,
+    "addmetadata": true,
+    "download_archive": "<DLDIR>/.archive.txt",
+    "embedsubtitles": false,
+    "embedthumbnail": false,
+    "format": "bestaudio/best",
+    "ignoreconfig": true,
+    "max_downloads": 10,
+    "no_warnings": true,
+    "noplaylist": false,
+    "outtmpl": "<JOB>/%(title).150B [%(id)s].%(ext)s",
+    "playlist_items": "1,3,5",
+    "postprocessors": [
+     {
+      "key": "FFmpegExtractAudio",
+      "preferredcodec": "opus",
+      "preferredquality": "192K"
+     }
+    ],
+    "quiet": true,
+    "ratelimit": 102400,
+    "restrictfilenames": true,
+    "socket_timeout": 30,
+    "sponsorblock_remove": [
+     "sponsor"
+    ],
+    "writeautomaticsub": false,
+    "writesubtitles": false,
+    "writethumbnail": false
+   },
+   "result": {
+    "count": 1,
+    "duration": 61,
+    "duration_str": "1:01",
+    "files": [
+     {
+      "bytes": 10,
+      "file": "Fake Title [abc].mp4",
+      "title": "Fake Title"
+     }
+    ],
+    "job_id": "<ID>",
+    "mode": "audio",
+    "note": "File(s) saved on disk and offered to the user for playback/download in the UI. Do NOT invent details about the content, and do NOT say more than a short one-sentence confirmation that it's ready.",
+    "ok": true,
+    "output_dir": null
+   }
+  }
+ ]
+}

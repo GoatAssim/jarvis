@@ -364,7 +364,11 @@ class HubDaemon:
         else:
             ok, why = engine.available()
             if not ok:
-                outcome = Outcome.failed("the %s engine isn't ready: %s" % (engine.name, why or "unavailable"))
+                # An engine whose absence passes (the Stremio server not running yet) says so with
+                # `unavailable_is_retryable`: the row waits and retries instead of failing for good.
+                outcome = Outcome.failed("the %s engine isn't ready: %s" % (engine.name, why or "unavailable"),
+                                         retryable=bool(getattr(engine, "unavailable_is_retryable", False)),
+                                         delay_s=getattr(engine, "unavailable_delay_s", None))
             else:
                 ctx = EngineContext(self.store, item, self.settings(), stop_reason=worker.reason,
                                     rate_limit_bps=lambda: self._rate_for(worker))

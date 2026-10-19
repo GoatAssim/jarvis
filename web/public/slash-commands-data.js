@@ -1153,6 +1153,10 @@ window.JARVIS_SLASH_COMMANDS = /*JSON-BEGIN*/
       "reason": "internal plumbing, not a user-facing command",
       "riskTier": "safe"
     },
+    "hub-admin": {
+      "reason": "internal plumbing: the Download Hub's web back end (JSON on stdin, or a long-running watch stream), not a user-facing command",
+      "riskTier": "safe"
+    },
     "_internal_bridge": {
       "reason": "internal plumbing: the long-lived process the web server talks to, not a user-facing command",
       "riskTier": "safe"

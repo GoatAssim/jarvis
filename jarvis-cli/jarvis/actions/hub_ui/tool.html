@@ -17,20 +17,13 @@
   </header>
   <div class="banner" id="banner" role="status" hidden></div>
 
-  <!-- SETTINGS: replaces the three panes while open; built by tool.js -->
-  <section class="settings" id="settings" aria-label="Download settings">
-    <div class="settings__bar">
-      <button type="button" class="btn btn--sm" id="settingsBack">&larr; Back to downloads</button>
-      <h3 class="settings__title">Download settings</h3>
-      <span class="settings__dirty" id="settingsDirty" role="status" aria-live="polite"></span>
-      <button type="button" class="btn btn--sm" id="settingsRevert" disabled>Undo changes</button>
-      <button type="button" class="btn btn--primary btn--sm" id="settingsSave" disabled>Save</button>
-    </div>
-    <div class="settings__main">
-      <nav class="settings__nav" id="settingsNav" aria-label="Settings sections"></nav>
-      <div class="settings__page" id="settingsPage"></div>
-    </div>
-  </section>
+  <!-- the three views: Downloads (the three panes below), Providers, History; built by tool.js -->
+  <nav class="tabs" id="tabs" role="tablist" aria-label="Download views">
+    <button type="button" class="tab" role="tab" id="tabDownloads" aria-selected="true" aria-controls="body" data-tab="downloads" tabindex="0">Downloads</button>
+    <button type="button" class="tab" role="tab" id="tabProviders" aria-selected="false" aria-controls="providersPane" data-tab="providers" tabindex="-1">Providers<span class="tab__n" id="provCount"></span></button>
+    <button type="button" class="tab" role="tab" id="tabHistory" aria-selected="false" aria-controls="historyPane" data-tab="history" tabindex="-1">History</button>
+    <span class="livetag" id="liveTag" role="status" aria-live="polite" style="margin-left:auto;align-self:center"></span>
+  </nav>
 
   <div class="body" id="body">
 
@@ -145,4 +138,38 @@
     </section>
 
   </div>
+
+  <!-- PROVIDERS: every tool that reports downloads into the hub, its health, its switch -->
+  <section class="tabpane" id="providersPane" role="tabpanel" aria-labelledby="tabProviders" hidden>
+    <div class="hist__bar">
+      <span class="hist__count" id="provSummary">reading providers&hellip;</span>
+      <span style="margin-left:auto"></span>
+      <button type="button" class="btn btn--sm" id="provRefresh">Refresh</button>
+    </div>
+    <div class="pane-scroll" id="provList"></div>
+  </section>
+
+  <!-- HISTORY: finished, failed and cancelled downloads -->
+  <section class="tabpane" id="historyPane" role="tabpanel" aria-labelledby="tabHistory" hidden>
+    <div class="hist__bar">
+      <div class="search">
+        <input type="search" id="histSearch" class="search__input" spellcheck="false" autocomplete="off" aria-label="Search the history" placeholder="Search the history&hellip;">
+      </div>
+      <select id="histState" aria-label="Show">
+        <option value="all">All</option>
+        <option value="done">Finished</option>
+        <option value="failed">Failed</option>
+        <option value="cancelled">Cancelled</option>
+      </select>
+      <select id="histSource" aria-label="Source"><option value="">Every source</option></select>
+      <span class="hist__count" id="histCount"></span>
+      <button type="button" class="btn btn--sm" id="histCsv" title="Save what is listed as a spreadsheet file">Export CSV</button>
+      <button type="button" class="btn btn--sm" id="histJson" title="Save what is listed as a JSON file">Export JSON</button>
+      <span class="inline" title="Remove the list entries of downloads older than this. Downloaded files are never deleted.">
+        <input type="number" id="histDays" min="1" max="3650" value="90" aria-label="Days" style="width:70px">
+        <button type="button" class="btn btn--sm btn--danger" id="histClear">Clear older (days)</button>
+      </span>
+    </div>
+    <div class="pane-scroll" id="histList" role="list" aria-label="Download history"></div>
+  </section>
 </div>

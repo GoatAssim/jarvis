@@ -2229,6 +2229,15 @@ def main():
             print(json.dumps(_cal.tool_calendar_events({"days": 7}), indent=2))
             return
 
+    if argv[0] == "hub-admin":
+        # jarvis hub-admin card | list | settings | history | history_remove | history_clear
+        #                | redownload | reorder | file | thumb   (one JSON object on stdin, one on stdout)
+        # jarvis hub-admin watch                                 (one JSON object per line, until stopped)
+        # The Download Hub's web back end (hub_admin.py owns every rule): the in-chat status card, the
+        # Downloads panel's push stream, thumbnails and files, History and queue order. Not a command to type.
+        from . import hub_admin as _hub_admin
+        return _hub_admin.run_cli(argv[1:])
+
     if argv[0] == "calendar-admin":
         # jarvis calendar-admin feeds | window | check | link | feed-enable | feed-remove
         #                       | event-add | event-update | event-delete | settings

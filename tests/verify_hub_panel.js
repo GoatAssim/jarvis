@@ -74,38 +74,16 @@ const eq = (a, b) => JSON.stringify(a) === JSON.stringify(b);
   // The panel keeps no list of levels or notification types: until the hub's answer arrives the menu holds
   // only "default", the tick lists are empty and the panel says it is loading.
   check("before the first answer there are no levels, no types, and a loading line",
-    pure.levelMenu().length === 1 && pure.NOTIFY_OPTIONS.actions.length === 0 && /Loading/.test(pure.NOTIFY_OPTIONS_WAIT || "Loading"));
+    pure.NOTIFY_OPTIONS.actions.length === 0 && /Loading/.test(pure.NOTIFY_OPTIONS_WAIT || "Loading"));
   const FIVE = ["silent", "standard", "persistent", "broadcast", "confirm"].map((n, i) => ({ value: i + 1, name: n }));
   check("the first answer is applied and reported as a change",
     pure.applyNotifyOptions({ version: "v1", levels: FIVE, actions: [{ id: "inbox", label: "Inbox" }, { id: "small_toast", label: "Small toast" }, { id: "discord", label: "Discord DM", dm: true }] }) === true);
-  check("the level menu uses the notifier's own names", pure.levelMenu()[0].value === "default" && pure.levelMenu().length === 6 && /Persistent/.test(pure.levelMenu()[3].label));
   check("the same answer again changes nothing (no redraw)", pure.applyNotifyOptions({ version: "v1", levels: FIVE, actions: [{ id: "inbox", label: "Inbox" }, { id: "small_toast", label: "Small toast" }, { id: "discord", label: "Discord DM", dm: true }] }) === false);
   check("every action of the catalog is offered for one download, labelled by the catalog",
     pure.NOTIFY_OPTIONS.actions.length === 3 && pure.channelLabel("small_toast") === "Small toast" && pure.channelLabel("nope") === "nope");
   check("every notification type is listed, in order", eq(pure.NOTIFY_EVENTS.map((e) => e.id), ["done", "failed", "group_done", "queue_empty", "stalled", "started"]));
 
-  check("days: presets and a single day round-trip", pure.daysChoice(pure.DAYS) === "all" && pure.daysChoice(["mon", "tue", "wed", "thu", "fri"]) === "weekdays" && pure.daysChoice(["sat", "sun"]) === "weekends" && pure.daysChoice(["wed"]) === "wed" && pure.daysChoice(["mon", "wed"]) === "custom");
-  check("days: a custom set is kept when nothing is chosen", eq(pure.daysFromChoice("custom", ["mon", "wed"]), ["mon", "wed"]) && eq(pure.daysFromChoice("weekdays"), ["mon", "tue", "wed", "thu", "fri"]) && eq(pure.daysFromChoice("fri"), ["fri"]));
-  check("a new time window starts overnight, unlimited", eq(pure.blankWindow(), { days: pure.DAYS, from: "01:00", to: "07:00", rate_limit_kbps: 0 }));
 
-  const hubSettings = {
-    rate_limit_kbps: 0, schedule: [], after_download: { open: "off" }, concurrency: { total: 4, http: 2 }, http: { stall_seconds: 60, max_retries: 4 },
-    folders: { video: "Video", audio: "Audio", file: "Files" },
-    notify: { enabled: true, min_seconds: 0, coalesce_s: 8, providers: true, started: { enabled: false, level: null }, done: { enabled: true, level: null }, failed: { enabled: true, level: null }, stalled: { enabled: false, level: null }, group_done: { enabled: true, level: null }, queue_empty: { enabled: true, level: null } },
-  };
-  const base = pure.prefsFromSettings(hubSettings);
-  const copy = () => JSON.parse(JSON.stringify(base));
-  check("the form model reads the hub's settings (an unset level stays unset)", base.notify.events.done.enabled === true && base.notify.events.done.level === null && base.notify.events.started.enabled === false && base.after_open === "off" && base.folders.file === "Files");
-  check("nothing edited, nothing to save", eq(pure.prefsDiff(base, copy()), {}));
-  const edited = copy();
-  edited.rate_limit_kbps = 2048; edited.after_open = "reveal"; edited.notify.events.done.enabled = false; edited.notify.events.failed.level = 4; edited.notify.events.stalled.level = null;
-  edited.notify.coalesce_s = 0; edited.folders.video = "Movies"; edited.concurrency.total = 6; edited.http.max_retries = 0; edited.schedule = [pure.blankWindow()];
-  const diff = pure.prefsDiff(base, edited);
-  check("only what changed is sent, under the keys dl_prefs takes", eq(Object.keys(diff).sort(), ["after_download.open", "concurrency.total", "folders.video", "http.max_retries", "notify.coalesce_s", "notify.done.enabled", "notify.failed.level", "rate_limit_kbps", "schedule"]));
-  check("values keep their types (a level is a number, 0 retries is 0)", diff["notify.failed.level"] === 4 && diff["http.max_retries"] === 0 && diff.rate_limit_kbps === 2048 && diff["notify.done.enabled"] === false);
-  const back = copy(); back.notify.events.done.level = 3; const base3 = pure.prefsFromSettings(Object.assign({}, hubSettings, { notify: Object.assign({}, hubSettings.notify, { done: { enabled: true, level: 3 } }) }));
-  check("going back to the notifier's default is sent as 'default'", pure.prefsDiff(base3, copy()).hasOwnProperty("notify.done.level") && pure.prefsDiff(base3, copy())["notify.done.level"] === "default" && pure.prefsDiff(base, back)["notify.done.level"] === 3);
-  check("the overview summarises notifications", pure.notifySummary(base) === "4 of 6 notification types on" && pure.notifySummary(Object.assign(copy(), { notify: Object.assign(copy().notify, { enabled: false }) })) === "Notifications are off");
 
   check("the add form: no extras -> no extra arguments", eq(pure.addOptionsFromForm({ limit: "", unit: "kb", open: "default", notify: "default" }), { args: {} }));
   check("the add form: extras become dl_add arguments", eq(pure.addOptionsFromForm({ limit: "2", unit: "mb", open: "reveal", notify: "on" }), { args: { speed_limit_kbps: 2048, open_when_done: "reveal", notify: "on" } }));
@@ -115,24 +93,10 @@ const eq = (a, b) => JSON.stringify(a) === JSON.stringify(b);
   check("the add form: nothing ticked sends no notification choices", eq(pure.addOptionsFromForm({ limit: "", unit: "kb", open: "default", notify: "default", channels: [], events: [] }), { args: {} }));
   check("a download's own channels, events and folder in words", pure.itemPrefsText({ notify_channels: ["discord"], notify_events: ["done"], subdir: "Y" }) === "notify via Discord \u00B7 notify when it finishes \u00B7 saves in Y");
   check("a download's own full path in words", pure.itemPrefsText({ dest_abs: "D:\\Games" }) === "saves in D:\\Games");
-  check("cleanExt", pure.cleanExt("ISO") === ".iso" && pure.cleanExt(".tar.gz") === ".tar.gz" && pure.cleanExt("a/b") === "" && pure.cleanExt("") === "");
-  check("isFullPath", pure.isFullPath("D:\\x") && pure.isFullPath("/mnt/x") && pure.isFullPath("~/x") && !pure.isFullPath("Movies/Kids") && !pure.isFullPath(""));
-  check("extFolderRows sorts by extension", eq(pure.extFolderRows({ ".pdf": "Docs", ".iso": "ISOs" }), [[".iso", "ISOs"], [".pdf", "Docs"]]));
-  {
-    const base = pure.prefsFromSettings({ ext_folders: { ".iso": "ISOs" } });
-    const cur = pure.prefsFromSettings({ ext_folders: { ".iso": "ISOs" } });
-    check("file-type folders unchanged -> no update", eq(pure.prefsDiff(base, cur), {}));
-    cur.ext_folders[".pdf"] = "Docs";
-    check("a new file-type folder sends the whole map", eq(pure.prefsDiff(base, cur), { ext_folders: { ".iso": "ISOs", ".pdf": "Docs" } }));
-    delete cur.ext_folders[".iso"];
-    delete cur.ext_folders[".pdf"];
-    check("removing the last one sends an empty map", eq(pure.prefsDiff(base, cur), { ext_folders: {} }));
-  }
   {
     const html3 = fs.readFileSync(path.join(ui, "tool.html"), "utf8");
     check("the add form has the per-download notification pickers", html3.includes('id="addChannels"') && html3.includes('id="addEvents"'));
   }
-  check("the test result names the channels that delivered", pure.testResultText({ ok: true, delivered: ["inbox", "desktop"], failed_channels: [] }) === "Test sent: inbox, desktop." && /Couldn't reach: voice/.test(pure.testResultText({ ok: true, delivered: ["inbox"], failed_channels: ["voice"] })) && pure.testResultText({ ok: false, error: "nope" }) === "nope");
 
   // ---- the bar (plan 11.4)
   const look = (o) => pure.barLook(row(o));
@@ -228,7 +192,7 @@ const eq = (a, b) => JSON.stringify(a) === JSON.stringify(b);
   check("the add form's start time becomes start_at; 'now' sends nothing", eq(pure.addOptionsFromForm({ start: " tomorrow 3am " }).args, { start_at: "tomorrow 3am" }) && eq(pure.addOptionsFromForm({ start: "now" }).args, {}));
   check("a type and a level the notifier gains are offered with no change here, and a new `version` redraws",
     pure.applyNotifyOptions({ version: "v2", actions: [{ id: "discord", label: "Discord" }, { id: "telegram", label: "Telegram" }], levels: [{ value: 1, name: "silent" }, { value: 6, name: "panic" }] })
-    && pure.NOTIFY_OPTIONS.actions.some((c) => c.id === "telegram") && pure.levelMenu().some((o) => o.value === "6" && /Panic/.test(o.label)) && !pure.levelMenu().some((o) => o.value === "3")
+    && pure.NOTIFY_OPTIONS.actions.some((c) => c.id === "telegram")
     && pure.NOTIFY_OPTIONS.version === "v2");
   check("an older server that sends only `channels` still works", pure.applyNotifyOptions({ levels: FIVE, channels: [{ id: "inbox", label: "Inbox" }] }) === true && pure.NOTIFY_OPTIONS.actions.length === 1);
   check("an empty or missing answer changes nothing (the lists are kept)", !pure.applyNotifyOptions(null) && !pure.applyNotifyOptions({ channels: [], levels: [], actions: [] }) && pure.NOTIFY_OPTIONS.actions.length === 1);
@@ -250,15 +214,132 @@ const eq = (a, b) => JSON.stringify(a) === JSON.stringify(b);
   check("a provider's text never chooses which tool runs (no tool-kind links, no dynamic names from rows)",
     !/callTool\(\s*l\./.test(source) && !/runTool\(\s*(row|r|l)\./.test(source));
   const html2 = fs.readFileSync(path.join(ui, "tool.html"), "utf8");
-  check("the settings screen and its buttons exist in tool.html", ["settings", "settingsNav", "settingsPage", "settingsSave", "settingsRevert", "settingsBack", "speedQuick", "openFolder", "settingsBtn", "detailPrefs", "addLimit", "addOpen", "addNotify"].every((id) => html2.includes('id="' + id + '"')));
-  check("the panel can open the Settings screen with Escape and close it", /Escape/.test(source) && /closeSettings/.test(source));
-  check("the settings are saved with dl_prefs; only the library folder and a full-path file-type folder go through the confirm-gated dl_settings", /callTool\("dl_prefs"/.test(source) && /callTool\("dl_settings", \{ set: \{ library_root/.test(source) && /callTool\("dl_settings", \{ set: \{ ext_folders/.test(source) && (source.match(/callTool\("dl_settings"/g) || []).length === 2);
+  check("the buttons the panel keeps exist in tool.html, and the settings screen is gone", ["speedQuick", "openFolder", "settingsBtn", "detailPrefs", "addLimit", "addOpen", "addNotify", "tabs", "providersPane", "historyPane"].every((id) => html2.includes('id="' + id + '"')) && !/id="(settings|settingsNav|settingsPage|settingsSave|settingsRevert|settingsBack)"/.test(html2));
+  check("the Settings button opens Settings > Downloads and the panel has no settings screen of its own", /JarvisSettings[\s\S]{0,60}show\(\{ section: "downloads" \}\)/.test(source) && !/renderSettings|saveSettings|revertSettings|closeSettings|settingsOpen/.test(source));
+  check("the panel changes no setting itself: its two shortcuts write with dl_prefs, and dl_settings is never called from here (Settings > Downloads owns it)", /callTool\("dl_prefs"/.test(source) && !/dl_settings/.test(source.replace(/\/\/[^\n]*/g, "")));
   check("an event's target isn't read after an await (it is cleared inside a shadow root)", !/await[^\n]*\n[^\n]*e\.target/.test(source.slice(source.indexOf("speedQuick\").addEventListener"), source.indexOf("speedQuick\").addEventListener") + 1200)));
   const css = fs.readFileSync(path.join(ui, "tool.css"), "utf8");
   check("the stylesheet defines a look for every bar kind", ["determinate", "indeterminate", "striped", "queued", "done", "failed", "stalled", "paused", "stale", "cancelled", "unknown"]
     .every((k) => k === "determinate" || css.includes(".bar-track." + k) || css.includes("." + k)));
   check("motion respects prefers-reduced-motion", css.includes("prefers-reduced-motion"));
-  check("the stylesheet styles the settings screen", [".settings", ".snav", ".ntable", ".choice", ".prefsbox", ".speedq"].every((c) => css.includes(c)));
+  check("the stylesheet styles the tabs, History, Providers and the queue drag", [".tabs", ".tab[", ".hist__row", ".prov", ".drop-before", ".speedq"].every((c) => css.includes(c)));
+
+  // ---- History tab: what is listed, the exports, the words on a row
+  const H = (o) => Object.assign({ id: "h_1", owner: "hub", engine: "http", state: "done", kind: "file", title: "a.zip", derived: [], capabilities: [], finished_at: 1000 }, o);
+  const hrows = [H({ id: "h_a", title: "Old.iso", finished_at: 1000 }), H({ id: "h_b", title: "New.mp4", kind: "video", engine: "ytdlp", finished_at: 3000 }),
+    H({ id: "h_c", title: "Bad file", state: "failed", error: "HTTP 404", finished_at: 2000 }), H({ id: "h_d", title: "Live one", state: "downloading" }),
+    H({ id: "h_e", title: "Dropped", state: "cancelled", finished_at: 2500 })];
+  check("History lists only finished, failed and cancelled rows, newest first",
+    eq(pure.historyFilter(hrows, {}).map((r) => r.id), ["h_b", "h_e", "h_c", "h_a"]));
+  check("History narrows by state, source and title", eq(pure.historyFilter(hrows, { state: "failed" }).map((r) => r.id), ["h_c"])
+    && eq(pure.historyFilter(hrows, { source: pure.sourceKey(hrows[1]) }).map((r) => r.id), ["h_b"])
+    && eq(pure.historyFilter(hrows, { search: "ISO" }).map((r) => r.id), ["h_a"]) && pure.historyFilter(hrows, { search: "zzz" }).length === 0);
+  check("a spreadsheet cell that starts like a formula is defused, quotes and commas are escaped",
+    pure.csvCell("=HYPERLINK(1)") === "'=HYPERLINK(1)" && pure.csvCell("+1") === "'+1" && pure.csvCell("-2") === "'-2" && pure.csvCell("@a") === "'@a"
+    && pure.csvCell('say "hi", ok') === '"say ""hi"", ok"' && pure.csvCell(null) === "" && pure.csvCell("plain") === "plain");
+  const csv = pure.historyCsv([hrows[2]]).split("\r\n");
+  check("the CSV has a header row and one row per entry", csv[0] === "Title,State,Source,Kind,Size (bytes),Finished,Error" && /^Bad file,failed,.*,HTTP 404$/.test(csv[1]) && csv[2] === "");
+  const json = JSON.parse(pure.historyJson([hrows[1]]));
+  check("the JSON export is an array of readable fields", json.length === 1 && json[0].Title === "New.mp4" && json[0].State === "done" && /^1970-01-01T00:50:00/.test(json[0].Finished));
+  check("a History row's second line: source, size, when, and why it failed",
+    /HTTP 404/.test(pure.historyMeta(hrows[2], 4000 * 1000)) && /failed /.test(pure.historyMeta(hrows[2], 4000 * 1000)) && /cancelled /.test(pure.historyMeta(hrows[4], 4000 * 1000)));
+
+  // ---- Providers tab
+  const P = (o) => Object.assign({ id: "demo", label: "Demo", enabled: true, mode: "push", rows: 2, live: 1, stale: 0, interval_s: null, last_error: null, last_report_age_s: 5, last_ok_age_s: null, controls: ["pause"], read_only: false }, o);
+  check("provider tone: off, error, gone quiet, fine", pure.providerTone(P({ enabled: false })) === "off" && pure.providerTone(P({ last_error: "boom" })) === "bad"
+    && pure.providerTone(P({ live: 2, stale: 2 })) === "quiet" && pure.providerTone(P({ live: 2, stale: 1 })) === "ok" && pure.providerTone(P()) === "ok");
+  check("provider facts read in words and never claim control a read-only tool lacks",
+    pure.providerFacts(P({ read_only: true, controls: [] })).some((f) => f[0] === "Can be controlled" && /No/.test(f[1]))
+    && pure.providerFacts(P({ mode: "poll", interval_s: 10, last_ok_age_s: 600 })).some((f) => f[0] === "Last good check" && f[1] === "10 min ago")
+    && pure.providerFacts(P({ last_report_age_s: null })).some((f) => f[1] === "none yet"));
+  check("provider badge", pure.providerBadge(P({ enabled: false })) === "Off" && pure.providerBadge(P({ read_only: true })) === "Read-only" && pure.providerBadge(P({ mode: "poll" })) === "Polled" && pure.providerBadge(P()) === "Reports");
+
+  // ---- the waiting queue: order, drag and arrows
+  const Q = (id, pr, at, o) => Object.assign({ id: id, owner: "hub", state: "queued", priority: pr, created_at: at }, o || {});
+  const qrows = [Q("a", 0, 1), Q("b", 0, 2), Q("c", 5, 3), Q("p", 0, 0, { owner: "provider" }), Q("r", 0, 0, { state: "downloading" })];
+  check("the queue is listed in the order it will run: priority first, then oldest first, hub rows only", eq(pure.queueOrder(qrows), ["c", "a", "b"]));
+  check("moving a row before / after another", eq(pure.moveInOrder(["a", "b", "c"], "c", "a", false), ["c", "a", "b"]) && eq(pure.moveInOrder(["a", "b", "c"], "a", "c", true), ["b", "c", "a"])
+    && eq(pure.moveInOrder(["a", "b"], "a", "zzz", false), ["a", "b"]) && eq(pure.moveInOrder(["a", "b"], "zzz", "a", false), ["a", "b"]));
+  const before = ["a", "b", "c"]; pure.moveInOrder(before, "c", "a", false); pure.stepInOrder(before, "b", -1);
+  check("reordering never changes the list it was given", eq(before, ["a", "b", "c"]));
+  check("one step up or down, and nothing at either end", eq(pure.stepInOrder(["a", "b", "c"], "b", -1), ["b", "a", "c"]) && eq(pure.stepInOrder(["a", "b", "c"], "b", 1), ["a", "c", "b"])
+    && pure.stepInOrder(["a", "b"], "a", -1) === null && pure.stepInOrder(["a", "b"], "b", 1) === null && pure.stepInOrder(["a"], "x", 1) === null);
+  check("only a queued hub row, with the live order known, can be dragged", pure.canReorder(Q("a", 0, 1), true) && !pure.canReorder(Q("a", 0, 1), false)
+    && !pure.canReorder(Q("a", 0, 1, { state: "downloading" }), true) && !pure.canReorder(Q("a", 0, 1, { owner: "provider" }), true)
+    && !pure.canReorder({ id: "a", owner: "hub", state: "queued" }, true));
+  check("waiting rows are listed in run order when the stream gave their priorities, and newest-first otherwise",
+    eq(pure.sortRows([Q("a", 0, 1), Q("b", 0, 2), Q("c", 5, 3)]).map((r) => r.id), ["c", "a", "b"])
+    && eq(pure.sortRows([{ id: "a", owner: "hub", state: "queued", created_at: 1 }, { id: "b", owner: "hub", state: "queued", created_at: 2 }]).map((r) => r.id), ["b", "a"]));
+
+  // ---- static wiring of the new tabs
+  const htmlT = fs.readFileSync(path.join(ui, "tool.html"), "utf8");
+  check("the tab strip is a real tablist: three tabs, one selected, each controls a pane", /role="tablist"/.test(htmlT) && (htmlT.match(/role="tab"/g) || []).length === 3
+    && (htmlT.match(/aria-selected="true"/g) || []).length === 1 && /role="tabpanel"/.test(htmlT) && /aria-controls="providersPane"/.test(htmlT) && /aria-controls="historyPane"/.test(htmlT));
+  check("the arrow keys, Home and End move between tabs", /ArrowRight/.test(source) && /ArrowLeft/.test(source) && /"Home"/.test(source) && /"End"/.test(source));
+  check("the writes to the hub's web routes carry the header the server requires, and removing history asks first",
+    /"X-Jarvis-Hub": "1"/.test(source) && /askFirst\("Remove from the history\?"/.test(source) && /askFirst\("Clear old history\?"/.test(source) && /dry_run: true/.test(source));
+  check("the panel only talks to /api/hub/ routes it knows", [...source.matchAll(/["'`]\/api\/([a-z\/\-]+)/g)].every((m) => /^hub\/(stream|history|history\/remove|history\/clear|redownload|reorder|thumb\/|file\/)/.test(m[1])));
+  check("the live stream falls back to polling: errors, a silent stream and a `down` message all hand over", /es\.onerror = liveDown/.test(source) && /addEventListener\("down", liveDown\)/.test(source) && /45000/.test(source));
+  check("while the stream is live the poll only refreshes the summary", /streaming \? \{ limit: 1, summary: true \}/.test(source));
+  check("a row drag doesn't turn into 'links dropped on the panel'", /if \(S\.dragId\) return;/.test(source));
+  check("drag has a keyboard route: every draggable row also has move up / move down buttons", /Move up in the queue/.test(source) && /Move down in the queue/.test(source));
+
+  // ---- the chat card keeps the panel's looks (its formatting half is a copy: they must agree on every state)
+  const card = require(path.join(__dirname, "..", "web", "public", "download-status-card.js"));
+  const states = ["queued", "probing", "connecting", "downloading", "postprocessing", "paused", "stalled", "failed", "cancelled", "done", "weird"];
+  const variants = [{}, { percent: 40 }, { percent: 40, speed_bps: 2097152, eta_s: 90 }, { percent: null }, { stale: true, age_s: 600, owner: "provider" },
+    { retry_in_s: 12 }, { derived: ["percent", "speed", "eta"], percent: 10, speed_bps: 1024, eta_s: 5 }, { phase: "verifying", phase_index: 1, phase_count: 2 },
+    { capabilities: ["pause", "resume", "cancel", "retry", "open", "reveal"], bytes_done: 5, bytes_total: 10 }, { owner: "provider", read_only: true, capabilities: [] }];
+  let same = true;
+  states.forEach((st) => variants.forEach((v) => {
+    const r = row(Object.assign({ state: st }, v));
+    if (!eq(card._pure.barLook(r), pure.barLook(r)) || card._pure.statusText(r) !== pure.statusText(r) || !eq(card._pure.rowActions(r), pure.rowActions(r))) same = false;
+  }));
+  check("the chat card draws every state exactly like the Downloads panel (bar look, words, buttons)", same);
+  check("the card's formatters agree with the panel's", [0, 1023, 1536, 5 * 1024 * 1024].every((n) => card._pure.fmtBytes(n) === pure.fmtBytes(n))
+    && [0, 45, 600, 3900, null].every((n) => card._pure.fmtEta(n) === pure.fmtEta(n) && card._pure.fmtAgo(n) === pure.fmtAgo(n)) && card._pure.fmtSpeed(2097152) === pure.fmtSpeed(2097152));
+  check("a card offers pause / resume / retry / cancel while live and open / show in folder when done, nothing for a group or a read-only row",
+    eq(card._pure.cardVerbs(row({ state: "downloading", capabilities: ["pause", "cancel", "open"] })).map((a) => a.verb), ["pause", "cancel"])
+    && card._pure.cardVerbs(row({ state: "done", capabilities: ["open", "reveal"] })).map((a) => a.verb).includes("open")
+    && card._pure.cardVerbs({ card: "group", state: "downloading" }).length === 0
+    && card._pure.cardVerbs(row({ owner: "provider", state: "downloading", capabilities: [] })).length === 0);
+  check("a payload is cleaned: bad ids dropped, at most eight cards, groups kept as groups",
+    card._pure.normalizeCards({ cards: [{ id: "ok1" }, { id: "bad id" }, { id: 5 }, null, { id: "g1", card: "group" }].concat(Array.from({ length: 12 }, (_, i) => ({ id: "x" + i }))) }).length === 8
+    && card._pure.normalizeCards({ cards: [{ id: "g1", card: "group" }] })[0].card === "group" && card._pure.normalizeCards(null).length === 0);
+  check("a batch card reads in words", card._pure.groupStatus({ counts: { done: 2, total: 5, running: 1, failed: 1 }, final: false }) === "2 of 5 done \u00B7 1 running \u00B7 1 failed");
+  const cardSrc = fs.readFileSync(path.join(__dirname, "..", "web", "public", "download-status-card.js"), "utf8");
+  check("the card never assigns HTML and writes text with textContent", !/innerHTML|outerHTML|insertAdjacentHTML|document\.write|eval\(|new Function/.test(cardSrc) && /textContent/.test(cardSrc));
+  check("the card can run only the five download controls", /RUNNABLE = \{ dl_pause: 1, dl_resume: 1, dl_retry: 1, dl_cancel: 1, dl_open: 1 \}/.test(cardSrc));
+  check("the card's thumbnail comes from the id-based route, never a URL from the data", /"\/api\/hub\/thumb\/" \+ encodeURIComponent\(row\.id\)/.test(cardSrc) && !/\.src = row\./.test(cardSrc));
+  check("the card stops following when everything is final, the element left the page, or on too many streams", /allFinal\(\)\) stop\(\)/.test(cardSrc) && /isConnected/.test(cardSrc) && /MAX_STREAMS = 3/.test(cardSrc));
+
+  // ---- Settings > Downloads (web/public/downloads-settings.js): which rows exist, how they are written
+  const dset = require(path.join(__dirname, "..", "web", "public", "downloads-settings.js"))._pure;
+  const payload = { settings: { rate_limit_kbps: 0, folders: { video: "Video" }, concurrency: { total: 4 }, notify: { enabled: true, min_seconds: 5 }, steam_threshold_mb: 500, weird_list: [1], retention: { keep_history_days: 0 }, schedule: [], ext_folders: {} },
+    writable: ["rate_limit_kbps", "folders.video", "concurrency.total", "notify.enabled", "notify.done.enabled", "notify.done.level", "steam_threshold_mb", "weird_list", "schedule", "ext_folders", "library_root"],
+    prefs_writable: ["rate_limit_kbps", "folders.video", "concurrency.total", "notify.enabled", "schedule", "ext_folders"] };
+  const planned = dset.planRows(payload);
+  const paths = planned.reduce((a, g) => a.concat(g.rows.map((r) => r.path)), []);
+  check("only settings the hub says are writable get a row", paths.includes("rate_limit_kbps") && paths.includes("concurrency.total") && paths.includes("library_root")
+    && !paths.includes("notify.min_seconds") && !paths.includes("http.max_retries") && !paths.includes("retention.keep_history_days"));
+  check("a writable setting this page has never heard of still gets a generic row; a list or map it can't edit is left out, never shown wrongly",
+    paths.includes("steam_threshold_mb") && !paths.includes("weird_list") && !paths.includes("schedule") && !paths.includes("ext_folders") && !paths.includes("notify.done.enabled"));
+  check("rows are grouped under headings in a fixed order", eq(planned.map((g) => g.group), ["Where files go", "Speed", "Running at once", "Notifications", "Other"].filter((g) => planned.some((x) => x.group === g))));
+  check("a key dl_prefs takes goes there; the rest through the confirm-gated dl_settings", dset.toolFor("rate_limit_kbps", payload) === "dl_prefs" && dset.toolFor("library_root", payload) === "dl_settings");
+  check("private hosts: one per line or comma separated, blanks dropped", eq(dset.textToHosts("a.local\n b.lan:8080 , ,c"), ["a.local", "b.lan:8080", "c"]) && dset.hostsToText(["a", "b"]) === "a\nb");
+  check("speed windows round-trip: day words stay words, numbers stay numbers",
+    eq(dset.modelToWindows(dset.windowsToModel([{ days: ["mon", "tue", "wed", "thu", "fri"], from: "01:00", to: "07:00", rate_limit_kbps: 512 }])), [{ days: "weekdays", from: "01:00", to: "07:00", rate_limit_kbps: 512 }])
+    && dset.daysChoice(["mon", "wed"]) === "custom" && dset.daysChoice(["sat", "sun"]) === "weekends");
+  check("folder-per-type: a dot is added, empty rows are dropped, the table round-trips", eq(dset.modelToExt([{ ext: "iso", folder: "ISOs" }, { ext: ".pdf", folder: "Docs" }, { ext: "", folder: "x" }, { ext: "zip", folder: "" }]), { ".iso": "ISOs", ".pdf": "Docs" })
+    && eq(dset.extToModel({ ".pdf": "Docs", ".iso": "ISOs" }), [{ ext: ".iso", folder: "ISOs" }, { ext: ".pdf", folder: "Docs" }]));
+  const dsSrc = fs.readFileSync(path.join(__dirname, "..", "web", "public", "downloads-settings.js"), "utf8");
+  check("the section writes only through dl_prefs / dl_settings / dl_provider_prefs and never assigns HTML", /RUNNABLE = \{ dl_prefs: 1, dl_settings: 1, dl_provider_prefs: 1 \}/.test(dsSrc) && !/innerHTML|insertAdjacentHTML|eval\(/.test(dsSrc));
+  check("the section keeps no limit or range of its own beyond input hints (the hub validates)", !/Number\.isInteger|throw new Error\("[^"]*(must be|between)/.test(dsSrc));
+  const settingsSrc = fs.readFileSync(path.join(__dirname, "..", "web", "public", "settings.js"), "utf8");
+  check("settings.js takes extra sections from JarvisSettingsSections and gives them the row helpers", /JarvisSettingsSections/.test(settingsSrc) && /\.\.\.EXTRA_SECTIONS/.test(settingsSrc) && /ui: \{ h, group, rowShell, makeControl, flash, linkRow \}/.test(settingsSrc));
+  const idxHtml = fs.readFileSync(path.join(__dirname, "..", "web", "public", "index.html"), "utf8");
+  check("index.html loads the card and the section before settings.js",
+    idxHtml.indexOf("download-status-card.js") > -1 && idxHtml.indexOf("downloads-settings.js") > -1 && idxHtml.indexOf("downloads-settings.js") < idxHtml.indexOf('src="settings.js"') && idxHtml.includes("download-status-card.css"));
 
   console.log("\n" + passed + " passed, " + failed + " failed");
   process.exit(failed ? 1 : 0);

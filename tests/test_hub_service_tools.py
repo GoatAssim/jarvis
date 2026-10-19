@@ -25,6 +25,8 @@ from pathlib import Path
 HOME = tempfile.mkdtemp(prefix="jarvis-hub-svc-")
 os.environ["JARVIS_HUB_NO_DELIVER"] = "1"      # tests never fire real notifications
 os.environ["HOME"] = HOME
+# These tests assume no Stremio server is running (the owner's own may be): point the engine at a closed port.
+os.environ["JARVIS_STREMIO_SERVER_URL"] = "http://127.0.0.1:9"
 os.environ["USERPROFILE"] = HOME
 for _var in ("JARVIS_SCHEDULED", "JARVIS_CONTEXT", "JARVIS_ALLOWED_TOOLS"):
     os.environ.pop(_var, None)
@@ -114,7 +116,9 @@ def test_tool_file():
     check("the runner exists and is skipped by the loader", (CLI / "jarvis" / "actions" / "_hub_daemon.py").exists()
           and not any(r.file.startswith("_hub_daemon") and r.valid for r in records))
 
-    check("the tools are in the registry's `downloads` group", sorted(tool_registry.TOOL_GROUPS.get("downloads", [])) == sorted(TOOL_NAMES))
+    # present_download_status (actions/download_status_card.py) shares the group on purpose: it has to be in the model's tool set
+    # in the same turn as dl_add, and the routing is by group.
+    check("the tools are in the registry's `downloads` group", sorted(tool_registry.TOOL_GROUPS.get("downloads", [])) == sorted(TOOL_NAMES + ["present_download_status"]))
     route = tool_router.route
     check("'what's downloading' routes to the downloads group", "downloads" in route("what's downloading right now?").groups)
     check("'download this file <url>' routes there", "downloads" in route("download this file https://example.com/a.zip").groups)
@@ -155,7 +159,7 @@ def test_add_items():
     mixed = service.add_items([PUBLIC + "/e.zip", "http://10.0.0.1/x"], store=store)
     check("one good and one bad: the good is queued, the bad listed", mixed["ok"] and mixed["count"] == 1 and len(mixed["skipped"]) == 1)
     magnet = service.add_items(["magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567"], store=store)
-    check("a magnet link says the stremio engine isn't installed", magnet["ok"] is False and "stremio" in magnet["error"])
+    check("a magnet link says the stremio engine isn't ready (its server is down)", magnet["ok"] is False and "stremio" in magnet["error"])
     yt = service.add_items(["https://www.youtube.com/watch?v=abc"], store=store)
     check("a YouTube page is not queued as a file (yt-dlp takes it, or says it isn't ready)",
           (yt["ok"] and yt["added"][0]["engine"] == "ytdlp") or (yt["ok"] is False and "ytdlp" in yt["error"]))
