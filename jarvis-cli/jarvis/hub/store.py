@@ -43,7 +43,8 @@ _SCHEMA = (
         attempts INTEGER NOT NULL DEFAULT 0, priority INTEGER NOT NULL DEFAULT 0,
         next_attempt_at REAL, dedupe_key TEXT,
         created_at REAL NOT NULL, started_at REAL, finished_at REAL, updated_at REAL NOT NULL,
-        last_report_at REAL, stale INTEGER NOT NULL DEFAULT 0, keep INTEGER NOT NULL DEFAULT 0
+        last_report_at REAL, stale INTEGER NOT NULL DEFAULT 0, keep INTEGER NOT NULL DEFAULT 0,
+        dest_is_dir INTEGER
     )""",
     "CREATE INDEX IF NOT EXISTS items_state ON items(state)",
     "CREATE INDEX IF NOT EXISTS items_provider ON items(provider, state)",
@@ -83,7 +84,7 @@ ITEM_COLUMNS = frozenset((
     "dest_dir", "dest_file", "thumb_ref", "detail_json", "children_json", "links_json",
     "capabilities_json", "controls_json", "message", "error", "control", "attempts",
     "priority", "next_attempt_at", "dedupe_key", "created_at", "started_at", "finished_at",
-    "updated_at", "last_report_at", "stale", "keep",
+    "updated_at", "last_report_at", "stale", "keep", "dest_is_dir",
 ))
 # python name -> column, for the structured values stored as JSON text
 _JSON_FIELDS = {
@@ -105,7 +106,7 @@ _REPORT_KEYS = frozenset((
 _INTERNAL_COLUMNS = frozenset((
     "dest_dir", "dest_file", "next_attempt_at", "attempts", "control", "priority", "group_id",
     "keep", "thumb_ref", "dedupe_key", "started_at", "finished_at", "last_report_at", "stale",
-    "source_url", "engine",
+    "source_url", "engine", "dest_is_dir",
 ))
 _PROVIDER_JSON = {"capabilities": "capabilities_json", "controls": "controls_json",
                   "open_roots": "open_roots_json", "settings": "settings_json"}
@@ -113,6 +114,38 @@ _PROVIDER_JSON = {"capabilities": "capabilities_json", "controls": "controls_jso
 EVENT_KEEP_PER_ITEM = 100
 # Rows of the settings table that are runtime state kept next to the settings, not settings.
 RUNTIME_KEYS = ("daemon", "notify_state")
+
+
+# N2: `items.dest_is_dir` (NULL = not known, 1 = dest is a folder, 0 = dest is a file).  A database
+# made before it existed gets the column added on the first connection in each process.  This is
+# keyed on the column itself, not on PRAGMA user_version, so it needs no SCHEMA_VERSION bump.
+_COLUMNS_CHECKED = set()
+
+
+def _ensure_columns(conn, db_path):
+    key = str(db_path)
+    if key in _COLUMNS_CHECKED:
+        return
+    names = {r[1] for r in conn.execute("PRAGMA table_info(items)").fetchall()}
+    if names and "dest_is_dir" not in names:
+        try:
+            conn.execute("ALTER TABLE items ADD COLUMN dest_is_dir INTEGER")
+        except sqlite3.OperationalError as exc:     # the daemon or the web server got there first
+            if "duplicate column" not in str(exc).lower():
+                raise
+    if names:
+        _COLUMNS_CHECKED.add(key)
+
+
+def _dest_kind(dest):
+    """1 if `dest` is a folder on disk, 0 if a file, None if it is not there (or cannot be asked)."""
+    if not dest:
+        return None
+    try:
+        p = Path(dest)
+        return None if not p.exists() else int(p.is_dir())
+    except (OSError, ValueError):
+        return None
 
 
 def _dumps(value):
@@ -186,6 +219,7 @@ class Store:
             except Exception:
                 conn.execute("ROLLBACK")
                 raise
+        _ensure_columns(conn, self.path)
         return conn
 
     @contextlib.contextmanager
@@ -798,6 +832,9 @@ class Store:
                     problems.append("dest outside this provider's open_roots; dropped")
                     dest = None
                 extra["dest_file"] = dest
+                # N2: is it a folder?  Steam's dest is.  Re-worked on every report, so a folder that
+                # did not exist yet is recognised once it does; unknown (NULL) until then.
+                extra["dest_is_dir"] = _dest_kind(dest)
             if fields.get("group"):
                 gid = "%s:%s" % (pid, states.clean_text(fields["group"], 80))
                 if not conn.execute("SELECT 1 FROM groups WHERE id=?", (gid,)).fetchone():

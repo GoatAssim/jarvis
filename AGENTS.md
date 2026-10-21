@@ -50,6 +50,10 @@ things that were already fixed once.
   first request and every redirect; `allow_private_hosts` is editable only through the confirm-gated
   `dl_settings`. `hub_client` never raises. The panel renders download text with `textContent` only
   (`tests/verify_hub_panel.js` greps for markup assignment). The model cannot create a provider.
+  `dl_add` is the router and keeps only the shared arguments: a source's own options go in that source's
+  add tool (`dl_add_ytdlp`, `dl_add_stremio`), never on `dl_add`. A tool-supplied provider's `dl_add_<id>` is
+  generated from the `add` block of its `TOOL_DOWNLOADS` entry (`tool_download_add.py`), never written by hand.
+  Every add tool is the owner's: a chat guest is refused in the handler, whatever an allow-list says.
 - **The Stremio half of the hub (`hub/engines/stremio.py`, `hub/stremio/`, `actions/stremio_stack.py`,
   `stremio_open.py`, `play_media.py`).** The engine is the HTTP engine's `stream_to_file` plus
   registration (`POST /<hash>/create`, then poll `stats.json`: a torrent with no peers never answers
@@ -67,7 +71,16 @@ things that were already fixed once.
   only video/audio files under the downloads folders and the server's own `/<hash>/<n>` link; no tool
   argument is a path or URL, and a command line is always an argv list. The account key in
   `~/.jarvis/stremio.json` is never read by this code or printed (`config.public_view` blanks it).
-  Tests: `test_hub_stremio_links.py`, `_engine.py`, `_tools.py` (a fake server in
+  **Finding Stremio (N9).** `hub/stremio/detect.py` finds the app with no setup (the configured port, a running
+  Stremio, Windows' install list, the Start Menu shortcut, the usual folders; read-only, each probe takes its
+  inputs as arguments); `hub/stremio/status.py` turns the facts into ONE state and plain sentence that
+  `stack_status`, `stack_start`, `stack_doctor` and `hub-admin stremio_status` all share. Jarvis starts nothing
+  while the Stremio app is open and its server merely silent. The paths are saved ONLY by the owner's
+  Locate... button (`hub-admin stremio_save` -> `config.save_paths`: loopback, `X-Jarvis-Hub` header, refused for
+  an unattended process, both files must exist); no tool names `save_paths` / `stremio_save`
+  (`test_hub_stremio_detect.py` fails if one does). The start wait is the hub setting
+  `stremio.start_wait_seconds` (default 60).
+  Tests: `test_hub_stremio_links.py`, `_engine.py`, `_tools.py`, `_detect.py` (a fake server in
   `tests/_hub_fake_stremio.py`); the older hub tests set `JARVIS_STREMIO_SERVER_URL` to a closed port
   so a real Stremio on the dev machine can't change their answers.
 - **The model may start, stop and inspect daemons; it may not create one.**

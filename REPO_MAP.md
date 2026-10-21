@@ -166,6 +166,7 @@ jarvis-cli/jarvis/
     browser_daemon.py     `jarvis browser-daemon` -- the BUILT-IN `browser` daemon (daemons.py BUILTIN, off until started): holds ONE warm Playwright session across asks and serves browser_tools' own `_local_tool_browser_*` functions over a loopback TCP socket (newline-delimited JSON, one request per connection; port in `~/.jarvis/browser-daemon.port`). Closes the browser, not itself, after `browser_daemon_idle_seconds` (default 600) of no use. Transport + lifecycle only: no second copy of the click/fill logic. Tests: `test_browser_daemon.py`
     command_tools.py  commands_config.py   saved user commands
     custom_tools*.py  user Python tools from ~/.jarvis/tools/ (custom_tools_suggest.py = the editor's inline suggestions, `ctools-suggest`; returns text only, never writes a tool). custom_tools_store.py also keeps DRAFTS: ~/.jarvis/tools/_drafts/<key>.json, backups of tools still being written (saved or not); custom_tools_ui_templates.py = the "Button page" / "Menu panel" templates and their starter html/js/css. custom_tools_store.py also owns a tool's WEB FILES (the folders its TOOL_UI declares): `web_footprint`, `read_web_file` / `write_web_file` (`ctools-files`, the editor's extra tabs), `import_bundle` / `read_zip_bundle` (`ctools-import`: several files, a folder or a .zip), `web_removal_plan` (`ctools-delete --folders`, `ctools-files removal`)
+    tool_download_add.py  N4: the `add` block of a TOOL_DOWNLOADS entry -> a GENERATED `dl_add_<id>` tool (validates its arguments, dry_run, runs the file's own tool through `execute_tool`, inherits its confirm gate, owner-only, never replaces a hand-written tool of that name). Called from `tool_loader.py` (`split_add` / `prepare` per file, `attach` after the whole scan). A bad block is logged and dropped
     tool_commands.py      TOOL_COMMANDS (I.2.11): validates the palette commands a tool file contributes (a typed twin of one of its own tools; no riskTier = dangerous) and builds the tool's arguments from typed words. `jarvis tool-commands list|prepare|run`; routes `/api/tool-commands*`. A command is off when the owner switches it off (Tool Manager) or when its tool is (`tools.command_off_reason`)
     tool_ui.py            TOOL_UI: validates a tool file's own screen (a button or Menu entry opening a page built from the tool's tool.html/js/css) and reads its files; paths can't leave the declaring file's directory; optional `size` ("normal" | "wide", menu panels) picks the window size. `jarvis tool-ui list|bundle|run`
     tool_maker.py        the Tool Maker conversation (L.53): the per-turn context (tool name + whole editor text, from a temp file server.js writes), WITHHELD_TOOLS (write-a-file / run-a-program tools it may not use), history trimming, the origin stamp. Active only while JARVIS_TOOL_MAKER_CONTEXT_FILE is set
@@ -366,7 +367,9 @@ jarvis-cli/jarvis/
         send_dm.py            NEW (L.20) — DM ONE known person; owner-only, confirm-gated,
                               rate-limited (~/.jarvis/channels/dm_sends.json), refuses unattended
         channel_people.py     NEW — remember_sender / who_am_i_talking_to
-        download_hub.py       Download Hub (JARVIS_DOWNLOAD_HUB.md phases 1-2): dl_add / dl_list / dl_status /
+        download_hub.py       Download Hub (JARVIS_DOWNLOAD_HUB.md phases 1-2): dl_add (the router: any link, names the
+                              engine and its add tool) / dl_add_ytdlp / dl_add_stremio (N4: a source's own options) /
+                              dl_list / dl_status /
                               dl_pause / dl_resume / dl_cancel / dl_retry / dl_schedule / dl_open / dl_settings, hub_doctor,
                               hub_demo_provider. Thin: every rule is in hub/service.py. Declares the Menu >
                               Downloads panel (hub_ui/, shipped as package data) and the `hub` daemon
@@ -377,7 +380,7 @@ jarvis-cli/jarvis/
                               stack_doctor, stremio_prepare (confirm-gated), server_cache, server_cache_clear
                               (confirm-gated); DAEMONS `server` and `web`; the /stack command. An already-open
                               Stremio app reads "already up", never a duplicate start
-        _stremio_server.py    runners the two Stremio DAEMONS launch (read ~/.jarvis/stremio.json at launch)
+        _stremio_server.py    runners the two Stremio DAEMONS launch (read ~/.jarvis/stremio.json at launch; the server runner finds Stremio with hub/stremio/detect.py)
         _stremio_web.py
         stremio_open.py       phase 7: stremio_open (a stremio-web screen / episode stream list in the browser)
         play_media.py         phase 7: play_episode (tier 3 mpv/VLC on a finished file or the server's link; tier 2
@@ -410,6 +413,12 @@ jarvis-cli/jarvis/
                           Tests: test_hub_core / test_hub_http_engine / test_hub_daemon /
                           test_hub_service_tools / test_hub_daemon_process + verify_hub_panel.js;
                           Stremio: test_hub_stremio_links / _engine / _tools (tests/_hub_fake_stremio.py is a fake server)
+                          steam-checks.py (repo root, NOT part of the package): the read-only Steam experiment script the owner runs
+                          on Windows (brief 06: N5 second signals, N6 cancel record, N12 control research); tests/test_steam_checks.py
+                                                   detect.py (N9: read-only probes that find Stremio with no setup: port, running program, Windows
+                          install list, Start Menu shortcut, usual folders; each takes fake inputs in tests); status.py
+                          (collect facts + `describe`: one plain sentence per state, shared by stack_* and hub-admin);
+                          config.save_paths = the owner's Locate... save (called only from hub_admin, never a tool).
         person_memory_tools.py  L.21-L.23 owner-only: person_remember/forget/instruct/recall/
                               review + await_reply (own `person_memory` group)
         workspace_tools.py    NEW — daemons, log search, backlog as AI tools

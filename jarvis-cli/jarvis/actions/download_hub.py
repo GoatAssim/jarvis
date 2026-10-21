@@ -7,8 +7,13 @@ drift apart.  See jarvis/hub/__init__.py for the module map and where later phas
 
 What is in it
 -------------
-  dl_add / dl_list / dl_status                 queue and look (file links and, since phase 3,
-                                               video pages through the yt-dlp engine)
+  dl_add / dl_list / dl_status                 queue and look (dl_add is the router: it takes any link
+                                               and says which engine took it and which add tool carries
+                                               that engine's own options)
+  dl_add_ytdlp / dl_add_stremio                the per-source add tools (N4): video / audio options,
+                                               a torrent's file choice.  A tool file's own source gets a
+                                               GENERATED dl_add_<id> (tool_download_add.py), never one
+                                               written here
   dl_import_legacy                             index the old ytdl_download folders (read-only)
   dl_providers / dl_provider_prefs             the watched sources (Steam, Playnite, tools with
                                                their own downloads): health, on / off, settings
@@ -35,6 +40,10 @@ the tool would silently vanish); the hub package is import-light but is still on
 inside the handlers, so a `jarvis` command that never touches downloads pays nothing.
 """
 
+import json
+import os
+import sys
+
 # ---------------------------------------------------------------------------
 # helpers
 # ---------------------------------------------------------------------------
@@ -54,10 +63,50 @@ def _svc():
     return service
 
 
-# dl_add's video options (handed to the yt-dlp engine; ignored for a plain file link)
+# The yt-dlp options.  They live in dl_add_ytdlp's schema only (N4); dl_add still ACCEPTS them
+# (forwarded to the yt-dlp engine, ignored for a plain file link, marked deprecated in its answer)
+# so old callers keep working.
 _VIDEO_ARGS = ("mode", "quality", "container", "video_codec", "audio_format", "audio_quality",
                "embed_thumbnail", "embed_metadata", "embed_chapters", "write_subs", "embed_subs",
                "sub_langs", "sponsorblock_remove", "skip_if_downloaded")
+
+# The per-download notification / after-download / speed arguments.  Every add tool still ACCEPTS
+# them (the panel's add form and ytdl_download send them), but they are only ADVERTISED in the
+# schemas when this is True.  False = the "optional second step" of N4 as far as the schemas go:
+# they can be set on a queued row with dl_prefs and its `id`.  Owner decision N4 (OWNER_TODO).
+ADVERTISE_PER_DOWNLOAD_EXTRAS = False
+_EXTRA_ARGS = ("speed_limit_kbps", "open_when_done", "notify", "notify_channels", "notify_events")
+
+# Which add tool carries an engine's own options.  An engine not listed (http, qbittorrent) has
+# none: plain links stay with dl_add.
+_ADD_TOOL_FOR_ENGINE = {"ytdlp": "dl_add_ytdlp", "stremio": "dl_add_stremio"}
+
+
+def _add_tool_for(engine):
+    return _ADD_TOOL_FOR_ENGINE.get(engine or "", "dl_add")
+
+
+def _is_chat_guest():
+    """True when this turn answers a chat message from someone who is NOT the owner.  No chat
+    context (the PC, a scheduled job) is the owner's own.  Same variable tools.py reads, but an
+    unreadable value counts as a guest here: a permission check fails closed."""
+    raw = os.environ.get("JARVIS_CHANNEL_SENDER") or ""
+    if not raw.strip():
+        return False
+    try:
+        data = json.loads(raw)
+    except (ValueError, TypeError):
+        return True
+    if not isinstance(data, dict):
+        return True
+    if not data.get("platform") or not data.get("user_id"):
+        return False
+    return not data.get("is_owner")
+
+
+def _guest_refusal():
+    return {"ok": False, "error": "adding downloads is the owner's: someone in a chat can look at the "
+                                  "queue (dl_list, dl_status) but not add to it"}
 
 
 def _fail(label, exc):
@@ -102,59 +151,159 @@ def _confirm_outside(path, count=1):
 # ---------------------------------------------------------------------------
 
 
+def _gather_urls(args):
+    urls = []
+    if args.get("url"):
+        urls.append(str(args["url"]))
+    extra = args.get("urls")
+    if isinstance(extra, list):
+        urls += [str(u) for u in extra]
+    elif isinstance(extra, str) and extra.strip():
+        urls.append(extra)
+    return [u.strip() for u in urls if u and u.strip()]
+
+
+def _queue(args, urls, engine, engine_options, label):
+    """What every add tool does once it knows its links, the engine and the engine's options: the
+    dry run, the bulk question, the open-the-file question, the full-path question, then the
+    hub's add_items.  ONE copy, so the three tools cannot drift apart."""
+    svc = _svc()
+    if args.get("dry_run"):
+        decisions = []
+        for text in urls[:10]:
+            d = svc.preview(text, engine=engine)
+            decisions.append({"input": text[:120], "ok": d["ok"], "engine": d["engine"],
+                              "reason": d["reason"], "problem": d["problem"],
+                              "add_tool": _add_tool_for(d["engine"]) if d["engine"] else None})
+        return {"ok": True, "dry_run": True, "decisions": decisions}
+
+    limits = (svc.get_settings().get("settings") or {}).get("limits") or {}
+    if len(urls) > int(limits.get("confirm_above_items", 5)):
+        # A bulk add is the one place a question is asked from inside the handler:
+        # default=False, so an unattended run queues nothing nobody approved.
+        from .. import ui_bridge as ui
+        if not ui.confirm("Queue %d downloads?" % len(urls),
+                          body="\n".join(u[:100] for u in urls[:8]) + ("\n..." if len(urls) > 8 else ""),
+                          level="warn", confirm_label="Queue them", cancel_label="Cancel", default=False):
+            return {"ok": False, "cancelled": True, "error": "not confirmed: nothing was queued"}
+    open_when_done = args.get("open_when_done")
+    if str(open_when_done or "").strip().lower() == "open" and not _confirm_open(len(urls)):
+        return {"ok": False, "cancelled": True, "error": "not confirmed: nothing was queued"}
+    dest = args.get("dest")
+    allow_abs = False
+    if dest and svc.settings_mod.is_absolute_spec(dest):
+        if not _confirm_outside(dest, len(urls)):
+            return {"ok": False, "cancelled": True, "error": "not confirmed: nothing was queued"}
+        allow_abs = True
+    res = svc.add_items(urls, engine=engine, dest=dest, group=args.get("group"),
+                        start_paused=bool(args.get("start_paused")),
+                        speed_limit_kbps=args.get("speed_limit_kbps"),
+                        open_when_done=open_when_done, notify_me=args.get("notify"),
+                        notify_channels=args.get("notify_channels"),
+                        notify_events=args.get("notify_events"),
+                        allow_absolute_dest=allow_abs, start_at=args.get("start_at"),
+                        engine_options=engine_options)
+    if isinstance(res, dict):
+        for row in res.get("added") or []:
+            if isinstance(row, dict):
+                row["add_tool"] = _add_tool_for(row.get("engine"))
+    return res
+
+
 def tool_dl_add(args):
+    """The router: any link, the engine is picked as plan section 8 says, and the answer names the
+    add tool that carries that engine's own options."""
     try:
         args = args or {}
-        urls = []
-        if args.get("url"):
-            urls.append(str(args["url"]))
-        extra = args.get("urls")
-        if isinstance(extra, list):
-            urls += [str(u) for u in extra]
-        elif isinstance(extra, str) and extra.strip():
-            urls.append(extra)
-        urls = [u.strip() for u in urls if u and u.strip()]
+        if _is_chat_guest():
+            return _guest_refusal()
+        urls = _gather_urls(args)
         if not urls:
             return {"needs_clarification": True, "message": "Which link should I download?"}
-        svc = _svc()
         engine = (args.get("engine") or "").strip() or None
-
-        if args.get("dry_run"):
-            decisions = []
-            for text in urls[:10]:
-                d = svc.preview(text, engine=engine)
-                decisions.append({"input": text[:120], "ok": d["ok"], "engine": d["engine"],
-                                  "reason": d["reason"], "problem": d["problem"]})
-            return {"ok": True, "dry_run": True, "decisions": decisions}
-
-        limits = (svc.get_settings().get("settings") or {}).get("limits") or {}
-        if len(urls) > int(limits.get("confirm_above_items", 5)):
-            # A bulk add is the one place a question is asked from inside the handler:
-            # default=False, so an unattended run queues nothing nobody approved.
-            from .. import ui_bridge as ui
-            if not ui.confirm("Queue %d downloads?" % len(urls),
-                              body="\n".join(u[:100] for u in urls[:8]) + ("\n..." if len(urls) > 8 else ""),
-                              level="warn", confirm_label="Queue them", cancel_label="Cancel", default=False):
-                return {"ok": False, "cancelled": True, "error": "not confirmed: nothing was queued"}
-        open_when_done = args.get("open_when_done")
-        if str(open_when_done or "").strip().lower() == "open" and not _confirm_open(len(urls)):
-            return {"ok": False, "cancelled": True, "error": "not confirmed: nothing was queued"}
-        dest = args.get("dest")
-        allow_abs = False
-        if dest and svc.settings_mod.is_absolute_spec(dest):
-            if not _confirm_outside(dest, len(urls)):
-                return {"ok": False, "cancelled": True, "error": "not confirmed: nothing was queued"}
-            allow_abs = True
-        return svc.add_items(urls, engine=engine, dest=dest, group=args.get("group"),
-                             start_paused=bool(args.get("start_paused")),
-                             speed_limit_kbps=args.get("speed_limit_kbps"),
-                             open_when_done=open_when_done, notify_me=args.get("notify"),
-                             notify_channels=args.get("notify_channels"),
-                             notify_events=args.get("notify_events"),
-                             allow_absolute_dest=allow_abs, start_at=args.get("start_at"),
-                             engine_options={k: args.get(k) for k in _VIDEO_ARGS if args.get(k) is not None})
+        video = {k: args.get(k) for k in _VIDEO_ARGS if args.get(k) is not None}
+        res = _queue(args, urls, engine, video, "dl_add")
+        if video and isinstance(res, dict) and not res.get("dry_run"):
+            note = ("%s on dl_add is deprecated: use dl_add_ytdlp for video options "
+                    "(they were still applied to the video links)." % ", ".join(sorted(video)))
+            res["note"] = (res["note"] + " " + note) if res.get("note") else note
+        return res
     except Exception as exc:  # noqa: BLE001 - a tool never raises
         return _fail("dl_add", exc)
+
+
+def tool_dl_add_ytdlp(args):
+    """Queue a video / audio page with the yt-dlp engine and its own options."""
+    try:
+        args = args or {}
+        if _is_chat_guest():
+            return _guest_refusal()
+        urls = _gather_urls(args)
+        if not urls:
+            return {"needs_clarification": True, "message": "Which video link should I download?"}
+        video = {k: args.get(k) for k in _VIDEO_ARGS if args.get(k) is not None}
+        return _queue(args, urls, "ytdlp", video, "dl_add_ytdlp")
+    except Exception as exc:  # noqa: BLE001
+        return _fail("dl_add_ytdlp", exc)
+
+
+def _stremio_source(args):
+    """The magnet / infohash / stream object / .torrent link plus the file choice -> (the canonical
+    source text, an error).  The file choice is the magnet's `so=` or the stream's `fileIdx`;
+    `file_index` sets it and wins over one already in the text."""
+    from ..hub.stremio import links
+    magnet = args.get("magnet")
+    magnet = magnet.strip() if isinstance(magnet, str) else magnet
+    stream = args.get("stream")
+    if magnet and stream:
+        return None, "give a magnet or a stream, not both"
+    idx = args.get("file_index")
+    if idx is not None and idx != "":
+        if isinstance(idx, bool):
+            return None, "file_index must be a whole number from 0"
+        try:
+            idx = int(str(idx).strip())
+        except (TypeError, ValueError):
+            return None, "file_index must be a whole number from 0"
+        if not 0 <= idx <= links.MAX_FILE_INDEX:
+            return None, "file_index must be a whole number from 0 to %d" % links.MAX_FILE_INDEX
+    else:
+        idx = None
+    if stream:
+        parsed = links.parse_stream(stream)
+        if not parsed:
+            return None, ("that stream has no infoHash, so it is not a torrent: a direct `url` stream goes "
+                          "to dl_add, a YouTube one to dl_add_ytdlp")
+    elif magnet:
+        parsed = links.parse_input(str(magnet))
+        if not parsed or parsed.get("kind") == "server_url":
+            return None, "that is not a magnet link, a 40-character infohash, a Stremio stream or a .torrent link"
+    else:
+        return None, None
+    if parsed.get("kind") == "torrent_url":
+        if idx is not None:
+            return None, ("a .torrent link can't carry a file choice (its file list is only known once "
+                          "it is fetched); leave file_index out")
+        return parsed["url"], None
+    if idx is not None:
+        parsed = dict(parsed, file_idx=idx)
+    return links.canonical_source(parsed), None
+
+
+def tool_dl_add_stremio(args):
+    """Queue a torrent (magnet, infohash, Stremio stream or .torrent link) with the Stremio engine."""
+    try:
+        args = args or {}
+        if _is_chat_guest():
+            return _guest_refusal()
+        source, problem = _stremio_source(args)
+        if problem:
+            return {"ok": False, "error": problem}
+        if not source:
+            return {"needs_clarification": True, "message": "Which magnet link, infohash or stream should I download?"}
+        return _queue(args, [source], "stremio", None, "dl_add_stremio")
+    except Exception as exc:  # noqa: BLE001
+        return _fail("dl_add_stremio", exc)
 
 
 def tool_dl_import_legacy(args):
@@ -170,7 +319,16 @@ def tool_dl_import_legacy(args):
 def tool_dl_providers(args):
     """Every provider (tools with their own downloads, Steam, Playnite) with health and counts."""
     try:
-        return _svc().list_providers()
+        res = _svc().list_providers()
+        # Each provider's add tool, when its file declared an `add` block (generated by the loader).
+        # Only asked of a tools module that is already loaded: this file never imports it itself.
+        live = getattr(sys.modules.get("jarvis.tools"), "TOOLS", None) or {}
+        if isinstance(res, dict):
+            for row in res.get("providers") or []:
+                if isinstance(row, dict):
+                    name = "dl_add_%s" % row.get("id")
+                    row["add_tool"] = name if name in live else None
+        return res
     except Exception as exc:  # noqa: BLE001
         return _fail("dl_providers", exc)
 
@@ -347,51 +505,90 @@ _SELECTOR_PROPS = {
     "all": {"type": "boolean", "description": "Apply to everything that can take it."},
 }
 
+# Every property any add tool can carry, written once.  Each tool picks its own (see _add_props).
+_ALL_PROPS = {
+    "url": {"type": "string", "description": "The link to download."},
+    "urls": {"type": "array", "items": {"type": "string"}, "description": "Several links at once (one group)."},
+    "engine": {"type": "string", "description": "Force an engine (e.g. http) instead of the router's choice."},
+    "dest": {"type": "string", "description": "Where THIS download is saved: a sub-folder of the library root (e.g. 'Manuals') or a full path like 'D:/Games' (the person confirms a full path)."},
+    "group": {"type": "string", "description": "A name for this batch."},
+    "start_paused": {"type": "boolean", "description": "Queue it paused instead of starting it."},
+    "start_at": {"type": "string", "description": "Hold it until a time, in the person's words: 'tomorrow at 3am', 'in 2 hours', '2026-11-02 01:30'. One time, not a repeat. Wins over start_paused."},
+    "speed_limit_kbps": {"type": "integer", "description": "A speed cap for just this download, in KB/s (0 or missing = only the global limit applies)."},
+    "open_when_done": {"type": "string", "enum": ["default", "off", "reveal", "folder", "open"], "description": "What to do when it finishes: nothing, show the file in its folder, open the folder, or open the file (asks the person first; programs and scripts are never opened). Default = the person's own setting."},
+    "notify": {"type": "string", "enum": ["default", "on", "off"], "description": "Tell the person when this one finishes or fails (on), never (off), or follow their notification settings (default)."},
+    "notify_channels": {"type": "array", "items": {"type": "string"}, "description": "Where to announce THIS download, instead of the person's usual channels, e.g. [\"discord\"] for Discord only (the notification inbox keeps its record either way). " + _notify_types_help() + " dl_prefs with no arguments lists every type (notify_options.actions). Omit to follow the person's own settings."},
+    "notify_events": {"type": "array", "items": {"type": "string", "enum": ["started", "done", "failed", "stalled"]}, "description": "Which events announce THIS download, e.g. [\"done\", \"failed\"]. Omit to follow the person's own settings. A download with its own choices is announced even if notifications are off globally."},
+    "dry_run": {"type": "boolean", "description": "Only say which engine would take each link; queue nothing."},
+    "mode": {"type": "string", "enum": ["video", "audio"], "description": "Video pages only: video (default) or audio only."},
+    "quality": {"type": "string", "description": "Video pages only: best (default), 2160p, 1440p, 1080p, 720p, 480p, 360p, or an exact 'id:<format_id>' from ytdl_formats."},
+    "container": {"type": "string", "enum": ["mp4", "mkv", "webm"], "description": "Video pages only: the file type to merge into (default mp4)."},
+    "video_codec": {"type": "string", "enum": ["h264", "vp9", "av1"], "description": "Video pages only: prefer this codec when there is a choice."},
+    "audio_format": {"type": "string", "enum": ["mp3", "m4a", "opus", "wav", "flac", "aac", "vorbis", "alac"], "description": "Video pages, mode=audio: the audio file type (default mp3)."},
+    "audio_quality": {"type": "string", "description": "Video pages, mode=audio: '0' (best) to '10', or a bitrate like '192K' (default)."},
+    "embed_thumbnail": {"type": "boolean", "description": "Video pages only: embed the thumbnail as cover art."},
+    "embed_metadata": {"type": "boolean", "description": "Video pages only: embed title / uploader."},
+    "embed_chapters": {"type": "boolean", "description": "Video pages only: embed chapter markers."},
+    "write_subs": {"type": "boolean", "description": "Video pages only: also save subtitles as separate files."},
+    "embed_subs": {"type": "boolean", "description": "Video pages only: embed subtitles in the video file."},
+    "sub_langs": {"type": "string", "description": "Video pages only: subtitle languages, e.g. 'en' or 'en,es'."},
+    "sponsorblock_remove": {"type": "string", "description": "Video pages only (YouTube): SponsorBlock categories to cut, e.g. 'sponsor,selfpromo'."},
+    "skip_if_downloaded": {"type": "boolean", "description": "Video pages only: skip a video yt-dlp's archive says was already fetched."},
+    # dl_add_ytdlp's link wording and dl_add_stremio's own arguments
+    "ytdlp_url": {"type": "string", "description": "The video / audio page link (YouTube or any site yt-dlp supports)."},
+    "ytdlp_urls": {"type": "array", "items": {"type": "string"}, "description": "Several video links with the same options (one group)."},
+    "magnet": {"type": "string", "description": "A magnet link, a 40-character infohash or a link to a .torrent file. Give this or `stream`."},
+    "stream": {"type": "object", "description": "A Stremio stream object ({infoHash, fileIdx, ...}) instead of a magnet."},
+    "file_index": {"type": "integer", "description": "Which file inside the torrent to download (0-based). Leave out to let Jarvis pick the main video file; same as the magnet's so=N."},
+}
+_CORE_NAMES = ("url", "urls", "engine", "dest", "group", "start_paused", "start_at", "dry_run")
+_SHARED_NAMES = ("dest", "group", "start_paused", "start_at", "dry_run")
+
+
+def _add_props(names, renamed=None):
+    """One add tool's properties: `names` from _ALL_PROPS (`renamed` maps a name to the key in
+    _ALL_PROPS whose text it uses), plus the per-download extras when they are advertised."""
+    renamed = renamed or {}
+    out = {n: dict(_ALL_PROPS[renamed.get(n, n)]) for n in names}
+    if ADVERTISE_PER_DOWNLOAD_EXTRAS:
+        out.update({n: dict(_ALL_PROPS[n]) for n in _EXTRA_ARGS})
+    return out
+
+
 TOOL_SCHEMAS = [
     {
         "name": "dl_add",
         "description": (
-            "Queue a download in the Download Hub and return at once; the hub's background daemon does "
-            "the transfer and shows it in Menu > Downloads. Takes a direct file link (http/https) and also a "
-            "YouTube page or a page of any other site yt-dlp supports (the yt-dlp engine; one video per link, "
-            "mode / quality / container choose the result). For a video the person wants to watch in chat "
-            "right now, ytdl_download (blocking) is the better tool; ytdl_download with background=true "
-            "queues here exactly like dl_add. Also takes a magnet link, a 40-character infohash, a Stremio stream or a .torrent link "
-            "(the Stremio engine: needs Stremio's streaming server, see stack_status / stack_start). "
-            "Set dry_run to see which engine would take a link without queueing it."
+            "Queue a download in the Download Hub and return at once (the hub daemon does the transfer; "
+            "see Menu > Downloads). Takes any link or magnet; the router picks the engine and the answer "
+            "names it and the add tool for its options: dl_add_ytdlp (video / audio pages: quality, format, "
+            "subtitles) or dl_add_stremio (torrents: file choice). dry_run only names the engine. "
+            "To watch a video now, ytdl_download."
         ),
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "url": {"type": "string", "description": "The link to download."},
-                "urls": {"type": "array", "items": {"type": "string"}, "description": "Several links at once (queued as one group)."},
-                "engine": {"type": "string", "description": "Force an engine (e.g. http) instead of letting the router choose."},
-                "dest": {"type": "string", "description": "Where THIS download is saved, overriding the per-extension and per-type folders: a sub-folder of the library root (e.g. 'Manuals') or a full path like 'D:/Games' (the person is asked to confirm a full path)."},
-                "group": {"type": "string", "description": "A name for this batch."},
-                "start_paused": {"type": "boolean", "description": "Queue it paused instead of starting it."},
-                "start_at": {"type": "string", "description": "Hold it until a time, in the person's own words: 'tomorrow at 3am', 'in 2 hours', 'tonight', '2026-11-02 01:30'. One time, not a repeat. The hub daemon starts it then (or as soon as it is running again). Wins over start_paused."},
-                "speed_limit_kbps": {"type": "integer", "description": "A speed cap for just this download, in KB/s (0 or missing = only the global limit applies)."},
-                "open_when_done": {"type": "string", "enum": ["default", "off", "reveal", "folder", "open"], "description": "What to do when it finishes: nothing, show the file in its folder, open the folder, or open the file (asks the person first; programs and scripts are never opened). Default = the person's own setting."},
-                "notify": {"type": "string", "enum": ["default", "on", "off"], "description": "Tell the person when this one finishes or fails (on), never (off), or follow their notification settings (default)."},
-                "notify_channels": {"type": "array", "items": {"type": "string"}, "description": "Where to announce THIS download, instead of the person's usual channels, e.g. [\"discord\"] for Discord only (the notification inbox keeps its record either way). " + _notify_types_help() + " dl_prefs with no arguments lists every type (notify_options.actions). Omit to follow the person's own settings."},
-                "notify_events": {"type": "array", "items": {"type": "string", "enum": ["started", "done", "failed", "stalled"]}, "description": "Which events announce THIS download, e.g. [\"done\", \"failed\"]. Omit to follow the person's own settings. A download with its own choices is announced even if notifications are off globally."},
-                "dry_run": {"type": "boolean", "description": "Only say which engine would take each link; queue nothing."},
-                "mode": {"type": "string", "enum": ["video", "audio"], "description": "Video pages only: video (default) or audio only."},
-                "quality": {"type": "string", "description": "Video pages only: best (default), 2160p, 1440p, 1080p, 720p, 480p, 360p, or an exact 'id:<format_id>' from ytdl_formats."},
-                "container": {"type": "string", "enum": ["mp4", "mkv", "webm"], "description": "Video pages only: the file type to merge into (default mp4)."},
-                "video_codec": {"type": "string", "enum": ["h264", "vp9", "av1"], "description": "Video pages only: prefer this codec when there is a choice."},
-                "audio_format": {"type": "string", "enum": ["mp3", "m4a", "opus", "wav", "flac", "aac", "vorbis", "alac"], "description": "Video pages, mode=audio: the audio file type (default mp3)."},
-                "audio_quality": {"type": "string", "description": "Video pages, mode=audio: '0' (best) to '10', or a bitrate like '192K' (default)."},
-                "embed_thumbnail": {"type": "boolean", "description": "Video pages only: embed the thumbnail as cover art."},
-                "embed_metadata": {"type": "boolean", "description": "Video pages only: embed title / uploader."},
-                "embed_chapters": {"type": "boolean", "description": "Video pages only: embed chapter markers."},
-                "write_subs": {"type": "boolean", "description": "Video pages only: also save subtitles as separate files."},
-                "embed_subs": {"type": "boolean", "description": "Video pages only: embed subtitles in the video file."},
-                "sub_langs": {"type": "string", "description": "Video pages only: subtitle languages, e.g. 'en' or 'en,es'."},
-                "sponsorblock_remove": {"type": "string", "description": "Video pages only (YouTube): SponsorBlock categories to cut, e.g. 'sponsor,selfpromo'."},
-                "skip_if_downloaded": {"type": "boolean", "description": "Video pages only: skip a video yt-dlp's archive says was already fetched."},
-            },
-        },
+        "parameters": {"type": "object", "properties": _add_props(_CORE_NAMES)},
+    },
+    {
+        "name": "dl_add_ytdlp",
+        "description": (
+            "Queue a video or audio download from YouTube or any site yt-dlp supports (the yt-dlp engine) in "
+            "the Download Hub, in the background: quality (720p, 1080p...), mp4 / mkv / webm, audio only "
+            "(mp3, m4a...), subtitles, thumbnail, chapters, SponsorBlock. One video per link. Returns at "
+            "once; the hub daemon does the transfer. To watch it now, ytdl_download. dry_run only names the engine."
+        ),
+        "parameters": {"type": "object",
+                       "properties": _add_props(("url", "urls") + _SHARED_NAMES + _VIDEO_ARGS,
+                                                {"url": "ytdlp_url", "urls": "ytdlp_urls"})},
+    },
+    {
+        "name": "dl_add_stremio",
+        "description": (
+            "Queue a torrent in the Download Hub with the Stremio engine: a magnet link, a 40-character "
+            "infohash, a Stremio stream object or a .torrent link, optionally one chosen file of it "
+            "(file_index). Needs Stremio's streaming server (stack_status / stack_start). Returns at once; "
+            "the hub daemon does the transfer. dry_run only names the engine."
+        ),
+        "parameters": {"type": "object",
+                       "properties": _add_props(("magnet", "stream", "file_index") + _SHARED_NAMES)},
     },
     {
         "name": "dl_import_legacy",
@@ -576,6 +773,8 @@ TOOL_SCHEMAS = [
 
 TOOLS = {
     "dl_add": tool_dl_add,
+    "dl_add_ytdlp": tool_dl_add_ytdlp,
+    "dl_add_stremio": tool_dl_add_stremio,
     "dl_list": tool_dl_list,
     "dl_import_legacy": tool_dl_import_legacy,
     "dl_providers": tool_dl_providers,
@@ -610,6 +809,30 @@ TOOL_KEYWORDS = {
         "add a download": 10,
         "download this link": {"weight": 9, "not_with": _NOT_MEDIA},
         "magnet link": 8,
+    },
+    # "download this video" stays with ytdl_download; these are the phrases for the BACKGROUND queue.
+    "dl_add_ytdlp": {
+        "queue a video": 10,
+        "queue the video": 10,
+        "queue this video": 10,
+        "download the video in the background": 10,
+        "download this video in the background": 10,
+        "video in the background": 9,
+        "queue the audio": 9,
+        "add the video to my downloads": 10,
+        "add a video download": 10,
+    },
+    "dl_add_stremio": {
+        "download this torrent": 10,
+        "download a torrent": 10,
+        "download the torrent": 10,
+        "add a torrent": 10,
+        "add this torrent": 10,
+        "add this magnet": 10,
+        "download this magnet": 10,
+        "queue this magnet": 10,
+        "queue a torrent": 10,
+        "infohash": 8,
     },
     "dl_list": {
         "download queue": 10,
@@ -649,10 +872,14 @@ TOOL_KEYWORDS = {
 TOOL_PACK_INSTRUCTION = (
     "dl_add queues and returns at once; the hub daemon does the transfer, so report progress "
     "with dl_list / dl_status instead of waiting. 'Download it tomorrow night' = dl_add with "
-    "start_at (or dl_schedule for one already queued). It takes file links and video pages "
-    "(YouTube and other yt-dlp sites, one video per link); ytdl_download is still the tool for "
-    "'download this video now' (and with background=true it queues here too). Magnet links, infohashes and Stremio streams "
-    "go through the Stremio server (stack_status says whether it is up; stremio_prepare sets it up the first time)."
+    "start_at (or dl_schedule for one already queued). dl_add is the router: it takes any link or "
+    "magnet and its answer names the add tool for that engine. Choices that belong to a source go to "
+    "its own tool: dl_add_ytdlp for a video or audio page (quality, format, audio only, subtitles; "
+    "one video per link), dl_add_stremio for a torrent (magnet, infohash, stream; file_index picks a "
+    "file). Do not put video options on dl_add. ytdl_download is still the tool for 'download this "
+    "video now' (and with background=true it queues here too). Torrents go through the Stremio server "
+    "(stack_status says whether it is up; stremio_prepare sets it up the first time). Per-download "
+    "notification / speed / open-when-done choices go on the queued row with dl_prefs and its id."
 )
 
 # ---------------------------------------------------------------------------
@@ -743,7 +970,7 @@ _LOCAL = "http://127.0.0.1:<port>/<file>"
 
 TEST_CHECKLIST = {
     "dl_add": {
-        "does": "Queues a direct http(s) link in the Download Hub; the daemon downloads it in the background.",
+        "does": "The Download Hub's router: queues a link (any engine) and names the engine and the add tool for its options; a direct http(s) link downloads in the background.",
         "steps": [
             {"run": {"url": "https://<a real file link>", "dry_run": True},
              "expect": "ok: true, one decision: engine http, reason 'direct link', nothing queued."},
@@ -760,11 +987,9 @@ TEST_CHECKLIST = {
             {"run": {"url": "https://<a real, small file link>", "start_at": "yesterday at 9am"},
              "expect": "ok: false, says that time has already passed."},
             {"run": {"url": "https://www.youtube.com/watch?v=<a short video id>", "dry_run": True},
-             "expect": "ok: true, one decision: engine ytdlp, reason 'YouTube page'. (Without yt-dlp / ffmpeg: ok false, the problem names what is missing.)"},
-            {"run": {"url": "https://www.youtube.com/watch?v=<a short video id>", "mode": "audio", "audio_format": "mp3"},
-             "expect": "ok: true, one item (engine ytdlp, kind audio); it shows an indeterminate bar with growing size, then lands as an .mp3 in the Audio folder."},
-            {"run": {"url": "https://www.youtube.com/watch?v=<a short video id>", "quality": "1080p", "container": "gif"},
-             "expect": "ok: false: container must be one of mp4, mkv, webm (nothing is queued)."},
+             "expect": "ok: true, one decision: engine ytdlp, reason 'YouTube page', add_tool dl_add_ytdlp (a magnet link says dl_add_stremio, a plain file link dl_add). (Without yt-dlp / ffmpeg: decision ok false, the problem names what is missing.)"},
+            {"run": {"url": "https://www.youtube.com/watch?v=<a short video id>", "mode": "audio"},
+             "expect": "Still works (deprecated): ok: true, one item (engine ytdlp, kind audio) and a note that mode on dl_add is deprecated and dl_add_ytdlp is the tool for it."},
             {"ask": "Download this file: https://<a real, small file link>",
              "expect": "Calls dl_add (not ytdl_download) and says it was queued."},
             {"ask": "/dl https://<a real, small file link>",
@@ -780,8 +1005,47 @@ TEST_CHECKLIST = {
         "care": "Writes the file under the library root (default ~/Downloads/Jarvis/Files). A local test server needs allow_private_hosts set first (dl_settings).",
         "watch": ["Adding the same link twice returns the existing item (duplicate: true), not a second download.",
                   "More than 5 links in one call asks for confirmation first.",
-                  "From a remote chat guest (Discord / Instagram) dl_list answers but dl_add is refused: adding downloads is the owner's.",
+                  "From a remote chat guest (Discord / Instagram) dl_list answers but dl_add, dl_add_ytdlp and dl_add_stremio are refused: adding downloads is the owner's.",
+                  "Each added row in the answer carries add_tool, the tool for that engine's own options.",
                   "Kill the daemon mid-file (Menu > Daemons > Stop), start it again: the row goes back to queued and the file resumes, not restarts (needs a server that supports Range)."],
+    },
+    "dl_add_ytdlp": {
+        "does": "Queues a video or audio page in the Download Hub with the yt-dlp engine and its own options (quality, container, audio only, subtitles...); the daemon downloads it in the background.",
+        "steps": [
+            {"run": {"url": "https://www.youtube.com/watch?v=<a short video id>", "dry_run": True},
+             "expect": "ok: true, one decision: engine ytdlp, add_tool dl_add_ytdlp, nothing queued. (Without yt-dlp / ffmpeg: ok false, the problem names what is missing.)"},
+            {"run": {"url": "https://www.youtube.com/watch?v=<a short video id>", "mode": "audio", "audio_format": "mp3"},
+             "expect": "ok: true, one item (engine ytdlp, kind audio); it shows an indeterminate bar with growing size, then lands as an .mp3 in the Audio folder."},
+            {"run": {"url": "https://www.youtube.com/watch?v=<a short video id>", "quality": "1080p", "container": "gif"},
+             "expect": "ok: false: container must be one of mp4, mkv, webm (nothing is queued)."},
+            {"run": {"url": "https://<a real file link>.zip", "dry_run": True},
+             "expect": "ok: true with one decision whose problem says the ytdlp engine can't take that input; a plain file link belongs to dl_add."},
+            {"ask": "Queue this video in the background as an mp3: https://www.youtube.com/watch?v=<a short video id>",
+             "expect": "Finds and calls dl_add_ytdlp (not dl_add with video options, not ytdl_download) with mode audio; says it was queued."},
+        ],
+        "needs": ["The 'Download hub' daemon running (Menu > Daemons)", "Internet access", "yt-dlp and ffmpeg installed"],
+        "care": "Writes the file under the library root (Video / Audio folder).",
+        "watch": ["From a remote chat guest the tool is refused: adding downloads is the owner's."],
+    },
+    "dl_add_stremio": {
+        "does": "Queues a torrent (magnet, infohash, Stremio stream or .torrent link), optionally one chosen file of it, with the Stremio engine.",
+        "steps": [
+            {"run": {"magnet": "magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567", "dry_run": True},
+             "expect": "ok: true, one decision: engine stremio, add_tool dl_add_stremio. With Stremio's server stopped the decision's problem says so and how to start it (stack_start). Nothing queued."},
+            {"run": {"magnet": "0123456789abcdef0123456789abcdef01234567", "file_index": 2, "dry_run": True},
+             "expect": "ok: true, one decision for a magnet that carries so=2 (an infohash alone is accepted)."},
+            {"run": {"magnet": "not a magnet"},
+             "expect": "ok: false: that is not a magnet link, a 40-character infohash, a Stremio stream or a .torrent link."},
+            {"run": {"magnet": "magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567", "stream": {"infoHash": "0123456789abcdef0123456789abcdef01234567"}},
+             "expect": "ok: false: give a magnet or a stream, not both."},
+            {"run": {"magnet": "https://<a real .torrent link>.torrent", "file_index": 1},
+             "expect": "ok: false: a .torrent link can't carry a file choice; leave file_index out."},
+            {"ask": "Download this magnet, only file 3: magnet:?xt=urn:btih:<a real infohash>",
+             "expect": "Calls dl_add_stremio with file_index 3 and says it was queued (Stremio's server running)."},
+        ],
+        "needs": ["The 'Download hub' daemon running (Menu > Daemons)", "Stremio's streaming server for the queueing step (stack_start)", "A magnet you are allowed to download"],
+        "care": "Writes the torrent's files under the library root.",
+        "watch": ["From a remote chat guest the tool is refused: adding downloads is the owner's."],
     },
     "dl_import_legacy": {
         "does": "Indexes the videos the older ytdl_download tool saved as read-only rows (provider 'Earlier video downloads'); nothing is moved or deleted.",

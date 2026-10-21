@@ -6,9 +6,16 @@ read-only game with a link, and one that stops reporting so it goes stale.
 
 Everything is a pure function of the seconds since the demo started (`rows_at`), so it is
 testable without a clock and the daemon only has to call `tick` once a second.  The demo
-is an ordinary provider: it writes through `Store.upsert_provider_row` like any tool would,
-declares no capabilities (so every row shows the read-only badge) and its rows are
-deleted again with `clear`.
+is an ordinary provider: it writes through `Store.upsert_provider_row` like any tool would
+and its rows are deleted again with `clear`.
+
+Pause / resume / cancel (brief 13, part A, N12).  The demo declares those three verbs and a
+control tool for each (`CONTROLS`, thin tools in actions/hub_demo_controls.py that call `control`
+here).  A row's own clock stops while it is paused (`rows_at(elapsed, controls)`), so a paused
+bar holds still and carries on from the same place; a cancelled row stays cancelled until the
+demo is started again.  The only state is the `ctl` block next to the demo switch in the hub
+settings; `start` and `stop` drop it.  Nothing here touches another provider's rows: a control
+only accepts a demo row's own local id.
 """
 
 PROVIDER = "demo"
@@ -18,8 +25,12 @@ FAIL_AT = 15.0
 SILENT_AFTER = 10.0
 _MB = 1024 * 1024
 
+# What the demo offers.  The tools are in actions/hub_demo_controls.py (tool name -> `control`).
+CAPABILITIES = ["pause", "resume", "cancel"]
+CONTROLS = {"pause": "hub_demo_pause", "resume": "hub_demo_resume", "cancel": "hub_demo_cancel"}
 
-def rows_at(elapsed):
+
+def _base_rows(elapsed):
     """{local id: fields, or None when that row sends no report at this moment}."""
     t = max(0.0, float(elapsed))
     total = 600 * _MB
@@ -78,10 +89,60 @@ def rows_at(elapsed):
     return rows
 
 
+ROW_IDS = tuple(_base_rows(0))
+
+# Fields a paused or cancelled row must not keep reporting (a stopped row has no speed, phase or error).
+_STOPPED_DROP = ("error", "phase", "phase_index", "phase_count", "speed_bps", "eta_s")
+
+
+def _row_time(elapsed, ctl):
+    """The row's own clock: the demo's elapsed seconds minus the time it spent paused."""
+    if not ctl:
+        return max(0.0, float(elapsed))
+    held = float(ctl.get("paused_total") or 0.0)
+    since = ctl.get("paused_since")
+    if since is not None:
+        held += max(0.0, float(elapsed) - float(since))
+    return max(0.0, float(elapsed) - held)
+
+
+def _base_row(local_id, t):
+    """One row as the demo would report it at its own time `t`.  A row that has gone silent
+    still has a title and a place to freeze at, so a paused or cancelled one uses its first report."""
+    row = _base_rows(t)[local_id]
+    return row if row is not None else _base_rows(0)[local_id]
+
+
+def rows_at(elapsed, controls=None):
+    """{local id: fields, or None when that row sends no report at this moment}.
+
+    `controls` is the `ctl` block ({local id: {"paused_total", "paused_since", "cancelled",
+    "cancel_t"}}); without it every row simply follows the demo's clock."""
+    rows = _base_rows(elapsed)
+    for local_id, ctl in (controls or {}).items():
+        if local_id not in rows or not isinstance(ctl, dict):
+            continue
+        if ctl.get("cancelled"):
+            fields = _base_row(local_id, float(ctl.get("cancel_t") or 0.0))
+            fields = {k: v for k, v in fields.items() if k not in _STOPPED_DROP}
+            fields.update({"state": "cancelled", "message": "cancelled"})
+            rows[local_id] = fields
+        elif ctl.get("paused_since") is not None:
+            fields = _base_row(local_id, _row_time(elapsed, ctl))
+            fields = {k: v for k, v in fields.items() if k not in _STOPPED_DROP}
+            fields.update({"state": "paused", "message": "paused"})
+            rows[local_id] = fields
+        elif ctl.get("paused_total"):
+            # resumed: the row follows its own (shifted) clock
+            rows[local_id] = _base_rows(_row_time(elapsed, ctl))[local_id]
+    return rows
+
+
 def ensure_provider(store):
     return store.register_provider(
         PROVIDER, label="Demo provider", mode="push", kind="file", icon="D",
-        capabilities=[], controls={}, open_roots=[], source_file="download_hub.py")
+        capabilities=list(CAPABILITIES), controls=dict(CONTROLS), open_roots=[],
+        source_file="download_hub.py")
 
 
 def tick(store, now):
@@ -91,7 +152,7 @@ def tick(store, now):
         return 0
     elapsed = now - float(demo.get("started_at") or now)
     written = 0
-    for local_id, fields in rows_at(elapsed).items():
+    for local_id, fields in rows_at(elapsed, demo.get("ctl")).items():
         if fields is None:
             continue
         item, _ = store.upsert_provider_row(PROVIDER, local_id, fields, now=now)
@@ -138,3 +199,68 @@ def status(store):
     return {"ok": True, "running": bool(demo.get("enabled")), "rows": len(rows),
             "elapsed_s": round(store.now() - float(demo["started_at"]), 1)
             if demo.get("enabled") and demo.get("started_at") else None}
+
+
+# --------------------------------------------------------------------------- controls
+
+def _refuse(why):
+    return {"ok": False, "error": why}
+
+
+def control(store, verb, local_id, now=None):
+    """Pause, resume or cancel one demo row (what the three demo control tools call).
+
+    `local_id` is the id without the `demo:` prefix, exactly what the hub passes to a provider's
+    control tool.  Anything that is not one of the demo's own rows is refused, so a control can
+    never reach another provider's row.  Every refusal says why in plain words.  An accepted verb
+    is written to the row straight away (the demo is the provider, so it reports like any other
+    provider); the daemon's next tick keeps it that way.
+    """
+    verb = str(verb or "").strip().lower()
+    if verb not in CONTROLS:
+        return _refuse("the demo provider doesn't offer %s" % (verb or "that"))
+    local = str(local_id or "").strip()
+    if ":" in local:
+        return _refuse("%s is not a demo download (a demo control only works on the demo's own rows)" % local[:60])
+    if local not in ROW_IDS:
+        return _refuse("there is no demo download called %s" % (local[:60] or "(no id)"))
+    demo = store.get_settings().get("demo") or {}
+    if not demo.get("enabled"):
+        return _refuse("the demo isn't running; start it first")
+    now = store.now() if now is None else now
+    elapsed = max(0.0, now - float(demo.get("started_at") or now))
+    block = dict(demo.get("ctl") or {})
+    ctl = dict(block.get(local) or {})
+    if ctl.get("cancelled"):
+        return _refuse("already cancelled")
+    paused = ctl.get("paused_since") is not None
+    t = _row_time(elapsed, ctl)
+    state = _base_row(local, t)["state"]
+
+    if verb == "pause":
+        if paused:
+            return _refuse("already paused")
+        if state in ("done", "failed"):
+            return _refuse("already %s" % state)
+        ctl["paused_since"] = elapsed
+        message = "paused"
+    elif verb == "resume":
+        if not paused:
+            return _refuse("not paused")
+        ctl["paused_total"] = float(ctl.get("paused_total") or 0.0) + max(0.0, elapsed - float(ctl["paused_since"]))
+        ctl["paused_since"] = None
+        message = "resumed"
+    else:  # cancel
+        if state in ("done", "failed"):
+            return _refuse("already %s" % state)
+        ctl["cancelled"] = True
+        ctl["cancel_t"] = t
+        ctl["paused_since"] = None
+        message = "cancelled"
+
+    block[local] = ctl
+    store.set_setting_raw("demo", {"enabled": True, "started_at": demo.get("started_at"), "ctl": block})
+    fields = rows_at(elapsed, block).get(local)
+    if fields is not None:
+        store.upsert_provider_row(PROVIDER, local, fields, now=now)
+    return {"ok": True, "message": message, "id": "%s:%s" % (PROVIDER, local)}

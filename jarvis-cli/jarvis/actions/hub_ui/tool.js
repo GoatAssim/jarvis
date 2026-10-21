@@ -316,6 +316,59 @@ function hintFromDecisions(decisions) {
   return ["\u2192 " + list.length + " links, queued as one batch", false];
 }
 
+// ---- the add form calls the tool of the engine that will take each link (N4)
+// dl_add's dry_run says, per link, which engine takes it and which add tool carries that engine's
+// own options (decision.add_tool).  The form does what the model does: ask the router, then call
+// that tool.  Anything unknown or unanswered stays with dl_add, which routes it again itself.
+// -> [{ tool, urls }] in order of first appearance.
+function groupByAddTool(urls, decisions) {
+  const list = Array.isArray(decisions) ? decisions : [];
+  const order = [];
+  const by = {};
+  (Array.isArray(urls) ? urls : []).forEach((u, i) => {
+    const d = list[i];
+    const t = d && /^dl_add[a-z0-9_]*$/.test(String(d.add_tool || "")) ? d.add_tool : "dl_add";
+    if (!by[t]) { by[t] = []; order.push(t); }
+    by[t].push(u);
+  });
+  return order.map((t) => ({ tool: t, urls: by[t] }));
+}
+
+// The calls to make: one per group, except dl_add_stremio, which takes one magnet at a time.
+// `base` (dest, group, start_paused and the extras) goes to every call.  -> [{ tool, args }]
+function addCalls(groups, base) {
+  const calls = [];
+  (groups || []).forEach((g) => {
+    if (g.tool === "dl_add_stremio") {
+      g.urls.forEach((u) => calls.push({ tool: g.tool, args: Object.assign({}, base, { magnet: u }) }));
+    } else {
+      calls.push({ tool: g.tool, args: Object.assign({}, base, { urls: g.urls }) });
+    }
+  });
+  return calls;
+}
+
+// One answer out of several add calls: what was queued adds up; a declined confirmation or a
+// failure in one does not hide what the others did.
+function mergeAddResults(results) {
+  const list = (Array.isArray(results) ? results : []).filter((r) => r && typeof r === "object");
+  if (list.length === 1) return list[0];
+  const out = { ok: false, count: 0, added: [], skipped: [] };
+  const notes = [];
+  list.forEach((r) => {
+    if (r.declined) out.declined = true;
+    if (r.ok) out.ok = true;
+    out.count += Number(r.count) || 0;
+    (r.added || []).forEach((a) => out.added.push(a));
+    (r.skipped || []).forEach((a) => out.skipped.push(a));
+    if (r.note) notes.push(r.note);
+    if (!r.ok && r.error && !out.error) out.error = r.error;
+  });
+  if (notes.length) out.note = notes.join(" ");
+  if (out.ok) delete out.error;
+  return out;
+}
+
 // ---- helpers added for the three-pane layout (rework 17.1); pure, like everything above
 
 // The one word that picks a row's colour (the dot and the left edge).  A silent provider row
@@ -653,7 +706,7 @@ const pure = {
   toneOf, overviewStats, needsAttention, runningNow, sublineText, countText,
   LIMIT_PRESETS, OPEN_CHOICES, NOTIFY_EVENTS, NOTIFY_OPTIONS, NOTIFY_OPTIONS_WAIT, DAYS, fmtLimit, parseLimit, limitFields,
   limitSummary, quickSpeedOptions, openLabel, openMenu,
-  addOptionsFromForm, itemPrefsText,
+  addOptionsFromForm, itemPrefsText, groupByAddTool, addCalls, mergeAddResults,
   ITEM_EVENTS, channelLabel,
   CARD_VERBS, cardActions, fmtWhen, applyNotifyOptions,
   HISTORY_STATES, historyFilter, csvCell, historyCsv, historyJson, historyMeta, providerTone, providerFacts, providerBadge,
@@ -1286,7 +1339,7 @@ async function submitAdd(ev) {
   const input = $("#addInput");
   const urls = extractInputs(input.value);
   if (!urls.length) { setHint("Paste a link that starts with http:// or https://", true); return; }
-  const args = { urls: urls };
+  const args = {};
   const dest = $("#addDest").value.trim();
   const group = $("#addGroup").value.trim();
   if (dest) args.dest = dest;
@@ -1299,7 +1352,16 @@ async function submitAdd(ev) {
   const btn = $("#addBtn");
   btn.disabled = true;
   try {
-    const r = await callTool("dl_add", args);
+    // Ask the router which engine takes each link, then call that engine's add tool.
+    const pre = await callTool("dl_add", { urls: urls, dry_run: true });
+    const calls = addCalls(groupByAddTool(urls, pre && pre.decisions), args);
+    const results = [];
+    for (const c of calls) {
+      const one = await callTool(c.tool, c.args);
+      results.push(one);
+      if (one && one.declined) break;
+    }
+    const r = mergeAddResults(results);
     if (r.declined) { setHint("Cancelled", false); return; }
     if (r.ok) {
       const added = r.added || [];

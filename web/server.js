@@ -2957,6 +2957,14 @@ app.post("/api/hub/history/clear", requireHubWrite, requireJarvis, (req, res) =>
 });
 app.post("/api/hub/redownload", requireHubWrite, requireJarvis, (req, res) => hubAdmin(res, "redownload", { id: hubText(req.body?.id, 120) }, 30000));
 app.post("/api/hub/reorder", requireHubWrite, requireJarvis, (req, res) => hubAdmin(res, "reorder", { ids: hubIds(req.body?.ids) }));
+// Stremio (N9, brief 12): the status block (read) and the Locate... button's save (write: the owner's own
+// button only -- loopback Host, same-origin, X-Jarvis-Hub header, and hub_admin refuses an unattended process).
+// The browser sends paths the owner picked; hub_admin / hub/stremio/config.py check both files exist before saving.
+app.get("/api/hub/stremio", requireHubRead, requireJarvis, (req, res) => hubAdmin(res, "stremio_status", { doctor: req.query.doctor === "1" }, 60000));
+app.post("/api/hub/stremio/paths", requireHubWrite, requireJarvis, (req, res) => hubAdmin(res, "stremio_save", {
+  runtime_exe: hubText(req.body?.runtime_exe, 500), server_js: hubText(req.body?.server_js, 500),
+  server_url: hubText(req.body?.server_url, 80), dry_run: req.body?.dry_run === true,
+}, 30000));
 
 // The push stream: ONE `jarvis hub-admin watch` process feeds every open panel and chat card. It starts
 // with the first subscriber and stops ten seconds after the last one leaves. A subscriber may follow only

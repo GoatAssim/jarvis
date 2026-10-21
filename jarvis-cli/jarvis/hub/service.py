@@ -1009,14 +1009,25 @@ def apply_control_directly(store, item):
 # --------------------------------------------------------------------------- opening files
 
 def _default_launch(path, action):
-    """Open a file with its default program, or show it in the file manager.  Never raises."""
+    """Open a file with its default program, or show it in the file manager.  Never raises.
+
+    Returns True when the launch started; False when it could not start; or a short text when it
+    started but did something LESS than asked (Windows: the file could not be selected, so its
+    folder was opened).  `open_item` passes that text on to the caller.  Explorer cannot say
+    whether it found the item, so True means "started", not "the right window is showing".
+    """
     try:
         path = str(path)
         if sys.platform.startswith("win"):
             if action == "reveal":
-                subprocess.Popen(["explorer", "/select," + path])
-            else:
-                os.startfile(path)  # noqa: S606 - the path was checked against the library root
+                from . import reveal       # the pure command builder (hub/reveal.py)
+                try:
+                    subprocess.Popen(reveal.explorer_command(path))    # one string: the path is quoted inside the switch
+                    return True
+                except Exception:  # noqa: BLE001 - fall back, and say so
+                    os.startfile(reveal.windows_folder(path))  # noqa: S606
+                    return "couldn't select the file; its folder was opened instead"
+            os.startfile(path)  # noqa: S606 - the path was checked against the library root
         elif sys.platform == "darwin":
             subprocess.Popen(["open", "-R", path] if action == "reveal" else ["open", path])
         else:
@@ -1027,7 +1038,7 @@ def _default_launch(path, action):
         return False
 
 
-LAUNCH = _default_launch       # swapped by tests
+LAUNCH = _default_launch       # swapped by tests; (path, action) -> True | False | a note (see above)
 
 
 def open_item(item_id, action="open", store=None):
@@ -1035,8 +1046,11 @@ def open_item(item_id, action="open", store=None):
 
     The path is read from the database, never from the caller, and must sit inside the
     library root or a folder the owner chose (hub rows) or one of the provider's `open_roots`.
+    A row's `dest` may be a folder (Steam's is, a multi-file torrent's can be): `reveal` then
+    opens that folder itself and `folder` does not take its parent (see hub/reveal.py).
     """
     try:
+        from . import reveal               # the pure "what to open" rules (hub/reveal.py)
         store = _store(store)
         if action not in ("open", "reveal", "folder"):
             return _err("action must be open, reveal or folder")
@@ -1052,12 +1066,24 @@ def open_item(item_id, action="open", store=None):
             roots = [Path(r) for r in ((store.get_provider(item["provider"]) or {}).get("open_roots") or [])]
         if not roots or not any(naming.under(r, path) for r in roots):
             return _err("that file isn't inside a folder the hub may open")
-        if not os.path.exists(path):
-            return _err("the file is no longer there: %s" % path)
-        target = os.path.dirname(str(path)) if action == "folder" else path
-        if not LAUNCH(target, "open" if action == "folder" else action):
+        exists = os.path.exists(path)
+        # The row's marker says what dest was when it was reported; the disk says what it is now.
+        marker = item.get("dest_is_dir")            # 1 folder, 0 file, None not known
+        is_dir = os.path.isdir(path) if exists else bool(marker)
+        if not exists:
+            return _err(("the file or folder is no longer there (or isn't there yet): %s" if marker is None
+                         else "the folder isn't there yet, or is no longer there: %s" if marker
+                         else "the file is no longer there: %s") % path)
+        target, launch_action = reveal.plan_open(path, action, is_dir)
+        result = LAUNCH(target, launch_action)
+        if not result:
             return _err("couldn't open it on this system")
-        return {"ok": True, "action": action, "path": str(target)}
+        out = {"ok": True, "action": action, "path": str(target)}
+        if isinstance(result, str):        # the launcher did less than asked, and says what
+            out["note"] = result
+            if launch_action == "reveal":
+                out["selected"] = False
+        return out
     except Exception as exc:  # noqa: BLE001
         return _err("couldn't open that: %s" % exc)
 

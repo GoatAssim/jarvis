@@ -82,6 +82,8 @@ A file can also declare downloads of its own for Menu > Downloads:
     TOOL_DOWNLOADS = [ {"id": ..., "label": ..., "mode": "push" | "poll" | "both", ...}, ... ]
 
 ...see tool_downloads.py for the fields. Registered by the hub daemon; a bad entry is dropped.
+    An entry may carry an `add` block; the loader then GENERATES a `dl_add_<id>` tool from it
+    (tool_download_add.py), which exists exactly as long as the file does.
 
 ...registered in the Daemons panel when the tool is installed and removed when
 it is uninstalled. See tool_daemons.py for the contract, what the tool controls
@@ -281,6 +283,10 @@ class ActionModuleRecord:
     # TOOL_DOWNLOADS entries (Download Hub providers), already validated and normalised by
     # tool_downloads.validate_downloads. [] when the module declared none.
     downloads: list = field(default_factory=list)
+    # The tools generated from TOOL_DOWNLOADS `add` blocks (tool_download_add.prepare), kept here
+    # until discover_actions has seen every file; tool_download_add.attach then folds them into
+    # schemas / tools / keywords / checklist, after which this list is only a record of what was made.
+    download_adds: list = field(default_factory=list)
 
 
 def _validate(module, filename, logger):
@@ -480,13 +486,20 @@ def _validate(module, filename, logger):
     # TOOL_DOWNLOADS: downloads the tool supplies itself, shown in Menu > Downloads (hub plan
     # 5.2). Same rule as the others: a bad entry is logged and dropped, the tools load.
     download_entries = []
+    download_adds = []
     raw_downloads = getattr(module, "TOOL_DOWNLOADS", None)
     if raw_downloads is not None:
-        from . import tool_downloads
+        from . import tool_download_add, tool_downloads
+        # An entry's optional `add` block (N4) asks for a generated dl_add_<id> tool; the provider
+        # validator knows nothing of it, so it is taken out first and handled by its own module.
+        raw_downloads, raw_adds = tool_download_add.split_add(raw_downloads)
         download_entries, download_errors = tool_downloads.validate_downloads(
             raw_downloads, filename, names, confirm_required)
         for problem in download_errors:
             logger(f"[tool-downloads] {problem}")
+        if raw_adds:
+            download_adds = tool_download_add.prepare(
+                raw_adds, download_entries, names, confirm_required, ai_review, group, filename, logger)
 
     return ActionModuleRecord(
         file=filename, valid=True, group=group, schemas=schemas, tools=tools,
@@ -494,7 +507,7 @@ def _validate(module, filename, logger):
         confirm_required=confirm_required, ai_review=ai_review, result_specs=result_specs,
         personas=personas, checklist=checklist, checklist_group=checklist_group, ui=ui,
         daemons=daemon_decls, commands=command_entries, settings=setting_entries,
-        downloads=download_entries,
+        downloads=download_entries, download_adds=download_adds,
     )
 
 
@@ -587,5 +600,11 @@ def discover_actions(actions_dir=None, reserved_names=None, logger=print):
             logger(f"[tools] Auto-discovered {sorted(rec.tools)} from {path.name} (group={rec.group!r})")
         else:
             logger(f"[tools] Rejected {path.name}: {rec.error}")
+
+    # A TOOL_DOWNLOADS `add` block becomes a dl_add_<id> tool.  Done after the whole scan so a
+    # hand-written tool of that name, in any file, wins and the generated one is skipped.
+    if any(getattr(r, "download_adds", None) for r in records):
+        from . import tool_download_add
+        tool_download_add.attach(records, reserved, logger)
 
     return records

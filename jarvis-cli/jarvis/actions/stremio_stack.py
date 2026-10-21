@@ -7,7 +7,12 @@ the server is `hub/engines/stremio.py`; magnets and Stremio streams go in throug
   stack_status / stack_start / stack_stop / stack_doctor   is it up, bring it up, take it down,
                                        what is wrong.  Detection is by ANSWERING on the port, not
                                        by daemon state: a server the Stremio app already opened
-                                       reads "already up" and no second one is started
+                                       reads "already up" and no second one is started.  Stremio's
+                                       files are found without any setup (hub/stremio/detect.py:
+                                       a running Stremio, Windows' install list, the Start Menu,
+                                       the usual folders), and every outcome is its own plain
+                                       sentence (hub/stremio/status.py).  The paths are saved only
+                                       by the owner's Locate... button (hub_admin), never a tool
   stremio_prepare                      cache unlimited (a finite cache can evict a finished
                                        episode), cache folder, connection and speed limits
                                        (confirm-gated: it changes the server's own settings)
@@ -27,7 +32,8 @@ import time
 from pathlib import Path
 
 GB = 1024 ** 3
-START_WAIT_S = 25
+START_WAIT_S = 25                 # stremio-web only (it builds on first start); the server's wait is a setting
+DEFAULT_START_WAIT_S = 60         # hub setting stremio.start_wait_seconds (10 to 300)
 STOP_WAIT_S = 15
 SKIP_DEFAULT_ROOT_NAMES = ("", ".", "/")
 
@@ -75,16 +81,41 @@ def _hub_items():
 
 
 def _ensure_daemon(did):
-    """True when the daemon is registered (syncing the tool declarations once if it isn't yet)."""
+    """(True, "") when the daemon is registered, syncing the tool declarations once if it isn't yet
+    (so the FIRST start works without restarting Jarvis).  (False, why) in plain words otherwise."""
     from .. import daemons
     if daemons.get(did):
-        return True
+        return True, ""
+    why = ""
     try:
         from .. import tool_daemons
-        tool_daemons.sync_if_stale(force=True)
-    except Exception:  # noqa: BLE001
-        return False
-    return bool(daemons.get(did))
+        result = tool_daemons.sync_if_stale(force=True)
+        if result is None:
+            try:
+                from .. import atomic_io
+                recorded = atomic_io.read_json(tool_daemons._state_path(), default={}, expect=dict).get("error")  # noqa: SLF001
+            except Exception:  # noqa: BLE001
+                recorded = None
+            why = "registering the tool's daemons failed: %s" % str(recorded or "no reason recorded")[:160]
+        else:
+            for conflict in result.get("conflicts") or []:
+                if did in str(conflict):
+                    why = str(conflict)[:200]
+    except Exception as exc:  # noqa: BLE001
+        why = "registering the tool's daemons failed: %s: %s" % (type(exc).__name__, str(exc)[:120])
+    if daemons.get(did):
+        return True, ""
+    return False, why or "the daemon list still doesn't have it after registering (is the Stremio tool switched off in Menu > Tool Manager?)"
+
+
+def _start_wait():
+    """How long stack_start waits for the server to answer: hub setting stremio.start_wait_seconds."""
+    try:
+        from ..hub.store import Store
+        value = (Store().get_settings().get("stremio") or {}).get("start_wait_seconds")
+        return max(10, min(300, int(value)))
+    except Exception:  # noqa: BLE001 - settings unreadable: the default
+        return DEFAULT_START_WAIT_S
 
 
 def _wait_for(check, seconds):
@@ -96,21 +127,25 @@ def _wait_for(check, seconds):
     return bool(check())
 
 
-def _server_view(config, server):
-    cfg = config.load()
-    srv = server.StremioServer(server.config.server_url(cfg))
-    up, info = srv.is_up()
+def _server_view(config, server, wait=None):
+    """The server block of stack_status: the old keys (url, up, version, daemon, managed_by_jarvis,
+    note, problem, can_start, hint) plus the plain-words state (see hub/stremio/status.py)."""
+    from ..hub.stremio import status
+    snap = status.snapshot(wait_seconds=wait or _start_wait())
     daemon = server.daemon_state(server.SERVER_DAEMON)
-    out = {"url": srv.base, "up": up, "version": info if up else None, "daemon": daemon["status"],
-           "managed_by_jarvis": bool(up and daemon["running"])}
+    up = snap["state"] == "running"
+    out = {"url": snap["address"], "up": up, "version": snap["version"] or None, "daemon": daemon["status"],
+           "managed_by_jarvis": bool(up and daemon["running"]), "state": snap["state"], "title": snap["title"],
+           "sentence": snap["sentence"], "next": snap["next"], "step": snap["step"], "can_start": snap["can_start"],
+           "path": snap["path"]}
+    if snap["problems"]:
+        out["problems"] = snap["problems"]
     if up and not daemon["running"]:
         out["note"] = "already up (started outside Jarvis, e.g. by the Stremio app); I won't start a duplicate"
     if not up:
-        out["problem"] = info
-        exe, _js, where = config.runtime(cfg)
-        out["can_start"] = bool(exe)
-        if not exe:
-            out["hint"] = "I can't find Stremio's server files; install the Stremio app or set server.runtime_exe / server_js in ~/.jarvis/stremio.json"
+        out["problem"] = snap["sentence"]
+        if not snap["can_start"]:
+            out["hint"] = snap["sentence"]
     return out
 
 
@@ -139,7 +174,7 @@ def tool_stack_status(args):
             hub["daemon_alive"] = bool(Store().daemon_info()["alive"])
         except Exception:  # noqa: BLE001
             pass
-        bits = ["server: %s" % ("already up" if srv.get("note") else "up" if srv["up"] else "down")
+        bits = ["server: %s" % ("already up" if srv.get("note") else "up" if srv["up"] else "down (%s)" % srv["title"].lower())
                 + (" (v%s)" % srv["version"] if srv["up"] else ""),
                 "stremio-web: %s" % ("up" if web["up"] else "down"),
                 "download hub: %s" % ("running" if hub["daemon_alive"] else "not running")]
@@ -148,32 +183,68 @@ def tool_stack_status(args):
         return _fail("stack_status", exc)
 
 
-def _start_server(config, server):
-    srv = server.StremioServer()
-    up, info = srv.is_up()
-    if up:
-        daemon = server.daemon_state(server.SERVER_DAEMON)
-        return {"state": "already_up", "version": info, "url": srv.base,
-                "note": "already up" + ("" if daemon["running"] else " (started outside Jarvis)")
-                + "; nothing was started"}
-    if server.port_answers(srv.base):
-        return {"state": "blocked", "error": "something is listening on %s but it isn't answering like a Stremio server" % srv.base}
-    exe, _js, where = config.runtime()
-    if not exe:
-        return {"state": "error", "error": "I can't find Stremio's server files. Install the Stremio app, or set server.runtime_exe "
-                                          "and server.server_js in ~/.jarvis/stremio.json (stack_doctor shows what it looked for)"}
-    if not _ensure_daemon(server.SERVER_DAEMON):
-        return {"state": "error", "error": "the Stremio server daemon isn't registered yet; restart Jarvis or open Menu > Daemons once"}
+def _await_server(srv, seconds, daemon_id):
+    """Wait for the server to answer.  'up', 'exited' (the program stopped while we waited) or 'timeout'."""
     from .. import daemons
-    ok, message = daemons.start(server.SERVER_DAEMON)
-    if not ok and "already" not in message:
-        return {"state": "error", "error": message}
+    begun = time.monotonic()
+    end = begun + seconds
+    while True:
+        if srv.is_up(timeout=1.5)[0]:
+            return "up"
+        try:
+            state = daemons.status(daemon_id)
+        except Exception:  # noqa: BLE001
+            state = {}
+        label = state.get("status")
+        if label in ("crashed", "restarting") or (label == "stopped" and time.monotonic() - begun >= 3):
+            return "exited"
+        if time.monotonic() >= end:
+            return "timeout"
+        time.sleep(1.0)
+
+
+def _start_server(config, server):
+    """Bring Stremio's server up, or say in one plain sentence why not.  The result keeps the old
+    `state` words (already_up / started / blocked / error) and adds `outcome` (the fine-grained id from
+    hub/stremio/status.py, or not_registered / disabled / launch_refused) and `sentence`."""
+    from ..hub.stremio import status
+    wait = _start_wait()
+    snap = status.snapshot(wait_seconds=wait)
+    base = {"url": snap["address"], "outcome": snap["state"], "sentence": snap["sentence"]}
+    if snap["problems"]:
+        base["problems"] = snap["problems"]
+    if snap["state"] == "running":
+        outside = snap["managed_by"] == "outside"
+        return {**base, "state": "already_up", "version": snap["version"],
+                "note": "already up" + (" (started outside Jarvis)" if outside else "") + "; nothing was started"}
+    if snap["state"] in ("other_port", "port_busy", "app_open", "files_missing", "not_found"):
+        return {**base, "state": "blocked" if snap["state"] == "port_busy" else "error", "error": snap["sentence"]}
+    from .. import daemons
+    if snap["state"] in ("ready", "start_failed"):
+        registered, why = _ensure_daemon(server.SERVER_DAEMON)
+        if not registered:
+            return {**base, "state": "error", "outcome": "not_registered",
+                    "error": "Jarvis couldn't set up the Stremio server task, so it can't start it (%s). Restarting Jarvis may fix it." % why}
+        ok, message = daemons.start(server.SERVER_DAEMON)
+        if not ok and "already" not in message:
+            if "disabled" in message:
+                return {**base, "state": "error", "outcome": "disabled",
+                        "error": "The Stremio server task is switched off, so Jarvis can't start it. Turn it on in Menu > Daemons."}
+            return {**base, "state": "error", "outcome": "launch_refused",
+                    "error": "Jarvis couldn't start the Stremio program: %s" % str(message)[:200]}
     server.forget_probe()
-    came_up = _wait_for(lambda: srv.is_up(timeout=1.5)[0], START_WAIT_S)
-    if came_up:
-        return {"state": "started", "version": srv.is_up()[1], "url": srv.base}
-    return {"state": "starting", "url": srv.base,
-            "note": "I started it but it isn't answering yet; check stack_status in a few seconds (Menu > Daemons has its console)"}
+    srv = server.StremioServer()
+    result = _await_server(srv, wait, server.SERVER_DAEMON)
+    if result == "up":
+        version = srv.is_up()[1]
+        return {**base, "state": "started", "outcome": "started", "version": version,
+                "sentence": "Stremio's server is running at %s (version %s). Jarvis started it." % (snap["address"], version)}
+    after = status.snapshot(wait_seconds=wait, waited=wait if result == "timeout" else None, exited=(result == "exited"))
+    out = {**base, "state": "blocked" if after["state"] == "port_busy" else "error", "outcome": after["state"],
+           "sentence": after["sentence"], "error": after["sentence"]}
+    if after.get("next"):
+        out["next"] = after["next"]
+    return out
 
 
 def _start_web(config, server):
@@ -183,8 +254,9 @@ def _start_web(config, server):
     if not config.web_dir():
         return {"state": "not_configured",
                 "note": "stremio-web isn't set up (put its folder in web.dir of ~/.jarvis/stremio.json); playback links need it"}
-    if not _ensure_daemon(server.WEB_DAEMON):
-        return {"state": "error", "error": "the stremio-web daemon isn't registered yet; restart Jarvis or open Menu > Daemons once"}
+    registered, why = _ensure_daemon(server.WEB_DAEMON)
+    if not registered:
+        return {"state": "error", "error": "Jarvis couldn't set up the stremio-web task, so it can't start it (%s). Restarting Jarvis may fix it." % why}
     from .. import daemons
     ok, message = daemons.start(server.WEB_DAEMON)
     if not ok and "already" not in message:
@@ -203,9 +275,11 @@ def tool_stack_start(args):
         out = {"ok": True}
         if what in ("server", "both"):
             out["server"] = _start_server(config, server)
-            if out["server"]["state"] in ("error", "blocked"):
+            if out["server"]["state"] not in ("already_up", "started"):
                 out["ok"] = False
                 out["error"] = out["server"]["error"]
+            if out["server"].get("problems"):
+                out["config_problems"] = out["server"]["problems"]
         if what in ("web", "both") and out["ok"]:
             out["web"] = _start_web(config, server)
             if out["web"]["state"] == "error":
@@ -285,11 +359,19 @@ def tool_stack_doctor(args):
                              str(path) if path.exists() else "none (defaults are used): %s" % path))
         for problem in config.problems(cfg):
             checks.append(_check("config", "warn", problem))
-        exe, js, where = config.runtime(cfg)
+        from ..hub.stremio import detect, status
+        snap = status.snapshot(wait_seconds=_start_wait())
+        path = snap["path"]
+        exe, js, where = path.get("runtime_exe"), path.get("server_js"), path.get("where")
         checks.append(_check("server files", "ok" if exe else "warn",
-                             ("%s + %s (%s)" % (exe, js, where)) if exe
-                             else "not found; install the Stremio app or set server.runtime_exe and server_js"))
-        srv = server.StremioServer()
+                             ("%s + %s (found %s)" % (exe, js, detect.HOW.get(where, where))) if exe else snap["sentence"]))
+        for probe in snap["tried"]:
+            checks.append(_check("looked: %s" % probe["probe"], "ok" if (probe["found"] or exe) else "warn", probe["detail"]))
+        checks.append(_check("state", "ok" if snap["state"] in ("running", "ready", "starting") else "warn",
+                             "%s: %s" % (snap["title"], snap["sentence"])))
+        checks.append(_check("start wait", "ok", "stack_start waits up to %d seconds for the server (hub setting stremio.start_wait_seconds)"
+                             % _start_wait()))
+        srv = server.StremioServer(snap["address"])
         up, info = srv.is_up()
         if up:
             checks.append(_check("server", "ok", "answering at %s, version %s" % (srv.base, info)))
@@ -308,9 +390,8 @@ def tool_stack_doctor(args):
             except server.ServerError as exc:
                 checks.append(_check("server settings", "warn", str(exc)))
         else:
-            other = server.port_answers(srv.base)
-            checks.append(_check("server", "fail", ("something listens on %s but it isn't a Stremio server" % srv.base) if other
-                                 else "%s (stack_start brings it up)" % info))
+            checks.append(_check("server", "fail", snap["sentence"] if snap["state"] != "ready"
+                                 else "%s (stack_start brings it up)" % snap["sentence"]))
         web = config.web_url()
         checks.append(_check("stremio-web", "ok" if server.port_answers(web) else "warn",
                              ("answering at %s" % web) if server.port_answers(web)
@@ -336,7 +417,9 @@ def tool_stack_doctor(args):
         except Exception as exc:  # noqa: BLE001
             checks.append(_check("stremio engine", "warn", "couldn't check: %s" % exc))
         failed = [c for c in checks if c["status"] == "fail"]
-        return {"ok": not failed, "checks": checks, "config": config.public_view(cfg),
+        return {"ok": not failed, "checks": checks, "config": config.public_view(cfg), "state": snap["state"],
+                "diagnostic": status.diagnostic_text(snap, ["%s [%s] %s" % (c["name"], c["status"], c["detail"]) for c in checks
+                                                           if not c["name"].startswith("looked:")]),
                 "summary": "%d check(s), %d failed, %d warning(s)" % (len(checks), len(failed),
                                                                       len([c for c in checks if c["status"] == "warn"]))}
     except Exception as exc:  # noqa: BLE001
@@ -601,19 +684,23 @@ _WHAT = {"type": "string", "enum": ["server", "web", "both"],
 TOOL_SCHEMAS = [
     {"name": "stack_status",
      "description": ("Is the Stremio stack up? The streaming server (answers on its port, even if the Stremio app started it), "
-                     "stremio-web, and the download hub's daemon, with versions and how many Stremio downloads are running."),
+                     "stremio-web, and the download hub's daemon, with versions and how many Stremio downloads are running. "
+                     "When the server is down it says why in one plain sentence (not found, not running, app open but silent, other port, port in use)."),
      "parameters": {"type": "object", "properties": {}}},
     {"name": "stack_start",
-     "description": ("Start the Stremio streaming server and/or stremio-web (Menu > Daemons). If the server already answers "
-                     "(the Stremio app is open) it says 'already up' and starts nothing."),
+     "description": ("Start the Stremio streaming server and/or stremio-web (Menu > Daemons). Finds the Stremio app by itself. "
+                     "If the server already answers (the Stremio app is open) it says 'already up' and starts nothing. "
+                     "If it can't, the error is one plain sentence: not found, could not start the program, started but silent, "
+                     "answers on another port, port in use, or the app is open but its server isn't answering."),
      "parameters": {"type": "object", "properties": {"what": _WHAT}}},
     {"name": "stack_stop",
      "description": ("Stop the Stremio server and/or stremio-web that Jarvis started. Asks first when downloads or a stream are running. "
                      "A server started by the Stremio app itself is left alone."),
      "parameters": {"type": "object", "properties": {"what": _WHAT}}},
     {"name": "stack_doctor",
-     "description": ("Diagnose the Stremio setup: server files, version, ports, cache folder and size, free space, stremio-web, "
-                     "a video player, and whether the hub's Stremio engine is ready."),
+     "description": ("Diagnose the Stremio setup: what it looked at to find Stremio (running program, Windows' install list, Start Menu, "
+                     "usual folders) and what each found, the state in plain words, server files, version, ports, cache folder and size, "
+                     "free space, stremio-web, a video player, and whether the hub's Stremio engine is ready. Also returns a copyable `diagnostic` text."),
      "parameters": {"type": "object", "properties": {}}},
     {"name": "stremio_prepare",
      "description": ("Get the Stremio server ready for downloading (asks the person first). Default: set its cache to unlimited so "
@@ -711,7 +798,7 @@ TEST_CHECKLIST = {
     "stack_status": {
         "does": "Says whether Stremio's server, stremio-web and the hub daemon are up.",
         "steps": [
-            {"run": {}, "expect": "ok: true with server / web / hub blocks and a one-line summary. With the Stremio app open, the server reads 'already up (started outside Jarvis)'."},
+            {"run": {}, "expect": "ok: true with server / web / hub blocks and a one-line summary. With the Stremio app open, the server reads 'already up (started outside Jarvis)'. With it down, server.state / title / sentence say why in plain words (Installed, not running / Not found / App open, server silent / Running on another port / Port in use)."},
             {"ask": "Is Stremio running?", "expect": "Calls stack_status and answers from it."},
         ],
         "needs": ["Nothing; it works with the server down too (it says so)."],
@@ -720,11 +807,11 @@ TEST_CHECKLIST = {
     "stack_start": {
         "does": "Starts Stremio's streaming server (and stremio-web) as Jarvis daemons, unless one already answers.",
         "steps": [
-            {"run": {"what": "server"}, "expect": "With the Stremio app open: server state 'already_up', nothing started (Menu > Daemons shows no new daemon running). With it closed: state 'started' with a version within ~25 s."},
+            {"run": {"what": "server"}, "expect": "With the Stremio app open: server state 'already_up', nothing started (Menu > Daemons shows no new daemon running). With it closed: state 'started' with a version within the wait (hub setting stremio.start_wait_seconds, default 60 s). Stremio in a non-default folder: it is found without editing any file. With Stremio not installed: ok false and one sentence saying it wasn't found and what was looked at. With the app open but its server silent: ok false, 'the Stremio app is open, but its server isn't answering', and nothing is started."},
             {"run": {"what": "web"}, "expect": "'not_configured' with a note when web.dir isn't set; otherwise 'started' (first start can take a while to build)."},
             {"ask": "Start Stremio", "expect": "Calls stack_start and reports the state."},
         ],
-        "needs": ["The Stremio desktop app installed (or server.runtime_exe / server_js in ~/.jarvis/stremio.json)"],
+        "needs": ["The Stremio desktop app installed (found automatically; or the paths saved with Locate...)"],
         "care": "Starting a server twice must never happen: check the Stremio app is closed OR that the answer says already_up.",
         "watch": ["Menu > Daemons shows 'Stremio streaming server' under the Stremio category."],
     },
@@ -738,7 +825,7 @@ TEST_CHECKLIST = {
     "stack_doctor": {
         "does": "Checks the Stremio setup and says what is wrong.",
         "steps": [
-            {"run": {}, "expect": "ok with a checks list: server files, server version, cache size and folder, free space, stremio-web, player, daemons, the stremio engine. The config block shows '(set)' for any account key, never its value."},
+            {"run": {}, "expect": "ok with a checks list: 'looked: port / process / registry / shortcut / folder' rows saying what each probe found, a 'state' row in plain words, server files, server version, cache size and folder, free space, stremio-web, player, daemons, the stremio engine; a copyable `diagnostic` text. The config block shows '(set)' for any account key, never its value."},
         ],
     },
     "stremio_prepare": {

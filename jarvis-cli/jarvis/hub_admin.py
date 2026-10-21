@@ -6,7 +6,9 @@ One verb serves three front-end pieces, the way `calendar-admin` serves the Cale
   * the Downloads panel's push stream, thumbnails and files (`watch`, `thumb`, `file`),
   * the panel's History tab and the drag-to-reorder queue (`history`, `history_remove`,
     `history_clear`, `redownload`, `reorder`) plus the Settings tab's read of the hub settings
-    (`settings`).
+    (`settings`);
+  * the Stremio status block (`stremio_status`, read-only) and the Locate... button's save
+    (`stremio_save`: the owner's paths into ~/.jarvis/stremio.json; N9, brief 12).
 
 It is NOT a command to type.  The request is one JSON object on stdin, the answer is one JSON
 object on stdout (`watch` prints one JSON object per line until it is stopped).  `{"ok": false,
@@ -37,8 +39,8 @@ import time
 _UNATTENDED_VARS = ("JARVIS_CHANNEL", "JARVIS_CHANNEL_SENDER", "JARVIS_SCHEDULED", "JARVIS_TASK_ID")
 _UNATTENDED_MESSAGE = "The Download Hub's History and queue controls can only be used from the Jarvis page itself."
 
-READ_OPS = ("card", "list", "settings", "history", "file", "thumb")
-WRITE_OPS = ("history_remove", "history_clear", "redownload", "reorder")
+READ_OPS = ("card", "list", "settings", "history", "file", "thumb", "stremio_status")
+WRITE_OPS = ("history_remove", "history_clear", "redownload", "reorder", "stremio_save")
 OPS = READ_OPS + WRITE_OPS
 
 MAX_CARD_IDS = 8
@@ -510,6 +512,78 @@ def reorder(request, store=None):
         return _err("couldn't reorder the queue: %s" % exc)
 
 
+# --------------------------------------------------------------------------- Stremio (N9, brief 12)
+
+def _stremio_wait(store=None):
+    """The `stremio.start_wait_seconds` hub setting (60 when it can't be read)."""
+    try:
+        value = (_store(store).get_settings().get("stremio") or {}).get("start_wait_seconds")
+        return max(10, min(300, int(value)))
+    except Exception:  # noqa: BLE001
+        return 60
+
+
+def _stremio_payload(snap):
+    """What the status card, Settings and the add form show.  Nothing secret: the account key is
+    never read, and the paths are the ones the owner chose or Jarvis found."""
+    from .hub.stremio import config, detect
+    path = dict(snap.get("path") or {})
+    path["how_text"] = detect.HOW.get(path.get("where") or "", "")
+    out = {key: snap.get(key) for key in ("state", "title", "sentence", "next", "action", "step", "step_label",
+                                           "address", "version", "managed_by", "problems", "can_start", "installed_version")}
+    out.update(ok=True, path=path, tried=snap.get("tried") or [], config_file=str(config.config_path()))
+    return out
+
+
+def stremio_status(request=None, store=None):
+    """Read-only: the state of Stremio's server in words, its address and version, the program Jarvis
+    would start and how it was found, the failed step, config problems, and a diagnostic text.
+    `doctor: true` adds the whole `stack_doctor` result to the diagnostic (slower: it asks the server
+    about its cache).  Starts, stops and writes nothing."""
+    try:
+        from .hub.stremio import status
+        snap = status.snapshot(wait_seconds=_stremio_wait(store))
+        out = _stremio_payload(snap)
+        out["diagnostic"] = status.diagnostic_text(snap)
+        if (request or {}).get("doctor"):
+            try:
+                from .actions import stremio_stack
+                doc = stremio_stack.tool_stack_doctor({})
+                if doc.get("diagnostic"):
+                    out["diagnostic"] = doc["diagnostic"]
+            except Exception:  # noqa: BLE001 - the short diagnostic above stands
+                pass
+        return out
+    except Exception as exc:  # noqa: BLE001
+        return _err("couldn't read Stremio's status: %s" % str(exc)[:160])
+
+
+def stremio_save(request, store=None):
+    """The Locate... button: save the two paths (and, for 'answers on another port', the loopback
+    address) into ~/.jarvis/stremio.json.  The owner's own button only: this runs for a write op, so an
+    unattended process is refused before it gets here, and `config.save_paths` checks again.  Both
+    files must exist; a new address must answer like a Stremio server.  `dry_run: true` only checks
+    (and reports what is on the server's port) without writing."""
+    try:
+        from .hub.stremio import config, detect, status
+        request = request if isinstance(request, dict) else {}
+        exe, js = request.get("runtime_exe"), request.get("server_js")
+        url = request.get("server_url") or None
+        if request.get("dry_run") is True:
+            checked = config.check_paths(exe, js)
+            probe = detect.probe_port(config.server_url(), other_ports=(detect.DEFAULT_PORT,))
+            return {"ok": checked["ok"], "dry_run": True, "problems": checked["problems"], "server": probe,
+                    **({} if checked["ok"] else {"error": "; ".join(checked["problems"])})}
+        result = config.save_paths(exe, js, server_url=url)
+        if not result.get("ok"):
+            return _err(result.get("error") or "couldn't save", **{k: v for k, v in result.items() if k in ("code", "problems")})
+        out = stremio_status({}, store)
+        out["saved"] = result["saved"]
+        return out
+    except Exception as exc:  # noqa: BLE001
+        return _err("couldn't save the Stremio paths: %s" % str(exc)[:160])
+
+
 # --------------------------------------------------------------------------- the entry point
 
 def admin(op, request=None, store=None):
@@ -543,6 +617,10 @@ def admin(op, request=None, store=None):
             return redownload(request, store)
         if op == "reorder":
             return reorder(request, store)
+        if op == "stremio_status":
+            return stremio_status(request, store)
+        if op == "stremio_save":
+            return stremio_save(request, store)
     except Exception as exc:  # noqa: BLE001 - a panel call must answer, not crash the page
         return _err("Download Hub error: %s" % str(exc)[:160])
     return _err("unknown op")

@@ -285,7 +285,7 @@ def test_unattended():
         check("%s: the writes are refused" % var, res["ok"] is False and res.get("code") == "unattended" and st.get_item(a["id"]) is not None)
         check("%s: the reads still work (a card in a chat reply)" % var, hub_admin.admin("card", {"ids": [a["id"]]}, store=st)["ok"] is True)
         del os.environ[var]
-    check("every write op is on the guarded list, and no read op is", set(hub_admin.WRITE_OPS) == {"history_remove", "history_clear", "redownload", "reorder"} and not set(hub_admin.READ_OPS) & set(hub_admin.WRITE_OPS))
+    check("every write op is on the guarded list, and no read op is", set(hub_admin.WRITE_OPS) == {"history_remove", "history_clear", "redownload", "reorder", "stremio_save"} and not set(hub_admin.READ_OPS) & set(hub_admin.WRITE_OPS))
     check("an unknown op is a usage line, not a crash", hub_admin.admin("rm-rf", {})["ok"] is False)
 
 
@@ -310,7 +310,7 @@ def test_plumbing():
     check("the slash registry lists it as not exposed", '"hub-admin"' in slash)
     server = (ROOT / "web" / "server.js").read_text(encoding="utf-8")
     check("every /api/hub write route needs the hub header, and every route is loopback-checked",
-          server.count("requireHubWrite, requireJarvis") == 4 and "requireHubRead, requireJarvis" in server and "function hubOriginOk" in server)
+          server.count("requireHubWrite, requireJarvis") == 5 and "requireHubRead, requireJarvis" in server and "function hubOriginOk" in server)
     check("a thumbnail or file route takes an id and never a path", 'app.get("/api/hub/thumb/:id"' in server and 'app.get("/api/hub/file/:id"' in server and "req.query.path" not in server.split("// Download Hub web back end")[1].split("// Calendars panel")[0])
     check("the thumbnail route pins its content type and nosniff", "X-Content-Type-Options" in server and "sandbox" in server)
     check("the stream route is capped and stops its watcher", "HUB_MAX_CLIENTS" in server and "hubWatchStopSoon" in server)

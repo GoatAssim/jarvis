@@ -38,7 +38,7 @@ DEFAULTS = {
     # segment_min_bytes big whose server supports Range.  A download can override it (options.segments).
     "http": {"stall_seconds": 60, "max_retries": 3, "connect_timeout": 15,
              "segments": 1, "segment_min_bytes": 32 * 1024 * 1024},
-    "stremio": {"mode": "save", "stall_seconds": 90, "max_retries": 3,   # phase 4 
+    "stremio": {"mode": "save", "stall_seconds": 90, "max_retries": 3, "start_wait_seconds": 60,   # phase 4 
     "metadata_timeout": 90},      # seconds to wait for a torrent's file list (no peers = no list)    "providers": {},             # phase 5: per-provider blocks
     "provider_limits": {"max_rows": 500, "max_report_kb": 64, "max_reports_per_s": 20,
                         "stale_after_s": 30},
@@ -97,7 +97,7 @@ PREFS_WRITABLE = {
     "rate_limit_kbps", "schedule",
     "concurrency.total", "concurrency.http", "concurrency.ytdlp", "concurrency.stremio",
     "http.stall_seconds", "http.max_retries", "http.segments", "http.segment_min_bytes",
-    "stremio.stall_seconds", "stremio.max_retries", "stremio.metadata_timeout",
+    "stremio.stall_seconds", "stremio.max_retries", "stremio.metadata_timeout", "stremio.start_wait_seconds",
     "after_download.open",
     "notify.enabled", "notify.min_seconds", "notify.coalesce_s", "notify.providers",
     "ext_folders",
@@ -438,6 +438,7 @@ _CHECKS = {
     "stremio.stall_seconds": lambda v: _int_in(v, 10, 3600, "stremio.stall_seconds"),
     "stremio.max_retries": lambda v: _int_in(v, 0, 10, "stremio.max_retries"),
     "stremio.metadata_timeout": lambda v: _int_in(v, 10, 600, "stremio.metadata_timeout"),
+    "stremio.start_wait_seconds": lambda v: _int_in(v, 10, 300, "stremio.start_wait_seconds"),
     "http.segments": lambda v: _int_in(v, 1, 16, "http.segments"),
     "http.segment_min_bytes": lambda v: _int_in(v, 1024 * 1024, 1 << 40, "http.segment_min_bytes"),
     "schedule": _check_schedule,

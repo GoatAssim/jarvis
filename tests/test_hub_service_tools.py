@@ -71,7 +71,7 @@ def fresh_store(clock=None):
     return Store(Path(HOME) / f"hub-{_n[0]}.db", clock=clock or time.time)
 
 
-TOOL_NAMES = ["dl_add", "dl_list", "dl_status", "dl_pause", "dl_resume", "dl_cancel", "dl_retry",
+TOOL_NAMES = ["dl_add", "dl_add_ytdlp", "dl_add_stremio", "dl_list", "dl_status", "dl_pause", "dl_resume", "dl_cancel", "dl_retry",
               "dl_schedule", "dl_open", "dl_settings", "dl_prefs", "hub_doctor", "hub_demo_provider",
               "dl_import_legacy", "dl_providers", "dl_provider_prefs"]
 
@@ -84,7 +84,7 @@ def test_tool_file():
     check("the loader finds download_hub.py", len(mine) == 1)
     rec = mine[0]
     check("it is valid (no load error)", rec.valid and not rec.error)
-    check("it defines exactly the 16 tools", sorted(rec.tools) == sorted(TOOL_NAMES) and sorted(s["name"] for s in rec.schemas) == sorted(TOOL_NAMES))
+    check("it defines exactly the 18 tools", sorted(rec.tools) == sorted(TOOL_NAMES) and sorted(s["name"] for s in rec.schemas) == sorted(TOOL_NAMES))
     check("in the new `downloads` group", rec.group == "downloads")
     check("no tool name collides with another file's", all(set(rec.tools).isdisjoint(set(o.tools)) for o in records if o is not rec and o.valid))
     check("cancel, settings, provider settings and the demo are confirm-gated by name",
@@ -447,8 +447,8 @@ def test_demo():
     out = demo.start(store)
     check("start writes the rows at once", out["ok"] and out["rows"] == 7)
     rows = {r["id"]: r for r in store.list_items(provider="demo", limit=50)}
-    check("they are the demo provider's, read-only", len(rows) == 7 and all(r["owner"] == "provider" for r in rows.values())
-          and all(service.present_item(r, {p["id"]: p for p in store.list_providers()}, clock())["read_only"] for r in rows.values()))
+    check("they are the demo provider's, and it can be controlled (brief 13 part A: pause / resume / cancel)", len(rows) == 7 and all(r["owner"] == "provider" for r in rows.values())
+          and not any(service.present_item(r, {p["id"]: p for p in store.list_providers()}, clock())["read_only"] for r in rows.values()))
     for _ in range(45):
         clock.advance(1)
         demo.tick(store, clock())
