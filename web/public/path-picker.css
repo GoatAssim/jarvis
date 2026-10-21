@@ -1,0 +1,143 @@
+/* path-picker.css - the folder / file picker (Download Hub N14).
+ *
+ * Colours come from the app's tokens (--bg-raised, --bg-1, --accent*, --text*), with fallbacks, so the
+ * light and dark themes both work and no colour is fixed.  Every state is told by more than colour: the
+ * highlighted row has a bar and bold text, a folder and a file have different icon shapes, an empty list
+ * says so in words.  It sits above the Settings dialog (9200) and below toasts (9300). */
+
+.jpp-backdrop{
+  position: fixed; inset: 0; z-index: 9250;
+  display: grid; place-items: center;
+  grid-template-columns: minmax(0, 1fr); grid-template-rows: minmax(0, 1fr);   /* a long path may scroll, never widen the card */
+  padding: 16px;
+  background: rgba(2, 5, 10, 0.72);
+  backdrop-filter: blur(3px);
+}
+
+.jpp{
+  width: min(760px, 100%);
+  height: min(560px, 100%);
+  min-width: 0;
+  display: flex; flex-direction: column;
+  background: var(--bg-raised, var(--bg-1, #0b1420));
+  color: var(--text, #e6f5fc);
+  border: 1px solid var(--accent-dim, #164a63);
+  border-radius: calc(var(--jui-radius, 6px) * 1.4);
+  box-shadow: 0 24px 70px rgba(0, 0, 0, 0.55);
+  font-size: 0.86rem;
+  min-height: 0;
+}
+
+.jpp__head{
+  display: flex; align-items: center; gap: 10px;
+  padding: 12px 14px;
+  border-bottom: 1px solid var(--accent-dim, #164a63);
+}
+.jpp__title{ flex: 1 1 auto; margin: 0; font-size: 0.98rem; font-weight: 600; letter-spacing: 0.02em; color: var(--text, #e6f5fc); }
+.jpp__x{
+  background: none; border: none; cursor: pointer;
+  color: var(--text-dimmer, #4d6377); font-size: 1.3rem; line-height: 1; padding: 0 4px;
+}
+.jpp__x:hover{ color: var(--text, #e6f5fc); }
+
+/* breadcrumb: one line, scrolls sideways when the path is long */
+.jpp__crumbs{ padding: 8px 14px 0; overflow-x: auto; min-width: 0; }
+.jpp__crumbs-list{ display: flex; flex-wrap: nowrap; gap: 2px; margin: 0; padding: 0 0 6px; list-style: none; white-space: nowrap; }
+.jpp__crumbs-list li + li::before{ content: "\203A"; color: var(--text-dimmer, #4d6377); padding: 0 4px; }
+.jpp__crumb{
+  display: inline-block; line-height: 1.4;
+  background: none; border: none; padding: 2px 4px; border-radius: 3px;
+  font: inherit; color: var(--text-dim, #85a2b6); cursor: pointer;
+}
+button.jpp__crumb:hover{ color: var(--text, #e6f5fc); background: color-mix(in srgb, var(--accent, #4fd8ff) 12%, transparent); }
+.jpp__crumb--here{ color: var(--text, #e6f5fc); font-weight: 600; cursor: default; }
+
+.jpp__body{ flex: 1 1 auto; display: grid; grid-template-columns: 170px minmax(0, 1fr); gap: 10px; padding: 6px 14px 8px; min-height: 0; }
+.jpp__places{ min-width: 0; overflow-y: auto; border-right: 1px solid var(--accent-dim, #164a63); padding-right: 8px; }
+.jpp__places-list{ margin: 0; padding: 0; list-style: none; display: flex; flex-direction: column; gap: 2px; }
+.jpp__place{
+  width: 100%; text-align: left; background: none; border: 1px solid transparent; border-radius: 3px;
+  padding: 5px 8px; font: inherit; color: var(--text-dim, #85a2b6); cursor: pointer;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.jpp__place:hover{ color: var(--text, #e6f5fc); background: color-mix(in srgb, var(--accent, #4fd8ff) 10%, transparent); }
+.jpp__place.is-here{ color: var(--text, #e6f5fc); font-weight: 600; border-color: var(--accent-dim, #164a63); }
+
+.jpp__main{ display: flex; flex-direction: column; min-width: 0; min-height: 0; }
+.jpp__note{ min-height: 0; color: var(--accent-secondary, #f2b544); font-size: 0.8rem; padding: 0 2px 4px; }
+.jpp__note:empty{ display: none; }
+
+.jpp__list{
+  flex: 1 1 auto; min-height: 0; margin: 0; padding: 2px; list-style: none; overflow-y: auto;
+  background: var(--bg-1, #070d16);
+  border: 1px solid var(--accent-dim, #164a63); border-radius: 4px;
+}
+.jpp__list:focus-visible{ outline: 2px solid var(--accent, #4fd8ff); outline-offset: 1px; }
+.jpp__row{
+  display: flex; align-items: center; gap: 8px;
+  padding: 4px 8px; border-left: 3px solid transparent; border-radius: 3px; cursor: default;
+}
+.jpp__row:hover{ background: color-mix(in srgb, var(--accent, #4fd8ff) 8%, transparent); }
+.jpp__row.is-on{
+  background: color-mix(in srgb, var(--accent, #4fd8ff) 18%, transparent);
+  border-left-color: var(--accent, #4fd8ff); font-weight: 600;
+}
+.jpp__name{ flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.jpp__row.is-link .jpp__name::after{ content: " \21AA"; color: var(--text-dimmer, #4d6377); }   /* a link / shortcut */
+.jpp__facts{ flex: 0 0 auto; color: var(--text-dimmer, #4d6377); font-size: 0.76rem; font-weight: 400; white-space: pre; }
+.jpp__empty{ padding: 14px 10px; color: var(--text-dim, #85a2b6); }
+
+/* two icon shapes, drawn with borders so they follow the text colour */
+.jpp__ico{ flex: 0 0 auto; position: relative; display: inline-block; width: 16px; height: 12px; }
+.jpp__ico--folder{ border: 1.5px solid var(--accent-soft, #2ea9d6); border-radius: 2px; background: color-mix(in srgb, var(--accent, #4fd8ff) 18%, transparent); }
+.jpp__ico--folder::before{ content: ""; position: absolute; left: -1.5px; top: -4.5px; width: 7px; height: 3px; border: 1.5px solid var(--accent-soft, #2ea9d6); border-bottom: none; border-radius: 2px 2px 0 0; background: var(--bg-1, #070d16); }
+.jpp__ico--file{ width: 11px; height: 14px; margin: 0 2.5px; border: 1.5px solid var(--text-dim, #85a2b6); border-radius: 1px; }
+.jpp__ico--file::before{ content: ""; position: absolute; left: 2px; top: 3px; width: 4px; height: 1.5px; background: var(--text-dim, #85a2b6); box-shadow: 0 3px 0 var(--text-dim, #85a2b6); }
+
+.jpp__more{ padding: 4px 2px 0; color: var(--text-dim, #85a2b6); font-size: 0.78rem; }
+.jpp__more:empty{ display: none; }
+.jpp__filter{ padding: 4px 2px 0; color: var(--accent, #4fd8ff); font-size: 0.8rem; word-break: break-all; }
+.jpp__hint{ padding: 4px 2px 0; color: var(--text-dimmer, #4d6377); font-size: 0.74rem; }
+
+.jpp__pathrow, .jpp__newrow{ display: flex; gap: 8px; align-items: center; padding: 4px 14px; }
+.jpp__path, .jpp__newname{
+  flex: 1 1 auto; min-width: 0; padding: 6px 8px;
+  background: var(--bg-1, #070d16); color: var(--text, #e6f5fc);
+  border: 1px solid var(--accent-dim, #164a63); border-radius: 4px;
+  font: inherit; font-family: ui-monospace, "Cascadia Code", Consolas, monospace; font-size: 0.8rem;
+}
+.jpp__path:focus-visible, .jpp__newname:focus-visible{ outline: 2px solid var(--accent, #4fd8ff); outline-offset: 1px; }
+
+.jpp__error{ padding: 2px 14px; color: #ff5f6d; font-size: 0.8rem; }
+.jpp__error:empty{ display: none; }
+
+.jpp__foot{ display: flex; align-items: center; gap: 8px; padding: 10px 14px; border-top: 1px solid var(--accent-dim, #164a63); }
+.jpp__spacer{ flex: 1 1 auto; }
+
+.jpp__btn{
+  padding: 6px 14px; border-radius: 4px; cursor: pointer;
+  border: 1px solid var(--accent-dim, #164a63); background: transparent; color: var(--text-dim, #85a2b6);
+  font: inherit; font-weight: 500; white-space: nowrap;
+}
+.jpp__btn:hover:not(:disabled){ color: var(--text, #e6f5fc); border-color: var(--accent-soft, #2ea9d6); }
+.jpp__btn:focus-visible{ outline: 2px solid var(--accent, #4fd8ff); outline-offset: 2px; }
+.jpp__btn:disabled{ opacity: 0.5; cursor: not-allowed; }
+.jpp__btn--main{ background: var(--accent, #4fd8ff); border-color: var(--accent, #4fd8ff); color: var(--bg, #070d16); font-weight: 600; }
+.jpp__btn--main:hover:not(:disabled){ background: var(--accent-soft, #2ea9d6); border-color: var(--accent-soft, #2ea9d6); color: var(--bg, #070d16); }
+.jpp__btn--main{ max-width: 240px; overflow: hidden; text-overflow: ellipsis; }
+
+/* narrow: the places go above the list as one scrolling row; the facts column is dropped */
+@media (max-width: 560px){
+  .jpp-backdrop{ padding: 6px; }
+  .jpp__body{ grid-template-columns: minmax(0, 1fr); grid-template-rows: auto minmax(0, 1fr); }
+  .jpp__places{ border-right: none; border-bottom: 1px solid var(--accent-dim, #164a63); padding: 0 0 6px; overflow-x: auto; overflow-y: hidden; }
+  .jpp__places-list{ flex-direction: row; }
+  .jpp__place{ width: auto; }
+  .jpp__facts{ display: none; }
+  .jpp__foot{ flex-wrap: wrap; }
+}
+
+@media (prefers-reduced-motion: no-preference){
+  .jpp{ animation: jpp-in 140ms ease-out; }
+  @keyframes jpp-in{ from{ opacity: 0; transform: translateY(8px); } to{ opacity: 1; transform: none; } }
+}

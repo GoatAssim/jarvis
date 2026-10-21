@@ -1603,6 +1603,18 @@ $("#addInput").addEventListener("input", () => {
 $("#addInput").addEventListener("keydown", (e) => {
   if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) { e.preventDefault(); $("#addForm").requestSubmit(); }
 });
+// N14: Browse... beside "Save in folder". The picker (web/public/path-picker.js) only fills the box; the hub still
+// checks the folder when the download is added (library rules, the confirmation outside the library).
+$("#addDestBrowse").addEventListener("click", async () => {
+  const picker = window.JarvisPathPicker;
+  if (!picker || typeof picker.open !== "function") { toast("The folder picker isn't available. Type the folder instead.", "warn"); return; }
+  const box = $("#addDest");
+  const libraryRoot = (S.summary && S.summary.library_root) || "";
+  const chosen = await picker.open({ kind: "folder", title: "Save in folder", start: picker.startFor(box.value, libraryRoot) });
+  if (chosen === null || chosen === undefined) { box.focus(); return; }
+  box.value = picker.insideRoot(libraryRoot, chosen) || chosen;          // inside the library: just the sub-folder
+  box.focus();
+});
 $("#search").addEventListener("input", (e) => { S.search = e.target.value; render(); });
 $("#groupBy").addEventListener("change", (e) => { S.groupBy = e.target.value; savePrefs(); render(); });
 $("#refresh").addEventListener("click", () => { S.lastError = ""; schedule(10); });

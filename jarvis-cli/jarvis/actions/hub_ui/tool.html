@@ -76,7 +76,10 @@
             <summary>Options</summary>
             <div class="field">
               <label class="field__label" for="addDest">Save in folder</label>
-              <input type="text" id="addDest" spellcheck="false" placeholder="e.g. Manuals, or D:\Games (optional)">
+              <div class="inline">
+                <input type="text" id="addDest" spellcheck="false" placeholder="e.g. Manuals, or D:\Games (optional)">
+                <button type="button" class="btn btn--sm" id="addDestBrowse" aria-label="Browse for the folder">Browse...</button>
+              </div>
               <div class="field__help" id="addDestHelp">A folder inside your downloads library, or a full path (you'll be asked to confirm one outside the library). Leave empty to use the folder for its file type.</div>
             </div>
             <div class="field">

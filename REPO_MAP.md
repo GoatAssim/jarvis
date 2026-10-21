@@ -401,6 +401,11 @@ jarvis-cli/jarvis/
                           the Settings read. Reads and four row-only writes (refused when unattended); no model tool
                           reaches it.
                           Tests: test_hub_admin.py, test_download_status_card.py
+    hub_browse.py         Download Hub (N14): the folder / file listing behind the web picker (`hub-admin browse`) and its one-level
+                          `mkdir` (the picker's New folder); reached only through hub_admin, so both refuse an unattended process.
+                          Names and kinds only (size and date for files), never contents; hidden / system entries left out, capped,
+                          network paths refused, no tree walking. The hub still validates a chosen path when the field is saved.
+                          Tests: test_hub_browse.py
     hub/                  Download Hub core (import-light; see hub/__init__.py for the module map and where
                           later phases plug in): store.py (sqlite, WAL), states.py (what a row may say),
                           netguard.py (SSRF guard), naming.py, router.py, service.py, daemon.py (scheduler,
@@ -444,6 +449,7 @@ web/
     public/agent-panel.js (+ .css)   the Focus layout's Agent side panel: while dev_agent / code_agent runs it shows the codebase root, the file being worked on, a file tree with a status per file, and a short log. Fed by app.js from the existing JARVIS_MEDIA dev_agent events (no server route); reducer + tree builder in JarvisAgentPanel._pure
     public/custom-tools.js       theme gallery for the Skin modal (the old Custom Tools panel moved to tool-manager.js)
     public/download-status-card.js/.css  Download Hub (phase 8): the live in-chat download card (render / restore); follows /api/hub/stream, falls back to /api/hub/card; its formatting half is a copy of the panel's (tests/verify_hub_panel.js checks they agree)
+    public/path-picker.js/.css  Download Hub (N14): window.JarvisPathPicker.open({kind, start, title, extensions}) -> full path or null; the server lists the folders (POST /api/hub/browse, /api/hub/browse/new-folder), the page only draws them (names as text); Tests: verify_path_picker.js, verify_hub_browse_routes.js, test_hub_browse.py
     public/downloads-settings.js     Download Hub (phase 8): Settings > Downloads, registered through window.JarvisSettingsSections; rows come from /api/hub/settings (what is writable), writes go through dl_prefs / dl_settings
     public/settings.js (+ .css)      L.43: the Settings modal (replaced the Skin modal): section rail, search, AI / Layout / Notifications / Tools / Integrations / Memory / About panes and the Advanced tab (Files, Tunables, Plumbing, History); talks only to /api/settings/*; the Skin section stays app.js's
     public/test-checklist.js     Menu -> Test Checklist (UI, browser-only results)

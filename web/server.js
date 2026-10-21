@@ -2966,6 +2966,24 @@ app.post("/api/hub/stremio/paths", requireHubWrite, requireJarvis, (req, res) =>
   server_url: hubText(req.body?.server_url, 80), dry_run: req.body?.dry_run === true,
 }, 30000));
 
+// N14, the folder / file picker (jarvis/hub_browse.py owns the rules). The answer is a listing of the owner's disk,
+// so both routes are POST, need a loopback Host AND the X-Jarvis-Hub header (another web page cannot make the
+// browser ask), and the CLI refuses an unattended process. `browse` only lists (names, kinds, a size and a date for
+// files, never contents); `new-folder` makes one folder, one level, with a plain name. No model tool reaches them.
+// The hub still validates a chosen path when the field is saved; nothing here decides what is allowed.
+function requireHubBrowse(req, res, next) { return requireHubWrite(req, res, next); }
+const HUB_BROWSE_KINDS = new Set(["folder", "file"]);
+app.post("/api/hub/browse", requireHubBrowse, requireJarvis, (req, res) => {
+  const body = req.body && typeof req.body === "object" ? req.body : {};
+  const kind = HUB_BROWSE_KINDS.has(body.kind) ? body.kind : "folder";
+  const extensions = Array.isArray(body.extensions) ? body.extensions.filter((e) => typeof e === "string").slice(0, 24).map((e) => e.slice(0, 20)) : [];
+  return hubAdmin(res, "browse", { path: hubText(body.path, 1100), kind, extensions, hidden: body.hidden === true }, 15000);
+});
+app.post("/api/hub/browse/new-folder", requireHubBrowse, requireJarvis, (req, res) => {
+  const body = req.body && typeof req.body === "object" ? req.body : {};
+  return hubAdmin(res, "mkdir", { parent: hubText(body.parent, 1100), name: hubText(body.name, 200) }, 15000);
+});
+
 // The push stream: ONE `jarvis hub-admin watch` process feeds every open panel and chat card. It starts
 // with the first subscriber and stops ten seconds after the last one leaves. A subscriber may follow only
 // some downloads (?ids=a,b or ?group=g, what a chat card does); without a filter it gets everything.

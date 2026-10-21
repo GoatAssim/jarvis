@@ -577,6 +577,8 @@ actually render Markdown):
 
     node tests/verify_math_rendering.js
     node tests/verify_hub_panel.js                # Download Hub panel: pure helpers + "never builds markup from data" greps
+    node tests/verify_path_picker.js              # Download Hub N14: the folder / file picker's pure helpers + "text only, no browser dialogs" greps
+    node tests/verify_hub_browse_routes.js        # Download Hub N14: the two picker routes' guards (loopback Host, X-Jarvis-Hub, Origin) and payload clamps, cut from the real web/server.js
     node tests/verify_thread_extras_collapse.js   # BUG-5/6: answered confirmations are one line, one card per dev_agent job, cards before the reply on reload, saved thinking follows the toggle; no npm install
     node tests/verify_ask_trace_replay.js   # also: the Raw/Summary console views (buildAskTraceViews) and the saved-as-drawn card merge (mergeDisplayWithExtras)
     node tests/verify_saved_as_shown_routes.js   # POST /api/console/:id/trace and POST /api/conversations/:id/display (validation, stdin payload, size caps)
@@ -1022,6 +1024,13 @@ Renaming to a name already in use IS the merge (there is no separate merge opera
 `server.js` (`/api/command-categories/*`) with the shared JS rules. The two vocabularies stay separate, so
 neither path may touch the other. The dialog is `public/category-manager.js` (one modal at a time, built
 from `JarvisUI.choose/prompt/confirm`).
+
+## The folder / file picker (N14) - rules for anything that calls it
+
+- A page cannot learn a picked path, so `jarvis/hub_browse.py` lists folders (`hub-admin browse`) and `web/public/path-picker.js` draws them. Call `JarvisPathPicker.open({kind: "folder" | "file", start, title, extensions})`; it resolves the full path or `null`. Use `JarvisPathPicker.startFor(fieldText, libraryRoot)` for `start` and `JarvisPathPicker.insideRoot(libraryRoot, picked)` to turn a pick inside the library into a sub-folder.
+- The picker only FILLS a text box. Every field keeps its box (people paste paths), and the hub still validates the path when the field is saved (library rules, the confirmation outside the library). Never skip that check because "the picker chose it".
+- Listing is read-only and one folder deep: names and kinds, a size and date for files, never contents, no tree walking, no model tool. `browse` and `mkdir` go through `hub_admin` and both refuse an unattended process; the routes are POST with a loopback Host and the `X-Jarvis-Hub` header (`requireHubBrowse`). A new picker route copies that, it does not weaken it.
+- File and folder names come off the disk: they reach the page through `textContent` only. `tests/verify_path_picker.js` greps for markup assignment and browser dialogs.
 
 ## Patch conventions
 

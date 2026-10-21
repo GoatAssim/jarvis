@@ -42,6 +42,10 @@ _UNATTENDED_MESSAGE = "The Download Hub's History and queue controls can only be
 READ_OPS = ("card", "list", "settings", "history", "file", "thumb", "stremio_status")
 WRITE_OPS = ("history_remove", "history_clear", "redownload", "reorder", "stremio_save")
 OPS = READ_OPS + WRITE_OPS
+# N14 (the path picker, jarvis/hub_browse.py): list one folder, and make one new folder.  Neither reads a file's
+# contents.  Both are for the Jarvis page's own picker, so both refuse an unattended process (below).
+PICKER_OPS = ("browse", "mkdir")
+OPS = OPS + PICKER_OPS
 
 MAX_CARD_IDS = 8
 MAX_IDS = 200
@@ -595,6 +599,8 @@ def admin(op, request=None, store=None):
         why = unattended_reason()
         if why:
             return _err(why, code="unattended")
+    if op in PICKER_OPS and unattended_reason():
+        return _err("The folder picker can only be used from the Jarvis page itself.", code="unattended")
     try:
         if op == "card":
             return card_payload(ids=request.get("ids"), group=request.get("group"),
@@ -621,6 +627,12 @@ def admin(op, request=None, store=None):
             return stremio_status(request, store)
         if op == "stremio_save":
             return stremio_save(request, store)
+        if op == "browse":
+            from . import hub_browse
+            return hub_browse.browse(request, store=store)
+        if op == "mkdir":
+            from . import hub_browse
+            return hub_browse.make_folder(request)
     except Exception as exc:  # noqa: BLE001 - a panel call must answer, not crash the page
         return _err("Download Hub error: %s" % str(exc)[:160])
     return _err("unknown op")
