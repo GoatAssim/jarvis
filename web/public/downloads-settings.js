@@ -102,6 +102,21 @@
     return GROUP_ORDER.filter((g) => groups[g]).map((g) => ({ group: g, rows: groups[g] }));
   }
 
+  // The provider settings this page edits (a provider's own `settings` block, as `dl_providers` reports it with
+  // the defaults filled in).  Today that is Steam's update-size threshold (track C): a number of GB, 0 = every
+  // update.  A row exists only when the hub reported the key, so an older hub shows nothing rather than a dead row.
+  // The value is written with dl_provider_prefs, which asks first; the hub's validator owns the range.
+  const PROVIDER_SETTING_FIELDS = {
+    steam: [{ key: "notify_min_update_gb", label: "Steam: announce updates of at least", type: "float", min: 0, unit: "GB",
+      help: "A Steam update smaller than this stays quiet; 0 = announce every update. An update whose size isn't known stays quiet unless this is 0." }],
+  };
+  function providerSettingRows(p) {
+    const fields = PROVIDER_SETTING_FIELDS[String((p && p.id) || "")] || [];
+    const have = (p && p.settings && typeof p.settings === "object") ? p.settings : {};
+    return fields.filter((f) => typeof have[f.key] === "number").map((f) => Object.assign({}, f, { value: have[f.key] }));
+  }
+  function providerSettingArgs(id, key, value) { return { id: id, settings: { [key]: value } }; }
+
   function hostsToText(list) { return Array.isArray(list) ? list.join("\n") : ""; }
   function textToHosts(text) {
     return String(text || "").split(/[\n,;]+/).map((t) => t.trim()).filter(Boolean);
@@ -335,6 +350,14 @@
         ui.flash(onStatus, "Saved", "ok");
       }, onStatus);
       rows.push(ui.rowShell(p.label || p.id, p.read_only ? "Shows its downloads here; has no controls." : "", on.el, onStatus));
+      providerSettingRows(p).forEach((f) => {
+        const stStatus = h("span", { class: "prefs-row__status" });
+        const ctl = ui.makeControl({ type: f.type, min: f.min, unit: f.unit }, f.value, async (v) => {
+          await runHubTool(PROVIDER_TOOL, providerSettingArgs(p.id, f.key, v));       // the hub's own error text reaches the row as it is
+          ui.flash(stStatus, "Saved", "ok");
+        }, stStatus);
+        rows.push(ui.rowShell(f.label, f.help, ctl.el, stStatus));
+      });
       if (typeof p.interval_s === "number") {
         const ivStatus = h("span", { class: "prefs-row__status" });
         const iv = ui.makeControl({ type: "float", min: 0.5, unit: "seconds" }, p.interval_s, async (v) => {
@@ -350,7 +373,7 @@
   const section = {
     id: "downloads", label: "Downloads", title: "Downloads",
     lede: "Where downloads go, how fast and how many at once, what happens when one finishes, and which events notify you. The Downloads panel (Menu > Downloads) shows and controls the downloads themselves.",
-    terms: "downloads download hub folder library speed limit bandwidth schedule window concurrency stremio yt-dlp video audio torrent steam provider notify notification finished after retry stall private host extension",
+    terms: "downloads download hub folder library speed limit bandwidth schedule window concurrency stremio yt-dlp video audio torrent steam provider notify notification finished after retry stall private host extension steam update size threshold gb",
     build: build,
   };
 
@@ -359,6 +382,7 @@
     FIELDS: FIELDS, planRows: planRows, extraRows: extraRows, toolFor: toolFor, getPath: getPath, hostsToText: hostsToText,
     textToHosts: textToHosts, daysChoice: daysChoice, windowsToModel: windowsToModel, modelToWindows: modelToWindows,
     extToModel: extToModel, modelToExt: modelToExt, isEventPath: isEventPath,
+    PROVIDER_SETTING_FIELDS: PROVIDER_SETTING_FIELDS, providerSettingRows: providerSettingRows, providerSettingArgs: providerSettingArgs,
   } };
   if (typeof module !== "undefined" && module.exports) module.exports = global.JarvisDownloadsSettings;
 })(typeof window !== "undefined" ? window : globalThis);

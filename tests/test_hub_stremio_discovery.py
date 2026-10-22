@@ -188,6 +188,29 @@ r = tools.tool_stremio_library({})
 check("no account key says how to set it up", r["ok"] is False and "auth_key" in r["error"])
 
 # ---- the declarations
+# ---- brief 18: the exact name wins; "no addon offers streams" is a plain sentence (hand-built results, no network)
+def _row(name, score):
+    return {"id": "tt" + name, "name": name, "score": score}
+
+
+check("one exact name wins even when a longer title is close behind (the real 1.0 vs 0.933 case)",
+      discovery.is_clear_winner([_row("a", 1.0), _row("b", 0.933), _row("c", 0.85)]))
+check("two exact names still ask", not discovery.is_clear_winner([_row("a", 1.0), _row("b", 1.0)]))
+check("no exact name and a small gap still asks", not discovery.is_clear_winner([_row("a", 0.93), _row("b", 0.85)]))
+check("the old gap rule still wins without an exact name", discovery.is_clear_winner([_row("a", 0.95), _row("b", 0.5)]))
+check("an exact name that is not first (hand-ordered) is not trusted", not discovery.is_clear_winner([_row("a", 0.933), _row("b", 1.0)]))
+sentence = discovery.no_streams_sentence("series", "tt0000001")
+check("the no-streams sentence is plain and says what to do", "no installed addon offers streams for imdb ids (type series)" in sentence and "Add an addon" in sentence)
+check("it names no address, no key and no path", "http" not in sentence and "key" not in sentence.replace("account key", "") and "/" not in sentence.replace("addons.urls", "").replace("~/.jarvis/stremio.json", ""))
+cfg.write_text(json.dumps({"addons": {"urls": [BASE + "/cat/manifest.json", BASE + "/str/manifest.json"]}}))
+_pair = A.installed(A.Net(allow=["127.0.0.1"]))[0]
+cfg.write_text(json.dumps({"addons": {"urls": [BASE + "/cat/manifest.json"]}}))
+_cat_only = A.installed(A.Net(allow=["127.0.0.1"]))[0]
+check("offers_streams: true for the fake pair; false for no addon at all",
+      len(_pair) == 2 and discovery.offers_streams(_pair) and not discovery.offers_streams([]))
+check("offers_streams looks at the type and id too: the catalog addon offers series streams but not a made-up type",
+      discovery.offers_streams(_cat_only, "series", "tt0000001") and not discovery.offers_streams(_cat_only, "channel", "tt0000001"))
+
 check("the tools are declared in the stremio group, with schemas for every one",
       tools.TOOL_GROUP == "stremio" and {s["name"] for s in tools.TOOL_SCHEMAS} == set(tools.TOOLS))
 check("only the account write is confirm-gated here", tools.TOOL_CONFIRM_REQUIRED == {"stremio_mark_watched"})

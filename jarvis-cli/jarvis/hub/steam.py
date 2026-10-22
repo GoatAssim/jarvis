@@ -15,8 +15,22 @@ Honesty about what is known (plan P2, P3).  These are Steam's undocumented files
 names are stable in practice but the `StateFlags` bits are community knowledge, so they are
 HINTS.  The mapping below is one small table (`classify`) with fixtures in the tests; if a Steam
 update changes the files, only this module is wrong, and the hub says "no manifests found"
-rather than showing an empty list.  Speed and ETA are not stored by Steam: they are left out of
-the report so the hub derives them from successive byte counts (shown with "≈").
+rather than showing an empty list.
+
+Steam does NOT write BytesDownloaded while it downloads (N5).  A real run (2026-10-21, Windows,
+one PC, 145 s) saw the manifest rewritten only every 20 to 50 s, while Steam's downloading folder
+and its disk writes were changing all the time.  So:
+
+  * a byte count from the manifest is "what Steam last reported, N s ago", never a live number:
+    a running row carries no percent, no done-bytes, no speed and no ETA (speed_bps / eta_s are
+    sent as None on purpose, so the hub does not derive a "speed" from the size of one burst);
+  * a running row is never "stalled" from the manifest alone.  Two more signals are read, both
+    read-only and cheap: the size / file count / newest-file time of steamapps/downloading/<id>
+    (and temp/<id>) in the game's own library, and the disk-write counter of Steam's processes
+    (psutil only).  An unreadable signal is "unavailable", never "flat";
+  * "stalled" needs the manifest bytes AND every available second signal flat for STALL_SECONDS,
+    and at least one second signal available.  A signal that says "moving" can only keep the row
+    on "downloading" a little longer; it can never cause a stall.
 
   bits seen: 2 UpdateRequired, 4 FullyInstalled, 256 UpdateRunning, 512 UpdatePaused,
              1024 UpdateStarted, 1048576 Downloading, 2097152 Staging, 4194304 Committing
@@ -28,8 +42,9 @@ the report so the hub derives them from successive byte counts (shown with "≈"
                 a bare 2, instead of a row stuck on "paused" with no percent that later "finishes"
                 100% of nothing.  A download that was already listed and is then paused stays.
   installing    staging / committing set (a phase, not a download: the bar shows stage bytes)
-  downloading   256 / 1024 / 1048576 set and the byte count moved since the last look
-  stalled       ... and it did not move for 3 looks in a row
+  downloading   256 / 1024 / 1048576 set (the message says what Steam last reported and how old it is)
+  stalled       ... and nothing moved for STALL_SECONDS: manifest bytes, downloading folder and Steam's
+                disk writes (every one of them that can be read, at least one of them readable)
   queued        ... but nothing has been fetched yet (Steam's own queue)
   done           it was being fetched and Steam now says fully installed (4): reported once
   not listed    everything else, including a game that merely has an update PENDING (2 alone):
@@ -43,6 +58,7 @@ error and writes nothing), never failed.
 import os
 import re
 import sys
+import time
 from pathlib import Path
 
 from . import providers, states
@@ -56,7 +72,16 @@ FLAG_STAGING = 2097152
 FLAG_COMMITTING = 4194304
 _RUNNING = FLAG_UPDATE_RUNNING | FLAG_UPDATE_STARTED | FLAG_DOWNLOADING
 _STAGING = FLAG_STAGING | FLAG_COMMITTING
-STALL_LOOKS = 3
+# N5.  steam-checks.py (standard library only, imports nothing from the hub) keeps copies of
+# STALL_SECONDS and of WRITES_MIN_BYTES_PER_S (as IO_NOISE_BYTES per 2 s tick);
+# tests/test_hub_steam_alive.py fails if the copies drift apart.
+STALL_SECONDS = 60.0              # manifest and every readable second signal flat this long = stalled
+LOOK_GAP_SECONDS = 15.0           # a longer pause between two looks restarts every "flat since" timer
+WRITES_MIN_BYTES_PER_S = 32 * 1024  # Steam's writes below this are noise, not a download
+DIR_MAX_FILES = 4000              # downloading/<id> bigger than this: the folder signal is unavailable
+DIR_MAX_DEPTH = 8                 # ... and so is one nested deeper than this (never a half-read "flat")
+STEAM_PROCESS_NAMES = frozenset((
+    "steam.exe", "steamwebhelper.exe", "steamservice.exe", "steam", "steam_osx", "steamwebhelper"))
 MAX_MANIFESTS = 400
 MAX_FILE_BYTES = 256 * 1024
 
@@ -125,14 +150,143 @@ def parse_libraries(text):
     return out
 
 
+# --------------------------------------------------------------------------- second signals (N5)
+
+def read_folder_signal(library, appid, max_files=DIR_MAX_FILES, max_depth=DIR_MAX_DEPTH):
+    """What is in steamapps/downloading/<appid> and steamapps/temp/<appid> of the game's own library.
+
+    -> {"bytes", "files", "newest_mtime"} (summed over both folders), or None = UNAVAILABLE: neither
+    folder exists, a read failed, or the tree is bigger than the caps (a half-read folder must never
+    look "flat").  Read-only, never follows links, stops at the caps, so one look stays cheap."""
+    total = {"bytes": 0, "files": 0, "newest_mtime": 0.0}
+    found = False
+    try:
+        for sub in ("downloading", "temp"):
+            root = Path(library) / "steamapps" / sub / str(appid)
+            if not root.is_dir():
+                continue
+            found = True
+            stack = [(str(root), 0)]
+            while stack:
+                here, depth = stack.pop()
+                with os.scandir(here) as entries:
+                    for entry in entries:
+                        if entry.is_symlink():
+                            continue
+                        if entry.is_dir(follow_symlinks=False):
+                            if depth + 1 > max_depth:
+                                return None
+                            stack.append((entry.path, depth + 1))
+                            continue
+                        stat = entry.stat(follow_symlinks=False)
+                        total["files"] += 1
+                        if total["files"] > max_files:
+                            return None
+                        total["bytes"] += stat.st_size
+                        total["newest_mtime"] = max(total["newest_mtime"], stat.st_mtime)
+    except (OSError, ValueError):
+        return None
+    return total if found else None
+
+
+def read_steam_writes():
+    """Total bytes written so far by Steam's processes, read with psutil only (no PowerShell, no
+    subprocess).  None = UNAVAILABLE: no psutil, no readable process, or the platform has no counter."""
+    try:
+        import psutil
+    except ImportError:
+        return None
+    total, readable = 0, 0
+    try:
+        for proc in psutil.process_iter(["name"]):
+            if (proc.info.get("name") or "").lower() not in STEAM_PROCESS_NAMES:
+                continue
+            try:
+                total += int(proc.io_counters().write_bytes)
+                readable += 1
+            except (psutil.Error, AttributeError, OSError, ValueError):
+                continue
+    except Exception:  # noqa: BLE001 - whatever went wrong, "can't tell" is the honest answer
+        return None
+    return total if readable else None
+
+
+def _signal_moved(name, before, now_value, seconds):
+    """Did one second signal change between two looks?  (A signal that moved can only keep a row
+    on "downloading", so every doubt here is answered "moved".)"""
+    if name == "folder":
+        return (now_value["bytes"] != before["bytes"] or now_value["files"] != before["files"]
+                or now_value["newest_mtime"] > before["newest_mtime"])
+    # writes: a counter that went DOWN (a Steam process ended) is a change too
+    return now_value < before or now_value - before > WRITES_MIN_BYTES_PER_S * max(0.0, seconds)
+
+
+def _look(memory, now, signals):
+    """Record this look's second signals in the app's memory.
+
+    `signals` is {"folder": snapshot or None, "writes": total or None}; None = unavailable.
+    Returns {"folder": seconds since it last moved or None, "writes": same}.  The first look, a
+    look after a gap longer than LOOK_GAP_SECONDS, a signal that was unavailable a moment ago and
+    a clock that jumped back all count as "moved just now": flat is only ever PROVEN by watching."""
+    signals = signals if isinstance(signals, dict) else {}
+    before_at = memory.get("look_at")
+    gap = None if before_at is None else now - before_at
+    restart = gap is None or gap < 0 or gap > LOOK_GAP_SECONDS
+    flat = {}
+    for name in ("folder", "writes"):
+        value = signals.get(name)
+        before = memory.get(name)
+        memory[name] = value
+        if value is None:
+            flat[name] = None
+            continue
+        if restart or before is None or _signal_moved(name, before, value, gap):
+            memory[name + "_moved_at"] = now
+        flat[name] = now - memory.get(name + "_moved_at", now)
+    memory["look_at"] = now
+    return flat
+
+
+_SIGNAL_LABELS = (("folder", "downloading folder"), ("writes", "Steam disk writes"))
+
+
+def _ago(seconds):
+    seconds = max(0, int(seconds))
+    return "%d s" % seconds if seconds < 90 else "%d min" % (seconds // 60)
+
+
+def _size(count):
+    value = float(max(0, count))
+    for unit in ("B", "KB", "MB", "GB"):
+        if value < 1024 or unit == "GB":
+            return ("%d %s" % (value, unit)) if unit == "B" else ("%.1f %s" % (value, unit))
+        value /= 1024.0
+
+
+def _flags_of(manifest):
+    state = (manifest or {}).get("AppState") if isinstance(manifest, dict) and "AppState" in manifest else manifest
+    return _int(_ci(state if isinstance(state, dict) else {}, "StateFlags"))
+
+
+def is_running_download(manifest):
+    """True when classify would read this manifest's second signals (a transfer is running; not
+    paused, not staging).  Lets the provider read the folder only for apps that need it."""
+    flags = _flags_of(manifest)
+    return bool(flags & _RUNNING) and not flags & (FLAG_UPDATE_PAUSED | _STAGING)
+
+
 # --------------------------------------------------------------------------- one manifest -> one row
 
-def classify(manifest, memory=None):
+def classify(manifest, memory=None, now=None, signals=None):
     """One parsed appmanifest -> a row dict for the hub, or None when nothing is being fetched.
 
-    `memory` is this app's {"bytes": last BytesDownloaded, "still": looks without movement,
-    "seen": True once looked at before}; the caller keeps it between polls.  It is updated here.
+    `memory` is this app's dict, kept by the caller between polls and updated here ("bytes" and
+    "staged": the last manifest numbers, "bytes_changed_at": when they last changed, plus what
+    `_look` keeps).  `now` is the poll's clock (seconds); `signals` is {"folder": ..., "writes": ...}
+    as read_folder_signal / read_steam_writes return them (None = unavailable).  Without signals a
+    running row is never "stalled".
     """
+    now = time.time() if now is None else float(now)
     state = (manifest or {}).get("AppState") if isinstance(manifest, dict) and "AppState" in manifest else manifest
     state = state if isinstance(state, dict) else {}
     appid = str(_ci(state, "appid", "")).strip()
@@ -142,10 +296,14 @@ def classify(manifest, memory=None):
     to_dl, got = _int(_ci(state, "BytesToDownload")), _int(_ci(state, "BytesDownloaded"))
     to_stage, staged = _int(_ci(state, "BytesToStage")), _int(_ci(state, "BytesStaged"))
     memory = memory if memory is not None else {}
+    flat = None
     previous = memory.get("bytes")
     moved = previous is None or got != previous or staged != memory.get("staged")
     memory["bytes"], memory["staged"] = got, staged
-    memory["still"] = 0 if moved else memory.get("still", 0) + 1
+    if moved:
+        memory["bytes_changed_at"] = now
+        if previous is not None:
+            memory["bytes_seen_change"] = True      # Steam really rewrote them while we were looking
     first = not memory.get("seen")
     memory["seen"] = True
 
@@ -164,15 +322,25 @@ def classify(manifest, memory=None):
     elif flags & _STAGING:
         row.update(state="postprocessing", phase="installing", percent=_pct(staged, to_stage, 99.0))
     elif flags & _RUNNING:
+        flat = _look(memory, now, signals)
         if to_dl <= 0 and got <= 0:
             row.update(state="queued", message="waiting in Steam's own queue")
-        elif memory["still"] >= STALL_LOOKS and got < to_dl:
-            row.update(state="stalled", message="no progress for %d looks; Steam may be waiting" % memory["still"])
         else:
-            row.update(state="downloading", phase=None)
-        if to_dl > 0:
-            row["bytes_done"], row["bytes_total"] = min(got, to_dl), to_dl
-            row["percent"] = _pct(got, to_dl, 99.0)
+            # What Steam last wrote is a past fact, not a live number: no percent, no done-bytes, no
+            # speed, no ETA.  The explicit Nones keep the hub from deriving a "speed" out of the size
+            # of one burst of bytes (that measures when Steam writes the file, not how fast it goes).
+            row.update(phase=None, percent=None, bytes_done=None, speed_bps=None, eta_s=None)
+            if to_dl > 0:
+                row["bytes_total"] = to_dl
+            available = [v for v in flat.values() if v is not None]
+            quiet = now - memory.get("bytes_changed_at", now)
+            if got < to_dl and available and min([quiet] + available) >= STALL_SECONDS:
+                checked = ["manifest"] + [label for key, label in _SIGNAL_LABELS if flat[key] is not None]
+                row.update(state="stalled", percent=_pct(got, to_dl, 99.0), bytes_done=min(got, to_dl),
+                           message="nothing moved for %s (%s); Steam may be waiting"
+                                   % (_ago(min([quiet] + available)), ", ".join(checked)))
+            else:
+                row.update(state="downloading", message=_last_report(got, to_dl, memory, now, bool(available)))
     else:
         # Not fetching anything now.  If we were watching it and Steam now calls it fully
         # installed, it finished: say so once (a later poll no longer lists it).  Anything else
@@ -185,7 +353,31 @@ def classify(manifest, memory=None):
         return None
     memory["active"] = True
     row["detail"] = [{"label": "App id", "value": appid}, {"label": "Steam flags", "value": str(flags)}]
+    if flat is not None:
+        row["detail"].append({"label": "Other signs of life", "value": "; ".join(
+            "%s %s" % (label, "unavailable" if flat[key] is None else "last moved %s ago" % _ago(flat[key]))
+            for key, label in _SIGNAL_LABELS)})
     return row
+
+
+def _last_report(got, to_dl, memory, now, have_signals):
+    """The honest sentence for a running row whose only numbers are the manifest's."""
+    if got <= 0:
+        text = "Steam hasn't reported any progress yet"
+    else:
+        age = now - memory.get("bytes_changed_at", now)
+        if memory.get("bytes_seen_change"):
+            when = "reported %s ago" % _ago(age)
+        elif age >= 1:
+            when = "reported at least %s ago" % _ago(age)
+        else:
+            when = "as Steam had written it when Jarvis first looked"
+        sizes = "%.1f %% (%s of %s)" % (_pct(got, to_dl, 99.0), _size(got), _size(to_dl)) if to_dl > 0 else _size(got)
+        text = "%s, %s" % (sizes, when)
+    text += "; Steam isn't reporting live progress"
+    if not have_signals:
+        text += " and Jarvis can't see any other sign of activity"
+    return text
 
 
 def _pct(done, total, ceiling):
@@ -291,15 +483,18 @@ def read_manifests(libraries, cache=None):
     return out
 
 
-def parse_manifests(files, memory=None):
+def parse_manifests(files, memory=None, now=None, signals=None):
     """The pure function the plan asks for: parsed manifests in, rows out.
 
     `files`: {appid: (library, installdir, parsed manifest)} as read_manifests returns.
+    `now`: the poll's clock; `signals`: {appid: {"folder": ..., "writes": ...}} (see classify).
     Returns [row] for what is being fetched; install folders are filled in as `dest`."""
     memory = memory if memory is not None else {}
+    now = time.time() if now is None else now
+    signals = signals if isinstance(signals, dict) else {}
     rows = []
     for appid, (lib, installdir, parsed) in sorted(files.items()):
-        row = classify(parsed, memory.setdefault(appid, {}))
+        row = classify(parsed, memory.setdefault(appid, {}), now, signals.get(appid))
         if row is None:
             continue
         if installdir:
@@ -331,6 +526,8 @@ class SteamProvider(providers.BuiltinProvider):
         self.root_override = None          # tests
         self.candidates = None             # tests
         self.is_running = steam_running    # tests
+        self.read_folder = read_folder_signal   # tests: (library, appid) -> snapshot or None
+        self.read_writes = read_steam_writes    # tests: () -> bytes written so far or None
         self._memory, self._cache = {}, {}
         self._active = False
 
@@ -353,7 +550,28 @@ class SteamProvider(providers.BuiltinProvider):
     def idle(self, store):
         return not self._active
 
-    def poll(self, store, now):
+    def _signals(self, files):
+        """The second signals, read only for the apps that are running a transfer right now (the poll
+        runs every ~3 s, so an idle Steam costs nothing).  Any failure = unavailable (None)."""
+        out, writes, read = {}, None, False
+        for appid, (lib, _installdir, parsed) in files.items():
+            if not is_running_download(parsed):
+                continue
+            if not read:
+                read = True
+                try:
+                    writes = self.read_writes()
+                except Exception:  # noqa: BLE001
+                    writes = None
+            try:
+                folder = self.read_folder(lib, appid)
+            except Exception:  # noqa: BLE001
+                folder = None
+            out[appid] = {"folder": folder, "writes": writes}
+        return out
+
+    def poll(self, store, now=None):
+        now = time.time() if now is None else now
         steam, libs = find_libraries(self._root(store), self.candidates)
         if not steam:
             return {"error": "Steam wasn't found (set its folder with dl_provider_prefs, or JARVIS_STEAM_ROOT)"}
@@ -362,7 +580,7 @@ class SteamProvider(providers.BuiltinProvider):
             return {"error": "no appmanifest files found in %d Steam librar%s" % (len(libs), "y" if len(libs) == 1 else "ies")}
         for gone in set(self._memory) - set(files):
             self._memory.pop(gone, None)
-        rows = parse_manifests(files, self._memory)
+        rows = parse_manifests(files, self._memory, now, self._signals(files))
         self._active = bool(rows)
         if rows and not self.is_running():
             self._active = False

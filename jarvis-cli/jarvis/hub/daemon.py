@@ -49,6 +49,7 @@ HOUSEKEEPING_EVERY = 5.0
 DEMO_EVERY = 1.0
 SETTINGS_TTL = 2.0
 PROVIDER_SYNC_EVERY = 60.0
+PRUNE_EVERY = 3600.0          # retention: history rows older than retention.keep_history_days go
 EXIT_ALREADY_RUNNING = 3
 
 
@@ -112,6 +113,7 @@ class HubDaemon:
         self._settings_at = 0.0
         self._last_housekeeping = 0.0
         self._last_demo = 0.0
+        self._last_prune = None              # None = not yet this run: start_up prunes once
         self._notifier = notify.Dispatcher(self.store, deliver=deliver, clock=clock)
         self._recent_opens = collections.deque()
         self._rates, self._rates_key, self._rates_at = {}, None, 0.0
@@ -201,6 +203,7 @@ class HubDaemon:
         for name, why in engines.LOAD_ERRORS.items():
             log.error("engine module %s failed to load: %s", name, why)
         self._sync_providers()
+        self._prune_history()
 
     def tick(self):
         self._reap()
@@ -309,6 +312,32 @@ class HubDaemon:
         flagged = self.store.mark_stale(stale_after=float(limits["stale_after_s"]))
         if flagged["stale"] or flagged["unknown"]:
             log.info("provider rows: %d went stale, %d became unknown", flagged["stale"], flagged["unknown"])
+        self._settle_unknown()
+        if self._last_prune is None or time.monotonic() - self._last_prune >= PRUNE_EVERY:
+            self._prune_history()
+
+    def _settle_unknown(self):
+        """Provider rows that stayed `unknown` for unknown_settle_hours settle into `cancelled`."""
+        try:
+            settled = providers.settle_unknown(
+                self.store, self._clock(), providers.settle_hours(self.settings()))
+            if settled:
+                log.info("provider rows: %d gave up waiting (unknown too long): %s",
+                         len(settled), ", ".join(settled[:5]) + (" ..." if len(settled) > 5 else ""))
+        except Exception:  # noqa: BLE001 - housekeeping never stops the tick
+            log.exception("settling unknown provider rows failed")
+
+    def _prune_history(self):
+        """Retention: trim history ROWS older than retention.keep_history_days (0 = keep forever).
+        Never touches a file.  A failure is logged and the tick carries on."""
+        self._last_prune = time.monotonic()
+        try:
+            days = (self.settings().get("retention") or {}).get("keep_history_days")
+            gone = self.store.prune_history(days, now=self._clock())
+            if gone:
+                log.info("retention: removed %d history row(s) older than %s day(s); no file was touched", gone, days)
+        except Exception:  # noqa: BLE001
+            log.exception("pruning the history failed")
 
     def _sync_providers(self, wait=False):
         """Register the providers tool files declared (TOOL_DOWNLOADS) and the built-in ones this

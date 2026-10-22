@@ -147,6 +147,27 @@ textarea { resize: vertical; min-height: 84px; font-family: var(--h-mono); font-
 .rbtn:hover, .rbtn:focus-visible { color: var(--h-text); border-color: var(--h-acc2); background: color-mix(in srgb, var(--h-acc) 12%, transparent); outline: none; }
 .rbtn--danger:hover, .rbtn--danger:focus-visible { color: var(--h-red); border-color: var(--h-red); background: color-mix(in srgb, var(--h-red) 12%, transparent); }
 .rbtn:disabled { opacity: .45; cursor: default; }
+/* The toggle (N1): Pause while it runs, Resume while it is paused.  An icon and a word, always drawn (no hover),
+   at least 32px tall, at the right of the card's top row.  Cancel stays a small separate button below. */
+.tbtn {
+  flex: none; display: inline-flex; align-items: center; justify-content: center; gap: 6px; min-height: 32px; min-width: 32px;
+  font: inherit; font-size: 11.5px; letter-spacing: .03em; cursor: pointer; color: var(--h-text);
+  background: color-mix(in srgb, var(--h-acc) 10%, transparent); border: 1px solid var(--h-acc2); border-radius: 3px; padding: 4px 11px;
+  transition: color .12s, border-color .12s, background .12s;
+}
+.tbtn:hover:not(:disabled), .tbtn:focus-visible { background: color-mix(in srgb, var(--h-acc) 22%, transparent); border-color: var(--h-acc); outline: none; }
+.tbtn:disabled { opacity: .6; cursor: default; }
+.tbtn__i { font-size: 10px; line-height: 1; }
+.tbtn--resume { border-color: var(--h-green); background: color-mix(in srgb, var(--h-green) 12%, transparent); }
+.tbtn--resume:hover:not(:disabled), .tbtn--resume:focus-visible { background: color-mix(in srgb, var(--h-green) 24%, transparent); border-color: var(--h-green); }
+.tbtn--retry { border-color: var(--h-orange); background: color-mix(in srgb, var(--h-orange) 10%, transparent); }
+.tbtn--retry:hover:not(:disabled), .tbtn--retry:focus-visible { background: color-mix(in srgb, var(--h-orange) 22%, transparent); border-color: var(--h-orange); }
+.tbtn.is-busy { border-style: dashed; }
+.tbtn--lg { min-height: 36px; padding: 6px 16px; font-size: 12.5px; }
+.pglyph { color: var(--h-dim); font-size: 9px; letter-spacing: -1px; }
+.row__why { margin-top: 6px; padding: 4px 8px; font-size: 11px; line-height: 1.45; color: var(--h-dim); border: 1px dashed var(--h-line2); border-radius: 2px; }
+.detail__actions--top { margin-top: 2px; margin-bottom: 10px; align-items: center; }
+
 .tag { display: inline-block; border: 1px solid var(--h-line); border-radius: 2px; padding: 1px 5px; font-size: 9.5px; letter-spacing: .04em; text-transform: uppercase; color: var(--h-dimmer); }
 .tag--ro { border-style: dashed; }
 .tag--warn { color: var(--h-sec); border-color: var(--h-sec); }
@@ -161,6 +182,7 @@ textarea { resize: vertical; min-height: 84px; font-family: var(--h-mono); font-
 .bar-track.failed .bar-fill { background: var(--h-red); }
 .bar-track.stalled .bar-fill { background: var(--h-orange); }
 .bar-track.paused .bar-fill, .bar-track.unknown .bar-fill { background: var(--h-dimmer); }
+.bar-track.paused { opacity: .6; }
 .bar-track.cancelled { border-style: dashed; }
 .bar-track.cancelled .bar-fill { width: 0 !important; }
 .bar-track.striped .bar-fill, .bar-track.stale .bar-fill {

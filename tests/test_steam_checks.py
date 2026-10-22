@@ -286,11 +286,18 @@ player.join()
 report = (out_dir / "steam-checks-report.txt").read_text(encoding="utf-8")
 timeline_rows = [json.loads(line) for line in (out_dir / "steam-checks-timeline.jsonl").read_text(encoding="utf-8").splitlines()]
 
-check("e2e: a false stall makes the run exit 1 (FAIL), not 0", code == 1, code)
-check("e2e: the false stall is reported as a FAIL", any(s == "FAIL" and "FALSE stall" in t or (s == "FAIL" and "stall of app 620" in t) for s, t in sc2.RESULTS), [r for r in sc2.RESULTS if "stall" in r[1]])
+# N5 (brief 16): the hub no longer says "stalled" from the manifest alone, so the same fake download that
+# used to produce a false stall now produces none: the folder grows, the manifest never changes, the row
+# stays "downloading" and the run has no FAIL.
+check("e2e: no FAIL in the run (the old false stall is gone)", code == 0 and not any(s == "FAIL" for s, t in sc2.RESULTS), [r for r in sc2.RESULTS if r[0] == "FAIL"])
+check("e2e: Jarvis never said 'stalled' while the folder grew", any("never said 'stalled'" in t for s, t in sc2.RESULTS)
+      and not any("stalled" in str((r.get("row") or {}).get("state")) for r in [json.loads(l) for l in (out_dir / "steam-checks-timeline.jsonl").read_text(encoding="utf-8").splitlines()]), [r for r in sc2.RESULTS if "stall" in r[1]])
 check("e2e: '[PASS] stall was recognised' is gone", "stall was recognised" not in report)
 check("e2e: the watch ran its full length", any(s == "PASS" and "full length" in t for s, t in sc2.RESULTS), [r for r in sc2.RESULTS if "watch" in r[1]])
-check("e2e: percent did not rise although the folder grew = FAIL naming N5", any(s == "FAIL" and "N5" in t for s, t in sc2.RESULTS), [r for r in sc2.RESULTS if "percent" in r[1]])
+check("e2e: no percent while the folder grew is an INFO naming N5 (on purpose), not a FAIL", any(s == "INFO" and "on purpose since N5" in t for s, t in sc2.RESULTS) and not any(s == "FAIL" and "percent" in t for s, t in sc2.RESULTS), [r for r in sc2.RESULTS if "percent" in r[1]])
+check("e2e: the downloading rows in the timeline carry the honest message and no percent", any(
+    (r.get("row") or {}).get("state") == "downloading" and "live progress" in str((r.get("row") or {}).get("message")) and (r.get("row") or {}).get("percent") is None
+    for r in timeline_rows), [r.get("row") for r in timeline_rows if r.get("row")][:4])
 check("e2e: the manifest removal was seen as an event", any(r.get("event") == "manifest_removed" and r.get("app") == "620" for r in timeline_rows), [r for r in timeline_rows if "event" in r])
 check("e2e: the N6 record says manifest removed and that Jarvis would mark it unknown", "manifest removed" in report and "'unknown'" in report)
 check("e2e: second signals are in the timeline", any((r.get("sig") or {}).get("dir", {}).get("620", {}).get("moved") for r in timeline_rows))

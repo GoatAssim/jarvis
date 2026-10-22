@@ -191,14 +191,17 @@ def steam_process_running():
 #   io   -- disk-write counters of the Steam processes (psutil, else PowerShell CIM on Windows, else /proc)
 # Everything here only READS.  Nothing starts, stops, freezes or drives Steam.
 
-STALL_REAL_S = 60.0          # N5 wanted: "stalled" only when the second signal is flat over a longer window
+# The next two values are COPIES of the hub's rule (this script imports nothing from the hub at module
+# level and stays standard-library only).  The originals are STALL_SECONDS and WRITES_MIN_BYTES_PER_S
+# in jarvis-cli/jarvis/hub/steam.py; tests/test_hub_steam_alive.py fails if the copies drift apart.
+STALL_REAL_S = 60.0          # == hub STALL_SECONDS: "stalled" only when the manifest and every readable second signal are flat this long
 DIR_FILE_CAP = 20000         # a downloading folder with more files than this is sampled partially
 IO_PROCESS_NAMES = ("steam.exe", "steamwebhelper.exe", "steamservice.exe", "steam", "steamwebhelper")
 LOG_KEYWORDS = ("download", "paus", "resum", "stopp", "cancel", "update", "state changed", "app update",
                 "uninstall", "staging", "commit", "queue", "suspend", "install")
 LOG_LINE_CAP = 6             # lines kept per tick in the timeline
 LOG_LINE_LEN = 200
-IO_NOISE_BYTES = 64 * 1024   # a per-tick write delta below this is not a download (Steam writes small files all the time)
+IO_NOISE_BYTES = 64 * 1024   # == hub WRITES_MIN_BYTES_PER_S (32 KB/s) x this script's default 2 s tick: a smaller write delta is not a download
 
 
 def dir_signal(folder):
@@ -1194,11 +1197,16 @@ def part6_watch(args):
         result("PASS", "a download was reported as 'downloading'")
         rising = [a for a, s in series.items() if len(s) >= 3 and s[-1] > s[0]]
         dir_grew = [a for a, st in sig_stats.items() if st["dir_moved"]]
+        stuck = [a for a in dir_grew if len(series.get(a, [])) >= 3 and series[a][-1] <= series[a][0]]
         if rising:
             result("PASS", "percent rose during the download", "; ".join("%s: %s%% -> %s%%" % (a, series[a][0], series[a][-1]) for a in rising))
-        elif dir_grew:
+        elif stuck:
             result("FAIL", "percent did not rise although the downloading folder grew (this is N5)",
-                   "app(s) %s: Jarvis took progress only from the manifest, which Steam does not write while it downloads" % ", ".join(sorted(dir_grew)))
+                   "app(s) %s: Jarvis showed a percent that stood still while Steam was downloading" % ", ".join(sorted(stuck)))
+        elif dir_grew and not series:
+            result("INFO", "no percent was shown while the downloading folder grew: on purpose since N5",
+                   "Steam does not write progress while it downloads, so a running row says what Steam last reported "
+                   "(and how old that is) in its message instead of a percent that would stand still")
         else:
             result("FAIL", "percent rose during the download", "no app's percent went up (and no second signal moved either)")
         result("INFO", "peak speed derived from manifest byte deltas", "%s/s: NOT a real speed, it measures when Steam wrote the file (N5)" % human(peak_speed))

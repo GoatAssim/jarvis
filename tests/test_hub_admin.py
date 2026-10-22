@@ -174,7 +174,8 @@ def test_thumb_and_file():
     check("an oversize one is refused", hub_admin.resolve_thumb(it["id"], store=st)["ok"] is False)
     check("a bad id is refused without a lookup", hub_admin.resolve_thumb("../etc/passwd", store=st)["ok"] is False and hub_admin.resolve_thumb("nope", store=st)["ok"] is False)
 
-    lib = Path(HOME) / ".jarvis" / "downloads"
+    # the library is wherever the hub says it is (by default ~/Downloads/Jarvis); never a path guessed here
+    lib = hub_settings.library_root(st.get_settings())
     lib.mkdir(parents=True, exist_ok=True)
     inside = lib / "ok.bin"
     inside.write_bytes(b"data")

@@ -59,6 +59,74 @@ function cardActions(row) {
   return rowActions(row).filter((a) => CARD_VERBS.indexOf(a.verb) !== -1);
 }
 
+// ---- N1: the one toggle every card shows, what it says while it works, and why a row has none.
+// The toggle is Pause while a download runs and Resume while it is paused (Start now for one waiting
+// for its start time); a failed or cancelled one gets Retry in the same place.  It is drawn only when the
+// row's own capabilities carry the verb (cardActions), so nothing is invented for a provider that
+// didn't declare it.  The words and icon live here, in one place, for the card and the detail pane.
+const TOGGLE_ICONS = { pause: "\u275A\u275A", resume: "\u25B6", retry: "\u21BB" };
+const DOING = { pause: "Pausing\u2026", resume: "Resuming\u2026", retry: "Retrying\u2026", cancel: "Cancelling\u2026" };
+const SPACE_NOTE = " Space does the same on the selected card.";
+
+// The first of Pause / Resume the row offers; Retry only when it has neither (failed, cancelled).
+function primaryAction(row) {
+  const acts = cardActions(row);
+  const a = acts.find((x) => x.verb === "pause") || acts.find((x) => x.verb === "resume") || acts.find((x) => x.verb === "retry");
+  if (!a) return null;
+  const timed = a.verb === "resume" && !!row.scheduled_at;
+  const label = timed ? "Start now" : a.label;
+  const title = a.verb === "pause" ? "Stop it for now and keep what is already downloaded." + SPACE_NOTE
+    : timed ? "Start it now, without waiting for its start time." + SPACE_NOTE
+      : a.verb === "resume" ? "Start it again from where it stopped." + SPACE_NOTE
+        : "Try it again.";
+  return Object.assign({}, a, { label: label, icon: TOGGLE_ICONS[a.verb] || "", title: title, doing: timed ? "Starting\u2026" : DOING[a.verb] });
+}
+
+// The card's other buttons (Retry on a stalled row, Cancel), in their usual order.
+function secondaryActions(row) {
+  const p = primaryAction(row);
+  return cardActions(row).filter((a) => !p || a.verb !== p.verb);
+}
+
+// What the hub says it is about to do (`row.pending` is the verb it was asked: "pause", "cancel").
+function pendingWord(pending) {
+  const v = String(pending || "").toLowerCase();
+  if (!v) return "";
+  return DOING[v] || (v.charAt(0).toUpperCase() + v.slice(1) + "\u2026");
+}
+
+// Why a row has no Pause / Resume, in words.  null = nothing to explain (it can be paused, or it is
+// finished).  `card` says whether the sentence also goes on the list card (Steam and Playnite) or only
+// in the detail pane (any other read-only tool keeps the text it always had).
+function controlNote(row) {
+  if (!row || row.owner !== "provider" || FINAL.has(row.state)) return null;
+  const caps = Array.isArray(row.capabilities) ? row.capabilities : [];
+  if (caps.indexOf("pause") !== -1 || caps.indexOf("resume") !== -1) return null;
+  const id = String(row.provider || "").toLowerCase();
+  if (id === "steam") {
+    return { title: "Controlled in Steam", card: true,
+      text: row.state === "paused" ? "Steam runs this download; resume it in Steam" : "Steam runs this download; pause it in Steam" };
+  }
+  if (id === "playnite") return { title: "No controls", card: true, text: "Playnite gives no progress or controls" };
+  if (row.read_only) return { title: "Read-only", card: false, text: "This tool reports its progress but can't be paused or cancelled from here." };
+  return null;
+}
+
+// What a control tool's answer tells the person, if anything: { msg, level } or null.  A "Show in
+// folder" that fell back to opening the folder answers ok with a `note`: that is a warning, not a plain
+// success (N2).
+function controlNotice(r, action) {
+  const res = r || {};
+  if (res.declined) return { msg: "Cancelled", level: "info" };
+  if (res.ok === false) return { msg: res.error || "That didn't work", level: "warn" };
+  if (res.note) return { msg: String(res.note), level: "warn" };
+  if (res.pending && res.pending.length) {
+    const what = action && (action.doing || (action.label ? action.label + "\u2026" : ""));
+    return { msg: what || "Working\u2026", level: "info" };
+  }
+  return null;
+}
+
 // "today 3:00 AM", "tomorrow 3:00 AM", "Tue 3:00 AM", "Nov 2 3:00 AM" for a start time (epoch seconds).
 function fmtWhen(sec, nowMs) {
   const s = num(sec);
@@ -709,6 +777,7 @@ const pure = {
   addOptionsFromForm, itemPrefsText, groupByAddTool, addCalls, mergeAddResults,
   ITEM_EVENTS, channelLabel,
   CARD_VERBS, cardActions, fmtWhen, applyNotifyOptions,
+  primaryAction, secondaryActions, pendingWord, controlNote, controlNotice, TOGGLE_ICONS,
   HISTORY_STATES, historyFilter, csvCell, historyCsv, historyJson, historyMeta, providerTone, providerFacts, providerBadge,
   queueOrder, moveInOrder, stepInOrder, canReorder,
 };
@@ -724,6 +793,7 @@ const S = {
   rows: [], summary: null, selected: null, view: "all", source: "", search: "", groupBy: "none",
   detail: null, busy: false, timer: 0, closed: false, lastError: "", hold: 0, holdTimer: 0,
   pendingSelect: "", sig: {},
+  acting: {},                       // id -> { from, doing, until }: a Pause / Resume / Retry just pressed
   hubPrefs: null,
   saving: false,
   tab: "downloads", live: false, liveAt: 0, es: null, liveTimer: 0, dragId: "",
@@ -869,6 +939,37 @@ function renderChips() {
   }
 }
 
+// A button the person just pressed says what is happening ("Pausing...") at once, and keeps saying it
+// until the row's state moves on, the hub reports the request (`row.pending`), or ACTING_MS pass.
+const ACTING_MS = 12000;
+function pruneActing() {
+  const now = Date.now();
+  Object.keys(S.acting).forEach((id) => {
+    const a = S.acting[id];
+    const row = S.rows.find((r) => r.id === id);
+    if (!row || now > a.until || row.state !== a.from) delete S.acting[id];
+  });
+}
+function busyWord(row) {
+  const a = S.acting[row.id];
+  return (a && a.doing) || pendingWord(row.pending);
+}
+
+// The toggle (Pause / Resume / Start now / Retry): an icon and a word, always drawn, never on hover.
+function toggleButton(row, prim, large) {
+  const busy = busyWord(row);
+  const attrs = { type: "button", "aria-label": prim.label + ": " + (row.title || row.id) };
+  if (busy) { attrs.disabled = "disabled"; attrs["aria-busy"] = "true"; }
+  return el("button", {
+    cls: "tbtn tbtn--" + prim.verb + (large ? " tbtn--lg" : "") + (busy ? " is-busy" : ""),
+    title: busy ? busy : prim.title, attrs: attrs,
+    on: { click: (e) => { e.stopPropagation(); e.preventDefault(); runAction(row, prim); } },
+  }, [
+    el("span", { cls: "tbtn__i", text: prim.icon, attrs: { "aria-hidden": "true" } }),
+    el("span", { cls: "tbtn__t", text: busy || prim.label }),
+  ]);
+}
+
 function renderBar(row, big) {
   const look = barLook(row);
   const fill = el("div", { cls: "bar-fill" });
@@ -880,10 +981,14 @@ function renderRow(row) {
   const tone = toneOf(row);
   const meta = [el("span", { cls: "tag", text: sourceLabel(row) })];
   if (row.read_only) meta.push(el("span", { cls: "tag tag--ro", text: "read-only", title: "This tool reports its progress but can't be controlled from here" }));
+  // a paused row carries a pause glyph as well as the word, so it is never taken for a stalled one
+  if (tone === "paused") meta.push(el("span", { cls: "pglyph", text: TOGGLE_ICONS.pause, attrs: { "aria-hidden": "true" } }));
   meta.push(el("span", { cls: "st" + (row.error ? " bad" : ""), text: statusText(row) }));
   const size = sizeText(row);
   if (size) meta.push(el("span", { text: size }));
-  const buttons = cardActions(row).map((a) => el("button", {
+  const prim = primaryAction(row);
+  const why = controlNote(row);
+  const buttons = secondaryActions(row).map((a) => el("button", {
     cls: "rbtn" + (a.danger ? " rbtn--danger" : ""), text: a.label, title: CARD_TITLES[a.verb] || a.label,
     attrs: { type: "button", "aria-label": a.label + ": " + (row.title || row.id) },
     on: { click: (e) => { e.stopPropagation(); e.preventDefault(); e.currentTarget.disabled = true; runAction(row, a); } },
@@ -912,9 +1017,11 @@ function renderRow(row) {
       el("span", { cls: "dot tone-" + tone, attrs: { "aria-hidden": "true" } }),
       el("span", { cls: "row__title", text: row.title || row.id, title: row.title || row.id }),
       el("span", { cls: "row__kind", text: KIND_ICON[row.kind] || KIND_ICON.other, attrs: { "aria-hidden": "true" } }),
+      prim ? toggleButton(row, prim, false) : null,
     ]),
     renderBar(row, false),
     el("div", { cls: "row__meta" }, meta),
+    why && why.card ? el("div", { cls: "row__why", text: why.text }) : null,
     buttons.length ? el("div", { cls: "row__acts" }, buttons) : null,
   ]);
   if (draggable) wireDrag(rowEl, row);
@@ -938,7 +1045,7 @@ function sectionHeader(section) {
 function renderList() {
   const rows = visibleRows();
   $("#count").textContent = countText(rows.length, S.rows.length);
-  if (!changed("list", [rows, S.selected, S.groupBy, S.live])) return;
+  if (!changed("list", [rows, S.selected, S.groupBy, S.live, S.acting])) return;
   const list = $("#list");
   const scroll = list.scrollTop;
   list.textContent = "";
@@ -981,6 +1088,27 @@ function buildDetail(row, full) {
   if (row.read_only) badges.push(el("span", { cls: "tag tag--ro", text: "read-only" }));
   box.appendChild(el("div", { cls: "detail__status" }, badges));
 
+  // The controls come first: Pause / Resume (or Retry) and Cancel, then Open / Show in folder.
+  const actions = rowActions(row);
+  const prim = primaryAction(row);
+  const ctrl = actions.filter((a) => a.verb === "pause" || a.verb === "resume" || a.verb === "retry" || a.verb === "cancel");
+  const files = actions.filter((a) => a.verb === "open" || a.verb === "reveal");
+  const plain = (a) => el("button", {
+    cls: "btn btn--sm" + (a.danger ? " btn--danger" : ""), text: a.label, attrs: { type: "button" },
+    on: { click: () => runAction(row, a) },
+  });
+  const buttons = ctrl.map((a) => (prim && a.verb === prim.verb ? toggleButton(row, prim, true) : plain(a)));
+  files.forEach((a) => buttons.push(plain(a)));
+  if (files.some((a) => a.verb === "open")) {            // a finished file: its folder is one click too
+    buttons.push(el("button", {
+      cls: "btn btn--sm", text: "Open folder", attrs: { type: "button" },
+      on: { click: async () => { const n = controlNotice(await callTool("dl_open", { id: row.id, action: "folder" })); if (n) toast(n.msg, n.level); } },
+    }));
+  }
+  if (buttons.length) box.appendChild(el("div", { cls: "detail__actions detail__actions--top" }, buttons));
+  const why = controlNote(row);
+  if (why) box.appendChild(note("", why.title, why.text));
+
   const bar = renderBar(row, true);
   bar.classList.add("detail__bar");
   box.appendChild(bar);
@@ -990,24 +1118,8 @@ function buildDetail(row, full) {
     el("span", { text: right }),
   ]));
 
-  const actions = rowActions(row);
-  if (actions.length) {
-    const buttons = actions.map((a) => el("button", {
-      cls: "btn btn--sm" + (a.danger ? " btn--danger" : ""), text: a.label, attrs: { type: "button" },
-      on: { click: () => runAction(row, a) },
-    }));
-    if (actions.some((a) => a.verb === "open")) {          // a finished file: its folder is one click too
-      buttons.splice(actions.findIndex((a) => a.verb === "reveal") + 1 || buttons.length, 0, el("button", {
-        cls: "btn btn--sm", text: "Open folder", attrs: { type: "button" },
-        on: { click: async () => { const r = await callTool("dl_open", { id: row.id, action: "folder" }); if (r.ok === false) toast(r.error || "That didn't work", "warn"); } },
-      }));
-    }
-    box.appendChild(el("div", { cls: "detail__actions" }, buttons));
-  }
-
   if (row.error) box.appendChild(note("bad", "It failed", row.error));
   if (isStale(row)) box.appendChild(note("warn", "Not reporting", "Nothing has been heard from this download " + fmtAgo(row.age_s) + ". It may have stopped, or the tool that runs it may be closed. It is not marked failed."));
-  if (row.read_only) box.appendChild(note("", "Read-only", "This tool reports its progress but can't be paused or cancelled from here."));
   if (row.pending) box.appendChild(note("", "Waiting for the hub", "\u201C" + row.pending + "\u201D has been requested and will be applied in a moment."));
 
   const dl = el("dl", { cls: "detail__rows" });
@@ -1067,7 +1179,7 @@ function renderMid() {
   renderDetailPrefs();
   if (!row) { S.sig.detail = ""; return; }
   const full = S.detail && S.detail.id === row.id ? S.detail.item : null;
-  if (!changed("detail", [row, full && full.events, full && full.children, full && full.detail])) return;
+  if (!changed("detail", [row, full && full.events, full && full.children, full && full.detail, S.acting[row.id] || null])) return;
   buildDetail(row, full);
 }
 
@@ -1193,6 +1305,7 @@ function render() {
   if (S.hold && Date.now() < S.hold) { clearTimeout(S.holdTimer); S.holdTimer = setTimeout(render, 250); return; }   // don't rebuild under a click
   S.hold = 0;
   if (S.closed) return;
+  pruneActing();
   renderTop();
   renderBanner();
   renderChips();
@@ -1222,10 +1335,20 @@ function reportControl(r, label) {
 
 async function runAction(row, action) {
   const args = action.tool === "dl_open" ? { id: row.id, action: action.verb } : { id: row.id };
+  // Pause / Resume / Retry say "Pausing..." on the button at once (N1); Cancel asks first, so it doesn't.
+  const doing = action.doing || ((action.verb === "pause" || action.verb === "resume" || action.verb === "retry") ? DOING[action.verb] : "");
+  if (doing) {
+    S.acting[row.id] = { from: row.state, doing: doing, until: Date.now() + ACTING_MS };
+    render();
+    setTimeout(() => { pruneActing(); render(); }, ACTING_MS + 100);
+  }
   const r = await callTool(action.tool, args);
-  if (r.declined) toast("Cancelled", "info");
-  else if (r.ok === false) toast(r.error || "That didn't work", "warn");
-  else if (r.pending && r.pending.length) toast(action.label + "\u2026", "info");
+  if (r.declined || r.ok === false) delete S.acting[row.id];
+  // errors, a declined confirmation, a request the hub queued, and (N2) a note such as "its folder was
+  // opened instead" all reach the person; only a plain success is silent
+  const n = controlNotice(r, Object.assign({}, action, { doing: doing }));
+  if (n) toast(n.msg, n.level);
+  if (doing) render();
   schedule(300);
 }
 

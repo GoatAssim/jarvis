@@ -753,8 +753,14 @@ TOOL_PACK_INSTRUCTION = (
     "infohash or a Stremio stream and the hub daemon downloads it through that server. stack_status says whether the "
     "server is up (it may already be open in the Stremio app: then nothing needs starting); stack_start brings it up; "
     "stremio_prepare (asks first) sets the cache to unlimited before the first download. For 'Stremio isn't working', use stack_doctor. "
-    "To play: play_episode needs the show's IMDb id (tt...) plus season and episode (never invent one: ask); it plays a finished "
-    "download or a torrent stream in mpv/VLC when it has one, and otherwise opens the episode's stream list in stremio-web. "
+    "Finding a show: media_find turns a name into an id and type (several titles match: ask the owner), media_episodes lists "
+    "seasons and episodes, stream_search ranks one episode's releases. Ids may be IMDb (tt...) or Kitsu (kitsu:N): pass id and "
+    "type exactly as given, never invent one. A release that doesn't state its language is not a dub. "
+    "A whole season: bulk_plan shows a plan and queues nothing; read its message to the owner, ask about any episode with no "
+    "match (the plan lists what exists), and only after they agree call bulk_run with the plan_id (it asks for confirmation "
+    "itself). With no season named the plan takes the latest and says so: pass that on. "
+    "To play: play_episode takes a title or an IMDb id, plus season and episode for a series (several titles match: ask); it plays "
+    "a finished download or a torrent stream in mpv/VLC when it has one, else opens the episode's stream list in stremio-web. "
     "play_local plays a finished download by id or title; stremio_open opens a stremio-web screen."
 )
 
@@ -791,7 +797,7 @@ DAEMONS = [
 
 TEST_CHECKLIST_GROUP = {
     "label": "Stremio",
-    "blurb": "The Stremio stack (server, stremio-web), its cache, and playing things: stack_*, stremio_prepare, server_cache*, stremio_open, play_episode, play_local.",
+    "blurb": "The Stremio stack (server, stremio-web) and cache, finding shows and streams, season plans, playing: stack_*, stremio_prepare, server_cache*, stremio_open, stremio_addons, stremio_library, stremio_mark_watched, media_find, media_episodes, stream_search, bulk_plan, bulk_run, play_episode, play_local.",
 }
 
 TEST_CHECKLIST = {

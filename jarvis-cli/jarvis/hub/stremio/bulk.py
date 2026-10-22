@@ -141,6 +141,8 @@ def make_plan(net, found, *, media_id, type_, season=None, episodes=None, want, 
     if policy not in ranking.POLICIES:
         raise BulkError("on_missing must be one of: %s" % ", ".join(ranking.POLICIES))
     ep = discovery.episodes(net, found, type_, media_id)
+    if not discovery.offers_streams(found, ep["type"], ep["id"]):
+        raise BulkError(discovery.no_streams_sentence(ep["type"], ep["id"]))      # no plan is saved
     videos = ep["videos"]
     if not videos:
         raise BulkError("the addons list no episodes for %s; it may be a film (use dl_add or play_episode)" % (ep["title"] or media_id))

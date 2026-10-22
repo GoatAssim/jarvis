@@ -685,6 +685,11 @@ OWNER_ONLY_TOOLS = frozenset({
     # about OTHER people, so a guest is never offered them either.
     "person_remember", "person_forget", "person_instruct", "person_recall",
     "person_review", "await_reply",
+    # Download hub (R3): tools that queue downloads, hide rows from the owner's list, or read the
+    # owner's private Stremio library.  A guest keeps dl_list / dl_status.  The generated
+    # dl_add_<id> tools are NOT listed (they have no fixed names); their handlers refuse a guest.
+    "dl_add", "dl_add_ytdlp", "dl_add_stremio", "dl_dismiss",
+    "bulk_plan", "bulk_run", "stremio_library", "stremio_mark_watched",
 })
 
 

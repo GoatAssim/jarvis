@@ -816,16 +816,26 @@ def control_provider_row(item, verb, provider, executor=None, confirm=None):
     """A provider row's pause / resume / cancel / retry: run the provider's own control tool for
     that verb.  Returns the same ("pending" | "skipped", detail) pair `_apply` uses.
 
-    No capability, no action: a read-only provider answers "read-only" and nothing runs.  The
-    answer is "pending" (not "changed") because the row only changes when the provider next
-    reports; the hub never edits a provider's row itself."""
+    No capability, no action, and nothing runs.  The refusal says why: "read-only" only for a
+    provider that declares no control verb at all (Steam, Playnite); a provider that has verbs but
+    not this one for the row's state (Pause on a paused row) says "can't <verb> a download that is
+    <state>".  The answer is "pending" (not "changed") because the row only changes when the
+    provider next reports; the hub never edits a provider's row itself."""
     from . import providers as providers_mod
     caps = effective_capabilities(item, provider)
     label = (provider or {}).get("label") or item["provider"]
     if verb not in caps:
-        return "skipped", "read-only: %s doesn't offer %s" % (label, verb)
+        declared = set((provider or {}).get("capabilities") or [])
+        if not declared & set(CONTROL_VERBS):
+            return "skipped", "read-only: %s doesn't offer %s" % (label, verb)
+        return "skipped", "can't %s a download that is %s" % (verb, item["state"])
     ok, detail = providers_mod.run_control(item, verb, provider, executor=executor, confirm=confirm)
     return ("pending", detail) if ok else ("skipped", detail)
+
+
+# What `_apply` can do to a row.  A provider that declares none of them is "read-only" (it may still
+# declare `reveal`, as Steam does).
+CONTROL_VERBS = ("pause", "resume", "cancel", "retry")
 
 
 def _apply(store, verb, item, daemon_alive, providers, bulk=False):
@@ -939,6 +949,46 @@ def _schedule_one(store, item, timed):
         ok = store.transition(item["id"], "paused", expect=state, next_attempt_at=timed["epoch"],
                               options=options, message=None, event=event)
     return ("changed", "starts at %s" % timed["iso"]) if ok else ("skipped", "its state just changed")
+
+
+def dismiss(*, id=None, finished=False, store=None):
+    """Hide provider rows from the lists (`dl_dismiss`).  Nothing is deleted and no file is touched.
+
+    `id`: one row.  `finished`: every row that can be dismissed (a provider row that is unknown or
+    finished).  A hub download is refused (it is cancelled with dl_cancel, and a finished one is
+    removed from History); so is a row that is still running.  A dismissed row stays hidden while
+    its provider keeps reporting it finished or unknown, and comes back when the provider reports it
+    live again."""
+    try:
+        store = _store(store)
+        row_id = str(id or "").strip()
+        if row_id and finished:
+            return _err("give an id or finished: true, not both")
+        if not row_id and not finished:
+            return _err("say which row: an id, or finished: true to clear everything that can be dismissed")
+        note = "hidden from the lists; no file was touched"
+        if finished:
+            rows = store.list_items(owner="provider", states_in=states.DISMISSABLE_STATES, limit=2000)
+            done = store.dismiss_items([r["id"] for r in rows])
+            return {"ok": True, "dismissed": done, "count": len(done),
+                    "note": note if done else "nothing to clear"}
+        item = store.get_item(row_id)
+        if not item:
+            return _err("no such download")
+        if item["owner"] == "hub":
+            return _err("a hub download isn't dismissed: cancel it with dl_cancel (a finished one is removed "
+                        "from History in the Downloads panel)")
+        if item["state"] not in states.DISMISSABLE_STATES:
+            why = "it is still running" if item["state"] in states.ACTIVE_STATES else "it hasn't finished"
+            return _err("%s (%s); only a row that is unknown or finished can be dismissed" % (why, item["state"]))
+        if item.get("dismissed_at") is not None:
+            return {"ok": True, "dismissed": [], "count": 0, "note": "it was already hidden"}
+        done = store.dismiss_items([item["id"]])
+        if not done:
+            return _err("its state just changed; look at it again")
+        return {"ok": True, "dismissed": done, "count": len(done), "note": note}
+    except Exception as exc:  # noqa: BLE001
+        return _err("dismiss failed: %s" % exc)
 
 
 def schedule_items(when, *, id=None, group=None, engine=None, provider=None, all=False, store=None):
@@ -1151,6 +1201,10 @@ def run_auto_open(store, settings, since, recent, now=None):
         result = open_item(item["id"], mode, store=store)
         recent.append(now)
         if result.get("ok"):
+            # open_item answers ok with a `note` when it did less than asked (its folder was opened
+            # because the file could not be selected): log that, not "shown in its folder".
+            if result.get("note"):
+                note = "%s (%s)" % (states.clean_text(result["note"], 200), mode)
             store.add_event(item["id"], "info", note)
             out.append((item["id"], mode))
         else:

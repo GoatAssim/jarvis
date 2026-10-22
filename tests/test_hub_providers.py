@@ -463,9 +463,14 @@ def test_steam_classify():
     mem = {}
     p = steam.parse_vdf(acf(100, "Fresh Install", 1026, to_dl=1000, got=250))
     row = steam.classify(p, mem)
-    check("downloading: percent from bytes, labelled an install", row["state"] == "downloading" and row["percent"] == 25.0
-          and row["bytes_done"] == 250 and row["bytes_total"] == 1000 and row["subtitle"] == "install" and row["kind"] == "game")
-    check("no speed or ETA is claimed (the hub derives them)", "speed_bps" not in row and "eta_s" not in row)
+    # N5: Steam does not write BytesDownloaded while it downloads, so a running row carries what Steam
+    # LAST reported in its message, not a percent or done-bytes that look live.
+    check("downloading: no live percent or done-bytes, the total is known, labelled an install", row["state"] == "downloading"
+          and row["percent"] is None and row["bytes_done"] is None and row["bytes_total"] == 1000
+          and row["subtitle"] == "install" and row["kind"] == "game")
+    check("...and the message says what Steam last reported and that it is not live", "25.0 %" in row["message"] and "live progress" in row["message"])
+    check("speed and ETA are sent as None on purpose, so the hub never derives one from a burst of bytes",
+          "speed_bps" in row and row["speed_bps"] is None and "eta_s" in row and row["eta_s"] is None)
     mem2 = {}
     row = steam.classify(steam.parse_vdf(acf(101, "Old Game", 1026, to_dl=500, got=10, size=9000, updated=1700000000)), mem2)
     check("an app with size on disk and a last-updated time is an update", row["subtitle"] == "update")
@@ -493,15 +498,16 @@ def test_steam_classify():
     check("a manifest without an app id is ignored", steam.classify({"AppState": {"name": "x"}}, {}) is None)
     check("a hostile app id is ignored", steam.classify(steam.parse_vdf(acf("../x", "x", 1026, to_dl=5)), {}) is None)
     huge = steam.classify(steam.parse_vdf(acf(107, "Over", 1026, to_dl=100, got=900)), {})
-    check("bytes past the total are clamped", huge["bytes_done"] == 100 and huge["percent"] <= 99.0)
+    check("bytes past the total are clamped (the percent in the message stays under 100)", huge["bytes_total"] == 100 and "99.0 %" in huge["message"])
 
     mem = {}
     seq = []
-    for _ in range(4):
-        seq.append(steam.classify(steam.parse_vdf(acf(108, "Stuck", 1026, to_dl=1000, got=300)), mem)["state"])
-    check("no byte movement over 3 looks is stalled (amber), after being downloading first", seq == ["downloading", "downloading", "downloading", "stalled"])
-    row = steam.classify(steam.parse_vdf(acf(108, "Stuck", 1026, to_dl=1000, got=400)), mem)
-    check("movement clears the stall", row["state"] == "downloading")
+    for i in range(4):
+        seq.append(steam.classify(steam.parse_vdf(acf(108, "Stuck", 1026, to_dl=1000, got=300)), mem, now=1000.0 + 3 * i)["state"])
+    check("frozen manifest bytes alone are never 'stalled' (N5), however many looks", seq == ["downloading"] * 4)
+    row = steam.classify(steam.parse_vdf(acf(108, "Stuck", 1026, to_dl=1000, got=400)), mem, now=1012.0)
+    check("a new report from Steam is shown as the last report, with its age", row["state"] == "downloading"
+          and "40.0 %" in row["message"] and "reported 0 s ago" in row["message"])
 
     mem = {}
     steam.classify(steam.parse_vdf(acf(109, "Finisher", 1026, to_dl=100, got=60)), mem)

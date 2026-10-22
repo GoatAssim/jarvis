@@ -171,6 +171,8 @@ def tool_stream_search(args):
             limit = 10
         net = _net()
         found, notes = _addons(net)
+        if not discovery.offers_streams(found, type_, item_id):
+            return {"ok": False, "error": discovery.no_streams_sentence(type_, item_id), "note": " ".join(notes) or None}
         try:
             vid, _ep = _video_id(net, found, type_, item_id, None if season is None else int(season),
                                  None if episode is None else int(episode))
@@ -314,12 +316,7 @@ TOOL_KEYWORDS = {
     "stremio_mark_watched": {"mark as watched": 10, "mark watched": 10, "mark it watched": 10, "mark unwatched": 10},
 }
 
-TOOL_PACK_INSTRUCTION = (
-    "Finding a show for Stremio: media_find turns a name into an id (it asks the owner when several titles match; never invent an id), "
-    "media_episodes lists seasons and episodes, stream_search ranks the releases of one episode. Ids may be IMDb (tt...) or Kitsu "
-    "(kitsu:N): pass the id and type exactly as media_find gave them. A release that doesn't state its language is not a dub. "
-    "A whole season is bulk_plan, then (after the owner agrees) bulk_run."
-)
+# The group's one instruction text lives in stremio_stack.py (one declarer per group).
 
 # Writing the owner's Stremio account is confirmed out of band, like every other write to something that is theirs.
 TOOL_CONFIRM_REQUIRED = {"stremio_mark_watched"}

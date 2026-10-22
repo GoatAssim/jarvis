@@ -11,6 +11,15 @@
 "use strict";
 const fs = require("fs");
 const path = require("path");
+const vm = require("vm");
+
+// web/public/*.js are browser scripts that hang their API on `window`.  web/package.json says "type": "module",
+// so require() would hand back an empty namespace: run them with vm in a bare `window` instead.
+function loadBrowserScript(name) {
+  const win = {};
+  vm.runInContext(fs.readFileSync(path.join(__dirname, "..", "web", "public", name), "utf8"), vm.createContext({ window: win, console }), { filename: name });
+  return win;
+}
 
 const ui = path.join(__dirname, "..", "jarvis-cli", "jarvis", "actions", "hub_ui");
 const source = fs.readFileSync(path.join(ui, "tool.js"), "utf8");
@@ -91,7 +100,7 @@ const eq = (a, b) => JSON.stringify(a) === JSON.stringify(b);
   check("one download's own choices in words", pure.itemPrefsText({}) === "" && pure.itemPrefsText({ limit_kbps: 300, open: "reveal", notify: "off" }) === "limit 300 KB/s \u00B7 then: show the file in its folder \u00B7 never notify");
   check("the add form: channels and events become dl_add arguments", eq(pure.addOptionsFromForm({ limit: "", unit: "kb", open: "default", notify: "default", channels: ["discord"], events: ["done", "failed"] }), { args: { notify_channels: ["discord"], notify_events: ["done", "failed"] } }));
   check("the add form: nothing ticked sends no notification choices", eq(pure.addOptionsFromForm({ limit: "", unit: "kb", open: "default", notify: "default", channels: [], events: [] }), { args: {} }));
-  check("a download's own channels, events and folder in words", pure.itemPrefsText({ notify_channels: ["discord"], notify_events: ["done"], subdir: "Y" }) === "notify via Discord \u00B7 notify when it finishes \u00B7 saves in Y");
+  check("a download's own channels, events and folder in words", pure.itemPrefsText({ notify_channels: ["discord"], notify_events: ["done"], subdir: "Y" }) === "notify via Discord DM \u00B7 notify when it finishes \u00B7 saves in Y");   // the label is the hub catalog's (loaded above), not the panel's
   check("a download's own full path in words", pure.itemPrefsText({ dest_abs: "D:\\Games" }) === "saves in D:\\Games");
   {
     const html3 = fs.readFileSync(path.join(ui, "tool.html"), "utf8");
@@ -285,7 +294,8 @@ const eq = (a, b) => JSON.stringify(a) === JSON.stringify(b);
   check("drag has a keyboard route: every draggable row also has move up / move down buttons", /Move up in the queue/.test(source) && /Move down in the queue/.test(source));
 
   // ---- the chat card keeps the panel's looks (its formatting half is a copy: they must agree on every state)
-  const card = require(path.join(__dirname, "..", "web", "public", "download-status-card.js"));
+  const card = loadBrowserScript("download-status-card.js").JarvisDownloadCard;
+  check("the card script loads and exposes its pure half", !!(card && card._pure && typeof card._pure.barLook === "function"));
   const states = ["queued", "probing", "connecting", "downloading", "postprocessing", "paused", "stalled", "failed", "cancelled", "done", "weird"];
   const variants = [{}, { percent: 40 }, { percent: 40, speed_bps: 2097152, eta_s: 90 }, { percent: null }, { stale: true, age_s: 600, owner: "provider" },
     { retry_in_s: 12 }, { derived: ["percent", "speed", "eta"], percent: 10, speed_bps: 1024, eta_s: 5 }, { phase: "verifying", phase_index: 1, phase_count: 2 },
@@ -314,7 +324,8 @@ const eq = (a, b) => JSON.stringify(a) === JSON.stringify(b);
   check("the card stops following when everything is final, the element left the page, or on too many streams", /allFinal\(\)\) stop\(\)/.test(cardSrc) && /isConnected/.test(cardSrc) && /MAX_STREAMS = 3/.test(cardSrc));
 
   // ---- Settings > Downloads (web/public/downloads-settings.js): which rows exist, how they are written
-  const dset = require(path.join(__dirname, "..", "web", "public", "downloads-settings.js"))._pure;
+  const dsetWin = loadBrowserScript("downloads-settings.js");
+  const dset = dsetWin.JarvisDownloadsSettings._pure;
   const payload = { settings: { rate_limit_kbps: 0, folders: { video: "Video" }, concurrency: { total: 4 }, notify: { enabled: true, min_seconds: 5 }, steam_threshold_mb: 500, weird_list: [1], retention: { keep_history_days: 0 }, schedule: [], ext_folders: {} },
     writable: ["rate_limit_kbps", "folders.video", "concurrency.total", "notify.enabled", "notify.done.enabled", "notify.done.level", "steam_threshold_mb", "weird_list", "schedule", "ext_folders", "library_root"],
     prefs_writable: ["rate_limit_kbps", "folders.video", "concurrency.total", "notify.enabled", "schedule", "ext_folders"] };
@@ -340,6 +351,66 @@ const eq = (a, b) => JSON.stringify(a) === JSON.stringify(b);
   const idxHtml = fs.readFileSync(path.join(__dirname, "..", "web", "public", "index.html"), "utf8");
   check("index.html loads the card and the section before settings.js",
     idxHtml.indexOf("download-status-card.js") > -1 && idxHtml.indexOf("downloads-settings.js") > -1 && idxHtml.indexOf("downloads-settings.js") < idxHtml.indexOf('src="settings.js"') && idxHtml.includes("download-status-card.css"));
+
+  // ---- N1: Pause / Resume on every card, and why a row that can't be paused says so
+  const hubCaps = { queued: ["pause", "cancel"], probing: ["pause", "cancel"], connecting: ["pause", "cancel"], downloading: ["pause", "cancel"], postprocessing: ["pause", "cancel"],
+    paused: ["resume", "cancel"], stalled: ["retry", "pause", "cancel"], failed: ["retry"], cancelled: ["retry"], done: ["open", "reveal"] };
+  const prim = (o) => { const p = pure.primaryAction(row(o)); return p ? p.verb : null; };
+  check("every running state shows Pause as the toggle", ["queued", "probing", "connecting", "downloading", "postprocessing", "stalled"].every((st) => prim({ state: st, capabilities: hubCaps[st] }) === "pause"));
+  check("a paused download shows Resume", prim({ state: "paused", capabilities: hubCaps.paused }) === "resume");
+  check("a failed or cancelled download shows Retry in the same place", prim({ state: "failed", capabilities: hubCaps.failed }) === "retry" && prim({ state: "cancelled", capabilities: hubCaps.cancelled }) === "retry");
+  check("a finished download has no toggle", prim({ state: "done", capabilities: hubCaps.done, dest_file: "x" }) === null);
+  const pa = pure.primaryAction(row({ state: "downloading", capabilities: hubCaps.downloading }));
+  check("the toggle carries an icon, a word, the tool, and a tooltip that names the Space shortcut", pa.icon.length > 0 && pa.label === "Pause" && pa.tool === "dl_pause" && /Space/.test(pa.title) && pa.doing === "Pausing\u2026");
+  const ra = pure.primaryAction(row({ state: "paused", capabilities: hubCaps.paused }));
+  check("Resume says Resuming while it works, and a tooltip with Space", ra.label === "Resume" && ra.tool === "dl_resume" && ra.doing === "Resuming\u2026" && /Space/.test(ra.title) && /again/.test(ra.title));
+  const sa = pure.primaryAction(row({ state: "paused", capabilities: hubCaps.paused, scheduled_at: 1900000000 }));
+  check("a scheduled row says Start now (and still runs dl_resume)", sa.label === "Start now" && sa.tool === "dl_resume" && sa.doing === "Starting\u2026");
+  check("a stalled row keeps Retry and Cancel as the small buttons beside the Pause toggle", eq(pure.secondaryActions(row({ state: "stalled", capabilities: hubCaps.stalled })).map((a) => a.verb), ["retry", "cancel"]));
+  check("a running row keeps Cancel as the only small button; Retry on a failed row is the toggle, not repeated", eq(pure.secondaryActions(row({ state: "downloading", capabilities: hubCaps.downloading })).map((a) => a.verb), ["cancel"]) && pure.secondaryActions(row({ state: "failed", capabilities: hubCaps.failed })).length === 0);
+  check("no verb is invented: a row whose capabilities lack pause, resume and retry gets no toggle; one that declares only Resume gets Resume, never Pause",
+    prim({ state: "downloading", capabilities: ["cancel"] }) === null && prim({ state: "downloading", capabilities: [] }) === null && prim({ state: "downloading", capabilities: ["reveal"] }) === null
+    && prim({ state: "downloading", capabilities: ["resume", "cancel"] }) === "resume" && prim({ state: "stalled", capabilities: ["retry", "cancel"] }) === "retry");
+  check("the toggle is the same set the chat card offers (it only reorders the panel's buttons)",
+    ["queued", "downloading", "paused", "stalled", "failed", "done"].every((st) => { const r = row({ state: st, capabilities: hubCaps[st], dest_file: "x" }); return eq(card._pure.rowActions(r), pure.rowActions(r)); }));
+
+  const steam = (o) => row(Object.assign({ owner: "provider", provider: "steam", state: "downloading", capabilities: ["reveal"], read_only: false }, o));
+  check("Steam: no toggle, and the reason in words (on the card as well)", prim(steam({})) === null
+    && pure.controlNote(steam({})).text === "Steam runs this download; pause it in Steam" && pure.controlNote(steam({})).card === true);
+  check("Steam: the same on a queued or stalled row", pure.controlNote(steam({ state: "queued" })).text === "Steam runs this download; pause it in Steam" && !!pure.controlNote(steam({ state: "stalled", stale: false })));
+  check("Steam: an already paused row says resume it in Steam, not pause", pure.controlNote(steam({ state: "paused" })).text === "Steam runs this download; resume it in Steam");
+  check("Steam: a finished row has nothing to explain", pure.controlNote(steam({ state: "done" })) === null && pure.controlNote(steam({ state: "failed" })) === null);
+  check("Steam: if the provider ever declares pause, the explanation goes and the toggle appears", pure.controlNote(steam({ capabilities: ["pause", "cancel"] })) === null && prim(steam({ capabilities: ["pause", "cancel"] })) === "pause");
+  const pl = (o) => row(Object.assign({ owner: "provider", provider: "playnite", state: "unknown", capabilities: [], read_only: true }, o));
+  check("Playnite: no controls, said in words on the card, whatever the state while it is not finished", ["unknown", "downloading", "installing", "queued"].every((st) => pure.controlNote(pl({ state: st })).text === "Playnite gives no progress or controls" && pure.controlNote(pl({ state: st })).card === true) && prim(pl({})) === null);
+  const other = row({ owner: "provider", provider: "somewhere", state: "downloading", capabilities: [], read_only: true });
+  check("any other read-only tool keeps today's text, in the detail pane only", pure.controlNote(other).text === "This tool reports its progress but can't be paused or cancelled from here." && pure.controlNote(other).card === false && pure.controlNote(other).title === "Read-only");
+  check("a demo or other provider row that can be paused gets the toggle and no explanation", prim({ owner: "provider", provider: "demo", state: "downloading", capabilities: ["pause", "cancel"] }) === "pause"
+    && pure.controlNote(row({ owner: "provider", provider: "demo", state: "downloading", capabilities: ["pause", "cancel"] })) === null);
+  check("a hub-owned row never gets an explanation", pure.controlNote(row({ state: "downloading", capabilities: ["pause", "cancel"] })) === null && pure.controlNote(null) === null);
+
+  check("what the hub is about to do reads in words", pure.pendingWord("pause") === "Pausing\u2026" && pure.pendingWord("cancel") === "Cancelling\u2026" && pure.pendingWord("resume") === "Resuming\u2026" && pure.pendingWord("") === "" && pure.pendingWord(null) === "" && pure.pendingWord("prioritize") === "Prioritize\u2026");
+
+  // what a control tool's answer tells the person (incl. N2: "Show in folder" fell back to the folder)
+  const nt = (r, a) => pure.controlNotice(r, a);
+  check("a plain success says nothing", nt({ ok: true }, pa) === null && nt({ ok: true, pending: [] }, pa) === null);
+  check("a queued request says what is happening", eq(nt({ ok: true, pending: ["h_1"] }, pa), { msg: "Pausing\u2026", level: "info" }) && eq(nt({ ok: true, pending: ["h_1"] }, { label: "Cancel" }), { msg: "Cancel\u2026", level: "info" }));
+  check("a declined confirmation says Cancelled", eq(nt({ ok: false, declined: true, error: "x" }, pa), { msg: "Cancelled", level: "info" }));
+  check("an error shows the hub's own words as a warning", eq(nt({ ok: false, error: "No such download" }, pa), { msg: "No such download", level: "warn" }) && nt({ ok: false }, pa).msg === "That didn't work");
+  check("N2: Show in folder that fell back to the folder shows the hub's note as a warning", eq(nt({ ok: true, note: "The file is gone, so its folder was opened instead" }, { label: "Show in folder" }), { msg: "The file is gone, so its folder was opened instead", level: "warn" }));
+  check("N2: a note wins over nothing but not over an error", nt({ ok: false, error: "E", note: "n" }, pa).msg === "E");
+
+  // wiring on the source: the panel draws the toggle from these helpers and shows the notice
+    check("the card's top row holds the toggle (not a hover-only control)", /prim \? toggleButton\(row, prim, false\) : null/.test(source) && !/\.tbtn[^{]*\{[^}]*(opacity: 0|display: none|visibility: hidden)/.test(css) && !/:hover[^{]*\.tbtn\s*\{[^}]*display/.test(css));
+  check("the toggle is at least 32px tall", /\.tbtn \{[^}]*min-height: 32px/.test(css));
+  check("the detail pane puts the controls before the bar and Open / Show in folder after them", source.indexOf("detail__actions detail__actions--top") > -1 && source.indexOf("detail__actions detail__actions--top") < source.indexOf("const bar = renderBar(row, true)")
+    && /const ctrl = actions\.filter/.test(source) && /const files = actions\.filter/.test(source));
+  check("a paused row has a pause glyph and a dimmed bar", /tone === "paused"\) meta\.push\(el\("span", \{ cls: "pglyph"/.test(source) && /\.bar-track\.paused \{ opacity/.test(css));
+  check("the card shows the explanation line only where controlNote says so", /why && why\.card \? el\("div", \{ cls: "row__why"/.test(source) && /\.row__why \{/.test(css));
+  check("runAction shows the notice, and the open-folder button shows it too", /const n = controlNotice\(r, Object\.assign\(\{\}, action, \{ doing: doing \}\)\);\s*if \(n\) toast\(n\.msg, n\.level\);/.test(source) && /controlNotice\(await callTool\("dl_open", \{ id: row\.id, action: "folder" \}\)\)/.test(source));
+  check("a pressed Pause / Resume / Retry says what is happening at once, and it is cleared on failure or when the state moves on", /S\.acting\[row\.id\] = \{ from: row\.state, doing: doing/.test(source) && /if \(r\.declined \|\| r\.ok === false\) delete S\.acting\[row\.id\]/.test(source) && /row\.state !== a\.from/.test(source) && /S\.acting\]\)\) return;|S\.acting\]\)/.test(source));
+  check("the pending word shows on the toggle too (the hub's own request), and the button is disabled while busy", /busy \|\| prim\.label/.test(source) && /attrs\.disabled = "disabled"/.test(source) && /busyWord\(row\) \{[^}]*pendingWord\(row\.pending\)/.test(source.replace(/\n/g, " ")));
+  check("the toggle is built with el() and textContent only (no HTML from data)", !/innerHTML|insertAdjacentHTML/.test(source.slice(source.indexOf("function toggleButton"), source.indexOf("function renderBar"))));
 
   console.log("\n" + passed + " passed, " + failed + " failed");
   process.exit(failed ? 1 : 0);

@@ -82,8 +82,11 @@ def test_pure():
     check("a batch reads as counts", card.summary_line({"card": "group", "title": "Pack", "counts": {"done": 2, "total": 5, "failed": 1, "running": 1}, "percent": 50})
           == "Pack: 2 of 5 done, 1 failed, 1 running (50%)")
     check("a row without a title still has words", card.summary_line({"state": "queued"}) == "download: queued")
-    payload = card.card_line_payload([dict(row, secret_path="C:/x", source_url="http://x", has_thumb=True, owner="hub")] * 12)
-    check("at most eight cards go to the page", len(payload["cards"]) == 8 and len(payload["ids"]) == 8)
+    # twelve DIFFERENT downloads, shaped like hub_admin.card_payload makes them (`card: "item"`): the cap is on
+    # the number of cards, and `ids` lists only the item cards that went
+    twelve = [dict(row, id="h%d" % i, card="item", secret_path="C:/x", source_url="http://x", has_thumb=True, owner="hub") for i in range(12)]
+    payload = card.card_line_payload(twelve)
+    check("at most eight cards go to the page", len(payload["cards"]) == 8 and len(payload["ids"]) == 8 and payload["ids"] == ["h%d" % i for i in range(8)])
     check("only the fields the card draws go, no paths or links", all("secret_path" not in c and "source_url" not in c for c in payload["cards"]) and payload["cards"][0]["has_thumb"] is True)
     check("groups and items are told apart", card.card_line_payload([{"id": "g", "card": "group"}, {"id": "i", "card": "item"}])["groups"] == ["g"])
 

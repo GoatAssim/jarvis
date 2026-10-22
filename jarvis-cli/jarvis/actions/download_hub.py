@@ -17,8 +17,10 @@ What is in it
   dl_import_legacy                             index the old ytdl_download folders (read-only)
   dl_providers / dl_provider_prefs             the watched sources (Steam, Playnite, tools with
                                                their own downloads): health, on / off, settings
-  dl_pause / dl_resume / dl_cancel / dl_retry  control (hub downloads; provider rows are
-                                               read-only until phase 5)
+  dl_pause / dl_resume / dl_cancel / dl_retry  control (hub downloads; a provider row only if
+                                               its provider declares the verb, else read-only)
+  dl_dismiss                                   hide a provider row that is unknown or finished
+                                               (one id, or finished=true); owner only, deletes nothing
   dl_schedule                                  start a download later ("tomorrow 3am"), or clear
                                                that; dl_add takes the same `start_at`
   dl_open                                      open or reveal a FINISHED file, open its folder,
@@ -107,6 +109,11 @@ def _is_chat_guest():
 def _guest_refusal():
     return {"ok": False, "error": "adding downloads is the owner's: someone in a chat can look at the "
                                   "queue (dl_list, dl_status) but not add to it"}
+
+
+def _dismiss_guest_refusal():
+    return {"ok": False, "error": "clearing the download list is the owner's: someone in a chat can look at "
+                                  "the queue (dl_list, dl_status) but not hide rows from it"}
 
 
 def _fail(label, exc):
@@ -391,6 +398,19 @@ def tool_dl_cancel(args):
 
 def tool_dl_retry(args):
     return _control("retry", args)
+
+
+def tool_dl_dismiss(args):
+    """Hide a provider row that is unknown or finished (`id`), or every such row (`finished: true`).
+    Owner only.  Not confirm-gated: nothing is deleted and no file is touched, and the row comes back
+    on its own if its provider reports it live again."""
+    try:
+        if _is_chat_guest():
+            return _dismiss_guest_refusal()
+        args = args or {}
+        return _svc().dismiss(id=args.get("id"), finished=args.get("finished") is True)
+    except Exception as exc:  # noqa: BLE001
+        return _fail("dl_dismiss", exc)
 
 
 def tool_dl_schedule(args):
@@ -683,6 +703,13 @@ TOOL_SCHEMAS = [
         "parameters": {"type": "object", "properties": dict(_SELECTOR_PROPS)},
     },
     {
+        "name": "dl_dismiss",
+        "description": "Hide a Steam / Playnite / tool row that is unknown or finished from the list (one id, or finished=true for all of them). Nothing is deleted. Not for hub downloads or running ones.",
+        "parameters": {"type": "object", "properties": {
+            "id": {"type": "string", "description": "The row's id"},
+            "finished": {"type": "boolean", "description": "true = every row that can be dismissed"}}},
+    },
+    {
         "name": "dl_schedule",
         "description": (
             "Start a download later, or change/clear when it starts. `when` is the person's own words "
@@ -784,6 +811,7 @@ TOOLS = {
     "dl_resume": tool_dl_resume,
     "dl_cancel": tool_dl_cancel,
     "dl_retry": tool_dl_retry,
+    "dl_dismiss": tool_dl_dismiss,
     "dl_schedule": tool_dl_schedule,
     "dl_open": tool_dl_open,
     "dl_settings": tool_dl_settings,
@@ -855,6 +883,9 @@ TOOL_KEYWORDS = {
     "dl_resume": {"resume downloads": 10, "resume the download": 10},
     "dl_cancel": {"cancel the download": 10, "cancel downloads": 10},
     "dl_retry": {"retry the download": 10, "retry downloads": 10, "retry failed downloads": 10},
+    "dl_dismiss": {"dismiss the download": 10, "dismiss download": 9, "clear finished downloads": 10,
+                   "clear the download list": 9, "hide the download": 9, "hide finished downloads": 9,
+                   "clear unknown downloads": 9},
     "dl_schedule": {"schedule a download": 10, "schedule the download": 10, "schedule downloads": 10,
                     "start the download at": 10, "download it later": 9, "download later": 9,
                     "start downloading at": 9, "download tonight": 9, "download at night": 9},
@@ -1135,7 +1166,7 @@ TEST_CHECKLIST = {
             {"ask": "/dlpauseall",
              "expect": "Asks to confirm, then pauses every running download (the same as dl_pause with all=true)."},
         ],
-        "watch": ["Pausing a row from a read-only provider (the demo rows) says it is read-only, never fails silently."],
+        "watch": ["Pausing a row from a read-only provider (a Steam or Playnite row) says it is read-only, never fails silently."],
     },
     "dl_resume": {
         "does": "Resumes paused downloads from where they stopped.",
@@ -1154,6 +1185,24 @@ TEST_CHECKLIST = {
             {"run": {"id": "<a done id>"}, "expect": "ok: false, 'already done'; the finished file is still there."},
         ],
         "care": "Deletes the partial file of what you cancel.",
+    },
+    "dl_dismiss": {
+        "does": "Hides a Steam / Playnite / tool row that is unknown or finished from the list. Nothing is deleted and no file is touched.",
+        "steps": [
+            {"run": {"id": "<an unknown or done Steam / Playnite row>"},
+             "expect": "ok: true, the id is in 'dismissed'; the row is gone from the list and the counts. No confirmation is asked."},
+            {"run": {"id": "<a downloading provider row>"},
+             "expect": "ok: false, 'it is still running'; the row stays."},
+            {"run": {"id": "<a hub download id>"},
+             "expect": "ok: false, a hub download isn't dismissed: cancel it with dl_cancel."},
+            {"run": {"finished": True},
+             "expect": "ok: true with a count: every unknown or finished provider row is hidden; hub downloads and running rows stay."},
+            {"run": {}, "expect": "ok: false asking for an id or finished: true."},
+        ],
+        "needs": ["A Steam / Playnite / tool row that is unknown or finished"],
+        "watch": ["A hidden row comes back by itself if its provider reports it live again (the game starts downloading again).",
+                  "From a remote chat guest the tool is refused (and not even offered)."],
+        "care": "Hides rows only; nothing is deleted.",
     },
     "dl_retry": {
         "does": "Puts failed, stalled or cancelled downloads back in the queue with a fresh retry budget.",
@@ -1186,7 +1235,7 @@ TEST_CHECKLIST = {
     "dl_open": {
         "does": "Opens a finished download, or reveals it in the file manager; only inside the library folder.",
         "steps": [
-            {"run": {"id": "<a done id>", "action": "reveal"}, "expect": "ok: true; the folder opens with the file selected."},
+            {"run": {"id": "<a done id>", "action": "reveal"}, "expect": "ok: true and no `note`; the folder opens with the file selected (a `note` means the folder was opened without it)."},
             {"run": {"id": "<a done id>"}, "expect": "ok: true; the file opens in its default program."},
             {"run": {"id": "<a queued id>"}, "expect": "ok: false, that download has no file yet."},
         ],
@@ -1240,6 +1289,6 @@ TEST_CHECKLIST = {
         ],
         "needs": ["The Download hub daemon running (it advances the demo rows)"],
         "watch": ["After about 40 s the 'silent' row goes grey with 'last update ... ago' (stale), not red.",
-                  "Every demo row shows the read-only badge and no pause / cancel buttons."],
+                  "Demo rows show Pause / Resume / Cancel as their state allows (after Pause the row shows paused; the 'silent' row is the stale one)."],
     },
 }

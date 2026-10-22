@@ -32,14 +32,22 @@ DEFAULTS = {
     # Speed windows: [{"days": "all", "from": "01:00", "to": "07:00", "rate_limit_kbps": 0}].
     # Inside a window its limit replaces `rate_limit_kbps` (0 there = unlimited); first match wins.
     "schedule": [],
+    # keep_history_days: the daemon deletes finished history ROWS (never files) older than this;
+    # 0 or less = keep forever.  auto_delete_files exists but nothing reads it: the hub never
+    # deletes a file by itself.
     "retention": {"keep_history_days": 90, "auto_delete_files": False},
+    # A provider row that vanished from its provider's list sits in `unknown`; after this many hours
+    # (counted from the moment it became unknown) it settles into `cancelled`.  A row flagged stale
+    # (the provider itself is not answering, e.g. Steam closed) is never settled.
+    "unknown_settle_hours": 24,
     "allow_private_hosts": [],   # the SSRF allow-list ("host" or "host:port")
     # segments: parallel connections per file (1 = off, the default); only used for a file at least
     # segment_min_bytes big whose server supports Range.  A download can override it (options.segments).
     "http": {"stall_seconds": 60, "max_retries": 3, "connect_timeout": 15,
              "segments": 1, "segment_min_bytes": 32 * 1024 * 1024},
     "stremio": {"mode": "save", "stall_seconds": 90, "max_retries": 3, "start_wait_seconds": 60,   # phase 4 
-    "metadata_timeout": 90},      # seconds to wait for a torrent's file list (no peers = no list)    "providers": {},             # phase 5: per-provider blocks
+    "metadata_timeout": 90},      # seconds to wait for a torrent's file list (no peers = no list)
+    "providers": {},             # phase 5: per-provider blocks
     "provider_limits": {"max_rows": 500, "max_report_kb": 64, "max_reports_per_s": 20,
                         "stale_after_s": 30},
     "allowed_link_schemes": ["steam", "https"],
@@ -100,7 +108,7 @@ PREFS_WRITABLE = {
     "stremio.stall_seconds", "stremio.max_retries", "stremio.metadata_timeout", "stremio.start_wait_seconds",
     "after_download.open",
     "notify.enabled", "notify.min_seconds", "notify.coalesce_s", "notify.providers",
-    "ext_folders",
+    "ext_folders", "unknown_settle_hours",
 } | {"folders." + k for k in FOLDER_KINDS} \
   | {"notify.%s.%s" % (e, f) for e in EVENTS for f in ("enabled", "level")}
 
@@ -447,6 +455,7 @@ _CHECKS = {
     "notify.providers": _bool("notify.providers"),
     "notify.min_seconds": lambda v: _int_in(v, 0, 86400, "notify.min_seconds"),
     "notify.coalesce_s": lambda v: _int_in(v, 0, 600, "notify.coalesce_s"),
+    "unknown_settle_hours": lambda v: _int_in(v, 1, 720, "unknown_settle_hours"),
 }
 for _kind in FOLDER_KINDS:
     _CHECKS["folders." + _kind] = _check_kind_folder("folders." + _kind)

@@ -44,7 +44,7 @@ _SCHEMA = (
         next_attempt_at REAL, dedupe_key TEXT,
         created_at REAL NOT NULL, started_at REAL, finished_at REAL, updated_at REAL NOT NULL,
         last_report_at REAL, stale INTEGER NOT NULL DEFAULT 0, keep INTEGER NOT NULL DEFAULT 0,
-        dest_is_dir INTEGER
+        dest_is_dir INTEGER, dismissed_at REAL
     )""",
     "CREATE INDEX IF NOT EXISTS items_state ON items(state)",
     "CREATE INDEX IF NOT EXISTS items_provider ON items(provider, state)",
@@ -84,7 +84,7 @@ ITEM_COLUMNS = frozenset((
     "dest_dir", "dest_file", "thumb_ref", "detail_json", "children_json", "links_json",
     "capabilities_json", "controls_json", "message", "error", "control", "attempts",
     "priority", "next_attempt_at", "dedupe_key", "created_at", "started_at", "finished_at",
-    "updated_at", "last_report_at", "stale", "keep", "dest_is_dir",
+    "updated_at", "last_report_at", "stale", "keep", "dest_is_dir", "dismissed_at",
 ))
 # python name -> column, for the structured values stored as JSON text
 _JSON_FIELDS = {
@@ -106,7 +106,7 @@ _REPORT_KEYS = frozenset((
 _INTERNAL_COLUMNS = frozenset((
     "dest_dir", "dest_file", "next_attempt_at", "attempts", "control", "priority", "group_id",
     "keep", "thumb_ref", "dedupe_key", "started_at", "finished_at", "last_report_at", "stale",
-    "source_url", "engine", "dest_is_dir",
+    "source_url", "engine", "dest_is_dir", "dismissed_at",
 ))
 _PROVIDER_JSON = {"capabilities": "capabilities_json", "controls": "controls_json",
                   "open_roots": "open_roots_json", "settings": "settings_json"}
@@ -116,9 +116,12 @@ EVENT_KEEP_PER_ITEM = 100
 RUNTIME_KEYS = ("daemon", "notify_state")
 
 
-# N2: `items.dest_is_dir` (NULL = not known, 1 = dest is a folder, 0 = dest is a file).  A database
-# made before it existed gets the column added on the first connection in each process.  This is
-# keyed on the column itself, not on PRAGMA user_version, so it needs no SCHEMA_VERSION bump.
+# Columns added after SCHEMA_VERSION 1 shipped.  A database made before one existed gets it added
+# on the first connection in each process.  This is keyed on the column itself, not on PRAGMA
+# user_version, so none of them needs a SCHEMA_VERSION bump.
+#   dest_is_dir    N2: NULL = not known, 1 = dest is a folder, 0 = dest is a file
+#   dismissed_at   a provider row the owner hid (epoch seconds); NULL = shown
+_LATE_COLUMNS = (("dest_is_dir", "INTEGER"), ("dismissed_at", "REAL"))
 _COLUMNS_CHECKED = set()
 
 
@@ -127,12 +130,13 @@ def _ensure_columns(conn, db_path):
     if key in _COLUMNS_CHECKED:
         return
     names = {r[1] for r in conn.execute("PRAGMA table_info(items)").fetchall()}
-    if names and "dest_is_dir" not in names:
-        try:
-            conn.execute("ALTER TABLE items ADD COLUMN dest_is_dir INTEGER")
-        except sqlite3.OperationalError as exc:     # the daemon or the web server got there first
-            if "duplicate column" not in str(exc).lower():
-                raise
+    for column, kind in _LATE_COLUMNS:
+        if names and column not in names:
+            try:
+                conn.execute("ALTER TABLE items ADD COLUMN %s %s" % (column, kind))
+            except sqlite3.OperationalError as exc:     # the daemon or the web server got there first
+                if "duplicate column" not in str(exc).lower():
+                    raise
     if names:
         _COLUMNS_CHECKED.add(key)
 
@@ -481,9 +485,10 @@ class Store:
 
     def list_items(self, *, states_in=None, engine=None, provider=None, owner=None, kind=None,
                    group_id=None, search=None, stale=None, include_disabled=False,
-                   limit=200, offset=0, order="recent"):
+                   include_dismissed=False, limit=200, offset=0, order="recent"):
         """Items for the panel and the model.  Rows of a switched-off provider are hidden
-        unless `include_disabled` (turning a provider off hides its rows, plan 5.2)."""
+        unless `include_disabled` (turning a provider off hides its rows, plan 5.2); rows the
+        owner dismissed are hidden unless `include_dismissed`."""
         where, args = [], []
         if states_in:
             where.append("i.state IN (%s)" % ",".join("?" * len(states_in)))
@@ -503,6 +508,8 @@ class Store:
             args += [like, like, like]
         if not include_disabled:
             where.append("(p.id IS NULL OR p.enabled = 1)")
+        if not include_dismissed:
+            where.append("i.dismissed_at IS NULL")
         sql = ("SELECT i.*, p.label AS provider_label, p.icon AS provider_icon, g.title AS group_title "
                "FROM items i LEFT JOIN providers p ON p.id = i.provider "
                "LEFT JOIN groups g ON g.id = i.group_id")
@@ -517,12 +524,13 @@ class Store:
         return [row_to_item(r) for r in rows]
 
     def counts(self):
-        """Totals for the status bar and dl_status.  Rows of disabled providers don't count."""
+        """Totals for the status bar and dl_status.  Rows of disabled providers and dismissed
+        rows don't count."""
         with self._read() as conn:
             rows = conn.execute(
                 "SELECT i.state, i.owner, i.provider, i.engine, i.stale, i.speed_bps, p.label AS plabel "
                 "FROM items i LEFT JOIN providers p ON p.id = i.provider "
-                "WHERE p.id IS NULL OR p.enabled = 1").fetchall()
+                "WHERE (p.id IS NULL OR p.enabled = 1) AND i.dismissed_at IS NULL").fetchall()
         out = {"total": 0, "by_state": {}, "by_provider": {}, "by_engine": {}, "active": 0,
                "queued": 0, "failed": 0, "stale": 0, "paused": 0, "done": 0,
                "speed_hub_bps": 0.0, "speed_other_bps": 0.0}
@@ -596,6 +604,13 @@ class Store:
         if touch:
             updates.setdefault("last_report_at", now)
             updates.setdefault("stale", 0)
+        # A dismissed row stays hidden while the provider keeps saying it is finished or unknown, and
+        # comes back the moment it reports the row live again (a later update of the same Steam game
+        # reuses the id `steam:<appid>`).
+        came_back = (prev.get("dismissed_at") is not None and "dismissed_at" not in updates
+                     and new_state not in states.DISMISSABLE_STATES)
+        if came_back:
+            updates["dismissed_at"] = None
 
         if new_state != old_state:
             if new_state in states.ACTIVE_STATES and not prev["started_at"]:
@@ -623,6 +638,8 @@ class Store:
                         "%s: %s" % (line, tail) if tail else line, now)
         elif event:
             self._event(conn, prev["id"], "info", event, now)
+        if came_back:
+            self._event(conn, prev["id"], "info", "reported again by its provider; shown again", now)
         for note in notes:
             self._event(conn, prev["id"], "debug", note, now)
         return row_to_item(conn.execute("SELECT * FROM items WHERE id=?", (prev["id"],)).fetchone())
@@ -717,15 +734,76 @@ class Store:
                 self._event(conn, row["id"], "info", "%s -> queued (hub restarted)" % row["state"], now)
         return len(rows)
 
-    def delete_items(self, ids):
+    def delete_items(self, ids, only_states=None):
+        """Delete rows with their events.  `only_states`: a row that is NOT in one of these states
+        by the time the transaction runs is left alone (retention uses it, so a row retried a
+        moment after it was picked is never deleted)."""
         ids = [i for i in ids if i]
         if not ids:
             return 0
         with self._write() as conn:
+            if only_states:
+                got = ",".join("?" * len(ids))
+                ok = ",".join("?" * len(only_states))
+                ids = [r["id"] for r in conn.execute(
+                    "SELECT id FROM items WHERE id IN (%s) AND state IN (%s)" % (got, ok),
+                    list(ids) + list(only_states)).fetchall()]
+                if not ids:
+                    return 0
             marks = ",".join("?" * len(ids))
             conn.execute("DELETE FROM events WHERE item_id IN (%s)" % marks, ids)
             conn.execute("DELETE FROM notices WHERE item_id IN (%s)" % marks, ids)
             return conn.execute("DELETE FROM items WHERE id IN (%s)" % marks, ids).rowcount
+
+    def dismiss_items(self, ids, now=None):
+        """Hide provider rows that are `unknown` or finished.  Returns the ids actually hidden.
+
+        The rule lives here as well as in the service, so no caller can hide a hub row or a row that
+        is still running.  Nothing is deleted: the row stays in the database (a later report from the
+        provider may bring it back, see `_update`), and no file is touched.  A row already hidden
+        is not counted again."""
+        ids = [i for i in dict.fromkeys(ids or []) if i]
+        if not ids:
+            return []
+        now = self.now() if now is None else now
+        done = []
+        with self._write() as conn:
+            for item_id in ids:
+                row = conn.execute("SELECT id, owner, state, dismissed_at FROM items WHERE id=?", (item_id,)).fetchone()
+                if row is None or row["dismissed_at"] is not None or not states.is_dismissable(row["owner"], row["state"]):
+                    continue
+                conn.execute("UPDATE items SET dismissed_at=? WHERE id=?", (now, item_id))
+                self._event(conn, item_id, "info", "dismissed (hidden; nothing was deleted)", now)
+                done.append(item_id)
+        return done
+
+    def prune_history(self, keep_days, now=None):
+        """Retention: delete history ROWS (and their events) of downloads that finished more than
+        `keep_days` days ago.  Returns how many rows went.
+
+        Only rows in a final state (done, failed, cancelled) are candidates, dated by `finished_at`
+        and, when a row has none, `updated_at`.  Active, queued, paused, stalled and `unknown` rows
+        are never touched, nor is a row flagged `keep`.  `keep_days` of 0 or less (or not a number)
+        means keep forever.  This never deletes a file: it only trims the database.  Dismissed rows
+        are pruned like any other."""
+        try:
+            days = float(keep_days)
+        except (TypeError, ValueError):
+            return 0
+        if not days > 0 or days != days:
+            return 0
+        now = self.now() if now is None else now
+        cutoff = now - days * 86400.0
+        marks = ",".join("?" * len(states.FINAL_STATES))
+        with self._read() as conn:
+            rows = conn.execute(
+                "SELECT id FROM items WHERE state IN (%s) AND keep = 0 AND COALESCE(finished_at, updated_at) < ?"
+                % marks, states.FINAL_STATES + (cutoff,)).fetchall()
+        ids = [r["id"] for r in rows]
+        gone = 0
+        for start in range(0, len(ids), 400):          # well under sqlite's variable limit
+            gone += self.delete_items(ids[start:start + 400], only_states=states.FINAL_STATES)
+        return gone
 
     def mark_stale(self, now=None, stale_after=30.0, unknown_after=86400.0):
         """Provider rows that went quiet: flag them (never failed), and after a day move a

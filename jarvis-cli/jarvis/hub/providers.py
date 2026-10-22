@@ -21,6 +21,11 @@ same `tools.execute_tool` every caller uses) or a BUILT-IN function registered i
 missing from the list is finished (done if it had reached 100 %, else unknown) instead of
 being left spinning (plan 5.7).  Without it only what arrives is updated.
 
+An `unknown` row does not stay unknown forever: `settle_unknown()` (the daemon calls it in its
+housekeeping) moves one that has been unknown for `unknown_settle_hours` into `cancelled`, unless
+the provider itself is not answering (a row flagged stale is never settled) or reports the row
+again first (then it simply follows the provider again).
+
 Everything a provider says goes through Store.upsert_provider_row, so it is sanitised the
 same as a pushed report: only its own `<provider>:<id>` rows, paths checked against its
 open_roots, links against the allowed schemes, size and row caps.  Nothing here ever raises into
@@ -35,6 +40,8 @@ from concurrent.futures import ThreadPoolExecutor
 from . import states
 
 log = logging.getLogger("jarvis.hub.providers")
+
+DEFAULT_UNKNOWN_SETTLE_HOURS = 24
 
 DEFAULT_POLL_TIMEOUT_S = 5.0
 IDLE_MIN_S = 30.0
@@ -165,16 +172,77 @@ def apply_poll(store, provider_id, result, now=None):
         out["applied"] += 1
     out["dropped"] += max(0, len(items) - MAX_ITEMS_PER_POLL)
     if result.get("complete") is True:
+        label = _provider_label(store, provider_id)
         for row in store.list_items(provider=provider_id, limit=2000, include_disabled=True):
             if row["state"] in states.FINAL_STATES or row["state"] == "unknown" or row["id"] in seen:
                 continue
             if (row.get("percent") or 0) >= 100:
-                new, note = "done", "no longer listed by the provider; it had reached 100 %"
+                fields = {"state": "done"}
+                note = "no longer listed by the provider; it had reached 100 %"
             else:
-                new, note = "unknown", "no longer listed by the provider"
-            store.update_item(row["id"], {"state": new}, event=note)
+                fields = {"state": "unknown",
+                          "message": "%s stopped listing this; it may have been cancelled, finished or removed" % label}
+                note = "no longer listed by the provider"
+            store.update_item(row["id"], fields, event=note)
             out["finished"] += 1
     return out
+
+
+def _provider_label(store, provider_id):
+    try:
+        provider = store.get_provider(provider_id)
+    except Exception:  # noqa: BLE001 - a wording must never break a poll
+        provider = None
+    return states.clean_text((provider or {}).get("label") or provider_id, 60) or "The provider"
+
+
+def settle_hours(settings):
+    """`unknown_settle_hours` from the settings, 24 when it is missing or unusable."""
+    try:
+        hours = int((settings or {}).get("unknown_settle_hours", DEFAULT_UNKNOWN_SETTLE_HOURS))
+    except (TypeError, ValueError):
+        return DEFAULT_UNKNOWN_SETTLE_HOURS
+    return hours if 1 <= hours <= 720 else DEFAULT_UNKNOWN_SETTLE_HOURS
+
+
+def settle_unknown(store, now, hours=DEFAULT_UNKNOWN_SETTLE_HOURS):
+    """Give up on provider rows that have been `unknown` for `hours`: they become `cancelled`
+    (final), message "<Provider> never listed this again (gave up waiting after N h)".  Returns
+    the ids settled.  Pure but for the store: `now` and `hours` come from the caller, so a test
+    drives it with a fake clock.
+
+    * How long a row has been unknown comes from the row's own `updated_at` (set when it became
+      unknown, and refreshed by any report), so a row that was already unknown in an existing
+      database settles too; no extra field is needed.
+    * A row flagged `stale` is never settled: the provider itself stopped answering (Steam is
+      closed), which says nothing about the download.  When the provider answers again the row
+      follows it.
+    * A provider that reports the row live before it settles brings it back as before
+      (`Store.upsert_provider_row`); a row settled by mistake comes back the same way.
+    * Hidden (dismissed) rows settle too, so they can be pruned later."""
+    try:
+        hours = int(hours)
+    except (TypeError, ValueError):
+        hours = DEFAULT_UNKNOWN_SETTLE_HOURS
+    hours = max(1, hours)
+    cutoff = now - hours * 3600.0
+    settled = []
+    rows = store.list_items(states_in=("unknown",), owner="provider", stale=False,
+                            include_disabled=True, include_dismissed=True, limit=2000)
+    labels = {}
+    for row in rows:
+        if (row.get("updated_at") or 0) > cutoff:
+            continue
+        pid = row.get("provider") or ""
+        if pid not in labels:
+            labels[pid] = _provider_label(store, pid)
+        message = "%s never listed this again (gave up waiting after %d h)" % (labels[pid], hours)
+        done = store.update_item(row["id"], {"state": "cancelled", "message": message},
+                                 expect="unknown", event="unknown for %d h; gave up waiting" % hours,
+                                 touch=False)           # this is the hub's decision, not a report
+        if done is not None:
+            settled.append(row["id"])
+    return settled
 
 
 # --------------------------------------------------------------------------- the poll runner

@@ -24,6 +24,7 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "jarvis-cli"))
 sys.path.insert(0, str(ROOT / "tests"))
 
+import _hub_fake_addon as fake_addon  # noqa: E402
 import _hub_fake_stremio as fake  # noqa: E402
 from jarvis import ui_bridge, tool_commands, checklist_schema, tool_daemons  # noqa: E402
 from jarvis.actions import play_media, stremio_open, stremio_stack  # noqa: E402
@@ -176,6 +177,73 @@ check("no player installed: tier 2, the stremio-web player link with the stream 
 res = play_media.tool_play_episode({"stream": {"infoHash": H1}, "imdb_id": "tt0944947", "season": 1, "episode": 1, "via": "player"})
 check("via=player with no player says so instead of opening a browser", not res["ok"] and "mpv" in res["error"] and "tried" in res)
 player.find_one = lambda kind: "/fake/%s" % kind if kind == "mpv" else ""
+
+# ---- play_episode by title (brief 18).  The addons are the FAKE pair from _hub_fake_addon.py: nothing here ran
+# against a real addon.  No account key in this config, so no cloud call is attempted; the owner's allow list lets the
+# loopback fake through the SSRF guard.
+ABASE, AST, ASERVER = fake_addon.start()
+saved_cfg = cfg_path.read_text()
+cfg_path.write_text(json.dumps({"web": {"url": BASE}, "addons": {"urls": [ABASE + "/cat/manifest.json", ABASE + "/str/manifest.json"]}}))
+Store().set_settings({"allow_private_hosts": ["127.0.0.1"]})
+SH = fake_addon.SHOW
+
+
+def addon_requests():
+    return [x for x in AST.log if not x.startswith("POST")]
+
+
+opened.clear()
+by_id = play_media.tool_play_episode({"imdb_id": SH, "season": 2, "episode": 3, "open": False})
+AST.log.clear()
+res = play_media.tool_play_episode({"imdb_id": SH, "title": "something else", "season": 2, "episode": 3, "open": False})
+check("with an imdb_id the title is ignored and no addon is asked", res["ok"] and res["link"] == by_id["link"] and not AST.log and "matched" not in res)
+AST.log.clear()
+res = play_media.tool_play_episode({"title": "Spirit Hunters", "season": 2, "episode": 3, "open": False})
+check("title: one clear match goes where the imdb_id goes (same tier, same link)",
+      res["ok"] and res["tier"] == by_id["tier"] == 1 and res["link"] == by_id["link"] and res["link"].endswith("#/detail/series/%s/%s:2:3" % (SH, SH)))
+check("the result says what the title was taken to be", "Spirit Hunters" in res.get("matched", "") and SH in res["matched"])
+check("the lookup went to the addons' catalog search only", any("/catalog/" in x for x in AST.log) and not any("/stream/" in x for x in AST.log))
+opened.clear()
+res = play_media.tool_play_episode({"title": "Spirit Hunters", "season": 2, "episode": 3})
+check("title: the browser opens the same episode page", res["ok"] and opened == [by_id["link"]])
+opened.clear()
+res = play_media.tool_play_episode({"title": "spirit", "season": 1, "episode": 1})
+check("title: several matches ask, with a short list of id, type, name, year, and open nothing",
+      res.get("needs_clarification") and len(res["matches"]) == 2 and not opened
+      and all(set(m) == {"id", "type", "name", "year"} for m in res["matches"]) and {m["id"] for m in res["matches"]} >= {SH})
+res = play_media.tool_play_episode({"title": "xyzzy", "season": 1, "episode": 1})
+check("title: no match is a plain sentence that names what was asked", res["ok"] is False and "Nothing was found" in res["error"] and "xyzzy" in res["error"] and not opened)
+res = play_media.tool_play_episode({"title": "Moon Pilot", "season": 1, "episode": 1})
+check("title: a Kitsu-only title says stremio-web needs an IMDb id and names what was found",
+      res["ok"] is False and "IMDb id" in res["error"] and "Moon Pilot" in res["error"] and "kitsu:42" in res["error"] and not opened)
+AST.log.clear()
+res = play_media.tool_play_episode({"title": "Spirit Hunters"})
+check("title: a series with no season or episode asks, and costs no request", res.get("needs_clarification") and "season" in res["message"].lower() and not AST.log)
+res = play_media.tool_play_episode({"title": "Spirit Hunters", "season": 2})
+check("title: half an episode asks too, with no request", res.get("needs_clarification") and not AST.log)
+res = play_media.tool_play_episode({})
+check("nothing at all still asks which show, says a title will do, and makes no request",
+      res.get("needs_clarification") and "title" in res["message"] and "IMDb id" in res["message"] and not AST.log)
+check("a bad imdb_id with a title is still refused (the title doesn't rescue it)",
+      not play_media.tool_play_episode({"imdb_id": "tt1", "title": "Spirit Hunters", "season": 1, "episode": 1})["ok"] and not AST.log)
+
+# a stream that is already known never needs the title; the title only matters for the two web tiers
+launched.clear()
+opened.clear()
+AST.log.clear()
+res = play_media.tool_play_episode({"infohash": H1, "title": "xyzzy", "type": "movie"})
+check("a known stream plays even though the title finds nothing, and no lookup is made",
+      res["ok"] and res["tier"] == 3 and launched and not addon_requests())
+player.find_one = lambda kind: ""
+res = play_media.tool_play_episode({"stream": {"infoHash": H1, "fileIdx": 0}, "title": "xyzzy", "season": 1, "episode": 1})
+check("no player and a title that finds nothing: it says so and what the player route tried",
+      res["ok"] is False and "Nothing was found" in res["error"] and res.get("tried") and not opened)
+res = play_media.tool_play_episode({"stream": {"infoHash": H1, "fileIdx": 0}, "title": "Spirit Hunters", "season": 2, "episode": 3})
+check("no player and a title that resolves: tier 2, the web player link built with the resolved imdb id",
+      res["ok"] and res["tier"] == 2 and "#/player/" in res["link"] and SH in res["link"] and res["link"] in opened)
+player.find_one = lambda kind: "/fake/%s" % kind if kind == "mpv" else ""
+cfg_path.write_text(saved_cfg)
+fake_addon.STATE.__init__()
 
 # a finished download
 LIB.mkdir(parents=True, exist_ok=True)

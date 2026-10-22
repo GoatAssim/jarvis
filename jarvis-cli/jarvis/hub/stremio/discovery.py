@@ -127,12 +127,20 @@ def find(net, found_addons, query, type_=None):
 
 
 def is_clear_winner(results):
-    """One result, or a top result that clearly beats the next (so no question is needed)."""
+    """One result, or a top result that clearly beats the next (so no question is needed).
+
+    A result whose normalised name equals the query (score 1.0, see `_similarity`) and which is the
+    ONLY such result wins outright: the real Cinemeta answer for "Jujutsu Kaisen" has the series at
+    1.0 and the film "Jujutsu Kaisen 0" at 0.933, a gap of 0.067, which the gap rule alone reads as
+    "ask".  Two exact matches (two shows with the same name) still ask."""
     if not results:
         return False
     if len(results) == 1:
         return True
     first, second = results[0], results[1]
+    exact = [r for r in results if r["score"] >= 1.0]
+    if len(exact) == 1 and exact[0] is first:
+        return True
     return first["score"] >= 0.9 and first["score"] - second["score"] >= 0.15
 
 
@@ -240,6 +248,20 @@ def latest_season(videos):
 
 
 # --------------------------------------------------------------------------- the streams
+
+def offers_streams(found_addons, type_=None, item_id=None):
+    """True when at least one installed addon offers streams (for this type and id, when given)."""
+    return any(a.supports("stream", type_, item_id) for a in found_addons)
+
+
+def no_streams_sentence(type_=None, item_id=None):
+    """The plain sentence for "nothing here can give a stream" (the real Cinemeta-only answer).  Shared by
+    stream_search and bulk_plan so neither returns an empty result that looks like an answer."""
+    what = (" for %s ids (type %s)" % (A.id_kind(item_id), type_ or "series")) if item_id else ""
+    return ("no installed addon offers streams%s: the addons found can only look titles up, so there is nothing to plan "
+            "or queue. Add an addon that offers streams (an account key or an addons.urls list in ~/.jarvis/stremio.json), "
+            "then ask again." % what)
+
 
 def streams_for(net, found_addons, type_, video_id, *, budget_s=STREAM_BUDGET_S):
     """Ask every stream-capable addon for one episode, in parallel.

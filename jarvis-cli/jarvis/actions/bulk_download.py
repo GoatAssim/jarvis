@@ -26,7 +26,7 @@ def tool_bulk_plan(args):
         args = args or {}
         from ..hub import settings as settings_mod
         from ..hub.store import Store
-        from ..hub.stremio import addons as A, bulk, ranking
+        from ..hub.stremio import addons as A, bulk, discovery, ranking
         from . import stremio_discovery as disc
 
         title, media_id = str(args.get("title") or "").strip(), A.valid_id(args.get("id"))
@@ -45,6 +45,8 @@ def tool_bulk_plan(args):
         found, notes = A.installed(net)
         if not found:
             return {"ok": False, "error": "no Stremio addon is known. " + " ".join(notes)}
+        if not discovery.offers_streams(found):
+            return {"ok": False, "error": discovery.no_streams_sentence(), "note": " ".join(notes) or None}
 
         type_ = A.valid_type(args.get("type")) if args.get("type") else None
         if media_id:
@@ -134,12 +136,7 @@ TOOL_KEYWORDS = {
     "bulk_run": {"queue the season": 10, "start the season": 9, "run the plan": 10, "yes queue it": 8},
 }
 
-TOOL_PACK_INSTRUCTION = (
-    "A whole season: bulk_plan (it finds the show, picks the season, ranks each episode's releases) shows a plan and queues nothing. "
-    "Read its message to the owner, ask about any episode with no match (the plan lists what exists), and only after they agree call "
-    "bulk_run with the plan_id; it asks for a confirmation itself. If the owner didn't name a season the plan takes the latest and says "
-    "so: pass that on."
-)
+# The group's one instruction text lives in stremio_stack.py (one declarer per group).
 
 # One group of up to 60 downloads: confirmed out of band, never by an argument the model could fill.
 TOOL_CONFIRM_REQUIRED = {"bulk_run"}

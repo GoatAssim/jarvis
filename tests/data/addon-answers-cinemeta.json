@@ -1,0 +1,133 @@
+{
+ "notes": [
+  "no Stremio account key in ~/.jarvis/stremio.json, so the addon list comes from the 'addons.urls' list there, if any",
+  "no installed addon can look titles up, so Cinemeta (Stremio's default) was used"
+ ],
+ "addons": [
+  {
+   "name": "Cinemeta",
+   "version": "3.0.14",
+   "host": "v3-cinemeta.strem.io",
+   "source": "default",
+   "types": [
+    "movie",
+    "series"
+   ],
+   "resources": [
+    "addon_catalog",
+    "catalog",
+    "meta"
+   ],
+   "description": "The official addon for movie and series catalogs",
+   "streams": false,
+   "meta": true,
+   "catalogs": 8
+  }
+ ],
+ "search": [
+  {
+   "id": "tt12343534",
+   "type": "series",
+   "name": "Jujutsu Kaisen",
+   "year": 2020,
+   "id_kind": "imdb",
+   "addon": "Cinemeta",
+   "images": {
+    "poster": "https://m.media-amazon.com/images/M/MV5BMjBlNTExMDAtMWZjZi00MDc5LWFkMjgtZDU0ZWQ5ODk3YWY5XkEyXkFqcGc@._V1_SX250.jpg",
+    "background": "https://images.metahub.space/background/medium/tt12343534/img"
+   }
+  },
+  {
+   "id": "tt14331144",
+   "type": "movie",
+   "name": "Jujutsu Kaisen 0",
+   "year": 2022,
+   "id_kind": "imdb",
+   "addon": "Cinemeta",
+   "images": {
+    "poster": "https://images.metahub.space/poster/small/tt14331144/img",
+    "background": "https://images.metahub.space/background/medium/tt14331144/img",
+    "logo": "https://images.metahub.space/logo/medium/tt14331144/img"
+   }
+  },
+  {
+   "id": "tt38121182",
+   "type": "movie",
+   "name": "Jujutsu Kaisen: Execution",
+   "year": 2025,
+   "id_kind": "imdb",
+   "addon": "Cinemeta",
+   "images": {
+    "poster": "https://m.media-amazon.com/images/M/MV5BODMxOWIxYzAtNTNiYi00MTk5LWE2MjUtNjM1MTg3YmQ5NTlhXkEyXkFqcGc@._V1_SX250.jpg",
+    "background": "https://images.metahub.space/background/medium/tt38121182/img"
+   }
+  },
+  {
+   "id": "tt36956670",
+   "type": "movie",
+   "name": "Jujutsu Kaisen: Hidden Inventory / Premature Death - The Movie",
+   "year": 2025,
+   "id_kind": "imdb",
+   "addon": "Cinemeta",
+   "images": {
+    "poster": "https://m.media-amazon.com/images/M/MV5BZmRlYzE5YTAtOTMyOS00MTY3LTg2MmYtMTU5Y2E2ODg5ZjNiXkEyXkFqcGc@._V1_SX250.jpg",
+    "background": "https://images.metahub.space/background/medium/tt36956670/img"
+   }
+  },
+  {
+   "id": "tt14524948",
+   "type": "series",
+   "name": "Blind Wave: Jujutsu Kaisen Reaction",
+   "year": 2021,
+   "id_kind": "imdb",
+   "addon": "Cinemeta",
+   "images": {
+    "poster": "https://m.media-amazon.com/images/M/MV5BN2M2MTIxM2ItMGYyMy00YmViLTliYzUtZWQwMTI4NTQwYzZlXkEyXkFqcGc@._V1_SX250.jpg",
+    "background": "https://images.metahub.space/background/medium/tt14524948/img"
+   }
+  }
+ ],
+ "title": {
+  "id": "tt12343534",
+  "type": "series",
+  "name": "Jujutsu Kaisen",
+  "seasons": [
+   {
+    "season": 0,
+    "episodes": 7,
+    "released": 7
+   },
+   {
+    "season": 1,
+    "episodes": 24,
+    "released": 24
+   },
+   {
+    "season": 2,
+    "episodes": 23,
+    "released": 23
+   },
+   {
+    "season": 3,
+    "episodes": 12,
+    "released": 12
+   },
+   {
+    "season": 4,
+    "episodes": 1,
+    "released": 1
+   }
+  ],
+  "image_fields": [
+   "background",
+   "logo",
+   "poster"
+  ]
+ },
+ "video_id": "tt12343534:1:1",
+ "answered": [],
+ "failed": [
+  "no installed addon offers streams for imdb ids (type series)"
+ ],
+ "streams": []
+}

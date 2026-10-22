@@ -16,6 +16,9 @@ Spirit Hunters season 2 (the acceptance case: dub + 1080p):
 Season 1 has three episodes with 720p subs only.  Every wording below is invented for the test;
 it is NOT a record of what real addons write (see tests/addon_checks.py for that).
 
+A third addon exists only when a test sets `state.cin`: "/cin" serves a RECORDED answer (the real Cinemeta,
+tests/data/addon-answers-cinemeta.json) rebuilt into addon responses by test_hub_stremio_real_cinemeta.py.
+
 `state.log` records every request path; `state.fail` = {"/str"} makes that addon answer 500 to everything, `state.fail_streams` only to stream requests;
 `state.slow` = {"/str": seconds} delays it.
 """
@@ -42,6 +45,7 @@ class State:
         self.fail_streams = set()
         self.slow = {}
         self.posts = []
+        self.cin = None          # a RECORDED addon (test_hub_stremio_real_cinemeta.py) served at /cin: see Handler.cinemeta
         self.library = [
             {"_id": "tt0000011", "name": "Old Film", "type": "movie", "removed": False, "_mtime": "2026-01-01T00:00:00.000Z",
              "state": {"timesWatched": 0, "flaggedWatched": 0, "timeOffset": 600000, "duration": 6000000, "lastWatched": "2026-05-01T00:00:00.000Z"}},
@@ -117,7 +121,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
     def do_GET(self):
         path = unquote(urlsplit(self.path).path)
         STATE.log.append(path)
-        addon = "/cat" if path.startswith("/cat/") else "/str" if path.startswith("/str/") else None
+        addon = ("/cat" if path.startswith("/cat/") else "/str" if path.startswith("/str/")
+                 else "/cin" if path.startswith("/cin/") and STATE.cin else None)
         if addon is None:
             return self._send(404, {})
         if addon in STATE.slow:
@@ -125,6 +130,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if addon in STATE.fail:
             return self._send(500, {"err": "boom"})
         rest = path[len(addon):]
+        if addon == "/cin":
+            return self.cinemeta(rest)
         if addon in STATE.fail_streams and "/stream/" in rest:
             return self._send(500, {"err": "boom"})
         if rest == "/manifest.json":
@@ -153,6 +160,19 @@ class Handler(http.server.BaseHTTPRequestHandler):
             return self._send(200, {"meta": None})
         if kind == "stream":
             return self._send(200, {"streams": streams_for(pieces[2], addon)})
+        return self._send(404, {})
+
+    def cinemeta(self, rest):
+        """/cin: an addon whose answers come from STATE.cin = {"manifest": {...}, "search": f(type, query) -> metas,
+        "metas": {id: meta}}.  It has no stream resource, like the real Cinemeta."""
+        cin = STATE.cin
+        if rest == "/manifest.json":
+            return self._send(200, cin["manifest"])
+        pieces = (rest.strip("/")[:-5] if rest.endswith(".json") else rest.strip("/")).split("/")
+        if pieces[0] == "catalog" and len(pieces) == 4:
+            return self._send(200, {"metas": cin["search"](pieces[1], pieces[3].partition("=")[2].lower())})
+        if pieces[0] == "meta" and len(pieces) == 3:
+            return self._send(200, {"meta": cin["metas"].get(pieces[2])})
         return self._send(404, {})
 
     def do_POST(self):
