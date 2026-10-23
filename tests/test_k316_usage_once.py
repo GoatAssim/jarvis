@@ -31,9 +31,10 @@ def check(name, cond, detail=""):
 SRC = (ROOT / "jarvis-cli" / "jarvis" / "cli.py").read_text(encoding="utf-8")
 
 # --- source shape ------------------------------------------------------------
-check("cli.py prints the JARVIS_USAGE marker from exactly one place",
-      len(re.findall(r'print\(\s*"JARVIS_USAGE "', SRC)) == 1,
-      str(len(re.findall(r'print\(\s*"JARVIS_USAGE "', SRC))))
+# The marker line is built by wire.usage() now (nonce-tagged, test_bridge.py), not by a print() in cli.py: one
+# place = exactly one wire.usage( call and no hand-printed marker left.
+_places = len(re.findall(r'print\(\s*"JARVIS_USAGE "', SRC)) + len(re.findall(r"\bwire\.usage\(", SRC))
+check("cli.py prints the JARVIS_USAGE marker from exactly one place", _places == 1, str(_places))
 check("handle_ai_prompt calls _emit_usage exactly once",
       len(re.findall(r"^\s+_emit_usage\(result\)", SRC, re.M)) == 1)
 

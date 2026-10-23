@@ -324,13 +324,19 @@ def test_web_side_reads_the_catalog():
           '"/api/notifications/catalog"' in server and '["notify-config", "--catalog"]' in server)
     nj = (web / "public" / "notifications.js").read_text(encoding="utf-8")
     check("the toast renderer loads the catalog", "loadCatalog" in nj and "API.catalog" in nj)
-    check("it keeps its built-in position list as the fallback", 'const POSITIONS = ["top", "bottom"' in nj)
+    # L.30: no page keeps its own list (test_no_hardcoded_notify_lists.py); the toast host keeps ONE default
+    # position so a notification is still drawable before the catalog loads.
+    check("it keeps no position list of its own, only one default position",
+          'const POSITIONS = ["top", "bottom"' not in nj and 'const DEFAULT_POSITION = "bottom-right"' in nj)
     check("level 2 / level 5 are not hard-coded in show()", "level >= 2" not in nj.split("function show(")[1].split("function ")[0]
           if "function show(" in nj else True)
     sj = (web / "public" / "settings.js").read_text(encoding="utf-8")
-    check("Settings > Notifications builds from the catalog", "notifyCatalog()" in sj and "cat.presets" in sj and "cat.kinds" in sj)
-    check("Settings keeps the built-in lists as the fallback", "const LEVELS = [[1," in sj and "const NOTIFY_KINDS" in sj
-          and '["daemon", "Daemon problems", 2]' in sj)
+    check("Settings > Notifications builds from the catalog",
+          "notifyCatalog()" in sj and "pickerLevels()" in sj and "pickerKinds()" in sj and "pickerPositions()" in sj)
+    # L.30 replaced the built-in fallback lists: with no catalog the section says so instead of offering a stale list.
+    check("Settings keeps no list of levels or kinds of its own, and says so when the catalog can't load",
+          "const LEVELS = [[1," not in sj and "const NOTIFY_KINDS" not in sj
+          and "The notification options could not be loaded" in sj)
     check("Settings still never builds markup from a value", ".innerHTML" not in sj)
 
 

@@ -21,6 +21,19 @@ makes yt-dlp stop at once and leave its `.part` file for the next attempt.  That
 way; the engine still kills the process tree when the worker doesn't answer in time (a hook only
 runs while bytes move), and it never relies on this for post-processing.
 
+TWO OTHER JOBS, chosen by the arguments (brief 21):
+
+  * `{"op": "probe", "url": ..., "max_entries": N}` LOOKS at a playlist and downloads nothing: flat
+    extraction (titles and links only), at most N entries (never more than 100), answered as one
+    result line: `{"ok", "is_playlist", "title", "count", "more", "entries": [{"title", "url"}]}`;
+  * `"generic": true` in a download's arguments means the owner allowed yt-dlp's generic extractor
+    for this one link.  yt-dlp then fetches pages it knows nothing about and follows their
+    redirects itself, which `hub/netguard.py` cannot see, so in this process only (it dies with
+    the download): every socket connection to a private, loopback, link-local or otherwise
+    non-public address is refused, on every hop, and a stream that needs another program to
+    fetch it (live HLS, RTSP, MMS, RTMP: ffmpeg or rtmpdump connect on their own, outside this
+    guard) is refused before any byte moves.
+
 A pipe protocol and not a thread: a hub download must be killable (see engines/ytdlp.py), and yt-dlp
 runs in this process only.  Anything yt-dlp prints is moved to stderr so it can never be mistaken
 for a protocol line.
@@ -31,6 +44,7 @@ mistaken for an engine.  Nothing else imports it.
 
 import json
 import os
+import re
 import sys
 import threading
 import time
@@ -155,6 +169,167 @@ def _stop_class():
     return type("StopRequested", (base,), {})
 
 
+# --------------------------------------------------------------------------- probe
+
+PROBE_MAX = 100             # the hard ceiling, whatever the caller asks for
+_UNAVAILABLE_TITLES = frozenset(["[private video]", "[deleted video]"])
+_ID_RE = re.compile(r"^[\w-]{6,20}$")
+
+
+def _entry_url(entry):
+    """The http(s) link of one flat playlist entry, or ''."""
+    url = str(entry.get("url") or entry.get("webpage_url") or "").strip()
+    if re.match(r"^https?://", url, re.I):
+        return url[:2048]
+    if url and str(entry.get("ie_key") or "").lower() == "youtube" and _ID_RE.match(url):
+        return "https://www.youtube.com/watch?v=" + url      # YouTube sometimes gives a bare id
+    return ""
+
+
+def probe(arguments):
+    """Look at `arguments["url"]` without downloading: a playlist's title, size and first entries."""
+    url = str(arguments.get("url") or "").strip()
+    if not url:
+        return {"ok": False, "error": "url is required"}
+    try:
+        cap = int(arguments.get("max_entries") or PROBE_MAX)
+    except (TypeError, ValueError):
+        cap = PROBE_MAX
+    cap = max(1, min(cap, PROBE_MAX))
+    try:
+        import yt_dlp
+    except ImportError:
+        return {"ok": False, "error": "yt-dlp isn't installed (pip install yt-dlp)"}
+    opts = {"quiet": True, "no_warnings": True, "ignoreconfig": True, "socket_timeout": 30,
+            "skip_download": True, "extract_flat": "in_playlist", "noplaylist": False,
+            "playlistend": cap, "lazy_playlist": True}
+    try:
+        with yt_dlp.YoutubeDL(opts) as ydl:
+            info = ydl.extract_info(url, download=False)
+    except Exception as exc:  # noqa: BLE001 - always answer with a result
+        return {"ok": False, "error": "couldn't look at that link: %s" % exc}
+    if not isinstance(info, dict):
+        return {"ok": False, "error": "yt-dlp found nothing at that link"}
+    raw = info.get("entries")
+    if raw is None:
+        return {"ok": True, "is_playlist": False, "title": info.get("title")}
+    entries, unavailable, unusable = [], 0, 0
+    try:
+        for entry in raw:
+            if len(entries) + unavailable + unusable >= cap:
+                break
+            if not isinstance(entry, dict):
+                unusable += 1
+                continue
+            title = str(entry.get("title") or "").strip()
+            if title.lower() in _UNAVAILABLE_TITLES:
+                unavailable += 1
+                continue
+            link = _entry_url(entry)
+            if not link:
+                unusable += 1
+                continue
+            entries.append({"title": title[:200], "url": link})
+    except Exception as exc:  # noqa: BLE001 - a listing that breaks half way is still an answer
+        if not entries:
+            return {"ok": False, "error": "couldn't read the playlist: %s" % exc}
+    total = info.get("playlist_count")
+    if isinstance(total, bool) or not isinstance(total, int) or total < 0:
+        total = None
+    seen = len(entries) + unavailable + unusable
+    return {"ok": True, "is_playlist": True, "title": str(info.get("title") or "").strip()[:200],
+            "count": total if total is not None else seen,
+            "more": bool(total is not None and total > seen) or (total is None and seen >= cap),
+            "entries": entries, "unavailable": unavailable, "unusable": unusable}
+
+
+# --------------------------------------------------------------------------- generic guard
+
+OK_PROTOCOLS = frozenset(["http", "https", "m3u8_native", "http_dash_segments"])
+REFUSED = "private or local address"        # engines/ytdlp.py reads this as a permanent failure
+
+
+def _peer_check(sock, address, is_public=None):
+    """The address a connect() may really use, or an OSError.  A host NAME is resolved here and
+    every answer must be public; the first one is what gets used, so the name is not looked up
+    a second time by the connect (no rebinding window)."""
+    import ipaddress
+    import socket
+    if is_public is None:
+        from jarvis.hub import netguard
+        is_public = netguard._is_public
+    if sock.family not in (socket.AF_INET, socket.AF_INET6) or not isinstance(address, tuple) or len(address) < 2:
+        return address                                   # a local (unix) socket is not the network
+    host, port = str(address[0]), address[1]
+    bare = host.split("%")[0]
+    try:
+        ipaddress.ip_address(bare)
+    except ValueError:
+        try:
+            infos = socket.getaddrinfo(host, port, sock.family, socket.SOCK_STREAM)
+        except (OSError, UnicodeError) as exc:
+            raise OSError("couldn't resolve %s: %s" % (host[:80], exc))
+        if not infos or any(not is_public(i[4][0]) for i in infos):
+            raise OSError("%s is a %s: refused for the generic extractor" % (host[:80], REFUSED))
+        return infos[0][4]
+    if not is_public(bare):
+        raise OSError("%s is a %s: refused for the generic extractor" % (host[:80], REFUSED))
+    return address
+
+
+def install_network_guard(is_public=None):
+    """Refuse non-public peers for every connection this process makes.  Returns a function that
+    puts things back (the tests use it; the worker never does: it exits after the download)."""
+    import socket
+    real_connect, real_connect_ex = socket.socket.connect, socket.socket.connect_ex
+
+    def connect(self, address):
+        return real_connect(self, _peer_check(self, address, is_public))
+
+    def connect_ex(self, address):
+        try:
+            address = _peer_check(self, address, is_public)
+        except OSError:
+            return 13                                    # EACCES: connect_ex reports, it doesn't raise
+        return real_connect_ex(self, address)
+
+    socket.socket.connect, socket.socket.connect_ex = connect, connect_ex
+
+    def restore():
+        socket.socket.connect, socket.socket.connect_ex = real_connect, real_connect_ex
+    return restore
+
+
+def check_generic_format(info):
+    """Raise unless `info` (one file yt-dlp is about to fetch) is fetched by yt-dlp itself."""
+    info = info or {}
+    protocol = str(info.get("protocol") or "https")
+    if info.get("is_live") or protocol not in OK_PROTOCOLS:
+        raise RuntimeError(
+            "the generic extractor found a %s that another program would have to fetch (%s); that "
+            "can't be kept inside the %s guard, so it was refused"
+            % ("live stream" if info.get("is_live") else "stream", protocol, REFUSED))
+
+
+def apply_generic_guard(yt_dlp):
+    """Everything `"generic": true` turns on, in this process: the network guard and a YoutubeDL
+    that checks each file before fetching it."""
+    restore = install_network_guard()
+    base = yt_dlp.YoutubeDL
+
+    class GuardedYoutubeDL(base):
+        def dl(self, name, info, *args, **kwargs):
+            check_generic_format(info)
+            return super().dl(name, info, *args, **kwargs)
+
+    yt_dlp.YoutubeDL = GuardedYoutubeDL
+
+    def undo():
+        yt_dlp.YoutubeDL = base
+        restore()
+    return undo
+
+
 def main():
     global _proto
     _proto = sys.stdout
@@ -167,15 +342,24 @@ def main():
     except Exception as exc:  # noqa: BLE001
         result = {"ok": False, "error": "bad worker input: %s" % exc}
     else:
-        try:
-            from jarvis import ytdl_tools
-            work_dir = str(arguments.get("output_dir") or ".")
-            reporter = _Reporter(work_dir, _stop_class())
-            result = ytdl_tools.download_with_hooks(
-                arguments, progress_hooks=[reporter.progress], postprocessor_hooks=[reporter.postprocess],
-                plan_hook=reporter.plan)
-        except Exception as exc:  # noqa: BLE001 - always answer with a result line
-            result = {"ok": False, "error": "download failed: %s" % exc}
+        if arguments.get("op") == "probe":
+            try:
+                result = probe(arguments)
+            except Exception as exc:  # noqa: BLE001
+                result = {"ok": False, "error": "probe failed: %s" % exc}
+        else:
+            try:
+                from jarvis import ytdl_tools
+                if arguments.get("generic") is True:
+                    import yt_dlp
+                    apply_generic_guard(yt_dlp)
+                work_dir = str(arguments.get("output_dir") or ".")
+                reporter = _Reporter(work_dir, _stop_class())
+                result = ytdl_tools.download_with_hooks(
+                    arguments, progress_hooks=[reporter.progress], postprocessor_hooks=[reporter.postprocess],
+                    plan_hook=reporter.plan)
+            except Exception as exc:  # noqa: BLE001 - always answer with a result line
+                result = {"ok": False, "error": "download failed: %s" % exc}
     if reporter is not None and reporter.stopped:
         # yt-dlp may have turned our exception into an error message; what happened is "stopped".
         result = {"ok": False, "stopped": reporter.stopped, "error": "stopped (%s)" % reporter.stopped}

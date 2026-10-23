@@ -6,6 +6,7 @@
     <div class="top__actions">
       <button type="button" class="btn" id="pauseAll" title="Pause every download that can be paused">Pause all</button>
       <button type="button" class="btn" id="resumeAll" title="Resume every paused download">Resume all</button>
+      <button type="button" class="btn" id="clearFinished" title="Hide every finished, failed, cancelled or lost row that another tool (Steam, Playnite ...) reported. Downloads the hub made itself and the History tab are not touched, and no file is touched.">Clear finished</button>
       <label class="speedq" title="Limit the total download speed">
         <span class="speedq__l">Speed</span>
         <select id="speedQuick" aria-label="Speed limit for all downloads"></select>
@@ -50,6 +51,7 @@
           <option value="source">Source</option>
           <option value="group">Batch</option>
         </select>
+        <button type="button" class="btn btn--sm" id="showHidden" aria-pressed="false" title="Also list the rows you hid, dimmed. Nothing hidden is deleted.">Show hidden</button>
       </div>
       <div class="list" id="list" role="listbox" tabindex="0" aria-label="Downloads"></div>
     </section>

@@ -17,11 +17,39 @@ its fallback releases, which only bulk_run's own rows carry.
 """
 
 
+import json
+import os
+
+
+def _is_chat_guest():
+    """True when this turn answers a chat message from someone who is NOT the owner.  No chat context
+    (the PC, a scheduled job) is the owner's own.  Same rule as download_hub._is_chat_guest: an
+    unreadable value counts as a guest, because a permission check fails closed."""
+    raw = os.environ.get("JARVIS_CHANNEL_SENDER") or ""
+    if not raw.strip():
+        return False
+    try:
+        data = json.loads(raw)
+    except Exception:  # noqa: BLE001  (bad JSON, or nested too deep to read: either way, not the owner)
+        return True
+    if not isinstance(data, dict):
+        return True
+    if not data.get("platform") or not data.get("user_id"):
+        return False
+    return not data.get("is_owner")
+
+
+def _guest_refusal(tool):
+    return {"ok": False, "error": "%s is the owner's: someone in a chat can't use it" % tool}
+
+
 def _fail(label, exc):
     return {"ok": False, "error": "%s failed: %s" % (label, exc)}
 
 
 def tool_bulk_plan(args):
+    if _is_chat_guest():
+        return _guest_refusal("bulk_plan")
     try:
         args = args or {}
         from ..hub import settings as settings_mod
@@ -82,6 +110,8 @@ def tool_bulk_plan(args):
 
 
 def tool_bulk_run(args):
+    if _is_chat_guest():
+        return _guest_refusal("bulk_run")
     try:
         args = args or {}
         from ..hub.store import Store

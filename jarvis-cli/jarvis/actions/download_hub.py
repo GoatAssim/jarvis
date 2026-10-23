@@ -910,7 +910,10 @@ TOOL_PACK_INSTRUCTION = (
     "file). Do not put video options on dl_add. ytdl_download is still the tool for 'download this "
     "video now' (and with background=true it queues here too). Torrents go through the Stremio server "
     "(stack_status says whether it is up; stremio_prepare sets it up the first time). Per-download "
-    "notification / speed / open-when-done choices go on the queued row with dl_prefs and its id."
+    "notification / speed / open-when-done choices go on the queued row with dl_prefs and its id. "
+    "present_download_status(ids|group|query): after you queue with dl_add, call it ONCE with the ids dl_add "
+    "returned (or the group id for a batch) to show a live card (bar, speed, Pause/Cancel, Open when done); "
+    "the card updates itself, so never call it again to 'refresh'. It is read-only: it starts, stops and changes nothing."
 )
 
 # ---------------------------------------------------------------------------

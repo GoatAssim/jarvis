@@ -170,21 +170,25 @@ check("E3 the panel asks that route and downloads the result",
 check("E3 the panel offers both formats", 'exportMem(p, "json")' in panel and 'exportMem(p, "text")' in panel)
 
 # ======================================================================= R1
-golden = json.loads((REPO / "tests" / "fixtures" / "l21_recall_golden.json").read_text(encoding="utf-8"))
-check("R1 the fixture has cases", len(golden["cases"]) >= 4)
-for case in golden["cases"]:
-    records = case["records"]
-    known = {r["id"] for r in records}
-    for item in case["good"]:
-        res = recall_check.check_reply(item["reply"], records, case["message"])
-        label = f"R1 [{case['name']}] good: {item['reply'][:50]}"
-        check(label + " -> every recall claim is grounded", res["ungrounded"] == 0, json.dumps(res["statements"]))
-        check(label + " -> cites only ids from the block", set(res["cited_ids"]) <= known, str(res["cited_ids"]))
-        if "expect_ids" in item:
-            check(label + " -> cites exactly the expected ids", res["cited_ids"] == item["expect_ids"], str(res["cited_ids"]))
-    for reply in case["bad"]:
-        res = recall_check.check_reply(reply, records, case["message"])
-        check(f"R1 [{case['name']}] bad: {reply[:50]} -> flagged", res["ungrounded"] >= 1, json.dumps(res["statements"]))
+GOLDEN_FILE = REPO / "tests" / "fixtures" / "l21_recall_golden.json"
+if not GOLDEN_FILE.exists():   # tests/fixtures is kept out of the shared copy (private conversations)
+    print("SKIPPED: tests/fixtures/l21_recall_golden.json is not in this copy (the golden recall cases only)")
+else:
+    golden = json.loads(GOLDEN_FILE.read_text(encoding="utf-8"))
+    check("R1 the fixture has cases", len(golden["cases"]) >= 4)
+    for case in golden["cases"]:
+        records = case["records"]
+        known = {r["id"] for r in records}
+        for item in case["good"]:
+            res = recall_check.check_reply(item["reply"], records, case["message"])
+            label = f"R1 [{case['name']}] good: {item['reply'][:50]}"
+            check(label + " -> every recall claim is grounded", res["ungrounded"] == 0, json.dumps(res["statements"]))
+            check(label + " -> cites only ids from the block", set(res["cited_ids"]) <= known, str(res["cited_ids"]))
+            if "expect_ids" in item:
+                check(label + " -> cites exactly the expected ids", res["cited_ids"] == item["expect_ids"], str(res["cited_ids"]))
+        for reply in case["bad"]:
+            res = recall_check.check_reply(reply, records, case["message"])
+            check(f"R1 [{case['name']}] bad: {reply[:50]} -> flagged", res["ungrounded"] >= 1, json.dumps(res["statements"]))
 
 # a saved item that was NOT in the block cannot ground a claim
 reset()

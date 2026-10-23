@@ -34,7 +34,7 @@ os.environ["HOME"] = HOME
 os.environ["USERPROFILE"] = HOME
 os.environ["JARVIS_HOME"] = os.path.join(HOME, ".jarvis")
 
-from jarvis import daemons, notifier  # noqa: E402  (after HOME is redirected)
+from jarvis import daemons, notifier, tool_daemons  # noqa: E402  (after HOME is redirected)
 
 PASS, FAIL = [], []
 
@@ -76,12 +76,16 @@ class _Patched:
         self.start, self.notify = start, notify
 
     def __enter__(self):
-        self._old = (daemons.start, notifier.notify)
+        self._old = (daemons.start, notifier.notify, tool_daemons.sync_if_stale)
         daemons.start, notifier.notify = self.start, self.notify
+        # autostart_all() first registers the daemons installed tools declare. Since the Download Hub ships
+        # `download_hub-hub` with autostart on, that call added a third failure (a fake start() fails for every
+        # daemon) to a test that counts only the daemons IT registered. Keep the registry to the test's own.
+        tool_daemons.sync_if_stale = lambda *a, **k: None
         return self
 
     def __exit__(self, *exc):
-        daemons.start, notifier.notify = self._old
+        daemons.start, notifier.notify, tool_daemons.sync_if_stale = self._old
         return False
 
 
@@ -212,8 +216,12 @@ def test_real_notifier_writes_the_inbox_record():
 
 def test_settings_has_a_daemon_problems_row():
     src = (ROOT / "web" / "public" / "settings.js").read_text(encoding="utf-8")
+    # Since L.30 settings.js keeps no list of kinds: it draws a row for every registry kind with `settings`
+    # true (pickerKinds), so the row exists when the registry says so.
+    from jarvis import notify_registry as reg
     check("Settings > Notifications has the `daemon` row",
-          '["daemon", "Daemon problems", 2]' in src)
+          any(k["id"] == "daemon" and k["label"] == "Daemon problems" and k["level"] == 2 and k["settings"]
+              for k in reg.catalog()["kinds"]) and "pickerKinds()" in src)
 
 
 if __name__ == "__main__":

@@ -1,7 +1,7 @@
 """Local players for playback tier 3 (plan 9.4): mpv or VLC on a finished file or on the
 streaming server's URL.  This is the one tier where Jarvis can control playback afterwards, so
-mpv is started with a JSON IPC endpoint (`--input-ipc-server`); nothing in phase 7 talks to it
-yet (mpv IPC control is not built), but the endpoint is where a later phase will.
+mpv is started with a JSON IPC endpoint (`--input-ipc-server`), and hub/stremio/mpv.py (the `play_control`
+tool) talks to it: pause, resume, seek, stop, volume, status, on the player recorded here and no other.
 
 What may be played is decided HERE, not by the caller:
 

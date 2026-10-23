@@ -687,7 +687,8 @@ OWNER_ONLY_TOOLS = frozenset({
     "person_review", "await_reply",
     # Download hub (R3): tools that queue downloads, hide rows from the owner's list, or read the
     # owner's private Stremio library.  A guest keeps dl_list / dl_status.  The generated
-    # dl_add_<id> tools are NOT listed (they have no fixed names); their handlers refuse a guest.
+    # dl_add_<id> tools have no fixed names, so they are not listed here: hidden_from_sender()
+    # adds every loaded tool whose name starts with GENERATED_ADD_PREFIX (their handlers also refuse).
     "dl_add", "dl_add_ytdlp", "dl_add_stremio", "dl_dismiss",
     "bulk_plan", "bulk_run", "stremio_library", "stremio_mark_watched",
 })
@@ -709,15 +710,32 @@ def _chat_sender_is_guest():
     return not data.get("is_owner")
 
 
+# tool_download_add.NAME_PREFIX: the Download Hub generates a dl_add_<id> tool for every provider
+# file that declares an `add` block.  They queue downloads for the owner, so a guest gets none.
+GENERATED_ADD_PREFIX = "dl_add_"
+
+
+def _generated_add_tools():
+    """The names of the loaded dl_add_<id> tools (offered schemas and runnable handlers alike).
+    Empty when the registry is not built yet; the three callers only ever test `name in hidden`."""
+    try:
+        from . import tool_registry
+        names = set(getattr(tool_registry, "TOOL_INDEX", None) or ()) | set(TOOLS)
+    except Exception:  # noqa: BLE001  (never let a guest check break the offer)
+        return frozenset()
+    return frozenset(n for n in names if isinstance(n, str) and n.startswith(GENERATED_ADD_PREFIX))
+
+
 def hidden_from_sender():
     """Tool names that must not be offered to / listed for the current sender.
 
     Two independent reasons a name can be hidden: the sender is a guest in a
-    chat (OWNER_ONLY_TOOLS), or this is a Tool Maker panel turn (L.53), in
-    which the conversation may only EDIT the editor's text, so the tools that
-    write files or run programs are withheld (tool_maker.WITHHELD_TOOLS). The
-    second is enforced at execution too -- see run_tool and withheld_refusal."""
-    base = OWNER_ONLY_TOOLS if _chat_sender_is_guest() else frozenset()
+    chat (OWNER_ONLY_TOOLS, and the generated dl_add_<id> tools), or this is a
+    Tool Maker panel turn (L.53), in which the conversation may only EDIT the
+    editor's text, so the tools that write files or run programs are withheld
+    (tool_maker.WITHHELD_TOOLS). The second is enforced at execution too -- see
+    run_tool and withheld_refusal. Always a plain frozenset."""
+    base = (OWNER_ONLY_TOOLS | _generated_add_tools()) if _chat_sender_is_guest() else frozenset()
     return base | tool_maker.withheld_tools()
 
 

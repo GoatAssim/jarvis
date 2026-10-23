@@ -761,7 +761,8 @@ TOOL_PACK_INSTRUCTION = (
     "itself). With no season named the plan takes the latest and says so: pass that on. "
     "To play: play_episode takes a title or an IMDb id, plus season and episode for a series (several titles match: ask); it plays "
     "a finished download or a torrent stream in mpv/VLC when it has one, else opens the episode's stream list in stremio-web. "
-    "play_local plays a finished download by id or title; stremio_open opens a stremio-web screen."
+    "play_local plays a finished download by id or title; stremio_open opens a stremio-web screen. play_control pauses, seeks, "
+    "stops or sets the volume of the mpv Jarvis opened. dl_add also takes the full path of a .torrent file on this PC."
 )
 
 # stremio_prepare changes the server's own settings; server_cache_clear stops it and deletes files.

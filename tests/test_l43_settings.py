@@ -442,7 +442,13 @@ def test_model_cannot_reach_the_writers():
     check("only cli.py imports settings_admin; nothing else calls the tunable writers", offenders == [], offenders)
     from jarvis import tools
     names = [n.lower() for n in tools.TOOLS]
-    check("no model tool is named for settings or tunables", not [n for n in names if "setting" in n or "tunable" in n], names)
+    # `dl_settings` is the Download Hub's own tool (the hub's settings file, e.g. allow_private_hosts), not a writer of
+    # THIS Settings modal / tunables: it never imports settings_admin (the source scan above proves that for every
+    # module), and it is confirm-gated. Anything else named for settings or tunables still fails here.
+    from jarvis.actions import download_hub as _download_hub
+    check("dl_settings (the hub's own settings) is confirm-gated", "dl_settings" in _download_hub.TOOL_CONFIRM_REQUIRED)
+    check("no model tool is named for settings or tunables",
+          not [n for n in names if ("setting" in n or "tunable" in n) and n != "dl_settings"], names)
     from jarvis import reserved_names
     check("settings-admin is a reserved command name", "settings-admin" in reserved_names.RESERVED_NAMES)
 

@@ -6,11 +6,15 @@ a dropped connection that resumes with Range after the server "restarts" and for
 registrations; a torrent with no peers (no_seeders, and the switch to a ranked fallback); pause and
 cancel; the server being down (engine unavailable, the daemon retries instead of failing); the SSRF
 guard (only the Stremio server's own host:port is let through, the owner's allow-list is untouched);
-a .torrent link (fetched under the guard, registered with POST /create); the router + dedupe
+a .torrent link (fetched under the guard, registered with POST /create); a .torrent FILE on this PC
+(brief 22: claimed by the engine's own route rule, kept in the hub's folder, registered with POST /create, and
+never stored by its path); the router + dedupe
 (two pastes of one magnet are one download); and the hub settings the engine reads.
 
 Run: python tests/test_hub_stremio_engine.py
 """
+import hashlib
+import json
 import os
 import shutil
 import sys
@@ -33,7 +37,7 @@ from jarvis.hub import engines, netguard, service, states  # noqa: E402
 from jarvis.hub.engines import stremio as seng  # noqa: E402
 from jarvis.hub.engines.base import EngineContext, Outcome  # noqa: E402
 from jarvis.hub.store import Store  # noqa: E402
-from jarvis.hub.stremio import links, server as sserver  # noqa: E402
+from jarvis.hub.stremio import links, server as sserver, torrentfile  # noqa: E402
 
 passed = failed = 0
 _n = [0]
@@ -268,6 +272,131 @@ def test_torrent_file():
     check("a non-.torrent body is refused", out.kind == Outcome.FAILED)
 
 
+def make_torrent(length=7000, name="clip.mp4"):
+    """A small real bencoded .torrent: -> (bytes, infohash)."""
+    info = b"d6:lengthi%de4:name%d:%s12:piece lengthi16384e6:pieces20:%se" % (length, len(name), name.encode(), b"p" * 20)
+    return b"d8:announce13:udp://t.x:1/a4:info" + info + b"e", hashlib.sha1(info).hexdigest()
+
+
+def test_local_torrent_file():
+    """Brief 22.  Against the FAKE Stremio server; Linux only."""
+    store, lib = env()
+    engines.load(force=True)
+    secret = Path(HOME) / ("secret folder %d" % _n[0]) / "\u043c\u043e\u0438 \u0444\u0430\u0439\u043b\u044b"     # spaces and non-ASCII
+    secret.mkdir(parents=True)
+    blob, digest = make_torrent(7000)
+    good = secret / "\u041f\u0440\u0438\u0432\u0435\u0442 \u043c\u0438\u0440 clip.torrent"
+    good.write_bytes(blob)
+    ST.torrents[digest] = {"name": "clip", "files": [("clip/clip.mp4", 7000)]}
+    ST.blob_hash = digest
+
+    hit = seng._match(str(good), {})
+    check("_match claims a good .torrent path (spaces and non-ASCII in it)", hit and hit["kind"] == "torrent" and "file" in hit["reason"])
+    check("...and its source is a magnet with the infohash and the bare file name, no folder",
+          hit["source"].startswith("magnet:?xt=urn:btih:" + digest) and "secret" not in hit["source"] and str(secret) not in hit["source"]
+          and links.parse_magnet(hit["source"])["name"] == "\u041f\u0440\u0438\u0432\u0435\u0442 \u043c\u0438\u0440 clip")
+    check("the engine claimed it at the router's priority, ahead of the http engine", hit["source"] == seng._match('"%s"' % good, {})["source"])
+    check("a copy was kept in the hub's own folder, named by the infohash", (torrentfile.staging_dir() / (digest + ".torrent")).read_bytes() == blob)
+
+    r = service.add_items([str(good)], store=store)
+    row = store.get_item(r["added"][0]["id"])
+    check("add_items queues it for the stremio engine", r["ok"] and row["engine"] == "stremio" and ".torrent file" in r["added"][0]["reason"])
+    check("the stored source_url holds no folder name", "secret" not in row["source_url"] and str(HOME) not in row["source_url"])
+    again = service.add_items([str(good)], store=store)
+    check("the same file twice is one download", again["added"][0]["duplicate"] is True)
+    as_magnet = service.add_items([magnet(digest)], store=store)
+    check("...and the same torrent as a plain magnet is the same download", as_magnet["added"][0]["duplicate"] is True)
+
+    item = store.claim_next({"default": 100}, 100)
+    leaked_title = store.get_item(item["id"])["title"]
+    print("   (info) title the add code gave the row before it ran: %r" % leaked_title)
+    check("(known, hub/service.py is not ours) the add code titles the row with the text it was given, so the title starts as the path",
+          torrentfile.looks_like_path(leaked_title))
+    out = run(store, item)
+    row = store.get_item(item["id"])
+    check("the kept file is registered with POST /create and downloads", out.kind == Outcome.DONE and ST.blobs == [blob.hex()]
+          and Path(out.dest_file).stat().st_size == 7000)
+    ref = row["source_ref"]
+    check("source_ref holds the file name, size and infohash",
+          ref.get("torrent_file") == {"name": "\u041f\u0440\u0438\u0432\u0435\u0442 \u043c\u0438\u0440 clip.torrent", "size": len(blob), "infohash": digest}
+          and ref.get("infohash") == digest)
+    check("nothing stored on the row names the folder (title, source, source_ref, events)",
+          "secret" not in json.dumps(row, default=str) and "secret" not in json.dumps(store.list_events(row["id"]) if hasattr(store, "list_events") else [], default=str))
+    check("the title is no longer a path", not torrentfile.looks_like_path(row["title"]))
+
+    # The scrub happens BEFORE anything else (the HTTP step names the row after the video later anyway), so test it with the
+    # server unreachable: the run stops at once, and the row must already have lost the path from its title.
+    blob2, digest2 = make_torrent(8000, "other.mp4")
+    path2 = secret / "other.torrent"
+    path2.write_bytes(blob2)
+    r2 = service.add_items([str(path2)], store=store)
+    row2 = store.get_item(r2["added"][0]["id"])
+    check("(before it runs, the row's title is the typed path: the add code's doing)", torrentfile.looks_like_path(row2["title"]))
+    claimed2 = store.claim_next({"default": 100}, 100)
+    live_url = os.environ["JARVIS_STREMIO_SERVER_URL"]
+    os.environ["JARVIS_STREMIO_SERVER_URL"] = "http://127.0.0.1:9"
+    sserver.forget_probe()
+    try:
+        out_down = run(store, claimed2)
+    finally:
+        os.environ["JARVIS_STREMIO_SERVER_URL"] = live_url
+        sserver.forget_probe()
+    scrubbed = store.get_item(claimed2["id"])
+    check("with the server down the run fails at once, retryably (nothing downloaded)", out_down.kind == Outcome.FAILED and out_down.retryable)
+    check("...and the row's title is already just the file's name, not the path", scrubbed["title"] == "other.torrent"
+          and "secret" not in json.dumps(scrubbed, default=str))
+
+    # the kept copy is gone (moved machine, cleaned folder): the row falls back to asking the swarm, and says so
+    (torrentfile.staging_dir() / (digest + ".torrent")).unlink()
+    ST.blobs.clear()
+    ST.registered.clear()
+    ST.torrents[digest] = {"name": "clip", "files": [("clip/clip.mp4", 7000)]}
+    item2 = store.add_item(engine="stremio", source_url=magnet(digest, "&dn=x"), title="", kind="torrent",
+                           options={"filename": "again.mp4"})[0]
+    item2 = store.claim_next({"default": 100}, 100)
+    store.update_item(item2["id"], {"source_ref": {"torrent_file": {"name": "x.torrent", "size": 1, "infohash": digest}}})
+    out2 = run(store, store.get_item(item2["id"]))
+    check("with the kept copy gone it registers by infohash instead (no blob posted) and still downloads", out2.kind == Outcome.DONE and not ST.blobs)
+
+    # a magnet that has no kept copy never posts a blob
+    ST.blobs.clear()
+    item3 = claim(store, magnet(H3))
+    run(store, item3)
+    check("an ordinary magnet never posts a blob", not ST.blobs)
+
+    # bad paths: nothing is queued, and each says one sentence naming only the file
+    before = len(store.list_items(limit=500))
+    bad = {}
+    folder = secret / "isadir.torrent"
+    folder.mkdir()
+    bad["directory"] = (str(folder), "folder")
+    bad["missing"] = (str(secret / "nope.torrent"), "can't find")
+    big = secret / "big.torrent"
+    big.write_bytes(b"d" + b"x" * (torrentfile.MAX_BYTES + 10))
+    bad["oversized"] = (str(big), "larger than")
+    text = secret / "notes.torrent"
+    text.write_text("dear diary, this is not a torrent\n")
+    bad["a text file named .torrent"] = (str(text), "isn't a .torrent file")
+    link = secret / "alias.torrent"
+    link.symlink_to(good)
+    bad["a link to somewhere else"] = (str(link), "link to somewhere else")
+    bad["a relative path"] = ("some/where/x.torrent", "full path")
+    bad["a network share"] = ("//server/share/x.torrent", "network share")
+    for label, (path, word) in bad.items():
+        found, sentence = torrentfile.local_torrent(path)
+        check("bad path (%s): one sentence, nothing returned to queue" % label, found is None and sentence and word in sentence and "\n" not in sentence)
+        check("bad path (%s): the sentence never echoes the folder" % label, "secret" not in sentence and str(HOME) not in sentence)
+        res = service.add_items([path], store=store)
+        check("bad path (%s): nothing is queued" % label, not res["ok"] and not res["added"])
+        check("bad path (%s): the engine's rule does not claim it" % label, seng._match(path, {}) is None)
+    check("no row was added by any bad path", len(store.list_items(limit=500)) == before)
+    check("a bad path left no kept copy (only the second good file's is there)", {p.name for p in torrentfile.staging_dir().iterdir()} == {digest2 + ".torrent"})
+    check("a plain URL or a missing non-.torrent path is not this feature's business",
+          torrentfile.local_torrent("http://x/y") == (None, None) and torrentfile.local_torrent("/tmp/readme.txt") == (None, None))
+    check("the cap is the same one the link fetch uses", torrentfile.MAX_BYTES == seng.MAX_TORRENT_FILE == 5 * 1024 * 1024)
+    check("a path is not echoed by the one that is too long either", torrentfile.local_torrent("/" + "a" * 5000 + ".torrent") == (None, None))
+
+
 def test_router_and_dedupe():
     store, lib = env()
     engines.load(force=True)
@@ -301,6 +430,7 @@ try:
     test_pause_cancel_and_down()
     test_ssrf()
     test_torrent_file()
+    test_local_torrent_file()
     test_router_and_dedupe()
 finally:
     fake.stop(FAKE)

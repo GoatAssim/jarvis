@@ -54,6 +54,19 @@ things that were already fixed once.
   add tool (`dl_add_ytdlp`, `dl_add_stremio`), never on `dl_add`. A tool-supplied provider's `dl_add_<id>` is
   generated from the `add` block of its `TOOL_DOWNLOADS` entry (`tool_download_add.py`), never written by hand.
   Every add tool is the owner's: a chat guest is refused in the handler, whatever an allow-list says.
+  A provider row is hidden, never deleted, by `dl_dismiss` (`Store.dismiss_items`: only a non-hub row that is
+  `unknown` or final; `items.dismissed_at`; `list_items` and `counts` skip it; it reappears when its provider
+  reports it live again). `unknown` is not permanent: `providers.settle_unknown` (daemon housekeeping) moves a
+  non-stale one to `cancelled` after `unknown_settle_hours` (default 24); a stale row (provider down) never settles.
+  Retention is real: the daemon calls `Store.prune_history` at start and hourly, deleting final history ROWS older
+  than `retention.keep_history_days` (0 = keep forever). Nothing deletes a file; `retention.auto_delete_files` still does nothing.
+- **In-chat download card and the web back end.** `present_download_status` (actions/download_status_card.py) is a read-only tool in the `downloads` group with no confirm gate: it takes an id, ids, a group or a title query, prints one `download_status` card line through `wire.media` (at most 8 cards) and returns a one-line text status. The card (`web/public/download-status-card.js`) follows `/api/hub/stream` and falls back to `/api/hub/card`; untrusted text goes in with `textContent` only. `jarvis hub-admin <op>` (hub_admin.py; JSON on stdin, JSON on stdout, `watch` = JSON lines) is the web back end behind `/api/hub/*`: reads `card`, `list`, `settings`, `history`, `file`, `thumb`; row-only writes `history_remove`, `history_clear`, `redownload`, `reorder`, refused for an unattended process (its other ops, `stremio_status`, `stremio_save`, `browse` and `mkdir`, are in the Stremio and picker rules). No model tool reaches it. Paths and thumbnails are resolved from the database by item id, never taken from the caller, and a file must sit inside the library root or the provider's `open_roots`. Routes: GET `/api/hub/card`, `list`, `settings`, `history`, `thumb/:id`, `file/:id`, `stream`; POST `/api/hub/history/remove`, `history/clear`, `redownload`, `reorder` (the Stremio and picker routes, `/api/hub/stremio`, `/stremio/paths`, `/browse`, `/browse/new-folder`, are in their own rules); reads need a loopback Host, writes also the `X-Jarvis-Hub` header.
+- **Panel buttons come from the row.** A Downloads-panel button is drawn only when the row's own `capabilities` contain its verb; the toggle (Pause / Resume / Start now / Retry) is `primaryAction` in hub_ui/tool.js and calls the same tool the model uses. A row with no pause or resume says why in words (`controlNote`); never invent a verb a provider did not declare. A control tool's `note` is shown as a warning (`controlNotice`).
+- **`hub/steam.py` stays read-only and inert (N5).** No subprocess, no PowerShell, no network, no steam:// command
+  (`test_hub_steam_alive.py` checks the imports). A Steam row that is running never carries a live percent,
+  done-bytes, speed or ETA (speed_bps / eta_s are sent as None on purpose); "stalled" needs the manifest and every
+  readable second signal flat for `STALL_SECONDS`, and an unreadable signal is "unavailable", never "flat".
+  `steam-checks.py` keeps copies of `STALL_SECONDS` and `WRITES_MIN_BYTES_PER_S`.
 - **The Stremio half of the hub (`hub/engines/stremio.py`, `hub/stremio/`, `actions/stremio_stack.py`,
   `stremio_open.py`, `play_media.py`).** The engine is the HTTP engine's `stream_to_file` plus
   registration (`POST /<hash>/create`, then poll `stats.json`: a torrent with no peers never answers
@@ -83,6 +96,20 @@ things that were already fixed once.
   Tests: `test_hub_stremio_links.py`, `_engine.py`, `_tools.py`, `_detect.py` (a fake server in
   `tests/_hub_fake_stremio.py`); the older hub tests set `JARVIS_STREMIO_SERVER_URL` to a closed port
   so a real Stremio on the dev machine can't change their answers.
+- **Finding shows and downloading a season (phase 6: `actions/stremio_discovery.py`, `bulk_download.py`,
+  `hub/stremio/{addons,discovery,bulk,ranking,markers}.py`).** Every addon call goes through ONE guarded client
+  (`addons.Net`: `netguard.check_url` on every hop, the owner's `allow_private_hosts` is the only way past it);
+  addon addresses and the account key are never shown, logged or put in an error. `markers.py` is the only place
+  that knows addon wording, and it is still a guess (no real stream text has been seen). `bulk_plan` queues
+  nothing and saves no plan when no installed addon offers streams; `bulk_run` is confirm-gated out of band and
+  writes rows with `Store.add_item`, never through `dl_add`. A title is resolved by
+  `stremio_discovery.resolve_title` (shared by `media_find`, `bulk_plan`, `play_episode`): one result whose
+  normalised name equals the query and is the only such result wins; otherwise the top score must be 0.9 or more
+  and lead the next by 0.15; else the tool asks and never picks. `play_episode` looks a title up only when there
+  is no `imdb_id` and no `item_id`, and never before the season and episode are known. The `stremio` group has
+  ONE pack instruction, in `stremio_stack.py` (`test_hub_stremio_pack_instruction.py` pins it). Tests:
+  `test_hub_stremio_ranking.py`, `_discovery.py`, `test_hub_bulk.py`, `test_hub_stremio_real_cinemeta.py` (the
+  owner's real Cinemeta answer in `tests/data/`, served by a fake).
 - **The model may start, stop and inspect daemons; it may not create one.**
   Registering a daemon stores an argv Jarvis later runs unattended, and
   the model is the component most exposed to text written by other people
@@ -577,6 +604,7 @@ actually render Markdown):
 
     node tests/verify_math_rendering.js
     node tests/verify_hub_panel.js                # Download Hub panel: pure helpers + "never builds markup from data" greps
+    node tests/verify_hub_settings.js             # Download Hub Settings > Downloads: the section built against a fake ui; the Steam update-size row, its confirm-gated dl_provider_prefs write, decline and hub-error paths
     node tests/verify_path_picker.js              # Download Hub N14: the folder / file picker's pure helpers + "text only, no browser dialogs" greps
     node tests/verify_hub_browse_routes.js        # Download Hub N14: the two picker routes' guards (loopback Host, X-Jarvis-Hub, Origin) and payload clamps, cut from the real web/server.js
     node tests/verify_thread_extras_collapse.js   # BUG-5/6: answered confirmations are one line, one card per dev_agent job, cards before the reply on reload, saved thinking follows the toggle; no npm install
@@ -603,6 +631,7 @@ actually render Markdown):
     python3 tests/test_e4_notify_owner_record.py  # E4: the `notify_owner` tool writes ONE silent `owner_dm` inbox record per call (failed only if nobody was reached); result dict unchanged; never re-DMs
     python3 tests/test_one_notification_system.py  # E5: static ratchet -- no second browser Notification / toast host / toast() helper / native confirm / OS toast / owner DM / unregistered kind
     python3 tests/test_hub_universal_notifications.py  # Download Hub on the one notification system: `download` kind, notify-send --kind/--source/--failed, POST /api/notifications/send, host.notify, hub panel has no toast of its own
+    python3 tests/test_hub_steam_alive.py  # Download Hub N5: a running Steam download is never "stalled" from the manifest alone; second signals (downloading folder, Steam's disk writes via psutil), the 60 s rule, replay of the real 2026-10-21 run (tests/fixtures/steam_n5_real_run.jsonl; tests/fixtures is git-ignored, so a shared copy may not have it)
     python3 tests/test_l43_tree.py          # L.43: "changed from default" report + per-value reset (same gate as every Settings write)
     node tests/verify_settings_tree.js      # L.43: settings.js tree helpers, deep-link parser and wiring; no npm install
     python3 tests/verify_l36_insights_ui.py # L.36-P1/P2/P3: Conversation / Usage / Test tabs in a real browser; needs `playwright` (Python) + Chromium, prints SKIP without them

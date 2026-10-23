@@ -49,6 +49,9 @@ from jarvis import (ai_client, ai_config, ai_providers, conversations, key_healt
 from jarvis import tools as system_tools  # noqa: E402
 
 FIXTURE = Path(__file__).resolve().parent / "fixtures" / "5267d91a8b996d48.jsonl"
+if not FIXTURE.exists():   # tests/fixtures is kept out of the shared copy (private conversations)
+    print("SKIPPED: tests/fixtures/5267d91a8b996d48.jsonl is not in this copy")
+    sys.exit(0)
 CEILING = 2500          # the L.24 target for this ask: total ESTIMATED input tokens
 PASS, FAIL = [], []
 

@@ -593,8 +593,9 @@ def test_steam_provider():
     r100, r101 = store.get_item("steam:100"), store.get_item("steam:101")
     check("one poll makes a row per active Steam download", r100["state"] == "downloading" and r101["subtitle"] == "update"
           and store.get_item("steam:102") is None)
-    check("the row's percent, bytes and install folder came from the manifest", r100["percent"] == 20.0 and r100["bytes_done"] == 200
-          and r100["dest_file"].endswith("Fresh Install"))
+    check("the row's total, install folder and last report came from the manifest", r100["state"] == "downloading"
+          and r100["percent"] is None and r100["bytes_done"] is None and r100["bytes_total"] == 1000
+          and "20.0 %" in r100["message"] and r100["dest_file"].endswith("Fresh Install"))
     ro = service.list_items(provider="steam", store=store)["items"]
     check("Steam rows are read-only apart from Reveal", all(set(r["capabilities"]) <= {"reveal"} for r in ro))
     check("pause on a Steam row says it is read-only", "read-only" in service.control("pause", id="steam:100", store=store)["error"])
@@ -603,8 +604,8 @@ def test_steam_provider():
     (steam_dir / "steamapps" / "appmanifest_100.acf").write_text(acf(100, "Fresh Install", 1026, to_dl=1000, got=600))
     poll_now()
     r100 = store.get_item("steam:100")
-    check("a second poll with more bytes gives the hub a derived speed (marked ≈) and an ETA",
-          r100["percent"] == 60.0 and (r100["speed_bps"] or 0) > 0 and "speed" in r100["derived"])
+    check("a second poll with more bytes gives the hub NO derived speed or ETA (a burst is not a rate)",
+          "60.0 %" in r100["message"] and not r100["speed_bps"] and not r100["eta_s"] and "speed" not in r100["derived"])
 
     clock.advance(4)
     (steam_dir / "steamapps" / "appmanifest_100.acf").write_text(acf(100, "Fresh Install", 4, size=1000, updated=9))

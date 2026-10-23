@@ -12,9 +12,11 @@ The router only picks HUB engines.  A tool-supplied download is started by its o
 appears on its own (plan section 8, last paragraph).
 """
 
+import contextlib
 import hashlib
 import json
 import re
+import threading
 from urllib.parse import urlsplit, urlunsplit
 
 from . import engines
@@ -76,6 +78,22 @@ def dedupe_key(engine, source, options=None):
     return "%s|%s|%s" % (engine, source, options_hash(options))
 
 
+# The yt-dlp generic extractor, asked once (brief 21).  A rule cannot tell a forced call from a
+# default one, so no rule claims "anything": the add tool names the exact links the owner said yes
+# to for the length of ONE call, in this thread only, and only a FORCED ytdlp route looks at it.
+_approved = threading.local()
+
+
+@contextlib.contextmanager
+def generic_allowed(urls):
+    previous = getattr(_approved, "urls", None)
+    _approved.urls = frozenset(str(u).strip() for u in urls or [])
+    try:
+        yield
+    finally:
+        _approved.urls = previous
+
+
 def _result(ok, engine=None, reason="", kind="file", source="", available=False, problem=None):
     return {"ok": ok, "engine": engine, "reason": reason, "kind": kind, "source": source,
             "available": available, "problem": problem}
@@ -117,6 +135,15 @@ def route(text, engine=None, settings=None):
                 hit = _safe_match(rule, text, settings)
                 if hit:
                     return _finish(engine, hit, text, forced=True)
+        if engine == "ytdlp" and text in (getattr(_approved, "urls", None) or ()):
+            hit = None
+            try:
+                generic = getattr(known, "generic_match", None)
+                hit = generic(text, settings or {}) if generic else None
+            except Exception:  # noqa: BLE001 - same rule as _safe_match
+                hit = None
+            if hit:
+                return _finish(engine, hit, text, forced=True)
         return _result(False, engine=engine, problem="the %s engine can't take that input" % engine)
 
     for rule in rules:

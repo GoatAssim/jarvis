@@ -46,8 +46,9 @@ check("the group still has all its tool files (nothing was dropped from it)",
 text = tool_registry.pack_instruction("stremio")
 check("the merged text is exactly the one declared text", text == stremio_stack.TOOL_PACK_INSTRUCTION)
 for name in ("media_find", "media_episodes", "stream_search", "bulk_plan", "bulk_run", "play_episode", "play_local", "stremio_open",
-             "stack_status", "stack_start", "stremio_prepare", "stack_doctor", "dl_add"):
+             "stack_status", "stack_start", "stremio_prepare", "stack_doctor", "dl_add", "play_control"):
     check("the text names %s" % name, name in text)
+check("brief 22: it says dl_add takes the full path of a .torrent file", ".torrent file" in text)
 check("it is not longer than the three old texts together (%d <= %d)" % (len(text), OLD_TOTAL), len(text) <= OLD_TOTAL)
 
 # every rule of the old texts is still in it

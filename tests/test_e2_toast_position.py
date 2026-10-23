@@ -214,10 +214,17 @@ def test_notify_send_argument_parsing():
 def test_web_side_is_wired():
     web = ROOT / "web" / "public"
     settings = (web / "settings.js").read_text(encoding="utf-8")
+    # Since L.30 settings.js keeps NO list of positions: the row's choices come from the registry's catalog
+    # (pickerPositions()), and test_no_hardcoded_notify_lists.py fails if a page types one out. So this pins
+    # the row, that it is built from the catalog, and that the catalog offers every one of the eight.
     check("Settings > Notifications has the position row",
-          '"Where toasts appear"' in settings and 'path: ["position"]' in settings)
+          '"Where notifications appear"' in settings and 'path: ["position"]' in settings)
+    check("Settings builds the position choices from the catalog (pickerPositions)",
+          "pickerPositions()" in settings and "positions.items.map" in settings)
+    from jarvis import notify_registry as _reg
+    offered = {p["id"] for p in _reg.catalog()["positions"]}
     for pos in EIGHT:
-        check(f"Settings offers {pos}", f'["{pos}", ' in settings)
+        check(f"the catalog behind Settings offers {pos}", pos in offered, sorted(offered))
     js = (web / "notifications.js").read_text(encoding="utf-8")
     # E3: the stacks are the page's one toast host, made by ui-kit.js (JarvisUI.toastStack);
     # notifications.js asks it for the stack of a notification's position.
@@ -227,7 +234,11 @@ def test_web_side_is_wired():
     for pos in EIGHT:
         check(f"CSS has a stack for {pos}", f".jui-toasts--{pos}" in css)
     sched = (web / "schedules.js").read_text(encoding="utf-8")
-    check("Schedules offers desktop, not toast", '["desktop", "Desktop"]' in sched and '["toast", "Toast"]' not in sched)
+    # Since L.30 schedules.js reads its channel list from the catalog (pickerActions), not from a list of its own.
+    action_ids = {a["id"] for a in _reg.ACTIONS}
+    check("Schedules offers desktop, not toast",
+          "desktop" in action_ids and "toast" not in action_ids and 'pickerOf("pickerActions")' in sched
+          and '["toast", "Toast"]' not in sched, sorted(action_ids))
     check("Schedules maps an old stored `toast` to desktop", "legacyChannel" in sched)
 
 

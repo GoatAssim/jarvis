@@ -10,6 +10,10 @@
  *     shown as it is; no limit or range is checked twice here.
  * Each row saves as soon as it is changed, like the other sections; the speed windows and the per-extension
  * folders are lists, so those two have their own Save button.
+ *
+ * The Stremio card (brief 19, N9 step 3) is the one block that talks to hub routes of its own: GET /api/hub/stremio (what is
+ * installed and running), POST /api/hub/stremio/paths (Locate...), POST /api/hub/stremio/start (Start).  Like every hub write
+ * they carry the X-Jarvis-Hub header; the hub decides what is allowed and this page shows its sentences as they are.
  */
 (function (global) {
   "use strict";
@@ -48,6 +52,9 @@
       help: "Downloads that finish this close together become one message." },
     { path: "notify.providers", group: "Notifications", label: "Also tell me about other tools' downloads", type: "bool",
       help: "Game installs and other tools that report into the hub." },
+    // brief 19: the hub's own range (1 to 720) is not repeated here; a value it refuses shows its refusal text.
+    { path: "unknown_settle_hours", group: "Lost downloads", label: "Give up on a lost download after (hours)", type: "int",
+      help: "When another tool (Steam, Playnite ...) stops listing a download that hadn't finished, its row waits as \"unknown\". After this long it becomes \"cancelled\" (never \"failed\"). A row that is only out of date because its program is closed is never given up on." },
     { path: "allow_private_hosts", group: "Safety", label: "Allowed private addresses", type: "hosts",
       help: "Links to your own network are refused unless listed here: one host or host:port per line. Changing it asks first." },
   ];
@@ -57,7 +64,7 @@
   };
   const OPEN_LABELS = { off: "Nothing", reveal: "Show the file in its folder", folder: "Open the folder", open: "Open the file" };
   const GROUP_ORDER = ["Where files go", "Speed", "Running at once", "Connections", "When a download finishes",
-    "Notifications", "Safety", "Other"];
+    "Notifications", "Lost downloads", "Safety", "Other"];
   // rows with their own editor, never generic
   const CUSTOM = { schedule: 1, ext_folders: 1 };
 
@@ -156,6 +163,132 @@
     return out;
   }
 
+  // ---- the Stremio card: pure half (brief 19, N9 step 3) -------------------------------------------------
+  // The card is built from the hub's `stremio_status` answer (GET /api/hub/stremio).  Everything it says about Stremio comes
+  // from that answer: the sentence is the hub's own, the buttons follow the hub's `can_start`, and the page decides nothing
+  // about what Stremio is.  `stremioModel` turns an answer into what the card draws, so every state is checked without a DOM.
+
+  // Which tone the state's title gets: ok (green), bad (red), or none.
+  const STREMIO_TONE = { running: "ok", ready: "", starting: "", other_port: "", port_busy: "", silent: "", app_open: "",
+    files_missing: "", start_failed: "bad", not_found: "bad" };
+
+  function stremioFacts(s) {
+    const path = (s && s.path) || {};
+    const facts = [];
+    facts.push(["Program", path.found && path.runtime_exe ? path.runtime_exe : "not found"]);
+    facts.push(["server.js", path.found && path.server_js ? path.server_js : "not found"]);
+    if (path.found && path.how_text) facts.push(["Found", path.how_text]);
+    let app = "not found";
+    if (s.state === "app_open") app = "open, but its server is silent";
+    else if (s.installed_version) app = "installed, version " + s.installed_version;
+    else if (path.found) app = "installed";
+    facts.push(["App", app]);
+    let server = "not running";
+    if (s.state === "running") {
+      server = "running at " + (s.address || "?") + (s.version ? " (version " + s.version + ")" : "")
+        + (s.managed_by === "outside" ? ", started outside Jarvis" : s.managed_by === "jarvis" ? ", started by Jarvis" : "");
+    } else if (s.state === "other_port") {
+      server = "answers at " + (s.other_url || "another address") + ", not at " + (s.address || "?");
+    } else if (s.state === "starting") {
+      server = "starting";
+    }
+    facts.push(["Server", server]);
+    const web = s.web;
+    facts.push(["Web", !web ? "unknown" : web.answers ? "answering at " + web.url
+      : web.configured ? "not answering at " + web.url : "not set up (web.dir is empty in the config)"]);
+    (Array.isArray(s.problems) ? s.problems : []).forEach((p) => facts.push(["Problem", String(p)]));
+    return facts;
+  }
+
+  // What the card draws for a status answer: title, tone, the hub's sentence and next step, the facts, and the Start button's state.
+  function stremioModel(s) {
+    if (!s) {
+      return { loaded: false, title: "Stremio", tone: "", sentence: "Reading Stremio's status\u2026", next: "", facts: [], canStart: false,
+        startTip: "Start isn't possible until the status has been read.", diagnostic: "" };
+    }
+    if (typeof s !== "object" || s.ok === false || !s.state) {
+      const why = (s && s.error) ? String(s.error) : "Stremio's status couldn't be read.";
+      return { loaded: false, title: "Stremio", tone: "bad", sentence: why, next: "", facts: [], canStart: false,
+        startTip: "Start isn't possible until the status can be read.", diagnostic: "" };
+    }
+    const canStart = s.can_start === true;
+    const startTip = canStart ? "Start Stremio's server (it may take up to " + (s.wait_seconds || 60) + " seconds)."
+      : s.state === "running" ? "Stremio's server is already running; there is nothing to start."
+        : (s.sentence || "Start isn't possible right now.");
+    return { loaded: true, title: s.title || "Stremio", tone: STREMIO_TONE[s.state] || "", sentence: String(s.sentence || ""),
+      next: String(s.next || ""), facts: stremioFacts(s), canStart: canStart, startTip: startTip, diagnostic: diagnosticFor(s) };
+  }
+
+  // The text Copy diagnostic copies: the one the hub prepared; if it sent none, one built here from the same fields.
+  function diagnosticFor(s) {
+    if (s && typeof s.diagnostic === "string" && s.diagnostic.trim()) return s.diagnostic;
+    if (!s || typeof s !== "object") return "";
+    const lines = ["Stremio status: " + (s.title || "?") + " (built by the page: the hub sent no diagnostic text)", s.sentence || "", "address: " + (s.address || "?")];
+    stremioFacts(s).forEach((f) => lines.push(f[0] + ": " + f[1]));
+    return lines.filter((l) => l !== "").join("\n");
+  }
+
+  // The folder a picker should open in for a path the hub knows (either slash), or "".
+  function folderOf(p) {
+    const text = String(p || "");
+    const at = Math.max(text.lastIndexOf("/"), text.lastIndexOf("\\"));
+    return at > 0 ? text.slice(0, at) : "";
+  }
+
+  // The picker's options for one of the two files; it starts where the other known file lives, so the second pick is one click.
+  function pickOptions(key, known, windows) {
+    const here = known[key] || known[key === "runtime_exe" ? "server_js" : "runtime_exe"] || "";
+    return {
+      kind: "file", start: folderOf(here),
+      title: key === "runtime_exe" ? "Locate the Stremio program (stremio-runtime.exe)" : "Locate Stremio's server.js",
+      extensions: key === "server_js" ? [".js"] : (windows ? [".exe"] : []),
+    };
+  }
+
+  // Locate...: pick one file (and the other too when the hub doesn't know it yet), then save the pair through stremio_save.
+  // `deps.pick(options)` -> a path or null (cancelled); `deps.save(body)` -> the hub's answer or throws its refusal.  When the
+  // hub reports the server answering at another address (state other_port) that address is saved with the paths: its own sentence
+  // promises exactly that.  The hub checks both files exist and refuses with a sentence; it is shown as it is.
+  async function locateFlow(deps, status, which) {
+    const path = (status && status.path) || {};
+    const known = { runtime_exe: path.runtime_exe || "", server_js: path.server_js || "" };
+    const other = which === "runtime_exe" ? "server_js" : "runtime_exe";
+    const order = known[other] ? [which] : [which, other];
+    for (const key of order) {
+      const picked = await deps.pick(pickOptions(key, known, deps.windows === true));
+      if (!picked) return { status: "cancelled" };
+      known[key] = String(picked);
+    }
+    const body = { runtime_exe: known.runtime_exe, server_js: known.server_js };
+    if (status && status.state === "other_port" && status.other_url) body.server_url = status.other_url;
+    try {
+      return { status: "saved", result: await deps.save(body), body: body };
+    } catch (err) {
+      return { status: "refused", error: String((err && err.message) || err || "The hub didn't accept that."), body: body };
+    }
+  }
+
+  // Start: one call that may take up to the hub's wait.  The page times out on its own a little after that, so a stuck request
+  // can't leave the button working for ever.  `deps.start(timeoutMs)` -> the hub's answer, or throws (`timedOut` for the page's time-out).
+  const START_SLACK_MS = 20000;
+  function startTimeoutMs(status) {
+    const wait = Number(status && status.wait_seconds);
+    return (Number.isFinite(wait) && wait > 0 ? wait : 60) * 1000 + START_SLACK_MS;
+  }
+  async function startFlow(deps, status) {
+    const ms = startTimeoutMs(status);
+    try {
+      const r = await deps.start(ms);
+      return { status: "ok", text: String(r.sentence || r.note || "Stremio's server is running."), result: r };
+    } catch (err) {
+      if (err && err.timedOut) {
+        return { status: "timeout", text: "Still no answer after " + Math.round(ms / 1000) + " seconds. Stremio may still be starting: press Check again in a moment." };
+      }
+      const data = (err && err.data) || {};
+      return { status: "refused", text: String(data.error || (err && err.message) || "Stremio's server didn't start."), result: data };
+    }
+  }
+
   // ---- talking to the hub -------------------------------------------------------------------------------
 
   async function getJson(path) {
@@ -174,6 +307,31 @@
     try { data = await res.json(); } catch (_) { /* not JSON */ }
     if (!res.ok) throw new Error((data && (data.error || data.message)) || res.statusText || ("HTTP " + res.status));
     return data;
+  }
+
+  // A write to the hub's own web routes (/api/hub/*): they insist on the X-Jarvis-Hub header, so another web page can't make the
+  // browser change anything.  Resolves with the hub's answer; throws its refusal (`err.data` = the whole answer), or an error with
+  // `timedOut` when `timeoutMs` passes first.
+  async function hubPost(path, body, timeoutMs) {
+    const ctl = typeof AbortController === "function" ? new AbortController() : null;
+    const timer = ctl && timeoutMs ? setTimeout(() => ctl.abort(), timeoutMs) : 0;
+    try {
+      const res = await fetch(path, { method: "POST", headers: { "Content-Type": "application/json", "X-Jarvis-Hub": "1" },
+        body: JSON.stringify(body || {}), signal: ctl ? ctl.signal : undefined });
+      let data = null;
+      try { data = await res.json(); } catch (_) { /* not JSON */ }
+      if (!res.ok || !data || data.ok === false) {
+        const err = new Error((data && (data.error || data.message)) || res.statusText || ("HTTP " + res.status));
+        err.data = data || {};
+        throw err;
+      }
+      return data;
+    } catch (err) {
+      if (err && err.name === "AbortError") { const t = new Error("timed out"); t.timedOut = true; throw t; }
+      throw err;
+    } finally {
+      if (timer && typeof clearTimeout === "function") clearTimeout(timer);
+    }
   }
 
   // The same gate as the Downloads panel and the Debug panel: ask whether the call needs a confirmation,
@@ -257,8 +415,103 @@
       if (writable.has("schedule")) blocks.push(scheduleBlock(ctx, payload));
       if (writable.has("ext_folders")) blocks.push(extFoldersBlock(ctx, payload));
       blocks.push(providersBlock(ctx, payload));
+      blocks.push(stremioBlock(ctx));
       return blocks.filter(Boolean);
     });
+  }
+
+  // ---- the Stremio card (DOM) ---------------------------------------------------------------------------
+  // Drawn at once with "Reading ..." and filled when the status arrives, so the rest of Settings never waits for it.
+  function stremioBlock(ctx) {
+    const ui = ctx.ui;
+    const h = ui.h;
+    const state = { status: null, busy: "" };
+    const sentence = h("div", { class: "prefs-note", text: "Reading Stremio's status\u2026" });
+    const next = h("div", { class: "prefs-row__help" });
+    const title = h("div", { class: "prefs-row__label", text: "Stremio" });
+    const facts = h("div", { class: "prefs-list" });
+    const msg = h("span", { class: "prefs-row__status" });
+    const diag = h("textarea", { class: "prefs-input prefs-input--wide", readonly: true, rows: 7, spellcheck: "false", "aria-label": "Stremio diagnostic text" });
+    const btn = (text, onclick, extra) => h("button", Object.assign({ class: "btn btn--ghost btn--sm", type: "button", text: text, onclick: onclick }, extra || {}));
+    const bCheck = btn("Check again", () => load());
+    const bCopy = btn("Copy diagnostic", () => copy());
+    const bProg = btn("Locate program\u2026", () => locate("runtime_exe"));
+    const bJs = btn("Locate server.js\u2026", () => locate("server_js"));
+    const bStart = h("button", { class: "btn btn--sm", type: "button", text: "Start", onclick: () => start() });
+    const all = [bCheck, bCopy, bProg, bJs, bStart];
+
+    function say(text, kind) { ui.flash(msg, text, kind); }
+    function lock(word) { state.busy = word; all.forEach((b) => { b.disabled = !!word; }); }
+
+    function paint() {
+      const m = stremioModel(state.status);
+      title.textContent = "Stremio: " + m.title;
+      sentence.textContent = m.sentence;
+      sentence.className = "prefs-note" + (m.tone === "bad" ? " prefs-note--warn" : "");
+      next.textContent = m.next;
+      facts.replaceChildren(...m.facts.map((f) => h("div", { class: "prefs-inline" }, [h("strong", { text: f[0] + ":" }), h("span", { text: " " + f[1] })])));
+      diag.value = m.diagnostic;
+      bStart.title = m.startTip;
+      bStart.disabled = !!state.busy || !m.canStart;
+      bCopy.disabled = !!state.busy || !m.diagnostic;
+    }
+
+    async function load() {
+      lock("reading");
+      say("");
+      try { state.status = await getJson("/api/hub/stremio"); }
+      catch (err) { state.status = { ok: false, error: "Couldn't read Stremio's status: " + err.message }; }
+      lock("");
+      paint();
+    }
+
+    async function copy() {
+      const text = diagnosticFor(state.status);
+      let ok = false;
+      try { await global.navigator.clipboard.writeText(text); ok = true; } catch (_) { /* fall back below */ }
+      if (!ok) {
+        try { diag.focus(); diag.select(); ok = !!global.document.execCommand("copy"); } catch (_) { ok = false; }
+      }
+      say(ok ? "Copied" : "Couldn't copy: the text is selected below, press Ctrl+C", ok ? "ok" : "err");
+    }
+
+    async function locate(which) {
+      const picker = global.JarvisPathPicker;
+      if (!picker || typeof picker.open !== "function") { say("The file picker isn't available on this page.", "err"); return; }
+      lock("locating");
+      say("");
+      const out = await locateFlow({
+        pick: (o) => picker.open(o), save: (body) => hubPost("/api/hub/stremio/paths", body, 30000),
+        windows: /win/i.test(String((global.navigator && (global.navigator.platform || global.navigator.userAgent)) || "")),
+      }, state.status, which);
+      lock("");
+      if (out.status === "saved") { state.status = out.result; say("Saved", "ok"); }
+      else if (out.status === "refused") say(out.error, "err");
+      paint();
+    }
+
+    async function start() {
+      lock("starting");
+      say("Starting Stremio's server\u2026");
+      const out = await startFlow({ start: (ms) => hubPost("/api/hub/stremio/start", {}, ms) }, state.status);
+      lock("");
+      say(out.text, out.status === "ok" ? "ok" : "err");
+      await load2();
+    }
+    // after Start the status is read again (without clearing the sentence the button just said)
+    async function load2() {
+      try { state.status = await getJson("/api/hub/stremio"); } catch (_) { /* the message above stands */ }
+      paint();
+    }
+
+    paint();
+    load();
+    return ui.group("Stremio", [
+      ui.rowShell("Stremio's server", "What Jarvis found, whether it runs, and how to point it at Stremio. Locate... saves the two file paths for Jarvis only; it never changes Stremio.",
+        h("div", {}, [title, sentence, next, facts]), msg),
+      h("div", { class: "prefs-inline" }, all),
+      h("details", {}, [h("summary", { text: "Diagnostic text" }), diag]),
+    ]);
   }
 
   function listEditor(ctx, opts) {
@@ -373,7 +626,7 @@
   const section = {
     id: "downloads", label: "Downloads", title: "Downloads",
     lede: "Where downloads go, how fast and how many at once, what happens when one finishes, and which events notify you. The Downloads panel (Menu > Downloads) shows and controls the downloads themselves.",
-    terms: "downloads download hub folder library speed limit bandwidth schedule window concurrency stremio yt-dlp video audio torrent steam provider notify notification finished after retry stall private host extension steam update size threshold gb",
+    terms: "downloads download hub folder library speed limit bandwidth schedule window concurrency stremio yt-dlp video audio torrent steam provider notify notification finished after retry stall private host extension steam update size threshold gb unknown lost give up settle hours cancelled playnite stremio server start locate diagnostic",
     build: build,
   };
 
@@ -383,6 +636,8 @@
     textToHosts: textToHosts, daysChoice: daysChoice, windowsToModel: windowsToModel, modelToWindows: modelToWindows,
     extToModel: extToModel, modelToExt: modelToExt, isEventPath: isEventPath,
     PROVIDER_SETTING_FIELDS: PROVIDER_SETTING_FIELDS, providerSettingRows: providerSettingRows, providerSettingArgs: providerSettingArgs,
+    stremioModel: stremioModel, stremioFacts: stremioFacts, diagnosticFor: diagnosticFor, folderOf: folderOf, pickOptions: pickOptions,
+    locateFlow: locateFlow, startFlow: startFlow, startTimeoutMs: startTimeoutMs, hubPost: hubPost, STREMIO_TONE: STREMIO_TONE,
   } };
   if (typeof module !== "undefined" && module.exports) module.exports = global.JarvisDownloadsSettings;
 })(typeof window !== "undefined" ? window : globalThis);

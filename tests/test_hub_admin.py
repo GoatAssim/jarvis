@@ -11,6 +11,12 @@ age (dry run counts, then removes); downloading again; reordering the queue (que
 the refusals for an unattended process; the CLI entry's JSON-in / JSON-out; and the `hub-admin`
 plumbing (reserved name, slash registry, cli.py branch, server routes' guards).
 
+Brief 19 (round 4, agent P) adds: the `dismiss` write op (one row, every finished row, the hub's own refusals
+unchanged, an unattended process refused, no file touched), `list` with `include_dismissed` and the
+`dismissed_at` every row carries, `unknown_settle_hours` as the settings payload reports it and the hub
+validates it, and the `stremio_start` write op (`tool_stack_start` patched: no real process; the real
+function with the app open starts nothing).
+
 Run: python tests/test_hub_admin.py
 """
 import base64
@@ -277,6 +283,194 @@ def test_redownload_and_reorder():
     check("one row can't be 'reordered'", hub_admin.reorder({"ids": [x["id"]]}, store=st2)["ok"] is False)
 
 
+def provider_rows(st):
+    """A temporary store with a Steam-like provider and one provider row in each state that matters."""
+    st.register_provider("steam", label="Steam", mode="poll", poll_tool="get_x", capabilities=["reveal"])
+    for local, state in (("run", "downloading"), ("fin", "done"), ("fail", "failed"), ("can", "cancelled"),
+                         ("unk", "unknown"), ("pau", "paused"), ("que", "queued")):
+        st.upsert_provider_row("steam", local, {"title": "Row " + local, "state": state,
+                                                "percent": 100 if state == "done" else 5})
+    return st
+
+
+def test_dismiss_op():
+    st = provider_rows(fresh_store())
+    hub_done = make(st, "hub finished", "done")
+    keep = Path(HOME) / "library-file.bin"
+    keep.write_bytes(b"x")
+    st.update_item("steam:fin", {"dest_file": str(keep)}, touch=False)
+    check("dismiss is a write op (so an unattended process is refused before it runs)",
+          "dismiss" in hub_admin.WRITE_OPS and "dismiss" not in hub_admin.READ_OPS)
+    one = hub_admin.admin("dismiss", {"id": "steam:fin"}, store=st)
+    check("one finished provider row is hidden, with the hub's own answer",
+          one["ok"] and one["dismissed"] == ["steam:fin"] and one["count"] == 1 and "no file was touched" in one["note"])
+    check("the row is still in the database, marked, and its file is untouched",
+          st.get_item("steam:fin")["dismissed_at"] is not None and keep.exists())
+    again = hub_admin.admin("dismiss", {"id": "steam:fin"}, store=st)
+    check("hiding it twice is ok and says it was already hidden", again["ok"] and again["dismissed"] == [] and "already" in again["note"])
+    run = hub_admin.admin("dismiss", {"id": "steam:run"}, store=st)
+    check("a running row is refused with the hub's words and stays", run["ok"] is False and "still running" in run["error"]
+          and st.get_item("steam:run")["dismissed_at"] is None)
+    pau = hub_admin.admin("dismiss", {"id": "steam:pau"}, store=st)
+    que = hub_admin.admin("dismiss", {"id": "steam:que"}, store=st)
+    check("a row that hasn't finished is refused (paused, queued)", pau["ok"] is False and que["ok"] is False
+          and "hasn't finished" in pau["error"] and "hasn't finished" in que["error"])
+    hub = hub_admin.admin("dismiss", {"id": hub_done["id"]}, store=st)
+    check("a hub row is refused, even a finished one, and points to dl_cancel and History",
+          hub["ok"] is False and "dl_cancel" in hub["error"] and "History" in hub["error"] and st.get_item(hub_done["id"])["dismissed_at"] is None)
+    check("an unknown id is a refusal, not a crash", hub_admin.admin("dismiss", {"id": "steam:nope"}, store=st)["ok"] is False)
+    check("a malformed id is refused before it reaches the hub", hub_admin.admin("dismiss", {"id": "a b/../c"}, store=st)["ok"] is False)
+    check("neither an id nor finished is a refusal", hub_admin.admin("dismiss", {}, store=st)["ok"] is False)
+    check("both an id and finished is a refusal (the hub's rule)", hub_admin.admin("dismiss", {"id": "steam:fail", "finished": True}, store=st)["ok"] is False
+          and st.get_item("steam:fail")["dismissed_at"] is None)
+    check("finished: \"true\" as text is not finished: true", hub_admin.admin("dismiss", {"finished": "true"}, store=st)["ok"] is False)
+    allrows = hub_admin.admin("dismiss", {"finished": True}, store=st)
+    check("Clear finished hides every unknown or finished provider row that is still shown",
+          allrows["ok"] and sorted(allrows["dismissed"]) == ["steam:can", "steam:fail", "steam:unk"] and allrows["count"] == 3)
+    check("... and nothing else: running, paused, queued and the hub row stay",
+          all(st.get_item(i)["dismissed_at"] is None for i in ("steam:run", "steam:pau", "steam:que", hub_done["id"])))
+    check("clearing again says there is nothing to clear", hub_admin.admin("dismiss", {"finished": True}, store=st)["note"] == "nothing to clear")
+    check("no file was touched by any of it", keep.exists() and keep.read_bytes() == b"x")
+    # the answer is service.dismiss's, unchanged
+    st2 = provider_rows(fresh_store())
+    direct = service.dismiss(id="steam:run", store=st2)
+    via = hub_admin.admin("dismiss", {"id": "steam:run"}, store=st2)
+    check("a refusal through hub-admin is exactly the service's refusal", direct == via)
+    for var in ("JARVIS_CHANNEL", "JARVIS_SCHEDULED", "JARVIS_TASK_ID", "JARVIS_CHANNEL_SENDER"):
+        os.environ[var] = "1"
+        res = hub_admin.admin("dismiss", {"id": "steam:fail"}, store=st2)
+        res_all = hub_admin.admin("dismiss", {"finished": True}, store=st2)
+        del os.environ[var]
+        check("%s: dismiss is refused for an unattended process and hides nothing" % var,
+              res["ok"] is False and res.get("code") == "unattended" and res_all.get("code") == "unattended"
+              and st2.get_item("steam:fail")["dismissed_at"] is None)
+    out = io.StringIO()
+    hub_admin.run_cli(["dismiss"], stdin=io.StringIO("{\"id\": \"steam:nope\"}"), stdout=out)
+    check("through the CLI entry: one JSON refusal line", json.loads(out.getvalue())["ok"] is False)
+
+
+def test_list_include_dismissed_and_row_field():
+    st = provider_rows(fresh_store())
+    visible = hub_admin.admin("list", {}, store=st)
+    check("every row carries dismissed_at (None while shown)",
+          visible["ok"] and visible["items"] and all("dismissed_at" in r and r["dismissed_at"] is None for r in visible["items"]))
+    check("the card payload carries it too",
+          "dismissed_at" in hub_admin.card_payload(ids=["steam:fin"], store=st)["cards"][0])
+    hub_admin.admin("dismiss", {"id": "steam:fin"}, store=st)
+    hub_admin.admin("dismiss", {"id": "steam:unk"}, store=st)
+    shown = hub_admin.admin("list", {}, store=st)
+    ids = {r["id"] for r in shown["items"]}
+    check("by default a dismissed row is not listed", "steam:fin" not in ids and "steam:unk" not in ids and "steam:run" in ids)
+    everything = hub_admin.admin("list", {"include_dismissed": True}, store=st)
+    by_id = {r["id"]: r for r in everything["items"]}
+    check("include_dismissed brings the hidden rows back, marked with when they were hidden",
+          "steam:fin" in by_id and isinstance(by_id["steam:fin"]["dismissed_at"], float) and by_id["steam:unk"]["dismissed_at"]
+          and by_id["steam:run"]["dismissed_at"] is None)
+    check("only the literal true counts (1 and \"1\" do not)",
+          all("steam:fin" not in {r["id"] for r in hub_admin.admin("list", {"include_dismissed": v}, store=st)["items"]} for v in (1, "1", "true", None)))
+    check("the summary counts still leave hidden rows out", everything["summary"]["counts"] == shown["summary"]["counts"])
+    gen = hub_admin.watch_events(store=st, interval=0, stop=lambda: True)
+    first = next(gen)
+    check("the push stream never carries a hidden row (the panel asks for them with `list`)",
+          "steam:fin" not in {r["id"] for r in first["items"]})
+    # the hub un-hides a row by itself when its provider reports it live again
+    st.upsert_provider_row("steam", "fin", {"title": "Row fin", "state": "downloading", "percent": 2})
+    check("a hidden row the provider reports live again is shown again by the hub",
+          "steam:fin" in {r["id"] for r in hub_admin.admin("list", {}, store=st)["items"]})
+
+
+def test_settle_hours_setting():
+    st = fresh_store()
+    payload = hub_admin.settings_payload(st)
+    check("the settings payload reports unknown_settle_hours as writable by dl_prefs, with its value",
+          payload["ok"] and "unknown_settle_hours" in payload["writable"] and "unknown_settle_hours" in payload["prefs_writable"]
+          and payload["settings"]["unknown_settle_hours"] == 24)
+    ok = service.update_prefs({"unknown_settle_hours": 48}, store=st)
+    check("the hub stores 48 and the payload then reports it", ok["ok"] and hub_admin.settings_payload(st)["settings"]["unknown_settle_hours"] == 48)
+    bad = service.update_prefs({"unknown_settle_hours": 0}, store=st)
+    check("the hub's own refusal for 0 names its range (the page shows this text as it is)",
+          bad["ok"] is False and "between 1 and 720" in bad["error"] and hub_admin.settings_payload(st)["settings"]["unknown_settle_hours"] == 48)
+    check("720 is accepted and 721 refused", service.update_prefs({"unknown_settle_hours": 720}, store=st)["ok"]
+          and service.update_prefs({"unknown_settle_hours": 721}, store=st)["ok"] is False)
+
+
+class _FakeStack:
+    """Stands in for `stremio_stack.tool_stack_start`: records the call, answers what it is told to."""
+    def __init__(self, answer):
+        self.answer, self.calls = answer, []
+
+    def __call__(self, args):
+        self.calls.append(dict(args or {}))
+        if isinstance(self.answer, Exception):
+            raise self.answer
+        return self.answer
+
+
+def test_stremio_start_op():
+    from jarvis.actions import stremio_stack
+    real = stremio_stack.tool_stack_start
+    try:
+        check("stremio_start is a write op, never a read op", "stremio_start" in hub_admin.WRITE_OPS and "stremio_start" not in hub_admin.READ_OPS)
+        started = {"ok": True, "server": {"state": "started", "outcome": "started", "url": "http://127.0.0.1:11470", "version": "4.20.8",
+                                          "sentence": "Stremio's server is running at http://127.0.0.1:11470 (version 4.20.8). Jarvis started it."}}
+        stremio_stack.tool_stack_start = fake = _FakeStack(started)
+        out = hub_admin.admin("stremio_start", {})
+        check("it calls tool_stack_start for the server only, once", fake.calls == [{"what": "server"}])
+        check("a start gives ok with the status sentence and version", out["ok"] is True and out["state"] == "started" and out["version"] == "4.20.8"
+              and "Jarvis started it" in out["sentence"] and "error" not in out)
+        check("a request body can't change what is started (no `what`, no path, no url)",
+              hub_admin.admin("stremio_start", {"what": "both", "runtime_exe": "C:/x.exe", "url": "http://evil"})["ok"] is True and fake.calls[-1] == {"what": "server"})
+        up = {"ok": True, "server": {"state": "already_up", "outcome": "running", "url": "http://127.0.0.1:11470", "version": "4.20.8",
+                                     "note": "already up (started outside Jarvis); nothing was started", "sentence": "Stremio's server is running ..."}}
+        stremio_stack.tool_stack_start = _FakeStack(up)
+        out = hub_admin.admin("stremio_start", {})
+        check("already up is ok and says nothing was started", out["ok"] is True and out["state"] == "already_up" and "nothing was started" in out["note"])
+        app_open = {"ok": False, "error": "The Stremio app is open, but its server isn't answering ...",
+                    "server": {"state": "error", "outcome": "app_open", "url": "http://127.0.0.1:11470", "sentence": "The Stremio app is open, but its server isn't answering ...",
+                               "error": "The Stremio app is open, but its server isn't answering ..."}}
+        stremio_stack.tool_stack_start = _FakeStack(app_open)
+        out = hub_admin.admin("stremio_start", {})
+        check("a refusal is ok: false with the status sentence as the error, and the outcome",
+              out["ok"] is False and out["outcome"] == "app_open" and "app is open" in out["error"] and "app is open" in out["sentence"])
+        silent = {"ok": False, "error": "silent", "server": {"state": "error", "outcome": "silent", "sentence": "silent", "next": "Look at its console", "error": "silent",
+                                                          "problems": ["a problem"]}, "config_problems": ["a problem"]}
+        stremio_stack.tool_stack_start = _FakeStack(silent)
+        out = hub_admin.admin("stremio_start", {})
+        check("the next step and the config problems come through", out["ok"] is False and out["next"] == "Look at its console" and out["config_problems"] == ["a problem"])
+        stremio_stack.tool_stack_start = _FakeStack({"ok": False, "error": "tool broke"})
+        check("an answer with no server block still gives its error", hub_admin.admin("stremio_start", {})["error"] == "tool broke")
+        stremio_stack.tool_stack_start = _FakeStack(RuntimeError("boom"))
+        out = hub_admin.admin("stremio_start", {})
+        check("an exception is a refusal, not a crash", out["ok"] is False and "boom" in out["error"])
+        stremio_stack.tool_stack_start = _FakeStack(None)
+        check("a non-dict answer is a refusal", hub_admin.admin("stremio_start", {})["ok"] is False)
+        for var in ("JARVIS_CHANNEL", "JARVIS_SCHEDULED", "JARVIS_TASK_ID", "JARVIS_CHANNEL_SENDER"):
+            stremio_stack.tool_stack_start = fake = _FakeStack(started)
+            os.environ[var] = "1"
+            res = hub_admin.admin("stremio_start", {})
+            del os.environ[var]
+            check("%s: stremio_start is refused for an unattended process and starts nothing" % var,
+                  res["ok"] is False and res.get("code") == "unattended" and fake.calls == [])
+    finally:
+        stremio_stack.tool_stack_start = real
+
+    # the REAL tool_stack_start, with the app open and its server silent: nothing is started (N9 decision 4)
+    from jarvis.hub.stremio import status as stremio_status_mod
+    from jarvis import daemons
+    real_snapshot, real_dstart = stremio_status_mod.snapshot, daemons.start
+    started_daemons = []
+    try:
+        stremio_status_mod.snapshot = lambda **kw: {"state": "app_open", "title": "App open, server silent", "address": "http://127.0.0.1:11470",
+                                                    "sentence": "The Stremio app is open, but its server isn't answering at http://127.0.0.1:11470.",
+                                                    "problems": [], "managed_by": "", "version": "", "path": {}, "tried": []}
+        daemons.start = lambda did, *a, **k: started_daemons.append(did) or (True, "started")
+        out = hub_admin.admin("stremio_start", {})
+        check("with the Stremio app open and its server silent: ok is false, the sentence is the status's, and no daemon was started",
+              out["ok"] is False and "app is open" in out["error"] and started_daemons == [])
+    finally:
+        stremio_status_mod.snapshot, daemons.start = real_snapshot, real_dstart
+
+
 def test_unattended():
     st = fresh_store()
     a = make(st, "done one", "done")
@@ -286,7 +480,7 @@ def test_unattended():
         check("%s: the writes are refused" % var, res["ok"] is False and res.get("code") == "unattended" and st.get_item(a["id"]) is not None)
         check("%s: the reads still work (a card in a chat reply)" % var, hub_admin.admin("card", {"ids": [a["id"]]}, store=st)["ok"] is True)
         del os.environ[var]
-    check("every write op is on the guarded list, and no read op is", set(hub_admin.WRITE_OPS) == {"history_remove", "history_clear", "redownload", "reorder", "stremio_save"} and not set(hub_admin.READ_OPS) & set(hub_admin.WRITE_OPS))
+    check("every write op is on the guarded list, and no read op is", set(hub_admin.WRITE_OPS) == {"history_remove", "history_clear", "redownload", "reorder", "stremio_save", "dismiss", "stremio_start"} and not set(hub_admin.READ_OPS) & set(hub_admin.WRITE_OPS))
     check("an unknown op is a usage line, not a crash", hub_admin.admin("rm-rf", {})["ok"] is False)
 
 
@@ -311,16 +505,24 @@ def test_plumbing():
     check("the slash registry lists it as not exposed", '"hub-admin"' in slash)
     server = (ROOT / "web" / "server.js").read_text(encoding="utf-8")
     check("every /api/hub write route needs the hub header, and every route is loopback-checked",
-          server.count("requireHubWrite, requireJarvis") == 5 and "requireHubRead, requireJarvis" in server and "function hubOriginOk" in server)
+          server.count("requireHubWrite, requireJarvis") == 7 and "requireHubRead, requireJarvis" in server and "function hubOriginOk" in server)
     check("a thumbnail or file route takes an id and never a path", 'app.get("/api/hub/thumb/:id"' in server and 'app.get("/api/hub/file/:id"' in server and "req.query.path" not in server.split("// Download Hub web back end")[1].split("// Calendars panel")[0])
     check("the thumbnail route pins its content type and nosniff", "X-Content-Type-Options" in server and "sandbox" in server)
     check("the stream route is capped and stops its watcher", "HUB_MAX_CLIENTS" in server and "hubWatchStopSoon" in server)
+    check("the new routes: POST /api/hub/dismiss and /api/hub/stremio/start, and ?include_dismissed=1 on the list read",
+          'app.post("/api/hub/dismiss", requireHubWrite, requireJarvis' in server and 'app.post("/api/hub/stremio/start", requireHubWrite, requireJarvis' in server
+          and 'include_dismissed: req.query.include_dismissed === "1"' in server)
+    check("the dismiss route reads an id and a literal `finished: true`, nothing else; the start route reads no body",
+          'hubAdmin(res, "dismiss", {\n  id: hubText(req.body?.id, 120), finished: req.body?.finished === true,' in server
+          and 'hubAdmin(res, "stremio_start", {}, 330000)' in server)
     check("hub_admin.py never opens the database itself", "sqlite3" not in (CLI / "jarvis" / "hub_admin.py").read_text(encoding="utf-8"))
 
 
 if __name__ == "__main__":
     for fn in (test_card, test_group_card, test_stream_diff, test_watch_generator, test_thumb_and_file, test_settings_and_history,
-               test_history_writes, test_clear_by_age, test_redownload_and_reorder, test_unattended, test_cli, test_plumbing):
+               test_history_writes, test_clear_by_age, test_redownload_and_reorder, test_dismiss_op,
+               test_list_include_dismissed_and_row_field, test_settle_hours_setting, test_stremio_start_op,
+               test_unattended, test_cli, test_plumbing):
         fn()
     print(f"\n{passed} passed, {failed} failed")
     sys.exit(1 if failed else 0)

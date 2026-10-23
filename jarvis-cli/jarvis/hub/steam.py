@@ -591,8 +591,35 @@ class SteamProvider(providers.BuiltinProvider):
 PROVIDER = SteamProvider()
 
 
+def _psutil_missing():
+    """True when psutil cannot be imported (the import stays in the function, like read_steam_writes)."""
+    try:
+        import psutil  # noqa: F401
+    except ImportError:
+        return True
+    return False
+
+
+def _steam_rows_exist(store):
+    try:
+        return bool(store.list_items(provider="steam", include_disabled=True, include_dismissed=True, limit=1))
+    except Exception:  # noqa: BLE001 - the doctor never fails because of this
+        return False
+
+
 def doctor(store):
-    """hub_doctor's lines for Steam (plan P2: say 'no manifests found', never an empty list)."""
+    """hub_doctor's lines for Steam (plan P2: say 'no manifests found', never an empty list), then one
+    more when Steam is on this PC (or has rows) and psutil is missing: the disk-writes signal is gone."""
+    lines = _manifest_lines(store)
+    steam, _libs = find_libraries(PROVIDER._root(store), PROVIDER.candidates)
+    if _psutil_missing() and (steam or _steam_rows_exist(store)):
+        lines.append({"name": "steam disk writes", "status": "warn",
+                      "detail": "the Steam disk writes signal is unavailable (psutil is not installed), so a stall is "
+                                "decided from the downloading folder alone; run pip install psutil in the Python Jarvis uses"})
+    return lines
+
+
+def _manifest_lines(store):
     steam, libs = find_libraries(PROVIDER._root(store), PROVIDER.candidates)
     if not steam:
         return [{"name": "steam", "status": "ok", "detail": "Steam wasn't found on this PC; the Steam provider is idle"}]

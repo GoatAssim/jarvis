@@ -373,6 +373,9 @@ jarvis-cli/jarvis/
                               dl_pause / dl_resume / dl_cancel / dl_retry / dl_schedule / dl_open / dl_settings, hub_doctor,
                               hub_demo_provider. Thin: every rule is in hub/service.py. Declares the Menu >
                               Downloads panel (hub_ui/, shipped as package data) and the `hub` daemon
+                              also dl_dismiss (owner only, not confirm-gated: hides a provider row that is unknown or finished)
+        download_hub_commands.py  the Download Hub's palette commands (data only; download_hub.py hands the list to the loader)
+        hub_demo_controls.py  the demo provider's hub_demo_pause / _resume / _cancel tools (brief 13 part A; group `hub_demo`)
                               download_status_card.py  Download Hub phase 8 (17.3-4): `present_download_status` -- one live card in the web chat
                               (read-only; prints a `download_status` media line, the page follows the download itself)
         _hub_daemon.py        the runner DAEMONS launches (underscore = not a tool)
@@ -383,7 +386,11 @@ jarvis-cli/jarvis/
         _stremio_server.py    runners the two Stremio DAEMONS launch (read ~/.jarvis/stremio.json at launch; the server runner finds Stremio with hub/stremio/detect.py)
         _stremio_web.py
         stremio_open.py       phase 7: stremio_open (a stremio-web screen / episode stream list in the browser)
-        play_media.py         phase 7: play_episode (tier 3 mpv/VLC on a finished file or the server's link; tier 2
+        stremio_discovery.py  phase 6 (group `stremio`): media_find, media_episodes, stream_search, stremio_addons,
+                              stremio_library, stremio_mark_watched (confirm-gated); resolve_title is shared with
+                              bulk_plan and play_episode. No pack instruction here: the group's one text is in stremio_stack.py
+        bulk_download.py      phase 6: bulk_plan (queues nothing), bulk_run (confirm-gated out of band)
+        play_media.py         phase 7: play_episode (by IMDb id or by title; tier 3 mpv/VLC on a finished file or the server's link; tier 2
                               stremio-web player link; tier 1 episode stream list), play_local; the /play command
         notification_test.py  L.30: the `notification_test` tool + Menu > Notification test (notification_test_ui/, also
                               package data): send a test notification through the real notifier at any level, through any
@@ -395,6 +402,7 @@ jarvis-cli/jarvis/
                               Declared `"size": "wide"` so it opens in the big panel size
                               Phase 8: Downloads / Providers / History tabs, live updates over /api/hub/stream (polling is the
                               fallback), drag-to-reorder of the waiting queue; its settings live in Settings > Downloads
+                          N1: one toggle per card (primaryAction), the reason a row has no pause (controlNote), "Pausing..." feedback (S.acting).
  
     hub_admin.py          Download Hub web back end behind `jarvis hub-admin <op>` (JSON on stdin / stdout; `watch` = JSON lines):
                           the chat status card, the panel's push stream, thumbnails and files by id, History, queue order,
@@ -410,16 +418,34 @@ jarvis-cli/jarvis/
                           later phases plug in): store.py (sqlite, WAL), states.py (what a row may say),
                           netguard.py (SSRF guard), naming.py, router.py, service.py, daemon.py (scheduler,
                           workers, THE retry policy), demo.py, doctor.py, settings.py, engines/ (one module
-                          per engine, discovered; http.py, ytdlp.py, stremio.py). stremio/ (phases 4 and 7:
+                          per engine, discovered; http.py, ytdlp.py, stremio.py, qbittorrent.py (opt-in; never run against a real
+                          qBittorrent), _ytdlp_worker.py (the yt-dlp child process)), reveal.py (N2: the pure "show in folder" rules),
+                          playnite_provider.py (the Playnite provider). stremio/ (phases 4 and 7:
                           config.py ~/.jarvis/stremio.json, loopback only; links.py magnets / streams / file
-                          picking / deep links; server.py the streaming server's HTTP API; player.py mpv / VLC).
+                          picking / deep links; server.py the streaming server's HTTP API; player.py mpv / VLC; addons.py (guarded addon
+                          client; Cinemeta as the default list/meta addon), discovery.py (find, episodes, streams_for, the no-streams sentence),
+                          bulk.py (bulk plans and runs), ranking.py, markers.py (the unverified word table)).
                           hub_client.py (next to this folder) is the
                           never-raising client a tool uses to report its own downloads.
                           Tests: test_hub_core / test_hub_http_engine / test_hub_daemon /
-                          test_hub_service_tools / test_hub_daemon_process + verify_hub_panel.js;
-                          Stremio: test_hub_stremio_links / _engine / _tools (tests/_hub_fake_stremio.py is a fake server)
+                          test_hub_service_tools / test_hub_daemon_process + verify_hub_panel.js, verify_hub_settings.js;
+                          Stremio: test_hub_stremio_links / _engine / _tools (tests/_hub_fake_stremio.py is a fake server),
+                          test_hub_stremio_ranking / _discovery / _pack_instruction / _real_cinemeta, test_hub_bulk (tests/_hub_fake_addon.py is a
+                          fake addon pair, plus a recorded addon at /cin); tests/data/addon-answers-cinemeta.json is the owner's real Cinemeta
+                          answer; tests/addon_checks.py is the probe that makes such a file
+                          Round 3 (brief 17), also in the files above: providers.py settle_unknown / settle_hours (an `unknown` provider row gives up
+                          after unknown_settle_hours -> cancelled); store.py items.dismissed_at, dismiss_items, prune_history (retention),
+                          list_items(include_dismissed=); service.py dismiss(id= | finished=); tests/test_hub_provider_lifecycle.py (settling,
+                          dismiss, retention pruning, daemon wiring, fake clock)
+                          qBittorrent (track E): engines/qbittorrent.py; tests/test_hub_qbittorrent_engine.py with tests/_hub_fake_qbittorrent.py.
+                          Epic / GOG probe (read-only, owner runs it): tests/store_checks.py; tests/test_hub_store_checks.py
+                          N2: hub/reveal.py; tests/test_hub_reveal.py
                           steam-checks.py (repo root, NOT part of the package): the read-only Steam experiment script the owner runs
-                          on Windows (brief 06: N5 second signals, N6 cancel record, N12 control research); tests/test_steam_checks.py
+                          on Windows (brief 06: N5 second signals, N6 cancel record, N12 control research; brief 16: its stall window and
+                          write-noise limit are copies of hub/steam.py's); tests/test_steam_checks.py
+                          steam.py also holds the N5 second-signal readers (read_folder_signal: downloading/<id> size, files, newest mtime,
+                          capped; read_steam_writes: Steam's disk writes via psutil only) and the "flat since" timers; tests/test_hub_steam_alive.py
+                          with tests/fixtures/steam_n5_real_run.jsonl (an excerpt of the real 2026-10-21 Steam run; git-ignored, so a shared copy may not have it)
                                                    detect.py (N9: read-only probes that find Stremio with no setup: port, running program, Windows
                           install list, Start Menu shortcut, usual folders; each takes fake inputs in tests); status.py
                           (collect facts + `describe`: one plain sentence per state, shared by stack_* and hub-admin);
@@ -451,6 +477,7 @@ web/
     public/download-status-card.js/.css  Download Hub (phase 8): the live in-chat download card (render / restore); follows /api/hub/stream, falls back to /api/hub/card; its formatting half is a copy of the panel's (tests/verify_hub_panel.js checks they agree)
     public/path-picker.js/.css  Download Hub (N14): window.JarvisPathPicker.open({kind, start, title, extensions}) -> full path or null; the server lists the folders (POST /api/hub/browse, /api/hub/browse/new-folder), the page only draws them (names as text); Tests: verify_path_picker.js, verify_hub_browse_routes.js, test_hub_browse.py
     public/downloads-settings.js     Download Hub (phase 8): Settings > Downloads, registered through window.JarvisSettingsSections; rows come from /api/hub/settings (what is writable), writes go through dl_prefs / dl_settings
+                          tests: verify_hub_panel.js (panel + chat card + the Settings pure helpers), verify_hub_settings.js (the Settings > Downloads section against a fake ui)
     public/settings.js (+ .css)      L.43: the Settings modal (replaced the Skin modal): section rail, search, AI / Layout / Notifications / Tools / Integrations / Memory / About panes and the Advanced tab (Files, Tunables, Plumbing, History); talks only to /api/settings/*; the Skin section stays app.js's
     public/test-checklist.js     Menu -> Test Checklist (UI, browser-only results)
     public/test-checklist-data.js  the SHIPPED checklist catalogue: an entry per

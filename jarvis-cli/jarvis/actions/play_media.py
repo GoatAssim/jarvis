@@ -10,11 +10,47 @@
                  depends on discovery tools: when a stream is missing it opens the stream list.  A `title` is
                  resolved (stremio_discovery.resolve_title) only when there is no imdb_id and no item_id.
   play_local     plays a FINISHED hub download (by id or title) in mpv / VLC.
+  play_control   pause / resume / toggle / seek / stop / volume / status of the mpv Jarvis itself started (hub/stremio/mpv.py,
+                 over mpv's JSON IPC endpoint).  Owner only.  Never any other process, never a raw command.
 
 What may be played is decided in hub/stremio/player.py: files under the downloads folders with a
 video or audio extension, and the Stremio server's own stream links.  No tool argument is a path
 or a URL.
 """
+
+
+def _is_chat_guest():
+    """True when this turn answers a chat message from someone who is NOT the owner.  No chat context (the PC, a
+    scheduled job) is the owner's own.  An unreadable value counts as a guest: a permission check fails closed."""
+    import json
+    import os
+    raw = os.environ.get("JARVIS_CHANNEL_SENDER") or ""
+    if not raw.strip():
+        return False
+    try:
+        data = json.loads(raw)
+    except (ValueError, TypeError):
+        return True
+    if not isinstance(data, dict):
+        return True
+    if not data.get("platform") or not data.get("user_id"):
+        return False
+    return not data.get("is_owner")
+
+
+def tool_play_control(args):
+    """Control the mpv Jarvis started.  Owner only (refused for a chat guest here: tools.py's OWNER_ONLY_TOOLS only
+    stops OFFERING it)."""
+    try:
+        if _is_chat_guest():
+            return {"ok": False, "error": "controlling the player is the owner's: someone in a chat can't pause or stop it"}
+        args = args or {}
+        if not str(args.get("action") or "").strip():
+            return {"needs_clarification": True, "message": "What should the player do: pause, resume, toggle, seek, stop, volume or status?"}
+        from ..hub.stremio import mpv
+        return mpv.run(args.get("action"), seconds=args.get("seconds"), volume=args.get("volume"))
+    except Exception as exc:  # noqa: BLE001
+        return _fail("play_control", exc)
 
 
 def _fail(label, exc):
@@ -227,7 +263,12 @@ def _play_episode(args, ctx):
         return {"needs_clarification": True,
                 "message": "Which show? Give its title (or its IMDb id, like tt0944947) plus the season and episode; "
                            "or the id of a finished download (dl_list)."}
-    if kind == "series" and (season is None or episode is None) and (args.get("imdb_id") or title):
+    # A title alone (no type, no season, no episode, no imdb_id, no known stream) may be a film, which needs no season
+    # or episode: so for that one case the title is looked up FIRST and the question comes after, only for a series.
+    # Any other case asks at once, before any lookup (type=series with a missing season, a half-given season/episode).
+    lookup_first = bool(title and not args.get("imdb_id") and parsed is None and not str(args.get("type") or "").strip()
+                        and season is None and episode is None)
+    if kind == "series" and (season is None or episode is None) and (args.get("imdb_id") or title) and not lookup_first:
         return {"needs_clarification": True, "message": "Which season and episode?"}      # asked before any lookup
 
     def look_up_title():
@@ -243,6 +284,11 @@ def _play_episode(args, ctx):
         if answer is not None:
             return answer
         kind = ctx.get("kind") or kind
+        if lookup_first and kind == "series":
+            # a clear series match: now the season and episode are needed.  Hand back the id so the next call needs no lookup.
+            return {"needs_clarification": True, "imdb_id": args["imdb_id"], "type": "series", "matched": ctx.get("matched"),
+                    "message": "That is %s. Which season and episode? Ask the owner, then call play_episode again with this imdb_id, "
+                               "the season and the episode." % ctx.get("matched")}
     try:
         if args.get("imdb_id"):
             links.deep_link_detail(config.web_url(), args["imdb_id"], kind, season, episode)   # validates
@@ -303,7 +349,7 @@ TOOL_SCHEMAS = [
                      "make it ask which one, nothing is guessed. play_local plays a finished download by title."),
      "parameters": {"type": "object", "properties": {
          "imdb_id": {"type": "string", "description": "IMDb id like tt0944947. Wins over title."},
-         "title": {"type": "string", "description": "The show or film as the owner said it, when there is no imdb_id (or media_find id). For a film also pass type=movie."},
+         "title": {"type": "string", "description": "The show or film as the owner said it, when there is no imdb_id (or media_find id). With no type, season or episode the title is looked up first: a film plays, a series asks for season and episode, several matches ask which."},
          "season": {"type": "integer"}, "episode": {"type": "integer"},
          "type": {"type": "string", "enum": ["series", "movie"], "description": "Default series."},
          "item_id": {"type": "string", "description": "A finished hub download to play (from dl_list)."},
@@ -323,14 +369,26 @@ TOOL_SCHEMAS = [
          "query": {"type": "string", "description": "Part of its title, when there is no id."},
          "player": {"type": "string", "enum": ["auto", "mpv", "vlc"]},
          "fullscreen": {"type": "boolean"}}}},
+    {"name": "play_control",
+     "description": ("Control the mpv player that Jarvis itself opened (play_episode / play_local): pause, resume, toggle, seek (relative "
+                     "seconds), stop (closes it), volume (0-100) or status (title, position, duration, paused). Only that player; with "
+                     "none running it says so. Owner only."),
+     "parameters": {"type": "object", "properties": {
+         "action": {"type": "string", "enum": ["pause", "resume", "toggle", "seek", "stop", "volume", "status"]},
+         "seconds": {"type": "number", "description": "For seek: seconds to skip, negative to go back (e.g. -30)."},
+         "volume": {"type": "integer", "description": "For volume: 0 to 100."}},
+         "required": ["action"]}},
 ]
 
-TOOLS = {"play_episode": tool_play_episode, "play_local": tool_play_local}
+TOOLS = {"play_episode": tool_play_episode, "play_local": tool_play_local, "play_control": tool_play_control}
 TOOL_GROUP = "stremio"
 
 TOOL_KEYWORDS = {
     "play_episode": {"play episode": 10, "play the episode": 10, "play s0": 9, "watch episode": 10, "watch the episode": 10,
                      "play season": 9, "watch s0": 9},
+    "play_control": {"pause the video": 10, "pause the player": 10, "resume the video": 10, "resume playback": 10, "skip ahead": 8,
+                     "skip back": 8, "rewind the video": 9, "turn the volume": 8, "stop the player": 10, "what is playing": 9,
+                     "what's playing": 9, "pause the episode": 9, "pause the movie": 9},
     "play_local": {"play the download": 10, "play the downloaded": 10, "play it in mpv": 10, "play it in vlc": 10,
                    "play the file": 8, "play the finished": 10},
 }
@@ -369,6 +427,21 @@ TEST_CHECKLIST = {
                   "the Stremio server running for streaming (stack_start)",
                   "for a title: an addon that can look titles up (Cinemeta is used when none is set)"],
         "care": "Opens a browser tab or a player window. A title is looked up on the network (only through the addon guard); an IMDb id needs no lookup.",
+    },
+    "play_control": {
+        "does": "Pauses, resumes, seeks, stops, sets the volume of, or reports on the mpv player that Jarvis itself started.",
+        "steps": [
+            {"run": {"action": "status"}, "expect": "With nothing started by Jarvis playing: ok: false, one sentence saying nothing is playing that Jarvis started. While mpv plays: ok: true with title, position, duration, paused."},
+            {"run": {"action": "pause"}, "expect": "ok: true, done: paused; the video freezes. action resume continues it."},
+            {"run": {"action": "seek", "seconds": -30}, "expect": "ok: true, the video jumps back 30 seconds."},
+            {"run": {"action": "volume", "volume": 40}, "expect": "ok: true, the volume drops to 40."},
+            {"run": {"action": "volume", "volume": 300}, "expect": "ok: false, says volume must be from 0 to 100; nothing is sent to mpv."},
+            {"run": {"action": "stop"}, "expect": "ok: true, the mpv window closes."},
+            {"ask": "Pause the video", "expect": "Calls play_control with action pause and says it paused."},
+        ],
+        "needs": ["mpv (not VLC) started by play_episode or play_local; Linux and macOS use a socket, Windows a named pipe (not tested)"],
+        "watch": ["Only the mpv Jarvis started is ever controlled: a player you opened yourself is never touched.",
+                  "From a remote chat guest it is refused: controlling the player is the owner's."],
     },
     "play_local": {
         "does": "Plays a finished Download Hub file in mpv or VLC.",

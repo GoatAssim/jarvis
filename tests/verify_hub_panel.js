@@ -287,7 +287,7 @@ const eq = (a, b) => JSON.stringify(a) === JSON.stringify(b);
   check("the arrow keys, Home and End move between tabs", /ArrowRight/.test(source) && /ArrowLeft/.test(source) && /"Home"/.test(source) && /"End"/.test(source));
   check("the writes to the hub's web routes carry the header the server requires, and removing history asks first",
     /"X-Jarvis-Hub": "1"/.test(source) && /askFirst\("Remove from the history\?"/.test(source) && /askFirst\("Clear old history\?"/.test(source) && /dry_run: true/.test(source));
-  check("the panel only talks to /api/hub/ routes it knows", [...source.matchAll(/["'`]\/api\/([a-z\/\-]+)/g)].every((m) => /^hub\/(stream|history|history\/remove|history\/clear|redownload|reorder|thumb\/|file\/)/.test(m[1])));
+  check("the panel only talks to /api/hub/ routes it knows", [...source.matchAll(/["'`]\/api\/([a-z\/\-]+)/g)].every((m) => /^hub\/(stream|list|dismiss|history|history\/remove|history\/clear|redownload|reorder|thumb\/|file\/)/.test(m[1])));
   check("the live stream falls back to polling: errors, a silent stream and a `down` message all hand over", /es\.onerror = liveDown/.test(source) && /addEventListener\("down", liveDown\)/.test(source) && /45000/.test(source));
   check("while the stream is live the poll only refreshes the summary", /streaming \? \{ limit: 1, summary: true \}/.test(source));
   check("a row drag doesn't turn into 'links dropped on the panel'", /if \(S\.dragId\) return;/.test(source));
@@ -411,6 +411,69 @@ const eq = (a, b) => JSON.stringify(a) === JSON.stringify(b);
   check("a pressed Pause / Resume / Retry says what is happening at once, and it is cleared on failure or when the state moves on", /S\.acting\[row\.id\] = \{ from: row\.state, doing: doing/.test(source) && /if \(r\.declined \|\| r\.ok === false\) delete S\.acting\[row\.id\]/.test(source) && /row\.state !== a\.from/.test(source) && /S\.acting\]\)\) return;|S\.acting\]\)/.test(source));
   check("the pending word shows on the toggle too (the hub's own request), and the button is disabled while busy", /busy \|\| prim\.label/.test(source) && /attrs\.disabled = "disabled"/.test(source) && /busyWord\(row\) \{[^}]*pendingWord\(row\.pending\)/.test(source.replace(/\n/g, " ")));
   check("the toggle is built with el() and textContent only (no HTML from data)", !/innerHTML|insertAdjacentHTML/.test(source.slice(source.indexOf("function toggleButton"), source.indexOf("function renderBar"))));
+
+  // ---- brief 19: Dismiss, Clear finished, Show hidden
+  const prow = (o) => Object.assign({ id: "steam:1", owner: "provider", provider: "steam", state: "done", derived: [], capabilities: ["reveal"], stale: false, dismissed_at: null }, o);
+  check("a provider row can be dismissed when it is unknown or in a final state, and in no other",
+    ["done", "failed", "cancelled", "unknown"].every((st) => pure.canDismiss(prow({ state: st })))
+    && ["queued", "probing", "connecting", "downloading", "postprocessing", "paused", "stalled"].every((st) => !pure.canDismiss(prow({ state: st }))));
+  check("a hub row is never dismissable, even a finished one", !pure.canDismiss(row({ state: "done" })) && !pure.canDismiss(row({ state: "failed", owner: "hub" })));
+  check("the row's own state decides: no capability named dismiss is read or invented",
+    pure.canDismiss(prow({ capabilities: [] })) && !/\"dismiss\"/.test(source.slice(source.indexOf("const ACTION_DEFS"), source.indexOf("const ACTION_ORDER"))) && pure.rowActions(prow({ capabilities: ["reveal"] })).every((a) => a.verb !== "dismiss"));
+  check("junk is not dismissable", !pure.canDismiss(null) && !pure.canDismiss({}) && !pure.canDismiss(prow({ state: undefined })));
+  const hid = prow({ id: "steam:2", dismissed_at: 1700000000 });
+  check("a hidden row is dimmed (and offers Show again) until it is listed again; it can't be dismissed twice",
+    pure.isHidden(hid) && pure.isDimmed(hid, {}) && !pure.canDismiss(hid, {}) && !pure.isDimmed(hid, { "steam:2": true }) && pure.canDismiss(hid, { "steam:2": true }) && !pure.isHidden(prow({})));
+  const live = [prow({ id: "steam:1" }), prow({ id: "steam:3", state: "downloading" }), row({ id: "h_1", state: "done" })];
+  check("Clear finished counts the shown dismissable provider rows only (not running, not hub, not hidden)",
+    eq(pure.dismissableRows(live.concat([hid]), {}).map((r) => r.id), ["steam:1"]));
+  const hidden = [hid, prow({ id: "steam:1", dismissed_at: 5 }), prow({ id: "steam:9" })];
+  check("Show hidden off lists only the live rows", eq(pure.mergeHidden(live, hidden, false, {}).map((r) => r.id), ["steam:1", "steam:3", "h_1"]));
+  check("Show hidden on adds the hidden rows (a row the hub shows again wins; a row without dismissed_at is not added)",
+    eq(pure.mergeHidden(live, hidden, true, {}).map((r) => r.id), ["steam:1", "steam:3", "h_1", "steam:2"]));
+  check("a row listed again stays in the list with Show hidden off", eq(pure.mergeHidden(live, hidden, false, { "steam:2": true }).map((r) => r.id), ["steam:1", "steam:3", "h_1", "steam:2"]));
+  check("mergeHidden copes with nothing", eq(pure.mergeHidden([], null, true, null), []) && eq(pure.mergeHidden(live, undefined, false, undefined), live));
+  check("a hidden row still counts in its status view when listed (the Finished view finds it)", pure.viewMatches("done", hid) && eq(pure.filterRows(pure.mergeHidden(live, hidden, true, {}), { view: "done" }).map((r) => r.id), ["steam:1", "h_1", "steam:2"]));
+  check("what the person is told: one row, several, none, already hidden",
+    pure.dismissNotice({ ok: true, dismissed: ["a"], count: 1 }).msg === "Hidden. No file was touched."
+    && pure.dismissNotice({ ok: true, dismissed: ["a", "b", "c"], count: 3 }).msg === "Hid 3 rows. No file was touched."
+    && pure.dismissNotice({ ok: true, dismissed: [], count: 0, note: "nothing to clear" }).msg === "Nothing to clear"
+    && pure.dismissNotice({ ok: true, dismissed: [], count: 0, note: "it was already hidden" }).msg === "It was already hidden"
+    && pure.dismissNotice(null).msg === "Nothing to hide");
+  check("the tooltips say that files are never touched, and Clear finished says hub rows and History are not touched",
+    /no file is touched/i.test(pure.DISMISS_TIP) && /no file is touched/i.test(pure.CLEAR_TIP) && /hub made itself/.test(pure.CLEAR_TIP) && /History/.test(pure.CLEAR_TIP)
+    && /Nothing hidden is deleted/.test(pure.SHOW_HIDDEN_TIP) && /hub keeps it hidden/.test(pure.SHOW_AGAIN_TIP));
+  const htmlD = fs.readFileSync(path.join(ui, "tool.html"), "utf8");
+  check("tool.html has Clear finished in the top strip and the Show hidden toggle (aria-pressed) in the list bar",
+    /id="clearFinished"[^>]*>Clear finished</.test(htmlD) && /id="showHidden"[^>]*aria-pressed="false"[^>]*>Show hidden</.test(htmlD)
+    && htmlD.indexOf('id="clearFinished"') < htmlD.indexOf("</header>") && htmlD.indexOf('id="showHidden"') > htmlD.indexOf('id="groupBy"')
+    && /no file is touched/.test(htmlD.slice(htmlD.indexOf('id="clearFinished"'), htmlD.indexOf('id="clearFinished"') + 400)));
+  check("the wiring: Dismiss posts {id}, Clear finished posts {finished: true}, Show hidden reads ?include_dismissed=1",
+    /hubFetch\("\/api\/hub\/dismiss", \{ id: row\.id \}\)/.test(source) && /hubFetch\("\/api\/hub\/dismiss", \{ finished: true \}\)/.test(source)
+    && /hubFetch\("\/api\/hub\/list\?include_dismissed=1"\)/.test(source)
+    && /\$\("#clearFinished"\)\.addEventListener\("click", clearFinished\)/.test(source) && /\$\("#showHidden"\)\.addEventListener\("click", toggleShowHidden\)/.test(source));
+  const dismissSrc = source.slice(source.indexOf("async function dismissRow"), source.indexOf("async function demoAction"));
+  check("there is no confirmation dialog on Dismiss or Clear finished, and no tool is run for them",
+    !/askFirst|confirm\(/.test(dismissSrc) && !/callTool|runTool/.test(dismissSrc) && !/askFirst/.test(source.slice(source.indexOf("function dismissButton"), source.indexOf("function sectionHeader"))));
+  check("Show again calls nothing: it only marks the row as listed again", /function showAgain\(row\) \{\s*S\.revealed\[row\.id\] = true;\s*render\(\);\s*\}/.test(source));
+  check("the Dismiss button is drawn from canDismiss / isDimmed on the card and in the detail pane",
+    /const hide = dismissButton\(row, false\);\s*if \(hide\) buttons\.push\(hide\)/.test(source) && /const hideBtn = dismissButton\(row, true\);/.test(source)
+    && /if \(!dimmed && !canDismiss\(row, S\.revealed\)\) return null;/.test(source));
+  check("a hidden row is dimmed in the CSS and tagged in words too; the button is built with el() and textContent",
+    /\.row\.is-hidden \{ opacity/.test(css) && /text: "hidden"/.test(source) && !/innerHTML|insertAdjacentHTML/.test(source.slice(source.indexOf("function dismissButton"), source.indexOf("function sectionHeader"))));
+  check("the hidden rows are asked for only while they are in view, and the poll refreshes them",
+    /if \(!S\.showHidden && !Object\.keys\(S\.revealed\)\.length\) return;/.test(source) && /loadHidden\(false\);\s*\/\/ only does anything while hidden rows are in view/.test(source));
+  check("the live rows (counts, needs attention, queue order) are not computed from the hidden ones",
+    /overviewStats\(S\.rows\)/.test(source) && /needsAttention\(S\.rows\)/.test(source) && /queueOrder\(S\.rows\)/.test(source) && /const counts = viewCounts\(viewRows\(\)\)/.test(source));
+  check("the list's signature includes what Show hidden and Show again change", /\[rows, S\.selected, S\.groupBy, S\.live, S\.revealed, S\.showHidden, S\.acting\]/.test(source));
+
+  // ---- brief 19 step 4: a running Steam row's note on the card
+  const steamNote = "30.6 % of 2.1 GB, reported 20 s ago; Steam isn't reporting live progress";
+  check("a running Steam row shows its own note on the card; nothing for other rows or states, and nothing is invented",
+    pure.cardNote(prow({ state: "downloading", message: steamNote })) === steamNote && pure.cardNote(prow({ state: "downloading", message: "" })) === ""
+    && pure.cardNote(prow({ state: "downloading", message: null })) === "" && pure.cardNote(prow({ state: "done", message: steamNote })) === ""
+    && pure.cardNote(prow({ state: "downloading", provider: "playnite", message: steamNote })) === "" && pure.cardNote(row({ state: "downloading", message: steamNote })) === ""
+    && pure.cardNote(null) === "" && /cardNote\(row\) \? el\("div", \{ cls: "row__note"/.test(source) && /\.row__note \{/.test(css));
 
   console.log("\n" + passed + " passed, " + failed + " failed");
   process.exit(failed ? 1 : 0);

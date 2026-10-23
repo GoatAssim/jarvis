@@ -172,6 +172,12 @@ plan = bulk_tools.tool_bulk_plan({"title": QUERY})
 check("bulk_plan without a season, with a stream addon: takes season 4 and says it assumed", plan.get("ok") and plan.get("season") == 4 and plan.get("season_assumed"))
 print("   bulk_plan message (fake stream addon, season never named):")
 print("      " + str(plan.get("message")).replace("\n", "\n      "))
+check("the real season 4 (1 episode) after season 3 (12) gets the one extra sentence",
+      "Season 3 has 12 episodes; this one has 1, so it may have just started." in plan.get("message", "")
+      and plan["message"].count("just started") == 1)
+check("...and the plan is what it was: season 4, one episode, the same 'latest' sentence, 'has' for one release",
+      plan["season"] == 4 and len(plan["episodes"]) == 1 and "this is the latest one (4 of 4)" in plan["message"]
+      and "1 of them has a release" in plan["message"])
 cfg.write_text(json.dumps({}))
 
 # ---- streams: nothing recorded, so say so

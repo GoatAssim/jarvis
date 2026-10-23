@@ -10,6 +10,9 @@ The plugin is loaded by the worker process through PYTHONPATH (yt-dlp finds a `y
 folder on sys.path), so the real engine, the real worker, real yt-dlp and real ffmpeg are all
 in the loop.
 
+A second extractor, `hubtest:list`, answers `http://127.0.0.1:<port>/hubtestlist/<id>?n=<count>` with a
+PLAYLIST of `n` entries, each a `/hubtest/<id>-<i>` link (brief 21; used by test_hub_ytdlp_playlists.py).
+
 URL query for /hubtest/<id>:
     v=<bytes>     the video stream's exact size (filesize)
     a=<bytes>     the audio stream's size
@@ -56,6 +59,21 @@ class HubTestIE(InfoExtractor):
                 audio["filesize_approx" if q.get("approx") else "filesize"] = int(q["a"])
             formats.append(audio)
         return {"id": vid, "title": "Hub Test " + vid, "formats": formats, "duration": 4}
+
+
+class HubTestListIE(InfoExtractor):
+    IE_NAME = "hubtest:list"
+    _VALID_URL = r"https?://[^/]+/hubtestlist/(?P<id>[\\w-]+)"
+
+    def _real_extract(self, url):
+        list_id = self._match_id(url)
+        parts = urlsplit(url)
+        q = {k: v[0] for k, v in parse_qs(parts.query).items()}
+        base = "%s://%s" % (parts.scheme, parts.netloc)
+        count = int(q.get("n") or 3)
+        entries = [self.url_result("%s/hubtest/%s-%d" % (base, list_id, i), ie="HubTest", video_title="Part %d" % i)
+                   for i in range(1, count + 1)]
+        return self.playlist_result(entries, list_id, "Hub Test List " + list_id)
 '''
 
 

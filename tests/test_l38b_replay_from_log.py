@@ -221,8 +221,9 @@ def test_rebuild_turn_extras_rules():
           thread_extras.rebuild_turn_extras([], stored) == stored)
     check("no runs and nothing saved -> empty list", thread_extras.rebuild_turn_extras([], None) == [])
     check("tool-derived type list is exactly what extras_from_runs / declined can emit",
+          # downloadStatus: present_download_status's chat card (Download Hub track D, thread_extras.py line 132)
           thread_extras.TOOL_DERIVED_TYPES == {"confirm", "screenshot", "organizeJson", "download",
-                                               "presentFile", "devAgent", "declinedAction"})
+                                               "presentFile", "downloadStatus", "devAgent", "declinedAction"})
 
 
 # ---- 2. real ask --------------------------------------------------------------

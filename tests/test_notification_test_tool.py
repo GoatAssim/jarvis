@@ -96,7 +96,9 @@ def test_it_goes_through_notify_only():
     tree = ast.parse(src)
     calls = [n for n in ast.walk(tree) if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute) and n.func.attr == "notify"]
     check("the module has exactly one notify() call and no delivery of its own", len(calls) == 1
-          and "wire.media" not in src and "_deliver" not in src.replace("_deliverers", ""), len(calls))
+          and "wire.media" not in src
+          # `resolve_delivery` is notifier's read-only planner the preview uses (docstring, line 12); it is not a delivery
+          and "_deliver" not in src.replace("_deliverers", "").replace("resolve_delivery", ""), len(calls))
 
 
 def test_the_preview_matches_the_record():

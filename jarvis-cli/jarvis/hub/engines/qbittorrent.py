@@ -733,7 +733,10 @@ class QBittorrentEngine(Engine):
             hub_state = {"metadata": "connecting", "queued": "connecting",
                          "checking": "postprocessing", "moving": "postprocessing"}.get(kind, "downloading")
             if hub_state != last_state:
-                ctx.set_state(hub_state)
+                # Any write that does not name `eta_s` makes the store derive one from the bytes
+                # and mark it "≈" (states.sanitize_report), over qBittorrent's own.  So every
+                # write after the report below carries qBittorrent's ETA along.
+                ctx.set_state(hub_state, eta_s=fields.get("eta_s"))
                 last_state = hub_state
 
             done = fields.get("bytes_done")
@@ -762,7 +765,7 @@ class QBittorrentEngine(Engine):
             if kind in ("active", "stalled") and now - last_children >= CHILDREN_EVERY_S:
                 last_children = now
                 try:
-                    ctx.update(children=_children(client.files(infohash)))
+                    ctx.update(children=_children(client.files(infohash)), eta_s=fields.get("eta_s"))
                 except QbError:
                     pass
 

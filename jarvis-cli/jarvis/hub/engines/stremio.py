@@ -5,7 +5,10 @@ end; the server fetches the pieces.  This engine is the HTTP engine plus two ext
 
   1. REGISTER   POST /<hash>/create (a torrent with no peers keeps that request open, yet it IS
                 registered, so we poll /<hash>/stats.json for `files[]` instead of waiting on it);
-                a .torrent URL is fetched (SSRF-guarded) and registered with POST /create.
+                a .torrent URL is fetched (SSRF-guarded) and registered with POST /create.  A .torrent FILE
+                on this PC (the owner gave its path) is claimed by `_match`, checked and copied into the hub's
+                own folder by stremio/torrentfile.py, and queued as a magnet; this step then registers the kept
+                copy with POST /create exactly as it does a fetched one.  The row never holds the path.
   2. CHOOSE     the file: the index the source named, else SxxExx in a pack, else the largest video.
   3. DOWNLOAD   engines.http.stream_to_file on  /<hash>/<idx>?external=1&download=1  (the server
                 answers 307 -> /<hash>/<name>?download=1; the HTTP engine follows it with Range
@@ -41,11 +44,12 @@ from .. import settings as settings_mod
 from ..stremio import config as scfg
 from ..stremio import links
 from ..stremio import server as sserver
+from ..stremio import torrentfile
 from .base import Engine, Outcome, RouteRule
 
 NAME = "stremio"
 STATS_EVERY = 10.0          # watchdog period (plan 7.3 step 4)
-MAX_TORRENT_FILE = 5 * 1024 * 1024
+MAX_TORRENT_FILE = torrentfile.MAX_BYTES        # one cap for a fetched link and a local file: 5 MB
 FREE_SPACE_MARGIN = 1.10
 USER_AGENT = "Jarvis-Hub/1"
 
@@ -412,6 +416,11 @@ def _run(item, ctx):
     stall = max(10, _int(stremio_cfg.get("stall_seconds") or 90))
     meta_wait = max(1, _int(stremio_cfg.get("metadata_timeout") or 90))
 
+    if torrentfile.looks_like_path(item.get("title")):
+        # A path typed into dl_add can reach the row as its first title (the add code titles a row with the text it
+        # was given).  Never keep a folder name on a row: say the file's own name instead.
+        ctx.update(title=(str(target.get("name") or "") + ".torrent") if target.get("name") else "torrent file")
+
     server = sserver.StremioServer()
     watch = None
     try:
@@ -420,12 +429,22 @@ def _run(item, ctx):
         if not up:
             return Outcome.failed(why, retryable=True, delay_s=20.0)
 
-        # --- 1. register (a .torrent link is fetched and registered first)
+        # --- 1. register (a .torrent link is fetched and registered first; so is the kept copy of a .torrent FILE)
+        blob = None
         if target["kind"] == "torrent_url":
             ctx.update(phase="fetching the .torrent file")
             blob, problem = _fetch_torrent(target["url"], ctx)
             if blob is None:
                 return Outcome.failed(problem)
+        elif target["kind"] in ("magnet", "infohash"):
+            blob = torrentfile.staged_blob(target["infohash"])
+            if blob is not None:
+                # file name and size and infohash only: the folder the file came from was never stored
+                ref["torrent_file"] = {"name": (str(target.get("name") or "") + ".torrent") if target.get("name") else "",
+                                       "size": len(blob), "infohash": target["infohash"]}
+            elif ref.get("torrent_file"):
+                ctx.event("warn", "the kept copy of the .torrent file is gone; asking the swarm for the file list instead")
+        if blob is not None:
             try:
                 created = server.create_from_blob(blob)
             except sserver.ServerError as exc:
@@ -462,7 +481,8 @@ def _run(item, ctx):
         opts = _layout(item, ref, ctx, entry, idx)
         ref.update({"infohash": target["infohash"], "file_idx": idx, "length": length})
         title = str(item.get("title") or "")
-        if not title or title.lower().startswith(("magnet:", "{")) or title == str(item.get("source_url") or "")[:len(title)]:
+        if (not title or title.lower().startswith(("magnet:", "{")) or title == str(item.get("source_url") or "")[:len(title)]
+                or torrentfile.looks_like_path(title)):
             ctx.update(title=Path(opts["filename"]).stem or opts["filename"])
         run_item = dict(item, options=opts, source_ref=ref)
         url = links.download_url(server.base, target["infohash"], idx)
@@ -520,10 +540,17 @@ _REASONS = {
 
 def _match(text, settings):
     parsed = links.parse_input(text, scfg.server_hostport())
-    if not parsed:
+    if parsed:
+        return {"reason": _REASONS.get(parsed["kind"], "torrent (Stremio engine)"), "kind": "torrent",
+                "source": links.canonical_source(parsed)}
+    # A path to a .torrent file on this PC.  Only a file that passes every check is claimed (a bad path is not: the
+    # router then says what it says for anything it can't take; the one-sentence reasons are
+    # torrentfile.local_torrent's second answer).  The row gets a magnet, never the path.
+    found, _problem = torrentfile.local_torrent(text)
+    if found is None or not torrentfile.stage(found):
         return None
-    return {"reason": _REASONS.get(parsed["kind"], "torrent (Stremio engine)"), "kind": "torrent",
-            "source": links.canonical_source(parsed)}
+    return {"reason": ".torrent file on this PC (Stremio engine)", "kind": "torrent",
+            "source": links.build_magnet(found["infohash"], None, found["stem"])}
 
 
 ENGINE = StremioEngine()

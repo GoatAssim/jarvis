@@ -656,6 +656,36 @@ done = subprocess.run([sys.executable, str(runner)], env=env, capture_output=Tru
 check("runner: nothing to start -> exits 2 and says what it looked at and how to fix it",
       done.returncode == 2 and "I looked at:" in done.stderr and "process:" in done.stderr and "Locate..." in done.stderr)
 
+# ===================================================================== brief 19: the Stremio card's needs
+
+check("LOCATE_HINT no longer promises a button that doesn't exist yet, and points at the card",
+      "until that button exists" not in status.LOCATE_HINT.lower() and "Locate..." in status.LOCATE_HINT and "Settings > Downloads > Stremio" in status.LOCATE_HINT)
+d = status.describe(facts())
+check("the not_found sentence still names Locate..., the card and the config file (so the manual way stays documented)",
+      "Locate..." in d["sentence"] and "Settings > Downloads > Stremio" in d["sentence"] and str(config.config_path()) in d["sentence"]
+      and "until that button" not in d["sentence"].lower())
+d = status.describe(facts(other_url="http://127.0.0.1:11471", other_version="4.20.8"))
+check("describe() hands the other address on (state other_port) so the card's Locate... can save it; empty otherwise",
+      d["state"] == "other_port" and d["other_url"] == "http://127.0.0.1:11471" and status.describe(facts())["other_url"] == "")
+REG[:] = []
+got = hub_admin.admin("stremio_status", {})
+check("hub-admin stremio_status also reports other_url, the wait Start may take, and stremio-web (url, answers, configured)",
+      got["ok"] and "other_url" in got and isinstance(got["wait_seconds"], int) and 10 <= got["wait_seconds"] <= 300
+      and set(got["web"]) == {"url", "answers", "configured"} and isinstance(got["web"]["answers"], bool) and isinstance(got["web"]["configured"], bool))
+hub_src = (ROOT / "jarvis-cli" / "jarvis" / "hub_admin.py").read_text(encoding="utf-8")
+start_src = hub_src[hub_src.index("def stremio_start"):hub_src.index("# ----", hub_src.index("def stremio_start"))]
+check("stremio_start starts the SERVER only, through tool_stack_start, and takes nothing from the request",
+      'tool_stack_start({"what": "server"})' in start_src and "request.get" not in start_src and "what\": \"both" not in start_src)
+offenders = []
+for py in sorted((ROOT / "jarvis-cli" / "jarvis").rglob("*.py")):
+    rel = py.relative_to(ROOT / "jarvis-cli" / "jarvis").as_posix()
+    if rel == "hub_admin.py":
+        continue
+    if re.search(r"\bstremio_start\b", py.read_text(encoding="utf-8", errors="replace")):
+        offenders.append(rel)
+check("nothing but hub_admin.py names the stremio_start op (no tool, no other module): %s" % (offenders or "clean"), not offenders)
+check("no Stremio tool is named stremio_start", "stremio_start" not in stremio_stack.TOOLS)
+
 shutil.rmtree(HOME, ignore_errors=True)
 print("\n%d passed, %d failed" % (passed, failed))
 sys.exit(1 if failed else 0)

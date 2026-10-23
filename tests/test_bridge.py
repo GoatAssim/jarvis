@@ -179,6 +179,10 @@ def worker():
     if _worker is None:
         _write_home_files()
         _worker = Worker()
+    elif _worker.proc.poll() is not None:
+        # test_a_changed_tool_folder_retires_the_worker_... closes the shared worker on purpose; every test
+        # after it used to write to that closed pipe ("ValueError: write to closed file"). Start a new one.
+        _worker = Worker()
     return _worker
 
 

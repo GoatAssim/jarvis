@@ -30,9 +30,10 @@ from . import config, detect
 
 DEFAULT_WAIT_S = 60
 
-# Until the Locate... button exists in the Downloads settings, the sentence says how to do it by hand.
-LOCATE_HINT = ("Point Jarvis at it with Locate... (Settings > Downloads). Until that button exists, "
-               "set server.runtime_exe and server.server_js in %s")
+# Where the owner points Jarvis at Stremio: the Locate... buttons on the Stremio card (Settings > Downloads).  The
+# config file is named as well, for anyone who would rather edit it.  `%s` is the file's path.
+LOCATE_HINT = ("Point Jarvis at it with Locate... (Settings > Downloads > Stremio), "
+               "or set server.runtime_exe and server.server_js in %s")
 
 STEP_LABELS = {"find": "finding Stremio", "launch": "starting the program", "wait": "waiting for its server",
                "port": "the server's port", "": ""}
@@ -139,7 +140,9 @@ def describe(facts):
         except (TypeError, ValueError):
             age = None
     out = {"address": url, "version": facts.get("version") or "", "managed_by": "", "path": path,
-           "problems": problems, "can_start": False, "action": "", "step": "", "next": ""}
+           "problems": problems, "can_start": False, "action": "", "step": "", "next": "",
+           # where a server DID answer when it was not at `address` (state other_port); the card's Locate... saves it
+           "other_url": facts.get("other_url") or ""}
 
     def done(state, sentence, next_="", action="", step="", can_start=False):
         out.update(state=state, title=TITLES[state], sentence=sentence, next=next_, action=action, step=step,

@@ -232,7 +232,10 @@ def test_errors_and_retries():
     out = run(store, item)
     check("a body that ends early is retryable (never accepted as the file)",
           out.kind in (Outcome.STALLED, Outcome.FAILED) and out.retryable)
-    check("and is not renamed to its final name", not list((lib / "Files").glob("*")) or all(p.name.endswith(".part") for p in (lib / "Files").glob("*")))
+    # The folder also holds `flaky`, the finished file of the retry check above, so the old
+    # "everything in the folder ends in .part" form could never pass.  Look at THIS download only.
+    check("and is not renamed to its final name",
+          not (lib / "Files" / "short").exists() and (lib / "Files" / "short.part").exists())
 
     store, lib = env(stall=1)
     item = claim(store, BASE + "/hang?size=200000")

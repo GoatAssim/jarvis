@@ -39,6 +39,10 @@ def check(name, cond):
 
 
 BASE, ST, SERVER = fake.start()
+# Offline on purpose: when no installed addon can look titles up, discovery falls back to the REAL Cinemeta.
+# On a PC with internet that fallback answers, and the check 'an addon that errors ... nothing found' fails.
+# Point the default at a closed local port so this test never depends on the network.
+A.DEFAULT_META_MANIFEST = "http://127.0.0.1:9/manifest.json"
 cfg = config.config_path()
 cfg.parent.mkdir(parents=True, exist_ok=True)
 cfg.write_text(json.dumps({"addons": {"urls": [BASE + "/cat/manifest.json", BASE + "/str/manifest.json"]}}))

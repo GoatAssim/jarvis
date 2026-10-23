@@ -29,12 +29,8 @@ TOOL_KEYWORDS = {
     },
 }
 
-TOOL_PACK_INSTRUCTION = (
-    "present_download_status(ids|group|query): after you queue a download with dl_add, call this ONCE to show "
-    "the user a live progress card (bar, speed, Pause/Cancel, Open when done). Pass the ids dl_add returned "
-    "(or the group id for a batch). Do not call it again to 'refresh' - the card updates itself. "
-    "It is read-only and does not start, stop or change anything."
-)
+# No TOOL_PACK_INSTRUCTION here on purpose: the "downloads" group has ONE, in download_hub.py (it
+# covers present_download_status too).  tests/test_hub_guest_gates.py checks that only one file declares it.
 
 TOOL_SCHEMAS = [{
     "name": "present_download_status",

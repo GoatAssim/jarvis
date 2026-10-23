@@ -271,7 +271,10 @@ def test_cli_and_wiring():
             offenders.append(path.name)
     check("nothing else reaches the settings writers (the reset included)", offenders == [], offenders)
     from jarvis import tools
-    check("no model tool is named reset-something for settings", not [n for n in tools.TOOLS if "setting" in n.lower() or "reset_value" in n.lower()])
+    # `dl_settings` belongs to the Download Hub (its own settings file); the scan above shows nothing but
+    # settings_admin / tunables touches this Settings tree's writers. Any other tool named for settings still fails.
+    check("no model tool is named reset-something for settings",
+          not [n for n in tools.TOOLS if ("setting" in n.lower() or "reset_value" in n.lower()) and n != "dl_settings"])
 
 
 if __name__ == "__main__":

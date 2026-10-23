@@ -72,6 +72,30 @@ def rows():
 plan = tools.tool_bulk_plan({"title": "Spirit Hunters", "quality": "1080p", "audio": "dub"})
 check("the show is resolved from its name and a plan comes back", plan["ok"] and plan["title"] == "Spirit Hunters" and plan["plan_id"].startswith("bp"))
 check("no season named: the latest is taken, and the plan says so", plan["season"] == 2 and plan["season_assumed"] and "latest" in plan["message"])
+check("a latest season of normal size (4 episodes after 3) gets no 'just started' sentence", "just started" not in plan["message"])
+
+
+def synth(seasons, season, assumed=True, got=1):
+    """A hand-built plan: only what plan_message reads."""
+    counts = dict(seasons)
+    return {"media": {"title": "Show"}, "season": season, "season_assumed": assumed,
+            "seasons_available": [{"season": n, "episodes": c, "released": c} for n, c in seasons],
+            "totals": {"episodes": counts[season], "exact": got, "fallback": 0, "size_gb": 1.4, "unknown_size": 0},
+            "want": {}, "destination": "D/Stremio/Show/Season %02d" % season, "episodes": []}
+
+
+check("plural: one release says 'has', not 'have'", "1 of them has a release to queue" in bulk.plan_message(synth([(1, 12), (2, 12)], 2, got=1)))
+check("plural: two releases still say 'have'", "2 of them have a release to queue" in bulk.plan_message(synth([(1, 12), (2, 12)], 2, got=2)))
+msg = bulk.plan_message(synth([(0, 7), (1, 24), (2, 23), (3, 12), (4, 1)], 4))
+check("season sentence: latest has 1, the real season before has 12: one sentence, naming both",
+      "Season 3 has 12 episodes; this one has 1, so it may have just started." in msg and msg.count("just started") == 1)
+check("season sentence: exactly half is not 'fewer than half'", "just started" not in bulk.plan_message(synth([(1, 12), (2, 6)], 2)))
+check("season sentence: just under half is", "just started" in bulk.plan_message(synth([(1, 12), (2, 5)], 2)))
+check("season sentence: a season the owner named gets none", "just started" not in bulk.plan_message(synth([(1, 12), (2, 1)], 2, assumed=False)))
+check("season sentence: specials (season 0) are never 'the season before'", "just started" not in bulk.plan_message(synth([(0, 30), (1, 2)], 1)))
+check("season sentence: a show with one season gets none", "just started" not in bulk.plan_message(synth([(1, 1)], 1)))
+check("season sentence: a gap in the numbering compares with the nearest real season before",
+      "Season 2 has 10 episodes; this one has 3" in bulk.plan_message(synth([(1, 4), (2, 10), (5, 3)], 5)))
 check("bulk_plan queues NOTHING", rows() == [] and not store.list_groups())
 tot = plan["totals"]
 check("E1 and E2 have an exact dubbed 1080p pick", tot["exact"] == 2 and [e["status"] for e in plan["episodes"][:2]] == ["exact", "exact"])

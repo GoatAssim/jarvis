@@ -290,6 +290,9 @@ def test_confirm_gated_verbs_are_never_marked_safe():
 
 CLI_SOURCES = sorted((JARVIS_CLI / "jarvis").glob("*.py"))
 CLI_TEXT = "\n".join(p.read_text(encoding="utf-8") for p in CLI_SOURCES)
+# A usage line may be written as adjacent string literals ("usage: jarvis x <a> " <newline> "[--b B]"), which
+# Python joins into one string. Join them here too, or only the first line of such a usage is compared.
+CLI_TEXT = re.sub(r'"[ \t]*\n[ \t]*"', "", CLI_TEXT)
 USAGE_LITERAL_RE = re.compile(r'usage: jarvis ([a-z][a-z0-9-]*) ([^"\\\n]*)')
 
 

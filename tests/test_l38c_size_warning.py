@@ -35,7 +35,7 @@ def put(conv_id, nbytes):
 
 
 def doctor_check():
-    return {c.check_id: c for c in doctor.check_conversations()}.get("conv.events")
+    return {c.id: c for c in doctor.check_conversations()}.get("conv.events")
 
 
 MB = 1024 * 1024

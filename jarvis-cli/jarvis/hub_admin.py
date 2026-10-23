@@ -7,8 +7,10 @@ One verb serves three front-end pieces, the way `calendar-admin` serves the Cale
   * the panel's History tab and the drag-to-reorder queue (`history`, `history_remove`,
     `history_clear`, `redownload`, `reorder`) plus the Settings tab's read of the hub settings
     (`settings`);
-  * the Stremio status block (`stremio_status`, read-only) and the Locate... button's save
-    (`stremio_save`: the owner's paths into ~/.jarvis/stremio.json; N9, brief 12).
+  * the Stremio status block (`stremio_status`, read-only), the Locate... button's save
+    (`stremio_save`: the owner's paths into ~/.jarvis/stremio.json; N9, brief 12) and the Start button
+    (`stremio_start`: the server only, through `tool_stack_start`; brief 19);
+  * hiding a finished or lost provider row (`dismiss`; brief 19).  It hides, it deletes no row and no file.
 
 It is NOT a command to type.  The request is one JSON object on stdin, the answer is one JSON
 object on stdout (`watch` prints one JSON object per line until it is stopped).  `{"ok": false,
@@ -20,7 +22,7 @@ The rules this module keeps (they are the Download Hub invariants in AGENTS.md, 
   * a path or a thumbnail is resolved from the database by item id, never taken from the caller,
     and a file must sit inside the library root / the folder the owner chose (hub rows) or the
     provider's `open_roots` (provider rows), exactly as `service.open_item` checks it;
-  * the writes (`history_remove`, `history_clear`, `redownload`, `reorder`) touch ROWS only.  No file
+  * the writes (`history_remove`, `history_clear`, `redownload`, `reorder`, `dismiss`) touch ROWS only.  No file
     is ever deleted here, a provider's rows are never removed (the provider would just report
     them again), and an unattended process (a chat reply, a scheduled job, a sub-agent) is refused;
   * no model-facing tool reaches this module.  `present_download_status` calls only `card_payload`,
@@ -40,7 +42,8 @@ _UNATTENDED_VARS = ("JARVIS_CHANNEL", "JARVIS_CHANNEL_SENDER", "JARVIS_SCHEDULED
 _UNATTENDED_MESSAGE = "The Download Hub's History and queue controls can only be used from the Jarvis page itself."
 
 READ_OPS = ("card", "list", "settings", "history", "file", "thumb", "stremio_status")
-WRITE_OPS = ("history_remove", "history_clear", "redownload", "reorder", "stremio_save")
+# `dismiss` (brief 19) hides a provider row that is unknown or finished; `stremio_start` (brief 19) is the Start button.
+WRITE_OPS = ("history_remove", "history_clear", "redownload", "reorder", "stremio_save", "dismiss", "stremio_start")
 OPS = READ_OPS + WRITE_OPS
 # N14 (the path picker, jarvis/hub_browse.py): list one folder, and make one new folder.  Neither reads a file's
 # contents.  Both are for the Jarvis page's own picker, so both refuse an unattended process (below).
@@ -107,6 +110,9 @@ def present_row(item, providers, now):
     row["has_thumb"] = bool(item.get("thumb_ref"))
     # the order the queue will run in (the panel's drag-to-reorder needs it; dl_list rows don't carry it)
     row["priority"] = int(item.get("priority") or 0)
+    # a row the owner hid (epoch seconds), None while it is shown; `service.present_item` doesn't carry it, and the
+    # panel's "Show hidden" needs it (brief 19)
+    row["dismissed_at"] = item.get("dismissed_at")
     return row
 
 
@@ -247,10 +253,14 @@ def diff_rows(previous, rows):
     return upserts, removed, current
 
 
-def snapshot(store=None, limit=500):
+def snapshot(store=None, limit=500, include_dismissed=False):
+    """The rows and the summary.  `include_dismissed` also returns the rows the owner hid (they carry
+    `dismissed_at`); the push stream never does, so the panel asks for them with the `list` op only while
+    its "Show hidden" switch is on."""
     service = _modules()[0]
     store = _store(store)
-    rows = _rows(store, store.list_items(limit=max(1, min(int(limit), 2000))))
+    rows = _rows(store, store.list_items(limit=max(1, min(int(limit), 2000)),
+                                         include_dismissed=bool(include_dismissed)))
     summary = service.summary(store)
     summary.pop("notify_options", None)      # the panel reads it with its own polls; it is big
     return {"ok": True, "items": rows, "summary": summary, "at": time.time()}
@@ -516,6 +526,23 @@ def reorder(request, store=None):
         return _err("couldn't reorder the queue: %s" % exc)
 
 
+def dismiss(request, store=None):
+    """The panel's Dismiss and Clear finished: hide one provider row (`{"id": ...}`) or every row that can be
+    hidden (`{"finished": true}`).  The rules, the refusals (a hub row, a row that is still running, one that
+    hasn't finished) and the answer are `service.dismiss`'s own and come back unchanged.  It hides: no row is
+    deleted and no file is touched, so it needs no confirmation.  Only a well-formed id is passed on."""
+    try:
+        service = _modules()[0]
+        store = _store(store)
+        req = request if isinstance(request, dict) else {}
+        item_id = str(req.get("id") or "").strip()
+        if item_id and not ITEM_ID_RE.match(item_id):
+            return _err("that isn't a download id")
+        return service.dismiss(id=item_id or None, finished=req.get("finished") is True, store=store)
+    except Exception as exc:  # noqa: BLE001
+        return _err("couldn't hide that: %s" % exc)
+
+
 # --------------------------------------------------------------------------- Stremio (N9, brief 12)
 
 def _stremio_wait(store=None):
@@ -527,6 +554,17 @@ def _stremio_wait(store=None):
         return 60
 
 
+def _stremio_web():
+    """stremio-web, for the card's "Web" line: its address, whether anything listens there (a bare connect, 1 s at
+    most) and whether Jarvis has a folder to start it from (`web.dir`).  Reads only; never raises."""
+    try:
+        from .hub.stremio import config, server
+        url = config.web_url()
+        return {"url": url, "answers": bool(server.port_answers(url)), "configured": bool(config.web_dir())}
+    except Exception:  # noqa: BLE001 - the card then says it doesn't know
+        return None
+
+
 def _stremio_payload(snap):
     """What the status card, Settings and the add form show.  Nothing secret: the account key is
     never read, and the paths are the ones the owner chose or Jarvis found."""
@@ -534,7 +572,8 @@ def _stremio_payload(snap):
     path = dict(snap.get("path") or {})
     path["how_text"] = detect.HOW.get(path.get("where") or "", "")
     out = {key: snap.get(key) for key in ("state", "title", "sentence", "next", "action", "step", "step_label",
-                                           "address", "version", "managed_by", "problems", "can_start", "installed_version")}
+                                           "address", "version", "managed_by", "problems", "can_start", "installed_version",
+                                           "other_url")}
     out.update(ok=True, path=path, tried=snap.get("tried") or [], config_file=str(config.config_path()))
     return out
 
@@ -546,8 +585,11 @@ def stremio_status(request=None, store=None):
     about its cache).  Starts, stops and writes nothing."""
     try:
         from .hub.stremio import status
-        snap = status.snapshot(wait_seconds=_stremio_wait(store))
+        wait = _stremio_wait(store)
+        snap = status.snapshot(wait_seconds=wait)
         out = _stremio_payload(snap)
+        out["wait_seconds"] = wait          # how long Start may take (the card's own time-out follows it)
+        out["web"] = _stremio_web()
         out["diagnostic"] = status.diagnostic_text(snap)
         if (request or {}).get("doctor"):
             try:
@@ -588,6 +630,35 @@ def stremio_save(request, store=None):
         return _err("couldn't save the Stremio paths: %s" % str(exc)[:160])
 
 
+def stremio_start(request=None, store=None):
+    """The card's Start button: bring Stremio's SERVER up, nothing else (not stremio-web).  It is
+    `stremio_stack.tool_stack_start` with what="server", so every rule is that function's: loopback only; the
+    already-up case starts nothing; and when the Stremio app is open with a silent server it says so and starts
+    nothing (N9 decision 4).  It may wait up to `stremio.start_wait_seconds`, so the web route gives it a long
+    time-out and the page shows a working state and times out on its own.  The answer is the sentence the status
+    uses; `ok` is false when the server is not up afterwards.  A write op: an unattended process is refused."""
+    try:
+        from .actions import stremio_stack
+        raw = stremio_stack.tool_stack_start({"what": "server"})
+        raw = raw if isinstance(raw, dict) else {}
+        server = raw.get("server") if isinstance(raw.get("server"), dict) else {}
+        out = {"state": server.get("state") or "", "outcome": server.get("outcome") or "",
+               "sentence": server.get("sentence") or "", "url": server.get("url") or ""}
+        for key in ("version", "note", "next"):
+            if server.get(key):
+                out[key] = server[key]
+        if raw.get("config_problems"):
+            out["config_problems"] = raw["config_problems"]
+        if raw.get("ok"):
+            out["ok"] = True
+            return out
+        out["ok"] = False
+        out["error"] = str(raw.get("error") or server.get("error") or "Stremio's server did not start")[:400]
+        return out
+    except Exception as exc:  # noqa: BLE001
+        return _err("couldn't start Stremio's server: %s" % str(exc)[:160])
+
+
 # --------------------------------------------------------------------------- the entry point
 
 def admin(op, request=None, store=None):
@@ -606,7 +677,7 @@ def admin(op, request=None, store=None):
             return card_payload(ids=request.get("ids"), group=request.get("group"),
                                 query=request.get("query"), store=store)
         if op == "list":
-            return snapshot(store, request.get("limit") or 500)
+            return snapshot(store, request.get("limit") or 500, include_dismissed=request.get("include_dismissed") is True)
         if op == "settings":
             return settings_payload(store)
         if op == "history":
@@ -623,10 +694,14 @@ def admin(op, request=None, store=None):
             return redownload(request, store)
         if op == "reorder":
             return reorder(request, store)
+        if op == "dismiss":
+            return dismiss(request, store)
         if op == "stremio_status":
             return stremio_status(request, store)
         if op == "stremio_save":
             return stremio_save(request, store)
+        if op == "stremio_start":
+            return stremio_start(request, store)
         if op == "browse":
             from . import hub_browse
             return hub_browse.browse(request, store=store)

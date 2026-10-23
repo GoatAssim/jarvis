@@ -81,7 +81,10 @@ check("dl_add still tells the model about ytdl_download and dry_run",
       "ytdl_download" in schema("dl_add")["description"] and "dry_run" in schema("dl_add")["description"])
 check("dl_add names both add tools", "dl_add_ytdlp" in schema("dl_add")["description"] and "dl_add_stremio" in schema("dl_add")["description"])
 check("dl_add_ytdlp: url / urls, the shared few and the 14 yt-dlp options",
-      props("dl_add_ytdlp") == {"url", "urls", "dest", "group", "start_paused", "start_at", "dry_run"} | VIDEO and len(VIDEO) == 14)
+      # `playlist` and `generic` (brief 21) are the yt-dlp tool's own two extras; they are optional here
+      # so this check holds both before and after they are added to the schema.
+      props("dl_add_ytdlp") - {"playlist", "generic"} == {"url", "urls", "dest", "group", "start_paused", "start_at", "dry_run"} | VIDEO
+      and len(VIDEO) == 14)
 check("dl_add_ytdlp has no engine argument (it is the engine)", "engine" not in props("dl_add_ytdlp"))
 check("dl_add_stremio: magnet / stream / file_index and the shared few",
       props("dl_add_stremio") == {"magnet", "stream", "file_index", "dest", "group", "start_paused", "start_at", "dry_run"})

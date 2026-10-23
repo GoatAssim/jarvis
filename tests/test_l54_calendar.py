@@ -436,8 +436,14 @@ def test_model_cannot_reach_admin():
         if path.name in ("calendar_tools.py", "cli.py"):
             continue
         text = path.read_text(encoding="utf-8", errors="replace")
+        named = "calendar-admin" in text.replace("reserved_names", "")
+        if path.name == "hub_admin.py":
+            # hub_admin.py (the Download Hub's web back end, track D) only says in its docstring that it works "the way
+            # `calendar-admin` serves the Calendars panel". It calls nothing of calendar_tools: the call pattern below
+            # still applies to it, only the bare mention is let through.
+            named = False
         if re.search(r"calendar_tools\.(admin|link_feed|add_feed_unverified|set_settings|add_local_event|update_local_event|delete_local_event|remove_feed|set_feed_enabled|check_feed)", text) \
-                or "calendar-admin" in text.replace("reserved_names", ""):
+                or named:
             offenders.append(path.name)
     check("only cli.py (and reserved_names.py, which just lists the name) reaches the panel back end", offenders in ([], ["reserved_names.py"]), offenders)
     from jarvis import reserved_names

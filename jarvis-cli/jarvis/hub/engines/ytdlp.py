@@ -35,11 +35,13 @@ ffmpeg check).  What this file adds around it:
 If a worker sends no progress lines at all (an older helper, a site whose hooks never fire), the
 row falls back to the size of the folder: live bytes and speed, no percent.
 
-What is deliberately NOT here: playlists (a hub download is one video; `ytdl_download`'s
-`playlist` option is not passed), cookies, a proxy, and the generic extractor.  The router only
+What is deliberately NOT here: cookies and a proxy.  A hub download is still ONE video:
+`ytdl_download`'s `playlist` option is never passed.  A playlist becomes a group of single-video
+rows made by `engines/_ytdlp_playlist.py` (it looks first, asks, caps at 50).  The router only
 claims a link when it is a YouTube page or a site yt-dlp has a SPECIFIC extractor for, so this
-engine can never be pointed at an arbitrary address (the HTTP engine's SSRF guard doesn't apply
-to yt-dlp, which does its own fetching).
+engine is not pointed at an arbitrary address by default (the HTTP engine's SSRF guard doesn't
+apply to yt-dlp, which does its own fetching).  The one exception is the generic extractor,
+asked once per link (`options.generic`, see GENERIC_ENABLED below, OFF in this version).
 """
 
 import importlib.util
@@ -54,7 +56,7 @@ import time
 from pathlib import Path
 from urllib.parse import urlsplit
 
-from .. import naming, states
+from .. import naming, netguard, states
 from .. import settings as settings_mod
 from .base import Engine, Outcome, RouteRule
 
@@ -79,6 +81,13 @@ _CTRL = re.compile(r"[\x00-\x1f\x7f]")
 
 _YOUTUBE_HOSTS = frozenset(["youtube.com", "www.youtube.com", "m.youtube.com", "music.youtube.com",
                             "youtu.be", "www.youtu.be"])
+
+# The generic extractor (a link no specific extractor claims), allowed by the owner for ONE link.
+# OFF: yt-dlp does its own fetching and follows redirects itself, which netguard cannot see.  The
+# worker has a connect-level guard for it (see _ytdlp_worker.py) but it could not be tried against
+# real yt-dlp, and ffmpeg / rtmpdump connect outside any Python guard, so the owner decides.
+GENERIC_ENABLED = False
+GENERIC_KEY = "generic"
 
 # Tests swap these.
 worker_command_override = None
@@ -125,6 +134,10 @@ def normalize_options(raw):
     for key in _BOOL_KEYS:
         if raw.get(key) is not None:
             out[key] = bool(raw[key])
+    if raw.get(GENERIC_KEY):                           # stored only when true: "this link, asked once"
+        if not GENERIC_ENABLED:
+            return {}, "yt-dlp's generic extractor is switched off in this version, so nothing was queued"
+        out[GENERIC_KEY] = True
     return out, None
 
 
@@ -199,6 +212,33 @@ def _match_site(text, settings):
         return {"reason": "supported site: %s (yt-dlp engine)" % states.clean_text(name, 40),
                 "kind": "video", "source": text}
     return None
+
+
+def generic_problem(text):
+    """Why the generic extractor may NOT take this link, or None when it may.  Checked before
+    queueing and again when the download starts: http / https only, no credentials, and every
+    address the host resolves to must be PUBLIC (the owner's allow_private_hosts list is
+    deliberately not consulted: it was made for the HTTP engine)."""
+    if not GENERIC_ENABLED:
+        return "the generic extractor is switched off in this version"
+    text = (text or "").strip()
+    if not _is_http(text):
+        return "only http and https links can go to the generic extractor"
+    if _looks_like_file(text):
+        return "that is a file link, not a page: the HTTP engine takes it (dl_add)"
+    try:
+        netguard.check_url(text, ())
+    except netguard.GuardError as exc:
+        return str(exc)
+    return None
+
+
+def _match_generic(text, settings):
+    """A route hit for a link the owner allowed the generic extractor for, else None."""
+    if generic_problem(text) is not None:
+        return None
+    return {"reason": "generic extractor, allowed by you for this link", "kind": "video",
+            "source": (text or "").strip()}
 
 
 # --------------------------------------------------------------------------- progress (Level B)
@@ -569,7 +609,8 @@ def _kill_tree(proc):
 _PERMANENT = ("unsupported url", "geo-restricted", "private video", "video unavailable", "sign in",
               "members-only", "age-restricted", "age restricted", "removed", "not available", "drm",
               "ffmpeg", "isn't installed", "no output file", "requested format is not available",
-              "not a valid url", "unable to extract", "this video is", "has been terminated")
+              "not a valid url", "unable to extract", "this video is", "has been terminated",
+              "private or local address", "generic extractor")
 _TRANSIENT = ("timed out", "timeout", "connection", "temporarily", "http error 5", "http error 429",
               "reset by peer", "urlopen error", "incompleteread", "remote end closed",
               "network is unreachable", "name resolution", "try again", "too many requests")
@@ -636,6 +677,10 @@ class YtdlpEngine(Engine):
             return False, "ffmpeg isn't installed or not on PATH (yt-dlp needs it to merge video and audio)"
         return True, ""
 
+    def generic_match(self, text, settings):
+        """The router asks this only for a link the owner allowed the generic extractor for."""
+        return _match_generic(text, settings)
+
     def run(self, item, ctx):
         try:
             return self._run(item, ctx)
@@ -680,6 +725,12 @@ class YtdlpEngine(Engine):
 
         call = dict(args)
         call["url"] = item.get("source_url") or ""
+        if args.get(GENERIC_KEY):
+            # Asked once, remembered on the row.  Looked at again NOW: the switch may have been
+            # turned off since, and a name can point somewhere else than it did at queue time.
+            why = generic_problem(call["url"])
+            if why:
+                return Outcome.failed("the generic extractor was refused for this link: %s" % states.clean_text(why, 160))
         call["output_dir"] = str(work_dir)
         rate = ctx.rate_limit_bps()
         if rate > 0:

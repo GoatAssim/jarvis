@@ -45,6 +45,7 @@ class State:
         self.fail_streams = set()
         self.slow = {}
         self.posts = []
+        self.movies = False      # True: "/cat" also has a searchable MOVIE catalog (two films: "Paper Lanterns", "Spirit Hunters: The Film")
         self.cin = None          # a RECORDED addon (test_hub_stremio_real_cinemeta.py) served at /cin: see Handler.cinemeta
         self.library = [
             {"_id": "tt0000011", "name": "Old Film", "type": "movie", "removed": False, "_mtime": "2026-01-01T00:00:00.000Z",
@@ -138,6 +139,14 @@ class Handler(http.server.BaseHTTPRequestHandler):
             return self._send(200, self.manifest(addon))
         pieces = (rest.strip("/")[:-5] if rest.endswith(".json") else rest.strip("/")).split("/")
         kind = pieces[0]
+        if kind == "catalog" and len(pieces) == 4 and addon == "/cat" and pieces[1] == "movie":
+            query = pieces[3].partition("=")[2].lower()          # the movie catalog answers films only (and only when STATE.movies)
+            films = []
+            if "lantern" in query or "paper" in query:
+                films.append({"id": "tt7000100", "type": "movie", "name": "Paper Lanterns", "releaseInfo": "2022"})
+            if "spirit" in query or "hunters" in query:
+                films.append({"id": "tt7000200", "type": "movie", "name": "Spirit Hunters: The Film", "releaseInfo": "2023"})
+            return self._send(200, {"metas": films})
         if kind == "catalog" and len(pieces) == 4 and addon == "/cat":
             query = pieces[3].partition("=")[2].lower()
             metas = []
@@ -201,12 +210,14 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
     def manifest(self, addon):
         if addon == "/cat":
+            catalogs = [{"type": "series", "id": "top", "extra": [{"name": "search"}]},
+                        {"type": "anime", "id": "kitsu-top", "extra": [{"name": "search"}]},
+                        {"type": "series", "id": "browse-only", "extra": [{"name": "genre", "isRequired": True}]}]
+            if STATE.movies:
+                catalogs.append({"type": "movie", "id": "movies-top", "extra": [{"name": "search"}]})
             return {"id": "fake.catalog", "name": "Fake Catalog", "version": "1.0.0", "types": ["series", "anime", "movie"],
                     "resources": ["catalog", "meta", {"name": "stream", "types": ["series"], "idPrefixes": ["tt"]}],
-                    "idPrefixes": ["tt", "kitsu:"],
-                    "catalogs": [{"type": "series", "id": "top", "extra": [{"name": "search"}]},
-                                 {"type": "anime", "id": "kitsu-top", "extra": [{"name": "search"}]},
-                                 {"type": "series", "id": "browse-only", "extra": [{"name": "genre", "isRequired": True}]}]}
+                    "idPrefixes": ["tt", "kitsu:"], "catalogs": catalogs}
         return {"id": "fake.streams", "name": "Fake Streams", "version": "2.1.0", "types": ["series", "anime"],
                 "resources": ["stream"], "idPrefixes": ["tt", "kitsu:"], "catalogs": []}
 

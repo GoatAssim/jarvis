@@ -1,0 +1,37 @@
+Jarvis Download Hub: try-by-hand results
+written 2026-10-22 21:44
+
+repo: D:\MyDigitalVault\prjects\whole jarvis\jarvis v2\jarvis
+BUILD_NUMBER: 105
+SOURCE_HASH: 413bc8bef292
+python: 3.14.3
+platform: win32
+
+== checks run by the script ==
+[P1a] FAIL  installed copy matches the repo (jarvis version vs build_info.py)  -> repo says BUILD_NUMBER 105, SOURCE_HASH 413bc8bef292...; jarvis version said: could not start: [WinError 193] %1 is not a valid Win32 application -> MISMATCH or unreadable: run script.bat, then run this again
+[P2a] PASS  psutil importable in the Python running this script  -> psutil 7.2.2
+[P3a-node] PASS  node on PATH (needed for the two verify_*.js panel tests)  -> ~\AppData\Local\Author Software\nvm\.nodejs\node.EXE
+[T1] FAIL  build_info.py matches the source on disk  -> AssertionError: jarvis/build_info.py is stale: its SOURCE_HASH (413bc8bef292...) does not match the source tree on disk right now (6645e0e7bf29...). Someone edited jarvis-cli/jarvis/ without regenerat
+      last lines: Traceback (most recent call last): |   File "D:\MyDigitalVault\prjects\whole jarvis\jarvis v2\jarvis\tests\test_build_info.py", line 49, in <module> |     test_source_hash_matches_tree() |     ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^^ |   File "D:\MyDigitalVault\prjects\whole jarvis\jarvis v2\jarvis\tests\test_build_info.py", line 27, in test_source_hash_matches_tree |     assert build_info.SOURCE_HASH == computed, ( |            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ | AssertionError: jarvis/build_info.py is
+[T2] PASS  panel: the page's own checks  -> 193 passed, 0 failed
+[T3] PASS  Settings > Downloads page checks  -> 18 passed, 0 failed
+[T4] PASS  hub_admin back end  -> 83 passed, 0 failed
+[T5] PASS  in-chat status card  -> 37 passed, 0 failed
+[T6] PASS  provider rows: unknown, settle, dismiss, retention  -> 99 passed, 0 failed
+[T7] PASS  Steam: never stalled from the manifest alone  -> 86 passed, 0 failed
+[T8] PASS  Stremio pack instruction (one text)  -> 36 passed, 0 failed
+[T9] PASS  the real Cinemeta answer  -> 37 passed, 0 failed
+[T10] PASS  Stremio tools, play by title  -> 76 passed, 0 failed
+[T11] FAIL  Stremio discovery  -> 69 passed, 1 failed
+      last lines: ok      it names no address, no key and no path | ok      offers_streams: true for the fake pair; false for no addon at all | ok      offers_streams looks at the type and id too: the catalog addon offers series streams but not a made-up type | ok      the tools are declared in the stremio group, with schemas for every one | ok      only the account write is confirm-gated here | ok      every checklist entry is well formed |  | 69 passed, 1 failed
+
+== steps done by hand ==
+[P1] PASS  Run the current copy of Jarvis
+[P2] PASS  psutil in the Python Jarvis uses
+[A1] PASS  Pause button is there without hovering
+[A2] PASS  Pause then Resume feedback
+
+not answered yet: A3, A4, A5, A6, A7, A8, A9, L1, L2, L3, L4, L5, L6, L7, L8, N1, N2, N3, N4, N5, N6, N7, V1, V2, V3, V4
+
+FAILED checks: P1a, T1, T11
+FAILED steps: none

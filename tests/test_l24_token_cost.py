@@ -36,6 +36,18 @@ def check(name, cond, detail=""):
 
 
 FIXTURES = ROOT / "tests" / "fixtures"
+_REAL_LOGS = ("81b52bb561796954", "cb140e091ddc66e8")
+_skip_said = []
+
+
+def _real_logs_missing():
+    """True (after saying so once) when the two real logs are not in this copy: tests/fixtures is kept out of the
+    shared copy because it holds private conversations. Only the tests that read them are skipped."""
+    missing = [n for n in _REAL_LOGS if not (FIXTURES / f"{n}.jsonl").exists()]
+    if missing and not _skip_said:
+        _skip_said.append(1)
+        print(f"SKIPPED: tests/fixtures/{missing[0]}.jsonl is not in this copy (the tests that read the real logs only)")
+    return bool(missing)
 
 
 def _rows(name):
@@ -66,6 +78,8 @@ def test_every_real_gemini_response_matches_provider_total():
     """The strongest check available: for every Gemini response in the two
     real logs, input + output + thinking must equal the provider's own
     totalTokenCount. If thinking were already inside output this would fail."""
+    if _real_logs_missing():
+        return
     checked = bad = 0
     for name in ("81b52bb561796954", "cb140e091ddc66e8"):
         for r in _rows(name):
@@ -142,6 +156,8 @@ def _ask_usage_from_fixture(name):
 
 
 def test_per_ask_total_on_real_failover_logs():
+    if _real_logs_missing():
+        return
     for name, exp_in_out, exp_think, exp_inout, exp_attempts in (
         ("81b52bb561796954", 49276, 7256, 508, 10),
         ("cb140e091ddc66e8", 35444, 3702, 1129, 13),

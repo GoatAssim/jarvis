@@ -127,6 +127,60 @@ function controlNotice(r, action) {
   return null;
 }
 
+// The second small line a running Steam row shows on its card: the hub's own note for it ("30.6 % ..., reported 20 s ago; Steam isn't
+// reporting live progress"), which used to be in the detail pane only.  Nothing is made up: it is `row.message`, and only a running
+// Steam row has one (brief 19, step 4).
+function cardNote(row) {
+  if (!row || row.owner !== "provider" || String(row.provider || "").toLowerCase() !== "steam" || !ACTIVE.has(row.state)) return "";
+  return typeof row.message === "string" ? row.message.trim() : "";
+}
+
+// ---- brief 19: Dismiss, Clear finished, Show hidden.
+// A row another tool reported (Steam, Playnite ...) that is unknown or finished can be HIDDEN.  Hiding deletes no row and
+// touches no file, so there is no question first.  The row's own `owner` and `state` decide (the hub sends no "can dismiss"
+// capability, and none is invented here); the hub applies the same rule again and says so if it disagrees (a hub download,
+// a row that is still running).  A hidden row carries `dismissed_at`; the live stream never lists it, so the panel asks for
+// the hidden rows (`/api/hub/list?include_dismissed=1`) only while "Show hidden" is on.  "Show again" calls nothing: it
+// lists the row as a normal row in this view (`revealed`), until the panel is reloaded; the hub un-hides a row by itself
+// when its tool reports it live again.
+const DISMISSABLE = new Set(["done", "failed", "cancelled", "unknown"]);
+const DISMISS_TIP = "Hide this row from the list. Nothing is deleted and no file is touched; it comes back by itself if its tool reports it running again.";
+const CLEAR_TIP = "Hide every finished, failed, cancelled or lost row that another tool (Steam, Playnite ...) reported. Downloads the hub made itself and the History tab are not touched, and no file is touched.";
+const SHOW_AGAIN_TIP = "List this row again for now. The hub keeps it hidden; it comes back for good when its tool reports it running again.";
+const SHOW_HIDDEN_TIP = "Also list the rows you hid, dimmed. Nothing hidden is deleted.";
+
+function isHidden(row) { return !!(row && row.dismissed_at); }
+
+// Can this row be dismissed (a hidden row that was listed again counts as shown)?
+function canDismiss(row, revealed) {
+  if (!row || row.owner !== "provider" || !DISMISSABLE.has(row.state)) return false;
+  return !isHidden(row) || !!(revealed && revealed[row.id]);
+}
+
+// A hidden row the person has not listed again: it is drawn dimmed and offers "Show again".
+function isDimmed(row, revealed) { return isHidden(row) && !(revealed && revealed[row.id]); }
+
+// The rows Clear finished would hide: shown rows only (a hidden one is already hidden).
+function dismissableRows(rows, revealed) {
+  return (Array.isArray(rows) ? rows : []).filter((r) => !isHidden(r) && canDismiss(r, revealed));
+}
+
+// The live rows plus the hidden ones the view lists (all of them while Show hidden is on, else only the ones
+// listed again).  A row the hub shows again is in `live` and wins over its old hidden copy.
+function mergeHidden(live, hidden, showHidden, revealed) {
+  const have = new Set(live.map((r) => r.id));
+  const extra = (Array.isArray(hidden) ? hidden : []).filter((r) => isHidden(r) && !have.has(r.id) && (showHidden || (revealed && revealed[r.id])));
+  return extra.length ? live.concat(extra) : live;
+}
+
+// What the person is told after the hub answered ok.  `res` is service.dismiss's answer.
+function dismissNotice(res) {
+  const r = res || {};
+  const n = Array.isArray(r.dismissed) ? r.dismissed.length : (Number(r.count) || 0);
+  if (!n) return { msg: r.note ? String(r.note).charAt(0).toUpperCase() + String(r.note).slice(1) : "Nothing to hide", level: "info" };
+  return { msg: (n === 1 ? "Hidden" : "Hid " + n + " rows") + ". No file was touched.", level: "info" };
+}
+
 // "today 3:00 AM", "tomorrow 3:00 AM", "Tue 3:00 AM", "Nov 2 3:00 AM" for a start time (epoch seconds).
 function fmtWhen(sec, nowMs) {
   const s = num(sec);
@@ -778,6 +832,7 @@ const pure = {
   ITEM_EVENTS, channelLabel,
   CARD_VERBS, cardActions, fmtWhen, applyNotifyOptions,
   primaryAction, secondaryActions, pendingWord, controlNote, controlNotice, TOGGLE_ICONS,
+  cardNote, DISMISSABLE, DISMISS_TIP, CLEAR_TIP, SHOW_AGAIN_TIP, SHOW_HIDDEN_TIP, isHidden, canDismiss, isDimmed, dismissableRows, mergeHidden, dismissNotice,
   HISTORY_STATES, historyFilter, csvCell, historyCsv, historyJson, historyMeta, providerTone, providerFacts, providerBadge,
   queueOrder, moveInOrder, stepInOrder, canReorder,
 };
@@ -793,6 +848,7 @@ const S = {
   rows: [], summary: null, selected: null, view: "all", source: "", search: "", groupBy: "none",
   detail: null, busy: false, timer: 0, closed: false, lastError: "", hold: 0, holdTimer: 0,
   pendingSelect: "", sig: {},
+  showHidden: false, hiddenRows: [], revealed: {}, clearing: false,   // brief 19: the "Show hidden" switch, the rows it lists, the ones listed again
   acting: {},                       // id -> { from, doing, until }: a Pause / Resume / Retry just pressed
   hubPrefs: null,
   saving: false,
@@ -855,12 +911,17 @@ async function loadPrefs() {
   } catch (e) { /* defaults */ }
 }
 
+// Every row the lists show: the live rows, plus the hidden ones when "Show hidden" is on (or one was listed again).
+function viewRows() {
+  return mergeHidden(S.rows, S.hiddenRows, S.showHidden, S.revealed);
+}
+
 function selectedRow() {
-  return S.rows.find((r) => r.id === S.selected) || null;
+  return viewRows().find((r) => r.id === S.selected) || null;
 }
 
 function visibleRows() {
-  return sortRows(filterRows(S.rows, { view: S.view, source: S.source, search: S.search }));
+  return sortRows(filterRows(viewRows(), { view: S.view, source: S.source, search: S.search }));
 }
 
 // ---- top strip
@@ -888,6 +949,13 @@ function renderTop() {
   const st = overviewStats(S.rows);
   $("#pauseAll").disabled = !(st.active + st.queued + st.stalled);
   $("#resumeAll").disabled = !st.paused;
+  const clearable = dismissableRows(S.rows).length;
+  const clear = $("#clearFinished");
+  if (!S.clearing) clear.disabled = !clearable;
+  clear.textContent = clearable ? "Clear finished (" + clearable + ")" : "Clear finished";
+  const sh = $("#showHidden");
+  sh.setAttribute("aria-pressed", S.showHidden ? "true" : "false");
+  sh.classList.toggle("is-active", S.showHidden);
 }
 
 function renderBanner() {
@@ -916,8 +984,8 @@ function chip(label, n, active, flag, onClick) {
 }
 
 function renderChips() {
-  const counts = viewCounts(S.rows);
-  const sources = sourceList(S.rows);
+  const counts = viewCounts(viewRows());
+  const sources = sourceList(viewRows());
   if (!changed("chips", [counts, sources, S.view, S.source])) return;
   const vbox = $("#viewChips");
   vbox.textContent = "";
@@ -986,6 +1054,8 @@ function renderRow(row) {
   meta.push(el("span", { cls: "st" + (row.error ? " bad" : ""), text: statusText(row) }));
   const size = sizeText(row);
   if (size) meta.push(el("span", { text: size }));
+  const dimmed = isDimmed(row, S.revealed);
+  if (dimmed) meta.push(el("span", { cls: "tag", text: "hidden", title: "You hid this row. Nothing was deleted." }));
   const prim = primaryAction(row);
   const why = controlNote(row);
   const buttons = secondaryActions(row).map((a) => el("button", {
@@ -993,6 +1063,8 @@ function renderRow(row) {
     attrs: { type: "button", "aria-label": a.label + ": " + (row.title || row.id) },
     on: { click: (e) => { e.stopPropagation(); e.preventDefault(); e.currentTarget.disabled = true; runAction(row, a); } },
   }));
+  const hide = dismissButton(row, false);
+  if (hide) buttons.push(hide);
   const draggable = canReorder(row, S.live);
   if (draggable) {
     const order = queueOrder(S.rows);
@@ -1008,7 +1080,7 @@ function renderRow(row) {
     });
   }
   const rowEl = el("div", {
-    cls: "row tone-" + tone + " state-" + row.state,
+    cls: "row tone-" + tone + " state-" + row.state + (dimmed ? " is-hidden" : ""),
     attrs: { role: "option", "aria-selected": row.id === S.selected ? "true" : "false", "data-id": row.id, draggable: draggable ? "true" : "false" },
     on: { click: () => select(row.id) },
   }, [
@@ -1022,10 +1094,23 @@ function renderRow(row) {
     renderBar(row, false),
     el("div", { cls: "row__meta" }, meta),
     why && why.card ? el("div", { cls: "row__why", text: why.text }) : null,
+    cardNote(row) ? el("div", { cls: "row__note", text: cardNote(row), title: cardNote(row) }) : null,
     buttons.length ? el("div", { cls: "row__acts" }, buttons) : null,
   ]);
   if (draggable) wireDrag(rowEl, row);
   return rowEl;
+}
+
+// Dismiss on a row that can be hidden; "Show again" on a hidden one (that one calls nothing).  null for any other row.
+function dismissButton(row, large) {
+  const dimmed = isDimmed(row, S.revealed);
+  if (!dimmed && !canDismiss(row, S.revealed)) return null;
+  const label = dimmed ? "Show again" : "Dismiss";
+  return el("button", {
+    cls: (large ? "btn btn--sm" : "rbtn") + " dismiss", text: label, title: dimmed ? SHOW_AGAIN_TIP : DISMISS_TIP,
+    attrs: { type: "button", "aria-label": label + ": " + (row.title || row.id) },
+    on: { click: (e) => { e.stopPropagation(); e.preventDefault(); if (dimmed) showAgain(row); else dismissRow(row, e.currentTarget); } },
+  });
 }
 
 function sectionHeader(section) {
@@ -1044,15 +1129,16 @@ function sectionHeader(section) {
 
 function renderList() {
   const rows = visibleRows();
-  $("#count").textContent = countText(rows.length, S.rows.length);
-  if (!changed("list", [rows, S.selected, S.groupBy, S.live, S.acting])) return;
+  const total = viewRows().length;
+  $("#count").textContent = countText(rows.length, total);
+  if (!changed("list", [rows, S.selected, S.groupBy, S.live, S.revealed, S.showHidden, S.acting])) return;
   const list = $("#list");
   const scroll = list.scrollTop;
   list.textContent = "";
   if (!rows.length) {
     list.appendChild(el("div", {
       cls: "empty",
-      text: S.rows.length ? "Nothing matches this filter." : "No downloads yet. Paste a link in the form, or ask Jarvis to download a file.",
+      text: total ? "Nothing matches this filter." : "No downloads yet. Paste a link in the form, or ask Jarvis to download a file.",
     }));
     return;
   }
@@ -1099,6 +1185,8 @@ function buildDetail(row, full) {
   });
   const buttons = ctrl.map((a) => (prim && a.verb === prim.verb ? toggleButton(row, prim, true) : plain(a)));
   files.forEach((a) => buttons.push(plain(a)));
+  const hideBtn = dismissButton(row, true);
+  if (hideBtn) buttons.push(hideBtn);
   if (files.some((a) => a.verb === "open")) {            // a finished file: its folder is one click too
     buttons.push(el("button", {
       cls: "btn btn--sm", text: "Open folder", attrs: { type: "button" },
@@ -1368,6 +1456,68 @@ async function allAction(verb) {
   schedule(300);
 }
 
+// ---- brief 19: Dismiss, Clear finished, Show hidden.  The writes go to the hub's own routes (hubFetch sends the header the
+// server insists on); the hub's refusals (a hub download, a row still running) reach the person as the hub worded them.
+
+// The rows the owner hid, only while the view needs them (Show hidden is on, or one was listed again).
+async function loadHidden(loud) {
+  if (!S.showHidden && !Object.keys(S.revealed).length) return;
+  try {
+    const r = await hubFetch("/api/hub/list?include_dismissed=1");
+    S.hiddenRows = (Array.isArray(r.items) ? r.items : []).filter(isHidden);
+  } catch (err) {
+    if (loud) toast("Couldn't read the hidden rows: " + message(err), "warn");
+  }
+  if (!S.closed) render();
+}
+
+async function dismissRow(row, btn) {
+  if (btn) btn.disabled = true;
+  try {
+    const n = dismissNotice(await hubFetch("/api/hub/dismiss", { id: row.id }));
+    toast(n.msg, n.level);
+    delete S.revealed[row.id];
+  } catch (err) {
+    toast(message(err), "warn");
+    if (btn) btn.disabled = false;
+    return;
+  }
+  await loadHidden(false);
+  schedule(300);
+}
+
+function showAgain(row) {
+  S.revealed[row.id] = true;
+  render();
+}
+
+async function clearFinished() {
+  if (S.clearing) return;
+  S.clearing = true;
+  $("#clearFinished").disabled = true;
+  try {
+    const n = dismissNotice(await hubFetch("/api/hub/dismiss", { finished: true }));
+    toast(n.msg, n.level);
+  } catch (err) {
+    toast(message(err), "warn");
+  }
+  S.clearing = false;
+  await loadHidden(false);
+  render();
+  schedule(300);
+}
+
+function toggleShowHidden() {
+  S.showHidden = !S.showHidden;
+  if (S.showHidden) {
+    loadHidden(true);
+  } else {
+    S.revealed = {};
+    if (S.selected && !viewRows().some((x) => x.id === S.selected)) { S.selected = null; S.detail = null; }
+  }
+  render();
+}
+
 async function demoAction(action) {
   const r = await callTool("hub_demo_provider", { action: action });
   if (r.declined) { toast("Cancelled", "info"); return; }
@@ -1426,7 +1576,7 @@ async function poll() {
     S.lastError = "";
     if (S.pendingSelect && S.rows.some((x) => x.id === S.pendingSelect)) { S.selected = S.pendingSelect; S.detail = null; }
     S.pendingSelect = "";
-    if (S.selected && !S.rows.some((x) => x.id === S.selected)) { S.selected = null; S.detail = null; }
+    if (S.selected && !viewRows().some((x) => x.id === S.selected)) { S.selected = null; S.detail = null; }
   } catch (err) {
     S.lastError = message(err);
   } finally {
@@ -1437,6 +1587,7 @@ async function poll() {
   if (row && (!S.detail || S.detail.id !== row.id || S.detail.state !== row.state || Date.now() - S.detail.at > 8000)) {
     loadDetail();
   }
+  loadHidden(false);                    // only does anything while hidden rows are in view
   schedule();
 }
 
@@ -1764,6 +1915,8 @@ $("#speedQuick").addEventListener("change", async (e) => {
 });
 $("#pauseAll").addEventListener("click", () => allAction("pause"));
 $("#resumeAll").addEventListener("click", () => allAction("resume"));
+$("#clearFinished").addEventListener("click", clearFinished);
+$("#showHidden").addEventListener("click", toggleShowHidden);
 
 const list = $("#list");
 // A poll must not rebuild the panes between pressing and releasing a button (the click would
@@ -1897,7 +2050,7 @@ function setLiveTag() {
 function afterRowsChanged() {
   if (S.pendingSelect && S.rows.some((x) => x.id === S.pendingSelect)) { S.selected = S.pendingSelect; S.detail = null; }
   S.pendingSelect = "";
-  if (S.selected && !S.rows.some((x) => x.id === S.selected)) { S.selected = null; S.detail = null; }
+  if (S.selected && !viewRows().some((x) => x.id === S.selected)) { S.selected = null; S.detail = null; }
   S.lastError = "";
   render();
   const row = selectedRow();

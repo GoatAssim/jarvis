@@ -1,0 +1,162 @@
+{
+ "manual": {
+  "P1": {
+   "status": "pass",
+   "note": "",
+   "at": "21:45"
+  },
+  "P2": {
+   "status": "pass",
+   "note": "",
+   "at": "21:45"
+  },
+  "A1": {
+   "status": "pass",
+   "note": "",
+   "at": "21:45"
+  },
+  "A2": {
+   "status": "pass",
+   "note": "",
+   "at": "21:45"
+  }
+ },
+ "meta": {
+  "when": "2026-10-22 21:44",
+  "repo": "D:\\MyDigitalVault\\prjects\\whole jarvis\\jarvis v2\\jarvis",
+  "BUILD_NUMBER": "105",
+  "SOURCE_HASH": "413bc8bef292",
+  "python": "3.14.3",
+  "platform": "win32"
+ },
+ "auto": [
+  {
+   "id": "P1a",
+   "title": "installed copy matches the repo (jarvis version vs build_info.py)",
+   "status": "fail",
+   "detail": "repo says BUILD_NUMBER 105, SOURCE_HASH 413bc8bef292...; jarvis version said: could not start: [WinError 193] %1 is not a valid Win32 application -> MISMATCH or unreadable: run script.bat, then run this again"
+  },
+  {
+   "id": "P2a",
+   "title": "psutil importable in the Python running this script",
+   "status": "pass",
+   "detail": "psutil 7.2.2"
+  },
+  {
+   "id": "P3a-node",
+   "title": "node on PATH (needed for the two verify_*.js panel tests)",
+   "status": "pass",
+   "detail": "~\\AppData\\Local\\Author Software\\nvm\\.nodejs\\node.EXE"
+  },
+  {
+   "id": "T1",
+   "title": "build_info.py matches the source on disk",
+   "status": "fail",
+   "rc": 1,
+   "secs": 0.1,
+   "expected": "passes only after script.bat has regenerated build_info.py; red before that is expected",
+   "detail": "AssertionError: jarvis/build_info.py is stale: its SOURCE_HASH (413bc8bef292...) does not match the source tree on disk right now (6645e0e7bf29...). Someone edited jarvis-cli/jarvis/ without regenerat",
+   "tail": "Traceback (most recent call last):\n  File \"D:\\MyDigitalVault\\prjects\\whole jarvis\\jarvis v2\\jarvis\\tests\\test_build_info.py\", line 49, in <module>\n    test_source_hash_matches_tree()\n    ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^^\n  File \"D:\\MyDigitalVault\\prjects\\whole jarvis\\jarvis v2\\jarvis\\tests\\test_build_info.py\", line 27, in test_source_hash_matches_tree\n    assert build_info.SOURCE_HASH == computed, (\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\nAssertionError: jarvis/build_info.py is stale: its SOURCE_HASH (413bc8bef292...) does not match the source tree on disk right now (6645e0e7bf29...). Someone edited jarvis-cli/jarvis/ without regenerating build metadata. Fix: run `python build_tools/bump_build_version.py` from jarvis-cli/ and commit the resulting jarvis/build_info.py."
+  },
+  {
+   "id": "T2",
+   "title": "panel: the page's own checks",
+   "status": "pass",
+   "rc": 0,
+   "secs": 0.1,
+   "expected": "all pass, no crash",
+   "detail": "193 passed, 0 failed",
+   "tail": "ok      a paused row has a pause glyph and a dimmed bar\nok      the card shows the explanation line only where controlNote says so\nok      runAction shows the notice, and the open-folder button shows it too\nok      a pressed Pause / Resume / Retry says what is happening at once, and it is cleared on failure or when the state moves on\nok      the pending word shows on the toggle too (the hub's own request), and the button is disabled while busy\nok      the toggle is built with el() and textContent only (no HTML from data)\n\n193 passed, 0 failed"
+  },
+  {
+   "id": "T3",
+   "title": "Settings > Downloads page checks",
+   "status": "pass",
+   "rc": 0,
+   "secs": 0.1,
+   "expected": "all pass",
+   "detail": "18 passed, 0 failed",
+   "tail": "ok      declining writes nothing and the row reports it (so it puts the old value back)\nok      a value the hub refuses is sent as typed and its error shows as the hub wrote it (the page owns no range)\nok      nothing says Saved after a refusal\nok      the page still writes only through the three allowed tools and never assigns HTML\nok      the new row has no limit or range of its own\nok      the row is found by Settings search\n\n18 passed, 0 failed"
+  },
+  {
+   "id": "T4",
+   "title": "hub_admin back end",
+   "status": "pass",
+   "rc": 0,
+   "secs": 1.8,
+   "expected": "all pass",
+   "detail": "83 passed, 0 failed",
+   "tail": "ok      the slash registry lists it as not exposed\nok      every /api/hub write route needs the hub header, and every route is loopback-checked\nok      a thumbnail or file route takes an id and never a path\nok      the thumbnail route pins its content type and nosniff\nok      the stream route is capped and stops its watcher\nok      hub_admin.py never opens the database itself\n\n83 passed, 0 failed"
+  },
+  {
+   "id": "T5",
+   "title": "in-chat status card",
+   "status": "pass",
+   "rc": 0,
+   "secs": 1.0,
+   "expected": "all pass",
+   "detail": "37 passed, 0 failed",
+   "tail": "[tools] Auto-discovered ['send_dm'] from send_dm.py (group='channels')\n[personas] Registered persona 'jarvis-unhinged' ('Jarvis (Unhinged)') from starter_personas.py\n[personas] Registered persona 'study-buddy' ('Study Buddy') from starter_personas.py\n[tools] Auto-discovered ['media_episodes', 'media_find', 'stream_search', 'stremio_addons', 'stremio_library', 'stremio_mark_watched'] from stremio_discovery.py (group='stremio')\n[tools] Auto-discovered ['stremio_open'] from stremio_open.py (group='stremio')\n[tools] Auto-discovered ['server_cache', 'server_cache_clear', 'stack_doctor', 'stack_start', 'stack_status', 'stack_stop', 'stremio_prepare'] from stremio_stack.py (group='stremio')\n[tools] Note: workspace_tools.py (group='workspace'): ['daemon_status'] have no TOOL_KEYWORDS of their own — auto-derived a minimal keyword set from each name as a fallback.\n[tools] Auto-discovered ['backlog"
+  },
+  {
+   "id": "T6",
+   "title": "provider rows: unknown, settle, dismiss, retention",
+   "status": "pass",
+   "rc": 0,
+   "secs": 3.1,
+   "expected": "all pass",
+   "detail": "99 passed, 0 failed",
+   "tail": "settling unknown provider rows failed\nTraceback (most recent call last):\n  File \"D:\\MyDigitalVault\\prjects\\whole jarvis\\jarvis v2\\jarvis\\jarvis-cli\\jarvis\\hub\\daemon.py\", line 322, in _settle_unknown\n    settled = providers.settle_unknown(\n        self.store, self._clock(), providers.settle_hours(self.settings()))\n  File \"D:\\MyDigitalVault\\prjects\\whole jarvis\\jarvis v2\\jarvis\\tests\\test_hub_provider_lifecycle.py\", line 490, in boom\n    raise RuntimeError(\"disk on fire\")\nRuntimeError: disk on fire"
+  },
+  {
+   "id": "T7",
+   "title": "Steam: never stalled from the manifest alone",
+   "status": "pass",
+   "rc": 0,
+   "secs": 0.4,
+   "expected": "all pass",
+   "detail": "86 passed, 0 failed",
+   "tail": "ok      ...and no percent or done-bytes, but the total\nok      ...and the message (shown in the detail) says what Steam last reported\nok      through the hub: when Steam says installed the row is done at 100 %\nok      hub/steam.py imports no subprocess, socket, network or shell module\nok      ...only the standard modules it needs, and psutil lazily\nok      ...and it has no steam:// command except the Open in Steam link target\n\n86 passed, 0 failed"
+  },
+  {
+   "id": "T8",
+   "title": "Stremio pack instruction (one text)",
+   "status": "pass",
+   "rc": 0,
+   "secs": 1.0,
+   "expected": "36 expected",
+   "detail": "36 passed, 0 failed",
+   "tail": "[tools] Auto-discovered ['send_dm'] from send_dm.py (group='channels')\n[personas] Registered persona 'jarvis-unhinged' ('Jarvis (Unhinged)') from starter_personas.py\n[personas] Registered persona 'study-buddy' ('Study Buddy') from starter_personas.py\n[tools] Auto-discovered ['media_episodes', 'media_find', 'stream_search', 'stremio_addons', 'stremio_library', 'stremio_mark_watched'] from stremio_discovery.py (group='stremio')\n[tools] Auto-discovered ['stremio_open'] from stremio_open.py (group='stremio')\n[tools] Auto-discovered ['server_cache', 'server_cache_clear', 'stack_doctor', 'stack_start', 'stack_status', 'stack_stop', 'stremio_prepare'] from stremio_stack.py (group='stremio')\n[tools] Note: workspace_tools.py (group='workspace'): ['daemon_status'] have no TOOL_KEYWORDS of their own — auto-derived a minimal keyword set from each name as a fallback.\n[tools] Auto-discovered ['backlog"
+  },
+  {
+   "id": "T9",
+   "title": "the real Cinemeta answer",
+   "status": "pass",
+   "rc": 0,
+   "secs": 0.6,
+   "expected": "37 expected",
+   "detail": "37 passed, 0 failed",
+   "tail": "ok      play_episode by 'Jujutsu' asks which one\nok      bulk_plan without a season, with a stream addon: takes season 4 and says it assumed\n   bulk_plan message (fake stream addon, season never named):\n      Jujutsu Kaisen season 4: 1 episode, any quality. You didn't name a season, so this is the latest one (4 of 4); say so if you meant another. 1 of them have a release to queue (about 1.4 GB), saved to C:/Users/assim/AppData/Local/Temp/jarvis-real-cinemeta-0_pvp9o2/Downloads/Jarvis/Stremio/Jujutsu Kaisen/Season 04, via Stremio. Nothing is queued yet. If they say yes: bulk_run with this plan_id.\n\nNOT CHECKED: the recording holds no streams (the owner has no addon that offers them), so how real stream text is read is untested.\n\n37 passed, 0 failed"
+  },
+  {
+   "id": "T10",
+   "title": "Stremio tools, play by title",
+   "status": "pass",
+   "rc": 0,
+   "secs": 1.4,
+   "expected": "76 expected",
+   "detail": "76 passed, 0 failed",
+   "tail": "ok      the two destructive tools are confirm-gated\nok      stremio_stack: the palette commands validate\nok      play_media: the palette commands validate\nok      both daemons validate\nok      the runner _stremio_server.py exists beside the tool file\nok      the runner _stremio_web.py exists beside the tool file\n\n76 passed, 0 failed"
+  },
+  {
+   "id": "T11",
+   "title": "Stremio discovery",
+   "status": "fail",
+   "rc": 1,
+   "secs": 8.2,
+   "expected": "70 expected",
+   "detail": "69 passed, 1 failed",
+   "tail": "ok      it names no address, no key and no path\nok      offers_streams: true for the fake pair; false for no addon at all\nok      offers_streams looks at the type and id too: the catalog addon offers series streams but not a made-up type\nok      the tools are declared in the stremio group, with schemas for every one\nok      only the account write is confirm-gated here\nok      every checklist entry is well formed\n\n69 passed, 1 failed"
+  }
+ ]
+}

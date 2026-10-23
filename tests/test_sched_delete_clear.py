@@ -199,6 +199,17 @@ def test_wiring():
         if path.name in ("scheduler.py", "cli.py", "doctor.py", "tasks.py", "reserved_names.py"):
             continue
         text = path.read_text(encoding="utf-8", errors="ignore")
+        if path.name == "send_dm.py":
+            # send_dm's scheduled-DM path deletes ONE job: the one it created a few lines earlier in the same call
+            # when the approval gate did not engage ("don't leave a dead job behind"). The id is never an argument
+            # of the tool, so a model cannot delete what ran unattended. Pin exactly that shape (one call, on the
+            # job it just made), so any other reach from send_dm.py still fails below.
+            created = len(re.findall(r"job = scheduler\.create\(", text)) == 1
+            only_own = re.findall(r"\bdelete_job\b", text) == ["delete_job"] and "scheduler.delete_job(job[\"id\"])" in text
+            others = re.search(r"\bclear_finished\b|sched-delete|sched-clear", text)
+            check("send_dm.py's one delete_job is on the job it just created (not on a model-supplied id)",
+                  created and only_own and not others)
+            continue
         if re.search(r"\bdelete_job\b|\bclear_finished\b|sched-delete|sched-clear", text):
             hits.append(path.name)
     check("no other module (so no model tool) reaches delete_job / clear_finished", not hits, hits)

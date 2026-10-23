@@ -384,6 +384,9 @@ for path in src.rglob("*.py"):
     if path.name in ("tool_commands.py", "tool_loader.py", "custom_tools_store.py", "tools.py", "cli.py", "_template.py", "reserved_names.py",
                      "tool_disable.py",     # tool_disable.py: the owner-only switch store (2026-10-11j) -- it names the
                      "download_hub.py",     # list but has no model-facing tool; test_tool_disable.py pins that
+                     "stremio_stack.py",    # ships its own fixed palette command (/stack) and
+                     "play_media.py",       # (/play), like download_hub.py: a constant list, nothing a model writes;
+                                            # test_hub_stremio_tools.py validates both lists
                      "tool_downloads.py"):  # download_hub.py ships its own fixed palette commands (test_hub_commands.py
         continue                            # pins them); tool_downloads.py only mentions the name in a docstring
     if "TOOL_COMMANDS" in path.read_text(encoding="utf-8", errors="replace"):

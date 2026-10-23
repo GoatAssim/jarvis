@@ -261,6 +261,22 @@ def make_plan(net, found, *, media_id, type_, season=None, episodes=None, want, 
     return plan
 
 
+def _much_shorter_than_before(plan):
+    """(previous season, its episodes, this season's episodes) when the season the plan picked has fewer than half
+    the episodes of the real season just before it, else None.  Specials (season 0) are never the one before.
+    Words only: the plan itself (which season, which rows) is not changed by this."""
+    try:
+        this = int(plan["season"])
+        counts = {int(s["season"]): int(s["episodes"]) for s in plan.get("seasons_available") or []}
+    except (KeyError, TypeError, ValueError):
+        return None
+    before = [n for n in counts if 0 < n < this]
+    if not before or this not in counts:
+        return None
+    prev = max(before)
+    return (prev, counts[prev], counts[this]) if counts[this] * 2 < counts[prev] else None
+
+
 def plan_message(plan):
     """The plan in words, for the model to relay and the owner to confirm."""
     t, want = plan["totals"], plan["want"]
@@ -269,11 +285,15 @@ def plan_message(plan):
     if plan.get("season_assumed"):
         out.append("You didn't name a season, so this is the latest one (%d of %d); say so if you meant another."
                    % (plan["season"], len([s for s in plan["seasons_available"] if s["season"] > 0])))
+        short = _much_shorter_than_before(plan)
+        if short:
+            out.append("Season %d has %d episodes; this one has %d, so it may have just started." % short)
     got = t["exact"] + t["fallback"]
     size = ("about %.1f GB" % t["size_gb"]) if t["size_gb"] else "size not reported"
     if t["unknown_size"]:
         size += " (%d without a size)" % t["unknown_size"]
-    out.append("%d of them have a release to queue (%s), saved to %s, via Stremio." % (got, size, plan["destination"]))
+    out.append("%d of them %s a release to queue (%s), saved to %s, via Stremio."
+               % (got, "has" if got == 1 else "have", size, plan["destination"]))
     if t["fallback"]:
         out.append("%d use a lesser release than asked for (see each row's note)." % t["fallback"])
     pending = [r for r in plan["episodes"] if r["status"] == "pending"]

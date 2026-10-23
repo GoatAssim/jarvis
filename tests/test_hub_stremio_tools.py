@@ -218,7 +218,16 @@ check("title: a Kitsu-only title says stremio-web needs an IMDb id and names wha
       res["ok"] is False and "IMDb id" in res["error"] and "Moon Pilot" in res["error"] and "kitsu:42" in res["error"] and not opened)
 AST.log.clear()
 res = play_media.tool_play_episode({"title": "Spirit Hunters"})
-check("title: a series with no season or episode asks, and costs no request", res.get("needs_clarification") and "season" in res["message"].lower() and not AST.log)
+# MOVED in brief 22: this used to ask at once and cost no request.  A title alone may be a film, so it is looked up first;
+# only a clear SERIES match then asks for the season and episode (and hands back the id, so the next call needs no lookup).
+check("title alone (no type): the title is looked up first, then a clear series match asks for season and episode",
+      res.get("needs_clarification") and "season" in res["message"].lower() and res.get("imdb_id") == SH and res.get("type") == "series"
+      and SH in res.get("matched", "") and any("/catalog/" in x for x in AST.log))
+check("...and that lookup asked for no episode list and no stream", not any("/meta/" in x or "/stream/" in x for x in AST.log))
+AST.log.clear()
+res = play_media.tool_play_episode({"title": "Spirit Hunters", "type": "series"})
+check("title with type=series and no season or episode asks at once, and costs no request (state.log empty)",
+      res.get("needs_clarification") and "season" in res["message"].lower() and not AST.log and "imdb_id" not in res)
 res = play_media.tool_play_episode({"title": "Spirit Hunters", "season": 2})
 check("title: half an episode asks too, with no request", res.get("needs_clarification") and not AST.log)
 res = play_media.tool_play_episode({})
@@ -226,6 +235,44 @@ check("nothing at all still asks which show, says a title will do, and makes no 
       res.get("needs_clarification") and "title" in res["message"] and "IMDb id" in res["message"] and not AST.log)
 check("a bad imdb_id with a title is still refused (the title doesn't rescue it)",
       not play_media.tool_play_episode({"imdb_id": "tt1", "title": "Spirit Hunters", "season": 1, "episode": 1})["ok"] and not AST.log)
+
+# ---- a film by title (brief 22).  The fake catalog gets a movie catalog for this block only.
+AST.movies = True
+opened.clear()
+AST.log.clear()
+res = play_media.tool_play_episode({"title": "Paper Lanterns", "open": False})
+check("film by title, no type, no season or episode: it is looked up and the film's page comes back, with no question",
+      res["ok"] and res["tier"] == 1 and res["link"].endswith("#/detail/movie/tt7000100/tt7000100") and "Paper Lanterns" in res.get("matched", "")
+      and "movie" in res["matched"] and not res.get("needs_clarification"))
+check("film by title: only manifests and catalog searches were made (no episode list, no stream), the movie catalog among them",
+      any("/catalog/movie/" in x for x in AST.log) and all(("/catalog/" in x or x.endswith("manifest.json")) for x in AST.log))
+res = play_media.tool_play_episode({"title": "Paper Lanterns"})
+check("film by title: the browser opens the film's page", res["ok"] and opened and opened[-1].endswith("#/detail/movie/tt7000100/tt7000100"))
+res = play_media.tool_play_episode({"title": "Paper Lanterns", "type": "movie", "open": False})
+check("film with type=movie still works as before", res["ok"] and res["link"].endswith("#/detail/movie/tt7000100/tt7000100"))
+AST.log.clear()
+res = play_media.tool_play_episode({"title": "Spirit Hunters"})
+check("a title that fits a series exactly and a film loosely: the exact name wins, and it asks for season and episode",
+      res.get("needs_clarification") and res.get("imdb_id") == SH and res.get("type") == "series")
+opened.clear()
+res = play_media.tool_play_episode({"title": "spirit"})
+check("several matches (two series and a film) ask which one, with the list, and open nothing",
+      res.get("needs_clarification") and len(res["matches"]) == 3 and {m["type"] for m in res["matches"]} == {"series", "movie"}
+      and "imdb_id" not in res and not opened)
+res = play_media.tool_play_episode({"title": "Spirit Hunters: The Film", "open": False})
+check("two titles share a name start: the exact film name still plays the film", res["ok"] and res["link"].endswith("#/detail/movie/tt7000200/tt7000200"))
+res = play_media.tool_play_episode({"title": "xyzzy"})
+check("film-or-series lookup that finds nothing: one sentence naming what was asked, nothing opened",
+      res["ok"] is False and "xyzzy" in res["error"] and "Nothing was found" in res["error"])
+res = play_media.tool_play_episode({"title": "Moon Pilot"})
+check("title alone, Kitsu-only: still the IMDb-id sentence (no season question first)", res["ok"] is False and "IMDb id" in res["error"] and not res.get("needs_clarification"))
+AST.log.clear()
+res = play_media.tool_play_episode({"imdb_id": SH})
+check("an imdb_id with no season or episode still asks at once, no request", res.get("needs_clarification") and "season" in res["message"].lower() and not AST.log)
+res = play_media.tool_play_episode({"title": "Spirit Hunters", "season": 2})
+check("a title with a season but no episode still asks at once (the pinned half-episode case)", res.get("needs_clarification") and "imdb_id" not in res and not any("/catalog/" in x for x in AST.log))
+AST.movies = False
+opened.clear()
 
 # a stream that is already known never needs the title; the title only matters for the two web tiers
 launched.clear()

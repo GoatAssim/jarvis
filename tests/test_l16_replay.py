@@ -52,6 +52,9 @@ from jarvis import (ai_client, ai_config, ai_providers, conversations, key_healt
 from jarvis import tools as system_tools  # noqa: E402
 
 FIXTURE = Path(__file__).resolve().parent / "fixtures" / "1a99e1e3f0d3af0e.jsonl"
+if not FIXTURE.exists():   # tests/fixtures is kept out of the shared copy (private conversations)
+    print("SKIPPED: tests/fixtures/1a99e1e3f0d3af0e.jsonl is not in this copy")
+    sys.exit(0)
 
 PASS, FAIL = [], []
 

@@ -39,7 +39,11 @@ def check(name, condition, detail=""):
         FAILED.append(f"{name}{(' - ' + detail) if detail else ''}")
 
 
-cases = json.loads((REPO / "tests" / "fixtures" / "l22_paraphrase_cases.json").read_text(encoding="utf-8"))["cases"]
+_CASES_FILE = REPO / "tests" / "fixtures" / "l22_paraphrase_cases.json"
+if not _CASES_FILE.exists():   # tests/fixtures is kept out of the shared copy (private conversations)
+    print("SKIPPED: tests/fixtures/l22_paraphrase_cases.json is not in this copy")
+    sys.exit(0)
+cases = json.loads(_CASES_FILE.read_text(encoding="utf-8"))["cases"]
 check("the fixture has at least 10 topics", len(cases) >= 10, str(len(cases)))
 check("topics are all different", len({c["topic"] for c in cases}) == len(cases))
 

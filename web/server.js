@@ -2912,7 +2912,8 @@ app.get("/api/hub/card", requireHubRead, requireJarvis, (req, res) => {
   const group = HUB_ID_RE.test(String(req.query.group || "")) ? String(req.query.group) : "";
   return hubAdmin(res, "card", { ids: hubIds(req.query.ids, 8), group, query: hubText(req.query.query, 80) });
 });
-app.get("/api/hub/list", requireHubRead, requireJarvis, (req, res) => hubAdmin(res, "list", { limit: 500 }));
+// ?include_dismissed=1 also returns the provider rows the owner hid (the panel's "Show hidden"); they carry dismissed_at.
+app.get("/api/hub/list", requireHubRead, requireJarvis, (req, res) => hubAdmin(res, "list", { limit: 500, include_dismissed: req.query.include_dismissed === "1" }));
 app.get("/api/hub/settings", requireHubRead, requireJarvis, (req, res) => hubAdmin(res, "settings", {}));
 app.get("/api/hub/history", requireHubRead, requireJarvis, (req, res) => {
   const states = hubText(req.query.states, 80).split(",").filter(Boolean);
@@ -2957,6 +2958,11 @@ app.post("/api/hub/history/clear", requireHubWrite, requireJarvis, (req, res) =>
 });
 app.post("/api/hub/redownload", requireHubWrite, requireJarvis, (req, res) => hubAdmin(res, "redownload", { id: hubText(req.body?.id, 120) }, 30000));
 app.post("/api/hub/reorder", requireHubWrite, requireJarvis, (req, res) => hubAdmin(res, "reorder", { ids: hubIds(req.body?.ids) }));
+// Dismiss / Clear finished (brief 19): hide one provider row ({id}) or every row that can be hidden ({finished: true}).
+// It hides: no row is deleted and no file is touched. The rules and the refusals are service.dismiss's (hub_admin passes them on).
+app.post("/api/hub/dismiss", requireHubWrite, requireJarvis, (req, res) => hubAdmin(res, "dismiss", {
+  id: hubText(req.body?.id, 120), finished: req.body?.finished === true,
+}));
 // Stremio (N9, brief 12): the status block (read) and the Locate... button's save (write: the owner's own
 // button only -- loopback Host, same-origin, X-Jarvis-Hub header, and hub_admin refuses an unattended process).
 // The browser sends paths the owner picked; hub_admin / hub/stremio/config.py check both files exist before saving.
@@ -2965,6 +2971,12 @@ app.post("/api/hub/stremio/paths", requireHubWrite, requireJarvis, (req, res) =>
   runtime_exe: hubText(req.body?.runtime_exe, 500), server_js: hubText(req.body?.server_js, 500),
   server_url: hubText(req.body?.server_url, 80), dry_run: req.body?.dry_run === true,
 }, 30000));
+// The card's Start button (brief 19): Stremio's SERVER only, through stremio_stack.tool_stack_start (loopback only; it starts
+// nothing when the server is already up or the Stremio app is open with a silent server). It may wait up to the hub setting
+// stremio.start_wait_seconds (10 to 300), so this route's time-out is longer than that; the page shows a working state and
+// gives up waiting on its own. Same guards as every write: loopback Host, same origin, X-Jarvis-Hub, and hub_admin refuses an
+// unattended process. No body is read.
+app.post("/api/hub/stremio/start", requireHubWrite, requireJarvis, (req, res) => hubAdmin(res, "stremio_start", {}, 330000));
 
 // N14, the folder / file picker (jarvis/hub_browse.py owns the rules). The answer is a listing of the owner's disk,
 // so both routes are POST, need a loopback Host AND the X-Jarvis-Hub header (another web page cannot make the
