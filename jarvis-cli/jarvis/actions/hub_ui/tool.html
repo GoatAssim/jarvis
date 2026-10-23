@@ -18,10 +18,10 @@
   </header>
   <div class="banner" id="banner" role="status" hidden></div>
 
-  <!-- the three views: Downloads (the three panes below), Providers, History; built by tool.js -->
+  <!-- the three views: Downloads (the three panes below), Sources, History; built by tool.js -->
   <nav class="tabs" id="tabs" role="tablist" aria-label="Download views">
     <button type="button" class="tab" role="tab" id="tabDownloads" aria-selected="true" aria-controls="body" data-tab="downloads" tabindex="0">Downloads</button>
-    <button type="button" class="tab" role="tab" id="tabProviders" aria-selected="false" aria-controls="providersPane" data-tab="providers" tabindex="-1">Providers<span class="tab__n" id="provCount"></span></button>
+    <button type="button" class="tab" role="tab" id="tabSources" aria-selected="false" aria-controls="sourcesPane" data-tab="sources" tabindex="-1">Sources<span class="tab__n" id="srcCount"></span></button>
     <button type="button" class="tab" role="tab" id="tabHistory" aria-selected="false" aria-controls="historyPane" data-tab="history" tabindex="-1">History</button>
     <span class="livetag" id="liveTag" role="status" aria-live="polite" style="margin-left:auto;align-self:center"></span>
   </nav>
@@ -144,14 +144,14 @@
 
   </div>
 
-  <!-- PROVIDERS: every tool that reports downloads into the hub, its health, its switch -->
-  <section class="tabpane" id="providersPane" role="tabpanel" aria-labelledby="tabProviders" hidden>
+  <!-- SOURCES (brief 24): every download engine, and every program that reports its own downloads, with an honest status -->
+  <section class="tabpane" id="sourcesPane" role="tabpanel" aria-labelledby="tabSources" hidden>
     <div class="hist__bar">
-      <span class="hist__count" id="provSummary">reading providers&hellip;</span>
+      <span class="hist__count" id="srcSummary">reading the sources&hellip;</span>
       <span style="margin-left:auto"></span>
-      <button type="button" class="btn btn--sm" id="provRefresh">Refresh</button>
+      <button type="button" class="btn btn--sm src-check" id="srcRefresh" title="Ask every engine again. This only looks; it never starts or changes anything.">Check now</button>
     </div>
-    <div class="pane-scroll" id="provList"></div>
+    <div class="pane-scroll" id="srcList"></div>
   </section>
 
   <!-- HISTORY: finished, failed and cancelled downloads -->

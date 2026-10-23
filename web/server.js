@@ -2967,6 +2967,10 @@ app.post("/api/hub/dismiss", requireHubWrite, requireJarvis, (req, res) => hubAd
 // button only -- loopback Host, same-origin, X-Jarvis-Hub header, and hub_admin refuses an unattended process).
 // The browser sends paths the owner picked; hub_admin / hub/stremio/config.py check both files exist before saving.
 app.get("/api/hub/stremio", requireHubRead, requireJarvis, (req, res) => hubAdmin(res, "stremio_status", { doctor: req.query.doctor === "1" }, 60000));
+// The Sources tab (brief 24): every engine and every provider with an honest status. Read-only (no write guard, like `list`):
+// it starts and changes nothing, and hub_admin leaves out every key, password and address. Each engine's own check has a
+// time limit inside hub_admin; the route's is a little longer.
+app.get("/api/hub/sources", requireHubRead, requireJarvis, (req, res) => hubAdmin(res, "sources", {}, 30000));
 app.post("/api/hub/stremio/paths", requireHubWrite, requireJarvis, (req, res) => hubAdmin(res, "stremio_save", {
   runtime_exe: hubText(req.body?.runtime_exe, 500), server_js: hubText(req.body?.server_js, 500),
   server_url: hubText(req.body?.server_url, 80), dry_run: req.body?.dry_run === true,

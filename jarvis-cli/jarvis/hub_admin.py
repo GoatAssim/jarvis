@@ -35,13 +35,15 @@ import os
 import re
 import sys
 import time
+from pathlib import Path
 
 # Same guard as calendar_tools.unattended_reason(): a chat reply, a scheduled job and a subagent all
 # run the same CLI, and the writes below are the owner's own button presses.
 _UNATTENDED_VARS = ("JARVIS_CHANNEL", "JARVIS_CHANNEL_SENDER", "JARVIS_SCHEDULED", "JARVIS_TASK_ID")
 _UNATTENDED_MESSAGE = "The Download Hub's History and queue controls can only be used from the Jarvis page itself."
 
-READ_OPS = ("card", "list", "settings", "history", "file", "thumb", "stremio_status")
+# `sources` (brief 24) is the Sources tab: every engine and every provider with an honest status.  Read-only.
+READ_OPS = ("card", "list", "settings", "history", "file", "thumb", "stremio_status", "sources")
 # `dismiss` (brief 19) hides a provider row that is unknown or finished; `stremio_start` (brief 19) is the Start button.
 WRITE_OPS = ("history_remove", "history_clear", "redownload", "reorder", "stremio_save", "dismiss", "stremio_start")
 OPS = READ_OPS + WRITE_OPS
@@ -659,6 +661,140 @@ def stremio_start(request=None, store=None):
         return _err("couldn't start Stremio's server: %s" % str(exc)[:160])
 
 
+# --------------------------------------------------------------------------- the Sources tab (brief 24)
+
+# What each engine is for, in a short phrase.  An engine that is not here shows only its label.
+ENGINE_HANDLES = {
+    "http": "direct links and files",
+    "ytdlp": "YouTube and other video sites",
+    "stremio": "magnets, torrent files and Stremio streams",
+    "qbittorrent": "magnets, when you ask for it",
+}
+# The file an engine is set up in, when it has no settings page.  A path in words, never its contents.
+ENGINE_CONFIG_FILES = {"qbittorrent": "~/.jarvis/qbittorrent.json"}
+# A provider the hub knows about that only registers when it is first used.  Playnite registers on its first install on
+# purpose (hub/playnite_provider.py), so before that it is not a provider row and the page would show nothing at all.
+KNOWN_PROVIDER_HINTS = {
+    "playnite": ("Playnite", "Appears here after the first install Jarvis starts through Playnite."),
+}
+SOURCES_CHECK_SECONDS = 8.0            # one engine's own check may not hold the page up longer than this
+
+_URL_RE = re.compile(r"[A-Za-z][A-Za-z0-9+.\-]*://[^\s)\]'\"]*[^\s)\]'\".,;:!?]")
+_HOSTPORT_RE = re.compile(r"\b(?:\d{1,3}\.){3}\d{1,3}(?::\d+)?\b|\blocalhost(?::\d+)?\b", re.IGNORECASE)
+_SECRET_RE = re.compile(r"(?i)\b(pass(?:word|wd)?|token|api[_-]?key|secret|cookie|auth)\b(\s*[=:]\s*)\S+")
+
+
+def _plain(text, limit=300):
+    """A sentence from an engine or a provider, safe to show: no address (an addon or server URL, or host:port), and
+    nothing after `password=` / `token:` and the like.  The Sources tab is a status page, not a settings dump."""
+    out = str(text or "")
+    try:                                              # the folder the person's home is in is not for a status page
+        home = str(Path.home())
+        for form in {home, home.replace("\\", "/")}:
+            if len(form) > 3:
+                out = out.replace(form, "~")
+    except Exception:  # noqa: BLE001
+        pass
+    out = _URL_RE.sub("its address", out)
+    out = _HOSTPORT_RE.sub("its address", out)
+    out = _SECRET_RE.sub(lambda m: m.group(1) + m.group(2) + "(hidden)", out)
+    out = " ".join(out.split())
+    return out[:limit]
+
+
+def _engine_state(ok, reason):
+    """ready | needs_setup | not_running | off, from an engine's own (ok, reason)."""
+    if ok:
+        return "ready"
+    low = str(reason or "").lower()
+    if "switched off" in low or "turned off" in low or "disabled" in low:
+        return "off"
+    for word in ("isn't running", "is not running", "not running", "can't reach", "cannot reach", "couldn't reach",
+                 "isn't answering", "didn't answer", "connection refused", "no answer"):
+        if word in low:
+            return "not_running"
+    return "needs_setup"
+
+
+def _probe_engine(engine):
+    """(ok, reason, checks) for one engine.  Raises if the engine's own check does; the caller says Broken."""
+    ok, reason = engine.available()
+    checks = []
+    doctor = getattr(engine, "doctor", None)
+    if callable(doctor):
+        for line in (doctor() or [])[:8]:
+            if isinstance(line, dict):
+                checks.append({"name": _plain(line.get("name"), 60), "status": _plain(line.get("status"), 12) or "info",
+                               "detail": _plain(line.get("detail"), 300)})
+    return bool(ok), str(reason or ""), checks
+
+
+def sources(request=None, store=None):
+    """Read-only, for the Sources tab: every download engine (ready, needs setup, not running, off or broken, with
+    the one-sentence reason, what it is for, how many it has running and waiting, its own check lines and where to
+    configure it) and every program that reports its own downloads (what `dl_providers` says, plus a hint for one the
+    hub knows but that has not registered yet).  Starts nothing and changes nothing; an engine whose check raises is
+    shown Broken, never a crash.  No key, password or address is in the answer."""
+    try:
+        import concurrent.futures
+        from .hub import engines, service, settings as settings_mod, states
+        st = _store(store)
+        engines.load()
+        counts = st.counts().get("by_engine") or {}
+        waiting = {}
+        for row in st.list_items(owner="hub", states_in=("queued",), limit=2000):
+            waiting[row.get("engine") or "?"] = waiting.get(row.get("engine") or "?", 0) + 1
+        writable = settings_mod.PREFS_WRITABLE
+
+        names = sorted(engines.ENGINES)
+        pool = concurrent.futures.ThreadPoolExecutor(max_workers=max(1, min(8, len(names) or 1)))
+        futures = {name: pool.submit(_probe_engine, engines.ENGINES[name]) for name in names}
+        out_engines = []
+        deadline = time.monotonic() + SOURCES_CHECK_SECONDS
+        for name in names:
+            engine = engines.ENGINES[name]
+            ok, reason, checks, state = False, "", [], "broken"
+            try:
+                ok, reason, checks = futures[name].result(timeout=max(0.1, deadline - time.monotonic()))
+                state = _engine_state(ok, reason)
+                if not ok and str(reason).startswith("check failed"):
+                    state = "broken"
+            except concurrent.futures.TimeoutError:
+                reason = "its check did not finish in %d seconds" % int(SOURCES_CHECK_SECONDS)
+            except Exception as exc:  # noqa: BLE001 - an engine's check must never take the page down
+                reason = "its check failed: %s" % type(exc).__name__ + (": %s" % exc if str(exc) else "")
+            by = counts.get(name) or {}
+            has_settings = any(k == "concurrency." + name or k.startswith(name + ".") for k in writable)
+            out_engines.append({
+                "id": name, "label": getattr(engine, "label", "") or name, "state": state, "reason": _plain(reason),
+                "handles": ENGINE_HANDLES.get(name, ""), "active": int(by.get("active") or 0), "queued": int(waiting.get(name, 0)),
+                "checks": checks, "configure": name if has_settings else None,
+                "config_file": ENGINE_CONFIG_FILES.get(name),
+            })
+        pool.shutdown(wait=False)
+        for name, why in sorted(engines.LOAD_ERRORS.items()):
+            out_engines.append({"id": name, "label": name, "state": "broken", "reason": _plain("didn't load: %s" % why),
+                                "handles": "", "active": 0, "queued": 0, "checks": [], "configure": None, "config_file": None})
+
+        provided = service.list_providers(st)
+        if provided.get("ok") is False:
+            return _err(provided.get("error") or "couldn't read the providers")
+        out_providers = []
+        seen = set()
+        for p in provided.get("providers") or []:
+            seen.add(p.get("id"))
+            row = dict(p)
+            row["registered"] = True
+            row["last_error"] = _plain(row.get("last_error")) or None
+            out_providers.append(row)
+        for pid, (label, hint) in sorted(KNOWN_PROVIDER_HINTS.items()):
+            if pid not in seen:
+                out_providers.append({"id": pid, "label": label, "registered": False, "hint": hint})
+        return {"ok": True, "engines": out_engines, "providers": out_providers}
+    except Exception as exc:  # noqa: BLE001
+        return _err("couldn't read the sources: %s" % _plain(exc, 160))
+
+
 # --------------------------------------------------------------------------- the entry point
 
 def admin(op, request=None, store=None):
@@ -698,6 +834,8 @@ def admin(op, request=None, store=None):
             return dismiss(request, store)
         if op == "stremio_status":
             return stremio_status(request, store)
+        if op == "sources":
+            return sources(request, store)
         if op == "stremio_save":
             return stremio_save(request, store)
         if op == "stremio_start":

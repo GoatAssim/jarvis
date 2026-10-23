@@ -793,6 +793,50 @@ function providerBadge(p) {
   return !p.enabled ? "Off" : p.read_only ? "Read-only" : p.mode === "poll" ? "Polled" : "Reports";
 }
 
+// ---- the Sources tab (brief 24).  Everything an engine card says comes from the hub's `sources` answer; the page
+// decides only the word, the colour and which settings block a Configure button lands on.
+const ENGINE_WORDS = { ready: "Ready", needs_setup: "Needs setup", not_running: "Not running", off: "Off", broken: "Broken" };
+const ENGINE_TONES = { ready: "done", needs_setup: "stalled", not_running: "stalled", off: "stale", broken: "failed" };
+// The block of Settings > Downloads an engine's Configure button scrolls to (data-settings-anchor in downloads-settings.js).
+// Stremio has its own card; HTTP's retry and stall rows are under Connections; yt-dlp's only setting is how many run at once.
+const CONFIGURE_ANCHORS = { stremio: "stremio", http: "connections", ytdlp: "running-at-once" };
+const PROVIDER_SETTINGS_ANCHOR = "other-tools-downloads";
+function engineWord(state) { return ENGINE_WORDS[state] || "Unknown"; }
+function engineTone(state) { return ENGINE_TONES[state] || "stale"; }
+// "magnets and torrent files · 1 active · 0 waiting"
+function engineLine(e) {
+  const parts = [];
+  if (e && e.handles) parts.push(e.handles);
+  parts.push((num(e && e.active) || 0) + " active");
+  parts.push((num(e && e.queued) || 0) + " waiting");
+  return parts.join(DOT);
+}
+// {anchor} for an engine that has a settings block to land on, else null (no button).
+function engineConfigure(e) {
+  const anchor = e ? CONFIGURE_ANCHORS[e.configure] : "";
+  return anchor ? { anchor: anchor } : null;
+}
+// What the card says in place of a Configure button: where it is set up, or that it has no settings.
+function engineSettingsNote(e) {
+  if (!e || engineConfigure(e)) return "";
+  return e.config_file ? "Set up in " + e.config_file + "." : "No settings.";
+}
+function sourcesSummary(d) {
+  if (!d) return "reading the sources\u2026";
+  const engines = d.engines || [];
+  const progs = (d.providers || []).filter((p) => p.registered !== false);
+  const by = (s) => engines.filter((e) => e.state === s).length;
+  const bits = [engines.length + (engines.length === 1 ? " engine" : " engines")];
+  if (by("ready")) bits.push(by("ready") + " ready");
+  if (by("needs_setup")) bits.push(by("needs_setup") + " needs setup");
+  if (by("not_running")) bits.push(by("not_running") + " not running");
+  if (by("off")) bits.push(by("off") + " off");
+  if (by("broken")) bits.push(by("broken") + " broken");
+  const bad = progs.filter((p) => providerTone(p) === "bad").length;
+  const quiet = progs.filter((p) => providerTone(p) === "quiet").length;
+  return bits.join(DOT) + " | " + progs.length + (progs.length === 1 ? " program" : " programs") + (bad ? DOT + bad + " with an error" : "") + (quiet ? DOT + quiet + " gone quiet" : "");
+}
+
 // The waiting hub queue in the order it will RUN (priority first, then oldest first).
 function queueOrder(rows) {
   return (rows || []).filter((r) => r.owner === "hub" && r.state === "queued")
@@ -821,6 +865,20 @@ function canReorder(row, live) {
   return !!live && row.owner === "hub" && row.state === "queued" && num(row.priority) !== null;
 }
 
+// Why a row has no arrows and no grip, in a sentence (the card's tooltip, N15).  "" when the row HAS them, and for a
+// finished row, where "order" means nothing.  Pure.
+function reorderNote(row, live) {
+  if (!row) return "";
+  if (row.owner !== "hub") return "Only downloads the hub itself queues can be put in a different order. " + (row.provider_label || "This program") + " runs this one.";
+  if (row.state === "paused") return "A paused download isn't waiting in the queue. Resume it first; then it can be moved.";
+  if (row.state === "queued") {
+    if (!live || num(row.priority) === null) return "Moving a waiting download needs the live connection to the hub, and it is not up right now. It comes back by itself.";
+    return "";
+  }
+  if (ACTIVE.has(row.state) || row.state === "stalled") return "Already started. Only downloads that are still waiting can be put in a different order.";
+  return "";
+}
+
 const pure = {
   ACTIVE, FINAL, VIEWS, KIND_ICON, fmtBytes, fmtSpeed, fmtEta, fmtAgo, percentText, speedText, etaText,
   sizeText, statusText, barLook, rowActions, sourceKey, sourceLabel, viewMatches, viewCounts, sourceList,
@@ -833,8 +891,8 @@ const pure = {
   CARD_VERBS, cardActions, fmtWhen, applyNotifyOptions,
   primaryAction, secondaryActions, pendingWord, controlNote, controlNotice, TOGGLE_ICONS,
   cardNote, DISMISSABLE, DISMISS_TIP, CLEAR_TIP, SHOW_AGAIN_TIP, SHOW_HIDDEN_TIP, isHidden, canDismiss, isDimmed, dismissableRows, mergeHidden, dismissNotice,
-  HISTORY_STATES, historyFilter, csvCell, historyCsv, historyJson, historyMeta, providerTone, providerFacts, providerBadge,
-  queueOrder, moveInOrder, stepInOrder, canReorder,
+  HISTORY_STATES, historyFilter, csvCell, historyCsv, historyJson, historyMeta, providerTone, providerFacts, providerBadge, ENGINE_WORDS, ENGINE_TONES, CONFIGURE_ANCHORS, engineWord, engineTone, engineLine, engineConfigure, engineSettingsNote, sourcesSummary,
+  queueOrder, moveInOrder, stepInOrder, canReorder, reorderNote, applyOrder,
 };
 if (host && host.__hubPureOnly) return pure;
 
@@ -853,7 +911,7 @@ const S = {
   hubPrefs: null,
   saving: false,
   tab: "downloads", live: false, liveAt: 0, es: null, liveTimer: 0, dragId: "",
-  providers: [], provTimer: 0, provLoaded: false,
+  sources: null, srcTimer: 0, srcLoaded: false, srcBusy: false,
   hist: { rows: [], more: false, loaded: false, busy: false, state: "all", source: "", search: "", error: "" },
 };
 let hintTimer = 0;
@@ -1079,8 +1137,12 @@ function renderRow(row) {
       }));
     });
   }
+  // N16: the toggle and Cancel sit on ONE row, toggle first, the same height (.tbtn / .rbtn share their box in tool.css)
+  const acts = [prim ? toggleButton(row, prim, false) : null].concat(buttons).filter(Boolean);
+  const noReorder = draggable ? "" : reorderNote(row, S.live);
   const rowEl = el("div", {
     cls: "row tone-" + tone + " state-" + row.state + (dimmed ? " is-hidden" : ""),
+    title: noReorder,
     attrs: { role: "option", "aria-selected": row.id === S.selected ? "true" : "false", "data-id": row.id, draggable: draggable ? "true" : "false" },
     on: { click: () => select(row.id) },
   }, [
@@ -1089,13 +1151,12 @@ function renderRow(row) {
       el("span", { cls: "dot tone-" + tone, attrs: { "aria-hidden": "true" } }),
       el("span", { cls: "row__title", text: row.title || row.id, title: row.title || row.id }),
       el("span", { cls: "row__kind", text: KIND_ICON[row.kind] || KIND_ICON.other, attrs: { "aria-hidden": "true" } }),
-      prim ? toggleButton(row, prim, false) : null,
     ]),
     renderBar(row, false),
     el("div", { cls: "row__meta" }, meta),
     why && why.card ? el("div", { cls: "row__why", text: why.text }) : null,
     cardNote(row) ? el("div", { cls: "row__note", text: cardNote(row), title: cardNote(row) }) : null,
-    buttons.length ? el("div", { cls: "row__acts" }, buttons) : null,
+    acts.length ? el("div", { cls: "row__acts" }, acts) : null,
   ]);
   if (draggable) wireDrag(rowEl, row);
   return rowEl;
@@ -1183,7 +1244,9 @@ function buildDetail(row, full) {
     cls: "btn btn--sm" + (a.danger ? " btn--danger" : ""), text: a.label, attrs: { type: "button" },
     on: { click: () => runAction(row, a) },
   });
-  const buttons = ctrl.map((a) => (prim && a.verb === prim.verb ? toggleButton(row, prim, true) : plain(a)));
+  // N16: the toggle first, then Retry / Cancel, all the same height (tool.css, .detail__actions--top)
+  const ctrlFirst = ctrl.filter((a) => prim && a.verb === prim.verb).concat(ctrl.filter((a) => !(prim && a.verb === prim.verb)));
+  const buttons = ctrlFirst.map((a) => (prim && a.verb === prim.verb ? toggleButton(row, prim, true) : plain(a)));
   files.forEach((a) => buttons.push(plain(a)));
   const hideBtn = dismissButton(row, true);
   if (hideBtn) buttons.push(hideBtn);
@@ -1568,7 +1631,10 @@ async function poll() {
     const streaming = S.live;
     const r = await host.runTool("dl_list", streaming ? { limit: 1, summary: true } : { limit: 500, summary: true });
     if (r && r.ok === false) throw new Error(r.error || "the hub didn't answer");
-    if (!streaming) S.rows = Array.isArray(r.items) ? r.items : [];
+    // `streaming` was read BEFORE the await: a slow dl_list that started while the stream was still connecting
+    // lands after the stream's snapshot.  Its rows carry no `priority`, so letting it overwrite them took the
+    // arrows and the grip away until some row changed (N15).  Look again now.
+    if (!streaming && !S.live) S.rows = Array.isArray(r.items) ? r.items : [];
     if (r.summary) {
       S.summary = r.summary;
       if (applyNotifyOptions(r.summary.notify_options)) { S.sig.addextras = ""; S.sig.dprefs = ""; }
@@ -1859,9 +1925,12 @@ async function openLibrary() {
 // This panel keeps two shortcuts (the speed menu and the Fewer / More buttons) that write through the same
 // dl_prefs tool; everything else about the hub's settings is edited there, not here.
 
-function openSettings() {
+// `anchor` (a string, brief 24) names a block of the Downloads page to scroll to: "stremio", "connections" ...  A click
+// handler that passes the event instead gets the page as before.
+function openSettings(anchor) {
   const s = window.JarvisSettings;
-  if (s && typeof s.show === "function") s.show({ section: "downloads" });
+  const want = typeof anchor === "string" && /^[a-z0-9-]{1,40}$/.test(anchor) ? anchor : "";
+  if (s && typeof s.show === "function") s.show(want ? { section: "downloads", anchor: want } : { section: "downloads" });
   else toast("Settings can't be opened from here", "warn");
 }
 
@@ -2002,10 +2071,10 @@ async function askFirst(title, body, label) {
 // ---- tabs
 
 function setTab(name, focus) {
-  if (["downloads", "providers", "history"].indexOf(name) === -1) return;
+  if (["downloads", "sources", "history"].indexOf(name) === -1) return;
   S.tab = name;
   $("#hub").dataset.tab = name;
-  ["downloads", "providers", "history"].forEach((t) => {
+  ["downloads", "sources", "history"].forEach((t) => {
     const btn = $("#tab" + t.charAt(0).toUpperCase() + t.slice(1));
     const on = t === name;
     btn.setAttribute("aria-selected", on ? "true" : "false");
@@ -2013,12 +2082,12 @@ function setTab(name, focus) {
     if (on && focus) btn.focus();
   });
   $("#body").hidden = name !== "downloads";
-  $("#providersPane").hidden = name !== "providers";
+  $("#sourcesPane").hidden = name !== "sources";
   $("#historyPane").hidden = name !== "history";
-  clearInterval(S.provTimer);
-  if (name === "providers") {
-    loadProviders();
-    S.provTimer = setInterval(() => { if (!doc.hidden) loadProviders(); }, 5000);
+  clearInterval(S.srcTimer);
+  if (name === "sources") {
+    loadSources(false);
+    S.srcTimer = setInterval(() => { if (!doc.hidden) loadSources(false); }, 10000);
   } else if (name === "history") {
     loadHistory();
   }
@@ -2028,7 +2097,7 @@ $("#tabs").addEventListener("click", (e) => {
   if (b) setTab(b.getAttribute("data-tab"), false);
 });
 $("#tabs").addEventListener("keydown", (e) => {
-  const order = ["downloads", "providers", "history"];
+  const order = ["downloads", "sources", "history"];
   const at = order.indexOf(S.tab);
   let to = -1;
   if (e.key === "ArrowRight") to = (at + 1) % order.length;
@@ -2097,66 +2166,128 @@ function startLive() {
   S.liveTimer = setInterval(() => { if (S.live && Date.now() - S.liveAt > 45000) liveDown(); }, 10000);
 }
 
-// ---- Providers
+// ---- Sources (brief 24): the Providers tab, now with every download engine above the programs that report their own downloads
 
-async function loadProviders() {
-  const r = await callTool("dl_providers", {});
-  if (S.closed) return;
-  if (r.ok === false) {
-    if (!S.provLoaded) $("#provSummary").textContent = r.error || "The providers couldn't be read.";
-    return;
-  }
-  S.providers = Array.isArray(r.providers) ? r.providers : [];
-  S.provLoaded = true;
-  renderProviders();
+function setChecking(on) {
+  $("#sourcesPane").querySelectorAll(".src-check").forEach((b) => { b.disabled = !!on; b.textContent = on ? "Checking\u2026" : "Check now"; });
 }
 
-function renderProviders() {
-  const list = S.providers;
-  $("#provCount").textContent = list.length ? String(list.length) : "";
-  const bad = list.filter((p) => providerTone(p) === "bad").length;
-  const quiet = list.filter((p) => providerTone(p) === "quiet").length;
-  $("#provSummary").textContent = !list.length ? "No other tools report downloads here yet."
-    : list.length + (list.length === 1 ? " provider" : " providers") + (bad ? " \u00B7 " + bad + " with an error" : "") + (quiet ? " \u00B7 " + quiet + " gone quiet" : "");
-  if (!changed("providers", list)) return;
-  const box = $("#provList");
-  box.textContent = "";
-  if (!list.length) {
-    box.appendChild(el("div", { cls: "hist__empty", text: "Game installs and other tools that report into the hub appear here." }));
-    return;
+// One read of the hub's `sources` answer.  It only looks: it never starts, stops or changes anything.  `manual` is the
+// person pressing Check now (so the buttons say so); the timer reloads quietly.
+async function loadSources(manual) {
+  if (S.srcBusy) return;
+  S.srcBusy = true;
+  if (manual) setChecking(true);
+  try {
+    const r = await hubFetch("/api/hub/sources");
+    if (S.closed) return;
+    S.sources = { engines: Array.isArray(r.engines) ? r.engines : [], providers: Array.isArray(r.providers) ? r.providers : [] };
+    S.srcLoaded = true;
+    renderSources();
+  } catch (err) {
+    if (S.closed) return;
+    if (!S.srcLoaded) $("#srcSummary").textContent = message(err) || "The sources couldn't be read.";
+    else if (manual) toast(message(err) || "The sources couldn't be read.", "warn");
+  } finally {
+    S.srcBusy = false;
+    if (!S.closed) setChecking(false);
   }
-  list.forEach((p) => {
-    const tone = providerTone(p);
-    const toggle = el("button", {
-      cls: "btn btn--sm", text: p.enabled ? "Turn off" : "Turn on",
-      attrs: { type: "button", "aria-label": (p.enabled ? "Turn off " : "Turn on ") + (p.label || p.id) },
-      on: { click: async (e) => {
-        e.currentTarget.disabled = true;
-        const r = await callTool("dl_provider_prefs", { id: p.id, enabled: !p.enabled });
-        if (r.declined) toast("Cancelled", "info");
-        else if (r.ok === false) toast(r.error || "That didn't work", "warn");
-        loadProviders();
-      } },
-    });
-    const grid = el("div", { cls: "prov__grid" }, providerFacts(p).map((f) => el("div", { cls: "prov__kv" }, [
-      el("span", { text: f[0] + ": " }), el("b", { text: f[1] }),
-    ])));
-    box.appendChild(el("div", { cls: "prov is-" + tone, attrs: { "data-id": p.id } }, [
-      el("div", { cls: "prov__head" }, [
-        el("span", { cls: "prov__name", text: p.label || p.id }),
-        el("span", { cls: "prov__badge", text: providerBadge(p) }),
-        tone === "quiet" ? el("span", { cls: "prov__badge", text: "Not reporting" }) : null,
-        el("span", { cls: "prov__actions" }, [
-          toggle,
-          el("button", { cls: "btn btn--sm", text: "Settings\u2026", attrs: { type: "button" }, on: { click: openSettings } }),
-        ]),
+}
+
+function sourceHeading(text, note) {
+  return el("div", { cls: "src__h" }, [el("span", { cls: "src__title", text: text }), note ? el("span", { cls: "src__note", text: note }) : null]);
+}
+
+function renderEngine(e) {
+  const tone = engineTone(e.state);
+  const cfg = engineConfigure(e);
+  const checks = (Array.isArray(e.checks) ? e.checks : []).filter((c) => c && c.detail && c.detail !== e.reason);
+  const settingsNote = engineSettingsNote(e);
+  const cardTone = e.state === "ready" ? "ok" : e.state === "broken" ? "bad" : e.state === "off" ? "off" : "warn";
+  return el("div", { cls: "prov src-engine is-" + cardTone, attrs: { "data-id": e.id, "data-kind": "engine", "data-state": e.state } }, [
+    el("div", { cls: "prov__head" }, [
+      el("span", { cls: "dot tone-" + tone, attrs: { "aria-hidden": "true" } }),
+      el("span", { cls: "prov__name", text: e.label || e.id }),
+      el("span", { cls: "prov__badge src__state", text: engineWord(e.state) }),
+      el("span", { cls: "prov__actions" }, [
+        cfg ? el("button", {
+          cls: "btn btn--sm src-configure", text: "Configure", attrs: { type: "button", "aria-label": "Configure " + (e.label || e.id) },
+          on: { click: () => openSettings(cfg.anchor) },
+        }) : null,
+        el("button", {
+          cls: "btn btn--sm src-check", text: "Check now",
+          attrs: { type: "button", "aria-label": "Check " + (e.label || e.id) + " again", title: "Ask again. This only looks; it never starts or changes anything." },
+          on: { click: () => loadSources(true) },
+        }),
       ]),
-      grid,
-      p.last_error ? el("div", { cls: "prov__err", text: "Last error: " + String(p.last_error).slice(0, 240) }) : null,
-    ]));
-  });
+    ]),
+    e.reason ? el("div", { cls: "prov__reason" + (e.state === "broken" ? " is-bad" : ""), text: e.reason }) : null,
+    el("div", { cls: "prov__line", text: engineLine(e) }),
+    settingsNote ? el("div", { cls: "prov__line prov__line--dim", text: settingsNote }) : null,
+    checks.length ? el("div", { cls: "prov__checks" }, checks.map((c) => el("div", { cls: "prov__check is-" + (c.status || "info"), text: (c.name ? c.name + ": " : "") + c.detail }))) : null,
+  ]);
 }
-$("#provRefresh").addEventListener("click", loadProviders);
+
+function renderProviderCard(p) {
+  // not registered yet: a program the hub knows about that only appears after its first use; say so instead of nothing
+  if (p.registered === false) {
+    return el("div", { cls: "prov is-off src-provider", attrs: { "data-id": p.id, "data-kind": "provider", "data-registered": "no" } }, [
+      el("div", { cls: "prov__head" }, [
+        el("span", { cls: "dot tone-stale", attrs: { "aria-hidden": "true" } }),
+        el("span", { cls: "prov__name", text: p.label || p.id }),
+        el("span", { cls: "prov__badge", text: "Not seen yet" }),
+      ]),
+      el("div", { cls: "prov__reason", text: p.hint || "It appears here once it reports its first download." }),
+    ]);
+  }
+  const tone = providerTone(p);
+  const toggle = el("button", {
+    cls: "btn btn--sm", text: p.enabled ? "Turn off" : "Turn on",
+    attrs: { type: "button", "aria-label": (p.enabled ? "Turn off " : "Turn on ") + (p.label || p.id) },
+    on: { click: async (e) => {
+      e.currentTarget.disabled = true;
+      const r = await callTool("dl_provider_prefs", { id: p.id, enabled: !p.enabled });
+      if (r.declined) toast("Cancelled", "info");
+      else if (r.ok === false) toast(r.error || "That didn't work", "warn");
+      loadSources(false);
+    } },
+  });
+  const grid = el("div", { cls: "prov__grid" }, providerFacts(p).map((f) => el("div", { cls: "prov__kv" }, [
+    el("span", { text: f[0] + ": " }), el("b", { text: f[1] }),
+  ])));
+  return el("div", { cls: "prov src-provider is-" + tone, attrs: { "data-id": p.id, "data-kind": "provider" } }, [
+    el("div", { cls: "prov__head" }, [
+      el("span", { cls: "prov__name", text: p.label || p.id }),
+      el("span", { cls: "prov__badge", text: providerBadge(p) }),
+      tone === "quiet" ? el("span", { cls: "prov__badge", text: "Not reporting" }) : null,
+      el("span", { cls: "prov__actions" }, [
+        toggle,
+        el("button", { cls: "btn btn--sm", text: "Settings\u2026", attrs: { type: "button" }, on: { click: () => openSettings(PROVIDER_SETTINGS_ANCHOR) } }),
+      ]),
+    ]),
+    grid,
+    p.last_error ? el("div", { cls: "prov__err", text: "Last error: " + String(p.last_error).slice(0, 240) }) : null,
+  ]);
+}
+
+function renderSources() {
+  const data = S.sources;
+  const engines = (data && data.engines) || [];
+  const progs = (data && data.providers) || [];
+  $("#srcCount").textContent = data ? String(engines.length + progs.filter((p) => p.registered !== false).length) : "";
+  $("#srcSummary").textContent = sourcesSummary(data);
+  if (!changed("sources", data)) return;
+  const box = $("#srcList");
+  box.textContent = "";
+  box.appendChild(sourceHeading("Download engines", "What the hub downloads with itself."));
+  if (!engines.length) box.appendChild(el("div", { cls: "hist__empty", text: "The hub reported no download engines." }));
+  engines.forEach((e) => box.appendChild(renderEngine(e)));
+  box.appendChild(sourceHeading("Programs that report their own downloads", "Game installs and other tools; the hub shows them, it does not run them."));
+  if (!progs.length) box.appendChild(el("div", { cls: "hist__empty", text: "Game installs and other tools that report into the hub appear here." }));
+  progs.forEach((p) => box.appendChild(renderProviderCard(p)));
+  setChecking(S.srcBusy);
+}
+$("#srcRefresh").addEventListener("click", () => loadSources(true));
 
 // ---- History
 
@@ -2297,9 +2428,21 @@ $("#histClear").addEventListener("click", async () => {
 
 // ---- the waiting queue: drag a row, or use its arrows (phase 9 option B)
 
+// The rows with the waiting queue in the order `ids` (earlier = starts sooner).  The hub's own `reorder` does the same
+// sum: priority counts down from the length.  Pure; rows not in `ids` are returned as they were.
+function applyOrder(rows, ids) {
+  const list = ids || [];
+  return (rows || []).map((r) => (list.indexOf(r.id) === -1 ? r : Object.assign({}, r, { priority: list.length - list.indexOf(r.id) })));
+}
+
 async function sendOrder(ids) {
+  // Show the new order at once; the stream's next tick (up to a second away) would otherwise be the first the
+  // person sees of it.  If the hub refuses, put the old rows back and say so.
+  const before = S.rows;
+  S.rows = applyOrder(S.rows, ids);
+  render();
   try { await hubFetch("/api/hub/reorder", { ids: ids }); schedule(300); }
-  catch (err) { toast(message(err), "warn"); }
+  catch (err) { S.rows = before; render(); toast(message(err), "warn"); }
 }
 
 function moveQueued(id, delta) {
@@ -2344,7 +2487,7 @@ function wireDrag(rowEl, row) {
 
 host.onClose(() => {
   S.closed = true; clearTimeout(S.timer); clearTimeout(S.holdTimer); clearTimeout(hintTimer);
-  clearInterval(S.liveTimer); clearInterval(S.provTimer); clearTimeout(histTimer);
+  clearInterval(S.liveTimer); clearInterval(S.srcTimer); clearTimeout(histTimer);
   if (S.es) { S.es.close(); S.es = null; }
 });
 

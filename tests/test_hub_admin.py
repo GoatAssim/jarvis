@@ -471,6 +471,105 @@ def test_stremio_start_op():
         stremio_status_mod.snapshot, daemons.start = real_snapshot, real_dstart
 
 
+def _cli_out(op, body):
+    out = io.StringIO()
+    hub_admin.run_cli([op], stdin=io.StringIO(body), stdout=out)
+    return out.getvalue().strip().splitlines()[-1]
+
+
+def test_sources_op():
+    """Brief 24: the Sources tab's read-only op."""
+    from jarvis.hub import engines
+    engines.load()
+    st = fresh_store()
+    check("sources is a read op (not refused for an unattended process, like card and list)",
+          "sources" in hub_admin.READ_OPS and "sources" not in hub_admin.WRITE_OPS)
+    res = hub_admin.admin("sources", {}, store=st)
+    ids = [e["id"] for e in res.get("engines", [])]
+    check("a fresh store: all four engines are listed, and the answer is ok", res.get("ok") is True and set(ids) >= {"http", "ytdlp", "stremio", "qbittorrent"} and len(ids) == len(set(ids)))
+    by = {e["id"]: e for e in res["engines"]}
+    check("every engine has an id, a label, one of the five states, a reason, handles, counts, checks and configure",
+          all({"id", "label", "state", "reason", "handles", "active", "queued", "checks", "configure"} <= set(e) for e in res["engines"])
+          and all(e["state"] in ("ready", "needs_setup", "not_running", "off", "broken") for e in res["engines"]))
+    check("the handles phrases come from the small table (HTTP, yt-dlp, Stremio, qBittorrent)",
+          by["http"]["handles"] == "direct links and files" and by["ytdlp"]["handles"] == "YouTube and other video sites"
+          and by["stremio"]["handles"] == "magnets, torrent files and Stremio streams" and by["qbittorrent"]["handles"] == "magnets, when you ask for it")
+    check("a fresh store has no registered provider; Playnite is shown with its hint instead of nothing",
+          [p for p in res["providers"] if p.get("registered")] == []
+          and [p for p in res["providers"] if p["id"] == "playnite"][0].get("hint", "").startswith("Appears here after the first install Jarvis starts through Playnite"))
+    check("qBittorrent without its file is Needs setup and the reason names the file",
+          by["qbittorrent"]["state"] == "needs_setup" and "qbittorrent.json" in by["qbittorrent"]["reason"] and by["qbittorrent"]["config_file"] == "~/.jarvis/qbittorrent.json")
+    check("an engine with writable settings gets a configure id, one without (qBittorrent) gets none",
+          by["stremio"]["configure"] == "stremio" and by["http"]["configure"] == "http" and by["ytdlp"]["configure"] == "ytdlp" and by["qbittorrent"]["configure"] is None)
+    check("the home folder never appears in the answer (it is shown as ~)", HOME not in json.dumps(res))
+
+    # an engine that says it is unavailable, one that is switched off, one that is not running, one that raises
+    http = engines.ENGINES["http"]
+    real = http.available
+    try:
+        http.available = lambda: (False, "the `requests` package is missing")
+        r1 = {e["id"]: e for e in hub_admin.admin("sources", {}, store=st)["engines"]}["http"]
+        check("an engine whose available() is false is Needs setup, with its own reason", r1["state"] == "needs_setup" and r1["reason"] == "the `requests` package is missing")
+        http.available = lambda: (False, "switched off in qbittorrent.json (\"enabled\": false)")
+        check("a switched-off engine is Off", {e["id"]: e for e in hub_admin.admin("sources", {}, store=st)["engines"]}["http"]["state"] == "off")
+        http.available = lambda: (False, "can't reach it (is it running?)")
+        check("an engine that cannot be reached is Not running", {e["id"]: e for e in hub_admin.admin("sources", {}, store=st)["engines"]}["http"]["state"] == "not_running")
+        http.available = lambda: (_ for _ in ()).throw(RuntimeError("kaboom"))
+        r3 = hub_admin.admin("sources", {}, store=st)
+        broken = {e["id"]: e for e in r3["engines"]}["http"]
+        check("an engine whose check raises is Broken and the op still answers ok with the others",
+              r3["ok"] is True and broken["state"] == "broken" and "kaboom" in broken["reason"] and len(r3["engines"]) >= 4)
+    finally:
+        http.available = real
+
+    # a module that failed to load
+    engines.LOAD_ERRORS["bad_engine"] = "ImportError: no module named nothing at http://10.0.0.5:9/x"
+    try:
+        r4 = {e["id"]: e for e in hub_admin.admin("sources", {}, store=st)["engines"]}
+        check("an engine that failed to load is listed Broken with the load error",
+              r4["bad_engine"]["state"] == "broken" and "didn't load" in r4["bad_engine"]["reason"] and "ImportError" in r4["bad_engine"]["reason"])
+        check("an address inside a load error is not shown", "10.0.0.5" not in r4["bad_engine"]["reason"])
+    finally:
+        engines.LOAD_ERRORS.pop("bad_engine", None)
+
+    # no secret anywhere: a fake qBittorrent file with a password, and addresses in the reasons
+    jdir = Path(HOME) / ".jarvis"
+    jdir.mkdir(parents=True, exist_ok=True)
+    cfg = jdir / "qbittorrent.json"
+    cfg.write_text(json.dumps({"address": "http://127.0.0.1:1", "username": "admin", "password": "hunter2-SECRET-pw", "tag": "jarvis"}), encoding="utf-8")
+    try:
+        engines.ENGINES["qbittorrent"]._avail = None
+        blob = json.dumps(hub_admin.admin("sources", {}, store=st))
+        check("a qBittorrent password in its config file never appears in the answer", "hunter2-SECRET-pw" not in blob and "admin" not in blob.replace("administrator", ""))
+        check("no http:// or https:// address appears anywhere in the answer", "http://" not in blob and "https://" not in blob and "127.0.0.1" not in blob)
+    finally:
+        cfg.unlink()
+        engines.ENGINES["qbittorrent"]._avail = None
+    check("the plain-sentence cleaner removes `password: x` and `token=x`", "x1" not in hub_admin._plain("password: x1 and token=x1") and "(hidden)" in hub_admin._plain("password: x1"))
+
+    # counts: running and waiting hub rows per engine; provider rows stay out of the engine counts
+    st2 = provider_rows(fresh_store())
+    make(st2, "waiting a", "queued")
+    make(st2, "waiting b", "queued")
+    make(st2, "running one", "downloading")
+    make(st2, "finished one", "done")
+    rows_before = sorted((r["title"], r["state"], r["priority"]) for r in st2.list_items(limit=50, include_dismissed=True))
+    counted = {e["id"]: e for e in hub_admin.admin("sources", {}, store=st2)["engines"]}["http"]
+    check("an engine's active and queued are its hub rows' counts (2 waiting, 1 running, finished not counted)", counted["active"] == 1 and counted["queued"] == 2)
+    provs = [p for p in hub_admin.admin("sources", {}, store=st2)["providers"] if p.get("registered")]
+    check("a registered provider carries what dl_providers says, with registered true",
+          provs and all(p["registered"] is True and "enabled" in p and "interval_s" in p and "last_error" in p for p in provs))
+    check("sources starts and changes nothing: the rows are the same afterwards",
+          rows_before == sorted((r["title"], r["state"], r["priority"]) for r in st2.list_items(limit=50, include_dismissed=True)))
+    check("through the CLI entry point it is one JSON object", json.loads(_cli_out("sources", "{}")).get("ok") is True)
+    server_js = (ROOT / "web" / "server.js").read_text(encoding="utf-8")
+    check("web/server.js: GET /api/hub/sources is a read route (no write guard), calling the sources op",
+          'app.get("/api/hub/sources", requireHubRead, requireJarvis, (req, res) => hubAdmin(res, "sources", {}, 30000));' in server_js
+          and "/api/hub/sources\", requireHubWrite" not in server_js)
+    cli_src = (CLI / "jarvis" / "cli.py").read_text(encoding="utf-8")
+    check("cli.py needs no change: hub-admin dispatch is generic", "_hub_admin.run_cli(argv[1:])" in cli_src)
+
+
 def test_unattended():
     st = fresh_store()
     a = make(st, "done one", "done")
@@ -521,7 +620,7 @@ def test_plumbing():
 if __name__ == "__main__":
     for fn in (test_card, test_group_card, test_stream_diff, test_watch_generator, test_thumb_and_file, test_settings_and_history,
                test_history_writes, test_clear_by_age, test_redownload_and_reorder, test_dismiss_op,
-               test_list_include_dismissed_and_row_field, test_settle_hours_setting, test_stremio_start_op,
+               test_list_include_dismissed_and_row_field, test_settle_hours_setting, test_stremio_start_op, test_sources_op,
                test_unattended, test_cli, test_plumbing):
         fn()
     print(f"\n{passed} passed, {failed} failed")

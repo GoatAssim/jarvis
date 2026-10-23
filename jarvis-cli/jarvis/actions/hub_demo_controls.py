@@ -68,6 +68,8 @@ TEST_CHECKLIST = {
         "does": "Pauses one demo download; this is what the Pause button on a demo row runs.",
         "steps": [
             {"run": {"id": "climb"}, "expect": "ok: true, message 'paused' while the demo is running; the climb row shows Paused and its bar stops."},
+            {"run": {"id": "<any demo row>"},
+             "expect": "With the demo stopped or never started (hub_demo_provider action stop / clear): ok: false, 'the demo isn't running; start it first'; nothing changes."},
             {"run": {"id": "steam:12345"}, "expect": "ok: false, error saying it is not a demo download (nothing else is touched)."},
         ],
         "needs": ["The demo started with hub_demo_provider (action start)"],

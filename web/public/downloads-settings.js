@@ -357,6 +357,14 @@
     return runHubTool(toolFor(path, payload), { set: { [path]: value } });
   }
 
+  // brief 24: every block carries data-settings-anchor (its heading, lower-cased, letters and digits joined by dashes) so the
+  // Downloads panel's Sources tab can open Settings > Downloads scrolled to it: "stremio", "connections", "running-at-once".
+  function anchorOf(title) { return String(title || "").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 40); }
+  function anchored(node, title) {
+    if (node && typeof node.setAttribute === "function") node.setAttribute("data-settings-anchor", anchorOf(title));
+    return node;
+  }
+
   // ---- the section --------------------------------------------------------------------------------------
 
   function build(ctx) {
@@ -387,7 +395,7 @@
         return ui.rowShell(spec.label, (extra && extra.help) || spec.help || "", ctl.el, status);
       }
 
-      planRows(payload).forEach((g) => blocks.push(ui.group(g.group, g.rows.map((r) => settingRow(r)))));
+      planRows(payload).forEach((g) => blocks.push(anchored(ui.group(g.group, g.rows.map((r) => settingRow(r))), g.group)));
 
       // ---- which events notify, and how important each is
       const writable = new Set(payload.writable || []);
@@ -414,8 +422,8 @@
       // ---- speed windows
       if (writable.has("schedule")) blocks.push(scheduleBlock(ctx, payload));
       if (writable.has("ext_folders")) blocks.push(extFoldersBlock(ctx, payload));
-      blocks.push(providersBlock(ctx, payload));
-      blocks.push(stremioBlock(ctx));
+      blocks.push(anchored(providersBlock(ctx, payload), "Other tools' downloads"));
+      blocks.push(anchored(stremioBlock(ctx), "Stremio"));
       return blocks.filter(Boolean);
     });
   }
@@ -633,7 +641,7 @@
   global.JarvisSettingsSections = (global.JarvisSettingsSections || []).concat([section]);
   global.JarvisDownloadsSettings = { _pure: {
     FIELDS: FIELDS, planRows: planRows, extraRows: extraRows, toolFor: toolFor, getPath: getPath, hostsToText: hostsToText,
-    textToHosts: textToHosts, daysChoice: daysChoice, windowsToModel: windowsToModel, modelToWindows: modelToWindows,
+    textToHosts: textToHosts, anchorOf: anchorOf, daysChoice: daysChoice, windowsToModel: windowsToModel, modelToWindows: modelToWindows,
     extToModel: extToModel, modelToExt: modelToExt, isEventPath: isEventPath,
     PROVIDER_SETTING_FIELDS: PROVIDER_SETTING_FIELDS, providerSettingRows: providerSettingRows, providerSettingArgs: providerSettingArgs,
     stremioModel: stremioModel, stremioFacts: stremioFacts, diagnosticFor: diagnosticFor, folderOf: folderOf, pickOptions: pickOptions,

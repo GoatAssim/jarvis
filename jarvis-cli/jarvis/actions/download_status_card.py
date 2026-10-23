@@ -145,8 +145,12 @@ TEST_CHECKLIST = {
              "expect": "One card for the whole batch: counts, one overall bar."},
             {"run": {"ids": ["no-such-id"]},
              "expect": "ok: false, problem says there is no such download; no card is drawn."},
+            {"run": {"group": "no-such-group"},
+             "expect": "ok: false, problem says there is no such download; no card is drawn."},
+            {"run": {"query": "<part of a download's title>"},
+             "expect": "ok: true, shown 1 (or one card per match): the download is found by its title, no id needed."},
             {"run": {},
-             "expect": "ok: false, problem asks which download."},
+             "expect": "ok: false, problem asks which download ('Say which download: pass the id(s) dl_add returned, a group id, or part of the title.')."},
         ],
     },
 }

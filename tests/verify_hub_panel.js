@@ -223,15 +223,15 @@ const eq = (a, b) => JSON.stringify(a) === JSON.stringify(b);
   check("a provider's text never chooses which tool runs (no tool-kind links, no dynamic names from rows)",
     !/callTool\(\s*l\./.test(source) && !/runTool\(\s*(row|r|l)\./.test(source));
   const html2 = fs.readFileSync(path.join(ui, "tool.html"), "utf8");
-  check("the buttons the panel keeps exist in tool.html, and the settings screen is gone", ["speedQuick", "openFolder", "settingsBtn", "detailPrefs", "addLimit", "addOpen", "addNotify", "tabs", "providersPane", "historyPane"].every((id) => html2.includes('id="' + id + '"')) && !/id="(settings|settingsNav|settingsPage|settingsSave|settingsRevert|settingsBack)"/.test(html2));
-  check("the Settings button opens Settings > Downloads and the panel has no settings screen of its own", /JarvisSettings[\s\S]{0,60}show\(\{ section: "downloads" \}\)/.test(source) && !/renderSettings|saveSettings|revertSettings|closeSettings|settingsOpen/.test(source));
+  check("the buttons the panel keeps exist in tool.html, and the settings screen is gone", ["speedQuick", "openFolder", "settingsBtn", "detailPrefs", "addLimit", "addOpen", "addNotify", "tabs", "sourcesPane", "historyPane"].every((id) => html2.includes('id="' + id + '"')) && !/id="(settings|settingsNav|settingsPage|settingsSave|settingsRevert|settingsBack)"/.test(html2));
+  check("the Settings button opens Settings > Downloads and the panel has no settings screen of its own", /JarvisSettings[\s\S]{0,200}show\(want \? \{ section: "downloads", anchor: want \} : \{ section: "downloads" \}\)/.test(source) && !/renderSettings|saveSettings|revertSettings|closeSettings|settingsOpen/.test(source));
   check("the panel changes no setting itself: its two shortcuts write with dl_prefs, and dl_settings is never called from here (Settings > Downloads owns it)", /callTool\("dl_prefs"/.test(source) && !/dl_settings/.test(source.replace(/\/\/[^\n]*/g, "")));
   check("an event's target isn't read after an await (it is cleared inside a shadow root)", !/await[^\n]*\n[^\n]*e\.target/.test(source.slice(source.indexOf("speedQuick\").addEventListener"), source.indexOf("speedQuick\").addEventListener") + 1200)));
   const css = fs.readFileSync(path.join(ui, "tool.css"), "utf8");
   check("the stylesheet defines a look for every bar kind", ["determinate", "indeterminate", "striped", "queued", "done", "failed", "stalled", "paused", "stale", "cancelled", "unknown"]
     .every((k) => k === "determinate" || css.includes(".bar-track." + k) || css.includes("." + k)));
   check("motion respects prefers-reduced-motion", css.includes("prefers-reduced-motion"));
-  check("the stylesheet styles the tabs, History, Providers and the queue drag", [".tabs", ".tab[", ".hist__row", ".prov", ".drop-before", ".speedq"].every((c) => css.includes(c)));
+  check("the stylesheet styles the tabs, History, the Sources cards and the queue drag", [".tabs", ".tab[", ".hist__row", ".prov", ".drop-before", ".speedq"].every((c) => css.includes(c)));
 
   // ---- History tab: what is listed, the exports, the words on a row
   const H = (o) => Object.assign({ id: "h_1", owner: "hub", engine: "http", state: "done", kind: "file", title: "a.zip", derived: [], capabilities: [], finished_at: 1000 }, o);
@@ -263,6 +263,78 @@ const eq = (a, b) => JSON.stringify(a) === JSON.stringify(b);
     && pure.providerFacts(P({ last_report_age_s: null })).some((f) => f[1] === "none yet"));
   check("provider badge", pure.providerBadge(P({ enabled: false })) === "Off" && pure.providerBadge(P({ read_only: true })) === "Read-only" && pure.providerBadge(P({ mode: "poll" })) === "Polled" && pure.providerBadge(P()) === "Reports");
 
+  // ---- the Sources tab (brief 24)
+  const E = (o) => Object.assign({ id: "stremio", label: "Stremio (torrent)", state: "ready", reason: "", handles: "magnets, torrent files and Stremio streams", active: 1, queued: 0, checks: [], configure: "stremio", config_file: null }, o);
+  check("every engine state has its own word and its own colour: Ready, Needs setup, Not running, Off, Broken",
+    eq(["ready", "needs_setup", "not_running", "off", "broken"].map(pure.engineWord), ["Ready", "Needs setup", "Not running", "Off", "Broken"])
+    && eq(["ready", "needs_setup", "not_running", "off", "broken"].map(pure.engineTone), ["done", "stalled", "stalled", "stale", "failed"])
+    && pure.engineWord("nonsense") === "Unknown" && pure.engineTone("nonsense") === "stale");
+  check("an engine's line: what it is for, then how many run and wait (an engine the table doesn't know shows only the counts)",
+    pure.engineLine(E({ active: 1, queued: 0 })) === "magnets, torrent files and Stremio streams" + " \u00B7 1 active \u00B7 0 waiting"
+    && pure.engineLine(E({ handles: "", active: 0, queued: 3 })) === "0 active \u00B7 3 waiting" && pure.engineLine(E({ active: null, queued: undefined })).endsWith("0 active \u00B7 0 waiting"));
+  check("Configure: Stremio lands on its card, HTTP on Connections, yt-dlp on Running at once; qBittorrent and a load error get no button",
+    pure.engineConfigure(E()).anchor === "stremio" && pure.engineConfigure(E({ configure: "http" })).anchor === "connections"
+    && pure.engineConfigure(E({ configure: "ytdlp" })).anchor === "running-at-once" && pure.engineConfigure(E({ configure: null })) === null
+    && pure.engineConfigure(E({ configure: "something-new" })) === null && pure.engineConfigure(null) === null);
+  check("without a Configure button the card says where it is set up (qBittorrent's file) or that there are no settings, and says nothing when there is a button",
+    pure.engineSettingsNote(E({ configure: null, config_file: "~/.jarvis/qbittorrent.json" })) === "Set up in ~/.jarvis/qbittorrent.json."
+    && pure.engineSettingsNote(E({ configure: null })) === "No settings." && pure.engineSettingsNote(E()) === "");
+  const srcData = { engines: [E(), E({ id: "http", state: "needs_setup" }), E({ id: "ytdlp", state: "broken" }), E({ id: "qb", state: "not_running" }), E({ id: "x", state: "off" })],
+    providers: [P({ id: "steam" }), P({ id: "gone", last_error: "boom" }), { id: "playnite", label: "Playnite", registered: false, hint: "Appears here after the first install Jarvis starts through Playnite." }] };
+  check("the summary counts every state and counts only the registered programs (the Playnite hint is not one)",
+    pure.sourcesSummary(srcData) === "5 engines \u00B7 1 ready \u00B7 1 needs setup \u00B7 1 not running \u00B7 1 off \u00B7 1 broken | 2 programs \u00B7 1 with an error"
+    && pure.sourcesSummary(null).startsWith("reading") && pure.sourcesSummary({ engines: [], providers: [] }) === "0 engines | 0 programs");
+  const srcBlock = source.slice(source.indexOf("// ---- Sources (brief 24)"), source.indexOf("$(\"#srcRefresh\").addEventListener"));
+  const htmlS = fs.readFileSync(path.join(ui, "tool.html"), "utf8");
+  check("the tab is called Sources and the old Providers ids are gone from the page and the script",
+    />Sources<span class="tab__n" id="srcCount">/.test(htmlS) && /data-tab="sources"/.test(htmlS) && /id="sourcesPane"/.test(htmlS)
+    && !/providersPane|tabProviders|provList|provSummary|provCount|provRefresh|data-tab="providers"/.test(htmlS)
+    && !/providersPane|tabProviders|loadProviders|renderProviders|provTimer|S\.providers/.test(source) && !/data-tab="providers"/.test(fs.readFileSync(path.join(ui, "tool.css"), "utf8")));
+  check("two sections, in order: Download engines, then Programs that report their own downloads",
+    /sourceHeading\("Download engines"/.test(srcBlock) && /sourceHeading\("Programs that report their own downloads"/.test(srcBlock)
+    && srcBlock.indexOf('sourceHeading("Download engines"') < srcBlock.indexOf('sourceHeading("Programs that report their own downloads"'));
+  check("Check now only reads: a plain GET of /api/hub/sources (no body, so no write header), on every button and the bar",
+    /hubFetch\("\/api\/hub\/sources"\)/.test(srcBlock) && !/hubFetch\("\/api\/hub\/sources",/.test(source) && /id="srcRefresh"/.test(htmlS) && (srcBlock.match(/src-check/g) || []).length >= 2 && /class="btn btn--sm src-check" id="srcRefresh"/.test(htmlS)
+    && /loadSources\(true\)/.test(srcBlock));
+  check("an engine card shows the dot, the word, the reason, the line, Configure and Check now; a Broken one shows its reason in red",
+    /engineWord\(e\.state\)/.test(srcBlock) && /"dot tone-" \+ tone/.test(srcBlock) && /e\.reason \?/.test(srcBlock) && /prov__reason" \+ \(e\.state === "broken" \? " is-bad"/.test(srcBlock)
+    && /openSettings\(cfg\.anchor\)/.test(srcBlock) && /cfg \? el\("button"/.test(srcBlock));
+  check("an empty provider shows its hint instead of nothing (Playnite), with no switch to flip",
+    /p\.registered === false/.test(srcBlock) && /p\.hint \|\|/.test(srcBlock) && /Not seen yet/.test(srcBlock)
+    && srcBlock.slice(srcBlock.indexOf("p.registered === false"), srcBlock.indexOf("const tone = providerTone(p);")).indexOf("dl_provider_prefs") === -1);
+  check("the programs section keeps every control the Providers tab had: the switch, Settings, the facts, the last error, the gone-quiet marker",
+    /dl_provider_prefs", \{ id: p\.id, enabled: !p\.enabled \}/.test(srcBlock) && /Turn off/.test(srcBlock) && /Settings\\u2026/.test(srcBlock) && /providerFacts\(p\)/.test(srcBlock)
+    && /Last error: /.test(srcBlock) && /Not reporting/.test(srcBlock) && /providerBadge\(p\)/.test(srcBlock) && /r\.declined/.test(srcBlock));
+  check("a program's Settings button lands on the Other tools' downloads block; the old click handlers still open Settings (the event is not an anchor)",
+    /openSettings\(PROVIDER_SETTINGS_ANCHOR\)/.test(srcBlock) && pure.CONFIGURE_ANCHORS.stremio === "stremio" && /typeof anchor === "string" && \/\^\[a-z0-9-\]\{1,40\}\$\/\.test\(anchor\)/.test(source)
+    && /on: \{ click: openSettings \}/.test(source) === false);
+  check("everything an engine or program says is drawn with textContent (no HTML from the answer)", !/innerHTML|insertAdjacentHTML|outerHTML/.test(srcBlock));
+  check("the Sources tab loads on opening, reloads every 10 s while it is visible, and never overlaps two loads",
+    /loadSources\(false\);\s*\n\s*S\.srcTimer = setInterval\(\(\) => \{ if \(!doc\.hidden\) loadSources\(false\); \}, 10000\)/.test(source) && /if \(S\.srcBusy\) return;/.test(srcBlock));
+  const dsSrc2 = fs.readFileSync(path.join(__dirname, "..", "web", "public", "downloads-settings.js"), "utf8");
+  const stSrc2 = fs.readFileSync(path.join(__dirname, "..", "web", "public", "settings.js"), "utf8");
+  check("Settings > Downloads blocks carry data-settings-anchor (Stremio, Connections, Running at once, Other tools' downloads) and Settings scrolls to one on show()",
+    /setAttribute\("data-settings-anchor"/.test(dsSrc2) && /anchored\(stremioBlock\(ctx\), "Stremio"\)/.test(dsSrc2) && /anchored\(providersBlock\(ctx, payload\), "Other tools' downloads"\)/.test(dsSrc2)
+    && /anchored\(ui\.group\(g\.group/.test(dsSrc2) && /if \(want\.anchor\) scrollToAnchor/.test(stSrc2) && /data-settings-anchor="' \+ anchor/.test(stSrc2) && /\^\[a-z0-9-\]\{1,40\}\$/.test(stSrc2));
+
+  // ---- N15: why a row has no arrows or grip, and the order shown at once
+  const R = (o) => Object.assign({ id: "a", owner: "hub", state: "queued", priority: 3 }, o);
+  check("a waiting hub row with the live stream has arrows, so it needs no explanation", pure.reorderNote(R(), true) === "" && pure.canReorder(R(), true));
+  check("the live stream down: it says moving needs the connection", /live connection/.test(pure.reorderNote(R(), false)) && /live connection/.test(pure.reorderNote(R({ priority: undefined }), true)));
+  check("a running, probing or stalled hub row says it already started", ["downloading", "probing", "connecting", "postprocessing", "stalled"].every((st) => /Already started/.test(pure.reorderNote(R({ state: st }), true))));
+  check("a paused row says to resume it first", /Resume it first/.test(pure.reorderNote(R({ state: "paused" }), true)));
+  check("a row another program runs names that program", /Steam runs this one/.test(pure.reorderNote(R({ owner: "provider", provider_label: "Steam" }), true)) && /This program runs/.test(pure.reorderNote(R({ owner: "provider" }), true)));
+  check("a finished row has nothing to explain", ["done", "failed", "cancelled"].every((st) => pure.reorderNote(R({ state: st }), true) === "") && pure.reorderNote(null, true) === "");
+  const orderRows = [R({ id: "a", priority: 0, created_at: 1 }), R({ id: "b", priority: 0, created_at: 2 }), R({ id: "c", priority: 0, created_at: 3 }), R({ id: "x", owner: "provider", state: "downloading" })];
+  const moved = pure.applyOrder(orderRows, ["c", "a", "b"]);
+  check("applyOrder shows a new order at once: the same sum the hub does, rows outside it untouched, nothing mutated",
+    eq(pure.queueOrder(moved), ["c", "a", "b"]) && moved[0].priority === 2 && moved[2].priority === 3 && moved[3] === orderRows[3] && orderRows[0].priority === 0 && eq(pure.queueOrder(orderRows), ["a", "b", "c"]));
+  check("a refused order is put back, and a drop or an arrow shows the new order before the hub answers",
+    /const before = S\.rows;\s*\n\s*S\.rows = applyOrder\(S\.rows, ids\);\s*\n\s*render\(\);/.test(source) && /catch \(err\) \{ S\.rows = before; render\(\); toast/.test(source));
+  check("a slow poll that started before the stream came up never overwrites the stream's rows (N15's cause)", /if \(!streaming && !S\.live\) S\.rows = /.test(source));
+  check("the card's tooltip and the toggle sit where N15 and N16 put them", /title: noReorder/.test(source) && /\[prim \? toggleButton\(row, prim, false\) : null\]\.concat\(buttons\)/.test(source)
+    && /\.rbtn \{[^}]*min-height: 32px/.test(fs.readFileSync(path.join(ui, "tool.css"), "utf8")) && /\.detail__actions--top \.tbtn--lg, \.detail__actions--top \.btn--sm/.test(fs.readFileSync(path.join(ui, "tool.css"), "utf8")));
+
   // ---- the waiting queue: order, drag and arrows
   const Q = (id, pr, at, o) => Object.assign({ id: id, owner: "hub", state: "queued", priority: pr, created_at: at }, o || {});
   const qrows = [Q("a", 0, 1), Q("b", 0, 2), Q("c", 5, 3), Q("p", 0, 0, { owner: "provider" }), Q("r", 0, 0, { state: "downloading" })];
@@ -283,11 +355,11 @@ const eq = (a, b) => JSON.stringify(a) === JSON.stringify(b);
   // ---- static wiring of the new tabs
   const htmlT = fs.readFileSync(path.join(ui, "tool.html"), "utf8");
   check("the tab strip is a real tablist: three tabs, one selected, each controls a pane", /role="tablist"/.test(htmlT) && (htmlT.match(/role="tab"/g) || []).length === 3
-    && (htmlT.match(/aria-selected="true"/g) || []).length === 1 && /role="tabpanel"/.test(htmlT) && /aria-controls="providersPane"/.test(htmlT) && /aria-controls="historyPane"/.test(htmlT));
+    && (htmlT.match(/aria-selected="true"/g) || []).length === 1 && /role="tabpanel"/.test(htmlT) && /aria-controls="sourcesPane"/.test(htmlT) && /aria-controls="historyPane"/.test(htmlT));
   check("the arrow keys, Home and End move between tabs", /ArrowRight/.test(source) && /ArrowLeft/.test(source) && /"Home"/.test(source) && /"End"/.test(source));
   check("the writes to the hub's web routes carry the header the server requires, and removing history asks first",
     /"X-Jarvis-Hub": "1"/.test(source) && /askFirst\("Remove from the history\?"/.test(source) && /askFirst\("Clear old history\?"/.test(source) && /dry_run: true/.test(source));
-  check("the panel only talks to /api/hub/ routes it knows", [...source.matchAll(/["'`]\/api\/([a-z\/\-]+)/g)].every((m) => /^hub\/(stream|list|dismiss|history|history\/remove|history\/clear|redownload|reorder|thumb\/|file\/)/.test(m[1])));
+  check("the panel only talks to /api/hub/ routes it knows", [...source.matchAll(/["'`]\/api\/([a-z\/\-]+)/g)].every((m) => /^hub\/(stream|list|sources|dismiss|history|history\/remove|history\/clear|redownload|reorder|thumb\/|file\/)/.test(m[1])));
   check("the live stream falls back to polling: errors, a silent stream and a `down` message all hand over", /es\.onerror = liveDown/.test(source) && /addEventListener\("down", liveDown\)/.test(source) && /45000/.test(source));
   check("while the stream is live the poll only refreshes the summary", /streaming \? \{ limit: 1, summary: true \}/.test(source));
   check("a row drag doesn't turn into 'links dropped on the panel'", /if \(S\.dragId\) return;/.test(source));
@@ -401,7 +473,7 @@ const eq = (a, b) => JSON.stringify(a) === JSON.stringify(b);
   check("N2: a note wins over nothing but not over an error", nt({ ok: false, error: "E", note: "n" }, pa).msg === "E");
 
   // wiring on the source: the panel draws the toggle from these helpers and shows the notice
-    check("the card's top row holds the toggle (not a hover-only control)", /prim \? toggleButton\(row, prim, false\) : null/.test(source) && !/\.tbtn[^{]*\{[^}]*(opacity: 0|display: none|visibility: hidden)/.test(css) && !/:hover[^{]*\.tbtn\s*\{[^}]*display/.test(css));
+    check("the card's button row holds the toggle, first (not a hover-only control; N16 moved it down from the top row)", /prim \? toggleButton\(row, prim, false\) : null/.test(source) && !/\.tbtn[^{]*\{[^}]*(opacity: 0|display: none|visibility: hidden)/.test(css) && !/:hover[^{]*\.tbtn\s*\{[^}]*display/.test(css));
   check("the toggle is at least 32px tall", /\.tbtn \{[^}]*min-height: 32px/.test(css));
   check("the detail pane puts the controls before the bar and Open / Show in folder after them", source.indexOf("detail__actions detail__actions--top") > -1 && source.indexOf("detail__actions detail__actions--top") < source.indexOf("const bar = renderBar(row, true)")
     && /const ctrl = actions\.filter/.test(source) && /const files = actions\.filter/.test(source));

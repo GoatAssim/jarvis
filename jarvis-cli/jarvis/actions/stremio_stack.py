@@ -816,6 +816,7 @@ TEST_CHECKLIST = {
         "steps": [
             {"run": {"what": "server"}, "expect": "With the Stremio app open: server state 'already_up', nothing started (Menu > Daemons shows no new daemon running). With it closed: state 'started' with a version within the wait (hub setting stremio.start_wait_seconds, default 60 s). Stremio in a non-default folder: it is found without editing any file. With Stremio not installed: ok false and one sentence saying it wasn't found and what was looked at. With the app open but its server silent: ok false, 'the Stremio app is open, but its server isn't answering', and nothing is started."},
             {"run": {"what": "web"}, "expect": "'not_configured' with a note when web.dir isn't set; otherwise 'started' (first start can take a while to build)."},
+            {"run": {"what": "bogus"}, "expect": "ok: false, 'what must be server, web or both'; nothing is started."},
             {"ask": "Start Stremio", "expect": "Calls stack_start and reports the state."},
         ],
         "needs": ["The Stremio desktop app installed (found automatically; or the paths saved with Locate...)"],
@@ -825,20 +826,22 @@ TEST_CHECKLIST = {
     "stack_stop": {
         "does": "Stops the server / stremio-web that Jarvis started.",
         "steps": [
-            {"run": {"what": "server"}, "expect": "A server Jarvis started stops (state 'stopped'). One the Stremio app started: state 'not_ours' and nothing is killed. While a download or stream is running it asks first."},
+            {"run": {"what": "server"}, "expect": "A server Jarvis started stops (state 'stopped'). One the Stremio app started: state 'not_ours' and nothing is killed. While a download or stream is running it asks first. With no server running at all: ok: true, state 'not_running_by_jarvis' and nothing is killed."},
+            {"run": {"what": "web"}, "expect": "ok: true; stremio-web that Jarvis started stops (state 'stopped'); with none started by Jarvis, state 'not_running_by_jarvis'."},
+            {"run": {"what": "bogus"}, "expect": "ok: false, 'what must be server, web or both'; nothing is stopped."},
         ],
         "care": "Stopping the server interrupts running Stremio downloads; they retry once it is back.",
     },
     "stack_doctor": {
         "does": "Checks the Stremio setup and says what is wrong.",
         "steps": [
-            {"run": {}, "expect": "ok with a checks list: 'looked: port / process / registry / shortcut / folder' rows saying what each probe found, a 'state' row in plain words, server files, server version, cache size and folder, free space, stremio-web, player, daemons, the stremio engine; a copyable `diagnostic` text. The config block shows '(set)' for any account key, never its value."},
+            {"run": {}, "expect": "With Stremio not installed (the failure case): ok: false, each 'looked: ...' row is a warning saying what it did not find, and the 'state' row reads 'Not found: I couldn't find Stremio on this PC ...'. With a working setup: ok with a checks list: 'looked: port / process / registry / shortcut / folder' rows saying what each probe found, a 'state' row in plain words, server files, server version, cache size and folder, free space, stremio-web, player, daemons, the stremio engine; a copyable `diagnostic` text. The config block shows '(set)' for any account key, never its value."},
         ],
     },
     "stremio_prepare": {
         "does": "Sets the Stremio server's cache to unlimited (and optionally its folder, connections and speed limit).",
         "steps": [
-            {"run": {"cache": "unlimited"}, "expect": "Asks first. Then ok: true with 'changed' showing cacheSize going to null, and stack_doctor afterwards shows cache unlimited."},
+            {"run": {"cache": "unlimited"}, "expect": "Asks first. Then ok: true with 'changed' showing cacheSize going to null, and stack_doctor afterwards shows cache unlimited. With the server not running (the failure case): ok: false, 'the Stremio server isn't answering at <url> (is it running? try stack_start). stremio_prepare changes the running server's settings; start it first (stack_start)'; nothing changes."},
             {"run": {"cache": "9999", "cache_root": "D:/<a drive with little space>"}, "expect": "ok: false, says the drive has too little free space (nothing changed)."},
             {"run": {"cache_root": "..\\x"}, "expect": "ok: false, cache_root must be a full path."},
         ],
@@ -848,14 +851,14 @@ TEST_CHECKLIST = {
     "server_cache": {
         "does": "Shows what the Stremio server has cached and which torrents it knows.",
         "steps": [
-            {"run": {}, "expect": "ok: true with cache_root, size on disk, drive_free and a torrents list; rows Jarvis downloads say known_to_jarvis."},
+            {"run": {}, "expect": "ok: true with cache_root, size on disk, drive_free and a torrents list; rows Jarvis downloads say known_to_jarvis. With the server not running (the failure case): ok: false, 'the Stremio server isn't answering at <url> (is it running? try stack_start)' and a hint to start it."},
         ],
         "needs": ["The Stremio server running"],
     },
     "server_cache_clear": {
         "does": "Stops the Jarvis-started server, empties <cacheRoot>/stremio-cache and starts it again.",
         "steps": [
-            {"run": {}, "expect": "Asks first. With a Stremio download running: ok false, says to pause it. With the server started by the Stremio app: ok false, asks you to close it. Otherwise ok: true with cleared_files and freed, and the server comes back."},
+            {"run": {}, "expect": "Asks first. With a Stremio download running: ok false, says to pause it. With the server started by the Stremio app: ok false, asks you to close it. Otherwise ok: true with cleared_files and freed, and the server comes back. With no server ever started by Jarvis (cache folder unknown): ok: false, 'I need the server running once to read its cache folder (stack_start); I won't guess a folder to delete'; nothing is deleted."},
         ],
         "care": "Deletes files: only inside <cacheRoot>/stremio-cache, never through a link, never while the server runs. Finished hub downloads are separate files.",
     },

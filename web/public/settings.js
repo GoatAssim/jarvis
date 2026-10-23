@@ -1183,6 +1183,29 @@
     clearSearch();
     select(want.section || S.section);
     loadCatalog().catch(() => { /* search just has fewer entries until a section loads it */ });
+    if (want.anchor) scrollToAnchor(want.section || S.section, want.anchor);
+  }
+
+  // Brief 24: land on one block of a section (a block carries data-settings-anchor).  The section builds a moment after
+  // select(), so look for the block for a few seconds, then scroll it into view and outline it briefly.  Nothing is
+  // changed; a block that never appears just leaves the section open at the top.
+  function scrollToAnchor(section, anchor) {
+    if (!/^[a-z0-9-]{1,40}$/.test(String(anchor || ""))) return;
+    let tries = 0;
+    const timer = setInterval(() => {
+      tries += 1;
+      const pane = BY_ID[section] ? paneFor(section) : null;
+      const node = pane ? pane.querySelector('[data-settings-anchor="' + anchor + '"]') : null;
+      if (node) {
+        clearInterval(timer);
+        node.scrollIntoView({ block: "start", behavior: "auto" });
+        const keep = node.style.outline;
+        node.style.outline = "2px solid var(--accent, #4aa3ff)";
+        setTimeout(() => { node.style.outline = keep; }, 2200);
+      } else if (tries > 40) {
+        clearInterval(timer);
+      }
+    }, 150);
   }
 
   async function confirmDiscardAdvanced() {
