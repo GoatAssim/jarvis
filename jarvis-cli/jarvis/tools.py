@@ -691,6 +691,8 @@ OWNER_ONLY_TOOLS = frozenset({
     # adds every loaded tool whose name starts with GENERATED_ADD_PREFIX (their handlers also refuse).
     "dl_add", "dl_add_ytdlp", "dl_add_stremio", "dl_dismiss",
     "bulk_plan", "bulk_run", "stremio_library", "stremio_mark_watched",
+    # Stremio playback (brief 31): drives the mpv on the owner's PC; its handler refuses a guest too.
+    "play_control",
 })
 
 

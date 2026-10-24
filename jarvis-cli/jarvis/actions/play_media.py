@@ -29,7 +29,7 @@ def _is_chat_guest():
         return False
     try:
         data = json.loads(raw)
-    except (ValueError, TypeError):
+    except Exception:  # noqa: BLE001  (bad JSON, or nested too deep to read -- a RecursionError: either way, not the owner)
         return True
     if not isinstance(data, dict):
         return True
@@ -39,8 +39,8 @@ def _is_chat_guest():
 
 
 def tool_play_control(args):
-    """Control the mpv Jarvis started.  Owner only (refused for a chat guest here: tools.py's OWNER_ONLY_TOOLS only
-    stops OFFERING it)."""
+    """Control the mpv Jarvis started.  Owner only: tools.py's OWNER_ONLY_TOOLS keeps it from being OFFERED to a chat
+    guest (brief 31), and a guest who calls it anyway is refused here, before anything is sent."""
     try:
         if _is_chat_guest():
             return {"ok": False, "error": "controlling the player is the owner's: someone in a chat can't pause or stop it"}
@@ -193,11 +193,15 @@ def _imdb_from_title(title, type_arg):
     resolve_title from stremio_discovery, so every request goes through its guarded client (netguard)."""
     from ..hub.stremio import addons as A
     from . import stremio_discovery as disc
-    net = disc._net()
-    found, notes = disc._addons(net)
+    try:
+        net = disc._net()
+        found, notes = disc._addons(net)
+    except Exception as exc:  # noqa: BLE001  (the addon list could not even be read: say so in a sentence, never the exception's own text)
+        return None, None, None, {"ok": False, "error": "the title lookup couldn't start (%s), so %r can't be found; give its IMDb id (tt...)."
+                                                          % (type(exc).__name__, title[:60])}
     if not found:
-        return None, None, None, {"ok": False, "error": "no addon can look titles up, so %r can't be found; give its IMDb id (tt...). %s"
-                                                          % (title[:60], " ".join(notes)).strip()}
+        return None, None, None, {"ok": False, "error": ("no addon can look titles up, so %r can't be found; give its IMDb id (tt...). %s"
+                                                           % (title[:60], " ".join(str(n) for n in notes))).strip()}
     kind, payload = disc.resolve_title(net, found, title, A.valid_type(type_arg) if type_arg else None)
     if kind == "none":
         return None, None, None, {"ok": False, "error": "Nothing was found for the title %r. If that is an abbreviation, try the full title, "
@@ -433,7 +437,7 @@ TEST_CHECKLIST = {
                   "the Stremio server running for streaming (stack_start)",
                   "for a title: an addon that can look titles up (Cinemeta is used when none is set)"],
         "care": "Opens a browser tab or a player window. A title is looked up on the network (only through the addon guard); an IMDb id needs no lookup.",
-        "watch": ["⚠️ A title with NO addon able to look it up (network cut, Cinemeta refused, no addons.urls) is meant to answer 'no addon can look titles up, so ... can't be found; give its IMDb id (tt...)'. When this entry was checked it answered \"play_episode failed: 'tuple' object has no attribute 'strip'\" instead (play_media.py, _imdb_from_title: .strip() lands on the % tuple). Listed under Open points in the test report. The zzzz step above needs an addon that answers; its sentence is read from the code, not run."],
+        "watch": ["A title with NO addon able to look it up (network cut, Cinemeta refused, no addons.urls) answers ok: false, 'no addon can look titles up, so ... can't be found; give its IMDb id (tt...)', and nothing opens or starts. (Brief 31 fixed an earlier crash here, \"'tuple' object has no attribute 'strip'\"; checked against a fake addon setup only, never with a real network cut. The zzzz step above needs an addon that answers; its sentence is read from the code, not run.)"],
     },
     "play_control": {
         "does": "Pauses, resumes, seeks, stops, sets the volume of, or reports on the mpv player that Jarvis itself started.",
@@ -451,7 +455,7 @@ TEST_CHECKLIST = {
         ],
         "needs": ["mpv (not VLC) started by play_episode or play_local; Linux and macOS use a socket, Windows a named pipe (not tested)"],
         "watch": ["Only the mpv Jarvis started is ever controlled: a player you opened yourself is never touched.",
-                  "From a remote chat guest it is refused: controlling the player is the owner's. (The handler refuses; the tool is still OFFERED to a guest, because play_control is not in tools.OWNER_ONLY_TOOLS: brief 22 report, Open point 4.)",
+                  "Owner only: a remote chat guest is not offered play_control (tools.OWNER_ONLY_TOOLS), and if one calls it anyway the handler refuses: controlling the player is the owner's.",
                   "⚠️ 'stop' sends mpv's quit command, so the window closes (not just the playback). Real mpv's answers have never been seen by any report."],
     },
     "play_local": {

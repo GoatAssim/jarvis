@@ -214,12 +214,12 @@ def test_owner_only_set_is_exactly_what_the_handlers_gate():
     check("OWNER_ONLY_TOOLS names real tools",
           all(n in system_tools._tool_index() for n in system_tools.OWNER_ONLY_TOOLS))
     check("it is send_dm + recent_dms + recent_spaces (S10c) + the L.21-L.23 person tools + the Download Hub's "
-          "add / dismiss / season / Stremio-library tools",
+          "add / dismiss / season / Stremio-library tools + play_control (brief 31)",
           system_tools.OWNER_ONLY_TOOLS == {
               "send_dm", "recent_dms", "recent_spaces", "person_remember", "person_forget",
               "person_instruct", "person_recall", "person_review", "await_reply",
               "dl_add", "dl_add_ytdlp", "dl_add_stremio", "dl_dismiss",
-              "bulk_plan", "bulk_run", "stremio_library", "stremio_mark_watched"},
+              "bulk_plan", "bulk_run", "stremio_library", "stremio_mark_watched", "play_control"},
           sorted(system_tools.OWNER_ONLY_TOOLS))
 
 

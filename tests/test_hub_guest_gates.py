@@ -7,6 +7,7 @@ Covers:
     sentence naming the tool and saying it is the owner's; the owner (on a chat platform, and with no chat
     context at all) is let through, as before.
   * the two copies of the guest rule behave exactly like download_hub._is_chat_guest on the same inputs.
+  * (brief 31) play_control is in OWNER_ONLY_TOOLS too, hidden from a guest, and its handler still refuses one.
   * the four names are in tools.OWNER_ONLY_TOOLS; tools.hidden_from_sender() hides them, and every loaded
     dl_add_<id> tool, from a guest (still a plain frozenset, nothing for the owner, nothing for no chat).
   * the "downloads" group has exactly ONE pack instruction, in download_hub.py, not longer than the two old
@@ -37,9 +38,11 @@ from jarvis import tool_registry, tools  # noqa: E402
 from jarvis.actions import bulk_download as bulk_tools  # noqa: E402
 from jarvis.actions import download_hub as dh  # noqa: E402
 from jarvis.actions import stremio_discovery as disc  # noqa: E402
+from jarvis.actions import play_media  # noqa: E402
 from jarvis.hub import steam  # noqa: E402
 from jarvis.hub.store import Store  # noqa: E402
 from jarvis.hub.stremio import bulk as bulk_engine  # noqa: E402
+from jarvis.hub.stremio import mpv  # noqa: E402
 from jarvis.hub.stremio import discovery, ranking  # noqa: E402
 
 passed = failed = 0
@@ -190,6 +193,37 @@ finally:
     set_sender(None)
     del tool_registry.TOOL_INDEX[GEN]
     del tools.TOOLS[GEN]
+
+# ------------------------------------------------------------------ play_control (brief 31): owner-only, hidden from a guest, handler still refuses
+check("play_control is in OWNER_ONLY_TOOLS", "play_control" in tools.OWNER_ONLY_TOOLS)
+check("play_control is a real tool", "play_control" in tools.TOOLS and "play_control" in tool_registry.TOOL_INDEX)
+check("play_episode and play_local are NOT added with it (brief 31 leaves them; see its report)",
+      not ({"play_episode", "play_local"} & tools.OWNER_ONLY_TOOLS))
+for label, raw in (("a chat guest", GUEST), ("a sender with no is_owner flag", GUEST_NO_FLAG)):
+    set_sender(raw)
+    check(f"{label}: play_control is hidden by hidden_from_sender()", "play_control" in tools.hidden_from_sender())
+for label, raw in (("the owner on a chat platform", OWNER), ("no chat context", None)):
+    set_sender(raw)
+    check(f"{label}: play_control is not hidden", "play_control" not in tools.hidden_from_sender())
+set_sender(None)
+
+_orig_mpv_run = mpv.run
+mpv.run = Spy("mpv_run", {"ok": True, "done": "paused"})
+try:
+    for label, raw in [("a chat guest", GUEST), ("a sender with no is_owner flag", GUEST_NO_FLAG)] + [("an unreadable sender (%r...)" % r[:12], r) for r in UNREADABLE]:
+        set_sender(raw)
+        reached.clear()
+        r = play_media.tool_play_control({"action": "pause"})
+        check(f"play_control handler still refuses {label}, before anything is sent to mpv",
+              r.get("ok") is False and "owner" in r.get("error", "") and reached == [])
+    for label, raw in (("the owner on a chat platform", OWNER), ("no chat context", None)):
+        set_sender(raw)
+        reached.clear()
+        r = play_media.tool_play_control({"action": "pause"})
+        check(f"play_control handler lets {label} through", r.get("ok") is True and reached == ["mpv_run"])
+finally:
+    mpv.run = _orig_mpv_run
+    set_sender(None)
 
 # ------------------------------------------------------------------ one pack instruction for "downloads"
 declarers = sorted(r.file for r in tools._AUTO_VALID if r.group == "downloads" and r.pack_instruction)
