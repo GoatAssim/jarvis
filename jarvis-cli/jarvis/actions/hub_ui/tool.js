@@ -349,22 +349,10 @@ function viewCounts(rows) {
   return out;
 }
 
-function sourceList(rows) {
-  const seen = {};
-  const list = [];
-  rows.forEach((r) => {
-    const key = sourceKey(r);
-    if (!seen[key]) { seen[key] = { key: key, label: sourceLabel(r), count: 0 }; list.push(seen[key]); }
-    seen[key].count++;
-  });
-  return list.sort((a, b) => a.label.localeCompare(b.label));
-}
-
 function filterRows(rows, f) {
   const q = String(f.search || "").trim().toLowerCase();
   return rows.filter((r) => {
     if (!viewMatches(f.view || "all", r)) return false;
-    if (f.source && sourceKey(r) !== f.source) return false;
     if (q) {
       const hay = ((r.title || "") + " " + (r.subtitle || "") + " " + (r.message || "") + " " + (r.error || "")).toLowerCase();
       if (hay.indexOf(q) === -1) return false;
@@ -719,17 +707,158 @@ function itemPrefsText(prefs) {
 
 const HISTORY_STATES = ["done", "failed", "cancelled"];
 
-// What the History tab lists: finished rows only, narrowed by state, source and a title search.
-function historyFilter(rows, f) {
-  const o = f || {};
-  const q = String(o.search || "").trim().toLowerCase();
-  return (rows || []).filter((r) => {
-    if (HISTORY_STATES.indexOf(r.state) === -1) return false;
-    if (o.state && o.state !== "all" && r.state !== o.state) return false;
-    if (o.source && sourceKey(r) !== o.source) return false;
-    if (q && String(r.title || r.id).toLowerCase().indexOf(q) === -1) return false;
-    return true;
-  }).sort((a, b) => (b.finished_at || b.created_at || 0) - (a.finished_at || a.created_at || 0));
+// ---- History (brief 25, N21).  The hub does the filtering, sorting and counting (`history` answers one page plus a
+// summary of the WHOLE filtered set); everything here only words, groups and selects what it was given.
+const HISTORY_PAGE = 100;                // rows asked for per page (the hub's cap is 500)
+const HISTORY_SORTS = [["newest", "Newest first"], ["largest", "Largest first"], ["slowest", "Slowest first"], ["name", "Name A to Z"]];
+const HISTORY_EXPORT_PAGES = 40;         // an export reads at most this many pages of 500
+const HISTORY_REDOWNLOAD_MAX = 50;       // a bulk Re-download queues at most this many in one go
+
+function dayStartMs(d) { return new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime(); }
+
+// The group a row sits in when the list is newest first: Today, Yesterday, This week (2 to 6 days ago), then its month.
+function historyGroup(row, nowMs) {
+  const t = num(row.finished_at) !== null ? row.finished_at : num(row.created_at);
+  if (t === null) return { key: "earlier", label: "Earlier" };
+  const d = new Date(t * 1000);
+  const now = new Date(nowMs === undefined || nowMs === null ? Date.now() : nowMs);
+  const age = Math.round((dayStartMs(now) - dayStartMs(d)) / 86400000);
+  if (age <= 0) return { key: "today", label: "Today" };
+  if (age === 1) return { key: "yesterday", label: "Yesterday" };
+  if (age < 7) return { key: "week", label: "This week" };
+  return { key: "m:" + d.getFullYear() + "-" + (d.getMonth() + 1), label: d.toLocaleDateString([], { month: "long", year: "numeric" }) };
+}
+
+// Consecutive rows with the same group, in the order given.  Only a newest-first list is grouped by day: under any other
+// sort the days would be scattered, so it is one flat group.
+function historyGroups(rows, nowMs, sort) {
+  if (sort && sort !== "newest") return [{ key: "all", label: "", rows: (rows || []).slice() }];
+  const out = [];
+  (rows || []).forEach((r) => {
+    const g = historyGroup(r, nowMs);
+    if (!out.length || out[out.length - 1].key !== g.key) out.push({ key: g.key, label: g.label, rows: [] });
+    out[out.length - 1].rows.push(r);
+  });
+  return out;
+}
+
+// A date box's value ("2026-10-24") as the start / end of that local day, in epoch seconds.
+function historyRange(from, to) {
+  const out = { since: null, until: null, error: "" };
+  const day = (text) => { const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(text || "")); return m ? [Number(m[1]), Number(m[2]) - 1, Number(m[3])] : null; };
+  const f = day(from), t = day(to);
+  if ((from && !f) || (to && !t)) { out.error = "Pick the dates again."; return out; }
+  if (f) out.since = new Date(f[0], f[1], f[2], 0, 0, 0).getTime() / 1000;
+  if (t) out.until = new Date(t[0], t[1], t[2], 23, 59, 59).getTime() / 1000;
+  if (out.since !== null && out.until !== null && out.since > out.until) out.error = "The date range ends before it starts.";
+  return out;
+}
+
+// The query string of one History request.  `f`: {state, search, sort, from, to}; `o`: {limit, before, checkFiles}.
+function historyQuery(f, o) {
+  const x = f || {}, opt = o || {};
+  const parts = ["limit=" + Math.max(1, Math.min(500, Math.round(num(opt.limit) || HISTORY_PAGE)))];
+  parts.push("sort=" + encodeURIComponent(HISTORY_SORTS.some((s) => s[0] === x.sort) ? x.sort : "newest"));
+  if (x.state && x.state !== "all" && HISTORY_STATES.indexOf(x.state) !== -1) parts.push("states=" + x.state);
+  const q = String(x.search || "").trim();
+  if (q) parts.push("search=" + encodeURIComponent(q.slice(0, 80)));
+  const r = historyRange(x.from, x.to);
+  if (!r.error) {
+    if (r.since !== null) parts.push("since=" + Math.round(r.since));
+    if (r.until !== null) parts.push("until=" + Math.round(r.until));
+  }
+  if (opt.before) parts.push("before=" + encodeURIComponent(String(opt.before)));
+  if (opt.checkFiles) parts.push("check_files=1");
+  return parts.join("&");
+}
+
+function historyFiltersActive(f) {
+  const x = f || {};
+  return !!((x.state && x.state !== "all") || String(x.search || "").trim() || x.from || x.to);
+}
+
+// "128 downloads . 14.2 GB . 3 failed" for the whole filtered set (the hub counted it, not this page).
+function historySummaryText(summary, truncated) {
+  const s = summary || {};
+  const n = num(s.count) || 0;
+  const parts = [n + (n === 1 ? " download" : " downloads")];
+  if (num(s.total_bytes) > 0) parts.push(fmtBytes(s.total_bytes));
+  if (num(s.failed) > 0) parts.push(s.failed + " failed");
+  return parts.join(DOT) + (truncated ? " (the newest " + HISTORY_SCAN_NOTE + " counted)" : "");
+}
+const HISTORY_SCAN_NOTE = "20,000";
+
+function fmtTook(sec) {
+  const s = num(sec);
+  if (s === null || s < 1) return "";
+  if (s < 60) return Math.round(s) + " s";
+  if (s < 3600) { const r = Math.round(s % 60); return Math.floor(s / 60) + " min" + (r ? " " + r + " s" : ""); }
+  const m = Math.floor((s % 3600) / 60);
+  return Math.floor(s / 3600) + " h " + (m < 10 ? "0" : "") + m + " min";
+}
+
+function historyDuration(row) {
+  return num(row.started_at) !== null && num(row.finished_at) !== null ? fmtTook(row.finished_at - row.started_at) : "";
+}
+
+// The name of the file a finished download ended up as (the last part of its path), or "".
+function historyDestName(row) {
+  if (row.state !== "done" || typeof row.dest !== "string") return "";
+  const parts = row.dest.replace(/[\\/]+$/, "").split(/[\\/]/);
+  return parts[parts.length - 1] || "";
+}
+
+// Why a failed row failed, in one sentence: the first sentence of what the hub recorded; never a guess.
+function historyReason(row) {
+  if (row.state !== "failed") return "";
+  const text = String(row.error || "").replace(/\s+/g, " ").trim();
+  if (!text) return "No reason was recorded.";
+  const first = text.split(/(?<=[.!?])\s/)[0];
+  return first.length > 160 ? first.slice(0, 157) + "\u2026" : first;
+}
+
+// Everything one History row says, as plain data (the page only draws it).
+function historyRowModel(row, nowMs) {
+  const when = fmtWhen(row.finished_at, nowMs);
+  const size = num(row.bytes_total) !== null ? fmtBytes(row.bytes_total) : (num(row.bytes_done) !== null ? fmtBytes(row.bytes_done) : "");
+  return {
+    id: row.id, title: row.title || row.id, state: row.state, tone: row.state === "done" ? "ok" : row.state,
+    badge: sourceLabel(row), size: size, took: historyDuration(row),
+    when: when ? (row.state === "failed" ? "failed " : row.state === "cancelled" ? "cancelled " : "") + when : "",
+    dest: historyDestName(row), reason: historyReason(row), missing: row.state === "done" && row.file_exists === false,
+    selectable: row.owner === "hub",
+  };
+}
+
+// Shift-click: every id from `a` to `b` in the order shown (just `b` when either is not in the list).
+function selectionRange(ids, a, b) {
+  const i = ids.indexOf(a), j = ids.indexOf(b);
+  if (i === -1 || j === -1) return [b];
+  return ids.slice(Math.min(i, j), Math.max(i, j) + 1);
+}
+
+// The confirmations of the two bulk buttons: they say how many, and that no file is deleted.
+function historyRemoveText(n) {
+  return { title: "Remove " + n + " from the history?",
+    body: "Remove " + n + " list " + (n === 1 ? "entry" : "entries") + " from the history?\n\nOnly the list entries go. No downloaded file is deleted or touched.", label: "Remove" };
+}
+function historyRedownloadText(n) {
+  return { title: "Download " + n + " again?",
+    body: "Queue " + n + " " + (n === 1 ? "download" : "downloads") + " again?\n\nEach one starts as a new download from the same link and the same folder choice. The old entries stay in the history and no file is deleted.", label: "Download again" };
+}
+
+function historyRetentionNote(days) {
+  const d = num(days);
+  return d !== null && d > 0 ? "The hub removes history entries older than " + d + (d === 1 ? " day" : " days") + ". Downloaded files are never deleted." : "";
+}
+
+// Which of the three empty states the list is in, or null when there are rows to show.
+function historyEmpty(h) {
+  if (!h || h.error || !h.loaded) return null;
+  if (num(h.summary && h.summary.count) > 0) return null;
+  return historyFiltersActive(h)
+    ? { kind: "filtered", text: "Nothing matches these filters." }
+    : { kind: "none", text: "Nothing has finished yet. Finished, failed and cancelled downloads are listed here." };
 }
 
 // One spreadsheet cell.  A cell that starts like a formula is prefixed with ' so a title the web sent
@@ -798,8 +927,9 @@ function providerBadge(p) {
 const ENGINE_WORDS = { ready: "Ready", needs_setup: "Needs setup", not_running: "Not running", off: "Off", broken: "Broken" };
 const ENGINE_TONES = { ready: "done", needs_setup: "stalled", not_running: "stalled", off: "stale", broken: "failed" };
 // The block of Settings > Downloads an engine's Configure button scrolls to (data-settings-anchor in downloads-settings.js).
-// Stremio has its own card; HTTP's retry and stall rows are under Connections; yt-dlp's only setting is how many run at once.
-const CONFIGURE_ANCHORS = { stremio: "stremio", http: "connections", ytdlp: "running-at-once" };
+// Brief 25: each engine has its own collapsed block under Sources (Stremio's holds the Stremio card); the block's anchor is the
+// engine's name.  Opening a block by its anchor unfolds it.
+const CONFIGURE_ANCHORS = { stremio: "stremio", http: "http", ytdlp: "yt-dlp" };
 const PROVIDER_SETTINGS_ANCHOR = "other-tools-downloads";
 function engineWord(state) { return ENGINE_WORDS[state] || "Unknown"; }
 function engineTone(state) { return ENGINE_TONES[state] || "stale"; }
@@ -881,7 +1011,7 @@ function reorderNote(row, live) {
 
 const pure = {
   ACTIVE, FINAL, VIEWS, KIND_ICON, fmtBytes, fmtSpeed, fmtEta, fmtAgo, percentText, speedText, etaText,
-  sizeText, statusText, barLook, rowActions, sourceKey, sourceLabel, viewMatches, viewCounts, sourceList,
+  sizeText, statusText, barLook, rowActions, sourceKey, sourceLabel, viewMatches, viewCounts,
   filterRows, sortRows, groupRows, moveSelection, extractInputs, hintFromDecisions, isStale,
   toneOf, overviewStats, needsAttention, runningNow, sublineText, countText,
   LIMIT_PRESETS, OPEN_CHOICES, NOTIFY_EVENTS, NOTIFY_OPTIONS, NOTIFY_OPTIONS_WAIT, DAYS, fmtLimit, parseLimit, limitFields,
@@ -891,7 +1021,7 @@ const pure = {
   CARD_VERBS, cardActions, fmtWhen, applyNotifyOptions,
   primaryAction, secondaryActions, pendingWord, controlNote, controlNotice, TOGGLE_ICONS,
   cardNote, DISMISSABLE, DISMISS_TIP, CLEAR_TIP, SHOW_AGAIN_TIP, SHOW_HIDDEN_TIP, isHidden, canDismiss, isDimmed, dismissableRows, mergeHidden, dismissNotice,
-  HISTORY_STATES, historyFilter, csvCell, historyCsv, historyJson, historyMeta, providerTone, providerFacts, providerBadge, ENGINE_WORDS, ENGINE_TONES, CONFIGURE_ANCHORS, engineWord, engineTone, engineLine, engineConfigure, engineSettingsNote, sourcesSummary,
+  HISTORY_STATES, HISTORY_SORTS, HISTORY_PAGE, HISTORY_REDOWNLOAD_MAX, historyGroup, historyGroups, historyRange, historyQuery, historyFiltersActive, historySummaryText, fmtTook, historyDuration, historyDestName, historyReason, historyRowModel, selectionRange, historyRemoveText, historyRedownloadText, historyRetentionNote, historyEmpty, csvCell, historyCsv, historyJson, historyMeta, providerTone, providerFacts, providerBadge, ENGINE_WORDS, ENGINE_TONES, CONFIGURE_ANCHORS, engineWord, engineTone, engineLine, engineConfigure, engineSettingsNote, sourcesSummary,
   queueOrder, moveInOrder, stepInOrder, canReorder, reorderNote, applyOrder,
 };
 if (host && host.__hubPureOnly) return pure;
@@ -903,7 +1033,7 @@ const doc = root.ownerDocument || document;
 const $ = (sel) => root.querySelector(sel);
 
 const S = {
-  rows: [], summary: null, selected: null, view: "all", source: "", search: "", groupBy: "none",
+  rows: [], summary: null, selected: null, view: "all", search: "", groupBy: "none",
   detail: null, busy: false, timer: 0, closed: false, lastError: "", hold: 0, holdTimer: 0,
   pendingSelect: "", sig: {},
   showHidden: false, hiddenRows: [], revealed: {}, clearing: false,   // brief 19: the "Show hidden" switch, the rows it lists, the ones listed again
@@ -912,7 +1042,10 @@ const S = {
   saving: false,
   tab: "downloads", live: false, liveAt: 0, es: null, liveTimer: 0, dragId: "",
   sources: null, srcTimer: 0, srcLoaded: false, srcBusy: false,
-  hist: { rows: [], more: false, loaded: false, busy: false, state: "all", source: "", search: "", error: "" },
+  // History (brief 25): the rows loaded so far (a page at a time), the cursor of the next page, the hub's summary of the whole
+  // filtered set, the filters, the selected ids and how much of the list is already drawn.
+  hist: { rows: [], next: null, more: false, loaded: false, busy: false, seq: 0, state: "all", search: "", sort: "newest", from: "", to: "",
+    error: "", summary: null, states: null, truncated: false, retention: 0, sel: {}, last: "", drawn: 0, lastGroup: "", exporting: false },
 };
 let hintTimer = 0;
 let hintSeq = 0;
@@ -955,7 +1088,7 @@ function changed(key, value) {
 
 function savePrefs() {
   try {
-    host.storage.set("prefs", JSON.stringify({ view: S.view, source: S.source, groupBy: S.groupBy })).catch(() => {});
+    host.storage.set("prefs", JSON.stringify({ view: S.view, groupBy: S.groupBy })).catch(() => {});
   } catch (e) { /* storage is a convenience */ }
 }
 
@@ -964,7 +1097,7 @@ async function loadPrefs() {
     const raw = await host.storage.get("prefs");
     const p = raw ? JSON.parse(raw) : {};
     if (VIEWS.some((v) => v.id === p.view)) S.view = p.view;
-    if (typeof p.source === "string") S.source = p.source;
+    // a `source` saved by an older panel is ignored on purpose: the source chips are gone (N22 part d), so it would hide rows with no control to clear it
     if (["none", "source", "group"].indexOf(p.groupBy) !== -1) S.groupBy = p.groupBy;
   } catch (e) { /* defaults */ }
 }
@@ -979,7 +1112,7 @@ function selectedRow() {
 }
 
 function visibleRows() {
-  return sortRows(filterRows(viewRows(), { view: S.view, source: S.source, search: S.search }));
+  return sortRows(filterRows(viewRows(), { view: S.view, search: S.search }));
 }
 
 // ---- top strip
@@ -1043,8 +1176,7 @@ function chip(label, n, active, flag, onClick) {
 
 function renderChips() {
   const counts = viewCounts(viewRows());
-  const sources = sourceList(viewRows());
-  if (!changed("chips", [counts, sources, S.view, S.source])) return;
+  if (!changed("chips", [counts, S.view])) return;
   const vbox = $("#viewChips");
   vbox.textContent = "";
   VIEWS.forEach((v) => {
@@ -1052,17 +1184,6 @@ function renderChips() {
       S.view = v.id; savePrefs(); render();
     }));
   });
-  const sbox = $("#sourceChips");
-  sbox.textContent = "";
-  if (sources.length > 1) {
-    sources.forEach((src) => {
-      sbox.appendChild(chip(src.label, src.count, S.source === src.key, false, () => {
-        S.source = S.source === src.key ? "" : src.key;
-        savePrefs();
-        render();
-      }));
-    });
-  }
 }
 
 // A button the person just pressed says what is happening ("Pausing...") at once, and keeps saying it
@@ -2289,82 +2410,170 @@ function renderSources() {
 }
 $("#srcRefresh").addEventListener("click", () => loadSources(true));
 
-// ---- History
+// ---- History (brief 25, N21)
 
 let histTimer = 0;
 
-async function loadHistory() {
+function histFilters() {
   const h = S.hist;
-  if (h.busy) return;
+  return { state: h.state, search: h.search, sort: h.sort, from: h.from, to: h.to };
+}
+
+// Load the first page again (`keep`: as many rows as were showing, so a Remove or a Retry doesn't throw the person back to the top)
+// or, with `more`, the next page.  A newer request makes an older answer that arrives late go unused.
+async function loadHistory(more, keep) {
+  const h = S.hist;
+  if (more && (h.busy || !h.more || !h.next)) return;
+  const range = historyRange(h.from, h.to);
+  if (range.error) { h.error = range.error; h.loaded = true; h.rows = []; h.summary = null; renderHistory(true); return; }
+  const seq = ++h.seq;
   h.busy = true;
   try {
-    const r = await hubFetch("/api/hub/history?limit=500");
-    h.rows = Array.isArray(r.items) ? r.items : [];
-    h.more = !!r.more;
+    const limit = more ? HISTORY_PAGE : Math.max(HISTORY_PAGE, Math.min(500, keep || 0));
+    const r = await hubFetch("/api/hub/history?" + historyQuery(histFilters(), { limit: limit, before: more ? h.next : "", checkFiles: true }));
+    if (seq !== h.seq) return;
+    const items = Array.isArray(r.items) ? r.items : [];
+    h.rows = more ? h.rows.concat(items) : items;
+    h.next = r.next_cursor || null;
+    h.more = !!r.more && !!h.next;
+    h.summary = r.summary || { count: h.rows.length, total_bytes: 0, failed: 0 };
+    h.states = r.states || null;
+    h.truncated = !!r.summary_truncated;
+    h.retention = num(r.retention_days) || 0;
     h.error = "";
     h.loaded = true;
+    if (!more) {
+      const have = {};
+      h.rows.forEach((x) => { have[x.id] = true; });
+      Object.keys(h.sel).forEach((id) => { if (!have[id]) delete h.sel[id]; });
+    }
   } catch (err) {
+    if (seq !== h.seq) return;
     h.error = message(err);
+    if (!more) h.loaded = true;
   } finally {
-    h.busy = false;
+    if (seq === h.seq) h.busy = false;
   }
-  renderHistory();
+  renderHistory(!more);
 }
 
-function historyRows() {
-  return historyFilter(S.hist.rows, { state: S.hist.state, source: S.hist.source, search: S.hist.search });
+function histReload() { loadHistory(false, S.hist.rows.length); }
+
+function histSelectedIds() {
+  const have = {};
+  S.hist.rows.forEach((r) => { if (r.owner === "hub") have[r.id] = true; });
+  return Object.keys(S.hist.sel).filter((id) => S.hist.sel[id] && have[id]);
 }
 
-function renderHistory() {
+function renderHistory(reset) {
   const h = S.hist;
-  const rows = historyRows();
-  // sources present in what is loaded
-  const sel = $("#histSource");
-  const keys = sourceList(h.rows);
-  if (changed("histsrc", keys)) {
-    sel.textContent = "";
-    sel.appendChild(el("option", { text: "Every source", attrs: { value: "" } }));
-    keys.forEach((k) => { const o = el("option", { text: k.label, attrs: { value: k.key } }); sel.appendChild(o); });
-    sel.value = h.source;
-  }
-  $("#histCount").textContent = !h.loaded ? (h.error ? "" : "reading\u2026")
-    : rows.length + (rows.length === 1 ? " entry" : " entries") + (h.more ? " (the newest " + h.rows.length + " loaded)" : "");
-  $("#histCsv").disabled = !rows.length;
-  $("#histJson").disabled = !rows.length;
   const box = $("#histList");
-  if (!changed("hist", [rows, h.error, h.loaded])) return;
-  box.textContent = "";
-  if (h.error) { box.appendChild(el("div", { cls: "hist__empty", text: "The history couldn't be read: " + h.error })); return; }
-  if (!h.loaded) return;
-  if (!rows.length) {
-    box.appendChild(el("div", { cls: "hist__empty", text: h.rows.length ? "Nothing matches this filter." : "Nothing has finished yet." }));
-    return;
+  const empty = historyEmpty(h);
+  const summary = h.summary || { count: 0, total_bytes: 0, failed: 0 };
+  $("#histCount").textContent = h.error && !h.loaded ? "" : !h.loaded ? "reading\u2026" : historySummaryText(summary, h.truncated);
+  const failed = h.states ? num(h.states.failed) || 0 : summary.failed;
+  const chip = $("#histFailedChip");
+  chip.hidden = !h.loaded || (!failed && h.state !== "failed");
+  chip.textContent = "Failed " + failed;
+  chip.setAttribute("aria-pressed", h.state === "failed" ? "true" : "false");
+  chip.classList.toggle("is-active", h.state === "failed");
+  $("#histClearFilters").hidden = !historyFiltersActive(h);
+  $("#histCsv").disabled = !(summary.count > 0) || h.exporting;
+  $("#histJson").disabled = !(summary.count > 0) || h.exporting;
+  // the list: a reset rebuilds it; otherwise only the rows that arrived are added at the end
+  const keepTop = box.scrollTop;
+  if (reset) { box.textContent = ""; h.drawn = 0; h.lastGroup = ""; }
+  if (reset || h.drawn < h.rows.length || !box.firstChild) {
+    box.querySelectorAll(".hist__empty,.hist__note").forEach((n) => n.remove());
+    if (h.error && !h.rows.length) {
+      box.appendChild(el("div", { cls: "hist__empty", text: "The history couldn't be read: " + h.error }));
+    } else if (empty) {
+      const wrap = el("div", { cls: "hist__empty hist__empty--" + empty.kind }, [el("div", { text: empty.text })]);
+      if (empty.kind === "filtered") wrap.appendChild(el("button", { cls: "btn btn--sm", text: "Clear filters", attrs: { type: "button", id: "histEmptyClear" }, on: { click: clearHistoryFilters } }));
+      else { const note = historyRetentionNote(h.retention); if (note) wrap.appendChild(el("div", { cls: "small", text: note })); }
+      box.appendChild(wrap);
+    } else if (h.loaded) {
+      drawHistoryRows();
+    }
   }
-  rows.forEach((r) => box.appendChild(historyRow(r)));
+  if (!reset) box.scrollTop = keepTop;
+  if (h.loaded && !empty && !h.more && h.rows.length && !h.error) {
+    const note = historyRetentionNote(h.retention);
+    if (note && !box.querySelector(".hist__note")) box.appendChild(el("div", { cls: "hist__note small", text: note }));
+  }
+  const moreBtn = $("#histMore");
+  moreBtn.hidden = !h.more && !(h.error && h.rows.length);
+  moreBtn.disabled = h.busy;
+  moreBtn.textContent = h.error && h.rows.length ? "Couldn't load more: " + h.error + " (try again)" : h.busy ? "Loading\u2026" : "Load more (" + Math.max(0, summary.count - h.rows.length) + " left)";
+  renderHistoryBulk();
 }
 
-function historyRow(r) {
-  const tone = r.state === "done" ? "ok" : r.state;
+// Draw the rows that are loaded but not drawn yet, with a sticky header wherever the day group changes.
+function drawHistoryRows() {
+  const h = S.hist;
+  const box = $("#histList");
+  const now = Date.now();
+  for (let i = h.drawn; i < h.rows.length; i++) {
+    const r = h.rows[i];
+    if (h.sort === "newest") {
+      const g = historyGroup(r, now);
+      if (g.key !== h.lastGroup) { box.appendChild(el("div", { cls: "hist__group", text: g.label, attrs: { role: "presentation", "data-group": g.key } })); h.lastGroup = g.key; }
+    }
+    box.appendChild(historyRow(r, now));
+  }
+  h.drawn = h.rows.length;
+}
+
+function renderHistoryBulk() {
+  const ids = histSelectedIds();
+  const bar = $("#histBulk");
+  bar.hidden = !ids.length;
+  $("#histSelCount").textContent = ids.length + " selected";
+  const redo = $("#histBulkRedo");
+  redo.disabled = ids.length > HISTORY_REDOWNLOAD_MAX;
+  redo.title = ids.length > HISTORY_REDOWNLOAD_MAX ? "Select at most " + HISTORY_REDOWNLOAD_MAX + " to download again in one go" : "Queue the selected downloads again";
+  $("#histList").querySelectorAll(".hist__check").forEach((c) => {
+    const on = !!S.hist.sel[c.getAttribute("data-id")];
+    c.checked = on;
+    const row = c.closest ? c.closest(".hist__row") : null;
+    if (row) row.classList.toggle("is-selected", on);
+  });
+}
+
+function clearHistoryFilters() {
+  const h = S.hist;
+  h.state = "all"; h.search = ""; h.from = ""; h.to = ""; h.sel = {}; h.last = "";
+  $("#histState").value = "all"; $("#histSearch").value = ""; $("#histFrom").value = ""; $("#histTo").value = "";
+  loadHistory(false, 0);
+}
+
+function historyRow(r, nowMs) {
+  const m = historyRowModel(r, nowMs);
   const thumb = r.has_thumb
     ? el("img", { cls: "hist__thumb", attrs: { src: "/api/hub/thumb/" + encodeURIComponent(r.id), alt: "", loading: "lazy" } })
     : el("span", { cls: "hist__thumb", text: KIND_ICON[r.kind] || KIND_ICON.other, attrs: { "aria-hidden": "true" } });
   const acts = [];
   rowActions(r).filter((a) => ["open", "reveal", "retry"].indexOf(a.verb) !== -1).forEach((a) => {
+    const fileVerb = a.verb === "open" || a.verb === "reveal";
     acts.push(el("button", {
-      cls: "rbtn", text: a.label, attrs: { type: "button", "aria-label": a.label + ": " + (r.title || r.id) },
-      on: { click: async (e) => { e.currentTarget.disabled = true; await runAction(r, a); loadHistory(); } },
+      cls: "rbtn", text: a.label, attrs: { type: "button", "aria-label": a.label + ": " + m.title },
+      on: { click: async (e) => {
+        // a file the hub found missing is said so; nothing is sent to open it
+        if (fileVerb && m.missing) { toast("That file is no longer there (it was moved or deleted), so there is nothing to " + (a.verb === "open" ? "open" : "show") + ".", "warn"); return; }
+        e.currentTarget.disabled = true; await runAction(r, a); histReload();
+      } },
     }));
   });
-  if (r.owner === "hub" && r.state === "done") {
+  if (r.owner === "hub" && r.state === "done" && !m.missing) {
     acts.push(el("a", {
       cls: "rbtn", text: "Save a copy", title: "Download this file through the browser",
-      attrs: { href: "/api/hub/file/" + encodeURIComponent(r.id), download: "", "aria-label": "Save a copy of " + (r.title || r.id) },
+      attrs: { href: "/api/hub/file/" + encodeURIComponent(r.id), download: "", "aria-label": "Save a copy of " + m.title },
     }));
   }
   if (r.owner === "hub") {
     if (r.state !== "failed" || !acts.some((x) => x.textContent === "Retry")) {
       acts.push(el("button", {
-        cls: "rbtn", text: "Download again", attrs: { type: "button", "aria-label": "Download again: " + (r.title || r.id) },
+        cls: "rbtn", text: r.state === "failed" ? "Retry" : "Download again", attrs: { type: "button", "aria-label": (r.state === "failed" ? "Retry: " : "Download again: ") + m.title },
         on: { click: async (e) => {
           e.currentTarget.disabled = true;
           try { await hubFetch("/api/hub/redownload", { id: r.id }); toast("Queued again", "info"); schedule(300); }
@@ -2375,23 +2584,44 @@ function historyRow(r) {
     }
     acts.push(el("button", {
       cls: "rbtn rbtn--danger", text: "Remove", title: "Remove from the list. The file is not deleted.",
-      attrs: { type: "button", "aria-label": "Remove from history: " + (r.title || r.id) },
+      attrs: { type: "button", "aria-label": "Remove from history: " + m.title },
       on: { click: async () => {
-        if (!(await askFirst("Remove from the history?", (r.title || r.id) + "\n\nOnly the list entry goes. The downloaded file is not touched.", "Remove"))) return;
+        if (!(await askFirst("Remove from the history?", m.title + "\n\nOnly the list entry goes. The downloaded file is not touched.", "Remove"))) return;
         try { await hubFetch("/api/hub/history/remove", { ids: [r.id] }); toast("Removed from the history", "info"); }
         catch (err) { toast(message(err), "warn"); }
-        loadHistory();
+        histReload();
       } },
     }));
   }
-  return el("div", { cls: "hist__row state-" + r.state + " tone-" + tone, attrs: { role: "listitem", "data-id": r.id } }, [
-    thumb,
-    el("div", { cls: "hist__main" }, [
-      el("div", { cls: "hist__title", text: r.title || r.id, title: r.title || r.id }),
-      el("div", { cls: "hist__meta", text: historyMeta(r), title: historyMeta(r) }),
-    ]),
-    el("div", { cls: "hist__actions" }, acts),
-  ]);
+  const line = [el("span", { cls: "tag", text: m.badge })];
+  [m.size, m.took, m.when].forEach((t) => { if (t) line.push(el("span", { text: t })); });
+  if (m.missing) line.push(el("span", { cls: "tag tag--warn", text: "file missing", title: "The file is no longer where the hub saved it" }));
+  const main = [
+    el("div", { cls: "hist__title", text: m.title, title: m.title }),
+    el("div", { cls: "hist__meta", title: historyMeta(r, nowMs) }, line),
+  ];
+  if (m.dest) main.push(el("div", { cls: "hist__dest", text: "\u2192 " + m.dest, title: String(r.dest || "") }));
+  if (m.reason) main.push(el("div", { cls: "hist__reason", text: m.reason, title: String(r.error || "") }));
+  const kids = [];
+  if (m.selectable) {
+    kids.push(el("input", {
+      cls: "hist__check", attrs: { type: "checkbox", "data-id": r.id, "aria-label": "Select " + m.title },
+      on: { click: (e) => {
+        const h = S.hist;
+        const on = e.currentTarget.checked;
+        if (e.shiftKey && h.last) {
+          const ids = h.rows.filter((x) => x.owner === "hub").map((x) => x.id);
+          selectionRange(ids, h.last, r.id).forEach((id) => { if (on) h.sel[id] = true; else delete h.sel[id]; });
+        } else if (on) h.sel[r.id] = true; else delete h.sel[r.id];
+        h.last = r.id;
+        renderHistoryBulk();
+      } },
+    }));
+  } else {
+    kids.push(el("span", { cls: "hist__check hist__check--none", attrs: { "aria-hidden": "true" } }));
+  }
+  kids.push(thumb, el("div", { cls: "hist__main" }, main), el("div", { cls: "hist__actions" }, acts));
+  return el("div", { cls: "hist__row state-" + r.state + " tone-" + m.tone + (m.missing ? " is-missing" : "") + (S.hist.sel[r.id] ? " is-selected" : ""), attrs: { role: "listitem", "data-id": r.id } }, kids);
 }
 
 function saveFile(name, mime, text) {
@@ -2403,15 +2633,94 @@ function saveFile(name, mime, text) {
   a.remove();
   setTimeout(() => URL.revokeObjectURL(url), 2000);
 }
-$("#histCsv").addEventListener("click", () => saveFile("download-history.csv", "text/csv;charset=utf-8", historyCsv(historyRows())));
-$("#histJson").addEventListener("click", () => saveFile("download-history.json", "application/json", historyJson(historyRows())));
-$("#histState").addEventListener("change", (e) => { S.hist.state = e.target.value; renderHistory(); });
-$("#histSource").addEventListener("change", (e) => { S.hist.source = e.target.value; renderHistory(); });
+
+// What is listed, all of it: the rows loaded so far, and when the list has more, the rest of the same filtered set (pages of 500).
+async function historyAll() {
+  const h = S.hist;
+  if (!h.more) return h.rows.slice();
+  const rows = h.rows.slice();
+  let cursor = h.next;
+  for (let page = 0; cursor && page < HISTORY_EXPORT_PAGES; page++) {
+    const r = await hubFetch("/api/hub/history?" + historyQuery(histFilters(), { limit: 500, before: cursor }));
+    (Array.isArray(r.items) ? r.items : []).forEach((x) => rows.push(x));
+    cursor = r.more ? r.next_cursor : null;
+  }
+  return rows;
+}
+async function historyExport(name, mime, make) {
+  const h = S.hist;
+  if (h.exporting) return;
+  h.exporting = true; renderHistory(false);
+  try { saveFile(name, mime, make(await historyAll())); }
+  catch (err) { toast("The export failed: " + message(err), "warn"); }
+  h.exporting = false; renderHistory(false);
+}
+$("#histCsv").addEventListener("click", () => historyExport("download-history.csv", "text/csv;charset=utf-8", historyCsv));
+$("#histJson").addEventListener("click", () => historyExport("download-history.json", "application/json", historyJson));
+
+function histFilterChanged() { S.hist.sel = {}; S.hist.last = ""; loadHistory(false, 0); }
+$("#histState").addEventListener("change", (e) => { S.hist.state = e.target.value; histFilterChanged(); });
+$("#histSort").addEventListener("change", (e) => { S.hist.sort = e.target.value; histFilterChanged(); });
+$("#histFrom").addEventListener("change", (e) => { S.hist.from = e.target.value; histFilterChanged(); });
+$("#histTo").addEventListener("change", (e) => { S.hist.to = e.target.value; histFilterChanged(); });
+$("#histFailedChip").addEventListener("click", () => {
+  S.hist.state = S.hist.state === "failed" ? "all" : "failed";
+  $("#histState").value = S.hist.state;
+  histFilterChanged();
+});
+$("#histClearFilters").addEventListener("click", clearHistoryFilters);
 $("#histSearch").addEventListener("input", (e) => {
   clearTimeout(histTimer);
   const v = e.target.value;
-  histTimer = setTimeout(() => { S.hist.search = v; renderHistory(); }, 150);
+  histTimer = setTimeout(() => { S.hist.search = v; histFilterChanged(); }, 250);
 });
+// more rows as the person scrolls near the end; the button under the list does the same for the keyboard
+$("#histList").addEventListener("scroll", () => {
+  const b = $("#histList");
+  if (b.scrollTop + b.clientHeight >= b.scrollHeight - 2000) loadHistory(true);
+});
+$("#histMore").addEventListener("click", () => loadHistory(true));
+
+// ---- selection and the two bulk buttons.  Neither touches a file: Remove takes list entries out, Re-download queues new downloads.
+$("#histSelAll").addEventListener("click", () => {
+  S.hist.rows.forEach((r) => { if (r.owner === "hub") S.hist.sel[r.id] = true; });
+  renderHistoryBulk();
+});
+$("#histSelNone").addEventListener("click", () => { S.hist.sel = {}; S.hist.last = ""; renderHistoryBulk(); });
+$("#histBulkRemove").addEventListener("click", async () => {
+  const ids = histSelectedIds();
+  if (!ids.length) return;
+  const t = historyRemoveText(ids.length);
+  if (!(await askFirst(t.title, t.body, t.label))) return;
+  let removed = 0;
+  const skipped = [];
+  try {
+    for (let i = 0; i < ids.length; i += 200) {
+      const r = await hubFetch("/api/hub/history/remove", { ids: ids.slice(i, i + 200) });
+      removed += r.removed || 0;
+      (r.skipped || []).forEach((x) => skipped.push(x));
+    }
+    toast("Removed " + removed + " from the history" + (skipped.length ? " (" + skipped.length + " could not be removed: " + String(skipped[0].why || "").slice(0, 120) + ")" : ""), skipped.length ? "warn" : "info");
+  } catch (err) { toast(message(err), "warn"); }
+  S.hist.sel = {}; S.hist.last = "";
+  histReload();
+});
+$("#histBulkRedo").addEventListener("click", async () => {
+  const ids = histSelectedIds();
+  if (!ids.length || ids.length > HISTORY_REDOWNLOAD_MAX) return;
+  const t = historyRedownloadText(ids.length);
+  if (!(await askFirst(t.title, t.body, t.label))) return;
+  let queued = 0;
+  const why = [];
+  for (const id of ids) {
+    try { await hubFetch("/api/hub/redownload", { id: id }); queued++; } catch (err) { why.push(message(err)); }
+  }
+  toast("Queued " + queued + " again" + (why.length ? " (" + why.length + " could not be: " + why[0].slice(0, 120) + ")" : ""), why.length ? "warn" : "info");
+  S.hist.sel = {}; S.hist.last = "";
+  schedule(300);
+  renderHistoryBulk();
+});
+
 $("#histClear").addEventListener("click", async () => {
   const days = Number.parseInt($("#histDays").value, 10);
   if (!Number.isFinite(days) || days < 1 || days > 3650) { toast("Enter a number of days from 1 to 3650", "warn"); return; }
@@ -2423,7 +2732,8 @@ $("#histClear").addEventListener("click", async () => {
     const r = await hubFetch("/api/hub/history/clear", { days: days });
     toast("Removed " + r.removed + " from the history", "info");
   } catch (err) { toast(message(err), "warn"); }
-  loadHistory();
+  S.hist.sel = {};
+  histReload();
 });
 
 // ---- the waiting queue: drag a row, or use its arrows (phase 9 option B)

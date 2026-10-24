@@ -243,7 +243,8 @@ def tool_dl_add(args):
 
 
 def tool_dl_add_ytdlp(args):
-    """Queue a video / audio page with the yt-dlp engine and its own options."""
+    """Queue a video / audio page with the yt-dlp engine and its own options.  A playlist or channel
+    link is never taken silently: it asks, and `playlist="all"` queues it as one group."""
     try:
         args = args or {}
         if _is_chat_guest():
@@ -252,7 +253,11 @@ def tool_dl_add_ytdlp(args):
         if not urls:
             return {"needs_clarification": True, "message": "Which video link should I download?"}
         video = {k: args.get(k) for k in _VIDEO_ARGS if args.get(k) is not None}
-        return _queue(args, urls, "ytdlp", video, "dl_add_ytdlp")
+        # Playlists and the generic extractor (brief 30, logic from brief 21): a playlist link asks
+        # first, playlist="all" queues one group.  Imported here, like _svc(), so loading this file
+        # never loads the hub package.
+        from ..hub.engines import _ytdlp_playlist
+        return _ytdlp_playlist.tool(args, urls, video, _queue)
     except Exception as exc:  # noqa: BLE001
         return _fail("dl_add_ytdlp", exc)
 
@@ -560,6 +565,15 @@ _ALL_PROPS = {
     # dl_add_ytdlp's link wording and dl_add_stremio's own arguments
     "ytdlp_url": {"type": "string", "description": "The video / audio page link (YouTube or any site yt-dlp supports)."},
     "ytdlp_urls": {"type": "array", "items": {"type": "string"}, "description": "Several video links with the same options (one group)."},
+    # dl_add_ytdlp only (never dl_add, rule N4).  A LITERAL COPY of hub/engines/_ytdlp_playlist.TOOL_PROPS: this
+    # file must not import the hub package at load time.  tests/test_hub_ytdlp_hook.py fails if the two differ.
+    "playlist": {"type": "string", "enum": ["one", "all"],
+                 "description": ("A playlist or channel link is never taken silently. 'all' = look, then queue up "
+                                 "to 50 of its videos as one group. 'one' = just the single video the link names. "
+                                 "Without it a playlist link queues nothing and asks.")},
+    "generic": {"type": "boolean",
+                "description": ("Only after the owner said yes for THIS link: let yt-dlp's generic extractor try a "
+                                "page no site-specific extractor knows. One link per call. Default false.")},
     "magnet": {"type": "string", "description": "A magnet link, a 40-character infohash or a link to a .torrent file. Give this or `stream`."},
     "stream": {"type": "object", "description": "A Stremio stream object ({infoHash, fileIdx, ...}) instead of a magnet."},
     "file_index": {"type": "integer", "description": "Which file inside the torrent to download (0-based). Leave out to let Jarvis pick the main video file; same as the magnet's so=N."},
@@ -595,11 +609,12 @@ TOOL_SCHEMAS = [
         "description": (
             "Queue a video or audio download from YouTube or any site yt-dlp supports (the yt-dlp engine) in "
             "the Download Hub, in the background: quality (720p, 1080p...), mp4 / mkv / webm, audio only "
-            "(mp3, m4a...), subtitles, thumbnail, chapters, SponsorBlock. One video per link. Returns at "
+            "(mp3, m4a...), subtitles, thumbnail, chapters, SponsorBlock. One video per link; a playlist or "
+            "channel link queues nothing and asks first (then playlist='all' takes up to 50 as one group). Returns at "
             "once; the hub daemon does the transfer. To watch it now, ytdl_download. dry_run only names the engine."
         ),
         "parameters": {"type": "object",
-                       "properties": _add_props(("url", "urls") + _SHARED_NAMES + _VIDEO_ARGS,
+                       "properties": _add_props(("url", "urls") + _SHARED_NAMES + _VIDEO_ARGS + ("playlist", "generic"),
                                                 {"url": "ytdlp_url", "urls": "ytdlp_urls"})},
     },
     {
@@ -852,6 +867,13 @@ TOOL_KEYWORDS = {
         "queue the audio": 9,
         "add the video to my downloads": 10,
         "add a video download": 10,
+        # playlists (brief 30).  Spotify owns the bare word "playlist", so these name video or YouTube.
+        "youtube playlist": 10,
+        "video playlist": 9,
+        "download this playlist": {"weight": 8, "needs_any": ["youtube", "video", "videos"]},
+        "download the playlist": {"weight": 8, "needs_any": ["youtube", "video", "videos"]},
+        "queue this playlist": {"weight": 8, "needs_any": ["youtube", "video", "videos"]},
+        "download this channel": {"weight": 8, "needs_any": ["youtube", "video", "videos"]},
     },
     "dl_add_stremio": {
         "download this torrent": 10,
@@ -1059,7 +1081,7 @@ TEST_CHECKLIST = {
                   "Kill the daemon mid-file (Menu > Daemons > Stop), start it again: the row goes back to queued and the file resumes, not restarts (needs a server that supports Range)."],
     },
     "dl_add_ytdlp": {
-        "does": "Queues a video or audio page in the Download Hub with the yt-dlp engine and its own options (quality, container, audio only, subtitles...); the daemon downloads it in the background.",
+        "does": "Queues a video or audio page in the Download Hub with the yt-dlp engine and its own options (quality, container, audio only, subtitles...); the daemon downloads it in the background. A playlist or channel link is never taken silently: it asks first, and playlist: all queues it as one group of at most 50.",
         "steps": [
             {"run": {"url": "https://www.youtube.com/watch?v=<a short video id>", "dry_run": True},
              "expect": "ok: true, one decision: engine ytdlp, add_tool dl_add_ytdlp, nothing queued. (Without yt-dlp / ffmpeg the call is still ok: true, but the decision is ok: false and its problem says the ytdlp engine isn't ready and what is missing.)"},
@@ -1071,13 +1093,28 @@ TEST_CHECKLIST = {
              "expect": "ok: true for the call, with one decision that is ok: false and whose problem says 'the ytdlp engine can't take that input'; a plain file link belongs to dl_add."},
             {"run": {},
              "expect": "No error, a question: needs_clarification 'Which video link should I download?'; nothing is queued."},
+            {"run": {"url": "https://www.youtube.com/playlist?list=<a short playlist id, 3 to 5 videos>"},
+             "expect": "No error, a question: needs_clarification: true, queued: 0, the playlist's title and size, at most five titles and a `call` with playlist: all. Nothing is queued (Menu > Downloads has no new row). (Without yt-dlp / ffmpeg: ok: false and the error says the ytdlp engine isn't ready.)"},
+            {"run": {"url": "https://www.youtube.com/playlist?list=<the same playlist id>", "playlist": "all", "dry_run": True},
+             "expect": "ok: true, dry_run: true, a sentence saying what a real call would do; nothing is looked at and nothing is queued."},
+            {"run": {"url": "https://www.youtube.com/playlist?list=<the same playlist id>", "playlist": "all", "start_paused": True},
+             "expect": "ok: true, one group named after the playlist with one row per video (at most 50), all paused; the answer carries `playlist` (title, count, queued, not_taken, cap) and five rows at most. More than 5 videos makes the hub ask 'Queue N downloads?' first; answer yes."},
+            {"run": {"url": "https://www.youtube.com/watch?v=<a short video id>&list=<a playlist id>", "start_paused": True},
+             "expect": "ok: true, ONE row (the video, not the playlist) and a note saying that the link also names a playlist and that playlist: all takes it."},
+            {"run": {"url": "https://<a page no yt-dlp extractor knows>", "generic": True},
+             "expect": "ok: false, one plain sentence saying yt-dlp's generic extractor is switched off in this version; nothing is queued."},
+            {"ask": "Queue this whole playlist in the background: https://www.youtube.com/playlist?list=<a short playlist id>",
+             "expect": "Calls dl_add_ytdlp with the link and NO playlist argument, then asks you whether to take all of it (title and size); only after you say yes does it call again with playlist all."},
             {"ask": "Queue this video in the background as an mp3: https://www.youtube.com/watch?v=<a short video id>",
              "expect": "Finds and calls dl_add_ytdlp (not dl_add with video options, not ytdl_download) with mode audio; says it was queued."},
         ],
         "needs": ["The 'Download hub' daemon running (Menu > Daemons)", "Internet access", "yt-dlp and ffmpeg installed"],
         "care": "Writes the file under the library root (Video / Audio folder).",
         "watch": ["From a remote chat guest the tool is refused: adding downloads is the owner's.",
-                  "⚠️ Playlists: the code for 'a playlist link asks first, playlist: all queues one group of at most 50' exists (hub/engines/_ytdlp_playlist.py, brief 21) but this tool is not hooked to it in jarvis-main_164_: its schema has no `playlist` or `generic` argument, and a playlist link is not asked about or made into a group. If Menu > Debug shows `playlist` in this tool's arguments, the hook has been merged: then check that a playlist link queues nothing and asks (title, size, five titles), and that playlist: all queues one group of up to 50. `generic` is switched off in this version."],
+                  "Playlists (brief 30): a playlist or channel link queues nothing and asks; playlist: all queues one group of at most 50, named after the playlist; a link that names a video AND a playlist (watch?v=...&list=...) queues the video with a note; `playlist: one` on a playlist page has nothing to take and asks again. Menu > Debug lists `playlist` and `generic` in this tool's arguments (not in dl_add's).",
+                  "⚠️ Not run for real: the playlist look-up and the group were only run against a FAKE yt-dlp helper (tests/test_hub_ytdlp_hook.py). Never tried on real YouTube, never with a real yt-dlp playlist probe, and the 'ask' step (does the model ask before sending playlist: all) was not run.",
+                  "⚠️ dl_add (the router) is not hooked to playlists: a playlist link given to dl_add is queued as ONE row whose answer names dl_add_ytdlp, with no question. What yt-dlp then downloads for that row was not run. Use dl_add_ytdlp for playlists.",
+                  "The cap of 50 is fixed in this version: `ytdlp.playlist_max` can only lower it, but no hub setting by that name exists yet. `generic` is switched off: it answers with one sentence and queues nothing."],
     },
     "dl_add_stremio": {
         "does": "Queues a torrent (magnet, infohash, Stremio stream or .torrent link), optionally one chosen file of it, with the Stremio engine.",

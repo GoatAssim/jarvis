@@ -30,6 +30,7 @@ The rules this module keeps (they are the Download Hub invariants in AGENTS.md, 
 """
 
 import base64
+import copy
 import json
 import os
 import re
@@ -54,7 +55,7 @@ OPS = OPS + PICKER_OPS
 
 MAX_CARD_IDS = 8
 MAX_IDS = 200
-MAX_HISTORY = 1000
+MAX_HISTORY = 500
 MAX_THUMB_BYTES = 256 * 1024
 ITEM_ID_RE = re.compile(r"^[A-Za-z0-9_.:\-]{1,120}$")
 THUMB_RE = re.compile(r"^data:image/(png|jpeg|webp|gif);base64,([A-Za-z0-9+/=]+)$")
@@ -115,6 +116,8 @@ def present_row(item, providers, now):
     # a row the owner hid (epoch seconds), None while it is shown; `service.present_item` doesn't carry it, and the
     # panel's "Show hidden" needs it (brief 19)
     row["dismissed_at"] = item.get("dismissed_at")
+    # when the transfer began (History shows how long it took); `service.present_item` doesn't carry it
+    row["started_at"] = item.get("started_at")
     return row
 
 
@@ -385,7 +388,9 @@ def settings_payload(store=None):
         settings = store.get_settings()
         view = service.settings_view(settings)
         view.pop("notify_options", None)         # the Settings tab reads the live notifier catalog itself
-        return {"ok": True, "settings": settings, "view": view,
+        # `defaults`: hub/settings.py's own DEFAULTS, copied as they are (brief 25, B2) so the page can say what a setting is
+        # normally and offer Reset.  Read-only: nothing here adds or changes a default.
+        return {"ok": True, "settings": settings, "view": view, "defaults": copy.deepcopy(settings_mod.DEFAULTS),
                 "writable": sorted(settings_mod.WRITABLE), "prefs_writable": sorted(settings_mod.PREFS_WRITABLE),
                 "events": list(settings_mod.EVENTS), "open_modes": list(settings_mod.OPEN_MODES),
                 "providers": service.list_providers(store).get("providers", [])}
@@ -396,26 +401,157 @@ def settings_payload(store=None):
 # --------------------------------------------------------------------------- history
 
 HISTORY_STATES = ("done", "failed", "cancelled")
+HISTORY_SORTS = ("newest", "largest", "slowest", "name")
+HISTORY_DEFAULT_LIMIT = 100          # a page when the caller names none
+HISTORY_SCAN = 20000                 # most rows read to build the summary of a filtered set (flagged when it bites)
+HISTORY_FILE_CHECKS = 200            # most rows on one page whose file is looked for (`check_files`)
+
+
+def _row_time(item):
+    return item.get("finished_at") or item.get("updated_at") or item.get("created_at") or 0
+
+
+def _row_size(item):
+    for key in ("bytes_total", "bytes_done"):
+        if isinstance(item.get(key), (int, float)) and item[key] > 0:
+            return int(item[key])
+    return 0
+
+
+def _row_speed(item):
+    """Average bytes per second over the whole download, or None when the row doesn't say."""
+    size = item.get("bytes_total") if isinstance(item.get("bytes_total"), (int, float)) else item.get("bytes_done")
+    started, finished = item.get("started_at"), item.get("finished_at")
+    if not (isinstance(size, (int, float)) and size > 0 and started and finished and finished > started):
+        return None
+    return size / float(finished - started)
+
+
+def _sort_key(item, sort):
+    """A tuple that sorts ASCENDING in the order the person asked for; the id ends every key so the order is total
+    (a cursor can then say exactly where a page stopped)."""
+    t, ident = -float(_row_time(item)), str(item.get("id") or "")
+    if sort == "largest":
+        return (-_row_size(item), t, ident)
+    if sort == "slowest":
+        speed = _row_speed(item)
+        return (0 if speed is not None else 1, speed if speed is not None else 0.0, t, ident)
+    if sort == "name":
+        return (str(item.get("title") or ident).lower(), t, ident)
+    return (t, ident)
+
+
+def _cursor_make(sort, key):
+    raw = json.dumps([sort, list(key)], separators=(",", ":")).encode("utf-8")
+    return base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
+
+
+def _cursor_read(token, sort):
+    """The key a `before` cursor stands for, or None when it isn't one of ours or belongs to another sort."""
+    try:
+        text = str(token or "")
+        if not text or len(text) > 600 or not re.match(r"^[A-Za-z0-9_\-]+$", text):
+            return None
+        data = json.loads(base64.urlsafe_b64decode(text + "=" * (-len(text) % 4)).decode("utf-8"))
+        if not (isinstance(data, list) and len(data) == 2 and data[0] == sort and isinstance(data[1], list)):
+            return None
+        return tuple(data[1])
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _stamp(value, name):
+    """A request's date bound as epoch seconds (a number or a numeric string), or None."""
+    if value in (None, ""):
+        return None
+    try:
+        out = float(value)
+    except (TypeError, ValueError):
+        raise ValueError("%s must be a time in epoch seconds" % name)
+    if out != out or out < 0 or out > 4102444800:
+        raise ValueError("%s is out of range" % name)
+    return out
+
+
+def _file_exists(item):
+    """True / False for a file or folder a row points at, None when it can't be told (no path, or the check itself
+    failed).  It only looks; nothing is opened, read or touched."""
+    path = item.get("dest_file") or item.get("dest_dir")
+    if not path or not isinstance(path, str):
+        return None
+    try:
+        return bool(os.path.exists(path))
+    except (OSError, ValueError):
+        return None
 
 
 def history(request, store=None):
-    """Finished, failed and cancelled rows, newest first, for the History tab."""
+    """Finished, failed and cancelled rows for the History tab.
+
+    Old callers that pass nothing still get `items`, `count`, `more` and `retention_days`, newest first.  A caller may also
+    pass `sort` (newest, largest, slowest, name), `since` / `until` (epoch seconds, on when the row finished), `before` (the
+    `next_cursor` of the page before) and `check_files`.  The answer's `summary` ({count, total_bytes, failed}) and
+    `states` describe the WHOLE filtered set, not the page.  Nothing here deletes or opens a file."""
     try:
         service = _modules()[0]
         store = _store(store)
         req = request if isinstance(request, dict) else {}
         wanted = [s for s in (req.get("states") or HISTORY_STATES) if s in HISTORY_STATES] or list(HISTORY_STATES)
-        limit = max(1, min(int(req.get("limit") or 300), MAX_HISTORY))
+        limit = max(1, min(int(req.get("limit") or HISTORY_DEFAULT_LIMIT), MAX_HISTORY))
         offset = max(0, int(req.get("offset") or 0))
-        items = store.list_items(states_in=wanted, kind=(str(req.get("kind") or "")[:20] or None),
-                                 provider=(str(req.get("provider") or "")[:60] or None),
-                                 search=(str(req.get("search") or "")[:80] or None),
-                                 limit=limit + 1, offset=offset)
-        items.sort(key=lambda i: (i.get("finished_at") or i.get("updated_at") or 0), reverse=True)
-        more = len(items) > limit
-        rows = _rows(store, items[:limit])
-        return {"ok": True, "items": rows, "count": len(rows), "more": more, "retention_days":
-                int((store.get_settings().get("retention") or {}).get("keep_history_days") or 0)}
+        sort = str(req.get("sort") or "newest")
+        if sort not in HISTORY_SORTS:
+            return _err("unknown sort %r (use one of: %s)" % (sort[:20], ", ".join(HISTORY_SORTS)))
+        try:
+            since, until = _stamp(req.get("since"), "since"), _stamp(req.get("until"), "until")
+        except ValueError as exc:
+            return _err(str(exc))
+        if since is not None and until is not None and since > until:
+            return _err("the date range ends before it starts")
+        # every row of the filtered set, newest created first, read in pages of the store's own cap
+        items, scanned, truncated = [], 0, False
+        while True:
+            chunk = store.list_items(states_in=list(HISTORY_STATES), kind=(str(req.get("kind") or "")[:20] or None),
+                                     provider=(str(req.get("provider") or "")[:60] or None),
+                                     search=(str(req.get("search") or "")[:80] or None), limit=2000, offset=scanned)
+            items += chunk
+            scanned += len(chunk)
+            if len(chunk) < 2000:
+                break
+            if scanned >= HISTORY_SCAN:
+                truncated = True
+                break
+        if since is not None:
+            items = [i for i in items if _row_time(i) >= since]
+        if until is not None:
+            items = [i for i in items if _row_time(i) <= until]
+        by_state = {s: 0 for s in HISTORY_STATES}
+        for i in items:
+            by_state[i["state"]] = by_state.get(i["state"], 0) + 1
+        listed = [i for i in items if i["state"] in wanted]
+        listed.sort(key=lambda i: _sort_key(i, sort))
+        summary = {"count": len(listed), "total_bytes": sum(_row_size(i) for i in listed),
+                   "failed": sum(1 for i in listed if i["state"] == "failed")}
+        if req.get("before"):
+            cursor = _cursor_read(req.get("before"), sort)
+            if cursor is None:
+                return _err("that page marker isn't one this list gave (or it is for another sort); load the list again")
+            page = [i for i in listed if _sort_key(i, sort) > cursor][:limit + 1]
+        else:
+            page = listed[offset:offset + limit + 1]
+        more = len(page) > limit
+        page = page[:limit]
+        rows = _rows(store, page)
+        if req.get("check_files") is True:
+            for n, (item, row) in enumerate(zip(page, rows)):
+                row["file_exists"] = _file_exists(item) if n < HISTORY_FILE_CHECKS else None
+        out = {"ok": True, "items": rows, "rows": rows, "count": len(rows), "more": more,
+               "next_cursor": _cursor_make(sort, _sort_key(page[-1], sort)) if (more and page) else None,
+               "summary": summary, "states": by_state, "sort": sort,
+               "retention_days": int((store.get_settings().get("retention") or {}).get("keep_history_days") or 0)}
+        if truncated:
+            out["summary_truncated"] = True
+        return out
     except Exception as exc:  # noqa: BLE001
         return _err("couldn't read the history: %s" % exc)
 

@@ -43,6 +43,16 @@
     { path: "http.stall_seconds", group: "Connections", label: "Call a download stalled after", type: "int", min: 10, unit: "seconds",
       help: "No bytes for this long counts as stalled and is retried." },
     { path: "http.max_retries", group: "Connections", label: "Retries before it fails", type: "int", min: 0, max: 10 },
+    // labels only (brief 25): the hub's own range and rules are not repeated here; a value it refuses shows its refusal text
+    { path: "http.segments", group: "Connections", label: "Parallel connections per file", type: "int",
+      help: "1 = off. Only used for a file at least the size below, from a server that supports resuming. One download can override it." },
+    { path: "http.segment_min_bytes", group: "Connections", label: "Smallest file that is split up", type: "int", unit: "bytes" },
+    { path: "stremio.stall_seconds", group: "Torrents", label: "Call a torrent stalled after", type: "int", unit: "seconds",
+      help: "No bytes for this long counts as stalled and is retried." },
+    { path: "stremio.max_retries", group: "Torrents", label: "Torrent retries before it fails", type: "int" },
+    { path: "stremio.metadata_timeout", group: "Torrents", label: "Wait for a torrent's file list", type: "int", unit: "seconds",
+      help: "No peers means no list. After this long the torrent fails instead of waiting." },
+    { path: "stremio.start_wait_seconds", group: "Torrents", label: "Wait for the Stremio server to start", type: "int", unit: "seconds" },
     { path: "after_download.open", group: "When a download finishes", label: "Do this when one finishes", type: "choice",
       help: "A single download can override this when you add it." },
     { path: "notify.enabled", group: "Notifications", label: "Tell me about downloads", type: "bool",
@@ -63,7 +73,7 @@
     stalled: "A download stalls", group_done: "A whole batch finishes", queue_empty: "The queue empties",
   };
   const OPEN_LABELS = { off: "Nothing", reveal: "Show the file in its folder", folder: "Open the folder", open: "Open the file" };
-  const GROUP_ORDER = ["Where files go", "Speed", "Running at once", "Connections", "When a download finishes",
+  const GROUP_ORDER = ["Where files go", "Speed", "Running at once", "Connections", "Torrents", "When a download finishes",
     "Notifications", "Lost downloads", "Safety", "Other"];
   // rows with their own editor, never generic
   const CUSTOM = { schedule: 1, ext_folders: 1 };
@@ -123,6 +133,169 @@
     return fields.filter((f) => typeof have[f.key] === "number").map((f) => Object.assign({}, f, { value: have[f.key] }));
   }
   function providerSettingArgs(id, key, value) { return { id: id, settings: { [key]: value } }; }
+
+  // ---- the page's structure, defaults and timing (brief 25, N20): pure, tested without a DOM -------------------------------
+
+  // The rail, in order.  Every row lands in exactly one of these (or in Other, shown only when something has no home).
+  const PAGE_SECTIONS = [
+    { id: "files", title: "Files", lede: "Where finished downloads are kept and which folder each kind of file goes to." },
+    { id: "speed", title: "Speed and schedule", lede: "One limit for everything the hub downloads, and windows of the day with a limit of their own." },
+    { id: "running", title: "Running at once", lede: "How many downloads run together. Each source's own limit is in its block under Sources." },
+    { id: "sources", title: "Sources", lede: "One block per download engine and per program that reports its own downloads. Open one to see its settings." },
+    { id: "notifications", title: "Notifications", lede: "Which events speak up. How they reach you follows Settings > Notifications." },
+    { id: "finish", title: "When a download finishes", lede: "What the hub does the moment a download is done." },
+    { id: "safety", title: "Safety", lede: "Limits that keep the hub away from places it shouldn't go." },
+  ];
+  const OTHER_SECTION = { id: "other", title: "Other", lede: "Settings the hub accepts that this page has no wording for yet." };
+
+  // Where a setting lives: {section, source}.  `source` names an engine block under Sources ("" = a row of the Sources section itself).
+  function placeOf(path) {
+    const p = String(path || "");
+    let m;
+    if (p === "library_root" || p === "ext_folders" || /^folders\./.test(p)) return { section: "files", source: null };
+    if (p === "rate_limit_kbps" || p === "schedule") return { section: "speed", source: null };
+    if (p === "concurrency.total") return { section: "running", source: null };
+    if ((m = /^concurrency\.([a-z0-9_]+)$/.exec(p))) return { section: "sources", source: m[1] };
+    if ((m = /^(http|stremio)\.[a-z0-9_]+$/.exec(p))) return { section: "sources", source: m[1] };
+    if (p === "unknown_settle_hours") return { section: "sources", source: "" };
+    if (/^notify\./.test(p)) return { section: "notifications", source: null };
+    if (/^after_download\./.test(p)) return { section: "finish", source: null };
+    if (p === "allow_private_hosts") return { section: "safety", source: null };
+    return { section: "other", source: null };
+  }
+
+  // When a change takes effect, ONLY for the keys whose reading was checked in the hub's code (listed in the report):
+  //   hub/daemon.py re-reads the settings every SETTINGS_TTL (2 s) and uses them for the speed in force (_global_bps), the slots
+  //   (_caps), the finish pass (notifications, open-when-done), settling lost rows and the retry decision (_max_retries);
+  //   hub/engines/http.py and stremio.py read their own blocks once, when a download starts.
+  // Any other key says nothing rather than guess.
+  const TIMING_RULES = [
+    [/^(rate_limit_kbps|schedule)$/, "within a few seconds"],
+    [/^concurrency\./, "within a few seconds"],
+    [/^notify\./, "from the next announcement"],
+    [/^after_download\./, "for downloads that finish after the change"],
+    [/^unknown_settle_hours$/, "at the hub's next check of other tools' downloads"],
+    [/^(http\.(stall_seconds|segments|segment_min_bytes)|stremio\.(stall_seconds|metadata_timeout))$/, "for the next download that starts"],
+    [/^(http|stremio)\.max_retries$/, "the next time a download fails and the hub decides on a retry"],
+  ];
+  function timingFor(path) {
+    for (const [re, text] of TIMING_RULES) if (re.test(String(path || ""))) return text;
+    return "";
+  }
+
+  function valuesEqual(a, b) {
+    if (a === b) return true;
+    if (a === null || b === null || typeof a !== "object" || typeof b !== "object") return false;
+    if (Array.isArray(a) !== Array.isArray(b)) return false;
+    const ka = Object.keys(a), kb = Object.keys(b);
+    if (ka.length !== kb.length) return false;
+    return ka.every((k) => Object.prototype.hasOwnProperty.call(b, k) && valuesEqual(a[k], b[k]));
+  }
+
+  // The hub's own default for a key (undefined when the hub did not report defaults, so the row shows none).
+  function defaultOf(payload, path) { return getPath((payload && payload.defaults) || {}, path); }
+
+  function setPath(obj, path, value) {
+    const keys = String(path).split(".");
+    let node = obj;
+    keys.slice(0, -1).forEach((k) => { if (node[k] === null || typeof node[k] !== "object") node[k] = {}; node = node[k]; });
+    node[keys[keys.length - 1]] = value;
+  }
+
+  // A value in the words a person would use.  `spec.type`: bool, int, float, text, hosts, choice, list (a schedule or a folder map).
+  function formatValue(spec, v, payload) {
+    if (v === undefined) return "";
+    if (v === null) return /\.level$/.test(String(spec.path || "")) ? "follow Settings > Notifications" : "not set";
+    if (spec.type === "bool") return v === true ? "On" : "Off";
+    if (spec.type === "hosts") return Array.isArray(v) && v.length ? v.join(", ") : "none";
+    if (spec.type === "choice" && !/\.level$/.test(String(spec.path || ""))) return OPEN_LABELS[v] || String(v);
+    if (spec.type === "list") {
+      const n = Array.isArray(v) ? v.length : (v && typeof v === "object" ? Object.keys(v).length : 0);
+      const noun = spec.path === "schedule" ? ["window", "windows"] : ["file type", "file types"];
+      return n === 0 ? "none" : n + " " + (n === 1 ? noun[0] : noun[1]);
+    }
+    if (typeof v === "number") return String(v) + (spec.unit ? " " + spec.unit : "");
+    if (v === "") return spec.path === "library_root" ? "the default Jarvis downloads folder" : "empty";
+    return String(v);
+  }
+
+  // What a row says under its help text: the default, whether the value differs, and when a change takes effect.
+  function rowInfo(spec, payload, current) {
+    const def = defaultOf(payload, spec.path);
+    const has = def !== undefined;
+    const timing = timingFor(spec.path);
+    return {
+      hasDefault: has, differs: has && !valuesEqual(current, def),
+      defaultText: has ? "Default: " + formatValue(spec, def, payload) : "",
+      timing: timing ? "Takes effect " + timing : "",
+    };
+  }
+
+  // Search: every word typed must be somewhere in the text (label, help, the source it belongs to).
+  function matchQuery(text, query) {
+    const words = String(query || "").toLowerCase().split(/\s+/).filter(Boolean);
+    const hay = String(text || "").toLowerCase();
+    return words.every((w) => hay.indexOf(w) !== -1);
+  }
+
+  // ---- the per-source blocks
+  const ENGINE_WORDS = { ready: "Ready", needs_setup: "Needs setup", not_running: "Not running", off: "Off", broken: "Broken" };
+  const ENGINE_DOTS = { ready: "ok", needs_setup: "warn", not_running: "warn", off: "off", broken: "bad" };
+  // an engine the hub's `sources` answer didn't deliver (older hub, or the call failed): the three that have settings here
+  const FALLBACK_ENGINES = [{ id: "http", label: "HTTP" }, { id: "ytdlp", label: "yt-dlp" }, { id: "stremio", label: "Stremio (torrent)" }];
+  // The block's scroll anchor: the Sources tab's Configure button lands on it (tool.js CONFIGURE_ANCHORS).
+  const SOURCE_ANCHORS = { http: "http", ytdlp: "yt-dlp", stremio: "stremio", qbittorrent: "qbittorrent" };
+  function sourceAnchor(id) { return SOURCE_ANCHORS[id] || anchorOf("source " + id); }
+
+  function providerDot(p) {
+    if (p && p.enabled === false) return { tone: "off", word: "Off" };
+    if (p && p.last_error) return { tone: "bad", word: "Error" };
+    if (p && typeof p.live === "number" && typeof p.stale === "number" && p.live > 0 && p.stale >= p.live) return { tone: "warn", word: "Not reporting" };
+    return { tone: "ok", word: "Reporting" };
+  }
+
+  // The blocks of the Sources section, in order: engines (as the Sources tab lists them), then the programs that report downloads.
+  // `rowSources`: engine ids that some writable row belongs to, so a setting for an engine the answer didn't list still gets a block.
+  function planSources(payload, sources, rowSources) {
+    const out = [];
+    const seen = {};
+    const engines = sources && Array.isArray(sources.engines) && sources.engines.length ? sources.engines : FALLBACK_ENGINES;
+    engines.forEach((e) => {
+      if (!e || typeof e.id !== "string") return;
+      seen[e.id] = true;
+      out.push({ kind: "engine", id: e.id, label: e.label || e.id, anchor: sourceAnchor(e.id), tone: ENGINE_DOTS[e.state] || "off",
+        word: ENGINE_WORDS[e.state] || "", reason: e.reason || "", config_file: e.config_file || "" });
+    });
+    (rowSources || []).forEach((id) => {
+      if (id && !seen[id]) { seen[id] = true; out.push({ kind: "engine", id: id, label: id, anchor: sourceAnchor(id), tone: "off", word: "", reason: "", config_file: "" }); }
+    });
+    (Array.isArray(payload && payload.providers) ? payload.providers : []).forEach((p) => {
+      if (!p || typeof p.id !== "string") return;
+      const d = providerDot(p);
+      out.push({ kind: "provider", id: p.id, label: p.label || p.id, anchor: "tool-" + anchorOf(p.id), tone: d.tone, word: d.word, reason: "", config_file: "", provider: p });
+    });
+    return out;
+  }
+
+  // ---- the two list editors
+  // Which row of a list a hub refusal is about, from the hub's own sentence ("schedule window 2: ...", ".iso: ...", "bad extension 'x'"),
+  // or -1 when it says none.  The sentence itself is shown unchanged.
+  function rowOfError(kind, message, model) {
+    const text = String(message || "");
+    if (kind === "schedule") {
+      const m = /schedule window (\d+)/.exec(text);
+      const n = m ? Number(m[1]) - 1 : -1;
+      return n >= 0 && n < model.length ? n : -1;
+    }
+    const norm = (e) => { const t = String(e || "").trim().toLowerCase(); return t && t[0] !== "." ? "." + t : t; };
+    const bad = /bad extension '([^']*)'/.exec(text) || /bad extension "([^"]*)"/.exec(text);
+    for (let i = 0; i < model.length; i++) {
+      const ext = norm(model[i].ext);
+      if (bad && String(model[i].ext || "").slice(0, 30) === bad[1]) return i;
+      if (ext && text.toLowerCase().indexOf(ext + ":") === 0) return i;
+    }
+    return -1;
+  }
 
   function hostsToText(list) { return Array.isArray(list) ? list.join("\n") : ""; }
   function textToHosts(text) {
@@ -468,67 +641,7 @@
   }
 
   // ---- the section --------------------------------------------------------------------------------------
-
-  function build(ctx) {
-    const ui = ctx.ui;
-    const h = ui.h;
-    return getJson("/api/hub/settings").then((payload) => {
-      const blocks = [];
-
-      function savedFlash(status) { ui.flash(status, "Saved", "ok"); setTimeout(() => ui.flash(status, ""), 1800); }
-
-      function settingRow(spec, extra) {
-        const status = h("span", { class: "prefs-row__status" });
-        let value = getPath(payload.settings || {}, spec.path);
-        let control = Object.assign({}, spec);
-        if (spec.type === "choice") {
-          const modes = (payload.open_modes || []).map((m) => [m, OPEN_LABELS[m] || m]);
-          control = Object.assign({}, spec, { choices: modes });
-        } else if (spec.type === "hosts") {
-          control = Object.assign({}, spec, { type: "text" });
-          value = (value || []).join(", ");
-        }
-        const commit = async (next) => {
-          const sent = spec.type === "hosts" ? textToHosts(next) : next;
-          await writeSetting(spec.path, sent, payload);
-          savedFlash(status);
-        };
-        const ctl = ui.makeControl(control, value, commit, status);
-        return ui.rowShell(spec.label, (extra && extra.help) || spec.help || "", ctl.el, status);
-      }
-
-      planRows(payload).forEach((g) => blocks.push(anchored(ui.group(g.group, g.rows.map((r) => settingRow(r))), g.group)));
-
-      // ---- which events notify, and how important each is
-      const writable = new Set(payload.writable || []);
-      const N = global.JarvisNotifications;
-      const levels = N && typeof N.pickerLevels === "function" ? N.pickerLevels() : { items: [] };
-      const eventRows = [];
-      (payload.events || []).forEach((ev) => {
-        if (!writable.has("notify." + ev + ".enabled")) return;
-        const onStatus = h("span", { class: "prefs-row__status" });
-        const on = ui.makeControl({ type: "bool" }, getPath(payload.settings, "notify." + ev + ".enabled") === true,
-          async (v) => { await writeSetting("notify." + ev + ".enabled", v, payload); savedFlash(onStatus); }, onStatus);
-        eventRows.push(ui.rowShell(EVENT_LABELS[ev] || ev, "", on.el, onStatus));
-        if (writable.has("notify." + ev + ".level") && levels.items.length) {
-          const lvStatus = h("span", { class: "prefs-row__status" });
-          const current = getPath(payload.settings, "notify." + ev + ".level");
-          const choices = [["default", "Follow Settings > Notifications"]].concat(levels.items.map((l) => [l.level, l.label]));
-          const lv = ui.makeControl({ type: "choice", choices: choices }, current === null || current === undefined ? "default" : current,
-            async (v) => { await writeSetting("notify." + ev + ".level", v === "default" ? null : v, payload); savedFlash(lvStatus); }, lvStatus);
-          eventRows.push(ui.rowShell((EVENT_LABELS[ev] || ev) + ": how important", "", lv.el, lvStatus));
-        }
-      });
-      if (eventRows.length) blocks.push(ui.group("Which events notify", eventRows));
-
-      // ---- speed windows
-      if (writable.has("schedule")) blocks.push(scheduleBlock(ctx, payload));
-      if (writable.has("ext_folders")) blocks.push(extFoldersBlock(ctx, payload));
-      blocks.push(anchored(providersBlock(ctx, payload), "Other tools' downloads"));
-      blocks.push(anchored(stremioBlock(ctx), "Stremio"));
-      return blocks.filter(Boolean);
-    });
-  }
+  // (build() and the page are below, after the Stremio card)
 
   // ---- the Stremio card (DOM) ---------------------------------------------------------------------------
   // Drawn at once with "Reading ..." and filled when the status arrives, so the rest of Settings never waits for it.
@@ -735,119 +848,431 @@
     ]);
   }
 
-  function listEditor(ctx, opts) {
-    // opts: { title, help, model, columns:[{key,label,kind,choices?,width?}], blank(), save(model), addLabel, max }
+  // ---- the page (DOM) -------------------------------------------------------------------------------------------------------
+  // build() returns ONE element: a search bar, a rail of sections, and the sections.  Every row still goes through ctx.ui (the row
+  // helpers settings.js hands over) and writes through dl_prefs / dl_settings / dl_provider_prefs; this file only decides what
+  // goes where, what each row says about itself, and what the search and "Changed from default" hide.  The finished page is
+  // reachable as `element.__dls` (rows, setQuery, setChangedOnly, visible ...) so a test can drive it without a browser.
+
+  const PAGE_CSS = [
+    ".dls{display:grid;grid-template-columns:168px minmax(0,1fr);gap:4px 18px;align-items:start}",
+    ".dls-tools{grid-column:1/-1;display:flex;flex-wrap:wrap;align-items:center;gap:10px;position:sticky;top:-14px;z-index:3;padding:8px 0;background:var(--bg-0,var(--bg-1));border-bottom:1px solid var(--border)}",
+    ".dls-tools .dls-search{width:280px;max-width:100%}.dls-count{font-size:11.5px;color:var(--text-dim)}",
+    ".dls-rail{position:sticky;top:48px;display:flex;flex-direction:column;gap:2px}",
+    ".dls-rail__item{display:flex;justify-content:space-between;gap:8px;text-align:left;padding:5px 8px;border:0;border-radius:var(--radius);background:none;color:var(--text-dim);font:inherit;font-size:12.5px;cursor:pointer}",
+    ".dls-rail__item:hover,.dls-rail__item.is-active{background:var(--bg-1);color:var(--text)}.dls-rail__n{color:var(--text-dimmer);font-size:11px}",
+    ".dls-main{min-width:0}.dls-section{margin:0 0 22px}.dls-section>.dls-lede{margin:0 0 8px;font-size:11.5px;color:var(--text-dim)}",
+    ".dls [hidden]{display:none!important}",
+    ".dls-meta{display:flex;flex-wrap:wrap;align-items:center;gap:2px 12px;margin-top:3px;font-size:11px;color:var(--text-dimmer)}",
+    ".dls-reset{padding:0;border:0;background:none;color:var(--accent);font:inherit;font-size:11px;text-decoration:underline;cursor:pointer}",
+    ".dls-source{margin:0 0 8px;border:1px solid var(--border);border-radius:var(--radius);background:var(--bg-1)}",
+    ".dls-source>summary{display:flex;align-items:center;gap:8px;padding:8px 10px;cursor:pointer;font-size:13px;color:var(--text);list-style:none}",
+    ".dls-source>summary::-webkit-details-marker{display:none}.dls-source>summary::before{content:'\\25B8';color:var(--text-dimmer)}",
+    ".dls-source[open]>summary::before{content:'\\25BE'}.dls-source__state{margin-left:auto;font-size:11.5px;color:var(--text-dim)}",
+    ".dls-source__body{padding:0 12px 10px}.dls-dot{width:9px;height:9px;border-radius:50%;background:var(--text-dimmer);flex:none}",
+    ".dls-dot--ok{background:var(--green,#3fb950)}.dls-dot--warn{background:var(--gold,#d29922)}.dls-dot--bad{background:var(--red,#f85149)}",
+    ".dls-table{width:100%;border-collapse:collapse;margin:4px 0 8px}.dls-table th{font-size:11px;font-weight:400;text-align:left;color:var(--text-dimmer);padding:2px 6px 4px 0}",
+    ".dls-table td{padding:3px 6px 3px 0;vertical-align:top}.dls-table .prefs-input,.dls-table .prefs-select{width:100%;box-sizing:border-box}",
+    ".dls-table__err td{padding:0 0 6px;font-size:11.5px;color:var(--red)}.dls-none{padding:18px 0;color:var(--text-dim);font-size:13px}",
+    "@media (max-width:760px){.dls{grid-template-columns:1fr}.dls-rail{position:static;flex-direction:row;flex-wrap:wrap}.dls-tools{position:static}}",
+  ].join("\n");
+  function injectStyle() {
+    if (typeof document === "undefined" || !document.head || document.getElementById("dls-style")) return;
+    const st = document.createElement("style");
+    st.id = "dls-style";
+    st.textContent = PAGE_CSS;
+    document.head.appendChild(st);
+  }
+
+  function build(ctx) {
+    return Promise.all([getJson("/api/hub/settings"), getJson("/api/hub/sources").catch(() => null)])
+      .then(([payload, sources]) => [makePage(ctx, payload, sources)]);
+  }
+
+  function makePage(ctx, payload, sources) {
+    injectStyle();
     const ui = ctx.ui;
     const h = ui.h;
-    const model = opts.model;
-    const list = h("div", { class: "prefs-list" });
-    const status = h("span", { class: "prefs-row__status" });
-    function paint() {
-      list.replaceChildren(...model.map((row, i) => {
-        const cells = opts.columns.map((c) => {
-          let input;
-          if (c.kind === "select") {
-            input = h("select", { class: "prefs-select", "aria-label": c.label });
-            c.choices(row).forEach(([v, label]) => input.append(h("option", { value: String(v), text: label })));
-            input.value = String(row[c.key]);
-          } else {
-            input = h("input", { type: c.kind === "number" ? "number" : "text", class: "prefs-input", "aria-label": c.label, placeholder: c.label, spellcheck: "false" });
-            if (c.kind === "number") input.min = "0";
-            input.value = row[c.key] === undefined || row[c.key] === null ? "" : String(row[c.key]);
-          }
-          input.addEventListener("change", () => { row[c.key] = c.kind === "number" ? Number(input.value) : input.value; });
-          return input;
-        });
-        const remove = h("button", { class: "btn btn--ghost btn--sm", type: "button", text: "Remove",
-          onclick: () => { model.splice(i, 1); paint(); } });
-        return h("div", { class: "prefs-inline" }, cells.concat([remove]));
-      }));
-      if (!model.length) list.append(h("div", { class: "prefs-empty", text: opts.empty || "None yet." }));
+    if (!payload.settings || typeof payload.settings !== "object") payload.settings = {};
+    const writable = new Set(payload.writable || []);
+    const entries = [];                 // everything the search and the toggle can hide: settings, tables, the Stremio card, provider rows
+    const sourceBlocks = [];            // { id, label, node, body, details, userOpen }
+    const state = { query: "", changedOnly: false };
+
+    function savedFlash(status) { ui.flash(status, "Saved", "ok"); setTimeout(() => ui.flash(status, ""), 1800); }
+
+    // ---- one setting
+    function addEntry(e) { entries.push(e); return e; }
+
+    function paintMeta(e) {
+      if (!e.meta) return;
+      const info = e.info();
+      const kids = [];
+      if (info.defaultText) kids.push(h("span", { class: "dls-default", text: info.defaultText }));
+      if (info.differs) kids.push(h("button", { class: "dls-reset", type: "button", text: "Reset", "aria-label": "Reset " + e.label + " to its default", onclick: () => e.reset() }));
+      if (info.timing) kids.push(h("span", { class: "dls-timing", text: info.timing }));
+      e.meta.replaceChildren(...kids);
+      if (e.node && typeof e.node.setAttribute === "function") e.node.setAttribute("data-changed", info.differs ? "1" : "0");
     }
-    paint();
-    const add = h("button", { class: "btn btn--ghost btn--sm", type: "button", text: opts.addLabel,
-      onclick: () => { if (model.length < (opts.max || 50)) { model.push(opts.blank()); paint(); } } });
-    const save = h("button", { class: "btn btn--sm", type: "button", text: "Save", onclick: async () => {
-      save.disabled = true;
-      ui.flash(status, "");
-      try { await opts.save(model); ui.flash(status, "Saved", "ok"); }
-      catch (err) { ui.flash(status, err.message, "err"); }
-      save.disabled = false;
-    } });
-    return ui.group(opts.title, [
-      opts.help ? h("div", { class: "prefs-note", text: opts.help }) : null,
-      list,
-      h("div", { class: "prefs-inline" }, [add, save, status]),
-    ].filter(Boolean));
-  }
 
-  function scheduleBlock(ctx, payload) {
-    const dayChoices = (w) => [["all", "Every day"], ["weekdays", "Weekdays"], ["weekends", "Weekends"]]
-      .concat(["all", "weekdays", "weekends"].indexOf(w.days) === -1 ? [[w.days, "Chosen days (" + w.days + ")"]] : []);
-    return listEditor(ctx, {
-      title: "Speed windows",
-      help: "Inside a window its limit replaces the speed limit above (0 = unlimited there). The first window that matches wins; a window may cross midnight.",
-      model: windowsToModel(getPath(payload.settings, "schedule")),
-      columns: [
-        { key: "days", label: "Days", kind: "select", choices: dayChoices },
-        { key: "from", label: "From (hh:mm)", kind: "text" },
-        { key: "to", label: "To (hh:mm)", kind: "text" },
-        { key: "rate_limit_kbps", label: "Limit (KB/s)", kind: "number" },
-      ],
-      blank: blankWindow, addLabel: "Add a window", max: 10, empty: "No windows: the speed limit above always applies.",
-      save: (model) => writeSetting("schedule", modelToWindows(model), payload),
-    });
-  }
+    function settingRow(spec, where) {
+      const status = h("span", { class: "prefs-row__status" });
+      const toCtl = spec.toCtl || ((v) => (spec.type === "hosts" ? (v || []).join(", ") : v));
+      const fromCtl = spec.fromCtl || ((v) => (spec.type === "hosts" ? textToHosts(v) : v));
+      let control = Object.assign({}, spec);
+      if (spec.type === "choice" && !spec.choices) control.choices = (payload.open_modes || []).map((m) => [m, OPEN_LABELS[m] || m]);
+      if (spec.type === "hosts") control.type = "text";
+      const e = { kind: "setting", path: spec.path, label: spec.label, help: spec.help || "", section: where.section, source: where.source, spec: spec, status: status };
+      const commit = async (next) => {
+        const sent = fromCtl(next);
+        await writeSetting(spec.path, sent, payload);
+        setPath(payload.settings, spec.path, sent);
+        savedFlash(status);
+        paintMeta(e);
+        applyFilter();
+      };
+      const ctl = ui.makeControl(control, toCtl(getPath(payload.settings, spec.path)), commit, status);
+      e.meta = h("div", { class: "dls-meta" });
+      e.node = ui.rowShell(spec.label, spec.help || "", ctl.el, status, e.meta);
+      e.info = () => rowInfo(spec, payload, getPath(payload.settings, spec.path));
+      e.reset = async () => {
+        const def = defaultOf(payload, spec.path);
+        if (def === undefined || !e.info().differs) return;
+        try {
+          await writeSetting(spec.path, def, payload);
+          setPath(payload.settings, spec.path, def);
+          ctl.set(toCtl(def));
+          savedFlash(status);
+        } catch (err) { ui.flash(status, err.message, "err"); }
+        paintMeta(e);
+        applyFilter();
+      };
+      paintMeta(e);
+      return addEntry(e);
+    }
 
-  function extFoldersBlock(ctx, payload) {
-    return listEditor(ctx, {
-      title: "Folder per file type",
-      help: "Send a kind of file somewhere of its own, e.g. .iso to ISOs. A folder name is inside the download folder; a longer ending (.tar.gz) wins over a shorter one.",
-      model: extToModel(getPath(payload.settings, "ext_folders")),
-      columns: [{ key: "ext", label: ".ext", kind: "text" }, { key: "folder", label: "Folder", kind: "text" }],
-      blank: () => ({ ext: "", folder: "" }), addLabel: "Add a file type", max: 50, empty: "None: files go by kind (video, audio, other).",
-      save: (model) => writeSetting("ext_folders", modelToExt(model), payload),
-    });
-  }
+    // ---- a row that is not a hub setting (a program's own switch, its update size, its check interval): no default, no timing
+    function plainRow(label, help, ctlEl, status, where, text) {
+      const node = ui.rowShell(label, help, ctlEl, status);
+      return addEntry({ kind: "plain", path: "", label: label, help: help || "", section: where.section, source: where.source, node: node, text: text || "", info: () => ({ differs: false }) });
+    }
 
-  function providersBlock(ctx, payload) {
-    const ui = ctx.ui;
-    const h = ui.h;
-    const list = Array.isArray(payload.providers) ? payload.providers : [];
-    if (!list.length) return null;
-    const rows = [];
-    list.forEach((p) => {
-      const onStatus = h("span", { class: "prefs-row__status" });
-      const on = ui.makeControl({ type: "bool" }, p.enabled === true, async (v) => {
-        const r = await runHubTool(PROVIDER_TOOL, { id: p.id, enabled: v });
-        if (r && r.ok === false) throw new Error(r.error);
-        ui.flash(onStatus, "Saved", "ok");
-      }, onStatus);
-      rows.push(ui.rowShell(p.label || p.id, p.read_only ? "Shows its downloads here; has no controls." : "", on.el, onStatus));
-      providerSettingRows(p).forEach((f) => {
-        const stStatus = h("span", { class: "prefs-row__status" });
-        const ctl = ui.makeControl({ type: f.type, min: f.min, unit: f.unit }, f.value, async (v) => {
-          await runHubTool(PROVIDER_TOOL, providerSettingArgs(p.id, f.key, v));       // the hub's own error text reaches the row as it is
-          ui.flash(stStatus, "Saved", "ok");
-        }, stStatus);
-        rows.push(ui.rowShell(f.label, f.help, ctl.el, stStatus));
+    // ---- the two list editors, as tables
+    function tableEditor(opts) {
+      // opts: { path, kind, title, help, model, columns:[{key,label,kind,choices?}], blank(), save(model), addLabel, max, empty }
+      const model = opts.model;
+      const errors = {};
+      const status = h("span", { class: "prefs-row__status" });
+      const body = h("tbody");
+      const table = h("table", { class: "dls-table" }, [
+        h("thead", {}, [h("tr", {}, opts.columns.map((c) => h("th", { scope: "col", text: c.label })).concat([h("th", { scope: "col", text: "" })]))]),
+        body,
+      ]);
+      const emptyNote = h("div", { class: "prefs-empty", text: opts.empty || "None yet." });
+      function paint() {
+        const trs = [];
+        model.forEach((row, i) => {
+          const cells = opts.columns.map((c) => {
+            let input;
+            if (c.kind === "select") {
+              input = h("select", { class: "prefs-select", "aria-label": c.label + ", row " + (i + 1) });
+              c.choices(row).forEach(([v, label]) => input.append(h("option", { value: String(v), text: label })));
+              input.value = String(row[c.key]);
+            } else {
+              input = h("input", { type: c.kind === "number" ? "number" : "text", class: "prefs-input", "aria-label": c.label + ", row " + (i + 1), spellcheck: "false" });
+              if (c.kind === "number") input.min = "0";
+              input.value = row[c.key] === undefined || row[c.key] === null ? "" : String(row[c.key]);
+            }
+            input.addEventListener("change", () => { row[c.key] = c.kind === "number" ? Number(input.value) : input.value; delete errors[i]; paint(); });
+            return h("td", {}, [input]);
+          });
+          trs.push(h("tr", { "data-row": String(i) }, cells.concat([h("td", {}, [h("button", { class: "btn btn--ghost btn--sm", type: "button", text: "Remove", "aria-label": "Remove row " + (i + 1),
+            onclick: () => { model.splice(i, 1); Object.keys(errors).forEach((k) => delete errors[k]); paint(); } })])])));
+          if (errors[i]) trs.push(h("tr", { class: "dls-table__err", role: "alert" }, [h("td", { colspan: String(opts.columns.length + 1), text: errors[i] })]));
+        });
+        body.replaceChildren(...trs);
+        e.view = trs;                       // the rows as drawn (a test reads these; the page never does)
+        table.hidden = !model.length;
+        emptyNote.hidden = !!model.length;
+      }
+      const spec = { path: opts.path, type: "list" };
+      const e = { kind: "table", view: [], path: opts.path, label: opts.title, help: opts.help, section: opts.section, source: null, spec: spec, status: status };
+      paint();
+      e.meta = h("div", { class: "dls-meta" });
+      e.info = () => rowInfo(spec, payload, getPath(payload.settings, opts.path));
+      e.reset = async () => {
+        const def = defaultOf(payload, opts.path);
+        if (def === undefined || !e.info().differs) return;
+        try {
+          await writeSetting(opts.path, def, payload);
+          setPath(payload.settings, opts.path, def);
+          model.splice(0, model.length, ...opts.toModel(def));
+          Object.keys(errors).forEach((k) => delete errors[k]);
+          paint();
+          savedFlash(status);
+        } catch (err) { ui.flash(status, err.message, "err"); }
+        paintMeta(e);
+        applyFilter();
+      };
+      const add = h("button", { class: "btn btn--ghost btn--sm", type: "button", text: opts.addLabel, onclick: () => { if (model.length < (opts.max || 50)) { model.push(opts.blank()); paint(); } } });
+      const save = h("button", { class: "btn btn--sm", type: "button", text: "Save", onclick: async () => {
+        save.disabled = true;
+        ui.flash(status, "");
+        Object.keys(errors).forEach((k) => delete errors[k]);
+        try {
+          const written = opts.toWritten(model);
+          await writeSetting(opts.path, written, payload);
+          setPath(payload.settings, opts.path, written);
+          paint();
+          ui.flash(status, "Saved", "ok");
+          paintMeta(e);
+          applyFilter();
+        } catch (err) {
+          const at = rowOfError(opts.kind, err.message, model);
+          if (at >= 0) errors[at] = err.message;
+          paint();
+          ui.flash(status, err.message, "err");     // the hub's own words, whole, whether or not one row could be named
+        }
+        save.disabled = false;
+      } });
+      e.node = h("div", { class: "prefs-group-table", "data-search": (opts.title + " " + opts.help).toLowerCase() }, [
+        h("div", { class: "prefs-row__label", text: opts.title }),
+        h("div", { class: "prefs-row__help", text: opts.help }),
+        e.meta, table, emptyNote,
+        h("div", { class: "prefs-inline" }, [add, save, status]),
+      ]);
+      paintMeta(e);
+      return addEntry(e);
+    }
+
+    function scheduleTable(where) {
+      const dayChoices = (w) => [["all", "Every day"], ["weekdays", "Weekdays"], ["weekends", "Weekends"]]
+        .concat(["all", "weekdays", "weekends"].indexOf(w.days) === -1 ? [[w.days, "Chosen days (" + w.days + ")"]] : []);
+      return tableEditor({
+        path: "schedule", kind: "schedule", title: "Speed windows", section: where.section,
+        help: "Inside a window its limit replaces the speed limit above (0 = unlimited there). The first window that matches wins; a window may cross midnight.",
+        model: windowsToModel(getPath(payload.settings, "schedule")),
+        columns: [
+          { key: "days", label: "Days", kind: "select", choices: dayChoices },
+          { key: "from", label: "From (hh:mm)", kind: "text" },
+          { key: "to", label: "To (hh:mm)", kind: "text" },
+          { key: "rate_limit_kbps", label: "Limit (KB/s)", kind: "number" },
+        ],
+        blank: blankWindow, addLabel: "Add a window", max: 10, empty: "No windows: the speed limit above always applies.",
+        toModel: windowsToModel, toWritten: modelToWindows,
       });
-      if (typeof p.interval_s === "number") {
-        const ivStatus = h("span", { class: "prefs-row__status" });
-        const iv = ui.makeControl({ type: "float", min: 0.5, unit: "seconds" }, p.interval_s, async (v) => {
-          await runHubTool(PROVIDER_TOOL, { id: p.id, interval_s: v });
-          ui.flash(ivStatus, "Saved", "ok");
-        }, ivStatus);
-        rows.push(ui.rowShell((p.label || p.id) + ": check every", "", iv.el, ivStatus));
+    }
+
+    function extTable(where) {
+      return tableEditor({
+        path: "ext_folders", kind: "ext", title: "Folder per file type", section: where.section,
+        help: "Send a kind of file somewhere of its own, e.g. .iso to ISOs. A folder name is inside the download folder; a longer ending (.tar.gz) wins over a shorter one.",
+        model: extToModel(getPath(payload.settings, "ext_folders")),
+        columns: [{ key: "ext", label: ".ext", kind: "text" }, { key: "folder", label: "Folder", kind: "text" }],
+        blank: () => ({ ext: "", folder: "" }), addLabel: "Add a file type", max: 50, empty: "None: files go by kind (video, audio, other).",
+        toModel: extToModel, toWritten: modelToExt,
+      });
+    }
+
+    // ---- which rows exist, and where they go
+    const rowSpecs = planRows(payload).reduce((all, g) => all.concat(g.rows), []);
+    const bySection = {};
+    PAGE_SECTIONS.concat([OTHER_SECTION]).forEach((s) => { bySection[s.id] = { def: s, children: [], settings: [] }; });
+    const bySource = {};
+    const rowSources = [];
+    rowSpecs.forEach((spec) => {
+      const where = placeOf(spec.path);
+      if (where.source) { (bySource[where.source] = bySource[where.source] || []).push(spec); if (rowSources.indexOf(where.source) === -1) rowSources.push(where.source); }
+      else bySection[where.section].settings.push(spec);
+    });
+
+    PAGE_SECTIONS.concat([OTHER_SECTION]).forEach((s) => {
+      const sec = bySection[s.id];
+      sec.settings.forEach((spec) => sec.children.push(settingRow(spec, { section: s.id, source: null }).node));
+    });
+
+    // files and speed tables sit with their section's rows
+    if (writable.has("ext_folders")) bySection.files.children.push(extTable({ section: "files" }).node);
+    if (writable.has("schedule")) bySection.speed.children.push(scheduleTable({ section: "speed" }).node);
+
+    // which events notify, and how important each is
+    const N = global.JarvisNotifications;
+    const levels = N && typeof N.pickerLevels === "function" ? N.pickerLevels() : { items: [] };
+    (payload.events || []).forEach((ev) => {
+      if (writable.has("notify." + ev + ".enabled")) {
+        bySection.notifications.children.push(settingRow({ path: "notify." + ev + ".enabled", label: EVENT_LABELS[ev] || ev, type: "bool", help: "" },
+          { section: "notifications", source: null }).node);
+      }
+      if (writable.has("notify." + ev + ".level") && levels.items.length) {
+        const choices = [["default", "Follow Settings > Notifications"]].concat(levels.items.map((l) => [l.level, l.label]));
+        bySection.notifications.children.push(settingRow({ path: "notify." + ev + ".level", label: (EVENT_LABELS[ev] || ev) + ": how important", type: "choice", choices: choices, help: "",
+          toCtl: (v) => (v === null || v === undefined ? "default" : v), fromCtl: (v) => (v === "default" ? null : v) }, { section: "notifications", source: null }).node);
       }
     });
-    return ui.group("Other tools' downloads", rows);
+
+    // general rows of the Sources section come first, then one collapsed block per source
+    const srcSec = bySection.sources;
+    const srcChildren = srcSec.children.slice();
+    const plan = planSources(payload, sources, rowSources);
+
+    function sourceBlock(src) {
+      const specs = src.kind === "engine" ? (bySource[src.id] || []) : [];
+      const kids = [];
+      const mark = { section: "sources", source: src.id, label: src.label };
+      specs.forEach((spec) => kids.push(settingRow(spec, mark).node));
+      if (src.id === "stremio") {
+        const card = stremioBlock(ctx);
+        kids.push(card);
+        addEntry({ kind: "card", path: "", label: "Stremio server", help: "", section: "sources", source: "stremio", node: card, info: () => ({ differs: false }),
+          text: "stremio server web folder start command address cache torrent settings file repair diagnostic locate" });
+      }
+      if (src.kind === "provider") {
+        const p = src.provider;
+        const onStatus = h("span", { class: "prefs-row__status" });
+        const on = ui.makeControl({ type: "bool" }, p.enabled === true, async (v) => {
+          const r = await runHubTool(PROVIDER_TOOL, { id: p.id, enabled: v });
+          if (r && r.ok === false) throw new Error(r.error);
+          ui.flash(onStatus, "Saved", "ok");
+        }, onStatus);
+        kids.push(plainRow(p.label || p.id, p.read_only ? "Shows its downloads here; has no controls." : "", on.el, onStatus, mark, "switch on off enabled").node);
+        providerSettingRows(p).forEach((f) => {
+          const stStatus = h("span", { class: "prefs-row__status" });
+          const ctl = ui.makeControl({ type: f.type, min: f.min, unit: f.unit }, f.value, async (v) => {
+            await runHubTool(PROVIDER_TOOL, providerSettingArgs(p.id, f.key, v));       // the hub's own error text reaches the row as it is
+            ui.flash(stStatus, "Saved", "ok");
+          }, stStatus);
+          kids.push(plainRow(f.label, f.help, ctl.el, stStatus, mark, "").node);
+        });
+        if (typeof p.interval_s === "number") {
+          const ivStatus = h("span", { class: "prefs-row__status" });
+          const iv = ui.makeControl({ type: "float", min: 0.5, unit: "seconds" }, p.interval_s, async (v) => {
+            await runHubTool(PROVIDER_TOOL, { id: p.id, interval_s: v });
+            ui.flash(ivStatus, "Saved", "ok");
+          }, ivStatus);
+          kids.push(plainRow((p.label || p.id) + ": check every", "", iv.el, ivStatus, mark, "").node);
+        }
+      }
+      const count = kids.length;       // 0 = nothing to set for this source
+      if (!count) {
+        kids.push(h("div", { class: "prefs-note", text: "This source has no settings here." + (src.config_file ? " It is set up in " + src.config_file + "." : "") }));
+      }
+      const body = h("div", { class: "dls-source__body" }, kids);
+      const summary = h("summary", {}, [
+        h("span", { class: "dls-dot dls-dot--" + src.tone, "aria-hidden": "true" }),
+        h("span", { text: src.label }),
+        h("span", { class: "dls-source__state", text: [src.word, count ? "" : "no settings"].filter(Boolean).join(" \u00b7 ") }),
+      ]);
+      const details = h("details", { class: "dls-source", "data-settings-anchor": src.anchor }, [summary, body]);
+      const block = { id: src.id, label: src.label, node: details, details: details, userOpen: false };
+      details.addEventListener("toggle", () => { if (!state.query && !state.changedOnly) block.userOpen = !!details.open; });
+      // The Sources tab's Configure button scrolls to this node (settings.js scrollToAnchor); a closed block opens first, so the
+      // person lands on the settings and not on a folded heading.
+      const scroll = details.scrollIntoView;
+      details.scrollIntoView = function (o) { details.open = true; block.userOpen = true; if (typeof scroll === "function") scroll.call(details, o); };
+      sourceBlocks.push(block);
+      return block;
+    }
+
+    const engineBlocks = plan.filter((s) => s.kind === "engine").map(sourceBlock);
+    const providerBlocks = plan.filter((s) => s.kind === "provider").map(sourceBlock);
+    srcSec.children = srcChildren.concat(engineBlocks.map((b) => b.node));
+    if (providerBlocks.length) {
+      const wrap = h("div", { "data-settings-anchor": "other-tools-downloads" }, [h("h4", { class: "dls-sub", text: "Other tools' downloads" })].concat(providerBlocks.map((b) => b.node)));
+      srcSec.children.push(wrap);
+    }
+
+    // ---- sections and rail
+    const secNodes = {};
+    const railItems = {};
+    const railKids = [];
+    const mainKids = [];
+    PAGE_SECTIONS.concat([OTHER_SECTION]).forEach((s) => {
+      const sec = bySection[s.id];
+      if (!sec.children.length) return;
+      const node = h("section", { class: "prefs-group dls-section", id: "dls-" + s.id, "data-settings-anchor": anchorOf(s.title), "data-section": s.id },
+        [h("h3", { text: s.title }), h("div", { class: "dls-lede", text: s.lede })].concat(sec.children));
+      secNodes[s.id] = node;
+      const n = h("span", { class: "dls-rail__n", text: "" });
+      const item = h("button", { class: "dls-rail__item", type: "button", "data-target": s.id, onclick: () => {
+        Object.keys(railItems).forEach((k) => railItems[k].btn.classList.remove("is-active"));
+        item.classList.add("is-active");
+        if (typeof node.scrollIntoView === "function") node.scrollIntoView({ block: "start", behavior: "auto" });
+      } }, [h("span", { text: s.title }), n]);
+      railItems[s.id] = { btn: item, n: n, title: s.title };
+      railKids.push(item);
+      mainKids.push(node);
+    });
+    const none = h("div", { class: "dls-none", text: "No setting matches that.", hidden: true });
+    mainKids.push(none);
+    const rail = h("nav", { class: "dls-rail", "aria-label": "Download settings sections" }, railKids);
+    const main = h("div", { class: "dls-main" }, mainKids);
+
+    // ---- search and "Changed from default"
+    const search = h("input", { type: "search", class: "prefs-input dls-search", placeholder: "Search download settings\u2026", "aria-label": "Search download settings", spellcheck: "false", autocomplete: "off" });
+    const changedBox = h("input", { type: "checkbox", id: "dls-changed" });
+    const changedLabel = h("label", { class: "check", for: "dls-changed" }, [changedBox, h("span", { text: "Changed from default" })]);
+    const countEl = h("span", { class: "dls-count", "aria-live": "polite", text: "" });
+    const tools = h("div", { class: "dls-tools" }, [search, changedLabel, countEl]);
+
+    function entryText(e) {
+      const block = e.source ? sourceBlocks.find((b) => b.id === e.source) : null;
+      return [e.label, e.help, e.path, e.text || "", block ? block.label : ""].join(" ");
+    }
+    function entryVisible(e) {
+      if (state.changedOnly && !(e.info && e.info().differs)) return false;
+      return matchQuery(entryText(e), state.query);
+    }
+    function applyFilter() {
+      const filtering = !!state.query.trim() || state.changedOnly;
+      const perSection = {};
+      let shown = 0;
+      let total = 0;
+      entries.forEach((e) => {
+        const vis = entryVisible(e);
+        e.visible = vis;
+        if (e.node) e.node.hidden = !vis;
+        total++;
+        if (vis) { shown++; perSection[e.section] = (perSection[e.section] || 0) + 1; }
+      });
+      sourceBlocks.forEach((b) => {
+        const inside = entries.filter((e) => e.source === b.id && e.section === "sources");
+        const any = inside.some((e) => e.visible);
+        const labelHit = !state.changedOnly && matchQuery(b.label, state.query);
+        const vis = !filtering || any || (labelHit && !inside.length);
+        b.node.hidden = !vis;
+        b.details.open = filtering ? vis && (any || labelHit) : b.userOpen;
+      });
+      Object.keys(secNodes).forEach((id) => {
+        const blockShown = id === "sources" && sourceBlocks.some((b) => !b.node.hidden);
+        secNodes[id].hidden = filtering && !(perSection[id] > 0) && !blockShown;
+        const c = perSection[id] || 0;
+        railItems[id].n.textContent = filtering && c ? String(c) : "";
+      });
+      none.hidden = !(filtering && shown === 0 && !sourceBlocks.some((b) => !b.node.hidden));
+      countEl.textContent = filtering ? shown + " of " + total + " settings shown" : "";
+    }
+    search.addEventListener("input", () => { state.query = search.value; applyFilter(); });
+    changedBox.addEventListener("change", () => { state.changedOnly = !!changedBox.checked; applyFilter(); });
+    applyFilter();
+
+    const el = h("div", { class: "dls" }, [tools, rail, main]);
+    el.__dls = {
+      entries: entries, sourceBlocks: sourceBlocks, sections: secNodes,
+      setQuery: (q) => { state.query = String(q || ""); applyFilter(); },
+      setChangedOnly: (on) => { state.changedOnly = !!on; applyFilter(); },
+      visiblePaths: () => entries.filter((e) => e.visible && e.path).map((e) => e.path),
+      visibleLabels: () => entries.filter((e) => e.visible).map((e) => e.label),
+      sectionIds: () => Object.keys(secNodes),
+      rowFor: (path) => entries.find((e) => e.path === path) || null,
+      state: state,
+    };
+    return el;
   }
 
   const section = {
     id: "downloads", label: "Downloads", title: "Downloads",
     lede: "Where downloads go, how fast and how many at once, what happens when one finishes, and which events notify you. The Downloads panel (Menu > Downloads) shows and controls the downloads themselves.",
-    terms: "downloads download hub folder library speed limit bandwidth schedule window concurrency stremio yt-dlp video audio torrent steam provider notify notification finished after retry stall private host extension steam update size threshold gb unknown lost give up settle hours cancelled playnite stremio server start locate diagnostic",
+    terms: "downloads download hub folder library speed limit bandwidth schedule window concurrency stremio yt-dlp video audio torrent steam provider notify notification finished after retry stall private host extension steam update size threshold gb unknown lost give up settle hours cancelled playnite stremio server start locate diagnostic default reset changed from default rail section search parallel connections segments torrent metadata timeout speed windows folder per file type",
     build: build,
   };
 
@@ -862,6 +1287,8 @@
     stremioSetupModel: stremioSetupModel, serverSaveBody: serverSaveBody, webSaveBody: webSaveBody, stremioCacheModel: stremioCacheModel,
     cacheRequestText: cacheRequestText, repairModel: repairModel, repairBrokenFileHint: repairBrokenFileHint,
     settingsSaveFlow: settingsSaveFlow, repairFlow: repairFlow, startWebFlow: startWebFlow,
+    PAGE_SECTIONS: PAGE_SECTIONS, placeOf: placeOf, timingFor: timingFor, valuesEqual: valuesEqual, defaultOf: defaultOf, setPath: setPath, formatValue: formatValue,
+    rowInfo: rowInfo, matchQuery: matchQuery, planSources: planSources, providerDot: providerDot, rowOfError: rowOfError, TIMING_RULES: TIMING_RULES,
   } };
   if (typeof module !== "undefined" && module.exports) module.exports = global.JarvisDownloadsSettings;
 })(typeof window !== "undefined" ? window : globalThis);

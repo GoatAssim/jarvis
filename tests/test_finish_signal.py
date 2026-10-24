@@ -66,7 +66,10 @@ def fake_http(responses):
 
 TOOLS = [{"name": "get_battery", "description": "d", "parameters": {"type": "object", "properties": {}}}]
 MSGS = [{"role": "user", "content": "hi"}]
-PROVIDER = {"name": "t", "model": "m", "api_key": "k", "base_url": "http://x/v1"}
+# min_round_interval_seconds = 0: no real 3 s floor between two rounds on the same key (key_health.pace_key
+# would otherwise sleep for real before every one of the ~47 adapter calls here: about 140 s in all). Pacing is
+# tested in test_key_health.py; nothing in this file is about it.
+PROVIDER = {"name": "t", "model": "m", "api_key": "k", "base_url": "http://x/v1", "min_round_interval_seconds": 0}
 
 
 class Exec:
@@ -271,7 +274,7 @@ def test_openai_stop_with_calls_still_continues():
 def ask_env(providers, defaults_extra=None):
     orig = (ai_config.load_ai_config, conversations.JARVIS_DIR, conversations.CONV_DIR,
             conversations.INDEX_FILE, conversations.CURRENT_FILE, logs.JARVIS_DIR, logs.LOG_DIR)
-    defaults = {"tools_enabled": True, "prompt_mode": "full"}
+    defaults = {"tools_enabled": True, "prompt_mode": "full", "min_round_interval_seconds": 0}   # no real 3 s pacing
     defaults.update(defaults_extra or {})
     cfg = {"persona": {}, "providers": providers, "defaults": defaults}
     with tempfile.TemporaryDirectory() as tmp:

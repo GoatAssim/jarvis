@@ -617,9 +617,113 @@ def test_plumbing():
     check("hub_admin.py never opens the database itself", "sqlite3" not in (CLI / "jarvis" / "hub_admin.py").read_text(encoding="utf-8"))
 
 
+def _generated_history(n=5000):
+    """A store with n finished rows, written straight into the database (every 20th failed, every 33rd cancelled)."""
+    import sqlite3
+    st = fresh_store()
+    st.add_item(engine="http", source_url=PUBLIC + "/seed", title="seed")      # creates the tables
+    now = time.time()
+    rows = []
+    for i in range(n):
+        state = "failed" if i % 20 == 7 else "cancelled" if i % 33 == 5 else "done"
+        fin = now - 600 - i * 1000.0
+        rows.append(("g%05d" % i, "File %04d.bin" % i, state, 1000 + (i * 7919) % 900000, fin - 3 - (i % 50), fin, fin, fin - 100,
+                     str(Path(HOME) / "gen" / ("f%05d.bin" % i)) if state == "done" else None, "HTTP 503. Gave up." if state == "failed" else None))
+    con = sqlite3.connect(str(st.path))
+    con.executemany("INSERT INTO items(id,title,state,bytes_total,started_at,finished_at,updated_at,created_at,dest_file,error,engine,source_url) "
+                    "VALUES (?,?,?,?,?,?,?,?,?,?, 'http', 'http://93.184.216.34/x')", rows)
+    con.commit()
+    con.close()
+    return st, rows
+
+
+def test_history_paging():
+    st, rows = _generated_history()
+    t0 = time.time()
+    first = hub_admin.history({"limit": 100}, store=st)
+    check("a generated store of 5,000 rows answers a page of 100 with a cursor (%.0f ms)" % ((time.time() - t0) * 1000),
+          first["ok"] and first["count"] == 100 and first["more"] and first["next_cursor"] and first["rows"] == first["items"])
+    done = sum(1 for r in rows if r[2] == "done")
+    failed = sum(1 for r in rows if r[2] == "failed")
+    check("the summary is for the WHOLE filtered set, not the page",
+          first["summary"]["count"] == 5000 and first["summary"]["failed"] == failed and first["summary"]["total_bytes"] == sum(r[3] for r in rows)
+          and first["states"] == {"done": done, "failed": failed, "cancelled": 5000 - done - failed})
+    for sort in ("newest", "largest", "slowest", "name"):
+        seen, cursor, pages = [], None, 0
+        while True:
+            out = hub_admin.history({"limit": 500, "sort": sort, "before": cursor}, store=st)
+            seen += [r["id"] for r in out["rows"]]
+            pages += 1
+            cursor = out["next_cursor"]
+            if not out["more"]:
+                break
+        check("sort %s: ten pages of 500 give every row exactly once" % sort, out["ok"] and pages == 10 and len(seen) == 5000 and len(set(seen)) == 5000)
+        if sort == "newest":
+            check("newest is newest-finished first, all the way", seen == [r[0] for r in sorted(rows, key=lambda r: (-r[5], r[0]))])
+        if sort == "largest":
+            sizes = [next(r[3] for r in rows if r[0] == i) for i in seen]
+            check("largest is biggest first, all the way", sizes == sorted(sizes, reverse=True))
+        if sort == "name":
+            titles = [next(r[1] for r in rows if r[0] == i) for i in seen]
+            check("name is A to Z", titles == sorted(titles, key=str.lower))
+        if sort == "slowest":
+            speed = {r[0]: r[3] / (r[5] - r[4]) for r in rows}
+            order = [speed[i] for i in seen]
+            check("slowest puts the lowest average speed first, all the way", order == sorted(order))
+    # a row removed between two pages does not break the cursor
+    page1 = hub_admin.history({"limit": 100}, store=st)
+    st.delete_items([page1["rows"][-1]["id"]])
+    page2 = hub_admin.history({"limit": 100, "before": page1["next_cursor"]}, store=st)
+    check("a cursor still works after the row it points at was removed", page2["ok"] and page2["rows"][0]["id"] == "g00100")
+    check("a cursor for another sort or a made-up one is refused in words",
+          hub_admin.history({"before": page1["next_cursor"], "sort": "name"}, store=st)["ok"] is False
+          and hub_admin.history({"before": "not-a-cursor!"}, store=st)["ok"] is False and hub_admin.history({"before": "e30"}, store=st)["ok"] is False)
+    check("an unknown sort is refused", hub_admin.history({"sort": "random"}, store=st)["ok"] is False)
+    check("old callers that pass nothing keep their shape (items, count, more, retention_days)",
+          all(k in hub_admin.history({}, store=st) for k in ("items", "count", "more", "retention_days")) and hub_admin.history({}, store=st)["count"] == 100)
+    check("the page size is capped at 500 and defaults to 100", hub_admin.MAX_HISTORY == 500 and hub_admin.history({"limit": 10 ** 9}, store=st)["count"] == 500)
+    # state, search and a date range narrow the whole set, and the summary follows
+    only = hub_admin.history({"states": ["failed"], "limit": 500}, store=st)
+    check("a state filter narrows the set and the summary", only["summary"]["count"] == failed - (1 if page1["rows"][-1]["state"] == "failed" else 0)
+          and all(r["state"] == "failed" for r in only["rows"]))
+    some = hub_admin.history({"search": "file 04", "limit": 500}, store=st)
+    check("a title search narrows the whole set", some["summary"]["count"] == 100 - sum(1 for r in [page1["rows"][-1]] if "File 04" in r["title"]) and all("file 04" in r["title"].lower() for r in some["rows"]))
+    now = time.time()
+    day = hub_admin.history({"since": now - 600 - 10 * 1000.0 - 1, "until": now, "limit": 500}, store=st)
+    check("a date range keeps only rows that finished inside it", day["summary"]["count"] > 0 and all(r["finished_at"] >= now - 600 - 10 * 1000.0 - 1 for r in day["rows"]))
+    check("a range that ends before it starts, or a junk date, is refused", hub_admin.history({"since": now, "until": now - 10}, store=st)["ok"] is False
+          and hub_admin.history({"since": "x"}, store=st)["ok"] is False)
+    # files: only when asked, a missing path is False, no path is None, and the cap is 200 a page
+    plain = hub_admin.history({"limit": 5}, store=st)
+    check("file_exists is absent unless check_files is asked for", all("file_exists" not in r for r in plain["rows"]))
+    gen = Path(HOME) / "gen"
+    gen.mkdir(exist_ok=True)
+    present = [r for r in hub_admin.history({"limit": 20}, store=st)["rows"] if r["state"] == "done"][:2]
+    for r in present[:1]:
+        Path(r["dest"]).write_bytes(b"x")
+    checked = hub_admin.history({"limit": 500, "check_files": True}, store=st)["rows"]
+    by = {r["id"]: r for r in checked}
+    check("a path that exists is true, one that does not is false", by[present[0]["id"]]["file_exists"] is True and by[present[1]["id"]]["file_exists"] is False)
+    check("a row with no path says null, not false", all(r["file_exists"] is None for r in checked if not r["dest"]) and any(not r["dest"] for r in checked))
+    check("only the first 200 rows of a page are looked at", all(r["file_exists"] is None for r in checked[200:]) and all(r["file_exists"] is not None for r in checked[:200] if r["dest"]))
+    check("a row carries started_at, so the page can say how long it took", all("started_at" in r for r in checked))
+    # bulk remove: several ids at once, the file stays
+    keep = Path(HOME) / "gen" / "keepme.bin"
+    keep.write_bytes(b"k")
+    victims = [r["id"] for r in checked[:150]]
+    st.update_item(victims[0], {"dest_file": str(keep)}, touch=False)
+    out = hub_admin.history_remove({"ids": victims}, store=st)
+    check("history_remove takes many ids at once and removes them all", out["ok"] and out["removed"] == 150 and out["skipped"] == [])
+    check("and bulk remove leaves every file where it was", keep.exists() and present[0]["dest"] and Path(present[0]["dest"]).exists())
+    after = hub_admin.history({"limit": 1}, store=st)
+    check("the summary shrinks by exactly what was removed", after["summary"]["count"] == 5000 - 1 - 150 + (1 if page1["rows"][-1]["id"] in victims else 0))
+    check("the new history code never opens, reads or deletes a file", "os.remove" not in (CLI / "jarvis" / "hub_admin.py").read_text(encoding="utf-8")
+          and "unlink" not in (CLI / "jarvis" / "hub_admin.py").read_text(encoding="utf-8"))
+
+
 if __name__ == "__main__":
     for fn in (test_card, test_group_card, test_stream_diff, test_watch_generator, test_thumb_and_file, test_settings_and_history,
-               test_history_writes, test_clear_by_age, test_redownload_and_reorder, test_dismiss_op,
+               test_history_writes, test_history_paging, test_clear_by_age, test_redownload_and_reorder, test_dismiss_op,
                test_list_include_dismissed_and_row_field, test_settle_hours_setting, test_stremio_start_op, test_sources_op,
                test_unattended, test_cli, test_plumbing):
         fn()

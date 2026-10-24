@@ -64,6 +64,10 @@ def fresh():
     with bi._lock:
         bi._saving.clear()
         del bi._notes[:]
+        bi._live_pages[:] = []
+        bi._parent.clear()
+        bi._asked_until.clear()
+        bi._active[0] = None
     hub_client.set_store_factory(None)
 
 
@@ -126,20 +130,21 @@ fresh()
 first, later = FakePage(), FakePage()
 ctx = FakeContext([first])
 check("attach watches the context", bi.attach(ctx) is True)
-check("an open page gets the download listener", first.handlers.get("download") == [bi._on_download])
+check("an open page gets the download listener (and hears of its pop-ups and its closing)",
+      len(first.handlers.get("download", [])) == 1 and len(first.handlers.get("popup", [])) == 1 and len(first.handlers.get("close", [])) == 1)
 check("the context is told to call us for every later page and when it closes",
-      ctx.handlers.get("page") == [bi._watch_page] and ctx.handlers.get("close") == [bi._on_context_closed])
+      ctx.handlers.get("page") == [bi._watch_page] and len(ctx.handlers.get("close", [])) == 1)
 check("Playwright's context has no download event, so none is used", "download" not in ctx.handlers)
 bi.attach(ctx)
 check("attach twice does not subscribe twice", len(ctx.handlers["page"]) == 1 and len(first.handlers["download"]) == 1)
 ctx.handlers["page"][0](later)                         # a pop-up / new tab appears
-check("a page that appears later (pop-up, new tab) is watched", later.handlers.get("download") == [bi._on_download])
+check("a page that appears later (pop-up, new tab) is watched", len(later.handlers.get("download", [])) == 1)
 ctx.handlers["page"][0](later)
 check("the same page is not watched twice", len(later.handlers["download"]) == 1)
 
 # --------------------------------------------------------------------------- one download, start to finish
 fresh()
-bi._on_download(FakeDownload("report.pdf", b"%PDF-1.4 hello"))
+bi._save_download(FakeDownload("report.pdf", b"%PDF-1.4 hello"))
 found = [r for r in rows() if r["title"] == "report.pdf"]
 check("a download is a row of the browser provider", len(found) == 1 and found[0]["id"].startswith("browser:b"))
 item = found[0]
@@ -167,14 +172,14 @@ check("the provider is not one of the hub's own engines", "browser" not in __imp
 
 # kinds, names, folders
 fresh()
-bi._on_download(FakeDownload("clip.MKV", b"v"))
-bi._on_download(FakeDownload("song.mp3", b"a"))
+bi._save_download(FakeDownload("clip.MKV", b"v"))
+bi._save_download(FakeDownload("song.mp3", b"a"))
 check("a video goes to the Video folder", (LIB / "Video" / "clip.MKV").is_file())
 check("an audio file goes to the Audio folder", (LIB / "Audio" / "song.mp3").is_file())
-bi._on_download(FakeDownload("..\\..\\evil?.exe", b"x"))
-bi._on_download(FakeDownload("../../../etc/passwd", b"x"))
-bi._on_download(FakeDownload("CON.txt", b"x"))
-bi._on_download(FakeDownload("", b"x"))
+bi._save_download(FakeDownload("..\\..\\evil?.exe", b"x"))
+bi._save_download(FakeDownload("../../../etc/passwd", b"x"))
+bi._save_download(FakeDownload("CON.txt", b"x"))
+bi._save_download(FakeDownload("", b"x"))
 inside = all(naming.under(LIB, p) for p in LIB.rglob("*") if p.is_file())
 check("hostile names stay inside the library folder", inside and not (Path(HOME) / "etc").exists())
 check("every one of them is a finished row", all(r["state"] == "done" for r in rows() if r["title"] in
@@ -182,9 +187,9 @@ check("every one of them is a finished row", all(r["state"] == "done" for r in r
 bi.take_notes()
 
 fresh()
-bi._on_download(FakeDownload("same.zip", b"1"))
-bi._on_download(FakeDownload("same.zip", b"2"))
-bi._on_download(FakeDownload("same.zip", b"3"))
+bi._save_download(FakeDownload("same.zip", b"1"))
+bi._save_download(FakeDownload("same.zip", b"2"))
+bi._save_download(FakeDownload("same.zip", b"3"))
 check("two downloads of one name never share a file",
       sorted(p.name for p in (LIB / "Files").glob("same*")) == ["same (1).zip", "same (2).zip", "same.zip"])
 check("each file keeps its own bytes", {p.read_bytes() for p in (LIB / "Files").glob("same*")} == {b"1", b"2", b"3"})
@@ -193,13 +198,13 @@ bi.take_notes()
 # an owner's extension folder is respected like for every other hub download
 Store().set_settings({"ext_folders": {".epub": "Books"}})
 fresh()
-bi._on_download(FakeDownload("novel.epub", b"e"))
+bi._save_download(FakeDownload("novel.epub", b"e"))
 check("the owner's extension folder applies", (LIB / "Books" / "novel.epub").is_file())
 bi.take_notes()
 
 # --------------------------------------------------------------------------- failures
 fresh()
-bi._on_download(FakeDownload("broken.iso", b"abcdef", error="net::ERR_CONNECTION_RESET"))
+bi._save_download(FakeDownload("broken.iso", b"abcdef", error="net::ERR_CONNECTION_RESET"))
 bad = [r for r in rows() if r["title"] == "broken.iso"]
 check("a failed save is a failed row", len(bad) == 1 and bad[0]["state"] == "failed")
 check("the failure says why, in one line", "ERR_CONNECTION_RESET" in (bad[0].get("error") or ""))
@@ -214,7 +219,7 @@ def browser_closes():
     bi._on_context_closed()
 
 
-bi._on_download(FakeDownload("midway.bin", b"abc", on_save=browser_closes))
+bi._save_download(FakeDownload("midway.bin", b"abc", on_save=browser_closes))
 mid = [r for r in rows() if r["title"] == "midway.bin"]
 check("a browser that closes mid-save leaves a failed row, not a row stuck downloading",
       len(mid) == 1 and mid[0]["state"] == "failed" and "closed" in (mid[0].get("error") or ""))
@@ -237,12 +242,12 @@ def flaky_replace(src, dst):
 
 
 os.replace = flaky_replace
-bi._on_download(FakeDownload("held.bin", b"held-bytes"))
+bi._save_download(FakeDownload("held.bin", b"held-bytes"))
 check("a rename that fails twice is retried and the file lands", (LIB / "Files" / "held.bin").read_bytes() == b"held-bytes"
       and [r for r in rows() if r["title"] == "held.bin"][0]["state"] == "done")
 swaps["n"] = -100
 os.replace = lambda src, dst: (_ for _ in ()).throw(PermissionError("held by another process"))
-bi._on_download(FakeDownload("stuck.bin", b"stuck-bytes"))
+bi._save_download(FakeDownload("stuck.bin", b"stuck-bytes"))
 os.replace = real_replace
 stuck = [r for r in rows() if r["title"] == "stuck.bin"][0]
 kept = list((LIB / "Files").glob("stuck.bin.part"))
@@ -258,7 +263,7 @@ blocker = Path(HOME) / "afile"
 blocker.write_text("x")
 Store().set_settings({"folders.file": "Files2"})
 (LIB / "Files2").write_text("I am a file where the folder should be")
-bi._on_download(FakeDownload("nowhere.bin", b"x"))
+bi._save_download(FakeDownload("nowhere.bin", b"x"))
 nw = [r for r in rows() if r["title"] == "nowhere.bin"]
 check("a folder that can't be made fails the row and never raises", len(nw) == 1 and nw[0]["state"] == "failed")
 (LIB / "Files2").unlink()
@@ -277,7 +282,7 @@ class BrokenStore:
 hub_client.set_store_factory(lambda: BrokenStore())
 raised = None
 try:
-    bi._on_download(FakeDownload("offline.bin", b"still saved"))
+    bi._save_download(FakeDownload("offline.bin", b"still saved"))
 except Exception as exc:  # noqa: BLE001
     raised = exc
 hub_client.set_store_factory(None)
@@ -294,7 +299,7 @@ fresh()
 plain = {"ok": True, "url": "https://example.com/"}
 check("a result with nothing to say comes back untouched", bi.annotate(plain, FakePage()) is plain)
 check("a non-dict result is left alone", bi.annotate("text", FakePage()) == "text")
-bi._on_download(FakeDownload("invoice.pdf", b"i"))
+bi._save_download(FakeDownload("invoice.pdf", b"i"))
 out = bi.annotate({"ok": True, "url": "https://example.com/"}, FakePage())
 check("the result lists the download", out["ok"] is True and out["downloads"][0]["title"] == "invoice.pdf"
       and out["downloads"][0]["state"] == "done")
@@ -306,7 +311,7 @@ check("the sentence is plain text, no markup characters from the page", "<" not 
 check("it is told once", "downloads" not in bi.annotate({"ok": True}, FakePage()))
 
 fresh()
-bi._on_download(FakeDownload("direct.zip", b"z"))
+bi._save_download(FakeDownload("direct.zip", b"z"))
 nav = bi.annotate({"ok": False, "error": "Navigation failed: Page.goto: Download is starting\nCall log:\n - navigating"},
                   FakePage("https://example.com/files"))
 check("a navigation Chromium refused because it was a download becomes a success",
@@ -315,7 +320,7 @@ fresh()
 other = bi.annotate({"ok": False, "error": "Navigation failed: net::ERR_NAME_NOT_RESOLVED"}, FakePage())
 check("a real navigation failure stays a failure", other["ok"] is False and "downloads" not in other)
 fresh()
-bi._on_download(FakeDownload("late.zip", b"z"))
+bi._save_download(FakeDownload("late.zip", b"z"))
 oops = bi.annotate({"ok": False, "error": "Click failed: timeout"}, FakePage())
 check("a failure that has a download note keeps ok false (only a refused navigation is turned)", oops["ok"] is False and oops["downloads"])
 
@@ -328,7 +333,7 @@ check("settle gives up after its limit and says so", bi.settle(page, 0.3) is Fal
 still = bi.annotate({"ok": True}, page, max_s=0.2)
 check("a save still running is reported as such, with a way to continue",
       still["downloads"][0]["state"] == "downloading" and "still being downloaded" in still["download_note"]
-      and "closing the browser first would lose it" in still["download_note"])
+      and "Closing the browser first makes it fail" in still["download_note"] and "carries on by itself" in still["download_note"])
 check("the row is not touched by the wait", row("browser:bslow")["state"] == "downloading")
 bi._finish_failed("bslow", bi._saving["bslow"], "test cleanup")
 bi.take_notes()
@@ -378,8 +383,8 @@ check("browser_tools attaches the listener where the context is made",
       and tools_src.index("browser_intake.attach(context)") < tools_src.index("page = context.pages[0]"))
 check("the confirmation list is untouched: nothing here adds a way to download without it",
       "browser_click" in (ROOT / "jarvis-cli" / "jarvis" / "tool_safety.py").read_text(encoding="utf-8"))
-check("browser_tools only imports the new module inside guarded blocks (a bug there never breaks the browser)",
-      tools_src.count("from .hub import browser_intake") == 2 and "def _hub_downloads" in tools_src
+check("browser_tools only imports the new module inside guarded blocks (a bug there never breaks the browser): the three hooks",
+      tools_src.count("from .hub import browser_intake") == 3 and "def _hub_downloads" not in tools_src
       and "import browser_intake" not in tools_src.split("def _ensure_page")[0])
 
 
@@ -454,11 +459,11 @@ def real_browser_part():
     base = "http://127.0.0.1:%d" % port
     fresh()
     try:
-        page, err = browser_tools._ensure_page()
+        page, err = bi.run_on_owner(browser_tools._ensure_page)     # the session belongs to the browser's thread
         if err:
             print("SKIPPED real-browser checks: the Jarvis browser could not start here: %s" % err[:120])
             return
-        agent = page.evaluate("navigator.userAgent")
+        agent = bi.run_on_owner(page.evaluate, "navigator.userAgent")
         print("REAL BROWSER: %s (Playwright chromium, headless, through browser_tools._ensure_page)" % agent)
         got = browser_tools._local_tool_browser_goto({"url": base + "/page"})
         check("[chromium] a normal page loads and says nothing about downloads", got.get("ok") is True and "downloads" not in got)

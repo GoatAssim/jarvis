@@ -33,6 +33,14 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "jarvis-cli"))
 GOLDEN = ROOT / "tests" / "_ytdl_opts_golden.json"
 
+import importlib.util  # noqa: E402
+
+if importlib.util.find_spec("yt_dlp") is None:
+    # The whole file replays the option matrix against a stand-in for yt_dlp.YoutubeDL, so it needs the
+    # module itself. Say so out loud and stop; do not let a missing module look like a pass.
+    print("SKIPPED test_hub_ytdlp_parity: yt_dlp is not installed; this is not a pass.")
+    sys.exit(0)
+
 import yt_dlp  # noqa: E402
 
 from jarvis import ytdl_tools  # noqa: E402

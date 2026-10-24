@@ -21,6 +21,7 @@ import json
 import os
 import sys
 import tempfile
+import threading
 from pathlib import Path
 
 _HOME = tempfile.mkdtemp(prefix="jarvis-servers-")
@@ -50,7 +51,21 @@ G1, G2 = "900000000000000001", "900000000000000002"
 C1, C2, C3 = "800000000000000001", "800000000000000002", "800000000000000003"
 
 
+def _wait_for_background_writers(seconds=15.0):
+    """base.handle_message starts a daemon thread named "episode-summary" after the first reply to a
+    non-owner (channels/episodes.py: run_in_background, throttled to once per person per 30 minutes).
+    It reads and writes under ~/.jarvis, so a wipe that runs while it is alive can see "Directory not
+    empty" (the thread puts a file back while rmtree is removing the folder). Wait for it first.
+    The thread is not stopped or faked: whatever it does still happens, just not during the delete."""
+    for t in threading.enumerate():
+        if t is not threading.current_thread() and t.name == "episode-summary":
+            t.join(seconds)
+            if t.is_alive():
+                raise AssertionError("the episode-summary thread was still running after %.0f s" % seconds)
+
+
 def wipe():
+    _wait_for_background_writers()
     root = Path(_HOME) / ".jarvis"
     if root.exists():
         import shutil

@@ -10,6 +10,13 @@
     are dropped when a redirect changes host;
   * a stall (no data for `http.stall_seconds`) comes back as `Outcome.stalled`, a dropped
     connection or 5xx as a retryable failure; the daemon owns the retry policy;
+  * a name is RESERVED the moment it is chosen: the `.part` file is created at once with an exclusive
+    create (`_reserve`), so two downloads of one name started together can never share a `.part`
+    (the second one finds the name taken and moves on to `name (1).ext`).  The `.part` is recorded
+    in the item's `source_ref` straight away; a resume always goes on with ITS OWN recorded `.part`;
+  * the rename at the end never replaces a file (`_publish`: a hard link, which fails if the name
+    exists, then the `.part` is removed); a finished file that took the name meanwhile, or a name
+    another download has reserved, sends the download to the next free `name (n).ext`;
   * `stream_to_file` is the reusable part: the Stremio engine (phase 4) points it at the
     server's `download=1` URL and adds its own registration and stats watchdog.
 
@@ -35,6 +42,7 @@ through naming.sanitize_filename, the destination is forced under the library ro
 free disk space is checked before the first byte is written (refuse, never truncate).
 """
 
+import errno
 import os
 import re
 import shutil
@@ -114,6 +122,107 @@ def _remove(path):
         pass
 
 
+def _reserve(dest_dir, name):
+    """Choose a free final name AND claim it, in one step.  -> (final, part) as strings.
+
+    The claim is an exclusive create of `<final>.part` (`O_CREAT | O_EXCL`): the operating system lets
+    exactly one caller create it, in this process or another (the browser intake claims names the same
+    way), so no lock is needed and two downloads of one name never get the same pair.  The loser sees
+    the name taken, asks `naming.unique_path` again (which now counts that `.part` as taken) and
+    moves on to `name (1).ext`.  The empty `.part` is the reservation; the transfer fills it."""
+    for _ in range(1000):
+        final = naming.unique_path(Path(dest_dir) / name)
+        part = str(final) + ".part"
+        try:
+            os.close(os.open(part, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o666))
+        except FileExistsError:
+            continue                                  # somebody claimed it between the pick and now
+        return str(final), part
+    raise OSError("could not reserve a file name in %s" % dest_dir)
+
+
+def _reclaim(part):
+    """A resumed item's own `.part` is gone (deleted, or never written): take the exact name back with
+    the same exclusive create.  False when another download holds it now, in which case the item must
+    not write into it and starts again under a new name."""
+    os.makedirs(os.path.dirname(part) or ".", exist_ok=True)      # its folder may be gone too
+    try:
+        os.close(os.open(part, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o666))
+    except FileExistsError:
+        return False
+    return True
+
+
+_publish_lock = threading.Lock()                      # only the no-hard-links fallback uses it
+_NO_LINKS = {errno.EPERM, errno.ENOSYS, errno.EXDEV, getattr(errno, "ENOTSUP", -1),
+             getattr(errno, "EOPNOTSUPP", -1), getattr(errno, "EMLINK", -1)}
+
+
+def _links_unsupported(exc):
+    """Does this error mean the file system can't make hard links (FAT, some network shares), as
+    opposed to "that name exists" or a real disk problem?"""
+    if isinstance(exc, (NotImplementedError, AttributeError)):
+        return True
+    return (isinstance(exc, OSError) and not isinstance(exc, FileExistsError)
+            and (exc.errno in _NO_LINKS or getattr(exc, "winerror", None) in (1, 50)))
+
+
+def _final_names(final):
+    """`final`, then `name (1).ext`, `name (2).ext` ... skipping a name whose own `.part` exists (that is
+    another download's reservation).  The caller's own `.part` belongs to `final`, so `final` is offered
+    first without that test."""
+    path = Path(final)
+    yield path
+    for n in range(1, 1000):
+        candidate = path.with_name("%s (%d)%s" % (path.stem, n, path.suffix))
+        if not Path(str(candidate) + ".part").exists():
+            yield candidate
+    yield path.with_name("%s (%d)%s" % (path.stem, os.getpid(), path.suffix))
+
+
+def _same_file(a, b):
+    try:
+        return os.path.samefile(a, b)
+    except OSError:
+        return False
+
+
+def _publish(part, final):
+    """Give `part` its final name without ever replacing a file.  -> the Path it ended up with.
+
+    The exclusive step is `os.link(part, target)`: it creates the new name only if it does not exist
+    (atomic, and it holds between processes), so "check, then replace" never happens.  Once linked, the
+    `.part` name is removed.  If the two already name ONE file, an earlier finish was interrupted
+    between the link and the removal: it is completed, not repeated as a `(1)` copy.  On a file system
+    with no hard links the fallback is a lock plus an existence check plus a replace: safe between the
+    threads of this process, not between processes."""
+    part = str(part)
+    links = True
+    for target in _final_names(final):
+        target = str(target)
+        if links:
+            try:
+                os.link(part, target)
+            except FileExistsError:
+                if _same_file(part, target):
+                    _remove(part)
+                    return Path(target)
+                continue
+            except (OSError, NotImplementedError, AttributeError) as exc:
+                if not _links_unsupported(exc):
+                    raise
+                links = False
+            else:
+                _remove(part)
+                return Path(target)
+        with _publish_lock:
+            if os.path.exists(target):
+                continue
+            os.replace(part, target)
+            return Path(target)
+    raise OSError("no free file name left for %s" % final)
+
+
 def _fmt_size(n):
     for unit in ("B", "KB", "MB", "GB", "TB"):
         if n < 1024 or unit == "TB":
@@ -128,6 +237,35 @@ def stream_to_file(ctx, item, url, headers=None, resolver=None, session=None, se
     `segments` > 1 allows a segmented download (see the module docstring); the default, 1, is
     the single-connection download every caller got before, so existing callers (the Stremio
     engine) are untouched."""
+    mine = {}                                    # "part": the .part THIS call reserved, if it did
+    out = None
+    try:
+        out = _stream_to_file(ctx, item, url, headers, resolver, session, segments, mine)
+        return out
+    finally:
+        _drop_unused_reservation(ctx, mine, out)
+
+
+def _drop_unused_reservation(ctx, mine, out):
+    """A name is reserved before the first byte arrives.  If the run then ends for good without having
+    written anything (no space, a refused part, an unexpected error), the empty `.part` and the resume
+    handle that points at it must not stay behind: nothing would ever use them and the name would stay
+    taken.  A retryable failure, a stall, a pause or a requeue keep it: the retry resumes on it."""
+    part = mine.get("part")
+    if not part:
+        return
+    if out is not None and not (out.kind == Outcome.FAILED and not out.retryable):
+        return
+    try:
+        if os.path.getsize(part) != 0:
+            return
+    except OSError:
+        return
+    _remove(part)
+    ctx.update(source_ref={})
+
+
+def _stream_to_file(ctx, item, url, headers, resolver, session, segments, mine):
     import requests
 
     opts = item.get("options") or {}
@@ -162,6 +300,14 @@ def stream_to_file(ctx, item, url, headers=None, resolver=None, session=None, se
     session = session or requests.Session()
     resp = None
     try:
+        if part and not seg_table and not os.path.exists(part):
+            # Its own .part is gone.  Take the exact name back (exclusive create); if another download
+            # holds it now, never write into it: start again under a new name.
+            if _reclaim(part):
+                mine["part"] = part
+            else:
+                part = final = None
+                ref = {}
         if seg_table:                           # resuming a segmented download
             return _download_segments(ctx, session, url, req, allow, (connect_timeout, stall), resolver,
                                       part, final, ref, seg_table, None, stall)
@@ -215,13 +361,16 @@ def stream_to_file(ctx, item, url, headers=None, resolver=None, session=None, se
                 dest_dir.mkdir(parents=True, exist_ok=True)
             except OSError as exc:
                 return Outcome.failed("can't create %s: %s" % (dest_dir, exc))
-            final = str(naming.unique_path(dest_dir / name))
-            part = final + ".part"
+            try:
+                final, part = _reserve(dest_dir, name)       # the name is ours from here on
+            except OSError as exc:
+                return Outcome.failed("can't reserve a file name in %s: %s" % (dest_dir, _short(exc)))
+            mine["part"] = part
             ref = {"part": part, "final": final}
             fields = {"dest_dir": str(dest_dir), "dest_file": final, "kind": kind}
             if header_name or not item.get("title"):
                 fields["title"] = Path(final).name
-            ctx.update(**fields)
+            ctx.update(source_ref=ref, **fields)             # a crash or a retry finds its own .part
         etag, modified = hdr.get("ETag"), hdr.get("Last-Modified")
         if etag and not etag.startswith("W/"):          # a weak ETag is no good for If-Range
             ref["etag"] = etag
@@ -354,11 +503,8 @@ def _finish(ctx, part, final, done, total):
         _remove(part)
         ctx.update(source_ref={}, bytes_done=0)
         return Outcome.failed("received more data than announced; starting over", retryable=True, delay_s=1.0)
-    target = Path(final)
-    if target.exists():                               # something else took the name meanwhile
-        target = naming.unique_path(target, ignore_part=True)
     try:
-        os.replace(part, str(target))
+        target = _publish(part, final)                # never replaces a file; a taken name moves on
     except OSError as exc:
         return Outcome.failed("couldn't finish the file: %s" % _short(exc))
     ctx.update(dest_file=str(target), dest_dir=str(target.parent), bytes_done=done, bytes_total=done)

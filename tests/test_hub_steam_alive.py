@@ -101,52 +101,60 @@ check("steam-checks.py keeps the same stall window", sc.STALL_REAL_S == steam.ST
 check("steam-checks.py keeps the same write-noise limit (per 2 s tick)", sc.IO_NOISE_BYTES == steam.WRITES_MIN_BYTES_PER_S * 2)
 
 # ------------------------------------------------------------------------------- the real run
-fixture = [json.loads(line) for line in (ROOT / "tests" / "fixtures" / "steam_n5_real_run.jsonl").read_text(encoding="utf-8").splitlines()]
-meta, ticks = fixture[0], fixture[1:]
-check("the fixture is an excerpt (small) of the real timeline, with both games", len(ticks) == 70 and set(meta["apps"]) == {"980610", "291550"}
-      and (ROOT / "tests" / "fixtures" / "steam_n5_real_run.jsonl").stat().st_size < 20000)
+FIXTURE = ROOT / "tests" / "fixtures" / "steam_n5_real_run.jsonl"
+REAL_RUN_SKIPPED = not FIXTURE.is_file()
+if REAL_RUN_SKIPPED:
+    # The fixture is a cut-down, re-keyed copy of one Windows PC's real run; it is git-ignored (tests/fixtures)
+    # and cannot be rebuilt from anything else. Say so out loud instead of crashing, and still run every
+    # check that does not need it. A skip is not a pass.
+    print("SKIPPED test_hub_steam_alive (the real-run replay): %s is missing; those checks did not run and this is not a pass." % FIXTURE.relative_to(ROOT))
+else:
+    fixture = [json.loads(line) for line in (ROOT / "tests" / "fixtures" / "steam_n5_real_run.jsonl").read_text(encoding="utf-8").splitlines()]
+    meta, ticks = fixture[0], fixture[1:]
+    check("the fixture is an excerpt (small) of the real timeline, with both games", len(ticks) == 70 and set(meta["apps"]) == {"980610", "291550"}
+          and (ROOT / "tests" / "fixtures" / "steam_n5_real_run.jsonl").stat().st_size < 20000)
 
 
-def replay(with_signals=True):
-    """Feed the real run through the new code, one look per recorded tick."""
-    mem = {a: {} for a in meta["apps"]}
-    seen = []
-    for tick in ticks:
-        for appid, rec in tick["a"].items():
-            to_dl, got, to_stage, staged, size, updated = rec["m"]
-            m = man(appid, rec["f"], to_dl, got, to_stage, staged, size, updated, name=meta["apps"][appid])
-            sig = None
-            if with_signals:
-                d = rec["d"]
-                sig = {"folder": {"bytes": d[0], "files": d[1], "newest_mtime": d[2]} if d else None, "writes": tick["w"]}
-            row = steam.classify(m, mem[appid], now=T0 + tick["t"], signals=sig)
-            seen.append((tick["t"], appid, rec["old"], row["state"] if row else None, row))
-    return seen
+    def replay(with_signals=True):
+        """Feed the real run through the new code, one look per recorded tick."""
+        mem = {a: {} for a in meta["apps"]}
+        seen = []
+        for tick in ticks:
+            for appid, rec in tick["a"].items():
+                to_dl, got, to_stage, staged, size, updated = rec["m"]
+                m = man(appid, rec["f"], to_dl, got, to_stage, staged, size, updated, name=meta["apps"][appid])
+                sig = None
+                if with_signals:
+                    d = rec["d"]
+                    sig = {"folder": {"bytes": d[0], "files": d[1], "newest_mtime": d[2]} if d else None, "writes": tick["w"]}
+                row = steam.classify(m, mem[appid], now=T0 + tick["t"], signals=sig)
+                seen.append((tick["t"], appid, rec["old"], row["state"] if row else None, row))
+        return seen
 
 
-real = replay()
-old_stalled = [x for x in real if x[2] == "stalled"]
-check("the real run has the stalled ticks the report lists (7 + 21 for Quaver, 19 + 1 for Brawlhalla)",
-      len([x for x in old_stalled if x[1] == "980610"]) == 28 and len([x for x in old_stalled if x[1] == "291550"]) == 20)
-check("EVERY tick where the old code said 'stalled' is now 'downloading'", old_stalled and all(x[3] == "downloading" for x in old_stalled))
-check("the new code never says 'stalled' anywhere in the real run", not any(x[3] == "stalled" for x in real))
-running_rows = [x[4] for x in real if x[3] == "downloading"]
-check("a running real row has no live percent, no done-bytes, no speed, no ETA (sent as None on purpose)",
-      running_rows and all(r["percent"] is None and r["bytes_done"] is None and r["speed_bps"] is None and r["eta_s"] is None for r in running_rows))
-check("...but it knows the total and says that Steam isn't reporting live progress", all(r["bytes_total"] > 0 and "live progress" in r["message"] for r in running_rows))
-quaver_after_write = [x[4] for x in real if x[1] == "980610" and 45.9 < x[0] < 60]
-check("20 s after a manifest write the message says what Steam reported and how old it is",
-      quaver_after_write and any("reported 1" in r["message"] or "reported 2" in r["message"] for r in quaver_after_write)
-      and any("30.6 %" in r["message"] and "37.4 MB of 122.3 MB" in r["message"] for r in quaver_after_write))
-check("the early 'waiting in Steam's own queue' tick is still queued (existing behaviour)", any(x[1] == "980610" and x[3] == "queued" for x in real))
-done = [x for x in real if x[3] == "done"]
-check("the finished game is reported 'done' exactly once", len(done) == 1 and done[0][1] == "980610" and done[0][4]["percent"] == 100)
-check("the real signals were read as moving at some looks and the row says so in its detail",
-      any(any(d["label"] == "Other signs of life" and "downloading folder last moved" in d["value"] for d in r["detail"]) for r in running_rows))
+    real = replay()
+    old_stalled = [x for x in real if x[2] == "stalled"]
+    check("the real run has the stalled ticks the report lists (7 + 21 for Quaver, 19 + 1 for Brawlhalla)",
+          len([x for x in old_stalled if x[1] == "980610"]) == 28 and len([x for x in old_stalled if x[1] == "291550"]) == 20)
+    check("EVERY tick where the old code said 'stalled' is now 'downloading'", old_stalled and all(x[3] == "downloading" for x in old_stalled))
+    check("the new code never says 'stalled' anywhere in the real run", not any(x[3] == "stalled" for x in real))
+    running_rows = [x[4] for x in real if x[3] == "downloading"]
+    check("a running real row has no live percent, no done-bytes, no speed, no ETA (sent as None on purpose)",
+          running_rows and all(r["percent"] is None and r["bytes_done"] is None and r["speed_bps"] is None and r["eta_s"] is None for r in running_rows))
+    check("...but it knows the total and says that Steam isn't reporting live progress", all(r["bytes_total"] > 0 and "live progress" in r["message"] for r in running_rows))
+    quaver_after_write = [x[4] for x in real if x[1] == "980610" and 45.9 < x[0] < 60]
+    check("20 s after a manifest write the message says what Steam reported and how old it is",
+          quaver_after_write and any("reported 1" in r["message"] or "reported 2" in r["message"] for r in quaver_after_write)
+          and any("30.6 %" in r["message"] and "37.4 MB of 122.3 MB" in r["message"] for r in quaver_after_write))
+    check("the early 'waiting in Steam's own queue' tick is still queued (existing behaviour)", any(x[1] == "980610" and x[3] == "queued" for x in real))
+    done = [x for x in real if x[3] == "done"]
+    check("the finished game is reported 'done' exactly once", len(done) == 1 and done[0][1] == "980610" and done[0][4]["percent"] == 100)
+    check("the real signals were read as moving at some looks and the row says so in its detail",
+          any(any(d["label"] == "Other signs of life" and "downloading folder last moved" in d["value"] for d in r["detail"]) for r in running_rows))
 
-blind = replay(with_signals=False)
-check("with NO second signal at all the real run is never stalled either", not any(x[3] == "stalled" for x in blind))
-check("...and the message says Jarvis can't see any other sign of activity", all("can't see any other sign" in x[4]["message"] for x in blind if x[3] == "downloading"))
+    blind = replay(with_signals=False)
+    check("with NO second signal at all the real run is never stalled either", not any(x[3] == "stalled" for x in blind))
+    check("...and the message says Jarvis can't see any other sign of activity", all("can't see any other sign" in x[4]["message"] for x in blind if x[3] == "downloading"))
 
 # ------------------------------------------------------------------------------- the stall rule, in time
 states, row, _ = run_looks(59, signals=FLAT)
@@ -481,4 +489,6 @@ check("...and it has no steam:// command except the Open in Steam link target", 
 
 print()
 print(f"{passed} passed, {failed} failed")
+if REAL_RUN_SKIPPED:
+    print("SKIPPED (not a pass): the real-run replay, because %s is missing." % FIXTURE.relative_to(ROOT))
 sys.exit(1 if failed else 0)

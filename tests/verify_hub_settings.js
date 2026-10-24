@@ -32,7 +32,7 @@ function fakeEl(tag, attrs, kids) {
 function world(opts) {
   const o = Object.assign({ providers: [], confirmRequired: false, confirmAnswer: true, runResult: { ok: true }, settings: {}, writable: [], prefsWritable: [],
     stremio: { ok: true, state: "running", title: "Running", sentence: "Stremio's server is running.", can_start: false, address: "http://127.0.0.1:11470", path: {} },
-    stremioHang: false, pathsReply: null, startReply: null, hang: null }, opts || {});
+    stremioHang: false, pathsReply: null, startReply: null, hang: null, defaults: undefined, events: [], openModes: [], sources: null }, opts || {});
   const calls = [];
   const win = {};
   win.fetch = async (url, init) => {
@@ -40,7 +40,8 @@ function world(opts) {
     calls.push({ url, body, headers: (init && init.headers) || null, method: (init && init.method) || "GET" });
     const reply = (data, status) => ({ ok: !status || status < 400, status: status || 200, statusText: status ? "ERR" : "OK", json: async () => data });
     if (o.hang && o.hang.test(url)) return new Promise((resolve, reject) => { if (init && init.signal) init.signal.addEventListener("abort", () => { const e = new Error("aborted"); e.name = "AbortError"; reject(e); }); });
-    if (url === "/api/hub/settings") return reply({ ok: true, settings: o.settings, providers: o.providers, writable: o.writable, prefs_writable: o.prefsWritable, events: [], open_modes: [] });
+    if (url === "/api/hub/settings") return reply({ ok: true, settings: o.settings, defaults: o.defaults, providers: o.providers, writable: o.writable, prefs_writable: o.prefsWritable, events: o.events, open_modes: o.openModes });
+    if (url === "/api/hub/sources" && o.sources) return reply(o.sources);
     if (url === "/api/hub/stremio") return o.stremioHang ? new Promise(() => {}) : (o.stremio && o.stremio.ok === false ? reply(o.stremio, 400) : reply(o.stremio));
     if (url === "/api/hub/stremio/paths" && o.pathsReply) return reply(o.pathsReply.body, o.pathsReply.status);
     if (url === "/api/hub/stremio/start" && o.startReply) return reply(o.startReply.body, o.startReply.status);
@@ -58,7 +59,7 @@ function world(opts) {
     h: (tag, attrs, kids) => fakeEl(tag, attrs, kids),
     group: (title, rows) => ({ title, rows }),
     rowShell: (label, help, el, status) => { const r = { label, help, el, status }; shells.push(r); return r; },
-    makeControl: (spec, value, commit, status) => { const c = { spec, value, commit, status, el: fakeEl("ctl") }; controls.push(c); return c; },
+    makeControl: (spec, value, commit, status) => { const c = { spec, value, commit, status, el: fakeEl("ctl"), set(v) { c.last = v; } }; controls.push(c); return c; },
     flash: (status, text, kind) => flashes.push({ text, kind }),
   };
   const section = win.JarvisSettingsSections[0];
@@ -142,9 +143,10 @@ const playniteP = { id: "playnite", label: "Playnite", enabled: true, read_only:
   {
     const w = world({ settings: { unknown_settle_hours: 24 }, writable: ["unknown_settle_hours"], prefsWritable: ["unknown_settle_hours"] });
     const blocks = await w.section.build({ ui: w.ui });
-    const grp = blocks.find((b) => b && b.title === "Lost downloads");
     const row = w.shells.find((r) => r.label === "Give up on a lost download after (hours)");
-    check("with the hub reporting it writable, the row is on the page in its own group", !!grp && !!row && grp.rows.length === 1);
+    // moved (brief 25): the old "Lost downloads" group is now a row of the Sources section
+    const lost = blocks[0].__dls.rowFor("unknown_settle_hours");
+    check("with the hub reporting it writable, the row is on the page, in the Sources section", !!row && !!lost && lost.section === "sources" && blocks[0].__dls.sectionIds().includes("sources"));
     check("its help says what happens: cancelled, never failed, and a program that is only closed is never given up on",
       /cancelled/.test(row.help) && /never \"failed\"/.test(row.help) && /closed is never given up on/.test(row.help) && /Steam, Playnite/.test(row.help));
     const ctl = w.controls.find((c) => c.spec.path === "unknown_settle_hours");
@@ -170,7 +172,7 @@ const playniteP = { id: "playnite", label: "Playnite", enabled: true, read_only:
   {
     const w = world({ settings: { unknown_settle_hours: 24 }, writable: [], prefsWritable: [] });
     const blocks = await w.section.build({ ui: w.ui });
-    check("an older hub that doesn't list the key gets no row (not a dead one)", !blocks.some((b) => b && b.title === "Lost downloads") && !w.shells.some((r) => /Give up on a lost/.test(r.label)));
+    check("an older hub that doesn't list the key gets no row (not a dead one)", blocks[0].__dls.rowFor("unknown_settle_hours") === null && !w.shells.some((r) => /Give up on a lost/.test(r.label)));
   }
 
   // ---- brief 19, step 3: the Stremio card, pure half (every state the hub can report)
@@ -299,10 +301,11 @@ const playniteP = { id: "playnite", label: "Playnite", enabled: true, read_only:
     check("the card asked for the status once, with a plain GET", w.calls.filter((c) => c.url === "/api/hub/stremio").length === 1 && w.calls.find((c) => c.url === "/api/hub/stremio").method === "GET");
     const w2 = world({ stremio: { ok: false, error: "no hub" } });
     const blocks = await w2.section.build({ ui: w2.ui });
-    check("a status that can't be read doesn't break the section: the card is still there", blocks.some((b) => b && b.title === "Stremio"));
+    check("a status that can't be read doesn't break the section: the card is still there, in the Stremio source block", blocks[0].__dls.entries.some((e) => e.kind === "card" && e.source === "stremio")
+      && blocks[0].__dls.sourceBlocks.some((b) => b.id === "stremio"));
   }
   {
-    const code = src.slice(src.indexOf("function stremioBlock"), src.indexOf("function listEditor"));
+    const code = src.slice(src.indexOf("function stremioBlock"), src.indexOf("// ---- the page (DOM)"));
     check("the card's buttons: Check again, Copy diagnostic, Locate program, Locate server.js, Start; no HTML is assigned",
       /"Check again"/.test(code) && /"Copy diagnostic"/.test(code) && /Locate program/.test(code) && /Locate server\.js/.test(code) && /text: "Start"/.test(code) && !/innerHTML|insertAdjacentHTML/.test(src));
     check("Start goes to the one start route with an empty body and its own time-out; Locate saves through the paths route",
@@ -407,6 +410,173 @@ const playniteP = { id: "playnite", label: "Playnite", enabled: true, read_only:
     check("pressing it posts {repair: true} to the paths route, with the hub header", !!repairCall && eq(repairCall.body, { repair: true }) && repairCall.method === "POST");
     const startWeb = find([...w.shells.map((r) => r.el), ...[]], "Start stremio-web");
     check("the page source sends the literal web to the start route and nothing else for it", /hubPost\("\/api\/hub\/stremio\/start", \{ what: "web" \}, ms\)/.test(src));
+  }
+
+
+  // ---- brief 25 (N20): the page's structure, search, defaults, reset, timing, source blocks and the two tables
+  {
+    const ALL = ["library_root", "folders.video", "folders.audio", "folders.file", "ext_folders", "rate_limit_kbps", "schedule", "concurrency.total", "concurrency.http",
+      "concurrency.ytdlp", "concurrency.stremio", "http.stall_seconds", "http.max_retries", "http.segments", "http.segment_min_bytes", "stremio.stall_seconds", "stremio.max_retries",
+      "stremio.metadata_timeout", "stremio.start_wait_seconds", "after_download.open", "notify.enabled", "notify.min_seconds", "notify.coalesce_s", "notify.providers",
+      "notify.done.enabled", "unknown_settle_hours", "allow_private_hosts", "brand_new.key"];
+    const SET = { library_root: "", folders: { video: "Video", audio: "Audio", file: "Files" }, ext_folders: {}, rate_limit_kbps: 0, schedule: [],
+      concurrency: { total: 6, http: 3, ytdlp: 2, stremio: 3 }, http: { stall_seconds: 60, max_retries: 3, segments: 1, segment_min_bytes: 33554432 },
+      stremio: { stall_seconds: 90, max_retries: 3, metadata_timeout: 90, start_wait_seconds: 60 }, after_download: { open: "off" },
+      notify: { enabled: true, min_seconds: 0, coalesce_s: 8, providers: true, done: { enabled: true, level: null } }, unknown_settle_hours: 24, allow_private_hosts: [], brand_new: { key: true } };
+    const DEF = JSON.parse(JSON.stringify(SET));
+    DEF.concurrency.total = 4;
+    const SOURCES = { ok: true, engines: [
+      { id: "http", label: "HTTP", state: "ready", reason: "", config_file: null }, { id: "qbittorrent", label: "qBittorrent", state: "needs_setup", reason: "not set up", config_file: "~/.jarvis/qbittorrent.json" },
+      { id: "stremio", label: "Stremio (torrent)", state: "not_running", reason: "", config_file: null }, { id: "ytdlp", label: "yt-dlp", state: "broken", reason: "", config_file: null }], providers: [] };
+    const mk = (extra) => world(Object.assign({ settings: JSON.parse(JSON.stringify(SET)), defaults: DEF, writable: ALL, prefsWritable: ALL.filter((p) => p !== "library_root" && p !== "allow_private_hosts"),
+      events: ["done"], openModes: ["off", "reveal"], sources: SOURCES, providers: [steamP({ notify_min_update_gb: 1 }), playniteP] }, extra || {}));
+    const w = mk();
+    const blocks = await w.section.build({ ui: w.ui });
+    const page = blocks[0].__dls;
+    const walk = (n, f) => { if (!n || typeof n !== "object") return; f(n); (n.kids || []).forEach((k) => walk(k, f)); (n.el ? [n.el] : []).forEach((k) => walk(k, f)); };
+    const nodes = (root, pred) => { const out = []; walk(root, (n) => { if (pred(n)) out.push(n); }); return out; };
+    const P = w.pure;
+
+    check("the page is ONE element holding a search bar, a rail and the sections", blocks.length === 1 && blocks[0].tag === "div" && blocks[0].attrs.class === "dls");
+    check("the rail has the seven sections of N20, in order, and Other only for a key with no home",
+      eq(page.sectionIds(), ["files", "speed", "running", "sources", "notifications", "finish", "safety", "other"]) && eq(P.PAGE_SECTIONS.map((x) => x.title),
+        ["Files", "Speed and schedule", "Running at once", "Sources", "Notifications", "When a download finishes", "Safety"]));
+    const w0 = mk({ writable: ALL.filter((p) => p !== "brand_new.key") });
+    check("without such a key there is no Other section", !(await w0.section.build({ ui: w0.ui }))[0].__dls.sectionIds().includes("other"));
+    const sec = (p) => page.rowFor(p).section;
+    check("each setting is in the section a person would look in",
+      sec("library_root") === "files" && sec("folders.audio") === "files" && sec("ext_folders") === "files" && sec("rate_limit_kbps") === "speed" && sec("schedule") === "speed"
+      && sec("concurrency.total") === "running" && sec("notify.enabled") === "notifications" && sec("notify.done.enabled") === "notifications" && sec("after_download.open") === "finish"
+      && sec("allow_private_hosts") === "safety" && sec("unknown_settle_hours") === "sources" && sec("brand_new.key") === "other");
+    check("an engine's settings sit in its own block: HTTP, yt-dlp and Stremio",
+      eq(page.entries.filter((e) => e.source === "http").map((e) => e.path).sort(), ["concurrency.http", "http.max_retries", "http.segment_min_bytes", "http.segments", "http.stall_seconds"])
+      && eq(page.entries.filter((e) => e.source === "ytdlp" && e.path).map((e) => e.path), ["concurrency.ytdlp"])
+      && page.entries.filter((e) => e.source === "stremio").map((e) => e.path).sort().join() === ",concurrency.stremio,stremio.max_retries,stremio.metadata_timeout,stremio.stall_seconds,stremio.start_wait_seconds");
+    check("every writable key with a label has a row, none is dropped, and a key the page has no wording for still gets a generic one",
+      ALL.every((p) => !!page.rowFor(p)) && page.rowFor("brand_new.key").spec.type === "bool");
+    check("nothing about retention appears while the hub doesn't report it writable", !page.entries.some((e) => /retention|keep history/i.test(e.label + e.path)));
+    check("the page adds no setting of its own: every setting row is one the hub listed", page.entries.filter((e) => e.kind === "setting" || e.kind === "table").every((e) => ALL.includes(e.path)));
+
+    // defaults, reset, timing
+    const conc = page.rowFor("concurrency.total");
+    check("a row says its default, and offers Reset only when the value differs", conc.info().defaultText === "Default: 4" && conc.info().differs === true
+      && page.rowFor("concurrency.http").info().differs === false && page.rowFor("concurrency.http").info().defaultText === "Default: 3");
+    check("defaults read in words: Off/On, the folder default, 'none', a unit", P.formatValue({ type: "bool" }, false) === "Off" && P.formatValue({ path: "library_root", type: "text" }, "") === "the default Jarvis downloads folder"
+      && P.formatValue({ type: "hosts" }, []) === "none" && P.formatValue({ type: "int", unit: "KB/s" }, 0) === "0 KB/s" && P.formatValue({ path: "schedule", type: "list" }, [1, 2]) === "2 windows"
+      && P.formatValue({ path: "notify.done.level", type: "choice" }, null) === "follow Settings > Notifications" && P.formatValue({ type: "choice", path: "after_download.open" }, "reveal") === "Show the file in its folder");
+    w.calls.length = 0;
+    await conc.reset();
+    const run = w.calls.filter((c) => c.url === "/api/tools/run").pop();
+    check("Reset writes the hub's default through the same tool as a change, and the row goes back to its default",
+      run && run.body.name === "dl_prefs" && eq(run.body.arguments, { set: { "concurrency.total": 4 } }) && conc.info().differs === false);
+    const ctlTotal = w.controls.find((c) => c.spec.path === "concurrency.total");
+    check("and the control shows the default again", ctlTotal.last === 4);
+    w.calls.length = 0;
+    await conc.reset();
+    check("Reset on a row already at its default does nothing", w.calls.length === 0);
+    await ctlTotal.commit(9);
+    check("changing a row makes it differ at once, with no reload", conc.info().differs === true);
+    const wl = mk();
+    const pl = (await wl.section.build({ ui: wl.ui }))[0].__dls;
+    const lib = wl.controls.find((c) => c.spec.path === "library_root");
+    wl.calls.length = 0;
+    await lib.commit("D:\\Media");
+    check("a change to the library folder still goes through dl_settings, which asks first", wl.calls.some((c) => c.url === "/api/tools/preview" && c.body.name === "dl_settings"));
+    wl.confirmRequired = false;
+    const noDef = world({ settings: JSON.parse(JSON.stringify(SET)), writable: ALL, prefsWritable: ALL, events: [], openModes: [] });
+    const pn = (await noDef.section.build({ ui: noDef.ui }))[0].__dls;
+    check("a hub that reports no defaults gets no default text and no Reset (the page doesn't guess)", pn.rowFor("concurrency.total").info().hasDefault === false
+      && pn.rowFor("concurrency.total").info().defaultText === "" && pn.rowFor("concurrency.total").info().differs === false);
+    check("the timing is shown for keys whose reading was checked in the hub's code",
+      P.timingFor("rate_limit_kbps") === "within a few seconds" && P.timingFor("schedule") === "within a few seconds" && P.timingFor("concurrency.http") === "within a few seconds"
+      && P.timingFor("notify.done.enabled") === "from the next announcement" && P.timingFor("after_download.open") === "for downloads that finish after the change"
+      && P.timingFor("http.stall_seconds") === "for the next download that starts" && P.timingFor("stremio.metadata_timeout") === "for the next download that starts"
+      && /retry/.test(P.timingFor("http.max_retries")) && /other tools/.test(P.timingFor("unknown_settle_hours")));
+    check("and nothing for the others: no guess", ["library_root", "folders.video", "ext_folders", "allow_private_hosts", "stremio.start_wait_seconds", "brand_new.key", "notify"].every((k) => P.timingFor(k) === ""));
+    check("a row's meta says 'Takes effect ...' when it is known and nothing when it isn't", /^Takes effect within a few seconds/.test(conc.info().timing) && page.rowFor("library_root").info().timing === "");
+
+    // search
+    page.setQuery("speed");
+    check("search narrows rows by label and help across every section", page.visiblePaths().includes("rate_limit_kbps") && page.visiblePaths().includes("schedule") && !page.visiblePaths().includes("library_root")
+      && page.visiblePaths().length < 6);
+    page.setQuery("shared by everything");
+    check("it searches the help text too", eq(page.visiblePaths(), ["rate_limit_kbps"]));
+    page.setQuery("torrent retries");
+    check("every word has to match", eq(page.visiblePaths(), ["stremio.max_retries"]) && page.sectionIds().length > 0);
+    page.setQuery("stremio");
+    check("searching a source's name shows that block with all its settings and its card", page.visiblePaths().includes("stremio.stall_seconds") && page.visiblePaths().includes("concurrency.stremio")
+      && page.entries.find((e) => e.kind === "card").visible === true && !page.visiblePaths().includes("http.stall_seconds"));
+    check("a block with a hit opens by itself; one with none is hidden", page.sourceBlocks.find((b) => b.id === "stremio").details.open === true && page.sourceBlocks.find((b) => b.id === "http").node.hidden === true);
+    page.setQuery("zzz nothing");
+    check("a search nothing matches shows no rows", page.visiblePaths().length === 0);
+    page.setQuery("");
+    check("clearing the search shows everything and folds the blocks back", page.entries.every((e) => e.visible) && page.sourceBlocks.every((b) => b.details.open === false && b.node.hidden === false));
+    // changed from default
+    page.setChangedOnly(true);
+    check("'Changed from default' shows only the rows whose value differs (and hides the card)", eq(page.visiblePaths(), ["concurrency.total"]) && page.entries.find((e) => e.kind === "card").visible === false);
+    await conc.reset();
+    check("and a reset row leaves it at once", page.visiblePaths().length === 0);
+    page.setChangedOnly(false);
+
+    // the Sources blocks
+    check("one block per engine, in the Sources tab's order, with its name", eq(page.sourceBlocks.filter((b) => ["http", "qbittorrent", "stremio", "ytdlp"].includes(b.id)).map((b) => b.label), ["HTTP", "qBittorrent", "Stremio (torrent)", "yt-dlp"]));
+    const ps = P.planSources({ providers: [steamP({}), playniteP] }, SOURCES, []);
+    check("each block carries the Sources tab's status word and dot", eq(ps.filter((x) => x.kind === "engine").map((x) => [x.id, x.word, x.tone]), [["http", "Ready", "ok"], ["qbittorrent", "Needs setup", "warn"], ["stremio", "Not running", "warn"], ["ytdlp", "Broken", "bad"]]));
+    check("a program that reports its downloads gets a block too, with its own dot", ps.filter((x) => x.kind === "provider").length === 2 && P.providerDot({ enabled: false }).tone === "off" && P.providerDot({ last_error: "x" }).tone === "bad"
+      && P.providerDot({ live: 2, stale: 2 }).word === "Not reporting" && P.providerDot({ live: 2, stale: 1 }).tone === "ok");
+    const anchorOf = (b) => b.node.attrs["data-settings-anchor"];
+    check("the blocks' anchors are the ones the Sources tab's Configure buttons use: stremio, http, yt-dlp", anchorOf(page.sourceBlocks.find((b) => b.id === "stremio")) === "stremio"
+      && anchorOf(page.sourceBlocks.find((b) => b.id === "http")) === "http" && anchorOf(page.sourceBlocks.find((b) => b.id === "ytdlp")) === "yt-dlp" && P.anchorOf("Other tools' downloads") === "other-tools-downloads");
+    check("the provider group keeps the anchor its Settings button uses", nodes(blocks[0], (n) => n.attrs && n.attrs["data-settings-anchor"] === "other-tools-downloads").length === 1);
+    check("a source's block is folded until someone asks, and scrolling to it opens it", page.sourceBlocks.every((b) => b.details.open === false || b.details.open === undefined)
+      && (() => { const b = page.sourceBlocks.find((x) => x.id === "stremio"); b.node.scrollIntoView(); return b.details.open === true; })());
+    const wf = mk({ sources: null });
+    const pf = (await wf.section.build({ ui: wf.ui }))[0].__dls;
+    check("when the sources answer can't be read the three engines that have settings still get their blocks", eq(pf.sourceBlocks.map((b) => b.id).slice(0, 3), ["http", "ytdlp", "stremio"]));
+    check("a source with no settings says so (qBittorrent), and the page shows its setup file", (() => {
+      const b = page.sourceBlocks.find((x) => x.id === "qbittorrent");
+      return nodes(b.node, (n) => n.attrs && /no settings here/.test(n.attrs.text || "") && /qbittorrent\.json/.test(n.attrs.text || "")).length === 1;
+    })());
+    check("Steam's switch and update size are in its block, with no default or timing claimed", (() => {
+      const labels = w.shells.map((r) => r.label);
+      return labels.includes("Steam: announce updates of at least") && labels.includes("Steam") && page.entries.filter((e) => e.source === "steam").every((e) => e.kind === "plain" && e.info().differs === false);
+    })());
+
+    // the two tables
+    const sched = page.entries.find((e) => e.kind === "table" && e.path === "schedule");
+    const btn = (root, text) => nodes(root, (n) => n.attrs && n.attrs.text === text)[0];
+    const rowsOf = (e) => ({ kids: e.view });          // the table's rows as drawn
+    check("the speed windows are a table with column headings and add, remove and Save buttons", nodes(sched.node, (n) => n.tag === "table").length === 1 && nodes(sched.node, (n) => n.tag === "th").length === 5
+      && !!btn(sched.node, "Add a window") && !!btn(sched.node, "Save"));
+    w.calls.length = 0;
+    btn(sched.node, "Add a window").attrs.onclick();
+    btn(sched.node, "Add a window").attrs.onclick();
+    check("Add a row adds one, Remove takes one out (one Remove button per row)", nodes(rowsOf(sched), (n) => n.attrs && n.attrs.text === "Remove").length === 2);
+    nodes(rowsOf(sched), (n) => n.attrs && n.attrs.text === "Remove")[1].attrs.onclick();
+    check("removing a row leaves the others", nodes(rowsOf(sched), (n) => n.attrs && n.attrs.text === "Remove").length === 1);
+    btn(sched.node, "Add a window").attrs.onclick();
+    const w2 = mk({ runResult: { ok: false, error: "schedule window 2: from and to can't be the same time" } });
+    const ps2 = (await w2.section.build({ ui: w2.ui }))[0].__dls;
+    const sch2 = ps2.entries.find((e) => e.kind === "table" && e.path === "schedule");
+    btn(sch2.node, "Add a window").attrs.onclick();
+    btn(sch2.node, "Add a window").attrs.onclick();
+    await btn(sch2.node, "Save").attrs.onclick();
+    check("one Save writes the whole list, and a refusal shows in the hub's own words, unchanged", w2.flashes.some((f) => f.kind === "err" && f.text === "schedule window 2: from and to can't be the same time")
+      && eq(w2.calls.filter((c) => c.url === "/api/tools/run").pop().body.arguments.set.schedule.length, 2));
+    check("the refusal is attached to the row it names: '... window 2' is the second row", nodes(rowsOf(sch2), (n) => n.attrs && n.attrs.role === "alert").length === 1);
+    check("the pure row finder: window N is row N-1; an extension is found by name; no number means no row", P.rowOfError("schedule", "schedule window 2: x", [1, 2, 3]) === 1 && P.rowOfError("schedule", "schedule window 9: x", [1, 2]) === -1
+      && P.rowOfError("schedule", "at most 10 schedule windows", [1]) === -1 && P.rowOfError("ext", ".iso: the folder must be a plain sub-folder", [{ ext: "pdf" }, { ext: ".iso" }]) === 1
+      && P.rowOfError("ext", "bad extension 'iso!': use something like .iso", [{ ext: "iso!" }]) === 0 && P.rowOfError("ext", "ext_folders must be an object", [{ ext: ".a" }]) === -1);
+    const ext = page.entries.find((e) => e.kind === "table" && e.path === "ext_folders");
+    check("the folder-per-file-type list is a table too, with its own add button and Save", !!btn(ext.node, "Add a file type") && !!btn(ext.node, "Save") && nodes(ext.node, (n) => n.tag === "th").length === 3);
+    const w3 = mk({ settings: Object.assign({}, SET, { schedule: [{ days: ["mon", "tue", "wed", "thu", "fri", "sat", "sun"], from: "01:00", to: "07:00", rate_limit_kbps: 50 }] }) });
+    const p3 = (await w3.section.build({ ui: w3.ui }))[0].__dls;
+    const t3 = p3.entries.find((e) => e.kind === "table" && e.path === "schedule");
+    check("a list that differs from its default offers Reset, and Reset writes the default and empties the table", t3.info().differs === true && nodes(rowsOf(t3), (n) => n.attrs && n.attrs.text === "Remove").length === 1);
+    w3.calls.length = 0;
+    await t3.reset();
+    check("(the default of both lists is none)", eq(w3.calls.filter((c) => c.url === "/api/tools/run").pop().body.arguments, { set: { schedule: [] } }) && nodes(rowsOf(t3), (n) => n.attrs && n.attrs.text === "Remove").length === 0);
+    check("the lists are searchable like any row", (() => { page.setQuery("midnight"); const v = page.visiblePaths(); page.setQuery(""); return eq(v, ["schedule"]); })());
   }
 
   // ---- safety greps

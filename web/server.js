@@ -2923,6 +2923,10 @@ app.get("/api/hub/history", requireHubRead, requireJarvis, (req, res) => {
     states, kind: hubText(req.query.kind, 20), provider: hubText(req.query.provider, 60),
     search: hubText(req.query.search, 80),
     limit: Number.isFinite(limit) ? limit : 300, offset: Number.isFinite(offset) ? offset : 0,
+    // brief 25 (N21): sort, a date range (epoch seconds), the cursor of the page before, and "look for the files of this page".
+    // The hub validates every one of them; `provider` is kept for other callers (N22 part d removed the page's filter, not the parameter).
+    sort: hubText(req.query.sort, 20), since: hubText(req.query.since, 20), until: hubText(req.query.until, 20),
+    before: hubText(req.query.before, 600), check_files: req.query.check_files === "1",
   });
 });
 

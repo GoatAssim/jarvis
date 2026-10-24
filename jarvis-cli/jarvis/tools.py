@@ -693,6 +693,9 @@ OWNER_ONLY_TOOLS = frozenset({
     "bulk_plan", "bulk_run", "stremio_library", "stremio_mark_watched",
     # Stremio playback (brief 31): drives the mpv on the owner's PC; its handler refuses a guest too.
     "play_control",
+    # Steam (N22b/c): they install / update games on the owner's PC and read what is installed; a guest is
+    # never offered them (their handlers refuse a guest too).
+    "steam_library", "steam_install_game", "steam_update_game",
 })
 
 

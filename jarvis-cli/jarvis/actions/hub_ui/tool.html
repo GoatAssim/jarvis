@@ -43,7 +43,6 @@
                aria-label="Search downloads" placeholder="Search downloads&hellip;">
       </div>
       <div class="chips" id="viewChips" role="group" aria-label="Filter by status"></div>
-      <div class="chips" id="sourceChips" role="group" aria-label="Filter by source"></div>
       <div class="listbar">
         <label for="groupBy">Group by</label>
         <select id="groupBy" aria-label="Group by">
@@ -166,15 +165,36 @@
         <option value="failed">Failed</option>
         <option value="cancelled">Cancelled</option>
       </select>
-      <select id="histSource" aria-label="Source"><option value="">Every source</option></select>
-      <span class="hist__count" id="histCount"></span>
-      <button type="button" class="btn btn--sm" id="histCsv" title="Save what is listed as a spreadsheet file">Export CSV</button>
-      <button type="button" class="btn btn--sm" id="histJson" title="Save what is listed as a JSON file">Export JSON</button>
+      <select id="histSort" aria-label="Sort by">
+        <option value="newest">Newest first</option>
+        <option value="largest">Largest first</option>
+        <option value="slowest">Slowest first</option>
+        <option value="name">Name A to Z</option>
+      </select>
+      <span class="inline hist__range" title="Only downloads that finished between these days">
+        <label for="histFrom">From</label><input type="date" id="histFrom" aria-label="From day">
+        <label for="histTo">to</label><input type="date" id="histTo" aria-label="To day">
+      </span>
+      <button type="button" class="btn btn--sm" id="histClearFilters" hidden>Clear filters</button>
+      <button type="button" class="btn btn--sm" id="histCsv" title="Save everything listed as a spreadsheet file">Export CSV</button>
+      <button type="button" class="btn btn--sm" id="histJson" title="Save everything listed as a JSON file">Export JSON</button>
       <span class="inline" title="Remove the list entries of downloads older than this. Downloaded files are never deleted.">
         <input type="number" id="histDays" min="1" max="3650" value="90" aria-label="Days" style="width:70px">
         <button type="button" class="btn btn--sm btn--danger" id="histClear">Clear older (days)</button>
       </span>
     </div>
+    <div class="hist__summary">
+      <span class="hist__count" id="histCount" aria-live="polite"></span>
+      <button type="button" class="chip" id="histFailedChip" aria-pressed="false" hidden title="Show only the downloads that failed">Failed 0</button>
+    </div>
+    <div class="hist__bulk" id="histBulk" hidden role="group" aria-label="Selected downloads">
+      <span id="histSelCount">0 selected</span>
+      <button type="button" class="btn btn--sm" id="histSelAll" title="Select every download loaded so far that the hub made itself">Select all loaded</button>
+      <button type="button" class="btn btn--sm" id="histBulkRedo" title="Queue the selected downloads again">Download again</button>
+      <button type="button" class="btn btn--sm btn--danger" id="histBulkRemove" title="Remove the selected entries from the list. No file is deleted.">Remove from history</button>
+      <button type="button" class="btn btn--sm" id="histSelNone">Clear selection</button>
+    </div>
     <div class="pane-scroll" id="histList" role="list" aria-label="Download history"></div>
+    <button type="button" class="btn btn--sm hist__more" id="histMore" hidden>Load more</button>
   </section>
 </div>

@@ -8,6 +8,8 @@ Covers:
     context at all) is let through, as before.
   * the two copies of the guest rule behave exactly like download_hub._is_chat_guest on the same inputs.
   * (brief 31) play_control is in OWNER_ONLY_TOOLS too, hidden from a guest, and its handler still refuses one.
+  * (brief 6F) steam_library, steam_install_game and steam_update_game are in OWNER_ONLY_TOOLS too, real tools, hidden
+    from a guest by hidden_from_sender() (not from the owner, not with no chat context), and their handlers still refuse one.
   * the four names are in tools.OWNER_ONLY_TOOLS; tools.hidden_from_sender() hides them, and every loaded
     dl_add_<id> tool, from a guest (still a plain frozenset, nothing for the owner, nothing for no chat).
   * the "downloads" group has exactly ONE pack instruction, in download_hub.py, not longer than the two old
@@ -39,6 +41,7 @@ from jarvis.actions import bulk_download as bulk_tools  # noqa: E402
 from jarvis.actions import download_hub as dh  # noqa: E402
 from jarvis.actions import stremio_discovery as disc  # noqa: E402
 from jarvis.actions import play_media  # noqa: E402
+from jarvis.actions import steam_tools  # noqa: E402
 from jarvis.hub import steam  # noqa: E402
 from jarvis.hub.store import Store  # noqa: E402
 from jarvis.hub.stremio import bulk as bulk_engine  # noqa: E402
@@ -223,6 +226,32 @@ try:
         check(f"play_control handler lets {label} through", r.get("ok") is True and reached == ["mpv_run"])
 finally:
     mpv.run = _orig_mpv_run
+    set_sender(None)
+
+# ------------------------------------------------------------------ the three Steam tools (brief 6F): owner-only, hidden from a guest, handlers still refuse
+STEAM_TOOLS = ("steam_library", "steam_install_game", "steam_update_game")
+STEAM_CALLS = {"steam_library": {}, "steam_install_game": {"game": "105600"}, "steam_update_game": {"game": "105600"}}
+_steam_opened = []
+_orig_open_url = steam.OPEN_URL
+steam.OPEN_URL = lambda url: _steam_opened.append(url)     # nothing here ever starts a real Steam
+try:
+    for name in STEAM_TOOLS:
+        check(f"{name} is in OWNER_ONLY_TOOLS", name in tools.OWNER_ONLY_TOOLS)
+        check(f"{name} is a real tool", name in tools.TOOLS and name in tool_registry.TOOL_INDEX)
+        for label, raw in (("a chat guest", GUEST), ("a sender with no is_owner flag", GUEST_NO_FLAG)):
+            set_sender(raw)
+            check(f"{label}: {name} is hidden by hidden_from_sender()", name in tools.hidden_from_sender())
+        for label, raw in (("the owner on a chat platform", OWNER), ("no chat context", None)):
+            set_sender(raw)
+            check(f"{label}: {name} is not hidden", name not in tools.hidden_from_sender())
+        for label, raw in [("a chat guest", GUEST), ("a sender with no is_owner flag", GUEST_NO_FLAG)] + [("an unreadable sender (%r...)" % r[:12], r) for r in UNREADABLE]:
+            set_sender(raw)
+            del _steam_opened[:]
+            r = steam_tools.TOOLS[name](STEAM_CALLS[name])
+            check(f"{name} handler still refuses {label}, before anything is opened in Steam",
+                  r.get("ok") is False and "owner's" in r.get("error", "") and _steam_opened == [])
+finally:
+    steam.OPEN_URL = _orig_open_url
     set_sender(None)
 
 # ------------------------------------------------------------------ one pack instruction for "downloads"

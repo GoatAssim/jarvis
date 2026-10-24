@@ -152,8 +152,8 @@ const eq = (a, b) => JSON.stringify(a) === JSON.stringify(b);
   check("view: not reporting is the stale provider row", eq(f({ view: "stale" }), ["e"]));
   check("view: all", f({ view: "all" }).length === rows.length);
   check("counts per view", eq(pure.viewCounts(rows), { all: 8, active: 1, waiting: 3, scheduled: 0, failed: 2, done: 1, stale: 1 }));
-  check("source filter: hub engine / provider", eq(f({ source: "provider:demo" }), ["e"]) && f({ source: "hub:http" }).length === 7);
-  check("the sources list is labelled and counted", eq(pure.sourceList(rows).map((s) => [s.label, s.count]), [["Demo provider", 1], ["HTTP", 7]]));
+  // N22 part d: the source/provider filter left the panel.  A `source` in the filter (an old saved one) changes nothing.
+  check("a source in the filter is ignored: the filter is gone from the panel (N22 part d)", f({ source: "provider:demo" }).length === rows.length && f({ source: "hub:http" }).length === rows.length && pure.sourceList === undefined);
   check("search looks in title, subtitle, message and error", eq(f({ search: "alpha" }), ["a"]) && eq(f({ search: "CHECKSUM" }), ["c"]) && f({ search: "zzz" }).length === 0);
   check("filters combine", eq(f({ view: "waiting", search: "paused" }), ["f"]));
 
@@ -238,11 +238,59 @@ const eq = (a, b) => JSON.stringify(a) === JSON.stringify(b);
   const hrows = [H({ id: "h_a", title: "Old.iso", finished_at: 1000 }), H({ id: "h_b", title: "New.mp4", kind: "video", engine: "ytdlp", finished_at: 3000 }),
     H({ id: "h_c", title: "Bad file", state: "failed", error: "HTTP 404", finished_at: 2000 }), H({ id: "h_d", title: "Live one", state: "downloading" }),
     H({ id: "h_e", title: "Dropped", state: "cancelled", finished_at: 2500 })];
-  check("History lists only finished, failed and cancelled rows, newest first",
-    eq(pure.historyFilter(hrows, {}).map((r) => r.id), ["h_b", "h_e", "h_c", "h_a"]));
-  check("History narrows by state, source and title", eq(pure.historyFilter(hrows, { state: "failed" }).map((r) => r.id), ["h_c"])
-    && eq(pure.historyFilter(hrows, { source: pure.sourceKey(hrows[1]) }).map((r) => r.id), ["h_b"])
-    && eq(pure.historyFilter(hrows, { search: "ISO" }).map((r) => r.id), ["h_a"]) && pure.historyFilter(hrows, { search: "zzz" }).length === 0);
+  check("the old client-side History filter is gone: the hub filters, sorts and counts now (brief 25)", pure.historyFilter === undefined);
+  // ---- History rework (brief 25, N21): query, range, groups, summary, rows, selection, confirmations, empty states
+  check("a History request asks for a page of 100 with the sort, and says only what is filtered",
+    pure.historyQuery({}, {}) === "limit=100&sort=newest" && pure.historyQuery({ state: "all", sort: "bogus" }, {}) === "limit=100&sort=newest"
+    && pure.historyQuery({ state: "failed", sort: "largest", search: " a b " }, { limit: 7, before: "X_y", checkFiles: true }) === "limit=7&sort=largest&states=failed&search=a%20b&before=X_y&check_files=1"
+    && pure.historyQuery({}, { limit: 9999 }).startsWith("limit=500&") && pure.historyQuery({ state: "evil" }, {}) === "limit=100&sort=newest");
+  const rg = pure.historyRange("2026-10-01", "2026-10-02");
+  check("a date range runs from the start of the first local day to the end of the last",
+    rg.error === "" && rg.since === new Date(2026, 9, 1, 0, 0, 0).getTime() / 1000 && rg.until === new Date(2026, 9, 2, 23, 59, 59).getTime() / 1000
+    && pure.historyRange("", "").since === null && pure.historyRange("2026-10-05", "").until === null);
+  check("a range that ends before it starts, or a bad date, is an error in words",
+    /ends before it starts/.test(pure.historyRange("2026-10-05", "2026-10-01").error) && /Pick the dates again/.test(pure.historyRange("soon", "").error)
+    && !/since=/.test(pure.historyQuery({ from: "2026-10-05", to: "2026-10-01" }, {})) && /since=\d+&until=\d+/.test(pure.historyQuery({ from: "2026-10-01", to: "2026-10-02" }, {})));
+  const NOW = new Date(2026, 9, 24, 15, 0, 0).getTime();
+  const at = (y, m, d, hh) => new Date(y, m, d, hh || 12, 0, 0).getTime() / 1000;
+  const gl = (t) => pure.historyGroup({ finished_at: t }, NOW).label;
+  check("groups: Today, Yesterday, This week (2 to 6 days ago), then the month",
+    gl(at(2026, 9, 24, 1)) === "Today" && gl(at(2026, 9, 23)) === "Yesterday" && gl(at(2026, 9, 22)) === "This week" && gl(at(2026, 9, 18)) === "This week"
+    && gl(at(2026, 9, 17)) === new Date(2026, 9, 17).toLocaleDateString([], { month: "long", year: "numeric" }) && gl(at(2026, 5, 3)) === new Date(2026, 5, 3).toLocaleDateString([], { month: "long", year: "numeric" })
+    && pure.historyGroup({}, NOW).label === "Earlier" && gl(at(2026, 9, 25)) === "Today");
+  const grows = [{ id: "a", finished_at: at(2026, 9, 24, 2) }, { id: "b", finished_at: at(2026, 9, 24, 1) }, { id: "c", finished_at: at(2026, 9, 23) }, { id: "d", finished_at: at(2026, 9, 1) }];
+  check("a newest-first list is grouped in order; any other sort is one flat group",
+    eq(pure.historyGroups(grows, NOW, "newest").map((g) => [g.label, g.rows.length]), [["Today", 2], ["Yesterday", 1], [new Date(2026, 9, 1).toLocaleDateString([], { month: "long", year: "numeric" }), 1]])
+    && eq(pure.historyGroups(grows, NOW, "largest").map((g) => [g.label, g.rows.length]), [["", 4]]));
+  check("the summary line counts the whole set, leaves out what is zero, and says when it was capped",
+    pure.historySummaryText({ count: 128, total_bytes: 15246000000, failed: 3 }) === "128 downloads \u00b7 14.2 GB \u00b7 3 failed" && pure.historySummaryText({ count: 1, total_bytes: 0, failed: 0 }) === "1 download"
+    && /the newest 20,000 counted/.test(pure.historySummaryText({ count: 20000 }, true)) && pure.historySummaryText(null) === "0 downloads");
+  check("how long a download took reads in words", pure.fmtTook(0.4) === "" && pure.fmtTook(42) === "42 s" && pure.fmtTook(134) === "2 min 14 s" && pure.fmtTook(180) === "3 min" && pure.fmtTook(3900) === "1 h 05 min"
+    && pure.historyDuration({ started_at: 100, finished_at: 234 }) === "2 min 14 s" && pure.historyDuration({ finished_at: 234 }) === "");
+  check("the destination is the file's own name, from either kind of path, and only for finished rows",
+    pure.historyDestName({ state: "done", dest: "/home/me/Downloads/a.zip" }) === "a.zip" && pure.historyDestName({ state: "done", dest: "C:\\Users\\me\\Downloads\\b.iso" }) === "b.iso"
+    && pure.historyDestName({ state: "done", dest: "/tmp/folder/" }) === "folder" && pure.historyDestName({ state: "failed", dest: "/x/y" }) === "" && pure.historyDestName({ state: "done" }) === "");
+  check("a failed row's reason is its first sentence, shortened; with no reason it says so and does not guess",
+    pure.historyReason({ state: "failed", error: "HTTP 503 from the server. Tried 3 times." }) === "HTTP 503 from the server." && pure.historyReason({ state: "failed", error: "" }) === "No reason was recorded."
+    && pure.historyReason({ state: "failed", error: "x".repeat(400) }).length === 158 && pure.historyReason({ state: "done", error: "old" }) === "");
+  const m = pure.historyRowModel(H({ id: "h_m", state: "done", bytes_total: 2048, started_at: 100, finished_at: 3000, dest: "/d/a.zip", file_exists: false }), 4000 * 1000);
+  check("a row model carries size, duration, destination, and 'missing' only when the hub said the file is gone",
+    m.size === "2.0 KB" && m.took === "48 min 20 s" && m.dest === "a.zip" && m.missing === true && m.selectable === true
+    && pure.historyRowModel(H({ state: "done", file_exists: null }), 4000 * 1000).missing === false && pure.historyRowModel(H({ state: "done" }), 4000 * 1000).missing === false
+    && pure.historyRowModel(H({ owner: "provider" }), 4000 * 1000).selectable === false && /^failed /.test(pure.historyRowModel(H({ state: "failed", error: "x" }), 4000 * 1000).when));
+  const sel5 = ["a", "b", "c", "d", "e"];
+  check("Shift-click selects every id between two, in either direction; an unknown id selects just itself",
+    eq(pure.selectionRange(sel5, "b", "d"), ["b", "c", "d"]) && eq(pure.selectionRange(sel5, "d", "b"), ["b", "c", "d"]) && eq(pure.selectionRange(sel5, "x", "d"), ["d"]));
+  check("the bulk confirmations say how many, and that no file is deleted",
+    /^Remove 3 from the history\?$/.test(pure.historyRemoveText(3).title) && /3 list entries/.test(pure.historyRemoveText(3).body) && /No downloaded file is deleted/.test(pure.historyRemoveText(3).body)
+    && /1 list entry/.test(pure.historyRemoveText(1).body) && /Queue 2 downloads again/.test(pure.historyRedownloadText(2).body) && /no file is deleted/.test(pure.historyRedownloadText(2).body)
+    && pure.HISTORY_REDOWNLOAD_MAX === 50);
+  check("the retention sentence appears only when the hub reports a retention", pure.historyRetentionNote(0) === "" && pure.historyRetentionNote(null) === ""
+    && /older than 90 days/.test(pure.historyRetentionNote(90)) && /never deleted/.test(pure.historyRetentionNote(90)) && /1 day\./.test(pure.historyRetentionNote(1)));
+  check("the empty states: none yet, nothing matches, and none while rows exist or the list is still loading",
+    pure.historyEmpty({ loaded: true, summary: { count: 0 }, state: "all" }).kind === "none" && pure.historyEmpty({ loaded: true, summary: { count: 0 }, state: "failed" }).kind === "filtered"
+    && pure.historyEmpty({ loaded: true, summary: { count: 0 }, search: "x" }).kind === "filtered" && pure.historyEmpty({ loaded: true, summary: { count: 3 } }) === null
+    && pure.historyEmpty({ loaded: false, summary: null }) === null && pure.historyEmpty({ loaded: true, error: "x", summary: null }) === null);
   check("a spreadsheet cell that starts like a formula is defused, quotes and commas are escaped",
     pure.csvCell("=HYPERLINK(1)") === "'=HYPERLINK(1)" && pure.csvCell("+1") === "'+1" && pure.csvCell("-2") === "'-2" && pure.csvCell("@a") === "'@a"
     && pure.csvCell('say "hi", ok') === '"say ""hi"", ok"' && pure.csvCell(null) === "" && pure.csvCell("plain") === "plain");
@@ -272,9 +320,9 @@ const eq = (a, b) => JSON.stringify(a) === JSON.stringify(b);
   check("an engine's line: what it is for, then how many run and wait (an engine the table doesn't know shows only the counts)",
     pure.engineLine(E({ active: 1, queued: 0 })) === "magnets, torrent files and Stremio streams" + " \u00B7 1 active \u00B7 0 waiting"
     && pure.engineLine(E({ handles: "", active: 0, queued: 3 })) === "0 active \u00B7 3 waiting" && pure.engineLine(E({ active: null, queued: undefined })).endsWith("0 active \u00B7 0 waiting"));
-  check("Configure: Stremio lands on its card, HTTP on Connections, yt-dlp on Running at once; qBittorrent and a load error get no button",
-    pure.engineConfigure(E()).anchor === "stremio" && pure.engineConfigure(E({ configure: "http" })).anchor === "connections"
-    && pure.engineConfigure(E({ configure: "ytdlp" })).anchor === "running-at-once" && pure.engineConfigure(E({ configure: null })) === null
+  check("Configure: each engine lands on its own block under Sources (moved: HTTP was Connections, yt-dlp was Running at once); qBittorrent and a load error get no button",
+    pure.engineConfigure(E()).anchor === "stremio" && pure.engineConfigure(E({ configure: "http" })).anchor === "http"
+    && pure.engineConfigure(E({ configure: "ytdlp" })).anchor === "yt-dlp" && pure.engineConfigure(E({ configure: null })) === null
     && pure.engineConfigure(E({ configure: "something-new" })) === null && pure.engineConfigure(null) === null);
   check("without a Configure button the card says where it is set up (qBittorrent's file) or that there are no settings, and says nothing when there is a button",
     pure.engineSettingsNote(E({ configure: null, config_file: "~/.jarvis/qbittorrent.json" })) === "Set up in ~/.jarvis/qbittorrent.json."
@@ -313,9 +361,9 @@ const eq = (a, b) => JSON.stringify(a) === JSON.stringify(b);
     /loadSources\(false\);\s*\n\s*S\.srcTimer = setInterval\(\(\) => \{ if \(!doc\.hidden\) loadSources\(false\); \}, 10000\)/.test(source) && /if \(S\.srcBusy\) return;/.test(srcBlock));
   const dsSrc2 = fs.readFileSync(path.join(__dirname, "..", "web", "public", "downloads-settings.js"), "utf8");
   const stSrc2 = fs.readFileSync(path.join(__dirname, "..", "web", "public", "settings.js"), "utf8");
-  check("Settings > Downloads blocks carry data-settings-anchor (Stremio, Connections, Running at once, Other tools' downloads) and Settings scrolls to one on show()",
-    /setAttribute\("data-settings-anchor"/.test(dsSrc2) && /anchored\(stremioBlock\(ctx\), "Stremio"\)/.test(dsSrc2) && /anchored\(providersBlock\(ctx, payload\), "Other tools' downloads"\)/.test(dsSrc2)
-    && /anchored\(ui\.group\(g\.group/.test(dsSrc2) && /if \(want\.anchor\) scrollToAnchor/.test(stSrc2) && /data-settings-anchor="' \+ anchor/.test(stSrc2) && /\^\[a-z0-9-\]\{1,40\}\$/.test(stSrc2));
+  check("Settings > Downloads blocks carry data-settings-anchor (every section, every source block, Other tools' downloads) and Settings scrolls to one on show()",
+    /"data-settings-anchor": src\.anchor/.test(dsSrc2) && /"data-settings-anchor": "other-tools-downloads"/.test(dsSrc2) && /"data-settings-anchor": anchorOf\(s\.title\)/.test(dsSrc2)
+    && /details\.scrollIntoView = function/.test(dsSrc2) && /if \(want\.anchor\) scrollToAnchor/.test(stSrc2) && /data-settings-anchor="' \+ anchor/.test(stSrc2) && /\^\[a-z0-9-\]\{1,40\}\$/.test(stSrc2));
 
   // ---- N15: why a row has no arrows or grip, and the order shown at once
   const R = (o) => Object.assign({ id: "a", owner: "hub", state: "queued", priority: 3 }, o);

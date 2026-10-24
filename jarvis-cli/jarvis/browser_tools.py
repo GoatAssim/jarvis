@@ -93,6 +93,7 @@ correct selector for markup it has never seen.
 """
 
 import atexit
+import functools
 import json
 import secrets
 import socket
@@ -124,7 +125,6 @@ _DAEMON_CALL_TIMEOUT = 30.0
 FETCH_MAX_CHARS = 4000
 
 _DEFAULT_ACTION_TIMEOUT_MS = 10_000
-_DOWNLOAD_GRACE_MS = 500  # N22a: after a click, how long to wait for a download to START
 _PROBE_MS = 1500  # short per-candidate look before trying the next
                    # selector strategy, so 3 near-misses don't burn the
                    # whole timeout before the real match gets a turn
@@ -279,21 +279,37 @@ def _ensure_page():
     return page, None
 
 
-def _hub_downloads(result, page, grace_ms=0):
-    """N22a: add to a tool's result what became of any download it started (the file handed to the
-    Download Hub, or the failed row).  A result with nothing to add comes back untouched; never raises.
-    The wait for a running save happens in hub/browser_intake.py: a save only moves while Playwright runs."""
-    try:
-        from .hub import browser_intake
-        return browser_intake.annotate(result, page, grace_ms=grace_ms)
-    except Exception:  # noqa: BLE001
-        return result
+def _current_page():
+    return _session.get("page")
 
 
-def close_browser():
-    """Tear down the session, if one is open. Both the explicit
-    browser_close tool and the atexit hook below call this — one teardown
-    path, always safe to call when nothing is open, never raises."""
+def _via_intake(kind):
+    """N22a / 6E, hook 2 (see hub/browser_intake.py): run this tool on the browser's own thread and add to its result
+    what became of any download.  Whatever goes wrong on the intake's side, the tool runs exactly once and its own
+    result comes back (as it did before N22a)."""
+    def decorate(fn):
+        @functools.wraps(fn)
+        def tool(args=None):
+            seen = {}
+
+            def once(a):
+                seen["ran"] = True
+                seen["result"] = fn(a)
+                return seen["result"]
+            try:
+                from .hub import browser_intake
+                return browser_intake.run_tool(once, kind, args, _current_page)
+            except Exception:  # noqa: BLE001
+                if "result" in seen:
+                    return seen["result"]
+                if "ran" in seen:
+                    raise
+                return fn(args)
+        return tool
+    return decorate
+
+
+def _close_browser_now():
     context = _session.get("context")
     pw = _session.get("playwright")
     _session["page"] = None
@@ -309,6 +325,21 @@ def close_browser():
             pw.stop()
     except Exception:
         pass
+
+
+def close_browser(wait_for_downloads=True):
+    """Tear down the session, if one is open. Both the explicit
+    browser_close tool and the atexit hook below call this — one teardown
+    path, always safe to call when nothing is open, never raises.
+
+    N22a / 6E, hook 3: the teardown runs on the browser's own thread (Playwright can't be used from another), and
+    a download still being saved gets up to 30 s to land first, unless `wait_for_downloads` is False (the
+    browser_close tool: the owner or model asked for it now). What is still running then fails with a plain reason."""
+    try:
+        from .hub import browser_intake
+        return browser_intake.closing(_close_browser_now, browser_intake.DRAIN_AT_CLOSE_S if wait_for_downloads else 0.0)
+    except Exception:  # noqa: BLE001
+        return _close_browser_now()
 
 
 atexit.register(close_browser)
@@ -390,6 +421,7 @@ def _find_locator(page, description, timeout_ms):
 # ── tools -------------------------------------------------------------
 
 
+@_via_intake("goto")
 def _local_tool_browser_goto(args=None):
     args = args or {}
     url = (args.get("url") or "").strip()
@@ -407,16 +439,15 @@ def _local_tool_browser_goto(args=None):
     try:
         page.goto(url, wait_until="domcontentloaded", timeout=30_000)
     except Exception as e:
-        # A link that is a file download makes Chromium refuse the navigation ("Download is starting"):
-        # _hub_downloads turns that into the success it is when the hub has the file.
-        return _hub_downloads({"ok": False, "error": f"Navigation failed: {e}"}, page)
+        return {"ok": False, "error": f"Navigation failed: {e}"}
     try:
         title = page.title()
     except Exception:
         title = ""
-    return _hub_downloads({"ok": True, "url": page.url, "title": title}, page)
+    return {"ok": True, "url": page.url, "title": title}
 
 
+@_via_intake("click")
 def _local_tool_browser_click(args=None):
     args = args or {}
     description = (args.get("description") or "").strip()
@@ -438,10 +469,10 @@ def _local_tool_browser_click(args=None):
         loc.click(timeout=_DEFAULT_ACTION_TIMEOUT_MS)
     except Exception as e:
         return {"ok": False, "error": f"Click failed: {e}"}
-    # A click may start a download: wait for it to begin, then until the file has landed in the hub.
-    return _hub_downloads({"ok": True, "url": page.url}, page, grace_ms=_DOWNLOAD_GRACE_MS)
+    return {"ok": True, "url": page.url}
 
 
+@_via_intake("fill")
 def _local_tool_browser_fill(args=None):
     args = args or {}
     description = (args.get("description") or "").strip()
@@ -469,6 +500,7 @@ def _local_tool_browser_fill(args=None):
     return {"ok": True}
 
 
+@_via_intake("get_text")
 def _local_tool_browser_get_text(args=None):
     args = args or {}
     description = (args.get("description") or "").strip()
@@ -510,6 +542,7 @@ def _prune_browser_screenshots():
             break
 
 
+@_via_intake("screenshot")
 def _local_tool_browser_screenshot(args=None):
     page, err = _ensure_page()
     if err:
@@ -550,6 +583,7 @@ def _local_tool_browser_screenshot(args=None):
     }
 
 
+@_via_intake("wait_for")
 def _local_tool_browser_wait_for(args=None):
     args = args or {}
     description = (args.get("description") or "").strip()
@@ -576,12 +610,13 @@ def _local_tool_browser_wait_for(args=None):
             "ok": False, "timed_out": True,
             "error": f'"{description}" never appeared within {timeout_seconds:.0f}s (tried: {", ".join(tried)}).',
         }
-    return _hub_downloads({"ok": True, "url": page.url}, page)    # N22a: lets a save that is still running continue
+    return {"ok": True, "url": page.url}
 
 
+@_via_intake("close")
 def _local_tool_browser_close(args=None):
     was_open = _session.get("page") is not None
-    close_browser()
+    close_browser(wait_for_downloads=False)
     return {"ok": True, "closed": was_open}
 
 

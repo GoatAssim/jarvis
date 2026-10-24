@@ -412,11 +412,250 @@ def section_sources(page, ids):
     check("Stremio's Configure opens Settings > Downloads with the Stremio card in view", box["section"] == "downloads" and 0 <= box["top"] < box["vh"] and box["bottom"] > 0, box)
     page.click("#skin-close")
     page.wait_for_selector("#prefs-backdrop", state="hidden", timeout=10000)
-    box = land("http", "connections")
-    check("HTTP's Configure opens Settings > Downloads at Connections", box["section"] == "downloads" and 0 <= box["top"] < box["vh"], box)
+    box = land("http", "http")
+    opened = page.evaluate("document.querySelector('[data-settings-anchor=\"http\"]').open")
+    check("HTTP's Configure opens Settings > Downloads at HTTP's own block, and unfolds it", box["section"] == "downloads" and 0 <= box["top"] < box["vh"] and opened is True, (box, opened))
+    page.click("#skin-close")
+    page.wait_for_selector("#prefs-backdrop", state="hidden", timeout=10000)
+    box = land("ytdlp", "yt-dlp")
+    check("yt-dlp's Configure lands on its block too", box["section"] == "downloads" and 0 <= box["top"] < box["vh"], box)
     page.click("#skin-close")
     page.wait_for_selector("#prefs-backdrop", state="hidden", timeout=10000)
 
+
+
+
+def section_settings(page):
+    print("\n-- N20: Settings > Downloads, rebuilt --")
+    from jarvis.hub.store import Store
+
+    page.click("#settingsBtn")
+    page.wait_for_selector("#prefs-backdrop:not([hidden]) .dls .dls-rail__item", timeout=30000)
+    page.wait_for_timeout(400)
+    rail = page.evaluate("Array.from(document.querySelectorAll('.dls-rail__item')).map((b) => b.firstChild.textContent)")
+    check("the page has its own rail with the seven sections", rail[:7] == ["Files", "Speed and schedule", "Running at once", "Sources", "Notifications", "When a download finishes", "Safety"], rail)
+    blocks = page.evaluate("Array.from(document.querySelectorAll('details.dls-source')).map((d) => [d.getAttribute('data-settings-anchor'), d.open])")
+    check("each engine has a collapsed block under Sources", [b[0] for b in blocks][:4] == ["http", "qbittorrent", "stremio", "yt-dlp"] and not any(b[1] for b in blocks), blocks)
+    page.click("details[data-settings-anchor=http] > summary")
+    check("a block unfolds on click and shows its settings", page.evaluate("document.querySelector('details[data-settings-anchor=http]').open") is True
+          and page.locator("details[data-settings-anchor=http] .prefs-row").count() >= 3)
+    page.click("details[data-settings-anchor=http] > summary")
+    # search
+    total = page.locator(".dls .prefs-row:visible").count()
+    page.fill(".dls-search", "speed")
+    page.wait_for_timeout(200)
+    shown = page.evaluate("Array.from(document.querySelectorAll('.dls .prefs-row, .dls .prefs-group-table')).filter((r) => !r.hidden && r.offsetParent !== null).map((r) => r.querySelector('.prefs-row__label').textContent)")
+    check("typing 'speed' leaves only the speed settings on screen", 0 < len(shown) < 5 and any("Speed limit" in x for x in shown), shown)
+    page.fill(".dls-search", "zzzz nothing")
+    page.wait_for_timeout(150)
+    check("a search nothing matches says so", page.locator(".dls-none:visible").count() == 1)
+    page.fill(".dls-search", "")
+    page.wait_for_timeout(150)
+    check("clearing the search brings every row back", page.locator(".dls .prefs-row:visible").count() >= total - 1, (total, page.locator(".dls .prefs-row:visible").count()))
+    # change a setting, see it differ, reset it
+    before = Store().get_settings()["concurrency"]["total"]
+    box = page.locator('.dls .prefs-row:has-text("Downloads at once (all)") input[type=number]')
+    box.fill("7")
+    box.press("Tab")
+    page.wait_for_selector('.dls .prefs-row:has-text("Downloads at once (all)") .prefs-row__status.is-ok', timeout=20000)
+    check("changing a row saves it through the hub", Store().get_settings()["concurrency"]["total"] == 7, Store().get_settings()["concurrency"])
+    default_text = page.evaluate("document.evaluate(\"//div[contains(@class,'prefs-row')][.//div[text()='Downloads at once (all)']]//span[contains(@class,'dls-default')]\", document, null, 9, null).singleNodeValue.textContent")
+    check("the row says its default (4), has a Reset link, and says when it takes effect", default_text == "Default: 4"
+          and page.locator('.dls .prefs-row:has-text("Downloads at once (all)") .dls-reset').count() == 1
+          and "Takes effect within a few seconds" in page.locator('.dls .prefs-row:has-text("Downloads at once (all)") .dls-meta').inner_text())
+    page.check("#dls-changed")
+    page.wait_for_timeout(200)
+    only = page.evaluate("Array.from(document.querySelectorAll('.dls .prefs-row')).filter((r) => !r.hidden && r.offsetParent !== null).map((r) => r.querySelector('.prefs-row__label').textContent)")
+    check("'Changed from default' shows just that row", only == ["Downloads at once (all)"], only)
+    page.click('.dls .prefs-row:has-text("Downloads at once (all)") .dls-reset')
+    deadline = time.time() + 20
+    while time.time() < deadline and Store().get_settings()["concurrency"]["total"] != 4:
+        page.wait_for_timeout(200)
+    deadline = time.time() + 10
+    while time.time() < deadline and page.locator('.dls .prefs-row:visible').count() != 0:
+        page.wait_for_timeout(150)
+    check("Reset writes the hub's default (4) and the row leaves the changed list", Store().get_settings()["concurrency"]["total"] == 4
+          and page.locator('.dls .prefs-row:visible').count() == 0, page.locator('.dls .prefs-row:visible').count())
+    page.uncheck("#dls-changed")
+    # the speed windows table
+    page.click('.dls .prefs-group-table:has-text("Speed windows") >> text=Add a window')
+    check("Add a window adds a table row with four boxes", page.locator('.dls .prefs-group-table:has-text("Speed windows") tbody tr').count() == 1
+          and page.locator('.dls .prefs-group-table:has-text("Speed windows") tbody tr input, .dls .prefs-group-table:has-text("Speed windows") tbody tr select').count() == 4)
+    page.click('.dls .prefs-group-table:has-text("Speed windows") >> text=Save')
+    deadline = time.time() + 20
+    while time.time() < deadline and not Store().get_settings().get("schedule"):
+        page.wait_for_timeout(200)
+    check("Save writes the whole list", len(Store().get_settings().get("schedule") or []) == 1, Store().get_settings().get("schedule"))
+    page.fill('.dls .prefs-group-table:has-text("Speed windows") tbody tr input >> nth=1', "01:00")
+    page.fill('.dls .prefs-group-table:has-text("Speed windows") tbody tr input >> nth=0', "01:00")
+    page.dispatch_event('.dls .prefs-group-table:has-text("Speed windows") tbody tr input >> nth=0', "change")
+    page.click('.dls .prefs-group-table:has-text("Speed windows") >> text=Save')
+    page.wait_for_selector('.dls .prefs-group-table:has-text("Speed windows") tr.dls-table__err', timeout=20000)
+    err = page.locator('.dls .prefs-group-table:has-text("Speed windows") tr.dls-table__err').inner_text()
+    check("a refused list shows the hub's own sentence under the row it names", "schedule window 1" in err and "same time" in err, err)
+    page.click('.dls .prefs-group-table:has-text("Speed windows") .dls-reset')
+    deadline = time.time() + 20
+    while time.time() < deadline and Store().get_settings().get("schedule"):
+        page.wait_for_timeout(200)
+    deadline = time.time() + 10
+    while time.time() < deadline and page.locator('.dls .prefs-group-table:has-text("Speed windows") tbody tr').count() != 0:
+        page.wait_for_timeout(150)
+    check("Reset on the table writes the default (no windows) and empties it", not Store().get_settings().get("schedule")
+          and page.locator('.dls .prefs-group-table:has-text("Speed windows") tbody tr').count() == 0,
+          (Store().get_settings().get("schedule"), page.locator('.dls .prefs-group-table:has-text("Speed windows") tbody tr').count()))
+    # rail jump
+    page.click('.dls-rail__item:has-text("Safety")')
+    page.wait_for_timeout(300)
+    top = page.evaluate("[document.querySelector('#dls-safety').getBoundingClientRect().top, window.innerHeight]")
+    check("a rail entry brings its section into view (the last one can't reach the top of the pane)", 0 <= top[0] < top[1], top)
+    page.click("#skin-close")
+    page.wait_for_selector("#prefs-backdrop", state="hidden", timeout=10000)
+
+
+HIST_ROWS = 5000
+
+
+def seed_history():
+    """5,000 finished rows spread over 120 days, written straight into the temporary database (nothing runs them).  Every 20th
+    failed, every 33rd was cancelled; the first 120 `done` rows point at a real file, the other `done` rows at one that is not there."""
+    from jarvis.hub.store import Store
+
+    st = Store()
+    files = HOME / "hist-files"
+    files.mkdir(exist_ok=True)
+    now = time.time()
+    rows = []
+    for i in range(HIST_ROWS):
+        state = "failed" if i % 20 == 7 else "cancelled" if i % 33 == 5 else "done"
+        finished = now - 600 - i * (120 * 86400.0 / HIST_ROWS)
+        dest = None
+        if state == "done":
+            dest = str(files / ("file%04d.bin" % i))
+            if i < 120:
+                Path(dest).write_bytes(b"x" * 10)
+        rows.append(("hist%05d" % i, "File %04d.bin" % i, state, 1000 + (i * 7919) % 900000, finished - 5 - (i % 40), finished, finished, finished - 100,
+                     dest, "HTTP 503 from the server. Tried 3 times." if state == "failed" else None))
+    con = sqlite3.connect(str(st.path))
+    con.executemany("INSERT INTO items(id, title, state, bytes_total, started_at, finished_at, updated_at, created_at, dest_file, error, engine, source_url) "
+                    "VALUES (?,?,?,?,?,?,?,?,?,?, 'http', 'http://example.invalid/x')", rows)
+    con.commit()
+    count = con.execute("SELECT COUNT(*) FROM items WHERE state IN ('done','failed','cancelled')").fetchone()[0]
+    failed = con.execute("SELECT COUNT(*) FROM items WHERE state='failed'").fetchone()[0]
+    con.close()
+    on_disk = sum(1 for r in rows[:120] if r[2] == "done")      # the files that exist
+    return count, failed, on_disk
+
+
+HIST_JS = """() => {
+  const R = __hubRoot();
+  const list = R.querySelector('#histList');
+  return { rows: list.querySelectorAll('.hist__row').length, groups: Array.from(list.querySelectorAll('.hist__group')).map((g) => g.textContent),
+           count: R.querySelector('#histCount').textContent, bulkHidden: R.querySelector('#histBulk').hidden, more: !R.querySelector('#histMore').hidden,
+           chip: R.querySelector('#histFailedChip').hidden ? '' : R.querySelector('#histFailedChip').textContent };
+}"""
+
+
+def hist_state(page):
+    return page.evaluate(HIST_JS)
+
+
+def hist_wait(page, pred, ms=8000):
+    deadline = time.time() + ms / 1000.0
+    st = None
+    while time.time() < deadline:
+        st = hist_state(page)
+        if pred(st):
+            return True, st
+        page.wait_for_timeout(100)
+    return False, st
+
+
+def section_history(page):
+    print("\n-- N21: the History tab with %d generated rows --" % HIST_ROWS)
+    total, failed, on_disk = seed_history()
+    page.evaluate("""() => { window.__confirms = []; window.JarvisUI = window.JarvisUI || {}; window.JarvisUI.confirm = async (o) => { window.__confirms.push(o); return true; }; }""")
+    t0 = time.time()
+    page.evaluate("__hubRoot().querySelector('#tabHistory').click()")
+    ok, st = hist_wait(page, lambda s: s["rows"] > 0)
+    first_ms = (time.time() - t0) * 1000
+    check("the first page is %d rows, not thousands, and it came back fast" % 100, ok and st["rows"] == 100 and first_ms < 5000, (st, round(first_ms)))
+    check("the summary counts the WHOLE set, not the page (%d downloads, %d failed)" % (total, failed),
+          st["count"].startswith("%d downloads" % total) and (" %d failed" % failed) in st["count"], st["count"])
+    check("the days are grouped under headers, Today first", st["groups"][:1] == ["Today"] and len(st["groups"]) >= 2, st["groups"][:5])
+    sticky = page.evaluate("getComputedStyle(__hubRoot().querySelector('.hist__group')).position")
+    check("a day header is sticky", sticky == "sticky", sticky)
+    check("the Failed chip shows the failed count", st["chip"] == "Failed %d" % failed, st["chip"])
+    # scroll near the end a dozen times: each time the next 100 rows arrive, once each, and the page is not rebuilt
+    t0 = time.time()
+    last = st["rows"]
+    for _ in range(12):
+        page.evaluate("() => { const b = __hubRoot().querySelector('#histList'); b.scrollTop = b.scrollHeight; }")
+        ok, st = hist_wait(page, lambda s: s["rows"] > last, ms=6000)
+        if not ok:
+            break
+        last = st["rows"]
+    scroll_s = time.time() - t0
+    ids = page.evaluate("Array.from(__hubRoot().querySelectorAll('#histList .hist__row')).map((r) => r.getAttribute('data-id'))")
+    check("scrolling loads the next pages, once each (%d rows after 12 scrolls, %.1f s)" % (len(ids), scroll_s), len(ids) == 1300 and len(set(ids)) == 1300 and st["more"], (len(ids), len(set(ids))))
+    missing = page.evaluate("Array.from(__hubRoot().querySelectorAll('#histList .hist__row.is-missing')).length")
+    expect_missing = page.evaluate("Array.from(__hubRoot().querySelectorAll('#histList .hist__row.state-done')).length") - sum(
+        1 for i in page.evaluate("Array.from(__hubRoot().querySelectorAll('#histList .hist__row.state-done')).map((r) => r.getAttribute('data-id'))")
+        if i.startswith("hist") and int(i[4:]) < 120)
+    check("a finished row whose file is not there is marked 'file missing' (every page checks its own rows)", missing == expect_missing and missing > 1000, (missing, expect_missing))
+    one = page.evaluate("""() => { const r = __hubRoot().querySelector('#histList .hist__row[data-id="hist00007"]'); return { reason: r.querySelector('.hist__reason') && r.querySelector('.hist__reason').textContent,
+        retry: Array.from(r.querySelectorAll('.rbtn')).map((b) => b.textContent) }; }""")
+    check("a failed row says why in one sentence and has a Retry button", one["reason"] == "HTTP 503 from the server." and "Retry" in one["retry"], one)
+    # Failed chip: only the failed rows, and the count agrees
+    page.evaluate("__hubRoot().querySelector('#histFailedChip').click()")
+    ok, st = hist_wait(page, lambda s: s["count"].startswith("%d downloads" % failed))
+    check("the Failed chip narrows the list to the failed rows and the summary follows", ok and st["rows"] == min(100, failed), st)
+    for _ in range(6):
+        page.evaluate("() => { const b = __hubRoot().querySelector('#histList'); b.scrollTop = b.scrollHeight; }")
+        ok, st = hist_wait(page, lambda s: not s["more"], ms=3000)
+        if ok:
+            break
+    check("the end of a list is reached: every failed row is there once, no Load more, the retention sentence closes it",
+          ok and st["rows"] == failed and not st["more"] and page.evaluate("!!__hubRoot().querySelector('#histList .hist__note')"), st)
+    page.evaluate("__hubRoot().querySelector('#histFailedChip').click()")
+    hist_wait(page, lambda s: s["count"].startswith("%d downloads" % total))
+    # sort: largest first
+    page.evaluate("() => { const s = __hubRoot().querySelector('#histSort'); s.value = 'largest'; s.dispatchEvent(new Event('change')); }")
+    ok, st = hist_wait(page, lambda s: s["groups"] == [] and s["rows"] > 0)
+    sizes = page.evaluate("Array.from(__hubRoot().querySelectorAll('#histList .hist__row .hist__meta')).slice(0, 5).map((m) => m.textContent)")
+    check("sorted by size the list is flat (no day headers) and starts with the biggest", ok and "880 KB" in sizes[0], sizes)
+    page.evaluate("() => { const s = __hubRoot().querySelector('#histSort'); s.value = 'newest'; s.dispatchEvent(new Event('change')); }")
+    hist_wait(page, lambda s: len(s["groups"]) >= 2)
+    # select a range with shift, remove it: the confirmation says how many and that no file goes; the file stays
+    page.evaluate("""() => { const c = __hubRoot().querySelectorAll('#histList .hist__check[data-id]'); c[2].click(); }""")
+    page.evaluate("""() => { const c = __hubRoot().querySelectorAll('#histList .hist__check[data-id]');
+        c[5].dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, shiftKey: true })); }""")
+    st = hist_state(page)
+    sel = page.evaluate("__hubRoot().querySelector('#histSelCount').textContent")
+    check("Shift-click selects the range between two checkboxes and the bulk bar shows", not st["bulkHidden"] and sel == "4 selected", sel)
+    gone = page.evaluate("Array.from(__hubRoot().querySelectorAll('#histList .hist__check:checked')).map((c) => c.getAttribute('data-id'))")
+    page.evaluate("__hubRoot().querySelector('#histBulkRemove').click()")
+    deadline = time.time() + 8
+    removed_n = 0
+    while time.time() < deadline:
+        from jarvis.hub.store import Store
+        removed_n = sum(1 for i in gone if Store().get_item(i) is None)
+        if removed_n == len(gone):
+            break
+        page.wait_for_timeout(150)
+    conf = page.evaluate("window.__confirms[window.__confirms.length - 1]")
+    check("bulk Remove asked first, said how many, and said no file is deleted", conf and "4" in conf["title"] and "No downloaded file is deleted" in conf["body"], conf)
+    check("bulk Remove removed exactly those rows", removed_n == len(gone) == 4, (removed_n, gone))
+    kept = sum(1 for i in range(120) if (HOME / "hist-files" / ("file%04d.bin" % i)).exists())
+    check("and every downloaded file is still on disk", kept == on_disk, (kept, on_disk))
+    ok, st = hist_wait(page, lambda s: s["count"].startswith("%d downloads" % (total - 4)))
+    check("the list and the summary follow the removal", ok, st and st["count"])
+    # filters that match nothing: the empty state offers Clear filters
+    page.evaluate("""() => { const i = __hubRoot().querySelector('#histSearch'); i.value = 'no such title zzz'; i.dispatchEvent(new Event('input')); }""")
+    ok, st = hist_wait(page, lambda s: s["rows"] == 0 and s["count"].startswith("0 downloads"))
+    check("nothing matching shows the filtered empty state with a Clear filters button", ok and page.evaluate("!!__hubRoot().querySelector('#histEmptyClear')"), st)
+    page.evaluate("__hubRoot().querySelector('#histEmptyClear').click()")
+    ok, st = hist_wait(page, lambda s: s["rows"] > 0)
+    check("Clear filters brings the list back", ok, st)
 
 
 def main():
@@ -438,6 +677,8 @@ def main():
         section_reorder(page, ids)
         section_buttons(page)
         section_sources(page, ids)
+        section_settings(page)
+        section_history(page)
         check("no page error was raised in the whole run", not errors, errors[:3])
         browser.close()
     print("\nengine: %s; server: the real web/server.js on %s; back end: the real hub_admin and store in %s" % (engine, BASE, HOME))
