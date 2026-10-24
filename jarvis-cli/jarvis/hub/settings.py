@@ -27,7 +27,7 @@ from . import naming, paths
 
 DEFAULTS = {
     "library_root": "",          # "" = paths.default_library_root()
-    "concurrency": {"total": 4, "http": 3, "ytdlp": 2, "stremio": 3},
+    "concurrency": {"total": 4, "http": 3, "ytdlp": 2, "stremio": 3, "qbittorrent": 2},
     "rate_limit_kbps": 0,        # 0 = unlimited; shared across running hub downloads
     # Speed windows: [{"days": "all", "from": "01:00", "to": "07:00", "rate_limit_kbps": 0}].
     # Inside a window its limit replaces `rate_limit_kbps` (0 there = unlimited); first match wins.
@@ -47,6 +47,12 @@ DEFAULTS = {
              "segments": 1, "segment_min_bytes": 32 * 1024 * 1024},
     "stremio": {"mode": "save", "stall_seconds": 90, "max_retries": 3, "start_wait_seconds": 60,   # phase 4 
     "metadata_timeout": 90},      # seconds to wait for a torrent's file list (no peers = no list)
+    # qBittorrent engine (brief 31, decision 11).  Only its BEHAVIOUR lives here; the connection (address,
+    # user name, PASSWORD) and the on/off switch stay in ~/.jarvis/qbittorrent.json, so no settings answer
+    # can ever show a secret.  A key the file also sets is the file's (see engines/qbittorrent.py).
+    "qbittorrent": {"prefer_for_magnets": False, "cancel_deletes_data": True, "after_done": "keep",
+                    "save_subfolder": "Torrents", "category": "", "tag": "jarvis",
+                    "metadata_timeout_s": 900, "stall_minutes": 0, "poll_s": 2.0},
     "providers": {},             # phase 5: per-provider blocks
     "provider_limits": {"max_rows": 500, "max_report_kb": 64, "max_reports_per_s": 20,
                         "stale_after_s": 30},
@@ -73,6 +79,9 @@ DEFAULTS = {
     # tool-supplied rows (Steam, ...).
     "notify": {
         "enabled": True, "min_seconds": 0, "coalesce_s": 8, "providers": True,
+        # one on/off switch per provider (brief 31): {"steam": True, "playnite": True}; a provider with
+        # no entry is on.  `providers` above is the master switch for all of them.
+        "by_provider": {"steam": True, "playnite": True},
         "started": {"enabled": False, "level": None},
         "done": {"enabled": True, "level": None},
         "failed": {"enabled": True, "level": None},
@@ -101,18 +110,30 @@ MAX_WINDOWS = 10
 STEAM_MIN_UPDATE_GB_DEFAULT = 1.0
 MAX_MIN_UPDATE_GB = 10_000.0
 
+# The providers that have a notification switch of their own out of the box.  Any other provider id
+# is accepted too (`notify.by_provider.<id>`), see `notify_provider_key`.
+NOTIFY_PROVIDERS = ("steam", "playnite")
+QBITTORRENT_PREFS = ("prefer_for_magnets", "category", "metadata_timeout_s", "stall_minutes", "poll_s")
+QBITTORRENT_CONFIRM = ("cancel_deletes_data", "after_done", "save_subfolder", "tag")
+QBITTORRENT_AFTER_DONE = ("keep", "pause", "remove")
+
 PREFS_WRITABLE = {
     "rate_limit_kbps", "schedule",
-    "concurrency.total", "concurrency.http", "concurrency.ytdlp", "concurrency.stremio",
+    "concurrency.total", "concurrency.http", "concurrency.ytdlp", "concurrency.stremio", "concurrency.qbittorrent",
     "http.stall_seconds", "http.max_retries", "http.segments", "http.segment_min_bytes",
     "stremio.stall_seconds", "stremio.max_retries", "stremio.metadata_timeout", "stremio.start_wait_seconds",
     "after_download.open",
     "notify.enabled", "notify.min_seconds", "notify.coalesce_s", "notify.providers",
     "ext_folders", "unknown_settle_hours",
 } | {"folders." + k for k in FOLDER_KINDS} \
-  | {"notify.%s.%s" % (e, f) for e in EVENTS for f in ("enabled", "level")}
+  | {"notify.%s.%s" % (e, f) for e in EVENTS for f in ("enabled", "level")} \
+  | {"notify.by_provider.%s" % p for p in NOTIFY_PROVIDERS} \
+  | {"qbittorrent." + k for k in QBITTORRENT_PREFS}
 
-WRITABLE = PREFS_WRITABLE | {"library_root", "allow_private_hosts"}
+# Behaviour that deletes data or moves files, or changes which torrents count as the hub's own, goes
+# through dl_settings (which asks first), like library_root.
+WRITABLE = PREFS_WRITABLE | {"library_root", "allow_private_hosts"} \
+    | {"qbittorrent." + k for k in QBITTORRENT_CONFIRM}
 
 
 def _deep_merge(base, over):
@@ -432,6 +453,53 @@ def steam_min_update_bytes(stored):
     return int(provider_setting("steam", stored, "notify_min_update_gb") * 1024 ** 3)
 
 
+def _float_in(value, lo, hi, label):
+    if isinstance(value, bool):
+        return None, "%s must be a number" % label
+    try:
+        num = float(value)
+    except (TypeError, ValueError):
+        return None, "%s must be a number" % label
+    if num != num or num < lo or num > hi:
+        return None, "%s must be between %g and %g" % (label, lo, hi)
+    return num, None
+
+
+def _check_qb_label(label, max_len):
+    """A category or a tag as qBittorrent keeps it: plain text, no commas (tags are comma-separated), no control characters."""
+    def check(value):
+        if not isinstance(value, str):
+            return None, "%s must be text" % label
+        text = value.strip()
+        if len(text) > max_len or any(ord(c) < 32 or c in ",\\" for c in text):
+            return None, "%s must be at most %d characters, with no commas, backslashes or control characters" % (label, max_len)
+        return text, None
+    return check
+
+
+def _check_qb_after_done(value):
+    if value not in QBITTORRENT_AFTER_DONE:
+        return None, "qbittorrent.after_done must be one of: %s" % ", ".join(QBITTORRENT_AFTER_DONE)
+    return value, None
+
+
+def notify_provider_key(key):
+    """The provider id in a `notify.by_provider.<id>` key, or None (any other key, or an odd id)."""
+    prefix = "notify.by_provider."
+    if not isinstance(key, str) or not key.startswith(prefix):
+        return None
+    pid = key[len(prefix):]
+    return pid if re.fullmatch(r"[a-z0-9][a-z0-9_-]{0,39}", pid) else None
+
+
+def qbittorrent_view(settings):
+    """The `qbittorrent` block as an answer: the known behaviour keys only, whatever else is stored.
+    The engine's connection details (and the password) are not settings and never pass through here."""
+    block = (settings or {}).get("qbittorrent")
+    block = block if isinstance(block, dict) else {}
+    return {k: block.get(k, DEFAULTS["qbittorrent"][k]) for k in DEFAULTS["qbittorrent"]}
+
+
 _CHECKS = {
     "library_root": _check_root,
     "ext_folders": _check_ext_folders,
@@ -441,6 +509,16 @@ _CHECKS = {
     "concurrency.http": lambda v: _int_in(v, 1, 16, "concurrency.http"),
     "concurrency.ytdlp": lambda v: _int_in(v, 1, 16, "concurrency.ytdlp"),
     "concurrency.stremio": lambda v: _int_in(v, 1, 16, "concurrency.stremio"),
+    "concurrency.qbittorrent": lambda v: _int_in(v, 1, 16, "concurrency.qbittorrent"),
+    "qbittorrent.prefer_for_magnets": _bool("qbittorrent.prefer_for_magnets"),
+    "qbittorrent.cancel_deletes_data": _bool("qbittorrent.cancel_deletes_data"),
+    "qbittorrent.after_done": _check_qb_after_done,
+    "qbittorrent.save_subfolder": _check_kind_folder("qbittorrent.save_subfolder"),
+    "qbittorrent.category": _check_qb_label("qbittorrent.category", 100),
+    "qbittorrent.tag": _check_qb_label("qbittorrent.tag", 60),
+    "qbittorrent.metadata_timeout_s": lambda v: _int_in(v, 60, 86400, "qbittorrent.metadata_timeout_s"),
+    "qbittorrent.stall_minutes": lambda v: _int_in(v, 0, 10080, "qbittorrent.stall_minutes"),
+    "qbittorrent.poll_s": lambda v: _float_in(v, 0.5, 30, "qbittorrent.poll_s"),
     "http.stall_seconds": lambda v: _int_in(v, 10, 3600, "http.stall_seconds"),
     "http.max_retries": lambda v: _int_in(v, 0, 10, "http.max_retries"),
     "stremio.stall_seconds": lambda v: _int_in(v, 10, 3600, "stremio.stall_seconds"),
@@ -459,6 +537,8 @@ _CHECKS = {
 }
 for _kind in FOLDER_KINDS:
     _CHECKS["folders." + _kind] = _check_kind_folder("folders." + _kind)
+for _provider in NOTIFY_PROVIDERS:
+    _CHECKS["notify.by_provider.%s" % _provider] = _bool("notify.by_provider.%s" % _provider)
 for _event in EVENTS:
     _CHECKS["notify.%s.enabled" % _event] = _bool("notify.%s.enabled" % _event)
     _CHECKS["notify.%s.level" % _event] = _check_level
@@ -476,6 +556,15 @@ def validate_update(updates, allowed=None):
     if not isinstance(updates, dict) or not updates:
         return clean, ["nothing to change"]
     for key, value in updates.items():
+        pid = notify_provider_key(key)
+        if pid is not None and key not in allowed and "notify.providers" in allowed:
+            # any provider id has its own notification switch, not only the two built in
+            checked, err = _bool(key)(value)
+            if err:
+                errors.append(err)
+            else:
+                clean[key] = checked
+            continue
         if key not in allowed:
             if key in WRITABLE:
                 errors.append("%r can't be changed with dl_prefs; it needs dl_settings (which asks you first)" % str(key)[:60])

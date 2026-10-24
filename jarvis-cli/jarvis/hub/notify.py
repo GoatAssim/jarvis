@@ -184,6 +184,7 @@ class Dispatcher:
         self.clock = clock or time.time
         self._pending = {}                  # (event, channels) -> {"first": ts, "entries": [...], "level": n, "channels": [...]}
         self._was_busy = False
+        self._muted = frozenset()                 # provider ids with their own notification switch off (per pass)
         self._burst = {"done": 0, "failed": 0}   # finishes since the queue last went idle
         self._since = None
         self._provider_cache = {}           # provider id -> its settings block, for one pass
@@ -214,6 +215,23 @@ class Dispatcher:
         return (event == "done" and item.get("owner") != "hub"
                 and below_update_threshold(item, self._provider_settings(item.get("provider"))))
 
+    @staticmethod
+    def muted_providers(cfg):
+        """The provider ids whose own switch (`notify.by_provider.<id>`) is off.  A provider with no
+        entry is on; so is any entry that is not exactly False."""
+        block = (cfg or {}).get("by_provider")
+        if not isinstance(block, dict):
+            return frozenset()
+        return frozenset(str(pid) for pid, on in block.items() if on is False)
+
+    def _provider_muted(self, item):
+        """Is this a provider's row (Steam, Playnite, a tool's) whose notifications the owner switched off?"""
+        return item.get("owner") != "hub" and str(item.get("provider") or "") in self._muted
+
+    def _silent(self, event, item):
+        """Nobody is told about this row, and it isn't part of the queue's tally."""
+        return self._provider_muted(item) or self._quiet_update(event, item)
+
     # ------------------------------------------------------------ settings helpers
 
     @staticmethod
@@ -229,6 +247,7 @@ class Dispatcher:
         cfg = settings.get("notify") or {}
         master = bool(cfg.get("enabled", True))
         self._provider_cache = {}                         # the owner may have changed a threshold since the last pass
+        self._muted = self.muted_providers(cfg)           # ... or a provider's own switch
         since = self.since()
         sent = 0
         queued_group_checks = []
@@ -237,9 +256,9 @@ class Dispatcher:
             for item in self.store.unclaimed(event, state_name, since=since, stamp_column=column):
                 if not self.store.claim_notice(item["id"], event, item.get(column) or 0):
                     continue
-                if not _channels_of(item) and not self._quiet_update(event, item):
-                    # a download announced elsewhere, or a small Steam update nobody is told about,
-                    # isn't part of the queue's tally
+                if not _channels_of(item) and not self._silent(event, item):
+                    # a download announced elsewhere, a small Steam update nobody is told about, or a
+                    # provider the owner switched off, isn't part of the queue's tally
                     self._burst[event] += 1
                 self._consider(event, item, cfg, settings, master)
                 if item.get("group_id"):
@@ -270,8 +289,8 @@ class Dispatcher:
         mine = item["owner"] == "hub"
         if not mine and (event not in ("done", "failed") or not cfg.get("providers", True)):
             return
-        if self._quiet_update(event, item):
-            return                                       # a Steam update under the owner's size threshold
+        if self._silent(event, item):
+            return                                       # a provider switched off, or a Steam update under the size threshold
         options = item.get("options") or {}
         override = options.get("notify")
         if override == "off":

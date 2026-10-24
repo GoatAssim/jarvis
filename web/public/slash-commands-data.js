@@ -994,7 +994,8 @@ window.JARVIS_SLASH_COMMANDS = /*JSON-BEGIN*/
       "args": [],
       "covers": [
         "personas-list",
-        "settings-admin"
+        "settings-admin",
+        "tool-settings"
       ],
       "example": "/settings",
       "preview": "Open Settings: skin, AI, layout, notifications, tools and safety, memory, About and Advanced."
@@ -1367,7 +1368,7 @@ window.JARVIS_SLASH_COMMANDS = /*JSON-BEGIN*/
     "notify-send": {
       "summary": "Send a message to every configured channel.",
       "riskTier": "dangerous",
-      "usage": "<message> [title] [channels,csv] [--position P] [--level N]"
+      "usage": "<message> [title] [channels,csv] [--position P] [--level N] [--kind K] [--source S] [--failed] [--look L] [--tone T]"
     },
     "mcp-call": {
       "summary": "Run an arbitrary MCP tool by name.",

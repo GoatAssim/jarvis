@@ -7,9 +7,11 @@ is nearly full); a fail is something that stops downloads working.
 Extension points for later phases, so nobody edits this file to add a prerequisite:
   * an engine reports its own prerequisites through `available()` (ffmpeg for yt-dlp, the
     Stremio server for the Stremio engine) -- they appear under "engine <name>";
-  * an engine may also define `doctor() -> [ {name, status, detail}, ... ]` for more.
+  * an engine may also define `doctor() -> [ {name, status, detail}, ... ]` for more (or
+    `doctor(settings=None)`, and then it is given the hub's settings).
 """
 
+import inspect
 import os
 import shutil
 
@@ -88,7 +90,9 @@ def run(store=None):
         extra = getattr(engine, "doctor", None)
         if callable(extra):
             try:
-                for row in extra() or []:
+                # an engine's doctor may take the hub's settings (qBittorrent's behaviour keys live there)
+                takes_settings = "settings" in inspect.signature(extra).parameters
+                for row in (extra(settings=settings) if takes_settings else extra()) or []:
                     checks.append(_check(str(row.get("name", name)), row.get("status", "warn"), str(row.get("detail", ""))))
             except Exception as exc:  # noqa: BLE001
                 checks.append(_check("engine %s" % name, "warn", "its own checks failed: %s" % exc))

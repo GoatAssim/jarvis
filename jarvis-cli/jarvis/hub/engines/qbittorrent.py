@@ -161,8 +161,15 @@ def parse_address(text):
     return "%s://%s%s" % (scheme, netloc, parts.path.rstrip("/")), None
 
 
-def _clean_config(raw):
-    cfg = dict(DEFAULT_CONFIG)
+# The behaviour keys the owner can also set in the hub's own settings (`qbittorrent` block, brief 31).
+# The connection (address, user name, PASSWORD) and the on/off switch are the file's alone: a secret
+# never lives in the settings, so no settings answer can show it.
+SETTINGS_KEYS = ("category", "tag", "save_subfolder", "after_done", "prefer_for_magnets",
+                 "cancel_deletes_data", "metadata_timeout_s", "stall_minutes", "poll_s")
+
+
+def _clean_config(raw, base=None):
+    cfg = dict(base or DEFAULT_CONFIG)
     if not isinstance(raw, dict):
         return cfg
     for key in ("address", "username", "category", "tag", "save_subfolder"):
@@ -185,9 +192,22 @@ def _clean_config(raw):
     return cfg
 
 
-def load_config(path=None):
+def _settings_base(settings):
+    """DEFAULT_CONFIG with the hub's `qbittorrent` settings block laid over it (only the behaviour
+    keys, each checked the same way a file value is).  The file then wins for any key it sets."""
+    block = (settings or {}).get("qbittorrent") if isinstance(settings, dict) else None
+    if not isinstance(block, dict):
+        return dict(DEFAULT_CONFIG)
+    return _clean_config({k: block[k] for k in SETTINGS_KEYS if k in block})
+
+
+def load_config(path=None, settings=None):
     """(config, None) or (None, a one-line problem the owner can act on).  Never raises, and the
-    problem never contains the password."""
+    problem never contains the password.
+
+    `settings` is the hub's settings (ctx.settings).  Precedence for a behaviour key: the file when
+    it sets the key, else the settings block, else the default.  `prefer_for_magnets` is on when
+    EITHER says so (as it always was)."""
     target = Path(path) if path else config_path()
     if not target.exists():
         return None, "not set up: create %s with the Web UI address (see the top of engines/qbittorrent.py)" % target
@@ -195,7 +215,10 @@ def load_config(path=None):
         raw = json.loads(target.read_text(encoding="utf-8-sig"))
     except (OSError, ValueError) as exc:
         return None, "can't read %s: %s" % (CONFIG_NAME, type(exc).__name__)
-    cfg = _clean_config(raw)
+    seeded = _settings_base(settings)
+    cfg = _clean_config(raw, seeded)
+    if seeded["prefer_for_magnets"]:
+        cfg["prefer_for_magnets"] = True
     if isinstance(raw, dict) and raw.get("enabled") is False:
         return None, "switched off in %s (\"enabled\": false)" % CONFIG_NAME
     base, problem = parse_address(cfg["address"])
@@ -560,8 +583,8 @@ class QBittorrentEngine(Engine):
         finally:
             client.close()
 
-    def doctor(self):
-        cfg, problem = load_config()
+    def doctor(self, settings=None):
+        cfg, problem = load_config(settings=settings)
         if problem:
             return []                                   # `available()` already says it, once
         client = Client(cfg["base"], cfg["username"], cfg["password"], timeout=(2.0, 4.0))
@@ -593,7 +616,7 @@ class QBittorrentEngine(Engine):
             return Outcome.failed("unexpected error: %s" % _short(exc))
 
     def _run(self, item, ctx):
-        cfg, problem = load_config()
+        cfg, problem = load_config(settings=getattr(ctx, "settings", None))
         if problem:
             return Outcome.failed("the qBittorrent engine isn't set up: %s" % problem)
         parsed = parse_magnet(item.get("source_url"))

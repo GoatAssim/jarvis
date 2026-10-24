@@ -256,6 +256,59 @@ def normalize_item_options(limit_kbps=None, open_when_done=None, notify_me=None,
     return out, None
 
 
+# --------------------------------------------------------------------------- engine item options
+#
+# An engine can read choices of its own from its row's `options` (the HTTP engine reads `segments`).
+# `item_options` on add_items is the ONE way an add tool stores such a choice (N4, brief 31).  It is
+# deliberately narrow: an allow-list, one entry per option, naming the engines that honour it and
+# the checker that decides what a value may be.  A key not listed is an error, never stored.
+#
+# Not here on purpose: `headers` (an Authorization value would sit in the database in clear text),
+# `filename`, and the Stremio engine's `show` / `season` / `episode` / `fallbacks` (H23, which the
+# bulk tools write themselves).  Each is an owner decision (brief 31, "Open points").
+
+def _check_segments(value):
+    """Parallel parts for ONE download: a whole number from 1 (off for this one) to the engine's maximum."""
+    try:
+        from .engines import http as http_engine
+        top = int(http_engine.SEGMENT_MAX)
+    except Exception:  # noqa: BLE001 - the validator must keep working without the engine module
+        top = 16
+    if isinstance(value, float) and value != int(value):
+        return None, "segments must be a whole number"       # 2.5 is not quietly cut to 2
+    return settings_mod._int_in(value, 1, top, "segments")
+
+
+ITEM_OPTION_CHECKS = {
+    # option -> (the engines that honour it, checker(value) -> (clean, error))
+    "segments": (("http",), _check_segments),
+}
+
+
+def normalize_engine_item_options(raw):
+    """The `item_options` an add tool sends -> ({option: clean value}, error).
+
+    None / {} is fine (nothing).  Anything but an object, an option this hub doesn't know and a value
+    its checker refuses are errors, all in plain words.  A value of None leaves that option unset."""
+    if raw in (None, {}, ""):
+        return {}, None
+    if not isinstance(raw, dict):
+        return {}, "item_options must be an object like {\"segments\": 4}"
+    out = {}
+    for key, value in raw.items():
+        name = str(key)
+        if name not in ITEM_OPTION_CHECKS:
+            return {}, "unknown item option %r; the options a download can carry here: %s" % (
+                name[:40], ", ".join(sorted(ITEM_OPTION_CHECKS)))
+        if value is None:
+            continue
+        clean, problem = ITEM_OPTION_CHECKS[name][1](value)
+        if problem:
+            return {}, problem
+        out[name] = clean
+    return out, None
+
+
 def split_dest(dest, root, allow_absolute=False):
     """A folder the owner typed for one download -> ({"subdir": ...} or {"dest_abs": ...}, error).
 
@@ -279,14 +332,19 @@ def split_dest(dest, root, allow_absolute=False):
 def add_items(inputs, *, engine=None, dest=None, group=None, start_paused=False,
               speed_limit_kbps=None, open_when_done=None, notify_me=None,
               notify_channels=None, notify_events=None, allow_absolute_dest=False, start_at=None,
-              engine_options=None, store=None):
+              engine_options=None, item_options=None, store=None):
     """Queue one or more downloads.  Returns {ok, added, skipped, group, note}.
 
     `start_at` ("tomorrow 3am", "in 2 hours") holds them until then (see "timed starts" above);
     it wins over `start_paused`.
 
     `engine_options`: yt-dlp's own choices (mode, quality, container, audio_format ...).  They
-    are checked once, here, and only stored on rows the yt-dlp engine takes."""
+    are checked once, here, and only stored on rows the yt-dlp engine takes.
+
+    `item_options`: other per-download choices an engine reads from its row (today `segments`, the
+    HTTP engine's parallel parts).  Checked once, here (`normalize_engine_item_options`), stored only on
+    rows an engine that honours them takes; the other rows ignore them and the answer's `note` says so.
+    A link that is already queued (`duplicate`) keeps the options it has."""
     try:
         store = _store(store)
         if isinstance(inputs, str):
@@ -328,6 +386,9 @@ def add_items(inputs, *, engine=None, dest=None, group=None, start_paused=False,
             video_opts, problem = ytdlp_engine.normalize_options(engine_options)
             if problem:
                 return _err(problem)
+        item_opts, problem = normalize_engine_item_options(item_options)
+        if problem:
+            return _err(problem)
         plan, skipped = [], []
         for text in wanted:
             decision = preview(text, engine=engine, store=store)
@@ -340,6 +401,7 @@ def add_items(inputs, *, engine=None, dest=None, group=None, start_paused=False,
         if plan and (group or len(plan) > 1):
             group_id = store.ensure_group(group or "Batch of %d" % len(plan), kind="batch")
         ignored = False
+        ignored_opts, kept_by_duplicate = set(), set()
         for text, decision in plan:
             options = dict(where)
             options.update(extras)            # extras never reach the dedupe key (options_hash)
@@ -349,6 +411,11 @@ def add_items(inputs, *, engine=None, dest=None, group=None, start_paused=False,
                 options.update(video_opts)
             elif video_opts:
                 ignored = True
+            for opt_name, opt_value in item_opts.items():
+                if decision["engine"] in ITEM_OPTION_CHECKS[opt_name][0]:
+                    options[opt_name] = opt_value
+                else:
+                    ignored_opts.add(opt_name)
             if decision["engine"] == "ytdlp":
                 try:
                     host = urlsplit(decision["source"]).hostname or "the web"
@@ -367,6 +434,8 @@ def add_items(inputs, *, engine=None, dest=None, group=None, start_paused=False,
                 kind=naming.kind_for(title) if kind == "file" else kind,
                 options=options, group_id=group_id, state="paused" if (start_paused or timed) else "queued",
                 dedupe_key=router.dedupe_key(decision["engine"], router.canonical_url(decision["source"]), options))
+            if not created:
+                kept_by_duplicate.update(k for k in item_opts if k in options)
             if timed and created:
                 store.update_item(item["id"], {"next_attempt_at": timed["epoch"]}, touch=False,
                                   event="scheduled to start at %s" % timed["iso"])
@@ -385,6 +454,11 @@ def add_items(inputs, *, engine=None, dest=None, group=None, start_paused=False,
         if ignored:
             notes.append("mode / quality / container / audio_format only apply to video pages (the yt-dlp "
                          "engine); they were ignored for the other links.")
+        for opt_name in sorted(ignored_opts):
+            notes.append("%s only applies to links the %s engine takes; it was ignored for the other links." % (
+                opt_name, "/".join(ITEM_OPTION_CHECKS[opt_name][0])))
+        for opt_name in sorted(kept_by_duplicate):
+            notes.append("%s was not changed on a link that was already queued; it keeps its own options." % opt_name)
         if notes:
             out["note"] = " ".join(notes)
         return out
@@ -465,7 +539,7 @@ def present_item(item, providers, now):
         "links": item.get("links") or [], "pending": item.get("control") or "",
         # this download's own choices (hub rows only): speed cap KB/s, when-done action, notify
         "prefs": ({k: (item.get("options") or {}).get(k) for k in ("limit_kbps", "open", "notify", "notify_channels",
-                                                             "notify_events", "subdir", "dest_abs")
+                                                             "notify_events", "subdir", "dest_abs", "segments")
                    if (item.get("options") or {}).get(k) is not None} if item["owner"] == "hub" else {}),
     }
 
@@ -667,6 +741,8 @@ def settings_view(settings):
             "rate_limit_now": {"kbps": kbps, "source": source},
             "folders": settings["folders"], "ext_folders": settings.get("ext_folders") or {},
             "after_download": settings["after_download"],
+            # only the known behaviour keys: the qBittorrent connection and its password are not settings
+            "qbittorrent": settings_mod.qbittorrent_view(settings),
             "notify": settings["notify"], "notify_options": notify_options(),
             "library": library_info(settings)}
 

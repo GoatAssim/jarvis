@@ -51,6 +51,8 @@ SETTLE_MAX_S = 600.0         # how long one browser tool call may wait for saves
 SETTLE_POLL_MS = 200
 DRAIN_AT_EXIT_S = 30.0       # when the process ends with a save running, wait this long before the browser closes
 MAX_NOTES = 20
+REPLACE_TRIES = 6            # putting the finished file in place can fail for a moment (a virus scanner holds it on Windows)
+REPLACE_WAIT_S = 0.5
 
 _lock = threading.RLock()
 _saving = {}                 # local id -> {"item", "title", "part", "started", "done"}
@@ -183,11 +185,21 @@ def _on_download(download):
             return
         try:
             size = os.path.getsize(part)
-            if target.exists():                    # someone took the name while we were saving
-                target = naming.unique_path(target, ignore_part=True)
-            os.replace(part, target)
+            for attempt in range(REPLACE_TRIES):
+                if target.exists():                # someone took the name while we were saving
+                    target = naming.unique_path(target, ignore_part=True)
+                try:
+                    os.replace(part, target)
+                    break
+                except OSError:
+                    if attempt == REPLACE_TRIES - 1:
+                        raise
+                    time.sleep(REPLACE_WAIT_S)
         except OSError as exc:
-            _finish_failed(local_id, entry, "could not put the file in place: %s" % _first_line(exc))
+            # The download itself is whole: never delete it.  The row fails and says where the file is.
+            kept = entry.pop("part", None)
+            _finish_failed(local_id, entry, "the file is downloaded but could not be renamed (%s); it is kept as %s"
+                           % (_first_line(exc), kept))
             return
         with _lock:
             if entry.get("done"):

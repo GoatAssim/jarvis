@@ -341,7 +341,7 @@ check("a block with only a tool and a description is fine (no params: just dry_r
       set(next(s for s in recs["fake_provider.py"].schemas if s["name"] == gen)["parameters"]["properties"]) == {"dry_run"})
 
 check("the real loader result for the shipped files is unchanged: no generated tool without an add block",
-      not [n for n in tools.TOOLS if n.startswith("dl_add_") and n not in ("dl_add_ytdlp", "dl_add_stremio")])
+      not [n for n in tools.TOOLS if n.startswith("dl_add_") and n not in ("dl_add_ytdlp", "dl_add_stremio", "dl_add_http")])
 check("the shipped add tools are live in the tool table and in the downloads group",
       all(n in tools.TOOLS for n in ("dl_add", "dl_add_ytdlp", "dl_add_stremio")))
 

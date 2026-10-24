@@ -222,6 +222,36 @@ check("... exactly one note, not two", len([n for n in bi.take_notes() if n["tit
 check("... and nothing is left in the saving list", bi.saving_now() == [])
 check("... and no .part is left", not list(LIB.rglob("midway*")))
 
+# the finished file cannot be put in place (a scanner holds it): it is kept, never deleted, and the row says where
+fresh()
+real_replace = os.replace
+bi.REPLACE_WAIT_S = 0.01
+swaps = {"n": 0}
+
+
+def flaky_replace(src, dst):
+    swaps["n"] += 1
+    if swaps["n"] < 3:
+        raise PermissionError("held by another process")
+    return real_replace(src, dst)
+
+
+os.replace = flaky_replace
+bi._on_download(FakeDownload("held.bin", b"held-bytes"))
+check("a rename that fails twice is retried and the file lands", (LIB / "Files" / "held.bin").read_bytes() == b"held-bytes"
+      and [r for r in rows() if r["title"] == "held.bin"][0]["state"] == "done")
+swaps["n"] = -100
+os.replace = lambda src, dst: (_ for _ in ()).throw(PermissionError("held by another process"))
+bi._on_download(FakeDownload("stuck.bin", b"stuck-bytes"))
+os.replace = real_replace
+stuck = [r for r in rows() if r["title"] == "stuck.bin"][0]
+kept = list((LIB / "Files").glob("stuck.bin.part"))
+check("a rename that never works fails the row", stuck["state"] == "failed" and "could not be renamed" in stuck["error"])
+check("... but the downloaded bytes are KEPT, and the row says where", len(kept) == 1 and kept[0].read_bytes() == b"stuck-bytes"
+      and str(kept[0]) in stuck["error"])
+kept[0].unlink()
+bi.take_notes()
+
 # a library folder that cannot be made is a failed row with a plain sentence
 fresh()
 blocker = Path(HOME) / "afile"

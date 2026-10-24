@@ -170,10 +170,12 @@ def _gather_urls(args):
     return [u.strip() for u in urls if u and u.strip()]
 
 
-def _queue(args, urls, engine, engine_options, label):
+def _queue(args, urls, engine, engine_options, label, item_options=None):
     """What every add tool does once it knows its links, the engine and the engine's options: the
     dry run, the bulk question, the open-the-file question, the full-path question, then the
-    hub's add_items.  ONE copy, so the three tools cannot drift apart."""
+    hub's add_items.  ONE copy, so every add tool shares it.  `item_options` (brief 31) is the engine's
+    own per-download choice that is not a yt-dlp one (dl_add_http's `segments`); it is only handed on
+    when there is one, so an older `add_items` (or a test's fake of it) is called exactly as before."""
     svc = _svc()
     if args.get("dry_run"):
         decisions = []
@@ -202,6 +204,7 @@ def _queue(args, urls, engine, engine_options, label):
         if not _confirm_outside(dest, len(urls)):
             return {"ok": False, "cancelled": True, "error": "not confirmed: nothing was queued"}
         allow_abs = True
+    extra = {"item_options": item_options} if item_options else {}
     res = svc.add_items(urls, engine=engine, dest=dest, group=args.get("group"),
                         start_paused=bool(args.get("start_paused")),
                         speed_limit_kbps=args.get("speed_limit_kbps"),
@@ -209,7 +212,7 @@ def _queue(args, urls, engine, engine_options, label):
                         notify_channels=args.get("notify_channels"),
                         notify_events=args.get("notify_events"),
                         allow_absolute_dest=allow_abs, start_at=args.get("start_at"),
-                        engine_options=engine_options)
+                        engine_options=engine_options, **extra)
     if isinstance(res, dict):
         for row in res.get("added") or []:
             if isinstance(row, dict):

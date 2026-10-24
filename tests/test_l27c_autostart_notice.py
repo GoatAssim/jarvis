@@ -199,7 +199,16 @@ def test_real_notifier_writes_the_inbox_record():
     Path(notifier.CONFIG_FILE).parent.mkdir(parents=True, exist_ok=True)
     Path(notifier.CONFIG_FILE).write_text(json.dumps({"levels": {"daemon": 1}}), encoding="utf-8")
     _register("l27c-real", name="Real one")
-    with _Patched(_fail_all, notifier.notify):
+    # The notifier saves the record to the inbox BEFORE it notes that the inbox worked, so the copy on disk
+    # never lists "inbox" in `delivered`; what it delivered is on the record notify() returns. Watch that one.
+    real_notify, returned = notifier.notify, []
+
+    def _spy(*args, **kwargs):
+        record = real_notify(*args, **kwargs)
+        returned.append(record)
+        return record
+
+    with _Patched(_fail_all, _spy):
         daemons.autostart_all()
     items = [i for i in notifier._load_inbox() if i.get("kind") == "daemon"]
     check("one `daemon` record is in the inbox", len(items) == 1, items)
@@ -207,7 +216,9 @@ def test_real_notifier_writes_the_inbox_record():
         rec = items[0]
         check("record is marked failed", rec.get("failed") is True, rec)
         check("level 1 from notify_config.json is honoured", rec.get("level") == 1, rec)
-        check("level 1 delivers to the inbox only", rec.get("delivered") == ["inbox"], rec)
+        check("level 1 delivers to the inbox only",
+              len(returned) == 1 and returned[0] and returned[0].get("delivered") == ["inbox"]
+              and not returned[0].get("failed_channels"), returned)
         check("record names the daemon", "Real one (l27c-real)" in rec.get("message", ""), rec)
     _reset_registry()
 
