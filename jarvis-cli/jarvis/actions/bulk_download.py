@@ -189,6 +189,8 @@ TEST_CHECKLIST = {
              "expect": "ok: true, a plan_id, per-episode status (exact / pending / none / unreleased) and a message in words."},
             {"run": {"title": "<a show>", "season": 1, "quality": "1080", "audio": "dub", "on_missing": "other_quality"},
              "expect": "episodes without a dubbed 1080p get the closest other quality with dub, marked fallback with a note."},
+            {"run": {"title": "<a show whose newest season only just started>", "audio": "dub"},
+             "expect": "No season named: the plan takes the latest and the message says so ('You didn't name a season, so this is the latest one (N of M); say so if you meant another.'). If that season lists fewer than half the episodes of the season before it, the message adds 'Season X has A episodes; this one has B, so it may have just started.' Same season, same plan, same rows either way. (⚠️ Seen only on a recording of one real Cinemeta answer with invented stream text.)"},
             {"run": {"title": "<a show>", "season": 99}, "expect": "ok: false, says the show has no season 99 and lists the seasons it has."},
             {"run": {},
              "expect": "No error, a question: needs_clarification 'Which show? Give its name (or an id from media_find).'; nothing is planned."},

@@ -2971,16 +2971,27 @@ app.get("/api/hub/stremio", requireHubRead, requireJarvis, (req, res) => hubAdmi
 // it starts and changes nothing, and hub_admin leaves out every key, password and address. Each engine's own check has a
 // time limit inside hub_admin; the route's is a little longer.
 app.get("/api/hub/sources", requireHubRead, requireJarvis, (req, res) => hubAdmin(res, "sources", {}, 30000));
+// Brief 29: the same route also carries the stremio-web block ({url, dir, start_cmd}, each clamped; only the keys that are strings
+// are passed on, hub/stremio/config.py is the validator) and `repair: true` (+ `keep_copy: true`) for a missing, stale or broken
+// stremio.json. Same guards as before: nothing here decides what is allowed.
+function hubStremioWeb(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+  const out = {};
+  for (const key of ["url", "dir", "start_cmd"]) if (typeof value[key] === "string") out[key] = value[key].slice(0, 500);
+  return out;
+}
 app.post("/api/hub/stremio/paths", requireHubWrite, requireJarvis, (req, res) => hubAdmin(res, "stremio_save", {
   runtime_exe: hubText(req.body?.runtime_exe, 500), server_js: hubText(req.body?.server_js, 500),
   server_url: hubText(req.body?.server_url, 80), dry_run: req.body?.dry_run === true,
+  web: hubStremioWeb(req.body?.web), repair: req.body?.repair === true, keep_copy: req.body?.keep_copy === true,
 }, 30000));
 // The card's Start button (brief 19): Stremio's SERVER only, through stremio_stack.tool_stack_start (loopback only; it starts
 // nothing when the server is already up or the Stremio app is open with a silent server). It may wait up to the hub setting
 // stremio.start_wait_seconds (10 to 300), so this route's time-out is longer than that; the page shows a working state and
 // gives up waiting on its own. Same guards as every write: loopback Host, same origin, X-Jarvis-Hub, and hub_admin refuses an
 // unattended process. No body is read.
-app.post("/api/hub/stremio/start", requireHubWrite, requireJarvis, (req, res) => hubAdmin(res, "stremio_start", {}, 330000));
+// Brief 29: the only thing read from the body is the literal "web" (start stremio-web); anything else starts the server, as before.
+app.post("/api/hub/stremio/start", requireHubWrite, requireJarvis, (req, res) => hubAdmin(res, "stremio_start", req.body?.what === "web" ? { what: "web" } : {}, 330000));
 
 // N14, the folder / file picker (jarvis/hub_browse.py owns the rules). The answer is a listing of the owner's disk,
 // so both routes are POST, need a loopback Host AND the X-Jarvis-Hub header (another web page cannot make the

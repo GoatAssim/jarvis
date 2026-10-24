@@ -124,6 +124,7 @@ _DAEMON_CALL_TIMEOUT = 30.0
 FETCH_MAX_CHARS = 4000
 
 _DEFAULT_ACTION_TIMEOUT_MS = 10_000
+_DOWNLOAD_GRACE_MS = 500  # N22a: after a click, how long to wait for a download to START
 _PROBE_MS = 1500  # short per-candidate look before trying the next
                    # selector strategy, so 3 near-misses don't burn the
                    # whole timeout before the real match gets a turn
@@ -262,6 +263,13 @@ def _ensure_page():
             user_data_dir=str(PROFILE_DIR),
             headless=_headless_setting(),
         )
+        # N22a: every download this browser makes goes to the Download Hub (hub/browser_intake.py).
+        # Never allowed to break the browser itself.
+        try:
+            from .hub import browser_intake
+            browser_intake.attach(context)
+        except Exception:  # noqa: BLE001
+            pass
         page = context.pages[0] if context.pages else context.new_page()
     except Exception as e:
         return None, f"Could not start the browser: {e}"
@@ -269,6 +277,17 @@ def _ensure_page():
     _session["context"] = context
     _session["page"] = page
     return page, None
+
+
+def _hub_downloads(result, page, grace_ms=0):
+    """N22a: add to a tool's result what became of any download it started (the file handed to the
+    Download Hub, or the failed row).  A result with nothing to add comes back untouched; never raises.
+    The wait for a running save happens in hub/browser_intake.py: a save only moves while Playwright runs."""
+    try:
+        from .hub import browser_intake
+        return browser_intake.annotate(result, page, grace_ms=grace_ms)
+    except Exception:  # noqa: BLE001
+        return result
 
 
 def close_browser():
@@ -388,12 +407,14 @@ def _local_tool_browser_goto(args=None):
     try:
         page.goto(url, wait_until="domcontentloaded", timeout=30_000)
     except Exception as e:
-        return {"ok": False, "error": f"Navigation failed: {e}"}
+        # A link that is a file download makes Chromium refuse the navigation ("Download is starting"):
+        # _hub_downloads turns that into the success it is when the hub has the file.
+        return _hub_downloads({"ok": False, "error": f"Navigation failed: {e}"}, page)
     try:
         title = page.title()
     except Exception:
         title = ""
-    return {"ok": True, "url": page.url, "title": title}
+    return _hub_downloads({"ok": True, "url": page.url, "title": title}, page)
 
 
 def _local_tool_browser_click(args=None):
@@ -417,7 +438,8 @@ def _local_tool_browser_click(args=None):
         loc.click(timeout=_DEFAULT_ACTION_TIMEOUT_MS)
     except Exception as e:
         return {"ok": False, "error": f"Click failed: {e}"}
-    return {"ok": True, "url": page.url}
+    # A click may start a download: wait for it to begin, then until the file has landed in the hub.
+    return _hub_downloads({"ok": True, "url": page.url}, page, grace_ms=_DOWNLOAD_GRACE_MS)
 
 
 def _local_tool_browser_fill(args=None):
@@ -554,7 +576,7 @@ def _local_tool_browser_wait_for(args=None):
             "ok": False, "timed_out": True,
             "error": f'"{description}" never appeared within {timeout_seconds:.0f}s (tried: {", ".join(tried)}).',
         }
-    return {"ok": True, "url": page.url}
+    return _hub_downloads({"ok": True, "url": page.url}, page)    # N22a: lets a save that is still running continue
 
 
 def _local_tool_browser_close(args=None):

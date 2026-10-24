@@ -313,6 +313,102 @@ const playniteP = { id: "playnite", label: "Playnite", enabled: true, read_only:
       && eq([...new Set(code.match(/\/api\/hub\/[a-z\/]+/g))].sort(), ["/api/hub/stremio", "/api/hub/stremio/paths", "/api/hub/stremio/start"]));
   }
 
+  // ---- brief 29, part 1: the Stremio card's setting rows (server address, stremio-web, cache, repair)
+  {
+    const w = world();
+    const P = w.pure;
+    const status = (o) => Object.assign({ ok: true, state: "ready", address: "http://127.0.0.1:11470", path: {}, wait_seconds: 60, web: { url: "http://127.0.0.1:8080", answers: false, configured: false },
+      web_config: { url: "http://127.0.0.1:8080", dir: "", dir_exists: false, start_cmd: "pnpm start", default_url: "http://127.0.0.1:8080", default_start_cmd: "pnpm start", server_url: "http://127.0.0.1:11470", default_server_url: "http://127.0.0.1:11470" },
+      cache: { known: false, note: "Start the server to see it." }, config: { state: "ok", can_repair: false } }, o);
+
+    const set = P.stremioSetupModel(status());
+    check("setup model: the rows start from what the hub reports (address, web folder, command, address)", set.ready && set.server.value === "http://127.0.0.1:11470"
+      && set.web.dir === "" && set.web.startCmd === "pnpm start" && set.web.url === "http://127.0.0.1:8080" && set.web.configured === false);
+    check("setup model: an older hub with no web_config gives no rows (nothing is invented)", P.stremioSetupModel({ ok: true, state: "ready" }).ready === false && P.stremioSetupModel(null).ready === false);
+    check("setup model: a saved folder that is gone is flagged", P.stremioSetupModel(status({ web_config: { dir: "D:\\gone", dir_exists: false } })).web.dirMissing === true);
+    check("the Web fact no longer sends anyone to a file", P.stremioModel(status()).facts.some((f) => f[0] === "Web" && /choose the stremio-web folder below/.test(f[1])) && !/web\.dir is empty/.test(src));
+
+    check("server body: nothing for an unchanged or empty box; the new address otherwise", P.serverSaveBody("http://127.0.0.1:11470", "http://127.0.0.1:11470") === null && P.serverSaveBody("  ", "x") === null
+      && eq(P.serverSaveBody(" http://127.0.0.1:11471 ", "http://127.0.0.1:11470"), { server_url: "http://127.0.0.1:11471" }));
+    check("web body: only the boxes that changed are sent, trimmed, as typed (the hub is the only validator)",
+      eq(P.webSaveBody({ url: "http://127.0.0.1:8080", dir: " D:\\sw ", startCmd: "pnpm start" }, set.web), { web: { dir: "D:\\sw" } })
+      && P.webSaveBody({ url: "http://127.0.0.1:8080", dir: "", startCmd: "pnpm start" }, set.web) === null
+      && eq(P.webSaveBody({ startCmd: "a && b" }, set.web), { web: { start_cmd: "a && b" } }));
+    check("web body: clearing the folder is sent as an empty string (it turns stremio-web off), not dropped",
+      eq(P.webSaveBody({ dir: "" }, { dir: "D:\\sw" }), { web: { dir: "" } }));
+
+    check("cache: not known -> the hub's sentence and no button", eq(P.stremioCacheModel(status()), { known: false, text: "Start the server to see it.", root: "", canAsk: false }));
+    const cacheOn = P.stremioCacheModel(status({ cache: { known: true, root: "D:\\Cache", size_bytes: 4294967296 } }));
+    check("cache: known -> the folder and its size limit, and the request button is on", cacheOn.canAsk && cacheOn.root === "D:\\Cache" && /D:\\Cache \(size limit 4 GB\)/.test(cacheOn.text));
+    check("cache: an older hub (no cache block) says it isn't reported", P.stremioCacheModel({ ok: true }).text === "Not reported by this hub." && !P.stremioCacheModel({ ok: true }).canAsk);
+    check("the cache request names the folder, keeps the size limit, and says Jarvis will ask first",
+      /move Stremio's cache to E:\\New and keep its current size limit/.test(P.cacheRequestText("E:\\New")) && /stremio_prepare/.test(P.cacheRequestText("E:\\New")) && /confirm/.test(P.cacheRequestText("E:\\New")));
+
+    const fixable = status({ config: { state: "stale", sentence: "A Stremio path saved in stremio.json no longer exists.", can_repair: true, repair_needs_copy: false,
+      repair_pair: { runtime_exe: "C:\\S\\r.exe", server_js: "C:\\S\\server.js", how: "in the usual folders" } } });
+    const rep = P.repairModel(fixable);
+    check("repair model: one sentence from the hub, a button, what was found and what is written",
+      rep.offer && rep.label === "Re-detect and save" && /no longer exists/.test(rep.sentence) && /C:\\S\\r\.exe/.test(rep.detail) && /Only the two paths are written/.test(rep.detail) && rep.needsCopy === false);
+    const brokenOffer = P.repairModel(status({ config: { state: "broken", sentence: "x", can_repair: true, repair_needs_copy: true, repair_pair: { runtime_exe: "a", server_js: "b" } } }));
+    check("repair model: a broken file says it is moved aside to stremio.json.bad, never deleted", brokenOffer.needsCopy && /stremio\.json\.bad/.test(brokenOffer.detail) && /nothing is deleted/.test(brokenOffer.detail));
+    check("repair model: a good file or a hub without it offers nothing", P.repairModel(status()).offer === false && P.repairModel({ ok: true }).offer === false);
+    check("a broken file with nothing found gets the hub's sentence and no button",
+      P.repairModel(status({ config: { state: "broken", sentence: "stremio.json can't be read.", can_repair: false } })).offer === false
+      && P.repairBrokenFileHint(status({ config: { state: "broken", sentence: "stremio.json can't be read.", can_repair: false } })) === "stremio.json can't be read.");
+
+    const saves = [];
+    const deps = (o) => Object.assign({ confirm: async () => true, save: async (b) => { saves.push(b); return { ok: true, saved: b }; } }, o || {});
+    check("save flow: no body -> unchanged, no request", (await P.settingsSaveFlow(deps(), null)).status === "unchanged" && saves.length === 0);
+    let r = await P.settingsSaveFlow(deps(), { web: { dir: "D:\\sw" } });
+    check("save flow: a body is sent as it is and reported saved", r.status === "saved" && eq(saves, [{ web: { dir: "D:\\sw" } }]));
+    r = await P.settingsSaveFlow(deps({ save: async () => { throw new Error("the stremio-web folder doesn't exist: D:\\sw"); } }), { web: { dir: "D:\\sw" } });
+    check("save flow: the hub's refusal comes back word for word", r.status === "refused" && r.error === "the stremio-web folder doesn't exist: D:\\sw");
+
+    saves.length = 0;
+    r = await P.repairFlow(deps(), fixable);
+    check("repair flow: a stale file is repaired with one request and no question", r.status === "saved" && eq(saves, [{ repair: true }]));
+    saves.length = 0;
+    const asked = [];
+    const brokenStatus = status({ config: { state: "broken", sentence: "x", can_repair: true, repair_needs_copy: true, repair_pair: { runtime_exe: "a", server_js: "b" } } });
+    r = await P.repairFlow(deps({ confirm: async (t) => { asked.push(t); return false; } }), brokenStatus);
+    check("repair flow: a broken file asks first, and a no sends nothing", r.status === "cancelled" && saves.length === 0 && asked.length === 1 && /stremio\.json\.bad/.test(asked[0]) && /Nothing is deleted/.test(asked[0]));
+    r = await P.repairFlow(deps({ confirm: async (t) => { asked.push(t); return true; } }), brokenStatus);
+    check("repair flow: a yes sends repair with keep_copy", r.status === "saved" && eq(saves, [{ repair: true, keep_copy: true }]));
+    check("repair flow: nothing to repair sends nothing", (await P.repairFlow(deps(), status())).status === "none" && saves.length === 1);
+
+    let r2 = await P.startWebFlow({ start: async (ms) => ({ ok: true, sentence: "stremio-web is running at http://127.0.0.1:8080." }) }, status());
+    check("start web: success shows the hub's sentence", r2.status === "ok" && /running at/.test(r2.text));
+    r2 = await P.startWebFlow({ start: async () => { const e = new Error("x"); e.data = { ok: false, error: "set web.dir first" }; throw e; } }, status());
+    check("start web: a refusal shows the hub's error", r2.status === "refused" && r2.text === "set web.dir first");
+    r2 = await P.startWebFlow({ start: async () => { const e = new Error("t"); e.timedOut = true; throw e; } }, status());
+    check("start web: a time-out says to press Check again", r2.status === "timeout" && /Check again/.test(r2.text));
+  }
+
+  // ---- brief 29: the same rows on the page, through the real build and its buttons
+  {
+    const st = { ok: true, state: "ready", title: "Installed, not running", sentence: "Stremio is installed.", can_start: true, address: "http://127.0.0.1:11470", path: {}, wait_seconds: 60,
+      web: { url: "http://127.0.0.1:8080", answers: false, configured: false },
+      web_config: { url: "http://127.0.0.1:8080", dir: "", dir_exists: false, start_cmd: "pnpm start", default_url: "http://127.0.0.1:8080", default_start_cmd: "pnpm start", server_url: "http://127.0.0.1:11470", default_server_url: "http://127.0.0.1:11470" },
+      cache: { known: false, note: "Start the server to see it." },
+      config: { state: "missing", sentence: "There is no stremio.json yet.", can_repair: true, repair_needs_copy: false, repair_pair: { runtime_exe: "C:\\S\\r.exe", server_js: "C:\\S\\server.js", how: "in the usual folders" } } };
+    const w = world({ stremio: st, pathsReply: { body: Object.assign({}, st, { saved: {} }) }, startReply: { body: { ok: true, sentence: "stremio-web is running at http://127.0.0.1:8080." } } });
+    await w.section.build({ ui: w.ui });
+    await new Promise((r) => setTimeout(r, 20));
+    const labels = w.shells.map((r) => r.label);
+    check("the page has a row for the settings file, the server address, the stremio-web folder, command and address, and the cache",
+      ["Stremio's settings file", "Server address", "stremio-web folder", "stremio-web start command", "stremio-web address", "Stremio's cache"].every((l) => labels.includes(l)));
+    const find = (kids, text) => { const out = []; const walk = (n) => { if (!n || typeof n !== "object") return; if (n.attrs && n.attrs.text === text) out.push(n); (n.kids || []).forEach(walk); (n.el ? [n.el] : []).forEach(walk); }; kids.forEach(walk); return out[0]; };
+    const row = (l) => w.shells.find((r) => r.label === l);
+    const repairBtn = find([row("Stremio's settings file")], "Re-detect and save");
+    check("the repair button is on the page", !!repairBtn && typeof repairBtn.attrs.onclick === "function");
+    w.calls.length = 0;
+    await repairBtn.attrs.onclick();
+    const repairCall = w.calls.find((c) => c.url === "/api/hub/stremio/paths");
+    check("pressing it posts {repair: true} to the paths route, with the hub header", !!repairCall && eq(repairCall.body, { repair: true }) && repairCall.method === "POST");
+    const startWeb = find([...w.shells.map((r) => r.el), ...[]], "Start stremio-web");
+    check("the page source sends the literal web to the start route and nothing else for it", /hubPost\("\/api\/hub\/stremio\/start", \{ what: "web" \}, ms\)/.test(src));
+  }
+
   // ---- safety greps
   check("the page still writes only through the three allowed tools and never assigns HTML", /RUNNABLE = \{ dl_prefs: 1, dl_settings: 1, dl_provider_prefs: 1 \}/.test(src) && !/innerHTML|insertAdjacentHTML|eval\(/.test(src));
   check("the new row has no limit or range of its own", !/Number\.isInteger|throw new Error\("[^"]*(must be|between)/.test(src));

@@ -611,9 +611,9 @@ def test_plumbing():
     check("the new routes: POST /api/hub/dismiss and /api/hub/stremio/start, and ?include_dismissed=1 on the list read",
           'app.post("/api/hub/dismiss", requireHubWrite, requireJarvis' in server and 'app.post("/api/hub/stremio/start", requireHubWrite, requireJarvis' in server
           and 'include_dismissed: req.query.include_dismissed === "1"' in server)
-    check("the dismiss route reads an id and a literal `finished: true`, nothing else; the start route reads no body",
+    check("the dismiss route reads an id and a literal `finished: true`, nothing else; the start route reads only the literal \"web\" (brief 29)",
           'hubAdmin(res, "dismiss", {\n  id: hubText(req.body?.id, 120), finished: req.body?.finished === true,' in server
-          and 'hubAdmin(res, "stremio_start", {}, 330000)' in server)
+          and 'hubAdmin(res, "stremio_start", req.body?.what === "web" ? { what: "web" } : {}, 330000)' in server)
     check("hub_admin.py never opens the database itself", "sqlite3" not in (CLI / "jarvis" / "hub_admin.py").read_text(encoding="utf-8"))
 
 

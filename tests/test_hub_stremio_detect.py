@@ -674,8 +674,9 @@ check("hub-admin stremio_status also reports other_url, the wait Start may take,
       and set(got["web"]) == {"url", "answers", "configured"} and isinstance(got["web"]["answers"], bool) and isinstance(got["web"]["configured"], bool))
 hub_src = (ROOT / "jarvis-cli" / "jarvis" / "hub_admin.py").read_text(encoding="utf-8")
 start_src = hub_src[hub_src.index("def stremio_start"):hub_src.index("# ----", hub_src.index("def stremio_start"))]
-check("stremio_start starts the SERVER only, through tool_stack_start, and takes nothing from the request",
-      'tool_stack_start({"what": "server"})' in start_src and "request.get" not in start_src and "what\": \"both" not in start_src)
+check("stremio_start starts the SERVER, or stremio-web only for the literal \"web\", through tool_stack_start, and takes nothing else from the request",
+      'tool_stack_start({"what": what})' in start_src and 'request.get("what") == "web"' in start_src
+      and start_src.count("request.get") == 1 and "what\": \"both" not in start_src)
 offenders = []
 for py in sorted((ROOT / "jarvis-cli" / "jarvis").rglob("*.py")):
     rel = py.relative_to(ROOT / "jarvis-cli" / "jarvis").as_posix()

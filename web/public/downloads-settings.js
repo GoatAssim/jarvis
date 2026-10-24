@@ -195,7 +195,7 @@
     facts.push(["Server", server]);
     const web = s.web;
     facts.push(["Web", !web ? "unknown" : web.answers ? "answering at " + web.url
-      : web.configured ? "not answering at " + web.url : "not set up (web.dir is empty in the config)"]);
+      : web.configured ? "not answering at " + web.url : "not set up: choose the stremio-web folder below"]);
     (Array.isArray(s.problems) ? s.problems : []).forEach((p) => facts.push(["Problem", String(p)]));
     return facts;
   }
@@ -286,6 +286,108 @@
       }
       const data = (err && err.data) || {};
       return { status: "refused", text: String(data.error || (err && err.message) || "Stremio's server didn't start."), result: data };
+    }
+  }
+
+  // ---- the Stremio card: the settings rows (brief 29, N18 second half + N22 part e) -------------------------------------
+  // Pure helpers again: what each row shows, and the body each save sends.  The hub (hub/stremio/config.py) is the only validator;
+  // nothing here checks an address, a folder or a command, and the hub's refusal is shown as it came.
+
+  // The server-address row and the stremio-web rows, from the status answer.
+  function stremioSetupModel(s) {
+    const ok = !!(s && typeof s === "object" && s.ok !== false && s.state);
+    const wc = (ok && s.web_config && typeof s.web_config === "object") ? s.web_config : null;
+    const web = (ok && s.web && typeof s.web === "object") ? s.web : null;
+    return {
+      ready: ok && !!wc,
+      server: { value: wc ? String(wc.server_url || "") : "", def: wc ? String(wc.default_server_url || "") : "" },
+      web: {
+        url: wc ? String(wc.url || "") : "", dir: wc ? String(wc.dir || "") : "", startCmd: wc ? String(wc.start_cmd || "") : "",
+        defUrl: wc ? String(wc.default_url || "") : "", defCmd: wc ? String(wc.default_start_cmd || "") : "",
+        dirMissing: !!(wc && wc.dir && wc.dir_exists === false), answers: !!(web && web.answers), configured: !!(web && web.configured),
+      },
+    };
+  }
+
+  // What to send for the address row: nothing when it didn't change.
+  function serverSaveBody(value, saved) {
+    const v = String(value || "").trim();
+    return v && v !== String(saved || "") ? { server_url: v } : null;
+  }
+
+  // What to send for the stremio-web rows: only the boxes that differ from what the hub reports, or null when none does.
+  function webSaveBody(fields, saved) {
+    const out = {};
+    ["url", "dir", "start_cmd"].forEach((k) => {
+      const key = k === "start_cmd" ? "startCmd" : k;
+      if (fields[key] === undefined) return;
+      const v = String(fields[key]).trim();
+      if (v !== String((saved || {})[key] || "")) out[k] = v;
+    });
+    return Object.keys(out).length ? { web: out } : null;
+  }
+
+  // The cache row: where it is (only the running server knows) and the request to hand to Jarvis, which makes the change with
+  // its own stremio_prepare tool and asks first.  The page never changes the cache itself.
+  function stremioCacheModel(s) {
+    const c = (s && s.cache && typeof s.cache === "object") ? s.cache : null;
+    if (!c) return { known: false, text: "Not reported by this hub.", root: "", canAsk: false };
+    if (!c.known) return { known: false, text: String(c.note || "Not known: Stremio's server must be running."), root: "", canAsk: false };
+    const gb = typeof c.size_bytes === "number" ? " (size limit " + (c.size_bytes / 1073741824).toFixed(c.size_bytes % 1073741824 ? 1 : 0) + " GB)" : "";
+    return { known: true, text: String(c.root) + gb, root: String(c.root), canAsk: true };
+  }
+  function cacheRequestText(folder) {
+    return "Please move Stremio's cache to " + String(folder || "").trim() + " and keep its current size limit "
+      + "(use stremio_prepare with cache_root set and cache \"keep\"; it will ask me to confirm).";
+  }
+
+  // The repair offer (N22 part e): one sentence from the hub, one button.  A file that isn't JSON is only touched after a yes.
+  function repairModel(s) {
+    const c = (s && s.config && typeof s.config === "object") ? s.config : null;
+    if (!c || c.state === "ok" || !c.can_repair) return { offer: false };
+    const pair = c.repair_pair || {};
+    const copy = c.repair_needs_copy === true;
+    return {
+      offer: true, needsCopy: copy, sentence: String(c.sentence || ""),
+      label: copy ? "Keep a copy and save a fresh file" : "Re-detect and save",
+      detail: "Found " + (pair.how || "on this PC") + ": " + (pair.runtime_exe || "?") + " and " + (pair.server_js || "?")
+        + (copy ? ". Your unreadable file is moved to stremio.json.bad (nothing is deleted)." : ". Only the two paths are written; everything else in the file stays."),
+    };
+  }
+  // A file that isn't JSON while no working Stremio is known: the hub's sentence is all the card can say (no button to press).
+  function repairBrokenFileHint(s) {
+    const c = (s && s.config && typeof s.config === "object") ? s.config : null;
+    return c && c.state === "broken" && !c.can_repair ? String(c.sentence || "") : "";
+  }
+
+  // One save through the paths route.  `deps.save(body)` -> the hub's answer, or throws its refusal.
+  async function settingsSaveFlow(deps, body) {
+    if (!body) return { status: "unchanged" };
+    try { return { status: "saved", result: await deps.save(body), body: body }; }
+    catch (err) { return { status: "refused", error: String((err && err.message) || err || "The hub didn't accept that."), body: body }; }
+  }
+
+  // The repair: `deps.confirm(text)` -> true to go on (asked only when a file would be moved aside), `deps.save(body)` as above.
+  async function repairFlow(deps, status) {
+    const m = repairModel(status);
+    if (!m.offer) return { status: "none" };
+    if (m.needsCopy) {
+      const yes = await deps.confirm("Your stremio.json can't be read as JSON. Move it to stremio.json.bad and write a fresh file with the Stremio paths Jarvis found? Nothing is deleted.");
+      if (!yes) return { status: "cancelled" };
+    }
+    return settingsSaveFlow(deps, m.needsCopy ? { repair: true, keep_copy: true } : { repair: true });
+  }
+
+  // Start stremio-web: the same start route, with the literal "web" (the server's Start sends no body).
+  async function startWebFlow(deps, status) {
+    const ms = startTimeoutMs(status);
+    try {
+      const r = await deps.start(ms);
+      return { status: "ok", text: String(r.sentence || r.note || "stremio-web is running."), result: r };
+    } catch (err) {
+      if (err && err.timedOut) return { status: "timeout", text: "Still no answer after " + Math.round(ms / 1000) + " seconds. stremio-web can take a while the first time: press Check again in a moment." };
+      const data = (err && err.data) || {};
+      return { status: "refused", text: String(data.error || (err && err.message) || "stremio-web didn't start."), result: data };
     }
   }
 
@@ -447,6 +549,25 @@
     const bJs = btn("Locate server.js\u2026", () => locate("server_js"));
     const bStart = h("button", { class: "btn btn--sm", type: "button", text: "Start", onclick: () => start() });
     const all = [bCheck, bCopy, bProg, bJs, bStart];
+    // ---- brief 29: the setting rows (server address, stremio-web, the cache, the repair offer).  Saved through the same
+    // paths route as Locate...; the hub (hub/stremio/config.py) validates and its refusal is shown as it came.
+    const field = (label, hint) => h("input", { type: "text", class: "prefs-input prefs-input--wide", spellcheck: "false", "aria-label": label, placeholder: hint || "" });
+    const inServer = field("Stremio server address", "http://127.0.0.1:11470");
+    const inWebDir = field("stremio-web folder", "the folder where stremio-web is");
+    const inWebCmd = field("stremio-web start command", "pnpm start");
+    const inWebUrl = field("stremio-web address", "http://127.0.0.1:8080");
+    const bSaveServer = btn("Save address", () => saveServer());
+    const bBrowseWeb = btn("Browse\u2026", () => browseWeb());
+    const bSaveWeb = btn("Save web settings", () => saveWeb());
+    const bStartWeb = btn("Start stremio-web", () => startWeb());
+    const bRepair = h("button", { class: "btn btn--sm", type: "button", text: "Re-detect and save", onclick: () => repair() });
+    const repairNote = h("div", { class: "prefs-note" });
+    const repairDetail = h("div", { class: "prefs-row__help" });
+    const repairBox = h("div", {}, [repairNote, repairDetail, h("div", { class: "prefs-inline" }, [bRepair])]);
+    const cacheText = h("div", { class: "prefs-note" });
+    const bCache = btn("Copy a request for Jarvis\u2026", () => askCache());
+    all.push(bSaveServer, bBrowseWeb, bSaveWeb, bStartWeb, bRepair, bCache);
+    let filledFor = null;
 
     function say(text, kind) { ui.flash(msg, text, kind); }
     function lock(word) { state.busy = word; all.forEach((b) => { b.disabled = !!word; }); }
@@ -462,6 +583,34 @@
       bStart.title = m.startTip;
       bStart.disabled = !!state.busy || !m.canStart;
       bCopy.disabled = !!state.busy || !m.diagnostic;
+      paintSetup();
+    }
+
+    // The rows are filled from the hub's answer once per answer, so a repaint (a button's busy state) never erases what is being typed.
+    function paintSetup() {
+      const set = stremioSetupModel(state.status);
+      const rep = repairModel(state.status);
+      repairBox.hidden = !rep.offer;
+      repairNote.textContent = rep.offer ? rep.sentence : "";
+      repairDetail.textContent = rep.offer ? rep.detail : "";
+      bRepair.textContent = rep.offer ? rep.label : "Re-detect and save";
+      const broken = repairBrokenFileHint(state.status);
+      if (broken) { repairBox.hidden = false; repairNote.textContent = broken; repairDetail.textContent = "Rename or fix the file, or use Locate... after moving it aside."; }
+      bRepair.hidden = !rep.offer;
+      if (filledFor !== state.status && set.ready) {
+        filledFor = state.status;
+        inServer.value = set.server.value; inWebDir.value = set.web.dir; inWebCmd.value = set.web.startCmd; inWebUrl.value = set.web.url;
+      }
+      const cache = stremioCacheModel(state.status);
+      cacheText.textContent = cache.text;
+      bCache.disabled = !!state.busy || !cache.canAsk;
+      bCache.title = cache.canAsk ? "Choose a folder; the request is copied for you to send to Jarvis, which asks before it changes anything."
+        : "Stremio's server must be running for Jarvis to move its cache.";
+      bSaveServer.disabled = !!state.busy || !set.ready;
+      bSaveWeb.disabled = !!state.busy || !set.ready;
+      bStartWeb.disabled = !!state.busy || !set.ready || set.web.answers || !set.web.configured;
+      bStartWeb.title = set.web.answers ? "stremio-web is already answering." : !set.web.configured ? "Choose the stremio-web folder and save first."
+        : "Start stremio-web with the saved command, in the saved folder.";
     }
 
     async function load() {
@@ -512,12 +661,76 @@
       paint();
     }
 
+    // one save through the paths route (the hub's sentence is shown as it is)
+    async function runSave(body, okText) {
+      lock("saving");
+      say("");
+      const out = await settingsSaveFlow({ save: (b) => hubPost("/api/hub/stremio/paths", b, 30000) }, body);
+      lock("");
+      if (out.status === "saved") { state.status = out.result; say(okText || "Saved", "ok"); }
+      else if (out.status === "refused") say(out.error, "err");
+      else say("Nothing changed.");
+      paint();
+    }
+    function saveServer() { const set = stremioSetupModel(state.status); return runSave(serverSaveBody(inServer.value, set.server.value), "Address saved"); }
+    function saveWeb() {
+      const set = stremioSetupModel(state.status);
+      return runSave(webSaveBody({ url: inWebUrl.value, dir: inWebDir.value, startCmd: inWebCmd.value }, set.web), "stremio-web settings saved");
+    }
+    async function browseWeb() {
+      const picker = global.JarvisPathPicker;
+      if (!picker || typeof picker.open !== "function") { say("The folder picker isn't available on this page.", "err"); return; }
+      const picked = await picker.open({ kind: "folder", start: inWebDir.value || "", title: "Choose the stremio-web folder" });
+      if (picked) inWebDir.value = String(picked);
+    }
+    async function startWeb() {
+      lock("starting");
+      say("Starting stremio-web\u2026");
+      const out = await startWebFlow({ start: (ms) => hubPost("/api/hub/stremio/start", { what: "web" }, ms) }, state.status);
+      lock("");
+      say(out.text, out.status === "ok" ? "ok" : "err");
+      await load2();
+    }
+    async function repair() {
+      lock("saving");
+      say("");
+      const ui2 = global.JarvisUI;
+      const out = await repairFlow({
+        confirm: async (text) => !!(ui2 && typeof ui2.confirm === "function" && await ui2.confirm({ title: "Replace stremio.json?", level: "warn", focusCancel: true, confirmLabel: "Keep a copy and save", body: text })),
+        save: (b) => hubPost("/api/hub/stremio/paths", b, 30000),
+      }, state.status);
+      lock("");
+      if (out.status === "saved") { state.status = out.result; say(out.result && out.result.kept_copy ? "Saved. Your old file is " + out.result.kept_copy : "Saved", "ok"); }
+      else if (out.status === "refused") say(out.error, "err");
+      paint();
+    }
+    async function askCache() {
+      const picker = global.JarvisPathPicker;
+      if (!picker || typeof picker.open !== "function") { say("The folder picker isn't available on this page.", "err"); return; }
+      const cache = stremioCacheModel(state.status);
+      const picked = await picker.open({ kind: "folder", start: cache.root || "", title: "Choose the new cache folder" });
+      if (!picked) return;
+      const text = cacheRequestText(picked);
+      let ok = false;
+      try { await global.navigator.clipboard.writeText(text); ok = true; } catch (_) { /* shown below instead */ }
+      say(ok ? "Copied. Paste it into the chat: Jarvis changes the cache with its own tool and asks you first." : text, ok ? "ok" : "err");
+    }
+
     paint();
     load();
     return ui.group("Stremio", [
       ui.rowShell("Stremio's server", "What Jarvis found, whether it runs, and how to point it at Stremio. Locate... saves the two file paths for Jarvis only; it never changes Stremio.",
         h("div", {}, [title, sentence, next, facts]), msg),
-      h("div", { class: "prefs-inline" }, all),
+      h("div", { class: "prefs-inline" }, [bCheck, bCopy, bProg, bJs, bStart]),
+      ui.rowShell("Stremio's settings file", "Jarvis keeps what it knows about Stremio in a small file. If it is missing or out of date, one button repairs it.", repairBox, null),
+      ui.rowShell("Server address", "Where Stremio's server answers. Only this PC (127.0.0.1 or localhost) is accepted, and a server must answer there before it is saved.",
+        h("div", { class: "prefs-inline" }, [inServer, bSaveServer]), null),
+      ui.rowShell("stremio-web folder", "The folder Jarvis starts stremio-web from. Empty = not used.", h("div", { class: "prefs-inline" }, [inWebDir, bBrowseWeb]), null),
+      ui.rowShell("stremio-web start command", "One program and its arguments, run in that folder. Empty = pnpm start.", inWebCmd, null),
+      ui.rowShell("stremio-web address", "Where stremio-web answers (this PC only).", inWebUrl, null),
+      h("div", { class: "prefs-inline" }, [bSaveWeb, bStartWeb]),
+      ui.rowShell("Stremio's cache", "Where Stremio keeps what it is streaming. Changing it is a request to Jarvis, which asks before it changes the server.",
+        h("div", {}, [cacheText, bCache]), null),
       h("details", {}, [h("summary", { text: "Diagnostic text" }), diag]),
     ]);
   }
@@ -646,6 +859,9 @@
     PROVIDER_SETTING_FIELDS: PROVIDER_SETTING_FIELDS, providerSettingRows: providerSettingRows, providerSettingArgs: providerSettingArgs,
     stremioModel: stremioModel, stremioFacts: stremioFacts, diagnosticFor: diagnosticFor, folderOf: folderOf, pickOptions: pickOptions,
     locateFlow: locateFlow, startFlow: startFlow, startTimeoutMs: startTimeoutMs, hubPost: hubPost, STREMIO_TONE: STREMIO_TONE,
+    stremioSetupModel: stremioSetupModel, serverSaveBody: serverSaveBody, webSaveBody: webSaveBody, stremioCacheModel: stremioCacheModel,
+    cacheRequestText: cacheRequestText, repairModel: repairModel, repairBrokenFileHint: repairBrokenFileHint,
+    settingsSaveFlow: settingsSaveFlow, repairFlow: repairFlow, startWebFlow: startWebFlow,
   } };
   if (typeof module !== "undefined" && module.exports) module.exports = global.JarvisDownloadsSettings;
 })(typeof window !== "undefined" ? window : globalThis);

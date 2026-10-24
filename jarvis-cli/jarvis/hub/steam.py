@@ -517,6 +517,170 @@ def steam_running():
     return False
 
 
+# --------------------------------------------------------------------------- N22 b/c: the library, and one launch
+
+# What Jarvis can say about the games Steam has installed, and the one thing it can ask Steam to do for
+# them: open Steam's OWN install dialog (`steam://install/<appid>`).  Steam stays read-only for pause and
+# cancel (decision S2): nothing here pauses, cancels, deletes or writes a Steam file.
+#
+# UPDATE PENDING IS NOT MEASURED YET.  Findings 01/02 saw the UpdateRequired bit (2) on idle games, so the
+# bit alone proves nothing, and no rule has been checked against a real Steam.  Until the owner's probe
+# (tests/steam_update_checks.py) has been read, `update_pending` answers "yes" only when Steam is fetching
+# an update RIGHT NOW (a fact classify() already trusts) and "unknown" for everything else.  The raw
+# numbers are returned beside it so the owner can see what Steam wrote.  One place to change: update_pending().
+
+LIBRARY_LIMIT = 200
+_CTRL = re.compile(r"[\x00-\x1f\x7f]+")
+INSTALL_URL = re.compile(r"^steam://install/[0-9]{1,10}$")
+OBSERVE_SECONDS = 6.0
+OBSERVE_STEP = 1.0
+
+
+def _clean(text, limit=80):
+    """Text that came out of a file Steam wrote (a game's name): one line, no control characters, capped."""
+    return _CTRL.sub(" ", str(text or "")).strip()[:limit]
+
+
+def _opt(state, name):
+    value = _ci(state, name)
+    return None if value in (None, "") else _clean(value, 40)
+
+
+def update_pending(fact):
+    """("yes" | "no" | "unknown", reason).  The one rule; see the comment above for why it is this short."""
+    transfer = fact.get("transfer")
+    if transfer and transfer.get("kind") == "update":
+        return "yes", "Steam is fetching an update for it now (%s)" % transfer.get("state")
+    if transfer:
+        return "unknown", "Steam is fetching it now as a first install"
+    return "unknown", ("not measured yet: Steam's own update flag has been seen set on idle games, so it is not "
+                       "trusted; run tests/steam_update_checks.py and send the report")
+
+
+def game_facts(files, now=None):
+    """The games Steam has a manifest for, as plain facts.  `files` is what read_manifests returns.
+    Read-only; the same manifests the provider reads."""
+    now = time.time() if now is None else now
+    games = []
+    for appid, (lib, installdir, parsed) in files.items():
+        state = _ci(parsed, "AppState", parsed)
+        state = state if isinstance(state, dict) else {}
+        flags = _flags_of(state)
+        row = classify(parsed, {}, now, None)
+        transfer = None
+        if row is not None and row.get("state") in ("downloading", "queued", "paused", "postprocessing", "stalled"):
+            transfer = {"state": row["state"], "kind": row.get("subtitle") or "install"}
+        fact = {
+            "appid": str(appid),
+            "name": _clean(_ci(state, "name", "")) or "App %s" % appid,
+            "library": str(lib),
+            "installdir": _clean(installdir, 120),
+            "size_on_disk": _int(_ci(state, "SizeOnDisk")),
+            "last_updated": _int(_ci(state, "LastUpdated")),
+            "state_flags": flags,
+            "fully_installed": bool(flags & 4),
+            "build_id": _opt(state, "buildid"),
+            "target_build_id": _opt(state, "TargetBuildID"),
+            "bytes_to_download": _int(_ci(state, "BytesToDownload")),
+            "bytes_downloaded": _int(_ci(state, "BytesDownloaded")),
+            "transfer": transfer,
+        }
+        fact["update_pending"], fact["update_reason"] = update_pending(fact)
+        games.append(fact)
+    games.sort(key=lambda g: (g["name"].casefold(), g["appid"]))
+    return games
+
+
+def find_game(games, query):
+    """(game or None, [candidates]).  An app id, then an exact name, then a name that contains the text
+    (only when exactly one does); several matches come back as candidates so the caller can ask."""
+    text = _clean(query, 120)
+    if not text:
+        return None, []
+    if text.isdigit():
+        hit = [g for g in games if g["appid"] == text]
+        return (hit[0], hit) if hit else (None, [])
+    low = text.casefold()
+    exact = [g for g in games if g["name"].casefold() == low]
+    if len(exact) == 1:
+        return exact[0], exact
+    part = exact or [g for g in games if low in g["name"].casefold()]
+    return (part[0], part) if len(part) == 1 else (None, part)
+
+
+def install_url(appid):
+    """steam://install/<appid> for a plain number, else None.  The only URL this module ever launches."""
+    text = str(appid or "").strip()
+    url = "steam://install/%s" % text
+    return url if text.isdigit() and INSTALL_URL.match(url) else None
+
+
+def _open_url(url):
+    if sys.platform.startswith("win"):
+        os.startfile(url)  # noqa: S606  (a steam:// URL we built, checked by INSTALL_URL)
+        return
+    import subprocess
+    subprocess.Popen(["open" if sys.platform == "darwin" else "xdg-open", url],
+                     stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+
+OPEN_URL = _open_url      # tests swap this: nothing in a test ever starts a real Steam
+
+
+def launch_install(appid):
+    """Ask Steam to open its install dialog for one app.  -> (ok, error text).  Never raises."""
+    url = install_url(appid)
+    if not url:
+        return False, "not a Steam app id"
+    try:
+        OPEN_URL(url)
+        return True, ""
+    except Exception as exc:  # noqa: BLE001
+        return False, "could not hand %s to Steam: %s" % (url, str(exc)[:120])
+
+
+def _signature(entry):
+    if not entry:
+        return None
+    lib, _dir, parsed = entry
+    state = _ci(parsed, "AppState", parsed)
+    state = state if isinstance(state, dict) else {}
+    return (_flags_of(state), _int(_ci(state, "BytesToDownload")), _int(_ci(state, "BytesDownloaded")))
+
+
+def manifest_signature(libraries, appid):
+    """What Steam's manifest for one app says right now (flags and the two byte counters), or None.
+    Take it BEFORE launching, so a change the launch causes is seen as a change."""
+    return _signature(read_manifests(libraries).get(str(appid)))
+
+
+_UNSET = object()
+
+
+def observe_start(libraries, appid, seconds=OBSERVE_SECONDS, step=OBSERVE_STEP, sleep=time.sleep, clock=time.monotonic,
+                  before=_UNSET):
+    """After a launch: look at the manifests for a few seconds and say what Steam wrote.
+    -> "started" (the app's manifest appeared or changed and Steam is fetching) | "changed" (it changed but nothing is
+    being fetched) | "nothing" (no change seen: Steam may be showing its dialog, or the game is not owned).
+    Read-only."""
+    appid = str(appid)
+    if before is _UNSET:
+        before = manifest_signature(libraries, appid)
+    end = clock() + seconds
+    seen_change = False
+    while True:
+        files = read_manifests(libraries)
+        now = _signature(files.get(appid))
+        if now != before:
+            seen_change = True
+            fact = [g for g in game_facts({appid: files[appid]}) if g["appid"] == appid] if appid in files else []
+            if fact and fact[0]["transfer"]:
+                return "started"
+        if clock() >= end:
+            return "changed" if seen_change else "nothing"
+        sleep(step)
+
+
 # --------------------------------------------------------------------------- the provider
 
 class SteamProvider(providers.BuiltinProvider):

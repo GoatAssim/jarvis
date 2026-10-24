@@ -567,6 +567,57 @@ def _stremio_web():
         return None
 
 
+def _stremio_web_config():
+    """What the card's stremio-web rows show (brief 29): the saved folder and command and their defaults.  A folder the owner
+    chose and a command, never a secret.  Separate from `_stremio_web()` so that block keeps its three keys."""
+    try:
+        from .hub.stremio import config
+        cfg = config.load()
+        folder = str((cfg.get("web") or {}).get("dir") or "")
+        return {"url": config.web_url(cfg), "dir": folder[:300], "dir_exists": bool(config.web_dir(cfg)),
+                "start_cmd": config.web_command(cfg), "default_url": config.DEFAULT_WEB_URL,
+                "default_start_cmd": config.DEFAULTS["web"]["start_cmd"], "server_url": config.server_url(cfg),
+                "default_server_url": config.DEFAULT_SERVER_URL}
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _stremio_cache(snap):
+    """Where Stremio's cache is, for the card's row.  Only the RUNNING server knows (its /settings `cacheRoot`), so this
+    asks it (loopback, 2 s) and says plainly when it can't.  Reads only; never raises; no secret is in a server's settings
+    answer and only the two keys below are kept.  Changing it is `stremio_prepare` (confirm-gated), not this module."""
+    try:
+        if snap.get("state") != "running":
+            return {"known": False, "note": "Stremio's cache folder is read from its running server. Start the server to see it."}
+        from .hub.stremio import config, server
+        values = server.StremioServer(config.server_url()).values(timeout=2)
+        root = str(values.get("cacheRoot") or "")
+        size = values.get("cacheSize")
+        out = {"known": bool(root), "root": root[:300]}
+        if isinstance(size, (int, float)) and not isinstance(size, bool) and size > 0:
+            out["size_bytes"] = int(size)
+        if not root:
+            out["note"] = "The server didn't say where its cache is."
+        return out
+    except Exception:  # noqa: BLE001
+        return {"known": False, "note": "Couldn't ask the server where its cache is."}
+
+
+def _stremio_config_block(snap):
+    """The stremio.json file's own state (missing, broken, stale ...) and, when Jarvis is finding Stremio by itself and
+    a working pair is known, the repair the card may offer (N22 part e).  Reads only."""
+    from .hub.stremio import config, detect
+    state = config.file_state()
+    path = snap.get("path") or {}
+    offer = bool(state["state"] != "ok" and path.get("found") and path.get("where") not in ("", "config"))
+    out = {"state": state["state"], "file": state["file"], "sentence": state["sentence"], "can_repair": offer}
+    if offer:
+        out["repair_pair"] = {"runtime_exe": path.get("runtime_exe") or "", "server_js": path.get("server_js") or "",
+                              "how": detect.HOW.get(path.get("where") or "", "")}
+        out["repair_needs_copy"] = state["state"] == "broken"
+    return out
+
+
 def _stremio_payload(snap):
     """What the status card, Settings and the add form show.  Nothing secret: the account key is
     never read, and the paths are the ones the owner chose or Jarvis found."""
@@ -592,6 +643,9 @@ def stremio_status(request=None, store=None):
         out = _stremio_payload(snap)
         out["wait_seconds"] = wait          # how long Start may take (the card's own time-out follows it)
         out["web"] = _stremio_web()
+        out["web_config"] = _stremio_web_config()
+        out["cache"] = _stremio_cache(snap)
+        out["config"] = _stremio_config_block(snap)
         out["diagnostic"] = status.diagnostic_text(snap)
         if (request or {}).get("doctor"):
             try:
@@ -607,42 +661,77 @@ def stremio_status(request=None, store=None):
 
 
 def stremio_save(request, store=None):
-    """The Locate... button: save the two paths (and, for 'answers on another port', the loopback
-    address) into ~/.jarvis/stremio.json.  The owner's own button only: this runs for a write op, so an
-    unattended process is refused before it gets here, and `config.save_paths` checks again.  Both
-    files must exist; a new address must answer like a Stremio server.  `dry_run: true` only checks
-    (and reports what is on the server's port) without writing."""
+    """The card's save button(s): the two paths (and, for 'answers on another port', the loopback address), the
+    stremio-web block (`web`: url, dir, start_cmd), the server address alone, or `repair: true` (re-detect and save;
+    `keep_copy: true` moves an unreadable stremio.json aside first).  All of them write ~/.jarvis/stremio.json through
+    hub/stremio/config.py, which is the only validator.  The owner's own button only: this runs for a write op, so an
+    unattended process is refused before it gets here, and config checks again.  Both path files must exist; a new
+    server address must answer like a Stremio server.  `dry_run: true` only checks (and reports what is on the server's
+    port) without writing."""
     try:
         from .hub.stremio import config, detect, status
         request = request if isinstance(request, dict) else {}
         exe, js = request.get("runtime_exe"), request.get("server_js")
         url = request.get("server_url") or None
-        if request.get("dry_run") is True:
+        web = request.get("web") if isinstance(request.get("web"), dict) else None
+        if request.get("repair") is True:
+            result = config.repair(keep_copy=request.get("keep_copy") is True)
+        elif not (exe or js) and (url or web is not None):
+            if request.get("dry_run") is True:
+                clean, found = config.check_web(web) if web is not None else ({}, [])
+                return {"ok": not found, "dry_run": True, "problems": found, "web": clean,
+                        **({} if not found else {"error": "; ".join(found)})}
+            result = config.save_settings(server_url=url, web=web)
+        elif request.get("dry_run") is True:
             checked = config.check_paths(exe, js)
             probe = detect.probe_port(config.server_url(), other_ports=(detect.DEFAULT_PORT,))
             return {"ok": checked["ok"], "dry_run": True, "problems": checked["problems"], "server": probe,
                     **({} if checked["ok"] else {"error": "; ".join(checked["problems"])})}
-        result = config.save_paths(exe, js, server_url=url)
+        else:
+            result = config.save_paths(exe, js, server_url=url)
         if not result.get("ok"):
             return _err(result.get("error") or "couldn't save", **{k: v for k, v in result.items() if k in ("code", "problems")})
         out = stremio_status({}, store)
-        out["saved"] = result["saved"]
+        out["saved"] = result.get("saved") or {}
+        for key in ("kept_copy", "repaired"):
+            if result.get(key):
+                out[key] = result[key]
         return out
     except Exception as exc:  # noqa: BLE001
-        return _err("couldn't save the Stremio paths: %s" % str(exc)[:160])
+        return _err("couldn't save the Stremio settings: %s" % str(exc)[:160])
 
 
 def stremio_start(request=None, store=None):
-    """The card's Start button: bring Stremio's SERVER up, nothing else (not stremio-web).  It is
-    `stremio_stack.tool_stack_start` with what="server", so every rule is that function's: loopback only; the
-    already-up case starts nothing; and when the Stremio app is open with a silent server it says so and starts
-    nothing (N9 decision 4).  It may wait up to `stremio.start_wait_seconds`, so the web route gives it a long
-    time-out and the page shows a working state and times out on its own.  The answer is the sentence the status
-    uses; `ok` is false when the server is not up afterwards.  A write op: an unattended process is refused."""
+    """The card's Start buttons.  Without a body: bring Stremio's SERVER up, nothing else.  With `what: "web"` (that literal
+    and nothing else is read; brief 29): start stremio-web from the folder and command in stremio.json.  Both are
+    `stremio_stack.tool_stack_start`, so every rule is that function's: loopback only; the already-up case starts nothing;
+    and when the Stremio app is open with a silent server it says so and starts nothing (N9 decision 4).  The server start
+    may wait up to `stremio.start_wait_seconds`, so the web route gives it a long time-out and the page shows a working state
+    and times out on its own.  The answer is the sentence the status uses; `ok` is false when it is not up afterwards.  A
+    write op: an unattended process is refused."""
     try:
         from .actions import stremio_stack
-        raw = stremio_stack.tool_stack_start({"what": "server"})
+        what = "web" if isinstance(request, dict) and request.get("what") == "web" else "server"
+        raw = stremio_stack.tool_stack_start({"what": what})
         raw = raw if isinstance(raw, dict) else {}
+        if what == "web":
+            web = raw.get("web") if isinstance(raw.get("web"), dict) else {}
+            state = str(web.get("state") or "")
+            out = {"state": state, "url": web.get("url") or ""}
+            if state == "already_up":
+                out["sentence"] = "stremio-web is already running at %s." % out["url"]
+            elif state == "started":
+                out["sentence"] = "stremio-web is running at %s." % out["url"]
+            elif state == "starting":
+                out["sentence"] = "stremio-web was started and hasn't answered yet at %s." % out["url"]
+            if web.get("note"):
+                out["note"] = str(web["note"])[:300]
+            if raw.get("ok") and state in ("already_up", "started", "starting"):
+                out["ok"] = True
+                return out
+            out["ok"] = False
+            out["error"] = str(raw.get("error") or web.get("error") or web.get("note") or "stremio-web did not start")[:400]
+            return out
         server = raw.get("server") if isinstance(raw.get("server"), dict) else {}
         out = {"state": server.get("state") or "", "outcome": server.get("outcome") or "",
                "sentence": server.get("sentence") or "", "url": server.get("url") or ""}
@@ -658,7 +747,7 @@ def stremio_start(request=None, store=None):
         out["error"] = str(raw.get("error") or server.get("error") or "Stremio's server did not start")[:400]
         return out
     except Exception as exc:  # noqa: BLE001
-        return _err("couldn't start Stremio's server: %s" % str(exc)[:160])
+        return _err("couldn't start Stremio: %s" % str(exc)[:160])
 
 
 # --------------------------------------------------------------------------- the Sources tab (brief 24)
