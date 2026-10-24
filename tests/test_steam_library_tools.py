@@ -1,9 +1,9 @@
 """Download Hub, N22 parts b and c (brief 30): see the Steam library, install a game, start an update.
 
-Covers hub/steam.py's new read-only facts (game_facts, update_pending, find_game, install_url, launch_install,
-observe_start) and actions/steam_tools.py (steam_library, steam_install_game, steam_update_game), on a FAKE Steam
-folder.  Nothing here starts a real Steam, opens a real steam:// link, or talks to the network: steam.OPEN_URL is
-a recording stand-in.
+Covers hub/steam.py's new read-only facts (game_facts, update_pending, find_game, observe_start) and
+actions/steam_tools.py (steam_library, steam_install_game, steam_update_game, and the launcher that lives there:
+install_url, OPEN_URL, launch_install), on a FAKE Steam folder.  Nothing here starts a real Steam, opens a real
+steam:// link, or talks to the network: steam_tools.OPEN_URL is a recording stand-in.
 
   * update_pending is "yes" only while Steam is fetching an update now, "unknown" otherwise (never "no");
     a game's name from a manifest is cleaned and capped; the raw flags and build ids are passed through.
@@ -98,7 +98,7 @@ def tree_hash():
 
 BEFORE = tree_hash()
 launched = []
-steam.OPEN_URL = lambda url: launched.append(url)
+st.OPEN_URL = lambda url: launched.append(url)
 steam.OBSERVE_SECONDS, steam.OBSERVE_STEP = 0.0, 0.0
 running = [True]
 steam.steam_running = lambda: running[0]
@@ -143,16 +143,16 @@ check("no match: none, no candidates", steam.find_game(games, "zzz") == (None, [
 check("an empty query matches nothing", steam.find_game(games, "  ") == (None, []))
 
 # --------------------------------------------------------------------------- the one URL
-check("a plain number makes the install URL", steam.install_url("730") == "steam://install/730")
-check("anything else makes none", all(steam.install_url(x) is None for x in
+check("a plain number makes the install URL", st.install_url("730") == "steam://install/730")
+check("anything else makes none", all(st.install_url(x) is None for x in
       ("", None, "12 3", "1;calc", "../1", "steam://install/1", "-5", "1.5", "１２", "123456789012", "0x1f")))
-check("launch_install refuses a bad id without calling anything", steam.launch_install("1;calc") == (False, "not a Steam app id") and launched == [])
-check("launch_install hands exactly the URL over", steam.launch_install("730") == (True, "") and launched == ["steam://install/730"])
+check("launch_install refuses a bad id without calling anything", st.launch_install("1;calc") == (False, "not a Steam app id") and launched == [])
+check("launch_install hands exactly the URL over", st.launch_install("730") == (True, "") and launched == ["steam://install/730"])
 del launched[:]
-steam.OPEN_URL = lambda url: (_ for _ in ()).throw(OSError("no handler for steam://"))
-ok, err = steam.launch_install("730")
+st.OPEN_URL = lambda url: (_ for _ in ()).throw(OSError("no handler for steam://"))
+ok, err = st.launch_install("730")
 check("a failing launch is a sentence, never an exception", ok is False and "no handler" in err)
-steam.OPEN_URL = lambda url: launched.append(url)
+st.OPEN_URL = lambda url: launched.append(url)
 
 # --------------------------------------------------------------------------- observe_start (a fake clock, no sleeping)
 ticks = [0.0]
@@ -269,18 +269,18 @@ def steam_writes(url):
     put(LIB2, 888, manifest(888, "Fresh Game", 1026, to_dl=5000, got=0))
 
 
-steam.OPEN_URL = steam_writes
+st.OPEN_URL = steam_writes
 steam.OBSERVE_SECONDS, steam.OBSERVE_STEP = 0.2, 0.0
 r = st.tool_steam_install_game({"game": "888"})
 check("install: Steam wrote a manifest and is fetching -> started, the row is in Downloads",
       r["observed"] == "started" and "Steam row in Downloads" in r["message"] and "read-only" in r["message"])
 (LIB2 / "steamapps" / "appmanifest_888.acf").unlink()
-steam.OPEN_URL = lambda url: launched.append(url)
+st.OPEN_URL = lambda url: launched.append(url)
 steam.OBSERVE_SECONDS = 0.0
-steam.OPEN_URL = lambda url: (_ for _ in ()).throw(OSError("boom"))
+st.OPEN_URL = lambda url: (_ for _ in ()).throw(OSError("boom"))
 r = st.tool_steam_install_game({"game": "730"})
 check("install: a launch that fails is an error, not a claim", r["ok"] is False and "boom" in r["error"])
-steam.OPEN_URL = lambda url: launched.append(url)
+st.OPEN_URL = lambda url: launched.append(url)
 
 # --------------------------------------------------------------------------- steam_update_game
 del launched[:]
@@ -322,12 +322,15 @@ prov = steam.PROVIDER
 check("the Steam provider still offers no pause / resume / cancel (decision S2)",
       not ({"pause", "resume", "cancel"} & set(getattr(prov, "capabilities", []) or [])))
 tree = ast.parse((ROOT / "jarvis-cli" / "jarvis" / "actions" / "steam_tools.py").read_text(encoding="utf-8"))
-called = {n.func.attr for n in ast.walk(tree) if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)}
-check("the action module never writes, deletes or kills anything itself",
+_launcher = [n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "_open_url"]
+_inside = {id(x) for n in _launcher for x in ast.walk(n)}      # the launcher moved here (brief 6G): it alone may call Popen / startfile
+called = {n.func.attr for n in ast.walk(tree)
+          if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute) and id(n) not in _inside}
+check("the action module never writes, deletes or kills anything itself (the one launcher, _open_url, aside)",
       not ({"write_text", "write_bytes", "unlink", "rmtree", "remove", "kill", "terminate", "system", "Popen", "startfile"} & called))
-src = (ROOT / "jarvis-cli" / "jarvis" / "hub" / "steam.py").read_text(encoding="utf-8")
-check("hub/steam.py launches only the install URL (one Popen / startfile, both behind the URL check)",
-      src.count("os.startfile(") == 1 and src.count("subprocess.Popen(") == 1 and "steam://validate" not in src.split("N22 b/c")[1])
+src = (ROOT / "jarvis-cli" / "jarvis" / "actions" / "steam_tools.py").read_text(encoding="utf-8")
+check("steam_tools.py launches only the install URL (one Popen / startfile, both behind the URL check)",
+      len(_launcher) == 1 and src.count("os.startfile(") == 1 and src.count("subprocess.Popen(") == 1 and "steam://validate" not in src)
 
 print()
 print(f"{passed} passed, {failed} failed")

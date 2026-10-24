@@ -8,6 +8,9 @@ What this is, and is not:
     owner chooses the library and confirms; the progress row in Downloads already exists (the Steam
     provider, hub/steam.py).  Both tools are confirmed with the owner before every call
     (TOOL_CONFIRM_REQUIRED) and refuse a chat guest before doing anything.
+  * THE LAUNCHER LIVES HERE, not in hub/steam.py: `install_url`, `_open_url` / `OPEN_URL` and `launch_install`
+    are the only code that starts `steam://install/<appid>`.  hub/steam.py is the watcher (it runs every few
+    seconds) and stays read-only and inert; this module runs only when the owner asks for an install.
   * Steam stays READ-ONLY for pause and cancel (decision S2): there is no tool here, and no row control,
     that pauses, cancels, deletes or edits anything of Steam's.
   * "Which games have an update" is NOT answered yet: no signal has been measured against a real Steam
@@ -19,6 +22,8 @@ What this is, and is not:
 """
 import json
 import os
+import re
+import sys
 
 from ..hub import steam
 
@@ -47,6 +52,42 @@ def _guest_refusal(tool):
 
 def _fail(label, exc):
     return {"ok": False, "error": "%s failed: %s" % (label, str(exc)[:200])}
+
+
+# --------------------------------------------------------------------------- the launcher (moved here from hub/steam.py, brief 6G)
+
+INSTALL_URL = re.compile(r"^steam://install/[0-9]{1,10}$")
+
+
+def install_url(appid):
+    """steam://install/<appid> for a plain number, else None.  The only URL this module ever launches."""
+    text = str(appid or "").strip()
+    url = "steam://install/%s" % text
+    return url if text.isdigit() and INSTALL_URL.match(url) else None
+
+
+def _open_url(url):
+    if sys.platform.startswith("win"):
+        os.startfile(url)  # noqa: S606  (a steam:// URL we built, checked by INSTALL_URL)
+        return
+    import subprocess
+    subprocess.Popen(["open" if sys.platform == "darwin" else "xdg-open", url],
+                     stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+
+OPEN_URL = _open_url      # tests swap this: nothing in a test ever starts a real Steam
+
+
+def launch_install(appid):
+    """Ask Steam to open its install dialog for one app.  -> (ok, error text).  Never raises."""
+    url = install_url(appid)
+    if not url:
+        return False, "not a Steam app id"
+    try:
+        OPEN_URL(url)
+        return True, ""
+    except Exception as exc:  # noqa: BLE001
+        return False, "could not hand %s to Steam: %s" % (url, str(exc)[:120])
 
 
 def _library():
@@ -148,7 +189,7 @@ def _start(tool, args, update):
         if not steam.steam_running():
             return {"ok": False, "error": "Steam isn't running. Start Steam and sign in, then ask again; nothing was started."}
         before = steam.manifest_signature(libs, appid)      # taken first: a change the launch causes must show as a change
-        ok, err = steam.launch_install(appid)
+        ok, err = launch_install(appid)
         if not ok:
             return {"ok": False, "error": err}
         seen = steam.observe_start(libs, appid, seconds=steam.OBSERVE_SECONDS, step=steam.OBSERVE_STEP, before=before)

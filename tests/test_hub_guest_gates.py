@@ -232,8 +232,8 @@ finally:
 STEAM_TOOLS = ("steam_library", "steam_install_game", "steam_update_game")
 STEAM_CALLS = {"steam_library": {}, "steam_install_game": {"game": "105600"}, "steam_update_game": {"game": "105600"}}
 _steam_opened = []
-_orig_open_url = steam.OPEN_URL
-steam.OPEN_URL = lambda url: _steam_opened.append(url)     # nothing here ever starts a real Steam
+_orig_open_url = steam_tools.OPEN_URL
+steam_tools.OPEN_URL = lambda url: _steam_opened.append(url)     # nothing here ever starts a real Steam
 try:
     for name in STEAM_TOOLS:
         check(f"{name} is in OWNER_ONLY_TOOLS", name in tools.OWNER_ONLY_TOOLS)
@@ -251,7 +251,7 @@ try:
             check(f"{name} handler still refuses {label}, before anything is opened in Steam",
                   r.get("ok") is False and "owner's" in r.get("error", "") and _steam_opened == [])
 finally:
-    steam.OPEN_URL = _orig_open_url
+    steam_tools.OPEN_URL = _orig_open_url
     set_sender(None)
 
 # ------------------------------------------------------------------ one pack instruction for "downloads"

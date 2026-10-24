@@ -11,6 +11,11 @@ Steam offers no supported external control and no progress API, so this READS it
 Read-only and never touching Steam: no pause, cancel or priority (the plan never simulates one),
 only a Reveal button for the install folder and an "Open in Steam" link.
 
+This module starts nothing: no subprocess, no shell, no network, and no command sent to Steam.  The one
+thing Jarvis can ask Steam to do (open its own install dialog for one game, on the owner's request) lives
+in actions/steam_tools.py.  tests/test_hub_steam_alive.py and tests/test_steam_launcher_placement.py check
+that this module stays that way.
+
 Honesty about what is known (plan P2, P3).  These are Steam's undocumented files: the field
 names are stable in practice but the `StateFlags` bits are community knowledge, so they are
 HINTS.  The mapping below is one small table (`classify`) with fixtures in the tests; if a Steam
@@ -517,11 +522,13 @@ def steam_running():
     return False
 
 
-# --------------------------------------------------------------------------- N22 b/c: the library, and one launch
+# --------------------------------------------------------------------------- N22 b/c: the library (read-only)
 
-# What Jarvis can say about the games Steam has installed, and the one thing it can ask Steam to do for
-# them: open Steam's OWN install dialog (`steam://install/<appid>`).  Steam stays read-only for pause and
-# cancel (decision S2): nothing here pauses, cancels, deletes or writes a Steam file.
+# What Jarvis can say about the games Steam has installed.  Everything in this section only READS Steam's
+# files.  The one thing Jarvis can ask Steam to do for a game (open Steam's OWN install dialog) is NOT
+# launched from here: that launcher lives in actions/steam_tools.py, which runs only when the owner asks
+# for an install, so this module (the watcher, which runs every few seconds) stays inert.  Steam also stays
+# read-only for pause and cancel (decision S2): nothing here pauses, cancels, deletes or writes a Steam file.
 #
 # UPDATE PENDING IS NOT MEASURED YET.  Findings 01/02 saw the UpdateRequired bit (2) on idle games, so the
 # bit alone proves nothing, and no rule has been checked against a real Steam.  Until the owner's probe
@@ -531,7 +538,6 @@ def steam_running():
 
 LIBRARY_LIMIT = 200
 _CTRL = re.compile(r"[\x00-\x1f\x7f]+")
-INSTALL_URL = re.compile(r"^steam://install/[0-9]{1,10}$")
 OBSERVE_SECONDS = 6.0
 OBSERVE_STEP = 1.0
 
@@ -606,37 +612,6 @@ def find_game(games, query):
         return exact[0], exact
     part = exact or [g for g in games if low in g["name"].casefold()]
     return (part[0], part) if len(part) == 1 else (None, part)
-
-
-def install_url(appid):
-    """steam://install/<appid> for a plain number, else None.  The only URL this module ever launches."""
-    text = str(appid or "").strip()
-    url = "steam://install/%s" % text
-    return url if text.isdigit() and INSTALL_URL.match(url) else None
-
-
-def _open_url(url):
-    if sys.platform.startswith("win"):
-        os.startfile(url)  # noqa: S606  (a steam:// URL we built, checked by INSTALL_URL)
-        return
-    import subprocess
-    subprocess.Popen(["open" if sys.platform == "darwin" else "xdg-open", url],
-                     stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-
-
-OPEN_URL = _open_url      # tests swap this: nothing in a test ever starts a real Steam
-
-
-def launch_install(appid):
-    """Ask Steam to open its install dialog for one app.  -> (ok, error text).  Never raises."""
-    url = install_url(appid)
-    if not url:
-        return False, "not a Steam app id"
-    try:
-        OPEN_URL(url)
-        return True, ""
-    except Exception as exc:  # noqa: BLE001
-        return False, "could not hand %s to Steam: %s" % (url, str(exc)[:120])
 
 
 def _signature(entry):
