@@ -331,6 +331,18 @@ const playniteP = { id: "playnite", label: "Playnite", enabled: true, read_only:
     check("setup model: a saved folder that is gone is flagged", P.stremioSetupModel(status({ web_config: { dir: "D:\\gone", dir_exists: false } })).web.dirMissing === true);
     check("the Web fact no longer sends anyone to a file", P.stremioModel(status()).facts.some((f) => f[0] === "Web" && /choose the stremio-web folder below/.test(f[1])) && !/web\.dir is empty/.test(src));
 
+    // brief 30: the account, player and addon rows (pure models and request bodies)
+    check("account model: signed in shows the email; no account block gives no row", P.accountModel({ ok: true, account: { signed_in: true, email: "a@b.c" } }).sentence.includes("a@b.c")
+      && P.accountModel({ ok: true, account: { signed_in: false } }).signedIn === false && P.accountModel({ ok: true }).ready === false);
+    check("login body: needs both boxes; the key body needs the key", P.loginBody("a@b.c", "") === null && eq(P.loginBody(" a@b.c ", "pw"), { action: "login", email: "a@b.c", password: "pw" })
+      && P.keyBody("  ") === null && eq(P.keyBody(" k "), { action: "key", auth_key: "k" }));
+    check("player body: only what changed; empty program clears it", P.playerSaveBody({ kind: "auto", exe: "" }, { kind: "auto", exe: "" }) === null
+      && eq(P.playerSaveBody({ kind: "vlc", exe: "" }, { kind: "auto", exe: "" }), { player: { kind: "vlc" } })
+      && eq(P.playerSaveBody({ kind: "auto", exe: "" }, { kind: "auto", exe: "C:\\mpv.exe" }), { player: { exe: "" } }));
+    check("addon list: hosts and positions only; add and remove bodies", P.addonsModel({ ok: true, addon_hosts: [{ index: 0, host: "a.example" }] }).rows[0].host === "a.example"
+      && P.addonsModel({ ok: true }).ready === false && eq(P.addonsBody("https://x/manifest.json  https://y/manifest.json", null), { addon_urls: { add: ["https://x/manifest.json", "https://y/manifest.json"], remove: [] } })
+      && eq(P.addonsBody("", 2), { addon_urls: { add: [], remove: [2] } }) && P.addonsBody("", null) === null);
+
     check("server body: nothing for an unchanged or empty box; the new address otherwise", P.serverSaveBody("http://127.0.0.1:11470", "http://127.0.0.1:11470") === null && P.serverSaveBody("  ", "x") === null
       && eq(P.serverSaveBody(" http://127.0.0.1:11471 ", "http://127.0.0.1:11470"), { server_url: "http://127.0.0.1:11471" }));
     check("web body: only the boxes that changed are sent, trimmed, as typed (the hub is the only validator)",

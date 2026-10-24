@@ -696,6 +696,10 @@ OWNER_ONLY_TOOLS = frozenset({
     # Steam (N22b/c): they install / update games on the owner's PC and read what is installed; a guest is
     # never offered them (their handlers refuse a guest too).
     "steam_library", "steam_install_game", "steam_update_game",
+    # Playing and the Stremio stack (7A): a guest can ask them to open a player or a browser, or to start
+    # and stop programs, on the owner's PC. The read-only ones (stack_status, stack_doctor, server_cache)
+    # are not in this set. NOTE: only play_control's handler refuses a guest; these five are hidden, not refused.
+    "play_local", "play_episode", "stack_start", "stack_stop", "server_cache_clear",
 })
 
 

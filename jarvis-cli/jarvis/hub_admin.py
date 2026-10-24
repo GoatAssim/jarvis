@@ -46,7 +46,7 @@ _UNATTENDED_MESSAGE = "The Download Hub's History and queue controls can only be
 # `sources` (brief 24) is the Sources tab: every engine and every provider with an honest status.  Read-only.
 READ_OPS = ("card", "list", "settings", "history", "file", "thumb", "stremio_status", "sources")
 # `dismiss` (brief 19) hides a provider row that is unknown or finished; `stremio_start` (brief 19) is the Start button.
-WRITE_OPS = ("history_remove", "history_clear", "redownload", "reorder", "stremio_save", "dismiss", "stremio_start")
+WRITE_OPS = ("history_remove", "history_clear", "redownload", "reorder", "stremio_save", "dismiss", "stremio_start", "stremio_account")
 OPS = READ_OPS + WRITE_OPS
 # N14 (the path picker, jarvis/hub_browse.py): list one folder, and make one new folder.  Neither reads a file's
 # contents.  Both are for the Jarvis page's own picker, so both refuse an unattended process (below).
@@ -718,6 +718,20 @@ def _stremio_web_config():
         return None
 
 
+def _stremio_extra():
+    """The account, player and addon-list rows (brief 30).  The account key is never read here, only whether one is saved;
+    the addon list is shown as hosts and positions, because a debrid key can sit in an address's path."""
+    try:
+        from .hub.stremio import config
+        cfg = config.load()
+        kind, exe = config.player_prefs(cfg)
+        return {"account": config.account_state(cfg),
+                "player_config": {"kind": kind, "exe": exe[:300], "exe_exists": bool(exe) and Path(exe).is_file()},
+                "addon_hosts": config.addon_hosts(cfg)}
+    except Exception:  # noqa: BLE001
+        return {}
+
+
 def _stremio_cache(snap):
     """Where Stremio's cache is, for the card's row.  Only the RUNNING server knows (its /settings `cacheRoot`), so this
     asks it (loopback, 2 s) and says plainly when it can't.  Reads only; never raises; no secret is in a server's settings
@@ -780,6 +794,7 @@ def stremio_status(request=None, store=None):
         out["wait_seconds"] = wait          # how long Start may take (the card's own time-out follows it)
         out["web"] = _stremio_web()
         out["web_config"] = _stremio_web_config()
+        out.update(_stremio_extra())
         out["cache"] = _stremio_cache(snap)
         out["config"] = _stremio_config_block(snap)
         out["diagnostic"] = status.diagnostic_text(snap)
@@ -810,14 +825,18 @@ def stremio_save(request, store=None):
         exe, js = request.get("runtime_exe"), request.get("server_js")
         url = request.get("server_url") or None
         web = request.get("web") if isinstance(request.get("web"), dict) else None
+        player = request.get("player") if isinstance(request.get("player"), dict) else None
+        addon_urls = request.get("addon_urls") if isinstance(request.get("addon_urls"), dict) else None
         if request.get("repair") is True:
             result = config.repair(keep_copy=request.get("keep_copy") is True)
-        elif not (exe or js) and (url or web is not None):
+        elif not (exe or js) and (url or web is not None or player is not None or addon_urls is not None):
             if request.get("dry_run") is True:
                 clean, found = config.check_web(web) if web is not None else ({}, [])
+                if player is not None:
+                    found = found + config.check_player(player)[1]
                 return {"ok": not found, "dry_run": True, "problems": found, "web": clean,
                         **({} if not found else {"error": "; ".join(found)})}
-            result = config.save_settings(server_url=url, web=web)
+            result = config.save_settings(server_url=url, web=web, player=player, addon_urls=addon_urls)
         elif request.get("dry_run") is True:
             checked = config.check_paths(exe, js)
             probe = detect.probe_port(config.server_url(), other_ports=(detect.DEFAULT_PORT,))
@@ -835,6 +854,49 @@ def stremio_save(request, store=None):
         return out
     except Exception as exc:  # noqa: BLE001
         return _err("couldn't save the Stremio settings: %s" % str(exc)[:160])
+
+
+def stremio_account(request, store=None):
+    """The card's account buttons (brief 30).  `action`: "login" (email + password, signs in to Stremio's cloud and saves the
+    key it returns), "key" (paste a login key), "check" (ask Stremio whose key it is), "logout" (tell Stremio, then forget the
+    key).  The owner's own button only: a write op, so an unattended process is refused before it gets here and config checks
+    again.  The password is used for one call and never stored or echoed; the key is never returned."""
+    try:
+        from .hub.stremio import addons, config
+        request = request if isinstance(request, dict) else {}
+        action = str(request.get("action") or "")
+        refused = config._owner_only()
+        if refused:
+            return _err(refused["error"], code=refused.get("code"))
+        net = addons.Net()
+        note = ""
+        if action == "login":
+            key, email = addons.login(net, request.get("email"), request.get("password"))
+            result = config.save_account(key, email)
+            note = "Signed in as %s." % email
+        elif action == "key":
+            result = config.save_account(request.get("auth_key"), "")
+            note = "Login key saved. Press Check account to see whose it is."
+        elif action == "check":
+            if not config.account_state()["signed_in"]:
+                return _err("no Stremio account is saved yet")
+            email = addons.account_email(net)
+            result = config.save_account(addons.auth_key(), email) if email else {"ok": True}
+            note = ("The saved key belongs to %s." % email) if email else "Stremio accepted the saved key."
+        elif action == "logout":
+            if config.account_state()["signed_in"]:
+                addons.remote_logout(net)
+            result = config.clear_account()
+            note = "Signed out. The login key was removed from stremio.json."
+        else:
+            return _err("unknown account action")
+        if not result.get("ok"):
+            return _err(result.get("error") or "couldn't save the account")
+        out = stremio_status({}, store)
+        out["account_note"] = note
+        return out
+    except Exception as exc:  # noqa: BLE001 - AddonError text already has the password and key removed
+        return _err("couldn't update the Stremio account: %s" % str(exc)[:200])
 
 
 def stremio_start(request=None, store=None):
@@ -1065,6 +1127,8 @@ def admin(op, request=None, store=None):
             return stremio_save(request, store)
         if op == "stremio_start":
             return stremio_start(request, store)
+        if op == "stremio_account":
+            return stremio_account(request, store)
         if op == "browse":
             from . import hub_browse
             return hub_browse.browse(request, store=store)

@@ -437,7 +437,8 @@ TEST_CHECKLIST = {
                   "the Stremio server running for streaming (stack_start)",
                   "for a title: an addon that can look titles up (Cinemeta is used when none is set)"],
         "care": "Opens a browser tab or a player window. A title is looked up on the network (only through the addon guard); an IMDb id needs no lookup.",
-        "watch": ["A title with NO addon able to look it up (network cut, Cinemeta refused, no addons.urls) answers ok: false, 'no addon can look titles up, so ... can't be found; give its IMDb id (tt...)', and nothing opens or starts. (Brief 31 fixed an earlier crash here, \"'tuple' object has no attribute 'strip'\"; checked against a fake addon setup only, never with a real network cut. The zzzz step above needs an addon that answers; its sentence is read from the code, not run.)"],
+        "watch": ["Owner only: a chat guest is not offered play_episode (tools.OWNER_ONLY_TOOLS).",
+                  "A title with NO addon able to look it up (network cut, Cinemeta refused, no addons.urls) answers ok: false, 'no addon can look titles up, so ... can't be found; give its IMDb id (tt...)', and nothing opens or starts. (Brief 31 fixed an earlier crash here, \"'tuple' object has no attribute 'strip'\"; checked against a fake addon setup only, never with a real network cut. The zzzz step above needs an addon that answers; its sentence is read from the code, not run.)"],
     },
     "play_control": {
         "does": "Pauses, resumes, seeks, stops, sets the volume of, or reports on the mpv player that Jarvis itself started.",
@@ -468,6 +469,7 @@ TEST_CHECKLIST = {
             {"run": {}, "expect": "No error, a question: needs_clarification 'Which download? Give its id (dl_list) or part of its title.'"},
         ],
         "needs": ["mpv or VLC installed"],
-        "watch": ["Only video / audio files inside the downloads library ever play: a .exe or a file outside it is refused."],
+        "watch": ["Only video / audio files inside the downloads library ever play: a .exe or a file outside it is refused.",
+                  "Owner only: a chat guest is not offered play_local (tools.OWNER_ONLY_TOOLS)."],
     },
 }

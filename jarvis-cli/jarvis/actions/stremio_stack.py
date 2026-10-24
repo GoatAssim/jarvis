@@ -821,7 +821,8 @@ TEST_CHECKLIST = {
         ],
         "needs": ["The Stremio desktop app installed (found automatically; or the paths saved with Locate...)"],
         "care": "Starting a server twice must never happen: check the Stremio app is closed OR that the answer says already_up.",
-        "watch": ["Menu > Daemons shows 'Stremio streaming server' under the Stremio category."],
+        "watch": ["Menu > Daemons shows 'Stremio streaming server' under the Stremio category.",
+                  "Owner only: a chat guest is not offered stack_start (tools.OWNER_ONLY_TOOLS)."],
     },
     "stack_stop": {
         "does": "Stops the server / stremio-web that Jarvis started.",
@@ -831,6 +832,7 @@ TEST_CHECKLIST = {
             {"run": {"what": "bogus"}, "expect": "ok: false, 'what must be server, web or both'; nothing is stopped."},
         ],
         "care": "Stopping the server interrupts running Stremio downloads; they retry once it is back.",
+        "watch": ["Owner only: a chat guest is not offered stack_stop (tools.OWNER_ONLY_TOOLS)."],
     },
     "stack_doctor": {
         "does": "Checks the Stremio setup and says what is wrong.",
@@ -864,5 +866,6 @@ TEST_CHECKLIST = {
             {"run": {}, "expect": "Asks first. With a Stremio download running: ok false, says to pause it. With the server started by the Stremio app: ok false, asks you to close it. Otherwise ok: true with cleared_files and freed, and the server comes back. With no server ever started by Jarvis (cache folder unknown): ok: false, 'I need the server running once to read its cache folder (stack_start); I won't guess a folder to delete'; nothing is deleted."},
         ],
         "care": "Deletes files: only inside <cacheRoot>/stremio-cache, never through a link, never while the server runs. Finished hub downloads are separate files.",
+        "watch": ["Owner only: a chat guest is not offered server_cache_clear (tools.OWNER_ONLY_TOOLS)."],
     },
 }

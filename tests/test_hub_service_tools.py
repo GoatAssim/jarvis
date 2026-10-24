@@ -118,7 +118,8 @@ def test_tool_file():
 
     # present_download_status (actions/download_status_card.py) shares the group on purpose: it has to be in the model's tool set
     # in the same turn as dl_add, and the routing is by group.
-    check("the tools are in the registry's `downloads` group", sorted(tool_registry.TOOL_GROUPS.get("downloads", [])) == sorted(TOOL_NAMES + ["present_download_status"]))
+    # dl_add_http lives in its own file (actions/download_add_http.py, N4) and joins the same group, like present_download_status.
+    check("the tools are in the registry's `downloads` group", sorted(tool_registry.TOOL_GROUPS.get("downloads", [])) == sorted(TOOL_NAMES + ["present_download_status", "dl_add_http"]))
     route = tool_router.route
     check("'what's downloading' routes to the downloads group", "downloads" in route("what's downloading right now?").groups)
     check("'download this file <url>' routes there", "downloads" in route("download this file https://example.com/a.zip").groups)

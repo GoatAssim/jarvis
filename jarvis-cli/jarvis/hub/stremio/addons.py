@@ -298,6 +298,55 @@ def cloud_call(net, method, body):
     return data.get("result")
 
 
+def _cloud_error(data, *secrets):
+    err = data.get("error") if isinstance(data, dict) else None
+    if not err:
+        return None
+    text = str(err.get("message") if isinstance(err, dict) else err)
+    for secret in secrets:
+        if secret and len(secret) >= 3:
+            text = text.replace(secret, "***")
+    return "the Stremio cloud said: %s" % (states.clean_text(text, 160) or "an error")
+
+
+def login(net, email, password):
+    """Sign in to the owner's Stremio account: POST /api/login -> (auth_key, email).  The password is used for this one call
+    and goes nowhere else (not stored, not logged, not in an error).  NOT run against the real API (no network where this was
+    written); the reply is read defensively."""
+    email, password = str(email or "").strip(), str(password or "")
+    if not re.match(r"^[^@\s]{1,100}@[^@\s]{1,150}$", email) or not password or len(password) > 200:
+        raise AddonError("enter the email and password of your Stremio account")
+    body = {"type": "Login", "email": email, "password": password, "facebook": False}
+    try:
+        data = net.request("POST", CLOUD_API + "login", "the Stremio cloud", json_body=body, limit=MAX_CLOUD_BYTES, timeout=(5, 20))
+    except AddonError as exc:
+        raise AddonError(str(exc).replace(password, "***") if len(password) >= 3 else str(exc))
+    problem = _cloud_error(data, password)
+    if problem:
+        raise AddonError(problem)
+    result = data.get("result") if isinstance(data, dict) else None
+    key = str((result or {}).get("authKey") or "").strip() if isinstance(result, dict) else ""
+    if not re.match(r"^[A-Za-z0-9_\-+=/.]{8,200}$", key):
+        raise AddonError("the Stremio cloud answered without a login key")
+    user = result.get("user") if isinstance(result.get("user"), dict) else {}
+    return key, str(user.get("email") or email)[:150]
+
+
+def account_email(net):
+    """The email of the saved key's account (GetUser), or raises AddonError (the key is dead, or the cloud is unreachable)."""
+    result = cloud_call(net, "getUser", {"type": "GetUser"})
+    return str((result or {}).get("email") or "")[:150] if isinstance(result, dict) else ""
+
+
+def remote_logout(net):
+    """Best effort: tell Stremio the saved key is finished.  Never raises."""
+    try:
+        cloud_call(net, "logout", {"type": "Logout"})
+        return True
+    except Exception:  # noqa: BLE001
+        return False
+
+
 # --------------------------------------------------------------------------- which addons are installed
 
 def _from_manifest_entry(entry, source):

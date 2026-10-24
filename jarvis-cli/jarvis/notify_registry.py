@@ -239,8 +239,21 @@ DEFAULT_TONE = "info"
 # Lookups (pure; the notifier and every other consumer use these)
 # ---------------------------------------------------------------------------
 
-MIN_LEVEL = min(p["level"] for p in PRESETS)
-MAX_LEVEL = max(p["level"] for p in PRESETS)
+def min_level():
+    """The lowest level in PRESETS, read when asked (a test or a live edit may swap the table)."""
+    return min(p["level"] for p in PRESETS)
+
+
+def max_level():
+    """The highest level in PRESETS, read when asked."""
+    return max(p["level"] for p in PRESETS)
+
+
+# Kept for importers (notifier.MIN_LEVEL / MAX_LEVEL and anything that read these names): the same
+# values as before, computed once at import. Anything that VALIDATES or PRINTS a bound calls
+# min_level() / max_level() instead, so it follows the table.
+MIN_LEVEL = min_level()
+MAX_LEVEL = max_level()
 
 
 def actions(type_=None):
@@ -412,7 +425,7 @@ def level_help():
     """The `level` parameter's description for the scheduler tools."""
     parts = ["%d %s (%s)" % (p["level"], p["id"], p["help"]) for p in PRESETS]
     return ("How important this is, %d-%d (K.2.7): %s. Omit to use the configured default."
-            % (MIN_LEVEL, MAX_LEVEL, ", ".join(parts)))
+            % (min_level(), max_level(), ", ".join(parts)))
 
 
 def channel_help():
@@ -452,8 +465,8 @@ def catalog(config=None):
         "default_look": DEFAULT_LOOK,
         "default_tone": DEFAULT_TONE,
         "positions": [dict(p) for p in positions_menu()],
-        "min_level": MIN_LEVEL,
-        "max_level": MAX_LEVEL,
+        "min_level": min_level(),
+        "max_level": max_level(),
         "default_level": DEFAULT_LEVEL,
         "default_position": DEFAULT_POSITION,
     }

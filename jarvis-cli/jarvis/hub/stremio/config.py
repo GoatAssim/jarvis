@@ -354,12 +354,13 @@ def _raw_for_write():
             raw = json.loads(path.read_text(encoding="utf-8") or "{}")
         except (OSError, ValueError):
             return None, "%s exists but can't be read as JSON, so I didn't touch it. Fix or rename it first" % path
-        if not isinstance(raw, dict) or not isinstance(raw.get("server", {}), dict) or not isinstance(raw.get("web", {}), dict):
-            return None, "%s isn't shaped like Jarvis expects (no 'server' / 'web' object), so I didn't touch it" % path
+        if not isinstance(raw, dict) or not isinstance(raw.get("server", {}), dict) or not isinstance(raw.get("web", {}), dict) \
+                or any(not isinstance(raw.get(k, {}), dict) for k in ("player", "addons", "account")):
+            return None, "%s isn't shaped like Jarvis expects (no 'server' / 'web' / 'player' / 'addons' / 'account' object), so I didn't touch it" % path
     return raw, None
 
 
-def save_settings(server_url=None, web=None, check=None):
+def save_settings(server_url=None, web=None, player=None, addon_urls=None, check=None):
     """Write `server.url` and/or the `web` block into ~/.jarvis/stremio.json.  OWNER ONLY (hub_admin.stremio_save,
     the card's own buttons); there is no model tool for it.  A new `server_url` must be http on loopback AND answer
     like a Stremio server right now (a dead address is never saved); the web address only has to be loopback
@@ -367,9 +368,9 @@ def save_settings(server_url=None, web=None, check=None):
     refused = _owner_only()
     if refused:
         return refused
-    if not server_url and web is None:
+    if not server_url and web is None and player is None and addon_urls is None:
         return {"ok": False, "error": "nothing to save"}
-    new_url, clean_web = None, {}
+    new_url, clean_web, clean_player, new_urls = None, {}, {}, None
     if server_url:
         new_url = _loopback_url(server_url)
         if new_url is None:
@@ -382,11 +383,25 @@ def save_settings(server_url=None, web=None, check=None):
             return {"ok": False, "error": "; ".join(found), "problems": found}
         if not clean_web:
             return {"ok": False, "error": "nothing to save"}
+    if player is not None:
+        clean_player, found = check_player(player)
+        if found:
+            return {"ok": False, "error": "; ".join(found), "problems": found}
+        if not clean_player:
+            return {"ok": False, "error": "nothing to save"}
     raw, why = _raw_for_write()
     if why:
         return {"ok": False, "error": why}
+    if addon_urls is not None:
+        new_urls, found = check_addon_urls(addon_urls, (raw.get("addons") or {}).get("urls") if isinstance(raw.get("addons"), dict) else [])
+        if found:
+            return {"ok": False, "error": "; ".join(found), "problems": found}
     if new_url:
         raw["server"] = dict(raw.get("server") or {}, url=new_url)
+    if clean_player:
+        raw["player"] = dict(raw.get("player") or {}, **clean_player)
+    if new_urls is not None:
+        raw["addons"] = dict(raw.get("addons") or {}, urls=new_urls)
     if clean_web:
         raw["web"] = dict(raw.get("web") or {}, **clean_web)
     from ... import atomic_io
@@ -403,7 +418,163 @@ def save_settings(server_url=None, web=None, check=None):
         if any((after.get("web") or {}).get(k) != v for k, v in clean_web.items()):
             return {"ok": False, "error": "I wrote %s but reading it back didn't give the same stremio-web settings" % path}
         saved["web"] = clean_web
+    if clean_player:
+        if any((after.get("player") or {}).get(k) != v for k, v in clean_player.items()):
+            return {"ok": False, "error": "I wrote %s but reading it back didn't give the same player settings" % path}
+        saved["player"] = clean_player
+    if new_urls is not None:
+        saved["addon_urls"] = len(new_urls)
     return {"ok": True, "saved": saved, "file": str(path)}
+
+
+# --------------------------------------------------------------------------- player, addon list, account (owner only)
+# Same rules as above: the owner's own buttons, an unattended process is refused, every other key is carried over.  The
+# secrets (the account key, a debrid key inside an addon address) are written here and never read back out by the page.
+
+_PLAYER_KINDS = ("auto", "mpv", "vlc")
+MAX_ADDON_URLS = 30
+MAX_ADDON_URL = 300
+_KEY_RE = re.compile(r"^[A-Za-z0-9_\-+=/.]{8,200}$")
+
+
+def check_player(player):
+    """(clean, problems) for {'kind': auto|mpv|vlc, 'exe': full path or ''}.  Only the keys present are checked."""
+    clean, found = {}, []
+    if not isinstance(player, dict):
+        return clean, ["the player settings must be an object with kind and exe"]
+    for key in player:
+        if key not in ("kind", "exe"):
+            found.append("%s isn't a player setting Jarvis can save" % str(key)[:40])
+    if "kind" in player:
+        kind = str(player["kind"] or "").strip().lower()
+        if kind in _PLAYER_KINDS:
+            clean["kind"] = kind
+        else:
+            found.append("the player must be auto, mpv or vlc")
+    if "exe" in player:
+        text = str(player["exe"] or "").strip().strip('"').strip()
+        if not text:
+            clean["exe"] = ""
+        else:
+            exe, why = _plain_path(text, "the player program")
+            if why:
+                found.append(why)
+            elif not Path(exe).is_file():
+                found.append("the player program doesn't exist: %s" % exe)
+            elif exe.lower().endswith((".js", ".lnk", ".txt", ".json")):
+                found.append("the player must be the program itself (mpv.exe or vlc.exe), not %s" % detect.basename(exe))
+            else:
+                clean["exe"] = exe
+    return clean, found
+
+
+def _addon_url(text):
+    text = str(text or "").strip()
+    if not text or len(text) > MAX_ADDON_URL or re.search(r"\s", text):
+        return None
+    try:
+        parts = urlsplit(text)
+        parts.port  # noqa: B018 - raises ValueError on a bad port
+    except ValueError:
+        return None
+    if parts.scheme.lower() not in ("http", "https") or not parts.hostname or parts.username or parts.password or parts.fragment:
+        return None
+    return text
+
+
+def check_addon_urls(change, current):
+    """(new list, problems) for {'add': [address ...], 'remove': [position ...]} applied to the saved list.  Positions are the
+    ones `addon_hosts()` showed, so the page never needs the addresses (a debrid key can sit in one)."""
+    current = [str(u) for u in (current or []) if isinstance(u, str)]
+    if not isinstance(change, dict):
+        return None, ["the addon list change must be an object with add and remove"]
+    found, out = [], list(current)
+    drop = set()
+    for pos in change.get("remove") or []:
+        if isinstance(pos, int) and not isinstance(pos, bool) and 0 <= pos < len(current):
+            drop.add(pos)
+        else:
+            found.append("there is no addon at position %s" % str(pos)[:10])
+    out = [u for i, u in enumerate(current) if i not in drop]
+    for raw in change.get("add") or []:
+        url = _addon_url(raw)
+        if url is None:
+            found.append("that isn't an addon address (http or https, no spaces, up to %d characters)" % MAX_ADDON_URL)
+        elif url not in out:
+            out.append(url)
+    if len(out) > MAX_ADDON_URLS:
+        found.append("at most %d addons can be saved" % MAX_ADDON_URLS)
+    return (None if found else out), found
+
+
+def addon_hosts(cfg=None):
+    """The saved addon list as [{'index', 'host'}]: the host only, never the path (a debrid key can be in it)."""
+    cfg = cfg or load()
+    block = cfg.get("addons")
+    urls = block.get("urls") if isinstance(block, dict) else None
+    out = []
+    for i, url in enumerate(urls if isinstance(urls, list) else []):
+        try:
+            parts = urlsplit(str(url))
+            out.append({"index": i, "host": ("%s%s" % (parts.hostname or "?", ":%d" % parts.port if parts.port else ""))[:80]})
+        except ValueError:
+            out.append({"index": i, "host": "?"})
+    return out[:MAX_ADDON_URLS]
+
+
+def account_state(cfg=None):
+    """{'signed_in', 'email'}: whether a key is saved and the email it was saved with.  Never the key."""
+    block = (cfg or load()).get("account")
+    block = block if isinstance(block, dict) else {}
+    key = str(block.get("auth_key") or "").strip()
+    return {"signed_in": bool(_KEY_RE.match(key)), "email": str(block.get("email") or "")[:150]}
+
+
+def save_account(auth_key, email=""):
+    """Write `account.auth_key` (and `account.email`, which is not a secret) into stremio.json.  OWNER ONLY.  Every other key
+    is carried over; a file that isn't valid JSON is never overwritten.  {'ok', 'error'?, 'file'}; never echoes the key."""
+    refused = _owner_only()
+    if refused:
+        return refused
+    key = str(auth_key or "").strip()
+    if not _KEY_RE.match(key):
+        return {"ok": False, "error": "that doesn't look like a Stremio login key (letters, digits and - _ + = / . only)"}
+    raw, why = _raw_for_write()
+    if why:
+        return {"ok": False, "error": why}
+    block = dict(raw.get("account") or {}, auth_key=key)
+    email = str(email or "").strip()[:150]
+    if email:
+        block["email"] = email
+    else:
+        block.pop("email", None)
+    raw["account"] = block
+    from ... import atomic_io
+    if not atomic_io.write_json(config_path(), raw):
+        return {"ok": False, "error": "couldn't write %s (is the folder writable?)" % config_path()}
+    if not account_state()["signed_in"]:
+        return {"ok": False, "error": "I wrote %s but reading it back didn't show the account" % config_path()}
+    return {"ok": True, "file": str(config_path())}
+
+
+def clear_account():
+    """Sign out: remove `account.auth_key` and `account.email` (nothing else).  OWNER ONLY."""
+    refused = _owner_only()
+    if refused:
+        return refused
+    raw, why = _raw_for_write()
+    if why:
+        return {"ok": False, "error": why}
+    block = dict(raw.get("account") or {})
+    if not (block.get("auth_key") or block.get("email")):
+        return {"ok": True, "file": str(config_path()), "was_signed_in": False}
+    block.pop("auth_key", None)
+    block.pop("email", None)
+    raw["account"] = block
+    from ... import atomic_io
+    if not atomic_io.write_json(config_path(), raw):
+        return {"ok": False, "error": "couldn't write %s (is the folder writable?)" % config_path()}
+    return {"ok": True, "file": str(config_path()), "was_signed_in": True}
 
 
 def file_state(cfg=None):

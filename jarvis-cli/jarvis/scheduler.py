@@ -181,11 +181,11 @@ _EVENT_RE = re.compile(r"^[a-z0-9][a-z0-9_.:-]{0,63}$")
 
 def _level_type_message():
     """The "not a number" message, with the bounds read from the notification registry."""
-    return "level must be an integer %d-%d" % (notify_registry.MIN_LEVEL, notify_registry.MAX_LEVEL)
+    return "level must be an integer %d-%d" % (notify_registry.min_level(), notify_registry.max_level())
 
 
 def _level_range_message():
-    return "level must be between %d and %d" % (notify_registry.MIN_LEVEL, notify_registry.MAX_LEVEL)
+    return "level must be between %d and %d" % (notify_registry.min_level(), notify_registry.max_level())
 
 
 class SchedulerError(Exception):
@@ -446,7 +446,7 @@ def create(kind="reminder", title="", when=None, trigger=None, action=None,
             level = int(level)
         except (TypeError, ValueError):
             raise SchedulerError(_level_type_message())
-        if not (notify_registry.MIN_LEVEL <= level <= notify_registry.MAX_LEVEL):
+        if not (notify_registry.min_level() <= level <= notify_registry.max_level()):
             raise SchedulerError(_level_range_message())
 
     action = dict(action or {})
@@ -837,7 +837,7 @@ def update_job(job_id, changes, trusted=False, now=None):
                     level = int(level)
                 except (TypeError, ValueError):
                     raise SchedulerError(_level_type_message())
-                if not (notify_registry.MIN_LEVEL <= level <= notify_registry.MAX_LEVEL):
+                if not (notify_registry.min_level() <= level <= notify_registry.max_level()):
                     raise SchedulerError(_level_range_message())
                 work["level"] = level
 

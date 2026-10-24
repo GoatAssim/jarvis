@@ -212,6 +212,22 @@ _LEGACY_LEVEL_WORDS = {
 _LEVEL_ALIASES = {**{p["id"]: p["level"] for p in registry.PRESETS}, **_LEGACY_LEVEL_WORDS}
 
 
+def _level_bounds():
+    """(lowest, highest) valid level, read when asked.
+
+    The registry's table is the source, so a level added to notify_registry.PRESETS is valid
+    here at once. The module constants MIN_LEVEL / MAX_LEVEL stay for importers and can only
+    WIDEN the range: a caller that moves notifier.MAX_LEVEL (tests/test_hub_schedule_options.py)
+    still sees its number accepted.
+    """
+    return min(MIN_LEVEL, registry.min_level()), max(MAX_LEVEL, registry.max_level())
+
+
+def _level_aliases():
+    """Preset names (live from the table) plus the legacy words."""
+    return {**{p["id"]: p["level"] for p in registry.PRESETS}, **_LEGACY_LEVEL_WORDS}
+
+
 def normalize_level(value, kind=None, source=None, config=None):
     """Resolve an explicit level to an int in MIN_LEVEL..MAX_LEVEL.
 
@@ -224,16 +240,18 @@ def normalize_level(value, kind=None, source=None, config=None):
       3. `config["levels"][kind]`.
       4. DEFAULT_LEVEL.
     """
+    low, high = _level_bounds()
     if value is not None:
         try:
             lvl = int(value)
-            if MIN_LEVEL <= lvl <= MAX_LEVEL:
+            if low <= lvl <= high:
                 return lvl
         except (TypeError, ValueError):
             pass
         text = str(value).strip().lower()
-        if text in _LEVEL_ALIASES:
-            return _LEVEL_ALIASES[text]
+        aliases = _level_aliases()
+        if text in aliases:
+            return aliases[text]
 
     config = config if config is not None else _load_config()
     levels = config.get("levels") or {}
@@ -242,7 +260,7 @@ def normalize_level(value, kind=None, source=None, config=None):
             continue
         try:
             lvl = int(levels[candidate_key])
-            if MIN_LEVEL <= lvl <= MAX_LEVEL:
+            if low <= lvl <= high:
                 return lvl
         except (KeyError, TypeError, ValueError):
             continue
@@ -268,9 +286,10 @@ def describe_options():
     Pure: reads only this module and the registry, no file, so it is cheap enough to call on
     every poll.
     """
+    low, high = _level_bounds()
     levels = []
-    for number in range(MIN_LEVEL, MAX_LEVEL + 1):
-        name = LEVEL_NAMES.get(number) or ("level %d" % number)
+    for number in range(low, high + 1):
+        name = LEVEL_NAMES.get(number) or registry.level_names().get(number) or ("level %d" % number)
         entry = {"value": number, "name": name,
                  "label": "%d \u00b7 %s" % (number, name[:1].upper() + name[1:])}
         row = registry.preset(number)
@@ -284,7 +303,7 @@ def describe_options():
         channels.append({"id": channel, "label": label})
     cat = registry.catalog()
     return {
-        "levels": levels, "min_level": MIN_LEVEL, "max_level": MAX_LEVEL, "default_level": DEFAULT_LEVEL,
+        "levels": levels, "min_level": low, "max_level": high, "default_level": DEFAULT_LEVEL,
         "channels": channels, "positions": list(POSITIONS), "default_position": DEFAULT_POSITION,
         "actions": cat["actions"], "presets": cat["presets"], "looks": cat["looks"],
         "tones": cat["tones"], "kinds": cat["kinds"], "default_look": cat["default_look"],

@@ -500,6 +500,47 @@
     return Object.keys(out).length ? { web: out } : null;
   }
 
+  // ---- the Stremio card: account, player, addon list (brief 30) ---------------------------------------------------------
+  // Pure again.  The hub never sends the account key or an addon address (a debrid key can sit in one): only "signed in", the
+  // email, the host of each saved addon and its position.  Every body below is null when there is nothing to send.
+  function accountModel(s) {
+    const a = (s && s.ok !== false && s.account && typeof s.account === "object") ? s.account : null;
+    if (!a) return { ready: false, signedIn: false, email: "", sentence: "The account status isn't available." };
+    const email = String(a.email || "");
+    return { ready: true, signedIn: !!a.signed_in, email: email,
+      sentence: a.signed_in ? "Signed in" + (email ? " as " + email : "") + ". Jarvis can read your Stremio addons and library."
+        : "Not signed in. Without an account Jarvis only uses the addon list below." };
+  }
+  function loginBody(email, password) {
+    const e = String(email || "").trim(), p = String(password || "");
+    return e && p ? { action: "login", email: e, password: p } : null;
+  }
+  function keyBody(key) {
+    const k = String(key || "").trim();
+    return k ? { action: "key", auth_key: k } : null;
+  }
+  function playerModel(s) {
+    const p = (s && s.ok !== false && s.player_config && typeof s.player_config === "object") ? s.player_config : null;
+    if (!p) return { ready: false, kind: "auto", exe: "", missing: false };
+    return { ready: true, kind: String(p.kind || "auto"), exe: String(p.exe || ""), missing: !!(p.exe && p.exe_exists === false) };
+  }
+  function playerSaveBody(fields, saved) {
+    const out = {}, kind = String(fields.kind || "").trim(), exe = String(fields.exe || "").trim();
+    if (kind && kind !== String((saved || {}).kind || "auto")) out.kind = kind;
+    if (exe !== String((saved || {}).exe || "")) out.exe = exe;
+    return Object.keys(out).length ? { player: out } : null;
+  }
+  function addonsModel(s) {
+    const rows = (s && s.ok !== false && Array.isArray(s.addon_hosts)) ? s.addon_hosts : null;
+    if (!rows) return { ready: false, rows: [] };
+    return { ready: true, rows: rows.map((r) => ({ index: Number(r.index), host: String(r.host || "?") })) };
+  }
+  function addonsBody(text, removeIndex) {
+    const add = String(text || "").split(/\s+/).filter(Boolean);
+    const remove = Number.isInteger(removeIndex) ? [removeIndex] : [];
+    return add.length || remove.length ? { addon_urls: { add: add, remove: remove } } : null;
+  }
+
   // The cache row: where it is (only the running server knows) and the request to hand to Jarvis, which makes the change with
   // its own stremio_prepare tool and asks first.  The page never changes the cache itself.
   function stremioCacheModel(s) {
@@ -681,6 +722,27 @@
     const bCache = btn("Copy a request for Jarvis\u2026", () => askCache());
     all.push(bSaveServer, bBrowseWeb, bSaveWeb, bStartWeb, bRepair, bCache);
     let filledFor = null;
+    // ---- brief 30: the account, the player and the addon list.  Same route family as above; the page only ever sends what the
+    // owner typed, and never shows the key or an addon address (the hub sends hosts and positions).
+    const inEmail = h("input", { type: "email", class: "prefs-input prefs-input--wide", spellcheck: "false", autocomplete: "off", "aria-label": "Stremio account email", placeholder: "email" });
+    const inPass = h("input", { type: "password", class: "prefs-input prefs-input--wide", autocomplete: "off", "aria-label": "Stremio account password", placeholder: "password" });
+    const inKey = h("input", { type: "password", class: "prefs-input prefs-input--wide", autocomplete: "off", spellcheck: "false", "aria-label": "Stremio login key", placeholder: "or paste a login key" });
+    const accountNote = h("div", { class: "prefs-note" });
+    const bLogin = h("button", { class: "btn btn--sm", type: "button", text: "Sign in", onclick: () => accountDo(loginBody(inEmail.value, inPass.value), true) });
+    const bSaveKey = btn("Save key", () => accountDo(keyBody(inKey.value), true));
+    const bCheckAcc = btn("Check account", () => accountDo({ action: "check" }, false));
+    const bLogout = btn("Sign out", () => signOut());
+    const selPlayer = h("select", { class: "prefs-select", "aria-label": "Video player" });
+    [["auto", "Automatic (mpv, then VLC)"], ["mpv", "mpv"], ["vlc", "VLC"]].forEach((o) => selPlayer.append(h("option", { value: o[0], text: o[1] })));
+    const inPlayerExe = field("Player program", "full path to mpv.exe or vlc.exe; empty = look for it");
+    const bBrowsePlayer = btn("Browse\u2026", () => browsePlayer());
+    const bSavePlayer = btn("Save player", () => savePlayer());
+    const playerNote = h("div", { class: "prefs-row__help" });
+    const addonList = h("div", { class: "prefs-list" });
+    const inAddon = field("Addon address", "https://\u2026/manifest.json (one or more, separated by spaces)");
+    const bAddAddon = btn("Add", () => runSave(addonsBody(inAddon.value, null), "Addon added").then(() => { inAddon.value = ""; }));
+    all.push(inEmail, inPass, inKey, bLogin, bSaveKey, bCheckAcc, bLogout, selPlayer, inPlayerExe, bBrowsePlayer, bSavePlayer, bAddAddon);
+    let extraFor = null;
 
     function say(text, kind) { ui.flash(msg, text, kind); }
     function lock(word) { state.busy = word; all.forEach((b) => { b.disabled = !!word; }); }
@@ -724,6 +786,48 @@
       bStartWeb.disabled = !!state.busy || !set.ready || set.web.answers || !set.web.configured;
       bStartWeb.title = set.web.answers ? "stremio-web is already answering." : !set.web.configured ? "Choose the stremio-web folder and save first."
         : "Start stremio-web with the saved command, in the saved folder.";
+      paintExtra();
+    }
+
+    // account / player / addon rows: the boxes are filled once per hub answer; the lists are redrawn every time
+    function paintExtra() {
+      const acc = accountModel(state.status), pl = playerModel(state.status), ad = addonsModel(state.status);
+      accountNote.textContent = acc.sentence;
+      accountNote.className = "prefs-note" + (acc.ready ? "" : " prefs-note--warn");
+      bLogin.disabled = !!state.busy || !acc.ready; bSaveKey.disabled = bLogin.disabled;
+      bCheckAcc.disabled = !!state.busy || !acc.signedIn; bLogout.disabled = !!state.busy || !acc.signedIn;
+      if (extraFor !== state.status && pl.ready) { extraFor = state.status; selPlayer.value = pl.kind; inPlayerExe.value = pl.exe; if (acc.email && !inEmail.value) inEmail.value = acc.email; }
+      playerNote.textContent = pl.missing ? "The saved player program no longer exists. Pick it again or clear the box." : "";
+      bSavePlayer.disabled = !!state.busy || !pl.ready; bBrowsePlayer.disabled = bSavePlayer.disabled; bAddAddon.disabled = !!state.busy || !ad.ready;
+      addonList.replaceChildren(...(ad.rows.length ? ad.rows.map((r) => h("div", { class: "prefs-inline" }, [h("span", { text: r.host }),
+        btn("Remove", () => runSave(addonsBody("", r.index), "Addon removed"), { disabled: !!state.busy })]))
+        : [h("div", { class: "prefs-empty", text: ad.ready ? "No addons saved here. Your account's addons are used when you are signed in." : "Not available." })]));
+    }
+    // one account call; `clearBoxes` empties the password and key boxes afterwards, whatever the answer was
+    async function accountDo(body, clearBoxes) {
+      if (!body) { say("Fill the box first.", "err"); return; }
+      lock("saving");
+      say(body.action === "login" ? "Signing in\u2026" : "");
+      try {
+        const r = await hubPost("/api/hub/stremio/account", body, 45000);
+        state.status = r; say(String(r.account_note || "Done"), "ok");
+      } catch (err) { say(String((err && err.message) || "The hub didn't accept that."), "err"); }
+      if (clearBoxes) { inPass.value = ""; inKey.value = ""; }
+      lock("");
+      paint();
+    }
+    async function signOut() {
+      const ui2 = global.JarvisUI;
+      const yes = !!(ui2 && typeof ui2.confirm === "function" && await ui2.confirm({ title: "Sign out of Stremio?", level: "warn", focusCancel: true, confirmLabel: "Sign out",
+        body: "Jarvis forgets your Stremio login key and tells Stremio it is finished. Your Stremio account itself is not changed." }));
+      if (yes) await accountDo({ action: "logout" }, true);
+    }
+    function savePlayer() { const pl = playerModel(state.status); return runSave(playerSaveBody({ kind: selPlayer.value, exe: inPlayerExe.value }, pl), "Player saved"); }
+    async function browsePlayer() {
+      const picker = global.JarvisPathPicker;
+      if (!picker || typeof picker.open !== "function") { say("The file picker isn't available on this page.", "err"); return; }
+      const picked = await picker.open({ kind: "file", start: inPlayerExe.value || "", title: "Choose mpv or VLC" });
+      if (picked) inPlayerExe.value = String(picked);
     }
 
     async function load() {
@@ -842,6 +946,12 @@
       ui.rowShell("stremio-web start command", "One program and its arguments, run in that folder. Empty = pnpm start.", inWebCmd, null),
       ui.rowShell("stremio-web address", "Where stremio-web answers (this PC only).", inWebUrl, null),
       h("div", { class: "prefs-inline" }, [bSaveWeb, bStartWeb]),
+      ui.rowShell("Stremio account", "Sign in so Jarvis can read your installed addons and library. The password is used once to get a login key and is never saved; only the key is kept, in Jarvis's own stremio.json, and this page never shows it.",
+        h("div", {}, [accountNote, h("div", { class: "prefs-inline" }, [inEmail, inPass, bLogin]), h("div", { class: "prefs-inline" }, [inKey, bSaveKey]), h("div", { class: "prefs-inline" }, [bCheckAcc, bLogout])]), null),
+      ui.rowShell("Video player", "Which player Jarvis uses for a finished file or a stream. Automatic looks for mpv, then VLC.",
+        h("div", {}, [h("div", { class: "prefs-inline" }, [selPlayer, inPlayerExe, bBrowsePlayer, bSavePlayer]), playerNote]), null),
+      ui.rowShell("Extra addons", "Addon addresses Jarvis uses besides your account's. Only the site is shown here, because an address can contain a private key.",
+        h("div", {}, [addonList, h("div", { class: "prefs-inline" }, [inAddon, bAddAddon])]), null),
       ui.rowShell("Stremio's cache", "Where Stremio keeps what it is streaming. Changing it is a request to Jarvis, which asks before it changes the server.",
         h("div", {}, [cacheText, bCache]), null),
       h("details", {}, [h("summary", { text: "Diagnostic text" }), diag]),
@@ -1284,7 +1394,7 @@
     PROVIDER_SETTING_FIELDS: PROVIDER_SETTING_FIELDS, providerSettingRows: providerSettingRows, providerSettingArgs: providerSettingArgs,
     stremioModel: stremioModel, stremioFacts: stremioFacts, diagnosticFor: diagnosticFor, folderOf: folderOf, pickOptions: pickOptions,
     locateFlow: locateFlow, startFlow: startFlow, startTimeoutMs: startTimeoutMs, hubPost: hubPost, STREMIO_TONE: STREMIO_TONE,
-    stremioSetupModel: stremioSetupModel, serverSaveBody: serverSaveBody, webSaveBody: webSaveBody, stremioCacheModel: stremioCacheModel,
+    stremioSetupModel: stremioSetupModel, accountModel: accountModel, loginBody: loginBody, keyBody: keyBody, playerModel: playerModel, playerSaveBody: playerSaveBody, addonsModel: addonsModel, addonsBody: addonsBody, serverSaveBody: serverSaveBody, webSaveBody: webSaveBody, stremioCacheModel: stremioCacheModel,
     cacheRequestText: cacheRequestText, repairModel: repairModel, repairBrokenFileHint: repairBrokenFileHint,
     settingsSaveFlow: settingsSaveFlow, repairFlow: repairFlow, startWebFlow: startWebFlow,
     PAGE_SECTIONS: PAGE_SECTIONS, placeOf: placeOf, timingFor: timingFor, valuesEqual: valuesEqual, defaultOf: defaultOf, setPath: setPath, formatValue: formatValue,

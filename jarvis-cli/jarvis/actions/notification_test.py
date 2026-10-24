@@ -159,9 +159,9 @@ def _requested(args):
         try:
             level = int(level)
         except (TypeError, ValueError):
-            return None, "level must be a whole number, %d-%d" % (registry.MIN_LEVEL, registry.MAX_LEVEL)
-        if not (registry.MIN_LEVEL <= level <= registry.MAX_LEVEL):
-            return None, "level must be between %d and %d" % (registry.MIN_LEVEL, registry.MAX_LEVEL)
+            return None, "level must be a whole number, %d-%d" % (registry.min_level(), registry.max_level())
+        if not (registry.min_level() <= level <= registry.max_level()):
+            return None, "level must be between %d and %d" % (registry.min_level(), registry.max_level())
     try:
         count = int(args.get("count") or 1)
     except (TypeError, ValueError):

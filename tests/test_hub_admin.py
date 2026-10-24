@@ -499,8 +499,10 @@ def test_sources_op():
           and [p for p in res["providers"] if p["id"] == "playnite"][0].get("hint", "").startswith("Appears here after the first install Jarvis starts through Playnite"))
     check("qBittorrent without its file is Needs setup and the reason names the file",
           by["qbittorrent"]["state"] == "needs_setup" and "qbittorrent.json" in by["qbittorrent"]["reason"] and by["qbittorrent"]["config_file"] == "~/.jarvis/qbittorrent.json")
-    check("an engine with writable settings gets a configure id, one without (qBittorrent) gets none",
-          by["stremio"]["configure"] == "stremio" and by["http"]["configure"] == "http" and by["ytdlp"]["configure"] == "ytdlp" and by["qbittorrent"]["configure"] is None)
+    check("every engine with writable settings gets a configure id; qBittorrent has a settings block now (SETTINGS_KEYS), so it gets one too",
+          by["stremio"]["configure"] == "stremio" and by["http"]["configure"] == "http" and by["ytdlp"]["configure"] == "ytdlp"
+          and by["qbittorrent"]["configure"] == "qbittorrent"
+          and any(k.startswith("qbittorrent.") for k in hub_settings.PREFS_WRITABLE))
     check("the home folder never appears in the answer (it is shown as ~)", HOME not in json.dumps(res))
 
     # an engine that says it is unavailable, one that is switched off, one that is not running, one that raises

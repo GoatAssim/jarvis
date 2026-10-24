@@ -535,7 +535,7 @@ def test_settings_roundtrip():
     check("a change is stored and merged over the defaults", got["concurrency"]["http"] == 1 and got["concurrency"]["total"] == 4
           and got["allow_private_hosts"] == ["127.0.0.1"] and got["rate_limit_kbps"] == 300)
     store.set_settings({"concurrency.total": 2})
-    check("a second nested change keeps the first", store.get_settings()["concurrency"] == {"total": 2, "http": 1, "ytdlp": 2, "stremio": 3})
+    check("a second nested change keeps the first", store.get_settings()["concurrency"] == {"total": 2, "http": 1, "ytdlp": 2, "stremio": 3, "qbittorrent": 2})
 
 
 # ---------------------------------------------------------------- router and engines

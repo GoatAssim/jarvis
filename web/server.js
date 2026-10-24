@@ -2984,11 +2984,32 @@ function hubStremioWeb(value) {
   for (const key of ["url", "dir", "start_cmd"]) if (typeof value[key] === "string") out[key] = value[key].slice(0, 500);
   return out;
 }
+// Brief 30: the player ({kind, exe}) and the addon list change ({add: [address], remove: [position]}); both are clamped here and
+// validated by hub/stremio/config.py.
+function hubStremioPlayer(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+  const out = {};
+  for (const key of ["kind", "exe"]) if (typeof value[key] === "string") out[key] = value[key].slice(0, 500);
+  return out;
+}
+function hubStremioAddonUrls(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+  const add = Array.isArray(value.add) ? value.add.filter((u) => typeof u === "string").slice(0, 30).map((u) => u.slice(0, 400)) : [];
+  const remove = Array.isArray(value.remove) ? value.remove.filter((n) => Number.isInteger(n)).slice(0, 30) : [];
+  return { add, remove };
+}
 app.post("/api/hub/stremio/paths", requireHubWrite, requireJarvis, (req, res) => hubAdmin(res, "stremio_save", {
   runtime_exe: hubText(req.body?.runtime_exe, 500), server_js: hubText(req.body?.server_js, 500),
   server_url: hubText(req.body?.server_url, 80), dry_run: req.body?.dry_run === true,
   web: hubStremioWeb(req.body?.web), repair: req.body?.repair === true, keep_copy: req.body?.keep_copy === true,
+  player: hubStremioPlayer(req.body?.player), addon_urls: hubStremioAddonUrls(req.body?.addon_urls),
 }, 30000));
+// Brief 30: the account buttons (sign in with email + password, paste a login key, check, sign out). Same guards as every write.
+// The password travels to hub_admin on stdin (never an argument), is used for one call to Stremio and is never stored or returned.
+app.post("/api/hub/stremio/account", requireHubWrite, requireJarvis, (req, res) => hubAdmin(res, "stremio_account", {
+  action: hubText(req.body?.action, 12), email: hubText(req.body?.email, 200), password: hubText(req.body?.password, 200),
+  auth_key: hubText(req.body?.auth_key, 220),
+}, 45000));
 // The card's Start button (brief 19): Stremio's SERVER only, through stremio_stack.tool_stack_start (loopback only; it starts
 // nothing when the server is already up or the Stremio app is open with a silent server). It may wait up to the hub setting
 // stremio.start_wait_seconds (10 to 300), so this route's time-out is longer than that; the page shows a working state and

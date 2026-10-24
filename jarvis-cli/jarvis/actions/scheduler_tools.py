@@ -124,7 +124,7 @@ def _level(args):
         lvl = int(raw)
     except (TypeError, ValueError):
         return None
-    return lvl if notify_registry.MIN_LEVEL <= lvl <= notify_registry.MAX_LEVEL else None
+    return lvl if notify_registry.min_level() <= lvl <= notify_registry.max_level() else None
 
 
 # ---------------------------------------------------------------------------
