@@ -929,7 +929,7 @@ const ENGINE_TONES = { ready: "done", needs_setup: "stalled", not_running: "stal
 // The block of Settings > Downloads an engine's Configure button scrolls to (data-settings-anchor in downloads-settings.js).
 // Brief 25: each engine has its own collapsed block under Sources (Stremio's holds the Stremio card); the block's anchor is the
 // engine's name.  Opening a block by its anchor unfolds it.
-const CONFIGURE_ANCHORS = { stremio: "stremio", http: "http", ytdlp: "yt-dlp" };
+const CONFIGURE_ANCHORS = { stremio: "stremio", http: "http", ytdlp: "yt-dlp", qbittorrent: "qbittorrent" };
 const PROVIDER_SETTINGS_ANCHOR = "other-tools-downloads";
 function engineWord(state) { return ENGINE_WORDS[state] || "Unknown"; }
 function engineTone(state) { return ENGINE_TONES[state] || "stale"; }

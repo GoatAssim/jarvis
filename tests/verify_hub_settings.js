@@ -32,7 +32,10 @@ function fakeEl(tag, attrs, kids) {
 function world(opts) {
   const o = Object.assign({ providers: [], confirmRequired: false, confirmAnswer: true, runResult: { ok: true }, settings: {}, writable: [], prefsWritable: [],
     stremio: { ok: true, state: "running", title: "Running", sentence: "Stremio's server is running.", can_start: false, address: "http://127.0.0.1:11470", path: {} },
-    stremioHang: false, pathsReply: null, startReply: null, hang: null, defaults: undefined, events: [], openModes: [], sources: null }, opts || {});
+    stremioHang: false, pathsReply: null, startReply: null, hang: null, defaults: undefined, events: [], openModes: [], sources: null,
+    qbt: { ok: true, file: "~/.jarvis/qbittorrent.json", exists: true, problem: null, values: { enabled: true, address: "http://127.0.0.1:8080", username: "admin" },
+      defaults: { enabled: true, address: "http://127.0.0.1:8080", username: "" }, password_set: true, file_overrides: [], engine: { ok: true, reason: "" } },
+    qbtPost: null }, opts || {});
   const calls = [];
   const win = {};
   win.fetch = async (url, init) => {
@@ -45,6 +48,11 @@ function world(opts) {
     if (url === "/api/hub/stremio") return o.stremioHang ? new Promise(() => {}) : (o.stremio && o.stremio.ok === false ? reply(o.stremio, 400) : reply(o.stremio));
     if (url === "/api/hub/stremio/paths" && o.pathsReply) return reply(o.pathsReply.body, o.pathsReply.status);
     if (url === "/api/hub/stremio/start" && o.startReply) return reply(o.startReply.body, o.startReply.status);
+    if (url === "/api/hub/qbittorrent") {
+      if (!o.qbt) return { ok: false, status: 404, statusText: "nope", json: async () => null };
+      if (init && init.method === "POST") return o.qbtPost ? reply(o.qbtPost.body, o.qbtPost.status) : reply(Object.assign({}, o.qbt, { saved: Object.keys(body || {}) }));
+      return o.qbt.ok === false ? reply(o.qbt, 400) : reply(o.qbt);
+    }
     if (url === "/api/tools/preview") return reply({ confirm_required: o.confirmRequired });
     if (url === "/api/tools/run") return reply({ result: o.runResult });
     return { ok: false, status: 404, statusText: "nope", json: async () => null };
@@ -428,11 +436,15 @@ const playniteP = { id: "playnite", label: "Playnite", enabled: true, read_only:
   // ---- brief 25 (N20): the page's structure, search, defaults, reset, timing, source blocks and the two tables
   {
     const ALL = ["library_root", "folders.video", "folders.audio", "folders.file", "ext_folders", "rate_limit_kbps", "schedule", "concurrency.total", "concurrency.http",
-      "concurrency.ytdlp", "concurrency.stremio", "http.stall_seconds", "http.max_retries", "http.segments", "http.segment_min_bytes", "stremio.stall_seconds", "stremio.max_retries",
+      "concurrency.ytdlp", "concurrency.stremio", "concurrency.qbittorrent", "qbittorrent.prefer_for_magnets", "qbittorrent.category", "qbittorrent.tag",
+      "qbittorrent.save_subfolder", "qbittorrent.after_done", "qbittorrent.cancel_deletes_data", "qbittorrent.metadata_timeout_s", "qbittorrent.stall_minutes",
+      "qbittorrent.poll_s", "http.stall_seconds", "http.max_retries", "http.segments", "http.segment_min_bytes", "stremio.stall_seconds", "stremio.max_retries",
       "stremio.metadata_timeout", "stremio.start_wait_seconds", "after_download.open", "notify.enabled", "notify.min_seconds", "notify.coalesce_s", "notify.providers",
       "notify.done.enabled", "unknown_settle_hours", "allow_private_hosts", "brand_new.key"];
     const SET = { library_root: "", folders: { video: "Video", audio: "Audio", file: "Files" }, ext_folders: {}, rate_limit_kbps: 0, schedule: [],
-      concurrency: { total: 6, http: 3, ytdlp: 2, stremio: 3 }, http: { stall_seconds: 60, max_retries: 3, segments: 1, segment_min_bytes: 33554432 },
+      concurrency: { total: 6, http: 3, ytdlp: 2, stremio: 3, qbittorrent: 2 },
+      qbittorrent: { prefer_for_magnets: false, category: "", tag: "jarvis", save_subfolder: "Torrents", after_done: "keep", cancel_deletes_data: true, metadata_timeout_s: 900, stall_minutes: 0, poll_s: 1 },
+      http: { stall_seconds: 60, max_retries: 3, segments: 1, segment_min_bytes: 33554432 },
       stremio: { stall_seconds: 90, max_retries: 3, metadata_timeout: 90, start_wait_seconds: 60 }, after_download: { open: "off" },
       notify: { enabled: true, min_seconds: 0, coalesce_s: 8, providers: true, done: { enabled: true, level: null } }, unknown_settle_hours: 24, allow_private_hosts: [], brand_new: { key: true } };
     const DEF = JSON.parse(JSON.stringify(SET));
@@ -517,7 +529,7 @@ const playniteP = { id: "playnite", label: "Playnite", enabled: true, read_only:
     check("every word has to match", eq(page.visiblePaths(), ["stremio.max_retries"]) && page.sectionIds().length > 0);
     page.setQuery("stremio");
     check("searching a source's name shows that block with all its settings and its card", page.visiblePaths().includes("stremio.stall_seconds") && page.visiblePaths().includes("concurrency.stremio")
-      && page.entries.find((e) => e.kind === "card").visible === true && !page.visiblePaths().includes("http.stall_seconds"));
+      && page.entries.find((e) => e.kind === "card" && e.source === "stremio").visible === true && !page.visiblePaths().includes("http.stall_seconds"));
     check("a block with a hit opens by itself; one with none is hidden", page.sourceBlocks.find((b) => b.id === "stremio").details.open === true && page.sourceBlocks.find((b) => b.id === "http").node.hidden === true);
     page.setQuery("zzz nothing");
     check("a search nothing matches shows no rows", page.visiblePaths().length === 0);
@@ -545,10 +557,109 @@ const playniteP = { id: "playnite", label: "Playnite", enabled: true, read_only:
     const wf = mk({ sources: null });
     const pf = (await wf.section.build({ ui: wf.ui }))[0].__dls;
     check("when the sources answer can't be read the three engines that have settings still get their blocks", eq(pf.sourceBlocks.map((b) => b.id).slice(0, 3), ["http", "ytdlp", "stremio"]));
-    check("a source with no settings says so (qBittorrent), and the page shows its setup file", (() => {
-      const b = page.sourceBlocks.find((x) => x.id === "qbittorrent");
-      return nodes(b.node, (n) => n.attrs && /no settings here/.test(n.attrs.text || "") && /qbittorrent\.json/.test(n.attrs.text || "")).length === 1;
-    })());
+    {
+      const wn = mk({ sources: Object.assign({}, SOURCES, { engines: SOURCES.engines.concat([{ id: "mystery", label: "Mystery", state: "off", reason: "", config_file: "~/.jarvis/mystery.json" }]) }) });
+      const pn2 = (await wn.section.build({ ui: wn.ui }))[0].__dls;
+      const b = pn2.sourceBlocks.find((x) => x.id === "mystery");
+      check("a source with no settings says so, and the page shows its setup file",
+        nodes(b.node, (n) => n.attrs && /no settings here/.test(n.attrs.text || "") && /mystery\.json/.test(n.attrs.text || "")).length === 1);
+    }
+    {
+      // ---- the qBittorrent block: every hub setting has words and a home, and the connection card sits at its top
+      const QB = ["concurrency.qbittorrent", "qbittorrent.after_done", "qbittorrent.cancel_deletes_data", "qbittorrent.category", "qbittorrent.metadata_timeout_s",
+        "qbittorrent.poll_s", "qbittorrent.prefer_for_magnets", "qbittorrent.save_subfolder", "qbittorrent.stall_minutes", "qbittorrent.tag"];
+      check("every qBittorrent setting the hub lists is a row in the qBittorrent block, not in Other",
+        eq(page.entries.filter((e) => e.source === "qbittorrent" && e.path).map((e) => e.path).sort(), QB) && QB.every((p) => sec(p) === "sources"));
+      check("each has a label and help in words, never the raw key", QB.every((p) => { const r = page.rowFor(p); return r.label && r.label !== p.replace(/[._]/g, " ") && !/[._]/.test(r.label) && r.help; }));
+      check("the choice shows its own words, in the row and in 'Default: ...'", (() => {
+        const row = page.rowFor("qbittorrent.after_done");
+        return row.spec.choices.length === 3 && row.info().defaultText === "Default: Keep it seeding";
+      })());
+      check("the timing is only claimed where the engine reads the key when a run starts, or when a magnet link is added",
+        P.timingFor("qbittorrent.poll_s") === "for the next torrent that starts" && P.timingFor("qbittorrent.prefer_for_magnets") === "for the next magnet link you add");
+      check("the dangerous ones need the confirm-gated tool, the everyday ones don't", (() => {
+        const pay = { prefs_writable: ["qbittorrent.poll_s", "qbittorrent.category"] };
+        return P.toolFor("qbittorrent.poll_s", pay) === "dl_prefs" && P.toolFor("qbittorrent.cancel_deletes_data", pay) === "dl_settings";
+      })());
+
+      const wq = mk();
+      const pq = (await wq.section.build({ ui: wq.ui }))[0].__dls;
+      await new Promise((r) => setTimeout(r, 0));
+      const card = pq.entries.find((e) => e.kind === "card" && e.source === "qbittorrent");
+      check("the connection card is the first thing in the qBittorrent block, and searchable", !!card && pq.entries.filter((e) => e.source === "qbittorrent")[0] === card
+        && (() => { pq.setQuery("password"); const v = card.visible === true; pq.setQuery(""); return v; })());
+      check("the card read the connection once, from its own route", wq.calls.filter((c) => c.url === "/api/hub/qbittorrent").length === 1 && wq.calls.find((c) => c.url === "/api/hub/qbittorrent").method === "GET");
+      const labels = wq.shells.map((r) => r.label);
+      check("it has the switch, the address, the user name and the password", ["Use qBittorrent", "Web UI address", "User name", "Password"].every((l) => labels.includes(l)));
+      const ctlOf = (label) => wq.controls.find((c) => c.spec.type && !c.spec.path && wq.shells.find((r) => r.el === c.el && r.label === label));
+      const byKey = {};
+      wq.controls.filter((c) => !c.spec.path && c.spec.type).forEach((c) => { byKey[c.spec.type + ":" + String(c.value)] = c; });
+      check("the controls start from what the file holds", byKey["bool:true"] && byKey["text:http://127.0.0.1:8080"] && byKey["text:admin"]);
+      wq.calls.length = 0;
+      await byKey["text:http://127.0.0.1:8080"].commit("http://localhost:9090");
+      const post = wq.calls.find((c) => c.method === "POST");
+      check("a change is one POST of that one key, with the hub header", post && post.url === "/api/hub/qbittorrent" && eq(post.body, { address: "http://localhost:9090" })
+        && post.headers && post.headers["X-Jarvis-Hub"] === "1" && wq.flashes.some((f) => f.text === "Saved"));
+      wq.calls.length = 0;
+      await byKey["bool:true"].commit(false);
+      check("the switch posts enabled alone", eq(wq.calls.find((c) => c.method === "POST").body, { enabled: false }));
+
+      // the password: typed, sent alone, never drawn back
+      const pwShell = wq.shells.find((r) => r.label === "Password");
+      const pwNodes = nodes(pwShell.el, () => true);
+      const box = pwNodes.find((n) => n.tag === "input" && n.attrs.type === "password");
+      const btn = (text) => pwNodes.find((n) => n.tag === "button" && n.attrs.text === text);
+      check("the password box is a password field the browser must not fill", box && box.attrs.autocomplete === "new-password" && box.attrs["aria-label"] === "qBittorrent password");
+      box.value = "";                      // (the fake element has no value of its own until one is written)
+      wq.calls.length = 0;
+      btn("Save password").attrs.onclick();
+      await new Promise((r) => setTimeout(r, 0));
+      check("an empty box sends nothing and says so", wq.calls.length === 0 && wq.flashes.some((f) => /Type the password first/.test(f.text)));
+      box.value = "S3cret pw";
+      btn("Save password").attrs.onclick();
+      await new Promise((r) => setTimeout(r, 0));
+      const pwPost = wq.calls.find((c) => c.method === "POST");
+      check("Save password sends the password alone, and the box is emptied afterwards", pwPost && eq(pwPost.body, { password: "S3cret pw" }) && box.value === "");
+      wq.calls.length = 0;
+      btn("Forget it").attrs.onclick();
+      await new Promise((r) => setTimeout(r, 0));
+      check("Forget it sends clear_password and nothing else", eq(wq.calls.find((c) => c.method === "POST").body, { clear_password: true }));
+      check("the page never puts a password in a row, a note or a label", !JSON.stringify(wq.shells.map((r) => [r.label, r.help])).includes("S3cret"));
+
+      // the status sentence
+      const pure = P.qbtModel(wq.qbtStatusSample || { ok: true, values: { enabled: true, address: "a", username: "" }, engine: { ok: true }, password_set: true, file: "f", exists: true });
+      check("connected reads as connected; not connected shows the engine's own reason; a failed read says it couldn't be read",
+        pure.sentence.startsWith("Connected") && pure.tone === "ok"
+        && P.qbtModel({ ok: true, values: {}, engine: { ok: false, reason: "can't reach qBittorrent (is it running?)" } }).sentence === "can't reach qBittorrent (is it running?)"
+        && P.qbtModel({ ok: false, error: "boom" }).loaded === false && P.qbtModel(null).tone === "bad");
+      check("bodies: a key is sent alone, an empty password is no body, forget and release are one flag each",
+        eq(P.qbtBody("username", "x"), { username: "x" }) && P.qbtPasswordBody("") === null && P.qbtPasswordBody(null) === null && eq(P.qbtPasswordBody(" a "), { password: " a " })
+        && eq(P.qbtForgetBody(), { clear_password: true }) && eq(P.qbtReleaseBody(), { release_settings: true }));
+
+      // a file that also holds behaviour keys wins over the rows: the card says so and offers the way out
+      const wo = mk({ qbt: Object.assign({}, wq.win && {}, { ok: true, file: "~/.jarvis/qbittorrent.json", exists: true, problem: null, values: { enabled: true, address: "http://127.0.0.1:8080", username: "" },
+        defaults: {}, password_set: false, file_overrides: ["tag", "poll_s"], engine: { ok: false, reason: "can't reach qBittorrent" } }) });
+      await wo.section.build({ ui: wo.ui });
+      await new Promise((r) => setTimeout(r, 0));
+      check("the override text names the rows in the page's own words and says the file wins", /qBittorrent tag, Ask qBittorrent for progress every/.test(P.qbtOverrideText(["tag", "poll_s"]))
+        && /file wins/.test(P.qbtOverrideText(["tag"])) && P.qbtOverrideText([]) === "");
+      const noteOf = wo.shells.find((r) => r.label === "Connection");
+      const overrideEl = noteOf.el.kids[2];
+      check("the card shows that note, and the 'Let the rows below decide' button appears with it", /file wins/.test(overrideEl.textContent) && overrideEl.hidden === false);
+      // a refused save shows the hub's own sentence on the row and leaves the card standing
+      const wr = mk({ qbtPost: { status: 400, body: { ok: false, error: "the Web UI must be on this PC: use 127.0.0.1 or localhost" } } });
+      await wr.section.build({ ui: wr.ui });
+      await new Promise((r) => setTimeout(r, 0));
+      const ca = wr.controls.find((c) => c.spec.type === "text" && c.value === "http://127.0.0.1:8080");
+      let refusal = "";
+      try { await ca.commit("http://10.0.0.5:8080"); } catch (e) { refusal = e.message; }
+      check("a refused address reaches the row as the hub worded it (the control shows it)", /must be on this PC/.test(refusal));
+      // an unreadable connection does not break the page
+      const wb = mk({ qbt: { ok: false, error: "boom" } });
+      const pb = (await wb.section.build({ ui: wb.ui }))[0].__dls;
+      await new Promise((r) => setTimeout(r, 0));
+      check("when the connection can't be read the rest of the block is still there", pb.entries.filter((e) => e.source === "qbittorrent" && e.path).length === QB.length && !wb.shells.some((r) => r.label === "Web UI address"));
+    }
     check("Steam's switch and update size are in its block, with no default or timing claimed", (() => {
       const labels = w.shells.map((r) => r.label);
       return labels.includes("Steam: announce updates of at least") && labels.includes("Steam") && page.entries.filter((e) => e.source === "steam").every((e) => e.kind === "plain" && e.info().differs === false);

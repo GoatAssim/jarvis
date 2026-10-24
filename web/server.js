@@ -3018,6 +3018,22 @@ app.post("/api/hub/stremio/account", requireHubWrite, requireJarvis, (req, res) 
 // Brief 29: the only thing read from the body is the literal "web" (start stremio-web); anything else starts the server, as before.
 app.post("/api/hub/stremio/start", requireHubWrite, requireJarvis, (req, res) => hubAdmin(res, "stremio_start", req.body?.what === "web" ? { what: "web" } : {}, 330000));
 
+// Settings > Downloads > Sources > qBittorrent: the connection form's status (read) and its save (write: the owner's own form
+// only -- loopback Host, same origin, X-Jarvis-Hub, and hub_admin refuses an unattended process). The file is
+// ~/.jarvis/qbittorrent.json, written only by hub/engines/qbittorrent.py save_connection, the one validator. Only the form's
+// own keys are passed on. The password is written, never read back: the status says only whether one is saved.
+function hubQbtForm(body) {
+  const src = body && typeof body === "object" && !Array.isArray(body) ? body : {};
+  const out = {};
+  if (typeof src.address === "string") out.address = src.address.slice(0, 300);
+  if (typeof src.username === "string") out.username = src.username.slice(0, 300);
+  if (typeof src.password === "string") out.password = src.password.slice(0, 200);
+  for (const key of ["enabled", "clear_password", "release_settings"]) if (typeof src[key] === "boolean") out[key] = src[key];
+  return out;
+}
+app.get("/api/hub/qbittorrent", requireHubRead, requireJarvis, (req, res) => hubAdmin(res, "qbittorrent_status", {}, 30000));
+app.post("/api/hub/qbittorrent", requireHubWrite, requireJarvis, (req, res) => hubAdmin(res, "qbittorrent_save", hubQbtForm(req.body), 30000));
+
 // N14, the folder / file picker (jarvis/hub_browse.py owns the rules). The answer is a listing of the owner's disk,
 // so both routes are POST, need a loopback Host AND the X-Jarvis-Hub header (another web page cannot make the
 // browser ask), and the CLI refuses an unattended process. `browse` only lists (names, kinds, a size and a date for

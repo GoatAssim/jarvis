@@ -838,12 +838,12 @@ class YtdlpEngine(Engine):
             Path(dest_dir).mkdir(parents=True, exist_ok=True)
             for name in names:
                 source = Path(work_dir) / name
-                target = naming.unique_path(Path(dest_dir) / name)
                 size = source.stat().st_size
-                try:
-                    os.replace(str(source), str(target))
-                except OSError:
-                    shutil.move(str(source), str(target))        # another disk: copy then delete
+                # The final name is CLAIMED, not just chosen (brief 7B): `unique_path` then `os.replace` let two
+                # downloads of one name that finish together both pick it, and the second replaced the first.
+                # `move_unique` links the file to the name (fails if it exists), then goes on to `name (1).ext`;
+                # nothing is ever replaced.  Another disk is handled inside it.
+                target = naming.move_unique(source, Path(dest_dir) / name)
                 moved[name] = target
                 total += size
         except OSError as exc:

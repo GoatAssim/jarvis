@@ -7,8 +7,10 @@ names.  And every destination is checked to resolve INSIDE the library root -- t
 writes anywhere else (and `dl_add`'s `dest` is only ever a sub-folder of it).
 """
 
+import errno
 import os
 import re
+import shutil
 import unicodedata
 from pathlib import Path
 from urllib.parse import unquote, urlsplit
@@ -188,3 +190,120 @@ def unique_path(path, ignore_part=False):
         if not taken(candidate):
             return candidate
     return path.with_name("%s (%d)%s" % (stem, os.getpid(), ext))
+
+
+# --------------------------------------------------------------------------- publishing without replacing (brief 7B)
+
+_NO_LINKS = {errno.EPERM, errno.ENOSYS, errno.EXDEV, getattr(errno, "ENOTSUP", -1),
+             getattr(errno, "EOPNOTSUPP", -1), getattr(errno, "EMLINK", -1)}
+
+
+def _links_unsupported(exc):
+    """Does this error mean "this file system / these two folders can't be hard-linked" (FAT, some network
+    shares, another disk), as opposed to "that name exists" or a real disk problem?"""
+    if isinstance(exc, (NotImplementedError, AttributeError)):
+        return True
+    return (isinstance(exc, OSError) and not isinstance(exc, FileExistsError)
+            and (exc.errno in _NO_LINKS or getattr(exc, "winerror", None) in (1, 17, 50)))
+
+
+def _same_file(a, b):
+    try:
+        return os.path.samefile(a, b)
+    except OSError:
+        return False
+
+
+def _remove_quietly(path):
+    try:
+        os.remove(path)
+    except OSError:
+        pass
+
+
+def _free_name_candidates(wanted, own_part):
+    """`wanted`, then `name (1).ext`, `name (2).ext` ... as Paths, skipping a name whose `.part` exists (a `.part`
+    is another download's reservation).  `own_part=True`: the `.part` next to `wanted` is the caller's own, so
+    `wanted` is offered without that test.  A name that already EXISTS is not skipped here: the exclusive
+    claim in `move_unique` refuses it (and so can tell "taken" from "already ours").  Lazy, so each `.part`
+    test sees the folder as it is NOW."""
+    wanted = Path(wanted)
+    if own_part or not Path(str(wanted) + ".part").exists():
+        yield wanted
+    for n in range(1, 1000):
+        candidate = wanted.with_name("%s (%d)%s" % (wanted.stem, n, wanted.suffix))
+        if not Path(str(candidate) + ".part").exists():
+            yield candidate
+    yield wanted.with_name("%s (%d)%s" % (wanted.stem, os.getpid(), wanted.suffix))
+
+
+def move_unique(source, wanted, own_part=False):
+    """Move the finished file `source` to `wanted`, or to the next free `name (n).ext`, and NEVER replace a file.
+    -> the Path it ended up with.
+
+    `unique_path` followed by `os.replace` is "check, then replace": two finishes of one name that run together
+    both pass the check and the second replaces the first.  Here the name is CLAIMED by the operating system:
+      * the claim is `os.link(source, target)`, which creates `target` only if it does not exist (atomic, and it
+        holds between processes); on success `source` is removed.  The loser of a race gets FileExistsError and
+        goes on to the next free name;
+      * if the two names are already ONE file, an earlier call was interrupted between the link and the removal:
+        it is completed, not repeated as a `(1)` copy;
+      * where hard links are not possible (FAT, a network share, another disk) the claim is an exclusive create
+        of `target` itself (`O_CREAT | O_EXCL`, also atomic and also between processes); the file is then moved
+        over our own empty claim, and the claim is removed again if that move fails.
+    `own_part=True` is for a caller whose `source` IS the `.part` of `wanted` (the browser intake): that `.part`
+    does not make `wanted` look taken.  The download is never lost: any error before the claim leaves `source`
+    where it was."""
+    source = str(source)
+    wanted = Path(wanted)
+    if _same_file(source, wanted):                     # an interrupted finish, seen from the start
+        _remove_quietly(source)
+        return wanted
+    links = True
+    for target in _free_name_candidates(wanted, own_part):
+        text = str(target)
+        if links:
+            try:
+                os.link(source, text)
+            except FileExistsError:
+                if _same_file(source, text):          # an interrupted finish: the name is already ours
+                    _remove_quietly(source)
+                    return target
+                continue
+            except (OSError, NotImplementedError, AttributeError) as exc:
+                if not _links_unsupported(exc):
+                    raise
+                links = False
+            else:
+                _remove_quietly(source)
+                return target
+        try:                                           # no hard links: claim the name by an exclusive create
+            os.close(os.open(text, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o666))
+        except FileExistsError:
+            continue
+        try:
+            try:
+                os.replace(source, text)               # over our OWN empty claim
+            except OSError:
+                shutil.move(source, text)              # another disk: copy, then delete the original
+        except BaseException:
+            _remove_quietly(text)                      # the claim (or a half copy of it) is ours to remove
+            raise
+        return target
+    raise OSError("no free file name left for %s" % wanted)
+
+
+def claim_name(wanted, own_part=False):
+    """Claim a final name WITHOUT moving anything yet: `wanted`, or the next free `name (n).ext`, is created
+    empty with `O_CREAT | O_EXCL` (atomic, between processes too) and returned as a Path.  The caller then moves
+    its finished file over this empty claim (`os.replace`, which is how a caller that must retry a rename on
+    Windows does it) and removes the claim if it gives up.  Nothing that exists is ever touched.  `own_part` is
+    as in `move_unique`.  Used by the browser intake (brief 7B); `move_unique` is the one-call version."""
+    for target in _free_name_candidates(Path(wanted), own_part):
+        try:
+            os.close(os.open(str(target), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o666))
+        except FileExistsError:
+            continue
+        return target
+    raise OSError("no free file name left for %s" % wanted)
+

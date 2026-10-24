@@ -44,9 +44,10 @@ _UNATTENDED_VARS = ("JARVIS_CHANNEL", "JARVIS_CHANNEL_SENDER", "JARVIS_SCHEDULED
 _UNATTENDED_MESSAGE = "The Download Hub's History and queue controls can only be used from the Jarvis page itself."
 
 # `sources` (brief 24) is the Sources tab: every engine and every provider with an honest status.  Read-only.
-READ_OPS = ("card", "list", "settings", "history", "file", "thumb", "stremio_status", "sources")
+READ_OPS = ("card", "list", "settings", "history", "file", "thumb", "stremio_status", "sources", "qbittorrent_status")
 # `dismiss` (brief 19) hides a provider row that is unknown or finished; `stremio_start` (brief 19) is the Start button.
-WRITE_OPS = ("history_remove", "history_clear", "redownload", "reorder", "stremio_save", "dismiss", "stremio_start", "stremio_account")
+WRITE_OPS = ("history_remove", "history_clear", "redownload", "reorder", "stremio_save", "dismiss", "stremio_start", "stremio_account",
+             "qbittorrent_save")
 OPS = READ_OPS + WRITE_OPS
 # N14 (the path picker, jarvis/hub_browse.py): list one folder, and make one new folder.  Neither reads a file's
 # contents.  Both are for the Jarvis page's own picker, so both refuse an unattended process (below).
@@ -948,6 +949,41 @@ def stremio_start(request=None, store=None):
         return _err("couldn't start Stremio: %s" % str(exc)[:160])
 
 
+# --------------------------------------------------------------------------- qBittorrent's connection
+
+def qbittorrent_status(request=None, store=None):
+    """The connection form, read: the switch, the Web UI address and the user name as the file holds them, whether a
+    password is saved (never the password), which behaviour keys the file also holds (they win over the settings rows),
+    what is wrong with the file, and the engine's own answer in the words the Sources tab uses.  Writes nothing."""
+    try:
+        from .hub.engines import qbittorrent as qbe
+        out = qbe.connection_state()
+        out["file"] = _plain(out.get("file"), 300)
+        out["problem"] = _plain(out["problem"], 300) if out.get("problem") else None
+        ok, reason = qbe.ENGINE.available()
+        out["engine"] = {"ok": bool(ok), "reason": _plain(reason, 300)}
+        out["ok"] = True
+        return out
+    except Exception as exc:  # noqa: BLE001 - a status read must never take the page down
+        return _err("couldn't read the qBittorrent connection: %s" % _plain(exc, 160))
+
+
+def qbittorrent_save(request, store=None):
+    """The connection form's save.  OWNER ONLY: `admin` refuses an unattended process before this runs.  Writes only the
+    keys sent, through the engine's own validator (`save_connection`); a refusal names the field and writes nothing.
+    The answer is the status again, plus `saved` (the key names).  A password is written here and never sent back."""
+    try:
+        from .hub.engines import qbittorrent as qbe
+        result = qbe.save_connection(request if isinstance(request, dict) else {})
+        if not result.get("ok"):
+            return _err(result.get("error") or "couldn't save the qBittorrent connection", problems=result.get("problems") or [])
+        out = qbittorrent_status({}, store)
+        out["saved"] = result.get("saved") or []
+        return out
+    except Exception as exc:  # noqa: BLE001
+        return _err("couldn't save the qBittorrent connection: %s" % _plain(exc, 160))
+
+
 # --------------------------------------------------------------------------- the Sources tab (brief 24)
 
 # What each engine is for, in a short phrase.  An engine that is not here shows only its label.
@@ -1129,6 +1165,10 @@ def admin(op, request=None, store=None):
             return stremio_start(request, store)
         if op == "stremio_account":
             return stremio_account(request, store)
+        if op == "qbittorrent_status":
+            return qbittorrent_status(request, store)
+        if op == "qbittorrent_save":
+            return qbittorrent_save(request, store)
         if op == "browse":
             from . import hub_browse
             return hub_browse.browse(request, store=store)

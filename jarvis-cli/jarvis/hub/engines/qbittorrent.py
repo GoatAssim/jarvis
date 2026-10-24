@@ -6,7 +6,9 @@ behind the same engine contract as `http` and `ytdlp`, so the tools and the pane
 
 SETUP (nothing here is on until the owner does it)
   1. qBittorrent > Tools > Options > Web UI: switch "Web User Interface" on, keep it on 127.0.0.1.
-  2. Create `~/.jarvis/qbittorrent.json` (the same shape as `~/.jarvis/stremio.json`):
+  2. Settings > Downloads > Sources > qBittorrent does this for you: the switch, the Web UI address, the user
+     name and the password go into the file below, and every behaviour option is a row in the same block.
+     By hand, create `~/.jarvis/qbittorrent.json` (the same shape as `~/.jarvis/stremio.json`):
 
          {
            "address": "http://127.0.0.1:8080",
@@ -61,6 +63,7 @@ import base64
 import binascii
 import ipaddress
 import json
+import os
 import re
 import shutil
 import time
@@ -210,7 +213,8 @@ def load_config(path=None, settings=None):
     EITHER says so (as it always was)."""
     target = Path(path) if path else config_path()
     if not target.exists():
-        return None, "not set up: create %s with the Web UI address (see the top of engines/qbittorrent.py)" % target
+        return None, ("not set up: open Settings > Downloads > Sources > qBittorrent and enter the Web UI address "
+                      "(it is saved in %s)" % target)
     try:
         raw = json.loads(target.read_text(encoding="utf-8-sig"))
     except (OSError, ValueError) as exc:
@@ -226,6 +230,135 @@ def load_config(path=None, settings=None):
         return None, problem
     cfg["base"] = base
     return cfg, None
+
+
+# --------------------------------------------------------------------------- the connection form (owner only)
+#
+# Settings > Downloads > Sources > qBittorrent edits the CONNECTION in this file: the on/off switch, the Web UI address,
+# the user name and the password.  Nothing else is written here: the behaviour options are rows of the hub's own
+# settings (SETTINGS_KEYS), and a behaviour key written to this file would override them (the file wins).  The password
+# is written and never read back: `connection_state` says only whether one is saved.  The one caller is hub_admin's
+# qbittorrent_save, which refuses an unattended process.
+
+CONNECTION_LABELS = {"enabled": "Use qBittorrent", "address": "Web UI address", "username": "User name",
+                     "password": "Password"}
+CONNECTION_TEXT_MAX = 300
+CONNECTION_PASSWORD_MAX = 200
+
+
+def _read_raw(target):
+    """(dict, None) for the file as it is ({} when there is none), or (None, what is wrong with it)."""
+    if not target.exists():
+        return {}, None
+    try:
+        raw = json.loads(target.read_text(encoding="utf-8-sig"))
+    except (OSError, ValueError) as exc:
+        return None, "%s isn't readable JSON (%s)" % (CONFIG_NAME, type(exc).__name__)
+    if not isinstance(raw, dict):
+        return None, "%s must hold one JSON object" % CONFIG_NAME
+    return raw, None
+
+
+def connection_state(path=None):
+    """What the connection form shows.  The file's connection values (the defaults where it sets none), whether a password
+    is saved (never the password), which behaviour keys the file also holds (they win over the settings rows), and what is
+    wrong with the file, if anything.  Read-only."""
+    target = Path(path) if path else config_path()
+    raw, problem = _read_raw(target)
+    cfg = _clean_config(raw) if raw is not None else dict(DEFAULT_CONFIG)
+    overrides = [key for key in SETTINGS_KEYS if raw and key in raw]      # the file wins over the settings rows for these
+    return {
+        "file": str(target), "exists": target.exists(), "problem": problem,
+        "values": {"enabled": (raw or {}).get("enabled") is not False, "address": cfg["address"], "username": cfg["username"]},
+        "defaults": {"enabled": True, "address": DEFAULT_CONFIG["address"], "username": DEFAULT_CONFIG["username"]},
+        "password_set": bool(cfg.get("password")),
+        "file_overrides": overrides,
+    }
+
+
+def _check_connection(values):
+    """(clean, problems): the values the owner sent.  Only the keys sent come back; a key that isn't part of the
+    connection is a problem, never ignored.  No message repeats a value."""
+    clean, problems = {}, []
+    for key, value in values.items():
+        if key in ("clear_password", "release_settings"):
+            if value is not True and value is not False:
+                problems.append("%s must be on or off" % key.replace("_", " "))
+            continue
+        label = CONNECTION_LABELS.get(key)
+        if label is None:
+            problems.append("%r isn't a qBittorrent connection setting" % str(key)[:40])
+        elif key == "enabled":
+            if isinstance(value, bool):
+                clean[key] = value
+            else:
+                problems.append("%s must be on or off" % label)
+        elif key == "password":
+            if not isinstance(value, str) or len(value) > CONNECTION_PASSWORD_MAX:
+                problems.append("the password must be text of at most %d characters" % CONNECTION_PASSWORD_MAX)
+            elif value:
+                clean[key] = value                       # not stripped: spaces can be part of a password
+        else:                                            # address, username
+            if not isinstance(value, str):
+                problems.append("%s must be text" % label)
+                continue
+            text = value.strip()
+            if len(text) > CONNECTION_TEXT_MAX:
+                problems.append("%s is too long (%d characters at most)" % (label, CONNECTION_TEXT_MAX))
+                continue
+            if key == "address":
+                _base, why = parse_address(text)
+                if why:
+                    problems.append(why)
+                    continue
+            clean[key] = text
+    return clean, problems
+
+
+def _write_json(target, data):
+    target.parent.mkdir(parents=True, exist_ok=True)
+    tmp = target.with_name(target.name + ".tmp")
+    tmp.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    try:
+        os.chmod(str(tmp), 0o600)                        # the password is in here: owner-only where the OS allows it
+    except OSError:
+        pass
+    os.replace(str(tmp), str(target))
+
+
+def save_connection(values, path=None):
+    """Write the connection form into the file: only the keys sent change, every other key stays as it was.
+    `clear_password: true` forgets the saved password; `release_settings: true` removes the behaviour keys from the
+    file so the hub's settings rows decide.  Returns {"ok": True, "saved": [...], "file"} or {"ok": False, "error",
+    "problems"}; nothing is written when anything is refused.  OWNER ONLY (see above)."""
+    if not isinstance(values, dict):
+        return {"ok": False, "error": "the settings must be one object"}
+    target = Path(path) if path else config_path()
+    raw, why = _read_raw(target)
+    if raw is None:
+        return {"ok": False, "error": "%s; fix it or move it aside, then save again (nothing was changed)" % why}
+    clean, problems = _check_connection(values)
+    if problems:
+        return {"ok": False, "error": problems[0], "problems": problems}
+    merged = dict(raw)
+    merged.update(clean)
+    saved = set(clean)
+    if values.get("clear_password") is True:
+        merged["password"] = ""
+        saved.add("password")
+    if values.get("release_settings") is True:
+        for key in SETTINGS_KEYS:
+            if key in merged:
+                del merged[key]
+                saved.add(key)
+    if not saved:
+        return {"ok": False, "error": "nothing to save"}
+    try:
+        _write_json(target, merged)
+    except OSError as exc:
+        return {"ok": False, "error": "couldn't write %s: %s" % (CONFIG_NAME, type(exc).__name__)}
+    ENGINE._avail = None                                 # the next availability check reads the new file
+    return {"ok": True, "saved": sorted(saved), "file": str(target)}
 
 
 # --------------------------------------------------------------------------- magnets

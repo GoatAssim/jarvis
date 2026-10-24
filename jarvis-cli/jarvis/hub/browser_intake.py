@@ -250,19 +250,29 @@ def _save_download(download):
             return
         if entry.get("done"):                       # the browser closed while it was saving
             return
+        claimed = None
         try:
             size = os.path.getsize(part)
+            # Brief 7B: the final name is CLAIMED (an exclusive create), then the file is moved over our own empty
+            # claim.  Before, "if the target exists pick another, then os.replace" left a window in which a file
+            # that appeared after the check was replaced.  Now a name that exists (or appears at any moment) is
+            # refused by the operating system and the next free `name (n).ext` is claimed instead.
+            target = claimed = naming.claim_name(target, own_part=True)
             for attempt in range(REPLACE_TRIES):
-                if target.exists():                # someone took the name while we were saving
-                    target = naming.unique_path(target, ignore_part=True)
                 try:
                     os.replace(part, target)
+                    claimed = None
                     break
                 except OSError:
                     if attempt == REPLACE_TRIES - 1:
                         raise
                     time.sleep(REPLACE_WAIT_S)
         except OSError as exc:
+            if claimed is not None:                # we give up: our own empty claim must not stay behind
+                try:
+                    os.remove(claimed)
+                except OSError:
+                    pass
             # The download itself is whole: never delete it.  The row fails and says where the file is.
             kept = entry.pop("part", None)
             _finish_failed(local_id, entry, "the file is downloaded but could not be renamed (%s); it is kept as %s"

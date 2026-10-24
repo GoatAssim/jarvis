@@ -320,9 +320,10 @@ const eq = (a, b) => JSON.stringify(a) === JSON.stringify(b);
   check("an engine's line: what it is for, then how many run and wait (an engine the table doesn't know shows only the counts)",
     pure.engineLine(E({ active: 1, queued: 0 })) === "magnets, torrent files and Stremio streams" + " \u00B7 1 active \u00B7 0 waiting"
     && pure.engineLine(E({ handles: "", active: 0, queued: 3 })) === "0 active \u00B7 3 waiting" && pure.engineLine(E({ active: null, queued: undefined })).endsWith("0 active \u00B7 0 waiting"));
-  check("Configure: each engine lands on its own block under Sources (moved: HTTP was Connections, yt-dlp was Running at once); qBittorrent and a load error get no button",
+  check("Configure: each engine lands on its own block under Sources (moved: HTTP was Connections, yt-dlp was Running at once); qBittorrent lands on its own block, a load error gets no button",
     pure.engineConfigure(E()).anchor === "stremio" && pure.engineConfigure(E({ configure: "http" })).anchor === "http"
-    && pure.engineConfigure(E({ configure: "ytdlp" })).anchor === "yt-dlp" && pure.engineConfigure(E({ configure: null })) === null
+    && pure.engineConfigure(E({ configure: "ytdlp" })).anchor === "yt-dlp" && pure.engineConfigure(E({ configure: "qbittorrent" })).anchor === "qbittorrent"
+    && pure.engineConfigure(E({ configure: null })) === null
     && pure.engineConfigure(E({ configure: "something-new" })) === null && pure.engineConfigure(null) === null);
   check("without a Configure button the card says where it is set up (qBittorrent's file) or that there are no settings, and says nothing when there is a button",
     pure.engineSettingsNote(E({ configure: null, config_file: "~/.jarvis/qbittorrent.json" })) === "Set up in ~/.jarvis/qbittorrent.json."

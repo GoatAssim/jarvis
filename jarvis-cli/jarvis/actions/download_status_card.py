@@ -152,5 +152,7 @@ TEST_CHECKLIST = {
             {"run": {},
              "expect": "ok: false, problem asks which download ('Say which download: pass the id(s) dl_add returned, a group id, or part of the title.')."},
         ],
+        "watch": ["⚠️ KNOWN BUG in 168 (found by the 7D check, NOT fixed): through tools.execute_tool (the model's path and Menu > Debug's direct run) every call answers ok: false 'Say which download...' whatever you pass. The dispatcher hands the handler ONE dict; the handler is declared with keyword arguments (ids, group, query). Delete this line after the fix.",
+                  "So the steps above that expect ok: true cannot pass yet, and the 'no such download' steps answer the 'Say which download' sentence instead. Seen in a Linux sandbox; the tool's own test calls it with keyword arguments, which hides this. See the 7D report, Open points."],
     },
 }

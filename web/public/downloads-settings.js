@@ -40,6 +40,8 @@
     { path: "concurrency.http", group: "Running at once", label: "Direct links at once", type: "int", min: 1, max: 16 },
     { path: "concurrency.ytdlp", group: "Running at once", label: "Video sites at once", type: "int", min: 1, max: 16 },
     { path: "concurrency.stremio", group: "Running at once", label: "Torrents at once", type: "int", min: 1, max: 16 },
+    { path: "concurrency.qbittorrent", group: "Running at once", label: "qBittorrent torrents at once", type: "int",
+      help: "How many torrents the hub keeps running in qBittorrent together; the rest wait their turn." },
     { path: "http.stall_seconds", group: "Connections", label: "Call a download stalled after", type: "int", min: 10, unit: "seconds",
       help: "No bytes for this long counts as stalled and is retried." },
     { path: "http.max_retries", group: "Connections", label: "Retries before it fails", type: "int", min: 0, max: 10 },
@@ -53,6 +55,27 @@
     { path: "stremio.metadata_timeout", group: "Torrents", label: "Wait for a torrent's file list", type: "int", unit: "seconds",
       help: "No peers means no list. After this long the torrent fails instead of waiting." },
     { path: "stremio.start_wait_seconds", group: "Torrents", label: "Wait for the Stremio server to start", type: "int", unit: "seconds" },
+    // qBittorrent's behaviour (brief 31): the hub validates every value, so no range is repeated here.  Its connection (switch, address,
+    // user name, password) is not a hub setting: it has its own card at the top of the qBittorrent block.
+    { path: "qbittorrent.prefer_for_magnets", group: "Torrents", label: "Prefer qBittorrent for magnet links", type: "bool",
+      help: "On = a magnet link goes to qBittorrent while it answers. Off = it is used only when you pick it for a download." },
+    { path: "qbittorrent.category", group: "Torrents", label: "qBittorrent category", type: "text",
+      help: "The category every torrent Jarvis adds is given. Empty = none." },
+    { path: "qbittorrent.tag", group: "Torrents", label: "qBittorrent tag", type: "text",
+      help: "A tag on every torrent Jarvis adds, so they are easy to find in qBittorrent and Jarvis counts only these. One word, no commas." },
+    { path: "qbittorrent.save_subfolder", group: "Torrents", label: "qBittorrent saves into", type: "text",
+      help: "A sub-folder of the download folder (like Torrents or Media/Torrents). Empty = the download folder itself. Changing it asks first." },
+    { path: "qbittorrent.after_done", group: "Torrents", label: "When a qBittorrent torrent is done", type: "choice",
+      choices: [["keep", "Keep it seeding"], ["pause", "Pause it"], ["remove", "Remove it from qBittorrent (keeps the files)"]],
+      help: "Only for torrents Jarvis added. Changing it asks first." },
+    { path: "qbittorrent.cancel_deletes_data", group: "Torrents", label: "Cancelling deletes unfinished data", type: "bool",
+      help: "On = cancelling a torrent Jarvis added also deletes its unfinished data inside the download folder. Off = it is kept. Changing it asks first." },
+    { path: "qbittorrent.metadata_timeout_s", group: "Torrents", label: "Wait for a magnet link's file list", type: "int", unit: "seconds",
+      help: "No peers means no list. After this long the torrent fails instead of waiting." },
+    { path: "qbittorrent.stall_minutes", group: "Torrents", label: "Call a qBittorrent torrent stalled after", type: "int", unit: "minutes",
+      help: "No data for this long and the torrent fails. 0 = never." },
+    { path: "qbittorrent.poll_s", group: "Torrents", label: "Ask qBittorrent for progress every", type: "float", unit: "seconds",
+      help: "How often the hub checks qBittorrent. Faster means smoother progress and more requests." },
     { path: "after_download.open", group: "When a download finishes", label: "Do this when one finishes", type: "choice",
       help: "A single download can override this when you add it." },
     { path: "notify.enabled", group: "Notifications", label: "Tell me about downloads", type: "bool",
@@ -134,6 +157,48 @@
   }
   function providerSettingArgs(id, key, value) { return { id: id, settings: { [key]: value } }; }
 
+  // ---- the qBittorrent connection card: pure half (the DOM half is below) ---------------------------------------------------
+  // The card edits only the CONNECTION in ~/.jarvis/qbittorrent.json through GET / POST /api/hub/qbittorrent (hub_admin
+  // qbittorrent_status / qbittorrent_save): the switch, the Web UI address, the user name and the password.  The hub's validator
+  // (hub/engines/qbittorrent.py save_connection) is the only check.  The password is never drawn: the status says only whether one is saved.
+
+  // What the card draws for a status answer.
+  function qbtModel(s) {
+    if (!s || typeof s !== "object" || s.ok === false || !s.values || typeof s.values !== "object") {
+      return { loaded: false, tone: "bad", sentence: String((s && s.error) || "qBittorrent's connection settings couldn't be read."),
+        file: "", exists: false, problem: "", passwordSet: false, overrides: [], values: null };
+    }
+    const eng = (s.engine && typeof s.engine === "object") ? s.engine : {};
+    const connected = eng.ok === true;
+    return {
+      loaded: true, tone: connected ? "ok" : "",
+      sentence: connected ? "Connected: qBittorrent answers on this PC." : String(eng.reason || s.problem || "Not connected yet."),
+      file: String(s.file || ""), exists: s.exists === true, problem: s.problem ? String(s.problem) : "",
+      passwordSet: s.password_set === true,
+      overrides: Array.isArray(s.file_overrides) ? s.file_overrides.map(String).slice(0, 12) : [],
+      values: s.values,
+    };
+  }
+
+  // The names of the settings rows the file also holds (it wins over them), in the page's own words.
+  function qbtOverrideNames(keys) {
+    return (keys || []).map((k) => {
+      const f = FIELDS.find((x) => x.path === "qbittorrent." + k);
+      return f ? f.label : String(k);
+    });
+  }
+  function qbtOverrideText(keys) {
+    if (!keys || !keys.length) return "";
+    return "The settings file also holds " + qbtOverrideNames(keys).join(", ") + ". The file wins, so those rows below change nothing until "
+      + "the file lets go of them.";
+  }
+
+  // What a save sends.  A password is sent only when one was typed; an empty box sends nothing.
+  function qbtBody(key, value) { return { [key]: value }; }
+  function qbtPasswordBody(text) { return String(text || "") === "" ? null : { password: String(text) }; }
+  function qbtForgetBody() { return { clear_password: true }; }
+  function qbtReleaseBody() { return { release_settings: true }; }
+
   // ---- the page's structure, defaults and timing (brief 25, N20): pure, tested without a DOM -------------------------------
 
   // The rail, in order.  Every row lands in exactly one of these (or in Other, shown only when something has no home).
@@ -156,7 +221,7 @@
     if (p === "rate_limit_kbps" || p === "schedule") return { section: "speed", source: null };
     if (p === "concurrency.total") return { section: "running", source: null };
     if ((m = /^concurrency\.([a-z0-9_]+)$/.exec(p))) return { section: "sources", source: m[1] };
-    if ((m = /^(http|stremio)\.[a-z0-9_]+$/.exec(p))) return { section: "sources", source: m[1] };
+    if ((m = /^(http|stremio|qbittorrent)\.[a-z0-9_]+$/.exec(p))) return { section: "sources", source: m[1] };
     if (p === "unknown_settle_hours") return { section: "sources", source: "" };
     if (/^notify\./.test(p)) return { section: "notifications", source: null };
     if (/^after_download\./.test(p)) return { section: "finish", source: null };
@@ -176,6 +241,8 @@
     [/^after_download\./, "for downloads that finish after the change"],
     [/^unknown_settle_hours$/, "at the hub's next check of other tools' downloads"],
     [/^(http\.(stall_seconds|segments|segment_min_bytes)|stremio\.(stall_seconds|metadata_timeout))$/, "for the next download that starts"],
+    [/^qbittorrent\.prefer_for_magnets$/, "for the next magnet link you add"],
+    [/^qbittorrent\.[a-z_]+$/, "for the next torrent that starts"],
     [/^(http|stremio)\.max_retries$/, "the next time a download fails and the hub decides on a retry"],
   ];
   function timingFor(path) {
@@ -208,7 +275,10 @@
     if (v === null) return /\.level$/.test(String(spec.path || "")) ? "follow Settings > Notifications" : "not set";
     if (spec.type === "bool") return v === true ? "On" : "Off";
     if (spec.type === "hosts") return Array.isArray(v) && v.length ? v.join(", ") : "none";
-    if (spec.type === "choice" && !/\.level$/.test(String(spec.path || ""))) return OPEN_LABELS[v] || String(v);
+    if (spec.type === "choice" && !/\.level$/.test(String(spec.path || ""))) {
+      const named = Array.isArray(spec.choices) ? spec.choices.find((c) => c[0] === v) : null;
+      return named ? named[1] : (OPEN_LABELS[v] || String(v));
+    }
     if (spec.type === "list") {
       const n = Array.isArray(v) ? v.length : (v && typeof v === "object" ? Object.keys(v).length : 0);
       const noun = spec.path === "schedule" ? ["window", "windows"] : ["file type", "file types"];
@@ -999,6 +1069,104 @@
       .then(([payload, sources]) => [makePage(ctx, payload, sources)]);
   }
 
+  // ---- the qBittorrent connection card (DOM) ---------------------------------------------------------------------------------
+  // The top of the qBittorrent block under Sources: the switch, the Web UI address, the user name and the password.  Each row
+  // saves as soon as it changes, like the settings rows under it; the password has its own box and buttons and is never drawn
+  // back.  The behaviour options (category, tag, where it saves ...) are the ordinary settings rows below this card.
+  function qbittorrentCard(ctx) {
+    const ui = ctx.ui;
+    const h = ui.h;
+    const ROUTE = "/api/hub/qbittorrent";
+    const note = h("div", { class: "prefs-note", text: "Reading qBittorrent's connection\u2026" });
+    const where = h("div", { class: "prefs-row__help" });
+    const overrideNote = h("div", { class: "prefs-note prefs-note--warn", hidden: true });
+    const releaseStatus = h("span", { class: "prefs-row__status" });
+    const bRelease = h("button", { class: "btn btn--sm", type: "button", text: "Let the rows below decide", onclick: async () => {
+      try { applyStatus(await hubPost(ROUTE, qbtReleaseBody(), 30000)); saved(releaseStatus); }
+      catch (err) { ui.flash(releaseStatus, err.message, "err"); }
+    } });
+    const releaseBox = h("div", { class: "prefs-inline", hidden: true }, [bRelease, releaseStatus]);
+    const rows = h("div", {});
+    const pwNote = h("div", { class: "prefs-row__help" });
+    const bCheck = h("button", { class: "btn btn--ghost btn--sm", type: "button", text: "Check again", onclick: () => load() });
+    let drawn = false;
+
+    function saved(status) { ui.flash(status, "Saved", "ok"); setTimeout(() => ui.flash(status, ""), 1800); }
+
+    // the sentence, the file and the notes, from any answer; the rows are left alone so nothing being typed is lost
+    function applyStatus(s) {
+      const m = qbtModel(s);
+      note.textContent = m.sentence;
+      note.className = "prefs-note" + (m.tone === "bad" ? " prefs-note--warn" : "");
+      where.textContent = m.loaded ? "Connection file: " + m.file + (m.exists ? "" : " (created when you first save)") + (m.problem && !m.sentence.includes(m.problem) ? ". " + m.problem : "") : "";
+      const text = qbtOverrideText(m.overrides);
+      overrideNote.textContent = text;
+      overrideNote.hidden = !text;
+      releaseBox.hidden = !text;
+      pwNote.textContent = m.passwordSet ? "A password is saved." : "No password is saved (leave it so if qBittorrent asks for none).";
+      return m;
+    }
+
+    function field(spec, value) {
+      const status = h("span", { class: "prefs-row__status" });
+      const ctl = ui.makeControl({ type: spec.type }, value, async (next) => {
+        applyStatus(await hubPost(ROUTE, qbtBody(spec.key, next), 30000));
+        saved(status);
+      }, status);
+      return ui.rowShell(spec.label, spec.help, ctl.el, status);
+    }
+
+    function passwordRow() {
+      const status = h("span", { class: "prefs-row__status" });
+      const box = h("input", { type: "password", class: "prefs-input prefs-input--wide", autocomplete: "new-password", spellcheck: "false",
+        "aria-label": "qBittorrent password", placeholder: "Type the Web UI password" });
+      const send = async (body) => {
+        try { applyStatus(await hubPost(ROUTE, body, 30000)); box.value = ""; saved(status); }
+        catch (err) { ui.flash(status, err.message, "err"); }
+      };
+      const save = h("button", { class: "btn btn--sm", type: "button", text: "Save password", onclick: () => {
+        const body = qbtPasswordBody(box.value);
+        if (!body) { ui.flash(status, "Type the password first.", "err"); return; }
+        send(body);
+      } });
+      const forget = h("button", { class: "btn btn--ghost btn--sm", type: "button", text: "Forget it", onclick: () => send(qbtForgetBody()) });
+      return ui.rowShell("Password", "Kept only in qBittorrent's connection file on this PC, and never shown again, so the box stays empty.",
+        h("div", {}, [h("div", { class: "prefs-inline" }, [box, save, forget]), pwNote]), status);
+    }
+
+    function draw(m) {
+      const v = m.values;
+      rows.replaceChildren(
+        field({ key: "enabled", type: "bool", label: "Use qBittorrent",
+          help: "Off = Jarvis doesn't use qBittorrent at all, even while it is running." }, v.enabled !== false),
+        field({ key: "address", type: "text", label: "Web UI address",
+          help: "Where qBittorrent's Web UI answers. Only this PC is accepted (127.0.0.1 or localhost). Default http://127.0.0.1:8080." }, v.address || ""),
+        field({ key: "username", type: "text", label: "User name",
+          help: "Leave empty if qBittorrent has \"Bypass authentication for clients on localhost\" switched on." }, v.username || ""),
+        passwordRow());
+      drawn = true;
+    }
+
+    async function load() {
+      bCheck.disabled = true;
+      let s;
+      try { s = await getJson(ROUTE); }
+      catch (err) { s = { ok: false, error: "Couldn't read qBittorrent's connection settings: " + err.message }; }
+      bCheck.disabled = false;
+      const m = applyStatus(s);
+      if (m.loaded && !drawn) draw(m);
+    }
+
+    load();
+    return ui.group("qBittorrent connection", [
+      ui.rowShell("Connection", "qBittorrent's Web UI must be switched on (Tools > Options > Web UI) and kept on this PC. Jarvis asks it to download and watches the torrents it adds.",
+        h("div", {}, [note, where, overrideNote]), null),
+      rows,
+      releaseBox,
+      h("div", { class: "prefs-inline" }, [bCheck]),
+    ]);
+  }
+
   function makePage(ctx, payload, sources) {
     injectStyle();
     const ui = ctx.ui;
@@ -1229,6 +1397,12 @@
       const specs = src.kind === "engine" ? (bySource[src.id] || []) : [];
       const kids = [];
       const mark = { section: "sources", source: src.id, label: src.label };
+      if (src.id === "qbittorrent") {
+        const card = qbittorrentCard(ctx);
+        kids.push(card);
+        addEntry({ kind: "card", path: "", label: "qBittorrent connection", help: "", section: "sources", source: "qbittorrent", node: card, info: () => ({ differs: false }),
+          text: "qbittorrent connection web ui address user name username password switch on off enabled torrent settings file" });
+      }
       specs.forEach((spec) => kids.push(settingRow(spec, mark).node));
       if (src.id === "stremio") {
         const card = stremioBlock(ctx);
@@ -1382,7 +1556,7 @@
   const section = {
     id: "downloads", label: "Downloads", title: "Downloads",
     lede: "Where downloads go, how fast and how many at once, what happens when one finishes, and which events notify you. The Downloads panel (Menu > Downloads) shows and controls the downloads themselves.",
-    terms: "downloads download hub folder library speed limit bandwidth schedule window concurrency stremio yt-dlp video audio torrent steam provider notify notification finished after retry stall private host extension steam update size threshold gb unknown lost give up settle hours cancelled playnite stremio server start locate diagnostic default reset changed from default rail section search parallel connections segments torrent metadata timeout speed windows folder per file type",
+    terms: "downloads download hub folder library speed limit bandwidth schedule window concurrency stremio yt-dlp video audio torrent steam provider notify notification finished after retry stall private host extension steam update size threshold gb unknown lost give up settle hours cancelled playnite stremio server start locate diagnostic qbittorrent web ui address user name password category tag magnet default reset changed from default rail section search parallel connections segments torrent metadata timeout speed windows folder per file type",
     build: build,
   };
 
@@ -1398,6 +1572,8 @@
     cacheRequestText: cacheRequestText, repairModel: repairModel, repairBrokenFileHint: repairBrokenFileHint,
     settingsSaveFlow: settingsSaveFlow, repairFlow: repairFlow, startWebFlow: startWebFlow,
     PAGE_SECTIONS: PAGE_SECTIONS, placeOf: placeOf, timingFor: timingFor, valuesEqual: valuesEqual, defaultOf: defaultOf, setPath: setPath, formatValue: formatValue,
+    qbtModel: qbtModel, qbtOverrideNames: qbtOverrideNames, qbtOverrideText: qbtOverrideText, qbtBody: qbtBody, qbtPasswordBody: qbtPasswordBody,
+    qbtForgetBody: qbtForgetBody, qbtReleaseBody: qbtReleaseBody,
     rowInfo: rowInfo, matchQuery: matchQuery, planSources: planSources, providerDot: providerDot, rowOfError: rowOfError, TIMING_RULES: TIMING_RULES,
   } };
   if (typeof module !== "undefined" && module.exports) module.exports = global.JarvisDownloadsSettings;

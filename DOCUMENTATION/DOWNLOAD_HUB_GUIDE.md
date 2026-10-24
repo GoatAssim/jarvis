@@ -310,9 +310,10 @@ These are the keys the hub reports as writable (`hub_admin.py`, `settings` op: `
 - **Cannot:** be sure about dub / sub or resolution: those words are guesses until a real addon with streams is probed. Episodes of a series cannot be marked watched from here.
 
 ### Torrents (qBittorrent, optional)
-- **Needs:** qBittorrent with its Web UI switched on and kept on this PC, and a file `~/.jarvis/qbittorrent.json` with the address and, unless localhost needs none, the user name and password. Off until that file exists.
+- **Needs:** qBittorrent with its Web UI switched on and kept on this PC. Set up the connection in **Settings > Downloads > Sources > qBittorrent** (the Configure button on the Sources tab lands there): the on/off switch, the Web UI address, and, unless localhost needs none, the user name and password. The form writes `~/.jarvis/qbittorrent.json`, the only place the password is kept; the page never shows it again. Off until an address is saved.
+- **Options:** the rest (category, tag, where it saves, what happens when a torrent is done, magnet preference, cancel behaviour, timeouts, polling, how many run at once) are ordinary rows in the same block. If the file also holds one of those keys it wins over the row; the card says so and offers "Let the rows below decide", which removes those keys from the file.
 - **Can:** with `engine="qbittorrent"` on `dl_add`, add a magnet and show live percent, speed, time left, peers and seeds. It never takes magnets by default (the Stremio engine does), unless `prefer_for_magnets` is on. A cancel removes only a torrent the hub added and deletes its partial data only inside the library.
-- **Limits:** never run against a real qBittorrent; no hub setting for it (the file is the only place).
+- **Limits:** never run against a real qBittorrent. The connection (switch, address, user name, password) is not a hub setting, so no settings answer can show a secret; it is read and saved by `hub_admin` `qbittorrent_status` / `qbittorrent_save` (validated by `save_connection`, owner only).
 
 ### Steam (watched, read-only)
 - **Needs:** Steam on this PC. Install `psutil` in the Python Jarvis uses; without it `hub_doctor` warns and stalls are judged from Steam's downloading folder alone.
