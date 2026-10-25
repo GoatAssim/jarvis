@@ -538,7 +538,11 @@ const eq = (a, b) => JSON.stringify(a) === JSON.stringify(b);
   check("a provider row can be dismissed when it is unknown or in a final state, and in no other",
     ["done", "failed", "cancelled", "unknown"].every((st) => pure.canDismiss(prow({ state: st })))
     && ["queued", "probing", "connecting", "downloading", "postprocessing", "paused", "stalled"].every((st) => !pure.canDismiss(prow({ state: st }))));
-  check("a hub row is never dismissable, even a finished one", !pure.canDismiss(row({ state: "done" })) && !pure.canDismiss(row({ state: "failed", owner: "hub" })));
+  check("a hub row is dismissable once it failed or was cancelled, never while running or when finished (History holds those)",
+    pure.canDismiss(row({ state: "failed", owner: "hub" })) && pure.canDismiss(row({ state: "cancelled", owner: "hub" }))
+    && !pure.canDismiss(row({ state: "done" })) && !pure.canDismiss(row({ state: "downloading", owner: "hub" })) && !pure.canDismiss(row({ state: "paused", owner: "hub" })));
+check("Clear finished takes cancelled hub rows but leaves failed ones (they may want a Retry)",
+    pure.dismissableRows([row({ id: "c", state: "cancelled", owner: "hub" }), row({ id: "f", state: "failed", owner: "hub" })]).map((r) => r.id).join() === "c");
   check("the row's own state decides: no capability named dismiss is read or invented",
     pure.canDismiss(prow({ capabilities: [] })) && !/\"dismiss\"/.test(source.slice(source.indexOf("const ACTION_DEFS"), source.indexOf("const ACTION_ORDER"))) && pure.rowActions(prow({ capabilities: ["reveal"] })).every((a) => a.verb !== "dismiss"));
   check("junk is not dismissable", !pure.canDismiss(null) && !pure.canDismiss({}) && !pure.canDismiss(prow({ state: undefined })));
@@ -586,7 +590,14 @@ const eq = (a, b) => JSON.stringify(a) === JSON.stringify(b);
     /if \(!S\.showHidden && !Object\.keys\(S\.revealed\)\.length\) return;/.test(source) && /loadHidden\(false\);\s*\/\/ only does anything while hidden rows are in view/.test(source));
   check("the live rows (counts, needs attention, queue order) are not computed from the hidden ones",
     /overviewStats\(S\.rows\)/.test(source) && /needsAttention\(S\.rows\)/.test(source) && /queueOrder\(S\.rows\)/.test(source) && /const counts = viewCounts\(viewRows\(\)\)/.test(source));
-  check("the list's signature includes what Show hidden and Show again change", /\[rows, S\.selected, S\.groupBy, S\.live, S\.revealed, S\.showHidden, S\.acting\]/.test(source));
+  check("a collapsed group says what is inside it (counts by state), and a single download reads singular",
+    pure.sectionSummary([{ state: "downloading" }, { state: "failed" }, { state: "failed" }, { state: "done" }]) === "4 downloads \u00B7 1 running \u00B7 2 failed \u00B7 1 done"
+    && pure.sectionSummary([{ state: "paused" }]) === "1 download \u00B7 1 paused" && pure.sectionSummary(null) === "0 downloads");
+  check("groups collapse from a chevron button and the title, remember it (prefs.collapsed), and arrow keys skip collapsed rows",
+    /function toggleSection\(key\)/.test(source) && /"aria-expanded": open \? "true" : "false"/.test(source) && /collapsed: Object\.keys\(S\.collapsed\)/.test(source)
+    && /p\.collapsed\.slice\(0, 200\)/.test(source) && /shownRows\(rows\)\.map\(\(r\) => r\.id\)/.test(source)
+    && /id="collapseAll"/.test(fs.readFileSync(path.join(ui, "tool.html"), "utf8")) && /\.section__toggle \{/.test(css));
+  check("the list's signature includes what Show hidden and Show again change", /\[rows, S\.selected, S\.groupBy, S\.live, S\.revealed, S\.showHidden, S\.collapsed, S\.acting\]/.test(source));
 
   // ---- brief 19 step 4: a running Steam row's note on the card
   const steamNote = "30.6 % of 2.1 GB, reported 20 s ago; Steam isn't reporting live progress";

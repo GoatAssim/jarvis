@@ -52,7 +52,7 @@ def run_tool(**kw):
     """Run the tool with a default Store under HOME; returns (parsed result, the card lines printed)."""
     err = io.StringIO()
     with contextlib.redirect_stderr(err):
-        out = card.TOOLS["present_download_status"](**kw)
+        out = card.TOOLS["present_download_status"](kw)        # one dict, the way tools.execute_tool hands it over
     lines = [l for l in err.getvalue().splitlines() if wire.MEDIA_PREFIX in l]
     return json.loads(out), lines
 
@@ -116,6 +116,25 @@ def test_tool():
     check("a string instead of a list is tolerated, not a crash", r3["ok"] is False)
 
 
+def test_through_the_dispatcher():
+    """The bug the 7D check found: through tools.execute_tool every call answered 'Say which download'."""
+    from jarvis import tools
+    st = Store()
+    a = st.add_item(engine="http", source_url=PUBLIC + "/d.bin", title="d.bin")[0]
+    err = io.StringIO()
+    with contextlib.redirect_stderr(err):
+        res = tools.execute_tool("present_download_status", {"ids": [a["id"]]})
+        none = tools.execute_tool("present_download_status", {})
+        bad = tools.execute_tool("present_download_status", {"ids": ["no-such-id"]})
+    res = json.loads(res) if isinstance(res, str) else res
+    none = json.loads(none) if isinstance(none, str) else none
+    bad = json.loads(bad) if isinstance(bad, str) else bad
+    check("through execute_tool a real id draws a card (it answered 'Say which download' before)", res.get("ok") is True and res.get("shown") == 1)
+    check("... and printed one download_status card line", len([l for l in err.getvalue().splitlines() if wire.MEDIA_PREFIX in l]) == 1)
+    check("through execute_tool, no arguments still asks which download", none.get("ok") is False and "Say which download" in (none.get("problem") or ""))
+    check("through execute_tool, an unknown id is 'no such download', not the 'say which' sentence", bad.get("ok") is False and "Say which download" not in (bad.get("problem") or ""))
+
+
 def test_reload():
     st = Store()
     a = st.add_item(engine="http", source_url=PUBLIC + "/r.bin", title="r.bin")[0]
@@ -137,7 +156,7 @@ def test_front_end_plumbing():
 
 
 if __name__ == "__main__":
-    for fn in (test_loading, test_pure, test_tool, test_reload, test_front_end_plumbing):
+    for fn in (test_loading, test_pure, test_tool, test_through_the_dispatcher, test_reload, test_front_end_plumbing):
         fn()
     print(f"\n{passed} passed, {failed} failed")
     sys.exit(1 if failed else 0)

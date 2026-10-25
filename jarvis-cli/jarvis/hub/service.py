@@ -1093,11 +1093,11 @@ def _schedule_one(store, item, timed):
 
 
 def dismiss(*, id=None, finished=False, store=None):
-    """Hide provider rows from the lists (`dl_dismiss`).  Nothing is deleted and no file is touched.
+    """Hide rows from the lists (`dl_dismiss`).  Nothing is deleted and no file is touched.
 
     `id`: one row.  `finished`: every row that can be dismissed (a provider row that is unknown or
-    finished).  A hub download is refused (it is cancelled with dl_cancel, and a finished one is
-    removed from History); so is a row that is still running.  A dismissed row stays hidden while
+    finished, a hub download that was cancelled).  A hub download is hidden once it failed or was
+    cancelled; a running one is cancelled with dl_cancel and a finished one is removed from History.  A dismissed row stays hidden while
     its provider keeps reporting it finished or unknown, and comes back when the provider reports it
     live again."""
     try:
@@ -1110,15 +1110,16 @@ def dismiss(*, id=None, finished=False, store=None):
         note = "hidden from the lists; no file was touched"
         if finished:
             rows = store.list_items(owner="provider", states_in=states.DISMISSABLE_STATES, limit=2000)
+            rows += store.list_items(owner="hub", states_in=("cancelled",), limit=2000)     # ones the owner abandoned
             done = store.dismiss_items([r["id"] for r in rows])
             return {"ok": True, "dismissed": done, "count": len(done),
                     "note": note if done else "nothing to clear"}
         item = store.get_item(row_id)
         if not item:
             return _err("no such download")
-        if item["owner"] == "hub":
-            return _err("a hub download isn't dismissed: cancel it with dl_cancel (a finished one is removed "
-                        "from History in the Downloads panel)")
+        if item["owner"] == "hub" and not states.is_dismissable("hub", item["state"]):
+            return _err("a hub download is hidden once it has failed or been cancelled: cancel it with dl_cancel first "
+                        "(a finished one is removed from History in the Downloads panel)")
         if item["state"] not in states.DISMISSABLE_STATES:
             why = "it is still running" if item["state"] in states.ACTIVE_STATES else "it hasn't finished"
             return _err("%s (%s); only a row that is unknown or finished can be dismissed" % (why, item["state"]))

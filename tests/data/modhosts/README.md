@@ -58,9 +58,10 @@ or the loader sites that the plan marks "Probe" is unverified.
 
 | File | What it is |
 | --- | --- |
-| `optifine_downloads.html` | The `/downloads` page as received (capped at 1.5 MB). The parser tests run against this. |
+| `optifine_downloads.html` | The `/downloads` page as received (capped at 1.5 MB). The parser tests run against this. Rows are `<tr class='downloadLine downloadLineMain|More|Preview'>` under `<h2>Minecraft X</h2>`; the "Show all versions", "+ More" and "+ Preview versions" controls are `javascript:` links that reveal hidden blocks of the same page, so one request lists everything. The Download button is an ad wrapper on another host whose `url` parameter holds the optifine.net link; the (Mirror) link is that same link, direct. |
+| `optifine_rows.json` | Composite: every row the probe parsed (Minecraft version, kind main/more/preview, file name, label, date, Forge text, the direct optifine.net link, the wrapper host of the Download button). `main` is the recommended build of a version; `more` older builds; `preview` previews. |
 | `optifine_downloads_more_<n>.html` | Only present if "Show all versions" / "+ More" / "+ Preview versions" turned out to be real links; the pages they led to. |
-| `optifine_hops.json` | Composite: the chosen older version, every hop of its Download chain and of its (Mirror) chain (host, scheme, status, redirect target, content type, length, `Content-Disposition`, ZIP signature), the text of each intermediate page (cut at 120,000 characters), how the final link is formed (`final_link_shape`), whether it works a second time straight away, without a `Referer`, and after the wait (`after_wait`). The OptiFine route (A or B) comes from this. |
+| `optifine_hops.json` | Composite: the chosen older version, the link followed (the direct (Mirror) link; the wrapper host of the Download button is recorded but never contacted), every hop (host, scheme, status, redirect target, content type, length, `Content-Disposition`, ZIP signature), the text of each intermediate page (cut at 120,000 characters), how the final link is formed (`final_link_shape`), whether it works a second time straight away (`reuse_straight_away`), a fresh link without a `Referer` (`fresh_without_referer`), and after the wait (`after_wait`). The OptiFine route (A or B) comes from this. |
 
 The intermediate pages carry ad scripts and a short-lived anonymous download token; both are harmless but are not test data
 worth keeping beyond the parser. **No OptiFine jar is ever kept**: only headers and the first 16 bytes of the final file.
@@ -75,6 +76,8 @@ worth keeping beyond the parser. **No OptiFine jar is ever kept**: only headers 
 | `loader_meta_forge_maven.json` | Composite from `maven-metadata.xml`: version count, first/last versions, those for the tested Minecraft version, the start of the XML. |
 | `loader_meta_neoforge.json` | `{isSnapshot, versions}` cut to the versions that map to the tested Minecraft version plus the newest four. |
 | `loader_meta_neoforge_legacy.json` | The older `net.neoforged:forge` artifact (used for 1.20.1), if it answered. |
+| `loader_meta_coverage.json` | Composite: for the newest Minecraft releases, the Forge recommended/latest and the NeoForge prefix rule that matched with its newest stable / newest of any kind. Shows which versions have no recommended Forge build and how 2-number (26.3) and 3-number (26.1.2) Minecraft versions map. |
+| `loader_meta_fabric_unknown.json`, `loader_meta_quilt_unknown.json` | What the Fabric and Quilt endpoints answer for a Minecraft version that does not exist (99.99): the shape of "no loader for this version". |
 
 Each loader file names the Minecraft version it was fetched for in `probe_meta.json` (`derived.mc_version`); it can be an
 older version than the newest if the newest had no build yet.

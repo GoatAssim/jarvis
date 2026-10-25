@@ -154,9 +154,25 @@ def _episode_candidates(net, found, type_, video, want):
     return releases, answer
 
 
+def _dest_text(dest, library_root):
+    """The owner's folder for this season -> (where, shown, error).  `where` is what the rows carry (a sub-folder of the
+    library, or a full path: bulk_run asks before saving outside the library)."""
+    where, problem = service.split_dest(dest, library_root, allow_absolute=True)
+    if problem:
+        return None, None, problem
+    if where.get("dest_abs"):
+        return where, str(where["dest_abs"]).replace("\\", "/").rstrip("/"), None
+    return where, "%s/%s" % (str(library_root).replace("\\", "/").rstrip("/"), str(where["subdir"]).strip("/\\")), None
+
+
 def make_plan(net, found, *, media_id, type_, season=None, episodes=None, want, policy="ask",
-              library_root, budget_s=PLAN_BUDGET_S):
+              library_root, budget_s=PLAN_BUDGET_S, dest=None):
     """-> the plan dict (also saved).  Queues nothing."""
+    where, shown, problem = (None, None, None)
+    if dest not in (None, ""):
+        where, shown, problem = _dest_text(dest, library_root)
+        if problem:
+            raise BulkError(problem)
     if policy not in ranking.POLICIES:
         raise BulkError("on_missing must be one of: %s" % ", ".join(ranking.POLICIES))
     ep = discovery.episodes(net, found, type_, media_id)
@@ -274,7 +290,8 @@ def make_plan(net, found, *, media_id, type_, season=None, episodes=None, want, 
             "season": season, "seasons_available": seasons, "season_assumed": assumed,
             "want": want, "policy": policy, "group_id": group_id_for(ep["id"], season, want),
             "group_title": "%s S%02d (%s)" % (show, season, _want_text(want)),
-            "destination": destination(library_root, show, season), "episodes": ordered, "totals": totals,
+            "destination": shown or destination(library_root, show, season), "dest_text": str(dest).strip() if where else None,
+            "episodes": ordered, "totals": totals,
             "notes": notes}
     save_plan(plan)
     return plan
@@ -418,6 +435,11 @@ def run_plan(plan_id, *, store, override_caps=False, start_paused=False):
         if opts.get("episode") is not None and opts.get("season") is not None:
             existing.setdefault((int(opts["season"]), int(opts["episode"])), []).append(row)
 
+    dest_where = {}
+    if plan.get("dest_text"):           # the owner's own folder (re-checked: a plan file is data, not trust)
+        dest_where, problem = service.split_dest(plan["dest_text"], root, allow_absolute=True)
+        if problem:
+            return {"ok": False, "error": "the plan's folder can't be used: %s" % problem}
     queued, duplicates, already, skipped = [], [], [], []
     for r in wanted:
         number = int(r["episode"])
@@ -439,6 +461,7 @@ def run_plan(plan_id, *, store, override_caps=False, start_paused=False):
             continue
         options = {"show": show, "season": season, "episode": number, "meta_id": plan["media"]["id"],
                    "meta_type": plan["media"]["type"]}
+        options.update(dest_where)
         item, created = store.add_item(
             engine="stremio", source_url=decision["source"], title="%s %s" % (show, _se(season, number)),
             kind="video", options=options, source_ref={"fallbacks": fallbacks} if fallbacks else None,

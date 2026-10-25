@@ -103,9 +103,15 @@ def card_line_payload(cards, title=None):
             "groups": [c["id"] for c in slim if c.get("card") == "group"]}
 
 
-def tool_present_download_status(ids=None, group=None, query=None):
-    """Draw the card; the returned text is the status in words."""
+def tool_present_download_status(args=None):
+    """Draw the card; the returned text is the status in words.
+
+    ONE parameter on purpose: tools.execute_tool hands a handler (arguments dict) and, when the handler declares
+    two or more parameters, a ToolContext as well.  This handler used to be declared (ids, group, query), so every
+    call from the model got the whole dict as `ids` and a context as `group`, and answered 'Say which download'."""
     from .. import hub_admin, wire
+    args = args if isinstance(args, dict) else {}
+    ids, group, query = args.get("ids"), args.get("group"), args.get("query")
     ids = [str(i) for i in ids] if isinstance(ids, list) else ([str(ids)] if isinstance(ids, str) and ids else [])
     if not (ids or group or query):
         return json.dumps({"ok": False, "problem": "Say which download: pass the id(s) dl_add returned, a group id, or part of the title."})
@@ -152,7 +158,6 @@ TEST_CHECKLIST = {
             {"run": {},
              "expect": "ok: false, problem asks which download ('Say which download: pass the id(s) dl_add returned, a group id, or part of the title.')."},
         ],
-        "watch": ["⚠️ KNOWN BUG in 168 (found by the 7D check, NOT fixed): through tools.execute_tool (the model's path and Menu > Debug's direct run) every call answers ok: false 'Say which download...' whatever you pass. The dispatcher hands the handler ONE dict; the handler is declared with keyword arguments (ids, group, query). Delete this line after the fix.",
-                  "So the steps above that expect ok: true cannot pass yet, and the 'no such download' steps answer the 'Say which download' sentence instead. Seen in a Linux sandbox; the tool's own test calls it with keyword arguments, which hides this. See the 7D report, Open points."],
+        "watch": ["The model reaches this tool with ONE dict of arguments; the handler reads it (it once only understood keyword arguments, so every model call answered 'Say which download')."],
     },
 }

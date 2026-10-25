@@ -285,6 +285,36 @@ def _fetch_torrent(url, ctx):
         session.close()
 
 
+# A torrent that gave no file list within the wait is remembered for a while (shared by every worker thread in the hub
+# daemon).  A season pack serves nine episodes: without this each of the nine waited the full time on the same dead
+# torrent; with it the first one waits and the rest move to their next release at once.
+DEAD_TTL_S = 30 * 60
+_dead = {}
+_dead_lock = threading.Lock()
+
+
+def _mark_dead(infohash):
+    with _dead_lock:
+        _dead[str(infohash).lower()] = time.monotonic()
+
+
+def _is_dead(infohash):
+    key = str(infohash or "").lower()
+    with _dead_lock:
+        when = _dead.get(key)
+        if when is None:
+            return False
+        if time.monotonic() - when > DEAD_TTL_S:
+            _dead.pop(key, None)
+            return False
+        return True
+
+
+def _forget_dead(infohash):
+    with _dead_lock:
+        _dead.pop(str(infohash or "").lower(), None)
+
+
 def _sources_text(stats):
     """", 2 of 9 trackers / DHT answered" from the server's own stats (its `sources` list), or "".  Read defensively:
     the server is closed-source, so a missing or odd shape just gives no text."""
@@ -404,6 +434,16 @@ def _remember(ctx, ref):
 def _switch_candidate(ctx, item, ref, hostport, why):
     """Move to the next ranked fallback.  Returns an Outcome (a quick retry) or None when there is none."""
     pending = list(ref.get("fallbacks") or [])
+    # the next release that is not a torrent already known to be dead; when every one left is, take the first anyway
+    ranked = [(c, _candidate(c, hostport)) for c in pending]
+    ranked = [(c, p) for c, p in ranked if p]
+    live = [pair for pair in ranked if not _is_dead(pair[1]["infohash"])]
+    skipped = [pair for pair in ranked if _is_dead(pair[1]["infohash"])] if live else []
+    order = live + ([] if live else ranked)
+    if skipped:
+        ctx.event("info", "%d release%s skipped: the same torrent gave no file list a moment ago"
+                  % (len(skipped), "" if len(skipped) == 1 else "s"))
+    pending = [c for c, _ in order]
     while pending:
         parsed = _candidate(pending.pop(0), hostport)
         if not parsed:
@@ -475,11 +515,16 @@ def _run(item, ctx):
                 return Outcome.failed("the Stremio server didn't accept that .torrent file")
             target = dict(target, infohash=digest)
             ref["infohash"] = digest
+        if blob is None and ref.get("fallbacks") and _is_dead(target["infohash"]):
+            skipped = _switch_candidate(ctx, item, ref, hostport, "this torrent gave no file list a moment ago (another download)")
+            if skipped is not None:
+                return skipped
         ctx.update(phase="registering the torrent", source_ref=ref)
         diag = {}
         stats, outcome = _register(server, target, ctx, meta_wait, diag)
         if outcome is not None:
             if outcome.kind == Outcome.FAILED and outcome.error == "no_seeders":
+                _mark_dead(target["infohash"])
                 msg = "no seeders: the torrent gave no file list in %d s" % meta_wait
                 if diag.get("note"):
                     msg += " (the server said: %s)" % diag["note"]
@@ -487,6 +532,7 @@ def _run(item, ctx):
                     msg + ". Try again later, or another release")
             return outcome
 
+        _forget_dead(target["infohash"])
         # --- 2. choose the file
         files = stats.get("files") or []
         season, episode = _int_hint(item, ref, "season"), _int_hint(item, ref, "episode")

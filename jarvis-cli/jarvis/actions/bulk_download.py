@@ -96,7 +96,7 @@ def tool_bulk_plan(args):
         try:
             plan = bulk.make_plan(net, found, media_id=media_id, type_=kind_hint, season=args.get("season"),
                                   episodes=episodes, want=want, policy=policy,
-                                  library_root=settings_mod.library_root(store.get_settings()))
+                                  library_root=settings_mod.library_root(store.get_settings()), dest=args.get("dest"))
         except (bulk.BulkError, A.AddonError) as exc:
             return {"ok": False, "error": str(exc)}
         out = bulk.public_plan(plan)
@@ -130,7 +130,16 @@ def tool_bulk_run(args):
                                 % (latest["id"], latest["media"]["title"], latest["season"], latest["totals"]["episodes"],
                                    "" if latest["totals"]["episodes"] == 1 else "s", made, latest["id"]))}
         try:
-            return bulk.run_plan(str(args["plan_id"]).strip(), store=Store(), override_caps=args.get("override_caps") is True,
+            plan_id = str(args["plan_id"]).strip()
+            try:
+                saved = bulk.load_plan(plan_id)
+            except bulk.BulkError:
+                saved = {}                      # run_plan says what is wrong with the id, in the same words as ever
+            if saved.get("dest_text") and bulk.settings_mod.is_absolute_spec(saved["dest_text"]):
+                from .download_hub import _confirm_outside
+                if not _confirm_outside(saved["destination"], len([r for r in saved["episodes"] if r.get("pick")])):
+                    return {"ok": False, "cancelled": True, "error": "not confirmed: nothing was queued"}
+            return bulk.run_plan(plan_id, store=Store(), override_caps=args.get("override_caps") is True,
                                  start_paused=args.get("start_paused") is True)
         except bulk.BulkError as exc:
             return {"ok": False, "error": str(exc)}
@@ -152,6 +161,7 @@ TOOL_SCHEMAS = [
          "episodes": {"type": "array", "items": {"type": "integer"}, "description": "Only these episodes (default the whole season)."},
          "quality": {"type": "string", "description": "2160, 1080, 720 or 480 (4k, 1080p ...). Omit for any."},
          "audio": {"type": "string", "enum": ["dub", "sub", "any"], "description": "dub = an English (dubbed) audio track, read from the release's text. Default any."},
+         "dest": {"type": "string", "description": "A folder the owner named for these episodes (a full path like D:\\\\Video\\\\Show\\\\Name, or a sub-folder of the library). Pass it whenever they gave one; it is asked about before anything is saved outside the library."},
          "max_gb_per_episode": {"type": "number"}, "min_seeders": {"type": "integer"},
          "on_missing": {"type": "string", "enum": ["ask", "skip", "other_quality", "other_audio", "best"],
                         "description": ("What an episode with no exact match gets. ask (default): it is left out and listed with what exists, so "

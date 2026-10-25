@@ -4,10 +4,15 @@
   media_find            a title ("jujutsu kaisen") -> a short list of candidates with their ids; asks which one
                         when it is ambiguous.  Works with whatever id scheme the owner's addons use
                         (IMDb `tt...` or Kitsu `kitsu:N`): each result says which, and every later tool follows it.
+                        A title it has resolved before comes from a small saved list (hub/stremio/title_cache.py)
+                        and says `cached: true`; `fresh: true` looks it up again.  The same show listed by several
+                        addons is ONE match, not a question (brief 8C, N29).
   media_episodes        a title's episodes, season by season (which season is the latest, which are out).
   stremio_addons        the addons that are installed (account, or the list in ~/.jarvis/stremio.json).
   stream_search         ask every addon for the streams of ONE episode (or film) and rank them: quality
-                        (1080p over 720p) and audio (dub over sub, read from the stream's text).
+                        (1080p over 720p) and audio (dub over sub, read from the stream's text).  The rows carry a
+                        `rank`, an `infohash` and a `file_idx` and NO magnet; the ranked list is kept for a few
+                        minutes (hub/stremio/pick_store.py) so play_episode can take the row's rank as `pick`.
   stremio_library       the owner's Stremio library: continue watching, watched.
   stremio_mark_watched  mark a MOVIE watched / unwatched in the account (preview first; confirm-gated).
 
@@ -17,6 +22,7 @@ Text an addon wrote is data: it is cleaned and truncated, never obeyed.
 """
 
 
+import inspect
 import json
 import os
 
@@ -64,20 +70,73 @@ def _addons(net, need=None):
 
 # --------------------------------------------------------------------------- media_find
 
-def resolve_title(net, found, query, type_=None):
-    """Shared with bulk_plan.  -> ("one", result) | ("ask", [results]) | ("none", errors)."""
+def _title_cache():
+    """The title cache module, or None when it cannot be loaded (a lookup then works as it did before it existed)."""
+    try:
+        from ..hub.stremio import title_cache
+        return title_cache
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _confirm_offered(item_id):
+    """The owner is using `item_id`: when it was one of the ids of the last \"several titles match\" question, the
+    cache learns which show the name meant (N29c).  Never raises, never asks an addon."""
+    cache = _title_cache()
+    if cache is not None and item_id:
+        try:
+            cache.confirm_id(item_id)
+        except Exception:  # noqa: BLE001
+            pass
+
+
+def resolve_title(net, found, query, type_=None, *, use_cache=False, fresh=False):
+    """Shared with bulk_plan and play_episode.  -> ("one", result) | ("ask", [results]) | ("none", errors).
+
+    Order (brief 8C): the saved title (only when `use_cache`, and not when `fresh`), then `discovery.find`, then
+    `title_cache.collapse` (the same show listed by several addons is one result), then `is_clear_winner`.
+    A clear winner is saved.  An \"ask\" answer is never saved: its ids are only remembered for a few minutes so the
+    owner's pick can be learned (`confirm_id`).  A cached result carries `cached: True`.  `fresh` skips the saved
+    title and, when the new lookup is no longer a clear winner, forgets the old one.
+
+    `use_cache` is off by default: play_episode and bulk_plan call this with four arguments and their tests pin
+    \"the catalog search always runs\".  media_find turns it on (it is the call that cost 9.6 s in finding 04)."""
     from ..hub.stremio import discovery
+    cache = _title_cache()
+    if cache is not None and use_cache and not fresh:
+        hit = cache.lookup(query, type_)
+        if hit:
+            return "one", dict(hit, cached=True)
     answer = discovery.find(net, found, query, type_)
     results = answer["results"]
     if not results:
+        if cache is not None:
+            if fresh:
+                cache.forget(query, type_)
+            if cache.is_id_query(query):
+                cache.forget_id(str(query).strip())      # \"no addon knows that id\": the saved titles that point at it go
         return "none", answer["errors"] or ["no addon found anything for that"]
-    if discovery.is_clear_winner(results):
-        return "one", results[0]
-    return "ask", results
+    shown = cache.collapse(results) if cache is not None else results
+    if discovery.is_clear_winner(shown):
+        if cache is not None:
+            cache.store(query, type_, shown[0])
+        return "one", shown[0]
+    if cache is not None:
+        if fresh:
+            cache.forget(query, type_)
+        cache.remember_offer(query, type_, shown)
+    return "ask", shown
 
 
 def _public_result(r):
     return {k: r.get(k) for k in ("id", "type", "name", "year", "id_kind", "addon", "description", "images") if r.get(k) not in (None, "", {})}
+
+
+CACHED_NOTE = "Answered from the saved title list; no addon was asked. Pass fresh=true to look it up again."
+
+
+def _truthy(value):
+    return value is True or str(value).strip().lower() in ("true", "yes", "1")
 
 
 def tool_media_find(args):
@@ -88,11 +147,18 @@ def tool_media_find(args):
             return {"needs_clarification": True, "message": "Which show or film?"}
         from ..hub.stremio import addons as A
         type_ = A.valid_type(args.get("type")) if args.get("type") else None
+        fresh = _truthy(args.get("fresh"))
+        cache = _title_cache()
+        if cache is not None and not fresh:
+            # Before any addon is asked, the addon list included: the point of the cache is the call it saves.
+            hit = cache.lookup(query, type_)
+            if hit:
+                return {"ok": True, "resolved": True, "match": _public_result(hit), "cached": True, "note": CACHED_NOTE}
         net = _net()
         found, notes = _addons(net)
         if not found:
             return {"ok": False, "error": "no addon can look titles up. " + " ".join(notes)}
-        kind, payload = resolve_title(net, found, query, type_)
+        kind, payload = resolve_title(net, found, query, type_, fresh=fresh)
         if kind == "none":
             return {"ok": True, "results": [], "message": "Nothing found for %r. If that is an abbreviation, try the full title." % query[:60],
                     "problems": payload[:4], "note": " ".join(notes) or None}
@@ -114,6 +180,7 @@ def tool_media_episodes(args):
         item_id, type_ = A.valid_id(args.get("id")), A.valid_type(args.get("type") or "series")
         if not item_id:
             return {"needs_clarification": True, "message": "Which title? Give its id from media_find (tt... or kitsu:...)."}
+        _confirm_offered(item_id)
         net = _net()
         found, notes = _addons(net)
         try:
@@ -178,23 +245,110 @@ def _video_id(net, found, type_, item_id, season, episode):
     raise A.AddonError("that title has no season %s episode %s in the addons' lists" % (season, episode))
 
 
+DEFAULT_ROWS = 5                  # N26b: a play wants the first few, not a page of them
+MAX_ROWS = 25
+
+
+def _params(func):
+    """The argument names `func` takes.  Empty when they can't be read (the caller then keeps today's call)."""
+    try:
+        return set(inspect.signature(func).parameters)
+    except (TypeError, ValueError):
+        return set()
+
+
+def _normalize_want(ranking, args):
+    """-> (want, problem, note).  Contract C3: `language` goes to `ranking.normalize_want` only when that function
+    takes it (8B adds it); until then the argument is not applied and `note` says so, so a language the owner asked
+    for is never silently dropped."""
+    language = args.get("language")
+    language = str(language).strip()[:40] if language not in (None, "") else None
+    base = (args.get("quality"), args.get("audio"), args.get("max_gb"), args.get("min_seeders"))
+    if language and "language" in _params(ranking.normalize_want):
+        want, problem = ranking.normalize_want(*base, language=language)
+        return want, problem, None
+    want, problem = ranking.normalize_want(*base)
+    note = ("language=%s was not applied: this build has no language filter in its ranking yet." % language) if language else None
+    return want, problem, note
+
+
+def _rank(ranking, releases, want):
+    """Contract C3: the play intent (N28: the file known first, packs flagged) only when `ranking.rank` takes it."""
+    kwargs = {"torrents_only": False}
+    if "intent" in _params(ranking.rank):
+        kwargs["intent"] = "play"
+    return ranking.rank(releases, want, **kwargs)
+
+
+def _streams_for(discovery, net, found, type_, video_id):
+    """Contract C5: the play intent (N31: an early return) only when `discovery.streams_for` takes it."""
+    kwargs = {}
+    if "intent" in _params(discovery.streams_for):
+        kwargs["intent"] = "play"
+    return discovery.streams_for(net, found, type_, video_id, **kwargs)
+
+
+def _play_takes_pick():
+    """True when play_episode's schema has a `pick` argument (8A adds it), so the answer only promises it then."""
+    try:
+        from . import play_media
+        for schema in play_media.TOOL_SCHEMAS:
+            if schema.get("name") == "play_episode":
+                return "pick" in schema["parameters"]["properties"]
+    except Exception:  # noqa: BLE001
+        pass
+    return False
+
+
+def _row(candidate, rank, ranking):
+    """One row the model sees.  No magnet (N26a): a torrent row names its torrent by `infohash` and `file_idx`
+    (null = the addon named no file), which is what play_episode, dl_add_stremio (`magnet` takes a bare 40-character
+    infohash, `file_index` the file) and the pick store all use."""
+    c = candidate
+    row = {"rank": rank, "label": c["label"], "tier": c["tier"], "resolution": c["resolution"], "audio": c["audio"],
+           "size_gb": ranking.fmt_gb(c["size"]), "seeders": c["seeders"], "codec": c["codec"], "source_type": c["source"],
+           "addon": c["addon"], "name": c["name"], "torrent": c["torrent"], "direct_link": c["direct"]}
+    if c["torrent"]:
+        row["infohash"] = c.get("infohash")
+        row["file_idx"] = c.get("file_idx")
+    # what 8B's ranking adds (absent on a build without it): shown when they say something
+    if c.get("pack"):
+        row["pack"] = True
+    if c.get("file_known"):
+        row["file_known"] = True
+    if c.get("languages"):
+        row["languages"] = list(c["languages"])
+    if c.get("language_match") is not None:
+        row["language_match"] = c["language_match"]
+    return row
+
+
+def _remember_search(video_id, kept):
+    try:
+        from ..hub.stremio import pick_store
+        pick_store.remember(video_id, kept)
+    except Exception:  # noqa: BLE001  (a memory that fails is only a missing shortcut)
+        pass
+
+
 def tool_stream_search(args):
     try:
         args = args or {}
-        from ..hub.stremio import addons as A, discovery, links, ranking
+        from ..hub.stremio import addons as A, discovery, ranking
         item_id, type_ = A.valid_id(args.get("id")), A.valid_type(args.get("type") or "series")
         if not item_id:
             return {"needs_clarification": True, "message": "Which title? Give its id from media_find."}
+        _confirm_offered(item_id)
         season, episode = args.get("season"), args.get("episode")
         if type_ != "movie" and item_id.count(":") < 2 and (season is None or episode is None):
             return {"needs_clarification": True, "message": "Which season and episode?"}
-        want, problem = ranking.normalize_want(args.get("quality"), args.get("audio"), args.get("max_gb"), args.get("min_seeders"))
+        want, problem, language_note = _normalize_want(ranking, args)
         if problem:
             return {"ok": False, "error": problem}
         try:
-            limit = max(1, min(int(args.get("limit") or 10), 25))
+            limit = max(1, min(int(args.get("limit") or DEFAULT_ROWS), MAX_ROWS))
         except (TypeError, ValueError):
-            limit = 10
+            limit = DEFAULT_ROWS
         net = _net()
         found, notes = _addons(net)
         if not discovery.offers_streams(found, type_, item_id):
@@ -202,7 +356,7 @@ def tool_stream_search(args):
         try:
             vid, _ep = _video_id(net, found, type_, item_id, None if season is None else int(season),
                                  None if episode is None else int(episode))
-            answer = discovery.streams_for(net, found, type_, vid)
+            answer = _streams_for(discovery, net, found, type_, vid)
         except A.AddonError as exc:
             return {"ok": False, "error": str(exc)}
         except (TypeError, ValueError):
@@ -213,24 +367,24 @@ def tool_stream_search(args):
             if release is not None:
                 release["addon"] = addon_name
                 releases.append(release)
-        kept, rejected = ranking.rank(releases, want, torrents_only=False)
-        rows = []
-        for c in kept[:limit]:
-            row = {"rank": len(rows) + 1, "label": c["label"], "tier": c["tier"], "resolution": c["resolution"], "audio": c["audio"],
-                   "size_gb": ranking.fmt_gb(c["size"]), "seeders": c["seeders"], "codec": c["codec"], "source_type": c["source"],
-                   "addon": c["addon"], "name": c["name"], "torrent": c["torrent"], "direct_link": c["direct"]}
-            if c["torrent"]:
-                parsed = links.parse_stream(c["stream"])
-                row["magnet"] = links.build_magnet(parsed["infohash"], parsed["file_idx"], None, parsed["trackers"][:4])
-            rows.append(row)
+        kept, rejected = _rank(ranking, releases, want)
+        _remember_search(vid, kept)                      # ALL of them, not only the rows below: a pick may be past `limit`
+        rows = [_row(c, number, ranking) for number, c in enumerate(kept[:limit], 1)]
         exact = sum(1 for c in kept if c["tier"] == "exact")
-        out = {"ok": True, "video_id": vid, "wants": {k: v for k, v in want.items() if v}, "asked": answer["asked"],
-               "answered": answer["answered"], "found": len(kept), "exact": exact, "streams": rows,
+        out = {"ok": True, "video_id": vid, "search_for": vid, "wants": {k: v for k, v in want.items() if v},
+               "asked": answer["asked"], "answered": answer["answered"], "found": len(kept), "exact": exact, "streams": rows,
                "rejected": dict(rejected)}
+        if rows:
+            out["next"] = (("To play one, call play_episode with the same show, season and episode and pick=<its rank>; no magnet is needed. "
+                            if _play_takes_pick() else
+                            "To play one, call play_episode with its infohash and file_idx. ")
+                           + "To download one, call dl_add_stremio with its infohash as `magnet` and its file_idx as `file_index`.")
         if answer["failed"]:
             out["problems"] = answer["failed"][:5]
         if want["audio"] != "any" and any(r["audio"] == "unknown" for r in rows):
             out["note"] = "Some releases don't say their language; they are never counted as a %s." % want["audio"]
+        if language_note:
+            out["note"] = ((out.get("note") or "") + " " + language_note).strip()
         if notes:
             out["note"] = ((out.get("note") or "") + " " + " ".join(notes)).strip()
         if not kept:
@@ -284,10 +438,12 @@ TOOL_SCHEMAS = [
     {"name": "media_find",
      "description": ("Find a show or film by name through the owner's Stremio addons. Returns its id and type (an IMDb id like tt0000000, "
                      "or kitsu:N for anime, whichever the addons use) for the other tools. If several titles match it asks which one; "
-                     "if nothing is found and the name is an abbreviation, retry with the full title."),
+                     "if nothing is found and the name is an abbreviation, retry with the full title. A title found before comes from a saved list "
+                     "(the answer says cached: true) and asks no addon; the same show listed by several addons counts as one match."),
      "parameters": {"type": "object", "properties": {
          "query": {"type": "string", "description": "The title as the owner said it, or an id (tt... / kitsu:N)."},
-         "type": {"type": "string", "description": "Narrow to one type the addons use (series, movie, anime ...). Omit to search all."}},
+         "type": {"type": "string", "description": "Narrow to one type the addons use (series, movie, anime ...). Omit to search all."},
+         "fresh": {"type": "boolean", "description": "true = ignore the saved title and look it up again (use it when a cached answer was the wrong show)."}},
          "required": ["query"]}},
     {"name": "media_episodes",
      "description": ("List a title's episodes by season, using an id from media_find. Without a season it shows the latest released one "
@@ -303,15 +459,17 @@ TOOL_SCHEMAS = [
     {"name": "stream_search",
      "description": ("Ask every installed addon for the streams of ONE episode or film and rank them: the quality asked for first "
                      "(1080p over 720p), then audio (dub over sub; read from the release's text, so a release that does not say is "
-                     "'language not stated' and never counts as a dub). For a whole season use bulk_plan instead."),
+                     "'language not stated' and never counts as a dub). Each row has a rank, an infohash and a file_idx (no magnet); the search is "
+                     "remembered for a few minutes, so a row can be played by its rank. For a whole season use bulk_plan instead."),
      "parameters": {"type": "object", "properties": {
          "id": {"type": "string", "description": "From media_find."},
          "type": {"type": "string", "description": "From media_find (default series; movie for films)."},
          "season": {"type": "integer"}, "episode": {"type": "integer"},
          "quality": {"type": "string", "description": "2160, 1080, 720 or 480 (also 4k, 1080p ...). Omit for any."},
          "audio": {"type": "string", "enum": ["dub", "sub", "any"], "description": "Default any."},
+         "language": {"type": "string", "description": "A spoken language the owner asked for (english, french ...). Omit for any. 'dub' alone is not a language."},
          "max_gb": {"type": "number", "description": "Largest acceptable file, in GB."},
-         "min_seeders": {"type": "integer"}, "limit": {"type": "integer", "description": "How many to return (default 10)."}},
+         "min_seeders": {"type": "integer"}, "limit": {"type": "integer", "description": "How many rows to return (default 5, at most 25)."}},
          "required": ["id"]}},
     {"name": "stremio_library",
      "description": "The owner's Stremio library from their account: continue watching, watched, or everything.",
@@ -337,11 +495,11 @@ TOOL_GROUP = "stremio"
 
 TOOL_KEYWORDS = {
     "media_find": {"find the show": 10, "find a show": 10, "look up the show": 10, "find the series": 9, "find the movie": 9,
-                   "what show is": 6, "search stremio": 9, "stremio search": 9},
+                   "what show is": 6, "search stremio": 9, "stremio search": 9, "look the show up again": 7},
     "media_episodes": {"list the episodes": 10, "how many episodes": 10, "episodes of": 8, "what seasons": 9, "how many seasons": 10},
     "stremio_addons": {"stremio addons": 10, "installed addons": 10, "my addons": 8, "which addons": 9},
     "stream_search": {"find streams": 10, "search streams": 10, "which releases": 9, "dubbed release": 9, "find a release": 9,
-                      "streams for": 8},
+                      "streams for": 8, "stream options": 7, "pick a stream": 7},
     "stremio_library": {"stremio library": 10, "continue watching": 10, "what have i watched": 9, "my library": 6},
     "stremio_mark_watched": {"mark as watched": 10, "mark watched": 10, "mark it watched": 10, "mark unwatched": 10},
         "stremio": {"stremio":10}
@@ -358,7 +516,9 @@ TOOL_RESULT_SPECS = {
     "stream_search": {
         "list_item_drop": {"streams": {
             "medium": ["codec", "source_type", "torrent", "direct_link", "tier"],
-            "low": ["codec", "source_type", "torrent", "direct_link", "tier", "magnet", "name", "resolution", "audio"]}},
+            # `infohash` and `file_idx` stay at every level: they replaced the magnet, which low used to drop, and a row
+            # without them could not be played or downloaded (the rank alone only works through the pick store)
+            "low": ["codec", "source_type", "torrent", "direct_link", "tier", "name", "resolution", "audio", "languages"]}},
         "list_item_truncate": {"streams": {"name": {"medium": 80, "low": 40}}},
     },
     "media_find": {"list_item_drop": {"matches": {"medium": ["description", "images"], "low": ["description", "images", "addon"]}}},
@@ -376,9 +536,16 @@ TEST_CHECKLIST = {
             {"run": {"query": "<a show>"},
              "expect": "With the network cut and no addon reachable (the failure case): ok: false, 'no addon can look titles up.' followed by the reason (no account key, Cinemeta refused / could not resolve)."},
             {"ask": "Find the show jjk on Stremio", "expect": "Calls media_find; if the abbreviation finds nothing it retries with the full title or asks."},
+            {"run": {"query": "<the same show as the first step, again>"},
+             "expect": "cached: true and resolved at once: the saved title answered and no addon was asked (it is much faster than the first call)."},
+            {"run": {"query": "<the same show>", "fresh": True},
+             "expect": "Looked up again (no cached: true) and the saved title replaced by the new answer."},
+            {"run": {"query": "<a show several of your addons list under one name>"},
+             "expect": "One match with an IMDb id (Cinemeta's), not a question: the same name, type and year from several addons is one show. Two different shows with one name and different years still ask."},
         ],
         "needs": ["at least one addon that can search (an account key or an addons.urls list in ~/.jarvis/stremio.json; otherwise Cinemeta is used)"],
-        "watch": ["Network only through the SSRF guard: an addon on your own network needs its host in the allow list (dl_settings)."],
+        "watch": ["Network only through the SSRF guard: an addon on your own network needs its host in the allow list (dl_settings).",
+                  "⚠️ A cached title stays for 90 days. If it was the wrong show, run media_find again with fresh=true."],
     },
     "media_episodes": {
         "does": "Lists a title's seasons and one season's episodes (the latest when none is named).",
@@ -401,14 +568,19 @@ TEST_CHECKLIST = {
         "does": "Asks every addon for one episode's streams and ranks them by quality and audio language.",
         "steps": [
             {"run": {"id": "<id from media_find>", "type": "series", "season": 1, "episode": 1, "quality": "1080", "audio": "dub"},
-             "expect": "ok: true, streams ranked, exact ones (1080p dub) first, each with a size, seeders and the addon's name. A release with no language marker reads 'language not stated'."},
+             "expect": "ok: true, at most 5 streams ranked, exact ones (1080p dub) first, each with a rank, a size, seeders, the addon's name, an infohash and a file_idx, and NO magnet. search_for is the episode id. A release with no language marker reads 'language not stated'."},
+            {"run": {"id": "<id from media_find>", "type": "series", "season": 1, "episode": 1, "limit": 12},
+             "expect": "up to 12 rows (25 is the most). Then play_episode with pick set to one of those ranks plays that row (⚠️ needs the play_episode that takes pick; before it, use the row's infohash and file_idx)."},
+            {"run": {"id": "<id from media_find>", "type": "series", "season": 1, "episode": 1, "language": "english"},
+             "expect": "⚠️ with the ranking that has a language filter: rows carry languages / language_match. Without it: a note says language was not applied."},
             {"run": {"id": "<id from media_find>", "type": "series", "season": 1, "episode": 1}, "expect": "no audio preference: ranked by quality and seeders."},
             {"run": {"id": "<id from media_find>", "type": "series", "season": 1}, "expect": "needs_clarification: 'Which season and episode?'; no addon is asked."},
             {"run": {},
              "expect": "No error, a question: needs_clarification 'Which title? Give its id from media_find.'; no addon is asked."},
         ],
         "care": "Asks every addon you have installed (8 at a time, 8 s each).",
-        "watch": ["⚠️ The dub / sub / 1080p markers are guesses until checked against your addons' real answers: run tests/addon_checks.py and compare."],
+        "watch": ["⚠️ The dub / sub / 1080p markers are guesses until checked against your addons' real answers: run tests/addon_checks.py and compare.",
+                  "The ranked list is remembered for about 10 minutes (a small file in the hub folder, with no stream addresses in it); after that a pick says to search again."],
     },
     "stremio_library": {
         "does": "Reads your Stremio library (continue watching, watched) from your account.",

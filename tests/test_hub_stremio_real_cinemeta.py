@@ -131,6 +131,17 @@ check("media_find: 'Jujutsu Kaisen' resolves to the series, no question", r["ok"
 r = tools.tool_media_find({"query": "Jujutsu"})
 check("media_find: 'Jujutsu' asks and lists the candidates", r.get("needs_clarification") and r.get("resolved") is False and len(r["matches"]) >= 2)
 
+# brief 8C: the title that just resolved is saved, so the same name is answered with no request to the (rebuilt) Cinemeta
+_before = len(ST.log)
+r = tools.tool_media_find({"query": QUERY})
+check("media_find: the same title again is answered from the saved list: cached, the same series id, and no addon request at all",
+      r.get("resolved") is True and r.get("cached") is True and r["match"]["id"] == SERIES and len(ST.log) == _before)
+r = tools.tool_media_find({"query": QUERY, "fresh": True})
+check("media_find with fresh: looks it up again (requests are made) and still resolves to the series, no cached flag",
+      r.get("resolved") is True and "cached" not in r and r["match"]["id"] == SERIES and len(ST.log) > _before)
+check("the question 'Jujutsu' was not saved: it asks again (nothing was learned from a question nobody answered)",
+      tools.tool_media_find({"query": "Jujutsu"}).get("needs_clarification") is True)
+
 # ---- the title: seasons, the S1E1 video id
 ep = discovery.episodes(net, found, "series", SERIES)
 check("title name, id and type match", (ep["title"], ep["id"], ep["type"]) == (REC["title"]["name"], REC["title"]["id"], REC["title"]["type"]))

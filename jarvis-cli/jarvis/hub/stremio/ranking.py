@@ -50,7 +50,7 @@ POLICY_TIERS = {
     "best": TIERS,
 }
 
-MAX_FALLBACKS = 2
+MAX_FALLBACKS = 4                      # other TORRENTS (different infohash) the engine may move to, best first
 _GB = 1024 ** 3
 _MB = 1024 ** 2
 
@@ -403,8 +403,22 @@ def rank(releases, want, *, batch_binge=None, torrents_only=True, intent="bulk",
         by_language = _LANGUAGE_ORDER[c["language_match"]] if wanted_language else 0
         by_file = 0 if (not play or c.get("file_known")) else 1
         return (TIERS.index(c["tier"]), distance, by_language, by_file, -c["score"])
+    _penalise_oversized(kept, want)
     kept.sort(key=order)
     return kept, rejected
+
+
+def _penalise_oversized(kept, want):
+    """An episode's releases are mostly one size, with a few far bigger (a BDRip or remux next to web rips): with
+    "any quality" nothing said bigger is better, and the seeder bonus alone used to put an 840 MB file ahead of
+    350 MB ones.  Compared with the median of THIS episode's releases, one over 1.0x loses points as it grows."""
+    sizes = sorted(c["size"] for c in kept if c.get("size"))
+    if len(sizes) < 3:
+        return
+    median = sizes[len(sizes) // 2]
+    for c in kept:
+        if c.get("size") and c["size"] > median:
+            c["score"] -= min(30.0, 20.0 * (c["size"] / median - 1.0))
 
 
 def usual_binge(per_episode_top):
@@ -438,7 +452,13 @@ def choose(candidates, policy="ask"):
     usable = [c for c in candidates if c["tier"] in allowed]
     if usable:
         pick = usable[0]
-        rest = [c for c in usable[1:] if (c["infohash"], c["file_idx"]) != (pick["infohash"], pick["file_idx"])]
+        # fallbacks are OTHER torrents: the same infohash with another file is no help when that torrent is the problem
+        seen_hashes, rest = {pick["infohash"]}, []
+        for c in usable[1:]:
+            if c["infohash"] in seen_hashes:
+                continue
+            seen_hashes.add(c["infohash"])
+            rest.append(c)
         return {"status": "exact" if pick["tier"] == "exact" else "fallback", "pick": pick,
                 "fallbacks": rest[:MAX_FALLBACKS], "options": []}
     options = []

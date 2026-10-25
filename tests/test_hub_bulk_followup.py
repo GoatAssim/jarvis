@@ -89,5 +89,32 @@ check("addon ids are kept when no IMDb / Kitsu twin exists", len(discovery._coll
 check("two different shows with one name (other year) are NOT merged", len(discovery._collapse_same_title(
     [cand("tt1", name="Fargo", year=1996, type_="movie"), cand("tt2", name="Fargo", year=2014)])) == 2)
 
+# ---- Dismiss on a cancelled / failed hub download (2026-10-25: a cancelled one offered only Retry)
+from jarvis import hub_admin  # noqa: E402
+st = Store()
+mk = lambda n, state: st.add_item(engine="http", source_url="http://93.184.216.34/%s.bin" % n, title=n)[0]  # noqa: E731
+rows_by = {}
+for name, state in (("canc", "cancelled"), ("fail", "failed"), ("done", "done"), ("run", "downloading"), ("wait", "queued")):
+    item = mk(name, state)
+    st.update_item(item["id"], {"state": state})
+    rows_by[name] = item["id"]
+r = hub_admin.admin("dismiss", {"id": rows_by["canc"]}, store=st)
+check("a cancelled hub download can be hidden", r["ok"] and st.get_item(rows_by["canc"])["dismissed_at"] is not None)
+r = hub_admin.admin("dismiss", {"id": rows_by["fail"]}, store=st)
+check("so can a failed one", r["ok"] and st.get_item(rows_by["fail"])["dismissed_at"] is not None)
+for name in ("done", "run", "wait"):
+    r = hub_admin.admin("dismiss", {"id": rows_by[name]}, store=st)
+    check("a %s hub download is still refused (History / dl_cancel own those)" % name, r["ok"] is False and st.get_item(rows_by[name])["dismissed_at"] is None)
+check("a hidden row is gone from the list but not from the database", rows_by["canc"] not in [x["id"] for x in st.list_items(limit=50)]
+      and rows_by["canc"] in [x["id"] for x in st.list_items(include_dismissed=True, limit=50)])
+st.transition(rows_by["canc"], "queued", expect="cancelled")
+check("Retry on a hidden row brings it back", st.get_item(rows_by["canc"])["dismissed_at"] is None)
+c2 = mk("canc2", "cancelled")
+st.update_item(c2["id"], {"state": "cancelled"})
+f2 = mk("fail2", "failed")
+st.update_item(f2["id"], {"state": "failed"})
+allr = hub_admin.admin("dismiss", {"finished": True}, store=st)
+check("Clear finished takes the cancelled hub download and leaves the failed one", c2["id"] in allr["dismissed"] and f2["id"] not in allr["dismissed"])
+
 print("\n%d passed, %d failed" % (passed, failed))
 sys.exit(1 if failed else 0)

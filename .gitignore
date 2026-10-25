@@ -31,3 +31,4 @@ voices/
 /jarvis-cli/voice/
 web/data/
 tests/fixtures
+tests/data

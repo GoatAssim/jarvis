@@ -19,7 +19,7 @@ What is in it
                                                their own downloads): health, on / off, settings
   dl_pause / dl_resume / dl_cancel / dl_retry  control (hub downloads; a provider row only if
                                                its provider declares the verb, else read-only)
-  dl_dismiss                                   hide a provider row that is unknown or finished
+  dl_dismiss                                   hide a row that is unknown, finished, failed or cancelled
                                                (one id, or finished=true); owner only, deletes nothing
   dl_schedule                                  start a download later ("tomorrow 3am"), or clear
                                                that; dl_add takes the same `start_at`
@@ -722,7 +722,7 @@ TOOL_SCHEMAS = [
     },
     {
         "name": "dl_dismiss",
-        "description": "Hide a Steam / Playnite / tool row that is unknown or finished from the list (one id, or finished=true for all of them). Nothing is deleted. Not for hub downloads or running ones.",
+        "description": "Hide a row from the list: a Steam / Playnite / tool row that is unknown or finished, or a download of the hub that failed or was cancelled (one id, or finished=true for every row that can go). Nothing is deleted. Not for running ones or finished hub downloads (those are removed from History).",
         "parameters": {"type": "object", "properties": {
             "id": {"type": "string", "description": "The row's id"},
             "finished": {"type": "boolean", "description": "true = every row that can be dismissed"}}},

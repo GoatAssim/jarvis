@@ -144,8 +144,8 @@ function cardNote(row) {
 // lists the row as a normal row in this view (`revealed`), until the panel is reloaded; the hub un-hides a row by itself
 // when its tool reports it live again.
 const DISMISSABLE = new Set(["done", "failed", "cancelled", "unknown"]);
-const DISMISS_TIP = "Hide this row from the list. Nothing is deleted and no file is touched; it comes back by itself if its tool reports it running again.";
-const CLEAR_TIP = "Hide every finished, failed, cancelled or lost row that another tool (Steam, Playnite ...) reported. Downloads the hub made itself and the History tab are not touched, and no file is touched.";
+const DISMISS_TIP = "Hide this row from the list. Nothing is deleted and no file is touched; it comes back by itself if its tool reports it running again, or if you Retry it.";
+const CLEAR_TIP = "Hide every finished, failed, cancelled or lost row that another tool (Steam, Playnite ...) reported, and hub downloads you cancelled. Other downloads the hub made itself (failed or finished ones) and the History tab are not touched, and no file is touched.";
 const SHOW_AGAIN_TIP = "List this row again for now. The hub keeps it hidden; it comes back for good when its tool reports it running again.";
 const SHOW_HIDDEN_TIP = "Also list the rows you hid, dimmed. Nothing hidden is deleted.";
 
@@ -153,7 +153,9 @@ function isHidden(row) { return !!(row && row.dismissed_at); }
 
 // Can this row be dismissed (a hidden row that was listed again counts as shown)?
 function canDismiss(row, revealed) {
-  if (!row || row.owner !== "provider" || !DISMISSABLE.has(row.state)) return false;
+  if (!row || !DISMISSABLE.has(row.state)) return false;
+  // a provider row that is unknown or finished; a hub download only once it failed or was cancelled (a finished one lives in History)
+  if (row.owner === "hub" ? (row.state !== "failed" && row.state !== "cancelled") : row.owner !== "provider") return false;
   return !isHidden(row) || !!(revealed && revealed[row.id]);
 }
 
@@ -162,7 +164,9 @@ function isDimmed(row, revealed) { return isHidden(row) && !(revealed && reveale
 
 // The rows Clear finished would hide: shown rows only (a hidden one is already hidden).
 function dismissableRows(rows, revealed) {
-  return (Array.isArray(rows) ? rows : []).filter((r) => !isHidden(r) && canDismiss(r, revealed));
+  // Clear finished: provider rows that are done / failed / cancelled / lost, and hub downloads the owner cancelled
+  // (a failed hub download is hidden one by one: it may still be worth a Retry)
+  return (Array.isArray(rows) ? rows : []).filter((r) => !isHidden(r) && canDismiss(r, revealed) && (r.owner === "provider" || r.state === "cancelled"));
 }
 
 // The live rows plus the hidden ones the view lists (all of them while Show hidden is on, else only the ones
@@ -396,6 +400,19 @@ function groupRows(rows, mode) {
   });
   if (loose.length) sections.push({ key: "loose", title: "Single downloads", meta: "", rows: loose });
   return sections;
+}
+
+// What a collapsed group still says about itself: "9 downloads - 1 running - 8 failed".  Pure.
+function sectionSummary(rows) {
+  const list = Array.isArray(rows) ? rows : [];
+  const count = (states) => list.filter((r) => states.indexOf(r.state) !== -1).length;
+  const parts = [list.length + (list.length === 1 ? " download" : " downloads")];
+  [["running", ["probing", "connecting", "downloading", "postprocessing"]], ["waiting", ["queued", "stalled"]], ["paused", ["paused"]],
+    ["failed", ["failed"]], ["cancelled", ["cancelled"]], ["done", ["done"]]].forEach((g) => {
+    const n = count(g[1]);
+    if (n) parts.push(n + " " + g[0]);
+  });
+  return parts.join(DOT);
 }
 
 // Arrow-key movement through the rows as displayed.
@@ -1012,7 +1029,7 @@ function reorderNote(row, live) {
 const pure = {
   ACTIVE, FINAL, VIEWS, KIND_ICON, fmtBytes, fmtSpeed, fmtEta, fmtAgo, percentText, speedText, etaText,
   sizeText, statusText, barLook, rowActions, sourceKey, sourceLabel, viewMatches, viewCounts,
-  filterRows, sortRows, groupRows, moveSelection, extractInputs, hintFromDecisions, isStale,
+  filterRows, sortRows, groupRows, sectionSummary, moveSelection, extractInputs, hintFromDecisions, isStale,
   toneOf, overviewStats, needsAttention, runningNow, sublineText, countText,
   LIMIT_PRESETS, OPEN_CHOICES, NOTIFY_EVENTS, NOTIFY_OPTIONS, NOTIFY_OPTIONS_WAIT, DAYS, fmtLimit, parseLimit, limitFields,
   limitSummary, quickSpeedOptions, openLabel, openMenu,
@@ -1033,7 +1050,7 @@ const doc = root.ownerDocument || document;
 const $ = (sel) => root.querySelector(sel);
 
 const S = {
-  rows: [], summary: null, selected: null, view: "all", search: "", groupBy: "group", groupTouched: false,
+  rows: [], summary: null, selected: null, view: "all", search: "", groupBy: "group", groupTouched: false, collapsed: {},
   detail: null, busy: false, timer: 0, closed: false, lastError: "", hold: 0, holdTimer: 0,
   pendingSelect: "", sig: {},
   showHidden: false, hiddenRows: [], revealed: {}, clearing: false,   // brief 19: the "Show hidden" switch, the rows it lists, the ones listed again
@@ -1090,7 +1107,7 @@ function savePrefs() {
   try {
     // groupBy is saved only after the owner picked one: clicking a status chip used to save the default "Nothing" for good,
     // and a batch (a whole season) then never showed as a group.
-    const prefs = { view: S.view };
+    const prefs = { view: S.view, collapsed: Object.keys(S.collapsed).filter((k) => S.collapsed[k]).slice(0, 200) };
     if (S.groupTouched) { prefs.groupBy = S.groupBy; prefs.groupTouched = true; }
     host.storage.set("prefs", JSON.stringify(prefs)).catch(() => {});
   } catch (e) { /* storage is a convenience */ }
@@ -1104,6 +1121,7 @@ async function loadPrefs() {
     // a `source` saved by an older panel is ignored on purpose: the source chips are gone (N22 part d), so it would hide rows with no control to clear it
     // an older panel saved groupBy on every chip click, so only a value saved with groupTouched counts as the owner's choice
     if (p.groupTouched === true && ["none", "source", "group"].indexOf(p.groupBy) !== -1) { S.groupBy = p.groupBy; S.groupTouched = true; }
+    if (Array.isArray(p.collapsed)) p.collapsed.slice(0, 200).forEach((k) => { if (typeof k === "string") S.collapsed[k] = true; });
   } catch (e) { /* defaults */ }
 }
 
@@ -1300,8 +1318,36 @@ function dismissButton(row, large) {
   });
 }
 
+// Collapse / expand one group (a batch, or a source).  Remembered between visits.
+function toggleSection(key) {
+  if (S.collapsed[key]) delete S.collapsed[key]; else S.collapsed[key] = true;
+  savePrefs();
+  renderList();
+}
+
+// The rows to show, with the ones inside a collapsed group left out (arrow keys must not walk into them).
+function groupMode(rows) {
+  // "Batch" with no batch on the list would only add a "Single downloads" header over everything: show the plain list then
+  return S.groupBy === "group" && !rows.some((r) => r.group_id) ? "none" : S.groupBy;
+}
+function shownRows(rows) {
+  const out = [];
+  groupRows(rows, groupMode(rows)).forEach((section) => { if (!(section.title && S.collapsed[section.key])) section.rows.forEach((r) => out.push(r)); });
+  return out;
+}
+
 function sectionHeader(section) {
-  const kids = [el("span", { cls: "section__t", text: section.title + (section.meta ? DOT + section.meta : "") })];
+  const open = !S.collapsed[section.key];
+  const label = section.title + (section.meta ? DOT + section.meta : "") + (open ? "" : DOT + sectionSummary(section.rows));
+  const flip = () => toggleSection(section.key);
+  const kids = [
+    el("button", {
+      cls: "section__toggle", text: open ? "\u25BE" : "\u25B8", title: open ? "Collapse: hide these downloads" : "Expand: show these downloads",
+      attrs: { type: "button", "aria-expanded": open ? "true" : "false", "aria-label": (open ? "Collapse " : "Expand ") + section.title },
+      on: { click: (e) => { e.stopPropagation(); flip(); } },
+    }),
+    el("span", { cls: "section__t", text: label, on: { click: flip } }),
+  ];
   // Batch headers get the group-wide controls: the same tools, aimed at the whole batch.
   if (S.groupBy === "group" && /^g:/.test(section.key)) {
     const gid = section.key.slice(2);
@@ -1318,7 +1364,7 @@ function renderList() {
   const rows = visibleRows();
   const total = viewRows().length;
   $("#count").textContent = countText(rows.length, total);
-  if (!changed("list", [rows, S.selected, S.groupBy, S.live, S.revealed, S.showHidden, S.acting])) return;
+  if (!changed("list", [rows, S.selected, S.groupBy, S.live, S.revealed, S.showHidden, S.collapsed, S.acting])) return;
   const list = $("#list");
   const scroll = list.scrollTop;
   list.textContent = "";
@@ -1329,12 +1375,21 @@ function renderList() {
     }));
     return;
   }
-  // "Batch" with no batch on the list would only add a "Single downloads" header over everything: show the plain list then
-  const mode = S.groupBy === "group" && !rows.some((r) => r.group_id) ? "none" : S.groupBy;
-  groupRows(rows, mode).forEach((section) => {
+  const sections = groupRows(rows, groupMode(rows));
+  sections.forEach((section) => {
     if (section.title) list.appendChild(sectionHeader(section));
+    if (section.title && S.collapsed[section.key]) return;
     section.rows.forEach((r) => list.appendChild(renderRow(r)));
   });
+  const named = sections.filter((section) => section.title);
+  const all = $("#collapseAll");
+  if (all) {
+    const anyOpen = named.some((section) => !S.collapsed[section.key]);
+    all.hidden = named.length === 0;
+    all.textContent = anyOpen ? "Collapse all" : "Expand all";
+    all.title = anyOpen ? "Hide the downloads inside every group" : "Show the downloads inside every group";
+    all.setAttribute("aria-label", all.title);
+  }
   list.scrollTop = scroll;
 }
 
@@ -2114,6 +2169,14 @@ $("#pauseAll").addEventListener("click", () => allAction("pause"));
 $("#resumeAll").addEventListener("click", () => allAction("resume"));
 $("#clearFinished").addEventListener("click", clearFinished);
 $("#showHidden").addEventListener("click", toggleShowHidden);
+$("#collapseAll").addEventListener("click", () => {
+  const rows = visibleRows();
+  const named = groupRows(rows, groupMode(rows)).filter((section) => section.title);
+  const anyOpen = named.some((section) => !S.collapsed[section.key]);
+  named.forEach((section) => { if (anyOpen) S.collapsed[section.key] = true; else delete S.collapsed[section.key]; });
+  savePrefs();
+  renderList();
+});
 
 const list = $("#list");
 // A poll must not rebuild the panes between pressing and releasing a button (the click would
@@ -2126,7 +2189,7 @@ const list = $("#list");
 });
 list.addEventListener("keydown", (e) => {
   const rows = visibleRows();
-  const ids = rows.map((r) => r.id);
+  const ids = shownRows(rows).map((r) => r.id);
   const current = rows.find((r) => r.id === S.selected);
   if (e.key === "ArrowDown" || e.key === "ArrowUp") {
     e.preventDefault();

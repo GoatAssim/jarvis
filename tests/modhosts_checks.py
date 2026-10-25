@@ -27,10 +27,12 @@ variable CURSEFORGE_API_KEY.  The key is sent ONLY to api.curseforge.com, never 
 and the script searches every file it wrote for the key before it finishes (it deletes the file and exits
 loudly if the key is found).  No key: the CurseForge part is skipped and the report says so.
 
-OptiFine: the owner chose to reverse-engineer the official site, so the script follows ONE older version's
-Download and (Mirror) links one hop at a time, with a pause of a couple of seconds between requests, and stops
-at any host other than optifine.net.  It reads headers and the first bytes of the final file and closes the
-connection.  The whole OptiFine part is about 20 requests.
+OptiFine: the owner chose to reverse-engineer the official site, so the script follows ONE older version's link
+one hop at a time, with a pause of a couple of seconds between requests, and stops at any host other than
+optifine.net.  The page's Download button is an ad wrapper on another host (adfoc.us) that carries the optifine.net
+link in its `url` parameter; the script reads that parameter and starts from the direct optifine.net link, and never
+contacts the wrapper.  It reads headers and the first bytes of the final file and closes the connection.  The whole
+OptiFine part is about 20 requests.
 """
 import argparse
 import datetime
@@ -48,6 +50,7 @@ import urllib.parse
 import urllib.request
 import zipfile
 from collections import Counter, OrderedDict
+from html import unescape as html_unescape
 from html.parser import HTMLParser
 from pathlib import Path
 
@@ -99,8 +102,8 @@ PLAN = [
     ("modrinth", 3, "GET  api.modrinth.com/v2/versions?ids=[..] | /version/<id> | /projects?ids=[..]   (bulk fetches)"),
     ("modrinth", 3, "POST api.modrinth.com/v2/version_files | GET /version_file/<sha1> | POST /version_files/update   (by sha1)"),
     ("modrinth", 1, "GET  api.modrinth.com/v2/project/<slug> with a generic User-Agent (what does it get back?)"),
-    ("loaders", 2, "GET  meta.fabricmc.net/v2/versions/loader/<mc>          (one more try with an older version if empty)"),
-    ("loaders", 2, "GET  meta.quiltmc.org/v3/versions/loader/<mc>           (one more try with an older version if empty)"),
+    ("loaders", 3, "GET  meta.fabricmc.net/v2/versions/loader/<mc>          (one more try with an older version if empty; and once for an unknown version, 99.99)"),
+    ("loaders", 3, "GET  meta.quiltmc.org/v3/versions/loader/<mc>           (one more try with an older version if empty; and once for an unknown version, 99.99)"),
     ("loaders", 1, "GET  files.minecraftforge.net/net/minecraftforge/forge/promotions_slim.json"),
     ("loaders", 1, "GET  maven.minecraftforge.net/net/minecraftforge/forge/maven-metadata.xml   (the fallback when promotions has no entry)"),
     ("loaders", 1, "GET  maven.neoforged.net/api/maven/versions/releases/net/neoforged/neoforge"),
@@ -120,13 +123,12 @@ PLAN = [
     ("curseforge", 1, "GET  api.curseforge.com/v1/mods/search?classId=<modpacks>   (pick the smallest modpack file)"),
     ("curseforge", 9, "GET  <that modpack file on the CDN>: its size (up to 3 hops), then its zip file list (whole file if small, else up to 6 byte ranges); no key sent; nothing kept"),
     ("optifine", 2, "GET  optifine.net/downloads   (a second try with a browser User-Agent only if the first is refused)"),
-    ("optifine", 3, "GET  the targets of \"Show all versions\" / \"+ More\" / \"+ Preview versions\" (only if they are real links, not script toggles)"),
-    ("optifine", 5, "GET  the Download link of ONE older version, one hop at a time (host, status, redirect, content type; 16 bytes of the file)"),
+    ("optifine", 3, "GET  the targets of \"Show all versions\" / \"+ More\" / \"+ Preview versions\" (only if they are real links; on the layout seen so far they are javascript and cost nothing)"),
+    ("optifine", 5, "GET  the (Mirror) link of ONE older version (direct on optifine.net), one hop at a time (host, status, redirect, content type; 16 bytes of the file).  The Download button is an ad wrapper on another host: NOT contacted"),
     ("optifine", 1, "GET  the first hop again over https (if the site's link was plain http)"),
     ("optifine", 1, "GET  the final link a second time straight away (single use?)"),
-    ("optifine", 5, "GET  the (Mirror) link of the same version, one hop at a time"),
-    ("optifine", 1, "GET  the mirror's final link without a Referer header"),
-    ("optifine", 4, "GET  a fresh Download chain, stopped before the file (a token that is left unused)"),
+    ("optifine", 5, "GET  a fresh chain stopped before the file, then its final link WITHOUT a Referer header"),
+    ("optifine", 4, "GET  another fresh chain stopped before the file (a token that is left unused)"),
     ("optifine", 2, "GET  after --optifine-wait seconds (default 120): the first final link again, and the unused fresh one"),
 ]
 
@@ -233,19 +235,19 @@ def derive_loader_numbers(mods):
 
 
 def neoforge_prefixes(mc):
-    """NeoForge versions follow the Minecraft version: 1.21.1 -> 21.1.x, 1.21 -> 21.0.x.  Newer Minecraft
-    versions may not start with '1.', so more than one rule is tried and the data says which one fits."""
+    """NeoForge versions start with the Minecraft version.  Old scheme: 1.21.1 -> 21.1.<build>, 1.21 -> 21.0.<build>.
+    New scheme (Minecraft 26.x, seen in the first probe run): 26.3 -> 26.3.0.<build>, so the patch number is explicit
+    and the build is the fourth number.  The longest rule is tried first so that 26.1 does not swallow 26.1.2.
+    The data decides which rule fits (the loader coverage table in the report shows the matches per version)."""
     parts = mc.split(".")
     if parts and parts[0] == "1" and len(parts) >= 2:
-        parts = parts[1:]
-    cands = []
-    two = list(parts[:2])
-    if len(two) == 1:
-        two.append("0")
-    cands.append((".".join(two) + ".", "drop a leading '1.', keep two numbers"))
-    if len(parts) >= 3:
-        cands.append((".".join(parts) + ".", "all numbers after a leading '1.'"))
-    return cands
+        two = (parts[1:] + ["0"])[:2]
+        return [(".".join(two) + ".", "old scheme: Minecraft 1.A.B -> A.B.<build> (B is 0 when missing)")]
+    three = (parts + ["0", "0"])[:3]
+    out = [(".".join(three) + ".", "new scheme: year.drop.patch (patch 0 when missing), then the build")]
+    if len(parts) >= 2:
+        out.append((".".join(parts[:2]) + ".", "fallback: first two numbers only"))
+    return out
 
 
 def is_stable_version(v):
@@ -317,17 +319,76 @@ def scan_html(html):
     return s.finish()
 
 
-def analyse_downloads(html, base):
-    """What a naive parser finds on optifine.net/downloads, plus the markup of the 'more versions' controls."""
-    scan = scan_html(html)
+def optifine_target(href, base):
+    """(optifine.net URL, wrapper host) for one link of the downloads page.  The Download button is an ad wrapper, e.g.
+    http://adfoc.us/serve/sitelinks/?id=1&url=http://optifine.net/adloadx?f=X.jar&x=d52b, whose `url` parameter is the real
+    optifine.net link.  The wrapper host is returned so the report can name it; it is never contacted."""
+    if not href:
+        return None, None
+    u = urllib.parse.urljoin(base, html_unescape(href))
+    p = urllib.parse.urlparse(u)
+    if host_ok(p.hostname, OPT_ALLOW):
+        return u, None
+    inner = (urllib.parse.parse_qs(p.query).get("url") or [None])[0]
+    if inner and host_ok(urllib.parse.urlparse(inner).hostname, OPT_ALLOW):
+        return inner, p.hostname
+    return None, p.hostname
 
-    def absu(h):
-        return urllib.parse.urljoin(base, h) if h else None
 
+_OPT_TR = re.compile(r"<tr\b[^>]*\bclass\s*=\s*(['\"])([^'\"]*\bdownloadLine\b[^'\"]*)\1[^>]*>(.*?)</tr>", re.I | re.S)
+_OPT_H2 = re.compile(r"<h2[^>]*>\s*Minecraft\s+([^<]+?)\s*</h2>", re.I)
+
+
+def _opt_cell(body, cls):
+    m = re.search(r"<td\b[^>]*\bclass\s*=\s*['\"][^'\"]*\b%s\b[^'\"]*['\"][^>]*>(.*?)</td>" % cls, body, re.I | re.S)
+    return m.group(1) if m else ""
+
+
+def _opt_href(cell):
+    m = re.search(r"""<a\b[^>]*\bhref\s*=\s*(['"])(.*?)\1""", cell, re.I | re.S)
+    return m.group(2) if m else None
+
+
+def _opt_text(cell):
+    return " ".join(re.sub(r"<[^>]+>", " ", html_unescape(cell)).split())
+
+
+def parse_optifine_rows(html, base):
+    """The rows of the real page: <tr class='downloadLine downloadLineMain|More|Preview'> under <h2>Minecraft X</h2>.
+    Main = the recommended build, More = older builds of the same version, Preview = preview builds."""
+    heads = [(m.start(), m.group(1).strip()) for m in _OPT_H2.finditer(html)]
+    rows = []
+    for m in _OPT_TR.finditer(html):
+        classes = m.group(2).split()
+        body = m.group(3)
+        kind = ("preview" if "downloadLinePreview" in classes else "more" if "downloadLineMore" in classes
+                else "main" if "downloadLineMain" in classes else "other")
+        mc = None
+        for pos, name in heads:
+            if pos < m.start():
+                mc = name
+            else:
+                break
+        dl_raw, mir_raw = _opt_href(_opt_cell(body, "colDownload")), _opt_href(_opt_cell(body, "colMirror"))
+        dl, wrapper = optifine_target(dl_raw, base)
+        mirror, _ = optifine_target(mir_raw, base)
+        q = urllib.parse.parse_qs(urllib.parse.urlparse(mirror or dl or "").query)
+        f = (q.get("f") or [None])[0]
+        if not mc and f:
+            fm = re.match(r"(?:preview_)?OptiFine_([0-9][0-9.]*)_", f)
+            mc = fm.group(1) if fm else None
+        rows.append({"file": f, "mc": mc, "kind": kind, "preview": kind == "preview", "label": _opt_text(_opt_cell(body, "colFile")),
+                     "download": dl, "download_href_raw": html_unescape(dl_raw) if dl_raw else None, "wrapper_host": wrapper,
+                     "mirror": mirror, "date": _opt_text(_opt_cell(body, "colDate")), "forge": _opt_text(_opt_cell(body, "colForge")),
+                     "raw_tag": clip(m.group(0), 420)})
+    return rows
+
+
+def _rows_from_anchors(scan, base):
+    """Fallback for a page whose rows are not <tr class='downloadLine ...'> any more: pair the Download and (Mirror) anchors."""
     def fname(a):
         q = urllib.parse.parse_qs(urllib.parse.urlparse(a.get("href") or "").query)
         return (q.get("f") or [None])[0]
-
     downloads, mirrors = [], {}
     for a in scan.anchors:
         text = " ".join((a["text"] or "").split()).lower()
@@ -335,16 +396,28 @@ def analyse_downloads(html, base):
             continue
         if text == "download":
             downloads.append(a)
-        elif "mirror" in text:
-            if fname(a):
-                mirrors[fname(a)] = absu(a["href"])
+        elif "mirror" in text and fname(a):
+            mirrors[fname(a)] = urllib.parse.urljoin(base, a["href"])
     rows = []
     for a in downloads:
-        f = fname(a)
+        dl, wrapper = optifine_target(a["href"], base)
+        q = urllib.parse.parse_qs(urllib.parse.urlparse(dl or "").query)
+        f = (q.get("f") or [None])[0] or fname(a)
         m = re.match(r"(?:preview_)?OptiFine_([0-9][0-9.]*)_", f or "")
-        rows.append({"file": f, "mc": m.group(1) if m else None,
-                     "preview": bool(f and (f.startswith("preview_") or re.search(r"_pre\d*", f))),
-                     "download": absu(a["href"]), "mirror": mirrors.get(f), "raw_tag": a["raw"]})
+        kind = "preview" if f and (f.startswith("preview_") or re.search(r"_pre\d*", f)) else "other"
+        rows.append({"file": f, "mc": m.group(1) if m else None, "kind": kind, "preview": kind == "preview", "label": "",
+                     "download": dl, "download_href_raw": a["href"], "wrapper_host": wrapper, "mirror": mirrors.get(f),
+                     "date": "", "forge": "", "raw_tag": a["raw"]})
+    return rows
+
+
+def analyse_downloads(html, base):
+    """What a parser finds on optifine.net/downloads, plus the markup of the 'more versions' controls."""
+    scan = scan_html(html)
+    rows = parse_optifine_rows(html, base)
+    parsed_by = "table rows"
+    if not any(r["download"] or r["mirror"] for r in rows):
+        rows, parsed_by = _rows_from_anchors(scan, base), "anchors (the row markup was not recognised)"
     names = sorted(set(re.findall(r"(?:preview_)?OptiFine_[0-9][\w.\-]*?\.jar", html)))
     mcs = []
     for r in rows:
@@ -360,7 +433,7 @@ def analyse_downloads(html, base):
                        ("preview_versions", r"\+\s*Preview\s+versions")):
         wins = []
         for m in re.finditer(pat, html, re.I):
-            wins.append(html[max(0, m.start() - 220): m.end() + 120])
+            wins.append(html[max(0, m.start() - 160): m.end() + 120])
             if len(wins) >= 2:
                 break
         markers[label] = wins
@@ -369,17 +442,22 @@ def analyse_downloads(html, base):
         text = " ".join((a["text"] or "").split())
         if re.search(r"show all versions|^\+\s*more|preview versions", text, re.I):
             toggles.append({"text": text, "href": a.get("href"), "raw_tag": a["raw"]})
-    return {"bytes": len(html), "anchors": len(scan.anchors), "download_links": len(downloads),
-            "mirror_links": len(mirrors), "distinct_jar_names": len(names), "jar_name_sample": names[:6],
-            "distinct_mc_versions": mcs, "downloadline_markers": len(re.findall(r"downloadLine", html)),
+    return {"bytes": len(html), "anchors": len(scan.anchors), "parsed_by": parsed_by,
+            "download_links": sum(1 for r in rows if r["download"] or r["mirror"]),
+            "mirror_links": sum(1 for r in rows if r["mirror"]),
+            "wrapper_hosts": dict(Counter(r["wrapper_host"] for r in rows if r["wrapper_host"])),
+            "kinds": dict(Counter(r["kind"] for r in rows)),
+            "download_same_as_mirror": sum(1 for r in rows if r["download"] and r["download"] == r["mirror"]),
+            "distinct_jar_names": len(names), "jar_name_sample": names[:6],
+            "distinct_mc_versions": mcs, "downloadline_rows": len(_OPT_TR.findall(html)),
             "rows": rows, "markers": markers, "toggles": toggles[:10]}
 
 
 def pick_row(rows, forced_mc=None):
-    """The older version the hop tests follow: not the newest, not a preview, one with a Download link."""
-    stable = [r for r in rows if r["mc"] and not r["preview"] and r["download"]]
+    """The older version the hop tests follow: not the newest, not a preview, the recommended (main) build if there is one."""
+    stable = [r for r in rows if r["mc"] and not r["preview"] and (r["mirror"] or r["download"])]
     if not stable:
-        return None, "no stable row with a Download link was found"
+        return None, "no stable row with an optifine.net link was found"
     mcs = []
     for r in stable:
         if r["mc"] not in mcs:
@@ -387,7 +465,7 @@ def pick_row(rows, forced_mc=None):
     newest = max(mcs, key=vkey)
     if forced_mc:
         if forced_mc not in mcs:
-            return None, "--optifine-mc %s has no stable row with a Download link on the page (versions: %s)" % (forced_mc, ", ".join(mcs[:12]))
+            return None, "--optifine-mc %s has no stable row on the page (versions: %s)" % (forced_mc, ", ".join(sorted(mcs, key=vkey, reverse=True)[:12]))
         cands = [forced_mc]
         why = "--optifine-mc %s" % forced_mc
     else:
@@ -397,9 +475,10 @@ def pick_row(rows, forced_mc=None):
         older = sorted([m for m in mcs if m != newest], key=vkey, reverse=True)
         cands = older[:1] or [newest]
         why = "second-newest Minecraft version on the page" if older else "only version on the page"
-    for r in stable:
-        if r["mc"] == cands[0]:
-            return r, "%s (Minecraft %s; newest on the page is %s)" % (why, cands[0], newest)
+    mine = [r for r in stable if r["mc"] == cands[0]]
+    mine.sort(key=lambda r: 0 if r["kind"] == "main" else 1)
+    if mine:
+        return mine[0], "%s (Minecraft %s, %s build; newest on the page is %s)" % (why, cands[0], mine[0]["kind"], newest)
     return None, "no row found for Minecraft %s" % cands[0]
 
 
@@ -617,20 +696,35 @@ def transport(method, url, headers, body, timeout, body_limit, peek):
 # --------------------------------------------------------------------------------------------------------------
 
 def load_key():
-    """(key or None, where it came from).  The key is never printed or stored anywhere but in memory."""
+    """(key or None, where it came from, why there is none).  The key is never printed or stored anywhere but in memory;
+    the reason names files and field NAMES only."""
     p = Path.home() / ".jarvis" / "curseforge.json"
+    shown = "~/.jarvis/curseforge.json"
+    reasons = []
     try:
         if p.exists():
             data = json.loads(p.read_text(encoding="utf-8-sig"))
-            k = str((data or {}).get("api_key") or "").strip()
-            if k:
-                return k, "~/.jarvis/curseforge.json"
-    except Exception:
-        pass
+            if not isinstance(data, dict):
+                reasons.append("%s is JSON but not an object like {\"api_key\": \"...\"}" % shown)
+            else:
+                k = str(data.get("api_key") or "").strip()
+                if k:
+                    return k, shown, None
+                reasons.append("%s exists but has no non-empty \"api_key\" (fields it has: %s)" % (shown, sorted(data.keys()) or "none"))
+        else:
+            hint = ""
+            if p.with_name("curseforge.json.txt").exists():
+                hint = " (but curseforge.json.txt exists: Windows hid the real extension; rename it)"
+            reasons.append("%s does not exist%s" % (shown, hint))
+    except ValueError as e:
+        reasons.append("%s is not valid JSON (%s)" % (shown, e))
+    except Exception as e:
+        reasons.append("%s could not be read (%s: %s)" % (shown, type(e).__name__, e))
     k = os.environ.get("CURSEFORGE_API_KEY", "").strip()
     if k:
-        return k, "environment variable CURSEFORGE_API_KEY"
-    return None, None
+        return k, "environment variable CURSEFORGE_API_KEY", None
+    reasons.append("environment variable CURSEFORGE_API_KEY is not set")
+    return None, None, "; ".join(reasons)
 
 
 def read_build():
@@ -700,7 +794,7 @@ class RangeFile(object):
 class Probe(object):
     def __init__(self, args):
         self.args = args
-        self.key, self.key_source = (None, None) if args.no_curseforge else load_key()
+        self.key, self.key_source, self.key_reason = (None, None, None) if args.no_curseforge else load_key()
         self.build = read_build()
         self.ua = "Jarvis/%s (github.com/GoatAssim)" % self.build
         self.n = 0
@@ -1149,7 +1243,16 @@ class Probe(object):
         per_mc("fabric", FABRIC_META, "loader_meta_fabric.json", fabric_rule)
         per_mc("quilt", QUILT_META, "loader_meta_quilt.json", quilt_rule)
 
+        # what do Fabric and Quilt answer for a Minecraft version that does not exist (for the `no_loader_version` refusal)?
+        for name, template in (("fabric", FABRIC_META), ("quilt", QUILT_META)):
+            r, d = self.jget(template % "99.99", "%s loader list for an unknown version" % name, expect_fail=True)
+            self.fixture("loader_meta_%s_unknown.json" % name, {"minecraft_version_asked": "99.99", "status": r.status,
+                                                                  "body": d if d is not None else clip(r.text(), 300)}, resp=r)
+            lm.setdefault(name, {})["unknown_version_answer"] = {"status": r.status, "body": clip(json.dumps(d) if d is not None else r.text(), 160)}
+            self.say("%s for an unknown Minecraft version (99.99) -> HTTP %s %s" % (name, r.status, clip(json.dumps(d) if d is not None else r.text(), 160)))
+
         # Forge: promotions_slim.json, then the maven listing
+        promos, neo_versions = None, None
         r, d = self.jget(FORGE_PROMOS, "forge promotions_slim.json")
         info = {"url": FORGE_PROMOS}
         if isinstance(d, dict) and isinstance(d.get("promos"), dict):
@@ -1200,7 +1303,7 @@ class Probe(object):
                     break
             if not chosen:
                 sample = ordered[-8:]
-            self.fixture("loader_meta_neoforge.json", {"isSnapshot": d.get("isSnapshot"), "versions": sample + ordered[-4:]}, resp=r, max_list=30,
+            self.fixture("loader_meta_neoforge.json", {"isSnapshot": d.get("isSnapshot"), "versions": list(OrderedDict.fromkeys(sample + ordered[-4:]))}, resp=r, max_list=30,
                          derived={"mc_version": mc, "latest_stable": chosen, "rule": rule_used})
             info.update({"shape": {"isSnapshot": "bool", "versions": "[str] (%d)" % len(vs)}, "entries": len(vs),
                          "latest_stable": chosen, "rule": rule_used or "no NeoForge version matched any prefix rule for %s" % mc,
@@ -1209,6 +1312,7 @@ class Probe(object):
             self.say("  Minecraft %s maps to: %s" % (mc, chosen or "NOTHING FOUND (look at the newest versions above and map by hand)"))
             self.say("  rule: %s" % info["rule"])
             self.say("  list order in the answer (first 3 / last 3): %s / %s  (so sort by number, do not trust the order)" % (vs[:3], vs[-3:]))
+            neo_versions = ordered
         else:
             info["error"] = "versions list not usable"
         lm["neoforge"] = info
@@ -1221,6 +1325,36 @@ class Probe(object):
         else:
             lm["neoforge"]["legacy_artifact"] = {"url": NEOFORGE_LEGACY, "status": r.status}
             self.say("neoforge legacy artifact: HTTP %s (nothing usable)" % r.status)
+        self.loader_coverage(promos, neo_versions)
+
+    def loader_coverage(self, promos, neo_versions):
+        """Forge and NeoForge for the newest Minecraft releases, from the lists already fetched (no requests).  It shows
+        whether the version rules hold for 2-number (26.3) and 3-number (26.1.2) Minecraft versions, and which versions have
+        a recommended Forge build."""
+        releases = (self.facts.get("mc_releases") or [self.mc])[:8]
+        table = OrderedDict()
+        self.say("")
+        self.say("loader coverage for the newest Minecraft releases (Forge: promotions; NeoForge: prefix rule, newest stable / newest of any kind):")
+        for mcv in releases:
+            row = {}
+            if promos is not None:
+                row["forge"] = {"recommended": promos.get(mcv + "-recommended"), "latest": promos.get(mcv + "-latest")}
+            if neo_versions is not None:
+                ent = None
+                for prefix, why in neoforge_prefixes(mcv):
+                    mine = [v for v in neo_versions if v.startswith(prefix)]
+                    if mine:
+                        stable = [v for v in mine if is_stable_version(v)]
+                        ent = {"prefix": prefix, "rule": why, "matches": len(mine), "stable_matches": len(stable),
+                               "newest_stable": stable[-1] if stable else None, "newest_any": mine[-1]}
+                        break
+                row["neoforge"] = ent or {"prefix": neoforge_prefixes(mcv)[0][0], "matches": 0}
+            table[mcv] = row
+            f, n = row.get("forge") or {}, row.get("neoforge") or {}
+            self.say("  %-8s forge recommended=%-9s latest=%-9s | neoforge prefix %-8s matches=%-3s newest stable=%-12s newest any=%s" % (
+                mcv, f.get("recommended"), f.get("latest"), n.get("prefix"), n.get("matches"), n.get("newest_stable"), n.get("newest_any")))
+        self.facts["loader_coverage"] = table
+        self.fixture("loader_meta_coverage.json", {"minecraft_releases_checked": releases, "per_version": table}, max_list=20)
 
     # =========================================================================================================
     # CURSEFORGE
@@ -1614,7 +1748,7 @@ class Probe(object):
         ua_used = self.ua
         scan = analyse_downloads(r.text(), OPT_URL) if r.status == 200 else None
         if r.status != 200 or not scan or not scan["download_links"]:
-            self.say("  first try gave %s (%s Download links). Trying once with a browser-like User-Agent to see the difference."
+            self.say("  first try gave %s (%s rows with a link). Trying once with a browser-like User-Agent to see the difference."
                      % (r.status if r.status else r.error, scan["download_links"] if scan else 0))
             hdr2 = dict(hdr, **{"User-Agent": BROWSER_UA})
             r2 = self.send("GET", OPT_URL, headers=hdr2, pause=OPT_PAUSE, body_limit=HTML_CAP, label="optifine downloads page (browser UA)")
@@ -1631,19 +1765,27 @@ class Probe(object):
         hdr["User-Agent"] = ua_used
         html = r.text()
         self.fixture_text("optifine_downloads.html", html, resp=r, note="truncated at %d bytes" % HTML_CAP if r.truncated else None)
+        rows = scan["rows"]
         self.say("downloads page: HTTP %s, %s%s, user agent used: %s" % (r.status, human_bytes(len(r.body)), " (TRUNCATED at the cap)" if r.truncated else "", o["ua_used"]))
-        self.say("  a naive parser finds: %d Download links, %d (Mirror) links, %d distinct jar names, %d `downloadLine` markers"
-                 % (scan["download_links"], scan["mirror_links"], scan["distinct_jar_names"], scan["downloadline_markers"]))
-        self.say("  Minecraft versions in the first page (in page order): %s" % scan["distinct_mc_versions"])
-        self.say("  first rows: %s" % [(x["file"], "preview" if x["preview"] else "stable") for x in scan["rows"][:4]])
-        if scan["rows"]:
-            self.say("  markup of the first Download link: %s" % clip(scan["rows"][0]["raw_tag"], 300))
+        self.say("  rows found by the %s parser: %d  (by kind: %s) in %d Minecraft sections" % (scan["parsed_by"], len(rows), scan["kinds"], len(scan["distinct_mc_versions"])))
+        stable_mcs = sorted({x["mc"] for x in rows if x["mc"] and not x["preview"]}, key=vkey, reverse=True)
+        self.say("  newest Minecraft versions with a non-preview build: %s" % stable_mcs[:6])
+        self.say("  Download button: %d rows go through a wrapper host %s (NEVER contacted by this probe); for %d rows its `url` parameter is the "
+                 "same optifine.net link as the (Mirror) link" % (sum(scan["wrapper_hosts"].values()), scan["wrapper_hosts"] or "-", scan["download_same_as_mirror"]))
+        self.say("  (Mirror) links that point straight at optifine.net: %d" % scan["mirror_links"])
+        for x in rows[:2]:
+            self.say("  sample row: %s %s | %s | %s | %s | mirror=%s" % (x["mc"], x["kind"], x["label"], x["date"], x["forge"], x["mirror"]))
+            self.say("      raw: %s" % clip(" ".join(x["raw_tag"].split()), 360))
         for label, wins in scan["markers"].items():
-            self.say("  markup around %r: %s" % (label, ("\n      ".join(clip(" ".join(w.split()), 460) for w in wins[:1])) if wins else "NOT in the raw HTML (script-built, or another wording)"))
-        for t in scan["toggles"]:
-            self.say("  toggle anchor: text=%r href=%r" % (t["text"], t["href"]))
-        o["rows"], o["markers_found"] = len(scan["rows"]), {k: bool(v) for k, v in scan["markers"].items()}
-        # extra pages only when the toggles are real links
+            self.say("  markup around %r: %s" % (label, clip(" ".join(wins[0].split()), 330) if wins else "NOT in the raw HTML (script-built, or another wording)"))
+        self.say("  the 'show all / more / preview' controls are javascript: links that reveal hidden blocks of THIS page: %s"
+                 % ("yes" if all(str(t.get("href") or "").startswith("javascript") for t in scan["toggles"]) and scan["toggles"] else "NO, see the toggle anchors in the report"))
+        o["rows"], o["markers_found"] = len(rows), {k: bool(v) for k, v in scan["markers"].items()}
+        o["wrapper_hosts"] = scan["wrapper_hosts"]
+        self.fixture("optifine_rows.json", {"page_url": OPT_URL, "parsed_by": scan["parsed_by"], "kinds": scan["kinds"],
+                                            "rows": [{k: v for k, v in x.items() if k not in ("raw_tag", "download_href_raw")} for x in rows]},
+                     max_list=400, max_str=300)
+        # the toggles are real links on some other layout: fetch what they point at (not needed for the layout seen in the first run)
         extra = []
         for t in scan["toggles"]:
             href = t.get("href") or ""
@@ -1654,115 +1796,109 @@ class Probe(object):
         for i, u in enumerate(extra[:3], 1):
             rx = self.send("GET", u, headers=hdr, pause=OPT_PAUSE, body_limit=HTML_CAP, label="optifine extra page %d" % i)
             if rx.status == 200:
-                sx = analyse_downloads(rx.text(), u)
                 self.fixture_text("optifine_downloads_more_%d.html" % i, rx.text(), resp=rx)
-                self.say("  extra page %s -> %d Download links, %d distinct jar names, Minecraft versions: %s" % (
-                    clip(u, 90), sx["download_links"], sx["distinct_jar_names"], sx["distinct_mc_versions"][:12]))
-        if not extra:
-            self.say("  the 'show all / more / preview' controls are not plain links: any further versions are in this one page's HTML or are filled in by script")
 
-        row, why = pick_row(scan["rows"], self.args.optifine_mc)
+        row, why = pick_row(rows, self.args.optifine_mc)
         if not row:
             self.say("  cannot pick a version to follow: %s" % why)
             o["stopped_because"] = why
             return
+        link = row["mirror"] or row["download"]
+        o["link_source"] = "(Mirror) link" if row["mirror"] else "Download link, unwrapped"
         self.say("")
         self.say("-- following ONE older version: %s  (%s) --" % (row["file"], why))
+        self.say("  starting from its %s: %s" % (o["link_source"], link))
+        if row["download"] and row["mirror"] and row["download"] != row["mirror"]:
+            self.say("  NOTE: the Download button's inner link differs from the (Mirror) link: %s" % row["download"])
         o["file"] = row["file"]
-        # chain A: the Download link
-        self.say("  Download link, one hop at a time:")
-        hopsA, infoA = self.follow_chain(row["download"], "optifine Download", OPT_ALLOW, headers=hdr, referer=OPT_URL, max_hops=5,
+
+        def tail(info, hops):
+            last = hops[-1] if hops else {}
+            return last, bool(info.get("final_url") and last.get("zip_signature"))
+
+        hopsA, infoA = self.follow_chain(link, "optifine chain", OPT_ALLOW, headers=hdr, referer=OPT_URL, max_hops=5,
                                          pause=OPT_PAUSE, peek=16, countdown_wait=True)
         self.describe_hops(hopsA)
-        results = {"download_chain": hopsA, "download_info": {k: v for k, v in infoA.items()}}
+        results = {"link_followed": link, "link_source": o["link_source"], "chain": hopsA, "chain_info": dict(infoA),
+                   "download_button": {"raw_href": row.get("download_href_raw"), "wrapper_host": row.get("wrapper_host"),
+                                       "inner_link": row.get("download"), "same_as_mirror": row["download"] == row["mirror"]}}
         final = infoA.get("final_url")
-        last = hopsA[-1] if hopsA else {}
-        o["reached_file"] = bool(final and last.get("zip_signature"))
-        if not o["reached_file"]:
+        last, reached = tail(infoA, hopsA)
+        o["reached_file"] = reached
+        if not reached:
             o["stopped_because"] = infoA.get("stopped_because") or "the chain ended without a jar (see the hops)"
-        elif final:
+            self.say("  RESULT: the chain did NOT reach a jar: %s" % o["stopped_because"])
+        else:
             self.say("  RESULT: the chain reached a file: %s, content-type %s, length %s, filename %s, ZIP signature %s"
                      % (clip(final, 120), last.get("content_type"), last.get("content_length"), last.get("filename"), "yes" if last.get("zip_signature") else "NO"))
             self.say("  how the final link is formed: %s" % clip(json.dumps(link_shape(final)), 400))
             results["final_link_shape"] = link_shape(final)
             o["expected_name_matches"] = (last.get("filename") or "") == row["file"]
-        # http vs https for the first hop
         if hopsA and hopsA[0].get("scheme") == "http":
-            u = "https://" + row["download"].split("://", 1)[1]
+            u = "https://" + link.split("://", 1)[1]
             rs = self.send("GET", u, headers=hdr, pause=OPT_PAUSE, body_limit=400000, peek=16, label="optifine first hop over https")
             results["https_first_hop"] = {"url": u, "status": rs.status, "error": rs.error, "content_type": rs.header("content-type"), "location": rs.location()}
             self.say("  the site's links are plain http; the same first hop over https -> %s %s" % (rs.status or rs.error, rs.header("content-type") or ""))
             o["https_works"] = bool(rs.status and rs.status < 400)
-        # single-use test: same final link again straight away
-        if o["reached_file"]:
-            rr = self.send("GET", final, headers=dict(hdr, **({"Referer": infoA["final_referer"]} if infoA.get("final_referer") else {})),
-                           pause=OPT_PAUSE, body_limit=400000, peek=16, label="optifine final link again (2 s later)")
+        if reached:
+            h_a = dict(hdr, **({"Referer": infoA["final_referer"]} if infoA.get("final_referer") else {}))
+            rr = self.send("GET", final, headers=h_a, pause=OPT_PAUSE, body_limit=400000, peek=16, label="optifine final link again (straight away)")
             ok = bool(rr.status and rr.status < 300 and rr.body[:4] == b"PK\x03\x04")
             o["reuse_2s"] = ok
-            results["reuse_after_2s"] = {"status": rr.status, "content_type": rr.header("content-type"), "zip_signature": rr.body[:4] == b"PK\x03\x04", "location": rr.location()}
+            results["reuse_straight_away"] = {"status": rr.status, "content_type": rr.header("content-type"), "zip_signature": rr.body[:4] == b"PK\x03\x04", "location": rr.location()}
             self.say("  the SAME final link a second time, straight away -> HTTP %s, type %s, ZIP signature %s  => %s" % (
                 rr.status, rr.header("content-type"), "yes" if ok else "no", "re-usable" if ok else "SINGLE-USE (or bound to something else)"))
 
-        # chain M: the (Mirror) link, final fetch repeated without Referer
-        if row.get("mirror"):
-            self.say("  (Mirror) link, one hop at a time:")
-            hopsM, infoM = self.follow_chain(row["mirror"], "optifine Mirror", OPT_ALLOW, headers=hdr, referer=OPT_URL, max_hops=5,
-                                             pause=OPT_PAUSE, peek=16, countdown_wait=True)
-            self.describe_hops(hopsM)
-            results["mirror_chain"] = hopsM
-            results["mirror_info"] = infoM
-            lastM = hopsM[-1] if hopsM else {}
-            o["mirror_reached_file"] = bool(infoM.get("final_url") and lastM.get("zip_signature"))
-            same_host = [h.get("host") for h in hopsA] == [h.get("host") for h in hopsM]
-            self.say("  RESULT: the mirror chain %s; same hosts as the Download chain: %s" % (
-                "reached a jar" if o["mirror_reached_file"] else "did NOT reach a jar (%s)" % infoM.get("stopped_because"), "yes" if same_host else "no"))
-            if o["mirror_reached_file"] and infoM.get("final_referer"):
-                rm = self.send("GET", infoM["final_url"], headers=hdr, pause=OPT_PAUSE, body_limit=400000, peek=16, label="optifine mirror final link without Referer")
-                okm = bool(rm.status and rm.status < 300 and rm.body[:4] == b"PK\x03\x04")
-                o["final_without_referer"] = okm
-                results["mirror_final_without_referer"] = {"status": rm.status, "content_type": rm.header("content-type"), "zip_signature": rm.body[:4] == b"PK\x03\x04"}
-                self.say("  the mirror's final link again WITHOUT a Referer header -> HTTP %s, ZIP %s  (%s)" % (
-                    rm.status, "yes" if okm else "no",
-                    "a Referer is not needed" if okm else ("a Referer seems to be needed" if o.get("reuse_2s") else "inconclusive: the link may simply be single-use")))
-        else:
-            self.say("  no (Mirror) link found for this row")
-
-        # expiry: an unused fresh link and the old link, after the wait
-        if o["reached_file"]:
-            n_pre = max(1, len(hopsA) - 1)
-            self.say("  preparing a fresh, UNUSED final link (same chain, stopped one hop early) ...")
-            hopsB, infoB = self.follow_chain(row["download"], "optifine fresh chain", OPT_ALLOW, headers=hdr, referer=OPT_URL, max_hops=n_pre,
-                                             pause=OPT_PAUSE, peek=16, countdown_wait=True)
-            results["fresh_chain"] = hopsB
-            pending = infoB.get("pending_url")
-            wait = max(0, int(self.args.optifine_wait))
-            if pending and pending != final:
-                self.say("  waiting %d seconds (Ctrl+C skips the rest of the OptiFine tests) ..." % wait)
-                t_end = time.monotonic() + wait
-                try:
-                    while time.monotonic() < t_end:
-                        time.sleep(min(15, max(0.0, t_end - time.monotonic())))
-                        left = int(t_end - time.monotonic())
-                        if left > 0:
-                            print("      %d s left" % left)
-                            sys.stdout.flush()
-                except KeyboardInterrupt:
-                    self.say("  wait skipped by Ctrl+C")
-                h_old = dict(hdr, **({"Referer": infoA["final_referer"]} if infoA.get("final_referer") else {}))
-                ro = self.send("GET", final, headers=h_old, pause=OPT_PAUSE, body_limit=400000, peek=16, label="optifine used link after the wait")
-                h_new = dict(hdr, **({"Referer": infoB["pending_referer"]} if infoB.get("pending_referer") else {}))
-                rn = self.send("GET", pending, headers=h_new, pause=OPT_PAUSE, body_limit=400000, peek=16, label="optifine unused link after the wait")
-                old_ok = bool(ro.status and ro.status < 300 and ro.body[:4] == b"PK\x03\x04")
-                new_ok = bool(rn.status and rn.status < 300 and rn.body[:4] == b"PK\x03\x04")
-                o["old_after_wait"], o["fresh_after_wait"] = old_ok, new_ok
-                results["after_wait"] = {"seconds": wait, "used_link": {"status": ro.status, "zip": old_ok, "location": ro.location()},
-                                         "unused_link": {"url": pending, "status": rn.status, "zip": new_ok, "location": rn.location(),
-                                                         "content_type": rn.header("content-type")}}
-                self.say("  after %ds: the link already used once -> HTTP %s (%s); the link never used before -> HTTP %s (%s)" % (
-                    wait, ro.status, "ZIP" if old_ok else "no file", rn.status, "ZIP" if new_ok else "no file"))
+            n_pre = len(hopsA) - 1
+            if n_pre >= 1:
+                # does the final request need the Referer header?  A fresh, never-used link, fetched at once without it.
+                self.say("  fresh chain for the Referer test (stopped one hop before the file) ...")
+                hopsB, infoB = self.follow_chain(link, "optifine referer chain", OPT_ALLOW, headers=hdr, referer=OPT_URL, max_hops=n_pre,
+                                                 pause=OPT_PAUSE, peek=16, countdown_wait=True)
+                results["referer_test_chain"] = hopsB
+                pb = infoB.get("pending_url")
+                if pb:
+                    rb = self.send("GET", pb, headers=hdr, pause=OPT_PAUSE, body_limit=400000, peek=16, label="optifine fresh final link WITHOUT Referer")
+                    okb = bool(rb.status and rb.status < 300 and rb.body[:4] == b"PK\x03\x04")
+                    o["final_without_referer"] = okb
+                    results["fresh_without_referer"] = {"status": rb.status, "content_type": rb.header("content-type"), "zip_signature": rb.body[:4] == b"PK\x03\x04", "location": rb.location()}
+                    self.say("  a fresh final link fetched WITHOUT a Referer header -> HTTP %s, ZIP %s  (%s)" % (
+                        rb.status, "yes" if okb else "no", "a Referer is not needed" if okb else "a Referer (or the earlier cookies) seems to be needed"))
+                # expiry: one more fresh link, left unused, and the already-used link, both after the wait
+                self.say("  preparing a fresh, UNUSED final link for the expiry test ...")
+                hopsC, infoC = self.follow_chain(link, "optifine expiry chain", OPT_ALLOW, headers=hdr, referer=OPT_URL, max_hops=n_pre,
+                                                 pause=OPT_PAUSE, peek=16, countdown_wait=True)
+                results["expiry_test_chain"] = hopsC
+                pending = infoC.get("pending_url")
+                wait = max(0, int(self.args.optifine_wait))
+                if pending and pending != final:
+                    self.say("  waiting %d seconds (Ctrl+C skips the rest of the OptiFine tests) ..." % wait)
+                    t_end = time.monotonic() + wait
+                    try:
+                        while time.monotonic() < t_end:
+                            time.sleep(min(15, max(0.0, t_end - time.monotonic())))
+                            left = int(t_end - time.monotonic())
+                            if left > 0:
+                                print("      %d s left" % left)
+                                sys.stdout.flush()
+                    except KeyboardInterrupt:
+                        self.say("  wait skipped by Ctrl+C")
+                    ro = self.send("GET", final, headers=h_a, pause=OPT_PAUSE, body_limit=400000, peek=16, label="optifine used link after the wait")
+                    h_new = dict(hdr, **({"Referer": infoC["pending_referer"]} if infoC.get("pending_referer") else {}))
+                    rn = self.send("GET", pending, headers=h_new, pause=OPT_PAUSE, body_limit=400000, peek=16, label="optifine unused link after the wait")
+                    old_ok = bool(ro.status and ro.status < 300 and ro.body[:4] == b"PK\x03\x04")
+                    new_ok = bool(rn.status and rn.status < 300 and rn.body[:4] == b"PK\x03\x04")
+                    o["old_after_wait"], o["fresh_after_wait"] = old_ok, new_ok
+                    results["after_wait"] = {"seconds": wait, "used_link": {"status": ro.status, "zip": old_ok, "location": ro.location()},
+                                             "unused_link": {"url": pending, "status": rn.status, "zip": new_ok, "location": rn.location(),
+                                                             "content_type": rn.header("content-type")}}
+                    self.say("  after %ds: the link already used once -> HTTP %s (%s); the link never used before -> HTTP %s (%s)" % (
+                        wait, ro.status, "ZIP" if old_ok else "no file", rn.status, "ZIP" if new_ok else "no file"))
+                else:
+                    self.say("  could not prepare an unused link; the expiry test was skipped")
             else:
-                self.say("  could not prepare an unused link (the chain was too short to stop early); the expiry test was skipped")
-        self.fixture("optifine_hops.json", {"page_url": OPT_URL, "chosen_row": {k: v for k, v in row.items() if k != "raw_tag"},
+                self.say("  the chain is a single request, so there is no earlier hop to stop at; the Referer and expiry tests were skipped")
+        self.fixture("optifine_hops.json", {"page_url": OPT_URL, "chosen_row": {k: v for k, v in row.items() if k not in ("raw_tag",)},
                                             "chosen_because": why, "user_agent": o["ua_used"], "results": results}, max_list=40, max_str=130000)
         route, rwhy = decide_optifine_route(o)
         o["route"], o["route_why"] = route, rwhy
@@ -1807,7 +1943,7 @@ class Probe(object):
         print("\nUp to %d requests in total (hard ceiling %d), about %.1f seconds apart (%.1f s on optifine.net)." % (
             self.planned_total(), MAX_REQUESTS, DEFAULT_PAUSE, OPT_PAUSE))
         print("CurseForge key: %s" % ("found in %s (it is sent only to api.curseforge.com)" % self.key_source if self.key else
-                                      "none found (~/.jarvis/curseforge.json, CURSEFORGE_API_KEY): the CurseForge part would be skipped"))
+                                      "none found (%s): the CurseForge part would be skipped" % self.key_reason))
 
     def banner(self):
         a = self.args
@@ -1825,7 +1961,7 @@ class Probe(object):
                 self.say("  api.curseforge.com                    CurseForge API (key found in %s; sent ONLY here)" % self.key_source)
                 self.say("  *.forgecdn.net                        one file's first byte, and one small modpack zip's file list (no key sent)")
             else:
-                self.say("  (CurseForge: no key found in ~/.jarvis/curseforge.json or CURSEFORGE_API_KEY -> that section is SKIPPED)")
+                self.say("  (CurseForge: NO KEY -> that section is SKIPPED.  %s)" % self.key_reason)
         if not a.no_optifine:
             self.say("  optifine.net                          the official download pages; ONE older version, one file, ~%d s of waiting" % a.optifine_wait)
         self.say("")
@@ -1849,7 +1985,9 @@ class Probe(object):
             self.say("   User-Agent that worked: %s; plain-http links work over https: %s; final link needs a Referer: %s"
                      % (o.get("ua_used", "?"), o.get("https_works", "not tested"),
                         {True: "no", False: "maybe", None: "not tested"}[o.get("final_without_referer")]))
-            self.say("   Rows on the page: %s; the 'show all / more / preview' markers in the raw HTML: %s" % (o.get("rows", "?"), o.get("markers_found", "?")))
+            self.say("   Rows on the page: %s; link followed: %s; the Download button's wrapper host(s) (not contacted): %s"
+                     % (o.get("rows", "?"), o.get("link_source", "?"), o.get("wrapper_hosts") or "none"))
+            self.say("   the 'show all / more / preview' markers in the raw HTML: %s" % o.get("markers_found", "?"))
         else:
             self.say("   NOT DETERMINED: the OptiFine section did not run (%s)." % ("--no-optifine" if self.args.no_optifine else "see failures"))
         self.say("")
@@ -1915,8 +2053,15 @@ class Probe(object):
                     self.say("             fallback: %s (%d versions)" % (info["maven_fallback"]["url"], info["maven_fallback"]["versions"]))
                 if info.get("legacy_artifact"):
                     self.say("             legacy 1.20.1 artifact: %s" % info["legacy_artifact"])
+                if info.get("unknown_version_answer"):
+                    self.say("             an unknown Minecraft version answers: %s" % info["unknown_version_answer"])
             if cf.get("loaders_from_endpoint"):
                 self.say("   cross-check, CurseForge /minecraft/modloader prefixes seen: %s" % sorted(cf["loaders_from_endpoint"]))
+            if f.get("loader_coverage"):
+                self.say("   Forge / NeoForge per recent Minecraft release (see the coverage table above for the rule used):")
+                for mcv, row in f["loader_coverage"].items():
+                    fg, nf = row.get("forge") or {}, row.get("neoforge") or {}
+                    self.say("     %-8s forge rec=%s latest=%s | neoforge %s (%s matches)" % (mcv, fg.get("recommended"), fg.get("latest"), nf.get("newest_stable") or nf.get("newest_any"), nf.get("matches")))
         else:
             self.say("   NOT DETERMINED (%s)" % ("--no-loaders" if self.args.no_loaders else "the loader section failed"))
         self.say("")
@@ -1927,7 +2072,7 @@ class Probe(object):
         self.say("")
         self.say("9. WHAT DID NOT RUN OR FAILED")
         if not self.key and not self.args.no_curseforge:
-            self.say("   - CurseForge was skipped: no key.")
+            self.say("   - CurseForge was skipped: no key (%s)." % self.key_reason)
         for label, reason in self.failures:
             self.say("   - %s: %s" % (label, reason))
         if not self.failures and (self.key or self.args.no_curseforge):

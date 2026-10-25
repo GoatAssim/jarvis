@@ -251,11 +251,31 @@ check("the retry downloads the fallback into <library>/Stremio/<Show>/Season 02/
       and final.relative_to(LIB / "e2e").as_posix() == "Stremio/Spirit Hunters/Season 02/Spirit Hunters - S02E02.mkv")
 check("the group's progress counts it (what the 'batch finished' notice reads)", store2.group_progress(item["group_id"])["total"] == 1)
 
+# ---- 9b. the owner's own folder (2026-10-25: "download them inside D:\\...\\rick and morty" was ignored)
+OWN = Path(HOME) / "own-drive" / "rick and morty"
+dplan = tools.tool_bulk_plan({"title": "Spirit Hunters", "quality": "1080p", "audio": "dub", "dest": str(OWN)})
+check("a full-path folder is the plan's destination, and the plan says so", dplan["ok"] and dplan["destination"] == str(OWN).replace("\\", "/")
+      and str(OWN).replace("\\", "/") in dplan["message"])
+before_rows = len(rows())
+cancelled = tools.tool_bulk_run({"plan_id": dplan["plan_id"]})
+check("saving outside the library is asked about; unattended (no answer) nothing is queued", cancelled.get("cancelled") is True and len(rows()) == before_rows)
+res = bulk.run_plan(dplan["plan_id"], store=store)
+mine = [r for r in rows() if (r.get("options") or {}).get("dest_abs")]
+check("once allowed, every row carries the folder", res["ok"] and mine and all(r["options"]["dest_abs"] == str(OWN) for r in mine)
+      and all(r["options"].get("show") == "Spirit Hunters" for r in mine))
+r = tools.tool_bulk_plan({"title": "Spirit Hunters", "season": 1, "dest": "C:/../../Windows"})
+check("a folder with '..' is refused when planning, before anything is asked", r["ok"] is False and "usable full path" in r["error"])
+sub = tools.tool_bulk_plan({"title": "Spirit Hunters", "season": 1, "dest": "Shows/Spirit"})
+check("a sub-folder of the library needs no question and shows under the library", sub["ok"] and sub["destination"].endswith("/Shows/Spirit")
+      and sub["destination"].startswith(str(LIB).replace("\\", "/")))
+
 # ---- 10. the declarations
 check("both tools are declared in the stremio group", tools.TOOL_GROUP == "stremio" and set(tools.TOOLS) == {"bulk_plan", "bulk_run"}
       and {s["name"] for s in tools.TOOL_SCHEMAS} == set(tools.TOOLS))
 check("bulk_run is confirm-gated out of band, bulk_plan is not", tools.TOOL_CONFIRM_REQUIRED == {"bulk_run"})
-check("no tool takes a path or a URL", not any(k in json.dumps(tools.TOOL_SCHEMAS) for k in ('"url"', '"path"', '"dest"')))
+check("no tool takes a URL or a file path; bulk_plan takes ONE folder, `dest` (the owner's own words: 2026-10-25)",
+      not any(k in json.dumps(tools.TOOL_SCHEMAS) for k in ('"url"', '"path"')) and "dest" in tools.TOOL_SCHEMAS[0]["parameters"]["properties"]
+      and "dest" not in tools.TOOL_SCHEMAS[1]["parameters"]["properties"])
 bad = [(n, checklist_schema.validate_entry(n, e)) for n, e in tools.TEST_CHECKLIST.items() if checklist_schema.validate_entry(n, e)]
 check("every checklist entry is well formed", not bad and set(tools.TEST_CHECKLIST) == set(tools.TOOLS))
 

@@ -22,9 +22,10 @@ ACTIVE_STATES = ("probing", "connecting", "downloading", "postprocessing")
 WAITING_STATES = ("queued", "stalled")
 FINAL_STATES = ("done", "failed", "cancelled")
 # A provider row in one of these may be dismissed (hidden; no file is touched).  `unknown` is
-# not final, but nothing is running for it either.  A hub row is never dismissed: it is cancelled
-# (dl_cancel) and removed from History.
+# not final, but nothing is running for it either.  A hub row may be hidden once it has FAILED or been
+# CANCELLED (nothing is running and nothing was kept); a finished one is removed from History instead.
 DISMISSABLE_STATES = FINAL_STATES + ("unknown",)
+HUB_DISMISSABLE_STATES = ("failed", "cancelled")
 # States in which a speed / ETA makes no sense: they are cleared on entry.
 NO_RATE_STATES = ("queued", "paused", "stalled", "failed", "cancelled", "done", "unknown")
 
@@ -77,8 +78,10 @@ def is_active(state):
 
 
 def is_dismissable(owner, state):
-    """May this row be hidden?  Provider rows that are unknown or finished, nothing else."""
-    return owner != "hub" and state in DISMISSABLE_STATES
+    """May this row be hidden?  A provider row that is unknown or finished; a hub row that failed or was cancelled."""
+    if owner == "hub":
+        return state in HUB_DISMISSABLE_STATES
+    return state in DISMISSABLE_STATES
 
 
 def can_transition(old, new, owner="hub"):
