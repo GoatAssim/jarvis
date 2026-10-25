@@ -11,19 +11,28 @@
 Only the owner writes this file (there is deliberately no tool that does).  Two rules are
 enforced on READ, so a hand-edit can't weaken them:
 
-  * the server and web URLs must be http on a loopback address (plan section 14: "keep the
-    Stremio server and web UI bound to 127.0.0.1").  The hub's SSRF allow-list entry for the
+  * by default the server and web URLs must be http on a loopback address (plan section 14: "keep
+    the Stremio server and web UI bound to 127.0.0.1").  The hub's SSRF allow-list entry for the
     server is derived from `server.url`, so a non-loopback host here would open the guard;
-    such a value is ignored and the default is used (and `problems()` says so);
+    such a value is ignored and the default is used (and `problems()` says so).  The owner can
+    switch that rule off with `network.allow_remote` (the "Allow addresses other than this PC" box,
+    saved only by the owner's own button): then http AND https addresses on any host are accepted
+    (a Tailscale / LAN address, a name, Stremio's own web.stremio.com), still with no user name,
+    password, path or query in them;
   * `JARVIS_STREMIO_SERVER_URL` (the tests, or a second server on another port) overrides the
     server URL but obeys the same rule.
+
+    "network": {"allow_remote": false},               # off unless the owner ticked the box
+    "open":    {"with": "browser"}                    # "browser" or "native" (the Stremio app, stremio:// links)
 """
 
 import copy
+import ipaddress
 import json
 import os
 import re
 import shutil
+import socket
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -33,6 +42,7 @@ from . import detect
 DEFAULT_SERVER_URL = "http://127.0.0.1:11470"
 DEFAULT_WEB_URL = "http://127.0.0.1:8080"
 ENV_SERVER_URL = "JARVIS_STREMIO_SERVER_URL"
+STREMIO_SITE_URL = "https://web.stremio.com"       # Stremio's own hosted web app; a preset for the web address (needs allow_remote)
 LOOPBACK = ("127.0.0.1", "localhost", "::1")
 
 DEFAULTS = {
@@ -41,7 +51,10 @@ DEFAULTS = {
     "player": {"kind": "auto", "exe": ""},
     "account": {},
     "prefs": {},
+    "network": {"allow_remote": False},
+    "open": {"with": "browser"},
 }
+OPEN_WITH = ("browser", "native")
 _SECRET_KEYS = ("auth_key", "authkey", "password", "token", "cookie")
 
 
@@ -87,17 +100,108 @@ def _loopback_url(url):
     return "http://%s%s" % ("[%s]" % host if ":" in host else host, ":%d" % parts.port if parts.port else "")
 
 
+_HOST_CHARS = re.compile(r"^[a-z0-9._:\-]+$")
+
+
+def _remote_url(url):
+    """Like `_loopback_url` but for any host and http or https (only used when the owner allowed it): the URL without
+    a trailing slash, or None.  Still no user name, password, path, query or fragment."""
+    try:
+        parts = urlsplit(str(url or "").strip())
+        host = (parts.hostname or "").lower()
+        parts.port  # noqa: B018 - raises ValueError on a bad port
+    except ValueError:
+        return None
+    scheme = parts.scheme.lower()
+    if scheme not in ("http", "https") or not host or not _HOST_CHARS.match(host) or parts.username or parts.password:
+        return None
+    if parts.path not in ("", "/") or parts.query or parts.fragment:
+        return None
+    return "%s://%s%s" % (scheme, "[%s]" % host if ":" in host else host, ":%d" % parts.port if parts.port else "")
+
+
+def allow_remote(cfg=None):
+    """True only when the owner ticked "Allow addresses other than this PC" (network.allow_remote is exactly true)."""
+    cfg = cfg if isinstance(cfg, dict) else load()
+    block = cfg.get("network")
+    return isinstance(block, dict) and block.get("allow_remote") is True
+
+
+def _address_url(url, remote_ok=False):
+    """The one URL check for the server and web addresses: loopback http, or (remote_ok) any http/https host."""
+    return _remote_url(url) if remote_ok else _loopback_url(url)
+
+
+def _address_error(label, got, remote_ok):
+    """The refusal sentence for a bad address.  Keeps the old wording when remote addresses are off and says how to
+    allow them; says what IS accepted when they are on."""
+    if remote_ok:
+        return "the %s must be an http or https address with just a host and a port, like https://100.72.25.9:8080 (got %r)" % (label, str(got)[:80])
+    return ("the %s must be http on 127.0.0.1 or localhost (got %r). To use another address, tick 'Allow addresses other than "
+            "this PC' and save again" % (label, str(got)[:80]))
+
+
+def is_this_pc(url):
+    """True when the URL's host is this PC: a loopback name or an address that belongs to one of this PC's own network
+    cards (a Tailscale or LAN address included).  Found by trying to bind that address, so a name is resolved but nothing is
+    ever contacted.  A host that is somewhere else (web.stremio.com, another machine) is False."""
+    try:
+        host = (urlsplit(str(url or "")).hostname or "").lower()
+    except ValueError:
+        return False
+    if not host:
+        return False
+    if host in LOOPBACK:
+        return True
+    try:
+        ipaddress.ip_address(host)
+        addresses = [host]
+    except ValueError:
+        try:
+            addresses = sorted({info[4][0] for info in socket.getaddrinfo(host, None, type=socket.SOCK_STREAM)})[:8]
+        except (OSError, UnicodeError):
+            return False
+    for ip in addresses:
+        try:
+            addr = ipaddress.ip_address(ip)
+        except ValueError:
+            continue
+        if addr.is_loopback:
+            return True
+        sock = socket.socket(socket.AF_INET6 if addr.version == 6 else socket.AF_INET, socket.SOCK_STREAM)
+        try:
+            sock.bind((ip, 0))
+            return True
+        except OSError:
+            continue
+        finally:
+            sock.close()
+    return False
+
+
+def open_with_value(cfg=None):
+    """'browser' (default) or 'native': where playback links open (the default browser, or the Stremio app)."""
+    cfg = cfg if isinstance(cfg, dict) else load()
+    block = cfg.get("open")
+    value = str(block.get("with") or "").strip().lower() if isinstance(block, dict) else ""
+    return value if value in OPEN_WITH else "browser"
+
+
+open_with = open_with_value
+
+
 def server_url(cfg=None):
-    env = _loopback_url(os.environ.get(ENV_SERVER_URL))
+    cfg = cfg or load()
+    remote = allow_remote(cfg)
+    env = _address_url(os.environ.get(ENV_SERVER_URL), remote)
     if env:
         return env
-    cfg = cfg or load()
-    return _loopback_url((cfg.get("server") or {}).get("url")) or DEFAULT_SERVER_URL
+    return _address_url((cfg.get("server") or {}).get("url"), remote) or DEFAULT_SERVER_URL
 
 
 def web_url(cfg=None):
     cfg = cfg or load()
-    return _loopback_url((cfg.get("web") or {}).get("url")) or DEFAULT_WEB_URL
+    return _address_url((cfg.get("web") or {}).get("url"), allow_remote(cfg)) or DEFAULT_WEB_URL
 
 
 def hostport(url):
@@ -119,12 +223,17 @@ def problems(cfg=None):
     if not path.exists():
         return out
     cfg = cfg or load()
+    remote = allow_remote(cfg)
     raw_server = (cfg.get("server") or {}).get("url")
-    if raw_server and _loopback_url(raw_server) is None:
-        out.append("server.url must be http on 127.0.0.1 / localhost (got %r); the default is used" % str(raw_server)[:80])
+    if raw_server and _address_url(raw_server, remote) is None:
+        out.append(("server.url must be an http or https host and port (got %r); the default is used" if remote else
+                    "server.url must be http on 127.0.0.1 / localhost unless network.allow_remote is on (got %r); the default is used")
+                   % str(raw_server)[:80])
     raw_web = (cfg.get("web") or {}).get("url")
-    if raw_web and _loopback_url(raw_web) is None:
-        out.append("web.url must be http on 127.0.0.1 / localhost (got %r); the default is used" % str(raw_web)[:80])
+    if raw_web and _address_url(raw_web, remote) is None:
+        out.append(("web.url must be an http or https host and port (got %r); the default is used" if remote else
+                    "web.url must be http on 127.0.0.1 / localhost unless network.allow_remote is on (got %r); the default is used")
+                   % str(raw_web)[:80])
     block = cfg.get("server") or {}
     for key, label in (("runtime_exe", "the Stremio program"), ("server_js", "server.js")):
         saved = str(block.get(key) or "")
@@ -246,9 +355,10 @@ def save_paths(runtime_exe="", server_js="", server_url=None, check=None):
         return {"ok": False, "error": "; ".join(checked["problems"]), "problems": checked["problems"]}
     new_url = None
     if server_url:
-        new_url = _loopback_url(server_url)
+        remote_ok = allow_remote()
+        new_url = _address_url(server_url, remote_ok)
         if new_url is None:
-            return {"ok": False, "error": "the server address must be http on 127.0.0.1 or localhost (got %r)" % str(server_url)[:80]}
+            return {"ok": False, "error": _address_error("server address", server_url, remote_ok)}
         probe = detect.probe_port(new_url, check=check, other_ports=())
         if not probe["answers"]:
             return {"ok": False, "error": "nothing answers like a Stremio server at %s, so I didn't save that address" % new_url}
@@ -303,20 +413,22 @@ def _owner_only():
     return None
 
 
-def check_web(web):
+def check_web(web, remote_ok=None):
     """(clean, problems) for the stremio-web block the page sends: {'url', 'dir', 'start_cmd'}.  Only the keys
     present are checked.  Read-only: it looks at the folder and nothing else.  `dir` '' turns stremio-web off;
-    `start_cmd` '' goes back to the default command."""
+    `start_cmd` '' goes back to the default command.  `remote_ok` (None = what is saved now) says whether an address
+    other than this PC is accepted."""
     clean, problems_out = {}, []
+    remote_ok = allow_remote() if remote_ok is None else bool(remote_ok)
     if not isinstance(web, dict):
         return clean, ["the stremio-web settings must be an object with url, dir and start_cmd"]
     for key in web:
         if key not in _WEB_KEYS:
             problems_out.append("%s isn't a stremio-web setting Jarvis can save" % str(key)[:40])
     if "url" in web:
-        url = _loopback_url(web["url"])
+        url = _address_url(web["url"], remote_ok)
         if url is None:
-            problems_out.append("the stremio-web address must be http on 127.0.0.1 or localhost (got %r)" % str(web["url"])[:80])
+            problems_out.append(_address_error("stremio-web address", web["url"], remote_ok))
         else:
             clean["url"] = url
     if "dir" in web:
@@ -355,30 +467,67 @@ def _raw_for_write():
         except (OSError, ValueError):
             return None, "%s exists but can't be read as JSON, so I didn't touch it. Fix or rename it first" % path
         if not isinstance(raw, dict) or not isinstance(raw.get("server", {}), dict) or not isinstance(raw.get("web", {}), dict) \
-                or any(not isinstance(raw.get(k, {}), dict) for k in ("player", "addons", "account")):
-            return None, "%s isn't shaped like Jarvis expects (no 'server' / 'web' / 'player' / 'addons' / 'account' object), so I didn't touch it" % path
+                or any(not isinstance(raw.get(k, {}), dict) for k in ("player", "addons", "account", "network", "open")):
+            return None, "%s isn't shaped like Jarvis expects (no 'server' / 'web' / 'player' / 'addons' / 'account' / 'network' / 'open' object), so I didn't touch it" % path
     return raw, None
 
 
-def save_settings(server_url=None, web=None, player=None, addon_urls=None, check=None):
-    """Write `server.url` and/or the `web` block into ~/.jarvis/stremio.json.  OWNER ONLY (hub_admin.stremio_save,
-    the card's own buttons); there is no model tool for it.  A new `server_url` must be http on loopback AND answer
-    like a Stremio server right now (a dead address is never saved); the web address only has to be loopback
-    (stremio-web may not be running yet).  Returns {'ok', 'error'?, 'problems'?, 'saved': {...}, 'file'}."""
+def check_network(network):
+    """(clean, problems) for {'allow_remote': true|false}: whether addresses other than this PC are accepted."""
+    clean, found = {}, []
+    if not isinstance(network, dict):
+        return clean, ["the network settings must be an object with allow_remote"]
+    for key in network:
+        if key != "allow_remote":
+            found.append("%s isn't a network setting Jarvis can save" % str(key)[:40])
+    if "allow_remote" in network:
+        if isinstance(network["allow_remote"], bool):
+            clean["allow_remote"] = network["allow_remote"]
+        else:
+            found.append("allow_remote must be true or false")
+    return clean, found
+
+
+def check_open(value):
+    """(clean value, problems) for where playback links open: 'browser' or 'native' (the Stremio app)."""
+    text = str(value or "").strip().lower() if isinstance(value, str) else ""
+    if text in OPEN_WITH:
+        return text, []
+    return None, ["links can open in the browser or in the Stremio app (browser or native)"]
+
+
+def save_settings(server_url=None, web=None, player=None, addon_urls=None, check=None, network=None, open_with=None):
+    """Write `server.url`, the `web` block, `network.allow_remote` and/or `open.with` into ~/.jarvis/stremio.json.  OWNER ONLY
+    (hub_admin.stremio_save, the card's own buttons); there is no model tool for it.  A new `server_url` must be http on
+    loopback (or, when `network.allow_remote` is on, now or in this same save, any http/https host) AND answer like a Stremio
+    server right now (a dead address is never saved); the web address only has to pass the same address rule (stremio-web
+    may not be running yet).  Turning `allow_remote` off is refused while a saved address is not on this PC.
+    Returns {'ok', 'error'?, 'problems'?, 'saved': {...}, 'file'}."""
     refused = _owner_only()
     if refused:
         return refused
-    if not server_url and web is None and player is None and addon_urls is None:
+    if not server_url and web is None and player is None and addon_urls is None and network is None and open_with is None:
         return {"ok": False, "error": "nothing to save"}
-    new_url, clean_web, clean_player, new_urls = None, {}, {}, None
+    new_url, clean_web, clean_player, new_urls, clean_net, new_open = None, {}, {}, None, {}, None
+    if network is not None:
+        clean_net, found = check_network(network)
+        if found:
+            return {"ok": False, "error": "; ".join(found), "problems": found}
+        if not clean_net:
+            return {"ok": False, "error": "nothing to save"}
+    if open_with is not None:
+        new_open, found = check_open(open_with)
+        if found:
+            return {"ok": False, "error": "; ".join(found), "problems": found}
+    remote_ok = clean_net["allow_remote"] if "allow_remote" in clean_net else allow_remote()
     if server_url:
-        new_url = _loopback_url(server_url)
+        new_url = _address_url(server_url, remote_ok)
         if new_url is None:
-            return {"ok": False, "error": "the server address must be http on 127.0.0.1 or localhost (got %r)" % str(server_url)[:80]}
+            return {"ok": False, "error": _address_error("server address", server_url, remote_ok)}
         if not detect.probe_port(new_url, check=check, other_ports=())["answers"]:
             return {"ok": False, "error": "nothing answers like a Stremio server at %s, so I didn't save that address" % new_url}
     if web is not None:
-        clean_web, found = check_web(web)
+        clean_web, found = check_web(web, remote_ok)
         if found:
             return {"ok": False, "error": "; ".join(found), "problems": found}
         if not clean_web:
@@ -392,10 +541,22 @@ def save_settings(server_url=None, web=None, player=None, addon_urls=None, check
     raw, why = _raw_for_write()
     if why:
         return {"ok": False, "error": why}
+    if clean_net.get("allow_remote") is False:
+        # the box can only be cleared when nothing saved points away from this PC (else the address would silently fall back)
+        left = [(label, value) for label, value in (
+            ("server address", new_url or (raw.get("server") or {}).get("url")),
+            ("stremio-web address", clean_web.get("url") or (raw.get("web") or {}).get("url"))) if value and _loopback_url(value) is None]
+        if left:
+            return {"ok": False, "error": "the %s is %s, which isn't on this PC. Save an address on this PC (or empty the box) in the same save, "
+                                          "then clear 'Allow addresses other than this PC'" % (left[0][0], str(left[0][1])[:80])}
     if addon_urls is not None:
         new_urls, found = check_addon_urls(addon_urls, (raw.get("addons") or {}).get("urls") if isinstance(raw.get("addons"), dict) else [])
         if found:
             return {"ok": False, "error": "; ".join(found), "problems": found}
+    if clean_net:
+        raw["network"] = dict(raw.get("network") or {}, **clean_net)
+    if new_open:
+        raw["open"] = dict(raw.get("open") or {}, **{"with": new_open})
     if new_url:
         raw["server"] = dict(raw.get("server") or {}, url=new_url)
     if clean_player:
@@ -410,6 +571,14 @@ def save_settings(server_url=None, web=None, player=None, addon_urls=None, check
         return {"ok": False, "error": "couldn't write %s (is the folder writable?)" % path}
     after = load()
     saved = {}
+    if clean_net:
+        saved["network"] = clean_net
+        if allow_remote(after) != clean_net.get("allow_remote", allow_remote(after)):
+            return {"ok": False, "error": "I wrote %s but reading it back didn't give the same network setting" % path}
+    if new_open:
+        saved["open"] = new_open
+        if open_with_value(after) != new_open:
+            return {"ok": False, "error": "I wrote %s but reading it back didn't give the same 'open with' setting" % path}
     if new_url:
         saved["url"] = new_url
         if (after.get("server") or {}).get("url") != new_url:

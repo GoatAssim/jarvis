@@ -398,6 +398,20 @@ def deep_link_detail(web_url, imdb_id, kind="series", season=None, episode=None)
     return "%s/#/detail/series/%s/%s" % (base, imdb, quote(vid, safe=":"))
 
 
+NATIVE_SCHEME = "stremio:///"
+
+
+def native_link(link, web_url):
+    """The Stremio app's own form of a link this package built on the web address: `<web>/#/detail/series/tt1/tt1:1:1`
+    becomes `stremio:///detail/series/tt1/tt1:1:1` (the app registers the stremio:// scheme and shows the same screens).
+    Raises ValueError for anything that is not a `<web address>/#/...` link, so only links this package built get through."""
+    base = str(web_url).rstrip("/")
+    text = str(link)
+    if not text.startswith(base + "/#/"):
+        raise ValueError("that isn't a link on the stremio-web address")
+    return NATIVE_SCHEME + text[len(base) + 3:]
+
+
 _SCREENS = {"board": "#/", "discover": "#/discover", "library": "#/library", "addons": "#/addons",
             "settings": "#/settings", "calendar": "#/calendar"}
 

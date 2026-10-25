@@ -727,7 +727,10 @@ def _stremio_web_config():
         return {"url": config.web_url(cfg), "dir": folder[:300], "dir_exists": bool(config.web_dir(cfg)),
                 "start_cmd": config.web_command(cfg), "default_url": config.DEFAULT_WEB_URL,
                 "default_start_cmd": config.DEFAULTS["web"]["start_cmd"], "server_url": config.server_url(cfg),
-                "default_server_url": config.DEFAULT_SERVER_URL}
+                "default_server_url": config.DEFAULT_SERVER_URL,
+                # addresses other than this PC (off by default) and where playback links open (browser or the Stremio app)
+                "allow_remote": config.allow_remote(cfg), "open_with": config.open_with(cfg),
+                "stremio_site_url": config.STREMIO_SITE_URL, "this_pc": bool(config.is_this_pc(config.web_url(cfg)))}
     except Exception:  # noqa: BLE001
         return None
 
@@ -839,18 +842,27 @@ def stremio_save(request, store=None):
         exe, js = request.get("runtime_exe"), request.get("server_js")
         url = request.get("server_url") or None
         web = request.get("web") if isinstance(request.get("web"), dict) else None
+        network = request.get("network") if isinstance(request.get("network"), dict) else None
+        open_with = request.get("open_with") if isinstance(request.get("open_with"), str) else None
         player = request.get("player") if isinstance(request.get("player"), dict) else None
         addon_urls = request.get("addon_urls") if isinstance(request.get("addon_urls"), dict) else None
         if request.get("repair") is True:
             result = config.repair(keep_copy=request.get("keep_copy") is True)
-        elif not (exe or js) and (url or web is not None or player is not None or addon_urls is not None):
+        elif not (exe or js) and (url or web is not None or player is not None or addon_urls is not None
+                                  or network is not None or open_with is not None):
             if request.get("dry_run") is True:
-                clean, found = config.check_web(web) if web is not None else ({}, [])
+                remote_ok = network.get("allow_remote") if network is not None and isinstance(network.get("allow_remote"), bool) else None
+                clean, found = config.check_web(web, remote_ok) if web is not None else ({}, [])
+                if network is not None:
+                    found = found + config.check_network(network)[1]
+                if open_with is not None:
+                    found = found + config.check_open(open_with)[1]
                 if player is not None:
                     found = found + config.check_player(player)[1]
                 return {"ok": not found, "dry_run": True, "problems": found, "web": clean,
                         **({} if not found else {"error": "; ".join(found)})}
-            result = config.save_settings(server_url=url, web=web, player=player, addon_urls=addon_urls)
+            result = config.save_settings(server_url=url, web=web, player=player, addon_urls=addon_urls,
+                                          network=network, open_with=open_with)
         elif request.get("dry_run") is True:
             checked = config.check_paths(exe, js)
             probe = detect.probe_port(config.server_url(), other_ports=(detect.DEFAULT_PORT,))

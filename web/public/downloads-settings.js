@@ -597,8 +597,31 @@
         url: wc ? String(wc.url || "") : "", dir: wc ? String(wc.dir || "") : "", startCmd: wc ? String(wc.start_cmd || "") : "",
         defUrl: wc ? String(wc.default_url || "") : "", defCmd: wc ? String(wc.default_start_cmd || "") : "",
         dirMissing: !!(wc && wc.dir && wc.dir_exists === false), answers: !!(web && web.answers), configured: !!(web && web.configured),
+        thisPc: !wc || wc.this_pc !== false,
       },
+      // the "Allow addresses other than this PC" box and where playback links open (browser | native)
+      network: { allowRemote: !!(wc && wc.allow_remote), siteUrl: wc ? String(wc.stremio_site_url || "") : "" },
+      open: { with: wc && wc.open_with === "native" ? "native" : "browser" },
     };
+  }
+
+  // The box: nothing to send when it matches what is saved.
+  function networkSaveBody(checked, saved) {
+    return !!checked !== !!saved ? { network: { allow_remote: !!checked } } : null;
+  }
+
+  // Where links open: nothing to send when it matches what is saved.
+  function openSaveBody(value, saved) {
+    const v = String(value || "").trim().toLowerCase();
+    return (v === "browser" || v === "native") && v !== String(saved || "browser") ? { open_with: v } : null;
+  }
+
+  // One request out of several optional bodies (null = nothing), or null when none has anything.  The hub applies the box first,
+  // so an address and the box that allows it can travel together.
+  function mergeBodies() {
+    const out = {};
+    Array.prototype.slice.call(arguments).forEach((b) => { if (b && typeof b === "object") Object.assign(out, b); });
+    return Object.keys(out).length ? out : null;
   }
 
   // What to send for the address row: nothing when it didn't change.
@@ -829,6 +852,11 @@
     const inWebDir = field("stremio-web folder", "the folder where stremio-web is");
     const inWebCmd = field("stremio-web start command", "pnpm start");
     const inWebUrl = field("stremio-web address", "http://127.0.0.1:8080");
+    const chkRemote = h("input", { type: "checkbox", "aria-label": "Allow addresses other than this PC" });
+    const bSiteWeb = btn("Use Stremio's own website", () => useSite());
+    const selOpen = h("select", { class: "prefs-select", "aria-label": "Open Stremio links in" });
+    [["browser", "The browser (stremio-web or Stremio's website)"], ["native", "The Stremio app"]].forEach((o) => selOpen.append(h("option", { value: o[0], text: o[1] })));
+    const bSaveOpen = btn("Save", () => saveOpen());
     const bSaveServer = btn("Save address", () => saveServer());
     const bBrowseWeb = btn("Browse\u2026", () => browseWeb());
     const bSaveWeb = btn("Save web settings", () => saveWeb());
@@ -839,7 +867,7 @@
     const repairBox = h("div", {}, [repairNote, repairDetail, h("div", { class: "prefs-inline" }, [bRepair])]);
     const cacheText = h("div", { class: "prefs-note" });
     const bCache = btn("Copy a request for Jarvis\u2026", () => askCache());
-    all.push(bSaveServer, bBrowseWeb, bSaveWeb, bStartWeb, bRepair, bCache);
+    all.push(bSaveServer, bBrowseWeb, bSaveWeb, bStartWeb, bRepair, bCache, chkRemote, bSiteWeb, selOpen, bSaveOpen);
     let filledFor = null;
     // ---- brief 30: the account, the player and the addon list.  Same route family as above; the page only ever sends what the
     // owner typed, and never shows the key or an addon address (the hub sends hosts and positions).
@@ -894,7 +922,11 @@
       if (filledFor !== state.status && set.ready) {
         filledFor = state.status;
         inServer.value = set.server.value; inWebDir.value = set.web.dir; inWebCmd.value = set.web.startCmd; inWebUrl.value = set.web.url;
+        chkRemote.checked = set.network.allowRemote; selOpen.value = set.open.with;
       }
+      bSiteWeb.disabled = !!state.busy || !set.ready || !set.network.siteUrl;
+      bSaveOpen.disabled = !!state.busy || !set.ready;
+      selOpen.disabled = bSaveOpen.disabled; chkRemote.disabled = bSaveOpen.disabled;
       const cache = stremioCacheModel(state.status);
       cacheText.textContent = cache.text;
       bCache.disabled = !!state.busy || !cache.canAsk;
@@ -903,8 +935,8 @@
       bSaveServer.disabled = !!state.busy || !set.ready;
       bSaveWeb.disabled = !!state.busy || !set.ready;
       bStartWeb.disabled = !!state.busy || !set.ready || set.web.answers || !set.web.configured;
-      bStartWeb.title = set.web.answers ? "stremio-web is already answering." : !set.web.configured ? "Choose the stremio-web folder and save first."
-        : "Start stremio-web with the saved command, in the saved folder.";
+      bStartWeb.title = set.web.answers ? "stremio-web is already answering." : !set.web.thisPc ? "That address isn't on this PC, so Jarvis can't start it there."
+        : !set.web.configured ? "Choose the stremio-web folder and save first." : "Start stremio-web with the saved command, in the saved folder.";
       paintExtra();
     }
 
@@ -1008,10 +1040,26 @@
       else say("Nothing changed.");
       paint();
     }
-    function saveServer() { const set = stremioSetupModel(state.status); return runSave(serverSaveBody(inServer.value, set.server.value), "Address saved"); }
+    function saveServer() {
+      const set = stremioSetupModel(state.status);
+      return runSave(mergeBodies(serverSaveBody(inServer.value, set.server.value), networkSaveBody(chkRemote.checked, set.network.allowRemote)), "Address saved");
+    }
     function saveWeb() {
       const set = stremioSetupModel(state.status);
-      return runSave(webSaveBody({ url: inWebUrl.value, dir: inWebDir.value, startCmd: inWebCmd.value }, set.web), "stremio-web settings saved");
+      return runSave(mergeBodies(webSaveBody({ url: inWebUrl.value, dir: inWebDir.value, startCmd: inWebCmd.value }, set.web),
+        networkSaveBody(chkRemote.checked, set.network.allowRemote)), "stremio-web settings saved");
+    }
+    // Stremio's own hosted web app as the web address: fills the box and ticks the "other addresses" box; Save web settings stores both.
+    function useSite() {
+      const set = stremioSetupModel(state.status);
+      if (!set.network.siteUrl) return;
+      inWebUrl.value = set.network.siteUrl;
+      chkRemote.checked = true;
+      say("Filled in " + set.network.siteUrl + ". Press Save web settings to keep it.");
+    }
+    function saveOpen() {
+      const set = stremioSetupModel(state.status);
+      return runSave(openSaveBody(selOpen.value, set.open.with), selOpen.value === "native" ? "Links will open in the Stremio app" : "Links will open in the browser");
     }
     async function browseWeb() {
       const picker = global.JarvisPathPicker;
@@ -1059,12 +1107,17 @@
         h("div", {}, [title, sentence, next, facts]), msg),
       h("div", { class: "prefs-inline" }, [bCheck, bCopy, bProg, bJs, bStart]),
       ui.rowShell("Stremio's settings file", "Jarvis keeps what it knows about Stremio in a small file. If it is missing or out of date, one button repairs it.", repairBox, null),
-      ui.rowShell("Server address", "Where Stremio's server answers. Only this PC (127.0.0.1 or localhost) is accepted, and a server must answer there before it is saved.",
+      ui.rowShell("Allow addresses other than this PC", "Off: the server and stremio-web addresses must be http on 127.0.0.1 or localhost. On: http or https on any host is accepted (a Tailscale or network address, a name, Stremio's own website). Jarvis may then talk to that address, so turn it on only for hosts you trust. It is saved together with the address button you press.",
+        chkRemote, null),
+      ui.rowShell("Server address", "Where Stremio's server answers. A server must answer there before it is saved. Without the box above ticked only this PC (127.0.0.1 or localhost) is accepted.",
         h("div", { class: "prefs-inline" }, [inServer, bSaveServer]), null),
       ui.rowShell("stremio-web folder", "The folder Jarvis starts stremio-web from. Empty = not used.", h("div", { class: "prefs-inline" }, [inWebDir, bBrowseWeb]), null),
       ui.rowShell("stremio-web start command", "One program and its arguments, run in that folder. Empty = pnpm start.", inWebCmd, null),
-      ui.rowShell("stremio-web address", "Where stremio-web answers (this PC only).", inWebUrl, null),
+      ui.rowShell("stremio-web address", "Where stremio-web answers, e.g. http://127.0.0.1:8080 or https://100.72.25.9:8080. Other addresses than this PC need the box above. Jarvis only starts stremio-web for an address on this PC.",
+        h("div", { class: "prefs-inline" }, [inWebUrl, bSiteWeb]), null),
       h("div", { class: "prefs-inline" }, [bSaveWeb, bStartWeb]),
+      ui.rowShell("Open Stremio links in", "Where a show's page or a stream opens when Jarvis plays or opens something in Stremio. The Stremio app needs to be installed; then no stremio-web is needed at all.",
+        h("div", { class: "prefs-inline" }, [selOpen, bSaveOpen]), null),
       ui.rowShell("Stremio account", "Sign in so Jarvis can read your installed addons and library. The password is used once to get a login key and is never saved; only the key is kept, in Jarvis's own stremio.json, and this page never shows it.",
         h("div", {}, [accountNote, h("div", { class: "prefs-inline" }, [inEmail, inPass, bLogin]), h("div", { class: "prefs-inline" }, [inKey, bSaveKey]), h("div", { class: "prefs-inline" }, [bCheckAcc, bLogout])]), null),
       ui.rowShell("Video player", "Which player Jarvis uses for a finished file or a stream. Automatic looks for mpv, then VLC.",
@@ -1657,7 +1710,7 @@
     OVERRIDE_TEXT: OVERRIDE_TEXT, RETENTION_PATH: RETENTION_PATH,
     stremioModel: stremioModel, stremioFacts: stremioFacts, diagnosticFor: diagnosticFor, folderOf: folderOf, pickOptions: pickOptions,
     locateFlow: locateFlow, startFlow: startFlow, startTimeoutMs: startTimeoutMs, hubPost: hubPost, STREMIO_TONE: STREMIO_TONE,
-    stremioSetupModel: stremioSetupModel, accountModel: accountModel, loginBody: loginBody, keyBody: keyBody, playerModel: playerModel, playerSaveBody: playerSaveBody, addonsModel: addonsModel, addonsBody: addonsBody, serverSaveBody: serverSaveBody, webSaveBody: webSaveBody, stremioCacheModel: stremioCacheModel,
+    stremioSetupModel: stremioSetupModel, accountModel: accountModel, loginBody: loginBody, keyBody: keyBody, playerModel: playerModel, playerSaveBody: playerSaveBody, addonsModel: addonsModel, addonsBody: addonsBody, serverSaveBody: serverSaveBody, webSaveBody: webSaveBody, networkSaveBody: networkSaveBody, openSaveBody: openSaveBody, mergeBodies: mergeBodies, stremioCacheModel: stremioCacheModel,
     cacheRequestText: cacheRequestText, repairModel: repairModel, repairBrokenFileHint: repairBrokenFileHint,
     settingsSaveFlow: settingsSaveFlow, repairFlow: repairFlow, startWebFlow: startWebFlow,
     PAGE_SECTIONS: PAGE_SECTIONS, placeOf: placeOf, timingFor: timingFor, valuesEqual: valuesEqual, defaultOf: defaultOf, setPath: setPath, formatValue: formatValue,

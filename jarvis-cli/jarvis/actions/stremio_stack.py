@@ -251,6 +251,9 @@ def _start_web(config, server):
     url = config.web_url()
     if server.port_answers(url):
         return {"state": "already_up", "url": url}
+    if not config.is_this_pc(url):
+        return {"state": "not_local", "url": url,
+                "note": "stremio-web isn't answering at %s, and that address isn't on this PC, so Jarvis can't start it there" % url}
     if not config.web_dir():
         return {"state": "not_configured",
                 "note": "stremio-web isn't set up (put its folder in web.dir of ~/.jarvis/stremio.json); playback links need it"}

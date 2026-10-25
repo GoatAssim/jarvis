@@ -2998,11 +2998,18 @@ function hubStremioAddonUrls(value) {
   const remove = Array.isArray(value.remove) ? value.remove.filter((n) => Number.isInteger(n)).slice(0, 30) : [];
   return { add, remove };
 }
+// The "Allow addresses other than this PC" box ({allow_remote: true|false}) and where links open ("browser" | "native"): only
+// well-formed values are passed on, hub/stremio/config.py is the validator (and refuses anything else).
+function hubStremioNetwork(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+  return typeof value.allow_remote === "boolean" ? { allow_remote: value.allow_remote } : undefined;
+}
 app.post("/api/hub/stremio/paths", requireHubWrite, requireJarvis, (req, res) => hubAdmin(res, "stremio_save", {
   runtime_exe: hubText(req.body?.runtime_exe, 500), server_js: hubText(req.body?.server_js, 500),
-  server_url: hubText(req.body?.server_url, 80), dry_run: req.body?.dry_run === true,
+  server_url: hubText(req.body?.server_url, 200), dry_run: req.body?.dry_run === true,
   web: hubStremioWeb(req.body?.web), repair: req.body?.repair === true, keep_copy: req.body?.keep_copy === true,
   player: hubStremioPlayer(req.body?.player), addon_urls: hubStremioAddonUrls(req.body?.addon_urls),
+  network: hubStremioNetwork(req.body?.network), open_with: typeof req.body?.open_with === "string" ? req.body.open_with.slice(0, 20) : undefined,
 }, 30000));
 // Brief 30: the account buttons (sign in with email + password, paste a login key, check, sign out). Same guards as every write.
 // The password travels to hub_admin on stdin (never an argument), is used for one call to Stremio and is never stored or returned.

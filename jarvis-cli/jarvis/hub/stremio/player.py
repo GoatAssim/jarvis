@@ -200,3 +200,42 @@ def open_in_browser(url, opener=None):
         return bool(opener(url)), ""
     except Exception as exc:  # noqa: BLE001
         return False, "couldn't open the browser: %s" % exc
+
+
+def _os_open(url):
+    """Hand a stremio:// link to the operating system, which gives it to whatever program registered that scheme."""
+    if sys.platform.startswith("win"):
+        os.startfile(url)  # noqa: S606 - the link was built here and checked to start with stremio:///
+        return True
+    subprocess.Popen(["open" if sys.platform == "darwin" else "xdg-open", url],
+                     stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    return True
+
+
+def open_in_app(url, opener=None):
+    """Open a `stremio:///...` link in the Stremio app.  Only a link `links.native_link` made is opened."""
+    if not str(url).startswith(links.NATIVE_SCHEME) or any(c in str(url) for c in " \r\n\x00\"'<>"):
+        return False, "refusing to open a link that isn't a stremio:// link"
+    try:
+        return bool((opener or _os_open)(str(url))), ""
+    except Exception as exc:  # noqa: BLE001
+        return False, ("couldn't open the Stremio app (is it installed? Windows needs it to have registered stremio:// links): %s"
+                       % str(exc)[:120])
+
+
+def uses_app():
+    """True when the owner chose to open playback links in the Stremio app (Settings > Downloads > Stremio)."""
+    return scfg.open_with() == "native"
+
+
+def open_link(url, opener=None, app_opener=None):
+    """Open a link built on the stremio-web address where the owner chose: the default browser, or the Stremio app.
+    Returns (opened, problem).  The app route needs no stremio-web running at all."""
+    if not uses_app():
+        return open_in_browser(url, opener=opener)
+    base = scfg.web_url()
+    try:
+        native = links.native_link(url, base)
+    except ValueError:
+        return False, "refusing to open a link that isn't on stremio-web (%s)" % base
+    return open_in_app(native, opener=app_opener)

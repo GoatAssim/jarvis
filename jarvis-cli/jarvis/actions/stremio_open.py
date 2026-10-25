@@ -34,14 +34,14 @@ def tool_stremio_open(args):
         if args.get("open") is False:
             out["opened"] = False
             return out
-        if not server.port_answers(config.web_url()):
+        if not player.uses_app() and not server.port_answers(config.web_url()):
             out.update(ok=False, opened=False,
                        error="stremio-web isn't running at %s; start it with stack_start (what=web)" % config.web_url())
             return out
-        opened, problem = player.open_in_browser(link)
+        opened, problem = player.open_link(link)
         out["opened"] = opened
         if not opened:
-            out.update(ok=False, error=problem or "the browser didn't open")
+            out.update(ok=False, error=problem or ("the Stremio app didn't open" if player.uses_app() else "the browser didn't open"))
         up, _info = server.StremioServer().is_up()
         if not up:
             out["note"] = "Stremio's streaming server isn't running, so streams won't load until stack_start brings it up"

@@ -421,7 +421,7 @@ jarvis-cli/jarvis/
                           per engine, discovered; http.py, ytdlp.py, stremio.py, qbittorrent.py (opt-in; never run against a real
                           qBittorrent), _ytdlp_worker.py (the yt-dlp child process)), reveal.py (N2: the pure "show in folder" rules),
                           playnite_provider.py (the Playnite provider). stremio/ (phases 4 and 7:
-                          config.py ~/.jarvis/stremio.json, loopback only; links.py magnets / streams / file
+                          config.py ~/.jarvis/stremio.json, loopback only unless network.allow_remote (open.with = browser|native); links.py magnets / streams / file
                           picking / deep links; server.py the streaming server's HTTP API; player.py mpv / VLC; addons.py (guarded addon
                           client; Cinemeta as the default list/meta addon), discovery.py (find, episodes, streams_for, the no-streams sentence),
                           bulk.py (bulk plans and runs), ranking.py, markers.py (the unverified word table)).

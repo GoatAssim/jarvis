@@ -189,7 +189,7 @@ def port_answers(url, timeout=1.0):
     """A bare TCP connect to the URL's host:port (is anything listening?)."""
     try:
         parts = urlsplit(url)
-        host, port = parts.hostname or "127.0.0.1", parts.port or 80
+        host, port = parts.hostname or "127.0.0.1", parts.port or (443 if parts.scheme == "https" else 80)
         with socket.create_connection((host, port), timeout=timeout):
             return True
     except (OSError, ValueError):

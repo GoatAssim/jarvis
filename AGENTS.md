@@ -72,10 +72,17 @@ things that were already fixed once.
   registration (`POST /<hash>/create`, then poll `stats.json`: a torrent with no peers never answers
   `create`) and a stats watchdog; storage mode is `save` only. A Stremio source is stored as ONE
   canonical magnet (`links.canonical_source`) and deduped on infohash + file index
-  (`router.canonical_url`), never on trackers. The streaming server is **loopback only**:
-  `hub/stremio/config.py` ignores a non-loopback `server.url` on read, because the engine adds that
-  host:port to the SSRF allow-list for its OWN calls (through `_EngineCtx`; the owner's
-  `allow_private_hosts` is never edited and no other loopback port opens). Detection of "is it up" is
+  (`router.canonical_url`), never on trackers. The streaming server is **loopback only unless the owner
+  switched on `network.allow_remote`** (Settings > Downloads > Stremio > "Allow addresses other than this PC"; saved only by
+  that owner's button through `config.save_settings`, never by a tool, and refused for an unattended process):
+  `hub/stremio/config.py` ignores a non-loopback `server.url` / `web.url` on read while that box is off, because the
+  engine adds the server's host:port to the SSRF allow-list for its OWN calls (through `_EngineCtx`; the owner's
+  `allow_private_hosts` is never edited and no other port opens). With the box on, http or https on any host is accepted
+  (still no credentials, path or query), a new server address must still answer like a Stremio server before it is saved,
+  and the box cannot be cleared while a saved address is not on this PC. Jarvis only STARTS stremio-web for an address that
+  is on this PC (`config.is_this_pc`). Where links open is `open.with` (`browser` or `native`): native hands a
+  `stremio:///...` link (`links.native_link`, only built from a link on the web address) to the OS via
+  `player.open_in_app` and needs no stremio-web running. Tests: `test_hub_stremio_remote.py`. Detection of "is it up" is
   by ANSWERING on the port, never by daemon state: a server the Stremio app started reads "already
   up" and is never duplicated or killed (`stack_stop` / `server_cache_clear` only act on a server
   Jarvis started). `stremio_prepare` and `server_cache_clear` are confirm-gated by name;

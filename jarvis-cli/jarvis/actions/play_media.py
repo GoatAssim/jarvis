@@ -174,15 +174,16 @@ def _open_web(link, args, tier, how):
     from ..hub.stremio import config, player, server as sserver
     if args.get("open") is False:                  # just the link: nothing needs to be running
         return {"ok": True, "tier": tier, "how": how, "link": link, "opened": False}
-    if not sserver.port_answers(config.web_url()):
+    if not player.uses_app() and not sserver.port_answers(config.web_url()):
         from .stremio_stack import _start_web
         started = _start_web(config, sserver)
         if started["state"] not in ("started", "already_up"):
             return {"ok": False, "tier": tier, "link": link,
                     "error": "stremio-web isn't running (%s); start it with stack_start what=web" % (started.get("note") or started.get("error") or "not set up")}
-    opened, problem = player.open_in_browser(link)
+    opened, problem = player.open_link(link)
     if not opened:
-        return {"ok": False, "tier": tier, "link": link, "error": problem or "the browser didn't open"}
+        return {"ok": False, "tier": tier, "link": link,
+                "error": problem or ("the Stremio app didn't open" if player.uses_app() else "the browser didn't open")}
     return {"ok": True, "tier": tier, "how": how, "link": link, "opened": True}
 
 
